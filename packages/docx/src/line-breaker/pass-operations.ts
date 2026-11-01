@@ -8,6 +8,7 @@ import {
   computePreparedLineFloatWindow,
   type PreparedFloatWrap,
 } from '../float-layout.js';
+import { LINE_SEARCH_Y_LIMIT_PT, lineGridAfter, lineSearchPitch } from '../layout/float-wrap.js';
 import { calcEffectiveFontPx, EAST_ASIAN_RE, independentTextShapeRequest, sliceTextShapeRequest } from '../layout/text.js';
 import {
   wordSnapToCharsEastAsianCellCount,
@@ -454,56 +455,38 @@ function placeLineWindow(
       reference, requiredWidth,
     );
   };
-  // WORD_KASHIDA_LINE_FIT: a window reaching the band's far edge needs
-  // `farEdgeRequirement`, an interior one `requirement` (the reserve base of
-  // the former runs past the edge). The solver is asked unchanged, with
-  // `requirement` and the band's far edge moved inward by the difference:
-  // there a far-edge window is narrower by exactly that much. The window it
-  // returns is then read back in the real band.
-  const farEdgeShift = transaction.farEdgeRequirement === undefined ? 0
-    : transaction.farEdgeRequirement - transaction.requirement;
-  const lineQuery = (topY: number, x: number, width: number, height: number) => {
-    if (farEdgeShift === 0) return query(topY, x, width, height);
-    const shiftedWidth = width - farEdgeShift;
-    // The first window of the real band holding the interior requirement is
-    // admissible when an object ends it. The moved band measures a window an
-    // object edge ends between the moved and the real far edge to the moved
-    // edge (blk-0898-kfit9: the reserve runs to that object edge), so it is
-    // taken when it comes first.
-    const interiorWindow = () => {
-      if (farEdgeShift < 0) return null;
-      const interior = query(topY, x, width, height);
-      const endsAtObject = baseRtl ? interior.xOffset > 1e-9 : interior.xOffset + interior.maxWidth < width - 1e-9;
-      return endsAtObject && interior.maxWidth >= transaction.requirement ? interior : null;
-    };
-    const first = (found: { topY: number; xOffset: number; maxWidth: number }) => {
-      const interior = interiorWindow();
-      return interior && (interior.topY < found.topY || (interior.topY === found.topY
-        && (baseRtl ? interior.xOffset > found.xOffset : interior.xOffset < found.xOffset))) ? interior : found;
-    };
-    // Not even the clear band holds the requirement: the full band, as the
-    // solver gives a requirement wider than its band.
-    if (!(shiftedWidth >= transaction.requirement)) return first(query(topY, x, width, height, width));
-    const shiftedX = baseRtl ? x + farEdgeShift : x;
-    const win = query(topY, shiftedX, shiftedWidth, height);
-    const reachesFarEdge = baseRtl ? win.xOffset <= 1e-9 : win.xOffset + win.maxWidth >= shiftedWidth - 1e-9;
-    if (!reachesFarEdge) return first({ ...win, xOffset: win.xOffset + shiftedX - x });
-    // Pulled outward, the far edge is clipped back to the band (no object
-    // lies in a window the solver returned).
-    if (farEdgeShift < 0) {
-      return { topY: win.topY, xOffset: baseRtl ? 0 : win.xOffset, maxWidth: win.maxWidth + farEdgeShift };
-    }
-    // Pulled inward, the real window from the same leading side runs on to
-    // the first object or the band edge; earlier gaps, narrower than the
-    // requirement, stay refused.
-    return first(query(win.topY, x, width, height, win.maxWidth));
-  };
   // The requirement of a window at absolute [leftPt, leftPt + widthPt].
   const bandFarEdge = baseRtl ? lineBandX : lineBandX + lineBandWidth;
   const requirementOf = (leftPt: number, widthPt: number): number =>
     transaction.farEdgeRequirement !== undefined
       && (baseRtl ? leftPt <= bandFarEdge + 1e-9 : leftPt + widthPt >= bandFarEdge - 1e-9)
       ? transaction.farEdgeRequirement : transaction.requirement;
+  // WORD_KASHIDA_LINE_FIT: a window reaching the band's far edge needs
+  // `farEdgeRequirement`, an interior one `requirement`. The solver is asked
+  // unchanged, on the real band: first for the smaller of the two, accepting
+  // its window when the window holds its own kind's requirement; else once
+  // for the larger (every window that wide holds either kind: an upper bound),
+  // and in between again for the smaller from the next line-grid top after
+  // each refused window, as the retry steps.
+  const lineQuery = (topY: number, x: number, width: number, height: number) => {
+    const far = transaction.farEdgeRequirement;
+    if (far === undefined || far === transaction.requirement) return query(topY, x, width, height);
+    const low = Math.min(far, transaction.requirement);
+    const high = Math.max(far, transaction.requirement);
+    const holds = (window: { xOffset: number; maxWidth: number }): boolean =>
+      window.maxWidth >= requirementOf(x + window.xOffset, window.maxWidth);
+    let window = query(topY, x, width, height, low);
+    if (holds(window)) return window;
+    const bound = query(topY, x, width, height, high);
+    const pitch = lineSearchPitch(height);
+    while (pitch !== null && window.topY < bound.topY && Math.abs(window.topY) <= LINE_SEARCH_Y_LIMIT_PT
+      && Math.abs(topY) <= LINE_SEARCH_Y_LIMIT_PT) {
+      window = query(lineGridAfter(topY, pitch, window.topY), x, width, height, low);
+      if (window.topY > bound.topY) break;
+      if (holds(window)) return window;
+    }
+    return bound;
+  };
   let accepted: GapWindow & { narrowed: boolean } | null = null;
   const cursor = transaction.cursor;
   if (cursor) {

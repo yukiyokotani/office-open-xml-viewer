@@ -264,6 +264,17 @@ describe('WORD_KASHIDA_LINE_FIT line breaker', () => {
     expect(lines.map((line) => [line.topY, line.xOffset])).toEqual([[10, 300]]);
   });
 
+  it('fits a line beside a float edge close to the band edge to that edge (kfit9 S rows)', () => {
+    // Band [0, 300], text margin 360, mediumKashida, a float edge at 296
+    // beside line 1: the reserve runs to the float edge, 0.9 x 296 = 266.4
+    // holds the 265 pt prefix (an 8-character word and nine 4-character
+    // words), where a reserve to the band edge less the trailing indent (264)
+    // would not (blk-0898-kfit9 S001-S003: Word ends line 1 at t007).
+    const words = [token('W'.repeat(8) + ' '), ...Array.from({ length: 12 }, () => token('aaaa '))];
+    const lines = run(words, { maxWidth: 300, marginRightPx: 360, wrapCtx: wrap([band(296, 300, 0, 10)]), lineFit: fit(1, 0.1) });
+    expect(lines[0]!.segments.filter((segment) => 'text' in segment).length).toBe(10);
+  });
+
   it('takes a window ending at a float close to the band edge after a rejection (kfit9)', () => {
     // Band [0, 300], text margin 360, mediumKashida. Line 1 leaves [0, 100];
     // line 2 a float edge at 296, 4 pt inside the band edge, where the
@@ -274,6 +285,57 @@ describe('WORD_KASHIDA_LINE_FIT line breaker', () => {
       maxWidth: 300, marginRightPx: 360, wrapCtx: wrap([band(100, 300, 0, 10), band(296, 300, 10, 20)]), lineFit: fit(1, 0.1),
     });
     expect(lines.map((line) => [line.topY, line.xOffset, line.availWidth])).toEqual([[10, 0, 296]]);
+  });
+
+  it('keeps the tight-wrap retry steps of the real band (sol round 11)', () => {
+    // mediumKashida, band [0, 300], trailing indent 60, a through polygon and
+    // a tight 4 pt strip at the far edge: the 90 pt word lands where the
+    // unchanged solver puts the interior requirement (100) on the real band.
+    const through: FloatRect = { ...obstacle(0, 210), authoredWrap: 'through', imageY: 0, imageH: 60, yTop: 0, yBottom: 60,
+      wrapPolygon: [{ xPt: 0, yPt: 0 }, { xPt: 210, yPt: 0 }, { xPt: 150, yPt: 60 }, { xPt: 0, yPt: 60 }] };
+    const tight: FloatRect = { ...obstacle(296, 300), authoredWrap: 'tight', imageY: 0, imageH: 60, yTop: 0, yBottom: 60,
+      wrapPolygon: [{ xPt: 296, yPt: 0 }, { xPt: 300, yPt: 0 }, { xPt: 300, yPt: 60 }, { xPt: 296, yPt: 60 }] };
+    const lines = run([token('W'.repeat(18))], { maxWidth: 300, marginRightPx: 360, wrapCtx: wrap([through, tight]), lineFit: fit(1, 0.1) });
+    const expected = computePreparedLineFloatWindow(0, 100, 10, 0, 300, prepareFloatWrap([through, tight]), 0, 360,
+      { xLeftPt: 0, xRightPt: 300, readingDirection: 'ltr' }, 100);
+    expect(expected.topY).toBe(20);
+    expect(lines[0]!.topY).toBe(20);
+  });
+
+  it('admits a narrow far-edge window by its own requirement (sol round 11)', () => {
+    // highKashida, band [0, 300], trailing indent 1, one 0.65 pt glyph: the
+    // 1 pt window at y = 0 fits 0.6, the 1.1 pt window at y = 10 fits 0.68.
+    const ctx = { measureText: (text: string) => ({ width: text.length * 0.65,
+      fontBoundingBoxAscent: 0.8, fontBoundingBoxDescent: 0.2 }) } as unknown as CanvasRenderingContext2D;
+    const lines = layoutLines(ctx, [token('W', { fontSize: 1 })], 300, 0, 1, [],
+      wrap([band(0, 299, 0, 10), band(0, 298.9, 10, 20)]), {}, 0,
+      undefined, undefined, undefined, 301, false, true, false, undefined, 'bounded', undefined, true, false, fit(1, 0.2));
+    expect(lines.map((line) => [line.topY, line.xOffset])).toEqual([[10, 298.9]]);
+  });
+
+  it('bounds the far-edge search by line-grid steps up to the wider requirement', () => {
+    // highKashida, band [0, 300], trailing 60, a 210 pt word: the first line
+    // [0, 250] fits 200; the lines beside a left float leave [30, 300] (far
+    // edge: fits 204 < 210, though 270 holds the interior 262.5) for 19
+    // lines; the clear band at y = 200 fits 228.
+    let calls = 0;
+    const floats = [band(250, 300, 0, 10), band(0, 30, 10, 200)];
+    const prepared = prepareFloatWrap(floats);
+    const lineWindow: NonNullable<WrapLayoutCtx['lineWindow']> = (input) => {
+      // The retry's queries (the interior 262.5 and far-edge 277.5 widths).
+      if (input.minimumStartWidthPt > 260) calls += 1;
+      const window = computePreparedLineFloatWindow(input.topYPt, input.minimumStartWidthPt, input.probeHeightPt,
+        input.paragraphXPt, input.maximumWidthPt, prepared, input.columnXPt, input.columnXPt + input.columnWidthPt,
+        { xLeftPt: input.paragraphXPt, xRightPt: input.paragraphXPt + input.maximumWidthPt, readingDirection: 'ltr' },
+        input.squareMinimumStartWidthPt ?? input.minimumStartWidthPt);
+      return { topYPt: window.topY, xOffsetPt: window.xOffset, maximumWidthPt: window.maxWidth };
+    };
+    const lines = run([token('W'.repeat(42))], { maxWidth: 300, marginRightPx: 360,
+      wrapCtx: { ...wrap(floats), lineWindow }, lineFit: fit(1, 0.2) });
+    expect(lines[0]!.topY).toBe(200);
+    // Per layout pass (the paragraph is laid out twice): the smaller and the
+    // larger width once, then one query per line-grid top up to y = 200.
+    expect(calls).toBeLessThanOrEqual(2 * (2 + 200 / 10));
   });
 
   it('asks the line-window oracle once per rejection with each kind\'s requirement', () => {
