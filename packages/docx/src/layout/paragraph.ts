@@ -258,6 +258,9 @@ export type MeasuredTextPlanSegment = Readonly<
      * the applied advance (already in `measuredWidthPt`) and its natural
      * quarter em. Justification widens it first (see justifiedAutoSpaceExpansion). */
     autoSpace?: Readonly<{ appliedPt: number; naturalPt: number }>;
+    /** WORD_KERNED_SPACE_PAIRS pair with the preceding piece, already in
+     * `measuredWidthPt` and in the cluster offsets. */
+    leadingSeamPairPt?: number;
   }
 >;
 
@@ -1714,6 +1717,7 @@ export function planLine(input: PlanLineInput): LineLayout {
         textLayoutService: _textLayoutService,
         textShapeRequest: _textShapeRequest,
         autoSpace: _autoSpace,
+        leadingSeamPairPt: _leadingSeamPairPt,
         selectedFaceFontBox,
         retainedGeometry,
         direction: _direction,
@@ -3331,6 +3335,7 @@ function textPlanSegment(
   return {
     ...style,
     kind: 'text', measuredWidthPt: segment.measuredWidth,
+    ...(segment.leadingWordBoundaryPx ? { leadingSeamPairPt: segment.leadingWordBoundaryPx } : {}),
     characterGridDeltaPt: gridPt,
     ...(segment.latinSpaceCompressionPx ? {
       trailingSpaceCompressionPt: segment.latinSpaceCompressionPx,
@@ -7259,6 +7264,10 @@ function trailingAdvancePt(
       cluster.range.start >= segment.range.start + visible)
       .reduce((sum, cluster) => sum + cluster.advancePt, 0);
     if (visible > 0) break;
+    // WORD_KERNED_SPACE_PAIRS: a separator-only piece shifted by its seam pair
+    // with the glyph before it hangs that pair too, as a piece measured with
+    // its own trailing space does.
+    if (/^ +$/u.test(segment.text)) advancePt += segment.leadingSeamPairPt ?? 0;
   }
   return advancePt;
 }

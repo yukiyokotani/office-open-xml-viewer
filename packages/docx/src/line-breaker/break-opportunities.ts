@@ -48,7 +48,7 @@ import {
   rebaseSeaBreaks,
 } from './text-runs.js';
 import { fitCJKPrefix, hasEastAsianVisiblePredecessor } from './fit-search.js';
-import { LineGapRejection, fitJustifiedCompression, justifiedCompressionApplies, justifiedPrefixCompression, lineEndsWithText, type PassOperationState } from './pass-operations.js';
+import { LineGapRejection, fitJustifiedCompression, justifiedCompressionApplies, justifiedPrefixCompression, kernedSpacePairAdvance, lineEndsWithText, type PassOperationState } from './pass-operations.js';
 
 /** The iterator reads only its declared slice of the explicit pass state. */
 export type BreakOpportunityIteratorContext = Pick<
@@ -254,7 +254,11 @@ function processTextSegment(context: BreakOpportunityIteratorContext, seg: Layou
     s.autoSpaceLeadingPx = lineEndsWithText(breakerState.currentLine) ? undefined : 0;
   }
   const segmentBox = textSegmentBox(s);
-  const w = segmentBox.width;
+  // WORD_KERNED_SPACE_PAIRS: fit with the pair across the preceding piece's
+  // last space; placement re-resolves it against the actual predecessor.
+  const kernedSpacePair = kernedSpacePairAdvance(context, s, segmentBox.width);
+  s.leadingWordBoundaryPx = kernedSpacePair === 0 ? undefined : kernedSpacePair;
+  const w = segmentBox.width + kernedSpacePair;
   const prospectiveWidth = prospectiveSnapAdvance(s, w);
   const h = segmentBox.height;
   const asc = segmentBox.ascent;
@@ -354,10 +358,13 @@ function processTextSegment(context: BreakOpportunityIteratorContext, seg: Layou
   // so the grid delta, w:w scale and w:spacing pitch on the retained glyphs all
   // cancel and trailingSpaceW is the bare trailing-space advance — keeping `w`
   // and `wForFit` on the one advance model (`strAdvance` == the model behind `w`).
+  // A seam pair before visible glyphs belongs to them; a separator-only piece
+  // owns its pair with the preceding glyph, as a piece measured with its own
+  // trailing space does (WORD_KERNED_SPACE_PAIRS).
   const trailingSpaceW = snapToCharsClass(s, characterGrid)
     ? 0
     : s.text.endsWith(' ')
-      ? w - strAdvance(s, trimmed)
+      ? w - (trimmed ? kernedSpacePair : 0) - strAdvance(s, trimmed)
       : 0;
   s.latinNaturalTrailingSpacePx =
     trailingSpaceW > 0 &&
@@ -426,10 +433,24 @@ function processTextSegment(context: BreakOpportunityIteratorContext, seg: Layou
   // the justified-compression family; it is admitted as one unit either way.
   if ((!prefersWholeWordAtScriptBoundary(context, s) || s.autoSpaceBeforePt !== undefined)
     && fitJustifiedCompression(context, s)) return;
+  // A declined justified candidate re-measured its box; restore the fitted pair.
+  s.leadingWordBoundaryPx = kernedSpacePair === 0 ? undefined : kernedSpacePair;
+  s.measuredWidth = w;
   // The authored opportunity follows the existing whole-unit justified fit;
   // it must not introduce a wrap before a word admitted by that policy.
   if (placeOptionalHyphenPrefix(context, s)) return;
+  const fittedPredecessor = breakerState.currentLine.at(-1);
   if (prepareAtomicTextFit(context, { s, w, trailingSpaceW, sDictSea, fitWidthFor })) return;
+  // A pre-flush (an atomic group or a SEA chunk moved to a fresh line) leaves
+  // every admission value above fitted against the previous line's
+  // predecessor. With a WORD_KERNED_SPACE_PAIRS pair in them, judge the piece
+  // again at the new line start, where it takes no pair. Without one, the
+  // values are unchanged and the established path continues.
+  if (kernedSpacePair !== 0 && breakerState.currentLine.at(-1) !== fittedPredecessor) {
+    s.leadingWordBoundaryPx = undefined;
+    breakerState.queue.unshift(s);
+    return;
+  }
 
   // §17.3.1.21 permits one eligible punctuation character past the text
   // extent. The isolated compatibility predicate owns both the CJK-language
@@ -456,7 +477,9 @@ function processTextSegment(context: BreakOpportunityIteratorContext, seg: Layou
       s.script === 'complexScript',
       s.overflowPunctuationBidiLanguage,
     ) &&
-    breakerState.currentWidth + strAdvance(s, textBeforeTrailingOverflow) <= availW();
+    // The visible prefix keeps the WORD_KERNED_SPACE_PAIRS seam pair that
+    // placement charges.
+    breakerState.currentWidth + kernedSpacePair + strAdvance(s, textBeforeTrailingOverflow) <= availW();
 
   // WORD_COMPRESSED_SPACE_LINE_FIT: once a mixed line's spaces are shrunk, a
   // following unit (such as a closing mark split into its own source run) is
@@ -664,11 +687,7 @@ function processTabSegment(
       const input = { ...context, ...breakerState };
       breakerState.currentWidth += resolveCompletedTabCells(input);
       const { startPen, leftLimit, frame } = bidiTabFrame(input);
-      let followingWidth = 0;
-      for (const q of breakerState.queue) {
-        if ('isTab' in q || 'lineBreak' in q) break;
-        followingWidth += tabFollowWidth(q);
-      }
+      const followingWidth = tabFollowingMetrics().totalWidth;
       const box = wordPositionalTabReferenceBox(
         seg.ptab.relativeTo === 'indent' ? frame.indentStart : 0,
         seg.ptab.relativeTo === 'indent' ? frame.indentEnd : leftLimit,
@@ -758,11 +777,7 @@ function processTabSegment(
     // Width of the content that trails the ptab up to the next tab / line end
     // — needed to right-/center-align it against `target` (the trailing text
     // is what aligns to the stop, §17.18.71).
-    let followW = 0;
-    for (const q of breakerState.queue) {
-      if ('isTab' in q || 'lineBreak' in q) break;
-      followW += tabFollowWidth(q);
-    }
+    const followW = tabFollowingMetrics().totalWidth;
     const target = positionalTabTarget(seg.ptab.alignment, box.start, box.end, followW);
     let tabW = target - absFromParaX;
     // §17.3.3.23: "If the alignment location … cannot be found on the current
@@ -993,8 +1008,20 @@ function settleLineStartAutoSpace(
   return leading === 0 ? frame : { ...frame, w: frame.w - leading, wForFit: frame.wForFit - leading };
 }
 
+/** A pre-flush can likewise leave a segment fitted with its
+ * WORD_KERNED_SPACE_PAIRS pair at a line start, where it has no predecessor. */
+function settleLineStartKernedSpacePair(
+  context: BreakOpportunityIteratorContext,
+  frame: TextFitFrame,
+): TextFitFrame {
+  const pair = frame.s.leadingWordBoundaryPx ?? 0;
+  if (pair === 0 || lineEndsWithText(context.breakerState.currentLine)) return frame;
+  frame.s.leadingWordBoundaryPx = undefined;
+  return { ...frame, w: frame.w - pair, wForFit: frame.wForFit - pair };
+}
+
 function placeOrSplitText(context: BreakOpportunityIteratorContext, inputFrame: TextFitFrame): void {
-  const frame = settleLineStartAutoSpace(context, inputFrame);
+  const frame = settleLineStartKernedSpacePair(context, settleLineStartAutoSpace(context, inputFrame));
   const {
     breakerState,
     flush,
@@ -1077,8 +1104,11 @@ function placeOrSplitText(context: BreakOpportunityIteratorContext, inputFrame: 
       queueEmergencyTail(s, split);
     }
   } else {
+    // A prefix keeps the piece's leading seam pair (WORD_KERNED_SPACE_PAIRS),
+    // which placement charges; admit it against the same remaining width.
+    const leadingSeamPair = s.leadingWordBoundaryPx ?? 0;
     const semanticSplit = prefersWholeWordAtScriptBoundary(context, s)
-      ? 0 : explicitTextSplit(s, availW() - breakerState.currentWidth);
+      ? 0 : explicitTextSplit(s, availW() - breakerState.currentWidth - leadingSeamPair);
     if (semanticSplit > 0 && semanticSplit < s.text.length) {
       const prefix = s.text.slice(0, semanticSplit);
       const pw = strNaturalAdvance(s, prefix);
@@ -1104,7 +1134,7 @@ function placeOrSplitText(context: BreakOpportunityIteratorContext, inputFrame: 
       // line, split this member at the widest legal grapheme boundary that
       // fits the actual remaining band. This bases the decision on the group
       // advance, not on the follower's standalone width.
-      const remaining = availW() - breakerState.currentWidth;
+      const remaining = availW() - breakerState.currentWidth - leadingSeamPair;
       const split = emergencyTextSplit(s, remaining, true);
       // Splitting a glued member, or letting it overflow, forces its unit.
       const retained = (remaining > 0 || s.hardJoinPrev === true) && split > 0 && split < s.text.length
@@ -1172,7 +1202,9 @@ function prepareAtomicTextFit(
   if (!preferWholeWord && s.explicitBreaks && follower?.joinPrev) {
     const whole = measureJoinedTextUnit(s, breakerState.queue, context, w, trailingSpaceW, 0, false, 'whole-leader');
     if (breakerState.currentWidth + fitWidthFor(whole.width, whole.trailingSpace, whole.next) > availW()) {
-      const split = context.explicitTextSplit(s, availW() - breakerState.currentWidth);
+      // The prefix keeps the leader's WORD_KERNED_SPACE_PAIRS seam pair.
+      const split = context.explicitTextSplit(s,
+        availW() - breakerState.currentWidth - (s.leadingWordBoundaryPx ?? 0));
       if (split > 0 && split < s.text.length) {
         context.queueEmergencyTail(s, split);
         breakerState.queue.unshift({ ...s, ...RESET_SLICED_TEXT_MEASUREMENT,

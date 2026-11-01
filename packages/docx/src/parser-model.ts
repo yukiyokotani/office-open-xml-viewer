@@ -1554,9 +1554,9 @@ export function numberingMarkerShapeInput(
     fontHint: facts?.fontHint,
     eastAsiaLanguage: facts?.langEastAsia,
     // Marker-specific zero-threshold observations are absent. Preserve its
-    // previous size comparison; the mode-15 content-run extension is not
-    // evidence for generated numbering glyphs.
-    kerning: wordKerningApplies(fontSizePt, facts?.kerning),
+    // previous size comparison; the content-run zero-disables extension is
+    // not evidence for generated numbering glyphs.
+    kerning: wordKerningApplies(fontSizePt, facts?.kerning, 'size-comparison'),
   });
 }
 
@@ -1615,7 +1615,7 @@ export function paragraphMarkShapeInput(
     fontHint: facts.fontHint,
     eastAsiaLanguage: facts.langEastAsia,
     // Paragraph marks likewise have no measured zero-threshold evidence.
-    kerning: wordKerningApplies(fontSizePt, facts.kerning),
+    kerning: wordKerningApplies(fontSizePt, facts.kerning, 'size-comparison'),
   });
 }
 
