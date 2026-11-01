@@ -219,7 +219,8 @@ function resolveBidiTabStops(
       // The fitted prefix, rather than the full queued cell, owns alignment.
       // The final projection may reduce a gap but cannot enlarge its allocation
       // past the fitting band (library policy, not an Office overflow fallback).
-      width[i] = Math.max(0, Math.min(target, (frame.fitEnd ?? frame.bandEnd) - following) - pen);
+      width[i] = Math.max(0, Math.min(target,
+        (it.ptab.alignment === 'left' ? frame.fitEnd ?? frame.bandEnd : frame.bandEnd) - following) - pen);
       pen += width[i];
       continue;
     }
@@ -258,8 +259,10 @@ function resolveBidiTabStops(
     const bandLimit = frame?.narrowed
       ? frame.bandEnd
       : Math.min(leftLimitPx, frame?.bandEnd ?? leftLimitPx);
-    // WORD_KASHIDA_LINE_FIT: fitted content ends within the fit width.
-    const trailingLimit = frame?.fitEnd === undefined ? bandLimit : Math.min(bandLimit, frame.fitEnd);
+    // WORD_KASHIDA_LINE_FIT: content after a leading tab ends within the fit
+    // width; an aligned cell may reach its stop anywhere in the band.
+    const trailingLimit = frame?.fitEnd === undefined || role !== 'leading'
+      ? bandLimit : Math.min(bandLimit, frame.fitEnd);
     if (target + fw > trailingLimit) target = trailingLimit - fw;
     // Never let a tab move the pen backwards (right).
     if (target < pen) target = pen;

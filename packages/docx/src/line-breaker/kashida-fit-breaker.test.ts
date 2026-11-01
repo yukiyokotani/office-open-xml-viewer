@@ -29,7 +29,7 @@ function wrap(floats: FloatRect[]): WrapLayoutCtx {
   return { floats, paraX: 0, startPageY: 0, columnXPt: 0, columnWidthPt: 360,
     readingDirection: 'ltr', pageH: 800, lineBoxH: () => 10 };
 }
-const fit = (fraction: number, reservePx: number): LineFitWidth => ({ fraction, reservePx, rtlVisiblePrefix: false });
+const fit = (fraction: number, reserveShare: number): LineFitWidth => ({ fraction, reserveShare, rtlVisiblePrefix: false });
 
 function run(segs: LayoutSeg[], options: {
   maxWidth?: number; marginRightPx?: number; wrapCtx?: WrapLayoutCtx; baseRtl?: boolean;
@@ -46,13 +46,20 @@ describe('WORD_KASHIDA_LINE_FIT line breaker', () => {
   it('retries a rejected float gap with the band width the fitted advance needs', () => {
     // Gaps of 100 pt ([0, 100]) and 120 pt ([160, 280]) beside two floats.
     const floats = wrap([obstacle(100, 160), obstacle(280, 360)]);
-    // Before mode 15, a 36 pt reserve: the 70 pt word misses the first gap
-    // (64 pt) and fits the second (84 pt).
-    const legacy = run([token('W'.repeat(14))], { wrapCtx: floats, lineFit: fit(1, 36) });
-    expect(legacy.map((line) => [line.topY, line.xOffset])).toEqual([[0, 160]]);
-    // Mode 15, 0.9 of the gap: the 95 pt word misses 90 pt and fits 108 pt.
-    const mode15 = run([token('W'.repeat(19))], { wrapCtx: floats, lineFit: fit(0.9, 0) });
-    expect(mode15.map((line) => [line.topY, line.xOffset])).toEqual([[0, 160]]);
+    // A 10% reserve of the gap before mode 15 (blk-0898-kfit7 P1/P2: the
+    // float edge is the far edge) and 0.9 of it from mode 15: the 95 pt word
+    // misses the first gap (90 pt) and fits the second (108 pt).
+    for (const lineFit of [fit(1, 0.1), fit(0.9, 0)]) {
+      const lines = run([token('W'.repeat(19))], { wrapCtx: floats, lineFit });
+      expect(lines.map((line) => [line.topY, line.xOffset])).toEqual([[0, 160]]);
+    }
+  });
+
+  it('reserves a share of a float-narrowed window, not of the column, before mode 15', () => {
+    // One float leaves [0, 200] of a 360 pt column: 0.1 × 200 = 20 pt
+    // reserved (180 pt fit), not 36 pt (164 pt): a 170 pt word fits.
+    const lines = run([token('W'.repeat(34))], { wrapCtx: wrap([obstacle(200, 360)]), lineFit: fit(1, 0.1) });
+    expect(lines.map((line) => [line.topY, line.xOffset])).toEqual([[0, 0]]);
   });
 
   it('ends a right-to-left tab cell within the fit width', () => {
@@ -70,19 +77,24 @@ describe('WORD_KASHIDA_LINE_FIT line breaker', () => {
     expect(plain!.segments.find((segment) => 'isTab' in segment)!.measuredWidth).toBeCloseTo(300);
   });
 
-  it('applies the mode-15 fraction to an aligned cell\'s complete margin allocation', () => {
-    // A 310 pt band with 50 pt to the text margin: 0.8 × 360 = 288 pt. A right
-    // tab cell ending at 295 pt does not fit (310 × 0.8 + 50 = 298 would).
-    const segs = [token('A'), tab(), token('B'.repeat(8))];
-    const lines = run(segs, {
-      maxWidth: 310, marginRightPx: 360, tabStops: [{ pos: 295, alignment: 'right', leader: 'none' }],
-      lineFit: fit(0.8, 0),
+  it('admits an aligned tab cell against the band, not the fit width', () => {
+    // blk-0898-kfit7 T2: a right tab cell ending at 295 pt stays on a 360 pt
+    // highKashida line whose text fits 288 pt.
+    const cell = run([token('A'), tab(), token('B'.repeat(8))], {
+      tabStops: [{ pos: 295, alignment: 'right', leader: 'none' }], lineFit: fit(0.8, 0),
     });
-    expect(lines).toHaveLength(2);
-    // The same cell fits a cell limit of 300 pt (no reserve on 310 + 50).
-    const plain = run(segs, {
-      maxWidth: 310, marginRightPx: 360, tabStops: [{ pos: 295, alignment: 'right', leader: 'none' }],
+    expect(cell).toHaveLength(1);
+    // Text before the tab keeps the fit width (kfit7 T4): 305 pt of words do
+    // not fit 288 pt, so the second word and the cell move to the next line.
+    const lead = run([token(`${'A'.repeat(30)} `), token(`${'B'.repeat(30)} `), tab(), token('C')], {
+      tabStops: [{ pos: 355, alignment: 'right', leader: 'none' }], lineFit: fit(0.8, 0),
     });
-    expect(plain).toHaveLength(1);
+    expect(lead.map((line) => line.segments.filter((segment) => 'text' in segment).map((segment) => (segment as LayoutTextSeg).text.trim()).join('|')))
+      .toEqual(['A'.repeat(30), `${'B'.repeat(30)}|C`]);
+    // A right-to-left end-aligned cell keeps its stop as well: 300 - 50 - 5.
+    const [rtl] = run([token('A'), tab(), token('B'.repeat(10))], {
+      baseRtl: true, tabStops: [{ pos: 300, alignment: 'end', leader: 'none' }], lineFit: fit(0.8, 0),
+    });
+    expect(rtl!.segments.find((segment) => 'isTab' in segment)!.measuredWidth).toBeCloseTo(245);
   });
 });

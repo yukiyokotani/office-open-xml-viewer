@@ -71,7 +71,8 @@ import type { PassOperationState } from './pass-operations.js';
  * WORD_RTL_JUSTIFIED_VISIBLE_FIT visible-prefix fit of right-to-left lines. */
 export interface LineFitWidth {
   readonly fraction: number;
-  readonly reservePx: number;
+  /** Share of the line's start-to-far-edge width reserved (before mode 15). */
+  readonly reserveShare: number;
   /** A right-to-left line fits its visible prefix, without its line-end U+0020. */
   readonly rtlVisiblePrefix: boolean;
 }
@@ -99,7 +100,7 @@ export interface LineBreakerPassInput {
   readonly overflowPunct: boolean;
   readonly justifiedCompression?: boolean;
   /** WORD_KASHIDA_LINE_FIT: a bounded line's text may fill `fraction` of its
-   * available width less `reservePx` (absent: the whole width; paint still
+   * available width less its reserve (absent: the whole width; paint still
    * justifies to the full width), and WORD_RTL_JUSTIFIED_VISIBLE_FIT. */
   readonly lineFit?: LineFitWidth;
   readonly passContext: Readonly<{

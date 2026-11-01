@@ -624,8 +624,8 @@ export function performRejectGap(
   const rejected = transaction.window;
   // The unit's advance is measured against the fit width; the window search
   // compares raw band widths (WORD_KASHIDA_LINE_FIT).
-  const required = lineBandWidthForFit(operationState, rejection.requiredWidth)
-    + (breakerState.isFirst ? Math.max(0, firstIndent) : 0);
+  const required = lineBandWidthForFit(operationState, rejection.requiredWidth,
+    breakerState.isFirst ? Math.max(0, firstIndent) : 0);
   const hangingOffset = breakerState.isFirst ? Math.min(0, firstIndent) : 0;
   // The forced unit did not fit this gap, so its advance exceeds the width
   // the solver admitted. A lower bound that does not (non-monotone advances)
@@ -643,16 +643,40 @@ export function performAvailW(operationState: PassOperationState) {
     : lineFitWidth(operationState, breakerState.lineMaxWidth - (breakerState.isFirst ? firstIndent : 0));
 }
 
+type LineFitState = Pick<PassOperationState,
+  'lineFit' | 'breakerState' | 'maxWidth' | 'marginRightPx' | 'tabOriginPx' | 'baseRtl'>;
+
 /** WORD_KASHIDA_LINE_FIT: the part of a bounded line width its text may fill. */
-export function lineFitWidth(operationState: Pick<PassOperationState, 'lineFit'>, widthPx: number): number {
+export function lineFitWidth(operationState: LineFitState, widthPx: number): number {
   const fit = operationState.lineFit;
-  return fit === undefined ? widthPx : widthPx * fit.fraction - fit.reservePx;
+  if (fit === undefined) return widthPx;
+  return widthPx * fit.fraction
+    - (fit.reserveShare > 0 ? fit.reserveShare * lineReserveBaseWidth(operationState) : 0);
 }
 
-/** Inverse of {@link lineFitWidth}: the band width whose fit width holds `advancePx`. */
-export function lineBandWidthForFit(operationState: Pick<PassOperationState, 'lineFit'>, advancePx: number): number {
+/** Width from the current line window's start edge to its far edge: the
+ * window edge where a float narrows that side, else the container edge past
+ * the trailing indent (paraX-relative px; RTL mirrored). */
+function lineReserveBaseWidth(operationState: LineFitState): number {
+  const { breakerState, maxWidth, marginRightPx, tabOriginPx, baseRtl } = operationState;
+  const start = breakerState.lineXOffset;
+  const end = breakerState.lineXOffset + breakerState.lineMaxWidth;
+  if (baseRtl) return end - (start > 1e-9 ? start : -tabOriginPx);
+  return (end < maxWidth - 1e-9 ? end : marginRightPx) - start;
+}
+
+/** Window width whose fit width holds `advancePx` after `indentPx` (a
+ * narrowed float gap, whose far edge is its own). */
+export function lineBandWidthForFit(
+  operationState: Pick<PassOperationState, 'lineFit'>,
+  advancePx: number,
+  indentPx: number,
+): number {
   const fit = operationState.lineFit;
-  return fit === undefined ? advancePx : (advancePx + fit.reservePx) / fit.fraction;
+  if (fit === undefined) return advancePx + indentPx;
+  return fit.reserveShare > 0
+    ? (advancePx + indentPx) / (1 - fit.reserveShare)
+    : advancePx / fit.fraction + indentPx;
 }
 
 export function performFitsMeasuredWidth(
@@ -677,7 +701,7 @@ export function performFitsMeasuredWidth(
   // The reversed operation order applies only to the full width; a reduced
   // fit width (WORD_KASHIDA_LINE_FIT) is compared as computed by availW.
   const fit = operationState.lineFit;
-  if (fit !== undefined && (fit.fraction !== 1 || fit.reservePx !== 0)) return false;
+  if (fit !== undefined && (fit.fraction !== 1 || fit.reserveShare !== 0)) return false;
   return used + (breakerState.isFirst ? firstIndent : 0) <= breakerState.lineMaxWidth;
 }
 

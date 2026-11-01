@@ -615,11 +615,7 @@ export function measureParagraph(
     wordJustifiedInterwordCompressionApplies(
       paragraph.alignment, environment.compatibilityMode,
     ) && environment.verticalCJK !== true,
-    wordJustifiedLineFit(
-      paragraph.alignment, environment.compatibilityMode, placement.availableWidthPt,
-      context.baseRtl ? context.physicalIndentRightPt : context.physicalIndentLeftPt,
-      context.baseRtl,
-    ),
+    wordJustifiedLineFit(paragraph.alignment, environment.compatibilityMode, context.baseRtl),
   );
   if (lines.length === 0) return measureMarkOnly();
 

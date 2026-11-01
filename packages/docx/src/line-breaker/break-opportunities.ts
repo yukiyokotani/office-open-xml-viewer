@@ -632,11 +632,16 @@ function commitAlignedTabCell(context: BreakOpportunityIteratorContext): void {
  * controls overlap floats and that overlap is not emulated.
  */
 function alignedTabCellAvailW(context: BreakOpportunityIteratorContext): number {
+  return lineBandW(context) + context.breakerState.lineMarginExtension;
+}
+
+/** The line's band width, without the WORD_KASHIDA_LINE_FIT reserve: an
+ * aligned tab cell may reach its stop anywhere in the band. */
+function lineBandW(context: BreakOpportunityIteratorContext): number {
   const { breakerState, firstIndent, widthPolicy } = context;
-  if (widthPolicy !== 'bounded') return context.availW() + breakerState.lineMarginExtension;
-  // WORD_KASHIDA_LINE_FIT takes its share of the complete allocation.
-  return lineFitWidth(context, breakerState.lineMaxWidth - (breakerState.isFirst ? firstIndent : 0)
-    + breakerState.lineMarginExtension);
+  return widthPolicy !== 'bounded'
+    ? Number.POSITIVE_INFINITY
+    : breakerState.lineMaxWidth - (breakerState.isFirst ? firstIndent : 0);
 }
 
 function processTabSegment(
@@ -844,11 +849,13 @@ function processTabSegment(
     // Stop coordinates are margin-relative (§17.3.1.37): a fitting cell keeps
     // that allocation on an unnarrowed line, past an authored right indent.
     // Otherwise the gap and cell are limited to the actual paragraph/float band.
+    // WORD_KASHIDA_LINE_FIT reserves nothing for an aligned cell: it is
+    // admitted against the band, while text before the tab keeps the fit width.
     const cellAvail = alignedTabCellAvailW(context);
     const cellLimit = breakerState.currentWidth + tabW + following.totalWidth <= cellAvail
       ? cellAvail : availW();
-    seg.marginAllocation = cellLimit > availW()
-      && breakerState.currentWidth + tabW + following.totalWidth > availW();
+    seg.marginAllocation = cellLimit > lineBandW(context)
+      && breakerState.currentWidth + tabW + following.totalWidth > lineBandW(context);
     if (breakerState.currentWidth + tabW > cellLimit) {
       if (breakerState.currentLine.length > 0) {
         flush(undefined, false, seg.src);
