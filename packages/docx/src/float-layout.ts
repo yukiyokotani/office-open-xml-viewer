@@ -25,6 +25,7 @@ export type {
   Gap,
   LineFloatReference,
   LineFloatSweepDiagnostics,
+  LineWindowAdmission,
   PreparedFloatWrap,
   WrapSide,
 } from './layout/float-wrap.js';

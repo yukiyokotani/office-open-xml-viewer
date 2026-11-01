@@ -579,15 +579,34 @@ describe('resolveLineFloatWindow — float geometry and numeric domain', () => {
     expect(diagnostics.evaluatedYCount).toBeLessThan(20_000 + 12 * regions.length);
   }, 60_000);
 
-  it('keeps sweeping to the earliest contour root for through wrap', () => {
+  it('steps a through-wrap line down by its line height (word-through-wrap-line-step-advance)', () => {
     const triangle = polygonFloat('through', [
       { xPt: 20, yPt: 0 }, { xPt: 80, yPt: 0 }, { xPt: 50, yPt: 100 },
     ]);
 
+    // The left gap [0, 20 + 0.3 y] (the edge read at the band top) first
+    // holds 40 pt at y = 200/3; a 1 pt line takes the next line-grid top, 67.
     const result = resolveLineFloatWindow(0, 40, 1, 0, 100, [triangle]);
 
-    expect(result.topY).toBeCloseTo(200 / 3, 10);
-    expect(result.maxWidth).toBeCloseTo(40, 10);
+    expect(result.topY).toBe(67);
+    expect(result.maxWidth).toBeCloseTo(40.1, 10);
+  });
+
+  it('admits a through opening that crosses the band edge by its clipped width (#2054)', () => {
+    // Band [0, 300] in a 360 pt column; the notch open at the top runs from
+    // x = 200 - y to x = 350, past the band edge. Word steps the line down by
+    // its height and reads each window clipped to the band: a 110 pt unit
+    // fits [200 - y, 300] from y = 10, so a 15 pt line takes y = 15.
+    const notch = polygonFloat('through', [
+      { xPt: 0, yPt: 0 }, { xPt: 200, yPt: 0 }, { xPt: 140, yPt: 60 }, { xPt: 350, yPt: 60 },
+      { xPt: 350, yPt: 0 }, { xPt: 360, yPt: 0 }, { xPt: 360, yPt: 80 }, { xPt: 0, yPt: 80 },
+    ]);
+
+    expect(resolveLineFloatWindow(0, 110, 15, 0, 300, [notch], 0, 360))
+      .toEqual({ topY: 15, xOffset: 185, maxWidth: 115 });
+    // The tight copy does not enter the notch open at its top: below it.
+    expect(resolveLineFloatWindow(0, 110, 15, 0, 300, [polygonFloat('tight', notch.wrapPolygon!)], 0, 360).topY)
+      .toBe(90);
   });
 
   it('keeps a concave polygon interior gap for through but not tight', () => {

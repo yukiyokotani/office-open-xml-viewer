@@ -25,7 +25,7 @@ import {
   type LineBoundary,
   type WrapLayoutCtx,
 } from './model.js';
-import { createLineBreakerState, type GapTransaction, type GapWindow } from './break-queue.js';
+import { createLineBreakerState, isInklessLineItem, type GapTransaction, type GapWindow } from './break-queue.js';
 import {
   commitMixedLineItem,
   createMixedSpaceState,
@@ -75,6 +75,9 @@ import {
 import type { LineBreakerPassInput } from './pass-driver.js';
 
 export interface PassOperationState extends LineBreakerPassInput {
+  /** The paragraph's own first-line offset (`firstIndent` reads the body
+   * offset a float window resolved for a numbered first line instead). */
+  readonly paragraphFirstIndent: number;
   readonly reservePrefixWork: (utf16Units: number) => void;
   readonly breakerState: ReturnType<typeof createLineBreakerState>;
   readonly sameLatinSpaceFace: (candidate: LayoutTextSeg, reference: LayoutTextSeg) => boolean;
@@ -362,7 +365,11 @@ export function performStartLine(operationState: PassOperationState, requirement
     // A mark-only head's requirement is a band width (word-empty-mark-float-
     // side-gap), not a fitted advance, so it takes no WORD_KASHIDA_LINE_FIT
     // conversion.
-    requirement: requirement + (breakerState.isFirst ? Math.max(0, firstIndent) : 0),
+    // WORD_NUMBERED_FIRST_LINE_GAP_FIT: a numbered first line's indent body
+    // offset is no window floor: each window resolves its own marker body,
+    // and placement (with its break-time admission) judges the window.
+    requirement: requirement
+      + (breakerState.isFirst && !wrapCtx.numberingFirstLine ? Math.max(0, firstIndent) : 0),
     window: null,
     narrowed: false,
     endsAtExclusion: false,
@@ -388,19 +395,16 @@ function placeNumberingFirstLine(
   numbering: NonNullable<WrapLayoutCtx['numberingFirstLine']>,
   hangingOffset: number,
 ): void {
-  const { breakerState, maxWidth, baseRtl } = operationState;
-  const base = baseRtl
-    ? maxWidth - (breakerState.lineXOffset + breakerState.lineMaxWidth)
-    : breakerState.lineXOffset;
-  const windowEdge = base + hangingOffset;
-  const authored = numbering.authoredFirstIndentPx;
-  const leadingEdge = Math.max(Math.max(0, windowEdge) + authored, windowEdge);
-  if (leadingEdge <= authored) {
+  const { breakerState, baseRtl } = operationState;
+  const placed = numberedFirstLineBody(
+    operationState, numbering, hangingOffset, breakerState.lineXOffset, breakerState.lineMaxWidth,
+  );
+  if (!placed) {
     breakerState.firstIndentOverride = undefined;
     breakerState.numberingFirstLine = undefined;
     return;
   }
-  const bodyIndent = Math.max(leadingEdge, numbering.bodyIndentAt(leadingEdge));
+  const { windowEdge, leadingEdge, bodyIndent } = placed;
   // The breaker reads a line's window start as origin + min(0, first indent).
   // The body indent is never negative here, so re-anchor the origin at the
   // window's real leading edge (keeping its trailing edge) before charging it.
@@ -419,6 +423,52 @@ function placeNumberingFirstLine(
  * run of far-edge windows that each fail their own requirement costs a
  * bounded number of solver queries. */
 export const KASHIDA_FLOAT_RETRY_STEP_LIMIT = 32;
+
+/** The marker edge and body start (logical px from the leading indent) a
+ * numbered first line takes in the window [xOffset, xOffset + lineMaxWidth]
+ * (paragraph-band px, the hanging offset included as placement charges it),
+ * or null when the window leaves the leading edge where the indents put it. */
+function numberedFirstLineBody(
+  operationState: Pick<PassOperationState, 'maxWidth' | 'baseRtl'>,
+  numbering: NonNullable<WrapLayoutCtx['numberingFirstLine']>,
+  hangingOffset: number,
+  xOffset: number,
+  lineMaxWidth: number,
+): { windowEdge: number; leadingEdge: number; bodyIndent: number } | null {
+  const { maxWidth, baseRtl } = operationState;
+  const base = baseRtl ? maxWidth - (xOffset + lineMaxWidth) : xOffset;
+  const windowEdge = base + hangingOffset;
+  const authored = numbering.authoredFirstIndentPx;
+  const leadingEdge = Math.max(Math.max(0, windowEdge) + authored, windowEdge);
+  if (leadingEdge <= authored) return null;
+  return { windowEdge, leadingEdge, bodyIndent: Math.max(leadingEdge, numbering.bodyIndentAt(leadingEdge)) };
+}
+
+/** WORD_NUMBERED_FIRST_LINE_GAP_FIT: the width a numbered first line's text
+ * may fill after its marker body in a solver window (`xOffset` from the
+ * expanded first-line band, `solverWidth` without the hanging offset): the
+ * window as placement (placeNumberingFirstLine) sets it, less the body offset,
+ * through the WORD_KASHIDA_LINE_FIT fit of that window, as the breaker's
+ * available width (performAvailW) reads it. */
+function numberedFirstLineTextWidth(
+  operationState: PassOperationState,
+  numbering: NonNullable<WrapLayoutCtx['numberingFirstLine']>,
+  hangingOffset: number,
+  xOffset: number,
+  solverWidth: number,
+): number {
+  const lineMaxWidth = solverWidth + hangingOffset;
+  const placed = numberedFirstLineBody(operationState, numbering, hangingOffset, xOffset, lineMaxWidth);
+  if (!placed) {
+    return windowLineFitWidth(operationState, { xOffset, maxWidth: lineMaxWidth },
+      lineMaxWidth - operationState.paragraphFirstIndent);
+  }
+  const window = {
+    xOffset: operationState.baseRtl ? xOffset : xOffset + hangingOffset,
+    maxWidth: solverWidth,
+  };
+  return windowLineFitWidth(operationState, window, solverWidth - (placed.bodyIndent - placed.windowEdge));
+}
 
 /** Search the first admissible window for the transaction's requirement:
  * a later gap on the continuation baseline, else a new physical line. */
@@ -448,14 +498,24 @@ function placeLineWindow(
     xRightPt: (wrapCtx.referenceXPt ?? wrapCtx.paraX) + (wrapCtx.referenceWidthPt ?? maxWidth),
     readingDirection: wrapCtx.readingDirection ?? (baseRtl ? 'rtl' : 'ltr'),
   } as const;
+  // WORD_NUMBERED_FIRST_LINE_GAP_FIT: after its head unit was rejected, a
+  // numbered first line admits only a window (on the expanded first-line
+  // band) that holds the unit after the marker body that window resolves.
+  const numberingHead = numbering ? transaction.numberingHead : undefined;
+  const admitsWindow = numbering && numberingHead !== undefined
+    ? (window: Readonly<{ xOffset: number; maxWidth: number }>) =>
+      operationState.fitsMeasuredWidth(numberingHead,
+        numberedFirstLineTextWidth(operationState, numbering, hangingOffset, window.xOffset, window.maxWidth))
+    : undefined;
   const query = (topY: number, x: number, width: number, height: number,
-    requiredWidth = transaction.requirement) => {
+    requiredWidth = transaction.requirement, admits?: typeof admitsWindow) => {
     if (wrapCtx.lineWindow) {
       const win = wrapCtx.lineWindow({
         topYPt: topY, minimumStartWidthPt: requiredWidth,
         squareMinimumStartWidthPt: requiredWidth, probeHeightPt: height,
         paragraphXPt: x, maximumWidthPt: width,
         columnXPt: wrapCtx.columnXPt, columnWidthPt: wrapCtx.columnWidthPt,
+        ...(admits ? { admitsWindow: admits } : {}),
       });
       return { topY: win.topYPt, xOffset: win.xOffsetPt, maxWidth: win.maximumWidthPt };
     }
@@ -463,7 +523,7 @@ function placeLineWindow(
       topY, requiredWidth, height, x, width,
       preparedFloatWrap ?? prepareFloatWrap(wrapCtx.floats),
       wrapCtx.columnXPt, wrapCtx.columnXPt + wrapCtx.columnWidthPt,
-      reference, requiredWidth,
+      reference, requiredWidth, admits,
     );
   };
   // The requirement of a solver window: `bandX` is the absolute origin of
@@ -548,7 +608,9 @@ function placeLineWindow(
       transaction.snapshot = null;
       return;
     }
-    const win = lineQuery(transaction.requestTopY, lineBandX, lineBandWidth, probeH);
+    const win = admitsWindow
+      ? query(transaction.requestTopY, lineBandX, lineBandWidth, probeH, transaction.requirement, admitsWindow)
+      : lineQuery(transaction.requestTopY, lineBandX, lineBandWidth, probeH);
     accepted = {
       topY: win.topY,
       xOffset: win.xOffset,
@@ -567,6 +629,12 @@ function placeLineWindow(
   if (rejected && accepted.narrowed
     && accepted.solverWidth < requirementOf(accepted.solverBandX,
       { xOffset: accepted.solverXOffset, maxWidth: accepted.solverWidth })) {
+    accepted = { ...accepted, narrowed: false };
+  }
+  // A boundary that ignores the admission test (WORD_NUMBERED_FIRST_LINE_GAP_FIT)
+  // can return the rejected window again: place it forced, ending the search.
+  if (rejected && admitsWindow && accepted.narrowed && accepted.topY === rejected.topY
+    && accepted.xOffset === rejected.xOffset && accepted.solverWidth === rejected.solverWidth) {
     accepted = { ...accepted, narrowed: false };
   }
   breakerState.currentLineTopY = accepted.topY;
@@ -646,10 +714,6 @@ export function performForcedPlacement(
   throw new LineGapRejection(requiredWidth, lead?.src ? { ...lead.src } : undefined);
 }
 
-function isInklessLineItem(item: LayoutSeg): boolean {
-  return ('text' in item && item.metricOnly === true) || ('imagePath' in item && Boolean(item.anchor));
-}
-
 /** Lower bound of a queued unit's line-head advance, from placement's measures. */
 function headUnitLowerBound(operationState: PassOperationState, segment: LayoutSeg | undefined): number {
   if (!segment) return 0;
@@ -686,6 +750,30 @@ export function performRejectGap(
   }
   transaction.stopBefore = null;
   const rejected = transaction.window;
+  const numbering = breakerState.isFirst ? operationState.wrapCtx?.numberingFirstLine : undefined;
+  if (numbering && transaction.cursor === null) {
+    // WORD_NUMBERED_FIRST_LINE_GAP_FIT: every candidate window resolves its
+    // own marker body, so the retry admits windows by the text width they
+    // leave rather than by one width requirement. The unit's advance is the
+    // solver's lower bound (the body never starts before the window).
+    const hangingOffset = Math.min(0, numbering.authoredFirstIndentPx);
+    const head = Math.max(transaction.numberingHead ?? 0, rejection.requiredWidth);
+    // A unit that the rejected window's own arithmetic admits failed for
+    // another reason (non-monotone advances): take the established retry.
+    if (!operationState.fitsMeasuredWidth(head, numberedFirstLineTextWidth(
+      operationState, numbering, hangingOffset, rejected.xOffset, rejected.solverWidth,
+    ))) {
+      transaction.numberingHead = head;
+      transaction.farEdgeRequirement = undefined;
+      // A window's fitted text width never exceeds fraction x its width (the
+      // body offset and a reserve only reduce it), so this is a lower bound.
+      // It replaces the seed requirement: that one charged the indents' body
+      // offset, which each window now resolves (and admits) for itself.
+      transaction.requirement = head / (operationState.lineFit?.fraction ?? 1);
+      placeLineWindow(operationState, transaction, rejected);
+      return;
+    }
+  }
   if (lineFitReduced(operationState)) {
     // WORD_KASHIDA_LINE_FIT: the established retry with the width each
     // window kind needs for its fitted width to hold the unit (the inverse of
