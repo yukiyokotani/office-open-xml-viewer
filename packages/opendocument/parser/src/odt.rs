@@ -5880,6 +5880,13 @@ mod tests {
         assert_eq!(other.borders.top.as_ref().map(|b| b.width), Some(2.0));
         assert!(other.borders.bottom.is_none() && other.borders.left.is_none());
         assert_eq!(cell.content.len(), 2);
+        // LibreOffice cuts cell paragraphs without widow or keep controls.
+        for element in &cell.content {
+            let docx_model::CellElement::Paragraph(p) = element else {
+                panic!()
+            };
+            assert!(!p.widow_control && !p.keep_lines);
+        }
     }
 
     #[test]

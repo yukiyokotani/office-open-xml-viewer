@@ -824,7 +824,8 @@ impl<'a> Reader<'a> {
         // repeated header rows (each held to a quarter page): LibreOffice
         // continues a row whose first line does not, the DOCX layout cannot
         // advance. Each line's contribution is held to a quarter page too,
-        // counting a font at twice its size.
+        // counting a font at four times its size (room for tall font
+        // metrics) and its line height.
         let mark = |p: &DocParagraph| {
             p.paragraph_mark_font_facts
                 .as_ref()
@@ -832,7 +833,7 @@ impl<'a> Reader<'a> {
                 .into_iter()
                 .chain(p.default_font_size)
                 .fold(0.0, f64::max)
-                * 2.0
+                * 4.0
         };
         let mut tallest: f64 = 0.0;
         // The cell's text width after its padding.
@@ -841,16 +842,25 @@ impl<'a> Reader<'a> {
             let CellElement::Paragraph(p) = element else {
                 continue;
             };
-            // The paragraph mark sizes an empty paragraph's line.
-            tallest = p
+            // The paragraph mark sizes an empty paragraph's line; a
+            // proportional line height scales the line, a fixed or minimum
+            // one sets it at least.
+            let (factor, floor) = match &p.line_spacing {
+                Some(spacing) if spacing.rule == "auto" => (spacing.value.max(1.0), 0.0),
+                Some(spacing) => (1.0, spacing.value),
+                None => (1.0, 0.0),
+            };
+            let line = p
                 .runs
                 .iter()
                 .map(|run| match run {
-                    DocRun::Text(text) => text.font_size * 2.0,
+                    DocRun::Text(text) => text.font_size * 4.0,
                     DocRun::Image(image) => image.height_pt,
                     _ => 0.0,
                 })
-                .fold(tallest.max(mark(p)), f64::max);
+                .fold(mark(p), f64::max)
+                * factor;
+            tallest = tallest.max(line).max(floor);
             // Indents leaving no width in the cell (LibreOffice clips the
             // text) or reaching outside it were not measured.
             let first = p.indent_left + p.indent_first;
@@ -948,6 +958,12 @@ fn finish_cell(blocks: Vec<Block>) -> Result<Vec<CellElement>, String> {
             return Err(unsupported("table-cell-paragraph-fill"));
         }
         paragraph.contextual_spacing = false;
+        // LibreOffice cuts a cell paragraph at a page without its
+        // widow/orphan or keep-together controls (measured: four-line
+        // paragraphs split three/one with widows and orphans 2 and with
+        // keep-together always).
+        paragraph.widow_control = false;
+        paragraph.keep_lines = false;
         out.push(CellElement::Paragraph(Box::new(paragraph)));
     }
     Ok(out)
