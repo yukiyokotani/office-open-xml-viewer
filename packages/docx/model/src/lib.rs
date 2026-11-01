@@ -3111,6 +3111,9 @@ pub struct ShapeTextRun {
     pub bold: bool,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub italic: bool,
+    /// ECMA-376 §17.3.2.30 w:rtl, resolved through the run style hierarchy.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub rtl: bool,
     /// ECMA-376 §17.3.3.25 w:ruby inside VML/text-box content. Carried through
     /// the same shape rich-text path as normal run formatting so the renderer can
     /// center the annotation above the base glyphs instead of flattening it into

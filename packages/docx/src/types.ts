@@ -1099,6 +1099,8 @@ export interface ShapeTextRun {
   fontFamilyEastAsia?: string | null;
   bold?: boolean;
   italic?: boolean;
+  /** ECMA-376 §17.3.2.30 `<w:rtl>` — right-to-left run characteristics. */
+  rtl?: boolean;
   /** ECMA-376 §17.3.3.25 ruby annotation (furigana) for text-box runs. */
   ruby?: RubyAnnotation | null;
 }

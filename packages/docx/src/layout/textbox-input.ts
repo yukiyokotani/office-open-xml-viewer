@@ -39,6 +39,7 @@ export interface NormalizedTextBoxRunInput {
   readonly fontFamilyEastAsia?: string;
   readonly bold: boolean;
   readonly italic: boolean;
+  readonly rtl?: boolean;
   readonly ruby?: import('../types.js').RubyAnnotation | null;
 }
 
@@ -131,6 +132,7 @@ export function normalizeTextBoxInput(
         ...(run.fontFamilyEastAsia ? { fontFamilyEastAsia: run.fontFamilyEastAsia } : {}),
         bold: run.bold ?? block.bold ?? false,
         italic: run.italic ?? block.italic ?? false,
+        ...(run.rtl === undefined ? {} : { rtl: run.rtl }),
         ...(run.ruby ? { ruby: run.ruby } : {}),
       })),
       alignment: block.alignment ?? 'left',
