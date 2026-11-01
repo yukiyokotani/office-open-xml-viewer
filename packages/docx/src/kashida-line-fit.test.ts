@@ -6,8 +6,8 @@ import type { BodyElement, DocParagraph, DocSettings, DocxTextRun, SectionProps 
 // WORD_KASHIDA_LINE_FIT (#2008): Windows Word reserves 10% (mediumKashida)
 // and 20% (highKashida) of the line width in line fit, still justifies the
 // lines to the full width, and opens no inter-CJK gaps on soft-wrapped kashida
-// and thaiDistribute lines. Synthetic controls blk-0898-kfit and -kfitn in
-// compatibility modes unset, 14 and 15.
+// and thaiDistribute lines. Synthetic controls blk-0898-kfit, -kfitn and
+// -kfit5 in compatibility modes unset, 11, 12, 14 and 15.
 
 /** Stub glyph advance: every character 0.5 em (10 pt at 20 pt). */
 function makeCtx(): CanvasRenderingContext2D {
@@ -116,6 +116,34 @@ describe('WORD_KASHIDA_LINE_FIT', () => {
       expect(wordsOn(right!), `mode ${settings?.compatibilityMode}`).toBe(settings === MODE_15 ? 5 : 4);
       const [left] = lines(para([textRun(WORDS)], 'highKashida', { indentLeft: 50 }), settings);
       expect(wordsOn(left!), `mode ${settings?.compatibilityMode}`).toBe(5);
+    }
+  });
+
+  it('keeps first-line and hanging offsets out of the pre-15 reserve', () => {
+    // A 50 pt left indent with a 50 pt hanging indent: the first line is
+    // 360 pt wide, later lines 310 pt. Before mode 15 both lose
+    // 0.2 × (360 - 50) = 62 pt (298 pt: 6 words; 248 pt: 5 words); mode 15
+    // fits 0.8 of each (288 pt: 5 words; 248 pt: 5 words).
+    for (const settings of MODES) {
+      const [first, second] = lines(
+        para([textRun(WORDS)], 'highKashida', { indentLeft: 50, indentFirst: -50 }), settings);
+      expect(wordsOn(first!), `mode ${settings?.compatibilityMode}`).toBe(settings === MODE_15 ? 5 : 6);
+      expect(wordsOn(second!)).toBe(5);
+    }
+  });
+
+  it('takes the start indent of a right-to-left paragraph for the pre-15 reserve', () => {
+    const hebrew = Array.from({ length: 20 }, () => '\u05d0\u05d1\u05d2\u05d3').join(' ');
+    const rtl = { bidi: true } as Partial<DocParagraph>;
+    for (const settings of MODES) {
+      // A right-to-left line fits its line-end space too (5 words: 250 pt).
+      // w:left is the start indent: 320 - 0.2 × 320 = 256 pt (5 words).
+      const [start] = lines(para([textRun(hebrew)], 'highKashida', { ...rtl, indentLeft: 40 }), settings);
+      expect(wordsOn(start!), `mode ${settings?.compatibilityMode}`).toBe(5);
+      // w:right is the end indent: 320 - 0.2 × 360 = 248 pt (4 words) before
+      // mode 15, 0.8 × 320 = 256 pt (5 words) from it.
+      const [end] = lines(para([textRun(hebrew)], 'highKashida', { ...rtl, indentRight: 40 }), settings);
+      expect(wordsOn(end!), `mode ${settings?.compatibilityMode}`).toBe(settings === MODE_15 ? 5 : 4);
     }
   });
 
