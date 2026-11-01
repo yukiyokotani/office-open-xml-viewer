@@ -3774,6 +3774,11 @@ pub struct DocTableRow {
     /// ECMA-376 §17.4.6 w:cantSplit. When true, this row must not be split
     /// across page boundaries.
     pub cant_split: bool,
+    /// The row is cut at a page as LibreOffice cuts it: a row whose fragment
+    /// would overflow only by the bottom rule a page slice appends is cut so
+    /// the rule fits instead of moving whole. DOCX never sets it.
+    #[serde(rename = "__cutsInPlace", skip_serializing_if = "std::ops::Not::not")]
+    pub cuts_in_place: bool,
     #[serde(rename = "__tableRowLayout")]
     pub table_row_layout: TableRowLayoutAcquisitionWire,
 }

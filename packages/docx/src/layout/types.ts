@@ -1453,6 +1453,10 @@ export interface TableRowFormatInput {
   readonly height: TableRowHeightInput | null;
   /** Effective CT_OnOff values after table-style and direct row resolution. */
   readonly cantSplit: boolean;
+  /** The row is cut at a page as LibreOffice cuts it (DOCX never sets it): a
+   * row overflowing a fragment only by its appended bottom rule is cut so the
+   * rule fits instead of moving whole. */
+  readonly cutsInPlace?: true;
   readonly repeatedHeader: boolean;
   readonly cellSpacingPt: number;
   readonly justification: string | null;
@@ -1539,6 +1543,8 @@ export interface TableRowLayoutInput {
   readonly source: SourceRef;
   readonly logicalRowIndex: number;
   readonly cantSplit: boolean;
+  /** See {@link TableRowFormatInput.cutsInPlace}. */
+  readonly cutsInPlace?: true;
   readonly heightPt: number | null;
   readonly heightRule: 'auto' | 'atLeast' | 'exact';
   /** Effective §17.4.43/.44/.45 dxa spacing for this row. */

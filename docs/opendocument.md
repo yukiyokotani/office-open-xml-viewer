@@ -85,6 +85,20 @@ Currently admitted:
   trailing no-break or other Unicode space keeps its decoration in both;
 - text in the Latin script class of ODF Part 3 Table 22, including the
   spaces, punctuation, symbols and emoji the table leaves unassigned.
+- tables of paragraphs, admitted as far as the corpus's tables go:
+  absolute (refitted to the table as LibreOffice refits them) or
+  full-width relative column widths, explicit left/centre/right alignment
+  and a left margin (also past the text area), cell padding (the same top
+  and bottom padding across a row), single solid collapsed borders and
+  rows of their content's height splitting at page breaks as LibreOffice
+  splits them, with ASCII or CJK text up to 24 pt in cells. Tables need
+  LibreOffice's cell spacing and row keep settings set explicitly, as
+  LibreOffice writes them. Everything else in tables rejects for now:
+  table margins, page breaks and kept paragraphs at tables, repeated
+  header rows, authored row heights and rows kept together, cell backgrounds
+  and centred or bottom-aligned cells, cell paragraph margins, merged or
+  repeated cells, nested tables, lists, headings and pictures in cells,
+  double or dashed borders and vertical cell text;
 - lists in label alignment mode, numbered as LibreOffice numbers them
   (continued lists, items nested without a paragraph of their own, list
   headers), with decimal, letter and Roman labels or text bullets, labels
@@ -127,7 +141,11 @@ LibreOffice's layout settings (`settings.xml`) that Word-derived documents
 carry are admitted where they were measured to change nothing the reader
 admits; the others must keep LibreOffice's new-document values, except
 `BalanceSpacesAndIdeographicSpaces`, which is applied as LibreOffice applies
-it: a space at the start or end of a text portion (portions end at
+it, and `AddParaTableSpacing`, under which two paragraphs, or a paragraph
+and a table, are separated by the sum of the bottom and top margins
+(otherwise by the larger of them). Under
+`BalanceSpacesAndIdeographicSpaces`, a space at the start or end of a text
+portion (portions end at
 formatting changes, bookmarks, reference marks, soft hyphens, no-break
 spaces and hyphens, zero-width spaces, word joiners and line breaks), or
 next to another space, advances half its Asian font size. Where the reader
@@ -140,6 +158,6 @@ because LibreOffice then lays out its lines differently.
 
 Tabs, letter spacing, horizontal scaling,
 raised/lowered text, fixed and minimum line heights, proportional line
-heights below 100%, tables, frames and images, notes, fields,
+heights below 100%, frames and images, notes, fields,
 comments, tracked changes, headers and footers, Asian and complex scripts,
 and other formatting reject for now. The subset grows release by release.

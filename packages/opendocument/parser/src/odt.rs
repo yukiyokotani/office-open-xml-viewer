@@ -15,8 +15,8 @@ use crate::style::{
     Cascade, Family, Group, Scope, Style, StyleRef, StyleSheet, LOEXT_GRAPHIC, PARAGRAPH, TEXT,
 };
 use crate::xml::{
-    self, NS_DRAW, NS_FO, NS_LOEXT, NS_OFFICE, NS_OFFICEOOO, NS_STYLE, NS_SVG, NS_TEXT, NS_XLINK,
-    NS_XML,
+    self, NS_DRAW, NS_FO, NS_LOEXT, NS_OFFICE, NS_OFFICEOOO, NS_STYLE, NS_SVG, NS_TABLE, NS_TEXT,
+    NS_XLINK, NS_XML,
 };
 use docx_model::owned_cursor::OwnedDocumentResource;
 use docx_model::{
@@ -201,6 +201,7 @@ fn read_with(
         odf_1_4: version == Some("1.4"),
         text_width: page.section.page_width - page.section.margin_left - page.section.margin_right,
         page_left_margin: page.section.margin_left,
+        page_right_margin: page.section.margin_right,
         sheet: &sheet,
         fonts: &fonts,
         used_faces: RefCell::new(HashSet::new()),
@@ -212,7 +213,9 @@ fn read_with(
         break_layout_work: 0,
         layout_flags,
         page_master: page.name.as_str(),
-        paragraphs: Vec::new(),
+        blocks: Vec::new(),
+        paragraph_count: 0,
+        next_table: 0,
         retained_text_bytes: 0,
         construction_bytes: 0,
         contextual_spacing_defined,
@@ -547,7 +550,40 @@ struct LayoutFlags {
     /// count from the paragraph indent when true, from the text area when
     /// false (measured); `None` leaves them unknown.
     tabs_relative: Option<bool>,
+    /// AddParaTableSpacing false: the space between two paragraphs, or a
+    /// paragraph and a table, is the larger of the bottom and top margins,
+    /// not their sum (measured, in the body and in table cells, whatever the
+    /// line height; absent, LibreOffice sums).
+    para_space_max: bool,
+    /// AddParaSpacingToTableCells, AddParaLineSpacingToTableCells and
+    /// TableRowKeep all set true, the conditions the table measurements hold
+    /// under. LibreOffice reads a missing AddParaSpacingToTableCells as false
+    /// (measured) and TableRowKeep as false, so each must be explicit.
+    table_settings: bool,
 }
+
+impl LayoutFlags {
+    /// The space between a block with bottom margin `bottom` and the next
+    /// with top margin `top` (see `para_space_max`).
+    fn gap(self, bottom: f64, top: f64) -> f64 {
+        if self.para_space_max {
+            bottom.max(top)
+        } else {
+            bottom + top
+        }
+    }
+}
+
+/// Configuration items that place paragraphs and tables (see `LayoutFlags`).
+/// AddParaTableSpacingAtStart false drops the top margin of a page's first
+/// block (measured); missing, it is true.
+const SPACING_SETTINGS: [&str; 5] = [
+    "AddParaTableSpacing",
+    "AddParaTableSpacingAtStart",
+    "AddParaSpacingToTableCells",
+    "AddParaLineSpacingToTableCells",
+    "TableRowKeep",
+];
 
 fn check_settings(text: &str, version: Option<&str>) -> Result<LayoutFlags, String> {
     let document = xml::parse(text)?;
@@ -571,6 +607,7 @@ fn check_settings(text: &str, version: Option<&str>) -> Result<LayoutFlags, Stri
         return Err(unsupported("compatibility-setting"));
     }
     let mut seen = HashSet::new();
+    let mut table_items = 0;
     for item in set
         .children()
         .filter(|n| xml::is(*n, xml::NS_CONFIG, "config-item"))
@@ -596,6 +633,16 @@ fn check_settings(text: &str, version: Option<&str>) -> Result<LayoutFlags, Stri
             if !matches {
                 return Err(unsupported("compatibility-setting"));
             }
+        } else if SPACING_SETTINGS.contains(&name) {
+            let value = boolean()?;
+            match name {
+                "AddParaTableSpacing" => trailing.para_space_max = !value,
+                "AddParaTableSpacingAtStart" if !value => {
+                    return Err(unsupported("compatibility-setting"));
+                }
+                "AddParaTableSpacingAtStart" => {}
+                _ => table_items += usize::from(value),
+            }
         } else if INERT_SETTINGS.contains(&name)
             || JUSTIFICATION_SETTINGS.contains(&name)
             || SPACE_SETTINGS.contains(&name)
@@ -613,6 +660,7 @@ fn check_settings(text: &str, version: Option<&str>) -> Result<LayoutFlags, Stri
             }
         }
     }
+    trailing.table_settings = table_items == 3;
     Ok(trailing)
 }
 
@@ -929,6 +977,14 @@ struct Collected {
 mod image;
 #[path = "odt_list.rs"]
 mod list;
+#[path = "odt_table.rs"]
+mod table;
+
+/// A collected body block before spacing is resolved.
+enum Block {
+    Paragraph(Box<Collected>),
+    Table(Box<docx_model::DocTable>),
+}
 
 struct Reader<'a> {
     rules: CompatRules,
@@ -949,6 +1005,7 @@ struct Reader<'a> {
     /// The page's text area width and left margin (pt).
     text_width: f64,
     page_left_margin: f64,
+    page_right_margin: f64,
     sheet: &'a StyleSheet,
     fonts: &'a FontFaces,
     used_faces: RefCell<HashSet<Face>>,
@@ -963,7 +1020,10 @@ struct Reader<'a> {
     break_layout_work: usize,
     layout_flags: LayoutFlags,
     page_master: &'a str,
-    paragraphs: Vec<Collected>,
+    blocks: Vec<Block>,
+    /// Paragraphs read so far, in the body and in cells.
+    paragraph_count: usize,
+    next_table: usize,
     retained_text_bytes: usize,
     construction_bytes: usize,
     contextual_spacing_defined: bool,
@@ -1019,6 +1079,7 @@ impl<'a> Reader<'a> {
             match (node.tag_name().namespace(), node.tag_name().name()) {
                 (Some(NS_TEXT), "p") => self.paragraph(node, None)?,
                 (Some(NS_TEXT), "list") => self.list(node, None, depth)?,
+                (Some(NS_TABLE), "table") => self.table(node)?,
                 (Some(NS_TEXT), "h") => {
                     let level = node
                         .attribute((NS_TEXT, "outline-level"))
@@ -1065,7 +1126,7 @@ impl<'a> Reader<'a> {
         node: roxmltree::Node<'_, '_>,
         outline_level: Option<u32>,
     ) -> Result<(), String> {
-        if self.paragraphs.len() >= MAX_PARAGRAPHS {
+        if self.paragraph_count >= MAX_PARAGRAPHS {
             return Err("OpenDocument text exceeds the paragraph limit".into());
         }
         let list = self.list_paragraph.take();
@@ -1118,7 +1179,7 @@ impl<'a> Reader<'a> {
             if master != self.page_master {
                 return Err(unsupported("master-page-change"));
             }
-            page_break_before = !self.paragraphs.is_empty();
+            page_break_before = self.paragraph_count > 0;
             if properties
                 .get(NS_STYLE, "page-number")
                 .is_some_and(|v| v != "auto")
@@ -1281,7 +1342,8 @@ impl<'a> Reader<'a> {
                 return Err(unsupported("line-height-proportional-mixed"));
             }
         }
-        self.paragraphs.push(collected);
+        self.paragraph_count += 1;
+        self.blocks.push(Block::Paragraph(Box::new(collected)));
         Ok(())
     }
 
@@ -2029,25 +2091,56 @@ impl<'a> Reader<'a> {
     /// space before with space after 0, so the DOCX max(after, before) rule
     /// reproduces it.
     fn finish(self) -> Result<Vec<BodyElement>, String> {
-        let mut out = Vec::with_capacity(self.paragraphs.len());
+        let mut out = Vec::with_capacity(self.blocks.len());
         let mut previous: Option<Collected> = None;
+        // A table was just emitted: the next paragraph keeps its own top
+        // margin (tables have no margins; measured).
+        let mut after_table = false;
         // The previous paragraph's background (its model has moved into the
         // output).
         let mut previous_shading: Option<String> = None;
         let mut break_pending = false;
-        for mut collected in self.paragraphs {
+        for block in self.blocks {
+            let mut collected = match block {
+                Block::Paragraph(collected) => *collected,
+                Block::Table(table) => {
+                    // A page break before a table (after the previous
+                    // paragraph) is not in the corpus.
+                    if break_pending {
+                        return Err(unsupported("table-break"));
+                    }
+                    // A paragraph kept with a table is not in the corpus.
+                    if matches!(out.last(), Some(BodyElement::Paragraph(p)) if p.keep_next) {
+                        return Err(unsupported("table-keep"));
+                    }
+                    // The previous paragraph keeps its bottom margin above
+                    // the table (measured); a table first in the body, or
+                    // directly after another, starts at its top.
+                    if let (Some(BodyElement::Paragraph(paragraph)), Some(prev)) =
+                        (out.last_mut(), &previous)
+                    {
+                        paragraph.space_after = prev.bottom;
+                    }
+                    out.push(BodyElement::Table(table));
+                    after_table = true;
+                    previous = None;
+                    previous_shading = None;
+                    continue;
+                }
+            };
             let mut paragraph = std::mem::take(&mut collected.paragraph);
             paragraph.page_break_before |= break_pending;
-            paragraph.space_before = match previous {
+            paragraph.space_before = match (std::mem::take(&mut after_table), &previous) {
+                (true, _) => collected.top,
                 // Measured: after a hard page break (break-before, break-after
                 // or a page style named on the paragraph) LibreOffice applies
                 // the new paragraph's top margin alone; the previous bottom
                 // margin is not carried. At an automatic page break both
                 // vanish, as the DOCX layout drops space before at the top of
                 // a page it reached by pagination.
-                None => collected.top,
-                Some(_) if paragraph.page_break_before => collected.top,
-                Some(ref prev) => {
+                (false, None) => collected.top,
+                (false, Some(_)) if paragraph.page_break_before => collected.top,
+                (false, Some(prev)) => {
                     let same = prev.area == collected.area
                         && prev.named_style.is_some()
                         && prev.named_style == collected.named_style;
@@ -2057,7 +2150,7 @@ impl<'a> Reader<'a> {
                     if same && prev.contextual {
                         0.0
                     } else {
-                        prev.bottom + collected.top
+                        self.layout_flags.gap(prev.bottom, collected.top)
                     }
                 }
             };
@@ -2918,6 +3011,15 @@ fn paragraph_properties(cascade: &Cascade<'_>, rules: CompatRules) -> Result<Col
             Some(value) => length_pt(value),
         }
     };
+    // §20.219, §20.220: vertical margins are non-negative.
+    let vertical = |name: &str| -> Result<f64, String> {
+        let value = length(name)?;
+        if value >= 0.0 {
+            Ok(value)
+        } else {
+            Err(unsupported("paragraph-margin"))
+        }
+    };
     let alignment = match cascade.get(NS_FO, "text-align") {
         None | Some("start") | Some("left") => "left",
         Some("end") | Some("right") => "right",
@@ -2966,7 +3068,10 @@ fn paragraph_properties(cascade: &Cascade<'_>, rules: CompatRules) -> Result<Col
             .get(NS_FO, name)
             .map(|v| v.parse::<u32>().map_err(|_| invalid("bad widows/orphans")))
             .transpose()?
-            .unwrap_or(2))
+            // Unset, LibreOffice applies neither (measured: a paragraph
+            // leaves one line at a page's foot); its own documents set both
+            // to 2 in the default paragraph style.
+            .unwrap_or(0))
     };
     let widow_control = match (count("widows")?, count("orphans")?) {
         (2, 2) => true,
@@ -2998,8 +3103,8 @@ fn paragraph_properties(cascade: &Cascade<'_>, rules: CompatRules) -> Result<Col
     };
     Ok(Collected {
         paragraph,
-        top: length("margin-top")?,
-        bottom: length("margin-bottom")?,
+        top: vertical("margin-top")?,
+        bottom: vertical("margin-bottom")?,
         contextual: cascade.get(NS_STYLE, "contextual-spacing") == Some("true"),
         named_style: None,
         area: 0,
@@ -3073,7 +3178,7 @@ mod tests {
     use crate::package::PackageLimits;
     use ooxml_common::resource::OoxmlFormat;
 
-    const NS: &str = r#"xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:style="urn:oasis:names:tc:opendocument:xmlns:style:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" xmlns:fo="urn:oasis:names:tc:opendocument:xmlns:xsl-fo-compatible:1.0" xmlns:svg="urn:oasis:names:tc:opendocument:xmlns:svg-compatible:1.0" xmlns:loext="urn:org:documentfoundation:names:experimental:office:xmlns:loext:1.0" xmlns:draw="urn:oasis:names:tc:opendocument:xmlns:drawing:1.0" xmlns:officeooo="http://openoffice.org/2009/office" xmlns:xlink="http://www.w3.org/1999/xlink""#;
+    const NS: &str = r#"xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:style="urn:oasis:names:tc:opendocument:xmlns:style:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" xmlns:fo="urn:oasis:names:tc:opendocument:xmlns:xsl-fo-compatible:1.0" xmlns:svg="urn:oasis:names:tc:opendocument:xmlns:svg-compatible:1.0" xmlns:loext="urn:org:documentfoundation:names:experimental:office:xmlns:loext:1.0" xmlns:draw="urn:oasis:names:tc:opendocument:xmlns:drawing:1.0" xmlns:officeooo="http://openoffice.org/2009/office" xmlns:xlink="http://www.w3.org/1999/xlink" xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0""#;
     const FACES: &str = r#"<office:font-face-decls><style:font-face style:name="Serif" svg:font-family="'Liberation Serif'" style:font-family-generic="roman"/><style:font-face style:name="Sans" svg:font-family="'Liberation Sans'" style:font-family-generic="swiss"/><style:font-face style:name="Sans2" svg:font-family="'Liberation Sans'" style:font-family-generic="system"/><style:font-face style:name="Mincho" svg:font-family="'Hiragino Mincho ProN'" style:font-family-generic="system"/></office:font-face-decls>"#;
 
     struct Fixture<'a> {
@@ -5370,6 +5475,628 @@ mod tests {
         assert!(matches!(&runs[0], DocRun::AnchorHost(m) if m.list_label == Some("end")));
         assert!(matches!(&runs[1], DocRun::Image(p) if p.list_label == Some("end")));
         assert!(matches!(&runs[2], DocRun::Text(t) if t.list_label.is_none() && t.text == "a"));
+    }
+
+    const TABLE_STYLES: &str = r##"<style:style style:name="T" style:family="table"><style:table-properties table:border-model="collapsing" style:width="10cm" fo:margin-left="-0.191cm" fo:margin-top="0pt" fo:margin-bottom="0pt" table:align="left" style:writing-mode="page"/></style:style><style:style style:name="T.A" style:family="table-column"><style:table-column-properties style:column-width="4cm"/></style:style><style:style style:name="T.B" style:family="table-column"><style:table-column-properties style:column-width="6cm"/></style:style><style:style style:name="T.1" style:family="table-row"><style:table-row-properties fo:keep-together="auto"/></style:style><style:style style:name="T.A1" style:family="table-cell"><style:table-cell-properties fo:padding-left="0.191cm" fo:padding-right="0.191cm" fo:padding-top="0cm" fo:padding-bottom="0cm" fo:border="0.5pt solid #000000" style:vertical-align="top"/></style:style><style:style style:name="T.B1" style:family="table-cell"><style:table-cell-properties fo:padding="0cm" fo:border-top="2pt solid #ff0000" fo:border-bottom="none" fo:border-left="none" fo:border-right="none"/></style:style><style:style style:name="T.HB" style:family="table-cell"><style:table-cell-properties fo:padding="0cm" fo:border-top="none" fo:border-bottom="2pt solid #ff0000" fo:border-left="none" fo:border-right="none"/></style:style><style:style style:name="Sp" style:family="paragraph"><style:paragraph-properties fo:margin-top="6pt" fo:margin-bottom="8pt"/></style:style>"##;
+
+    fn table_body(table: &str) -> String {
+        format!(
+            r#"<text:p text:style-name="Sp">before</text:p>{table}<text:p text:style-name="Sp">after</text:p>"#
+        )
+    }
+
+    const TABLE: &str = r#"<table:table table:name="T" table:style-name="T"><table:table-column table:style-name="T.A"/><table:table-column table:style-name="T.B"/><table:table-row><table:table-cell table:style-name="T.A1" office:value-type="string"><text:p>h1</text:p></table:table-cell><table:table-cell table:style-name="T.HB"><text:p>h2</text:p></table:table-cell></table:table-row><table:table-row table:style-name="T.1"><table:table-cell table:style-name="T.A1"><text:p>a</text:p><text:p>b</text:p></table:table-cell><table:table-cell table:style-name="T.B1"><text:p>c</text:p></table:table-cell></table:table-row></table:table>"#;
+
+    fn table_settings(spacing: &str) -> String {
+        [
+            ("AddParaTableSpacing", spacing),
+            ("AddParaTableSpacingAtStart", "true"),
+            ("AddParaSpacingToTableCells", "true"),
+            ("AddParaLineSpacingToTableCells", "true"),
+            ("TableRowKeep", "true"),
+        ]
+        .iter()
+        .map(|(name, value)| {
+            format!(r#"<config:config-item config:name="{name}" config:type="boolean">{value}</config:config-item>"#)
+        })
+        .collect()
+    }
+
+    fn read_table(automatic: &str, body: &str) -> Result<Document, String> {
+        read_fixture(Fixture {
+            automatic,
+            body,
+            settings: &table_settings("true"),
+            ..Fixture::default()
+        })
+    }
+
+    #[test]
+    fn separates_blocks_by_the_larger_margin_without_add_para_table_spacing() {
+        let read = |spacing: &str, body: &str| {
+            read_fixture(Fixture {
+                automatic: TABLE_STYLES,
+                body,
+                settings: &table_settings(spacing),
+                ..Fixture::default()
+            })
+            .unwrap()
+        };
+        let document = read("false", &table_body(TABLE));
+        let [BodyElement::Paragraph(before), BodyElement::Table(table), BodyElement::Paragraph(after)] =
+            document.body.as_slice()
+        else {
+            panic!("a paragraph, a table and a paragraph")
+        };
+        assert_eq!(before.space_after, 8.0);
+        assert_eq!(after.space_before, 6.0);
+        let _ = table;
+        let paragraphs =
+            r#"<text:p text:style-name="Sp">a</text:p><text:p text:style-name="Sp">b</text:p>"#;
+        for (spacing, gap) in [("false", 8.0), ("true", 14.0)] {
+            let BodyElement::Paragraph(second) = &read(spacing, paragraphs).body[1] else {
+                panic!()
+            };
+            assert_eq!(second.space_before, gap, "{spacing}");
+        }
+    }
+
+    #[test]
+    fn charges_table_style_scans_per_use() {
+        let padded = format!("0.5pt{}solid #000000", " ".repeat(64 * 1024));
+        let styles = format!(
+            r#"<style:style style:name="T" style:family="table"><style:table-properties table:border-model="collapsing" style:width="10cm" table:align="left"/></style:style><style:style style:name="T.A" style:family="table-column"><style:table-column-properties style:column-width="10cm"/></style:style><style:style style:name="T.A1" style:family="table-cell"><style:table-cell-properties fo:padding="0cm" fo:border="{padded}"/></style:style><style:style style:name="Sp" style:family="paragraph"><style:paragraph-properties fo:margin-top="6pt" fo:margin-bottom="8pt"/></style:style>"#
+        );
+        let rows = |count: usize| {
+            let row = r#"<table:table-row><table:table-cell table:style-name="T.A1"><text:p>x</text:p></table:table-cell></table:table-row>"#;
+            table_body(&format!(
+                r#"<table:table table:name="T" table:style-name="T"><table:table-column table:style-name="T.A"/>{}</table:table>"#,
+                row.repeat(count)
+            ))
+        };
+        read_table(&styles, &rows(2)).unwrap();
+        let error = read_table(&styles, &rows(300)).unwrap_err();
+        assert!(error.contains("style resolution limit"), "{error}");
+    }
+
+    #[test]
+    fn rejects_column_grids_libreoffice_refits_by_unmodelled_rules() {
+        let cases = [
+            // Weights beside absolute widths.
+            TABLE_STYLES
+                .replace(
+                    r#"style:column-width="4cm""#,
+                    r#"style:column-width="4cm" style:rel-column-width="1000*""#,
+                )
+                .replace(
+                    r#"style:column-width="6cm""#,
+                    r#"style:column-width="6cm" style:rel-column-width="3000*""#,
+                ),
+            // A weight below MINLAY in a relative table.
+            TABLE_STYLES
+                .replace(
+                    r#"style:width="10cm""#,
+                    r#"style:width="10cm" style:rel-width="100%""#,
+                )
+                .replace(
+                    r#"style:column-width="4cm""#,
+                    r#"style:rel-column-width="1*""#,
+                )
+                .replace(
+                    r#"style:column-width="6cm""#,
+                    r#"style:rel-column-width="99*""#,
+                ),
+            // A centred grid that does not add up to the table.
+            TABLE_STYLES
+                .replace(r#"table:align="left""#, r#"table:align="center""#)
+                .replace(r#"fo:margin-left="-0.191cm""#, r#"fo:margin-left="0cm""#),
+        ];
+        for styles in cases {
+            assert_eq!(
+                read_table(&styles, &table_body(TABLE)).unwrap_err(),
+                unsupported("table-columns")
+            );
+        }
+    }
+
+    #[test]
+    fn refits_absolute_columns_as_libreoffice_does() {
+        // Traced from LibreOffice 26.8 and matched against its output: a
+        // 10 cm (5669 twip) table with two columns.
+        for (input, expected) in [
+            ([57, 5613], [79, 5590]),
+            ([454, 5216], [473, 5196]),
+            ([1701, 3969], [1709, 3960]),
+            ([170, 5499], [170, 5499]),
+        ] {
+            let fitted = if input.iter().sum::<i64>() == 5669 {
+                input.to_vec()
+            } else {
+                super::table::redistribute(&input, 5669)
+            };
+            assert_eq!(fitted, expected);
+        }
+        assert_eq!(super::table::redistribute(&[100, 200], 330), [110, 220]);
+    }
+
+    #[test]
+    fn rejects_negative_vertical_margins() {
+        for margin in ["margin-top", "margin-bottom"] {
+            let styles = format!(
+                r#"<style:style style:name="N" style:family="paragraph"><style:paragraph-properties fo:{margin}="-20pt"/></style:style>"#
+            );
+            let result = read_fixture(Fixture {
+                automatic: &styles,
+                body: r#"<text:p>a</text:p><text:p text:style-name="N">b</text:p>"#,
+                ..Fixture::default()
+            });
+            assert_eq!(
+                result.unwrap_err(),
+                unsupported("paragraph-margin"),
+                "{margin}"
+            );
+            let table = TABLE_STYLES
+                .replace(r#"fo:margin-top="0pt""#, r#"fo:margin-top="{top}""#)
+                .replace(
+                    r#"fo:margin-bottom="0pt""#,
+                    r#"fo:margin-bottom="{bottom}""#,
+                )
+                .replace(
+                    "{top}",
+                    if margin == "margin-top" {
+                        "-20pt"
+                    } else {
+                        "5pt"
+                    },
+                )
+                .replace(
+                    "{bottom}",
+                    if margin == "margin-bottom" {
+                        "-20pt"
+                    } else {
+                        "3pt"
+                    },
+                );
+            assert_eq!(
+                read_table(&table, &table_body(TABLE)).unwrap_err(),
+                unsupported("table-margin"),
+                "{margin}"
+            );
+        }
+    }
+
+    #[test]
+    fn gives_a_shared_row_edge_to_both_rows() {
+        // Without repeated headers: the first row's second cell has a 2 pt
+        // bottom rule and nothing below it carries a top rule, so the cell
+        // below carries the shared rule (repeated at a page break); the
+        // upper cells keep their own.
+        let styles = TABLE_STYLES.replace(
+            r#"fo:border-top="2pt solid #ff0000""#,
+            r#"fo:border-top="none""#,
+        );
+        let body = TABLE
+            .replace("<table:table-header-rows>", "")
+            .replace("</table:table-header-rows>", "");
+        let document = read_table(&styles, &table_body(&body)).unwrap();
+        let BodyElement::Table(table) = &document.body[1] else {
+            panic!()
+        };
+        let width = |side: &Option<docx_model::BorderSpec>| side.as_ref().map(|b| b.width);
+        assert_eq!(width(&table.rows[0].cells[1].borders.bottom), Some(2.0));
+        assert_eq!(width(&table.rows[1].cells[1].borders.top), Some(2.0));
+        assert_eq!(width(&table.rows[1].cells[0].borders.top), Some(0.5));
+    }
+
+    #[test]
+    fn rejects_cell_lines_that_could_not_share_a_page() {
+        let styles = format!(
+            r#"{TABLE_STYLES}<style:style style:name="Big" style:family="text"><style:text-properties fo:font-size="200pt"/></style:style>"#
+        );
+        let body = table_body(&TABLE.replace(
+            "<text:p>c</text:p>",
+            r#"<text:p><text:span text:style-name="Big">c</text:span></text:p>"#,
+        ));
+        assert_eq!(
+            read_table(&styles, &body).unwrap_err(),
+            unsupported("table-cell-line")
+        );
+        // An empty paragraph's line is sized by its mark.
+        let styles = format!(
+            r#"{TABLE_STYLES}<style:style style:name="Huge" style:family="paragraph"><style:text-properties fo:font-size="650pt"/></style:style>"#
+        );
+        let body =
+            table_body(&TABLE.replace("<text:p>c</text:p>", r#"<text:p text:style-name="Huge"/>"#));
+        assert_eq!(
+            read_table(&styles, &body).unwrap_err(),
+            unsupported("table-cell-line")
+        );
+        // Indents leaving no width in the cell.
+        let styles = format!(
+            r#"{TABLE_STYLES}<style:style style:name="Wide" style:family="paragraph"><style:paragraph-properties fo:margin-left="400pt"/></style:style>"#
+        );
+        let body = table_body(&TABLE.replace(
+            "<text:p>c</text:p>",
+            r#"<text:p text:style-name="Wide">c</text:p>"#,
+        ));
+        assert_eq!(
+            read_table(&styles, &body).unwrap_err(),
+            unsupported("table-cell-indent")
+        );
+        // A line narrower than an em (165 pt of a 169.85 pt cell).
+        let styles = styles.replace(r#"fo:margin-left="400pt""#, r#"fo:margin-left="165pt""#);
+        assert_eq!(
+            read_table(&styles, &body).unwrap_err(),
+            unsupported("table-cell-indent")
+        );
+    }
+
+    #[test]
+    fn bounds_cell_lines_by_their_widest_glyph_and_quantizes_rules() {
+        let narrow = format!(
+            r#"{TABLE_STYLES}<style:style style:name="N" style:family="paragraph"><style:paragraph-properties fo:margin-left="150pt"/></style:style>"#
+        );
+        // 19.85 pt of line: ASCII at 12 pt fits (1.25 em), U+01F1 does not.
+        let ascii = table_body(&TABLE.replace(
+            "<text:p>c</text:p>",
+            r#"<text:p text:style-name="N">c</text:p>"#,
+        ));
+        read_table(&narrow, &ascii).unwrap();
+        let wide = table_body(&TABLE.replace(
+            "<text:p>c</text:p>",
+            "<text:p text:style-name=\"N\">\u{1f1}</text:p>",
+        ));
+        assert_eq!(
+            read_table(&narrow, &wide).unwrap_err(),
+            unsupported("table-cell-text")
+        );
+        // A 0.02 pt rule is under a twip: no rule.
+        let thin = TABLE_STYLES.replace("0.5pt solid #000000", "0.02pt solid #000000");
+        let document = read_table(&thin, &table_body(TABLE)).unwrap();
+        let BodyElement::Table(table) = &document.body[1] else {
+            panic!()
+        };
+        assert!(table.rows[1].cells[0].borders.left.is_none());
+        let fine = TABLE_STYLES.replace("0.5pt solid #000000", "0.05pt solid #000000");
+        let document = read_table(&fine, &table_body(TABLE)).unwrap();
+        let BodyElement::Table(table) = &document.body[1] else {
+            panic!()
+        };
+        assert_eq!(
+            table.rows[1].cells[0]
+                .borders
+                .left
+                .as_ref()
+                .map(|b| b.width),
+            Some(0.05)
+        );
+    }
+
+    #[test]
+    fn requires_the_measured_table_settings() {
+        let body = table_body(TABLE);
+        let read = |settings: &str| {
+            read_fixture(Fixture {
+                automatic: TABLE_STYLES,
+                body: &body,
+                settings,
+                ..Fixture::default()
+            })
+        };
+        assert_eq!(read("").unwrap_err(), unsupported("table-setting"));
+        for item in [
+            "AddParaSpacingToTableCells",
+            "AddParaLineSpacingToTableCells",
+            "TableRowKeep",
+        ] {
+            let all = table_settings("true");
+            let missing = all.replace(
+                &format!(r#"<config:config-item config:name="{item}" config:type="boolean">true</config:config-item>"#),
+                "",
+            );
+            assert_eq!(
+                read(&missing).unwrap_err(),
+                unsupported("table-setting"),
+                "{item}"
+            );
+            let off = all.replace(
+                &format!(r#""{item}" config:type="boolean">true"#),
+                &format!(r#""{item}" config:type="boolean">false"#),
+            );
+            assert_eq!(
+                read(&off).unwrap_err(),
+                unsupported("table-setting"),
+                "{item}"
+            );
+        }
+        let at_start = table_settings("true").replace(
+            r#""AddParaTableSpacingAtStart" config:type="boolean">true"#,
+            r#""AddParaTableSpacingAtStart" config:type="boolean">false"#,
+        );
+        assert_eq!(
+            read(&at_start).unwrap_err(),
+            unsupported("compatibility-setting")
+        );
+    }
+
+    #[test]
+    fn maps_tables_as_libreoffice_lays_them_out() {
+        let document = read_table(TABLE_STYLES, &table_body(TABLE)).unwrap();
+        let [BodyElement::Paragraph(before), BodyElement::Table(table), BodyElement::Paragraph(after)] =
+            document.body.as_slice()
+        else {
+            panic!("a paragraph, a table and a paragraph")
+        };
+        // The paragraphs keep their own margins around the table.
+        assert_eq!(before.space_after, 8.0);
+        assert_eq!(after.space_before, 6.0);
+        let cm = 72.0 / 2.54;
+        // 4 cm and 6 cm read as 2268 + 3402 twips against a 5669 twip
+        // table: LibreOffice refits them to 2272 and 3397.
+        assert_eq!(table.col_widths, [2272.0 / 20.0, 3397.0 / 20.0]);
+        let _ = cm;
+        assert_eq!(table.jc, "left");
+        assert!((table.tbl_ind.unwrap() + 0.191 * cm).abs() < 1e-9);
+        assert_eq!(table.layout.as_deref(), Some("fixed"));
+        assert!(!table.rows[0].is_header && !table.rows[1].is_header);
+        let row = &table.rows[1];
+        assert_eq!(row.row_height_rule, "auto");
+        assert!(row.row_height.is_none() && !row.cant_split && row.cuts_in_place);
+        let cell = &row.cells[0];
+        assert_eq!(cell.v_align, "top");
+        assert!((cell.margin_left.unwrap() - 0.191 * cm).abs() < 1e-9);
+        assert_eq!(cell.borders.top.as_ref().map(|b| b.width), Some(0.5));
+        let other = &row.cells[1];
+        assert_eq!(other.borders.top.as_ref().map(|b| b.width), Some(2.0));
+        assert!(other.borders.bottom.is_none() && other.borders.left.is_none());
+        assert_eq!(cell.content.len(), 2);
+        // LibreOffice cuts cell paragraphs without widow or keep controls.
+        for element in &cell.content {
+            let docx_model::CellElement::Paragraph(p) = element else {
+                panic!()
+            };
+            assert!(!p.widow_control && !p.keep_lines);
+        }
+    }
+
+    #[test]
+    fn maps_relative_widths() {
+        let styles = TABLE_STYLES
+            .replace(
+                r#"style:width="10cm""#,
+                r#"style:width="10cm" style:rel-width="100%""#,
+            )
+            .replace(
+                r#"style:column-width="4cm""#,
+                r#"style:rel-column-width="1000*""#,
+            )
+            .replace(
+                r#"style:column-width="6cm""#,
+                r#"style:rel-column-width="3000*""#,
+            );
+        let document = read_table(&styles, &table_body(TABLE)).unwrap();
+        let BodyElement::Table(table) = &document.body[1] else {
+            panic!()
+        };
+        let section = &document.section;
+        let width = section.page_width - section.margin_left - section.margin_right;
+        let total: f64 = table.col_widths.iter().sum();
+        assert!((total - (width - 0.0)).abs() < 1e-6, "{total} {width}");
+        assert!((table.col_widths[1] / table.col_widths[0] - 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn rejects_unmodelled_tables() {
+        let cell = |extra: &str| {
+            TABLE.replacen("<table:table-cell table:style-name=\"T.A1\" office:value-type=\"string\">", &format!("<table:table-cell table:style-name=\"T.A1\" office:value-type=\"string\"{extra}>"), 1)
+        };
+        let cases: Vec<(String, String, &str)> = vec![
+            (
+                TABLE_STYLES.into(),
+                table_body(&cell(r#" table:number-columns-spanned="2""#)),
+                "table-cell",
+            ),
+            (
+                TABLE_STYLES.into(),
+                table_body(
+                    &TABLE.replace("<text:p>c</text:p>", r#"<table:table table:name="N"/>"#),
+                ),
+                "table-cell-content",
+            ),
+            (
+                TABLE_STYLES.into(),
+                table_body(&TABLE.replace(
+                    "<text:p>c</text:p>",
+                    "<text:list><text:list-item><text:p>c</text:p></text:list-item></text:list>",
+                )),
+                "table-cell-content",
+            ),
+            (
+                TABLE_STYLES.into(),
+                table_body(&TABLE.replace("<text:p>c</text:p>", "")),
+                "table-cell-empty",
+            ),
+            (
+                TABLE_STYLES.replace("0.5pt solid #000000", "0.5pt double #000000"),
+                table_body(TABLE),
+                "table-border",
+            ),
+            (
+                TABLE_STYLES.replace(
+                    r#"style:vertical-align="top""#,
+                    r#"style:writing-mode="tb-rl""#,
+                ),
+                table_body(TABLE),
+                "table-cell-property",
+            ),
+            (
+                TABLE_STYLES.replace(
+                    r#"style:width="10cm""#,
+                    r#"style:width="10cm" style:rel-width="50%""#,
+                ),
+                table_body(TABLE),
+                "table-rel-width",
+            ),
+            (
+                TABLE_STYLES.replace(
+                    r#"style:column-width="4cm""#,
+                    r#"style:column-width="0.03cm""#,
+                ),
+                table_body(TABLE),
+                "table-columns",
+            ),
+            // Table features no corpus table uses reject.
+            (
+                TABLE_STYLES.replace(r#"fo:keep-together="auto""#, r#"style:row-height="2cm""#),
+                table_body(TABLE),
+                "table-row",
+            ),
+            (
+                TABLE_STYLES.replace(r#"fo:keep-together="auto""#, r#"fo:keep-together="always""#),
+                table_body(TABLE),
+                "table-row",
+            ),
+            (
+                TABLE_STYLES.into(),
+                table_body(
+                    &TABLE
+                        .replace(
+                            "<table:table-row>",
+                            "<table:table-header-rows><table:table-row>",
+                        )
+                        .replacen(
+                            "</table:table-row>",
+                            "</table:table-row></table:table-header-rows>",
+                            1,
+                        ),
+                ),
+                "table-header-rows",
+            ),
+            (
+                TABLE_STYLES.replace(
+                    r#"style:width="10cm""#,
+                    r#"style:width="10cm" fo:break-before="page""#,
+                ),
+                table_body(TABLE),
+                "table-property",
+            ),
+            (
+                TABLE_STYLES.replace(
+                    r#"fo:border="0.5pt solid #000000""#,
+                    r##"fo:border="0.5pt solid #000000" fo:background-color="#ffff00""##,
+                ),
+                table_body(TABLE),
+                "table-cell-property",
+            ),
+            (
+                TABLE_STYLES.replace(
+                    r#"style:vertical-align="top""#,
+                    r#"style:vertical-align="middle""#,
+                ),
+                table_body(TABLE),
+                "table-cell-property",
+            ),
+            (
+                TABLE_STYLES.replace(r#"fo:margin-left="-0.191cm""#, r#"fo:margin-left="-3cm""#),
+                table_body(TABLE),
+                "table-geometry",
+            ),
+            (
+                format!(
+                    r#"{TABLE_STYLES}<style:style style:name="K" style:family="paragraph"><style:paragraph-properties fo:keep-with-next="always"/></style:style>"#
+                ),
+                table_body(&TABLE.replace(
+                    "<text:p>a</text:p>",
+                    r#"<text:p text:style-name="K">a</text:p>"#,
+                )),
+                "table-cell-keep",
+            ),
+            (
+                TABLE_STYLES.replace(
+                    r#"table:border-model="collapsing""#,
+                    r#"table:border-model="separating""#,
+                ),
+                table_body(TABLE),
+                "table-property",
+            ),
+            // Without a stated model LibreOffice separates the borders.
+            (
+                TABLE_STYLES.replace(r#"table:border-model="collapsing" "#, ""),
+                table_body(TABLE),
+                "table-border-model",
+            ),
+            // Weights in part of the grid.
+            (
+                TABLE_STYLES.replace(
+                    r#"style:column-width="4cm""#,
+                    r#"style:column-width="4cm" style:rel-column-width="1000*""#,
+                ),
+                table_body(TABLE),
+                "table-columns",
+            ),
+            (
+                TABLE_STYLES.replace(
+                    r#"style:name="T" style:family="table""#,
+                    r#"style:name="T" style:family="table" style:master-page-name="Standard""#,
+                ),
+                table_body(TABLE),
+                "table-style-attribute",
+            ),
+            (
+                TABLE_STYLES.replace(
+                    r#"fo:border-left="none""#,
+                    r#"fo:border-left="0.5pt solid #ff0000""#,
+                ),
+                table_body(TABLE),
+                "table-border-conflict",
+            ),
+            // Fixed space LibreOffice continues over pages: a row taller
+            // than the page body, and padding taller than it.
+            (
+                TABLE_STYLES.replace(
+                    r#"fo:keep-together="auto""#,
+                    r#"style:min-row-height="2cm""#,
+                ),
+                table_body(TABLE),
+                "table-row",
+            ),
+            (
+                TABLE_STYLES
+                    .replace(
+                        r#"fo:padding="0cm""#,
+                        r#"fo:padding="0cm" fo:padding-top="30cm""#,
+                    )
+                    .replace(r#"fo:padding-top="0cm""#, r#"fo:padding-top="30cm""#),
+                table_body(TABLE),
+                "table-row-height",
+            ),
+            // Table margins (with or without a break before).
+            (
+                TABLE_STYLES.replace(r#"fo:margin-top="0pt""#, r#"fo:margin-top="5pt""#),
+                table_body(TABLE),
+                "table-margin",
+            ),
+            (
+                TABLE_STYLES.replace(r#"fo:margin-bottom="0pt""#, r#"fo:margin-bottom="3pt""#),
+                table_body(TABLE),
+                "table-margin",
+            ),
+            // A paragraph kept with the table after it.
+            (
+                format!(
+                    r#"{TABLE_STYLES}<style:style style:name="Kn" style:family="paragraph"><style:paragraph-properties fo:keep-with-next="always"/></style:style>"#
+                ),
+                format!(r#"<text:p text:style-name="Kn">kept</text:p>{TABLE}"#),
+                "table-keep",
+            ),
+        ];
+        for (styles, body, code) in cases {
+            assert_eq!(
+                read_table(&styles, &body).map(|_| ()),
+                Err(unsupported(code)),
+                "{code}"
+            );
+        }
     }
 
     #[test]

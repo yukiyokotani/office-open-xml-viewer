@@ -805,6 +805,7 @@ export function acquireRetainedTable<State>(
       source: sourceAt([...sourcePath, rowIndex]),
       logicalRowIndex: rowIndex,
       cantSplit: rowFormat?.cantSplit ?? row.cantSplit === true,
+      ...(rowFormat?.cutsInPlace ? { cutsInPlace: true as const } : {}),
       heightPt: rowFormat?.height?.valuePt ?? null,
       heightRule,
       cellSpacingPt: rowFormat?.cellSpacingPt ?? 0,

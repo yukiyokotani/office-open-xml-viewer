@@ -1318,6 +1318,34 @@ describe('retained table pagination', () => {
     expect(result.nextCursor).toMatchObject({ rowIndex: 0, rowFragmentIndex: 1 });
   });
 
+  it('cuts a producer row that overflows only by the appended bottom rule', () => {
+    const rule = { widthPt: 12, color: '000000', authoredStyle: 'single' };
+    const ruled = (index: number, cutsInPlace: boolean) => {
+      const base = row(index, 40, { paragraph: paragraph(`ruled-${index}`, [10, 10, 10, 10]) });
+      return {
+        ...base,
+        ...(cutsInPlace ? { cutsInPlace: true as const } : {}),
+        cells: base.cells.map((cell) => ({
+          ...cell,
+          borders: { ...noBorders, top: index > 0 ? rule : null, bottom: rule },
+        })),
+      };
+    };
+    // 40 + (12 + 40) of rows fit 97 pt, but not with the 12 pt rule a page
+    // slice appends below its last row (the table's own last row, row 2,
+    // counts it in its height).
+    const deferred = take(acquisition([ruled(0, false), ruled(1, false), ruled(2, false)]), 97);
+    expect(deferred.fragment?.rows.map((item) => item.logicalRowIndex)).toEqual([0]);
+    const cut = take(acquisition([ruled(0, true), ruled(1, true), ruled(2, true)]), 97);
+    expect(cut.fragment?.rows.map((item) => [item.logicalRowIndex, item.fragmentIndex]))
+      .toEqual([[0, 0], [1, 0]]);
+    expect(cut.fragment?.rows[1]?.cells[0]?.contentRanges).toEqual([
+      { kind: 'paragraph', blockIndex: 0, lineStart: 0, lineEnd: 3 },
+    ]);
+    expect(cut.fragment!.advancePt).toBeLessThanOrEqual(97);
+    expect(cut.nextCursor).toMatchObject({ rowIndex: 1, rowFragmentIndex: 1 });
+  });
+
   it('clips an over-page cantSplit row to the fresh Word page band without continuation', () => {
     const source = acquisition([row(0, 120, {
       cantSplit: true,
