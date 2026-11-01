@@ -611,6 +611,23 @@ impl<'a> Reader<'a> {
                 return Err(unsupported("table-border-conflict"));
             }
         }
+        // Where a page break falls between two rows, LibreOffice draws their
+        // shared edge again above the row continuing on the next page, and
+        // below the row ending the page only where that row has a bottom
+        // rule of its own (measured: a 12 pt bottom rule alone moves the
+        // continued rows 12 pt down; a top rule alone adds nothing at the
+        // page's foot). The lower cell carries the wider rule, as the DOCX
+        // layout repeats a row's top rule there; without a break the layout
+        // draws the shared edge once at the wider width either way.
+        for index in 1..doc_rows.len() {
+            let (above, below) = doc_rows.split_at_mut(index);
+            for (upper, lower) in above[index - 1].cells.iter().zip(&mut below[0].cells) {
+                let width = |side: &Option<BorderSpec>| side.as_ref().map_or(0.0, |b| b.width);
+                if width(&upper.borders.bottom) > width(&lower.borders.top) {
+                    lower.borders.top = upper.borders.bottom.clone();
+                }
+            }
+        }
         // LibreOffice counts a row's explicit height (fixed or minimum) from
         // the top of the border above it (measured). The DOCX layout does so
         // for an exact row (WORD_COLLAPSED_BORDER_ROW_TRACK_FOOTPRINT) but adds
@@ -802,6 +819,26 @@ impl<'a> Reader<'a> {
         let mut content = finish_cell(blocks)?;
         if content.is_empty() {
             return Err(unsupported("table-cell-empty"));
+        }
+        // A row's first line must fit a page beside its fixed space and the
+        // repeated header rows (each held to a quarter page): LibreOffice
+        // continues a row whose first line does not, the DOCX layout cannot
+        // advance. Each line's contribution is held to a quarter page too,
+        // counting a font at twice its size.
+        let tallest = content
+            .iter()
+            .flat_map(|element| match element {
+                CellElement::Paragraph(p) => p.runs.iter(),
+                _ => [].iter(),
+            })
+            .map(|run| match run {
+                DocRun::Text(text) => text.font_size * 2.0,
+                DocRun::Image(image) => image.height_pt,
+                _ => 0.0,
+            })
+            .fold(0.0, f64::max);
+        if tallest.partial_cmp(&(self.text_height / 4.0)) != Some(std::cmp::Ordering::Less) {
+            return Err(unsupported("table-cell-line"));
         }
         if let Some(fill) = &background {
             // §20.395 automatic colour over the cell's background, as over a

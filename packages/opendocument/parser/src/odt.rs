@@ -5734,6 +5734,46 @@ mod tests {
     }
 
     #[test]
+    fn gives_a_shared_row_edge_to_both_rows() {
+        // T.A1 has a 0.5 pt bottom rule over T.B1 and a T.B1 header cell
+        // (no bottom rule) over a T.B1 cell with a 2 pt top rule: each lower
+        // cell carries the wider shared rule, the upper ones keep theirs.
+        let styles = TABLE_STYLES.replace(
+            r#"fo:border-top="2pt solid #ff0000""#,
+            r#"fo:border-top="none""#,
+        );
+        let body = TABLE.replace(
+            r#"<table:table-cell table:style-name="T.B1"><text:p>c</text:p>"#,
+            r#"<table:table-cell table:style-name="T.A1"><text:p>c</text:p>"#,
+        );
+        let document = read_table(&styles, &table_body(&body)).unwrap();
+        let BodyElement::Table(table) = &document.body[1] else {
+            panic!()
+        };
+        let width = |side: &Option<docx_model::BorderSpec>| side.as_ref().map(|b| b.width);
+        // Header A1 (bottom 0.5) over body A1 (top 0.5): unchanged.
+        assert_eq!(width(&table.rows[1].cells[0].borders.top), Some(0.5));
+        // Header B1 (no bottom) over body A1 (top 0.5): the lower keeps it.
+        assert_eq!(width(&table.rows[0].cells[1].borders.bottom), None);
+        assert_eq!(width(&table.rows[1].cells[1].borders.top), Some(0.5));
+    }
+
+    #[test]
+    fn rejects_cell_lines_that_could_not_share_a_page() {
+        let styles = format!(
+            r#"{TABLE_STYLES}<style:style style:name="Big" style:family="text"><style:text-properties fo:font-size="200pt"/></style:style>"#
+        );
+        let body = table_body(&TABLE.replace(
+            "<text:p>c</text:p>",
+            r#"<text:p><text:span text:style-name="Big">c</text:span></text:p>"#,
+        ));
+        assert_eq!(
+            read_table(&styles, &body).unwrap_err(),
+            unsupported("table-cell-line")
+        );
+    }
+
+    #[test]
     fn requires_the_measured_table_settings() {
         let body = table_body(TABLE);
         let read = |settings: &str| {
