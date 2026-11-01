@@ -119,9 +119,9 @@ describe('computeLineVisualOrder', () => {
   });
 
   it('orders an embedded LTR run inside an RTL line', () => {
-    // logical: Hebrew, Latin, Hebrew (base RTL) -> visual L→R: [2,1,0]
+    // logical: rtl Hebrew, Latin, rtl Hebrew (base RTL) -> visual L→R: [2,1,0]
     const { order, rtl } = computeLineVisualOrder(
-      [{ text: 'שלום ' }, { text: 'world ' }, { text: 'טוב' }],
+      [{ text: 'שלום ', rtl: true }, { text: 'world ' }, { text: 'טוב', rtl: true }],
       true,
     );
     expect(order).toEqual([2, 1, 0]);
@@ -277,5 +277,41 @@ describe('rtl-marked run punctuation (§17.3.2.30 ambiguous → RTL)', () => {
     const { order } = computeLineVisualOrder(segs, true);
     // Visual left→right: 2026 - 02 - 28
     expect(order).toEqual([4, 3, 2, 1, 0]);
+  });
+});
+
+describe('run-direction isolates (WORD_RUN_DIRECTION_ISOLATE)', () => {
+  // Segments as the line planner passes them: whitespace-delimited slices of
+  // runs. Arabic: A1 كتاب, A2 قلم, A3 بيت, A4 شمس (blk-0898-bidi-order).
+  const visual = (segs: { text: string; rtl?: boolean }[], baseRtl: boolean) =>
+    computeLineVisualOrder(segs, baseRtl).order.map((index) => segs[index]!.text.trim());
+
+  it('draws a leading non-rtl Latin word at the left of a bidi line (s01)', () => {
+    expect(visual([{ text: 'Xray ' }, { text: 'كتاب ' }, { text: 'قلم ' }, { text: 'بيت' }], true))
+      .toEqual(['Xray', 'بيت', 'قلم', 'كتاب']);
+  });
+
+  it('keeps a non-rtl Latin run beside rtl Arabic runs at its logical start (s02)', () => {
+    expect(visual([{ text: 'Xray ' }, { text: 'كتاب ', rtl: true }, { text: 'قلم ', rtl: true }, { text: 'بيت', rtl: true }], true))
+      .toEqual(['بيت', 'قلم', 'كتاب', 'Xray']);
+  });
+
+  it('orders a non-rtl run left to right as a unit inside a bidi line (m02, e02)', () => {
+    expect(visual([{ text: 'كتاب ' }, { text: 'قلم ' }, { text: 'Xray ' }, { text: 'بيت ' }, { text: 'شمس' }], true))
+      .toEqual(['قلم', 'كتاب', 'Xray', 'شمس', 'بيت']);
+    expect(visual([{ text: 'كتاب ' }, { text: 'قلم ' }, { text: 'Xray' }], true))
+      .toEqual(['قلم', 'كتاب', 'Xray']);
+  });
+
+  it('orders an rtl run right to left as a unit inside an LTR line (l04)', () => {
+    expect(visual([{ text: 'Xray ', rtl: true }, { text: 'كتاب ', rtl: true }, { text: 'Yoke', rtl: true }], false))
+      .toEqual(['Yoke', 'كتاب', 'Xray']);
+  });
+
+  it('places the rtl runs around a non-rtl run by the paragraph direction (x10)', () => {
+    expect(visual([
+      { text: 'Xray ' }, { text: 'كتاب ', rtl: true }, { text: 'قلم ', rtl: true },
+      { text: 'Yoke ' }, { text: 'بيت ' }, { text: 'شمس' },
+    ], true)).toEqual(['Yoke', 'شمس', 'بيت', 'قلم', 'كتاب', 'Xray']);
   });
 });

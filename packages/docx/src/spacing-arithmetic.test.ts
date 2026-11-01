@@ -17,6 +17,9 @@ const mainStreams = JSON.parse(readFileSync(
 // 'kashida' (highKashida) was re-recorded for WORD_KASHIDA_LINE_FIT: its
 // over-wide Latin run now force-breaks at 0.8 of the width; every advance,
 // transform and fill keeps its arithmetic.
+// It was re-recorded again when WORD_LINE_END_SPACE_STAYS_IN_RUN painted its
+// Arabic words left to right, because the space ending that left-to-right
+// line resolves to the line end: only the two fill origins changed.
 // All numeric fields are unrounded doubles, including retained cluster advances
 // and offsets, every transform argument, and every fill's complete paint state.
 describe('unexcluded text keeps main spacing arithmetic bit for bit', () => {

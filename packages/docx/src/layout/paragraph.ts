@@ -422,6 +422,8 @@ export interface PlanLineInput {
   readonly doNotExpandShiftReturn?: boolean;
   /** compatibilityMode is absent or below 15 (WORD_LINE_END_JUSTIFICATION). */
   readonly lineEndJustificationBeforeMode15?: boolean;
+  /** Runs without authored w:rtl: no run-direction isolates. */
+  readonly runDirectionUnauthored?: boolean;
   /** The paragraph piece ends at a page or column break (its last line). */
   readonly endsAtHardBreak?: boolean;
   readonly firstLineIndentPt?: number;
@@ -704,6 +706,7 @@ function resolveRtlLineEndSpaces(
     if (visible > 0) break;
   }
   const order = visual.order.filter((index) => segments[index]?.kind !== 'anchor-host');
+  const position = new Map(order.map((index, at) => [index, at]));
   const hung = new Set<number>();
   // Walk inward from one extreme: spaces-only segments hang there; the first
   // visible segment hangs its spaces only when it draws them on this side.
@@ -724,8 +727,8 @@ function resolveRtlLineEndSpaces(
   const interior: RtlInteriorSpace[] = [];
   for (const [index, { widthPt, spacesOnly }] of trailing) {
     if (hung.has(index)) continue;
-    const position = order.indexOf(index);
-    const owner = spacesOnly || visual.rtl[index] !== true ? index : order[position - 1];
+    const at = position.get(index) ?? -1;
+    const owner = spacesOnly || visual.rtl[index] !== true ? index : order[at - 1];
     if (owner !== undefined) interior.push({ owner, widthPt });
   }
   return { rightPt, leftPt, interior };
@@ -1465,6 +1468,12 @@ export function planLine(input: PlanLineInput): LineLayout {
   const { line } = input;
   let segments = line.segments;
   const bidi = input.baseRtl || segmentsHaveRtl(segments);
+  // A right-to-left line under character spreading keeps its gap model's
+  // previous order and line-end geometry: that model does not place the gaps
+  // of run-direction isolates (WORD_LINE_END_JUSTIFICATION).
+  const characterSpreadBidi = bidi && input.displayMathJustification === undefined
+    && resolveAlignEdge(input.alignment, input.baseRtl) === 'justify'
+    && lineEndJustification(input, line.endsWithBreak) === 'character';
   const visual = computeLineVisualOrder(
     segments.map((segment) => segment.kind === 'tab'
       ? { isTab: true }
@@ -1472,6 +1481,7 @@ export function planLine(input: PlanLineInput): LineLayout {
         ? { text: segment.text, rtl: segment.rtl, digitsAsAN: segment.digitsAsAN }
         : {}),
     input.baseRtl,
+    characterSpreadBidi ? 'line-level' : input.runDirectionUnauthored === true ? 'unauthored' : 'word',
   );
   let naturalWidthPt = segments.reduce((sum, segment) => sum + segmentWidth(segment), 0);
   const lineLeftPt = input.paragraphXPt + line.xOffsetPt;
@@ -1512,7 +1522,14 @@ export function planLine(input: PlanLineInput): LineLayout {
     && wordRtlJustifiedVisibleFitApplies(input.alignment, input.baseRtl === true, input.wordWrap !== false);
   // The line-end spaces hang on the side where they are drawn; spaces drawn
   // between other segments cannot hang and stay in the line.
-  const rtlLineEnd = rtlVisibleEdge
+  // WORD_LINE_END_SPACE_STAYS_IN_RUN: a left-to-right line with right-to-left
+  // text hangs its line-end spaces on the side they are drawn as well.
+  // Kashida-justified lines keep their previous geometry: Word leaves part of
+  // their slack unfilled there (blk-0898-bidi-fit A0-*Kashida-L), a separate
+  // difference the hang alone cannot match.
+  const ltrSideHang = !characterSpreadBidi && !input.baseRtl && bidi && input.wordWrap !== false
+    && input.displayMathJustification === undefined && kashidaLevel(input.alignment) === null;
+  const rtlLineEnd = rtlVisibleEdge || ltrSideHang
     ? resolveRtlLineEndSpaces(segments, visual)
     : { rightPt: 0, leftPt: 0, interior: [] as RtlInteriorSpace[] };
   const rtlHangingSpacePt = rtlLineEnd.rightPt + rtlLineEnd.leftPt;
@@ -1576,7 +1593,8 @@ export function planLine(input: PlanLineInput): LineLayout {
     }
   }
   // WORD_LINE_END_SPACE_HANGS: the spaces ending a line stand outside
-  // justification and centre/right alignment.
+  // justification and centre/right alignment. Lines with right-to-left text
+  // hang them on the side they are drawn (sideHang below).
   const hangingLineEndSpacePt = wordLineEndSpaceHangs(bidi, input.wordWrap !== false)
     ? trailingAdvancePt(segments, hangingSpaceVisibleLength)
     : 0;
@@ -1591,7 +1609,10 @@ export function planLine(input: PlanLineInput): LineLayout {
   let stretchByIndex: ReadonlyMap<number, SegStretch> | null = null;
   let perGapPt = 0;
   let distributedWidthPt = 0;
-  const distSegments = distributionSegments(segments, bidi, input.wordWrap !== false);
+  // Width the retained visible-width fit dropped from the natural width (its
+  // line-end spaces); spaces drawn inside the line still occupy it.
+  let visibleWidthDropPt = 0;
+  const distSegments = distributionSegments(segments, bidi && !ltrSideHang, input.wordWrap !== false);
   // WORD_LINE_END_JUSTIFICATION: a word-justified line without any opportunity
   // is centred instead (mode-15 distribute).
   let centreUnjustified = false;
@@ -1611,6 +1632,7 @@ export function planLine(input: PlanLineInput): LineLayout {
     if (!model) throw new Error('Justified line is missing its retained gap plan');
     const retainedNaturalWidthPt = naturalWidthPt;
     naturalWidthPt = model.visibleWidthPx;
+    visibleWidthDropPt = Math.max(0, retainedNaturalWidthPt - naturalWidthPt);
     lineSlackPt = effectiveAvailableWidthPt - physicalStartOffsetPt - naturalWidthPt;
     if (applyJustify || line.justifiedCompressionPt > 0) {
       // Opportunities and measured advances belong to the breaker. No text or
@@ -1655,6 +1677,7 @@ export function planLine(input: PlanLineInput): LineLayout {
         },
       ), segments);
       if (distribution?.usedUnweightedExpansion) {
+        visibleWidthDropPt = 0;
         naturalWidthPt = retainedNaturalWidthPt;
         lineSlackPt = effectiveAvailableWidthPt - physicalStartOffsetPt - naturalWidthPt;
       }
@@ -1704,19 +1727,36 @@ export function planLine(input: PlanLineInput): LineLayout {
   // the spaces drawn between segments: the next segment on each one's drawn
   // side moves over it, so the visible text stays inside the band.
   let rtlRightHangPt = 0;
-  if (rtlVisibleEdge) {
-    const overflowPt = distributedWidthPt - lineSlackPt;
-    rtlRightHangPt = applyJustify ? rtlLineEnd.rightPt : Math.min(Math.max(0, overflowPt), rtlLineEnd.rightPt);
-    const leftHangPt = applyJustify
+  let leftHangPt = 0;
+  if (rtlVisibleEdge || ltrSideHang) {
+    const interiorPt = rtlLineEnd.interior.reduce((sum, space) => sum + space.widthPt, 0);
+    // Every dropped line-end space is drawn somewhere on the line: edge spaces
+    // hang below, interior ones are absorbed.
+    const overflowPt = distributedWidthPt - lineSlackPt
+      + Math.min(visibleWidthDropPt, interiorPt + rtlLineEnd.leftPt + rtlLineEnd.rightPt);
+    // Soft-wrapped left-to-right lines hang their line-end spaces in full,
+    // justified or not, and their last lines (distribute included) only the
+    // overflow (blk-0898-bidi-fit A0-left-L and A0-distribute-L).
+    const fullHang = ltrSideHang ? softWrapped : applyJustify;
+    rtlRightHangPt = fullHang ? rtlLineEnd.rightPt : Math.min(Math.max(0, overflowPt), rtlLineEnd.rightPt);
+    leftHangPt = fullHang
       ? rtlLineEnd.leftPt
       : Math.min(Math.max(0, overflowPt - rtlRightHangPt), rtlLineEnd.leftPt);
     let residualPt = overflowPt - rtlRightHangPt - leftHangPt;
+    // One copy of the stretch plan takes every absorbed space.
+    let merged: Map<number, SegStretch> | undefined;
     for (const { owner, widthPt } of rtlLineEnd.interior) {
       if (!(residualPt > 1e-9)) break;
-      const absorbPt = Math.min(residualPt, widthPt);
-      const merged = new Map(stretchByIndex ?? []);
+      merged ??= new Map(stretchByIndex ?? []);
       const previous = merged.get(owner);
       const ownedPt = previous?.trailingGap ? previous.trailingDelta ?? perGapPt : 0;
+      // The owner's own advance bounds what it can give up, so its painted
+      // width (and its decorations) never goes negative.
+      const ownerSegment = segments[owner];
+      const ownerRoomPt = Math.max(0,
+        (ownerSegment ? segmentWidth(ownerSegment) : 0) + (previous?.internalStretch ?? 0) + ownedPt);
+      const absorbPt = Math.min(residualPt, widthPt, ownerRoomPt);
+      if (!(absorbPt > 0)) continue;
       merged.set(owner, {
         splitBefore: previous?.splitBefore ?? [],
         internalStretch: previous?.internalStretch ?? 0,
@@ -1724,10 +1764,13 @@ export function planLine(input: PlanLineInput): LineLayout {
         trailingGap: true,
         trailingDelta: ownedPt - absorbPt,
       });
-      stretchByIndex = merged;
       distributedWidthPt -= absorbPt;
       residualPt -= absorbPt;
     }
+    if (merged) stretchByIndex = merged;
+    // The interior spaces the visible width dropped are drawn on the line, so
+    // the drawn width counts them before their absorption.
+    naturalWidthPt += Math.min(visibleWidthDropPt, interiorPt);
   }
   const drawnWidthPt = naturalWidthPt + distributedWidthPt;
   // WORD_FLOAT_GAP_FLOW aligns the visible word edge, while
@@ -1748,9 +1791,15 @@ export function planLine(input: PlanLineInput): LineLayout {
         // keeps it (blk-0898-kfit6 final lines keep their space inside).
         ? alignmentSlackPt + rtlRightHangPt
         : 0;
+  // Left-to-right lines with hung spaces: the spaces hung on the left pass
+  // the start edge, those on the right the end edge.
+  const ltrHangOffsetPt = !ltrSideHang ? 0
+    : edge === 'right' ? rtlRightHangPt
+      : edge === 'center' || centreUnjustified ? (rtlRightHangPt - leftHangPt) / 2
+        : -leftHangPt;
   const lineStartPt = lineLeftPt + physicalStartOffsetPt;
   const alignmentOffsetPt = input.decimalAutoTabPt === undefined
-    ? naturalAlignmentOffsetPt
+    ? naturalAlignmentOffsetPt + ltrHangOffsetPt
     : Math.max(0, input.paragraphXPt + input.decimalAutoTabPt - drawnWidthPt - lineStartPt);
   let xPt = lineStartPt + alignmentOffsetPt;
   const placements: ParagraphPlacement[] = [];
@@ -3879,6 +3928,7 @@ function planMeasuredLines(
       ...(ulTrailSpace ? { ulTrailSpace } : {}),
       ...(doNotExpandShiftReturn ? { doNotExpandShiftReturn } : {}),
       ...(context.endsAtHardBreak ? { endsAtHardBreak: true } : {}),
+      ...(context.runDirectionUnauthored ? { runDirectionUnauthored: true } : {}),
       ...(compatibilityMode !== 15 ? { lineEndJustificationBeforeMode15: true } : {}),
       ...(context.wordWrap === false ? { wordWrap: false } : {}),
       firstLineIndentPt: context.firstIndentPt,
@@ -5039,6 +5089,8 @@ function textBoxParagraphContext(
   return {
     ...host,
     ...(paragraph.endsAtHardBreak === true ? { endsAtHardBreak: true as const } : {}),
+    // Shape-text runs (ShapeTextRun) carry no w:rtl.
+    runDirectionUnauthored: true,
     rightIndentGrid: {
       ...inherited.rightIndentGrid,
       paragraphAllowsAdjustment: paragraph.adjustRightInd !== false,

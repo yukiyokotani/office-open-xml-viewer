@@ -210,14 +210,15 @@ describe('WORD_LINE_END_SPACE_HANGS', () => {
     expect(visibleEnd(variant!)).toBeCloseTo(380, 6);
   });
 
-  it('leaves right-to-left lines to their previous geometry', () => {
-    // A line with right-to-left text is outside the rule: its line-end space
-    // and a trailing anchor host keep their cells, so seven gaps share the
-    // 10 pt of slack (350 pt natural width) as before the rule.
+  it('hangs the line-end space of a left-to-right line holding right-to-left text', () => {
+    // UAX #9 L1 puts the space at the line end; Windows Word ends such
+    // justified lines flush at both margins (blk-0898-bidi-fit A0-both-L,
+    // Arabic rtl runs in an LTR paragraph: ink 56.5-538.0pt in a
+    // 56.7-538.6pt band). Six gaps share the 20 pt of visible slack.
     const host = { type: 'anchorHost', fontSize: 20, fontFamily: 'NotInMetrics', bold: false, italic: false } as DocParagraph['runs'][number];
     const [line] = lines(para([textRun('אאאא bbbb cccc dddd eeee ffff gggg '), host, textRun('hhhh')], 'both'));
     const last = texts(line!).find((p) => p.text.startsWith('gggg'))!;
-    expect(last.bounds.xPt).toBeCloseTo(20 + 6 * 40 + 6 * (10 + 10 / 7), 6);
+    expect(last.bounds.xPt).toBeCloseTo(20 + 6 * 40 + 6 * (10 + 20 / 6), 6);
   });
 
   it('keeps the line-end spaces of a wordWrap-off paragraph in the line', () => {

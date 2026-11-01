@@ -12,7 +12,22 @@ export interface SegmentLineBidiOptions {
   isRtlAmbiguous?: (character: string) => boolean;
   /** Word paints a whole word slice RTL if any non-space unit is odd-level. */
   directionFromAnyOdd?: boolean;
+  /**
+   * Direction of the span a segment belongs to, or undefined for a segment
+   * outside any span (tabs, objects). A maximal run of consecutive segments
+   * whose span direction differs from the base direction is wrapped in a
+   * directional isolate (UAX#9 LRI/RLI ... PDI), so it is ordered as one unit
+   * and resolved internally in its own direction.
+   */
+  isolateDirection?: (segment: unknown) => 'ltr' | 'rtl' | undefined;
+  /** With directionFromAnyOdd: a block of slices whose closing U+0020
+   *  resolves to the other direction is painted in that direction. */
+  paintDirectionFromTrailingSpace?: boolean;
 }
+
+const LRI = '\u2066';
+const RLI = '\u2067';
+const PDI = '\u2069';
 
 export interface SegmentLineVisualOrder {
   order: number[];
@@ -42,6 +57,7 @@ export function segmentLineHasRtl(
 export function computeSegmentLineVisualOrder(
   segments: readonly unknown[], baseRtl: boolean,
   options: SegmentLineBidiOptions = {},
+  lineEndNeutral = false,
 ): SegmentLineVisualOrder {
   const count = segments.length;
   if (count === 0) return { order: [], rtl: [] };
@@ -51,9 +67,19 @@ export function computeSegmentLineVisualOrder(
   // The UAX#9 engine treats a missing entry as no override, so only authored
   // HL1 positions need storage; the array can remain sparse.
   let override: (BidiClass | undefined)[] | undefined;
+  const isolates = options.isolateDirection
+    ? segments.map((segment) => {
+      const direction = options.isolateDirection!(segment);
+      return direction !== undefined && (direction === 'rtl') !== baseRtl ? direction : undefined;
+    })
+    : undefined;
   for (let i = 0; i < count; i++) {
     const segment = segments[i];
     const value = textOf(segment) ?? '';
+    const isolate = isolates?.[i];
+    if (isolate !== undefined && isolates![i - 1] !== isolate) {
+      full += isolate === 'rtl' ? RLI : LRI;
+    }
     const digitsAsAN = options.digitsAsAN?.(segment) === true;
     const rtlMarked = options.isRtlMarked?.(segment) === true;
     start[i] = full.length;
@@ -72,7 +98,11 @@ export function computeSegmentLineVisualOrder(
         }
       }
     }
+    if (isolate !== undefined && isolates![i + 1] !== isolate) full += PDI;
   }
+  // A final neutral keeps the line's trailing whitespace out of UAX #9 L1,
+  // for hosts whose line-end spaces stay with their runs.
+  if (lineEndNeutral) full += OBJECT_PLACEHOLDER;
   const { levels, paragraphLevel } = getDefaultBidiEngine().computeLevels(
     full, baseRtl ? 'rtl' : 'ltr', override,
   );
@@ -86,6 +116,7 @@ export function computeSegmentLineVisualOrder(
   // L2 and the Canvas direction agree for a leading-neutral RTL slice.
   const rtl = new Array<boolean>(count);
   const anchor = new Array<number>(count);
+  const spaceStart = new Array<number>(count);
   for (let i = 0; i < count; i++) {
     let scanEnd = end[i];
     while (scanEnd > start[i] && full[scanEnd - 1] === ' ') scanEnd--;
@@ -97,8 +128,30 @@ export function computeSegmentLineVisualOrder(
       if ((level & 1) === 1 && firstOdd < 0) firstOdd = k;
       else if ((level & 1) === 0 && firstEven < 0) firstEven = k;
     }
-    rtl[i] = firstOdd >= 0;
     anchor[i] = firstOdd >= 0 ? firstOdd : firstEven >= 0 ? firstEven : start[i];
+    rtl[i] = firstOdd >= 0;
+    spaceStart[i] = scanEnd;
+  }
+  if (options.paintDirectionFromTrailingSpace) {
+    // A run of consecutive slices at one ordering level is drawn as a block.
+    // When the U+0020 that ends the block resolves to the other direction,
+    // UAX #9 puts it outside the block, on that direction's side; painting
+    // every slice of the block in that direction moves each slice's own
+    // trailing space to the same side, so the gaps fall between the words.
+    let runStart = 0;
+    for (let i = 1; i <= count; i++) {
+      if (i < count && textOf(segments[i]) !== undefined && textOf(segments[i - 1]) !== undefined
+        && levels[anchor[i]!] === levels[anchor[runStart]!]) continue;
+      const last = i - 1;
+      const space = spaceStart[last]!;
+      if (textOf(segments[last]) !== undefined && space < end[last]! && levels[space] !== 255) {
+        const spaceRtl = (levels[space]! & 1) === 1;
+        if (spaceRtl !== ((levels[anchor[last]!]! & 1) === 1)) {
+          for (let k = runStart; k <= last; k++) rtl[k] = spaceRtl;
+        }
+      }
+      runStart = i;
+    }
   }
   return { order: buildVisualOrder(levels, paragraphLevel, anchor).order, rtl };
 }
