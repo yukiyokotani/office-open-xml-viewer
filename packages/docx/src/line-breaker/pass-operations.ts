@@ -638,7 +638,13 @@ export function performAvailW(operationState: PassOperationState) {
   const { breakerState, firstIndent, widthPolicy } = operationState;
   return widthPolicy !== 'bounded'
     ? Number.POSITIVE_INFINITY
-    : breakerState.lineMaxWidth - (breakerState.isFirst ? firstIndent : 0);
+    : lineFitWidth(operationState, breakerState.lineMaxWidth - (breakerState.isFirst ? firstIndent : 0));
+}
+
+/** WORD_KASHIDA_LINE_FIT: the part of a bounded line width its text may fill. */
+export function lineFitWidth(operationState: Pick<PassOperationState, 'lineFit'>, widthPx: number): number {
+  const fit = operationState.lineFit;
+  return fit === undefined ? widthPx : widthPx * fit.fraction - fit.reservePx;
 }
 
 export function performFitsMeasuredWidth(
@@ -660,6 +666,9 @@ export function performFitsMeasuredWidth(
   ) {
     return false;
   }
+  // The reversed operation order applies only to the full width; a reduced
+  // fit width (WORD_KASHIDA_LINE_FIT) is compared as computed by availW.
+  if (operationState.lineFit !== undefined) return false;
   return used + (breakerState.isFirst ? firstIndent : 0) <= breakerState.lineMaxWidth;
 }
 

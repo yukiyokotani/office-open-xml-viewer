@@ -67,6 +67,12 @@ import {
 } from './pass-operations.js';
 import type { PassOperationState } from './pass-operations.js';
 
+/** Fit-width reduction of WORD_KASHIDA_LINE_FIT. */
+export interface LineFitWidth {
+  readonly fraction: number;
+  readonly reservePx: number;
+}
+
 export interface LineBreakerPassInput {
   readonly ctx: MeasurementTextContext;
   readonly segs: LayoutSeg[];
@@ -89,6 +95,10 @@ export interface LineBreakerPassInput {
   readonly verticalGlyphMeasurement?: VerticalGlyphMeasurementService;
   readonly overflowPunct: boolean;
   readonly justifiedCompression?: boolean;
+  /** WORD_KASHIDA_LINE_FIT: a bounded line's text may fill `fraction` of its
+   * available width less `reservePx` (absent: the whole width). Paint still
+   * justifies to the full width. */
+  readonly lineFit?: LineFitWidth;
   readonly passContext: Readonly<{
     probeHeights: readonly number[] | null;
     /** Monotone per-physical-line exclusion probe heights (≥ probeHeights). */

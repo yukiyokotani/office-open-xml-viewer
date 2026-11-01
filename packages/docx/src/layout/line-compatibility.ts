@@ -470,6 +470,45 @@ export const WORD_LINE_END_JUSTIFICATION = defineCompatibilityRule({
   description: 'How a justified paragraph (§17.18.44) justifies a line that does not end at a soft wrap. A line ended by a manual break (§17.3.3.1 br textWrapping, also clear=all, and cr) is justified like a soft-wrapped line unless doNotExpandShiftReturn (§17.15.3.5) is set; a single word stays at its natural width; under lowKashida, mediumKashida, highKashida and, before mode 15, thaiDistribute a space-free (CJK) line stays ragged. A line ended by a page or column break is justified like a soft-wrapped line before compatibility mode 15 and like a final line from mode 15, whatever doNotExpandShiftReturn says. Final lines stay unjustified, except distribute: before mode 15 (mode unset, 11, 12, 14) its final, break-ended and page/column-break-ended lines are spread by an equal advance after every grapheme cluster but the last, spaces included (fit residual 0.1-0.2pt), with hanging line-end spaces outside; from mode 15 they are justified at their gaps and centred when they have none (Latin single words; CJK lines widen their inter-character gaps). From mode 15 a thaiDistribute line ended by a manual break is spread per character too, single words included. Only gaps after the last tab are justified on these lines (kashida and automatic East Asian spacing included), and a line with a tab is not centred (unmeasured). Right-to-left lines keep word justification through the existing bidi gap model, which opens gaps only at segment seams: Word spreads the blk-0898-brk Hebrew distribute lines flush (per character before mode 15, at their gaps from mode 15), while a line whose gaps that model leaves closed stays at its logical start, as before this rule, and is centred only when it has no gap at all (a separate RTL justification limitation); a compressed mode-15 line keeps the opportunities its fit used. Fixed-pitch cells (fitText, character grid) stay whole in the character spread, and hanging ones take no part in it; one fitText region (§17.3.2.14) split over several runs stays whole, and so does a grapheme cluster continuing across a formatting seam (UAX #29 over the contiguous text: combining marks, regional-indicator pairs, emoji ZWJ sequences), while a seam that only forbids a line break still opens a gap. doNotExpandShiftReturn does not affect distribute (blk-0898-brk-nexp controls). Synthetic Windows Word controls blk-0898-brk-* and -hard-* in modes unset, 11, 12, 14 and 15, with and without doNotExpandShiftReturn, for both, distribute, low/medium/highKashida and thaiDistribute: Latin multi-word, single-word, CJK, mixed, tab, RTL Hebrew, zero-margin table cell, br clear=all, cr, break at the paragraph end, column and page breaks. All lines but mixed Latin/CJK lines match per character within 2.4pt; mixed lines keep the separate CJK/space weighting of ordinary justification.',
 });
 
+export const WORD_KASHIDA_LINE_FIT = defineCompatibilityRule({
+  id: 'word-kashida-line-fit',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'blk-0898-kfit',
+    application: 'Microsoft Word',
+    version: '16.0.20527',
+    platform: 'Windows',
+  },
+  description: 'Line fit and soft-line justification of the kashida and Thai justification types (§17.18.44). A mediumKashida line takes the next word only while its natural width (hanging line-end spaces excluded) stays within its available width less a 10% reserve, and a highKashida line less a 20% reserve; lowKashida, both, distribute and thaiDistribute fit the whole width. From compatibility mode 15 the reserve is that share of the line\'s own width (0.9 / 0.8 of the width between the indents); before mode 15 (mode unset; 11, 12 and 14 assumed) it is that share of the width from the paragraph\'s leading indent to the far edge of its column, so a trailing indent does not shrink it. The reserve narrows the fit width of the line breaker only, the force-break of an over-wide word or CJK run included; paint still justifies every soft-wrapped line to the full width, so the reserve is spent by stretching. A soft-wrapped lowKashida, mediumKashida, highKashida or thaiDistribute line opens no inter-CJK gaps: its slack goes to its spaces, and a space-free CJK line keeps its natural width at the line start (both and distribute still spread CJK). Evidence: synthetic Windows Word 16.0.20527 controls blk-0898-kfit-mode{none,14,15} (K1-K6 Latin with short and long words, double spaces, Arial 10pt and Times New Roman 20pt; K7 MS Mincho CJK; K8 Tahoma Thai; full 481.9pt width), blk-0898-longword-mode{none,15} and blk-0898-kfitn-mode{none,15} (both and the kashida types in Times New Roman 12pt and Arial 10pt at full width, a 113.4pt right indent, 141.75pt indents on both sides and a 300pt right indent). Admissible fit widths at full width are [0.89909, 0.90179) and [0.79931, 0.80018) of 481.9pt in every mode; with indents, mode 15 follows 0.9 / 0.8 of the indented width (right indent 113.4pt: medium [325.7, 332.4) against 331.7, high [286.9, 301.9) against 294.8; both-side indents: high [155.7, 159.0) against 158.7) and mode unset follows the leading-indent rule (right indent 113.4pt: medium [320.2, 322.4) against 320.3; both-side indents: medium [161.6, 164.9) against 164.4, high [129.6, 130.6) against 130.4), which a fixed fraction of the indented width, a constant amount or a reserve per space, character or em contradicts. The renderer reproduces every medium/high Latin, CJK and Thai paragraph of these controls line for line except the mode-unset K7 CJK paragraphs, and K7 mixed label+CJK lines put all slack into the space, within 1.7pt per character. Unmeasured: modes 11, 12 and 14 with indents, first-line and hanging indents, table cells (the cell is the container), float-narrowed lines, tab cells, right-to-left paragraphs (the right indent leads) and vertical text. Unreproduced: in mode unset Word sets the Latin label of a low/medium/highKashida CJK paragraph alone on its first line and breaks the CJK run without kinsoku; lowKashida and thaiDistribute CJK lines push a line-end U+3002 to the next line where the renderer hangs it. Thai cluster spreading of thaiDistribute, kashida elongation of Arabic words, East Asian automatic spacing on these lines and the mode-15 interword compression of both, distribute, lowKashida and thaiDistribute lines keep their separate models.',
+});
+
+/** Fit width of {@link WORD_KASHIDA_LINE_FIT}: a line's text may fill
+ * `fraction` of its available width less `reservePx`; undefined keeps the
+ * whole width. `containerWidthPt` is the width of the column or cell the
+ * paragraph is placed in, `leadingIndentPt` the paragraph's indent on its
+ * line-start side. */
+export function wordJustifiedLineFit(
+  alignment: string | null | undefined,
+  compatibilityMode: number | undefined,
+  containerWidthPt: number,
+  leadingIndentPt: number,
+): { readonly fraction: number; readonly reservePx: number } | undefined {
+  const reserve = alignment === 'mediumKashida' ? 0.1 : alignment === 'highKashida' ? 0.2 : 0;
+  if (reserve === 0) return undefined;
+  // From mode 15 the reserve is a share of the line's own width; before it, a
+  // share of the width from the leading indent to the container's far edge.
+  return compatibilityMode === 15
+    ? { fraction: 1 - reserve, reservePx: 0 }
+    : { fraction: 1, reservePx: reserve * Math.max(0, containerWidthPt - leadingIndentPt) };
+}
+
+/** Whether a soft-wrapped justified line opens no inter-CJK gaps, so a
+ * space-free CJK line keeps its natural width ({@link WORD_KASHIDA_LINE_FIT}). */
+export function wordSoftLineJustifiesAtSpacesOnly(alignment: string | null | undefined): boolean {
+  return alignment === 'lowKashida' || alignment === 'mediumKashida'
+    || alignment === 'highKashida' || alignment === 'thaiDistribute';
+}
+
 /** Scope of {@link WORD_LINE_END_SPACE_HANGS}. */
 export function wordLineEndSpaceHangs(bidi: boolean, wordWrap: boolean): boolean {
   return !bidi && wordWrap;

@@ -48,7 +48,7 @@ import {
   rebaseSeaBreaks,
 } from './text-runs.js';
 import { fitCJKPrefix, hasEastAsianVisiblePredecessor } from './fit-search.js';
-import { LineGapRejection, fitJustifiedCompression, justifiedCompressionApplies, justifiedPrefixCompression, lineEndsWithText, type PassOperationState } from './pass-operations.js';
+import { LineGapRejection, fitJustifiedCompression, justifiedCompressionApplies, justifiedPrefixCompression, lineEndsWithText, lineFitWidth, type PassOperationState } from './pass-operations.js';
 
 /** The iterator reads only its declared slice of the explicit pass state. */
 export type BreakOpportunityIteratorContext = Pick<
@@ -83,6 +83,7 @@ export type BreakOpportunityIteratorContext = Pick<
   | 'segAdvance'
   | 'strAdvance'
   | 'justifiedCompression'
+  | 'lineFit'
   | 'isJustified'
   | 'stretchLastLine'
   | 'widthPolicy'
@@ -1251,7 +1252,7 @@ function prepareAtomicTextFit(
     const chunkWForFit = fitWidthFor(chunkW, chunkTrail, next);
     if (
       breakerState.currentWidth + chunkWForFit > availW() &&
-      chunkWForFit <= breakerState.lineMaxWidth
+      chunkWForFit <= lineFitWidth(context, breakerState.lineMaxWidth)
     ) {
       flush(undefined, false, s.src);
     }

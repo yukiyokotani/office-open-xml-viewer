@@ -27,7 +27,7 @@ import { shadowInkBounds } from './vml-shadow.js';
 import { createParagraphAnchorReferenceWorkBudget } from './resource-budgets.js';
 import { addExactRational, exactRationalFromNumber, exactRationalToNumberUp } from './exact-geometry.js';
 import { revisionIsOmitted } from './revision-visibility.js';
-import { wordArabicTextKerned, wordEastAsianAutoSpaceJustifiedMaximumPt, wordKerningApplies, wordLineEndSpaceHangs } from './line-compatibility.js';
+import { wordArabicTextKerned, wordEastAsianAutoSpaceJustifiedMaximumPt, wordKerningApplies, wordLineEndSpaceHangs, wordSoftLineJustifiesAtSpacesOnly } from './line-compatibility.js';
 import type { LineGapPlan } from '../line-breaker/line-gaps.js';
 import { distributeLineSlack as distributeProportionalSlack, enumerateGaps, graphemeClusterOffsets, type LineGap } from '@silurus/ooxml-core';
 import { specifiedTextLineMetrics, specifiedTextParagraphIsHomogeneous } from './specified-line-spacing.js';
@@ -1440,6 +1440,9 @@ export function planLine(input: PlanLineInput): LineLayout {
   const applyJustify = justification !== null;
   // Lines that are not soft-wrapped are justified only after their last tab.
   const softWrapped = !line.endsWithBreak && !input.isLastLine;
+  // WORD_KASHIDA_LINE_FIT: soft-wrapped kashida and thaiDistribute lines
+  // open no inter-CJK gaps.
+  const softLineSpacesOnly = softWrapped && wordSoftLineJustifiesAtSpacesOnly(input.alignment);
   const afterLastTab = softWrapped ? 0 : lastTabSegmentIndex(segments) + 1;
   const kashida = applyJustify ? kashidaLevel(input.alignment) : null;
   if (kashida && lineSlackPt > 0) {
@@ -1600,9 +1603,13 @@ export function planLine(input: PlanLineInput): LineLayout {
       -(line.baselinePt - line.topPt) * .25,
       // A justified line ended by a manual break opens only space gaps under
       // the kashida types and pre-15 thaiDistribute (WORD_LINE_END_JUSTIFICATION).
+      // A soft-wrapped line does too under the kashida types and
+      // thaiDistribute, so a space-free CJK line keeps its natural width
+      // (WORD_KASHIDA_LINE_FIT).
       residualSlackPt > 0
         && !((line.endsWithBreak || (input.isLastLine && input.endsAtHardBreak === true))
-          && !lineEndOpensCjkGaps(input)),
+          && !lineEndOpensCjkGaps(input))
+        && !softLineSpacesOnly,
       input.alignment === 'thaiDistribute' && residualSlackPt > 0,
     ), segments);
     perGapPt = distribution?.perGap ?? 0;
@@ -1625,7 +1632,8 @@ export function planLine(input: PlanLineInput): LineLayout {
     ? alignmentSlackPt
     : edge === 'center' || centreUnjustified
       ? alignmentSlackPt / 2
-      : edge === 'justify' && input.baseRtl && (!applyJustify || (!softWrapped && distributedWidthPt <= 0))
+      : edge === 'justify' && input.baseRtl
+        && (!applyJustify || ((!softWrapped || softLineSpacesOnly) && distributedWidthPt <= 0))
         ? alignmentSlackPt
         : 0;
   const lineStartPt = lineLeftPt + physicalStartOffsetPt;
