@@ -256,6 +256,14 @@ describe('kerned U+0020 pairs (WORD_KERNED_SPACE_PAIRS)', () => {
     expect(wrapped.map(line => line.map(p => p.text).join(''))).toEqual(['x ', 'A', 'B,\u2019']);
   });
 
+  it('sizes max-content like bounded lines across a paint-only formatting change', () => {
+    const runs = [run('x', { kerning: 2, color: 'FF0000' }), run('x A', { kerning: 2, color: '0000FF' })];
+    const [bounded] = lines(layout(runs, 400, 15));
+    // x(6) x(6) space(3) and the space+A pair of the blue run's own seam.
+    expect(bounded!.at(-1)!.x).toBeCloseTo(15 - 0.75, 6);
+    expect(maxContent(runs)).toBeCloseTo(15 - 0.75 + 9, 6);
+  });
+
   it.each([
     ['ruby', { ruby: { text: 'r', fontSizePt: 6 } }],
     ['right-to-left', { rtl: true }],

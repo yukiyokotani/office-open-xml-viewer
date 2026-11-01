@@ -239,6 +239,15 @@ function mergeCompatibleTextSegments(
           || snapToCharsClass(segment, characterGrid) !== null
           || condensedSpacingMayFloor(previous, characterGrid, 1)
           || condensedSpacingMayFloor(segment, characterGrid, 1)))
+      // Kerned pieces of different source sequences (a paint-only formatting
+      // change) stay split as on bounded lines: a merge would keep only the
+      // head's source identity and context, so a later WORD_KERNED_SPACE_PAIRS
+      // seam of the tail's run could no longer prove itself, and the merged
+      // string would kern the letters across the change, which bounded lines
+      // shape apart.
+      && !(segment.textShapeRequest?.kerning === true
+        && (previous.sourceRunIndex !== segment.sourceRunIndex
+          || previous.sourceTextSequence !== segment.sourceTextSequence))
       && compatibleText(previous, segment)
       // Included and excluded spans depend on the full run. Losing a Latin
       // base can turn its attached Arabic mark into standalone proof; losing
