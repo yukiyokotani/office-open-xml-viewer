@@ -213,7 +213,9 @@ describe('WORD_KASHIDA_LINE_FIT line breaker', () => {
     let seed = 20081;
     const random = (): number => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed / 2147483648; };
     for (let trial = 0; trial < 1200; trial += 1) {
-      const trailing = Math.round(random() * 100) - 40;
+      // A third of the trials cut the reserve base short (negative trailing
+      // indents beyond the window), where the reserve is zero.
+      const trailing = trial % 3 === 0 ? -Math.round(100 + random() * 250) : Math.round(random() * 100) - 40;
       const indent = [0, 0, 20, 35][Math.floor(random() * 4)]!;
       const [fraction, share] = [[1, 0.1], [1, 0.2], [0.9, 0], [0.8, 0]][Math.floor(random() * 4)]!;
       // Window widths cluster around the word so that reserves of either kind
@@ -229,7 +231,7 @@ describe('WORD_KASHIDA_LINE_FIT line breaker', () => {
         maxWidth: 300, marginRightPx: 300 + trailing, firstIndent: indent, wrapCtx: wrap(floats), lineFit: fit(fraction, share),
       });
       const expected = windows.findIndex(({ width, farEdge }) =>
-        (width - indent) * fraction - share * (width + (farEdge ? trailing : 0)) >= word - 1e-9);
+        (width - indent) * fraction - share * Math.max(0, width + (farEdge ? trailing : 0)) >= word - 1e-9);
       const label = JSON.stringify({ trial, trailing, indent, fraction, share, windows, word });
       if (expected < 0) {
         expect(lines[0]!.topY, label).toBe(40);
@@ -239,4 +241,35 @@ describe('WORD_KASHIDA_LINE_FIT line breaker', () => {
       }
     }
   }, 30_000);
+  it('never lets a reserve base cut short by a negative indent widen the fit past the window', () => {
+    // maxWidth 420, text margin 340: a 50 pt far-edge window [370, 420] has a
+    // reserve base of 50 - 80 < 0, so it fits 50 pt, not 56: the 55 pt word
+    // goes to the next line's 120 pt window [300, 420] (base 40, fit 112).
+    const floats = wrap([band(0, 370, 0, 10), band(0, 300, 10, 20)], 420);
+    const lines = run([token('W'.repeat(11))], {
+      maxWidth: 420, marginRightPx: 340, wrapCtx: floats, lineFit: fit(1, 0.2),
+    });
+    expect(lines.map((line) => [line.topY, line.xOffset])).toEqual([[10, 300]]);
+  });
+
+  it('resumes excluded-window retries from the rejected window (bounded work)', () => {
+    // 100 successive 10 pt bands each leave a 100 pt window; a 95 pt word
+    // fits none of them at 0.8 and lands below them. The oracle counts the
+    // band tops it scans: resuming keeps it linear, a restart is quadratic.
+    let work = 0;
+    const lineWindow: NonNullable<WrapLayoutCtx['lineWindow']> = (input) => {
+      for (let top = input.topYPt; ; top += 10) {
+        work += 1;
+        if (top >= 1000) return { topYPt: top, xOffsetPt: 0, maximumWidthPt: input.maximumWidthPt };
+        const excluded = input.excludedWindows?.some((window) =>
+          window.topY === top && window.leftPt === input.paragraphXPt && window.widthPt === 100);
+        if (100 >= input.minimumStartWidthPt && !excluded) return { topYPt: top, xOffsetPt: 0, maximumWidthPt: 100 };
+      }
+    };
+    const lines = run([token('W'.repeat(19))], {
+      wrapCtx: { ...wrap([]), floats: [], lineWindow }, lineFit: fit(0.8, 0),
+    });
+    expect(lines[0]!.topY).toBe(1000);
+    expect(work).toBeLessThan(1000);
+  });
 });

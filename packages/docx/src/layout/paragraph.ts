@@ -1513,8 +1513,16 @@ export function planLine(input: PlanLineInput): LineLayout {
     ? resolveRtlLineEndSpaces(segments, visual)
     : { rightPt: 0, leftPt: 0, interior: [] as RtlInteriorSpace[] };
   const rtlHangingSpacePt = rtlLineEnd.rightPt + rtlLineEnd.leftPt;
+  // A justified line's admitted overflow first goes into its interior
+  // line-end spaces, before ordinary justification sees the slack, so no
+  // negative slack compresses the gaps around them (the remaining slack is
+  // then spread and the spaces absorbed below).
+  const rtlInteriorPt = rtlLineEnd.interior.reduce((sum, { widthPt }) => sum + widthPt, 0);
+  const rtlInteriorAbsorbPt = applyJustify
+    ? Math.min(rtlInteriorPt, Math.max(0, -(lineSlackPt + rtlHangingSpacePt))) : 0;
+  const rtlJustifySlackBonusPt = rtlHangingSpacePt + rtlInteriorAbsorbPt;
   const kashida = applyJustify ? kashidaLevel(input.alignment) : null;
-  if (kashida && lineSlackPt + rtlHangingSpacePt > 0) {
+  if (kashida && lineSlackPt + rtlJustifySlackBonusPt > 0) {
     // Kashida rewrites one contextual paint operation. A segment already split
     // into cluster-origin operations, or whose elongated text would reach the
     // WORD_CONDENSED_SPACING_ADVANCE_FLOOR, offers no elongation point; the
@@ -1528,7 +1536,7 @@ export function planLine(input: PlanLineInput): LineLayout {
         && !excluded.has(segmentIndex)
         ? { text: segment.text }
         : {}),
-      lineSlackPt + rtlHangingSpacePt,
+      lineSlackPt + rtlJustifySlackBonusPt,
       kashida,
       (segmentIndex, text) => {
         const segment = segments[segmentIndex];
@@ -1561,7 +1569,7 @@ export function planLine(input: PlanLineInput): LineLayout {
         };
       });
       naturalWidthPt += distribution.appliedPx;
-      lineSlackPt = distribution.residualPx - rtlHangingSpacePt;
+      lineSlackPt = distribution.residualPx - rtlJustifySlackBonusPt;
     }
   }
   // WORD_LINE_END_SPACE_HANGS: the spaces ending a line stand outside
@@ -1660,7 +1668,7 @@ export function planLine(input: PlanLineInput): LineLayout {
       }
     }
   } else if (applyJustify) {
-    const justifySlackPt = lineSlackPt + hangingLineEndSpacePt + rtlHangingSpacePt;
+    const justifySlackPt = lineSlackPt + hangingLineEndSpacePt + rtlJustifySlackBonusPt;
     const autoSpace = justifiedAutoSpaceExpansion(segments, justifySlackPt, afterLastTab);
     const autoSpaceTakenPt = autoSpace?.takenPt ?? 0;
     const residualSlackPt = justifySlackPt - autoSpaceTakenPt;

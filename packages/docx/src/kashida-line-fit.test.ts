@@ -324,4 +324,20 @@ describe('WORD_RTL_JUSTIFIED_VISIBLE_FIT', () => {
       expect(end(first!)).toBeCloseTo(365);
     }
   });
+  it('absorbs an admitted interior line-end space before justification, with no glyph overlap', () => {
+    // 360 pt band from x = 20; runs a×15 + space, Hebrew×13 + two spaces,
+    // a×4 + two spaces, another word: 370 pt natural, 350 pt visible.
+    const rtl = { bidi: true } as Partial<DocParagraph>;
+    for (const settings of MODES) {
+      const [first] = lines(para([textRun(`${'a'.repeat(15)} `), textRun(`${'\u05d0'.repeat(13)}  `),
+        textRun(`${'a'.repeat(4)}  `), textRun('bbbbb')], 'both', rtl), settings);
+      const xs = characters(first!).map(({ xPt }) => xPt);
+      expect(xs).toHaveLength(32);
+      for (let index = 1; index < xs.length; index += 1) {
+        expect(xs[index]! - xs[index - 1]!).toBeGreaterThanOrEqual(10 - 1e-6);
+      }
+      expect(xs[0]!).toBeGreaterThanOrEqual(20 - 1e-6);
+      expect(xs.at(-1)! + 10).toBeLessThanOrEqual(380 + 1e-6);
+    }
+  });
 });

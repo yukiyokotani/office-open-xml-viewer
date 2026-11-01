@@ -202,6 +202,8 @@ export interface GapTransaction {
   stopBefore: LineBoundary | null;
   /** Windows a WORD_KASHIDA_LINE_FIT unit did not fit, skipped by the search. */
   excluded?: Array<{ topY: number; leftPt: number; widthPt: number }>;
+  /** Excluded-window retries taken by this line (bounded). */
+  excludedRetries?: number;
 }
 
 export function createLineBreakerState(maxWidth: number, wrapCtx?: WrapLayoutCtx) {

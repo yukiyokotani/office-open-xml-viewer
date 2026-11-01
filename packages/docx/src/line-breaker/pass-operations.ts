@@ -640,11 +640,27 @@ export function performRejectGap(
     // window, and placement tests every candidate forward through the same
     // fit width admission uses; a candidate that is still too small is
     // rejected and skipped in turn.
-    transaction.excluded = [...transaction.excluded ?? [],
-      { topY: rejected.topY, ...rejected.solverWindow }];
-    transaction.requirement = Math.max(transaction.requirement,
-      rejection.requiredWidth + (breakerState.isFirst ? Math.max(0, firstIndent) : 0));
-    placeLineWindow(operationState, transaction, null);
+    //
+    // The search resumes at the rejected window's top: no earlier top offers
+    // a window that is both wide enough and not excluded, and the requirement
+    // never decreases, so earlier tops need no rescan. Exclusions above the
+    // resumed top can no longer match and are dropped. A cumulative budget
+    // bounds the retries of one line; past it the unit takes the full band.
+    const retries = (transaction.excludedRetries ?? 0) + 1;
+    if (retries <= LINE_FIT_RETRY_BUDGET) {
+      transaction.excludedRetries = retries;
+      transaction.requestTopY = Math.max(transaction.requestTopY, rejected.topY);
+      transaction.excluded = [
+        ...(transaction.excluded ?? []).filter((window) => window.topY >= transaction.requestTopY),
+        { topY: rejected.topY, ...rejected.solverWindow },
+      ];
+      transaction.requirement = Math.max(transaction.requirement,
+        rejection.requiredWidth + (breakerState.isFirst ? Math.max(0, firstIndent) : 0));
+      placeLineWindow(operationState, transaction, null);
+      return;
+    }
+    transaction.requirement = maxWidth - hangingOffset;
+    placeLineWindow(operationState, transaction, rejected);
     return;
   }
   const required = rejection.requiredWidth
@@ -657,6 +673,9 @@ export function performRejectGap(
     : maxWidth - hangingOffset;
   placeLineWindow(operationState, transaction, rejected);
 }
+
+/** Excluded-window retries one line may take (WORD_KASHIDA_LINE_FIT). */
+const LINE_FIT_RETRY_BUDGET = 1024;
 
 export function performAvailW(operationState: PassOperationState) {
   const { breakerState, firstIndent, widthPolicy } = operationState;
@@ -676,8 +695,10 @@ export function lineFitWidth(operationState: LineFitState, widthPx: number): num
   if (fit === undefined) return widthPx;
   if (fit.reserveShare === 0) return widthPx * fit.fraction;
   const window = { xOffset: operationState.breakerState.lineXOffset, maxWidth: operationState.breakerState.lineMaxWidth };
+  // A reserve base cut short by a negative trailing indent never enlarges the
+  // fit past the window: the reserve is at least zero.
   return widthPx * fit.fraction
-    - fit.reserveShare * (window.maxWidth + lineReserveExtension(operationState, window));
+    - fit.reserveShare * Math.max(0, window.maxWidth + lineReserveExtension(operationState, window));
 }
 
 /** Signed distance the reserve base runs past a line window's far edge: from
