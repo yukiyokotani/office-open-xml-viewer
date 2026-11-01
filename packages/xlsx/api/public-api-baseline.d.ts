@@ -2092,6 +2092,7 @@ export interface SecondaryValueAxis {
     tickMarkSkip?: number | null;
     dateAxis?: boolean | null;
     crossBetween?: 'between' | 'midCat' | string | null;
+    pairedBesidePrimary?: boolean | null;
     crosses?: string | null;
     crossesAt?: number | null;
     titleFontSizeHpt?: number | null;

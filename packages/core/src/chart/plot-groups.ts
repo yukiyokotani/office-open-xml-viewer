@@ -99,7 +99,22 @@ export function classicPlotDispatch(chart: ChartModel): ClassicPlotDispatch {
   //   between or on the tick marks;
   // - the horizontal bar painter has no secondary value axis.
   // A group on a deleted secondary category axis that cannot share is left
-  // unsupported on every route.
+  // unsupported where sharing opened the route: a line or area group (those
+  // routes accepted primary category axes only), and any group whose axis
+  // was paired beside the primary one (`pairedBesidePrimary`), a form the
+  // routes could not resolve before. A group on an axis resolved by position,
+  // as before sharing existed, keeps the route that drew it then: the bar
+  // groups of a bar-only scene and the bar group of a bar + area pair reached
+  // the bar painter whatever their category axis (within those routes' own
+  // bar-direction limits), and a placeholder there would lose a chart that
+  // drew.
+  const kinds = new Set(groups.map(group => group.kind));
+  const barRoute = (kinds.size === 1 && kinds.has('bar'))
+    || (groups.length === 2 && kinds.has('bar') && kinds.has('area'));
+  const resolvedByPosition = chart.secondaryCatAxis?.pairedBesidePrimary !== true;
+  const drawsUnshared = (group: ChartPlotGroup): boolean =>
+    group.kind === 'scatter' || group.kind === 'bubble'
+    || (group.kind === 'bar' && barRoute && resolvedByPosition);
   const primaryCategoryCount = chartCategories(chart).length;
   const horizontalBars = groups.some(group => group.kind === 'bar'
     && (group.barDirection ?? (chart.chartType.endsWith('H') ? 'bar' : 'col')) === 'bar');
@@ -111,17 +126,20 @@ export function classicPlotDispatch(chart: ChartModel): ClassicPlotDispatch {
     && (chart.secondaryValAxis?.crossBetween ?? 'between')
       === (chart.catAxisCrossBetween ?? 'between')
     && !horizontalBars
+    // A series without categories of its own (`categories` absent, which the
+    // parser also emits for the first series) falls back to the chart's
+    // categories (ChartSeries contract), so it carries their count.
     && groups.every(group => group.kind === 'scatter' || group.kind === 'bubble'
       || chart.series.slice(group.seriesStart, group.seriesStart + group.seriesCount)
         .every(series => (series.categories?.length
-          ? series.categories.length : series.values.length) === primaryCategoryCount));
+          ? series.categories.length : primaryCategoryCount) === primaryCategoryCount));
   if (chart.secondaryCatAxis?.hidden === true && !sharesCategories
-    && groups.some(group => group.categoryAxis === 'secondary'
-      && group.kind !== 'scatter' && group.kind !== 'bubble')) return 'unsupported';
+    && groups.some(group => group.categoryAxis === 'secondary' && !drawsUnshared(group))) {
+    return 'unsupported';
+  }
   const onPrimaryCategories = (group: ChartPlotGroup): boolean =>
     group.categoryAxis === 'primary'
     || (group.categoryAxis === 'secondary' && sharesCategories);
-  const kinds = new Set(groups.map(group => group.kind));
   if (groups.some(group => THREE_D_GROUPS.has(group.kind))) return 'unsupported';
   if (groups.length === 2 && groups[0].kind === 'bar' && groups[1].kind === 'scatter') {
     const [bar, scatter] = groups;
