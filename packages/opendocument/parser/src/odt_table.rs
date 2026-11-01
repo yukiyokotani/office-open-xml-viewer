@@ -621,6 +621,30 @@ impl<'a> Reader<'a> {
                 return Err(unsupported("table-border-conflict"));
             }
         }
+        // Under repeated header rows LibreOffice places a continued page's
+        // rows by their own top rules, not the header's bottom rule
+        // (measured: a 12 pt header bottom rule over unruled rows moves the
+        // DOCX layout's continued rows 12 pt down). Every body row must so
+        // share the header's bottom rule.
+        if let Some(last_header) = doc_rows.iter().rposition(|row| row.is_header) {
+            let same = |a: &Option<BorderSpec>, b: &Option<BorderSpec>| match (a, b) {
+                (None, None) => true,
+                (Some(a), Some(b)) => a.width == b.width && a.color == b.color,
+                _ => false,
+            };
+            let header = &doc_rows[last_header];
+            for row in doc_rows.iter().filter(|row| !row.is_header) {
+                self.charge_work(row.cells.len())?;
+                if header
+                    .cells
+                    .iter()
+                    .zip(&row.cells)
+                    .any(|(above, below)| !same(&above.borders.bottom, &below.borders.top))
+                {
+                    return Err(unsupported("table-header-rule"));
+                }
+            }
+        }
         // Where a page break falls between two rows, LibreOffice draws their
         // shared edge again above the row continuing on the next page, and
         // below the row ending the page only where that row has a bottom

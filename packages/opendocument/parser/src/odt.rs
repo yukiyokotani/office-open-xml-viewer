@@ -5491,7 +5491,7 @@ mod tests {
         assert!(matches!(&runs[2], DocRun::Text(t) if t.list_label.is_none() && t.text == "a"));
     }
 
-    const TABLE_STYLES: &str = r##"<style:style style:name="T" style:family="table"><style:table-properties table:border-model="collapsing" style:width="10cm" fo:margin-left="-0.191cm" fo:margin-top="5pt" fo:margin-bottom="3pt" table:align="left" style:writing-mode="page"/></style:style><style:style style:name="T.A" style:family="table-column"><style:table-column-properties style:column-width="4cm"/></style:style><style:style style:name="T.B" style:family="table-column"><style:table-column-properties style:column-width="6cm"/></style:style><style:style style:name="T.H" style:family="table-row"><style:table-row-properties style:row-height="1cm"/></style:style><style:style style:name="T.1" style:family="table-row"><style:table-row-properties style:min-row-height="2cm"/></style:style><style:style style:name="T.A1" style:family="table-cell"><style:table-cell-properties fo:padding-left="0.191cm" fo:padding-right="0.191cm" fo:padding-top="0cm" fo:padding-bottom="0cm" fo:border="0.5pt solid #000000" style:vertical-align="top" fo:background-color="#ffff00"><style:background-image/></style:table-cell-properties></style:style><style:style style:name="T.B1" style:family="table-cell"><style:table-cell-properties fo:padding="0cm" fo:border-top="2pt solid #ff0000" fo:border-bottom="none" fo:border-left="none" fo:border-right="none"/></style:style><style:style style:name="Sp" style:family="paragraph"><style:paragraph-properties fo:margin-top="6pt" fo:margin-bottom="8pt"/></style:style>"##;
+    const TABLE_STYLES: &str = r##"<style:style style:name="T" style:family="table"><style:table-properties table:border-model="collapsing" style:width="10cm" fo:margin-left="-0.191cm" fo:margin-top="5pt" fo:margin-bottom="3pt" table:align="left" style:writing-mode="page"/></style:style><style:style style:name="T.A" style:family="table-column"><style:table-column-properties style:column-width="4cm"/></style:style><style:style style:name="T.B" style:family="table-column"><style:table-column-properties style:column-width="6cm"/></style:style><style:style style:name="T.H" style:family="table-row"><style:table-row-properties style:row-height="1cm"/></style:style><style:style style:name="T.1" style:family="table-row"><style:table-row-properties style:min-row-height="2cm"/></style:style><style:style style:name="T.A1" style:family="table-cell"><style:table-cell-properties fo:padding-left="0.191cm" fo:padding-right="0.191cm" fo:padding-top="0cm" fo:padding-bottom="0cm" fo:border="0.5pt solid #000000" style:vertical-align="top" fo:background-color="#ffff00"><style:background-image/></style:table-cell-properties></style:style><style:style style:name="T.B1" style:family="table-cell"><style:table-cell-properties fo:padding="0cm" fo:border-top="2pt solid #ff0000" fo:border-bottom="none" fo:border-left="none" fo:border-right="none"/></style:style><style:style style:name="T.HB" style:family="table-cell"><style:table-cell-properties fo:padding="0cm" fo:border-top="none" fo:border-bottom="2pt solid #ff0000" fo:border-left="none" fo:border-right="none"/></style:style><style:style style:name="Sp" style:family="paragraph"><style:paragraph-properties fo:margin-top="6pt" fo:margin-bottom="8pt"/></style:style>"##;
 
     fn table_body(table: &str) -> String {
         format!(
@@ -5499,7 +5499,7 @@ mod tests {
         )
     }
 
-    const TABLE: &str = r#"<table:table table:name="T" table:style-name="T"><table:table-column table:style-name="T.A"/><table:table-column table:style-name="T.B"/><table:table-header-rows><table:table-row table:style-name="T.H"><table:table-cell table:style-name="T.A1" office:value-type="string"><text:p>h1</text:p></table:table-cell><table:table-cell table:style-name="T.B1"><text:p>h2</text:p></table:table-cell></table:table-row></table:table-header-rows><table:table-row table:style-name="T.1"><table:table-cell table:style-name="T.A1"><text:p>a</text:p><text:p>b</text:p></table:table-cell><table:table-cell table:style-name="T.B1"><text:p>c</text:p></table:table-cell></table:table-row></table:table>"#;
+    const TABLE: &str = r#"<table:table table:name="T" table:style-name="T"><table:table-column table:style-name="T.A"/><table:table-column table:style-name="T.B"/><table:table-header-rows><table:table-row table:style-name="T.H"><table:table-cell table:style-name="T.A1" office:value-type="string"><text:p>h1</text:p></table:table-cell><table:table-cell table:style-name="T.HB"><text:p>h2</text:p></table:table-cell></table:table-row></table:table-header-rows><table:table-row table:style-name="T.1"><table:table-cell table:style-name="T.A1"><text:p>a</text:p><text:p>b</text:p></table:table-cell><table:table-cell table:style-name="T.B1"><text:p>c</text:p></table:table-cell></table:table-row></table:table>"#;
 
     fn table_settings(spacing: &str) -> String {
         [
@@ -5738,27 +5738,25 @@ mod tests {
 
     #[test]
     fn gives_a_shared_row_edge_to_both_rows() {
-        // T.A1 has a 0.5 pt bottom rule over T.B1 and a T.B1 header cell
-        // (no bottom rule) over a T.B1 cell with a 2 pt top rule: each lower
-        // cell carries the wider shared rule, the upper ones keep theirs.
+        // Without repeated headers: the first row's second cell has a 2 pt
+        // bottom rule and nothing below it carries a top rule, so the cell
+        // below carries the shared rule (repeated at a page break); the
+        // upper cells keep their own.
         let styles = TABLE_STYLES.replace(
             r#"fo:border-top="2pt solid #ff0000""#,
             r#"fo:border-top="none""#,
         );
-        let body = TABLE.replace(
-            r#"<table:table-cell table:style-name="T.B1"><text:p>c</text:p>"#,
-            r#"<table:table-cell table:style-name="T.A1"><text:p>c</text:p>"#,
-        );
+        let body = TABLE
+            .replace("<table:table-header-rows>", "")
+            .replace("</table:table-header-rows>", "");
         let document = read_table(&styles, &table_body(&body)).unwrap();
         let BodyElement::Table(table) = &document.body[1] else {
             panic!()
         };
         let width = |side: &Option<docx_model::BorderSpec>| side.as_ref().map(|b| b.width);
-        // Header A1 (bottom 0.5) over body A1 (top 0.5): unchanged.
+        assert_eq!(width(&table.rows[0].cells[1].borders.bottom), Some(2.0));
+        assert_eq!(width(&table.rows[1].cells[1].borders.top), Some(2.0));
         assert_eq!(width(&table.rows[1].cells[0].borders.top), Some(0.5));
-        // Header B1 (no bottom) over body A1 (top 0.5): the lower keeps it.
-        assert_eq!(width(&table.rows[0].cells[1].borders.bottom), None);
-        assert_eq!(width(&table.rows[1].cells[1].borders.top), Some(0.5));
     }
 
     #[test]
@@ -6104,6 +6102,15 @@ mod tests {
                     .replace(r#"fo:padding-top="0cm""#, r#"fo:padding-top="30cm""#),
                 table_body(TABLE),
                 "table-row-height",
+            ),
+            // A repeated header's bottom rule unlike the body rows' top rules.
+            (
+                TABLE_STYLES.replace(
+                    r#"fo:border-bottom="2pt solid #ff0000""#,
+                    r#"fo:border-bottom="none""#,
+                ),
+                table_body(TABLE),
+                "table-header-rule",
             ),
             // A page break before a table with a top margin.
             (
