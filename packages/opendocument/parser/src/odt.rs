@@ -5816,6 +5816,47 @@ mod tests {
     }
 
     #[test]
+    fn bounds_cell_lines_by_their_widest_glyph_and_quantizes_rules() {
+        let narrow = format!(
+            r#"{TABLE_STYLES}<style:style style:name="N" style:family="paragraph"><style:paragraph-properties fo:margin-left="150pt"/></style:style>"#
+        );
+        // 19.85 pt of line: ASCII at 12 pt fits (1.25 em), U+01F1 does not.
+        let ascii = table_body(&TABLE.replace(
+            "<text:p>c</text:p>",
+            r#"<text:p text:style-name="N">c</text:p>"#,
+        ));
+        read_table(&narrow, &ascii).unwrap();
+        let wide = table_body(&TABLE.replace(
+            "<text:p>c</text:p>",
+            "<text:p text:style-name=\"N\">\u{1f1}</text:p>",
+        ));
+        assert_eq!(
+            read_table(&narrow, &wide).unwrap_err(),
+            unsupported("table-cell-indent")
+        );
+        // A 0.02 pt rule is under a twip: no rule.
+        let thin = TABLE_STYLES.replace("0.5pt solid #000000", "0.02pt solid #000000");
+        let document = read_table(&thin, &table_body(TABLE)).unwrap();
+        let BodyElement::Table(table) = &document.body[1] else {
+            panic!()
+        };
+        assert!(table.rows[1].cells[0].borders.left.is_none());
+        let fine = TABLE_STYLES.replace("0.5pt solid #000000", "0.05pt solid #000000");
+        let document = read_table(&fine, &table_body(TABLE)).unwrap();
+        let BodyElement::Table(table) = &document.body[1] else {
+            panic!()
+        };
+        assert_eq!(
+            table.rows[1].cells[0]
+                .borders
+                .left
+                .as_ref()
+                .map(|b| b.width),
+            Some(0.05)
+        );
+    }
+
+    #[test]
     fn requires_the_measured_table_settings() {
         let body = table_body(TABLE);
         let read = |settings: &str| {

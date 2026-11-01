@@ -138,8 +138,19 @@ fn border(value: &str) -> Result<Option<BorderSpec>, String> {
     if style != "solid" || !(width > 0.0 && width <= 12.0) {
         return Err(unsupported("table-border"));
     }
+    // LibreOffice holds border widths in whole twips, rounded half up
+    // (measured: 0.02 pt draws nothing and lays out as no border, 0.05 pt
+    // as one twip); a width at a half twip is left unresolved.
+    let scaled = width * 20.0;
+    if (scaled.fract() - 0.5).abs() < 1e-6 {
+        return Err(unsupported("table-border"));
+    }
+    let twips = (scaled + 0.5).floor();
+    if twips == 0.0 {
+        return Ok(None);
+    }
     Ok(Some(BorderSpec {
-        width,
+        width: twips / 20.0,
         color: Some(hex_color(color)?),
         style: "single".into(),
     }))
@@ -904,24 +915,38 @@ impl<'a> Reader<'a> {
         if tallest.partial_cmp(&(self.text_height / 4.0)) != Some(std::cmp::Ordering::Less) {
             return Err(unsupported("table-cell-line"));
         }
-        // LibreOffice clips a glyph wider than the cell's line; the DOCX
-        // layout paints it whole. Lines at least an em wide hold any glyph
-        // of the admitted (Latin, CJK) text.
+        // LibreOffice clips a glyph or picture wider than the cell's line;
+        // the DOCX layout paints it whole. A line must hold the widest glyph
+        // it can carry: within 1.25 em for ASCII and CJK text (whose glyphs
+        // keep within an em), within 2 em for any other character (measured:
+        // U+01F1 advances 1.33 em in Liberation Serif).
+        let narrow = |c: char| {
+            c.is_ascii()
+                || matches!(c, '\u{3000}'..='\u{9fff}' | '\u{f900}'..='\u{faff}' | '\u{ff00}'..='\u{ffef}')
+        };
         for element in &content {
             let CellElement::Paragraph(p) = element else {
                 continue;
             };
-            let em = p
+            let widest = p
                 .runs
                 .iter()
-                .filter_map(|run| match run {
-                    DocRun::Text(text) => Some(text.font_size),
-                    _ => None,
+                .map(|run| match run {
+                    DocRun::Text(text) => {
+                        text.font_size
+                            * if text.text.chars().all(narrow) {
+                                1.25
+                            } else {
+                                2.0
+                            }
+                    }
+                    DocRun::Image(image) => image.width_pt,
+                    _ => 0.0,
                 })
                 .fold(0.0, f64::max);
             let line =
                 available - p.indent_left.max(p.indent_left + p.indent_first) - p.indent_right;
-            if line < em {
+            if line < widest {
                 return Err(unsupported("table-cell-indent"));
             }
         }
