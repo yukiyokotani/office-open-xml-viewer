@@ -2227,7 +2227,10 @@ function measureFollowingBodyBlock(
       // terminal grid-leading allowance only after the paginator knows the
       // keep set's complete reserve; earlier members keep their full advances.
       leadContentExtentPt: leadLineBoxExtentPt,
-      ...(leadFragment ? { leadGridParagraph: leadFragment } : {}),
+      ...(leadFragment ? {
+        leadGridParagraph: leadFragment,
+        wholeParagraphHasPlacements: layout.lines.some(line => line.placements.length > 0),
+      } : {}),
       fullFootnoteReferenceIds: footnoteIdsInRetainedSlice(layout),
       leadFootnoteReferenceIds: firstLine ? footnoteIdsInRetainedLines([firstLine]) : [],
       pageOwnedAnchorKeysByLine: pageOwnedAnchorKeysByLine(layout),
