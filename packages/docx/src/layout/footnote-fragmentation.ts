@@ -66,7 +66,9 @@ function lineSourcePosition(block: ParagraphLayout, lineIndex: number,
     ? first.sourceRunIndex : undefined);
   if (first && runIndex !== undefined) {
     const runStart = index.runStarts.get(runIndex) ?? first.range.start;
-    return Object.freeze({ runIndex, offset: first.range.start - runStart });
+    const windowStart = block.noteSourceWindow ? block.noteSourceStart?.boundary : undefined;
+    return Object.freeze({ runIndex, offset: first.range.start - runStart
+      + (windowStart?.segIndex === runIndex ? windowStart.charOffset : 0) });
   }
   // Atomic controls without source-run metadata use their occurrence offset.
   // A changed offset is rejected conservatively rather than guessing a cut.
@@ -228,7 +230,7 @@ function partitionIndexedFootnote(acquired: NoteLayout, cursor: FootnoteCursor |
   const startBlock = cursor?.blockIndex ?? 0;
   const originalStart = acquired.story.blocks[startBlock];
   const refreshedStart = originalStart && (originalStart.kind === 'paragraph' || originalStart.kind === 'table') && acquireBlock
-    ? acquireBlock(originalStart, cursor?.sourceContinuation) : originalStart;
+    ? acquireBlock(originalStart, cursor?.sourceContinuation, capacityPt, lineBudget) : originalStart;
   const resumedSource = cursor?.sourceContinuation;
   const sourceReflow = refreshedStart?.kind === 'paragraph' && resumedSource !== undefined
     && refreshedStart.noteSourceStart !== undefined
@@ -275,6 +277,7 @@ function partitionIndexedFootnote(acquired: NoteLayout, cursor: FootnoteCursor |
       }) } : {}),
       ...(block.kind === 'paragraph' && block.noteLineEndBoundaries ? { sourceContinuation: Object.freeze({
         blockIndex: block.source.path[0]!,
+        ...(block.noteSourceWindow ? { sourceRunCursor: true as const } : {}),
         paragraph: Object.freeze({
           boundary: lineIndex > 0 ? block.noteLineEndBoundaries[lineIndex - 1]!
             : block.noteSourceStart?.boundary ?? null,
@@ -284,8 +287,8 @@ function partitionIndexedFootnote(acquired: NoteLayout, cursor: FootnoteCursor |
     });
   for (let blockIndex = startBlock; blockIndex < acquired.story.blocks.length; blockIndex += 1) {
     const original = acquired.story.blocks[blockIndex]!;
-    const block = blockIndex === startBlock ? refreshedStart! : (original.kind === 'paragraph' || original.kind === 'table') && acquireBlock
-      ? acquireBlock(original) : original;
+    const block = blockIndex === startBlock ? refreshedStart! : remainingLines > 0 && (original.kind === 'paragraph' || original.kind === 'table') && acquireBlock
+      ? acquireBlock(original, undefined, Math.max(0, capacityPt - usedPt), remainingLines) : original;
     if (block.kind !== 'paragraph' && block.kind !== 'table') throw new Error('Unsupported footnote block');
     // Story acquisition already folds §17.3.1.9 contextualSpacing and
     // §17.3.1.33 adjacent margins. Preserve its cursor delta within this

@@ -2,7 +2,7 @@ import type { NoteSourceContinuation, StoryLayoutAcquisitionInput } from './body
 import type { NoteLayout, ParagraphLayout, StoryLayout, TableLayout } from './types.js';
 
 type Block = ParagraphLayout | TableLayout;
-type Acquire = (block: Block, destination: StoryLayoutAcquisitionInput, start?: NoteSourceContinuation) => Block;
+type Acquire = (block: Block, destination: StoryLayoutAcquisitionInput, start?: NoteSourceContinuation, capacityPt?: number, maximumLines?: number) => Block;
 
 // Acquisition capabilities stay outside the immutable paint graph. An epoch
 // shares page-independent blocks; partitioning resolves only visited field
@@ -18,8 +18,8 @@ export function registerNoteBlockDestination(note: NoteLayout, destination: Stor
   if (acquisitions.has(note.story)) destinations.set(note, destination);
 }
 
-export function noteBlockAcquirer(note: NoteLayout): ((block: Block, start?: NoteSourceContinuation) => Block) | undefined {
+export function noteBlockAcquirer(note: NoteLayout): ((block: Block, start?: NoteSourceContinuation, capacityPt?: number, maximumLines?: number) => Block) | undefined {
   const acquire = acquisitions.get(note.story);
   const destination = destinations.get(note);
-  return acquire && destination ? (block, start) => acquire(block, destination, start) : undefined;
+  return acquire && destination ? (block, start, capacityPt, maximumLines) => acquire(block, destination, start, capacityPt, maximumLines) : undefined;
 }

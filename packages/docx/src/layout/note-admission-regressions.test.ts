@@ -11,8 +11,10 @@ import type { DocumentLayout, NoteLayout, PaintNode } from './types.js';
 import { endnoteIdsInRetainedSlice, footnoteIdsInRetainedSlice } from './note-reference-ownership.js';
 import * as tableLayout from './table.js';
 import * as budgets from './resource-budgets.js';
+import * as runtimeState from './runtime-state.js';
 import * as noteColumns from './note-column-acquisition.js';
 import * as noteBlocks from './note-block-acquisition.js';
+import { NOTE_RECOVERY_WORK_MULTIPLIER, NoteOverflowPolicy, NoteOverflowRecoveryRequired } from './note-overflow-policy.js';
 
 type Kind = 'footnote' | 'endnote';
 const context = {
@@ -96,6 +98,52 @@ function independentOversizedNotes(count: number) {
     runs: [{ ...run, noteRef: { kind: 'footnote', id: note.id } }],
   })) as BodyElement[];
   return { model, expected };
+}
+
+function measuredRecovery(model: DocxDocumentModel, continuation: boolean, verify: (layout: DocumentLayout) => void) {
+  let work = 0;
+  let sourceUnits = 0;
+  let passes = 1;
+  const fieldView = runtimeState.createFieldAcquisitionServicesView;
+  const fieldSpy = vi.spyOn(runtimeState, 'createFieldAcquisitionServicesView').mockImplementation((...args) => {
+    passes++;
+    return fieldView(...args);
+  });
+  const original = budgets.createFootnoteAcquisitionWorkBudget;
+  const spy = vi.spyOn(budgets, 'createFootnoteAcquisitionWorkBudget').mockImplementation(() => {
+    const budget = original();
+    return { ...budget, charge(source) {
+      const size = budget.sourceUnits(source);
+      if (Array.isArray(source)) sourceUnits = Math.max(sourceUnits, size);
+      work += size;
+      budget.charge(source);
+    } };
+  });
+  const started = performance.now();
+  let outcome = 'complete';
+  let layout: DocumentLayout | undefined;
+  try { layout = render(model, continuation); }
+  catch (error) {
+    // These are v0.89's failures for these exact synthetic source classes.
+    outcome = model.footnotes!.length ? 'FootnoteAdmissionOverflowError' : 'NoteCapacityExceededError';
+    expect(error).toMatchObject({ name: outcome });
+  } finally { spy.mockRestore(); fieldSpy.mockRestore(); }
+  const ms = Math.round(performance.now() - started);
+  if (layout) verify(layout);
+  // The note-local 32 sweeps plus ordinary pre-rejection acquisitions in at
+  // most four field passes (two whole acquisitions/pass) are all linear in
+  // this note, independently of the global 32M execution ceiling.
+  expect(work).toBeLessThanOrEqual((NOTE_RECOVERY_WORK_MULTIPLIER + 8) * (sourceUnits + 1));
+  return { work, ms, outcome, passes };
+}
+
+function assertLinearRecovery(results: readonly { work: number }[]) {
+  const current = results.at(-1)!, previous = results.at(-2);
+  // Doubling source costs 2x. In this matrix newly opened destinations
+  // add a fourth field pass to the three-pass paragraph case (tables use
+  // two). The extra label digit contributes < 1/15 of source units:
+  // 2 * 4/3 * 16/15 < 2.9. The old paths exceed 3.3 and 3.6 respectively.
+  if (previous) expect(current.work).toBeLessThanOrEqual(2.9 * previous.work);
 }
 
 // SHA-256 of the complete JSON.stringify(DocumentLayout), acquired from an
@@ -257,6 +305,141 @@ describe('reviewed note admission regressions', () => {
       // paragraph acquisitions; the allowance is independent of page count.
       expect(work).toBeLessThanOrEqual(2500 * count);
     } finally { spy.mockRestore(); }
+  });
+
+  it("keeps independent recovery allowances and the execution's first rejection across groups", () => {
+    const policy = new NoteOverflowPolicy();
+    const first = new Error('first admission');
+    policy.recover(new NoteOverflowRecoveryRequired('footnote', ['small'], first));
+    policy.recover(new NoteOverflowRecoveryRequired('endnote', ['large'], new Error('later admission')));
+    expect(policy.failure('endnote', ['large'])).toBe(first);
+    policy.charge('footnote', 'small', 1, NOTE_RECOVERY_WORK_MULTIPLIER * 2);
+    policy.charge('endnote', 'large', 1000, NOTE_RECOVERY_WORK_MULTIPLIER * 1001);
+    // The large note buys no work for the small one. Neither another group's
+    // permission nor another source-size lookup resets earlier debits.
+    expect(() => policy.charge('footnote', 'small', 1, 1)).toThrow(first);
+    expect(() => policy.charge('endnote', 'large', 1000, 1)).toThrow(first);
+  });
+
+  it('resumes a bounded field paragraph inside long original text runs', () => {
+    const before = 'word '.repeat(600) + 'page=';
+    const after = ';' + ' tail'.repeat(600);
+    const p = paragraph(before);
+    const run = p.runs[0]!;
+    if (run.type !== 'text') throw new Error('Expected text fixture');
+    p.runs.push({ ...run, type: 'field', fieldType: 'page', instruction: 'PAGE', fallbackText: '1' },
+      { ...run, text: after });
+    const model = document('footnote', [table([paragraph('tall;', 120)]), p], 15, 1);
+    model.section.pageNumType = { start: 99, fmt: 'decimal' };
+    const layout = render(model);
+    const owner = layout.pages.find(page => page.layers.notes.some(note => note.kind === 'note'
+      && note.story.blocks.some(block => text(block).includes('page='))))!;
+    expectConserved(layout, { '7': `tall;${before}${owner.pageIndex + 99}${after}` });
+  });
+
+  it.each(['footnote', 'endnote'] as const)('stops repeated %s refresh trials at the note-local work allowance', kind => {
+    const p = paragraph('page=');
+    const run = p.runs[0]!;
+    if (run.type !== 'text') throw new Error('Expected text fixture');
+    p.runs.push({ ...run, type: 'field', fieldType: 'page', instruction: 'PAGE', fallbackText: '1' });
+    let originalFailure: Error | undefined;
+    let attempts = 0;
+    const recover = NoteOverflowPolicy.prototype.recover;
+    const policy = vi.spyOn(NoteOverflowPolicy.prototype, 'recover').mockImplementation(function (this: NoteOverflowPolicy, error) {
+      if (error instanceof NoteOverflowRecoveryRequired) originalFailure ??= error.failure;
+      return recover.call(this, error);
+    });
+    const original = noteBlocks.noteBlockAcquirer;
+    const refresh = vi.spyOn(noteBlocks, 'noteBlockAcquirer').mockImplementation(note => {
+      const acquire = original(note);
+      return acquire && ((block, start, capacity, maximumLines) => {
+        if (block.kind !== 'paragraph') return acquire(block, start, capacity, maximumLines);
+        // Model a future reserve solver repeatedly trying a field block on
+        // one destination. Each capacity misses the latest-only cache, and
+        // no progress/physical-page guard can see this inner acquisition loop.
+        for (let trial = 0; trial < 1000; trial++) {
+          attempts++;
+          acquire(block, start, (capacity ?? 80) / (trial + 1), maximumLines);
+        }
+        throw new Error('Recovery did not stop acquisition fan-out');
+      });
+    });
+    try {
+      let failure: unknown;
+      try { render(document(kind, [table([paragraph('tall;', 120)]), p], 15, 1)); }
+      catch (error) { failure = error; }
+      expect(originalFailure).toBeDefined();
+      expect(failure).toBe(originalFailure);
+      expect(attempts).toBeGreaterThan(1);
+      expect(attempts).toBeLessThan(100);
+    } finally { refresh.mockRestore(); policy.mockRestore(); }
+  });
+
+  it.each(['page', 'numPages'] as const)('bounds continuation-off %s table recovery under doubling', fieldType => {
+    const results: { n: number; work: number; ms: number; outcome: string; passes: number }[] = [];
+    for (const n of [64, 128, 256, 512]) {
+      const content = Array.from({ length: n }, (_, i) => {
+        const p = paragraph(`n${i}=`);
+        const run = p.runs[0]!;
+        if (run.type !== 'text') throw new Error('Expected text fixture');
+        p.runs.push({ ...run, type: 'field', fieldType, instruction: fieldType.toUpperCase(), fallbackText: '1' },
+          { ...run, type: 'text', text: ';' });
+        return table([p]);
+      });
+      const model = document('footnote', content, 15, 2);
+      model.section.pageNumType = { start: 99, fmt: 'decimal' };
+      const result = measuredRecovery(model, false, layout => {
+        const retained = layout.pages.flatMap(page => page.layers.notes.flatMap(note => {
+          if (note.kind !== 'note') return [];
+          const value = fieldType === 'page' ? page.pageIndex + 99 : layout.pages.length;
+          const fragments = note.story.blocks.map(text).join('');
+          for (const match of fragments.matchAll(/n\d+=(\d+);/g)) expect(Number(match[1])).toBe(value);
+          return [...fragments.matchAll(/n(\d+)=\d+;/g)].map(match => Number(match[1]));
+        }));
+        expect(retained).toEqual(Array.from({ length: n }, (_, i) => i));
+      });
+      results.push({ n, ...result });
+      assertLinearRecovery(results);
+    }
+    process.stdout.write(JSON.stringify({ shape: 'tables', fieldType, results }) + '\n');
+  });
+
+  it.each(['footnote', 'endnote'] as const)('bounds a long PAGE paragraph in %s recovery under doubling', kind => {
+    const results: { n: number; work: number; ms: number; outcome: string; passes: number }[] = [];
+    for (const n of [512, 1024, 2048]) {
+      const p = paragraph('');
+      const run = p.runs[0]!;
+      if (run.type !== 'text') throw new Error('Expected text fixture');
+      p.runs = Array.from({ length: n }, (_, i) => [
+        { ...run, type: 'text' as const, text: `f${i}=` },
+        { ...run, type: 'field' as const, fieldType: 'page', instruction: 'PAGE', fallbackText: '1' },
+        { ...run, type: 'text' as const, text: '; ' },
+      ]).flat();
+      const model = document(kind, [table([paragraph('tall;', 120)]), p], 15, 1);
+      model.section.pageNumType = { start: 99, fmt: 'decimal' };
+      results.push({ n, ...measuredRecovery(model, true, layout => {
+        const combined = notes(layout).flatMap(note => note.story.blocks.map(text)).join('');
+        expect(combined.replace(/f(\d+)=\d+; /g, 'f$1;')).toBe('tall;' + Array.from({ length: n }, (_, i) => `f${i};`).join(''));
+        let fields = 0;
+        for (const page of layout.pages) for (const note of page.layers.notes) {
+          if (note.kind !== 'note') continue;
+          for (const block of note.story.blocks) if (block.kind === 'paragraph') {
+            for (const line of block.lines) for (const placement of line.placements) {
+              if (placement.kind !== 'text') continue;
+              for (const owner of placement.sourceRuns ?? []) {
+                if (owner.sourceRunIndex % 3 !== 1) continue;
+                const start = Math.max(placement.range.start, owner.range.start) - placement.range.start;
+                const end = Math.min(placement.range.end, owner.range.end) - placement.range.start;
+                if (end > start) { fields++; expect(placement.text.slice(start, end)).toBe(String(page.pageIndex + 99)); }
+              }
+            }
+          }
+        }
+        expect(fields).toBe(n);
+      }) });
+      assertLinearRecovery(results);
+    }
+    process.stdout.write(JSON.stringify({ shape: 'paragraph', kind, results }) + '\n');
   });
 
   it.each(['footnote', 'endnote'] as const)('continues oversized %s tables across unequal columns', kind => {

@@ -174,6 +174,9 @@ export interface AcquiredTableBlock {
 export interface NoteSourceContinuation {
   readonly blockIndex: number;
   readonly paragraph: ParagraphFragmentCursor;
+  /** Bounded recovery windows encode boundary as source run/UTF-16 offset,
+   * rather than an index into an obsolete full-paragraph segment stream. */
+  readonly sourceRunCursor?: true;
 }
 
 export interface StoryLayoutAcquisitionInput {
