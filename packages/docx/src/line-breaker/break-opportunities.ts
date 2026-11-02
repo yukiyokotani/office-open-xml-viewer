@@ -47,7 +47,7 @@ import {
   hasCJKBreakOpportunity,
   rebaseSeaBreaks,
 } from './text-runs.js';
-import { fitCJKPrefix, hasEastAsianVisiblePredecessor } from './fit-search.js';
+import { fitCJKPrefix, fitsLineWidth, hasEastAsianVisiblePredecessor } from './fit-search.js';
 import { LineGapRejection, fitJustifiedCompression, justifiedCompressionApplies, justifiedPrefixCompression, kernedSpacePairAdvance, lineEndsWithText, lineFitReduced, lineFitWidth, type PassOperationState } from './pass-operations.js';
 
 /** The iterator reads only its declared slice of the explicit pass state. */
@@ -332,7 +332,7 @@ function processTextSegment(context: BreakOpportunityIteratorContext, seg: Layou
         if (!('text' in candidate) || candidate.paragraphFinalIdeographicSpaceTail !== true) break;
         trailingTailWidth += segAdvance(candidate);
       }
-      if (breakerState.currentWidth + trailingTailWidth > availW()) {
+      if (!fitsLineWidth(breakerState.currentWidth + trailingTailWidth, availW())) {
         flush(undefined, false, s.src);
         breakerState.queue.unshift(s);
         return;
@@ -350,7 +350,7 @@ function processTextSegment(context: BreakOpportunityIteratorContext, seg: Layou
       const regionWidth = measureFitTextUnit(s, breakerState.queue, context);
       if (
         breakerState.currentLine.length > 0 &&
-        breakerState.currentWidth + regionWidth > availW()
+        !fitsLineWidth(breakerState.currentWidth + regionWidth, availW())
       ) {
         flush(undefined, false, s.src);
       }
@@ -492,7 +492,7 @@ function processTextSegment(context: BreakOpportunityIteratorContext, seg: Layou
     ) &&
     // The visible prefix keeps the WORD_KERNED_SPACE_PAIRS seam pair that
     // placement charges.
-    breakerState.currentWidth + kernedSpacePair + strAdvance(s, textBeforeTrailingOverflow) <= availW();
+    fitsLineWidth(breakerState.currentWidth + kernedSpacePair + strAdvance(s, textBeforeTrailingOverflow), availW());
 
   // WORD_COMPRESSED_SPACE_LINE_FIT: once a mixed line's spaces are shrunk, a
   // following unit (such as a closing mark split into its own source run) is
@@ -556,10 +556,10 @@ function processMathSegment(context: BreakOpportunityIteratorContext, seg: Layou
     seg.measuredWidth = w;
     seg.mathAscent = asc;
     seg.mathDescent = desc;
-    if (breakerState.currentLine.length > 0 && breakerState.currentWidth + w > availW()) {
+    if (breakerState.currentLine.length > 0 && !fitsLineWidth(breakerState.currentWidth + w, availW())) {
       flush(undefined, false, seg.src);
     }
-    if (breakerState.currentLine.length === 0 && w > availW()) context.forcedPlacement(w);
+    if (breakerState.currentLine.length === 0 && !fitsLineWidth(w, availW())) context.forcedPlacement(w);
     addToLine(seg, w, seg.fontSize, Math.max(asc, emPx * SYNTHETIC_ASCENT_EM), Math.max(desc, emPx * SYNTHETIC_DESCENT_EM));
     return;
   }
@@ -580,10 +580,10 @@ function processMathSegment(context: BreakOpportunityIteratorContext, seg: Layou
   // does (tall math — fractions, big operators — keeps its larger ink box).
   const lineAsc = Math.max(asc, emPx * SYNTHETIC_ASCENT_EM);
   const lineDesc = Math.max(desc, emPx * SYNTHETIC_DESCENT_EM);
-  if (breakerState.currentLine.length > 0 && breakerState.currentWidth + w > availW()) {
+  if (breakerState.currentLine.length > 0 && !fitsLineWidth(breakerState.currentWidth + w, availW())) {
     flush(undefined, false, seg.src);
   }
-  if (breakerState.currentLine.length === 0 && w > availW()) context.forcedPlacement(w);
+  if (breakerState.currentLine.length === 0 && !fitsLineWidth(w, availW())) context.forcedPlacement(w);
   addToLine(seg, w, seg.fontSize, lineAsc, lineDesc);
   return;
 }
@@ -604,10 +604,10 @@ function processImageSegment(context: BreakOpportunityIteratorContext, seg: Layo
   const h = seg.heightPt;
   const asc = seg.heightPt * scale;
   seg.measuredWidth = w;
-  if (breakerState.currentLine.length > 0 && breakerState.currentWidth + w > availW()) {
+  if (breakerState.currentLine.length > 0 && !fitsLineWidth(breakerState.currentWidth + w, availW())) {
     flush(undefined, false, seg.src);
   }
-  if (breakerState.currentLine.length === 0 && w > availW()) context.forcedPlacement(w);
+  if (breakerState.currentLine.length === 0 && !fitsLineWidth(w, availW())) context.forcedPlacement(w);
   addToLine(seg, w, h, asc, 0);
   return;
 }
@@ -933,7 +933,7 @@ function processTabSegment(
   // containment policy also applies to float-displaced targets. On an empty
   // line an out-of-band tab contributes no gap, so its cell can use the normal
   // fitting path rather than retrying an unreachable target forever.
-  if (breakerState.currentWidth + tabWidth > availW()) {
+  if (!fitsLineWidth(breakerState.currentWidth + tabWidth, availW())) {
     if (breakerState.currentLine.length > 0) {
       flush(undefined, false, seg.src);
       breakerState.queue.unshift(seg);
@@ -1256,7 +1256,7 @@ function prepareAtomicTextFit(
   // that opportunity before placing the leader; otherwise the tail forces overflow.
   if (!preferWholeWord && s.explicitBreaks && follower?.joinPrev) {
     const whole = measureJoinedTextUnit(s, breakerState.queue, context, w, trailingSpaceW, 0, false, 'whole-leader');
-    if (breakerState.currentWidth + fitWidthFor(whole.width, whole.trailingSpace, whole.next) > availW()) {
+    if (!fitsLineWidth(breakerState.currentWidth + fitWidthFor(whole.width, whole.trailingSpace, whole.next), availW())) {
       // The prefix keeps the leader's WORD_KERNED_SPACE_PAIRS seam pair.
       const split = context.explicitTextSplit(s,
         availW() - breakerState.currentWidth - (s.leadingWordBoundaryPx ?? 0));
@@ -1282,7 +1282,7 @@ function prepareAtomicTextFit(
     const group = measureJoinedTextUnit(s, breakerState.queue, context, w, trailingSpaceW, 0, false, preferWholeWord ? 'whole-word' : 'prefix');
     const groupFitWidth = fitWidthFor(group.width, group.trailingSpace, group.next);
     if (
-      breakerState.currentWidth + groupFitWidth > availW() &&
+      !fitsLineWidth(breakerState.currentWidth + groupFitWidth, availW()) &&
       // WORD_COMPRESSED_SPACE_LINE_FIT judges a joined unit as one candidate,
       // so a source-run seam inside it cannot change the decision.
       !(mixedCandidateMayShrink(breakerState, group.pieces.map((piece) => piece.text).join(''), group.pieces[0]?.segment)
@@ -1337,8 +1337,8 @@ function prepareAtomicTextFit(
     }
     const chunkWForFit = fitWidthFor(chunkW, chunkTrail, next);
     if (
-      breakerState.currentWidth + chunkWForFit > availW() &&
-      chunkWForFit <= lineFitWidth(context, breakerState.lineMaxWidth)
+      !fitsLineWidth(breakerState.currentWidth + chunkWForFit, availW()) &&
+      fitsLineWidth(chunkWForFit, lineFitWidth(context, breakerState.lineMaxWidth))
     ) {
       flush(undefined, false, s.src);
     }
@@ -1566,7 +1566,7 @@ function splitCjkOverflow(context: BreakOpportunityIteratorContext, frame: TextF
     // protection) must itself be admitted. Otherwise keep the checked
     // kinsoku-legal head, and failing that the natural break.
     const needsShrink = (head: string): boolean =>
-      head.length > 0 && breakerState.currentWidth + strAdvance(s, head) > availW();
+      head.length > 0 && !fitsLineWidth(breakerState.currentWidth + strAdvance(s, head), availW());
     // The break after the head must be legal in the joined character sequence
     // (kinsoku pair with the next character, here or in a following run).
     const nextCharacter = (head: string): string | undefined => {
