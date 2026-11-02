@@ -411,7 +411,8 @@ export interface LayoutImageSeg extends LayoutSegSource {
   mimeType: string;
   widthPt: number;
   heightPt: number;
-  /** The source is a literal wp:inline picture, rather than a chart/shape box. */
+  /** Participates in WORD_INLINE_PICTURE_AUTO_LEADING: an inline picture or
+   * drawing shape (WPS/VML text box); chart boxes do not opt in. */
   inlinePicture?: true;
   /** Paragraph mark's selected-face natural single line, measured once per paragraph. */
   paragraphMarkSinglePx?: number;

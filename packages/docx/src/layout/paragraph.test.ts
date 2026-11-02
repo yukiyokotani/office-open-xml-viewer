@@ -789,23 +789,87 @@ describe('layoutParagraph', () => {
 });
 
 describe('paragraphLayoutFromMeasurement retained authorities', () => {
+  const inlineShape = (heightPt = 10) => ({
+    type: 'shape' as const,
+    inline: true,
+    widthPt: 20,
+    heightPt,
+    anchorXPt: 0,
+    anchorYPt: 0,
+    anchorXFromMargin: false,
+    anchorYFromPara: false,
+    zOrder: 0,
+    subpaths: [],
+    presetGeometry: 'rect',
+    fill: { fillType: 'solid' as const, color: '009989' },
+    stroke: null,
+    textBlocks: [],
+  });
+
+  function measureInlineParagraph(runs: DocParagraph['runs'], multiple = 1) {
+    const value = {
+      ...paragraph, runs, defaultFontSize: 10, defaultFontFamily: 'Test Sans',
+      lineSpacing: { rule: 'auto' as const, value: multiple },
+    };
+    const context = { ...acquisitionContext, lineSpacing: value.lineSpacing };
+    const placement = {
+      startYPt: 10, paragraphXPt: 10, availableWidthPt: 100, maximumYPt: 500,
+      suppressSpaceBefore: false,
+    };
+    const measurer = { context: measureContext, fontFamilyClasses: {} };
+    const layoutServices = createLayoutServices({
+      section: {
+        pageWidth: 612, pageHeight: 792,
+        marginTop: 72, marginRight: 72, marginBottom: 72, marginLeft: 72,
+        headerDistance: 36, footerDistance: 36,
+        titlePage: false, evenAndOddHeaders: false,
+      },
+      body: [], headers: { default: null, first: null, even: null },
+      footers: { default: null, first: null, even: null },
+    }, { measureContext });
+    const environment = {
+      documentHasEastAsianText: false, pageWritingMode: 'horizontal-tb' as const,
+      pageIndex: 0, totalPages: 1, layoutServices,
+    };
+    const measured = measureParagraph(value as never, context, placement, measurer, environment);
+    return paragraphLayoutFromMeasurement(value as never, {
+      id: 'inline-shape-line', source, flowDomainId: 'body', ordinaryFlow: true,
+      context, placement, measurer, environment, exclusions: [],
+    } as never, measured);
+  }
+
+  it('keeps a single-spaced inline shape line exactly its box height', () => {
+    const node = measureInlineParagraph([inlineShape(40)]);
+    const line = node.lines[0]!;
+    const box = node.drawings[0]!.flowBounds;
+    expect(node.lines).toHaveLength(1);
+    expect(line.advancePt).toBe(40);
+    expect(box.yPt).toBe(line.bounds.yPt);
+    expect(box.yPt + box.heightPt).toBe(line.baselinePt);
+  });
+
+  it('adds paragraph-mark single-line leading to a 1.5-spaced inline shape', () => {
+    // Independent mark-only control supplies the selected face's single line.
+    const markSingle = measureInlineParagraph([]).advancePt;
+    expect(markSingle).toBeGreaterThan(0);
+    expect(markSingle).toBeLessThan(40);
+    const node = measureInlineParagraph([inlineShape(40)], 1.5);
+    expect(node.lines[0]!.advancePt).toBeCloseTo(40 + 0.5 * markSingle, 10);
+    expect(node.lines[0]!.advancePt).not.toBe(60);
+  });
+
+  it('places an inline shape bottom on the visible text baseline', () => {
+    const node = measureInlineParagraph([paragraph.runs[0]!, inlineShape(40)]);
+    const line = node.lines[0]!;
+    const box = node.drawings[0]!.flowBounds;
+    const text = line.placements.find((item) => item.kind === 'text')!;
+    expect(box.yPt + box.heightPt).toBe(line.baselinePt);
+    expect(text.origin.yPt).toBe(line.baselinePt);
+    // The fixture's visible text has 2pt descent; no synthetic host adds more.
+    expect(line.advancePt).toBe(42);
+  });
+
   it('flows consecutive wp:inline WPS shapes at their paragraph pen positions', () => {
-    const inlineShape = () => ({
-      type: 'shape' as const,
-      inline: true,
-      widthPt: 20,
-      heightPt: 10,
-      anchorXPt: 0,
-      anchorYPt: 0,
-      anchorXFromMargin: false,
-      anchorYFromPara: false,
-      zOrder: 0,
-      subpaths: [],
-      presetGeometry: 'rect',
-      fill: { fillType: 'solid' as const, color: '009989' },
-      stroke: null,
-      textBlocks: [],
-    });
     const tabRun = {
       ...(paragraph.runs[0] as Extract<DocParagraph['runs'][number], { type: 'text' }>),
       text: '\t',

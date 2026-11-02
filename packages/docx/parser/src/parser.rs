@@ -7924,7 +7924,9 @@ fn prepend_anchor_host_metrics(
         DocRun::Image(image) => image.anchor,
         DocRun::Chart(chart) => chart.anchor,
         DocRun::UnavailableDrawing(drawing) => drawing.anchor_acquisition.is_some(),
-        DocRun::Shape(_) => true,
+        // A `wp:inline` shape (§20.4.2.8) is in the line, not floating: it has
+        // no zero-advance host character (issue #2063).
+        DocRun::Shape(shape) => !shape.inline,
         _ => false,
     });
     if has_floating_drawing {
@@ -24503,6 +24505,61 @@ mod anchor_image_relative_from_tests {
     }
 
     #[test]
+    fn wps_textbox_anchor_host_is_only_added_for_floating_shapes() {
+        for (container, expected_hosts) in [("inline", 0), ("anchor", 1)] {
+            let position = if container == "anchor" {
+                r#"<wp:simplePos x="0" y="0"/>
+                   <wp:positionH relativeFrom="page"><wp:posOffset>0</wp:posOffset></wp:positionH>
+                   <wp:positionV relativeFrom="paragraph"><wp:posOffset>0</wp:posOffset></wp:positionV>"#
+            } else {
+                ""
+            };
+            let body = format!(
+                r#"<w:p><w:r><w:drawing>
+                  <wp:{container} xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+                    xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+                    xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">
+                    {position}<wp:extent cx="254000" cy="508000"/>
+                    <wp:docPr id="1" name="Text box"/>
+                    <a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">
+                      <wps:wsp><wps:spPr>
+                        <a:xfrm><a:off x="0" y="0"/><a:ext cx="254000" cy="508000"/></a:xfrm>
+                        <a:prstGeom prst="rect"/></wps:spPr>
+                        <wps:txbx><w:txbxContent><w:p><w:r><w:t>Box</w:t></w:r></w:p></w:txbxContent></wps:txbx>
+                        <wps:bodyPr/>
+                      </wps:wsp>
+                    </a:graphicData></a:graphic>
+                  </wp:{container}>
+                </w:drawing></w:r></w:p>"#
+            );
+            let doc = parse_from_bytes(&build_docx_without_media(&body)).expect("WPS paragraph");
+            let BodyElement::Paragraph(paragraph) = &doc.body[0] else {
+                panic!("expected WPS paragraph");
+            };
+            let shapes: Vec<_> = paragraph
+                .runs
+                .iter()
+                .filter_map(|run| match run {
+                    DocRun::Shape(shape) => Some(shape),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(shapes.len(), 1, "{container}");
+            assert_eq!(shapes[0].inline, container == "inline");
+            assert_eq!(shapes[0].text_blocks[0].text, "Box");
+            assert_eq!(
+                paragraph
+                    .runs
+                    .iter()
+                    .filter(|run| matches!(run, DocRun::AnchorHost(_)))
+                    .count(),
+                expected_hosts,
+                "{container} text box host count"
+            );
+        }
+    }
+
+    #[test]
     fn grouped_shapes_share_one_independent_host_run() {
         let metrics = AnchorHostMetrics {
             font_size: 12.0,
@@ -32770,6 +32827,24 @@ mod vml_pict_tests {
         assert!((shape.stroke_width - 1.5).abs() < 1e-6);
         assert_eq!(shape.stroke_dash.as_deref(), Some("0 2"));
         assert_eq!(shape.stroke_cap.as_deref(), Some("round"));
+    }
+
+    #[test]
+    fn inline_vml_textbox_has_no_anchor_host() {
+        let body = format!(
+            r##"<w:document{ns}><w:body><w:p><w:r><w:pict>
+              <v:shape type="#_x0000_t202" style="width:20pt;height:40pt">
+                <v:textbox><w:txbxContent><w:p><w:r><w:t>Box</w:t></w:r></w:p></w:txbxContent></v:textbox>
+              </v:shape>
+            </w:pict></w:r></w:p></w:body></w:document>"##,
+            ns = VML_NS,
+        );
+        let runs = all_runs(&body, &HashMap::new());
+        let [DocRun::Shape(shape)] = runs.as_slice() else {
+            panic!("inline VML text box must have no anchor host: {runs:?}");
+        };
+        assert!(shape.inline);
+        assert_eq!(shape.text_blocks[0].text, "Box");
     }
 
     /// Part 4 §19.3.2.6: a floating VML object with square wrapping reserves

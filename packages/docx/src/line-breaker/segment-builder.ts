@@ -1879,6 +1879,7 @@ function appendRunsToSegments(
         anchorXFromMargin: false,
         anchorYFromPara: false,
         inlineShape: true,
+        inlinePicture: true,
         ...(run.inlineOffsetXPt ? { inlineOffsetXPt: run.inlineOffsetXPt } : {}),
         ...(run.inlineOffsetYPt ? { inlineOffsetYPt: run.inlineOffsetYPt } : {}),
         measuredWidth: 0,
