@@ -5343,9 +5343,14 @@ export function acquireShapeTextBoxLayout(
   // block start/end to physical right/left; the WordArt LTR-column projection
   // below then mirrors the block axis without swapping these insets. vert270
   // runs inline start/end from physical bottom to top, block from left.
+  // WORD_TEXT_BOX_PHYSICAL_INSETS: a DrawingML text body's insets start at the
+  // inner edge of a painted outline (the visible-outline test of shapeStroke
+  // in shape-drawing-plan.ts); a legacy v:textbox keeps the bare insets.
+  const outlineHalfPt = !shape.vmlTextBox && shape.stroke && shape.strokeWidth && shape.strokeWidth > 0
+    ? shape.strokeWidth / 2 : 0;
   const physicalInsets = {
-    topPt: shape.textInsetT ?? 0, rightPt: shape.textInsetR ?? 0,
-    bottomPt: shape.textInsetB ?? 0, leftPt: shape.textInsetL ?? 0,
+    topPt: (shape.textInsetT ?? 0) + outlineHalfPt, rightPt: (shape.textInsetR ?? 0) + outlineHalfPt,
+    bottomPt: (shape.textInsetB ?? 0) + outlineHalfPt, leftPt: (shape.textInsetL ?? 0) + outlineHalfPt,
   };
   const insets = textBoxLogicalInsets(physicalInsets, stackedWordArt ? 'vert' : verticalMode);
   if (textRect) {
