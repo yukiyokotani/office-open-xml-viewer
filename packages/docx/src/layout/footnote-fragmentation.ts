@@ -7,7 +7,9 @@ import { unionLayoutRects } from './rect-union.js';
 import { partitionFootnoteTable } from './footnote-table-fragmentation.js';
 import { noteBlockAcquirer } from './note-block-acquisition.js';
 import type { TableFragmentCursor } from './table-pagination.js';
-import type { NoteLayout, NoteSeparatorLayout, PaintNode, ParagraphLayout, StoryLayout, TableLayout } from './types.js';
+import type { NoteLayout, NoteSeparatorLayout, PaintNode, ParagraphLayout, SourceRef, StoryLayout, TableLayout } from './types.js';
+
+type ChargePartitionWork = (source: SourceRef, units: number) => void;
 
 export interface FootnoteCursor {
   readonly sourceContinuation?: NoteSourceContinuation;
@@ -30,7 +32,8 @@ interface ParagraphContinuationIndex {
   readonly runStarts: ReadonlyMap<number, number>;
 }
 
-function indexParagraph(block: ParagraphLayout): ParagraphContinuationIndex {
+function indexParagraph(block: ParagraphLayout, charge?: ChargePartitionWork): ParagraphContinuationIndex {
+  charge?.(block.source, block.lines.length);
   const advances = new Float64Array(block.lines.length + 1);
   const runStarts = new Map<number, number>();
   const record = (runIndex: number, start: number) =>
@@ -40,8 +43,10 @@ function indexParagraph(block: ParagraphLayout): ParagraphContinuationIndex {
     const gap = previous ? Math.max(0, line.bounds.yPt - (previous.bounds.yPt + previous.advancePt)) : 0;
     advances[index + 1] = advances[index]! + gap + line.advancePt;
     if (!Number.isFinite(advances[index + 1])) throw new RangeError('Invalid footnote line advance');
+    charge?.(block.source, line.placements.length);
     for (const placement of line.placements) {
       if (placement.kind === 'text' && placement.sourceRuns) {
+        charge?.(block.source, placement.sourceRuns.length);
         for (const run of placement.sourceRuns) record(run.sourceRunIndex, run.range.start);
       } else if ((placement.kind === 'text' || placement.kind === 'resource')
         && placement.sourceRunIndex !== undefined) record(placement.sourceRunIndex, placement.range.start);
@@ -144,13 +149,14 @@ export type ContinuationNoticeProvider = () => NoteSeparatorLayout | null;
  * paragraph finalizer's addition order. Page-local reacquisition gets a new key. */
 export function createFootnotePartitioner(
   allowOverflow: (note: NoteLayout) => boolean = () => false,
+  charge?: ChargePartitionWork,
 ): typeof partitionFootnote {
   const indexes = new WeakMap<ParagraphLayout, ParagraphContinuationIndex>();
   const supportedStories = new WeakMap<StoryLayout, boolean>();
   const indexOf = (block: ParagraphLayout) => {
     let index = indexes.get(block);
     if (!index) {
-      index = indexParagraph(block);
+      index = indexParagraph(block, charge);
       if (isDeepFrozenPlainDataRoot(block)) indexes.set(block, index);
     }
     return index;
@@ -169,12 +175,12 @@ export function createFootnotePartitioner(
     if (acquired.trailing) throw new Error('An acquired note cannot own a continuation notice');
     if (extent === 'minimum') {
       // The minimum is a measured charge, not a claim that this unit fits.
-      return partitionIndexedFootnote(acquired, cursor, Number.MAX_VALUE, indexOf, supports, recovery, 1);
+      return partitionIndexedFootnote(acquired, cursor, Number.MAX_VALUE, indexOf, supports, recovery, 1, charge);
     }
     // Only admission on a fresh band requests overflow after fitting failed.
     const partition = extent === 'overflow'
-      ? partitionIndexedFootnote(acquired, cursor, Number.MAX_VALUE, indexOf, supports, recovery, 1)
-      : partitionIndexedFootnote(acquired, cursor, capacityPt, indexOf, supports, recovery);
+      ? partitionIndexedFootnote(acquired, cursor, Number.MAX_VALUE, indexOf, supports, recovery, 1, charge)
+      : partitionIndexedFootnote(acquired, cursor, capacityPt, indexOf, supports, recovery, Infinity, charge);
     if (!partition?.nextCursor || !continuationNotice) return partition;
     const notice = continuationNotice();
     if (!notice) return partition;
@@ -189,7 +195,7 @@ export function createFootnotePartitioner(
     const reserved = extent === 'largest-with-reserved-notice' || extent === 'overflow'
       ? partition
       : partitionIndexedFootnote(acquired, cursor,
-        Math.max(0, capacityPt - notice.advancePt), indexOf, supports, recovery);
+        Math.max(0, capacityPt - notice.advancePt), indexOf, supports, recovery, Infinity, charge);
     if (!reserved) return null;
     if (!reserved.nextCursor) throw new Error('Footnote partition completed under a smaller capacity');
     const fragment = reserved.fragment;
@@ -215,6 +221,7 @@ function partitionIndexedFootnote(acquired: NoteLayout, cursor: FootnoteCursor |
   recovery: boolean,
   /** Most real lines/table units to keep; minimum retains one. */
   lineBudget = Number.POSITIVE_INFINITY,
+  charge?: ChargePartitionWork,
 ): FootnotePartition | null {
   if (!Number.isFinite(capacityPt) || capacityPt < 0) throw new RangeError('Invalid footnote capacity');
   const acquireBlock = recovery ? noteBlockAcquirer(acquired) : undefined;
@@ -286,6 +293,7 @@ function partitionIndexedFootnote(acquired: NoteLayout, cursor: FootnoteCursor |
       }) } : {}),
     });
   for (let blockIndex = startBlock; blockIndex < acquired.story.blocks.length; blockIndex += 1) {
+    charge?.(acquired.source, 1);
     const original = acquired.story.blocks[blockIndex]!;
     const block = blockIndex === startBlock ? refreshedStart! : remainingLines > 0 && (original.kind === 'paragraph' || original.kind === 'table') && acquireBlock
       ? acquireBlock(original, undefined, Math.max(0, capacityPt - usedPt), remainingLines) : original;
@@ -375,6 +383,7 @@ function partitionIndexedFootnote(acquired: NoteLayout, cursor: FootnoteCursor |
       + Math.max(0, first.bounds.yPt - (block.flowBounds.yPt + block.spacing.beforePt))
       : -Math.max(0, first.bounds.yPt - (previous!.bounds.yPt + previous!.advancePt));
     while (low <= high) {
+      charge?.(block.source, 1);
       const end = Math.floor((low + high) / 2);
       const advancePt = leadingPt + index.advances[end]! - index.advances[lineStart]!
         + (end === block.lines.length ? block.spacing.afterPt : 0);
@@ -387,6 +396,8 @@ function partitionIndexedFootnote(acquired: NoteLayout, cursor: FootnoteCursor |
       nextCursor = cut(block, blockIndex, lineStart);
       break;
     }
+    charge?.(block.source, admitted - lineStart);
+    for (let i = lineStart; i < admitted; i++) charge?.(block.source, block.lines[i]!.placements.length);
     const admittedBlock = sliceParagraphLayout(block, {
       lineStart, lineEnd: admitted,
       continuesFromPrevious: lineStart > 0 || (sourceReflow && resumedSource!.paragraph.boundary !== null),

@@ -1,4 +1,5 @@
-import { noteOverflowAllowed, noteOverflowPolicyOf, NoteOverflowRecoveryRequired } from './note-overflow-policy.js';
+import { noteOverflowAllowed, noteOverflowPolicyOf, NoteOverflowRecoveryRequired,
+  attachNoteRecoveryOwner, noteRecoveryOwnerOf } from './note-overflow-policy.js';
 import { MAX_BODY_LAYOUT_PAGES } from './resource-budgets.js';
 import { registerFootnoteTable, registerFootnoteTableDestination } from './footnote-table-fragmentation.js';
 import { registerNoteBlockAcquisition, registerNoteBlockDestination } from './note-block-acquisition.js';
@@ -712,6 +713,7 @@ function acquireBodyStoryLayout(
     ?? selectedNoteSeparatorRole(request.source);
   const overflowingNote = (request.source.story === 'footnote' || request.source.story === 'endnote')
     && noteOverflowAllowed(services, request.source.story, [request.source.storyInstance]);
+  const recoverySource = overflowingNote ? request.source : noteRecoveryOwnerOf(services);
   // Notes containing only ordinary text and in-flow tables share acquisition
   // across equal-width pages. After failed admission, field-bearing blocks can
   // join that epoch: partitionFootnote refreshes them on demand before fitting.
@@ -721,15 +723,19 @@ function acquireBodyStoryLayout(
     && (request.source.story === 'endnote'
       || (request.source.story === 'footnote'
         && (overflowingNote || services.allowFootnoteContinuation === true || request.container.capacity === 'unbounded')));
-  const workBudget = continuedNote || (reservedRole !== undefined
+  const workBudget = recoverySource !== undefined || continuedNote || (reservedRole !== undefined
     && (request.source.story === 'endnote' || services.allowFootnoteContinuation === true))
     ? footnoteAcquisitionWorkBudgetOf(services) : undefined;
   if (continuedNote && !workBudget) throw new Error('Footnote acquisition requires a pagination work budget');
   const charge = (input: object) => {
     if (!workBudget) return;
-    if (overflowingNote && (request.source.story === 'footnote' || request.source.story === 'endnote')) {
-      noteOverflowPolicyOf(services)?.charge(request.source.story, request.source.storyInstance,
-        workBudget.sourceUnits(root), workBudget.sourceUnits(input));
+    if (recoverySource) {
+      const policy = noteOverflowPolicyOf(services);
+      if (overflowingNote) policy?.registerSource(recoverySource, workBudget.sourceUnits(root));
+      // Source traversal copies immutable string references. Shaping below
+      // pays for the characters it actually processes, including retries;
+      // charging their full length here too would count that work twice.
+      policy?.chargeSourceTraversal(recoverySource, input);
     }
     workBudget.charge(input);
   };
@@ -865,6 +871,7 @@ function acquireBodyStoryLayout(
         pageIndex: number; start: string; capacityPt: number; maximumLines: number; block: ParagraphLayout | TableLayout;
       }>();
       registerNoteBlockAcquisition(story, (block, destination, start, capacityPt = destination.container.bounds.heightPt, maximumLines = Infinity) => {
+        noteOverflowPolicyOf(services)?.chargeWork(request.source, 1);
         const index = block.source.path[0]!;
         if (!fieldBlocks.has(index)) return block;
         const hit = latest.get(block);
@@ -969,8 +976,15 @@ function layoutBodyStory(
     },
   };
   if (fieldBlockIndex === undefined) preRegisterPageFloats(root, request.sourceStart?.blockIndex ?? 0, candidate);
-  const storyServices = createLayoutServicesRuntimeView(services, request.container.quarterTurnMath
-    ? { math: quarterTurnMathMetadataService(services.math) } : {});
+  const recoveryPolicy = noteOverflowAllowed(services, request.source.story as 'footnote' | 'endnote', [request.source.storyInstance])
+    ? noteOverflowPolicyOf(services) : undefined;
+  const storyServices = createLayoutServicesRuntimeView(services, {
+    ...(request.container.quarterTurnMath ? { math: quarterTurnMathMetadataService(services.math) } : {}),
+    // Debit each shaping request, including counterfactual line fits and
+    // nested cell paragraphs, before invoking the shared text authority.
+    ...(recoveryPolicy ? { text: recoveryPolicy.textServiceFor(request.source, services.text) } : {}),
+  });
+  if (recoveryPolicy) attachNoteRecoveryOwner(storyServices, request.source);
   candidate.layoutServices = storyServices;
   // Content only a page position places (header/footer root hosts, the
   // positioned tables of story tables) resolves against the destination

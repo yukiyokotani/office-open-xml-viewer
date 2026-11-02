@@ -1869,6 +1869,21 @@ test('retained layout validation uses the reviewed invariants import', () => {
   expectDiagnostic(root, 'RETAINED_LAYOUT_IMMUTABILITY', 'local impostor invariants', '--final');
 });
 
+test('retained layout validation allows only a throw-only recovery catch', () => {
+  const root = initializeCanonicalFixture('docx-layout-boundary-recovery-catch-');
+  const path = 'packages/docx/src/layout/body-paginator.ts';
+  const withCatch = (handler) => canonicalBodyPaginator.replace(
+    '  return (yield* assertAndDeepFreezeDocumentLayoutSteps(layout));\n',
+    '  try {\n    return (yield* assertAndDeepFreezeDocumentLayoutSteps(layout));\n'
+      + `  } catch (error) { ${handler} }\n`,
+  );
+  write(root, path, withCatch('throw error;'));
+  const accepted = runChecker(root, '--final');
+  assert.equal(accepted.status, 0, accepted.output);
+  write(root, path, withCatch('return layout;'));
+  expectDiagnostic(root, 'RETAINED_LAYOUT_IMMUTABILITY', 'recovery cannot return an unvalidated layout', '--final');
+});
+
 test('the selected-layout variant module is mandatory', () => {
   const root = initializeCanonicalFixture('docx-layout-boundary-selection-missing-');
   rmSync(join(root, 'packages/docx/src/layout/document-layout-variants.ts'));

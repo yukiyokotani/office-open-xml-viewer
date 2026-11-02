@@ -16,6 +16,7 @@ import {
   convergeExactState,
 } from './convergence.js';
 import { LayoutInvariantError } from './diagnostics.js';
+import { noteOverflowPolicyOf, noteRecoveryOwnerOf } from './note-overflow-policy.js';
 import { paragraphAcquisitionCacheOf } from './runtime-state.js';
 import { adjustForWidowOrphan } from '../line-fit-policy.js';
 import type { StoryPageFrames } from './story-page-frames.js';
@@ -565,8 +566,8 @@ function floatingTableIndexOf(source: RetainedTableAcquisition): FloatingTableIn
  */
 type FragmentRowTracks = TablePrefixTracks;
 
-function startFragmentRowTracks(source: RetainedTableAcquisition): FragmentRowTracks {
-  return tablePrefixTracks(source.input);
+function startFragmentRowTracks(source: RetainedTableAcquisition, context: TableFragmentContext): FragmentRowTracks {
+  return tablePrefixTracks(source.input, context.services);
 }
 
 /** The candidate as the last row of the whole prefix: the probe of a grid the
@@ -1217,6 +1218,7 @@ function remainingRowAtCursor(
               block.layout,
               cellCursor.paragraphLineStart,
               block.layout.lines.length,
+              context,
             ),
           };
         }),
@@ -1563,7 +1565,12 @@ function paragraphSlice(
   paragraph: ParagraphLayout,
   start: number,
   end: number,
+  context: TableFragmentContext,
 ): ParagraphLayout {
+  const policy = noteOverflowPolicyOf(context.services);
+  const workSource = noteRecoveryOwnerOf(context.services) ?? paragraph.source;
+  policy?.chargeWork(workSource, end - start);
+  for (let i = start; i < end; i++) policy?.chargeWork(workSource, paragraph.lines[i]!.placements.length);
   return sliceParagraphLayout(paragraph, {
     lineStart: start,
     lineEnd: end,
@@ -1580,6 +1587,7 @@ function selectParagraph(
   availableHeightPt: number,
   freshAvailableHeightPt: number,
   canGainPageSpace: boolean,
+  context: TableFragmentContext,
   overflowFirstUnit = false,
 ): Readonly<{
   block: TableCellBlockInput | null;
@@ -1590,8 +1598,9 @@ function selectParagraph(
   let selected: ParagraphLayout | null = null;
   let lineEnd = start;
   for (let candidateEnd = start + 1; candidateEnd <= paragraph.lines.length; candidateEnd += 1) {
-    const candidate = paragraphSlice(paragraph, start, candidateEnd);
+    const candidate = paragraphSlice(paragraph, start, candidateEnd, context);
     const candidateBlock = { ...sourceBlock, layout: candidate };
+    noteOverflowPolicyOf(context.services)?.chargeWork(noteRecoveryOwnerOf(context.services) ?? paragraph.source, selectedBlocks.length);
     if (measureTableCellBlockFlowHeightPt([...selectedBlocks, candidateBlock])
       > availableHeightPt + EPSILON_PT) break;
     lineEnd = candidateEnd;
@@ -1626,7 +1635,7 @@ function selectParagraph(
     if (widow.kind !== 'dropLastLine') break;
     lineEnd -= 1;
   }
-  selected = paragraphSlice(paragraph, start, lineEnd);
+  selected = paragraphSlice(paragraph, start, lineEnd, context);
   return {
     block: { ...sourceBlock, layout: selected },
     range: { kind: 'paragraph', blockIndex: sourceBlock.sourceBlockIndex, lineStart: start, lineEnd },
@@ -1674,6 +1683,7 @@ function selectCell(
   let nestedFragmentIndex = cursor.nestedFragmentIndex;
 
   while (blockIndex < cell.blocks.length) {
+    context.chargeSourceScan?.(1);
     const sourceBlock = cell.blocks[blockIndex]!;
     const child = sourceBlock.layout;
     if (child.kind === 'paragraph') {
@@ -1706,6 +1716,7 @@ function selectCell(
         availableContentHeightPt,
         freshAvailableContentHeightPt,
         canGainPageSpace,
+        context,
         context.oversizedCellPolicy === 'overflow-first-unit' && !canGainPageSpace && blocks.length === 0,
       );
       if (!selected.block || !selected.range) break;
@@ -2222,7 +2233,7 @@ function takeTableFragmentPass(
   ]) as readonly FloatRegistryEntryPt[];
   let floatParagraphId = registrySnapshot?.nextParagraphId ?? 0;
   let availablePt = Math.max(0, context.availableHeightPt);
-  const pageOriginTracks = startFragmentRowTracks(source);
+  const pageOriginTracks = startFragmentRowTracks(source, context);
   const headerCount = leadingHeaderCount(source.input);
   if (cursor.rowIndex >= headerCount && cursor.rowIndex > 0 && headerCount > 0) {
     for (let rowIndex = 0; rowIndex < headerCount; rowIndex += 1) {

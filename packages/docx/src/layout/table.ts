@@ -12,6 +12,7 @@ import {
   wordExactRowVerticalClipBounds,
   wordSpacedCellInsideBorderOverridesTable,
 } from './table-compatibility.js';
+import { noteOverflowPolicyOf, noteRecoveryOwnerOf } from './note-overflow-policy.js';
 import type {
   BlockLayoutResult,
   FlowBlockPlacement,
@@ -1360,6 +1361,7 @@ export function layoutTable(
   placement: FlowBlockPlacement,
   _services: LayoutServices,
 ): BlockLayoutResult<TableLayout> {
+  noteOverflowPolicyOf(_services)?.chargeRetained(noteRecoveryOwnerOf(_services) ?? rawInput.source, rawInput);
   const input = snapshotPlainData(rawInput, 'TableLayoutInput') as TableLayoutInput;
   if (input.columnWidthsPt.some((width) => !Number.isFinite(width) || width < 0)) {
     throw new TypeError('TableLayoutInput.columnWidthsPt must contain finite non-negative widths');
@@ -1817,7 +1819,9 @@ function rowCoverage(
   return { covered, regular };
 }
 
-export function tablePrefixTracks(input: TableLayoutInput): TablePrefixTracks {
+export function tablePrefixTracks(input: TableLayoutInput, services?: LayoutServices): TablePrefixTracks {
+  const policy = services && noteOverflowPolicyOf(services);
+  const workSource = (services && noteRecoveryOwnerOf(services)) ?? input.source;
   const columnCount = input.columnWidthsPt.length;
   const flows = new WeakMap<TableCellLayoutInput, CellFlowGeometry>();
   const flowOf = (cell: TableCellLayoutInput): CellFlowGeometry => {
@@ -1908,6 +1912,7 @@ export function tablePrefixTracks(input: TableLayoutInput): TablePrefixTracks {
   const commitNext = (rows: readonly TableRowLayoutInput[]) => {
     const rowIndex = tracks.heights.length;
     const row = rows[rowIndex]!;
+    policy?.chargeRetained(workSource, row);
     const next = rows[rowIndex + 1]!;
     const above = rowIndex === 0 ? null : { row: rows[rowIndex - 1]!, covered: tracks.covered };
     const coverage = rowCoverage(row, above?.row, tracks.open, columnCount, input.segmentOpeningLogicalRowIndex);
@@ -1932,6 +1937,7 @@ export function tablePrefixTracks(input: TableLayoutInput): TablePrefixTracks {
     while (tracks.heights.length < target) commitNext(rows);
   };
   const resolve = (rows: readonly TableRowLayoutInput[], candidate: TableRowLayoutInput) => {
+    policy?.chargeRetained(workSource, candidate);
     sync(rows);
     const count = rows.length;
     const base = tracks.heights.length;

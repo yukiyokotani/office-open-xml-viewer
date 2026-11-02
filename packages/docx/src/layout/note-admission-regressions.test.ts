@@ -15,6 +15,7 @@ import * as budgets from './resource-budgets.js';
 import * as runtimeState from './runtime-state.js';
 import * as noteColumns from './note-column-acquisition.js';
 import * as noteBlocks from './note-block-acquisition.js';
+import * as pageFactory from './page-factory.js';
 import { NOTE_RECOVERY_WORK_MULTIPLIER, NoteOverflowPolicy, NoteOverflowRecoveryRequired } from './note-overflow-policy.js';
 
 type Kind = 'footnote' | 'endnote';
@@ -172,6 +173,111 @@ const ordinaryLayouts = [
 ] as const;
 
 describe('reviewed note admission regressions', () => {
+  it('preserves the captured rejection when recovery finalization throws', () => {
+    let originalFailure: Error | undefined;
+    const recover = NoteOverflowPolicy.prototype.recover;
+    const policy = vi.spyOn(NoteOverflowPolicy.prototype, 'recover').mockImplementation(function (this: NoteOverflowPolicy, error) {
+      if (error instanceof NoteOverflowRecoveryRequired) originalFailure ??= error.failure;
+      return recover.call(this, error);
+    });
+    const finalize = pageFactory.finalizeLayoutPage;
+    let injected = 0;
+    const finalizer = vi.spyOn(pageFactory, 'finalizeLayoutPage').mockImplementation((...args) => {
+      if (originalFailure) { injected++; throw new RangeError('Injected finalization failure'); }
+      return finalize(...args);
+    });
+    try {
+      let failure: unknown;
+      try { render(document('footnote', [paragraph('tall;', 120), paragraph('tail;')], 15), false); }
+      catch (error) { failure = error; }
+      expect(injected).toBe(1);
+      expect(originalFailure).toMatchObject({ name: 'FootnoteAdmissionOverflowError' });
+      expect(failure).toBe(originalFailure);
+    } finally { finalizer.mockRestore(); policy.mockRestore(); }
+  });
+
+  it('preserves admission geometry when recovered columns fail finalization', () => {
+    const model = document('footnote', Array.from({ length: 9 }, () => paragraph('n;')), 11, 3);
+    model.section.columns = { count: 3, spacePt: 10, equalWidth: false, sep: false,
+      cols: [40, 60, 80].map(widthPt => ({ widthPt, spacePt: 10 })) };
+    model.body = [paragraph('before;'), paragraph('before;'), ...model.body] as BodyElement[];
+    expect(() => render(model, false)).toThrow(expect.objectContaining({
+      name: 'FootnoteAdmissionOverflowError', reservePt: 96, admissionChargePt: 106, freshPageExtentPt: 80,
+    }));
+  });
+
+  it('charges every repeated table materialization before an inner recovery loop can fan out', () => {
+    let originalFailure: Error | undefined;
+    let attempts = 0;
+    const recover = NoteOverflowPolicy.prototype.recover;
+    const policy = vi.spyOn(NoteOverflowPolicy.prototype, 'recover').mockImplementation(function (this: NoteOverflowPolicy, error) {
+      if (error instanceof NoteOverflowRecoveryRequired) originalFailure ??= error.failure;
+      return recover.call(this, error);
+    });
+    const fragment = tableAcquisition.layoutTableFragment;
+    const materialize = vi.spyOn(tableAcquisition, 'layoutTableFragment').mockImplementation((...args) => {
+      if (!originalFailure) return fragment(...args);
+      // A future inner solver can repeat the same immutable acquisition on
+      // one destination without changing a page or source cursor. Cache hits
+      // in the size memo must still pay for every real materialization.
+      for (let trial = 0; trial < 100_000; trial++) { attempts++; fragment(...args); }
+      throw new Error('Recovery failed to bound table materialization');
+    });
+    try {
+      let failure: unknown;
+      try { render(document('footnote', [table([paragraph('tall;', 120)])], 15), false); }
+      catch (error) { failure = error; }
+      expect(originalFailure).toMatchObject({ name: 'FootnoteAdmissionOverflowError' });
+      expect(failure).toBe(originalFailure);
+      expect(attempts).toBeGreaterThan(1);
+      expect(attempts).toBeLessThan(100);
+    } finally { materialize.mockRestore(); policy.mockRestore(); }
+  });
+
+  it('bounds repeated-header materialization by the note-local work allowance', () => {
+    const results: { n: number; rows: number; work: number; limit: number; ms: number }[] = [];
+    for (const n of [64, 128, 256, 512]) {
+      const grid = table([paragraph('h;', 1)]);
+      grid.rows = Array.from({ length: 2 * n }, (_, index) => ({ ...grid.rows[0]!,
+        isHeader: index < n, cells: [{ ...grid.rows[0]!.cells[0]!,
+          content: [paragraph(index < n ? 'h;' : 'r;', index < n ? 1 : 120)] }],
+      }));
+      const model = document('footnote', [grid], 15);
+      model.section.columns!.spacePt = 10;
+      let originalFailure: Error | undefined;
+      let rows = 0, work = 0, limit = 0;
+      const recover = NoteOverflowPolicy.prototype.recover;
+      const policy = vi.spyOn(NoteOverflowPolicy.prototype, 'recover').mockImplementation(function (this: NoteOverflowPolicy, error) {
+        if (error instanceof NoteOverflowRecoveryRequired) originalFailure ??= error.failure;
+        return recover.call(this, error);
+      });
+      const charge = NoteOverflowPolicy.prototype.charge;
+      const counter = vi.spyOn(NoteOverflowPolicy.prototype, 'charge').mockImplementation(function (this: NoteOverflowPolicy, kind, id, sourceUnits, units) {
+        charge.call(this, kind, id, sourceUnits, units);
+        if (this.allows(kind, [id])) { work += units; limit = NOTE_RECOVERY_WORK_MULTIPLIER * (sourceUnits + 1); }
+      });
+      const layoutTable = tableLayout.layoutTable;
+      const materialize = vi.spyOn(tableLayout, 'layoutTable').mockImplementation((...args) => {
+        const result = layoutTable(...args);
+        if (originalFailure) rows += args[0].rows.length;
+        return result;
+      });
+      const started = performance.now();
+      try {
+        let failure: unknown;
+        try { render(model, false); } catch (error) { failure = error; }
+        expect(originalFailure).toMatchObject({ name: 'FootnoteAdmissionOverflowError' });
+        expect(failure).toBe(originalFailure);
+        expect(work).toBeLessThanOrEqual(limit);
+        // A fixed allowance bounds actual materialization, including copies
+        // of every header on failed candidates, independently of wall time.
+        expect(rows).toBeLessThan(32 * 2 * n);
+        results.push({ n, rows, work, limit, ms: Math.round(performance.now() - started) });
+      } finally { materialize.mockRestore(); counter.mockRestore(); policy.mockRestore(); }
+    }
+    process.stdout.write(JSON.stringify({ shape: 'repeated-headers', results }) + '\n');
+  }, 60_000);
+
   it.each((['footnote', 'endnote'] as const).flatMap(kind => [1, 2].flatMap(columns =>
     ['repeated-source', 'empty-fragment'].map(failureMode => ({ kind, columns, failureMode })))))(
     'fails with the original error for $failureMode recovery ($kind, $columns columns)', ({ kind, columns, failureMode }) => {

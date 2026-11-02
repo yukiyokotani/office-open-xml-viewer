@@ -1547,7 +1547,8 @@ function* paginateBodyPassSteps(
     }
   };
   const partitionNote = createFootnotePartitioner(note =>
-    recoveryAllowed(note.source.story as 'footnote' | 'endnote', [note.source.storyInstance]));
+    recoveryAllowed(note.source.story as 'footnote' | 'endnote', [note.source.storyInstance]),
+    (source, units) => notePolicy?.chargeWork(source, units));
   const partitionFootnote: typeof partitionNote = (...args) => {
     const note = args[0];
     const kind = note.source.story as 'footnote' | 'endnote';
@@ -5556,115 +5557,122 @@ export function* paginateBodySteps(
   // Every convergence pass and its field-acquisition service views share this
   // private memo, while a later variant/document pagination starts fresh.
   services = createParagraphAcquisitionCacheServicesView(services);
-  attachNoteOverflowPolicy(services, new NoteOverflowPolicy());
-  const owners = ownerMap(input);
-  let publishedPages = 0;
-  let publicationFailed = false;
-  const publisher: BodyPagePublisher | undefined = observer
-    ? {
-        get publishedPages() { return publishedPages; },
-        get failed() { return publicationFailed; },
-        publish: (pass, processedEntries, pageIndexLimit) => {
-          // The live page still owns the transition edge: section-region and
-          // page-final composition can change when the following page opens.
-          // It is never published, and the pass-level rule may bound the
-          // prefix further (see `anchorStablePageLimit`).
-          const limit = Math.min(pageIndexLimit, livePageIndex(pass));
-          const count = pass.layout.pages.findIndex((page) => page.pageIndex >= limit);
-          if (count <= publishedPages) return;
-          try {
-            const composed = composeBodyPaginationResult(pass, input, owners, options, false);
-            // This publication is deliberately provisional: header/footer and
-            // pagination-field convergence may replace it, and consumers
-            // receive `exact:false`.
-            const publishable = Object.freeze({
-              ...composed,
-              pages: Object.freeze(composed.pages.slice(0, count)),
-            }) as DocumentLayout;
-            observer.onPages(publishable, processedEntries);
-            publishedPages = count;
-          } catch {
-            // A provisional snapshot is best-effort. The same live pagination
-            // session remains authoritative and must be allowed to finish.
-            publicationFailed = true;
-          }
-        },
-      }
-    : undefined;
-  let seed: BodyPaginationPassResult | null = yield* paginateBodyWithColumnBalancingSteps(
-    input, services, options, [], publisher,
-  );
-  const convergence = convergeHeaderFooterReserveSteps<
-    BodyPaginationPassResult,
-    number,
-    ReserveRepaginationCarry
-  >(seed, {
-    measure: (pass) => headerFooterReserves(pass),
-    // A repagination reads only these facts of the pass before it (besides
-    // the measured reserves). Carrying them, rather than the pass, lets that
-    // pass's whole layout and pagination session be collected while the next
-    // one is built.
-    carry: (pass) => Object.freeze({
-      fieldContexts: paginationFieldPageContexts(pass.layout),
-      // Page-owned tables need one geometry-discovery pass and one exclusion
-      // pass. Reuse the accepted geometry for this later reserve iteration
-      // when stable; changed ownership still runs exact convergence anew.
-      anchorPlan: pageAnchorDestinationPlan(pass.layout),
-      pageScopedFloorProof: pageScopedFloorProofPasses.has(pass),
-    }),
-    repaginate: function* reserveRepagination(reserves, carried) {
-      const contexts = carried.fieldContexts;
-      const iterationServices = createFieldAcquisitionServicesView(services, {
-        totalPages: contexts.length,
-        resolveDestinationPage: (pageIndex) => contexts[pageIndex],
-      });
-      const refine = function* (pageScoped: boolean) {
-        let observed = reserves;
-        const openingObservations = new Set<string>();
-        // Retry the same algorithm with actual opening observations. Bound retries
-        // by the page ceiling, retain only recent exact identities, and share the
-        // original hard miss ledger. Completed-pass exact reserve, field and anchor
-        // convergence remains unchanged. A fixed small retry cap would reject
-        // documents with many independent first/default section boundaries.
-        for (let refinement = 0; refinement < MAX_BODY_LAYOUT_PAGES; refinement++) {
-          const fingerprint = JSON.stringify(observed);
-          if (openingObservations.has(fingerprint)) throw new LayoutInvariantError('NON_CONVERGENCE', 'Opened page reserve observations did not converge');
-          openingObservations.add(fingerprint);
-          if (openingObservations.size > MAX_OPENED_RESERVE_IDENTITIES) {
-            openingObservations.delete(openingObservations.values().next().value!);
-          }
-          try {
-            return yield* paginateBodyWithColumnBalancingSteps(
-              input, iterationServices, options, observed, undefined, carried.anchorPlan,
-              pageScoped,
-            );
-          } catch (error) {
-            if (!(error instanceof OpenedPageReserveObservation)) throw error;
-            observed = error.reserves;
-          }
+  const policy = new NoteOverflowPolicy();
+  attachNoteOverflowPolicy(services, policy);
+  // Recovery is one transaction through composition and final validation.
+  // Every escaping failure preserves the exact rejection captured by its gate.
+  try {
+    const owners = ownerMap(input);
+    let publishedPages = 0;
+    let publicationFailed = false;
+    const publisher: BodyPagePublisher | undefined = observer
+      ? {
+          get publishedPages() { return publishedPages; },
+          get failed() { return publicationFailed; },
+          publish: (pass, processedEntries, pageIndexLimit) => {
+            // The live page still owns the transition edge: section-region and
+            // page-final composition can change when the following page opens.
+            // It is never published, and the pass-level rule may bound the
+            // prefix further (see `anchorStablePageLimit`).
+            const limit = Math.min(pageIndexLimit, livePageIndex(pass));
+            const count = pass.layout.pages.findIndex((page) => page.pageIndex >= limit);
+            if (count <= publishedPages) return;
+            try {
+              const composed = composeBodyPaginationResult(pass, input, owners, options, false);
+              // This publication is deliberately provisional: header/footer and
+              // pagination-field convergence may replace it, and consumers
+              // receive `exact:false`.
+              const publishable = Object.freeze({
+                ...composed,
+                pages: Object.freeze(composed.pages.slice(0, count)),
+              }) as DocumentLayout;
+              observer.onPages(publishable, processedEntries);
+              publishedPages = count;
+            } catch {
+              // A provisional snapshot is best-effort. The same live pagination
+              // session remains authoritative and must be allowed to finish.
+              publicationFailed = true;
+            }
+          },
         }
-        throw new LayoutInvariantError('NON_CONVERGENCE', 'Opened page reserve observation refinement limit exceeded');
-      };
-      if (carried.pageScopedFloorProof) return yield* refine(true);
-      try {
-        return yield* refine(false);
-      } catch (error) {
-        // #2012: the reserve run can alternate on page-table floors that the
-        // strict proof never settles even though the reserve-free run did.
-        // Only a run that would otherwise fail retries with the page-scoped
-        // proof, so every converging layout is unchanged.
-        if (!(error instanceof LayoutInvariantError) || error.code !== 'NON_CONVERGENCE') throw error;
-        return yield* refine(true);
-      }
-    },
-    identity: (pass) => paginationFieldPageContexts(pass.layout),
-    requiresConvergence: seed.session.hasPaginationFields,
-  });
-  seed = null;
-  const converged = (yield* convergence).result;
-  return (yield* assertAndDeepFreezeDocumentLayoutSteps(
-    composeBodyPaginationResult(converged, input, owners, options, true),
-  )) as DocumentLayout;
+      : undefined;
+    let seed: BodyPaginationPassResult | null = yield* paginateBodyWithColumnBalancingSteps(
+      input, services, options, [], publisher,
+    );
+    const convergence = convergeHeaderFooterReserveSteps<
+      BodyPaginationPassResult,
+      number,
+      ReserveRepaginationCarry
+    >(seed, {
+      measure: (pass) => headerFooterReserves(pass),
+      // A repagination reads only these facts of the pass before it (besides
+      // the measured reserves). Carrying them, rather than the pass, lets that
+      // pass's whole layout and pagination session be collected while the next
+      // one is built.
+      carry: (pass) => Object.freeze({
+        fieldContexts: paginationFieldPageContexts(pass.layout),
+        // Page-owned tables need one geometry-discovery pass and one exclusion
+        // pass. Reuse the accepted geometry for this later reserve iteration
+        // when stable; changed ownership still runs exact convergence anew.
+        anchorPlan: pageAnchorDestinationPlan(pass.layout),
+        pageScopedFloorProof: pageScopedFloorProofPasses.has(pass),
+      }),
+      repaginate: function* reserveRepagination(reserves, carried) {
+        const contexts = carried.fieldContexts;
+        const iterationServices = createFieldAcquisitionServicesView(services, {
+          totalPages: contexts.length,
+          resolveDestinationPage: (pageIndex) => contexts[pageIndex],
+        });
+        const refine = function* (pageScoped: boolean) {
+          let observed = reserves;
+          const openingObservations = new Set<string>();
+          // Retry the same algorithm with actual opening observations. Bound retries
+          // by the page ceiling, retain only recent exact identities, and share the
+          // original hard miss ledger. Completed-pass exact reserve, field and anchor
+          // convergence remains unchanged. A fixed small retry cap would reject
+          // documents with many independent first/default section boundaries.
+          for (let refinement = 0; refinement < MAX_BODY_LAYOUT_PAGES; refinement++) {
+            const fingerprint = JSON.stringify(observed);
+            if (openingObservations.has(fingerprint)) throw new LayoutInvariantError('NON_CONVERGENCE', 'Opened page reserve observations did not converge');
+            openingObservations.add(fingerprint);
+            if (openingObservations.size > MAX_OPENED_RESERVE_IDENTITIES) {
+              openingObservations.delete(openingObservations.values().next().value!);
+            }
+            try {
+              return yield* paginateBodyWithColumnBalancingSteps(
+                input, iterationServices, options, observed, undefined, carried.anchorPlan,
+                pageScoped,
+              );
+            } catch (error) {
+              if (!(error instanceof OpenedPageReserveObservation)) throw error;
+              observed = error.reserves;
+            }
+          }
+          throw new LayoutInvariantError('NON_CONVERGENCE', 'Opened page reserve observation refinement limit exceeded');
+        };
+        if (carried.pageScopedFloorProof) return yield* refine(true);
+        try {
+          return yield* refine(false);
+        } catch (error) {
+          // #2012: the reserve run can alternate on page-table floors that the
+          // strict proof never settles even though the reserve-free run did.
+          // Only a run that would otherwise fail retries with the page-scoped
+          // proof, so every converging layout is unchanged.
+          if (!(error instanceof LayoutInvariantError) || error.code !== 'NON_CONVERGENCE') throw error;
+          return yield* refine(true);
+        }
+      },
+      identity: (pass) => paginationFieldPageContexts(pass.layout),
+      requiresConvergence: seed.session.hasPaginationFields,
+    });
+    seed = null;
+    const converged = (yield* convergence).result;
+    return (yield* assertAndDeepFreezeDocumentLayoutSteps(
+      composeBodyPaginationResult(converged, input, owners, options, true),
+    )) as DocumentLayout;
+  } catch (error) {
+    throw policy.errorForAttempt(error);
+  }
 }
 
 export function paginateBody(
