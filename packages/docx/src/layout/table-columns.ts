@@ -676,7 +676,10 @@ function solveTableColumnWidths(input: TableColumnLayoutInput): readonly number[
   for (const cell of cells) {
     enforceContentConstraint(widths, minimums, transferFloors, maximums, cell);
   }
-  if (input.growUnpreferredColumns === true && input.tablePreferredWidthPt === null) {
+  const nonbinding = maximums.reduce((sum, width) => sum + width, 0)
+    <= finiteNonNegative(input.availableWidthPt) + EPSILON_PT;
+  if ((input.growUnpreferredColumns === true || (input.growUnpreferredColumns === 'nonbinding' && nonbinding))
+    && input.tablePreferredWidthPt === null) {
     growUnpreferredColumns(widths, minimums, maximums, cells, input.rows, finiteNonNegative(input.availableWidthPt));
   }
   return Object.freeze(fitToAvailableWidth(

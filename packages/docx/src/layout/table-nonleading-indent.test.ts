@@ -314,3 +314,24 @@ describe('unmeasured neighbours of the extended rules keep the previous behavior
     expect(shifts('nested', 15, { jc: 'left', spacing: true })).toEqual([36, -18]);
   }, 60_000);
 });
+
+describe('content-fit boundaries (#2065 review)', () => {
+  it('keeps three-track or spanning content-sized tables on their grid and indent', () => {
+    const three = (indent: number | null) => tableGeometry('body', tableXml({ ...CONTENT_SIZED, jc: 'right', label: 'Q', indent })
+      .replace('<w:gridCol w:w="2000"/><w:gridCol w:w="2000"/>', '<w:gridCol w:w="2000"/><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/>')
+      .replace('</w:tr>', '<w:tc><w:tcPr><w:tcW w:w="0" w:type="auto"/></w:tcPr><w:p><w:r><w:t>c</w:t></w:r></w:p></w:tc></w:tr>'), 'Q', 15);
+    expect(three(null).widthPt).toBeCloseTo(300, 6);
+    expect(three(720).xPt - three(null).xPt).toBeCloseTo(36, 6);
+    const spanned = (indent: number | null) => tableGeometry('body', tableXml({ ...CONTENT_SIZED, jc: 'right', label: 'Q', indent })
+      .replace(/<w:tc><w:tcPr><w:tcW w:w="0" w:type="auto"\/><\/w:tcPr><w:p><w:r><w:t>b<\/w:t><\/w:r><\/w:p><\/w:tc>/, '')
+      .replace('<w:tcPr><w:tcW w:w="0" w:type="auto"/></w:tcPr>', '<w:tcPr><w:tcW w:w="0" w:type="auto"/><w:gridSpan w:val="2"/></w:tcPr>'), 'Q', 15);
+    expect(spanned(720).xPt - spanned(null).xPt).toBeCloseTo(36, 6);
+  }, 60_000);
+  it('keeps the previous solve for a binding content-sized fit outside the leading band', () => {
+    const long = 'w '.repeat(60).trim();
+    const at = (mode: number) => tableGeometry('body', tableXml({ ...CONTENT_SIZED, jc: 'center', label: 'Q', indent: null })
+      .replace('<w:t>b</w:t>', `<w:t>${long}</w:t>`), 'Q', mode);
+    // 2 x 6pt + 120 x 6pt content exceeds the 481.9pt band: no growth.
+    expect(at(11).widthPt).toBeCloseTo(200, 6);
+  }, 60_000);
+});
