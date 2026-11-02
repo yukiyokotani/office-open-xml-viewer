@@ -640,6 +640,26 @@ function fitToAvailableWidth(
   return cleanWidths(result.map((width) => width * scale));
 }
 
+/** WORD_TABLE_CELL_SPACING_GEOMETRY establishes only nonbinding content fits.
+ * Use this same admission test before selecting the geometry and when solving
+ * it. A binding table must retain its original constraints, ceiling and boxes,
+ * rather than solving reduced constraints and adding a gap budget afterwards. */
+export function spacedAutoFitContentWidthsPt(input: TableColumnLayoutInput): readonly number[] | null {
+  const columnCount = requiredColumnCount(input);
+  const spacingPt = input.separatedCellSpacingPt ?? 0;
+  if (input.layout !== 'autofit' || spacingPt <= 0 || columnCount === 0
+    || input.growUnpreferredColumns !== 'nonbinding') return null;
+  const allUnpreferred = input.rows.every((row) => row.before === null && row.after === null
+    && row.cells.length === columnCount && row.cells.every((cell, index) =>
+      cell.columnSpan === 1 && cell.columnStart === index && cell.preferredWidth === null));
+  if (!allUnpreferred) return null;
+  const { maximums } = singleColumnBounds(input.rows, columnCount, 0);
+  const maximumPt = maximums.reduce((sum, width) => sum + width, 0);
+  const gapBudgetPt = (columnCount + 1) * 2 * spacingPt;
+  return maximumPt + gapBudgetPt <= (input.availableWidthPt ?? 0)
+    && maximumPt + gapBudgetPt < (input.contentBandPt ?? 0) ? maximums : null;
+}
+
 /**
  * ECMA-376 §17.18.87 fixed/autofit guidance expressed as a deterministic,
  * parser-independent constraint solver. `tblGrid` seeds widths; it never
@@ -652,7 +672,7 @@ function solveTableColumnWidths(input: TableColumnLayoutInput): readonly number[
   if (spacingPt > 0) {
     // WORD_TABLE_CELL_SPACING_GEOMETRY: solve cell boxes without gaps. Fixed
     // tracks carve the gap budget proportionally; AutoFit constraints already
-    // contain cell borders and margins, and fit inside the remaining ceiling.
+    // contain cell borders and margins, and are admitted only when nonbinding.
     const gapBudgetPt = (columnCount + 1) * 2 * spacingPt;
     const cellInput = { ...input, separatedCellSpacingPt: undefined };
     let boxes: readonly number[];
@@ -663,20 +683,12 @@ function solveTableColumnWidths(input: TableColumnLayoutInput): readonly number[
       if (totalPt <= gapBudgetPt) return resolved;
       boxes = resolved.map((width) => width * (totalPt - gapBudgetPt) / totalPt);
     } else {
-      const availablePt = Math.max(0, (input.availableWidthPt ?? 0) - gapBudgetPt);
-      const bandPt = Math.max(0, (input.contentBandPt ?? 0) - gapBudgetPt);
-      const { maximums } = singleColumnBounds(input.rows, columnCount, 0);
-      const maximumPt = maximums.reduce((sum, width) => sum + width, 0);
-      // Only a nonbinding all-unpreferred, unspanned solve establishes an
-      // n-track content fit. Binding allocation still uses the ordinary solver.
-      const allUnpreferred = input.rows.every((row) => row.before === null && row.after === null
-        && row.cells.length === columnCount && row.cells.every((cell, index) =>
-          cell.columnSpan === 1 && cell.columnStart === index && cell.preferredWidth === null));
-      boxes = allUnpreferred && input.growUnpreferredColumns === 'nonbinding'
-        && maximumPt <= availablePt && maximumPt < bandPt
-        ? maximums
-        : solveTableColumnWidths({ ...cellInput, availableWidthPt: availablePt,
-          contentBandPt: bandPt, growUnpreferredColumns: false });
+      const contentWidths = spacedAutoFitContentWidthsPt(input);
+      // Production eligibility rejects binding cases before changing any
+      // constraints or acquisition geometry. Do not allocate unmeasured gaps
+      // if a direct solver caller supplies an inapplicable spacing request.
+      if (!contentWidths) return solveTableColumnWidths(cellInput);
+      boxes = contentWidths;
     }
     // Retained grid tracks allocate half each shared gap and the entire outer
     // gap. Subtracting the same insets in acquisition/materialization leaves

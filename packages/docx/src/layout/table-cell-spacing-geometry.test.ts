@@ -141,17 +141,20 @@ describe('WORD_TABLE_CELL_SPACING_GEOMETRY (#2066)', () => {
       table.rows[0]!.cells.forEach((cell, index) => expect(cell.contentBounds.widthPt).toBeCloseTo((index + 1) * 6, 8));
     }
   });
-  it('includes every gap in the nonbinding AutoFit ceiling and leaves binding growth disabled', () => {
+  it('includes every gap in the nonbinding AutoFit ceiling', () => {
     const fits = geometry({ auto: true, texts: Array(3).fill('w '.repeat(10)) });
     // Three 120pt maxima, each with two 3pt borders; four 20pt gaps.
     expect(fits.flowBounds.widthPt).toBeCloseTo(458, 8);
-    const binding = geometry({ auto: true, texts: Array(3).fill('w '.repeat(11)) });
-    // Maxima alone fit 468pt, but maxima + gaps (494pt) do not. Retain
-    // saved 100pt cell widths rather than applying an unmeasured n-track fit.
-    expect(binding.flowBounds.widthPt).toBeCloseTo(380, 8);
-    const wide = geometry({ auto: true, widths: [5000, 5000, 5000], long: true });
-    expect(wide.flowBounds.widthPt).toBeCloseTo(E1 - E0, 8);
-    expect(wide.rows[0]!.cells[0]!.contentBounds.widthPt).toBeCloseTo((468 - 80) / 3 - 6, 8);
+  });
+  it('keeps binding spaced AutoFit byte-identical to the base renderer', () => {
+    const binding = { auto: true, texts: Array(3).fill('w '.repeat(11)) };
+    // Maxima + borders + gaps need 494pt, exceeding the 468pt band. The
+    // entire retained layout must use the base path, including vertical flow.
+    expect(geometry(binding).flowBounds.widthPt).toBe(300);
+    // Captured at 5b6d291540f122570b801086a52b43e6718b6fbe with this helper.
+    expect(fingerprint([binding])).toBe('e1bf5a08d76e3b3a8f07a79d22938e09add612f9ace1af555ed17d6da04c90ce');
+    expect(fingerprint([{ auto: true, widths: [5000, 5000, 5000], long: true }]))
+      .toBe('d62e5a2c96040b2b97c9950b751a0d3317dfa4adeace656b0b24e56391c3ed94');
   });
   // Captured from the unmodified stacked parent cb1746fad^ using these same
   // synthetic inputs. These guard the explicit byte-identical retained-layout

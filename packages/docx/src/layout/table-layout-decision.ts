@@ -363,6 +363,7 @@ export function decideLogicalTable(
   authoredEnvironment: TableDecisionEnvironment,
   commonFrame = true,
   commonGrid = true,
+  spacedAutoFitContentFits?: (candidate: TableMemberDecision) => boolean,
 ): LogicalTableDecision {
   // A producer-supplied outer-edge table (outerEdgeIndent) carries its own
   // physical outer edge and grid; the OOXML table compatibility modes
@@ -401,7 +402,7 @@ export function decideLogicalTable(
   // Every unmeasured neighbour keeps the old source projection and geometry.
   const spacingPt = format.rows[0]?.cellSpacingPt ?? 0;
   const uniformBorderPt = spacingPt > 0 ? wordUniformSpacedTableBorderPt(table) : null;
-  const spacingGeometry = spacingPt > 0 && uniformBorderPt !== null
+  let spacingGeometry = spacingPt > 0 && uniformBorderPt !== null
     && singleTable && commonFrame && commonGrid && topLevelBody && environment.singleColumn
     && !environment.inTableCell && !isVerticalTextDirection(environment.textDirection)
     && environment.quarterTurnedStory !== true && format.ordinaryFlow && format.positioning == null
@@ -419,6 +420,15 @@ export function decideLogicalTable(
         row.cells.length === input.gridWidthsPt.length && row.cells.every((cell, index) =>
           cell.columnSpan === 1 && cell.columnStart === index))))
     ? Object.freeze({ spacingPt, borderPt: uniformBorderPt }) : null;
+  if (spacingGeometry && input.layout === 'autofit') {
+    // Binding distribution is outside WORD_TABLE_CELL_SPACING_GEOMETRY.
+    // Resolve this before origin, content constraints, child acquisition or
+    // row geometry change. A width-only fallback cannot restore the base path.
+    const candidate = memberContext(table, source, origin, measuredOrigin, contentWidthPt, environment,
+      usesLogicalProperties, omittedMarginEndOrigin, false,
+      { ...NO_SCOPE_EXTENSIONS, contentFitted: true, spacingGeometry });
+    if (spacedAutoFitContentFits?.(candidate) !== true) spacingGeometry = null;
+  }
   // WORD_AUTOFIT_CONTENT_COLUMN_GROWTH: the measured content-sized class.
   const contentFitted = contentSized && singleTable && format.ordinaryFlow && format.positioning == null
     && format.outerEdgeIndent !== true && !rowOverrides && !gridSkips
