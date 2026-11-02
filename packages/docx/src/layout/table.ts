@@ -175,7 +175,7 @@ function effectiveCellSpacingPt(row: TableRowLayoutInput | undefined): number {
 /**
  * §17.4.43/.44/.45 require spacing between adjacent cells and the table edge
  * without increasing the table width. An outer boundary owns the full row
- * spacing; an internal boundary is one shared gap split symmetrically between
+ * spacing outside WORD_TABLE_CELL_SPACING_GEOMETRY; an internal boundary is one shared gap split symmetrically between
  * its two cells. When adjacent rows differ, the larger minimum owns the shared
  * boundary so neither row's constraint is weakened.
  */
@@ -823,7 +823,6 @@ function materializeBorders(
         owner.input.columnStart,
         owner.input.columnSpan,
         input.columnWidthsPt.length,
-        row.spacingGeometry !== undefined,
       );
     const leftPt = Math.min(startXPt, endXPt)
       + (input.bidiVisual ? logicalEndInsetPt : logicalStartInsetPt);
@@ -1131,7 +1130,6 @@ function materializeBorders(
           cell.columnStart,
           cell.columnSpan,
           input.columnWidthsPt.length,
-        row.spacingGeometry !== undefined,
         );
       const leftPt = Math.min(startXPt, endXPt)
         + (input.bidiVisual ? logicalEndInsetPt : logicalStartInsetPt);
@@ -1178,7 +1176,6 @@ function materializeBorders(
           cell.columnStart,
           cell.columnSpan,
           input.columnWidthsPt.length,
-        row.spacingGeometry !== undefined,
         );
       const leftPt = Math.min(startXPt, endXPt)
         + (input.bidiVisual ? logicalEndInsetPt : logicalStartInsetPt);
@@ -1562,7 +1559,7 @@ function materializeTableRow(
       cell.columnStart,
       cell.columnSpan,
       input.columnWidthsPt.length,
-        row.spacingGeometry !== undefined,
+      row.spacingGeometry !== undefined,
     );
     const cellXPt = gridLeftPt + (input.bidiVisual ? endInsetPt : startInsetPt);
     const cellRightPt = gridRightPt - (input.bidiVisual ? startInsetPt : endInsetPt);

@@ -19,7 +19,7 @@ interface Options {
   jc?: string; bidi?: boolean; indent?: number; auto?: boolean; widths?: number[];
   span?: boolean; verticalMerge?: boolean; cellBorder?: boolean; asymmetric?: boolean;
   rowSpacing?: boolean; nested?: boolean; header?: boolean; floating?: boolean;
-  vertical?: boolean; long?: boolean;
+  vertical?: boolean; long?: boolean; texts?: string[];
 }
 const para = (text: string) => `<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="368" w:lineRule="exact"/></w:pPr><w:r><w:t>${text}</w:t></w:r></w:p>`;
 function geometry(o: Options = {}): TableLayout {
@@ -35,7 +35,7 @@ function geometry(o: Options = {}): TableLayout {
     + widths.flatMap((_width, col) => o.span && col === 1 ? [] : [`<w:tc><w:tcPr><w:tcW w:w="${o.auto ? 0 : o.span && col === 0 ? widths[0]! + widths[1]! : widths[col]}" w:type="${o.auto ? 'auto' : 'dxa'}"/>`
       + `${o.span && col === 0 ? '<w:gridSpan w:val="2"/>' : ''}${o.verticalMerge && col === 0 ? `<w:vMerge${row === 0 ? ' w:val="restart"' : ''}/>` : ''}`
       + `${o.cellBorder && col === 0 ? `<w:tcBorders>${border('left')}</w:tcBorders>` : ''}${o.vertical ? '<w:textDirection w:val="tbRl"/>' : ''}`
-      + `</w:tcPr>${para(o.long ? 'w '.repeat(100) : ['Q', 'bb', 'ccc'][col] ?? 'Q')}</w:tc>`]).join('') + '</w:tr>').join('');
+      + `</w:tcPr>${para(o.texts?.[col] ?? (o.long ? 'w '.repeat(100) : ['Q', 'bb', 'ccc'][col] ?? 'Q'))}</w:tc>`]).join('') + '</w:tr>').join('');
   const table = `<w:tbl><w:tblPr>${tblPr}</w:tblPr><w:tblGrid>${widths.map((w) => `<w:gridCol w:w="${w}"/>`).join('')}</w:tblGrid>${rows}</w:tbl>`;
   const outer = `<w:tbl><w:tblPr><w:tblLayout w:type="fixed"/></w:tblPr><w:tblGrid><w:gridCol w:w="9000"/></w:tblGrid><w:tr><w:tc>${table}${para('end')}</w:tc></w:tr></w:tbl>`;
   const mode = o.mode === undefined ? 15 : o.mode;
@@ -132,6 +132,21 @@ describe('WORD_TABLE_CELL_SPACING_GEOMETRY (#2066)', () => {
       table.rows[0]!.cells.forEach((cell, index) => expect(cell.contentBounds.widthPt).toBeCloseTo((index + 1) * 6, 8));
     }
   });
+  it('includes every gap in the nonbinding AutoFit ceiling and leaves binding growth disabled', () => {
+    const fits = geometry({ auto: true, texts: Array(3).fill('w '.repeat(10)) });
+    // Three 120pt maxima, each with two 3pt borders; four 20pt gaps.
+    expect(fits.flowBounds.widthPt).toBeCloseTo(458, 8);
+    const binding = geometry({ auto: true, texts: Array(3).fill('w '.repeat(11)) });
+    // Maxima alone fit 468pt, but maxima + gaps (494pt) do not. Retain
+    // saved 100pt cell widths rather than applying an unmeasured n-track fit.
+    expect(binding.flowBounds.widthPt).toBeCloseTo(380, 8);
+    const wide = geometry({ auto: true, widths: [5000, 5000, 5000], long: true });
+    expect(wide.flowBounds.widthPt).toBeCloseTo(E1 - E0, 8);
+    expect(wide.rows[0]!.cells[0]!.contentBounds.widthPt).toBeCloseTo((468 - 80) / 3 - 6, 8);
+  });
+  // Captured from the unmodified stacked parent cb1746fad^ using these same
+  // synthetic inputs. These guard the explicit byte-identical retained-layout
+  // contract, including borders, paragraphs and row/page flow, not a test count.
   it('keeps all no-spacing retained geometry byte-identical to the previous renderer', () => {
     const cases = [null, 11, 12, 14, 15].flatMap((mode) => [false, true].flatMap((bidi) => ['left', 'center', 'end'].flatMap((jc) =>
       [false, true].map((auto) => ({ spacing: 0, mode, bidi, jc, auto, indent: 720, margin: 108 })))));
