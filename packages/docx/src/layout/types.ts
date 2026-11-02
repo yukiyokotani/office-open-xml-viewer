@@ -1416,6 +1416,9 @@ export interface TableColumnLayoutInput {
    * past the saved grid toward their maximum content width; 'nonbinding'
    * only when every maximum fits the ceiling together. */
   readonly growUnpreferredColumns?: boolean | 'nonbinding';
+  /** The text band the intrinsic maxima were capped at; a 'nonbinding'
+   * fit must stay strictly inside it, so no maximum was capped. */
+  readonly contentBandPt?: number;
   readonly gridWidthsPt: readonly number[];
   readonly gridWidthKeys?: readonly (string | null)[];
   readonly tablePreferredWidthPt: number | null;

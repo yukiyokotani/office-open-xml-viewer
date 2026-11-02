@@ -356,3 +356,14 @@ describe('content-fit width inputs (#2065 review round 3)', () => {
     }
   }, 60_000);
 });
+
+describe('content-fit nonbinding gate (#2065 review round 4)', () => {
+  it('keeps the previous solve when a negative indent enlarges the ceiling past binding content', () => {
+    const long = 'w '.repeat(100).trim();
+    for (const mode of [11, 12, 14, 15]) {
+      const table = tableGeometry('body', tableXml({ ...CONTENT_SIZED, jc: 'center', label: 'Q', indent: -360 })
+        .replace('<w:t>b</w:t>', `<w:t>${long}</w:t>`), 'Q', mode);
+      expect(table.widthPt, `${mode}`).toBeCloseTo(200, 6);
+    }
+  }, 60_000);
+});
