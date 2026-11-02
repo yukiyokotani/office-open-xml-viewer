@@ -756,6 +756,8 @@ export interface ParagraphLayout extends LayoutNodeBase {
    * shape the unconsumed suffix at its own width through the same paragraph engine. */
   readonly noteLineEndBoundaries?: readonly LineBoundary[];
   readonly noteSourceStart?: ParagraphFragmentCursor;
+  /** Its note boundaries are source run/UTF-16 positions, not shaped segments. */
+  readonly noteSourceWindow?: true;
   readonly borders: readonly BorderSegment[];
   readonly shading?: FillPaint;
   readonly resources: readonly InlineResourceLayout[];
