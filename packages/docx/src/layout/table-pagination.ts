@@ -154,6 +154,9 @@ export interface TableFragmentContext {
   readonly oversizedCellPolicy?: 'overflow-first-unit';
   /** Only over-capacity notes use the immutable source's cached suffix metrics. */
   readonly noteContinuation?: boolean;
+  /** Recovery-only debit before immutable source scans, including cache misses.
+   * Shares the note's allowance across continuations, trials and field passes. */
+  readonly chargeSourceScan?: (units: number) => void;
   readonly page: TableFragmentPageContext;
   readonly floatingTableFrames?: Readonly<{
     page: FloatingTableReferenceFramesPt['page'];
@@ -310,6 +313,7 @@ function nestedTableFragmentContext(
   if (!cells) {
     const indexed = new Map<string, TableCellLayout>();
     for (const row of source.layout.rows) for (const cell of row.cells) {
+      context.chargeSourceScan?.(1);
       // Preserve the original first-match lookup for projected cell owners.
       if (!indexed.has(cell.id)) indexed.set(cell.id, cell);
     }
@@ -738,7 +742,7 @@ function layoutNestedWholeAt(
     nested, { ...nested.input, rows }, context.placement, context.services,
   ).layout;
   const placedWhole: PlacedWholeLayouts = new Map();
-  const placements: readonly (RowPagePlacement | null)[] = needsNestedPageOrigins(nested)
+  const placements: readonly (RowPagePlacement | null)[] = needsNestedPageOrigins(nested, context.chargeSourceScan)
     ? sourceRows.map((row) => rowPagePlacement(nested, row, 'source', context, placedWhole))
     : [];
   const origin = context.pagePlacement?.translationPt;
@@ -918,7 +922,7 @@ function rowPagePlacement(
     && cellIndex === 0 && blockIndex === 0
     && wordGridFramePreservesEmptyCarrierReference(row.cells[cellIndex]!)
   );
-  if (!rowNeedsPageOrigins(source, row) && !keepsInsertionReference(0, 0)) return null;
+  if (!rowNeedsPageOrigins(source, row, context.chargeSourceScan) && !keepsInsertionReference(0, 0)) return null;
   const owner = context.pagePlacement;
   if (!owner) return null;
   const translation = owner.translationPt;
@@ -936,7 +940,7 @@ function rowPagePlacement(
       const laidOutCell = laidOutRow.cells[cellIndex];
       const start = firstBlock(cellIndex);
       if (!laidOutCell || !cell.blocks.slice(start).some((block) => (
-        blockNeedsPageOrigin(source, block) || keepsInsertionReference(cellIndex, start)
+        blockNeedsPageOrigin(source, block, context.chargeSourceScan) || keepsInsertionReference(cellIndex, start)
       ))) return UNPLACED_CELL;
       const placedAt = (blockIndex: number) => laidOutCell.blocks[blockIndex - start];
       const cellTopPt = translation.yPt + laidOutCell.flowBounds.yPt;
@@ -946,7 +950,7 @@ function rowPagePlacement(
       for (let blockIndex = start; blockIndex < cell.blocks.length; blockIndex += 1) {
         const block = cell.blocks[blockIndex]!;
         const placed = placedAt(blockIndex);
-        if (!placed || (!blockNeedsPageOrigin(source, block)
+        if (!placed || (!blockNeedsPageOrigin(source, block, context.chargeSourceScan)
           && !keepsInsertionReference(cellIndex, blockIndex))) continue;
         const placedTopPt = cellTopPt + placed.offsetPt;
         if (block.layout.kind === 'table') {
@@ -1118,7 +1122,7 @@ function resolveFinalFrameChild<R extends Readonly<{ placement: ResolvedFloating
 ): R {
   // The placement being resolved already found this child.
   const nested = source.nestedById[occurrence.tableId]!;
-  if (!hasPagePlacedContent(nested) || !context.pagePlacement) return resolveWith(nested.layout);
+  if (!hasPagePlacedContent(nested, context.chargeSourceScan) || !context.pagePlacement) return resolveWith(nested.layout);
   const hostCell = floatingTableIndexOf(source).cellById.get(occurrence.hostCellId);
   if (!hostCell) throw new LayoutInvariantError('INVALID_REFERENCE', `${occurrence.hostCellId} is not a cell`);
   // The child is acquired in its host cell's content box (table-acquisition.ts).
@@ -2150,14 +2154,15 @@ export function takeTableFragment(
 const noteSourceMetrics = new WeakMap<RetainedTableAcquisition, {
   needsOrigins: boolean; suffixHeights: Float64Array;
 }>();
-function noteMetrics(source: RetainedTableAcquisition) {
+function noteMetrics(source: RetainedTableAcquisition, chargeWork?: (units: number) => void) {
   let metrics = noteSourceMetrics.get(source);
   if (!metrics) {
     const suffixHeights = new Float64Array(source.layout.rows.length + 1);
     for (let i = source.layout.rows.length - 1; i >= 0; i--) {
+      chargeWork?.(1);
       suffixHeights[i] = suffixHeights[i + 1]! + Math.max(0, source.layout.rows[i]!.heightPt);
     }
-    metrics = { needsOrigins: needsNestedPageOrigins(source), suffixHeights };
+    metrics = { needsOrigins: needsNestedPageOrigins(source, chargeWork), suffixHeights };
     noteSourceMetrics.set(source, metrics);
   }
   return metrics;
@@ -2277,7 +2282,7 @@ function takeTableFragmentPass(
   // Acquisition-time tracks of rows whose nested content is placed per page
   // (re-acquired anchor or text box paragraphs) are not their occurrence
   // tracks, so they never admit the remainder.
-  const metrics = context.noteContinuation ? noteMetrics(source) : undefined;
+  const metrics = context.noteContinuation ? noteMetrics(source, context.chargeSourceScan) : undefined;
   const retainedRemainderFits = cursor.rowFragmentIndex === 0
     && cursor.cells.length === 0
     && !(metrics ? metrics.needsOrigins : needsNestedPageOrigins(source))
@@ -2434,7 +2439,7 @@ function takeTableFragmentPass(
         : null;
     };
     const continuing = rowCursor.rowFragmentIndex > 0;
-    const cutRow = rowNeedsPageOrigins(source, occurrenceRow)
+    const cutRow = rowNeedsPageOrigins(source, occurrenceRow, context.chargeSourceScan)
       ? placeRowNestedContent(
         source, occurrenceRow, () => selected.map((item) => item.input), ownership, context,
         pageOriginTracks, rowCursor, cutOf, frameAt(position, hint?.cut),

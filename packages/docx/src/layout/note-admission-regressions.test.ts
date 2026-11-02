@@ -10,6 +10,7 @@ import type { BodyElement, DocParagraph, DocxDocumentModel } from '../types.js';
 import type { DocumentLayout, NoteLayout, PaintNode } from './types.js';
 import { endnoteIdsInRetainedSlice, footnoteIdsInRetainedSlice } from './note-reference-ownership.js';
 import * as tableLayout from './table.js';
+import * as tableAcquisition from './table-acquisition.js';
 import * as budgets from './resource-budgets.js';
 import * as runtimeState from './runtime-state.js';
 import * as noteColumns from './note-column-acquisition.js';
@@ -667,6 +668,80 @@ describe('reviewed note admission regressions', () => {
     expect(layout.pages.length).toBeLessThanOrEqual(3);
     expect(notes(layout)[0]!.story.blocks.map(text).join('')).toContain('n1;');
   });
+
+  it('keeps continued tall-row recovery block reads linear under source doubling', () => {
+    const results: { n: number; reads: number; ms: number }[] = [];
+    for (const n of [512, 1024, 2048, 4096]) {
+      let reads = 0;
+      const original = tableAcquisition.acquireRetainedTable;
+      const spy = vi.spyOn(tableAcquisition, 'acquireRetainedTable').mockImplementation((...args) => {
+        const acquired = original(...args);
+        return { ...acquired, input: { ...acquired.input, rows: acquired.input.rows.map(row => ({
+          ...row, cells: row.cells.map(cell => ({ ...cell,
+            blocks: new Proxy([...cell.blocks], { get(target, key, receiver) {
+              if (typeof key === 'string' && /^\d+$/.test(key)) reads++;
+              return Reflect.get(target, key, receiver);
+            } }),
+          })),
+        })) } };
+      });
+      try {
+        const content = Array.from({ length: n }, (_, i) => paragraph(`p${i};`));
+        const started = performance.now();
+        const layout = render(document('footnote', [table(content)], 15), false);
+        const ms = Math.round(performance.now() - started);
+        expectConserved(layout, { '7': content.map((_, i) => `p${i};`).join('') });
+        results.push({ n, reads, ms });
+      } finally { spy.mockRestore(); }
+    }
+    process.stdout.write(JSON.stringify({ shape: 'continued-tall-row', results }) + '\n');
+    for (let i = 1; i < results.length; i++) {
+      // Labels all fit one line; page/column geometry and the two convergence
+      // passes stay fixed. Doubling doubles source visits and band selection,
+      // plus a partial boundary band. Allow 10% slack over 2x at >=512 blocks
+      // (2.2x); the old full-row scan on every cut approaches 4x.
+      expect(results[i]!.reads).toBeLessThanOrEqual(2.2 * results[i - 1]!.reads);
+    }
+  }, 60_000);
+
+  it.each(['rowNeedsPageOrigins', 'retainedTableAcquisitionIsReusableAcrossPages'] as const)(
+    'charges repeated %s scans to the note-local recovery allowance', predicate => {
+      let originalFailure: Error | undefined;
+      let attempts = 0;
+      const recover = NoteOverflowPolicy.prototype.recover;
+      const policy = vi.spyOn(NoteOverflowPolicy.prototype, 'recover').mockImplementation(function (this: NoteOverflowPolicy, error) {
+        if (error instanceof NoteOverflowRecoveryRequired) originalFailure ??= error.failure;
+        return recover.call(this, error);
+      });
+      const rowPredicate = tableAcquisition.rowNeedsPageOrigins;
+      const reusePredicate = tableAcquisition.retainedTableAcquisitionIsReusableAcrossPages;
+      const repeatScan = (scan: () => boolean) => {
+        // Model a future unbounded inner pagination loop. Real production
+        // scans must debit before work even without source/page progress.
+        for (let i = 0; i < 100_000; i++) { attempts++; scan(); }
+        throw new Error('Recovery did not stop source scans');
+      };
+      const scan = predicate === 'rowNeedsPageOrigins'
+        ? vi.spyOn(tableAcquisition, predicate).mockImplementation((source, row, charge) => {
+            if (!charge) return rowPredicate(source, row);
+            // A fresh immutable occurrence forces a real predicate cache miss.
+            return repeatScan(() => rowPredicate(source, { ...row }, charge));
+          })
+        : vi.spyOn(tableAcquisition, predicate).mockImplementation((source, charge) => {
+            if (!charge) return reusePredicate(source);
+            return repeatScan(() => reusePredicate({ ...source }, charge));
+          });
+      try {
+        let failure: unknown;
+        try {
+          render(document('footnote', [table(Array.from({ length: 30 }, (_, i) => paragraph(`p${i};`)))], 15), false);
+        } catch (error) { failure = error; }
+        expect(originalFailure).toMatchObject({ name: 'FootnoteAdmissionOverflowError' });
+        expect(failure).toBe(originalFailure);
+        expect(attempts).toBeGreaterThan(1);
+        expect(attempts).toBeLessThan(100_000);
+      } finally { scan.mockRestore(); policy.mockRestore(); }
+    });
 
   it.each([40, 80, 160])('bounds whole-story layoutTable work linearly for %i independent tables', count => {
     const spy = vi.spyOn(tableLayout, 'layoutTable');

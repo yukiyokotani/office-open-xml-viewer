@@ -12,6 +12,7 @@ const sources = new WeakMap<TableLayout, Readonly<{
   services: LayoutServices;
   page: TableFragmentPageContext;
   splittable: boolean;
+  chargeSourceScan?: (units: number) => void;
 }>>();
 const continuations = new WeakMap<TableFragmentCursor, NonNullable<ReturnType<typeof sources.get>>>();
 const destinations = new WeakMap<NoteLayout, TableFragmentPageContext>();
@@ -26,10 +27,12 @@ export function registerFootnoteTableDestination(note: NoteLayout, page: TableFr
 export function registerFootnoteTable(
   layout: TableLayout, acquisition: RetainedTableAcquisition, services: LayoutServices,
   page: TableFragmentPageContext,
+  chargeSourceScan?: (units: number) => void,
 ): void {
   const input = { ...acquisition.input, flowDomainId: layout.flowDomainId };
   sources.set(layout, { acquisition: { ...acquisition, input }, services, page,
-    splittable: retainedTableAcquisitionIsReusableAcrossPages(acquisition) });
+    chargeSourceScan,
+    splittable: retainedTableAcquisitionIsReusableAcrossPages(acquisition, chargeSourceScan) });
 }
 
 /** Library content-retention policy, not an Office row-cut observation.
@@ -65,6 +68,7 @@ export function partitionFootnoteTable(
   const context: TableFragmentContext = {
     availableHeightPt: bounds.heightPt,
     noteContinuation: true,
+    chargeSourceScan: source.chargeSourceScan,
     // A fit trial may defer to another band; only the explicit minimum grants
     // the first-unit over-band fallback. These are capacity sentinels,
     // not fitted page/row dimensions.

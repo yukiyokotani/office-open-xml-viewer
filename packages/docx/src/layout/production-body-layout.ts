@@ -1518,6 +1518,14 @@ function layoutBodyStory(
   });
   if ((request.source.story === 'footnote' || request.source.story === 'endnote')
     && noteOverflowAllowed(services, request.source.story, [request.source.storyInstance])) {
+    const kind = request.source.story;
+    const noteId = request.source.storyInstance;
+    const policy = noteOverflowPolicyOf(services);
+    const sourceUnits = footnoteAcquisitionWorkBudgetOf(services)!.sourceUnits(root);
+    // Recovery's retained-table predicates/indexes visit source independently
+    // of acquisition misses. Debit their actual work against the same note's
+    // 32*(source units+1) allowance; retries preserve the original v0.89 error.
+    const chargeSourceScan = (units: number) => policy?.charge(kind, noteId, sourceUnits, units);
     retained.blocks.forEach((block, index) => {
       const original = acquired.blocks[index];
       const acquisition = original && storyTableAcquisitions.get(original.id);
@@ -1525,7 +1533,7 @@ function layoutBodyStory(
         physicalPageIndex: request.pageIndex,
         displayPageNumber: candidate.displayPageNumber ?? request.pageIndex + 1,
         occurrenceId: block.id,
-      });
+      }, chargeSourceScan);
     });
   }
   return retained;
