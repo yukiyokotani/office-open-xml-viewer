@@ -4,13 +4,21 @@ import { projectBodyOccurrence } from './occurrence-projection.js';
 import { isDeepFrozenPlainDataRoot } from './plain-data.js';
 import { placeNoteSeparatorOccurrence } from './reserved-note-separators.js';
 import { unionLayoutRects } from './rect-union.js';
-import type { NoteLayout, NoteSeparatorLayout, PaintNode, ParagraphLayout, StoryLayout } from './types.js';
+import { partitionFootnoteTable } from './footnote-table-fragmentation.js';
+import { noteBlockAcquirer } from './note-block-acquisition.js';
+import type { TableFragmentCursor } from './table-pagination.js';
+import type { NoteLayout, NoteSeparatorLayout, PaintNode, ParagraphLayout, SourceRef, StoryLayout, TableLayout } from './types.js';
+
+type ChargePartitionWork = (source: SourceRef, units: number) => void;
 
 export interface FootnoteCursor {
   readonly sourceContinuation?: NoteSourceContinuation;
   readonly acquisitionStart?: NoteSourceContinuation;
   readonly blockIndex: number;
+  /** Paragraph line cut; zero for a table (tableCursor owns its row cut). */
   readonly lineIndex: number;
+  /** Table paginator cut (rows/cell units), independent of note lineIndex. */
+  readonly tableCursor?: TableFragmentCursor;
   readonly inlineExtentPt: number;
   readonly sourcePosition: Readonly<{ runIndex: number; offset: number }> | number | null;
 }
@@ -24,7 +32,8 @@ interface ParagraphContinuationIndex {
   readonly runStarts: ReadonlyMap<number, number>;
 }
 
-function indexParagraph(block: ParagraphLayout): ParagraphContinuationIndex {
+function indexParagraph(block: ParagraphLayout, charge?: ChargePartitionWork): ParagraphContinuationIndex {
+  charge?.(block.source, block.lines.length);
   const advances = new Float64Array(block.lines.length + 1);
   const runStarts = new Map<number, number>();
   const record = (runIndex: number, start: number) =>
@@ -34,8 +43,10 @@ function indexParagraph(block: ParagraphLayout): ParagraphContinuationIndex {
     const gap = previous ? Math.max(0, line.bounds.yPt - (previous.bounds.yPt + previous.advancePt)) : 0;
     advances[index + 1] = advances[index]! + gap + line.advancePt;
     if (!Number.isFinite(advances[index + 1])) throw new RangeError('Invalid footnote line advance');
+    charge?.(block.source, line.placements.length);
     for (const placement of line.placements) {
       if (placement.kind === 'text' && placement.sourceRuns) {
+        charge?.(block.source, placement.sourceRuns.length);
         for (const run of placement.sourceRuns) record(run.sourceRunIndex, run.range.start);
       } else if ((placement.kind === 'text' || placement.kind === 'resource')
         && placement.sourceRunIndex !== undefined) record(placement.sourceRunIndex, placement.range.start);
@@ -60,7 +71,9 @@ function lineSourcePosition(block: ParagraphLayout, lineIndex: number,
     ? first.sourceRunIndex : undefined);
   if (first && runIndex !== undefined) {
     const runStart = index.runStarts.get(runIndex) ?? first.range.start;
-    return Object.freeze({ runIndex, offset: first.range.start - runStart });
+    const windowStart = block.noteSourceWindow ? block.noteSourceStart?.boundary : undefined;
+    return Object.freeze({ runIndex, offset: first.range.start - runStart
+      + (windowStart?.segIndex === runIndex ? windowStart.charOffset : 0) });
   }
   // Atomic controls without source-run metadata use their occurrence offset.
   // A changed offset is rejected conservatively rather than guessing a cut.
@@ -81,8 +94,8 @@ function sameSourcePosition(a: FootnoteCursor['sourcePosition'], b: FootnoteCurs
  * the bottom, even when its baseline fits; increasing capacity by 2pt retains
  * it. Baseline-only fitting or an extra descent allowance is not supported.
  * The following page owns a
- * fresh note separator and resumes at the first unpainted line. A note whose
- * first line cannot fit is left to ordinary reference relocation.
+ * fresh note separator and resumes at the first unpainted line or table. A
+ * note whose first complete unit cannot fit uses ordinary reference relocation.
  */
 export function partitionFootnote(
   acquired: NoteLayout,
@@ -117,11 +130,13 @@ export type FootnotePartition = Readonly<{
  * already reserved the page's single notice outside the capacity (because a
  * later note of the same body unit may continue): a continuing fragment
  * still carries the notice occurrence but is not charged it a second time.
- * `minimum` keeps only the first real line (plus any leading empty
+ * `minimum` keeps only the first real line or table unit (plus any leading empty
  * paragraphs) regardless of capacity and reserves no notice: the legal
  * minimum head that pagination must leave for a later reference in the same
- * mandatory body unit. A note that cannot partition still returns null. */
-export type FootnotePartitionExtent = 'largest' | 'largest-with-reserved-notice' | 'minimum';
+ * mandatory body unit. `overflow` is an explicit fresh-band last resort: keep
+ * that minimum with its full ink even beyond capacity; acquisition first tries
+ * ordinary fitting. Frames and page-dependent tables are atomic blocks. */
+export type FootnotePartitionExtent = 'largest' | 'largest-with-reserved-notice' | 'minimum' | 'overflow';
 
 /** Lazily acquired, unplaced reserved continuation notice occurrence; null when
  * the story is absent, empty, guard-only or fully hidden. */
@@ -132,13 +147,16 @@ export type ContinuationNoticeProvider = () => NoteSeparatorLayout | null;
  * only engine-sealed roots, never arbitrary shallow-frozen/mutable callers.
  * Admission uses cumulative sums, but final fragment advance keeps the shared
  * paragraph finalizer's addition order. Page-local reacquisition gets a new key. */
-export function createFootnotePartitioner(): typeof partitionFootnote {
+export function createFootnotePartitioner(
+  allowOverflow: (note: NoteLayout) => boolean = () => false,
+  charge?: ChargePartitionWork,
+): typeof partitionFootnote {
   const indexes = new WeakMap<ParagraphLayout, ParagraphContinuationIndex>();
   const supportedStories = new WeakMap<StoryLayout, boolean>();
   const indexOf = (block: ParagraphLayout) => {
     let index = indexes.get(block);
     if (!index) {
-      index = indexParagraph(block);
+      index = indexParagraph(block, charge);
       if (isDeepFrozenPlainDataRoot(block)) indexes.set(block, index);
     }
     return index;
@@ -152,11 +170,17 @@ export function createFootnotePartitioner(): typeof partitionFootnote {
     return supported;
   };
   return (acquired, cursor, capacityPt, continuationNotice, extent = 'largest') => {
+    const recovery = allowOverflow(acquired);
+    if (extent === 'overflow' && !recovery) extent = 'largest';
     if (acquired.trailing) throw new Error('An acquired note cannot own a continuation notice');
     if (extent === 'minimum') {
-      return partitionIndexedFootnote(acquired, cursor, Number.MAX_VALUE, indexOf, supports, 1);
+      // The minimum is a measured charge, not a claim that this unit fits.
+      return partitionIndexedFootnote(acquired, cursor, Number.MAX_VALUE, indexOf, supports, recovery, 1, charge);
     }
-    const partition = partitionIndexedFootnote(acquired, cursor, capacityPt, indexOf, supports);
+    // Only admission on a fresh band requests overflow after fitting failed.
+    const partition = extent === 'overflow'
+      ? partitionIndexedFootnote(acquired, cursor, Number.MAX_VALUE, indexOf, supports, recovery, 1, charge)
+      : partitionIndexedFootnote(acquired, cursor, capacityPt, indexOf, supports, recovery, Infinity, charge);
     if (!partition?.nextCursor || !continuationNotice) return partition;
     const notice = continuationNotice();
     if (!notice) return partition;
@@ -168,10 +192,10 @@ export function createFootnotePartitioner(): typeof partitionFootnote {
     // than retaining a separator/notice-only fragment. When the caller has
     // already reserved the notice outside the capacity, the first partition
     // is final and only carries the occurrence.
-    const reserved = extent === 'largest-with-reserved-notice'
+    const reserved = extent === 'largest-with-reserved-notice' || extent === 'overflow'
       ? partition
       : partitionIndexedFootnote(acquired, cursor,
-        Math.max(0, capacityPt - notice.advancePt), indexOf, supports);
+        Math.max(0, capacityPt - notice.advancePt), indexOf, supports, recovery, Infinity, charge);
     if (!reserved) return null;
     if (!reserved.nextCursor) throw new Error('Footnote partition completed under a smaller capacity');
     const fragment = reserved.fragment;
@@ -183,7 +207,8 @@ export function createFootnotePartitioner(): typeof partitionFootnote {
     const advancePt = fragment.advancePt + trailing.advancePt;
     const bounds = Object.freeze({ ...fragment.flowBounds, heightPt: advancePt });
     return Object.freeze({
-      fragment: Object.freeze({ ...fragment, flowBounds: bounds, inkBounds: bounds, advancePt, trailing }),
+      fragment: Object.freeze({ ...fragment, flowBounds: bounds,
+        inkBounds: recovery ? Object.freeze(unionLayoutRects([fragment.inkBounds, bounds])!) : bounds, advancePt, trailing }),
       nextCursor: reserved.nextCursor,
       hostShiftPt: reserved.hostShiftPt,
     });
@@ -193,39 +218,50 @@ export function createFootnotePartitioner(): typeof partitionFootnote {
 function partitionIndexedFootnote(acquired: NoteLayout, cursor: FootnoteCursor | null, capacityPt: number,
   indexOf: (block: ParagraphLayout) => ParagraphContinuationIndex,
   supports: (story: StoryLayout) => boolean,
-  /** Most real lines to keep; the minimum-head extent keeps exactly one. */
+  recovery: boolean,
+  /** Most real lines/table units to keep; minimum retains one. */
   lineBudget = Number.POSITIVE_INFINITY,
+  charge?: ChargePartitionWork,
 ): FootnotePartition | null {
   if (!Number.isFinite(capacityPt) || capacityPt < 0) throw new RangeError('Invalid footnote capacity');
+  const acquireBlock = recovery ? noteBlockAcquirer(acquired) : undefined;
   // A cursor counts shaped lines, so continuing it in a different text width
   // could silently skip or repeat source text. The caller must reacquire the
   // source suffix and start a fresh line cursor before changing widths.
-  if (cursor && cursor.inlineExtentPt !== acquired.flowBounds.widthPt) {
+  if (cursor && !cursor.tableCursor && cursor.inlineExtentPt !== acquired.flowBounds.widthPt) {
     throw new Error('Footnote continuation across different text widths is unsupported');
   }
-  if (cursor) {
-    const block = acquired.story.blocks[cursor.blockIndex];
-    if (!block || block.kind !== 'paragraph'
-      || !sameSourcePosition(cursor.sourcePosition, lineSourcePosition(block, cursor.lineIndex, indexOf(block)))) {
-      throw new Error('Footnote continuation source cut changed during reflow');
-    }
+  // Only destination-dependent recovery blocks can replace a shaped epoch.
+  // Reacquire at its source cursor, then start at line zero of that suffix;
+  // an old line index is never meaningful after PAGE changes wrapping.
+  const startBlock = cursor?.blockIndex ?? 0;
+  const originalStart = acquired.story.blocks[startBlock];
+  const refreshedStart = originalStart && (originalStart.kind === 'paragraph' || originalStart.kind === 'table') && acquireBlock
+    ? acquireBlock(originalStart, cursor?.sourceContinuation, capacityPt, lineBudget) : originalStart;
+  const resumedSource = cursor?.sourceContinuation;
+  const sourceReflow = refreshedStart?.kind === 'paragraph' && resumedSource !== undefined
+    && refreshedStart.noteSourceStart !== undefined
+    && JSON.stringify(refreshedStart.noteSourceStart) === JSON.stringify(resumedSource.paragraph);
+  if (cursor && (!refreshedStart || (refreshedStart.kind !== 'paragraph' && refreshedStart.kind !== 'table')
+    || (!sourceReflow && !sameSourcePosition(cursor.sourcePosition, refreshedStart.kind === 'table'
+      ? null : lineSourcePosition(refreshedStart, cursor.lineIndex, indexOf(refreshedStart))))
+    || (refreshedStart.kind === 'table' && cursor.lineIndex !== 0))) {
+    throw new Error('Footnote continuation source cut changed during reflow');
   }
-  if (cursor === null && acquired.advancePt <= capacityPt && lineBudget === Number.POSITIVE_INFINITY) {
+  if (!acquireBlock && cursor === null && acquired.advancePt <= capacityPt && lineBudget === Number.POSITIVE_INFINITY) {
     return Object.freeze({ fragment: acquired, nextCursor: null, hostShiftPt: 0 });
   }
+  if (!recovery && !supports(acquired.story)) return null;
   let remainingLines = lineBudget;
-  // The line cursor owns ordinary paragraph flow only. Table rows and framed
-  // paragraphs need their own placement/continuation contract; a frame's
-  // independent position must not be folded as an adjacent paragraph margin.
-  // Relocate their reference until they fit whole, or let admission report its
-  // capacity error. Never retain clipped or page-stale unsupported content.
-  if (!supports(acquired.story)) return null;
+  // The unchanged ordinary path partitions paragraph-only stories and keeps
+  // tables/frames whole. Only a previously rejected group may enter complete-
+  // block/table-row cuts and indivisible overflow below. These extensions are
+  // library content-retention policy, not an Office pagination claim.
   // The scalar separator band or the native leading occurrence's advance.
   const separatorPt = acquired.advancePt - acquired.story.advancePt;
   let usedPt = separatorPt;
   if (usedPt >= capacityPt) return null;
   const blocks: PaintNode[] = [];
-  const startBlock = cursor?.blockIndex ?? 0;
   let nextCursor: FootnoteCursor | null = null;
   let hostShiftPt: number | null = null;
   // `projected` is `source` placed in the fragment; its first line is source
@@ -239,12 +275,16 @@ function partitionIndexedFootnote(acquired: NoteLayout, cursor: FootnoteCursor |
       ? first.bounds.yPt - source.lines[lineStart]!.bounds.yPt
       : projected.flowBounds.yPt - source.flowBounds.yPt;
   };
-  const cut = (block: ParagraphLayout, blockIndex: number, lineIndex: number): FootnoteCursor =>
+  const cut = (block: ParagraphLayout | TableLayout, blockIndex: number, lineIndex: number): FootnoteCursor =>
     Object.freeze({ blockIndex, lineIndex, inlineExtentPt: acquired.flowBounds.widthPt,
-      sourcePosition: lineSourcePosition(block, lineIndex, indexOf(block)),
+      sourcePosition: block.kind === 'table' ? null : lineSourcePosition(block, lineIndex, indexOf(block)),
       ...(acquired.acquisitionSourceStart ? { acquisitionStart: acquired.acquisitionSourceStart } : {}),
-      ...(block.noteLineEndBoundaries ? { sourceContinuation: Object.freeze({
+      ...(block.kind === 'table' ? { sourceContinuation: Object.freeze({
+        blockIndex: block.source.path[0]!, paragraph: Object.freeze({ boundary: null }),
+      }) } : {}),
+      ...(block.kind === 'paragraph' && block.noteLineEndBoundaries ? { sourceContinuation: Object.freeze({
         blockIndex: block.source.path[0]!,
+        ...(block.noteSourceWindow ? { sourceRunCursor: true as const } : {}),
         paragraph: Object.freeze({
           boundary: lineIndex > 0 ? block.noteLineEndBoundaries[lineIndex - 1]!
             : block.noteSourceStart?.boundary ?? null,
@@ -253,8 +293,11 @@ function partitionIndexedFootnote(acquired: NoteLayout, cursor: FootnoteCursor |
       }) } : {}),
     });
   for (let blockIndex = startBlock; blockIndex < acquired.story.blocks.length; blockIndex += 1) {
-    const block = acquired.story.blocks[blockIndex]!;
-    if (block.kind !== 'paragraph') throw new Error('Unsupported footnote block');
+    charge?.(acquired.source, 1);
+    const original = acquired.story.blocks[blockIndex]!;
+    const block = blockIndex === startBlock ? refreshedStart! : remainingLines > 0 && (original.kind === 'paragraph' || original.kind === 'table') && acquireBlock
+      ? acquireBlock(original, undefined, Math.max(0, capacityPt - usedPt), remainingLines) : original;
+    if (block.kind !== 'paragraph' && block.kind !== 'table') throw new Error('Unsupported footnote block');
     // Story acquisition already folds §17.3.1.9 contextualSpacing and
     // §17.3.1.33 adjacent margins. Preserve its cursor delta within this
     // fragment rather than reintroducing each preceding space-after. A new
@@ -262,9 +305,9 @@ function partitionIndexedFootnote(acquired: NoteLayout, cursor: FootnoteCursor |
     // and after ownership remain the shared paragraph slice contract's values.
     if (blocks.length > 0) {
       const previous = acquired.story.blocks[blockIndex - 1]!;
-      usedPt += block.flowBounds.yPt - (previous.flowBounds.yPt + previous.advancePt);
+      usedPt += original.flowBounds.yPt - (previous.flowBounds.yPt + previous.advancePt);
     }
-    const place = (paragraph: typeof block) => projectBodyOccurrence(paragraph, {
+    const place = <T extends ParagraphLayout | TableLayout>(paragraph: T): T => projectBodyOccurrence(paragraph, {
       occurrenceId: `${acquired.id}:block:${blockIndex}`,
       destination: {
         coordinateSpace: 'logical-page-points',
@@ -273,12 +316,51 @@ function partitionIndexedFootnote(acquired: NoteLayout, cursor: FootnoteCursor |
           yPt: acquired.story.flowBounds.yPt + usedPt - separatorPt - paragraph.flowBounds.yPt },
       },
     });
-    const lineStart = blockIndex === startBlock ? (cursor?.lineIndex ?? 0) : 0;
-    // The minimum-head extent ends after its first real line, exactly where a
-    // capacity-bound partition would cut before an unfitting next line.
+    const lineStart = blockIndex === startBlock && !sourceReflow ? (cursor?.lineIndex ?? 0) : 0;
+    // The minimum head ends after its first real line or table block, exactly
+    // where a capacity-bound partition would cut before the next unit.
     if (remainingLines <= 0) {
       nextCursor = cut(block, blockIndex, lineStart);
       break;
+    }
+    if (block.kind === 'table') {
+      const tableCursor = blockIndex === startBlock ? cursor?.tableCursor : undefined;
+      const partial = !acquired.story.bandDependent && block.ordinaryFlow
+        && (tableCursor || usedPt + block.advancePt > capacityPt + 1e-6 || lineBudget === 1)
+        ? partitionFootnoteTable(block, tableCursor, Math.max(0, capacityPt - usedPt), lineBudget === 1, acquired)
+        : null;
+      if (partial) {
+        blocks.push(place(partial.fragment));
+        usedPt += partial.fragment.advancePt;
+        remainingLines -= 1;
+        if (partial.nextCursor) {
+          nextCursor = Object.freeze({ ...cut(block, blockIndex, 0), tableCursor: partial.nextCursor });
+          break;
+        }
+        continue;
+      }
+      if (usedPt + block.advancePt > capacityPt + 1e-6 || tableCursor) {
+        nextCursor = cut(block, blockIndex, 0);
+        break;
+      }
+      blocks.push(place(block));
+      usedPt += block.advancePt;
+      // A minimum head may be a table: charge its complete content once,
+      // rather than skipping it to find a later paragraph line.
+      remainingLines -= 1;
+      continue;
+    }
+    // A frame group already owns its placement. Until it has an internal
+    // continuation contract, retain its complete block as an atomic unit.
+    if (!block.ordinaryFlow) {
+      if (usedPt + block.advancePt > capacityPt) {
+        nextCursor = cut(block, blockIndex, 0);
+        break;
+      }
+      retain(place(block), block, 0);
+      usedPt += block.advancePt;
+      remainingLines -= 1;
+      continue;
     }
     if (block.lines.length === 0) {
       if (usedPt + block.advancePt > capacityPt) {
@@ -301,6 +383,7 @@ function partitionIndexedFootnote(acquired: NoteLayout, cursor: FootnoteCursor |
       + Math.max(0, first.bounds.yPt - (block.flowBounds.yPt + block.spacing.beforePt))
       : -Math.max(0, first.bounds.yPt - (previous!.bounds.yPt + previous!.advancePt));
     while (low <= high) {
+      charge?.(block.source, 1);
       const end = Math.floor((low + high) / 2);
       const advancePt = leadingPt + index.advances[end]! - index.advances[lineStart]!
         + (end === block.lines.length ? block.spacing.afterPt : 0);
@@ -313,9 +396,12 @@ function partitionIndexedFootnote(acquired: NoteLayout, cursor: FootnoteCursor |
       nextCursor = cut(block, blockIndex, lineStart);
       break;
     }
+    charge?.(block.source, admitted - lineStart);
+    for (let i = lineStart; i < admitted; i++) charge?.(block.source, block.lines[i]!.placements.length);
     const admittedBlock = sliceParagraphLayout(block, {
       lineStart, lineEnd: admitted,
-      continuesFromPrevious: lineStart > 0, continuesOnNext: admitted < block.lines.length,
+      continuesFromPrevious: lineStart > 0 || (sourceReflow && resumedSource!.paragraph.boundary !== null),
+      continuesOnNext: admitted < block.lines.length,
     });
     retain(place(admittedBlock), block, lineStart);
     usedPt += admittedBlock.advancePt;
@@ -331,7 +417,7 @@ function partitionIndexedFootnote(acquired: NoteLayout, cursor: FootnoteCursor |
     ...acquired.story,
     blocks: Object.freeze(blocks),
     flowBounds: storyBounds,
-    inkBounds: storyBounds,
+    inkBounds: recovery ? Object.freeze(unionLayoutRects([storyBounds, ...blocks.map(block => block.inkBounds)])!) : storyBounds,
     advancePt: usedPt - separatorPt,
   });
   const noteBounds = Object.freeze({ ...acquired.flowBounds, heightPt: usedPt });
@@ -340,7 +426,7 @@ function partitionIndexedFootnote(acquired: NoteLayout, cursor: FootnoteCursor |
       ...acquired,
       story,
       flowBounds: noteBounds,
-      inkBounds: noteBounds,
+      inkBounds: recovery ? Object.freeze(unionLayoutRects([noteBounds, story.inkBounds])!) : noteBounds,
       advancePt: usedPt,
     }),
     nextCursor,
