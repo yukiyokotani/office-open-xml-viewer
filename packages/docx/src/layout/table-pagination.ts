@@ -1745,6 +1745,10 @@ function partialRow(
   freshAvailableHeightPt: number,
   canGainPageSpace: boolean,
   context: TableFragmentContext,
+  prefixGeometry?: Readonly<{
+    current: (row: TableRowLayoutInput) => TableRowLayout | null;
+    fresh: (row: TableRowLayoutInput) => TableRowLayout | null;
+  }>,
 ): Readonly<{
   selected: SelectedRow | null;
   next: TableFragmentCursor;
@@ -1758,17 +1762,14 @@ function partialRow(
   const verticalInsetsPt = Math.max(0, ...row.cells.map((cell) => (
     cell.margins.topPt + cell.margins.bottomPt
   )));
-  // A one-row fragment owns both outer cell-spacing bands. Reserve them before
-  // selecting legal child boundaries so layoutTable cannot grow past the page.
-  // WORD_TABLE_CELL_SPACING_GEOMETRY uses 2s at each fragment edge and
-  // independent full top/bottom cell borders. This is the same one-row box
-  // layoutTable materializes; selection must reserve it before choosing lines.
+  // Standalone reservation for the established path (also the malformed-grid
+  // fallback). Measured spaced tables below probe their complete prefix so
+  // preceding rows do not retain a second set of standalone edges.
   const separated = row.cellSpacingPt > 0 ? row.spacingGeometry : undefined;
   const spacingInsetsPt = Math.max(0, row.cellSpacingPt) * (separated ? 4 : 2)
     + 2 * (separated?.borderPt ?? 0);
-  // A continued row is materialized as an auto-height, one-row table fragment.
-  // Reserve the same page-local collapsed top/bottom half-rules that layoutTable
-  // will add to that track after the legal child boundary has been selected.
+  // A continued row has an auto-height track. The standalone path reserves
+  // the page-local collapsed top/bottom rules that layoutTable will add.
   const fragmentRow: TableRowLayoutInput = {
     ...row,
     heightPt: null,
@@ -1778,13 +1779,32 @@ function partialRow(
     ...source.input,
     rows: [fragmentRow],
   })[0] ?? 0;
+  // WORD_TABLE_CELL_SPACING_GEOMETRY: a partial row follows the same prefix
+  // as a whole row. Probe its auto-height box without content: this reserves
+  // margins, cell/table borders and gaps while releasing the preceding row's
+  // standalone bottom edge. Subtract the complete prefix from the complete
+  // band, rather than charging two standalone boxes. The fresh-page probe
+  // keeps only the leading headers that will repeat there. This reuses the
+  // established geometry; it does not infer another Office page-cut rule.
+  const emptyFragmentRow: TableRowLayoutInput | undefined = prefixGeometry && {
+    ...fragmentRow,
+    cells: fragmentRow.cells.map((cell) => ({ ...cell, blocks: [] })),
+  };
+  const prefix = emptyFragmentRow && prefixGeometry?.current(emptyFragmentRow);
+  const freshPrefix = emptyFragmentRow && prefixGeometry?.fresh(emptyFragmentRow);
   const availableContentHeightPt = Math.max(
     0,
-    availableHeightPt - verticalInsetsPt - spacingInsetsPt - boundaryInsetsPt,
+    prefix
+      ? context.availableHeightPt
+        - (prefix.flowBounds.yPt + prefix.heightPt - context.placement.cursor.yPt)
+      : availableHeightPt - verticalInsetsPt - spacingInsetsPt - boundaryInsetsPt,
   );
   const freshAvailableContentHeightPt = Math.max(
     0,
-    freshAvailableHeightPt - verticalInsetsPt - spacingInsetsPt - boundaryInsetsPt,
+    freshPrefix
+      ? context.freshPageHeightPt
+        - (freshPrefix.flowBounds.yPt + freshPrefix.heightPt - context.placement.cursor.yPt)
+      : freshAvailableHeightPt - verticalInsetsPt - spacingInsetsPt - boundaryInsetsPt,
   );
   const selectedCells = row.cells.map((cell, index) => selectCell(
     source,
@@ -2181,6 +2201,8 @@ function takeTableFragmentPass(
   let availablePt = Math.max(0, context.availableHeightPt);
   const pageOriginTracks = startFragmentRowTracks(source);
   const headerCount = leadingHeaderCount(source.input);
+  const freshHeaderRows = spacedAdmissionTracks ? source.input.rows.slice(0, headerCount) : [];
+  const freshSpacedAdmissionTracks = spacedAdmissionTracks ? tablePrefixTracks(source.input) : null;
   if (cursor.rowIndex >= headerCount && cursor.rowIndex > 0 && headerCount > 0) {
     for (let rowIndex = 0; rowIndex < headerCount; rowIndex += 1) {
       const position = selected.length;
@@ -2206,7 +2228,11 @@ function takeTableFragmentPass(
         hint?.resolved,
       );
       const header = preparedHeader.row;
-      const heightPt = paginationRowHeightForOccurrence(source, header, rowIndex, context);
+      const headerTrack = spacedAdmissionTracks?.row(admissionRows, header, context.placement);
+      const heightPt = headerTrack
+        ? headerTrack.flowBounds.yPt + headerTrack.heightPt - context.placement.cursor.yPt
+          - (context.availableHeightPt - availablePt)
+        : paginationRowHeightForOccurrence(source, header, rowIndex, context);
       if (heightPt > availablePt + EPSILON_PT) {
         return passOf({ fragment: null, nextCursor: cursor, requiresFreshPage: true });
       }
@@ -2390,12 +2416,21 @@ function takeTableFragmentPass(
 
     const canGainPageSpace = context.availableHeightPt + EPSILON_PT < context.freshPageHeightPt
       || selected.some((item) => item.ownership === 'source');
+    const prefixGeometry = spacedAdmissionTracks && freshSpacedAdmissionTracks ? {
+      current: (candidate: TableRowLayoutInput) => spacedAdmissionTracks.row(
+        admissionRows, candidate, context.placement,
+      ),
+      fresh: (candidate: TableRowLayoutInput) => freshSpacedAdmissionTracks.row(
+        rowIndex >= headerCount ? freshHeaderRows : [], candidate, context.placement,
+      ),
+    } : undefined;
     // The row is cut (or continued) here: its nested page-placed content is
     // placed against the occurrence this fragment selects, not the uncut row,
     // and so are its own positioned children's anchors.
     const cutOf = (candidate: TableRowLayoutInput): TableRowLayoutInput | null => {
       const probe = partialRow(
         source, candidate, rowCursor, availablePt, freshSourceHeightPt, canGainPageSpace, context,
+        prefixGeometry,
       );
       return probe.selected && !(probe.complete && rowCursor.rowFragmentIndex === 0)
         ? probe.selected.input
@@ -2417,6 +2452,7 @@ function takeTableFragmentPass(
     let partial = partialRow(
       source, cutRow, rowCursor, availablePt,
       freshSourceHeightPt, canGainPageSpace, context,
+      prefixGeometry,
     );
     let selectedPrepared: ReturnType<typeof finalFrameRow> | null = null;
     const visitedOwnershipStates = new Set<string>();
@@ -2442,6 +2478,7 @@ function takeTableFragmentPass(
       const reselection = partialRow(
         source, selectedPrepared.row, rowCursor, availablePt,
         freshSourceHeightPt, canGainPageSpace, context,
+        prefixGeometry,
       );
       if (!reselection.selected) {
         partial = reselection;
@@ -2471,6 +2508,9 @@ function takeTableFragmentPass(
           ? { resolvedFloatingTables: Object.freeze(ownedResolved) }
           : {}),
       });
+      const partialTrack = partial.complete && partial.next.rowIndex < source.input.rows.length
+        ? spacedAdmissionTracks?.row(admissionRows, partial.selected.input, context.placement)
+        : null;
       admissionRows.push(partial.selected.input);
       floatRegistry = Object.freeze([...floatRegistry, ...committedEntries]);
       floatParagraphId += committedEntries.length;
@@ -2478,15 +2518,17 @@ function takeTableFragmentPass(
       if (partial.complete && partial.next.rowIndex < source.input.rows.length) {
         // A completed continuation can own vertically merged content whose
         // physical track is resolved only after following logical rows join the
-        // same fragment. Keep admitting those rows by their retained tracks;
-        // the canonical materialization below remains the final fit authority
-        // and trims any over-admission at whole-row boundaries.
-        availablePt = Math.max(0, availablePt - completedPartialRowTrackHeight(
-          source,
-          partial.selected.input,
-          rowIndex,
-          context,
-        ));
+        // same fragment. The measured spaced class keeps its prefix geometry;
+        // other tables keep admitting those rows by their retained tracks.
+        // Canonical materialization remains the final fit authority below.
+        availablePt = partialTrack ? Math.max(0, context.availableHeightPt
+          - (partialTrack.flowBounds.yPt + partialTrack.heightPt - context.placement.cursor.yPt))
+          : Math.max(0, availablePt - completedPartialRowTrackHeight(
+            source,
+            partial.selected.input,
+            rowIndex,
+            context,
+          ));
         followsCompletedPartialRow = true;
         rowIndex = partial.next.rowIndex;
         continue;
