@@ -214,6 +214,8 @@ export interface BodyLayoutInput {
   readonly parserDiagnostics?: readonly LayoutDiagnostic[];
   /** §17.11 document-end note stories, in authored numbering order. */
   readonly endnoteIds?: readonly string[];
+  /** Footnote ids the body references more than once (progressive publication). */
+  readonly repeatedFootnoteIds?: readonly string[];
   readonly noteLayoutSettings?: Readonly<{
     footnotePosition: string;
     endnotePosition: string;
@@ -253,6 +255,7 @@ export interface BodyLayoutAcquisitionInput {
   readonly evenAndOddHeaders: boolean;
   readonly parserDiagnostics?: readonly LayoutDiagnostic[];
   readonly endnoteIds?: readonly string[];
+  readonly repeatedFootnoteIds?: readonly string[];
   readonly noteLayoutSettings: Readonly<{
     footnotePosition: string;
     endnotePosition: string;
@@ -408,6 +411,7 @@ export function projectBodyLayoutInput(acquired: BodyLayoutAcquisitionInput): Bo
     sequence,
     parserDiagnostics: acquired.parserDiagnostics ?? [],
     endnoteIds: acquired.endnoteIds ?? [],
+    repeatedFootnoteIds: acquired.repeatedFootnoteIds ?? [],
     noteLayoutSettings: acquired.noteLayoutSettings,
   }, 'DOCX body layout input') as BodyLayoutInput;
 }

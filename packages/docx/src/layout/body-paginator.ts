@@ -1525,8 +1525,8 @@ function* paginateBodyPassSteps(
    * from), reserve, continuation and note-area choices. Each footnote spans
    * from the first page that read its permission or holds its reference or a
    * fragment to the last such page, unbounded while it continues past the
-   * last closed page, has no closed reference yet, or was permitted during
-   * this pass. A span crossing the limit can still change at or after it,
+   * last closed page, has no closed reference yet, was permitted during this
+   * pass, or is referenced again (a permission covers every occurrence). A span crossing the limit can still change at or after it,
    * reject there, and change its earlier pages, so the limit drops to the
    * span's start, repeatedly. Endnote recovery acts only in the
    * document-end flow, so publication stops at that flow's first page. Only
@@ -1547,7 +1547,7 @@ function* paginateBodyPassSteps(
     const live = state.flow.pageIndex;
     const closedReference = new Set<string>();
     for (const [pageIndex, ids] of footnoteIdsByPage) if (pageIndex < live) ids.forEach(id => closedReference.add(id));
-    const unbounded = new Set(footnotesCarriedFromClosedPage);
+    const unbounded = new Set([...footnotesCarriedFromClosedPage, ...input.repeatedFootnoteIds ?? []]);
     for (const { kind, id } of notePolicy?.permittedSince(permissionsAtPassStart) ?? []) {
       if (kind === 'footnote') unbounded.add(id);
     }
@@ -5493,10 +5493,10 @@ function* paginateBodyWithColumnBalancingSteps(
     ? {
         get publishedPages() { return publisher.publishedPages; },
         get failed() { return publisher.failed; },
-        publish(pass: BodyPaginationPassResult, processedEntries: number, limit: number) {
+        publish(pass: BodyPaginationPassResult, processedEntries: number, limit: number, noteLimit?: NotePublicationLimit) {
           const terminal = processedEntries > lastBodyEntry
             ? terminalBodyPage(pass.layout)?.pageIndex : undefined;
-          publisher.publish(pass, processedEntries, terminal === undefined ? limit : Math.min(limit, terminal));
+          publisher.publish(pass, processedEntries, terminal === undefined ? limit : Math.min(limit, terminal), noteLimit);
         },
       } : publisher;
   let pass: BodyPaginationPassResult | null = yield* paginateBodyWithAnchorConvergenceSteps(

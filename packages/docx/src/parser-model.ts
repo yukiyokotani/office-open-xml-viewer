@@ -82,6 +82,7 @@ import {
   type BodySectionOccurrence,
 } from './layout/context.js';
 import { normalizeAdjacentTables, type AdjacentTableSequenceInput } from './layout/adjacent-tables.js';
+import { repeatedFootnoteReferenceIds } from './layout/note-reference-ownership.js';
 import { isWrapFloat } from './float-layout.js';
 import type {
   BodyLayoutAcquisitionInput,
@@ -1430,6 +1431,7 @@ export function bodyLayoutAcquisitionInput(doc: DocxDocumentModel): BodyLayoutAc
     footnoteLayoutLikeWW8: doc.settings?.footnoteLayoutLikeWW8,
     evenAndOddHeaders: doc.section.evenAndOddHeaders,
     endnoteIds: (doc.endnotes ?? []).map((note) => note.id),
+    repeatedFootnoteIds: repeatedFootnoteReferenceIds(doc.body),
     noteLayoutSettings: documentNoteLayoutSettingsInput(doc),
     pageLayoutSettings: documentPageLayoutSettingsInput(doc),
     parserDiagnostics: mapParseDiagnostics(
