@@ -230,10 +230,11 @@ function memberContext(
     && hasMeasuredCompatibilityMode
     && hasMeasuredAlignmentGeometry;
   // WORD_AUTOFIT_CONTENT_COLUMN_GROWTH: a content-sized table (decided at
-  // the logical-table boundary) grows its columns whatever its jc and mode;
-  // the ceiling stays the established one where the leading-indent band is
-  // unmeasured.
-  const growsContentColumns = usesLeadingIndentBand || contentFitted;
+  // the logical-table boundary) content-fits whatever its jc and mode when
+  // its content fits the established ceiling; a binding fit there is
+  // unmeasured and keeps the previous solve.
+  const contentGrowth: 'band' | 'nonbinding' | 'none' = usesLeadingIndentBand ? 'band'
+    : contentFitted ? 'nonbinding' : 'none';
   const outerCellMarginsHangOutsideBand = compatibilityMode === undefined || compatibilityMode === 14;
   const textBandPt = usesLeadingIndentBand
     ? Math.max(0, Math.min(...rowPlacements.map(({ justification, indentPt }) => {
@@ -320,7 +321,7 @@ function memberContext(
     tableIndentPt: nestedNegativeIndentIgnored && leading(table.jc) ? Math.max(0, tableIndentPt) : tableIndentPt,
     effectiveLayout,
     rowTranslationsPt: Object.freeze(rowTranslationsPt), maximumTableWidthPt,
-    isFixedNestedTable, usesLeadingIndentBand, growsContentColumns, forcedFitOuterMarginsPt,
+    isFixedNestedTable, usesLeadingIndentBand, contentGrowth, forcedFitOuterMarginsPt,
     percentWidthBasePt });
 }
 
@@ -388,6 +389,10 @@ export function decideLogicalTable(
   const contentFitted = contentSized && singleTable && format.ordinaryFlow && format.positioning == null
     && format.outerEdgeIndent !== true && !rowOverrides && !gridSkips
     && format.rows.every((row) => row.cellSpacingPt === 0)
+    // The two unspanned unpreferred tracks the solver content-fits.
+    && input.gridWidthsPt.length === 2
+    && input.rows.every((row) => row.cells.length === 2
+      && row.cells.every((cell, index) => cell.columnSpan === 1 && cell.columnStart === index))
     && environment.topLevel && !isVerticalTextDirection(environment.textDirection)
     && environment.quarterTurnedStory !== true
     && (environment.story === 'header' || environment.story === 'footer'
