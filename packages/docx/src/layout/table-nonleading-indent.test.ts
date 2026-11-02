@@ -162,8 +162,9 @@ describe('WORD_TABLE_NONLEADING_INDENT_SCOPE', () => {
   it('an unmeasured compatibility mode keeps the previous indent contract', () => {
     expect(shifts('body', 13, { jc: 'right', margins: false })).toEqual([36, -18]);
     expect(shifts('header', 13, { jc: 'right' })).toEqual([36, -18]);
-    // An AutoFit table without any preferred width waits for its width fix.
-    expect(shifts('body', 15, { jc: 'right', tblW: '<w:tblW w:w="0" w:type="auto"/>', layout: '',
+    // A content-sized AutoFit table outside the content-fitted scope (a text
+    // box) keeps the previous contract.
+    expect(shifts('textbox', 15, { jc: 'right', tblW: '<w:tblW w:w="0" w:type="auto"/>', layout: '',
       tcW: '<w:tcW w:w="0" w:type="auto"/>' })).toEqual([36, -18]);
     // Unmeasured margin spellings stay outside the scope as well.
     expect(shifts('header', 15, { jc: 'right',
@@ -179,11 +180,12 @@ describe('WORD_TABLE_NONLEADING_INDENT_SCOPE', () => {
     // A quarter-turned (eaVert) text-box story in a horizontal section is unmeasured.
     expect(deltas('eaVertTextbox', 15, { jc: 'right' })).toEqual(deltas('eaVertTextbox', 13, { jc: 'right' }));
     expect(deltas('eaVertTextbox', 15, { jc: 'right' }).slice(0, 2)).toEqual([36, -18]);
-    // tcW pct 0 is no preference: still a content-sized AutoFit table.
+    // tcW pct 0 is no preference: still a content-sized AutoFit table, which
+    // a text box does not content-fit.
     const auto = { jc: 'right', tblW: '<w:tblW w:w="0" w:type="auto"/>', layout: '' };
-    expect(deltas('body', 15, { ...auto, tcW: '<w:tcW w:w="0" w:type="pct"/>' }))
-      .toEqual(deltas('body', 13, { ...auto, tcW: '<w:tcW w:w="0" w:type="pct"/>' }));
-    expect(shifts('body', 15, { ...auto, tcW: '<w:tcW w:w="0" w:type="pct"/>' })).toEqual([36, -18]);
+    expect(deltas('textbox', 15, { ...auto, tcW: '<w:tcW w:w="0" w:type="pct"/>' }))
+      .toEqual(deltas('textbox', 13, { ...auto, tcW: '<w:tcW w:w="0" w:type="pct"/>' }));
+    expect(shifts('textbox', 15, { ...auto, tcW: '<w:tcW w:w="0" w:type="pct"/>' })).toEqual([36, -18]);
     // Authored skips the parser clears against the two-column grid stay out
     // (omitted margins keep the origin observation out of the comparison).
     for (const trPr of ['<w:gridAfter w:val="1"/>', '<w:gridBefore w:val="3"/>']) {
@@ -192,4 +194,176 @@ describe('WORD_TABLE_NONLEADING_INDENT_SCOPE', () => {
       expect(shifts('body', 15, options), trPr).toEqual([36, -18]);
     }
   });
+});
+
+const CONTENT_SIZED = { tblW: '<w:tblW w:w="0" w:type="auto"/>', layout: '', tcW: '<w:tcW w:w="0" w:type="auto"/>' } as const;
+
+describe('WORD_AUTOFIT_CONTENT_COLUMN_GROWTH for content-sized tables (#2065)', () => {
+  it('fits an auto-width table with auto cells to its content at every jc and measured mode', () => {
+    for (const story of ['body', 'header', 'footer'] as const) {
+      for (const mode of [null, 11, 12, 14, 15]) {
+        const left = tableGeometry(story, tableXml({ ...CONTENT_SIZED, jc: 'left', label: 'Q', indent: null }), 'Q', mode);
+        // Two 6pt-per-character cells ("Q", "b") with 5.4pt margins.
+        expect(left.widthPt, `${story} ${mode}`).toBeCloseTo(2 * (6 + 10.8), 6);
+        for (const jc of ['center', 'right', 'end']) {
+          for (const bidi of [false, true]) {
+            const table = tableGeometry(story, tableXml({ ...CONTENT_SIZED, jc, bidi, label: 'Q', indent: null }), 'Q', mode);
+            expect(table.widthPt, `${story} ${mode} ${jc} ${bidi}`).toBeCloseTo(left.widthPt, 6);
+          }
+        }
+      }
+    }
+  }, 120_000);
+  it('ignores a nonleading tblInd once the table is content-fitted (#2040)', () => {
+    // One label for every indent: a content-fitted width follows the label.
+    const at = (mode: number | null, jc: string, bidi: boolean, indent: number | null) =>
+      tableGeometry('body', tableXml({ ...CONTENT_SIZED, jc, bidi, label: 'Q', indent }), 'Q', mode);
+    for (const mode of [null, 11, 12, 14, 15]) {
+      for (const jc of ['center', 'right', 'end']) {
+        for (const bidi of [false, true]) {
+          const base = at(mode, jc, bidi, null);
+          for (const indent of [720, -360]) expect(at(mode, jc, bidi, indent), `${jc} ${mode} ${bidi} ${indent}`).toEqual(base);
+        }
+      }
+    }
+  }, 120_000);
+});
+
+/** The placement edge (leading x, center or trailing x) in a mode minus its
+ * mode-15 twin (mode 15 has no margin hang), so width changes do not count. */
+function hang(story: Story, mode: number | null, options: Parameters<typeof tableXml>[0]): number {
+  const trailing = (options.jc === 'right' || options.jc === 'end') !== (options.bidi === true);
+  const edge = (m: number | null) => {
+    const { xPt, widthPt } = tableGeometry(story, tableXml(options), options.label, m);
+    return options.jc === 'center' ? xPt + widthPt / 2 : trailing ? xPt + widthPt : xPt;
+  };
+  return edge(mode) - edge(15);
+}
+
+describe('WORD_TABLE_MARGIN_HANG_SCOPE (#2064)', () => {
+  const structures = [
+    ['tcW pct', { tcW: '<w:tcW w:w="2500" w:type="pct"/>' }],
+    ['tcW auto (content-sized)', CONTENT_SIZED],
+    ['tcW nil', { tcW: '<w:tcW w:w="0" w:type="nil"/>' }],
+    ['no tcW', { tcW: '' }],
+    ['tcW dxa 0', { tcW: '<w:tcW w:w="0" w:type="dxa"/>' }],
+    ['tblW pct', { tblW: '<w:tblW w:w="2000" w:type="pct"/>' }],
+    ['AutoFit tblW auto with dxa cells', { tblW: '<w:tblW w:w="0" w:type="auto"/>', layout: '' }],
+  ] as const;
+  it.each(structures)('hangs the row left margin for %s like the measured origin class', (_name, structure) => {
+    for (const mode of [null, 11, 12, 14]) {
+      expect(hang('body', mode, { ...structure, jc: 'left', label: 'Q', indent: 720 }), `${mode}`).toBeCloseTo(-5.4, 6);
+      expect(hang('body', mode, { ...structure, jc: 'left', label: 'Q', indent: null }), `${mode}`).toBeCloseTo(0, 6);
+      expect(hang('body', mode, { ...structure, jc: 'center', label: 'Q', indent: null }), `${mode}`).toBeCloseTo(0, 6);
+      expect(hang('body', mode, { ...structure, jc: 'right', label: 'Q', indent: null }), `${mode}`).toBeCloseTo(5.4, 6);
+      expect(hang('body', mode, { ...structure, jc: 'end', label: 'Q', indent: 720, bidi: true }), `${mode}`).toBeCloseTo(-5.4, 6);
+    }
+  }, 60_000);
+  it('hangs explicit-margin tables in a header, footer and footnote; a text box hangs leading tables only', () => {
+    for (const story of ['header', 'footer', 'footnote'] as const) {
+      expect(hang(story, 14, { jc: 'left', label: 'Q', indent: 720 }), story).toBeCloseTo(-5.4, 6);
+      expect(hang(story, null, { jc: 'right', label: 'Q', indent: null }), story).toBeCloseTo(5.4, 6);
+    }
+    expect(hang('textbox', 12, { jc: 'left', label: 'Q', indent: 720 })).toBeCloseTo(-5.4, 6);
+    expect(hang('textbox', 12, { jc: 'right', label: 'Q', indent: null })).toBeCloseTo(0, 6);
+    expect(hang('textbox', 12, { jc: 'end', label: 'Q', indent: null })).toBeCloseTo(0, 6);
+  }, 60_000);
+  it('keeps omitted margins, cell spacing, nesting and mode 13 outside the extension', () => {
+    expect(hang('body', 14, { jc: 'right', label: 'Q', indent: null, margins: false, tcW: '' })).toBeCloseTo(0, 6);
+    expect(hang('body', 14, { jc: 'right', label: 'Q', indent: null, spacing: true, tcW: '' })).toBeCloseTo(0, 6);
+    expect(hang('nested', 14, { jc: 'right', label: 'Q', indent: null, tcW: '' })).toBeCloseTo(0, 6);
+    expect(hang('body', 13, { jc: 'right', label: 'Q', indent: null, tcW: '' })).toBeCloseTo(0, 6);
+  }, 60_000);
+  it('sizes a percentage tblW from the band plus the outer margins while they hang', () => {
+    const width = (mode: number | null) => tableGeometry('body', tableXml({ jc: 'left', label: 'Q', indent: null,
+      tblW: '<w:tblW w:w="2000" w:type="pct"/>' }), 'Q', mode).widthPt;
+    const bandPt = (11906 - 2 * 1134) / 20;
+    expect(width(15)).toBeCloseTo(0.4 * bandPt, 6);
+    for (const mode of [null, 11, 12, 14]) expect(width(mode), `${mode}`).toBeCloseTo(0.4 * (bandPt + 10.8), 6);
+  }, 60_000);
+});
+
+describe('WORD_NESTED_NEGATIVE_INDENT (#2067)', () => {
+  it('ignores a negative tblInd on a once-nested leading table and keeps a positive one', () => {
+    for (const mode of [null, 11, 12, 14, 15]) {
+      for (const margins of [true, false]) {
+        for (const jc of ['left', 'start']) {
+          expect(shifts('nested', mode, { jc, margins }), `${jc} ${mode} ${margins}`).toEqual([36, 0]);
+          expect(shifts('nested', mode, { jc, margins, bidi: true }), `${jc} ${mode} ${margins} bidi`).toEqual([-36, 0]);
+        }
+      }
+    }
+    // A top-level table still moves by a negative indent.
+    expect(shifts('body', 15, { jc: 'left' })).toEqual([36, -18]);
+  }, 120_000);
+});
+
+describe('unmeasured neighbours of the extended rules keep the previous behavior', () => {
+  it('keeps a content-sized table outside the content-fitted scope on its indent and grid', () => {
+    expect(shifts('footnote', 15, { ...CONTENT_SIZED, jc: 'right' })).toEqual([36, -18]);
+    expect(shifts('footnote', 14, { ...CONTENT_SIZED, jc: 'right' })).toEqual([36, -18]);
+    // Row justification is an override outside the measured class.
+    const rowJc = tableGeometry('body', tableXml({ ...CONTENT_SIZED, jc: 'right', label: 'Q', indent: null,
+      trPr: '<w:jc w:val="right"/>' }), 'Q', 14);
+    expect(rowJc.widthPt).toBeCloseTo(200, 6);
+    // Cell spacing is outside the measured content-sized class.
+    expect(shifts('body', 15, { ...CONTENT_SIZED, jc: 'right', spacing: true })).toEqual([36, -18]);
+  }, 60_000);
+  it('keeps a negative indent on once-nested AutoFit or spaced tables', () => {
+    expect(shifts('nested', 15, { jc: 'left', layout: '' })).toEqual([36, -18]);
+    expect(shifts('nested', 15, { jc: 'left', spacing: true })).toEqual([36, -18]);
+  }, 60_000);
+});
+
+describe('content-fit boundaries (#2065 review)', () => {
+  it('keeps three-track or spanning content-sized tables on their grid and indent', () => {
+    const three = (indent: number | null) => tableGeometry('body', tableXml({ ...CONTENT_SIZED, jc: 'right', label: 'Q', indent })
+      .replace('<w:gridCol w:w="2000"/><w:gridCol w:w="2000"/>', '<w:gridCol w:w="2000"/><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/>')
+      .replace('</w:tr>', '<w:tc><w:tcPr><w:tcW w:w="0" w:type="auto"/></w:tcPr><w:p><w:r><w:t>c</w:t></w:r></w:p></w:tc></w:tr>'), 'Q', 15);
+    expect(three(null).widthPt).toBeCloseTo(300, 6);
+    expect(three(720).xPt - three(null).xPt).toBeCloseTo(36, 6);
+    const spanned = (indent: number | null) => tableGeometry('body', tableXml({ ...CONTENT_SIZED, jc: 'right', label: 'Q', indent })
+      .replace(/<w:tc><w:tcPr><w:tcW w:w="0" w:type="auto"\/><\/w:tcPr><w:p><w:r><w:t>b<\/w:t><\/w:r><\/w:p><\/w:tc>/, '')
+      .replace('<w:tcPr><w:tcW w:w="0" w:type="auto"/></w:tcPr>', '<w:tcPr><w:tcW w:w="0" w:type="auto"/><w:gridSpan w:val="2"/></w:tcPr>'), 'Q', 15);
+    expect(spanned(720).xPt - spanned(null).xPt).toBeCloseTo(36, 6);
+  }, 60_000);
+  it('keeps the previous solve for a binding content-sized fit outside the leading band', () => {
+    const long = 'w '.repeat(60).trim();
+    const at = (mode: number) => tableGeometry('body', tableXml({ ...CONTENT_SIZED, jc: 'center', label: 'Q', indent: null })
+      .replace('<w:t>b</w:t>', `<w:t>${long}</w:t>`), 'Q', mode);
+    // 2 x 6pt + 120 x 6pt content exceeds the 481.9pt band: no growth.
+    expect(at(11).widthPt).toBeCloseTo(200, 6);
+  }, 60_000);
+});
+
+describe('content-fit width inputs (#2065 review round 3)', () => {
+  it('keeps the previous width ceilings when the ignored indent would select the leading band', () => {
+    const long = 'w '.repeat(60).trim();
+    const at = (indent: number | null) => tableGeometry('body', tableXml({ ...CONTENT_SIZED, jc: 'center', label: 'Q', indent })
+      .replace('<w:gridCol w:w="2000"/><w:gridCol w:w="2000"/>', '<w:gridCol w:w="4819"/><w:gridCol w:w="4819"/>')
+      .replace('<w:t>b</w:t>', `<w:t>${long}</w:t>`), 'Q', 14);
+    // Without tblInd the grid matches the band (leading-band geometry); with
+    // +720 it did not before, and the ignored indent must not change that.
+    expect(at(720).widthPt).toBeCloseTo(481.9, 6);
+  }, 60_000);
+  it('keeps content-sized tables with logical or nil margins on their grid', () => {
+    for (const margins of [
+      '<w:tblCellMar><w:start w:w="108" w:type="dxa"/><w:end w:w="108" w:type="dxa"/></w:tblCellMar>',
+      '<w:tblCellMar><w:left w:w="0" w:type="nil"/><w:right w:w="0" w:type="nil"/></w:tblCellMar>',
+    ]) {
+      const table = tableGeometry('body', tableXml({ ...CONTENT_SIZED, jc: 'right', label: 'Q', indent: null, margins }), 'Q', 15);
+      expect(table.widthPt, margins).toBeCloseTo(200, 6);
+    }
+  }, 60_000);
+});
+
+describe('content-fit nonbinding gate (#2065 review round 4)', () => {
+  it('keeps the previous solve when a negative indent enlarges the ceiling past binding content', () => {
+    const long = 'w '.repeat(100).trim();
+    for (const mode of [11, 12, 14, 15]) {
+      const table = tableGeometry('body', tableXml({ ...CONTENT_SIZED, jc: 'center', label: 'Q', indent: -360 })
+        .replace('<w:t>b</w:t>', `<w:t>${long}</w:t>`), 'Q', mode);
+      expect(table.widthPt, `${mode}`).toBeCloseTo(200, 6);
+    }
+  }, 60_000);
 });
