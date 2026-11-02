@@ -340,6 +340,39 @@ describe('layoutDocument — body paragraph fragments (PR 5 Task 12)', () => {
 });
 
 describe('layoutDocument — exact source-boundary paragraph continuation', () => {
+  it('moves a break-only grid heading intact when its first full line does not fit', () => {
+    // Windows Word 16.0.20430: both ends of the break-only heading land on
+    // page 2 even with keepNext/keepLines/widowControl explicitly disabled.
+    // Unlike visible glyph lines, blank break lines get no grid-leading relief.
+    const target = para('', {
+      runs: [{ type: 'break', breakType: 'line' }],
+      defaultFontSize: 16,
+      lineSpacing: { rule: 'auto', value: 1.15, explicit: true },
+      keepNext: false, keepLines: false, widowControl: false,
+      spaceAfter: 2,
+    });
+    const model = doc([
+      para('F', { lineSpacing: { rule: 'exact', value: 60 } }) as BodyElement,
+      target as BodyElement,
+      para('After', { lineSpacing: { rule: 'exact', value: 10 } }) as BodyElement,
+    ], 100);
+    model.section.docGridType = 'lines';
+    model.section.docGridLinePitch = 18;
+    const layout = layoutDocument(model);
+    const fragments = sourceFragments(layout, 1);
+
+    expect(layout.pages).toHaveLength(2);
+    expect(layout.pages[0]!.layers.body.map(node => node.source.path[0])).toEqual([0]);
+    expect(layout.pages[1]!.layers.body.map(node => node.source.path[0])).toEqual([1, 2]);
+    expect(fragments).toHaveLength(1);
+    expect(fragments[0]!.lines).toHaveLength(2);
+    expect(fragments[0]!.lines.map(line => line.advancePt)).toEqual([20.7, 20.7]);
+    expect(fragments[0]!.spacing.afterPt).toBe(2);
+    expect(fragmentText(sourceFragments(layout, 0))).toBe('F');
+    expect(fragmentText(sourceFragments(layout, 2))).toBe('After');
+    expect(sourceFragments(layout, 2)[0]!.flowBounds.yPt).toBeCloseTo(53.4);
+  });
+
   it.each(['', 'A'])('retains the empty line after a paginated trailing break (%j)', (text) => {
     const target = para('', {
       runs: [...(text ? [sizedTextRun(text, 10)] : []), { type: 'break', breakType: 'line' }],

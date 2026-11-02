@@ -111,7 +111,7 @@ export const WORD_GRID_LINE_CONTENT_FIT_ADMISSION = defineCompatibilityRule({
     version: '16.0.20430',
     platform: 'Windows',
   },
-  description: 'Windows Word 16.0 build 20430 admits a centered text box inside a 20pt line-grid cell when the natural box ends inside the body, even when the cell overhangs the bottom margin. A later-positioned caption whose natural box crosses the body bottom moves to the next page. These inside/outside observations support content-box admission, not baseline-only admission or a fixed overhang tolerance. ECMA-376 §§17.6.5 and 17.3.1.32 define grid participation, not this page-edge rule. trr3 family D further observes the same page boundary for 11pt MS Mincho empty marks and single-character paragraphs on a 16.4pt grid (modes 14/15, lines/linesAndChars, zero/one preceding empty mark): 15pt moves and 15.5pt stays. Empty marks carry the equivalent metric-only allowance through word-trailing-empty-mark-baseline-admission. Only leading added beyond its own natural/authored height is eligible; authored atLeast minima and auto multiples remain charged. The allowance is restricted to a positive whitelist of plain glyph paint in undecorated paragraphs: paragraph/run borders (including between/bar rules), shading/highlight, underline/strike/emphasis, ruby, fields, tabs, objects and unknown retained paint retain the full cell, even when a continuation slice omits paragraph edges. Off-grid and exact lines retain full-box admission. This observation applies only at the physical body bottom with no intervening reservation; note bands, wrap exclusions and shortened column regions retain the whole grid cell. Evidence: issue #1674 / PR #1796 controls.',
+  description: 'Windows Word 16.0 build 20430 admits a centered text box inside a 20pt line-grid cell when the natural box ends inside the body, even when the cell overhangs the bottom margin. A later-positioned caption whose natural box crosses the body bottom moves to the next page. These inside/outside observations support content-box admission, not baseline-only admission or a fixed overhang tolerance. ECMA-376 §§17.6.5 and 17.3.1.32 define grid participation, not this page-edge rule. trr3 family D further observes the same page boundary for 11pt MS Mincho empty marks and single-character paragraphs on a 16.4pt grid (modes 14/15, lines/linesAndChars, zero/one preceding empty mark): 15pt moves and 15.5pt stays. Empty marks carry the equivalent metric-only allowance through word-trailing-empty-mark-baseline-admission. Only leading added beyond its own natural/authored height is eligible; authored atLeast minima and auto multiples remain charged. The allowance requires text placements and is restricted to a positive whitelist of plain glyph paint in undecorated paragraphs: paragraph/run borders (including between/bar rules), shading/highlight, underline/strike/emphasis, ruby, fields, tabs, objects and unknown retained paint retain the full cell, even when a continuation slice omits paragraph edges. Break-only lines retain full-box admission; the trr3 family C counterexamples and evidence limits are recorded beside the predicate. Off-grid and exact lines retain full-box admission. This observation applies only at the physical body bottom with no intervening reservation; note bands, wrap exclusions and shortened column regions retain the whole grid cell. Evidence: issue #1674 / PR #1796 controls; issue #2099.',
 });
 
 // Positive paint whitelist for the bounded plain-caption observation. Unknown
@@ -151,10 +151,22 @@ const GRID_PLAIN_TYPOGRAPHY_KEYS = new Set([
 ]);
 
 function wordGridLineHasPlainPaint(paragraph: ParagraphLayout, line: LineLayout): boolean {
-  return Object.entries(paragraph).every(([key, value]) => value === undefined
-    || GRID_PLAIN_PARAGRAPH_KEYS.has(key)
-    || (['borders', 'drawings', 'textBoxes'].includes(key)
-      && Array.isArray(value) && value.length === 0))
+  // Windows Word 16.0.20430, trr3 family C (144 controls): modes 14/15,
+  // automatic overflow/hard break/pageBreakBefore, empty/text/break-only,
+  // before 0/15pt, exact36/auto1.15, keepNext off/on. Both heading endpoints
+  // land on page 2 throughout. In the automatic, before=0, auto1.15,
+  // keepNext-off break-only counterexamples, no keepLines/widowControl applies:
+  // full first-line fit moves the paragraph; glyph-content relief would split
+  // it. A line with no placements cannot inherit the plain-glyph observation
+  // via vacuous every(). This restricts relief, not paragraph splitting: blank
+  // lines can still split when their full advances fit. Metric-only empty
+  // paragraph marks have their separate allowance. These endpoint probes do
+  // not establish automatic grid pitch, caret-to-line geometry or other faces.
+  return line.placements.length > 0
+    && Object.entries(paragraph).every(([key, value]) => value === undefined
+      || GRID_PLAIN_PARAGRAPH_KEYS.has(key)
+      || (['borders', 'drawings', 'textBoxes'].includes(key)
+        && Array.isArray(value) && value.length === 0))
     && paragraph.lines.every(candidate => (candidate.barTabRules?.length ?? 0) === 0)
     && Object.entries(line).every(([key, value]) => value === undefined
       || GRID_PLAIN_LINE_KEYS.has(key)
