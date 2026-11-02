@@ -96,7 +96,7 @@ import { createRevisionAuthorColorResolver } from './track-changes.js';
 import { BODY_STORY_CONTEXT, bodyAnchorReferenceFrames, retainedTableRecord, resolveBodyParagraphLayoutContext, resolveStateParagraphLayoutContext, withTableCellStory } from './acquisition-state.js';
 import { applyNumberingBodyOffset, resolveNumberingMarkerGeometry } from './numbering-marker.js';
 import { projectTableColumnLayoutInput, type TableSourceAcquisitionInput } from './table-source-acquisition.js';
-import { measureTableIntrinsicWidths, resolveTableColumnWidths } from './table-columns.js';
+import { measureTableIntrinsicWidths, resolveTableColumnWidths, spacedAutoFitContentWidthsPt } from './table-columns.js';
 import { decideLogicalTable, type LogicalTableDecision, type TableMemberDecision } from './table-layout-decision.js';
 import {
   bodyTableAcquisitionState,
@@ -2061,7 +2061,10 @@ function measureFollowingBodyBlock(
       // terminal grid-leading allowance only after the paginator knows the
       // keep set's complete reserve; earlier members keep their full advances.
       leadContentExtentPt: leadLineBoxExtentPt,
-      ...(leadFragment ? { leadGridParagraph: leadFragment } : {}),
+      ...(leadFragment ? {
+        leadGridParagraph: leadFragment,
+        wholeParagraphHasPlacements: layout.lines.some(line => line.placements.length > 0),
+      } : {}),
       fullFootnoteReferenceIds: footnoteIdsInRetainedSlice(layout),
       leadFootnoteReferenceIds: firstLine ? footnoteIdsInRetainedLines([firstLine]) : [],
       pageOwnedAnchorKeysByLine: pageOwnedAnchorKeysByLine(layout),
@@ -3152,7 +3155,8 @@ function resolveAdjacentTableGroup(
   });
   const decision = decideLogicalTable(logicalTable, logicalSource,
     members.map(({ table }, i) => ({ table, source: sources[i]! })), contentWPt,
-    tableDecisionEnvironment(state), commonFrame, commonGrid);
+    tableDecisionEnvironment(state), commonFrame, commonGrid,
+    (candidate) => spacedAutoFitContentWidthsPt(acquireTableColumnInput(logicalTable, contentWPt, state, candidate)) !== null);
   const logicalColumns = decision.usesLogicalProperties
     ? resolveColumnWidths(logicalTable, contentWPt, state, decision, decision.logical) : null;
   return { decision, logicalColumns };
@@ -3182,7 +3186,8 @@ function tableDecisionEnvironment(state: BodyMeasurementContext) {
 
 function singleTableDecision(table: TableLayoutSource, contentWPt: number, state: BodyMeasurementContext): LogicalTableDecision {
   const source = state.acquisitionInputs.tableSourceAcquisitionInput(table);
-  return decideLogicalTable(table, source, [{ table, source }], contentWPt, tableDecisionEnvironment(state));
+  return decideLogicalTable(table, source, [{ table, source }], contentWPt, tableDecisionEnvironment(state), true, true,
+    (candidate) => spacedAutoFitContentWidthsPt(acquireTableColumnInput(table, contentWPt, state, candidate)) !== null);
 }
 
 function resolveColumnWidths(
@@ -3317,7 +3322,7 @@ function acquireTableColumnInput(
   const intrinsicWidths = intrinsicWidthsForTable(table);
   const columnInput = projectTableColumnLayoutInput(decision.source, decision.percentWidthBasePt,
     (rowIndex, cellIndex, preferred) => intrinsicWidths(table.rows[rowIndex]!.cells[cellIndex]!, preferred),
-    maximumWidthPt);
+    maximumWidthPt, decision.spacingGeometry);
   return {
     ...columnInput,
     outerMarginAllowancePt: forcedFitOuterMarginsPt,
