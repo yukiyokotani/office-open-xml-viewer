@@ -921,7 +921,9 @@ export type BodyPaginationPassResult = Readonly<{
 
 interface BodyPaginationPassObserver {
   shouldPublish(committedPages: number): boolean;
-  publish(pass: BodyPaginationPassResult, processedEntries: number): void;
+  /** `notePageLimit` bounds the published prefix by note recovery
+   * (`notePublicationPageLimit`); absent, notes impose no bound. */
+  publish(pass: BodyPaginationPassResult, processedEntries: number, notePageLimit?: number): void;
   /** Receives, in pass order, every value the pass reads from the page-anchor
    * convergence carry (see `anchorStablePageLimit`). */
   onPageAnchorInput?(event: PageAnchorInputEvent): void;
@@ -968,10 +970,10 @@ function passPublicationObserver(
       && committedPages >= Math.max(nextCheckpoint, publisher.publishedPages + 2)
       && (extra.canExtend?.() ?? true)
     ),
-    publish: (pass, processedEntries) => {
+    publish: (pass, processedEntries, notePageLimit = Number.POSITIVE_INFINITY) => {
       const pages = pass.layout.pages.length;
       nextCheckpoint = Math.max(pages + 1, pages * 2);
-      publisher.publish(pass, processedEntries, pageIndexLimit(pass));
+      publisher.publish(pass, processedEntries, Math.min(pageIndexLimit(pass), notePageLimit));
     },
     ...(extra.onPageAnchorInput ? { onPageAnchorInput: extra.onPageAnchorInput } : {}),
     ...(extra.onPageAnchorRollback ? { onPageAnchorRollback: extra.onPageAnchorRollback } : {}),
@@ -1475,6 +1477,8 @@ function* paginateBodyPassSteps(
       resetNotePage();
       capturePageCheckpoint(nextEntryIndex);
       if (!skipPageAnchorPrescan) yield* prescanPageAnchors(state, nextEntryIndex);
+      // The closed page's unfinished footnotes, before the new page takes them.
+      footnotesCarriedFromClosedPage = new Set(pendingFootnoteContinuations.keys());
       placePendingFootnoteContinuations();
     } else {
       const nextLocation = acquisitionLocation(state);
@@ -1500,6 +1504,40 @@ function* paginateBodyPassSteps(
   const footnoteIdsByPage = new Map<number, Set<string>>();
   const footnoteReserveByPage = new Map<number, number>();
   const footnoteLayoutsByPage = new Map<number, NoteLayout[]>();
+  // Footnotes that continued past the last closed page, and the page the
+  // document-end note flow started on (`notePublicationPageLimit`).
+  let footnotesCarriedFromClosedPage: ReadonlySet<string> = new Set();
+  let endnoteFlowStartPage = Number.POSITIVE_INFINITY;
+  const permissionsAtPassStart = notePolicy?.permissionCount ?? 0;
+  /**
+   * The first page a progressive publication must not include because of note
+   * overflow recovery (#2113). Recovery grants a note its permission at the
+   * page that rejects it, and every later pass applies that permission to all
+   * of the note's pages, its reference page included, so those pages can
+   * change. A footnote that continued past the last closed page may still be
+   * rejected, so nothing from its reference page or first fragment on is
+   * published; a footnote completed on closed pages can no longer be. A
+   * footnote permitted during this pass laid out its earlier pages without the
+   * permission later passes apply, so those pages wait as well. Endnote
+   * recovery acts only in the document-end flow, so publication stops at that
+   * flow's first page. Only publication timing depends on this bound.
+   */
+  const notePublicationPageLimit = (): number => {
+    let limit = endnoteFlowStartPage;
+    const unsettled = new Set(footnotesCarriedFromClosedPage);
+    for (const { kind, id } of notePolicy?.permittedSince(permissionsAtPassStart) ?? []) {
+      if (kind === 'footnote') unsettled.add(id);
+    }
+    for (const id of unsettled) {
+      for (const [pageIndex, ids] of footnoteIdsByPage) {
+        if (ids.has(id)) limit = Math.min(limit, pageIndex);
+      }
+      for (const [pageIndex, notes] of footnoteLayoutsByPage) {
+        if (notes.some(note => note.source.storyInstance === id)) limit = Math.min(limit, pageIndex);
+      }
+    }
+    return limit;
+  };
   let liveNoteLayoutsById = new Map<string, NoteLayout[]>();
   // Non-zero source-cut shifts of committed continued tails, by page and note
   // (FootnotePartition.hostShiftPt; footnoteBandPlan).
@@ -2544,7 +2582,7 @@ function* paginateBodyPassSteps(
         [],
         [],
         frameObservations,
-      ), entryIndex);
+      ), entryIndex, notePublicationPageLimit());
     }
     const entry = input.sequence[entryIndex]!;
     if (entry.kind === 'consume-source') {
@@ -3441,6 +3479,7 @@ function* paginateBodyPassSteps(
   // Continuation belongs to the endnote area, not just an individual note:
   // §17.11.4 applies also when the next band starts with a new note.
   let endnoteFlowStarted = false;
+  if (endnoteIds.length > 0) endnoteFlowStartPage = state.flow.pageIndex;
   const modernEndnotes = input.compatibilityMode === 15 && activeRegion(state).columns.length > 1;
   if (modernEndnotes) {
     let pending: readonly PageNoteSource[] = endnoteIds.map(id => Object.freeze({ id, cursor: null }));
@@ -3560,7 +3599,7 @@ function* paginateBodyPassSteps(
         observer.publish(paginationPassResult(state, owners, session, allocations,
           footnoteReserveByPage, footnoteLayoutsByPage, footnoteHostShiftsByPage,
           terminalDiagnostic, anchorInputs, serializedAnchorInputs, frameObservations,
-          frameAnchorObservations, endnoteLayoutsByPage), input.sequence.length);
+          frameAnchorObservations, endnoteLayoutsByPage), input.sequence.length, notePublicationPageLimit());
       }
     }
   }
@@ -4833,6 +4872,12 @@ function* paginateBodyWithAnchorConvergenceSteps(
     // Pages below this index are closed in the first pass.
     let closedBefore = 0;
     let abandoned = false;
+    // A note permission granted while the passes overlap reaches pages the
+    // second pass may already have laid out without it, unlike the ordinary
+    // second pass, which starts with it (#2113). Stop overlapping then.
+    const overlapPolicy = noteOverflowPolicyOf(services);
+    const overlapPermissions = overlapPolicy?.permissionCount ?? 0;
+    const permissionsChanged = () => (overlapPolicy?.permissionCount ?? 0) !== overlapPermissions;
     const addDestinations = (pages: readonly LayoutPage[]) => {
       for (const [key, destination] of pageAnchorDestinationPlan({ pages, diagnostics: [] })) {
         // A destination on a closed page cannot reappear on a later one; if
@@ -4852,7 +4897,7 @@ function* paginateBodyWithAnchorConvergenceSteps(
     const firstPublisher = anchorPassObserver(null)!;
     const firstObserver: BodyPaginationPassObserver = {
       shouldPublish: (committedPages) => firstPublisher.shouldPublish(committedPages),
-      publish: (pass, processedEntries) => firstPublisher.publish(pass, processedEntries),
+      publish: (pass, processedEntries, notePageLimit) => firstPublisher.publish(pass, processedEntries, notePageLimit),
       onPageAnchorInput: (event) => firstPublisher.onPageAnchorInput?.(event),
       onPageAnchorRollback: (pageIndex) => firstPublisher.onPageAnchorRollback?.(pageIndex),
       // Destinations come from each newly closed page alone: they depend
@@ -4883,7 +4928,7 @@ function* paginateBodyWithAnchorConvergenceSteps(
     const secondPublisher = anchorPassObserver(view, () => firstResult !== null)!;
     const secondObserver: BodyPaginationPassObserver = {
       shouldPublish: (committedPages) => !abandoned && secondPublisher.shouldPublish(committedPages),
-      publish: (pass, processedEntries) => secondPublisher.publish(pass, processedEntries),
+      publish: (pass, processedEntries, notePageLimit) => secondPublisher.publish(pass, processedEntries, notePageLimit),
       // One body entry can open several pages. The second pass suspends
       // until the first has closed the page this read needs.
       pageAnchorPlanPending: (pageIndex) => {
@@ -4900,11 +4945,14 @@ function* paginateBodyWithAnchorConvergenceSteps(
     );
     // Both passes advance one suspension at a time, each forwarded to the
     // scheduler, so host turns and cancellation are never starved.
-    const secondMayStep = () => !abandoned && secondResult === null && (
-      secondWaitsFor !== null
-        ? closedBefore > secondWaitsFor
-        // Keep the second pass at most one page behind the closed prefix.
-        : closedBefore > secondLive + 1);
+    const secondMayStep = () => {
+      if (!abandoned && permissionsChanged()) abandoned = true;
+      return !abandoned && secondResult === null && (
+        secondWaitsFor !== null
+          ? closedBefore > secondWaitsFor
+          // Keep the second pass at most one page behind the closed prefix.
+          : closedBefore > secondLive + 1);
+    };
     while (firstResult === null) {
       if (secondMayStep()) {
         const next = second.next();
@@ -4927,6 +4975,7 @@ function* paginateBodyWithAnchorConvergenceSteps(
     }
     const firstPass = firstResult as BodyPaginationPassResult | null;
     if (firstPass === null) throw new Error('The opening anchor pass did not complete');
+    if (permissionsChanged()) abandoned = true;
     if (abandoned) return Object.freeze({ first: firstPass, second: null });
     const appliedPlan = JSON.stringify([...view]);
     return Object.freeze({
