@@ -19,10 +19,11 @@ interface Options {
   jc?: string; bidi?: boolean; indent?: number; auto?: boolean; widths?: number[];
   span?: boolean; verticalMerge?: boolean; cellBorder?: boolean; asymmetric?: boolean;
   rowSpacing?: boolean; nested?: boolean; header?: boolean; floating?: boolean;
+  repeatedHeader?: boolean; bodyLines?: number;
   spacingScope?: 'row' | 'exception' | 'style';
   vertical?: boolean; long?: boolean; texts?: string[]; pageHeight?: number; rightBorderColor?: string;
 }
-const para = (text: string) => `<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="368" w:lineRule="exact"/></w:pPr><w:r><w:t>${text}</w:t></w:r></w:p>`;
+const para = (text: string, allowOrphans = false) => `<w:p><w:pPr>${allowOrphans ? '<w:widowControl w:val="0"/>' : ''}<w:spacing w:before="0" w:after="0" w:line="368" w:lineRule="exact"/></w:pPr><w:r><w:t>${text}</w:t></w:r></w:p>`;
 function geometry(o: Options = {}, fragments?: TableLayout[]): TableLayout {
   const widths = o.widths ?? [2000, 2000, 2000];
   const border = (side: string, size = o.border ?? 24) => `<w:${side} w:val="${size ? 'single' : 'nil'}" w:sz="${size}" w:color="${side === 'right' ? o.rightBorderColor ?? '000000' : '000000'}"/>`;
@@ -35,12 +36,16 @@ function geometry(o: Options = {}, fragments?: TableLayout[]): TableLayout {
     + `<w:tblBorders>${['top', 'bottom', 'left', 'right', 'insideH', 'insideV'].map((side) => border(side, o.asymmetric && side === 'right' ? 4 : undefined)).join('')}</w:tblBorders>`
     + (o.margin === null ? '' : `<w:tblCellMar>${['left', 'right', 'top', 'bottom'].map((side) => `<w:${side} w:w="${o.margin ?? 0}" w:type="dxa"/>`).join('')}</w:tblCellMar>`);
   const rows = [0, 1].map((row) => `<w:tr>${o.rowSpacing && row === 1 ? '<w:tblPrEx><w:tblCellSpacing w:w="60" w:type="dxa"/></w:tblPrEx>' : ''}`
+    + (o.repeatedHeader && row === 0 ? '<w:trPr><w:tblHeader/></w:trPr>' : '')
     + (o.spacingScope === 'row' ? `<w:trPr><w:tblCellSpacing w:w="${o.spacing ?? 200}" w:type="dxa"/></w:trPr>`
       : o.spacingScope === 'exception' ? `<w:tblPrEx><w:tblCellSpacing w:w="${o.spacing ?? 200}" w:type="dxa"/></w:tblPrEx>` : '')
     + widths.flatMap((_width, col) => o.span && col === 1 ? [] : [`<w:tc><w:tcPr><w:tcW w:w="${o.auto ? 0 : o.span && col === 0 ? widths[0]! + widths[1]! : widths[col]}" w:type="${o.auto ? 'auto' : 'dxa'}"/>`
       + `${o.span && col === 0 ? '<w:gridSpan w:val="2"/>' : ''}${o.verticalMerge && col === 0 ? `<w:vMerge${row === 0 ? ' w:val="restart"' : ''}/>` : ''}`
       + `${o.cellBorder && col === 0 ? `<w:tcBorders>${border('left')}</w:tcBorders>` : ''}${o.vertical ? '<w:textDirection w:val="tbRl"/>' : ''}`
-      + `</w:tcPr>${para(o.texts?.[col] ?? (o.long ? 'w '.repeat(100) : ['Q', 'bb', 'ccc'][col] ?? 'Q'))}</w:tc>`]).join('') + '</w:tr>').join('');
+      + `</w:tcPr>${para(row === 1 && o.bodyLines !== undefined
+        ? Array(o.bodyLines).fill('Q').join('</w:t><w:br/><w:t>')
+        : o.texts?.[col] ?? (o.long ? 'w '.repeat(100) : ['Q', 'bb', 'ccc'][col] ?? 'Q'),
+      row === 1 && o.bodyLines !== undefined)}</w:tc>`]).join('') + '</w:tr>').join('');
   const table = `<w:tbl><w:tblPr>${tblPr}</w:tblPr><w:tblGrid>${widths.map((w) => `<w:gridCol w:w="${w}"/>`).join('')}</w:tblGrid>${rows}</w:tbl>`;
   const outer = `<w:tbl><w:tblPr><w:tblLayout w:type="fixed"/></w:tblPr><w:tblGrid><w:gridCol w:w="9000"/></w:tblGrid><w:tr><w:tc>${table}${para('end')}</w:tc></w:tr></w:tbl>`;
   const mode = o.mode === undefined ? 15 : o.mode;
@@ -185,6 +190,30 @@ describe('WORD_TABLE_CELL_SPACING_GEOMETRY (#2066)', () => {
       expect(bottom(table.flowBounds)).toBeLessThanOrEqual(242);
     }
   });
+  it.each([[698, 32, 685.2], [126, 1, 114.8]])(
+    'uses prefix geometry for partial rows in a %spt body', (bodyHeight, lineCount, fragmentHeight) => {
+      const fragments: TableLayout[] = [];
+      geometry({ repeatedHeader: true, bodyLines: 40, pageHeight: (bodyHeight + 144) * 20 }, fragments);
+      expect(fragments.length).toBeGreaterThan(1);
+      // 18.4pt header + body lines, three 20pt gaps and six 3pt borders.
+      // A standalone row would charge the shared fragment edges twice.
+      const retainedLineCounts: number[] = [];
+      for (const table of fragments) {
+        expect(table.rows).toHaveLength(2);
+        expect(table.flowBounds.heightPt).toBeLessThanOrEqual(bodyHeight);
+        expect(bottom(table.flowBounds)).toBeLessThanOrEqual(72 + bodyHeight);
+        const body = table.rows[1]!.cells[0]!.blocks[0]!.layout;
+        if (body.kind !== 'paragraph') throw new Error('Expected body paragraph');
+        retainedLineCounts.push(body.lines.length);
+      }
+      expect(retainedLineCounts.reduce((total, count) => total + count, 0)).toBe(40);
+      fragments.slice(0, -1).forEach((table, index) => {
+        expect(retainedLineCounts[index]).toBe(lineCount);
+        expect(table.flowBounds.heightPt).toBeCloseTo(fragmentHeight, 8);
+        expect(table.flowBounds.heightPt + 18.4).toBeGreaterThan(bodyHeight);
+      });
+    },
+  );
   it('keeps the previous geometry when gaps alone would exhaust the table or band', () => {
     for (const auto of [false, true]) {
       const table = geometry({ spacing: 2000, auto });
