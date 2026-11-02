@@ -122,9 +122,13 @@ function memberContext(
     || marginHang === 'all' || (marginHang === 'leading' && leading(justification));
   // WORD_TABLE_NONLEADING_INDENT_SCOPE: further measured structures drop a
   // nonleading tblInd (§17.4.50) without joining the origin margin hang.
+  // The width ceilings below keep the previous indent contract for a
+  // content-fitted table: only its placement and nonbinding fit change.
   const widthIndent = (justification: string | null | undefined, indentPt: number, inherited = baseIndentInherited) =>
-    wordTableEffectiveIndentPt({ measured: measuredRow(justification) || nonleadingIndentIgnored, justification,
-      indentPt: rowIndent(justification, indentPt, inherited) });
+    wordTableEffectiveIndentPt({ measured: contentFitted
+      ? measuredOrigin || (omittedMarginEndOrigin && justification === 'end')
+      : measuredRow(justification) || nonleadingIndentIgnored, justification,
+    indentPt: rowIndent(justification, indentPt, inherited) });
   const rowIndentPts = format.rows.map((row) => {
     const ownException = !logicalProperties && row.exception?.indentAuthored === true;
     return widthIndent(row.justification ?? table.jc,
@@ -388,7 +392,8 @@ export function decideLogicalTable(
   // WORD_AUTOFIT_CONTENT_COLUMN_GROWTH: the measured content-sized class.
   const contentFitted = contentSized && singleTable && format.ordinaryFlow && format.positioning == null
     && format.outerEdgeIndent !== true && !rowOverrides && !gridSkips
-    && format.rows.every((row) => row.cellSpacingPt === 0)
+    && format.rows.every((row) => row.cellSpacingPt === 0
+      && row.cells.every((cell) => cell.dxaHorizontalMarginsOnly === true))
     // The two unspanned unpreferred tracks the solver content-fits.
     && input.gridWidthsPt.length === 2
     && input.rows.every((row) => row.cells.length === 2

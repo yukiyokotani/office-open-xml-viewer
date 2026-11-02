@@ -335,3 +335,24 @@ describe('content-fit boundaries (#2065 review)', () => {
     expect(at(11).widthPt).toBeCloseTo(200, 6);
   }, 60_000);
 });
+
+describe('content-fit width inputs (#2065 review round 3)', () => {
+  it('keeps the previous width ceilings when the ignored indent would select the leading band', () => {
+    const long = 'w '.repeat(60).trim();
+    const at = (indent: number | null) => tableGeometry('body', tableXml({ ...CONTENT_SIZED, jc: 'center', label: 'Q', indent })
+      .replace('<w:gridCol w:w="2000"/><w:gridCol w:w="2000"/>', '<w:gridCol w:w="4819"/><w:gridCol w:w="4819"/>')
+      .replace('<w:t>b</w:t>', `<w:t>${long}</w:t>`), 'Q', 14);
+    // Without tblInd the grid matches the band (leading-band geometry); with
+    // +720 it did not before, and the ignored indent must not change that.
+    expect(at(720).widthPt).toBeCloseTo(481.9, 6);
+  }, 60_000);
+  it('keeps content-sized tables with logical or nil margins on their grid', () => {
+    for (const margins of [
+      '<w:tblCellMar><w:start w:w="108" w:type="dxa"/><w:end w:w="108" w:type="dxa"/></w:tblCellMar>',
+      '<w:tblCellMar><w:left w:w="0" w:type="nil"/><w:right w:w="0" w:type="nil"/></w:tblCellMar>',
+    ]) {
+      const table = tableGeometry('body', tableXml({ ...CONTENT_SIZED, jc: 'right', label: 'Q', indent: null, margins }), 'Q', 15);
+      expect(table.widthPt, margins).toBeCloseTo(200, 6);
+    }
+  }, 60_000);
+});
