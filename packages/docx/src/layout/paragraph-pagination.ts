@@ -12,6 +12,8 @@ export interface ParagraphFragmentCursor {
   readonly boundary: LineBoundary | null;
   readonly sourceRangeStart?: number;
   readonly uniformRubyAdvancePt?: number;
+  /** Whole initial acquisition, including lines consumed on earlier pages. */
+  readonly wholeParagraphHasPlacements?: boolean;
 }
 
 export interface ParagraphFragmentSelection {
@@ -51,6 +53,7 @@ export type ParagraphFragmentation =
  */
 function completingParagraphAdmissionExtentPt(
   fragment: ParagraphLayout,
+  wholeParagraphHasPlacements: boolean,
   authoredSpaceAfterPt: number,
   writingMode: WritingMode,
   availableBlockExtentPt: number,
@@ -63,7 +66,7 @@ function completingParagraphAdmissionExtentPt(
     authoredSpaceAfterPt,
   });
   const logicalLineBoxExtentPt = wordGridLineAdmissionExtentPt(
-    fragment, withoutSpaceAfterPt, unreservedBodyBottomPt, reservePt,
+    fragment, wholeParagraphHasPlacements, withoutSpaceAfterPt, unreservedBodyBottomPt, reservePt,
   );
   return wordVerticalRlFinalLineAdmissionExtentPt({
     paragraph: fragment,
@@ -122,6 +125,10 @@ export function selectParagraphFragment(
     throw new RangeError('Authored paragraph spaceAfter must be finite and non-negative');
   }
   const total = acquired.lines.length;
+  // A continuation acquisition contains only the remaining source. Preserve
+  // the whole paragraph's placement fact before any candidate slicing.
+  const wholeParagraphHasPlacements = cursor.wholeParagraphHasPlacements
+    ?? acquired.lines.some(line => line.placements.length > 0);
   const lineEndLimit = policy.lineEndLimit;
   if (lineEndLimit !== undefined
     && (!Number.isInteger(lineEndLimit) || lineEndLimit < 0 || lineEndLimit >= total)) {
@@ -144,11 +151,12 @@ export function selectParagraphFragment(
   const admissionExtent = (fragment: ParagraphLayout, completesParagraph: boolean, reservePt: number): number => (
     completesParagraph
       ? completingParagraphAdmissionExtentPt(
-        fragment, authoredSpaceAfterPt, policy.writingMode ?? 'horizontal-tb', availableBlockExtentPt,
+        fragment, wholeParagraphHasPlacements, authoredSpaceAfterPt,
+        policy.writingMode ?? 'horizontal-tb', availableBlockExtentPt,
         policy.unreservedBodyBottomPt, reservePt,
       )
       : wordGridLineAdmissionExtentPt(
-        fragment, fragment.advancePt, policy.unreservedBodyBottomPt, reservePt,
+        fragment, wholeParagraphHasPlacements, fragment.advancePt, policy.unreservedBodyBottomPt, reservePt,
       )
   );
   if (fragmentation.kind === 'indivisible') {
@@ -284,6 +292,7 @@ export function selectParagraphFragment(
     nextCursor: nextBoundary === null ? null : Object.freeze({
       boundary: nextBoundary,
       sourceRangeStart: fragment.lines.at(-1)!.range.end,
+      wholeParagraphHasPlacements,
       ...(uniformRubyAdvancePt === undefined ? {} : { uniformRubyAdvancePt }),
     }),
     requiresFreshFlowRegion: false,

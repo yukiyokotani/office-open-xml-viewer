@@ -2611,6 +2611,7 @@ function* paginateBodyPassSteps(
           let keepSetExtentPt = acquired.blockExtentPt;
           const keepSetReferenceIds = new Set(footnoteIdsInRetainedSlice(acquired.layout));
           let terminalGridParagraph: ParagraphLayout | undefined;
+          let terminalWholeParagraphHasPlacements = true;
           let terminalLeadExtentPt = 0;
           let hasTerminalBlock = false;
           let keepSetBlockedByDeferral = false;
@@ -2653,6 +2654,7 @@ function* paginateBodyPassSteps(
             referenceIds?.forEach((id) => keepSetReferenceIds.add(id));
             if (!continues) {
               terminalGridParagraph = following.leadGridParagraph;
+              terminalWholeParagraphHasPlacements = following.wholeParagraphHasPlacements ?? true;
               terminalLeadExtentPt = following.leadContentExtentPt;
             }
             if (!continues || keepSetBlockedByDeferral) {
@@ -2673,7 +2675,8 @@ function* paginateBodyPassSteps(
             location.availableBounds.widthPt,
           ).reservePt;
           const terminalAdmissionPt = terminalGridParagraph
-            ? wordGridLineAdmissionExtentPt(terminalGridParagraph, terminalLeadExtentPt,
+            ? wordGridLineAdmissionExtentPt(terminalGridParagraph,
+              terminalWholeParagraphHasPlacements, terminalLeadExtentPt,
               unreservedBodyBottomPt, keepSetReservePt, keepSetExtentPt - terminalLeadExtentPt)
             : terminalLeadExtentPt;
           const keepSetAdmissionPt = keepSetExtentPt
