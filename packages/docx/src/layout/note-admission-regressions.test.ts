@@ -1158,7 +1158,7 @@ describe('progressive publication around note recovery (#2113)', () => {
     // A permission is per footnote id: recovery at the second reference also
     // changes the first occurrence's note area.
     const model = document('footnote', [paragraph('a;', 50), paragraph('b;', 10)], 15, 2);
-    const reference = model.body[0]! as DocParagraph;
+    const reference = model.body[0]!;
     const filler = (prefix: string) => Array.from({ length: 60 }, (_, i) => paragraph(`${prefix}${i};`) as BodyElement);
     const columns = model.section.columns;
     const body: BodyElement[] = [reference, ...filler('s'), {
@@ -1174,6 +1174,18 @@ describe('progressive publication around note recovery (#2113)', () => {
     model.section = { ...model.section, marginTop: 30, marginBottom: 30 };
     const { previews, layout } = await publications(model);
     expect(layout).toEqual(render(model));
+    expectPublishedPagesFinal(previews, layout);
+  });
+
+  it('publishes past a settled footnote referenced twice', async () => {
+    const model = document('footnote', [paragraph('n;')], 15, 2);
+    const reference = model.body[0]! as DocParagraph & { type: 'paragraph' };
+    const run = reference.runs[0]!;
+    reference.runs.push({ ...run, text: 'again;' } as DocParagraph['runs'][number]);
+    model.body = [reference as BodyElement, ...Array.from({ length: 129 }, (_, i) => paragraph(`b${i};`, 24) as BodyElement)];
+    const { previews, layout } = await publications(model);
+    expect(layout).toEqual(render(model));
+    expect(previews.length).toBeGreaterThan(0);
     expectPublishedPagesFinal(previews, layout);
   });
 
