@@ -5,6 +5,7 @@ import { isDeepFrozenPlainDataRoot } from './plain-data.js';
 import { placeNoteSeparatorOccurrence } from './reserved-note-separators.js';
 import { unionLayoutRects } from './rect-union.js';
 import { partitionFootnoteTable } from './footnote-table-fragmentation.js';
+import { noteBlockAcquirer } from './note-block-acquisition.js';
 import type { TableFragmentCursor } from './table-pagination.js';
 import type { NoteLayout, NoteSeparatorLayout, PaintNode, ParagraphLayout, StoryLayout, TableLayout } from './types.js';
 
@@ -214,6 +215,7 @@ function partitionIndexedFootnote(acquired: NoteLayout, cursor: FootnoteCursor |
   lineBudget = Number.POSITIVE_INFINITY,
 ): FootnotePartition | null {
   if (!Number.isFinite(capacityPt) || capacityPt < 0) throw new RangeError('Invalid footnote capacity');
+  const acquireBlock = recovery ? noteBlockAcquirer(acquired) : undefined;
   // A cursor counts shaped lines, so continuing it in a different text width
   // could silently skip or repeat source text. The caller must reacquire the
   // source suffix and start a fresh line cursor before changing widths.
@@ -221,7 +223,9 @@ function partitionIndexedFootnote(acquired: NoteLayout, cursor: FootnoteCursor |
     throw new Error('Footnote continuation across different text widths is unsupported');
   }
   if (cursor) {
-    const block = acquired.story.blocks[cursor.blockIndex];
+    const original = acquired.story.blocks[cursor.blockIndex];
+    const block = original && (original.kind === 'paragraph' || original.kind === 'table') && acquireBlock
+      ? acquireBlock(original) : original;
     if (!block || (block.kind !== 'paragraph' && block.kind !== 'table')
       || !sameSourcePosition(cursor.sourcePosition, block.kind === 'table'
         ? null : lineSourcePosition(block, cursor.lineIndex, indexOf(block)))
@@ -229,7 +233,7 @@ function partitionIndexedFootnote(acquired: NoteLayout, cursor: FootnoteCursor |
       throw new Error('Footnote continuation source cut changed during reflow');
     }
   }
-  if (cursor === null && acquired.advancePt <= capacityPt && lineBudget === Number.POSITIVE_INFINITY) {
+  if (!acquireBlock && cursor === null && acquired.advancePt <= capacityPt && lineBudget === Number.POSITIVE_INFINITY) {
     return Object.freeze({ fragment: acquired, nextCursor: null, hostShiftPt: 0 });
   }
   if (!recovery && !supports(acquired.story)) return null;
@@ -274,7 +278,9 @@ function partitionIndexedFootnote(acquired: NoteLayout, cursor: FootnoteCursor |
       }) } : {}),
     });
   for (let blockIndex = startBlock; blockIndex < acquired.story.blocks.length; blockIndex += 1) {
-    const block = acquired.story.blocks[blockIndex]!;
+    const original = acquired.story.blocks[blockIndex]!;
+    const block = (original.kind === 'paragraph' || original.kind === 'table') && acquireBlock
+      ? acquireBlock(original) : original;
     if (block.kind !== 'paragraph' && block.kind !== 'table') throw new Error('Unsupported footnote block');
     // Story acquisition already folds §17.3.1.9 contextualSpacing and
     // §17.3.1.33 adjacent margins. Preserve its cursor delta within this
@@ -283,7 +289,7 @@ function partitionIndexedFootnote(acquired: NoteLayout, cursor: FootnoteCursor |
     // and after ownership remain the shared paragraph slice contract's values.
     if (blocks.length > 0) {
       const previous = acquired.story.blocks[blockIndex - 1]!;
-      usedPt += block.flowBounds.yPt - (previous.flowBounds.yPt + previous.advancePt);
+      usedPt += original.flowBounds.yPt - (previous.flowBounds.yPt + previous.advancePt);
     }
     const place = <T extends ParagraphLayout | TableLayout>(paragraph: T): T => projectBodyOccurrence(paragraph, {
       occurrenceId: `${acquired.id}:block:${blockIndex}`,

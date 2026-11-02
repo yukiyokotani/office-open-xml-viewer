@@ -177,6 +177,9 @@ export interface NoteSourceContinuation {
 }
 
 export interface StoryLayoutAcquisitionInput {
+  /** Recovery partitioning will resolve visited field blocks before fitting.
+   * Whole-note admission must instead receive destination-complete content. */
+  readonly deferNoteFields?: boolean;
   readonly sourceStart?: NoteSourceContinuation;
   /** Section occurrence selecting this header/footer. Direct root acquisition
    * defaults to source ownership; production page composers supply the section. */
@@ -209,6 +212,7 @@ export interface StoryLayoutAcquisitionInput {
 }
 
 export interface NoteLayoutAcquisitionInput {
+  readonly deferNoteFields?: boolean;
   /** Page-wide area only: the first column's measured separator advance,
    * retained as a blank top band in another column. No separator is acquired
    * or painted there; its text width must not change the shared top edge. */

@@ -23,7 +23,7 @@ export function acquireNoteColumnPartition(
   let reflow = !cursor?.tableCursor && cursor?.sourceContinuation !== undefined
     && cursor.inlineExtentPt !== request.container.bounds.widthPt;
   let sourceStart = reflow ? cursor!.sourceContinuation : cursor?.acquisitionStart;
-  const acquire = () => session.layoutNotes!({ ...request,
+  const acquire = () => session.layoutNotes!({ ...request, deferNoteFields: true,
     ...(sourceStart ? { sourceStart } : {}),
   })[0];
   let acquired = acquire();

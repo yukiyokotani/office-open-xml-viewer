@@ -27,7 +27,7 @@ function paragraph(text: string, height = 10): DocParagraph & { type: 'paragraph
     lineSpacing: { value: height, rule: 'exact', explicit: true },
     runs: [{ ...run, text, noteRef: undefined, vertAlign: null }] };
 }
-function table(content: DocParagraph[], header = false): BodyElement {
+function table(content: DocParagraph[], header = false): Extract<BodyElement, { type: 'table' }> {
   const row = (items: DocParagraph[], isHeader = false) => ({
     cells: [{ content: items, colSpan: 1, vMerge: null, borders: {}, background: null,
       vAlign: 'top', widthPt: 40 }],
@@ -36,7 +36,7 @@ function table(content: DocParagraph[], header = false): BodyElement {
   return { type: 'table', colWidths: [40], rows: [
     ...(header ? [row([paragraph('header;')], true)] : []), row(content),
   ], borders: {}, cellMarginTop: 0, cellMarginBottom: 0, cellMarginLeft: 0, cellMarginRight: 0,
-  jc: 'left', layout: 'fixed', tblpPr: null } as unknown as BodyElement;
+  jc: 'left', layout: 'fixed', tblpPr: null } as unknown as Extract<BodyElement, { type: 'table' }>;
 }
 function document(kind: Kind, content: BodyElement[], mode?: number, columns = 2): DocxDocumentModel {
   const model = noteContinuationModel();
@@ -354,5 +354,74 @@ describe('reviewed note admission regressions', () => {
       expectConserved(layout, { '7': Array.from({ length: count }, (_, i) => `n${i};`).join('') });
       expect(spy.mock.calls.length).toBeLessThanOrEqual(12 * count);
     } finally { spy.mockRestore(); }
+  });
+
+  it.each([20, 40, 80, 160, 640])('bounds acquisition with a trailing PAGE field for %i tables', count => {
+    const field = paragraph('page=');
+    const run = field.runs[0]!;
+    if (run.type !== 'text') throw new Error('Expected text fixture');
+    field.runs.push({ ...run, type: 'field', fieldType: 'page', instruction: 'PAGE', fallbackText: '1' });
+    const spy = vi.spyOn(tableLayout, 'layoutTable');
+    try {
+      const content = Array.from({ length: count }, (_, i) => table([paragraph(`n${i};`, 20)]));
+      const layout = render(document('footnote', [...content, field], undefined, 1));
+      const destination = layout.pages.find(page => page.layers.notes.some(note =>
+        note.kind === 'note' && note.story.blocks.some(block => text(block).includes('page='))))!;
+      expectConserved(layout, { '7': content.map((_, i) => `n${i};`).join('') + `page=${destination.pageIndex + 1}` });
+      // Ordinary admission, the destination-complete recovery head, and the
+      // shared continuation epoch each need measurement + placement in the
+      // initial and settled page-count passes: 3*2*2 = 12N, independent of
+      // how many continuation pages the source requires.
+      expect(spy.mock.calls.length).toBeLessThanOrEqual(12 * count);
+    } finally { spy.mockRestore(); }
+  });
+
+  it.each([20, 40, 80, 160])('indexes nested parent cells once for %i outer rows', count => {
+    const outer = table([paragraph('unused;')]) as Extract<BodyElement, { type: 'table' }>;
+    outer.rows = Array.from({ length: count }, (_, i) => ({ ...outer.rows[0]!, cells: [{
+      ...outer.rows[0]!.cells[0]!,
+      content: [table(Array.from({ length: 12 }, (_, j) => paragraph(`r${i}p${j};`)))],
+    }] }));
+    let reads = 0;
+    const original = tableLayout.layoutTable;
+    const spy = vi.spyOn(tableLayout, 'layoutTable').mockImplementation((...args) => {
+      const result = original(...args);
+      if (args[0].rows.length !== count) return result;
+      return { ...result, layout: { ...result.layout, rows: result.layout.rows.map(row => ({
+        ...row, get cells() { reads += 1; return row.cells; },
+      })) } };
+    });
+    try {
+      const layout = render(document('footnote', [outer], undefined, 1));
+      expectConserved(layout, { '7': Array.from({ length: count }, (_, i) =>
+        Array.from({ length: 12 }, (_, j) => `r${i}p${j};`).join('')).join('') });
+      // Budget one row read per paragraph unit (12) and eight setup/boundary
+      // reads in each of two page-count passes: 2*(12+8)N. Parent lookup must
+      // add one indexing traversal, not a full-table scan per unit trial.
+      expect(reads).toBeLessThanOrEqual(40 * count);
+    } finally { spy.mockRestore(); }
+  });
+
+  it.each(['footnote', 'endnote'] as const)('resolves interleaved field blocks on each %s destination', kind => {
+    const content = Array.from({ length: 40 }, (_, i) => {
+      const p = paragraph(`p${i}=`);
+      const run = p.runs[0]!;
+      if (run.type !== 'text') throw new Error('Expected text fixture');
+      p.runs.push({ ...run, type: 'field', fieldType: 'page', instruction: 'PAGE', fallbackText: '1' },
+        { ...run, text: ';' });
+      // Exercise both root paragraphs and atomic page-dependent tables.
+      return i % 2 ? p : table([p]);
+    });
+    const model = document(kind, content, undefined, 1);
+    model.section.pageNumType = { start: 9, fmt: 'decimal' };
+    const layout = render(model);
+    const retained = layout.pages.flatMap(page => page.layers.notes.flatMap(note => {
+      if (note.kind !== 'note') return [];
+      const fragments = note.story.blocks.map(text).join('');
+      for (const match of fragments.matchAll(/p\d+=(\d+);/g)) expect(Number(match[1])).toBe(page.pageIndex + 9);
+      return [...fragments.matchAll(/p(\d+)=\d+;/g)].map(match => Number(match[1]));
+    }));
+    expect(retained).toEqual(Array.from({ length: 40 }, (_, i) => i));
+    expect(layout.pages.length).toBeGreaterThan(2);
   });
 });

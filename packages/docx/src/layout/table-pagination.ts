@@ -294,6 +294,11 @@ function paginationRowHeight(source: RetainedTableAcquisition, rowIndex: number)
   return Math.max(0, row.heightPt, row.contentHeightPt);
 }
 
+// Parent geometry is immutable for an acquisition. Index it once rather than
+// flattening every outer row for each nested fragment/capacity trial. Weak
+// ownership releases the index with the shaped epoch, including on failure.
+const parentCells = new WeakMap<RetainedTableAcquisition, ReadonlyMap<string, TableCellLayout>>();
+
 function nestedTableFragmentContext(
   source: RetainedTableAcquisition,
   parentCell: TableCellLayoutInput,
@@ -301,9 +306,17 @@ function nestedTableFragmentContext(
   availableHeightPt: number,
   nestedBlock?: TableCellBlockInput,
 ): TableFragmentContext {
-  const retainedCell = source.layout.rows
-    .flatMap((row) => row.cells)
-    .find((cell) => cell.id === parentCell.id);
+  let cells = parentCells.get(source);
+  if (!cells) {
+    const indexed = new Map<string, TableCellLayout>();
+    for (const row of source.layout.rows) for (const cell of row.cells) {
+      // Preserve the original first-match lookup for projected cell owners.
+      if (!indexed.has(cell.id)) indexed.set(cell.id, cell);
+    }
+    cells = indexed;
+    parentCells.set(source, cells);
+  }
+  const retainedCell = cells.get(parentCell.id);
   if (!retainedCell) {
     throw new LayoutInvariantError(
       'INVALID_REFERENCE',

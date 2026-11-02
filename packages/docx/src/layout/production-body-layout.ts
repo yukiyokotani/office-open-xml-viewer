@@ -1,6 +1,7 @@
 import { noteOverflowAllowed, NoteOverflowRecoveryRequired } from './note-overflow-policy.js';
 import { MAX_BODY_LAYOUT_PAGES } from './resource-budgets.js';
 import { registerFootnoteTable, registerFootnoteTableDestination } from './footnote-table-fragmentation.js';
+import { registerNoteBlockAcquisition, registerNoteBlockDestination } from './note-block-acquisition.js';
 import { deepFreezePlainData, deepFreezePlainDataWithFrozenAliases } from './plain-data.js';
 import { quarterTurnMathMetadataService } from './resources.js';
 import { pageOwnedAnchorKeysByLine } from './anchor-line-deferral.js';
@@ -656,6 +657,7 @@ interface BodyStoryAcquisitionContext {
    * separate inference epochs; a failed admission may change permission. */
   readonly noteSourceReuse: WeakMap<object, boolean>;
   readonly overflowingNoteSourceReuse: WeakMap<object, boolean>;
+  readonly noteFieldBlocks: WeakMap<object, ReadonlySet<number>>;
   readonly source: LayoutSourceStore;
   readonly publicAnchorBridge: typeof publicAnchorBridge;
   readonly headerFooterContext: string;
@@ -702,9 +704,9 @@ function acquireBodyStoryLayout(
   // acquisition per width/section/font context serves every page occurrence.
   const reservedRole = reservedNoteSeparatorRole(request.source)
     ?? selectedNoteSeparatorRole(request.source);
-  // Notes containing only ordinary text and in-flow tables have no destination
-  // page fields or anchors. Their acquisition is shared across equal-width pages;
-  // partitionFootnote projects only the admitted slice into its page domain.
+  // Notes containing only ordinary text and in-flow tables share acquisition
+  // across equal-width pages. After failed admission, field-bearing blocks can
+  // join that epoch: partitionFootnote refreshes them on demand before fitting.
   // Other continued stories are page-local and must not retain a full copy
   // for every destination page in this session cache.
   const continuedNote = reservedRole === undefined
@@ -721,38 +723,58 @@ function acquireBodyStoryLayout(
   let reusableNote = continuedNote && sourceReuse.get(root);
   if (continuedNote && reusableNote === undefined) {
     workBudget?.sourceUnits(root);
+    let hasFields = false;
     const reusableBlock = (element: LayoutStoryBlock
       | TableLayoutSource['rows'][number]['cells'][number]['content'][number]): boolean => {
       if (element.type === 'paragraph') return !element.framePr
-        && element.runs.every(run => run.type === 'text');
+        && element.runs.every(run => {
+          if (run.type === 'field') {
+            hasFields = true;
+            // Whole footnotes with continuation disabled never visit the
+            // partition seam; keep their destination acquisition unchanged.
+            return request.source.story === 'endnote' || services.allowFootnoteContinuation === true;
+          }
+          return run.type === 'text';
+        });
       // A plain table's cell-relative acquisition is just as independent of
       // the destination as a plain paragraph. Reuse the complete shaped note
       // epoch instead of reacquiring every table for each continuation page.
-      // Fields, frames, drawings and positioned tables at any depth still
-      // require destination acquisition; widths/section/services stay keyed.
+      // Frames, drawings and positioned tables still require destination
+      // acquisition. Field blocks are acquired lazily before fragment fitting.
       return element.type === 'table' && !source.acquisition.effectiveTablePositioning(element)
         && element.rows.every(row => row.cells.every(cell => cell.content.every(reusableBlock)));
     };
+    const fieldBlocks = new Set<number>();
     reusableNote = overflowingNote
-      ? root.every(reusableBlock)
+      ? root.every((block, index) => {
+          hasFields = false;
+          const reusable = reusableBlock(block);
+          if (hasFields) fieldBlocks.add(index);
+          return reusable;
+        })
       : root.every(element => element.type === 'paragraph'
         && !element.framePr && element.runs.every(run => run.type === 'text'));
     sourceReuse.set(root, reusableNote);
+    if (overflowingNote && reusableNote && fieldBlocks.size > 0) dependencies.noteFieldBlocks.set(root, fieldBlocks);
   }
-  // Both proved page-independent classes hold no frame, text box, field or
-  // anchor, i.e. no page-placed content, so neither a band translation nor
-  // page frames can change their layout: their key keeps only the facts the
-  // layout depends on (section and container extent), and they are never a
-  // convergence trial. Every other story keeps its page and placement facts.
-  const pageIndependent = reusableNote || reservedRole !== undefined;
+  const fieldBlocks = overflowingNote && dependencies.noteFieldBlocks.get(root);
+  // A whole-note admission may retain its input directly, without partitioning
+  // (including atomic overflow or several notes in one mandatory body unit).
+  // Only callers promising to partition may share a deferred-field template.
+  if (fieldBlocks && request.deferNoteFields !== true) reusableNote = false;
+  // These epochs hold no frames, text boxes or anchors, so band/page frames
+  // cannot change their acquisition. Recovery field blocks are destination-
+  // acquired before fit, not painted from this shared template. All other
+  // stories keep their page and placement facts in the cache key.
+  const sharedAcquisition = reusableNote || reservedRole !== undefined;
   const occurrence = JSON.stringify(overflowingNote
-    ? [request.source, pageIndependent ? null : request.pageIndex, 'overflow']
-    : [request.source, pageIndependent ? null : request.pageIndex]);
+    ? [request.source, sharedAcquisition ? null : request.pageIndex, 'overflow']
+    : [request.source, sharedAcquisition ? null : request.pageIndex]);
   const placement = JSON.stringify({
     section: request.section,
-    container: pageIndependent ? { ...request.container, id: null } : request.container,
-    band: pageIndependent ? null : request.bandTranslationPt ?? null,
-    pageFrames: pageIndependent ? null : request.pageFrames ?? null,
+    container: sharedAcquisition ? { ...request.container, id: null } : request.container,
+    band: sharedAcquisition ? null : request.bandTranslationPt ?? null,
+    pageFrames: sharedAcquisition ? null : request.pageFrames ?? null,
     sourceStart: request.sourceStart ?? null,
   });
   const pageStoryCache = (request.source.story === 'header' || request.source.story === 'footer')
@@ -798,7 +820,7 @@ function acquireBodyStoryLayout(
   return (pageStoryCache ?? dependencies.storyLayoutCache).layout({
     occurrence: pageStoryOccurrence,
     placement: pageStoryPlacement,
-    trial: !pageIndependent
+    trial: !sharedAcquisition
       && (request.bandTranslationPt !== undefined || request.pageFrames !== undefined),
     // Replace, never accumulate, a separator root's context; never retain a
     // destination-dependent full continued note once per page.
@@ -806,6 +828,7 @@ function acquireBodyStoryLayout(
     // full suffix for every source cut. Equal-width whole-note acquisitions
     // keep their existing shared cache; width-changing cuts retain one latest.
     retention: reservedRole !== undefined || request.sourceStart !== undefined
+      || (fieldBlocks && request.deferNoteFields !== true)
       ? 'latest'
       : continuedNote && !reusableNote ? 'none' : 'session',
   }, () => {
@@ -814,7 +837,34 @@ function acquireBodyStoryLayout(
     // every miss before destination-field resolution, shaping, geometry or
     // resource acquisition; cache hits are free.
     workBudget?.charge(root);
-    return layoutBodyStory(dependencies, request, root, reservedRole !== undefined);
+    const story = layoutBodyStory(dependencies, request, root, reservedRole !== undefined);
+    if (fieldBlocks && reusableNote) {
+      // Recovery only: the v0.89 admission must already have failed. PAGE
+      // (§17.16.5.44) is evaluated on its destination, while unrelated tables
+      // keep their acquisition. Retain just the latest occurrence per field
+      // block, not a full story per page. Partitioning never visits consumed
+      // blocks, so a field at the tail cannot cause quadratic reacquisition.
+      const latest = new WeakMap<ParagraphLayout | TableLayout, {
+        pageIndex: number; block: ParagraphLayout | TableLayout;
+      }>();
+      registerNoteBlockAcquisition(story, (block, destination) => {
+        const index = block.source.path[0]!;
+        if (!fieldBlocks.has(index)) return block;
+        const hit = latest.get(block);
+        if (hit?.pageIndex === destination.pageIndex) return hit.block;
+        workBudget?.charge(root[index]!);
+        const refreshed = layoutBodyStory(dependencies, {
+          ...request, pageIndex: destination.pageIndex,
+          container: { ...request.container, bounds: { ...request.container.bounds, yPt: block.flowBounds.yPt } },
+        }, root, false, index).blocks[0];
+        if (!refreshed || (refreshed.kind !== 'paragraph' && refreshed.kind !== 'table')) {
+          throw new Error('Note field acquisition lost its source block');
+        }
+        latest.set(block, { pageIndex: destination.pageIndex, block: refreshed });
+        return refreshed;
+      });
+    }
+    return story;
   });
 }
 
@@ -825,6 +875,8 @@ function layoutBodyStory(
   request: import('./body-layout-kernel.js').StoryLayoutAcquisitionInput,
   root: readonly LayoutStoryBlock[],
   separatorRoot: boolean,
+  /** A field-only refresh in an admitted, anchor/frame-free recovery epoch. */
+  fieldBlockIndex?: number,
 ): StoryLayout {
   const { source, state, services, publicAnchorBridge } = dependencies;
   const start = request.sourceStart;
@@ -879,7 +931,7 @@ function layoutBodyStory(
       ...(request.container.quarterTurned ? { quarterTurned: true } : {}),
     },
   };
-  preRegisterPageFloats(root, request.sourceStart?.blockIndex ?? 0, candidate);
+  if (fieldBlockIndex === undefined) preRegisterPageFloats(root, request.sourceStart?.blockIndex ?? 0, candidate);
   const storyServices = createLayoutServicesRuntimeView(services, request.container.quarterTurnMath
     ? { math: quarterTurnMathMetadataService(services.math) } : {});
   candidate.layoutServices = storyServices;
@@ -933,7 +985,9 @@ function layoutBodyStory(
   })();
   const storyTableAcquisitions = new Map<string, RetainedTableAcquisition>();
   let bandDependent = false;
-  const blockInputs: StoryBlockInput[] = root.flatMap((element, index): StoryBlockInput[] => {
+  const selectedBlocks = fieldBlockIndex === undefined ? root : [root[fieldBlockIndex]!];
+  const blockInputs: StoryBlockInput[] = selectedBlocks.flatMap((element, selectedIndex): StoryBlockInput[] => {
+    const index = fieldBlockIndex ?? selectedIndex;
     if (request.sourceStart && index < request.sourceStart.blockIndex) return [];
     const source: SourceRef = {
       story: request.source.story,
@@ -988,11 +1042,12 @@ function layoutBodyStory(
       return projected;
     });
   });
-  let previousParagraph: LayoutParagraphBlock | null = null;
+  const preceding = fieldBlockIndex === undefined ? undefined : root[fieldBlockIndex - 1];
+  let previousParagraph: LayoutParagraphBlock | null = preceding?.type === 'paragraph' ? preceding : null;
   // ECMA-376 §17.3.1.11 frames are story-local: adjacent paragraphs with
   // identical framePr form one frame anchored to the next non-frame
   // paragraph of the same story (headers and footers included).
-  const storyFrameGroups = collectBodyFrameGroups(root);
+  const storyFrameGroups = collectBodyFrameGroups(selectedBlocks);
   const storyFrameAcquisitions = new Map<
     BodyFrameGroup<LayoutParagraphBlock>,
     Readonly<{
@@ -1804,6 +1859,7 @@ function layoutBodyNotes(
         section: request.section,
         container: storyContainer,
         ...(request.sourceStart ? { sourceStart: request.sourceStart } : {}),
+        ...(request.deferNoteFields ? { deferNoteFields: true } : {}),
         ...(bandTranslationPt ? { bandTranslationPt } : {}),
       });
     } catch (error) {
@@ -1905,6 +1961,9 @@ function layoutBodyNotes(
       displayPageNumber: fieldAcquisitionContextOf(services).resolveDestinationPage?.(request.pageIndex)?.displayPageNumber
         ?? request.pageIndex + 1,
       occurrenceId: note.id,
+    });
+    registerNoteBlockDestination(note, {
+      source, pageIndex: request.pageIndex, section: request.section, container: storyContainer,
     });
     notes.push(note);
     stack.append(advancePt);
@@ -2944,6 +3003,7 @@ function openConcreteBodyLayoutSession(
     storyLayoutCache,
     noteSourceReuse: new WeakMap(),
     overflowingNoteSourceReuse: new WeakMap(),
+    noteFieldBlocks: new WeakMap(),
     publicAnchorBridge,
     // All of these are immutable for this concrete session. Intern large exact
     // fingerprints in the pagination scope rather than copying font snapshots
