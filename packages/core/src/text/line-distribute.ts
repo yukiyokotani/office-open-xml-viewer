@@ -143,6 +143,12 @@ export interface DistributeOptions {
    *  this way; non-SEA boundaries keep the ordinary space/CJK rules. Verified
    *  against the Word-exported adjudication fixture (issue #959). */
   seaClusterGaps?: boolean;
+  /** With {@link seaClusterGaps}: the SEA cluster before an inter-word space
+   *  run opens its own gap too (committed with the run, so a line-end run
+   *  opens none). WordprocessingML `thaiDistribute` before compatibility mode
+   *  15 widens every Thai cluster and space; omitted callers keep the run as
+   *  the only opportunity. */
+  seaClusterSpaceGaps?: boolean;
 }
 
 /** Distribute slack over the enumerated opportunities. Existing callers use

@@ -18,14 +18,16 @@ export function acquireNoteColumnPartition(
   inspectAcquisition?: (note: NoteLayout) => void,
 ): FootnotePartition | null {
   if (!session.layoutNotes) throw new Error('Note continuation requires note acquisition');
-  let reflow = cursor?.sourceContinuation !== undefined
+  // A row/cell cursor owns a shaped epoch. Complete-block boundaries may
+  // reflow the suffix; an in-row cut must keep its source geometry.
+  let reflow = !cursor?.tableCursor && cursor?.sourceContinuation !== undefined
     && cursor.inlineExtentPt !== request.container.bounds.widthPt;
   let sourceStart = reflow ? cursor!.sourceContinuation : cursor?.acquisitionStart;
-  const acquire = () => session.layoutNotes!({ ...request,
+  const acquire = () => session.layoutNotes!({ ...request, deferNoteFields: true,
     ...(sourceStart ? { sourceStart } : {}),
   })[0];
   let acquired = acquire();
-  if (cursor?.sourceContinuation && acquired?.story.bandDependent && request.bandTranslationPt && !reflow) {
+  if (!cursor?.tableCursor && cursor?.sourceContinuation && acquired?.story.bandDependent && request.bandTranslationPt && !reflow) {
     // A page-owned host must see the translation of the retained suffix,
     // excluding source lines discarded by a prior shaped-epoch line cursor.
     sourceStart = cursor.sourceContinuation;
@@ -33,7 +35,12 @@ export function acquireNoteColumnPartition(
     acquired = acquire();
   }
   if (acquired) inspectAcquisition?.(acquired);
-  const result = acquired ? partition(acquired, reflow ? null : cursor, capacityPt, notice, extent) : null;
+  if (extent !== 'overflow') {
+    const result = acquired ? partition(acquired, reflow ? null : cursor, capacityPt, notice, extent) : null;
+    return result ? Object.freeze({ ...result, fragment: destinationOwnedNote(result.fragment) }) : null;
+  }
+  const result = acquired ? partition(acquired, reflow ? null : cursor, capacityPt, notice)
+    ?? partition(acquired, reflow ? null : cursor, capacityPt, notice, 'overflow') : null;
   return result ? Object.freeze({ ...result, fragment: destinationOwnedNote(result.fragment) }) : null;
 }
 

@@ -71,6 +71,13 @@ export function enumerateGaps<T extends DistributeSeg>(
     }
     if (u.ws) {
       if (state.hasContent && u.si !== final) {
+        if (opts.seaClusterSpaceGaps && opts.seaClusterGaps && state.pendingCount === 0
+          && previous?.cp !== undefined && isSeaScriptCodePoint(previous.cp) && previous.si !== final) {
+          const before = width(previous);
+          state.pendingWidth += before;
+          state.pendingCount += 1;
+          if (collect) pending.push(descriptor(previous, 'boundary'));
+        }
         state.pendingLastWidth = width(u);
         state.pendingWidth += state.pendingLastWidth;
         state.pendingCount += 1;
