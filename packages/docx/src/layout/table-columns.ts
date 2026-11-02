@@ -16,19 +16,21 @@ export interface TableCellHorizontalSpacingInsets {
 /** §17.4.43/.44/.45 spacing lives inside the table grid: an outer edge owns
  * the full spacing and two adjacent cells share one inner gap. This projection
  * is shared by intrinsic constraints, child acquisition, and final cell boxes
- * so each stage uses the same content width. */
+ * so each stage uses the same content width. WORD_TABLE_CELL_SPACING_GEOMETRY
+ * doubles those insets only for the measured separated-box class. */
 export function tableCellHorizontalSpacingInsets(
   spacingPt: number,
   columnStart: number,
   columnSpan: number,
   columnCount: number,
+  separatedGeometry = false,
 ): TableCellHorizontalSpacingInsets {
   const spacing = Number.isFinite(spacingPt) ? Math.max(0, spacingPt) : 0;
   const start = Math.max(0, columnStart);
   const end = start + Math.max(1, columnSpan);
   return {
-    startPt: start === 0 ? spacing : spacing / 2,
-    endPt: end >= Math.max(0, columnCount) ? spacing : spacing / 2,
+    startPt: (start === 0 ? spacing : spacing / 2) * (separatedGeometry && spacing > 0 ? 2 : 1),
+    endPt: (end >= Math.max(0, columnCount) ? spacing : spacing / 2) * (separatedGeometry && spacing > 0 ? 2 : 1),
   };
 }
 
@@ -638,6 +640,26 @@ function fitToAvailableWidth(
   return cleanWidths(result.map((width) => width * scale));
 }
 
+/** WORD_TABLE_CELL_SPACING_GEOMETRY establishes only nonbinding content fits.
+ * Use this same admission test before selecting the geometry and when solving
+ * it. A binding table must retain its original constraints, ceiling and boxes,
+ * rather than solving reduced constraints and adding a gap budget afterwards. */
+export function spacedAutoFitContentWidthsPt(input: TableColumnLayoutInput): readonly number[] | null {
+  const columnCount = requiredColumnCount(input);
+  const spacingPt = input.separatedCellSpacingPt ?? 0;
+  if (input.layout !== 'autofit' || spacingPt <= 0 || columnCount === 0
+    || input.growUnpreferredColumns !== 'nonbinding') return null;
+  const allUnpreferred = input.rows.every((row) => row.before === null && row.after === null
+    && row.cells.length === columnCount && row.cells.every((cell, index) =>
+      cell.columnSpan === 1 && cell.columnStart === index && cell.preferredWidth === null));
+  if (!allUnpreferred) return null;
+  const { maximums } = singleColumnBounds(input.rows, columnCount, 0);
+  const maximumPt = maximums.reduce((sum, width) => sum + width, 0);
+  const gapBudgetPt = (columnCount + 1) * 2 * spacingPt;
+  return maximumPt + gapBudgetPt <= (input.availableWidthPt ?? 0)
+    && maximumPt + gapBudgetPt < (input.contentBandPt ?? 0) ? maximums : null;
+}
+
 /**
  * ECMA-376 §17.18.87 fixed/autofit guidance expressed as a deterministic,
  * parser-independent constraint solver. `tblGrid` seeds widths; it never
@@ -646,6 +668,37 @@ function fitToAvailableWidth(
 function solveTableColumnWidths(input: TableColumnLayoutInput): readonly number[] {
   const columnCount = requiredColumnCount(input);
   if (columnCount === 0) return Object.freeze([]);
+  const spacingPt = input.separatedCellSpacingPt ?? 0;
+  if (spacingPt > 0) {
+    // WORD_TABLE_CELL_SPACING_GEOMETRY: solve cell boxes without gaps. Fixed
+    // tracks carve the gap budget proportionally; AutoFit constraints already
+    // contain cell borders and margins, and are admitted only when nonbinding.
+    const gapBudgetPt = (columnCount + 1) * 2 * spacingPt;
+    const cellInput = { ...input, separatedCellSpacingPt: undefined };
+    let boxes: readonly number[];
+    if (input.layout === 'fixed') {
+      const resolved = solveTableColumnWidths(cellInput);
+      const totalPt = resolved.reduce((sum, width) => sum + width, 0);
+      // An impossible gap budget is not measured. Preserve the prior solve.
+      if (totalPt <= gapBudgetPt) return resolved;
+      boxes = resolved.map((width) => width * (totalPt - gapBudgetPt) / totalPt);
+    } else {
+      const contentWidths = spacedAutoFitContentWidthsPt(input);
+      // Production eligibility rejects binding cases before changing any
+      // constraints or acquisition geometry. Do not allocate unmeasured gaps
+      // if a direct solver caller supplies an inapplicable spacing request.
+      if (!contentWidths) return solveTableColumnWidths(cellInput);
+      boxes = contentWidths;
+    }
+    // Retained grid tracks allocate half each shared gap and the entire outer
+    // gap. Subtracting the same insets in acquisition/materialization leaves
+    // the cell boxes; summing a span retains its interior 2s gaps.
+    return Object.freeze(boxes.map((width, column) => {
+      const insets = tableCellHorizontalSpacingInsets(spacingPt, column, 1, columnCount, true);
+      return width + insets.startPt + insets.endPt;
+    }));
+  }
+
   const widths = fixedWidths(input, columnCount);
   if (input.layout === 'fixed') {
     if (input.availableWidthPt === null) {
