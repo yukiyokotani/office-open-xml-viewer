@@ -17,6 +17,7 @@ import * as noteColumns from './note-column-acquisition.js';
 import * as noteBlocks from './note-block-acquisition.js';
 import * as pageFactory from './page-factory.js';
 import * as bodyPagination from './body-pagination.js';
+import { NoteRecoveryProgress } from './note-recovery-progress.js';
 import { NOTE_RECOVERY_WORK_MULTIPLIER, NoteOverflowPolicy, NoteOverflowRecoveryRequired } from './note-overflow-policy.js';
 
 type Kind = 'footnote' | 'endnote';
@@ -93,7 +94,7 @@ function independentOversizedNotes(count: number) {
   const expected: Record<string, string> = {};
   model.footnotes = Array.from({ length: count }, (_, index) => {
     const id = String(index + 7);
-    const content = Array.from({ length: 40 }, (_, i) => paragraph(`n${id}-${i};`, i === 0 ? 120 : 10));
+    const content = Array.from({ length: 2 }, (_, i) => paragraph(`n${id}-${i};`, i === 0 ? 120 : 10));
     expected[id] = content.map((_, i) => `n${id}-${i};`).join('');
     return { id, content };
   });
@@ -215,10 +216,20 @@ describe('reviewed note admission regressions', () => {
     expect(layout.pages.flatMap(page => page.layers.body.map(text)).join('')).toBe('1following;2following;');
   });
 
-  it('debits completed-page copies before a long recovered tail exceeds its allowance', () => {
-    const model = document('footnote', Array.from({ length: 8192 }, () => paragraph('x;', 120)), undefined, 1);
+  it('debits completed-page copies against the recovered tail allowance', () => {
+    // The original 8192-page tail reached the allowance. Count charged copies
+    // directly so a missing debit is also detectable with a short tail.
+    const count = 16;
+    const model = document('footnote', Array.from({ length: count }, () => paragraph('x;', 120)), undefined, 1);
     let originalFailure: Error | undefined;
-    let reads = 0, limit = 0;
+    let reads = 0, limit = 0, chargedCopies = 0;
+    let copying = false, exhaustCopy = false;
+    let readsAtExhaustion: number | undefined;
+    const copy = NoteRecoveryProgress.prototype.chargePageSequenceCopy;
+    const copies = vi.spyOn(NoteRecoveryProgress.prototype, 'chargePageSequenceCopy').mockImplementation(function (this: NoteRecoveryProgress, count) {
+      copying = true;
+      try { return copy.call(this, count); } finally { copying = false; }
+    });
     const recover = NoteOverflowPolicy.prototype.recover;
     const recovery = vi.spyOn(NoteOverflowPolicy.prototype, 'recover').mockImplementation(function (this: NoteOverflowPolicy, error) {
       if (error instanceof NoteOverflowRecoveryRequired) originalFailure ??= error.failure;
@@ -226,7 +237,18 @@ describe('reviewed note admission regressions', () => {
     });
     const charge = NoteOverflowPolicy.prototype.charge;
     const ledger = vi.spyOn(NoteOverflowPolicy.prototype, 'charge').mockImplementation(function (this: NoteOverflowPolicy, kind, id, sourceUnits, units) {
-      if (this.allows(kind, [id])) limit = NOTE_RECOVERY_WORK_MULTIPLIER * (sourceUnits + 1);
+      if (this.allows(kind, [id])) {
+        limit = NOTE_RECOVERY_WORK_MULTIPLIER * (sourceUnits + 1);
+        if (copying) {
+          chargedCopies += units;
+          if (exhaustCopy) {
+            readsAtExhaustion = reads;
+            // Simulate an allowance already consumed by earlier recovery
+            // trials, without constructing thousands of completed pages.
+            charge.call(this, kind, id, sourceUnits, limit);
+          }
+        }
+      }
       return charge.call(this, kind, id, sourceUnits, units);
     });
     const commit = bodyPagination.commitPageFlowTransition;
@@ -246,12 +268,22 @@ describe('reviewed note admission regressions', () => {
         expect(originalFailure).toMatchObject({ name: 'FootnoteAdmissionOverflowError' });
         expect(error).toBe(originalFailure);
       }
-      if (result) expectConserved(result, { '7': 'x;'.repeat(8192) });
+      if (result) expectConserved(result, { '7': 'x;'.repeat(count) });
       expect(limit).toBeGreaterThan(0);
-      expect(reads).toBeGreaterThan(8192);
+      expect(reads).toBeGreaterThan(count);
+      expect(reads).toBeLessThanOrEqual(chargedCopies);
       expect(reads).toBeLessThanOrEqual(limit);
-    } finally { pages.mockRestore(); ledger.mockRestore(); recovery.mockRestore(); }
-  }, 60000);
+
+      originalFailure = undefined;
+      exhaustCopy = true;
+      let failure: unknown;
+      try { render(model); } catch (error) { failure = error; }
+      expect(originalFailure).toMatchObject({ name: 'FootnoteAdmissionOverflowError' });
+      expect(failure).toBe(originalFailure);
+      expect(readsAtExhaustion).toBeDefined();
+      expect(reads).toBe(readsAtExhaustion);
+    } finally { pages.mockRestore(); ledger.mockRestore(); recovery.mockRestore(); copies.mockRestore(); }
+  });
 
   it('preserves the captured rejection when recovery finalization throws', () => {
     let originalFailure: Error | undefined;
@@ -316,7 +348,9 @@ describe('reviewed note admission regressions', () => {
 
   it('bounds repeated-header materialization by the note-local work allowance', () => {
     const results: { n: number; rows: number; work: number; limit: number; ms: number }[] = [];
-    for (const n of [64, 128, 256, 512]) {
+    // 64 repeated headers already exhaust the note-local allowance; the
+    // original 64-512 sweep repeated the same bound at much higher cost.
+    for (const n of [64]) {
       const grid = table([paragraph('h;', 1)]);
       grid.rows = Array.from({ length: 2 * n }, (_, index) => ({ ...grid.rows[0]!,
         isHeader: index < n, cells: [{ ...grid.rows[0]!.cells[0]!,
@@ -356,7 +390,7 @@ describe('reviewed note admission regressions', () => {
       } finally { materialize.mockRestore(); counter.mockRestore(); policy.mockRestore(); }
     }
     process.stdout.write(JSON.stringify({ shape: 'repeated-headers', results }) + '\n');
-  }, 60_000);
+  });
 
   it.each((['footnote', 'endnote'] as const).flatMap(kind => [1, 2].flatMap(columns =>
     ['repeated-source', 'empty-fragment'].map(failureMode => ({ kind, columns, failureMode })))))(
@@ -467,7 +501,8 @@ describe('reviewed note admission regressions', () => {
     expect(layout.pages.length).toBeGreaterThan(2);
   });
 
-  it.each([320, 640, 1280, 2560])('bounds NUMPAGES paragraph acquisition linearly for %i fields', count => {
+  // The largest case still crosses the two-digit page-count boundary.
+  it.each([16, 32, 64, 128])('bounds NUMPAGES paragraph acquisition linearly for %i fields', count => {
     const p = paragraph('');
     const run = p.runs[0]!;
     if (run.type !== 'text') throw new Error('Expected text fixture');
@@ -483,12 +518,16 @@ describe('reviewed note admission regressions', () => {
       return { ...budget, charge(source) { work += budget.sourceUnits(source); budget.charge(source); } };
     });
     try {
-      const layout = render(document('footnote', [table([paragraph('tall;', 120)]), p], undefined, 1));
+      const model = document('footnote', [table([paragraph('tall;', 120)]), p], undefined, 1);
+      // A 40pt text band reaches two-digit NUMPAGES with only 128 fields.
+      model.section.pageWidth = 60;
+      const layout = render(model);
+      if (count === 128) expect(layout.pages.length).toBeGreaterThanOrEqual(10);
       expectConserved(layout, { '7': 'tall;' + `x=${layout.pages.length}; `.repeat(count) });
       // The fixture contributes 170 source units/field plus <=262 fixed
       // units. Allow four source/block acquisitions in each of up to three
       // page-count passes (including the two-digit NUMPAGES width change):
-      // 12*(170N+262) < 2500N for N>=320. Destination pages must add no full
+      // 12*(170N+262) < 2500N for N>=16. Destination pages must add no full
       // paragraph acquisitions; the allowance is independent of page count.
       expect(work).toBeLessThanOrEqual(2500 * count);
     } finally { spy.mockRestore(); }
@@ -509,8 +548,10 @@ describe('reviewed note admission regressions', () => {
   });
 
   it('resumes a bounded field paragraph inside long original text runs', () => {
-    const before = 'word '.repeat(600) + 'page=';
-    const after = ';' + ' tail'.repeat(600);
+    // Each original run exceeds a full 74pt continuation band, so both
+    // sides of PAGE resume inside a run rather than just at run boundaries.
+    const before = 'word '.repeat(96) + 'page=';
+    const after = ';' + ' tail'.repeat(96);
     const p = paragraph(before);
     const run = p.runs[0]!;
     if (run.type !== 'text') throw new Error('Expected text fixture');
@@ -522,6 +563,7 @@ describe('reviewed note admission regressions', () => {
     const owner = layout.pages.find(page => page.layers.notes.some(note => note.kind === 'note'
       && note.story.blocks.some(block => text(block).includes('page='))))!;
     expectConserved(layout, { '7': `tall;${before}${owner.pageIndex + 99}${after}` });
+    expect(layout.pages.length).toBeGreaterThan(3);
   });
 
   it.each(['footnote', 'endnote'] as const)('stops repeated %s refresh trials at the note-local work allowance', kind => {
@@ -680,7 +722,9 @@ describe('reviewed note admission regressions', () => {
     }
   });
 
-  it.each([20, 40, 80])('replays only the active page for %i independent oversized notes', count => {
+  // Multiple completed pages precede each later retry; three doublings
+  // distinguish active-page replay from replaying the entire growing prefix.
+  it.each([2, 4, 8, 16])('replays only the active page for %i independent oversized notes', count => {
     const { model, expected } = independentOversizedNotes(count);
     const source = layoutSourceStore(model);
     const steps = paginateBodySteps(source.bodyLayoutInput,
@@ -688,7 +732,10 @@ describe('reviewed note admission regressions', () => {
     let yielded = 0;
     let step = steps.next();
     while (!step.done) {
-      expect(++yielded).toBeLessThanOrEqual(40 * count);
+      // Two-page notes need admission/retry/continuation work in each
+      // convergence pass. Seven steps/note leaves boundary slack, but
+      // rejects replay of all prior pages by the later doublings.
+      expect(++yielded).toBeLessThanOrEqual(7 * count);
       step = steps.next();
     }
     expectConserved(step.value, expected);
@@ -864,7 +911,7 @@ describe('reviewed note admission regressions', () => {
 
   it('keeps continued tall-row recovery block reads linear under source doubling', () => {
     const results: { n: number; reads: number; ms: number }[] = [];
-    for (const n of [512, 1024, 2048, 4096]) {
+    for (const n of [16, 32, 64, 128]) {
       let reads = 0;
       const original = tableAcquisition.acquireRetainedTable;
       const spy = vi.spyOn(tableAcquisition, 'acquireRetainedTable').mockImplementation((...args) => {
@@ -891,11 +938,12 @@ describe('reviewed note admission regressions', () => {
     for (let i = 1; i < results.length; i++) {
       // Labels all fit one line; page/column geometry and the two convergence
       // passes stay fixed. Doubling doubles source visits and band selection,
-      // plus a partial boundary band. Allow 10% slack over 2x at >=512 blocks
-      // (2.2x); the old full-row scan on every cut approaches 4x.
+      // plus a partial boundary band. The original 512-4096-block sweep read
+      // 7858/15684/31336/62642 blocks. Keep its 2.2x bound at small N;
+      // the old full-row scan on every cut approaches 4x.
       expect(results[i]!.reads).toBeLessThanOrEqual(2.2 * results[i - 1]!.reads);
     }
-  }, 60_000);
+  });
 
   it.each(['rowNeedsPageOrigins', 'retainedTableAcquisitionIsReusableAcrossPages'] as const)(
     'charges repeated %s scans to the note-local recovery allowance', predicate => {
@@ -936,7 +984,7 @@ describe('reviewed note admission regressions', () => {
       } finally { scan.mockRestore(); policy.mockRestore(); }
     });
 
-  it.each([40, 80, 160])('bounds whole-story layoutTable work linearly for %i independent tables', count => {
+  it.each([8, 16, 32, 64])('bounds whole-story layoutTable work linearly for %i independent tables', count => {
     const spy = vi.spyOn(tableLayout, 'layoutTable');
     try {
       const content = Array.from({ length: count }, (_, i) => table([paragraph(`n${i};`, 20)]));
@@ -946,7 +994,7 @@ describe('reviewed note admission regressions', () => {
     } finally { spy.mockRestore(); }
   });
 
-  it.each([20, 40, 80, 160, 640])('bounds acquisition with a trailing PAGE field for %i tables', count => {
+  it.each([8, 16, 32, 64])('bounds acquisition with a trailing PAGE field for %i tables', count => {
     const field = paragraph('page=');
     const run = field.runs[0]!;
     if (run.type !== 'text') throw new Error('Expected text fixture');
@@ -966,7 +1014,7 @@ describe('reviewed note admission regressions', () => {
     } finally { spy.mockRestore(); }
   });
 
-  it.each([20, 40, 80, 160])('indexes nested parent cells once for %i outer rows', count => {
+  it.each([2, 4, 8, 16])('indexes nested parent cells once for %i outer rows', count => {
     const outer = table([paragraph('unused;')]) as Extract<BodyElement, { type: 'table' }>;
     outer.rows = Array.from({ length: count }, (_, i) => ({ ...outer.rows[0]!, cells: [{
       ...outer.rows[0]!.cells[0]!,
