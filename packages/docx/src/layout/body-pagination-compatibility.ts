@@ -157,12 +157,14 @@ function wordGridLineHasPlainPaint(paragraph: ParagraphLayout, line: LineLayout)
   // land on page 2 throughout. In the automatic, before=0, auto1.15,
   // keepNext-off break-only counterexamples, no keepLines/widowControl applies:
   // full first-line fit moves the paragraph; glyph-content relief would split
-  // it. A line with no placements cannot inherit the plain-glyph observation
-  // via vacuous every(). This restricts relief, not paragraph splitting: blank
+  // it. A fragment with no glyph line cannot inherit the plain-glyph observation
+  // via vacuous every(). A fragment that holds glyphs keeps its previous relief,
+  // blank break lines included (unmeasured either way).
+  // This restricts relief, not paragraph splitting: blank
   // lines can still split when their full advances fit. Metric-only empty
   // paragraph marks have their separate allowance. These endpoint probes do
   // not establish automatic grid pitch, caret-to-line geometry or other faces.
-  return line.placements.length > 0
+  return paragraph.lines.some(candidate => candidate.placements.length > 0)
     && Object.entries(paragraph).every(([key, value]) => value === undefined
       || GRID_PLAIN_PARAGRAPH_KEYS.has(key)
       || (['borders', 'drawings', 'textBoxes'].includes(key)

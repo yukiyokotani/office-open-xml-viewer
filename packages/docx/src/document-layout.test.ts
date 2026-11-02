@@ -340,6 +340,36 @@ describe('layoutDocument — body paragraph fragments (PR 5 Task 12)', () => {
 });
 
 describe('layoutDocument — exact source-boundary paragraph continuation', () => {
+  it('keeps grid-leading relief for a glyph fragment that ends in a blank break line', () => {
+    const target = para('', {
+      runs: [
+        sizedTextRun('A', 16),
+        { type: 'break', breakType: 'line' },
+        { type: 'break', breakType: 'line' },
+        sizedTextRun('B', 16),
+      ],
+      defaultFontSize: 16,
+      lineSpacing: { rule: 'auto', value: 1.15, explicit: true },
+      keepNext: false, keepLines: false, widowControl: false,
+    });
+    const model = doc([
+      para('F', { lineSpacing: { rule: 'exact', value: 39 } }) as BodyElement,
+      target as BodyElement,
+    ], 100);
+    model.section.docGridType = 'lines';
+    model.section.docGridLinePitch = 18;
+    const layout = layoutDocument(model);
+    const fragments = sourceFragments(layout, 1);
+
+    expect(layout.pages).toHaveLength(2);
+    expect(fragments.map(fragment => fragment.lines.length)).toEqual([2, 1]);
+    expect(fragments.map(fragment => fragmentText([fragment]))).toEqual(['A', 'B']);
+    expect(fragments[0]!.lines[1]!.placements).toHaveLength(0);
+    expect(layout.pages[0]!.layers.body).toContain(fragments[0]);
+    expect(layout.pages[1]!.layers.body).toContain(fragments[1]);
+    expect(fragments[1]!.lines[0]!.bounds.yPt).toBe(10);
+  });
+
   it('moves a break-only grid heading intact when its first full line does not fit', () => {
     // Windows Word 16.0.20430: both ends of the break-only heading land on
     // page 2 even with keepNext/keepLines/widowControl explicitly disabled.
