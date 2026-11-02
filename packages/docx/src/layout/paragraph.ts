@@ -2648,6 +2648,8 @@ function retainedNumberingPlan(
     physicalIndentLeftPt: context.physicalIndentLeftPt,
     tabStops: paragraph.tabStops,
     defaultTabPt: context.defaultTabPt,
+    compatibilityMode: options.environment.compatibilityMode,
+    baseRtl: context.baseRtl,
   }, service);
 }
 
@@ -2676,6 +2678,8 @@ function numberingFirstLineWindow(
       physicalIndentLeftPt: context.baseRtl ? context.physicalIndentRightPt : context.physicalIndentLeftPt,
       tabStops: paragraph.tabStops,
       defaultTabPt: context.defaultTabPt,
+      compatibilityMode: options.environment.compatibilityMode,
+      baseRtl: context.baseRtl,
     }, service).bodyOffsetPt,
   };
 }

@@ -3247,6 +3247,7 @@ function acquireTableColumnInput(
             defaultTabPt: state.defaultTabPt,
             service: state.layoutServices?.text,
             clusterGeometry: false,
+            compatibilityMode: state.layoutSettings.compat.compatibilityMode,
           });
           const numbering = context.numberingMarkerGeometry
             ?? (paragraph.numbering && markerInput && state.layoutServices?.text
@@ -3255,6 +3256,8 @@ function acquireTableColumnInput(
                   physicalIndentLeftPt: context.physicalIndentLeftPt,
                   tabStops: paragraph.tabStops,
                   defaultTabPt: state.defaultTabPt,
+                  compatibilityMode: state.layoutSettings.compat.compatibilityMode,
+                  baseRtl: context.baseRtl,
                 }, state.layoutServices.text, false)
               : undefined);
           const intrinsic = measureParagraphIntrinsicWidths(

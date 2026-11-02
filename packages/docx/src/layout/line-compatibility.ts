@@ -1011,6 +1011,37 @@ export const WORD_NUMBERING_SUFFIX_COINCIDENT_LIST_TAB = defineCompatibilityRule
   description: 'For the tab synthesized by a numbering suffix, accept an authored numeric list tab coincident with the shaped marker end instead of advancing to the next automatic tab stop. Library policy, no Office measurement: coincident list-tab handling from PR #1080; no control.',
 });
 
+export const WORD_NUMBERING_SPACE_SUFFIX_ARIAL = defineCompatibilityRule({
+  id: 'word-numbering-space-suffix-arial',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'blk-0898-numsp',
+    application: 'Microsoft Word',
+    version: '16.0.20527',
+    platform: 'Windows',
+  },
+  description: 'A numbering level with w:suff="space" separates marker and body by one U+0020 space in Arial at the marker font size, independently of marker, paragraph-mark, run, docDefaults and Normal-style fonts. All 48 rows of blk-0898-numsp-{nostyles,styles}-mode{none,14,15} identify the suffix PDF span as ArialMT at the marker size. Measured classes (PDF space advance in pt; nominal Arial comparison): level Courier New 12, mark absent or Verdana 16, run Courier New 12 or Georgia 18: 3.38 (Arial 12 = 3.33; Courier New 12 = 7.20, Verdana 16 = 5.63, Georgia 18 = 4.34); level Courier New without size, mark Verdana 16: marker Courier New 16, space 4.48 (Arial 16 = 4.44); level size 12 only, mark Verdana 16: marker Verdana 12, space 3.33 (Verdana 12 = 4.22); no level rPr, mark Verdana 16: marker Verdana 16, space 4.41 (Arial 16 = 4.44); level Verdana 16, mark Courier New 12: space 4.41 (Arial 16 = 4.44); docDefaults Tahoma 8 and Normal Trebuchet MS 10, no level/mark rPr: marker Trebuchet MS 10, space 2.72 (Arial 10 = 2.78; Trebuchet 10 = 3.01); no styles part or level/mark rPr: built-in host default YuMincho 10.5, space 2.90 (Arial 10.5 = 2.92). Identical in modes unset, 14 and 15, the only measured modes; unmeasured modes 11/12/13 and all other explicit modes keep the previous marker-font space. Scope: the measured classes only — left-to-right paragraphs, regular (not bold or italic, not complex-script) markers in ordinary Latin and East Asian faces, picture bullets excluded. Right-to-left paragraphs, bold or italic markers, complex-script markers, symbol-encoded markers (Private Use Area text or text the shared symbol-font table remaps) and modes 11/12/13 are unmeasured and keep the previous marker-face space. Advances come from TextLayoutService font data and its metric-compatible fallback, never these comparison numbers or a fitted em fraction. ECMA-376 §17.9.28 and §17.18.46 specify the space character, not this font choice.',
+});
+
+/** WORD_NUMBERING_SPACE_SUFFIX_ARIAL admission: the measured classes only;
+ * everything else keeps the space in the marker's own face. */
+export function wordNumberingSpaceSuffixUsesArial(input: Readonly<{
+  compatibilityMode: number | undefined;
+  leftToRight: boolean;
+  markerWeight: number;
+  markerStyle: 'normal' | 'italic';
+  complexScriptMarker: boolean;
+  symbolMarker: boolean;
+}>): boolean {
+  void WORD_NUMBERING_SPACE_SUFFIX_ARIAL;
+  return (input.compatibilityMode === undefined || input.compatibilityMode === 14 || input.compatibilityMode === 15)
+    && input.leftToRight
+    && input.markerWeight <= 400
+    && input.markerStyle === 'normal'
+    && !input.complexScriptMarker
+    && !input.symbolMarker;
+}
+
 export const WORD_NUMBERING_MARKER_PARAGRAPH_MARK_FALLBACK = defineCompatibilityRule({
   id: 'word-numbering-marker-paragraph-mark-fallback',
   evidence: {
@@ -1064,7 +1095,7 @@ export const WORD_NUMBERED_FIRST_LINE_GAP_FIT = defineCompatibilityRule({
     version: '16.0.20527',
     platform: 'Windows',
   },
-  description: 'A numbered first line beside floats takes the first window, in reading order and then down the page, that holds its first word after the marker body that window resolves (the body offset the indents give is no width floor for a window, before or after a rejection, so admission stays with break-time placement, hanging punctuation included; this follows from the per-window body: no control has that offset wider than a later window) (the WORD_NUMBERING_MARKER marker edge and suffix tab of issue #1883, per window): in mode 15 a 15 or 17 character word goes to the [300,450] gap with the marker at 300 and the body at the 324 pt default stop (the 340 pt custom stop for the custom row), although the first gap leaves 50 pt after its 50 pt body; an 18 or 19 character word that no gap holds goes below the floats (60 pt) with the body at 50 pt; beside the tight triangle the line steps to the grid line whose edge resolves a 144 pt body. Space and nothing suffixes follow the same order. Modes unset and 14 differ for a paragraph that anchors its own floats (the [300,450] body at the 336 pt stop, the 17 character and custom-stop rows below the floats, and the triangle rows at other positions), a separate pre-15 anchor-paragraph behaviour that is not reproduced. The suffix space is measured by the renderer in the marker face (7.2 pt) where Word sets 3.34 pt, so one space-suffix row (18 characters) still differs, a separate numbering-suffix difference.',
+  description: 'A numbered first line beside floats takes the first window, in reading order and then down the page, that holds its first word after the marker body that window resolves (the body offset the indents give is no width floor for a window, before or after a rejection, so admission stays with break-time placement, hanging punctuation included; this follows from the per-window body: no control has that offset wider than a later window) (the WORD_NUMBERING_MARKER marker edge and suffix tab of issue #1883, per window): in mode 15 a 15 or 17 character word goes to the [300,450] gap with the marker at 300 and the body at the 324 pt default stop (the 340 pt custom stop for the custom row), although the first gap leaves 50 pt after its 50 pt body; an 18 or 19 character word that no gap holds goes below the floats (60 pt) with the body at 50 pt; beside the tight triangle the line steps to the grid line whose edge resolves a 144 pt body. Space and nothing suffixes follow the same order. Modes unset and 14 differ for a paragraph that anchors its own floats (the [300,450] body at the 336 pt stop, the 17 character and custom-stop rows below the floats, and the triangle rows at other positions), a separate pre-15 anchor-paragraph behaviour that is not reproduced. The suffix-space font discrepancy in these controls (marker-face 7.2 pt versus Word 3.34 pt) is handled separately by WORD_NUMBERING_SPACE_SUFFIX_ARIAL.',
 });
 
 /** Issue #2057 controls (blk-0898-floats-head-mode15, Windows Word 16.0.20527,
