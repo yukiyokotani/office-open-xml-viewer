@@ -3322,6 +3322,8 @@ function acquireTableColumnInput(
     ...columnInput,
     outerMarginAllowancePt: forcedFitOuterMarginsPt,
     growUnpreferredColumns: contentGrowth === 'band' ? true : contentGrowth === 'nonbinding' ? 'nonbinding' : false,
+    // The ceiling the intrinsic maxima above were capped at.
+    contentBandPt: contentWPt,
   };
 }
 
