@@ -3238,7 +3238,7 @@ function acquireTableColumnInput(
 ): TableColumnLayoutInput {
   const format = decision.source.format;
   const { maximumTableWidthPt, isFixedNestedTable,
-    usesLeadingIndentBand, forcedFitOuterMarginsPt } = decision;
+    contentGrowth, forcedFitOuterMarginsPt } = decision;
   const intrinsicWidthsForTable = (
     owner: TableLayoutSource,
     ownerDecision = decision,
@@ -3293,7 +3293,7 @@ function acquireTableColumnInput(
             // columns (notably the 5:1 control). Only the measured auto-column
             // growth path needs this uncapped interval; preferred and nested
             // paths retain their existing measurement ceiling.
-            usesLeadingIndentBand && owner === table && ownerLayout !== 'fixed'
+            contentGrowth === 'band' && owner === table && ownerLayout !== 'fixed'
               && preferredWidth === null
               ? Number.MAX_SAFE_INTEGER
               : contentWPt,
@@ -3343,13 +3343,15 @@ function acquireTableColumnInput(
     : format.ordinaryFlow ? (decision.effectiveLayout === 'fixed' ? null : maximumTableWidthPt)
       : Math.max(contentWPt, state.pageWidth);
   const intrinsicWidths = intrinsicWidthsForTable(table);
-  const columnInput = projectTableColumnLayoutInput(decision.source, contentWPt,
+  const columnInput = projectTableColumnLayoutInput(decision.source, decision.percentWidthBasePt,
     (rowIndex, cellIndex, preferred) => intrinsicWidths(table.rows[rowIndex]!.cells[cellIndex]!, preferred),
     maximumWidthPt);
   return {
     ...columnInput,
     outerMarginAllowancePt: forcedFitOuterMarginsPt,
-    growUnpreferredColumns: usesLeadingIndentBand,
+    growUnpreferredColumns: contentGrowth === 'band' ? true : contentGrowth === 'nonbinding' ? 'nonbinding' : false,
+    // The ceiling the intrinsic maxima above were capped at.
+    contentBandPt: contentWPt,
   };
 }
 
