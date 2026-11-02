@@ -1014,6 +1014,18 @@ export const WORD_THAI_DISTRIBUTE_CLUSTER_POLICY = defineCompatibilityRule({
   description: 'Expand non-final thaiDistribute lines at Thai grapheme-cluster boundaries while retaining a natural-width final line. Classification: normative, ECMA-376 §17.18.44 thaiDistribute (inter-character distribution); the natural-width final line is library policy (PR #978).',
 });
 
+export const WORD_THAI_DISTRIBUTE_PROPORTIONAL_SPREAD = defineCompatibilityRule({
+  id: 'word-thai-distribute-proportional-spread',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'blk-0898-cjk-thjust',
+    application: 'Microsoft Word',
+    version: '16.0.20527',
+    platform: 'Windows',
+  },
+  description: 'Before compatibility mode 15 a thaiDistribute line that is justified (soft-wrapped, or ended by a manual break; a piece ended by a page or column break is unmeasured and keeps the equal spread) and holds Thai text but no CJK spreads its slack in proportion to advance: every Thai grapheme cluster and every space widens by the same fraction of its own advance, the last cluster of the line excepted, while Latin letters keep their advance (a Latin word widens only at its spaces). Final lines stay natural (word-thai-distribute-cluster-policy). Evidence: synthetic Windows Word 16.0.20527 controls blk-0898-cjk-thjust-modenone and blk-0898-cjk-thdfin-modenone, Tahoma 12pt Thai at the full 481.9pt width, with and without th-TH: spaced Thai phrases (J2), spaced Thai without above or below marks (J3), a Times New Roman label before spaced Thai (J1) and Latin words between Thai phrases (J5), and a space-free Thai line ended by a manual break (D10). The share of each cluster and space is its advance times one line factor (residual within 0.3pt per character, increments quantised to about 0.12pt); an equal share per cluster misses by up to 1.7pt per gap on the same lines, and the label and Latin letters stay within 0.05pt of their natural advance. Re-exported after Thai (th-TH) was added as an Office editing language (Thai proofing tools not installed), the same controls place every glyph at the same position (0.01pt), so the rule does not depend on that setting. Rendered against those PDFs, characters land within 1.1pt (before: 2.2-3.9pt, 19.2pt on the break-ended line; worst character per row J1/J2/J3/J5 1.7/1.8/1.0/1.7pt against 2.6/3.6/2.2/3.9pt, D5 1.1 against 2.4pt, D10 0.6 against 19.2pt, every excess over 1.1pt at a SARA AM). Limitation: Word also widens the seam before THAI CHARACTER SARA AM, which shapes as one cluster with its base here, so ำ and the characters after it can sit up to 1.8pt off. Weights are the retained cluster advances (a cluster continued across a formatting seam weighs its whole advance), so nothing is shaped again. Scope: the measured line class only, horizontal left-to-right lines of text runs holding Thai and printable ASCII (U+0020-U+007E), where Thai meets other text only at a U+0020 space, without character spacing, scaling, a character grid, fitText or ruby, and in a paragraph without bidi; every other line keeps the equal per-gap spread of word-thai-distribute-cluster-policy unchanged, because Word was not measured there: Thai directly against Latin letters, digits or punctuation, CJK (supplementary Han and fixed-pitch fitText regions included), Lao, Khmer, Myanmar and other scripts, tabs, inline objects, and lines whose gap cuts do not start a retained shaped cluster. Unchanged also: mode 15, where Latin letters widen too and the share is neither equal nor proportional (unpinned).',
+});
+
 export const WORD_NUMERIC_DECIMAL_TAB_INFERENCE = defineCompatibilityRule({
   id: 'word-numeric-decimal-tab-inference',
   evidence: {

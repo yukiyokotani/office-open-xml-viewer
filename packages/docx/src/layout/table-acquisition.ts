@@ -98,6 +98,9 @@ export interface NestedFloatingTableOccurrence {
 }
 
 const pagePlacedContentTables = new WeakMap<RetainedTableAcquisition, boolean>();
+const nestedPageOriginTables = new WeakMap<RetainedTableAcquisition, boolean>();
+const pageOriginRows = new WeakMap<RetainedTableAcquisition, WeakMap<TableRowLayoutInput, boolean>>();
+const pageReusableTables = new WeakMap<RetainedTableAcquisition, boolean>();
 
 /**
  * Whether this table, laid out whole at a known page origin, has anything to
@@ -109,30 +112,37 @@ const pagePlacedContentTables = new WeakMap<RetainedTableAcquisition, boolean>()
  * placed through the page origin of the table that holds it
  * (table-pagination.ts layoutNestedWhole).
  */
-export function hasPagePlacedContent(source: RetainedTableAcquisition): boolean {
+export function hasPagePlacedContent(source: RetainedTableAcquisition, chargeWork?: (units: number) => void): boolean {
   const known = pagePlacedContentTables.get(source);
   if (known !== undefined) return known;
-  const result = source.floatingTables.length > 0 || needsNestedPageOrigins(source);
+  const result = source.floatingTables.length > 0 || needsNestedPageOrigins(source, chargeWork);
   pagePlacedContentTables.set(source, result);
   return result;
 }
 
 /** Whether placing this table needs the page origin of a block inside it:
  * an in-flow nested table, a positioned child or a text box with page-placed
- * content. */
-export function needsNestedPageOrigins(source: RetainedTableAcquisition): boolean {
-  return source.input.rows.some((row) => rowNeedsPageOrigins(source, row))
+ * content. The immutable table-level answer is cached too: even iterating
+ * already-indexed rows on each continuation would rescan a long table. */
+export function needsNestedPageOrigins(source: RetainedTableAcquisition, chargeWork?: (units: number) => void): boolean {
+  const known = nestedPageOriginTables.get(source);
+  if (known !== undefined) return known;
+  const result = source.input.rows.some((row) => rowNeedsPageOrigins(source, row, chargeWork))
     || source.floatingTables.some((occurrence) => {
+      chargeWork?.(1);
       const positioned = source.nestedById[occurrence.tableId];
-      return positioned !== undefined && hasPagePlacedContent(positioned);
+      return positioned !== undefined && hasPagePlacedContent(positioned, chargeWork);
     });
+  nestedPageOriginTables.set(source, result);
+  return result;
 }
 
 /** A cell paragraph whose text boxes hold page-placed content: their stories'
  * page frames need the paragraph's page position (paragraph.ts
  * hostFlowPageTranslationPt), which only the table's pagination knows in a
  * cell. */
-export function paragraphHasBandDependentTextBoxes(layout: ParagraphLayout): boolean {
+export function paragraphHasBandDependentTextBoxes(layout: ParagraphLayout, chargeWork?: (units: number) => void): boolean {
+  chargeWork?.(layout.textBoxes.length);
   return layout.textBoxes.some((textBox) => textBox.story.bandDependent === true);
 }
 
@@ -140,51 +150,82 @@ export function paragraphHasBandDependentTextBoxes(layout: ParagraphLayout): boo
 export function blockNeedsPageOrigin(
   source: RetainedTableAcquisition,
   block: TableCellBlockInput,
+  chargeWork?: (units: number) => void,
 ): boolean {
-  if (block.layout.kind === 'paragraph') return paragraphHasBandDependentTextBoxes(block.layout);
+  chargeWork?.(1);
+  if (block.layout.kind === 'paragraph') return paragraphHasBandDependentTextBoxes(block.layout, chargeWork);
   if (block.layout.kind !== 'table') return false;
   const nested = source.nestedById[block.layout.id];
-  return nested !== undefined && hasPagePlacedContent(nested);
+  return nested !== undefined && hasPagePlacedContent(nested, chargeWork);
 }
 
+/** Pure memoization of immutable semantic rows, scoped to their acquisition:
+ * a continued tall row must not rescan its original blocks for every cut.
+ * Occurrence rows have their own identities and therefore their own answers.
+ * Weak ownership releases both levels with the acquisition/row. Recovery
+ * debits each cache-miss source visit before scanning; cache hits do no scan. */
 export function rowNeedsPageOrigins(
   source: RetainedTableAcquisition,
   row: TableRowLayoutInput,
+  chargeWork?: (units: number) => void,
 ): boolean {
-  return row.cells.some((cell) => cell.blocks.some((block) => blockNeedsPageOrigin(source, block)));
+  let rows = pageOriginRows.get(source);
+  if (!rows) {
+    rows = new WeakMap();
+    pageOriginRows.set(source, rows);
+  }
+  const known = rows.get(row);
+  if (known !== undefined) return known;
+  chargeWork?.(1);
+  const result = row.cells.some((cell) => {
+    chargeWork?.(1);
+    return cell.blocks.some((block) => blockNeedsPageOrigin(source, block, chargeWork));
+  });
+  rows.set(row, result);
+  return result;
 }
 
 function retainedNodeIsReusableAcrossPages(
   node: PaintNode,
   visited: Set<PaintNode>,
+  chargeWork?: (units: number) => void,
 ): boolean {
+  chargeWork?.(1);
   if (visited.has(node)) return true;
   visited.add(node);
   if (node.kind === 'drawing') return node.anchorLayer === undefined;
   if (node.kind === 'paragraph') {
-    return node.lines.every((line) => !line.placements.some(placementDependsOnPage))
+    chargeWork?.(node.drawings.length + node.textBoxes.length);
+    return node.lines.every((line) => {
+      chargeWork?.(1 + line.placements.length);
+      return !line.placements.some((placement) => {
+        if (placement.kind === 'text') chargeWork?.(placement.sourceRuns?.length ?? 0);
+        return placementDependsOnPage(placement);
+      });
+    })
       && node.drawings.every((drawing) => (
-        retainedNodeIsReusableAcrossPages(drawing, visited)
+        retainedNodeIsReusableAcrossPages(drawing, visited, chargeWork)
       ))
       && node.textBoxes.every((textBox) => (
-        retainedNodeIsReusableAcrossPages(textBox, visited)
+        retainedNodeIsReusableAcrossPages(textBox, visited, chargeWork)
       ));
   }
   if (node.kind === 'textbox' || node.kind === 'note') {
     return node.story.blocks.every((block) => (
-      retainedNodeIsReusableAcrossPages(block, visited)
+      retainedNodeIsReusableAcrossPages(block, visited, chargeWork)
     ));
   }
-  return node.rows.every((row) => row.cells.every((cell) => (
-    cell.blocks.every((block) => (
-      retainedNodeIsReusableAcrossPages(block.layout, visited)
-    ))
-  )))
+  return node.rows.every((row) => {
+    chargeWork?.(1 + row.cells.length);
+    return row.cells.every((cell) => cell.blocks.every((block) => (
+      retainedNodeIsReusableAcrossPages(block.layout, visited, chargeWork)
+    )));
+  })
     && (node.floatingTables ?? []).every((placement) => (
-      retainedNodeIsReusableAcrossPages(placement.child, visited)
+      retainedNodeIsReusableAcrossPages(placement.child, visited, chargeWork)
     ))
     && (node.resolvedFloatingTables ?? []).every((placement) => (
-      retainedNodeIsReusableAcrossPages(placement.child, visited)
+      retainedNodeIsReusableAcrossPages(placement.child, visited, chargeWork)
     ));
 }
 
@@ -208,26 +249,40 @@ function retainedNodeIsReusableAcrossPages(
 function retainedTableAcquisitionGraphIsReusableAcrossPages(
   acquisition: RetainedTableAcquisition,
   visited: Set<PaintNode>,
+  chargeWork?: (units: number) => void,
 ): boolean {
-  const rowsAreReusable = acquisition.input.rows.every((row) => (
-    row.cells.every((cell) => cell.blocks.every((block) => (
-      block.pageDependent !== true
-      && retainedNodeIsReusableAcrossPages(block.layout, visited)
-    )))
-  ));
+  const rowsAreReusable = acquisition.input.rows.every((row) => {
+    chargeWork?.(1 + row.cells.length);
+    return row.cells.every((cell) => cell.blocks.every((block) => {
+      chargeWork?.(1);
+      return block.pageDependent !== true
+        && retainedNodeIsReusableAcrossPages(block.layout, visited, chargeWork);
+    }));
+  });
   return rowsAreReusable
     && Object.values(acquisition.nestedById).every(
-      (nested) => retainedTableAcquisitionGraphIsReusableAcrossPages(nested, visited),
+      (nested) => {
+        chargeWork?.(1);
+        return retainedTableAcquisitionGraphIsReusableAcrossPages(nested, visited, chargeWork);
+      },
     );
 }
 
 export function retainedTableAcquisitionIsReusableAcrossPages(
   acquisition: RetainedTableAcquisition,
+  chargeWork?: (units: number) => void,
 ): boolean {
-  return retainedTableAcquisitionGraphIsReusableAcrossPages(
+  // Registration can revisit an acquisition. Its immutable dependency graph
+  // needs only one walk, with recovery charging that walk before each visit.
+  const known = pageReusableTables.get(acquisition);
+  if (known !== undefined) return known;
+  const result = retainedTableAcquisitionGraphIsReusableAcrossPages(
     acquisition,
     new Set<PaintNode>(),
+    chargeWork,
   );
+  pageReusableTables.set(acquisition, result);
+  return result;
 }
 
 function nextRegularParagraphIndex(
