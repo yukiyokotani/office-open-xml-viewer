@@ -753,18 +753,24 @@ describe('reviewed note admission regressions', () => {
     model.body.unshift(floating);
     const source = layoutSourceStore(model);
     let yields = 0;
-    const counts: number[] = [];
+    const previews: DocumentLayout[] = [];
     const layout = await layoutDocumentProgressively(source.bodyLayoutInput,
       createLayoutServices(source, { measureContext: context, allowFootnoteContinuation: true }),
       { currentDateMs: 0 }, {
-        onPreview: preview => counts.push(preview.layout.pages.length),
+        onPreview: preview => previews.push(preview.layout),
         scheduler: { sliceMs: 0, yieldToHost: async () => { yields++; } },
       });
     expectConserved(layout, expected);
     expect(layout.pages.length).toBeLessThanOrEqual(8 * count);
     expect(yields).toBeLessThanOrEqual(100 * count);
-    expect(counts.length).toBeGreaterThan(0);
+    // Every reference sits on page 0 and each note recovers, so #2113 may
+    // withhold every publication; whatever is published stays final.
+    const counts = previews.map(preview => preview.pages.length);
     expect(counts).toEqual([...new Set(counts)].sort((a, b) => a - b));
+    for (const preview of previews) preview.pages.forEach((page, index) => {
+      expect(page.layers.body).toEqual(layout.pages[index]!.layers.body);
+      expect(page.layers.notes).toEqual(layout.pages[index]!.layers.notes);
+    });
   });
 
   it.each([1, 2])('recovers an oversized footnote tail while endnotes open a page (%i columns)', columns => {
@@ -1116,6 +1122,25 @@ describe('progressive publication around note recovery (#2113)', () => {
     expectPublishedPagesFinal(previews, layout);
     const counts = previews.map(preview => preview.pages.length);
     expect(counts).toEqual([...new Set(counts)].sort((a, b) => a - b));
+  });
+
+  it('never publishes a page a recovered reference can move back to', async () => {
+    // The opening pass defers the reference past page 1; after recovery the
+    // final layout admits it, and the note's first fragments, on page 1.
+    const content: BodyElement[] = [...Array.from({ length: 18 }, (_, i) => paragraph(`n${i};`, 24)),
+      table([paragraph('tall;', 160), paragraph('tail;', 24)])];
+    const model = document('footnote', content, 15, 2);
+    const reference = model.body[0]!;
+    const body: BodyElement[] = Array.from({ length: 80 }, (_, i) => paragraph(`b${i};`, 24) as BodyElement);
+    body.splice(8, 0, reference);
+    const floating = table([paragraph('anchor;')]);
+    floating.tblpPr = { leftFromText: 0, rightFromText: 0, topFromText: 0, bottomFromText: 0,
+      horzAnchor: 'margin', horzSpecified: true, vertAnchor: 'page', tblpX: 0, tblpY: 0 };
+    body.splice(12, 0, floating);
+    model.body = body;
+    const { previews, layout } = await publications(model);
+    expect(layout).toEqual(render(model));
+    expectPublishedPagesFinal(previews, layout);
   });
 
   it('only delays publication of an ordinary continuing footnote', async () => {
