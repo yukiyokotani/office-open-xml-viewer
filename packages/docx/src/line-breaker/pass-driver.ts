@@ -242,6 +242,17 @@ export function runLineBreakerPass(input: LineBreakerPassInput): LayoutLine[] {
 
   const endBoundary: LineBoundary = { segIndex: segs.length, charOffset: 0 };
   breakerState.queue = new SegmentQueue(prepareBreakQueue(segs, startBoundary, kinsoku, scale, measurement));
+  // ECMA-376 §17.3.3.1: a terminal text-wrapping break opens an empty
+  // line. Its preceding line consumes the sentinel, so pagination can resume
+  // at the source end while that empty line still remains. Restore the same
+  // pending flush (and break font size) as an uninterrupted pass; otherwise
+  // acquisition falls back to an unrelated, indivisible paragraph-mark box.
+  const terminalSegment = segs.at(-1);
+  if (startBoundary?.trailingEmptyLine === true
+    && startBoundary.segIndex === segs.length && startBoundary.charOffset === 0
+    && terminalSegment && 'lineBreak' in terminalSegment) {
+    breakerState.trailingBreakFontSize = terminalSegment.fontSize;
+  }
 
   // The segment's laid-out ADVANCE (= its measuredWidth): natural width plus the
   // character-grid delta, the §17.3.2.43 horizontal glyph scale (w:w) and the

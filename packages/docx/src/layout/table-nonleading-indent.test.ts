@@ -268,9 +268,10 @@ describe('WORD_TABLE_MARGIN_HANG_SCOPE (#2064)', () => {
     expect(hang('textbox', 12, { jc: 'right', label: 'Q', indent: null })).toBeCloseTo(0, 6);
     expect(hang('textbox', 12, { jc: 'end', label: 'Q', indent: null })).toBeCloseTo(0, 6);
   }, 60_000);
-  it('keeps omitted margins, cell spacing, nesting and mode 13 outside the extension', () => {
+  it('keeps omitted margins, nesting and mode 13 outside the hang and applies the separate spaced rule', () => {
     expect(hang('body', 14, { jc: 'right', label: 'Q', indent: null, margins: false, tcW: '' })).toBeCloseTo(0, 6);
-    expect(hang('body', 14, { jc: 'right', label: 'Q', indent: null, spacing: true, tcW: '' })).toBeCloseTo(0, 6);
+    // WORD_TABLE_CELL_SPACING_GEOMETRY hangs both 3pt gaps plus the 5.4pt margin.
+    expect(hang('body', 14, { jc: 'right', label: 'Q', indent: null, spacing: true, tcW: '' })).toBeCloseTo(11.4, 6);
     expect(hang('nested', 14, { jc: 'right', label: 'Q', indent: null, tcW: '' })).toBeCloseTo(0, 6);
     expect(hang('body', 13, { jc: 'right', label: 'Q', indent: null, tcW: '' })).toBeCloseTo(0, 6);
   }, 60_000);
@@ -306,8 +307,13 @@ describe('unmeasured neighbours of the extended rules keep the previous behavior
     const rowJc = tableGeometry('body', tableXml({ ...CONTENT_SIZED, jc: 'right', label: 'Q', indent: null,
       trPr: '<w:jc w:val="right"/>' }), 'Q', 14);
     expect(rowJc.widthPt).toBeCloseTo(200, 6);
-    // Cell spacing is outside the measured content-sized class.
-    expect(shifts('body', 15, { ...CONTENT_SIZED, jc: 'right', spacing: true })).toEqual([36, -18]);
+    // Spaced content-sized body tables now content-fit (#2066). Keep the
+    // label identical: shifts() changes it, which would change intrinsic width.
+    const spaced = (indent: number | null) => tableGeometry('body', tableXml({ ...CONTENT_SIZED, jc: 'right',
+      spacing: true, label: 'Q', indent }), 'Q', 15);
+    expect(spaced(null).widthPt).toBeCloseTo(2 * (6 + 10.8) + 3 * 6, 6);
+    expect(spaced(720)).toEqual(spaced(null));
+    expect(spaced(-360)).toEqual(spaced(null));
   }, 60_000);
   it('keeps a negative indent on once-nested AutoFit or spaced tables', () => {
     expect(shifts('nested', 15, { jc: 'left', layout: '' })).toEqual([36, -18]);
