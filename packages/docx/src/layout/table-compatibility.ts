@@ -238,6 +238,54 @@ export const WORD_TABLE_MARGIN_HANG_SCOPE = defineCompatibilityRule({
   description: 'Windows Word 16.0.20527 controls (one-row two-cell 4000-twip-grid tables with 108-twip dxa tblCellMar left/right, LTR and bidiVisual, jc left/start/center/right/end, tblInd omitted, +720, -360 and a table-style tblInd 720; compatibility mode omitted, 11, 12, 14 and 15) hang the first cell left margin exactly as word-table-origin-compatibility does for its measured class: in every mode except 15, a leading table with an indent (direct or from the table style) moves left by the row left margin, and a right or end table moves right by it; center tables and mode 15 do not hang. In the body this holds whatever the widths: tcW pct, auto, nil, omitted and dxa 0; tblW pct and auto; fixed and AutoFit. Top-level tables of the explicit-margin class hang identically in a header, a footer and a footnote. In a page-anchored text box only the leading hang applies; right and end tables keep their trailing edge at the inner band. A percentage tblW in the hanging modes is a share of the text band plus the first row outer margins (40% = 197.08pt = 0.4 x (481.9 + 10.8)pt, against 0.4 x 481.9pt in mode 15); this width part applies to page-owned stories (single-column body, header, footer). The rule applies to single tables inside word-table-nonleading-indent-scope; multiple rows anchor and hang per row as word-table-origin-compatibility measured, while adjacent-table (§17.4.37) groups keep the previous behavior. Cell spacing (tracked separately), omitted, logical or non-dxa margins, row-level justification or exceptions, authored gridBefore/gridAfter, nested, floating and vertical-text tables, quarter-turned text boxes, endnotes and other compatibility modes were not measured and keep the previous behavior.',
 });
 
+/** ECMA-376 §§17.4.43–45 establish separated edges and spacing precedence;
+ * the following numeric geometry and compatibility-mode placement are observed
+ * Word behavior, not a normative interpretation of the spacing measurement. */
+export const WORD_TABLE_CELL_SPACING_GEOMETRY = defineCompatibilityRule({
+  id: 'word-table-cell-spacing-geometry',
+  evidence: { kind: 'office-observation', syntheticFixtureId: 'table-cell-spacing-geometry',
+    application: 'Microsoft Word', version: '16.0.20527', platform: 'Windows' },
+  description: 'Windows Word controls use three 2000-twip tracks, tblW 6000, spacing 0/60/200 twips, omitted/zero/108-twip margins, no borders or uniform single borders sz4/sz24, fixed layout or content-sized AutoFit, left/center/right justification, no indent or +720, LTR/bidiVisual and omitted/14/15 modes. Positive spacing s reserves 2s at every outer and shared boundary. Each cell contains its own full border width t before its margins. Fixed cell widths carve (n+1)*2s from the resolved grid proportionally; a horizontal span retains its interior gaps. Vertical extents include the outer table top/bottom border as well as both cell borders. Mode 15 LTR boxes move inward by half the aligned outer border (center stays centered); bidi boxes shift a further half border left. Omitted/14 modes have no border shift: leading tables with authored indentation and trailing tables hang the full 2s+t+margin content inset in LTR, or s+t+margin in bidi, leaving exactly s there. Unindented leading and centered tables do not hang. AutoFit content-sized tables fit all unspanned unpreferred tracks to their content maxima only when those maxima and all gaps fit the occurrence ceiling and text band together; binding multitrack distribution is not established. Omitted margins retain the library zero instead of approximating the observed Word half-point quanta. Fixed proportional widths were measured within 0.1pt at s=3/10pt; these are ideal geometry rules, not fits to raster/quantized offsets. Scope is one ordinary top-level table in a horizontal single-column body, uniform positive row spacing and uniform absent or single borders, legacy dxa or omitted margins, fixed dxa width or content-sized AutoFit, modes omitted/14/15. Asymmetric borders, any cell border override, row exceptions/justification/skips, vertical merges, nested tables or contents, floating tables, other stories, vertical text, negative indentation and other modes retain their previous geometry. Horizontal spans join only the fixed width formula; AutoFit spans remain excluded. Pagination of the measured automatic rows uses the same page-local outer gaps and border footprints; Office continuation placement was not separately measured.',
+});
+
+/** An independent border box is established only for the measured uniform
+ * table-border class. A cell override, even one matching the table, is outside
+ * the evidence; never infer its ownership from an equal effective width. */
+export function wordUniformSpacedTableBorderPt(table: TableLayoutSource): number | null {
+  const widths = Object.values(table.borders).map((border) => {
+    if (!border || border.style === 'nil' || border.style === 'none') return 0;
+    return border.style === 'single' && Number.isFinite(border.width) ? border.width : null;
+  });
+  if (widths.some((width) => width === null || width !== widths[0])) return null;
+  if (table.rows.some((row) => row.cells.some((cell) =>
+    Object.values(cell.borders).some((border) => border != null)
+    || cell.vMerge != null || (cell.textDirection != null && cell.textDirection !== 'lrTb')
+    || cell.content.some((block) => block.type === 'table')))) return null;
+  return widths[0] ?? 0;
+}
+
+/** Signed logical-axis displacement; alignedTableOrigin reverses it for bidi.
+ * WORD_TABLE_CELL_SPACING_GEOMETRY keeps border placement and the legacy hang
+ * separate, with no half-border shift in the legacy modes. */
+export function wordSpacedTableTranslationPt(input: Readonly<{
+  mode: number | undefined; justification: string | null | undefined; bidi: boolean;
+  indentPt: number; indentAuthored: boolean; spacingPt: number; borderPt: number;
+  leadingMarginPt: number; trailingMarginPt: number;
+}>): number {
+  const leading = input.justification == null || input.justification === 'left' || input.justification === 'start';
+  const center = input.justification === 'center';
+  const indent = leading ? input.indentPt : 0;
+  if (input.mode === 15) {
+    const physicalBorderShift = center ? 0 : (leading !== input.bidi ? 1 : -1) * input.borderPt / 2;
+    const physicalShift = physicalBorderShift - (input.bidi ? input.borderPt / 2 : 0);
+    return indent + (input.bidi ? -physicalShift : physicalShift);
+  }
+  if (center || (leading && !input.indentAuthored)) return indent;
+  const margin = leading ? input.leadingMarginPt : input.trailingMarginPt;
+  const hang = (input.bidi ? input.spacingPt : 2 * input.spacingPt) + input.borderPt + margin;
+  return indent + (leading ? -hang : hang);
+}
+
 /** ECMA-376 §17.4.50 lets tblInd move a leading table either way. */
 export const WORD_NESTED_NEGATIVE_INDENT = defineCompatibilityRule({
   id: 'word-nested-negative-indent',

@@ -22,13 +22,14 @@ export function tableCellHorizontalSpacingInsets(
   columnStart: number,
   columnSpan: number,
   columnCount: number,
+  separatedGeometry = false,
 ): TableCellHorizontalSpacingInsets {
   const spacing = Number.isFinite(spacingPt) ? Math.max(0, spacingPt) : 0;
   const start = Math.max(0, columnStart);
   const end = start + Math.max(1, columnSpan);
   return {
-    startPt: start === 0 ? spacing : spacing / 2,
-    endPt: end >= Math.max(0, columnCount) ? spacing : spacing / 2,
+    startPt: (start === 0 ? spacing : spacing / 2) * (separatedGeometry && spacing > 0 ? 2 : 1),
+    endPt: (end >= Math.max(0, columnCount) ? spacing : spacing / 2) * (separatedGeometry && spacing > 0 ? 2 : 1),
   };
 }
 
@@ -646,6 +647,45 @@ function fitToAvailableWidth(
 function solveTableColumnWidths(input: TableColumnLayoutInput): readonly number[] {
   const columnCount = requiredColumnCount(input);
   if (columnCount === 0) return Object.freeze([]);
+  const spacingPt = input.separatedCellSpacingPt ?? 0;
+  if (spacingPt > 0) {
+    // WORD_TABLE_CELL_SPACING_GEOMETRY: solve cell boxes without gaps. Fixed
+    // tracks carve the gap budget proportionally; AutoFit constraints already
+    // contain cell borders and margins, and fit inside the remaining ceiling.
+    const gapBudgetPt = (columnCount + 1) * 2 * spacingPt;
+    const cellInput = { ...input, separatedCellSpacingPt: undefined };
+    let boxes: readonly number[];
+    if (input.layout === 'fixed') {
+      const resolved = solveTableColumnWidths(cellInput);
+      const totalPt = resolved.reduce((sum, width) => sum + width, 0);
+      // An impossible gap budget is not measured. Preserve the prior solve.
+      if (totalPt <= gapBudgetPt) return resolved;
+      boxes = resolved.map((width) => width * (totalPt - gapBudgetPt) / totalPt);
+    } else {
+      const availablePt = Math.max(0, (input.availableWidthPt ?? 0) - gapBudgetPt);
+      const bandPt = Math.max(0, (input.contentBandPt ?? 0) - gapBudgetPt);
+      const { maximums } = singleColumnBounds(input.rows, columnCount, 0);
+      const maximumPt = maximums.reduce((sum, width) => sum + width, 0);
+      // Only a nonbinding all-unpreferred, unspanned solve establishes an
+      // n-track content fit. Binding allocation still uses the ordinary solver.
+      const allUnpreferred = input.rows.every((row) => row.before === null && row.after === null
+        && row.cells.length === columnCount && row.cells.every((cell, index) =>
+          cell.columnSpan === 1 && cell.columnStart === index && cell.preferredWidth === null));
+      boxes = allUnpreferred && input.growUnpreferredColumns === 'nonbinding'
+        && maximumPt <= availablePt && maximumPt < bandPt
+        ? maximums
+        : solveTableColumnWidths({ ...cellInput, availableWidthPt: availablePt,
+          contentBandPt: bandPt, growUnpreferredColumns: false });
+    }
+    // Retained grid tracks allocate half each shared gap and the entire outer
+    // gap. Subtracting the same insets in acquisition/materialization leaves
+    // the cell boxes; summing a span retains its interior 2s gaps.
+    return Object.freeze(boxes.map((width, column) => {
+      const insets = tableCellHorizontalSpacingInsets(spacingPt, column, 1, columnCount, true);
+      return width + insets.startPt + insets.endPt;
+    }));
+  }
+
   const widths = fixedWidths(input, columnCount);
   if (input.layout === 'fixed') {
     if (input.availableWidthPt === null) {
