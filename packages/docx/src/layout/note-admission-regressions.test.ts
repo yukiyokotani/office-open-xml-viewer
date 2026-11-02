@@ -142,10 +142,11 @@ function measuredRecovery(model: DocxDocumentModel, continuation: boolean, verif
 
 function assertLinearRecovery(results: readonly { work: number }[]) {
   const current = results.at(-1)!, previous = results.at(-2);
-  // Doubling source costs 2x. In this matrix newly opened destinations
-  // add a fourth field pass to the three-pass paragraph case (tables use
-  // two). The extra label digit contributes < 1/15 of source units:
-  // 2 * 4/3 * 16/15 < 2.9. The old paths exceed 3.3 and 3.6 respectively.
+  // Doubling source costs 2x, with slack for destination/pass boundaries and
+  // label-width changes; quadratic reacquisition approaches 4x. The original
+  // large-N matrices (64-512 tables, 512-2048 fields) needed a fourth field
+  // pass and an extra label digit: 2 * 4/3 * 16/15 < 2.9. The old paths
+  // exceeded 3.3x and 3.6x respectively. Keep that work bound at CI-sized N.
   if (previous) expect(current.work).toBeLessThanOrEqual(2.9 * previous.work);
 }
 
@@ -563,7 +564,9 @@ describe('reviewed note admission regressions', () => {
 
   it.each(['page', 'numPages'] as const)('bounds continuation-off %s table recovery under doubling', fieldType => {
     const results: { n: number; work: number; ms: number; outcome: string; passes: number }[] = [];
-    for (const n of [64, 128, 256, 512]) {
+    // Three small doublings exercise recovery without making runner speed
+    // part of the contract; the work counter distinguishes 2x from 4x growth.
+    for (const n of [8, 16, 32, 64]) {
       const content = Array.from({ length: n }, (_, i) => {
         const p = paragraph(`n${i}=`);
         const run = p.runs[0]!;
@@ -592,7 +595,9 @@ describe('reviewed note admission regressions', () => {
 
   it.each(['footnote', 'endnote'] as const)('bounds a long PAGE paragraph in %s recovery under doubling', kind => {
     const results: { n: number; work: number; ms: number; outcome: string; passes: number }[] = [];
-    for (const n of [512, 1024, 2048]) {
+    // The oversized table forces recovery even at the smallest field count;
+    // later doublings carry the paragraph across destination pages.
+    for (const n of [16, 32, 64, 128]) {
       const p = paragraph('');
       const run = p.runs[0]!;
       if (run.type !== 'text') throw new Error('Expected text fixture');
@@ -691,7 +696,10 @@ describe('reviewed note admission regressions', () => {
   });
 
   it('replays active anchor journals for independent oversized notes in progressive layout', async () => {
-    const { model, expected } = independentOversizedNotes(80);
+    // Twelve references plus the anchor exceed the progressive preview's
+    // 12-entry gate while keeping independent retries and journal replay cheap.
+    const count = 12;
+    const { model, expected } = independentOversizedNotes(count);
     const floating = table([paragraph('anchor;')]) as Extract<BodyElement, { type: 'table' }>;
     floating.tblpPr = { leftFromText: 0, rightFromText: 0, topFromText: 0, bottomFromText: 0,
       horzAnchor: 'margin', horzSpecified: true, vertAnchor: 'page', tblpX: 0, tblpY: 0 };
@@ -706,8 +714,8 @@ describe('reviewed note admission regressions', () => {
         scheduler: { sliceMs: 0, yieldToHost: async () => { yields++; } },
       });
     expectConserved(layout, expected);
-    expect(layout.pages.length).toBeLessThanOrEqual(8 * 80);
-    expect(yields).toBeLessThanOrEqual(100 * 80);
+    expect(layout.pages.length).toBeLessThanOrEqual(8 * count);
+    expect(yields).toBeLessThanOrEqual(100 * count);
     expect(counts.length).toBeGreaterThan(0);
     expect(counts).toEqual([...new Set(counts)].sort((a, b) => a - b));
   });
