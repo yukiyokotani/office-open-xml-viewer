@@ -25,6 +25,14 @@ describe('normalizeTextBoxInput', () => {
     expect(runs.map((run) => run.rtl)).toEqual([true, false, undefined]);
   });
 
+  it('leaves complex-script facts of a run without rtl/cs exactly as before', () => {
+    const run = shapeRunToDocRun({ text: 'אבג', fontSizePt: 12, fontFamily: 'Latin Face', bold: true, italic: true });
+    expect(run).not.toHaveProperty('fontFamilyCs');
+    expect(run).not.toHaveProperty('fontSizeCs');
+    expect(run).not.toHaveProperty('boldCs');
+    expect(run).not.toHaveProperty('italicCs');
+  });
+
   it('projects complete text-box acquisition by count without traversing its subtree', () => {
     const content = new Proxy([] as unknown[], {
       get(target, property, receiver) {
