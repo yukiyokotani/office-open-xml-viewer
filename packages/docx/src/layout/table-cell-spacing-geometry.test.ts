@@ -19,7 +19,7 @@ interface Options {
   jc?: string; bidi?: boolean; indent?: number; auto?: boolean; widths?: number[];
   span?: boolean; verticalMerge?: boolean; cellBorder?: boolean; asymmetric?: boolean;
   rowSpacing?: boolean; nested?: boolean; header?: boolean; floating?: boolean;
-  vertical?: boolean; long?: boolean; texts?: string[];
+  vertical?: boolean; long?: boolean; texts?: string[]; pageHeight?: number;
 }
 const para = (text: string) => `<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="368" w:lineRule="exact"/></w:pPr><w:r><w:t>${text}</w:t></w:r></w:p>`;
 function geometry(o: Options = {}): TableLayout {
@@ -43,7 +43,7 @@ function geometry(o: Options = {}): TableLayout {
     ['[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>'],
     ['_rels/.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="d" Type="${R}/officeDocument" Target="word/document.xml"/></Relationships>`],
     ['word/_rels/document.xml.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="s" Type="${R}/settings" Target="settings.xml"/><Relationship Id="h" Type="${R}/header" Target="header1.xml"/></Relationships>`],
-    ['word/document.xml', `<w:document xmlns:w="${W}" xmlns:r="${R}"><w:body>${o.header ? para('body') : o.nested ? outer : table}${para('after')}<w:sectPr><w:headerReference w:type="default" r:id="h"/><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:bottom="1440" w:left="1440" w:right="1440" w:header="360"/></w:sectPr></w:body></w:document>`],
+    ['word/document.xml', `<w:document xmlns:w="${W}" xmlns:r="${R}"><w:body>${o.header ? para('body') : o.nested ? outer : table}${para('after')}<w:sectPr><w:headerReference w:type="default" r:id="h"/><w:pgSz w:w="12240" w:h="${o.pageHeight ?? 15840}"/><w:pgMar w:top="1440" w:bottom="1440" w:left="1440" w:right="1440" w:header="360"/></w:sectPr></w:body></w:document>`],
     ['word/header1.xml', `<w:hdr xmlns:w="${W}">${o.header ? table : ''}${para('header')}</w:hdr>`],
     ['word/settings.xml', `<w:settings xmlns:w="${W}">${mode === null ? '' : `<w:compat><w:compatSetting w:name="compatibilityMode" w:uri="http://schemas.microsoft.com/office/word" w:val="${mode}"/></w:compat>`}</w:settings>`],
   ]);
@@ -147,6 +147,13 @@ describe('WORD_TABLE_CELL_SPACING_GEOMETRY (#2066)', () => {
   // Captured from the unmodified stacked parent cb1746fad^ using these same
   // synthetic inputs. These guard the explicit byte-identical retained-layout
   // contract, including borders, paragraphs and row/page flow, not a test count.
+  it('reserves both cell borders and doubled outer gaps before splitting a row', () => {
+    const table = geometry({ long: true, pageHeight: 6000 });
+    // A 300pt page with 72pt margins owns a 156pt body. Child selection must
+    // reserve the same border/gap geometry that materialization later retains.
+    expect(table.flowBounds.heightPt).toBeLessThanOrEqual(156);
+    expect(bottom(table.flowBounds)).toBeLessThanOrEqual(228);
+  });
   it('keeps all no-spacing retained geometry byte-identical to the previous renderer', () => {
     const cases = [null, 11, 12, 14, 15].flatMap((mode) => [false, true].flatMap((bidi) => ['left', 'center', 'end'].flatMap((jc) =>
       [false, true].map((auto) => ({ spacing: 0, mode, bidi, jc, auto, indent: 720, margin: 108 })))));

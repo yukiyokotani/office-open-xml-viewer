@@ -1760,7 +1760,12 @@ function partialRow(
   )));
   // A one-row fragment owns both outer cell-spacing bands. Reserve them before
   // selecting legal child boundaries so layoutTable cannot grow past the page.
-  const spacingInsetsPt = Math.max(0, row.cellSpacingPt) * 2;
+  // WORD_TABLE_CELL_SPACING_GEOMETRY uses 2s at each fragment edge and
+  // independent full top/bottom cell borders. This is the same one-row box
+  // layoutTable materializes; selection must reserve it before choosing lines.
+  const separated = row.cellSpacingPt > 0 ? row.spacingGeometry : undefined;
+  const spacingInsetsPt = Math.max(0, row.cellSpacingPt) * (separated ? 4 : 2)
+    + 2 * (separated?.borderPt ?? 0);
   // A continued row is materialized as an auto-height, one-row table fragment.
   // Reserve the same page-local collapsed top/bottom half-rules that layoutTable
   // will add to that track after the legal child boundary has been selected.
