@@ -1690,4 +1690,6 @@ export interface VmlShapeAcquisitionFacts {
   readonly vmlInsetPen?: boolean;
   readonly vmlConcentricGradient?: boolean;
   readonly vmlTextRects?: Array<[number, number, number, number]>;
+  /** The text body is a legacy `<v:textbox>` (Part 4 §19.1.2.22), not `<wps:txbx>`. */
+  readonly vmlTextBox?: boolean;
 }
