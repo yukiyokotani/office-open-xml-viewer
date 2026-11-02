@@ -176,7 +176,7 @@ function effectiveCellSpacingPt(row: TableRowLayoutInput | undefined): number {
 /**
  * §17.4.43/.44/.45 require spacing between adjacent cells and the table edge
  * without increasing the table width. An outer boundary owns the full row
- * spacing; an internal boundary is one shared gap split symmetrically between
+ * spacing outside WORD_TABLE_CELL_SPACING_GEOMETRY; an internal boundary is one shared gap split symmetrically between
  * its two cells. When adjacent rows differ, the larger minimum owns the shared
  * boundary so neither row's constraint is weakened.
  */
@@ -185,6 +185,10 @@ function rowSpacingInsets(
   rowIndex: number,
 ): RowSpacingInsets {
   const currentPt = effectiveCellSpacingPt(rows[rowIndex]);
+  if (currentPt > 0 && rows[rowIndex]?.spacingGeometry) {
+    return { topPt: rowIndex === 0 ? 2 * currentPt : currentPt,
+      bottomPt: rowIndex === rows.length - 1 ? 2 * currentPt : currentPt };
+  }
   const previousPt = effectiveCellSpacingPt(rows[rowIndex - 1]);
   const nextPt = effectiveCellSpacingPt(rows[rowIndex + 1]);
   return {
@@ -371,7 +375,8 @@ function resolveRowTrack(
   let contentHeightPt = 0;
   for (const [cellIndex, cell] of row.cells.entries()) {
     if (roles[cellIndex] !== 'none') continue;
-    const required = cellRequiredHeight(cell, flowOf(cell), spacing);
+    const required = cellRequiredHeight(cell, flowOf(cell), spacing)
+      + 2 * (row.spacingGeometry?.borderPt ?? 0);
     contentHeightPt = Math.max(contentHeightPt, required);
     if (row.heightRule !== 'exact') heightPt = Math.max(heightPt, required);
   }
@@ -693,6 +698,11 @@ function rowRuleInsetsPt(
   input: TableLayoutInput,
   boundaries: ReturnType<typeof resolvedBoundaries>,
 ): RowRuleInsets {
+  const separated = input.rows[0]?.spacingGeometry;
+  if (separated && effectiveCellSpacingPt(input.rows[0]) > 0) {
+    return { top: input.rows.map((_row, index) => index === 0 ? separated.borderPt : 0),
+      bottom: input.rows.map((_row, index) => index === input.rows.length - 1 ? separated.borderPt : 0) };
+  }
   const widthsPt = collapsedHorizontalBoundaryWidthsPt(input, boundaries);
   const last = input.rows.length - 1;
   return {
@@ -836,6 +846,39 @@ function materializeBorders(
     const yPt = position === 'top' ? topPt : bottomPt;
     push(visibleBorder(candidate), edge, { xPt: leftPt, yPt }, { xPt: rightPt, yPt });
   };
+
+  // WORD_TABLE_CELL_SPACING_GEOMETRY: table and cells own independent
+  // border boxes; there is no extra inside rule down the middle of a gap.
+  const separated = input.rows[0]?.spacingGeometry;
+  if (separated && effectiveCellSpacingPt(input.rows[0]) > 0) {
+    const t = separated.borderPt;
+    const rectangle = (left: number, top: number, right: number, bottom: number,
+      edges: Pick<TableEdgeInputs, 'top' | 'bottom' | 'left' | 'right'>): void => {
+      push(edges.top, 'top', { xPt: left, yPt: top + t / 2 }, { xPt: right, yPt: top + t / 2 });
+      push(edges.bottom, 'bottom', { xPt: left, yPt: bottom - t / 2 }, { xPt: right, yPt: bottom - t / 2 });
+      push(edges.left, 'left', { xPt: left + t / 2, yPt: top + t / 2 }, { xPt: left + t / 2, yPt: bottom - t / 2 });
+      push(edges.right, 'right', { xPt: right - t / 2, yPt: top + t / 2 }, { xPt: right - t / 2, yPt: bottom - t / 2 });
+    };
+    rectangle(rowXPt[0] ?? 0, tableYPt, (rowXPt[0] ?? 0) + tableWidthPt, rowY(input.rows.length), input.borders);
+    input.rows.forEach((row, rowIndex) => {
+      const spacing = rowSpacingInsets(input.rows, rowIndex);
+      for (const cell of row.cells) {
+        const start = columnX(rowIndex, cell.columnStart);
+        const end = columnX(rowIndex, cell.columnStart + cell.columnSpan);
+        const insets = tableCellHorizontalSpacingInsets(row.cellSpacingPt, cell.columnStart,
+          cell.columnSpan, input.columnWidthsPt.length, true);
+        const edges = physicalCellEdges(cell, input.borders, null, rowIndex, rowIndex,
+          input.rows.length, input.columnWidthsPt.length, input.bidiVisual);
+        rectangle(Math.min(start, end) + (input.bidiVisual ? insets.endPt : insets.startPt),
+          rowY(rowIndex) + spacing.topPt + (rowIndex === 0 ? t : 0),
+          Math.max(start, end) - (input.bidiVisual ? insets.startPt : insets.endPt),
+          rowY(rowIndex + 1) - spacing.bottomPt - (rowIndex === input.rows.length - 1 ? t : 0),
+          { top: visibleBorder(edges.top), bottom: visibleBorder(edges.bottom),
+            left: visibleBorder(edges.left), right: visibleBorder(edges.right) });
+      }
+    });
+    return segments;
+  }
 
   boundaries.horizontal.forEach((columns, boundary) => {
     const aboveSpaced = boundary > 0
@@ -1522,21 +1565,24 @@ function materializeTableRow(
       cell.columnStart,
       cell.columnSpan,
       input.columnWidthsPt.length,
+      row.spacingGeometry !== undefined,
     );
     const cellXPt = gridLeftPt + (input.bidiVisual ? endInsetPt : startInsetPt);
     const cellRightPt = gridRightPt - (input.bidiVisual ? startInsetPt : endInsetPt);
     const cellWidthPt = Math.max(0, cellRightPt - cellXPt);
-    const cellTopPt = rowTopPt + rowSpacing.topPt;
+    const cellTopPt = rowTopPt + rowSpacing.topPt
+      + (row.spacingGeometry ? ruleInsetsPt.top[rowIndex] ?? 0 : 0);
     const cellHeightPt = opensRegion
       ? Math.max(0, cellBottomPt - cellTopPt)
-      : Math.max(0, rowHeightPt - rowSpacing.topPt - rowSpacing.bottomPt);
+      : Math.max(0, rowHeightPt - rowSpacing.topPt - rowSpacing.bottomPt
+        - (row.spacingGeometry ? (ruleInsetsPt.top[rowIndex] ?? 0) + (ruleInsetsPt.bottom[rowIndex] ?? 0) : 0));
     const flow = flows.get(cell.id) ?? resolveCellFlow([]);
     // WORD_COLLAPSED_BORDER_ROW_TRACK_FOOTPRINT: content starts below the
     // row's top rule and ends above the table's bottom rule.
     const margins = {
       ...cell.margins,
-      topPt: cell.margins.topPt + (ruleInsetsPt.top[rowIndex] ?? 0),
-      bottomPt: cell.margins.bottomPt + (ruleInsetsPt.bottom[lastRowIndex] ?? 0),
+      topPt: cell.margins.topPt + (row.spacingGeometry?.borderPt ?? ruleInsetsPt.top[rowIndex] ?? 0),
+      bottomPt: cell.margins.bottomPt + (row.spacingGeometry?.borderPt ?? ruleInsetsPt.bottom[lastRowIndex] ?? 0),
     };
     const physicalContentHeightPt = Math.max(
       0,
@@ -1568,11 +1614,11 @@ function materializeTableRow(
           ? cellHeightPt - margins.bottomPt - flow.inkHeightPt - flow.inkTopPt
           : topInkOffsetPt;
     const contentBounds = {
-      xPt: cellXPt + cell.margins.leftPt,
+      xPt: cellXPt + cell.margins.leftPt + (row.spacingGeometry?.borderPt ?? 0),
       yPt: cellTopPt + inkOffsetPt,
       // Use the same grouped horizontal margins as acquisition so retained
       // geometry and line layout agree at an intrinsic equality.
-      widthPt: Math.max(0, cellWidthPt - (cell.margins.leftPt + cell.margins.rightPt)),
+      widthPt: Math.max(0, cellWidthPt - (cell.margins.leftPt + cell.margins.rightPt) - 2 * (row.spacingGeometry?.borderPt ?? 0)),
       heightPt: availableContentHeightPt,
     };
     const cellFlowBounds = { xPt: cellXPt, yPt: cellTopPt, widthPt: cellWidthPt, heightPt: cellHeightPt };
