@@ -850,15 +850,15 @@ function materializeBorders(
   // border boxes; there is no extra inside rule down the middle of a gap.
   const separated = input.rows[0]?.spacingGeometry;
   if (separated && effectiveCellSpacingPt(input.rows[0]) > 0) {
-    const border = input.borders.top;
     const t = separated.borderPt;
-    const rectangle = (left: number, top: number, right: number, bottom: number): void => {
-      push(border, 'top', { xPt: left, yPt: top + t / 2 }, { xPt: right, yPt: top + t / 2 });
-      push(border, 'bottom', { xPt: left, yPt: bottom - t / 2 }, { xPt: right, yPt: bottom - t / 2 });
-      push(border, 'left', { xPt: left + t / 2, yPt: top + t / 2 }, { xPt: left + t / 2, yPt: bottom - t / 2 });
-      push(border, 'right', { xPt: right - t / 2, yPt: top + t / 2 }, { xPt: right - t / 2, yPt: bottom - t / 2 });
+    const rectangle = (left: number, top: number, right: number, bottom: number,
+      edges: Pick<TableEdgeInputs, 'top' | 'bottom' | 'left' | 'right'>): void => {
+      push(edges.top, 'top', { xPt: left, yPt: top + t / 2 }, { xPt: right, yPt: top + t / 2 });
+      push(edges.bottom, 'bottom', { xPt: left, yPt: bottom - t / 2 }, { xPt: right, yPt: bottom - t / 2 });
+      push(edges.left, 'left', { xPt: left + t / 2, yPt: top + t / 2 }, { xPt: left + t / 2, yPt: bottom - t / 2 });
+      push(edges.right, 'right', { xPt: right - t / 2, yPt: top + t / 2 }, { xPt: right - t / 2, yPt: bottom - t / 2 });
     };
-    rectangle(rowXPt[0] ?? 0, tableYPt, (rowXPt[0] ?? 0) + tableWidthPt, rowY(input.rows.length));
+    rectangle(rowXPt[0] ?? 0, tableYPt, (rowXPt[0] ?? 0) + tableWidthPt, rowY(input.rows.length), input.borders);
     input.rows.forEach((row, rowIndex) => {
       const spacing = rowSpacingInsets(input.rows, rowIndex);
       for (const cell of row.cells) {
@@ -866,10 +866,14 @@ function materializeBorders(
         const end = columnX(rowIndex, cell.columnStart + cell.columnSpan);
         const insets = tableCellHorizontalSpacingInsets(row.cellSpacingPt, cell.columnStart,
           cell.columnSpan, input.columnWidthsPt.length, true);
+        const edges = physicalCellEdges(cell, input.borders, null, rowIndex, rowIndex,
+          input.rows.length, input.columnWidthsPt.length, input.bidiVisual);
         rectangle(Math.min(start, end) + (input.bidiVisual ? insets.endPt : insets.startPt),
           rowY(rowIndex) + spacing.topPt + (rowIndex === 0 ? t : 0),
           Math.max(start, end) - (input.bidiVisual ? insets.startPt : insets.endPt),
-          rowY(rowIndex + 1) - spacing.bottomPt - (rowIndex === input.rows.length - 1 ? t : 0));
+          rowY(rowIndex + 1) - spacing.bottomPt - (rowIndex === input.rows.length - 1 ? t : 0),
+          { top: visibleBorder(edges.top), bottom: visibleBorder(edges.bottom),
+            left: visibleBorder(edges.left), right: visibleBorder(edges.right) });
       }
     });
     return segments;

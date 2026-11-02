@@ -410,8 +410,10 @@ export function decideLogicalTable(
     && ((table.tblInd ?? 0) >= 0 || table.jc === 'center' || table.jc === 'right' || table.jc === 'end')
     && format.rows.every((row) => row.cellSpacingPt === spacingPt && row.height == null
       && row.cells.every((cell) => cell.dxaHorizontalMarginsOnly === true))
-    && ((input.layout === 'fixed' && table.widthPt != null && table.widthPt > 0 && table.widthPct == null)
-      || (contentSized && input.gridWidthsPt.length > 0 && input.rows.every((row) =>
+    && ((input.layout === 'fixed' && table.widthPt != null
+        && table.widthPt > (input.gridWidthsPt.length + 1) * 2 * spacingPt && table.widthPct == null)
+      || (contentSized && input.gridWidthsPt.length > 0
+        && contentWidthPt > (input.gridWidthsPt.length + 1) * 2 * spacingPt && input.rows.every((row) =>
         row.cells.length === input.gridWidthsPt.length && row.cells.every((cell, index) =>
           cell.columnSpan === 1 && cell.columnStart === index))))
     ? Object.freeze({ spacingPt, borderPt: uniformBorderPt }) : null;

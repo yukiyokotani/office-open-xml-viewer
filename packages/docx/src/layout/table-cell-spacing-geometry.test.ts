@@ -19,12 +19,12 @@ interface Options {
   jc?: string; bidi?: boolean; indent?: number; auto?: boolean; widths?: number[];
   span?: boolean; verticalMerge?: boolean; cellBorder?: boolean; asymmetric?: boolean;
   rowSpacing?: boolean; nested?: boolean; header?: boolean; floating?: boolean;
-  vertical?: boolean; long?: boolean; texts?: string[]; pageHeight?: number;
+  vertical?: boolean; long?: boolean; texts?: string[]; pageHeight?: number; rightBorderColor?: string;
 }
 const para = (text: string) => `<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="368" w:lineRule="exact"/></w:pPr><w:r><w:t>${text}</w:t></w:r></w:p>`;
 function geometry(o: Options = {}): TableLayout {
   const widths = o.widths ?? [2000, 2000, 2000];
-  const border = (side: string, size = o.border ?? 24) => `<w:${side} w:val="${size ? 'single' : 'nil'}" w:sz="${size}" w:color="000000"/>`;
+  const border = (side: string, size = o.border ?? 24) => `<w:${side} w:val="${size ? 'single' : 'nil'}" w:sz="${size}" w:color="${side === 'right' ? o.rightBorderColor ?? '000000' : '000000'}"/>`;
   const tblPr = `<w:tblW w:w="${o.auto ? 0 : widths.reduce((a, b) => a + b, 0)}" w:type="${o.auto ? 'auto' : 'dxa'}"/>`
     + `<w:tblLayout w:type="${o.auto ? 'autofit' : 'fixed'}"/><w:tblCellSpacing w:w="${o.spacing ?? 200}" w:type="dxa"/>`
     + `<w:jc w:val="${o.jc ?? 'left'}"/>${o.indent === undefined ? '' : `<w:tblInd w:w="${o.indent}" w:type="dxa"/>`}`
@@ -92,6 +92,11 @@ describe('WORD_TABLE_CELL_SPACING_GEOMETRY (#2066)', () => {
     // Border strokes lie inside the independent cell boxes.
     if (t > 0) expect(table.borders.some((b) => Math.abs(b.from.xPt - (first!.flowBounds.xPt + t / 2)) < 1e-8)).toBe(true);
   });
+  it('retains each border side colour while using uniform-width box geometry', () => {
+    const table = geometry({ rightBorderColor: 'FF0000' });
+    expect(table.borders.map((border) => border.color.toLowerCase())).toContain('#ff0000');
+    expect(table.rows[0]!.cells[0]!.contentBounds.xPt - table.flowBounds.xPt).toBeCloseTo(23, 8);
+  });
   it('carves fixed gaps proportionally, including horizontal spans', () => {
     const table = geometry({ widths: [1000, 2000, 3000], span: true });
     const [span, last] = table.rows[0]!.cells;
@@ -153,6 +158,13 @@ describe('WORD_TABLE_CELL_SPACING_GEOMETRY (#2066)', () => {
     // reserve the same border/gap geometry that materialization later retains.
     expect(table.flowBounds.heightPt).toBeLessThanOrEqual(156);
     expect(bottom(table.flowBounds)).toBeLessThanOrEqual(228);
+  });
+  it('keeps the previous geometry when gaps alone would exhaust the table or band', () => {
+    for (const auto of [false, true]) {
+      const table = geometry({ spacing: 2000, auto });
+      expect(table.flowBounds.xPt).toBe(E0);
+      expect(table.rows[0]!.cells[0]!.flowBounds.xPt - table.flowBounds.xPt).toBe(100);
+    }
   });
   it('keeps all no-spacing retained geometry byte-identical to the previous renderer', () => {
     const cases = [null, 11, 12, 14, 15].flatMap((mode) => [false, true].flatMap((bidi) => ['left', 'center', 'end'].flatMap((jc) =>
