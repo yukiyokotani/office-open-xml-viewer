@@ -86,6 +86,11 @@ export type {
  *                       gaps (a combining mark stays glued to its base). Off for
  *                       `both`/`distribute` per
  *                       `word-thai-distribute-cluster-policy`.
+ * @param clusterAdvanceWeights When given, each gap takes a share of the slack
+ *                       proportional to this advance (pt) of the grapheme
+ *                       cluster ending at the code point before it, and a SEA
+ *                       cluster before a space run opens a gap too
+ *                       (`word-thai-distribute-proportional-spread`).
  * @returns The distribution, or `null` when nothing stretches.
  */
 export function distributeLineSlack(
@@ -96,12 +101,18 @@ export function distributeLineSlack(
   minPerGap = -Infinity,
   includeCJK = true,
   seaClusterGaps = false,
+  clusterAdvanceWeights?: (segmentIndex: number, cpOffset: number) => number,
 ): DistributeResult | null {
   return distributeLineSlackCore(segments, slack, {
     firstContentSi,
     lastDrawnSi,
     minPerGap,
     seaClusterGaps,
+    // Proportional allocation by the advance of the cluster before each gap,
+    // with the SEA cluster before a space opening its own gap.
+    ...(clusterAdvanceWeights
+      ? { seaClusterSpaceGaps: true, gapWidth: (si: number, off: number) => clusterAdvanceWeights(si, off) }
+      : {}),
     // Compression (includeCJK=false) opens spaces only; never widen an inter-CJK
     // boundary, which would overlap ideographs. The kernel default isGapChar
     // (core.isCjkBreakChar) handles expansion.
