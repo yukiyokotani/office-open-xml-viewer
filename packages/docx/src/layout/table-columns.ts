@@ -16,7 +16,8 @@ export interface TableCellHorizontalSpacingInsets {
 /** §17.4.43/.44/.45 spacing lives inside the table grid: an outer edge owns
  * the full spacing and two adjacent cells share one inner gap. This projection
  * is shared by intrinsic constraints, child acquisition, and final cell boxes
- * so each stage uses the same content width. */
+ * so each stage uses the same content width. WORD_TABLE_CELL_SPACING_GEOMETRY
+ * doubles those insets only for the measured separated-box class. */
 export function tableCellHorizontalSpacingInsets(
   spacingPt: number,
   columnStart: number,

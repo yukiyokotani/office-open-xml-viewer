@@ -69,6 +69,7 @@ interface MemberScopeExtensions {
   readonly nestedNegativeIndentIgnored: boolean;
   /** WORD_AUTOFIT_CONTENT_COLUMN_GROWTH for a content-sized table. */
   readonly contentFitted: boolean;
+  /** WORD_TABLE_CELL_SPACING_GEOMETRY, absent outside measured structures. */
   readonly spacingGeometry: Readonly<{ spacingPt: number; borderPt: number }> | null;
 }
 const NO_SCOPE_EXTENSIONS: MemberScopeExtensions = Object.freeze({
@@ -243,8 +244,9 @@ function memberContext(
   // the logical-table boundary) content-fits whatever its jc and mode when
   // its content fits the established ceiling; a binding fit there is
   // unmeasured and keeps the previous solve.
-  const contentGrowth: 'band' | 'nonbinding' | 'none' = spacingGeometry ? (contentFitted ? 'nonbinding' : 'none') : usesLeadingIndentBand ? 'band'
-    : contentFitted ? 'nonbinding' : 'none';
+  const contentGrowth: 'band' | 'nonbinding' | 'none' = spacingGeometry
+    ? (contentFitted ? 'nonbinding' : 'none')
+    : usesLeadingIndentBand ? 'band' : contentFitted ? 'nonbinding' : 'none';
   const outerCellMarginsHangOutsideBand = compatibilityMode === undefined || compatibilityMode === 14;
   const textBandPt = usesLeadingIndentBand
     ? Math.max(0, Math.min(...rowPlacements.map(({ justification, indentPt }) => {
@@ -405,7 +407,7 @@ export function decideLogicalTable(
     && environment.quarterTurnedStory !== true && format.ordinaryFlow && format.positioning == null
     && format.outerEdgeIndent !== true && !rowOverrides && !gridSkips
     && (environment.mode === undefined || environment.mode === 14 || environment.mode === 15)
-    && (table.tblInd ?? 0) >= 0
+    && ((table.tblInd ?? 0) >= 0 || table.jc === 'center' || table.jc === 'right' || table.jc === 'end')
     && format.rows.every((row) => row.cellSpacingPt === spacingPt && row.height == null
       && row.cells.every((cell) => cell.dxaHorizontalMarginsOnly === true))
     && ((input.layout === 'fixed' && table.widthPt != null && table.widthPt > 0 && table.widthPct == null)
@@ -418,7 +420,8 @@ export function decideLogicalTable(
     && format.outerEdgeIndent !== true && !rowOverrides && !gridSkips
     && format.rows.every((row) => (row.cellSpacingPt === 0 || spacingGeometry !== null)
       && row.cells.every((cell) => cell.dxaHorizontalMarginsOnly === true))
-    // The two unspanned unpreferred tracks the solver content-fits.
+    // Keep the no-spacing two-track scope. Spaced tables additionally admit
+    // n unspanned unpreferred tracks, only at nonbinding maxima in the solver.
     && (input.gridWidthsPt.length === 2 || spacingGeometry !== null)
     && input.rows.every((row) => row.cells.length === input.gridWidthsPt.length
       && row.cells.every((cell, index) => cell.columnSpan === 1 && cell.columnStart === index))
