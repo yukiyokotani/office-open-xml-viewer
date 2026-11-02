@@ -2676,6 +2676,7 @@ function assertCanonicalCutoverBoundaries(root) {
     // admission error, but must keep the sole validated layout return. A
     // throw-only catch cannot introduce an unvalidated successful exit.
     if (returned && ts.isTryStatement(returned)
+      && returned.tryBlock.statements.length === 1
       && !returned.finallyBlock && returned.catchClause?.block.statements.length === 1
       && ts.isThrowStatement(returned.catchClause.block.statements[0])) {
       returned = returned.tryBlock.statements.at(-1);

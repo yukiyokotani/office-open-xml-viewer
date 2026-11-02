@@ -1880,6 +1880,9 @@ test('retained layout validation allows only a throw-only recovery catch', () =>
   write(root, path, withCatch('throw error;'));
   const accepted = runChecker(root, '--final');
   assert.equal(accepted.status, 0, accepted.output);
+  write(root, path, withCatch('throw error;').replace(
+    '  try {\n', '  try {\n    if (input.raw) return layout;\n'));
+  expectDiagnostic(root, 'RETAINED_LAYOUT_IMMUTABILITY', 'early raw return bypasses validation', '--final');
   write(root, path, withCatch('return layout;'));
   expectDiagnostic(root, 'RETAINED_LAYOUT_IMMUTABILITY', 'recovery cannot return an unvalidated layout', '--final');
 });

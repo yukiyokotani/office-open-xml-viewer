@@ -54,6 +54,20 @@ export class NoteRecoveryProgress {
   private revision = 0;
   private bandStart = 0;
   private noteCommitted = false;
+  private workSource: SourceRef | undefined;
+
+  constructor(private readonly recoveryWork?: Readonly<{
+    allows(source: SourceRef): boolean;
+    charge(source: SourceRef, units: number): void;
+  }>) {}
+
+  /** Page-sequence copies visit the completed prefix too. Attribute them to
+   * the note retained on this live page, before copying, so a long tail cannot
+   * perform quadratic prefix work outside its note-local recovery allowance.
+   * Ordinary notes have no recovery ledger and keep their existing behavior. */
+  chargePageSequenceCopy(pageCount: number): void {
+    if (this.workSource) this.recoveryWork?.charge(this.workSource, pageCount);
+  }
 
   authorize(failure: Error | undefined): void {
     this.failure ??= failure;
@@ -91,6 +105,8 @@ export class NoteRecoveryProgress {
    * note's source cursor. A plan, separator or repeated decoration earns none. */
   retainNote(note: NoteLayout): void {
     if (note.story.blocks.length === 0) return;
+    // A later ordinary note cannot erase this page's recovery work owner.
+    if (this.recoveryWork?.allows(note.source)) this.workSource = note.source;
     this.noteCommitted = true;
     this.revision++;
   }
@@ -116,6 +132,7 @@ export class NoteRecoveryProgress {
     this.failure = this.bandFailure = undefined;
     this.revision = this.bandStart = 0;
     this.noteCommitted = false;
+    this.workSource = undefined;
   }
 
   fail(error: unknown): never { throw this.failure ?? error; }

@@ -43,7 +43,10 @@ export interface BodyPageTransitionFactory {
 function retain(input: BodyPaginationState): BodyPaginationState {
   return Object.freeze({
     ...input,
-    pages: Object.freeze([...input.pages]),
+    // Reducer inputs own their new arrays; scalar updates reuse the already
+    // frozen sequence. Do not traverse the completed prefix for a reserve or
+    // balance-only change.
+    pages: Object.freeze(input.pages),
   });
 }
 

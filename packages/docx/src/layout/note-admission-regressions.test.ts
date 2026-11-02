@@ -16,6 +16,7 @@ import * as runtimeState from './runtime-state.js';
 import * as noteColumns from './note-column-acquisition.js';
 import * as noteBlocks from './note-block-acquisition.js';
 import * as pageFactory from './page-factory.js';
+import * as bodyPagination from './body-pagination.js';
 import { NOTE_RECOVERY_WORK_MULTIPLIER, NoteOverflowPolicy, NoteOverflowRecoveryRequired } from './note-overflow-policy.js';
 
 type Kind = 'footnote' | 'endnote';
@@ -173,6 +174,84 @@ const ordinaryLayouts = [
 ] as const;
 
 describe('reviewed note admission regressions', () => {
+  it('keeps consecutive oversized table notes clear of their reference body', () => {
+    const model = document('footnote', [], undefined, 1);
+    model.section.pageHeight = 400;
+    model.section.headerDistance = 0;
+    model.headers.default = { body: [paragraph('header;', 120) as BodyElement] };
+    // Each note is 16 * (6pt label + 12pt table) plus a 6pt band =
+    // 294pt. The header leaves 270pt. The seed pass fits whole notes in
+    // 380pt, then reserve convergence splits the first note, moving the
+    // second reference beyond the seed's page set. That unseen fresh page
+    // must use its real header band instead of zero reserve.
+    const expected: Record<string, string> = {};
+    model.footnotes = ['7', '8'].map(id => {
+      const content = Array.from({ length: 16 }, (_, index) => {
+        const grid = table([paragraph(`${id}a${index};`, 12)]);
+        grid.colWidths = [40, 40];
+        grid.rows[0]!.cells.push({ ...grid.rows[0]!.cells[0]!, content: [paragraph(`${id}b${index};`, 12)] });
+        return [paragraph(`${id}label${index};`, 6), grid];
+      }).flat();
+      expected[id] = Array.from({ length: 16 }, (_, index) =>
+        `${id}label${index};${id}a${index};${id}b${index};`).join('');
+      return { id, content };
+    });
+    model.body = ['7', '8'].map((id, index) => {
+      const reference = paragraph(`body${id};`, 14);
+      reference.pageBreakBefore = index > 0;
+      const run = reference.runs[0];
+      if (run?.type !== 'text') throw new Error('Expected reference text');
+      reference.runs = [{ ...run, noteRef: { kind: 'footnote', id } },
+        ...paragraph('following;').runs];
+      return reference;
+    }) as BodyElement[];
+    // layoutDocument runs the same invariant validation/freezing as the
+    // browser; an overlapping retained result must fail here.
+    const layout = render(model);
+    expectConserved(layout, expected);
+    for (const id of ['7', '8']) expect(notes(layout).filter(note => note.source.storyInstance === id).length)
+      .toBeGreaterThan(1);
+    expect(layout.pages.flatMap(page => page.layers.body.map(text)).join('')).toBe('1following;2following;');
+  });
+
+  it('debits completed-page copies before a long recovered tail exceeds its allowance', () => {
+    const model = document('footnote', Array.from({ length: 8192 }, () => paragraph('x;', 120)), undefined, 1);
+    let originalFailure: Error | undefined;
+    let reads = 0, limit = 0;
+    const recover = NoteOverflowPolicy.prototype.recover;
+    const recovery = vi.spyOn(NoteOverflowPolicy.prototype, 'recover').mockImplementation(function (this: NoteOverflowPolicy, error) {
+      if (error instanceof NoteOverflowRecoveryRequired) originalFailure ??= error.failure;
+      return recover.call(this, error);
+    });
+    const charge = NoteOverflowPolicy.prototype.charge;
+    const ledger = vi.spyOn(NoteOverflowPolicy.prototype, 'charge').mockImplementation(function (this: NoteOverflowPolicy, kind, id, sourceUnits, units) {
+      if (this.allows(kind, [id])) limit = NOTE_RECOVERY_WORK_MULTIPLIER * (sourceUnits + 1);
+      return charge.call(this, kind, id, sourceUnits, units);
+    });
+    const commit = bodyPagination.commitPageFlowTransition;
+    const pages = vi.spyOn(bodyPagination, 'commitPageFlowTransition').mockImplementation((state, ...args) => {
+      // Observe real completed-page reads at the reducer boundary. This also
+      // permits a future persistent sequence to finish with linear work.
+      const observed = new Proxy(state.pages, { get(target, key, receiver) {
+        if (typeof key === 'string' && /^(0|[1-9][0-9]*)$/.test(key)) reads++;
+        return Reflect.get(target, key, receiver);
+      } });
+      return commit({ ...state, pages: observed }, ...args);
+    });
+    try {
+      let result: DocumentLayout | undefined;
+      try { result = render(model); }
+      catch (error) {
+        expect(originalFailure).toMatchObject({ name: 'FootnoteAdmissionOverflowError' });
+        expect(error).toBe(originalFailure);
+      }
+      if (result) expectConserved(result, { '7': 'x;'.repeat(8192) });
+      expect(limit).toBeGreaterThan(0);
+      expect(reads).toBeGreaterThan(8192);
+      expect(reads).toBeLessThanOrEqual(limit);
+    } finally { pages.mockRestore(); ledger.mockRestore(); recovery.mockRestore(); }
+  }, 60000);
+
   it('preserves the captured rejection when recovery finalization throws', () => {
     let originalFailure: Error | undefined;
     const recover = NoteOverflowPolicy.prototype.recover;

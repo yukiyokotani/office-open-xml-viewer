@@ -40,6 +40,8 @@ export class NoteOverflowPolicy {
   private readonly sourceTraversalSizes = new WeakMap<object, number>();
   private readonly textViews = new WeakMap<TextLayoutService, Map<string, TextLayoutService>>();
   private originalFailure: Error | undefined;
+  /** True only after this execution reached an established rejection gate. */
+  get recovering(): boolean { return this.originalFailure !== undefined; }
   /** The transaction includes all convergence, composition and final validation.
    * Once the gate captured v0.89's rejection, no recovery-only exception may
    * replace that exact object, even outside acquisition/partition call sites. */

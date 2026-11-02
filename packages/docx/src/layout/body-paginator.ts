@@ -1158,8 +1158,9 @@ function* paginateBodyPassSteps(
   // ECMA-376 §17.6.11: when a repeat pass opens an unseen physical page,
   // measure its selected story with that page's owner/slot/number. Discovery
   // stays observation-free; no other page's reserve or note plan is borrowed.
-  // Only openings use this lookup. Preflight/admission keeps the previous
-  // pass's observations (zero for unseen pages), preserving its fit decisions;
+  // Ordinary preflight/admission keeps the previous pass's observations
+  // (zero for unseen pages), preserving its fit decisions. After rejection,
+  // freshPageExtent measures unseen recovery destinations separately;
   // exact final reserve convergence still validates the resulting pages.
   const reserveForOpening = (owner: BodySectionLayoutInput, pageIndex: number, parityBlank = false, automaticOpening = false): HeaderFooterReserve => {
     // A newly measured page may be smaller than the last complete pass's
@@ -1245,7 +1246,11 @@ function* paginateBodyPassSteps(
     initialLocation: acquisitionLocation(state),
   }, services, options);
   const notePolicy = noteOverflowPolicyOf(services);
-  const noteProgress = new NoteRecoveryProgress();
+  const noteProgress = new NoteRecoveryProgress({
+    allows: source => (source.story === 'footnote' || source.story === 'endnote')
+      && notePolicy?.allows(source.story, [source.storyInstance]) === true,
+    charge: (source, units) => notePolicy?.chargeWork(source, units),
+  });
   const acquireNoteColumnPartition: typeof acquireNoteColumnPartitionBase = (...args) => {
     const request = args[1];
     noteProgress.authorize(notePolicy?.failure(request.kind, request.referenceIds));
@@ -1264,17 +1269,32 @@ function* paginateBodyPassSteps(
   };
   if (notePolicy) sessionNotePolicies.set(session, notePolicy);
   reserveSession = session;
+  const recoveredFreshReserves = new Map<string, HeaderFooterReserve>();
   const freshPageExtent = (target: BodyPaginationState): number => {
     const owner = owners.get(target.flow.section.sectionOccurrenceId);
     if (!owner) {
       throw new Error(`Unknown body section ${target.flow.section.sectionOccurrenceId}`);
     }
     const nextPageIndex = target.flow.pageIndex + 1;
-    const interval = pageBodyInterval(
-      owner,
-      nextPageIndex,
-      reserves[nextPageIndex] ?? { top: 0, bottom: 0 },
-    );
+    let reserve: HeaderFooterReserve | undefined = reserves[nextPageIndex];
+    if (!reserve && reserves.length > 0 && notePolicy?.recovering) {
+      // Recovery can create destinations beyond the preceding reserve pass.
+      // Zero there is the ordinary discovery input, not the fresh page's
+      // capacity: using it can force a whole later note into a smaller actual
+      // header/footer band and overlap its reference (§17.11.21). Only after
+      // an established rejection, measure that unseen destination's own
+      // stories; successful v0.89 executions keep their original fit inputs.
+      const context = resolvePageStoryContext(owner, nextPageIndex,
+        previousPageContext?.pageNumber, contentFirstAppearance.get(owner.sectionOccurrenceId), false);
+      const key = JSON.stringify([owner.sectionOccurrenceId, nextPageIndex,
+        context.firstPageOfSection, context.firstContentPageIndex, context.pageNumber]);
+      reserve = recoveredFreshReserves.get(key);
+      if (!reserve) {
+        reserve = measurePageHeaderFooterReserve(session, context);
+        recoveredFreshReserves.set(key, reserve);
+      }
+    }
+    const interval = pageBodyInterval(owner, nextPageIndex, reserve ?? { top: 0, bottom: 0 });
     // A same-page §17.18.77 region may begin below the physical body origin.
     // Fresh-page admission is governed by the next page's complete reserved
     // interval, not by that reduced current-page section band.
@@ -1438,6 +1458,7 @@ function* paginateBodyPassSteps(
       && 'placement' in event
       && event.placement === 'same-page-column'
     ));
+    noteProgress.chargePageSequenceCopy(state.pages.length);
     const transitioned = commitPageFlowTransition(state, transition, factory);
     // Opening can request reserve refinement without committing a new page.
     // Let that existing convergence signal run before judging a completed
@@ -2275,6 +2296,7 @@ function* paginateBodyPassSteps(
   let installModernNoteArea = () => {};
   const acceptPageNode = (...args: Parameters<typeof acceptNode>): BodyPaginationState => {
     if (canRecoverOnPage) pageAcceptances.push(bodyOccurrenceKey(args[2], acquisitionLocation(args[0]).flowDomainId, args[4]));
+    noteProgress.chargePageSequenceCopy(args[0].pages.length);
     const accepted = acceptNode(...args);
     noteProgress.retain(args[1]);
     return accepted;
@@ -5561,7 +5583,7 @@ export function* paginateBodySteps(
   attachNoteOverflowPolicy(services, policy);
   // Recovery is one transaction through composition and final validation.
   // Every escaping failure preserves the exact rejection captured by its gate.
-  try {
+  const acquire = function* (): PaginationSteps<DocumentLayout> {
     const owners = ownerMap(input);
     let publishedPages = 0;
     let publicationFailed = false;
@@ -5667,9 +5689,10 @@ export function* paginateBodySteps(
     });
     seed = null;
     const converged = (yield* convergence).result;
-    return (yield* assertAndDeepFreezeDocumentLayoutSteps(
-      composeBodyPaginationResult(converged, input, owners, options, true),
-    )) as DocumentLayout;
+    return composeBodyPaginationResult(converged, input, owners, options, true);
+  };
+  try {
+    return (yield* assertAndDeepFreezeDocumentLayoutSteps(yield* acquire())) as DocumentLayout;
   } catch (error) {
     throw policy.errorForAttempt(error);
   }
