@@ -1,4 +1,5 @@
 import { MAX_BODY_LAYOUT_PAGES } from './resource-budgets.js';
+import { registerFootnoteTable } from './footnote-table-fragmentation.js';
 import { deepFreezePlainData, deepFreezePlainDataWithFrozenAliases } from './plain-data.js';
 import { quarterTurnMathMetadataService } from './resources.js';
 import { pageOwnedAnchorKeysByLine } from './anchor-line-deferral.js';
@@ -1397,6 +1398,17 @@ function layoutBodyStory(
       }),
     ),
   });
+  if (request.source.story === 'footnote' || request.source.story === 'endnote') {
+    retained.blocks.forEach((block, index) => {
+      const original = acquired.blocks[index];
+      const acquisition = original && storyTableAcquisitions.get(original.id);
+      if (block.kind === 'table' && acquisition) registerFootnoteTable(block, acquisition, storyServices, {
+        physicalPageIndex: request.pageIndex,
+        displayPageNumber: candidate.displayPageNumber ?? request.pageIndex + 1,
+        occurrenceId: block.id,
+      });
+    });
+  }
   return retained;
 }
 
@@ -1738,10 +1750,10 @@ function layoutBodyNotes(
     const ruleYPt = noteTopPt + (selectedBand?.ruleOffsetPt ?? separatorHeightPt / 2);
     const storyContainer = {
       ...request.container,
-      // Acquire the source once before page partitioning; this is a resource
-      // acquisition container, not permission for retained note ink to overflow.
-      ...((services.allowFootnoteContinuation === true && request.kind === 'footnote') || request.kind === 'endnote'
-        ? { capacity: 'unbounded' as const } : {}),
+      // Acquire every source unit before admission. With continuation disabled
+      // an over-page note remains whole; capacity is a paginator decision, not
+      // permission to discard source during story acquisition.
+      capacity: 'unbounded' as const,
       id: `${request.container.id}:${request.kind}:${id}`,
       bounds: {
         ...request.container.bounds,
@@ -1775,8 +1787,7 @@ function layoutBodyNotes(
       }
       throw error;
     }
-    if (((services.allowFootnoteContinuation === true && request.kind === 'footnote') || request.kind === 'endnote')
-      && story.advancePt > request.section.geometry.pageHeight * MAX_BODY_LAYOUT_PAGES) {
+    if (story.advancePt > request.section.geometry.pageHeight * MAX_BODY_LAYOUT_PAGES) {
       // Match the paginator's physical-page budget before retaining a source
       // that cannot finish within it. This is resource policy, not Office fit.
       throw new Error('Footnote source exceeds the document page budget');

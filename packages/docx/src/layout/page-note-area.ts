@@ -95,7 +95,9 @@ function compareProgress(left: PageNoteFlow['progress'], right: PageNoteFlow['pr
   }
   // Synthetic same-width acquisitions can omit source boundaries. Production
   // width-changing continuation requires them before reaching this helper.
-  return a.blockIndex - b.blockIndex || a.lineIndex - b.lineIndex;
+  return a.blockIndex - b.blockIndex
+    || (a.tableCursor?.rowIndex ?? 0) - (b.tableCursor?.rowIndex ?? 0)
+    || a.lineIndex - b.lineIndex;
 }
 
 /** Balance the largest source prefix admitted by capacity, using exactly the

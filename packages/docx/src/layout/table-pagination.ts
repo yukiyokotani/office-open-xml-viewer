@@ -149,6 +149,9 @@ export interface TableFragmentContext {
   readonly compatibility: 'word' | 'standard';
   /** Deterministic policy for floating rows taller than a fresh page band. */
   readonly oversizedRowPolicy?: 'split' | 'atomic';
+  /** Note admission may measure/retain the first indivisible cell unit even
+   * beyond a fresh band. Following cell content still gets a continuation. */
+  readonly oversizedCellPolicy?: 'overflow-first-unit';
   readonly page: TableFragmentPageContext;
   readonly floatingTableFrames?: Readonly<{
     page: FloatingTableReferenceFramesPt['page'];
@@ -1558,6 +1561,7 @@ function selectParagraph(
   availableHeightPt: number,
   freshAvailableHeightPt: number,
   canGainPageSpace: boolean,
+  overflowFirstUnit = false,
 ): Readonly<{
   block: TableCellBlockInput | null;
   range: BlockContinuationRange | null;
@@ -1573,6 +1577,10 @@ function selectParagraph(
       > availableHeightPt + EPSILON_PT) break;
     lineEnd = candidateEnd;
   }
+  // A fresh note band cannot gain space by relocating an over-tall unit.
+  // Retain exactly its first complete line; later lines keep their cursor,
+  // rather than being clipped below that indivisible unit on the same page.
+  if (lineEnd === start && overflowFirstUnit) lineEnd = start + 1;
   if (lineEnd === start) return { block: null, range: null, lineEnd: start, advancePt: 0 };
   const canRelocate = start === 0 && (selectedBlocks.length > 0 || canGainPageSpace);
   // §17.3.1.14 / §17.3.1.44 apply to cell paragraphs too. The selected
@@ -1662,7 +1670,9 @@ function selectCell(
       // slicer for a first line can never make progress from an empty array.
       if (child.lines.length === 0) {
         if (measureTableCellBlockFlowHeightPt([...blocks, sourceBlock])
-          > availableContentHeightPt + EPSILON_PT) break;
+          > availableContentHeightPt + EPSILON_PT
+          && !(context.oversizedCellPolicy === 'overflow-first-unit'
+            && !canGainPageSpace && blocks.length === 0)) break;
         blocks.push(sourceBlock);
         range.push({ kind: 'whole', blockIndex: sourceBlock.sourceBlockIndex });
         blockIndex += 1;
@@ -1677,6 +1687,7 @@ function selectCell(
         availableContentHeightPt,
         freshAvailableContentHeightPt,
         canGainPageSpace,
+        context.oversizedCellPolicy === 'overflow-first-unit' && !canGainPageSpace && blocks.length === 0,
       );
       if (!selected.block || !selected.range) break;
       blocks.push({ ...selected.block, ...(sourceBlock.structuralTrailing

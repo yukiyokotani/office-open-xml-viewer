@@ -373,18 +373,13 @@ describe('canonical producer with a real document model', () => {
       measureContext: measureContext(), allowFootnoteContinuation: continuation,
     }), { currentDateMs: 0 });
     // Only 15pt remains on page one. The 26pt reference + note fits a 35pt
-    // destination band, but cannot be admitted into a 25pt destination.
-    if (nextLines === 6) {
-      // Preserve the existing final invariant failure for an impossible page,
-      // rather than adding a stricter hypothetical-page admission policy.
-      expect(render).toThrow(expect.objectContaining({ code: 'FLOW_OVERLAP' }));
-      return;
-    }
+    // destination band. With only 25pt there, retain the note below the
+    // reference and let its ink overflow instead of rejecting the document.
     const layout = render();
     expect(layout.pages).toHaveLength(2);
     expect(layout.pages.map(page => page.layers.body.length)).toEqual([6, 1]);
     expect(layout.pages[0]?.layers.notes).toEqual([]);
-    expect(layout.pages[1]?.layers.body[0]?.flowBounds.yPt).toBe(55);
+    expect(layout.pages[1]?.layers.body[0]?.flowBounds.yPt).toBe(nextLines === 6 ? 65 : 55);
     expect(layout.pages[1]?.layers.notes[0]).toMatchObject({
       advancePt: 16, flowDomainId: 'notes:page:1', source: { storyInstance: '7' },
     });
@@ -647,7 +642,7 @@ describe('canonical producer with a real document model', () => {
     expect(layout.pages.map(page => page.layers.notes.map(note => note.advancePt))).toEqual([[16], []]);
   });
 
-  it.each([false, true])('rejects an impossible row against observed openings before the page limit (continuation %s)', continuation => {
+  it.each([false, true])('retains an impossible row and its note at the observed fresh opening (continuation %s)', continuation => {
     const table = ordinaryTable('left', 0, false) as Extract<BodyElement, { type: 'table' }>;
     table.rows[0]!.cantSplit = true;
     table.rows[0]!.cells[0]!.content = [{ ...paragraph(), type: 'paragraph' }];
@@ -656,9 +651,19 @@ describe('canonical producer with a real document model', () => {
       [{ id: '7', content: [ordinaryParagraph('note')] }], 6);
     model.section.columns = null;
     model.body.push(table);
-    expect(() => layoutDocument(model, createLayoutServices(model, {
+    const layout = layoutDocument(model, createLayoutServices(model, {
       measureContext: measureContext(), allowFootnoteContinuation: continuation,
-    }), { currentDateMs: 0 })).toThrow(expect.objectContaining({ code: 'FOOTNOTE_RESERVE_EXCEEDS_FRESH_PAGE' }));
+    }), { currentDateMs: 0 });
+    expect(layout.pages.flatMap(page => page.layers.body).flatMap(block => block.kind === 'table'
+      ? block.rows : [])).toHaveLength(2);
+    // Each row references the same note; a repeated reference on another
+    // physical page owns a fresh occurrence, with no reused descendant ids.
+    for (const page of layout.pages) {
+      if (page.layers.body.some(block => block.kind === 'table')) {
+        expect(page.layers.notes).toHaveLength(1);
+        expect(page.layers.notes[0]!.source.storyInstance).toBe('7');
+      }
+    }
   });
 
   it('observes independent empty openings across more than sixteen section boundaries', () => {
@@ -2000,6 +2005,187 @@ describe('reserved note separator consumer', () => {
   });
 });
 
+describe('over-page footnote content retention', () => {
+  it.each([
+    { kind: 'footnote', shape: 'rows', mode: undefined, columns: 1 },
+    { kind: 'footnote', shape: 'row', mode: undefined, columns: 1 },
+    { kind: 'footnote', shape: 'splittable-row', mode: undefined, columns: 1 },
+    { kind: 'footnote', shape: 'mixed-row', mode: undefined, columns: 1 },
+    { kind: 'footnote', shape: 'line', mode: undefined, columns: 1 },
+    { kind: 'footnote', shape: 'frame', mode: undefined, columns: 1 },
+    { kind: 'footnote', shape: 'band-table', mode: undefined, columns: 1 },
+    { kind: 'footnote', shape: 'frame-ref', mode: undefined, columns: 1 },
+    { kind: 'footnote', shape: 'table-ref', mode: undefined, columns: 1 },
+    { kind: 'footnote', shape: 'boundary-line', mode: 15, columns: 2 },
+    { kind: 'footnote', shape: 'rows', mode: 14, columns: 2 },
+    { kind: 'footnote', shape: 'line', mode: 14, columns: 2 },
+    { kind: 'footnote', shape: 'rows', mode: 15, columns: 2 },
+    { kind: 'footnote', shape: 'line', mode: 15, columns: 2 },
+    { kind: 'endnote', shape: 'rows', mode: undefined, columns: 1 },
+    { kind: 'endnote', shape: 'line', mode: undefined, columns: 1 },
+    { kind: 'endnote', shape: 'rows', mode: 15, columns: 2 },
+    { kind: 'endnote', shape: 'line', mode: 15, columns: 2 },
+    { kind: 'footnote', shape: 'whole', mode: undefined, columns: 1 },
+    { kind: 'footnote', shape: 'whole', mode: 15, columns: 2 },
+  ] as const)('retains oversized $kind $shape (mode $mode, $columns columns)', ({ kind, shape, mode, columns }) => {
+    const exact = (text: string, height: number) => ({ ...ordinaryParagraph(text),
+      lineSpacing: { value: height, rule: 'exact' as const, explicit: true },
+    });
+    const labels = shape === 'rows' ? Array.from({ length: 4 }, (_, i) => `r${i};`)
+      : shape === 'splittable-row' || shape === 'mixed-row' ? Array.from({ length: 12 }, (_, i) => `l${i};`)
+      : shape === 'row' ? ['huge;'] : ['oversized;'];
+    const table = ordinaryTable('left', 0, false) as Extract<BodyElement, { type: 'table' }>;
+    table.rows = labels.map(text => ({ ...table.rows[0]!, cantSplit: true,
+      cells: [{ ...table.rows[0]!.cells[0]!, content: [{ ...exact(text, shape === 'rows' ? 50 : 120), type: 'paragraph' as const }] }],
+    }));
+    if (shape === 'splittable-row' || shape === 'mixed-row') table.rows = [{ ...table.rows[0]!, cantSplit: false,
+      cells: [{ ...table.rows[0]!.cells[0]!, content: labels.map((text, index) =>
+        ({ ...exact(text, shape === 'mixed-row' && index === 3 ? 120 : 20), type: 'paragraph' as const })) }],
+    }];
+    if (shape === 'band-table') table.rows[0]!.cells[0]!.content.push(floatingTable() as CellElement, { ...ordinaryParagraph('anchor;'), type: 'paragraph' });
+    const tall = exact(labels[0]!, shape === 'boundary-line' ? 74 : 120);
+    if (shape === 'frame') tall.framePr = {
+      dropCap: 'none', lines: 1, wrap: 'around', hAnchor: 'text', vAnchor: 'text',
+      hRule: 'auto', hSpace: 0, vSpace: 0, w: 40, h: 120, x: 0, y: 0,
+    };
+    const suffix = shape === 'frame' ? Array.from({ length: 10 }, (_, i) => `after${i};`) : ['suffix;'];
+    const tail = suffix.map(ordinaryBodyParagraph);
+    const content: BodyElement[] = shape === 'line' || shape === 'frame' || shape === 'whole' || shape === 'boundary-line'
+      ? [tall as BodyElement, ...tail]
+      : [table, ...tail];
+    const model = columnStoryDocument([kind === 'endnote' ? endnoteReferenceParagraph('7') as DocParagraph : paragraph()], [], 0);
+    if (shape === 'frame-ref') {
+      const reference = model.body[0] as DocParagraph;
+      reference.framePr = {
+        dropCap: 'none', lines: 1, wrap: 'around', hAnchor: 'text', vAnchor: 'text',
+        hRule: 'auto', hSpace: 0, vSpace: 0, w: 40, h: 10, x: 0, y: 0,
+      };
+    }
+    if (shape === 'table-ref') {
+      const referenceTable = ordinaryTable('left', 0, false) as Extract<BodyElement, { type: 'table' }>;
+      referenceTable.rows[0]!.cells[0]!.content = [model.body[0] as CellElement];
+      model.body = [referenceTable];
+    }
+    if (shape === 'frame-ref' || shape === 'table-ref') model.body.unshift(ordinaryBodyParagraph('before;'));
+    if (columns === 1) model.section.columns = null;
+    model.settings = { compatibilityMode: mode };
+    model.headers = { default: null, first: null, even: null };
+    model.footnotes = kind === 'footnote' ? [{ id: '7', content }] : [];
+    model.endnotes = kind === 'endnote' ? [{ id: '7', content }] : [];
+    const layout = layoutDocument(model, createLayoutServices(model, {
+      measureContext: measureContext(), allowFootnoteContinuation: shape !== 'whole',
+    }), { currentDateMs: 0 });
+    const notes = layout.pages.flatMap(page => page.layers.notes)
+      .filter((node): node is NoteLayout => node.kind === 'note' && node.source.story === kind);
+    const textIn = (blocks: readonly import('./types.js').PaintNode[]): string => blocks.map(block => {
+      if (block.kind === 'paragraph') return block.lines.flatMap(line => line.placements)
+        .flatMap(placement => placement.kind === 'text' ? [placement.text] : []).join('');
+      if (block.kind === 'table') return block.rows.flatMap(row => row.cells
+        .map(cell => textIn(cell.blocks.map(block => block.layout)))).join('');
+      return '';
+    }).join('');
+    // A positioned child in the band-dependent case is inspected separately;
+    // it is page-owned, rather than a second ordinary table-cell block.
+    expect(notes.map(note => textIn(note.story.blocks)).join('')).toBe(labels.join('') + (shape === 'band-table' ? 'anchor;' : '') + suffix.join(''));
+    if (shape === 'mixed-row') {
+      const oversized = notes.find(note => textIn(note.story.blocks).includes('l3;'))!;
+      expect(textIn(oversized.story.blocks)).toBe('l3;');
+      expect(notes.indexOf(oversized)).toBeLessThan(notes.length - 1);
+    }
+    if (shape === 'splittable-row') expect(notes.length).toBeGreaterThan(1);
+    if (shape === 'rows') {
+      expect(notes.length).toBeGreaterThan(1);
+      expect(notes.flatMap(note => note.story.blocks).flatMap(block => block.kind === 'table'
+        ? block.rows.map(row => row.source.path) : [])).toHaveLength(4);
+    }
+    if (shape === 'band-table') {
+      expect(notes.some(note => note.story.bandDependent)).toBe(true);
+      const positioned = notes.flatMap(note => note.story.blocks.flatMap(block => block.kind === 'table'
+        ? block.resolvedFloatingTables ?? [] : []));
+      expect(positioned).toHaveLength(1);
+      expect(textIn(positioned.map(placement => placement.child))).toBe('1');
+    }
+    if (shape === 'frame-ref' || shape === 'table-ref') {
+      expect(layout.pages[0]!.layers.notes).toHaveLength(0);
+    }
+    if (shape !== 'rows' && shape !== 'splittable-row' && shape !== 'mixed-row' && shape !== 'boundary-line') {
+      const oversized = notes.find(note => note.story.blocks.some(block => block.source.path[0] === 0))!;
+      expect(oversized.inkBounds.yPt + oversized.inkBounds.heightPt).toBeGreaterThan(100);
+      expect(oversized.flowBounds.yPt).toBeGreaterThanOrEqual(10);
+    }
+  }, 30_000);
+
+  it('leaves a preceding label on the reference page when the following table does not fit', () => {
+    const content = Array.from({ length: 8 }, (_, index) => {
+      const label = ordinaryParagraph(`label-${index};`);
+      label.lineSpacing = { value: 6, rule: 'exact', explicit: true };
+      const cell = ordinaryParagraph(`cell-${index};`);
+      cell.lineSpacing = { value: 10, rule: 'exact', explicit: true };
+      const table = ordinaryTable('left', 0, false) as Extract<BodyElement, { type: 'table' }>;
+      table.rows[0]!.cells[0]!.content = [{ ...cell, type: 'paragraph' }];
+      return [{ ...label, type: 'paragraph' as const }, table];
+    }).flat();
+    const reference = paragraph();
+    reference.lineSpacing = { value: 4, rule: 'exact', explicit: true };
+    const model = columnStoryDocument([reference], [], 0);
+    model.section.columns = null;
+    model.headers = { default: null, first: null, even: null };
+    model.footnotes = [{ id: '7', content }];
+    const layout = layoutDocument(model, createLayoutServices(model, {
+      measureContext: measureContext(), allowFootnoteContinuation: true,
+    }), { currentDateMs: 0 });
+    const notes = layout.pages.flatMap(page => page.layers.notes)
+      .filter((node): node is NoteLayout => node.kind === 'note');
+    // 80pt band: 4pt reference + 6pt separator + four (6+10)pt
+    // label/table pairs + one 6pt label. The fifth table resumes next page.
+    expect(notes[0]!.story.blocks.map(block => block.kind)).toEqual([
+      'paragraph', 'table', 'paragraph', 'table', 'paragraph', 'table', 'paragraph', 'table', 'paragraph',
+    ]);
+    expect(notes[1]!.story.blocks[0]?.kind).toBe('table');
+    expect(notes.flatMap(note => note.story.blocks).map(block => block.source.path[0]))
+      .toEqual(Array.from({ length: 16 }, (_, index) => index));
+  });
+
+  it.each(['paragraphs', 'tables'] as const)(
+    'continues a footnote taller than a physical page made of %s without losing content',
+    kind => {
+      const labels = Array.from({ length: 20 }, (_, index) => `note-${index};`);
+      const content = labels.map(text => {
+        if (kind === 'paragraphs') return ordinaryBodyParagraph(text);
+        const table = ordinaryTable('left', 0, false) as Extract<BodyElement, { type: 'table' }>;
+        table.rows[0]!.cells[0]!.content = [{ ...ordinaryParagraph(text), type: 'paragraph' }];
+        return table;
+      });
+      const model = columnStoryDocument([paragraph()], [], 0);
+      model.section.columns = null;
+      model.headers = { default: null, first: null, even: null };
+      model.footnotes = [{ id: '7', content }];
+      const layout = layoutDocument(model, createLayoutServices(model, {
+        measureContext: measureContext(), allowFootnoteContinuation: true,
+      }), { currentDateMs: 0 });
+      expect(layout.pages.length).toBeGreaterThan(2);
+      const notes = layout.pages.flatMap(page => page.layers.notes)
+        .filter((node): node is NoteLayout => node.kind === 'note');
+      const textIn = (blocks: readonly import('./types.js').PaintNode[]): string => blocks.map(block => {
+        if (block.kind === 'paragraph') return block.lines.flatMap(line => line.placements)
+          .flatMap(placement => placement.kind === 'text' ? [placement.text] : []).join('');
+        if (block.kind === 'table') return block.rows.map(row => row.cells
+          .map(cell => textIn(cell.blocks.map(block => block.layout))).join('')).join('');
+        return '';
+      }).join('');
+      expect(notes.map(note => textIn(note.story.blocks)).join('')).toBe(labels.join(''));
+      expect(layout.pages[0]!.layers.body.some(block => block.kind === 'paragraph'
+        && block.lines.some(line => line.placements.some(placement => placement.kind === 'text'
+          && placement.noteReference?.id === '7')))).toBe(true);
+      expect(layout.pages[0]!.layers.notes).toHaveLength(1);
+      for (const page of layout.pages) {
+        expect(page.layers.notes).toHaveLength(1);
+        const note = page.layers.notes[0]!;
+        expect(note.flowBounds.yPt + note.advancePt).toBeLessThanOrEqual(90);
+      }
+    },
+  );
+});
 
 describe('multiple pending footnote continuations', () => {
   it('preserves deferred cursors when an earlier continuation fills the page band', async () => {

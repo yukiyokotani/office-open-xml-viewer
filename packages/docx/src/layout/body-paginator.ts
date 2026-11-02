@@ -190,23 +190,6 @@ class OpenedPageReserveObservation extends Error {
   }
 }
 
-class FootnoteAdmissionOverflowError extends Error {
-  readonly code = 'FOOTNOTE_RESERVE_EXCEEDS_FRESH_PAGE' as const;
-
-  constructor(
-    readonly reservePt: number,
-    readonly admissionChargePt: number,
-    readonly freshPageExtentPt: number,
-  ) {
-    super(
-      'Body footnote admission cannot fit a fresh physical page '
-      + `(reserve: ${reservePt}, charge: ${admissionChargePt}, `
-      + `fresh page: ${freshPageExtentPt})`,
-    );
-    this.name = 'FootnoteAdmissionOverflowError';
-  }
-}
-
 interface BodyBalanceTarget {
   readonly pageIndex: number;
   readonly targetPt: number;
@@ -280,20 +263,6 @@ function widowLegalLineEnd(lineEnd: number, total: number): number {
     if (!orphan && !widow) return end;
   }
   return total;
-}
-
-function assertFreshPageFootnoteAdmission(
-  reservePt: number,
-  admissionChargePt: number,
-  freshPageExtentPt: number,
-): void {
-  if (reservePt > 0 && admissionChargePt > freshPageExtentPt) {
-    throw new FootnoteAdmissionOverflowError(
-      reservePt,
-      admissionChargePt,
-      freshPageExtentPt,
-    );
-  }
 }
 
 function nestedFloatingOccurrenceIds(layout: TableLayout): ReadonlySet<string> {
@@ -1441,6 +1410,7 @@ function* paginateBodyPassSteps(
   const footnoteHostShiftsByPage = new Map<number, Map<string, number>>();
   const pendingFootnoteContinuations = new Map<string, FootnoteCursor>();
   let noteController: PageNoteController | undefined;
+  let modernFirstHeadPt = 0;
   let mode15NoteOwner: BodyAcquisitionLocation | undefined;
   // The normative WW8 override keeps only reference-free following text on
   // this physical page. Mode15 is the measured later-reference exception.
@@ -1549,7 +1519,12 @@ function* paginateBodyPassSteps(
     inlineExtentPt: number,
     retainedReferenceIds?: readonly string[],
   ): FootnoteAdmission => {
-    const whole = footnoteAdmissionForIds(retainedReferenceIds ?? footnoteIdsInRetainedSlice(candidate), inlineExtentPt);
+    const ids = retainedReferenceIds ?? footnoteIdsInRetainedSlice(candidate);
+    let whole = footnoteAdmissionForIds(ids, inlineExtentPt);
+    if (whole.reservePt > freshPageExtent(state) && services.allowFootnoteContinuation === true) {
+      whole = footnoteAdmissionForIds(ids, inlineExtentPt, Math.max(0,
+        additionalFootnoteReserveCapacityPt() - candidate.advancePt));
+    }
     // Frames/tables/indivisible marks use their existing whole-note admission.
     const modern = modernFootnoteAdmission(whole.ids, false, false);
     return modern === undefined ? whole : modernAdmissionResult(whole.ids, modern);
@@ -1610,9 +1585,14 @@ function* paginateBodyPassSteps(
       if (services.allowFootnoteContinuation !== true
         || availableReservePt === undefined || index !== layouts.length - 1) return note;
       const precedingPt = layouts.slice(0, index).reduce((sum, preceding) => sum + preceding.advancePt, 0);
-      const partition = partitionFootnote(note, null, Math.max(0, availableReservePt - precedingPt),
+      const capacityPt = Math.max(0, availableReservePt - precedingPt);
+      let partition = partitionFootnote(note, null, capacityPt,
         extent === 'minimum' ? undefined : continuationNoticeFor(location, inlineExtentPt, pending.carriesNotice),
         extent);
+      if (!partition && !state.flow.pageHasContent && pendingIds.size === 0 && index === 0) {
+        partition = partitionFootnote(note, null, capacityPt,
+          continuationNoticeFor(location, inlineExtentPt, pending.carriesNotice), 'overflow');
+      }
       if (partition?.nextCursor) {
         continuations.push(Object.freeze({ id: note.source.storyInstance, cursor: partition.nextCursor }));
         return partition.fragment;
@@ -1657,8 +1637,7 @@ function* paginateBodyPassSteps(
     // Reusable full-note acquisition may have first been requested during a
     // rejected admission on another page. Intact notes need destination
     // ownership too; fragmented notes already project only their admitted lines.
-    const ownedLayouts = services.allowFootnoteContinuation !== true
-      ? layouts : layouts.map(destinationOwnedNote);
+    const ownedLayouts = layouts.map(destinationOwnedNote);
     retainedLayouts.push(...ownedLayouts);
     // §17.18.33: the page's one continuation notice ends its note band. A note
     // committed after the carrier takes the already-reserved notice; a later
@@ -1734,7 +1713,8 @@ function* paginateBodyPassSteps(
           : !hasFootnoteReferenceOnPage(state.flow.pageIndex),
         continuing: true,
       }, cursor, capacityPt, partitionFootnote,
-        continuationNoticeFor(location, location.availableBounds.widthPt));
+        continuationNoticeFor(location, location.availableBounds.widthPt),
+        !hasFootnoteReferenceOnPage(state.flow.pageIndex) ? 'overflow' : undefined);
       if (!partition) {
         if (!hasFootnoteReferenceOnPage(state.flow.pageIndex)) {
           throw new NoteCapacityExceededError('footnote', state.flow.pageIndex, `notes:page:${state.flow.pageIndex}`);
@@ -1789,8 +1769,14 @@ function* paginateBodyPassSteps(
   // with a note it cannot hold, pushing the page-bottom band (§17.11.21) off
   // the page. Continuation-off pages carry no tails, so there this is the
   // existing body-content rule.
-  const pageCanGainSpaceByRelocating = (): boolean => (
-    state.flow.pageHasContent || state.footnoteReservePt > 0
+  // A modern area's new heads are speculative until their references commit.
+  // When their conservative first head plus the first body unit exceeds a
+  // fresh band, relocating cannot help; allow ordinary indivisible progress.
+  // Incoming tails still own their capacity and require reference relocation.
+  const pageCanGainSpaceByRelocating = (requiredBodyPt = 0): boolean => (
+    state.flow.pageHasContent || (state.footnoteReservePt > 0
+      && (!noteController || incomingTailSourceIds.size > 0
+        || modernFirstHeadPt + requiredBodyPt <= freshPageExtent(state)))
   );
   const noteContinuationEligibilityByEntry = new Map<number, boolean>();
   const noteContinuationBeforeHardBreak = (entryIndex: number): boolean => {
@@ -2260,6 +2246,7 @@ function* paginateBodyPassSteps(
         const noteLocation = Object.freeze({ ...location, section,
           availableBounds: Object.freeze({ ...location.availableBounds, xPt: column.xPt, widthPt: column.wPt }),
         });
+        let exceedsFreshBand = false;
         const result = acquireNoteColumnPartition(session, {
           kind: 'footnote', referenceIds: Object.freeze([source.id]), pageIndex, section,
           firstOnPage: firstInColumn, continuing: continuingPage,
@@ -2269,13 +2256,18 @@ function* paginateBodyPassSteps(
           container: { id: `${band}:${columnIndex}`, kind: 'footnote', capacity: 'unbounded', bounds: {
             xPt: column.xPt, yPt: 0, widthPt: column.wPt, heightPt: section.geometry.pageHeight,
           } },
-        }, source.cursor, availablePt, partitionFootnote,
+        }, source.cursor, services.allowFootnoteContinuation === true ? availablePt : Number.MAX_VALUE, partitionFootnote,
         columnIndex === columns.length - 1
           ? continuationNoticeFor(noteLocation, column.wPt, false, true) : undefined,
-        undefined, note => {
+        capacityPt === maximumPt && firstInColumn ? 'overflow' : undefined, note => {
+          if (columnIndex === 0 && firstInColumn) {
+            modernFirstHeadPt = partitionFootnote(note, source.cursor, 0, undefined, 'minimum')?.fragment.advancePt
+              ?? note.advancePt;
+          }
+          exceedsFreshBand = note.advancePt > maximumPt;
           if (columnIndex === 0 && firstInColumn) separatorAdvancePt = note.leading?.advancePt ?? note.story.flowBounds.yPt - note.flowBounds.yPt;
         });
-        return source.allowPartial === false && result?.nextCursor ? null : result;
+        return source.allowPartial === false && !exceedsFreshBand && result?.nextCursor ? null : result;
       };
       const request = { sources: queue, columnCount: columns.length, capacityPt, acquire };
       return balanced ? balancePageNoteArea(request) : flowPageNoteArea(request);
@@ -2303,7 +2295,10 @@ function* paginateBodyPassSteps(
     installModernNoteArea();
     return true;
   };
-  resetNotePage = () => { noteController = undefined; mode15NoteOwner = undefined; incomingTailSourceIds = new Set(); };
+  resetNotePage = () => {
+    noteController = undefined; modernFirstHeadPt = 0;
+    mode15NoteOwner = undefined; incomingTailSourceIds = new Set();
+  };
   beforeNotePageClose = () => noteController?.beforePageClose();
   capturePageCheckpoint(0);
   yield* prescanPageAnchors(state, 0);
@@ -2527,23 +2522,17 @@ function* paginateBodyPassSteps(
           const admissionChargePt = acquired.placement.sectionFlowOwnership === 'page'
             ? notes.reservePt
             : (relocationExtentPt ?? acquired.blockExtentPt) + notes.reservePt;
-          const freshExtentPt = freshPageExtent(state);
           // The footnote band is physical-page global; spare room in the active
           // column cannot authorize a reserve that clips a deeper prior column.
           const reserveInvadesCommittedPageContent =
             footnoteReserveInvadesCommittedPageContent(notes.reservePt);
-          assertFreshPageFootnoteAdmission(
-            notes.reservePt,
-            admissionChargePt,
-            freshExtentPt,
-          );
           if (
             (
               admissionChargePt > location.availableBounds.heightPt
               || reserveInvadesCommittedPageContent
             )
-            && admissionChargePt <= freshExtentPt
-            && pageCanGainSpaceByRelocating()
+            && (admissionChargePt <= freshPageExtent(state) || notes.reservePt > freshPageExtent(state))
+            && pageCanGainSpaceByRelocating(admissionChargePt - notes.reservePt)
           ) {
             yield* commitTransition(
               reserveInvadesCommittedPageContent
@@ -2589,7 +2578,7 @@ function* paginateBodyPassSteps(
             allocations,
             acquired.placement,
           );
-          commitFootnotes(notes.ids, notes.layouts);
+          commitFootnotes(notes.ids, notes.layouts, notes.continuations);
           if (acquired.flowRegistryDelta) {
             session.commitFlowRegistryDelta(acquired.flowRegistryDelta);
           }
@@ -2798,7 +2787,8 @@ function* paginateBodyPassSteps(
         const anchorLineBreak = deferredAnchorLineIndex(acquired.layout);
         // Same fresh-region rule as framed paragraphs: a page whose band
         // holds carried note lines is not fresh (pageCanGainSpaceByRelocating).
-        const canRelocateParagraph = pageCanGainSpaceByRelocating();
+        const canRelocateParagraph = pageCanGainSpaceByRelocating(
+          acquired.layout.lines[0]?.advancePt ?? acquired.blockExtentPt);
         // Continuation mode (the public default) reserves each referenced note
         // at its reference line; later lines are admitted only beside those
         // committed plans. With continuation off every note stays whole.
@@ -2871,15 +2861,8 @@ function* paginateBodyPassSteps(
         );
         const notes = plannedNotes
           ?? footnoteAdmission(selected.fragment, location.availableBounds.widthPt);
-        // The fatal guard re-checks the fit the selector admitted, with the
-        // same extent (authored trailing space after a completing fragment is
-        // not charged), so it rejects only notes that cannot fit any fresh
-        // page beside that fragment. Retained advance still drives the cursor.
-        assertFreshPageFootnoteAdmission(
-          notes.reservePt,
-          selected.admissionExtentPt + notes.reservePt,
-          freshPageExtent(state),
-        );
+        // Like indivisible body units, an oversized note retains its ink on
+        // the fresh page rather than making document layout fail.
         commitFootnotes(notes.ids, notes.layouts, notes.continuations);
         if (acquired.flowRegistryDelta) {
           const acceptedDelta = paragraphFlowRegistryDeltaForAcceptedFragment(
@@ -2983,6 +2966,7 @@ function* paginateBodyPassSteps(
           ? Object.freeze({
               ids: Object.freeze([]) as readonly string[],
               layouts: Object.freeze([]) as readonly NoteLayout[],
+              continuations: Object.freeze([]),
               reservePt: 0,
             })
           : footnoteAdmission(
@@ -3029,11 +3013,8 @@ function* paginateBodyPassSteps(
             reservePt: notes.reservePt,
           });
           if (seenCandidates.has(fingerprint)) {
-            assertFreshPageFootnoteAdmission(
-              lastFootnoteAdmission.reservePt,
-              lastFootnoteAdmission.chargePt,
-              freshPageExtent(state),
-            );
+            if (lastFootnoteAdmission.reservePt > 0
+              && lastFootnoteAdmission.chargePt > freshPageExtent(state)) break;
             throw new Error('Table footnote admission did not converge');
           }
           seenCandidates.add(fingerprint);
@@ -3041,11 +3022,22 @@ function* paginateBodyPassSteps(
             0,
             location.availableBounds.heightPt - notes.reservePt,
           );
+          const previousAcquisition = acquired;
           acquired = requestAt(availableBlockExtentPt);
+          if (acquired.requiresFreshFlowRegion && !state.flow.pageHasContent
+            && state.footnoteReservePt === 0 && lastFootnoteAdmission.reservePt > 0
+            && lastFootnoteAdmission.chargePt > freshPageExtent(state)) {
+            // The note's first unit is indivisible even beside the smallest
+            // body row. Moving to the same fresh geometry cannot help: retain
+            // the original body fragment and its note's overflow plan.
+            acquired = previousAcquisition;
+            break;
+          }
           notes = acquired.requiresFreshFlowRegion
             ? Object.freeze({
                 ids: Object.freeze([]) as readonly string[],
                 layouts: Object.freeze([]) as readonly NoteLayout[],
+                continuations: Object.freeze([]),
                 reservePt: 0,
               })
             : footnoteAdmission(
@@ -3060,11 +3052,6 @@ function* paginateBodyPassSteps(
           }
         }
         if (acquired.requiresFreshFlowRegion) {
-          assertFreshPageFootnoteAdmission(
-            lastFootnoteAdmission.reservePt,
-            lastFootnoteAdmission.chargePt,
-            freshPageExtent(state),
-          );
           const rebasesFloatingTableOnFreshFrame = !state.flow.pageHasContent
             && acquired.nextCursor?.floatingContinuationFrame === 'fresh-text'
             && cursor?.floatingContinuationFrame === undefined;
@@ -3108,7 +3095,7 @@ function* paginateBodyPassSteps(
           allocations,
           acquired.placement,
         );
-        commitFootnotes(notes.ids, notes.layouts);
+        commitFootnotes(notes.ids, notes.layouts, notes.continuations);
         if (acquired.flowRegistryDelta) {
           session.commitFlowRegistryDelta(bindTableFlowRegistryDeltaToAcceptedOccurrence(
             acquired.flowRegistryDelta,
@@ -3231,7 +3218,9 @@ function* paginateBodyPassSteps(
             container: { id: `${band}:${columnIndex}`, kind: 'endnote', capacity: 'unbounded', bounds: {
               xPt: column.xPt, yPt: 0, widthPt: column.wPt, heightPt: section.geometry.pageHeight,
             } },
-          }, source.cursor, availablePt, partitionFootnote, undefined, undefined, note => {
+          }, source.cursor, availablePt, partitionFootnote, undefined,
+          topPt === state.flow.regionStartBlockPt && state.footnoteReservePt === 0 && firstInColumn
+            ? 'overflow' : undefined, note => {
             if (columnIndex === 0 && firstInColumn) separatorAdvancePt = note.leading?.advancePt ?? note.story.flowBounds.yPt - note.flowBounds.yPt;
           });
         },
@@ -3274,7 +3263,9 @@ function* paginateBodyPassSteps(
           xPt: location.availableBounds.xPt, yPt: 0,
           widthPt: location.availableBounds.widthPt, heightPt: location.section.geometry.pageHeight,
         } },
-      }, cursor, location.availableBounds.heightPt, partitionFootnote);
+      }, cursor, location.availableBounds.heightPt, partitionFootnote, undefined,
+        state.flow.cursorBlockPt === state.flow.regionStartBlockPt && state.footnoteReservePt === 0
+          ? 'overflow' : undefined);
       if (!partition) {
         if (state.flow.cursorBlockPt === state.flow.regionStartBlockPt && state.footnoteReservePt === 0) {
           throw new NoteCapacityExceededError('endnote', state.flow.pageIndex, band);
@@ -3426,12 +3417,23 @@ function footnoteStack(
       0,
       page.section.geometry.pageHeight - Math.abs(page.section.geometry.marginBottom),
     );
+  // Content-retention policy mirrors an indivisible body block: an over-tall
+  // note starts after retained body content and overflows the bottom, never
+  // moves its head above the page. Ordinary fitting bands remain bottom-aligned.
+  const contentTopPt = (members: readonly NoteLayout[]): number => Math.max(
+    page.sectionRegions.at(-1)?.blockStartPt ?? Math.abs(page.section.geometry.marginTop),
+    ...page.layers.body.filter(node => node.ordinaryFlow && members.some(note =>
+      node.flowBounds.xPt < note.flowBounds.xPt + note.flowBounds.widthPt
+      && note.flowBounds.xPt < node.flowBounds.xPt + node.flowBounds.widthPt))
+      .map(node => Math.max(node.flowBounds.yPt + node.flowBounds.heightPt,
+        node.flowBounds.heightPt === 0 ? node.inkBounds.yPt + node.inkBounds.heightPt : 0)),
+  );
   if (notes.some(note => note.pageArea !== undefined)) {
     const heightPt = notes[0]!.pageArea!.heightPt;
     if (!notes.every(note => note.pageArea?.heightPt === heightPt)) {
       throw new Error('A page-wide note area must own one common reserve');
     }
-    const targetTopPt = blockEndPt - heightPt;
+    const targetTopPt = Math.max(contentTopPt(notes), blockEndPt - heightPt);
     return { advancePt: heightPt, targetTopPt,
       topsPt: Object.freeze(notes.map(note => targetTopPt + note.pageArea!.offsetPt)),
     };
@@ -3448,7 +3450,8 @@ function footnoteStack(
   const pageStack = new NoteStack();
   (pageBand === undefined ? [] : bands.get(pageBand)!).forEach((index) => (
     pageStack.append(notes[index]!.advancePt)));
-  const pageTopPt = blockEndPt - pageStack.advancePt;
+  const pageTopPt = Math.max(contentTopPt(pageBand === undefined ? [] : bands.get(pageBand)!.map(i => notes[i]!)),
+    blockEndPt - pageStack.advancePt);
   const topsPt = new Array<number>(notes.length);
   let targetTopPt = pageTopPt;
   for (const [band, members] of bands) {
@@ -3456,7 +3459,7 @@ function footnoteStack(
     const stack = isPageBand ? pageStack : new NoteStack();
     if (!isPageBand) members.forEach((index) => stack.append(notes[index]!.advancePt));
     const bottomPt = isPageBand ? blockEndPt : pageTopPt;
-    const topPt = bottomPt - stack.advancePt;
+    const topPt = Math.max(contentTopPt(members.map(i => notes[i]!)), bottomPt - stack.advancePt);
     targetTopPt = Math.min(targetTopPt, topPt);
     members.forEach((index, order) => { topsPt[index] = stack.topAt(topPt, order); });
   }

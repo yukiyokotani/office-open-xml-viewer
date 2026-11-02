@@ -33,7 +33,10 @@ export function acquireNoteColumnPartition(
     acquired = acquire();
   }
   if (acquired) inspectAcquisition?.(acquired);
-  const result = acquired ? partition(acquired, reflow ? null : cursor, capacityPt, notice, extent) : null;
+  const result = acquired ? partition(acquired, reflow ? null : cursor, capacityPt, notice,
+    extent === 'overflow' ? undefined : extent)
+    ?? (extent === 'overflow' ? partition(acquired, reflow ? null : cursor, capacityPt, notice, 'overflow') : null)
+    : null;
   return result ? Object.freeze({ ...result, fragment: destinationOwnedNote(result.fragment) }) : null;
 }
 
