@@ -387,6 +387,7 @@ export function decideLogicalTable(
   // WORD_AUTOFIT_CONTENT_COLUMN_GROWTH: the measured content-sized class.
   const contentFitted = contentSized && singleTable && format.ordinaryFlow && format.positioning == null
     && format.outerEdgeIndent !== true && !rowOverrides && !gridSkips
+    && format.rows.every((row) => row.cellSpacingPt === 0)
     && environment.topLevel && !isVerticalTextDirection(environment.textDirection)
     && environment.quarterTurnedStory !== true
     && (environment.story === 'header' || environment.story === 'footer'
