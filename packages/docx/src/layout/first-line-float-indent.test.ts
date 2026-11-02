@@ -29,7 +29,6 @@ describe('first-line indents beside floats through the DOCX parser', () => {
   // so leading/trailing/center positions differ by 4/0/2 pt in RTL (0/4/2 LTR).
   // No-float ordinary tabs retain main's geometry. Five no-float RTL positional
   // cases instead use Word: margin-left, both centers, and both right targets.
-  // Word overlap is deliberately excluded from the library containment policy.
   const floatStarts = [
     [552, 108, 484, 40], [566, 352, 240, 26],
     [532, 108, 484, 60], [566, 332, 260, 26],
@@ -62,20 +61,21 @@ describe('first-line indents beside floats through the DOCX parser', () => {
     } else {
       const index = (entry.rtl ? 2 : 0) + (entry.float === 'right' ? 1 : 0);
       const expectedX = floatStarts[entry.tabIndex][index];
-      const bandStart = entry.float === 'left' ? 272 : 72;
-      const bandEnd = entry.float === 'right' ? 340 : 540;
-      if (expectedX >= bandStart && expectedX + 20 <= bandEnd) {
-        expect(texts.map((text) => text.bounds)).toEqual([
-          { xPt: expectedX, yPt: 72, widthPt: 20, heightPt: 12 },
-        ]);
-      }
-      for (const text of texts) {
-        expect(text.bounds.xPt).toBeGreaterThanOrEqual(bandStart);
-        expect(text.bounds.xPt + text.bounds.widthPt).toBeLessThanOrEqual(bandEnd);
-      }
+      // WORD_TAB_DISPLACED_READING_FRAME (mode absent): the displaced cell keeps
+      // Word's position past the float window or the margin. One residual is
+      // unexplained: a second tab whose pen already lies past the right margin
+      // advances 14 pt in Word at 10 and 20 pt (tabs-floats-overflow-font20),
+      // while the library resolves the automatic 36 pt grid (10 pt further).
+      const pastMarginSecondTab = entry.count === 2 && (entry.rtl ? entry.float === 'right' : entry.float === 'left');
+      expect(texts.map((text) => text.bounds)).toEqual([
+        { xPt: expectedX + (pastMarginSecondTab ? (entry.rtl ? -10 : 10) : 0), yPt: 72, widthPt: 20, heightPt: 12 },
+      ]);
     }
   });
 
+  // Latin and CJK text in left-to-right runs: outside the measured
+  // WORD_ALIGNED_TAB_CELL_FIT_BACK bidi rows (w:rtl runs), the last start gap
+  // stays provisional and the bidi walk shrinks it as the cell fills the line.
   it.each([
     { name: 'two tabs with hanging indent and CJK', indent: 'w:left="720" w:hanging="720"', count: 2, stop: 5600, text: '漢'.repeat(50) },
     { name: 'three tabs and Latin words', indent: '', count: 3, stop: 720, text: 'word '.repeat(15).trim() },
@@ -269,12 +269,17 @@ describe('first-line indents beside floats through the DOCX parser', () => {
     expect(last ? last.bounds.xPt + last.bounds.widthPt : undefined).toBe(338);
   });
 
-  it.each([10, 20])('contains an out-of-band tab cell at %s pt font size', (fontSizePt) => {
+  // tabs-floats-overflow-font20 (Word, mode absent): the first tab keeps its
+  // float-displaced stop past the window (WORD_TAB_DISPLACED_READING_FRAME), so
+  // its cell starts past the margin. Word then advances the second tab 14 pt
+  // at 10 and 20 pt (word at 566 pt), an unexplained amount; the library uses
+  // the automatic 36 pt grid (576 pt), a known 10 pt residual.
+  it.each([10, 20])('overflows a displaced tab cell past the margin at %s pt font size', (fontSizePt) => {
     const paragraph = layoutParagraph(documentBytes('w:left="720" w:hanging="720"', false, 0,
       { alignment: 'left', count: 2, text: 'word', fontSizePt }), fontSizePt * 0.6);
+    expect(paragraph.lines).toHaveLength(1);
     const text = paragraph.lines.flatMap((line) => line.placements).find((node) => node.kind === 'text');
-    expect(text?.bounds.xPt).toBeGreaterThanOrEqual(272);
-    expect((text?.bounds.xPt ?? 0) + (text?.bounds.widthPt ?? 0)).toBeLessThanOrEqual(540);
+    expect(text?.bounds.xPt).toBe(576);
     expect(text?.bounds.widthPt).toBe(fontSizePt * 2.4);
   });
 
