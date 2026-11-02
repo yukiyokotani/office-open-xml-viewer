@@ -1,6 +1,5 @@
 import type { FootnoteCursor, FootnotePartition } from './footnote-fragmentation.js';
 import type { NoteLayout } from './types.js';
-import type { TableFragmentCursor } from './table-pagination.js';
 
 /** One source-ordered note queue. A cursor always names the unpainted suffix. */
 export interface PageNoteSource {
@@ -83,22 +82,6 @@ export function flowPageNoteArea(input: PageNoteAreaInput): PageNoteFlow {
     remaining: Object.freeze(remaining), progress: Object.freeze({ sourceIndex, cursor }) });
 }
 
-/** Parallel cells advance monotonically, but rowIndex alone says nothing
- * about a cut inside that row. Compare every source block/line/nested-table
- * cut; fragment ordinals count placements, not source progress. */
-function compareTableProgress(a?: TableFragmentCursor, b?: TableFragmentCursor): number {
-  const row = (a?.rowIndex ?? 0) - (b?.rowIndex ?? 0);
-  if (row) return row;
-  for (let index = 0; index < Math.max(a?.cells.length ?? 0, b?.cells.length ?? 0); index++) {
-    const x = a?.cells[index], y = b?.cells[index];
-    const cut = (x?.blockIndex ?? 0) - (y?.blockIndex ?? 0)
-      || (x?.paragraphLineStart ?? 0) - (y?.paragraphLineStart ?? 0)
-      || compareTableProgress(x?.nestedCursor ?? undefined, y?.nestedCursor ?? undefined);
-    if (cut) return cut;
-  }
-  return 0;
-}
-
 /** Source ordering is independent of the widths that shaped each epoch. */
 function compareProgress(left: PageNoteFlow['progress'], right: PageNoteFlow['progress']): number {
   if (left.sourceIndex !== right.sourceIndex) return left.sourceIndex - right.sourceIndex;
@@ -112,9 +95,7 @@ function compareProgress(left: PageNoteFlow['progress'], right: PageNoteFlow['pr
   }
   // Synthetic same-width acquisitions can omit source boundaries. Production
   // width-changing continuation requires them before reaching this helper.
-  return a.blockIndex - b.blockIndex
-    || compareTableProgress(a.tableCursor, b.tableCursor)
-    || a.lineIndex - b.lineIndex;
+  return a.blockIndex - b.blockIndex || a.lineIndex - b.lineIndex;
 }
 
 /** Balance the largest source prefix admitted by capacity, using exactly the

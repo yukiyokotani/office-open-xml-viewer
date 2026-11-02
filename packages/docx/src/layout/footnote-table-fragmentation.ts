@@ -1,3 +1,4 @@
+import { retainedTableAcquisitionIsReusableAcrossPages } from './table-acquisition.js';
 import type { RetainedTableAcquisition } from './table-acquisition.js';
 import { startTableFragmentCursor, takeTableFragment, type TableFragmentCursor,
   type TableFragmentContext, type TableFragmentPageContext } from './table-pagination.js';
@@ -10,6 +11,7 @@ const sources = new WeakMap<TableLayout, Readonly<{
   acquisition: RetainedTableAcquisition;
   services: LayoutServices;
   page: TableFragmentPageContext;
+  splittable: boolean;
 }>>();
 const continuations = new WeakMap<TableFragmentCursor, NonNullable<ReturnType<typeof sources.get>>>();
 const destinations = new WeakMap<NoteLayout, TableFragmentPageContext>();
@@ -26,7 +28,8 @@ export function registerFootnoteTable(
   page: TableFragmentPageContext,
 ): void {
   const input = { ...acquisition.input, flowDomainId: layout.flowDomainId };
-  sources.set(layout, { acquisition: { ...acquisition, input }, services, page });
+  sources.set(layout, { acquisition: { ...acquisition, input }, services, page,
+    splittable: retainedTableAcquisitionIsReusableAcrossPages(acquisition) });
 }
 
 /** Library content-retention policy, not an Office row-cut observation.
@@ -52,12 +55,16 @@ export function partitionFootnoteTable(
 ): Readonly<{ fragment: TableLayout; nextCursor: TableFragmentCursor | null }> | null {
   const destination = sources.get(table);
   const source = (cursor && continuations.get(cursor)) || destination;
-  if (!source) return null;
+  // §17.16.5.44 PAGE means the current page. Without a per-row source
+  // reacquisition hook, page-dependent tables remain atomic. This also keeps
+  // page-anchored content on its acquisition page instead of reusing stale ink.
+  if (!source || !source.splittable) return null;
   const { acquisition, services } = source;
   const page = destinationNote && destinations.get(destinationNote);
   const bounds = { ...table.flowBounds, heightPt: minimum ? 0 : capacityPt };
   const context: TableFragmentContext = {
     availableHeightPt: bounds.heightPt,
+    noteContinuation: true,
     // A fit trial may defer to another band; only the explicit minimum grants
     // the first-unit over-band fallback. These are capacity sentinels,
     // not fitted page/row dimensions.

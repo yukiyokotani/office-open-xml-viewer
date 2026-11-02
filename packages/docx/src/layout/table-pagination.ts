@@ -152,6 +152,8 @@ export interface TableFragmentContext {
   /** Note admission may measure/retain the first indivisible cell unit even
    * beyond a fresh band. Following cell content still gets a continuation. */
   readonly oversizedCellPolicy?: 'overflow-first-unit';
+  /** Only over-capacity notes use the immutable source's cached suffix metrics. */
+  readonly noteContinuation?: boolean;
   readonly page: TableFragmentPageContext;
   readonly floatingTableFrames?: Readonly<{
     page: FloatingTableReferenceFramesPt['page'];
@@ -2128,6 +2130,26 @@ export function takeTableFragment(
   }
 }
 
+// A continued note can span thousands of bands. Scan each immutable source
+// once, then test a remaining suffix in O(1); neither this weak index nor its
+// scalar arrays retain an expired acquisition. Ordinary table pagination keeps
+// its established arithmetic/selection path.
+const noteSourceMetrics = new WeakMap<RetainedTableAcquisition, {
+  needsOrigins: boolean; suffixHeights: Float64Array;
+}>();
+function noteMetrics(source: RetainedTableAcquisition) {
+  let metrics = noteSourceMetrics.get(source);
+  if (!metrics) {
+    const suffixHeights = new Float64Array(source.layout.rows.length + 1);
+    for (let i = source.layout.rows.length - 1; i >= 0; i--) {
+      suffixHeights[i] = suffixHeights[i + 1]! + Math.max(0, source.layout.rows[i]!.heightPt);
+    }
+    metrics = { needsOrigins: needsNestedPageOrigins(source), suffixHeights };
+    noteSourceMetrics.set(source, metrics);
+  }
+  return metrics;
+}
+
 function takeTableFragmentPass(
   source: RetainedTableAcquisition,
   cursor: TableFragmentCursor,
@@ -2242,12 +2264,13 @@ function takeTableFragmentPass(
   // Acquisition-time tracks of rows whose nested content is placed per page
   // (re-acquired anchor or text box paragraphs) are not their occurrence
   // tracks, so they never admit the remainder.
+  const metrics = context.noteContinuation ? noteMetrics(source) : undefined;
   const retainedRemainderFits = cursor.rowFragmentIndex === 0
     && cursor.cells.length === 0
-    && !needsNestedPageOrigins(source)
-    && source.layout.rows
-      .slice(cursor.rowIndex)
-      .reduce((heightPt, row) => heightPt + Math.max(0, row.heightPt), 0)
+    && !(metrics ? metrics.needsOrigins : needsNestedPageOrigins(source))
+    && (metrics ? metrics.suffixHeights[cursor.rowIndex]!
+      : source.layout.rows.slice(cursor.rowIndex)
+        .reduce((heightPt, row) => heightPt + Math.max(0, row.heightPt), 0))
       <= availablePt + EPSILON_PT;
   let followsCompletedPartialRow = false;
   while (rowIndex < source.input.rows.length) {

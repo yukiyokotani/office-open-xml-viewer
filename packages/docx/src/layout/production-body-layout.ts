@@ -1,3 +1,4 @@
+import { noteOverflowAllowed, NoteOverflowRecoveryRequired } from './note-overflow-policy.js';
 import { MAX_BODY_LAYOUT_PAGES } from './resource-budgets.js';
 import { registerFootnoteTable, registerFootnoteTableDestination } from './footnote-table-fragmentation.js';
 import { deepFreezePlainData, deepFreezePlainDataWithFrozenAliases } from './plain-data.js';
@@ -651,9 +652,10 @@ interface BodyStoryAcquisitionContext {
    * acquisition context (at most six roots); its page occurrences are
    * projections, never per-page copies. */
   readonly storyLayoutCache: StoryLayoutCache;
-  /** Whether an immutable continued-note root has only page-independent text
-   * and in-flow tables; computed once per root. */
+  /** Ordinary text-only reuse and admitted overflow text/table reuse are
+   * separate inference epochs; a failed admission may change permission. */
   readonly noteSourceReuse: WeakMap<object, boolean>;
+  readonly overflowingNoteSourceReuse: WeakMap<object, boolean>;
   readonly source: LayoutSourceStore;
   readonly publicAnchorBridge: typeof publicAnchorBridge;
   readonly headerFooterContext: string;
@@ -713,7 +715,10 @@ function acquireBodyStoryLayout(
     && (request.source.story === 'endnote' || services.allowFootnoteContinuation === true))
     ? footnoteAcquisitionWorkBudgetOf(services) : undefined;
   if (continuedNote && !workBudget) throw new Error('Footnote acquisition requires a pagination work budget');
-  let reusableNote = continuedNote && dependencies.noteSourceReuse.get(root);
+  const overflowingNote = (request.source.story === 'footnote' || request.source.story === 'endnote')
+    && noteOverflowAllowed(services, request.source.story, [request.source.storyInstance]);
+  const sourceReuse = overflowingNote ? dependencies.overflowingNoteSourceReuse : dependencies.noteSourceReuse;
+  let reusableNote = continuedNote && sourceReuse.get(root);
   if (continuedNote && reusableNote === undefined) {
     workBudget?.sourceUnits(root);
     const reusableBlock = (element: LayoutStoryBlock
@@ -728,8 +733,11 @@ function acquireBodyStoryLayout(
       return element.type === 'table' && !source.acquisition.effectiveTablePositioning(element)
         && element.rows.every(row => row.cells.every(cell => cell.content.every(reusableBlock)));
     };
-    reusableNote = root.every(reusableBlock);
-    dependencies.noteSourceReuse.set(root, reusableNote);
+    reusableNote = overflowingNote
+      ? root.every(reusableBlock)
+      : root.every(element => element.type === 'paragraph'
+        && !element.framePr && element.runs.every(run => run.type === 'text'));
+    sourceReuse.set(root, reusableNote);
   }
   // Both proved page-independent classes hold no frame, text box, field or
   // anchor, i.e. no page-placed content, so neither a band translation nor
@@ -737,7 +745,9 @@ function acquireBodyStoryLayout(
   // layout depends on (section and container extent), and they are never a
   // convergence trial. Every other story keeps its page and placement facts.
   const pageIndependent = reusableNote || reservedRole !== undefined;
-  const occurrence = JSON.stringify([request.source, pageIndependent ? null : request.pageIndex]);
+  const occurrence = JSON.stringify(overflowingNote
+    ? [request.source, pageIndependent ? null : request.pageIndex, 'overflow']
+    : [request.source, pageIndependent ? null : request.pageIndex]);
   const placement = JSON.stringify({
     section: request.section,
     container: pageIndependent ? { ...request.container, id: null } : request.container,
@@ -820,8 +830,10 @@ function layoutBodyStory(
   const start = request.sourceStart;
   if (start && (separatorRoot || (request.source.story !== 'footnote' && request.source.story !== 'endnote')
     || !Number.isSafeInteger(start.blockIndex) || start.blockIndex < 0
-    || root[start.blockIndex]?.type !== 'paragraph')) {
-    throw new Error('A note continuation must name an original root paragraph');
+    || (root[start.blockIndex]?.type !== 'paragraph'
+      && !(root[start.blockIndex]?.type === 'table' && start.paragraph.boundary === null
+        && noteOverflowAllowed(services, request.source.story, [request.source.storyInstance]))))) {
+    throw new Error('A note continuation must name an original root paragraph or admitted table boundary');
   }
   const noteReferenceNumber =
     !separatorRoot
@@ -1409,7 +1421,8 @@ function layoutBodyStory(
       }),
     ),
   });
-  if (request.source.story === 'footnote' || request.source.story === 'endnote') {
+  if ((request.source.story === 'footnote' || request.source.story === 'endnote')
+    && noteOverflowAllowed(services, request.source.story, [request.source.storyInstance])) {
     retained.blocks.forEach((block, index) => {
       const original = acquired.blocks[index];
       const acquisition = original && storyTableAcquisitions.get(original.id);
@@ -1761,10 +1774,11 @@ function layoutBodyNotes(
     const ruleYPt = noteTopPt + (selectedBand?.ruleOffsetPt ?? separatorHeightPt / 2);
     const storyContainer = {
       ...request.container,
-      // Acquire every source unit before admission. With continuation disabled
-      // an over-page note remains whole; capacity is a paginator decision, not
-      // permission to discard source during story acquisition.
-      capacity: 'unbounded' as const,
+      // Ordinary acquisition is unchanged; only a group rejected by the
+      // existing capacity guard may acquire all content with continuation off.
+      ...((services.allowFootnoteContinuation === true && request.kind === 'footnote') || request.kind === 'endnote'
+        || noteOverflowAllowed(services, request.kind, [id])
+        ? { capacity: 'unbounded' as const } : {}),
       id: `${request.container.id}:${request.kind}:${id}`,
       bounds: {
         ...request.container.bounds,
@@ -1794,11 +1808,14 @@ function layoutBodyNotes(
       });
     } catch (error) {
       if (error instanceof FlowCapacityExceededError && error.containerId === storyContainer.id) {
-        throw new NoteCapacityExceededError(request.kind, request.pageIndex, request.container.id);
+        throw new NoteOverflowRecoveryRequired(request.kind, [id],
+          new NoteCapacityExceededError(request.kind, request.pageIndex, request.container.id));
       }
       throw error;
     }
-    if (story.advancePt > request.section.geometry.pageHeight * MAX_BODY_LAYOUT_PAGES) {
+    if (((services.allowFootnoteContinuation === true && request.kind === 'footnote') || request.kind === 'endnote'
+      || noteOverflowAllowed(services, request.kind, [id]))
+      && story.advancePt > request.section.geometry.pageHeight * MAX_BODY_LAYOUT_PAGES) {
       // Match the paginator's physical-page budget before retaining a source
       // that cannot finish within it. This is resource policy, not Office fit.
       throw new Error('Footnote source exceeds the document page budget');
@@ -2926,6 +2943,7 @@ function openConcreteBodyLayoutSession(
     services,
     storyLayoutCache,
     noteSourceReuse: new WeakMap(),
+    overflowingNoteSourceReuse: new WeakMap(),
     publicAnchorBridge,
     // All of these are immutable for this concrete session. Intern large exact
     // fingerprints in the pagination scope rather than copying font snapshots

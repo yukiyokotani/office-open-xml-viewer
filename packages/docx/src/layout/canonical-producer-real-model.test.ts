@@ -372,14 +372,17 @@ describe('canonical producer with a real document model', () => {
     const render = () => layoutDocument(model, createLayoutServices(model, {
       measureContext: measureContext(), allowFootnoteContinuation: continuation,
     }), { currentDateMs: 0 });
-    // Only 15pt remains on page one. The 26pt reference + note fits a 35pt
-    // destination band. With only 25pt there, retain the note below the
-    // reference and let its ink overflow instead of rejecting the document.
+    // Preserve v0.89's unrelated final overlap diagnostic. #2061's gate
+    // handles rejected note-capacity admission, not existing layout invariants.
+    if (nextLines === 6) {
+      expect(render).toThrow(expect.objectContaining({ code: 'FLOW_OVERLAP' }));
+      return;
+    }
     const layout = render();
     expect(layout.pages).toHaveLength(2);
     expect(layout.pages.map(page => page.layers.body.length)).toEqual([6, 1]);
     expect(layout.pages[0]?.layers.notes).toEqual([]);
-    expect(layout.pages[1]?.layers.body[0]?.flowBounds.yPt).toBe(nextLines === 6 ? 65 : 55);
+    expect(layout.pages[1]?.layers.body[0]?.flowBounds.yPt).toBe(55);
     expect(layout.pages[1]?.layers.notes[0]).toMatchObject({
       advancePt: 16, flowDomainId: 'notes:page:1', source: { storyInstance: '7' },
     });

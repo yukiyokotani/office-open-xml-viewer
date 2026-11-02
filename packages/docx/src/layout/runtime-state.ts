@@ -1,3 +1,4 @@
+import { attachNoteOverflowPolicy, noteOverflowPolicyOf } from './note-overflow-policy.js';
 import type { LayoutServices } from './types.js';
 import type { PaintResourceRegistry } from './types.js';
 import type { KinsokuRules, NumberFormat } from '@silurus/ooxml-core';
@@ -372,6 +373,8 @@ export function createLayoutServicesRuntimeView(
   overrides: Readonly<{ text?: LayoutServices['text']; math?: LayoutServices['math'] }> = {},
 ): LayoutServices {
   const view = Object.freeze({ ...services, ...overrides });
+  const notePolicy = noteOverflowPolicyOf(services);
+  if (notePolicy) attachNoteOverflowPolicy(view, notePolicy);
   const kernel = bodyLayoutKernelOf(services);
   if (!kernel) throw new Error('Body layout kernel is not attached to the supplied services');
   if (bodyLayoutKernelOf(view) !== kernel) {

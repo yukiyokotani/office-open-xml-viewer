@@ -1,3 +1,7 @@
+import { paginateBodySteps } from './body-paginator.js';
+import { layoutDocumentProgressively } from './progressive.js';
+import { layoutSourceStore } from '../layout-source-model-adapter.js';
+import { createHash } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import { createLayoutServices } from '../layout-runtime.js';
 import { layoutDocument } from '../document-layout.js';
@@ -15,11 +19,11 @@ const context = {
     fontBoundingBoxAscent: 8, fontBoundingBoxDescent: 2 }),
 } as unknown as CanvasRenderingContext2D;
 
-function paragraph(text: string, height = 10): DocParagraph {
+function paragraph(text: string, height = 10): DocParagraph & { type: 'paragraph' } {
   const base = noteContinuationModel().footnotes![0]!.content[0] as DocParagraph;
   const run = base.runs[0];
   if (run?.type !== 'text') throw new Error('Expected text fixture');
-  return { ...base, widowControl: false, spaceBefore: 0, spaceAfter: 0,
+  return { ...base, type: 'paragraph', widowControl: false, spaceBefore: 0, spaceAfter: 0,
     lineSpacing: { value: height, rule: 'exact', explicit: true },
     runs: [{ ...run, text, noteRef: undefined, vertAlign: null }] };
 }
@@ -74,7 +78,206 @@ function expectConserved(layout: DocumentLayout, expected: Readonly<Record<strin
   }
 }
 
+function independentOversizedNotes(count: number) {
+  const model = document('footnote', [], undefined, 1);
+  const reference = model.body[0] as DocParagraph;
+  const run = reference.runs[0]!;
+  const expected: Record<string, string> = {};
+  model.footnotes = Array.from({ length: count }, (_, index) => {
+    const id = String(index + 7);
+    const content = Array.from({ length: 40 }, (_, i) => paragraph(`n${id}-${i};`, i === 0 ? 120 : 10));
+    expected[id] = content.map((_, i) => `n${id}-${i};`).join('');
+    return { id, content };
+  });
+  model.body = model.footnotes.map(note => ({ ...reference,
+    runs: [{ ...run, noteRef: { kind: 'footnote', id: note.id } }],
+  })) as BodyElement[];
+  return { model, expected };
+}
+
+// SHA-256 of the complete JSON.stringify(DocumentLayout), acquired from an
+// isolated clean origin/v0.89 (cb78d8a60119ae78a3e03b126612dafe2f2d8d8a)
+// source tree with these exact synthetic models and measurement service. This
+// covers IDs, source cuts, fields, ordering and all geometry, not a summary.
+const ordinaryLayouts = [
+  {"kind": "footnote", "continuation": false, "shape": "unequal-tables", "digest": "4fefc479c58b523bb907037b248a52172a3879836517a4542926004a96180806"},
+  {"kind": "footnote", "continuation": false, "shape": "paragraph-balance", "digest": "1066b4d932565e4dcd66c3d37fd1afeb6968ecb3818172f5aa3e1cb3ac752ecd"},
+  {"kind": "footnote", "continuation": false, "shape": "fitting-table", "digest": "6299910a1ea7dd2c1895da21471592e7022bc86971de6c8670e99c54d6f05109"},
+  {"kind": "footnote", "continuation": true, "shape": "unequal-tables", "digest": "4fefc479c58b523bb907037b248a52172a3879836517a4542926004a96180806"},
+  {"kind": "footnote", "continuation": true, "shape": "paragraph-balance", "digest": "1066b4d932565e4dcd66c3d37fd1afeb6968ecb3818172f5aa3e1cb3ac752ecd"},
+  {"kind": "footnote", "continuation": true, "shape": "fitting-table", "digest": "6299910a1ea7dd2c1895da21471592e7022bc86971de6c8670e99c54d6f05109"},
+  {"kind": "footnote", "continuation": true, "shape": "text-continuation", "digest": "7d20682eb418137707eebde5a71146602ae65ceee30c6921caaf2578ae379341"},
+  {"kind": "endnote", "continuation": false, "shape": "unequal-tables", "digest": "8b4911e12ccda128c4c2f3d41540e30c4f9efa80f6fc50771e2a6e10547f2c89"},
+  {"kind": "endnote", "continuation": false, "shape": "paragraph-balance", "digest": "a35e290ffdc3624825268111ea1b5ef5527e57b9c233fd675894ccabe1262aab"},
+  {"kind": "endnote", "continuation": false, "shape": "fitting-table", "digest": "4bf15267e202da14e518c5c4c8a0a8b2dcf2b3003ba417660efda8dbe0700146"},
+  {"kind": "endnote", "continuation": false, "shape": "text-continuation", "digest": "934a6aa5d2f953d51fd253b82a9e94057dc6062f549c887c2bfeed49ee80c8c3"},
+  {"kind": "endnote", "continuation": false, "shape": "three-heads", "digest": "c927ddc7a87d54ebbdf1ae499d68bc6e558df1f36f355a056ec74966507826ab"},
+  {"kind": "endnote", "continuation": true, "shape": "unequal-tables", "digest": "8b4911e12ccda128c4c2f3d41540e30c4f9efa80f6fc50771e2a6e10547f2c89"},
+  {"kind": "endnote", "continuation": true, "shape": "paragraph-balance", "digest": "a35e290ffdc3624825268111ea1b5ef5527e57b9c233fd675894ccabe1262aab"},
+  {"kind": "endnote", "continuation": true, "shape": "fitting-table", "digest": "4bf15267e202da14e518c5c4c8a0a8b2dcf2b3003ba417660efda8dbe0700146"},
+  {"kind": "endnote", "continuation": true, "shape": "text-continuation", "digest": "934a6aa5d2f953d51fd253b82a9e94057dc6062f549c887c2bfeed49ee80c8c3"},
+  {"kind": "endnote", "continuation": true, "shape": "three-heads", "digest": "c927ddc7a87d54ebbdf1ae499d68bc6e558df1f36f355a056ec74966507826ab"},
+] as const;
+
 describe('reviewed note admission regressions', () => {
+  it.each(['footnote', 'endnote'] as const)('continues oversized %s tables across unequal columns', kind => {
+    for (const singleTable of [false, true]) {
+      const content = Array.from({ length: 20 }, (_, i) => paragraph(`n${i};`));
+      const model = document(kind, singleTable ? [table(content)] : content.flatMap(p => [paragraph('label;'), table([p])]), 15);
+      model.section.columns = { count: 2, spacePt: 20, equalWidth: false, sep: false,
+        cols: [{ widthPt: 60, spacePt: 20 }, { widthPt: 100, spacePt: 0 }] };
+      const layout = render(model);
+      expectConserved(layout, { '7': content.map((_, i) => `${singleTable ? '' : 'label;'}n${i};`).join('') }, kind);
+      expect(layout.pages.length).toBeLessThanOrEqual(6);
+    }
+  });
+
+  it.each(['footnote', 'endnote'] as const)('keeps twenty PAGE-field rows atomic in an oversized %s', kind => {
+    const rows = Array.from({ length: 20 }, (_, i) => {
+      const p = paragraph(`r${i};`);
+      const run = p.runs[0];
+      if (run?.type !== 'text') throw new Error('Expected text fixture');
+      p.runs.push({ ...run, type: 'field', fieldType: 'page', instruction: 'PAGE', fallbackText: '1' });
+      return p;
+    });
+    const t = table([rows[0]!]) as Extract<BodyElement, { type: 'table' }>;
+    t.rows = rows.map(p => ({ ...t.rows[0]!, cells: [{ ...t.rows[0]!.cells[0]!, content: [p] }] }));
+    const model = document(kind, [t], undefined, 1);
+    // Initial acquisition sees page 1; actual ownership after relocation is
+    // page 2. Atomic overflow must reacquire there, not reuse PAGE=1 rows.
+    model.body = [...Array.from({ length: 7 }, () => paragraph('before;')), ...model.body] as BodyElement[];
+    const layout = render(model);
+    expect(layout.pages.length).toBeLessThanOrEqual(3);
+    expect(notes(layout)).toHaveLength(1);
+    const page = layout.pages.find(page => page.layers.notes.some(note => note.kind === 'note'))!;
+    expectConserved(layout, { '7': rows.map((_, i) => `r${i};${page.pageIndex + 1}`).join('') }, kind);
+    const retained = notes(layout)[0]!.story.blocks[0]!;
+    expect(retained.kind === 'table' ? retained.rows.length : 0).toBe(20);
+  });
+
+  it.each(['footnote', 'endnote'] as const)('retains oversized table and nested-table units for %s', kind => {
+    for (const nested of [false, true]) {
+      const content = Array.from({ length: 12 }, (_, i) => paragraph(`n${i};`, i === 3 ? 120 : 10));
+      const t = table(content) as Extract<BodyElement, { type: 'table' }>;
+      const block = nested ? table([paragraph('unused;')]) as Extract<BodyElement, { type: 'table' }> : t;
+      if (nested) block.rows[0]!.cells[0]!.content = [t];
+      const layout = render(document(kind, [block], 15));
+      expectConserved(layout, { '7': content.map((_, i) => `n${i};`).join('') }, kind);
+      expect(layout.pages.length).toBeLessThanOrEqual(6);
+    }
+  });
+
+  it.each([20, 40, 80])('replays only the active page for %i independent oversized notes', count => {
+    const { model, expected } = independentOversizedNotes(count);
+    const source = layoutSourceStore(model);
+    const steps = paginateBodySteps(source.bodyLayoutInput,
+      createLayoutServices(source, { measureContext: context, allowFootnoteContinuation: true }), { currentDateMs: 0 });
+    let yielded = 0;
+    let step = steps.next();
+    while (!step.done) {
+      expect(++yielded).toBeLessThanOrEqual(40 * count);
+      step = steps.next();
+    }
+    expectConserved(step.value, expected);
+    expect(step.value.pages.length).toBeLessThanOrEqual(8 * count);
+  });
+
+  it('replays active anchor journals for independent oversized notes in progressive layout', async () => {
+    const { model, expected } = independentOversizedNotes(80);
+    const floating = table([paragraph('anchor;')]) as Extract<BodyElement, { type: 'table' }>;
+    floating.tblpPr = { leftFromText: 0, rightFromText: 0, topFromText: 0, bottomFromText: 0,
+      horzAnchor: 'margin', horzSpecified: true, vertAnchor: 'page', tblpX: 0, tblpY: 0 };
+    model.body.unshift(floating);
+    const source = layoutSourceStore(model);
+    let yields = 0;
+    const counts: number[] = [];
+    const layout = await layoutDocumentProgressively(source.bodyLayoutInput,
+      createLayoutServices(source, { measureContext: context, allowFootnoteContinuation: true }),
+      { currentDateMs: 0 }, {
+        onPreview: preview => counts.push(preview.layout.pages.length),
+        scheduler: { sliceMs: 0, yieldToHost: async () => { yields++; } },
+      });
+    expectConserved(layout, expected);
+    expect(layout.pages.length).toBeLessThanOrEqual(8 * 80);
+    expect(yields).toBeLessThanOrEqual(100 * 80);
+    expect(counts.length).toBeGreaterThan(0);
+    expect(counts).toEqual([...new Set(counts)].sort((a, b) => a - b));
+  });
+
+  it.each([1, 2])('recovers an oversized footnote tail while endnotes open a page (%i columns)', columns => {
+    const model = document('footnote', [paragraph('before;'), paragraph('tall;', 120), paragraph('after;')], columns === 2 ? 15 : undefined, columns);
+    const reference = model.body[0] as DocParagraph;
+    const run = reference.runs[0]!;
+    reference.runs.push({ ...run, noteRef: { kind: 'endnote', id: '8' } } as DocParagraph['runs'][number]);
+    model.endnotes = [{ id: '8', content: Array.from({ length: 20 }, (_, i) => paragraph(`e${i};`)) }];
+    const layout = render(model);
+    expectConserved(layout, { '7': 'before;tall;after;' });
+    expectConserved(layout, { '8': Array.from({ length: 20 }, (_, i) => `e${i};`).join('') }, 'endnote');
+    expect(layout.pages.length).toBeLessThanOrEqual(8);
+  });
+
+  it('keeps progressive publications growing across a late oversized-note retry', async () => {
+    const model = document('footnote', [paragraph('tall;', 120), paragraph('tail;')], undefined, 1);
+    model.body = [...Array.from({ length: 40 }, () => paragraph('before;')), ...model.body] as BodyElement[];
+    const source = layoutSourceStore(model);
+    const counts: number[] = [];
+    const layout = await layoutDocumentProgressively(source.bodyLayoutInput,
+      createLayoutServices(source, { measureContext: context, allowFootnoteContinuation: true }),
+      { currentDateMs: 0 }, {
+        onPreview: preview => counts.push(preview.layout.pages.length),
+        scheduler: { sliceMs: 0, yieldToHost: async () => undefined },
+      });
+    expect(counts.length).toBeGreaterThanOrEqual(2);
+    expect(counts).toEqual([...new Set(counts)].sort((a, b) => a - b));
+    expect(layout).toEqual(render(model));
+    expectConserved(layout, { '7': 'tall;tail;' });
+    expect(layout.pages.length).toBeLessThanOrEqual(8);
+  });
+
+  it.each([false, true])('makes progress for three 40+10pt heads (continuation: %s)', continuation => {
+    const model = document('footnote', [], 15);
+    const reference = model.body[0] as DocParagraph;
+    const run = reference.runs[0]!;
+    model.footnotes = ['7', '8', '9'].map(id => ({ id,
+      content: [paragraph(`head-${id};`, 40), paragraph(`tail-${id};`)] as BodyElement[] }));
+    reference.runs = model.footnotes.map(note => ({ ...run, noteRef: { kind: 'footnote', id: note.id } })) as DocParagraph['runs'];
+    const layout = render(model, continuation);
+    expectConserved(layout, { '7': 'head-7;tail-7;', '8': 'head-8;tail-8;', '9': 'head-9;tail-9;' });
+    expect(layout.pages.length).toBeLessThanOrEqual(4);
+  });
+
+  it.each(ordinaryLayouts)('preserves v0.89 bytes ($kind, $shape, continuation $continuation)', ({ kind, shape, continuation, digest }) => {
+    const content = shape === 'unequal-tables'
+      ? [table([paragraph('a;')]), table([paragraph('b;')]), table([paragraph('c;')])]
+      : shape === 'fitting-table' ? [table([paragraph('a;'), paragraph('b;')])]
+      : Array.from({ length: shape === 'text-continuation' ? 20 : 3 }, (_, i) => paragraph(`n${i};`)) as BodyElement[];
+    const model = document(kind, content, 15);
+    if (shape === 'unequal-tables') model.section.columns = { count: 2, spacePt: 20, equalWidth: false, sep: false,
+      cols: [{ widthPt: 60, spacePt: 20 }, { widthPt: 100, spacePt: 0 }] };
+    let expected = shape === 'unequal-tables' ? 'a;b;c;' : shape === 'fitting-table' ? 'a;b;'
+      : Array.from({ length: shape === 'text-continuation' ? 20 : 3 }, (_, i) => `n${i};`).join('');
+    if (shape === 'three-heads') {
+      const reference = model.body[0] as DocParagraph;
+      const run = reference.runs[0]!;
+      model.endnotes = ['7', '8', '9'].map(id => ({ id,
+        content: [paragraph(`head-${id};`, 40), paragraph(`tail-${id};`)] as BodyElement[] }));
+      reference.runs = model.endnotes.map(note => ({ ...run, noteRef: { kind, id: note.id } })) as DocParagraph['runs'];
+      expected = '';
+    }
+    const layout = render(model, continuation);
+    expectConserved(layout, shape === 'three-heads'
+      ? { '7': 'head-7;tail-7;', '8': 'head-8;tail-8;', '9': 'head-9;tail-9;' } : { '7': expected }, kind);
+    expect(layout.pages.length).toBeLessThanOrEqual(2);
+    expect(createHash('sha256').update(JSON.stringify(layout)).digest('hex')).toBe(digest);
+  });
+
+  it.each(['footnote', 'endnote'] as const)('bounds overflow balancing for a twelve-paragraph %s', kind => {
+    const content = Array.from({ length: 12 }, (_, i) => paragraph(`n${i};`, i === 3 ? 120 : 10));
+    const layout = render(document(kind, content as BodyElement[], 15));
+    expectConserved(layout, { '7': Array.from({ length: 12 }, (_, i) => `n${i};`).join('') }, kind);
+    expect(layout.pages.length).toBeLessThanOrEqual(5);
+  });
+
   it.each([false, true])('retains all three oversized notes after rejected admission (notice: %s)', notice => {
     const model = document('footnote', [], 15);
     const reference = model.body[0] as DocParagraph;

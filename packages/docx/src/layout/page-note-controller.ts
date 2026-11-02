@@ -45,6 +45,8 @@ export class PageNoteController {
     private readonly maximumPt: number,
     private readonly build: NoteAreaBuilder,
     private readonly allowContinuation: boolean,
+    private readonly recoveryAllowed: (ids: readonly string[]) => boolean = () => false,
+    private readonly capacityFailure: (ids: readonly string[], error: Error) => never = (_ids, error) => { throw error; },
   ) {
     this.sources = sources;
     this.incoming = new Set(sources.map(source => source.id));
@@ -53,6 +55,8 @@ export class PageNoteController {
   }
 
   get area(): PageNoteFlow { return this.retained; }
+  private forcedHeads = false;
+  get hasForcedHeads(): boolean { return this.forcedHeads; }
 
   /** Reset only the page's real-reference journal before replay. Incoming
    * fragments own this page without requiring another body reference. */
@@ -95,13 +99,13 @@ export class PageNoteController {
   }
 
   committed(ids: readonly string[]): void {
-    if (ids.length === 0) return;
     // A fresh-region body selector can force an indivisible reference unit
     // after ordinary admission rejects it. That is permission for overflow,
     // never permission to commit references without their note content.
     // Replay with every required head retained; subsequent pages own tails.
-    const heads = new Set(this.retained.chunks.map(chunk => chunk.layout.source.storyInstance));
-    if (ids.some(id => !heads.has(id))) {
+    const heads = this.recoveryAllowed(ids)
+      ? new Set(this.retained.chunks.map(chunk => chunk.layout.source.storyInstance)) : undefined;
+    if (heads && ids.some(id => !heads.has(id))) {
       if (!ids.every(id => heads.has(id) || this.blocked.has(id))) {
         throw new Error('A committed reference has no retained note head');
       }
@@ -110,6 +114,7 @@ export class PageNoteController {
         ...ids.filter(id => !known.has(id)).map(id => Object.freeze({ id, cursor: null }))]);
       this.required = Object.freeze([...new Set([...this.required, ...ids])]);
       this.retained = this.build(this.sources, this.maximumPt, false, true);
+      this.forcedHeads = true;
       const retainedHeads = new Set(this.retained.chunks.map(chunk => chunk.layout.source.storyInstance));
       if (!this.required.every(id => retainedHeads.has(id))) throw new Error('Overflow omitted a required note head');
       ids.forEach(id => this.blocked.delete(id));
@@ -118,6 +123,7 @@ export class PageNoteController {
     ids.forEach(id => this.actual.add(id));
     const search = this.search;
     if (!search || !this.required.every(id => this.actual.has(id))) return;
+    if (this.recoveryAllowed(this.required)) { this.search = undefined; return; }
     if (search.finalizing) {
       this.search = undefined;
       return;
@@ -147,7 +153,8 @@ export class PageNoteController {
   private evaluate(capacityPt: number, balanced: boolean): PageNoteFlow {
     // Resource policy, shared by all reference groups on this one page. Work
     // credits are not restored when body/source state rolls back.
-    if (++this.evaluations > 1024) throw new Error('Page note planning exceeded its operational evaluation limit');
+    if (++this.evaluations > 1024) this.capacityFailure(this.sources.map(source => source.id),
+      new Error('Page note planning exceeded its operational evaluation limit'));
     return this.build(this.sources, capacityPt, balanced);
   }
 

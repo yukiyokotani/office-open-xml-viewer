@@ -450,18 +450,6 @@ export function wordFlowNeutralPreBreakAnchorParagraph(
   });
 }
 
-export const WORD_TABLE_BLOCK_FOOTNOTE_CONTINUATION = defineCompatibilityRule({
-  id: 'word-table-block-footnote-continuation',
-  evidence: {
-    kind: 'office-observation',
-    syntheticFixtureId: 'table-block-footnote-continuation',
-    application: 'Microsoft Word',
-    version: '16.0.20527',
-    platform: 'Windows',
-  },
-  description: 'ECMA-376 §17.11.1 and §17.18.33 define note continuation and separator roles but not block selection. Windows Word 16.0.20527 controls with two notes, each containing sixteen single-row two-cell tables separated by exact 6pt labels, support cuts between complete story blocks: a label before a table may remain with the reference while the table continues, and all content stays in source order. In omitted mode and modes 11, 12, 14 and 15, both LTR and bidiVisual controls put thirteen tables plus the fourteenth label on the reference page and three tables on the continuation page; table text tops are 349.04636 through 543.46636pt, then 511.06636, 527.26636 and 543.46636pt. The library reproduces block-boundary continuation, label retention and content order, not those exact page cuts: the first note retains fourteen tables then two, and the second starts beside its tail with twelve then four rather than starting on the following page, and does not reproduce the measured separator lengths. These extreme-control differences are accepted fidelity limitations. Internal row/line splits, over-page tables, width-changing continuations, nested or positioned tables and mode 13 remain unmeasured; row splitting and indivisible overflow are separate library content-retention policy, not Word observations.',
-});
-
 export const WORD_PARAGRAPH_FOOTNOTE_CONTINUATION = defineCompatibilityRule({
   id: 'word-paragraph-footnote-continuation',
   evidence: {

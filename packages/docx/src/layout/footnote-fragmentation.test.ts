@@ -68,7 +68,7 @@ describe('page-bottom footnote continuation', () => {
         flowBounds: bounds, inkBounds: bounds, advancePt: 150, lines }] },
     };
     expect(partitionFootnote(acquired, null, 80)).toBeNull();
-    const head = partitionFootnote(acquired, null, 80, () => notice(4), 'overflow')!;
+    const head = createFootnotePartitioner(() => true)(acquired, null, 80, () => notice(4), 'overflow')!;
     expect(head.fragment.advancePt).toBe(130);
     expect(head.fragment.trailing?.advancePt).toBe(4);
     const tail = partitionFootnote(acquired, head.nextCursor, 80)!;

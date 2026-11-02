@@ -139,8 +139,11 @@ export type ContinuationNoticeProvider = () => NoteSeparatorLayout | null;
  * only engine-sealed roots, never arbitrary shallow-frozen/mutable callers.
  * Admission uses cumulative sums, but final fragment advance keeps the shared
  * paragraph finalizer's addition order. Page-local reacquisition gets a new key. */
-export function createFootnotePartitioner(): typeof partitionFootnote {
+export function createFootnotePartitioner(
+  allowOverflow: (note: NoteLayout) => boolean = () => false,
+): typeof partitionFootnote {
   const indexes = new WeakMap<ParagraphLayout, ParagraphContinuationIndex>();
+  const supportedStories = new WeakMap<StoryLayout, boolean>();
   const indexOf = (block: ParagraphLayout) => {
     let index = indexes.get(block);
     if (!index) {
@@ -149,16 +152,26 @@ export function createFootnotePartitioner(): typeof partitionFootnote {
     }
     return index;
   };
+  const supports = (story: StoryLayout) => {
+    let supported = supportedStories.get(story);
+    if (supported === undefined) {
+      supported = story.blocks.every(block => block.kind === 'paragraph' && block.ordinaryFlow);
+      if (isDeepFrozenPlainDataRoot(story)) supportedStories.set(story, supported);
+    }
+    return supported;
+  };
   return (acquired, cursor, capacityPt, continuationNotice, extent = 'largest') => {
+    const recovery = allowOverflow(acquired);
+    if (extent === 'overflow' && !recovery) extent = 'largest';
     if (acquired.trailing) throw new Error('An acquired note cannot own a continuation notice');
     if (extent === 'minimum') {
       // The minimum is a measured charge, not a claim that this unit fits.
-      return partitionIndexedFootnote(acquired, cursor, Number.MAX_VALUE, indexOf, 1);
+      return partitionIndexedFootnote(acquired, cursor, Number.MAX_VALUE, indexOf, supports, recovery, 1);
     }
     // Only admission on a fresh band requests overflow after fitting failed.
     const partition = extent === 'overflow'
-      ? partitionIndexedFootnote(acquired, cursor, Number.MAX_VALUE, indexOf, 1)
-      : partitionIndexedFootnote(acquired, cursor, capacityPt, indexOf);
+      ? partitionIndexedFootnote(acquired, cursor, Number.MAX_VALUE, indexOf, supports, recovery, 1)
+      : partitionIndexedFootnote(acquired, cursor, capacityPt, indexOf, supports, recovery);
     if (!partition?.nextCursor || !continuationNotice) return partition;
     const notice = continuationNotice();
     if (!notice) return partition;
@@ -173,7 +186,7 @@ export function createFootnotePartitioner(): typeof partitionFootnote {
     const reserved = extent === 'largest-with-reserved-notice' || extent === 'overflow'
       ? partition
       : partitionIndexedFootnote(acquired, cursor,
-        Math.max(0, capacityPt - notice.advancePt), indexOf);
+        Math.max(0, capacityPt - notice.advancePt), indexOf, supports, recovery);
     if (!reserved) return null;
     if (!reserved.nextCursor) throw new Error('Footnote partition completed under a smaller capacity');
     const fragment = reserved.fragment;
@@ -186,7 +199,7 @@ export function createFootnotePartitioner(): typeof partitionFootnote {
     const bounds = Object.freeze({ ...fragment.flowBounds, heightPt: advancePt });
     return Object.freeze({
       fragment: Object.freeze({ ...fragment, flowBounds: bounds,
-        inkBounds: Object.freeze(unionLayoutRects([fragment.inkBounds, bounds])!), advancePt, trailing }),
+        inkBounds: recovery ? Object.freeze(unionLayoutRects([fragment.inkBounds, bounds])!) : bounds, advancePt, trailing }),
       nextCursor: reserved.nextCursor,
       hostShiftPt: reserved.hostShiftPt,
     });
@@ -195,6 +208,8 @@ export function createFootnotePartitioner(): typeof partitionFootnote {
 
 function partitionIndexedFootnote(acquired: NoteLayout, cursor: FootnoteCursor | null, capacityPt: number,
   indexOf: (block: ParagraphLayout) => ParagraphContinuationIndex,
+  supports: (story: StoryLayout) => boolean,
+  recovery: boolean,
   /** Most real lines/table units to keep; minimum retains one. */
   lineBudget = Number.POSITIVE_INFINITY,
 ): FootnotePartition | null {
@@ -217,10 +232,12 @@ function partitionIndexedFootnote(acquired: NoteLayout, cursor: FootnoteCursor |
   if (cursor === null && acquired.advancePt <= capacityPt && lineBudget === Number.POSITIVE_INFINITY) {
     return Object.freeze({ fragment: acquired, nextCursor: null, hostShiftPt: 0 });
   }
+  if (!recovery && !supports(acquired.story)) return null;
   let remainingLines = lineBudget;
-  // WORD_TABLE_BLOCK_FOOTNOTE_CONTINUATION establishes complete-block cuts,
-  // including a label before a deferred table. The row-level extension and
-  // indivisible overflow below are library retention policy, not a Word claim.
+  // The unchanged ordinary path partitions paragraph-only stories and keeps
+  // tables/frames whole. Only a previously rejected group may enter complete-
+  // block/table-row cuts and indivisible overflow below. These extensions are
+  // library content-retention policy, not an Office pagination claim.
   // The scalar separator band or the native leading occurrence's advance.
   const separatorPt = acquired.advancePt - acquired.story.advancePt;
   let usedPt = separatorPt;
@@ -244,6 +261,9 @@ function partitionIndexedFootnote(acquired: NoteLayout, cursor: FootnoteCursor |
     Object.freeze({ blockIndex, lineIndex, inlineExtentPt: acquired.flowBounds.widthPt,
       sourcePosition: block.kind === 'table' ? null : lineSourcePosition(block, lineIndex, indexOf(block)),
       ...(acquired.acquisitionSourceStart ? { acquisitionStart: acquired.acquisitionSourceStart } : {}),
+      ...(block.kind === 'table' ? { sourceContinuation: Object.freeze({
+        blockIndex: block.source.path[0]!, paragraph: Object.freeze({ boundary: null }),
+      }) } : {}),
       ...(block.kind === 'paragraph' && block.noteLineEndBoundaries ? { sourceContinuation: Object.freeze({
         blockIndex: block.source.path[0]!,
         paragraph: Object.freeze({
@@ -371,7 +391,7 @@ function partitionIndexedFootnote(acquired: NoteLayout, cursor: FootnoteCursor |
     ...acquired.story,
     blocks: Object.freeze(blocks),
     flowBounds: storyBounds,
-    inkBounds: Object.freeze(unionLayoutRects([storyBounds, ...blocks.map(block => block.inkBounds)])!),
+    inkBounds: recovery ? Object.freeze(unionLayoutRects([storyBounds, ...blocks.map(block => block.inkBounds)])!) : storyBounds,
     advancePt: usedPt - separatorPt,
   });
   const noteBounds = Object.freeze({ ...acquired.flowBounds, heightPt: usedPt });
@@ -380,7 +400,7 @@ function partitionIndexedFootnote(acquired: NoteLayout, cursor: FootnoteCursor |
       ...acquired,
       story,
       flowBounds: noteBounds,
-      inkBounds: Object.freeze(unionLayoutRects([noteBounds, story.inkBounds])!),
+      inkBounds: recovery ? Object.freeze(unionLayoutRects([noteBounds, story.inkBounds])!) : noteBounds,
       advancePt: usedPt,
     }),
     nextCursor,
