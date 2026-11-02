@@ -17,15 +17,27 @@ export class NoteOverflowRecoveryRequired extends Error {
 }
 
 export class NoteOverflowPolicy {
-  private readonly permitted = new Set<string>();
+  private readonly permitted = new Map<string, Error>();
   allows(kind: NoteKind, ids: readonly string[]): boolean {
     return ids.some(id => this.permitted.has(`${kind}:${id}`));
+  }
+  /** Recovery is optional: inability to continue must expose the exact
+   * pre-recovery failure, including its class and admission geometry. */
+  failure(kind: NoteKind, ids: readonly string[]): Error | undefined {
+    for (const id of ids) {
+      const failure = this.permitted.get(`${kind}:${id}`);
+      if (failure) return failure;
+    }
+    return undefined;
+  }
+  fail(kind: NoteKind, ids: readonly string[], error: unknown): never {
+    throw this.failure(kind, ids) ?? error;
   }
   recover(error: unknown): boolean {
     if (!(error instanceof NoteOverflowRecoveryRequired)) return false;
     const added = error.ids.filter(id => !this.permitted.has(`${error.kind}:${id}`));
-    if (added.length === 0) throw error.failure;
-    added.forEach(id => this.permitted.add(`${error.kind}:${id}`));
+    if (added.length === 0) this.fail(error.kind, error.ids, error.failure);
+    added.forEach(id => this.permitted.set(`${error.kind}:${id}`, error.failure));
     return true;
   }
 }

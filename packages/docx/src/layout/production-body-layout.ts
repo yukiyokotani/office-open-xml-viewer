@@ -657,7 +657,7 @@ interface BodyStoryAcquisitionContext {
    * separate inference epochs; a failed admission may change permission. */
   readonly noteSourceReuse: WeakMap<object, boolean>;
   readonly overflowingNoteSourceReuse: WeakMap<object, boolean>;
-  readonly noteFieldBlocks: WeakMap<object, ReadonlySet<number>>;
+  readonly noteFieldBlocks: WeakMap<object, ReadonlyMap<number, boolean>>;
   readonly source: LayoutSourceStore;
   readonly publicAnchorBridge: typeof publicAnchorBridge;
   readonly headerFooterContext: string;
@@ -724,12 +724,14 @@ function acquireBodyStoryLayout(
   if (continuedNote && reusableNote === undefined) {
     workBudget?.sourceUnits(root);
     let hasFields = false;
+    let destinationDependent = false;
     const reusableBlock = (element: LayoutStoryBlock
       | TableLayoutSource['rows'][number]['cells'][number]['content'][number]): boolean => {
       if (element.type === 'paragraph') return !element.framePr
         && element.runs.every(run => {
           if (run.type === 'field') {
             hasFields = true;
+            if (run.fieldType !== 'numPages') destinationDependent = true;
             // Whole footnotes with continuation disabled never visit the
             // partition seam; keep their destination acquisition unchanged.
             return request.source.story === 'endnote' || services.allowFootnoteContinuation === true;
@@ -744,12 +746,13 @@ function acquireBodyStoryLayout(
       return element.type === 'table' && !source.acquisition.effectiveTablePositioning(element)
         && element.rows.every(row => row.cells.every(cell => cell.content.every(reusableBlock)));
     };
-    const fieldBlocks = new Set<number>();
+    const fieldBlocks = new Map<number, boolean>();
     reusableNote = overflowingNote
       ? root.every((block, index) => {
           hasFields = false;
+          destinationDependent = false;
           const reusable = reusableBlock(block);
-          if (hasFields) fieldBlocks.add(index);
+          if (hasFields) fieldBlocks.set(index, destinationDependent);
           return reusable;
         })
       : root.every(element => element.type === 'paragraph'
@@ -845,22 +848,30 @@ function acquireBodyStoryLayout(
       // block, not a full story per page. Partitioning never visits consumed
       // blocks, so a field at the tail cannot cause quadratic reacquisition.
       const latest = new WeakMap<ParagraphLayout | TableLayout, {
-        pageIndex: number; block: ParagraphLayout | TableLayout;
+        pageIndex: number; start: string; block: ParagraphLayout | TableLayout;
       }>();
-      registerNoteBlockAcquisition(story, (block, destination) => {
+      registerNoteBlockAcquisition(story, (block, destination, start) => {
         const index = block.source.path[0]!;
         if (!fieldBlocks.has(index)) return block;
         const hit = latest.get(block);
-        if (hit?.pageIndex === destination.pageIndex) return hit.block;
+        // NUMPAGES (§17.16.5.42) is fixed throughout this acquisition
+        // session/pass. Its result and width cannot change across destinations;
+        // reuse the shaped epoch including its line cursor. PAGE (§17.16.5.44)
+        // must instead resume the source suffix before destination reflow.
+        const sourceStart = block.kind === 'paragraph' && fieldBlocks.get(index) ? start : undefined;
+        const startKey = JSON.stringify(sourceStart ?? null);
+        if (hit && ((block.kind === 'paragraph' && !fieldBlocks.get(index))
+          || (hit.pageIndex === destination.pageIndex && hit.start === startKey))) return hit.block;
         workBudget?.charge(root[index]!);
         const refreshed = layoutBodyStory(dependencies, {
           ...request, pageIndex: destination.pageIndex,
+          ...(sourceStart ? { sourceStart } : {}),
           container: { ...request.container, bounds: { ...request.container.bounds, yPt: block.flowBounds.yPt } },
         }, root, false, index).blocks[0];
         if (!refreshed || (refreshed.kind !== 'paragraph' && refreshed.kind !== 'table')) {
           throw new Error('Note field acquisition lost its source block');
         }
-        latest.set(block, { pageIndex: destination.pageIndex, block: refreshed });
+        latest.set(block, { pageIndex: destination.pageIndex, start: startKey, block: refreshed });
         return refreshed;
       });
     }

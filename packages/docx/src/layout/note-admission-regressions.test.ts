@@ -10,6 +10,9 @@ import type { BodyElement, DocParagraph, DocxDocumentModel } from '../types.js';
 import type { DocumentLayout, NoteLayout, PaintNode } from './types.js';
 import { endnoteIdsInRetainedSlice, footnoteIdsInRetainedSlice } from './note-reference-ownership.js';
 import * as tableLayout from './table.js';
+import * as budgets from './resource-budgets.js';
+import * as noteColumns from './note-column-acquisition.js';
+import * as noteBlocks from './note-block-acquisition.js';
 
 type Kind = 'footnote' | 'endnote';
 const context = {
@@ -120,6 +123,142 @@ const ordinaryLayouts = [
 ] as const;
 
 describe('reviewed note admission regressions', () => {
+  it.each((['footnote', 'endnote'] as const).flatMap(kind => [1, 2].flatMap(columns =>
+    ['repeated-source', 'empty-fragment'].map(failureMode => ({ kind, columns, failureMode })))))(
+    'fails with the original error for $failureMode recovery ($kind, $columns columns)', ({ kind, columns, failureMode }) => {
+      const original = noteColumns.acquireNoteColumnPartition;
+      let head: ReturnType<typeof original>;
+      let rejected = 0;
+      const spy = vi.spyOn(noteColumns, 'acquireNoteColumnPartition').mockImplementation((...args) => {
+        if (failureMode === 'repeated-source' && head && args[2]) {
+          rejected++;
+          // Returning already consumed content at the same source cursor
+          // must fail even if its translated geometry/ink looks nonempty.
+          return { ...head, nextCursor: args[2] };
+        }
+        const result = original(...args);
+        if (failureMode === 'empty-fragment' && result && args[2]) {
+          rejected++;
+          // A cursor claiming progress cannot substitute for committed
+          // content. A fresh page/band must reject this separator-only plan.
+          return { ...result, fragment: { ...result.fragment, story: { ...result.fragment.story, blocks: [] } } };
+        }
+        if (result?.nextCursor) head = result;
+        return result;
+      });
+      try {
+        const model = document(kind, [table([paragraph('tall;', 120)]),
+          ...Array.from({ length: 20 }, (_, i) => paragraph(`tail${i};`))], 14, columns);
+        expect(() => render(model)).toThrow(expect.objectContaining({
+          name: kind === 'footnote' ? 'FootnoteAdmissionOverflowError' : 'NoteCapacityExceededError',
+        }));
+        expect(rejected).toBeGreaterThan(0);
+        expect(rejected).toBeLessThanOrEqual(2);
+      } finally { spy.mockRestore(); }
+    });
+
+  it.each(['footnote', 'endnote'] as const)('preserves the original %s failure if destination reflow is unsupported', kind => {
+    const original = noteBlocks.noteBlockAcquirer;
+    let rejected = 0;
+    const spy = vi.spyOn(noteBlocks, 'noteBlockAcquirer').mockImplementation(note => {
+      const acquire = original(note);
+      return acquire && ((block, start) => {
+        if (start?.paragraph.boundary) { rejected++; throw new Error('Unsupported recovery source cursor'); }
+        return acquire(block, start);
+      });
+    });
+    try {
+      const p = paragraph('');
+      const run = p.runs[0]!;
+      if (run.type !== 'text') throw new Error('Expected text fixture');
+      p.runs = Array.from({ length: 240 }, () => [
+        { ...run, text: 'x=' },
+        { ...run, type: 'field' as const, fieldType: 'page', instruction: 'PAGE', fallbackText: '1' },
+        { ...run, text: '; ' },
+      ]).flat();
+      expect(() => render(document(kind, [table([paragraph('tall;', 120)]), p], undefined, 1)))
+        .toThrow(expect.objectContaining({
+          name: kind === 'footnote' ? 'FootnoteAdmissionOverflowError' : 'NoteCapacityExceededError',
+        }));
+      expect(rejected).toBe(1);
+    } finally { spy.mockRestore(); }
+  });
+
+  it('retains a table reference beside its recovered reserve in three columns', () => {
+    const model = document('footnote', [paragraph('before;'), paragraph('tall;', 120), paragraph('after;')], 15, 3);
+    model.body = [table([model.body[0] as DocParagraph])];
+    const layout = render(model, false);
+    expectConserved(layout, { '7': 'before;tall;after;' });
+    expect(layout.pages.flatMap(page => page.layers.body).map(text).join('')).toBe('1');
+    expect(layout.pages.length).toBeLessThanOrEqual(4);
+  });
+
+  it.each(['footnote', 'endnote'] as const)('resumes PAGE paragraph source after wrapping changes in a %s', kind => {
+    const p = paragraph('');
+    const run = p.runs[0]!;
+    if (run.type !== 'text') throw new Error('Expected text fixture');
+    p.runs = Array.from({ length: 60 }, (_, i) => [
+      { ...run, text: `f${i}=` },
+      { ...run, type: 'field' as const, fieldType: 'page', instruction: 'PAGE', fallbackText: '1' },
+      { ...run, text: '; ' },
+    ]).flat();
+    const model = document(kind, [table([paragraph('tall;', 120)]), p], undefined, 1);
+    model.section.pageNumType = { start: 8, fmt: 'decimal' };
+    const layout = render(model);
+    const fragments = layout.pages.flatMap(page => page.layers.notes.flatMap(note => {
+      if (note.kind !== 'note') return [];
+      return note.story.blocks.map(text);
+    }));
+    const combined = fragments.join('');
+    expect(combined.replace(/f(\d+)=\d+; /g, 'f$1;')).toBe('tall;' + Array.from({ length: 60 }, (_, i) => `f${i};`).join(''));
+    // A field may start on the last line of a page: verify each field glyph's
+    // ownership, independently of whether its surrounding label also fits.
+    let fields = 0;
+    for (const page of layout.pages) for (const note of page.layers.notes) {
+      if (note.kind !== 'note') continue;
+      for (const block of note.story.blocks) if (block.kind === 'paragraph') {
+        for (const line of block.lines) for (const placement of line.placements) {
+          if (placement.kind !== 'text') continue;
+          for (const owner of placement.sourceRuns ?? []) {
+            if (owner.sourceRunIndex % 3 !== 1) continue;
+            const start = Math.max(placement.range.start, owner.range.start) - placement.range.start;
+            const end = Math.min(placement.range.end, owner.range.end) - placement.range.start;
+            if (end > start) { fields++; expect(placement.text.slice(start, end)).toBe(String(page.pageIndex + 8)); }
+          }
+        }
+      }
+    }
+    expect(fields).toBe(60);
+    expect(layout.pages.length).toBeGreaterThan(2);
+  });
+
+  it.each([320, 640, 1280, 2560])('bounds NUMPAGES paragraph acquisition linearly for %i fields', count => {
+    const p = paragraph('');
+    const run = p.runs[0]!;
+    if (run.type !== 'text') throw new Error('Expected text fixture');
+    p.runs = Array.from({ length: count }, () => [
+      { ...run, text: 'x=' },
+      { ...run, type: 'field' as const, fieldType: 'numPages', instruction: 'NUMPAGES', fallbackText: '1' },
+      { ...run, text: '; ' },
+    ]).flat();
+    let work = 0;
+    const original = budgets.createFootnoteAcquisitionWorkBudget;
+    const spy = vi.spyOn(budgets, 'createFootnoteAcquisitionWorkBudget').mockImplementation(() => {
+      const budget = original();
+      return { ...budget, charge(source) { work += budget.sourceUnits(source); budget.charge(source); } };
+    });
+    try {
+      const layout = render(document('footnote', [table([paragraph('tall;', 120)]), p], undefined, 1));
+      expectConserved(layout, { '7': 'tall;' + `x=${layout.pages.length}; `.repeat(count) });
+      // The fixture contributes 170 source units/field plus <=262 fixed
+      // units. Allow four source/block acquisitions in each of up to three
+      // page-count passes (including the two-digit NUMPAGES width change):
+      // 12*(170N+262) < 2500N for N>=320. Destination pages must add no full
+      // paragraph acquisitions; the allowance is independent of page count.
+      expect(work).toBeLessThanOrEqual(2500 * count);
+    } finally { spy.mockRestore(); }
+  });
+
   it.each(['footnote', 'endnote'] as const)('continues oversized %s tables across unequal columns', kind => {
     for (const singleTable of [false, true]) {
       const content = Array.from({ length: 20 }, (_, i) => paragraph(`n${i};`));

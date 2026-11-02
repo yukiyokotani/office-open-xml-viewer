@@ -1,8 +1,8 @@
-import type { StoryLayoutAcquisitionInput } from './body-layout-kernel.js';
+import type { NoteSourceContinuation, StoryLayoutAcquisitionInput } from './body-layout-kernel.js';
 import type { NoteLayout, ParagraphLayout, StoryLayout, TableLayout } from './types.js';
 
 type Block = ParagraphLayout | TableLayout;
-type Acquire = (block: Block, destination: StoryLayoutAcquisitionInput) => Block;
+type Acquire = (block: Block, destination: StoryLayoutAcquisitionInput, start?: NoteSourceContinuation) => Block;
 
 // Acquisition capabilities stay outside the immutable paint graph. An epoch
 // shares page-independent blocks; partitioning resolves only visited field
@@ -18,8 +18,8 @@ export function registerNoteBlockDestination(note: NoteLayout, destination: Stor
   if (acquisitions.has(note.story)) destinations.set(note, destination);
 }
 
-export function noteBlockAcquirer(note: NoteLayout): ((block: Block) => Block) | undefined {
+export function noteBlockAcquirer(note: NoteLayout): ((block: Block, start?: NoteSourceContinuation) => Block) | undefined {
   const acquire = acquisitions.get(note.story);
   const destination = destinations.get(note);
-  return acquire && destination ? block => acquire(block, destination) : undefined;
+  return acquire && destination ? (block, start) => acquire(block, destination, start) : undefined;
 }
