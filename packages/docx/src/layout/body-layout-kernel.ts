@@ -255,6 +255,8 @@ export interface FollowingBodyBlockMeasurement {
   /** Retained first-line slice for reservation-aware grid admission. Only
    * acquired for grid lines; later paragraph decoration is excluded. */
   readonly leadGridParagraph?: ParagraphLayout;
+  /** All lines of the whole paragraph, before the first-line slice. */
+  readonly wholeParagraphHasPlacements?: boolean;
   /** References painted when the complete block is retained with a keep chain. */
   readonly fullFootnoteReferenceIds?: readonly string[];
   /** References painted by the first indivisible content admitted with keepNext. */

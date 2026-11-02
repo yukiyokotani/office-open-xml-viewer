@@ -340,6 +340,72 @@ describe('layoutDocument — body paragraph fragments (PR 5 Task 12)', () => {
 });
 
 describe('layoutDocument — exact source-boundary paragraph continuation', () => {
+  it.each([
+    { mode: 11, keepNext: false },
+    { mode: 14, keepNext: false },
+    { mode: 15, keepNext: false },
+    { mode: 15, keepNext: true },
+  ])('preserves v0.89 pagination for a blank prefix before glyphs (mode $mode, keepNext $keepNext)', ({ mode, keepNext }) => {
+    const target = para('', {
+      runs: [
+        { type: 'break', breakType: 'line' },
+        sizedTextRun('A', 16),
+        { type: 'break', breakType: 'line' },
+        { type: 'break', breakType: 'line' },
+        sizedTextRun('B', 16),
+      ],
+      defaultFontSize: 16,
+      lineSpacing: { rule: 'auto', value: 1.15, explicit: true },
+      keepNext: false, keepLines: false, widowControl: false,
+    });
+    const model = doc([
+      para('F', { lineSpacing: { rule: 'exact', value: keepNext ? 40 : 60 } }) as BodyElement,
+      ...(keepNext ? [para('H', {
+        lineSpacing: { rule: 'exact', value: 20 }, keepNext: true,
+      }) as BodyElement] : []),
+      target as BodyElement,
+    ], 100);
+    model.settings = { compatibilityMode: mode };
+    model.section.docGridType = 'lines';
+    model.section.docGridLinePitch = 18;
+    const layout = layoutDocument(model);
+    const fragments = sourceFragments(layout, keepNext ? 2 : 1);
+
+    expect(layout.pages).toHaveLength(2);
+    expect(fragments.map(fragment => fragment.lines.length)).toEqual([1, 3]);
+    expect(fragments.map(fragment => fragmentText([fragment]))).toEqual(['', 'AB']);
+    expect(layout.pages[0]!.layers.body).toContain(fragments[0]);
+    expect(layout.pages[1]!.layers.body).toContain(fragments[1]);
+  });
+
+  it.each([11, 14, 15])('preserves v0.89 pagination for blank-only continuations after glyphs in mode %i', (mode) => {
+    const target = para('', {
+      runs: [
+        sizedTextRun('A', 16),
+        ...Array.from({ length: 4 }, () => ({ type: 'break', breakType: 'line' } as const)),
+      ],
+      defaultFontSize: 16,
+      lineSpacing: { rule: 'auto', value: 1.15, explicit: true },
+      keepNext: false, keepLines: false, widowControl: false,
+    });
+    const model = doc([
+      para('F', { lineSpacing: { rule: 'exact', value: 62 } }) as BodyElement,
+      target as BodyElement,
+    ], 102);
+    model.settings = { compatibilityMode: mode };
+    model.section.docGridType = 'lines';
+    model.section.docGridLinePitch = 18;
+    const layout = layoutDocument(model);
+    const fragments = sourceFragments(layout, 1);
+
+    expect(layout.pages).toHaveLength(2);
+    expect(fragments.map(fragment => fragment.lines.length)).toEqual([1, 4]);
+    expect(fragments.map(fragment => fragmentText([fragment]))).toEqual(['A', '']);
+    expect(fragments[1]!.lines.every(line => line.placements.length === 0)).toBe(true);
+    expect(layout.pages[0]!.layers.body).toContain(fragments[0]);
+    expect(layout.pages[1]!.layers.body).toContain(fragments[1]);
+  });
+
   it('keeps grid-leading relief for a glyph fragment that ends in a blank break line', () => {
     const target = para('', {
       runs: [
@@ -373,7 +439,7 @@ describe('layoutDocument — exact source-boundary paragraph continuation', () =
   it('moves a break-only grid heading intact when its first full line does not fit', () => {
     // Windows Word 16.0.20430: both ends of the break-only heading land on
     // page 2 even with keepNext/keepLines/widowControl explicitly disabled.
-    // Unlike visible glyph lines, blank break lines get no grid-leading relief.
+    // A whole paragraph without placements gets no grid-leading relief.
     const target = para('', {
       runs: [{ type: 'break', breakType: 'line' }],
       defaultFontSize: 16,

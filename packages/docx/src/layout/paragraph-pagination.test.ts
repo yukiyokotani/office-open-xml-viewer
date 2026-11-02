@@ -198,7 +198,7 @@ describe('paragraph page-local reserve selection', () => {
     // Lookahead acquired the successor at y=0; a 10pt heading places its
     // actual line at y=10. A page-owned exclusion ending at 9pt is above
     // that line; a host-owned exclusion moves down with its paragraph.
-    expect(wordGridLineAdmissionExtentPt(successor, 10, 18, 0, 10)).toBe(expectedExtent);
+    expect(wordGridLineAdmissionExtentPt(successor, true, 10, 18, 0, 10)).toBe(expectedExtent);
   });
 
   it.each(['paragraph', 'line', 'text', 'glyph'] as const)(
@@ -206,7 +206,7 @@ describe('paragraph page-local reserve selection', () => {
       const retained = verticalEdgeParagraph('horizontal-tb', 8, undefined, 2);
       const line = { ...retained.lines[0]!, gridAfterLeadingPt: 2 };
       const candidate = { ...retained, lines: [line] };
-      expect(wordGridLineAdmissionExtentPt(candidate, 10, 18)).toBe(8);
+      expect(wordGridLineAdmissionExtentPt(candidate, true, 10, 18)).toBe(8);
       // New retained paint must be reviewed before it joins the plain-text
       // observation, even when an older admission implementation cannot paint it.
       Object.assign(owner === 'paragraph' ? candidate
@@ -214,7 +214,7 @@ describe('paragraph page-local reserve selection', () => {
           : owner === 'text' ? line.placements[0]!
             : (line.placements[0]! as import('./types.js').TextPlacement).paintOps[0]!,
       { futureDecoration: {} });
-      expect(wordGridLineAdmissionExtentPt(candidate, 10, 18)).toBe(10);
+      expect(wordGridLineAdmissionExtentPt(candidate, true, 10, 18)).toBe(10);
     },
   );
 
@@ -461,6 +461,7 @@ describe('paragraph page-local reserve selection', () => {
       boundary: { segIndex: 0, charOffset: 1 },
       sourceRangeStart: 1,
       uniformRubyAdvancePt: 30,
+      wholeParagraphHasPlacements: true,
     });
   });
 
