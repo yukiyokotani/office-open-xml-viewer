@@ -220,6 +220,11 @@ pub fn visit_para_on_page_breaks<E>(
         let mut chunk = para.clone();
         chunk.runs = runs;
         chunk.complex_field_boundaries = std::mem::take(&mut boundary_chunks[index]);
+        // A break follows this piece: an interior separator, or a trailing one
+        // after the last retained chunk.
+        if index < seps.len() || (index + 1 == retained_chunks && !trailing.is_empty()) {
+            chunk.ends_at_hard_break = Some(true);
+        }
         emit(ParaPiece::Para(chunk))?;
         emitted = true;
         emitted_paragraph = true;

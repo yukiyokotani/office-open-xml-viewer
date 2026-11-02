@@ -558,6 +558,10 @@ pub struct DocumentSettings {
     /// spaces of a line.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ul_trail_space: Option<bool>,
+    /// §17.15.3.5 `w:compat` / `w:doNotExpandShiftReturn` — do not justify a
+    /// line that ends with a manual line break.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub do_not_expand_shift_return: Option<bool>,
     /// [MS-DOCX] `w:compat/w:compatSetting[@w:name="compatibilityMode"]`
     /// (`@w:uri="http://schemas.microsoft.com/office/word"`) — the Word
     /// version whose layout rules the document uses (for example 14 or 15).
@@ -1253,6 +1257,15 @@ pub struct DocParagraph {
     /// `Some(false)` when disabled; omitted (`None`) means the default, on.
     #[serde(rename = "wordWrap", skip_serializing_if = "Option::is_none", default)]
     pub word_wrap: Option<bool>,
+    /// The paragraph piece ends where its source paragraph has a page or column
+    /// break (`w:br w:type="page|column"`, §17.3.3.1), which normalization
+    /// turns into a body-level break after this piece. `Some(true)` only.
+    #[serde(
+        rename = "endsAtHardBreak",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
+    pub ends_at_hard_break: Option<bool>,
     /// ECMA-376 §17.3.1.1 `w:adjustRightInd` — permit automatic right-indent
     /// adjustment when a document grid is active. The style-hierarchy default
     /// is true; true is omitted from JSON and the TypeScript model therefore
@@ -3607,10 +3620,16 @@ pub struct DocTable {
     /// LEADING edge (left in LTR, right in RTL/`bidi_visual`), in pt (signed —
     /// a negative value pulls the table outward past the leading margin toward
     /// the page edge). `type="dxa"` only; `pct`/`auto` are ignored per §17.4.50.
-    /// `None` ⇒ no direct indent (the renderer adds nothing). Applied by the
+    /// Resolved through the table style hierarchy (§17.7.6); `None` ⇒ no
+    /// indent anywhere in that hierarchy (the renderer adds nothing). Applied by the
     /// renderer only when the resolved `jc` is left/leading.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tbl_ind: Option<f64>,
+    /// True when `tbl_ind` was inherited from the table style hierarchy rather
+    /// than authored on the table. §17.4.50 ignores tblInd for non-leading
+    /// rows; layout drops an inherited value per row's resulting jc.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub tbl_ind_inherited: bool,
     /// ECMA-376 §17.4.52 `<w:tblLayout w:type>`. "fixed" or "autofit".
     /// Absent in the source ⇒ None, which the renderer treats as the spec
     /// default "autofit" (size columns by preferred widths). When "fixed" the
@@ -3810,6 +3829,11 @@ pub struct TableRowLayoutAcquisitionWire {
     pub justification: Option<String>,
     pub before_width: Option<TableWidthAcquisitionWire>,
     pub after_width: Option<TableWidthAcquisitionWire>,
+    /// Authored provenance of a positive `w:gridBefore`/`w:gridAfter`
+    /// (§17.4.14/.15). The semantic row counts are normalized against the
+    /// grid, which clears conflicting offsets; this keeps the authored skip.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub grid_skip_authored: bool,
     pub cell_spacing: Option<TableWidthAcquisitionWire>,
     /// Effective whole-table/conditional table-style spacing for this row.
     /// Direct row, exception, and table properties remain separate higher layers.

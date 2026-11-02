@@ -1,4 +1,4 @@
-import { measureFitTextUnit, measureJoinedTextUnit } from './atomic-units.js';
+import { lineEndSpaceCharged, lineTrailingSpaceSuffixWidth, measureFitTextUnit, measureJoinedTextUnit } from './atomic-units.js';
 import { placeOptionalHyphenPrefix } from './optional-hyphens.js';
 import {
   kinsokuAdjustedSplit,
@@ -48,7 +48,7 @@ import {
   rebaseSeaBreaks,
 } from './text-runs.js';
 import { fitCJKPrefix, hasEastAsianVisiblePredecessor } from './fit-search.js';
-import { LineGapRejection, fitJustifiedCompression, isListLabelItem, justifiedCompressionApplies, justifiedPrefixCompression, lineEndsWithText, type PassOperationState } from './pass-operations.js';
+import { LineGapRejection, fitJustifiedCompression, isListLabelItem, justifiedCompressionApplies, justifiedPrefixCompression, kernedSpacePairAdvance, lineEndsWithText, lineFitReduced, lineFitWidth, type PassOperationState } from './pass-operations.js';
 
 /** The iterator reads only its declared slice of the explicit pass state. */
 export type BreakOpportunityIteratorContext = Pick<
@@ -83,6 +83,7 @@ export type BreakOpportunityIteratorContext = Pick<
   | 'segAdvance'
   | 'strAdvance'
   | 'justifiedCompression'
+  | 'lineFit'
   | 'isJustified'
   | 'stretchLastLine'
   | 'widthPolicy'
@@ -137,10 +138,21 @@ function placedAdvanceExceeds(
   segment: LayoutTextSeg,
   placedText: string,
 ): boolean {
-  const { breakerState, strAdvance, availW, fitsMeasuredWidth, baseRtl } = context;
+  const { breakerState, strAdvance, availW, fitsMeasuredWidth } = context;
   // A line-end U+3000 run hangs as whitespace (word-ideographic-space hang).
-  const visible = (baseRtl ? placedText : placedText.replace(/ +$/u, '')).replace(/\u3000+$/u, '');
-  return !fitsMeasuredWidth(breakerState.currentWidth + strAdvance(segment, visible), availW());
+  const visible = (lineEndSpaceCharged(context) ? placedText : placedText.replace(/ +$/u, ''))
+    .replace(/\u3000+$/u, '');
+  return !fitsMeasuredWidth(visibleLineWidth(context, visible) + strAdvance(segment, visible), availW());
+}
+
+/** The current line's advance as the head unit's visible-prefix fit sees it:
+ * when the placed text adds no visible character, the whole U+0020 suffix the
+ * line already ends with (across members) is part of the same line-end run
+ * and is excluded as well, unless the policy charges line-end spaces. */
+function visibleLineWidth(context: BreakOpportunityIteratorContext, placedVisible: string): number {
+  const { breakerState } = context;
+  if (placedVisible !== '' || lineEndSpaceCharged(context)) return breakerState.currentWidth;
+  return breakerState.currentWidth - lineTrailingSpaceSuffixWidth(breakerState.currentLine, context);
 }
 
 function lineAdvanceFrom(line: readonly LayoutSeg[], start: number): number {
@@ -254,7 +266,11 @@ function processTextSegment(context: BreakOpportunityIteratorContext, seg: Layou
     s.autoSpaceLeadingPx = lineEndsWithText(breakerState.currentLine) ? undefined : 0;
   }
   const segmentBox = textSegmentBox(s);
-  const w = segmentBox.width;
+  // WORD_KERNED_SPACE_PAIRS: fit with the pair across the preceding piece's
+  // last space; placement re-resolves it against the actual predecessor.
+  const kernedSpacePair = kernedSpacePairAdvance(context, s, segmentBox.width);
+  s.leadingWordBoundaryPx = kernedSpacePair === 0 ? undefined : kernedSpacePair;
+  const w = segmentBox.width + kernedSpacePair;
   const prospectiveWidth = prospectiveSnapAdvance(s, w);
   const h = segmentBox.height;
   const asc = segmentBox.ascent;
@@ -354,10 +370,13 @@ function processTextSegment(context: BreakOpportunityIteratorContext, seg: Layou
   // so the grid delta, w:w scale and w:spacing pitch on the retained glyphs all
   // cancel and trailingSpaceW is the bare trailing-space advance — keeping `w`
   // and `wForFit` on the one advance model (`strAdvance` == the model behind `w`).
+  // A seam pair before visible glyphs belongs to them; a separator-only piece
+  // owns its pair with the preceding glyph, as a piece measured with its own
+  // trailing space does (WORD_KERNED_SPACE_PAIRS).
   const trailingSpaceW = snapToCharsClass(s, characterGrid)
     ? 0
     : s.text.endsWith(' ')
-      ? w - strAdvance(s, trimmed)
+      ? w - (trimmed ? kernedSpacePair : 0) - strAdvance(s, trimmed)
       : 0;
   s.latinNaturalTrailingSpacePx =
     trailingSpaceW > 0 &&
@@ -381,11 +400,12 @@ function processTextSegment(context: BreakOpportunityIteratorContext, seg: Layou
   s.mixedNaturalTrailingSpaceCount = mixedSpaces ? s.text.length - trimmed.length : undefined;
   // Library containment policy: an RTL line is anchored at its right edge,
   // so even an invisible trailing-space advance shifts visible LTR cells left.
-  // Count that advance during fitting instead of admitting glyphs past the band.
+  // Count that advance during fitting instead of admitting glyphs past the band,
+  // except on the justified lines WORD_RTL_JUSTIFIED_VISIBLE_FIT measured.
   const fitWidthFor = (
     widthPx: number,
     trailingSpacePx: number,
-  ): number => wordVisiblePrefixFitWidthPx(widthPx, trailingSpacePx, context.baseRtl);
+  ): number => wordVisiblePrefixFitWidthPx(widthPx, trailingSpacePx, lineEndSpaceCharged(context));
   const wForFit = fitWidthFor(prospectiveWidth, trailingSpaceW);
   // ECMA-376 §17.3.1.33 does not prescribe a line-breaking tolerance.
   // Word-for-Mac controls with Calibri and Arial, left/center/right aligned
@@ -426,10 +446,24 @@ function processTextSegment(context: BreakOpportunityIteratorContext, seg: Layou
   // the justified-compression family; it is admitted as one unit either way.
   if ((!prefersWholeWordAtScriptBoundary(context, s) || s.autoSpaceBeforePt !== undefined)
     && fitJustifiedCompression(context, s)) return;
+  // A declined justified candidate re-measured its box; restore the fitted pair.
+  s.leadingWordBoundaryPx = kernedSpacePair === 0 ? undefined : kernedSpacePair;
+  s.measuredWidth = w;
   // The authored opportunity follows the existing whole-unit justified fit;
   // it must not introduce a wrap before a word admitted by that policy.
   if (placeOptionalHyphenPrefix(context, s)) return;
+  const fittedPredecessor = breakerState.currentLine.at(-1);
   if (prepareAtomicTextFit(context, { s, w, trailingSpaceW, sDictSea, fitWidthFor })) return;
+  // A pre-flush (an atomic group or a SEA chunk moved to a fresh line) leaves
+  // every admission value above fitted against the previous line's
+  // predecessor. With a WORD_KERNED_SPACE_PAIRS pair in them, judge the piece
+  // again at the new line start, where it takes no pair. Without one, the
+  // values are unchanged and the established path continues.
+  if (kernedSpacePair !== 0 && breakerState.currentLine.at(-1) !== fittedPredecessor) {
+    s.leadingWordBoundaryPx = undefined;
+    breakerState.queue.unshift(s);
+    return;
+  }
 
   // §17.3.1.21 permits one eligible punctuation character past the text
   // extent. The isolated compatibility predicate owns both the CJK-language
@@ -456,7 +490,9 @@ function processTextSegment(context: BreakOpportunityIteratorContext, seg: Layou
       s.script === 'complexScript',
       s.overflowPunctuationBidiLanguage,
     ) &&
-    breakerState.currentWidth + strAdvance(s, textBeforeTrailingOverflow) <= availW();
+    // The visible prefix keeps the WORD_KERNED_SPACE_PAIRS seam pair that
+    // placement charges.
+    breakerState.currentWidth + kernedSpacePair + strAdvance(s, textBeforeTrailingOverflow) <= availW();
 
   // WORD_COMPRESSED_SPACE_LINE_FIT: once a mixed line's spaces are shrunk, a
   // following unit (such as a closing mark split into its own source run) is
@@ -640,7 +676,29 @@ function commitAlignedTabCell(context: BreakOpportunityIteratorContext): void {
  * controls overlap floats and that overlap is not emulated.
  */
 function alignedTabCellAvailW(context: BreakOpportunityIteratorContext): number {
-  return context.availW() + context.breakerState.lineMarginExtension;
+  return lineBandW(context) + context.breakerState.lineMarginExtension;
+}
+
+/** Whether a tab's cell aligns to its stop (right, centre, decimal or an
+ * aligned positional tab) rather than starting there: such a cell takes no
+ * WORD_KASHIDA_LINE_FIT reserve, in either direction. */
+function tabCellIsAligned(
+  seg: LayoutTabSeg,
+  stop: () => { alignment: Parameters<typeof tabAlignmentRole>[0] } | null | undefined,
+): boolean {
+  if (seg.ptab) return seg.ptab.alignment !== 'left';
+  const resolved = stop();
+  return resolved !== null && resolved !== undefined && tabAlignmentRole(resolved.alignment) !== 'leading';
+}
+
+
+/** The line's band width, without the WORD_KASHIDA_LINE_FIT reserve: an
+ * aligned tab cell may reach its stop anywhere in the band. */
+function lineBandW(context: BreakOpportunityIteratorContext): number {
+  const { breakerState, firstIndent, widthPolicy } = context;
+  return widthPolicy !== 'bounded'
+    ? Number.POSITIVE_INFINITY
+    : breakerState.lineMaxWidth - (breakerState.isFirst ? firstIndent : 0);
 }
 
 function processTabSegment(
@@ -672,14 +730,10 @@ function processTabSegment(
   if (baseRtl) {
     let oversizedMarginLeading = false;
     if (seg.ptab) {
-      const input = { ...context, ...breakerState };
+      const input = { ...context, ...breakerState, ...(context.lineFit ? { fitWidth: availW() } : {}) };
       breakerState.currentWidth += resolveCompletedTabCells(input);
       const { startPen, leftLimit, frame } = bidiTabFrame(input);
-      let followingWidth = 0;
-      for (const q of breakerState.queue) {
-        if ('isTab' in q || 'lineBreak' in q) break;
-        followingWidth += tabFollowWidth(q);
-      }
+      const followingWidth = tabFollowingMetrics().totalWidth;
       const box = wordPositionalTabReferenceBox(
         seg.ptab.relativeTo === 'indent' ? frame.indentStart : 0,
         seg.ptab.relativeTo === 'indent' ? frame.indentEnd : leftLimit,
@@ -697,7 +751,7 @@ function processTabSegment(
         return;
       }
     }
-    const input = { ...context, ...breakerState };
+    const input = { ...context, ...breakerState, ...(context.lineFit ? { fitWidth: availW() } : {}) };
     const { startPen, frame } = bidiTabFrame(input);
     if (frame.narrowed || oversizedMarginLeading || seg.ptab?.relativeTo === 'indent') {
       // Resolve leading gaps before fitting, in the same reading frame as
@@ -722,12 +776,12 @@ function processTabSegment(
             seg.ptab.relativeTo === 'indent' ? frame.indentEnd : input.marginRightPx + tabOriginPx,
             frame.bandStart, frame.bandEnd, frame.narrowed).start
           : stop?.pos ?? pen;
-        if (target > frame.bandEnd && breakerState.currentLine.length > 0) {
+        if (target > frame.fitEnd && breakerState.currentLine.length > 0) {
           flush(undefined, false, seg.src);
           breakerState.queue.unshift(seg);
           return;
         }
-        const gap = target > frame.bandEnd ? 0 : Math.max(0, target - pen);
+        const gap = target > frame.fitEnd ? 0 : Math.max(0, target - pen);
         seg.readingGap = gap;
         seg.measuredWidth = gap;
         seg.leader = stop?.leader;
@@ -742,6 +796,14 @@ function processTabSegment(
     }
     seg.measuredWidth = 0;
     addToLine(seg, 0, seg.fontSize, seg.fontSize * scale * SYNTHETIC_ASCENT_EM, seg.fontSize * scale * SYNTHETIC_DESCENT_EM);
+    // WORD_KASHIDA_LINE_FIT reserves nothing for an aligned cell: an end,
+    // centre or decimal stop's cell, or a right or centre positional tab's,
+    // is admitted against the band, as left-to-right.
+    if (lineFitReduced(context) && tabCellIsAligned(seg, () => nextLineTabStop(
+      startPen + breakerState.currentWidth, context.bidiCustomStopsPx, context.bidiIntervalPx, frame.leadingShift))
+      && context.fitsMeasuredWidth(breakerState.currentWidth + tabFollowingMetrics().totalWidth, lineBandW(context))) {
+      commitAlignedTabCell(context);
+    }
     return;
   }
 
@@ -769,11 +831,7 @@ function processTabSegment(
     // Width of the content that trails the ptab up to the next tab / line end
     // — needed to right-/center-align it against `target` (the trailing text
     // is what aligns to the stop, §17.18.71).
-    let followW = 0;
-    for (const q of breakerState.queue) {
-      if ('isTab' in q || 'lineBreak' in q) break;
-      followW += tabFollowWidth(q);
-    }
+    const followW = tabFollowingMetrics().totalWidth;
     const target = positionalTabTarget(seg.ptab.alignment, box.start, box.end, followW);
     let tabW = target - absFromParaX;
     // §17.3.3.23: "If the alignment location … cannot be found on the current
@@ -791,7 +849,10 @@ function processTabSegment(
       // segment so the line-height reflects the ptab's font.
       tabW = 0;
     }
-    if (breakerState.currentWidth + tabW > availW()) {
+    // WORD_KASHIDA_LINE_FIT reserves nothing for an aligned cell: a right or
+    // centre positional tab and its cell are admitted against the band.
+    const ptabLimit = tabCellIsAligned(seg, () => null) ? lineBandW(context) : availW();
+    if (!context.fitsMeasuredWidth(breakerState.currentWidth + tabW, ptabLimit)) {
       if (breakerState.currentLine.length > 0) {
         flush(undefined, false, seg.src);
         breakerState.queue.unshift(seg);
@@ -804,7 +865,8 @@ function processTabSegment(
     // §17.3.3.23 selects the reference target independently of paragraph
     // indents. Library policy limits allocation to the actual paragraph/float
     // band: a fitting cell stays aligned, and all other cells use normal breaks.
-    if (seg.ptab.alignment !== 'left' && breakerState.currentWidth + followW <= availW()) {
+    if (tabCellIsAligned(seg, () => null)
+      && context.fitsMeasuredWidth(breakerState.currentWidth + followW, ptabLimit)) {
       commitAlignedTabCell(context);
     }
     return;
@@ -833,7 +895,7 @@ function processTabSegment(
   // Automatic stops returned by nextTabStop are left-aligned, so they fall
   // through to the left-tab path below.
   const alignmentRole = stop ? tabAlignmentRole(stop.alignment) : 'leading';
-  if (stop && alignmentRole !== 'leading') {
+  if (stop && tabCellIsAligned(seg, () => stop)) {
     const stopX = stopParaX;
     seg.leader = stop.leader;
     const following = tabFollowingMetrics();
@@ -848,11 +910,13 @@ function processTabSegment(
     // Stop coordinates are margin-relative (§17.3.1.37): a fitting cell keeps
     // that allocation on an unnarrowed line, past an authored right indent.
     // Otherwise the gap and cell are limited to the actual paragraph/float band.
+    // WORD_KASHIDA_LINE_FIT reserves nothing for an aligned cell: it is
+    // admitted against the band, while text before the tab keeps the fit width.
     const cellAvail = alignedTabCellAvailW(context);
-    const cellLimit = breakerState.currentWidth + tabW + following.totalWidth <= cellAvail
+    const cellLimit = context.fitsMeasuredWidth(breakerState.currentWidth + tabW + following.totalWidth, cellAvail)
       ? cellAvail : availW();
-    seg.marginAllocation = cellLimit > availW()
-      && breakerState.currentWidth + tabW + following.totalWidth > availW();
+    seg.marginAllocation = cellLimit > lineBandW(context)
+      && breakerState.currentWidth + tabW + following.totalWidth > lineBandW(context);
     if (breakerState.currentWidth + tabW > cellLimit) {
       if (breakerState.currentLine.length > 0) {
         flush(undefined, false, seg.src);
@@ -865,7 +929,7 @@ function processTabSegment(
     addToLine(seg, tabW, seg.fontSize, seg.fontSize * scale * SYNTHETIC_ASCENT_EM, seg.fontSize * scale * SYNTHETIC_DESCENT_EM);
     // Keep an aligned cell atomic only when it fits its band. Oversized cells
     // return to the iterator at their ordinary break sites.
-    if (breakerState.currentWidth + following.totalWidth <= cellLimit) {
+    if (context.fitsMeasuredWidth(breakerState.currentWidth + following.totalWidth, cellLimit)) {
       commitAlignedTabCell(context);
     }
     return;
@@ -1013,8 +1077,20 @@ function settleLineStartAutoSpace(
   return leading === 0 ? frame : { ...frame, w: frame.w - leading, wForFit: frame.wForFit - leading };
 }
 
+/** A pre-flush can likewise leave a segment fitted with its
+ * WORD_KERNED_SPACE_PAIRS pair at a line start, where it has no predecessor. */
+function settleLineStartKernedSpacePair(
+  context: BreakOpportunityIteratorContext,
+  frame: TextFitFrame,
+): TextFitFrame {
+  const pair = frame.s.leadingWordBoundaryPx ?? 0;
+  if (pair === 0 || lineEndsWithText(context.breakerState.currentLine)) return frame;
+  frame.s.leadingWordBoundaryPx = undefined;
+  return { ...frame, w: frame.w - pair, wForFit: frame.wForFit - pair };
+}
+
 function placeOrSplitText(context: BreakOpportunityIteratorContext, inputFrame: TextFitFrame): void {
-  const frame = settleLineStartAutoSpace(context, inputFrame);
+  const frame = settleLineStartKernedSpacePair(context, settleLineStartAutoSpace(context, inputFrame));
   const {
     breakerState,
     flush,
@@ -1102,8 +1178,11 @@ function placeOrSplitText(context: BreakOpportunityIteratorContext, inputFrame: 
       queueEmergencyTail(s, split);
     }
   } else {
+    // A prefix keeps the piece's leading seam pair (WORD_KERNED_SPACE_PAIRS),
+    // which placement charges; admit it against the same remaining width.
+    const leadingSeamPair = s.leadingWordBoundaryPx ?? 0;
     const semanticSplit = prefersWholeWordAtScriptBoundary(context, s)
-      ? 0 : explicitTextSplit(s, availW() - breakerState.currentWidth);
+      ? 0 : explicitTextSplit(s, availW() - breakerState.currentWidth - leadingSeamPair);
     if (semanticSplit > 0 && semanticSplit < s.text.length) {
       const prefix = s.text.slice(0, semanticSplit);
       const pw = strNaturalAdvance(s, prefix);
@@ -1129,15 +1208,21 @@ function placeOrSplitText(context: BreakOpportunityIteratorContext, inputFrame: 
       // line, split this member at the widest legal grapheme boundary that
       // fits the actual remaining band. This bases the decision on the group
       // advance, not on the follower's standalone width.
-      const remaining = availW() - breakerState.currentWidth;
+      const remaining = availW() - breakerState.currentWidth - leadingSeamPair;
       const split = emergencyTextSplit(s, remaining, true);
       // Splitting a glued member, or letting it overflow, forces its unit.
       const retained = (remaining > 0 || s.hardJoinPrev === true) && split > 0 && split < s.text.length
         ? s.text.slice(0, split) : s.text;
       if (split < s.text.length || placedAdvanceExceeds(context, s, retained)) {
         const unitStart = joinedUnitStart(breakerState.currentLine);
+        // The rejection reports the unit's visible advance: a member adding
+        // no visible character leaves the line's whole space suffix out.
+        const minimal = context.minimalLegalTextWidth(s);
+        const suffix = minimal === 0 && !lineEndSpaceCharged(context)
+          ? Math.min(lineTrailingSpaceSuffixWidth(breakerState.currentLine, context),
+            lineAdvanceFrom(breakerState.currentLine, unitStart)) : 0;
         context.forcedPlacement(
-          lineAdvanceFrom(breakerState.currentLine, unitStart) + context.minimalLegalTextWidth(s),
+          lineAdvanceFrom(breakerState.currentLine, unitStart) - suffix + minimal,
           unitStart,
         );
       }
@@ -1197,7 +1282,9 @@ function prepareAtomicTextFit(
   if (!preferWholeWord && s.explicitBreaks && follower?.joinPrev) {
     const whole = measureJoinedTextUnit(s, breakerState.queue, context, w, trailingSpaceW, 0, false, 'whole-leader');
     if (breakerState.currentWidth + fitWidthFor(whole.width, whole.trailingSpace, whole.next) > availW()) {
-      const split = context.explicitTextSplit(s, availW() - breakerState.currentWidth);
+      // The prefix keeps the leader's WORD_KERNED_SPACE_PAIRS seam pair.
+      const split = context.explicitTextSplit(s,
+        availW() - breakerState.currentWidth - (s.leadingWordBoundaryPx ?? 0));
       if (split > 0 && split < s.text.length) {
         context.queueEmergencyTail(s, split);
         breakerState.queue.unshift({ ...s, ...RESET_SLICED_TEXT_MEASUREMENT,
@@ -1284,7 +1371,7 @@ function prepareAtomicTextFit(
     const chunkWForFit = fitWidthFor(chunkW, chunkTrail, next);
     if (
       breakerState.currentWidth + chunkWForFit > availW() &&
-      chunkWForFit <= breakerState.lineMaxWidth
+      chunkWForFit <= lineFitWidth(context, breakerState.lineMaxWidth)
     ) {
       flush(undefined, false, s.src);
     }

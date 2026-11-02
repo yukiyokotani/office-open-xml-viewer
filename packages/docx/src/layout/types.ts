@@ -1462,6 +1462,12 @@ export interface TableRowFormatInput {
     /** Null unless the effective margin comes from an authored/inherited
      * legacy left element. Defaults and logical margins are unmeasured. */
     readonly originLeftMarginPt?: number | null;
+    /** True only when parser provenance shows that no cell, exception, table
+     * or style layer authors a left/right margin. */
+    readonly horizontalMarginsOmitted?: boolean;
+    /** True only when parser provenance shows that every layer authors its
+     * horizontal margins, if at all, as dxa legacy left/right elements. */
+    readonly dxaHorizontalMarginsOnly?: boolean;
   }[];
 }
 
@@ -1613,6 +1619,8 @@ export interface FlowContainer {
   readonly noWrap?: boolean;
   /** Upright inline math in a quarter-turn DrawingML WordArt frame. */
   readonly quarterTurnMath?: boolean;
+  /** The story is laid out in a quarter-turned (vertical bodyPr) text box. */
+  readonly quarterTurned?: boolean;
 }
 
 export interface FlowCursor extends PointPt {}

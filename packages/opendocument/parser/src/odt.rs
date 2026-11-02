@@ -230,6 +230,7 @@ fn read_with(
     reader.charge_construction(font_table_bytes)?;
     let used = used_font_table(&reader.used_faces.borrow())?;
     let images = std::mem::take(&mut reader.images);
+    let no_justify_breaks = reader.layout_flags.no_justify_breaks;
     let body = reader.finish()?;
 
     let document = Document {
@@ -237,6 +238,10 @@ fn read_with(
         body,
         settings: Some(DocumentSettings {
             default_tab_stop,
+            // DoNotJustifyLinesWithManualBreak leaves a justified line ended
+            // by a manual break unjustified, as DOCX doNotExpandShiftReturn
+            // does (§17.15.3.5); without it such paragraphs reject.
+            do_not_expand_shift_return: no_justify_breaks.then_some(true),
             ..DocumentSettings::default()
         }),
         font_family_classes: metadata(&used, |face| face.generic),
@@ -494,6 +499,10 @@ const INERT_SETTINGS: [&str; 10] = [
     "MsWordCompTrailingBlanks",
     "MsWordUlTrailSpace",
 ];
+
+/// A DOCX kerning threshold (pt) below every font size: kerning applies at
+/// any size (§17.3.2.19 `w:kern`; zero would disable it).
+const KERN_EVERY_SIZE: f64 = f64::MIN_POSITIVE;
 
 /// LibreOffice configuration items that change justification, admitted with
 /// either value and applied to justified paragraphs (see `LayoutFlags`).
@@ -1175,7 +1184,10 @@ impl<'a> Reader<'a> {
             // whole-unit distribution leaves its lines up to 0.1 pt per space
             // short). JustifyLinesWithShrinking also compresses spaces, and
             // LibreOffice stretches a line ended by a manual break unless
-            // DoNotJustifyLinesWithManualBreak; the DOCX layout does neither.
+            // DoNotJustifyLinesWithManualBreak. The DOCX layout does not
+            // compress, and stretches such a line by Word's rules (not
+            // measured against LibreOffice), so only that setting, mapped to
+            // doNotExpandShiftReturn, admits a manual break here.
             if self.layout_flags.shrink {
                 return Err(unsupported("justify-shrinking"));
             }
@@ -2524,15 +2536,18 @@ impl RunProperties {
             // DOCX synthesizes small caps its own way; not yet measured.
             return Err(unsupported("small-caps"));
         }
-        // §20.315 pair kerning on: DOCX kerning with a 0pt threshold kerns
-        // every size (wordKerningApplies, outside compatibility mode 15).
+        // §20.315 pair kerning on: DOCX kerning with the smallest positive
+        // threshold kerns every size (wordKerningApplies; a 0pt threshold
+        // disables kerning). Like Word, LibreOffice also kerns the pairs
+        // that include U+0020 (measured, Arial, Times New Roman and
+        // Liberation Serif and Sans, 12 pt), as WORD_KERNED_SPACE_PAIRS does.
         // Off: no DOCX kerning, which matches LibreOffice's unkerned text
         // (measured, Liberation Serif and Sans, 12 and 30 pt, justified).
         // LibreOffice kerns text whose styles never set the attribute
         // (measured), against the ODF default of off (§20.315); the corpus
         // always sets it, so an unset value rejects.
         let kerning = match cascade.get(NS_STYLE, "letter-kerning") {
-            Some("true") => Some(0.0),
+            Some("true") => Some(KERN_EVERY_SIZE),
             Some("false") => None,
             None => return Err(unsupported("letter-kerning-unset")),
             Some(_) => return Err(invalid("bad letter-kerning")),
@@ -4464,11 +4479,22 @@ mod tests {
             .unwrap_err(),
             unsupported("justify-shrinking")
         );
-        assert!(justified(
+        // DOCX doNotExpandShiftReturn keeps those break-ended lines
+        // unjustified in the layout; without the setting it stays unset.
+        let shift_return = |document: &Document| {
+            document
+                .settings
+                .as_ref()
+                .and_then(|settings| settings.do_not_expand_shift_return)
+        };
+        let admitted = justified(
             "DoNotJustifyLinesWithManualBreak",
-            r#"<text:p text:style-name="J">alpha<text:line-break/>beta</text:p>"#
+            r#"<text:p text:style-name="J">alpha<text:line-break/>beta</text:p>"#,
         )
-        .is_ok());
+        .unwrap();
+        assert_eq!(shift_return(&admitted), Some(true));
+        let plain = justified("JustifyLinesWithShrinking", "<text:p>alpha beta</text:p>").unwrap();
+        assert_eq!(shift_return(&plain), None);
         // Left-aligned paragraphs are unaffected by either setting.
         assert!(justified("JustifyLinesWithShrinking", "<text:p>alpha beta</text:p>").is_ok());
     }
@@ -5396,7 +5422,7 @@ mod tests {
                     .collect()
             })
             .collect();
-        assert_eq!(kerning, vec![vec![None], vec![Some(0.0)]]);
+        assert_eq!(kerning, vec![vec![None], vec![Some(KERN_EVERY_SIZE)]]);
         // A paragraph mixing kerned and unkerned runs rejects.
         let mixed = read_fixture(Fixture {
             default_text: r#"style:font-name="Serif" fo:font-size="12pt" style:letter-kerning="true""#,

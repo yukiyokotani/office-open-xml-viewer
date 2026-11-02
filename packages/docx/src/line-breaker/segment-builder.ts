@@ -1150,7 +1150,7 @@ function pushSegmentPiece(
     fontHint: r.fontHint,
     eastAsiaLanguage: r.langEastAsia,
     kerning:
-      wordKerningApplies(cs ? csFontSize : base.fontSize, effectiveKerningThreshold, environment.compatibilityMode),
+      wordKerningApplies(cs ? csFontSize : base.fontSize, effectiveKerningThreshold),
     measure: false,
   });
   const shaped = authoritativeSpan
@@ -1595,6 +1595,7 @@ function emitResolvedTextSegment(
     colorAuto: r.colorAuto ?? false,
     border: r.border ?? null,
     ruby: emissionState.firstSeg ? ruby : undefined,
+    ...(ruby ? { rubyPiece: true as const } : {}),
     revision,
     ...(revision && environment.showTrackedChanges === true
       ? {

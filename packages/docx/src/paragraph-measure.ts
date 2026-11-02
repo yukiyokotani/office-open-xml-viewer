@@ -27,6 +27,7 @@ import {
   WORD_INLINE_OBJECT_GRID_LINE_ALLOCATION,
   WORD_PICTURE_BULLET_LINE_PARTICIPATION,
   wordJustifiedInterwordCompressionApplies,
+  wordJustifiedLineFit,
 } from './layout/line-compatibility.js';
 import { LayoutInvariantError } from './layout/diagnostics.js';
 import type { MeasurementTextContext } from './layout/measurement-capabilities.js';
@@ -57,6 +58,9 @@ export interface ParagraphMeasurementEnvironment extends LineLayoutEnvironment {
   readonly compatibilityMode?: number;
   /** §17.15.3.8 ulTrailSpace: hanging line-end spaces keep their underline. */
   readonly ulTrailSpace?: boolean;
+  /** §17.15.3.5 doNotExpandShiftReturn: lines ended by a manual break stay
+   * unjustified. */
+  readonly doNotExpandShiftReturn?: boolean;
 }
 
 export interface TextMeasurer {
@@ -610,7 +614,11 @@ export function measureParagraph(
     context.overflowPunct !== false,
     wordJustifiedInterwordCompressionApplies(
       paragraph.alignment, environment.compatibilityMode,
-    ) && environment.verticalCJK !== true,
+    ) && environment.verticalCJK !== true
+      ? { lineEndIdeographicSpaceHangs: paragraph.wordWrap !== false }
+      : false,
+    wordJustifiedLineFit(paragraph.alignment, environment.compatibilityMode, context.baseRtl, context.wordWrap !== false,
+      context.baseRtl ? context.physicalIndentLeftPt : context.physicalIndentRightPt + rightGridAdjustmentPt),
   );
   if (lines.length === 0) return measureMarkOnly();
 

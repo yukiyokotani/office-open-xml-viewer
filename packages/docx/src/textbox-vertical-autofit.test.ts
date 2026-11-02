@@ -163,34 +163,14 @@ describe('§20.1.10.83 + §21.1.2.1.1 — vertical spAutoFit cross-axis grow/shr
     expect(fit).toEqual(box);
   });
 
-  it('inset-axis mapping: tIns/bIns add to the CROSS (width) extent (not the column length)', () => {
-    // Retained acquisition returns `tIns + contentH + bIns` on the fitted axis;
-    // the wrap width is physical HEIGHT, so tIns/bIns land on the physical
-    // WIDTH (cross) axis. Two boxes with identical content + identical h differ
-    // only by tIns/bIns ⇒ the grown widths differ by exactly 2·tb.
-    const ctx = makeMeasureCtx();
-    const mk = (tb: number): ShapeRun => {
-      const block: ShapeText = { text: CJK.repeat(30), fontSizePt: 10, alignment: 'left', runs: [run(CJK.repeat(30))] };
-      return {
-        type: 'shape', zOrder: 0, subpaths: [], presetGeometry: 'rect', fill: null, stroke: null,
-        textBlocks: [block], textAnchor: 't',
-        textInsetL: 0, textInsetT: tb, textInsetR: 0, textInsetB: tb,
-        textVert: 'eaVert', textAutofit: 'sp',
-      } as unknown as ShapeRun;
-    };
-    const box = { x: 0, y: 0, w: 30, h: 100 };
-    const w0 = retainedAutofitBox(mk(0), box, ctx).w;
-    const w7 = retainedAutofitBox(mk(7), box, ctx).w;
-    expect(w7 - w0, 'tIns+bIns=2·7 added to the cross width').toBeCloseTo(14, 5);
-  });
-
-  it('inset-axis mapping: lIns/rIns govern the COLUMN LENGTH (wrap) axis — more inset ⇒ shorter columns ⇒ wider box', () => {
-    // lIns/rIns reduce the wrap width (= physical HEIGHT = column length), so a
-    // larger lIns/rIns fits fewer chars per column ⇒ more columns ⇒ a WIDER cross
-    // extent. This distinguishes the wrap axis from the cross axis.
+  it('inset-axis mapping: lIns/rIns add to the CROSS (width) extent (not the column length)', () => {
+    // WORD_TEXT_BOX_PHYSICAL_INSETS (Windows Word 16.0.20527 vertical-inset
+    // controls): insets stay on their physical edges, so the left/right insets
+    // bound the column stack and a fitted box is columns + lIns + rIns wide.
+    // Two boxes differing only by lIns/rIns differ by exactly 2·lr.
     const ctx = makeMeasureCtx();
     const mk = (lr: number): ShapeRun => {
-      const block: ShapeText = { text: CJK.repeat(20), fontSizePt: 10, alignment: 'left', runs: [run(CJK.repeat(20))] };
+      const block: ShapeText = { text: CJK.repeat(30), fontSizePt: 10, alignment: 'left', runs: [run(CJK.repeat(30))] };
       return {
         type: 'shape', zOrder: 0, subpaths: [], presetGeometry: 'rect', fill: null, stroke: null,
         textBlocks: [block], textAnchor: 't',
@@ -199,10 +179,32 @@ describe('§20.1.10.83 + §21.1.2.1.1 — vertical spAutoFit cross-axis grow/shr
       } as unknown as ShapeRun;
     };
     const box = { x: 0, y: 0, w: 30, h: 100 };
+    const w0 = retainedAutofitBox(mk(0), box, ctx).w;
+    const w7 = retainedAutofitBox(mk(7), box, ctx).w;
+    expect(w7 - w0, 'lIns+rIns=2·7 added to the cross width').toBeCloseTo(14, 5);
+  });
+
+  it('inset-axis mapping: tIns/bIns govern the COLUMN LENGTH (wrap) axis — more inset ⇒ shorter columns ⇒ wider box', () => {
+    // tIns/bIns reduce the column length (= physical HEIGHT), so larger
+    // top/bottom insets fit fewer chars per column ⇒ more columns ⇒ a WIDER
+    // cross extent. This distinguishes the wrap axis from the cross axis.
+    const ctx = makeMeasureCtx();
+    const mk = (tb: number): ShapeRun => {
+      const block: ShapeText = { text: CJK.repeat(20), fontSizePt: 10, alignment: 'left', runs: [run(CJK.repeat(20))] };
+      return {
+        type: 'shape', zOrder: 0, subpaths: [], presetGeometry: 'rect', fill: null, stroke: null,
+        textBlocks: [block], textAnchor: 't',
+        textInsetL: 0, textInsetT: tb, textInsetR: 0, textInsetB: tb,
+        textVert: 'eaVert', textAutofit: 'sp',
+      } as unknown as ShapeRun;
+    };
+    const box = { x: 0, y: 0, w: 30, h: 100 };
     const wNarrowInset = retainedAutofitBox(mk(0), box, ctx).w;
     const wWideInset = retainedAutofitBox(mk(25), box, ctx).w;
-    expect(wWideInset, 'shorter columns from bigger lIns/rIns pack into more columns ⇒ wider')
-      .toBeGreaterThan(wNarrowInset);
+    // 20 chars of 10pt: 10 per 100pt column (2 columns) vs 5 per 50pt
+    // column (4 columns), so the column stack doubles.
+    expect(wWideInset, 'shorter columns from bigger tIns/bIns pack into more columns ⇒ wider')
+      .toBeCloseTo(2 * wNarrowInset, 5);
   });
 
   it('a shape without spAutoFit or without text blocks is returned unchanged', () => {

@@ -92,6 +92,7 @@ export function paragraphMeasurementEnvironment(
     lineWrapLikeWord6: state.layoutSettings.compat.lineWrapLikeWord6,
     enableOpenTypeFeatures: state.layoutSettings.compat.enableOpenTypeFeatures,
     ...(state.layoutSettings.compat.ulTrailSpace ? { ulTrailSpace: true } : {}),
+    ...(state.layoutSettings.compat.doNotExpandShiftReturn ? { doNotExpandShiftReturn: true } : {}),
     ...(state.layoutSettings.compat.compatibilityMode === undefined
       ? {}
       : { compatibilityMode: state.layoutSettings.compat.compatibilityMode }),

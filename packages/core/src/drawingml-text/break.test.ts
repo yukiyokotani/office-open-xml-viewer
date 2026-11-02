@@ -76,35 +76,33 @@ describe('matched PowerPoint and Excel DrawingML wrap controls', () => {
 
   it('bounds work for a long unbreakable word in a one-character box', () => {
     let measuredCharacters = 0;
-    const start = performance.now();
     const result = breakDrawingMlText([{ type: 'text', text: 'a'.repeat(3200), style: 'same' }], {
       maxWidth: 1,
       measureText(value) { measuredCharacters += value.length; return value.length; },
     });
-    const elapsedMs = performance.now() - start;
     expect(result).toHaveLength(3200);
+    // Deterministic work bound instead of wall-clock time (#2039): a linear
+    // breaker measures ~4n characters here; re-measuring every prefix is
+    // ~n²/2 ≈ 5.1M.
     expect(measuredCharacters).toBeLessThan(30_000);
-    expect(elapsedMs).toBeLessThan(100);
   });
 
   it('bounds measurement for negative tracking in a one-character box', () => {
     let measuredCharacters = 0;
-    const start = performance.now();
     const result = breakDrawingMlText([{ type: 'text', text: 'a'.repeat(3200), style: 'same' }], {
       maxWidth: 1,
       nonMonotoneMeasure: true,
       measureText(value) { measuredCharacters += value.length; return value.length; },
     });
-    const elapsedMs = performance.now() - start;
     expect(result).toHaveLength(3200);
+    // The bounded shaping window measures ~63n characters; re-measuring every
+    // prefix is ~n²/2 ≈ 5.1M.
     expect(measuredCharacters).toBeLessThan(1_000_000);
-    expect(elapsedMs).toBeLessThan(100);
   });
 
   it('bounds tab resolution for a densely tabbed negative-tracking paragraph', () => {
     let measuredCharacters = 0;
     let tabResolutions = 0;
-    const start = performance.now();
     const result = breakDrawingMlText([{ type: 'text', text: 'ab\t'.repeat(1067), style: 'same' }], {
       maxWidth: 9,
       defaultTabSize: 72,
@@ -116,13 +114,12 @@ describe('matched PowerPoint and Excel DrawingML wrap controls', () => {
         return glyphs * 9 - 1.5 * Math.max(0, glyphs - 1);
       },
     });
-    const elapsedMs = performance.now() - start;
     expect(result.length).toBeGreaterThan(1000);
     // One pen per line for the fit and one for the closed line's paint width;
     // re-resolving every candidate prefix would call this per candidate.
     expect(tabResolutions).toBeLessThanOrEqual(2 * result.length);
+    // ~2n characters for n = 3201; re-measuring every prefix is ~n²/2 ≈ 5.1M.
     expect(measuredCharacters).toBeLessThan(100_000);
-    expect(elapsedMs).toBeLessThan(100);
   });
 
   it('keeps the last fitting prefix past a shaping window under negative tracking', () => {

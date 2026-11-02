@@ -175,7 +175,7 @@ export const WORD_TABLE_ORIGIN_COMPATIBILITY = defineCompatibilityRule({
   id: 'word-table-origin-compatibility',
   evidence: { kind: 'office-observation', syntheticFixtureId: 'table-origin-compatibility-and-occupied-grid',
     application: 'Microsoft Word', version: '16.113.2', platform: 'macOS 27.0' },
-  description: '528 ordinary-table controls cover modes 11/12/14/15, LTR/RTL, leading/center/end, omitted/zero/positive/negative indentation, explicit zero/asymmetric cell margins, cell overrides, first-row exceptions, fixed/AutoFit, nested contents, borderless and full-band tables. For top-level body tables with positive dxa cell preferences, explicit legacy horizontal margins and zero spacing (fixed auto/dxa table width or AutoFit dxa table width), modes 11/12/14 hang the first cell left margin: leading placement only with authored indentation and anchored to the first row, end placement per row. Center and end ignore indentation in both placement and width fitting, as ECMA-376 §17.4.50 specifies (contrary to MS-OI29500 §2.1.155). Mode 15 removes the margin hang. Border rasterization is separate from nominal grid geometry. Spaced tables and wholly omitted horizontal margins remain unresolved and retain the previous origin and content-inset behavior; Nested table origins, logical start/end margin spellings, and other compatibility modes are outside the measured scope. Windows Word 16.0 build 16.0.20430 retest is consistent within the tested subset; see the officeObservations entry for this rule in scripts/docx-compatibility-microsoft-evidence.json for values and evidence limits.',
+  description: '528 ordinary-table controls cover modes 11/12/14/15, LTR/RTL, leading/center/end, omitted/zero/positive/negative indentation, explicit zero/asymmetric cell margins, cell overrides, first-row exceptions, fixed/AutoFit, nested contents, borderless and full-band tables. For top-level body tables with positive dxa cell preferences, explicit legacy horizontal margins and zero spacing (fixed auto/dxa table width or AutoFit dxa table width), modes 11/12/14 hang the first cell left margin: leading placement only with authored indentation and anchored to the first row, end placement per row. Center and end ignore indentation in both placement and width fitting, as ECMA-376 §17.4.50 specifies (contrary to MS-OI29500 §2.1.155). Mode 15 removes the margin hang. Windows Word 16.0.20527 single-cell controls (5000-twip dxa table and cell, single borders, with no styles part, a styles part without a table style, or a default Normal Table style carrying tblInd 0 and 108-twip left/right margins; compatibility mode omitted, 11, 12, 14 and 15) extend this: an omitted compatibilityMode hangs exactly like mode 14 (style margins 108, tblCellMar 300/200, tcMar 400/100, tblInd 500, tblInd -300, tblInd 500 with tblCellMar left 200, right-aligned and bidiVisual tables all place text identically in both); a tblInd supplied by the table style hierarchy (the default table style\'s tblInd 0, or a basedOn style\'s tblInd 500) counts as authored indentation (modes 11 and 12 hang the style margin, tblCellMar 300 and tcMar 400 exactly like mode 14), while the same explicit margins without any tblInd in the hierarchy do not hang; a centered table never hangs; and a table nested in a cell keeps its edge at the containing cell\'s content edge in every mode (nested origins stay outside the hang). With horizontal margins omitted at every layer (cell, exception, table, style), the same top-level body structure in modes 11/12/14/15 was measured only on controls-1664 page 7 (fixed 108/180pt dxa tracks, 288pt dxa tblW, LTR and bidiVisual, justification omitted/start/end, tblInd 0 and +36pt): end justification places the table identically with tblInd 0 and +36pt in both directions, so ECMA-376 §17.4.50 ignores the indent there as well, while omitted/start justification applies it. Only that end class joins the observation; omitted-margin right/center rows, an omitted mode, mode 13, nonpositive or non-dxa cell widths and nested tables keep the previous origin behavior. Spaced tables remain unresolved and retain the previous origin behavior (the content inset of omitted margins is word-table-unspecified-horizontal-cell-margin); logical start/end margin spellings and other compatibility modes are outside the measured scope. Border rasterization is separate from nominal grid geometry. Windows Word 16.0 build 16.0.20430 retest is consistent within the tested subset; see the officeObservations entry for this rule in scripts/docx-compatibility-microsoft-evidence.json for values and evidence limits.',
 });
 
 export const WORD_FIXED_UNUSED_LEADING_GRID = defineCompatibilityRule({
@@ -185,10 +185,70 @@ export const WORD_FIXED_UNUSED_LEADING_GRID = defineCompatibilityRule({
   description: 'The original fixed gridBefore controls in modes 11/12/14/15 and 48 follow-ups in modes 14/15 show that a leading track skipped by every row has zero layout width. Fixed auto table width retains the occupied 108/180pt tracks; dxa 324pt scales them to 121.5/202.5pt. A preceding row occupying the 36pt track preserves it and ordinary skipped-row placement. wBefore of 0/18/36pt has no effect in either class. This refines ECMA-376 §§17.4.15 and 17.18.87 only for top-level body nonspaced fixed tables with auto/dxa table width and positive dxa cell preferences; nested and nonbody stories, percentage table width, AutoFit, trailing skips, spans, and nonpositive or missing cell preferences remain outside the observation. Windows Word 16.0 build 16.0.20430 retest is consistent within the tested subset; see the officeObservations entry for this rule in scripts/docx-compatibility-microsoft-evidence.json for values and evidence limits.',
 });
 
+/**
+ * ECMA-376 §17.4.50: tblInd applies only to a leading (left/start/omitted)
+ * table justification. WORD_TABLE_ORIGIN_COMPATIBILITY enables this for its
+ * measured origin classes; this rule extends only the indent part (not the
+ * legacy margin hang) to the further measured table structures below.
+ */
+export const WORD_TABLE_NONLEADING_INDENT_SCOPE = defineCompatibilityRule({
+  id: 'word-table-nonleading-indent-scope',
+  evidence: { kind: 'office-observation', syntheticFixtureId: 'table-nonleading-indent-classes',
+    application: 'Microsoft Word', version: '16.0.20527', platform: 'Windows' },
+  description: 'ECMA-376 §17.4.50 ignores tblInd unless the table justification is leading. Windows Word 16.0.20527 controls (one-row two-cell 4000-twip tables, LTR and bidiVisual, jc left/start/center/right/end, tblInd omitted, +720, -360 and a table-style tblInd 720; compatibility mode omitted, 11, 12, 14 and 15) place and size every center, right and end table identically for all four indents, while left/start tables move by the indent (mirrored under bidiVisual). This holds for omitted horizontal margins (fixed and AutoFit dxa tables), a right-only tblCellMar, explicit 108-twip margins with percentage, auto, nil, missing and zero-dxa cell widths, a percentage table width, an AutoFit auto-width table with dxa or auto cells, 60-twip cell spacing with explicit or omitted margins, tables nested once in a body table cell (explicit and omitted margins), and top-level tables in a header, a footer, a page-anchored text box and a footnote (explicit and omitted margins, LTR and bidiVisual). The indent rule alone extends to these classes; the legacy margin hang of word-table-origin-compatibility keeps its own measured scope. Horizontal margins must be omitted or authored as dxa legacy left/right elements at every layer (cell, exception, table, style), the kind resolved as §17.4.87 does (an omitted type is dxa, a percent measurement is pct); nil/auto/pct widths and logical start/end spellings were not measured. An adjacent-table (§17.4.37) group is one table and qualifies with a common frame and grid. An AutoFit table without any effective preferred table or cell width (tblW auto, tcW auto; zero, nil and auto widths count as absent, as in the column solver) also ignores the indent in these controls, but it is excluded until its separately tracked content-fit width defect is fixed: its nonleading tables are placed far from the observed position at every indent, and applying the indent rule alone moves the indented rows farther from it. Compatibility mode 13 is not a value Word opens; other modes, row-level justification or table exceptions, authored gridBefore/gridAfter (including offsets the parser clears against the grid), floating or vertical-text tables, tables in a quarter-turned (vertical bodyPr) text box, deeper nesting and endnotes were not measured and keep the previous behavior.',
+});
+
+/** WORD_TABLE_NONLEADING_INDENT_SCOPE: the measured structures where a
+ * nonleading table ignores its tblInd outside the origin observation. */
+export function wordNonleadingIndentScope(input: Readonly<{
+  mode: number | undefined;
+  story: string | undefined;
+  topLevel: boolean;
+  tableCellDepth: number;
+  verticalText: boolean;
+  commonFrame: boolean;
+  marginClass: boolean;
+  outerEdgeIndent: boolean;
+  ordinaryFlow: boolean;
+  positioned: boolean;
+  rowOverrides: boolean;
+  gridSkips: boolean;
+  /** AutoFit with no preferred table or cell width (excluded, see the rule). */
+  contentSizedAutoFit: boolean;
+}>): boolean {
+  const story = input.story;
+  const measuredStory = story === 'body' || story === 'header' || story === 'footer'
+    || story === 'footnote' || story === 'textbox';
+  const measuredNesting = input.topLevel || (story === 'body' && input.tableCellDepth === 1);
+  return wordMeasuredTableOriginPlacementMode(input.mode) && measuredStory && measuredNesting
+    && !input.verticalText && input.commonFrame && input.marginClass && !input.outerEdgeIndent && input.ordinaryFlow
+    && !input.positioned && !input.rowOverrides && !input.gridSkips && !input.contentSizedAutoFit;
+}
+
 /** The observation is deliberately restricted to the exported mode boundaries. */
 export function wordMeasuredTableOriginMode(mode: number | undefined): boolean {
   return mode === 11 || mode === 12 || mode === 14 || mode === 15;
 }
+
+/** WORD_TABLE_ORIGIN_COMPATIBILITY origin scope: the explicit measured modes
+ * plus an omitted compatibilityMode, which places tables like mode 14.
+ * WORD_FIXED_UNUSED_LEADING_GRID keeps {@link wordMeasuredTableOriginMode}. */
+export function wordMeasuredTableOriginPlacementMode(mode: number | undefined): boolean {
+  return mode === undefined || wordMeasuredTableOriginMode(mode);
+}
+
+/**
+ * ECMA-376 §17.4.34 / §17.4.11 give tables whose style hierarchy never
+ * specifies a leading/trailing cell margin 115 twips. Word lays out 0. The
+ * DOCX parser applies this fallback (parser.rs, table cell margins), after
+ * direct tblCellMar and the associated (or §17.7.4 default) table style.
+ */
+export const WORD_TABLE_UNSPECIFIED_HORIZONTAL_CELL_MARGIN = defineCompatibilityRule({
+  id: 'word-table-unspecified-horizontal-cell-margin',
+  evidence: { kind: 'office-observation', syntheticFixtureId: 'table-cell-margin-default-and-origin',
+    application: 'Microsoft Word', version: '16.0.20527', platform: 'Windows' },
+  description: 'A left or right cell margin that neither tcMar, tblCellMar nor the table style hierarchy specifies is 0, not the 115 twips of ECMA-376 §§17.4.34/17.4.11. Windows Word 16.0.20527 controls (5000-twip single-cell tables with no styles part, or a styles part without any table style, in compatibility modes omitted/11/12/14/15): text starts at the table edge and ends at its trailing edge for default margins, tblInd 500, centered, right-aligned, bidiVisual, tblInd -300 and nested 3000-twip tables, while explicit tblCellMar 0, 300/200 and tcMar 400/100 apply as authored; a table with only tblCellMar left 200 keeps a 0 right margin. The same 0 margin (default and tblInd 500 tables, modes omitted and 15) holds in a header, a footer, an inline text box and a footnote, identically to a body control in the same document. A default Normal Table style carrying 108-twip margins supplies 108 as usual. A table style that exists but omits tblCellMar was not measured separately; it reaches the same fallback.',
+});
 
 export const WORD_EXACT_ROW_VERTICAL_CLIP_ONLY = defineCompatibilityRule({
   id: 'word-exact-row-vertical-clip-only',
@@ -594,8 +654,11 @@ export function wordTableOriginTranslationPt(input: Readonly<{
   indentAuthored: boolean;
   firstLeftMarginPt: number;
   rowLeftMarginPt: number;
+  /** WORD_TABLE_NONLEADING_INDENT_SCOPE outside the origin observation. */
+  nonleadingIndentIgnored?: boolean;
 }>): number {
-  const indentPt = wordTableEffectiveIndentPt(input);
+  const indentPt = wordTableEffectiveIndentPt({ ...input,
+    measured: input.measured || input.nonleadingIndentIgnored === true });
   if (!input.measured) return indentPt;
   if (input.justification === 'center') return indentPt;
   if (input.justification === 'right' || input.justification === 'end') {

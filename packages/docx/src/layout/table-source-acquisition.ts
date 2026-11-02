@@ -78,6 +78,9 @@ export interface TableRowLayoutAcquisitionWire {
   readonly justification: string | null;
   readonly beforeWidth: TableWidthAcquisitionWire | null;
   readonly afterWidth: TableWidthAcquisitionWire | null;
+  /** A positive gridBefore/gridAfter was authored, even when normalization
+   * against the grid cleared it (§17.4.14/.15). */
+  readonly gridSkipAuthored?: boolean;
   readonly cellSpacing: TableWidthAcquisitionWire | null;
   readonly styleCellSpacing?: TableWidthAcquisitionWire | null;
   readonly styleCellMargins?: TableMarginAcquisitionWire | null;

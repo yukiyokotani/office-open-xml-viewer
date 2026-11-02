@@ -45,11 +45,15 @@ function textRun(text: string, extra: Partial<DocxTextRun> = {}): DocParagraph['
   return { type: 'text', ...run } as DocParagraph['runs'][number];
 }
 
-function para(runs: DocParagraph['runs'], alignment: DocParagraph['alignment']): BodyElement {
+function para(
+  runs: DocParagraph['runs'],
+  alignment: DocParagraph['alignment'],
+  extra: Partial<DocParagraph> = {},
+): BodyElement {
   const p: DocParagraph = {
     alignment, indentLeft: 0, indentRight: 0, indentFirst: 0,
     spaceBefore: 0, spaceAfter: 0, lineSpacing: null, numbering: null, tabStops: [],
-    runs, defaultFontSize: 20, defaultFontFamily: 'NotInMetrics',
+    runs, defaultFontSize: 20, defaultFontFamily: 'NotInMetrics', ...extra,
   };
   return { type: 'paragraph', ...p } as BodyElement;
 }
@@ -77,6 +81,7 @@ function visibleEnd(line: LineLayout): number {
 
 // Seven 4-letter words (340 pt visible, 350 pt with the line-end space) fit
 // the 360 pt band; the eighth wraps.
+const MODE_15: DocSettings = { compatibilityMode: 15 };
 const WORDS = 'aaaa bbbb cccc dddd eeee ffff gggg hhhh';
 
 describe('WORD_LINE_END_SPACE_HANGS', () => {
@@ -125,6 +130,84 @@ describe('WORD_LINE_END_SPACE_HANGS', () => {
       const [line] = lines(para(runs, 'both'), { compatibilityMode: 15 });
       expect(visibleEnd(line!)).toBeCloseTo(380, 6);
     }
+  });
+
+  it('hangs an overflowing line-end U+3000 from the mode-15 fit', () => {
+    // 35 ideographs (350 pt) and a 15 pt U+3000 overflow the 360 pt band: the
+    // space hangs and the ideographs spread to the band edge.
+    const [line] = lines(para([textRun('あ'.repeat(35)), textRun('\u3000', { fontSize: 30 }), textRun('いい')], 'both'),
+      { compatibilityMode: 15 });
+    expect(texts(line!).map((p) => p.text).join('')).toBe(`${'あ'.repeat(35)}\u3000`);
+    const ideographs = texts(line!).filter((p) => p.text.trim() !== '').at(-1)!;
+    expect(ideographs.bounds.xPt + ideographs.advancePt).toBeCloseTo(380, 6);
+  });
+
+  it('keeps U+3000 between Latin words at its natural width in mode 15', () => {
+    // Seven words and six U+3000 separators (340 pt) and a line-end U+3000
+    // fit the band; the eighth word wraps.
+    const words = 'aaaa bbbb cccc dddd eeee ffff gggg hhhh'.replaceAll(' ', '\u3000');
+    const [mode15] = lines(para([textRun(words)], 'both'), { compatibilityMode: 15 });
+    expect(visibleEnd(mode15!)).toBeCloseTo(360, 6);
+    const [legacy] = lines(para([textRun(words)], 'both'));
+    expect(visibleEnd(legacy!)).toBeCloseTo(380, 6);
+    // A U+3000 next to an ideograph keeps its opportunity: 'ああ' and six
+    // words (320 pt) spread to the band edge.
+    const [mixed] = lines(para([textRun(`ああ\u3000${words}`)], 'both'), { compatibilityMode: 15 });
+    expect(visibleEnd(mixed!)).toBeCloseTo(380, 6);
+  });
+
+  it('gives no slack to the spaces of a hanging U+0020/U+3000 tail', () => {
+    // A 335 pt band: seven words end at 355; ' \u3000 ' hangs past the edge.
+    const [line] = lines(para([textRun('aaaa bbbb cccc dddd eeee ffff gggg \u3000 hhhhhhhhhhhhhhhh')], 'both',
+      { indentRight: 25 }), MODE_15);
+    expect(visibleEnd(line!)).toBeCloseTo(355, 6);
+    // The same tail inside one run with ideographs: every U+3000 of it hangs.
+    const [cjk] = lines(para([textRun(`${'あ'.repeat(35)}\u3000 \u3000`), textRun('いい')], 'both',
+      { indentRight: 5 }), MODE_15);
+    expect(visibleEnd(cjk!)).toBeCloseTo(375, 6);
+  });
+
+  it('classifies the neighbours of a mode-15 U+3000 by visible text only', () => {
+    // Five words fit after a 10 pt lead cell and a U+3000 (310 pt); the
+    // U+3000 separators between Latin words give no expansion.
+    const words = 'aaaaa bbbbb ccccc ddddd eeeee fffff ggggg'.replaceAll(' ', '\u3000');
+    const latin = lines(para([textRun('x'), textRun(`\u3000${words}`)], 'both'), MODE_15)[0]!;
+    expect(visibleEnd(latin)).toBeCloseTo(330, 6);
+    // A fitText ideograph is an opaque cell, like an object: no CJK neighbour.
+    const fitted = lines(para([textRun('\u3042', { fitTextVal: 200, fitTextId: 7 }), textRun(`\u3000${words}`)], 'both'),
+      MODE_15)[0]!;
+    expect(visibleEnd(fitted)).toBeCloseTo(330, 6);
+    // A supplementary ideograph is CJK: its U+3000 opens.
+    const han = lines(para([textRun('\u{20000}'), textRun(`\u3000${words}`)], 'both'), MODE_15)[0]!;
+    expect(visibleEnd(han)).toBeCloseTo(380, 6);
+  });
+
+  it('keeps the previous mode-15 geometry on lines with right-to-left text and with wordWrap off', () => {
+    const words = 'bbbb cccc dddd eeee ffff gggg hhhh'.replaceAll(' ', '\u3000');
+    const [rtl] = lines(para([textRun('\u05d0\u05d0\u05d0\u05d0'), textRun(`\u3000${words}`)], 'both'), MODE_15);
+    expect(Math.max(...texts(rtl!).map((p) => p.bounds.xPt + p.advancePt))).toBeCloseTo(380, 6);
+    const [noWrap] = lines(para([textRun('aaaa bbbb cccc dddd eeee ffff gggg\u3000 hhhhhhhhhhhhhhhh')], 'both',
+      { indentRight: 25, wordWrap: false } as Partial<DocParagraph>), MODE_15);
+    expect(Math.max(...texts(noWrap!).map((p) => p.bounds.xPt + p.advancePt))).toBeCloseTo(365, 6);
+  });
+
+  it('keeps the U+3000 visible on a line whose right-to-left text is fitted', () => {
+    const words = 'bbbb cccc dddd eeee ffff gggg hhhh'.replaceAll(' ', '\u3000');
+    const [rtl] = lines(para([textRun('\u05d0\u05d1', { fitTextVal: 400, fitTextId: 3 }), textRun(`\u3000${words}`)], 'both',
+      { indentRight: 35 }), MODE_15);
+    expect(Math.max(...texts(rtl!).map((p) => p.bounds.xPt + p.advancePt))).toBeCloseTo(350, 6);
+  });
+
+  it('hangs no fitted line-end U+3000 in the expansion', () => {
+    const [fitted] = lines(para([textRun('あ'.repeat(34)), textRun('\u3000', { fitTextVal: 200, fitTextId: 4 }),
+      textRun('aaaa')], 'both'), MODE_15);
+    expect(Math.max(...texts(fitted!).map((p) => p.bounds.xPt + p.advancePt))).toBeLessThanOrEqual(380 + 1e-6);
+  });
+
+  it('classifies a U+3000 after an ideographic variation sequence by its Han base', () => {
+    const words = 'bbbb cccc dddd eeee ffff gggg hhhh'.replaceAll(' ', '\u3000');
+    const [variant] = lines(para([textRun('\u845b\u{E0100}'), textRun(`\u3000${words}`)], 'both'), MODE_15);
+    expect(visibleEnd(variant!)).toBeCloseTo(380, 6);
   });
 
   it('leaves right-to-left lines to their previous geometry', () => {

@@ -46,6 +46,8 @@ export interface DocumentLayoutSettings {
     readonly enableOpenTypeFeatures: boolean;
     /** §17.15.3.8 ulTrailSpace: underline trailing spaces. */
     readonly ulTrailSpace: boolean;
+    /** §17.15.3.5 doNotExpandShiftReturn. */
+    readonly doNotExpandShiftReturn: boolean;
     /** compatSetting compatibilityMode; undefined when the document omits it. */
     readonly compatibilityMode?: number;
   };
@@ -92,6 +94,8 @@ export interface StoryContext {
   readonly story: StoryKind;
   readonly containers: readonly ContainerFrame[];
   readonly lineNumberingEligible: boolean;
+  /** The story is laid out in a quarter-turned (vertical bodyPr) text box. */
+  readonly quarterTurned?: boolean;
 }
 
 export function enterTableCellStoryContext(parent: StoryContext): StoryContext {
@@ -99,6 +103,7 @@ export function enterTableCellStoryContext(parent: StoryContext): StoryContext {
     story: parent.story,
     containers: [...parent.containers, { kind: 'tableCell' }],
     lineNumberingEligible: false,
+    ...(parent.quarterTurned ? { quarterTurned: true } : {}),
   };
 }
 
@@ -146,6 +151,8 @@ export interface ParagraphLayoutContext {
   readonly overflowPunct?: boolean;
   /** ECMA-376 §17.3.1.45 wordWrap; present only when disabled. */
   readonly wordWrap?: false;
+  /** The paragraph piece ends at a page or column break of its source paragraph. */
+  readonly endsAtHardBreak?: true;
   /** Effective marker geometry acquired with the paragraph context and reused
    * by retained layout instead of shaping the marker a second time. */
   readonly numberingMarkerGeometry?: NumberingMarkerGeometry;
@@ -208,6 +215,7 @@ export function resolveDocumentLayoutSettings(
       lineWrapLikeWord6: document.settings?.lineWrapLikeWord6 ?? false,
       enableOpenTypeFeatures: document.settings?.enableOpenTypeFeatures ?? false,
       ulTrailSpace: document.settings?.ulTrailSpace ?? false,
+      doNotExpandShiftReturn: document.settings?.doNotExpandShiftReturn ?? false,
       ...(document.settings?.compatibilityMode !== undefined
         ? { compatibilityMode: document.settings.compatibilityMode }
         : {}),
@@ -388,6 +396,7 @@ export function resolveParagraphLayoutContext(
     defaultTabPt: settings.defaultTabPt,
     overflowPunct: paragraph.overflowPunct !== false,
     ...(paragraph.wordWrap === false ? { wordWrap: false as const } : {}),
+    ...(paragraph.endsAtHardBreak === true ? { endsAtHardBreak: true as const } : {}),
     mathDefJc: settings.mathDefJc,
   };
 }

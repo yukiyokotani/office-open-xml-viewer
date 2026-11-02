@@ -156,6 +156,9 @@ export interface DocSettings {
   adjustLineHeightInTable?: boolean;
   /** §17.15.3.8 `w:compat/w:ulTrailSpace` — underline trailing spaces. */
   ulTrailSpace?: boolean;
+  /** §17.15.3.5 `w:compat/w:doNotExpandShiftReturn` — leave a line that ends
+   * with a manual line break unjustified. */
+  doNotExpandShiftReturn?: boolean;
   /** `w:compat/w:compatSetting[@w:name="compatibilityMode"]` (Word URI) — the
    *  Word version whose layout rules the document uses (for example 14, 15). */
   compatibilityMode?: number;
@@ -575,6 +578,10 @@ export interface DocParagraph {
   /** ECMA-376 §17.3.1.45 `<w:wordWrap>` after the style cascade; present only
    *  when disabled (`false`). Omission means the default, on. */
   wordWrap?: boolean;
+  /** This paragraph piece ends at a page or column break of its source
+   *  paragraph (§17.3.3.1), split off into a body-level break; present only
+   *  when true. */
+  endsAtHardBreak?: boolean;
   /** ECMA-376 §17.3.1.2 `<w:autoSpaceDE>` after the style cascade; present
    *  only when disabled (`false`). Omission means the spec default, on. */
   autoSpaceDE?: boolean;
@@ -1376,9 +1383,9 @@ export interface DocxTextRun {
   /** ECMA-376 §17.3.2.19 `<w:kern w:val>` — font-kerning threshold in POINTS
    *  (the smallest font size that is kerned). A positive resolved threshold
    *  enables kerning at or above that size; absence disables it. Zero disables
-   *  content-run kerning only in mode 15 (WORD_KERN_THRESHOLD_AUTHORITY);
-   *  unmeasured modes, numbering glyphs and paragraph marks retain the previous
-   *  zero size comparison. */
+   *  content-run kerning in every compatibility mode
+   *  (WORD_KERN_THRESHOLD_AUTHORITY); numbering glyphs and paragraph marks
+   *  retain the previous zero size comparison. */
   kerning?: number;
   /** ECMA-376 §17.3.2.10 `<w:eastAsianLayout w:vert>` — horizontal-in-vertical
    *  (縦中横 / tate-chū-yoko). `true` means that in a VERTICAL (tbRl) page this
@@ -1614,9 +1621,14 @@ export interface DocTable {
    *  LEADING edge (left in an LTR table, right in an RTL/`bidiVisual` table), in
    *  pt. SIGNED: a negative value pulls the table outward past the leading margin
    *  toward the page edge. `type="dxa"` only; `pct`/`auto` are dropped by the
-   *  parser per §17.4.50. Absent ⇒ no direct indent. The renderer applies it only
+   *  parser per §17.4.50. Resolved through the table style hierarchy (§17.7.6);
+   *  absent ⇒ no indent anywhere in that hierarchy. The renderer applies it only
    *  when the resolved `jc` is left/leading (§17.4.50). */
   tblInd?: number;
+  /** True when `tblInd` was inherited from the table style hierarchy rather
+   *  than authored on the table; layout ignores it for a row whose resulting
+   *  jc is not leading (§17.4.50). */
+  tblIndInherited?: boolean;
   /** ECMA-376 §17.4.52 `<w:tblLayout w:type>` — 'fixed' | 'autofit'. Absent
    *  (undefined) means the specification default, 'autofit'. The table grid is
    *  the initial shared grid for §17.18.87; preferred table/cell widths remain
