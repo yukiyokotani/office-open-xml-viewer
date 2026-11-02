@@ -12098,6 +12098,23 @@ fn extract_simple_paragraph_text(
             bold: fmt.bold.unwrap_or(false),
             italic: fmt.italic.unwrap_or(false),
             rtl: fmt.rtl.unwrap_or(false),
+            cs: fmt.cs_toggle.filter(|enabled| *enabled),
+            // Preserve the same resolved CS axes as body text (§17.3.2.26,
+            // §17.3.2.39, §17.7.2). base_run already includes docDefaults and
+            // paragraph styles; resolve_run_fmt adds character/direct rPr.
+            font_family_cs: theme
+                .resolve_font_ref(fmt.font_family_cs.clone())
+                .or_else(|| resolve_font_with_default(&fmt)),
+            font_size_cs_pt: Some(
+                fmt.font_size_cs
+                    .or(fmt.font_size)
+                    .unwrap_or(DEFAULT_FONT_SIZE),
+            ),
+            // §17.3.2.2 / §17.3.2.17: these toggles are independent of b/i.
+            // Explicit false also distinguishes parser runs from hand-built
+            // public runs, whose missing CS companions retain Latin formatting.
+            bold_cs: Some(fmt.bold_cs.unwrap_or(false)),
+            italic_cs: Some(fmt.italic_cs.unwrap_or(false)),
             ruby,
         });
         if first_run_fmt.is_none() {
@@ -27190,6 +27207,50 @@ mod txbx_inline_image_tests {
             &HashMap::new(),
             DepthGuard::root(),
         )
+    }
+
+    #[test]
+    fn text_box_runs_preserve_complex_script_companions() {
+        let styles = StyleMap::parse(
+            r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+              <w:docDefaults><w:rPrDefault><w:rPr>
+                <w:rFonts w:cstheme="minorBidi"/><w:szCs w:val="30"/><w:iCs/>
+              </w:rPr></w:rPrDefault></w:docDefaults>
+              <w:style w:type="character" w:styleId="Cs"><w:rPr><w:cs/></w:rPr></w:style>
+            </w:styles>"#,
+        );
+        let mut theme = ThemeColors::default();
+        theme.fonts.insert("minor/cs".into(), "Theme CS".into());
+        let doc = XmlDoc::parse(
+            r#"<wps:wsp xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"
+                       xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+              <wps:txbx><w:txbxContent><w:p>
+                <w:r><w:rPr><w:rtl/><w:cs/><w:bCs/><w:iCs/>
+                  <w:szCs w:val="36"/><w:rFonts w:cs="Direct CS"/>
+                </w:rPr><w:t>אבג</w:t></w:r>
+                <w:r><w:rPr><w:rtl/><w:b/><w:i/><w:rStyle w:val="Cs"/></w:rPr><w:t>דהו</w:t></w:r>
+              </w:p></w:txbxContent></wps:txbx>
+            </wps:wsp>"#,
+        ).unwrap();
+        let body = parse_shape_text_body(&styles, doc.root_element(), &theme, &HashMap::new());
+        let runs = serde_json::to_value(&body.legacy_blocks[0].runs).unwrap();
+        assert_eq!(runs[0]["rtl"], true);
+        assert_eq!(runs[0]["cs"], true);
+        assert_eq!(runs[0]["fontFamilyCs"], "Direct CS");
+        assert_eq!(runs[0]["fontSizeCsPt"], 18.0);
+        assert_eq!(runs[0]["boldCs"], true);
+        assert_eq!(runs[0]["italicCs"], true);
+        assert_eq!(runs[1]["cs"], true, "character-style cs is resolved");
+        assert_eq!(
+            runs[1]["fontFamilyCs"], "Theme CS",
+            "docDefaults cs theme font is resolved"
+        );
+        assert_eq!(runs[1]["fontSizeCsPt"], 15.0);
+        assert_eq!(runs[1]["italicCs"], true, "docDefaults iCs is inherited");
+        assert_eq!(
+            runs[1]["boldCs"], false,
+            "absent bCs is explicitly off despite Latin bold"
+        );
     }
 
     #[test]

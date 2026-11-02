@@ -5390,6 +5390,11 @@ export function acquireShapeTextBoxLayout(
       bold: run.bold,
       italic: run.italic,
       rtl: run.rtl,
+      cs: run.cs,
+      fontFamilyCs: run.fontFamilyCs,
+      fontSizeCsPt: run.fontSizeCsPt,
+      boldCs: run.boldCs,
+      italicCs: run.italicCs,
       ruby: run.ruby,
     }, shape.textVert));
     const availableImageWidthPt = Math.max(
