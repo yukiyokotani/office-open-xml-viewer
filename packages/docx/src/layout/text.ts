@@ -118,6 +118,24 @@ export function shapeRunToDocRun(
     text: run.text,
     bold: run.bold ?? false,
     italic: run.italic ?? false,
+    rtl: run.rtl,
+    cs: run.cs,
+    // Public compatibility policy: a hand-built run that opts into complex-
+    // script formatting (rtl/cs) but omits a CS companion keeps its Latin
+    // value, so it renders as it did before those flags existed. Parser
+    // projections resolve every companion explicitly (including false), and a
+    // run without rtl/cs keeps exactly its previous facts.
+    ...(run.rtl || run.cs ? {
+      fontFamilyCs: run.fontFamilyCs ?? run.fontFamily ?? undefined,
+      fontSizeCs: run.fontSizeCsPt ?? run.fontSizePt,
+      boldCs: run.boldCs ?? run.bold ?? false,
+      italicCs: run.italicCs ?? run.italic ?? false,
+    } : {
+      ...(run.fontFamilyCs != null ? { fontFamilyCs: run.fontFamilyCs } : {}),
+      ...(run.fontSizeCsPt !== undefined ? { fontSizeCs: run.fontSizeCsPt } : {}),
+      ...(run.boldCs !== undefined ? { boldCs: run.boldCs } : {}),
+      ...(run.italicCs !== undefined ? { italicCs: run.italicCs } : {}),
+    }),
     underline: false,
     strikethrough: false,
     fontSize: run.fontSizePt,
