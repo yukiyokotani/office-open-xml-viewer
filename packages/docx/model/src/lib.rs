@@ -2097,6 +2097,11 @@ pub struct ShapeRun {
     pub vml_stroke_pattern: Option<Duotone>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub vml_inset_pen: bool,
+    /// The text body comes from a legacy `<v:textbox>` (Part 4 §19.1.2.22)
+    /// rather than DrawingML `<wps:txbx>`; Word places it without the
+    /// DrawingML outline inset (issue #2069 controls and sample-11).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub vml_text_box: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub vml_concentric_gradient: bool,
     /// Part 4 §19.1.2.14: normalized clipping rectangles, in authored order.
@@ -3111,6 +3116,24 @@ pub struct ShapeTextRun {
     pub bold: bool,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub italic: bool,
+    /// ECMA-376 §17.3.2.30 w:rtl, resolved through the run style hierarchy.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub rtl: bool,
+    /// ECMA-376 §17.3.2.7 w:cs, resolved through the run style hierarchy.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cs: Option<bool>,
+    /// ECMA-376 §17.3.2.26 rFonts@cs, with theme references resolved.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_family_cs: Option<String>,
+    /// ECMA-376 §17.3.2.39 w:szCs, in points.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_size_cs_pt: Option<f64>,
+    /// ECMA-376 §17.3.2.2 w:bCs; resolved absence is explicitly false.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bold_cs: Option<bool>,
+    /// ECMA-376 §17.3.2.17 w:iCs; resolved absence is explicitly false.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub italic_cs: Option<bool>,
     /// ECMA-376 §17.3.3.25 w:ruby inside VML/text-box content. Carried through
     /// the same shape rich-text path as normal run formatting so the renderer can
     /// center the annotation above the base glyphs instead of flattening it into

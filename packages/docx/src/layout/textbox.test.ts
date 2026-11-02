@@ -407,6 +407,45 @@ describe('rich text-box story acquisition', () => {
       .toEqual([startX, startY]);
   });
 
+  it.each([
+    // WORD_TEXT_BOX_PHYSICAL_INSETS (#2069): the insets start at the inner edge
+    // of a painted outline, so every edge moves in by half its width; a box
+    // whose outline is not painted keeps the bare insets.
+    ['a 2pt outline', { stroke: '000000', strokeWidth: 2 }, { xPt: 8, yPt: 12, widthPt: 78, heightPt: 42 }],
+    ['no outline colour', { stroke: null, strokeWidth: 2 }, { xPt: 7, yPt: 11, widthPt: 80, heightPt: 44 }],
+    ['a zero-width outline', { stroke: '000000', strokeWidth: 0 }, { xPt: 7, yPt: 11, widthPt: 80, heightPt: 44 }],
+    ['a VML v:textbox outline', { stroke: '000000', strokeWidth: 2, vmlTextBox: true }, { xPt: 7, yPt: 11, widthPt: 80, heightPt: 44 }],
+  ] as const)('starts text-box insets inside %s', (_label, outline, bounds) => {
+    const story: StoryLayout = {
+      story: 'textbox', flowBounds: bounds, inkBounds: bounds, clipBounds: bounds,
+      blocks: [], advancePt: 0, diagnostics: [],
+    };
+    const acquireCompleteStory = vi.fn(() => story);
+    const shape = {
+      type: 'shape', textInsetL: 2, textInsetT: 3, textInsetR: 4, textInsetB: 5,
+      textAutofit: 'none', ...outline,
+    } as unknown as ShapeRun;
+    acquireShapeTextBoxLayout(
+      shape,
+      { xPt: 5, yPt: 8, widthPt: 86, heightPt: 52 },
+      {
+        id: 'shape:o',
+        source: { story: 'textbox', storyInstance: 'shape:o', path: [] },
+        flowDomainId: 'shape-owner',
+        context: paragraphContext,
+        measurer: { context: canvas(), fontFamilyClasses: {} },
+        environment: {
+          pageIndex: 0, totalPages: 1, pageWritingMode: 'horizontal-tb', documentHasEastAsianText: false,
+        },
+        input: { kind: 'complete', source: { story: 'textbox', storyInstance: 'shape:o', path: [] }, blockCount: 1 },
+        acquireCompleteStory,
+      },
+    );
+    expect(acquireCompleteStory).toHaveBeenCalledWith(expect.objectContaining({
+      container: expect.objectContaining({ bounds }),
+    }));
+  });
+
   it('keeps vertical spAutoFit floating-table geometry in the shifted local story frame', () => {
     const rect = (xPt: number, yPt: number, widthPt = 10, heightPt = 10) => ({
       xPt, yPt, widthPt, heightPt,
