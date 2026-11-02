@@ -406,8 +406,10 @@ export function decideLogicalTable(
     && !environment.inTableCell && !isVerticalTextDirection(environment.textDirection)
     && environment.quarterTurnedStory !== true && format.ordinaryFlow && format.positioning == null
     && format.outerEdgeIndent !== true && !rowOverrides && !gridSkips
-    && (environment.mode === undefined || environment.mode === 14 || environment.mode === 15)
-    && ((table.tblInd ?? 0) >= 0 || table.jc === 'center' || table.jc === 'right' || table.jc === 'end')
+    // The blk-0898 table controls (spaced one-row tables, modes 11/12/14/15
+    // and omitted, tblInd -360) place modes 11/12 like 14 and move a leading
+    // table by a negative indent like a positive one.
+    && wordMeasuredTableOriginPlacementMode(environment.mode)
     && format.rows.every((row) => row.cellSpacingPt === spacingPt && row.height == null
       && row.cells.every((cell) => cell.dxaHorizontalMarginsOnly === true))
     && ((input.layout === 'fixed' && table.widthPt != null

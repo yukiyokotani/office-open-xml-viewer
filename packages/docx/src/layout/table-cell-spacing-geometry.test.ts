@@ -173,6 +173,20 @@ describe('WORD_TABLE_CELL_SPACING_GEOMETRY (#2066)', () => {
   });
   it('keeps unmeasured classes byte-identical to the previous renderer', () => {
     expect(fingerprint([{ asymmetric: true }, { cellBorder: true }, { rowSpacing: true }, { nested: true },
-      { header: true }, { floating: true }, { vertical: true }, { verticalMerge: true }, { mode: 11 }, { mode: 12 }])).toBe('7f5f756d97733e7cdb1a7ab3b0269a20f97083d2bc467331e2c6980ae0742ffe');
+      { header: true }, { floating: true }, { vertical: true }, { verticalMerge: true }])).toBe('28a6cf890f22e943b52dc511ea76b9e98f25e5bae672811f81863286987f92d2');
+  });
+  it('places modes 11 and 12 like mode 14 and moves a leading table by a negative indent', () => {
+    for (const jc of ['left', 'center', 'right']) {
+      for (const bidi of [false, true]) {
+        const at14 = geometry({ mode: 14, jc, bidi, indent: 720, margin: 108 });
+        for (const mode of [11, 12]) {
+          expect(geometry({ mode, jc, bidi, indent: 720, margin: 108 }), `${mode} ${jc} ${bidi}`).toEqual(at14);
+        }
+      }
+    }
+    for (const mode of [null, 14, 15]) {
+      const none = geometry({ mode, indent: 0 }).flowBounds.xPt;
+      expect(geometry({ mode, indent: -360 }).flowBounds.xPt - none, `${mode}`).toBeCloseTo(-18, 8);
+    }
   });
 });
