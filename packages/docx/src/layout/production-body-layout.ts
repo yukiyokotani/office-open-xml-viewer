@@ -1,5 +1,5 @@
 import { MAX_BODY_LAYOUT_PAGES } from './resource-budgets.js';
-import { registerFootnoteTable } from './footnote-table-fragmentation.js';
+import { registerFootnoteTable, registerFootnoteTableDestination } from './footnote-table-fragmentation.js';
 import { deepFreezePlainData, deepFreezePlainDataWithFrozenAliases } from './plain-data.js';
 import { quarterTurnMathMetadataService } from './resources.js';
 import { pageOwnedAnchorKeysByLine } from './anchor-line-deferral.js';
@@ -651,8 +651,8 @@ interface BodyStoryAcquisitionContext {
    * acquisition context (at most six roots); its page occurrences are
    * projections, never per-page copies. */
   readonly storyLayoutCache: StoryLayoutCache;
-  /** Whether an immutable continued-footnote root is a proved
-   * page-independent (text-only) class; computed once per root. */
+  /** Whether an immutable continued-note root has only page-independent text
+   * and in-flow tables; computed once per root. */
   readonly noteSourceReuse: WeakMap<object, boolean>;
   readonly source: LayoutSourceStore;
   readonly publicAnchorBridge: typeof publicAnchorBridge;
@@ -700,8 +700,8 @@ function acquireBodyStoryLayout(
   // acquisition per width/section/font context serves every page occurrence.
   const reservedRole = reservedNoteSeparatorRole(request.source)
     ?? selectedNoteSeparatorRole(request.source);
-  // Ordinary text-only paragraph notes have no destination-page fields or
-  // anchors. Their immutable acquisition is shared across equal-width pages;
+  // Notes containing only ordinary text and in-flow tables have no destination
+  // page fields or anchors. Their acquisition is shared across equal-width pages;
   // partitionFootnote projects only the admitted slice into its page domain.
   // Other continued stories are page-local and must not retain a full copy
   // for every destination page in this session cache.
@@ -716,11 +716,22 @@ function acquireBodyStoryLayout(
   let reusableNote = continuedNote && dependencies.noteSourceReuse.get(root);
   if (continuedNote && reusableNote === undefined) {
     workBudget?.sourceUnits(root);
-    reusableNote = root.every(element => element.type === 'paragraph'
-      && !element.framePr && element.runs.every(run => run.type === 'text'));
+    const reusableBlock = (element: LayoutStoryBlock
+      | TableLayoutSource['rows'][number]['cells'][number]['content'][number]): boolean => {
+      if (element.type === 'paragraph') return !element.framePr
+        && element.runs.every(run => run.type === 'text');
+      // A plain table's cell-relative acquisition is just as independent of
+      // the destination as a plain paragraph. Reuse the complete shaped note
+      // epoch instead of reacquiring every table for each continuation page.
+      // Fields, frames, drawings and positioned tables at any depth still
+      // require destination acquisition; widths/section/services stay keyed.
+      return element.type === 'table' && !source.acquisition.effectiveTablePositioning(element)
+        && element.rows.every(row => row.cells.every(cell => cell.content.every(reusableBlock)));
+    };
+    reusableNote = root.every(reusableBlock);
     dependencies.noteSourceReuse.set(root, reusableNote);
   }
-  // Both proved page-independent classes hold no table, frame, text box or
+  // Both proved page-independent classes hold no frame, text box, field or
   // anchor, i.e. no page-placed content, so neither a band translation nor
   // page frames can change their layout: their key keeps only the facts the
   // layout depends on (section and container extent), and they are never a
@@ -1871,6 +1882,12 @@ function layoutBodyNotes(
       separator,
       ...(leading ? { leading } : {}),
       story,
+    });
+    registerFootnoteTableDestination(note, {
+      physicalPageIndex: request.pageIndex,
+      displayPageNumber: fieldAcquisitionContextOf(services).resolveDestinationPage?.(request.pageIndex)?.displayPageNumber
+        ?? request.pageIndex + 1,
+      occurrenceId: note.id,
     });
     notes.push(note);
     stack.append(advancePt);

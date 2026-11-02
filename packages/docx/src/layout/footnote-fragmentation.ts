@@ -285,7 +285,7 @@ function partitionIndexedFootnote(acquired: NoteLayout, cursor: FootnoteCursor |
       const tableCursor = blockIndex === startBlock ? cursor?.tableCursor : undefined;
       const partial = !acquired.story.bandDependent && block.ordinaryFlow
         && (tableCursor || usedPt + block.advancePt > capacityPt + 1e-6 || lineBudget === 1)
-        ? partitionFootnoteTable(block, tableCursor, Math.max(0, capacityPt - usedPt), lineBudget === 1)
+        ? partitionFootnoteTable(block, tableCursor, Math.max(0, capacityPt - usedPt), lineBudget === 1, acquired)
         : null;
       if (partial) {
         blocks.push(place(partial.fragment));

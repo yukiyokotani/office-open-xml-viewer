@@ -2239,8 +2239,9 @@ function* paginateBodyPassSteps(
     const band = `${pageFootnoteBandId(pageIndex)}:band:${ownerRegion.id}:area`;
     const continuingPage = sources[0]?.cursor != null;
     incomingTailSourceIds = new Set(sources.map(source => source.id));
-    return new PageNoteController(sources, maximumPt, (queue, capacityPt, balanced) => {
+    return new PageNoteController(sources, maximumPt, (queue, capacityPt, balanced, retainAllHeads) => {
       let separatorAdvancePt: number | undefined;
+      let overflowNoticeRetained = false;
       const acquire = (source: PageNoteSource, columnIndex: number, firstInColumn: boolean, availablePt: number) => {
         const column = columns[columnIndex]!;
         const noteLocation = Object.freeze({ ...location, section,
@@ -2256,10 +2257,10 @@ function* paginateBodyPassSteps(
           container: { id: `${band}:${columnIndex}`, kind: 'footnote', capacity: 'unbounded', bounds: {
             xPt: column.xPt, yPt: 0, widthPt: column.wPt, heightPt: section.geometry.pageHeight,
           } },
-        }, source.cursor, services.allowFootnoteContinuation === true ? availablePt : Number.MAX_VALUE, partitionFootnote,
+        }, source.cursor, availablePt, partitionFootnote,
         columnIndex === columns.length - 1
-          ? continuationNoticeFor(noteLocation, column.wPt, false, true) : undefined,
-        capacityPt === maximumPt && firstInColumn ? 'overflow' : undefined, note => {
+          ? continuationNoticeFor(noteLocation, column.wPt, retainAllHeads === true && overflowNoticeRetained, true) : undefined,
+        (capacityPt === maximumPt && firstInColumn) || retainAllHeads ? 'overflow' : undefined, note => {
           if (columnIndex === 0 && firstInColumn) {
             modernFirstHeadPt = partitionFootnote(note, source.cursor, 0, undefined, 'minimum')?.fragment.advancePt
               ?? note.advancePt;
@@ -2267,10 +2268,49 @@ function* paginateBodyPassSteps(
           exceedsFreshBand = note.advancePt > maximumPt;
           if (columnIndex === 0 && firstInColumn) separatorAdvancePt = note.leading?.advancePt ?? note.story.flowBounds.yPt - note.flowBounds.yPt;
         });
-        return source.allowPartial === false && !exceedsFreshBand && result?.nextCursor ? null : result;
+        if (source.allowPartial === false && !exceedsFreshBand && result?.nextCursor) return null;
+        if (retainAllHeads && result?.fragment.trailing) overflowNoticeRetained = true;
+        return result;
       };
       const request = { sources: queue, columnCount: columns.length, capacityPt, acquire };
-      return balanced ? balancePageNoteArea(request) : flowPageNoteArea(request);
+      const area = balanced ? balancePageNoteArea(request) : flowPageNoteArea(request);
+      if (!retainAllHeads) return area;
+      // Only forced fresh-page progress reaches this path. A mandatory group
+      // may have more oversized heads than columns. Keep each missing head
+      // after the final column's retained content, with its full ink, and keep
+      // all unpainted suffix cursors in source order. This is library retention
+      // policy, not a claim that the overflowing group fits the page.
+      const chunks = [...area.chunks];
+      const columnIndex = columns.length - 1;
+      let offsetPt = chunks.filter(chunk => chunk.columnIndex === columnIndex)
+        .reduce((end, chunk) => Math.max(end, chunk.offsetPt + chunk.layout.advancePt), 0);
+      const remaining: PageNoteSource[] = [];
+      for (const source of area.remaining) {
+        if (source.cursor) { remaining.push(source); continue; }
+        const head = acquire(source, columnIndex, offsetPt === 0, maximumPt);
+        if (!head) throw new Error('Overflow could not retain a required note head');
+        chunks.push(Object.freeze({ columnIndex, offsetPt, layout: head.fragment, hostShiftPt: head.hostShiftPt }));
+        offsetPt += head.fragment.advancePt;
+        if (head.nextCursor) remaining.push(Object.freeze({ ...source, cursor: head.nextCursor }));
+      }
+      // §17.18.33: even an overflowing mandatory group owns only one notice,
+      // at the end of the last column. Move its existing measured occurrence;
+      // do not acquire or charge a notice for each forced note head.
+      const carrier = chunks.findIndex(chunk => chunk.layout.trailing);
+      const receiver = chunks.length - 1;
+      if (carrier >= 0 && carrier !== receiver) {
+        const moved = moveContinuationNotice(chunks[carrier]!.layout, chunks[receiver]!.layout);
+        chunks[carrier] = Object.freeze({ ...chunks[carrier]!, layout: moved.carrier });
+        chunks[receiver] = Object.freeze({ ...chunks[receiver]!, layout: moved.receiver });
+        offsetPt = 0;
+        chunks.forEach((chunk, index) => {
+          if (chunk.columnIndex !== columnIndex) return;
+          chunks[index] = Object.freeze({ ...chunk, offsetPt });
+          offsetPt += chunk.layout.advancePt;
+        });
+      }
+      return Object.freeze({ ...area, chunks: Object.freeze(chunks), remaining: Object.freeze(remaining),
+        heightPt: Math.max(area.heightPt, offsetPt) });
     }, services.allowFootnoteContinuation === true);
   };
   modernFootnoteAdmission = (ids, mandatoryUnit, allowPartial) => {

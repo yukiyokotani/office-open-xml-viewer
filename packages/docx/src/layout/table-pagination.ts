@@ -2210,7 +2210,13 @@ function takeTableFragmentPass(
       );
       const header = preparedHeader.row;
       const heightPt = paginationRowHeightForOccurrence(source, header, rowIndex, context);
-      if (heightPt > availablePt + EPSILON_PT) {
+      // §17.4.49 repeats the header with the continued row. The explicit
+      // fresh-band retention policy must reach the first source cell unit
+      // even when its header already exhausts that band; retain both with
+      // overflow, as for a source unit taller than the remaining header band.
+      if (heightPt > availablePt + EPSILON_PT
+        && !(context.oversizedCellPolicy === 'overflow-first-unit'
+          && context.availableHeightPt >= context.freshPageHeightPt)) {
         return passOf({ fragment: null, nextCursor: cursor, requiresFreshPage: true });
       }
       selected.push(selectedWholeRow(

@@ -3,7 +3,8 @@ import type { PageNoteFlow, PageNoteSource } from './page-note-area.js';
 /** Internal control transfer to the live page's immutable source checkpoint. */
 export class PageNoteReplay extends Error {}
 
-type NoteAreaBuilder = (sources: readonly PageNoteSource[], capacityPt: number, balanced: boolean) => PageNoteFlow;
+type NoteAreaBuilder = (sources: readonly PageNoteSource[], capacityPt: number, balanced: boolean,
+  retainAllHeads?: boolean) => PageNoteFlow;
 
 interface NoteAreaSearch {
   readonly baseSources: readonly PageNoteSource[];
@@ -94,6 +95,26 @@ export class PageNoteController {
   }
 
   committed(ids: readonly string[]): void {
+    if (ids.length === 0) return;
+    // A fresh-region body selector can force an indivisible reference unit
+    // after ordinary admission rejects it. That is permission for overflow,
+    // never permission to commit references without their note content.
+    // Replay with every required head retained; subsequent pages own tails.
+    const heads = new Set(this.retained.chunks.map(chunk => chunk.layout.source.storyInstance));
+    if (ids.some(id => !heads.has(id))) {
+      if (!ids.every(id => heads.has(id) || this.blocked.has(id))) {
+        throw new Error('A committed reference has no retained note head');
+      }
+      const known = new Set(this.sources.map(source => source.id));
+      this.sources = Object.freeze([...this.sources,
+        ...ids.filter(id => !known.has(id)).map(id => Object.freeze({ id, cursor: null }))]);
+      this.required = Object.freeze([...new Set([...this.required, ...ids])]);
+      this.retained = this.build(this.sources, this.maximumPt, false, true);
+      const retainedHeads = new Set(this.retained.chunks.map(chunk => chunk.layout.source.storyInstance));
+      if (!this.required.every(id => retainedHeads.has(id))) throw new Error('Overflow omitted a required note head');
+      ids.forEach(id => this.blocked.delete(id));
+      throw new PageNoteReplay();
+    }
     ids.forEach(id => this.actual.add(id));
     const search = this.search;
     if (!search || !this.required.every(id => this.actual.has(id))) return;
