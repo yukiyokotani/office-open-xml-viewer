@@ -345,6 +345,8 @@ export interface MeasuredResourcePlanSegment {
   readonly widthPt: number;
   readonly heightPt: number;
   readonly topOffsetPt: number;
+  /** §20.4.2.6 inline effect extent before the object; the advance is unchanged. */
+  readonly leftOffsetPt?: number;
   readonly orientation?: import('./types.js').UprightResourceOrientation;
 }
 
@@ -1795,7 +1797,7 @@ export function planLine(input: PlanLineInput): LineLayout {
         resourceKey: segment.resourceKey, resourceKind: segment.resourceKind,
         ...(segment.orientation ? { orientation: segment.orientation } : {}),
         bounds: {
-          xPt, yPt: line.baselinePt + segment.topOffsetPt,
+          xPt: xPt + (segment.leftOffsetPt ?? 0), yPt: line.baselinePt + segment.topOffsetPt,
           widthPt: segment.widthPt, heightPt: segment.heightPt,
         },
         advancePt: segment.measuredWidthPt,
@@ -3786,16 +3788,22 @@ function planMeasuredLines(
         if (image.anchor) continue;
         const runIndex = sourceRunIndex(segment);
         const occurrence = runSource(source, runIndex ?? 0);
+        // §20.4.2.6: the segment box includes the inline effect extent; the
+        // object itself paints at its authored size inside it.
+        const [effectLeftPt, effectTopPt, effectRightPt, effectBottomPt] = image.effectExtent ?? [0, 0, 0, 0];
+        const objectWidthPt = image.widthPt - effectLeftPt - effectRightPt;
+        const objectHeightPt = image.heightPt - effectTopPt - effectBottomPt;
         if (image.inlineShape) {
+          const leftOffsetPt = (image.inlineOffsetXPt ?? 0) + effectLeftPt;
           segments.push({
             kind: 'inline-drawing',
             range: { start: segmentOffset, end: segmentOffset + occurrenceLength },
             drawingId: `${paragraphId}:drawing:${runIndex ?? 0}`,
             measuredWidthPt: image.measuredWidth,
-            widthPt: image.widthPt,
-            heightPt: image.heightPt,
-            topOffsetPt: -image.heightPt + (image.inlineOffsetYPt ?? 0),
-            ...(image.inlineOffsetXPt ? { leftOffsetPt: image.inlineOffsetXPt } : {}),
+            widthPt: objectWidthPt,
+            heightPt: objectHeightPt,
+            topOffsetPt: -image.heightPt + effectTopPt + (image.inlineOffsetYPt ?? 0),
+            ...(leftOffsetPt ? { leftOffsetPt } : {}),
           });
           sourceOffset = Math.max(sourceOffset, segmentOffset + occurrenceLength);
           continue;
@@ -3821,7 +3829,8 @@ function planMeasuredLines(
           kind: 'resource', range: { start: segmentOffset, end: segmentOffset + occurrenceLength },
           ...(runIndex === undefined ? {} : { sourceRunIndex: runIndex }),
           resourceKey, resourceKind, measuredWidthPt: image.measuredWidth,
-          widthPt: image.widthPt, heightPt: image.heightPt, topOffsetPt: -image.heightPt,
+          widthPt: objectWidthPt, heightPt: objectHeightPt, topOffsetPt: -image.heightPt + effectTopPt,
+          ...(effectLeftPt ? { leftOffsetPt: effectLeftPt } : {}),
           ...(resourceOrientation ? { orientation: resourceOrientation } : {}),
         });
       } else if ('math' in segment) {

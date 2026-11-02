@@ -1160,6 +1160,18 @@ export const WORD_INLINE_PICTURE_AUTO_LEADING = defineCompatibilityRule({
   description: 'For an inline picture or drawing shape (wp:inline WPS or in-flow VML text box) with automatic spacing at or above one line, add the authored leading of the selected text/paragraph-mark face to the natural drawing/text baseline union, rather than multiplying the drawing height. Image-only, text-only and alternating 28.35pt-picture controls at line=240/259 and exact=259 distinguish the two advances; earlier Word controls covered picture heights 5–255pt at auto multiples 1, 1.079 and 1.15. Windows Word 16.0.20527 issue #2063 PDF controls (72 inline cases across no-styles/docDefaults documents, compatibility mode omitted/15) also establish box-only single spacing equal to box height and mixed-text box bottoms on the baseline. At 1.5 spacing a 40pt box with a 10pt Times New Roman mark adds about 5.74pt, not 20pt. In compatibility mode 15 Word selects document-default single-line leading; the library still uses the paragraph mark when those faces differ (a separate unresolved selection difference). Exact spacing and lines without inline pictures/shapes retain their own allocation.',
 });
 
+export const WORD_EMPTY_MARK_ASCII_FACE = defineCompatibilityRule({
+  id: 'word-empty-mark-ascii-face',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'empty-mark-face-matrix',
+    application: 'Microsoft Word',
+    version: '16.0.20527',
+    platform: 'Windows',
+  },
+  description: 'An empty paragraph has no character from which ECMA-376 §17.3.2.26 could select a font slot. Windows Word 16.0.20527 controls (three empty paragraphs per case, mark ascii Century/Times New Roman/Arial x eastAsia MS Mincho/Yu Mincho x 10.5/12pt x eastAsia language ja-JP or en-US x hint eastAsia or none, documents with and without East Asian text, compatibility modes omitted and 15) give every empty line the single-line height of the ascii face: 1.15 em for Times New Roman/Arial and 1.2 em for Century, never the East Asian face, whatever the hint, language or document scripts. Under a lines docGrid every case takes the grid pitch. Issue #2063 follow-up (sample-26).',
+});
+
 /** Word-observed inline-picture projection of ECMA-376 §17.3.1.33. */
 export function wordInlinePictureAutoLineHeightPx(
   naturalUnionPx: number,

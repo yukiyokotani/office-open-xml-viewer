@@ -890,6 +890,9 @@ export interface AnchorHostMetrics {
 }
 
 export interface ShapeRun {
+  /** ECMA-376 §20.4.2.6 `wp:effectExtent` of an inline shape, [left, top,
+   *  right, bottom] in pt: extent the line reserves around the shape. */
+  inlineEffectExtent?: [number, number, number, number];
   /** ECMA-376 §20.4.2.8 — true when the shape is hosted by `<wp:inline>` and
    * therefore advances the paragraph pen like an inline drawing object. */
   inline?: boolean;
@@ -1468,6 +1471,9 @@ export interface RubyAnnotation {
 export type EmphasisMark = 'dot' | 'comma' | 'circle' | 'underDot';
 
 export interface ImageRun {
+  /** ECMA-376 §20.4.2.6 `wp:effectExtent` of an inline picture, [left, top,
+   *  right, bottom] in pt: extent the line reserves around the picture. */
+  inlineEffectExtent?: [number, number, number, number];
   /**
    * Embedded zip path of the raster blip (e.g. `word/media/image1.png`) — the
    * raster fallback (PNG/JPEG), or the SVG part itself when no raster blip is

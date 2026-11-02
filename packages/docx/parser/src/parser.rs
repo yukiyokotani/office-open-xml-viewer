@@ -9216,6 +9216,7 @@ fn parse_inline_drawing(
             &container_runs,
             diagnostics,
         );
+        apply_inline_effect_extent(container, &mut container_runs);
         finish_container(&mut container_runs);
         runs.extend(container_runs);
     }
@@ -9364,11 +9365,42 @@ fn parse_inline_drawing_impl(
 ) -> Vec<DocRun> {
     let mut runs = Vec::new();
     for container in drawing_own_containers(node) {
-        runs.extend(parse_drawing_container(
+        let mut container_runs = parse_drawing_container(
             style_map, num_map, container, media_map, chart_map, rel_map, theme, depth,
-        ));
+        );
+        apply_inline_effect_extent(container, &mut container_runs);
+        runs.extend(container_runs);
     }
     runs
+}
+
+/// ECMA-376 §20.4.2.6: a `wp:inline` container's `wp:effectExtent` is extra
+/// extent the line reserves around the object (Word issue #2063 controls:
+/// pictures and shapes alike). Recorded on the container's inline picture and
+/// inline shape runs; anchors keep it in their wrap facts.
+fn apply_inline_effect_extent(container: roxmltree::Node, runs: &mut [DocRun]) {
+    if container.tag_name().name() != "inline" {
+        return;
+    }
+    let Some(edges) = container
+        .children()
+        .find(|child| child.is_element() && child.tag_name().name() == "effectExtent")
+        .map(parse_effect_extent)
+    else {
+        return;
+    };
+    let pt = |value: Option<f64>| value.filter(|v| v.is_finite() && *v > 0.0).unwrap_or(0.0);
+    let extent = [pt(edges.left_pt), pt(edges.top_pt), pt(edges.right_pt), pt(edges.bottom_pt)];
+    if extent.iter().all(|v| *v == 0.0) {
+        return;
+    }
+    for run in runs.iter_mut() {
+        match run {
+            DocRun::Image(image) if !image.anchor => image.inline_effect_extent = Some(extent),
+            DocRun::Shape(shape) if shape.inline => shape.inline_effect_extent = Some(extent),
+            _ => {}
+        }
+    }
 }
 
 /// One `wp:inline` / `wp:anchor` container of a `w:drawing`.
@@ -9651,6 +9683,7 @@ fn parse_drawing_container(
             }
         };
         return vec![DocRun::Image(Box::new(ImageRun {
+            inline_effect_extent: None,
             image_path,
             mime_type,
             svg_image_path,
@@ -9907,6 +9940,7 @@ fn parse_drawing_container(
         }
     };
     vec![DocRun::Image(Box::new(ImageRun {
+        inline_effect_extent: None,
         image_path,
         mime_type,
         svg_image_path,
@@ -11071,6 +11105,7 @@ fn parse_group_pic(
         .and_then(|clr| clr.attribute("val").map(|v| v.to_uppercase()));
 
     Some(ImageRun {
+        inline_effect_extent: None,
         image_path,
         mime_type,
         svg_image_path,
@@ -14423,6 +14458,7 @@ fn vml_image_run(
         anchor.then(|| vml_word_anchor_acquisition(shape, definition, style, width_pt, height_pt));
 
     ImageRun {
+        inline_effect_extent: None,
         mime_type: mime_from_ext(&image_path).to_string(),
         image_path,
         svg_image_path: None,
@@ -19264,6 +19300,7 @@ mod tests {
     #[test]
     fn doc_run_wire_tags_match_ts_acquisition_discriminants() {
         let image = ImageRun {
+            inline_effect_extent: None,
             image_path: "word/media/image1.png".to_string(),
             mime_type: "image/png".to_string(),
             svg_image_path: None,
@@ -22953,6 +22990,7 @@ mod svg_blip_tests {
     #[test]
     fn image_run_serializes_path_fields_not_data_url() {
         let run = ImageRun {
+            inline_effect_extent: None,
             image_path: "word/media/image1.png".to_string(),
             mime_type: "image/png".to_string(),
             svg_image_path: Some("word/media/image2.svg".to_string()),
@@ -24502,6 +24540,51 @@ mod anchor_image_relative_from_tests {
             host.anchor_occurrence_id.as_deref(),
             Some(acquisition.occurrence_id.as_str())
         );
+    }
+
+    #[test]
+    fn inline_effect_extent_is_recorded_on_inline_shapes_only() {
+        for (container, expected) in [("inline", Some([0.5, 1.0, 1.5, 2.0])), ("anchor", None)] {
+            let position = if container == "anchor" {
+                r#"<wp:simplePos x="0" y="0"/>
+                   <wp:positionH relativeFrom="page"><wp:posOffset>0</wp:posOffset></wp:positionH>
+                   <wp:positionV relativeFrom="paragraph"><wp:posOffset>0</wp:posOffset></wp:positionV>"#
+            } else {
+                ""
+            };
+            let body = format!(
+                r#"<w:p><w:r><w:drawing>
+                  <wp:{container} xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+                    xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+                    xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">
+                    {position}<wp:extent cx="254000" cy="508000"/>
+                    <wp:effectExtent l="6350" t="12700" r="19050" b="25400"/>
+                    <wp:docPr id="1" name="Text box"/>
+                    <a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">
+                      <wps:wsp><wps:spPr>
+                        <a:xfrm><a:off x="0" y="0"/><a:ext cx="254000" cy="508000"/></a:xfrm>
+                        <a:prstGeom prst="rect"/></wps:spPr>
+                        <wps:txbx><w:txbxContent><w:p><w:r><w:t>Box</w:t></w:r></w:p></w:txbxContent></wps:txbx>
+                        <wps:bodyPr/>
+                      </wps:wsp>
+                    </a:graphicData></a:graphic>
+                  </wp:{container}>
+                </w:drawing></w:r></w:p>"#
+            );
+            let doc = parse_from_bytes(&build_docx_without_media(&body)).expect("WPS paragraph");
+            let BodyElement::Paragraph(paragraph) = &doc.body[0] else {
+                panic!("expected WPS paragraph");
+            };
+            let shape = paragraph
+                .runs
+                .iter()
+                .find_map(|run| match run {
+                    DocRun::Shape(shape) => Some(shape),
+                    _ => None,
+                })
+                .expect("one shape");
+            assert_eq!(shape.inline_effect_extent, expected, "{container}");
+        }
     }
 
     #[test]

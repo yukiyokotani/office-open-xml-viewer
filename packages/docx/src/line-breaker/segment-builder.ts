@@ -1633,6 +1633,23 @@ function emitResolvedTextSegment(
   emissionState.gluePending = false;
 }
 
+/** ECMA-376 §20.4.2.6: an inline object's line box is its extent widened by
+ * `wp:effectExtent` on every edge (Word #2063 controls: pictures and shapes;
+ * the advance gains left + right, the line gains top + bottom). */
+function inlineEffectExtentBox(
+  extent: readonly number[] | undefined,
+  widthPt: number,
+  heightPt: number,
+): { widthPt: number; heightPt: number; effectExtent?: readonly [number, number, number, number] } {
+  if (!extent || extent.length !== 4 || extent.every((edge) => !(edge > 0))) return { widthPt, heightPt };
+  const [left, top, right, bottom] = extent.map((edge) => (edge > 0 ? edge : 0)) as [number, number, number, number];
+  return {
+    widthPt: widthPt + left + right,
+    heightPt: heightPt + top + bottom,
+    effectExtent: [left, top, right, bottom],
+  };
+}
+
 function appendRunsToSegments(
   runs: readonly ParagraphLayoutRun[],
   environment: LineLayoutEnvironment,
@@ -1820,8 +1837,7 @@ function appendRunsToSegments(
         imagePath: img.imagePath,
         mimeType: img.mimeType,
         ...(img.anchor ? {} : { inlinePicture: true as const }),
-        widthPt: img.widthPt,
-        heightPt: img.heightPt,
+        ...inlineEffectExtentBox(img.anchor ? undefined : img.inlineEffectExtent, img.widthPt, img.heightPt),
         rotation: img.rotation,
         flipH: img.flipH,
         flipV: img.flipV,
@@ -1871,8 +1887,6 @@ function appendRunsToSegments(
       segs.push({
         imagePath: '',
         mimeType: '',
-        widthPt: run.widthPt,
-        heightPt: run.heightPt,
         anchor: false,
         anchorXPt: 0,
         anchorYPt: 0,
@@ -1880,6 +1894,7 @@ function appendRunsToSegments(
         anchorYFromPara: false,
         inlineShape: true,
         inlinePicture: true,
+        ...inlineEffectExtentBox(run.inlineEffectExtent, run.widthPt, run.heightPt),
         ...(run.inlineOffsetXPt ? { inlineOffsetXPt: run.inlineOffsetXPt } : {}),
         ...(run.inlineOffsetYPt ? { inlineOffsetYPt: run.inlineOffsetYPt } : {}),
         measuredWidth: 0,

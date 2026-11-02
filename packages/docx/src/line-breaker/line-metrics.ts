@@ -5,7 +5,7 @@ import type { NumberingMarkerShapeInput } from '../layout/types.js';
 import type { MeasurementTextContext } from '../layout/measurement-capabilities.js';
 import type { ParagraphLayoutSource, TextLayoutService } from '../layout/text.js';
 import { referenceFontLineMetrics } from '../reference-font-line-metrics.js';
-import { wordDegenerateLineSpacingIsSingle, wordEastAsianGridLineCells, wordFarEastSingleLinePx, wordGridAtLeastLineHeightPx, wordUseFeLayoutInheritedGridHeightPx, wordUseFeLayoutParagraphMarkGridAdvancePx, wordInlinePictureAutoLineHeightPx, wordLatinDesignGridSingleHeight } from '../layout/line-compatibility.js';
+import { WORD_EMPTY_MARK_ASCII_FACE, wordDegenerateLineSpacingIsSingle, wordEastAsianGridLineCells, wordFarEastSingleLinePx, wordGridAtLeastLineHeightPx, wordUseFeLayoutInheritedGridHeightPx, wordUseFeLayoutParagraphMarkGridAdvancePx, wordInlinePictureAutoLineHeightPx, wordLatinDesignGridSingleHeight } from '../layout/line-compatibility.js';
 import { type DocGridCtx, type LayoutLine } from './model.js';
 import { isGridLineRule } from './advance.js';
 import { buildFont, getDefaultFontFamily, getDefaultFontSize } from './font-routes.js';
@@ -337,24 +337,20 @@ export function paragraphMarkLineMetrics(
   minimumAscentPx = 0,
 ): MarkLineMetrics {
   const effectiveMarkShapeInput = markShapeInput;
-  // ECMA-376 §17.3.2.26 `w:rFonts@w:hint`: an empty paragraph has no code
-  // point from which to infer a script slot, so the paragraph-mark hint selects
-  // the face used to measure the mark. It does NOT make an otherwise Latin-only
-  // paragraph occupy East-Asian docGrid cells: grid-cell classification remains
-  // content/document based, independently of font routing.
-  // WORD_PICTURE_BULLET_LINE_PARTICIPATION: beside a picture bullet the empty
-  // mark is measured with its own (non-East-Asian) face.
-  const markUsesEastAsianFace = (eastAsian && minimumAscentPx <= 0)
-    || effectiveMarkShapeInput?.fontHint === 'eastAsia';
+  // WORD_EMPTY_MARK_ASCII_FACE: an empty paragraph mark is measured with its
+  // ascii face whatever its hint, language, eastAsia face or the document's
+  // scripts. East-Asian docGrid cell classification (`eastAsian`) stays
+  // content/document based and is unaffected.
+  void WORD_EMPTY_MARK_ASCII_FACE;
   const forceCs = effectiveMarkShapeInput?.complexScript === true;
   const fs = effectiveMarkShapeInput?.fontSizePt ?? getDefaultFontSize(para);
-  const authoredFamily = getDefaultFontFamily(para, markUsesEastAsianFace);
+  const authoredFamily = getDefaultFontFamily(para, false);
   const markWeight = effectiveMarkShapeInput?.weight ?? 400;
   const markStyle = effectiveMarkShapeInput?.style ?? 'normal';
   // §17.3.1.29 stores the paragraph mark's own run properties in pPr/rPr.
   // Shape this probe in its own context: the library's scoped Arabic substitute
   // policy must not borrow script proof from surrounding body runs.
-  const markProbe = markUsesEastAsianFace ? 'あ' : 'x';
+  const markProbe = 'x';
   // A supplied metric map without the selecting text service cannot prove
   // which face Canvas paints. The compatibility argument above is ignored;
   // only the selected resource tuple below can lend authoritative geometry.
@@ -466,9 +462,7 @@ export function paragraphMarkLineMetrics(
   // the baseline, and that whole box then follows the paragraph's line rule.
   // Exact spacing ignores the picture (the caller passes no minimum).
   asc = Math.max(asc, minimumAscentPx);
-  const resourceRatio = markUsesEastAsianFace
-    ? resolvedLocalFont?.eastAsianLineHeightRatio ?? resolvedLocalFont?.lineHeightRatio
-    : resolvedLocalFont?.lineHeightRatio;
+  const resourceRatio = resolvedLocalFont?.lineHeightRatio;
   const designIntendedSingle = referenceMarkMetric
     ? referenceMarkMetric.lineHeightRatio * fs * scale
     : resourceRatio != null

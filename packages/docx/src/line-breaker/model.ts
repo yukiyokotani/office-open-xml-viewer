@@ -416,6 +416,9 @@ export interface LayoutImageSeg extends LayoutSegSource {
   inlinePicture?: true;
   /** Paragraph mark's selected-face natural single line, measured once per paragraph. */
   paragraphMarkSinglePx?: number;
+  /** ECMA-376 §20.4.2.6 inline effect extent [left, top, right, bottom] (pt),
+   *  already included in widthPt/heightPt; the object paints inside it. */
+  effectExtent?: readonly [number, number, number, number];
   /** A picture-bullet marker's height on the paragraph's first line: its
    * metrics join the line like an inline picture's, but it takes no width,
    * break opportunity or segment slot (the marker is painted separately). */

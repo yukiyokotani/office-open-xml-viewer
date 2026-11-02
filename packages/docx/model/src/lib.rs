@@ -1991,6 +1991,10 @@ pub struct VmlEdgeStroke {
 #[derive(Serialize, Debug, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ShapeRun {
+    /// ECMA-376 §20.4.2.6 `wp:effectExtent` of an inline (`wp:inline`) shape,
+    /// [left, top, right, bottom] in points; `None` for anchors and zero.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inline_effect_extent: Option<[f64; 4]>,
     /// True when this WPS shape is hosted by `wp:inline` and therefore
     /// participates in paragraph line flow like a glyph-sized drawing object.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
@@ -3280,6 +3284,11 @@ pub use ooxml_common::blip::{BlipEffect, Duotone, SrcRect};
 #[derive(Serialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ImageRun {
+    /// ECMA-376 §20.4.2.6 `wp:effectExtent` of an inline (`wp:inline`) picture,
+    /// [left, top, right, bottom] in points: extra extent the line reserves
+    /// around the picture. `None` for anchors and an all-zero extent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inline_effect_extent: Option<[f64; 4]>,
     /// Embedded zip path of the raster blip (e.g. `word/media/image1.png`), the
     /// raster fallback (PNG/JPEG), or the SVG part itself when the blip embeds no
     /// raster `r:embed`. The renderer fetches the bytes lazily by path rather
