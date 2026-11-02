@@ -16,6 +16,9 @@ export interface NoteNumbering {
 export interface LineBoundary {
   segIndex: number;
   charOffset: number;
+  /** Source END after consuming a terminal §17.3.3.1 break, before laying
+   * out the empty line it opened. Bare END means that line is complete. */
+  trailingEmptyLine?: true;
 }
 
 
