@@ -764,7 +764,7 @@ function frameMeetsEarlierFlowContent(
 function paragraphFragmentStartKey(cursor: ParagraphFragmentCursor): string {
   return cursor.boundary === null
     ? 'root'
-    : `paragraph:${cursor.boundary.segIndex}:${cursor.boundary.charOffset}`;
+    : `paragraph:${cursor.boundary.segIndex}:${cursor.boundary.charOffset}${cursor.boundary.trailingEmptyLine ? ':empty-line' : ''}`;
 }
 
 function hasFollowingInkContent(input: BodyLayoutInput, startIndex: number): boolean {

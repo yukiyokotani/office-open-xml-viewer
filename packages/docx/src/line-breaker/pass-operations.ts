@@ -1030,7 +1030,8 @@ export function performFlush(
     hasRuby: breakerState.lineHasRuby,
     eastAsian: breakerState.lineEastAsian,
     endsWithBreak: brTerminated,
-    consumedEnd: nextStart ?? breakerState.queue.peek()?.src ?? endBoundary,
+    consumedEnd: nextStart ?? breakerState.queue.peek()?.src
+      ?? (brTerminated ? { ...endBoundary, trailingEmptyLine: true } : endBoundary),
   });
   if (wrapCtx) {
     if (!brTerminated && nextStart !== undefined) {

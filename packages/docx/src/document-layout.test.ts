@@ -340,6 +340,31 @@ describe('layoutDocument — body paragraph fragments (PR 5 Task 12)', () => {
 });
 
 describe('layoutDocument — exact source-boundary paragraph continuation', () => {
+  it.each(['', 'A'])('retains the empty line after a paginated trailing break (%j)', (text) => {
+    const target = para('', {
+      runs: [...(text ? [sizedTextRun(text, 10)] : []), { type: 'break', breakType: 'line' }],
+      lineSpacing: { rule: 'exact', value: 20 },
+      spaceAfter: 3,
+    });
+    const model = doc([
+      para('F', { lineSpacing: { rule: 'exact', value: 60 } }) as BodyElement,
+      target as BodyElement,
+      para('After', { lineSpacing: { rule: 'exact', value: 10 } }) as BodyElement,
+    ], 100);
+    const layout = layoutDocument(model);
+    const fragments = sourceFragments(layout, 1);
+
+    expect(layout.pages).toHaveLength(2);
+    expect(fragments.map(fragment => fragment.lines.length)).toEqual([1, 1]);
+    expect(fragments.map(fragment => fragment.lines[0]!.advancePt)).toEqual([20, 20]);
+    expect(fragments.map(fragment => fragment.lines[0]!.bounds.yPt)).toEqual([70, 10]);
+    expect(fragments.map(fragment => fragment.spacing.afterPt)).toEqual([0, 3]);
+    expect(fragmentText(fragments)).toBe(text);
+    const after = sourceFragments(layout, 2);
+    expect(fragmentText(after)).toBe('After');
+    expect(after[0]!.lines[0]!.bounds.yPt).toBe(33);
+  });
+
   it('continues exactly from a 100pt column into a 48pt destination measurement', () => {
     const filler = cjkParagraph('う'.repeat(30), 20);
     const text = 'あ'.repeat(20);

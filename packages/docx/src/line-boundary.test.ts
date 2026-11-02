@@ -48,7 +48,7 @@ function textSeg(text: string, extra: Partial<LayoutTextSeg> = {}): LayoutTextSe
   };
 }
 
-const lineBreak = (): LayoutSeg => ({ lineBreak: true, fontSize: 10, measuredWidth: 0 });
+const lineBreak = (fontSize = 10): LayoutSeg => ({ lineBreak: true, fontSize, measuredWidth: 0 });
 
 interface Fixture {
   readonly name: string;
@@ -89,7 +89,7 @@ const fixtures: Fixture[] = [
   {
     name: 'manual breaks including a trailing break',
     width: 200,
-    segs: () => [textSeg('first'), lineBreak(), textSeg('second'), lineBreak()],
+    segs: () => [textSeg('first'), lineBreak(), textSeg('second'), lineBreak(18)],
     hasTrailingBreak: true,
   },
   {
@@ -276,10 +276,6 @@ function textSequence(lines: LayoutLine[]): string[] {
     .join(''));
 }
 
-function isEnd(boundary: LineBoundary, segCount: number): boolean {
-  return boundary.segIndex === segCount && boundary.charOffset === 0;
-}
-
 describe('strict tab-stop alignment aliases', () => {
   const tabFixture = (alignment: TabStop['alignment']): Fixture => ({
     name: alignment,
@@ -304,7 +300,7 @@ describe('strict tab-stop alignment aliases', () => {
 
 describe('layoutLines consumed-content boundaries', () => {
   for (const fixture of fixtures) {
-    it(`reproduces every content-bearing suffix for ${fixture.name}`, () => {
+    it(`reproduces every suffix for ${fixture.name}`, () => {
       const lines = layoutFixture(fixture);
       expect(lines.length).toBeGreaterThanOrEqual(2);
       if (fixture.expectedMidSegmentIndex !== undefined) {
@@ -346,16 +342,6 @@ describe('layoutLines consumed-content boundaries', () => {
         const expected = lineStructure(lines.slice(i + 1));
         const suffix = lineStructure(layoutFixture(fixture, boundary));
 
-        // A trailing manual break creates a final zero-content line. Its
-        // predecessor and that empty line both necessarily end at the same
-        // two-field END coordinate, so END cannot distinguish those two entry
-        // states. The mid-stream boundary below still proves that suffix layout
-        // preserves and re-emits the trailing empty line.
-        if (fixture.hasTrailingBreak && isEnd(boundary, fixture.segs().length) && expected.length > 0) {
-          expect(expected[0].segments).toEqual([]);
-          expect(suffix).toEqual([]);
-          continue;
-        }
         expect(suffix).toEqual(expected);
       }
     });
