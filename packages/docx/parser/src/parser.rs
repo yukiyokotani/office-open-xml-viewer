@@ -13299,6 +13299,7 @@ fn parse_vml_shape(
         }),
         vml_stroke_fill: stroke_image,
         vml_text_rects: text_rects.unwrap_or_default(),
+        vml_text_box: text_box_node.is_some(),
         // Part 4 §§19.1.2.19/.21/.14: the path veto wins over both
         // host and decoration requests; omission uses the centered pen.
         vml_inset_pen: {
@@ -32904,6 +32905,7 @@ mod vml_pict_tests {
         let [DocRun::AnchorHost(host), DocRun::Shape(shape)] = runs.as_slice() else {
             panic!("floating VML text box must retain one anchor host: {runs:?}");
         };
+        assert!(shape.vml_text_box, "a v:textbox body is marked as VML");
         let acquisition = shape
             .anchor_acquisition
             .as_ref()
