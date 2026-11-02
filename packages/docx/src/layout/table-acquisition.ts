@@ -600,7 +600,9 @@ export function acquireRetainedTable<State>(
         currentColumnStart,
         columnSpan,
         columnWidthsPt.length,
+        member.spacingGeometry !== null,
       );
+      const cellBorderInsetsPt = 2 * (member.spacingGeometry?.borderPt ?? 0);
       const cellPath = [...sourcePath, rowIndex, cellIndex];
       const cellId = `${flowDomainId}:cell:${rowIndex}.${cellIndex}`;
       // Same grouped insets as the horizontal content width below.
@@ -608,7 +610,7 @@ export function acquireRetainedTable<State>(
         0,
         cellTotalWidthPt
           - (spacingInsets.startPt + spacingInsets.endPt)
-          - (formatMargins.left + formatMargins.right),
+          - (formatMargins.left + formatMargins.right) - cellBorderInsetsPt,
       );
       const verticalMode = cell.vMerge === false ? undefined : verticalCellMode(cell);
       const acquireAt = (lineWidthPt: number | undefined) => cell.vMerge === false
@@ -631,7 +633,7 @@ export function acquireRetainedTable<State>(
               0,
               totalWidthPt
                 - (spacingInsets.startPt + spacingInsets.endPt)
-                - (formatMargins.left + formatMargins.right),
+                - (formatMargins.left + formatMargins.right) - cellBorderInsetsPt,
             ),
             createCellState: dependencies.createCellState,
             acquireParagraph: (
@@ -808,6 +810,7 @@ export function acquireRetainedTable<State>(
       heightPt: rowFormat?.height?.valuePt ?? null,
       heightRule,
       cellSpacingPt: rowFormat?.cellSpacingPt ?? 0,
+      ...(member.spacingGeometry ? { spacingGeometry: { borderPt: member.spacingGeometry.borderPt } } : {}),
       exceptionBorders: rowFormat?.exception?.borders
         ? retainedEdges(rowFormat.exception.borders)
         : null,
