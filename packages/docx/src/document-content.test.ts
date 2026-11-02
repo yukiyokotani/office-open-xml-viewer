@@ -1,10 +1,85 @@
 import { describe, expect, it } from 'vitest';
 import { docxRenderedTextUsages } from './document-content.js';
-import { docxOfficeFontFallbackRequests } from './font-plan.js';
+import { docxFontDemandCandidates, docxOfficeFontFallbackRequests } from './font-plan.js';
 import type { InternalFieldRun } from './parser-model.js';
 import type { DocxDocumentModel } from './types.js';
 
 describe('docx rendered text inventory', () => {
+  // The families demand would request: authored, then script fallbacks.
+  const docxFontPreloadNames = (doc: DocxDocumentModel) => {
+    const candidates = docxFontDemandCandidates(doc, []);
+    return [...candidates.authored, ...candidates.fallback];
+  };
+  const documentWithRun = (run: object) => ({
+    body: [{ type: 'paragraph', runs: [run] }],
+    headers: { default: null, first: null, even: null },
+    footers: { default: null, first: null, even: null },
+  }) as unknown as DocxDocumentModel;
+
+  it.each(['rtl', 'cs'] as const)('collects the independent CS tuple of a compatibility %s run', (flag) => {
+    const facts = {
+      text: '123', fontSizePt: 10, [flag]: true,
+      fontFamily: 'Arial', bold: true, italic: true,
+      fontFamilyCs: 'Cambria', boldCs: false, italicCs: false,
+    };
+    const shapeDoc = documentWithRun({
+      type: 'shape', textBlocks: [{ text: '123', fontSizePt: 10, runs: [facts] }],
+    });
+    const bodyDoc = documentWithRun({ type: 'text', ...facts });
+
+    expect(docxFontPreloadNames(shapeDoc)).toContain('Cambria');
+    expect(docxFontPreloadNames(shapeDoc)).toEqual(docxFontPreloadNames(bodyDoc));
+    for (const options of [{}, { fontDemand: true }]) {
+      const requests = docxOfficeFontFallbackRequests(shapeDoc, options);
+      expect(requests.filter((request) => request.family === 'Cambria')).toEqual([
+        { family: 'Cambria', weight: 400, style: 'normal' },
+        { family: 'Cambria', presenceOnly: true },
+      ]);
+      expect(requests).toContainEqual({ family: 'Arial', weight: 700, style: 'italic' });
+      expect(requests).toEqual(docxOfficeFontFallbackRequests(bodyDoc, options));
+    }
+  });
+
+  it.each([
+    { companion: 'family', family: 'Cambria', csFacts: { boldCs: false, italicCs: false }, boldCs: false, italicCs: false },
+    { companion: 'style', family: 'Arial', csFacts: { fontFamilyCs: 'Cambria' }, boldCs: true, italicCs: true },
+  ])('collects an omitted CS $companion from inherited compatibility Latin facts', ({ family, csFacts, boldCs, italicCs }) => {
+    const shapeDoc = documentWithRun({
+      type: 'shape', textBlocks: [{
+        text: '123', fontSizePt: 10, fontFamily: family, bold: true, italic: true,
+        runs: [{ text: '123', fontSizePt: 10, rtl: true, ...csFacts }],
+      }],
+    });
+    const bodyDoc = documentWithRun({
+      type: 'text', text: '123', rtl: true,
+      fontFamily: family, bold: true, italic: true,
+      fontFamilyCs: 'Cambria', boldCs, italicCs,
+    });
+
+    expect(docxFontPreloadNames(shapeDoc)).toEqual(docxFontPreloadNames(bodyDoc));
+    for (const options of [{}, { fontDemand: true }]) {
+      expect(docxOfficeFontFallbackRequests(shapeDoc, options))
+        .toEqual(docxOfficeFontFallbackRequests(bodyDoc, options));
+    }
+  });
+
+  it('keeps the compatibility inventory unchanged without rtl/cs', () => {
+    const doc = documentWithRun({
+      type: 'shape', textBlocks: [{ text: '123', fontSizePt: 10, runs: [{
+        text: '123', fontSizePt: 10, rtl: false, cs: false,
+        fontFamily: 'Arial', bold: true, italic: true,
+        fontFamilyCs: 'Cambria', boldCs: false, italicCs: false,
+      }] }],
+    });
+
+    expect(docxFontPreloadNames(doc)).not.toContain('Cambria');
+    for (const options of [{}, { fontDemand: true }]) {
+      const requests = docxOfficeFontFallbackRequests(doc, options);
+      expect(requests.some((request) => request.family === 'Cambria')).toBe(false);
+      expect(requests).toContainEqual({ family: 'Arial', weight: 700, style: 'italic' });
+    }
+  });
+
   it('inventories field results on both non-CS/EA and CS formatting tuples', () => {
     const field: InternalFieldRun & { type: 'field' } = {
       type: 'field', fieldType: 'other', instruction: 'REF x', fallbackText: 'result',
