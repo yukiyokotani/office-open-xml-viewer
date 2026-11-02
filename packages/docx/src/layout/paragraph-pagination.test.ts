@@ -17,7 +17,17 @@ const paragraph = (): ParagraphLayout => ({
   lines: Array.from({ length: 3 }, (_, index) => ({
     range: { start: index, end: index + 1 },
     bounds: { xPt: 0, yPt: index * 10, widthPt: 100, heightPt: 10 },
-    baselinePt: index * 10 + 8, advancePt: 10, placements: [],
+    baselinePt: index * 10 + 8, advancePt: 10,
+    placements: [{
+      kind: 'text', text: 'A', range: { start: index, end: index + 1 },
+      origin: { xPt: 0, yPt: index * 10 + 8 },
+      bounds: { xPt: 0, yPt: index * 10, widthPt: 5, heightPt: 10 },
+      advancePt: 5, clusters: [], paintOps: [],
+      color: { kind: 'default' },
+      fontRoute: { familyList: 'serif', scope: 'native', fingerprint: 'serif' },
+      fontSizePt: 10, fontWeight: 400, fontStyle: 'normal',
+      direction: 'ltr', writingMode: 'horizontal-tb', decorations: [],
+    }],
   })) as LineLayout[],
   borders: [], resources: [], drawings: [], textBoxes: [], events: [], exclusions: [],
 });
@@ -96,7 +106,7 @@ describe('paragraph page-local reserve selection', () => {
       flowBounds: { xPt: 0, yPt: 0, widthPt: 100, heightPt: 10 },
       inkBounds: { xPt: 0, yPt: 0, widthPt: 100, heightPt: 10 },
       advancePt: 10,
-      lines: paragraph().lines.slice(0, 1),
+      lines: paragraph().lines.slice(0, 1).map(line => ({ ...line, placements: [] })),
     };
 
     const selected = selectParagraphFragment(
@@ -133,6 +143,22 @@ describe('paragraph page-local reserve selection', () => {
     expect(selected.fragment?.advancePt).toBe(shaded ? 10 : 20);
     expect(selected.admissionExtentPt).toBe(shaded ? 10 : 18);
     expect(selected.nextCursor?.boundary).toEqual({ segIndex: 0, charOffset: shaded ? 1 : 2 });
+  });
+
+  it('admits a visible grid prefix even when the following break line is blank', () => {
+    const retained = twoLineParagraph(0);
+    const selected = selectParagraphFragment({
+      ...retained,
+      lines: retained.lines.map((line, index) => ({
+        ...line, gridAfterLeadingPt: 2,
+        placements: index === 0 ? line.placements : [],
+      })),
+    }, { boundary: null }, splittable(twoLineBoundaries), 8, 40, true, {
+      keepLines: false, widowControl: false, unreservedBodyBottomPt: 8,
+    });
+    expect(selected.fragment?.lines).toHaveLength(1);
+    expect(selected.admissionExtentPt).toBe(8);
+    expect(selected.nextCursor?.boundary).toEqual(twoLineBoundaries[0]);
   });
 
   it.each([
