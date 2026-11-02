@@ -12,7 +12,10 @@ import type { TableLayout } from './types.js';
 const W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
 const encoder = new TextEncoder();
 
-function layoutTable(tableXml: string, mode = 14): TableLayout {
+const LOGICAL_TABLE_STYLE = '<w:style w:type="table" w:styleId="LogicalTable"><w:name w:val="Logical table"/></w:style>';
+
+/** `mode: null` omits compatSetting compatibilityMode. */
+function layoutTable(tableXml: string, mode: number | null = 14, tableStyles = LOGICAL_TABLE_STYLE): TableLayout {
   const parts = new Map([
     ['[Content_Types].xml', `<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
       <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
@@ -32,10 +35,10 @@ function layoutTable(tableXml: string, mode = 14): TableLayout {
       <w:sectPr><w:pgSz w:w="12240" w:h="14400"/>
         <w:pgMar w:left="1440" w:right="1440" w:top="1440" w:bottom="1440"/>
       </w:sectPr></w:body></w:document>`],
-    ['word/styles.xml', `<w:styles xmlns:w="${W}"><w:style w:type="table" w:styleId="LogicalTable"><w:name w:val="Logical table"/></w:style></w:styles>`],
-    ['word/settings.xml', `<w:settings xmlns:w="${W}"><w:compat>
+    ['word/styles.xml', `<w:styles xmlns:w="${W}">${tableStyles}</w:styles>`],
+    ['word/settings.xml', `<w:settings xmlns:w="${W}">${mode === null ? '' : `<w:compat>
       <w:compatSetting w:name="compatibilityMode" w:uri="http://schemas.microsoft.com/office/word" w:val="${mode}"/>
-    </w:compat></w:settings>`],
+    </w:compat>`}</w:settings>`],
   ]);
   const archive = new DocxArchive(storeZip(new Map(
     [...parts].map(([name, xml]) => [name, encoder.encode(xml)]),
@@ -89,6 +92,146 @@ describe('Word table origin and occupied grid', () => {
       .toBeCloseTo(mode === 15 ? 72 : 54, 8);
     const rtl = layoutTable(table(row, indent + '<w:bidiVisual/>'), mode);
     expect(rtl.flowBounds.xPt).toBeCloseTo(mode === 15 ? 246.6 : 264.6, 8);
+  });
+  it('an omitted compatibility mode hangs the first cell margin like mode 14', () => {
+    for (const options of [indent, indent + '<w:bidiVisual/>', '<w:jc w:val="right"/>']) {
+      expect(layoutTable(table(row, options), null).flowBounds.xPt)
+        .toBeCloseTo(layoutTable(table(row, options), 14).flowBounds.xPt, 8);
+    }
+    expect(layoutTable(table(row, indent), null).flowBounds.xPt).toBeCloseTo(59.4, 8);
+  });
+  it('a table style tblInd is authored indentation, and unspecified horizontal cell margins are zero', () => {
+    // WORD_TABLE_ORIGIN_COMPATIBILITY / WORD_TABLE_UNSPECIFIED_HORIZONTAL_CELL_MARGIN.
+    const normalTable = (tblPr: string) => `<w:style w:type="table" w:default="1" w:styleId="TableNormal"><w:name w:val="Normal Table"/><w:tblPr>${tblPr}</w:tblPr></w:style>`;
+    const styleMargins = '<w:tblCellMar><w:left w:w="108" w:type="dxa"/><w:right w:w="108" w:type="dxa"/></w:tblCellMar>';
+    const indented = '<w:style w:type="table" w:styleId="Indented"><w:basedOn w:val="TableNormal"/><w:tblPr><w:tblInd w:w="500" w:type="dxa"/></w:tblPr></w:style>';
+    const styled = normalTable('<w:tblInd w:w="0" w:type="dxa"/>' + styleMargins) + indented;
+    const plain = (tblPr = '', tcMar = '') => `<w:tbl><w:tblPr>${tblPr}<w:tblW w:type="dxa" w:w="5000"/></w:tblPr><w:tblGrid><w:gridCol w:w="5000"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:tcW w:type="dxa" w:w="5000"/>${tcMar}</w:tcPr><w:p><w:r><w:t>x</w:t></w:r></w:p></w:tc></w:tr></w:tbl>`;
+    const textStart = (layout: TableLayout) => layout.rows[0]?.cells[0]?.contentBounds.xPt;
+    const tcMar = '<w:tcMar><w:left w:w="400" w:type="dxa"/></w:tcMar>';
+    for (const mode of [null, 11, 12, 14]) {
+      // The default style's tblInd 0 hangs the style or tcMar margin outside the band.
+      expect(layoutTable(plain(), mode, styled).flowBounds.xPt).toBeCloseTo(66.6, 8);
+      expect(textStart(layoutTable(plain('', tcMar), mode, styled))).toBeCloseTo(72, 8);
+      // A basedOn style's tblInd 500 is the table indentation.
+      expect(textStart(layoutTable(plain('<w:tblStyle w:val="Indented"/>'), mode, styled))).toBeCloseTo(97, 8);
+      // Without tblInd anywhere in the hierarchy the same margin does not hang.
+      expect(layoutTable(plain('', tcMar), mode, normalTable(styleMargins)).flowBounds.xPt).toBeCloseTo(72, 8);
+    }
+    expect(textStart(layoutTable(plain('<w:tblStyle w:val="Indented"/>'), 15, styled))).toBeCloseTo(102.4, 8);
+    // No style margins at all: the text starts at the table edge on both sides.
+    for (const styles of ['', normalTable('<w:tblInd w:w="0" w:type="dxa"/>')]) {
+      const bare = layoutTable(plain(), null, styles);
+      expect(textStart(bare)).toBeCloseTo(72, 8);
+      expect(bare.rows[0]?.cells[0]?.contentBounds.widthPt).toBeCloseTo(250, 8);
+    }
+  });
+  it('a style-supplied center or right jc ignores the style tblInd (§17.4.50), and a direct jc wins', () => {
+    const styles = '<w:style w:type="table" w:styleId="Centered"><w:name w:val="Centered"/><w:tblPr><w:jc w:val="center"/><w:tblInd w:w="720" w:type="dxa"/></w:tblPr></w:style>'
+      + '<w:style w:type="table" w:styleId="Righted"><w:name w:val="Righted"/><w:basedOn w:val="Centered"/><w:tblPr><w:jc w:val="right"/></w:tblPr></w:style>';
+    const tbl = (tblPr: string, marginsXml = '') => `<w:tbl><w:tblPr>${tblPr}<w:tblW w:type="dxa" w:w="5000"/>${marginsXml}</w:tblPr><w:tblGrid><w:gridCol w:w="5000"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:tcW w:type="dxa" w:w="5000"/></w:tcPr><w:p><w:r><w:t>x</w:t></w:r></w:p></w:tc></w:tr></w:tbl>`;
+    // 468pt band at x=72, 250pt table: centred at 181, right-aligned at 290.
+    // The measured origin class (explicit legacy margins, measured modes);
+    // unmeasured classes keep their established nonleading-indent contract.
+    for (const mode of [null, 11, 12, 14, 15]) {
+      for (const marginsXml of [margins()]) {
+        expect(layoutTable(tbl('<w:tblStyle w:val="Centered"/>', marginsXml), mode, styles).flowBounds.xPt).toBeCloseTo(181, 8);
+        const right = layoutTable(tbl('<w:tblStyle w:val="Righted"/>', marginsXml), mode, styles).flowBounds.xPt;
+        expect(right).toBeCloseTo(290 + (mode !== 15 ? 18 : 0), 8);
+        // A direct leading jc overrides the style jc, so the style indent applies.
+        expect(layoutTable(tbl('<w:tblStyle w:val="Centered"/><w:jc w:val="left"/>', marginsXml), mode, styles).flowBounds.xPt)
+          .toBeCloseTo(72 + 36 - (mode !== 15 ? 18 : 0), 8);
+      }
+    }
+  });
+  it('an inherited style tblInd never shifts a non-leading table in an unmeasured class', () => {
+    // No left margin anywhere and a pct cell width: both outside the origin observation.
+    const styles = '<w:style w:type="table" w:styleId="Centered"><w:name w:val="Centered"/><w:tblPr><w:jc w:val="center"/><w:tblInd w:w="720" w:type="dxa"/></w:tblPr></w:style>'
+      + '<w:style w:type="table" w:styleId="Plain"><w:name w:val="Plain"/><w:tblPr><w:jc w:val="center"/></w:tblPr></w:style>';
+    for (const tcW of ['<w:tcW w:type="dxa" w:w="5000"/>', '<w:tcW w:type="pct" w:w="5000"/>']) {
+      const tbl = (tblPr: string) => `<w:tbl><w:tblPr>${tblPr}<w:tblW w:type="dxa" w:w="5000"/></w:tblPr><w:tblGrid><w:gridCol w:w="5000"/></w:tblGrid><w:tr><w:tc><w:tcPr>${tcW}</w:tcPr><w:p><w:r><w:t>x</w:t></w:r></w:p></w:tc></w:tr></w:tbl>`;
+      for (const mode of [null, 13, 14]) {
+        const unindented = layoutTable(tbl('<w:tblStyle w:val="Plain"/>'), mode, styles).flowBounds.xPt;
+        expect(layoutTable(tbl('<w:tblStyle w:val="Centered"/>'), mode, styles).flowBounds.xPt).toBeCloseTo(unindented, 8);
+        // A direct leading jc keeps the inherited indent.
+        expect(layoutTable(tbl('<w:tblStyle w:val="Centered"/><w:jc w:val="left"/>'), mode, styles).flowBounds.xPt).toBeCloseTo(72 + 36, 8);
+      }
+    }
+  });
+  it('an inherited style tblInd follows each row\'s resulting jc (trPr and tblPrEx overrides)', () => {
+    const styles = '<w:style w:type="table" w:styleId="Indented"><w:name w:val="Indented"/><w:tblPr><w:tblInd w:w="720" w:type="dxa"/></w:tblPr></w:style>'
+      + '<w:style w:type="table" w:styleId="CenteredIndented"><w:name w:val="CenteredIndented"/><w:basedOn w:val="Indented"/><w:tblPr><w:jc w:val="center"/></w:tblPr></w:style>';
+    const rowJc = (how: 'trPr' | 'tblPrEx', jc: string) => how === 'trPr'
+      ? `<w:tr><w:trPr><w:jc w:val="${jc}"/></w:trPr>` : `<w:tr><w:tblPrEx><w:jc w:val="${jc}"/></w:tblPrEx>`;
+    const tbl = (style: string, tr: string, marginsXml: string) => `<w:tbl><w:tblPr><w:tblStyle w:val="${style}"/><w:tblW w:type="dxa" w:w="5000"/>${marginsXml}</w:tblPr><w:tblGrid><w:gridCol w:w="5000"/></w:tblGrid>${tr}<w:tc><w:tcPr><w:tcW w:type="dxa" w:w="5000"/></w:tcPr><w:p><w:r><w:t>x</w:t></w:r></w:p></w:tc></w:tr></w:tbl>`;
+    const rowX = (layout: TableLayout) => layout.rows[0]?.cells[0]?.flowBounds.xPt;
+    // 468pt band at x=72, 250pt table: a centred row sits at 181.
+    for (const how of ['trPr', 'tblPrEx'] as const) {
+      for (const mode of [null, 13, 14, 15]) {
+        // Leading table, centred row: the inherited indent is ignored (no horizontal margins: unmeasured).
+        expect(rowX(layoutTable(tbl('Indented', rowJc(how, 'center'), ''), mode, styles))).toBeCloseTo(181, 8);
+        // Centred table, leading row: the inherited indent applies to that row.
+        expect(rowX(layoutTable(tbl('CenteredIndented', rowJc(how, 'left'), ''), mode, styles))).toBeCloseTo(108, 8);
+      }
+      for (const mode of [null, 14, 15]) {
+        // Measured class (explicit legacy margins): the leading row keeps the indent and its margin hang.
+        expect(rowX(layoutTable(tbl('CenteredIndented', rowJc(how, 'left'), margins()), mode, styles)))
+          .toBeCloseTo(mode === 15 ? 108 : 90, 8);
+        expect(rowX(layoutTable(tbl('Indented', rowJc(how, 'center'), margins()), mode, styles))).toBeCloseTo(181, 8);
+      }
+    }
+  });
+  it('end justification with wholly omitted horizontal margins ignores tblInd in the measured modes only', () => {
+    // WORD_TABLE_ORIGIN_COMPATIBILITY (controls-1664 page 7; ECMA-376 §17.4.50).
+    const omitted = (options: string, rows = row) => table(rows, options).replace(margins(), '');
+    const x = (xml: string, mode: number | null) => layoutTable(xml, mode).flowBounds.xPt;
+    for (const mode of [11, 12, 14, 15]) {
+      for (const rtl of ['', '<w:bidiVisual/>']) {
+        expect(x(omitted(indent.replace('108', '720') + '<w:jc w:val="end"/>' + rtl), mode))
+          .toBeCloseTo(x(omitted('<w:tblInd w:type="dxa" w:w="0"/><w:jc w:val="end"/>' + rtl), mode), 8);
+      }
+      expect(x(omitted(indent.replace('108', '720') + '<w:jc w:val="end"/>'), mode)).toBeCloseTo(252, 8);
+    }
+    // WORD_TABLE_NONLEADING_INDENT_SCOPE extends the ignored indent to right,
+    // center, an omitted mode and percentage cells; mode 13 is unmeasured and
+    // keeps the established contract.
+    const zero = '<w:tblInd w:type="dxa" w:w="0"/>';
+    const shifted = indent.replace('108', '720');
+    const pct = row.replaceAll('w:type="dxa"', 'w:type="pct"');
+    for (const [jc, mode, rows, shift] of [['right', 14, row, 0], ['center', 14, row, 0], ['end', 13, row, 36],
+      ['center', 13, row, 36], ['end', null, row, 0], ['end', 14, pct, 0]] as const) {
+      const options = `<w:jc w:val="${jc}"/>`;
+      expect(x(omitted(shifted + options, rows), mode) - x(omitted(zero + options, rows), mode), `${jc} ${mode}`).toBeCloseTo(shift, 8);
+    }
+  });
+  it('an authored horizontal margin at any layer keeps end tables out of the omitted-margin class', () => {
+    // horizontalMarginsOmitted is lexical: nil/auto/pct and logical start/end
+    // elements are authored even where they resolve to no value.
+    const options = '<w:tblStyle w:val="LogicalTable"/><w:jc w:val="end"/><w:tblInd w:type="dxa" w:w="720"/>';
+    const element = (name: string, kind: string) => `<w:${name} w:type="${kind}" w:w="${kind === 'dxa' ? 0 : 50}"/>`;
+    const authored: [string, string][] = [];
+    for (const kind of ['nil', 'auto', 'pct']) authored.push(['left', kind], ['right', kind]);
+    authored.push(['start', 'dxa'], ['end', 'dxa'], ['start', 'nil'], ['end', 'pct']);
+    const results: Record<string, number> = {};
+    for (const [name, kind] of authored) {
+      const mar = element(name, kind);
+      const cases = {
+        cell: [table(`<w:tr>${cell(2160).replace('/></w:tcPr>', `/><w:tcMar>${mar}</w:tcMar></w:tcPr>`)}${cell(3600)}</w:tr>`, options).replace(margins(), ''), LOGICAL_TABLE_STYLE],
+        exception: [table(`<w:tr><w:tblPrEx><w:tblCellMar>${mar}</w:tblCellMar></w:tblPrEx>${cell(2160)}${cell(3600)}</w:tr>`, options).replace(margins(), ''), LOGICAL_TABLE_STYLE],
+        table: [table(row, options).replace(margins(), `<w:tblCellMar>${mar}</w:tblCellMar>`), LOGICAL_TABLE_STYLE],
+        style: [table(row, options).replace(margins(), ''), `<w:style w:type="table" w:styleId="LogicalTable"><w:name w:val="Logical table"/><w:tblPr><w:tblCellMar>${mar}</w:tblCellMar></w:tblPr></w:style>`],
+      } as const;
+      for (const [layer, [xml, styles]] of Object.entries(cases)) {
+        results[`${layer} ${name} ${kind}`] = layoutTable(xml, 14, styles).flowBounds.xPt;
+      }
+    }
+    // Every case keeps the origin it had before the omitted-margin class:
+    // the indent applies (288), except a legacy left resolved to 0 at table or
+    // style scope, which is the explicit-margin class (end ignores it: 252).
+    for (const [key, xPt] of Object.entries(results)) {
+      expect(xPt, key).toBe(/^(table|style) left /.test(key) ? 252 : 288);
+    }
+    expect(Object.keys(results)).toHaveLength(40);
   });
   it.each(['center', 'right'])('%s ignores indentation and uses the first cell margin only at the logical end', (jc) => {
     const rows = `<w:tr>${cell(2160, 540)}${cell(3600)}</w:tr><w:tr>${cell(2160, 120)}${cell(3600)}</w:tr>`;
@@ -208,12 +351,14 @@ describe('Word table origin and occupied grid', () => {
       .replace('<w:gridCol w:w="2160"/><w:gridCol w:w="3600"/>', '<w:gridCol w:w="4680"/><w:gridCol w:w="4680"/>');
     const single = layoutTable(make(rows.join('')));
     const split = layoutTable(rows.map(make).join(''));
-    // Disabled whole-group eligibility: independently retain main's 540pt
-    // grid and signed center translation in both forms and both row orders.
+    // The origin observation stays disabled for the whole group, but
+    // WORD_TABLE_NONLEADING_INDENT_SCOPE drops the centred -36pt indent
+    // (ECMA-376 §17.4.50) identically in both forms and both row orders, so
+    // the AutoFit grid fits the 468pt band instead of main's 540pt.
     for (const layout of [split, single]) {
-      expect(layout.columnWidthsPt).toEqual([270, 270]);
+      expect(layout.columnWidthsPt).toEqual([234, 234]);
       expect(layout.rows.map((r) => r.cells.map((c) => c.flowBounds))).toEqual(
-        [72, 82].map((yPt) => [0, 270].map((xPt) => ({ xPt, yPt, widthPt: 270, heightPt: 10 }))),
+        [72, 82].map((yPt) => [72, 306].map((xPt) => ({ xPt, yPt, widthPt: 234, heightPt: 10 }))),
       );
     }
   });
@@ -233,13 +378,34 @@ describe('Word table origin and occupied grid', () => {
       .toEqual(single.rows.map((r) => r.cells.map((c) => c.flowBounds)));
     expect(split.rows.map((r) => r.cells[0]?.flowBounds.xPt)).toEqual([108, 108]);
   });
+  it('split centred members share the first logical row\'s authored indent over a style-inherited one', () => {
+    // A style-inherited tblInd is filtered for non-leading rows only when it is
+    // the selected indent; the logical first row's tblPrEx indent is authored.
+    const styles = '<w:style w:type="table" w:styleId="LogicalTable"><w:name w:val="Logical table"/><w:tblPr><w:tblInd w:w="720" w:type="dxa"/></w:tblPr></w:style>';
+    const skipped = `<w:tr><w:trPr><w:gridBefore w:val="1"/></w:trPr>${cell(2160)}${cell(3600)}</w:tr>`;
+    const first = skipped.replace('<w:tr>', '<w:tr><w:tblPrEx><w:tblInd w:type="dxa" w:w="720"/></w:tblPrEx>');
+    const make = (rows: string) => table(rows, '<w:tblStyle w:val="LogicalTable"/><w:jc w:val="center"/>')
+      .replace(margins(), '').replace('<w:tblGrid>', '<w:tblGrid><w:gridCol w:w="720"/>');
+    // WORD_FIXED_UNUSED_LEADING_GRID (modes 11/12/14/15) makes the members one
+    // logical table; no horizontal margins keeps the origin observation off.
+    for (const mode of [11, 14, 15]) {
+      const split = layoutTable(make(first) + make(skipped) + make(skipped), mode, styles);
+      const single = layoutTable(make(first + skipped + skipped), mode, styles);
+      expect(split.rows.map((r) => r.cells[0]?.flowBounds.xPt))
+        .toEqual(single.rows.map((r) => r.cells[0]?.flowBounds.xPt));
+      // Centred 288pt occupied grid in the 468pt band at x=72 (162), plus the shared 36pt.
+      expect(split.rows.map((r) => r.cells[0]?.flowBounds.xPt)).toEqual([198, 198, 198]);
+    }
+  });
   it('first-row exceptions anchor every leading row with the first cell override', () => {
     const rows = `<w:tr><w:tblPrEx><w:tblInd w:type="dxa" w:w="720"/>${margins(240)}</w:tblPrEx>${cell(2160, 540)}${cell(3600)}</w:tr>${row}`;
     expect(layoutTable(table(rows, indent)).rows.map((r) => r.cells[0]?.flowBounds.xPt)).toEqual([81, 81]);
   });
   it('preserves the previous origin for unresolved missing-margin and spaced classes', () => {
+    // A right table with omitted margins drops its indent
+    // (WORD_TABLE_NONLEADING_INDENT_SCOPE) but keeps the unhung origin.
     const missing = table(row, indent + '<w:jc w:val="right"/>').replace(margins(), '');
-    expect(layoutTable(missing).flowBounds.xPt).toBeCloseTo(257.4, 8);
+    expect(layoutTable(missing).flowBounds.xPt).toBeCloseTo(252, 8);
     const logicalOverride = table(`<w:tr>${cell(2160, 540).replace('<w:left ', '<w:start ')}${cell(3600)}</w:tr>`, indent);
     expect(layoutTable(logicalOverride).flowBounds.xPt).toBeCloseTo(77.4, 8);
     const unpreferred = table(row.replaceAll('w:type="dxa"', 'w:type="auto"'), indent);

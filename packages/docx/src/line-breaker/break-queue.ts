@@ -198,6 +198,9 @@ export interface GapTransaction {
   }> | null;
   /** Complete units precede a forced unit: end the fragment before this source. */
   stopBefore: LineBoundary | null;
+  /** WORD_KASHIDA_LINE_FIT: requirement of a window reaching the band's far
+   * edge, when it differs from `requirement` (an interior window's). */
+  farEdgeRequirement?: number;
 }
 
 export function createLineBreakerState(maxWidth: number, wrapCtx?: WrapLayoutCtx) {

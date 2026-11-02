@@ -400,6 +400,7 @@ fn project_table(
                 before_width: (planned.grid_before != 0)
                     .then(|| physical_width(planned.width_before)),
                 after_width: (planned.grid_after != 0).then(|| physical_width(planned.width_after)),
+                grid_skip_authored: planned.grid_before != 0 || planned.grid_after != 0,
                 justification: None,
                 cell_spacing: None,
                 style_cell_spacing: None,
@@ -441,6 +442,8 @@ fn project_table(
         cell_margin_right: f64::from(margins[3]) / 20.0,
         jc: ["left", "center", "right"][alignment as usize].into(),
         tbl_ind: Some(f64::from(plan.origin) / 20.0),
+        // The producer owns this indent; it is never style-inherited.
+        tbl_ind_inherited: false,
         layout: Some(if first_autofit { "autofit" } else { "fixed" }.into()),
         width_pt: table_preferred.and_then(|w| match w {
             PreferredWidth::Dxa(value) if value > 0 => Some(f64::from(value) / 20.0),

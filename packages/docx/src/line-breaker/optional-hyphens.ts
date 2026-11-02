@@ -1,4 +1,6 @@
+import { lineEndSpaceCharged, trailingSpaceSuffixWidth } from './atomic-units.js';
 import type { BreakOpportunityIteratorContext } from './break-opportunities.js';
+import { seamPairAdvance } from './pass-operations.js';
 import type { LayoutTextSeg } from './model.js';
 import { RESET_SLICED_TEXT_MEASUREMENT, slicedTextMetadata } from './advance.js';
 import type { KinsokuRules } from '@silurus/ooxml-core';
@@ -36,13 +38,20 @@ export function placeOptionalHyphenPrefix(
     context.reservePrefixWork(next.text.length + 1);
     members.push(next);
   }
+  // Each member follows its predecessor with its WORD_KERNED_SPACE_PAIRS seam
+  // pair, as placement commits it; the first follows the current line's end.
   let width = context.breakerState.currentWidth;
+  let predecessor = context.breakerState.currentLine.at(-1);
   let candidate: { index: number; offset: number; glyph: LayoutTextSeg } | undefined;
   let visiblePrefix = false;
   for (const [index, member] of members.entries()) {
     const markers = member.optionalHyphen
       ? [{ offset: 0, glyph: member.optionalHyphen }]
       : member.optionalHyphenBreaks ?? [];
+    if (!member.optionalHyphen) {
+      width += seamPairAdvance(context, predecessor, member, context.segAdvance(member));
+      predecessor = member;
+    }
     for (const marker of markers) {
       // A marker at a word's end has no continuation to break. Fixed fitText
       // cells and authored no-break ownership keep their ordinary atomicity.
@@ -67,12 +76,12 @@ export function placeOptionalHyphenPrefix(
       visiblePrefix ||= member.text.trim().length > 0;
     }
   }
-  const last = members.at(-1)!;
   // A collapsible trailing space does not force an otherwise fitting word
-  // to select an optional hyphen. RTL keeps its ordinary containment policy.
-  if (!context.baseRtl && last.text.endsWith(' ')) {
-    context.reservePrefixWork(last.text.length);
-    width -= context.segAdvance(last) - context.strAdvance(last, last.text.replace(/ +$/u, ''));
+  // to select an optional hyphen; the whole U+0020 suffix of the joined word
+  // is excluded, across members. RTL keeps its ordinary containment policy
+  // outside WORD_RTL_JUSTIFIED_VISIBLE_FIT.
+  if (!lineEndSpaceCharged(context)) {
+    width -= trailingSpaceSuffixWidth(members.filter((member) => !member.optionalHyphen), context);
   }
   if (context.fitsMeasuredWidth(width, context.availW())) return false;
   // An unselected owner cannot bypass the existing registered-face space

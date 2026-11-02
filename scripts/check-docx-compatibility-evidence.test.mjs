@@ -79,11 +79,12 @@ function run(root, ...args) {
 test('accepts literal rules with live regression evidence', () => {
   const result = run(fixture());
   assert.equal(result.status, 0, result.stderr);
-  // compatibility.ts declares six rules: the Windows Word controls of #1896
+  // compatibility.ts declares seven rules: the Windows Word controls of #1896
   // and #1902 retired word-float-different-paragraph-displacement and
-  // word-page-anchored-table-collision-deferral, and #1902 added three
-  // office-observation table-pagination rules.
-  assert.match(result.stdout, /verified \(6 rules\)/);
+  // word-page-anchored-table-collision-deferral, #1902 added three
+  // office-observation table-pagination rules, and #2044 added
+  // word-text-box-physical-insets.
+  assert.match(result.stdout, /verified \(7 rules\)/);
 });
 
 test('rejects a stale regression test title', () => {
@@ -405,7 +406,7 @@ test('accepts quoted literal keys and extra static metadata', () => {
   `);
   const result = run(root);
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /verified \(7 rules\)/);
+  assert.match(result.stdout, /verified \(8 rules\)/);
 });
 
 test('rejects a rule that no production source cites', () => {

@@ -6,7 +6,7 @@ import { cloneSegmentsForLinePass, convergeLineWrap } from './layout/line-wrap-c
 import type { MeasurementTextContext, VerticalGlyphMeasurementService } from './layout/measurement-capabilities.js';
 import { type DocGridCtx, type LayoutLine, type LayoutSeg, type LineBoundary, type WrapLayoutCtx } from './line-breaker/model.js';
 import { DEFAULT_TAB_PT } from './line-breaker/tabs.js';
-import { runLineBreakerPass } from './line-breaker/pass-driver.js';
+import { runLineBreakerPass, type LineFitWidth } from './line-breaker/pass-driver.js';
 export { type LineBoundary, type LayoutTextSeg, type LayoutTabSeg, type LayoutImageSeg, type LayoutMathSeg, type LayoutLineBreak, type LayoutSeg, type LayoutLine, type WrapLayoutCtx, type DocGridCtx, type LineLayoutEnvironment } from './line-breaker/model.js';
 export { gridCharDeltaPx, eaGlyphCount, gridSegDeltaPx, segmentCharacterGridDeltaPx, charSpacingDeltaPx, condensedSpacingMayFloor, condensedClusterFloorPx, type NaturalClusterAdvance, type CondensedAdvanceUnits, effectiveCharacterSpacingPt, punctuationCompressionTotalPt, widthBalanceSpaceAdjustmentTotalPt, widthBalanceSpaceAdjustmentForTextPt, slicedPunctuationCompressions, charScaleFactor, segLetterSpacingPx, segAdvanceWidth, type SnapToCharsClass, snapToCharsClass, snapToCharsAllocatedWidthPx, isGridLineRule } from './line-breaker/advance.js';
 export { rubyAscentReservePx } from './line-breaker/ruby-metrics.js';
@@ -16,6 +16,11 @@ export { splitSmallCapsCase, type NoteNumbering, formatNoteNumber, findNearbyFon
 export { fitCJKPrefix } from './line-breaker/fit-search.js';
 export { DEFAULT_TAB_PT, resolveDefaultTabPt, type BidiTabItem, type BidiTabResult, layoutBidiTabStops } from './line-breaker/tabs.js';
 export { buildSegments } from './line-breaker/segment-builder.js';
+
+/** WORD_JUSTIFIED_INTERWORD_COMPRESSION for the paragraph; the object form
+ * also says whether a line-end U+3000 hangs from the visible fit
+ * (WORD_LINE_END_SPACE_HANGS: not with wordWrap off). */
+export type JustifiedCompressionOption = boolean | Readonly<{ lineEndIdeographicSpaceHangs: boolean }>;
 
 export function layoutLines(
   ctx: MeasurementTextContext,
@@ -38,7 +43,8 @@ export function layoutLines(
   widthPolicy?: 'bounded' | 'intrinsic' | 'unwrapped',
   verticalGlyphMeasurement?: VerticalGlyphMeasurementService,
   overflowPunct?: boolean,
-  justifiedCompression?: boolean,
+  justifiedCompression?: JustifiedCompressionOption,
+  lineFit?: LineFitWidth,
 ): LayoutLine[];
 
 export function layoutLines(
@@ -88,7 +94,10 @@ export function layoutLines(
   widthPolicy: 'bounded' | 'intrinsic' | 'unwrapped' = 'bounded',
   verticalGlyphMeasurement?: VerticalGlyphMeasurementService,
   overflowPunct = false,
-  justifiedCompression = false,
+  justifiedCompression: JustifiedCompressionOption = false,
+  // WORD_KASHIDA_LINE_FIT: the part of each bounded line's width its text may
+  // fill; retained paint still justifies to the full width.
+  lineFit?: LineFitWidth,
   passContext?: Readonly<{
     probeHeights: readonly number[] | null;
     probeFloors?: readonly number[] | null;
@@ -128,6 +137,7 @@ export function layoutLines(
       verticalGlyphMeasurement,
       overflowPunct,
       justifiedCompression,
+      lineFit,
       { probeHeights, probeFloors, preparedFloatWrap },
     );
     // DrawingML wrap=none (§21.1.2.1.1) removes only the automatic break at the
@@ -174,7 +184,12 @@ export function layoutLines(
     ctx, segs, maxWidth, firstIndent, scale, tabStops, wrapCtx,
     fontFamilyClasses, tabOriginPx, kinsoku, characterGrid, defaultTabPt,
     marginRightPx, baseRtl, isJustified, stretchLastLine, startBoundary,
-    widthPolicy, verticalGlyphMeasurement, overflowPunct, justifiedCompression, passContext,
+    widthPolicy, verticalGlyphMeasurement, overflowPunct,
+    justifiedCompression: justifiedCompression !== false,
+    lineEndIdeographicSpaceHangs: typeof justifiedCompression === 'object'
+      ? justifiedCompression.lineEndIdeographicSpaceHangs
+      : justifiedCompression,
+    ...(lineFit ? { lineFit } : {}), passContext,
   });
 }
 

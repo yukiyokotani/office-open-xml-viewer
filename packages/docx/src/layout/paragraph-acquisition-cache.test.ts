@@ -149,7 +149,7 @@ function options(
 }
 
 describe('paragraph acquisition cache', () => {
-  it('remeasures zero-threshold text when a vertical move also changes compatibility mode', () => {
+  it('disables zero-threshold content kerning whatever the compatibility mode', () => {
     const ctx = measureContext();
     ctx.measureText = function (text) {
       return {
@@ -165,14 +165,17 @@ describe('paragraph acquisition cache', () => {
     (paragraph.runs[0] as Extract<DocRun, { type: 'text' }>).kerning = 0;
     const input = paragraphAcquisitionInput(paragraph, source);
     const base = options(services, { measurer: { context: ctx, fontFamilyClasses: {} } });
-    const at = (compatibilityMode: number, startYPt: number) => acquireParagraphResult(input, {
+    const at = (compatibilityMode: number | undefined, startYPt: number) => acquireParagraphResult(input, {
       ...base,
       environment: { ...base.environment, compatibilityMode },
       placement: { ...base.placement, startYPt },
     }).layout.lines[0]!.placements.find((placement) => placement.kind === 'text')?.kerning;
-    expect(at(14, 72)).toBe(true);
+    // WORD_KERN_THRESHOLD_AUTHORITY: measured with the mode omitted and in
+    // mode 15; an explicit zero is never a kerning threshold for content text.
+    expect(at(14, 72)).toBe(false);
     expect(at(15, 73)).toBe(false);
-    expect(at(14, 74)).toBe(true);
+    expect(at(14, 74)).toBe(false);
+    expect(at(undefined, 75)).toBe(false);
   });
 
   it('reuses the immutable result across initial and field service views', () => {

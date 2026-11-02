@@ -1,12 +1,14 @@
+import { lineEndSpaceCharged } from './atomic-units.js';
 import { textBreakOffsetAt, textBreakOffsets } from './text-break-window.js';
 import { candidateUnit, lineGapModel, type GapSegment } from './line-gaps.js';
 import { LineMeasurementAdapter } from './measurement-adapter.js';
-import { enumerateGaps, graphemeClusterOffsets, kinsokuAdjustedSplit } from '@silurus/ooxml-core';
+import { enumerateGaps, graphemeClusterOffsets, isCjkBreakChar, kinsokuAdjustedSplit, type LineGap } from '@silurus/ooxml-core';
 import {
   prepareFloatWrap,
   computePreparedLineFloatWindow,
   type PreparedFloatWrap,
 } from '../float-layout.js';
+import { LINE_SEARCH_Y_LIMIT_PT, lineGridAfter, lineSearchPitch } from '../layout/float-wrap.js';
 import { calcEffectiveFontPx, EAST_ASIAN_RE, independentTextShapeRequest, sliceTextShapeRequest } from '../layout/text.js';
 import {
   wordSnapToCharsEastAsianCellCount,
@@ -31,6 +33,7 @@ import {
   type MixedSpaceCandidate,
 } from './mixed-space-fit.js';
 import { applyBidiTabPostPass } from './tabs.js';
+import { segmentsHaveRtl } from '../bidi-line.js';
 import {
   eastAsianGridCountSinglePx,
   measuredLineMetrics,
@@ -42,6 +45,8 @@ import {
   leadingAutoSpacePx,
   segLetterSpacingPx,
   charSpacingDeltaPx,
+  condensedSpacingMayFloor,
+  condensedUnitAdvancesPx,
   type CondensedAdvanceUnits,
   protectedNoBreakOffsets,
   hardJoinPrefixEnd,
@@ -257,7 +262,7 @@ export function performMinimalLegalTextWidth(
   operationState: PassOperationState,
   segment: LayoutTextSeg,
 ): number {
-  const { kinsoku, strAdvance, baseRtl } = operationState;
+  const { kinsoku, strAdvance } = operationState;
   const text = segment.text;
   let end = text.length;
   if (segment.fitTextRegionIndex === undefined && !segment.ruby && !segment.tateChuYoko) {
@@ -283,7 +288,7 @@ export function performMinimalLegalTextWidth(
   }
   const prefix = text.slice(0, end);
   // The fit tests exclude a collapsible U+0020 suffix except in an RTL line.
-  return strAdvance(segment, baseRtl ? prefix : prefix.replace(/ +$/u, ''));
+  return strAdvance(segment, lineEndSpaceCharged(operationState) ? prefix : prefix.replace(/ +$/u, ''));
 }
 
 /** Vertical allocation belongs to the physical line; only a failed gap
@@ -354,6 +359,9 @@ export function performStartLine(operationState: PassOperationState, requirement
   const transaction: GapTransaction = {
     cursor,
     requestTopY: breakerState.currentLineTopY,
+    // A mark-only head's requirement is a band width (word-empty-mark-float-
+    // side-gap), not a fitted advance, so it takes no WORD_KASHIDA_LINE_FIT
+    // conversion.
     requirement: requirement + (breakerState.isFirst ? Math.max(0, firstIndent) : 0),
     window: null,
     narrowed: false,
@@ -404,6 +412,14 @@ function placeNumberingFirstLine(
   };
 }
 
+/** Resource limit on the line-grid steps one line's WORD_KASHIDA_LINE_FIT
+ * float search takes between the smaller and the larger of its two window
+ * requirements (library policy, not an OOXML rule). Past it the line takes
+ * the window the larger requirement found, which every kind admits, so a long
+ * run of far-edge windows that each fail their own requirement costs a
+ * bounded number of solver queries. */
+export const KASHIDA_FLOAT_RETRY_STEP_LIMIT = 32;
+
 /** Search the first admissible window for the transaction's requirement:
  * a later gap on the continuation baseline, else a new physical line. */
 function placeLineWindow(
@@ -450,15 +466,56 @@ function placeLineWindow(
       reference, requiredWidth,
     );
   };
-  let accepted: GapWindow & { narrowed: boolean } | null = null;
+  // The requirement of a solver window: `bandX` is the absolute origin of
+  // the band it was queried on (its xOffset is relative to it) and its width
+  // is the solver's (the hanging offset not yet added). Every kind decision
+  // goes through here so the expanded first-line band and the paragraph band
+  // are never mixed.
+  const bandFarEdge = baseRtl ? lineBandX : lineBandX + lineBandWidth;
+  const requirementOf = (bandX: number, window: Readonly<{ xOffset: number; maxWidth: number }>): number => {
+    const leftPt = bandX + window.xOffset;
+    return transaction.farEdgeRequirement !== undefined
+      && (baseRtl ? leftPt <= bandFarEdge + 1e-9 : leftPt + window.maxWidth >= bandFarEdge - 1e-9)
+      ? transaction.farEdgeRequirement : transaction.requirement;
+  };
+  // WORD_KASHIDA_LINE_FIT: a window reaching the band's far edge needs
+  // `farEdgeRequirement`, an interior one `requirement`. The solver is asked
+  // unchanged, on the real band: first for the smaller of the two, accepting
+  // its window when the window holds its own kind's requirement; else once
+  // for the larger (every window that wide holds either kind: an upper bound),
+  // and in between again for the smaller from the next line-grid top after
+  // each refused window, as the retry steps.
+  let retrySteps = KASHIDA_FLOAT_RETRY_STEP_LIMIT;
+  const lineQuery = (topY: number, x: number, width: number, height: number) => {
+    const far = transaction.farEdgeRequirement;
+    if (far === undefined || far === transaction.requirement) return query(topY, x, width, height);
+    const low = Math.min(far, transaction.requirement);
+    const high = Math.max(far, transaction.requirement);
+    const holds = (window: { xOffset: number; maxWidth: number }): boolean =>
+      window.maxWidth >= requirementOf(x, window);
+    let window = query(topY, x, width, height, low);
+    if (holds(window)) return window;
+    const bound = query(topY, x, width, height, high);
+    const pitch = lineSearchPitch(height);
+    while (pitch !== null && window.topY < bound.topY && Math.abs(window.topY) <= LINE_SEARCH_Y_LIMIT_PT
+      && Math.abs(topY) <= LINE_SEARCH_Y_LIMIT_PT && retrySteps > 0) {
+      retrySteps -= 1;
+      window = query(lineGridAfter(topY, pitch, window.topY), x, width, height, low);
+      if (window.topY > bound.topY) break;
+      if (holds(window)) return window;
+    }
+    return bound;
+  };
+  // `solverBandX`: the origin of the band the accepted window was queried on.
+  let accepted: GapWindow & { narrowed: boolean; solverBandX: number; solverXOffset: number } | null = null;
   const cursor = transaction.cursor;
   if (cursor) {
     const probeH = physicalProbeHeight(probeFloors, breakerState.physicalLineIndex);
     const left = baseRtl ? lineBandX : cursor.right;
     const right = baseRtl ? cursor.left : lineBandX + lineBandWidth;
     if (probeH !== undefined && right > left) {
-      const next = query(cursor.topY, left, right - left, probeH);
-      if (next.topY === cursor.topY && next.maxWidth >= transaction.requirement) {
+      const next = lineQuery(cursor.topY, left, right - left, probeH);
+      if (next.topY === cursor.topY && next.maxWidth >= requirementOf(left, next)) {
         // A strictly smaller unvisited band gives monotonic horizontal
         // progress; the column and largest-side reference never shrink.
         accepted = {
@@ -467,6 +524,8 @@ function placeLineWindow(
           maxWidth: next.maxWidth,
           solverWidth: next.maxWidth,
           narrowed: true,
+          solverBandX: left,
+          solverXOffset: next.xOffset,
         };
       }
     }
@@ -489,13 +548,15 @@ function placeLineWindow(
       transaction.snapshot = null;
       return;
     }
-    const win = query(transaction.requestTopY, lineBandX, lineBandWidth, probeH);
+    const win = lineQuery(transaction.requestTopY, lineBandX, lineBandWidth, probeH);
     accepted = {
       topY: win.topY,
       xOffset: win.xOffset,
       maxWidth: win.maxWidth + hangingOffset,
       solverWidth: win.maxWidth,
       narrowed: win.xOffset !== 0 || win.maxWidth !== lineBandWidth,
+      solverBandX: lineBandX,
+      solverXOffset: win.xOffset,
     };
   }
   // After a rejection the requirement exceeds the rejected width. A window
@@ -503,7 +564,9 @@ function placeLineWindow(
   // (it differs only by representable rounding) or comes from a boundary
   // that does not honor the requirement. Accept it without a transaction:
   // forced placement is then the established behavior, and the search ends.
-  if (rejected && accepted.narrowed && accepted.solverWidth < transaction.requirement) {
+  if (rejected && accepted.narrowed
+    && accepted.solverWidth < requirementOf(accepted.solverBandX,
+      { xOffset: accepted.solverXOffset, maxWidth: accepted.solverWidth })) {
     accepted = { ...accepted, narrowed: false };
   }
   breakerState.currentLineTopY = accepted.topY;
@@ -523,7 +586,8 @@ function placeLineWindow(
     breakerState.lineMarginExtension = free.topY === accepted.topY && free.xOffset === 0
       && free.maxWidth >= extension ? extension : 0;
   }
-  transaction.window = accepted;
+  const { solverBandX: _solverBandX, solverXOffset: _solverXOffset, ...window } = accepted;
+  transaction.window = window;
   transaction.narrowed = accepted.narrowed;
   // Absolute line-end edge versus the paragraph band edge, in reading order.
   const windowStart = wrapCtx.paraX + accepted.xOffset;
@@ -622,9 +686,26 @@ export function performRejectGap(
   }
   transaction.stopBefore = null;
   const rejected = transaction.window;
+  if (lineFitReduced(operationState)) {
+    // WORD_KASHIDA_LINE_FIT: the established retry with the width each
+    // window kind needs for its fitted width to hold the unit (the inverse of
+    // lineFitWidth, offsets included as the retry below charges them).
+    const hangingOffset = breakerState.isFirst ? Math.min(0, firstIndent) : 0;
+    const need = lineFitWindowRequirements(operationState, rejection.requiredWidth);
+    const rejectedNeed = transaction.endsAtExclusion ? need.interior : need.farEdge;
+    if (rejectedNeed > rejected.solverWidth) {
+      transaction.farEdgeRequirement = Math.max(transaction.farEdgeRequirement ?? transaction.requirement, need.farEdge);
+      transaction.requirement = Math.max(transaction.requirement, need.interior);
+    } else {
+      transaction.farEdgeRequirement = undefined;
+      transaction.requirement = maxWidth - hangingOffset;
+    }
+    placeLineWindow(operationState, transaction, rejected);
+    return;
+  }
+  const hangingOffset = breakerState.isFirst ? Math.min(0, firstIndent) : 0;
   const required = rejection.requiredWidth
     + (breakerState.isFirst ? Math.max(0, firstIndent) : 0);
-  const hangingOffset = breakerState.isFirst ? Math.min(0, firstIndent) : 0;
   // The forced unit did not fit this gap, so its advance exceeds the width
   // the solver admitted. A lower bound that does not (non-monotone advances)
   // sends the unit to the full band instead of creeping through gaps.
@@ -638,7 +719,80 @@ export function performAvailW(operationState: PassOperationState) {
   const { breakerState, firstIndent, widthPolicy } = operationState;
   return widthPolicy !== 'bounded'
     ? Number.POSITIVE_INFINITY
-    : breakerState.lineMaxWidth - (breakerState.isFirst ? firstIndent : 0);
+    : lineFitWidth(operationState, breakerState.lineMaxWidth - (breakerState.isFirst ? firstIndent : 0));
+}
+
+type LineFitState = Pick<PassOperationState,
+  'lineFit' | 'breakerState' | 'maxWidth' | 'marginRightPx' | 'tabOriginPx' | 'baseRtl'>;
+
+/** WORD_KASHIDA_LINE_FIT: the part of a bounded line width its text may fill.
+ * The single forward helper: every admission compares with this width (via
+ * availW) and {@link lineFitWindowRequirements} is its inverse per window kind. */
+export function lineFitWidth(operationState: LineFitState, widthPx: number): number {
+  return windowLineFitWidth(operationState, {
+    xOffset: operationState.breakerState.lineXOffset, maxWidth: operationState.breakerState.lineMaxWidth,
+  }, widthPx);
+}
+
+/** {@link lineFitWidth} of a given line window. */
+function windowLineFitWidth(
+  operationState: Pick<PassOperationState, 'lineFit' | 'maxWidth' | 'marginRightPx' | 'tabOriginPx' | 'baseRtl'>,
+  window: Readonly<{ xOffset: number; maxWidth: number }>,
+  widthPx: number,
+): number {
+  const fit = operationState.lineFit;
+  if (fit === undefined) return widthPx;
+  if (fit.reserveShare === 0) return widthPx * fit.fraction;
+  // A reserve base cut short by a negative trailing indent never enlarges the
+  // fit past the window: the reserve is at least zero.
+  return widthPx * fit.fraction
+    - fit.reserveShare * Math.max(0, window.maxWidth + lineReserveExtension(operationState, window));
+}
+
+/** Signed distance the reserve base runs past a line window's far edge: from
+ * the window's far edge to the container edge past the trailing indent when
+ * the window reaches the band's far edge (no float narrows that side), else
+ * zero (paraX-relative px; RTL mirrored). Negative for a negative indent. */
+function lineReserveExtension(
+  operationState: Pick<PassOperationState, 'maxWidth' | 'marginRightPx' | 'tabOriginPx' | 'baseRtl'>,
+  window: Readonly<{ xOffset: number; maxWidth: number }>,
+): number {
+  const { maxWidth, marginRightPx, tabOriginPx, baseRtl } = operationState;
+  if (baseRtl) return window.xOffset > 1e-9 ? 0 : tabOriginPx + window.xOffset;
+  const end = window.xOffset + window.maxWidth;
+  return end < maxWidth - 1e-9 ? 0 : marginRightPx - end;
+}
+
+/** The solver width each window kind needs for its {@link lineFitWidth} to
+ * hold `advancePx`: the smallest width of the monotone fitted width, for an
+ * interior window (no extension) and for one reaching the band's far edge
+ * (the signed trailing-indent extension), the hanging offset placement adds
+ * and the first-line indent admission subtracts included. */
+function lineFitWindowRequirements(
+  operationState: Pick<PassOperationState, 'lineFit' | 'breakerState' | 'wrapCtx' | 'firstIndent'
+    | 'maxWidth' | 'marginRightPx' | 'tabOriginPx' | 'baseRtl'>,
+  advancePx: number,
+): { interior: number; farEdge: number } {
+  const fit = operationState.lineFit!;
+  const { breakerState, firstIndent, maxWidth, marginRightPx, tabOriginPx, baseRtl } = operationState;
+  const indent = breakerState.isFirst ? firstIndent : 0;
+  // The hanging offset the retry charges (placement re-anchors a numbered
+  // first line at its resolved body, so its authored hanging is not added).
+  const hanging = breakerState.isFirst ? Math.min(0, firstIndent) : 0;
+  // lineMaxWidth L = solver width + hanging; fit = (L - indent) * f - s * max(0, L + e).
+  const lineWidthFor = (extension: number): number => {
+    const unreserved = advancePx / fit.fraction + indent;
+    if (fit.reserveShare === 0 || unreserved + extension <= 0) return unreserved;
+    return (advancePx + fit.fraction * indent + fit.reserveShare * extension) / (fit.fraction - fit.reserveShare);
+  };
+  const farExtension = baseRtl ? tabOriginPx : marginRightPx - maxWidth;
+  return { interior: lineWidthFor(0) - hanging, farEdge: lineWidthFor(farExtension) - hanging };
+}
+
+/** Whether WORD_KASHIDA_LINE_FIT narrows this paragraph's fit width. */
+export function lineFitReduced(operationState: Pick<PassOperationState, 'lineFit'>): boolean {
+  const fit = operationState.lineFit;
+  return fit !== undefined && (fit.fraction !== 1 || fit.reserveShare !== 0);
 }
 
 export function performFitsMeasuredWidth(
@@ -660,6 +814,10 @@ export function performFitsMeasuredWidth(
   ) {
     return false;
   }
+  // The reversed operation order applies only to the full width; a reduced
+  // fit width (WORD_KASHIDA_LINE_FIT) is compared as computed by availW.
+  const fit = operationState.lineFit;
+  if (fit !== undefined && (fit.fraction !== 1 || fit.reserveShare !== 0)) return false;
   return used + (breakerState.isFirst ? firstIndent : 0) <= breakerState.lineMaxWidth;
 }
 
@@ -705,6 +863,7 @@ export function performFlush(
   performSettleMixedSpaces(operationState);
   breakerState.currentWidth += applyBidiTabPostPass({
     baseRtl,
+    ...(operationState.lineFit ? { fitWidth: operationState.availW() } : {}),
     currentLine: breakerState.currentLine,
     marginRightPx,
     maxWidth: operationState.maxWidth,
@@ -845,10 +1004,7 @@ export function performFlush(
             ...justifiedGapPlan,
             // CJK/ideographic/SEA expansion has no proportional measurement.
             // Retain its previous opportunities; family selection lives in core.
-            expansionGaps: enumerateGaps(breakerState.currentLine.map(s => ({
-              text: 'text' in s && !s.metricOnly && s.fitTextRegionIndex === undefined && s.snapGridClass === undefined
-                ? s.text : undefined,
-            })), { lastDrawnSi: Infinity }).gaps,
+            expansionGaps: withoutLatinIdeographicSpaceGaps(breakerState.currentLine),
           },
         } : {}),
     segments: breakerState.currentLine,
@@ -966,6 +1122,19 @@ export function performAddToLine(
     const delta = resolveAutoSpaceAtPlacement(operationState, s);
     if (delta !== 0) {
       w += delta;
+      committedWidth = w;
+    }
+  }
+  if ('text' in s) {
+    // WORD_KERNED_SPACE_PAIRS: re-resolve the cross-space pair against the
+    // actual predecessor, so every placement path (a fitted width, a fresh
+    // line after a pre-flush, a re-measured box) commits the same width that
+    // retained paint shifts the glyph origin by.
+    const applied = s.leadingWordBoundaryPx ?? 0;
+    const desired = kernedSpacePairAdvance(operationState, s, w - applied);
+    s.leadingWordBoundaryPx = desired === 0 ? undefined : desired;
+    if (desired !== applied) {
+      w += desired - applied;
       committedWidth = w;
     }
   }
@@ -1460,15 +1629,81 @@ export function justifiedCompressionApplies(state: Pick<PassOperationState,
     && state.characterGrid?.type !== 'linesAndChars';
 }
 
-function gapSegment(state: Pick<PassOperationState, 'strAdvance' | 'scale' | 'characterGrid'>, segment: LayoutSeg): GapSegment {
+/** The unweighted expansion opportunities of a mode-15 justified line, less
+ * the U+3000 whose nearest non-space cells on both sides are not CJK, as
+ * WORD_JUSTIFIED_INTERWORD_COMPRESSION describes. Lines with right-to-left
+ * text keep every opportunity. */
+function withoutLatinIdeographicSpaceGaps(line: readonly LayoutSeg[]): LineGap[] {
+  // Opaque cells (objects, ruby, fitText, grid-excluded and metric-only
+  // cells) neither join nor classify a neighbour by their underlying text.
+  const projected = line.map((segment) => ({
+    text: 'text' in segment && !segment.metricOnly && segment.fitTextRegionIndex === undefined
+      && segment.snapGridClass === undefined ? segment.text : undefined,
+  }));
+  const gaps = enumerateGaps(projected, { lastDrawnSi: Infinity }).gaps;
+  if (!gaps.some((gap) => gap.codePoint === 0x3000) || segmentsHaveRtl(line)) return gaps;
+  const OPAQUE = 0xfffc;
+  const cells: number[] = [];
+  const cellAt = new Map<string, number>();
+  projected.forEach(({ text }, si) => {
+    if (text === undefined || ('ruby' in line[si]! && line[si]!.ruby)) {
+      cells.push(OPAQUE);
+      return;
+    }
+    let off = 0;
+    for (const character of text) {
+      // A grapheme extender (a variation selector, a combining mark) belongs
+      // to the cell before it: the neighbour is classified by its base.
+      if (!GRAPHEME_EXTENDER.test(character) || cells.length === 0) {
+        cellAt.set(`${si}:${off}`, cells.length);
+        cells.push(character.codePointAt(0)!);
+      }
+      off += 1;
+    }
+  });
+  // Nearest non-space cell on each side, in one pass per direction.
+  const isSpace = (cp: number): boolean => cp === 0x20 || cp === 0x3000;
+  const before: Array<number | undefined> = [];
+  const after: Array<number | undefined> = new Array(cells.length);
+  let nearest: number | undefined;
+  for (let at = 0; at < cells.length; at++) {
+    before.push(nearest);
+    if (!isSpace(cells[at]!)) nearest = cells[at];
+  }
+  nearest = undefined;
+  for (let at = cells.length - 1; at >= 0; at--) {
+    after[at] = nearest;
+    if (!isSpace(cells[at]!)) nearest = cells[at];
+  }
+  return gaps.filter((gap) => {
+    if (gap.codePoint !== 0x3000) return true;
+    const at = cellAt.get(`${gap.segIndex}:${gap.cpOffset}`);
+    if (at === undefined) return true;
+    return isCjkNeighbour(before[at]) || isCjkNeighbour(after[at]);
+  });
+}
+
+const GRAPHEME_EXTENDER = /^[\p{Grapheme_Extend}\u200d]$/u;
+const EAST_ASIAN_SCRIPT = /^[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]$/u;
+
+/** CJK text for {@link withoutLatinIdeographicSpaceGaps}, supplementary
+ * ideographs included. */
+function isCjkNeighbour(cp: number | undefined): boolean {
+  return cp !== undefined && cp !== 0xfffc
+    && (isCjkBreakChar(cp) || EAST_ASIAN_SCRIPT.test(String.fromCodePoint(cp)));
+}
+
+function gapSegment(state: Pick<PassOperationState, 'strAdvance' | 'scale' | 'characterGrid'
+  | 'lineEndIdeographicSpaceHangs'>, segment: LayoutSeg): GapSegment {
   if ('text' in segment) {
     // §17.3.2.14 owns fixed-width fitText geometry and atomic wrapping.
     // Its interaction with proportional justification is unmeasured: keep
     // the cell and adjacent spaces fixed, as for the existing pitch policy.
     if (segment.fitTextRegionIndex !== undefined) {
-      return { widthPx: segment.measuredWidth, spacePx: 0 };
+      return { widthPx: segment.measuredWidth, spacePx: 0, ...(segmentsHaveRtl([segment]) ? { rtl: true } : {}) };
     }
     const spaceWidths = new Map<number, number>();
+    const ideographicSpaceWidths = new Map<number, number>();
     const spaceClusters = segment.shapedSpaceClusters ?? segment.shapedClusters;
     if (spaceClusters && !segment.ruby) {
       const advances = new Map(spaceClusters.map(cluster => [cluster.range.start, cluster.advancePt]));
@@ -1485,6 +1720,18 @@ function gapSegment(state: Pick<PassOperationState, 'strAdvance' | 'scale' | 'ch
         cpOffset += 1;
       }
     }
+    // U+3000 is a text cell for gaps; only the advances of those in the
+    // trailing U+0020/U+3000 run are needed, where a line-end U+3000 hangs.
+    if (state.lineEndIdeographicSpaceHangs === true && segment.text.includes('\u3000') && !segment.ruby) {
+      const characters = [...segment.text];
+      let start = segment.text.length;
+      for (let off = characters.length - 1; off >= 0 && (characters[off] === ' ' || characters[off] === '\u3000'); off--) {
+        start -= 1;
+        if (characters[off] !== '\u3000') continue;
+        ideographicSpaceWidths.set(off, state.strAdvance(
+          { ...segment, text: '\u3000', ...slicedTextMetadata(segment, start, start + 1) }, '\u3000'));
+      }
+    }
     const start = segment.text.indexOf(' ');
     const spacePx = spaceWidths.values().next().value ?? (start >= 0 && !segment.ruby
       ? state.strAdvance({ ...segment, text: ' ', ...slicedTextMetadata(segment, start, start + 1) }, ' ')
@@ -1493,7 +1740,9 @@ function gapSegment(state: Pick<PassOperationState, 'strAdvance' | 'scale' | 'ch
     return {
       text: segment.metricOnly ? '' : segment.ruby ? undefined : segment.text,
       widthPx: segment.measuredWidth, spacePx, spaceWidths,
+      ...(ideographicSpaceWidths.size > 0 ? { ideographicSpaceWidths } : {}),
       ...(leadingGapPx > 0 ? { leadingGapPx } : {}),
+      ...(segmentsHaveRtl([segment]) ? { rtl: true } : {}),
     };
   }
   return { widthPx: segment.measuredWidth, spacePx: 0 };
@@ -1532,7 +1781,8 @@ export function justifiedPrefixCompression(state: Pick<PassOperationState,
  * for paint. Advances are never shortened here; compression is line-owned. */
 export function fitJustifiedCompression(state: Pick<PassOperationState,
   'justifiedCompression' | 'baseRtl' | 'widthPolicy' | 'characterGrid' | 'breakerState'
-  | 'segAdvance' | 'strAdvance' | 'availW' | 'textSegmentBox' | 'addToLine' | 'scale' | 'measurement' | 'flush'>, first: LayoutTextSeg): boolean {
+  | 'segAdvance' | 'strAdvance' | 'availW' | 'textSegmentBox' | 'addToLine' | 'scale' | 'measurement' | 'flush'
+  | 'reservePrefixWork'>, first: LayoutTextSeg): boolean {
   if (!justifiedCompressionApplies(state) || first.fitTextRegionIndex !== undefined) return false;
   const { breakerState: breaker } = state;
   if (breaker.justifiedUnitEnd) {
@@ -1548,8 +1798,9 @@ export function fitJustifiedCompression(state: Pick<PassOperationState,
   const boxes = members.map(member => {
     if (!('text' in member)) throw new Error('A text candidate lost its placement unit');
     const box = state.textSegmentBox(member);
-    const boundary = state.measurement.wordBoundaryAdvance(
-      previousText && 'text' in previousText ? previousText : undefined, member);
+    // WORD_KERNED_SPACE_PAIRS: the same seam oracle that placement re-resolves.
+    const boundary = seamPairAdvance(state,
+      previousText && 'text' in previousText ? previousText : undefined, member, box.width);
     boundaries.push(boundary);
     member.measuredWidth = box.width + boundary;
     previousText = member;
@@ -1590,6 +1841,61 @@ export function fitJustifiedCompression(state: Pick<PassOperationState,
   return true;
 }
 
+export type SeamPairState = Pick<PassOperationState,
+  'measurement' | 'widthPolicy' | 'characterGrid' | 'scale' | 'reservePrefixWork'>;
+
+/** WORD_KERNED_SPACE_PAIRS: the font's pair adjustment across the seam
+ * between `previous` and `s`, which follows it on the same line, when one side
+ * of the seam is U+0020 (the separator ending a word piece, or a space split
+ * from its glyph by a font slot). A piece already measures the pairs inside
+ * it; only the seam pair is missing from the isolated measurements. The seam
+ * oracle acquires it from the selected face (never a constant) and declines
+ * unless both pieces belong to one identically formatted source sequence with
+ * kerning applying. Snapped-grid cells keep their own allocation.
+ *
+ * The pair adjusts the advance of the seam's first character (the space, or
+ * the glyph before a slot-split space). Under
+ * WORD_CONDENSED_SPACING_ADVANCE_FLOOR that character's committed contextual
+ * advance (the last floor unit of `previous`) is floored at zero with the pair
+ * folded in, so only the floored difference is charged; the charge
+ * never exceeds `widthPx`, the following piece's own advance, so no piece
+ * takes a negative width. Intrinsic sizing keeps its registered-unit
+ * acquisition (joined physical units) unchanged. */
+export function seamPairAdvance(
+  state: SeamPairState,
+  previous: LayoutSeg | undefined,
+  s: LayoutTextSeg,
+  widthPx: number,
+): number {
+  if (!previous || !('text' in previous)) return 0;
+  if (state.widthPolicy === 'intrinsic' && (previous.semanticSlotSpans || s.semanticSlotSpans)) {
+    return state.measurement.wordBoundaryAdvance(previous, s);
+  }
+  const { characterGrid, scale } = state;
+  if (snapToCharsClass(s, characterGrid) || snapToCharsClass(previous, characterGrid)) return 0;
+  let pair = state.measurement.kernedSpaceSeamAdvance(previous, s);
+  if (pair === 0) return 0;
+  if (condensedSpacingMayFloor(previous, characterGrid, scale)) {
+    // The committed contextual advance of the seam's first character (its
+    // pairs inside `previous` included), exactly as segAdvanceWidth floors it.
+    const units = state.measurement.condensedAdvanceUnits(
+      previous, previous.text, 0, characterGrid, state.reservePrefixWork);
+    const last = units ? condensedUnitAdvancesPx(previous, characterGrid, scale, units).at(-1) : undefined;
+    if (last !== undefined) pair = Math.max(0, last + pair) - Math.max(0, last);
+  }
+  return Math.max(pair, -Math.max(0, widthPx));
+}
+
+/** {@link seamPairAdvance} against the text piece ending the current line;
+ * a piece starting a line takes none. */
+export function kernedSpacePairAdvance(
+  state: SeamPairState & Pick<PassOperationState, 'breakerState'>,
+  s: LayoutTextSeg,
+  widthPx: number,
+): number {
+  return seamPairAdvance(state, state.breakerState.currentLine.at(-1), s, widthPx);
+}
+
 export function performTextSegmentBox(
   operationState: PassOperationState,
   s: LayoutTextSeg,
@@ -1624,18 +1930,10 @@ export function performTextSegmentBox(
     condensedNaturalClusters(operationState, s, s.text),
   ) + leadingAutoSpacePx(operationState, s);
   s.snapGridNaturalWidthPx = width;
-  // Max-content uses the unbroken native context, as its ordinary intrinsic
-  // text merge already does. Registered physical units must stay intact;
-  // acquire only their separator pair through the shared boundary oracle.
-  // This is not the bounded-line Word justification/compression policy.
-  if (operationState.widthPolicy === 'intrinsic') {
-    const previous = operationState.breakerState.currentLine.at(-1);
-    if (previous && 'text' in previous && (previous.semanticSlotSpans || s.semanticSlotSpans)) {
-      const boundary = measurement.wordBoundaryAdvance(previous, s);
-      s.leadingWordBoundaryPx = boundary;
-      width += boundary;
-    }
-  }
+  // The seam pair with the preceding piece (WORD_KERNED_SPACE_PAIRS; for
+  // max-content also the separator pair of registered physical units, whose
+  // ordinary text the intrinsic merge already joins) is resolved by the
+  // caller against the actual predecessor: see kernedSpacePairAdvance.
 
   const fullPx = s.fontSize * scale;
   let metricMeasurement = measured;
@@ -1855,25 +2153,44 @@ export function performDecimalAlignmentPrefixWidth(
   if (!point) return undefined;
   let width = 0;
   for (let index = 0; index < point.segmentIndex; index += 1) {
-    width += tabFollowWidth(segments[index]!);
+    width += tabFollowSeamWidth(operationState, segments, index);
   }
   const segment = segments[point.segmentIndex]!;
   if (!('text' in segment)) return width;
-  return width + strAdvance(segment, segment.text.slice(0, point.charOffset));
+  const prefixWidth = strAdvance(segment, segment.text.slice(0, point.charOffset));
+  // The separator follows the segment's seam pair, which precedes its glyphs.
+  return width + prefixWidth + seamPairAdvance(operationState, segments[point.segmentIndex - 1],
+    segment, tabFollowWidth(segment));
+}
+
+/** Advance of `segments[index]` in a tab's following cell, with the
+ * WORD_KERNED_SPACE_PAIRS seam pair against its predecessor in that cell, so
+ * right/center/decimal and positional alignment use the widths that placement
+ * commits. The cell's first item follows the tab, which takes no pair. */
+function tabFollowSeamWidth(
+  operationState: PassOperationState,
+  segments: readonly LayoutSeg[],
+  index: number,
+): number {
+  const segment = segments[index]!;
+  const width = operationState.tabFollowWidth(segment);
+  return 'text' in segment
+    ? width + seamPairAdvance(operationState, segments[index - 1], segment, width)
+    : width;
 }
 
 export function performTabFollowingMetrics(operationState: PassOperationState): Readonly<{
   totalWidth: number;
   decimalPrefixWidth?: number;
 }> {
-  const { breakerState, tabFollowWidth, decimalAlignmentPrefixWidth } = operationState;
+  const { breakerState, decimalAlignmentPrefixWidth } = operationState;
 
   const following: LayoutSeg[] = [];
   let totalWidth = 0;
   for (const q of breakerState.queue) {
     if ('isTab' in q || 'lineBreak' in q) break;
     following.push(q);
-    totalWidth += tabFollowWidth(q);
+    totalWidth += tabFollowSeamWidth(operationState, following, following.length - 1);
   }
   const decimalPrefixWidth = decimalAlignmentPrefixWidth(following);
   return decimalPrefixWidth === undefined ? { totalWidth } : { totalWidth, decimalPrefixWidth };
