@@ -35,6 +35,15 @@ describe('inline wp:effectExtent (ECMA-376 §20.4.2.6)', () => {
     expect(seg.objectSizePt).toEqual([20, 40]);
   });
 
+  it('keeps an inline shape on its own edges in a vertical section (not counter-turned)', () => {
+    const [seg] = buildSegments([{
+      type: 'shape', inline: true, widthPt: 20, heightPt: 40, inlineEffectExtent: [2, 3, 5, 8],
+    }] as never, { uprightResourceOrientation: 'upright-physical' } as LineLayoutEnvironment);
+    if (!seg || !('imagePath' in seg)) throw new Error('expected a shape segment');
+    expect(seg.effectExtent).toEqual([2, 3, 5, 8]);
+    expect([seg.widthPt, seg.heightPt]).toEqual([27, 51]);
+  });
+
   it.each([
     ['upright-physical', [3, 5, 8, 2]],
     ['upright-physical-counter-clockwise', [8, 2, 3, 5]],

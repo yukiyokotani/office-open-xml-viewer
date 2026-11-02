@@ -1636,8 +1636,8 @@ function emitResolvedTextSegment(
 /** ECMA-376 §20.4.2.6: an inline object's line box is its extent widened by
  * `wp:effectExtent` on every edge (Word #2063 controls: pictures and shapes;
  * the advance gains left + right, the line gains top + bottom). The edges are
- * physical: an upright graphic in a vertical section maps them onto the
- * logical line axes (clockwise: logical left/top/right/bottom = physical
+ * physical: a picture or chart that a vertical section keeps upright maps
+ * them onto the logical line axes (shapes and placeholders turn with the line) (clockwise: logical left/top/right/bottom = physical
  * top/right/bottom/left; counter-clockwise: bottom/left/top/right). Signed
  * values (ST_Coordinate) apply as authored; the box never goes below zero. */
 function inlineEffectExtentBox(
@@ -1915,7 +1915,9 @@ function appendRunsToSegments(
         anchorYFromPara: false,
         inlineShape: true,
         inlinePicture: true,
-        ...inlineEffectExtentBox(run.inlineEffectExtent, run.widthPt, run.heightPt, environment.uprightResourceOrientation),
+        // An inline shape is not counter-turned in a vertical section, so its
+        // effect edges stay on the object's own (logical) edges.
+        ...inlineEffectExtentBox(run.inlineEffectExtent, run.widthPt, run.heightPt),
         ...(run.inlineOffsetXPt ? { inlineOffsetXPt: run.inlineOffsetXPt } : {}),
         ...(run.inlineOffsetYPt ? { inlineOffsetYPt: run.inlineOffsetYPt } : {}),
         measuredWidth: 0,
@@ -1928,7 +1930,7 @@ function appendRunsToSegments(
         mimeType: '',
         ...inlineEffectExtentBox(
           acquiredAnchor !== undefined ? undefined : run.inlineEffectExtent,
-          run.widthPt, run.heightPt, environment.uprightResourceOrientation,
+          run.widthPt, run.heightPt,
         ),
         anchor: acquiredAnchor !== undefined,
         anchorXPt: 0,
