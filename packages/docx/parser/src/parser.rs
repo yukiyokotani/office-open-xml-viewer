@@ -9257,6 +9257,7 @@ fn unavailable_drawing_run(
     let (width_pt, height_pt) = drawing_extent_points(container)?;
     Some(DocRun::UnavailableDrawing(Box::new(
         UnavailableDrawingRun {
+            inline_effect_extent: None,
             resource_kind,
             width_pt,
             height_pt,
@@ -9382,15 +9383,21 @@ fn apply_inline_effect_extent(container: roxmltree::Node, runs: &mut [DocRun]) {
     if container.tag_name().name() != "inline" {
         return;
     }
-    let Some(edges) = container
+    let Some(node) = container
         .children()
         .find(|child| child.is_element() && child.tag_name().name() == "effectExtent")
-        .map(parse_effect_extent)
     else {
         return;
     };
-    let pt = |value: Option<f64>| value.filter(|v| v.is_finite() && *v > 0.0).unwrap_or(0.0);
-    let extent = [pt(edges.left_pt), pt(edges.top_pt), pt(edges.right_pt), pt(edges.bottom_pt)];
+    // ST_Coordinate: signed EMU or a universal measure.
+    let edge = |name: &str| {
+        node.attribute(name)
+            .and_then(ooxml_common::units::coordinate_to_emu)
+            .map(|emu| emu as f64 / 12700.0)
+            .filter(|pt| pt.is_finite())
+            .unwrap_or(0.0)
+    };
+    let extent = [edge("l"), edge("t"), edge("r"), edge("b")];
     if extent.iter().all(|v| *v == 0.0) {
         return;
     }
@@ -9398,6 +9405,10 @@ fn apply_inline_effect_extent(container: roxmltree::Node, runs: &mut [DocRun]) {
         match run {
             DocRun::Image(image) if !image.anchor => image.inline_effect_extent = Some(extent),
             DocRun::Shape(shape) if shape.inline => shape.inline_effect_extent = Some(extent),
+            DocRun::Chart(chart) if !chart.anchor => chart.inline_effect_extent = Some(extent),
+            DocRun::UnavailableDrawing(drawing) if drawing.anchor_acquisition.is_none() => {
+                drawing.inline_effect_extent = Some(extent)
+            }
             _ => {}
         }
     }
@@ -9463,6 +9474,7 @@ fn parse_drawing_container(
                     if let Some((width_pt, height_pt)) = drawing_extent_points(container) {
                         if let Some(chart) = rid.and_then(|rid| chart_map.clone_for_drawing(rid)) {
                             return vec![DocRun::Chart(Box::new(ChartRun {
+                                inline_effect_extent: None,
                                 chart,
                                 width_pt,
                                 height_pt,
@@ -9807,6 +9819,7 @@ fn parse_drawing_container(
                 if let Some((width_pt, height_pt)) = drawing_extent_points(container) {
                     if let Some(chart) = rid.and_then(|rid| chart_map.clone_for_drawing(rid)) {
                         return vec![DocRun::Chart(Box::new(ChartRun {
+                            inline_effect_extent: None,
                             chart,
                             width_pt,
                             height_pt,
@@ -19348,6 +19361,7 @@ mod tests {
             (DocRun::Image(Box::new(image)), "image"),
             (
                 DocRun::UnavailableDrawing(Box::new(UnavailableDrawingRun {
+                    inline_effect_extent: None,
                     resource_kind: UnavailableDrawingResourceKind::Image,
                     width_pt: 24.0,
                     height_pt: 24.0,

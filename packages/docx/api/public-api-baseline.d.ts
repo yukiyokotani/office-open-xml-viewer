@@ -838,6 +838,7 @@ export interface ChartRegionMapRenderer {
     render(ctx: CanvasRenderingContext2D, chart: ChartModel, rect: ChartRect, ptToPx: number, shapeRotationDeg?: number): boolean;
 }
 export interface ChartRun {
+    inlineEffectExtent?: [number, number, number, number];
     chart: ChartModel;
     widthPt: number;
     heightPt: number;
@@ -1794,6 +1795,7 @@ export interface ImageResourceOptions {
     resolution?: 'native-if-fit' | 'display';
 }
 export interface ImageRun {
+    inlineEffectExtent?: [number, number, number, number];
     imagePath: string;
     mimeType: string;
     svgImagePath?: string;
@@ -2462,6 +2464,7 @@ export type ShapeFill = {
     blipEffects?: BlipEffect[];
 };
 export interface ShapeRun {
+    inlineEffectExtent?: [number, number, number, number];
     inline?: boolean;
     inlineOffsetXPt?: number;
     inlineOffsetYPt?: number;

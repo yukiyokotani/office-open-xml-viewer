@@ -462,7 +462,12 @@ export function paragraphMarkLineMetrics(
   // the baseline, and that whole box then follows the paragraph's line rule.
   // Exact spacing ignores the picture (the caller passes no minimum).
   asc = Math.max(asc, minimumAscentPx);
-  const resourceRatio = resolvedLocalFont?.lineHeightRatio;
+  // The face is the ascii one, but an East Asian paragraph keeps that face's
+  // Far East design height, which is what docGrid cell counts are built from.
+  // A resource that only records its Far East height has no other design line.
+  const resourceRatio = eastAsian
+    ? resolvedLocalFont?.eastAsianLineHeightRatio ?? resolvedLocalFont?.lineHeightRatio
+    : resolvedLocalFont?.lineHeightRatio ?? resolvedLocalFont?.eastAsianLineHeightRatio;
   const designIntendedSingle = referenceMarkMetric
     ? referenceMarkMetric.lineHeightRatio * fs * scale
     : resourceRatio != null

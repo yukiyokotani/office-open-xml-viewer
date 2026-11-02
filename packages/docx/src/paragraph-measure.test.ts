@@ -555,8 +555,9 @@ describe('measureParagraph', () => {
 
     expect(advance(false)).toBe(10);
     expect(advance(true)).toBe(10);
-    // An authored mark hint still selects the East Asian face without a grid.
-    expect(advance(true, true)).toBe(14);
+    // WORD_EMPTY_MARK_ASCII_FACE: an authored eastAsia hint does not select the
+    // East Asian face for an empty mark either.
+    expect(advance(true, true)).toBe(10);
   });
 
   it('applies useFELayout grid-cell allocation to an empty paragraph mark', () => {

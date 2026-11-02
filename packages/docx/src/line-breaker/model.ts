@@ -687,6 +687,9 @@ export interface LineLayoutEnvironment {
   readonly noteNumbering?: NoteNumbering;
   readonly noteReferenceNumber?: number;
   readonly verticalCJK?: boolean;
+  /** Owner section's counter-turn for upright inline graphics; maps their
+   *  physical §20.4.2.6 effect edges onto the logical line axes. */
+  readonly uprightResourceOrientation?: import('../layout/types.js').UprightResourceOrientation;
   /** ECMA-376 Part 4 §14.8.3.50 w:useFELayout compatibility switch. */
   readonly useFeLayout?: boolean;
   /** §17.6.5 effective line-grid gate after section type, paragraph opt-out,

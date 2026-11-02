@@ -3420,6 +3420,11 @@ pub enum UnavailableDrawingResourceKind {
 #[derive(Serialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct UnavailableDrawingRun {
+    /// ECMA-376 §20.4.2.6 `wp:effectExtent` of a `wp:inline` container,
+    /// [left, top, right, bottom] in points (signed `ST_Coordinate`); `None`
+    /// for anchors and an all-zero extent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inline_effect_extent: Option<[f64; 4]>,
     pub resource_kind: UnavailableDrawingResourceKind,
     pub width_pt: f64,
     pub height_pt: f64,
@@ -3456,6 +3461,11 @@ fn is_true(v: &bool) -> bool {
 #[derive(Serialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ChartRun {
+    /// ECMA-376 §20.4.2.6 `wp:effectExtent` of a `wp:inline` container,
+    /// [left, top, right, bottom] in points (signed `ST_Coordinate`); `None`
+    /// for anchors and an all-zero extent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inline_effect_extent: Option<[f64; 4]>,
     /// The shared chart model (barChart / lineChart / pie / …). Emitted 1:1 as
     /// the `chart` object the core `renderChart` consumes.
     pub chart: ooxml_common::chart::ChartModel,

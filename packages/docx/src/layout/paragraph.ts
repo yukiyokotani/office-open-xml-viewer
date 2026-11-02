@@ -358,6 +358,8 @@ export interface MeasuredUnavailableResourcePlanSegment {
   readonly widthPt: number;
   readonly heightPt: number;
   readonly topOffsetPt: number;
+  /** §20.4.2.6 inline effect extent before the object; the advance is unchanged. */
+  readonly leftOffsetPt?: number;
   readonly drawingId: string;
 }
 
@@ -1808,7 +1810,7 @@ export function planLine(input: PlanLineInput): LineLayout {
         range: segment.range,
         drawingId: segment.drawingId,
         bounds: {
-          xPt: xPt + (segment.kind === 'inline-drawing' ? segment.leftOffsetPt ?? 0 : 0),
+          xPt: xPt + (segment.leftOffsetPt ?? 0),
           yPt: line.baselinePt + segment.topOffsetPt,
           widthPt: segment.widthPt,
           heightPt: segment.heightPt,
@@ -3814,9 +3816,10 @@ function planMeasuredLines(
             range: { start: segmentOffset, end: segmentOffset + occurrenceLength },
             resourceKind: image.unavailableResourceKind,
             measuredWidthPt: image.measuredWidth,
-            widthPt: image.widthPt,
-            heightPt: image.heightPt,
-            topOffsetPt: -image.heightPt,
+            widthPt: objectWidthPt,
+            heightPt: objectHeightPt,
+            topOffsetPt: -image.heightPt + effectTopPt,
+            ...(effectLeftPt ? { leftOffsetPt: effectLeftPt } : {}),
             drawingId: unavailableDrawingId(source, runIndex ?? 0),
           });
           sourceOffset = Math.max(sourceOffset, segmentOffset + occurrenceLength);

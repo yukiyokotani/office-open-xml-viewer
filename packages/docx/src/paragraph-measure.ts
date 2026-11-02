@@ -1,4 +1,5 @@
 import { specifiedTextLineMetrics, specifiedTextParagraphIsHomogeneous } from './layout/specified-line-spacing.js';
+import { uprightResourceOrientation } from './layout/coordinate-space.js';
 import {
   paragraphGridRightAdjustmentPt,
   type ParagraphLayoutContext,
@@ -342,6 +343,7 @@ export function measureParagraph(
 
   const segments = buildSegments(paragraph.runs, {
     ...environment,
+    uprightResourceOrientation: uprightResourceOrientation(environment.verticalPageFrame, environment.pageWritingMode),
     lineSpacing: context.lineSpacing,
     lineGridActive: context.lineGrid.active,
     characterGridActive: context.characterGrid.active,
