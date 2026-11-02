@@ -2750,6 +2750,12 @@ export interface ShapeTextRun {
     fontFamilyEastAsia?: string | null;
     bold?: boolean;
     italic?: boolean;
+    rtl?: boolean;
+    cs?: boolean;
+    fontFamilyCs?: string | null;
+    fontSizeCsPt?: number;
+    boldCs?: boolean;
+    italicCs?: boolean;
     ruby?: RubyAnnotation | null;
 }
 export interface SoftEdge {

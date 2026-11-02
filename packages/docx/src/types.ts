@@ -1100,6 +1100,22 @@ export interface ShapeTextRun {
   fontFamilyEastAsia?: string | null;
   bold?: boolean;
   italic?: boolean;
+  /** ECMA-376 §17.3.2.30 `<w:rtl>` — right-to-left run characteristics. */
+  rtl?: boolean;
+  /** ECMA-376 §17.3.2.7 `<w:cs>` — use complex-script formatting. */
+  cs?: boolean;
+  /** ECMA-376 §17.3.2.26 `<w:rFonts w:cs>` — resolved complex-script family.
+   * For hand-built rtl/cs runs, omission falls back to this run's fontFamily. */
+  fontFamilyCs?: string | null;
+  /** ECMA-376 §17.3.2.39 `<w:szCs>` — complex-script size in points.
+   * For hand-built rtl/cs runs, omission falls back to this run's fontSizePt. */
+  fontSizeCsPt?: number;
+  /** ECMA-376 §17.3.2.2 `<w:bCs>` — complex-script bold.
+   * For hand-built rtl/cs runs, omission falls back to this run's bold; false stays off. */
+  boldCs?: boolean;
+  /** ECMA-376 §17.3.2.17 `<w:iCs>` — complex-script italic.
+   * For hand-built rtl/cs runs, omission falls back to this run's italic; false stays off. */
+  italicCs?: boolean;
   /** ECMA-376 §17.3.3.25 ruby annotation (furigana) for text-box runs. */
   ruby?: RubyAnnotation | null;
 }

@@ -17,7 +17,7 @@ import {
   type InternalRunSlotMetadata,
   type InternalShapeRun,
 } from './parser-model.js';
-import { requestedFamily, type TextFontSlots } from './layout/text.js';
+import { requestedFamily, shapeRunToDocRun, type TextFontSlots } from './layout/text.js';
 import type { NumberingMarkerShapeInput } from './layout/types.js';
 
 type InternalRenderedFontAxes = Readonly<InternalRunSlotMetadata>;
@@ -111,11 +111,15 @@ function* shapeTextUsages(shape: ShapeRun, collection: FontCollection): Generato
     return;
   }
   for (const block of shape.textBlocks ?? []) {
-    yield* shapeBlockUsages(block);
+    yield* shapeBlockUsages(block, collection, content === undefined);
   }
 }
 
-function* shapeBlockUsages(block: ShapeText): Generator<DocxRenderedTextUsage> {
+function* shapeBlockUsages(
+  block: ShapeText,
+  collection: FontCollection,
+  compatibility: boolean,
+): Generator<DocxRenderedTextUsage> {
   if (block.numbering) {
     yield {
       text: block.numbering.text,
@@ -124,6 +128,19 @@ function* shapeBlockUsages(block: ShapeText): Generator<DocxRenderedTextUsage> {
   }
   if (block.runs?.length) {
     for (const run of block.runs) {
+      if (compatibility && (run.rtl || run.cs)) {
+        // §17.3.2.7/§17.3.2.30 select CS formatting even for digits. Apply
+        // block inheritance as normalizeTextBoxInput does, then reuse layout's
+        // compatibility fallback and the body's independent CS usage tuple.
+        // Keep unflagged runs and parser-created native projections unchanged.
+        yield* runUsages(shapeRunToDocRun({
+          ...run,
+          fontFamily: run.fontFamily ?? block.fontFamily,
+          bold: run.bold ?? block.bold,
+          italic: run.italic ?? block.italic,
+        }), collection);
+        continue;
+      }
       yield {
         text: run.text,
         // A run without an explicit axis inherits the block-level face.
