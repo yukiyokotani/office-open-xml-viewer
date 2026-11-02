@@ -621,7 +621,7 @@ export const WORD_JUSTIFICATION_PUNCTUATION_HANG = defineCompatibilityRule({
     version: '16.0.20527',
     platform: 'Windows',
   },
-  description: 'Which paragraphs let an overflowPunct (§17.3.1.21) closing mark hang past the line end, and how many. lowKashida, mediumKashida, highKashida and thaiDistribute paragraphs never hang one: the mark stays inside the line and kinsoku moves the character before it down with it (from compatibility mode 14; before mode 14 the kashida types instead break their CJK text without kinsoku, a separate unimplemented rule, and thaiDistribute already pushes). At most one mark hangs: when the character after a hangable mark may not start a line either (。」), nothing hangs and kinsoku moves the character before the pair down. Evidence: synthetic Windows Word 16.0.20527 controls blk-0898-cjk-kin-mode{none,11,12,14,15}, MS Mincho 12pt at the full 481.9pt width, every jc (left, both, distribute, low/medium/highKashida, thaiDistribute): 。 that fits at the last slot; 。, 、, 」, 々 and 。」 one slot past the margin; the same with eastAsia ja-JP, with overflowPunct off and with kinsoku off; and after a Latin label whose remainder leaves 4.5-6.3pt. Table cells, headers and footnotes: blk-0898-cjk-kincell-mode{none,11,12,14,15} repeat every row above inside a one-cell lrTb table with cell margins 0, with left/right margins 108 twips, and nested one level (each cell content width equal to the body width), and eight O1/O5 rows (every jc) in the default header and in a footnote. The header and footnote rows break exactly as the body rows in every mode. In every cell variant and every mode a table cell never hangs a mark: every row that hangs in the body (O1, O2, O3, O1j and PO1-PO3 under left, both and distribute; left only before mode 15) pushes the character before the mark instead, and with kinsoku off (N2) the mark starts the next line; every other row (kashida and thaiDistribute, 々, 。」, fitting marks) breaks exactly as in the body. Scope (admitted positively, everything else keeps the previous overflowPunct behaviour): CJK marks in ordinary (non-frame), left-to-right paragraphs with overflowPunct on and a measured alignment (left, both, distribute and the kashida and Thai types, with their Strict spellings start and justify), in an lrTb section without a document grid, at the top level of the main body, a header or a footnote, or in a table cell of the main body whose authored text direction (and every enclosing cell) is horizontal, where no mark hangs. Footers, endnotes, note separators, text boxes, frames, cells of headers and notes, rotated or other authored-vertical cells, upright tables of vertical sections, centred and right-aligned paragraphs, Latin and complex-script marks, right-to-left, vertical and grid paragraphs are unmeasured and keep their hang. The character after the mark is taken across run seams. Every kashida and thaiDistribute row from mode 14 (and thaiDistribute in every mode) pushes (line 1 one character short of the capacity, line 2 starting with the character and the mark); both and distribute hang 。、」 in every mode and push 。」 and 々. Unchanged here (measured, not implemented): left-aligned paragraphs hang a single mark in modes unset, 11, 12 and 14 but push it in mode 15, and with kinsoku off mode 15 neither hangs nor pushes (the mark starts the next line) while earlier modes still hang.',
+  description: 'Which paragraphs let an overflowPunct (§17.3.1.21) closing mark hang past the line end, and how many. lowKashida, mediumKashida, highKashida and thaiDistribute paragraphs never hang one: the mark stays inside the line and kinsoku moves the character before it down with it (from compatibility mode 14; before mode 14 the kashida types instead break their CJK text without kinsoku, a separate unimplemented rule, and thaiDistribute already pushes). At most one mark hangs: when the character after a hangable mark may not start a line either (。」), nothing hangs and kinsoku moves the character before the pair down. Evidence: synthetic Windows Word 16.0.20527 controls blk-0898-cjk-kin-mode{none,11,12,14,15}, MS Mincho 12pt at the full 481.9pt width, every jc (left, both, distribute, low/medium/highKashida, thaiDistribute): 。 that fits at the last slot; 。, 、, 」, 々 and 。」 one slot past the margin; the same with eastAsia ja-JP, with overflowPunct off and with kinsoku off; and after a Latin label whose remainder leaves 4.5-6.3pt. Table cells, headers and footnotes: blk-0898-cjk-kincell-mode{none,11,12,14,15} repeat every row above inside a one-cell lrTb table with cell margins 0, with left/right margins 108 twips, and nested one level (each cell content width equal to the body width), and eight O1/O5 rows (every jc) in the default header and in a footnote. The header and footnote rows break exactly as the body rows in every mode. In every cell variant and every mode a table cell never hangs a mark: every row that hangs in the body (O1, O2, O3, O1j and PO1-PO3 under left, both and distribute; left only before mode 15) pushes the character before the mark instead, and with kinsoku off (N2) the mark starts the next line; every other row (kashida and thaiDistribute, 々, 。」, fitting marks) breaks exactly as in the body. Left, centre, right, start and end (blk-0898-cjk-kin2-mode{none,11,12,14,15} SECA: every row above under jc center, right, start and end, and O1 centre and right rows in the header and the footnote) hang a single mark like left in modes unset, 11, 12 and 14 (。」 and 々 push) and push every mark from mode 15 (O1-O3, O1j, PO1-PO3: line 1 one character short of the capacity); both and distribute keep hanging in mode 15. Paragraph kinsoku off (§17.3.1.16, blk-0898-cjk-kin N2 and blk-0898-cjk-kin2 SECB N2-N8 under every jc, in the body, the header, the footnote and a cell): the paragraph breaks without the East Asian line-breaking rules (々 starts a line, 「 ends one, nothing pushes); before mode 15 the left, centre, right, start, end, both and distribute paragraphs still hang one mark (。, 、, 」; of 。」 the 。 hangs and 」 starts the next line), from mode 15 none hangs (C characters, the mark starts the next line), and the kashida and Thai types and table cells never hang (the mark starts the next line). Scope (admitted positively, everything else keeps the previous overflowPunct behaviour): CJK marks in ordinary (non-frame), left-to-right paragraphs with overflowPunct on and a measured alignment (left, centre, right, both, distribute and the kashida and Thai types, with their Strict spellings start, end and justify), in an lrTb section without a document grid, at the top level of the main body, a header or a footnote, or in a table cell of the main body whose authored text direction (and every enclosing cell) is horizontal, where no mark hangs. Footers, endnotes, note separators, text boxes, frames, cells of headers and notes, rotated or other authored-vertical cells, upright tables of vertical sections, Latin and complex-script marks, right-to-left, vertical and grid paragraphs are unmeasured and keep their hang. The character after the mark is taken across run seams. Every kashida and thaiDistribute row from mode 14 (and thaiDistribute in every mode) pushes (line 1 one character short of the capacity, line 2 starting with the character and the mark); both and distribute hang 。、」 in every mode and push 。」 and 々.',
 });
 
 export const WORD_OVERFLOW_PUNCTUATION_LATIN_PARENT_RUN = defineCompatibilityRule({
@@ -918,16 +918,22 @@ export type CjkClosingMarkHang = 'one' | 'none';
 
 /** The policy for a paragraph in the measured class (see
  * StoryContext.closingMarkHangAdmitted in layout-context.ts) with a measured
- * alignment, 'none' throughout inside a table cell; `undefined` (any other paragraph, including centred and
- * right-aligned ones) keeps the unmeasured overflowPunct behaviour. `start`
- * is the Strict spelling of `left` and `justify` that of `both` (§17.18.44);
- * the class is left-to-right only, where they coincide. */
+ * alignment, 'none' throughout inside a table cell; `undefined` (any other
+ * paragraph) keeps the unmeasured overflowPunct behaviour. `start` is the
+ * Strict spelling of `left`, `end` that of `right` and `justify` that of
+ * `both` (§17.18.44); the class is left-to-right only, where they coincide.
+ * From compatibility mode 15 left, centre and right aligned paragraphs hang
+ * no mark, and with the paragraph's kinsoku off (§17.3.1.16) no paragraph
+ * does. */
 export function wordCjkClosingMarkHang(
   alignment: string | null | undefined,
   measuredScope: boolean,
   insideTableCell = false,
+  compatibilityMode?: number,
+  paragraphKinsokuOff = false,
 ): CjkClosingMarkHang | undefined {
   if (!measuredScope) return undefined;
+  const mode15 = compatibilityMode !== undefined && compatibilityMode >= 15;
   switch (alignment) {
     case 'lowKashida':
     case 'mediumKashida':
@@ -936,11 +942,16 @@ export function wordCjkClosingMarkHang(
       return 'none';
     case 'left':
     case 'start':
+    case 'center':
+    case 'right':
+    case 'end':
+      // A table cell never hangs the mark (blk-0898-cjk-kincell); from mode
+      // 15 these alignments push it (blk-0898-cjk-kin, -kin2).
+      return insideTableCell || mode15 ? 'none' : 'one';
     case 'both':
     case 'justify':
     case 'distribute':
-      // A table cell never hangs the mark (blk-0898-cjk-kincell).
-      return insideTableCell ? 'none' : 'one';
+      return insideTableCell || (mode15 && paragraphKinsokuOff) ? 'none' : 'one';
     default:
       return undefined;
   }
@@ -948,7 +959,8 @@ export function wordCjkClosingMarkHang(
 
 /** Whether {@link WORD_JUSTIFICATION_PUNCTUATION_HANG} refuses to hang `mark`
  * given the character after it (`next` yields it on demand: undefined when
- * nothing, or no text, follows). Only a CJK mark in horizontal text is
+ * nothing, or no text, follows) and, with kinsoku off, whether the line
+ * already reaches past its width (`lineAlreadyOverflows`, read on demand). Only a CJK mark in horizontal text is
  * judged; everything else keeps its hang, and `next` is read only when the
  * one-mark limit needs it. */
 export function wordCjkClosingMarkHangRefused(
@@ -957,10 +969,13 @@ export function wordCjkClosingMarkHangRefused(
   next: () => string | undefined,
   kinsoku: Readonly<{ enabled: boolean; lineStartForbidden: ReadonlySet<number> }>,
   verticalRun: boolean,
+  lineAlreadyOverflows: () => boolean = () => false,
 ): boolean {
   if (policy === undefined || verticalRun || !isCjkBreakChar(mark.codePointAt(0)!)) return false;
   if (policy === 'none') return true;
-  if (!kinsoku.enabled) return false;
+  // With kinsoku off nothing pushes, so the one-mark limit refuses a second
+  // mark once one already hangs past the line end (it starts the next line).
+  if (!kinsoku.enabled) return lineAlreadyOverflows();
   const following = next();
   return following !== undefined && kinsoku.lineStartForbidden.has(following.codePointAt(0)!);
 }

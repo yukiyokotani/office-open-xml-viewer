@@ -502,6 +502,7 @@ function processTextSegment(context: BreakOpportunityIteratorContext, seg: Layou
         : queuedFollowingCharacter(context),
       context.kinsoku,
       s.verticalRun === true,
+      () => breakerState.currentWidth > availW(),
     ) &&
     // The visible prefix keeps the WORD_KERNED_SPACE_PAIRS seam pair that
     // placement charges.
@@ -1476,6 +1477,7 @@ function splitCjkOverflow(context: BreakOpportunityIteratorContext, frame: TextF
         () => split + 1 < allChars.length ? allChars[split + 1] : queuedFollowingCharacter(context),
         kinsoku,
         s.verticalRun === true,
+        () => breakerState.currentWidth > availW(),
       ) &&
       wordIsOverflowPunctuation(
         allChars[split],

@@ -358,6 +358,20 @@ export function resolveSectionLayoutContext(
   };
 }
 
+const disabledKinsokuRules = new WeakMap<KinsokuRules, KinsokuRules>();
+
+/** The document's East Asian line-breaking rules with kinsoku turned off,
+ * for a paragraph whose §17.3.1.16 w:kinsoku is false. */
+function paragraphKinsokuDisabled(rules: KinsokuRules): KinsokuRules {
+  if (!rules.enabled) return rules;
+  let disabled = disabledKinsokuRules.get(rules);
+  if (disabled === undefined) {
+    disabled = Object.freeze({ ...rules, enabled: false });
+    disabledKinsokuRules.set(rules, disabled);
+  }
+  return disabled;
+}
+
 function hasTableCellContainer(story: StoryContext): boolean {
   return story.containers.some((container) => container.kind === 'tableCell');
 }
@@ -449,7 +463,12 @@ export function resolveParagraphLayoutContext(
     tabStops: effectiveParagraphTabStops(paragraph),
     hasRuby: paragraphHasRuby(paragraph),
     hasEastAsianText: paragraphHasEastAsianText(paragraph),
-    kinsoku: settings.kinsoku,
+    // ECMA-376 §17.3.1.16: a paragraph with kinsoku off breaks without the
+    // East Asian line-breaking rules (one shared disabled object per document
+    // rules object, so rules-keyed caches stay bounded).
+    kinsoku: paragraph.kinsoku === false
+      ? paragraphKinsokuDisabled(settings.kinsoku)
+      : settings.kinsoku,
     defaultTabPt: settings.defaultTabPt,
     overflowPunct: paragraph.overflowPunct !== false,
     // word-justification-punctuation-hang, admitted only for the measured
@@ -468,6 +487,8 @@ export function resolveParagraphLayoutContext(
         && !isSectionLineGrid(section.grid.kind)
         && !characterGridActive,
       insideTableCell,
+      settings.compat.compatibilityMode,
+      paragraph.kinsoku === false,
     )),
     ...(paragraph.wordWrap === false ? { wordWrap: false as const } : {}),
     ...(paragraph.endsAtHardBreak === true ? { endsAtHardBreak: true as const } : {}),

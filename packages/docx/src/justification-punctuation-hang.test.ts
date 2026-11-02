@@ -5,7 +5,10 @@ import { createLayoutServices } from './layout-runtime.js';
 import { acquireShapeTextBoxLayout } from './layout/paragraph.js';
 import { normalizeInternalDocumentModel, textBoxAcquisitionInput } from './parser-model.js';
 import { layoutDocument } from './document-layout.js';
-import type { ParagraphLayoutContext } from './layout-context.js';
+import {
+  resolveDocumentLayoutSettings, resolveParagraphLayoutContext, resolveSectionLayoutContext,
+  type ParagraphLayoutContext, type StoryContext,
+} from './layout-context.js';
 import { wordCjkClosingMarkHangRefused } from './layout/line-compatibility.js';
 import type { LineLayout, ParagraphLayout, TextPlacement } from './layout/types.js';
 import type {
@@ -197,6 +200,9 @@ describe('word-justification-punctuation-hang', () => {
     expect(wordCjkClosingMarkHangRefused('none', '。', unread, kinsoku, false)).toBe(true);
     expect(wordCjkClosingMarkHangRefused('one', '.', unread, kinsoku, false)).toBe(false);
     expect(wordCjkClosingMarkHangRefused('one', '。', unread, { ...kinsoku, enabled: false }, false)).toBe(false);
+    // Kinsoku off: a second mark never hangs once the line already overflows.
+    expect(wordCjkClosingMarkHangRefused('one', '」', unread, { ...kinsoku, enabled: false }, false, () => true)).toBe(true);
+    expect(wordCjkClosingMarkHangRefused('one', '」', () => 'ら', kinsoku, false, () => true)).toBe(false);
     expect(wordCjkClosingMarkHangRefused('one', '。', () => '」', kinsoku, false)).toBe(true);
   });
 
@@ -277,11 +283,30 @@ describe('word-justification-punctuation-hang', () => {
     }
   });
 
-  it('keeps the previous hang for centred and right-aligned paragraphs (unmeasured alignments)', () => {
-    for (const alignment of ['center', 'right'] as const) {
-      const [first] = lines(withAlignment(overflowing('。」'), alignment), { compatibilityMode: 15 });
-      // The previous behaviour: nothing pushes the character before 。」.
-      expect(text(first!).startsWith(KANA.slice(0, 36) + '。'), alignment).toBe(true);
+  // #2080 (blk-0898-cjk-kin2 SECA): left, centre, right, start and end hang a
+  // single mark before mode 15 and push it from mode 15; both and distribute
+  // hang it in every mode.
+  it('pushes a line-end mark under left, center, right, start and end from mode 15 only', () => {
+    for (const alignment of ['left', 'start', 'center', 'right', 'end']) {
+      const [pushed, next] = lines(withAlignment(overflowing('。'), alignment), { compatibilityMode: 15 });
+      expect(text(pushed!), alignment).toBe(KANA.slice(0, 35));
+      expect(text(next!).startsWith(KANA[35]! + '。'), alignment).toBe(true);
+      for (const settings of [undefined, { compatibilityMode: 11 }, { compatibilityMode: 14 }] as Array<DocSettings | undefined>) {
+        const [hung] = lines(withAlignment(overflowing('。'), alignment), settings);
+        expect(text(hung!), `${alignment} ${settings?.compatibilityMode}`).toBe(KANA.slice(0, 36) + '。');
+      }
+    }
+    for (const alignment of ['both', 'distribute']) {
+      const [hung] = lines(withAlignment(overflowing('、'), alignment), { compatibilityMode: 15 });
+      expect(text(hung!), alignment).toBe(KANA.slice(0, 36) + '、');
+    }
+  });
+
+  it('hangs at most one mark under center and right before mode 15 (O5)', () => {
+    for (const alignment of ['center', 'right']) {
+      const [pushed, next] = lines(withAlignment(overflowing('。」'), alignment), { compatibilityMode: 14 });
+      expect(text(pushed!), alignment).toBe(KANA.slice(0, 35));
+      expect(text(next!).startsWith(KANA[35]! + '。」'), alignment).toBe(true);
     }
   });
 
@@ -422,5 +447,96 @@ describe('word-justification-punctuation-hang', () => {
       return kanaCount(block.lines[0]!);
     };
     for (const textVert of [null, 'vert', 'vert270', 'eaVert']) expect(boxedKana(textVert), String(textVert)).toBe(10);
+  });
+});
+
+// #2079: paragraph w:kinsoku=0 (§17.3.1.16), blk-0898-cjk-kin N2 and
+// blk-0898-cjk-kin2 SECB (N3-N8).
+describe('paragraph kinsoku off', () => {
+  const kinsokuOff = (body: BodyElement): BodyElement => ({ ...body, kinsoku: false }) as BodyElement;
+  const row = (tail: string, alignment: string, fit = 36): BodyElement =>
+    kinsokuOff(para([textRun(KANA.slice(0, fit) + tail + 'らりるれろ')], alignment as DocParagraph['alignment']));
+  const ALIGNED = ['left', 'start', 'center', 'right', 'end', 'both', 'distribute'];
+
+  it('hangs a single mark before mode 15 and neither hangs nor pushes from mode 15', () => {
+    for (const alignment of ALIGNED) {
+      for (const settings of [undefined, { compatibilityMode: 12 }, { compatibilityMode: 14 }] as Array<DocSettings | undefined>) {
+        const [hung] = lines(row('。', alignment), settings);
+        expect(text(hung!), `${alignment} ${settings?.compatibilityMode}`).toBe(KANA.slice(0, 36) + '。');
+      }
+      const [first, next] = lines(row('。', alignment), { compatibilityMode: 15 });
+      expect(text(first!), alignment).toBe(KANA.slice(0, 36));
+      expect(text(next!).startsWith('。らり'), alignment).toBe(true);
+    }
+  });
+
+  it('hangs 。 and starts the next line with 」 before mode 15 (N4)', () => {
+    const [hung, next] = lines(row('。」', 'both'), { compatibilityMode: 14 });
+    expect(text(hung!)).toBe(KANA.slice(0, 36) + '。');
+    expect(text(next!).startsWith('」らり')).toBe(true);
+  });
+
+  it('never pushes under the kashida types and thaiDistribute', () => {
+    for (const settings of [{ compatibilityMode: 14 }, { compatibilityMode: 15 }] as DocSettings[]) {
+      for (const [alignment, fit] of [['lowKashida', 36], ['thaiDistribute', 36], ['mediumKashida', 32], ['highKashida', 28]] as const) {
+        const [first, next] = lines(row('。', alignment, fit), settings);
+        expect(text(first!), alignment).toBe(KANA.slice(0, fit));
+        expect(text(next!).startsWith('。らり'), alignment).toBe(true);
+      }
+    }
+  });
+
+  it('lets a line start with 々 and end with 「 (no line-breaking rules)', () => {
+    for (const settings of [{ compatibilityMode: 14 }, { compatibilityMode: 15 }] as DocSettings[]) {
+      const [first, next] = lines(row('々', 'both'), settings);
+      expect(text(first!)).toBe(KANA.slice(0, 36));
+      expect(text(next!).startsWith('々らり')).toBe(true);
+      const [opening] = lines(kinsokuOff(para([textRun(KANA.slice(0, 35) + '「らりるれろ')], 'both')), settings);
+      expect(text(opening!)).toBe(KANA.slice(0, 35) + '「');
+    }
+  });
+
+  it('starts the next line with the mark in a table cell', () => {
+    const single = KANA.slice(0, 10) + '。らりる';
+    const cell = {
+      content: [kinsokuOff(para([textRun(single)], 'both')) as unknown as CellElement], colSpan: 1, vMerge: null,
+      borders: { top: null, bottom: null, left: null, right: null, insideH: null, insideV: null },
+      background: null, vAlign: 'top', widthPt: 100,
+    } as DocTableCell;
+    const table = {
+      type: 'table', colWidths: [100],
+      rows: [{ cells: [cell], rowHeight: null, rowHeightRule: 'auto', isHeader: false } as DocTableRow],
+      borders: { top: null, bottom: null, left: null, right: null, insideH: null, insideV: null },
+      cellMarginTop: 0, cellMarginBottom: 0, cellMarginLeft: 0, cellMarginRight: 0,
+      jc: 'left', layout: 'fixed',
+    } as unknown as BodyElement;
+    for (const settings of [{ compatibilityMode: 14 }, { compatibilityMode: 15 }] as DocSettings[]) {
+      const layout = layoutBodyModel([table], section, makeCtx(), {}, settings);
+      const texts: string[] = [];
+      const visit = (value: unknown, seen = new Set<object>()): void => {
+        if (value === null || typeof value !== 'object' || seen.has(value)) return;
+        seen.add(value);
+        const candidate = value as Partial<ParagraphLayout>;
+        if (candidate.kind === 'paragraph' && Array.isArray(candidate.lines)) texts.push(...candidate.lines.map(text));
+        for (const child of Object.values(value)) visit(child, seen);
+      };
+      visit(layout.pages[0]);
+      expect(texts.slice(0, 2)).toEqual([KANA.slice(0, 10), '。らりる']);
+    }
+  });
+
+  it('shares one disabled rules object and leaves other paragraphs on the document rules', () => {
+    const model = { section, body: [], settings: { compatibilityMode: 15 }, fontFamilyClasses: {} } as unknown as DocxDocumentModel;
+    const settings = resolveDocumentLayoutSettings(model);
+    const sectionContext = resolveSectionLayoutContext(settings, section);
+    const story = { story: 'body', containers: [], lineNumberingEligible: true } as unknown as StoryContext;
+    const source = (body: BodyElement) => body as unknown as Parameters<typeof resolveParagraphLayoutContext>[3];
+    const on = resolveParagraphLayoutContext(settings, sectionContext, story, source(para([textRun('a')], 'both')));
+    const off1 = resolveParagraphLayoutContext(settings, sectionContext, story, source(kinsokuOff(para([textRun('a')], 'both'))));
+    const off2 = resolveParagraphLayoutContext(settings, sectionContext, story, source(kinsokuOff(para([textRun('b')], 'left'))));
+    expect(on.kinsoku).toBe(settings.kinsoku);
+    expect(off1.kinsoku.enabled).toBe(false);
+    expect(off1.kinsoku).toBe(off2.kinsoku);
+    expect(off1.kinsoku.lineStartForbidden).toBe(settings.kinsoku.lineStartForbidden);
   });
 });

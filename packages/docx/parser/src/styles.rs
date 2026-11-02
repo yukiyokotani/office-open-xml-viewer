@@ -255,6 +255,10 @@ pub struct ParaFmt {
     /// ECMA-376 §17.3.1.45 w:wordWrap — omission inherits; the final default
     /// (`true`) is applied on the resolved paragraph.
     pub word_wrap: Option<bool>,
+    /// ECMA-376 §17.3.1.16 w:kinsoku — paragraph East Asian line-breaking
+    /// rules. Omission inherits; the final default (`true`) is applied on the
+    /// resolved paragraph.
+    pub kinsoku: Option<bool>,
     /// ECMA-376 §17.3.1.1 w:adjustRightInd — allow the consumer to adjust the
     /// effective right indent when a document grid is active. Retained as an
     /// Option through the style cascade because omission inherits and the final
@@ -1302,6 +1306,9 @@ pub(crate) fn apply_para(dst: &mut ParaFmt, src: &ParaFmt) {
     if src.word_wrap.is_some() {
         dst.word_wrap = src.word_wrap;
     }
+    if src.kinsoku.is_some() {
+        dst.kinsoku = src.kinsoku;
+    }
     if src.adjust_right_ind.is_some() {
         dst.adjust_right_ind = src.adjust_right_ind;
     }
@@ -1749,6 +1756,9 @@ pub fn parse_para_fmt(ppr: roxmltree::Node) -> ParaFmt {
 
     // wordWrap — ECMA-376 §17.3.1.45; same cascade contract.
     fmt.word_wrap = bool_prop(ppr, "wordWrap");
+
+    // kinsoku — ECMA-376 §17.3.1.16; same cascade contract.
+    fmt.kinsoku = bool_prop(ppr, "kinsoku");
 
     // adjustRightInd — ECMA-376 §17.3.1.1. The setting participates in the
     // paragraph-style hierarchy and omission ultimately defaults to true.
@@ -2978,6 +2988,24 @@ mod tests {
         assert_eq!(inherited.word_wrap, Some(false));
         apply_para(&mut inherited, &parse("<w:wordWrap/>"));
         assert_eq!(inherited.word_wrap, Some(true));
+    }
+
+    #[test]
+    fn kinsoku_participates_in_paragraph_style_cascade() {
+        let parse = |inner: &str| {
+            let xml = format!(
+                r#"<w:pPr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">{inner}</w:pPr>"#
+            );
+            let document = XmlDoc::parse(&xml).unwrap();
+            parse_para_fmt(document.root_element())
+        };
+        assert_eq!(parse("<w:keepNext/>").kinsoku, None);
+        assert_eq!(parse(r#"<w:kinsoku w:val="0"/>"#).kinsoku, Some(false));
+        let mut inherited = parse(r#"<w:kinsoku w:val="false"/>"#);
+        apply_para(&mut inherited, &parse("<w:keepNext/>"));
+        assert_eq!(inherited.kinsoku, Some(false));
+        apply_para(&mut inherited, &parse("<w:kinsoku/>"));
+        assert_eq!(inherited.kinsoku, Some(true));
     }
 
     #[test]

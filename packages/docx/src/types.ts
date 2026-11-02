@@ -577,6 +577,9 @@ export interface DocParagraph {
   /** ECMA-376 §17.3.1.45 `<w:wordWrap>` after the style cascade; present only
    *  when disabled (`false`). Omission means the default, on. */
   wordWrap?: boolean;
+  /** ECMA-376 §17.3.1.16 `<w:kinsoku>` after the style cascade; present only
+   *  when disabled (`false`). Omission means the default, on. */
+  kinsoku?: boolean;
   /** This paragraph piece ends at a page or column break of its source
    *  paragraph (§17.3.3.1), split off into a body-level break; present only
    *  when true. */
