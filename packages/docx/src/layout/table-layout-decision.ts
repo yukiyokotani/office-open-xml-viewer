@@ -2,7 +2,7 @@ import type { TableFormatInput } from './types.js';
 import { projectTableColumnLayoutInput, projectEffectiveTablePreferredWidthPt, absoluteTablePreferredWidthPt,
   type TableLayoutSource, type TableSourceAcquisitionInput } from './table-source-acquisition.js';
 import { wordFixedOccupiedGridInput, wordMeasuredTableOriginMode, wordMeasuredTableOriginPlacementMode,
-  wordNonleadingIndentScope, wordTableEffectiveIndentPt, wordTableMarginHangScope, wordTableOriginTranslationPt,
+  wordNonleadingIndentScope, wordUniformSpacedTableBorderPt, wordSpacedTableTranslationPt, wordTableEffectiveIndentPt, wordTableMarginHangScope, wordTableOriginTranslationPt,
   type WordTableMarginHangScope } from './table-compatibility.js';
 import { isVerticalTextDirection } from './section-orientation.js';
 
@@ -69,9 +69,10 @@ interface MemberScopeExtensions {
   readonly nestedNegativeIndentIgnored: boolean;
   /** WORD_AUTOFIT_CONTENT_COLUMN_GROWTH for a content-sized table. */
   readonly contentFitted: boolean;
+  readonly spacingGeometry: Readonly<{ spacingPt: number; borderPt: number }> | null;
 }
 const NO_SCOPE_EXTENSIONS: MemberScopeExtensions = Object.freeze({
-  marginHang: 'none', nestedNegativeIndentIgnored: false, contentFitted: false,
+  marginHang: 'none', nestedNegativeIndentIgnored: false, contentFitted: false, spacingGeometry: null,
 });
 
 /** All compatibility selection lives at this boundary. A member receives facts
@@ -88,7 +89,7 @@ function memberContext(
   nonleadingIndentIgnored = false,
   extensions: MemberScopeExtensions = NO_SCOPE_EXTENSIONS,
 ) {
-  const { marginHang, nestedNegativeIndentIgnored, contentFitted } = extensions;
+  const { marginHang, nestedNegativeIndentIgnored, contentFitted, spacingGeometry } = extensions;
   const format = source.format;
   const firstRowException = format.firstRowException;
   // MS-OI29500 §2.1.156/158: first-logical-row indent/layout authority
@@ -135,7 +136,12 @@ function memberContext(
       ownException ? (row.exception?.indentPt ?? 0) : baseIndentPt,
       !ownException && baseIndentInherited);
   });
-  const rowTranslationsPt = format.rows.map((row) => wordTableOriginTranslationPt({
+  const rowTranslationsPt = format.rows.map((row) => spacingGeometry ? wordSpacedTableTranslationPt({
+    mode: state.mode, justification: row.justification ?? table.jc, bidi: table.bidiVisual === true,
+    indentPt: tableIndentPt, indentAuthored: origin.indentAuthored, ...spacingGeometry,
+    leadingMarginPt: table.bidiVisual ? row.cells[0]?.marginsPt.right ?? 0 : row.cells[0]?.marginsPt.left ?? 0,
+    trailingMarginPt: table.bidiVisual ? row.cells.at(-1)?.marginsPt.left ?? 0 : row.cells.at(-1)?.marginsPt.right ?? 0,
+  }) : wordTableOriginTranslationPt({
     mode: state.mode, measured: measuredRow(row.justification ?? table.jc), justification: row.justification ?? table.jc,
     indentPt: rowIndent(row.justification ?? table.jc, tableIndentPt, tableIndentInherited),
     indentAuthored: logicalProperties ? origin.indentAuthored : firstRowException?.indentAuthored || table.tblInd != null,
@@ -237,7 +243,7 @@ function memberContext(
   // the logical-table boundary) content-fits whatever its jc and mode when
   // its content fits the established ceiling; a binding fit there is
   // unmeasured and keeps the previous solve.
-  const contentGrowth: 'band' | 'nonbinding' | 'none' = usesLeadingIndentBand ? 'band'
+  const contentGrowth: 'band' | 'nonbinding' | 'none' = spacingGeometry ? (contentFitted ? 'nonbinding' : 'none') : usesLeadingIndentBand ? 'band'
     : contentFitted ? 'nonbinding' : 'none';
   const outerCellMarginsHangOutsideBand = compatibilityMode === undefined || compatibilityMode === 14;
   const textBandPt = usesLeadingIndentBand
@@ -326,7 +332,7 @@ function memberContext(
     effectiveLayout,
     rowTranslationsPt: Object.freeze(rowTranslationsPt), maximumTableWidthPt,
     isFixedNestedTable, usesLeadingIndentBand, contentGrowth, forcedFitOuterMarginsPt,
-    percentWidthBasePt });
+    percentWidthBasePt, spacingGeometry });
 }
 
 export type TableMemberDecision = ReturnType<typeof memberContext>;
@@ -389,14 +395,32 @@ export function decideLogicalTable(
   // (zero, nil and auto widths are absent in the column solver).
   const contentSized = input.layout !== 'fixed' && input.tablePreferredWidthPt === null
     && input.rows.every((row) => row.cells.every((cell) => cell.preferredWidth === null));
+  // WORD_TABLE_CELL_SPACING_GEOMETRY: select once for the logical table.
+  // Every unmeasured neighbour keeps the old source projection and geometry.
+  const spacingPt = format.rows[0]?.cellSpacingPt ?? 0;
+  const uniformBorderPt = spacingPt > 0 ? wordUniformSpacedTableBorderPt(table) : null;
+  const spacingGeometry = spacingPt > 0 && uniformBorderPt !== null
+    && singleTable && commonFrame && commonGrid && topLevelBody && environment.singleColumn
+    && !environment.inTableCell && !isVerticalTextDirection(environment.textDirection)
+    && environment.quarterTurnedStory !== true && format.ordinaryFlow && format.positioning == null
+    && format.outerEdgeIndent !== true && !rowOverrides && !gridSkips
+    && (environment.mode === undefined || environment.mode === 14 || environment.mode === 15)
+    && (table.tblInd ?? 0) >= 0
+    && format.rows.every((row) => row.cellSpacingPt === spacingPt && row.height == null
+      && row.cells.every((cell) => cell.dxaHorizontalMarginsOnly === true))
+    && ((input.layout === 'fixed' && table.widthPt != null && table.widthPt > 0 && table.widthPct == null)
+      || (contentSized && input.gridWidthsPt.length > 0 && input.rows.every((row) =>
+        row.cells.length === input.gridWidthsPt.length && row.cells.every((cell, index) =>
+          cell.columnSpan === 1 && cell.columnStart === index))))
+    ? Object.freeze({ spacingPt, borderPt: uniformBorderPt }) : null;
   // WORD_AUTOFIT_CONTENT_COLUMN_GROWTH: the measured content-sized class.
   const contentFitted = contentSized && singleTable && format.ordinaryFlow && format.positioning == null
     && format.outerEdgeIndent !== true && !rowOverrides && !gridSkips
-    && format.rows.every((row) => row.cellSpacingPt === 0
+    && format.rows.every((row) => (row.cellSpacingPt === 0 || spacingGeometry !== null)
       && row.cells.every((cell) => cell.dxaHorizontalMarginsOnly === true))
     // The two unspanned unpreferred tracks the solver content-fits.
-    && input.gridWidthsPt.length === 2
-    && input.rows.every((row) => row.cells.length === 2
+    && (input.gridWidthsPt.length === 2 || spacingGeometry !== null)
+    && input.rows.every((row) => row.cells.length === input.gridWidthsPt.length
       && row.cells.every((cell, index) => cell.columnSpan === 1 && cell.columnStart === index))
     && environment.topLevel && !isVerticalTextDirection(environment.textDirection)
     && environment.quarterTurnedStory !== true
@@ -439,7 +463,7 @@ export function decideLogicalTable(
     rowOverrides,
     gridSkips,
   });
-  const extensions: MemberScopeExtensions = Object.freeze({ marginHang, nestedNegativeIndentIgnored, contentFitted });
+  const extensions: MemberScopeExtensions = Object.freeze({ marginHang, nestedNegativeIndentIgnored, contentFitted, spacingGeometry });
   const logical = memberContext(table, source, origin, measuredOrigin, contentWidthPt, environment,
     usesLogicalProperties, omittedMarginEndOrigin, nonleadingIndentIgnored, extensions);
   return Object.freeze({ measuredOrigin, usesLogicalProperties, dropsUnusedLeadingGrid, logical,

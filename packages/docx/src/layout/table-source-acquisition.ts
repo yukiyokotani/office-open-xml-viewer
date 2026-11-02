@@ -328,6 +328,7 @@ export function projectTableColumnLayoutInput(
     rowIndex: number, cellIndex: number, preferredWidth: TablePreferredWidthConstraint | null,
   ) => CellIntrinsicWidths,
   maximumWidthPt: number | null = availableWidthPt,
+  spacingGeometry?: Readonly<{ spacingPt: number; borderPt: number }> | null,
 ): TableColumnLayoutInput {
   const table = input.semantic;
   const { widthsPt: gridWidthsPt, widthKeys: gridWidthKeys } = tableGridLayout(input);
@@ -351,6 +352,7 @@ export function projectTableColumnLayoutInput(
   );
   return {
     layout: layoutKind === 'fixed' ? 'fixed' : 'autofit',
+    ...(spacingGeometry ? { separatedCellSpacingPt: spacingGeometry.spacingPt } : {}),
     availableWidthPt: maximumWidthPt === null ? null : Math.max(0, maximumWidthPt),
     gridWidthsPt,
     gridWidthKeys,
@@ -388,7 +390,10 @@ export function projectTableColumnLayoutInput(
             span,
             gridWidthsPt.length,
           );
-          const horizontalSpacingPt = spacingInsets.startPt + spacingInsets.endPt;
+          // Measured separated geometry solves independent cell boxes. Gaps are
+          // allocated after solving, while each full border precedes the margin.
+          const horizontalSpacingPt = spacingGeometry ? 2 * spacingGeometry.borderPt
+            : spacingInsets.startPt + spacingInsets.endPt;
           const margins = input.format.rows[rowIndex]?.cells[cellIndex]?.marginsPt;
           const horizontalMarginsPt = Math.max(0, margins?.left ?? 0)
             + Math.max(0, margins?.right ?? 0);

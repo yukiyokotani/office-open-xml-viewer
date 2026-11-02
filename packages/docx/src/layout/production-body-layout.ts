@@ -3317,7 +3317,7 @@ function acquireTableColumnInput(
   const intrinsicWidths = intrinsicWidthsForTable(table);
   const columnInput = projectTableColumnLayoutInput(decision.source, decision.percentWidthBasePt,
     (rowIndex, cellIndex, preferred) => intrinsicWidths(table.rows[rowIndex]!.cells[cellIndex]!, preferred),
-    maximumWidthPt);
+    maximumWidthPt, decision.spacingGeometry);
   return {
     ...columnInput,
     outerMarginAllowancePt: forcedFitOuterMarginsPt,
