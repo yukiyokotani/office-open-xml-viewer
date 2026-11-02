@@ -22,7 +22,7 @@ interface Options {
   vertical?: boolean; long?: boolean; texts?: string[]; pageHeight?: number; rightBorderColor?: string;
 }
 const para = (text: string) => `<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="368" w:lineRule="exact"/></w:pPr><w:r><w:t>${text}</w:t></w:r></w:p>`;
-function geometry(o: Options = {}): TableLayout {
+function geometry(o: Options = {}, fragments?: TableLayout[]): TableLayout {
   const widths = o.widths ?? [2000, 2000, 2000];
   const border = (side: string, size = o.border ?? 24) => `<w:${side} w:val="${size ? 'single' : 'nil'}" w:sz="${size}" w:color="${side === 'right' ? o.rightBorderColor ?? '000000' : '000000'}"/>`;
   const tblPr = `<w:tblW w:w="${o.auto ? 0 : widths.reduce((a, b) => a + b, 0)}" w:type="${o.auto ? 'auto' : 'dxa'}"/>`
@@ -66,13 +66,17 @@ function geometry(o: Options = {}): TableLayout {
     walk(layout.pages[0]?.layers);
     const result = found.at(-1);
     if (!result) throw new Error('No retained table');
+    if (fragments) {
+      layout.pages.slice(1).forEach((page) => walk(page.layers));
+      fragments.push(...found);
+    }
     return result;
   } finally { archive.free(); }
 }
 beforeAll(async () => { await init({ module_or_path: await readFile(new URL('../wasm/docx_parser_bg.wasm', import.meta.url)) }); });
 const right = (rect: { xPt: number; widthPt: number }) => rect.xPt + rect.widthPt;
 const bottom = (rect: { yPt: number; heightPt: number }) => rect.yPt + rect.heightPt;
-const fingerprint = (values: Options[]) => createHash('sha256').update(JSON.stringify(values.map(geometry))).digest('hex');
+const fingerprint = (values: Options[]) => createHash('sha256').update(JSON.stringify(values.map((value) => geometry(value)))).digest('hex');
 
 describe('WORD_TABLE_CELL_SPACING_GEOMETRY (#2066)', () => {
   it.each([[60, 24], [200, 4], [200, 0], [200, 24]])('reserves 2s gaps, cell border boxes and vertical outer borders (s=%s, sz=%s)', (spacing, border) => {
@@ -158,6 +162,17 @@ describe('WORD_TABLE_CELL_SPACING_GEOMETRY (#2066)', () => {
     // reserve the same border/gap geometry that materialization later retains.
     expect(table.flowBounds.heightPt).toBeLessThanOrEqual(156);
     expect(bottom(table.flowBounds)).toBeLessThanOrEqual(228);
+  });
+  it('reserves standalone outer geometry before admitting a whole row', () => {
+    const fragments: TableLayout[] = [];
+    geometry({ texts: Array(3).fill('w '.repeat(40)), pageHeight: 6280 }, fragments);
+    // The original 167.8pt track fits the 170pt body, but its standalone
+    // fragment needs 180.8pt. It must split instead of failing convergence.
+    expect(fragments.length).toBeGreaterThan(1);
+    for (const table of fragments) {
+      expect(table.flowBounds.heightPt).toBeLessThanOrEqual(170);
+      expect(bottom(table.flowBounds)).toBeLessThanOrEqual(242);
+    }
   });
   it('keeps the previous geometry when gaps alone would exhaust the table or band', () => {
     for (const auto of [false, true]) {

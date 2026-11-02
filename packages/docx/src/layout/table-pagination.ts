@@ -2129,6 +2129,9 @@ function takeTableFragmentPass(
   hints: ReadonlyMap<number, FragmentPositionHint>,
 ): FragmentPass {
   const selected: SelectedRow[] = [];
+  const admissionRows: TableRowLayoutInput[] = [];
+  const spacedAdmissionTracks = source.input.rows[0]?.spacingGeometry
+    ? tablePrefixTracks(source.input) : null;
   const used = new Map<number, string>();
   const placedAt = new Map<number, TableRowLayoutInput>();
   const cutAt = new Map<number, TableRowLayoutInput>();
@@ -2214,6 +2217,7 @@ function takeTableFragmentPass(
         false,
         preparedHeader.resolved,
       ));
+      admissionRows.push(header);
       floatRegistry = preparedHeader.registry;
       floatParagraphId = preparedHeader.nextParagraphId;
       availablePt -= heightPt;
@@ -2292,12 +2296,24 @@ function takeTableFragmentPass(
     // must not be charged again. When the remainder does cross the boundary,
     // keep the conservative content-aware height so partial rows and page-local
     // merge continuation ownership are derived before materialization.
-    const wholeHeightPt = retainedRemainderFits || followsCompletedPartialRow
+    const retainedHeightPt = retainedRemainderFits || followsCompletedPartialRow
       ? paginationRowTrackHeightForOccurrence(source, row, rowIndex, context)
       : paginationRowHeightForOccurrence(source, row, rowIndex, context);
+    // WORD_TABLE_CELL_SPACING_GEOMETRY: admission owns a page-local table,
+    // including both outer gaps and table borders. Probe the same prefix
+    // tracks materialization uses: a source row's original track can omit an
+    // outer edge, while appending a row releases the preceding bottom edge.
+    // The incremental probe resolves each committed row once and preserves
+    // the previous admission path outside this measured class.
+    const admittedRow = spacedAdmissionTracks?.row(admissionRows, row, context.placement);
+    const wholeHeightPt = admittedRow
+      ? admittedRow.flowBounds.yPt + admittedRow.heightPt - context.placement.cursor.yPt
+        - (context.availableHeightPt - availablePt)
+      : retainedHeightPt;
     if (canTakeWhole) {
       if (wholeHeightPt <= availablePt + EPSILON_PT) {
         selected.push(selectedWholeRow(row, 'source', 0, false, preparedRow.resolved));
+        admissionRows.push(row);
         floatRegistry = preparedRow.registry;
         floatParagraphId = preparedRow.nextParagraphId;
         availablePt -= wholeHeightPt;
@@ -2455,6 +2471,7 @@ function takeTableFragmentPass(
           ? { resolvedFloatingTables: Object.freeze(ownedResolved) }
           : {}),
       });
+      admissionRows.push(partial.selected.input);
       floatRegistry = Object.freeze([...floatRegistry, ...committedEntries]);
       floatParagraphId += committedEntries.length;
       nextCursor = partial.next.rowIndex >= source.input.rows.length ? null : partial.next;
