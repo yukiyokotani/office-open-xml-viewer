@@ -337,20 +337,26 @@ export function paragraphMarkLineMetrics(
   minimumAscentPx = 0,
 ): MarkLineMetrics {
   const effectiveMarkShapeInput = markShapeInput;
-  // WORD_EMPTY_MARK_ASCII_FACE: an empty paragraph mark is measured with its
-  // ascii face whatever its hint, language, eastAsia face or the document's
-  // scripts. East-Asian docGrid cell classification (`eastAsian`) stays
-  // content/document based and is unaffected.
+  // WORD_EMPTY_MARK_ASCII_FACE: without a line grid an empty paragraph mark
+  // is measured with its ascii face whatever its hint, language, eastAsia face
+  // or the document's scripts. Under a line grid every such line is one pitch
+  // (the same controls); the face then only decides the mark's below-baseline
+  // extent for page-bottom admission, where the East Asian face keeps Word's
+  // pagination (sample-3), so the established selection is retained there.
+  // WORD_PICTURE_BULLET_LINE_PARTICIPATION: beside a picture bullet the empty
+  // mark is measured with its own (non-East-Asian) face.
   void WORD_EMPTY_MARK_ASCII_FACE;
+  const markUsesEastAsianFace = isGridLineRule(grid)
+    && ((eastAsian && minimumAscentPx <= 0) || effectiveMarkShapeInput?.fontHint === 'eastAsia');
   const forceCs = effectiveMarkShapeInput?.complexScript === true;
   const fs = effectiveMarkShapeInput?.fontSizePt ?? getDefaultFontSize(para);
-  const authoredFamily = getDefaultFontFamily(para, false);
+  const authoredFamily = getDefaultFontFamily(para, markUsesEastAsianFace);
   const markWeight = effectiveMarkShapeInput?.weight ?? 400;
   const markStyle = effectiveMarkShapeInput?.style ?? 'normal';
   // §17.3.1.29 stores the paragraph mark's own run properties in pPr/rPr.
   // Shape this probe in its own context: the library's scoped Arabic substitute
   // policy must not borrow script proof from surrounding body runs.
-  const markProbe = 'x';
+  const markProbe = markUsesEastAsianFace ? 'あ' : 'x';
   // A supplied metric map without the selecting text service cannot prove
   // which face Canvas paints. The compatibility argument above is ignored;
   // only the selected resource tuple below can lend authoritative geometry.

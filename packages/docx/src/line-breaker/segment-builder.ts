@@ -1886,10 +1886,10 @@ function appendRunsToSegments(
       segs.push({
         imagePath: '',
         mimeType: '',
-        ...inlineEffectExtentBox(
-          chartRun.anchor ? undefined : chartRun.inlineEffectExtent,
-          chartRun.widthPt, chartRun.heightPt, environment.uprightResourceOrientation,
-        ),
+        // Word does not reserve an inline chart's effect extent (Pareto chart
+        // controls), so a chart keeps its wp:extent box.
+        widthPt: chartRun.widthPt,
+        heightPt: chartRun.heightPt,
         anchor: chartRun.anchor ?? false,
         anchorXPt: chartRun.anchorXPt ?? 0,
         anchorYPt: chartRun.anchorYPt ?? 0,

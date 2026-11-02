@@ -1169,7 +1169,7 @@ export const WORD_EMPTY_MARK_ASCII_FACE = defineCompatibilityRule({
     version: '16.0.20527',
     platform: 'Windows',
   },
-  description: 'An empty paragraph has no character from which ECMA-376 §17.3.2.26 could select a font slot. Windows Word 16.0.20527 controls (three empty paragraphs per case, mark ascii Century/Times New Roman/Arial x eastAsia MS Mincho/Yu Mincho x 10.5/12pt x eastAsia language ja-JP or en-US x hint eastAsia or none, documents with and without East Asian text, compatibility modes omitted and 15) give every empty line the single-line height of the ascii face: 1.15 em for Times New Roman/Arial and 1.2 em for Century, never the East Asian face, whatever the hint, language or document scripts. Under a lines docGrid every case takes the grid pitch. Issue #2063 follow-up (sample-26).',
+  description: 'An empty paragraph has no character from which ECMA-376 §17.3.2.26 could select a font slot. Windows Word 16.0.20527 controls (three empty paragraphs per case, mark ascii Century/Times New Roman/Arial x eastAsia MS Mincho/Yu Mincho x 10.5/12pt x eastAsia language ja-JP or en-US x hint eastAsia or none, documents with and without East Asian text, compatibility modes omitted and 15) give every empty line the single-line height of the ascii face: 1.15 em for Times New Roman/Arial and 1.2 em for Century, never the East Asian face, whatever the hint, language or document scripts. Under a lines docGrid every case takes the grid pitch, so there the face only sets the mark extent used for page-bottom admission and the established East Asian selection is kept (sample-3 pagination matches Word with it). Issue #2063 follow-up (sample-26).',
 });
 
 /** Word-observed inline-picture projection of ECMA-376 §17.3.1.33. */
