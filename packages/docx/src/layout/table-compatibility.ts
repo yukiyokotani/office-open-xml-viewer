@@ -123,7 +123,7 @@ export const WORD_AUTOFIT_CONTENT_COLUMN_GROWTH = defineCompatibilityRule({
     version: '16.113.2',
     platform: 'macOS 27.0',
   },
-  description: 'In the measured top-level auto-width AutoFit tables, a column without preferred cells grows beyond its initial tblGrid toward maximum content width, up to the occurrence ceiling. Two unpreferred tracks also release saved width beyond a short column maximum. Twelve simultaneous-growth controls in modes 14/15 start at 25/25pt and use breakable ii tokens in ratios 3:2, 1:1 and 5:1, with totals of 30 (nonbinding) and 90 (binding). Nonbinding columns reach their content maxima. Binding column widths match min_i + fraction * (max_i - min_i), where fraction = (ceiling - sum(min)) / sum(max - min), capped at 1. The unequal cases distinguish this from sharing deficits over saved widths, sharing absolute maxima, equal room and sequential growth. Intrinsic maxima must be unbounded by the text band. First-column differences are at most 0.228pt and both cells have identical Word line partitions. Only two nonspanning, wholly unpreferred tracks establish simultaneous sharing; larger grids, spans, and mixed preferred/unpreferred simultaneous growth retain the previous solver result. This is a measured content-interval rule, not an empirical scale factor or an observation of arbitrary multi-column growth. Windows Word 16.0 build 16.0.20430 retest is consistent within the tested subset; see the officeObservations entry for this rule in scripts/docx-compatibility-microsoft-evidence.json for values and evidence limits.',
+  description: 'In the measured top-level auto-width AutoFit tables, a column without preferred cells grows beyond its initial tblGrid toward maximum content width, up to the occurrence ceiling. Two unpreferred tracks also release saved width beyond a short column maximum. Twelve simultaneous-growth controls in modes 14/15 start at 25/25pt and use breakable ii tokens in ratios 3:2, 1:1 and 5:1, with totals of 30 (nonbinding) and 90 (binding). Nonbinding columns reach their content maxima. Binding column widths match min_i + fraction * (max_i - min_i), where fraction = (ceiling - sum(min)) / sum(max - min), capped at 1. The unequal cases distinguish this from sharing deficits over saved widths, sharing absolute maxima, equal room and sequential growth. Intrinsic maxima must be unbounded by the text band. First-column differences are at most 0.228pt and both cells have identical Word line partitions. Only two nonspanning, wholly unpreferred tracks establish simultaneous sharing; larger grids, spans, and mixed preferred/unpreferred simultaneous growth retain the previous solver result. This is a measured content-interval rule, not an empirical scale factor or an observation of arbitrary multi-column growth. Windows Word 16.0.20527 controls (blk-0898 tables batch: one-row two-cell AutoFit tables with tblW auto, tcW auto and 108-twip margins, jc left/start/center/right/end, LTR and bidiVisual, compatibility mode omitted, 11, 12, 14 and 15) content-fit such a table for every justification and mode, not only for a leading table in modes 14/15. That nonbinding fit therefore applies to a single top-level content-sized table (no preferred table or cell width, no row exceptions, row justification or grid skips, not positioned, not a producer outer-edge table) in a single-column body, header or footer for those modes; the occurrence ceiling where the leading-indent band is unmeasured (nonleading tables, modes 11/12) stays the established text band, and binding growth there is unmeasured. Windows Word 16.0 build 16.0.20430 retest is consistent within the tested subset; see the officeObservations entry for this rule in scripts/docx-compatibility-microsoft-evidence.json for values and evidence limits.',
 });
 
 export const WORD_AUTOFIT_NOWRAP_AUTO_FORCED_FIT = defineCompatibilityRule({
@@ -195,7 +195,7 @@ export const WORD_TABLE_NONLEADING_INDENT_SCOPE = defineCompatibilityRule({
   id: 'word-table-nonleading-indent-scope',
   evidence: { kind: 'office-observation', syntheticFixtureId: 'table-nonleading-indent-classes',
     application: 'Microsoft Word', version: '16.0.20527', platform: 'Windows' },
-  description: 'ECMA-376 §17.4.50 ignores tblInd unless the table justification is leading. Windows Word 16.0.20527 controls (one-row two-cell 4000-twip tables, LTR and bidiVisual, jc left/start/center/right/end, tblInd omitted, +720, -360 and a table-style tblInd 720; compatibility mode omitted, 11, 12, 14 and 15) place and size every center, right and end table identically for all four indents, while left/start tables move by the indent (mirrored under bidiVisual). This holds for omitted horizontal margins (fixed and AutoFit dxa tables), a right-only tblCellMar, explicit 108-twip margins with percentage, auto, nil, missing and zero-dxa cell widths, a percentage table width, an AutoFit auto-width table with dxa or auto cells, 60-twip cell spacing with explicit or omitted margins, tables nested once in a body table cell (explicit and omitted margins), and top-level tables in a header, a footer, a page-anchored text box and a footnote (explicit and omitted margins, LTR and bidiVisual). The indent rule alone extends to these classes; the legacy margin hang of word-table-origin-compatibility keeps its own measured scope. Horizontal margins must be omitted or authored as dxa legacy left/right elements at every layer (cell, exception, table, style), the kind resolved as §17.4.87 does (an omitted type is dxa, a percent measurement is pct); nil/auto/pct widths and logical start/end spellings were not measured. An adjacent-table (§17.4.37) group is one table and qualifies with a common frame and grid. An AutoFit table without any effective preferred table or cell width (tblW auto, tcW auto; zero, nil and auto widths count as absent, as in the column solver) also ignores the indent in these controls, but it is excluded until its separately tracked content-fit width defect is fixed: its nonleading tables are placed far from the observed position at every indent, and applying the indent rule alone moves the indented rows farther from it. Compatibility mode 13 is not a value Word opens; other modes, row-level justification or table exceptions, authored gridBefore/gridAfter (including offsets the parser clears against the grid), floating or vertical-text tables, tables in a quarter-turned (vertical bodyPr) text box, deeper nesting and endnotes were not measured and keep the previous behavior.',
+  description: 'ECMA-376 §17.4.50 ignores tblInd unless the table justification is leading. Windows Word 16.0.20527 controls (one-row two-cell 4000-twip tables, LTR and bidiVisual, jc left/start/center/right/end, tblInd omitted, +720, -360 and a table-style tblInd 720; compatibility mode omitted, 11, 12, 14 and 15) place and size every center, right and end table identically for all four indents, while left/start tables move by the indent (mirrored under bidiVisual). This holds for omitted horizontal margins (fixed and AutoFit dxa tables), a right-only tblCellMar, explicit 108-twip margins with percentage, auto, nil, missing and zero-dxa cell widths, a percentage table width, an AutoFit auto-width table with dxa or auto cells, 60-twip cell spacing with explicit or omitted margins, tables nested once in a body table cell (explicit and omitted margins), and top-level tables in a header, a footer, a page-anchored text box and a footnote (explicit and omitted margins, LTR and bidiVisual). The indent rule alone extends to these classes; the legacy margin hang of word-table-origin-compatibility keeps its own measured scope. Horizontal margins must be omitted or authored as dxa legacy left/right elements at every layer (cell, exception, table, style), the kind resolved as §17.4.87 does (an omitted type is dxa, a percent measurement is pct); nil/auto/pct widths and logical start/end spellings were not measured. An adjacent-table (§17.4.37) group is one table and qualifies with a common frame and grid. An AutoFit table without any effective preferred table or cell width (tblW auto, tcW auto; zero, nil and auto widths count as absent, as in the column solver) also ignores the indent in these controls. It joins this rule only where word-autofit-content-column-growth content-fits it; elsewhere its width is unmeasured and it keeps the previous behavior. Leading tables move by their indent, except that word-nested-negative-indent ignores a negative indent on a once-nested fixed table. Compatibility mode 13 is not a value Word opens; other modes, row-level justification or table exceptions, authored gridBefore/gridAfter (including offsets the parser clears against the grid), floating or vertical-text tables, tables in a quarter-turned (vertical bodyPr) text box, deeper nesting and endnotes were not measured and keep the previous behavior.',
 });
 
 /** WORD_TABLE_NONLEADING_INDENT_SCOPE: the measured structures where a
@@ -213,8 +213,9 @@ export function wordNonleadingIndentScope(input: Readonly<{
   positioned: boolean;
   rowOverrides: boolean;
   gridSkips: boolean;
-  /** AutoFit with no preferred table or cell width (excluded, see the rule). */
-  contentSizedAutoFit: boolean;
+  /** AutoFit with no preferred table or cell width outside the content-fitted
+   * scope (excluded, see the rule). */
+  unfittedContentSizedAutoFit: boolean;
 }>): boolean {
   const story = input.story;
   const measuredStory = story === 'body' || story === 'header' || story === 'footer'
@@ -222,7 +223,54 @@ export function wordNonleadingIndentScope(input: Readonly<{
   const measuredNesting = input.topLevel || (story === 'body' && input.tableCellDepth === 1);
   return wordMeasuredTableOriginPlacementMode(input.mode) && measuredStory && measuredNesting
     && !input.verticalText && input.commonFrame && input.marginClass && !input.outerEdgeIndent && input.ordinaryFlow
-    && !input.positioned && !input.rowOverrides && !input.gridSkips && !input.contentSizedAutoFit;
+    && !input.positioned && !input.rowOverrides && !input.gridSkips && !input.unfittedContentSizedAutoFit;
+}
+
+/**
+ * WORD_TABLE_ORIGIN_COMPATIBILITY measured the legacy left-margin hang for
+ * top-level body tables with positive dxa cell and table widths. This rule
+ * extends the same hang to the further structures measured below.
+ */
+export const WORD_TABLE_MARGIN_HANG_SCOPE = defineCompatibilityRule({
+  id: 'word-table-margin-hang-scope',
+  evidence: { kind: 'office-observation', syntheticFixtureId: 'table-margin-hang-classes',
+    application: 'Microsoft Word', version: '16.0.20527', platform: 'Windows' },
+  description: 'Windows Word 16.0.20527 controls (one-row two-cell 4000-twip-grid tables with 108-twip dxa tblCellMar left/right, LTR and bidiVisual, jc left/start/center/right/end, tblInd omitted, +720, -360 and a table-style tblInd 720; compatibility mode omitted, 11, 12, 14 and 15) hang the first cell left margin exactly as word-table-origin-compatibility does for its measured class: in every mode except 15, a leading table with an indent (direct or from the table style) moves left by the row left margin, and a right or end table moves right by it; center tables and mode 15 do not hang. In the body this holds whatever the widths: tcW pct, auto, nil, omitted and dxa 0; tblW pct and auto; fixed and AutoFit. Top-level tables of the explicit-margin class hang identically in a header, a footer and a footnote. In a page-anchored text box only the leading hang applies; right and end tables keep their trailing edge at the inner band. A percentage tblW in the hanging modes is a share of the text band plus the first row outer margins (40% = 197.08pt = 0.4 x (481.9 + 10.8)pt, against 0.4 x 481.9pt in mode 15); this width part applies to page-owned stories (single-column body, header, footer). The rule applies to single tables inside word-table-nonleading-indent-scope; multiple rows anchor and hang per row as word-table-origin-compatibility measured, while adjacent-table (§17.4.37) groups keep the previous behavior. Cell spacing (tracked separately), omitted, logical or non-dxa margins, row-level justification or exceptions, authored gridBefore/gridAfter, nested, floating and vertical-text tables, quarter-turned text boxes, endnotes and other compatibility modes were not measured and keep the previous behavior.',
+});
+
+/** ECMA-376 §17.4.50 lets tblInd move a leading table either way. */
+export const WORD_NESTED_NEGATIVE_INDENT = defineCompatibilityRule({
+  id: 'word-nested-negative-indent',
+  evidence: { kind: 'office-observation', syntheticFixtureId: 'table-nonleading-indent-classes',
+    application: 'Microsoft Word', version: '16.0.20527', platform: 'Windows' },
+  description: 'Windows Word 16.0.20527 controls nest one-row two-cell 4000-twip fixed tables once in a 9000-twip fixed body table cell (explicit 108-twip and omitted horizontal margins, LTR and bidiVisual, compatibility mode omitted, 11, 12, 14 and 15). A left or start table with tblInd -360 is placed exactly like its twin without tblInd, at the containing cell content edge (mirrored under bidiVisual), while +720 and a table-style tblInd 720 move it by 36pt. The negative indent is therefore ignored, not clamped to the cell edge. Center, right and end tables ignore every indent under word-table-nonleading-indent-scope. Scope: fixed tables without cell spacing inside the structures of word-table-nonleading-indent-scope, nested once in a body table cell; AutoFit or spaced nested tables, deeper nesting, other stories and other modes were not measured and keep the previous behavior.',
+});
+
+export type WordTableMarginHangScope = 'none' | 'leading' | 'all';
+
+/** WORD_TABLE_MARGIN_HANG_SCOPE: which rows of a table outside the origin
+ * observation hang the legacy left margin. */
+export function wordTableMarginHangScope(input: Readonly<{
+  mode: number | undefined;
+  story: string | undefined;
+  topLevel: boolean;
+  verticalText: boolean;
+  commonFrame: boolean;
+  /** Every row has an authored legacy left margin and only dxa margins. */
+  marginClass: boolean;
+  spacing: boolean;
+  outerEdgeIndent: boolean;
+  ordinaryFlow: boolean;
+  positioned: boolean;
+  rowOverrides: boolean;
+  gridSkips: boolean;
+}>): WordTableMarginHangScope {
+  const story = input.story;
+  if (!wordMeasuredTableOriginPlacementMode(input.mode) || !input.topLevel || input.verticalText
+    || !input.commonFrame || !input.marginClass || input.spacing || input.outerEdgeIndent
+    || !input.ordinaryFlow || input.positioned || input.rowOverrides || input.gridSkips) return 'none';
+  if (story === 'body' || story === 'header' || story === 'footer' || story === 'footnote') return 'all';
+  return story === 'textbox' ? 'leading' : 'none';
 }
 
 /** The observation is deliberately restricted to the exported mode boundaries. */
