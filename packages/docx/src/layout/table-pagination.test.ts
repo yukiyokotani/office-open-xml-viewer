@@ -1,3 +1,4 @@
+import { partitionFootnoteTable, registerFootnoteTable } from './footnote-table-fragmentation.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as tableModule from './table.js';
 import type { RetainedTableAcquisition } from './table-acquisition.js';
@@ -1786,4 +1787,39 @@ describe('retained table pagination', () => {
     expect(second.floatingTableRegistryDelta?.entries).toHaveLength(1);
   });
 
+});
+
+
+describe('oversized note table source work', () => {
+  it.each([80, 160, 320])('bounds source row visits linearly for %i continued rows', count => {
+    const original = acquisition(Array.from({ length: count }, (_, i) => row(i, 10)));
+    let visits = 0;
+    const counted = <T,>(rows: readonly T[]): readonly T[] => new Proxy(rows, {
+      get(target, key, receiver) {
+        if (typeof key === 'string' && /^\d+$/.test(key)) visits++;
+        return Reflect.get(target, key, receiver);
+      },
+    });
+    const source: RetainedTableAcquisition = { ...original,
+      input: { ...original.input, rows: counted(original.input.rows) },
+      layout: { ...original.layout, rows: counted(original.layout.rows) },
+    };
+    registerFootnoteTable(source.layout, source, {} as LayoutServices,
+      { physicalPageIndex: 0, displayPageNumber: 1, occurrenceId: 'note' });
+    let cursor: import('./table-pagination.js').TableFragmentCursor | undefined;
+    const retained: number[] = [];
+    let pages = 0;
+    do {
+      const part = partitionFootnoteTable(source.layout, cursor, 74, false)!;
+      expect(part).not.toBeNull();
+      retained.push(...part.fragment.rows.map(row => row.source.path[1]!));
+      cursor = part.nextCursor ?? undefined;
+      expect(++pages).toBeLessThanOrEqual(count);
+    } while (cursor);
+    expect(retained).toEqual(Array.from({ length: count }, (_, i) => i));
+    // Includes registration, the nested-origin scan, suffix-height indexing
+    // and actual row selection. A full-source scan per band exceeds this
+    // source-sized budget at all three sizes; no wall-clock assertion.
+    expect(visits).toBeLessThanOrEqual(20 * count);
+  });
 });
