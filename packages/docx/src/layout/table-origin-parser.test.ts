@@ -276,6 +276,9 @@ describe('Word table origin and occupied grid', () => {
     // fixture using the same parser/measurement inputs. It was re-recorded for
     // #1881, whose Word controls keep fixed tracks and absolute-width AutoFit
     // grids beyond the container; these cases all carry a 540pt dxa tblW.
+    // WORD_TABLE_MARGIN_HANG_SCOPE (#2064) measured the single-table form of
+    // cases 59 and 96 (leading, indented, mode 12/11): only their 18pt
+    // margin hang was re-recorded.
     const baseline = JSON.parse(await readFile(new URL('./table-origin-disabled-main.json', import.meta.url), 'utf8')) as { revision: string; cases: { split: number[][]; single: number[][] }[] };
     expect(baseline.cases).toHaveLength(128);
     let seed = 1664;
@@ -408,10 +411,11 @@ describe('Word table origin and occupied grid', () => {
     expect(layoutTable(missing).flowBounds.xPt).toBeCloseTo(252, 8);
     const logicalOverride = table(`<w:tr>${cell(2160, 540).replace('<w:left ', '<w:start ')}${cell(3600)}</w:tr>`, indent);
     expect(layoutTable(logicalOverride).flowBounds.xPt).toBeCloseTo(77.4, 8);
+    // WORD_TABLE_MARGIN_HANG_SCOPE: auto cell widths hang the 18pt margin.
     const unpreferred = table(row.replaceAll('w:type="dxa"', 'w:type="auto"'), indent);
-    expect(layoutTable(unpreferred).flowBounds.xPt).toBeCloseTo(77.4, 8);
+    expect(layoutTable(unpreferred).flowBounds.xPt).toBeCloseTo(59.4, 8);
     const autoFit = table(row, indent).replace('w:tblLayout w:type="fixed"', 'w:tblLayout w:type="autofit"');
-    expect(layoutTable(autoFit).flowBounds.xPt).toBeCloseTo(77.4, 8);
+    expect(layoutTable(autoFit).flowBounds.xPt).toBeCloseTo(59.4, 8);
     const cleared = table(`<w:tr><w:tblPrEx><w:tblW w:type="dxa" w:w="0"/></w:tblPrEx>${cell(2160)}${cell(3600)}</w:tr>`, indent + '<w:tblW w:type="dxa" w:w="5760"/>')
       .replace('w:tblLayout w:type="fixed"', 'w:tblLayout w:type="autofit"');
     expect(layoutTable(cleared).flowBounds.xPt).toBeCloseTo(77.4, 8);
