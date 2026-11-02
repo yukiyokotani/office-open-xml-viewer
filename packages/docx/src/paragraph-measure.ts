@@ -37,6 +37,8 @@ export { createFloatWrapOracle } from './layout/float-wrap-oracle.js';
 export type { WrapOracle } from './layout/float-wrap-oracle.js';
 
 export interface ParagraphMeasurementEnvironment extends LineLayoutEnvironment {
+  /** Recovery windows need source-run cuts independent of field display width. */
+  readonly retainSourceRunBoundaries?: boolean;
   readonly documentHasEastAsianText: boolean;
   readonly paragraphMarkShapeInput?: NumberingMarkerShapeInput;
   /** Selected-face text marker box, resolved by retained numbering before line acquisition. */
@@ -86,6 +88,7 @@ export interface MeasuredLine {
 }
 
 export interface MeasuredParagraph {
+  readonly lineEndSourceRuns?: readonly Readonly<{ runIndex: number; offset: number }>[];
   readonly lines: readonly MeasuredLine[];
   readonly markOnly: boolean;
   /** Grid-only leading below the empty mark's own font/spacing box. */
@@ -647,7 +650,45 @@ export function measureParagraph(
   }
 
   const lastLine = measuredLines[measuredLines.length - 1];
+  // Only bounded recovery windows request this projection. Segment indices
+  // belong to the shaped window; source-run positions survive a destination's
+  // changed PAGE width and a different window size. Use the segment builder's
+  // ownership, including coalesced sequences and consumed trailing spaces.
+  let lineEndSourceRuns: MeasuredParagraph['lineEndSourceRuns'];
+  if (environment.retainSourceRunBoundaries) {
+    const offsets = new Map<number, number>();
+    const starts = segments.map(segment => {
+      const runIndex = segment.sourceRunIndex;
+      if (runIndex === undefined || !('text' in segment)) throw new Error('Unsupported note source window segment');
+      const offset = offsets.get(runIndex) ?? 0;
+      offsets.set(runIndex, offset + segment.text.length);
+      return offset;
+    });
+    lineEndSourceRuns = measuredLines.map(({ layout }) => {
+      const boundary = layout.consumedEnd;
+      if (!boundary) throw new Error('Note source window omitted its consumed boundary');
+      const segment = segments[boundary.segIndex];
+      if (!segment) return { runIndex: paragraph.runs.length, offset: 0 };
+      const sequence = segment.sourceTextSequence;
+      if (sequence) {
+        const offset = (segment.sourceTextOffset ?? 0) + boundary.charOffset;
+        let low = 0, high = sequence.length;
+        while (low < high) {
+          const middle = Math.floor((low + high) / 2);
+          if (sequence[middle]!.end <= offset) low = middle + 1;
+          else high = middle;
+        }
+        const owner = sequence[low];
+        return owner ? { runIndex: owner.runIndex, offset: offset - owner.start }
+          : { runIndex: sequence.at(-1)!.runIndex + 1, offset: 0 };
+      }
+      const runIndex = segment.sourceRunIndex!;
+      const offset = starts[boundary.segIndex]! + boundary.charOffset;
+      return offset >= offsets.get(runIndex)! ? { runIndex: runIndex + 1, offset: 0 } : { runIndex, offset };
+    });
+  }
   return {
+    ...(lineEndSourceRuns ? { lineEndSourceRuns } : {}),
     lines: measuredLines,
     markOnly: false,
     requestedSpaceBeforePt,

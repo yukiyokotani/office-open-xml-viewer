@@ -53,6 +53,30 @@ function notice(advancePt: number): NoteSeparatorLayout {
 }
 
 describe('page-bottom footnote continuation', () => {
+  it('retains an indivisible over-band line and its notice, then resumes every remaining line once', () => {
+    const original = note(0);
+    const paragraph = original.story.blocks[0] as ParagraphLayout;
+    const lines = paragraph.lines.map((line, index) => ({ ...line,
+      advancePt: index === 0 ? 120 : 10,
+      bounds: { ...line.bounds, yPt: index === 0 ? 6 : 126 + (index - 1) * 10,
+        heightPt: index === 0 ? 120 : 10 },
+    }));
+    const bounds = { ...paragraph.flowBounds, heightPt: 150 };
+    const acquired: NoteLayout = { ...original, advancePt: 156,
+      flowBounds: { ...original.flowBounds, heightPt: 156 },
+      story: { ...original.story, advancePt: 150, blocks: [{ ...paragraph,
+        flowBounds: bounds, inkBounds: bounds, advancePt: 150, lines }] },
+    };
+    expect(partitionFootnote(acquired, null, 80)).toBeNull();
+    const head = createFootnotePartitioner(() => true)(acquired, null, 80, () => notice(4), 'overflow')!;
+    expect(head.fragment.advancePt).toBe(130);
+    expect(head.fragment.trailing?.advancePt).toBe(4);
+    const tail = partitionFootnote(acquired, head.nextCursor, 80)!;
+    expect(tail.nextCursor).toBeNull();
+    expect([head, tail].flatMap(part => part.fragment.story.blocks.flatMap(block =>
+      block.kind === 'paragraph' ? block.lines.map(line => line.range.start) : []))).toEqual([0, 1, 2, 3]);
+  });
+
   it('does not rescan a retained long paragraph for every continuation page', () => {
     const total = 2_000;
     let advanceReads = 0;

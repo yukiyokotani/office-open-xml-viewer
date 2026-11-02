@@ -2317,7 +2317,7 @@ describe('canonical body producer', () => {
       .toEqual([[0], [1, 2]]);
   });
 
-  it('rejects a placed footnote reserve that cannot fit a fresh physical page', () => {
+  it('retains a placed footnote reserve that cannot fit a fresh physical page', () => {
     const services = Object.freeze({
       text: { fingerprint: 'text' }, images: { fingerprint: 'images' }, math: { fingerprint: 'math' },
     }) as LayoutServices;
@@ -2362,12 +2362,11 @@ describe('canonical body producer', () => {
       }],
     };
 
-    expect(() => paginateBody(input, services, { currentDateMs: 0 })).toThrow(expect.objectContaining({
-      code: 'FOOTNOTE_RESERVE_EXCEEDS_FRESH_PAGE',
-    }));
+    const layout = paginateBody(input, services, { currentDateMs: 0 });
+    expect(layout.pages.flatMap(page => page.layers.body).map(node => node.source.path[0])).toEqual([0]);
   });
 
-  it('rejects an ordinary paragraph footnote reserve that cannot fit a fresh physical page', () => {
+  it('retains an ordinary paragraph footnote reserve that cannot fit a fresh physical page', () => {
     const services = Object.freeze({
       text: { fingerprint: 'text' }, images: { fingerprint: 'images' }, math: { fingerprint: 'math' },
     }) as LayoutServices;
@@ -2403,12 +2402,11 @@ describe('canonical body producer', () => {
       }],
     };
 
-    expect(() => paginateBody(input, services, { currentDateMs: 0 })).toThrow(expect.objectContaining({
-      code: 'FOOTNOTE_RESERVE_EXCEEDS_FRESH_PAGE',
-    }));
+    const layout = paginateBody(input, services, { currentDateMs: 0 });
+    expect(layout.pages.flatMap(page => page.layers.body).map(node => node.source.path[0])).toEqual([0]);
   });
 
-  it('rejects a table fragment and footnote reserve that cannot fit a fresh physical page', () => {
+  it('retains a table fragment and footnote reserve that cannot fit a fresh physical page', () => {
     const services = Object.freeze({
       text: { fingerprint: 'text' }, images: { fingerprint: 'images' }, math: { fingerprint: 'math' },
     }) as LayoutServices;
@@ -2439,9 +2437,8 @@ describe('canonical body producer', () => {
       }],
     };
 
-    expect(() => paginateBody(input, services, { currentDateMs: 0 })).toThrow(expect.objectContaining({
-      code: 'FOOTNOTE_RESERVE_EXCEEDS_FRESH_PAGE',
-    }));
+    const layout = paginateBody(input, services, { currentDateMs: 0 });
+    expect(layout.pages.flatMap(page => page.layers.body).map(node => node.source.path[0])).toEqual([0]);
   });
 
   it('keeps a paragraph with its note-bearing successor when the pair only fits a fresh page', () => {
