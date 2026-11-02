@@ -306,6 +306,8 @@ describe('unmeasured neighbours of the extended rules keep the previous behavior
     const rowJc = tableGeometry('body', tableXml({ ...CONTENT_SIZED, jc: 'right', label: 'Q', indent: null,
       trPr: '<w:jc w:val="right"/>' }), 'Q', 14);
     expect(rowJc.widthPt).toBeCloseTo(200, 6);
+    // Cell spacing is outside the measured content-sized class.
+    expect(shifts('body', 15, { ...CONTENT_SIZED, jc: 'right', spacing: true })).toEqual([36, -18]);
   }, 60_000);
   it('keeps a negative indent on once-nested AutoFit or spaced tables', () => {
     expect(shifts('nested', 15, { jc: 'left', layout: '' })).toEqual([36, -18]);
