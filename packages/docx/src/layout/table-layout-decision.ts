@@ -407,6 +407,11 @@ export function decideLogicalTable(
     && !environment.inTableCell && !isVerticalTextDirection(environment.textDirection)
     && environment.quarterTurnedStory !== true && format.ordinaryFlow && format.positioning == null
     && format.outerEdgeIndent !== true && !rowOverrides && !gridSkips
+    // ECMA-376 §17.4.43 puts trPr spacing inside text margins; §17.4.45
+    // puts tblPr spacing outside. The observation covers only the latter,
+    // including inherited table styles. Equal effective row values do not
+    // establish that provenance; tblPrEx (§17.4.44) is also unmeasured.
+    && source.lexical.rows.every(({ row }) => row?.cellSpacing == null && row?.exception?.cellSpacing == null)
     // The blk-0898 table controls (spaced one-row tables, modes 11/12/14/15
     // and omitted, tblInd -360) place modes 11/12 like 14 and move a leading
     // table by a negative indent like a positive one.

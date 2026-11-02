@@ -19,6 +19,7 @@ interface Options {
   jc?: string; bidi?: boolean; indent?: number; auto?: boolean; widths?: number[];
   span?: boolean; verticalMerge?: boolean; cellBorder?: boolean; asymmetric?: boolean;
   rowSpacing?: boolean; nested?: boolean; header?: boolean; floating?: boolean;
+  spacingScope?: 'row' | 'exception' | 'style';
   vertical?: boolean; long?: boolean; texts?: string[]; pageHeight?: number; rightBorderColor?: string;
 }
 const para = (text: string) => `<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="368" w:lineRule="exact"/></w:pPr><w:r><w:t>${text}</w:t></w:r></w:p>`;
@@ -26,12 +27,16 @@ function geometry(o: Options = {}, fragments?: TableLayout[]): TableLayout {
   const widths = o.widths ?? [2000, 2000, 2000];
   const border = (side: string, size = o.border ?? 24) => `<w:${side} w:val="${size ? 'single' : 'nil'}" w:sz="${size}" w:color="${side === 'right' ? o.rightBorderColor ?? '000000' : '000000'}"/>`;
   const tblPr = `<w:tblW w:w="${o.auto ? 0 : widths.reduce((a, b) => a + b, 0)}" w:type="${o.auto ? 'auto' : 'dxa'}"/>`
-    + `<w:tblLayout w:type="${o.auto ? 'autofit' : 'fixed'}"/><w:tblCellSpacing w:w="${o.spacing ?? 200}" w:type="dxa"/>`
+    + `<w:tblLayout w:type="${o.auto ? 'autofit' : 'fixed'}"/>`
+    + (o.spacingScope === 'style' ? '<w:tblStyle w:val="SpacingDerived"/>'
+      : o.spacingScope ? '' : `<w:tblCellSpacing w:w="${o.spacing ?? 200}" w:type="dxa"/>`)
     + `<w:jc w:val="${o.jc ?? 'left'}"/>${o.indent === undefined ? '' : `<w:tblInd w:w="${o.indent}" w:type="dxa"/>`}`
     + `${o.bidi ? '<w:bidiVisual/>' : ''}${o.floating ? '<w:tblpPr w:horzAnchor="page" w:vertAnchor="page" w:tblpX="1440" w:tblpY="1440"/>' : ''}`
     + `<w:tblBorders>${['top', 'bottom', 'left', 'right', 'insideH', 'insideV'].map((side) => border(side, o.asymmetric && side === 'right' ? 4 : undefined)).join('')}</w:tblBorders>`
     + (o.margin === null ? '' : `<w:tblCellMar>${['left', 'right', 'top', 'bottom'].map((side) => `<w:${side} w:w="${o.margin ?? 0}" w:type="dxa"/>`).join('')}</w:tblCellMar>`);
   const rows = [0, 1].map((row) => `<w:tr>${o.rowSpacing && row === 1 ? '<w:tblPrEx><w:tblCellSpacing w:w="60" w:type="dxa"/></w:tblPrEx>' : ''}`
+    + (o.spacingScope === 'row' ? `<w:trPr><w:tblCellSpacing w:w="${o.spacing ?? 200}" w:type="dxa"/></w:trPr>`
+      : o.spacingScope === 'exception' ? `<w:tblPrEx><w:tblCellSpacing w:w="${o.spacing ?? 200}" w:type="dxa"/></w:tblPrEx>` : '')
     + widths.flatMap((_width, col) => o.span && col === 1 ? [] : [`<w:tc><w:tcPr><w:tcW w:w="${o.auto ? 0 : o.span && col === 0 ? widths[0]! + widths[1]! : widths[col]}" w:type="${o.auto ? 'auto' : 'dxa'}"/>`
       + `${o.span && col === 0 ? '<w:gridSpan w:val="2"/>' : ''}${o.verticalMerge && col === 0 ? `<w:vMerge${row === 0 ? ' w:val="restart"' : ''}/>` : ''}`
       + `${o.cellBorder && col === 0 ? `<w:tcBorders>${border('left')}</w:tcBorders>` : ''}${o.vertical ? '<w:textDirection w:val="tbRl"/>' : ''}`
@@ -42,11 +47,14 @@ function geometry(o: Options = {}, fragments?: TableLayout[]): TableLayout {
   const files = new Map<string, string>([
     ['[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>'],
     ['_rels/.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="d" Type="${R}/officeDocument" Target="word/document.xml"/></Relationships>`],
-    ['word/_rels/document.xml.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="s" Type="${R}/settings" Target="settings.xml"/><Relationship Id="h" Type="${R}/header" Target="header1.xml"/></Relationships>`],
+    ['word/_rels/document.xml.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="s" Type="${R}/settings" Target="settings.xml"/><Relationship Id="h" Type="${R}/header" Target="header1.xml"/>${o.spacingScope === 'style' ? `<Relationship Id="st" Type="${R}/styles" Target="styles.xml"/>` : ''}</Relationships>`],
     ['word/document.xml', `<w:document xmlns:w="${W}" xmlns:r="${R}"><w:body>${o.header ? para('body') : o.nested ? outer : table}${para('after')}<w:sectPr><w:headerReference w:type="default" r:id="h"/><w:pgSz w:w="12240" w:h="${o.pageHeight ?? 15840}"/><w:pgMar w:top="1440" w:bottom="1440" w:left="1440" w:right="1440" w:header="360"/></w:sectPr></w:body></w:document>`],
     ['word/header1.xml', `<w:hdr xmlns:w="${W}">${o.header ? table : ''}${para('header')}</w:hdr>`],
     ['word/settings.xml', `<w:settings xmlns:w="${W}">${mode === null ? '' : `<w:compat><w:compatSetting w:name="compatibilityMode" w:uri="http://schemas.microsoft.com/office/word" w:val="${mode}"/></w:compat>`}</w:settings>`],
   ]);
+  if (o.spacingScope === 'style') files.set('word/styles.xml', `<w:styles xmlns:w="${W}">`
+    + `<w:style w:type="table" w:styleId="SpacingBase"><w:tblPr><w:tblCellSpacing w:w="${o.spacing ?? 200}" w:type="dxa"/></w:tblPr></w:style>`
+    + '<w:style w:type="table" w:styleId="SpacingDerived"><w:basedOn w:val="SpacingBase"/></w:style></w:styles>');
   const archive = new DocxArchive(storeZip(new Map([...files].map(([name, xml]) => [name, encoder.encode(xml)]))));
   try {
     const model = normalizeInternalDocumentModel(JSON.parse(new TextDecoder().decode(archive.parse()))).document;
@@ -192,6 +200,14 @@ describe('WORD_TABLE_CELL_SPACING_GEOMETRY (#2066)', () => {
   it('keeps unmeasured classes byte-identical to the previous renderer', () => {
     expect(fingerprint([{ asymmetric: true }, { cellBorder: true }, { rowSpacing: true }, { nested: true },
       { header: true }, { floating: true }, { vertical: true }, { verticalMerge: true }])).toBe('28a6cf890f22e943b52dc511ea76b9e98f25e5bae672811f81863286987f92d2');
+  });
+  it.each(['row', 'exception'] as const)('keeps uniform %s spacing byte-identical to the base renderer', (spacingScope) => {
+    expect(geometry({ spacingScope }).flowBounds.heightPt).toBeCloseTo(66.8, 8);
+    // Captured independently for both sources at 5b6d291540f122570b801086a52b43e6718b6fbe.
+    expect(fingerprint([{ spacingScope }])).toBe('1e2aaa8dc6f1d43b1ea27dbc6d7cc73ebc207c5a57dade938ac26e89d2cafbb6');
+  });
+  it('keeps style-inherited table-level spacing in the measured class', () => {
+    expect(geometry({ spacingScope: 'style' })).toEqual(geometry());
   });
   it('places modes 11 and 12 like mode 14 and moves a leading table by a negative indent', () => {
     for (const jc of ['left', 'center', 'right']) {
