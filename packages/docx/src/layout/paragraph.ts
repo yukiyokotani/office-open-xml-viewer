@@ -3792,9 +3792,8 @@ function planMeasuredLines(
         const occurrence = runSource(source, runIndex ?? 0);
         // §20.4.2.6: the segment box includes the inline effect extent; the
         // object itself paints at its authored size inside it.
-        const [effectLeftPt, effectTopPt, effectRightPt, effectBottomPt] = image.effectExtent ?? [0, 0, 0, 0];
-        const objectWidthPt = image.widthPt - effectLeftPt - effectRightPt;
-        const objectHeightPt = image.heightPt - effectTopPt - effectBottomPt;
+        const [effectLeftPt, effectTopPt] = image.effectExtent ?? [0, 0];
+        const [objectWidthPt, objectHeightPt] = image.objectSizePt ?? [image.widthPt, image.heightPt];
         if (image.inlineShape) {
           const leftOffsetPt = (image.inlineOffsetXPt ?? 0) + effectLeftPt;
           segments.push({

@@ -1645,7 +1645,12 @@ function inlineEffectExtentBox(
   widthPt: number,
   heightPt: number,
   orientation?: import('../layout/types.js').UprightResourceOrientation,
-): { widthPt: number; heightPt: number; effectExtent?: readonly [number, number, number, number] } {
+): {
+  widthPt: number;
+  heightPt: number;
+  effectExtent?: readonly [number, number, number, number];
+  objectSizePt?: readonly [number, number];
+} {
   if (!extent || extent.length !== 4 || extent.every((edge) => !Number.isFinite(edge) || edge === 0)) {
     return { widthPt, heightPt };
   }
@@ -1660,6 +1665,7 @@ function inlineEffectExtentBox(
     widthPt: Math.max(0, widthPt + left + right),
     heightPt: Math.max(0, heightPt + top + bottom),
     effectExtent: logical,
+    objectSizePt: [widthPt, heightPt],
   };
 }
 
