@@ -7,7 +7,7 @@ import type {
   MeasurementTextContext,
   VerticalGlyphMeasurementService,
 } from '../layout/measurement-capabilities.js';
-import { wordUniformRunPositionPaintPt } from '../layout/line-compatibility.js';
+import { wordUniformRunPositionPaintPt, type CjkClosingMarkHang } from '../layout/line-compatibility.js';
 import { calcEffectiveFontPx } from '../layout/text.js';
 import {
   type DocGridCtx,
@@ -98,6 +98,8 @@ export interface LineBreakerPassInput {
   readonly widthPolicy: 'bounded' | 'intrinsic' | 'unwrapped';
   readonly verticalGlyphMeasurement?: VerticalGlyphMeasurementService;
   readonly overflowPunct: boolean;
+  /** WORD_JUSTIFICATION_PUNCTUATION_HANG; absent outside its measured scope. */
+  readonly cjkClosingMarkHang?: CjkClosingMarkHang;
   readonly justifiedCompression?: boolean;
   /** A line-end U+3000 hangs from the visible fit (WORD_LINE_END_SPACE_HANGS). */
   readonly lineEndIdeographicSpaceHangs?: boolean;

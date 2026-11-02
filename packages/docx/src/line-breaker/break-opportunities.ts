@@ -11,6 +11,7 @@ import {
 } from '@silurus/ooxml-core';
 import { EAST_ASIAN_RE, LIST_LABEL_PICTURE_INSET_PT } from '../layout/text.js';
 import {
+  wordCjkClosingMarkHangRefused,
   wordIsOverflowPunctuation,
   wordIdeographicSpaceLineEndAllowanceCount,
   wordVisiblePrefixFitWidthPx,
@@ -88,6 +89,7 @@ export type BreakOpportunityIteratorContext = Pick<
   | 'stretchLastLine'
   | 'widthPolicy'
   | 'overflowPunct'
+  | 'cjkClosingMarkHang'
   | 'sameLatinSpaceFace'
   | 'fitsMeasuredWidth'
   | 'fitHomogeneousLatinSpaces'
@@ -489,6 +491,17 @@ function processTextSegment(context: BreakOpportunityIteratorContext, seg: Layou
       s.script === 'ascii' || s.script === 'highAnsi',
       s.script === 'complexScript',
       s.overflowPunctuationBidiLanguage,
+    ) &&
+    // word-justification-punctuation-hang, the following character taken
+    // across queued segments.
+    !wordCjkClosingMarkHangRefused(
+      context.cjkClosingMarkHang,
+      trailingOverflowCharacter,
+      () => trimmed.length < s.text.length
+        ? String.fromCodePoint(s.text.codePointAt(trimmed.length)!)
+        : queuedFollowingCharacter(context),
+      context.kinsoku,
+      s.verticalRun === true,
     ) &&
     // The visible prefix keeps the WORD_KERNED_SPACE_PAIRS seam pair that
     // placement charges.
@@ -965,6 +978,17 @@ function processTabSegment(
   seg.measuredWidth = tabWidth;
   addToLine(seg, tabWidth, seg.fontSize, seg.fontSize * scale * SYNTHETIC_ASCENT_EM, seg.fontSize * scale * SYNTHETIC_DESCENT_EM);
   return;
+}
+
+/** The first character of the next queued text, or `undefined` when no text
+ * segment follows (a tab, drawing or break starts no text). Empty pieces are
+ * skipped. */
+function queuedFollowingCharacter(context: BreakOpportunityIteratorContext): string | undefined {
+  for (const follower of context.breakerState.queue) {
+    if (!('text' in follower)) return undefined;
+    if (follower.text.length > 0) return String.fromCodePoint(follower.text.codePointAt(0)!);
+  }
+  return undefined;
 }
 
 interface TextFitFrame {
@@ -1477,6 +1501,15 @@ function splitCjkOverflow(context: BreakOpportunityIteratorContext, frame: TextF
       breakerState.gapTransaction?.endsAtExclusion !== true &&
       split < allChars.length &&
       (breakerState.currentLine.length > 0 || split > 0) &&
+      // word-justification-punctuation-hang (the following character may
+      // sit in a later queued segment).
+      !wordCjkClosingMarkHangRefused(
+        context.cjkClosingMarkHang,
+        allChars[split]!,
+        () => split + 1 < allChars.length ? allChars[split + 1] : queuedFollowingCharacter(context),
+        kinsoku,
+        s.verticalRun === true,
+      ) &&
       wordIsOverflowPunctuation(
         allChars[split],
         s.eastAsiaLanguage,

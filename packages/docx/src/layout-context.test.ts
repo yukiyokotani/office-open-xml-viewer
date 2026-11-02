@@ -94,8 +94,8 @@ describe('layout context resolvers', () => {
   });
 
   it('preserves nested table-cell container depth', () => {
-    const outerCell = enterTableCellStoryContext(bodyStory);
-    const innerCell = enterTableCellStoryContext(outerCell);
+    const outerCell = enterTableCellStoryContext(bodyStory, true);
+    const innerCell = enterTableCellStoryContext(outerCell, true);
 
     expect(outerCell.containers).toEqual([{ kind: 'tableCell' }]);
     expect(innerCell.containers).toEqual([

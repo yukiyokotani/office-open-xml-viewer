@@ -5138,8 +5138,14 @@ function textBoxParagraphContext(
   const hasEastAsianText = paragraph.runs.some((run) =>
     run.type === 'text' && EAST_ASIAN_RE.test(run.text));
   // Whether the paragraph ends at a page or column break is its own fact,
-  // never the host's (WORD_LINE_END_JUSTIFICATION).
-  const { endsAtHardBreak: _hostEndsAtHardBreak, ...host } = inherited;
+  // never the host's (WORD_LINE_END_JUSTIFICATION). A text-box paragraph is
+  // outside the measured class of WORD_JUSTIFICATION_PUNCTUATION_HANG, so it
+  // never takes the host's closing-mark policy either.
+  const {
+    endsAtHardBreak: _hostEndsAtHardBreak,
+    cjkClosingMarkHang: _hostCjkClosingMarkHang,
+    ...host
+  } = inherited;
   return {
     ...host,
     ...(paragraph.endsAtHardBreak === true ? { endsAtHardBreak: true as const } : {}),
@@ -6090,6 +6096,7 @@ function paragraphAcquisitionKey(
       cache.kinsokuKey(context.kinsoku),
       context.defaultTabPt,
       context.overflowPunct !== false,
+      context.cjkClosingMarkHang ?? null,
       context.numberingMarkerGeometry
         ? JSON.stringify(context.numberingMarkerGeometry)
         : null,
