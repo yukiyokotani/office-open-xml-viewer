@@ -12,8 +12,7 @@ import {
   condensedCharacterAdjustments,
   condensedClusterFloorPx,
   condensedSpacingMayFloor,
-  condensedUnitAdvancesPx,
-  condensedUnitsFloor,
+  condensedFloorAdvancesPx,
   contextualGraphemeAdvances,
   segmentCharacterGridDeltaPx,
   type CondensedAdvanceUnits,
@@ -3211,8 +3210,8 @@ function textPlanSegment(
             advancePx: cluster.advancePt,
           })),
     };
-    const advances = condensedUnitAdvancesPx(segment, characterGrid, 1, units);
-    if (condensedUnitsFloor(units, advances)) {
+    const advances = condensedFloorAdvancesPx(segment, characterGrid, 1, units);
+    if (advances) {
       let penPt = clusters[0]?.offset.xPt ?? 0;
       let unitStart = sourceOffset;
       clusters = units.clusters.map((unit, index) => {
