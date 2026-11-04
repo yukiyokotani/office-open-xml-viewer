@@ -753,18 +753,24 @@ describe('reviewed note admission regressions', () => {
     model.body.unshift(floating);
     const source = layoutSourceStore(model);
     let yields = 0;
-    const counts: number[] = [];
+    const previews: DocumentLayout[] = [];
     const layout = await layoutDocumentProgressively(source.bodyLayoutInput,
       createLayoutServices(source, { measureContext: context, allowFootnoteContinuation: true }),
       { currentDateMs: 0 }, {
-        onPreview: preview => counts.push(preview.layout.pages.length),
+        onPreview: preview => previews.push(preview.layout),
         scheduler: { sliceMs: 0, yieldToHost: async () => { yields++; } },
       });
     expectConserved(layout, expected);
     expect(layout.pages.length).toBeLessThanOrEqual(8 * count);
     expect(yields).toBeLessThanOrEqual(100 * count);
-    expect(counts.length).toBeGreaterThan(0);
+    // Every reference sits on page 0 and each note recovers, so #2113 may
+    // withhold every publication; whatever is published stays final.
+    const counts = previews.map(preview => preview.pages.length);
     expect(counts).toEqual([...new Set(counts)].sort((a, b) => a - b));
+    for (const preview of previews) preview.pages.forEach((page, index) => {
+      expect(page.layers.body).toEqual(layout.pages[index]!.layers.body);
+      expect(page.layers.notes).toEqual(layout.pages[index]!.layers.notes);
+    });
   });
 
   it.each([1, 2])('recovers an oversized footnote tail while endnotes open a page (%i columns)', columns => {
@@ -1061,5 +1067,133 @@ describe('reviewed note admission regressions', () => {
     }));
     expect(retained).toEqual(Array.from({ length: 40 }, (_, i) => i));
     expect(layout.pages.length).toBeGreaterThan(2);
+  });
+});
+
+// #2113: progressive publications are prefixes of the final layout. Recovery
+// grants an oversized note its permission at the rejecting page, and later
+// passes apply it to every page of that note, so a page holding an unfinished
+// note's reference or fragment must wait.
+describe('progressive publication around note recovery (#2113)', () => {
+  const continuingFootnoteModel = (oversized: boolean, anchoredTable: boolean) => {
+    const content = Array.from({ length: 30 }, (_, i) => paragraph(`n${i};`, 24));
+    if (oversized) content.push(paragraph('tall;', 800), paragraph('tail;', 24));
+    const model = document('footnote', content, 15, 2);
+    const body: BodyElement[] = [model.body[0]!,
+      ...Array.from({ length: 129 }, (_, i) => paragraph(`b${i};`, 24) as BodyElement)];
+    if (anchoredTable) {
+      const floating = table([paragraph('anchor;')]);
+      floating.tblpPr = { leftFromText: 0, rightFromText: 0, topFromText: 0, bottomFromText: 0,
+        horzAnchor: 'margin', horzSpecified: true, vertAnchor: 'page', tblpX: 0, tblpY: 0 };
+      body.splice(40, 0, floating);
+    }
+    model.body = body;
+    return model;
+  };
+  const publications = async (model: DocxDocumentModel) => {
+    const source = layoutSourceStore(model);
+    const previews: DocumentLayout[] = [];
+    const layout = await layoutDocumentProgressively(source.bodyLayoutInput,
+      createLayoutServices(source, { measureContext: context, allowFootnoteContinuation: true }),
+      { currentDateMs: 0 }, {
+        onPreview: preview => previews.push(preview.layout),
+        scheduler: { sliceMs: 0, yieldToHost: async () => undefined },
+      });
+    return { previews, layout };
+  };
+  // Every published page keeps the final page's body and note geometry.
+  const expectPublishedPagesFinal = (previews: readonly DocumentLayout[], layout: DocumentLayout) => {
+    for (const preview of previews) {
+      preview.pages.forEach((page, index) => {
+        const final = layout.pages[index]!;
+        expect(page.pageIndex).toBe(final.pageIndex);
+        expect(page.layers.body).toEqual(final.layers.body);
+        expect(page.layers.notes).toEqual(final.layers.notes);
+      });
+    }
+  };
+
+  it('never revises a published page when an oversized footnote recovers late', async () => {
+    const model = continuingFootnoteModel(true, true);
+    const { previews, layout } = await publications(model);
+    const blocking = render(model);
+    expect(layout).toEqual(blocking);
+    expect(previews.length).toBeGreaterThan(0);
+    expectPublishedPagesFinal(previews, layout);
+    const counts = previews.map(preview => preview.pages.length);
+    expect(counts).toEqual([...new Set(counts)].sort((a, b) => a - b));
+  });
+
+  it('never publishes a page a recovered reference can move back to', async () => {
+    // The opening pass defers the reference past page 1; after recovery the
+    // final layout admits it, and the note's first fragments, on page 1.
+    const content: BodyElement[] = [...Array.from({ length: 18 }, (_, i) => paragraph(`n${i};`, 24)),
+      table([paragraph('tall;', 160), paragraph('tail;', 24)])];
+    const model = document('footnote', content, 15, 2);
+    const reference = model.body[0]!;
+    const body: BodyElement[] = Array.from({ length: 80 }, (_, i) => paragraph(`b${i};`, 24) as BodyElement);
+    body.splice(8, 0, reference);
+    const floating = table([paragraph('anchor;')]);
+    floating.tblpPr = { leftFromText: 0, rightFromText: 0, topFromText: 0, bottomFromText: 0,
+      horzAnchor: 'margin', horzSpecified: true, vertAnchor: 'page', tblpX: 0, tblpY: 0 };
+    body.splice(12, 0, floating);
+    model.body = body;
+    const { previews, layout } = await publications(model);
+    expect(layout).toEqual(render(model));
+    expectPublishedPagesFinal(previews, layout);
+  });
+
+  it('keeps the footnote bound in a mode-15 document with endnotes', async () => {
+    const model = continuingFootnoteModel(true, true);
+    const last = model.body.at(-1) as DocParagraph;
+    const run = last.runs[0]!;
+    last.runs.push({ ...run, text: 'e;', noteRef: { kind: 'endnote', id: '8' } } as DocParagraph['runs'][number]);
+    model.endnotes = [{ id: '8', content: [paragraph('end;')] }];
+    const { previews, layout } = await publications(model);
+    expect(layout).toEqual(render(model));
+    expectPublishedPagesFinal(previews, layout);
+  });
+
+  it('keeps an earlier occurrence unsettled while its footnote is referenced again', async () => {
+    // A permission is per footnote id: recovery at the second reference also
+    // changes the first occurrence's note area.
+    const model = document('footnote', [paragraph('a;', 50), paragraph('b;', 10)], 15, 2);
+    const reference = model.body[0]!;
+    const filler = (prefix: string) => Array.from({ length: 60 }, (_, i) => paragraph(`${prefix}${i};`) as BodyElement);
+    const columns = model.section.columns;
+    const body: BodyElement[] = [reference, ...filler('s'), {
+      type: 'sectionBreak', kind: 'nextPage', columns,
+      geom: { pageWidth: 200, pageHeight: 100, marginTop: 10, marginRight: 10, marginBottom: 10,
+        marginLeft: 10, headerDistance: 0, footerDistance: 0 },
+    } as BodyElement, structuredClone(reference), ...filler('t')];
+    const floating = table([paragraph('anchor;')]);
+    floating.tblpPr = { leftFromText: 0, rightFromText: 0, topFromText: 0, bottomFromText: 0,
+      horzAnchor: 'margin', horzSpecified: true, vertAnchor: 'page', tblpX: 0, tblpY: 0 };
+    body.splice(25, 0, floating);
+    model.body = body;
+    model.section = { ...model.section, marginTop: 30, marginBottom: 30 };
+    const { previews, layout } = await publications(model);
+    expect(layout).toEqual(render(model));
+    expectPublishedPagesFinal(previews, layout);
+  });
+
+  it('publishes past a settled footnote referenced twice', async () => {
+    const model = document('footnote', [paragraph('n;')], 15, 2);
+    const reference = model.body[0]! as DocParagraph & { type: 'paragraph' };
+    const run = reference.runs[0]!;
+    reference.runs.push({ ...run, text: 'again;' } as DocParagraph['runs'][number]);
+    model.body = [reference as BodyElement, ...Array.from({ length: 129 }, (_, i) => paragraph(`b${i};`, 24) as BodyElement)];
+    const { previews, layout } = await publications(model);
+    expect(layout).toEqual(render(model));
+    expect(previews.length).toBeGreaterThan(0);
+    expectPublishedPagesFinal(previews, layout);
+  });
+
+  it('only delays publication of an ordinary continuing footnote', async () => {
+    const model = continuingFootnoteModel(false, false);
+    const { previews, layout } = await publications(model);
+    expect(layout).toEqual(render(model));
+    expect(previews.length).toBeGreaterThan(0);
+    expectPublishedPagesFinal(previews, layout);
   });
 });
