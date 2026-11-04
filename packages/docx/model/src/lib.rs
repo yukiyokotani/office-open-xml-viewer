@@ -1986,6 +1986,15 @@ pub struct VmlEdgeStroke {
     pub pattern: Option<Duotone>,
 }
 
+/// Source provenance for the bounded inline outer-run minimum policy.
+#[derive(Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InlineObjectOrigin {
+    #[serde(rename = "drawingml")]
+    DrawingMl,
+    #[serde(rename = "vmlStaticTextbox")]
+    VmlStaticTextbox,
+}
+
 /// A drawn shape (wps:wsp inside wp:anchor). Positioned like an anchor image
 /// and rendered via core's buildCustomPath + paint primitives.
 #[derive(Serialize, Debug, Clone, Default)]
@@ -1999,6 +2008,12 @@ pub struct ShapeRun {
         skip_serializing_if = "Option::is_none"
     )]
     pub inline_object_font_facts: Option<Box<RunFontFacts>>,
+    /// Actual parser origin, not inferred from geometry or font metrics.
+    #[serde(
+        rename = "__inlineObjectOrigin",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub inline_object_origin: Option<InlineObjectOrigin>,
     /// ECMA-376 §20.4.2.6 `wp:effectExtent` of an inline (`wp:inline`) shape,
     /// [left, top, right, bottom] in points; `None` for anchors and zero.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -3305,6 +3320,12 @@ pub struct ImageRun {
         skip_serializing_if = "Option::is_none"
     )]
     pub inline_object_font_facts: Option<Box<RunFontFacts>>,
+    /// Actual parser origin, not inferred from geometry or font metrics.
+    #[serde(
+        rename = "__inlineObjectOrigin",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub inline_object_origin: Option<InlineObjectOrigin>,
     /// ECMA-376 §20.4.2.6 `wp:effectExtent` of an inline (`wp:inline`) picture,
     /// [left, top, right, bottom] in points: extra extent the line reserves
     /// around the picture. `None` for anchors and an all-zero extent.

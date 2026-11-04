@@ -876,6 +876,63 @@ describe('paragraphLayoutFromMeasurement retained authorities', () => {
     expect(node.lines[0]!.advancePt).not.toBe(60);
   });
 
+  it('reserves the drawing run minimum above a small box while preserving actual text descent', () => {
+    const context = inlineFontMetricContext();
+    const options = { context, markFontSize: 8 };
+    const minimum = measureInlineParagraph([], 1, { context, markFontSize: 20 }).advancePt;
+    const suffix = { ...paragraph.runs[0]!, fontSize: 8 };
+    for (const mixed of [false, true]) {
+      const drawing = { ...inlineShape(8), __inlineObjectOrigin: 'drawingml',
+        __inlineObjectFontFacts: { fontSize: 20, fontFamily: 'Test Sans' } };
+      const node = measureInlineParagraph(mixed ? [drawing, suffix] : [drawing], 1, options);
+      const line = node.lines[0]!;
+      expect(line.advancePt).toBeCloseTo(minimum, 10);
+      // Only the real suffix contributes descent; the drawing run is a
+      // minimum line box, not an invisible glyph with another descent.
+      expect(line.baselinePt).toBeCloseTo(line.bounds.yPt + minimum - (mixed ? 1.6 : 0), 10);
+      expect(node.drawings[0]!.flowBounds.heightPt).toBe(8);
+      expect(node.drawings[0]!.flowBounds.yPt + 8).toBeCloseTo(line.baselinePt, 10);
+      const large = { ...drawing, heightPt: 40 };
+      const largeNode = measureInlineParagraph(mixed ? [large, suffix] : [large], 1, options);
+      expect(largeNode.lines[0]!.advancePt).toBeCloseTo(40 + (mixed ? 1.6 : 0), 10);
+    }
+  });
+
+  it('keeps the measured static VML textbox top while its run reserves advance below', () => {
+    const context = inlineFontMetricContext();
+    const options = { context, markFontSize: 8 };
+    const drawing = { ...inlineShape(8), __inlineObjectOrigin: 'vmlStaticTextbox',
+      __inlineObjectFontFacts: { fontSize: 20, fontFamily: 'Test Sans' } };
+    const node = measureInlineParagraph([drawing], 1, options);
+    expect(node.lines[0]!.advancePt).toBeCloseTo(20, 10);
+    expect(node.drawings[0]!.flowBounds.yPt).toBeCloseTo(node.lines[0]!.bounds.yPt, 10);
+    expect(node.drawings[0]!.flowBounds.heightPt).toBe(8);
+    // Mixed VML is unmeasured: preserve its previous allocation rather than
+    // turning the absent outer glyph into a suffix descent or top offset.
+    const suffix = { ...paragraph.runs[0]!, fontSize: 8 };
+    const mixed = measureInlineParagraph([drawing, suffix], 1, options);
+    const unknownDrawing = { ...drawing, __inlineObjectOrigin: undefined };
+    const unknown = measureInlineParagraph([unknownDrawing, suffix], 1, options);
+    expect(mixed.lines[0]!.advancePt).toBe(unknown.lines[0]!.advancePt);
+  });
+
+  it('applies literal-picture minimum and resets it before the following physical line', () => {
+    const context = inlineFontMetricContext();
+    const drawing = { type: 'image' as const, imagePath: 'inline.png', mimeType: 'image/png',
+      widthPt: 20, heightPt: 8, anchor: false, anchorXPt: 0, anchorYPt: 0,
+      anchorXFromMargin: false, anchorYFromPara: false, __inlineObjectOrigin: 'drawingml',
+      __inlineObjectFontFacts: { fontSize: 20, fontFamily: 'Test Sans' } };
+    const suffix = { ...paragraph.runs[0]!, text: 'next', fontSize: 8 };
+    const node = measureInlineParagraph([drawing, { type: 'break', breakType: 'line' }, suffix], 1, { context, markFontSize: 8 });
+    expect(node.lines[0]!.advancePt).toBeCloseTo(20, 10);
+    expect(node.lines[1]!.advancePt).toBeCloseTo(8, 10);
+    expect(node.lines[1]!.bounds.yPt).toBeCloseTo(node.lines[0]!.bounds.yPt + 20, 10);
+    const unknownDrawing = { ...drawing, __inlineObjectOrigin: undefined };
+    const unknown = measureInlineParagraph([unknownDrawing], 1,
+      { context, markFontSize: 8 });
+    expect(unknown.lines[0]!.advancePt).toBe(8);
+  });
+
   it.each(['shape', 'image'] as const)('takes inline %s leading from its effective drawing-run font, independently of its mark', (kind) => {
     const context = inlineFontMetricContext(false);
     const drawing = kind === 'shape' ? inlineShape(40) : { type: 'image' as const,

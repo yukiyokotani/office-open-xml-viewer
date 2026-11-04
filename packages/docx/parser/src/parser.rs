@@ -9687,6 +9687,7 @@ fn parse_drawing_container(
                 shape.width_pt = width_pt;
                 shape.height_pt = height_pt;
                 shape.inline = true;
+                shape.inline_object_origin = Some(InlineObjectOrigin::DrawingMl);
                 return vec![DocRun::Shape(Box::new(shape))];
             }
         }
@@ -9718,6 +9719,7 @@ fn parse_drawing_container(
         };
         return vec![DocRun::Image(Box::new(ImageRun {
             inline_object_font_facts: None,
+            inline_object_origin: Some(InlineObjectOrigin::DrawingMl),
             inline_effect_extent: None,
             image_path,
             mime_type,
@@ -9977,6 +9979,7 @@ fn parse_drawing_container(
     };
     vec![DocRun::Image(Box::new(ImageRun {
         inline_object_font_facts: None,
+        inline_object_origin: None,
         inline_effect_extent: None,
         image_path,
         mime_type,
@@ -11143,6 +11146,7 @@ fn parse_group_pic(
 
     Some(ImageRun {
         inline_object_font_facts: None,
+        inline_object_origin: None,
         inline_effect_extent: None,
         image_path,
         mime_type,
@@ -12803,6 +12807,24 @@ fn parse_vml_pict_shape(
     )
     .map(|mut run| {
         if let Some((offset_x_pt, offset_y_pt)) = inline {
+            // Only this measured static textbox class has advance-only run
+            // minimum ownership. Relative shapes, WordArt and other VML keep
+            // their existing placement; origin is never guessed in layout.
+            let static_textbox = run.text_path.is_none()
+                && shape
+                    .attribute("style")
+                    .and_then(|style| vml_css_str(style, "position"))
+                    .is_none_or(|position| position.eq_ignore_ascii_case("static"))
+                && shape.descendants().any(|node| {
+                    node.tag_name().name() == "txbxContent"
+                        && is_w_ns(node.tag_name().namespace())
+                        && node.parent().is_some_and(|parent| {
+                            parent.has_tag_name(("urn:schemas-microsoft-com:vml", "textbox"))
+                        })
+                });
+            if static_textbox {
+                run.inline_object_origin = Some(InlineObjectOrigin::VmlStaticTextbox);
+            }
             run.inline = true;
             run.inline_offset_x_pt = offset_x_pt;
             run.inline_offset_y_pt = offset_y_pt;
@@ -14498,6 +14520,7 @@ fn vml_image_run(
 
     ImageRun {
         inline_object_font_facts: None,
+        inline_object_origin: None,
         inline_effect_extent: None,
         mime_type: mime_from_ext(&image_path).to_string(),
         image_path,
@@ -19341,6 +19364,7 @@ mod tests {
     fn doc_run_wire_tags_match_ts_acquisition_discriminants() {
         let image = ImageRun {
             inline_object_font_facts: None,
+            inline_object_origin: None,
             inline_effect_extent: None,
             image_path: "word/media/image1.png".to_string(),
             mime_type: "image/png".to_string(),
@@ -23033,6 +23057,7 @@ mod svg_blip_tests {
     fn image_run_serializes_path_fields_not_data_url() {
         let run = ImageRun {
             inline_object_font_facts: None,
+            inline_object_origin: None,
             inline_effect_extent: None,
             image_path: "word/media/image1.png".to_string(),
             mime_type: "image/png".to_string(),
@@ -24627,6 +24652,10 @@ mod anchor_image_relative_from_tests {
                 })
                 .expect("one shape");
             assert_eq!(shape.inline_effect_extent, expected, "{container}");
+            assert_eq!(
+                shape.inline_object_origin,
+                (container == "inline").then_some(InlineObjectOrigin::DrawingMl)
+            );
         }
     }
 
@@ -24674,6 +24703,53 @@ mod anchor_image_relative_from_tests {
             let facts = &wire[0]["runs"][0]["__inlineObjectFontFacts"];
             assert_eq!(facts["fontSize"].as_f64(), Some(expected_size), "{wire}");
             assert_eq!(facts["fontFamily"].as_str(), Some(expected_face));
+        }
+    }
+
+    #[test]
+    fn inline_minimum_origin_excludes_relative_vml_and_wordart() {
+        for (position, payload, expected) in [
+            (
+                "",
+                "<v:textbox><w:txbxContent><w:p/></w:txbxContent></v:textbox>",
+                true,
+            ),
+            (
+                "position:relative;",
+                "<v:textbox><w:txbxContent><w:p/></w:txbxContent></v:textbox>",
+                false,
+            ),
+            ("", r#"<v:textpath string="WordArt"/>"#, false),
+            (
+                "",
+                r#"<v:textpath on="t" string="WordArt"/><v:textbox><w:txbxContent><w:p/></w:txbxContent></v:textbox>"#,
+                false,
+            ),
+            (
+                "",
+                r#"<v:textbox><x:txbxContent xmlns:x="urn:foreign"><w:p/></x:txbxContent></v:textbox>"#,
+                false,
+            ),
+        ] {
+            let body = format!(
+                r#"<w:p><w:r><w:pict xmlns:v="urn:schemas-microsoft-com:vml"><v:shape style="{position}width:80pt;height:8pt">{payload}</v:shape></w:pict></w:r></w:p>"#
+            );
+            let doc = parse_from_bytes(&build_docx_without_media(&body)).unwrap();
+            let BodyElement::Paragraph(paragraph) = &doc.body[0] else {
+                panic!("paragraph")
+            };
+            let shape = paragraph
+                .runs
+                .iter()
+                .find_map(|run| match run {
+                    DocRun::Shape(shape) => Some(shape),
+                    _ => None,
+                })
+                .expect("in-flow VML shape");
+            assert_eq!(
+                shape.inline_object_origin,
+                expected.then_some(InlineObjectOrigin::VmlStaticTextbox)
+            );
         }
     }
 

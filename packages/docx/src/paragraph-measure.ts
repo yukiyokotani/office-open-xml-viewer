@@ -409,6 +409,36 @@ export function measureParagraph(
     }
   }
 
+  // Observed Word 16 mode-15 auto-single root-body controls: the resolved
+  // outer run supplies a minimum natural advance. DrawingML places its extra
+  // above the object, preserving real suffix descent; static VML textboxes
+  // keep their top and reserve it below. This is not specified by §17.3.1.33.
+  // Tested run8/20, object8/40, TNR/Arial; mixed suffix is measured only for
+  // DrawingML. Unknown/public origins, relative VML and WordArt retain their
+  // old allocation. Auto multiples keep the independently measured rule above.
+  if (context.lineSpacing?.rule === 'auto' && context.lineSpacing.value === 1
+    && environment.inlineObjectRunLeadingAdmitted === true
+    && environment.compatibilityMode === 15 && !paragraph.numbering && !paragraph.framePr
+    && environment.pageWritingMode === 'horizontal-tb'
+    && environment.verticalCJK !== true && environment.verticalPageFrame !== true
+    && !context.lineGrid.active && !context.characterGrid.active && !context.baseRtl
+    && !context.hasRuby) {
+    const boxOnly = paragraph.runs.every(run => (run.type === 'image' && !run.anchor)
+      || (run.type === 'shape' && run.inline === true));
+    for (const segment of segments) {
+      if (!('imagePath' in segment) || !segment.inlinePicture || segment.sourceRunIndex === undefined) continue;
+      const sourceRun = paragraph.runs[segment.sourceRunIndex];
+      const run = sourceRun as ParagraphShapeRun | ParagraphImageRun | undefined;
+      if (!run || (run.type !== 'shape' && run.type !== 'image') || !run.inlineObjectShapeInput) continue;
+      if (run.inlineObjectOrigin !== 'drawingml' && !(run.inlineObjectOrigin === 'vmlStaticTextbox' && boxOnly)) continue;
+      const minimum = paragraphMarkLineMetrics(paragraph, 1, undefined, false, markUsesEastAsianGrid,
+        measurer.context, fontFamilyClasses, null, environment.resolvedLocalFonts,
+        environment.layoutServices?.text, run.inlineObjectShapeInput).advancePx;
+      if (run.inlineObjectOrigin === 'drawingml') segment.objectRunBaselineMinimumPx = minimum;
+      else segment.objectRunAdvanceMinimumPx = minimum;
+    }
+  }
+
   // Library policy retains the established paragraph-wide ruby reserve
   // (§17.3.3.25 describes the guide above the base; §17.6.5 supplies grid cells).
   // Resolve the complete physical unions before querying floats: a per-fragment

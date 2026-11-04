@@ -442,6 +442,12 @@ export interface LayoutImageSeg extends LayoutSegSource {
   inlinePicture?: true;
   /** Paragraph mark's selected-face natural single line, measured once per paragraph. */
   paragraphMarkSinglePx?: number;
+  /** Resolved outer-run minimum for baseline-aligned DrawingML: extra space
+   * joins ascent, while only real text supplies descent. */
+  objectRunBaselineMinimumPx?: number;
+  /** Static VML textbox minimum changes physical advance, never visible
+   * ascent/descent or baseline (its measured box-only class stays top-aligned). */
+  objectRunAdvanceMinimumPx?: number;
   /** ECMA-376 §20.4.2.6 inline effect extent [left, top, right, bottom] (pt),
    *  already included in widthPt/heightPt; the object paints inside it. */
   effectExtent?: readonly [number, number, number, number];

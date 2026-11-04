@@ -1796,8 +1796,10 @@ export function paragraphAcquisitionInput(
             ...localAnchorInput,
             occurrenceId: anchorOccurrenceKey(source, localAnchorInput.occurrenceId),
           }, 'DOCX scoped anchor acquisition input');
-      const { __anchorAcquisition: _privateAnchor, __inlineObjectFontFacts: _privateInlineFont, ...publicRun } = run as typeof run & InternalAnchorRunWire & { __inlineObjectFontFacts?: InternalRunFontFacts };
+      const { __anchorAcquisition: _privateAnchor, __inlineObjectFontFacts: _privateInlineFont, __inlineObjectOrigin: privateInlineOrigin, ...publicRun } = run as typeof run & InternalAnchorRunWire & { __inlineObjectFontFacts?: InternalRunFontFacts; __inlineObjectOrigin?: string };
       const inlineFont = inlineObjectShapeInput(originalRun);
+      const inlineOrigin = privateInlineOrigin === 'drawingml' || privateInlineOrigin === 'vmlStaticTextbox'
+        ? privateInlineOrigin : undefined;
       if (run.type !== 'shape') {
         const retainedRun = run.type === 'chart'
           ? (({ chart: _chartPayload, ...marker }) => ({
@@ -1808,6 +1810,7 @@ export function paragraphAcquisitionInput(
         return Object.freeze({
           ...structuredClone(retainedRun),
           ...(inlineFont ? { inlineObjectShapeInput: inlineFont } : {}),
+          ...(inlineOrigin ? { inlineObjectOrigin: inlineOrigin } : {}),
           ...(anchorInput === undefined ? {} : { anchorAcquisitionInput: anchorInput }),
         }) as ParagraphAcquisitionRun;
       }
@@ -1832,6 +1835,7 @@ export function paragraphAcquisitionInput(
         type: 'shape' as const,
         ...structuredClone(retainedShape),
         ...(inlineFont ? { inlineObjectShapeInput: inlineFont } : {}),
+        ...(inlineOrigin ? { inlineObjectOrigin: inlineOrigin } : {}),
         ...(vmlTextPathInput === undefined ? {} : { vmlTextPathInput }),
         ...((textBoxInput.kind === 'complete'
           ? textBoxInput.blockCount

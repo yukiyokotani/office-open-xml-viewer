@@ -364,6 +364,7 @@ pub(super) fn project(
                                 &mut paragraph.runs,
                                 DocRun::Image(Box::new(ImageRun {
                                     inline_object_font_facts: None,
+                                    inline_object_origin: None,
                                     inline_effect_extent: None,
                                     image_path: image.resource_key,
                                     mime_type,

@@ -207,11 +207,13 @@ export type ParagraphShapeRun = DeepReadonly<Extract<DocRun, { type: 'shape' }> 
   vmlTextPathInput?: VmlTextPathAcquisitionInput;
   textBoxInput?: TextBoxAcquisitionInput;
   inlineObjectShapeInput?: NumberingMarkerShapeInput;
+  inlineObjectOrigin?: 'drawingml' | 'vmlStaticTextbox';
   anchorAcquisitionInput?: AnchorAcquisitionInput;
 }>;
 
 export type ParagraphImageRun = DeepReadonly<Extract<DocRun, { type: 'image' }>> & Readonly<{
   inlineObjectShapeInput?: NumberingMarkerShapeInput;
+  inlineObjectOrigin?: 'drawingml' | 'vmlStaticTextbox';
   anchorAcquisitionInput?: AnchorAcquisitionInput;
 }>;
 
