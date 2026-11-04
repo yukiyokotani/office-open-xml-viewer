@@ -15,6 +15,18 @@ export function hasEastAsianVisiblePredecessor(text: string): boolean {
   return false;
 }
 
+/** Numerical tolerance of every line-fit admission, in device px. Line bands
+ * are differences of authored twip geometry carried as binary64 pt values
+ * (e.g. 595.3 - 56.7 - 56.7 - 361.9 = 119.99999999999994) and advances are sums of scaled
+ * glyph widths, so content exactly as wide as its band can compare a few ulps
+ * wider. An exact fit fits (issue #2102); this is round-off slack only, many
+ * orders of magnitude below one twip, never an Office width allowance. */
+export const LINE_FIT_EPSILON_PX = 1e-9;
+
+/** The one line-fit predicate: `used` fits `available` at exact equality. */
+export function fitsLineWidth(used: number, available: number): boolean {
+  return used <= available + LINE_FIT_EPSILON_PX;
+}
 
 export function fitCJKPrefix(
   ctx: MeasurementTextContext,
@@ -76,7 +88,7 @@ export function fitCJKPrefix(
       visibleEnd += Math.max(0, trailingCount - remainingHang);
     }
     const prefix = chars.slice(0, visibleEnd).join('');
-    return advanceOf(prefix) <= maxWidth;
+    return fitsLineWidth(advanceOf(prefix), maxWidth);
   };
   let lo = 0, hi = chars.length;
   while (lo < hi) {
