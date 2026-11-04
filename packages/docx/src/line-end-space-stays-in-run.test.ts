@@ -209,4 +209,14 @@ describe('line-end space in a run of the opposite direction', () => {
       expect(Math.min(...widths)).toBeGreaterThanOrEqual(0);
     }
   });
+  it('keeps visible glyphs inside the band when the preceding decorated run cannot absorb all spaces', () => {
+    const size = { fontSize: 12 };
+    const [line] = lines(para([
+      textRun('ab', size), textRun('c ', { ...size, underline: true, background: 'FFFF00' }),
+      textRun('אבג ABC    ', { ...size, rtl: true }),
+    ], 'both', { indentRight: 291, defaultFontSize: 12 } as Partial<DocParagraph>), { compatibilityMode: 15 });
+    const right = Math.max(...texts(line!).filter(p => p.text.trim()).map(p => p.bounds.xPt + p.bounds.widthPt));
+    expect(right).toBeLessThanOrEqual(89 + 1e-6);
+  });
+
 });

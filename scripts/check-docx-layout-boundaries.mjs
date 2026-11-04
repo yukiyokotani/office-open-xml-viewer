@@ -2671,7 +2671,16 @@ function assertCanonicalCutoverBoundaries(root) {
       || !eagerPaginationRouteDrainsCanonicalSteps(eager)) {
       fail('CANONICAL_LAYOUT_PRODUCER', producerLabel);
     }
-    const returned = producer.body.statements.at(-1);
+    let returned = producer.body.statements.at(-1);
+    // The recovery transaction may translate an exception to the original
+    // admission error, but must keep the sole validated layout return. A
+    // throw-only catch cannot introduce an unvalidated successful exit.
+    if (returned && ts.isTryStatement(returned)
+      && returned.tryBlock.statements.length === 1
+      && !returned.finallyBlock && returned.catchClause?.block.statements.length === 1
+      && ts.isThrowStatement(returned.catchClause.block.statements[0])) {
+      returned = returned.tryBlock.statements.at(-1);
+    }
     const frozenExpression = returned && ts.isReturnStatement(returned)
       ? unwrapStaticExpression(returned.expression)
       : null;

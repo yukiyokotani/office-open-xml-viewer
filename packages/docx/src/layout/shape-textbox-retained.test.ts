@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { ParagraphLayoutContext } from '../layout-context.js';
-import type { ShapeRun } from '../types.js';
+import type { ShapeRun, ShapeTextRun } from '../types.js';
 import type { DocxDocumentModel } from '../types.js';
 import { createLayoutServices } from '../layout-runtime.js';
 import { paintPlacedTextBoxLayout } from '../paint/canvas-text.js';
@@ -41,6 +41,50 @@ function canvas(): CanvasRenderingContext2D {
 }
 
 describe('retained shape text-box acquisition', () => {
+  it.each([
+    { label: 'omitted CS companions retain public Latin formatting', facts: { rtl: true }, weight: 700, style: 'italic', size: 12, family: 'Latin Face' },
+    { label: 'explicit CS values override Latin formatting', facts: { rtl: true, boldCs: false, italicCs: false, fontSizeCsPt: 18, fontFamilyCs: 'CS Face' }, weight: 400, style: 'normal', size: 18, family: 'CS Face' },
+    { label: 'cs selects its companions without rtl', facts: { cs: true, boldCs: false, fontSizeCsPt: 16, fontFamilyCs: 'CS Face' }, weight: 400, style: 'italic', size: 16, family: 'CS Face' },
+  ])('$label', ({ facts, weight, style, size, family }) => {
+    const measureContext = canvas();
+    const services = createLayoutServices({
+      section: {
+        pageWidth: 612, pageHeight: 792,
+        marginTop: 72, marginRight: 72, marginBottom: 72, marginLeft: 72,
+        headerDistance: 36, footerDistance: 36,
+        titlePage: false, evenAndOddHeaders: false,
+      },
+      body: [], headers: { default: null, first: null, even: null },
+      footers: { default: null, first: null, even: null },
+    } as DocxDocumentModel, { measureContext });
+    const run: ShapeTextRun = {
+      text: 'אבג', fontSizePt: 12, fontFamily: 'Latin Face', bold: true, italic: true, ...facts,
+    };
+    const shape = {
+      textBlocks: [{ text: run.text, fontSizePt: 12, alignment: 'left', runs: [run] }],
+    } as unknown as ShapeRun;
+    const layout = acquireShapeTextBoxLayout(shape, { xPt: 0, yPt: 0, widthPt: 300, heightPt: 100 }, {
+      id: 'cs-shape', source: { story: 'body', storyInstance: 'body', path: [0, 0] },
+      flowDomainId: 'body', context,
+      measurer: { context: measureContext, fontFamilyClasses: {} },
+      environment: {
+        pageIndex: 0, totalPages: 1, documentHasEastAsianText: false,
+        pageWritingMode: 'horizontal-tb', layoutServices: services,
+      },
+    });
+    const paragraph = layout?.story.blocks[0];
+    if (paragraph?.kind !== 'paragraph') throw new Error('expected retained paragraph');
+    const placements = paragraph.lines.flatMap((line) => line.placements);
+    expect(placements.length).toBeGreaterThan(0);
+    for (const placement of placements) {
+      if (placement.kind !== 'text') throw new Error('expected retained text');
+      expect(placement.fontWeight).toBe(weight);
+      expect(placement.fontStyle).toBe(style);
+      expect(placement.fontSizePt).toBe(size);
+      expect(placement.fontRoute.familyList.split(',')[0]).toBe(JSON.stringify(family));
+    }
+  });
+
   it.each([
     { anchor: undefined, expectedTopPt: 30, label: 'defaults to top' },
     { anchor: 'ctr', expectedTopPt: 65, label: 'centers' },

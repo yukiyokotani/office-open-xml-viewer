@@ -16,6 +16,7 @@ import {
   convergeExactState,
 } from './convergence.js';
 import { LayoutInvariantError } from './diagnostics.js';
+import { noteOverflowPolicyOf, noteRecoveryOwnerOf } from './note-overflow-policy.js';
 import { paragraphAcquisitionCacheOf } from './runtime-state.js';
 import { adjustForWidowOrphan } from '../line-fit-policy.js';
 import type { StoryPageFrames } from './story-page-frames.js';
@@ -149,6 +150,14 @@ export interface TableFragmentContext {
   readonly compatibility: 'word' | 'standard';
   /** Deterministic policy for floating rows taller than a fresh page band. */
   readonly oversizedRowPolicy?: 'split' | 'atomic';
+  /** Note admission may measure/retain the first indivisible cell unit even
+   * beyond a fresh band. Following cell content still gets a continuation. */
+  readonly oversizedCellPolicy?: 'overflow-first-unit';
+  /** Only over-capacity notes use the immutable source's cached suffix metrics. */
+  readonly noteContinuation?: boolean;
+  /** Recovery-only debit before immutable source scans, including cache misses.
+   * Shares the note's allowance across continuations, trials and field passes. */
+  readonly chargeSourceScan?: (units: number) => void;
   readonly page: TableFragmentPageContext;
   readonly floatingTableFrames?: Readonly<{
     page: FloatingTableReferenceFramesPt['page'];
@@ -289,6 +298,11 @@ function paginationRowHeight(source: RetainedTableAcquisition, rowIndex: number)
   return Math.max(0, row.heightPt, row.contentHeightPt);
 }
 
+// Parent geometry is immutable for an acquisition. Index it once rather than
+// flattening every outer row for each nested fragment/capacity trial. Weak
+// ownership releases the index with the shaped epoch, including on failure.
+const parentCells = new WeakMap<RetainedTableAcquisition, ReadonlyMap<string, TableCellLayout>>();
+
 function nestedTableFragmentContext(
   source: RetainedTableAcquisition,
   parentCell: TableCellLayoutInput,
@@ -296,9 +310,18 @@ function nestedTableFragmentContext(
   availableHeightPt: number,
   nestedBlock?: TableCellBlockInput,
 ): TableFragmentContext {
-  const retainedCell = source.layout.rows
-    .flatMap((row) => row.cells)
-    .find((cell) => cell.id === parentCell.id);
+  let cells = parentCells.get(source);
+  if (!cells) {
+    const indexed = new Map<string, TableCellLayout>();
+    for (const row of source.layout.rows) for (const cell of row.cells) {
+      context.chargeSourceScan?.(1);
+      // Preserve the original first-match lookup for projected cell owners.
+      if (!indexed.has(cell.id)) indexed.set(cell.id, cell);
+    }
+    cells = indexed;
+    parentCells.set(source, cells);
+  }
+  const retainedCell = cells.get(parentCell.id);
   if (!retainedCell) {
     throw new LayoutInvariantError(
       'INVALID_REFERENCE',
@@ -543,8 +566,8 @@ function floatingTableIndexOf(source: RetainedTableAcquisition): FloatingTableIn
  */
 type FragmentRowTracks = TablePrefixTracks;
 
-function startFragmentRowTracks(source: RetainedTableAcquisition): FragmentRowTracks {
-  return tablePrefixTracks(source.input);
+function startFragmentRowTracks(source: RetainedTableAcquisition, context: TableFragmentContext): FragmentRowTracks {
+  return tablePrefixTracks(source.input, context.services);
 }
 
 /** The candidate as the last row of the whole prefix: the probe of a grid the
@@ -720,7 +743,7 @@ function layoutNestedWholeAt(
     nested, { ...nested.input, rows }, context.placement, context.services,
   ).layout;
   const placedWhole: PlacedWholeLayouts = new Map();
-  const placements: readonly (RowPagePlacement | null)[] = needsNestedPageOrigins(nested)
+  const placements: readonly (RowPagePlacement | null)[] = needsNestedPageOrigins(nested, context.chargeSourceScan)
     ? sourceRows.map((row) => rowPagePlacement(nested, row, 'source', context, placedWhole))
     : [];
   const origin = context.pagePlacement?.translationPt;
@@ -900,7 +923,7 @@ function rowPagePlacement(
     && cellIndex === 0 && blockIndex === 0
     && wordGridFramePreservesEmptyCarrierReference(row.cells[cellIndex]!)
   );
-  if (!rowNeedsPageOrigins(source, row) && !keepsInsertionReference(0, 0)) return null;
+  if (!rowNeedsPageOrigins(source, row, context.chargeSourceScan) && !keepsInsertionReference(0, 0)) return null;
   const owner = context.pagePlacement;
   if (!owner) return null;
   const translation = owner.translationPt;
@@ -918,7 +941,7 @@ function rowPagePlacement(
       const laidOutCell = laidOutRow.cells[cellIndex];
       const start = firstBlock(cellIndex);
       if (!laidOutCell || !cell.blocks.slice(start).some((block) => (
-        blockNeedsPageOrigin(source, block) || keepsInsertionReference(cellIndex, start)
+        blockNeedsPageOrigin(source, block, context.chargeSourceScan) || keepsInsertionReference(cellIndex, start)
       ))) return UNPLACED_CELL;
       const placedAt = (blockIndex: number) => laidOutCell.blocks[blockIndex - start];
       const cellTopPt = translation.yPt + laidOutCell.flowBounds.yPt;
@@ -928,7 +951,7 @@ function rowPagePlacement(
       for (let blockIndex = start; blockIndex < cell.blocks.length; blockIndex += 1) {
         const block = cell.blocks[blockIndex]!;
         const placed = placedAt(blockIndex);
-        if (!placed || (!blockNeedsPageOrigin(source, block)
+        if (!placed || (!blockNeedsPageOrigin(source, block, context.chargeSourceScan)
           && !keepsInsertionReference(cellIndex, blockIndex))) continue;
         const placedTopPt = cellTopPt + placed.offsetPt;
         if (block.layout.kind === 'table') {
@@ -1100,7 +1123,7 @@ function resolveFinalFrameChild<R extends Readonly<{ placement: ResolvedFloating
 ): R {
   // The placement being resolved already found this child.
   const nested = source.nestedById[occurrence.tableId]!;
-  if (!hasPagePlacedContent(nested) || !context.pagePlacement) return resolveWith(nested.layout);
+  if (!hasPagePlacedContent(nested, context.chargeSourceScan) || !context.pagePlacement) return resolveWith(nested.layout);
   const hostCell = floatingTableIndexOf(source).cellById.get(occurrence.hostCellId);
   if (!hostCell) throw new LayoutInvariantError('INVALID_REFERENCE', `${occurrence.hostCellId} is not a cell`);
   // The child is acquired in its host cell's content box (table-acquisition.ts).
@@ -1195,6 +1218,7 @@ function remainingRowAtCursor(
               block.layout,
               cellCursor.paragraphLineStart,
               block.layout.lines.length,
+              context,
             ),
           };
         }),
@@ -1541,7 +1565,12 @@ function paragraphSlice(
   paragraph: ParagraphLayout,
   start: number,
   end: number,
+  context: TableFragmentContext,
 ): ParagraphLayout {
+  const policy = noteOverflowPolicyOf(context.services);
+  const workSource = noteRecoveryOwnerOf(context.services) ?? paragraph.source;
+  policy?.chargeWork(workSource, end - start);
+  for (let i = start; i < end; i++) policy?.chargeWork(workSource, paragraph.lines[i]!.placements.length);
   return sliceParagraphLayout(paragraph, {
     lineStart: start,
     lineEnd: end,
@@ -1558,6 +1587,8 @@ function selectParagraph(
   availableHeightPt: number,
   freshAvailableHeightPt: number,
   canGainPageSpace: boolean,
+  context: TableFragmentContext,
+  overflowFirstUnit = false,
 ): Readonly<{
   block: TableCellBlockInput | null;
   range: BlockContinuationRange | null;
@@ -1567,12 +1598,17 @@ function selectParagraph(
   let selected: ParagraphLayout | null = null;
   let lineEnd = start;
   for (let candidateEnd = start + 1; candidateEnd <= paragraph.lines.length; candidateEnd += 1) {
-    const candidate = paragraphSlice(paragraph, start, candidateEnd);
+    const candidate = paragraphSlice(paragraph, start, candidateEnd, context);
     const candidateBlock = { ...sourceBlock, layout: candidate };
+    noteOverflowPolicyOf(context.services)?.chargeWork(noteRecoveryOwnerOf(context.services) ?? paragraph.source, selectedBlocks.length);
     if (measureTableCellBlockFlowHeightPt([...selectedBlocks, candidateBlock])
       > availableHeightPt + EPSILON_PT) break;
     lineEnd = candidateEnd;
   }
+  // A fresh note band cannot gain space by relocating an over-tall unit.
+  // Retain exactly its first complete line; later lines keep their cursor,
+  // rather than being clipped below that indivisible unit on the same page.
+  if (lineEnd === start && overflowFirstUnit) lineEnd = start + 1;
   if (lineEnd === start) return { block: null, range: null, lineEnd: start, advancePt: 0 };
   const canRelocate = start === 0 && (selectedBlocks.length > 0 || canGainPageSpace);
   // §17.3.1.14 / §17.3.1.44 apply to cell paragraphs too. The selected
@@ -1599,7 +1635,7 @@ function selectParagraph(
     if (widow.kind !== 'dropLastLine') break;
     lineEnd -= 1;
   }
-  selected = paragraphSlice(paragraph, start, lineEnd);
+  selected = paragraphSlice(paragraph, start, lineEnd, context);
   return {
     block: { ...sourceBlock, layout: selected },
     range: { kind: 'paragraph', blockIndex: sourceBlock.sourceBlockIndex, lineStart: start, lineEnd },
@@ -1647,6 +1683,7 @@ function selectCell(
   let nestedFragmentIndex = cursor.nestedFragmentIndex;
 
   while (blockIndex < cell.blocks.length) {
+    context.chargeSourceScan?.(1);
     const sourceBlock = cell.blocks[blockIndex]!;
     const child = sourceBlock.layout;
     if (child.kind === 'paragraph') {
@@ -1662,7 +1699,9 @@ function selectCell(
       // slicer for a first line can never make progress from an empty array.
       if (child.lines.length === 0) {
         if (measureTableCellBlockFlowHeightPt([...blocks, sourceBlock])
-          > availableContentHeightPt + EPSILON_PT) break;
+          > availableContentHeightPt + EPSILON_PT
+          && !(context.oversizedCellPolicy === 'overflow-first-unit'
+            && !canGainPageSpace && blocks.length === 0)) break;
         blocks.push(sourceBlock);
         range.push({ kind: 'whole', blockIndex: sourceBlock.sourceBlockIndex });
         blockIndex += 1;
@@ -1677,6 +1716,8 @@ function selectCell(
         availableContentHeightPt,
         freshAvailableContentHeightPt,
         canGainPageSpace,
+        context,
+        context.oversizedCellPolicy === 'overflow-first-unit' && !canGainPageSpace && blocks.length === 0,
       );
       if (!selected.block || !selected.range) break;
       blocks.push({ ...selected.block, ...(sourceBlock.structuralTrailing
@@ -1745,6 +1786,10 @@ function partialRow(
   freshAvailableHeightPt: number,
   canGainPageSpace: boolean,
   context: TableFragmentContext,
+  prefixGeometry?: Readonly<{
+    current: (row: TableRowLayoutInput) => TableRowLayout | null;
+    fresh: (row: TableRowLayoutInput) => TableRowLayout | null;
+  }>,
 ): Readonly<{
   selected: SelectedRow | null;
   next: TableFragmentCursor;
@@ -1758,12 +1803,14 @@ function partialRow(
   const verticalInsetsPt = Math.max(0, ...row.cells.map((cell) => (
     cell.margins.topPt + cell.margins.bottomPt
   )));
-  // A one-row fragment owns both outer cell-spacing bands. Reserve them before
-  // selecting legal child boundaries so layoutTable cannot grow past the page.
-  const spacingInsetsPt = Math.max(0, row.cellSpacingPt) * 2;
-  // A continued row is materialized as an auto-height, one-row table fragment.
-  // Reserve the same page-local collapsed top/bottom half-rules that layoutTable
-  // will add to that track after the legal child boundary has been selected.
+  // Standalone reservation for the established path (also the malformed-grid
+  // fallback). Measured spaced tables below probe their complete prefix so
+  // preceding rows do not retain a second set of standalone edges.
+  const separated = row.cellSpacingPt > 0 ? row.spacingGeometry : undefined;
+  const spacingInsetsPt = Math.max(0, row.cellSpacingPt) * (separated ? 4 : 2)
+    + 2 * (separated?.borderPt ?? 0);
+  // A continued row has an auto-height track. The standalone path reserves
+  // the page-local collapsed top/bottom rules that layoutTable will add.
   const fragmentRow: TableRowLayoutInput = {
     ...row,
     heightPt: null,
@@ -1773,13 +1820,32 @@ function partialRow(
     ...source.input,
     rows: [fragmentRow],
   })[0] ?? 0;
+  // WORD_TABLE_CELL_SPACING_GEOMETRY: a partial row follows the same prefix
+  // as a whole row. Probe its auto-height box without content: this reserves
+  // margins, cell/table borders and gaps while releasing the preceding row's
+  // standalone bottom edge. Subtract the complete prefix from the complete
+  // band, rather than charging two standalone boxes. The fresh-page probe
+  // keeps only the leading headers that will repeat there. This reuses the
+  // established geometry; it does not infer another Office page-cut rule.
+  const emptyFragmentRow: TableRowLayoutInput | undefined = prefixGeometry && {
+    ...fragmentRow,
+    cells: fragmentRow.cells.map((cell) => ({ ...cell, blocks: [] })),
+  };
+  const prefix = emptyFragmentRow && prefixGeometry?.current(emptyFragmentRow);
+  const freshPrefix = emptyFragmentRow && prefixGeometry?.fresh(emptyFragmentRow);
   const availableContentHeightPt = Math.max(
     0,
-    availableHeightPt - verticalInsetsPt - spacingInsetsPt - boundaryInsetsPt,
+    prefix
+      ? context.availableHeightPt
+        - (prefix.flowBounds.yPt + prefix.heightPt - context.placement.cursor.yPt)
+      : availableHeightPt - verticalInsetsPt - spacingInsetsPt - boundaryInsetsPt,
   );
   const freshAvailableContentHeightPt = Math.max(
     0,
-    freshAvailableHeightPt - verticalInsetsPt - spacingInsetsPt - boundaryInsetsPt,
+    freshPrefix
+      ? context.freshPageHeightPt
+        - (freshPrefix.flowBounds.yPt + freshPrefix.heightPt - context.placement.cursor.yPt)
+      : freshAvailableHeightPt - verticalInsetsPt - spacingInsetsPt - boundaryInsetsPt,
   );
   const selectedCells = row.cells.map((cell, index) => selectCell(
     source,
@@ -2117,6 +2183,27 @@ export function takeTableFragment(
   }
 }
 
+// A continued note can span thousands of bands. Scan each immutable source
+// once, then test a remaining suffix in O(1); neither this weak index nor its
+// scalar arrays retain an expired acquisition. Ordinary table pagination keeps
+// its established arithmetic/selection path.
+const noteSourceMetrics = new WeakMap<RetainedTableAcquisition, {
+  needsOrigins: boolean; suffixHeights: Float64Array;
+}>();
+function noteMetrics(source: RetainedTableAcquisition, chargeWork?: (units: number) => void) {
+  let metrics = noteSourceMetrics.get(source);
+  if (!metrics) {
+    const suffixHeights = new Float64Array(source.layout.rows.length + 1);
+    for (let i = source.layout.rows.length - 1; i >= 0; i--) {
+      chargeWork?.(1);
+      suffixHeights[i] = suffixHeights[i + 1]! + Math.max(0, source.layout.rows[i]!.heightPt);
+    }
+    metrics = { needsOrigins: needsNestedPageOrigins(source, chargeWork), suffixHeights };
+    noteSourceMetrics.set(source, metrics);
+  }
+  return metrics;
+}
+
 function takeTableFragmentPass(
   source: RetainedTableAcquisition,
   cursor: TableFragmentCursor,
@@ -2124,6 +2211,9 @@ function takeTableFragmentPass(
   hints: ReadonlyMap<number, FragmentPositionHint>,
 ): FragmentPass {
   const selected: SelectedRow[] = [];
+  const admissionRows: TableRowLayoutInput[] = [];
+  const spacedAdmissionTracks = source.input.rows[0]?.spacingGeometry
+    ? tablePrefixTracks(source.input, context.services) : null;
   const used = new Map<number, string>();
   const placedAt = new Map<number, TableRowLayoutInput>();
   const cutAt = new Map<number, TableRowLayoutInput>();
@@ -2171,8 +2261,10 @@ function takeTableFragmentPass(
   ]) as readonly FloatRegistryEntryPt[];
   let floatParagraphId = registrySnapshot?.nextParagraphId ?? 0;
   let availablePt = Math.max(0, context.availableHeightPt);
-  const pageOriginTracks = startFragmentRowTracks(source);
+  const pageOriginTracks = startFragmentRowTracks(source, context);
   const headerCount = leadingHeaderCount(source.input);
+  const freshHeaderRows = spacedAdmissionTracks ? source.input.rows.slice(0, headerCount) : [];
+  const freshSpacedAdmissionTracks = spacedAdmissionTracks ? tablePrefixTracks(source.input, context.services) : null;
   if (cursor.rowIndex >= headerCount && cursor.rowIndex > 0 && headerCount > 0) {
     for (let rowIndex = 0; rowIndex < headerCount; rowIndex += 1) {
       const position = selected.length;
@@ -2198,8 +2290,18 @@ function takeTableFragmentPass(
         hint?.resolved,
       );
       const header = preparedHeader.row;
-      const heightPt = paginationRowHeightForOccurrence(source, header, rowIndex, context);
-      if (heightPt > availablePt + EPSILON_PT) {
+      const headerTrack = spacedAdmissionTracks?.row(admissionRows, header, context.placement);
+      const heightPt = headerTrack
+        ? headerTrack.flowBounds.yPt + headerTrack.heightPt - context.placement.cursor.yPt
+          - (context.availableHeightPt - availablePt)
+        : paginationRowHeightForOccurrence(source, header, rowIndex, context);
+      // §17.4.49 repeats the header with the continued row. The explicit
+      // fresh-band retention policy must reach the first source cell unit
+      // even when its header already exhausts that band; retain both with
+      // overflow, as for a source unit taller than the remaining header band.
+      if (heightPt > availablePt + EPSILON_PT
+        && !(context.oversizedCellPolicy === 'overflow-first-unit'
+          && context.availableHeightPt >= context.freshPageHeightPt)) {
         return passOf({ fragment: null, nextCursor: cursor, requiresFreshPage: true });
       }
       selected.push(selectedWholeRow(
@@ -2209,6 +2311,7 @@ function takeTableFragmentPass(
         false,
         preparedHeader.resolved,
       ));
+      admissionRows.push(header);
       floatRegistry = preparedHeader.registry;
       floatParagraphId = preparedHeader.nextParagraphId;
       availablePt -= heightPt;
@@ -2225,12 +2328,13 @@ function takeTableFragmentPass(
   // Acquisition-time tracks of rows whose nested content is placed per page
   // (re-acquired anchor or text box paragraphs) are not their occurrence
   // tracks, so they never admit the remainder.
+  const metrics = context.noteContinuation ? noteMetrics(source, context.chargeSourceScan) : undefined;
   const retainedRemainderFits = cursor.rowFragmentIndex === 0
     && cursor.cells.length === 0
-    && !needsNestedPageOrigins(source)
-    && source.layout.rows
-      .slice(cursor.rowIndex)
-      .reduce((heightPt, row) => heightPt + Math.max(0, row.heightPt), 0)
+    && !(metrics ? metrics.needsOrigins : needsNestedPageOrigins(source))
+    && (metrics ? metrics.suffixHeights[cursor.rowIndex]!
+      : source.layout.rows.slice(cursor.rowIndex)
+        .reduce((heightPt, row) => heightPt + Math.max(0, row.heightPt), 0))
       <= availablePt + EPSILON_PT;
   let followsCompletedPartialRow = false;
   while (rowIndex < source.input.rows.length) {
@@ -2287,12 +2391,24 @@ function takeTableFragmentPass(
     // must not be charged again. When the remainder does cross the boundary,
     // keep the conservative content-aware height so partial rows and page-local
     // merge continuation ownership are derived before materialization.
-    const wholeHeightPt = retainedRemainderFits || followsCompletedPartialRow
+    const retainedHeightPt = retainedRemainderFits || followsCompletedPartialRow
       ? paginationRowTrackHeightForOccurrence(source, row, rowIndex, context)
       : paginationRowHeightForOccurrence(source, row, rowIndex, context);
+    // WORD_TABLE_CELL_SPACING_GEOMETRY: admission owns a page-local table,
+    // including both outer gaps and table borders. Probe the same prefix
+    // tracks materialization uses: a source row's original track can omit an
+    // outer edge, while appending a row releases the preceding bottom edge.
+    // The incremental probe resolves each committed row once and preserves
+    // the previous admission path outside this measured class.
+    const admittedRow = spacedAdmissionTracks?.row(admissionRows, row, context.placement);
+    const wholeHeightPt = admittedRow
+      ? admittedRow.flowBounds.yPt + admittedRow.heightPt - context.placement.cursor.yPt
+        - (context.availableHeightPt - availablePt)
+      : retainedHeightPt;
     if (canTakeWhole) {
       if (wholeHeightPt <= availablePt + EPSILON_PT) {
         selected.push(selectedWholeRow(row, 'source', 0, false, preparedRow.resolved));
+        admissionRows.push(row);
         floatRegistry = preparedRow.registry;
         floatParagraphId = preparedRow.nextParagraphId;
         availablePt -= wholeHeightPt;
@@ -2369,19 +2485,28 @@ function takeTableFragmentPass(
 
     const canGainPageSpace = context.availableHeightPt + EPSILON_PT < context.freshPageHeightPt
       || selected.some((item) => item.ownership === 'source');
+    const prefixGeometry = spacedAdmissionTracks && freshSpacedAdmissionTracks ? {
+      current: (candidate: TableRowLayoutInput) => spacedAdmissionTracks.row(
+        admissionRows, candidate, context.placement,
+      ),
+      fresh: (candidate: TableRowLayoutInput) => freshSpacedAdmissionTracks.row(
+        rowIndex >= headerCount ? freshHeaderRows : [], candidate, context.placement,
+      ),
+    } : undefined;
     // The row is cut (or continued) here: its nested page-placed content is
     // placed against the occurrence this fragment selects, not the uncut row,
     // and so are its own positioned children's anchors.
     const cutOf = (candidate: TableRowLayoutInput): TableRowLayoutInput | null => {
       const probe = partialRow(
         source, candidate, rowCursor, availablePt, freshSourceHeightPt, canGainPageSpace, context,
+        prefixGeometry,
       );
       return probe.selected && !(probe.complete && rowCursor.rowFragmentIndex === 0)
         ? probe.selected.input
         : null;
     };
     const continuing = rowCursor.rowFragmentIndex > 0;
-    const cutRow = rowNeedsPageOrigins(source, occurrenceRow)
+    const cutRow = rowNeedsPageOrigins(source, occurrenceRow, context.chargeSourceScan)
       ? placeRowNestedContent(
         source, occurrenceRow, () => selected.map((item) => item.input), ownership, context,
         pageOriginTracks, rowCursor, cutOf, frameAt(position, hint?.cut),
@@ -2396,6 +2521,7 @@ function takeTableFragmentPass(
     let partial = partialRow(
       source, cutRow, rowCursor, availablePt,
       freshSourceHeightPt, canGainPageSpace, context,
+      prefixGeometry,
     );
     let selectedPrepared: ReturnType<typeof finalFrameRow> | null = null;
     const visitedOwnershipStates = new Set<string>();
@@ -2421,6 +2547,7 @@ function takeTableFragmentPass(
       const reselection = partialRow(
         source, selectedPrepared.row, rowCursor, availablePt,
         freshSourceHeightPt, canGainPageSpace, context,
+        prefixGeometry,
       );
       if (!reselection.selected) {
         partial = reselection;
@@ -2450,21 +2577,27 @@ function takeTableFragmentPass(
           ? { resolvedFloatingTables: Object.freeze(ownedResolved) }
           : {}),
       });
+      const partialTrack = partial.complete && partial.next.rowIndex < source.input.rows.length
+        ? spacedAdmissionTracks?.row(admissionRows, partial.selected.input, context.placement)
+        : null;
+      admissionRows.push(partial.selected.input);
       floatRegistry = Object.freeze([...floatRegistry, ...committedEntries]);
       floatParagraphId += committedEntries.length;
       nextCursor = partial.next.rowIndex >= source.input.rows.length ? null : partial.next;
       if (partial.complete && partial.next.rowIndex < source.input.rows.length) {
         // A completed continuation can own vertically merged content whose
         // physical track is resolved only after following logical rows join the
-        // same fragment. Keep admitting those rows by their retained tracks;
-        // the canonical materialization below remains the final fit authority
-        // and trims any over-admission at whole-row boundaries.
-        availablePt = Math.max(0, availablePt - completedPartialRowTrackHeight(
-          source,
-          partial.selected.input,
-          rowIndex,
-          context,
-        ));
+        // same fragment. The measured spaced class keeps its prefix geometry;
+        // other tables keep admitting those rows by their retained tracks.
+        // Canonical materialization remains the final fit authority below.
+        availablePt = partialTrack ? Math.max(0, context.availableHeightPt
+          - (partialTrack.flowBounds.yPt + partialTrack.heightPt - context.placement.cursor.yPt))
+          : Math.max(0, availablePt - completedPartialRowTrackHeight(
+            source,
+            partial.selected.input,
+            rowIndex,
+            context,
+          ));
         followsCompletedPartialRow = true;
         rowIndex = partial.next.rowIndex;
         continue;

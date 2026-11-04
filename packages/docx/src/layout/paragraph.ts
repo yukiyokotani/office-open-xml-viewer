@@ -29,7 +29,7 @@ import { addExactRational, exactRationalFromNumber, exactRationalToNumberUp } fr
 import { revisionIsOmitted } from './revision-visibility.js';
 import { wordArabicTextKerned, wordEastAsianAutoSpaceJustifiedMaximumPt, wordKerningApplies, wordLineEndSpaceHangs, wordRtlJustifiedVisibleFitApplies, wordSoftLineJustifiesAtSpacesOnly } from './line-compatibility.js';
 import type { LineGapPlan } from '../line-breaker/line-gaps.js';
-import { distributeLineSlack as distributeProportionalSlack, enumerateGaps, graphemeClusterOffsets, type LineGap } from '@silurus/ooxml-core';
+import { distributeLineSlack as distributeProportionalSlack, enumerateGaps, graphemeClusterOffsets, isSeaGraphemeExtend, type LineGap } from '@silurus/ooxml-core';
 import { specifiedTextLineMetrics, specifiedTextParagraphIsHomogeneous } from './specified-line-spacing.js';
 import { wordTextBoxVerticalMode } from './compatibility.js';
 import {
@@ -424,6 +424,9 @@ export interface PlanLineInput {
   readonly lineEndJustificationBeforeMode15?: boolean;
   /** Runs without authored w:rtl: no run-direction isolates. */
   readonly runDirectionUnauthored?: boolean;
+  /** A thaiDistribute paragraph below mode 15 with no character grid
+   *  (WORD_THAI_DISTRIBUTE_PROPORTIONAL_SPREAD). */
+  readonly thaiProportionalSpread?: boolean;
   /** The paragraph piece ends at a page or column break (its last line). */
   readonly endsAtHardBreak?: boolean;
   readonly firstLineIndentPt?: number;
@@ -479,6 +482,70 @@ function distributionSegments(
   return segments.map((segment, index) => segment.kind === 'text' && !segment.fixedPitch
     ? { text: segment.text }
     : hostsAreHanging && index >= suffixStart && segment.kind === 'anchor-host' ? { text: '' } : {});
+}
+
+/** {@link WORD_THAI_DISTRIBUTE_PROPORTIONAL_SPREAD} weights: the advance of
+ * the grapheme cluster ending at a gap's code point (its base and the Thai
+ * marks UAX #29 attaches to it, across formatting seams), or of the space at
+ * the gap. `undefined` keeps the equal per-gap spread: the rule covers only
+ * the measured line class, horizontal left-to-right text runs of Thai and
+ * printable ASCII without character spacing, scaling, fitText or ruby, where
+ * Thai meets other text only at a space, and every cut the gaps make starts
+ * a retained cluster. Advances come from the retained clusters, so no text
+ * is shaped again; work is linear in the line's code points. */
+function thaiProportionalClusterAdvance(
+  segments: readonly MeasuredLinePlanSegment[],
+  bidi: boolean,
+): ((segmentIndex: number, cpOffset: number) => number) | undefined {
+  if (bidi) return undefined;
+  const isThai = (cp: number): boolean => cp >= 0x0e00 && cp <= 0x0e7f;
+  const codePoints: number[] = [];
+  const advances: number[] = [];
+  const segmentStart: number[] = [];
+  let thai = false;
+  for (const segment of segments) {
+    segmentStart.push(codePoints.length);
+    if (segment.kind !== 'text' || segment.fixedPitch || segment.fitText || segment.ruby
+      || segment.direction !== 'ltr' || (segment.writingMode ?? 'horizontal-tb') !== 'horizontal-tb'
+      || (segment.characterSpacingPt ?? 0) !== 0 || (segment.characterScale ?? 1) !== 1
+      || (segment.characterGridDeltaPt ?? 0) !== 0) {
+      return undefined;
+    }
+    const clusterAdvance = new Map(segment.clusters.map((cluster) =>
+      [cluster.range.start - segment.range.start, cluster.advancePt] as const));
+    let utf16 = 0;
+    for (const character of segment.text) {
+      const cp = character.codePointAt(0)!;
+      const previous = codePoints.at(-1);
+      if (!isThai(cp) && (cp < 0x20 || cp > 0x7e)) return undefined;
+      if (previous !== undefined && isThai(cp) !== isThai(previous) && cp !== 0x20 && previous !== 0x20) {
+        return undefined;
+      }
+      // A Thai mark with no base (after a space or at the start) was not
+      // measured; such a line keeps the equal spread.
+      if (isSeaGraphemeExtend(cp) && (previous === undefined || previous === 0x20)) return undefined;
+      // A gap after a Thai cluster or a space cuts before this code point.
+      if (utf16 > 0 && previous !== undefined && (isThai(previous) || previous === 0x20)
+        && !isSeaGraphemeExtend(cp) && !clusterAdvance.has(utf16)) {
+        return undefined;
+      }
+      thai ||= isThai(cp);
+      codePoints.push(cp);
+      advances.push(clusterAdvance.get(utf16) ?? 0);
+      utf16 += character.length;
+    }
+  }
+  if (!thai) return undefined;
+  return (segmentIndex, cpOffset) => {
+    let index = (segmentStart[segmentIndex] ?? 0) + cpOffset;
+    if (codePoints[index] === 0x20) return advances[index] ?? 0;
+    let weight = 0;
+    for (; index >= 0; index -= 1) {
+      weight += advances[index] ?? 0;
+      if (!isSeaGraphemeExtend(codePoints[index] ?? 0)) break;
+    }
+    return weight;
+  };
 }
 
 /** How {@link WORD_LINE_END_JUSTIFICATION} justifies a line of a justified paragraph:
@@ -678,8 +745,8 @@ function centresWithoutOpportunity(
 }
 
 interface RtlInteriorSpace {
-  /** Segment whose trailing gap moves the next drawn segment over the space. */
-  readonly owner: number;
+  /** Source segment containing the whitespace to compress. */
+  readonly segmentIndex: number;
   readonly widthPt: number;
 }
 
@@ -706,7 +773,6 @@ function resolveRtlLineEndSpaces(
     if (visible > 0) break;
   }
   const order = visual.order.filter((index) => segments[index]?.kind !== 'anchor-host');
-  const position = new Map(order.map((index, at) => [index, at]));
   const hung = new Set<number>();
   // Walk inward from one extreme: spaces-only segments hang there; the first
   // visible segment hangs its spaces only when it draws them on this side.
@@ -725,11 +791,8 @@ function resolveRtlLineEndSpaces(
   const rightPt = hangFrom([...order].reverse(), (index) => visual.rtl[index] !== true);
   const leftPt = hangFrom(order, (index) => visual.rtl[index] === true);
   const interior: RtlInteriorSpace[] = [];
-  for (const [index, { widthPt, spacesOnly }] of trailing) {
-    if (hung.has(index)) continue;
-    const at = position.get(index) ?? -1;
-    const owner = spacesOnly || visual.rtl[index] !== true ? index : order[at - 1];
-    if (owner !== undefined) interior.push({ owner, widthPt });
+  for (const [index, { widthPt }] of trailing) {
+    if (!hung.has(index)) interior.push({ segmentIndex: index, widthPt });
   }
   return { rightPt, leftPt, interior };
 }
@@ -1712,6 +1775,12 @@ export function planLine(input: PlanLineInput): LineLayout {
           && !lineEndOpensCjkGaps(input))
         && !softLineSpacesOnly,
       input.alignment === 'thaiDistribute' && residualSlackPt > 0,
+      // Only soft-wrapped and manual-break-ended lines were measured; a piece
+      // ended by a page or column break keeps the equal spread.
+      input.thaiProportionalSpread === true
+        && residualSlackPt > 0 && (line.endsWithBreak || !input.isLastLine)
+        ? thaiProportionalClusterAdvance(segments, bidi)
+        : undefined,
     ), segments);
     perGapPt = distribution?.perGap ?? 0;
     stretchByIndex = withAutoSpaceExpansion(distribution?.perSeg ?? null, perGapPt, autoSpace);
@@ -1723,9 +1792,13 @@ export function planLine(input: PlanLineInput): LineLayout {
   // WORD_RTL_JUSTIFIED_VISIBLE_FIT admitted this line by its visible width.
   // A justified line hangs its line-end spaces outside the band in full; an
   // unjustified one keeps them inside while they fit and hangs only the
-  // overflow, right side first. Overflow left after hanging is absorbed into
-  // the spaces drawn between segments: the next segment on each one's drawn
-  // side moves over it, so the visible text stays inside the band.
+  // overflow, right side first. Overflow left after hanging is absorbed by
+  // compressing the source whitespace drawn between segments, so visible text
+  // stays inside the band without borrowing another run's advance.
+  // Compress the whitespace itself. Subtracting it from the preceding
+  // segment's trailing gap can reverse that segment's decoration extent;
+  // capping that subtraction instead leaves visible text outside the band.
+  const interiorSpaceCompression = new Map<number, number>();
   let rtlRightHangPt = 0;
   let leftHangPt = 0;
   if (rtlVisibleEdge || ltrSideHang) {
@@ -1743,31 +1816,13 @@ export function planLine(input: PlanLineInput): LineLayout {
       ? rtlLineEnd.leftPt
       : Math.min(Math.max(0, overflowPt - rtlRightHangPt), rtlLineEnd.leftPt);
     let residualPt = overflowPt - rtlRightHangPt - leftHangPt;
-    // One copy of the stretch plan takes every absorbed space.
-    let merged: Map<number, SegStretch> | undefined;
-    for (const { owner, widthPt } of rtlLineEnd.interior) {
-      if (!(residualPt > 1e-9)) break;
-      merged ??= new Map(stretchByIndex ?? []);
-      const previous = merged.get(owner);
-      const ownedPt = previous?.trailingGap ? previous.trailingDelta ?? perGapPt : 0;
-      // The owner's own advance bounds what it can give up, so its painted
-      // width (and its decorations) never goes negative.
-      const ownerSegment = segments[owner];
-      const ownerRoomPt = Math.max(0,
-        (ownerSegment ? segmentWidth(ownerSegment) : 0) + (previous?.internalStretch ?? 0) + ownedPt);
-      const absorbPt = Math.min(residualPt, widthPt, ownerRoomPt);
+    for (const { segmentIndex, widthPt } of rtlLineEnd.interior) {
+      const absorbPt = Math.min(Math.max(0, residualPt), widthPt);
       if (!(absorbPt > 0)) continue;
-      merged.set(owner, {
-        splitBefore: previous?.splitBefore ?? [],
-        internalStretch: previous?.internalStretch ?? 0,
-        ...(previous?.gapDeltas ? { gapDeltas: previous.gapDeltas } : {}),
-        trailingGap: true,
-        trailingDelta: ownedPt - absorbPt,
-      });
+      interiorSpaceCompression.set(segmentIndex, absorbPt);
       distributedWidthPt -= absorbPt;
       residualPt -= absorbPt;
     }
-    if (merged) stretchByIndex = merged;
     // The interior spaces the visible width dropped are drawn on the line, so
     // the drawn width counts them before their absorption.
     naturalWidthPt += Math.min(visibleWidthDropPt, interiorPt);
@@ -1809,7 +1864,8 @@ export function planLine(input: PlanLineInput): LineLayout {
     if (!segment) continue;
     const stretch = stretchByIndex?.get(segmentIndex);
     const internalStretchPt = stretch?.internalStretch ?? 0;
-    const widthPt = segmentWidth(segment) + internalStretchPt;
+    const compressedSpacePt = interiorSpaceCompression.get(segmentIndex) ?? 0;
+    const widthPt = segmentWidth(segment) + internalStretchPt - compressedSpacePt;
     if (segment.kind === 'tab') {
       const bounds = { xPt, yPt: line.topPt, widthPt: segment.measuredWidthPt, heightPt: line.advancePt };
       const decorations = segment.underline
@@ -1889,11 +1945,30 @@ export function planLine(input: PlanLineInput): LineLayout {
         direction: _direction,
         ...style
       } = segment;
-      const textGeometry = retainedTextGeometry(segment, stretch, perGapPt);
+      let textGeometry = retainedTextGeometry(segment, stretch, perGapPt);
+      if (compressedSpacePt > 0) {
+        // The compression belongs to source trailing whitespace, even when
+        // bidi places that whitespace before the visible glyphs. Keep the
+        // retained cluster advance and the paint origin under one authority.
+        const trailingStart = segment.range.start + segment.text.trimEnd().length;
+        let remainingPt = compressedSpacePt;
+        let removedPt = 0;
+        const clusters = textGeometry.clusters.map((cluster) => {
+          const reductionPt = cluster.range.start >= trailingStart
+            ? Math.min(remainingPt, cluster.advancePt) : 0;
+          remainingPt -= reductionPt;
+          const result = { ...cluster,
+            advancePt: cluster.advancePt - reductionPt,
+            offset: { ...cluster.offset, xPt: cluster.offset.xPt - removedPt } };
+          removedPt += reductionPt;
+          return result;
+        });
+        textGeometry = { ...textGeometry, clusters };
+      }
       const direction = visual.rtl[segmentIndex] ? 'rtl' : 'ltr';
       const trailingWhitespaceStart = segment.text.trimEnd().length;
       const rtlLeadingGapPt = direction === 'rtl'
-        ? (style.fitText?.trailingPadPt ?? 0) + segment.clusters
+        ? (style.fitText?.trailingPadPt ?? 0) + textGeometry.clusters
             .filter((cluster) => cluster.range.start >= segment.range.start + trailingWhitespaceStart)
             .reduce((sum, cluster) => sum + cluster.advancePt, 0)
         : 0;
@@ -3930,6 +4005,8 @@ function planMeasuredLines(
       ...(context.endsAtHardBreak ? { endsAtHardBreak: true } : {}),
       ...(context.runDirectionUnauthored ? { runDirectionUnauthored: true } : {}),
       ...(compatibilityMode !== 15 ? { lineEndJustificationBeforeMode15: true } : {}),
+      ...(paragraph.alignment === 'thaiDistribute' && (compatibilityMode ?? 0) < 15
+        && !context.characterGrid.active ? { thaiProportionalSpread: true } : {}),
       ...(context.wordWrap === false ? { wordWrap: false } : {}),
       firstLineIndentPt: context.firstIndentPt,
       ...(lineIndex === 0 && numberingPlan
@@ -5084,8 +5161,14 @@ function textBoxParagraphContext(
   const hasEastAsianText = paragraph.runs.some((run) =>
     run.type === 'text' && EAST_ASIAN_RE.test(run.text));
   // Whether the paragraph ends at a page or column break is its own fact,
-  // never the host's (WORD_LINE_END_JUSTIFICATION).
-  const { endsAtHardBreak: _hostEndsAtHardBreak, ...host } = inherited;
+  // never the host's (WORD_LINE_END_JUSTIFICATION). A text-box paragraph is
+  // outside the measured class of WORD_JUSTIFICATION_PUNCTUATION_HANG, so it
+  // never takes the host's closing-mark policy either.
+  const {
+    endsAtHardBreak: _hostEndsAtHardBreak,
+    cjkClosingMarkHang: _hostCjkClosingMarkHang,
+    ...host
+  } = inherited;
   return {
     ...host,
     ...(paragraph.endsAtHardBreak === true ? { endsAtHardBreak: true as const } : {}),
@@ -5395,9 +5478,14 @@ export function acquireShapeTextBoxLayout(
   // block start/end to physical right/left; the WordArt LTR-column projection
   // below then mirrors the block axis without swapping these insets. vert270
   // runs inline start/end from physical bottom to top, block from left.
+  // WORD_TEXT_BOX_PHYSICAL_INSETS: a DrawingML text body's insets start at the
+  // inner edge of a painted outline (the visible-outline test of shapeStroke
+  // in shape-drawing-plan.ts); a legacy v:textbox keeps the bare insets.
+  const outlineHalfPt = !shape.vmlTextBox && shape.stroke && shape.strokeWidth && shape.strokeWidth > 0
+    ? shape.strokeWidth / 2 : 0;
   const physicalInsets = {
-    topPt: shape.textInsetT ?? 0, rightPt: shape.textInsetR ?? 0,
-    bottomPt: shape.textInsetB ?? 0, leftPt: shape.textInsetL ?? 0,
+    topPt: (shape.textInsetT ?? 0) + outlineHalfPt, rightPt: (shape.textInsetR ?? 0) + outlineHalfPt,
+    bottomPt: (shape.textInsetB ?? 0) + outlineHalfPt, leftPt: (shape.textInsetL ?? 0) + outlineHalfPt,
   };
   const insets = textBoxLogicalInsets(physicalInsets, stackedWordArt ? 'vert' : verticalMode);
   if (textRect) {
@@ -5441,6 +5529,12 @@ export function acquireShapeTextBoxLayout(
       fontFamilyEastAsia: run.fontFamilyEastAsia ?? null,
       bold: run.bold,
       italic: run.italic,
+      rtl: run.rtl,
+      cs: run.cs,
+      fontFamilyCs: run.fontFamilyCs,
+      fontSizeCsPt: run.fontSizeCsPt,
+      boldCs: run.boldCs,
+      italicCs: run.italicCs,
       ruby: run.ruby,
     }, shape.textVert));
     const availableImageWidthPt = Math.max(
@@ -6027,6 +6121,7 @@ function paragraphAcquisitionKey(
       cache.kinsokuKey(context.kinsoku),
       context.defaultTabPt,
       context.overflowPunct !== false,
+      context.cjkClosingMarkHang ?? null,
       context.numberingMarkerGeometry
         ? JSON.stringify(context.numberingMarkerGeometry)
         : null,

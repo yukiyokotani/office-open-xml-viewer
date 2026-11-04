@@ -1,3 +1,4 @@
+import { isCjkBreakChar } from '@silurus/ooxml-core';
 import { defineCompatibilityRule } from './compatibility.js';
 import { OFFICE_FAR_EAST_SINGLE_LINE_FACTOR, officeOpenTypeAutoLineRatios } from '@silurus/ooxml-core/internal/office-auto-line';
 import type { LineSpacing, TabStop } from '../types.js';
@@ -611,6 +612,18 @@ export const WORD_OVERFLOW_PUNCTUATION_LANGUAGE_SETS = defineCompatibilityRule({
   description: 'Apply the language-specific punctuation sets documented for Word in [MS-OE376] §2.1.56 to Chinese, Japanese, and Korean language runs, and let overflowPunct override kinsoku when both rules affect the same character. When an effective East Asian language is absent, content that actually selects the East Asian script path retains the union as a bounded fallback.',
 });
 
+export const WORD_JUSTIFICATION_PUNCTUATION_HANG = defineCompatibilityRule({
+  id: 'word-justification-punctuation-hang',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'blk-0898-cjk-kin',
+    application: 'Microsoft Word',
+    version: '16.0.20527',
+    platform: 'Windows',
+  },
+  description: 'Which paragraphs let an overflowPunct (§17.3.1.21) closing mark hang past the line end, and how many. lowKashida, mediumKashida, highKashida and thaiDistribute paragraphs never hang one: the mark stays inside the line and kinsoku moves the character before it down with it (from compatibility mode 14; before mode 14 the kashida types instead break their CJK text without kinsoku, a separate unimplemented rule, and thaiDistribute already pushes). At most one mark hangs: when the character after a hangable mark may not start a line either (。」), nothing hangs and kinsoku moves the character before the pair down. Evidence: synthetic Windows Word 16.0.20527 controls blk-0898-cjk-kin-mode{none,11,12,14,15}, MS Mincho 12pt at the full 481.9pt width, every jc (left, both, distribute, low/medium/highKashida, thaiDistribute): 。 that fits at the last slot; 。, 、, 」, 々 and 。」 one slot past the margin; the same with eastAsia ja-JP, with overflowPunct off and with kinsoku off; and after a Latin label whose remainder leaves 4.5-6.3pt. Table cells, headers and footnotes: blk-0898-cjk-kincell-mode{none,11,12,14,15} repeat every row above inside a one-cell lrTb table with cell margins 0, with left/right margins 108 twips, and nested one level (each cell content width equal to the body width), and eight O1/O5 rows (every jc) in the default header and in a footnote. The header and footnote rows break exactly as the body rows in every mode. In every cell variant and every mode a table cell never hangs a mark: every row that hangs in the body (O1, O2, O3, O1j and PO1-PO3 under left, both and distribute; left only before mode 15) pushes the character before the mark instead, and with kinsoku off (N2) the mark starts the next line; every other row (kashida and thaiDistribute, 々, 。」, fitting marks) breaks exactly as in the body. Scope (admitted positively, everything else keeps the previous overflowPunct behaviour): CJK marks in ordinary (non-frame), left-to-right paragraphs with overflowPunct on and a measured alignment (left, both, distribute and the kashida and Thai types, with their Strict spellings start and justify), in an lrTb section without a document grid, at the top level of the main body, a header or a footnote, or in a table cell of the main body whose authored text direction (and every enclosing cell) is horizontal, where no mark hangs. Footers, endnotes, note separators, text boxes, frames, cells of headers and notes, rotated or other authored-vertical cells, upright tables of vertical sections, centred and right-aligned paragraphs, Latin and complex-script marks, right-to-left, vertical and grid paragraphs are unmeasured and keep their hang. The character after the mark is taken across run seams. Every kashida and thaiDistribute row from mode 14 (and thaiDistribute in every mode) pushes (line 1 one character short of the capacity, line 2 starting with the character and the mark); both and distribute hang 。、」 in every mode and push 。」 and 々. Unchanged here (measured, not implemented): left-aligned paragraphs hang a single mark in modes unset, 11, 12 and 14 but push it in mode 15, and with kinsoku off mode 15 neither hangs nor pushes (the mark starts the next line) while earlier modes still hang.',
+});
+
 export const WORD_OVERFLOW_PUNCTUATION_LATIN_PARENT_RUN = defineCompatibilityRule({
   id: 'word-overflow-punctuation-latin-parent-run',
   evidence: {
@@ -899,6 +912,59 @@ const ALL_WORD_OVERFLOW_PUNCTUATION = new Set([
 ]);
 const LATIN_WORD_OVERFLOW_PUNCTUATION = new Set(['.', ',']);
 
+/** {@link WORD_JUSTIFICATION_PUNCTUATION_HANG} policy for a CJK closing mark
+ * in its measured scope: at most one mark hangs ('one'), or none does. */
+export type CjkClosingMarkHang = 'one' | 'none';
+
+/** The policy for a paragraph in the measured class (see
+ * StoryContext.closingMarkHangAdmitted in layout-context.ts) with a measured
+ * alignment, 'none' throughout inside a table cell; `undefined` (any other paragraph, including centred and
+ * right-aligned ones) keeps the unmeasured overflowPunct behaviour. `start`
+ * is the Strict spelling of `left` and `justify` that of `both` (§17.18.44);
+ * the class is left-to-right only, where they coincide. */
+export function wordCjkClosingMarkHang(
+  alignment: string | null | undefined,
+  measuredScope: boolean,
+  insideTableCell = false,
+): CjkClosingMarkHang | undefined {
+  if (!measuredScope) return undefined;
+  switch (alignment) {
+    case 'lowKashida':
+    case 'mediumKashida':
+    case 'highKashida':
+    case 'thaiDistribute':
+      return 'none';
+    case 'left':
+    case 'start':
+    case 'both':
+    case 'justify':
+    case 'distribute':
+      // A table cell never hangs the mark (blk-0898-cjk-kincell).
+      return insideTableCell ? 'none' : 'one';
+    default:
+      return undefined;
+  }
+}
+
+/** Whether {@link WORD_JUSTIFICATION_PUNCTUATION_HANG} refuses to hang `mark`
+ * given the character after it (`next` yields it on demand: undefined when
+ * nothing, or no text, follows). Only a CJK mark in horizontal text is
+ * judged; everything else keeps its hang, and `next` is read only when the
+ * one-mark limit needs it. */
+export function wordCjkClosingMarkHangRefused(
+  policy: CjkClosingMarkHang | undefined,
+  mark: string,
+  next: () => string | undefined,
+  kinsoku: Readonly<{ enabled: boolean; lineStartForbidden: ReadonlySet<number> }>,
+  verticalRun: boolean,
+): boolean {
+  if (policy === undefined || verticalRun || !isCjkBreakChar(mark.codePointAt(0)!)) return false;
+  if (policy === 'none') return true;
+  if (!kinsoku.enabled) return false;
+  const following = next();
+  return following !== undefined && kinsoku.lineStartForbidden.has(following.codePointAt(0)!);
+}
+
 export const RTL_PRIMARY_SUBTAGS = new Set([
   'ar', 'fa', 'ur', 'he', 'iw', 'yi', 'ji', 'ps', 'sd', 'ug', 'dv', 'syr', 'ckb',
 ]);
@@ -982,6 +1048,18 @@ export const WORD_THAI_DISTRIBUTE_CLUSTER_POLICY = defineCompatibilityRule({
     reference: 'packages/docx/src/thai-distribute.test.ts#fills non-final lines to the right margin under thaiDistribute',
   },
   description: 'Expand non-final thaiDistribute lines at Thai grapheme-cluster boundaries while retaining a natural-width final line. Classification: normative, ECMA-376 §17.18.44 thaiDistribute (inter-character distribution); the natural-width final line is library policy (PR #978).',
+});
+
+export const WORD_THAI_DISTRIBUTE_PROPORTIONAL_SPREAD = defineCompatibilityRule({
+  id: 'word-thai-distribute-proportional-spread',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'blk-0898-cjk-thjust',
+    application: 'Microsoft Word',
+    version: '16.0.20527',
+    platform: 'Windows',
+  },
+  description: 'Before compatibility mode 15 a thaiDistribute line that is justified (soft-wrapped, or ended by a manual break; a piece ended by a page or column break is unmeasured and keeps the equal spread) and holds Thai text but no CJK spreads its slack in proportion to advance: every Thai grapheme cluster and every space widens by the same fraction of its own advance, the last cluster of the line excepted, while Latin letters keep their advance (a Latin word widens only at its spaces). Final lines stay natural (word-thai-distribute-cluster-policy). Evidence: synthetic Windows Word 16.0.20527 controls blk-0898-cjk-thjust-modenone and blk-0898-cjk-thdfin-modenone, Tahoma 12pt Thai at the full 481.9pt width, with and without th-TH: spaced Thai phrases (J2), spaced Thai without above or below marks (J3), a Times New Roman label before spaced Thai (J1) and Latin words between Thai phrases (J5), and a space-free Thai line ended by a manual break (D10). The share of each cluster and space is its advance times one line factor (residual within 0.3pt per character, increments quantised to about 0.12pt); an equal share per cluster misses by up to 1.7pt per gap on the same lines, and the label and Latin letters stay within 0.05pt of their natural advance. Re-exported after Thai (th-TH) was added as an Office editing language (Thai proofing tools not installed), the same controls place every glyph at the same position (0.01pt), so the rule does not depend on that setting. Rendered against those PDFs, characters land within 1.1pt (before: 2.2-3.9pt, 19.2pt on the break-ended line; worst character per row J1/J2/J3/J5 1.7/1.8/1.0/1.7pt against 2.6/3.6/2.2/3.9pt, D5 1.1 against 2.4pt, D10 0.6 against 19.2pt, every excess over 1.1pt at a SARA AM). Limitation: Word also widens the seam before THAI CHARACTER SARA AM, which shapes as one cluster with its base here, so ำ and the characters after it can sit up to 1.8pt off. Weights are the retained cluster advances (a cluster continued across a formatting seam weighs its whole advance), so nothing is shaped again. Scope: the measured line class only, horizontal left-to-right lines of text runs holding Thai and printable ASCII (U+0020-U+007E), where Thai meets other text only at a U+0020 space, without character spacing, scaling, a character grid, fitText or ruby, and in a paragraph without bidi; every other line keeps the equal per-gap spread of word-thai-distribute-cluster-policy unchanged, because Word was not measured there: Thai directly against Latin letters, digits or punctuation, CJK (supplementary Han and fixed-pitch fitText regions included), Lao, Khmer, Myanmar and other scripts, tabs, inline objects, and lines whose gap cuts do not start a retained shaped cluster. Unchanged also: mode 15, where Latin letters widen too and the share is neither equal nor proportional (unpinned).',
 });
 
 export const WORD_NUMERIC_DECIMAL_TAB_INFERENCE = defineCompatibilityRule({

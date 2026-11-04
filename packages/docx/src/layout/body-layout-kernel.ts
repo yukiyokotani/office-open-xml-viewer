@@ -174,9 +174,15 @@ export interface AcquiredTableBlock {
 export interface NoteSourceContinuation {
   readonly blockIndex: number;
   readonly paragraph: ParagraphFragmentCursor;
+  /** Bounded recovery windows encode boundary as source run/UTF-16 offset,
+   * rather than an index into an obsolete full-paragraph segment stream. */
+  readonly sourceRunCursor?: true;
 }
 
 export interface StoryLayoutAcquisitionInput {
+  /** Recovery partitioning will resolve visited field blocks before fitting.
+   * Whole-note admission must instead receive destination-complete content. */
+  readonly deferNoteFields?: boolean;
   readonly sourceStart?: NoteSourceContinuation;
   /** Section occurrence selecting this header/footer. Direct root acquisition
    * defaults to source ownership; production page composers supply the section. */
@@ -209,6 +215,7 @@ export interface StoryLayoutAcquisitionInput {
 }
 
 export interface NoteLayoutAcquisitionInput {
+  readonly deferNoteFields?: boolean;
   /** Page-wide area only: the first column's measured separator advance,
    * retained as a blank top band in another column. No separator is acquired
    * or painted there; its text width must not change the shared top edge. */
@@ -255,6 +262,8 @@ export interface FollowingBodyBlockMeasurement {
   /** Retained first-line slice for reservation-aware grid admission. Only
    * acquired for grid lines; later paragraph decoration is excluded. */
   readonly leadGridParagraph?: ParagraphLayout;
+  /** All lines of the whole paragraph, before the first-line slice. */
+  readonly wholeParagraphHasPlacements?: boolean;
   /** References painted when the complete block is retained with a keep chain. */
   readonly fullFootnoteReferenceIds?: readonly string[];
   /** References painted by the first indivisible content admitted with keepNext. */
