@@ -35,7 +35,7 @@ import {
   slicedTextMetadata,
   snapToCharsClass,
 } from './advance.js';
-import { createBidiTabCellResolver, bidiTabFrame, nextLineTabStop, positionalTabTarget, tabAlignmentRole } from './tabs.js';
+import { createBidiTabCellResolver, bidiTabFrame, nextLineTabStop, positionalTabTarget, tabAlignmentRole, wordTabGlueUnit } from './tabs.js';
 import { wordPositionalTabReferenceBox } from '../layout/line-compatibility.js';
 import { buildFont } from './font-routes.js';
 import {
@@ -703,6 +703,86 @@ function lineBandW(context: BreakOpportunityIteratorContext): number {
     : breakerState.lineMaxWidth - (breakerState.isFirst ? firstIndent : 0);
 }
 
+/** WORD_TAB_GLUED_TO_FOLLOWING_TEXT: a tab cannot end a line before the text
+ * that directly follows it. True when that text, a word in the rule's measured
+ * scope (wordTabGlueUnit), does not fit behind a gap of `gap`, so the line
+ * must break before the tab. Out of scope, and where no automatic break can
+ * occur (intrinsic or unwrapped acquisition), it never forces the break. */
+function tabFollowingUnitOverflows(context: BreakOpportunityIteratorContext, gap: number): boolean {
+  const { breakerState } = context;
+  if (breakerState.currentLine.length === 0 || context.widthPolicy !== 'bounded'
+    || glueLineNarrowed(context)) return false;
+  const [head, follower] = breakerState.queue.peekPair();
+  if (!wordTabGlueUnit(head, follower, context.characterGrid?.type === 'snapToChars', context.baseRtl)) return false;
+  return !context.fitsMeasuredWidth(
+    breakerState.currentWidth + gap + context.minimalLegalTextWidth(head),
+    context.availW(),
+  );
+}
+
+/** WORD_TAB_GLUED_TO_FOLLOWING_TEXT was measured on lines no float narrows;
+ * a float-narrowed line (or a gap beside a float) keeps the earlier behaviour,
+ * where WORD_TAB_DISPLACED_READING_FRAME and WORD_FLOAT_GAP_FLOW own it. */
+function glueLineNarrowed(context: BreakOpportunityIteratorContext): boolean {
+  const { breakerState, maxWidth } = context;
+  return breakerState.lineXOffset !== 0 || breakerState.lineMaxWidth !== maxWidth
+    || breakerState.gapTransaction?.narrowed === true;
+}
+
+/** Whether the cell after a decimal tab holds a real decimal separator (the
+ * first '.', as decimalAlignmentPoint finds it) rather than only the numeric
+ * fallback alignment point. */
+function alignedCellHasDecimalSeparator(context: BreakOpportunityIteratorContext): boolean {
+  for (const item of context.breakerState.queue) {
+    if ('isTab' in item || 'lineBreak' in item) return false;
+    if ('text' in item && item.text.includes('.')) return true;
+  }
+  return false;
+}
+
+/** Whether the cell after an aligned tab ends at a later tab rather than at a
+ * line break or the paragraph end. WORD_ALIGNED_TAB_CELL_FIT_BACK was
+ * measured on lines whose fitted cell is the line's last (single end, center
+ * and decimal stops; blk-0898-tabs-rtl E/C/D rows): the elastic gap takes the
+ * room the line leaves, which a later stop on the same line would take too.
+ * That interaction was not measured, so such a cell keeps the earlier
+ * stop-aligned allocation (LTR) or the bidi walk's in-place fit (RTL). */
+function alignedCellEndsAtTab(context: BreakOpportunityIteratorContext): boolean {
+  for (const item of context.breakerState.queue) {
+    if ('isTab' in item) return true;
+    if ('lineBreak' in item) return false;
+  }
+  return false;
+}
+
+/** Per pass, the advance from each queued item to the paragraph end or the
+ * next line break. Each item is measured once, so consecutive displaced tabs
+ * do not rescan the rest of the paragraph (linear in the paragraph). */
+const paragraphRestWidths = new WeakMap<object, WeakMap<LayoutSeg, number>>();
+function paragraphRestWidth(context: BreakOpportunityIteratorContext): number {
+  const { breakerState, scale } = context;
+  let cache = paragraphRestWidths.get(breakerState);
+  if (!cache) paragraphRestWidths.set(breakerState, cache = new WeakMap());
+  const visited: [LayoutSeg, number][] = [];
+  let restPx = 0;
+  for (const item of breakerState.queue) {
+    const known = cache.get(item);
+    if (known !== undefined) {
+      restPx = known;
+      break;
+    }
+    if ('lineBreak' in item) break;
+    visited.push([item, 'text' in item ? context.segAdvance(item)
+      : 'math' in item ? item.measuredWidth
+        : 'imagePath' in item && !item.anchor ? item.widthPt * scale : 0]);
+  }
+  for (let index = visited.length - 1; index >= 0; index -= 1) {
+    restPx += visited[index]![1];
+    cache.set(visited[index]![0], restPx);
+  }
+  return restPx;
+}
+
 function processTabSegment(
   context: BreakOpportunityIteratorContext,
   seg: LayoutTabSeg,
@@ -725,6 +805,32 @@ function processTabSegment(
     availW,
   } = context;
   seg.marginAllocation = false;
+  seg.alignedGapLimit = undefined;
+  seg.alignedFitBack = undefined;
+  seg.alignedCellWidth = undefined;
+  seg.alignedCellDecimal = undefined;
+  seg.windowOverflow = undefined;
+  seg.resolvedAlignment = undefined;
+  const displacedFrame = seg.displacedFloatTabFrame === true;
+  // WORD_TAB_DISPLACED_READING_FRAME scope: before mode 15 a float-narrowed
+  // line keeps a displaced cell past its window only when the rest of the
+  // paragraph (every later cell to the paragraph end or line break) could
+  // stand on one line; the measured paragraphs were one or two tabs before a
+  // single word or a six-word cell. Longer content must break anyway, and its
+  // break was not measured, so it keeps the window containment (an empty cell
+  // before a long one included). A later gap on the same baseline (a
+  // WORD_FLOAT_GAP_FLOW continuation) was not measured either and keeps the
+  // containment.
+  const overflowsWindowWhole = (): boolean => displacedFrame
+    && !breakerState.gapTransaction?.cursor
+    && paragraphRestFitsLine();
+  const paragraphRestFitsLine = (): boolean => paragraphRestWidth(context) <= maxWidth;
+  const breakBeforeTab = (): void => {
+    flush(undefined, false, seg.src);
+    breakerState.queue.unshift(seg);
+  };
+  const tabAscent = seg.fontSize * scale * SYNTHETIC_ASCENT_EM;
+  const tabDescent = seg.fontSize * scale * SYNTHETIC_DESCENT_EM;
 
   // Ordinary RTL stops still require the complete cell's visual order. A
   // positional tab additionally owns a normative next-line decision, which
@@ -748,27 +854,33 @@ function processTabSegment(
         && seg.ptab.relativeTo === 'margin' && followingWidth > box.end - box.start;
       const target = positionalTabTarget(seg.ptab.alignment, box.start, box.end, followingWidth);
       if (target < startPen + breakerState.currentWidth && breakerState.currentLine.length > 0) {
-        flush(undefined, false, seg.src);
-        breakerState.queue.unshift(seg);
+        breakBeforeTab();
         return;
       }
     }
     const input = { ...context, ...breakerState, ...(context.lineFit ? { fitWidth: availW() } : {}) };
     const { startPen, frame } = bidiTabFrame(input);
-    if (frame.narrowed || oversizedMarginLeading || seg.ptab?.relativeTo === 'indent') {
-      // Resolve leading gaps before fitting, in the same reading frame as
-      // paint. A provisional zero gap can fit text that the final tab would
-      // push into the exclusion. Without float exclusion, the final ordinary
-      // tab gap stays provisional, even after multiple tabs: the bidi walk can
-      // reduce the last gap as its cell fills the band. Freezing that gap here
-      // prematurely wraps otherwise in-band text. An indent-relative leading
-      // ptab instead has an authored fixed gap.
-      // Aligned cells retain post-pass alignment,
-      // bounded by the actual band after normal text fitting.
+    // WORD_ALIGNED_TAB_CELL_FIT_BACK: an ordinary start stop keeps its gap
+    // while its cell fills the line (#2050), so it is resolved here, before
+    // fitting, in the same reading frame as paint. End, center and decimal
+    // gaps stay provisional: the bidi walk lets them take only the room the
+    // fitted cell leaves. Earlier cells are complete when another tab is
+    // reached; charging their resolved gaps keeps the next cell in the band
+    // and visits each cell once (createBidiTabCellResolver). Positional tabs
+    // keep their established cases: a float-narrowed line, an oversized
+    // margin-relative leading cell and an indent-relative reference. The
+    // measured bidi rows held right-to-left (w:rtl) runs after the tab; a cell
+    // that starts with another run keeps the earlier provisional gap, which
+    // the bidi walk may shrink as text fits (unmeasured direction mix).
+    const head = breakerState.queue.peek();
+    const rtlCellInScope = !seg.ptab && head !== undefined && 'text' in head && head.rtl === true;
+    if (rtlCellInScope || frame.narrowed || oversizedMarginLeading || seg.ptab?.relativeTo === 'indent') {
       breakerState.currentWidth += resolveCompletedTabCells(input);
       const pen = startPen + breakerState.currentWidth;
       const stop = seg.ptab && !oversizedMarginLeading ? undefined : nextLineTabStop(pen,
-        context.bidiCustomStopsPx, context.bidiIntervalPx, frame.leadingShift);
+        context.bidiCustomStopsPx, context.bidiIntervalPx, frame.leadingShift, displacedFrame);
+      // The stop placement resolved for an ordinary tab (intrinsic minima read it).
+      if (!seg.ptab) seg.resolvedAlignment = stop?.alignment ?? 'left';
       const leading = seg.ptab ? seg.ptab.alignment === 'left'
         : !stop || tabAlignmentRole(stop.alignment) === 'leading';
       if (leading) {
@@ -778,40 +890,83 @@ function processTabSegment(
             seg.ptab.relativeTo === 'indent' ? frame.indentEnd : input.marginRightPx + tabOriginPx,
             frame.bandStart, frame.bandEnd, frame.narrowed).start
           : stop?.pos ?? pen;
-        if (target > frame.fitEnd && breakerState.currentLine.length > 0) {
-          flush(undefined, false, seg.src);
-          breakerState.queue.unshift(seg);
+        // WORD_KASHIDA_LINE_FIT: content after a leading stop ends within the
+        // line's fit width (the band end when no reserve applies).
+        const outOfBand = target > frame.fitEnd;
+        // An unnarrowed ordinary stop past the band keeps the bidi walk's
+        // margin containment (word-tab-stop-page-edge-clamp), as before.
+        if (!(outOfBand && !frame.narrowed && !seg.ptab)) {
+          // WORD_TAB_DISPLACED_READING_FRAME: before mode 15 an out-of-window
+          // displaced start cell overflows the float window instead of wrapping.
+          const overflow = outOfBand && frame.narrowed && !seg.ptab && overflowsWindowWhole();
+          if (outOfBand && !overflow && breakerState.currentLine.length > 0) {
+            breakBeforeTab();
+            return;
+          }
+          const gap = outOfBand && !overflow ? 0 : Math.max(0, target - pen);
+          if (!overflow && !seg.ptab && tabFollowingUnitOverflows(context, gap)) {
+            breakBeforeTab();
+            return;
+          }
+          seg.readingGap = gap;
+          seg.measuredWidth = gap;
+          seg.leader = stop?.leader;
+          seg.windowOverflow = overflow || undefined;
+          addToLine(seg, gap, seg.fontSize, tabAscent, tabDescent);
+          if (overflow) commitAlignedTabCell(context);
           return;
         }
-        const gap = target > frame.fitEnd ? 0 : Math.max(0, target - pen);
-        seg.readingGap = gap;
-        seg.measuredWidth = gap;
-        seg.leader = stop?.leader;
-        addToLine(seg, gap, seg.fontSize, seg.fontSize * scale * SYNTHETIC_ASCENT_EM, seg.fontSize * scale * SYNTHETIC_DESCENT_EM);
-        return;
       }
     } else if (!seg.ptab) {
       // Earlier cells are complete when another ordinary tab is reached. Charge
       // their resolved gaps so the next cell cannot overflow the line, but leave
       // this final gap provisional: the bidi walk may shrink it as text fits.
       breakerState.currentWidth += resolveCompletedTabCells(input);
+      seg.resolvedAlignment = nextLineTabStop(startPen + breakerState.currentWidth, context.bidiCustomStopsPx,
+        context.bidiIntervalPx, frame.leadingShift, displacedFrame)?.alignment ?? 'left';
     }
+    seg.readingGap = undefined;
     seg.measuredWidth = 0;
-    addToLine(seg, 0, seg.fontSize, seg.fontSize * scale * SYNTHETIC_ASCENT_EM, seg.fontSize * scale * SYNTHETIC_DESCENT_EM);
+    if (!seg.ptab && frame.narrowed && overflowsWindowWhole()) {
+      // An end/center/decimal cell: the bidi walk aligns the complete cell at
+      // its displaced stop even past the window (WORD_TAB_DISPLACED_READING_FRAME).
+      seg.windowOverflow = true;
+      addToLine(seg, 0, seg.fontSize, tabAscent, tabDescent);
+      commitAlignedTabCell(context);
+      return;
+    }
     // WORD_KASHIDA_LINE_FIT reserves nothing for an aligned cell: an end,
     // centre or decimal stop's cell, or a right or centre positional tab's,
     // is admitted against the band, as left-to-right.
-    if (lineFitReduced(context) && tabCellIsAligned(seg, () => nextLineTabStop(
-      startPen + breakerState.currentWidth, context.bidiCustomStopsPx, context.bidiIntervalPx, frame.leadingShift))
-      && context.fitsMeasuredWidth(breakerState.currentWidth + tabFollowingMetrics().totalWidth, lineBandW(context))) {
-      commitAlignedTabCell(context);
+    const admittedAligned = lineFitReduced(context) && tabCellIsAligned(seg, () => nextLineTabStop(
+      startPen + breakerState.currentWidth, context.bidiCustomStopsPx, context.bidiIntervalPx, frame.leadingShift,
+      displacedFrame))
+      && context.fitsMeasuredWidth(breakerState.currentWidth + tabFollowingMetrics().totalWidth, lineBandW(context));
+    if (!seg.ptab && !admittedAligned && tabFollowingUnitOverflows(context, 0)) {
+      breakBeforeTab();
+      return;
     }
+    // WORD_ALIGNED_TAB_CELL_FIT_BACK: the walk defers a fitted-back gap only
+    // for a right-to-left cell (as measured) that is not followed by a later
+    // tab (alignedCellEndsAtTab).
+    seg.alignedFitBack = rtlCellInScope && !alignedCellEndsAtTab(context) ? true : undefined;
+    if (seg.alignedFitBack) {
+      // The complete cell, as left-to-right placement measures it.
+      const cell = tabFollowingMetrics();
+      seg.alignedCellWidth = cell.totalWidth;
+      // Only a real separator aligns a fitted-back cell; the numeric fallback
+      // of a cell without one was not measured (the walk keeps its old fit).
+      seg.alignedCellDecimal = alignedCellHasDecimalSeparator(context) ? cell.decimalPrefixWidth : undefined;
+    }
+    addToLine(seg, 0, seg.fontSize, tabAscent, tabDescent);
+    if (admittedAligned) commitAlignedTabCell(context);
     return;
   }
 
   // LTR pen coordinates include the available line window's displacement.
   // RTL tabs are resolved in reading order by the post-pass above.
   const lineOrigin = breakerState.lineXOffset;
+  const narrowed = breakerState.lineXOffset !== 0 || breakerState.lineMaxWidth !== maxWidth;
   const absFromParaX = lineOrigin + breakerState.currentWidth
     + (breakerState.isFirst ? firstIndent : 0);
 
@@ -829,7 +984,7 @@ function processTabSegment(
     const box = wordPositionalTabReferenceBox(
       seg.ptab.relativeTo === 'indent' ? 0 : -tabOriginPx,
       seg.ptab.relativeTo === 'indent' ? maxWidth : marginRightPx,
-      bandLeft, bandRight, breakerState.lineXOffset !== 0 || breakerState.lineMaxWidth !== maxWidth);
+      bandLeft, bandRight, narrowed);
     // Width of the content that trails the ptab up to the next tab / line end
     // — needed to right-/center-align it against `target` (the trailing text
     // is what aligns to the stop, §17.18.71).
@@ -843,8 +998,7 @@ function processTabSegment(
     // content) to a fresh line — unless the line is empty (nowhere to wrap).
     if (tabW < 0) {
       if (breakerState.currentLine.length > 0) {
-        flush(undefined, false, seg.src);
-        breakerState.queue.unshift(seg);
+        breakBeforeTab();
         return;
       }
       // Empty line: cannot advance backwards; contribute no width but keep the
@@ -856,14 +1010,13 @@ function processTabSegment(
     const ptabLimit = tabCellIsAligned(seg, () => null) ? lineBandW(context) : availW();
     if (!context.fitsMeasuredWidth(breakerState.currentWidth + tabW, ptabLimit)) {
       if (breakerState.currentLine.length > 0) {
-        flush(undefined, false, seg.src);
-        breakerState.queue.unshift(seg);
+        breakBeforeTab();
         return;
       }
       tabW = 0;
     }
     seg.measuredWidth = tabW;
-    addToLine(seg, tabW, seg.fontSize, seg.fontSize * scale * SYNTHETIC_ASCENT_EM, seg.fontSize * scale * SYNTHETIC_DESCENT_EM);
+    addToLine(seg, tabW, seg.fontSize, tabAscent, tabDescent);
     // §17.3.3.23 selects the reference target independently of paragraph
     // indents. Library policy limits allocation to the actual paragraph/float
     // band: a fitting cell stays aligned, and all other cells use normal breaks.
@@ -886,16 +1039,14 @@ function processTabSegment(
     leader: t.leader,
   }));
   const stop = nextLineTabStop(curMarginPx, customStopsPx, defaultTabPt * scale,
-    lineOrigin);
+    lineOrigin, displacedFrame);
   seg.resolvedAlignment = stop?.alignment ?? 'left';
   // Convert the chosen margin-space stop back to paraX-relative px.
   const stopParaX = stop ? stop.pos - tabOriginPx : absFromParaX;
   // Right/center/decimal tab: place the tab + its trailing content (up to the next
-  // tab / line end) so the content ends at / centers on the stop. An oversized
-  // cell still uses ordinary break opportunities
-  // (ECMA-376 §17.3.1.37). This is what makes TOC "heading …… page" lines work.
-  // Automatic stops returned by nextTabStop are left-aligned, so they fall
-  // through to the left-tab path below.
+  // tab / line end) so the content ends at / centers on the stop. This is what
+  // makes TOC "heading …… page" lines work. Automatic stops returned by
+  // nextTabStop are left-aligned, so they fall through to the left-tab path below.
   const alignmentRole = stop ? tabAlignmentRole(stop.alignment) : 'leading';
   if (stop && tabCellIsAligned(seg, () => stop)) {
     const stopX = stopParaX;
@@ -915,20 +1066,51 @@ function processTabSegment(
     // WORD_KASHIDA_LINE_FIT reserves nothing for an aligned cell: it is
     // admitted against the band, while text before the tab keeps the fit width.
     const cellAvail = alignedTabCellAvailW(context);
-    const cellLimit = context.fitsMeasuredWidth(breakerState.currentWidth + tabW + following.totalWidth, cellAvail)
-      ? cellAvail : availW();
+    const fitsAligned = context.fitsMeasuredWidth(breakerState.currentWidth + tabW + following.totalWidth, cellAvail);
+    let cellLimit = fitsAligned ? cellAvail : availW();
     seg.marginAllocation = cellLimit > lineBandW(context)
       && breakerState.currentWidth + tabW + following.totalWidth > lineBandW(context);
-    if (breakerState.currentWidth + tabW > cellLimit) {
-      if (breakerState.currentLine.length > 0) {
-        flush(undefined, false, seg.src);
-        breakerState.queue.unshift(seg);
+    if (!context.fitsMeasuredWidth(breakerState.currentWidth + tabW + following.totalWidth, cellLimit)) {
+      if (narrowed && tabW > 0 && overflowsWindowWhole()) {
+        // WORD_TAB_DISPLACED_READING_FRAME: before mode 15 the displaced cell
+        // keeps its stop-aligned place past the float window or the margin.
+        seg.measuredWidth = tabW;
+        addToLine(seg, tabW, seg.fontSize, tabAscent, tabDescent);
+        commitAlignedTabCell(context);
         return;
       }
-      tabW = 0;
+      if (alignedCellEndsAtTab(context)
+        || (alignmentRole === 'decimal' && !alignedCellHasDecimalSeparator(context))) {
+        // Outside the WORD_ALIGNED_TAB_CELL_FIT_BACK scope (see
+        // alignedCellEndsAtTab; a decimal cell without a separator was not
+        // measured either): the gap keeps its stop-aligned allocation and
+        // the cell wraps at its ordinary opportunities, as before the rule.
+        if (breakerState.currentWidth + tabW > cellLimit) {
+          if (breakerState.currentLine.length > 0) {
+            breakBeforeTab();
+            return;
+          }
+          tabW = 0;
+        }
+      } else {
+        // WORD_ALIGNED_TAB_CELL_FIT_BACK: fit the cell with no gap; retained
+        // paint gives the gap the room the line leaves, up to the aligned gap.
+        if (tabW > 0) seg.alignedGapLimit = tabW;
+        tabW = 0;
+        // WORD_KASHIDA_LINE_FIT reserves nothing for an aligned cell: fitted
+        // back with no gap, the cell is admitted against the band, as the
+        // bidi path admits it (#2060).
+        if (lineFitReduced(context)
+          && context.fitsMeasuredWidth(breakerState.currentWidth + following.totalWidth, lineBandW(context))) {
+          cellLimit = lineBandW(context);
+        } else if (tabFollowingUnitOverflows(context, 0)) {
+          breakBeforeTab();
+          return;
+        }
+      }
     }
     seg.measuredWidth = tabW;
-    addToLine(seg, tabW, seg.fontSize, seg.fontSize * scale * SYNTHETIC_ASCENT_EM, seg.fontSize * scale * SYNTHETIC_DESCENT_EM);
+    addToLine(seg, tabW, seg.fontSize, tabAscent, tabDescent);
     // Keep an aligned cell atomic only when it fits its band. Oversized cells
     // return to the iterator at their ordinary break sites.
     if (context.fitsMeasuredWidth(breakerState.currentWidth + following.totalWidth, cellLimit)) {
@@ -947,16 +1129,28 @@ function processTabSegment(
   // line an out-of-band tab contributes no gap, so its cell can use the normal
   // fitting path rather than retrying an unreachable target forever.
   if (!fitsLineWidth(breakerState.currentWidth + tabWidth, availW())) {
+    if (narrowed && overflowsWindowWhole()) {
+      // WORD_TAB_DISPLACED_READING_FRAME: before mode 15 the tab keeps its
+      // displaced stop past the float window, and its complete cell with it.
+      tabWidth = Math.max(0, tabWidth);
+      seg.measuredWidth = tabWidth;
+      addToLine(seg, tabWidth, seg.fontSize, tabAscent, tabDescent);
+      commitAlignedTabCell(context);
+      return;
+    }
     if (breakerState.currentLine.length > 0) {
-      flush(undefined, false, seg.src);
-      breakerState.queue.unshift(seg);
+      breakBeforeTab();
       return;
     }
     tabWidth = 0;
   }
   tabWidth = Math.max(0, tabWidth);
+  if (tabFollowingUnitOverflows(context, tabWidth)) {
+    breakBeforeTab();
+    return;
+  }
   seg.measuredWidth = tabWidth;
-  addToLine(seg, tabWidth, seg.fontSize, seg.fontSize * scale * SYNTHETIC_ASCENT_EM, seg.fontSize * scale * SYNTHETIC_DESCENT_EM);
+  addToLine(seg, tabWidth, seg.fontSize, tabAscent, tabDescent);
   return;
 }
 
@@ -1249,6 +1443,52 @@ function placeOrSplitText(context: BreakOpportunityIteratorContext, inputFrame: 
       // it must never become a new line head and tear the cluster.
       s.measuredWidth = w;
       addToLine(s, w, h, asc, desc);
+      return;
+    }
+    // WORD_TAB_GLUED_TO_FOLLOWING_TEXT: a line holding only ordinary tabs
+    // offers no break before this token (a tab never ends a line ahead of its
+    // text), so the token is broken by characters in the room behind the tab.
+    // Positional tabs (§17.3.3.23) and words outside the measured scope
+    // (wordTabGlueUnit) keep the fresh line.
+    // A decimal cell without a separator is outside aligned fit-back's
+    // measured scope. Its zero-width aligned gap must not let the ordinary
+    // tab-glue emergency split erase the established tab-only leading line.
+    // Word's LTR controls with consecutive decimal tabs, a hanging indent
+    // and an unbroken Latin cell retain that line; cells with a separator
+    // continue through the measured aligned fit-back path.
+    const lastTab = breakerState.currentLine.at(-1);
+    const unmeasuredDecimalFallback = lastTab !== undefined && 'isTab' in lastTab
+      && lastTab.resolvedAlignment === 'decimal' && !s.text.includes('.')
+      && !alignedCellHasDecimalSeparator(context);
+    if (!unmeasuredDecimalFallback
+      && breakerState.currentLine.every((item) => 'isTab' in item && !item.ptab) && !glueLineNarrowed(context)
+      && wordTabGlueUnit(s, breakerState.queue.peek(), context.characterGrid?.type === 'snapToChars', context.baseRtl)) {
+      const remaining = availW() - breakerState.currentWidth;
+      const split = emergencyTextSplit(s, remaining);
+      if (split < s.text.length || placedAdvanceExceeds(context, s, s.text.slice(0, split))) {
+        context.forcedPlacement(breakerState.currentWidth + context.minimalLegalTextWidth(s), 0);
+      }
+      if (split >= s.text.length) {
+        s.measuredWidth = w;
+        addToLine(s, w, h, asc, desc);
+        return;
+      }
+      const prefix = s.text.slice(0, split);
+      const pw = strNaturalAdvance(s, prefix);
+      addToLine(
+        {
+          ...s,
+          ...RESET_SLICED_TEXT_MEASUREMENT,
+          text: prefix,
+          measuredWidth: pw,
+          ...slicedTextMetadata(s, 0, prefix.length),
+        },
+        pw,
+        h,
+        asc,
+        desc,
+      );
+      queueEmergencyTail(s, split);
       return;
     }
     // Latin token does not fit on the current (non-empty) line: move it to a fresh
