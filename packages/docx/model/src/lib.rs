@@ -2585,6 +2585,11 @@ pub struct RunFontFacts {
     pub lang_bidi: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lang_east_asia: Option<String>,
+    /// ECMA-376 §17.3.2.20 `w:lang/@w:val` — the language of non-East-Asian,
+    /// non-complex-script text, lower-cased (e.g. "sr-latn-rs"). Drives
+    /// language-sensitive OpenType forms (`locl`) of ascii/highAnsi text.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lang: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kerning: Option<f64>,
 }
@@ -2636,6 +2641,9 @@ pub struct UnderlineTypographyWire {
 #[derive(Serialize, Debug, Clone, Default, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct TypographyLanguagesWire {
+    /// ECMA-376 §17.3.2.20 w:lang/@w:val (non-East-Asian, non-cs text).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub val: Option<String>,
     pub east_asia: Option<String>,
     pub bidi: Option<String>,
 }
@@ -2780,6 +2788,11 @@ pub struct FieldRun {
     pub lang_bidi: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lang_east_asia: Option<String>,
+    /// ECMA-376 §17.3.2.20 `w:lang/@w:val` — the language of non-East-Asian,
+    /// non-complex-script text, lower-cased (e.g. "sr-latn-rs"). Drives
+    /// language-sensitive OpenType forms (`locl`) of ascii/highAnsi text.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lang: Option<String>,
     pub background: Option<String>,
     /// "super" | "sub" | None
     pub vert_align: Option<String>,
@@ -2984,6 +2997,11 @@ pub struct TextRun {
     /// Resolved ECMA-376 §17.3.2.20 w:lang/@w:eastAsia.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lang_east_asia: Option<String>,
+    /// ECMA-376 §17.3.2.20 `w:lang/@w:val` — the language of non-East-Asian,
+    /// non-complex-script text, lower-cased (e.g. "sr-latn-rs"). Drives
+    /// language-sensitive OpenType forms (`locl`) of ascii/highAnsi text.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lang: Option<String>,
     /// ECMA-376 §17.3.2.34 `<w:snapToGrid>` — run participation in the section
     /// character grid. `Some(false)` opts this run out; `None` inherits.
     #[serde(skip_serializing_if = "Option::is_none")]

@@ -139,6 +139,8 @@ export interface InternalRunSlotMetadata {
   italicCs?: boolean;
   langBidi?: string;
   langEastAsia?: string;
+  /** ECMA-376 §17.3.2.20 w:lang/@w:val, lower-cased. */
+  lang?: string;
 }
 
 function isListLabel(value: unknown): value is 'start' | 'end' | 'center' {

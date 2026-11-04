@@ -1,4 +1,5 @@
 import { acquireCanvasGlyphContours } from '../native-glyph-contours.js';
+import { restoreCanvasLanguage, selectCanvasLanguage } from '../canvas-language.js';
 import { type CjkLang } from '@silurus/ooxml-core';
 import {
   fontFamilyKey,
@@ -338,6 +339,7 @@ export function createProductionTextLayoutService(
         const previousFont = context.font;
         const previousLetterSpacing = context.letterSpacing;
         const previousKerning = context.fontKerning;
+        const previousLang = selectCanvasLanguage(context, request.lang);
         try {
           context.font = canvasFontString(
             request.fontRoute,
@@ -376,6 +378,7 @@ export function createProductionTextLayoutService(
           context.font = previousFont;
           context.letterSpacing = previousLetterSpacing;
           if (request.kerning != null) context.fontKerning = previousKerning;
+          restoreCanvasLanguage(context, previousLang);
         }
       },
     },

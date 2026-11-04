@@ -277,6 +277,70 @@ mod private_typography_wire_tests {
     }
 
     #[test]
+    fn western_language_resolves_cascade_independently_of_other_slots() {
+        // ECMA-376 §17.3.2.20: w:val, w:eastAsia and w:bidi are independent
+        // attributes; each inherits through §17.7 docDefaults → paragraph
+        // style → character style → direct formatting on its own.
+        let styles = StyleMap::parse(&format!(
+            r#"<w:styles xmlns:w="{W_NS}">
+          <w:docDefaults><w:rPrDefault><w:rPr><w:lang w:val="en-US" w:eastAsia="ja-JP"/></w:rPr></w:rPrDefault></w:docDefaults>
+          <w:style w:type="paragraph" w:styleId="Base"><w:rPr><w:lang w:val="sr-Latn-RS"/></w:rPr></w:style>
+          <w:style w:type="paragraph" w:styleId="Child"><w:basedOn w:val="Base"/></w:style>
+          <w:style w:type="character" w:styleId="Char"><w:rPr><w:lang w:bidi="ar-SA"/></w:rPr></w:style>
+        </w:styles>"#
+        ));
+        for (ppr, rpr, expected) in [
+            ("", "", "en-us"),
+            (r#"<w:pStyle w:val="Child"/>"#, "", "sr-latn-rs"),
+            (
+                r#"<w:pStyle w:val="Child"/>"#,
+                r#"<w:rStyle w:val="Char"/>"#,
+                "sr-latn-rs",
+            ),
+            (
+                r#"<w:pStyle w:val="Child"/>"#,
+                r#"<w:lang w:val="RO-ro"/>"#,
+                "ro-ro",
+            ),
+        ] {
+            let p = parse_p(
+                &format!(r#"<w:pPr>{ppr}</w:pPr><w:r><w:rPr>{rpr}</w:rPr><w:t>a</w:t></w:r>"#),
+                &styles,
+            );
+            let wire = first_run_json(&p, "text");
+            assert_eq!(wire["lang"], expected, "{ppr} {rpr}");
+            assert_eq!(wire["langEastAsia"], "ja-jp", "{ppr} {rpr}");
+            assert_eq!(
+                wire["__typographyAcquisition"]["languages"]["val"],
+                expected
+            );
+            // The paragraph mark inherits the style chain, not the run's
+            // direct formatting.
+            let mark = if rpr.contains("w:lang") {
+                "sr-latn-rs"
+            } else {
+                expected
+            };
+            assert_eq!(
+                p.paragraph_mark_font_facts
+                    .as_ref()
+                    .unwrap()
+                    .lang
+                    .as_deref(),
+                Some(mark)
+            );
+        }
+        // A run whose cascade never names w:val carries no language key, so
+        // its wire (and every downstream cache key) is unchanged.
+        let p = parse_p(r#"<w:r><w:t>a</w:t></w:r>"#, &StyleMap::default());
+        let wire = first_run_json(&p, "text");
+        assert!(wire.get("lang").is_none());
+        assert!(wire["__typographyAcquisition"]["languages"]
+            .get("val")
+            .is_none());
+    }
+
+    #[test]
     fn private_run_typography_is_identical_for_text_and_field_results() {
         let rpr = r#"<w:rPr>
           <w:u w:val="words" w:color="FF0000" w:themeColor="accent2" w:themeTint="20"/>
@@ -7588,6 +7652,7 @@ fn resolved_run_font_facts(fmt: &RunFmt, theme: &ThemeColors) -> RunFontFacts {
         italic_cs: fmt.italic_cs,
         lang_bidi: fmt.lang_bidi.clone(),
         lang_east_asia: fmt.lang_east_asia.clone(),
+        lang: fmt.lang.clone(),
         kerning: fmt.kerning,
     }
 }
@@ -7738,6 +7803,7 @@ fn run_typography_wire(
             .clone()
             .unwrap_or_else(missing_typography_value),
         languages: TypographyLanguagesWire {
+            val: fmt.lang.clone(),
             east_asia: fmt.lang_east_asia.clone(),
             bidi: fmt.lang_bidi.clone(),
         },
@@ -7794,6 +7860,7 @@ fn make_field_run(
         italic_cs: fmt.italic_cs,
         lang_bidi: fmt.lang_bidi.clone(),
         lang_east_asia: fmt.lang_east_asia.clone(),
+        lang: fmt.lang.clone(),
         background: fmt.background.clone(),
         vert_align: fmt.vert_align.clone(),
         all_caps: fmt.all_caps.unwrap_or(false),
@@ -7897,6 +7964,7 @@ fn text_runs_mergeable(a: &TextRun, b: &TextRun) -> bool {
         && a.italic_cs == b.italic_cs
         && a.lang_bidi == b.lang_bidi
         && a.lang_east_asia == b.lang_east_asia
+        && a.lang == b.lang
         && a.snap_to_grid == b.snap_to_grid
         // Character metrics change measured or painted geometry, so every one
         // must match before a noBreakHyphen run can be folded into its neighbour.
@@ -8149,6 +8217,7 @@ fn parse_run_inner(
     let italic_cs = fmt.italic_cs;
     let lang_bidi = fmt.lang_bidi.clone();
     let lang_east_asia = fmt.lang_east_asia.clone();
+    let lang = fmt.lang.clone();
     let font_hint = fmt.font_hint.clone();
     let snap_to_grid = fmt.snap_to_grid;
     // Run character metrics (ECMA-376 §17.3.2.35 spacing / §17.3.2.43 w /
@@ -8246,6 +8315,7 @@ fn parse_run_inner(
                         italic_cs,
                         lang_bidi: lang_bidi.clone(),
                         lang_east_asia: lang_east_asia.clone(),
+                        lang: lang.clone(),
                         snap_to_grid,
                         char_spacing,
                         fit_text_val,
@@ -8356,6 +8426,7 @@ fn parse_run_inner(
                         italic_cs,
                         lang_bidi: lang_bidi.clone(),
                         lang_east_asia: lang_east_asia.clone(),
+                        lang: lang.clone(),
                         snap_to_grid,
                         char_spacing,
                         fit_text_val,
@@ -8417,6 +8488,7 @@ fn parse_run_inner(
                     italic_cs,
                     lang_bidi: lang_bidi.clone(),
                     lang_east_asia: lang_east_asia.clone(),
+                    lang: lang.clone(),
                     snap_to_grid,
                     char_spacing,
                     fit_text_val,
@@ -8531,6 +8603,7 @@ fn parse_run_inner(
                     italic_cs,
                     lang_bidi: lang_bidi.clone(),
                     lang_east_asia: lang_east_asia.clone(),
+                    lang: lang.clone(),
                     snap_to_grid,
                     char_spacing,
                     fit_text_val,
@@ -8770,6 +8843,7 @@ fn parse_run_inner(
                     italic_cs,
                     lang_bidi: lang_bidi.clone(),
                     lang_east_asia: lang_east_asia.clone(),
+                    lang: lang.clone(),
                     snap_to_grid,
                     char_spacing,
                     fit_text_val,
@@ -21828,6 +21902,11 @@ mod rtl_tests {
         );
         assert_eq!(run.font_hint.as_deref(), Some("eastAsia"));
         assert_eq!(run.lang_east_asia.as_deref(), Some("zh-cn"));
+        assert_eq!(
+            run.lang.as_deref(),
+            Some("en-ae"),
+            "w:lang@w:val lower-cased → run.lang"
+        );
     }
 
     /// Legacy VML text box (ECMA-376 Part 4 §14.1): `<w:pict>` with a

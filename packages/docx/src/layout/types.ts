@@ -293,6 +293,8 @@ export interface RetainedGlyphPaintOperation {
   readonly text: string;
   readonly origin: PointPt;
   readonly fontRoute: CanvasFontRoute;
+  /** Canvas `lang` the glyph was measured with (§17.3.2.20 w:lang). */
+  readonly lang?: string;
   readonly fontSizePt: number;
   readonly fontWeight: number;
   readonly fontStyle: 'normal' | 'italic';
@@ -438,6 +440,9 @@ export interface TextPlacement {
   readonly paintOps: readonly TextPaintOp[];
   readonly color: TextColorPolicy;
   readonly fontRoute: CanvasFontRoute;
+  /** Canvas `lang` the text was measured with (§17.3.2.20 w:lang), so paint
+   * selects the same language-specific glyphs. Absent: context language. */
+  readonly lang?: string;
   readonly fontSizePt: number;
   readonly fontWeight: number;
   readonly fontStyle: 'normal' | 'italic';

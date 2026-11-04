@@ -132,6 +132,9 @@ pub struct RunFmt {
     pub lang_bidi: Option<String>,
     /// ECMA-376 §17.3.2.20 w:lang/@w:eastAsia, lower-cased.
     pub lang_east_asia: Option<String>,
+    /// ECMA-376 §17.3.2.20 w:lang/@w:val, lower-cased — the language of text
+    /// that is neither East Asian nor complex script.
+    pub lang: Option<String>,
     /// ECMA-376 §17.3.2.35 `<w:spacing w:val>` — character-spacing adjustment,
     /// the pitch added AFTER each character before the next is rendered
     /// ("equivalent to the additional character pitch added by a document
@@ -1535,6 +1538,9 @@ pub(crate) fn apply_run(dst: &mut RunFmt, src: &RunFmt) {
     if src.lang_east_asia.is_some() {
         dst.lang_east_asia = src.lang_east_asia.clone();
     }
+    if src.lang.is_some() {
+        dst.lang = src.lang.clone();
+    }
     // Run character-metric axes (§17.3.2.14 fitText / §17.3.2.35 spacing /
     // §17.3.2.43 w / §17.3.2.24 position / §17.3.2.19 kern). Each carries the
     // same "if omitted, inherit; if set, override" rule as the other run
@@ -2309,6 +2315,11 @@ pub fn parse_run_fmt(rpr: roxmltree::Node) -> RunFmt {
         if let Some(east_asia) = attr_w(lang, "eastAsia") {
             if !east_asia.is_empty() {
                 fmt.lang_east_asia = Some(east_asia.to_lowercase());
+            }
+        }
+        if let Some(val) = attr_w(lang, "val") {
+            if !val.is_empty() {
+                fmt.lang = Some(val.to_lowercase());
             }
         }
     }

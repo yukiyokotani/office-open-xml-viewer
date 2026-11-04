@@ -131,6 +131,8 @@ export interface LayoutTextSeg extends LayoutSegSource {
   color: string | null;
   fontFamily: string | null;
   fontRoute?: CanvasFontRoute;
+  /** Language the selected span was measured with (Canvas `lang`). */
+  lang?: string;
   /** Selected-route line ratio. It may come from parsed font bytes or a bounded
    * Canvas measurement; the latter does not reveal OpenType table identity. */
   /** Admitted reference profile has no Far East code-page bits; its Latin
