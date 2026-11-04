@@ -221,12 +221,15 @@ describe('WORD_LINE_END_JUSTIFICATION', () => {
     expect(characters(line!).map(({ xPt }) => xPt)).toEqual([20, 370].map((x) => expect.closeTo(x)));
   });
 
-  it('keeps a right-to-left line whose gap stays closed at its logical start', () => {
+  it('expands a logical source space on an unmarked right-to-left manual-break line', () => {
     const rtl = para([textRun('\u05d0\u05d1\u05d2 \u05d3\u05d4\u05d5'), BR, textRun('\u05d7')], 'distribute',
       { bidi: true } as Partial<DocParagraph>);
     const [broken] = lines(rtl, MODE_15);
     expect(end(broken!)).toBeCloseTo(380);
-    expect(start(broken!)).toBeGreaterThan(300);
+    expect(start(broken!)).toBeCloseTo(20);
+    const sourceText = broken!.placements.filter(p => p.kind === 'text')
+      .sort((a, b) => a.range.start - b.range.start).map(p => p.text).join('');
+    expect(sourceText).toBe('אבג דהו');
   });
 
   it('keeps regional-indicator pairs whole across runs when spreading characters', () => {

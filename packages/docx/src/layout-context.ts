@@ -168,6 +168,9 @@ export interface RightIndentGridPolicy {
 }
 
 export interface ParagraphLayoutContext {
+  /** The runs carry no authored w:rtl (public shape-text runs), so their
+   *  direction is unknown and WORD_RUN_DIRECTION_ISOLATE does not apply. */
+  readonly runDirectionUnauthored?: true;
   readonly lineGrid: LineGridPolicy;
   readonly characterGrid: CharacterGridPolicy;
   readonly rightIndentGrid: RightIndentGridPolicy;

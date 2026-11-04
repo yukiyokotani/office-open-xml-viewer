@@ -431,8 +431,8 @@ export interface TextPlacement {
   readonly advancePt: number;
   /** Shaped cluster geometry for selection/hit testing. Always covers `range`. */
   readonly clusters: readonly TextClusterLayout[];
-  /** Final U+0020 advance removed by the registered Latin line-fit rule. The
-   * transparent browser overlay must not hit-test beyond this retained box. */
+  /** Signed final U+0020 reduction: negative values retain RTL space expansion.
+   * The browser overlay must use this box and preserve its physical word edge. */
   readonly trailingSpaceCompressionPt?: number;
   /** Immutable contextual paint operations. Normally one whole-run operation. */
   readonly paintOps: readonly TextPaintOp[];

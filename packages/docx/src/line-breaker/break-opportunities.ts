@@ -1,5 +1,5 @@
 import { isInklessLineItem } from './break-queue.js';
-import { lineEndSpaceCharged, lineTrailingSpaceSuffixWidth, measureFitTextUnit, measureJoinedTextUnit } from './atomic-units.js';
+import { explicitLineEndSpaceCounts, lineEndSpaceCharged, lineTrailingSpaceSuffixWidth, measureFitTextUnit, measureJoinedTextUnit } from './atomic-units.js';
 import { placeOptionalHyphenPrefix } from './optional-hyphens.js';
 import {
   kinsokuAdjustedSplit,
@@ -144,7 +144,7 @@ function placedAdvanceExceeds(
 ): boolean {
   const { breakerState, strAdvance, availW, fitsMeasuredWidth } = context;
   // A line-end U+3000 run hangs as whitespace (word-ideographic-space hang).
-  const visible = (lineEndSpaceCharged(context) ? placedText : placedText.replace(/ +$/u, ''))
+  const visible = (lineEndSpaceCharged(context, segment, placedText) ? placedText : placedText.replace(/ +$/u, ''))
     .replace(/\u3000+$/u, '');
   return !fitsMeasuredWidth(visibleLineWidth(context, visible) + strAdvance(segment, visible), availW());
 }
@@ -410,7 +410,8 @@ function processTextSegment(context: BreakOpportunityIteratorContext, seg: Layou
     widthPx: number,
     trailingSpacePx: number,
   ): number => wordVisiblePrefixFitWidthPx(widthPx, trailingSpacePx, lineEndSpaceCharged(context));
-  const wForFit = fitWidthFor(prospectiveWidth, trailingSpaceW);
+  const wForFit = wordVisiblePrefixFitWidthPx(prospectiveWidth, trailingSpaceW,
+    lineEndSpaceCharged(context, s));
   // ECMA-376 §17.3.1.33 does not prescribe a line-breaking tolerance.
   // Word-for-Mac controls with Calibri and Arial, left/center/right aligned
   // 10pt table cells, wrap a trailing Latin word below its natural advance
@@ -481,7 +482,9 @@ function processTextSegment(context: BreakOpportunityIteratorContext, seg: Layou
   // §17.3.1.21 permits paragraph-edge hanging, not intrusion into a
   // DrawingML exclusion (§20.4.2.17). A narrowed float gap owns its full ink.
   const admitsTrailingOverflowPunctuation =
-    overflowPunct &&
+    // Hanging punctuation cannot also admit a charged source-space suffix.
+    // Its zero-ink continuation is acquired independently of the visible mark.
+    !explicitLineEndSpaceCounts(s) && overflowPunct &&
     breakerState.gapTransaction?.endsAtExclusion !== true &&
     trailingOverflowCharacter !== undefined &&
     (breakerState.currentLine.length > 0 || textBeforeTrailingOverflow.length > 0) &&
@@ -1605,7 +1608,7 @@ function prepareAtomicTextFit(
     })()
   ) {
     let chunkW = w;
-    let chunkTrail = trailingSpaceW;
+    let chunkTrail = lineEndSpaceCharged(context, s) ? 0 : trailingSpaceW;
     let next = breakerState.queue.peek();
     if (!s.text.endsWith(' ')) {
       const following = breakerState.queue[Symbol.iterator]();
@@ -1618,7 +1621,8 @@ function prepareAtomicTextFit(
         const fw = segAdvance(ft);
         const fTrim = ft.text.replace(/ +$/, '');
         chunkW += fw;
-        chunkTrail = ft.text.endsWith(' ') ? fw - strAdvance(ft, fTrim) : 0;
+        chunkTrail = ft.text.endsWith(' ') && !lineEndSpaceCharged(context, ft)
+          ? fw - strAdvance(ft, fTrim) : 0;
         if (ft.text.endsWith(' ')) {
           next = following.next().value;
           break;

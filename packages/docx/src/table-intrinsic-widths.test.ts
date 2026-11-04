@@ -168,6 +168,30 @@ describe('table intrinsic content widths', () => {
     ...overrides,
   });
 
+  it('includes opposite-direction source-end spaces in the AutoFit minimum without changing maximum content', () => {
+    const context = measuringContext();
+    const environment = {
+      pageIndex: 0, totalPages: 1, pageWritingMode: 'horizontal-tb' as const,
+      documentHasEastAsianText: false, compatibilityMode: 15,
+      layoutServices: createLayoutServices(model([]), { measureContext: context }),
+    };
+    const measure = (runs: DocParagraph['runs']) => measureParagraphIntrinsicWidths(
+      paragraph(runs, { alignment: 'center' }), intrinsicContext(), 200,
+      { context, fontFamilyClasses: {} }, environment,
+    );
+    // Word AutoFit reserves the whole opposite-direction run, including its
+    // source-owned spaces; fixed-width cells may instead wrap the suffix.
+    for (const runs of [
+      [{ ...textRun('Ab '), rtl: true }],
+      [{ ...textRun('1. '), rtl: true }],
+      [{ ...textRun('😀b '), rtl: true }],
+      [{ ...textRun('Ab'), rtl: true }, { ...textRun(' '), rtl: true }],
+    ]) expect(measure(runs)).toEqual({ minWidthPt: 15, maxWidthPt: 15 });
+    // Paragraph-direction trailing spaces continue hanging from the minimum.
+    expect(measure([textRun('Ab ')]))
+      .toEqual({ minWidthPt: 10, maxWidthPt: 15 });
+  });
+
   it('ignores paragraph intrinsic width for an empty unnumbered cell paragraph', () => {
     const source = paragraph([]);
     const measured: DocParagraph[] = [];
@@ -743,6 +767,21 @@ describe('table intrinsic content widths', () => {
     );
     expect(widths([parts.join('')])).toEqual({ minWidthPt: min, maxWidthPt: max });
     expect(widths(parts)).toEqual({ minWidthPt: min, maxWidthPt: max });
+  });
+
+  it('keeps native word-space kerning inside a charged source minimum', () => {
+    const ctx = measuringContext(text => [...text].length * 10
+      - (ctx.fontKerning === 'normal' ? (text.match(/T /gu)?.length ?? 0) : 0));
+    const services = createLayoutServices(model([]), { measureContext: ctx });
+    for (const parts of [['T '], ['T', ' ']]) {
+      const source = paragraph(parts.map(text => ({ ...textRun(text), kerning: 8 })),
+        { alignment: 'center', bidi: true });
+      expect(measureParagraphIntrinsicWidths(source, intrinsicContext({ baseRtl: true }), 200,
+        { context: ctx, fontFamilyClasses: {} },
+        { pageIndex: 0, totalPages: 1, pageWritingMode: 'horizontal-tb',
+          documentHasEastAsianText: false, compatibilityMode: 15, layoutServices: services },
+      )).toEqual({ minWidthPt: 19, maxWidthPt: 19 });
+    }
   });
 
   it.each(['font', 'formatting', 'threshold'])('retains a real %s boundary before a source-run space', (boundary) => {

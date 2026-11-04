@@ -1835,8 +1835,8 @@ export interface DocxTextRunInfo {
   y: number;
   /** Measured text width in CSS px. */
   w: number;
-  /** Final U+0020 reduction already included in `w`; limits the transparent
-   * selection/hyperlink hit box to the retained Canvas layout width. */
+  /** Signed final U+0020 reduction included in `w` (negative for expansion);
+   * bounds the selection/hyperlink hit box to the retained Canvas width. */
   trailingSpaceCompressionPx?: number;
   /** Line height in CSS px. */
   h: number;

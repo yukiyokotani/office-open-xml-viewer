@@ -424,9 +424,9 @@
     "transforms": [
       ["setTransform",1,0,0,1,0,0],
       ["setTransform",1,0,0,1,0,0],
-      ["translate",4.31421875,19.2607421875],
+      ["translate",0,19.2607421875],
       ["scale",0.66,1],
-      ["translate",127.40937750000002,19.2607421875],
+      ["translate",123.09515875000002,19.2607421875],
       ["scale",0.66,1],
       ["translate",0,43.2607421875],
       ["scale",0.66,1],
@@ -439,8 +439,8 @@
       "normal 400 20px \"Arial\", \"Arial\", \"Noto Sans\", \"Noto Sans Hebrew\", \"Noto Sans Thai\", \"Noto Sans Devanagari\", \"Arial\", \"Helvetica\", \"Liberation Sans\", \"Noto Sans JP\", \"Hiragino Sans\", \"Meiryo\", \"Noto Sans SC\", \"Noto Sans TC\", \"Noto Sans KR\", \"Noto Naskh Arabic\", \"Noto Sans Arabic\", sans-serif"
     ],
     "fills": [
-      ["بببــــــــــــب",0,0,0,"0.9741950757575757px","normal",4.31421875,19.2607421875,0.66,1],
-      ["بببـــــــــــــب",0,0,0,"0.9741950757575757px","normal",127.40937750000002,19.2607421875,0.66,1],
+      ["بببــــــــــــب ",0,0,0,"0.9741950757575757px","normal",0,19.2607421875,0.66,1],
+      ["بببـــــــــــــب ",0,0,0,"0.9741950757575757px","normal",123.09515875000002,19.2607421875,0.66,1],
       ["WWWWWWWWWWWWWWWWWWWWWWWWWWW",0,0,0,"0.9741950757575757px","normal",0,43.2607421875,0.66,1],
       ["WWWWWWWWWWWWWWWWWWWWWWWWWWW",0,0,0,"0.9741950757575757px","normal",0,67.2607421875,0.66,1],
       ["WWWWWW",0,0,0,"0.9741950757575757px","normal",0,91.2607421875,0.66,1]

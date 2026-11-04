@@ -813,6 +813,34 @@ export function finalizeBuiltSegments(
     start = end;
   }
 
+  // word-explicit-line-end-run-space-fit: acquire the source boundary once,
+  // before the breaker creates prefixes. A boundary may close several source
+  // owners; count only the U+0020 owners opposite to the paragraph direction.
+  // Non-text objects/tabs interrupt the literal space suffix. Empty source
+  // pieces have no visible predecessor and cannot open whitespace-only lines.
+  if (environment.countExplicitOppositeRunSpaces) {
+    for (let end = 0; end <= segs.length; end++) {
+      if (end < segs.length && !('lineBreak' in segs[end]!)) continue;
+      const tail: { segment: LayoutTextSeg; index: number }[] = [];
+      let hasVisible = false;
+      for (let index = end - 1; index >= 0; index--) {
+        const segment = segs[index]!;
+        if (!('text' in segment)) break;
+        if (segment.text === '') continue;
+        if (!segment.text.endsWith(' ')) { hasVisible = tail.length > 0 && segment.text.trim().length > 0; break; }
+        tail.push({ segment, index });
+        if (segment.text.replace(/ +$/u, '').length > 0) { hasVisible = true; break; }
+      }
+      if (!hasVisible) continue;
+      for (const { segment, index } of tail) {
+        if ((segment.rtl === true) === (environment.paragraphRtl === true)) continue;
+        segment.explicitLineEndSpaceEnd = (segment.sourceTextOffset ?? 0) + segment.text.length;
+        // UAX #14 LB7 permits no break before SP, including a formatting seam.
+        if (/^ +$/u.test(segment.text) && index > 0 && 'text' in segs[index - 1]!) segment.joinPrev = true;
+      }
+    }
+  }
+
   retainHorizontalPunctuationInkClearance(segs);
 }
 

@@ -47,7 +47,21 @@ test('fractional unchanged-text paint and advances equal main bit for bit', asyn
     return Object.fromEntries(await Promise.all(spacingFixtures.map(async (fixture: { id: string }) =>
       [fixture.id, await recordSpacingFixture(fixture)])));
   });
-  expect(streams).toEqual(mainSpacingStreams);
+  // Source-owned Arabic spaces intentionally change first-line paint packets;
+  // retain exact arithmetic for every unaffected fixture and the Latin tail.
+  for (const [id, stream] of Object.entries(streams)) {
+    if (id !== 'kashida') expect(stream).toEqual(mainSpacingStreams[id]);
+  }
+  const actual = streams.kashida;
+  const previous = mainSpacingStreams.kashida;
+  expect(actual.advances.slice(1)).toEqual(previous.advances.slice(1));
+  expect(actual.fills.filter((fill: readonly unknown[]) => String(fill[0]).startsWith('W')))
+    .toEqual(previous.fills.filter((fill: readonly unknown[]) => String(fill[0]).startsWith('W')));
+  expect(actual.advances[0].map((piece: readonly unknown[]) => piece[0]).join('')).toBe('بببب بببب ');
+  const arabicPaint = actual.fills.map((fill: readonly unknown[]) => String(fill[0]))
+    .filter((text: string) => /[\u0600-\u06ff]/u.test(text)).join('');
+  expect(arabicPaint).toContain('ـ');
+  expect(arabicPaint.replace(/[ـ ]/gu, '')).toBe('بببببببب');
 });
 
 for (let index = 0; index < CONFORMANCE_CASES.length; index += 1) {

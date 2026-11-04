@@ -210,17 +210,20 @@ describe('WORD_KASHIDA_LINE_FIT', () => {
 });
 
 describe('WORD_RTL_JUSTIFIED_VISIBLE_FIT', () => {
+  // Hebrew runs carry w:rtl, as Word writes them; a run without it is ordered
+  // as a left-to-right isolate (WORD_RUN_DIRECTION_ISOLATE).
   it('fits a justified right-to-left line by its visible prefix', () => {
     // A 345 pt line: seven words are 340 pt visible, 350 pt with the line-end
     // space.
     const hebrew = Array.from({ length: 20 }, () => '\u05d0\u05d1\u05d2\u05d3').join(' ');
     const rtl = { bidi: true, indentRight: 15 } as Partial<DocParagraph>;
     for (const settings of MODES) {
-      const [both] = lines(para([textRun(hebrew)], 'both', rtl), settings);
+      const [both] = lines(para([textRun(hebrew, { rtl: true })], 'both', rtl), settings);
       expect(wordsOn(both!), `mode ${settings?.compatibilityMode}`).toBe(7);
-      // Unmeasured alignments keep charging the line-end space.
-      const [start] = lines(para([textRun(hebrew)], 'left', rtl), settings);
-      expect(wordsOn(start!)).toBe(6);
+      // The measured all-alignment RTL hang also admits this visible prefix
+      // on an ordinary start-aligned line.
+      const [start] = lines(para([textRun(hebrew, { rtl: true })], 'left', rtl), settings);
+      expect(wordsOn(start!)).toBe(7);
     }
   });
 
@@ -230,18 +233,18 @@ describe('WORD_RTL_JUSTIFIED_VISIBLE_FIT', () => {
     const hebrew = Array.from({ length: 20 }, () => '\u05d0\u05d1\u05d2\u05d3').join(' ');
     for (const settings of MODES) {
       // Seven words justified across the band, the space hanging outside.
-      const [justified] = lines(para([textRun(hebrew)], 'both', rtl), settings);
+      const [justified] = lines(para([textRun(hebrew, { rtl: true })], 'both', rtl), settings);
       expect(start(justified!)).toBeCloseTo(35);
       expect(end(justified!)).toBeCloseTo(380);
       // A 340 pt single word with its space (350 pt) fits the 345 pt band and
       // stays at the start edge.
       const word = '\u05d0'.repeat(34);
-      const [single] = lines(para([textRun(`${word} ${word}`)], 'both', rtl), settings);
+      const [single] = lines(para([textRun(`${word} ${word}`, { rtl: true })], 'both', rtl), settings);
       expect(characters(single!)).toHaveLength(34);
       expect(end(single!)).toBeCloseTo(380);
       expect(start(single!)).toBeCloseTo(40);
       // highKashida: the line-end space hangs as well.
-      const [kashida] = lines(para([textRun(hebrew)], 'highKashida', rtl), settings);
+      const [kashida] = lines(para([textRun(hebrew, { rtl: true })], 'highKashida', rtl), settings);
       expect(end(kashida!)).toBeCloseTo(380);
       expect(start(kashida!)).toBeCloseTo(35);
       // Latin text keeps its line-end space at the right of its run, where it
@@ -259,13 +262,13 @@ describe('WORD_RTL_JUSTIFIED_VISIBLE_FIT', () => {
     const w1 = '\u05d0'.repeat(15);
     const half = '\u05d1'.repeat(9);
     for (const settings of MODES) {
-      const [split] = lines(para([textRun(`${w1} ${half}`), textRun(`${half} `, { color: 'FF0000' }), textRun('\u05d2'.repeat(5))], 'both', rtl), settings);
+      const [split] = lines(para([textRun(`${w1} ${half}`, { rtl: true }), textRun(`${half} `, { color: 'FF0000', rtl: true }), textRun('\u05d2'.repeat(5), { rtl: true })], 'both', rtl), settings);
       expect(characters(split!)).toHaveLength(33);
       // The visible text stays in the band at its start edge.
       expect(start(split!)).toBeGreaterThanOrEqual(35 - 1e-6);
       expect(end(split!)).toBeCloseTo(380);
       const soft = textRun('', { optionalHyphen: true } as Partial<DocxTextRun>);
-      const [hyphen] = lines(para([textRun(`${w1} ${half}`), soft, textRun(`${half} `), textRun('\u05d2'.repeat(5))], 'both', rtl), settings);
+      const [hyphen] = lines(para([textRun(`${w1} ${half}`, { rtl: true }), soft, textRun(`${half} `, { rtl: true }), textRun('\u05d2'.repeat(5), { rtl: true })], 'both', rtl), settings);
       expect(characters(hyphen!).map(({ character }) => character).join('')).not.toContain('-');
       expect(characters(hyphen!)).toHaveLength(33);
     }
@@ -302,7 +305,7 @@ describe('WORD_RTL_JUSTIFIED_VISIBLE_FIT', () => {
     // leftmost, so its space sits between the two words and takes the 5 pt.
     const rtl = { bidi: true, indentRight: 15 } as Partial<DocParagraph>;
     for (const settings of MODES) {
-      const [final] = lines(para([textRun(`${'\u05d0'.repeat(25)} ${'a'.repeat(8)} `)], 'both', rtl), settings);
+      const [final] = lines(para([textRun(`${'\u05d0'.repeat(25)} `, { rtl: true }), textRun(`${'a'.repeat(8)} `)], 'both', rtl), settings);
       expect(characters(final!)).toHaveLength(33);
       expect(start(final!)).toBeCloseTo(35);
       expect(end(final!)).toBeCloseTo(380);
@@ -312,7 +315,7 @@ describe('WORD_RTL_JUSTIFIED_VISIBLE_FIT', () => {
     const rtl = { bidi: true, indentRight: 15, wordWrap: false } as Partial<DocParagraph>;
     const hebrew = Array.from({ length: 20 }, () => '\u05d0\u05d1\u05d2\u05d3').join(' ');
     for (const settings of MODES) {
-      const [first] = lines(para([textRun(hebrew)], 'both', rtl), settings);
+      const [first] = lines(para([textRun(hebrew, { rtl: true })], 'both', rtl), settings);
       expect(wordsOn(first!)).toBe(6);
       expect(start(first!)).toBeGreaterThanOrEqual(35 - 1e-6);
       expect(end(first!)).toBeLessThanOrEqual(380 + 1e-6);

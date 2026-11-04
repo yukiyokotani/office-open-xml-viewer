@@ -4,7 +4,7 @@ import {
   computeSegmentLineVisualOrder, segmentLineHasRtl,
   type SegmentLineVisualOrder,
 } from '@silurus/ooxml-core/internal/bidi-line';
-import { wordRtlAmbiguousCharacter } from './layout/script-compatibility.js';
+import { wordRtlAmbiguousCharacter, wordRunDirectionSpan } from './layout/script-compatibility.js';
 
 const options = {
   isTab: (segment: unknown) => 'isTab' in (segment as object),
@@ -12,13 +12,29 @@ const options = {
   digitsAsAN: (segment: unknown) => (segment as { digitsAsAN?: unknown }).digitsAsAN === true,
   isRtlAmbiguous: wordRtlAmbiguousCharacter,
   directionFromAnyOdd: true,
+  isolateDirection: wordRunDirectionSpan,
+  paintDirectionFromTrailingSpace: true,
 };
 export type LineVisualOrder = SegmentLineVisualOrder;
 export const segmentsHaveRtl = (segments: readonly unknown[]): boolean =>
   segmentLineHasRtl(segments, options);
+const unauthoredDirectionOptions = { ...options, isolateDirection: undefined };
+const lineLevelOptions = {
+  ...options, isolateDirection: undefined, paintDirectionFromTrailingSpace: undefined,
+};
+/** How a line's runs are ordered: 'word' resolves run-direction isolates
+ *  (WORD_RUN_DIRECTION_ISOLATE) and keeps line-end spaces in their runs
+ *  (WORD_LINE_END_SPACE_STAYS_IN_RUN); 'unauthored' (runs without w:rtl) skips
+ *  the isolates; 'line-level' keeps plain line-level UAX #9 for lines whose
+ *  character-spread gap model has not adopted those rules. */
+export type LineOrderModel = 'word' | 'unauthored' | 'line-level';
 export const computeLineVisualOrder = (
-  segments: readonly unknown[], baseRtl: boolean,
-): LineVisualOrder => computeSegmentLineVisualOrder(segments, baseRtl, options);
+  segments: readonly unknown[], baseRtl: boolean, model: LineOrderModel = 'word',
+): LineVisualOrder => model === 'line-level'
+  ? computeSegmentLineVisualOrder(segments, baseRtl, lineLevelOptions)
+  : computeSegmentLineVisualOrder(
+    segments, baseRtl, model === 'word' ? options : unauthoredDirectionOptions, true,
+  );
 
 /** Physical edge a line aligns to, resolving logical start/end against base direction. */
 export type AlignEdge = 'left' | 'right' | 'center' | 'justify';

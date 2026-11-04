@@ -17,12 +17,17 @@ export function sourceOwnedTextPlacements(placement: TextPlacement): readonly So
   const projected = trailingSpaceCompressionPt === undefined
     ? unreduced : { ...unreduced, trailingSpaceCompressionPt };
   if (!placement.sourceRuns) return [projected];
-  // The retained reduction is an equal share of each trailing U+0020 (see
+  // The signed retained reduction shares each trailing U+0020 equally (see
   // textPlanSegment); an owner reports only the share inside its own advance.
   const spacesStart = trailingSpaceCompressionPt === undefined
     ? placement.range.end
     : placement.range.start + placement.text.replace(/ +$/u, '').length;
   const perSpacePt = (trailingSpaceCompressionPt ?? 0) / Math.max(1, placement.range.end - spacesStart);
+  // Adjusted horizontal RTL clusters are relative to the glyph paint origin,
+  // including negative offsets for the physical leading whitespace.
+  const adjustedRtl = placement.direction === 'rtl' && trailingSpaceCompressionPt !== undefined
+    && (placement.writingMode ?? 'horizontal-tb') === 'horizontal-tb';
+  const fragmentOriginXPt = adjustedRtl ? placement.origin.xPt : placement.bounds.xPt;
   let cursor = 0;
   return placement.sourceRuns.map(owner => {
     while (cursor < placement.clusters.length && placement.clusters[cursor]!.range.end <= owner.range.start) cursor++;
@@ -42,7 +47,7 @@ export function sourceOwnedTextPlacements(placement: TextPlacement): readonly So
     const ownedSpaces = Math.max(0, owner.range.end - Math.max(owner.range.start, spacesStart));
     return {
       ...unreduced,
-      ...(ownedSpaces > 0 && perSpacePt > 0 ? { trailingSpaceCompressionPt: ownedSpaces * perSpacePt } : {}),
+      ...(ownedSpaces > 0 && perSpacePt !== 0 ? { trailingSpaceCompressionPt: ownedSpaces * perSpacePt } : {}),
       sourceRuns: undefined,
       sourceRunIndex: owner.sourceRunIndex,
       role: owner.role ?? 'content',
@@ -53,9 +58,9 @@ export function sourceOwnedTextPlacements(placement: TextPlacement): readonly So
         placement.semanticSlotSpans, offset, offset + owner.range.end - owner.range.start,
       ) } : {}),
       origin: whole ? placement.origin : { ...placement.origin, xPt: placement.origin.xPt + from },
-      bounds: whole ? placement.bounds : { ...placement.bounds, xPt: placement.bounds.xPt + from, widthPt: to - from },
+      bounds: whole ? placement.bounds : { ...placement.bounds, xPt: fragmentOriginXPt + from, widthPt: to - from },
       ...(placement.highlightBounds ? { highlightBounds: whole ? placement.highlightBounds : {
-        ...placement.highlightBounds, xPt: placement.highlightBounds.xPt + from, widthPt: to - from,
+        ...placement.highlightBounds, xPt: (adjustedRtl ? placement.origin.xPt : placement.highlightBounds.xPt) + from, widthPt: to - from,
       } } : {}),
       advancePt: whole ? placement.advancePt : to - from,
       clusters: whole ? placement.clusters : clusters.map(cluster => ({ ...cluster,

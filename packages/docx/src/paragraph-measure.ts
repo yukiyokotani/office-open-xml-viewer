@@ -28,6 +28,7 @@ import {
   WORD_PICTURE_BULLET_LINE_PARTICIPATION,
   wordJustifiedInterwordCompressionApplies,
   wordJustifiedLineFit,
+  wordExplicitLineEndRunSpaceFitApplies,
   wordPreservesPre15AnchorLine,
 } from './layout/line-compatibility.js';
 import { LayoutInvariantError } from './layout/diagnostics.js';
@@ -134,6 +135,20 @@ export function paragraphCharacterGrid(
     characterPitchPt: context.characterGrid.pitchPt,
     charSpacePt: context.characterGrid.deltaPt,
   };
+}
+
+/** One source-boundary acquisition policy for bounded lines and AutoFit. */
+export function paragraphCountsExplicitOppositeRunSpaces(
+  paragraph: Pick<ParagraphLayoutSource, 'alignment'>,
+  context: Pick<ParagraphLayoutContext, 'runDirectionUnauthored' | 'wordWrap'>,
+  environment: Pick<ParagraphMeasurementEnvironment,
+    'pageWritingMode' | 'verticalCJK' | 'verticalPageFrame' | 'compatibilityMode'>,
+): boolean {
+  return environment.pageWritingMode === 'horizontal-tb'
+    && environment.verticalCJK !== true && environment.verticalPageFrame !== true
+    && context.runDirectionUnauthored !== true
+    && wordExplicitLineEndRunSpaceFitApplies(environment.compatibilityMode, paragraph.alignment,
+      context.wordWrap !== false);
 }
 
 function paragraphGrid(context: ParagraphLayoutContext): DocGridCtx {
@@ -350,6 +365,7 @@ export function measureParagraph(
     lineGridActive: context.lineGrid.active,
     characterGridActive: context.characterGrid.active,
     paragraphRtl: context.baseRtl,
+    countExplicitOppositeRunSpaces: paragraphCountsExplicitOppositeRunSpaces(paragraph, context, environment),
     autoSpaceDE: paragraph.autoSpaceDE,
     autoSpaceDN: paragraph.autoSpaceDN,
   });
@@ -623,7 +639,9 @@ export function measureParagraph(
       ? { lineEndIdeographicSpaceHangs: paragraph.wordWrap !== false }
       : false,
     wordJustifiedLineFit(paragraph.alignment, environment.compatibilityMode, context.baseRtl, context.wordWrap !== false,
-      context.baseRtl ? context.physicalIndentLeftPt : context.physicalIndentRightPt + rightGridAdjustmentPt),
+      context.baseRtl ? context.physicalIndentLeftPt : context.physicalIndentRightPt + rightGridAdjustmentPt,
+      environment.pageWritingMode === 'horizontal-tb' && environment.verticalCJK !== true
+        && environment.verticalPageFrame !== true),
     context.cjkClosingMarkHang,
   );
   if (lines.length === 0) return measureMarkOnly();
