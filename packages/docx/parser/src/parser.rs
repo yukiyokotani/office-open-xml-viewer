@@ -16291,6 +16291,7 @@ fn parse_table_row(
         row_height_rule,
         is_header,
         cant_split,
+        cuts_in_place: false,
         table_row_layout,
     }
 }

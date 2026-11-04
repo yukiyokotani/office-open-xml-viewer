@@ -25,6 +25,10 @@ const STORED_ENTRY_OVERHEAD: usize = 64;
 pub enum Family {
     Paragraph,
     Text,
+    Table,
+    TableColumn,
+    TableRow,
+    TableCell,
 }
 
 impl Family {
@@ -32,6 +36,10 @@ impl Family {
         match self {
             Family::Paragraph => "paragraph",
             Family::Text => "text",
+            Family::Table => "table",
+            Family::TableColumn => "table-column",
+            Family::TableRow => "table-row",
+            Family::TableCell => "table-cell",
         }
     }
 }
