@@ -39,6 +39,7 @@ import {
   wordBalancedConsecutiveSpaceCellApplies,
   wordBalancedLinesAndCharsGridDeltaFactor,
   wordExternalLinkSyntaxBreakOffsets,
+  wordTabDisplacedReadingFrameApplies,
 } from '../layout/line-compatibility.js';
 import { type LayoutSeg, type LayoutTextSeg, type LineLayoutEnvironment } from './model.js';
 import { charScaleFactor, retainHorizontalPunctuationInkClearance } from './advance.js';
@@ -1836,6 +1837,8 @@ function appendRunsToSegments(
             sourceRunIndex: runIndex,
             ...(sequence ? { sourceTextOffset: displayOffset - 1 } : {}),
             ...(tabListLabel !== undefined ? { listLabel: tabListLabel } : {}),
+            ...(wordTabDisplacedReadingFrameApplies(environment.compatibilityMode)
+              ? { displacedFloatTabFrame: true } : {}),
           });
         }
       }

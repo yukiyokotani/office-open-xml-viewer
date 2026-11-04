@@ -7,13 +7,19 @@ export const WORD_TAB_DISPLACED_READING_FRAME = defineCompatibilityRule({
   id: 'word-float-tab-reading-frame',
   evidence: {
     kind: 'office-observation',
-    syntheticFixtureId: 'tabs-floats-round3',
+    syntheticFixtureId: 'blk-0898',
     application: 'Microsoft Word',
-    version: '16.0.20430',
+    version: '16.0.20527.20088',
     platform: 'Windows',
   },
-  description: 'Issue #1672 controlled Word exports cover ordinary left/right/center/decimal tabs, one/two tabs, both paragraph directions and either float edge, with no-float counterexamples. Eligibility stays margin-relative (ECMA-376 §17.3.1.37), but an authored target moves with a float-displaced leading line edge. Library policy retains this observation only where text fits the available float band. Word also overflows some tab cells into floats or past the margin; that unspecified fallback is intentionally unsupported. Out-of-band targets break the line and following text uses ordinary legal-break and emergency fitting, without an overflow allowance or a fabricated wide reference band. Evidence: issue #1672 controls (PR #1698), re-exported in Windows Word 16.0.20430 for #1896 with every in-band line identical to the earlier export; only the four unsupported overflow cells differ.',
+  description: 'Stop eligibility stays margin-relative (ECMA-376 §17.3.1.37). With the compatibility mode absent or below 15, an authored stop moves with a float-displaced leading line edge, and a cell whose displaced target lies outside the float window is placed there anyway: it overlaps the float or runs past the margin (and off the page) instead of breaking the line. From mode 15 stops are not displaced; an end/center/decimal cell is limited to the window by WORD_ALIGNED_TAB_CELL_FIT_BACK and a left/start stop past the window breaks the line. Evidence: issue #1672 controls (mode absent; ordinary left/right/center/decimal tabs, one/two tabs, both directions, either float edge, no-float counterexamples; PR #1698, Windows re-export for #1896), and the blk-0898-tabs-float controls of #2047 (Windows Word 16.0.20527, modes absent, 14 and 15; Courier New 12; a 150 x 10 pt square-wrapped float at either column edge narrowing line 1; right stops at 200, 300, 360, 400 and 481.9 pt, center, decimal and left stops at 360/400 pt, a single word and a six-word cell, LTR rows and bidi end/start rows; jc left, both, distribute, lowKashida). Modes absent and 14 are identical: every cell sits at stop + displacement (for example right 360 pt beside a left float ends at 510 pt, past the 481.9 pt margin; right 481.9 pt ends off the page), or over the float when the float is on the trailing side. Mode 15 places every row at its undisplaced stop or limited to the window end. Two pre-15 rows (jc left six-word cell, jc distribute bidi start stop) were instead set below the float with undisplaced stops; their siblings with identical geometry under other justifications were not, and this unexplained exception is not emulated. The renderer reproduces 76 of the 84 #1672 positions exactly (all single-tab and in-window cases); in the 8 two-tab cases the second tab starts past the right margin, where Word advances it 14 pt at 10 and 20 pt (tabs-floats-overflow-font20) while the library keeps the automatic grid (10 pt further), an unexplained residual. Library scope: the overflow applies only when the rest of the paragraph (every later cell to the paragraph end or line break) is no wider than the paragraph, and not in a second gap on the same baseline (WORD_FLOAT_GAP_FLOW); longer content (an empty cell before a long one included) and continuation gaps were not measured and keep the window containment.',
 });
+
+/** The compatibility modes in which {@link WORD_TAB_DISPLACED_READING_FRAME}
+ * displaces stops and lets out-of-window cells overflow. */
+export function wordTabDisplacedReadingFrameApplies(compatibilityMode: number | undefined): boolean {
+  return compatibilityMode === undefined || compatibilityMode < 15;
+}
 
 /** Projection of {@link WORD_TAB_DISPLACED_READING_FRAME}. The caller has already
  * selected the next eligible stop in margin coordinates. */
@@ -24,6 +30,30 @@ export function wordFloatTabStopPosition(
 ): number {
   return custom ? stopPosition + Math.max(0, leadingShift) : stopPosition;
 }
+
+export const WORD_TAB_GLUED_TO_FOLLOWING_TEXT = defineCompatibilityRule({
+  id: 'word-tab-glued-to-following-text',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'blk-0898',
+    application: 'Microsoft Word',
+    version: '16.0.20527.20088',
+    platform: 'Windows',
+  },
+  description: 'A tab character offers a line break before itself but not after itself: it stays with the text that immediately follows it. When the first unbreakable unit after a tab does not fit behind the tab\'s stop, the line breaks before the tab, which moves to the next line and resolves its stop there; a tab that starts a line keeps its unit, which is then broken by characters in the room left behind the stop. A space after the tab is an ordinary break opportunity (the tab and space end the line). Evidence: #2051, blk-0898-tabs-move controls (Windows Word 16.0.20527, compatibility modes absent, 14 and 15 identical; Courier New 12; jc left, both, distribute, lowKashida and highKashida; LTR left stops and bidi start stops): label + tab + a 24-character word at a 324 pt stop (the tab moves and the word is broken after 21 characters, 8 under the highKashida line-fit reserve); two stops 144/324 pt with a 180 pt label (the word lands whole at 144 pt on line 2); a space before the tab (same); a space after the tab (the word starts line 2 at the margin); a leading tab (the word is broken after the stop on line 1); an automatic 36 pt stop (the word lands at 36 pt); an 80-character word (moved, then broken behind the stop on line 2); a 20-character word that fits (stays). Before, the tab ended line 1 and the word started line 2 at the margin. Library scope (wordTabGlueUnit in line-breaker/tabs.ts): every measured word was one plain run; a tab followed by a word that continues across a formatting seam, holds an optional hyphen, a hyphen/URL or SEA/CJK opportunity, a no-break hyphen, fitText, ruby or tate-chu-yoko, or that lies on a snapToChars grid, a word in a run against the paragraph direction (a left-to-right run in a bidi paragraph: the #1672 r4 controls end such a line with its tabs), a float-narrowed line, and a positional tab, keep the earlier behaviour (the tab may end the line). Intrinsic minimum widths apply the rule to the same input class (a leading stop needs its pen position plus the glued word).',
+});
+
+export const WORD_ALIGNED_TAB_CELL_FIT_BACK = defineCompatibilityRule({
+  id: 'word-aligned-tab-cell-fit-back',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'blk-0898',
+    application: 'Microsoft Word',
+    version: '16.0.20527.20088',
+    platform: 'Windows',
+  },
+  description: 'ECMA-376 §17.3.1.37/§17.18.84 align the text after an end (right), center or decimal stop to that stop; neither says what happens when the aligned cell does not fit the line. Word fits such a cell as if the tab had no gap and then lets the gap take the line\'s leftover room, up to the stop-aligned gap, so the cell slides back toward the pen and ends at the line (or float window) end. On a justified line that still has justification opportunities the gap stays empty and the slack is justified instead. A start (left) stop never slides: its gap is fixed at the stop and the cell wraps at the line end, in left-to-right and bidi paragraphs alike. Evidence: #2050, blk-0898-tabs-rtl controls (Windows Word 16.0.20527, compatibility modes absent, 14 and 15; Courier New 12; jc left, both, distribute and lowKashida; every row in a bidi paragraph with Hebrew text and as a left-to-right twin): start stops at 72/216/360 pt, a leading tab, an automatic stop and two stops keep their gaps (line 1 holds 11/7/3/7/8/5 four-character tokens, against 12/12/12/13/9/7 when the last gap shrank); a 216 pt start cell overflowing by 0.6 pt wraps its last token; a center stop at 360 pt whose 280.8 pt cell would end at 500.4 pt ends at the 481.9 pt margin instead (start 201.1 pt), and a decimal stop at 360 pt with an overflowing cell starts its cell at 42.6 pt, ending line 1 at the margin, under jc left; under both, distribute and lowKashida that line starts its cell at the pen and is justified. End and center cells wider than the room before the stop start at the pen. #2047 blk-0898-tabs-float controls in mode 15 limit end, center and decimal cells beside a float to the window end (right/center/decimal 400 pt beside a right float end at 331.9 pt). Right- and center-aligned paragraphs with such a cell are unmeasured and treated like left-aligned ones. Because tab stops stay put, justification widens only gaps after a line\'s last tab, soft-wrapped lines included: with two start stops at 144/288 pt the first cell keeps its natural spacing under both, distribute and lowKashida (before, its gap took a share of the slack and the second cell started 4.2 pt late). Library scope: the measured bidi rows held right-to-left (w:rtl) runs after the tab, so in a bidi paragraph only such a cell keeps its start gap or defers its fitted-back gap, while a cell starting with a left-to-right run keeps the earlier provisional gap that the bidi walk shrinks; a decimal cell without a real separator (only the numeric fallback point) keeps the earlier allocation in either direction (the in-place bidi walk, the stop-aligned left-to-right gap). Every measured fitted-back cell was the last on its line, so a cell ended by a later tab keeps the earlier stop-aligned gap (left-to-right) or the bidi walk\'s in-place fit, and only a line\'s last tab takes slack. Bidi lines defer the fitted-back gap like left-to-right ones (the D2 bidi rows: zero gap under both, distribute and lowKashida, the leftover room under left). A line whose slack goes into Arabic kashida elongation counts as justified and keeps the gap empty (unmeasured: the lowKashida rows were Latin and Hebrew). Under a WORD_KASHIDA_LINE_FIT reserve a fitted-back cell is admitted against the band, as an aligned cell is in both directions (centre cells under a reserve are unmeasured there).',
+});
 
 export const WORD_POSITIONAL_TAB_AVAILABLE_BAND = defineCompatibilityRule({
   id: 'word-positional-tab-available-band',
