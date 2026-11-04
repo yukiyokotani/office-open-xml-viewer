@@ -596,12 +596,51 @@ describe('table intrinsic content widths', () => {
     expect(resolveColumnWidths(source, 200, columnState(ctx, services))).toEqual([50]);
   });
 
-  it('retains a left-tab leader in minimum content width', () => {
+  it('keeps a left-tab leader and the text glued to the tab in minimum content width', () => {
     const source = table([row([cell([paragraph([textRun('\tX')], {
       tabStops: [{ pos: 60, alignment: 'left', leader: 'dot' }],
     }) as CellElement])])], [0]);
 
-    expect(resolveColumnWidths(source, 200, columnState(measuringContext()))).toEqual([60]);
+    // WORD_TAB_GLUED_TO_FOLLOWING_TEXT: no break between the tab and X, so the
+    // minimum holds the 60 pt stop and the 5 pt glyph on one line.
+    expect(resolveColumnWidths(source, 200, columnState(measuringContext()))).toEqual([65]);
+  });
+
+  it.each([
+    { alignment: 'left', bidi: false, rtlRun: false, minimum: 125 },
+    { alignment: 'start', bidi: false, rtlRun: false, minimum: 125 },
+    { alignment: 'left', bidi: true, rtlRun: true, minimum: 125 },
+    { alignment: 'start', bidi: true, rtlRun: true, minimum: 125 },
+    // A left-to-right run in a bidi paragraph is outside the glue rule's
+    // measured scope and keeps the earlier whole-line minimum.
+    { alignment: 'left', bidi: true, rtlRun: false, minimum: 195 },
+    { alignment: 'start', bidi: true, rtlRun: false, minimum: 195 },
+  ] as const)('gives a leading $alignment stop (bidi $bidi, rtl run $rtlRun) a $minimum pt minimum', ({ alignment, bidi, rtlRun, minimum }) => {
+    // \tX then a 25-character word: the stop (60) and the glued X (5), or the
+    // 125 pt word alone on the next line.
+    const run = { ...textRun(`\tX ${'w'.repeat(25)}`), ...(rtlRun ? { rtl: true } : {}) } as DocParagraph['runs'][number];
+    const source = table([row([cell([paragraph([run], {
+      tabStops: [{ pos: 60, alignment, leader: 'none' }], bidi,
+    }) as CellElement])])], [0]);
+
+    expect(resolveColumnWidths(source, 400, columnState(measuringContext()))).toEqual([minimum]);
+  });
+
+  it('judges the glued word on the runs layout breaks, before the intrinsic merge', () => {
+    // "\tAB" then a red "CDEF": a formatting seam inside the word puts it out
+    // of WORD_TAB_GLUED_TO_FOLLOWING_TEXT's scope, so the stop alone counts.
+    const red = { ...textRun('CDEF'), color: 'FF0000' } as DocParagraph['runs'][number];
+    const seam = table([row([cell([paragraph([textRun('\tAB'), red], {
+      tabStops: [{ pos: 60, alignment: 'left', leader: 'none' }],
+    }) as CellElement])])], [0]);
+    expect(resolveColumnWidths(seam, 400, columnState(measuringContext()))).toEqual([60]);
+
+    // Only the first word after the tab counts: a later hyphen does not
+    // take "ABC" out of scope (60 + 15).
+    const later = table([row([cell([paragraph([textRun('\tABC de-f')], {
+      tabStops: [{ pos: 60, alignment: 'left', leader: 'none' }],
+    }) as CellElement])])], [0]);
+    expect(resolveColumnWidths(later, 400, columnState(measuringContext()))).toEqual([75]);
   });
 
   it('uses following content when resolving a right-tab maximum', () => {
