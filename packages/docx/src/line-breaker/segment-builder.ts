@@ -1886,8 +1886,10 @@ function appendRunsToSegments(
       segs.push({
         imagePath: '',
         mimeType: '',
-        // Word does not reserve an inline chart's effect extent (Pareto chart
-        // controls), so a chart keeps its wp:extent box.
+        // Preserve the established wp:extent chart allocation. Office-produced
+        // Pareto controls do not reserve this padding; other chart classes
+        // remain unmeasured, so chart effect-extent reservation is unsupported
+        // rather than inferred from the picture/shape rule.
         widthPt: chartRun.widthPt,
         heightPt: chartRun.heightPt,
         anchor: chartRun.anchor ?? false,

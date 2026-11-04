@@ -806,8 +806,9 @@ export type DocRun = DocRunContent & { revision?: RunRevision };
  *  (§20.4.2.3) at its resolved page box while contributing wrap exclusions
  *  when required — all paint paths use `renderChart`. */
 export interface ChartRun {
-  /** ECMA-376 §20.4.2.6 `wp:effectExtent` of an inline chart, [left, top,
-   *  right, bottom] in pt: extent the line reserves around the chart. */
+  /** Authored ECMA-376 §20.4.2.6 `wp:effectExtent` of an inline chart,
+   *  [left, top, right, bottom] in pt. Chart line-box reservation currently
+   *  keeps wp:extent; effect-extent reservation is not implemented. */
   inlineEffectExtent?: [number, number, number, number];
   chart: ChartModel;
   widthPt: number;

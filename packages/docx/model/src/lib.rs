@@ -3466,9 +3466,9 @@ fn is_true(v: &bool) -> bool {
 #[derive(Serialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ChartRun {
-    /// ECMA-376 §20.4.2.6 `wp:effectExtent` of a `wp:inline` container,
-    /// [left, top, right, bottom] in points (signed `ST_Coordinate`); `None`
-    /// for anchors and an all-zero extent.
+    /// Authored inline `wp:effectExtent` (ECMA-376 §20.4.2.6), physical
+    /// [left, top, right, bottom] points. Retained for fidelity; chart layout
+    /// currently keeps `wp:extent` and does not reserve effect padding.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub inline_effect_extent: Option<[f64; 4]>,
     /// The shared chart model (barChart / lineChart / pie / …). Emitted 1:1 as
