@@ -5,7 +5,7 @@ export function documentBytes(
   indent: string,
   rtl: boolean,
   xPt: number,
-  tab?: { alignment: string; count: number; text: string; positional?: boolean; relativeTo?: 'margin' | 'indent'; noFloat?: boolean; fontSizePt?: number; automatic?: boolean; prefix?: string; stop?: number; cells?: readonly string[]; mirrorIndents?: boolean },
+  tab?: { alignment: string; count: number; text: string; positional?: boolean; relativeTo?: 'margin' | 'indent'; noFloat?: boolean; fontSizePt?: number; automatic?: boolean; prefix?: string; stop?: number; cells?: readonly string[]; mirrorIndents?: boolean; compatibilityMode?: number; extraStops?: readonly { alignment: string; pos: number }[]; jc?: string; boldFrom?: number; textXml?: string; runRtl?: boolean },
 ): Uint8Array {
   const seed = CONFORMANCE_CASES.find(({ axes }) => axes.story === 'body'
     && axes.container === 'paragraph' && axes.object === 'floating');
@@ -28,7 +28,9 @@ export function documentBytes(
       ? `<w:ptab w:alignment="${tab.alignment}" w:relativeTo="${tab.relativeTo ?? 'margin'}" w:leader="none"/>`
       : '<w:tab/>'.repeat(tab.count);
     xml = xml.replace('<w:t', `${tab.prefix ? `<w:t>${tab.prefix}</w:t>` : ""}${tabXml}<w:t`)
-      .replace('</w:pPr>', `<w:tabs><w:tab w:val="${tab.alignment}" w:pos="${tab.stop ?? 5600}"/></w:tabs></w:pPr>`);
+      .replace('</w:pPr>', `<w:tabs><w:tab w:val="${tab.alignment}" w:pos="${tab.stop ?? 5600}"/>${
+        (tab.extraStops ?? []).map(({ alignment, pos }) => `<w:tab w:val="${alignment}" w:pos="${pos}"/>`).join('')
+      }</w:tabs></w:pPr>`);
     // CT_PPrBase requires tabs before bidi/spacing/ind (§A.1).
     xml = xml.replace(/<w:pPr>([\s\S]*?)<\/w:pPr>/, (_match, properties: string) => {
       const tabs = properties.match(/<w:tabs>[\s\S]*?<\/w:tabs>/)?.[0] ?? '';
@@ -45,10 +47,35 @@ export function documentBytes(
       .replace(/<w:t\b[^>]*>[\s\S]*?<\/w:t>/, tab.cells.map((cell) => `<w:t xml:space="preserve">${cell}</w:t>`).join('<w:tab/>'));
   }
   if (tab?.mirrorIndents) xml = xml.replace(/<w:ind[^>]*\/>/, '$&<w:mirrorIndents/>');
+  // CT_PPrBase: jc follows ind/mirrorIndents (§A.1).
+  if (tab?.jc) xml = xml.replace(/<w:ind[^>]*\/>(<w:mirrorIndents\/>)?/, `$&<w:jc w:val="${tab.jc}"/>`);
+  // §17.3.2.30 w:rtl on the run holding the tab and its text.
+  if (tab?.runRtl) xml = xml.replace(/(<w:r>\s*<w:rPr>[\s\S]*?)(<\/w:rPr>)([\s\S]*?<w:tab\/>)/, '$1<w:rtl/>$2$3');
+  if (tab?.textXml !== undefined) {
+    // Raw run content in place of the cell text (e.g. a w:softHyphen inside it).
+    xml = xml.replace(`<w:t xml:space="preserve">${tab.text}</w:t>`, tab.textXml);
+  }
+  if (tab?.boldFrom !== undefined) {
+    // The text continues in a bold run with no break opportunity at the seam.
+    const text = tab.text;
+    xml = xml.replace(`>${text}</w:t></w:r>`, `>${text.slice(0, tab.boldFrom)}</w:t></w:r>`
+      + `<w:r><w:rPr><w:b/></w:rPr><w:t xml:space="preserve">${text.slice(tab.boldFrom)}</w:t></w:r>`);
+  }
   if (tab?.fontSizePt) xml = xml.replace(/<w:sz(?:Cs)? w:val="\d+"\/>/g, (tag) => tag.replace(/\d+/, String((tab.fontSizePt ?? 12) * 2)));
   if (tab?.automatic) xml = xml.replace(/<w:tabs>[\s\S]*?<\/w:tabs>/g, '');
   if (tab?.noFloat) xml = xml.replace(/<w:drawing>[\s\S]*?<\/w:drawing>/g, '');
   parts.set('word/document.xml', encoder.encode(xml));
+  if (tab?.compatibilityMode !== undefined) {
+    // A settings part carrying only w:compat/w:compatSetting (§17.15.3.4).
+    const w = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
+    parts.set('word/settings.xml', encoder.encode(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:settings xmlns:w="${w}"><w:compat><w:compatSetting w:name="compatibilityMode" w:uri="http://schemas.microsoft.com/office/word" w:val="${tab.compatibilityMode}"/></w:compat></w:settings>`));
+    const types = decoder.decode(parts.get('[Content_Types].xml'));
+    parts.set('[Content_Types].xml', encoder.encode(types.replace('</Types>',
+      '<Override PartName="/word/settings.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml"/></Types>')));
+    const rels = decoder.decode(parts.get('word/_rels/document.xml.rels'));
+    parts.set('word/_rels/document.xml.rels', encoder.encode(rels.replace('</Relationships>',
+      '<Relationship Id="rIdTabSettings" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings" Target="settings.xml"/></Relationships>')));
+  }
   return storeZip(parts);
 }
 

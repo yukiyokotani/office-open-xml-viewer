@@ -310,6 +310,8 @@ export interface MeasuredTabPlanSegment {
   readonly kind: 'tab';
   readonly range: import('./types.js').TextRange;
   readonly measuredWidthPt: number;
+  /** WORD_ALIGNED_TAB_CELL_FIT_BACK: gap the tab may still take from the slack. */
+  readonly alignedGapLimitPt?: number;
   readonly leader: import('./types.js').TabPlacement['leader'];
   readonly fontSizePt: number;
   readonly bold?: boolean;
@@ -1565,12 +1567,13 @@ export function planLine(input: PlanLineInput): LineLayout {
   // measured character spreading on left-to-right lines only).
   const justification = lineEndRule === 'character' && bidi ? 'word' : lineEndRule;
   const applyJustify = justification !== null;
-  // Lines that are not soft-wrapped are justified only after their last tab.
   const softWrapped = !line.endsWithBreak && !input.isLastLine;
   // WORD_KASHIDA_LINE_FIT: soft-wrapped kashida and thaiDistribute lines
   // open no inter-CJK gaps.
   const softLineSpacesOnly = softWrapped && wordSoftLineJustifiesAtSpacesOnly(input.alignment);
-  const afterLastTab = softWrapped ? 0 : lastTabSegmentIndex(segments) + 1;
+  // Every line is justified only after its last tab: the stops before it keep
+  // their positions (WORD_ALIGNED_TAB_CELL_FIT_BACK; soft-wrapped lines too).
+  const afterLastTab = lastTabSegmentIndex(segments) + 1;
   // WORD_RTL_JUSTIFIED_VISIBLE_FIT: the breaker admitted this right-to-left
   // line by its visible prefix, so its line-end U+0020 hangs past the line's
   // end edge and the visible text keeps the start edge.
@@ -1593,6 +1596,7 @@ export function planLine(input: PlanLineInput): LineLayout {
     ? Math.min(rtlInteriorPt, Math.max(0, -(lineSlackPt + rtlHangingSpacePt))) : 0;
   const rtlJustifySlackBonusPt = rtlHangingSpacePt + rtlInteriorAbsorbPt;
   const kashida = applyJustify ? kashidaLevel(input.alignment) : null;
+  let kashidaAppliedPt = 0;
   if (kashida && lineSlackPt + rtlJustifySlackBonusPt > 0) {
     // Kashida rewrites one contextual paint operation. A segment already split
     // into cluster-origin operations, or whose elongated text would reach the
@@ -1640,6 +1644,7 @@ export function planLine(input: PlanLineInput): LineLayout {
         };
       });
       naturalWidthPt += distribution.appliedPx;
+      kashidaAppliedPt = distribution.appliedPx;
       lineSlackPt = distribution.residualPx - rtlJustifySlackBonusPt;
     }
   }
@@ -1803,7 +1808,6 @@ export function planLine(input: PlanLineInput): LineLayout {
       residualPt -= absorbPt;
     }
   }
-  const drawnWidthPt = naturalWidthPt + distributedWidthPt;
   // WORD_FLOAT_GAP_FLOW aligns the visible word edge, while
   // the trailing separator remains source-owned. Its advance must not shift
   // centred/right-aligned gap text. Other soft-wrapped lines exclude their
@@ -1811,13 +1815,38 @@ export function planLine(input: PlanLineInput): LineLayout {
   const trailingSeparatorPt = line.availableWidthPt < input.availableWidthPt && !bidi
     ? trailingAdvancePt(segments, (text) => text.trimEnd().length)
     : hangingLineEndSpacePt;
+  // WORD_ALIGNED_TAB_CELL_FIT_BACK: an end/center/decimal cell fitted with no
+  // gap slides toward its stop by the room the line leaves (visible width),
+  // never past its stop-aligned gap. A justified line that distributed its
+  // slack keeps the gap empty, kashida elongation included (the measured
+  // lowKashida rows justify such a line; its slack is not the gap's). Only the
+  // line's last tab is elastic: widening an earlier one would move the later
+  // stops (placement never defers a cell that a later tab ends;
+  // break-opportunities alignedCellEndsAtTab).
+  if (distributedWidthPt <= 0 && kashidaAppliedPt <= 0 && !centreUnjustified) {
+    const elasticIndex = lastTabSegmentIndex(segments);
+    const elastic = segments[elasticIndex];
+    if (elastic?.kind === 'tab' && (elastic.alignedGapLimitPt ?? 0) > 0) {
+      const takePt = Math.max(0, Math.min(elastic.alignedGapLimitPt!, lineSlackPt + trailingSeparatorPt));
+      if (takePt > 0) {
+        segments = segments.map((segment, segmentIndex) => segmentIndex === elasticIndex && segment.kind === 'tab'
+          ? { ...segment, measuredWidthPt: segment.measuredWidthPt + takePt }
+          : segment);
+        naturalWidthPt += takePt;
+        lineSlackPt -= takePt;
+      }
+    }
+  }
+  const drawnWidthPt = naturalWidthPt + distributedWidthPt;
   const alignmentSlackPt = lineSlackPt - distributedWidthPt + trailingSeparatorPt;
   const naturalAlignmentOffsetPt = edge === 'right'
     ? alignmentSlackPt
     : edge === 'center' || centreUnjustified
       ? alignmentSlackPt / 2
-      : edge === 'justify' && input.baseRtl && (rtlVisibleEdge || !applyJustify
-        || ((!softWrapped || softLineSpacesOnly) && distributedWidthPt <= 0))
+      // A right-to-left justified line that distributes nothing (a single word,
+      // or a label alone before a tab moved by WORD_TAB_GLUED_TO_FOLLOWING_TEXT,
+      // soft-wrapped or not) stays at its start edge (blk-0898-tabs-move R rows).
+      : edge === 'justify' && input.baseRtl && (rtlVisibleEdge || !applyJustify || distributedWidthPt <= 0)
         // Right-hanging line-end spaces pass the start edge; the visible text
         // keeps it (blk-0898-kfit6 final lines keep their space inside).
         ? alignmentSlackPt + rtlRightHangPt
@@ -3855,6 +3884,7 @@ function planMeasuredLines(
         segments.push({
           kind: 'tab', range: { start: segmentOffset, end: segmentOffset + occurrenceLength },
           measuredWidthPt: tab.measuredWidth, leader,
+          ...(tab.alignedGapLimit ? { alignedGapLimitPt: tab.alignedGapLimit } : {}),
           fontSizePt: tab.fontSize, bold: tab.bold, italic: tab.italic,
           ...(underline ? { underline } : {}),
           ...(leaderShape ? { leaderShape } : {}),
