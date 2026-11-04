@@ -6,7 +6,7 @@ import { acquireShapeTextBoxLayout } from './layout/paragraph.js';
 import { normalizeInternalDocumentModel, textBoxAcquisitionInput } from './parser-model.js';
 import { layoutDocument } from './document-layout.js';
 import type { ParagraphLayoutContext } from './layout-context.js';
-import { wordCjkClosingMarkHang, wordCjkClosingMarkHangRefused } from './layout/line-compatibility.js';
+import { wordCjkClosingMarkHangRefused } from './layout/line-compatibility.js';
 import type { LineLayout, ParagraphLayout, TextPlacement } from './layout/types.js';
 import type {
   BodyElement, CellElement, DocParagraph, DocSettings, DocTable, DocTableCell, DocTableRow,
@@ -476,15 +476,42 @@ describe('word-justification-punctuation-hang with paragraph kinsoku off', () =>
     expect(text(next!).startsWith('。')).toBe(true);
   });
 
-  it('resolves the policy by mode and container; kinsoku on keeps the previous policy', () => {
-    expect(wordCjkClosingMarkHang('both', true, false, true, 15)).toBe('break');
-    expect(wordCjkClosingMarkHang('both', true, false, true, 14)).toBe('one');
-    expect(wordCjkClosingMarkHang('left', true, false, true, undefined)).toBe('one');
-    expect(wordCjkClosingMarkHang('left', true, true, true, 14)).toBe('break');
-    expect(wordCjkClosingMarkHang('highKashida', true, false, true, 12)).toBe('break');
-    expect(wordCjkClosingMarkHang('center', true, false, true, 15)).toBeUndefined();
-    expect(wordCjkClosingMarkHang('both', false, false, true, 15)).toBeUndefined();
-    expect(wordCjkClosingMarkHang('both', true, false, false, 15)).toBe('one');
-    expect(wordCjkClosingMarkHang('thaiDistribute', true, false, false, 15)).toBe('none');
+  it('disables forbidden line edges even where closing-mark hanging is retained or unmeasured', () => {
+    for (const alignment of ['both', 'center']) {
+      const body = kinsokuOff([textRun(KANA.slice(0, 35) + '「らりるれろ')], alignment);
+      const [first] = lines(body, { compatibilityMode: 14 });
+      expect(text(first!), alignment).toBe(KANA.slice(0, 35) + '「');
+    }
+    const body = { ...kinsokuOff([textRun(KANA.slice(0, 36) + '々らり')], 'both'), overflowPunct: false } as BodyElement;
+    const [first, next] = lines(body, { compatibilityMode: 14 });
+    expect(text(first!)).toBe(KANA.slice(0, 36));
+    expect(text(next!).startsWith('々')).toBe(true);
   });
+
+  it('hangs only the first closing mark before mode 15 when kinsoku is off', () => {
+    const [first, next] = lines(kinsokuOff([textRun(KANA.slice(0, 36) + '。」らり')], 'both'), { compatibilityMode: 14 });
+    expect(text(first!)).toBe(KANA.slice(0, 36) + '。');
+    expect(text(next!).startsWith('」')).toBe(true);
+  });
+
+  it('uses paragraph-effective rules inside a table cell', () => {
+    const borders = { top: null, bottom: null, left: null, right: null, insideH: null, insideV: null };
+    const body = {
+      type: 'table', colWidths: [100], borders,
+      rows: [{ cells: [{
+        content: [kinsokuOff([textRun(KANA.slice(0, 10) + '。らり')], 'both')],
+        colSpan: 1, vMerge: null, borders, background: null, vAlign: 'top', widthPt: 100,
+      }], rowHeight: null, rowHeightRule: 'auto', isHeader: false }],
+      cellMarginTop: 0, cellMarginBottom: 0, cellMarginLeft: 0, cellMarginRight: 0,
+      jc: 'left', layout: 'fixed',
+    } as unknown as BodyElement;
+    const layout = layoutBodyModel([body], section, makeCtx(), {}, { compatibilityMode: 15 });
+    const table = layout.pages[0]!.layers.body[0]!;
+    if (table.kind !== 'table') throw new Error('expected a table');
+    const paragraph = table.rows[0]!.cells[0]!.blocks[0]!.layout;
+    if (paragraph.kind !== 'paragraph') throw new Error('expected a cell paragraph');
+    expect(paragraph.lines.map(text)).toEqual([KANA.slice(0, 10), '。らり']);
+  });
+
+
 });

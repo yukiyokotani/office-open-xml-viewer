@@ -440,6 +440,16 @@ describe('table intrinsic content widths', () => {
     )).toEqual({ minWidthPt: 7, maxWidthPt: 14 });
   });
 
+  it('does not glue forbidden CJK pairs into a minimum-width atom when kinsoku is disabled', () => {
+    const source = paragraph([textRun('あ。い')]);
+    const context = intrinsicContext({ kinsoku: { ...DEFAULT_KINSOKU_RULES, enabled: false } });
+    expect(measureParagraphIntrinsicWidths(
+      source, context, 200,
+      { context: measuringContext(), fontFamilyClasses: {} },
+      { pageIndex: 0, totalPages: 1, pageWritingMode: 'horizontal-tb', documentHasEastAsianText: true },
+    )).toEqual({ minWidthPt: 5, maxWidthPt: 15 });
+  });
+
   it('does not merge runs with different character-grid participation', () => {
     const source = paragraph([
       { ...textRun('漢'), snapToGrid: true },

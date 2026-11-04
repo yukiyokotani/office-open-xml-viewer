@@ -605,8 +605,9 @@ function minimumTextAtomWidthPt(
         const next = clusters[index].text.codePointAt(0);
         const breakAllowed = previous !== undefined
           && next !== undefined
-          && !context.kinsoku.lineEndForbidden.has(previous)
-          && !context.kinsoku.lineStartForbidden.has(next);
+          && (!context.kinsoku.enabled
+            || (!context.kinsoku.lineEndForbidden.has(previous)
+              && !context.kinsoku.lineStartForbidden.has(next)));
         if (breakAllowed) {
           atoms.push(atom);
           atom = clusters[index];

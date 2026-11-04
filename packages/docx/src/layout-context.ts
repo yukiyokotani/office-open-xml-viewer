@@ -358,6 +358,22 @@ export function resolveSectionLayoutContext(
   };
 }
 
+const disabledKinsokuRules = new WeakMap<KinsokuRules, KinsokuRules>();
+
+/** §17.3.1.16 disables forbidden line edges for the whole paragraph,
+ * independently of overflowPunct (WORD_JUSTIFICATION_PUNCTUATION_HANG).
+ * Share one immutable rules view per document so rules-keyed caches stay
+ * bounded across measurement, intrinsic sizing and line-break passes. */
+function paragraphKinsokuDisabled(rules: KinsokuRules): KinsokuRules {
+  if (!rules.enabled) return rules;
+  let disabled = disabledKinsokuRules.get(rules);
+  if (!disabled) {
+    disabled = Object.freeze({ ...rules, enabled: false });
+    disabledKinsokuRules.set(rules, disabled);
+  }
+  return disabled;
+}
+
 function hasTableCellContainer(story: StoryContext): boolean {
   return story.containers.some((container) => container.kind === 'tableCell');
 }
@@ -449,7 +465,7 @@ export function resolveParagraphLayoutContext(
     tabStops: effectiveParagraphTabStops(paragraph),
     hasRuby: paragraphHasRuby(paragraph),
     hasEastAsianText: paragraphHasEastAsianText(paragraph),
-    kinsoku: settings.kinsoku,
+    kinsoku: paragraph.kinsoku === false ? paragraphKinsokuDisabled(settings.kinsoku) : settings.kinsoku,
     defaultTabPt: settings.defaultTabPt,
     overflowPunct: paragraph.overflowPunct !== false,
     // word-justification-punctuation-hang, admitted only for the measured

@@ -913,10 +913,8 @@ const ALL_WORD_OVERFLOW_PUNCTUATION = new Set([
 const LATIN_WORD_OVERFLOW_PUNCTUATION = new Set(['.', ',']);
 
 /** {@link WORD_JUSTIFICATION_PUNCTUATION_HANG} policy for a CJK closing mark
- * in its measured scope: at most one mark hangs ('one'), none does ('none'),
- * or none does and the paragraph breaks without kinsoku ('break', paragraph
- * kinsoku off), so the mark starts the next line. */
-export type CjkClosingMarkHang = 'one' | 'none' | 'break';
+ * in its measured scope: at most one mark hangs ('one'), or none does. */
+export type CjkClosingMarkHang = 'one' | 'none';
 
 /** The policy for a paragraph in the measured class (see
  * StoryContext.closingMarkHangAdmitted in layout-context.ts) with a measured
@@ -934,8 +932,8 @@ export function wordCjkClosingMarkHang(
   const policy = cjkClosingMarkHangByAlignment(alignment, measuredScope, insideTableCell);
   // Paragraph kinsoku off: no hang and no push wherever the mark does not
   // hang, and in mode 15 for every measured alignment.
-  return paragraphKinsokuOff && (policy === 'none' || (policy === 'one' && compatibilityMode === 15))
-    ? 'break'
+  return paragraphKinsokuOff && policy === 'one' && compatibilityMode === 15
+    ? 'none'
     : policy;
 }
 
@@ -974,10 +972,14 @@ export function wordCjkClosingMarkHangRefused(
   next: () => string | undefined,
   kinsoku: Readonly<{ enabled: boolean; lineStartForbidden: ReadonlySet<number> }>,
   verticalRun: boolean,
+  lineAlreadyOverflows: () => boolean = () => false,
 ): boolean {
   if (policy === undefined || verticalRun || !isCjkBreakChar(mark.codePointAt(0)!)) return false;
-  if (policy !== 'one') return true;
-  if (!kinsoku.enabled) return false;
+  if (policy === 'none') return true;
+  // With kinsoku off, the following mark may begin the next line. A first
+  // mark still hangs in the observed pre-15 class; refuse a second one
+  // once the line already extends past its fit width.
+  if (!kinsoku.enabled) return lineAlreadyOverflows();
   const following = next();
   return following !== undefined && kinsoku.lineStartForbidden.has(following.codePointAt(0)!);
 }
