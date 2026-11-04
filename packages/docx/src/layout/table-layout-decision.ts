@@ -2,7 +2,8 @@ import type { TableFormatInput } from './types.js';
 import { projectTableColumnLayoutInput, projectEffectiveTablePreferredWidthPt, absoluteTablePreferredWidthPt,
   type TableLayoutSource, type TableSourceAcquisitionInput } from './table-source-acquisition.js';
 import { wordFixedOccupiedGridInput, wordMeasuredTableOriginMode, wordMeasuredTableOriginPlacementMode,
-  wordNonleadingIndentScope, wordTableEffectiveIndentPt, wordTableOriginTranslationPt } from './table-compatibility.js';
+  wordNonleadingIndentScope, wordUniformSpacedTableBorderPt, wordSpacedTableTranslationPt, wordTableEffectiveIndentPt, wordTableMarginHangScope, wordTableOriginTranslationPt,
+  type WordTableMarginHangScope } from './table-compatibility.js';
 import { isVerticalTextDirection } from './section-orientation.js';
 
 export interface TableDecisionEnvironment {
@@ -60,6 +61,21 @@ function tableOriginContext(
 }
 
 
+/** Logical-table scopes of the rules that extend measured classes. */
+interface MemberScopeExtensions {
+  /** WORD_TABLE_MARGIN_HANG_SCOPE. */
+  readonly marginHang: WordTableMarginHangScope;
+  /** WORD_NESTED_NEGATIVE_INDENT. */
+  readonly nestedNegativeIndentIgnored: boolean;
+  /** WORD_AUTOFIT_CONTENT_COLUMN_GROWTH for a content-sized table. */
+  readonly contentFitted: boolean;
+  /** WORD_TABLE_CELL_SPACING_GEOMETRY, absent outside measured structures. */
+  readonly spacingGeometry: Readonly<{ spacingPt: number; borderPt: number }> | null;
+}
+const NO_SCOPE_EXTENSIONS: MemberScopeExtensions = Object.freeze({
+  marginHang: 'none', nestedNegativeIndentIgnored: false, contentFitted: false, spacingGeometry: null,
+});
+
 /** All compatibility selection lives at this boundary. A member receives facts
  * selected here; it must never re-evaluate the logical table's eligibility. */
 function memberContext(
@@ -72,7 +88,9 @@ function memberContext(
   logicalProperties = measuredOrigin,
   omittedMarginEndOrigin = false,
   nonleadingIndentIgnored = false,
+  extensions: MemberScopeExtensions = NO_SCOPE_EXTENSIONS,
 ) {
+  const { marginHang, nestedNegativeIndentIgnored, contentFitted, spacingGeometry } = extensions;
   const format = source.format;
   const firstRowException = format.firstRowException;
   // MS-OI29500 §2.1.156/158: first-logical-row indent/layout authority
@@ -92,24 +110,39 @@ function memberContext(
     : table.tblIndInherited === true;
   const leading = (justification: string | null | undefined) =>
     justification == null || justification === 'left' || justification === 'start' || justification === 'both';
+  // WORD_NESTED_NEGATIVE_INDENT: a leading table nested once ignores a
+  // negative indent.
   const rowIndent = (justification: string | null | undefined, indentPt: number, inherited: boolean) =>
-    inherited && !leading(justification) ? 0 : indentPt;
+    inherited && !leading(justification) ? 0
+      : nestedNegativeIndentIgnored && leading(justification) ? Math.max(0, indentPt) : indentPt;
   // A row is inside an origin observation through the explicit-margin class
   // or, for end justification only, the omitted-margin class.
+  // WORD_TABLE_MARGIN_HANG_SCOPE adds further structures to the same hang
+  // (in a text box, leading rows only).
   const measuredRow = (justification: string | null | undefined) => measuredOrigin
-    || (omittedMarginEndOrigin && justification === 'end');
+    || (omittedMarginEndOrigin && justification === 'end')
+    || marginHang === 'all' || (marginHang === 'leading' && leading(justification));
   // WORD_TABLE_NONLEADING_INDENT_SCOPE: further measured structures drop a
   // nonleading tblInd (§17.4.50) without joining the origin margin hang.
+  // The width ceilings below keep the previous indent contract for a
+  // content-fitted table: only its placement and nonbinding fit change.
   const widthIndent = (justification: string | null | undefined, indentPt: number, inherited = baseIndentInherited) =>
-    wordTableEffectiveIndentPt({ measured: measuredRow(justification) || nonleadingIndentIgnored, justification,
-      indentPt: rowIndent(justification, indentPt, inherited) });
+    wordTableEffectiveIndentPt({ measured: contentFitted
+      ? measuredOrigin || (omittedMarginEndOrigin && justification === 'end')
+      : measuredRow(justification) || nonleadingIndentIgnored, justification,
+    indentPt: rowIndent(justification, indentPt, inherited) });
   const rowIndentPts = format.rows.map((row) => {
     const ownException = !logicalProperties && row.exception?.indentAuthored === true;
     return widthIndent(row.justification ?? table.jc,
       ownException ? (row.exception?.indentPt ?? 0) : baseIndentPt,
       !ownException && baseIndentInherited);
   });
-  const rowTranslationsPt = format.rows.map((row) => wordTableOriginTranslationPt({
+  const rowTranslationsPt = format.rows.map((row) => spacingGeometry ? wordSpacedTableTranslationPt({
+    mode: state.mode, justification: row.justification ?? table.jc, bidi: table.bidiVisual === true,
+    indentPt: tableIndentPt, indentAuthored: origin.indentAuthored, ...spacingGeometry,
+    leadingMarginPt: table.bidiVisual ? row.cells[0]?.marginsPt.right ?? 0 : row.cells[0]?.marginsPt.left ?? 0,
+    trailingMarginPt: table.bidiVisual ? row.cells.at(-1)?.marginsPt.left ?? 0 : row.cells.at(-1)?.marginsPt.right ?? 0,
+  }) : wordTableOriginTranslationPt({
     mode: state.mode, measured: measuredRow(row.justification ?? table.jc), justification: row.justification ?? table.jc,
     indentPt: rowIndent(row.justification ?? table.jc, tableIndentPt, tableIndentInherited),
     indentAuthored: logicalProperties ? origin.indentAuthored : firstRowException?.indentAuthored || table.tblInd != null,
@@ -207,6 +240,13 @@ function memberContext(
     && !hasPreferredTableWidth
     && hasMeasuredCompatibilityMode
     && hasMeasuredAlignmentGeometry;
+  // WORD_AUTOFIT_CONTENT_COLUMN_GROWTH: a content-sized table (decided at
+  // the logical-table boundary) content-fits whatever its jc and mode when
+  // its content fits the established ceiling; a binding fit there is
+  // unmeasured and keeps the previous solve.
+  const contentGrowth: 'band' | 'nonbinding' | 'none' = spacingGeometry
+    ? (contentFitted ? 'nonbinding' : 'none')
+    : usesLeadingIndentBand ? 'band' : contentFitted ? 'nonbinding' : 'none';
   const outerCellMarginsHangOutsideBand = compatibilityMode === undefined || compatibilityMode === 14;
   const textBandPt = usesLeadingIndentBand
     ? Math.max(0, Math.min(...rowPlacements.map(({ justification, indentPt }) => {
@@ -280,10 +320,21 @@ function memberContext(
     : Math.max(containerMaximumPt, Math.min(absolutePreferredPt, savedGridWidthPt));
   const isFixedNestedTable = effectiveLayout === 'fixed'
     && state.inTableCell;
+  // WORD_TABLE_MARGIN_HANG_SCOPE: where both outer margins hang outside the
+  // band (every mode but 15), a percentage tblW is a share of the band plus
+  // the first row's outer margins.
+  const firstRowCells = format.rows[0]?.cells;
+  const percentWidthBasePt = marginHang === 'all' && state.mode !== 15 && isTopLevelPageOwnedStory && firstRowCells
+    ? contentWPt + Math.max(0, firstRowCells[0]?.marginsPt.left ?? 0)
+      + Math.max(0, firstRowCells.at(-1)?.marginsPt.right ?? 0)
+    : contentWPt;
 
-  return Object.freeze({ source, tableIndentPt, effectiveLayout,
+  return Object.freeze({ source,
+    tableIndentPt: nestedNegativeIndentIgnored && leading(table.jc) ? Math.max(0, tableIndentPt) : tableIndentPt,
+    effectiveLayout,
     rowTranslationsPt: Object.freeze(rowTranslationsPt), maximumTableWidthPt,
-    isFixedNestedTable, usesLeadingIndentBand, forcedFitOuterMarginsPt });
+    isFixedNestedTable, usesLeadingIndentBand, contentGrowth, forcedFitOuterMarginsPt,
+    percentWidthBasePt, spacingGeometry });
 }
 
 export type TableMemberDecision = ReturnType<typeof memberContext>;
@@ -312,6 +363,7 @@ export function decideLogicalTable(
   authoredEnvironment: TableDecisionEnvironment,
   commonFrame = true,
   commonGrid = true,
+  spacedAutoFitContentFits?: (candidate: TableMemberDecision) => boolean,
 ): LogicalTableDecision {
   // A producer-supplied outer-edge table (outerEdgeIndent) carries its own
   // physical outer edge and grid; the OOXML table compatibility modes
@@ -336,6 +388,67 @@ export function decideLogicalTable(
   const dropsUnusedLeadingGrid = wordFixedOccupiedGridInput(input, environment.mode, gridScope) !== input;
   const usesLogicalProperties = measuredOrigin || dropsUnusedLeadingGrid;
   const format = source.format;
+  const rowOverrides = format.firstRowException != null
+    || format.rows.some((row) => row.exception != null || row.justification != null);
+  // Normalization clears conflicting offsets; the authored skip still counts.
+  const gridSkips = table.rows.some((row) => (row.gridBefore ?? 0) > 0 || (row.gridAfter ?? 0) > 0)
+    || source.lexical.rows.some((row) => row.row?.gridSkipAuthored === true);
+  const singleTable = members.length <= 1;
+  // An AutoFit table without any effective preferred table or cell width
+  // (zero, nil and auto widths are absent in the column solver).
+  const contentSized = input.layout !== 'fixed' && input.tablePreferredWidthPt === null
+    && input.rows.every((row) => row.cells.every((cell) => cell.preferredWidth === null));
+  // WORD_TABLE_CELL_SPACING_GEOMETRY: select once for the logical table.
+  // Every unmeasured neighbour keeps the old source projection and geometry.
+  const spacingPt = format.rows[0]?.cellSpacingPt ?? 0;
+  const uniformBorderPt = spacingPt > 0 ? wordUniformSpacedTableBorderPt(table) : null;
+  let spacingGeometry = spacingPt > 0 && uniformBorderPt !== null
+    && singleTable && commonFrame && commonGrid && topLevelBody && environment.singleColumn
+    && !environment.inTableCell && !isVerticalTextDirection(environment.textDirection)
+    && environment.quarterTurnedStory !== true && format.ordinaryFlow && format.positioning == null
+    && format.outerEdgeIndent !== true && !rowOverrides && !gridSkips
+    // ECMA-376 §17.4.43 puts trPr spacing inside text margins; §17.4.45
+    // puts tblPr spacing outside. The observation covers only the latter,
+    // including inherited table styles. Equal effective row values do not
+    // establish that provenance; tblPrEx (§17.4.44) is also unmeasured.
+    && source.lexical.rows.every(({ row }) => row?.cellSpacing == null && row?.exception?.cellSpacing == null)
+    // The blk-0898 table controls (spaced one-row tables, modes 11/12/14/15
+    // and omitted, tblInd -360) place modes 11/12 like 14 and move a leading
+    // table by a negative indent like a positive one.
+    && wordMeasuredTableOriginPlacementMode(environment.mode)
+    && format.rows.every((row) => row.cellSpacingPt === spacingPt && row.height == null
+      && row.cells.every((cell) => cell.dxaHorizontalMarginsOnly === true))
+    && ((input.layout === 'fixed' && table.widthPt != null
+        && table.widthPt > (input.gridWidthsPt.length + 1) * 2 * spacingPt && table.widthPct == null)
+      || (contentSized && input.gridWidthsPt.length > 0
+        && contentWidthPt > (input.gridWidthsPt.length + 1) * 2 * spacingPt && input.rows.every((row) =>
+        row.cells.length === input.gridWidthsPt.length && row.cells.every((cell, index) =>
+          cell.columnSpan === 1 && cell.columnStart === index))))
+    ? Object.freeze({ spacingPt, borderPt: uniformBorderPt }) : null;
+  if (spacingGeometry && input.layout === 'autofit') {
+    // Binding distribution is outside WORD_TABLE_CELL_SPACING_GEOMETRY.
+    // Resolve this before origin, content constraints, child acquisition or
+    // row geometry change. A width-only fallback cannot restore the base path.
+    const candidate = memberContext(table, source, origin, measuredOrigin, contentWidthPt, environment,
+      usesLogicalProperties, omittedMarginEndOrigin, false,
+      { ...NO_SCOPE_EXTENSIONS, contentFitted: true, spacingGeometry });
+    if (spacedAutoFitContentFits?.(candidate) !== true) spacingGeometry = null;
+  }
+  // WORD_AUTOFIT_CONTENT_COLUMN_GROWTH: the measured content-sized class.
+  const contentFitted = contentSized && singleTable && format.ordinaryFlow && format.positioning == null
+    && format.outerEdgeIndent !== true && !rowOverrides && !gridSkips
+    && format.rows.every((row) => (row.cellSpacingPt === 0 || spacingGeometry !== null)
+      && row.cells.every((cell) => cell.dxaHorizontalMarginsOnly === true))
+    // Keep the no-spacing two-track scope. Spaced tables additionally admit
+    // n unspanned unpreferred tracks, only at nonbinding maxima in the solver.
+    && (input.gridWidthsPt.length === 2 || spacingGeometry !== null)
+    && input.rows.every((row) => row.cells.length === input.gridWidthsPt.length
+      && row.cells.every((cell, index) => cell.columnSpan === 1 && cell.columnStart === index))
+    && environment.topLevel && !isVerticalTextDirection(environment.textDirection)
+    && environment.quarterTurnedStory !== true
+    && (environment.story === 'header' || environment.story === 'footer'
+      || (environment.story === 'body' && environment.singleColumn))
+    && wordMeasuredTableOriginPlacementMode(environment.mode);
   const nonleadingIndentIgnored = wordNonleadingIndentScope({
     mode: environment.mode,
     story: environment.story,
@@ -347,22 +460,38 @@ export function decideLogicalTable(
     outerEdgeIndent: format.outerEdgeIndent === true,
     ordinaryFlow: format.ordinaryFlow,
     positioned: format.positioning != null,
-    rowOverrides: format.firstRowException != null
-      || format.rows.some((row) => row.exception != null || row.justification != null),
-    // Normalization clears conflicting offsets; the authored skip still counts.
-    gridSkips: table.rows.some((row) => (row.gridBefore ?? 0) > 0 || (row.gridAfter ?? 0) > 0)
-      || source.lexical.rows.some((row) => row.row?.gridSkipAuthored === true),
-    // The effective preferred widths the column solver uses (zero, nil and
-    // auto widths are absent there).
-    contentSizedAutoFit: input.layout !== 'fixed' && input.tablePreferredWidthPt === null
-      && input.rows.every((row) => row.cells.every((cell) => cell.preferredWidth === null)),
+    rowOverrides,
+    gridSkips,
+    unfittedContentSizedAutoFit: contentSized && !contentFitted,
   });
+  // WORD_NESTED_NEGATIVE_INDENT: the nonleading-indent structures nested once
+  // in a body table cell.
+  const nestedNegativeIndentIgnored = nonleadingIndentIgnored && !environment.topLevel
+    && environment.story === 'body' && environment.tableCellDepth === 1
+    && origin.effectiveLayout === 'fixed' && format.rows.every((row) => row.cellSpacingPt === 0);
+  // WORD_TABLE_MARGIN_HANG_SCOPE: inside the nonleading-indent structures.
+  const marginHang = measuredOrigin || !nonleadingIndentIgnored || !singleTable ? 'none' : wordTableMarginHangScope({
+    mode: environment.mode,
+    story: environment.story,
+    topLevel: environment.topLevel,
+    verticalText: isVerticalTextDirection(environment.textDirection) || environment.quarterTurnedStory === true,
+    commonFrame: commonFrame && commonGrid,
+    marginClass: format.rows.every((row) => row.cells[0]?.originLeftMarginPt != null
+      && row.cells.every((cell) => cell.dxaHorizontalMarginsOnly === true)),
+    spacing: format.rows.some((row) => row.cellSpacingPt !== 0),
+    outerEdgeIndent: format.outerEdgeIndent === true,
+    ordinaryFlow: format.ordinaryFlow,
+    positioned: format.positioning != null,
+    rowOverrides,
+    gridSkips,
+  });
+  const extensions: MemberScopeExtensions = Object.freeze({ marginHang, nestedNegativeIndentIgnored, contentFitted, spacingGeometry });
   const logical = memberContext(table, source, origin, measuredOrigin, contentWidthPt, environment,
-    usesLogicalProperties, omittedMarginEndOrigin, nonleadingIndentIgnored);
+    usesLogicalProperties, omittedMarginEndOrigin, nonleadingIndentIgnored, extensions);
   return Object.freeze({ measuredOrigin, usesLogicalProperties, dropsUnusedLeadingGrid, logical,
     members: Object.freeze(members.map((member) => memberContext(member.table, member.source,
       origin, measuredOrigin, contentWidthPt, environment, usesLogicalProperties, omittedMarginEndOrigin,
-      nonleadingIndentIgnored))),
+      nonleadingIndentIgnored, extensions))),
   });
 }
 

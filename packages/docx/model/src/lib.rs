@@ -2101,6 +2101,11 @@ pub struct ShapeRun {
     pub vml_stroke_pattern: Option<Duotone>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub vml_inset_pen: bool,
+    /// The text body comes from a legacy `<v:textbox>` (Part 4 §19.1.2.22)
+    /// rather than DrawingML `<wps:txbx>`; Word places it without the
+    /// DrawingML outline inset (issue #2069 controls and sample-11).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub vml_text_box: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub vml_concentric_gradient: bool,
     /// Part 4 §19.1.2.14: normalized clipping rectangles, in authored order.

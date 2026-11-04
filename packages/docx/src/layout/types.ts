@@ -756,6 +756,8 @@ export interface ParagraphLayout extends LayoutNodeBase {
    * shape the unconsumed suffix at its own width through the same paragraph engine. */
   readonly noteLineEndBoundaries?: readonly LineBoundary[];
   readonly noteSourceStart?: ParagraphFragmentCursor;
+  /** Its note boundaries are source run/UTF-16 positions, not shaped segments. */
+  readonly noteSourceWindow?: true;
   readonly borders: readonly BorderSegment[];
   readonly shading?: FillPaint;
   readonly resources: readonly InlineResourceLayout[];
@@ -1413,8 +1415,14 @@ export interface TableColumnLayoutInput {
   /** The outer-cell margin portion of the physical AutoFit ceiling. */
   readonly outerMarginAllowancePt?: number;
   /** WORD_AUTOFIT_CONTENT_COLUMN_GROWTH: let unpreferred content columns grow
-   * past the saved grid toward their maximum content width. */
-  readonly growUnpreferredColumns?: boolean;
+   * past the saved grid toward their maximum content width; 'nonbinding'
+   * only when every maximum fits the ceiling together. */
+  readonly growUnpreferredColumns?: boolean | 'nonbinding';
+  /** WORD_TABLE_CELL_SPACING_GEOMETRY: gaps are outside solver cell boxes. */
+  readonly separatedCellSpacingPt?: number;
+  /** The text band the intrinsic maxima were capped at; a 'nonbinding'
+   * fit must stay strictly inside it, so no maximum was capped. */
+  readonly contentBandPt?: number;
   readonly gridWidthsPt: readonly number[];
   readonly gridWidthKeys?: readonly (string | null)[];
   readonly tablePreferredWidthPt: number | null;
@@ -1551,6 +1559,10 @@ export interface TableRowLayoutInput {
   readonly cellSpacingPt: number;
   /** §17.4.39 table-level border exception for this row, if authored. */
   readonly exceptionBorders: TableEdgeInputs | null;
+  /** WORD_TABLE_CELL_SPACING_GEOMETRY, selected before acquisition. Independent
+   * cell borders occupy this width inside each cell box. */
+  readonly spacingGeometry?: Readonly<{ borderPt: number }>;
+
   /** Effective §17.4.27/.26 row alignment. */
   readonly alignment: 'left' | 'center' | 'right';
   /** Signed leading-axis origin translation after first-row tblPrEx and the
@@ -1690,4 +1702,6 @@ export interface VmlShapeAcquisitionFacts {
   readonly vmlInsetPen?: boolean;
   readonly vmlConcentricGradient?: boolean;
   readonly vmlTextRects?: Array<[number, number, number, number]>;
+  /** The text body is a legacy `<v:textbox>` (Part 4 §19.1.2.22), not `<wps:txbx>`. */
+  readonly vmlTextBox?: boolean;
 }

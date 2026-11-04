@@ -103,7 +103,7 @@ describe('layout acquisition state', () => {
       ...paragraphState(),
       storyContext: BODY_STORY_CONTEXT,
     } as unknown as BodyAcquisitionState;
-    const nested = withTableCellStory(state);
+    const nested = withTableCellStory(state, true);
 
     expect(nested).not.toBe(state);
     expect(nested.storyContext).toEqual({

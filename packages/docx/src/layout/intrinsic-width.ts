@@ -702,6 +702,9 @@ export function measureParagraphIntrinsicWidths(
     'intrinsic',
     environment.verticalGlyphMeasurement,
     context.overflowPunct !== false,
+    false,
+    undefined,
+    context.cjkClosingMarkHang,
   );
   const oppositeIndentPt = context.baseRtl
     ? context.physicalIndentLeftPt
