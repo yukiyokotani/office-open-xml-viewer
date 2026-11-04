@@ -376,6 +376,8 @@ export interface LineFloatReference {
   readonly xLeftPt: number;
   readonly xRightPt: number;
   readonly readingDirection: 'ltr' | 'rtl';
+  /** Compatibility policy projected by paragraph layout; generic geometry preserves continuous through-wrap search. */
+  readonly stepThroughPolygons?: boolean;
 }
 
 function effectiveWrapSide(
@@ -726,7 +728,7 @@ export function createFloatLineBandPredicate(
 
 /** Whether the line band [topY, topY + probeH] lies in a polygon's
  * line-step region (WORD_TIGHT_WRAP_LINE_STEP_ADVANCE and
- * WORD_THROUGH_WRAP_LINE_STEP_ADVANCE): it meets a tight or through polygon,
+ * WORD_THROUGH_WRAP_LINE_STEP_ADVANCE): it meets a tight polygon, or a through polygon when enabled,
  * including the touched tight edges of `tightEdgeTouch`. An exempt anchor line
  * (`exemptLineTopPt`) is still in the region; the exemption only changes that
  * line's own window. */
@@ -736,8 +738,9 @@ function bandMeetsTightPolygon(
   probeH: number,
   paraXLeft: number,
   paraXRight: number,
+  stepThroughPolygons: boolean,
 ): boolean {
-  return lowestMetTightBottom(prepared, topY, probeH, paraXLeft, paraXRight) !== null;
+  return lowestMetTightBottom(prepared, topY, probeH, paraXLeft, paraXRight, stepThroughPolygons) !== null;
 }
 
 /** The lowest bottom of the tight and through polygons whose line-step
@@ -749,6 +752,7 @@ function lowestMetTightBottom(
   probeH: number,
   paraXLeft: number,
   paraXRight: number,
+  stepThroughPolygons: boolean,
 ): number | null {
   const exactTop = unreducedExactFromNumber(topY);
   const exactBottom = addUnreducedExact(exactTop, unreducedExactFromNumber(probeH));
@@ -756,8 +760,10 @@ function lowestMetTightBottom(
   for (const float of prepared.floats) {
     const { rect } = float;
     // WORD_THROUGH_WRAP_LINE_STEP_ADVANCE: a through polygon steps like a
-    // tight one; only tight polygons have touched edges (tightEdgeTouch).
-    if (!float.polygon || rect.mode !== 'square') continue;
+    // tight one only within the projected policy; only tight polygons have
+    // touched edges (tightEdgeTouch).
+    if (!float.polygon || rect.mode !== 'square'
+      || (float.polygon.kind !== 'tight' && !stepThroughPolygons)) continue;
     if (!floatOverlapsColumnX(rect as FloatRect, paraXLeft, paraXRight)) continue;
     const meets = tightEdgeTouch(float, exactTop, exactBottom) !== null
       || (compareExactRational(exactBottom, unreducedExactFromNumber(rect.yTop)) > 0
@@ -1427,7 +1433,7 @@ function computePreparedLineFloatWindowCore(
   if (current) return current;
   // One candidate walk, WORD_TIGHT_WRAP_LINE_STEP_ADVANCE and
   // WORD_THROUGH_WRAP_LINE_STEP_ADVANCE included ("tight" below covers both
-  // polygon kinds; tightEdgeTouch stays tight-only). Every
+  // polygon kinds when enabled; tightEdgeTouch stays tight-only). Every
   // candidate is tested with the same predicate (`evaluate`, i.e.
   // `lineWindowAtY`); the first one that fits is the answer, so no returned
   // line collides with a wrap region. Candidates come from two sources:
@@ -1467,7 +1473,7 @@ function computePreparedLineFloatWindowCore(
   const pitch = Math.abs(topY) <= LINE_SEARCH_Y_LIMIT_PT ? lineSearchPitch(probeH) : null;
   const tightAt = (y: number): boolean =>
     pitch !== null && Math.abs(y) <= LINE_SEARCH_Y_LIMIT_PT
-    && bandMeetsTightPolygon(prepared, y, probeH, paraXLeft, paraXRight);
+    && bandMeetsTightPolygon(prepared, y, probeH, paraXLeft, paraXRight, reference.stepThroughPolygons === true);
   const gridAfter = (y: number): number =>
     lineGridAfter(topY, pitch!, Math.min(y, LINE_SEARCH_Y_LIMIT_PT));
   let stepBudget = TIGHT_LINE_STEP_LIMIT;
@@ -1476,7 +1482,7 @@ function computePreparedLineFloatWindowCore(
       stepBudget -= 1;
       return gridAfter(y);
     }
-    const bottom = lowestMetTightBottom(prepared, y, probeH, paraXLeft, paraXRight);
+    const bottom = lowestMetTightBottom(prepared, y, probeH, paraXLeft, paraXRight, reference.stepThroughPolygons === true);
     return gridAfter(bottom === null ? y : Math.max(bottom, y));
   };
   let cursor = topY;

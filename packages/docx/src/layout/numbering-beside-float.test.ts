@@ -119,14 +119,14 @@ function squareShape(id: number, x: number, w: number, h: number): string {
  * literal marker `marker` (tab suffix) when `numbered`; the 504 pt column
  * starts 54 pt from the page edge. Returns its first two lines. */
 function anchoredParagraphLines(floats: string, text: string | readonly string[], numbered: { marker: string; ind: string } | null,
-  { compatibilityMode, advancePt = 5, anchorsLast = false }:
-    { compatibilityMode?: number | undefined; advancePt?: number; anchorsLast?: boolean } = {}) {
+  { compatibilityMode, advancePt = 5, anchorsLast = false, exactLinePt }:
+    { compatibilityMode?: number | undefined; advancePt?: number; anchorsLast?: boolean; exactLinePt?: number } = {}) {
   const enc = new TextEncoder();
   const ppr = numbered ? '<w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr>' : '';
   // An array is one run per element, alternately plain and bold.
   const runs = (typeof text === 'string' ? [text] : text)
     .map((piece, index) => `<w:r>${index % 2 === 1 ? '<w:rPr><w:b/></w:rPr>' : ''}<w:t>${piece}</w:t></w:r>`).join('');
-  const doc = `<w:document ${W}><w:body><w:p><w:pPr>${ppr}<w:spacing w:before="0" w:after="0"/></w:pPr>${anchorsLast ? `${runs}${floats}` : `${floats}${runs}`}</w:p><w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1080" w:right="1080" w:bottom="1080" w:left="1080" w:header="720" w:footer="720" w:gutter="0"/></w:sectPr></w:body></w:document>`;
+  const doc = `<w:document ${W}><w:body><w:p><w:pPr>${ppr}<w:spacing w:before="0" w:after="0"${exactLinePt === undefined ? '' : ` w:line="${exactLinePt * 20}" w:lineRule="exact"`}/></w:pPr>${anchorsLast ? `${runs}${floats}` : `${floats}${runs}`}</w:p><w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1080" w:right="1080" w:bottom="1080" w:left="1080" w:header="720" w:footer="720" w:gutter="0"/></w:sectPr></w:body></w:document>`;
   const numbering = `<w:numbering ${W}><w:abstractNum w:abstractNumId="1"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="${numbered?.marker ?? '1.'}"/><w:lvlJc w:val="left"/><w:pPr>${numbered?.ind ?? ''}</w:pPr></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="1"/></w:num></w:numbering>`;
   const input = storeZip(new Map([
     ['[Content_Types].xml', enc.encode('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/><Override PartName="/word/settings.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml"/></Types>')],
@@ -307,5 +307,18 @@ describe('over-wide first word after a float anchor (#2057, word-overlong-head-a
     expect(lines.map(({ topPt, text }) => ({ topPt, text }))).toEqual([
       { topPt: 10, text: '' }, { topPt: 20, text: thai.slice(0, 3) },
     ]);
+  });
+});
+
+describe('through-wrap line-step scope (#2054)', () => {
+  it.each([{ mode: undefined, top: 66 }, { mode: 15, top: 28 }])('keeps the selected polygon policy in mode $mode', ({ mode, top }) => {
+    // This top-open sloped notch preserves the previous renderer's 66pt
+    // placement in unmodeled legacy settings. Mode 15 instead selects
+    // the observed line-grid policy and admits the word at 28pt.
+    const points = [[0,0],[18000,0],[15120,21600],[19800,21600],[19800,0],[21600,0],[21600,21600],[0,21600],[0,0]];
+    const polygon = points.map(([x,y], index) => `<wp:${index === 0 ? 'start' : 'lineTo'} x="${x}" y="${y}"/>`).join('');
+    const shape = squareShape(48, 0, 600, 80).replace('<wp:wrapSquare wrapText="bothSides"/>',
+      `<wp:wrapThrough wrapText="bothSides"><wp:wrapPolygon edited="1">${polygon}</wp:wrapPolygon></wp:wrapThrough>`);
+    expect(anchoredParagraphLines(shape, 'abcde', null, { compatibilityMode: mode, exactLinePt: 14 })[0]).toMatchObject({ topPt: top, text: 'abcde' });
   });
 });

@@ -160,6 +160,7 @@ import {
   wordPreservesLowerLayerSameParagraphComposition,
   wordTextBoxVisibleAnchorExtentPt,
   wordGridPictureLineOriginPt,
+  wordStepsThroughWrapLines,
 } from './anchor-compatibility.js';
 import {
   wordRunVerticalAlignRaisePt,
@@ -5874,6 +5875,7 @@ function measurementPlacement(
             ? pageReference.xPt + pageReference.widthPt
             : options.placement.paragraphXPt + options.placement.availableWidthPt,
           readingDirection: options.context.baseRtl ? 'rtl' : 'ltr',
+          stepThroughPolygons: wordStepsThroughWrapLines(options.environment.compatibilityMode),
         });
   return {
     ...options.placement,

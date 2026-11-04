@@ -911,8 +911,8 @@ describe('polygon line-window active sweep complexity', () => {
 
   it('compiles a dense self-intersecting star incrementally and queries adjacent boundaries', () => {
     const vertexCount = 31;
-    // Inside the line-search domain tight and through lines advance in
-    // line-height steps instead of the contour sweep, so the star lies past it.
+    // Place the star outside the line-search domain so this contour sweep
+    // test remains independent of the paragraph-projected line-step policy.
     const prepared = prepareFloatWrap([translatedY(denseStar(vertexCount, 15, 'through'), T)]);
 
     const { window, diagnostics } = computePreparedLineFloatWindowWithDiagnostics(
