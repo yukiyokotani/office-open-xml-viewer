@@ -978,7 +978,8 @@ export function wordCjkClosingMarkHangRefused(
   if (policy === 'none') return true;
   // With kinsoku off, the following mark may begin the next line. A first
   // mark still hangs in the observed pre-15 class; refuse a second one
-  // once the line already extends past its fit width.
+  // once the line already extends past its fit width. The caller uses the
+  // ordinary closed-boundary fit predicate, including its roundoff handling.
   if (!kinsoku.enabled) return lineAlreadyOverflows();
   const following = next();
   return following !== undefined && kinsoku.lineStartForbidden.has(following.codePointAt(0)!);

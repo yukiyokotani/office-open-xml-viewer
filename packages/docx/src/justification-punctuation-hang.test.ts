@@ -494,6 +494,20 @@ describe('word-justification-punctuation-hang with paragraph kinsoku off', () =>
     expect(text(next!).startsWith('」')).toBe(true);
   });
 
+  it('hangs the first mark in its own run after a fractional exact band', () => {
+    // 36 × 10.1pt fills the 363.6pt band; repeated IEEE-754 addition can
+    // leave the stored prefix a few ulps above it. The hang and ordinary
+    // fit decisions must agree about that same closed boundary.
+    const run = (value: string, color: string | null = null) =>
+      ({ ...textRun(value, color), fontSize: 20.2 }) as DocParagraph['runs'][number];
+    const body = kinsokuOff([run(KANA.slice(0, 36)), run('。', 'FF0000'), run('らり')], 'both');
+    const layout = layoutBodyModel([body], { ...section, marginRight: 16.4 }, makeCtx(), {}, { compatibilityMode: 14 });
+    const paragraph = layout.pages[0]!.layers.body[0]!;
+    if (paragraph.kind !== 'paragraph') throw new Error('expected a paragraph');
+    expect(text(paragraph.lines[0]!)).toBe(KANA.slice(0, 36) + '。');
+    expect(text(paragraph.lines[1]!)).toBe('らり');
+  });
+
   it('uses paragraph-effective rules inside a table cell', () => {
     const borders = { top: null, bottom: null, left: null, right: null, insideH: null, insideV: null };
     const body = {
