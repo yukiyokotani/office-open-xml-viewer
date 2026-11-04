@@ -806,17 +806,26 @@ describe('paragraphLayoutFromMeasurement retained authorities', () => {
     textBlocks: [],
   });
 
-  function measureInlineParagraph(runs: DocParagraph['runs'], multiple = 1) {
+  function measureInlineParagraph(runs: DocParagraph['runs'], multiple = 1, options: {
+    markFontSize?: number;
+    lineGridPitchPt?: number;
+    context?: CanvasRenderingContext2D;
+    compatibilityMode?: number;
+    defaultParagraphStyleShapeInput?: Parameters<typeof measureParagraph>[4]['defaultParagraphStyleShapeInput'];
+  } = {}) {
+    const selectedContext = options.context ?? measureContext;
     const value = {
-      ...paragraph, runs, defaultFontSize: 10, defaultFontFamily: 'Test Sans',
+      ...paragraph, runs, defaultFontSize: options.markFontSize ?? 10, defaultFontFamily: 'Test Sans',
       lineSpacing: { rule: 'auto' as const, value: multiple },
     };
-    const context = { ...acquisitionContext, lineSpacing: value.lineSpacing };
+    const context = { ...acquisitionContext, lineSpacing: value.lineSpacing,
+      ...(options.lineGridPitchPt ? { lineGrid: { active: true, pitchPt: options.lineGridPitchPt } } : {}),
+    };
     const placement = {
       startYPt: 10, paragraphXPt: 10, availableWidthPt: 100, maximumYPt: 500,
       suppressSpaceBefore: false,
     };
-    const measurer = { context: measureContext, fontFamilyClasses: {} };
+    const measurer = { context: selectedContext, fontFamilyClasses: {} };
     const layoutServices = createLayoutServices({
       section: {
         pageWidth: 612, pageHeight: 792,
@@ -826,10 +835,12 @@ describe('paragraphLayoutFromMeasurement retained authorities', () => {
       },
       body: [], headers: { default: null, first: null, even: null },
       footers: { default: null, first: null, even: null },
-    }, { measureContext });
+    }, { measureContext: selectedContext });
     const environment = {
       documentHasEastAsianText: false, pageWritingMode: 'horizontal-tb' as const,
       pageIndex: 0, totalPages: 1, layoutServices,
+      compatibilityMode: options.compatibilityMode,
+      defaultParagraphStyleShapeInput: options.defaultParagraphStyleShapeInput,
     };
     const measured = measureParagraph(value as never, context, placement, measurer, environment);
     return paragraphLayoutFromMeasurement(value as never, {
@@ -856,6 +867,43 @@ describe('paragraphLayoutFromMeasurement retained authorities', () => {
     const node = measureInlineParagraph([inlineShape(40)], 1.5);
     expect(node.lines[0]!.advancePt).toBeCloseTo(40 + 0.5 * markSingle, 10);
     expect(node.lines[0]!.advancePt).not.toBe(60);
+  });
+
+  it('uses the default paragraph-style single line for horizontal mode-15 inline leading', () => {
+    const context = {
+      font: '', letterSpacing: '0px', fontKerning: 'auto',
+      measureText(this: { font: string }, text: string) {
+        const size = Number(/([\d.]+)px/u.exec(this.font)?.[1] ?? 10);
+        return { width: [...text].length * size / 2,
+          actualBoundingBoxAscent: size * 0.8, actualBoundingBoxDescent: size * 0.2,
+          fontBoundingBoxAscent: size * 0.8, fontBoundingBoxDescent: size * 0.2 } as TextMetrics;
+      },
+    } as unknown as CanvasRenderingContext2D;
+    const defaultSingle = measureInlineParagraph([], 1, { context, markFontSize: 20 }).advancePt;
+    const directSingle = measureInlineParagraph([], 1, { context, markFontSize: 10 }).advancePt;
+    expect(defaultSingle).toBeGreaterThan(directSingle);
+    const style = {
+      fontSizePt: 20, fonts: { ascii: 'Test Sans', highAnsi: 'Test Sans', eastAsia: 'Test Sans', complexScript: 'Test Sans' },
+      weight: 400, style: 'normal' as const, complexScript: false, kerning: false,
+    };
+    const modern = measureInlineParagraph([inlineShape(40)], 1.5,
+      { context, compatibilityMode: 15, defaultParagraphStyleShapeInput: style });
+    expect(modern.lines[0]!.advancePt).toBeCloseTo(40 + defaultSingle / 2, 10);
+    const legacy = measureInlineParagraph([inlineShape(40)], 1.5,
+      { context, compatibilityMode: 14, defaultParagraphStyleShapeInput: style });
+    expect(legacy.lines[0]!.advancePt).toBeCloseTo(40 + directSingle / 2, 10);
+    const mixedRuns = [paragraph.runs[0]!, inlineShape(40)];
+    const mixedBefore = measureInlineParagraph(mixedRuns, 1.5, { context, compatibilityMode: 15 });
+    const mixed = measureInlineParagraph(mixedRuns, 1.5,
+      { context, compatibilityMode: 15, defaultParagraphStyleShapeInput: style });
+    expect(mixed.lines[0]!.advancePt).toBe(mixedBefore.lines[0]!.advancePt);
+    // Word's grid controls collapse single/1.5 spacing to the same allocation.
+    // Default-style leading must not introduce another grid step.
+    const gridOptions = { context, compatibilityMode: 15, lineGridPitchPt: 16.4 };
+    const gridBefore = measureInlineParagraph([inlineShape(40)], 1.5, gridOptions);
+    const grid = measureInlineParagraph([inlineShape(40)], 1.5,
+      { ...gridOptions, defaultParagraphStyleShapeInput: style });
+    expect(grid.lines[0]!.advancePt).toBe(gridBefore.lines[0]!.advancePt);
   });
 
   it('places an inline shape bottom on the visible text baseline', () => {

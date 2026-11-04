@@ -80,6 +80,7 @@ pub(super) fn build(
     });
     let document_typography_settings = Some(DocumentTypographySettingsWire {
         normal_style_font_size_pt: facts.formatting.direct_normal_style_font_size_pt()?,
+        default_paragraph_style_font_facts: None,
     });
 
     let mut budget = ModelBudget::new(max_bytes);

@@ -29,6 +29,7 @@ import {
   WORD_PICTURE_BULLET_LINE_PARTICIPATION,
   wordJustifiedInterwordCompressionApplies,
   wordJustifiedLineFit,
+  wordDefaultStyleInlineLeadingApplies,
 } from './layout/line-compatibility.js';
 import { LayoutInvariantError } from './layout/diagnostics.js';
 import type { MeasurementTextContext } from './layout/measurement-capabilities.js';
@@ -42,6 +43,7 @@ export interface ParagraphMeasurementEnvironment extends LineLayoutEnvironment {
   readonly retainSourceRunBoundaries?: boolean;
   readonly documentHasEastAsianText: boolean;
   readonly paragraphMarkShapeInput?: NumberingMarkerShapeInput;
+  readonly defaultParagraphStyleShapeInput?: NumberingMarkerShapeInput;
   /** Selected-face text marker box, resolved by retained numbering before line acquisition. */
   /** Ascent (with line gap) of a numbered paragraph's text marker; an empty
    * item's mark line takes part with it (#1884). */
@@ -378,10 +380,21 @@ export function measureParagraph(
     // single-line height. Measure its paragraph mark through the same selected
     // face service as an empty paragraph, without the auto multiplier or grid.
     // The visible text's own selected metric takes precedence on mixed lines.
+    // WORD_INLINE_PICTURE_AUTO_LEADING: horizontal mode-15 lines use the
+    // document's default paragraph-style run on box-only ordinary body lines.
+    // Its parser-resolved facts keep w:default distinct from grid Normal.
+    // Other stories/containers, numbering, mixed text and vertical acquisition
+    // and active line grids keep their existing allocation; those classes were not established
+    // by the default-style controls. Authored font hints still select a slot.
+    const defaultStyle = wordDefaultStyleInlineLeadingApplies(environment.compatibilityMode, paragraph)
+      && environment.pageWritingMode === 'horizontal-tb'
+      && environment.verticalCJK !== true && environment.verticalPageFrame !== true
+      && !context.lineGrid.active
+      ? environment.defaultParagraphStyleShapeInput : undefined;
     const markSinglePx = paragraphMarkLineMetrics(
-      paragraph, 1, undefined, false, markUsesEastAsianGrid,
+      paragraph, 1, undefined, false, defaultStyle ? false : markUsesEastAsianGrid,
       measurer.context, fontFamilyClasses, null, environment.resolvedLocalFonts,
-      environment.layoutServices?.text, environment.paragraphMarkShapeInput,
+      environment.layoutServices?.text, defaultStyle ?? environment.paragraphMarkShapeInput,
     ).advancePx;
     for (const segment of segments) {
       if ('imagePath' in segment && segment.inlinePicture === true) {

@@ -11,6 +11,26 @@ describe('docx rendered text inventory', () => {
     footers: { default: null, first: null, even: null },
   }) as unknown as DocxDocumentModel;
 
+  it('loads the default paragraph-style metric font only for eligible inline leading', () => {
+    const doc = {
+      ...documentWithRun({ type: 'shape', inline: true, widthPt: 40, heightPt: 40, textBlocks: [] }),
+      settings: { compatibilityMode: 15 },
+      __documentTypographySettings: { defaultParagraphStyleFontFacts: {
+        fontFamily: 'Cambria', fontSize: 20, bold: true, italic: true,
+      } },
+    } as unknown as DocxDocumentModel;
+    const paragraph = doc.body[0]!;
+    if (paragraph.type !== 'paragraph') throw new Error('expected paragraph');
+    paragraph.lineSpacing = { rule: 'auto', value: 1.5 };
+    expect(docxFontPreloadNames(doc)).toContain('Cambria');
+    for (const options of [{}, { useGoogleFonts: true }]) {
+      expect(docxOfficeFontFallbackRequests(doc, options))
+        .toContainEqual({ family: 'Cambria', weight: 700, style: 'italic' });
+    }
+    expect(docxFontPreloadNames({ ...doc, settings: { compatibilityMode: 14 } })).not.toContain('Cambria');
+    expect(docxFontPreloadNames({ ...doc, body: [] })).not.toContain('Cambria');
+  });
+
   it.each(['rtl', 'cs'] as const)('collects the independent CS tuple of a compatibility %s run', (flag) => {
     const facts = {
       text: '123', fontSizePt: 10, [flag]: true,

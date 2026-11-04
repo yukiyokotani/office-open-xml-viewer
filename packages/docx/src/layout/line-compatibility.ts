@@ -1235,8 +1235,27 @@ export const WORD_INLINE_PICTURE_AUTO_LEADING = defineCompatibilityRule({
     version: '16.113.2',
     platform: 'macOS 27.0',
   },
-  description: 'For an inline picture or drawing shape (wp:inline WPS or in-flow VML text box) with automatic spacing at or above one line, add the authored leading of the selected text/paragraph-mark face to the natural drawing/text baseline union, rather than multiplying the drawing height. Image-only, text-only and alternating 28.35pt-picture controls at line=240/259 and exact=259 distinguish the two advances; earlier Word controls covered picture heights 5–255pt at auto multiples 1, 1.079 and 1.15. Windows Word 16.0.20527 issue #2063 PDF controls (72 inline cases across no-styles/docDefaults documents, compatibility mode omitted/15) also establish box-only single spacing equal to box height and mixed-text box bottoms on the baseline. At 1.5 spacing a 40pt box with a 10pt Times New Roman mark adds about 5.74pt, not 20pt. In compatibility mode 15 Word selects document-default single-line leading; the library still uses the paragraph mark when those faces differ (a separate unresolved selection difference). Exact spacing and lines without inline pictures/shapes retain their own allocation.',
+  description: 'For an inline picture or drawing shape (wp:inline WPS or in-flow VML text box) with automatic spacing at or above one line, add the authored leading of the selected text/paragraph-mark face to the natural drawing/text baseline union, rather than multiplying the drawing height. Image-only, text-only and alternating 28.35pt-picture controls at line=240/259 and exact=259 distinguish the two advances; earlier Word controls covered picture heights 5–255pt at auto multiples 1, 1.079 and 1.15. Windows Word 16.0.20527 issue #2063 PDF controls (72 inline cases across no-styles/docDefaults documents, compatibility mode omitted/15) also establish box-only single spacing equal to box height and mixed-text box bottoms on the baseline. At 1.5 spacing a 40pt box with a 10pt Times New Roman mark adds about 5.74pt, not 20pt. For off-grid horizontal mode-15 box-only lines, Windows Word 16.0.20527 default-style controls select the effective paragraph style marked w:default, over document run defaults, independently of the direct paragraph mark and of a differently named Normal style. Sixty controls cover Times New Roman/Arial/Yu Mincho, 9–20pt style sizes, 10/20pt direct marks, and single/1.5 spacing: leading follows the default style font/size while the 40pt box is unchanged. Thirty additional image/shape, grid/no-grid and spacing-omitted controls reproduce the default-style leading for both literal pictures and WPS shapes off-grid; an active line grid overrides the auto multiplier and retains its separate allocation. Parser-produced models retain those resolved font facts; legacy/vertical paths and older models retain paragraph-mark selection. Mixed-content selection remains governed by the visible text union. Exact spacing and lines without inline pictures/shapes retain their own allocation.',
 });
+
+/** The box-only input class measured by WORD_INLINE_PICTURE_AUTO_LEADING's
+ * default-style controls. Resource preflight and measurement share this gate
+ * so a face needed only for the leading is available before acquisition. The
+ * caller separately establishes ordinary body scope and horizontal axes. */
+export function wordDefaultStyleInlineLeadingApplies(
+  compatibilityMode: number | undefined,
+  paragraph: Readonly<{
+    lineSpacing?: Readonly<LineSpacing> | null;
+    numbering?: unknown;
+    runs: readonly Readonly<{ type: string; anchor?: boolean; inline?: boolean }>[];
+  }>,
+): boolean {
+  return compatibilityMode === 15 && !paragraph.numbering
+    && paragraph.lineSpacing?.rule === 'auto' && paragraph.lineSpacing.value > 1
+    && paragraph.runs.length > 0
+    && paragraph.runs.every(run => (run.type === 'image' && run.anchor !== true)
+      || (run.type === 'shape' && run.inline === true));
+}
 
 /** Word-observed inline-picture projection of ECMA-376 §17.3.1.33. */
 export function wordInlinePictureAutoLineHeightPx(

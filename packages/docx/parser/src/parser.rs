@@ -1883,6 +1883,17 @@ fn finish_document(
         .1
         .font_size
         .unwrap_or(DEFAULT_FONT_SIZE);
+    // §17.7.2 applies document defaults below the style marked w:default.
+    // Keep its full resolved run facts: inline automatic leading cannot be
+    // reconstructed from a body paragraph's direct mark or from grid Normal.
+    let mut default_paragraph_style_font_facts = resolved_run_font_facts(
+        &environment.style_map.resolve_para(None, None).1,
+        &environment.theme,
+    );
+    // Use the same missing-size policy as ordinary parser-created runs.
+    default_paragraph_style_font_facts
+        .font_size
+        .get_or_insert(DEFAULT_FONT_SIZE);
 
     // ECMA-376 §17.8.3.10: font family classification from fontTable.xml.
     // Resolve via relationship (Type ending in "/fontTable"); fall back to
@@ -2009,6 +2020,7 @@ fn finish_document(
         settings: environment.document_settings,
         document_typography_settings: Some(crate::types::DocumentTypographySettingsWire {
             normal_style_font_size_pt,
+            default_paragraph_style_font_facts: Some(Box::new(default_paragraph_style_font_facts)),
         }),
         page_layout_settings: environment.page_layout_settings,
         note_layout_settings: environment.note_layout_settings,
@@ -3979,6 +3991,29 @@ mod document_typography_settings_tests {
         let typography = document.document_typography_settings.unwrap();
 
         assert_eq!(typography.normal_style_font_size_pt, 9.0);
+    }
+
+    #[test]
+    fn default_paragraph_font_facts_keep_their_own_style_cascade() {
+        let styles_xml = format!(
+            r#"<w:styles xmlns:w="{W_NS}">
+                 <w:docDefaults><w:rPrDefault><w:rPr>
+                   <w:rFonts w:ascii="Times New Roman"/><w:sz w:val="20"/>
+                 </w:rPr></w:rPrDefault></w:docDefaults>
+                 <w:style w:type="paragraph" w:styleId="BuiltIn0">
+                   <w:name w:val="Normal"/><w:rPr><w:sz w:val="18"/></w:rPr>
+                 </w:style>
+                 <w:style w:type="paragraph" w:default="1" w:styleId="DocumentDefault">
+                   <w:name w:val="Document Default"/>
+                   <w:rPr><w:rFonts w:ascii="Arial"/><w:sz w:val="40"/></w:rPr>
+                 </w:style>
+               </w:styles>"#
+        );
+        let document = parse_from_bytes(&document_with_styles(&styles_xml)).unwrap();
+        let wire = serde_json::to_value(document).unwrap();
+        let facts = &wire["__documentTypographySettings"]["defaultParagraphStyleFontFacts"];
+        assert_eq!(facts["fontSize"].as_f64(), Some(20.0));
+        assert_eq!(facts["fontFamily"].as_str(), Some("Arial"));
     }
 }
 

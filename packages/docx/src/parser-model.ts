@@ -281,15 +281,20 @@ export interface InternalDocxDocumentModel extends DocxDocumentModel {
   }>;
   readonly __documentTypographySettings?: Readonly<{
     normalStyleFontSizePt?: number;
+    defaultParagraphStyleFontFacts?: InternalRunFontFacts;
   }>;
 }
 
 export function documentTypographySettingsInput(
   doc: DocxDocumentModel,
 ): DocumentTypographySettingsInput {
-  const authored = (doc as InternalDocxDocumentModel)
-    .__documentTypographySettings?.normalStyleFontSizePt;
+  const typography = (doc as InternalDocxDocumentModel).__documentTypographySettings;
+  const authored = typography?.normalStyleFontSizePt;
+  const defaultStyle = typography?.defaultParagraphStyleFontFacts;
   return snapshotPlainData({
+    ...(defaultStyle ? {
+      defaultParagraphStyleShapeInput: runFontFactsShapeInput(defaultStyle, 10, null, null),
+    } : {}),
     normalStyleFontSizePt:
       typeof authored === 'number' && Number.isFinite(authored) && authored > 0
         ? authored
@@ -1623,18 +1628,29 @@ export function paragraphMarkShapeInput(
 ): NumberingMarkerShapeInput | undefined {
   const facts = internalParagraph(paragraph).paragraphMarkFontFacts;
   if (!facts) return undefined;
-  const complexScript = facts.rtl === true || facts.cs === true;
   const fallbackFontSizePt = paragraph.runs.find(
     (run): run is Extract<DocRun, { type: 'text' | 'field' }> => run.type === 'text' || run.type === 'field',
   )?.fontSize ?? paragraph.defaultFontSize ?? 10;
+  return runFontFactsShapeInput(facts, fallbackFontSizePt,
+    paragraph.defaultFontFamily ?? null, paragraph.defaultFontFamilyEastAsia ?? null);
+}
+
+/** Project one effective style/mark run without consulting body content. */
+function runFontFactsShapeInput(
+  facts: InternalRunFontFacts,
+  fallbackFontSizePt: number,
+  fallbackAscii: string | null,
+  fallbackEastAsia: string | null,
+): NumberingMarkerShapeInput {
+  const complexScript = facts.rtl === true || facts.cs === true;
   const fontSizePt = complexScript
     ? (facts.fontSizeCs ?? facts.fontSize ?? fallbackFontSizePt)
     : (facts.fontSize ?? fallbackFontSizePt);
-  const ascii = facts.fontFamily ?? paragraph.defaultFontFamily ?? null;
+  const ascii = facts.fontFamily ?? fallbackAscii;
   const fallbackFonts: TextFontSlots = {
     ascii,
     highAnsi: facts.fontFamilyHighAnsi ?? ascii,
-    eastAsia: facts.fontFamilyEastAsia ?? paragraph.defaultFontFamilyEastAsia ?? ascii,
+    eastAsia: facts.fontFamilyEastAsia ?? fallbackEastAsia ?? ascii,
     complexScript: facts.fontFamilyCs ?? ascii,
   };
   return Object.freeze({

@@ -204,6 +204,7 @@ mod serialization_tests {
         let document = Document {
             document_typography_settings: Some(DocumentTypographySettingsWire {
                 normal_style_font_size_pt: 11.0,
+                default_paragraph_style_font_facts: None,
             }),
             ..Document::default()
         };
@@ -300,6 +301,11 @@ mod serialization_tests {
 #[serde(rename_all = "camelCase")]
 pub struct DocumentTypographySettingsWire {
     pub normal_style_font_size_pt: f64,
+    /// Effective default paragraph-style run facts (§17.7.2), before any
+    /// paragraph/direct formatting. This is distinct from the named Normal
+    /// style used by the character grid (§17.6.5).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_paragraph_style_font_facts: Option<Box<RunFontFacts>>,
 }
 
 #[derive(Serialize, Debug, Clone, Default)]

@@ -9,7 +9,7 @@ import type { BodyAcquisitionInputProjections } from './acquisition-input-projec
 import type { BodyLayoutInput } from './body-layout-input.js';
 import type { DocumentLayoutSettings } from '../layout-context.js';
 import type { ImageMetadataRecord, MathOccurrence } from './resources.js';
-import type { PaintResourceDescriptor, PaintResourceRegistry, SourceRef } from './types.js';
+import type { PaintResourceDescriptor, PaintResourceRegistry, SourceRef, NumberingMarkerShapeInput } from './types.js';
 import type { ParagraphAcquisitionInput } from './text.js';
 import type { DeepReadonly, ParsedUnsupportedTextBoxBlock } from './types.js';
 import { imageResourceKey, sourceKey, vmlPictureResourceKey, vmlStrokeResourceKey, vmlEdgeResourceKey } from './source-key.js';
@@ -107,6 +107,7 @@ export interface LayoutSourceDocumentFacts {
   readonly mathDefJc?: string;
   readonly documentHasEastAsianText: boolean;
   readonly normalStyleFontSizePt: number;
+  readonly defaultParagraphStyleShapeInput?: NumberingMarkerShapeInput;
   readonly compat: DocumentLayoutSettings['compat'];
 }
 

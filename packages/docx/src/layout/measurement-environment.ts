@@ -85,6 +85,10 @@ export function paragraphMeasurementEnvironment(
     verticalCJK: state.verticalCJK && !state.verticalAllRotated,
     verticalPageFrame: state.verticalCJK === true,
     documentHasEastAsianText: state.docEastAsian,
+    ...(state.layoutSettings.defaultParagraphStyleShapeInput
+      && state.storyContext.story === 'body' && state.storyContext.containers.length === 0 ? {
+      defaultParagraphStyleShapeInput: state.layoutSettings.defaultParagraphStyleShapeInput,
+    } : {}),
     useFeLayout: state.layoutSettings.compat.useFeLayout,
     balanceSingleByteDoubleByteWidth:
       state.layoutSettings.compat.balanceSingleByteDoubleByteWidth,

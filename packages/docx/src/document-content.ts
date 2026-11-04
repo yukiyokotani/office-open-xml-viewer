@@ -11,6 +11,7 @@ import type {
   ShapeText,
 } from './types.js';
 import {
+  documentTypographySettingsInput,
   numberingMarkerShapeInput,
   paragraphMarkShapeInput,
   type InternalDocxDocumentModel,
@@ -19,6 +20,7 @@ import {
 } from './parser-model.js';
 import { requestedFamily, shapeRunToDocRun, type TextFontSlots } from './layout/text.js';
 import type { NumberingMarkerShapeInput } from './layout/types.js';
+import { wordDefaultStyleInlineLeadingApplies } from './layout/line-compatibility.js';
 
 type InternalRenderedFontAxes = Readonly<InternalRunSlotMetadata>;
 
@@ -342,6 +344,16 @@ export function* docxRenderedTextUsages(
   }
   yield* reservedSeparatorUsages(doc, collection);
   yield* selectedSeparatorUsages(doc, collection);
+  // The default style can be used solely by inline-object leading, even when
+  // every visible run/mark requests another font. Collect that exact tuple
+  // before synchronous measurement. Preflight does not resolve section axes;
+  // a vertical-only document can conservatively collect this one bounded
+  // style tuple, while measurement retains its horizontal/body-story gate.
+  if (doc.body?.some(block => block.type === 'paragraph'
+    && wordDefaultStyleInlineLeadingApplies(doc.settings?.compatibilityMode, block as DocParagraph))) {
+    const style = documentTypographySettingsInput(doc).defaultParagraphStyleShapeInput;
+    if (style) yield shapeInputUsage(style.fontHint === 'eastAsia' ? 'あ' : 'x', style);
+  }
 }
 
 /** Unique authored families in first-rendered-use order. */
