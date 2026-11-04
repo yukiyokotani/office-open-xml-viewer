@@ -214,6 +214,8 @@ fn jpeg_structure(bytes: &[u8], budget: &mut u64) -> Result<(), String> {
     let mut tables: HuffmanTables<'_> = [[None; 2]; 2];
     let mut quantisers: [Option<&[u8]>; 4] = [None; 4];
     let mut profile: Vec<(u8, u8, &[u8])> = Vec::new();
+    let mut profile_seen = [false; 256];
+    let mut profile_bytes = 0usize;
     loop {
         if bytes.get(at) != Some(&0xff) {
             return Err(decode());
@@ -244,10 +246,31 @@ fn jpeg_structure(bytes: &[u8], budget: &mut u64) -> Result<(), String> {
         }
         let segment = bytes.get(at + 4..at + 2 + length).ok_or_else(decode)?;
         match marker {
-            // A profile chunk (ICC.1 Annex B.4): its 1-based sequence
+            // A profile chunk (ICC.1:2010 Annex B.4): its 1-based sequence
             // number, the chunk count, then the chunk's bytes.
             0xe2 if segment.starts_with(b"ICC_PROFILE\0") => match segment.get(12..14) {
-                Some(&[sequence, count]) => profile.push((sequence, count, &segment[14..])),
+                Some(&[sequence, count]) => {
+                    // ICC.1:2010 Annex B.4 gives each chunk a unique 1-based
+                    // u8 index and one common u8 count: at most 255 entries.
+                    // Reject impossible metadata before retaining it or
+                    // decoding pixels. The exact-profile allowlist also
+                    // bounds cumulative bytes without guessing a size limit.
+                    let length = profile_bytes.checked_add(segment.len() - 14);
+                    if count == 0
+                        || sequence == 0
+                        || sequence > count
+                        || profile_seen[usize::from(sequence)]
+                        || profile.first().is_some_and(|chunk| chunk.1 != count)
+                        || !length.is_some_and(|length| {
+                            SRGB_PROFILES.iter().any(|known| length <= known.0)
+                        })
+                    {
+                        return Err(unsupported("image-colour"));
+                    }
+                    profile_seen[usize::from(sequence)] = true;
+                    profile_bytes = length.expect("validated cumulative length");
+                    profile.push((sequence, count, &segment[14..]));
+                }
                 _ => return Err(unsupported("image-colour")),
             },
             0xe1 if segment.starts_with(b"Exif\0\0") => {
@@ -310,19 +333,37 @@ fn jpeg_structure(bytes: &[u8], budget: &mut u64) -> Result<(), String> {
 }
 
 /// Standard sRGB colour profiles, as (length, SHA-256) of their exact bytes:
-/// an sRGB profile paints a picture's stored values in Chrome and in
-/// LibreOffice alike, while any other profile is colour-managed by Chrome
-/// only. The 3,144-byte "sRGB IEC61966-2.1" profile (Hewlett-Packard, 1998).
+/// admission is intentionally limited to known identities. The reader does
+/// not model arbitrary ICC transformations or infer them from profile names.
+/// These are the 3,144-byte "sRGB IEC61966-2.1" profile (Hewlett-Packard,
+/// 1998), with perceptual or media-relative colorimetric rendering intent.
+/// The two verified identities differ only in header byte 67 (0 versus 1;
+/// ICC.1:2010 §7.2.15), with identical primaries, white point and curves.
+/// This is an exact-identity admission policy, not a claim that arbitrary
+/// intent/profile variants render identically. Bytes are preserved for the
+/// image decoder; other profiles retain the previous rejection.
 #[cfg(not(test))]
-const SRGB_PROFILES: &[(usize, [u8; 32])] = &[SRGB_IEC61966_2_1];
+const SRGB_PROFILES: &[(usize, [u8; 32])] = &[SRGB_IEC61966_2_1, SRGB_IEC61966_2_1_RELATIVE];
 #[cfg(test)]
-const SRGB_PROFILES: &[(usize, [u8; 32])] = &[SRGB_IEC61966_2_1, tests::TEST_PROFILE];
+const SRGB_PROFILES: &[(usize, [u8; 32])] = &[
+    SRGB_IEC61966_2_1,
+    SRGB_IEC61966_2_1_RELATIVE,
+    tests::TEST_PROFILE,
+];
 const SRGB_IEC61966_2_1: (usize, [u8; 32]) = (
     3144,
     [
         0x2b, 0x3a, 0xa1, 0x64, 0x57, 0x79, 0xa9, 0xe6, 0x34, 0x74, 0x4f, 0xaf, 0x9b, 0x01, 0xe9,
         0x10, 0x2b, 0x0c, 0x9b, 0x88, 0xfd, 0x6d, 0xec, 0xed, 0x79, 0x34, 0xdf, 0x86, 0xb9, 0x49,
         0xaf, 0x7e,
+    ],
+);
+const SRGB_IEC61966_2_1_RELATIVE: (usize, [u8; 32]) = (
+    3144,
+    [
+        0x3f, 0x6d, 0x67, 0x41, 0x74, 0xf3, 0x80, 0x4e, 0xb0, 0xda, 0xbd, 0xac, 0x90, 0xae, 0x17,
+        0x48, 0x6e, 0x89, 0x8c, 0x50, 0x63, 0xa6, 0x6f, 0x86, 0x1c, 0x11, 0x6e, 0xa0, 0x33, 0xda,
+        0x83, 0x01,
     ],
 );
 
@@ -1264,22 +1305,45 @@ pub(crate) mod tests {
         assert_eq!(sha256(&test_profile()), TEST_PROFILE.1);
     }
 
+    // The profile split into APP2 chunks (sequence, count, bytes),
+    // inserted after SOI in the given order.
+    fn jpeg_with_icc(chunks: &[(u8, u8, &[u8])]) -> Vec<u8> {
+        let mut out = JPEG_1X1[..2].to_vec();
+        for &(sequence, count, data) in chunks {
+            out.extend([0xff, 0xe2]);
+            out.extend(((data.len() + 16) as u16).to_be_bytes());
+            out.extend(b"ICC_PROFILE\0");
+            out.extend([sequence, count]);
+            out.extend(data);
+        }
+        out.extend(&JPEG_1X1[2..]);
+        out
+    }
+
+    #[test]
+    fn rejects_impossible_icc_before_decoding_pixels() {
+        let oversized = vec![0; SRGB_PROFILES.iter().map(|profile| profile.0).max().unwrap() + 1];
+        for chunks in [
+            vec![(0, 1, &[][..])],
+            vec![(1, 0, &[][..])],
+            vec![(2, 1, &[][..])],
+            vec![(1, 1, &[][..]), (1, 1, &[][..])],
+            vec![(1, 2, &[][..]), (2, 3, &[][..])],
+            vec![(1, 1, oversized.as_slice())],
+        ] {
+            // Invalid ICC metadata must reject before the valid JPEG's pixel
+            // budget is consulted, preventing resource amplification first.
+            let mut pixels = 0;
+            assert_eq!(
+                decode(&jpeg_with_icc(&chunks), &mut pixels),
+                Err(unsupported("image-colour"))
+            );
+        }
+    }
+
     #[test]
     fn admits_only_known_jpeg_colour_profiles() {
-        // The profile split into APP2 chunks (sequence, count, bytes),
-        // inserted after SOI in the given order.
-        let with = |chunks: &[(u8, u8, &[u8])]| {
-            let mut out = JPEG_1X1[..2].to_vec();
-            for &(sequence, count, data) in chunks {
-                out.extend([0xff, 0xe2]);
-                out.extend(((data.len() + 16) as u16).to_be_bytes());
-                out.extend(b"ICC_PROFILE\0");
-                out.extend([sequence, count]);
-                out.extend(data);
-            }
-            out.extend(&JPEG_1X1[2..]);
-            out
-        };
+        let with = jpeg_with_icc;
         let profile = test_profile();
         let (head, tail) = profile.split_at(120);
         let colour = Err(unsupported("image-colour"));
