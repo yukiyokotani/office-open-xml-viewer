@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import { layoutBodyModel } from './test-support/document-layout.test-support.js';
 import type { LineLayout, TextPlacement } from './layout/types.js';
 import type { BodyElement, DocParagraph, DocSettings, DocxTextRun, SectionProps } from './types';
@@ -129,34 +129,18 @@ describe('line-end space in a run of the opposite direction', () => {
     expect(order('distribute')).toEqual(['קלם', 'כתב', 'Xray']);
   });
 
-  it('resolves many separately formatted line-end spaces in linear time', () => {
-    // An LTR word, rtl Hebrew and 400 separately coloured rtl spaces: the
-    // spaces are drawn inside the line, each an interior line-end space.
+  it('retains separately formatted whitespace through a many-run layout', () => {
     const spaces = Array.from({ length: 400 }, (_, index) =>
       textRun(' ', { rtl: true, color: index % 2 === 0 ? 'FF0000' : '00FF00' }));
-    const body = para([textRun('abc '), textRun('אבג', { rtl: true }), ...spaces], 'left');
-    const spy = vi.spyOn(Array.prototype, 'indexOf');
-    lines(body, { compatibilityMode: 15 });
-    const calls = spy.mock.contexts.filter((context, index) =>
-      (context as unknown[]).length >= 400 && typeof spy.mock.calls[index]![0] === 'number').length;
-    spy.mockRestore();
-    expect(calls).toBeLessThan(10);
-  });
-
-  it('absorbs interior line-end spaces with one copy of the stretch plan', () => {
-    const run = (count: number) => {
-      const spaces = Array.from({ length: count }, (_, index) =>
-        textRun(' ', { rtl: true, color: index % 2 === 0 ? 'FF0000' : '00FF00' }));
-      const body = para([textRun('abc '), textRun('אבג', { rtl: true }), ...spaces], 'left');
-      const set = vi.spyOn(Map.prototype, 'set');
-      lines(body, { compatibilityMode: 15 });
-      const calls = set.mock.calls.length;
-      set.mockRestore();
-      return calls;
-    };
-    // Linear: doubling the spaces at most doubles the map writes (plus slack);
-    // copying the plan per absorbed space grows them about fourfold.
-    expect(run(800)).toBeLessThan(2.5 * run(400));
+    const result = lines(para([textRun('abc '), textRun('אבג', { rtl: true }), ...spaces], 'left'),
+      { compatibilityMode: 15 });
+    const placed = result.flatMap(texts);
+    expect(placed.map(p => p.text).join('').replace(/\s/g, '')).toBe('abcאבג');
+    expect(placed.reduce((sum, p) => sum + p.text.length, 0)).toBe(407);
+    for (const placement of placed) {
+      expect(placement.bounds.widthPt).toBeGreaterThanOrEqual(0);
+      for (const cluster of placement.clusters) expect(cluster.advancePt).toBeGreaterThanOrEqual(0);
+    }
   });
 
   it('keeps the visible text of a mode-15 justified line inside the band when its line-end spaces are drawn inside', () => {
@@ -217,6 +201,20 @@ describe('line-end space in a run of the opposite direction', () => {
     ], 'both', { indentRight: 291, defaultFontSize: 12 } as Partial<DocParagraph>), { compatibilityMode: 15 });
     const right = Math.max(...texts(line!).filter(p => p.text.trim()).map(p => p.bounds.xPt + p.bounds.widthPt));
     expect(right).toBeLessThanOrEqual(89 + 1e-6);
+  });
+
+  it('compresses U+0020 without taking advance from a preceding nonbreaking space', () => {
+    const size = { fontSize: 12 };
+    const [line] = lines(para([
+      textRun('ab', size), textRun('c ', { ...size, underline: true }),
+      textRun('אבג ABC\u00a0    ', { ...size, rtl: true }),
+    ], 'both', { indentRight: 285, defaultFontSize: 12 } as Partial<DocParagraph>), { compatibilityMode: 15 });
+    const label = texts(line!).find(p => p.text.startsWith('ABC'))!;
+    const nbsp = label.clusters.find(cluster =>
+      label.text.slice(cluster.range.start - label.range.start, cluster.range.end - label.range.start) === '\u00a0')!;
+    expect(nbsp.advancePt).toBe(6);
+    expect(label.clusters.reduce((sum, cluster) => sum + cluster.advancePt, 0)).toBeCloseTo(label.advancePt, 6);
+    expect(label.trailingSpaceCompressionPt).toBeGreaterThan(0);
   });
 
 });

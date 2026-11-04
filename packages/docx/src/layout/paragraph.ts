@@ -1950,13 +1950,13 @@ export function planLine(input: PlanLineInput): LineLayout {
         // The compression belongs to source trailing whitespace, even when
         // bidi places that whitespace before the visible glyphs. Keep the
         // retained cluster advance and the paint origin under one authority.
-        const trailingStart = segment.range.start + segment.text.trimEnd().length;
-        let remainingPt = compressedSpacePt;
+        const trailingStart = segment.range.start
+          + hangingSpaceVisibleLength(segment.text, (code) => code === 0x20);
+        const perSpacePt = compressedSpacePt / (segment.range.end - trailingStart);
         let removedPt = 0;
         const clusters = textGeometry.clusters.map((cluster) => {
-          const reductionPt = cluster.range.start >= trailingStart
-            ? Math.min(remainingPt, cluster.advancePt) : 0;
-          remainingPt -= reductionPt;
+          const spaces = Math.max(0, cluster.range.end - Math.max(cluster.range.start, trailingStart));
+          const reductionPt = Math.min(cluster.advancePt, spaces * perSpacePt);
           const result = { ...cluster,
             advancePt: cluster.advancePt - reductionPt,
             offset: { ...cluster.offset, xPt: cluster.offset.xPt - removedPt } };
@@ -2038,6 +2038,9 @@ export function planLine(input: PlanLineInput): LineLayout {
         bounds: { xPt, yPt: line.topPt, widthPt, heightPt: line.advancePt },
         highlightBounds,
         advancePt: widthPt,
+        ...(compressedSpacePt > 0 ? {
+          trailingSpaceCompressionPt: (style.trailingSpaceCompressionPt ?? 0) + compressedSpacePt,
+        } : {}),
         clusters: textGeometry.clusters,
         paintOps,
         decorations,
