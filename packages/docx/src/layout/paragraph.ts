@@ -1852,12 +1852,13 @@ export function planLine(input: PlanLineInput): LineLayout {
     ? trailingAdvancePt(segments, (text) => text.trimEnd().length)
     : hangingLineEndSpacePt;
   const alignmentSlackPt = lineSlackPt - distributedWidthPt + trailingSeparatorPt;
+  const rtlUsesVisibleAlignment = input.baseRtl && (rtlVisibleEdge || !applyJustify
+    || ((!softWrapped || softLineSpacesOnly) && distributedWidthPt <= 0));
   const naturalAlignmentOffsetPt = edge === 'right'
     ? alignmentSlackPt
     : edge === 'center' || centreUnjustified
       ? alignmentSlackPt / 2
-      : edge === 'justify' && input.baseRtl && (rtlVisibleEdge || !applyJustify
-        || ((!softWrapped || softLineSpacesOnly) && distributedWidthPt <= 0))
+      : edge === 'justify' && rtlUsesVisibleAlignment
         // Right-hanging line-end spaces pass the start edge; the visible text
         // keeps it (blk-0898-kfit6 final lines keep their space inside).
         ? alignmentSlackPt + rtlRightHangPt
@@ -1867,7 +1868,9 @@ export function planLine(input: PlanLineInput): LineLayout {
   const ltrHangOffsetPt = !ltrSideHang && !rtlLineEndHangs ? 0
     : edge === 'right' ? rtlRightHangPt
       : edge === 'center' || centreUnjustified ? (rtlRightHangPt - leftHangPt) / 2
-        : edge === 'justify' && input.baseRtl ? 0 : -leftHangPt;
+        // Visible-fit alignment already subtracts the hanging advance above.
+        // Other justified lines (including distribute) need that shift here.
+        : edge === 'justify' && rtlUsesVisibleAlignment ? 0 : -leftHangPt;
   const lineStartPt = lineLeftPt + physicalStartOffsetPt;
   const alignmentOffsetPt = input.decimalAutoTabPt === undefined
     ? naturalAlignmentOffsetPt + ltrHangOffsetPt

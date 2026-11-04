@@ -621,7 +621,9 @@ export function measureParagraph(
       ? { lineEndIdeographicSpaceHangs: paragraph.wordWrap !== false }
       : false,
     wordJustifiedLineFit(paragraph.alignment, environment.compatibilityMode, context.baseRtl, context.wordWrap !== false,
-      context.baseRtl ? context.physicalIndentLeftPt : context.physicalIndentRightPt + rightGridAdjustmentPt),
+      context.baseRtl ? context.physicalIndentLeftPt : context.physicalIndentRightPt + rightGridAdjustmentPt,
+      environment.pageWritingMode === 'horizontal-tb' && environment.verticalCJK !== true
+        && environment.verticalPageFrame !== true),
     context.cjkClosingMarkHang,
   );
   if (lines.length === 0) return measureMarkOnly();

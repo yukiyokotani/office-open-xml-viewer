@@ -245,6 +245,15 @@ describe('line-end space in a run of the opposite direction', () => {
 
   });
 
+  it('hangs the physical leading space on soft-wrapped RTL distribute lines', () => {
+    const [first] = lines(para([textRun(`${WORDS} ${WORDS}`, { rtl: true })],
+      'distribute', { bidi: true }), { compatibilityMode: 15 });
+    const ink = texts(first!).filter(p => p.text.trim());
+    expect(Math.min(...ink.map(p => p.origin.xPt))).toBeCloseTo(20, 6);
+    expect(Math.max(...ink.map(p => p.origin.xPt + p.text.trim().length * 10)))
+      .toBeCloseTo(380, 6);
+  });
+
   it('expands a logically interior label space even when it paints at the physical right edge', () => {
     const [line] = lines(para([
       textRun('Xray '), textRun('כתב קלם בית', { rtl: true }),

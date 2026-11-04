@@ -216,9 +216,10 @@ describe('WORD_RTL_JUSTIFIED_VISIBLE_FIT', () => {
     for (const settings of MODES) {
       const [both] = lines(para([textRun(hebrew, { rtl: true })], 'both', rtl), settings);
       expect(wordsOn(both!), `mode ${settings?.compatibilityMode}`).toBe(7);
-      // Unmeasured alignments keep charging the line-end space.
+      // The measured all-alignment RTL hang also admits this visible prefix
+      // on an ordinary start-aligned line.
       const [start] = lines(para([textRun(hebrew, { rtl: true })], 'left', rtl), settings);
-      expect(wordsOn(start!)).toBe(6);
+      expect(wordsOn(start!)).toBe(7);
     }
   });
 

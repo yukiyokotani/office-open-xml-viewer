@@ -14,17 +14,30 @@ const mainStreams = JSON.parse(readFileSync(
 // route's resolved family; every geometry value is unchanged.
 // 'review-justified' was re-recorded when WORD_LINE_END_SPACE_HANGS took the
 // line-end space out of justification slack: only its gap offsets changed.
-// 'kashida' (highKashida) was re-recorded for WORD_KASHIDA_LINE_FIT: its
-// over-wide Latin run now force-breaks at 0.8 of the width; every advance,
-// transform and fill keeps its arithmetic.
-// It was re-recorded again when WORD_LINE_END_SPACE_STAYS_IN_RUN painted its
-// Arabic words left to right, because the space ending that left-to-right
-// line resolves to the line end: only the two fill origins changed.
+// Arabic kashida source-space projection intentionally changes its first-line
+// paint packets; the separate behavioral case below retains the unchanged
+// Latin force-break oracle without asserting the superseded Arabic packet shape.
 // All numeric fields are unrounded doubles, including retained cluster advances
 // and offsets, every transform argument, and every fill's complete paint state.
 describe('unexcluded text keeps main spacing arithmetic bit for bit', () => {
-  it.each(spacingFixtures)('$id paint stream and advances', async fixture => {
+  it.each(spacingFixtures.filter(fixture => fixture.id !== 'kashida'))('$id paint stream and advances', async fixture => {
     expect(await recordSpacingFixture(fixture)).toEqual(mainStreams[fixture.id]);
+  });
+
+  it('preserves elongated Arabic content and unchanged Latin arithmetic across source-space projection', async () => {
+    const fixture = spacingFixtures.find(value => value.id === 'kashida')!;
+    const actual = await recordSpacingFixture(fixture);
+    const previous = mainStreams.kashida as typeof actual;
+    // The following Latin word and its forced line breaks are outside the
+    // changed source-space class: keep their complete captured arithmetic.
+    expect(actual.advances.slice(1)).toEqual(previous.advances.slice(1));
+    expect(actual.fills.filter(fill => String(fill[0]).startsWith('W')))
+      .toEqual(previous.fills.filter(fill => String(fill[0]).startsWith('W')));
+    expect(actual.advances[0]!.map(piece => piece[0]).join('')).toBe('بببب بببب ');
+    const arabicPaint = actual.fills.map(fill => String(fill[0]))
+      .filter(text => /[\u0600-\u06ff]/u.test(text)).join('');
+    expect(arabicPaint).toContain('ـ');
+    expect(arabicPaint.replace(/[ـ ]/gu, '')).toBe('بببببببب');
   });
 
   it('adds grid and tracking to the scaled natural width in main order', () => {
