@@ -1666,7 +1666,7 @@ export function planLine(input: PlanLineInput): LineLayout {
   // A space on an RTL-painted rightmost slice lies inside the line, before
   // that slice. It is an ordinary opportunity; excluding the entire rightmost
   // slice would discard that gap and over-expand the remaining spaces.
-  const excludedGapIndex = visual.rtl[lastDrawnIndex] === true
+  const excludedGapIndex = !characterSpreadBidi && visual.rtl[lastDrawnIndex] === true
     && rightmost?.kind === 'text' && rightmost.text.endsWith(' ')
     && (rightmost.basePaintOps[0]?.writingMode ?? 'horizontal-tb') === 'horizontal-tb'
     ? segments.length : lastDrawnIndex;
