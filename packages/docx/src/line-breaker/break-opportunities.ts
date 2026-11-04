@@ -1450,7 +1450,18 @@ function placeOrSplitText(context: BreakOpportunityIteratorContext, inputFrame: 
     // text), so the token is broken by characters in the room behind the tab.
     // Positional tabs (§17.3.3.23) and words outside the measured scope
     // (wordTabGlueUnit) keep the fresh line.
-    if (breakerState.currentLine.every((item) => 'isTab' in item && !item.ptab) && !glueLineNarrowed(context)
+    // A decimal cell without a separator is outside aligned fit-back's
+    // measured scope. Its zero-width aligned gap must not let the ordinary
+    // tab-glue emergency split erase the established tab-only leading line.
+    // Word's LTR controls with consecutive decimal tabs, a hanging indent
+    // and an unbroken Latin cell retain that line; cells with a separator
+    // continue through the measured aligned fit-back path.
+    const lastTab = breakerState.currentLine.at(-1);
+    const unmeasuredDecimalFallback = lastTab !== undefined && 'isTab' in lastTab
+      && lastTab.resolvedAlignment === 'decimal' && !s.text.includes('.')
+      && !alignedCellHasDecimalSeparator(context);
+    if (!unmeasuredDecimalFallback
+      && breakerState.currentLine.every((item) => 'isTab' in item && !item.ptab) && !glueLineNarrowed(context)
       && wordTabGlueUnit(s, breakerState.queue.peek(), context.characterGrid?.type === 'snapToChars', context.baseRtl)) {
       const remaining = availW() - breakerState.currentWidth;
       const split = emergencyTextSplit(s, remaining);

@@ -183,6 +183,13 @@ describe('an aligned cell ended by a later tab', () => {
 });
 
 describe('tab rules outside their measured scope keep the earlier layout', () => {
+  it('keeps the leading tab-only line before a long decimal cell without a separator', () => {
+    const lines = paragraphLines(documentBytes('w:left="720" w:hanging="720"', false, 0,
+      { alignment: 'decimal', count: 2, stop: 5600, text: 'a'.repeat(100), noFloat: true }), 7.2);
+    expect(lines).toHaveLength(3);
+    expect(lines[0]!.placements.some((node) => node.kind === 'text')).toBe(false);
+  });
+
   it.each(['left', 'decimal'])('two %s tabs then a Latin word in a bidi paragraph end their line', (alignment) => {
     // #1672 r4 controls (fit-049, fit-229): Word ends the line with the tabs
     // and starts the unbreakable left-to-right word at the next line start.
