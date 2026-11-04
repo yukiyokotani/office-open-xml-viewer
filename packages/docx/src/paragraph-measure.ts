@@ -28,6 +28,7 @@ import {
   WORD_PICTURE_BULLET_LINE_PARTICIPATION,
   wordJustifiedInterwordCompressionApplies,
   wordJustifiedLineFit,
+  wordPreservesPre15AnchorLine,
 } from './layout/line-compatibility.js';
 import { LayoutInvariantError } from './layout/diagnostics.js';
 import type { MeasurementTextContext } from './layout/measurement-capabilities.js';
@@ -556,6 +557,7 @@ export function measureParagraph(
   const wrapContext: WrapLayoutCtx | undefined = placement.wrap
     ? {
         startPageY: cursorPt,
+        preservePre15AnchorLine: wordPreservesPre15AnchorLine(environment.compatibilityMode),
         resolveLineAdvances: (lines) => allocateLines(lines).allocations.map(line => line.advancePt),
         paraX: paragraphXPt,
         // Raw COLUMN band (placement) for the topAndBottom gate; paraX above is
