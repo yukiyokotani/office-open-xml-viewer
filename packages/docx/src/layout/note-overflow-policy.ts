@@ -62,6 +62,15 @@ export class NoteOverflowPolicy {
     }
     return view;
   }
+  /** How many note permissions have been granted; permissions only grow. */
+  get permissionCount(): number { return this.permitted.size; }
+  /** The notes permitted after the first `count` grants, in grant order. */
+  permittedSince(count: number): ReadonlyArray<Readonly<{ kind: NoteKind; id: string }>> {
+    return [...this.permitted.keys()].slice(count).map((key) => {
+      const separator = key.indexOf(':');
+      return Object.freeze({ kind: key.slice(0, separator) as NoteKind, id: key.slice(separator + 1) });
+    });
+  }
   allows(kind: NoteKind, ids: readonly string[]): boolean {
     return ids.some(id => this.permitted.has(`${kind}:${id}`));
   }
