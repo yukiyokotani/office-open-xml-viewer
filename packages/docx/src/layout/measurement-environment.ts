@@ -80,6 +80,10 @@ export function paragraphMeasurementEnvironment(
     noteNumbers: state.noteNumbers,
     noteNumbering: state.noteNumbering,
     noteReferenceNumber: state.noteReferenceNumber,
+    ...(state.storyContext?.story === 'body'
+      && state.storyContext.containers.length === 0
+      && state.storyContext.inlineObjectRunLeadingAdmitted === true
+      ? { inlineObjectRunLeadingAdmitted: true as const } : {}),
     pageWritingMode: sectionWritingMode(state.sectionLayout),
     // §17.6.20 btLr uses the horizontal line model rotated wholesale.
     verticalCJK: state.verticalCJK && !state.verticalAllRotated,

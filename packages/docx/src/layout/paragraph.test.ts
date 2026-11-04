@@ -1,3 +1,4 @@
+import { paragraphAcquisitionInput } from '../parser-model.js';
 import { lineGapModel } from '../line-breaker/line-gaps.js';
 import { describe, expect, it } from 'vitest';
 import { DEFAULT_KINSOKU_RULES } from '@silurus/ooxml-core';
@@ -789,23 +790,195 @@ describe('layoutParagraph', () => {
 });
 
 describe('paragraphLayoutFromMeasurement retained authorities', () => {
+  const inlineShape = (heightPt = 10) => ({
+    type: 'shape' as const,
+    inline: true,
+    widthPt: 20,
+    heightPt,
+    anchorXPt: 0,
+    anchorYPt: 0,
+    anchorXFromMargin: false,
+    anchorYFromPara: false,
+    zOrder: 0,
+    subpaths: [],
+    presetGeometry: 'rect',
+    fill: { fillType: 'solid' as const, color: '009989' },
+    stroke: null,
+    textBlocks: [],
+  });
+
+  function inlineFontMetricContext(eastAsian = false): CanvasRenderingContext2D {
+    return {
+      font: '', letterSpacing: '0px', fontKerning: 'auto',
+      measureText(this: { font: string }, text: string) {
+        const size = Number(/([\d.]+)px/u.exec(this.font)?.[1] ?? 10);
+        const ascent = size * (eastAsian && /[^\x00-\x7f]/u.test(text) ? 1.4 : 0.8);
+        return { width: [...text].length * size / 2, actualBoundingBoxAscent: ascent,
+          actualBoundingBoxDescent: size * 0.2, fontBoundingBoxAscent: ascent,
+          fontBoundingBoxDescent: size * 0.2 } as TextMetrics;
+      },
+    } as unknown as CanvasRenderingContext2D;
+  }
+
+  function measureInlineParagraph(runs: DocParagraph['runs'], multiple = 1, options: { markFontSize?: number; context?: CanvasRenderingContext2D; documentHasEastAsianText?: boolean; compatibilityMode?: number; admitRunLeading?: boolean } = {}) {
+    const selectedContext = options.context ?? measureContext;
+    const value = {
+      ...paragraph, runs, defaultFontSize: options.markFontSize ?? 10, defaultFontFamily: 'Test Sans',
+      lineSpacing: { rule: 'auto' as const, value: multiple },
+    };
+    const context = { ...acquisitionContext, lineSpacing: value.lineSpacing };
+    const placement = {
+      startYPt: 10, paragraphXPt: 10, availableWidthPt: 100, maximumYPt: 500,
+      suppressSpaceBefore: false,
+    };
+    const measurer = { context: selectedContext, fontFamilyClasses: {} };
+    const layoutServices = createLayoutServices({
+      section: {
+        pageWidth: 612, pageHeight: 792,
+        marginTop: 72, marginRight: 72, marginBottom: 72, marginLeft: 72,
+        headerDistance: 36, footerDistance: 36,
+        titlePage: false, evenAndOddHeaders: false,
+      },
+      body: [], headers: { default: null, first: null, even: null },
+      footers: { default: null, first: null, even: null },
+    }, { measureContext: selectedContext });
+    const environment = {
+      documentHasEastAsianText: options.documentHasEastAsianText ?? false, pageWritingMode: 'horizontal-tb' as const,
+      pageIndex: 0, totalPages: 1, layoutServices,
+      compatibilityMode: options.compatibilityMode ?? 15,
+      ...(options.admitRunLeading === false ? {} : { inlineObjectRunLeadingAdmitted: true as const }),
+    };
+    const acquired = paragraphAcquisitionInput(value, source);
+    const measured = measureParagraph(acquired, context, placement, measurer, environment);
+    return paragraphLayoutFromMeasurement(acquired, {
+      id: 'inline-shape-line', source, flowDomainId: 'body', ordinaryFlow: true,
+      context, placement, measurer, environment, exclusions: [],
+    } as never, measured);
+  }
+
+  it('keeps a single-spaced inline shape line exactly its box height', () => {
+    const node = measureInlineParagraph([inlineShape(40)]);
+    const line = node.lines[0]!;
+    const box = node.drawings[0]!.flowBounds;
+    expect(node.lines).toHaveLength(1);
+    expect(line.advancePt).toBe(40);
+    expect(box.yPt).toBe(line.bounds.yPt);
+    expect(box.yPt + box.heightPt).toBe(line.baselinePt);
+  });
+
+  it('adds paragraph-mark single-line leading to a 1.5-spaced inline shape', () => {
+    // Independent mark-only control supplies the selected face's single line.
+    const markSingle = measureInlineParagraph([]).advancePt;
+    expect(markSingle).toBeGreaterThan(0);
+    expect(markSingle).toBeLessThan(40);
+    const node = measureInlineParagraph([inlineShape(40)], 1.5);
+    expect(node.lines[0]!.advancePt).toBeCloseTo(40 + 0.5 * markSingle, 10);
+    expect(node.lines[0]!.advancePt).not.toBe(60);
+  });
+
+  it('reserves the drawing run minimum above a small box while preserving actual text descent', () => {
+    const context = inlineFontMetricContext();
+    const options = { context, markFontSize: 8 };
+    const minimum = measureInlineParagraph([], 1, { context, markFontSize: 20 }).advancePt;
+    const suffix = { ...paragraph.runs[0]!, fontSize: 8 };
+    for (const mixed of [false, true]) {
+      const drawing = { ...inlineShape(8), __inlineObjectOrigin: 'drawingml',
+        __inlineObjectFontFacts: { fontSize: 20, fontFamily: 'Test Sans' } };
+      const node = measureInlineParagraph(mixed ? [drawing, suffix] : [drawing], 1, options);
+      const line = node.lines[0]!;
+      expect(line.advancePt).toBeCloseTo(minimum, 10);
+      // Only the real suffix contributes descent; the drawing run is a
+      // minimum line box, not an invisible glyph with another descent.
+      expect(line.baselinePt).toBeCloseTo(line.bounds.yPt + minimum - (mixed ? 1.6 : 0), 10);
+      expect(node.drawings[0]!.flowBounds.heightPt).toBe(8);
+      expect(node.drawings[0]!.flowBounds.yPt + 8).toBeCloseTo(line.baselinePt, 10);
+      const large = { ...drawing, heightPt: 40 };
+      const largeNode = measureInlineParagraph(mixed ? [large, suffix] : [large], 1, options);
+      expect(largeNode.lines[0]!.advancePt).toBeCloseTo(40 + (mixed ? 1.6 : 0), 10);
+    }
+  });
+
+  it('keeps the measured static VML textbox top while its run reserves advance below', () => {
+    const context = inlineFontMetricContext();
+    const options = { context, markFontSize: 8 };
+    const drawing = { ...inlineShape(8), __inlineObjectOrigin: 'vmlStaticTextbox',
+      __inlineObjectFontFacts: { fontSize: 20, fontFamily: 'Test Sans' } };
+    const node = measureInlineParagraph([drawing], 1, options);
+    expect(node.lines[0]!.advancePt).toBeCloseTo(20, 10);
+    expect(node.drawings[0]!.flowBounds.yPt).toBeCloseTo(node.lines[0]!.bounds.yPt, 10);
+    expect(node.drawings[0]!.flowBounds.heightPt).toBe(8);
+    // Mixed VML is unmeasured: preserve its previous allocation rather than
+    // turning the absent outer glyph into a suffix descent or top offset.
+    const suffix = { ...paragraph.runs[0]!, fontSize: 8 };
+    const mixed = measureInlineParagraph([drawing, suffix], 1, options);
+    const unknownDrawing = { ...drawing, __inlineObjectOrigin: undefined };
+    const unknown = measureInlineParagraph([unknownDrawing, suffix], 1, options);
+    expect(mixed.lines[0]!.advancePt).toBe(unknown.lines[0]!.advancePt);
+  });
+
+  it('applies literal-picture minimum and resets it before the following physical line', () => {
+    const context = inlineFontMetricContext();
+    const drawing = { type: 'image' as const, imagePath: 'inline.png', mimeType: 'image/png',
+      widthPt: 20, heightPt: 8, anchor: false, anchorXPt: 0, anchorYPt: 0,
+      anchorXFromMargin: false, anchorYFromPara: false, __inlineObjectOrigin: 'drawingml',
+      __inlineObjectFontFacts: { fontSize: 20, fontFamily: 'Test Sans' } };
+    const suffix = { ...paragraph.runs[0]!, text: 'next', fontSize: 8 };
+    const node = measureInlineParagraph([drawing, { type: 'break', breakType: 'line' }, suffix], 1, { context, markFontSize: 8 });
+    expect(node.lines[0]!.advancePt).toBeCloseTo(20, 10);
+    expect(node.lines[1]!.advancePt).toBeCloseTo(8, 10);
+    expect(node.lines[1]!.bounds.yPt).toBeCloseTo(node.lines[0]!.bounds.yPt + 20, 10);
+    const unknownDrawing = { ...drawing, __inlineObjectOrigin: undefined };
+    const unknown = measureInlineParagraph([unknownDrawing], 1,
+      { context, markFontSize: 8 });
+    expect(unknown.lines[0]!.advancePt).toBe(8);
+  });
+
+  it.each(['shape', 'image'] as const)('takes inline %s leading from its effective drawing-run font, independently of its mark', (kind) => {
+    const context = inlineFontMetricContext(false);
+    const drawing = kind === 'shape' ? inlineShape(40) : { type: 'image' as const,
+      imagePath: 'inline.png', mimeType: 'image/png', widthPt: 20, heightPt: 40,
+      anchor: false, anchorXPt: 0, anchorYPt: 0, anchorXFromMargin: false, anchorYFromPara: false };
+    const object = { ...drawing, __inlineObjectFontFacts: { fontSize: 30, fontFamily: 'Test Sans' } };
+    const runSingle = measureInlineParagraph([], 1, { context, markFontSize: 30 }).advancePt;
+    const node = measureInlineParagraph([object], 1.5, { context, markFontSize: 10 });
+    expect(node.lines[0]!.advancePt).toBeCloseTo(40 + runSingle / 2, 10);
+  });
+
+  it.each([
+    { compatibilityMode: 14 },
+    { admitRunLeading: false },
+    { mixed: true },
+  ])('keeps paragraph-mark leading outside the measured inline-run class: %j', (scope) => {
+    const context = inlineFontMetricContext();
+    const object = { ...inlineShape(40), __inlineObjectFontFacts: { fontSize: 30, fontFamily: 'Test Sans' } };
+    const markSingle = measureInlineParagraph([], 1, { context }).advancePt;
+    const runs = 'mixed' in scope ? [paragraph.runs[0]!, object] : [object];
+    const natural = measureInlineParagraph(runs, 1, { context }).lines[0]!.advancePt;
+    expect(measureInlineParagraph(runs, 1.5, { ...scope, context }).lines[0]!.advancePt)
+      .toBeCloseTo(natural + markSingle / 2, 10);
+  });
+
+  it('keeps the existing East Asian slot policy when acquiring inline-run leading', () => {
+    const context = inlineFontMetricContext(true);
+    const options = { context, documentHasEastAsianText: true };
+    const runSingle = measureInlineParagraph([], 1, { ...options, markFontSize: 20 }).advancePt;
+    const object = { ...inlineShape(40), __inlineObjectFontFacts: { fontSize: 20, fontFamily: 'Test Sans' } };
+    expect(measureInlineParagraph([object], 1.5, options).lines[0]!.advancePt)
+      .toBeCloseTo(40 + runSingle / 2, 10);
+  });
+
+  it('places an inline shape bottom on the visible text baseline', () => {
+    const node = measureInlineParagraph([paragraph.runs[0]!, inlineShape(40)]);
+    const line = node.lines[0]!;
+    const box = node.drawings[0]!.flowBounds;
+    const text = line.placements.find((item) => item.kind === 'text')!;
+    expect(box.yPt + box.heightPt).toBe(line.baselinePt);
+    expect(text.origin.yPt).toBe(line.baselinePt);
+    // The fixture's visible text has 2pt descent; no synthetic host adds more.
+    expect(line.advancePt).toBe(42);
+  });
+
   it('flows consecutive wp:inline WPS shapes at their paragraph pen positions', () => {
-    const inlineShape = () => ({
-      type: 'shape' as const,
-      inline: true,
-      widthPt: 20,
-      heightPt: 10,
-      anchorXPt: 0,
-      anchorYPt: 0,
-      anchorXFromMargin: false,
-      anchorYFromPara: false,
-      zOrder: 0,
-      subpaths: [],
-      presetGeometry: 'rect',
-      fill: { fillType: 'solid' as const, color: '009989' },
-      stroke: null,
-      textBlocks: [],
-    });
     const tabRun = {
       ...(paragraph.runs[0] as Extract<DocParagraph['runs'][number], { type: 'text' }>),
       text: '\t',
