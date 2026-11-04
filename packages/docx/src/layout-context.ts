@@ -111,8 +111,8 @@ export interface StoryContext {
    * without it, keeping the previous (v0.89) overflowPunct behaviour.
    */
   readonly closingMarkHangAdmitted?: true;
-  /** Independent Word-observed outer-run leading class: only the main body's
-   * root; paragraph measurement additionally gates mode, axes and contents. */
+  /** Independent main-body-root provenance. Paragraph measurement applies
+   * the mode, axes and content gate in wordInlineDrawingRunLeadingApplies. */
   readonly inlineObjectRunLeadingAdmitted?: true;
 }
 
