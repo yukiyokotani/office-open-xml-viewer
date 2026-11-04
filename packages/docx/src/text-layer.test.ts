@@ -120,6 +120,7 @@ describe('buildDocxTextLayer (extracted from DocxViewer._buildTextLayer)', () =>
       run({ text: 'A ', x: 0, w: 4, trailingSpaceCompressionPx: 2 }),
       run({ text: 'B', x: 4, w: 2 }),
       run({ text: 'אב ', x: 10, w: 30, direction: 'rtl', trailingSpaceCompressionPx: -20 }),
+      run({ text: '   ', x: 40, w: 60, direction: 'rtl', trailingSpaceCompressionPx: -30 }),
     ], 100, 100);
 
     expect(layer.children[0].style.width).toBe('4%');
@@ -129,6 +130,8 @@ describe('buildDocxTextLayer (extracted from DocxViewer._buildTextLayer)', () =>
     expect(layer.children[2].style.width).toBe('30%');
     expect(layer.children[2].style.direction).toBe('rtl');
     expect(layer.children[2].style['text-align']).toBe('right');
+    expect(layer.children[3].style.width).toBe('60%');
+    expect(layer.children[3].style['word-spacing']).toBe('10px');
   });
 
   // ECMA-376 §17.3.2.10 縦中横 (#836): a tate-chu-yoko run is drawn compressed into

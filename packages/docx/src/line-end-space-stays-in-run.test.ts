@@ -114,9 +114,9 @@ describe('line-end space in a run of the opposite direction', () => {
     // bidi paragraph, one non-rtl run "A1 A2 Xray": Word draws A2 A1 Xray, one space between each.
     const body = para([textRun('כתב קלם Xray')], 'left', { bidi: true } as Partial<DocParagraph>);
     const [line] = placements(body);
-    const words = line!.map((p) => ({ text: p.text, x: p.bounds.xPt }));
+    const words = line!.filter(p => p.text.trim()).map((p) => ({ text: p.text, x: p.bounds.xPt }));
     expect(words.map((w) => w.text.trim())).toEqual(['קלם', 'כתב', 'Xray']);
-    // Each slice keeps its own trailing space at its right: 4 + 4 + 4 characters.
+    // The retained source spaces occupy the physical slots between words.
     expect(words.map((w) => w.x)).toEqual([words[0]!.x, words[0]!.x + 40, words[0]!.x + 80]);
   });
 
@@ -225,7 +225,7 @@ describe('line-end space in a run of the opposite direction', () => {
     ], 'distribute'),
       { compatibilityMode: 15 });
     const placed = texts(line!);
-    expect(placed.map(p => p.text.trim())).toEqual(['Yoke', 'כתב', 'Xray']);
+    expect(placed.filter(p => p.text.trim()).map(p => p.text.trim())).toEqual(['Yoke', 'כתב', 'Xray']);
     // Natural content takes 130pt; each of the two source spaces gets 115pt
     // of the 230pt slack. RTL-owned spaces precede their word physically.
     expect(placed.find(p => p.text.trim() === 'כתב')!.origin.xPt).toBeCloseTo(185, 6);
@@ -243,6 +243,26 @@ describe('line-end space in a run of the opposite direction', () => {
       for (const cluster of placement.clusters) expect(cluster.advancePt).toBeGreaterThanOrEqual(0);
     }
 
+  });
+
+  it('expands a logically interior label space even when it paints at the physical right edge', () => {
+    const [line] = lines(para([
+      textRun('Xray '), textRun('כתב קלם בית', { rtl: true }),
+    ], 'distribute', { bidi: true }), { compatibilityMode: 15 });
+    const placed = texts(line!);
+    const ink = placed.filter(p => p.text.trim());
+    expect(ink.map(p => p.text.trim())).toEqual(['בית', 'קלם', 'כתב', 'Xray']);
+    // Three logical source spaces share 200pt. The label's space follows its
+    // glyphs physically, so the visible edge ends before the allocated edge.
+    expect(ink.map(p => p.origin.xPt)).toEqual([
+      expect.closeTo(20, 6), expect.closeTo(126.666666667, 6),
+      expect.closeTo(233.333333333, 6), expect.closeTo(263.333333333, 6),
+    ]);
+    const label = ink.find(p => p.text.trim() === 'Xray')!;
+    const closing = label.clusters.find(c => c.range.end === label.range.end)!;
+    expect(label.bounds.xPt + label.bounds.widthPt).toBeCloseTo(380, 6);
+    expect(closing.advancePt).toBeCloseTo(76.666666667, 6);
+    expect(label.clusters.reduce((sum, c) => sum + c.advancePt, 0)).toBeCloseTo(label.advancePt, 6);
   });
 
   it('retains expansion inside a consecutive trailing-space sequence', () => {
@@ -263,6 +283,33 @@ describe('line-end space in a run of the opposite direction', () => {
     expect(hebrew.clusters.reduce((sum, cluster) => sum + cluster.advancePt, 0))
       .toBeCloseTo(hebrew.advancePt, 6);
 
+  });
+
+  it('hangs the physical end space of a non-rtl run on a soft-wrapped bidi line', () => {
+    const [first] = lines(para([textRun(`${WORDS} ${WORDS}`)], 'left',
+      { ...narrow, bidi: true } as Partial<DocParagraph>), { compatibilityMode: 14 });
+    const right = Math.max(...texts(first!).map(p => p.origin.xPt
+      + p.clusters.filter(c => c.range.start < p.range.start + p.text.trimEnd().length)
+        .reduce((sum, c) => sum + c.advancePt, 0)));
+    expect(right).toBeCloseTo(380, 6);
+  });
+
+  it('retains differently formatted closing spaces outside their content-level block', () => {
+    const tailWord = WORDS.split(' ').at(-1)!;
+    const [first] = lines(para([
+      textRun(WORDS.slice(0, -tailWord.length)),
+      textRun(`${tailWord}   `, { fontSize: 12, background: 'FFFF00' }),
+      textRun(WORDS),
+    ], 'left', { bidi: true, indentRight: 95 } as Partial<DocParagraph>), { compatibilityMode: 14 });
+    const placed = texts(first!);
+    const closing = placed.find(p => p.text === '   ')!;
+    expect(closing.bounds.xPt).toBeCloseTo(380, 6);
+    expect(closing.bounds.widthPt).toBeCloseTo(18, 6);
+    expect(closing.fontSizePt).toBe(12);
+    expect(closing.highlightBounds?.xPt).toBeCloseTo(380, 6);
+    expect(closing.highlightBounds?.widthPt).toBeCloseTo(18, 6);
+    expect([...placed].sort((a, b) => a.range.start - b.range.start).map(p => p.text).join(''))
+      .toBe(`${WORDS}   `);
   });
 
 });

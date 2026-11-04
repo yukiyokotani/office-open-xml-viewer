@@ -1,3 +1,6 @@
+import { bidiPlacedOffsets } from './bidi-cluster-placement.js';
+import { rotatedWordView, rotatedSpaceView } from './bidi-space-placement.js';
+import { bidiSourceSpaceSlots, type BidiSourceSpaceSlot } from './bidi-space-slots.js';
 import {
   countedSpacingAdvance,
   countSpacingCharacters,
@@ -744,6 +747,12 @@ function centresWithoutOpportunity(
     || enumerateGaps(distSegments, { firstContentSi: firstContentIndex, lastDrawnSi: Infinity }).gaps.length === 0;
 }
 
+function retainedTrailingSpaceAdvancePt(segment: MeasuredLinePlanSegment): number {
+  if (segment.kind !== 'text') return 0;
+  const start = segment.range.start + hangingSpaceVisibleLength(segment.text, code => code === 0x20);
+  return segment.clusters.filter(c => c.range.start >= start).reduce((sum, c) => sum + c.advancePt, 0);
+}
+
 interface RtlInteriorSpace {
   /** Source segment containing the whitespace to compress. */
   readonly segmentIndex: number;
@@ -759,8 +768,9 @@ interface RtlInteriorSpace {
 function resolveRtlLineEndSpaces(
   segments: readonly MeasuredLinePlanSegment[],
   visual: Readonly<{ order: readonly number[]; rtl: readonly boolean[] }>,
+  spaceSlots?: ReadonlyMap<number, BidiSourceSpaceSlot>,
 ): { rightPt: number; leftPt: number; interior: RtlInteriorSpace[] } {
-  const trailing = new Map<number, { widthPt: number; spacesOnly: boolean }>();
+  const trailing = new Map<number, { widthPt: number; spacesOnly: boolean; sourceIndex: number; side: 'left' | 'right' }>();
   for (let index = segments.length - 1; index >= 0; index -= 1) {
     const segment = segments[index]!;
     if (segment.kind === 'anchor-host') continue;
@@ -769,7 +779,15 @@ function resolveRtlLineEndSpaces(
     const widthPt = segment.clusters
       .filter((cluster) => cluster.range.start >= segment.range.start + visible)
       .reduce((sum, cluster) => sum + cluster.advancePt, 0);
-    if (widthPt > 0) trailing.set(index, { widthPt, spacesOnly: visible === 0 });
+    if (widthPt > 0) {
+      const slot = spaceSlots?.get(index);
+      const slotIndex = slot?.slotIndex ?? index;
+      const target = segments[slotIndex];
+      trailing.set(slotIndex, { widthPt, sourceIndex: index,
+        spacesOnly: target?.kind === 'text' && hangingSpaceVisibleLength(target.text, code => code === 0x20) === 0,
+        side: slot?.side ?? (visual.rtl[index] ? 'left' : 'right'),
+      });
+    }
     if (visible > 0) break;
   }
   const order = visual.order.filter((index) => segments[index]?.kind !== 'anchor-host');
@@ -788,11 +806,11 @@ function resolveRtlLineEndSpaces(
     }
     return widthPt;
   };
-  const rightPt = hangFrom([...order].reverse(), (index) => visual.rtl[index] !== true);
-  const leftPt = hangFrom(order, (index) => visual.rtl[index] === true);
+  const rightPt = hangFrom([...order].reverse(), index => trailing.get(index)?.side === 'right');
+  const leftPt = hangFrom(order, index => trailing.get(index)?.side === 'left');
   const interior: RtlInteriorSpace[] = [];
-  for (const [index, { widthPt }] of trailing) {
-    if (!hung.has(index)) interior.push({ segmentIndex: index, widthPt });
+  for (const [index, { widthPt, sourceIndex }] of trailing) {
+    if (!hung.has(index)) interior.push({ segmentIndex: sourceIndex, widthPt });
   }
   return { rightPt, leftPt, interior };
 }
@@ -929,8 +947,8 @@ function keepGraphemeSafeCuts(
 /** Move positive word-space deltas to their source U+0020 advances. A run
  * of consecutive spaces has internal cuts as well as its final trailing gap;
  * retaining those cuts too would count their expansion twice in the source
- * geometry while omitting it from the physical RTL leading space. */
-function retainRtlTrailingSpaceExpansion(
+ * geometry while omitting it from the physical source-space packet. */
+function retainSourceTrailingSpaceExpansion(
   text: string,
   stretch: SegStretch,
   perGapPt: number,
@@ -1106,59 +1124,6 @@ function retainedRtlPaintOperations(
  * the whole text. */
 function levelDirection(level: number): 'ltr' | 'rtl' {
   return level % 2 === 1 ? 'rtl' : 'ltr';
-}
-
-/** WORD_CONDENSED_SPACING_ADVANCE_FLOOR splits a segment's paint at floored
- * clusters, and Canvas resolves bidirectional order only inside one
- * `fillText`. Place the split operations as the single operation they replace
- * would have been drawn: UAX#9 levels of the painted text in the paint
- * direction (Canvas applies no higher-level overrides), then each L2 reversal
- * (highest level first, down to the lowest odd level) mirrors its contiguous
- * run of operations within the run's own span. Operations are level-uniform
- * (split at level changes). A floored cluster drawn alone at an odd level
- * keeps its glyph's trailing edge on the right-to-left pen, its drawn
- * advance behind it. Work is linear per level. */
-function bidiPlacedOffsets(
-  items: readonly Readonly<{ xPt: number; advancePt: number; drawnAdvancePt?: number; level: number }>[],
-): number[] {
-  const xs = items.map((item) => item.xPt);
-  let order = items.map((_, index) => index);
-  let highest = 0;
-  let lowestOdd = Number.POSITIVE_INFINITY;
-  for (const item of items) {
-    highest = Math.max(highest, item.level);
-    if (item.level % 2 === 1) lowestOdd = Math.min(lowestOdd, item.level);
-  }
-  for (let level = highest; level >= lowestOdd; level -= 1) {
-    const next: number[] = [];
-    let cursor = 0;
-    while (cursor < order.length) {
-      if (items[order[cursor]!]!.level < level) {
-        next.push(order[cursor]!);
-        cursor += 1;
-        continue;
-      }
-      let end = cursor;
-      let startPt = Number.POSITIVE_INFINITY;
-      let endPt = Number.NEGATIVE_INFINITY;
-      while (end < order.length && items[order[end]!]!.level >= level) {
-        const index = order[end]!;
-        startPt = Math.min(startPt, xs[index]!);
-        endPt = Math.max(endPt, xs[index]! + items[index]!.advancePt);
-        end += 1;
-      }
-      for (let member = end - 1; member >= cursor; member -= 1) {
-        const index = order[member]!;
-        xs[index] = startPt + endPt - xs[index]! - items[index]!.advancePt;
-        next.push(index);
-      }
-      cursor = end;
-    }
-    order = next;
-  }
-  return items.map((item, index) => item.drawnAdvancePt !== undefined && item.level % 2 === 1
-    ? xs[index]! + item.advancePt - item.drawnAdvancePt
-    : xs[index]!);
 }
 
 /** Per-operation visible advance from the retained clusters (both run in
@@ -1581,6 +1546,11 @@ export function planLine(input: PlanLineInput): LineLayout {
     input.baseRtl,
     characterSpreadBidi ? 'line-level' : input.runDirectionUnauthored === true ? 'unauthored' : 'word',
   );
+  // Vertical cells retain their axis-specific glyph allocation. The measured
+  // Word source-space projection below is for horizontal text.
+  const horizontalBidiSpaces = bidi && segments.every(segment => segment.kind !== 'text'
+    || (segment.basePaintOps[0]?.writingMode ?? 'horizontal-tb') === 'horizontal-tb');
+  const sourceSpaceSlots = horizontalBidiSpaces ? bidiSourceSpaceSlots(visual, segments.length) : undefined;
   let naturalWidthPt = segments.reduce((sum, segment) => sum + segmentWidth(segment), 0);
   const lineLeftPt = input.paragraphXPt + line.xOffsetPt;
   // A margin-allocated tab cell widens this line's band past the trailing
@@ -1627,8 +1597,10 @@ export function planLine(input: PlanLineInput): LineLayout {
   // difference the hang alone cannot match.
   const ltrSideHang = !characterSpreadBidi && !input.baseRtl && bidi && input.wordWrap !== false
     && input.displayMathJustification === undefined && kashidaLevel(input.alignment) === null;
-  const rtlLineEnd = rtlVisibleEdge || ltrSideHang
-    ? resolveRtlLineEndSpaces(segments, visual)
+  const rtlLineEndHangs = horizontalBidiSpaces && input.baseRtl && !characterSpreadBidi && input.wordWrap !== false
+    && input.displayMathJustification === undefined;
+  const rtlLineEnd = rtlVisibleEdge || ltrSideHang || rtlLineEndHangs
+    ? resolveRtlLineEndSpaces(segments, visual, sourceSpaceSlots?.bySource)
     : { rightPt: 0, leftPt: 0, interior: [] as RtlInteriorSpace[] };
   const rtlHangingSpacePt = rtlLineEnd.rightPt + rtlLineEnd.leftPt;
   // A justified line's admitted overflow first goes into its interior
@@ -1697,13 +1669,14 @@ export function planLine(input: PlanLineInput): LineLayout {
     ? trailingAdvancePt(segments, hangingSpaceVisibleLength)
     : 0;
   const lastDrawnIndex = visual.order.at(-1) ?? -1;
-  const rightmost = segments[lastDrawnIndex];
-  // A space on an RTL-painted rightmost slice lies inside the line, before
-  // that slice. It is an ordinary opportunity; excluding the entire rightmost
-  // slice would discard that gap and over-expand the remaining spaces.
-  const excludedGapIndex = !characterSpreadBidi && visual.rtl[lastDrawnIndex] === true
-    && rightmost?.kind === 'text' && rightmost.text.endsWith(' ')
-    && (rightmost.basePaintOps[0]?.writingMode ?? 'horizontal-tb') === 'horizontal-tb'
+  // Word-space opportunities follow logical source adjacency, not the last
+  // physically painted slice. An LTR label before an RTL run can paint at the
+  // right edge while its trailing source space remains logically interior:
+  // excluding that slice loses one gap and over-expands the other spaces.
+  // enumerateGaps leaves true logical line-end spaces pending, so no physical
+  // slice must be excluded. The pre-15 character-spread path keeps its separate
+  // opportunity model; vertical text retains its axis-specific allocation.
+  const excludedGapIndex = horizontalBidiSpaces && !characterSpreadBidi
     ? segments.length : lastDrawnIndex;
   // `word-justification-leading-indent-exclusion`
   let firstContentIndex = 0;
@@ -1844,7 +1817,7 @@ export function planLine(input: PlanLineInput): LineLayout {
   const interiorSpaceCompression = new Map<number, number>();
   let rtlRightHangPt = 0;
   let leftHangPt = 0;
-  if (rtlVisibleEdge || ltrSideHang) {
+  if (rtlVisibleEdge || ltrSideHang || rtlLineEndHangs) {
     const interiorPt = rtlLineEnd.interior.reduce((sum, space) => sum + space.widthPt, 0);
     // Every dropped line-end space is drawn somewhere on the line: edge spaces
     // hang below, interior ones are absorbed.
@@ -1853,7 +1826,7 @@ export function planLine(input: PlanLineInput): LineLayout {
     // Soft-wrapped left-to-right lines hang their line-end spaces in full,
     // justified or not, and their last lines (distribute included) only the
     // overflow (blk-0898-bidi-fit A0-left-L and A0-distribute-L).
-    const fullHang = ltrSideHang ? softWrapped : applyJustify;
+    const fullHang = ltrSideHang || rtlLineEndHangs ? softWrapped || applyJustify : applyJustify;
     rtlRightHangPt = fullHang ? rtlLineEnd.rightPt : Math.min(Math.max(0, overflowPt), rtlLineEnd.rightPt);
     leftHangPt = fullHang
       ? rtlLineEnd.leftPt
@@ -1891,38 +1864,65 @@ export function planLine(input: PlanLineInput): LineLayout {
         : 0;
   // Left-to-right lines with hung spaces: the spaces hung on the left pass
   // the start edge, those on the right the end edge.
-  const ltrHangOffsetPt = !ltrSideHang ? 0
+  const ltrHangOffsetPt = !ltrSideHang && !rtlLineEndHangs ? 0
     : edge === 'right' ? rtlRightHangPt
       : edge === 'center' || centreUnjustified ? (rtlRightHangPt - leftHangPt) / 2
-        : -leftHangPt;
+        : edge === 'justify' && input.baseRtl ? 0 : -leftHangPt;
   const lineStartPt = lineLeftPt + physicalStartOffsetPt;
   const alignmentOffsetPt = input.decimalAutoTabPt === undefined
     ? naturalAlignmentOffsetPt + ltrHangOffsetPt
     : Math.max(0, input.paragraphXPt + input.decimalAutoTabPt - drawnWidthPt - lineStartPt);
   let xPt = lineStartPt + alignmentOffsetPt;
+  const rotatedPlans = new Map<number, Readonly<{
+    geometryStretch: SegStretch | undefined; naturalSpacePt: number; advancePt: number;
+    visibleWidthPt: number; expansionPt: number; ownsTrailingGap: boolean;
+  }>>();
+  if (sourceSpaceSlots) for (const index of sourceSpaceSlots.bySource.keys()) {
+    const segment = segments[index];
+    if (segment?.kind !== 'text') throw new Error('A bidi space slot requires retained text');
+    const stretch = stretchByIndex?.get(index);
+    const expanded = stretch && segment.text.endsWith(' ')
+      ? retainSourceTrailingSpaceExpansion(segment.text, stretch, perGapPt) : undefined;
+    const geometryStretch = expanded?.stretch ?? stretch;
+    const naturalSpacePt = retainedTrailingSpaceAdvancePt(segment);
+    rotatedPlans.set(index, {
+      geometryStretch, naturalSpacePt,
+      advancePt: naturalSpacePt + (expanded?.expansionPt ?? 0) - (interiorSpaceCompression.get(index) ?? 0),
+      visibleWidthPt: segmentWidth(segment) + (geometryStretch?.internalStretch ?? 0) - naturalSpacePt,
+      expansionPt: expanded?.expansionPt ?? 0, ownsTrailingGap: expanded?.ownsTrailingGap ?? false,
+    });
+  }
   const placements: ParagraphPlacement[] = [];
+  const rotatedTemplates = new Map<number, Readonly<{
+    placement: TextPlacement; clusters: readonly TextClusterLayout[];
+  }>>();
+  const rotatedIndex = new Map<TextPlacement, number>();
   const terminalDecorationTrims = new Map<number, number>();
   for (const segmentIndex of visual.order) {
     const segment = segments[segmentIndex];
     if (!segment) continue;
     const stretch = stretchByIndex?.get(segmentIndex);
     const compressedSpacePt = interiorSpaceCompression.get(segmentIndex) ?? 0;
-    // A source U+0020 painted RTL lies before its word physically. Its
-    // positive expansion belongs to that whitespace advance, not to the
-    // next visual segment. Character-spread seams without U+0020 keep their
+    // Positive expansion belongs to the source U+0020 advance, on whichever
+    // physical side bidi places it, rather than to the next visual segment. Character-spread seams without U+0020 keep their
     // separate gap model (WORD_RUN_DIRECTION_ISOLATE's documented exclusion).
     // Negative justification keeps the breaker's existing compression plan.
-    const sourceSpaceExpansion = !characterSpreadBidi && segment.kind === 'text'
-      && visual.rtl[segmentIndex] === true
+    const rotatedPlan = rotatedPlans.get(segmentIndex);
+    const sourceSpaceExpansion = !rotatedPlan && !characterSpreadBidi && segment.kind === 'text'
+      && (horizontalBidiSpaces || visual.rtl[segmentIndex] === true)
       && (segment.basePaintOps[0]?.writingMode ?? 'horizontal-tb') === 'horizontal-tb'
       && segment.text.endsWith(' ') && stretch
-      ? retainRtlTrailingSpaceExpansion(segment.text, stretch, perGapPt) : undefined;
-    const geometryStretch = sourceSpaceExpansion?.stretch ?? stretch;
+      ? retainSourceTrailingSpaceExpansion(segment.text, stretch, perGapPt) : undefined;
+    const geometryStretch = rotatedPlan?.geometryStretch ?? sourceSpaceExpansion?.stretch ?? stretch;
     const internalStretchPt = geometryStretch?.internalStretch ?? 0;
-    const rtlSpaceOwnsGap = sourceSpaceExpansion?.ownsTrailingGap === true;
-    const rtlSpaceStretchPt = sourceSpaceExpansion?.expansionPt ?? 0;
+    const rtlSpaceOwnsGap = rotatedPlan?.ownsTrailingGap ?? sourceSpaceExpansion?.ownsTrailingGap === true;
+    const rtlSpaceStretchPt = rotatedPlan?.expansionPt ?? sourceSpaceExpansion?.expansionPt ?? 0;
     const spaceAdjustmentPt = rtlSpaceStretchPt - compressedSpacePt;
-    const widthPt = segmentWidth(segment) + internalStretchPt + spaceAdjustmentPt;
+    const spaceSlot = sourceSpaceSlots?.bySlot.get(segmentIndex);
+    const sourceSpacePt = spaceSlot ? rotatedPlan!.advancePt : 0;
+    const assignedSpacePt = spaceSlot ? rotatedPlans.get(spaceSlot.sourceIndex)!.advancePt : 0;
+    const widthPt = segmentWidth(segment) + internalStretchPt + spaceAdjustmentPt
+      + assignedSpacePt - sourceSpacePt;
     if (segment.kind === 'tab') {
       const bounds = { xPt, yPt: line.topPt, widthPt: segment.measuredWidthPt, heightPt: line.advancePt };
       const decorations = segment.underline
@@ -2025,9 +2025,9 @@ export function planLine(input: PlanLineInput): LineLayout {
       const direction = visual.rtl[segmentIndex] ? 'rtl' : 'ltr';
       const trailingWhitespaceStart = segment.text.trimEnd().length;
       const rtlLeadingGapPt = direction === 'rtl'
-        ? (style.fitText?.trailingPadPt ?? 0) + textGeometry.clusters
+        ? (style.fitText?.trailingPadPt ?? 0) + (spaceSlot ? assignedSpacePt : textGeometry.clusters
             .filter((cluster) => cluster.range.start >= segment.range.start + trailingWhitespaceStart)
-            .reduce((sum, cluster) => sum + cluster.advancePt, 0)
+            .reduce((sum, cluster) => sum + cluster.advancePt, 0))
         : 0;
       const placedPaintOps = ((textGeometry.paintOps[0]?.writingMode ?? 'horizontal-tb') !== 'horizontal-tb'
         ? flooredVerticalPaintOperations
@@ -2162,9 +2162,53 @@ export function planLine(input: PlanLineInput): LineLayout {
         terminalDecorationTrims.set(placements.length, terminalDecorationTrimPt);
       }
       placements.push(placed);
+      if (spaceSlot) {
+        rotatedTemplates.set(segmentIndex, { placement: placed, clusters: textGeometry.clusters });
+        rotatedIndex.set(placed, segmentIndex);
+      }
     }
     xPt += widthPt;
     if (!rtlSpaceOwnsGap && stretch?.trailingGap) xPt += stretch.trailingDelta ?? perGapPt;
+  }
+  if (sourceSpaceSlots) {
+    const projected: ParagraphPlacement[] = [];
+    const projectedTrims = new Map<number, number>();
+    placements.forEach((placement, oldIndex) => {
+      const index = placement.kind === 'text' ? rotatedIndex.get(placement) : undefined;
+      if (index === undefined || placement.kind !== 'text') {
+        if (terminalDecorationTrims.has(oldIndex)) projectedTrims.set(projected.length, terminalDecorationTrims.get(oldIndex)!);
+        projected.push(placement);
+        return;
+      }
+      const slot = sourceSpaceSlots.bySlot.get(index)!;
+      const own = rotatedPlans.get(index)!;
+      const assigned = rotatedPlans.get(slot.sourceIndex)!;
+      const source = rotatedTemplates.get(slot.sourceIndex)!.placement;
+      const sourceSegment = segments[slot.sourceIndex]!;
+      const sourceStart = sourceSegment.kind === 'text'
+        ? source.range.start + hangingSpaceVisibleLength(source.text, code => code === 0x20) : source.range.end;
+      const spaceXPt = placement.bounds.xPt + (slot.side === 'left' ? 0 : own.visibleWidthPt);
+      const wordXPt = placement.bounds.xPt + (slot.side === 'left' ? assigned.advancePt : 0);
+      const visibleEnd = placement.range.start + hangingSpaceVisibleLength(placement.text, code => code === 0x20);
+      const word = rotatedWordView(placement, visibleEnd, wordXPt, own.visibleWidthPt,
+        rotatedTemplates.get(index)!.clusters);
+      const space = rotatedSpaceView(source, sourceStart, spaceXPt, assigned.advancePt,
+        assigned.naturalSpacePt, slot.side);
+      if (slot.side === 'left' && space) projected.push(space);
+      if (word) {
+        const segment = segments[index];
+        if (word.direction === 'ltr' && segment?.kind === 'text' && segment.decorationTerminalAdvancePt !== undefined) {
+          const trimPt = Math.max(0, own.visibleWidthPt + (word.ownedTrailingSlackPt ?? 0) - segment.decorationTerminalAdvancePt);
+          if (trimPt > 0) projectedTrims.set(projected.length, trimPt);
+        }
+        projected.push(word);
+      }
+      if (slot.side === 'right' && space) projected.push(space);
+    });
+    placements.length = 0;
+    for (const placement of projected) placements.push(placement);
+    terminalDecorationTrims.clear();
+    for (const [index, trim] of projectedTrims) terminalDecorationTrims.set(index, trim);
   }
   // WORD_LINE_END_SPACE_HANGS: no decoration over the hanging line-end
   // spaces; with ulTrailSpace (§17.15.3.8) they keep every decoration up to

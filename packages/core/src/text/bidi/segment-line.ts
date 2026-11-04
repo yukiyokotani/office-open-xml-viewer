@@ -32,6 +32,14 @@ const PDI = '\u2069';
 export interface SegmentLineVisualOrder {
   order: number[];
   rtl: boolean[];
+  /** Contiguous source slices whose closing U+0020 selected their paint
+   * direction instead of their content level. Consumers must preserve the
+   * source space's physical side when allocating differently sized spaces. */
+  spaceDirectionOverrides?: readonly Readonly<{
+    startIndex: number;
+    endIndex: number;
+    paintRtl: boolean;
+  }>[];
 }
 
 const textOf = (segment: unknown): string | undefined => {
@@ -132,6 +140,7 @@ export function computeSegmentLineVisualOrder(
     rtl[i] = firstOdd >= 0;
     spaceStart[i] = scanEnd;
   }
+  let spaceDirectionOverrides: NonNullable<SegmentLineVisualOrder['spaceDirectionOverrides']>[number][] | undefined;
   if (options.paintDirectionFromTrailingSpace) {
     // A run of consecutive slices at one ordering level is drawn as a block.
     // When the U+0020 that ends the block resolves to the other direction,
@@ -148,10 +157,13 @@ export function computeSegmentLineVisualOrder(
         const spaceRtl = (levels[space]! & 1) === 1;
         if (spaceRtl !== ((levels[anchor[last]!]! & 1) === 1)) {
           for (let k = runStart; k <= last; k++) rtl[k] = spaceRtl;
+          (spaceDirectionOverrides ??= []).push({ startIndex: runStart, endIndex: i, paintRtl: spaceRtl });
         }
       }
       runStart = i;
     }
   }
-  return { order: buildVisualOrder(levels, paragraphLevel, anchor).order, rtl };
+  return { order: buildVisualOrder(levels, paragraphLevel, anchor).order, rtl,
+    ...(spaceDirectionOverrides ? { spaceDirectionOverrides } : {}),
+  };
 }

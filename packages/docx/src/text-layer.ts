@@ -113,6 +113,11 @@ export function buildDocxTextLayer(
     // browser still gives transparent U+0020 its natural advance. Bound the
     // hit box to the retained width; RTL text keeps its physical right edge
     // for both expansion and compression. Percentages track canvas scaling.
+    // A separate zero-ink source-space span can retain its exact per-space
+    // advance through CSS as well as through the retained hit rectangle.
+    const sourceSpacePitch = run.trailingSpaceCompressionPx !== undefined
+      && run.text.length > 0 && /^ +$/u.test(run.text)
+      ? `word-spacing:${-run.trailingSpaceCompressionPx / run.text.length}px;` : '';
     const compressedHitBox = run.trailingSpaceCompressionPx !== undefined
       ? `width:${overlayPercent(run.w, cssWidth)};overflow:hidden;`
         + (run.direction === 'rtl' ? 'direction:rtl;text-align:right;' : '')
@@ -128,6 +133,7 @@ export function buildDocxTextLayer(
       `left:${overlayPercent(run.x, cssWidth)};top:${overlayPercent(run.y, cssHeight)};` +
       `font:${run.font};line-height:${run.h}px;letter-spacing:${letterSpacing};` +
       compressedHitBox +
+      sourceSpacePitch +
       transform +
       `white-space:pre;color:transparent;cursor:${cursor};pointer-events:all;`;
     if (link && onHyperlinkClick) {
