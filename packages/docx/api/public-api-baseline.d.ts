@@ -1211,6 +1211,7 @@ export interface DocParagraph {
     widowControl?: boolean;
     overflowPunct?: boolean;
     wordWrap?: boolean;
+    kinsoku?: boolean;
     endsAtHardBreak?: boolean;
     autoSpaceDE?: boolean;
     autoSpaceDN?: boolean;
