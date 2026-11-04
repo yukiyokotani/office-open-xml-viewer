@@ -90,15 +90,19 @@ const wordsOn = (line: LineLayout): number => characters(line).length / 4;
 
 describe('WORD_KASHIDA_LINE_FIT', () => {
   it('keeps the full width before mode 15 under a negative trailing indent', () => {
-    // blk-0898-kfit9 S014-S016: a highKashida line of a 345.5pt window under a
-    // -40pt right indent holds 316.9pt. A -40pt right indent widens the band
-    // to 400pt: eight words (390 pt) fit, as in a both paragraph.
-    for (const settings of [undefined, { compatibilityMode: 14 }]) {
-      for (const alignment of ['mediumKashida', 'highKashida'] as const) {
-        const [first] = lines(para([textRun(WORDS)], alignment, { indentRight: -40 }), settings);
-        const [plain] = lines(para([textRun(WORDS)], 'both', { indentRight: -40 }), settings);
-        expect(wordsOn(first!), `${alignment} mode ${settings?.compatibilityMode}`).toBe(wordsOn(plain!));
-        expect(wordsOn(first!)).toBe(8);
+    // blk-0898-floats-negind (-5 to -56.7pt) and blk-0898-kfit9 S014-S016:
+    // every negative trailing indent removes the reserve before mode 15. A
+    // -40pt right indent widens the band to 400pt: eight words (390 pt) fit,
+    // as in a both paragraph; at -5pt (365pt) seven do, where the reserve of
+    // the column (72pt) would leave five.
+    for (const settings of [undefined, { compatibilityMode: 11 }, { compatibilityMode: 14 }]) {
+      for (const [indentRight, words] of [[-40, 8], [-5, 7]] as const) {
+        for (const alignment of ['mediumKashida', 'highKashida'] as const) {
+          const [first] = lines(para([textRun(WORDS)], alignment, { indentRight }), settings);
+          const [plain] = lines(para([textRun(WORDS)], 'both', { indentRight }), settings);
+          expect(wordsOn(first!), `${alignment} ${indentRight} mode ${settings?.compatibilityMode}`).toBe(wordsOn(plain!));
+          expect(wordsOn(first!)).toBe(words);
+        }
       }
     }
     // From mode 15 the share of the line's own width stays: 0.8 x 400 = 320 holds 6 words.

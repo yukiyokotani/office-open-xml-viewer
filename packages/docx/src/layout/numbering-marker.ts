@@ -1,6 +1,6 @@
 import { symbolFontToUnicode } from '@silurus/ooxml-core';
 import type { NumberingInfo, TabStop } from '../types.js';
-import { wordNumberingSuffixAcceptsCoincidentListTab } from './line-compatibility.js';
+import { wordNumberingSpaceSuffixUsesArial, wordNumberingSuffixAcceptsCoincidentListTab } from './line-compatibility.js';
 import { nextTabStop, type TextLayoutService, type TextShapeResult } from './text.js';
 import type { DeepReadonly, NumberingMarkerShapeInput } from './types.js';
 import { allowsReferenceFontMetric, indexedFontMetrics, selectResourceMetric, selectedFontLineMetric } from '../line-breaker/font-metrics.js';
@@ -69,6 +69,7 @@ export function applyNumberingBodyOffset<Context extends Readonly<{
     authoredFirstIndentPt: number;
     tabStops: readonly TabStop[];
     defaultTabPt?: number;
+    compatibilityMode?: number;
     service?: TextLayoutService;
     clusterGeometry?: boolean;
   }>,
@@ -85,6 +86,8 @@ export function applyNumberingBodyOffset<Context extends Readonly<{
     physicalIndentLeftPt: context.physicalIndentLeftPt,
     tabStops: input.tabStops,
     defaultTabPt: input.defaultTabPt ?? context.defaultTabPt,
+    compatibilityMode: input.compatibilityMode,
+    baseRtl: context.baseRtl,
   }, service, input.clusterGeometry ?? true);
   return {
     ...context,
@@ -178,6 +181,10 @@ export function resolveNumberingMarkerGeometry(
     physicalIndentLeftPt: number;
     tabStops: readonly TabStop[];
     defaultTabPt: number;
+    compatibilityMode?: number;
+    /** Paragraph direction; WORD_NUMBERING_SPACE_SUFFIX_ARIAL is measured for
+     * left-to-right paragraphs only, so an absent value keeps the marker face. */
+    baseRtl?: boolean;
   }>,
   service: TextLayoutService,
   clusterGeometry = true,
@@ -205,8 +212,29 @@ export function resolveNumberingMarkerGeometry(
   const suffix = numbering.suff || 'tab';
   let bodyOffsetPt = markerEndPt;
   if (suffix === 'space') {
+    // `word-numbering-space-suffix-arial`: §17.9.28 specifies the space,
+    // while this compatibility face is independent of every marker slot
+    // and theme. Keep the marker size and measure through the same authority,
+    // including its resource resolution / metric-compatible fallback.
+    const spaceInput = wordNumberingSpaceSuffixUsesArial({
+      compatibilityMode: input.compatibilityMode,
+      leftToRight: input.baseRtl === false,
+      markerWeight: markerInput.weight,
+      markerStyle: markerInput.style,
+      complexScriptMarker: markerInput.complexScript,
+      // A symbol-encoded marker (Private Use Area code points, or text the
+      // shared symbol-font table remaps) is not measured.
+      symbolMarker: markerText !== numbering.text || /[\uE000-\uF8FF]/u.test(numbering.text),
+    })
+      ? {
+          ...markerInput,
+          fonts: { ascii: 'Arial', highAnsi: 'Arial', eastAsia: 'Arial', complexScript: 'Arial' },
+          themeFonts: undefined,
+          themeFontPresence: undefined,
+        }
+      : markerInput;
     bodyOffsetPt += shapeNumberingMarkerText(
-      markerInput,
+      spaceInput,
       ' ',
       1,
       service,

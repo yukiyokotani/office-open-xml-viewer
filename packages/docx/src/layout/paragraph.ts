@@ -163,6 +163,7 @@ import {
   wordPreservesLowerLayerSameParagraphComposition,
   wordTextBoxVisibleAnchorExtentPt,
   wordGridPictureLineOriginPt,
+  wordStepsThroughWrapLines,
 } from './anchor-compatibility.js';
 import {
   wordRunVerticalAlignRaisePt,
@@ -2923,6 +2924,8 @@ function retainedNumberingPlan(
     physicalIndentLeftPt: context.physicalIndentLeftPt,
     tabStops: paragraph.tabStops,
     defaultTabPt: context.defaultTabPt,
+    compatibilityMode: options.environment.compatibilityMode,
+    baseRtl: context.baseRtl,
   }, service);
 }
 
@@ -2951,6 +2954,8 @@ function numberingFirstLineWindow(
       physicalIndentLeftPt: context.baseRtl ? context.physicalIndentRightPt : context.physicalIndentLeftPt,
       tabStops: paragraph.tabStops,
       defaultTabPt: context.defaultTabPt,
+      compatibilityMode: options.environment.compatibilityMode,
+      baseRtl: context.baseRtl,
     }, service).bodyOffsetPt,
   };
 }
@@ -6076,6 +6081,7 @@ function measurementPlacement(
             ? pageReference.xPt + pageReference.widthPt
             : options.placement.paragraphXPt + options.placement.availableWidthPt,
           readingDirection: options.context.baseRtl ? 'rtl' : 'ltr',
+          stepThroughPolygons: wordStepsThroughWrapLines(options.environment.compatibilityMode),
         });
   return {
     ...options.placement,

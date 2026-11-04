@@ -3,6 +3,10 @@ import type { TextLayoutService } from './text.js';
 import { resolveNumberingMarkerGeometry } from './numbering-marker.js';
 import { createTextLayoutService } from './text.js';
 import { createFontResolver } from './font-service.js';
+import { layoutDocument } from '../document-layout.js';
+import { createLayoutServices } from '../layout-runtime.js';
+import { makeRecordingCanvas } from '../test-support/recording-canvas.test-support.js';
+import type { DocxDocumentModel } from '../types.js';
 
 const route = {
   familyList: 'serif', scope: 'generic', fingerprint: 'numbering-marker-test-route',
@@ -57,6 +61,102 @@ function textService(advancePt: number): TextLayoutService {
 }
 
 describe('resolveNumberingMarkerGeometry', () => {
+  // Deliberately synthetic advances: the service's Arial substitute has a
+  // 0.3125em space, distinct from both Courier and any fitted Arial fraction.
+  const suffixService = createTextLayoutService({
+    fonts: createFontResolver([
+      { requestedFamily: 'Arial', resolvedFamily: 'Suffix Sans', source: 'substitute' },
+      { requestedFamily: 'Courier New', resolvedFamily: 'Courier New', source: 'local' },
+    ]),
+    measurer: { fingerprint: 'suffix-font-advances', measure(request) {
+      const em = request.fontRoute.familyList.includes('Suffix Sans') ? 0.3125 : 0.625;
+      return { advancePt: request.text.length * request.fontSizePt * em,
+        ascentPt: request.fontSizePt * 0.8, descentPt: request.fontSizePt * 0.2 };
+    } },
+  });
+
+  it.each([
+    [undefined, 3.75], [14, 3.75], [15, 3.75],
+    [11, 7.5], [12, 7.5], [13, 7.5],
+  ])('uses the suffix font advance at marker size in mode %s', (compatibilityMode, suffixPt) => {
+    const input = { authoredFirstIndentPt: 0, physicalIndentLeftPt: 0,
+      tabStops: [], defaultTabPt: 36, compatibilityMode, baseRtl: false };
+    const geometry = resolveNumberingMarkerGeometry(
+      { numId: 1, level: 0, format: 'decimal', text: '1.', suff: 'space', indentLeft: 0, tab: 36 },
+      { fontSizePt: 12, fonts: { ascii: 'Courier New', eastAsia: 'Courier New', complexScript: 'Courier New' },
+        weight: 400, style: 'normal', complexScript: false },
+      input, suffixService,
+    );
+    expect(geometry.markerWidthPt).toBe(15);
+    expect(geometry.bodyOffsetPt - geometry.markerWidthPt).toBe(suffixPt);
+  });
+
+  // WORD_NUMBERING_SPACE_SUFFIX_ARIAL is measured for regular Latin / East
+  // Asian markers in left-to-right paragraphs only: every other class keeps
+  // the previous space in the marker's own face (7.5pt here) byte-identically.
+  it.each([
+    ['a right-to-left paragraph', { baseRtl: true }, {}, {}],
+    ['an unknown paragraph direction', { baseRtl: undefined }, {}, {}],
+    ['a bold marker', {}, { weight: 700 }, {}],
+    ['an italic marker', {}, { style: 'italic' as const }, {}],
+    ['a complex-script marker', {}, { complexScript: true }, {}],
+    ['a Private Use Area symbol marker', {}, {}, { text: '\uF0B7', fontFamily: 'Symbol' }],
+    ['a remapped symbol-font marker', {}, {}, { text: '\u00B7', fontFamily: 'Symbol' }],
+  ])('keeps the marker-face space for %s (unmeasured)', (_label, inputPatch, markerPatch, numberingPatch) => {
+    const geometry = resolveNumberingMarkerGeometry(
+      { numId: 1, level: 0, format: 'decimal', text: '1.', suff: 'space', indentLeft: 0, tab: 36, ...numberingPatch },
+      { fontSizePt: 12, fonts: { ascii: 'Courier New', eastAsia: 'Courier New', complexScript: 'Courier New' },
+        weight: 400, style: 'normal', complexScript: false, ...markerPatch },
+      { authoredFirstIndentPt: 0, physicalIndentLeftPt: 0, tabStops: [], defaultTabPt: 36,
+        compatibilityMode: 15, baseRtl: false, ...inputPatch },
+      suffixService,
+    );
+    expect(geometry.bodyOffsetPt - geometry.markerWidthPt).toBe(7.5);
+  });
+
+  it.each([
+    [15, false, 18, 3.75],
+    [15, false, 24, 3.75],
+    [12, false, 18, 7.5],
+    [15, true, 18, 7.5],
+    [12, true, 18, 7.5],
+  ] as const)('retains the marker-sized suffix gap through layout (mode %s, RTL %s, run %spt)',
+    (compatibilityMode, bidi, runSize, suffixPt) => {
+      const { canvas } = makeRecordingCanvas();
+      const ctx = canvas.getContext('2d')!;
+      const measure = ctx.measureText.bind(ctx);
+      ctx.measureText = (text) => ({ ...measure(text), width: [...text].length
+        * parseFloat(/([\d.]+)px/.exec(ctx.font)![1]!)
+        * (ctx.font.includes('"Arial"') ? 0.3125 : 0.625) });
+      const model = {
+        section: { pageWidth: 400, pageHeight: 400, marginTop: 0, marginRight: 0,
+          marginBottom: 0, marginLeft: 0, headerDistance: 0, footerDistance: 0 },
+        settings: { compatibilityMode },
+        body: [{ type: 'paragraph', alignment: bidi ? 'right' : 'left', bidi,
+          indentLeft: 0, indentRight: 0, indentFirst: 0, spaceBefore: 0, spaceAfter: 0,
+          lineSpacing: null, tabStops: [], defaultFontSize: 16, defaultFontFamily: 'Verdana',
+          numbering: { numId: 1, level: 0, format: 'decimal', text: '1.', suff: 'space',
+            indentLeft: 0, tab: 36, fontFamily: 'Courier New',
+            fontFacts: { fontFamily: 'Courier New', fontSize: 12 } },
+          runs: [{ type: 'text', text: 'Body', fontSize: runSize, fontFamily: 'Georgia',
+            bold: false, italic: false, underline: false, strikethrough: false }],
+          widowControl: false }],
+        headers: { default: null, first: null, even: null },
+        footers: { default: null, first: null, even: null },
+      } as unknown as DocxDocumentModel;
+      const layout = layoutDocument(model, createLayoutServices(model, { measureContext: ctx }));
+      const paragraph = layout.pages[0]!.layers.body.find((node) => node.kind === 'paragraph')!;
+      if (paragraph.kind !== 'paragraph') throw new Error('Expected a paragraph');
+      const placements = paragraph.lines[0]!.placements.filter((node) => node.kind === 'text');
+      const marker = placements.find((node) => node.role === 'numbering-marker')!;
+      const body = placements.find((node) => node.role !== 'numbering-marker')!;
+      expect(marker.fontSizePt).toBe(12);
+      const gap = bidi
+        ? marker.bounds.xPt - (body.bounds.xPt + body.advancePt)
+        : body.bounds.xPt - (marker.bounds.xPt + marker.advancePt);
+      expect(gap).toBeCloseTo(suffixPt, 8);
+    });
+
   it('allocates a registered marker from the same precise font box as body text', () => {
     // Canvas rounds both sides independently. Those device-pixel sides must
     // not enlarge a numbered line whose selected resource owns precise sides.
