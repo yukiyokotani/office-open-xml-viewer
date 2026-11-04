@@ -235,6 +235,31 @@ export const WORD_TIGHT_WRAP_LINE_STEP_ADVANCE = defineCompatibilityRule({
   description: 'When no gap beside a wrapTight polygon can hold a line, Word moves the line down by its own height and tries again (modes 14 and 15) instead of jumping to the polygon bottom as it does for square wrap.',
 });
 
+/** Issue #2054 controls (blk-0898-floats-thru-mode{none,14,15}, Windows Word
+ * 16.0.20527, Courier New 12, single spacing): a full-width through shape
+ * whose wrap polygon has a notch open at the top, with a left wall slanting by
+ * 0.5, 1, 2 or 4 pt per pt of depth and a right wall past or inside the band
+ * edge (a 120 pt trailing indent), the first unit 14.4 or 108 pt. */
+export const WORD_THROUGH_WRAP_LINE_STEP_ADVANCE = defineCompatibilityRule({
+  id: 'word-through-wrap-line-step-advance',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'blk-0898-floats-thru',
+    application: 'Microsoft Word',
+    version: '16.0.20527',
+    platform: 'Windows',
+  },
+  description: 'A line beside a wrapThrough polygon steps down by its own line height like a wrapTight one (WORD_TIGHT_WRAP_LINE_STEP_ADVANCE): every first line of the 12 sloped-notch controls in mode 15 sits on the line grid (13.59 or 27.19 pt below the paragraph top), not at the continuous depth where the opening first holds its unit (5.1 to 20.4 pt). Each window is the free interval over the whole line band (the slanted wall read at the band top: line starts within 0.15 pt), clipped to the trailing indent: an opening whose right wall lies past the band edge is admitted by its clipped width. A line that no notch window holds also steps (a rectangular through notch 10 pt too narrow and a wrapTight copy of the notch place the line at 81.5 pt below the 80 pt shape bottom, not on it), and a wrapTight polygon does not enter the notch open at its top. Modes unset and 14 agree wherever the paragraph is the first on its page; there a paragraph further down its page sets its text below its own shape (at 80 pt, or further down), a separate pre-15 anchor-paragraph behaviour these controls do not explain, which the renderer does not reproduce.',
+});
+
+/** Only mode 15 has matched line-step evidence for through-wrap paragraphs
+ * throughout a page. Pre-15 later paragraphs remain unexplained by these
+ * controls; preserve their prior continuous search rather than applying the
+ * mode-15 inference to them (WORD_THROUGH_WRAP_LINE_STEP_ADVANCE). */
+export function wordStepsThroughWrapLines(compatibilityMode?: number): boolean {
+  return compatibilityMode === 15;
+}
+
 /** ECMA-376 §§20.4.2.11, 20.4.2.17, 20.4.2.19 and 20.4.2.20 define
  * positioning and wrapping; this host-line decision records Office observation,
  * not a normative rule for resolving a self-moving line reference.

@@ -4,6 +4,7 @@ import {
   skipPastTopAndBottom,
   type FloatRect,
   type LineFloatReference,
+  type LineWindowAdmission,
 } from './float-wrap.js';
 
 export interface WrapOracle {
@@ -20,6 +21,9 @@ export interface WrapOracle {
      *  band `paragraphXPt`/`maximumWidthPt` the square side-gap math uses. */
     readonly columnXPt: number;
     readonly columnWidthPt: number;
+    /** Further admission test of a candidate window, in this query's units:
+     *  `topY`, `xOffset` from `paragraphXPt`, `maxWidth`. */
+    readonly admitsWindow?: LineWindowAdmission;
   }): {
     readonly topYPt: number;
     readonly xOffsetPt: number;
@@ -54,6 +58,7 @@ export function createFloatWrapOracle(
       maximumWidthPt,
       columnXPt,
       columnWidthPt,
+      admitsWindow,
     }) => {
       const window = computePreparedLineFloatWindow(
         topYPt,
@@ -70,6 +75,7 @@ export function createFloatWrapOracle(
           readingDirection: 'ltr',
         },
         squareMinimumStartWidthPt ?? minimumStartWidthPt,
+        admitsWindow,
       );
       return {
         topYPt: window.topY,
