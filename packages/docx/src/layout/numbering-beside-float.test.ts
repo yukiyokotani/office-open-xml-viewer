@@ -200,7 +200,7 @@ describe('numbered first line across float gaps (#2055, word-numbered-first-line
   it('sets a numbered word wider than every window below the floats', () => {
     // 600pt: no window (nor the 504pt band) holds it; it starts below the
     // floats after its body and is broken there.
-    const lines = anchoredParagraphLines(gaps, 'W'.repeat(120), numbered);
+    const lines = anchoredParagraphLines(gaps, 'W'.repeat(120), numbered, { compatibilityMode: 15 });
     expect(lines[0]).toMatchObject({ topPt: 60, marker: 54, body: 54 + 50 });
   });
 
@@ -262,19 +262,27 @@ describe('numbered first line across float gaps (#2055, word-numbered-first-line
 });
 
 describe('over-wide first word after a float anchor (#2057, word-overlong-head-after-anchor)', () => {
+  it.each([false, true])('preserves the earlier narrowed anchor line before mode 15 (joined=%s)', joined => {
+    const text = joined ? ['W'.repeat(60), 'W'.repeat(60)] : 'W'.repeat(120);
+    const lines = anchoredParagraphLines(squareShape(47, 100, 404, 10), text, null,
+      { compatibilityMode: undefined });
+    expect(lines[0]!.text).toBe('');
+    expect(lines[1]!.text).toBe('W'.repeat(100));
+  });
+
   it('breaks the word from the float bottom without an empty line before it', () => {
     // A 10pt float leaves a 100pt window; a 600pt word is wider than the
     // 504pt column, so it moves below the float and is broken there.
-    const lines = anchoredParagraphLines(squareShape(21, 100, 404, 10), 'W'.repeat(120), null);
+    const lines = anchoredParagraphLines(squareShape(21, 100, 404, 10), 'W'.repeat(120), null, { compatibilityMode: 15 });
     expect(lines[0]).toMatchObject({ topPt: 10, text: 'W'.repeat(100) });
     expect(lines[1]!.text).toBe('W'.repeat(20));
   });
 
-  it.each([undefined, 15])('keeps an unspaced word across differently formatted runs off an anchor-only line (mode %s)', (mode) => {
+  it('keeps a mode-15 unspaced word across formatted runs off an anchor-only line', () => {
     // The 800pt word joins two runs (plain, bold), so the joined-word
     // preflight judges it before the emergency splitter: the anchor alone
     // does not make the line nonempty there either.
-    const lines = anchoredParagraphLines(squareShape(22, 100, 404, 10), ['W'.repeat(80), 'W'.repeat(80)], null, { compatibilityMode: mode });
+    const lines = anchoredParagraphLines(squareShape(22, 100, 404, 10), ['W'.repeat(80), 'W'.repeat(80)], null, { compatibilityMode: 15 });
     expect(lines[0]).toMatchObject({ topPt: 10, text: 'W'.repeat(100) });
     expect(lines[1]!.text).toBe('W'.repeat(60));
   });

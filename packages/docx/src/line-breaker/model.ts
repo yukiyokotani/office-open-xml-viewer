@@ -577,6 +577,9 @@ export interface LayoutLine {
 /** Additional context passed to layoutLines so it can honor floats on the current page. */
 export interface WrapLayoutCtx {
   hasExclusions?: boolean;
+  /** Preserve the pre-15 allocation of an anchor-only line when a float
+   * narrows or displaces it (WORD_OVERLONG_HEAD_AFTER_ANCHOR scope policy). */
+  preservePre15AnchorLine?: boolean;
   startPageY: number;   // absolute canvas Y where the first line should start
   paraX: number;        // absolute canvas X of the paragraph's INDENTED text left edge
   /** Absolute canvas X of the paragraph's raw COLUMN left edge. Distinct from
