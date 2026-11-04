@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { sourceOwnedTextPlacements } from './layout/text-source-ownership.js';
 import { layoutBodyModel } from './test-support/document-layout.test-support.js';
 import type { LineLayout, TextPlacement } from './layout/types.js';
 import type { BodyElement, DocParagraph, DocSettings, DocxTextRun, SectionProps } from './types';
@@ -215,6 +216,33 @@ describe('line-end space in a run of the opposite direction', () => {
     expect(nbsp.advancePt).toBe(6);
     expect(label.clusters.reduce((sum, cluster) => sum + cluster.advancePt, 0)).toBeCloseTo(label.advancePt, 6);
     expect(label.trailingSpaceCompressionPt).toBeGreaterThan(0);
+  });
+
+  it('places word-space expansion on the physical leading side of RTL-painted slices', () => {
+    const [line] = lines(para([
+      textRun('Xray ', { rtl: true }), textRun('כתב', { rtl: true }),
+      textRun(' ', { rtl: true }), textRun('Yoke', { rtl: true }),
+    ], 'distribute'),
+      { compatibilityMode: 15 });
+    const placed = texts(line!);
+    expect(placed.map(p => p.text.trim())).toEqual(['Yoke', 'כתב', 'Xray']);
+    // Natural content takes 130pt; each of the two source spaces gets 115pt
+    // of the 230pt slack. RTL-owned spaces precede their word physically.
+    expect(placed.find(p => p.text.trim() === 'כתב')!.origin.xPt).toBeCloseTo(185, 6);
+    expect(placed.find(p => p.text.trim() === 'Xray')!.origin.xPt).toBeCloseTo(340, 6);
+    const arabic = placed.find(p => p.text.trim() === 'כתב')!;
+    const owners = sourceOwnedTextPlacements(arabic);
+    const space = owners.find(p => p.text === ' ')!;
+    const word = owners.find(p => p.text === 'כתב')!;
+    expect(space.bounds.widthPt).toBeCloseTo(125, 6);
+    expect(space.trailingSpaceCompressionPt).toBeCloseTo(-115, 6);
+    expect(word.bounds.xPt).toBeCloseTo(185, 6);
+    expect(word.origin.xPt).toBeCloseTo(185, 6);
+    for (const placement of placed) {
+      expect(placement.bounds.widthPt).toBeGreaterThanOrEqual(0);
+      for (const cluster of placement.clusters) expect(cluster.advancePt).toBeGreaterThanOrEqual(0);
+    }
+
   });
 
 });

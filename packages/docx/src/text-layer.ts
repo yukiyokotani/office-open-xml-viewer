@@ -109,12 +109,13 @@ export function buildDocxTextLayer(
     const letterSpacing = run.letterSpacingPx !== undefined
       ? `${run.letterSpacingPx}px`
       : '0';
-    // A Word-fitted terminal space shortens the retained run, but the browser
-    // still lays out the transparent U+0020 at its natural advance. Clip only
-    // that run's hit box so it cannot cover the following run/link. Keep the
-    // width percentage-based like its position under responsive canvas scaling.
+    // A retained terminal-space adjustment changes the run's box, while the
+    // browser still gives transparent U+0020 its natural advance. Bound the
+    // hit box to the retained width; RTL text keeps its physical right edge
+    // for both expansion and compression. Percentages track canvas scaling.
     const compressedHitBox = run.trailingSpaceCompressionPx !== undefined
       ? `width:${overlayPercent(run.w, cssWidth)};overflow:hidden;`
+        + (run.direction === 'rtl' ? 'direction:rtl;text-align:right;' : '')
       : '';
     // Position the span as a % of the page's intended CSS box so it tracks the
     // canvas's actual rendered size under external CSS scaling. `font` /

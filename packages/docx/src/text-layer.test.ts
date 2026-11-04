@@ -113,18 +113,22 @@ describe('buildDocxTextLayer (extracted from DocxViewer._buildTextLayer)', () =>
     expect(b.style.left).toBe(`${(50 / 700) * 100}%`);
   });
 
-  it('bounds a compressed terminal space overlay before the following run', () => {
+  it('bounds adjusted terminal-space overlays and keeps RTL words at their physical edge', () => {
     vi.stubGlobal('document', { createElement: (t: string) => makeEl(t) });
     const layer = makeEl('div');
     buildDocxTextLayer(layer as unknown as HTMLDivElement, [
       run({ text: 'A ', x: 0, w: 4, trailingSpaceCompressionPx: 2 }),
       run({ text: 'B', x: 4, w: 2 }),
+      run({ text: 'אב ', x: 10, w: 30, direction: 'rtl', trailingSpaceCompressionPx: -20 }),
     ], 100, 100);
 
     expect(layer.children[0].style.width).toBe('4%');
     expect(layer.children[0].style.overflow).toBe('hidden');
     expect(layer.children[1].style.width ?? '').toBe('');
     expect(layer.children[1].style.overflow ?? '').toBe('');
+    expect(layer.children[2].style.width).toBe('30%');
+    expect(layer.children[2].style.direction).toBe('rtl');
+    expect(layer.children[2].style['text-align']).toBe('right');
   });
 
   // ECMA-376 §17.3.2.10 縦中横 (#836): a tate-chu-yoko run is drawn compressed into

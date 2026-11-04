@@ -1662,6 +1662,14 @@ export function planLine(input: PlanLineInput): LineLayout {
     ? trailingAdvancePt(segments, hangingSpaceVisibleLength)
     : 0;
   const lastDrawnIndex = visual.order.at(-1) ?? -1;
+  const rightmost = segments[lastDrawnIndex];
+  // A space on an RTL-painted rightmost slice lies inside the line, before
+  // that slice. It is an ordinary opportunity; excluding the entire rightmost
+  // slice would discard that gap and over-expand the remaining spaces.
+  const excludedGapIndex = visual.rtl[lastDrawnIndex] === true
+    && rightmost?.kind === 'text' && rightmost.text.endsWith(' ')
+    && (rightmost.basePaintOps[0]?.writingMode ?? 'horizontal-tb') === 'horizontal-tb'
+    ? segments.length : lastDrawnIndex;
   // `word-justification-leading-indent-exclusion`
   let firstContentIndex = 0;
   if (!bidi) {
@@ -1763,7 +1771,7 @@ export function planLine(input: PlanLineInput): LineLayout {
     // only after its last tab (WORD_LINE_END_JUSTIFICATION).
     const distribution = keepGraphemeSafeCuts(distributeLineSlack(
       distSegments, residualSlackPt, Math.max(firstContentIndex, afterLastTab),
-      bidi ? lastDrawnIndex : segments.length,
+      bidi ? residualSlackPt > 0 ? excludedGapIndex : lastDrawnIndex : segments.length,
       -(line.baselinePt - line.topPt) * .25,
       // A justified line ended by a manual break opens only space gaps under
       // the kashida types and pre-15 thaiDistribute (WORD_LINE_END_JUSTIFICATION).
@@ -1865,7 +1873,18 @@ export function planLine(input: PlanLineInput): LineLayout {
     const stretch = stretchByIndex?.get(segmentIndex);
     const internalStretchPt = stretch?.internalStretch ?? 0;
     const compressedSpacePt = interiorSpaceCompression.get(segmentIndex) ?? 0;
-    const widthPt = segmentWidth(segment) + internalStretchPt - compressedSpacePt;
+    // A source U+0020 painted RTL lies before its word physically. Its
+    // positive expansion belongs to that whitespace advance, not to the
+    // next visual segment. Character-spread seams without U+0020 keep their
+    // separate gap model (WORD_RUN_DIRECTION_ISOLATE's documented exclusion).
+    // Negative justification keeps the breaker's existing compression plan.
+    const rtlSpaceOwnsGap = !characterSpreadBidi && segment.kind === 'text' && visual.rtl[segmentIndex] === true
+      && (segment.basePaintOps[0]?.writingMode ?? 'horizontal-tb') === 'horizontal-tb'
+      && segment.text.endsWith(' ') && stretch?.trailingGap === true
+      && (stretch.trailingDelta ?? perGapPt) > 0;
+    const rtlSpaceStretchPt = rtlSpaceOwnsGap ? stretch.trailingDelta ?? perGapPt : 0;
+    const spaceAdjustmentPt = rtlSpaceStretchPt - compressedSpacePt;
+    const widthPt = segmentWidth(segment) + internalStretchPt + spaceAdjustmentPt;
     if (segment.kind === 'tab') {
       const bounds = { xPt, yPt: line.topPt, widthPt: segment.measuredWidthPt, heightPt: line.advancePt };
       const decorations = segment.underline
@@ -1946,21 +1965,21 @@ export function planLine(input: PlanLineInput): LineLayout {
         ...style
       } = segment;
       let textGeometry = retainedTextGeometry(segment, stretch, perGapPt);
-      if (compressedSpacePt > 0) {
-        // The compression belongs to source trailing whitespace, even when
+      if (spaceAdjustmentPt !== 0) {
+        // The adjustment belongs to source trailing whitespace, even when
         // bidi places that whitespace before the visible glyphs. Keep the
         // retained cluster advance and the paint origin under one authority.
         const trailingStart = segment.range.start
           + hangingSpaceVisibleLength(segment.text, (code) => code === 0x20);
-        const perSpacePt = compressedSpacePt / (segment.range.end - trailingStart);
-        let removedPt = 0;
+        const perSpacePt = spaceAdjustmentPt / (segment.range.end - trailingStart);
+        let adjustmentPt = 0;
         const clusters = textGeometry.clusters.map((cluster) => {
           const spaces = Math.max(0, cluster.range.end - Math.max(cluster.range.start, trailingStart));
-          const reductionPt = Math.min(cluster.advancePt, spaces * perSpacePt);
+          const deltaPt = Math.max(-cluster.advancePt, spaces * perSpacePt);
           const result = { ...cluster,
-            advancePt: cluster.advancePt - reductionPt,
-            offset: { ...cluster.offset, xPt: cluster.offset.xPt - removedPt } };
-          removedPt += reductionPt;
+            advancePt: cluster.advancePt + deltaPt,
+            offset: { ...cluster.offset, xPt: cluster.offset.xPt + adjustmentPt } };
+          adjustmentPt += deltaPt;
           return result;
         });
         textGeometry = { ...textGeometry, clusters };
@@ -1986,7 +2005,8 @@ export function planLine(input: PlanLineInput): LineLayout {
         ? retainedRtlPaintOperations(placedPaintOps, textGeometry.clusters)
         : placedPaintOps;
       // `word-run-decoration-justified-advance`
-      const ownedTrailingSlackPt = stretch?.trailingGap ? stretch.trailingDelta ?? perGapPt : 0;
+      const ownedTrailingSlackPt = !rtlSpaceOwnsGap && stretch?.trailingGap
+        ? stretch.trailingDelta ?? perGapPt : 0;
       const origin = { xPt: xPt + rtlLeadingGapPt, yPt: line.baselinePt };
       const baselineOffsetPt = textGeometry.paintOps[0]?.offset.yPt ?? 0;
       const geometryOrigin = {
@@ -2038,10 +2058,24 @@ export function planLine(input: PlanLineInput): LineLayout {
         bounds: { xPt, yPt: line.topPt, widthPt, heightPt: line.advancePt },
         highlightBounds,
         advancePt: widthPt,
-        ...(compressedSpacePt > 0 ? {
-          trailingSpaceCompressionPt: (style.trailingSpaceCompressionPt ?? 0) + compressedSpacePt,
+        ...(spaceAdjustmentPt !== 0 ? {
+          trailingSpaceCompressionPt: (style.trailingSpaceCompressionPt ?? 0) - spaceAdjustmentPt,
         } : {}),
-        clusters: textGeometry.clusters,
+        // Paint consumes source-order offsets; source-addressed geometry
+        // must instead put the adjusted RTL whitespace on its physical side.
+        clusters: direction === 'rtl' && spaceAdjustmentPt !== 0
+          && (paintOps[0]?.writingMode ?? 'horizontal-tb') === 'horizontal-tb'
+          ? (() => {
+              const levels = resolvedBidiLevels(segment.text, 'rtl');
+              const xs = bidiPlacedOffsets(textGeometry.clusters.map(cluster => ({
+                xPt: cluster.offset.xPt, advancePt: cluster.advancePt,
+                level: levels[cluster.range.start - segment.range.start] ?? 1,
+              })));
+              return textGeometry.clusters.map((cluster, index) => ({
+                ...cluster, offset: { ...cluster.offset, xPt: xs[index]! - rtlLeadingGapPt },
+              }));
+            })()
+          : textGeometry.clusters,
         paintOps,
         decorations,
         ...(emphasis ? { emphasis } : {}),
@@ -2092,7 +2126,7 @@ export function planLine(input: PlanLineInput): LineLayout {
       placements.push(placed);
     }
     xPt += widthPt;
-    if (stretch?.trailingGap) xPt += stretch.trailingDelta ?? perGapPt;
+    if (!rtlSpaceOwnsGap && stretch?.trailingGap) xPt += stretch.trailingDelta ?? perGapPt;
   }
   // WORD_LINE_END_SPACE_HANGS: no decoration over the hanging line-end
   // spaces; with ulTrailSpace (§17.15.3.8) they keep every decoration up to

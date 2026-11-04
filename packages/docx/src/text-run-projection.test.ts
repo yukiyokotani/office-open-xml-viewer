@@ -380,15 +380,19 @@ function documentLayout(layoutPage: LayoutPage): DocumentLayout {
 }
 
 describe('textRunsForPage', () => {
-  it('projects retained terminal-space compression into CSS pixels', () => {
+  it('projects signed terminal-space adjustments into CSS pixels', () => {
     const compressed = paragraph('compressed', 'body', [
       placement('A ', 0, 0, { trailingSpaceCompressionPt: 2 }),
+      placement('אב ', 20, 0, { direction: 'rtl', trailingSpaceCompressionPt: -4 }),
     ]);
     const layers = buildPageLayers([
       { layer: 'body', node: compressed, coordinateSpace: 'section-logical' },
     ]);
-    expect(textRunsForPage(documentLayout(page(layers, [compressed.id])), 0, { scale: 2 })[0])
-      .toMatchObject({ text: 'A ', trailingSpaceCompressionPx: 4 });
+    expect(textRunsForPage(documentLayout(page(layers, [compressed.id])), 0, { scale: 2 }))
+      .toMatchObject([
+        { text: 'A ', trailingSpaceCompressionPx: 4 },
+        { text: 'אב ', trailingSpaceCompressionPx: -8, direction: 'rtl' },
+      ]);
   });
 
   it('projects the source w14:paraId onto every run owned by that paragraph', () => {
