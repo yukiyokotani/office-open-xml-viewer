@@ -1634,6 +1634,42 @@ function emitResolvedTextSegment(
   emissionState.gluePending = false;
 }
 
+/** ECMA-376 §20.4.2.6: an inline object's line box is its extent widened by
+ * `wp:effectExtent` on every edge (Word #2063 controls: pictures and shapes;
+ * the advance gains left + right, the line gains top + bottom). The edges are
+ * physical: a picture or chart that a vertical section keeps upright maps
+ * them onto the logical line axes (shapes and placeholders turn with the line) (clockwise: logical left/top/right/bottom = physical
+ * top/right/bottom/left; counter-clockwise: bottom/left/top/right). Signed
+ * values (ST_Coordinate) apply as authored; the box never goes below zero. */
+function inlineEffectExtentBox(
+  extent: readonly number[] | undefined,
+  widthPt: number,
+  heightPt: number,
+  orientation?: import('../layout/types.js').UprightResourceOrientation,
+): {
+  widthPt: number;
+  heightPt: number;
+  effectExtent?: readonly [number, number, number, number];
+  objectSizePt?: readonly [number, number];
+} {
+  if (!extent || extent.length !== 4 || extent.every((edge) => !Number.isFinite(edge) || edge === 0)) {
+    return { widthPt, heightPt };
+  }
+  const [l, t, r, b] = extent.map((edge) => (Number.isFinite(edge) ? edge : 0)) as [number, number, number, number];
+  const logical: [number, number, number, number] = orientation === 'upright-physical'
+    ? [t, r, b, l]
+    : orientation === 'upright-physical-counter-clockwise'
+      ? [b, l, t, r]
+      : [l, t, r, b];
+  const [left, top, right, bottom] = logical;
+  return {
+    widthPt: Math.max(0, widthPt + left + right),
+    heightPt: Math.max(0, heightPt + top + bottom),
+    effectExtent: logical,
+    objectSizePt: [widthPt, heightPt],
+  };
+}
+
 function appendRunsToSegments(
   runs: readonly ParagraphLayoutRun[],
   environment: LineLayoutEnvironment,
@@ -1823,8 +1859,7 @@ function appendRunsToSegments(
         imagePath: img.imagePath,
         mimeType: img.mimeType,
         ...(img.anchor ? {} : { inlinePicture: true as const }),
-        widthPt: img.widthPt,
-        heightPt: img.heightPt,
+        ...inlineEffectExtentBox(img.anchor ? undefined : img.inlineEffectExtent, img.widthPt, img.heightPt, environment.uprightResourceOrientation),
         rotation: img.rotation,
         flipH: img.flipH,
         flipV: img.flipV,
@@ -1854,6 +1889,10 @@ function appendRunsToSegments(
       segs.push({
         imagePath: '',
         mimeType: '',
+        // Preserve the established wp:extent chart allocation. Office-produced
+        // Pareto controls do not reserve this padding; other chart classes
+        // remain unmeasured, so chart effect-extent reservation is unsupported
+        // rather than inferred from the picture/shape rule.
         widthPt: chartRun.widthPt,
         heightPt: chartRun.heightPt,
         anchor: chartRun.anchor ?? false,
@@ -1874,14 +1913,16 @@ function appendRunsToSegments(
       segs.push({
         imagePath: '',
         mimeType: '',
-        widthPt: run.widthPt,
-        heightPt: run.heightPt,
         anchor: false,
         anchorXPt: 0,
         anchorYPt: 0,
         anchorXFromMargin: false,
         anchorYFromPara: false,
         inlineShape: true,
+        inlinePicture: true,
+        // An inline shape is not counter-turned in a vertical section, so its
+        // effect edges stay on the object's own (logical) edges.
+        ...inlineEffectExtentBox(run.inlineEffectExtent, run.widthPt, run.heightPt),
         ...(run.inlineOffsetXPt ? { inlineOffsetXPt: run.inlineOffsetXPt } : {}),
         ...(run.inlineOffsetYPt ? { inlineOffsetYPt: run.inlineOffsetYPt } : {}),
         measuredWidth: 0,
@@ -1892,8 +1933,10 @@ function appendRunsToSegments(
       segs.push({
         imagePath: '',
         mimeType: '',
-        widthPt: run.widthPt,
-        heightPt: run.heightPt,
+        ...inlineEffectExtentBox(
+          acquiredAnchor !== undefined ? undefined : run.inlineEffectExtent,
+          run.widthPt, run.heightPt,
+        ),
         anchor: acquiredAnchor !== undefined,
         anchorXPt: 0,
         anchorYPt: 0,

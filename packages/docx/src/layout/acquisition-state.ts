@@ -22,6 +22,7 @@ export const BODY_STORY_CONTEXT: StoryContext = Object.freeze({
 export const MAIN_BODY_STORY_CONTEXT: StoryContext = Object.freeze({
   ...BODY_STORY_CONTEXT,
   closingMarkHangAdmitted: true,
+  inlineObjectRunLeadingAdmitted: true,
 });
 
 type ParagraphContextState = Pick<

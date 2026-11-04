@@ -1,4 +1,5 @@
 import { textBreakWindow, textBreakOffsets } from '../line-breaker/text-break-window.js';
+import { uprightResourceOrientation } from './coordinate-space.js';
 import { LineMeasurementAdapter, kernedSpaceSeamIdentity } from '../line-breaker/measurement-adapter.js';
 import { condensedSpacingMayFloor, slicedTextMetadata } from '../line-breaker/advance.js';
 import { optionalHyphenBreakAllowed } from '../line-breaker/optional-hyphens.js';
@@ -711,6 +712,7 @@ export function measureParagraphIntrinsicWidths(
 
   const builtSegments = buildSegments(paragraph.runs, {
     ...environment,
+    uprightResourceOrientation: uprightResourceOrientation(environment.verticalPageFrame, environment.pageWritingMode),
     lineSpacing: context.lineSpacing,
     lineGridActive: context.lineGrid.active,
     characterGridActive: context.characterGrid.active,

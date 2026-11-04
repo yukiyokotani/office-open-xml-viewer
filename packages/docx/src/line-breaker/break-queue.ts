@@ -256,6 +256,8 @@ export function createLineBreakerState(maxWidth: number, wrapCtx?: WrapLayoutCtx
     lineIntendedSingle: 0,
     lineHasInlinePicture: false,
     linePictureMarkSingle: 0,
+    lineObjectBaselineMinimum: 0,
+    lineObjectAdvanceMinimum: 0,
     lineGridCountSingle: 0,
     lineLatinGridCountSingle: 0,
     lineVisibleAscent: 0,

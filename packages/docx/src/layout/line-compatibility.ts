@@ -1372,8 +1372,27 @@ export const WORD_INLINE_PICTURE_AUTO_LEADING = defineCompatibilityRule({
     version: '16.113.2',
     platform: 'macOS 27.0',
   },
-  description: 'For an inline picture with automatic spacing at or above one line, add the authored leading of the selected text/paragraph-mark face to the natural picture/text baseline union, rather than multiplying the picture height. Image-only, text-only and alternating 28.35pt-picture controls at line=240/259 and exact=259 distinguish the two advances; earlier Word controls covered picture heights 5–255pt at auto multiples 1, 1.079 and 1.15. Exact spacing and non-picture lines retain their own allocation.',
+  description: 'For an inline picture or drawing shape (wp:inline WPS or in-flow VML text box) with automatic spacing at or above one line, add the authored leading of the selected text/paragraph-mark face to the natural drawing/text baseline union, rather than multiplying the drawing height. Image-only, text-only and alternating 28.35pt-picture controls at line=240/259 and exact=259 distinguish the two advances; earlier Word controls covered picture heights 5–255pt at auto multiples 1, 1.079 and 1.15. Windows Word 16.0.20527 issue #2063 PDF controls (72 inline cases across no-styles/docDefaults documents, compatibility mode omitted/15) also establish box-only single spacing equal to box height and mixed-text box bottoms on the baseline. At 1.5 spacing a 40pt box with a 10pt Times New Roman mark adds about 5.74pt, not 20pt. Additional Windows mode-15 controls with Times New Roman, Arial and Yu Mincho distinguish document defaults, resolved Normal/default styles, an applied paragraph style, direct drawing-run font/size and direct paragraph-mark formatting: automatic leading follows the effective outer drawing run, with paragraph style below direct run rPr; a direct paragraph mark does not select it. Literal pictures and WPS shapes agree. Grid-snapped allocation remains independent, and the existing document-script font-slot policy is preserved. When an authored face is unavailable, the selected fallback supplies its own metrics; direct paragraph-mark size must not compensate for that resource difference. ECMA-376 §17.7.5.1 leaves omitted document defaults application-defined. Without document/style font declarations, preserve unspecified font slots and selected generic metrics rather than guessing an Office host default or borrowing the direct paragraph mark. In controlled inline-object clones, explicit Times New Roman 10pt default-font declarations make the renderer’s source-case page boundaries agree with Word; their fontless originals can differ. Fully authored Windows mode-15 auto-single controls use outer run8/20pt, object8/40pt and mark8pt: 16 WPS cases cover Times New Roman/Arial, four literal-picture cases cover Times New Roman, and four static VML textbox cases cover Times New Roman. DrawingML WPS and literal pictures reserve their outer-run natural minimum as extra ascent while preserving actual suffix descent; large objects retain their actual geometry. The static in-flow VML textbox controls have the same minimum advance but keep their object top, reserving extra below the visible box. The minimum is limited to horizontal off-grid main-body flow, with mixed ordinary text admitted only for DrawingML; mixed VML, relative VML, active WordArt including retained textbox content, unknown/public origins, ruby, numbering, frames and other stories remain outside this measured class. The parser retains actual source provenance; this minimum is not an invisible glyph or additional descent. The earlier box-height-only observation applies when the resolved outer-run minimum does not exceed the actual union. Minimum-height (atLeast) spacing remains outside this outer-run minimum rule. Controlled cases retain a preexisting object-top mismatch with Word even when line advance agrees; synthetic host metrics must not compensate for that separate limitation. Exact spacing and lines without inline pictures/shapes retain their own allocation.',
 });
+
+/** Observed outer-run leading selection is bounded to mode-15 box-only body
+ * paragraphs. The caller additionally admits only horizontal off-grid root
+ * body flow; other stories, mixed text and legacy modes keep their old route. */
+export function wordInlineDrawingRunLeadingApplies(
+  compatibilityMode: number | undefined,
+  paragraph: Readonly<{
+    lineSpacing?: Readonly<LineSpacing> | null;
+    numbering?: unknown;
+    framePr?: unknown;
+    runs: readonly Readonly<{ type: string; anchor?: boolean; inline?: boolean }>[];
+  }>,
+): boolean {
+  return compatibilityMode === 15 && !paragraph.numbering && !paragraph.framePr
+    && paragraph.lineSpacing?.rule === 'auto' && paragraph.lineSpacing.value > 1
+    && paragraph.runs.length > 0
+    && paragraph.runs.every(run => (run.type === 'image' && run.anchor !== true)
+      || (run.type === 'shape' && run.inline === true));
+}
 
 /** Word-observed inline-picture projection of ECMA-376 §17.3.1.33. */
 export function wordInlinePictureAutoLineHeightPx(

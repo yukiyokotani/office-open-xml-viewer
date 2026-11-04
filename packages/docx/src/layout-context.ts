@@ -111,6 +111,9 @@ export interface StoryContext {
    * without it, keeping the previous (v0.89) overflowPunct behaviour.
    */
   readonly closingMarkHangAdmitted?: true;
+  /** Independent main-body-root provenance. Paragraph measurement applies
+   * the mode, axes and content gate in wordInlineDrawingRunLeadingApplies. */
+  readonly inlineObjectRunLeadingAdmitted?: true;
 }
 
 /** Whether a table cell's authored text direction (§17.4.72) keeps the cell
