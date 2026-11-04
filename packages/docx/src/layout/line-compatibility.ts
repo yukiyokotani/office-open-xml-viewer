@@ -588,6 +588,20 @@ export function wordSoftLineJustifiesAtSpacesOnly(alignment: string | null | und
     || alignment === 'highKashida' || alignment === 'thaiDistribute';
 }
 
+export const WORD_EXPLICIT_LINE_END_RUN_SPACE_FIT = defineCompatibilityRule({
+  id: 'word-explicit-line-end-run-space-fit',
+  evidence: { kind: 'office-observation', syntheticFixtureId: 'bidi-explicit-source-space',
+    application: 'Microsoft Word', version: '16.0.20527', platform: 'Windows' },
+  description: 'ECMA-376 §17.3.3.1 distinguishes explicit breaks from automatic wrapping; §17.3.1.6 and §17.3.2.30 distinguish paragraph and run directions. Observed Office behavior, not a prescribed fit algorithm: in compatibility mode 15, source U+0020 immediately before a paragraph end or manual/page/column break counts in line admission when its run direction opposes the paragraph. Soft-wrap spaces continue hanging. Windows controls cover Arabic and Latin, Arial and Times New Roman 12pt, modes 14/15, one/three spaces, identical-format source seams, a differently formatted last-word seam and explicit break counterexamples. A separate same-direction space hangs: at the intermediate width two opposite-direction spaces plus one paragraph-direction space fit, while three opposite-direction spaces do not. The opposite-space widths come from authoritative shaping, never a font constant. Ownership is acquired before line splitting and retained by UTF-16 source endpoint, so a prefix cannot inherit the boundary. Scope is horizontal authored WordprocessingML, left/default and lowKashida alignment; compression and distribute classes, unmeasured other alignments, and unauthored DrawingML directions retain their existing admission. Empty source pieces cannot acquire an invisible-only line.',
+});
+
+export function wordExplicitLineEndRunSpaceFitApplies(
+  mode: number | undefined, alignment: string | null | undefined, wordWrap: boolean,
+): boolean {
+  return mode === 15 && wordWrap
+    && (alignment === undefined || alignment === null || alignment === 'left' || alignment === 'lowKashida');
+}
+
 /** Scope of {@link WORD_LINE_END_SPACE_HANGS}. */
 export function wordLineEndSpaceHangs(bidi: boolean, wordWrap: boolean): boolean {
   return !bidi && wordWrap;

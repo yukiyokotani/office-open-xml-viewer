@@ -288,7 +288,7 @@ export function performMinimalLegalTextWidth(
   }
   const prefix = text.slice(0, end);
   // The fit tests exclude a collapsible U+0020 suffix except in an RTL line.
-  return strAdvance(segment, lineEndSpaceCharged(operationState) ? prefix : prefix.replace(/ +$/u, ''));
+  return strAdvance(segment, lineEndSpaceCharged(operationState, segment, prefix) ? prefix : prefix.replace(/ +$/u, ''));
 }
 
 /** Vertical allocation belongs to the physical line; only a failed gap

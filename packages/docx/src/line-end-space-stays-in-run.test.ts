@@ -245,6 +245,48 @@ describe('line-end space in a run of the opposite direction', () => {
 
   });
 
+  it('counts opposite-run spaces at explicit line ends across source seams in mode 15', () => {
+    const content = `${WORDS} ${WORDS} `;
+    const variants = [
+      [textRun(content, { rtl: true })],
+      [textRun(content.slice(0, -1), { rtl: true }), textRun(' ', { rtl: true })],
+      [textRun(content.slice(0, -3), { rtl: true }), textRun(content.slice(-3), { rtl: true, bold: true })],
+      [textRun(content.replaceAll('א', '😀'), { rtl: true })],
+    ];
+    for (const runs of variants) {
+      const body = para(runs, 'left', narrow);
+      expect(lines(body, { compatibilityMode: 14 })).toHaveLength(2);
+      const current = lines(body, { compatibilityMode: 15 });
+      expect(current).toHaveLength(3);
+      // A source-interior soft wrap still hangs: only the explicit end counts.
+      const first = texts(current[0]!).sort((a, b) => a.range.start - b.range.start)
+        .map(p => p.text).join('').trim().split(/ +/u);
+      expect(first).toHaveLength(4);
+    }
+  });
+
+  it('counts an unmarked Latin run space against a bidi paragraph end', () => {
+    const latin = 'abcde fghij klmno pqrst';
+    const body = para([textRun(`${latin} ${latin} `)], 'left', { ...narrow, bidi: true });
+    expect(lines(body, { compatibilityMode: 14 })).toHaveLength(2);
+    expect(lines(body, { compatibilityMode: 15 })).toHaveLength(3);
+  });
+
+  it('counts source spaces before a manual break and distinguishes mixed-direction suffixes', () => {
+    const content = `${WORDS} ${WORDS} `;
+    const br = { type: 'break', breakType: 'line' } as DocParagraph['runs'][number];
+    const broken = lines(para([textRun(content, { rtl: true }), br, textRun('tail')],
+      'left', narrow), { compatibilityMode: 15 });
+    expect(broken).toHaveLength(4);
+    const three = lines(para([textRun(content + '  ', { rtl: true })], 'left',
+      { indentRight: 105 }), { compatibilityMode: 15 });
+    expect(three).toHaveLength(3);
+    const mixed = lines(para([
+      textRun(content + ' ', { rtl: true }), textRun(' ', { rtl: false }),
+    ], 'left', { indentRight: 105 }), { compatibilityMode: 15 });
+    expect(mixed).toHaveLength(2);
+  });
+
   it('hangs the physical leading space on soft-wrapped RTL distribute lines', () => {
     const [first] = lines(para([textRun(`${WORDS} ${WORDS}`, { rtl: true })],
       'distribute', { bidi: true }), { compatibilityMode: 15 });

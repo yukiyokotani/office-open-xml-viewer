@@ -13,15 +13,28 @@ export interface AtomicTextMeasurement {
   readonly strAdvance: (segment: LayoutTextSeg, text: string) => number;
 }
 
-/** Whether line fitting charges a line-end U+0020: right-to-left lines do
- * (library containment policy) unless WORD_RTL_JUSTIFIED_VISIBLE_FIT applies. */
-export function lineEndSpaceCharged(state: Pick<AtomicTextMeasurement, 'baseRtl' | 'lineFit'>): boolean {
-  return state.baseRtl && state.lineFit?.rtlVisiblePrefix !== true;
+/** The candidate must still reach its acquired UTF-16 source endpoint.
+ * A breaker-created prefix inherits metadata, but not the later boundary. */
+export function explicitLineEndSpaceCounts(segment: LayoutTextSeg, text = segment.text): boolean {
+  return segment.explicitLineEndSpaceEnd !== undefined && text.endsWith(' ')
+    && (segment.sourceTextOffset ?? segment.src?.charOffset ?? 0) + text.length === segment.explicitLineEndSpaceEnd;
 }
 
-/** Advance of the U+0020 suffix that ends `items` across members (a run of
- * spaces may span separately formatted segments); zero-width markers are
- * looked through. The single suffix measure of every visible-prefix fit. */
+/** Charge acquired explicit-end ownership, plus the previous RTL containment
+ * policy outside WORD_RTL_JUSTIFIED_VISIBLE_FIT. */
+export function lineEndSpaceCharged(
+  state: Pick<AtomicTextMeasurement, 'baseRtl' | 'lineFit'>,
+  segment?: LayoutTextSeg,
+  text?: string,
+): boolean {
+  return (segment !== undefined && explicitLineEndSpaceCounts(segment, text))
+    || (state.baseRtl && state.lineFit?.rtlVisiblePrefix !== true);
+}
+
+/** Hanging advance of the U+0020 suffix across source owners. Explicit-end
+ * opposite-run spaces remain charged; other spaces can hang independently in
+ * that same suffix. Zero-width markers are looked through. This is the single
+ * suffix measure used by visible-prefix admission and rollback. */
 export function trailingSpaceSuffixWidth(
   items: readonly LayoutSeg[],
   measurement: Pick<AtomicTextMeasurement, 'segAdvance' | 'strAdvance' | 'reservePrefixWork'>,
@@ -38,7 +51,7 @@ export function trailingSpaceSuffixWidth(
     if (!item.text.endsWith(' ')) return width;
     measurement.reservePrefixWork(item.text.length);
     const trimmed = item.text.replace(/ +$/u, '');
-    width += measurement.segAdvance(item) - measurement.strAdvance(item, trimmed);
+    if (!explicitLineEndSpaceCounts(item)) width += measurement.segAdvance(item) - measurement.strAdvance(item, trimmed);
     if (trimmed.length > 0) return width;
   }
   return width + knownWidth;
@@ -114,7 +127,7 @@ export function measureJoinedTextUnit(
     width: strAdvance(s, firstText) + (s.leadingWordBoundaryPx ?? 0), trailingSpace: 0, next: s, pieces,
   };
   let groupW = w;
-  let groupTrail = s.fitTextRegionIndex === undefined ? trailingSpaceW : 0;
+  let groupTrail = s.fitTextRegionIndex === undefined && !explicitLineEndSpaceCounts(s, firstText) ? trailingSpaceW : 0;
   let index = 0;
   let next: LayoutSeg | undefined;
   for (const f of following) {
@@ -145,7 +158,7 @@ export function measureJoinedTextUnit(
     const fw = end === f.text.length ? segAdvance(f) : strAdvance(f, prefix);
     groupW += fw;
     const trimmed = prefix.replace(/ +$/, '');
-    const trailing = !fixedCell && !lineEndSpaceCharged(measurement) && prefix.endsWith(' ')
+    const trailing = !fixedCell && !lineEndSpaceCharged(measurement, f, prefix) && prefix.endsWith(' ')
       ? fw - strAdvance(f, trimmed) : 0;
     groupTrail = trimmed.length === 0 && groupTrail > 0 ? groupTrail + trailing : trailing;
     if (end < f.text.length || !fixedCell && explicitEnd !== undefined && hardEnd === undefined) break;

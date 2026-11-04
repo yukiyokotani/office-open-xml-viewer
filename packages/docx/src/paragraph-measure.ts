@@ -28,6 +28,7 @@ import {
   WORD_PICTURE_BULLET_LINE_PARTICIPATION,
   wordJustifiedInterwordCompressionApplies,
   wordJustifiedLineFit,
+  wordExplicitLineEndRunSpaceFitApplies,
 } from './layout/line-compatibility.js';
 import { LayoutInvariantError } from './layout/diagnostics.js';
 import type { MeasurementTextContext } from './layout/measurement-capabilities.js';
@@ -349,6 +350,11 @@ export function measureParagraph(
     lineGridActive: context.lineGrid.active,
     characterGridActive: context.characterGrid.active,
     paragraphRtl: context.baseRtl,
+    countExplicitOppositeRunSpaces: environment.pageWritingMode === 'horizontal-tb'
+      && environment.verticalCJK !== true && environment.verticalPageFrame !== true
+      && context.runDirectionUnauthored !== true
+      && wordExplicitLineEndRunSpaceFitApplies(environment.compatibilityMode, paragraph.alignment,
+        context.wordWrap !== false),
     autoSpaceDE: paragraph.autoSpaceDE,
     autoSpaceDN: paragraph.autoSpaceDN,
   });

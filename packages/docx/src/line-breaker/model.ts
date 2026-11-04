@@ -36,6 +36,10 @@ export interface LayoutSegSource {
 
 export interface LayoutTextSeg extends LayoutSegSource {
   text: string;
+  /** word-explicit-line-end-run-space-fit: original UTF-16 endpoint in the
+   * sourceTextOffset axis (or original segment axis without a sequence).
+   * Prefix/suffix clones retain ownership, not an inferred last-piece flag. */
+  explicitLineEndSpaceEnd?: number;
   /** An authored zero-advance discretionary boundary. The retained glyph
    * has this source marker's own shaping/paint route; only a selected break
    * materializes it. The empty marker itself never paints or sizes a line. */
@@ -718,6 +722,8 @@ export interface LineLayoutEnvironment {
   readonly characterGridActive?: boolean;
   /** Paragraph base direction after inherited bidi resolution. */
   readonly paragraphRtl?: boolean;
+  /** Acquired horizontal word-explicit-line-end-run-space-fit eligibility. */
+  readonly countExplicitOppositeRunSpaces?: boolean;
   /** §17.15.3.3 w:balanceSingleByteDoubleByteWidth document compatibility switch. */
   readonly balanceSingleByteDoubleByteWidth?: boolean;
   readonly resolvedLocalFonts?: Readonly<Record<string, ResolvedFontMetric>>;
