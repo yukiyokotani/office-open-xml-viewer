@@ -64,7 +64,7 @@ import {
   segmentIntendedSingleLinePx,
 } from './font-routes.js';
 import { rubyAscentReservePx } from './ruby-metrics.js';
-import { fitCJKPrefix, hasEastAsianVisiblePredecessor } from './fit-search.js';
+import { fitCJKPrefix, fitsLineWidth, hasEastAsianVisiblePredecessor } from './fit-search.js';
 import { rebaseSeaBreaks, hasCJKBreakOpportunity } from './text-runs.js';
 import {
   keepLeadingKinsoku,
@@ -804,9 +804,9 @@ export function performFitsMeasuredWidth(
 
   // Intrinsic AutoFit widths can become the exact final line width. The
   // margin subtraction and point/pixel round trip may differ by an ulp from
-  // the same shaped advance. Use the existing grapheme-fit numerical epsilon
-  // (below), not an Office width allowance, before forcing an emergency split.
-  if (used <= available + 1e-9) return true;
+  // the same shaped advance. Use the shared line-fit numerical epsilon, not an
+  // Office width allowance, before forcing an emergency split.
+  if (fitsLineWidth(used, available)) return true;
   if (
     widthPolicy !== 'bounded' ||
     !Number.isFinite(used) ||
@@ -2282,7 +2282,7 @@ export function performEmergencyTextSplit(
       const index = lastFittingMonotoneIndex(legal.length, i => {
         operationState.reservePrefixWork(legal[i]!);
         const natural = strNaturalAdvance(segment, segment.text.slice(0, legal[i]!));
-        return prospectiveSnapAdvance(segment, natural) <= available + 1e-9;
+        return fitsLineWidth(prospectiveSnapAdvance(segment, natural), available);
       });
       if (index >= 0) split = legal[index]!;
     } else {
@@ -2294,7 +2294,7 @@ export function performEmergencyTextSplit(
         if (offset <= 0 || protectedOffsets.has(offset)) continue;
         operationState.reservePrefixWork(offset);
         const natural = strNaturalAdvance(segment, segment.text.slice(0, offset));
-        if (prospectiveSnapAdvance(segment, natural) <= available + 1e-9) split = offset;
+        if (fitsLineWidth(prospectiveSnapAdvance(segment, natural), available)) split = offset;
       }
     }
   }
@@ -2322,7 +2322,7 @@ export function performExplicitTextSplit(
     const offset = textBreakOffsetAt(window, index);
     operationState.reservePrefixWork(offset);
     const natural = strNaturalAdvance(segment, segment.text.slice(0, offset));
-    return prospectiveSnapAdvance(segment, natural) <= available + 1e-9;
+    return fitsLineWidth(prospectiveSnapAdvance(segment, natural), available);
   };
   // Use the emergency splitter's existing monotone-allocation contract. Signed
   // spacing retains exact candidate evaluation. Positive Latin snap allocation
