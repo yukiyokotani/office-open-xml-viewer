@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { createFontResolver } from './layout/font-service.js';
 import { createTextLayoutService, type GlyphMeasureRequest } from './layout/text.js';
 import { renderDocumentToCanvas } from './renderer.js';
-import type { BodyElement, DocParagraph, DocxDocumentModel, DocxTextRun, SectionProps } from './types';
+import type { BodyElement, DocParagraph, DocxDocumentModel, DocxTextRun, NumberingInfo, SectionProps } from './types';
 
 // ECMA-376 §17.3.2.20 w:lang — w:val governs text that is neither East Asian
 // nor complex script, w:eastAsia and w:bidi the other two §17.3.2.26 slots.
@@ -120,6 +120,23 @@ describe('Canvas lang at measure and paint', () => {
       footers: { default: null, first: null, even: null },
     } as unknown as DocxDocumentModel;
   }
+
+  it('preserves numbering-level language through marker measurement and paint', async () => {
+    const { canvas, ctx, draws, measures } = recordingCanvas();
+    const document = documentOf([run('Body')]);
+    const paragraph = document.body[0] as DocParagraph;
+    paragraph.numbering = {
+      numId: 1, level: 0, format: 'bullet', text: 'где', indentLeft: 0,
+      tab: 18, suff: 'space', fontFamily: 'Times New Roman',
+      fontFacts: { lang: 'sr-rs', fontSize: FONT_PX, italic: true },
+    } as unknown as NumberingInfo;
+    await renderDocumentToCanvas(document, canvas, 0, { dpr: 1, width: 600 });
+    expect(draws.filter(draw => draw.text === 'где').map(draw => draw.lang)).toEqual(['sr-rs']);
+    expect(measures.filter(measure => measure.text === 'где').map(measure => measure.lang))
+      .toContain('sr-rs');
+    expect(draws.filter(draw => draw.text === 'Body').map(draw => draw.lang)).toEqual(['inherit']);
+    expect(ctx.lang).toBe('inherit');
+  });
 
   it('draws a tagged run with the language it was measured with, and restores it', async () => {
     const { canvas, ctx, draws, measures } = recordingCanvas();

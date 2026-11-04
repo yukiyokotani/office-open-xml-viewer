@@ -1308,6 +1308,9 @@ export interface NumberingMarkerShapeInput {
   readonly complexScript: boolean;
   readonly fontHint?: 'default' | 'eastAsia' | 'cs';
   readonly eastAsiaLanguage?: string;
+  /** The independent w:lang axes of numbering/paragraph-mark run properties. */
+  readonly language?: string;
+  readonly complexScriptLanguage?: string;
   readonly kerning?: boolean;
 }
 

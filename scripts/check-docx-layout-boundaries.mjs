@@ -376,6 +376,8 @@ const EXACT_ACQUISITION_SURFACE_MEMBERS = new Map([
       'font',
       'letterSpacing',
       'fontKerning',
+      // Language is shaping input; this capability still excludes paint.
+      'lang',
       'measureText',
     ])],
     ['VerticalGlyphMeasurementService', new Set([
