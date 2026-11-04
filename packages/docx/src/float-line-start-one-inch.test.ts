@@ -107,7 +107,8 @@ describe('resolveLineFloatWindow — float geometry and numeric domain', () => {
 
     // The free side gap first reaches 40 pt at the contour root 200/3; the
     // line retries one line height (1 pt) lower each time, so it lands at 67.
-    const result = resolveLineFloatWindow(0, 40, 1, 0, 100, [triangle]);
+    const result = resolveLineFloatWindow(0, 40, 1, 0, 100, [triangle], 0, 100,
+      { xLeftPt: 0, xRightPt: 100, readingDirection: 'ltr', stepThroughPolygons: true });
 
     expect(result.topY).toBe(67);
     expect(result.maxWidth).toBeGreaterThanOrEqual(40);
@@ -586,7 +587,8 @@ describe('resolveLineFloatWindow — float geometry and numeric domain', () => {
 
     // The left gap [0, 20 + 0.3 y] (the edge read at the band top) first
     // holds 40 pt at y = 200/3; a 1 pt line takes the next line-grid top, 67.
-    const result = resolveLineFloatWindow(0, 40, 1, 0, 100, [triangle]);
+    const result = resolveLineFloatWindow(0, 40, 1, 0, 100, [triangle], 0, 100,
+      { xLeftPt: 0, xRightPt: 100, readingDirection: 'ltr', stepThroughPolygons: true });
 
     expect(result.topY).toBe(67);
     expect(result.maxWidth).toBeCloseTo(40.1, 10);
@@ -602,7 +604,8 @@ describe('resolveLineFloatWindow — float geometry and numeric domain', () => {
       { xPt: 350, yPt: 0 }, { xPt: 360, yPt: 0 }, { xPt: 360, yPt: 80 }, { xPt: 0, yPt: 80 },
     ]);
 
-    expect(resolveLineFloatWindow(0, 110, 15, 0, 300, [notch], 0, 360))
+    expect(resolveLineFloatWindow(0, 110, 15, 0, 300, [notch], 0, 360,
+      { xLeftPt: 0, xRightPt: 300, readingDirection: 'ltr', stepThroughPolygons: true }))
       .toEqual({ topY: 15, xOffset: 185, maxWidth: 115 });
     // The tight copy does not enter the notch open at its top: below it.
     expect(resolveLineFloatWindow(0, 110, 15, 0, 300, [polygonFloat('tight', notch.wrapPolygon!)], 0, 360).topY)

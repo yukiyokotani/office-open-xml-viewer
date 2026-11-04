@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { layoutLines, type LayoutLine, type LayoutSeg, type LayoutTextSeg, type WrapLayoutCtx } from '../line-layout.js';
 import { computePreparedLineFloatWindow, prepareFloatWrap } from '../layout/float-wrap.js';
 import type { FloatRect } from '../layout/float-wrap.js';
+import { createFloatWrapOracle } from '../layout/float-wrap-oracle.js';
 import type { LineFitWidth } from './pass-driver.js';
 import { KASHIDA_FLOAT_RETRY_STEP_LIMIT } from './pass-operations.js';
 
@@ -33,6 +34,14 @@ function band(left: number, right: number, top: number, bottom: number): FloatRe
 function wrap(floats: FloatRect[], columnWidthPt = 360, rtl = false, columnXPt = 0): WrapLayoutCtx {
   return { floats, paraX: 0, startPageY: 0, columnXPt, columnWidthPt,
     readingDirection: rtl ? 'rtl' : 'ltr', pageH: 800, lineBoxH: () => 10 };
+}
+/** These solver cases explicitly exercise the mode-15 through-step policy;
+ * paragraph-level compatibility projection has separate integration coverage. */
+function steppedThroughWrap(floats: FloatRect[], columnWidthPt = 360): WrapLayoutCtx {
+  const oracle = createFloatWrapOracle(floats, {
+    xLeftPt: 0, xRightPt: columnWidthPt, readingDirection: 'ltr', stepThroughPolygons: true,
+  });
+  return { ...wrap(floats, columnWidthPt), lineWindow: oracle.lineWindow };
 }
 const fit = (fraction: number, reserveShare: number): LineFitWidth => ({ fraction, reserveShare, rtlVisiblePrefix: false });
 type NumberingFirstLine = NonNullable<WrapLayoutCtx['numberingFirstLine']>;
@@ -422,9 +431,9 @@ describe('WORD_KASHIDA_LINE_FIT line breaker', () => {
     // (WORD_THROUGH_WRAP_LINE_STEP_ADVANCE), so it takes y = 20.
     const sloped: FloatRect = { ...obstacle(100, 360), authoredWrap: 'through', imageY: 0, imageH: 60, yTop: 0, yBottom: 60,
       wrapPolygon: [{ xPt: 100, yPt: 0 }, { xPt: 360, yPt: 0 }, { xPt: 360, yPt: 60 }, { xPt: 200, yPt: 60 }] };
-    const lines = run([token('W'.repeat(19))], { wrapCtx: wrap([sloped]), lineFit: fit(0.8, 0) });
+    const lines = run([token('W'.repeat(19))], { wrapCtx: steppedThroughWrap([sloped]), lineFit: fit(0.8, 0) });
     const raw = computePreparedLineFloatWindow(0, 118.75, 10, 0, 360, prepareFloatWrap([sloped]), 0, 360,
-      { xLeftPt: 0, xRightPt: 360, readingDirection: 'ltr' }, 118.75);
+      { xLeftPt: 0, xRightPt: 360, readingDirection: 'ltr', stepThroughPolygons: true }, 118.75);
     expect(lines[0]!.topY).toBeCloseTo(raw.topY, 9);
     expect(lines[0]!.topY).toBe(20);
     expect(lines[0]!.availWidth * 0.8).toBeGreaterThanOrEqual(95 - 1e-9);
@@ -452,9 +461,9 @@ describe('WORD_KASHIDA_LINE_FIT line breaker', () => {
       const [fraction, share] = [[1, 0.1], [1, 0.2], [0.9, 0], [0.8, 0]][Math.floor(random() * 4)]!;
       const word = 5 * (12 + Math.floor(random() * 20));
       const lines = run([token('W'.repeat(word / 5))], {
-        maxWidth: band, marginRightPx: band + trailing, wrapCtx: wrap([float], span), lineFit: fit(fraction, share),
+        maxWidth: band, marginRightPx: band + trailing, wrapCtx: steppedThroughWrap([float], span), lineFit: fit(fraction, share),
       });
-      const reference = { xLeftPt: 0, xRightPt: band, readingDirection: 'ltr' as const };
+      const reference = { xLeftPt: 0, xRightPt: band, readingDirection: 'ltr' as const, stepThroughPolygons: true };
       const fitted = (window: { xOffset: number; maxWidth: number }): number => window.maxWidth * fraction
         - share * Math.max(0, window.maxWidth + (window.xOffset + window.maxWidth >= band - 1e-9 ? trailing : 0));
       // Scan of the line grid (WORD_THROUGH_WRAP_LINE_STEP_ADVANCE: a line
