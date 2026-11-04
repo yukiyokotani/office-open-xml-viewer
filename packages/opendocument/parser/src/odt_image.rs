@@ -201,9 +201,9 @@ fn gif_structure(bytes: &[u8]) -> Result<(), String> {
 /// JPEG markers (ITU-T T.81 Annex B): SOI, then application segments,
 /// comments, quantisation and Huffman tables, restart intervals, one
 /// baseline 8-bit frame of one or three components, its scans, and EOI at
-/// the file's end. A colour profile (APP2 ICC_PROFILE), an EXIF orientation
-/// other than 1, an Adobe colour transform other than YCbCr, other frame
-/// types and any other marker reject.
+/// the file's end. A colour profile (APP2 ICC_PROFILE) other than a standard
+/// sRGB one, an EXIF orientation other than 1, an Adobe colour transform
+/// other than YCbCr, other frame types and any other marker reject.
 fn jpeg_structure(bytes: &[u8], budget: &mut u64) -> Result<(), String> {
     let decode = || unsupported("image-decode");
     let structure = || unsupported("image-structure");
@@ -213,6 +213,9 @@ fn jpeg_structure(bytes: &[u8], budget: &mut u64) -> Result<(), String> {
     let mut restart = 0u16;
     let mut tables: HuffmanTables<'_> = [[None; 2]; 2];
     let mut quantisers: [Option<&[u8]>; 4] = [None; 4];
+    let mut profile: Vec<(u8, u8, &[u8])> = Vec::new();
+    let mut profile_seen = [false; 256];
+    let mut profile_bytes = 0usize;
     loop {
         if bytes.get(at) != Some(&0xff) {
             return Err(decode());
@@ -223,10 +226,12 @@ fn jpeg_structure(bytes: &[u8], budget: &mut u64) -> Result<(), String> {
             return Err(structure());
         }
         if marker == 0xd9 {
-            return if scanned && at + 2 == bytes.len() {
+            return if !scanned || at + 2 != bytes.len() {
+                Err(decode())
+            } else if profile.is_empty() || srgb_profile(&mut profile) {
                 Ok(())
             } else {
-                Err(decode())
+                Err(unsupported("image-colour"))
             };
         }
         let length = usize::from(u16::from_be_bytes(
@@ -241,9 +246,33 @@ fn jpeg_structure(bytes: &[u8], budget: &mut u64) -> Result<(), String> {
         }
         let segment = bytes.get(at + 4..at + 2 + length).ok_or_else(decode)?;
         match marker {
-            0xe2 if segment.starts_with(b"ICC_PROFILE\0") => {
-                return Err(unsupported("image-colour"))
-            }
+            // A profile chunk (ICC.1:2010 Annex B.4): its 1-based sequence
+            // number, the chunk count, then the chunk's bytes.
+            0xe2 if segment.starts_with(b"ICC_PROFILE\0") => match segment.get(12..14) {
+                Some(&[sequence, count]) => {
+                    // ICC.1:2010 Annex B.4 gives each chunk a unique 1-based
+                    // u8 index and one common u8 count: at most 255 entries.
+                    // Reject impossible metadata before retaining it or
+                    // decoding pixels. The exact-profile allowlist also
+                    // bounds cumulative bytes without guessing a size limit.
+                    let length = profile_bytes.checked_add(segment.len() - 14);
+                    if count == 0
+                        || sequence == 0
+                        || sequence > count
+                        || profile_seen[usize::from(sequence)]
+                        || profile.first().is_some_and(|chunk| chunk.1 != count)
+                        || !length.is_some_and(|length| {
+                            SRGB_PROFILES.iter().any(|known| length <= known.0)
+                        })
+                    {
+                        return Err(unsupported("image-colour"));
+                    }
+                    profile_seen[usize::from(sequence)] = true;
+                    profile_bytes = length.expect("validated cumulative length");
+                    profile.push((sequence, count, &segment[14..]));
+                }
+                _ => return Err(unsupported("image-colour")),
+            },
             0xe1 if segment.starts_with(b"Exif\0\0") => {
                 if !exif_unrotated(&segment[6..]) {
                     return Err(unsupported("image-orientation"));
@@ -301,6 +330,131 @@ fn jpeg_structure(bytes: &[u8], budget: &mut u64) -> Result<(), String> {
         }
         at += 2 + length;
     }
+}
+
+/// Standard sRGB colour profiles, as (length, SHA-256) of their exact bytes:
+/// admission is intentionally limited to known identities. The reader does
+/// not model arbitrary ICC transformations or infer them from profile names.
+/// These are the 3,144-byte "sRGB IEC61966-2.1" profile (Hewlett-Packard,
+/// 1998), with perceptual or media-relative colorimetric rendering intent.
+/// The two verified identities differ only in header byte 67 (0 versus 1;
+/// ICC.1:2010 §7.2.15), with identical primaries, white point and curves.
+/// This is an exact-identity admission policy, not a claim that arbitrary
+/// intent/profile variants render identically. Bytes are preserved for the
+/// image decoder; other profiles retain the previous rejection.
+#[cfg(not(test))]
+const SRGB_PROFILES: &[(usize, [u8; 32])] = &[SRGB_IEC61966_2_1, SRGB_IEC61966_2_1_RELATIVE];
+#[cfg(test)]
+const SRGB_PROFILES: &[(usize, [u8; 32])] = &[
+    SRGB_IEC61966_2_1,
+    SRGB_IEC61966_2_1_RELATIVE,
+    tests::TEST_PROFILE,
+];
+const SRGB_IEC61966_2_1: (usize, [u8; 32]) = (
+    3144,
+    [
+        0x2b, 0x3a, 0xa1, 0x64, 0x57, 0x79, 0xa9, 0xe6, 0x34, 0x74, 0x4f, 0xaf, 0x9b, 0x01, 0xe9,
+        0x10, 0x2b, 0x0c, 0x9b, 0x88, 0xfd, 0x6d, 0xec, 0xed, 0x79, 0x34, 0xdf, 0x86, 0xb9, 0x49,
+        0xaf, 0x7e,
+    ],
+);
+const SRGB_IEC61966_2_1_RELATIVE: (usize, [u8; 32]) = (
+    3144,
+    [
+        0x3f, 0x6d, 0x67, 0x41, 0x74, 0xf3, 0x80, 0x4e, 0xb0, 0xda, 0xbd, 0xac, 0x90, 0xae, 0x17,
+        0x48, 0x6e, 0x89, 0x8c, 0x50, 0x63, 0xa6, 0x6f, 0x86, 0x1c, 0x11, 0x6e, 0xa0, 0x33, 0xda,
+        0x83, 0x01,
+    ],
+);
+
+/// Whether a profile's chunks (sequence, count, bytes) are each present
+/// once, numbered 1 to one common count, and reassemble in sequence order
+/// into exactly a profile of `SRGB_PROFILES`.
+fn srgb_profile(chunks: &mut [(u8, u8, &[u8])]) -> bool {
+    chunks.sort_unstable_by_key(|chunk| chunk.0);
+    let count = chunks[0].1;
+    if chunks.len() != usize::from(count)
+        || chunks
+            .iter()
+            .enumerate()
+            .any(|(at, chunk)| chunk.1 != count || usize::from(chunk.0) != at + 1)
+    {
+        return false;
+    }
+    let length: usize = chunks.iter().map(|chunk| chunk.2.len()).sum();
+    if !SRGB_PROFILES.iter().any(|known| known.0 == length) {
+        return false;
+    }
+    let digest = sha256(
+        &chunks
+            .iter()
+            .flat_map(|chunk| chunk.2)
+            .copied()
+            .collect::<Vec<_>>(),
+    );
+    SRGB_PROFILES.contains(&(length, digest))
+}
+
+/// SHA-256 (FIPS 180-4 §6.2).
+fn sha256(message: &[u8]) -> [u8; 32] {
+    const K: [u32; 64] = [
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
+        0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
+        0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
+        0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+        0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
+        0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+        0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
+        0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
+        0xc67178f2,
+    ];
+    let mut hash: [u32; 8] = [
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
+        0x5be0cd19,
+    ];
+    let mut padded = message.to_vec();
+    padded.push(0x80);
+    while padded.len() % 64 != 56 {
+        padded.push(0);
+    }
+    padded.extend((message.len() as u64 * 8).to_be_bytes());
+    for block in padded.chunks(64) {
+        let mut w = [0u32; 64];
+        for t in 0..64 {
+            w[t] = if t < 16 {
+                u32::from_be_bytes(block[4 * t..4 * t + 4].try_into().expect("4 bytes"))
+            } else {
+                let (a, b) = (w[t - 15], w[t - 2]);
+                let s0 = a.rotate_right(7) ^ a.rotate_right(18) ^ (a >> 3);
+                let s1 = b.rotate_right(17) ^ b.rotate_right(19) ^ (b >> 10);
+                w[t - 16]
+                    .wrapping_add(s0)
+                    .wrapping_add(w[t - 7])
+                    .wrapping_add(s1)
+            };
+        }
+        let mut v = hash;
+        for t in 0..64 {
+            let [a, b, c, d, e, f, g, h] = v;
+            let t1 = h
+                .wrapping_add(e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25))
+                .wrapping_add((e & f) ^ (!e & g))
+                .wrapping_add(K[t])
+                .wrapping_add(w[t]);
+            let t2 = (a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22))
+                .wrapping_add((a & b) ^ (a & c) ^ (b & c));
+            v = [t1.wrapping_add(t2), a, b, c, d.wrapping_add(t1), e, f, g];
+        }
+        for (word, add) in hash.iter_mut().zip(v) {
+            *word = word.wrapping_add(add);
+        }
+    }
+    let mut digest = [0; 32];
+    for (bytes, word) in digest.chunks_mut(4).zip(hash) {
+        bytes.copy_from_slice(&word.to_be_bytes());
+    }
+    digest
 }
 
 /// Natural (row-major) position of each zigzag index (T.81 Figure A.6).
@@ -1112,6 +1266,125 @@ pub(crate) mod tests {
     }
 
     /// 1×1 grey baseline JPEG (libjpeg output).
+    /// A synthetic 300-byte stand-in for a known profile: the test build
+    /// admits it beside the real sRGB profiles, whose bytes are not stored.
+    fn test_profile() -> Vec<u8> {
+        (0..300u32).map(|i| (i * 7 + 3) as u8).collect()
+    }
+    pub(super) const TEST_PROFILE: (usize, [u8; 32]) = (
+        300,
+        [
+            0x04, 0x77, 0x3f, 0x87, 0x26, 0xc8, 0x1c, 0xaf, 0xcf, 0xa1, 0xa0, 0x9a, 0x82, 0x66,
+            0x4b, 0x98, 0xb0, 0x0d, 0x20, 0x21, 0x03, 0x1a, 0x17, 0x15, 0xbc, 0xa1, 0x15, 0x4f,
+            0x2d, 0xad, 0x34, 0x72,
+        ],
+    );
+
+    #[test]
+    fn sha256_matches_fips_180_examples() {
+        let hex = |digest: [u8; 32]| {
+            digest
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>()
+        };
+        assert_eq!(
+            hex(sha256(b"abc")),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_eq!(
+            hex(sha256(
+                b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"
+            )),
+            "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"
+        );
+        assert_eq!(
+            hex(sha256(b"")),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        assert_eq!(sha256(&test_profile()), TEST_PROFILE.1);
+    }
+
+    // The profile split into APP2 chunks (sequence, count, bytes),
+    // inserted after SOI in the given order.
+    fn jpeg_with_icc(chunks: &[(u8, u8, &[u8])]) -> Vec<u8> {
+        let mut out = JPEG_1X1[..2].to_vec();
+        for &(sequence, count, data) in chunks {
+            out.extend([0xff, 0xe2]);
+            out.extend(((data.len() + 16) as u16).to_be_bytes());
+            out.extend(b"ICC_PROFILE\0");
+            out.extend([sequence, count]);
+            out.extend(data);
+        }
+        out.extend(&JPEG_1X1[2..]);
+        out
+    }
+
+    #[test]
+    fn rejects_impossible_icc_before_decoding_pixels() {
+        let oversized = vec![0; SRGB_PROFILES.iter().map(|profile| profile.0).max().unwrap() + 1];
+        for chunks in [
+            vec![(0, 1, &[][..])],
+            vec![(1, 0, &[][..])],
+            vec![(2, 1, &[][..])],
+            vec![(1, 1, &[][..]), (1, 1, &[][..])],
+            vec![(1, 2, &[][..]), (2, 3, &[][..])],
+            vec![(1, 1, oversized.as_slice())],
+        ] {
+            // Invalid ICC metadata must reject before the valid JPEG's pixel
+            // budget is consulted, preventing resource amplification first.
+            let mut pixels = 0;
+            assert_eq!(
+                decode(&jpeg_with_icc(&chunks), &mut pixels),
+                Err(unsupported("image-colour"))
+            );
+        }
+    }
+
+    #[test]
+    fn admits_only_known_jpeg_colour_profiles() {
+        let with = jpeg_with_icc;
+        let profile = test_profile();
+        let (head, tail) = profile.split_at(120);
+        let colour = Err(unsupported("image-colour"));
+        // The exact profile, in one chunk or in two in either order.
+        assert_eq!(dec(&with(&[(1, 1, &profile)])), Ok("image/jpeg"));
+        assert_eq!(dec(&with(&[(1, 2, head), (2, 2, tail)])), Ok("image/jpeg"));
+        assert_eq!(dec(&with(&[(2, 2, tail), (1, 2, head)])), Ok("image/jpeg"));
+        // One byte altered, truncated, or extended.
+        let mut altered = profile.clone();
+        altered[150] ^= 1;
+        assert_eq!(dec(&with(&[(1, 1, &altered)])), colour);
+        assert_eq!(dec(&with(&[(1, 1, &profile[..299])])), colour);
+        assert_eq!(
+            dec(&with(&[(1, 1, &[&profile[..], &[0]].concat())])),
+            colour
+        );
+        // Chunks reassembled out of sequence order would match the bytes.
+        assert_eq!(dec(&with(&[(2, 2, head), (1, 2, tail)])), colour);
+        // A missing, duplicated, zero-numbered or overcounted chunk, or
+        // counts that disagree.
+        assert_eq!(dec(&with(&[(1, 2, &profile)])), colour);
+        assert_eq!(dec(&with(&[(1, 1, head), (1, 1, tail)])), colour);
+        assert_eq!(dec(&with(&[(0, 1, &profile)])), colour);
+        assert_eq!(dec(&with(&[(2, 1, &profile)])), colour);
+        assert_eq!(dec(&with(&[(1, 2, head), (2, 3, tail)])), colour);
+        assert_eq!(
+            dec(&with(&[(1, 3, head), (2, 3, tail), (2, 3, &[])])),
+            colour
+        );
+        // A chunk without its sequence number and count.
+        let bare = [
+            &JPEG_1X1[..2],
+            b"\xff\xe2\x00\x0eICC_PROFILE\x00",
+            &JPEG_1X1[2..],
+        ]
+        .concat();
+        assert_eq!(dec(&bare), colour);
+        // The shipped table holds the 3,144-byte sRGB IEC61966-2.1 profile.
+        assert_eq!(SRGB_PROFILES[0].0, 3144);
+    }
+
     const JPEG_1X1: [u8; 159] = [
         0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0x01, 0x01, 0x00, 0x00,
         0x01, 0x00, 0x01, 0x00, 0x00, 0xff, 0xdb, 0x00, 0x43, 0x00, 0x10, 0x0b, 0x0c, 0x0e, 0x0c,

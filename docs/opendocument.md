@@ -91,8 +91,11 @@ Currently admitted:
   aligned at their start, end or centre, the level's character style and
   bullet face, and a tab, space or nothing after the label. Pictures as
   bullets are admitted when the package holds them as PNG, GIF or baseline
-  JPEG files that decode completely, without colour profiles, rotation or
-  animation, placed in the middle of their line, no taller than the font
+  JPEG files that decode completely, without rotation or animation.
+  JPEG additionally admits the exact known 3,144-byte sRGB IEC61966-2.1
+  profiles with perceptual or media-relative colorimetric rendering intent;
+  other JPEG profiles and all PNG/GIF colour profiles remain unsupported.
+  Pictures are placed in the middle of their line, no taller than the font
   size of the paragraph's first character and followed by a tab or nothing. LibreOffice's other number formats, headings
   in lists, a second sublist within one item, empty labelled paragraphs,
   decorated labels, labels that could wrap and labelled paragraphs that are
