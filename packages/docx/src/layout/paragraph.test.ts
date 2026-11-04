@@ -2672,16 +2672,13 @@ describe('planLine visual geometry', () => {
     if (placement?.kind !== 'text') throw new Error('expected retained text placement');
 
     expect(placement.range).toEqual({ start: 246, end: 250 });
-    expect(placement.paintOps.map((operation) => operation.range)).toEqual([
-      { start: 246, end: 248 },
-      { start: 248, end: 249 },
-      { start: 249, end: 250 },
-    ]);
-    expect(placement.paintOps.map((operation) => operation.text)).toEqual([
-      'نص',
-      ' ',
-      ' ',
-    ]);
+    // Packet count is not source ownership: consecutive expanded spaces may
+    // share one zero-ink operation, but every UTF-16 unit must still be owned.
+    expect(placement.paintOps.map(operation => operation.text).join('')).toBe(value);
+    const covered = placement.paintOps.flatMap(operation =>
+      Array.from({ length: operation.range.end - operation.range.start }, (_, offset) => operation.range.start + offset));
+    expect(covered).toEqual([246, 247, 248, 249]);
+    for (const cluster of placement.clusters) expect(cluster.advancePt).toBeGreaterThanOrEqual(0);
   });
 
   it('shifts cluster-aligned vertical paint operations during internal justification', () => {

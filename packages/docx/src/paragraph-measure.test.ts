@@ -11,11 +11,14 @@ import {
   type WrapOracle,
 } from './paragraph-measure.js';
 import { measureParagraphIntrinsicWidth } from './layout/frame.js';
+import { paragraphLayoutFromMeasurement } from './layout/paragraph.js';
+import { paragraphAcquisitionInput } from './parser-model.js';
+import { createLayoutServices } from './layout-runtime.js';
 import { createFontResolver } from './layout/font-service.js';
 import { createTextLayoutService } from './layout/text.js';
 import type { ParagraphLayoutContext } from './layout-context.js';
 import type { LayoutTextSeg } from './line-layout.js';
-import type { DocParagraph, DocxTextRun, FieldRun, ImageRun } from './types.js';
+import type { DocParagraph, DocxDocumentModel, DocxTextRun, FieldRun, ImageRun } from './types.js';
 
 function makeContext(ascentRatio = 0.8, descentRatio = 0.2): CanvasRenderingContext2D {
   let font = '10px serif';
@@ -1420,7 +1423,7 @@ describe('float gap admission by placement', () => {
       const measured = measureParagraph(paragraph({ runs }), layoutContext({ spaceBeforePt: 0, baseRtl: rtl }),
         placement({ startYPt: 0, maximumYPt: 2000, wrap: createFloatWrapOracle([obstacle], gapReference(rtl)) }),
         measurer, environment());
-      const lines = placedGeometry(measured);
+      const lines = retainedGeometry(measured, runs, rtl);
       const label = `tall case ${index}: ${JSON.stringify({ obstacle, words, rtl })}`;
       expect(bandViolation(lines, obstacle, rtl), label).toBeNull();
       expect(physicalViolation(lines, rtl), label).toBeNull();
@@ -1494,7 +1497,7 @@ interface PlacedLine {
   readonly physical: number | undefined;
   /** Allocated advance of the physical line (its probed band height). */
   readonly height: number;
-  readonly segments: readonly Readonly<{ text: string | null; width: number; visible: number }>[];
+  readonly segments: readonly Readonly<{ text: string | null; width: number; visible: number; startPt?: number }>[];
 }
 
 function placedGeometry(measured: ReturnType<typeof measureParagraph>): PlacedLine[] {
@@ -1514,6 +1517,59 @@ function placedGeometry(measured: ReturnType<typeof measureParagraph>): PlacedLi
   }));
 }
 
+/** Containment observes the same retained placement consumed by paint. The
+ * logical measured stream alone cannot reconstruct bidi space ownership. */
+function retainedGeometry(
+  measured: ReturnType<typeof measureParagraph>, runs: DocParagraph['runs'], rtl = false,
+): PlacedLine[] {
+  const documentParagraph = paragraph({ runs, bidi: rtl });
+  const model: DocxDocumentModel = {
+    body: [{ type: 'paragraph', ...documentParagraph }],
+    section: { pageWidth: 200, pageHeight: 2000, marginTop: 0, marginBottom: 0,
+      marginLeft: 0, marginRight: 0, headerDistance: 0, footerDistance: 0,
+      titlePage: false, evenAndOddHeaders: false },
+    headers: { default: null, first: null, even: null },
+    footers: { default: null, first: null, even: null },
+  };
+  const source = { story: 'body', storyInstance: 'body', path: [0] } as const;
+  const input = paragraphAcquisitionInput(documentParagraph, source);
+  const context = layoutContext({ spaceBeforePt: 0, baseRtl: rtl });
+  const env = environment({ compatibilityMode: 15,
+    layoutServices: createLayoutServices(model, { measureContext: makeContext() }) });
+  const acquired = measureParagraph(input, context, measured.placement, measurer, env);
+  const retained = paragraphLayoutFromMeasurement(input, {
+    id: 'containment', source, flowDomainId: 'body', ordinaryFlow: true,
+    context, placement: measured.placement, measurer, environment: env, exclusions: [],
+  }, acquired);
+  return retained.lines.map((line, index) => {
+    const fragments = line.wrapFragments ?? [line.wrapBounds ?? line.bounds];
+    const left = Math.min(...fragments.map(rect => rect.xPt));
+    const right = Math.max(...fragments.map(rect => rect.xPt + rect.widthPt));
+    return {
+      top: line.bounds.yPt, left, width: right - left,
+      physical: index, height: line.advancePt,
+      segments: line.placements.flatMap<PlacedLine['segments'][number]>(item => {
+        if (item.kind === 'text') {
+          const visible = item.clusters.filter(cluster => /\S/u.test(item.text.slice(
+            cluster.range.start - item.range.start, cluster.range.end - item.range.start,
+          )));
+          if (!visible.length) return [];
+          const startPt = item.origin.xPt + Math.min(...visible.map(cluster => cluster.offset.xPt));
+          // The deterministic canvas gives each scalar 0.5em of glyph ink.
+          // A retained cluster advance also includes tracking/fitText pitch,
+          // which is not ink and must not make this oracle invent overlap.
+          const endPt = item.origin.xPt + Math.max(...visible.map(cluster => cluster.offset.xPt
+            + [...item.text.slice(cluster.range.start - item.range.start, cluster.range.end - item.range.start)].length
+              * item.fontSizePt * 0.5 * (item.characterScale ?? 1)));
+          return [{ text: item.text, width: item.advancePt, startPt, visible: endPt - startPt }];
+        }
+        if (item.kind !== 'resource' && item.kind !== 'drawing') return [];
+        return [{ text: null, width: item.advancePt, startPt: item.bounds.xPt, visible: item.bounds.widthPt }];
+      }),
+    };
+  });
+}
+
 /** Every visible advance stays inside the paragraph band and outside the
  * exclusion, tested on the line band the solver probed. */
 function bandViolation(lines: readonly PlacedLine[], obstacle: FloatRect, rtl: boolean): string | null {
@@ -1522,8 +1578,8 @@ function bandViolation(lines: readonly PlacedLine[], obstacle: FloatRect, rtl: b
     const total = line.segments.reduce((sum, segment) => sum + segment.width, 0);
     let pen = line.left + (rtl ? line.width - total : 0);
     for (const segment of line.segments) {
-      const start = pen;
-      const end = pen + segment.visible;
+      const start = segment.startPt ?? pen;
+      const end = start + segment.visible;
       pen += segment.width;
       if (!(segment.visible > 1e-9)) continue;
       // The full paragraph band keeps its established edge rules (§17.3.1.21
@@ -1575,7 +1631,7 @@ it('keeps randomized content outside square and tight floats as physical lines',
       layoutContext({ spaceBeforePt: 0, baseRtl: item.rtl }),
       placement({ startYPt: 0, wrap: createFloatWrapOracle([item.float], gapReference(item.rtl)) }),
       measurer, environment({ compatibilityMode: 15 }));
-    const lines = placedGeometry(measured);
+    const lines = retainedGeometry(measured, item.runs, item.rtl);
     const label = `case ${index}: ${JSON.stringify(item)}`;
     expect(bandViolation(lines, item.float, item.rtl), label).toBeNull();
     expect(physicalViolation(lines, item.rtl), label).toBeNull();
@@ -1676,7 +1732,7 @@ it('converges mixed-height gap lines beside stacked square exclusions', () => {
     .map((fontSize) => ({ type: 'text', ...textRun('word ', { fontSize }) }));
   const obstacles = [stackedObstacle(80, 120, 0, 115), stackedObstacle(40, 190, 45, 200)];
   const measured = stackedLines(runs, obstacles);
-  const lines = placedGeometry(measured);
+  const lines = retainedGeometry(measured, runs);
   for (const obstacle of obstacles) expect(bandViolation(lines, obstacle, false)).toBeNull();
   expect(physicalViolation(lines, false)).toBeNull();
   expect(measuredTextSequence(measured).join('')).toBe('word '.repeat(5));
@@ -1707,7 +1763,7 @@ it('keeps mixed sizes, pictures and ruby beside stacked exclusions convergent', 
     const rtl = random(4) === 0;
     const label = `stacked case ${index}: ${JSON.stringify({ runs, obstacles, rtl })}`;
     const measured = stackedLines(runs, obstacles, rtl);
-    const lines = placedGeometry(measured);
+    const lines = retainedGeometry(measured, runs, rtl);
     for (const obstacle of obstacles) expect(bandViolation(lines, obstacle, rtl), label).toBeNull();
     expect(physicalViolation(lines, rtl), label).toBeNull();
   }

@@ -297,7 +297,15 @@ describe('first-line indents beside floats through the DOCX parser', () => {
     expect(paragraph.lines.length).toBeGreaterThan(1);
     expect(line?.bounds.widthPt).toBeLessThanOrEqual(268);
     if (expectedStart !== undefined) expect(line?.bounds.xPt).toBeCloseTo(expectedStart, 8);
-    if (expectedEnd !== undefined) expect((line?.bounds.xPt ?? 0) + (line?.bounds.widthPt ?? 0)).toBeCloseTo(expectedEnd, 8);
+    if (expectedEnd !== undefined) {
+      // A source-owned line-end space can stand beyond the fitted band; the
+      // float constraint belongs to visible retained clusters.
+      const visibleRight = Math.max(...(line?.placements ?? []).flatMap(item => item.kind !== 'text' ? []
+        : item.clusters.filter(cluster => /\S/u.test(item.text.slice(
+          cluster.range.start - item.range.start, cluster.range.end - item.range.start,
+        ))).map(cluster => item.origin.xPt + cluster.offset.xPt + cluster.advancePt)));
+      expect(visibleRight).toBeCloseTo(expectedEnd, 8);
+    }
     if (continuationStart !== undefined) expect(paragraph.lines[1]?.bounds.xPt).toBeCloseTo(continuationStart, 8);
   });
 });
