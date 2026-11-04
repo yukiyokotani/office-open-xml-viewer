@@ -409,13 +409,8 @@ export function measureParagraph(
     }
   }
 
-  // Observed Word 16 mode-15 auto-single root-body controls: the resolved
-  // outer run supplies a minimum natural advance. DrawingML places its extra
-  // above the object, preserving real suffix descent; static VML textboxes
-  // keep their top and reserve it below. This is not specified by §17.3.1.33.
-  // Tested run8/20, object8/40, TNR/Arial; mixed suffix is measured only for
-  // DrawingML. Unknown/public origins, relative VML and WordArt retain their
-  // old allocation. Auto multiples keep the independently measured rule above.
+  // WORD_INLINE_PICTURE_AUTO_LEADING owns this source-provenance minimum.
+  // Keep its single-spacing admission separate from automatic multiples above.
   if (context.lineSpacing?.rule === 'auto' && context.lineSpacing.value === 1
     && environment.inlineObjectRunLeadingAdmitted === true
     && environment.compatibilityMode === 15 && !paragraph.numbering && !paragraph.framePr
