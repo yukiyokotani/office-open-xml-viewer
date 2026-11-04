@@ -468,6 +468,8 @@ export function resolveParagraphLayoutContext(
         && !isSectionLineGrid(section.grid.kind)
         && !characterGridActive,
       insideTableCell,
+      paragraph.kinsoku === false,
+      settings.compat.compatibilityMode,
     )),
     ...(paragraph.wordWrap === false ? { wordWrap: false as const } : {}),
     ...(paragraph.endsAtHardBreak === true ? { endsAtHardBreak: true as const } : {}),

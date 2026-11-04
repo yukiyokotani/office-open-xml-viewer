@@ -6570,6 +6570,8 @@ fn parse_paragraph_cond_at_depth_with_diagnostics(
         auto_space_dn: base_para.auto_space_dn.filter(|enabled| !enabled),
         // ECMA-376 §17.3.1.45: omission means wordWrap is on.
         word_wrap: base_para.word_wrap.filter(|enabled| !enabled),
+        // ECMA-376 §17.3.1.16: omission means kinsoku is on.
+        kinsoku: base_para.kinsoku.filter(|enabled| !enabled),
         ends_at_hard_break: None,
         // ECMA-376 §17.3.1.1: omission resolves through the paragraph style
         // hierarchy and ultimately defaults to true.
@@ -21911,6 +21913,28 @@ mod rtl_tests {
             })
             .expect("paragraph present");
         assert!(para.overflow_punct);
+    }
+
+    /// ECMA-376 §17.3.1.16 — only a resolved `w:kinsoku w:val="0"` is carried.
+    #[test]
+    fn kinsoku_off_is_carried_and_omission_stays_absent() {
+        let paragraphs = |inner: &str| -> Vec<Option<bool>> {
+            body_from(inner)
+                .iter()
+                .filter_map(|e| match e {
+                    BodyElement::Paragraph(p) => Some(p.kinsoku),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(
+            paragraphs(
+                r#"<w:p><w:pPr><w:kinsoku w:val="0"/></w:pPr><w:r><w:t>a</w:t></w:r></w:p>
+                   <w:p><w:pPr><w:kinsoku/></w:pPr><w:r><w:t>b</w:t></w:r></w:p>
+                   <w:p><w:r><w:t>c</w:t></w:r></w:p>"#
+            ),
+            vec![Some(false), None, None]
+        );
     }
 
     /// ECMA-376 §17.3.1.7 — a `between` border is a first-class pBdr edge: a

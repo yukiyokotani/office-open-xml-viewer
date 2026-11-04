@@ -1248,6 +1248,10 @@ pub struct DocParagraph {
     /// `Some(false)` when disabled; omitted (`None`) means the default, on.
     #[serde(rename = "wordWrap", skip_serializing_if = "Option::is_none", default)]
     pub word_wrap: Option<bool>,
+    /// ECMA-376 §17.3.1.16 `w:kinsoku` resolved through the style cascade:
+    /// `Some(false)` when disabled; omitted (`None`) means the default, on.
+    #[serde(rename = "kinsoku", skip_serializing_if = "Option::is_none", default)]
+    pub kinsoku: Option<bool>,
     /// The paragraph piece ends where its source paragraph has a page or column
     /// break (`w:br w:type="page|column"`, §17.3.3.1), which normalization
     /// turns into a body-level break after this piece. `Some(true)` only.

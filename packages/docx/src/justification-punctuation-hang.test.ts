@@ -6,7 +6,7 @@ import { acquireShapeTextBoxLayout } from './layout/paragraph.js';
 import { normalizeInternalDocumentModel, textBoxAcquisitionInput } from './parser-model.js';
 import { layoutDocument } from './document-layout.js';
 import type { ParagraphLayoutContext } from './layout-context.js';
-import { wordCjkClosingMarkHangRefused } from './layout/line-compatibility.js';
+import { wordCjkClosingMarkHang, wordCjkClosingMarkHangRefused } from './layout/line-compatibility.js';
 import type { LineLayout, ParagraphLayout, TextPlacement } from './layout/types.js';
 import type {
   BodyElement, CellElement, DocParagraph, DocSettings, DocTable, DocTableCell, DocTableRow,
@@ -422,5 +422,69 @@ describe('word-justification-punctuation-hang', () => {
       return kanaCount(block.lines[0]!);
     };
     for (const textVert of [null, 'vert', 'vert270', 'eaVert']) expect(boxedKana(textVert), String(textVert)).toBe(10);
+  });
+});
+
+// #2079: paragraph w:kinsoku w:val="0" (§17.3.1.16), rows N2 of the same
+// controls. Where Word refuses the hang (mode 15, the kashida types and
+// thaiDistribute) the mark neither hangs nor is pushed: it starts line 2.
+describe('word-justification-punctuation-hang with paragraph kinsoku off', () => {
+  const kinsokuOff = (runs: DocParagraph['runs'], alignment: string): BodyElement =>
+    ({ ...para(runs, 'left'), alignment, kinsoku: false }) as BodyElement;
+  const overflowing = (alignment: string) =>
+    kinsokuOff([textRun(KANA.slice(0, 36) + '。らりるれろ')], alignment);
+  const FULL_WIDTH = ['left', 'both', 'distribute', 'lowKashida', 'thaiDistribute'];
+
+  it('mode 15: the mark starts line 2 under every measured alignment', () => {
+    for (const alignment of FULL_WIDTH) {
+      const [first, next] = lines(overflowing(alignment), { compatibilityMode: 15 });
+      expect(text(first!), alignment).toBe(KANA.slice(0, 36));
+      expect(text(next!).startsWith('。らりるれろ'), alignment).toBe(true);
+    }
+  });
+
+  it('before mode 15: left, both and distribute still hang the mark', () => {
+    for (const settings of [{}, { compatibilityMode: 14 }] as DocSettings[]) {
+      for (const alignment of ['left', 'both', 'distribute']) {
+        const [hung, next] = lines(overflowing(alignment), settings);
+        expect(text(hung!), alignment).toBe(KANA.slice(0, 36) + '。');
+        expect(text(next!), alignment).toBe('らりるれろ');
+      }
+    }
+  });
+
+  it('before mode 15: the kashida types and thaiDistribute neither hang nor push', () => {
+    for (const alignment of ['lowKashida', 'thaiDistribute']) {
+      const [first, next] = lines(overflowing(alignment), { compatibilityMode: 14 });
+      expect(text(first!), alignment).toBe(KANA.slice(0, 36));
+      expect(text(next!).startsWith('。'), alignment).toBe(true);
+    }
+    for (const [alignment, fit] of [['mediumKashida', 32], ['highKashida', 28]] as const) {
+      for (const settings of [{ compatibilityMode: 14 }, { compatibilityMode: 15 }] as DocSettings[]) {
+        const body = kinsokuOff([textRun(KANA.slice(0, fit) + '。らりるれろ')], alignment);
+        const [first, next] = lines(body, settings);
+        expect(text(first!), alignment).toBe(KANA.slice(0, fit));
+        expect(text(next!).startsWith('。'), alignment).toBe(true);
+      }
+    }
+  });
+
+  it('pulls nothing down across a run seam', () => {
+    const body = kinsokuOff([textRun(KANA.slice(0, 36)), textRun('。', 'FF0000'), textRun('らり')], 'both');
+    const [first, next] = lines(body, { compatibilityMode: 15 });
+    expect(text(first!)).toBe(KANA.slice(0, 36));
+    expect(text(next!).startsWith('。')).toBe(true);
+  });
+
+  it('resolves the policy by mode and container; kinsoku on keeps the previous policy', () => {
+    expect(wordCjkClosingMarkHang('both', true, false, true, 15)).toBe('break');
+    expect(wordCjkClosingMarkHang('both', true, false, true, 14)).toBe('one');
+    expect(wordCjkClosingMarkHang('left', true, false, true, undefined)).toBe('one');
+    expect(wordCjkClosingMarkHang('left', true, true, true, 14)).toBe('break');
+    expect(wordCjkClosingMarkHang('highKashida', true, false, true, 12)).toBe('break');
+    expect(wordCjkClosingMarkHang('center', true, false, true, 15)).toBeUndefined();
+    expect(wordCjkClosingMarkHang('both', false, false, true, 15)).toBeUndefined();
+    expect(wordCjkClosingMarkHang('both', true, false, false, 15)).toBe('one');
+    expect(wordCjkClosingMarkHang('thaiDistribute', true, false, false, 15)).toBe('none');
   });
 });

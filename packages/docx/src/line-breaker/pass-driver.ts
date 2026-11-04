@@ -121,7 +121,12 @@ export interface LineBreakerPassInput {
  * explicit pass state to the named measurement, fit, tab, and break operations.
  * The decisions and mutations live in those operations and the iterator.
  */
-export function runLineBreakerPass(input: LineBreakerPassInput): LayoutLine[] {
+export function runLineBreakerPass(sourceInput: LineBreakerPassInput): LayoutLine[] {
+  // WORD_JUSTIFICATION_PUNCTUATION_HANG 'break': the paragraph's own kinsoku
+  // off (§17.3.1.16) is honoured only in this measured class.
+  const input = sourceInput.cjkClosingMarkHang === 'break'
+    ? { ...sourceInput, kinsoku: { ...sourceInput.kinsoku, enabled: false } }
+    : sourceInput;
   const {
     ctx,
     segs,
