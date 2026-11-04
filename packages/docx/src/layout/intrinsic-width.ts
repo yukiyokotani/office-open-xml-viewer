@@ -2,6 +2,7 @@ import { textBreakWindow, textBreakOffsets } from '../line-breaker/text-break-wi
 import { LineMeasurementAdapter, kernedSpaceSeamIdentity } from '../line-breaker/measurement-adapter.js';
 import { condensedSpacingMayFloor, slicedTextMetadata } from '../line-breaker/advance.js';
 import { optionalHyphenBreakAllowed } from '../line-breaker/optional-hyphens.js';
+import { tabAlignmentRole, wordTabGlueUnit } from '../line-breaker/tabs.js';
 import { graphemeClusterOffsets } from '@silurus/ooxml-core';
 import type { DocTableCell } from '../types.js';
 import type { ParagraphLayoutContext } from '../layout-context.js';
@@ -524,8 +525,53 @@ function minimumTextAtomWidthPt(
   context: ParagraphLayoutContext,
   measurer: TextMeasurer,
 ): number {
-  const characterGrid = paragraphCharacterGrid(context);
   let maximumPt = 0;
+  visitTextAtomWidths(segments, context, measurer, (widthPt) => {
+    maximumPt = Math.max(maximumPt, widthPt);
+    return false;
+  });
+  return maximumPt;
+}
+
+/** WORD_TAB_GLUED_TO_FOLLOWING_TEXT: per tab in source order, the width of
+ * the word glued to it, or undefined when the text after it is outside the
+ * rule's measured scope. The scope is judged on the segments bounded layout breaks
+ * (`built`), before the intrinsic-only run merge erases formatting seams, and
+ * only on the first word after the tab (wordTabGlueUnit, as placement). */
+function tabGlueWidthsPt(
+  built: readonly LayoutSeg[],
+  merged: readonly LayoutSeg[],
+  context: ParagraphLayoutContext,
+  measurer: TextMeasurer,
+): readonly (number | undefined)[] {
+  const snapToChars = paragraphCharacterGrid(context)?.type === 'snapToChars';
+  const widths: (number | undefined)[] = [];
+  for (let index = 0; index < built.length; index += 1) {
+    const segment = built[index]!;
+    if (!('isTab' in segment)) continue;
+    let widthPt: number | undefined;
+    if (!segment.ptab && wordTabGlueUnit(built[index + 1], built[index + 2], snapToChars, context.baseRtl)) {
+      widthPt = 0;
+      visitTextAtomWidths([built[index + 1]!], context, measurer, (atomPt) => {
+        widthPt = atomPt;
+        return true;
+      });
+    }
+    widths.push(widthPt);
+  }
+  // The merge keeps every tab; if that ever changed, apply no glue.
+  return widths.length === merged.filter((segment) => 'isTab' in segment).length ? widths : [];
+}
+
+/** Visit every unbreakable text atom's width in source order until `visit`
+ * returns true. */
+function visitTextAtomWidths(
+  segments: readonly LayoutSeg[],
+  context: ParagraphLayoutContext,
+  measurer: TextMeasurer,
+  visit: (widthPt: number) => boolean,
+): void {
+  const characterGrid = paragraphCharacterGrid(context);
   for (let segmentIndex = 0; segmentIndex < segments.length; segmentIndex += 1) {
     const segment = segments[segmentIndex];
     if (!('text' in segment) || segment.text.length === 0) continue;
@@ -582,8 +628,8 @@ function minimumTextAtomWidthPt(
         ends.sort((left, right) => left - right);
         let atomStart = trimmedStart;
         for (const atomEnd of new Set(ends)) {
-          maximumPt = Math.max(maximumPt, measureTextRange(
-            pieces, joinedText, atomStart, atomEnd, measurer, characterGrid, optionalBreaks.get(atomEnd)));
+          if (visit(measureTextRange(
+            pieces, joinedText, atomStart, atomEnd, measurer, characterGrid, optionalBreaks.get(atomEnd)))) return;
           atomStart = atomEnd;
         }
         continue;
@@ -620,21 +666,17 @@ function minimumTextAtomWidthPt(
       }
       if (atom) atoms.push(atom);
       for (const unbreakable of atoms) {
-        maximumPt = Math.max(
-          maximumPt,
-          measureTextRange(
-            pieces,
-            joinedText,
-            unbreakable.start,
-            unbreakable.end,
-            measurer,
-            characterGrid,
-          ),
-        );
+        if (visit(measureTextRange(
+          pieces,
+          joinedText,
+          unbreakable.start,
+          unbreakable.end,
+          measurer,
+          characterGrid,
+        ))) return;
       }
     }
   }
-  return maximumPt;
 }
 
 function logicalLineInterval(
@@ -666,7 +708,7 @@ export function measureParagraphIntrinsicWidths(
   }
   if (maximumWidthPt === 0) return { minWidthPt: 0, maxWidthPt: 0 };
 
-  const segments = mergeCompatibleTextSegments(buildSegments(paragraph.runs, {
+  const builtSegments = buildSegments(paragraph.runs, {
     ...environment,
     lineSpacing: context.lineSpacing,
     lineGridActive: context.lineGrid.active,
@@ -674,7 +716,9 @@ export function measureParagraphIntrinsicWidths(
     paragraphRtl: context.baseRtl,
     autoSpaceDE: paragraph.autoSpaceDE,
     autoSpaceDN: paragraph.autoSpaceDN,
-  }), paragraphCharacterGrid(context));
+  });
+  const segments = mergeCompatibleTextSegments(builtSegments, paragraphCharacterGrid(context));
+  const glueWidthsPt = tabGlueWidthsPt(builtSegments, segments, context, measurer);
   const paragraphWidthPt = Math.max(
     1,
     maximumWidthPt - context.physicalIndentLeftPt - context.physicalIndentRightPt,
@@ -727,6 +771,7 @@ export function measureParagraphIntrinsicWidths(
     maximumRightPt = Math.max(maximumRightPt, markerInterval.endPt);
   }
   let minimumAtomPt = minimumTextAtomWidthPt(segments, context, measurer);
+  let tabOrdinal = 0;
   for (const line of lines) {
     let penPt = 0;
     const lineWidthPt = line.segments.reduce((sum, segment) => sum + segment.measuredWidth, 0);
@@ -737,9 +782,18 @@ export function measureParagraphIntrinsicWidths(
       } else if ('math' in segment) {
         minimumAtomPt = Math.max(minimumAtomPt, segment.measuredWidth);
       } else if ('isTab' in segment) {
+        const glueWidthPt = glueWidthsPt[tabOrdinal++];
         minimumAtomPt = Math.max(
           minimumAtomPt,
-          segment.resolvedAlignment === 'left' ? penPt : lineWidthPt,
+          // Within WORD_TAB_GLUED_TO_FOLLOWING_TEXT's scope a leading
+          // (left/start, either direction) stop needs the room up to its stop
+          // plus the word glued to it. Outside it the earlier minimum stays:
+          // a left-to-right literal left stop needs its pen position, every
+          // other tab its whole line.
+          glueWidthPt !== undefined && segment.resolvedAlignment !== undefined
+            && tabAlignmentRole(segment.resolvedAlignment) === 'leading'
+            ? penPt + glueWidthPt
+            : !context.baseRtl && segment.resolvedAlignment === 'left' ? penPt : lineWidthPt,
         );
       }
     }

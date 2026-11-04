@@ -1567,12 +1567,14 @@ function physicalViolation(lines: readonly PlacedLine[], rtl: boolean): string |
   return null;
 }
 
+// Mode 15: before it WORD_TAB_DISPLACED_READING_FRAME lets a complete tab cell
+// overflow a single float window on purpose.
 it('keeps randomized content outside square and tight floats as physical lines', () => {
   for (const [index, item] of atomicFloatPropertyCases().entries()) {
     const measured = measureParagraph(paragraph({ runs: item.runs }),
       layoutContext({ spaceBeforePt: 0, baseRtl: item.rtl }),
       placement({ startYPt: 0, wrap: createFloatWrapOracle([item.float], gapReference(item.rtl)) }),
-      measurer, environment());
+      measurer, environment({ compatibilityMode: 15 }));
     const lines = placedGeometry(measured);
     const label = `case ${index}: ${JSON.stringify(item)}`;
     expect(bandViolation(lines, item.float, item.rtl), label).toBeNull();
