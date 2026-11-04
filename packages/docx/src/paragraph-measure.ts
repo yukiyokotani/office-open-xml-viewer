@@ -622,6 +622,7 @@ export function measureParagraph(
       : false,
     wordJustifiedLineFit(paragraph.alignment, environment.compatibilityMode, context.baseRtl, context.wordWrap !== false,
       context.baseRtl ? context.physicalIndentLeftPt : context.physicalIndentRightPt + rightGridAdjustmentPt),
+    context.cjkClosingMarkHang,
   );
   if (lines.length === 0) return measureMarkOnly();
 

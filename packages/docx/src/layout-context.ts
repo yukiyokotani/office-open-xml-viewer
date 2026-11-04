@@ -13,6 +13,8 @@ import {
   wordAuthoredTabReplacesImplicitHangingStop,
   wordContainerAllowsGridRightIndentAdjustment,
   wordGridRightIndentAdjustmentPt,
+  wordCjkClosingMarkHang,
+  type CjkClosingMarkHang,
 } from './layout/line-compatibility.js';
 import type { NumberingMarkerGeometry } from './layout/numbering-marker.js';
 import type { SectionFlow } from './layout/types.js';
@@ -96,15 +98,51 @@ export interface StoryContext {
   readonly lineNumberingEligible: boolean;
   /** The story is laid out in a quarter-turned (vertical bodyPr) text box. */
   readonly quarterTurned?: boolean;
+  /**
+   * The one admission fact of WORD_JUSTIFICATION_PUNCTUATION_HANG: this story
+   * position is one Word was measured in, acquired in its section's own flow:
+   * the main body, a header or a footnote (top level), or a table cell of the
+   * main body whose authored text direction is horizontal (and so is every
+   * enclosing cell's). Only the main body's root story context and the header
+   * and footnote story roots carry it; entering a cell keeps it only in the
+   * main body and only while the cell is horizontal, an upright physical
+   * table in a vertical section drops it, and every other story (footers,
+   * endnotes, note separators, text boxes) and every fallback context starts
+   * without it, keeping the previous (v0.89) overflowPunct behaviour.
+   */
+  readonly closingMarkHangAdmitted?: true;
 }
 
-export function enterTableCellStoryContext(parent: StoryContext): StoryContext {
+/** Whether a table cell's authored text direction (§17.4.72) keeps the cell
+ * in horizontal flow: omitted or lrTb. Every other value, whether table
+ * acquisition rotates the cell or not, is outside the measured class. */
+export function tableCellFlowsHorizontally(
+  cell: Readonly<{ textDirection?: string | null }>,
+): boolean {
+  return cell.textDirection == null || cell.textDirection === 'lrTb';
+}
+
+/** `cellFlowsHorizontally`: tableCellFlowsHorizontally of the entered cell
+ * (and of every enclosing cell the parent context does not already state). */
+export function enterTableCellStoryContext(
+  parent: StoryContext,
+  cellFlowsHorizontally: boolean,
+): StoryContext {
   return {
     story: parent.story,
     containers: [...parent.containers, { kind: 'tableCell' }],
     lineNumberingEligible: false,
     ...(parent.quarterTurned ? { quarterTurned: true } : {}),
+    ...(parent.closingMarkHangAdmitted && parent.story === 'body' && cellFlowsHorizontally
+      ? { closingMarkHangAdmitted: true as const } : {}),
   };
+}
+
+/** The same story position without the hang admission. */
+export function withoutClosingMarkHangAdmission(story: StoryContext): StoryContext {
+  if (!story.closingMarkHangAdmitted) return story;
+  const { closingMarkHangAdmitted: _admitted, ...rest } = story;
+  return rest;
 }
 
 export interface LineGridPolicy {
@@ -149,6 +187,8 @@ export interface ParagraphLayoutContext {
   readonly defaultTabPt: number;
   /** ECMA-376 §17.3.1.21 — omission on the source paragraph resolves true. */
   readonly overflowPunct?: boolean;
+  /** WORD_JUSTIFICATION_PUNCTUATION_HANG; absent outside its measured scope. */
+  readonly cjkClosingMarkHang?: CjkClosingMarkHang;
   /** ECMA-376 §17.3.1.45 wordWrap; present only when disabled. */
   readonly wordWrap?: false;
   /** The paragraph piece ends at a page or column break of its source paragraph. */
@@ -259,6 +299,23 @@ function normalizeGridKind(type: string | null | undefined): SectionGridContext[
     default:
       return 'none';
   }
+}
+
+function withCjkClosingMarkHang(
+  policy: CjkClosingMarkHang | undefined,
+): { cjkClosingMarkHang?: CjkClosingMarkHang } {
+  return policy === undefined ? {} : { cjkClosingMarkHang: policy };
+}
+
+/** A paragraph context outside the measured class of
+ * WORD_JUSTIFICATION_PUNCTUATION_HANG (a compatibility text-box paragraph,
+ * or a cell paragraph whose cell leaves the class). */
+export function withoutCjkClosingMarkHang(
+  context: ParagraphLayoutContext,
+): ParagraphLayoutContext {
+  if (context.cjkClosingMarkHang === undefined) return context;
+  const { cjkClosingMarkHang: _policy, ...rest } = context;
+  return rest;
 }
 
 function isSectionLineGrid(kind: SectionGridContext['kind']): boolean {
@@ -395,6 +452,23 @@ export function resolveParagraphLayoutContext(
     kinsoku: settings.kinsoku,
     defaultTabPt: settings.defaultTabPt,
     overflowPunct: paragraph.overflowPunct !== false,
+    // word-justification-punctuation-hang, admitted only for the measured
+    // class: an ordinary (non-frame), left-to-right paragraph of an admitted
+    // story position (StoryContext.closingMarkHangAdmitted) in a horizontal,
+    // grid-free section, with overflowPunct on and a measured alignment. A
+    // table cell never hangs the mark.
+    ...withCjkClosingMarkHang(wordCjkClosingMarkHang(
+      paragraph.alignment,
+      story.closingMarkHangAdmitted === true
+        && paragraph.framePr == null
+        && paragraph.overflowPunct !== false
+        && !baseRtl
+        && section.textDirection === 'lrTb'
+        && section.sectionFlow === undefined
+        && !isSectionLineGrid(section.grid.kind)
+        && !characterGridActive,
+      insideTableCell,
+    )),
     ...(paragraph.wordWrap === false ? { wordWrap: false as const } : {}),
     ...(paragraph.endsAtHardBreak === true ? { endsAtHardBreak: true as const } : {}),
     mathDefJc: settings.mathDefJc,
