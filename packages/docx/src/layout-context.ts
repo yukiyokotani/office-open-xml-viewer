@@ -491,6 +491,7 @@ export function resolveParagraphLayoutContext(
       insideTableCell,
       paragraph.kinsoku === false,
       settings.compat.compatibilityMode,
+      settings.kinsoku.enabled,
     )),
     ...(paragraph.wordWrap === false ? { wordWrap: false as const } : {}),
     ...(paragraph.endsAtHardBreak === true ? { endsAtHardBreak: true as const } : {}),

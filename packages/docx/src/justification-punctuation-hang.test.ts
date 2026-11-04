@@ -104,6 +104,39 @@ describe('word-justification-punctuation-hang', () => {
     }
   });
 
+  it('pushes nonjustified closing marks only in the measured mode-15 kinsoku-on class', () => {
+    for (const alignment of ['left', 'center', 'right', 'start', 'end']) {
+      for (const mode of [undefined, 11, 12, 14, 15]) {
+        const [first, next] = lines(withAlignment(overflowing('。'), alignment), { compatibilityMode: mode });
+        expect(text(first!), `${alignment}/${mode}`).toBe(KANA.slice(0, mode === 15 ? 35 : 36) + (mode === 15 ? '' : '。'));
+        expect(text(next!).startsWith(mode === 15 ? KANA[35]! + '。' : 'らり'), `${alignment}/${mode}`).toBe(true);
+      }
+    }
+    for (const alignment of ['both', 'distribute']) {
+      expect(text(lines(withAlignment(overflowing('。'), alignment), { compatibilityMode: 15 })[0]!))
+        .toBe(KANA.slice(0, 36) + '。');
+    }
+  });
+
+  it('preserves paragraph-off, document-off and unmeasured-mode hanging behavior', () => {
+    for (const mode of [14, 15]) {
+      // A second closing mark distinguishes the old unmeasured center/right
+      // behavior from the newly admitted one-mark ON policy.
+      for (const alignment of ['center', 'right']) {
+        const body = { ...withAlignment(overflowing('。」'), alignment), kinsoku: false } as BodyElement;
+        expect(text(lines(body, { compatibilityMode: mode })[0]!)).toBe(KANA.slice(0, 36) + '。」');
+        expect(text(lines(withAlignment(overflowing('。」'), alignment), { compatibilityMode: mode, kinsoku: false })[0]!))
+          .toBe(KANA.slice(0, 36) + '。」');
+      }
+      expect(text(lines(overflowing('。'), { compatibilityMode: mode, kinsoku: false })[0]!))
+        .toBe(KANA.slice(0, 36) + '。');
+    }
+    for (const mode of [13, 16]) {
+      expect(text(lines(withAlignment(overflowing('。」'), 'center'), { compatibilityMode: mode })[0]!))
+        .toBe(KANA.slice(0, 36) + '。」');
+    }
+  });
+
   it('pushes at the kashida fit widths: 324 pt (mediumKashida) and 288 pt (highKashida)', () => {
     for (const settings of [{ compatibilityMode: 14 }, { compatibilityMode: 15 }] as DocSettings[]) {
       for (const [alignment, fit] of [['mediumKashida', 32], ['highKashida', 28]] as const) {
@@ -160,8 +193,8 @@ describe('word-justification-punctuation-hang', () => {
   }
 
   /** Kana on the first line of the one あ paragraph laid out for `body`. */
-  function firstLineKana(body: readonly BodyElement[], sectionProps: SectionProps = section): number {
-    const layout = layoutBodyModel(body, sectionProps, makeCtx(), {}, { compatibilityMode: 15 });
+  function firstLineKana(body: readonly BodyElement[], sectionProps: SectionProps = section, compatibilityMode = 15): number {
+    const layout = layoutBodyModel(body, sectionProps, makeCtx(), {}, { compatibilityMode });
     const found = paragraphsWithKana(layout.pages[0]);
     expect(found).toHaveLength(1);
     return kanaCount(found[0]!.lines[0]!);
@@ -210,8 +243,10 @@ describe('word-justification-punctuation-hang', () => {
     // A single 。 one slot past the cell edge: the body hangs it under both,
     // distribute and left; Word's cells push the character before it.
     const single = KANA.slice(0, 10) + '。らりる';
-    for (const alignment of ['both', 'distribute', 'left', 'lowKashida'] as const) {
-      expect(firstLineKana([tableOf([cellOf([cellPara([textRun(single)], alignment)])], null)]), alignment).toBe(9);
+    for (const mode of [14, 15]) {
+      for (const alignment of ['both', 'distribute', 'left', 'center', 'right', 'start', 'end', 'lowKashida'] as const) {
+        expect(firstLineKana([tableOf([cellOf([cellPara([textRun(single)], alignment)])], null)], section, mode), `${alignment}/${mode}`).toBe(9);
+      }
     }
   });
 
@@ -277,11 +312,11 @@ describe('word-justification-punctuation-hang', () => {
     }
   });
 
-  it('keeps the previous hang for centred and right-aligned paragraphs (unmeasured alignments)', () => {
+  it('limits pre-15 centered and right-aligned paragraphs to one hanging mark', () => {
     for (const alignment of ['center', 'right'] as const) {
-      const [first] = lines(withAlignment(overflowing('。」'), alignment), { compatibilityMode: 15 });
-      // The previous behaviour: nothing pushes the character before 。」.
-      expect(text(first!).startsWith(KANA.slice(0, 36) + '。'), alignment).toBe(true);
+      const [first, next] = lines(withAlignment(overflowing('。」'), alignment), { compatibilityMode: 14 });
+      expect(text(first!), alignment).toBe(KANA.slice(0, 35));
+      expect(text(next!).startsWith(KANA[35]! + '。」'), alignment).toBe(true);
     }
   });
 
