@@ -2623,12 +2623,42 @@ describe('planLine visual geometry', () => {
       },
     });
 
+    // A justified line widens only gaps after its last tab, soft-wrapped lines
+    // included (WORD_ALIGNED_TAB_CELL_FIT_BACK); 'b' alone offers none.
     expect(line.placements).toEqual([
       expect.objectContaining({ kind: 'text', text: 'a ', origin: { xPt: 0, yPt: 10 } }),
-      expect.objectContaining({ kind: 'tab', advancePt: 10, bounds: expect.objectContaining({ xPt: 40 }) }),
-      expect.objectContaining({ kind: 'text', text: 'b', origin: { xPt: 50, yPt: 10 } }),
+      expect.objectContaining({ kind: 'tab', advancePt: 10, bounds: expect.objectContaining({ xPt: 10 }) }),
+      expect.objectContaining({ kind: 'text', text: 'b', origin: { xPt: 20, yPt: 10 } }),
     ]);
     expect(() => stableFingerprint('planned-line', line)).not.toThrow();
+  });
+
+  // WORD_ALIGNED_TAB_CELL_FIT_BACK: a cell fitted with no gap takes the room
+  // its unjustified line leaves, up to the stop-aligned gap; a justified line
+  // that has gaps after the tab spreads them and keeps the gap empty.
+  it.each([
+    { alignment: 'left' as const, cellX: 35 },
+    { alignment: 'both' as const, cellX: 10 },
+  ])('resolves a fitted-back aligned tab gap under jc=$alignment', ({ alignment, cellX }) => {
+    const line = planLine({
+      paragraphXPt: 0, availableWidthPt: 60, alignment, baseRtl: false,
+      isFirstLine: false, isLastLine: false, stretchLastLine: false,
+      line: {
+        range: { start: 0, end: 7 }, topPt: 0, baselinePt: 10, advancePt: 12,
+        xOffsetPt: 0, availableWidthPt: 60, endsWithBreak: false,
+        segments: [
+          measuredText('a', 0, 10),
+          { kind: 'tab', range: { start: 1, end: 2 }, measuredWidthPt: 0, leader: 'none', fontSizePt: 10, alignedGapLimitPt: 25 },
+          measuredText('bb ', 2, 15),
+          measuredText('cc', 5, 10),
+        ],
+      },
+    });
+    const texts = line.placements.filter((placement) => placement.kind === 'text');
+    // jc=left: the 25 pt slack all goes to the gap, so the cell starts at 35 pt;
+    // jc=both: the gap stays empty and the bb/cc space takes the slack.
+    expect(texts[1]?.origin.xPt).toBe(cellX);
+    expect(texts.at(-1)?.origin.xPt).toBe(50);
   });
 
   it('retains an underline across the full advance of an underlined tab run', () => {

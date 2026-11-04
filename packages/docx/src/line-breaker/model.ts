@@ -1,6 +1,6 @@
 import type { LineSpacing, TabStop, DocxRunBorder, EmphasisMark } from '../types';
 import type { CanvasFontRoute, HyperlinkTarget, NumberFormat, Duotone, ResolvedFontMetric } from '@silurus/ooxml-core';
-import { type FloatRect } from '../float-layout.js';
+import { type FloatRect, type LineWindowAdmission } from '../float-layout.js';
 import type { LayoutServices } from '../layout/types.js';
 import type { VerticalGlyphMeasurementService } from '../layout/measurement-capabilities.js';
 import type { GlyphInkBounds, TextLayoutService, TextShapeRequest, FontScriptSlot } from '../layout/text.js';
@@ -390,6 +390,29 @@ export interface LayoutTabSeg extends LayoutSegSource {
   /** Set when this aligned tab's cell was admitted past the paragraph's
    *  trailing indent into the line's exclusion-free margin extension. */
   marginAllocation?: boolean;
+  /** WORD_ALIGNED_TAB_CELL_FIT_BACK: an end/center/decimal tab whose cell did
+   *  not fit at its stop-aligned position was fitted with no gap; this is the
+   *  stop-aligned gap it may still take from the slack of an unjustified line
+   *  (retained paint resolves it once the line's justification is known). */
+  alignedGapLimit?: number;
+  /** WORD_ALIGNED_TAB_CELL_FIT_BACK in a bidi line: set at placement when the
+   *  cell ends the paragraph or the line (not at a later tab), so the bidi walk
+   *  defers a fitted-back end/center/decimal gap to retained paint as
+   *  {@link alignedGapLimit}, as left-to-right placement does. */
+  alignedFitBack?: boolean;
+  /** Width of the complete cell after an {@link alignedFitBack} tab, to the
+   *  paragraph end or line break (the bidi walk sees only the line's part). */
+  alignedCellWidth?: number;
+  /** Logical advance from that complete cell's start to its decimal point
+   *  (the decimal stop's alignment point), when it has one. */
+  alignedCellDecimal?: number;
+  /** WORD_TAB_DISPLACED_READING_FRAME applies (compatibility mode absent or
+   *  below 15): custom stops move with a float-displaced leading line edge and
+   *  an out-of-window cell overflows instead of breaking the line. */
+  displacedFloatTabFrame?: boolean;
+  /** Set at placement when WORD_TAB_DISPLACED_READING_FRAME let this tab's
+   *  complete cell overflow the float window; the bidi walk keeps it there. */
+  windowOverflow?: boolean;
   /** Bold/italic of the run carrying the tab (ECMA-376 §17.3.1.37 — the leader
    *  characters take the formatting of the tab's run, e.g. a bold TOC1 entry's
    *  dot leader is bold). Threaded so {@link drawTabLeader} can match the font. */
@@ -584,6 +607,9 @@ export interface LayoutLine {
 /** Additional context passed to layoutLines so it can honor floats on the current page. */
 export interface WrapLayoutCtx {
   hasExclusions?: boolean;
+  /** Preserve the pre-15 allocation of an anchor-only line when a float
+   * narrows or displaces it (WORD_OVERLONG_HEAD_AFTER_ANCHOR scope policy). */
+  preservePre15AnchorLine?: boolean;
   startPageY: number;   // absolute canvas Y where the first line should start
   paraX: number;        // absolute canvas X of the paragraph's INDENTED text left edge
   /** Absolute canvas X of the paragraph's raw COLUMN left edge. Distinct from
@@ -613,6 +639,8 @@ export interface WrapLayoutCtx {
      *  indented text band the square side-gap math uses). */
     columnXPt: number;
     columnWidthPt: number;
+    /** Further admission test of a candidate window (see LineWindowAdmission). */
+    admitsWindow?: LineWindowAdmission;
   }) => {
     topYPt: number;
     xOffsetPt: number;
