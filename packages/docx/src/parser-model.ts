@@ -281,20 +281,15 @@ export interface InternalDocxDocumentModel extends DocxDocumentModel {
   }>;
   readonly __documentTypographySettings?: Readonly<{
     normalStyleFontSizePt?: number;
-    defaultParagraphStyleFontFacts?: InternalRunFontFacts;
   }>;
 }
 
 export function documentTypographySettingsInput(
   doc: DocxDocumentModel,
 ): DocumentTypographySettingsInput {
-  const typography = (doc as InternalDocxDocumentModel).__documentTypographySettings;
-  const authored = typography?.normalStyleFontSizePt;
-  const defaultStyle = typography?.defaultParagraphStyleFontFacts;
+  const authored = (doc as InternalDocxDocumentModel)
+    .__documentTypographySettings?.normalStyleFontSizePt;
   return snapshotPlainData({
-    ...(defaultStyle ? {
-      defaultParagraphStyleShapeInput: runFontFactsShapeInput(defaultStyle, 10, null, null),
-    } : {}),
     normalStyleFontSizePt:
       typeof authored === 'number' && Number.isFinite(authored) && authored > 0
         ? authored
@@ -1627,30 +1622,33 @@ export function paragraphMarkShapeInput(
   paragraph: ParagraphLayoutSource,
 ): NumberingMarkerShapeInput | undefined {
   const facts = internalParagraph(paragraph).paragraphMarkFontFacts;
-  if (!facts) return undefined;
-  const fallbackFontSizePt = paragraph.runs.find(
-    (run): run is Extract<DocRun, { type: 'text' | 'field' }> => run.type === 'text' || run.type === 'field',
-  )?.fontSize ?? paragraph.defaultFontSize ?? 10;
-  return runFontFactsShapeInput(facts, fallbackFontSizePt,
-    paragraph.defaultFontFamily ?? null, paragraph.defaultFontFamilyEastAsia ?? null);
+  return facts ? nonContentRunShapeInput(facts, paragraph) : undefined;
 }
 
-/** Project one effective style/mark run without consulting body content. */
-function runFontFactsShapeInput(
+/** Project the effective outer drawing-run font once; text-box text is a
+ * separate story and must not replace its object's automatic-leading face. */
+export function inlineObjectShapeInput(run: Readonly<{ type: string }>): NumberingMarkerShapeInput | undefined {
+  if (run.type !== 'image' && run.type !== 'shape') return undefined;
+  const facts = (run as { readonly __inlineObjectFontFacts?: InternalRunFontFacts }).__inlineObjectFontFacts;
+  return facts ? nonContentRunShapeInput(facts) : undefined;
+}
+
+function nonContentRunShapeInput(
   facts: InternalRunFontFacts,
-  fallbackFontSizePt: number,
-  fallbackAscii: string | null,
-  fallbackEastAsia: string | null,
+  paragraph?: ParagraphLayoutSource,
 ): NumberingMarkerShapeInput {
   const complexScript = facts.rtl === true || facts.cs === true;
+  const fallbackFontSizePt = paragraph?.runs.find(
+    (run): run is Extract<DocRun, { type: 'text' | 'field' }> => run.type === 'text' || run.type === 'field',
+  )?.fontSize ?? paragraph?.defaultFontSize ?? 10;
   const fontSizePt = complexScript
     ? (facts.fontSizeCs ?? facts.fontSize ?? fallbackFontSizePt)
     : (facts.fontSize ?? fallbackFontSizePt);
-  const ascii = facts.fontFamily ?? fallbackAscii;
+  const ascii = facts.fontFamily ?? paragraph?.defaultFontFamily ?? null;
   const fallbackFonts: TextFontSlots = {
     ascii,
     highAnsi: facts.fontFamilyHighAnsi ?? ascii,
-    eastAsia: facts.fontFamilyEastAsia ?? fallbackEastAsia ?? ascii,
+    eastAsia: facts.fontFamilyEastAsia ?? paragraph?.defaultFontFamilyEastAsia ?? ascii,
     complexScript: facts.fontFamilyCs ?? ascii,
   };
   return Object.freeze({
@@ -1798,7 +1796,8 @@ export function paragraphAcquisitionInput(
             ...localAnchorInput,
             occurrenceId: anchorOccurrenceKey(source, localAnchorInput.occurrenceId),
           }, 'DOCX scoped anchor acquisition input');
-      const { __anchorAcquisition: _privateAnchor, ...publicRun } = run as typeof run & InternalAnchorRunWire;
+      const { __anchorAcquisition: _privateAnchor, __inlineObjectFontFacts: _privateInlineFont, ...publicRun } = run as typeof run & InternalAnchorRunWire & { __inlineObjectFontFacts?: InternalRunFontFacts };
+      const inlineFont = inlineObjectShapeInput(originalRun);
       if (run.type !== 'shape') {
         const retainedRun = run.type === 'chart'
           ? (({ chart: _chartPayload, ...marker }) => ({
@@ -1808,6 +1807,7 @@ export function paragraphAcquisitionInput(
           : publicRun;
         return Object.freeze({
           ...structuredClone(retainedRun),
+          ...(inlineFont ? { inlineObjectShapeInput: inlineFont } : {}),
           ...(anchorInput === undefined ? {} : { anchorAcquisitionInput: anchorInput }),
         }) as ParagraphAcquisitionRun;
       }
@@ -1831,6 +1831,7 @@ export function paragraphAcquisitionInput(
       return Object.freeze({
         type: 'shape' as const,
         ...structuredClone(retainedShape),
+        ...(inlineFont ? { inlineObjectShapeInput: inlineFont } : {}),
         ...(vmlTextPathInput === undefined ? {} : { vmlTextPathInput }),
         ...((textBoxInput.kind === 'complete'
           ? textBoxInput.blockCount

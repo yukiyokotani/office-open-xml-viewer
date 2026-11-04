@@ -6145,6 +6145,7 @@ function paragraphAcquisitionKey(
         ]
         : null,
       lineOnly ? null : environment.pageWritingMode,
+      environment.inlineObjectRunLeadingAdmitted === true,
       environment.verticalCJK ?? null,
       lineOnly ? null : environment.verticalPageFrame ?? null,
       // Mode owns acquired kerning and justified-compression decisions.

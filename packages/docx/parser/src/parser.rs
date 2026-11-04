@@ -1883,17 +1883,6 @@ fn finish_document(
         .1
         .font_size
         .unwrap_or(DEFAULT_FONT_SIZE);
-    // §17.7.2 applies document defaults below the style marked w:default.
-    // Keep its full resolved run facts: inline automatic leading cannot be
-    // reconstructed from a body paragraph's direct mark or from grid Normal.
-    let mut default_paragraph_style_font_facts = resolved_run_font_facts(
-        &environment.style_map.resolve_para(None, None).1,
-        &environment.theme,
-    );
-    // Use the same missing-size policy as ordinary parser-created runs.
-    default_paragraph_style_font_facts
-        .font_size
-        .get_or_insert(DEFAULT_FONT_SIZE);
 
     // ECMA-376 §17.8.3.10: font family classification from fontTable.xml.
     // Resolve via relationship (Type ending in "/fontTable"); fall back to
@@ -2020,7 +2009,6 @@ fn finish_document(
         settings: environment.document_settings,
         document_typography_settings: Some(crate::types::DocumentTypographySettingsWire {
             normal_style_font_size_pt,
-            default_paragraph_style_font_facts: Some(Box::new(default_paragraph_style_font_facts)),
         }),
         page_layout_settings: environment.page_layout_settings,
         note_layout_settings: environment.note_layout_settings,
@@ -3991,29 +3979,6 @@ mod document_typography_settings_tests {
         let typography = document.document_typography_settings.unwrap();
 
         assert_eq!(typography.normal_style_font_size_pt, 9.0);
-    }
-
-    #[test]
-    fn default_paragraph_font_facts_keep_their_own_style_cascade() {
-        let styles_xml = format!(
-            r#"<w:styles xmlns:w="{W_NS}">
-                 <w:docDefaults><w:rPrDefault><w:rPr>
-                   <w:rFonts w:ascii="Times New Roman"/><w:sz w:val="20"/>
-                 </w:rPr></w:rPrDefault></w:docDefaults>
-                 <w:style w:type="paragraph" w:styleId="BuiltIn0">
-                   <w:name w:val="Normal"/><w:rPr><w:sz w:val="18"/></w:rPr>
-                 </w:style>
-                 <w:style w:type="paragraph" w:default="1" w:styleId="DocumentDefault">
-                   <w:name w:val="Document Default"/>
-                   <w:rPr><w:rFonts w:ascii="Arial"/><w:sz w:val="40"/></w:rPr>
-                 </w:style>
-               </w:styles>"#
-        );
-        let document = parse_from_bytes(&document_with_styles(&styles_xml)).unwrap();
-        let wire = serde_json::to_value(document).unwrap();
-        let facts = &wire["__documentTypographySettings"]["defaultParagraphStyleFontFacts"];
-        assert_eq!(facts["fontSize"].as_f64(), Some(20.0));
-        assert_eq!(facts["fontFamily"].as_str(), Some("Arial"));
     }
 }
 
@@ -8146,7 +8111,26 @@ fn parse_run_inner(
         italic,
         anchor_occurrence_id: None,
     };
-    let attach_anchor_host_metrics = |drawing_runs: &mut Vec<DocRun>| {
+    let attach_drawing_run_facts = |drawing_runs: &mut Vec<DocRun>| {
+        // An inline drawing is one character of this resolved outer run.
+        // Preserve all font slots before its text-box content starts a separate
+        // story. It needs automatic leading, not a synthetic anchor character.
+        let mut facts = None;
+        for drawing in drawing_runs.iter_mut() {
+            let target = match drawing {
+                DocRun::Shape(shape) if shape.inline => Some(&mut shape.inline_object_font_facts),
+                DocRun::Image(image) if !image.anchor => Some(&mut image.inline_object_font_facts),
+                _ => None,
+            };
+            if let Some(target) = target {
+                let facts = facts.get_or_insert_with(|| {
+                    let mut facts = resolved_run_font_facts(&fmt, theme);
+                    facts.font_size.get_or_insert(font_size);
+                    facts
+                });
+                *target = Some(Box::new(facts.clone()));
+            }
+        }
         prepend_anchor_host_metrics(drawing_runs, &anchor_host_metrics);
     };
     let vert_align = fmt.vert_align.clone();
@@ -8724,7 +8708,7 @@ fn parse_run_inner(
                     theme,
                     depth,
                     diagnostics,
-                    &attach_anchor_host_metrics,
+                    &attach_drawing_run_facts,
                 );
                 runs.extend(drawing_runs);
             }
@@ -8869,7 +8853,7 @@ fn parse_run_inner(
                                 theme,
                                 depth,
                                 diagnostics,
-                                &attach_anchor_host_metrics,
+                                &attach_drawing_run_facts,
                             );
                             runs.extend(drawing_runs);
                         } else if use_fallback
@@ -8888,20 +8872,20 @@ fn parse_run_inner(
                                 depth,
                                 diagnostics,
                             ) {
-                                attach_anchor_host_metrics(&mut group_runs);
+                                attach_drawing_run_facts(&mut group_runs);
                                 runs.extend(group_runs);
                             } else if let Some(img) = parse_vml_pict_image(inner, media_map) {
                                 let mut pict_runs = vec![DocRun::Image(Box::new(img))];
-                                attach_anchor_host_metrics(&mut pict_runs);
+                                attach_drawing_run_facts(&mut pict_runs);
                                 runs.extend(pict_runs);
                             } else if let Some(shp) = parse_vml_pict(
                                 style_map, num_map, inner, theme, media_map, chart_map, rel_map,
                                 depth,
                             ) {
-                                let anchored = shp.anchor_acquisition.is_some();
+                                let participates = shp.inline || shp.anchor_acquisition.is_some();
                                 let mut pict_runs = vec![DocRun::Shape(Box::new(shp))];
-                                if anchored {
-                                    attach_anchor_host_metrics(&mut pict_runs);
+                                if participates {
+                                    attach_drawing_run_facts(&mut pict_runs);
                                 }
                                 runs.extend(pict_runs);
                             }
@@ -8932,19 +8916,19 @@ fn parse_run_inner(
                     depth,
                     diagnostics,
                 ) {
-                    attach_anchor_host_metrics(&mut group_runs);
+                    attach_drawing_run_facts(&mut group_runs);
                     runs.extend(group_runs);
                 } else if let Some(img) = parse_vml_pict_image(child, media_map) {
                     let mut pict_runs = vec![DocRun::Image(Box::new(img))];
-                    attach_anchor_host_metrics(&mut pict_runs);
+                    attach_drawing_run_facts(&mut pict_runs);
                     runs.extend(pict_runs);
                 } else if let Some(shp) = parse_vml_pict(
                     style_map, num_map, child, theme, media_map, chart_map, rel_map, depth,
                 ) {
-                    let anchored = shp.anchor_acquisition.is_some();
+                    let participates = shp.inline || shp.anchor_acquisition.is_some();
                     let mut pict_runs = vec![DocRun::Shape(Box::new(shp))];
-                    if anchored {
-                        attach_anchor_host_metrics(&mut pict_runs);
+                    if participates {
+                        attach_drawing_run_facts(&mut pict_runs);
                     }
                     runs.extend(pict_runs);
                 }
@@ -8978,14 +8962,17 @@ fn parse_run_inner(
                         theme,
                         depth,
                         diagnostics,
-                        &attach_anchor_host_metrics,
+                        &attach_drawing_run_facts,
                     );
                     runs.extend(drawing_runs);
                 } else if let Some(img) = parse_object_ole_image(child, media_map) {
                     let anchored = img.anchor;
                     let mut object_runs = vec![DocRun::Image(Box::new(img))];
+                    // Inline OLE previews retain their established allocation:
+                    // outer-run leading controls cover ordinary pictures/text
+                    // boxes, not an embedded object's static preview.
                     if anchored {
-                        attach_anchor_host_metrics(&mut object_runs);
+                        attach_drawing_run_facts(&mut object_runs);
                     }
                     runs.extend(object_runs);
                 }
@@ -9730,6 +9717,7 @@ fn parse_drawing_container(
             }
         };
         return vec![DocRun::Image(Box::new(ImageRun {
+            inline_object_font_facts: None,
             inline_effect_extent: None,
             image_path,
             mime_type,
@@ -9988,6 +9976,7 @@ fn parse_drawing_container(
         }
     };
     vec![DocRun::Image(Box::new(ImageRun {
+        inline_object_font_facts: None,
         inline_effect_extent: None,
         image_path,
         mime_type,
@@ -11153,6 +11142,7 @@ fn parse_group_pic(
         .and_then(|clr| clr.attribute("val").map(|v| v.to_uppercase()));
 
     Some(ImageRun {
+        inline_object_font_facts: None,
         inline_effect_extent: None,
         image_path,
         mime_type,
@@ -14507,6 +14497,7 @@ fn vml_image_run(
         anchor.then(|| vml_word_anchor_acquisition(shape, definition, style, width_pt, height_pt));
 
     ImageRun {
+        inline_object_font_facts: None,
         inline_effect_extent: None,
         mime_type: mime_from_ext(&image_path).to_string(),
         image_path,
@@ -19349,6 +19340,7 @@ mod tests {
     #[test]
     fn doc_run_wire_tags_match_ts_acquisition_discriminants() {
         let image = ImageRun {
+            inline_object_font_facts: None,
             inline_effect_extent: None,
             image_path: "word/media/image1.png".to_string(),
             mime_type: "image/png".to_string(),
@@ -23040,6 +23032,7 @@ mod svg_blip_tests {
     #[test]
     fn image_run_serializes_path_fields_not_data_url() {
         let run = ImageRun {
+            inline_object_font_facts: None,
             inline_effect_extent: None,
             image_path: "word/media/image1.png".to_string(),
             mime_type: "image/png".to_string(),
@@ -24638,6 +24631,53 @@ mod anchor_image_relative_from_tests {
     }
 
     #[test]
+    fn inline_vml_font_facts_follow_applied_style_then_drawing_run() {
+        // §17.7.2: the paragraph mark's direct size does not replace the
+        // formatting inherited by its drawing run. Direct run rPr wins next.
+        let styles = StyleMap::parse(
+            r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+          <w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Times New Roman"/><w:sz w:val="20"/></w:rPr></w:rPrDefault></w:docDefaults>
+          <w:style w:type="paragraph" w:styleId="Other"><w:name w:val="Other"/><w:rPr><w:rFonts w:ascii="Arial"/><w:sz w:val="40"/></w:rPr></w:style>
+        </w:styles>"#,
+        );
+        for (direct, expected_size, expected_face) in [
+            ("", 20.0, "Arial"),
+            (
+                r#"<w:rPr><w:rFonts w:ascii="Courier New"/><w:sz w:val="60"/></w:rPr>"#,
+                30.0,
+                "Courier New",
+            ),
+        ] {
+            let xml = format!(
+                r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:v="urn:schemas-microsoft-com:vml"><w:body>
+              <w:p><w:pPr><w:pStyle w:val="Other"/><w:rPr><w:sz w:val="20"/></w:rPr></w:pPr>
+                <w:r>{direct}<w:pict><v:shape style="width:80pt;height:40pt"><v:textbox><w:txbxContent><w:p><w:r><w:t>Box</w:t></w:r></w:p></w:txbxContent></v:textbox></v:shape></w:pict></w:r>
+              </w:p></w:body></w:document>"#
+            );
+            let xml = XmlDoc::parse(&xml).unwrap();
+            let body = xml
+                .root_element()
+                .children()
+                .find(|n| n.has_tag_name((W_NS, "body")))
+                .unwrap();
+            let elements = parse_body_elements(
+                body,
+                &styles,
+                &mut NumberingMap::default(),
+                &HashMap::new(),
+                &ChartMap::default(),
+                &HashMap::new(),
+                &ThemeColors::default(),
+                &HashMap::new(),
+            );
+            let wire = serde_json::to_value(&elements).unwrap();
+            let facts = &wire[0]["runs"][0]["__inlineObjectFontFacts"];
+            assert_eq!(facts["fontSize"].as_f64(), Some(expected_size), "{wire}");
+            assert_eq!(facts["fontFamily"].as_str(), Some(expected_face));
+        }
+    }
+
+    #[test]
     fn wps_textbox_anchor_host_is_only_added_for_floating_shapes() {
         for (container, expected_hosts) in [("inline", 0), ("anchor", 1)] {
             let position = if container == "anchor" {
@@ -24648,7 +24688,7 @@ mod anchor_image_relative_from_tests {
                 ""
             };
             let body = format!(
-                r#"<w:p><w:r><w:drawing>
+                r#"<w:p><w:r><w:rPr><w:rFonts w:ascii="Courier New"/><w:sz w:val="60"/></w:rPr><w:drawing>
                   <wp:{container} xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
                     xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
                     xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">
@@ -24679,6 +24719,19 @@ mod anchor_image_relative_from_tests {
                 .collect();
             assert_eq!(shapes.len(), 1, "{container}");
             assert_eq!(shapes[0].inline, container == "inline");
+            let wire = serde_json::to_value(shapes[0]).unwrap();
+            if container == "inline" {
+                assert_eq!(
+                    wire["__inlineObjectFontFacts"]["fontSize"].as_f64(),
+                    Some(30.0)
+                );
+                assert_eq!(
+                    wire["__inlineObjectFontFacts"]["fontFamily"].as_str(),
+                    Some("Courier New")
+                );
+            } else {
+                assert!(wire.get("__inlineObjectFontFacts").is_none());
+            }
             assert_eq!(shapes[0].text_blocks[0].text, "Box");
             assert_eq!(
                 paragraph

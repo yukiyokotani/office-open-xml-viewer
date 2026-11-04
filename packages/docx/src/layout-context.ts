@@ -17,7 +17,7 @@ import {
   type CjkClosingMarkHang,
 } from './layout/line-compatibility.js';
 import type { NumberingMarkerGeometry } from './layout/numbering-marker.js';
-import type { SectionFlow, NumberingMarkerShapeInput } from './layout/types.js';
+import type { SectionFlow } from './layout/types.js';
 import type {
   BodyElement,
   ColumnGeom,
@@ -40,7 +40,6 @@ export interface DocumentLayoutSettings {
   readonly documentHasEastAsianText: boolean;
   /** ECMA-376 §17.6.5 base pitch from the resolved Normal style. */
   readonly normalStyleFontSizePt: number;
-  readonly defaultParagraphStyleShapeInput?: NumberingMarkerShapeInput;
   readonly compat: {
     readonly adjustLineHeightInTable: boolean;
     readonly useFeLayout: boolean;
@@ -57,10 +56,9 @@ export interface DocumentLayoutSettings {
 }
 
 /** Parser-independent document typography facts projected once at the model
- * boundary. Layout owns resolved font inputs, never the private wire. */
+ * boundary. Layout owns only the resolved point value, never the private wire. */
 export interface DocumentTypographySettingsInput {
   readonly normalStyleFontSizePt: number;
-  readonly defaultParagraphStyleShapeInput?: NumberingMarkerShapeInput;
 }
 
 export interface SectionGridContext {
@@ -113,6 +111,9 @@ export interface StoryContext {
    * without it, keeping the previous (v0.89) overflowPunct behaviour.
    */
   readonly closingMarkHangAdmitted?: true;
+  /** Independent Word-observed outer-run leading class: only the main body's
+   * root; paragraph measurement additionally gates mode, axes and contents. */
+  readonly inlineObjectRunLeadingAdmitted?: true;
 }
 
 /** Whether a table cell's authored text direction (§17.4.72) keeps the cell
@@ -249,9 +250,6 @@ export function resolveDocumentLayoutSettings(
     mathDefJc: document.settings?.mathDefJc,
     documentHasEastAsianText: documentHasEastAsianText(document.body),
     normalStyleFontSizePt: typography.normalStyleFontSizePt,
-    ...(typography.defaultParagraphStyleShapeInput ? {
-      defaultParagraphStyleShapeInput: typography.defaultParagraphStyleShapeInput,
-    } : {}),
     compat: {
       adjustLineHeightInTable: document.settings?.adjustLineHeightInTable ?? false,
       useFeLayout: document.settings?.useFeLayout ?? false,

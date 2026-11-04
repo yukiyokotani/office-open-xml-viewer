@@ -19,7 +19,7 @@ import {
   type LineLayoutEnvironment,
   type WrapLayoutCtx,
 } from './line-layout.js';
-import type { ParagraphLayoutSource } from './layout/text.js';
+import type { ParagraphLayoutSource, ParagraphShapeRun, ParagraphImageRun } from './layout/text.js';
 import type { WrapOracle } from './layout/float-wrap-oracle.js';
 import type { NumberingMarkerShapeInput, WritingMode } from './layout/types.js';
 import { wordEmptyMarkMinimumStartWidthPx } from './layout/compatibility.js';
@@ -29,7 +29,7 @@ import {
   WORD_PICTURE_BULLET_LINE_PARTICIPATION,
   wordJustifiedInterwordCompressionApplies,
   wordJustifiedLineFit,
-  wordDefaultStyleInlineLeadingApplies,
+  wordInlineDrawingRunLeadingApplies,
   wordPreservesPre15AnchorLine,
 } from './layout/line-compatibility.js';
 import { LayoutInvariantError } from './layout/diagnostics.js';
@@ -44,7 +44,8 @@ export interface ParagraphMeasurementEnvironment extends LineLayoutEnvironment {
   readonly retainSourceRunBoundaries?: boolean;
   readonly documentHasEastAsianText: boolean;
   readonly paragraphMarkShapeInput?: NumberingMarkerShapeInput;
-  readonly defaultParagraphStyleShapeInput?: NumberingMarkerShapeInput;
+  /** Measured root-body class for effective inline drawing-run leading. */
+  readonly inlineObjectRunLeadingAdmitted?: true;
   /** Selected-face text marker box, resolved by retained numbering before line acquisition. */
   /** Ascent (with line gap) of a numbered paragraph's text marker; an empty
    * item's mark line takes part with it (#1884). */
@@ -377,30 +378,34 @@ export function measureParagraph(
   if (context.lineSpacing?.rule === 'auto'
     && context.lineSpacing.value > 1
     && segments.some((segment) => 'imagePath' in segment && segment.inlinePicture === true)) {
-    // An image-only line has no text segment from which to obtain the authored
-    // single-line height. Measure its paragraph mark through the same selected
-    // face service as an empty paragraph, without the auto multiplier or grid.
-    // The visible text's own selected metric takes precedence on mixed lines.
-    // WORD_INLINE_PICTURE_AUTO_LEADING: horizontal mode-15 lines use the
-    // document's default paragraph-style run on box-only ordinary body lines.
-    // Its parser-resolved facts keep w:default distinct from grid Normal.
-    // Other stories/containers, numbering, mixed text and vertical acquisition
-    // and active line grids keep their existing allocation; those classes were not established
-    // by the default-style controls. Authored font hints still select a slot.
-    const defaultStyle = wordDefaultStyleInlineLeadingApplies(environment.compatibilityMode, paragraph)
+    // §17.7.2 resolves the outer drawing run before layout. Controlled Word
+    // auto-1.5 body lines select its effective paragraph style/direct rPr,
+    // independently of direct paragraph-mark formatting. Text-box content is
+    // a separate story. Preserve the existing document-script/slot selection;
+    // changing that policy would change East Asian fallback allocation.
+    // Caller-built public objects without private acquisition facts retain
+    // the paragraph-mark fallback. Charts keep their established allocation.
+    const useRunFont = environment.inlineObjectRunLeadingAdmitted === true
+      && wordInlineDrawingRunLeadingApplies(environment.compatibilityMode, paragraph)
       && environment.pageWritingMode === 'horizontal-tb'
       && environment.verticalCJK !== true && environment.verticalPageFrame !== true
-      && !context.lineGrid.active
-      ? environment.defaultParagraphStyleShapeInput : undefined;
-    const markSinglePx = paragraphMarkLineMetrics(
-      paragraph, 1, undefined, false, defaultStyle ? false : markUsesEastAsianGrid,
-      measurer.context, fontFamilyClasses, null, environment.resolvedLocalFonts,
-      environment.layoutServices?.text, defaultStyle ?? environment.paragraphMarkShapeInput,
-    ).advancePx;
+      && !context.lineGrid.active && !context.characterGrid.active && !context.baseRtl;
+    let fallbackSinglePx: number | undefined;
     for (const segment of segments) {
-      if ('imagePath' in segment && segment.inlinePicture === true) {
-        segment.paragraphMarkSinglePx = markSinglePx;
-      }
+      if (!('imagePath' in segment) || segment.inlinePicture !== true) continue;
+      const run = segment.sourceRunIndex === undefined
+        ? undefined : paragraph.runs[segment.sourceRunIndex];
+      const objectRun = run && (run.type === 'shape' || run.type === 'image')
+        ? run as ParagraphShapeRun | ParagraphImageRun
+        : undefined;
+      const shapeInput = useRunFont ? objectRun?.inlineObjectShapeInput : undefined;
+      const measureSingle = () => paragraphMarkLineMetrics(
+        paragraph, 1, undefined, false, markUsesEastAsianGrid,
+        measurer.context, fontFamilyClasses, null, environment.resolvedLocalFonts,
+        environment.layoutServices?.text, shapeInput ?? environment.paragraphMarkShapeInput,
+      ).advancePx;
+      segment.paragraphMarkSinglePx = shapeInput
+        ? measureSingle() : (fallbackSinglePx ??= measureSingle());
     }
   }
 

@@ -249,6 +249,7 @@ impl Store<'_> {
         let acquisition = acquisition(facts, occurrence_id.into(), placed);
         let [top, bottom, left, right] = crop;
         let image = ImageRun {
+            inline_object_font_facts: None,
             inline_effect_extent: None,
             image_path,
             mime_type,

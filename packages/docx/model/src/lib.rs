@@ -204,7 +204,6 @@ mod serialization_tests {
         let document = Document {
             document_typography_settings: Some(DocumentTypographySettingsWire {
                 normal_style_font_size_pt: 11.0,
-                default_paragraph_style_font_facts: None,
             }),
             ..Document::default()
         };
@@ -301,11 +300,6 @@ mod serialization_tests {
 #[serde(rename_all = "camelCase")]
 pub struct DocumentTypographySettingsWire {
     pub normal_style_font_size_pt: f64,
-    /// Effective default paragraph-style run facts (§17.7.2), before any
-    /// paragraph/direct formatting. This is distinct from the named Normal
-    /// style used by the character grid (§17.6.5).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub default_paragraph_style_font_facts: Option<Box<RunFontFacts>>,
 }
 
 #[derive(Serialize, Debug, Clone, Default)]
@@ -1997,6 +1991,14 @@ pub struct VmlEdgeStroke {
 #[derive(Serialize, Debug, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ShapeRun {
+    /// Effective WordprocessingML drawing-run font (§17.7.2, §17.3.2.26).
+    /// Inline automatic leading uses this run, not the directly formatted
+    /// paragraph mark; kept private until immutable acquisition projection.
+    #[serde(
+        rename = "__inlineObjectFontFacts",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub inline_object_font_facts: Option<Box<RunFontFacts>>,
     /// ECMA-376 §20.4.2.6 `wp:effectExtent` of an inline (`wp:inline`) shape,
     /// [left, top, right, bottom] in points; `None` for anchors and zero.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -3295,6 +3297,14 @@ pub use ooxml_common::blip::{BlipEffect, Duotone, SrcRect};
 #[derive(Serialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ImageRun {
+    /// Effective WordprocessingML drawing-run font (§17.7.2, §17.3.2.26).
+    /// Inline automatic leading uses this run, not the directly formatted
+    /// paragraph mark; kept private until immutable acquisition projection.
+    #[serde(
+        rename = "__inlineObjectFontFacts",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub inline_object_font_facts: Option<Box<RunFontFacts>>,
     /// ECMA-376 §20.4.2.6 `wp:effectExtent` of an inline (`wp:inline`) picture,
     /// [left, top, right, bottom] in points: extra extent the line reserves
     /// around the picture. `None` for anchors and an all-zero extent.

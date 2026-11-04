@@ -206,10 +206,12 @@ export type ParagraphMathRun = Readonly<{
 export type ParagraphShapeRun = DeepReadonly<Extract<DocRun, { type: 'shape' }> & import('./types.js').VmlShapeAcquisitionFacts> & Readonly<{
   vmlTextPathInput?: VmlTextPathAcquisitionInput;
   textBoxInput?: TextBoxAcquisitionInput;
+  inlineObjectShapeInput?: NumberingMarkerShapeInput;
   anchorAcquisitionInput?: AnchorAcquisitionInput;
 }>;
 
 export type ParagraphImageRun = DeepReadonly<Extract<DocRun, { type: 'image' }>> & Readonly<{
+  inlineObjectShapeInput?: NumberingMarkerShapeInput;
   anchorAcquisitionInput?: AnchorAcquisitionInput;
 }>;
 
