@@ -13,6 +13,7 @@ import type {
 import {
   numberingMarkerShapeInput,
   paragraphMarkShapeInput,
+  inlineObjectShapeInput,
   type InternalDocxDocumentModel,
   type InternalRunSlotMetadata,
   type InternalShapeRun,
@@ -202,6 +203,8 @@ function* textResultUsages(
 }
 
 function* runUsages(run: DocRun, collection: FontCollection): Generator<DocxRenderedTextUsage> {
+  const inlineFont = inlineObjectShapeInput(run);
+  if (inlineFont) yield shapeInputUsage('', inlineFont);
   if (run.type === 'text') {
     const text = run as DocxTextRun & InternalRenderedFontAxes;
     yield* textResultUsages(run.text, run.fontFamily, text, run.bold, run.italic, collection);

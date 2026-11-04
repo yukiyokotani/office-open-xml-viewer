@@ -221,10 +221,14 @@ export type ParagraphMathRun = Readonly<{
 export type ParagraphShapeRun = DeepReadonly<Extract<DocRun, { type: 'shape' }> & import('./types.js').VmlShapeAcquisitionFacts> & Readonly<{
   vmlTextPathInput?: VmlTextPathAcquisitionInput;
   textBoxInput?: TextBoxAcquisitionInput;
+  inlineObjectShapeInput?: NumberingMarkerShapeInput;
+  inlineObjectOrigin?: 'drawingml' | 'vmlStaticTextbox';
   anchorAcquisitionInput?: AnchorAcquisitionInput;
 }>;
 
 export type ParagraphImageRun = DeepReadonly<Extract<DocRun, { type: 'image' }>> & Readonly<{
+  inlineObjectShapeInput?: NumberingMarkerShapeInput;
+  inlineObjectOrigin?: 'drawingml' | 'vmlStaticTextbox';
   anchorAcquisitionInput?: AnchorAcquisitionInput;
   /** A picture list label (producers other than DOCX): see
    * `LayoutSegSource.listLabel`. */
@@ -245,6 +249,8 @@ export interface UnavailableDrawingAcquisitionRun {
   readonly resourceKind: 'image' | 'chart';
   readonly widthPt: number;
   readonly heightPt: number;
+  /** ECMA-376 §20.4.2.6 inline effect extent [left, top, right, bottom] (pt). */
+  readonly inlineEffectExtent?: readonly number[];
   readonly anchorAcquisitionInput?: AnchorAcquisitionInput;
 }
 

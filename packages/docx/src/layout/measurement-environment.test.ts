@@ -1,3 +1,5 @@
+import { MAIN_BODY_STORY_CONTEXT, BODY_STORY_CONTEXT } from './acquisition-state.js';
+import { enterTableCellStoryContext, withoutClosingMarkHangAdmission } from '../layout-context.js';
 import { describe, expect, it } from 'vitest';
 import type { DocxDocumentModel } from '../types.js';
 import type { ParagraphLayoutContext, SectionLayoutContext } from '../layout-context.js';
@@ -78,6 +80,21 @@ describe('layout measurement environment', () => {
       runs: [{ type: 'text', fontSize: 22 }],
     }))).toBe(22);
     expect(docDefaultFontSizePt(document({ runs: [] }))).toBe(10);
+  });
+
+  it('keeps inline-leading story admission independent of punctuation hanging', () => {
+    const state = { sectionLayout: { textDirection: 'lrTb' },
+      layoutSettings: { compat: {} }, storyContext: MAIN_BODY_STORY_CONTEXT,
+    } as unknown as BodyMeasurementContext;
+    expect(paragraphMeasurementEnvironment(state).inlineObjectRunLeadingAdmitted).toBe(true);
+    expect(paragraphMeasurementEnvironment({ ...state,
+      storyContext: withoutClosingMarkHangAdmission(MAIN_BODY_STORY_CONTEXT),
+    }).inlineObjectRunLeadingAdmitted).toBe(true);
+    for (const storyContext of [BODY_STORY_CONTEXT,
+      enterTableCellStoryContext(MAIN_BODY_STORY_CONTEXT, true)]) {
+      expect(paragraphMeasurementEnvironment({ ...state, storyContext })
+        .inlineObjectRunLeadingAdmitted).toBeUndefined();
+    }
   });
 
   it('clears upright-vertical grouping only for the all-rotated btLr path', () => {

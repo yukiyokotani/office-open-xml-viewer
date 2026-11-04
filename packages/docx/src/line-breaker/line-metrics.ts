@@ -337,11 +337,14 @@ export function paragraphMarkLineMetrics(
   minimumAscentPx = 0,
 ): MarkLineMetrics {
   const effectiveMarkShapeInput = markShapeInput;
-  // ECMA-376 §17.3.2.26 `w:rFonts@w:hint`: an empty paragraph has no code
-  // point from which to infer a script slot, so the paragraph-mark hint selects
-  // the face used to measure the mark. It does NOT make an otherwise Latin-only
-  // paragraph occupy East-Asian docGrid cells: grid-cell classification remains
-  // content/document based, independently of font routing.
+  // Existing empty-mark policy retains hint/document-script font routing.
+  // This is not specified by §17.3.2.26: an empty mark has no character from
+  // which to select a slot. Ordinary Word probes select the ascii face, but
+  // applying that selection to grid page-edge admission also moves following
+  // content a whole grid line in a real document. That face/admission
+  // interaction remains unresolved; do not add a grid-only font exception.
+  // Font routing and content/document-based grid-cell classification remain
+  // independent until the complete empty-mark rule is established.
   // WORD_PICTURE_BULLET_LINE_PARTICIPATION: beside a picture bullet the empty
   // mark is measured with its own (non-East-Asian) face.
   const markUsesEastAsianFace = (eastAsian && minimumAscentPx <= 0)

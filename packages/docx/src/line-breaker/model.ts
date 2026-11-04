@@ -448,10 +448,23 @@ export interface LayoutImageSeg extends LayoutSegSource {
   mimeType: string;
   widthPt: number;
   heightPt: number;
-  /** The source is a literal wp:inline picture, rather than a chart/shape box. */
+  /** Participates in WORD_INLINE_PICTURE_AUTO_LEADING: an inline picture or
+   * drawing shape (WPS/VML text box); chart boxes do not opt in. */
   inlinePicture?: true;
   /** Paragraph mark's selected-face natural single line, measured once per paragraph. */
   paragraphMarkSinglePx?: number;
+  /** Resolved outer-run minimum for baseline-aligned DrawingML: extra space
+   * joins ascent, while only real text supplies descent. */
+  objectRunBaselineMinimumPx?: number;
+  /** Static VML textbox minimum changes physical advance, never visible
+   * ascent/descent or baseline (its measured box-only class stays top-aligned). */
+  objectRunAdvanceMinimumPx?: number;
+  /** ECMA-376 §20.4.2.6 inline effect extent [left, top, right, bottom] (pt),
+   *  already included in widthPt/heightPt; the object paints inside it. */
+  effectExtent?: readonly [number, number, number, number];
+  /** Authored object size (pt) when {@link effectExtent} widens the box; the
+   *  object paints at this size even if a negative extent clamps the box. */
+  objectSizePt?: readonly [number, number];
   /** A picture-bullet marker's height on the paragraph's first line: its
    * metrics join the line like an inline picture's, but it takes no width,
    * break opportunity or segment slot (the marker is painted separately). */
@@ -732,6 +745,9 @@ export interface LineLayoutEnvironment {
   readonly noteNumbering?: NoteNumbering;
   readonly noteReferenceNumber?: number;
   readonly verticalCJK?: boolean;
+  /** Owner section's counter-turn for upright inline graphics; maps their
+   *  physical §20.4.2.6 effect edges onto the logical line axes. */
+  readonly uprightResourceOrientation?: import('../layout/types.js').UprightResourceOrientation;
   /** ECMA-376 Part 4 §14.8.3.50 w:useFELayout compatibility switch. */
   readonly useFeLayout?: boolean;
   /** §17.6.5 effective line-grid gate after section type, paragraph opt-out,

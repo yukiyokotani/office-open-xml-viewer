@@ -7925,7 +7925,9 @@ fn prepend_anchor_host_metrics(
         DocRun::Image(image) => image.anchor,
         DocRun::Chart(chart) => chart.anchor,
         DocRun::UnavailableDrawing(drawing) => drawing.anchor_acquisition.is_some(),
-        DocRun::Shape(_) => true,
+        // A `wp:inline` shape (§20.4.2.8) is in the line, not floating: it has
+        // no zero-advance host character (issue #2063).
+        DocRun::Shape(shape) => !shape.inline,
         _ => false,
     });
     if has_floating_drawing {
@@ -8111,7 +8113,26 @@ fn parse_run_inner(
         anchor_occurrence_id: None,
         list_label: None,
     };
-    let attach_anchor_host_metrics = |drawing_runs: &mut Vec<DocRun>| {
+    let attach_drawing_run_facts = |drawing_runs: &mut Vec<DocRun>| {
+        // An inline drawing is one character of this resolved outer run.
+        // Preserve all font slots before its text-box content starts a separate
+        // story. It needs automatic leading, not a synthetic anchor character.
+        let mut facts = None;
+        for drawing in drawing_runs.iter_mut() {
+            let target = match drawing {
+                DocRun::Shape(shape) if shape.inline => Some(&mut shape.inline_object_font_facts),
+                DocRun::Image(image) if !image.anchor => Some(&mut image.inline_object_font_facts),
+                _ => None,
+            };
+            if let Some(target) = target {
+                let facts = facts.get_or_insert_with(|| {
+                    let mut facts = resolved_run_font_facts(&fmt, theme);
+                    facts.font_size.get_or_insert(font_size);
+                    facts
+                });
+                *target = Some(Box::new(facts.clone()));
+            }
+        }
         prepend_anchor_host_metrics(drawing_runs, &anchor_host_metrics);
     };
     let vert_align = fmt.vert_align.clone();
@@ -8697,7 +8718,7 @@ fn parse_run_inner(
                     theme,
                     depth,
                     diagnostics,
-                    &attach_anchor_host_metrics,
+                    &attach_drawing_run_facts,
                 );
                 runs.extend(drawing_runs);
             }
@@ -8844,7 +8865,7 @@ fn parse_run_inner(
                                 theme,
                                 depth,
                                 diagnostics,
-                                &attach_anchor_host_metrics,
+                                &attach_drawing_run_facts,
                             );
                             runs.extend(drawing_runs);
                         } else if use_fallback
@@ -8863,20 +8884,20 @@ fn parse_run_inner(
                                 depth,
                                 diagnostics,
                             ) {
-                                attach_anchor_host_metrics(&mut group_runs);
+                                attach_drawing_run_facts(&mut group_runs);
                                 runs.extend(group_runs);
                             } else if let Some(img) = parse_vml_pict_image(inner, media_map) {
                                 let mut pict_runs = vec![DocRun::Image(Box::new(img))];
-                                attach_anchor_host_metrics(&mut pict_runs);
+                                attach_drawing_run_facts(&mut pict_runs);
                                 runs.extend(pict_runs);
                             } else if let Some(shp) = parse_vml_pict(
                                 style_map, num_map, inner, theme, media_map, chart_map, rel_map,
                                 depth,
                             ) {
-                                let anchored = shp.anchor_acquisition.is_some();
+                                let participates = shp.inline || shp.anchor_acquisition.is_some();
                                 let mut pict_runs = vec![DocRun::Shape(Box::new(shp))];
-                                if anchored {
-                                    attach_anchor_host_metrics(&mut pict_runs);
+                                if participates {
+                                    attach_drawing_run_facts(&mut pict_runs);
                                 }
                                 runs.extend(pict_runs);
                             }
@@ -8907,19 +8928,19 @@ fn parse_run_inner(
                     depth,
                     diagnostics,
                 ) {
-                    attach_anchor_host_metrics(&mut group_runs);
+                    attach_drawing_run_facts(&mut group_runs);
                     runs.extend(group_runs);
                 } else if let Some(img) = parse_vml_pict_image(child, media_map) {
                     let mut pict_runs = vec![DocRun::Image(Box::new(img))];
-                    attach_anchor_host_metrics(&mut pict_runs);
+                    attach_drawing_run_facts(&mut pict_runs);
                     runs.extend(pict_runs);
                 } else if let Some(shp) = parse_vml_pict(
                     style_map, num_map, child, theme, media_map, chart_map, rel_map, depth,
                 ) {
-                    let anchored = shp.anchor_acquisition.is_some();
+                    let participates = shp.inline || shp.anchor_acquisition.is_some();
                     let mut pict_runs = vec![DocRun::Shape(Box::new(shp))];
-                    if anchored {
-                        attach_anchor_host_metrics(&mut pict_runs);
+                    if participates {
+                        attach_drawing_run_facts(&mut pict_runs);
                     }
                     runs.extend(pict_runs);
                 }
@@ -8953,14 +8974,17 @@ fn parse_run_inner(
                         theme,
                         depth,
                         diagnostics,
-                        &attach_anchor_host_metrics,
+                        &attach_drawing_run_facts,
                     );
                     runs.extend(drawing_runs);
                 } else if let Some(img) = parse_object_ole_image(child, media_map) {
                     let anchored = img.anchor;
                     let mut object_runs = vec![DocRun::Image(Box::new(img))];
+                    // Inline OLE previews retain their established allocation:
+                    // outer-run leading controls cover ordinary pictures/text
+                    // boxes, not an embedded object's static preview.
                     if anchored {
-                        attach_anchor_host_metrics(&mut object_runs);
+                        attach_drawing_run_facts(&mut object_runs);
                     }
                     runs.extend(object_runs);
                 }
@@ -9226,6 +9250,7 @@ fn parse_inline_drawing(
             &container_runs,
             diagnostics,
         );
+        apply_inline_effect_extent(container, &mut container_runs);
         finish_container(&mut container_runs);
         runs.extend(container_runs);
     }
@@ -9266,6 +9291,7 @@ fn unavailable_drawing_run(
     let (width_pt, height_pt) = drawing_extent_points(container)?;
     Some(DocRun::UnavailableDrawing(Box::new(
         UnavailableDrawingRun {
+            inline_effect_extent: None,
             resource_kind,
             width_pt,
             height_pt,
@@ -9374,11 +9400,52 @@ fn parse_inline_drawing_impl(
 ) -> Vec<DocRun> {
     let mut runs = Vec::new();
     for container in drawing_own_containers(node) {
-        runs.extend(parse_drawing_container(
+        let mut container_runs = parse_drawing_container(
             style_map, num_map, container, media_map, chart_map, rel_map, theme, depth,
-        ));
+        );
+        apply_inline_effect_extent(container, &mut container_runs);
+        runs.extend(container_runs);
     }
     runs
+}
+
+/// ECMA-376 §20.4.2.6: a `wp:inline` container's `wp:effectExtent` is extra
+/// extent the line reserves around the object (Word issue #2063 controls:
+/// pictures and shapes alike). Recorded on the container's inline picture and
+/// inline shape runs; anchors keep it in their wrap facts.
+fn apply_inline_effect_extent(container: roxmltree::Node, runs: &mut [DocRun]) {
+    if container.tag_name().name() != "inline" {
+        return;
+    }
+    let Some(node) = container
+        .children()
+        .find(|child| child.is_element() && child.tag_name().name() == "effectExtent")
+    else {
+        return;
+    };
+    // ST_Coordinate: signed EMU or a universal measure.
+    let edge = |name: &str| {
+        node.attribute(name)
+            .and_then(ooxml_common::units::coordinate_to_emu)
+            .map(|emu| emu as f64 / 12700.0)
+            .filter(|pt| pt.is_finite())
+            .unwrap_or(0.0)
+    };
+    let extent = [edge("l"), edge("t"), edge("r"), edge("b")];
+    if extent.iter().all(|v| *v == 0.0) {
+        return;
+    }
+    for run in runs.iter_mut() {
+        match run {
+            DocRun::Image(image) if !image.anchor => image.inline_effect_extent = Some(extent),
+            DocRun::Shape(shape) if shape.inline => shape.inline_effect_extent = Some(extent),
+            DocRun::Chart(chart) if !chart.anchor => chart.inline_effect_extent = Some(extent),
+            DocRun::UnavailableDrawing(drawing) if drawing.anchor_acquisition.is_none() => {
+                drawing.inline_effect_extent = Some(extent)
+            }
+            _ => {}
+        }
+    }
 }
 
 /// One `wp:inline` / `wp:anchor` container of a `w:drawing`.
@@ -9441,6 +9508,7 @@ fn parse_drawing_container(
                     if let Some((width_pt, height_pt)) = drawing_extent_points(container) {
                         if let Some(chart) = rid.and_then(|rid| chart_map.clone_for_drawing(rid)) {
                             return vec![DocRun::Chart(Box::new(ChartRun {
+                                inline_effect_extent: None,
                                 chart,
                                 width_pt,
                                 height_pt,
@@ -9631,6 +9699,7 @@ fn parse_drawing_container(
                 shape.width_pt = width_pt;
                 shape.height_pt = height_pt;
                 shape.inline = true;
+                shape.inline_object_origin = Some(InlineObjectOrigin::DrawingMl);
                 return vec![DocRun::Shape(Box::new(shape))];
             }
         }
@@ -9661,6 +9730,9 @@ fn parse_drawing_container(
             }
         };
         return vec![DocRun::Image(Box::new(ImageRun {
+            inline_object_font_facts: None,
+            inline_object_origin: Some(InlineObjectOrigin::DrawingMl),
+            inline_effect_extent: None,
             image_path,
             mime_type,
             svg_image_path,
@@ -9785,6 +9857,7 @@ fn parse_drawing_container(
                 if let Some((width_pt, height_pt)) = drawing_extent_points(container) {
                     if let Some(chart) = rid.and_then(|rid| chart_map.clone_for_drawing(rid)) {
                         return vec![DocRun::Chart(Box::new(ChartRun {
+                            inline_effect_extent: None,
                             chart,
                             width_pt,
                             height_pt,
@@ -9918,6 +9991,9 @@ fn parse_drawing_container(
         }
     };
     vec![DocRun::Image(Box::new(ImageRun {
+        inline_object_font_facts: None,
+        inline_object_origin: None,
+        inline_effect_extent: None,
         image_path,
         mime_type,
         svg_image_path,
@@ -11083,6 +11159,9 @@ fn parse_group_pic(
         .and_then(|clr| clr.attribute("val").map(|v| v.to_uppercase()));
 
     Some(ImageRun {
+        inline_object_font_facts: None,
+        inline_object_origin: None,
+        inline_effect_extent: None,
         image_path,
         mime_type,
         svg_image_path,
@@ -12769,6 +12848,24 @@ fn parse_vml_pict_shape(
     )
     .map(|mut run| {
         if let Some((offset_x_pt, offset_y_pt)) = inline {
+            // Only this measured static textbox class has advance-only run
+            // minimum ownership. Relative shapes, WordArt and other VML keep
+            // their existing placement; origin is never guessed in layout.
+            let static_textbox = run.text_path.is_none()
+                && shape
+                    .attribute("style")
+                    .and_then(|style| vml_css_str(style, "position"))
+                    .is_none_or(|position| position.eq_ignore_ascii_case("static"))
+                && shape.descendants().any(|node| {
+                    node.tag_name().name() == "txbxContent"
+                        && is_w_ns(node.tag_name().namespace())
+                        && node.parent().is_some_and(|parent| {
+                            parent.has_tag_name(("urn:schemas-microsoft-com:vml", "textbox"))
+                        })
+                });
+            if static_textbox {
+                run.inline_object_origin = Some(InlineObjectOrigin::VmlStaticTextbox);
+            }
             run.inline = true;
             run.inline_offset_x_pt = offset_x_pt;
             run.inline_offset_y_pt = offset_y_pt;
@@ -14484,6 +14581,9 @@ fn vml_image_run(
         anchor.then(|| vml_word_anchor_acquisition(shape, definition, style, width_pt, height_pt));
 
     ImageRun {
+        inline_object_font_facts: None,
+        inline_object_origin: None,
+        inline_effect_extent: None,
         mime_type: mime_from_ext(&image_path).to_string(),
         image_path,
         svg_image_path: None,
@@ -19326,6 +19426,9 @@ mod tests {
     #[test]
     fn doc_run_wire_tags_match_ts_acquisition_discriminants() {
         let image = ImageRun {
+            inline_object_font_facts: None,
+            inline_object_origin: None,
+            inline_effect_extent: None,
             image_path: "word/media/image1.png".to_string(),
             mime_type: "image/png".to_string(),
             svg_image_path: None,
@@ -19375,6 +19478,7 @@ mod tests {
             (DocRun::Image(Box::new(image)), "image"),
             (
                 DocRun::UnavailableDrawing(Box::new(UnavailableDrawingRun {
+                    inline_effect_extent: None,
                     resource_kind: UnavailableDrawingResourceKind::Image,
                     width_pt: 24.0,
                     height_pt: 24.0,
@@ -23055,6 +23159,9 @@ mod svg_blip_tests {
     #[test]
     fn image_run_serializes_path_fields_not_data_url() {
         let run = ImageRun {
+            inline_object_font_facts: None,
+            inline_object_origin: None,
+            inline_effect_extent: None,
             image_path: "word/media/image1.png".to_string(),
             mime_type: "image/png".to_string(),
             svg_image_path: Some("word/media/image2.svg".to_string()),
@@ -24605,6 +24712,217 @@ mod anchor_image_relative_from_tests {
             host.anchor_occurrence_id.as_deref(),
             Some(acquisition.occurrence_id.as_str())
         );
+    }
+
+    #[test]
+    fn inline_effect_extent_is_recorded_on_inline_shapes_only() {
+        for (container, expected) in [("inline", Some([0.5, 1.0, 1.5, 2.0])), ("anchor", None)] {
+            let position = if container == "anchor" {
+                r#"<wp:simplePos x="0" y="0"/>
+                   <wp:positionH relativeFrom="page"><wp:posOffset>0</wp:posOffset></wp:positionH>
+                   <wp:positionV relativeFrom="paragraph"><wp:posOffset>0</wp:posOffset></wp:positionV>"#
+            } else {
+                ""
+            };
+            let body = format!(
+                r#"<w:p><w:r><w:drawing>
+                  <wp:{container} xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+                    xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+                    xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">
+                    {position}<wp:extent cx="254000" cy="508000"/>
+                    <wp:effectExtent l="6350" t="12700" r="19050" b="25400"/>
+                    <wp:docPr id="1" name="Text box"/>
+                    <a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">
+                      <wps:wsp><wps:spPr>
+                        <a:xfrm><a:off x="0" y="0"/><a:ext cx="254000" cy="508000"/></a:xfrm>
+                        <a:prstGeom prst="rect"/></wps:spPr>
+                        <wps:txbx><w:txbxContent><w:p><w:r><w:t>Box</w:t></w:r></w:p></w:txbxContent></wps:txbx>
+                        <wps:bodyPr/>
+                      </wps:wsp>
+                    </a:graphicData></a:graphic>
+                  </wp:{container}>
+                </w:drawing></w:r></w:p>"#
+            );
+            let doc = parse_from_bytes(&build_docx_without_media(&body)).expect("WPS paragraph");
+            let BodyElement::Paragraph(paragraph) = &doc.body[0] else {
+                panic!("expected WPS paragraph");
+            };
+            let shape = paragraph
+                .runs
+                .iter()
+                .find_map(|run| match run {
+                    DocRun::Shape(shape) => Some(shape),
+                    _ => None,
+                })
+                .expect("one shape");
+            assert_eq!(shape.inline_effect_extent, expected, "{container}");
+            assert_eq!(
+                shape.inline_object_origin,
+                (container == "inline").then_some(InlineObjectOrigin::DrawingMl)
+            );
+        }
+    }
+
+    #[test]
+    fn inline_vml_font_facts_follow_applied_style_then_drawing_run() {
+        // §17.7.2: the paragraph mark's direct size does not replace the
+        // formatting inherited by its drawing run. Direct run rPr wins next.
+        let styles = StyleMap::parse(
+            r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+          <w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Times New Roman"/><w:sz w:val="20"/></w:rPr></w:rPrDefault></w:docDefaults>
+          <w:style w:type="paragraph" w:styleId="Other"><w:name w:val="Other"/><w:rPr><w:rFonts w:ascii="Arial"/><w:sz w:val="40"/></w:rPr></w:style>
+        </w:styles>"#,
+        );
+        for (direct, expected_size, expected_face) in [
+            ("", 20.0, "Arial"),
+            (
+                r#"<w:rPr><w:rFonts w:ascii="Courier New"/><w:sz w:val="60"/></w:rPr>"#,
+                30.0,
+                "Courier New",
+            ),
+        ] {
+            let xml = format!(
+                r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:v="urn:schemas-microsoft-com:vml"><w:body>
+              <w:p><w:pPr><w:pStyle w:val="Other"/><w:rPr><w:sz w:val="20"/></w:rPr></w:pPr>
+                <w:r>{direct}<w:pict><v:shape style="width:80pt;height:40pt"><v:textbox><w:txbxContent><w:p><w:r><w:t>Box</w:t></w:r></w:p></w:txbxContent></v:textbox></v:shape></w:pict></w:r>
+              </w:p></w:body></w:document>"#
+            );
+            let xml = XmlDoc::parse(&xml).unwrap();
+            let body = xml
+                .root_element()
+                .children()
+                .find(|n| n.has_tag_name((W_NS, "body")))
+                .unwrap();
+            let elements = parse_body_elements(
+                body,
+                &styles,
+                &mut NumberingMap::default(),
+                &HashMap::new(),
+                &ChartMap::default(),
+                &HashMap::new(),
+                &ThemeColors::default(),
+                &HashMap::new(),
+            );
+            let wire = serde_json::to_value(&elements).unwrap();
+            let facts = &wire[0]["runs"][0]["__inlineObjectFontFacts"];
+            assert_eq!(facts["fontSize"].as_f64(), Some(expected_size), "{wire}");
+            assert_eq!(facts["fontFamily"].as_str(), Some(expected_face));
+        }
+    }
+
+    #[test]
+    fn inline_minimum_origin_excludes_relative_vml_and_wordart() {
+        for (position, payload, expected) in [
+            (
+                "",
+                "<v:textbox><w:txbxContent><w:p/></w:txbxContent></v:textbox>",
+                true,
+            ),
+            (
+                "position:relative;",
+                "<v:textbox><w:txbxContent><w:p/></w:txbxContent></v:textbox>",
+                false,
+            ),
+            ("", r#"<v:textpath string="WordArt"/>"#, false),
+            (
+                "",
+                r#"<v:textpath on="t" string="WordArt"/><v:textbox><w:txbxContent><w:p/></w:txbxContent></v:textbox>"#,
+                false,
+            ),
+            (
+                "",
+                r#"<v:textbox><x:txbxContent xmlns:x="urn:foreign"><w:p/></x:txbxContent></v:textbox>"#,
+                false,
+            ),
+        ] {
+            let body = format!(
+                r#"<w:p><w:r><w:pict xmlns:v="urn:schemas-microsoft-com:vml"><v:shape style="{position}width:80pt;height:8pt">{payload}</v:shape></w:pict></w:r></w:p>"#
+            );
+            let doc = parse_from_bytes(&build_docx_without_media(&body)).unwrap();
+            let BodyElement::Paragraph(paragraph) = &doc.body[0] else {
+                panic!("paragraph")
+            };
+            let shape = paragraph
+                .runs
+                .iter()
+                .find_map(|run| match run {
+                    DocRun::Shape(shape) => Some(shape),
+                    _ => None,
+                })
+                .expect("in-flow VML shape");
+            assert_eq!(
+                shape.inline_object_origin,
+                expected.then_some(InlineObjectOrigin::VmlStaticTextbox)
+            );
+        }
+    }
+
+    #[test]
+    fn wps_textbox_anchor_host_is_only_added_for_floating_shapes() {
+        for (container, expected_hosts) in [("inline", 0), ("anchor", 1)] {
+            let position = if container == "anchor" {
+                r#"<wp:simplePos x="0" y="0"/>
+                   <wp:positionH relativeFrom="page"><wp:posOffset>0</wp:posOffset></wp:positionH>
+                   <wp:positionV relativeFrom="paragraph"><wp:posOffset>0</wp:posOffset></wp:positionV>"#
+            } else {
+                ""
+            };
+            let body = format!(
+                r#"<w:p><w:r><w:rPr><w:rFonts w:ascii="Courier New"/><w:sz w:val="60"/></w:rPr><w:drawing>
+                  <wp:{container} xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+                    xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+                    xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">
+                    {position}<wp:extent cx="254000" cy="508000"/>
+                    <wp:docPr id="1" name="Text box"/>
+                    <a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">
+                      <wps:wsp><wps:spPr>
+                        <a:xfrm><a:off x="0" y="0"/><a:ext cx="254000" cy="508000"/></a:xfrm>
+                        <a:prstGeom prst="rect"/></wps:spPr>
+                        <wps:txbx><w:txbxContent><w:p><w:r><w:t>Box</w:t></w:r></w:p></w:txbxContent></wps:txbx>
+                        <wps:bodyPr/>
+                      </wps:wsp>
+                    </a:graphicData></a:graphic>
+                  </wp:{container}>
+                </w:drawing></w:r></w:p>"#
+            );
+            let doc = parse_from_bytes(&build_docx_without_media(&body)).expect("WPS paragraph");
+            let BodyElement::Paragraph(paragraph) = &doc.body[0] else {
+                panic!("expected WPS paragraph");
+            };
+            let shapes: Vec<_> = paragraph
+                .runs
+                .iter()
+                .filter_map(|run| match run {
+                    DocRun::Shape(shape) => Some(shape),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(shapes.len(), 1, "{container}");
+            assert_eq!(shapes[0].inline, container == "inline");
+            let wire = serde_json::to_value(shapes[0]).unwrap();
+            if container == "inline" {
+                assert_eq!(
+                    wire["__inlineObjectFontFacts"]["fontSize"].as_f64(),
+                    Some(30.0)
+                );
+                assert_eq!(
+                    wire["__inlineObjectFontFacts"]["fontFamily"].as_str(),
+                    Some("Courier New")
+                );
+            } else {
+                assert!(wire.get("__inlineObjectFontFacts").is_none());
+            }
+            assert_eq!(shapes[0].text_blocks[0].text, "Box");
+            assert_eq!(
+                paragraph
+                    .runs
+                    .iter()
+                    .filter(|run| matches!(run, DocRun::AnchorHost(_)))
+                    .count(),
+                expected_hosts,
+                "{container} text box host count"
+            );
+        }
     }
 
     #[test]
@@ -32879,6 +33197,24 @@ mod vml_pict_tests {
         assert!((shape.stroke_width - 1.5).abs() < 1e-6);
         assert_eq!(shape.stroke_dash.as_deref(), Some("0 2"));
         assert_eq!(shape.stroke_cap.as_deref(), Some("round"));
+    }
+
+    #[test]
+    fn inline_vml_textbox_has_no_anchor_host() {
+        let body = format!(
+            r##"<w:document{ns}><w:body><w:p><w:r><w:pict>
+              <v:shape type="#_x0000_t202" style="width:20pt;height:40pt">
+                <v:textbox><w:txbxContent><w:p><w:r><w:t>Box</w:t></w:r></w:p></w:txbxContent></v:textbox>
+              </v:shape>
+            </w:pict></w:r></w:p></w:body></w:document>"##,
+            ns = VML_NS,
+        );
+        let runs = all_runs(&body, &HashMap::new());
+        let [DocRun::Shape(shape)] = runs.as_slice() else {
+            panic!("inline VML text box must have no anchor host: {runs:?}");
+        };
+        assert!(shape.inline);
+        assert_eq!(shape.text_blocks[0].text, "Box");
     }
 
     /// Part 4 §19.3.2.6: a floating VML object with square wrapping reserves

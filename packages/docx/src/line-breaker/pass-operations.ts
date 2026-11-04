@@ -355,6 +355,8 @@ function resetPhysicalLineMetrics({ breakerState }: PassOperationState): void {
   breakerState.lineIntendedSingle = 0;
   breakerState.lineHasInlinePicture = false;
   breakerState.linePictureMarkSingle = 0;
+  breakerState.lineObjectBaselineMinimum = 0;
+  breakerState.lineObjectAdvanceMinimum = 0;
   breakerState.lineGridCountSingle = 0;
   breakerState.lineLatinGridCountSingle = 0;
   breakerState.lineVisibleAscent = 0;
@@ -1084,14 +1086,21 @@ export function performFlush(
   const desc = hasContent ? breakerState.lineDescent : contentHeight * scale * 0.2;
   // A picture-bullet marker metric joins that box (its own or synthesized)
   // as a minimum ascent above the baseline.
-  const asc = Math.max(contentAscent, breakerState.lineMarkerAscent);
+  const actualAscent = Math.max(contentAscent, breakerState.lineMarkerAscent);
+  // The drawing run is a minimum, not a hidden glyph: only real text
+  // contributes descent. VML's separately owned minimum changes advance only.
+  const objectExtra = Math.max(0, breakerState.lineObjectBaselineMinimum - actualAscent - desc);
+  const asc = actualAscent + objectExtra;
+  const physicalIntendedSingle = Math.max(breakerState.lineIntendedSingle, breakerState.lineObjectAdvanceMinimum);
   const h = Math.max(contentHeight, breakerState.lineMarkerHeight);
   const visibleAscent = breakerState.lineHasVisibleMetrics
-    ? Math.max(breakerState.lineVisibleAscent, breakerState.lineMarkerAscent)
+    ? Math.max(breakerState.lineVisibleAscent, breakerState.lineMarkerAscent) + objectExtra
     : asc;
   const visibleDescent = breakerState.lineHasVisibleMetrics
     ? breakerState.lineVisibleDescent
     : desc;
+  // Keep this explicit even for box-only VML: its larger physical intended
+  // single reserves below-space, not a centred visible baseline box.
   const visibleIntendedSingle = breakerState.lineHasVisibleMetrics
     ? breakerState.lineVisibleIntendedSingle
     : breakerState.lineIntendedSingle;
@@ -1172,7 +1181,7 @@ export function performFlush(
     visibleAscent,
     visibleDescent,
     visibleIntendedSingle,
-    intendedSingle: breakerState.lineIntendedSingle,
+    intendedSingle: physicalIntendedSingle,
     latinGridCountSingle: breakerState.lineLatinGridCountSingle,
     ...(inlinePictureTextSingle > 0 ? { inlinePictureTextSingle } : {}),
     uniformPositionAuto,
@@ -1208,7 +1217,7 @@ export function performFlush(
       asc,
       desc,
       breakerState.lineHasRuby,
-      breakerState.lineIntendedSingle,
+      physicalIntendedSingle,
       breakerState.lineEastAsian,
       gridCountSingle,
       uniformPositionAuto,
@@ -1415,6 +1424,10 @@ export function performAddToLine(
   if (h > breakerState.lineHeight) breakerState.lineHeight = h;
   if ('imagePath' in s && s.inlinePicture === true) {
     breakerState.lineHasInlinePicture = true;
+    breakerState.lineObjectBaselineMinimum = Math.max(breakerState.lineObjectBaselineMinimum,
+      (s.objectRunBaselineMinimumPx ?? 0) * scale);
+    breakerState.lineObjectAdvanceMinimum = Math.max(breakerState.lineObjectAdvanceMinimum,
+      (s.objectRunAdvanceMinimumPx ?? 0) * scale);
     breakerState.linePictureMarkSingle = Math.max(
       breakerState.linePictureMarkSingle,
       (s.paragraphMarkSinglePx ?? 0) * scale,
