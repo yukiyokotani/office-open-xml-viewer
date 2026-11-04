@@ -16,7 +16,7 @@ import {
 } from './advance.js';
 import type { DocGridCtx } from './model.js';
 import { verticalRunInkExtra } from './vertical-text.js';
-import { restoreCanvasLanguage, selectCanvasLanguage } from '../canvas-language.js';
+import { restoreCanvasLanguage, selectCanvasLanguage } from '@silurus/ooxml-core/internal/canvas-language';
 
 /** Measured UTF-16 units per text unit charged for one vertical cell plan:
  * routing probes (natural, vertical-form and ink probes) plus one

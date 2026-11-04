@@ -1,5 +1,5 @@
 import { acquireCanvasGlyphContours } from '../native-glyph-contours.js';
-import { restoreCanvasLanguage, selectCanvasLanguage } from '../canvas-language.js';
+import { restoreCanvasLanguage, selectCanvasLanguage } from '@silurus/ooxml-core/internal/canvas-language';
 import { type CjkLang } from '@silurus/ooxml-core';
 import {
   fontFamilyKey,

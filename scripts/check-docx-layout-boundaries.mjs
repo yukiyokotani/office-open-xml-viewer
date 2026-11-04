@@ -96,6 +96,11 @@ const BODY_LAYOUT_ADAPTER_IMPORT_BINDINGS = new Map([
 ]);
 
 const SHARED_PAINT_IMPORTS = new Map([
+  // Pure Canvas state selection/restoration; no measurement or layout acquisition.
+  ['@silurus/ooxml-core/internal/canvas-language', new Map([
+    ['selectCanvasLanguage', 'value'],
+    ['restoreCanvasLanguage', 'value'],
+  ])],
   ['@silurus/ooxml-core', new Map([
     ['acquireBitmapCacheLease', 'value'],
     ['applyDuotone', 'value'],

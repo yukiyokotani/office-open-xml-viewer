@@ -3,7 +3,7 @@ import {
   canvasFontString,
   withVertFeature,
 } from '@silurus/ooxml-core';
-import { restoreCanvasLanguage, selectCanvasLanguage } from '../canvas-language.js';
+import { restoreCanvasLanguage, selectCanvasLanguage } from '@silurus/ooxml-core/internal/canvas-language';
 import type { ParagraphLayout, TextBoxLayout } from '../layout/types.js';
 import type { CanvasPaintContext } from './types.js';
 import { paintDrawingLayout } from './canvas-drawing.js';

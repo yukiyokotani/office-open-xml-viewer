@@ -1,6 +1,6 @@
 import { canvasFontString, createAuxCanvas, GeometryWorkBudgetError } from '@silurus/ooxml-core';
 import type { GlyphContourRequest } from './layout/text.js';
-import { restoreCanvasLanguage, selectCanvasLanguage } from './canvas-language.js';
+import { restoreCanvasLanguage, selectCanvasLanguage } from '@silurus/ooxml-core/internal/canvas-language';
 
 type Point = Readonly<{x: number; y: number}>;
 
