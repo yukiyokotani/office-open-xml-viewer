@@ -78,6 +78,24 @@ function placements(body: BodyElement, settings?: DocSettings): TextPlacement[][
 }
 
 describe('line-end space in a run of the opposite direction', () => {
+  it('retains an overflowing explicit opposite-direction space on its own final line', () => {
+    // Word controls: an isolated source word fits the band, but its final
+    // opposite-direction U+0020 does not. The source suffix allocates a
+    // zero-ink line instead of changing the visible word's alignment.
+    for (const alignment of ['left', 'center', 'right'] as const) {
+      const body = para([textRun('1. ', { rtl: true })], alignment, { indentRight: 335 });
+      const result = lines(body, { compatibilityMode: 15 });
+      expect(result).toHaveLength(2);
+      const sourceText = (line: LineLayout) => texts(line)
+        .sort((a, b) => a.range.start - b.range.start).map(p => p.text).join('');
+      expect(result.map(sourceText)).toEqual(['1.', ' ']);
+      expect(texts(result[1]!)[0]!.range).toEqual({ start: 2, end: 3 });
+      const visibleLeft = Math.min(...texts(result[0]!).map(p => p.bounds.xPt));
+      expect(visibleLeft).toBeCloseTo(alignment === 'left' ? 20 : alignment === 'center' ? 22.5 : 25, 6);
+      expect(texts(result[1]!).every(p => p.bounds.widthPt >= 0)).toBe(true);
+    }
+  });
+
   it('narrows the overflowing final space at the start side below mode 15', () => {
     // Mode 14 keeps the line; only the 5 pt overflow of the 10 pt space hangs
     // past the start edge (A0-left-L: ink from 57.1pt, not 60.0pt).

@@ -137,6 +137,20 @@ export function paragraphCharacterGrid(
   };
 }
 
+/** One source-boundary acquisition policy for bounded lines and AutoFit. */
+export function paragraphCountsExplicitOppositeRunSpaces(
+  paragraph: Pick<ParagraphLayoutSource, 'alignment'>,
+  context: Pick<ParagraphLayoutContext, 'runDirectionUnauthored' | 'wordWrap'>,
+  environment: Pick<ParagraphMeasurementEnvironment,
+    'pageWritingMode' | 'verticalCJK' | 'verticalPageFrame' | 'compatibilityMode'>,
+): boolean {
+  return environment.pageWritingMode === 'horizontal-tb'
+    && environment.verticalCJK !== true && environment.verticalPageFrame !== true
+    && context.runDirectionUnauthored !== true
+    && wordExplicitLineEndRunSpaceFitApplies(environment.compatibilityMode, paragraph.alignment,
+      context.wordWrap !== false);
+}
+
 function paragraphGrid(context: ParagraphLayoutContext): DocGridCtx {
   const characterGrid = paragraphCharacterGrid(context);
   return {
@@ -351,11 +365,7 @@ export function measureParagraph(
     lineGridActive: context.lineGrid.active,
     characterGridActive: context.characterGrid.active,
     paragraphRtl: context.baseRtl,
-    countExplicitOppositeRunSpaces: environment.pageWritingMode === 'horizontal-tb'
-      && environment.verticalCJK !== true && environment.verticalPageFrame !== true
-      && context.runDirectionUnauthored !== true
-      && wordExplicitLineEndRunSpaceFitApplies(environment.compatibilityMode, paragraph.alignment,
-        context.wordWrap !== false),
+    countExplicitOppositeRunSpaces: paragraphCountsExplicitOppositeRunSpaces(paragraph, context, environment),
     autoSpaceDE: paragraph.autoSpaceDE,
     autoSpaceDN: paragraph.autoSpaceDN,
   });

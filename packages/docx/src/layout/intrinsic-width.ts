@@ -1,6 +1,7 @@
+import { explicitLineEndSpaceCounts } from '../line-breaker/atomic-units.js';
 import { textBreakWindow, textBreakOffsets } from '../line-breaker/text-break-window.js';
 import { LineMeasurementAdapter, kernedSpaceSeamIdentity } from '../line-breaker/measurement-adapter.js';
-import { condensedSpacingMayFloor, slicedTextMetadata } from '../line-breaker/advance.js';
+import { condensedSpacingMayFloor, RESET_SLICED_TEXT_MEASUREMENT, slicedTextMetadata } from '../line-breaker/advance.js';
 import { optionalHyphenBreakAllowed } from '../line-breaker/optional-hyphens.js';
 import { tabAlignmentRole, wordTabGlueUnit } from '../line-breaker/tabs.js';
 import { graphemeClusterOffsets } from '@silurus/ooxml-core';
@@ -25,7 +26,7 @@ import type {
   ParagraphMeasurementEnvironment,
   TextMeasurer,
 } from '../paragraph-measure.js';
-import { paragraphCharacterGrid } from '../paragraph-measure.js';
+import { paragraphCharacterGrid, paragraphCountsExplicitOppositeRunSpaces } from '../paragraph-measure.js';
 import { calcEffectiveFontPx, sliceTextShapeRequest } from './text.js';
 import { wordSnapToCharsEastAsianCellCount } from './line-compatibility.js';
 import type { ParagraphLayoutSource, TextFontSlots } from './text.js';
@@ -334,6 +335,7 @@ function measureTextRange(
   let boundaryAdapter: LineMeasurementAdapter | undefined;
   let condensedAdapter: LineMeasurementAdapter | undefined;
   let previousCandidate: LayoutTextSeg | undefined;
+  let previousSourceEnd: number | undefined;
   let pendingSnapBlock: Readonly<{
     kind: 'latin' | 'complexScript';
     naturalWidthPt: number;
@@ -371,6 +373,13 @@ function measureTextRange(
     const overlapStart = Math.max(start, piece.start);
     const overlapEnd = conditional ? piece.end : Math.min(end, piece.end);
     if (overlapStart >= overlapEnd) continue;
+    // A minimum projection can omit a hanging source owner. Its neighbors
+    // retain their source contexts, but must not gain a new adjacency pair.
+    if (previousSourceEnd !== undefined && overlapStart > previousSourceEnd) {
+      flushSnapBlock();
+      previousCandidate = undefined;
+    }
+    previousSourceEnd = overlapEnd;
     const text = conditional ? endingGlyph!.text : joinedText.slice(overlapStart, overlapEnd);
     const localStart = overlapStart - piece.start;
     const localEnd = overlapEnd - piece.start;
@@ -563,6 +572,40 @@ function tabGlueWidthsPt(
   return widths.length === merged.filter((segment) => 'isTab' in segment).length ? widths : [];
 }
 
+/** Keep visible source text and only charged U+0020 owners in one shaping
+ * range. Contiguous word/space pieces stay whole, preserving native kerning;
+ * omitted owners remain gaps rather than inventing new source adjacency. */
+function chargedMinimumPieces(
+  pieces: readonly Readonly<{ segment: LayoutTextSeg; start: number; end: number }>[],
+  joinedText: string,
+  visibleEnd: number,
+): Array<{ segment: LayoutTextSeg; start: number; end: number }> {
+  let spaceStart = joinedText.length;
+  while (spaceStart > 0 && joinedText.charCodeAt(spaceStart - 1) === 0x20) spaceStart--;
+  const owned: Array<{ segment: LayoutTextSeg; start: number; end: number }> = [];
+  for (const piece of pieces) {
+    const prefixEnd = Math.min(piece.end, visibleEnd);
+    const ownsSpace = explicitLineEndSpaceCounts(piece.segment);
+    const ownedStart = Math.max(piece.start, spaceStart);
+    if (ownsSpace && (piece.start >= spaceStart || prefixEnd === ownedStart)) {
+      owned.push(piece);
+      continue;
+    }
+    if (prefixEnd > piece.start) owned.push({ ...piece, end: prefixEnd });
+    if (ownsSpace && ownedStart < piece.end) {
+      const start = ownedStart - piece.start;
+      owned.push({
+        start: ownedStart, end: piece.end,
+        segment: { ...piece.segment, ...RESET_SLICED_TEXT_MEASUREMENT,
+          ...slicedTextMetadata(piece.segment, start, piece.segment.text.length),
+          text: piece.segment.text.slice(start),
+        },
+      });
+    }
+  }
+  return owned;
+}
+
 /** Visit every unbreakable text atom's width in source order until `visit`
  * returns true. */
 function visitTextAtomWidths(
@@ -607,13 +650,21 @@ function visitTextAtomWidths(
     const optionalOffsets = [...optionalBreaks.keys()].sort((left, right) => left - right);
     let optionalIndex = 0;
     let breakIndex = 0;
+    // The source-owned suffix is inspected once, before visiting atoms.
+    const hasChargedSpaces = pieces.some(piece => explicitLineEndSpaceCounts(piece.segment));
     let tokenStart = 0;
     for (const token of splitTextForLayout(joinedText)) {
       const trimmed = token.replace(/\s+$/u, '');
       const trimmedStart = tokenStart;
       const trimmedEnd = tokenStart + trimmed.length;
       tokenStart += token.length;
-      if (!trimmed) continue;
+      const minimumPieces = hasChargedSpaces && tokenStart === joinedText.length
+        ? chargedMinimumPieces(pieces, joinedText, trimmedEnd) : undefined;
+      if (!trimmed) {
+        if (minimumPieces && visit(measureTextRange(minimumPieces, joinedText,
+          trimmedStart, joinedText.length, measurer, characterGrid))) return;
+        continue;
+      }
       if (!hasCJKBreakOpportunity(trimmed)) {
         const ends: number[] = [];
         while (breakIndex < explicitBreaks.length && explicitBreaks[breakIndex] <= trimmedStart)
@@ -628,8 +679,11 @@ function visitTextAtomWidths(
         ends.sort((left, right) => left - right);
         let atomStart = trimmedStart;
         for (const atomEnd of new Set(ends)) {
+          const ownsSuffix = minimumPieces !== undefined && atomEnd === trimmedEnd;
           if (visit(measureTextRange(
-            pieces, joinedText, atomStart, atomEnd, measurer, characterGrid, optionalBreaks.get(atomEnd)))) return;
+            ownsSuffix ? minimumPieces : pieces, joinedText, atomStart,
+            ownsSuffix ? joinedText.length : atomEnd, measurer, characterGrid,
+            optionalBreaks.get(atomEnd)))) return;
           atomStart = atomEnd;
         }
         continue;
@@ -666,11 +720,12 @@ function visitTextAtomWidths(
       }
       if (atom) atoms.push(atom);
       for (const unbreakable of atoms) {
+        const ownsSuffix = minimumPieces !== undefined && unbreakable.end === trimmedEnd;
         if (visit(measureTextRange(
-          pieces,
+          ownsSuffix ? minimumPieces : pieces,
           joinedText,
           unbreakable.start,
-          unbreakable.end,
+          ownsSuffix ? joinedText.length : unbreakable.end,
           measurer,
           characterGrid,
         ))) return;
@@ -714,6 +769,7 @@ export function measureParagraphIntrinsicWidths(
     lineGridActive: context.lineGrid.active,
     characterGridActive: context.characterGrid.active,
     paragraphRtl: context.baseRtl,
+    countExplicitOppositeRunSpaces: paragraphCountsExplicitOppositeRunSpaces(paragraph, context, environment),
     autoSpaceDE: paragraph.autoSpaceDE,
     autoSpaceDN: paragraph.autoSpaceDN,
   });
@@ -770,7 +826,13 @@ export function measureParagraphIntrinsicWidths(
     minimumLeftPt = Math.min(minimumLeftPt, markerInterval.startPt);
     maximumRightPt = Math.max(maximumRightPt, markerInterval.endPt);
   }
-  let minimumAtomPt = minimumTextAtomWidthPt(segments, context, measurer);
+  // The maximum-content shaping view above stays unchanged. Its compatible
+  // run merge intentionally erases source seams; a charged minimum instead
+  // consumes the original acquired owners and their UTF-16 endpoints once.
+  // This also retains semantic slots and style-specific whitespace advances.
+  const minimumSegments = builtSegments.some(segment => 'text' in segment
+    && segment.explicitLineEndSpaceEnd !== undefined) ? builtSegments : segments;
+  let minimumAtomPt = minimumTextAtomWidthPt(minimumSegments, context, measurer);
   let tabOrdinal = 0;
   for (const line of lines) {
     let penPt = 0;

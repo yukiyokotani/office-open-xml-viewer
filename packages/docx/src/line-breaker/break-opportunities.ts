@@ -1,5 +1,5 @@
 import { isInklessLineItem } from './break-queue.js';
-import { lineEndSpaceCharged, lineTrailingSpaceSuffixWidth, measureFitTextUnit, measureJoinedTextUnit } from './atomic-units.js';
+import { explicitLineEndSpaceCounts, lineEndSpaceCharged, lineTrailingSpaceSuffixWidth, measureFitTextUnit, measureJoinedTextUnit } from './atomic-units.js';
 import { placeOptionalHyphenPrefix } from './optional-hyphens.js';
 import {
   kinsokuAdjustedSplit,
@@ -482,7 +482,9 @@ function processTextSegment(context: BreakOpportunityIteratorContext, seg: Layou
   // §17.3.1.21 permits paragraph-edge hanging, not intrusion into a
   // DrawingML exclusion (§20.4.2.17). A narrowed float gap owns its full ink.
   const admitsTrailingOverflowPunctuation =
-    overflowPunct &&
+    // Hanging punctuation cannot also admit a charged source-space suffix.
+    // Its zero-ink continuation is acquired independently of the visible mark.
+    !explicitLineEndSpaceCounts(s) && overflowPunct &&
     breakerState.gapTransaction?.endsAtExclusion !== true &&
     trailingOverflowCharacter !== undefined &&
     (breakerState.currentLine.length > 0 || textBeforeTrailingOverflow.length > 0) &&
