@@ -1,3 +1,4 @@
+import { isInklessLineItem } from './break-queue.js';
 import { lineEndSpaceCharged, lineTrailingSpaceSuffixWidth, measureFitTextUnit, measureJoinedTextUnit } from './atomic-units.js';
 import { placeOptionalHyphenPrefix } from './optional-hyphens.js';
 import {
@@ -64,6 +65,7 @@ export type BreakOpportunityIteratorContext = Pick<
   | 'firstIndent'
   | 'tabOriginPx'
   | 'maxWidth'
+  | 'wrapCtx'
   | 'marginRightPx'
   | 'tabFollowWidth'
   | 'measureText'
@@ -1307,6 +1309,19 @@ function settleLineStartKernedSpacePair(
   return { ...frame, w: frame.w - pair, wForFit: frame.wForFit - pair };
 }
 
+/** For a unit wider than the full band, the narrowed/vertically displaced
+ * observation is mode-15 only. The separately measured full-band case applies in every mode. Compare the
+ * physical query origin so an ordinary later line is not mistaken for a
+ * line a float pushed down. */
+function overlongAnchorLineInScope(context: BreakOpportunityIteratorContext, unitWidth: number): boolean {
+  if (!context.wrapCtx?.preservePre15AnchorLine
+    || context.fitsMeasuredWidth(unitWidth, context.maxWidth)) return true;
+  const { breakerState } = context;
+  return breakerState.lineXOffset === 0 && breakerState.lineMaxWidth === context.maxWidth
+    && (breakerState.gapTransaction === null
+      || breakerState.currentLineTopY === breakerState.gapTransaction.requestTopY);
+}
+
 function placeOrSplitText(context: BreakOpportunityIteratorContext, inputFrame: TextFitFrame): void {
   const frame = settleLineStartKernedSpacePair(context, settleLineStartAutoSpace(context, inputFrame));
   const {
@@ -1356,13 +1371,17 @@ function placeOrSplitText(context: BreakOpportunityIteratorContext, inputFrame: 
     splitSeaOverflow(context, frame);
   } else if (breakerState.currentLine.length === 0
     || (s.listLabel === undefined && breakerState.currentWidth < availW()
-      && breakerState.currentLine.every(isListLabelItem))) {
+      && breakerState.currentLine.every(isListLabelItem))
+    || breakerState.currentLine.every(isInklessLineItem) && overlongAnchorLineInScope(context, wForFit)) {
     // `word-overlong-token-emergency-break`: for a single non-CJK token wider
     // than a full line, fit the widest character prefix (at least one
     // character), draw it, and re-queue the remainder. Segments are already
     // space-delimited, so this cannot bypass an ordinary space opportunity.
     // The body's first unit on a line holding only a list label is fitted
     // the same way, in the width the label leaves.
+    // WORD_OVERLONG_HEAD_AFTER_ANCHOR: an anchor character before the token
+    // has no advance and stays with it, so a line holding only such items is
+    // still the token's empty line (flushing it would leave an empty line).
     const room = availW() - breakerState.currentWidth;
     const semanticSplit = explicitTextSplit(s, room);
     const split = semanticSplit || emergencyTextSplit(s, room);
@@ -1578,7 +1597,15 @@ function prepareAtomicTextFit(
   ) {
     const group = measureJoinedTextUnit(s, breakerState.queue, context, w, trailingSpaceW, 0, false, preferWholeWord ? 'whole-word' : 'prefix');
     const groupFitWidth = fitWidthFor(group.width, group.trailingSpace, group.next);
+    // WORD_OVERLONG_HEAD_AFTER_ANCHOR: a line holding only inkless items
+    // (anchor characters, mark metrics) is still the unit's empty line. The
+    // rule is measured for Latin words only: a unit holding SEA dictionary
+    // text keeps ending such a line first.
+    const anchorOnlyLine = breakerState.currentLine.every(isInklessLineItem)
+      && overlongAnchorLineInScope(context, groupFitWidth)
+      && group.pieces.every((piece) => piece.segment.seaBreaks === undefined);
     if (
+      !anchorOnlyLine &&
       !fitsLineWidth(breakerState.currentWidth + groupFitWidth, availW()) &&
       // WORD_COMPRESSED_SPACE_LINE_FIT judges a joined unit as one candidate,
       // so a source-run seam inside it cannot change the decision.

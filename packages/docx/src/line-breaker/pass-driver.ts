@@ -397,6 +397,7 @@ export function runLineBreakerPass(input: LineBreakerPassInput): LayoutLine[] {
 
   operationState = {
     ...input,
+    paragraphFirstIndent: input.firstIndent,
     reservePrefixWork: createPrefixWorkBudget(),
     probeHeights,
     probeFloors,

@@ -178,6 +178,13 @@ export interface GapWindow {
  * placement would need a forced break or overflow at the fragment head, the
  * fragment rolls back and the next gap is searched with a strictly larger
  * requirement. Admission and placement therefore share one implementation. */
+/** An anchor character (a floating object's inline anchor) or a
+ * paragraph-mark metric placeholder: it has no advance and no ink, and moves
+ * with the unit that follows it. */
+export function isInklessLineItem(item: LayoutSeg): boolean {
+  return ('text' in item && item.metricOnly === true) || ('imagePath' in item && Boolean(item.anchor));
+}
+
 export interface GapTransaction {
   /** Continuation origin while this physical line may still take a later gap. */
   cursor: { topY: number; left: number; right: number } | null;
@@ -201,6 +208,13 @@ export interface GapTransaction {
   /** WORD_KASHIDA_LINE_FIT: requirement of a window reaching the band's far
    * edge, when it differs from `requirement` (an interior window's). */
   farEdgeRequirement?: number;
+  /** WORD_NUMBERED_FIRST_LINE_GAP_FIT: the rejected head unit of a numbered
+   * first line, which every candidate window must hold after the marker body
+   * that window resolves. */
+  numberingHead?: number;
+  /** WORD_NUMBERED_FIRST_LINE_GAP_FIT: `numberingHead` in a window that may
+   * hang its trailing overflow punctuation (one not ending at an exclusion). */
+  numberingHangingHead?: number;
 }
 
 export function createLineBreakerState(maxWidth: number, wrapCtx?: WrapLayoutCtx) {
