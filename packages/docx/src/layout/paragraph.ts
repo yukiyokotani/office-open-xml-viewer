@@ -5149,6 +5149,10 @@ function textBoxParagraphContext(
   } = inherited;
   return {
     ...host,
+    // This path is the deliberately lossy public ShapeText projection, which
+    // has no own kinsoku member. §17.3.1.16 belongs to a paragraph, not its host.
+    // Complete Word text boxes resolve each paragraph in their own body story.
+    kinsoku: inherited.documentKinsoku ?? inherited.kinsoku,
     ...(paragraph.endsAtHardBreak === true ? { endsAtHardBreak: true as const } : {}),
     rightIndentGrid: {
       ...inherited.rightIndentGrid,
@@ -6095,6 +6099,8 @@ function paragraphAcquisitionKey(
       context.hasRuby,
       context.hasEastAsianText,
       cache.kinsokuKey(context.kinsoku),
+      ...(context.documentKinsoku
+        ? [['documentKinsoku', cache.kinsokuKey(context.documentKinsoku)]] : []),
       context.defaultTabPt,
       context.overflowPunct !== false,
       context.cjkClosingMarkHang ?? null,

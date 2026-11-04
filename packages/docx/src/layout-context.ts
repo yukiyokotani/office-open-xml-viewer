@@ -184,6 +184,10 @@ export interface ParagraphLayoutContext {
   readonly hasRuby: boolean;
   readonly hasEastAsianText: boolean;
   readonly kinsoku: KinsokuRules;
+  /** The document rules before an off host paragraph's §17.3.1.16 projection.
+   * Public compatibility text boxes have no own kinsoku property; their
+   * paragraphs start from these rules rather than inheriting the host's off. */
+  readonly documentKinsoku?: KinsokuRules;
   readonly defaultTabPt: number;
   /** ECMA-376 §17.3.1.21 — omission on the source paragraph resolves true. */
   readonly overflowPunct?: boolean;
@@ -466,6 +470,7 @@ export function resolveParagraphLayoutContext(
     hasRuby: paragraphHasRuby(paragraph),
     hasEastAsianText: paragraphHasEastAsianText(paragraph),
     kinsoku: paragraph.kinsoku === false ? paragraphKinsokuDisabled(settings.kinsoku) : settings.kinsoku,
+    ...(paragraph.kinsoku === false ? { documentKinsoku: settings.kinsoku } : {}),
     defaultTabPt: settings.defaultTabPt,
     overflowPunct: paragraph.overflowPunct !== false,
     // word-justification-punctuation-hang, admitted only for the measured

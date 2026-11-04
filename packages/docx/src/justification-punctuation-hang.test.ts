@@ -425,6 +425,48 @@ describe('word-justification-punctuation-hang', () => {
   });
 });
 
+describe('text-box paragraph kinsoku ownership', () => {
+  const specimen = 'あ'.repeat(10) + '々い';
+
+  function boxedLines(kind: 'complete' | 'compatibility', hostOff: boolean, childOff = false, settings?: DocSettings): string[] {
+    const child = { ...para([textRun(specimen)], 'left'), ...(childOff ? { kinsoku: false } : {}) };
+    const shape = {
+      type: 'shape', zOrder: 0, subpaths: [], presetGeometry: 'rect', fill: null, stroke: null,
+      textBlocks: [{ text: specimen, fontSizePt: 20, fontFamily: 'NotInMetrics', alignment: 'left' }],
+      textAnchor: 't', textInsetL: 0, textInsetT: 0, textInsetR: 0, textInsetB: 0,
+      widthPt: 100, heightPt: 100,
+      ...(kind === 'complete' ? { textBoxContent: [child] } : {}),
+    };
+    const host = { ...para([shape as unknown as DocParagraph['runs'][number]], 'left'),
+      ...(hostOff ? { kinsoku: false } : {}) };
+    const normalized = normalizeInternalDocumentModel({
+      section, body: [host], settings,
+      headers: { default: null, first: null, even: null },
+      footers: { default: null, first: null, even: null }, fontFamilyClasses: {},
+    } as unknown as DocxDocumentModel);
+    const layout = layoutDocument(normalized.document,
+      createLayoutServices(normalized.document, { measureContext: makeCtx() }), { currentDateMs: 0 });
+    const outer = layout.pages[0]?.layers.body.find(node => node.kind === 'paragraph');
+    if (outer?.kind !== 'paragraph') throw new Error('expected a host paragraph');
+    const inner = outer.textBoxes[0]?.story.blocks[0];
+    if (inner?.kind !== 'paragraph') throw new Error('expected a text-box paragraph');
+    return inner.lines.map(text);
+  }
+
+  it('resolves complete Word text-box paragraphs independently from their host', () => {
+    expect(boxedLines('complete', false, true)).toEqual(['あ'.repeat(10), '々い']);
+    expect(boxedLines('complete', true)).toEqual(['あ'.repeat(9), 'あ々い']);
+  });
+
+  it('uses document rules for the public compatibility projection, preserving document overrides', () => {
+    // ShapeText has no paragraph kinsoku member: its deliberately lossy
+    // projection defaults to the document, never the unrelated host paragraph.
+    expect(boxedLines('compatibility', true)).toEqual(['あ'.repeat(9), 'あ々い']);
+    expect(boxedLines('compatibility', true, false, { kinsoku: false })).toEqual(['あ'.repeat(10), '々い']);
+    expect(boxedLines('compatibility', true, false, { noLineBreaksBefore: '' })).toEqual(['あ'.repeat(10), '々い']);
+  });
+});
+
 // #2079: paragraph w:kinsoku w:val="0" (§17.3.1.16), rows N2 of the same
 // controls. Where Word refuses the hang (mode 15, the kashida types and
 // thaiDistribute) the mark neither hangs nor is pushed: it starts line 2.
