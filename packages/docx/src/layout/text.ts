@@ -1338,12 +1338,15 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
       // resource, weight, style and source) is one string for Canvas, whichever
       // family name or slot requested it and whatever CSS fallback list follows.
       // Shaping it apart would break Arabic joining. Only in-scope spans
-      // merge; ordinary spans start with per-slot runs, independently of the
+      // merge when their slot languages also agree: a shared face does not
+      // erase independent §17.3.2.20 language axes or their OpenType forms.
+      // Ordinary spans start with per-slot runs, independently of the
       // registered physical-unit admission below.
       const merged: Array<(typeof resolvedGroups)[number] & Pick<TextShapeSpan, 'semanticSlotSpans'>> = [];
       for (const group of resolvedGroups) {
         const previous = merged.at(-1);
         if (previous && previous.substituteScript && group.substituteScript
+          && scriptSlotLanguage(request, previous.script) === scriptSlotLanguage(request, group.script)
           && sameEffectiveFace(previous.font, group.font)) {
           merged[merged.length - 1] = { ...previous, text: previous.text + group.text, end: group.end };
         } else {

@@ -53,6 +53,30 @@ describe('text service: §17.3.2.20 language per font slot', () => {
     expect(measured.map((request) => 'lang' in request ? request.lang : 'absent')).toEqual(['sr-rs', 'absent']);
     expect('lang' in plain.spans[0]!).toBe(false);
   });
+
+  it('keeps independent languages when scoped Arabic shares a physical face across slots', () => {
+    const scoped = createTextLayoutService({
+      fonts: createFontResolver([
+        { requestedFamily: 'Scoped Face', resolvedFamily: 'Arabic Substitute', source: 'substitute', script: 'arabic' },
+      ], { scriptScopedFamilies: { 'scoped face': { script: 'arabic', substituteFamilies: ['Arabic Substitute'] } } }),
+      measurer: { fingerprint: 'scoped-language', measure: request => ({
+        advancePt: [...request.text].length * (request.lang === 'ar' ? 4 : 5), ascentPt: 8, descentPt: 2,
+      }) },
+    });
+    const request = {
+      // BMP Arabic is ASCII-slot; supplementary Arabic mathematical letters
+      // are East-Asian-slot in §17.3.2.26, even with the same scoped face.
+      text: 'ا\u{1EE00}', fontSizePt: 10, clusterGeometry: false as const,
+      fonts: { ascii: 'Scoped Face', eastAsia: 'Scoped Face' },
+      language: 'ar', eastAsiaLanguage: 'ur',
+    };
+    const split = scoped.shape(request);
+    expect(split.spans.map(span => [span.text, span.lang])).toEqual([['ا', 'ar'], ['\u{1EE00}', 'ur']]);
+    expect(split.advancePt).toBe(9);
+    // Equal languages retain the existing joining-safe physical shape.
+    expect(scoped.shape({ ...request, eastAsiaLanguage: 'ar' }).spans.map(span => span.text))
+      .toEqual([request.text]);
+  });
 });
 
 describe('Canvas lang at measure and paint', () => {
