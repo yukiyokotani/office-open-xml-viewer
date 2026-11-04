@@ -5,7 +5,7 @@ import type { NumberingMarkerShapeInput } from '../layout/types.js';
 import type { MeasurementTextContext } from '../layout/measurement-capabilities.js';
 import type { ParagraphLayoutSource, TextLayoutService } from '../layout/text.js';
 import { referenceFontLineMetrics } from '../reference-font-line-metrics.js';
-import { WORD_EMPTY_MARK_ASCII_FACE, wordDegenerateLineSpacingIsSingle, wordEastAsianGridLineCells, wordFarEastSingleLinePx, wordGridAtLeastLineHeightPx, wordUseFeLayoutInheritedGridHeightPx, wordUseFeLayoutParagraphMarkGridAdvancePx, wordInlinePictureAutoLineHeightPx, wordLatinDesignGridSingleHeight } from '../layout/line-compatibility.js';
+import { wordDegenerateLineSpacingIsSingle, wordEastAsianGridLineCells, wordFarEastSingleLinePx, wordGridAtLeastLineHeightPx, wordUseFeLayoutInheritedGridHeightPx, wordUseFeLayoutParagraphMarkGridAdvancePx, wordInlinePictureAutoLineHeightPx, wordLatinDesignGridSingleHeight } from '../layout/line-compatibility.js';
 import { type DocGridCtx, type LayoutLine } from './model.js';
 import { isGridLineRule } from './advance.js';
 import { buildFont, getDefaultFontFamily, getDefaultFontSize } from './font-routes.js';
@@ -337,22 +337,27 @@ export function paragraphMarkLineMetrics(
   minimumAscentPx = 0,
 ): MarkLineMetrics {
   const effectiveMarkShapeInput = markShapeInput;
-  // WORD_EMPTY_MARK_ASCII_FACE: an empty paragraph mark is measured with its
-  // ascii face whatever its hint, language, eastAsia face or document scripts.
-  // A line grid changes the advance, not the face owning the content box:
-  // page-edge controls with the ascii/eastAsia faces swapped distinguish them.
+  // Existing empty-mark policy retains hint/document-script font routing.
+  // This is not specified by §17.3.2.26: an empty mark has no character from
+  // which to select a slot. Ordinary Word probes select the ascii face, but
+  // applying that selection to grid page-edge admission also moves following
+  // content a whole grid line in a real document. That face/admission
+  // interaction remains unresolved; do not add a grid-only font exception.
+  // Font routing and content/document-based grid-cell classification remain
+  // independent until the complete empty-mark rule is established.
   // WORD_PICTURE_BULLET_LINE_PARTICIPATION: beside a picture bullet the empty
   // mark is measured with its own (non-East-Asian) face.
-  void WORD_EMPTY_MARK_ASCII_FACE;
+  const markUsesEastAsianFace = (eastAsian && minimumAscentPx <= 0)
+    || effectiveMarkShapeInput?.fontHint === 'eastAsia';
   const forceCs = effectiveMarkShapeInput?.complexScript === true;
   const fs = effectiveMarkShapeInput?.fontSizePt ?? getDefaultFontSize(para);
-  const authoredFamily = getDefaultFontFamily(para, false);
+  const authoredFamily = getDefaultFontFamily(para, markUsesEastAsianFace);
   const markWeight = effectiveMarkShapeInput?.weight ?? 400;
   const markStyle = effectiveMarkShapeInput?.style ?? 'normal';
   // §17.3.1.29 stores the paragraph mark's own run properties in pPr/rPr.
   // Shape this probe in its own context: the library's scoped Arabic substitute
   // policy must not borrow script proof from surrounding body runs.
-  const markProbe = 'x';
+  const markProbe = markUsesEastAsianFace ? 'あ' : 'x';
   // A supplied metric map without the selecting text service cannot prove
   // which face Canvas paints. The compatibility argument above is ignored;
   // only the selected resource tuple below can lend authoritative geometry.
@@ -464,12 +469,9 @@ export function paragraphMarkLineMetrics(
   // the baseline, and that whole box then follows the paragraph's line rule.
   // Exact spacing ignores the picture (the caller passes no minimum).
   asc = Math.max(asc, minimumAscentPx);
-  // The face is the ascii one, but an East Asian paragraph keeps that face's
-  // Far East design height, which is what docGrid cell counts are built from.
-  // A resource that only records its Far East height has no other design line.
-  const resourceRatio = eastAsian
+  const resourceRatio = markUsesEastAsianFace
     ? resolvedLocalFont?.eastAsianLineHeightRatio ?? resolvedLocalFont?.lineHeightRatio
-    : resolvedLocalFont?.lineHeightRatio ?? resolvedLocalFont?.eastAsianLineHeightRatio;
+    : resolvedLocalFont?.lineHeightRatio;
   const designIntendedSingle = referenceMarkMetric
     ? referenceMarkMetric.lineHeightRatio * fs * scale
     : resourceRatio != null
