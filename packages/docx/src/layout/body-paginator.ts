@@ -1561,11 +1561,12 @@ function* paginateBodyPassSteps(
       if (unbounded.has(id) || !closedReference.has(id)) span.last = Number.POSITIVE_INFINITY;
     }
     let limit = Math.min(pageIndexLimit, endnoteFlowStartPage);
-    for (let lowered = true; lowered;) {
-      lowered = false;
-      for (const span of spans.values()) {
-        if (span.first < limit && span.last >= limit) { limit = span.first; lowered = true; }
-      }
+    // Descending starts compute the closure in one sweep: after lowering,
+    // every previously visited span starts at or beyond the new limit.
+    // Repeated unsorted scans would be quadratic for a chain of notes
+    // continuing onto the next note's reference page.
+    for (const span of [...spans.values()].sort((a, b) => b.first - a.first)) {
+      if (span.first < limit && span.last >= limit) limit = span.first;
     }
     return limit;
   };
