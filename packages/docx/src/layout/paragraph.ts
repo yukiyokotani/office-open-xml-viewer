@@ -926,6 +926,41 @@ function keepGraphemeSafeCuts(
   return { perGap, perSeg: retained };
 }
 
+/** Move positive word-space deltas to their source U+0020 advances. A run
+ * of consecutive spaces has internal cuts as well as its final trailing gap;
+ * retaining those cuts too would count their expansion twice in the source
+ * geometry while omitting it from the physical RTL leading space. */
+function retainRtlTrailingSpaceExpansion(
+  text: string,
+  stretch: SegStretch,
+  perGapPt: number,
+): Readonly<{ stretch: SegStretch; expansionPt: number; ownsTrailingGap: boolean }> {
+  const trailingPt = stretch.trailingGap ? stretch.trailingDelta ?? perGapPt : 0;
+  const ownsTrailingGap = trailingPt > 0;
+  let expansionPt = ownsTrailingGap ? trailingPt : 0;
+  if (stretch.splitBefore.length === 0) return { stretch, expansionPt, ownsTrailingGap };
+  const tailStart = hangingSpaceVisibleLength(text, code => code === 0x20);
+  const tailCodePoint = [...text.slice(0, tailStart)].length;
+  const cuts: number[] = [];
+  const deltas: number[] = [];
+  let internalPt = 0;
+  stretch.splitBefore.forEach((cut, index) => {
+    const deltaPt = stretch.gapDeltas?.[index] ?? perGapPt;
+    if (cut > tailCodePoint && deltaPt > 0) internalPt += deltaPt;
+    else { cuts.push(cut); deltas.push(deltaPt); }
+  });
+  if (internalPt === 0) return { stretch, expansionPt, ownsTrailingGap };
+  expansionPt += internalPt;
+  return {
+    stretch: { ...stretch, splitBefore: cuts,
+      internalStretch: stretch.internalStretch - internalPt,
+      ...(stretch.gapDeltas ? { gapDeltas: deltas } : {}),
+    },
+    expansionPt,
+    ownsTrailingGap,
+  };
+}
+
 /** Merge sorted gap, cluster and paint-op boundaries. Every cursor only moves
  * forward: O(code points + clusters + gaps + operations), including long runs
  * of consecutive spaces. Deltas are owned by the accepted line's gap plan. */
@@ -1871,18 +1906,21 @@ export function planLine(input: PlanLineInput): LineLayout {
     const segment = segments[segmentIndex];
     if (!segment) continue;
     const stretch = stretchByIndex?.get(segmentIndex);
-    const internalStretchPt = stretch?.internalStretch ?? 0;
     const compressedSpacePt = interiorSpaceCompression.get(segmentIndex) ?? 0;
     // A source U+0020 painted RTL lies before its word physically. Its
     // positive expansion belongs to that whitespace advance, not to the
     // next visual segment. Character-spread seams without U+0020 keep their
     // separate gap model (WORD_RUN_DIRECTION_ISOLATE's documented exclusion).
     // Negative justification keeps the breaker's existing compression plan.
-    const rtlSpaceOwnsGap = !characterSpreadBidi && segment.kind === 'text' && visual.rtl[segmentIndex] === true
+    const sourceSpaceExpansion = !characterSpreadBidi && segment.kind === 'text'
+      && visual.rtl[segmentIndex] === true
       && (segment.basePaintOps[0]?.writingMode ?? 'horizontal-tb') === 'horizontal-tb'
-      && segment.text.endsWith(' ') && stretch?.trailingGap === true
-      && (stretch.trailingDelta ?? perGapPt) > 0;
-    const rtlSpaceStretchPt = rtlSpaceOwnsGap ? stretch.trailingDelta ?? perGapPt : 0;
+      && segment.text.endsWith(' ') && stretch
+      ? retainRtlTrailingSpaceExpansion(segment.text, stretch, perGapPt) : undefined;
+    const geometryStretch = sourceSpaceExpansion?.stretch ?? stretch;
+    const internalStretchPt = geometryStretch?.internalStretch ?? 0;
+    const rtlSpaceOwnsGap = sourceSpaceExpansion?.ownsTrailingGap === true;
+    const rtlSpaceStretchPt = sourceSpaceExpansion?.expansionPt ?? 0;
     const spaceAdjustmentPt = rtlSpaceStretchPt - compressedSpacePt;
     const widthPt = segmentWidth(segment) + internalStretchPt + spaceAdjustmentPt;
     if (segment.kind === 'tab') {
@@ -1964,7 +2002,7 @@ export function planLine(input: PlanLineInput): LineLayout {
         direction: _direction,
         ...style
       } = segment;
-      let textGeometry = retainedTextGeometry(segment, stretch, perGapPt);
+      let textGeometry = retainedTextGeometry(segment, geometryStretch, perGapPt);
       if (spaceAdjustmentPt !== 0) {
         // The adjustment belongs to source trailing whitespace, even when
         // bidi places that whitespace before the visible glyphs. Keep the

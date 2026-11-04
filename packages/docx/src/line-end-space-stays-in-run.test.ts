@@ -245,4 +245,14 @@ describe('line-end space in a run of the opposite direction', () => {
 
   });
 
+  it('retains expansion inside a consecutive trailing-space sequence', () => {
+    const [line] = lines(para([textRun('Xray כתב   Yoke', { rtl: true })], 'distribute'),
+      { compatibilityMode: 15 });
+    const placed = texts(line!);
+    // Four U+0020 opportunities share 210pt: all three spaces before the
+    // Hebrew word physically retain their 52.5pt expansion.
+    expect(placed.find(p => p.text.trim() === 'כתב')!.origin.xPt).toBeCloseTo(247.5, 6);
+    expect(placed.find(p => p.text.trim() === 'Xray')!.origin.xPt).toBeCloseTo(340, 6);
+  });
+
 });
