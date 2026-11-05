@@ -292,18 +292,17 @@ function resolveSequence(
     }
   }
 
-  // W2: EN -> AN when the last strong type is AL.
+  // UAX#9 Unicode 17, W2 then W3: retain the pre-W3 strong type in
+  // lastStrong, so converting a stored AL to R cannot hide it from later EN.
   {
     let lastStrong: BidiClass = sos;
     for (let p = 0; p < m; p++) {
       const t = wt[ind[p]];
       if (t === 'R' || t === 'L' || t === 'AL') lastStrong = t;
       else if (t === 'EN' && lastStrong === 'AL') wt[ind[p]] = 'AN';
+      if (t === 'AL') wt[ind[p]] = 'R';
     }
   }
-
-  // W3: AL -> R.
-  for (let p = 0; p < m; p++) if (wt[ind[p]] === 'AL') wt[ind[p]] = 'R';
 
   // W4: a single ES between EN EN, or CS between EN EN / AN AN, becomes that number type.
   for (let p = 1; p < m - 1; p++) {
@@ -326,17 +325,12 @@ function resolveSequence(
     p = q - 1;
   }
 
-  // W6: remaining ES, ET, CS -> ON.
-  for (let p = 0; p < m; p++) {
-    const t = wt[ind[p]];
-    if (t === 'ES' || t === 'ET' || t === 'CS') wt[ind[p]] = 'ON';
-  }
-
-  // W7: EN -> L when the last strong type is L.
+  // W6 then W7 share a traversal: W6 changes no strong L/R context.
   {
     let lastStrong: BidiClass = sos;
     for (let p = 0; p < m; p++) {
       const t = wt[ind[p]];
+      if (t === 'ES' || t === 'ET' || t === 'CS') wt[ind[p]] = 'ON';
       if (t === 'R' || t === 'L') lastStrong = t;
       else if (t === 'EN' && lastStrong === 'L') wt[ind[p]] = 'L';
     }
@@ -401,19 +395,18 @@ function resolveSequence(
     }
   }
 
-  // N1: NI between strong types of the same direction (EN/AN count as R) -> that direction.
+  // N1 then N2, after all N0 bracket/NSM updates: each NI run takes equal
+  // surrounding directions (EN/AN count as R), otherwise its embedding direction.
   for (let p = 0; p < m; p++) {
     if (!isNI(wt[ind[p]])) continue;
     let q = p;
     while (q < m && isNI(wt[ind[q]])) q++;
     const before = p > 0 ? strongDirOf(wt[ind[p - 1]]) : sos;
     const after = q < m ? strongDirOf(wt[ind[q]]) : eos;
-    if (before && after && before === after) for (let r = p; r < q; r++) wt[ind[r]] = before;
+    const direction = before && after && before === after ? before : e;
+    for (let r = p; r < q; r++) wt[ind[r]] = direction;
     p = q - 1;
   }
-
-  // N2: remaining NI -> embedding direction.
-  for (let p = 0; p < m; p++) if (isNI(wt[ind[p]])) wt[ind[p]] = e;
 
   // I1/I2: implicit levels.
   for (let p = 0; p < m; p++) {
@@ -459,7 +452,9 @@ export function resolveLevels(
   for (let i = 0; i < n; i++) removed[i] = isRemovedType(origTypes[i]);
 
   const sequences = buildSequences(origTypes, levels, removed, paragraphLevel, pdiOf, initOf);
-  const wt = types.slice();
+  // determineExplicitLevels already owns a fresh mutable copy; origTypes
+  // remains unchanged for N0's original NSM facts and L1 resets.
+  const wt = types;
   for (const seq of sequences) resolveSequence(seq, cps, origTypes, wt, levels);
 
   // L1: reset segment/paragraph separators and trailing/leading-to-separator
