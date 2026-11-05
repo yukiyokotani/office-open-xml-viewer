@@ -144,16 +144,22 @@ export class LineMeasurementAdapter {
       if (clusterGeometry) {
         if (clusterGeometry === 'spaces') segment.shapedSpaceClusters = shaped.clusters;
         else segment.shapedClusters = shaped.clusters;
-        segment.selectedFaceFontBox = {
-          ascentPt: shaped.ascentPt,
-          descentPt: shaped.descentPt,
-        };
-        segment.selectedFaceInkBounds = shaped.inkBounds ?? {
-          xMinPt: 0,
-          xMaxPt: shaped.advancePt,
-          ascentPt: shaped.ascentPt,
-          descentPt: shaped.descentPt,
-        };
+        // Visible spaces-only acquisition owns gap metrics, not published face
+        // geometry. The unconditional retained-line finalizer acquires full
+        // clusters and face metrics before these pieces leave the breaker.
+        // Empty/metric-only pieces are skipped there, so retain their writers.
+        if (clusterGeometry !== 'spaces' || segment.metricOnly || segment.text.length === 0) {
+          segment.selectedFaceFontBox = {
+            ascentPt: shaped.ascentPt,
+            descentPt: shaped.descentPt,
+          };
+          segment.selectedFaceInkBounds = shaped.inkBounds ?? {
+            xMinPt: 0,
+            xMaxPt: shaped.advancePt,
+            ascentPt: shaped.ascentPt,
+            descentPt: shaped.descentPt,
+          };
+        }
       }
       return {
         width: shaped.advancePt,

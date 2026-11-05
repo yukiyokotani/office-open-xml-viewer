@@ -92,6 +92,15 @@ const SPAN_TEXT = 'x A x A x B';
 const lastGlyphX = (line: { text: string; x: number }[]) => line.at(-1)!.x;
 
 describe('kerned U+0020 pairs (WORD_KERNED_SPACE_PAIRS)', () => {
+  it('keeps a raw first box separate from its incoming pair during contraction admission', () => {
+    const result = lines(layout([run('x A x A beyond', { kerning: 2 })], 36, 15, 'distribute'));
+    expect(result[0]!.map(piece => piece.text).join('')).toBe('x A x A ');
+    // Natural visible width is 36.75: two incoming -0.75 seams and the
+    // authored A+space pair are charged once. The last A ends at the band.
+    const last = result[0]!.at(-1)!;
+    expect(last.x + SCALAR.A!).toBeCloseTo(36, 6);
+    expect(result[0]![1]!.x).toBeCloseTo(9 - .75 - 3 * (.75 / 8.25), 6);
+  });
   it.each([undefined, 15])('charges the space+glyph pair across word pieces (mode %s)', (mode) => {
     const [line] = lines(layout([run(SPAN_TEXT, { kerning: 2 })], 400, mode));
     expect(line!.map(p => p.text).join('')).toBe(SPAN_TEXT);

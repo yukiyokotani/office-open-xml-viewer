@@ -57,7 +57,7 @@ describe('line layout cluster acquisition', () => {
     expect(current.measuredUtf16).toBeLessThanOrEqual(previous.measuredUtf16 * 2);
   });
 
-  it('uses aggregate shaping while wrapping and retains clusters only for final pieces', () => {
+  it.each(['あいうえおかきくけこ', 'aa bb cc dd'])('retains complete final clusters and face metrics after wrapping %j', (text) => {
     const requests: TextShapeRequest[] = [];
     const base = createTextLayoutService({
       fonts: createFontResolver([]),
@@ -79,7 +79,6 @@ describe('line layout cluster acquisition', () => {
         return base.shape(request);
       },
     });
-    const text = 'あいうえおかきくけこ';
     const shapeRequest: TextShapeRequest = Object.freeze({
       text,
       fontSizePt: 10,
@@ -101,7 +100,10 @@ describe('line layout cluster acquisition', () => {
       textShapeRequest: shapeRequest,
     };
 
-    const lines = layoutLines(measureContext(), [segment], 16, 0, 1);
+    const lines = layoutLines(measureContext(), [segment], 16, 0, 1, [], undefined, {}, 0,
+      undefined, undefined, undefined, undefined, false, text.includes(' '), false,
+      undefined, 'bounded', undefined, false,
+      text.includes(' ') ? { admissionOnly: true, lineEndIdeographicSpaceHangs: false } : false);
     const finalSegments = lines.flatMap((line) => line.segments)
       .filter((candidate): candidate is LayoutTextSeg => 'text' in candidate);
     const aggregateRequests = requests.filter((request) => request.clusterGeometry === false);
@@ -112,6 +114,10 @@ describe('line layout cluster acquisition', () => {
     expect(retainedRequests.map((request) => request.text))
       .toEqual(finalSegments.map((candidate) => candidate.text));
     for (const candidate of finalSegments) {
+      expect(candidate.selectedFaceFontBox).toEqual({ ascentPt: 8, descentPt: 2 });
+      expect(candidate.selectedFaceInkBounds).toEqual({
+        xMinPt: 0, xMaxPt: candidate.text.length * 5, ascentPt: 8, descentPt: 2,
+      });
       expect(candidate.shapedClusters?.map((cluster) => cluster.range)).toEqual(
         [...candidate.text].map((_character, index) => ({ start: index, end: index + 1 })),
       );

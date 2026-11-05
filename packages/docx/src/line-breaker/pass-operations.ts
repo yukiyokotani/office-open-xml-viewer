@@ -1957,9 +1957,10 @@ export function justifiedPrefixCompression(state: Pick<PassOperationState,
 /** Admit the whole unit against the same natural gap model that layout uses
  * for paint. Advances are never shortened here; compression is line-owned. */
 export function fitJustifiedCompression(state: Pick<PassOperationState,
-  'justifiedCompression' | 'baseRtl' | 'widthPolicy' | 'characterGrid' | 'breakerState'
+  'justifiedCompression' | 'justifiedCompressionAdmissionOnly' | 'baseRtl' | 'widthPolicy' | 'characterGrid' | 'breakerState'
   | 'segAdvance' | 'strAdvance' | 'availW' | 'textSegmentBox' | 'addToLine' | 'scale' | 'measurement' | 'flush'
-  | 'reservePrefixWork'>, first: LayoutTextSeg): boolean {
+  | 'reservePrefixWork'>, first: LayoutTextSeg,
+  rawFirstBox?: ReturnType<PassOperationState['textSegmentBox']>): boolean {
   if (!justifiedCompressionApplies(state) || first.fitTextRegionIndex !== undefined) return false;
   const { breakerState: breaker } = state;
   if (breaker.justifiedUnitEnd) {
@@ -1972,9 +1973,17 @@ export function fitJustifiedCompression(state: Pick<PassOperationState,
   if (members.some(member => !('text' in member))) return false;
   let previousText = breaker.currentLine.at(-1);
   const boundaries: number[] = [];
-  const boxes = members.map(member => {
+  const boxes = members.map((member, index) => {
     if (!('text' in member)) throw new Error('A text candidate lost its placement unit');
-    const box = state.textSegmentBox(member);
+    // Admission-only callers have just acquired this raw box in the same
+    // synchronous attempt. Reuse neither a paired width nor a follower's box;
+    // the legacy full-plan path keeps its existing acquisition policy.
+    const reuseFirst = index === 0 && state.justifiedCompressionAdmissionOnly === true && rawFirstBox;
+    const box = reuseFirst || state.textSegmentBox(member);
+    if (reuseFirst) {
+      member.leadingWordBoundaryPx = undefined;
+      member.snapGridNaturalWidthPx = box.width;
+    }
     // WORD_KERNED_SPACE_PAIRS: the same seam oracle that placement re-resolves.
     const boundary = seamPairAdvance(state,
       previousText && 'text' in previousText ? previousText : undefined, member, box.width);

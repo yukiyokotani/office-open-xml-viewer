@@ -465,7 +465,8 @@ function processTextSegment(context: BreakOpportunityIteratorContext, seg: Layou
     && context.fitsMeasuredWidth(breakerState.currentWidth + wForFit, availW())
     && candidateUnit(s, breakerState.queue).length === 1;
   if (completeUnitFitApplies && !ordinaryAdmissionCertified
-    && fitJustifiedCompression(context, s)) return;
+    && fitJustifiedCompression(context, s,
+      context.justifiedCompressionAdmissionOnly === true ? segmentBox : undefined)) return;
   // A declined justified candidate re-measured its box; restore the fitted pair.
   s.leadingWordBoundaryPx = kernedSpacePair === 0 ? undefined : kernedSpacePair;
   s.measuredWidth = w;
