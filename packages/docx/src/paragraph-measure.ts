@@ -681,6 +681,13 @@ export function measureParagraph(
     wordJustifiedLineFit(paragraph.alignment, environment.compatibilityMode, context.baseRtl, context.wordWrap !== false,
       context.baseRtl ? context.physicalIndentLeftPt : context.physicalIndentRightPt + rightGridAdjustmentPt),
     context.cjkClosingMarkHang,
+    {
+      alignment: paragraph.alignment,
+      runDirectionUnauthored: context.runDirectionUnauthored,
+      lineEndJustificationBeforeMode15: environment.compatibilityMode !== 15,
+      doNotExpandShiftReturn: environment.doNotExpandShiftReturn,
+      endsAtHardBreak: context.endsAtHardBreak,
+    },
   );
   if (lines.length === 0) return measureMarkOnly();
 

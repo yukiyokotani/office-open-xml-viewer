@@ -1,4 +1,5 @@
 import { defineCompatibilityRule } from './compatibility.js';
+import { unicodePunctuationOrSymbol } from '@silurus/ooxml-core/internal/bidi-line';
 
 export const WORD_RUN_DIRECTION_ISOLATE = defineCompatibilityRule({
   id: 'word-run-direction-isolate',
@@ -59,11 +60,9 @@ export const WORD_VERTICAL_TU_CORNER_PLACEMENT = defineCompatibilityRule({
   description: 'Keep a substituted vertical Tu comma or full stop at the font-designed upper-right cell position rather than ink-centering it geometrically. Evidence (observed Office behaviour): Word PDF of a corpus document in PR #793; follows the UAX #50 Tu class and JIS X 4051 corner placement.',
 });
 
-const RTL_AMBIGUOUS_CHARACTER = /[\p{P}\p{S}]/u;
-
-export function wordRtlAmbiguousCharacter(character: string): boolean {
-  return RTL_AMBIGUOUS_CHARACTER.test(character);
-}
+// The host HL1 policy retains the shared stateless predicate's identity;
+// native certification can recognize it without trusting arbitrary callbacks.
+export const wordRtlAmbiguousCharacter: (character: string) => boolean = unicodePunctuationOrSymbol;
 
 export function wordNeutralAttachesToActiveScript(character: string): boolean {
   return !/\p{L}/u.test(character);

@@ -1,4 +1,4 @@
-import { DEFAULT_KINSOKU_RULES } from '@silurus/ooxml-core';
+import { DEFAULT_KINSOKU_RULES, getDefaultBidiEngine, setBidiEngine } from '@silurus/ooxml-core';
 import { describe, expect, it } from 'vitest';
 import type { ParagraphLayoutContext } from '../layout-context.js';
 import { createLayoutServices } from '../layout-runtime.js';
@@ -149,6 +149,92 @@ function options(
 }
 
 describe('paragraph acquisition cache', () => {
+  it('reacquires decimal geometry when manual-break expansion changes', () => {
+    const services = scopedServices();
+    const paragraph = textParagraph();
+    const run = paragraph.runs[0] as Extract<DocRun, { type: 'text' }>;
+    paragraph.alignment = 'thaiDistribute';
+    paragraph.bidi = true;
+    paragraph.tabStops = [{ pos: 216, alignment: 'decimal', leader: 'none' }];
+    paragraph.runs = [
+      { ...run, text: 'AB' }, { ...run, text: '\t' },
+      { ...run, text: 'אבגד ', rtl: true },
+      { ...run, text: 'Label 12.50 هذا نص' },
+      { type: 'break', breakType: 'line' }, { ...run, text: 'tail' },
+    ];
+    const input = paragraphAcquisitionInput(paragraph, source);
+    const base = options(services, {
+      context: { ...context, baseRtl: true, isJustified: true, tabStops: paragraph.tabStops },
+    });
+    const at = (doNotExpandShiftReturn: boolean, startYPt: number) => ({
+      ...base,
+      environment: { ...base.environment, compatibilityMode: 15, doNotExpandShiftReturn },
+      placement: { ...base.placement, startYPt },
+    });
+    const geometry = (result: ReturnType<typeof acquireParagraphResult>) => result.layout.lines.map(line =>
+      line.placements.flatMap(placement => placement.kind === 'text'
+        ? [[placement.text, placement.origin.xPt, placement.origin.yPt, placement.advancePt]] : []));
+    const expanded = acquireParagraphResult(input, at(false, 72));
+    const cold = (startYPt: number) => acquireParagraphResult(
+      paragraphAcquisitionInput({ ...paragraph, runs: [...paragraph.runs] }, source), at(true, startYPt),
+    );
+    const coldSame = cold(72);
+    const coldMoved = cold(92);
+    expect(geometry(coldSame)).not.toEqual(geometry(expanded));
+    // Moving the paragraph bypasses exact-result reuse but can still reuse
+    // line acquisition; the changed tab anchor must agree with a cold layout.
+    expect(geometry(acquireParagraphResult(input, at(true, 92)))).toEqual(geometry(coldMoved));
+    expect(geometry(acquireParagraphResult(input, at(true, 72)))).toEqual(geometry(coldSame));
+  });
+
+  it('reacquires decimal geometry after provider lifecycle or method changes', () => {
+    const engine = getDefaultBidiEngine();
+    const geometry = (value: ReturnType<typeof acquireParagraphResult>) => value.layout.lines.map(line =>
+      line.placements.flatMap(p => p.kind === 'text'
+        ? [[p.text, p.origin.xPt, p.origin.yPt, p.advancePt]] : []));
+    try {
+      for (const change of ['same-object setter', 'method replacement']) {
+        let reverse = change === 'method replacement';
+        const adapter = {
+          computeLevels: (...args: Parameters<typeof engine.computeLevels>) => engine.computeLevels(...args),
+          reorderVisual: (...args: Parameters<typeof engine.reorderVisual>) => {
+            const order = engine.reorderVisual(...args);
+            return reverse ? order.reverse() : order;
+          },
+          getMirror: (...args: Parameters<typeof engine.getMirror>) => engine.getMirror(...args),
+        };
+        setBidiEngine(adapter);
+        const services = scopedServices();
+        const paragraph = textParagraph();
+        const run = paragraph.runs[0] as Extract<DocRun, { type: 'text' }>;
+        paragraph.bidi = true;
+        paragraph.alignment = 'left';
+        paragraph.tabStops = [{ pos: 216, alignment: 'decimal', leader: 'none' }];
+        paragraph.runs = [{ ...run, text: 'AB' }, { ...run, text: '\t' },
+          { ...run, text: '12.50 אבגד הוזח', rtl: true }];
+        const input = paragraphAcquisitionInput(paragraph, source);
+        const base = options(services, {
+          context: { ...context, baseRtl: true, tabStops: paragraph.tabStops },
+        });
+        const at = (startYPt: number) => ({ ...base,
+          environment: { ...base.environment, compatibilityMode: 15 },
+          placement: { ...base.placement, startYPt } });
+        const initial = geometry(acquireParagraphResult(input, at(72)));
+        if (change === 'same-object setter') { reverse = true; setBidiEngine(adapter); }
+        else adapter.reorderVisual = (...args) => engine.reorderVisual(...args);
+        const cold = (y: number) => geometry(acquireParagraphResult(
+          paragraphAcquisitionInput({ ...paragraph, runs: [...paragraph.runs] }, source), at(y),
+        ));
+        const coldSame = cold(72), coldMoved = cold(92);
+        expect(coldSame).not.toEqual(initial);
+        // Same placement exercises exact reuse; moving Y exercises the
+        // reusable measured-line owner. Both must use the current provider.
+        expect(geometry(acquireParagraphResult(input, at(72)))).toEqual(coldSame);
+        expect(geometry(acquireParagraphResult(input, at(92)))).toEqual(coldMoved);
+      }
+    } finally { setBidiEngine(engine); }
+  });
+
   it('disables zero-threshold content kerning whatever the compatibility mode', () => {
     const ctx = measureContext();
     ctx.measureText = function (text) {

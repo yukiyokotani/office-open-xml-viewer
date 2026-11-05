@@ -1,3 +1,5 @@
+import { hasRtlDecimalTabCapability } from '../line-breaker/tabs.js';
+import { wordLineEndJustification } from './line-compatibility.js';
 import {
   countedSpacingAdvance,
   countSpacingCharacters,
@@ -81,6 +83,8 @@ import { wordTrackChangeDecoration } from './paint-compatibility.js';
 import type { DocRun, ShapeRun } from '../types.js';
 import {
   computeLineVisualOrder,
+  lineOrderEngineIdentity,
+  paragraphLineOrderModel,
   jcIsFullyJustified,
   jcStretchesLastLine,
   resolveAlignEdge,
@@ -554,32 +558,6 @@ function thaiProportionalClusterAdvance(
     }
     return weight;
   };
-}
-
-/** How {@link WORD_LINE_END_JUSTIFICATION} justifies a line of a justified paragraph:
- * at its gaps ('word'), by an equal advance after every character
- * ('character'), at its gaps or else centred ('word-or-centre'), or not at all.
- * Soft-wrapped lines keep the paragraph's ordinary justification. */
-function lineEndJustification(
-  input: Pick<PlanLineInput, 'alignment' | 'isLastLine' | 'stretchLastLine'
-    | 'doNotExpandShiftReturn' | 'lineEndJustificationBeforeMode15' | 'endsAtHardBreak'>,
-  endsWithBreak: boolean,
-): 'word' | 'character' | 'word-or-centre' | null {
-  if (!endsWithBreak && !input.isLastLine) return 'word';
-  // A line ended by a page or column break is justified like a soft-wrapped
-  // line before compatibility mode 15 and like a final line from mode 15;
-  // doNotExpandShiftReturn does not apply to it.
-  const hardBreak = !endsWithBreak && input.endsAtHardBreak === true;
-  if (hardBreak && input.alignment !== 'distribute') {
-    return input.lineEndJustificationBeforeMode15 === true ? 'word' : null;
-  }
-  if (input.alignment === 'distribute' || (input.alignment === undefined && input.stretchLastLine)) {
-    return input.lineEndJustificationBeforeMode15 === true ? 'character' : 'word-or-centre';
-  }
-  if (!endsWithBreak || input.doNotExpandShiftReturn === true) return null;
-  return input.alignment === 'thaiDistribute' && input.lineEndJustificationBeforeMode15 !== true
-    ? 'character'
-    : 'word';
 }
 
 /** Whether a justified line ended by a manual break widens inter-CJK
@@ -1545,7 +1523,7 @@ export function planLine(input: PlanLineInput): LineLayout {
   // The existing character-spread gap model cannot place directional isolates.
   const characterSpreadBidi = bidi && input.displayMathJustification === undefined
     && resolveAlignEdge(input.alignment, input.baseRtl) === 'justify'
-    && lineEndJustification(input, line.endsWithBreak) === 'character';
+    && wordLineEndJustification(input, line.endsWithBreak) === 'character';
   const visual = computeLineVisualOrder(
     segments.map((segment) => segment.kind === 'tab'
       ? { isTab: true }
@@ -1553,14 +1531,10 @@ export function planLine(input: PlanLineInput): LineLayout {
         ? { text: segment.text, rtl: segment.rtl, digitsAsAN: segment.digitsAsAN }
         : {}),
     input.baseRtl,
-    // Library scope: this correction targets leading labels in RTL paragraphs;
-    // LTR paragraphs keep their previous resolution. Representation boundaries
-    // also retain legacy ordering: distribute still assigns gaps to measured
-    // slices, not source-owned opportunities (#2090), and compatibility shape
-    // text lacks authoritative run-direction provenance. These are limitations
-    // of this retained layout model, not exceptions to the observed rule.
-    characterSpreadBidi || input.alignment === 'distribute'
-      || !input.baseRtl || input.runDirectionUnauthored ? 'line-level' : 'word',
+    paragraphLineOrderModel({
+      baseRtl: input.baseRtl, alignment: input.alignment,
+      runDirectionUnauthored: input.runDirectionUnauthored, characterSpreadBidi,
+    }),
   );
   let naturalWidthPt = segments.reduce((sum, segment) => sum + segmentWidth(segment), 0);
   const lineLeftPt = input.paragraphXPt + line.xOffsetPt;
@@ -1581,7 +1555,7 @@ export function planLine(input: PlanLineInput): LineLayout {
   const edge = input.displayMathJustification === undefined
     ? resolveAlignEdge(input.alignment, input.baseRtl)
     : displayMathEdge(input.displayMathJustification);
-  const lineEndRule = edge === 'justify' ? lineEndJustification(input, line.endsWithBreak) : null;
+  const lineEndRule = edge === 'justify' ? wordLineEndJustification(input, line.endsWithBreak) : null;
   // Right-to-left lines keep word justification (WORD_LINE_END_JUSTIFICATION
   // measured character spreading on left-to-right lines only).
   const justification = lineEndRule === 'character' && bidi ? 'word' : lineEndRule;
@@ -6073,6 +6047,13 @@ function paragraphAcquisitionKey(
   } = options.placement;
   const context = options.context;
   const environment = options.environment;
+  // Decimal acquisition consumes the active provider before final placement.
+  // Key both exact results and reusable measured lines by its existing identity
+  // ordinals. The provider stays stable during this synchronous acquisition;
+  // later lifecycle/method changes must miss. Default/nondecimal paths perform
+  // no provider read or instantiation, and keep their original identity tuple.
+  const orderingEngine = hasRtlDecimalTabCapability(context.baseRtl, context.tabStops)
+    ? lineOrderEngineIdentity() : undefined;
   // Page-field values (ECMA-376 Part 1 §17.16.5.44 PAGE, §17.16.5.42 NUMPAGES,
   // §17.16.5.13 DATE, §17.16.5.65 TIME) reach measurement only through a field
   // run's result (resolveFieldText), and note numbers (§17.11) only through a
@@ -6092,6 +6073,20 @@ function paragraphAcquisitionKey(
     run.type !== 'text' && run.type !== 'field' && run.type !== 'break' && run.type !== 'ptab');
   const keysPageFields = hasFieldRun || nestsEnvironment;
   const keysNotes = hasNoteReference || nestsEnvironment;
+  // Placement's wrap identity preceded measurer identities in the original
+  // tuple. Preserve that ordinal assignment order while keeping the default
+  // path to its one existing two-element array (no empty spread allocation).
+  const wrapIdentity = !lineOnly && wrap ? cache.objectIdentity(wrap) : null;
+  const measurementIdentities = [
+    cache.objectIdentity(options.measurer.context),
+    cache.objectIdentity(options.measurer.fontFamilyClasses),
+  ];
+  if (orderingEngine) measurementIdentities.push(
+    cache.objectIdentity(orderingEngine.engine),
+    cache.objectIdentity(orderingEngine.token),
+    cache.objectIdentity(orderingEngine.compute),
+    cache.objectIdentity(orderingEngine.reorder),
+  );
   // Fixed-order tuples avoid the recursive generic fingerprint cost on this hot
   // path. A different property insertion order may conservatively miss for the
   // explicitly JSON-valued geometry below, but can never alias different facts.
@@ -6109,7 +6104,7 @@ function paragraphAcquisitionKey(
           plainPlacement.maximumYPt,
           plainPlacement.suppressSpaceBefore,
           plainPlacement.noWrap ?? false,
-          wrap ? cache.objectIdentity(wrap) : null,
+          wrapIdentity,
         ],
     [
       context.lineGrid.active,
@@ -6132,8 +6127,8 @@ function paragraphAcquisitionKey(
       context.spaceBeforePt,
       context.spaceAfterPt,
       context.baseRtl,
-      // This owns final ordering, not the reusable line measurement.
-      lineOnly ? null : context.runDirectionUnauthored === true,
+      // Decimal-tab acquisition also consumes the final ordering policy.
+      context.runDirectionUnauthored === true,
       context.isJustified,
       context.stretchLastLine,
       context.tabStops.map((stop) => [stop.pos, stop.alignment, stop.leader]),
@@ -6149,10 +6144,7 @@ function paragraphAcquisitionKey(
       context.mathDefJc ?? null,
       ...(lineOnly ? [context.characterGrid.pitchPt] : []),
     ],
-    [
-      cache.objectIdentity(options.measurer.context),
-      cache.objectIdentity(options.measurer.fontFamilyClasses),
-    ],
+    measurementIdentities,
     [
       keysPageFields ? environment.pageIndex : null,
       keysPageFields ? environment.totalPages : null,
@@ -6178,6 +6170,8 @@ function paragraphAcquisitionKey(
       lineOnly ? null : environment.verticalPageFrame ?? null,
       // Mode owns acquired kerning and justified-compression decisions.
       environment.compatibilityMode ?? null,
+      // Manual-break expansion also owns the acquired decimal order model.
+      environment.doNotExpandShiftReturn === true,
       environment.documentHasEastAsianText,
       environment.useFeLayout ?? null,
       environment.balanceSingleByteDoubleByteWidth ?? null,
@@ -6695,6 +6689,9 @@ export interface RetainedFrameGroupOptions {
   ) => Readonly<{ bounds: LayoutRect; exclusionBounds: LayoutRect }>;
 }
 
+// A frame session retains complete descendant layouts under one stable bidi
+// provider. Changing the provider requires a fresh pagination/layout session;
+// local paragraph/memo invalidation does not revise retained frame groups.
 const retainedFrameGroupCache = new WeakMap<object, Map<string, RetainedFrameGroupAcquisition>>();
 
 function frameFingerprintValue(value: unknown): unknown {

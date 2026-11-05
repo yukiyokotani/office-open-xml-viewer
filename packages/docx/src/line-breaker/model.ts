@@ -406,6 +406,8 @@ export interface LayoutTabSeg extends LayoutSegSource {
   /** Logical advance from that complete cell's start to its decimal point
    *  (the decimal stop's alignment point), when it has one. */
   alignedCellDecimal?: number;
+  /** Physical left-to-decimal offset of the complete queued cell. */
+  alignedCellPhysicalDecimal?: number;
   /** WORD_TAB_DISPLACED_READING_FRAME applies (compatibility mode absent or
    *  below 15): custom stops move with a float-displaced leading line edge and
    *  an out-of-window cell overflows instead of breaking the line. */
