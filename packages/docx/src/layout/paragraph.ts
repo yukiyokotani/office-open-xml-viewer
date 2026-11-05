@@ -1553,7 +1553,14 @@ export function planLine(input: PlanLineInput): LineLayout {
         ? { text: segment.text, rtl: segment.rtl, digitsAsAN: segment.digitsAsAN }
         : {}),
     input.baseRtl,
-    characterSpreadBidi || input.runDirectionUnauthored ? 'line-level' : 'word',
+    // Library scope: this correction targets leading labels in RTL paragraphs;
+    // LTR paragraphs keep their previous resolution. Representation boundaries
+    // also retain legacy ordering: distribute still assigns gaps to measured
+    // slices, not source-owned opportunities (#2090), and compatibility shape
+    // text lacks authoritative run-direction provenance. These are limitations
+    // of this retained layout model, not exceptions to the observed rule.
+    characterSpreadBidi || input.alignment === 'distribute'
+      || !input.baseRtl || input.runDirectionUnauthored ? 'line-level' : 'word',
   );
   let naturalWidthPt = segments.reduce((sum, segment) => sum + segmentWidth(segment), 0);
   const lineLeftPt = input.paragraphXPt + line.xOffsetPt;

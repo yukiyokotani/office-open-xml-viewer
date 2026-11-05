@@ -17,7 +17,9 @@ export type LineVisualOrder = SegmentLineVisualOrder;
 export const segmentsHaveRtl = (segments: readonly unknown[]): boolean =>
   segmentLineHasRtl(segments, options);
 // WORD_RUN_DIRECTION_ISOLATE: only final authored paragraphs opt in.
-const authoredOptions = { ...options, isolateDirection: wordRunDirectionSpan };
+const authoredOptions = {
+  ...options, isolateDirection: wordRunDirectionSpan, isolateRequiresUniformSlices: true,
+};
 // One anchor is retained per measured slice. Intra-slice resolved-level
 // boundaries are not retained, so punctuation or script changes inside one
 // slice can still be misplaced (#2076); this is not a complete bidi rewrite.

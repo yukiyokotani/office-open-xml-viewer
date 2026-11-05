@@ -98,6 +98,36 @@ it('places the authored leading label before its Arabic island in production lay
     .toBe(content);
 });
 
+it('preserves distribute ordering while its gap slots lack source ownership', () => {
+  const content = 'Label זהו טקסט';
+  const [first] = lines(para([textRun(content)], 'distribute', { bidi: true }), MODE_15);
+  const placed = first!.placements.filter((p): p is TextPlacement => p.kind === 'text');
+  expect([...placed].sort((a, b) => a.origin.xPt - b.origin.xPt).map(p => p.text.trim()))
+    .toEqual(['טקסט', 'זהו', 'Label']);
+  expect([...placed].sort((a, b) => a.range.start - b.range.start).map(p => p.text).join(''))
+    .toBe(content);
+});
+
+it('preserves a mixed-level paint slice until its internal islands are retained', () => {
+  const content = 'עבריתXray Yoke טקסט';
+  const [first] = lines(para([textRun(content)], 'left', { bidi: true }), MODE_15);
+  const placed = first!.placements.filter((p): p is TextPlacement => p.kind === 'text');
+  expect([...placed].sort((a, b) => a.origin.xPt - b.origin.xPt).map(p => p.text.trim()))
+    .toEqual(['טקסט', 'Yoke', 'עבריתXray']);
+  expect([...placed].sort((a, b) => a.range.start - b.range.start).map(p => p.text).join(''))
+    .toBe(content);
+});
+
+it('preserves existing LTR paragraph ordering outside the RTL label correction', () => {
+  const content = 'Label זהו טקסט';
+  const [first] = lines(para([textRun(content, { rtl: true })], 'left'), MODE_15);
+  const placed = first!.placements.filter((p): p is TextPlacement => p.kind === 'text');
+  expect([...placed].sort((a, b) => a.origin.xPt - b.origin.xPt).map(p => p.text.trim()))
+    .toEqual(['Label', 'טקסט', 'זהו']);
+  expect([...placed].sort((a, b) => a.range.start - b.range.start).map(p => p.text).join(''))
+    .toBe(content);
+});
+
 describe('WORD_KASHIDA_LINE_FIT', () => {
   it('keeps the full width before mode 15 under a negative trailing indent', () => {
     // blk-0898-floats-negind (-5 to -56.7pt) and blk-0898-kfit9 S014-S016:
