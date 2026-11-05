@@ -30,6 +30,13 @@ export interface SegmentLineVisualOrder {
   rtl: boolean[];
 }
 
+/** Internal acquired-cell view. One resolved anchor per caller-owned source
+ * cell, never a public per-character payload. In particular a space-only
+ * cell's content rtl flag is false while its actual anchor can be odd. */
+export interface SegmentLineResolvedOrder extends SegmentLineVisualOrder {
+  anchorLevels: Uint8Array;
+}
+
 const textOf = (segment: unknown): string | undefined => {
   const value = (segment as { text?: unknown }).text;
   return typeof value === 'string' ? value : undefined;
@@ -192,8 +199,25 @@ export function computeSegmentLineVisualOrder(
   segments: readonly unknown[], baseRtl: boolean,
   options: SegmentLineBidiOptions = {},
 ): SegmentLineVisualOrder {
+  return computeSegmentLineOrder(segments, baseRtl, options, false);
+}
+
+/** Reuse the SAME whole-host resolution and author/isolate scopes for source
+ * cells. Default format consumers retain their previous two-field result. */
+export function computeSegmentLineResolvedOrder(
+  segments: readonly unknown[], baseRtl: boolean,
+  options: SegmentLineBidiOptions = {},
+): SegmentLineResolvedOrder {
+  return computeSegmentLineOrder(segments, baseRtl, options, true) as SegmentLineResolvedOrder;
+}
+
+function computeSegmentLineOrder(
+  segments: readonly unknown[], baseRtl: boolean,
+  options: SegmentLineBidiOptions, retainAnchorLevels: boolean,
+): SegmentLineVisualOrder | SegmentLineResolvedOrder {
   const count = segments.length;
-  if (count === 0) return { order: [], rtl: [] };
+  if (count === 0) return retainAnchorLevels
+    ? { order: [], rtl: [], anchorLevels: new Uint8Array(0) } : { order: [], rtl: [] };
   let full = '';
   const start = new Array<number>(count);
   const end = new Array<number>(count);
@@ -239,7 +263,8 @@ export function computeSegmentLineVisualOrder(
   );
   if (!options.directionFromAnyOdd) {
     const { order, segLevels } = buildVisualOrder(levels, paragraphLevel, start);
-    return { order, rtl: Array.from(segLevels, (level) => (level & 1) === 1) };
+    const rtl = Array.from(segLevels, (level) => (level & 1) === 1);
+    return retainAnchorLevels ? { order, rtl, anchorLevels: segLevels } : { order, rtl };
   }
 
   // Word's whitespace-delimited slices use a content-level paint direction.
@@ -264,12 +289,13 @@ export function computeSegmentLineVisualOrder(
       // Reuse the previous model for the whole line; splitting paint here would
       // invent geometry. The second pass has no isolate hook, so work is at
       // most two linear UAX resolutions with line-local storage (#2076).
-      return computeSegmentLineVisualOrder(segments, baseRtl, {
+      return computeSegmentLineOrder(segments, baseRtl, {
         ...options, isolateDirection: undefined,
-      });
+      }, retainAnchorLevels);
     }
     rtl[i] = firstOdd >= 0;
     anchor[i] = firstOdd >= 0 ? firstOdd : firstEven >= 0 ? firstEven : start[i];
   }
-  return { order: buildVisualOrder(levels, paragraphLevel, anchor).order, rtl };
+  const { order, segLevels } = buildVisualOrder(levels, paragraphLevel, anchor);
+  return retainAnchorLevels ? { order, rtl, anchorLevels: segLevels } : { order, rtl };
 }

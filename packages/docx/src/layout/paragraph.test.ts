@@ -2413,6 +2413,73 @@ describe('planLine visual geometry', () => {
     }],
   });
 
+  it('keeps attached and already-atomic source spaces equivalent across a joined word seam', () => {
+    const piece = (text: string, start: number, breakBefore = true) => ({
+      ...measuredText(text, start, text.length * 5, true), breakBefore,
+      clusters: [...text].map((_character, index) => ({
+        range: { start: start + index, end: start + index + 1 },
+        offset: { xPt: index * 5, yPt: 0 }, advancePt: 5,
+      })),
+    });
+    const projected = (segments: ReturnType<typeof piece>[]) => planLine({
+      paragraphXPt: 0, availableWidthPt: 100, alignment: 'distribute', baseRtl: true,
+      isFirstLine: true, isLastLine: true, stretchLastLine: true,
+      lineEndJustificationBeforeMode15: false,
+      line: { range: { start: 0, end: 10 }, topPt: 0, baselinePt: 8, advancePt: 10,
+        xOffsetPt: 0, availableWidthPt: 100, endsWithBreak: false, segments },
+    });
+    // Formatting split inside the first Hebrew word joins its visible pieces.
+    // Its later SPACE cuts are independent acquired cluster boundaries.
+    const attached = projected([piece('א', 0), piece('בגד  ', 1, false), piece('הוזח', 6)]);
+    const atomic = projected([piece('א', 0), piece('בגד', 1, false), piece(' ', 4), piece(' ', 5), piece('הוזח', 6)]);
+    for (const line of [attached, atomic]) {
+      const texts = line.placements.filter((placement): placement is TextPlacement => placement.kind === 'text')
+        .sort((a, b) => a.range.start - b.range.start);
+      expect(texts.map(placement => placement.text).join('')).toBe('אבגד  הוזח');
+      const spaces = texts.filter(placement => placement.text === ' ');
+      expect(spaces.map(placement => placement.range)).toEqual([{ start: 4, end: 5 }, { start: 5, end: 6 }]);
+      // 50 pt natural content in a 100 pt band: each source space is5+25.
+      expect(spaces.map(placement => placement.advancePt)).toEqual([30, 30]);
+      expect(spaces.map(placement => placement.clusters[0]!.advancePt)).toEqual([30, 30]);
+      expect(line.bounds.widthPt).toBe(100);
+    }
+    expect(atomic).toEqual(attached);
+  });
+
+  it('preserves a contextual operation when a space cut would remove a visible head across NBSP', () => {
+    const value = 'אבגד \u00a0הוזח ';
+    const segment = {
+      ...measuredText(value, 0, value.length * 5, true),
+      clusters: [...value].map((_character, index) => ({
+        range: { start: index, end: index + 1 }, offset: { xPt: index * 5, yPt: 0 }, advancePt: 5,
+      })),
+    };
+    segment.basePaintOps = [{ ...segment.basePaintOps[0]!,
+      inkBounds: { xMinPt: 0, xMaxPt: 50, ascentPt: 8, descentPt: 2 },
+    }];
+    const projected = (before15: boolean) => planLine({
+      paragraphXPt: 0, availableWidthPt: 100, alignment: 'distribute', baseRtl: true,
+      isFirstLine: true, isLastLine: true, stretchLastLine: true,
+      lineEndJustificationBeforeMode15: before15,
+      line: { range: segment.range, topPt: 0, baselinePt: 8, advancePt: 10,
+        xOffsetPt: 0, availableWidthPt: 100, endsWithBreak: false, segments: [segment] },
+    });
+    // In this bounded RTL class both versions use the same legacy word
+    // allocator/order. The pre15 character-topology gate supplies its old path.
+    const legacy = projected(true);
+    const current = projected(false);
+    expect(current).toEqual(legacy);
+    const text = current.placements.filter((placement): placement is TextPlacement => placement.kind === 'text');
+    expect(text.map(placement => placement.text).join('')).toBe(value);
+    let cursor = 0;
+    for (const operation of text.flatMap(placement => placement.paintOps)) {
+      expect(operation.range.start).toBe(cursor);
+      expect(operation.text).toBe(value.slice(operation.range.start, operation.range.end));
+      cursor = operation.range.end;
+    }
+    expect(cursor).toBe(value.length);
+  });
+
   it.each(['a😀 b  c', `a${' '.repeat(50_000)}b`])(
     'projects retained proportional gaps through clusters and contextual paint ops in one sweep', (value) => {
       let utf16 = 0;
@@ -2840,18 +2907,21 @@ describe('planLine visual geometry', () => {
         ],
       },
     });
-    const placement = line.placements.find((candidate) => candidate.range.start === start);
-    expect(placement?.kind).toBe('text');
-    if (placement?.kind !== 'text') throw new Error('expected retained text placement');
-
-    expect(placement.range).toEqual({ start: 246, end: 250 });
-    // Atomic or coalesced zero-ink spaces are equally valid; the protection is
-    // complete, exactly-once source coverage rather than a paint-op count.
+    const owned = line.placements.filter((candidate): candidate is TextPlacement => candidate.kind === 'text'
+      && candidate.range.start >= start && candidate.range.end <= start + value.length)
+      .sort((a, b) => a.range.start - b.range.start);
+    expect(owned.map(placement => placement.text).join('')).toBe(value);
+    // Cell/op packetization may change; the protection is complete,
+    // exactly-once source coverage across visible and zero-ink fragments.
     let cursor = start;
-    for (const operation of placement.paintOps) {
-      expect(operation.range.start).toBe(cursor);
-      expect(operation.text).toBe(value.slice(operation.range.start - start, operation.range.end - start));
-      cursor = operation.range.end;
+    for (const placement of owned) {
+      expect(placement.range.start).toBe(cursor);
+      for (const operation of placement.paintOps) {
+        expect(operation.range.start).toBe(cursor);
+        expect(operation.text).toBe(value.slice(operation.range.start - start, operation.range.end - start));
+        cursor = operation.range.end;
+      }
+      expect(cursor).toBe(placement.range.end);
     }
     expect(cursor).toBe(start + value.length);
   });

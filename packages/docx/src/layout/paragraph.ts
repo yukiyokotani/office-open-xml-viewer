@@ -1,3 +1,4 @@
+import { sourceSpaceCells } from './source-space-cells.js';
 import { hasRtlDecimalTabCapability } from '../line-breaker/tabs.js';
 import { wordLineEndJustification } from './line-compatibility.js';
 import {
@@ -83,6 +84,7 @@ import { wordTrackChangeDecoration } from './paint-compatibility.js';
 import type { DocRun, ShapeRun } from '../types.js';
 import {
   computeLineVisualOrder,
+  computeLineResolvedOrder,
   lineOrderEngineIdentity,
   paragraphLineOrderModel,
   jcIsFullyJustified,
@@ -915,133 +917,6 @@ function keepGraphemeSafeCuts(
   return { perGap, perSeg: retained };
 }
 
-interface TrailingSpaceStretchProjection {
-  readonly geometryStretch: SegStretch;
-  readonly spaceDeltas: readonly Readonly<{ clusterIndex: number; deltaPt: number }>[];
-  readonly movedPt: number;
-}
-
-/** §17.18.44: an allocated word-space expansion belongs to that source space,
- * not to the physical right of its segment. enumerateGaps records the owning
- * code point; distributeLineSlack turns its offset into splitBefore = offset+1.
- * Transfer only positive allocations in an acquired U+0020 suffix. Non-space
- * cuts, compression and indivisible SPACE+mark clusters keep their old plan;
- * character spreading has a separate representation and does not call this.
- *
- * Each cursor moves forward, including consecutive spaces/UTF16 prefixes.
- * No arrays or replacement plan are allocated when nothing can move. */
-function projectTrailingSpaceStretch(
-  segment: MeasuredTextPlanSegment,
-  stretch: SegStretch | undefined,
-  perGapPt: number,
-): TrailingSpaceStretchProjection | undefined {
-  if (!stretch || !segment.text.endsWith(' ')) return undefined;
-  const trailingPt = stretch.trailingGap ? stretch.trailingDelta ?? perGapPt : 0;
-  let positive = trailingPt > 0;
-  for (let index = 0; !positive && index < stretch.splitBefore.length; index += 1) {
-    positive = (stretch.gapDeltas?.[index] ?? perGapPt) > 0;
-  }
-  if (!positive) return undefined;
-  let tailStart = segment.text.length;
-  while (tailStart > 0 && segment.text.charCodeAt(tailStart - 1) === 0x20) tailStart -= 1;
-  let tailCodePoint = 0;
-  for (let offset = 0; offset < tailStart; tailCodePoint += 1) {
-    offset += segment.text.codePointAt(offset)! > 0xffff ? 2 : 1;
-  }
-  const codePointLength = tailCodePoint + segment.text.length - tailStart;
-  // Do not consume malformed cuts and thereby hide the existing geometry
-  // validation (including a duplicated cut or incomplete proportional plan).
-  if (stretch.gapDeltas && stretch.gapDeltas.length !== stretch.splitBefore.length) return undefined;
-  for (let index = 0; index < stretch.splitBefore.length; index += 1) {
-    const cut = stretch.splitBefore[index]!;
-    if (cut <= 0 || cut >= codePointLength || (index > 0 && cut <= stretch.splitBefore[index - 1]!)) {
-      return undefined;
-    }
-  }
-  const absoluteTailStart = segment.range.start + tailStart;
-  let clusterIndex = 0;
-  let cuts: number[] | undefined;
-  let deltas: number[] | undefined;
-  let spaceDeltas: Array<{ clusterIndex: number; deltaPt: number }> | undefined;
-  let movedInternalPt = 0;
-  let movedTrailingPt = 0;
-  for (let index = 0; index <= stretch.splitBefore.length; index += 1) {
-    const trailing = index === stretch.splitBefore.length;
-    const cut = trailing ? codePointLength : stretch.splitBefore[index]!;
-    const deltaPt = trailing ? trailingPt : stretch.gapDeltas?.[index] ?? perGapPt;
-    // Invalid internal cuts must still reach retainedTextGeometry's validation.
-    const inSuffix = cut > tailCodePoint && (trailing || cut < codePointLength);
-    const boundary = segment.range.start + tailStart + cut - tailCodePoint;
-    while (inSuffix && segment.clusters[clusterIndex]
-      && segment.clusters[clusterIndex]!.range.end < boundary) clusterIndex += 1;
-    const cluster = segment.clusters[clusterIndex];
-    const ownsSpace = inSuffix && deltaPt > 0 && cluster !== undefined
-      && cluster.range.start >= absoluteTailStart && cluster.range.end === boundary;
-    if (ownsSpace) {
-      (spaceDeltas ??= []).push({ clusterIndex, deltaPt });
-      if (trailing) movedTrailingPt = deltaPt;
-      else {
-        if (!cuts) {
-          cuts = stretch.splitBefore.slice(0, index);
-          deltas = stretch.gapDeltas?.slice(0, index);
-        }
-        movedInternalPt += deltaPt;
-      }
-    } else if (!trailing && cuts) {
-      cuts.push(cut);
-      deltas?.push(deltaPt);
-    }
-  }
-  if (!spaceDeltas) return undefined;
-  return {
-    geometryStretch: {
-      ...stretch,
-      ...(cuts ? { splitBefore: cuts, internalStretch: stretch.internalStretch - movedInternalPt } : {}),
-      ...(deltas ? { gapDeltas: deltas } : {}),
-      ...(movedTrailingPt > 0 ? { trailingGap: false, trailingDelta: 0 } : {}),
-    },
-    spaceDeltas,
-    movedPt: movedInternalPt + movedTrailingPt,
-  };
-}
-
-/** Keep the existing source geometry/zero-ink paint coverage while widening
- * only the acquired space clusters. Subsequent offsets use the same prefix
- * sum; visible word shaping is never measured or reconstructed. */
-function retainTrailingSpaceStretch(
-  geometry: Readonly<{ clusters: readonly TextClusterLayout[]; paintOps: readonly TextPaintOp[] }>,
-  projection: TrailingSpaceStretchProjection,
-): Readonly<{ clusters: readonly TextClusterLayout[]; paintOps: readonly TextPaintOp[] }> {
-  let cursor = 0;
-  let precedingPt = 0;
-  const clusters = geometry.clusters.map((cluster, index) => {
-    const adjustment = projection.spaceDeltas[cursor];
-    const deltaPt = adjustment?.clusterIndex === index ? adjustment.deltaPt : 0;
-    const result = deltaPt === 0 && precedingPt === 0 ? cluster : {
-      ...cluster,
-      advancePt: cluster.advancePt + deltaPt,
-      offset: { ...cluster.offset, xPt: cluster.offset.xPt + precedingPt },
-    };
-    precedingPt += deltaPt;
-    if (deltaPt > 0) cursor += 1;
-    return result;
-  });
-  cursor = 0;
-  precedingPt = 0;
-  const paintOps = geometry.paintOps.map(operation => {
-    while (cursor < projection.spaceDeltas.length) {
-      const adjustment = projection.spaceDeltas[cursor]!;
-      if (geometry.clusters[adjustment.clusterIndex]!.range.end > operation.range.start) break;
-      precedingPt += adjustment.deltaPt;
-      cursor += 1;
-    }
-    return precedingPt === 0 ? operation : {
-      ...operation, offset: { ...operation.offset, xPt: operation.offset.xPt + precedingPt },
-    };
-  });
-  return { clusters, paintOps };
-}
-
 /** Merge sorted gap, cluster and paint-op boundaries. Every cursor only moves
  * forward: O(code points + clusters + gaps + operations), including long runs
  * of consecutive spaces. Deltas are owned by the accepted line's gap plan. */
@@ -1651,18 +1526,6 @@ export function planLine(input: PlanLineInput): LineLayout {
   const characterSpreadBidi = bidi && input.displayMathJustification === undefined
     && resolveAlignEdge(input.alignment, input.baseRtl) === 'justify'
     && wordLineEndJustification(input, line.endsWithBreak) === 'character';
-  const visual = computeLineVisualOrder(
-    segments.map((segment) => segment.kind === 'tab'
-      ? { isTab: true }
-      : segment.kind === 'text'
-        ? { text: segment.text, rtl: segment.rtl, digitsAsAN: segment.digitsAsAN }
-        : {}),
-    input.baseRtl,
-    paragraphLineOrderModel({
-      baseRtl: input.baseRtl, alignment: input.alignment,
-      runDirectionUnauthored: input.runDirectionUnauthored, characterSpreadBidi,
-    }),
-  );
   let naturalWidthPt = segments.reduce((sum, segment) => sum + segmentWidth(segment), 0);
   const lineLeftPt = input.paragraphXPt + line.xOffsetPt;
   // A margin-allocated tab cell widens this line's band past the trailing
@@ -1687,13 +1550,43 @@ export function planLine(input: PlanLineInput): LineLayout {
   // measured character spreading on left-to-right lines only).
   const justification = lineEndRule === 'character' && bidi ? 'word' : lineEndRule;
   const applyJustify = justification !== null;
+  const originalAfterLastTab = lastTabSegmentIndex(segments) + 1;
+  // Stage 1 capability: only unambiguously nonnegative natural word slack.
+  // Accepted compression, hang-funded negative budgets, character topology,
+  // compatibility-shape provenance and rewrite-capable Kashida stay legacy.
+  // One fine view owns UAX order, terminal classification, gaps and paint;
+  // never choose it after measuring against a different coarse budget.
+  const sourceCells = bidi && !characterSpreadBidi && !input.runDirectionUnauthored
+    && (justification === 'word' || justification === 'word-or-centre')
+    && kashidaLevel(input.alignment) === null && lineSlackPt >= 0
+    && line.gapPlan === undefined && line.justifiedCompressionPt === undefined
+      ? sourceSpaceCells(segments) : undefined;
+  if (sourceCells) segments = sourceCells.segments;
+  const descriptors = segments.map(segment => segment.kind === 'tab'
+    ? { isTab: true }
+    : segment.kind === 'text'
+      ? { text: segment.text, rtl: segment.rtl, digitsAsAN: segment.digitsAsAN }
+      : {});
+  const orderModel = paragraphLineOrderModel({
+    baseRtl: input.baseRtl, alignment: input.alignment,
+    runDirectionUnauthored: input.runDirectionUnauthored, characterSpreadBidi,
+  });
+  const resolved = sourceCells
+    ? computeLineResolvedOrder(descriptors, input.baseRtl, orderModel) : undefined;
+  const visual = resolved && sourceCells ? {
+    order: resolved.order,
+    // Spaces have no content-direction anchor: their OWN whole-host level
+    // supplies parity, rather than the first odd level of a neighboring word.
+    rtl: resolved.rtl.map((rtl, index) => sourceCells.spaceOnly[index]
+      ? (resolved.anchorLevels[index]! & 1) === 1 : rtl),
+  } : computeLineVisualOrder(descriptors, input.baseRtl, orderModel);
   const softWrapped = !line.endsWithBreak && !input.isLastLine;
   // WORD_KASHIDA_LINE_FIT: soft-wrapped kashida and thaiDistribute lines
   // open no inter-CJK gaps.
   const softLineSpacesOnly = softWrapped && wordSoftLineJustifiesAtSpacesOnly(input.alignment);
   // Every line is justified only after its last tab: the stops before it keep
   // their positions (WORD_ALIGNED_TAB_CELL_FIT_BACK; soft-wrapped lines too).
-  const afterLastTab = lastTabSegmentIndex(segments) + 1;
+  const afterLastTab = sourceCells?.parentCellStarts[originalAfterLastTab] ?? originalAfterLastTab;
   // WORD_RTL_JUSTIFIED_VISIBLE_FIT: the breaker admitted this right-to-left
   // line by its visible prefix, so its line-end U+0020 hangs past the line's
   // end edge and the visible text keeps the start edge.
@@ -1982,19 +1875,16 @@ export function planLine(input: PlanLineInput): LineLayout {
     const segment = segments[segmentIndex];
     if (!segment) continue;
     const stretch = stretchByIndex?.get(segmentIndex);
-    // Word-space source ownership only; do not broaden the character-cut,
-    // vertical, fit/admission, terminal-hanging or tab-order policies.
-    // Pre15 RTL distribute already uses this word allocator; its raw
-    // characterSpreadBidi flag selects visual order, not the gap topology.
-    const sourceSpaceStretch = bidi && (justification === 'word' || justification === 'word-or-centre')
-      && segment.kind === 'text'
-      && (segment.basePaintOps[0]?.writingMode ?? 'horizontal-tb') === 'horizontal-tb'
-      ? projectTrailingSpaceStretch(segment, stretch, perGapPt) : undefined;
-    const geometryStretch = sourceSpaceStretch?.geometryStretch ?? stretch;
+    // Each atomic source-space cell owns its existing positive allocation.
+    // Non-space cuts and every legacy/negative path keep their old plan.
+    const trailingDeltaPt = stretch?.trailingGap ? stretch.trailingDelta ?? perGapPt : 0;
+    const sourceSpaceDeltaPt = sourceCells?.spaceOnly[segmentIndex] && trailingDeltaPt > 0
+      ? trailingDeltaPt : 0;
+    const geometryStretch = sourceSpaceDeltaPt > 0 && stretch
+      ? { ...stretch, trailingGap: false, trailingDelta: 0 } : stretch;
     const internalStretchPt = geometryStretch?.internalStretch ?? 0;
-    // Moving P internal and Q external gives (I-P)+(P+Q)+(T-Q)=I+T.
-    // Thus line budgets, later segment starts and tab allocations stay fixed.
-    const widthPt = segmentWidth(segment) + internalStretchPt + (sourceSpaceStretch?.movedPt ?? 0);
+    // Moving Q external into its atomic source cell preserves W+I+T.
+    const widthPt = segmentWidth(segment) + internalStretchPt + sourceSpaceDeltaPt;
     if (segment.kind === 'tab') {
       const bounds = { xPt, yPt: line.topPt, widthPt: segment.measuredWidthPt, heightPt: line.advancePt };
       const decorations = segment.underline
@@ -2075,10 +1965,13 @@ export function planLine(input: PlanLineInput): LineLayout {
         ...style
       } = segment;
       const geometry = retainedTextGeometry(segment, geometryStretch, perGapPt);
-      const textGeometry = sourceSpaceStretch ? retainTrailingSpaceStretch(geometry, sourceSpaceStretch) : geometry;
+      const textGeometry = sourceSpaceDeltaPt > 0 ? {
+        ...geometry,
+        clusters: [{ ...geometry.clusters[0]!, advancePt: geometry.clusters[0]!.advancePt + sourceSpaceDeltaPt }],
+      } : geometry;
       const direction = visual.rtl[segmentIndex] ? 'rtl' : 'ltr';
       const trailingWhitespaceStart = segment.text.trimEnd().length;
-      const rtlLeadingGapPt = direction === 'rtl'
+      const rtlLeadingGapPt = direction === 'rtl' && !sourceCells?.spaceOnly[segmentIndex]
         ? (style.fitText?.trailingPadPt ?? 0) + textGeometry.clusters
             .filter((cluster) => cluster.range.start >= segment.range.start + trailingWhitespaceStart)
             .reduce((sum, cluster) => sum + cluster.advancePt, 0)

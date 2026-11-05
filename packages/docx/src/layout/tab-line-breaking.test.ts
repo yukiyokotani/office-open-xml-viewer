@@ -303,12 +303,10 @@ describe('source-owned RTL tab-cell justification', () => {
     // Source UTF16 positions differ from code-point cuts after the emoji.
     // Four visible glyphs per word, with two U+0020 between words: 80 pt
     // natural in a 468 pt band. The four spaces each receive (468-80)/4.
-    // Pre15 RTL distribute selects the existing word allocator even while its
-    // visual-order policy preserves the earlier line model.
     const text = 'אב😀ד  הוזח  טיכל';
     const layout = paragraphDocumentLayout(documentBytes('', true, 0, {
       alignment: 'left', count: 0, text, noFloat: true, runRtl: true,
-      jc: 'distribute', compatibilityMode: 14,
+      jc: 'distribute', compatibilityMode: 15,
     }));
     const paragraph = layout.pages[0]!.layers.body.find(node => node.kind === 'paragraph');
     if (paragraph?.kind !== 'paragraph') throw new Error('Missing paragraph');
