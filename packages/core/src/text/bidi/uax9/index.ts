@@ -61,6 +61,19 @@ class Uax9Engine implements BidiEngine {
   }
 }
 
+// Weak branding certifies only factory-created, unmodified native algorithms;
+// forwarding adapters/proxies and copied methods do not inherit this authority.
+const nativeEngines = new WeakSet<BidiEngine>();
+const nativeComputeLevels = Uax9Engine.prototype.computeLevels;
+const nativeReorderVisual = Uax9Engine.prototype.reorderVisual;
+
+export function isUnmodifiedNativeBidiEngine(engine: BidiEngine): boolean {
+  return nativeEngines.has(engine) && engine.computeLevels === nativeComputeLevels
+    && engine.reorderVisual === nativeReorderVisual;
+}
+
 export function createUax9Engine(): BidiEngine {
-  return new Uax9Engine();
+  const engine = new Uax9Engine();
+  nativeEngines.add(engine);
+  return engine;
 }

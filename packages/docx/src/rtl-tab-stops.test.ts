@@ -1,3 +1,6 @@
+import { createLineOrderResolver } from './bidi-line.js';
+import { physicalDecimalAlignmentPoint } from './line-breaker/decimal-anchor.js';
+import type { LayoutSeg } from './line-breaker/model.js';
 import { describe, it, expect } from 'vitest';
 import {
   layoutBidiTabStops,
@@ -266,7 +269,7 @@ describe('layoutBidiTabStops (§17.3.1.37 mirror — margin-anchored reading fra
 // renderDocumentToCanvas with a recording canvas (fixed-width glyphs), so the
 // full layout→reorder→draw path is exercised (not just the pure helper). The
 // mock glyph is `fontSize` px wide; positions are therefore exact and font-free.
-interface FillCall { text: string; x: number; }
+interface FillCall { text: string; x: number; y: number; }
 function makeRecordingCanvas(): { canvas: HTMLCanvasElement; fills: FillCall[]; leaderXs: number[] } {
   let font = '10px serif';
   const px = () => parseFloat(/(\d+(?:\.\d+)?)px/.exec(font)?.[1] ?? '10');
@@ -289,9 +292,9 @@ function makeRecordingCanvas(): { canvas: HTMLCanvasElement; fills: FillCall[]; 
     stroke() {}, fill() {}, fillRect() {}, strokeRect() {}, rect() {}, clip() {}, scale() {},
     translate() {}, setLineDash() {}, clearRect() {}, arc() {}, quadraticCurveTo() {}, bezierCurveTo() {},
     createLinearGradient() { return { addColorStop() {} }; }, drawImage() {},
-    fillText(text: string, x: number) {
+    fillText(text: string, x: number, y: number) {
       if (text === '_' || text === '.' || text === '·' || text === '-') leaderXs.push(x);
-      else fills.push({ text, x });
+      else fills.push({ text, x, y });
     },
     strokeText() {}, fillStyle: '#000', strokeStyle: '#000', lineWidth: 1,
     textAlign: 'left' as CanvasTextAlign, globalAlpha: 1,
@@ -334,6 +337,79 @@ function docOf(paras: DocParagraph[], width = 400): DocxDocumentModel {
 }
 
 describe('bidi TOC / footer rows render on one line, mirrored (issue #820)', () => {
+  it('projects fresh cell membership and advances through reusable canonical order', () => {
+    const segments = [{ text: 'AB' }, { isTab: true }, { text: '12.50', rtl: true },
+      { text: ' ', rtl: true }, { text: 'אבגד', rtl: true }] as unknown as LayoutSeg[];
+    const input = { segments, point: { segmentIndex: 2, charOffset: 2 },
+      cellStart: 2, cellEnd: 5, advances: [20, 0, 50, 10, 40],
+      selectedPrefixAdvance: 20, model: 'line-level' as const, resolveOrder: createLineOrderResolver() };
+    // The RTL word and space precede the numeric slice physically. A new
+    // acquired word width and then a shorter cell must not reuse an old offset.
+    expect(physicalDecimalAlignmentPoint(input)).toBe(70);
+    input.advances[4] = 80;
+    expect(physicalDecimalAlignmentPoint(input)).toBe(110);
+    expect(physicalDecimalAlignmentPoint({ ...input, cellEnd: 4 })).toBe(30);
+  });
+
+  it('aligns a decimal point by its visual cell position before following RTL words', async () => {
+    const { canvas, fills } = makeRecordingCanvas();
+    const row = bidiPara([txt('AB'), txt('\t'), txt('12.50 אבגד הוזח', true)],
+      [{ pos: 216, alignment: 'decimal', leader: 'none' }]);
+    await renderDocumentToCanvas(docOf([row]), canvas, 0, { dpr: 1, width: 400 });
+    const number = fills.find(f => f.text.startsWith('12.50'))!;
+    // Decimal stops are measured from the right text margin. Two 10pt digits
+    // precede the physical period, regardless of words reordered to its left.
+    expect(number.x + 20).toBeCloseTo(400 - 216, 6);
+  });
+
+  it('retains the complete-cell anchor when the decimal lies on a later line', async () => {
+    const { canvas, fills } = makeRecordingCanvas();
+    const numberText = '123456789012.50';
+    const row = bidiPara([txt('AB'), txt('\t'), txt(`אבגד הוזח ${numberText} תאגת`, true)],
+      [{ pos: 180, alignment: 'decimal', leader: 'none' }]);
+    await renderDocumentToCanvas(docOf([row], 200), canvas, 0, { dpr: 1, width: 200 });
+    const firstWord = fills.find(f => f.text === 'הוזח')!;
+    // The 300pt queued cell has 100pt before the numeric slice in reading
+    // order, and 30pt after its decimal. Its gap limit is 180-130-20=30pt.
+    // The first line's 100pt cell therefore starts at 50, with its visible RTL
+    // word 10pt past the retained space. The period itself is on the next line.
+    expect(firstWord.x).toBeCloseTo(60, 6);
+    expect(fills.find(f => f.text === numberText)!.y).toBeGreaterThan(firstWord.y);
+  });
+
+  it('preserves the numeric-end fallback when the actual cell has no separator', async () => {
+    const { canvas, fills } = makeRecordingCanvas();
+    const row = bidiPara([txt('AB'), txt('\t'), txt('12 אבגד הוזח', true)],
+      [{ pos: 216, alignment: 'decimal', leader: 'none' }]);
+    await renderDocumentToCanvas(docOf([row]), canvas, 0, { dpr: 1, width: 400 });
+    // The physical-period correction does not broaden the old numeric-end
+    // fallback for a number followed by RTL prose (an unmeasured boundary).
+    expect(fills.find(f => f.text === '12')!.x + 20).toBeCloseTo(284, 6);
+  });
+
+  it('preserves a nonterminal decimal cell while incremental context is unsupported', async () => {
+    const { canvas, fills } = makeRecordingCanvas();
+    const row = bidiPara([txt('AB'), txt('\t'), txt('12.50 אבגד הוזח', true), txt('\t'), txt('9', true)],
+      [{ pos: 216, alignment: 'decimal', leader: 'none' }, { pos: 350, alignment: 'left', leader: 'none' }]);
+    await renderDocumentToCanvas(docOf([row]), canvas, 0, { dpr: 1, width: 400 });
+    // Preserve the prior two-stop allocation: the new terminal-cell model
+    // must not silently reinterpret a cell used by the incremental tab walk.
+    expect(fills.find(f => f.text.startsWith('12.50'))!.x + 20).toBeCloseTo(284, 6);
+    expect(fills.find(f => f.text === '9')!.x).toBeCloseTo(40, 6);
+  });
+
+  it('preserves a selected decimal paint slice containing a directional island', async () => {
+    const { canvas, fills } = makeRecordingCanvas();
+    const mixed = 'Aאב.50';
+    const row = bidiPara([txt('AB'), txt('\t'), { ...txt(mixed, true), fontFamilyCs: 'Arial' }],
+      [{ pos: 216, alignment: 'decimal', leader: 'none' }]);
+    await renderDocumentToCanvas(docOf([row]), canvas, 0, { dpr: 1, width: 400 });
+    // The selected source slice contains both local parities. Keep its
+    // previous allocation: the following two-digit island starts at 154.
+    // A source-order prefix is not a physical caret inside the mixed slice.
+    expect(fills.find(f => f.text === '50')!.x).toBeCloseTo(154, 6);
+  });
+
   it('retains a leading tab leader when a second tab fixes its reading-order gap', async () => {
     const { canvas, fills, leaderXs } = makeRecordingCanvas();
     const row = bidiPara(

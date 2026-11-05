@@ -75,6 +75,7 @@ export type BreakOpportunityIteratorContext = Pick<
   | 'defaultTabPt'
   | 'tabFollowingMetrics'
   | 'bidiCustomStopsPx'
+  | 'bidiOrdering'
   | 'bidiIntervalPx'
   | 'decimalAlignmentPoint'
   | 'availW'
@@ -822,6 +823,7 @@ function processTabSegment(
   seg.alignedFitBack = undefined;
   seg.alignedCellWidth = undefined;
   seg.alignedCellDecimal = undefined;
+  seg.alignedCellPhysicalDecimal = undefined;
   seg.windowOverflow = undefined;
   seg.resolvedAlignment = undefined;
   const displacedFrame = seg.displacedFloatTabFrame === true;
@@ -965,11 +967,13 @@ function processTabSegment(
     seg.alignedFitBack = rtlCellInScope && !alignedCellEndsAtTab(context) ? true : undefined;
     if (seg.alignedFitBack) {
       // The complete cell, as left-to-right placement measures it.
-      const cell = tabFollowingMetrics();
+      const cell = tabFollowingMetrics(seg.resolvedAlignment === 'decimal' ? seg : undefined);
       seg.alignedCellWidth = cell.totalWidth;
       // Only a real separator aligns a fitted-back cell; the numeric fallback
       // of a cell without one was not measured (the walk keeps its old fit).
-      seg.alignedCellDecimal = alignedCellHasDecimalSeparator(context) ? cell.decimalPrefixWidth : undefined;
+      const hasSeparator = alignedCellHasDecimalSeparator(context);
+      seg.alignedCellDecimal = hasSeparator ? cell.decimalPrefixWidth : undefined;
+      seg.alignedCellPhysicalDecimal = hasSeparator ? cell.physicalDecimalOffset : undefined;
     }
     addToLine(seg, 0, seg.fontSize, tabAscent, tabDescent);
     if (admittedAligned) commitAlignedTabCell(context);
