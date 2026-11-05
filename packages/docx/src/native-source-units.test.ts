@@ -292,3 +292,60 @@ it('rejects a missing current directed receipt after a valid native preflight bu
   expect(() => layoutDocument(document, observed)).toThrow(/directed.*receipt/i);
   expect(bundles).toBe(1);
 });
+
+it('preserves source coverage when an ordinary continuation later acquires native units', () => {
+  const document = model(false, 10, 44);
+  const paragraph = document.body[0] as Extract<BodyElement, { type: 'paragraph' }>;
+  const text = Array(6).fill(content.slice(0, -1)).join(' ') + '.';
+  paragraph.runs = [{ ...paragraph.runs[0]!, type: 'text', text } as typeof paragraph.runs[number]];
+  const services = createLayoutServices(document, { measureContext: context() });
+  const native = getDefaultBidiEngine();
+  let initialSourceRequests = 0, switches = 0, bundles = 0;
+  const observed = createLayoutServicesRuntimeView(services, { text: Object.freeze({ ...services.text,
+    shape(request: Readonly<TextShapeRequest>) {
+      // The initial ordinary word request owns the complete source context.
+      // Observe its source-start call before the original service's shape cache.
+      if (request.measure === false && request.baseDirection === undefined
+        && request.text.length > 0 && request.substituteContext?.text === text
+        && request.substituteContext.offset === 0 && ++initialSourceRequests === 2) {
+        switches++;
+        setBidiEngine(native);
+      }
+      return services.text.shape(request);
+    },
+    acquireProjectableNativeUnits(requests: Parameters<NonNullable<typeof services.text.acquireProjectableNativeUnits>>[0]) {
+      const result = services.text.acquireProjectableNativeUnits!(requests);
+      if (result) bundles++;
+      return result;
+    },
+  }) });
+  setBidiEngine({ computeLevels: (...args) => native.computeLevels(...args),
+    reorderVisual: (...args) => native.reorderVisual(...args), getMirror: code => native.getMirror(code) });
+  try {
+    const layout = layoutDocument(document, observed);
+    expect(initialSourceRequests).toBeGreaterThanOrEqual(2);
+    expect(switches).toBe(1);
+    expect(bundles).toBeGreaterThan(0);
+    const operations = (pages: typeof layout.pages) => pages.flatMap(page => page.layers.body)
+      .filter((node): node is ParagraphLayout => node.kind === 'paragraph')
+      .flatMap(paragraph => paragraph.lines).flatMap(line => line.placements)
+      .filter(piece => piece.kind === 'text').flatMap(piece => piece.paintOps);
+    const mixed = (text: string) => /[ابت]/u.test(text) && /[A-Za-z]/u.test(text);
+    expect(operations(layout.pages.slice(0, 1)).some(op => mixed(op.text))).toBe(true);
+    const later = operations(layout.pages.slice(1));
+    expect(later.some(op => /[A-Za-z]/u.test(op.text))).toBe(true);
+    expect(later.some(op => mixed(op.text))).toBe(false);
+    const pieces = layout.pages.flatMap(page => page.layers.body)
+      .filter((node): node is ParagraphLayout => node.kind === 'paragraph')
+      .flatMap(paragraph => paragraph.lines).flatMap(line => line.placements)
+      .filter(piece => piece.kind === 'text').sort((a, b) => a.range.start - b.range.start);
+    let cursor = 0;
+    for (const piece of pieces) {
+      expect(piece.range.start).toBe(cursor);
+      expect(piece.range.end - piece.range.start).toBe(piece.text.length);
+      expect(text.slice(piece.range.start, piece.range.end)).toBe(piece.text);
+      cursor = piece.range.end;
+    }
+    expect(cursor).toBe(text.length);
+  } finally { setBidiEngine(native); }
+});

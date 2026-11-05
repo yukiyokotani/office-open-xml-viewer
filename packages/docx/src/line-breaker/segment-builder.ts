@@ -1,5 +1,5 @@
 import { ownSourceCursor } from './source-cursor.js';
-import { acquireNativeSourceUnits } from './native-source-units.js';
+import { acquireNativeSourceUnits, eligibleNativeSourceText } from './native-source-units.js';
 import { revisionIsOmitted } from '../layout/revision-visibility.js';
 import { type TextBreakWindow } from './text-break-window.js';
 import type { DocxTextRun, FieldRun } from '../types';
@@ -914,7 +914,9 @@ export function buildSegments(
   assignEastAsianAutoSpace(segs, environment);
   withdrawMixedSpaceEligibilityOutsideScope(segs);
 
-  return ownSourceCursor(acquireNativeSourceUnits(segs, runs, environment), runs, environment);
+  const nativeSourceText = environment.nativeUnitMinimumBandPt === undefined
+    ? undefined : eligibleNativeSourceText(runs);
+  return ownSourceCursor(acquireNativeSourceUnits(segs, nativeSourceText, environment), nativeSourceText);
 }
 
 // UAX #29 GB9 extenders and ZWJ can hide a base character's adjacency.

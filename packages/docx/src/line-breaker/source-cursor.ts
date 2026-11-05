@@ -1,15 +1,13 @@
-import type { LayoutSeg, LineBoundary, LineLayoutEnvironment } from './model.js';
-import type { ParagraphLayoutRun } from '../layout/text.js';
+import type { LayoutSeg, LineBoundary } from './model.js';
 
 /** Optional native acquisition can decline after a supported engine setter.
  * Continuations of this fixed-band single-source class therefore own UTF-16
  * source positions, not ordinals in whichever representation was selected.
  * This is source ownership only: it performs no measurement or native admission. */
 export function ownSourceCursor(
-  segments: LayoutSeg[], runs: readonly ParagraphLayoutRun[], environment: LineLayoutEnvironment,
+  segments: LayoutSeg[], text: string | undefined,
 ): LayoutSeg[] {
-  if (environment.nativeUnitMinimumBandPt === undefined || runs.length !== 1 || runs[0]?.type !== 'text') return segments;
-  const text = runs[0].text;
+  if (text === undefined) return segments;
   let cursor = 0;
   for (const segment of segments) {
     if (!('text' in segment) || segment.metricOnly || segment.sourceRunIndex !== 0

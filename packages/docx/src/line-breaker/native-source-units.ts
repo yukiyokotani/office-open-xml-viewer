@@ -6,17 +6,12 @@ import { fitsLineWidth } from './fit-search.js';
 import { RESET_SLICED_TEXT_MEASUREMENT, slicedTextMetadata } from './advance.js';
 import type { LayoutSeg, LayoutTextSeg, LineLayoutEnvironment } from './model.js';
 
-/** Normative shaping boundary: Unicode 17 / UAX #9 rev.51 §3.5, through the
- * SAME whole authored host resolver. The initial library capability is narrower:
- * one ordinary strong-letter source run, ASCII SPACE, and a true nonnumeric
- * scope-final period. Digits, marks, controls, weak punctuation, transformations
- * and unknown author scopes remain ordinary BEFORE directed acquisition. */
-export function acquireNativeSourceUnits(
-  original: LayoutSeg[], runs: readonly ParagraphLayoutRun[], environment: LineLayoutEnvironment,
-): LayoutSeg[] {
-  const band = environment.nativeUnitMinimumBandPt;
-  const service = environment.layoutServices?.text;
-  if (band === undefined || !service?.acquireProjectableNativeUnits || !service.shapeDirected || runs.length !== 1) return original;
+/** Immutable source eligibility is shared with continuation ownership. It must
+ * not depend on the current engine/provider or on a temporary shape outcome:
+ * eligible ordinary-first and native-first acquisitions share the same cursor.
+ * Excluded characters can never enter this capability and keep ordinary src. */
+export function eligibleNativeSourceText(runs: readonly ParagraphLayoutRun[]): string | undefined {
+  if (runs.length !== 1) return undefined;
   // The band owner supplies the complete canonical paragraph, not a source
   // window. With exactly one ordinary run, paragraph end is also the authored
   // LRI scope end; a font/run boundary followed by another unmarked run would
@@ -24,27 +19,41 @@ export function acquireNativeSourceUnits(
   const run = runs[0]!;
   if (run.type !== 'text' || run.rtl === true || run.cs === true || !run.text
     || run.smallCaps || run.allCaps || run.vertAlign != null
-    || run.text.startsWith(' ') || !/\p{Letter}/u.test(run.text)) return original;
+    || run.text.startsWith(' ') || !/\p{Letter}/u.test(run.text)) return undefined;
   let sawL = false, sawR = false;
   for (let offset = 0; offset < run.text.length;) {
     const code = run.text.codePointAt(offset)!;
     const character = String.fromCodePoint(code);
     const type = bidiClass(code);
     if (character !== ' ' && !(character === '.' && offset + 1 === run.text.length)) {
-      if (!/\p{Letter}/u.test(character) || (type !== 'L' && type !== 'R' && type !== 'AL')) return original;
+      if (!/\p{Letter}/u.test(character) || (type !== 'L' && type !== 'R' && type !== 'AL')) return undefined;
       sawL ||= type === 'L'; sawR ||= type === 'R' || type === 'AL';
     }
     offset += character.length;
   }
-  if (!sawR || (!sawL && !run.text.endsWith('.'))) return original;
+  if (!sawR || (!sawL && !run.text.endsWith('.'))) return undefined;
+  return run.text;
+}
+
+/** Normative shaping boundary: Unicode 17 / UAX #9 rev.51 §3.5, through the
+ * SAME whole authored host resolver. The initial library capability is narrower:
+ * one ordinary strong-letter source run, ASCII SPACE, and a true nonnumeric
+ * scope-final period. Digits, marks, controls, weak punctuation, transformations
+ * and unknown author scopes remain ordinary BEFORE directed acquisition. */
+export function acquireNativeSourceUnits(
+  original: LayoutSeg[], sourceText: string | undefined, environment: LineLayoutEnvironment,
+): LayoutSeg[] {
+  const band = environment.nativeUnitMinimumBandPt;
+  const service = environment.layoutServices?.text;
+  if (band === undefined || !service?.acquireProjectableNativeUnits || !service.shapeDirected || sourceText === undefined) return original;
   const engine = lineOrderEngineIdentity();
-  const resolved = resolveNativeSourceLevelUnits([{ text: run.text, rtl: false, digitsAsAN: false }], true);
+  const resolved = resolveNativeSourceLevelUnits([{ text: sourceText, rtl: false, digitsAsAN: false }], true);
   // Only the existing branded, unmodified Unicode-17 engine certifies this
   // closed strong-source theorem. A forwarding/custom engine remains ordinary.
   if (!resolved) return original;
   const units: Array<{ start: number; end: number; baseDirection: 'ltr' | 'rtl' }> = [];
   for (const part of resolved) {
-    const text = run.text.slice(part.startUTF16, part.endUTF16);
+    const text = sourceText.slice(part.startUTF16, part.endUTF16);
     // L1 SPACE reset is not a visible native cut. Its independently acquired
     // zero-ink charged source cell is projected by the final whole-host view.
     if (/^ +$/u.test(text) && units.length > 0) { units[units.length - 1]!.end = part.endUTF16; continue; }
@@ -64,8 +73,8 @@ export function acquireNativeSourceUnits(
       || (segment.charSpacing ?? 0) !== 0 || (segment.charScale ?? 1) !== 1
       || segment.autoSpaceBeforePt !== undefined || segment.punctuationCompressions?.length) return original;
     const request = segment.textShapeRequest;
-    if (request.substituteContext?.text !== run.text || request.substituteContext.offset !== cursor
-      || run.text.slice(cursor, cursor + segment.text.length) !== segment.text) return original;
+    if (request.substituteContext?.text !== sourceText || request.substituteContext.offset !== cursor
+      || sourceText.slice(cursor, cursor + segment.text.length) !== segment.text) return original;
     const end = cursor + segment.text.length;
     while (units[unitIndex] && units[unitIndex]!.end <= cursor) unitIndex++;
     let currentUnit = unitIndex;
@@ -76,7 +85,7 @@ export function acquireNativeSourceUnits(
       const unit = units[currentUnit]!;
       const first = Math.max(cursor, unit.start), last = Math.min(end, unit.end);
       if (first >= last) continue;
-      if (/[^ ]/u.test(run.text.slice(first, last))) {
+      if (/[^ ]/u.test(sourceText.slice(first, last))) {
         if (firstVisibleBase === undefined) firstVisibleBase = unit.baseDirection;
         else hasVisibleCut ||= firstVisibleBase !== unit.baseDirection;
       }
@@ -88,7 +97,7 @@ export function acquireNativeSourceUnits(
         // Native cuts inside a physical word are NOT legal source word breaks.
         joinPrev: start > 0 ? true : segment.joinPrev,
         textShapeRequest: { ...sliceTextShapeRequest(request, start, finish), baseDirection: unit.baseDirection },
-        nativeLevelUnit: Object.freeze({ sourceText: run.text, ...unit }),
+        nativeLevelUnit: Object.freeze({ sourceText: sourceText, ...unit }),
       });
     }
     unitIndex = Math.max(unitIndex, currentUnit - 1);
@@ -98,19 +107,19 @@ export function acquireNativeSourceUnits(
   // SPACE-only L1 cuts do not activate this capability. A visible boundary must
   // lie INSIDE an existing ordinary native operation before pair partners may
   // join the same selected source bundle.
-  if (!hasVisibleCut || cursor !== run.text.length) return original;
+  if (!hasVisibleCut || cursor !== sourceText.length) return original;
   // A level seam is not itself proof of an original grapheme boundary:
   // Letter/strong filtering still admits GCB Prepend letters. Only actual
   // whole-source segmentation certifies these new cuts; a code-point fallback
   // or segmentation of already-cut children would manufacture that proof.
   if (typeof Intl === 'undefined' || typeof Intl.Segmenter !== 'function') return original;
   const graphemes = new Intl.Segmenter(undefined, { granularity: 'grapheme' })
-    .segment(run.text)[Symbol.iterator]();
+    .segment(sourceText)[Symbol.iterator]();
   let boundary = 0;
   const isOriginalBoundary = (offset: number): boolean => {
     while (boundary < offset) {
       const next = graphemes.next();
-      boundary = next.done ? run.text.length : next.value.index;
+      boundary = next.done ? sourceText.length : next.value.index;
       if (next.done) break;
     }
     return boundary === offset;
@@ -119,11 +128,11 @@ export function acquireNativeSourceUnits(
   for (const piece of candidate) {
     const start = piece.textShapeRequest!.substituteContext!.offset;
     const end = start + piece.text.length;
-    if (start !== candidateEnd || run.text.slice(start, end) !== piece.text
+    if (start !== candidateEnd || sourceText.slice(start, end) !== piece.text
       || !isOriginalBoundary(start) || !isOriginalBoundary(end)) return original;
     candidateEnd = end;
   }
-  if (candidateEnd !== run.text.length) return original;
+  if (candidateEnd !== sourceText.length) return original;
   const requests = candidate.map(piece => ({ ...piece.textShapeRequest!,
     baseDirection: piece.nativeLevelUnit!.baseDirection, measure: true, clusterGeometry: 'spaces' as const }));
   const results = service.acquireProjectableNativeUnits(requests);
