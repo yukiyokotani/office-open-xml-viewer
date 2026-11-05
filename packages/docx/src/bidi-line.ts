@@ -52,16 +52,18 @@ export const computeLineVisualOrder = (
 );
 
 /** Final acquired source cells only; acquisition's coarse memo and decimal
- * anchors keep their established API/lifetime and native certificates. */
+ * anchors keep their established API/lifetime and native certificates. The
+ * parent model is the SAME canonical resolver's original segment view, not
+ * an alternate layout or paint pipeline. */
 export const computeLineSourceCellOrder = (
   parents: readonly unknown[], cells: readonly SegmentLineSourceCell[],
-  baseRtl: boolean, legacyModel: LineOrderModel,
+  baseRtl: boolean, parentModel: LineOrderModel,
 ) => computeSegmentLineSourceCellOrder(
   parents, cells, baseRtl,
   // Proper source cells can preserve authored SPACE scope even in distribute.
   // Acquisition/decimal anchors and unsupported final lines keep their model.
   baseRtl ? authoredOptions : options,
-  legacyModel === 'word' ? authoredOptions : options,
+  parentModel === 'word' ? authoredOptions : options,
 );
 
 export type LineOrderResolver = (
