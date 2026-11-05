@@ -769,6 +769,8 @@ function frameMeetsEarlierFlowContent(
 function paragraphFragmentStartKey(cursor: ParagraphFragmentCursor): string {
   return cursor.boundary === null
     ? 'root'
+    : cursor.boundary.sourceTextStart !== undefined
+      ? `source:${cursor.boundary.sourceTextStart + cursor.boundary.charOffset}${cursor.boundary.trailingEmptyLine ? ':empty-line' : ''}`
     : `paragraph:${cursor.boundary.segIndex}:${cursor.boundary.charOffset}${cursor.boundary.trailingEmptyLine ? ':empty-line' : ''}`;
 }
 

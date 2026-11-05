@@ -1,3 +1,5 @@
+import { ownSourceCursor } from './source-cursor.js';
+import { acquireNativeSourceUnits } from './native-source-units.js';
 import { revisionIsOmitted } from '../layout/revision-visibility.js';
 import { type TextBreakWindow } from './text-break-window.js';
 import type { DocxTextRun, FieldRun } from '../types';
@@ -912,7 +914,7 @@ export function buildSegments(
   assignEastAsianAutoSpace(segs, environment);
   withdrawMixedSpaceEligibilityOutsideScope(segs);
 
-  return segs;
+  return ownSourceCursor(acquireNativeSourceUnits(segs, runs, environment), runs, environment);
 }
 
 // UAX #29 GB9 extenders and ZWJ can hide a base character's adjacency.
@@ -1747,6 +1749,8 @@ function appendRunsToSegments(
           segment.metricProbeText = probe;
           segment.sourceRunIndex = runIndex;
           if (segment.textShapeRequest) {
+            segment.nativeLevelUnit = undefined;
+            segment.nativeVisiblePrefix = undefined;
             segment.textShapeRequest = Object.freeze(independentTextShapeRequest(segment.textShapeRequest, ''));
           }
         }
@@ -1789,6 +1793,8 @@ function appendRunsToSegments(
             if (segment.fontSource === 'native' && segment.fontInstalledFamily !== true) segment.metricProbeText = 'x';
             segment.sourceRunIndex = runIndex;
             if (segment.textShapeRequest) {
+              segment.nativeLevelUnit = undefined;
+              segment.nativeVisiblePrefix = undefined;
               segment.textShapeRequest = Object.freeze(independentTextShapeRequest(segment.textShapeRequest, ''));
             }
           }

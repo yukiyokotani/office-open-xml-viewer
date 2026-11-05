@@ -2,6 +2,7 @@ import type { BidiEngine } from '@silurus/ooxml-core';
 // WordprocessingML segment ordering uses the shared UAX#9 kernel with
 // Word's HL1 run overrides and content-level Canvas direction.
 import {
+  resolveSegmentNativeLevelUnits,
   computeSegmentLineVisualOrder, computeSegmentLineSourceCellOrder, segmentLineHasRtl,
   type SegmentLineSourceCell,
   type SegmentLineVisualOrder, type SegmentLineBidiOptions,
@@ -42,6 +43,11 @@ export const segmentsHaveRtl = (segments: readonly unknown[]): boolean =>
 const authoredOptions = Object.freeze({
   ...options, isolateDirection: wordRunDirectionSpan, isolateRequiresUniformSlices: true,
 });
+/** Acquisition-only source units. The authored scope is assembled once from
+ * the complete original source, never reconstructed from generated children. */
+export const resolveNativeSourceLevelUnits = (segments: readonly unknown[], baseRtl: boolean) =>
+  resolveSegmentNativeLevelUnits(segments, baseRtl, authoredOptions);
+
 // One anchor is retained per measured slice. Intra-slice resolved-level
 // boundaries are not retained, so punctuation or script changes inside one
 // slice can still be misplaced (#2076); this is not a complete bidi rewrite.
@@ -87,7 +93,7 @@ export const lineOrderEngineIdentity = (): Readonly<{
   const reorder = engine.reorderVisual;
   return { engine, compute, reorder, token: getBidiEngineLifecycleToken() } as const;
 };
-const sameEngineState = (a: ReturnType<typeof lineOrderEngineIdentity>, b: ReturnType<typeof lineOrderEngineIdentity>): boolean =>
+export const sameEngineState = (a: ReturnType<typeof lineOrderEngineIdentity>, b: ReturnType<typeof lineOrderEngineIdentity>): boolean =>
   a.engine === b.engine && a.token === b.token && a.compute === b.compute && a.reorder === b.reorder;
 
 /** One synchronous acquisition's canonical ordering reuse. The owner drops

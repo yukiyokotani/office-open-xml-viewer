@@ -1,5 +1,5 @@
 export { getDefaultBidiEngine, getBidiEngineLifecycleToken } from './engine.js';
-export { unicodePunctuationOrSymbol } from './char-data.js';
+export { unicodePunctuationOrSymbol, bidiClass } from './char-data.js';
 import { getDefaultBidiEngine } from './engine.js';
 import { hasStrongRtl, OBJECT_PLACEHOLDER, buildVisualOrder } from './line-order.js';
 import type { BidiClass } from './types.js';
@@ -214,6 +214,27 @@ export function computeSegmentLineVisualOrder(
   return computeSegmentLineOrder(segments, baseRtl, options, false);
 }
 
+/** Source-local native shaping boundaries from the SAME authored whole-host
+ * assembly and UAX #9 resolution used below. Unicode 17 / rev.51 §3.5 requires
+ * shaping within resolved level runs. No font, width, occurrence identity or
+ * alternate classification is introduced. Callers still own grapheme-safe
+ * eligibility and may not treat a SPACE level as a visible ink direction. */
+export interface SegmentNativeLevelUnit {
+  readonly parentIndex: number;
+  readonly startUTF16: number;
+  readonly endUTF16: number;
+  readonly level: number;
+}
+export function resolveSegmentNativeLevelUnits(
+  segments: readonly unknown[], baseRtl: boolean, options: SegmentLineBidiOptions,
+): readonly SegmentNativeLevelUnit[] | undefined {
+  if (!isUnmodifiedNativeBidiEngine(getDefaultBidiEngine())) return undefined;
+  let units: readonly SegmentNativeLevelUnit[] = [];
+  computeSegmentLineOrder(segments, baseRtl, options, false, undefined,
+    resolved => { units = resolved; });
+  return units;
+}
+
 /** Final acquired-cell projection only. Author scopes are assembled from the
  * ORIGINAL parents. A mixed visible island cannot be split by paint, so its
  * whole line returns the exact legacy parent model (#2076). Default format
@@ -260,6 +281,7 @@ function computeSegmentLineOrder(
   segments: readonly unknown[], baseRtl: boolean,
   options: SegmentLineBidiOptions, retainAnchorLevels: boolean,
   projection?: Readonly<{ cells: readonly SegmentLineSourceCell[]; legacyOptions: SegmentLineBidiOptions }>,
+  retainNativeUnits?: (units: readonly SegmentNativeLevelUnit[]) => void,
 ): SegmentLineVisualOrder | SegmentLineResolvedOrder | SegmentLineSourceCellOrder {
   const count = segments.length;
   if (count === 0 && projection) return { view: 'cells', order: [], rtl: [], anchorLevels: new Uint8Array(0) };
@@ -308,6 +330,22 @@ function computeSegmentLineOrder(
   const { levels, paragraphLevel } = getDefaultBidiEngine().computeLevels(
     full, baseRtl ? 'rtl' : 'ltr', override,
   );
+  if (retainNativeUnits) {
+    const units: SegmentNativeLevelUnit[] = [];
+    for (let parentIndex = 0; parentIndex < count; parentIndex++) {
+      const value = textOf(segments[parentIndex]) ?? '';
+      if (value.length === 0) continue;
+      let first = 0;
+      for (let offset = 1; offset <= value.length; offset++) {
+        if (offset !== value.length && levels[start[parentIndex]! + offset] === levels[start[parentIndex]! + first]) continue;
+        units.push({ parentIndex, startUTF16: first, endUTF16: offset,
+          level: levels[start[parentIndex]! + first]! });
+        first = offset;
+      }
+    }
+    retainNativeUnits(units);
+    return { order: [], rtl: [] };
+  }
   if (projection) {
     const cellStart = projection.cells.map(cell => start[cell.parentIndex]! + cell.startUTF16);
     const cellEnd = projection.cells.map(cell =>

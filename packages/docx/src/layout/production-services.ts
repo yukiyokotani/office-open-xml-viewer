@@ -31,6 +31,7 @@ import {
 import {
   classifyDocxFontGeneric,
   createTextLayoutService,
+  nativeVisiblePrefixMatches,
   snapshotFontMetrics,
   type GlyphMeasureRequest,
   type TextLayoutService,
@@ -326,6 +327,39 @@ export function createProductionTextLayoutService(
     }
   };
   return createTextLayoutService({
+    ...(supportsDirectedContext ? {
+      acquireProjectableNativeUnits: (requests, shape) => {
+        // Each request remains one native word operation plus optional charged
+        // ASCII suffix. Joined SPACE+Y probes are metrics, not new paint words.
+        // Do not manufacture an isolated SPACE or split a contextual multiword
+        // operation merely to make it look projectable.
+        if (requests.some(request => !request.text.trimEnd()
+          || request.text.replace(/ +$/u, '').includes(' '))) return undefined;
+        const results = requests.map(request => shape({ ...request, measure: true, clusterGeometry: 'spaces' }));
+        for (let index = 0; index < results.length; index++) {
+          const request = requests[index]!, entry = results[index]!, result = entry.shape;
+          if (result.spans.length !== 1) return undefined;
+          if (request.baseDirection === 'rtl' && request.text.endsWith(' ')
+            && !nativeVisiblePrefixMatches(request, result, entry.visiblePrefix)) return undefined;
+          if (result.nativeBaseDirection !== request.baseDirection) throw new TypeError('Native unit receipt mismatch');
+          if (!Number.isFinite(result.advancePt) || result.advancePt < 0
+            || result.spans.map(span => span.text).join('') !== request.text) return undefined;
+          let previous = 0;
+          const boundaries = new Set([0, request.text.length, ...result.graphemeBoundaries]);
+          for (const cluster of result.clusters ?? []) {
+            if (request.text.slice(cluster.range.start, cluster.range.end) !== ' '
+              || !boundaries.has(cluster.range.start) || !boundaries.has(cluster.range.end)
+              || !Number.isFinite(cluster.offsetPt) || !Number.isFinite(cluster.advancePt)
+              || cluster.offsetPt < previous || cluster.advancePt < 0
+              || cluster.offsetPt + cluster.advancePt > result.advancePt) return undefined;
+            previous = cluster.offsetPt + cluster.advancePt;
+          }
+          const spaces = request.text.split(' ').length - 1;
+          if (spaces !== (result.clusters?.length ?? 0)) return undefined;
+        }
+        return results;
+      },
+    } : {}),
     ...(context ? { glyphContours: acquireCanvasGlyphContours, glyphContourFingerprint: 'canvas-half-coverage-contours-v2',
       ...(supportsDirectedContext ? { glyphContoursSupportDirection: true as const } : {}) } : {}),
     fonts: createFontResolver(inventory, {
@@ -363,8 +397,10 @@ export function createProductionTextLayoutService(
       // DOM-dependent vertical documents cannot retain worker mode, so folding
       // that unused capability into the general text snapshot would make equal
       // horizontal main/worker services advertise unequal cache identities.
-      // v2: the Canvas measurer also proves synthesized faces (#1848).
-      fingerprint: supportsDirectedContext ? 'canvas-directed-text-metrics-v3'
+      // v2 proves synthesized faces; v4 additionally owns temporary projectable
+      // directed source bundles. Capability participates in the stable semantic
+      // fingerprint, independently of source occurrence or cache history.
+      fingerprint: supportsDirectedContext ? 'canvas-projectable-directed-prefix-text-metrics-v5'
         : context ? 'canvas-text-metrics-v2' : 'deterministic-text-metrics-v1',
       ...(context ? { sameGlyphRaster, ownsGlyphs } : {}),
       measure,

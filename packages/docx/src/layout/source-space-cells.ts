@@ -45,6 +45,20 @@ export function prepareSourceSpaceCells(parents: readonly MeasuredLinePlanSegmen
   for (let parentIndex = 0; parentIndex < parents.length; parentIndex += 1) {
     const parent = parents[parentIndex]!;
     parentCellStarts.push(projection.length);
+    if (parent.kind === 'text' && parent.nativeVisiblePrefix) {
+      const prefix = parent.nativeVisiblePrefix, op = parent.basePaintOps[0];
+      if (parent.nativeBaseDirection !== 'rtl' || !parent.text.endsWith(' ')
+        || prefix.endUTF16 !== parent.text.replace(/ +$/u, '').length
+        || prefix.request.text !== parent.text.slice(0, prefix.endUTF16)
+        || prefix.request.baseDirection !== 'rtl' || prefix.measurement.nativeBaseDirection !== 'rtl'
+        || prefix.request.fontRoute.fingerprint !== parent.fontRoute.fingerprint
+        || prefix.request.fontSizePt !== parent.fontSizePt || prefix.request.weight !== parent.fontWeight
+        || prefix.request.style !== parent.fontStyle || parent.basePaintOps.length !== 1 || !op
+        || op.text !== parent.text || op.range.start !== parent.range.start || op.range.end !== parent.range.end
+        || op.letterSpacingPt !== prefix.request.letterSpacingPt || op.scaleX !== 1
+        || (op.scaleY !== undefined && op.scaleY !== 1) || op.glyphOrientation !== undefined
+        || op.kerning !== (prefix.request.kerning === true ? 'normal' : 'none')) return undefined;
+    }
     if (parent.kind === 'text' && (parent.fixedPitch || parent.fitText || parent.ruby || parent.tateChuYoko
       || parent.optionalHyphenGlyph || parent.retainedGeometry?.emphasis
       || (parent.decorations.length > 0 && !parent.retainedGeometry)
@@ -129,7 +143,8 @@ function materializeSourceSpaceCells(
     if (parent.kind !== 'text' || projection[firstIndex]!.firstCluster < 0) {
       segments.push(parent); spaceOnly.push(false); continue;
     }
-    const { textShapeRequest: _request, textLayoutService: _service, ...retainedParent } = parent;
+    const { textShapeRequest: _request, textLayoutService: _service,
+      nativeVisiblePrefix: prefixAuthority, ...retainedParent } = parent;
     let ownerCursor = 0;
     let slotCursor = 0;
     for (let index = firstIndex; index < endIndex; index += 1) {
@@ -138,6 +153,11 @@ function materializeSourceSpaceCells(
       const start = parent.range.start + part.startUTF16;
       const end = parent.range.start + part.endUTF16;
       const { fromPt, toPt } = part;
+      // The operation we actually paint is the trimmed prefix. Its acquired
+      // native ink can differ from the full RTL Word+SPACE origin; neither
+      // advance subtraction nor the parent's old ink certifies that prefix.
+      const prefix = prefixAuthority && !part.spaceOnly && part.startUTF16 === 0
+        && part.endUTF16 === prefixAuthority.endUTF16 ? prefixAuthority : undefined;
       const clusters: MeasuredTextPlanSegment['clusters'][number][] = [];
       for (let ci = part.firstCluster; ci < part.endCluster; ci += 1) {
         const cluster = parent.clusters[ci]!;
@@ -160,8 +180,12 @@ function materializeSourceSpaceCells(
           text: op.text.slice(a - op.range.start, b - op.range.start),
           range: { start: a, end: b },
           offset: { ...op.offset, xPt: (a === op.range.start ? op.offset.xPt : cluster.offset.xPt) - fromPt },
-          ...(!part.spaceOnly && inkBounds ? { inkBounds } : {}),
-          ...(!part.spaceOnly && blockAxisInkBounds ? { blockAxisInkBounds } : {}),
+          ...(!part.spaceOnly && (prefix?.measurement.inkBounds ?? inkBounds)
+            ? { inkBounds: prefix?.measurement.inkBounds ?? inkBounds } : {}),
+          ...(!part.spaceOnly && blockAxisInkBounds ? { blockAxisInkBounds: prefix ? {
+            startPt: (op.glyphOffsetPt?.yPt ?? 0) - prefix.measurement.inkBounds.ascentPt,
+            endPt: (op.glyphOffsetPt?.yPt ?? 0) + prefix.measurement.inkBounds.descentPt,
+          } : blockAxisInkBounds } : {}),
         });
       }
       const relativeStart = start - parent.range.start, relativeEnd = end - parent.range.start;
@@ -195,6 +219,17 @@ function materializeSourceSpaceCells(
         measuredWidthPt: toPt - fromPt,
         clusters,
         basePaintOps: ops,
+        ...(parent.retainedGeometry && prefixAuthority ? {
+          retainedGeometry: { ...parent.retainedGeometry, base: prefix ? {
+            ascentPt: prefix.measurement.ascentPt, descentPt: prefix.measurement.descentPt,
+            inkBounds: prefix.measurement.inkBounds,
+          } : part.spaceOnly ? {
+            ...parent.retainedGeometry.base,
+            // The charged source cell paints no visible glyph. Keep its font
+            // box for rules, but do not borrow the neighboring word's ink.
+            inkBounds: { xMinPt: 0, xMaxPt: 0, ascentPt: 0, descentPt: 0 },
+          } : parent.retainedGeometry.base },
+        } : {}),
         ...(sourceRuns ? { sourceRuns } : {}),
         ...(semanticSlotSpans ? { semanticSlotSpans } : {}),
         autoSpace: firstCell ? parent.autoSpace : undefined,
