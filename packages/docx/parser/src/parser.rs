@@ -6571,6 +6571,8 @@ fn parse_paragraph_cond_at_depth_with_diagnostics(
         auto_space_dn: base_para.auto_space_dn.filter(|enabled| !enabled),
         // ECMA-376 §17.3.1.45: omission means wordWrap is on.
         word_wrap: base_para.word_wrap.filter(|enabled| !enabled),
+        // §17.3.1.16: retain the resolved fact for hanging-policy admission.
+        kinsoku: base_para.kinsoku.filter(|enabled| !enabled),
         ends_at_hard_break: None,
         // ECMA-376 §17.3.1.1: omission resolves through the paragraph style
         // hierarchy and ultimately defaults to true.
@@ -35680,6 +35682,46 @@ mod lvl_pstyle_backlink_tests {
             zw.finish().unwrap();
         }
         buf
+    }
+
+    /// §17.3.1.16: hanging admission needs the resolved paragraph fact, including
+    /// inherited off and a direct re-enable. Only false is serialized.
+    #[test]
+    fn paragraph_kinsoku_cascade_is_retained_for_hanging_admission() {
+        let styles = format!(
+            r#"<w:styles xmlns:w="{W_NS}">
+              <w:style w:type="paragraph" w:styleId="Off"><w:pPr><w:kinsoku w:val="0"/></w:pPr></w:style>
+              <w:style w:type="paragraph" w:styleId="Child"><w:basedOn w:val="Off"/></w:style>
+            </w:styles>"#
+        );
+        let bytes = build_docx_with_parts(
+            r#"<w:p><w:pPr><w:pStyle w:val="Child"/></w:pPr><w:r><w:t>a</w:t></w:r></w:p>
+               <w:p><w:pPr><w:pStyle w:val="Child"/><w:kinsoku/></w:pPr><w:r><w:t>b</w:t></w:r></w:p>
+               <w:p><w:pPr><w:kinsoku w:val="0"/></w:pPr><w:r><w:t>c</w:t></w:r></w:p>
+               <w:p><w:r><w:t>d</w:t></w:r></w:p>"#,
+            &styles,
+            "",
+        );
+        let document = parse_from_bytes(&bytes).expect("synthetic paragraph styles parse");
+        let values: Vec<serde_json::Value> = document
+            .body
+            .iter()
+            .filter_map(|element| match element {
+                BodyElement::Paragraph(paragraph) => {
+                    Some(serde_json::to_value(paragraph).unwrap()["kinsoku"].clone())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            values,
+            vec![
+                false.into(),
+                serde_json::Value::Null,
+                false.into(),
+                serde_json::Value::Null,
+            ]
+        );
     }
 
     /// Parse and collect every body paragraph's resolved (level, marker text).
