@@ -133,7 +133,7 @@ describe('retained contextual space projection through line acquisition', () => 
     });
     return layoutLines(context, [segment('😀a  ', firstClusters), segment('b ', [cluster(1, 4)]), segment('cccc')],
       width, 0, 1, [], undefined, {}, 0, undefined, undefined, undefined, undefined,
-      false, true, false, undefined, 'bounded', undefined, false, true);
+      false, true, false, undefined, 'bounded', undefined, false, { admissionOnly: true, lineEndIdeographicSpaceHangs: false });
   }
   it('keeps unequal contextual advances and the last duplicate offset across astral text', () => {
     // Natural48 and S=1+3+4=8: the existing quarter-space cap admits2pt,
@@ -143,6 +143,35 @@ describe('retained contextual space projection through line acquisition', () => 
       .map(segment => 'text' in segment ? segment.text : '').join(''));
     expect(text(46)).toEqual(['😀a  b cccc']);
     expect(text(45.75)).toEqual(['😀a  b ', 'cccc']);
+  });
+  it('preserves the exact quarter-cap boundary and its adjacent lower band', () => {
+    const context = { font: '10px serif', letterSpacing: '0px', fontKerning: 'none',
+      measureText(text: string) {
+        const widths: Record<string, number> = { a: 6, b: 8, c: 4.5, ' ': 1 };
+        return { width: [...text].reduce((sum, character) => sum + widths[character]!, 0)
+          + (text.includes('b ') ? 3 : 0),
+          fontBoundingBoxAscent: 8, fontBoundingBoxDescent: 2,
+          actualBoundingBoxAscent: 8, actualBoundingBoxDescent: 2 } as TextMetrics;
+      },
+    } as unknown as CanvasRenderingContext2D;
+    const segment = (text: string, spaceWidth?: number): LayoutTextSeg => ({
+      text, bold: false, italic: false, underline: false, strikethrough: false,
+      fontSize: 10, color: null, fontFamily: 'serif', vertAlign: null, measuredWidth: 0,
+      ...(spaceWidth === undefined ? {} : { shapedSpaceClusters: [cluster(1, spaceWidth)] }),
+    });
+    const acquire = (width: number) => layoutLines(context,
+      [segment('a ', 1), segment('b ', 4), segment('cccc')], width, 0, 1,
+      [], undefined, {}, 0, undefined, undefined, undefined, undefined,
+      false, true, false, undefined, 'bounded', undefined, false,
+      { admissionOnly: true, lineEndIdeographicSpaceHangs: false })
+      .map(line => line.segments.map(part => 'text' in part ? part.text : '').join(''));
+    // Natural37pt, authoritative gaps1+4=5pt: the existing cap permits
+    // exactly1.25pt. The adjacent lower double must refuse, without an epsilon.
+    const bits = new BigUint64Array(new Float64Array([35.75]).buffer);
+    bits[0] = bits[0]! - 1n;
+    const adjacentLowerBand = new Float64Array(bits.buffer)[0]!;
+    expect(acquire(35.75)).toEqual(['a b cccc']);
+    expect(acquire(adjacentLowerBand)).toEqual(['a b ', 'cccc']);
   });
   it('fails closed when retained space geometry is present but empty', () => {
     expect(() => acquire(46, [])).toThrow('A text space lacks authoritative cluster geometry');

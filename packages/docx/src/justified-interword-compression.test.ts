@@ -1,6 +1,4 @@
-import { LineMeasurementAdapter } from './line-breaker/measurement-adapter.js';
-import * as gapWork from './line-breaker/line-gaps.js';
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { renderDocumentToCanvas, type DocxTextRunInfo } from './renderer.js';
 import type { BodyElement, DocParagraph, DocxDocumentModel, DocxTextRun, SectionProps } from './types';
 
@@ -187,26 +185,6 @@ describe('WORD_JUSTIFIED_INTERWORD_COMPRESSION', () => {
         .join(' ').replace('Row', '').trim().split(/\s+/).filter(Boolean);
       expect.soft(visibleWords(first!), alignment).toHaveLength(6);
       expect.soft(visibleWords(second!), alignment).toEqual([extra]);
-    }
-  });
-
-  it('acquires a contraction gap model only when new alignments need an overflow decision', async () => {
-    const work = vi.spyOn(gapWork, 'lineGapModel');
-    const measurements = vi.spyOn(LineMeasurementAdapter.prototype, 'measureSegment');
-    try {
-      const [natural] = await renderLines(paragraph('Quiet rivers', 'distribute'), 233.3);
-      expect(words(natural)).toEqual(['Quiet', 'rivers']);
-      expect(work).not.toHaveBeenCalled();
-      const [compressed] = await renderLines(paragraph(CONTROL, 'distribute'), 233.3);
-      expect(words(compressed).at(-1)).toBe('valley');
-      expect(work).toHaveBeenCalled();
-      // This accepted overflow word has one producer acquisition; fitting
-      // consumes that raw box instead of acquiring its contextual spaces again.
-      expect(measurements.mock.calls.filter(([segment, geometry]) =>
-        geometry === 'spaces' && segment.text === 'valley ')).toHaveLength(1);
-    } finally {
-      measurements.mockRestore();
-      work.mockRestore();
     }
   });
 

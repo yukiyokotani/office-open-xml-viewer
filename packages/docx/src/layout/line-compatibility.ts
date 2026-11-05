@@ -634,6 +634,12 @@ export function wordJustifiedInterwordCompressionApplies(
     && compatibilityMode === 15;
 }
 
+/** The existing quarter-space cap, shared with conservative refusal proofs.
+ * An upper bound on S can certify refusal only; it cannot admit a line. */
+export function wordJustifiedCompressionExceedsCap(overflow: number, naturalGapSum: number): boolean {
+  return overflow > naturalGapSum / 4;
+}
+
 /** Observed proportional comparison. All lengths share one unit. Line-end
  * separators participate in the comparison but never receive paint slack. */
 export function wordJustifiedInterwordCompressionFactor(input: Readonly<{
@@ -645,7 +651,7 @@ export function wordJustifiedInterwordCompressionFactor(input: Readonly<{
 }>): number | undefined {
   const { overflow: C, naturalGapSum: S, previousOpportunitySum: Sprime,
     expansionWithoutCandidate: E, candidateLineEndSeparator: t } = input;
-  if (!(C > 0) || !(S > 0) || !(Sprime > 0) || C > S / 4) return undefined;
+  if (!(C > 0) || !(S > 0) || !(Sprime > 0) || wordJustifiedCompressionExceedsCap(C, S)) return undefined;
   return C / (S + t) <= 0.5 * E / Sprime ? C / S : undefined;
 }
 

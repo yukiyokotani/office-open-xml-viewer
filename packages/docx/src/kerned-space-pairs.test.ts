@@ -100,6 +100,11 @@ describe('kerned U+0020 pairs (WORD_KERNED_SPACE_PAIRS)', () => {
     const last = result[0]!.at(-1)!;
     expect(last.x + SCALAR.A!).toBeCloseTo(36, 6);
     expect(result[0]![1]!.x).toBeCloseTo(9 - .75 - 3 * (.75 / 8.25), 6);
+    // Refusal with a nonzero incoming seam requeues the same word at a fresh
+    // origin; that line must not keep the previous word's space+A pair.
+    const refused = lines(layout([run('x A x', { kerning: 2 })], 15, 15, 'distribute'));
+    expect(refused.map(line => line.map(piece => piece.text).join(''))).toEqual(['x ', 'A ', 'x']);
+    expect(refused[1]![0]!.x).toBe(0);
   });
   it.each([undefined, 15])('charges the space+glyph pair across word pieces (mode %s)', (mode) => {
     const [line] = lines(layout([run(SPAN_TEXT, { kerning: 2 })], 400, mode));
