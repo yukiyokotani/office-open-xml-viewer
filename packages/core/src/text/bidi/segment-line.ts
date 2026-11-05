@@ -1,3 +1,4 @@
+export { getDefaultBidiEngine, getBidiEngineLifecycleToken } from './engine.js';
 import { getDefaultBidiEngine } from './engine.js';
 import { hasStrongRtl, OBJECT_PLACEHOLDER, buildVisualOrder } from './line-order.js';
 import type { BidiClass } from './types.js';

@@ -1,3 +1,4 @@
+import type { LineOrderResolver } from '../bidi-line.js';
 import type { BidiTabOrderPolicy } from './tabs.js';
 import { createPrefixWorkBudget } from './prefix-work-budget.js';
 import { LineMeasurementAdapter } from './measurement-adapter.js';
@@ -111,6 +112,7 @@ export interface LineBreakerPassInput {
   readonly lineFit?: LineFitWidth;
   readonly passContext: Readonly<{
     probeHeights: readonly number[] | null;
+    decimalOrder?: LineOrderResolver;
     /** Monotone per-physical-line exclusion probe heights (≥ probeHeights). */
     probeFloors?: readonly number[] | null;
     preparedFloatWrap?: PreparedFloatWrap;

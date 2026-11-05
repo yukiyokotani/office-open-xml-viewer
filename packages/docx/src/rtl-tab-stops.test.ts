@@ -1,3 +1,6 @@
+import { createLineOrderResolver } from './bidi-line.js';
+import { physicalDecimalAlignmentPoint } from './line-breaker/decimal-anchor.js';
+import type { LayoutSeg } from './line-breaker/model.js';
 import { describe, it, expect } from 'vitest';
 import {
   layoutBidiTabStops,
@@ -334,6 +337,20 @@ function docOf(paras: DocParagraph[], width = 400): DocxDocumentModel {
 }
 
 describe('bidi TOC / footer rows render on one line, mirrored (issue #820)', () => {
+  it('projects fresh cell membership and advances through reusable canonical order', () => {
+    const segments = [{ text: 'AB' }, { isTab: true }, { text: '12.50', rtl: true },
+      { text: ' ', rtl: true }, { text: 'אבגד', rtl: true }] as unknown as LayoutSeg[];
+    const input = { segments, point: { segmentIndex: 2, charOffset: 2 },
+      cellStart: 2, cellEnd: 5, advances: [20, 0, 50, 10, 40],
+      selectedPrefixAdvance: 20, model: 'line-level' as const, resolveOrder: createLineOrderResolver() };
+    // The RTL word and space precede the numeric slice physically. A new
+    // acquired word width and then a shorter cell must not reuse an old offset.
+    expect(physicalDecimalAlignmentPoint(input)).toBe(70);
+    input.advances[4] = 80;
+    expect(physicalDecimalAlignmentPoint(input)).toBe(110);
+    expect(physicalDecimalAlignmentPoint({ ...input, cellEnd: 4 })).toBe(30);
+  });
+
   it('aligns a decimal point by its visual cell position before following RTL words', async () => {
     const { canvas, fills } = makeRecordingCanvas();
     const row = bidiPara([txt('AB'), txt('\t'), txt('12.50 אבגד הוזח', true)],

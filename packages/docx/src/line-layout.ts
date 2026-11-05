@@ -1,3 +1,4 @@
+import { createLineOrderResolver, type LineOrderResolver } from './bidi-line.js';
 import type { TabStop } from './types';
 import type { KinsokuRules } from '@silurus/ooxml-core';
 import { DEFAULT_KINSOKU_RULES } from '@silurus/ooxml-core';
@@ -106,11 +107,16 @@ export function layoutLines(
   bidiOrdering?: BidiTabOrderPolicy,
   passContext?: Readonly<{
     probeHeights: readonly number[] | null;
+    decimalOrder?: LineOrderResolver;
     probeFloors?: readonly number[] | null;
     preparedFloatWrap?: PreparedFloatWrap;
   }>,
 ): LayoutLine[] {
   if (passContext === undefined) {
+    // Only RTL decimal acquisition can request the projection. This owner is
+    // shared by convergence passes, never another paragraph or retained model.
+    const decimalOrder = baseRtl && tabStops.some(stop => stop.alignment === 'decimal')
+      ? createLineOrderResolver() : undefined;
     // Keep the pass inside the existing declaration: extracting this root
     // implementation would widen the frozen migration boundary, while moving
     // it under layout/ would reverse that layer's dependency direction. The
@@ -146,7 +152,7 @@ export function layoutLines(
       lineFit,
       cjkClosingMarkHang,
       bidiOrdering,
-      { probeHeights, probeFloors, preparedFloatWrap },
+      { probeHeights, probeFloors, preparedFloatWrap, decimalOrder },
     );
     // DrawingML wrap=none (§21.1.2.1.1) removes only the automatic break at the
     // text-body edge; floats of the same story (e.g. a §17.3.1.11 frame host)

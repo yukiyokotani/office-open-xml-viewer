@@ -1,3 +1,4 @@
+import type { LineOrderResolver } from '../bidi-line.js';
 import { paragraphLineOrderModel, type LineOrderModel } from '../bidi-line.js';
 import { wordLineEndJustification } from '../layout/line-compatibility.js';
 import { physicalDecimalAlignmentPoint } from './decimal-anchor.js';
@@ -390,6 +391,7 @@ export function tabLineOrderModel(input: Readonly<{
 }
 
 export interface BidiTabPostPassInput {
+  readonly decimalOrder?: LineOrderResolver;
   readonly baseRtl: boolean;
   readonly bidiOrdering?: BidiTabOrderPolicy;
   readonly isJustified?: boolean;
@@ -542,6 +544,7 @@ function resolveBidiTabRange(
           advances: input.currentLine.map(member => member.measuredWidth),
           selectedPrefixAdvance: prefix + (segment.leadingWordBoundaryPx ?? 0),
           model: tabLineOrderModel(input),
+          resolveOrder: input.decimalOrder,
         });
       }
     }

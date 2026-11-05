@@ -43,6 +43,16 @@ export interface BidiEngine {
 }
 
 let current: BidiEngine | null = null;
+let lifecycleToken: object = Object.freeze({});
+
+/** Internal invalidation identity, not an embedding-level/result cache.
+ * Providers must be deterministic for equal explicit inputs during a
+ * synchronous layout. After changing captured semantic configuration, call
+ * setBidiEngine again, even when retaining the same adapter object. Hidden
+ * closure mutation without a lifecycle call cannot be detected by consumers. */
+export function getBidiEngineLifecycleToken(): object {
+  return lifecycleToken;
+}
 
 /** The active engine. Lazily instantiates the default UAX#9 engine. */
 export function getDefaultBidiEngine(): BidiEngine {
@@ -50,12 +60,16 @@ export function getDefaultBidiEngine(): BidiEngine {
   return current;
 }
 
-/** Swap the active engine (tests, or a third-party adapter). */
+/** Swap the active engine (tests, or a third-party adapter). Call again after
+ * changing captured semantic configuration, even with the same object, so
+ * synchronous layout consumers invalidate derived ordering. */
 export function setBidiEngine(engine: BidiEngine): void {
   current = engine;
+  lifecycleToken = Object.freeze({});
 }
 
 /** Restore the built-in UAX#9 engine. */
 export function resetBidiEngine(): void {
   current = null;
+  lifecycleToken = Object.freeze({});
 }

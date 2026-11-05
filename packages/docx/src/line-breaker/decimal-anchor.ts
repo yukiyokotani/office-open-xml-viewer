@@ -1,4 +1,4 @@
-import { computeLineVisualOrder, type LineOrderModel } from '../bidi-line.js';
+import { computeLineVisualOrder, type LineOrderModel, type LineOrderResolver } from '../bidi-line.js';
 import { resolvedBidiLevels } from '../character-spacing.js';
 import type { LayoutSeg } from './model.js';
 
@@ -29,11 +29,12 @@ export function physicalDecimalAlignmentPoint(input: Readonly<{
   advances: readonly number[];
   selectedPrefixAdvance: number;
   model: LineOrderModel;
+  resolveOrder?: LineOrderResolver;
 }>): number | undefined {
   const { segments, point, advances } = input;
   const selected = segments[point.segmentIndex];
   if (!selected || !('text' in selected) || selected.text[point.charOffset] !== '.') return undefined;
-  const visual = computeLineVisualOrder(segments, true, input.model);
+  const visual = (input.resolveOrder ?? computeLineVisualOrder)(segments, true, input.model);
   const direction = visual.rtl[point.segmentIndex] ? 'rtl' : 'ltr';
   const levels = resolvedBidiLevels(selected.text, direction);
   if (levels.some(level => (level & 1) !== 0)) return undefined;

@@ -1021,6 +1021,7 @@ export function performFlush(
   breakerState.currentWidth += applyBidiTabPostPass({
     baseRtl,
     bidiOrdering: operationState.bidiOrdering,
+    decimalOrder: operationState.passContext.decimalOrder,
     isJustified: operationState.isJustified,
     stretchLastLine: operationState.stretchLastLine,
     endsWithBreak: brTerminated,
@@ -2382,6 +2383,7 @@ export function performTabFollowingMetrics(operationState: PassOperationState, p
   const physicalDecimalOffset = physicalDecimalAlignmentPoint({
     segments, point: { ...point, segmentIndex: cellStart + point.segmentIndex },
     cellStart, cellEnd: segments.length,
+    resolveOrder: operationState.passContext.decimalOrder,
     advances: [...prefix.map(segment => segment.measuredWidth), 0, ...advances],
     selectedPrefixAdvance,
     model: tabLineOrderModel({
