@@ -12,6 +12,13 @@ export interface SegmentLineBidiOptions {
   isRtlAmbiguous?: (character: string) => boolean;
   /** Word paints a whole word slice RTL if any non-space unit is odd-level. */
   directionFromAnyOdd?: boolean;
+  /** Host-authored direction of a text span. Consecutive opposite-direction
+   * segments resolve together inside a UAX #9 directional isolate. Objects
+   * and tabs return undefined and terminate the span. */
+  isolateDirection?: (segment: unknown) => 'ltr' | 'rtl' | undefined;
+  /** Preserve legacy ordering when one retained paint slice crosses a resolved
+   * odd/even level boundary that the host cannot project into separate paint. */
+  isolateRequiresUniformSlices?: boolean;
 }
 
 export interface SegmentLineVisualOrder {
@@ -51,9 +58,24 @@ export function computeSegmentLineVisualOrder(
   // The UAX#9 engine treats a missing entry as no override, so only authored
   // HL1 positions need storage; the array can remain sparse.
   let override: (BidiClass | undefined)[] | undefined;
+  let hasIsolate = false;
+  const isolates = options.isolateDirection
+    ? segments.map(segment => {
+      const direction = options.isolateDirection!(segment);
+      if (direction !== undefined && (direction === 'rtl') !== baseRtl) {
+        hasIsolate = true;
+        return direction;
+      }
+      return undefined;
+    })
+    : undefined;
   for (let i = 0; i < count; i++) {
     const segment = segments[i];
     const value = textOf(segment) ?? '';
+    const isolate = isolates?.[i];
+    if (isolate !== undefined && isolates![i - 1] !== isolate) {
+      full += isolate === 'rtl' ? '\u2067' : '\u2066';
+    }
     const digitsAsAN = options.digitsAsAN?.(segment) === true;
     const rtlMarked = options.isRtlMarked?.(segment) === true;
     start[i] = full.length;
@@ -72,6 +94,7 @@ export function computeSegmentLineVisualOrder(
         }
       }
     }
+    if (isolate !== undefined && isolates![i + 1] !== isolate) full += '\u2069';
   }
   const { levels, paragraphLevel } = getDefaultBidiEngine().computeLevels(
     full, baseRtl ? 'rtl' : 'ltr', override,
@@ -96,6 +119,16 @@ export function computeSegmentLineVisualOrder(
       if (level === 255) continue;
       if ((level & 1) === 1 && firstOdd < 0) firstOdd = k;
       else if ((level & 1) === 0 && firstEven < 0) firstEven = k;
+    }
+    if (hasIsolate && options.isolateRequiresUniformSlices
+      && firstOdd >= 0 && firstEven >= 0) {
+      // One anchor cannot preserve both islands of this already-shaped slice.
+      // Reuse the previous model for the whole line; splitting paint here would
+      // invent geometry. The second pass has no isolate hook, so work is at
+      // most two linear UAX resolutions with line-local storage (#2076).
+      return computeSegmentLineVisualOrder(segments, baseRtl, {
+        ...options, isolateDirection: undefined,
+      });
     }
     rtl[i] = firstOdd >= 0;
     anchor[i] = firstOdd >= 0 ? firstOdd : firstEven >= 0 ? firstEven : start[i];

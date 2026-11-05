@@ -436,6 +436,9 @@ export interface PlanLineInput {
   readonly doNotExpandShiftReturn?: boolean;
   /** compatibilityMode is absent or below 15 (WORD_LINE_END_JUSTIFICATION). */
   readonly lineEndJustificationBeforeMode15?: boolean;
+  /** Compatibility shape-text fallback preserves its prior ordering when
+   * authoritative WordprocessingML direction provenance is unavailable. */
+  readonly runDirectionUnauthored?: boolean;
   /** A thaiDistribute paragraph below mode 15 with no character grid
    *  (WORD_THAI_DISTRIBUTE_PROPORTIONAL_SPREAD). */
   readonly thaiProportionalSpread?: boolean;
@@ -1549,6 +1552,10 @@ export function planLine(input: PlanLineInput): LineLayout {
   const { line } = input;
   let segments = line.segments;
   const bidi = input.baseRtl || segmentsHaveRtl(segments);
+  // The existing character-spread gap model cannot place directional isolates.
+  const characterSpreadBidi = bidi && input.displayMathJustification === undefined
+    && resolveAlignEdge(input.alignment, input.baseRtl) === 'justify'
+    && lineEndJustification(input, line.endsWithBreak) === 'character';
   const visual = computeLineVisualOrder(
     segments.map((segment) => segment.kind === 'tab'
       ? { isTab: true }
@@ -1556,6 +1563,14 @@ export function planLine(input: PlanLineInput): LineLayout {
         ? { text: segment.text, rtl: segment.rtl, digitsAsAN: segment.digitsAsAN }
         : {}),
     input.baseRtl,
+    // Library scope: this correction targets leading labels in RTL paragraphs;
+    // LTR paragraphs keep their previous resolution. Representation boundaries
+    // also retain legacy ordering: distribute still assigns gaps to measured
+    // slices, not source-owned opportunities (#2090), and compatibility shape
+    // text lacks authoritative run-direction provenance. These are limitations
+    // of this retained layout model, not exceptions to the observed rule.
+    characterSpreadBidi || input.alignment === 'distribute'
+      || !input.baseRtl || input.runDirectionUnauthored ? 'line-level' : 'word',
   );
   let naturalWidthPt = segments.reduce((sum, segment) => sum + segmentWidth(segment), 0);
   const lineLeftPt = input.paragraphXPt + line.xOffsetPt;
@@ -4026,6 +4041,7 @@ function planMeasuredLines(
       ...(ulTrailSpace ? { ulTrailSpace } : {}),
       ...(doNotExpandShiftReturn ? { doNotExpandShiftReturn } : {}),
       ...(context.endsAtHardBreak ? { endsAtHardBreak: true } : {}),
+      ...(context.runDirectionUnauthored ? { runDirectionUnauthored: true } : {}),
       ...(compatibilityMode !== 15 ? { lineEndJustificationBeforeMode15: true } : {}),
       ...(paragraph.alignment === 'thaiDistribute' && (compatibilityMode ?? 0) < 15
         && !context.characterGrid.active ? { thaiProportionalSpread: true } : {}),
@@ -5194,6 +5210,9 @@ function textBoxParagraphContext(
   return {
     ...host,
     ...(paragraph.endsAtHardBreak === true ? { endsAtHardBreak: true as const } : {}),
+    // This compatibility model can include flattened WML text; its direction
+    // provenance is not authoritative. Complete WML stories bypass this path.
+    runDirectionUnauthored: true,
     rightIndentGrid: {
       ...inherited.rightIndentGrid,
       paragraphAllowsAdjustment: paragraph.adjustRightInd !== false,
@@ -6134,6 +6153,8 @@ function paragraphAcquisitionKey(
       context.spaceBeforePt,
       context.spaceAfterPt,
       context.baseRtl,
+      // This owns final ordering, not the reusable line measurement.
+      lineOnly ? null : context.runDirectionUnauthored === true,
       context.isJustified,
       context.stretchLastLine,
       context.tabStops.map((stop) => [stop.pos, stop.alignment, stop.leader]),
