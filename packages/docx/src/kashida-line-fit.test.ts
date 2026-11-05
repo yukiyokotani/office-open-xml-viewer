@@ -1,4 +1,10 @@
 import { describe, it, expect } from 'vitest';
+import { DEFAULT_KINSOKU_RULES } from '@silurus/ooxml-core';
+import { createLayoutServices } from './layout-runtime.js';
+import { acquireShapeTextBoxLayout } from './layout/paragraph.js';
+import { textBoxAcquisitionInput } from './parser-model.js';
+import type { ParagraphLayoutContext } from './layout-context.js';
+import type { DocxDocumentModel, ShapeRun } from './types';
 import { layoutBodyModel } from './test-support/document-layout.test-support.js';
 import type { LineLayout, TextPlacement } from './layout/types.js';
 import type { BodyElement, DocParagraph, DocSettings, DocxTextRun, SectionProps } from './types';
@@ -450,4 +456,48 @@ it.each([
       .sort((a, b) => a.range.start - b.range.start).map(p => p.text).join('');
     expect.soft(firstSource.trim().split(/\s+/), `sourceRTL ownership: expected ${expected}`).toHaveLength(expected);
   }
+});
+
+
+it('does not infer authored Arabic direction from a flattened compatibility text box', () => {
+  const content = Array.from({ length: 12 }, () => '\u0628\u062a\u062b').join(' ') + ' ';
+  const body = lines(para([textRun(content)], 'mediumKashida', {
+    bidi: true, indentRight: 15, wordWrap: true,
+  }), MODE_15);
+  const ctx = makeCtx();
+  const model = { section, body: [], settings: MODE_15,
+    headers: { default: null, first: null, even: null },
+    footers: { default: null, first: null, even: null }, fontFamilyClasses: {},
+  } as unknown as DocxDocumentModel;
+  const context: ParagraphLayoutContext = {
+    lineGrid: { active: false, pitchPt: null },
+    characterGrid: { active: false, kind: null, pitchPt: null, deltaPt: 0 },
+    rightIndentGrid: { pitchPt: null, paragraphAllowsAdjustment: true },
+    physicalIndentLeftPt: 0, physicalIndentRightPt: 0, firstIndentPt: 0,
+    lineSpacing: null, spaceBeforePt: 0, spaceAfterPt: 0,
+    baseRtl: false, isJustified: false, stretchLastLine: false,
+    tabStops: [], hasRuby: false, hasEastAsianText: false,
+    kinsoku: DEFAULT_KINSOKU_RULES, defaultTabPt: 36, overflowPunct: true,
+  };
+  const shape = {
+    type: 'shape', zOrder: 0, subpaths: [], presetGeometry: 'rect', fill: null, stroke: null,
+    textBlocks: [{ text: content, fontSizePt: 20, alignment: 'mediumKashida', bidi: true,
+      runs: [{ text: content, fontSizePt: 20, fontFamily: 'NotInMetrics' }], }],
+    textAnchor: 't', textInsetL: 0, textInsetT: 0, textInsetR: 0, textInsetB: 0,
+  } as unknown as ShapeRun;
+  const source = { story: 'textbox' as const, storyInstance: 'compatibility', path: [] as number[] };
+  const acquired = acquireShapeTextBoxLayout(shape,
+    { xPt: 0, yPt: 0, widthPt: 345, heightPt: 400 }, {
+      id: 'compatibility', source, flowDomainId: 'compatibility', context,
+      measurer: { context: ctx, fontFamilyClasses: {} },
+      environment: { pageIndex: 0, totalPages: 1, compatibilityMode: 15,
+        pageWritingMode: 'horizontal-tb', layoutServices: createLayoutServices(model, { measureContext: ctx }) },
+      input: textBoxAcquisitionInput(shape, source),
+    });
+  const child = acquired?.story.blocks[0];
+  if (child?.kind !== 'paragraph') throw new Error('expected compatibility paragraph');
+  // Same glyph/space metrics: body knows its source RTL was absent; the
+  // flattened public shape model cannot establish that source provenance.
+  expect(characters(body[0]!).length / 3).toBe(7);
+  expect(characters(child.lines[0]!).length / 3).toBe(8);
 });

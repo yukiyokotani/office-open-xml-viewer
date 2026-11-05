@@ -646,8 +646,10 @@ export function measureParagraph(
   );
   // WORD_UNMARKED_ARABIC_KASHIDA_SOURCE_SPACE: admission only. Retain the
   // same reserve and acquired separator advance; final justification/paint
-  // still consumes its existing visible-prefix policy independently.
-  const chargeArabicSourceSpace = wordUnmarkedArabicKashidaChargesSourceSpace(
+  // still consumes its existing visible-prefix policy independently. Flattened
+  // compatibility shapes have no authoritative WML run-direction provenance;
+  // an absent flag there cannot establish the observed unmarked-run class.
+  const chargeArabicSourceSpace = !context.runDirectionUnauthored && wordUnmarkedArabicKashidaChargesSourceSpace(
     paragraph, environment.compatibilityMode, context.baseRtl, context.wordWrap !== false,
     environment.verticalCJK !== true
       && (environment.pageWritingMode === undefined || environment.pageWritingMode === 'horizontal-tb'),
