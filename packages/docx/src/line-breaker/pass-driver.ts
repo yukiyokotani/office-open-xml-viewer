@@ -1,3 +1,4 @@
+import type { BidiTabOrderPolicy } from './tabs.js';
 import { createPrefixWorkBudget } from './prefix-work-budget.js';
 import { LineMeasurementAdapter } from './measurement-adapter.js';
 import type { TabStop } from '../types';
@@ -92,6 +93,7 @@ export interface LineBreakerPassInput {
   readonly defaultTabPt: number;
   readonly marginRightPx: number;
   readonly baseRtl: boolean;
+  readonly bidiOrdering?: BidiTabOrderPolicy;
   readonly isJustified: boolean;
   readonly stretchLastLine: boolean;
   readonly startBoundary?: LineBoundary;
@@ -336,10 +338,11 @@ export function runLineBreakerPass(input: LineBreakerPassInput): LayoutLine[] {
   const decimalAlignmentPrefixWidth = (segments: readonly LayoutSeg[]): number | undefined =>
     performDecimalAlignmentPrefixWidth(operationState, segments);
 
-  const tabFollowingMetrics = (): Readonly<{
+  const tabFollowingMetrics = (physicalDecimalTab?: LayoutTabSeg): Readonly<{
     totalWidth: number;
     decimalPrefixWidth?: number;
-  }> => performTabFollowingMetrics(operationState);
+    physicalDecimalOffset?: number;
+  }> => performTabFollowingMetrics(operationState, physicalDecimalTab);
 
   // A `<w:br/>` always starts a new line (§17.3.3.1) — when it is the LAST
   // content of the paragraph, the new line is empty but still occupies one line

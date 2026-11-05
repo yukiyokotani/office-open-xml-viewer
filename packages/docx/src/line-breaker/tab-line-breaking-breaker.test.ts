@@ -58,21 +58,17 @@ describe('WORD_ALIGNED_TAB_CELL_FIT_BACK on a wrapped cell', () => {
 });
 
 describe('WORD_ALIGNED_TAB_CELL_FIT_BACK on a wrapped decimal cell', () => {
-  it.each([false, true])('aligns the complete cell\'s own decimal point, rtl=%s', (baseRtl) => {
-    // A decimal stop at 80 pt after 'abcd': the 105 pt cell has its decimal
-    // point 90 pt into it, on the line after its first-line part. Both
-    // directions align that point of the complete cell: in the mirrored bidi
-    // frame the cell's reading-leading edge is the number's right edge, so
-    // the stop-aligned gap is 80 - (105 - 90) - 20 = 45 pt; left-to-right the
-    // point would sit before the pen (80 - 90 - 20 < 0), so there is no gap.
-    const rtl = { rtl: baseRtl || undefined };
-    const lines = run([token('abcd'), tab(), token('aa ', rtl), token('aa ', rtl), token('bbbbbbbbbbbb.xx', rtl)], {
-      maxWidth: 100, baseRtl, tabStops: [{ pos: 80, alignment: 'decimal', leader: 'none' }],
+  it('keeps the complete LTR cell point independent of its fitted prefix', () => {
+    // Stop 80 after a 20pt prefix: the complete 105pt cell's decimal point is
+    // 90pt into it, on a later line. Its target precedes the prefix, so no
+    // gap is allocated. RTL late-point coverage uses observable production
+    // placement in rtl-tab-stops.test.ts, not a logical-prefix metadata value.
+    const lines = run([token('abcd'), tab(), token('aa '), token('aa '), token('bbbbbbbbbbbb.xx')], {
+      maxWidth: 100, tabStops: [{ pos: 80, alignment: 'decimal', leader: 'none' }],
     });
     expect(lines.length).toBeGreaterThan(1);
     const placed = lines[0]!.segments.find((segment) => 'isTab' in segment) as LayoutTabSeg;
     expect(placed.measuredWidth).toBe(0);
-    expect(placed.alignedGapLimit).toBe(baseRtl ? 45 : undefined);
   });
 });
 

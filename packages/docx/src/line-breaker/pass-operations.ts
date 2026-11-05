@@ -1,3 +1,5 @@
+import { physicalDecimalAlignmentPoint } from './decimal-anchor.js';
+import { tabLineOrderModel } from './tabs.js';
 import { lineEndSpaceCharged } from './atomic-units.js';
 import { textBreakOffsetAt, textBreakOffsets } from './text-break-window.js';
 import { candidateUnit, lineGapModel, type GapSegment } from './line-gaps.js';
@@ -144,7 +146,7 @@ export interface PassOperationState extends LineBreakerPassInput {
     segments: readonly LayoutSeg[],
   ) => Readonly<{ segmentIndex: number; charOffset: number }> | null;
   readonly decimalAlignmentPrefixWidth: (segments: readonly LayoutSeg[]) => number | undefined;
-  readonly tabFollowingMetrics: () => Readonly<{ totalWidth: number; decimalPrefixWidth?: number }>;
+  readonly tabFollowingMetrics: (physicalDecimalTab?: LayoutTabSeg) => Readonly<{ totalWidth: number; decimalPrefixWidth?: number; physicalDecimalOffset?: number }>;
   readonly emergencyTextSplit: (
     segment: LayoutTextSeg,
     available: number,
@@ -1018,6 +1020,10 @@ export function performFlush(
   performSettleMixedSpaces(operationState);
   breakerState.currentWidth += applyBidiTabPostPass({
     baseRtl,
+    bidiOrdering: operationState.bidiOrdering,
+    isJustified: operationState.isJustified,
+    stretchLastLine: operationState.stretchLastLine,
+    endsWithBreak: brTerminated,
     ...(operationState.lineFit ? { fitWidth: operationState.availW() } : {}),
     currentLine: breakerState.currentLine,
     marginRightPx,
@@ -2330,21 +2336,61 @@ function tabFollowSeamWidth(
     : width;
 }
 
-export function performTabFollowingMetrics(operationState: PassOperationState): Readonly<{
+export function performTabFollowingMetrics(operationState: PassOperationState, physicalDecimalTab?: LayoutTabSeg): Readonly<{
   totalWidth: number;
   decimalPrefixWidth?: number;
+  physicalDecimalOffset?: number;
 }> {
   const { breakerState, decimalAlignmentPrefixWidth } = operationState;
 
   const following: LayoutSeg[] = [];
   let totalWidth = 0;
+  const advances = physicalDecimalTab ? [] as number[] : undefined;
+  let endsWithBreak = false;
   for (const q of breakerState.queue) {
-    if ('isTab' in q || 'lineBreak' in q) break;
+    if ('isTab' in q || 'lineBreak' in q) {
+      endsWithBreak = 'lineBreak' in q;
+      break;
+    }
     following.push(q);
-    totalWidth += tabFollowSeamWidth(operationState, following, following.length - 1);
+    const width = tabFollowSeamWidth(operationState, following, following.length - 1);
+    totalWidth += width;
+    advances?.push(width);
   }
   const decimalPrefixWidth = decimalAlignmentPrefixWidth(following);
-  return decimalPrefixWidth === undefined ? { totalWidth } : { totalWidth, decimalPrefixWidth };
+  if (decimalPrefixWidth === undefined) return { totalWidth };
+  if (!advances) return { totalWidth, decimalPrefixWidth };
+  const point = operationState.decimalAlignmentPoint(following);
+  if (!point) return { totalWidth, decimalPrefixWidth };
+  const selected = following[point.segmentIndex]!;
+  if (!('text' in selected) || selected.text[point.charOffset] !== '.') {
+    return { totalWidth, decimalPrefixWidth };
+  }
+  // Keep the selected prefix's acquisition arithmetic: subtracting earlier
+  // widths from the whole logical prefix can lose a short caret's precision.
+  const selectedPrefixAdvance = operationState.strAdvance(
+    selected, selected.text.slice(0, point.charOffset),
+  ) + seamPairAdvance(operationState, following[point.segmentIndex - 1],
+    selected, operationState.tabFollowWidth(selected));
+  // Existing fit-back owns a hypothetical unwrapped line through this entire
+  // terminal cell. Include the committed prefix and actual tab in host UAX
+  // context; this is not the shorter actual line's alignment point. Retain the
+  // result once when the tab is admitted, not on each following word/line.
+  const prefix = breakerState.currentLine;
+  const cellStart = prefix.length + 1;
+  const segments = [...prefix, physicalDecimalTab!, ...following];
+  const physicalDecimalOffset = physicalDecimalAlignmentPoint({
+    segments, point: { ...point, segmentIndex: cellStart + point.segmentIndex },
+    cellStart, cellEnd: segments.length,
+    advances: [...prefix.map(segment => segment.measuredWidth), 0, ...advances],
+    selectedPrefixAdvance,
+    model: tabLineOrderModel({
+      baseRtl: operationState.baseRtl, bidiOrdering: operationState.bidiOrdering,
+      isJustified: operationState.isJustified, stretchLastLine: operationState.stretchLastLine,
+      endsWithBreak,
+    }),
+  });
+  return { totalWidth, decimalPrefixWidth, ...(physicalDecimalOffset === undefined ? {} : { physicalDecimalOffset }) };
 }
 
 /** Bracket close to the line band; probing a whole suffix midpoint on

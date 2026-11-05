@@ -5,7 +5,7 @@ import { prepareFloatWrap, type PreparedFloatWrap } from './float-layout.js';
 import { cloneSegmentsForLinePass, convergeLineWrap } from './layout/line-wrap-convergence.js';
 import type { MeasurementTextContext, VerticalGlyphMeasurementService } from './layout/measurement-capabilities.js';
 import { type DocGridCtx, type LayoutLine, type LayoutSeg, type LineBoundary, type WrapLayoutCtx } from './line-breaker/model.js';
-import { DEFAULT_TAB_PT } from './line-breaker/tabs.js';
+import { DEFAULT_TAB_PT, type BidiTabOrderPolicy } from './line-breaker/tabs.js';
 import { runLineBreakerPass, type LineFitWidth } from './line-breaker/pass-driver.js';
 import type { CjkClosingMarkHang } from './layout/line-compatibility.js';
 export { type LineBoundary, type LayoutTextSeg, type LayoutTabSeg, type LayoutImageSeg, type LayoutMathSeg, type LayoutLineBreak, type LayoutSeg, type LayoutLine, type WrapLayoutCtx, type DocGridCtx, type LineLayoutEnvironment } from './line-breaker/model.js';
@@ -47,6 +47,7 @@ export function layoutLines(
   justifiedCompression?: JustifiedCompressionOption,
   lineFit?: LineFitWidth,
   cjkClosingMarkHang?: CjkClosingMarkHang,
+  bidiOrdering?: BidiTabOrderPolicy,
 ): LayoutLine[];
 
 export function layoutLines(
@@ -102,6 +103,7 @@ export function layoutLines(
   lineFit?: LineFitWidth,
   // WORD_JUSTIFICATION_PUNCTUATION_HANG, absent outside its measured scope.
   cjkClosingMarkHang?: CjkClosingMarkHang,
+  bidiOrdering?: BidiTabOrderPolicy,
   passContext?: Readonly<{
     probeHeights: readonly number[] | null;
     probeFloors?: readonly number[] | null;
@@ -143,6 +145,7 @@ export function layoutLines(
       justifiedCompression,
       lineFit,
       cjkClosingMarkHang,
+      bidiOrdering,
       { probeHeights, probeFloors, preparedFloatWrap },
     );
     // DrawingML wrap=none (§21.1.2.1.1) removes only the automatic break at the
@@ -188,7 +191,7 @@ export function layoutLines(
   return runLineBreakerPass({
     ctx, segs, maxWidth, firstIndent, scale, tabStops, wrapCtx,
     fontFamilyClasses, tabOriginPx, kinsoku, characterGrid, defaultTabPt,
-    marginRightPx, baseRtl, isJustified, stretchLastLine, startBoundary,
+    marginRightPx, baseRtl, isJustified, stretchLastLine, startBoundary, bidiOrdering,
     widthPolicy, verticalGlyphMeasurement, overflowPunct,
     justifiedCompression: justifiedCompression !== false,
     lineEndIdeographicSpaceHangs: typeof justifiedCompression === 'object'

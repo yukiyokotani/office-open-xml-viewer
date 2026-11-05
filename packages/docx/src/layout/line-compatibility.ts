@@ -1504,3 +1504,29 @@ export function wordSpecifiedTextLineMetrics(input: Readonly<{
     baselineOffsetPt: advancePt - (normalPt - input.singlePt) / 2 - input.descentPt,
   };
 }
+
+/** How {@link WORD_LINE_END_JUSTIFICATION} justifies a line of a justified paragraph:
+ * at its gaps ('word'), by an equal advance after every character
+ * ('character'), at its gaps or else centred ('word-or-centre'), or not at all.
+ * Soft-wrapped lines keep the paragraph's ordinary justification. */
+export function wordLineEndJustification(
+  input: Readonly<{ alignment?: string; isLastLine: boolean; stretchLastLine?: boolean;
+    doNotExpandShiftReturn?: boolean; lineEndJustificationBeforeMode15?: boolean; endsAtHardBreak?: boolean }>,
+  endsWithBreak: boolean,
+): 'word' | 'character' | 'word-or-centre' | null {
+  if (!endsWithBreak && !input.isLastLine) return 'word';
+  // A line ended by a page or column break is justified like a soft-wrapped
+  // line before compatibility mode 15 and like a final line from mode 15;
+  // doNotExpandShiftReturn does not apply to it.
+  const hardBreak = !endsWithBreak && input.endsAtHardBreak === true;
+  if (hardBreak && input.alignment !== 'distribute') {
+    return input.lineEndJustificationBeforeMode15 === true ? 'word' : null;
+  }
+  if (input.alignment === 'distribute' || (input.alignment === undefined && input.stretchLastLine)) {
+    return input.lineEndJustificationBeforeMode15 === true ? 'character' : 'word-or-centre';
+  }
+  if (!endsWithBreak || input.doNotExpandShiftReturn === true) return null;
+  return input.alignment === 'thaiDistribute' && input.lineEndJustificationBeforeMode15 !== true
+    ? 'character'
+    : 'word';
+}

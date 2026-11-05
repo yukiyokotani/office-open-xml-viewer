@@ -149,6 +149,44 @@ function options(
 }
 
 describe('paragraph acquisition cache', () => {
+  it('reacquires decimal geometry when manual-break expansion changes', () => {
+    const services = scopedServices();
+    const paragraph = textParagraph();
+    const run = paragraph.runs[0] as Extract<DocRun, { type: 'text' }>;
+    paragraph.alignment = 'thaiDistribute';
+    paragraph.bidi = true;
+    paragraph.tabStops = [{ pos: 216, alignment: 'decimal', leader: 'none' }];
+    paragraph.runs = [
+      { ...run, text: 'AB' }, { ...run, text: '\t' },
+      { ...run, text: 'אבגד ', rtl: true },
+      { ...run, text: 'Label 12.50 هذا نص' },
+      { type: 'break', breakType: 'line' }, { ...run, text: 'tail' },
+    ];
+    const input = paragraphAcquisitionInput(paragraph, source);
+    const base = options(services, {
+      context: { ...context, baseRtl: true, isJustified: true, tabStops: paragraph.tabStops },
+    });
+    const at = (doNotExpandShiftReturn: boolean, startYPt: number) => ({
+      ...base,
+      environment: { ...base.environment, compatibilityMode: 15, doNotExpandShiftReturn },
+      placement: { ...base.placement, startYPt },
+    });
+    const geometry = (result: ReturnType<typeof acquireParagraphResult>) => result.layout.lines.map(line =>
+      line.placements.flatMap(placement => placement.kind === 'text'
+        ? [[placement.text, placement.origin.xPt, placement.origin.yPt, placement.advancePt]] : []));
+    const expanded = acquireParagraphResult(input, at(false, 72));
+    const cold = (startYPt: number) => acquireParagraphResult(
+      paragraphAcquisitionInput({ ...paragraph, runs: [...paragraph.runs] }, source), at(true, startYPt),
+    );
+    const coldSame = cold(72);
+    const coldMoved = cold(92);
+    expect(geometry(coldSame)).not.toEqual(geometry(expanded));
+    // Moving the paragraph bypasses exact-result reuse but can still reuse
+    // line acquisition; the changed tab anchor must agree with a cold layout.
+    expect(geometry(acquireParagraphResult(input, at(true, 92)))).toEqual(geometry(coldMoved));
+    expect(geometry(acquireParagraphResult(input, at(true, 72)))).toEqual(geometry(coldSame));
+  });
+
   it('disables zero-threshold content kerning whatever the compatibility mode', () => {
     const ctx = measureContext();
     ctx.measureText = function (text) {

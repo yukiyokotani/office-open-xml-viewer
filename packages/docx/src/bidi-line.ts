@@ -14,6 +14,22 @@ const options = {
   directionFromAnyOdd: true,
 };
 export type LineVisualOrder = SegmentLineVisualOrder;
+export type LineOrderModel = 'line-level' | 'word';
+
+/** Library representation boundaries shared by acquisition and final placement.
+ * Leading-label isolates apply only to RTL paragraphs. Distribute assigns gaps
+ * to slices rather than source opportunities (#2090); character spread cannot
+ * place isolates, and compatibility shape text lacks authoritative run-direction
+ * provenance. These retain their previous library model.
+ */
+export function paragraphLineOrderModel(input: Readonly<{
+  baseRtl: boolean; alignment?: string; runDirectionUnauthored?: boolean;
+  characterSpreadBidi?: boolean;
+}>): LineOrderModel {
+  return input.characterSpreadBidi || input.alignment === 'distribute'
+    || !input.baseRtl || input.runDirectionUnauthored ? 'line-level' : 'word';
+}
+
 export const segmentsHaveRtl = (segments: readonly unknown[]): boolean =>
   segmentLineHasRtl(segments, options);
 // WORD_RUN_DIRECTION_ISOLATE: only final authored paragraphs opt in.
@@ -24,7 +40,7 @@ const authoredOptions = {
 // boundaries are not retained, so punctuation or script changes inside one
 // slice can still be misplaced (#2076); this is not a complete bidi rewrite.
 export const computeLineVisualOrder = (
-  segments: readonly unknown[], baseRtl: boolean, model: 'line-level' | 'word' = 'line-level',
+  segments: readonly unknown[], baseRtl: boolean, model: LineOrderModel = 'line-level',
 ): LineVisualOrder => computeSegmentLineVisualOrder(
   segments, baseRtl, model === 'word' ? authoredOptions : options,
 );

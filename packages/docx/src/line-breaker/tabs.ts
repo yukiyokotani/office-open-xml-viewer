@@ -1,3 +1,6 @@
+import { paragraphLineOrderModel, type LineOrderModel } from '../bidi-line.js';
+import { wordLineEndJustification } from '../layout/line-compatibility.js';
+import { physicalDecimalAlignmentPoint } from './decimal-anchor.js';
 import type { TabStop, DocSettings } from '../types';
 import { nextTabStop, nextTabStopRtl, type ResolvedTabStop } from '../layout/text.js';
 import { wordFloatTabStopPosition, wordPositionalTabReferenceBox } from '../layout/line-compatibility.js';
@@ -118,6 +121,10 @@ export interface BidiTabItem {
   cellWidth?: number;
   /** Logical advance (px) from that cell's start to its decimal point. */
   cellDecimal?: number;
+  /** Complete queued-cell physical anchor; distinct from the actual prefix. */
+  cellPhysicalDecimal?: number;
+  /** Resolve only for a decimal stop, after its role is known. */
+  resolvePhysicalDecimal?: () => number | undefined;
 }
 
 
@@ -235,6 +242,7 @@ function resolveBidiTabStops(
       }
       total += width[j];
     }
+    const physicalDecimal = role === 'decimal' ? items[from - 1]?.resolvePhysicalDecimal?.() : undefined;
     return {
       total,
       decimal,
@@ -243,7 +251,7 @@ function resolveBidiTabStops(
         : role === 'trailing'
           ? total
           : role === 'decimal'
-            ? decimal === undefined ? 0 : total - decimal
+            ? physicalDecimal !== undefined ? total - physicalDecimal : decimal === undefined ? 0 : total - decimal
             : 0,
     };
   };
@@ -332,7 +340,8 @@ function resolveBidiTabStops(
       // The complete cell's own decimal point: its first line may end before it.
       const decimal = it.cellWidth === undefined ? following.decimal : it.cellDecimal;
       const cellAlignment = role === 'center' ? cell / 2 : role === 'trailing' ? cell
-        : decimal === undefined ? 0 : cell - decimal;
+        : it.cellPhysicalDecimal !== undefined ? cell - it.cellPhysicalDecimal
+          : decimal === undefined ? 0 : cell - decimal;
       const cellTarget = stop.pos - cellAlignment;
       // A decimal cell without a decimal point (the mirrored no-separator
       // fallback) was not measured fitted back; it keeps the in-place walk.
@@ -358,8 +367,34 @@ function resolveBidiTabStops(
 }
 
 
+/** Acquisition shares the final paragraph's representation policy. */
+export interface BidiTabOrderPolicy {
+  readonly alignment?: string;
+  readonly runDirectionUnauthored?: boolean;
+  readonly lineEndJustificationBeforeMode15?: boolean;
+  readonly doNotExpandShiftReturn?: boolean;
+  readonly endsAtHardBreak?: boolean;
+}
+
+export function tabLineOrderModel(input: Readonly<{
+  baseRtl: boolean; bidiOrdering?: BidiTabOrderPolicy; isJustified?: boolean;
+  stretchLastLine?: boolean; endsWithBreak?: boolean;
+}>): LineOrderModel {
+  if (!input.bidiOrdering) return 'line-level';
+  const policy = input.bidiOrdering;
+  return paragraphLineOrderModel({ ...policy, baseRtl: input.baseRtl,
+    characterSpreadBidi: input.isJustified === true && wordLineEndJustification({
+      ...policy, isLastLine: false, stretchLastLine: input.stretchLastLine,
+    }, input.endsWithBreak === true) === 'character',
+  });
+}
+
 export interface BidiTabPostPassInput {
   readonly baseRtl: boolean;
+  readonly bidiOrdering?: BidiTabOrderPolicy;
+  readonly isJustified?: boolean;
+  readonly stretchLastLine?: boolean;
+  readonly endsWithBreak?: boolean;
   /** WORD_KASHIDA_LINE_FIT: the line's fit width when it is narrower than its
    * band; resolved cells end within it, while stops keep the band's frame. */
   readonly fitWidth?: number;
@@ -412,7 +447,7 @@ export function bidiTabFrame(input: Pick<BidiTabPostPassInput,
 /** Resolve bidi tab positions after line content is known, in the visual frame. */
 export function applyBidiTabPostPass(input: BidiTabPostPassInput): number {
   if (!input.baseRtl || !input.currentLine.some((segment) => 'isTab' in segment)) return 0;
-  return resolveBidiTabRange(input, 0, bidiTabFrame(input).startPen).delta;
+  return resolveBidiTabRange(input, 0, bidiTabFrame(input).startPen, true).delta;
 }
 
 /** Called only at a tab boundary: all preceding cells are complete. Tabs reset
@@ -443,6 +478,7 @@ function resolveBidiTabRange(
   input: BidiTabPostPassInput,
   from: number,
   startPen: number,
+  projectPhysicalDecimal = false,
 ): { delta: number; endPen: number } {
   const {
     baseRtl,
@@ -473,6 +509,7 @@ function resolveBidiTabRange(
     alignedFitBack: 'isTab' in s ? s.alignedFitBack : undefined,
     cellWidth: 'isTab' in s ? s.alignedCellWidth : undefined,
     cellDecimal: 'isTab' in s ? s.alignedCellDecimal : undefined,
+    cellPhysicalDecimal: 'isTab' in s ? s.alignedCellPhysicalDecimal : undefined,
   }));
   for (let tabIndex = 0; tabIndex < currentLine.length; tabIndex += 1) {
     if (!('isTab' in currentLine[tabIndex]!)) continue;
@@ -486,10 +523,27 @@ function resolveBidiTabRange(
     const itemIndex = tabIndex + 1 + point.segmentIndex;
     const segment = currentLine[itemIndex]!;
     if ('text' in segment) {
-      items[itemIndex]!.decimalOffset = strAdvance(
-        segment,
-        segment.text.slice(0, point.charOffset),
-      );
+      const prefix = strAdvance(segment, segment.text.slice(0, point.charOffset));
+      items[itemIndex]!.decimalOffset = prefix;
+      const tab = currentLine[tabIndex]!;
+      // Library capability: terminal aligned cells retain full-context
+      // acquisition. Nonterminal decimal cells keep their previous allocation;
+      // the incremental stop walk does not retain that context, and repeatedly
+      // resolving its growing prefix would be quadratic. A supported source
+      // cell projects once at flush, never once per word or later continuation.
+      // The selector also supplies a numeric-end fallback. That fallback,
+      // including a prefix whose real period is on a later line, stays legacy.
+      if (projectPhysicalDecimal && 'isTab' in tab && tab.alignedFitBack
+        && segment.text[point.charOffset] === '.') {
+        items[tabIndex]!.resolvePhysicalDecimal = () => physicalDecimalAlignmentPoint({
+          segments: input.currentLine,
+          point: { ...point, segmentIndex: from + itemIndex },
+          cellStart: from + tabIndex + 1, cellEnd: from + cellEnd,
+          advances: input.currentLine.map(member => member.measuredWidth),
+          selectedPrefixAdvance: prefix + (segment.leadingWordBoundaryPx ?? 0),
+          model: tabLineOrderModel(input),
+        });
+      }
     }
   }
   // Margin-anchored frame (§17.3.1.37 — stops measure from the TEXT MARGIN):

@@ -1,3 +1,4 @@
+import { wordLineEndJustification } from './line-compatibility.js';
 import {
   countedSpacingAdvance,
   countSpacingCharacters,
@@ -81,6 +82,7 @@ import { wordTrackChangeDecoration } from './paint-compatibility.js';
 import type { DocRun, ShapeRun } from '../types.js';
 import {
   computeLineVisualOrder,
+  paragraphLineOrderModel,
   jcIsFullyJustified,
   jcStretchesLastLine,
   resolveAlignEdge,
@@ -554,32 +556,6 @@ function thaiProportionalClusterAdvance(
     }
     return weight;
   };
-}
-
-/** How {@link WORD_LINE_END_JUSTIFICATION} justifies a line of a justified paragraph:
- * at its gaps ('word'), by an equal advance after every character
- * ('character'), at its gaps or else centred ('word-or-centre'), or not at all.
- * Soft-wrapped lines keep the paragraph's ordinary justification. */
-function lineEndJustification(
-  input: Pick<PlanLineInput, 'alignment' | 'isLastLine' | 'stretchLastLine'
-    | 'doNotExpandShiftReturn' | 'lineEndJustificationBeforeMode15' | 'endsAtHardBreak'>,
-  endsWithBreak: boolean,
-): 'word' | 'character' | 'word-or-centre' | null {
-  if (!endsWithBreak && !input.isLastLine) return 'word';
-  // A line ended by a page or column break is justified like a soft-wrapped
-  // line before compatibility mode 15 and like a final line from mode 15;
-  // doNotExpandShiftReturn does not apply to it.
-  const hardBreak = !endsWithBreak && input.endsAtHardBreak === true;
-  if (hardBreak && input.alignment !== 'distribute') {
-    return input.lineEndJustificationBeforeMode15 === true ? 'word' : null;
-  }
-  if (input.alignment === 'distribute' || (input.alignment === undefined && input.stretchLastLine)) {
-    return input.lineEndJustificationBeforeMode15 === true ? 'character' : 'word-or-centre';
-  }
-  if (!endsWithBreak || input.doNotExpandShiftReturn === true) return null;
-  return input.alignment === 'thaiDistribute' && input.lineEndJustificationBeforeMode15 !== true
-    ? 'character'
-    : 'word';
 }
 
 /** Whether a justified line ended by a manual break widens inter-CJK
@@ -1545,7 +1521,7 @@ export function planLine(input: PlanLineInput): LineLayout {
   // The existing character-spread gap model cannot place directional isolates.
   const characterSpreadBidi = bidi && input.displayMathJustification === undefined
     && resolveAlignEdge(input.alignment, input.baseRtl) === 'justify'
-    && lineEndJustification(input, line.endsWithBreak) === 'character';
+    && wordLineEndJustification(input, line.endsWithBreak) === 'character';
   const visual = computeLineVisualOrder(
     segments.map((segment) => segment.kind === 'tab'
       ? { isTab: true }
@@ -1553,14 +1529,10 @@ export function planLine(input: PlanLineInput): LineLayout {
         ? { text: segment.text, rtl: segment.rtl, digitsAsAN: segment.digitsAsAN }
         : {}),
     input.baseRtl,
-    // Library scope: this correction targets leading labels in RTL paragraphs;
-    // LTR paragraphs keep their previous resolution. Representation boundaries
-    // also retain legacy ordering: distribute still assigns gaps to measured
-    // slices, not source-owned opportunities (#2090), and compatibility shape
-    // text lacks authoritative run-direction provenance. These are limitations
-    // of this retained layout model, not exceptions to the observed rule.
-    characterSpreadBidi || input.alignment === 'distribute'
-      || !input.baseRtl || input.runDirectionUnauthored ? 'line-level' : 'word',
+    paragraphLineOrderModel({
+      baseRtl: input.baseRtl, alignment: input.alignment,
+      runDirectionUnauthored: input.runDirectionUnauthored, characterSpreadBidi,
+    }),
   );
   let naturalWidthPt = segments.reduce((sum, segment) => sum + segmentWidth(segment), 0);
   const lineLeftPt = input.paragraphXPt + line.xOffsetPt;
@@ -1581,7 +1553,7 @@ export function planLine(input: PlanLineInput): LineLayout {
   const edge = input.displayMathJustification === undefined
     ? resolveAlignEdge(input.alignment, input.baseRtl)
     : displayMathEdge(input.displayMathJustification);
-  const lineEndRule = edge === 'justify' ? lineEndJustification(input, line.endsWithBreak) : null;
+  const lineEndRule = edge === 'justify' ? wordLineEndJustification(input, line.endsWithBreak) : null;
   // Right-to-left lines keep word justification (WORD_LINE_END_JUSTIFICATION
   // measured character spreading on left-to-right lines only).
   const justification = lineEndRule === 'character' && bidi ? 'word' : lineEndRule;
@@ -6125,8 +6097,8 @@ function paragraphAcquisitionKey(
       context.spaceBeforePt,
       context.spaceAfterPt,
       context.baseRtl,
-      // This owns final ordering, not the reusable line measurement.
-      lineOnly ? null : context.runDirectionUnauthored === true,
+      // Decimal-tab acquisition also consumes the final ordering policy.
+      context.runDirectionUnauthored === true,
       context.isJustified,
       context.stretchLastLine,
       context.tabStops.map((stop) => [stop.pos, stop.alignment, stop.leader]),
@@ -6171,6 +6143,8 @@ function paragraphAcquisitionKey(
       lineOnly ? null : environment.verticalPageFrame ?? null,
       // Mode owns acquired kerning and justified-compression decisions.
       environment.compatibilityMode ?? null,
+      // Manual-break expansion also owns the acquired decimal order model.
+      environment.doNotExpandShiftReturn === true,
       environment.documentHasEastAsianText,
       environment.useFeLayout ?? null,
       environment.balanceSingleByteDoubleByteWidth ?? null,
