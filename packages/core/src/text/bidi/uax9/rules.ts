@@ -182,7 +182,7 @@ function canonBracket(cp: number): number {
 }
 
 interface Sequence {
-  indices: number[]; // original code-point indices, logical order
+  indices: readonly number[]; // original code-point indices, logical order
   level: number;
   sos: Dir;
   eos: Dir;
@@ -220,14 +220,17 @@ function buildSequences(
     // initiator's sequence, not a sequence start of its own.
     if (origTypes[firstIdx] === 'PDI' && initOf[firstIdx] !== -1) continue;
 
-    const indices: number[] = [];
+    // A single-run IRS can retain its private run indices directly. Copy only
+    // when linking another run, before any append; never mutate original runs.
+    let indices = run;
     let cur = run;
     for (;;) {
-      for (const idx of cur) indices.push(idx);
+      if (cur !== run) for (const idx of cur) indices.push(idx);
       const lastIdx = cur[cur.length - 1];
       if (isIsolateInitiator(origTypes[lastIdx]) && pdiOf[lastIdx] !== n) {
         const next = runByFirst.get(pdiOf[lastIdx]);
         if (next) {
+          if (indices === run) indices = run.slice();
           cur = next;
           continue;
         }
