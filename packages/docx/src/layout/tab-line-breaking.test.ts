@@ -276,13 +276,12 @@ describe('resolveDefaultTabPt', () => {
 
 describe('source-owned RTL tab-cell justification', () => {
   it('gives equal source spaces equal visible expansion without moving the label seam', () => {
-    // A decimal cell contains one uniform numeric slice followed by Hebrew
-    // words. Equal 5 pt glyph metrics make every source U+0020 the same width;
+    // A trailing-aligned cell contains homogeneous Hebrew visible islands. Equal 5 pt glyph metrics make every source U+0020 the same width;
     // justification may enlarge those gaps, not move their allocation to a
     // different source seam. The long cell soft-wraps, so `both` justifies it.
-    const text = `12.5 ${Array.from({ length: 20 }, () => 'אבגד').join(' ')}`;
+    const text = Array.from({ length: 20 }, () => 'אבגד').join(' ');
     const [line] = paragraphLines(documentBytes('', true, 0, {
-      alignment: 'decimal', count: 1, stop: 7200, prefix: 'ab', text,
+      alignment: 'right', count: 1, stop: 7200, prefix: 'ab', text,
       noFloat: true, runRtl: true, jc: 'both', compatibilityMode: 15,
     }));
     const words = line!.placements.filter((node) => node.kind === 'text')
@@ -297,6 +296,32 @@ describe('source-owned RTL tab-cell justification', () => {
     expect(cell.length).toBeGreaterThan(2);
     expect(cell.at(-1)!.right).toBeCloseTo(label.left);
     for (const gap of gaps) expect(gap).toBeCloseTo(gaps[0]!);
+  });
+
+  it('preserves the real numeric decimal anchor and complete source coverage in the mixed-host fallback', () => {
+    // The period has a different host HL1 level from the digits. This source
+    // island remains on the complete legacy path; do not guess its internal
+    // paint topology or change #2070's actual stop acquisition.
+    const text = `12.5 ${Array.from({ length: 20 }, () => 'אבגד').join(' ')}`;
+    const all = paragraphLines(documentBytes('', true, 0, {
+      alignment: 'decimal', count: 1, stop: 7200, prefix: 'ab', text,
+      noFloat: true, runRtl: true, jc: 'both', compatibilityMode: 15,
+    }));
+    const numeric = all[0]!.placements.find(p => p.kind === 'text' && p.text.trim() === '12.5');
+    if (numeric?.kind !== 'text') throw new Error('Missing decimal source');
+    const period = numeric.clusters.find(c => c.range.start === numeric.range.start + 2)!;
+    // Existing justified fit-back keeps the full terminal cell against its
+    // label, not re-tabbed to the ordinary stop after spreading. The2glyph
+    // label ends at540; the4glyph number abuts it and its period follows2glyphs.
+    expect(numeric.origin.xPt + period.offset.xPt).toBeCloseTo(540 - 2 * 5 - 4 * 5 + 2 * 5);
+    const source = all.flatMap(line => line.placements).sort((a, b) => a.range.start - b.range.start);
+    let cursor = 0;
+    for (const placement of source) {
+      expect(placement.range.start).toBe(cursor);
+      cursor = placement.range.end;
+    }
+    expect(source.map(p => p.kind === 'text' ? p.text : p.kind === 'tab' ? '\t' : '').join(''))
+      .toBe(`ab\t${text}`);
   });
 
   it('retains each consecutive source space after a supplementary character in the projected box', () => {

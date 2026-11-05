@@ -104,32 +104,33 @@ it('places the authored leading label before its Arabic island in production lay
     .toBe(content);
 });
 
-it('preserves distribute visible ordering with independently retained source spaces', () => {
+it('keeps the authored label at the left of a validated distribute source-cell span', () => {
   const content = 'Label זהו טקסט';
   const [first] = lines(para([textRun(content)], 'distribute', { bidi: true }), MODE_15);
   const placed = first!.placements.filter((p): p is TextPlacement => p.kind === 'text');
   expect(placed.filter(p => /\S/.test(p.text)).sort((a, b) => a.origin.xPt - b.origin.xPt).map(p => p.text.trim()))
-    .toEqual(['טקסט', 'זהו', 'Label']);
+    .toEqual(['Label', 'טקסט', 'זהו']);
   expect([...placed].sort((a, b) => a.range.start - b.range.start).map(p => p.text).join(''))
     .toBe(content);
 });
 
-it('keeps all four source spaces around an embedded LTR word in word justification', () => {
-  // Twenty visible 10 pt glyphs plus four natural 10 pt spaces in a 360 pt
-  // band: each of the FOUR inter-word spaces receives another 30 pt.
-  // A rightmost visible word must not suppress its own interior source space.
-  const runs = [textRun('אבגד הוזח', { rtl: true }), textRun(' Xray '), textRun('טיכל מנסע', { rtl: true })];
+it.each([
+  { leadingSpaceOwner: 'ltr', before: 'אבגד הוזח', latin: ' Xray ', origins: [20, 100, 180, 260, 340] },
+  { leadingSpaceOwner: 'rtl', before: 'אבגד הוזח ', latin: 'Xray ', origins: [20, 100, 140, 260, 340] },
+])('keeps four source spaces in their authored $leadingSpaceOwner span', ({ before, latin, origins }) => {
+  // Same visible text and 240pt natural width in a360pt band. Each source
+  // SPACE owns40pt, but two spaces on the Latin word's right share one gap
+  // when its preceding SPACE belongs to the RTL run instead of the LTR span.
+  const runs = [textRun(before, { rtl: true }), textRun(latin), textRun('טיכל מנסע', { rtl: true })];
   const [first] = lines(para(runs, 'distribute', { bidi: true }), MODE_15);
   const words = paintedWords(first!);
   expect(words.map(word => word.text)).toEqual(['מנסע', 'טיכל', 'Xray', 'הוזח', 'אבגד']);
-  expect(words.map(word => word.left)).toEqual([20, 100, 180, 260, 340]);
+  expect(words.map(word => word.left)).toEqual(origins);
   expect(words.at(-1)!.left + words.at(-1)!.width).toBe(380);
-  for (let index = 1; index < words.length; index += 1) {
-    expect(words[index]!.left - words[index - 1]!.left - words[index - 1]!.width).toBe(40);
-  }
   const source = first!.placements.filter((p): p is TextPlacement => p.kind === 'text')
     .sort((a, b) => a.range.start - b.range.start);
   expect(source.map(p => p.text).join('')).toBe('אבגד הוזח Xray טיכל מנסע');
+  expect(source.filter(p => p.text === ' ').map(p => p.advancePt)).toEqual([40, 40, 40, 40]);
 });
 
 it('resolves the space inside an LTR word group in its complete RTL host', () => {

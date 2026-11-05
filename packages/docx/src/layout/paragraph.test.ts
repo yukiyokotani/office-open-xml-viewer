@@ -2446,17 +2446,69 @@ describe('planLine visual geometry', () => {
     expect(atomic).toEqual(attached);
   });
 
+  it.each([
+    { first: 'אבXray ', rtl: false },
+    { first: 'אבXray ', rtl: true },
+    { first: '12.5 ', rtl: true },
+  ])('keeps the complete legacy line for mixed visible islands ($first, rtl=$rtl)', ({ first, rtl }) => {
+    const piece = (text: string, start: number, marked: boolean) => ({
+      ...measuredText(text, start, text.length * 5, marked), rtl: marked,
+      clusters: [...text].map((_character, index) => ({
+        range: { start: start + index, end: start + index + 1 },
+        offset: { xPt: index * 5, yPt: 0 }, advancePt: 5,
+      })),
+    });
+    const segments = [piece(first, 0, rtl), piece('Yoke ', first.length, rtl), piece('טקסט', first.length + 5, true)];
+    const project = (legacy: boolean) => planLine({
+      paragraphXPt: 0, availableWidthPt: 150, alignment: 'both', baseRtl: true,
+      runDirectionUnauthored: legacy, isFirstLine: true, isLastLine: false, stretchLastLine: false,
+      line: { range: { start: 0, end: first.length + 9 }, topPt: 0, baselinePt: 8, advancePt: 10,
+        xOffsetPt: 0, availableWidthPt: 150, endsWithBreak: false, segments },
+    });
+    // Compatibility-source mode supplies the existing complete parent plan;
+    // this mixed visible island already forces its old no-isolate ordering.
+    const legacy = project(true);
+    expect(project(false)).toEqual(legacy);
+    const placed = legacy.placements.filter((p): p is TextPlacement => p.kind === 'text');
+    expect(placed.sort((a, b) => a.range.start - b.range.start).map(p => p.text).join(''))
+      .toBe(`${first}Yoke טקסט`);
+  });
+
+  it.each([0, 5])('keeps a source-tail SPACE of %s pt on the complete legacy budget path', (spaceAdvancePt) => {
+    const piece = (text: string, start: number) => ({
+      ...measuredText(text, start, [...text].reduce((sum, char) => sum + (char === ' ' ? spaceAdvancePt : 5), 0), true), rtl: true,
+      clusters: [...text].map((_character, index) => ({
+        range: { start: start + index, end: start + index + 1 },
+        offset: { xPt: index * 5, yPt: 0 }, advancePt: text[index] === ' ' ? spaceAdvancePt : 5,
+      })),
+    });
+    const segments = [piece('אבגד ', 0), piece('הוזח ', 5)];
+    const project = (legacy: boolean) => planLine({
+      paragraphXPt: 0, availableWidthPt: 100, alignment: 'distribute', baseRtl: true,
+      runDirectionUnauthored: legacy, isFirstLine: true, isLastLine: true, stretchLastLine: true,
+      lineEndJustificationBeforeMode15: false,
+      line: { range: { start: 0, end: 10 }, topPt: 0, baselinePt: 8, advancePt: 10,
+        xOffsetPt: 0, availableWidthPt: 100, endsWithBreak: false, segments },
+    });
+    // Source presence, including an exact zero-advance SPACE, has no
+    // established distribute hanging budget. Preserve its
+    // entire allocation/paint, rather than combining a new fine gap model
+    // with that incomplete terminal budget.
+    expect(project(false)).toEqual(project(true));
+  });
+
   it('preserves a contextual operation when a space cut would remove a visible head across NBSP', () => {
-    const value = 'אבגד \u00a0הוזח ';
+    const value = 'אבגד \u00a0הוזח';
+    const base = measuredText(value, 0, value.length * 5, true);
     const segment = {
-      ...measuredText(value, 0, value.length * 5, true),
+      ...base,
       clusters: [...value].map((_character, index) => ({
         range: { start: index, end: index + 1 }, offset: { xPt: index * 5, yPt: 0 }, advancePt: 5,
       })),
+      basePaintOps: [{ ...base.basePaintOps[0]!,
+        inkBounds: { xMinPt: 0, xMaxPt: 50, ascentPt: 8, descentPt: 2 },
+      }],
     };
-    segment.basePaintOps = [{ ...segment.basePaintOps[0]!,
-      inkBounds: { xMinPt: 0, xMaxPt: 50, ascentPt: 8, descentPt: 2 },
-    }];
     const projected = (before15: boolean) => planLine({
       paragraphXPt: 0, availableWidthPt: 100, alignment: 'distribute', baseRtl: true,
       isFirstLine: true, isLastLine: true, stretchLastLine: true,

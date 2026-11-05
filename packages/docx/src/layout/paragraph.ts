@@ -84,7 +84,7 @@ import { wordTrackChangeDecoration } from './paint-compatibility.js';
 import type { DocRun, ShapeRun } from '../types.js';
 import {
   computeLineVisualOrder,
-  computeLineResolvedOrder,
+  computeLineSourceCellOrder,
   lineOrderEngineIdentity,
   paragraphLineOrderModel,
   jcIsFullyJustified,
@@ -1556,12 +1556,21 @@ export function planLine(input: PlanLineInput): LineLayout {
   // compatibility-shape provenance and rewrite-capable Kashida stay legacy.
   // One fine view owns UAX order, terminal classification, gaps and paint;
   // never choose it after measuring against a different coarse budget.
-  const sourceCells = bidi && !characterSpreadBidi && !input.runDirectionUnauthored
+  let sourceCells: ReturnType<typeof sourceSpaceCells>;
+  if (bidi && !characterSpreadBidi && !input.runDirectionUnauthored
     && (justification === 'word' || justification === 'word-or-centre')
     && kashidaLevel(input.alignment) === null && lineSlackPt >= 0
-    && line.gapPlan === undefined && line.justifiedCompressionPt === undefined
-      ? sourceSpaceCells(segments) : undefined;
-  if (sourceCells) segments = sourceCells.segments;
+    && line.gapPlan === undefined && line.justifiedCompressionPt === undefined) {
+    // A source-tail SPACE needs an established terminal budget before this
+    // representation can own its gaps. Distribute currently lacks that hanging
+    // policy (#2071); preserve its COMPLETE old line rather than invent credit
+    // or combine fine paint with an incomplete coarse terminal budget.
+    const terminalBudgetKnown = wordLineEndSpaceHangs(bidi, input.wordWrap !== false)
+      || (input.displayMathJustification === undefined
+        && wordRtlJustifiedVisibleFitApplies(input.alignment, input.baseRtl === true, input.wordWrap !== false));
+    const hasTerminalSpace = hasLogicalTailSpace(segments);
+    if (!hasTerminalSpace || terminalBudgetKnown) sourceCells = sourceSpaceCells(segments);
+  }
   const descriptors = segments.map(segment => segment.kind === 'tab'
     ? { isTab: true }
     : segment.kind === 'text'
@@ -1572,13 +1581,15 @@ export function planLine(input: PlanLineInput): LineLayout {
     runDirectionUnauthored: input.runDirectionUnauthored, characterSpreadBidi,
   });
   const resolved = sourceCells
-    ? computeLineResolvedOrder(descriptors, input.baseRtl, orderModel) : undefined;
-  const visual = resolved && sourceCells ? {
+    ? computeLineSourceCellOrder(descriptors, sourceCells.projection, input.baseRtl, orderModel) : undefined;
+  if (resolved?.view === 'parents') sourceCells = undefined;
+  if (sourceCells) segments = sourceCells.segments;
+  const visual = resolved ? {
     order: resolved.order,
-    // Spaces have no content-direction anchor: their OWN whole-host level
-    // supplies parity, rather than the first odd level of a neighboring word.
-    rtl: resolved.rtl.map((rtl, index) => sourceCells.spaceOnly[index]
-      ? (resolved.anchorLevels[index]! & 1) === 1 : rtl),
+    // A validated SPACE uses its OWN level inside the ORIGINAL author span.
+    // A rejected mixed visible island returns only the full legacy parent view.
+    rtl: sourceCells ? resolved.rtl.map((rtl, index) => sourceCells!.spaceOnly[index]
+      ? (resolved.anchorLevels[index]! & 1) === 1 : rtl) : resolved.rtl,
   } : computeLineVisualOrder(descriptors, input.baseRtl, orderModel);
   const softWrapped = !line.endsWithBreak && !input.isLastLine;
   // WORD_KASHIDA_LINE_FIT: soft-wrapped kashida and thaiDistribute lines
@@ -7576,6 +7587,19 @@ export function sliceParagraphLayout(
   }, acquired, rebasedSelected);
 }
 
+
+/** Logical source presence is independent of acquired advance: authored
+ * tracking may make an atomic U+0020 exactly zero-width. Match the existing
+ * terminal walk through empty text and zero-advance anchor carriers. */
+function hasLogicalTailSpace(segments: readonly MeasuredLinePlanSegment[]): boolean {
+  for (let index = segments.length - 1; index >= 0; index--) {
+    const segment = segments[index]!;
+    if (segment.kind === 'anchor-host') continue;
+    if (segment.kind !== 'text') return false;
+    if (segment.text.length > 0) return segment.text.endsWith(' ');
+  }
+  return false;
+}
 
 /** Advance of a line's trailing separator: the clusters after each final text
  * segment's visible prefix (`visibleLength`), across trailing segments that

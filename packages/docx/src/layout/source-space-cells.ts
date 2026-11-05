@@ -1,3 +1,4 @@
+import type { SegmentLineSourceCell } from '@silurus/ooxml-core/internal/bidi-line';
 import type { MeasuredLinePlanSegment, MeasuredTextPlanSegment } from './paragraph.js';
 import type { TextPaintOp } from './types.js';
 
@@ -5,6 +6,7 @@ export interface SourceSpaceCells {
   readonly segments: readonly MeasuredLinePlanSegment[];
   readonly parentCellStarts: readonly number[];
   readonly spaceOnly: readonly boolean[];
+  readonly projection: readonly SegmentLineSourceCell[];
 }
 
 /** A final-layout view, not new acquired text. Original indices, source ranges,
@@ -132,5 +134,18 @@ export function sourceSpaceCells(parents: readonly MeasuredLinePlanSegment[]): S
     }
   }
   parentCellStarts.push(segments.length);
-  return hasSpaceCell ? { segments, parentCellStarts, spaceOnly } : undefined;
+  if (!hasSpaceCell) return undefined;
+  const projection: SegmentLineSourceCell[] = [];
+  for (let parentIndex = 0; parentIndex < parents.length; parentIndex++) {
+    const parent = parents[parentIndex]!;
+    for (let ci = parentCellStarts[parentIndex]!; ci < parentCellStarts[parentIndex + 1]!; ci++) {
+      const cell = segments[ci]!;
+      projection.push({ parentIndex,
+        startUTF16: parent.kind === 'text' ? cell.range.start - parent.range.start : 0,
+        endUTF16: parent.kind === 'text' ? cell.range.end - parent.range.start : 0,
+        spaceOnly: spaceOnly[ci]!,
+      });
+    }
+  }
+  return { segments, parentCellStarts, spaceOnly, projection };
 }

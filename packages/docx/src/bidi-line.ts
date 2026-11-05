@@ -2,7 +2,8 @@ import type { BidiEngine } from '@silurus/ooxml-core';
 // WordprocessingML segment ordering uses the shared UAX#9 kernel with
 // Word's HL1 run overrides and content-level Canvas direction.
 import {
-  computeSegmentLineVisualOrder, computeSegmentLineResolvedOrder, segmentLineHasRtl,
+  computeSegmentLineVisualOrder, computeSegmentLineSourceCellOrder, segmentLineHasRtl,
+  type SegmentLineSourceCell,
   type SegmentLineVisualOrder, type SegmentLineBidiOptions,
   getDefaultBidiEngine, getBidiEngineLifecycleToken,
   certifyNativeSegmentLineOrder,
@@ -20,9 +21,10 @@ export type LineVisualOrder = SegmentLineVisualOrder;
 export type LineOrderModel = 'line-level' | 'word';
 
 /** Library representation boundaries shared by acquisition and final placement.
- * Leading-label isolates apply only to RTL paragraphs. Distribute retains its
- * prior author-span model: source-space cells currently cover only ordinary
- * positive word lines, not its complete character/native/negative topology.
+ * Leading-label isolates apply only to RTL paragraphs. Coarse distribute
+ * acquisition retains its prior model. Validated final source cells can retain
+ * original author scopes for positive word budgets; character/native/negative
+ * and unsupported terminal or mixed-visible geometry keep the whole old path.
  * Character spread cannot place isolates, and compatibility shape text lacks
  * authoritative run-direction provenance. These keep their previous model.
  */
@@ -51,10 +53,15 @@ export const computeLineVisualOrder = (
 
 /** Final acquired source cells only; acquisition's coarse memo and decimal
  * anchors keep their established API/lifetime and native certificates. */
-export const computeLineResolvedOrder = (
-  segments: readonly unknown[], baseRtl: boolean, model: LineOrderModel,
-) => computeSegmentLineResolvedOrder(
-  segments, baseRtl, model === 'word' ? authoredOptions : options,
+export const computeLineSourceCellOrder = (
+  parents: readonly unknown[], cells: readonly SegmentLineSourceCell[],
+  baseRtl: boolean, legacyModel: LineOrderModel,
+) => computeSegmentLineSourceCellOrder(
+  parents, cells, baseRtl,
+  // Proper source cells can preserve authored SPACE scope even in distribute.
+  // Acquisition/decimal anchors and unsupported final lines keep their model.
+  baseRtl ? authoredOptions : options,
+  legacyModel === 'word' ? authoredOptions : options,
 );
 
 export type LineOrderResolver = (
