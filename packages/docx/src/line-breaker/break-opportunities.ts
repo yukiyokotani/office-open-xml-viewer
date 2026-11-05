@@ -1,3 +1,4 @@
+import { candidateUnit } from './line-gaps.js';
 import { isInklessLineItem } from './break-queue.js';
 import { lineEndSpaceCharged, lineTrailingSpaceSuffixWidth, measureFitTextUnit, measureJoinedTextUnit } from './atomic-units.js';
 import { placeOptionalHyphenPrefix } from './optional-hyphens.js';
@@ -86,6 +87,7 @@ export type BreakOpportunityIteratorContext = Pick<
   | 'segAdvance'
   | 'strAdvance'
   | 'justifiedCompression'
+  | 'justifiedCompressionAdmissionOnly'
   | 'lineFit'
   | 'isJustified'
   | 'stretchLastLine'
@@ -448,7 +450,21 @@ function processTextSegment(context: BreakOpportunityIteratorContext, seg: Layou
   s.measuredWidth = w;
   // A whole word after an ideograph owns a WORD_EAST_ASIAN_AUTO_SPACE gap of
   // the justified-compression family; it is admitted as one unit either way.
-  if ((!prefersWholeWordAtScriptBoundary(context, s) || s.autoSpaceBeforePt !== undefined)
+  // Admission-only paragraphs keep the ordinary natural-fit authority. A
+  // complete single piece that already fits needs neither a second box/space
+  // acquisition nor a contraction model. Pending/refused units and accepted
+  // contraction retain their existing owner; source followers and internal
+  // opportunities defer to the complete-unit path below.
+  const completeUnitFitApplies = !prefersWholeWordAtScriptBoundary(context, s) || s.autoSpaceBeforePt !== undefined;
+  const ordinaryAdmissionCertified = completeUnitFitApplies
+    && context.justifiedCompressionAdmissionOnly === true
+    && justifiedCompressionApplies(context)
+    && breakerState.justifiedUnitEnd === undefined
+    && !(breakerState.justifiedCompressionPx > 0)
+    && !s.optionalHyphenWord && s.explicitBreaks === undefined
+    && context.fitsMeasuredWidth(breakerState.currentWidth + wForFit, availW())
+    && candidateUnit(s, breakerState.queue).length === 1;
+  if (completeUnitFitApplies && !ordinaryAdmissionCertified
     && fitJustifiedCompression(context, s)) return;
   // A declined justified candidate re-measured its box; restore the fitted pair.
   s.leadingWordBoundaryPx = kernedSpacePair === 0 ? undefined : kernedSpacePair;

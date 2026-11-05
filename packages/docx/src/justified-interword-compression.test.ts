@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest';
+import * as gapWork from './line-breaker/line-gaps.js';
+import { describe, expect, it, vi } from 'vitest';
 import { renderDocumentToCanvas, type DocxTextRunInfo } from './renderer.js';
 import type { BodyElement, DocParagraph, DocxDocumentModel, DocxTextRun, SectionProps } from './types';
 
@@ -188,6 +189,20 @@ describe('WORD_JUSTIFIED_INTERWORD_COMPRESSION', () => {
     }
   });
 
+  it('acquires a contraction gap model only when new alignments need an overflow decision', async () => {
+    const work = vi.spyOn(gapWork, 'lineGapModel');
+    try {
+      const [natural] = await renderLines(paragraph('Quiet rivers', 'distribute'), 233.3);
+      expect(words(natural)).toEqual(['Quiet', 'rivers']);
+      expect(work).not.toHaveBeenCalled();
+      const [compressed] = await renderLines(paragraph(CONTROL, 'distribute'), 233.3);
+      expect(words(compressed).at(-1)).toBe('valley');
+      expect(work).toHaveBeenCalled();
+    } finally {
+      work.mockRestore();
+    }
+  });
+
   it('preserves a native space-to-letter pair only when its tokens share a line', async () => {
     // An independent whole-string measure owns this boundary: the stub adds
     // a 200/2048 em space-T pair, in addition to its ordinary letter pairs.
@@ -345,6 +360,21 @@ describe('WORD_JUSTIFIED_INTERWORD_COMPRESSION', () => {
       textRun('ley beyond the distant hills today', { color: 'ff0000' }),
     ]), 233.3);
     expect(words(first).at(-1)).toBe('valley');
+  });
+
+  it('keeps later compression available after a refused source-split word', async () => {
+    const element = withRuns([
+      textRun('Quiet rivers carry morning light across the valley be'),
+      textRun('yond the distant hills today Quiets rivers carry morning light across the valley beyond the distant hills today', { color: 'ff0000' }),
+    ]);
+    (element as DocParagraph).alignment = 'distribute';
+    const result = await renderLines(element, 233.3);
+    // The style-split next word is refused on the first compressed line.
+    // On the next line the independently measured visible phrase advances
+    // 235.667pt, so retaining its final word also needs real contraction.
+    expect(words(result[0]).at(-1)).toBe('valley');
+    expect(words(result[1]).join(' ')).toBe('beyond the distant hills today Quiets rivers carry');
+    expect(result[1].at(-1)!.x + GEORGIA_SUM('carry') * 11 / 2048).toBeCloseTo(233.3, 3);
   });
 
   it('counts double spaces and separators in their own source runs', async () => {

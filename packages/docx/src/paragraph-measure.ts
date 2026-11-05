@@ -673,7 +673,10 @@ export function measureParagraph(
       // character-level UAX#9 proof.
       && ((paragraph.alignment !== 'distribute' && paragraph.alignment !== 'lowKashida')
         || (!context.baseRtl && !segmentsHaveRtl(segments)))
-      ? { lineEndIdeographicSpaceHangs: paragraph.wordWrap !== false }
+      ? {
+          lineEndIdeographicSpaceHangs: paragraph.wordWrap !== false,
+          admissionOnly: paragraph.alignment === 'distribute' || paragraph.alignment === 'lowKashida',
+        }
       : false,
     wordJustifiedLineFit(paragraph.alignment, environment.compatibilityMode, context.baseRtl, context.wordWrap !== false,
       context.baseRtl ? context.physicalIndentLeftPt : context.physicalIndentRightPt + rightGridAdjustmentPt),

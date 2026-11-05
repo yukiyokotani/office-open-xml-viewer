@@ -101,6 +101,8 @@ export interface LineBreakerPassInput {
   /** WORD_JUSTIFICATION_PUNCTUATION_HANG; absent outside its measured scope. */
   readonly cjkClosingMarkHang?: CjkClosingMarkHang;
   readonly justifiedCompression?: boolean;
+  /** Acquisition-only capability: no unused positive-expansion gap plan. */
+  readonly justifiedCompressionAdmissionOnly?: boolean;
   /** A line-end U+3000 hangs from the visible fit (WORD_LINE_END_SPACE_HANGS). */
   readonly lineEndIdeographicSpaceHangs?: boolean;
   /** WORD_KASHIDA_LINE_FIT: a bounded line's text may fill `fraction` of its

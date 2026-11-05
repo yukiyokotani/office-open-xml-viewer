@@ -1134,7 +1134,11 @@ export function performFlush(
             firstPositioned.resolvedDesignDescentRatio * firstPositioned.fontSize * scale,
         }
       : undefined;
+  // Admission-only C0 lines have no retained gap-plan consumer. Accepted
+  // contraction still rebuilds from the actual closing members (including
+  // forced followers/retraction) before the existing overflow clamp.
   const justifiedGapPlan = justifiedCompressionApplies(operationState)
+    && (!operationState.justifiedCompressionAdmissionOnly || breakerState.justifiedCompressionPx > 0)
     ? lineGapModel(breakerState.currentLine.map(s => gapSegment(operationState, s)))
     : undefined;
   breakerState.lines.push({
@@ -1360,7 +1364,11 @@ export function performAddToLine(
   }
   commitMixedLineItem(breakerState, s, scale);
   breakerState.currentWidth += committedWidth;
-  if (justifiedCompressionApplies(operationState)) {
+  // The admission-only capability builds its prefix at the first actual
+  // contraction test. Once acquired it follows committed additions exactly;
+  // the default full-plan capability retains eager expansion acquisition.
+  if (justifiedCompressionApplies(operationState)
+    && (!operationState.justifiedCompressionAdmissionOnly || breakerState.justifiedGapModel !== undefined)) {
     const previous = breakerState.justifiedGapModel;
     breakerState.justifiedGapModel = previous?.segmentCount === breakerState.currentLine.length - 1
       ? lineGapModel([gapSegment(operationState, s)], previous, false)
