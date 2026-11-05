@@ -474,6 +474,12 @@ export function resolveParagraphLayoutContext(
         && !isSectionLineGrid(section.grid.kind)
         && !characterGridActive,
       insideTableCell,
+      // The retained paragraph fact only admits the ON hanging extension.
+      // Keep the existing rules above: general paragraph-off line breaking
+      // (#2079) remains unsupported here.
+      paragraph.kinsoku === false,
+      settings.compat.compatibilityMode,
+      settings.kinsoku.enabled,
     )),
     ...(paragraph.wordWrap === false ? { wordWrap: false as const } : {}),
     ...(paragraph.endsAtHardBreak === true ? { endsAtHardBreak: true as const } : {}),
