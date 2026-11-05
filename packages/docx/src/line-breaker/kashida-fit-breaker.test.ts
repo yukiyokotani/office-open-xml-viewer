@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { getDefaultBidiEngine, setBidiEngine } from '@silurus/ooxml-core';
 import { layoutLines, type LayoutLine, type LayoutSeg, type LayoutTextSeg, type WrapLayoutCtx } from '../line-layout.js';
 import { computePreparedLineFloatWindow, prepareFloatWrap } from '../layout/float-wrap.js';
 import type { FloatRect } from '../layout/float-wrap.js';
@@ -58,7 +59,7 @@ function affineNumbering(authored: number, offset: number): NumberingFirstLine {
 
 function run(segs: LayoutSeg[], options: {
   maxWidth?: number; marginRightPx?: number; wrapCtx?: WrapLayoutCtx; baseRtl?: boolean; firstIndent?: number;
-  tabStops?: { pos: number; alignment: 'left' | 'right' | 'start' | 'end'; leader: 'none' }[];
+  tabStops?: { pos: number; alignment: 'left' | 'right' | 'start' | 'end' | 'decimal'; leader: 'none' }[];
   lineFit?: LineFitWidth;
 }): LayoutLine[] {
   const maxWidth = options.maxWidth ?? 360;
@@ -412,6 +413,50 @@ describe('WORD_KASHIDA_LINE_FIT line breaker', () => {
     const lines = run([token('W'.repeat(64))], { wrapCtx, lineFit: fit(0.8, 0) });
     expect(lines[0]!.topY).toBe(100000);
     expect(calls).toBeLessThan(10);
+  });
+
+  it('bounds full decimal context work across unchanged narrow-gap convergence', () => {
+    const head = '1'.repeat(60) + '.50';
+    const tail = 'אבגד ';
+    const source = head + ' ' + tail.repeat(2000);
+    const fullContexts: string[] = [];
+    const engine = getDefaultBidiEngine();
+    setBidiEngine({
+      computeLevels(text, base, overrides) {
+        // Count real UAX input work, not a private resolver's call sequence.
+        // Shorter continuation lines and local paint guards remain unrestricted.
+        if (text.length >= source.length) fullContexts.push(JSON.stringify([text, base, overrides]));
+        return engine.computeLevels(text, base, overrides);
+      },
+      reorderVisual: (...args) => engine.reorderVisual(...args),
+      getMirror: (...args) => engine.getMirror(...args),
+    });
+    const lineWindow: NonNullable<WrapLayoutCtx['lineWindow']> = (input) => {
+      for (let top = input.topYPt; top < 1000; top += 10) {
+        if (input.minimumStartWidthPt <= 390) return {
+          topYPt: top, xOffsetPt: 20, maximumWidthPt: 390,
+        };
+      }
+      return { topYPt: Math.max(100000, input.topYPt), xOffsetPt: 0,
+        maximumWidthPt: input.maximumWidthPt };
+    };
+    let lines: LayoutLine[];
+    try {
+      lines = run([tab(), token(head, { rtl: true }), token(' ', { rtl: true }),
+        ...Array.from({ length: 2000 }, () => token(tail, { rtl: true }))], {
+        baseRtl: true, tabStops: [{ pos: 300, alignment: 'decimal', leader: 'none' }],
+        wrapCtx: { ...wrap([], 360, true), pageH: 2000000, lineWindow,
+          numberingFirstLine: affineNumbering(-50, 0) }, lineFit: fit(0.8, 0),
+      });
+    } finally { setBidiEngine(engine); }
+    expect(lines.flatMap(line => line.segments.flatMap(seg => 'text' in seg ? [seg.text] : [])).join(''))
+      .toBe(source);
+    expect(lines.length).toBeGreaterThan(1);
+    expect(lines.every(line => Number.isFinite(line.topY) && line.availWidth >= 0)).toBe(true);
+    expect(fullContexts.length).toBeGreaterThan(0);
+    // This fixture repeats one complete source/HL1 context during convergence.
+    // Resolving that unchanged context again caused the measured long-cell cost.
+    expect(fullContexts.length).toBe(new Set(fullContexts).size);
   });
 
   it('searches the active baseline with each window\'s own requirement', () => {

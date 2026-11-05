@@ -1,7 +1,9 @@
 import { describe, it, expect } from 'vitest';
+import { getDefaultBidiEngine, setBidiEngine } from '@silurus/ooxml-core';
 import {
   segmentsHaveRtl,
   computeLineVisualOrder,
+  createLineOrderResolver,
   resolveAlignEdge,
   jcIsFullyJustified,
   jcStretchesLastLine,
@@ -25,12 +27,85 @@ describe('segmentsHaveRtl', () => {
 describe('authored opposite-direction run ordering', () => {
   it('keeps a leading Latin label at the left of its unmarked Arabic run', () => {
     const segments = [{ text: 'Label ' }, { text: 'هذا ' }, { text: 'نص ' }, { text: 'عربي ' }];
-    const visual = computeLineVisualOrder(segments, true, 'word');
+    const resolve = createLineOrderResolver();
+    const visual = resolve(segments, true, 'word');
     expect(visual.order.map(index => segments[index]!.text.trim()))
       .toEqual(['Label', 'عربي', 'نص', 'هذا']);
     // Acquisition callers and unauthored shape text retain their existing
     // line-level resolution; this change only orders authored final lines.
-    expect(computeLineVisualOrder(segments, true).order.at(-1)).toBe(0);
+    expect(resolve(segments, true).order.at(-1)).toBe(0);
+    expect(resolve(segments, true, 'word').order[0]).toBe(0);
+    segments[0]!.text = 'אחר ';
+    expect(resolve(segments, true, 'word').order).toEqual([3, 2, 1, 0]);
+  });
+
+  it('honors same-object adapter lifecycle and method changes during ordering reuse', () => {
+    const engine = getDefaultBidiEngine();
+    let reverseAdapterOrder = false;
+    const adapter = {
+      computeLevels: (...args: Parameters<typeof engine.computeLevels>) => engine.computeLevels(...args),
+      reorderVisual: (...args: Parameters<typeof engine.reorderVisual>) => {
+        const order = engine.reorderVisual(...args);
+        return reverseAdapterOrder ? order.reverse() : order;
+      },
+      getMirror: (...args: Parameters<typeof engine.getMirror>) => engine.getMirror(...args),
+    };
+    const resolve = createLineOrderResolver();
+    const words = [{ text: 'שלום ' }, { text: 'עולם' }];
+    try {
+      setBidiEngine(adapter);
+      expect(resolve(words, true).order).toEqual([1, 0]);
+      // A provider can change captured configuration while retaining its
+      // object and methods; the explicit setter is its invalidation contract.
+      reverseAdapterOrder = true;
+      setBidiEngine(adapter);
+      expect(resolve(words, true).order).toEqual([0, 1]);
+      adapter.reorderVisual = (...args) => engine.reorderVisual(...args);
+      expect(resolve(words, true).order).toEqual([1, 0]);
+      adapter.computeLevels = (text) => ({ levels: new Uint8Array(text.length), paragraphLevel: 0 });
+      expect(resolve(words, true).order).toEqual([0, 1]);
+    } finally { setBidiEngine(engine); }
+  });
+
+  it('honors replaced native methods and proxy providers for uniform RTL slices', () => {
+    const engine = getDefaultBidiEngine();
+    const reorder = engine.reorderVisual;
+    const words = [{ text: 'שלום ', rtl: true }, { text: 'עולם', rtl: true }];
+    const resolve = createLineOrderResolver();
+    try {
+      expect(resolve(words, true).order).toEqual([1, 0]);
+      engine.reorderVisual = (...args) => reorder.call(engine, ...args).reverse();
+      expect(resolve(words, true).order).toEqual([0, 1]);
+      engine.reorderVisual = reorder;
+      const proxy = new Proxy(engine, {
+        get(target, key, receiver) {
+          return key === 'reorderVisual'
+            ? (...args: Parameters<typeof reorder>) => reorder.call(target, ...args).reverse()
+            : Reflect.get(target, key, receiver);
+        },
+      });
+      setBidiEngine(proxy);
+      expect(resolve(words, true).order).toEqual([0, 1]);
+    } finally {
+      engine.reorderVisual = reorder;
+      setBidiEngine(engine);
+    }
+  });
+
+  it('preserves unresolved space and terminal-neutral anchor contexts', () => {
+    const resolve = createLineOrderResolver();
+    // L1 resets the tab, not the space AFTER it: the earlier L context can
+    // still give that space a level-2 anchor.
+    expect(resolve([{ text: 'AB', rtl: true }, { isTab: true },
+      { text: ' ', rtl: true }, { text: 'CD', rtl: true }], true, 'word'))
+      .toEqual({ order: [2, 3, 1, 0], rtl: [false, true, false, false] });
+    // An opposite unmarked space shares the LRI span with the following L.
+    expect(resolve([{ text: 'א', rtl: true }, { text: ' ' },
+      { text: 'AB' }, { text: 'ב', rtl: true }], true, 'word'))
+      .toEqual({ order: [3, 1, 2, 0], rtl: [true, false, false, true] });
+    // A terminal neutral is not bounded by L outside an isolate.
+    expect(resolve([{ text: 'AB!' }, { text: 'א', rtl: true }], true, 'line-level'))
+      .toEqual({ order: [1, 0], rtl: [true, true] });
   });
 
   it('leaves paragraph-direction Arabic ordering and paint direction unchanged', () => {
@@ -203,16 +278,21 @@ describe('computeLineVisualOrder', () => {
     // digit-group and separator segments tagged `digitsAsAN`. Under the RTL
     // base, UAX #9 §4.3 HL1 reorders those groups to "2026-02-28".
     const segs = [
-      { text: '28', rtl: true, digitsAsAN: true },
-      { text: '-', rtl: true, digitsAsAN: true },
-      { text: '02', rtl: true, digitsAsAN: true },
-      { text: '-', rtl: true, digitsAsAN: true },
-      { text: '2026', rtl: true, digitsAsAN: true },
+      { text: '28', rtl: false, digitsAsAN: false },
+      { text: '-', rtl: false, digitsAsAN: false },
+      { text: '02', rtl: false, digitsAsAN: false },
+      { text: '-', rtl: false, digitsAsAN: false },
+      { text: '2026', rtl: false, digitsAsAN: false },
     ];
-    const { order } = computeLineVisualOrder(segs, true);
+    const resolve = createLineOrderResolver();
+    expect(resolve(segs, true).order.map(i => segs[i]!.text).join('')).toBe('28-02-2026');
+    for (const segment of segs) segment.digitsAsAN = true;
+    const { order } = resolve(segs, true);
     // Visual L→R: 2026 - 02 - 28  →  logical indices [4,3,2,1,0].
     const visual = order.map((i) => segs[i].text).join('');
     expect(visual).toBe('2026-02-28');
+    for (const segment of segs) segment.rtl = true;
+    expect(resolve(segs, true).order.map(i => segs[i]!.text).join('')).toBe('2026-02-28');
   });
 
   it('reorders date groups even without AN classification when the run is rtl-marked', () => {
@@ -220,13 +300,16 @@ describe('computeLineVisualOrder', () => {
     // rtl-marked "-" separators are ambiguous punctuation and resolve R per
     // §17.3.2.30, so the EN groups still reorder to Word's visual order.
     const segs = [
-      { text: '28', rtl: true },
-      { text: '-', rtl: true },
-      { text: '02', rtl: true },
-      { text: '-', rtl: true },
-      { text: '2026', rtl: true },
+      { text: '28', rtl: false },
+      { text: '-', rtl: false },
+      { text: '02', rtl: false },
+      { text: '-', rtl: false },
+      { text: '2026', rtl: false },
     ];
-    const { order } = computeLineVisualOrder(segs, true);
+    const resolve = createLineOrderResolver();
+    expect(resolve(segs, true).order.map(i => segs[i]!.text).join('')).toBe('28-02-2026');
+    for (const segment of segs) segment.rtl = true;
+    const { order } = resolve(segs, true);
     const visual = order.map((i) => segs[i].text).join('');
     expect(visual).toBe('2026-02-28');
   });
