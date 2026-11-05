@@ -104,6 +104,30 @@ describe('word-justification-punctuation-hang', () => {
     }
   });
 
+  it('pushes nonjustified closing marks only in the measured mode-15 kinsoku-on class', () => {
+    // Ordinary left, previously unmeasured right, and Strict start exercise
+    // distinct admission names without repeating their mode cross-product.
+    for (const alignment of ['left', 'right', 'start']) {
+      const [first, next] = lines(withAlignment(overflowing('。'), alignment), { compatibilityMode: 15 });
+      expect(text(first!), alignment).toBe(KANA.slice(0, 35));
+      expect(text(next!).startsWith(KANA[35]! + '。'), alignment).toBe(true);
+    }
+  });
+
+  it('preserves paragraph-off, document-off and unmeasured-mode hanging behavior', () => {
+    // False excludes both the pre-15 one-mark bound and the mode-15 push.
+    for (const [alignment, mode, mark] of [['center', 14, '。」'], ['left', 15, '。']] as const) {
+      const body = { ...withAlignment(overflowing(mark), alignment), kinsoku: false } as BodyElement;
+      expect(text(lines(body, { compatibilityMode: mode })[0]!)).toBe(KANA.slice(0, 36) + mark);
+    }
+    expect(text(lines(withAlignment(overflowing('。」'), 'right'), { compatibilityMode: 15, kinsoku: false })[0]!))
+      .toBe(KANA.slice(0, 36) + '。」');
+    for (const mode of [13, 16]) {
+      expect(text(lines(withAlignment(overflowing('。」'), 'center'), { compatibilityMode: mode })[0]!))
+        .toBe(KANA.slice(0, 36) + '。」');
+    }
+  });
+
   it('pushes at the kashida fit widths: 324 pt (mediumKashida) and 288 pt (highKashida)', () => {
     for (const settings of [{ compatibilityMode: 14 }, { compatibilityMode: 15 }] as DocSettings[]) {
       for (const [alignment, fit] of [['mediumKashida', 32], ['highKashida', 28]] as const) {
@@ -160,8 +184,8 @@ describe('word-justification-punctuation-hang', () => {
   }
 
   /** Kana on the first line of the one あ paragraph laid out for `body`. */
-  function firstLineKana(body: readonly BodyElement[], sectionProps: SectionProps = section): number {
-    const layout = layoutBodyModel(body, sectionProps, makeCtx(), {}, { compatibilityMode: 15 });
+  function firstLineKana(body: readonly BodyElement[], sectionProps: SectionProps = section, compatibilityMode = 15): number {
+    const layout = layoutBodyModel(body, sectionProps, makeCtx(), {}, { compatibilityMode });
     const found = paragraphsWithKana(layout.pages[0]);
     expect(found).toHaveLength(1);
     return kanaCount(found[0]!.lines[0]!);
@@ -212,6 +236,10 @@ describe('word-justification-punctuation-hang', () => {
     const single = KANA.slice(0, 10) + '。らりる';
     for (const alignment of ['both', 'distribute', 'left', 'lowKashida'] as const) {
       expect(firstLineKana([tableOf([cellOf([cellPara([textRun(single)], alignment)])], null)]), alignment).toBe(9);
+    }
+    // New pre-15 centered-cell admission and Strict end in mode15.
+    for (const [alignment, mode] of [['center', 14], ['end', 15]] as const) {
+      expect(firstLineKana([tableOf([cellOf([cellPara([textRun(single)], alignment)])], null)], section, mode), `${alignment}/${mode}`).toBe(9);
     }
   });
 
@@ -277,11 +305,13 @@ describe('word-justification-punctuation-hang', () => {
     }
   });
 
-  it('keeps the previous hang for centred and right-aligned paragraphs (unmeasured alignments)', () => {
-    for (const alignment of ['center', 'right'] as const) {
-      const [first] = lines(withAlignment(overflowing('。」'), alignment), { compatibilityMode: 15 });
-      // The previous behaviour: nothing pushes the character before 。」.
-      expect(text(first!).startsWith(KANA.slice(0, 36) + '。'), alignment).toBe(true);
+  it('limits pre-15 centered and right-aligned paragraphs to one hanging mark', () => {
+    // Each positively admitted legacy mode, plus Strict end's alias, must
+    // enter the one-mark policy rather than the old unlimited hanging path.
+    for (const [alignment, mode] of [['center', undefined], ['center', 11], ['center', 12], ['center', 14], ['end', 14]] as const) {
+      const [first, next] = lines(withAlignment(overflowing('。」'), alignment), { compatibilityMode: mode });
+      expect(text(first!), `${alignment}/${mode}`).toBe(KANA.slice(0, 35));
+      expect(text(next!).startsWith(KANA[35]! + '。」'), `${alignment}/${mode}`).toBe(true);
     }
   });
 
