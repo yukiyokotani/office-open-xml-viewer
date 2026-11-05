@@ -30,6 +30,25 @@ export interface SegmentLineVisualOrder {
   rtl: boolean[];
 }
 
+/** Internal acquired-cell view. One resolved anchor per caller-owned source
+ * cell, never a public per-character payload. In particular a space-only
+ * cell's content rtl flag is false while its actual anchor can be odd. */
+export interface SegmentLineResolvedOrder extends SegmentLineVisualOrder {
+  anchorLevels: Uint8Array;
+}
+
+/** Caller-owned UTF-16 cells partition ORIGINAL parent text. Empty/textless
+ * parents retain their single original placeholder; no scope or tab is added. */
+export interface SegmentLineSourceCell {
+  readonly parentIndex: number;
+  readonly startUTF16: number;
+  readonly endUTF16: number;
+  readonly spaceOnly: boolean;
+}
+export interface SegmentLineSourceCellOrder extends SegmentLineResolvedOrder {
+  readonly view: 'cells' | 'parents';
+}
+
 const textOf = (segment: unknown): string | undefined => {
   const value = (segment as { text?: unknown }).text;
   return typeof value === 'string' ? value : undefined;
@@ -192,8 +211,60 @@ export function computeSegmentLineVisualOrder(
   segments: readonly unknown[], baseRtl: boolean,
   options: SegmentLineBidiOptions = {},
 ): SegmentLineVisualOrder {
+  return computeSegmentLineOrder(segments, baseRtl, options, false);
+}
+
+/** Final acquired-cell projection only. Author scopes are assembled from the
+ * ORIGINAL parents. A mixed visible island cannot be split by paint, so its
+ * whole line returns the exact legacy parent model (#2076). Default format
+ * consumers do not use this entry and retain their existing algorithm/API. */
+export function computeSegmentLineSourceCellOrder(
+  parents: readonly unknown[], cells: readonly SegmentLineSourceCell[],
+  baseRtl: boolean, options: SegmentLineBidiOptions,
+  legacyOptions: SegmentLineBidiOptions,
+): SegmentLineSourceCellOrder {
+  const legacy = (): SegmentLineSourceCellOrder => ({
+    ...computeSegmentLineOrder(parents, baseRtl, legacyOptions, true) as SegmentLineResolvedOrder,
+    view: 'parents',
+  });
+  // Reusing levels/falling directly to the existing no-isolate pass requires
+  // the same classification hooks and either the same authored scope policy
+  // with its established uniform-slice fallback, or no legacy isolates.
+  if (!options.directionFromAnyOdd
+    || options.isTab !== legacyOptions.isTab || options.isRtlMarked !== legacyOptions.isRtlMarked
+    || options.digitsAsAN !== legacyOptions.digitsAsAN
+    || options.isRtlAmbiguous !== legacyOptions.isRtlAmbiguous
+    || options.directionFromAnyOdd !== legacyOptions.directionFromAnyOdd
+    || (legacyOptions.isolateDirection !== undefined
+      && (legacyOptions.isolateDirection !== options.isolateDirection
+        || !legacyOptions.isolateRequiresUniformSlices))) return legacy();
+  let ci = 0;
+  for (let pi = 0; pi < parents.length; pi++) {
+    const text = textOf(parents[pi]) ?? '';
+    let end = 0, count = 0;
+    while (cells[ci]?.parentIndex === pi) {
+      const cell = cells[ci++]!;
+      if (!Number.isInteger(cell.startUTF16) || !Number.isInteger(cell.endUTF16)
+        || cell.startUTF16 !== end || cell.endUTF16 < end || cell.endUTF16 > text.length
+        || (text.length > 0 && cell.endUTF16 === end)
+        || cell.spaceOnly !== (text.slice(cell.startUTF16, cell.endUTF16) === ' ')) return legacy();
+      end = cell.endUTF16; count++;
+    }
+    if (count === 0 || end !== text.length || (text.length === 0 && count !== 1)) return legacy();
+  }
+  if (ci !== cells.length) return legacy();
+  return computeSegmentLineOrder(parents, baseRtl, options, true, { cells, legacyOptions }) as SegmentLineSourceCellOrder;
+}
+
+function computeSegmentLineOrder(
+  segments: readonly unknown[], baseRtl: boolean,
+  options: SegmentLineBidiOptions, retainAnchorLevels: boolean,
+  projection?: Readonly<{ cells: readonly SegmentLineSourceCell[]; legacyOptions: SegmentLineBidiOptions }>,
+): SegmentLineVisualOrder | SegmentLineResolvedOrder | SegmentLineSourceCellOrder {
   const count = segments.length;
-  if (count === 0) return { order: [], rtl: [] };
+  if (count === 0 && projection) return { view: 'cells', order: [], rtl: [], anchorLevels: new Uint8Array(0) };
+  if (count === 0) return retainAnchorLevels
+    ? { order: [], rtl: [], anchorLevels: new Uint8Array(0) } : { order: [], rtl: [] };
   let full = '';
   const start = new Array<number>(count);
   const end = new Array<number>(count);
@@ -237,9 +308,54 @@ export function computeSegmentLineVisualOrder(
   const { levels, paragraphLevel } = getDefaultBidiEngine().computeLevels(
     full, baseRtl ? 'rtl' : 'ltr', override,
   );
+  if (projection) {
+    const cellStart = projection.cells.map(cell => start[cell.parentIndex]! + cell.startUTF16);
+    const cellEnd = projection.cells.map(cell =>
+      end[cell.parentIndex]! - start[cell.parentIndex]! === 1
+        && (textOf(segments[cell.parentIndex]) ?? '').length === 0
+        ? end[cell.parentIndex]! : start[cell.parentIndex]! + cell.endUTF16);
+    const fine = projectResolvedLine(full, levels, paragraphLevel, cellStart, cellEnd, options,
+      projection.cells, true) as SegmentLineResolvedOrder | undefined;
+    if (fine) return { ...fine, view: 'cells' };
+    if (!hasIsolate) {
+      // Identical host/classification: project original parent anchors from
+      // the SAME resolved levels, without another UAX pass.
+      const coarse = projectResolvedLine(full, levels, paragraphLevel, start, end,
+        projection.legacyOptions, false, true) as SegmentLineResolvedOrder;
+      return { ...coarse, view: 'parents' };
+    }
+    // The mixed visible interval belongs to its original parent too. If the
+    // legacy model used these isolates, its existing mixed-parent fallback
+    // necessarily chooses no isolates; line-level legacy already uses none.
+    // Go directly there: at most the established two whole-host resolutions,
+    // never an extra authored pass or a fine-paint/coarse-budget mixture.
+    const coarse = computeSegmentLineOrder(segments, baseRtl, {
+      ...projection.legacyOptions, isolateDirection: undefined,
+    }, true) as SegmentLineResolvedOrder;
+    return { ...coarse, view: 'parents' };
+  }
+  const result = projectResolvedLine(full, levels, paragraphLevel, start, end, options,
+    Boolean(hasIsolate && options.isolateRequiresUniformSlices), retainAnchorLevels);
+  if (!result) {
+    // Existing whole-line mixed-slice fallback; the second pass has no isolate
+    // hook, so work remains at most two linear UAX resolutions (#2076).
+    return computeSegmentLineOrder(segments, baseRtl, {
+      ...options, isolateDirection: undefined,
+    }, retainAnchorLevels);
+  }
+  return result;
+}
+
+function projectResolvedLine(
+  full: string, levels: Uint8Array, paragraphLevel: number,
+  start: readonly number[], end: readonly number[], options: SegmentLineBidiOptions,
+  rejectMixed: boolean | readonly SegmentLineSourceCell[], retainAnchorLevels: boolean,
+): SegmentLineVisualOrder | SegmentLineResolvedOrder | undefined {
+  const count = start.length;
   if (!options.directionFromAnyOdd) {
     const { order, segLevels } = buildVisualOrder(levels, paragraphLevel, start);
-    return { order, rtl: Array.from(segLevels, (level) => (level & 1) === 1) };
+    const rtl = Array.from(segLevels, (level) => (level & 1) === 1);
+    return retainAnchorLevels ? { order, rtl, anchorLevels: segLevels } : { order, rtl };
   }
 
   // Word's whitespace-delimited slices use a content-level paint direction.
@@ -258,18 +374,11 @@ export function computeSegmentLineVisualOrder(
       if ((level & 1) === 1 && firstOdd < 0) firstOdd = k;
       else if ((level & 1) === 0 && firstEven < 0) firstEven = k;
     }
-    if (hasIsolate && options.isolateRequiresUniformSlices
-      && firstOdd >= 0 && firstEven >= 0) {
-      // One anchor cannot preserve both islands of this already-shaped slice.
-      // Reuse the previous model for the whole line; splitting paint here would
-      // invent geometry. The second pass has no isolate hook, so work is at
-      // most two linear UAX resolutions with line-local storage (#2076).
-      return computeSegmentLineVisualOrder(segments, baseRtl, {
-        ...options, isolateDirection: undefined,
-      });
-    }
+    if ((typeof rejectMixed === 'boolean' ? rejectMixed : !rejectMixed[i]!.spaceOnly)
+      && firstOdd >= 0 && firstEven >= 0) return undefined;
     rtl[i] = firstOdd >= 0;
     anchor[i] = firstOdd >= 0 ? firstOdd : firstEven >= 0 ? firstEven : start[i];
   }
-  return { order: buildVisualOrder(levels, paragraphLevel, anchor).order, rtl };
+  const { order, segLevels } = buildVisualOrder(levels, paragraphLevel, anchor);
+  return retainAnchorLevels ? { order, rtl, anchorLevels: segLevels } : { order, rtl };
 }

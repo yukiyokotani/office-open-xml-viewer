@@ -2,7 +2,8 @@ import type { BidiEngine } from '@silurus/ooxml-core';
 // WordprocessingML segment ordering uses the shared UAX#9 kernel with
 // Word's HL1 run overrides and content-level Canvas direction.
 import {
-  computeSegmentLineVisualOrder, segmentLineHasRtl,
+  computeSegmentLineVisualOrder, computeSegmentLineSourceCellOrder, segmentLineHasRtl,
+  type SegmentLineSourceCell,
   type SegmentLineVisualOrder, type SegmentLineBidiOptions,
   getDefaultBidiEngine, getBidiEngineLifecycleToken,
   certifyNativeSegmentLineOrder,
@@ -20,10 +21,12 @@ export type LineVisualOrder = SegmentLineVisualOrder;
 export type LineOrderModel = 'line-level' | 'word';
 
 /** Library representation boundaries shared by acquisition and final placement.
- * Leading-label isolates apply only to RTL paragraphs. Distribute assigns gaps
- * to slices rather than source opportunities (#2090); character spread cannot
- * place isolates, and compatibility shape text lacks authoritative run-direction
- * provenance. These retain their previous library model.
+ * Leading-label isolates apply only to RTL paragraphs. Coarse distribute
+ * acquisition retains its prior model. Validated final source cells can retain
+ * original author scopes for positive word budgets; character/native/negative
+ * and unsupported terminal or mixed-visible geometry keep the whole old path.
+ * Character spread cannot place isolates, and compatibility shape text lacks
+ * authoritative run-direction provenance. These keep their previous model.
  */
 export function paragraphLineOrderModel(input: Readonly<{
   baseRtl: boolean; alignment?: string; runDirectionUnauthored?: boolean;
@@ -46,6 +49,21 @@ export const computeLineVisualOrder = (
   segments: readonly unknown[], baseRtl: boolean, model: LineOrderModel = 'line-level',
 ): LineVisualOrder => computeSegmentLineVisualOrder(
   segments, baseRtl, model === 'word' ? authoredOptions : options,
+);
+
+/** Final acquired source cells only; acquisition's coarse memo and decimal
+ * anchors keep their established API/lifetime and native certificates. The
+ * parent model is the SAME canonical resolver's original segment view, not
+ * an alternate layout or paint pipeline. */
+export const computeLineSourceCellOrder = (
+  parents: readonly unknown[], cells: readonly SegmentLineSourceCell[],
+  baseRtl: boolean, parentModel: LineOrderModel,
+) => computeSegmentLineSourceCellOrder(
+  parents, cells, baseRtl,
+  // Proper source cells can preserve authored SPACE scope even in distribute.
+  // Acquisition/decimal anchors and unsupported final lines keep their model.
+  baseRtl ? authoredOptions : options,
+  parentModel === 'word' ? authoredOptions : options,
 );
 
 export type LineOrderResolver = (
