@@ -73,6 +73,10 @@ impl Properties {
             // retains only an explicit disable for ECMA-376 autoSpaceDE/DN.
             auto_space_de: self.flags.get("autoSpaceDE").copied().filter(|v| !v),
             word_wrap: self.flags.get("wordWrap").copied().filter(|v| !v),
+            // [MS-DOC] §2.6.2 sprmPFKinsoku (0x2433) has the same
+            // semantics as ECMA-376 §17.3.1.16. Preserve the resolved off
+            // value; absence retains the shared model's enabled default.
+            kinsoku: self.flags.get("kinsoku").copied().filter(|v| !v),
             ends_at_hard_break: None,
             auto_space_dn: self.flags.get("autoSpaceDN").copied().filter(|v| !v),
             borders,
@@ -540,6 +544,18 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn resolved_kinsoku_projects_only_a_disabled_value() {
+        let encode =
+            |properties: &Properties| serde_json::to_value(properties.direct_paragraph()).unwrap();
+        let mut properties = Properties::default();
+        assert!(encode(&properties).get("kinsoku").is_none());
+        properties.apply(0x2433, &[0]).unwrap();
+        assert_eq!(encode(&properties)["kinsoku"], false);
+        properties.apply(0x2433, &[1]).unwrap();
+        assert!(encode(&properties).get("kinsoku").is_none());
     }
 
     #[test]
