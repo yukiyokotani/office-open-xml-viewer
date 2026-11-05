@@ -128,6 +128,39 @@ const CONTROL = 'Quiet rivers carry morning light across the valley beyond the d
 const MANY_GAPS = `${Array.from({ length: 24 }, () => 'a').join(' ')} beyond the distant hills today`;
 
 describe('WORD_JUSTIFIED_INTERWORD_COMPRESSION', () => {
+  it.each([
+    { alignment: 'start' as const, stop: 216, count: 6, extra: 'seventh', admitted: 7 },
+    { alignment: 'end' as const, stop: 360, count: 16, extra: '', admitted: 13 },
+    { alignment: 'center' as const, stop: 216, count: 16, extra: '', admitted: 13 },
+  ])('admits the same near-overflow tab cell at a $alignment stop', async ({ alignment, stop, count, extra, admitted }) => {
+    // Independent Courier hmtx: every source glyph advances 1229/2048 em.
+    // A 481.9pt band leaves 265.9pt after the start stop, or 460.3pt after
+    // the three-glyph label when an end/center cell fits back. Word admits
+    // the next word under both, distribute and lowKashida in mode 15; mode
+    // 14 keeps it on the next line in all three original tab geometries.
+    const text = `${Array.from({ length: count }, () => 'word').join(' ')}${extra ? ` ${extra}` : ''}`;
+    const firstCellWords = async (jc: DocParagraph['alignment'], mode: number) => {
+      const canvas = georgiaCanvas();
+      const context = canvas.getContext('2d') as CanvasRenderingContext2D;
+      const measure = context.measureText.bind(context);
+      context.measureText = value => {
+        const width = [...value].length * Number(/([\d.]+)px/.exec(context.font)?.[1] ?? 12) * 1229 / 2048;
+        return { ...measure(value), width, actualBoundingBoxRight: width };
+      };
+      const element = paragraph(`Row\t${text}`, jc, 12, false, { fontFamily: 'Courier New' }) as DocParagraph;
+      element.tabStops = [{ pos: stop, alignment, leader: 'none' }];
+      const [first] = await renderLines(element as BodyElement, 481.9, { compatibilityMode: mode }, {}, canvas);
+      const last = first!.at(-1)!;
+      const hanging = (last.text.match(/ +$/)?.[0].length ?? 0) * last.fontSize * 1229 / 2048;
+      expect(last.x + last.w - hanging).toBeLessThanOrEqual(481.9 + 1e-6);
+      return first!.map(run => run.text).join('').replace(/\t/g, '').replace(/^Row/, '').trim().split(/ +/).length;
+    };
+    for (const jc of ['both', 'distribute', 'lowKashida'] as const) {
+      expect.soft(await firstCellWords(jc, 15), `${jc}, mode 15`).toBe(admitted);
+      expect.soft(await firstCellWords(jc, 14), `${jc}, mode 14`).toBe(admitted - 1);
+    }
+  });
+
   it('preserves a native space-to-letter pair only when its tokens share a line', async () => {
     // An independent whole-string measure owns this boundary: the stub adds
     // a 200/2048 em space-T pair, in addition to its ordinary letter pairs.
@@ -387,8 +420,7 @@ describe('WORD_JUSTIFIED_INTERWORD_COMPRESSION', () => {
   it.each([
     ['linesAndChars', paragraph(CONTROL, 'both'), { docGridType: 'linesAndChars', docGridLinePitch: 18, docGridCharSpace: 0 }, {}],
     ['snapToChars', paragraph(CONTROL, 'both'), { docGridType: 'snapToChars', docGridLinePitch: 18, docGridCharSpace: 0 }, {}],
-    ['distribute', paragraph(CONTROL, 'distribute'), {}, {}],
-    ['kashida', paragraph(CONTROL, 'lowKashida'), {}, {}],
+    ['medium kashida', paragraph(CONTROL, 'mediumKashida'), {}, {}],
     ['RTL', withRuns([textRun(CONTROL)], { bidi: true }), {}, {}],
     ['left', paragraph(CONTROL, 'left'), {}, {}],
   ] as const)('preserves the previous partition for %s', async (_name, element, section, settings) => {

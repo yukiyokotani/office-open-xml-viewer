@@ -1590,6 +1590,8 @@ export function planLine(input: PlanLineInput): LineLayout {
   // WORD_KASHIDA_LINE_FIT: soft-wrapped kashida and thaiDistribute lines
   // open no inter-CJK gaps.
   const softLineSpacesOnly = softWrapped && wordSoftLineJustifiesAtSpacesOnly(input.alignment);
+  const opensCjkExpansion = !((line.endsWithBreak || (input.isLastLine && input.endsAtHardBreak === true))
+    && !lineEndOpensCjkGaps(input)) && !softLineSpacesOnly;
   // Every line is justified only after its last tab: the stops before it keep
   // their positions (WORD_ALIGNED_TAB_CELL_FIT_BACK; soft-wrapped lines too).
   const afterLastTab = lastTabSegmentIndex(segments) + 1;
@@ -1723,6 +1725,11 @@ export function planLine(input: PlanLineInput): LineLayout {
       const expansionGaps = afterTab > 0
         ? model.expansionGaps.filter((gap) => gap.segIndex >= afterTab)
         : model.expansionGaps;
+      // The retained path uses the same line-owned expansion policy as the
+      // generic path below. Negative accepted compression keeps its acquired
+      // gaps and sum; only unweighted positive inter-CJK expansion is excluded.
+      const lineExpansionGaps = opensCjkExpansion
+        ? expansionGaps : expansionGaps.filter((gap) => gap.kind !== 'boundary');
       const distribution = keepGraphemeSafeCuts(distributeProportionalSlack(
         [], compressionSlackPt - autoSpaceTakenPt, {
           gapModel: {
@@ -1735,8 +1742,8 @@ export function planLine(input: PlanLineInput): LineLayout {
           proportional: true,
           unweightedExpansion: {
             gaps: hangingLineEndSpacePt > 0
-              ? withoutHangingSpaceGaps(expansionGaps, segments)
-              : expansionGaps,
+              ? withoutHangingSpaceGaps(lineExpansionGaps, segments)
+              : lineExpansionGaps,
             // The fit's visible width drops hanging line-end U+0020 and
             // U+3000 (WORD_LINE_END_SPACE_HANGS); the unweighted expansion
             // drops the same part, looking through zero-advance anchor hosts.
@@ -1776,10 +1783,7 @@ export function planLine(input: PlanLineInput): LineLayout {
       // A soft-wrapped line does too under the kashida types and
       // thaiDistribute, so a space-free CJK line keeps its natural width
       // (WORD_KASHIDA_LINE_FIT).
-      residualSlackPt > 0
-        && !((line.endsWithBreak || (input.isLastLine && input.endsAtHardBreak === true))
-          && !lineEndOpensCjkGaps(input))
-        && !softLineSpacesOnly,
+      residualSlackPt > 0 && opensCjkExpansion,
       input.alignment === 'thaiDistribute' && residualSlackPt > 0,
       // Only soft-wrapped and manual-break-ended lines were measured; a piece
       // ended by a page or column break keeps the equal spread.
