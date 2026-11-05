@@ -405,3 +405,49 @@ describe('WORD_RTL_JUSTIFIED_VISIBLE_FIT', () => {
     }
   });
 });
+it.each([
+  { alignment: 'mediumKashida', charged: 7, visible: 8 },
+  { alignment: 'highKashida', charged: 6, visible: 7 },
+] as const)('keeps Arabic source RTL ownership distinct in $alignment soft fitting', ({ alignment, charged, visible }) => {
+  // Three glyphs are 30pt and each space 10pt. The 345pt band leaves
+  // 310.5pt / 276pt after the existing 10% / 20% reserve respectively.
+  const arabic = Array.from({ length: 12 }, () => '\u0628\u062a\u062b').join(' ') + ' ';
+  const latin = Array.from({ length: 12 }, () => 'abc').join(' ') + ' ';
+  const acquire = (content: string, rtl?: boolean, cs?: boolean, settings = MODE_15) => lines(para([
+    textRun(content, { ...(rtl === undefined ? {} : { rtl }), ...(cs === undefined ? {} : { cs }) }),
+  // Mode14 reserves against the pre-indent360pt frame; a349pt line keeps
+  // the same visible/full-space boundary (313pt medium /277pt high).
+  ], alignment, { bidi: true, indentRight: settings.compatibilityMode === 14 ? 11 : 15, wordWrap: true }), settings);
+  const retainedCases = [
+    { content: arabic, retained: acquire(arabic), expected: charged },
+    { content: arabic, retained: acquire(arabic, false), expected: charged },
+    { content: arabic, retained: acquire(arabic, true), expected: visible },
+    { content: arabic, retained: acquire(arabic, undefined, true), expected: visible },
+    { content: arabic, retained: acquire(arabic, undefined, undefined, { compatibilityMode: 14 }), expected: visible },
+    // The original non-Arabic counters keep the existing visible fit.
+    { content: latin, retained: acquire(latin), expected: visible },
+  ];
+  if (alignment === 'mediumKashida') {
+    // A genuine authored formatting seam is outside the homogeneous source rule.
+    const cut = arabic.indexOf(' ') + 1;
+    retainedCases.push({ content: arabic, expected: visible, retained: lines(para([
+      textRun(arabic.slice(0, cut)), textRun(arabic.slice(cut), { bold: true }),
+    ], alignment, { bidi: true, indentRight: 15, wordWrap: true }), MODE_15) });
+  }
+  for (const { content, retained, expected } of retainedCases) {
+    const logical = retained.flatMap(line => line.placements
+      .filter((p): p is TextPlacement => p.kind === 'text'))
+      .sort((a, b) => a.range.start - b.range.start);
+    let cursor = 0;
+    for (const placement of logical) {
+      expect(placement.range.start).toBe(cursor);
+      expect(placement.range.end - placement.range.start).toBe(placement.text.length);
+      cursor = placement.range.end;
+    }
+    expect(cursor).toBe(content.length);
+    expect(logical.map(p => p.text).join('')).toBe(content);
+    const firstSource = retained[0]!.placements.filter((p): p is TextPlacement => p.kind === 'text')
+      .sort((a, b) => a.range.start - b.range.start).map(p => p.text).join('');
+    expect.soft(firstSource.trim().split(/\s+/), `sourceRTL ownership: expected ${expected}`).toHaveLength(expected);
+  }
+});

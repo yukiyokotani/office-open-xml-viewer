@@ -29,6 +29,7 @@ import {
   WORD_PICTURE_BULLET_LINE_PARTICIPATION,
   wordJustifiedInterwordCompressionApplies,
   wordJustifiedLineFit,
+  wordUnmarkedArabicKashidaChargesSourceSpace,
   wordInlineDrawingRunLeadingApplies,
   wordPreservesPre15AnchorLine,
 } from './layout/line-compatibility.js';
@@ -639,6 +640,18 @@ export function measureParagraph(
         pageH: placement.maximumYPt,
       }
     : undefined;
+  const lineFit = wordJustifiedLineFit(
+    paragraph.alignment, environment.compatibilityMode, context.baseRtl, context.wordWrap !== false,
+    context.baseRtl ? context.physicalIndentLeftPt : context.physicalIndentRightPt + rightGridAdjustmentPt,
+  );
+  // WORD_UNMARKED_ARABIC_KASHIDA_SOURCE_SPACE: admission only. Retain the
+  // same reserve and acquired separator advance; final justification/paint
+  // still consumes its existing visible-prefix policy independently.
+  const chargeArabicSourceSpace = wordUnmarkedArabicKashidaChargesSourceSpace(
+    paragraph, environment.compatibilityMode, context.baseRtl, context.wordWrap !== false,
+    environment.verticalCJK !== true
+      && (environment.pageWritingMode === undefined || environment.pageWritingMode === 'horizontal-tb'),
+  );
   const lines = layoutLines(
     measurer.context,
     segments,
@@ -667,8 +680,7 @@ export function measureParagraph(
     ) && environment.verticalCJK !== true
       ? { lineEndIdeographicSpaceHangs: paragraph.wordWrap !== false }
       : false,
-    wordJustifiedLineFit(paragraph.alignment, environment.compatibilityMode, context.baseRtl, context.wordWrap !== false,
-      context.baseRtl ? context.physicalIndentLeftPt : context.physicalIndentRightPt + rightGridAdjustmentPt),
+    chargeArabicSourceSpace && lineFit ? { ...lineFit, rtlVisiblePrefix: false } : lineFit,
     context.cjkClosingMarkHang,
     {
       alignment: paragraph.alignment,
