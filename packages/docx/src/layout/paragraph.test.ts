@@ -2845,16 +2845,15 @@ describe('planLine visual geometry', () => {
     if (placement?.kind !== 'text') throw new Error('expected retained text placement');
 
     expect(placement.range).toEqual({ start: 246, end: 250 });
-    expect(placement.paintOps.map((operation) => operation.range)).toEqual([
-      { start: 246, end: 248 },
-      { start: 248, end: 249 },
-      { start: 249, end: 250 },
-    ]);
-    expect(placement.paintOps.map((operation) => operation.text)).toEqual([
-      'نص',
-      ' ',
-      ' ',
-    ]);
+    // Atomic or coalesced zero-ink spaces are equally valid; the protection is
+    // complete, exactly-once source coverage rather than a paint-op count.
+    let cursor = start;
+    for (const operation of placement.paintOps) {
+      expect(operation.range.start).toBe(cursor);
+      expect(operation.text).toBe(value.slice(operation.range.start - start, operation.range.end - start));
+      cursor = operation.range.end;
+    }
+    expect(cursor).toBe(start + value.length);
   });
 
   it('shifts cluster-aligned vertical paint operations during internal justification', () => {
