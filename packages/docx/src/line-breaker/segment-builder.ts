@@ -1149,6 +1149,10 @@ function pushSegmentPiece(
     complexScript: cs,
     fontHint: r.fontHint,
     eastAsiaLanguage: r.langEastAsia,
+    // §17.3.2.20 languages of the other slots, present only when authored so
+    // runs without a language keep their requests and cache keys.
+    ...(r.lang ? { language: r.lang } : {}),
+    ...(r.langBidi ? { complexScriptLanguage: r.langBidi } : {}),
     kerning:
       wordKerningApplies(cs ? csFontSize : base.fontSize, effectiveKerningThreshold),
     measure: false,
@@ -1545,6 +1549,7 @@ function emitResolvedTextSegment(
     ...(resolvedSpan?.font.installedFamily ? { fontInstalledFamily: true as const } : {}),
     authoredReferenceMetricAllowed: mayUseAuthoredReferenceVerticalMetric(resolvedSpan?.font),
     fontRoute: resolvedSpan?.fontRoute,
+    ...(resolvedSpan?.lang !== undefined ? { lang: resolvedSpan.lang } : {}),
     resolvedLineHeightRatio: familyLineMetric?.lineHeightRatio,
     resolvedLatinGridCellAllocation: (resourceFamilyLineMetric?.farEastCodePage
       ?? referenceLineMetric?.farEastCodePage) === false,

@@ -1026,6 +1026,7 @@ fn evaluated_field_run(
             font_size_cs: run.font_size_cs,
             bold_cs: run.bold_cs,
             italic_cs: run.italic_cs,
+            lang: run.lang,
             lang_bidi: run.lang_bidi,
             lang_east_asia: run.lang_east_asia,
             background: run.background,

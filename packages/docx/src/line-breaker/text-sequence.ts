@@ -57,7 +57,7 @@ function formattingKey(run: SequenceRun, environment: LineLayoutEnvironment): st
     fontFamilyCs: run.fontFamilyCs, fontSlots: run.fontSlots, fontHint: run.fontHint,
     fontSizeCs: run.fontSizeCs, bold: run.bold, italic: run.italic,
     boldCs: run.boldCs, italicCs: run.italicCs, rtl: run.rtl, cs: run.cs,
-    langBidi: run.langBidi, langEastAsia: run.langEastAsia,
+    langBidi: run.langBidi, langEastAsia: run.langEastAsia, lang: run.lang,
     vertAlign: effective(input?.verticalAlign, run.vertAlign ?? undefined),
     position: effective(input?.positionPt, run.position),
     charSpacing: input?.characterSpacingPt ?? run.charSpacing,

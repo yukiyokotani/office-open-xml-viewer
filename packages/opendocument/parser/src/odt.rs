@@ -1652,6 +1652,7 @@ impl<'a> Reader<'a> {
                 if (pa.size - pb.size).abs() < 0.1 {
                     near.size = pa.size;
                 }
+                near.lang = pa.lang.clone();
                 near.lang_east_asia = pa.lang_east_asia.clone();
                 near.lang_bidi = pa.lang_bidi.clone();
                 if pa.family.eq_ignore_ascii_case(&near.family) {
@@ -2370,6 +2371,8 @@ struct RunProperties {
     position: Option<f64>,
     caps: bool,
     kerning: Option<f64>,
+    /// fo:language + fo:country (§20.202 western text), as a BCP 47 tag.
+    lang: Option<Atom>,
     lang_east_asia: Option<Atom>,
     lang_bidi: Option<Atom>,
 }
@@ -2552,18 +2555,18 @@ impl RunProperties {
             None => return Err(unsupported("letter-kerning-unset")),
             Some(_) => return Err(invalid("bad letter-kerning")),
         };
-        let language = |language: &str, country: &str| -> Option<Atom> {
-            let language = cascade.get(NS_STYLE, language).filter(|v| *v != "none")?;
-            Some(fonts.atom(
-                &match cascade.get(NS_STYLE, country).filter(|v| *v != "none") {
+        let language = |ns: &str, language: &str, country: &str| -> Option<Atom> {
+            let language = cascade.get(ns, language).filter(|v| *v != "none")?;
+            Some(
+                fonts.atom(&match cascade.get(ns, country).filter(|v| *v != "none") {
                     Some(country) => format!(
                         "{}-{}",
                         language.to_ascii_lowercase(),
                         country.to_ascii_uppercase()
                     ),
                     None => language.to_ascii_lowercase(),
-                },
-            ))
+                }),
+            )
         };
         Ok((
             Self {
@@ -2581,8 +2584,9 @@ impl RunProperties {
                 position,
                 caps,
                 kerning,
-                lang_east_asia: language("language-asian", "country-asian"),
-                lang_bidi: language("language-complex", "country-complex"),
+                lang: language(NS_FO, "language", "country"),
+                lang_east_asia: language(NS_STYLE, "language-asian", "country-asian"),
+                lang_bidi: language(NS_STYLE, "language-complex", "country-complex"),
             },
             face,
         ))
@@ -2597,7 +2601,7 @@ impl RunProperties {
                 .iter()
                 .map(|value| value.as_ref().map_or(0, String::len))
                 .sum::<usize>()
-            + [&self.lang_east_asia, &self.lang_bidi]
+            + [&self.lang, &self.lang_east_asia, &self.lang_bidi]
                 .iter()
                 .map(|value| value.as_ref().map_or(0, |atom| atom.len()))
                 .sum::<usize>();
@@ -2634,6 +2638,7 @@ impl RunProperties {
             position: self.position,
             all_caps: self.caps,
             kerning: self.kerning,
+            lang: self.lang.as_deref().map(str::to_string),
             lang_east_asia: self.lang_east_asia.as_deref().map(str::to_string),
             lang_bidi: self.lang_bidi.as_deref().map(str::to_string),
             ..TextRun::default()
@@ -2686,9 +2691,9 @@ fn check_text_keys(cascade: &Cascade<'_>) -> Result<(), String> {
                 | "background-color" | "letter-spacing" | "text-transform" | "font-variant"
                 | "script" | "hyphenate",
             ) => true,
-            // §20.202 western language: admitted but not carried (the DOCX
-            // model has no western slot). Language-specific OpenType forms
-            // are not applied, as for DOCX w:lang: #2001.
+            // §20.202 western language: carried as the run's
+            // language (DOCX w:lang/@w:val), which selects language-specific
+            // OpenType forms of its Latin/Cyrillic/Greek text (#2001).
             (NS_FO, "language" | "country") => true,
             (
                 NS_STYLE,
@@ -3240,6 +3245,28 @@ mod tests {
                 _ => "?".into(),
             })
             .collect()
+    }
+
+    #[test]
+    fn western_language_and_country_become_the_run_language() {
+        let automatic = r#"<style:style style:name="Sr" style:family="text"><style:text-properties fo:language="sr" fo:country="rs"/></style:style><style:style style:name="Ro" style:family="text"><style:text-properties fo:language="ro"/></style:style><style:style style:name="None" style:family="text"><style:text-properties fo:language="none" fo:country="RS"/></style:style>"#;
+        let document = read_fixture(Fixture {
+            automatic,
+            body: r#"<text:p><text:span text:style-name="Sr">а</text:span><text:span text:style-name="Ro">ș</text:span><text:span text:style-name="None">x</text:span>y</text:p>"#,
+            ..Fixture::default()
+        })
+        .unwrap();
+        let languages: Vec<Option<&str>> = paragraphs(&document)[0]
+            .runs
+            .iter()
+            .map(|run| match run {
+                DocRun::Text(text) => text.lang.as_deref(),
+                _ => panic!("not a text run"),
+            })
+            .collect();
+        // BCP 47 language-region, the same tag the Asian/complex slots carry.
+        // fo:language="none" names no language, so "x" joins the plain "y".
+        assert_eq!(languages, [Some("sr-RS"), Some("ro"), None]);
     }
 
     #[test]

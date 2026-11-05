@@ -9,6 +9,8 @@ export interface MeasurementTextContext {
   font: string;
   letterSpacing: string;
   fontKerning: CanvasFontKerning;
+  /** Canvas `lang`, present only where the engine supports it. */
+  lang?: string;
   measureText(text: string): TextMetrics;
 }
 

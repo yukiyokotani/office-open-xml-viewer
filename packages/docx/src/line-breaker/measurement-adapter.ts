@@ -16,6 +16,7 @@ import {
 } from './advance.js';
 import type { DocGridCtx } from './model.js';
 import { verticalRunInkExtra } from './vertical-text.js';
+import { restoreCanvasLanguage, selectCanvasLanguage } from '@silurus/ooxml-core/internal/canvas-language';
 
 /** Measured UTF-16 units per text unit charged for one vertical cell plan:
  * routing probes (natural, vertical-form and ink probes) plus one
@@ -56,6 +57,7 @@ export function kernedSpaceSeamIdentity(left: LayoutTextSeg, right: LayoutTextSe
     && (left.script === 'ascii' || left.script === 'highAnsi')
     && (right.script === 'ascii' || right.script === 'highAnsi')
     && !!left.fontRoute && left.fontRoute.fingerprint === right.fontRoute?.fingerprint
+    && left.lang === right.lang
     && calcEffectiveFontPx(left, scale) === calcEffectiveFontPx(right, scale)
     && left.bold === right.bold && left.italic === right.italic
     && l.weight === r.weight && l.style === r.style
@@ -118,6 +120,17 @@ export class LineMeasurementAdapter {
     if (previous != null) {
       this.context.fontKerning = previous;
       this.selectedKerning = previous;
+    }
+  }
+
+  /** Direct Canvas measurement of a segment's text uses the language its
+   * shaped span was measured and is painted with (TextShapeSpan.lang). */
+  private withSegmentLanguage<T>(segment: LayoutTextSeg, measure: () => T): T {
+    const previous = selectCanvasLanguage(this.context, segment.lang);
+    try {
+      return measure();
+    } finally {
+      restoreCanvasLanguage(this.context, previous);
     }
   }
 
@@ -257,7 +270,8 @@ export class LineMeasurementAdapter {
     this.context.fontKerning = 'normal';
     try {
       const width = (text: string) => this.context.measureText(text).width;
-      return (width(before + after) - width(before) - width(after)) * charScaleFactor(right);
+      return this.withSegmentLanguage(left, () =>
+        (width(before + after) - width(before) - width(after)) * charScaleFactor(right));
     } finally {
       this.context.font = previousFont;
       this.selectedFont = previousFont;
@@ -296,7 +310,8 @@ export class LineMeasurementAdapter {
       // routing probes plus bounded-context sideways graphemes.
       reserveWork(VERTICAL_PLAN_WORK_PER_UNIT * text.length);
       const gridPx = segmentCharacterGridDeltaPx(segment, grid, this.scale);
-      const cells = this.verticalGlyphMeasurement.planRun({
+      const verticalGlyphMeasurement = this.verticalGlyphMeasurement;
+      const cells = this.withSegmentLanguage(segment, () => verticalGlyphMeasurement.planRun({
         text,
         font: this.fontForSegment(segment),
         fontKerning: this.segmentKerning(segment),
@@ -307,7 +322,7 @@ export class LineMeasurementAdapter {
         growTrRotateInk: true,
         writingMode: 'vertical-rl',
         characterAdjustmentPt: (from: number, to: number) => adjustmentPx(start + from, start + to),
-      });
+      }));
       return {
         kind: 'vertical-cells',
         cells: cells.map((cell) => ({
@@ -363,7 +378,7 @@ export class LineMeasurementAdapter {
     this.selectSegmentFont(segment);
     const previous = this.selectSegmentKerning(segment);
     try {
-      return this.context.measureText(text);
+      return this.withSegmentLanguage(segment, () => this.context.measureText(text));
     } finally {
       this.restoreKerning(previous);
     }
@@ -391,8 +406,10 @@ export class LineMeasurementAdapter {
     }
     this.selectSegmentFont(segment);
     const previous = this.selectSegmentKerning(segment);
+    const verticalGlyphMeasurement = this.verticalGlyphMeasurement;
     try {
-      return verticalRunInkExtra(text, true, this.verticalGlyphMeasurement);
+      return this.withSegmentLanguage(segment, () =>
+        verticalRunInkExtra(text, true, verticalGlyphMeasurement));
     } finally {
       this.restoreKerning(previous);
     }

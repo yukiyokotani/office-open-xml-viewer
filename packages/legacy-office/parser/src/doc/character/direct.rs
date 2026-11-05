@@ -51,6 +51,10 @@ impl Properties {
         // with an invalid font reference still fails closed.
         let axes = self.direct_font_axes(fonts)?;
         let languages = self.resolved_languages()?;
+        // MS-DOC 2.6.1 sprmCRgLid0 supplies the non-East-Asian axis,
+        // corresponding to ECMA-376 17.3.2.20 lang@val. Preserve the decoder
+        // decision (including absence); compatibility-only LIDs stay metadata.
+        let lang = languages.default.map(str::to_ascii_lowercase);
         let lang_east_asia = languages.east_asia.map(str::to_ascii_lowercase);
         let lang_bidi = languages.bidi.map(str::to_ascii_lowercase);
         if self.bool_value("vanish").unwrap_or(false) {
@@ -124,6 +128,7 @@ impl Properties {
             font_size_cs,
             bold_cs: self.bool_value("bCs"),
             italic_cs: self.bool_value("iCs"),
+            lang: lang.clone(),
             lang_bidi: lang_bidi.clone(),
             lang_east_asia: lang_east_asia.clone(),
             char_spacing,
@@ -199,6 +204,7 @@ impl Properties {
             },
             kerning_threshold_pt: run.kerning,
             languages: TypographyLanguagesWire {
+                val: lang,
                 bidi: lang_bidi,
                 east_asia: lang_east_asia,
             },
@@ -217,6 +223,10 @@ impl Properties {
         let axes = self.direct_font_axes(fonts)?;
         let font_size = self.half_points("sz")?;
         let languages = self.resolved_languages()?;
+        // MS-DOC 2.6.1 sprmCRgLid0 supplies the non-East-Asian axis,
+        // corresponding to ECMA-376 17.3.2.20 lang@val. Preserve the decoder
+        // decision (including absence); compatibility-only LIDs stay metadata.
+        let lang = languages.default.map(str::to_ascii_lowercase);
         let lang_east_asia = languages.east_asia.map(str::to_ascii_lowercase);
         let lang_bidi = languages.bidi.map(str::to_ascii_lowercase);
         Ok(RunFontFacts {
@@ -234,6 +244,7 @@ impl Properties {
             italic: self.bool_value("i").unwrap_or(false),
             bold_cs: self.bool_value("bCs"),
             italic_cs: self.bool_value("iCs"),
+            lang,
             lang_bidi,
             lang_east_asia,
             kerning: self.direct_kerning_threshold_pt()?,
@@ -763,11 +774,10 @@ mod tests {
         // language; the direct reader projects the same.
         let invariant = applied(&[(0x4873, 0x007fu16.to_le_bytes().to_vec())]);
         assert_eq!(invariant.resolved_languages().unwrap().default, None);
-        assert!(invariant
-            .direct_text_run("x".into(), &[])
-            .unwrap()
-            .is_some());
-        assert!(invariant.direct_font_facts(&[]).is_ok());
+        let run = invariant.direct_text_run("x".into(), &[]).unwrap().unwrap();
+        assert_eq!(run.lang, None);
+        assert_eq!(run.typography_acquisition.unwrap().languages.val, None);
+        assert_eq!(invariant.direct_font_facts(&[]).unwrap().lang, None);
     }
 
     #[test]
@@ -783,18 +793,20 @@ mod tests {
             .direct_text_run("x".into(), &[])
             .unwrap()
             .unwrap();
-        // The default axis reaches the model only as a ruby guide language.
         assert_eq!(
             properties.resolved_languages().unwrap().default,
             Some("fr-FR")
         );
+        assert_eq!(run.lang.as_deref(), Some("fr-fr"));
         assert_eq!(run.lang_east_asia.as_deref(), Some("zh-tw"));
         assert_eq!(run.lang_bidi.as_deref(), Some("ar-sa"));
         let languages = &run.typography_acquisition.as_ref().unwrap().languages;
+        assert_eq!(languages.val.as_deref(), Some("fr-fr"));
         assert_eq!(languages.east_asia.as_deref(), Some("zh-tw"));
         assert_eq!(languages.bidi.as_deref(), Some("ar-sa"));
 
         let facts = properties.direct_font_facts(&[]).unwrap();
+        assert_eq!(facts.lang.as_deref(), Some("fr-fr"));
         assert_eq!(facts.lang_east_asia.as_deref(), Some("zh-tw"));
         assert_eq!(facts.lang_bidi.as_deref(), Some("ar-sa"));
 

@@ -118,6 +118,8 @@ export function shapeNumberingMarkerText(
     complexScript: input.complexScript,
     fontHint: input.fontHint,
     eastAsiaLanguage: input.eastAsiaLanguage,
+    language: input.language,
+    complexScriptLanguage: input.complexScriptLanguage,
     kerning: input.kerning ?? false,
     measure: true,
     clusterGeometry,

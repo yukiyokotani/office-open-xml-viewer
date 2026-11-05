@@ -3,6 +3,7 @@ import {
   canvasFontString,
   withVertFeature,
 } from '@silurus/ooxml-core';
+import { restoreCanvasLanguage, selectCanvasLanguage } from '@silurus/ooxml-core/internal/canvas-language';
 import type { ParagraphLayout, TextBoxLayout } from '../layout/types.js';
 import type { CanvasPaintContext } from './types.js';
 import { paintDrawingLayout } from './canvas-drawing.js';
@@ -111,6 +112,7 @@ function paintRetainedGlyph(
   );
   const previousKerning = ctx.fontKerning;
   if (operation.kerning) ctx.fontKerning = operation.kerning;
+  const previousLang = selectCanvasLanguage(ctx, operation.lang);
   if (upright) {
     ctx.save();
     ctx.translate(operation.origin.xPt, operation.origin.yPt);
@@ -121,6 +123,7 @@ function paintRetainedGlyph(
     ctx.fillText(operation.text, operation.origin.xPt, operation.origin.yPt);
   }
   if (operation.kerning) ctx.fontKerning = previousKerning;
+  restoreCanvasLanguage(ctx, previousLang);
 }
 
 function paintRetainedMarkPath(
@@ -317,6 +320,8 @@ function paintParagraphContents(node: ParagraphLayout, context: CanvasPaintConte
       ctx.textBaseline = 'alphabetic';
       const previousLetterSpacing = ctx.letterSpacing;
       const previousKerning = ctx.fontKerning;
+      // Measured with this language (TextShapeSpan.lang); draw with it too.
+      const previousLang = selectCanvasLanguage(ctx, placement.lang);
       for (const op of placement.paintOps) {
         // §17.3.3.29: an unselected optional hyphen must not affect display.
         // Strip only the paint string, preserving all retained UTF-16 source
@@ -374,6 +379,7 @@ function paintParagraphContents(node: ParagraphLayout, context: CanvasPaintConte
       }
       ctx.letterSpacing = previousLetterSpacing;
       ctx.fontKerning = previousKerning;
+      restoreCanvasLanguage(ctx, previousLang);
       if (placement.ruby) {
         const uprightRuby = context.textBoxVerticalMode === 'eaVert'
           || context.textBoxVerticalMode === 'mongolianVert';

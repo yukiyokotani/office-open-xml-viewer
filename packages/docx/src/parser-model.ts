@@ -139,6 +139,8 @@ export interface InternalRunSlotMetadata {
   italicCs?: boolean;
   langBidi?: string;
   langEastAsia?: string;
+  /** ECMA-376 §17.3.2.20 w:lang/@w:val, lower-cased. */
+  lang?: string;
 }
 
 function isListLabel(value: unknown): value is 'start' | 'end' | 'center' {
@@ -1574,6 +1576,8 @@ export function numberingMarkerShapeInput(
     complexScript,
     fontHint: facts?.fontHint,
     eastAsiaLanguage: facts?.langEastAsia,
+    ...(facts?.lang !== undefined ? { language: facts.lang } : {}),
+    ...(facts?.langBidi !== undefined ? { complexScriptLanguage: facts.langBidi } : {}),
     // Marker-specific zero-threshold observations are absent. Preserve its
     // previous size comparison; the content-run zero-disables extension is
     // not evidence for generated numbering glyphs.
@@ -1635,6 +1639,8 @@ export function paragraphMarkShapeInput(
     complexScript,
     fontHint: facts.fontHint,
     eastAsiaLanguage: facts.langEastAsia,
+    ...(facts.lang !== undefined ? { language: facts.lang } : {}),
+    ...(facts.langBidi !== undefined ? { complexScriptLanguage: facts.langBidi } : {}),
     // Paragraph marks likewise have no measured zero-threshold evidence.
     kerning: wordKerningApplies(fontSizePt, facts.kerning, 'size-comparison'),
   });

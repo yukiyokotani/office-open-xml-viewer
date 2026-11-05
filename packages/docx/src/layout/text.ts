@@ -189,6 +189,8 @@ type ParagraphTextFacts = Readonly<{
   italicCs?: boolean;
   langBidi?: string;
   langEastAsia?: string;
+  /** ECMA-376 §17.3.2.20 w:lang/@w:val, lower-cased. */
+  lang?: string;
   fontSlots?: Readonly<{
     direct: TextFontSlots;
     theme: TextFontSlots;
@@ -327,6 +329,10 @@ export interface TextShapeRequest {
   readonly fontHint?: 'default' | 'eastAsia' | 'cs';
   /** Resolved w:lang@eastAsia, normalized to lower case. */
   readonly eastAsiaLanguage?: string;
+  /** Resolved w:lang@val (§17.3.2.20): language of ascii/highAnsi text. */
+  readonly language?: string;
+  /** Resolved w:lang@bidi (§17.3.2.20): language of complex-script text. */
+  readonly complexScriptLanguage?: string;
   /** fontTable w:charset for the selected eastAsia face (hex byte). */
   readonly eastAsiaFontCharset?: string;
   readonly genericFamily?: 'serif' | 'sans-serif' | 'monospace';
@@ -476,6 +482,18 @@ export function replaceTextShapeRequest(
   } };
 }
 
+/** The §17.3.2.20 w:lang attribute that governs text of one §17.3.2.26 font
+ * slot: the same classification that selects the slot's face selects its
+ * language. Word's `x-none` names no language. */
+export function scriptSlotLanguage(
+  request: Readonly<Pick<TextShapeRequest, 'language' | 'eastAsiaLanguage' | 'complexScriptLanguage'>>,
+  slot: FontScriptSlot,
+): string | undefined {
+  const tag = slot === 'eastAsia' ? request.eastAsiaLanguage
+    : slot === 'complexScript' ? request.complexScriptLanguage : request.language;
+  return tag && tag.toLowerCase() !== 'x-none' ? tag : undefined;
+}
+
 export interface TextFontResolveRequest {
   /** Text covered by this request. Language-selected regional fallback applies
    * only when the text actually contains Han; it must not capture Latin glyphs. */
@@ -502,6 +520,9 @@ export interface GlyphMeasureRequest {
   readonly style: FontStyle;
   readonly letterSpacingPt: number;
   readonly kerning?: boolean;
+  /** BCP 47 language of the measured text (Canvas `lang`), selecting its
+   * language-specific OpenType forms. Absent leaves the context's language. */
+  readonly lang?: string;
 }
 
 export interface GlyphMeasurement {
@@ -571,6 +592,8 @@ export interface TextShapeSpan extends GlyphMeasurement {
   readonly breakBefore: boolean;
   readonly font: FontResolution;
   readonly fontRoute: CanvasFontRoute;
+  /** Language this span was measured with; paint must draw it with the same. */
+  readonly lang?: string;
 }
 
 export interface TextShapeResult extends GlyphMeasurement {
@@ -591,7 +614,7 @@ export interface TextShapeResult extends GlyphMeasurement {
 /** Native font authority acquires glyph contours before layout paint. The
  * numerical outline precision is in final point space, independent of DPR. */
 export interface GlyphContourRequest {
-  readonly spans: readonly Readonly<{ text: string; advancePt: number; fontRoute: CanvasFontRoute; font: Pick<FontResolution, 'weight' | 'style'> }>[];
+  readonly spans: readonly Readonly<{ text: string; advancePt: number; fontRoute: CanvasFontRoute; font: Pick<FontResolution, 'weight' | 'style'>; lang?: string }>[];
   readonly fontSizePt: number;
   readonly ink: Readonly<{ xMinPt: number; xMaxPt: number; ascentPt: number; descentPt: number }>;
   readonly maximumScale: number;
@@ -1043,6 +1066,8 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
       request.style,
       request.letterSpacingPt,
       request.kerning ?? null,
+      // Keys of text without a language are unchanged.
+      ...(request.lang !== undefined ? [request.lang] : []),
     ]);
     const retained = cached(measurementCache, key);
     if (retained) return retained;
@@ -1255,6 +1280,8 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
         request.measure ?? null,
         request.clusterGeometry ?? null,
         ...(scopeDescriptor !== undefined ? [scopeDescriptor] : []),
+        ...(request.language !== undefined || request.complexScriptLanguage !== undefined
+          ? [['lang', request.language ?? null, request.complexScriptLanguage ?? null]] : []),
       ]);
       const retainedShape = cached(shapeCache, shapeKey);
       if (retainedShape) return retainedShape;
@@ -1311,12 +1338,15 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
       // resource, weight, style and source) is one string for Canvas, whichever
       // family name or slot requested it and whatever CSS fallback list follows.
       // Shaping it apart would break Arabic joining. Only in-scope spans
-      // merge; ordinary spans start with per-slot runs, independently of the
+      // merge when their slot languages also agree: a shared face does not
+      // erase independent §17.3.2.20 language axes or their OpenType forms.
+      // Ordinary spans start with per-slot runs, independently of the
       // registered physical-unit admission below.
       const merged: Array<(typeof resolvedGroups)[number] & Pick<TextShapeSpan, 'semanticSlotSpans'>> = [];
       for (const group of resolvedGroups) {
         const previous = merged.at(-1);
         if (previous && previous.substituteScript && group.substituteScript
+          && scriptSlotLanguage(request, previous.script) === scriptSlotLanguage(request, group.script)
           && sameEffectiveFace(previous.font, group.font)) {
           merged[merged.length - 1] = { ...previous, text: previous.text + group.text, end: group.end };
         } else {
@@ -1402,6 +1432,7 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
       }
 
       const spans = merged.map(({ substituteScript, font, ...group }): TextShapeSpan => {
+        const lang = scriptSlotLanguage(request, group.script);
         const measurement = request.measure === false ? {
           advancePt: 0,
           ascentPt: 0,
@@ -1414,9 +1445,11 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
           style: font.style,
           letterSpacingPt: request.letterSpacingPt ?? 0,
           kerning: wordArabicTextKerned(group.text) ? true : request.kerning,
+          ...(lang !== undefined ? { lang } : {}),
         });
         return Object.freeze({
           ...group, ...measurement, font, fontRoute: font.route,
+          ...(lang !== undefined ? { lang } : {}),
           // Excluded spans also depend on the full run: a mark attached to a
           // Latin base must not become Arabic proof when measured in isolation.
           ...(scopeDescriptor !== undefined ? { substituteScope: substituteScript } : {}),
@@ -1477,6 +1510,7 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
                   style: span.font.style,
                   letterSpacingPt: request.letterSpacingPt ?? 0,
                   kerning: wordArabicTextKerned(span.text) ? true : request.kerning,
+                  ...(span.lang !== undefined ? { lang: span.lang } : {}),
                 });
                 break;
               }

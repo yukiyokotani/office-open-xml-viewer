@@ -389,6 +389,8 @@ export function paragraphMarkLineMetrics(
       complexScript: forceCs,
       fontHint: effectiveMarkShapeInput?.fontHint,
       eastAsiaLanguage: effectiveMarkShapeInput?.eastAsiaLanguage,
+      language: effectiveMarkShapeInput?.language,
+      complexScriptLanguage: effectiveMarkShapeInput?.complexScriptLanguage,
       kerning: effectiveMarkShapeInput?.kerning,
       measure: true,
     });

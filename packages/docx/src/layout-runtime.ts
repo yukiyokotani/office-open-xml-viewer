@@ -131,7 +131,7 @@ export function createLayoutServices(
   })();
   const context: MeasurementTextContext | null = canvasContext === null
     ? null
-    : Object.freeze({
+    : Object.freeze(Object.defineProperties({
         get font() { return canvasContext.font; },
         set font(value: string) { canvasContext.font = value; },
         get letterSpacing() { return canvasContext.letterSpacing; },
@@ -139,7 +139,14 @@ export function createLayoutServices(
         get fontKerning() { return canvasContext.fontKerning; },
         set fontKerning(value: CanvasFontKerning) { canvasContext.fontKerning = value; },
         measureText(text: string) { return canvasContext.measureText(text); },
-      });
+      }, 'lang' in canvasContext ? {
+        // Canvas `lang` (language-specific glyphs) only where the engine has it.
+        lang: {
+          get: () => (canvasContext as { lang: string }).lang,
+          set: (value: string) => { (canvasContext as { lang: string }).lang = value; },
+          enumerable: true,
+        },
+      } : {}));
   const canvasElement = canvasContext?.canvas as HTMLCanvasElement | undefined;
   const ownerCanvasConstructor =
     canvasElement?.ownerDocument?.defaultView?.HTMLCanvasElement;

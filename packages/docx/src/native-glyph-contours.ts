@@ -1,5 +1,6 @@
 import { canvasFontString, createAuxCanvas, GeometryWorkBudgetError } from '@silurus/ooxml-core';
 import type { GlyphContourRequest } from './layout/text.js';
+import { restoreCanvasLanguage, selectCanvasLanguage } from '@silurus/ooxml-core/internal/canvas-language';
 
 type Point = Readonly<{x: number; y: number}>;
 
@@ -34,7 +35,9 @@ export function acquireCanvasGlyphContours(request: GlyphContourRequest): readon
       let x = 0;
       for (const span of request.spans) {
         ctx.font = canvasFontString(span.fontRoute, request.fontSizePt, span.font.weight, span.font.style);
+        const previousLang = selectCanvasLanguage(ctx, span.lang);
         ctx.fillText(span.text, x, 0);
+        restoreCanvasLanguage(ctx, previousLang);
         x += span.advancePt;
       }
       const w = canvas.width, h = canvas.height, stride = w + 1;

@@ -188,6 +188,7 @@ function production(state, table, para, group) {
       + '  font: string;\n'
       + '  letterSpacing: string;\n'
       + '  fontKerning: unknown;\n'
+      + '  lang?: string;\n'
       + '  measureText(text: string): unknown;\n'
       + '}\n'
       + 'export interface VerticalGlyphMeasurementService {\n'
@@ -531,19 +532,19 @@ test('layout acquisition contexts reject paint capabilities and renderer back-ed
   for (const [label, source, detail] of [
     [
       'unlisted member',
-      'export interface MeasurementTextContext { font: string; letterSpacing: string; fontKerning: unknown; measureText(text: string): unknown; fillRect(): void }\n'
+      'export interface MeasurementTextContext { font: string; letterSpacing: string; fontKerning: unknown; lang?: string; measureText(text: string): unknown; fillRect(): void }\n'
         + 'export interface VerticalGlyphMeasurementService { fingerprint: string; measureRunInkExtra(text: string): number; planRun(input: unknown): unknown }\n',
       'fillRect',
     ],
     [
       'heritage clause',
-      'export interface MeasurementTextContext extends CanvasRenderingContext2D { font: string; letterSpacing: string; fontKerning: unknown; measureText(text: string): unknown }\n'
+      'export interface MeasurementTextContext extends CanvasRenderingContext2D { font: string; letterSpacing: string; fontKerning: unknown; lang?: string; measureText(text: string): unknown }\n'
         + 'export interface VerticalGlyphMeasurementService { fingerprint: string; measureRunInkExtra(text: string): number; planRun(input: unknown): unknown }\n',
       'heritage',
     ],
     [
       'extra declaration',
-      'export interface MeasurementTextContext { font: string; letterSpacing: string; fontKerning: unknown; measureText(text: string): unknown }\n'
+      'export interface MeasurementTextContext { font: string; letterSpacing: string; fontKerning: unknown; lang?: string; measureText(text: string): unknown }\n'
         + 'export interface VerticalGlyphMeasurementService { fingerprint: string; measureRunInkExtra(text: string): number; planRun(input: unknown): unknown }\n'
         + 'export interface PaintEscape { fillRect(): void }\n',
       'PaintEscape',
