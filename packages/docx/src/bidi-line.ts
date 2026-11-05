@@ -1,3 +1,4 @@
+import type { BidiEngine } from '@silurus/ooxml-core';
 // WordprocessingML segment ordering uses the shared UAX#9 kernel with
 // Word's HL1 run overrides and content-level Canvas direction.
 import {
@@ -58,7 +59,10 @@ const orderText = (segment: unknown): string | undefined => {
   const text = (segment as { text?: unknown }).text;
   return typeof text === 'string' ? text : undefined;
 };
-export const lineOrderEngineIdentity = () => {
+export const lineOrderEngineIdentity = (): Readonly<{
+  engine: BidiEngine; token: object;
+  compute: BidiEngine['computeLevels']; reorder: BidiEngine['reorderVisual'];
+}> => {
   const engine = getDefaultBidiEngine();
   const compute = engine.computeLevels;
   const reorder = engine.reorderVisual;
