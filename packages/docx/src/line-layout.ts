@@ -6,7 +6,7 @@ import { prepareFloatWrap, type PreparedFloatWrap } from './float-layout.js';
 import { cloneSegmentsForLinePass, convergeLineWrap } from './layout/line-wrap-convergence.js';
 import type { MeasurementTextContext, VerticalGlyphMeasurementService } from './layout/measurement-capabilities.js';
 import { type DocGridCtx, type LayoutLine, type LayoutSeg, type LineBoundary, type WrapLayoutCtx } from './line-breaker/model.js';
-import { DEFAULT_TAB_PT, type BidiTabOrderPolicy } from './line-breaker/tabs.js';
+import { DEFAULT_TAB_PT, hasRtlDecimalTabCapability, type BidiTabOrderPolicy } from './line-breaker/tabs.js';
 import { runLineBreakerPass, type LineFitWidth } from './line-breaker/pass-driver.js';
 import type { CjkClosingMarkHang } from './layout/line-compatibility.js';
 export { type LineBoundary, type LayoutTextSeg, type LayoutTabSeg, type LayoutImageSeg, type LayoutMathSeg, type LayoutLineBreak, type LayoutSeg, type LayoutLine, type WrapLayoutCtx, type DocGridCtx, type LineLayoutEnvironment } from './line-breaker/model.js';
@@ -115,7 +115,7 @@ export function layoutLines(
   if (passContext === undefined) {
     // Only RTL decimal acquisition can request the projection. This owner is
     // shared by convergence passes, never another paragraph or retained model.
-    const decimalOrder = baseRtl && tabStops.some(stop => stop.alignment === 'decimal')
+    const decimalOrder = hasRtlDecimalTabCapability(baseRtl, tabStops)
       ? createLineOrderResolver() : undefined;
     // Keep the pass inside the existing declaration: extracting this root
     // implementation would widen the frozen migration boundary, while moving

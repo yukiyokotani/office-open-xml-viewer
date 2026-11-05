@@ -1,3 +1,4 @@
+import { hasRtlDecimalTabCapability } from '../line-breaker/tabs.js';
 import { wordLineEndJustification } from './line-compatibility.js';
 import {
   countedSpacingAdvance,
@@ -82,6 +83,7 @@ import { wordTrackChangeDecoration } from './paint-compatibility.js';
 import type { DocRun, ShapeRun } from '../types.js';
 import {
   computeLineVisualOrder,
+  lineOrderEngineIdentity,
   paragraphLineOrderModel,
   jcIsFullyJustified,
   jcStretchesLastLine,
@@ -6038,6 +6040,13 @@ function paragraphAcquisitionKey(
   } = options.placement;
   const context = options.context;
   const environment = options.environment;
+  // Decimal acquisition consumes the active provider before final placement.
+  // Key both exact results and reusable measured lines by its existing identity
+  // ordinals. The provider stays stable during this synchronous acquisition;
+  // later lifecycle/method changes must miss. Default/nondecimal paths perform
+  // no provider read or instantiation, and keep their original identity tuple.
+  const orderingEngine = hasRtlDecimalTabCapability(context.baseRtl, context.tabStops)
+    ? lineOrderEngineIdentity() : undefined;
   // Page-field values (ECMA-376 Part 1 §17.16.5.44 PAGE, §17.16.5.42 NUMPAGES,
   // §17.16.5.13 DATE, §17.16.5.65 TIME) reach measurement only through a field
   // run's result (resolveFieldText), and note numbers (§17.11) only through a
@@ -6057,6 +6066,20 @@ function paragraphAcquisitionKey(
     run.type !== 'text' && run.type !== 'field' && run.type !== 'break' && run.type !== 'ptab');
   const keysPageFields = hasFieldRun || nestsEnvironment;
   const keysNotes = hasNoteReference || nestsEnvironment;
+  // Placement's wrap identity preceded measurer identities in the original
+  // tuple. Preserve that ordinal assignment order while keeping the default
+  // path to its one existing two-element array (no empty spread allocation).
+  const wrapIdentity = !lineOnly && wrap ? cache.objectIdentity(wrap) : null;
+  const measurementIdentities = [
+    cache.objectIdentity(options.measurer.context),
+    cache.objectIdentity(options.measurer.fontFamilyClasses),
+  ];
+  if (orderingEngine) measurementIdentities.push(
+    cache.objectIdentity(orderingEngine.engine),
+    cache.objectIdentity(orderingEngine.token),
+    cache.objectIdentity(orderingEngine.compute),
+    cache.objectIdentity(orderingEngine.reorder),
+  );
   // Fixed-order tuples avoid the recursive generic fingerprint cost on this hot
   // path. A different property insertion order may conservatively miss for the
   // explicitly JSON-valued geometry below, but can never alias different facts.
@@ -6074,7 +6097,7 @@ function paragraphAcquisitionKey(
           plainPlacement.maximumYPt,
           plainPlacement.suppressSpaceBefore,
           plainPlacement.noWrap ?? false,
-          wrap ? cache.objectIdentity(wrap) : null,
+          wrapIdentity,
         ],
     [
       context.lineGrid.active,
@@ -6114,10 +6137,7 @@ function paragraphAcquisitionKey(
       context.mathDefJc ?? null,
       ...(lineOnly ? [context.characterGrid.pitchPt] : []),
     ],
-    [
-      cache.objectIdentity(options.measurer.context),
-      cache.objectIdentity(options.measurer.fontFamilyClasses),
-    ],
+    measurementIdentities,
     [
       keysPageFields ? environment.pageIndex : null,
       keysPageFields ? environment.totalPages : null,
@@ -6662,6 +6682,9 @@ export interface RetainedFrameGroupOptions {
   ) => Readonly<{ bounds: LayoutRect; exclusionBounds: LayoutRect }>;
 }
 
+// A frame session retains complete descendant layouts under one stable bidi
+// provider. Changing the provider requires a fresh pagination/layout session;
+// local paragraph/memo invalidation does not revise retained frame groups.
 const retainedFrameGroupCache = new WeakMap<object, Map<string, RetainedFrameGroupAcquisition>>();
 
 function frameFingerprintValue(value: unknown): unknown {

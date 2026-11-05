@@ -49,7 +49,10 @@ let lifecycleToken: object = Object.freeze({});
  * Providers must be deterministic for equal explicit inputs during a
  * synchronous layout. After changing captured semantic configuration, call
  * setBidiEngine again, even when retaining the same adapter object. Hidden
- * closure mutation without a lifecycle call cannot be detected by consumers. */
+ * closure mutation without a lifecycle call cannot be detected by consumers.
+ * This identity invalidates participating local consumers; it does not revise
+ * already-retained whole-document layouts. Enclosing pagination owners require
+ * a stable provider and a fresh layout after provider reconfiguration. */
 export function getBidiEngineLifecycleToken(): object {
   return lifecycleToken;
 }

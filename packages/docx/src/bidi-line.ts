@@ -58,13 +58,13 @@ const orderText = (segment: unknown): string | undefined => {
   const text = (segment as { text?: unknown }).text;
   return typeof text === 'string' ? text : undefined;
 };
-const engineState = () => {
+export const lineOrderEngineIdentity = () => {
   const engine = getDefaultBidiEngine();
   const compute = engine.computeLevels;
   const reorder = engine.reorderVisual;
-  return { engine, compute, reorder, token: getBidiEngineLifecycleToken() };
+  return { engine, compute, reorder, token: getBidiEngineLifecycleToken() } as const;
 };
-const sameEngineState = (a: ReturnType<typeof engineState>, b: ReturnType<typeof engineState>): boolean =>
+const sameEngineState = (a: ReturnType<typeof lineOrderEngineIdentity>, b: ReturnType<typeof lineOrderEngineIdentity>): boolean =>
   a.engine === b.engine && a.token === b.token && a.compute === b.compute && a.reorder === b.reorder;
 
 /** One synchronous acquisition's canonical ordering reuse. The owner drops
@@ -79,12 +79,12 @@ const sameEngineState = (a: ReturnType<typeof engineState>, b: ReturnType<typeof
  * convergence. XLSX/PPTX keep their existing uncached ordering consumers. */
 export function createLineOrderResolver(): LineOrderResolver {
   let entry: Readonly<{
-    baseRtl: boolean; model: LineOrderModel; engine: ReturnType<typeof engineState>;
+    baseRtl: boolean; model: LineOrderModel; engine: ReturnType<typeof lineOrderEngineIdentity>;
     facts: readonly OrderSegmentFacts[];
     visual: ReturnType<LineOrderResolver>;
   }> | undefined;
   return (segments, baseRtl, model = 'line-level') => {
-    const active = engineState();
+    const active = lineOrderEngineIdentity();
     const policy: SegmentLineBidiOptions = model === 'word' ? authoredOptions : options;
     if (entry && entry.baseRtl === baseRtl && entry.model === model
       && sameEngineState(entry.engine, active) && entry.facts.length === segments.length
@@ -104,7 +104,7 @@ export function createLineOrderResolver(): LineOrderResolver {
     const computed = computeLineVisualOrder(segments, baseRtl, model);
     // Copy before freezing: a third-party engine may own its returned array.
     const visual = Object.freeze({ order: Object.freeze([...computed.order]), rtl: Object.freeze([...computed.rtl]) });
-    entry = sameEngineState(active, engineState())
+    entry = sameEngineState(active, lineOrderEngineIdentity())
       ? Object.freeze({ baseRtl, model, engine: active, facts, visual }) : undefined;
     return visual;
   };

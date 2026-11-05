@@ -368,6 +368,14 @@ function resolveBidiTabStops(
 }
 
 
+/** Physical decimal acquisition and its retained key share one capability
+ * gate. Ordinary LTR/default tabs do not read or instantiate a bidi provider. */
+export function hasRtlDecimalTabCapability(
+  baseRtl: boolean, stops: readonly Pick<TabStop, 'alignment'>[],
+): boolean {
+  return baseRtl && stops.some(stop => stop.alignment === 'decimal');
+}
+
 /** Acquisition shares the final paragraph's representation policy. */
 export interface BidiTabOrderPolicy {
   readonly alignment?: string;
