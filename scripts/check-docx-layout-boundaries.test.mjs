@@ -185,6 +185,8 @@ function production(state, table, para, group) {
       + 'export function gridForParagraphContext() {}\n');
   write(root, 'packages/docx/src/layout/measurement-capabilities.ts',
     'export interface MeasurementTextContext {\n'
+      + '  direction?: unknown;\n'
+      + '  textAlign?: unknown;\n'
       + '  font: string;\n'
       + '  letterSpacing: string;\n'
       + '  fontKerning: unknown;\n'
@@ -531,19 +533,19 @@ test('layout acquisition contexts reject paint capabilities and renderer back-ed
   for (const [label, source, detail] of [
     [
       'unlisted member',
-      'export interface MeasurementTextContext { font: string; letterSpacing: string; fontKerning: unknown; measureText(text: string): unknown; fillRect(): void }\n'
+      'export interface MeasurementTextContext { direction?: unknown; textAlign?: unknown; font: string; letterSpacing: string; fontKerning: unknown; measureText(text: string): unknown; fillRect(): void }\n'
         + 'export interface VerticalGlyphMeasurementService { fingerprint: string; measureRunInkExtra(text: string): number; planRun(input: unknown): unknown }\n',
       'fillRect',
     ],
     [
       'heritage clause',
-      'export interface MeasurementTextContext extends CanvasRenderingContext2D { font: string; letterSpacing: string; fontKerning: unknown; measureText(text: string): unknown }\n'
+      'export interface MeasurementTextContext extends CanvasRenderingContext2D { direction?: unknown; textAlign?: unknown; font: string; letterSpacing: string; fontKerning: unknown; measureText(text: string): unknown }\n'
         + 'export interface VerticalGlyphMeasurementService { fingerprint: string; measureRunInkExtra(text: string): number; planRun(input: unknown): unknown }\n',
       'heritage',
     ],
     [
       'extra declaration',
-      'export interface MeasurementTextContext { font: string; letterSpacing: string; fontKerning: unknown; measureText(text: string): unknown }\n'
+      'export interface MeasurementTextContext { direction?: unknown; textAlign?: unknown; font: string; letterSpacing: string; fontKerning: unknown; measureText(text: string): unknown }\n'
         + 'export interface VerticalGlyphMeasurementService { fingerprint: string; measureRunInkExtra(text: string): number; planRun(input: unknown): unknown }\n'
         + 'export interface PaintEscape { fillRect(): void }\n',
       'PaintEscape',

@@ -6,6 +6,9 @@ import type { WritingMode } from './types.js';
  * backing DOM canvas and is injected separately as a document-scoped service.
  */
 export interface MeasurementTextContext {
+  /** Optional: unknown structural contexts do not opt into directed acquisition. */
+  direction?: CanvasDirection;
+  textAlign?: CanvasTextAlign;
   font: string;
   letterSpacing: string;
   fontKerning: CanvasFontKerning;

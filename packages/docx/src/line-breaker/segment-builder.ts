@@ -1425,7 +1425,8 @@ function emitResolvedTextSegment(
     lineMetric: familyLineMetric } = selectedFontLineMetric(resolvedSpan?.font, localFont, naturalMetricAllowed,
       allowsReferenceFontMetric(indexedFontMetrics(environment.layoutServices?.text.fontMetrics
         ?? environment.layoutServices?.text.localMetrics ?? {}), resolvedSpan?.font),
-      environment.layoutServices ? { text: environment.layoutServices.text, probe: text } : undefined);
+      environment.layoutServices ? { text: environment.layoutServices.text, probe: text,
+        ...(textShapeRequest.baseDirection !== undefined ? { baseDirection: textShapeRequest.baseDirection } : {}) } : undefined);
   // LIBRARY_SYNTHESIZED_FACE_LINE_GEOMETRY does not extend to the East Asian
   // floor of a run painted in another slot (see that rule's scope).
   const { lineMetric: eaLineMetric } = selectedFontLineMetric(eaResolution, localEaFloor, naturalMetricAllowed,

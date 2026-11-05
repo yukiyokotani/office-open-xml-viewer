@@ -299,7 +299,13 @@ export interface TextFontSlotPresence {
   readonly complexScript?: boolean;
 }
 
+export type NativeBaseDirection = 'ltr' | 'rtl';
+
 export interface TextShapeRequest {
+  /** Explicit native shaping base, not an OOXML direction inference. UAX #9
+   * rev51 §3.5 and HTML Canvas text preparation require acquisition and paint
+   * to share it. Absence retains the existing provider/ambient contract. */
+  readonly baseDirection?: NativeBaseDirection;
   readonly text: string;
   readonly fontSizePt: number;
   readonly fonts: TextFontSlots;
@@ -437,23 +443,27 @@ export function sliceTextShapeRequest(
 }
 
 /** A generated probe or ruby guide is independent text, even when its glyphs
- * happen to occur in the base run. It must not inherit that run's Arabic proof. */
+ * happen to occur in the base run. It inherits neither that run's Arabic proof
+ * nor its explicit native base. A caller establishing a new directed probe
+ * must request that authority independently. */
 export function independentTextShapeRequest(
   request: Readonly<TextShapeRequest>,
   text: string,
 ): TextShapeRequest {
-  return { ...request, text, joinRegisteredGrapheme: undefined, joinRegisteredLatinSlots: undefined,
+  return { ...request, text, baseDirection: undefined, joinRegisteredGrapheme: undefined, joinRegisteredLatinSlots: undefined,
     registeredLatinPieceText: undefined, substituteContext: { text, offset: 0 } };
 }
 
 /** Transform this range in its run (e.g. inserting justification kashidas),
- * keeping proof on either side and recomputing scope for the transformed run. */
+ * keeping substitution proof on either side and recomputing its scope. The new
+ * string has no borrowed native-direction receipt/base; directed transformed
+ * acquisition requires the caller to establish that authority again. */
 export function replaceTextShapeRequest(
   request: Readonly<TextShapeRequest>,
   text: string,
 ): TextShapeRequest {
   const context = request.substituteContext ?? { text: request.text, offset: 0 };
-  return { ...request, text, joinRegisteredGrapheme: undefined, joinRegisteredLatinSlots: undefined,
+  return { ...request, text, baseDirection: undefined, joinRegisteredGrapheme: undefined, joinRegisteredLatinSlots: undefined,
     registeredLatinPieceText: undefined, substituteContext: {
     text: context.text.slice(0, context.offset) + text
       + context.text.slice(context.offset + request.text.length),
@@ -480,6 +490,7 @@ export interface TextFontResolveRequest {
 }
 
 export interface GlyphMeasureRequest {
+  readonly baseDirection?: NativeBaseDirection;
   readonly text: string;
   readonly fontRoute: CanvasFontRoute;
   readonly fontSizePt: number;
@@ -490,6 +501,8 @@ export interface GlyphMeasureRequest {
 }
 
 export interface GlyphMeasurement {
+  /** Honored acquisition receipt; request presence alone is not proof. */
+  readonly nativeBaseDirection?: NativeBaseDirection;
   /** May be negative when authored character spacing intentionally overlaps glyphs. */
   readonly advancePt: number;
   readonly ascentPt: number;
@@ -512,6 +525,7 @@ export interface GlyphInkBounds {
 
 /** Two Canvas routes rasterizing the same text in the same tuple. */
 export interface GlyphRasterComparisonRequest {
+  readonly baseDirection?: NativeBaseDirection;
   readonly text: string;
   readonly weight: number;
   readonly style: FontStyle;
@@ -523,6 +537,11 @@ export interface GlyphRasterComparisonRequest {
 export interface GlyphMeasurer {
   readonly fingerprint: string;
   measure(request: Readonly<GlyphMeasureRequest>): GlyphMeasurement;
+  /** Semantic opt-in BEFORE any directed call. A mismatched/missing receipt
+   * is a contract error, never a retry through a stateful ordinary provider. */
+  measureDirected?(request: Readonly<GlyphMeasureRequest & { baseDirection: NativeBaseDirection }>): GlyphMeasurement;
+  /** Every installed raster/ownership callback honors its request base. */
+  readonly supportsDirectedAuxiliaries?: true;
   /** True only when both routes paint pixel-identical non-empty glyph
    * rasters for the request. Absent or unable to rasterize → no proof. */
   sameGlyphRaster?(request: Readonly<GlyphRasterComparisonRequest>): boolean;
@@ -533,6 +552,7 @@ export interface GlyphMeasurer {
 
 /** Glyph ownership through one source's size-adjust:0% registration. */
 export interface GlyphOwnershipRequest {
+  readonly baseDirection?: NativeBaseDirection;
   readonly text: string;
   readonly weight: number;
   readonly style: FontStyle;
@@ -576,6 +596,7 @@ export interface TextShapeResult extends GlyphMeasurement {
 /** Native font authority acquires glyph contours before layout paint. The
  * numerical outline precision is in final point space, independent of DPR. */
 export interface GlyphContourRequest {
+  readonly baseDirection?: NativeBaseDirection;
   readonly spans: readonly Readonly<{ text: string; advancePt: number; fontRoute: CanvasFontRoute; font: Pick<FontResolution, 'weight' | 'style'> }>[];
   readonly fontSizePt: number;
   readonly ink: Readonly<{ xMinPt: number; xMaxPt: number; ascentPt: number; descentPt: number }>;
@@ -592,6 +613,9 @@ export interface TextLayoutService {
   readonly localMetrics: Readonly<Record<string, Readonly<ResolvedFontMetric>>>;
   resolve(request: Readonly<TextFontResolveRequest>): FontResolution;
   shape(request: Readonly<TextShapeRequest>): TextShapeResult;
+  /** Available only when measurement and every installed auxiliary explicitly
+   * support direction. No source-unit splitting or DOCX admission is implied. */
+  shapeDirected?(request: Readonly<TextShapeRequest & { baseDirection: NativeBaseDirection }>): TextShapeResult;
   glyphContours?(request: GlyphContourRequest): readonly (readonly Readonly<{x: number; y: number}>[])[] | undefined;
   /** Per-source script-substitute proof, when configured. A mixed scope stays
    * a semantic face-selection boundary; plain runs return no scope key. */
@@ -608,6 +632,7 @@ export interface TextLayoutServiceInput {
   readonly fonts: FontResolver;
   readonly measurer: GlyphMeasurer;
   readonly glyphContours?: TextLayoutService['glyphContours'];
+  readonly glyphContoursSupportDirection?: true;
   readonly glyphContourFingerprint?: string;
   readonly cjkFallback?: CjkLang;
   readonly fontMetrics?: Readonly<Record<string, Readonly<ResolvedFontMetric>>>;
@@ -919,8 +944,13 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
   if (input.glyphContours && !input.glyphContourFingerprint?.trim()) {
     throw new TypeError('Native glyph contour acquisition requires an authority fingerprint');
   }
+  const directedCapable = typeof input.measurer.measureDirected === 'function'
+    && (!input.glyphContours || input.glyphContoursSupportDirection === true)
+    && (!(input.measurer.sameGlyphRaster || input.measurer.ownsGlyphs)
+      || input.measurer.supportsDirectedAuxiliaries === true);
   const fingerprint = stableFingerprint('text', {
     glyphContours: input.glyphContourFingerprint ?? 'unavailable',
+    ...(directedCapable ? { directedMeasurement: true } : {}),
     fonts: input.fonts.fingerprint,
     measurer: input.measurer.fingerprint,
     cjkFallback: input.cjkFallback ?? null,
@@ -1019,8 +1049,17 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
     if (Object.isFrozen(route)) routeOrdinalByObject.set(route, ordinal);
     return ordinal;
   };
+  const acquireGlyph = (request: Readonly<GlyphMeasureRequest>): GlyphMeasurement => {
+    if (request.baseDirection === undefined) return input.measurer.measure(request);
+    if (!directedCapable) throw new TypeError('Directed text acquisition is unsupported');
+    const measured = input.measurer.measureDirected!({ ...request, baseDirection: request.baseDirection });
+    if (measured.nativeBaseDirection !== request.baseDirection) {
+      throw new TypeError('Directed measurement receipt does not match its request');
+    }
+    return measured;
+  };
   const measureGlyph = (request: Readonly<GlyphMeasureRequest>): Readonly<GlyphMeasurement> => {
-    const key = JSON.stringify([
+    const parts: unknown[] = [
       request.text,
       routeOrdinal(request.fontRoute),
       request.fontSizePt,
@@ -1028,10 +1067,14 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
       request.style,
       request.letterSpacingPt,
       request.kerning ?? null,
-    ]);
+    ];
+    // Preserve ordinary cache keys byte-for-byte; no per-character work or
+    // source occurrence IDs are introduced for callers without an explicit base.
+    if (request.baseDirection !== undefined) parts.push(request.baseDirection);
+    const key = JSON.stringify(parts);
     const retained = cached(measurementCache, key);
     if (retained) return retained;
-    const measured = input.measurer.measure(request);
+    const measured = acquireGlyph(request);
     const snapshot = Object.freeze({
       ...measured,
       ...(measured.inkBounds ? {
@@ -1048,7 +1091,7 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
   // already deduplicates shared cluster edges within the acquisition.
   const measureContextualPrefixAdvance = (
     request: Readonly<GlyphMeasureRequest>,
-  ): number => input.measurer.measure(request).advancePt;
+  ): number => acquireGlyph(request).advancePt;
   const shapeCache = new Map<string, TextShapeResult>();
   const scopeCache = new Map<string, Map<string, Uint8Array>>();
   let scopeScans = 0;
@@ -1058,8 +1101,13 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
   const rasterProofLimit = 256;
   const sameGlyphRaster = input.measurer.sameGlyphRaster
     ? (request: Readonly<GlyphRasterComparisonRequest>): boolean => {
-        const key = JSON.stringify([request.route.fingerprint, request.faceFamily,
-          request.weight, request.style, request.text]);
+        if (request.baseDirection !== undefined && !directedCapable) {
+          throw new TypeError('Directed raster proof is unsupported');
+        }
+        const parts: unknown[] = [request.route.fingerprint, request.faceFamily,
+          request.weight, request.style, request.text];
+        if (request.baseDirection !== undefined) parts.push(request.baseDirection);
+        const key = JSON.stringify(parts);
         const retained = rasterProofs.get(key);
         if (retained !== undefined) return retained;
         const proved = input.measurer.sameGlyphRaster!(request);
@@ -1069,10 +1117,19 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
       }
     : undefined;
   const service: TextLayoutService = Object.freeze({
-    ...(input.glyphContours ? { glyphContours: input.glyphContours } : {}),
+    ...(input.glyphContours ? { glyphContours: (request: GlyphContourRequest) => {
+      if (request.baseDirection !== undefined && !directedCapable) {
+        throw new TypeError('Directed contour acquisition is unsupported');
+      }
+      return input.glyphContours!(request);
+    } } : {}),
+    ...(directedCapable ? { shapeDirected: (request: Readonly<TextShapeRequest & { baseDirection: NativeBaseDirection }>) => service.shape(request) } : {}),
     ...(sameGlyphRaster ? { sameGlyphRaster } : {}),
     ...(input.measurer.ownsGlyphs
-      ? { ownsGlyphs: (request: Readonly<GlyphOwnershipRequest>) => input.measurer.ownsGlyphs!(request) } : {}),
+      ? { ownsGlyphs: (request: Readonly<GlyphOwnershipRequest>) => {
+        if (request.baseDirection !== undefined && !directedCapable) throw new TypeError('Directed glyph ownership is unsupported');
+        return input.measurer.ownsGlyphs!(request);
+      } } : {}),
     ...(input.fonts.exactLocalFaces
       ? { exactLocalFaces: (family: string) => input.fonts.exactLocalFaces!(family) } : {}),
     fingerprint,
@@ -1091,6 +1148,9 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
       return keys.length === 1 ? keys[0] : 'mixed';
     },
     shape(request: Readonly<TextShapeRequest>): TextShapeResult {
+      if (request.baseDirection !== undefined && !directedCapable) {
+        throw new TypeError('Directed text acquisition is unsupported');
+      }
       if (!Number.isFinite(request.fontSizePt) || request.fontSizePt < 0) {
         throw new RangeError('fontSizePt must be a finite non-negative number');
       }
@@ -1204,7 +1264,7 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
           (slot) => String.fromCharCode(48 + slot),
         ).join('');
       }
-      const shapeKey = JSON.stringify([
+      const shapeParts: unknown[] = [
         request.text,
         request.fontSizePt,
         [
@@ -1240,7 +1300,9 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
         request.measure ?? null,
         request.clusterGeometry ?? null,
         ...(scopeDescriptor !== undefined ? [scopeDescriptor] : []),
-      ]);
+      ];
+      if (request.baseDirection !== undefined) shapeParts.push(['baseDirection', request.baseDirection]);
+      const shapeKey = JSON.stringify(shapeParts);
       const retainedShape = cached(shapeCache, shapeKey);
       if (retainedShape) return retainedShape;
       const grouped: {
@@ -1399,6 +1461,7 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
           style: font.style,
           letterSpacingPt: request.letterSpacingPt ?? 0,
           kerning: wordArabicTextKerned(group.text) ? true : request.kerning,
+          ...(request.baseDirection !== undefined ? { baseDirection: request.baseDirection } : {}),
         });
         return Object.freeze({
           ...group, ...measurement, font, fontRoute: font.route,
@@ -1462,6 +1525,7 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
                   style: span.font.style,
                   letterSpacingPt: request.letterSpacingPt ?? 0,
                   kerning: wordArabicTextKerned(span.text) ? true : request.kerning,
+                  ...(request.baseDirection !== undefined ? { baseDirection: request.baseDirection } : {}),
                 });
                 break;
               }
@@ -1495,6 +1559,9 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
           })();
       const result: TextShapeResult = Object.freeze({
         advancePt: totalAdvancePt,
+        ...(request.baseDirection !== undefined && spans.length > 0
+          && spans.every(span => span.nativeBaseDirection === request.baseDirection)
+          ? { nativeBaseDirection: request.baseDirection } : {}),
         ascentPt,
         descentPt,
         ...(inkBounds ? { inkBounds } : {}),

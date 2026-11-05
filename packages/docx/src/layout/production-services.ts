@@ -254,8 +254,80 @@ export function createProductionTextLayoutService(
       }
     }
   }
+  // An explicitly directed request uses the same metric implementation as
+  // ordinary acquisition, but only a context exposing Canvas direction opts in.
+  // Unknown structural/custom contexts retain their ordinary contract.
+  const supportsDirectedContext = context !== null
+    && ['ltr', 'rtl', 'inherit'].includes(context.direction ?? '')
+    && ['start', 'end', 'left', 'right', 'center'].includes(context.textAlign ?? '');
+  const measure = (request: Readonly<GlyphMeasureRequest>) => {
+    if (!context) return {
+      advancePt: [...request.text].length * request.fontSizePt * 0.5,
+      ascentPt: request.fontSizePt * 0.8,
+      descentPt: request.fontSizePt * 0.2,
+    };
+    const previousFont = context.font;
+    const previousLetterSpacing = context.letterSpacing;
+    const previousKerning = context.fontKerning;
+    const previousDirection = request.baseDirection !== undefined ? context.direction : undefined;
+    const previousTextAlign = request.baseDirection !== undefined ? context.textAlign : undefined;
+    try {
+      if (request.baseDirection !== undefined) {
+        context.direction = request.baseDirection;
+        // Native ink bounds must use the same physical left origin as retained
+        // point geometry. Canvas start + RTL would instead use a right anchor.
+        context.textAlign = 'left';
+        if (context.direction !== request.baseDirection || context.textAlign !== 'left') {
+          throw new TypeError('Canvas did not honor directed measurement and left anchor');
+        }
+      }
+      context.font = canvasFontString(
+        request.fontRoute,
+        request.fontSizePt,
+        request.weight,
+        request.style,
+      );
+      context.letterSpacing = `${request.letterSpacingPt}px`;
+      if (request.kerning != null) context.fontKerning = request.kerning ? 'normal' : 'none';
+      const metrics = context.measureText(request.text);
+      const horizontalInkBoundsAreTight =
+        Number.isFinite(metrics.actualBoundingBoxLeft)
+        && Number.isFinite(metrics.actualBoundingBoxRight);
+      // Retain the historical full-advance fallback for consumers that need
+      // a stable ink box (ruby, decoration, hit geometry), but label whether
+      // the horizontal edges are genuinely tight. Whitespace-trimming
+      // consumers must not infer sidebearings from the fallback box.
+      const inkBounds = {
+        xMinPt: horizontalInkBoundsAreTight
+          ? -metrics.actualBoundingBoxLeft : 0,
+        xMaxPt: horizontalInkBoundsAreTight
+          ? metrics.actualBoundingBoxRight : metrics.width,
+        ascentPt: metrics.actualBoundingBoxAscent,
+        descentPt: metrics.actualBoundingBoxDescent,
+      };
+      return {
+        advancePt: metrics.width,
+        ...(request.baseDirection !== undefined ? { nativeBaseDirection: request.baseDirection } : {}),
+        ascentPt: metrics.fontBoundingBoxAscent ?? metrics.actualBoundingBoxAscent ?? 0,
+        descentPt: metrics.fontBoundingBoxDescent ?? metrics.actualBoundingBoxDescent ?? 0,
+        ...(Object.values(inkBounds).every(Number.isFinite) ? {
+          inkBounds,
+          ...(horizontalInkBoundsAreTight ? { horizontalInkBoundsAreTight: true } : {}),
+        } : {}),
+      };
+    } finally {
+      if (request.baseDirection !== undefined) {
+        context.direction = previousDirection;
+        context.textAlign = previousTextAlign;
+      }
+      context.font = previousFont;
+      context.letterSpacing = previousLetterSpacing;
+      if (request.kerning != null) context.fontKerning = previousKerning;
+    }
+  };
   return createTextLayoutService({
-    ...(context ? { glyphContours: acquireCanvasGlyphContours, glyphContourFingerprint: 'canvas-half-coverage-contours-v1' } : {}),
+    ...(context ? { glyphContours: acquireCanvasGlyphContours, glyphContourFingerprint: 'canvas-half-coverage-contours-v2',
+      ...(supportsDirectedContext ? { glyphContoursSupportDirection: true as const } : {}) } : {}),
     fonts: createFontResolver(inventory, {
       installedFamilies: options.installedFamilies,
       shadowedFamilies: [...shadowedFamilies],
@@ -292,57 +364,11 @@ export function createProductionTextLayoutService(
       // that unused capability into the general text snapshot would make equal
       // horizontal main/worker services advertise unequal cache identities.
       // v2: the Canvas measurer also proves synthesized faces (#1848).
-      fingerprint: context ? 'canvas-text-metrics-v2' : 'deterministic-text-metrics-v1',
+      fingerprint: supportsDirectedContext ? 'canvas-directed-text-metrics-v3'
+        : context ? 'canvas-text-metrics-v2' : 'deterministic-text-metrics-v1',
       ...(context ? { sameGlyphRaster, ownsGlyphs } : {}),
-      measure(request: Readonly<GlyphMeasureRequest>) {
-        if (!context) return {
-          advancePt: [...request.text].length * request.fontSizePt * 0.5,
-          ascentPt: request.fontSizePt * 0.8,
-          descentPt: request.fontSizePt * 0.2,
-        };
-        const previousFont = context.font;
-        const previousLetterSpacing = context.letterSpacing;
-        const previousKerning = context.fontKerning;
-        try {
-          context.font = canvasFontString(
-            request.fontRoute,
-            request.fontSizePt,
-            request.weight,
-            request.style,
-          );
-          context.letterSpacing = `${request.letterSpacingPt}px`;
-          if (request.kerning != null) context.fontKerning = request.kerning ? 'normal' : 'none';
-          const metrics = context.measureText(request.text);
-          const horizontalInkBoundsAreTight =
-            Number.isFinite(metrics.actualBoundingBoxLeft)
-            && Number.isFinite(metrics.actualBoundingBoxRight);
-          // Retain the historical full-advance fallback for consumers that need
-          // a stable ink box (ruby, decoration, hit geometry), but label whether
-          // the horizontal edges are genuinely tight. Whitespace-trimming
-          // consumers must not infer sidebearings from the fallback box.
-          const inkBounds = {
-            xMinPt: horizontalInkBoundsAreTight
-              ? -metrics.actualBoundingBoxLeft : 0,
-            xMaxPt: horizontalInkBoundsAreTight
-              ? metrics.actualBoundingBoxRight : metrics.width,
-            ascentPt: metrics.actualBoundingBoxAscent,
-            descentPt: metrics.actualBoundingBoxDescent,
-          };
-          return {
-            advancePt: metrics.width,
-            ascentPt: metrics.fontBoundingBoxAscent ?? metrics.actualBoundingBoxAscent ?? 0,
-            descentPt: metrics.fontBoundingBoxDescent ?? metrics.actualBoundingBoxDescent ?? 0,
-            ...(Object.values(inkBounds).every(Number.isFinite) ? {
-              inkBounds,
-              ...(horizontalInkBoundsAreTight ? { horizontalInkBoundsAreTight: true } : {}),
-            } : {}),
-          };
-        } finally {
-          context.font = previousFont;
-          context.letterSpacing = previousLetterSpacing;
-          if (request.kerning != null) context.fontKerning = previousKerning;
-        }
-      },
+      measure,
+      ...(supportsDirectedContext ? { measureDirected: measure, supportsDirectedAuxiliaries: true as const } : {}),
     },
   });
 }

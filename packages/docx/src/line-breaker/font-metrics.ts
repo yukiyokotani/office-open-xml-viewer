@@ -9,6 +9,7 @@ import { LIBRARY_SYNTHESIZED_FACE_LINE_GEOMETRY } from '../layout/line-compatibi
 export interface SynthesizedFaceProbe {
   readonly text: TextLayoutService;
   readonly probe: string;
+  readonly baseDirection?: 'ltr' | 'rtl';
 }
 
 const EAST_ASIAN_PROBE_SCRIPT = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\p{Script=Bopomofo}]/u;
@@ -72,6 +73,7 @@ export function authoredReferenceVerticalMetric(
   const probe = EAST_ASIAN_PROBE_SCRIPT.test(synthesis.probe) ? '国あ' : 'Hxg';
   const owned = (text: string) => synthesis.text.ownsGlyphs!({
     text, weight: selected.weight, style: selected.style, coverageProbeFamily: matched.coverageProbeFamily!,
+    ...(synthesis.baseDirection !== undefined ? { baseDirection: synthesis.baseDirection } : {}),
   });
   return reference && owned(probe) && owned(synthesis.probe) && synthesis.text.sameGlyphRaster({
     text: probe,
@@ -79,6 +81,7 @@ export function authoredReferenceVerticalMetric(
     style: selected.style,
     route: selected.route,
     faceFamily: matched.resolvedFamily,
+    ...(synthesis.baseDirection !== undefined ? { baseDirection: synthesis.baseDirection } : {}),
   }) ? reference : undefined;
 }
 
