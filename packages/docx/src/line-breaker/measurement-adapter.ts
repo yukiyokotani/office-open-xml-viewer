@@ -2,7 +2,7 @@ import { wordArabicTextKerned, wordKerningApplies } from '../layout/line-compati
 import { graphemeClusterOffsets } from '@silurus/ooxml-core';
 import type { LayoutTextSeg } from '../line-layout.js';
 import type { MeasurementTextContext, VerticalGlyphMeasurementService } from '../layout/measurement-capabilities.js';
-import { calcEffectiveFontPx, semanticSlotStartIndex } from '../layout/text.js';
+import { calcEffectiveFontPx, semanticSlotStartIndex, type TextShapeResult } from '../layout/text.js';
 import {
   charScaleFactor,
   CONDENSED_CONTEXT_GRAPHEMES,
@@ -128,6 +128,22 @@ export class LineMeasurementAdapter {
     } finally {
       this.restoreKerning(previous);
     }
+  }
+
+  /** Compression attempts acquire only contextual gap detail. Committed
+   * prefix advances and seam/face metadata remain owned by placement and the
+   * retained-line finalizer; reacquire the exact live request on each attempt. */
+  acquireCompressionSpaceClusters(segment: LayoutTextSeg): TextShapeResult['clusters'] {
+    if (!segment.textLayoutService || !segment.textShapeRequest) return undefined;
+    if (segment.textShapeRequest.text !== segment.text) {
+      throw new Error('Segment measurement does not match its retained text range context');
+    }
+    return segment.textLayoutService.shape({
+      ...segment.textShapeRequest,
+      fontSizePt: calcEffectiveFontPx(segment, this.scale),
+      measure: true,
+      clusterGeometry: 'spaces',
+    }).clusters;
   }
 
   measureSegment(segment: LayoutTextSeg, clusterGeometry: boolean | 'spaces' = false): TextMetrics {

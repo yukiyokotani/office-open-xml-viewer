@@ -57,7 +57,11 @@ describe('line layout cluster acquisition', () => {
     expect(current.measuredUtf16).toBeLessThanOrEqual(previous.measuredUtf16 * 2);
   });
 
-  it.each(['あいうえおかきくけこ', 'aa bb cc dd'])('retains complete final clusters and face metrics after wrapping %j', (text) => {
+  it.each([
+    { text: 'あいうえおかきくけこ', width: 16, wraps: true },
+    { text: 'aa bb cc dd', width: 16, wraps: true },
+    { text: 'aa bb', width: 60, wraps: false },
+  ])('retains complete final clusters and face metrics for $text at $width', ({ text, width, wraps }) => {
     const requests: TextShapeRequest[] = [];
     const base = createTextLayoutService({
       fonts: createFontResolver([]),
@@ -100,7 +104,7 @@ describe('line layout cluster acquisition', () => {
       textShapeRequest: shapeRequest,
     };
 
-    const lines = layoutLines(measureContext(), [segment], 16, 0, 1, [], undefined, {}, 0,
+    const lines = layoutLines(measureContext(), [segment], width, 0, 1, [], undefined, {}, 0,
       undefined, undefined, undefined, undefined, false, text.includes(' '), false,
       undefined, 'bounded', undefined, false,
       text.includes(' ') ? { admissionOnly: true, lineEndIdeographicSpaceHangs: false } : false);
@@ -109,8 +113,14 @@ describe('line layout cluster acquisition', () => {
     const aggregateRequests = requests.filter((request) => request.clusterGeometry === false);
     const retainedRequests = requests.filter((request) => request.clusterGeometry === true);
 
-    expect(finalSegments.length).toBeGreaterThan(1);
-    expect(aggregateRequests.some((request) => request.text !== text)).toBe(true);
+    if (wraps) {
+      expect(finalSegments.length).toBeGreaterThan(1);
+      expect(aggregateRequests.some((request) => request.text !== text)).toBe(true);
+    } else {
+      expect(lines).toHaveLength(1);
+      expect(finalSegments.map(segment => segment.text).join('')).toBe(text);
+      expect(finalSegments[0]?.measuredWidth).toBe(25);
+    }
     expect(retainedRequests.map((request) => request.text))
       .toEqual(finalSegments.map((candidate) => candidate.text));
     for (const candidate of finalSegments) {

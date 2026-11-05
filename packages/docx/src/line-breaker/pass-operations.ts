@@ -2066,6 +2066,20 @@ export function fitJustifiedCompression(state: Pick<PassOperationState,
     previousText = member;
     return box;
   });
+  // New admission-only paragraphs leave natural acquisition unchanged.
+  // Only a real complete-unit attempt needs contextual gap detail. Do not
+  // remeasure committed boxes here: their advances already own their seams.
+  // Reacquiring the live request avoids a separate receipt/cache lifetime.
+  if (state.justifiedCompressionAdmissionOnly === true) {
+    for (const group of [breaker.currentLine, members]) {
+      for (const segment of group) {
+        if ('text' in segment && segment.text.includes(' ') && !segment.ruby && !segment.metricOnly
+          && segment.textLayoutService && segment.textShapeRequest) {
+          segment.shapedSpaceClusters = state.measurement.acquireCompressionSpaceClusters(segment);
+        }
+      }
+    }
+  }
   // Keep the default/full-plan path unchanged. A certified cap failure omits
   // only an unused lazy prefix cache and still takes the common refusal path.
   // Later fits rebuild when absent; accepted final contraction rebuilds fresh,
@@ -2190,6 +2204,7 @@ export function performTextSegmentBox(
   // Fitting needs the spaces' contextual advances, not every prefix of a
   // possibly overlong word. Full cluster acquisition belongs to final slices.
   const measured = justifiedCompressionApplies(operationState) && s.text.includes(' ') && !s.ruby
+    && (!operationState.justifiedCompressionAdmissionOnly || s.metricOnly)
     ? measurement.measureSegment(s, 'spaces')
     : measureText(s, snapToCharsClass(s, characterGrid) === 'eastAsia');
   let width = segAdvanceWidth(
