@@ -1,4 +1,4 @@
-import { sourceSpaceCells } from './source-space-cells.js';
+import { prepareSourceSpaceCells, type SourceSpaceCells } from './source-space-cells.js';
 import { hasRtlDecimalTabCapability } from '../line-breaker/tabs.js';
 import { wordLineEndJustification } from './line-compatibility.js';
 import {
@@ -1556,7 +1556,7 @@ export function planLine(input: PlanLineInput): LineLayout {
   // compatibility-shape provenance and rewrite-capable Kashida stay legacy.
   // One fine view owns UAX order, terminal classification, gaps and paint;
   // never choose it after measuring against a different coarse budget.
-  let sourceCells: ReturnType<typeof sourceSpaceCells>;
+  let preparedSourceCells: ReturnType<typeof prepareSourceSpaceCells>;
   if (bidi && !characterSpreadBidi && !input.runDirectionUnauthored
     && (justification === 'word' || justification === 'word-or-centre')
     && kashidaLevel(input.alignment) === null && lineSlackPt >= 0
@@ -1569,7 +1569,7 @@ export function planLine(input: PlanLineInput): LineLayout {
       || (input.displayMathJustification === undefined
         && wordRtlJustifiedVisibleFitApplies(input.alignment, input.baseRtl === true, input.wordWrap !== false));
     const hasTerminalSpace = hasLogicalTailSpace(segments);
-    if (!hasTerminalSpace || terminalBudgetKnown) sourceCells = sourceSpaceCells(segments);
+    if (!hasTerminalSpace || terminalBudgetKnown) preparedSourceCells = prepareSourceSpaceCells(segments);
   }
   const descriptors = segments.map(segment => segment.kind === 'tab'
     ? { isTab: true }
@@ -1580,9 +1580,10 @@ export function planLine(input: PlanLineInput): LineLayout {
     baseRtl: input.baseRtl, alignment: input.alignment,
     runDirectionUnauthored: input.runDirectionUnauthored, characterSpreadBidi,
   });
-  const resolved = sourceCells
-    ? computeLineSourceCellOrder(descriptors, sourceCells.projection, input.baseRtl, orderModel) : undefined;
-  if (resolved?.view === 'parents') sourceCells = undefined;
+  const resolved = preparedSourceCells
+    ? computeLineSourceCellOrder(descriptors, preparedSourceCells.projection, input.baseRtl, orderModel) : undefined;
+  const sourceCells: SourceSpaceCells | undefined = resolved?.view === 'cells'
+    ? preparedSourceCells!.materialize() : undefined;
   if (sourceCells) segments = sourceCells.segments;
   const visual = resolved ? {
     order: resolved.order,
