@@ -1,4 +1,10 @@
 import { describe, it, expect } from 'vitest';
+import { DEFAULT_KINSOKU_RULES } from '@silurus/ooxml-core';
+import { createLayoutServices } from './layout-runtime.js';
+import { acquireShapeTextBoxLayout } from './layout/paragraph.js';
+import { textBoxAcquisitionInput } from './parser-model.js';
+import type { ParagraphLayoutContext } from './layout-context.js';
+import type { DocxDocumentModel, ShapeRun } from './types';
 import { layoutBodyModel } from './test-support/document-layout.test-support.js';
 import type { LineLayout, TextPlacement } from './layout/types.js';
 import type { BodyElement, DocParagraph, DocSettings, DocxTextRun, SectionProps } from './types';
@@ -443,4 +449,94 @@ describe('WORD_RTL_JUSTIFIED_VISIBLE_FIT', () => {
       expect(xs.at(-1)! + 10).toBeLessThanOrEqual(380 + 1e-6);
     }
   });
+});
+it.each([
+  { alignment: 'mediumKashida', charged: 7, visible: 8 },
+  { alignment: 'highKashida', charged: 6, visible: 7 },
+] as const)('keeps Arabic source RTL ownership distinct in $alignment soft fitting', ({ alignment, charged, visible }) => {
+  // Three glyphs are 30pt and each space 10pt. The 345pt band leaves
+  // 310.5pt / 276pt after the existing 10% / 20% reserve respectively.
+  const arabic = Array.from({ length: 12 }, () => '\u0628\u062a\u062b').join(' ') + ' ';
+  const latin = Array.from({ length: 12 }, () => 'abc').join(' ') + ' ';
+  const acquire = (content: string, rtl?: boolean, cs?: boolean, settings = MODE_15) => lines(para([
+    textRun(content, { ...(rtl === undefined ? {} : { rtl }), ...(cs === undefined ? {} : { cs }) }),
+  // Mode14 reserves against the pre-indent360pt frame; a349pt line keeps
+  // the same visible/full-space boundary (313pt medium /277pt high).
+  ], alignment, { bidi: true, indentRight: settings.compatibilityMode === 14 ? 11 : 15, wordWrap: true }), settings);
+  const retainedCases = [
+    { content: arabic, retained: acquire(arabic), expected: charged },
+    { content: arabic, retained: acquire(arabic, false), expected: charged },
+    { content: arabic, retained: acquire(arabic, true), expected: visible },
+    { content: arabic, retained: acquire(arabic, undefined, true), expected: visible },
+    { content: arabic, retained: acquire(arabic, undefined, undefined, { compatibilityMode: 14 }), expected: visible },
+    // The original non-Arabic counters keep the existing visible fit.
+    { content: latin, retained: acquire(latin), expected: visible },
+  ];
+  if (alignment === 'mediumKashida') {
+    // A genuine authored formatting seam is outside the homogeneous source rule.
+    const cut = arabic.indexOf(' ') + 1;
+    retainedCases.push({ content: arabic, expected: visible, retained: lines(para([
+      textRun(arabic.slice(0, cut)), textRun(arabic.slice(cut), { bold: true }),
+    ], alignment, { bidi: true, indentRight: 15, wordWrap: true }), MODE_15) });
+  }
+  for (const { content, retained, expected } of retainedCases) {
+    const logical = retained.flatMap(line => line.placements
+      .filter((p): p is TextPlacement => p.kind === 'text'))
+      .sort((a, b) => a.range.start - b.range.start);
+    let cursor = 0;
+    for (const placement of logical) {
+      expect(placement.range.start).toBe(cursor);
+      expect(placement.range.end - placement.range.start).toBe(placement.text.length);
+      cursor = placement.range.end;
+    }
+    expect(cursor).toBe(content.length);
+    expect(logical.map(p => p.text).join('')).toBe(content);
+    const firstSource = retained[0]!.placements.filter((p): p is TextPlacement => p.kind === 'text')
+      .sort((a, b) => a.range.start - b.range.start).map(p => p.text).join('');
+    expect.soft(firstSource.trim().split(/\s+/), `sourceRTL ownership: expected ${expected}`).toHaveLength(expected);
+  }
+});
+
+
+it('does not infer authored Arabic direction from a flattened compatibility text box', () => {
+  const content = Array.from({ length: 12 }, () => '\u0628\u062a\u062b').join(' ') + ' ';
+  const body = lines(para([textRun(content)], 'mediumKashida', {
+    bidi: true, indentRight: 15, wordWrap: true,
+  }), MODE_15);
+  const ctx = makeCtx();
+  const model = { section, body: [], settings: MODE_15,
+    headers: { default: null, first: null, even: null },
+    footers: { default: null, first: null, even: null }, fontFamilyClasses: {},
+  } as unknown as DocxDocumentModel;
+  const context: ParagraphLayoutContext = {
+    lineGrid: { active: false, pitchPt: null },
+    characterGrid: { active: false, kind: null, pitchPt: null, deltaPt: 0 },
+    rightIndentGrid: { pitchPt: null, paragraphAllowsAdjustment: true },
+    physicalIndentLeftPt: 0, physicalIndentRightPt: 0, firstIndentPt: 0,
+    lineSpacing: null, spaceBeforePt: 0, spaceAfterPt: 0,
+    baseRtl: false, isJustified: false, stretchLastLine: false,
+    tabStops: [], hasRuby: false, hasEastAsianText: false,
+    kinsoku: DEFAULT_KINSOKU_RULES, defaultTabPt: 36, overflowPunct: true,
+  };
+  const shape = {
+    type: 'shape', zOrder: 0, subpaths: [], presetGeometry: 'rect', fill: null, stroke: null,
+    textBlocks: [{ text: content, fontSizePt: 20, alignment: 'mediumKashida', bidi: true,
+      runs: [{ text: content, fontSizePt: 20, fontFamily: 'NotInMetrics' }], }],
+    textAnchor: 't', textInsetL: 0, textInsetT: 0, textInsetR: 0, textInsetB: 0,
+  } as unknown as ShapeRun;
+  const source = { story: 'textbox' as const, storyInstance: 'compatibility', path: [] as number[] };
+  const acquired = acquireShapeTextBoxLayout(shape,
+    { xPt: 0, yPt: 0, widthPt: 345, heightPt: 400 }, {
+      id: 'compatibility', source, flowDomainId: 'compatibility', context,
+      measurer: { context: ctx, fontFamilyClasses: {} },
+      environment: { pageIndex: 0, totalPages: 1, compatibilityMode: 15, documentHasEastAsianText: false,
+        pageWritingMode: 'horizontal-tb', layoutServices: createLayoutServices(model, { measureContext: ctx }) },
+      input: textBoxAcquisitionInput(shape, source),
+    });
+  const child = acquired?.story.blocks[0];
+  if (child?.kind !== 'paragraph') throw new Error('expected compatibility paragraph');
+  // Same glyph/space metrics: body knows its source RTL was absent; the
+  // flattened public shape model cannot establish that source provenance.
+  expect(characters(body[0]!).length / 3).toBe(7);
+  expect(characters(child.lines[0]!).length / 3).toBe(8);
 });
