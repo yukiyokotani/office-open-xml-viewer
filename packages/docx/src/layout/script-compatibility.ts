@@ -1,5 +1,19 @@
 import { defineCompatibilityRule } from './compatibility.js';
 
+export const WORD_RUN_DIRECTION_ISOLATE = defineCompatibilityRule({
+  id: 'word-run-direction-isolate',
+  evidence: {
+    kind: 'office-observation', syntheticFixtureId: 'bidi-run-direction-isolate',
+    application: 'Microsoft Word', version: '16.0.20527', platform: 'Windows',
+  },
+  description: 'ECMA-376 §17.3.1.6 and §17.3.2.30 distinguish paragraph direction and run direction. Observed Word ordering, not a prescribed OOXML bidi algorithm: consecutive text runs whose authored direction opposes the paragraph resolve as one UAX #9 directional isolate. An unmarked Latin label sharing a run with Arabic in a bidi paragraph therefore stays at the physical left of that run. Windows controls cover Arabic, Hebrew, Latin and digits, modes unset/11/12/14/15, medium/high kashida and logical start/end alignments. Paragraph-direction runs, tabs and objects retain their existing resolution; DrawingML runs have no authored w:rtl. Character-spread RTL lines retain their existing model because its gap placement does not support isolates. This rule changes final ordering only, not line fitting or source-space placement.',
+});
+
+export function wordRunDirectionSpan(segment: unknown): 'ltr' | 'rtl' | undefined {
+  const { text, rtl } = segment as { text?: unknown; rtl?: unknown };
+  return typeof text === 'string' ? rtl === true ? 'rtl' : 'ltr' : undefined;
+}
+
 export const WORD_NEUTRAL_SCRIPT_ATTACHMENT = defineCompatibilityRule({
   id: 'word-neutral-script-attachment',
   evidence: {

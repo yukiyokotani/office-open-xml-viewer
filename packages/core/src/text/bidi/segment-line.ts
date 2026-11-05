@@ -12,6 +12,10 @@ export interface SegmentLineBidiOptions {
   isRtlAmbiguous?: (character: string) => boolean;
   /** Word paints a whole word slice RTL if any non-space unit is odd-level. */
   directionFromAnyOdd?: boolean;
+  /** Host-authored direction of a text span. Consecutive opposite-direction
+   * segments resolve together inside a UAX #9 directional isolate. Objects
+   * and tabs return undefined and terminate the span. */
+  isolateDirection?: (segment: unknown) => 'ltr' | 'rtl' | undefined;
 }
 
 export interface SegmentLineVisualOrder {
@@ -51,9 +55,19 @@ export function computeSegmentLineVisualOrder(
   // The UAX#9 engine treats a missing entry as no override, so only authored
   // HL1 positions need storage; the array can remain sparse.
   let override: (BidiClass | undefined)[] | undefined;
+  const isolates = options.isolateDirection
+    ? segments.map(segment => {
+      const direction = options.isolateDirection!(segment);
+      return direction !== undefined && (direction === 'rtl') !== baseRtl ? direction : undefined;
+    })
+    : undefined;
   for (let i = 0; i < count; i++) {
     const segment = segments[i];
     const value = textOf(segment) ?? '';
+    const isolate = isolates?.[i];
+    if (isolate !== undefined && isolates![i - 1] !== isolate) {
+      full += isolate === 'rtl' ? '\u2067' : '\u2066';
+    }
     const digitsAsAN = options.digitsAsAN?.(segment) === true;
     const rtlMarked = options.isRtlMarked?.(segment) === true;
     start[i] = full.length;
@@ -72,6 +86,7 @@ export function computeSegmentLineVisualOrder(
         }
       }
     }
+    if (isolate !== undefined && isolates![i + 1] !== isolate) full += '\u2069';
   }
   const { levels, paragraphLevel } = getDefaultBidiEngine().computeLevels(
     full, baseRtl ? 'rtl' : 'ltr', override,

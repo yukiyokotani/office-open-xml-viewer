@@ -171,6 +171,9 @@ export interface RightIndentGridPolicy {
 }
 
 export interface ParagraphLayoutContext {
+  /** Compatibility shape-text fallback lacks authoritative WML run-direction
+   * provenance. Complete WordprocessingML stories retain their own context. */
+  readonly runDirectionUnauthored?: true;
   readonly lineGrid: LineGridPolicy;
   readonly characterGrid: CharacterGridPolicy;
   readonly rightIndentGrid: RightIndentGridPolicy;

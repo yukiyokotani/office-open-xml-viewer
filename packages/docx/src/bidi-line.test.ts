@@ -22,6 +22,24 @@ describe('segmentsHaveRtl', () => {
   });
 });
 
+describe('authored opposite-direction run ordering', () => {
+  it('keeps a leading Latin label at the left of its unmarked Arabic run', () => {
+    const segments = [{ text: 'Label ' }, { text: 'هذا ' }, { text: 'نص ' }, { text: 'عربي ' }];
+    const visual = computeLineVisualOrder(segments, true, 'word');
+    expect(visual.order.map(index => segments[index]!.text.trim()))
+      .toEqual(['Label', 'عربي', 'نص', 'هذا']);
+    // Acquisition callers and unauthored shape text retain their existing
+    // line-level resolution; this change only orders authored final lines.
+    expect(computeLineVisualOrder(segments, true).order.at(-1)).toBe(0);
+  });
+
+  it('leaves paragraph-direction Arabic ordering and paint direction unchanged', () => {
+    const segments = [{ text: 'هذا ', rtl: true }, { text: 'نص ', rtl: true }, { text: 'عربي ', rtl: true }];
+    expect(computeLineVisualOrder(segments, true, 'word'))
+      .toEqual(computeLineVisualOrder(segments, true));
+  });
+});
+
   it('keeps LTR word order for English text in rtl-marked runs', () => {
     // w:rtl on a run of pure Latin (e.g. "first leader name" in sample-7's
     // signature block): the RLE embedding must NOT reverse the words — only
