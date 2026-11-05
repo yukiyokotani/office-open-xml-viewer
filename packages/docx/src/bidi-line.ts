@@ -4,7 +4,7 @@ import {
   computeSegmentLineVisualOrder, segmentLineHasRtl,
   type SegmentLineVisualOrder,
 } from '@silurus/ooxml-core/internal/bidi-line';
-import { wordRtlAmbiguousCharacter } from './layout/script-compatibility.js';
+import { wordRtlAmbiguousCharacter, wordRunDirectionSpan } from './layout/script-compatibility.js';
 
 const options = {
   isTab: (segment: unknown) => 'isTab' in (segment as object),
@@ -16,9 +16,18 @@ const options = {
 export type LineVisualOrder = SegmentLineVisualOrder;
 export const segmentsHaveRtl = (segments: readonly unknown[]): boolean =>
   segmentLineHasRtl(segments, options);
+// WORD_RUN_DIRECTION_ISOLATE: only final authored paragraphs opt in.
+const authoredOptions = {
+  ...options, isolateDirection: wordRunDirectionSpan, isolateRequiresUniformSlices: true,
+};
+// One anchor is retained per measured slice. Intra-slice resolved-level
+// boundaries are not retained, so punctuation or script changes inside one
+// slice can still be misplaced (#2076); this is not a complete bidi rewrite.
 export const computeLineVisualOrder = (
-  segments: readonly unknown[], baseRtl: boolean,
-): LineVisualOrder => computeSegmentLineVisualOrder(segments, baseRtl, options);
+  segments: readonly unknown[], baseRtl: boolean, model: 'line-level' | 'word' = 'line-level',
+): LineVisualOrder => computeSegmentLineVisualOrder(
+  segments, baseRtl, model === 'word' ? authoredOptions : options,
+);
 
 /** Physical edge a line aligns to, resolving logical start/end against base direction. */
 export type AlignEdge = 'left' | 'right' | 'center' | 'justify';
