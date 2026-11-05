@@ -490,7 +490,7 @@ it('does not infer authored Arabic direction from a flattened compatibility text
     { xPt: 0, yPt: 0, widthPt: 345, heightPt: 400 }, {
       id: 'compatibility', source, flowDomainId: 'compatibility', context,
       measurer: { context: ctx, fontFamilyClasses: {} },
-      environment: { pageIndex: 0, totalPages: 1, compatibilityMode: 15,
+      environment: { pageIndex: 0, totalPages: 1, compatibilityMode: 15, documentHasEastAsianText: false,
         pageWritingMode: 'horizontal-tb', layoutServices: createLayoutServices(model, { measureContext: ctx }) },
       input: textBoxAcquisitionInput(shape, source),
     });
