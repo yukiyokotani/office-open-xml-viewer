@@ -6,6 +6,37 @@ import {
   buildVisualOrder,
 } from './line-order.js';
 import { getDefaultBidiEngine } from './engine.js';
+import { certifyReverseSegmentLine, computeSegmentLineVisualOrder } from './segment-line.js';
+
+describe('native reverse-anchor certificate', () => {
+  it('retains exact tab, numeric HL1 and space-only slice directions', () => {
+    const segments = [{ isTab: true }, { text: '12.50', rtl: true },
+      { text: ' ' }, { text: 'אבגד ', rtl: true }];
+    const options = {
+      isTab: (segment: unknown) => 'isTab' in (segment as object),
+      isRtlMarked: (segment: unknown) => (segment as { rtl?: boolean }).rtl === true,
+      isRtlAmbiguous: (character: string) => character === '.',
+      directionFromAnyOdd: true,
+    };
+    expect(certifyReverseSegmentLine(segments, true, options))
+      .toEqual({ order: [3, 2, 1, 0], rtl: [true, true, false, true] });
+    expect(computeSegmentLineVisualOrder(segments, true, options))
+      .toEqual({ order: [3, 2, 1, 0], rtl: [true, true, false, true] });
+  });
+
+  it('keeps the canonical UTF-16 HL1 boundary for astral L text', () => {
+    const segments = [{ text: '\u{10400}' }, { text: 'א' }];
+    const options = {
+      isRtlMarked: () => true,
+      // Canonical hooks receive individual code units, never this whole scalar.
+      isRtlAmbiguous: (character: string) => character === '\u{10400}',
+      directionFromAnyOdd: true,
+    };
+    const visual = certifyReverseSegmentLine(segments, true, options)
+      ?? computeSegmentLineVisualOrder(segments, true, options);
+    expect(visual).toEqual({ order: [1, 0], rtl: [false, true] });
+  });
+});
 
 describe('hasStrongRtl / RTL_GATE', () => {
   it('detects Arabic, Hebrew and RTL controls; ignores Latin/digits/neutrals', () => {

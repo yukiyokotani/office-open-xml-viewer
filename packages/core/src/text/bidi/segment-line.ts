@@ -2,6 +2,8 @@ export { getDefaultBidiEngine, getBidiEngineLifecycleToken } from './engine.js';
 import { getDefaultBidiEngine } from './engine.js';
 import { hasStrongRtl, OBJECT_PLACEHOLDER, buildVisualOrder } from './line-order.js';
 import type { BidiClass } from './types.js';
+import { bidiClass, bracket } from './char-data.js';
+import { isUnmodifiedNativeBidiEngine } from './uax9/index.js';
 
 export interface SegmentLineBidiOptions {
   /** DrawingML and Word tabs use Bidi_Class S; ordinary cell objects do not. */
@@ -31,6 +33,73 @@ const textOf = (segment: unknown): string | undefined => {
   const value = (segment as { text?: unknown }).text;
   return typeof value === 'string' ? value : undefined;
 };
+
+/** HL1 precedence is shared with certification. `character` is one UTF-16
+ * code unit, exactly as canonical override construction supplies it; the native
+ * adapter reads the leading unit of each code point, not an astral string. */
+function classOverrideForUnit(
+  character: string, digitsAsAN: boolean, rtlMarked: boolean,
+  options: SegmentLineBidiOptions,
+): BidiClass | undefined {
+  const code = character.charCodeAt(0);
+  if (digitsAsAN && code >= 0x30 && code <= 0x39) return 'AN';
+  return rtlMarked && options.isRtlAmbiguous?.(character) ? 'R' : undefined;
+}
+
+/** Exact native UAX#9 Unicode 17 (revision 51, X1-X10/W2-W7/N0-N2/I2/L1-L2)
+ * execution certificate, not an alternate bidi policy.
+ * No embeddings/isolates/overrides or L/NSM are admitted. W2-W7 introduce no L;
+ * N0 has no brackets, N1/N2 resolve NI to R, and I2/L1 leave every guaranteed
+ * R/AL content anchor at level 1. L2 therefore reverses all retained anchors.
+ * ASCII-space-only slices use a level-1 fallback anchor but rtl=false because
+ * the canonical content scan trims them completely; tabs have rtl=true.
+ * Unknown shapes/classes or synthetic isolates require the full resolver.
+ * Only synchronous acquisition memo misses opt in; no result cache lives here.
+ */
+export function certifyReverseSegmentLine(
+  segments: readonly unknown[], baseRtl: boolean,
+  options: SegmentLineBidiOptions,
+): SegmentLineVisualOrder | undefined {
+  if (!baseRtl || !options.directionFromAnyOdd
+    || !isUnmodifiedNativeBidiEngine(getDefaultBidiEngine())) return undefined;
+  const rtl: boolean[] = [];
+  for (const segment of segments) {
+    if (typeof segment !== 'object' || segment === null) return undefined;
+    const isolate = options.isolateDirection?.(segment);
+    if (isolate !== undefined && isolate !== 'rtl') return undefined;
+    const text = textOf(segment);
+    if (options.isTab?.(segment) === true) {
+      if (text !== undefined && text.length !== 0) return undefined;
+      rtl.push(true);
+      continue;
+    }
+    if (text === undefined || text.length === 0) return undefined;
+    let contentEnd = text.length;
+    while (contentEnd > 0 && text[contentEnd - 1] === ' ') contentEnd--;
+    const digitsAsAN = options.digitsAsAN?.(segment) === true;
+    const rtlMarked = options.isRtlMarked?.(segment) === true;
+    let hasR = false;
+    for (let offset = 0; offset < text.length;) {
+      const cp = text.codePointAt(offset)!;
+      const original = bidiClass(cp);
+      // Reject real controls even if a host override might replace their type.
+      switch (original) {
+        case 'R': case 'AL': case 'EN': case 'AN': case 'ES': case 'ET':
+        case 'CS': case 'ON': case 'WS': break;
+        default: return undefined;
+      }
+      if (bracket(cp)) return undefined;
+      const effective = classOverrideForUnit(text[offset], digitsAsAN, rtlMarked, options) ?? original;
+      if (offset < contentEnd && (effective === 'R' || effective === 'AL')) hasR = true;
+      offset += cp > 0xffff ? 2 : 1;
+    }
+    if (contentEnd !== 0 && !hasR) return undefined;
+    rtl.push(contentEnd !== 0);
+  }
+  const order: number[] = [];
+  for (let index = segments.length - 1; index >= 0; index--) order.push(index);
+  return { order, rtl };
+}
 
 /** Shared UAX#9 gate, including Word's run-level rtl mark when requested. */
 export function segmentLineHasRtl(
@@ -87,12 +156,8 @@ export function computeSegmentLineVisualOrder(
     } else if (value.length > 0 && (digitsAsAN || rtlMarked)) {
       const classes = override ??= [];
       for (let offset = start[i]; offset < end[i]; offset++) {
-        const code = full.charCodeAt(offset);
-        if (digitsAsAN && code >= 0x30 && code <= 0x39) {
-          classes[offset] = 'AN';
-        } else if (rtlMarked && options.isRtlAmbiguous?.(full[offset])) {
-          classes[offset] = 'R';
-        }
+        const value = classOverrideForUnit(full[offset], digitsAsAN, rtlMarked, options);
+        if (value !== undefined) classes[offset] = value;
       }
     }
     if (isolate !== undefined && isolates![i + 1] !== isolate) full += '\u2069';

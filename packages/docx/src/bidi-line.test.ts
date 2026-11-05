@@ -67,6 +67,31 @@ describe('authored opposite-direction run ordering', () => {
     } finally { setBidiEngine(engine); }
   });
 
+  it('honors replaced native methods and proxy providers for uniform RTL slices', () => {
+    const engine = getDefaultBidiEngine();
+    const reorder = engine.reorderVisual;
+    const words = [{ text: 'שלום ', rtl: true }, { text: 'עולם', rtl: true }];
+    const resolve = createLineOrderResolver();
+    try {
+      expect(resolve(words, true).order).toEqual([1, 0]);
+      engine.reorderVisual = (...args) => reorder.call(engine, ...args).reverse();
+      expect(resolve(words, true).order).toEqual([0, 1]);
+      engine.reorderVisual = reorder;
+      const proxy = new Proxy(engine, {
+        get(target, key, receiver) {
+          return key === 'reorderVisual'
+            ? (...args: Parameters<typeof reorder>) => reorder.call(target, ...args).reverse()
+            : Reflect.get(target, key, receiver);
+        },
+      });
+      setBidiEngine(proxy);
+      expect(resolve(words, true).order).toEqual([0, 1]);
+    } finally {
+      engine.reorderVisual = reorder;
+      setBidiEngine(engine);
+    }
+  });
+
   it('leaves paragraph-direction Arabic ordering and paint direction unchanged', () => {
     const segments = [{ text: 'هذا ', rtl: true }, { text: 'نص ', rtl: true }, { text: 'عربي ', rtl: true }];
     expect(computeLineVisualOrder(segments, true, 'word'))
