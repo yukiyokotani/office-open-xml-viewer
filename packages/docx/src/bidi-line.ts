@@ -9,13 +9,13 @@ import {
 } from '@silurus/ooxml-core/internal/bidi-line';
 import { wordRtlAmbiguousCharacter, wordRunDirectionSpan } from './layout/script-compatibility.js';
 
-const options = {
+const options = Object.freeze({
   isTab: (segment: unknown) => 'isTab' in (segment as object),
   isRtlMarked: (segment: unknown) => (segment as { rtl?: unknown }).rtl === true,
   digitsAsAN: (segment: unknown) => (segment as { digitsAsAN?: unknown }).digitsAsAN === true,
   isRtlAmbiguous: wordRtlAmbiguousCharacter,
   directionFromAnyOdd: true,
-};
+});
 export type LineVisualOrder = SegmentLineVisualOrder;
 export type LineOrderModel = 'line-level' | 'word';
 
@@ -36,9 +36,9 @@ export function paragraphLineOrderModel(input: Readonly<{
 export const segmentsHaveRtl = (segments: readonly unknown[]): boolean =>
   segmentLineHasRtl(segments, options);
 // WORD_RUN_DIRECTION_ISOLATE: only final authored paragraphs opt in.
-const authoredOptions = {
+const authoredOptions = Object.freeze({
   ...options, isolateDirection: wordRunDirectionSpan, isolateRequiresUniformSlices: true,
-};
+});
 // One anchor is retained per measured slice. Intra-slice resolved-level
 // boundaries are not retained, so punctuation or script changes inside one
 // slice can still be misplaced (#2076); this is not a complete bidi rewrite.
@@ -101,11 +101,13 @@ export function createLineOrderResolver(): LineOrderResolver {
           && fact.isolate === policy.isolateDirection?.(segment);
       })) return entry.visual;
     entry = undefined;
-    const facts = Object.freeze(segments.map(segment => Object.freeze({
+    // These new primitive snapshots never escape this closure or get mutated.
+    // Runtime freezes belong to the returned visual arrays, not private facts.
+    const facts: readonly OrderSegmentFacts[] = segments.map(segment => ({
       text: orderText(segment), tab: policy.isTab?.(segment) === true,
       rtl: policy.isRtlMarked?.(segment) === true, digits: policy.digitsAsAN?.(segment) === true,
       isolate: policy.isolateDirection?.(segment),
-    })));
+    }));
     const computed = certifyNativeSegmentLineOrder(segments, baseRtl, policy)
       ?? computeLineVisualOrder(segments, baseRtl, model);
     // Copy before freezing: a third-party engine may own its returned array.

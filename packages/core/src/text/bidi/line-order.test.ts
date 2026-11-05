@@ -6,7 +6,8 @@ import {
   buildVisualOrder,
 } from './line-order.js';
 import { getDefaultBidiEngine } from './engine.js';
-import { certifyNativeSegmentLineOrder, computeSegmentLineVisualOrder } from './segment-line.js';
+import { certifyNativeSegmentLineOrder, computeSegmentLineVisualOrder, type SegmentLineBidiOptions } from './segment-line.js';
+import { unicodePunctuationOrSymbol } from './char-data.js';
 
 describe('native anchor certificate', () => {
   it('retains exact tab, numeric HL1 and space-only slice directions', () => {
@@ -48,6 +49,22 @@ describe('native anchor certificate', () => {
     const visual = certifyNativeSegmentLineOrder(segments, true, options)
       ?? computeSegmentLineVisualOrder(segments, true, options);
     expect(visual).toEqual({ order: [1, 0], rtl: [false, true] });
+  });
+
+  it('refuses a repeated numeric piece after its mutable character policy changes', () => {
+    let pieces = 0;
+    const options: SegmentLineBidiOptions = {
+      directionFromAnyOdd: true,
+      isRtlMarked: () => {
+        if (++pieces === 2) options.isRtlAmbiguous = () => false;
+        return true;
+      },
+      isRtlAmbiguous: unicodePunctuationOrSymbol,
+    };
+    // Only the first piece has an HL1 R period. The second has no R anchor;
+    // reusing the first classification would falsely certify both as RTL.
+    expect(certifyNativeSegmentLineOrder([{ text: '12.50' }, { text: '12.50' }], true, options))
+      .toBeUndefined();
   });
 });
 

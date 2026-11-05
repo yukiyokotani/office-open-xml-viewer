@@ -1,8 +1,9 @@
 export { getDefaultBidiEngine, getBidiEngineLifecycleToken } from './engine.js';
+export { unicodePunctuationOrSymbol } from './char-data.js';
 import { getDefaultBidiEngine } from './engine.js';
 import { hasStrongRtl, OBJECT_PLACEHOLDER, buildVisualOrder } from './line-order.js';
 import type { BidiClass } from './types.js';
-import { bidiClass, bracket } from './char-data.js';
+import { bidiClass, bracket, unicodePunctuationOrSymbol } from './char-data.js';
 import { isUnmodifiedNativeBidiEngine } from './uax9/index.js';
 
 export interface SegmentLineBidiOptions {
@@ -76,22 +77,24 @@ export function certifyNativeSegmentLineOrder(
   const kinds = new Uint8Array(segments.length);
   const rtl: boolean[] = [];
   let hasL = false;
-  for (const segment of segments) {
-    if (typeof segment !== 'object' || segment === null) return undefined;
-    const isolate = options.isolateDirection?.(segment);
-    const text = textOf(segment);
-    if (options.isTab?.(segment) === true) {
-      if ((isolate !== undefined && isolate !== 'rtl')
-        || (text !== undefined && text.length !== 0)) return undefined;
-      kinds[rtl.length] = TAB;
-      rtl.push(true);
-      continue;
-    }
-    if (text === undefined || text.length === 0) return undefined;
+  // Only an immutable own reference to this closed, stateless primitive can
+  // skip repeated character callbacks. Mutable/accessor/unknown policies keep
+  // the full scan; never freeze or register a caller's policy as trusted.
+  let reuseAdjacent = false;
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(options, 'isRtlAmbiguous');
+    reuseAdjacent = descriptor?.value === unicodePunctuationOrSymbol
+      && descriptor.writable === false && descriptor.configurable === false;
+  } catch { /* Unknown policy proxies keep the existing full scan. */ }
+  let previousText: string | undefined;
+  let previousRtl = false;
+  let previousDigits = false;
+  let previousIsolate: 'ltr' | 'rtl' | undefined;
+  let previousKind: number | undefined;
+
+  const classifyPiece = (text: string, digitsAsAN: boolean, rtlMarked: boolean): number | undefined => {
     let contentEnd = text.length;
     while (contentEnd > 0 && text[contentEnd - 1] === ' ') contentEnd--;
-    const digitsAsAN = options.digitsAsAN?.(segment) === true;
-    const rtlMarked = options.isRtlMarked?.(segment) === true;
     let hasR = false;
     let rightEligible = true;
     let leftEligible = true;
@@ -115,19 +118,41 @@ export function certifyNativeSegmentLineOrder(
       if (offset < contentEnd && (effective === 'R' || effective === 'AL')) hasR = true;
       offset += cp > 0xffff ? 2 : 1;
     }
-    if (contentEnd === 0) {
-      if (isolate !== undefined && isolate !== 'rtl') return undefined;
-      kinds[rtl.length] = SPACE;
-      rtl.push(false);
-    } else if (rightEligible && hasR) {
-      if (isolate !== undefined && isolate !== 'rtl') return undefined;
-      kinds[rtl.length] = RIGHT;
+    if (contentEnd === 0) return SPACE;
+    if (rightEligible && hasR) return RIGHT;
+    if (leftEligible && first === 'L' && (lastContent === 'L' || lastContent === 'EN')) return LEFT;
+    return undefined;
+  };
+  for (const segment of segments) {
+    if (typeof segment !== 'object' || segment === null) return undefined;
+    const isolate = options.isolateDirection?.(segment);
+    const text = textOf(segment);
+    if (options.isTab?.(segment) === true) {
+      if ((isolate !== undefined && isolate !== 'rtl')
+        || (text !== undefined && text.length !== 0)) return undefined;
+      kinds[rtl.length] = TAB;
       rtl.push(true);
-    } else if (leftEligible && first === 'L' && (lastContent === 'L' || lastContent === 'EN')) {
-      kinds[rtl.length] = LEFT;
-      rtl.push(false);
-      hasL = true;
-    } else return undefined;
+      previousText = undefined;
+      previousKind = undefined;
+      continue;
+    }
+    if (text === undefined || text.length === 0) return undefined;
+    const digitsAsAN = options.digitsAsAN?.(segment) === true;
+    const rtlMarked = options.isRtlMarked?.(segment) === true;
+    // Per-segment hooks above remain fresh even on a hit. This constant local
+    // workspace reuses only intrinsic kind, never space context or geometry.
+    const adjacent = reuseAdjacent && previousKind !== undefined && text === previousText
+      && rtlMarked === previousRtl && digitsAsAN === previousDigits && isolate === previousIsolate;
+    const kind = adjacent ? previousKind : classifyPiece(text, digitsAsAN, rtlMarked);
+    if (kind === undefined || (kind !== LEFT && isolate !== undefined && isolate !== 'rtl')) return undefined;
+    previousText = text;
+    previousRtl = rtlMarked;
+    previousDigits = digitsAsAN;
+    previousIsolate = isolate;
+    previousKind = kind;
+    kinds[rtl.length] = kind;
+    rtl.push(kind === RIGHT);
+    if (kind === LEFT) hasL = true;
   }
   if (hasL) {
     for (let start = 0; start < kinds.length;) {

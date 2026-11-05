@@ -12,6 +12,15 @@ import {
 
 export { UNICODE_VERSION } from './char-data.generated.js';
 
+const PUNCTUATION_OR_SYMBOL = /[\p{P}\p{S}]/u;
+
+/** Stateless ECMAScript Unicode General_Category predicate. This preserves
+ * host regex semantics; it is not a claim about the pinned UCD table version.
+ * No global/sticky flag or caller-owned state participates in classification. */
+export function unicodePunctuationOrSymbol(character: string): boolean {
+  return PUNCTUATION_OR_SYMBOL.test(character);
+}
+
 /** Bidi_Class index (into BIDI_CLASS_NAMES) for a code point. */
 function bidiClassIndex(cp: number): number {
   // Binary search for the greatest range start <= cp. Ranges are gap-free and
