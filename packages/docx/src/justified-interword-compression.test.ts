@@ -161,6 +161,33 @@ describe('WORD_JUSTIFIED_INTERWORD_COMPRESSION', () => {
     }
   });
 
+  it.each([
+    { label: 'authored RTL mark', word: 'word', extra: 'seventh', rtl: true },
+    { label: 'unmarked RTL text', word: 'אבגד', extra: 'אבגדהוז', rtl: false },
+  ])('preserves natural-width partitions outside the LTR capability: $label', async ({ word, extra, rtl }) => {
+    // Six four-glyph words and their following spaces occupy 216.04pt;
+    // the seven-glyph next word exceeds the remaining 265.9pt cell at its
+    // natural Courier advance. The new alignment capability must preserve
+    // that partition when source gaps need RTL physical-edge ownership.
+    for (const alignment of ['distribute', 'lowKashida'] as const) {
+      const canvas = georgiaCanvas();
+      const context = canvas.getContext('2d') as CanvasRenderingContext2D;
+      const measure = context.measureText.bind(context);
+      context.measureText = value => {
+        const width = [...value].length * Number(/([\d.]+)px/.exec(context.font)?.[1] ?? 12) * 1229 / 2048;
+        return { ...measure(value), width, actualBoundingBoxRight: width };
+      };
+      const element = paragraph(`Row\t${Array(6).fill(word).join(' ')} ${extra}`, alignment, 12, false,
+        { fontFamily: 'Courier New', rtl }) as DocParagraph;
+      element.tabStops = [{ pos: 216, alignment: 'start', leader: 'none' }];
+      const [first, second] = await renderLines(element as BodyElement, 481.9, { compatibilityMode: 15 }, {}, canvas);
+      const visibleWords = (line: readonly DocxTextRunInfo[]) => line.map(run => run.text)
+        .join(' ').replace('Row', '').trim().split(/\s+/).filter(Boolean);
+      expect.soft(visibleWords(first!), alignment).toHaveLength(6);
+      expect.soft(visibleWords(second!), alignment).toEqual([extra]);
+    }
+  });
+
   it('preserves a native space-to-letter pair only when its tokens share a line', async () => {
     // An independent whole-string measure owns this boundary: the stub adds
     // a 200/2048 em space-T pair, in addition to its ordinary letter pairs.

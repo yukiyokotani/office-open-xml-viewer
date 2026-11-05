@@ -1590,8 +1590,6 @@ export function planLine(input: PlanLineInput): LineLayout {
   // WORD_KASHIDA_LINE_FIT: soft-wrapped kashida and thaiDistribute lines
   // open no inter-CJK gaps.
   const softLineSpacesOnly = softWrapped && wordSoftLineJustifiesAtSpacesOnly(input.alignment);
-  const opensCjkExpansion = !((line.endsWithBreak || (input.isLastLine && input.endsAtHardBreak === true))
-    && !lineEndOpensCjkGaps(input)) && !softLineSpacesOnly;
   // Every line is justified only after its last tab: the stops before it keep
   // their positions (WORD_ALIGNED_TAB_CELL_FIT_BACK; soft-wrapped lines too).
   const afterLastTab = lastTabSegmentIndex(segments) + 1;
@@ -1700,7 +1698,14 @@ export function planLine(input: PlanLineInput): LineLayout {
     perGapPt = distribution?.perGap ?? 0;
     stretchByIndex = distribution?.perSeg ?? null;
     distributedWidthPt = distributedDelta(distribution);
-  } else if (line.justifiedCompressionPt !== undefined) {
+  } else if (line.justifiedCompressionPt !== undefined
+    && (line.justifiedCompressionPt > 0
+      || (input.alignment !== 'distribute' && input.alignment !== 'lowKashida'))) {
+    // The added distribute/lowKashida capability owns admission and accepted
+    // contraction only. Uncompressed lines retain their previous positive
+    // geometry: source gaps inside opposite-direction run slices still lack
+    // physical-edge ownership (#2090), so this scalar fit plan cannot replace
+    // that expansion model. Existing both/justify C0 planning stays unchanged.
     const model = line.gapPlan;
     if (!model) throw new Error('Justified line is missing its retained gap plan');
     const retainedNaturalWidthPt = naturalWidthPt;
@@ -1725,11 +1730,6 @@ export function planLine(input: PlanLineInput): LineLayout {
       const expansionGaps = afterTab > 0
         ? model.expansionGaps.filter((gap) => gap.segIndex >= afterTab)
         : model.expansionGaps;
-      // The retained path uses the same line-owned expansion policy as the
-      // generic path below. Negative accepted compression keeps its acquired
-      // gaps and sum; only unweighted positive inter-CJK expansion is excluded.
-      const lineExpansionGaps = opensCjkExpansion
-        ? expansionGaps : expansionGaps.filter((gap) => gap.kind !== 'boundary');
       const distribution = keepGraphemeSafeCuts(distributeProportionalSlack(
         [], compressionSlackPt - autoSpaceTakenPt, {
           gapModel: {
@@ -1742,8 +1742,8 @@ export function planLine(input: PlanLineInput): LineLayout {
           proportional: true,
           unweightedExpansion: {
             gaps: hangingLineEndSpacePt > 0
-              ? withoutHangingSpaceGaps(lineExpansionGaps, segments)
-              : lineExpansionGaps,
+              ? withoutHangingSpaceGaps(expansionGaps, segments)
+              : expansionGaps,
             // The fit's visible width drops hanging line-end U+0020 and
             // U+3000 (WORD_LINE_END_SPACE_HANGS); the unweighted expansion
             // drops the same part, looking through zero-advance anchor hosts.
@@ -1783,7 +1783,10 @@ export function planLine(input: PlanLineInput): LineLayout {
       // A soft-wrapped line does too under the kashida types and
       // thaiDistribute, so a space-free CJK line keeps its natural width
       // (WORD_KASHIDA_LINE_FIT).
-      residualSlackPt > 0 && opensCjkExpansion,
+      residualSlackPt > 0
+        && !((line.endsWithBreak || (input.isLastLine && input.endsAtHardBreak === true))
+          && !lineEndOpensCjkGaps(input))
+        && !softLineSpacesOnly,
       input.alignment === 'thaiDistribute' && residualSlackPt > 0,
       // Only soft-wrapped and manual-break-ended lines were measured; a piece
       // ended by a page or column break keeps the equal spread.

@@ -618,7 +618,12 @@ export const WORD_JUSTIFIED_INTERWORD_COMPRESSION = defineCompatibilityRule({
  * instead move that word down. This bounded cross-alignment observation reuses
  * the existing proportional comparison and quarter-space cap, without claiming
  * that their thresholds were independently swept for the two new alignments.
- * Existing direction, grid, bounded-width and shaping exclusions still apply.
+ * The added alignments enable admission/contraction only; uncompressed
+ * expansion retains its existing projection until bidi gaps have source-owned
+ * physical edges. Paragraph acquisition additionally bounds the new alignments
+ * to base-LTR content without strong RTL text or authored RTL marks; the scalar
+ * gap model does not own mixed/RTL source edges. Existing both/justify behavior
+ * and the grid, width and shaping exclusions remain unchanged.
  */
 export function wordJustifiedInterwordCompressionApplies(
   alignment: string | null | undefined,

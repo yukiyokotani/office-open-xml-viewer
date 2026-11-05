@@ -88,6 +88,17 @@ const MODES: Array<DocSettings | undefined> = [undefined, { compatibilityMode: 1
 const WORDS = Array.from({ length: 20 }, () => 'aaaa').join(' ');
 const wordsOn = (line: LineLayout): number => characters(line).length / 4;
 
+it('preserves uncompressed mixed-run distribute extents while fitting gains compression', () => {
+  const [line] = lines(para([
+    textRun('Label '), textRun('אבגד אבג אבג', { rtl: true }),
+  ], 'distribute'), MODE_15);
+  // The short source fits naturally. Reusing scalar compression opportunities
+  // for its positive slack puts a gap beyond the final physical word instead
+  // of retaining the established full-band visible extent.
+  expect(start(line!)).toBeCloseTo(20);
+  expect(end(line!)).toBeCloseTo(380);
+});
+
 it('places the authored leading label before its Arabic island in production layout', () => {
   const content = 'Label هذا نص عربي';
   const [first] = lines(para([textRun(content)], 'left', { bidi: true }), MODE_15);
