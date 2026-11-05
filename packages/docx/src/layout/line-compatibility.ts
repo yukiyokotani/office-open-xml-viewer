@@ -584,10 +584,7 @@ export function wordUnmarkedArabicKashidaChargesSourceSpace(
     || ('optionalHyphen' in run && run.optionalHyphen)
     || ('noteSeparatorCharacter' in run && run.noteSeparatorCharacter)
     || /[\t\r\n\u00ad\ufffc]/u.test(run.text)) return false;
-  for (const character of run.text) {
-    if (/\p{Script=Arabic}/u.test(character) && /\p{Letter}/u.test(character)) return true;
-  }
-  return false;
+  return /(?=\p{Script=Arabic})\p{Letter}/u.test(run.text);
 }
 
 export const WORD_RTL_JUSTIFIED_VISIBLE_FIT = defineCompatibilityRule({
