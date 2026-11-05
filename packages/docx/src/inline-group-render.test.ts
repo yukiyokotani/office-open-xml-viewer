@@ -23,6 +23,17 @@ function inlineGroup(): string {
   return `<w:r><w:drawing><wp:inline><wp:extent cx="${36 * EMU}" cy="${20 * EMU}"/><wp:docPr id="1" name="inline group"/><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup"><wpg:wgp><wpg:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${36 * EMU}" cy="${20 * EMU}"/><a:chOff x="0" y="0"/><a:chExt cx="${36 * EMU}" cy="${20 * EMU}"/></a:xfrm></wpg:grpSpPr>${shape('0000FF')}<pic:pic><pic:nvPicPr><pic:cNvPr id="2" name="middle.png"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="rIdImage"/></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${36 * EMU}" cy="${20 * EMU}"/></a:xfrm><a:prstGeom prst="rect"/></pic:spPr></pic:pic>${shape('00FF00')}</wpg:wgp></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>`;
 }
 
+function inlineTextFramesDocx(): Uint8Array {
+  const paragraphs = ['vert', 'eaVert', 'vert270'].map((direction, index) =>
+    `<w:p><w:pPr><w:spacing w:before="0" w:after="120"/></w:pPr><w:r><w:drawing><wp:inline><wp:extent cx="${200 * EMU}" cy="${300 * EMU}"/><wp:docPr id="${index + 1}" name="Frame ${index + 1}"/><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:cNvSpPr txBox="1"/><wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${200 * EMU}" cy="${300 * EMU}"/></a:xfrm><a:prstGeom prst="rect"/></wps:spPr><wps:txbx><w:txbxContent><w:p><w:r><w:t>BOX</w:t></w:r></w:p></w:txbxContent></wps:txbx><wps:bodyPr vert="${direction}"><a:noAutofit/></wps:bodyPr></wps:wsp></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>`,
+  ).join('');
+  return storeZip(new Map([
+    ['[Content_Types].xml', encoder.encode('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>')],
+    ['_rels/.rels', encoder.encode('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="doc" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>')],
+    ['word/document.xml', encoder.encode(`<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><w:body>${paragraphs}<w:sectPr><w:pgSz w:w="12000" w:h="22000"/><w:pgMar w:top="400" w:right="400" w:bottom="400" w:left="400"/></w:sectPr></w:body></w:document>`)],
+  ]));
+}
+
 function docx(kind: string, unsupported: boolean | 'sibling' = false): Uint8Array {
   const document = `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture" xmlns:wpg="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><w:body><w:p><w:r><w:t>BEFORE</w:t></w:r>${kind === 'DrawingML' ? inlineGroup() : `<w:r><w:pict><v:group style="width:36pt;height:20pt" coordsize="360,200"><v:rect style="width:360;height:200" fillcolor="blue" stroked="f"/><v:shape style="width:360;height:200"><v:imagedata r:id="rIdImage"/></v:shape><v:rect style="width:360;height:200" fillcolor="lime" stroked="f"/>${unsupported === true ? '<v:rect style="width:10;height:10"><v:unavailable-decoration/></v:rect>' : ''}</v:group>${unsupported === 'sibling' ? '<v:rect style="width:10pt;height:10pt"><v:unavailable-decoration/></v:rect>' : ''}</w:pict></w:r>`}<w:r><w:t>AFTER</w:t></w:r></w:p><w:sectPr><w:pgSz w:w="15840" w:h="12240"/><w:pgMar w:top="0" w:right="0" w:bottom="0" w:left="0"/></w:sectPr></w:body></w:document>`;
   return storeZip(new Map([
@@ -99,6 +110,32 @@ beforeAll(async () => {
 afterEach(() => vi.unstubAllGlobals());
 
 describe('inline groups through DOCX parse and render', () => {
+  it('advances parsed inline WPS frames by their authored height without an outer-run strut', () => {
+    const archive = new DocxArchive(inlineTextFramesDocx());
+    let model;
+    try {
+      model = normalizeInternalDocumentModel(
+        JSON.parse(new TextDecoder().decode(archive.parse())),
+      ).document;
+    } finally {
+      archive.free();
+    }
+    const measureContext = recordingCanvas().canvas.getContext('2d');
+    const layout = layoutDocument(model, createLayoutServices(model, { measureContext }));
+    expect(layout.pages).toHaveLength(1);
+    const paragraphs = layout.pages[0]!.layers.body.filter(node => node.kind === 'paragraph');
+    expect(paragraphs).toHaveLength(3);
+    // The full parser/run path must not add an invisible outer text strut to
+    // a box-only paragraph: 300 pt frames plus authored 6 pt after-spacing.
+    expect(paragraphs.map(node => node.drawings[0]!.flowBounds.yPt)).toEqual([20, 326, 632]);
+    for (const node of paragraphs) {
+      expect(node.drawings).toHaveLength(1);
+      expect(node.drawings[0]!.flowBounds.widthPt).toBe(200);
+      expect(node.drawings[0]!.flowBounds.heightPt).toBe(300);
+      expect(node.advancePt).toBe(306);
+    }
+  });
+
   it.each(['body', 'header', 'footer', 'footnote', 'endnote'])('discloses unacquired root VML groups from the %s part through layout', story => {
     // Part 4 §19.1.2.7 permits auto sizing. Acquisition currently requires a
     // concrete box, so this early return has no retained unsupported marker.
