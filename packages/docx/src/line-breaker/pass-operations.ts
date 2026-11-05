@@ -1861,22 +1861,40 @@ function gapSegment(state: Pick<PassOperationState, 'strAdvance' | 'scale' | 'ch
     if (segment.fitTextRegionIndex !== undefined) {
       return { widthPx: segment.measuredWidth, spacePx: 0, ...(segmentsHaveRtl([segment]) ? { rtl: true } : {}) };
     }
-    const spaceWidths = new Map<number, number>();
-    const ideographicSpaceWidths = new Map<number, number>();
+    let spaceWidths: Map<number, number> | undefined;
+    let ideographicSpaceWidths: Map<number, number> | undefined;
+    let scalarSpacePx: number | undefined;
+    const start = segment.text.indexOf(' ');
+    const singleSpace = start >= 0 && segment.text.indexOf(' ', start + 1) < 0;
     const spaceClusters = segment.shapedSpaceClusters ?? segment.shapedClusters;
     if (spaceClusters && !segment.ruby) {
-      const advances = new Map(spaceClusters.map(cluster => [cluster.range.start, cluster.advancePt]));
-      let utf16 = 0;
-      let cpOffset = 0;
-      for (const character of segment.text) {
-        if (character === ' ') {
-          const advance = advances.get(utf16);
-          if (advance === undefined) throw new Error('A text space lacks authoritative cluster geometry');
-          spaceWidths.set(cpOffset, advance * charScaleFactor(segment)
-            + segLetterSpacingPx(segment, state.characterGrid, state.scale));
+      // One contextual space has no index-dependent width: use the existing
+      // scalar representation without allocating three temporary Maps. The
+      // retained offset is UTF-16, not a codepoint index. No isolated-space
+      // measurement substitutes for this authoritative contextual advance.
+      if (singleSpace && spaceClusters.length === 1 && spaceClusters[0].range.start === start) {
+        const advance = spaceClusters[0].advancePt;
+        if (advance === undefined) throw new Error('A text space lacks authoritative cluster geometry');
+        scalarSpacePx = advance * charScaleFactor(segment)
+          + segLetterSpacingPx(segment, state.characterGrid, state.scale);
+      } else {
+        // Preserve arbitrary ordering and last-duplicate-wins. General input
+        // remains O(text + clusters), including unequal contextual spaces.
+        const advances = new Map(spaceClusters.map(cluster => [cluster.range.start, cluster.advancePt]));
+        let utf16 = 0;
+        let cpOffset = 0;
+        for (const character of segment.text) {
+          if (character === ' ') {
+            const advance = advances.get(utf16);
+            if (advance === undefined) throw new Error('A text space lacks authoritative cluster geometry');
+            const width = advance * charScaleFactor(segment)
+              + segLetterSpacingPx(segment, state.characterGrid, state.scale);
+            if (singleSpace) scalarSpacePx = width;
+            else (spaceWidths ??= new Map<number, number>()).set(cpOffset, width);
+          }
+          utf16 += character.length;
+          cpOffset += 1;
         }
-        utf16 += character.length;
-        cpOffset += 1;
       }
     }
     // U+3000 is a text cell for gaps; only the advances of those in the
@@ -1887,19 +1905,19 @@ function gapSegment(state: Pick<PassOperationState, 'strAdvance' | 'scale' | 'ch
       for (let off = characters.length - 1; off >= 0 && (characters[off] === ' ' || characters[off] === '\u3000'); off--) {
         start -= 1;
         if (characters[off] !== '\u3000') continue;
-        ideographicSpaceWidths.set(off, state.strAdvance(
+        (ideographicSpaceWidths ??= new Map<number, number>()).set(off, state.strAdvance(
           { ...segment, text: '\u3000', ...slicedTextMetadata(segment, start, start + 1) }, '\u3000'));
       }
     }
-    const start = segment.text.indexOf(' ');
-    const spacePx = spaceWidths.values().next().value ?? (start >= 0 && !segment.ruby
+    const spacePx = scalarSpacePx ?? spaceWidths?.values().next().value ?? (start >= 0 && !segment.ruby
       ? state.strAdvance({ ...segment, text: ' ', ...slicedTextMetadata(segment, start, start + 1) }, ' ')
       : 0);
     const leadingGapPx = leadingAutoSpacePx(state, segment);
     return {
       text: segment.metricOnly ? '' : segment.ruby ? undefined : segment.text,
-      widthPx: segment.measuredWidth, spacePx, spaceWidths,
-      ...(ideographicSpaceWidths.size > 0 ? { ideographicSpaceWidths } : {}),
+      widthPx: segment.measuredWidth, spacePx,
+      ...(spaceWidths ? { spaceWidths } : {}),
+      ...(ideographicSpaceWidths ? { ideographicSpaceWidths } : {}),
       ...(leadingGapPx > 0 ? { leadingGapPx } : {}),
       ...(segmentsHaveRtl([segment]) ? { rtl: true } : {}),
     };

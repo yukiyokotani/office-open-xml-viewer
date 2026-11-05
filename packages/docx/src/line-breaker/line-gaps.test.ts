@@ -107,3 +107,44 @@ it('uses both observed compression boundaries, including one and zero gaps', () 
     expect(result !== undefined).toBe(accepted);
   }
 });
+
+
+describe('retained contextual space projection through line acquisition', () => {
+  const cluster = (start: number, advancePt: number): NonNullable<LayoutTextSeg['shapedSpaceClusters']>[number] => ({
+    range: { start, end: start + 1 }, offsetPt: 0, advancePt,
+  });
+  function acquire(width: number, firstClusters = [cluster(3, 100), cluster(4, 3), cluster(3, 1)]) {
+    // Native contextual widths: emoji8 + a6, adjacent spaces1/3;
+    // b8 + its contextual space4; cccc18. Retained offsets are UTF-16,
+    // whereas gap enumeration sees the astral scalar as one code point.
+    const context = { font: '10px serif', letterSpacing: '0px', fontKerning: 'none',
+      measureText(text: string) {
+        const widths: Record<string, number> = { '😀': 8, a: 6, b: 8, c: 4.5, ' ': 1 };
+        const width = [...text].reduce((n, c) => n + (widths[c] ?? 5), 0)
+          + (text.match(/  /g)?.length ?? 0) * 2 + (text.match(/b /g)?.length ?? 0) * 3;
+        return { width, fontBoundingBoxAscent: 8, fontBoundingBoxDescent: 2,
+          actualBoundingBoxAscent: 8, actualBoundingBoxDescent: 2 } as TextMetrics;
+      },
+    } as unknown as CanvasRenderingContext2D;
+    const segment = (text: string, shapedSpaceClusters?: LayoutTextSeg['shapedSpaceClusters']): LayoutTextSeg => ({
+      text, bold: false, italic: false, underline: false, strikethrough: false,
+      fontSize: 10, color: null, fontFamily: 'serif', vertAlign: null, measuredWidth: 0,
+      ...(shapedSpaceClusters ? { shapedSpaceClusters } : {}),
+    });
+    return layoutLines(context, [segment('😀a  ', firstClusters), segment('b ', [cluster(1, 4)]), segment('cccc')],
+      width, 0, 1, [], undefined, {}, 0, undefined, undefined, undefined, undefined,
+      false, true, false, undefined, 'bounded', undefined, false, true);
+  }
+  it('keeps unequal contextual advances and the last duplicate offset across astral text', () => {
+    // Natural48 and S=1+3+4=8: the existing quarter-space cap admits2pt,
+    // refuses2.25pt. An isolated-space scalar, wrong offset or first duplicate
+    // changes this observable boundary; no internal Map shape is asserted.
+    const text = (width: number) => acquire(width).map(line => line.segments
+      .map(segment => 'text' in segment ? segment.text : '').join(''));
+    expect(text(46)).toEqual(['😀a  b cccc']);
+    expect(text(45.75)).toEqual(['😀a  b ', 'cccc']);
+  });
+  it('fails closed when retained space geometry is present but empty', () => {
+    expect(() => acquire(46, [])).toThrow('A text space lacks authoritative cluster geometry');
+  });
+});
