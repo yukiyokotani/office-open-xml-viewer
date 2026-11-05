@@ -48,28 +48,42 @@ function classOverrideForUnit(
 
 /** Exact native UAX#9 Unicode 17 (revision 51, X1-X10/W2-W7/N0-N2/I2/L1-L2)
  * execution certificate, not an alternate bidi policy.
- * No embeddings/isolates/overrides or L/NSM are admitted. W2-W7 introduce no L;
- * N0 has no brackets, N1/N2 resolve NI to R, and I2/L1 leave every guaranteed
- * R/AL content anchor at level 1. L2 therefore reverses all retained anchors.
- * ASCII-space-only slices use a level-1 fallback anchor but rtl=false because
- * the canonical content scan trims them completely; tabs have rtl=true.
- * Unknown shapes/classes or synthetic isolates require the full resolver.
+ * Explicit formatting, BN/B/S text classes, brackets/NSM and unknown shapes
+ * require full resolution; ordinary strong direction marks keep their UCD class.
+ * R/AL-bearing pieces outside opposite spans keep their level-1 odd anchor.
+ * Pure L pieces must start L, end L/EN before trailing U+0020, and contain no
+ * R/AL/AN: W2/W7 reset at their first L, N1/N2 bound interior NI by L, and their
+ * content stays level 2 both at outer base 1 and inside a synthetic LRI span.
+ * Every opposite span member must be such an L piece. Thus even a global
+ * mixed-slice fallback that removes synthetic isolates preserves these anchors.
+ * Space-only slices have rtl=false but can have level 2: with L pieces present,
+ * certify their level-1 anchor only at host start, after an R piece, or where
+ * L1 resets them before an actual S tab/end. Tabs are barriers, not strong R.
+ * Other space contexts require full resolution. L2 runs on the exact short
+ * anchor vector; the all-R case retains its direct descending order.
  * Only synchronous acquisition memo misses opt in; no result cache lives here.
  */
-export function certifyReverseSegmentLine(
+export function certifyNativeSegmentLineOrder(
   segments: readonly unknown[], baseRtl: boolean,
   options: SegmentLineBidiOptions,
 ): SegmentLineVisualOrder | undefined {
-  if (!baseRtl || !options.directionFromAnyOdd
-    || !isUnmodifiedNativeBidiEngine(getDefaultBidiEngine())) return undefined;
+  if (!baseRtl || !options.directionFromAnyOdd) return undefined;
+  const engine = getDefaultBidiEngine();
+  if (!isUnmodifiedNativeBidiEngine(engine)) return undefined;
+  // Private tags preserve real tab barriers until space certification. Reuse
+  // this backing store as the level vector only after those checks finish.
+  const SPACE = 0, RIGHT = 1, LEFT = 2, TAB = 3;
+  const kinds = new Uint8Array(segments.length);
   const rtl: boolean[] = [];
+  let hasL = false;
   for (const segment of segments) {
     if (typeof segment !== 'object' || segment === null) return undefined;
     const isolate = options.isolateDirection?.(segment);
-    if (isolate !== undefined && isolate !== 'rtl') return undefined;
     const text = textOf(segment);
     if (options.isTab?.(segment) === true) {
-      if (text !== undefined && text.length !== 0) return undefined;
+      if ((isolate !== undefined && isolate !== 'rtl')
+        || (text !== undefined && text.length !== 0)) return undefined;
+      kinds[rtl.length] = TAB;
       rtl.push(true);
       continue;
     }
@@ -79,22 +93,55 @@ export function certifyReverseSegmentLine(
     const digitsAsAN = options.digitsAsAN?.(segment) === true;
     const rtlMarked = options.isRtlMarked?.(segment) === true;
     let hasR = false;
+    let rightEligible = true;
+    let leftEligible = true;
+    let first: BidiClass | undefined;
+    let lastContent: BidiClass | undefined;
     for (let offset = 0; offset < text.length;) {
       const cp = text.codePointAt(offset)!;
       const original = bidiClass(cp);
       // Reject real controls even if a host override might replace their type.
       switch (original) {
-        case 'R': case 'AL': case 'EN': case 'AN': case 'ES': case 'ET':
+        case 'L': case 'R': case 'AL': case 'EN': case 'AN': case 'ES': case 'ET':
         case 'CS': case 'ON': case 'WS': break;
         default: return undefined;
       }
       if (bracket(cp)) return undefined;
       const effective = classOverrideForUnit(text[offset], digitsAsAN, rtlMarked, options) ?? original;
+      first ??= effective;
+      if (offset < contentEnd) lastContent = effective;
+      if (original === 'L' || effective === 'L') rightEligible = false;
+      if (effective === 'R' || effective === 'AL' || effective === 'AN') leftEligible = false;
       if (offset < contentEnd && (effective === 'R' || effective === 'AL')) hasR = true;
       offset += cp > 0xffff ? 2 : 1;
     }
-    if (contentEnd !== 0 && !hasR) return undefined;
-    rtl.push(contentEnd !== 0);
+    if (contentEnd === 0) {
+      if (isolate !== undefined && isolate !== 'rtl') return undefined;
+      kinds[rtl.length] = SPACE;
+      rtl.push(false);
+    } else if (rightEligible && hasR) {
+      if (isolate !== undefined && isolate !== 'rtl') return undefined;
+      kinds[rtl.length] = RIGHT;
+      rtl.push(true);
+    } else if (leftEligible && first === 'L' && (lastContent === 'L' || lastContent === 'EN')) {
+      kinds[rtl.length] = LEFT;
+      rtl.push(false);
+      hasL = true;
+    } else return undefined;
+  }
+  if (hasL) {
+    for (let start = 0; start < kinds.length;) {
+      if (kinds[start] !== SPACE) { start++; continue; }
+      let end = start + 1;
+      while (end < kinds.length && kinds[end] === SPACE) end++;
+      if (start !== 0 && kinds[start - 1] !== RIGHT
+        && end !== kinds.length && kinds[end] !== TAB) return undefined;
+      start = end;
+    }
+    for (let index = 0; index < kinds.length; index++) {
+      if (kinds[index] !== LEFT) kinds[index] = RIGHT;
+    }
+    return { order: engine.reorderVisual(kinds, 0, kinds.length), rtl };
   }
   const order: number[] = [];
   for (let index = segments.length - 1; index >= 0; index--) order.push(index);

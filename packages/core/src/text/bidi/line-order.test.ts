@@ -6,9 +6,9 @@ import {
   buildVisualOrder,
 } from './line-order.js';
 import { getDefaultBidiEngine } from './engine.js';
-import { certifyReverseSegmentLine, computeSegmentLineVisualOrder } from './segment-line.js';
+import { certifyNativeSegmentLineOrder, computeSegmentLineVisualOrder } from './segment-line.js';
 
-describe('native reverse-anchor certificate', () => {
+describe('native anchor certificate', () => {
   it('retains exact tab, numeric HL1 and space-only slice directions', () => {
     const segments = [{ isTab: true }, { text: '12.50', rtl: true },
       { text: ' ' }, { text: 'אבגד ', rtl: true }];
@@ -18,10 +18,23 @@ describe('native reverse-anchor certificate', () => {
       isRtlAmbiguous: (character: string) => character === '.',
       directionFromAnyOdd: true,
     };
-    expect(certifyReverseSegmentLine(segments, true, options))
+    expect(certifyNativeSegmentLineOrder(segments, true, options))
       .toEqual({ order: [3, 2, 1, 0], rtl: [true, true, false, true] });
     expect(computeSegmentLineVisualOrder(segments, true, options))
       .toEqual({ order: [3, 2, 1, 0], rtl: [true, true, false, true] });
+    const prefixed = [{ text: 'AB' }, { text: 'CD' }, segments[0], segments[1],
+      { text: ' ', rtl: true }, segments[3]];
+    const wordOptions = {
+      ...options,
+      isolateDirection: (segment: unknown): 'ltr' | 'rtl' | undefined => {
+        const s = segment as { text?: string; rtl?: boolean };
+        return s.text === undefined ? undefined : s.rtl ? 'rtl' : 'ltr';
+      },
+      isolateRequiresUniformSlices: true,
+    };
+    const expected = { order: [5, 4, 3, 2, 0, 1], rtl: [false, false, true, true, false, true] };
+    expect(certifyNativeSegmentLineOrder(prefixed, true, wordOptions)).toEqual(expected);
+    expect(computeSegmentLineVisualOrder(prefixed, true, wordOptions)).toEqual(expected);
   });
 
   it('keeps the canonical UTF-16 HL1 boundary for astral L text', () => {
@@ -32,7 +45,7 @@ describe('native reverse-anchor certificate', () => {
       isRtlAmbiguous: (character: string) => character === '\u{10400}',
       directionFromAnyOdd: true,
     };
-    const visual = certifyReverseSegmentLine(segments, true, options)
+    const visual = certifyNativeSegmentLineOrder(segments, true, options)
       ?? computeSegmentLineVisualOrder(segments, true, options);
     expect(visual).toEqual({ order: [1, 0], rtl: [false, true] });
   });

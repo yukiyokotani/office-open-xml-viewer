@@ -5,7 +5,7 @@ import {
   computeSegmentLineVisualOrder, segmentLineHasRtl,
   type SegmentLineVisualOrder, type SegmentLineBidiOptions,
   getDefaultBidiEngine, getBidiEngineLifecycleToken,
-  certifyReverseSegmentLine,
+  certifyNativeSegmentLineOrder,
 } from '@silurus/ooxml-core/internal/bidi-line';
 import { wordRtlAmbiguousCharacter, wordRunDirectionSpan } from './layout/script-compatibility.js';
 
@@ -106,7 +106,7 @@ export function createLineOrderResolver(): LineOrderResolver {
       rtl: policy.isRtlMarked?.(segment) === true, digits: policy.digitsAsAN?.(segment) === true,
       isolate: policy.isolateDirection?.(segment),
     })));
-    const computed = certifyReverseSegmentLine(segments, baseRtl, policy)
+    const computed = certifyNativeSegmentLineOrder(segments, baseRtl, policy)
       ?? computeLineVisualOrder(segments, baseRtl, model);
     // Copy before freezing: a third-party engine may own its returned array.
     const visual = Object.freeze({ order: Object.freeze([...computed.order]), rtl: Object.freeze([...computed.rtl]) });

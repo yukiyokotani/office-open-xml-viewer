@@ -92,6 +92,22 @@ describe('authored opposite-direction run ordering', () => {
     }
   });
 
+  it('preserves unresolved space and terminal-neutral anchor contexts', () => {
+    const resolve = createLineOrderResolver();
+    // L1 resets the tab, not the space AFTER it: the earlier L context can
+    // still give that space a level-2 anchor.
+    expect(resolve([{ text: 'AB', rtl: true }, { isTab: true },
+      { text: ' ', rtl: true }, { text: 'CD', rtl: true }], true, 'word'))
+      .toEqual({ order: [2, 3, 1, 0], rtl: [false, true, false, false] });
+    // An opposite unmarked space shares the LRI span with the following L.
+    expect(resolve([{ text: 'א', rtl: true }, { text: ' ' },
+      { text: 'AB' }, { text: 'ב', rtl: true }], true, 'word'))
+      .toEqual({ order: [3, 1, 2, 0], rtl: [true, false, false, true] });
+    // A terminal neutral is not bounded by L outside an isolate.
+    expect(resolve([{ text: 'AB!' }, { text: 'א', rtl: true }], true, 'line-level'))
+      .toEqual({ order: [1, 0], rtl: [true, true] });
+  });
+
   it('leaves paragraph-direction Arabic ordering and paint direction unchanged', () => {
     const segments = [{ text: 'هذا ', rtl: true }, { text: 'نص ', rtl: true }, { text: 'عربي ', rtl: true }];
     expect(computeLineVisualOrder(segments, true, 'word'))
