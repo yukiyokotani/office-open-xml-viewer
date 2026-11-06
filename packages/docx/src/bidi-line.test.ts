@@ -380,3 +380,48 @@ describe('rtl-marked run punctuation (§17.3.2.30 ambiguous → RTL)', () => {
     expect(order).toEqual([4, 3, 2, 1, 0]);
   });
 });
+
+
+describe('authored numeric common separator', () => {
+  it('leaves numeric type matching to W2 before W4 after an AL strong source', () => {
+    // Explicitly no digitsAsAN: the existing UAX W2 owns EN→AN here. The
+    // interior CS is numeric membership, not a host-side W2 reimplementation.
+    const segments = [{ text: 'ا', rtl: true }, { text: '1', rtl: true },
+      { text: '.', rtl: true }, { text: '٢', rtl: true }];
+    const visual = computeLineVisualOrder(segments, true);
+    expect(visual.order.map(i => segments[i]!.text).join('')).toBe('1.٢ا');
+    expect(visual.rtl[2]).toBe(false);
+  });
+
+  it('uses original scalar numeric neighbors, including astral EN', () => {
+    const segments = [{ text: '\u{1D7CE}', rtl: true },
+      { text: '.', rtl: true }, { text: '\u{1D7CF}', rtl: true }];
+    const visual = computeLineVisualOrder(segments, true);
+    expect(visual.order.map(i => segments[i]!.text).join('')).toBe('\u{1D7CE}.\u{1D7CF}');
+    expect(visual.rtl).toEqual([false, false, false]);
+  });
+
+  it('does not bridge tabs, objects, controls, author isolates or differing digit classes', () => {
+    const numeric = { text: '12', rtl: true };
+    const period = { text: '.', rtl: true };
+    const last = { text: '5', rtl: true };
+    // Each boundary prevents immediate matching numeric adjacency for a
+    // distinct reason; none is skipped when constructing the complete host.
+    for (const barrier of [{ isTab: true }, {}, { text: '\u200f' }]) {
+      expect(computeLineVisualOrder([numeric, barrier, period, last], true).rtl[2]).toBe(true);
+    }
+    const authored = [{ text: '12' }, period, last];
+    expect(computeLineVisualOrder(authored, true, 'word').rtl[1]).toBe(true);
+    expect(computeLineVisualOrder([{ ...numeric, digitsAsAN: true }, period, last], true).rtl[1]).toBe(true);
+  });
+
+  it.each([false, true])('keeps a formatted numeric CS bridge in numeric source order, AN=%s', digitsAsAN => {
+    // A formatting seam does not end a Unicode number. Same effective numeric
+    // class on each side permits W4; retain EN versus authored AN precedence.
+    const segments = [{ text: '12', rtl: true, digitsAsAN },
+      { text: '.', rtl: true, digitsAsAN }, { text: '5', rtl: true, digitsAsAN }];
+    const visual = computeLineVisualOrder(segments, true);
+    expect(visual.order.map(i => segments[i]!.text).join('')).toBe('12.5');
+    expect(visual.rtl).toEqual([false, false, false]);
+  });
+});
