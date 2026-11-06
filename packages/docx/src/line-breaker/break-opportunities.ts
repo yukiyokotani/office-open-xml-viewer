@@ -1,4 +1,4 @@
-import { candidateUnit } from './line-gaps.js';
+import { candidateUnitIsSingleton } from './line-gaps.js';
 import { advanceLineBoundary } from './source-cursor.js';
 import { isInklessLineItem } from './break-queue.js';
 import { lineEndSpaceCharged, lineTrailingSpaceSuffixWidth, measureFitTextUnit, measureJoinedTextUnit } from './atomic-units.js';
@@ -462,7 +462,7 @@ function processTextSegment(context: BreakOpportunityIteratorContext, seg: Layou
     && !(breakerState.justifiedCompressionPx > 0)
     && !s.optionalHyphenWord && s.explicitBreaks === undefined
     && context.fitsMeasuredWidth(breakerState.currentWidth + wForFit, availW())
-    && candidateUnit(s, breakerState.queue).length === 1;
+    && candidateUnitIsSingleton(s, breakerState.queue.peek());
   if (completeUnitFitApplies && !ordinaryAdmissionCertified
     && fitJustifiedCompression(context, s,
       context.justifiedCompressionAdmissionOnly === true ? segmentBox : undefined)) return;

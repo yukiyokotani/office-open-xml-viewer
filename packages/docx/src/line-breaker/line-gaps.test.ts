@@ -68,7 +68,10 @@ describe('structural line gaps', () => {
   });
 });
 
-it('admits a protected successor group as a whole even after a separator', () => {
+it.each([
+  { label: 'full plan', compression: true },
+  { label: 'admission only', compression: { admissionOnly: true, lineEndIdeographicSpaceHangs: false } },
+])('admits a protected successor group as a whole even after a separator ($label)', ({ compression }) => {
   const seg = (text: string, extra: Partial<LayoutTextSeg> = {}): LayoutTextSeg => ({
     text, bold: false, italic: false, underline: false, strikethrough: false,
     fontSize: 10, color: null, fontFamily: 'serif', vertAlign: null, measuredWidth: 0, ...extra,
@@ -83,7 +86,7 @@ it('admits a protected successor group as a whole even after a separator', () =>
     seg('-', { joinPrev: true, hardJoinPrev: true, noBreakRanges: [{ start: 0, end: 1 }] }),
     seg('xyz', { joinPrev: true, hardJoinPrev: true }),
   ], 70, 0, 1, [], undefined, {}, 0, undefined, undefined, undefined, undefined,
-  false, true, false, undefined, 'bounded', undefined, false, true);
+  false, true, false, undefined, 'bounded', undefined, false, compression);
   expect(lines.map(line => line.segments.map(s => 'text' in s ? s.text : '').join('')))
     .toEqual(['lead ', 'ab -xyz']);
 });
