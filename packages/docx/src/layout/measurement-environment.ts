@@ -70,9 +70,13 @@ export function docDefaultFontSizePt(document: DocxDocumentModel): number {
 
 export function paragraphMeasurementEnvironment(
   state: BodyMeasurementContext,
+  // Intrinsic cell measurement retains its parent's page environment. Only
+  // the closing-pair source provenance comes from the actual entered story;
+  // every other policy below continues to use the original state.
+  closingPairSourceStory: StoryContext | undefined = state.storyContext,
 ): ParagraphMeasurementEnvironment {
   return {
-    ...(state.storyContext?.story === 'body' && state.storyContext.containers.length === 0
+    ...(closingPairSourceStory?.story === 'body' && closingPairSourceStory.containers.length === 0
       ? { closingPairRootSource: true as const } : {}),
     pageIndex: state.pageIndex,
     totalPages: state.totalPages,
