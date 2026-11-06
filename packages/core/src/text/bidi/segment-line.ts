@@ -14,6 +14,10 @@ export interface SegmentLineBidiOptions {
   /** Word's bidi-language digits are classified AN. */
   digitsAsAN?: (segment: unknown) => boolean;
   isRtlAmbiguous?: (character: string) => boolean;
+  /** Internal host HL1 policy: preserve an original CS between numeric
+   * effective EN/AN in the complete authored host (§17.3.2.30 / UAX#9 W4).
+   * Omitted by ordinary character-only consumers and DrawingML formats. */
+  preserveRtlNumericCS?: boolean;
   /** Word paints a whole word slice RTL if any non-space unit is odd-level. */
   directionFromAnyOdd?: boolean;
   /** Host-authored direction of a text span. Consecutive opposite-direction
@@ -90,6 +94,18 @@ export function certifyNativeSegmentLineOrder(
   if (!baseRtl || !options.directionFromAnyOdd) return undefined;
   const engine = getDefaultBidiEngine();
   if (!isUnmodifiedNativeBidiEngine(engine)) return undefined;
+  // This policy must be one stable fact for the complete certificate. A
+  // mutable/accessor/inherited opt-in cannot be captured like private frozen
+  // DOCX options; use canonical resolution instead, without invoking getters.
+  let preserveNumericCS = false;
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(options, 'preserveRtlNumericCS');
+    if (descriptor) {
+      if (!('value' in descriptor) || descriptor.writable !== false || descriptor.configurable !== false) return undefined;
+      preserveNumericCS = descriptor.value === true;
+    } else if ('preserveRtlNumericCS' in options) return undefined;
+  } catch { return undefined; }
+
   // Private tags preserve real tab barriers until space certification. Reuse
   // this backing store as the level vector only after those checks finish.
   const SPACE = 0, RIGHT = 1, LEFT = 2, TAB = 3;
@@ -108,6 +124,7 @@ export function certifyNativeSegmentLineOrder(
   let previousText: string | undefined;
   let previousRtl = false;
   let previousDigits = false;
+
   let previousIsolate: 'ltr' | 'rtl' | undefined;
   let previousKind: number | undefined;
 
@@ -129,7 +146,11 @@ export function certifyNativeSegmentLineOrder(
         default: return undefined;
       }
       if (bracket(cp)) return undefined;
-      const effective = classOverrideForUnit(text[offset], digitsAsAN, rtlMarked, options) ?? original;
+      const override = classOverrideForUnit(text[offset], digitsAsAN, rtlMarked, options);
+      // A neighboring source piece can complete this numeric context. The
+      // intrinsic certificate cannot decide it; canonical assembly must.
+      if (preserveNumericCS && original === 'CS' && override === 'R') return undefined;
+      const effective = override ?? original;
       first ??= effective;
       if (offset < contentEnd) lastContent = effective;
       if (original === 'L' || effective === 'L') rightEligible = false;
@@ -255,6 +276,7 @@ export function computeSegmentLineSourceCellOrder(
     || options.isTab !== legacyOptions.isTab || options.isRtlMarked !== legacyOptions.isRtlMarked
     || options.digitsAsAN !== legacyOptions.digitsAsAN
     || options.isRtlAmbiguous !== legacyOptions.isRtlAmbiguous
+    || options.preserveRtlNumericCS !== legacyOptions.preserveRtlNumericCS
     || options.directionFromAnyOdd !== legacyOptions.directionFromAnyOdd
     || (legacyOptions.isolateDirection !== undefined
       && (legacyOptions.isolateDirection !== options.isolateDirection
@@ -294,6 +316,9 @@ function computeSegmentLineOrder(
   // HL1 positions need storage; the array can remain sparse.
   let override: (BidiClass | undefined)[] | undefined;
   let hasIsolate = false;
+  // Allocate only for old R overrides which might be numeric separators.
+  // All other/default paths retain the original override construction.
+  let numericCS: number[] | undefined;
   const isolates = options.isolateDirection
     ? segments.map(segment => {
       const direction = options.isolateDirection!(segment);
@@ -323,9 +348,33 @@ function computeSegmentLineOrder(
       for (let offset = start[i]; offset < end[i]; offset++) {
         const value = classOverrideForUnit(full[offset], digitsAsAN, rtlMarked, options);
         if (value !== undefined) classes[offset] = value;
+        if (value === 'R' && options.preserveRtlNumericCS
+          && bidiClass(full.charCodeAt(offset)) === 'CS') (numericCS ??= []).push(offset);
       }
     }
     if (isolate !== undefined && isolates![i + 1] !== isolate) full += '\u2069';
+  }
+  if (numericCS) {
+    const numericAt = (offset: number): 'EN' | 'AN' | undefined => {
+      if (offset < 0 || offset >= full.length) return undefined;
+      const original = bidiClass(full.codePointAt(offset)!);
+      // Only the preexisting digit override can change a numeric class here;
+      // prior separator decisions never become a neighbor's digit authority.
+      const type = original === 'EN' && override?.[offset] === 'AN' ? 'AN' : original;
+      return type === 'EN' || type === 'AN' ? type : undefined;
+    };
+    for (const offset of numericCS) {
+      let previous = offset - 1;
+      // Previous numeric code point may be astral. Never classify its low
+      // surrogate as an independent source neighbor.
+      if (previous > 0 && full.charCodeAt(previous) >= 0xdc00 && full.charCodeAt(previous) <= 0xdfff
+        && full.charCodeAt(previous - 1) >= 0xd800 && full.charCodeAt(previous - 1) <= 0xdbff) previous--;
+      const left = numericAt(previous);
+      // Numeric membership precedes W2: an EN neighbor may become AN after
+      // an earlier AL. Preserve CS here; the SAME UAX pass decides W2/W4
+      // matching and subsequent neutral resolution, not this host predicate.
+      if (left !== undefined && numericAt(offset + 1) !== undefined) delete override![offset];
+    }
   }
   const { levels, paragraphLevel } = getDefaultBidiEngine().computeLevels(
     full, baseRtl ? 'rtl' : 'ltr', override,
