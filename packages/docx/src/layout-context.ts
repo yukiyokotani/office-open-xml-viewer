@@ -1,3 +1,4 @@
+import { paragraphKinsokuDisabled, paragraphOffLineEdges, paragraphOffJapaneseAdmitted } from './layout/kinsoku-off-edges.js';
 import {
   resolveKinsokuRules,
   type KinsokuRules,
@@ -34,6 +35,9 @@ import type {
 
 export interface DocumentLayoutSettings {
   readonly kinsoku: KinsokuRules;
+  readonly hasCustomKinsokuRules?: true;
+  /** Positive internal sealed-source capability; never parser/public wire. */
+  readonly paragraphOffBodySource?: (paragraph: ParagraphLayoutSource) => boolean;
   readonly defaultTabPt: number;
   readonly characterSpacingControl?: string;
   readonly mathDefJc?: string;
@@ -194,6 +198,10 @@ export interface ParagraphLayoutContext {
   readonly hasRuby: boolean;
   readonly hasEastAsianText: boolean;
   readonly kinsoku: KinsokuRules;
+  /** Observed bounded cut legality; never paragraph semantics or intrinsic policy. */
+  readonly lineEdgeRules?: KinsokuRules;
+  /** Document-base rules for a compatibility textbox, never its host OFF toggle. */
+  readonly documentKinsoku?: KinsokuRules;
   readonly defaultTabPt: number;
   /** ECMA-376 §17.3.1.21 — omission on the source paragraph resolves true. */
   readonly overflowPunct?: boolean;
@@ -252,6 +260,8 @@ export function resolveDocumentLayoutSettings(
   prepareBodyFrameMetadata(document.body);
   return {
     kinsoku: resolveKinsokuRules(document.settings),
+    ...(document.settings?.noLineBreaksBefore !== undefined || document.settings?.noLineBreaksAfter !== undefined
+      ? { hasCustomKinsokuRules: true as const } : {}),
     defaultTabPt: resolveDefaultTabPt(document.settings),
     characterSpacingControl: document.settings?.characterSpacingControl,
     mathDefJc: document.settings?.mathDefJc,
@@ -391,6 +401,7 @@ export function resolveParagraphLayoutContext(
     && (!hasTableCellContainer(story) || settings.compat.adjustLineHeightInTable);
   const characterGridActive = isSectionCharacterGrid(section.grid.kind);
   const baseRtl = paragraph.bidi === true;
+  const paragraphOffAdmitted = paragraphOffJapaneseAdmitted(settings, section, story, paragraph);
   const insideTableCell = hasTableCellContainer(story);
   const characterPitchPt = characterGridActive
     ? settings.normalStyleFontSizePt + (section.grid.charSpacePt ?? 0)
@@ -463,7 +474,9 @@ export function resolveParagraphLayoutContext(
     tabStops: effectiveParagraphTabStops(paragraph),
     hasRuby: paragraphHasRuby(paragraph),
     hasEastAsianText: paragraphHasEastAsianText(paragraph),
-    kinsoku: settings.kinsoku,
+    kinsoku: paragraphOffAdmitted ? paragraphKinsokuDisabled(settings.kinsoku) : settings.kinsoku,
+    ...(paragraphOffAdmitted ? { documentKinsoku: settings.kinsoku } : {}),
+    ...withParagraphOffLineEdges(paragraphOffLineEdges(settings, paragraph, paragraphOffAdmitted)),
     defaultTabPt: settings.defaultTabPt,
     overflowPunct: paragraph.overflowPunct !== false,
     // word-justification-punctuation-hang, admitted only for the measured
@@ -483,11 +496,11 @@ export function resolveParagraphLayoutContext(
         && !characterGridActive,
       insideTableCell,
       // The retained paragraph fact only admits the ON hanging extension.
-      // Keep the existing rules above: general paragraph-off line breaking
-      // (#2079) remains unsupported here.
+      // Paragraph-OFF edge policy is resolved independently above.
       paragraph.kinsoku === false,
       settings.compat.compatibilityMode,
       settings.kinsoku.enabled,
+      paragraphOffAdmitted,
     )),
     ...(paragraph.wordWrap === false ? { wordWrap: false as const } : {}),
     ...(paragraph.endsAtHardBreak === true ? { endsAtHardBreak: true as const } : {}),
@@ -539,4 +552,8 @@ export function resolveRunLayoutContext(
       deltaPt: active ? paragraph.characterGrid.deltaPt : 0,
     },
   };
+}
+
+function withParagraphOffLineEdges(rules: KinsokuRules | undefined): { lineEdgeRules?: KinsokuRules } {
+  return rules ? { lineEdgeRules: rules } : {};
 }

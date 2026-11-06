@@ -999,9 +999,12 @@ const ALL_WORD_OVERFLOW_PUNCTUATION = new Set([
 ]);
 const LATIN_WORD_OVERFLOW_PUNCTUATION = new Set(['.', ',']);
 
-/** {@link WORD_JUSTIFICATION_PUNCTUATION_HANG} policy for a CJK closing mark
- * in its measured scope: at most one mark hangs ('one'), or none does. */
-export type CjkClosingMarkHang = 'one' | 'none';
+/** Registered CJK punctuation authority. 'one'/'none' retain the established
+ * measured policy; undefined preserves unmeasured legacy overflow behavior.
+ * 'one-from-fitting-prefix' is the approved Japanese pre15 paragraph-OFF
+ * body class: the same one-mark refusal plus an actually fitting unextended
+ * prefix. It does not normalize document-OFF or other legacy callers. */
+export type CjkClosingMarkHang = 'one' | 'none' | 'one-from-fitting-prefix';
 
 /** The policy for a paragraph in the measured class (see
  * StoryContext.closingMarkHangAdmitted in layout-context.ts) with a measured
@@ -1016,15 +1019,26 @@ export function wordCjkClosingMarkHang(
   paragraphKinsokuOff = false,
   compatibilityMode?: number,
   documentKinsokuEnabled = true,
+  boundedJapaneseParagraphOff = false,
 ): CjkClosingMarkHang | undefined {
   if (!measuredScope) return undefined;
+  // Registered word-paragraph-off-japanese-line-edges: the approved mode15
+  // OFF body class permits the head but grants no punctuation extension.
+  // Pre15 one-mark admission and existing Kashida/Thai none remain separate.
+  if (boundedJapaneseParagraphOff && paragraphKinsokuOff && documentKinsokuEnabled) {
+    if (compatibilityMode === 15) return 'none';
+    if ((compatibilityMode === undefined || compatibilityMode === 11 || compatibilityMode === 12 || compatibilityMode === 14)
+      && (alignment === 'left' || alignment === 'both' || alignment === 'justify' || alignment === 'distribute')) {
+      return 'one-from-fitting-prefix';
+    }
+  }
   // §17.3.1.16 defines forbidden line edges, not this Office-version switch.
   // Observed ON controls: unset/11/12/14 hang one mark for nonjustified LTR
   // text; 15 pushes it with its preceding character. Center/right (Strict end)
   // and horizontal table cells were independently measured in those profiles.
   // Explicit punctuation-compression on/off does not select this rule.
-  // Other modes, document-off and paragraph-off retain the exact old policy;
-  // this does not implement paragraph-off line breaking (#2079).
+  // Outside the separately admitted Japanese OFF class above, other modes,
+  // document-off and paragraph-off retain their exact old hanging policy.
   const measuredOnProfile = compatibilityMode === undefined
     || compatibilityMode === 11 || compatibilityMode === 12
     || compatibilityMode === 14 || compatibilityMode === 15;
@@ -1612,6 +1626,13 @@ export const WORD_MIXED_RTL_DISTRIBUTE_PITCH = defineCompatibilityRule({
     application: 'Microsoft Word', version: '16.0.20527.20088', platform: 'Windows',
   },
   description: 'ECMA-376 §17.18.44 describes distribute pitch but does not specify this mixed-direction allocation. Approved bounded compatibility policy: in an ordinary root horizontal RTL body paragraph, a complete already-fitting single distribute line in modes absent or 14 may allocate source U+0020 cells and following cuts of ordinary printable ASCII glyphs. Arabic letter islands remain intact and explicitly RTL; an ordinary ASCII boundary SPACE must itself be ordinary-authored, while an internal Arabic SPACE remains RTL-authored. The actual selected source face supplies each SPACE cell through its resource xAvg ratio or existing exact-local reference metric; signed contextual visible advances remain native. Equal extra pitch is (band minus native visible advance minus selected SPACE cells) / (source SPACE count plus ASCII glyph-following cut count), with no cut after true source EOF. Budget, authored whole-host order and paint select one canonical fine cell view atomically. Unknown source, face/coverage/raster or tracked-word ink, fields, controls, joining marks, transformed or decorated text, tabs, grids, floats, frames, tables, continuations, overflow and other profiles retain their complete existing geometry. Evidence: ordinary Arial and Times New Roman at 12/20 pt in modes absent and 14, with cs/rtl ASCII and mode15 counterclasses; eight positive font/size/profile pairs have a maximum ASCII pen residual about 0.16 pt, not exact emitted-coordinate equality. These local descriptor proofs do not establish Word/native program-byte identity or complete Arabic ink/caret/source-SPACE affinity. Earlier digit/punctuation cases support the generic ASCII taxonomy but are not independent positive allocation proofs. No font-name, size, fixed opportunity count, tolerance or fitted coefficient selects this policy.',
+});
+
+/** Paragraph edges and one-character overflow are independent authorities. */
+export const WORD_PARAGRAPH_OFF_JAPANESE_LINE_EDGES = defineCompatibilityRule({
+  id: 'word-paragraph-off-japanese-line-edges',
+  evidence: { kind: 'regression-test', reference: 'packages/docx/src/kinsoku-off-edges.test.ts#neither hangs nor pushes the mode15 Japanese OFF closing mark under %s' },
+  description: 'Observed original Japanese paragraph-OFF body controls in unset/11/12/14/15: mode15 LEFT/BOTH/distribute and Kashida/Thai alignments retain the closing mark at the next line head without hanging or pushing; pre15 LEFT/BOTH/distribute retain one hanging mark. The version distinction is observed Office compatibility, not implied by ECMA37617.3.1.16. Initial capability requires canonical ordinary single-column horizontal LTR root body, document rules originally enabled, no complete-store floats, grid/frame/section flow, custom table presence including empty, numbering/tabs, ruby, controls, transformed/protected/nontext or complex/RTL runs. Homogeneous explicit Japanese is admitted; absent EA language requires actual Kana and does not synthesize a language tag. Chinese/Korean/mixed language and unmeasured placements keep previous behavior. The separately approved pre15 explicit punctuation/kana-compression Thai edge exception retains document head/tail prohibitions except the existing ten confirmed closing heads with overflow on; overflow off retains them all. Kana compression grants no additional head permissions. Head legality, tail legality and the one-character extension budget remain independent. The separate bounded edge view never supplies hanging, compression grouping, intrinsic or paint authority. Existing intrinsic paragraph-table atoms remain unchanged when the paragraph toggle is off. Word-box/partition observations do not establish all ink, source-SPACE or caret geometry.',
 });
 
 /** Separate soft-line presentation; acquisition and final-line fitting are not changed. */
