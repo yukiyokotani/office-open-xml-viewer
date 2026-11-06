@@ -298,10 +298,10 @@ describe('source-owned RTL tab-cell justification', () => {
     for (const gap of gaps) expect(gap).toBeCloseTo(gaps[0]!);
   });
 
-  it('preserves the real numeric decimal anchor and complete source coverage in the mixed-host fallback', () => {
-    // The period has a different host HL1 level from the digits. This source
-    // island remains on the complete legacy path; do not guess its internal
-    // paint topology or change #2070's actual stop acquisition.
+  it('retains the numeric anchor while expanding every source-space gap in a justified tab cell', () => {
+    // An interior numeric CS keeps its numeric class under authored RTL.
+    // The already acquired numeric word stays whole; source-space projection
+    // must not change #2070's independent stop/fit-back acquisition.
     const text = `12.5 ${Array.from({ length: 20 }, () => 'אבגד').join(' ')}`;
     const all = paragraphLines(documentBytes('', true, 0, {
       alignment: 'decimal', count: 1, stop: 7200, prefix: 'ab', text,
@@ -314,6 +314,16 @@ describe('source-owned RTL tab-cell justification', () => {
     // label, not re-tabbed to the ordinary stop after spreading. The2glyph
     // label ends at540; the4glyph number abuts it and its period follows2glyphs.
     expect(numeric.origin.xPt + period.offset.xPt).toBeCloseTo(540 - 2 * 5 - 4 * 5 + 2 * 5);
+    // Equal acquired source spaces own equal expansion, including the
+    // numeric/word seam; a numeric CS is not a separate RTL opportunity.
+    const words = all[0]!.placements.filter(node => node.kind === 'text')
+      .flatMap(node => node.paintOps.filter(op => /\S/.test(op.text)).map(op => ({
+        text: op.text.trim(), left: node.origin.xPt + op.offset.xPt,
+        right: node.origin.xPt + op.offset.xPt + op.text.trim().length * 5,
+      }))).filter(word => word.text !== 'ab').sort((a, b) => a.left - b.left);
+    const gaps = words.slice(1).map((word, index) => word.left - words[index]!.right);
+    expect(gaps.length).toBeGreaterThan(2);
+    for (const gap of gaps) expect(gap).toBeCloseTo(gaps[0]!);
     const source = all.flatMap(line => line.placements).sort((a, b) => a.range.start - b.range.start);
     let cursor = 0;
     for (const placement of source) {

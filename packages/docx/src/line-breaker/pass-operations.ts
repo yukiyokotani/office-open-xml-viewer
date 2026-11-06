@@ -18,6 +18,7 @@ import {
   wordSnapToCharsEastAsianCellCount,
   wordIdeographicSpaceLineEndAllowanceCount,
   wordJustifiedInterwordCompressionFactor,
+  wordJustifiedCompressionExceedsCap,
   wordIsOverflowPunctuation,
   WORD_RUBY_LINE_ASCENT,
 } from '../layout/line-compatibility.js';
@@ -1148,7 +1149,11 @@ export function performFlush(
             firstPositioned.resolvedDesignDescentRatio * firstPositioned.fontSize * scale,
         }
       : undefined;
+  // Admission-only C0 lines have no retained gap-plan consumer. Accepted
+  // contraction still rebuilds from the actual closing members (including
+  // forced followers/retraction) before the existing overflow clamp.
   const justifiedGapPlan = justifiedCompressionApplies(operationState)
+    && (!operationState.justifiedCompressionAdmissionOnly || breakerState.justifiedCompressionPx > 0)
     ? lineGapModel(breakerState.currentLine.map(s => gapSegment(operationState, s)))
     : undefined;
   breakerState.lines.push({
@@ -1374,7 +1379,11 @@ export function performAddToLine(
   }
   commitMixedLineItem(breakerState, s, scale);
   breakerState.currentWidth += committedWidth;
-  if (justifiedCompressionApplies(operationState)) {
+  // The admission-only capability builds its prefix at the first actual
+  // contraction test. Once acquired it follows committed additions exactly;
+  // the default full-plan capability retains eager expansion acquisition.
+  if (justifiedCompressionApplies(operationState)
+    && (!operationState.justifiedCompressionAdmissionOnly || breakerState.justifiedGapModel !== undefined)) {
     const previous = breakerState.justifiedGapModel;
     breakerState.justifiedGapModel = previous?.segmentCount === breakerState.currentLine.length - 1
       ? lineGapModel([gapSegment(operationState, s)], previous, false)
@@ -1858,6 +1867,15 @@ function isCjkNeighbour(cp: number | undefined): boolean {
     && (isCjkBreakChar(cp) || EAST_ASIAN_SCRIPT.test(String.fromCodePoint(cp)));
 }
 
+function contextualSpaceWidthPx(
+  state: Pick<PassOperationState, 'characterGrid' | 'scale'>,
+  segment: LayoutTextSeg,
+  advancePt: number,
+): number {
+  return advancePt * charScaleFactor(segment)
+    + segLetterSpacingPx(segment, state.characterGrid, state.scale);
+}
+
 function gapSegment(state: Pick<PassOperationState, 'strAdvance' | 'scale' | 'characterGrid'
   | 'lineEndIdeographicSpaceHangs'>, segment: LayoutSeg): GapSegment {
   if ('text' in segment) {
@@ -1867,22 +1885,38 @@ function gapSegment(state: Pick<PassOperationState, 'strAdvance' | 'scale' | 'ch
     if (segment.fitTextRegionIndex !== undefined) {
       return { widthPx: segment.measuredWidth, spacePx: 0, ...(segmentsHaveRtl([segment]) ? { rtl: true } : {}) };
     }
-    const spaceWidths = new Map<number, number>();
-    const ideographicSpaceWidths = new Map<number, number>();
+    let spaceWidths: Map<number, number> | undefined;
+    let ideographicSpaceWidths: Map<number, number> | undefined;
+    let scalarSpacePx: number | undefined;
+    const start = segment.text.indexOf(' ');
+    const singleSpace = start >= 0 && segment.text.indexOf(' ', start + 1) < 0;
     const spaceClusters = segment.shapedSpaceClusters ?? segment.shapedClusters;
     if (spaceClusters && !segment.ruby) {
-      const advances = new Map(spaceClusters.map(cluster => [cluster.range.start, cluster.advancePt]));
-      let utf16 = 0;
-      let cpOffset = 0;
-      for (const character of segment.text) {
-        if (character === ' ') {
-          const advance = advances.get(utf16);
-          if (advance === undefined) throw new Error('A text space lacks authoritative cluster geometry');
-          spaceWidths.set(cpOffset, advance * charScaleFactor(segment)
-            + segLetterSpacingPx(segment, state.characterGrid, state.scale));
+      // One contextual space has no index-dependent width: use the existing
+      // scalar representation without allocating three temporary Maps. The
+      // retained offset is UTF-16, not a codepoint index. No isolated-space
+      // measurement substitutes for this authoritative contextual advance.
+      if (singleSpace && spaceClusters.length === 1 && spaceClusters[0].range.start === start) {
+        const advance = spaceClusters[0].advancePt;
+        if (advance === undefined) throw new Error('A text space lacks authoritative cluster geometry');
+        scalarSpacePx = contextualSpaceWidthPx(state, segment, advance);
+      } else {
+        // Preserve arbitrary ordering and last-duplicate-wins. General input
+        // remains O(text + clusters), including unequal contextual spaces.
+        const advances = new Map(spaceClusters.map(cluster => [cluster.range.start, cluster.advancePt]));
+        let utf16 = 0;
+        let cpOffset = 0;
+        for (const character of segment.text) {
+          if (character === ' ') {
+            const advance = advances.get(utf16);
+            if (advance === undefined) throw new Error('A text space lacks authoritative cluster geometry');
+            const width = contextualSpaceWidthPx(state, segment, advance);
+            if (singleSpace) scalarSpacePx = width;
+            else (spaceWidths ??= new Map<number, number>()).set(cpOffset, width);
+          }
+          utf16 += character.length;
+          cpOffset += 1;
         }
-        utf16 += character.length;
-        cpOffset += 1;
       }
     }
     // U+3000 is a text cell for gaps; only the advances of those in the
@@ -1893,19 +1927,19 @@ function gapSegment(state: Pick<PassOperationState, 'strAdvance' | 'scale' | 'ch
       for (let off = characters.length - 1; off >= 0 && (characters[off] === ' ' || characters[off] === '\u3000'); off--) {
         start -= 1;
         if (characters[off] !== '\u3000') continue;
-        ideographicSpaceWidths.set(off, state.strAdvance(
+        (ideographicSpaceWidths ??= new Map<number, number>()).set(off, state.strAdvance(
           { ...segment, text: '\u3000', ...slicedTextMetadata(segment, start, start + 1) }, '\u3000'));
       }
     }
-    const start = segment.text.indexOf(' ');
-    const spacePx = spaceWidths.values().next().value ?? (start >= 0 && !segment.ruby
+    const spacePx = scalarSpacePx ?? spaceWidths?.values().next().value ?? (start >= 0 && !segment.ruby
       ? state.strAdvance({ ...segment, text: ' ', ...slicedTextMetadata(segment, start, start + 1) }, ' ')
       : 0);
     const leadingGapPx = leadingAutoSpacePx(state, segment);
     return {
       text: segment.metricOnly ? '' : segment.ruby ? undefined : segment.text,
-      widthPx: segment.measuredWidth, spacePx, spaceWidths,
-      ...(ideographicSpaceWidths.size > 0 ? { ideographicSpaceWidths } : {}),
+      widthPx: segment.measuredWidth, spacePx,
+      ...(spaceWidths ? { spaceWidths } : {}),
+      ...(ideographicSpaceWidths ? { ideographicSpaceWidths } : {}),
       ...(leadingGapPx > 0 ? { leadingGapPx } : {}),
       ...(segmentsHaveRtl([segment]) ? { rtl: true } : {}),
     };
@@ -1942,12 +1976,72 @@ export function justifiedPrefixCompression(state: Pick<PassOperationState,
   }) === undefined ? undefined : overflow;
 }
 
+/** Refuse only when the existing cap cannot possibly admit this singleton.
+ * Each supported piece has non-space content and at most one tail U+0020,
+ * so every source space-run has length one, even across piece boundaries.
+ * The enumerator therefore adds an ordered subset of these same nonnegative
+ * widths (an atomic SPACE+mark suppresses w by w-w). Adding extra nonnegative
+ * widths in that order is an IEEE-monotone upper bound; a flat sum would NOT
+ * bound the differently grouped arithmetic of general consecutive spaces.
+ * Natural width and the candidate-only tail use the model's exact fold and
+ * subtraction order. No model receipt is needed for this proven refusal. */
+function certifiedCapRefusalOverflow(state: Pick<PassOperationState,
+  'breakerState' | 'scale' | 'characterGrid' | 'availW'>, first: LayoutTextSeg): number | undefined {
+  const { breakerState: breaker } = state;
+  if (breaker.currentLine.length === 0 || breaker.justifiedGapModel !== undefined
+    || breaker.justifiedCompressionPx > 0 || breaker.latinLineGaps.length > 0
+    || breaker.mixedSpace.compressed) return undefined;
+  let naturalWidth = 0;
+  let upperGapSum = 0;
+  let candidateTail = 0;
+  for (let index = 0; index <= breaker.currentLine.length; index += 1) {
+    const segment = index === breaker.currentLine.length ? first : breaker.currentLine[index]!;
+    // Width-mutating legacy compression/condensation keeps its original
+    // model path; this receipt omission is only for ordinary stable advances.
+    if (!('text' in segment) || segment.text.length === 0 || segment.text === ' '
+      || segment.metricOnly || segment.ruby || segment.verticalRun || segment.tateChuYoko
+      || segment.fitTextRegionIndex !== undefined || segment.fitTextPerGapPx !== undefined
+      || segment.snapGridClass !== undefined || segment.autoSpaceBeforePt !== undefined
+      || segment.autoSpaceLeadingPx !== undefined || segment.autoSpaceCompressible
+      || segment.optionalHyphen || segment.optionalHyphenWord || segment.optionalHyphenGlyph
+      || segment.optionalHyphenBreaks !== undefined || segment.explicitBreaks !== undefined
+      || segment.latinSpaceCompressionEligible || segment.latinSpaceCompressionPx !== undefined
+      || segment.latinNaturalTrailingSpacePx !== undefined || segment.mixedSpaceAverageWidthRatio !== undefined
+      || segment.mixedNaturalTrailingSpacePx !== undefined || segment.punctuationCompressions !== undefined
+      || segment.widthBalanceGridDeltaFactor !== undefined || segment.widthBalanceSpaceSequence
+      || segment.widthBalanceSpaceAdjustmentPt !== undefined
+      || condensedSpacingMayFloor(segment, state.characterGrid, state.scale)
+      || segment.text.includes('\u3000')
+      || !Number.isFinite(segment.measuredWidth) || segment.measuredWidth < 0) return undefined;
+    const space = segment.text.indexOf(' ');
+    if (space >= 0 && space !== segment.text.length - 1) return undefined;
+    naturalWidth += segment.measuredWidth;
+    if (!Number.isFinite(naturalWidth)) return undefined;
+    if (space < 0) continue;
+    const clusters = segment.shapedSpaceClusters ?? segment.shapedClusters;
+    const cluster = clusters?.[0];
+    // Match the existing scalar gap authority, without substituting an
+    // isolated-space measurement or the general duplicate-offset Map policy.
+    if (clusters?.length !== 1 || cluster?.range.start !== space
+      || cluster.range.end !== space + 1 || cluster.advancePt === undefined) return undefined;
+    const width = contextualSpaceWidthPx(state, segment, cluster.advancePt);
+    if (!Number.isFinite(width) || width < 0) return undefined;
+    upperGapSum += width;
+    if (!Number.isFinite(upperGapSum)) return undefined;
+    if (index === breaker.currentLine.length) candidateTail += width;
+  }
+  const overflow = (naturalWidth - candidateTail) - state.availW();
+  return Number.isFinite(overflow) && overflow > 0
+    && wordJustifiedCompressionExceedsCap(overflow, upperGapSum) ? overflow : undefined;
+}
+
 /** Admit the whole unit against the same natural gap model that layout uses
  * for paint. Advances are never shortened here; compression is line-owned. */
 export function fitJustifiedCompression(state: Pick<PassOperationState,
-  'justifiedCompression' | 'baseRtl' | 'widthPolicy' | 'characterGrid' | 'breakerState'
+  'justifiedCompression' | 'justifiedCompressionAdmissionOnly' | 'baseRtl' | 'widthPolicy' | 'characterGrid' | 'breakerState'
   | 'segAdvance' | 'strAdvance' | 'availW' | 'textSegmentBox' | 'addToLine' | 'scale' | 'measurement' | 'flush'
-  | 'reservePrefixWork'>, first: LayoutTextSeg): boolean {
+  | 'reservePrefixWork'>, first: LayoutTextSeg,
+  rawFirstBox?: ReturnType<PassOperationState['textSegmentBox']>): boolean {
   if (!justifiedCompressionApplies(state) || first.fitTextRegionIndex !== undefined) return false;
   const { breakerState: breaker } = state;
   if (breaker.justifiedUnitEnd) {
@@ -1960,9 +2054,17 @@ export function fitJustifiedCompression(state: Pick<PassOperationState,
   if (members.some(member => !('text' in member))) return false;
   let previousText = breaker.currentLine.at(-1);
   const boundaries: number[] = [];
-  const boxes = members.map(member => {
+  const boxes = members.map((member, index) => {
     if (!('text' in member)) throw new Error('A text candidate lost its placement unit');
-    const box = state.textSegmentBox(member);
+    // Admission-only callers have just acquired this raw box in the same
+    // synchronous attempt. Reuse neither a paired width nor a follower's box;
+    // the legacy full-plan path keeps its existing acquisition policy.
+    const reuseFirst = index === 0 && state.justifiedCompressionAdmissionOnly === true && rawFirstBox;
+    const box = reuseFirst || state.textSegmentBox(member);
+    if (reuseFirst) {
+      member.leadingWordBoundaryPx = undefined;
+      member.snapGridNaturalWidthPx = box.width;
+    }
     // WORD_KERNED_SPACE_PAIRS: the same seam oracle that placement re-resolves.
     const boundary = seamPairAdvance(state,
       previousText && 'text' in previousText ? previousText : undefined, member, box.width);
@@ -1971,18 +2073,42 @@ export function fitJustifiedCompression(state: Pick<PassOperationState,
     previousText = member;
     return box;
   });
-  if (!breaker.justifiedGapModel || breaker.justifiedGapModel.segmentCount !== breaker.currentLine.length) {
-    breaker.justifiedGapModel = lineGapModel(breaker.currentLine.map(s => gapSegment(state, s)), undefined, false);
+  // New admission-only paragraphs leave natural acquisition unchanged.
+  // Only a real complete-unit attempt needs contextual gap detail. Do not
+  // remeasure committed boxes here: their advances already own their seams.
+  // Reacquiring the live request avoids a separate receipt/cache lifetime.
+  if (state.justifiedCompressionAdmissionOnly === true) {
+    for (const group of [breaker.currentLine, members]) {
+      for (const segment of group) {
+        if ('text' in segment && segment.text.includes(' ') && !segment.ruby && !segment.metricOnly
+          && segment.textLayoutService && segment.textShapeRequest) {
+          segment.shapedSpaceClusters = state.measurement.acquireCompressionSpaceClusters(segment);
+        }
+      }
+    }
   }
-  const previous = breaker.justifiedGapModel;
-  const model = lineGapModel(members.map(s => gapSegment(state, s)), previous, false);
-  const overflow = model.visibleWidthPx - state.availW();
-  const factor = overflow > 0 ? wordJustifiedInterwordCompressionFactor({
-    overflow, naturalGapSum: model.S,
-    candidateLineEndSeparator: model.lineEndSeparatorPx,
-    previousOpportunitySum: previous.S + previous.lineEndSeparatorPx,
-    expansionWithoutCandidate: state.availW() - previous.visibleWidthPx,
-  }) : 0;
+  // Keep the default/full-plan path unchanged. A certified cap failure omits
+  // only an unused lazy prefix cache and still takes the common refusal path.
+  // Later fits rebuild when absent; accepted final contraction rebuilds fresh,
+  // while the admission-only C0 finalizer consumes no such cache.
+  const refusedOverflow = state.justifiedCompressionAdmissionOnly === true && members.length === 1
+    ? certifiedCapRefusalOverflow(state, first) : undefined;
+  let overflow = refusedOverflow ?? 0;
+  let factor: number | undefined;
+  if (refusedOverflow === undefined) {
+    if (!breaker.justifiedGapModel || breaker.justifiedGapModel.segmentCount !== breaker.currentLine.length) {
+      breaker.justifiedGapModel = lineGapModel(breaker.currentLine.map(s => gapSegment(state, s)), undefined, false);
+    }
+    const previous = breaker.justifiedGapModel;
+    const model = lineGapModel(members.map(s => gapSegment(state, s)), previous, false);
+    overflow = model.visibleWidthPx - state.availW();
+    factor = overflow > 0 ? wordJustifiedInterwordCompressionFactor({
+      overflow, naturalGapSum: model.S,
+      candidateLineEndSeparator: model.lineEndSeparatorPx,
+      previousOpportunitySum: previous.S + previous.lineEndSeparatorPx,
+      expansionWithoutCandidate: state.availW() - previous.visibleWidthPx,
+    }) : 0;
+  }
   if (factor === undefined) {
     for (const [index, member] of members.entries()) member.measuredWidth = boxes[index].width;
     // An adjusted candidate that was refused must be reconsidered at a fresh
@@ -2085,6 +2211,7 @@ export function performTextSegmentBox(
   // Fitting needs the spaces' contextual advances, not every prefix of a
   // possibly overlong word. Full cluster acquisition belongs to final slices.
   const measured = justifiedCompressionApplies(operationState) && s.text.includes(' ') && !s.ruby
+    && (!operationState.justifiedCompressionAdmissionOnly || s.metricOnly)
     ? measurement.measureSegment(s, 'spaces')
     : measureText(s, snapToCharsClass(s, characterGrid) === 'eastAsia');
   let width = segAdvanceWidth(

@@ -16,6 +16,11 @@ const options = Object.freeze({
   isRtlMarked: (segment: unknown) => (segment as { rtl?: unknown }).rtl === true,
   digitsAsAN: (segment: unknown) => (segment as { digitsAsAN?: unknown }).digitsAsAN === true,
   isRtlAmbiguous: wordRtlAmbiguousCharacter,
+  // ECMA-376 §17.3.2.30 exempts numeric CS from the run RTL override.
+  // Preserve the established Office punctuation policy otherwise (terminal
+  // periods/prefixes and ES/ET are unchanged). Context belongs to the complete
+  // canonical host, not acquired word or formatting-run boundaries.
+  preserveRtlNumericCS: true,
   directionFromAnyOdd: true,
 });
 export type LineVisualOrder = SegmentLineVisualOrder;

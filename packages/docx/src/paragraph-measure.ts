@@ -1,3 +1,4 @@
+import { segmentsHaveRtl } from './bidi-line.js';
 import { specifiedTextLineMetrics, specifiedTextParagraphIsHomogeneous } from './layout/specified-line-spacing.js';
 import { uprightResourceOrientation } from './layout/coordinate-space.js';
 import {
@@ -684,7 +685,17 @@ export function measureParagraph(
     wordJustifiedInterwordCompressionApplies(
       paragraph.alignment, environment.compatibilityMode,
     ) && environment.verticalCJK !== true
-      ? { lineEndIdeographicSpaceHangs: paragraph.wordWrap !== false }
+      // The added alignment capability is bounded to the existing LTR gap
+      // representation. Strong RTL text and authored HL1 marks need physical
+      // source-gap ownership; the scalar fit allowance does not own those
+      // physical edges. This is a model boundary, not a font rule or a complete
+      // character-level UAX#9 proof.
+      && ((paragraph.alignment !== 'distribute' && paragraph.alignment !== 'lowKashida')
+        || (!context.baseRtl && !segmentsHaveRtl(segments)))
+      ? {
+          lineEndIdeographicSpaceHangs: paragraph.wordWrap !== false,
+          admissionOnly: paragraph.alignment === 'distribute' || paragraph.alignment === 'lowKashida',
+        }
       : false,
     chargeArabicSourceSpace && lineFit ? { ...lineFit, rtlVisiblePrefix: false } : lineFit,
     context.cjkClosingMarkHang,

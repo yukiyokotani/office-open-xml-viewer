@@ -342,7 +342,9 @@ export interface TextShapeRequest {
   readonly measure?: boolean;
   /** False acquires only aggregate metrics; 'spaces' acquires contextual
    * scalar U+0020 advances for fit arithmetic. Full clusters are acquired after
-   * wrapping, avoiding repeated prefix shaping of overlong words. */
+   * wrapping, avoiding repeated prefix shaping of overlong words. Acquisition
+   * detail must not change aggregate metrics for an otherwise identical
+   * request and service fingerprint. */
   readonly clusterGeometry?: boolean | 'spaces';
   /** The same run's surrounding text, with this request's offset in it. A
    * script-scoped substitute's scope is decided over the whole contiguous

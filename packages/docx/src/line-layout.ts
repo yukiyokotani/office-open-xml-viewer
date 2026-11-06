@@ -22,7 +22,11 @@ export { buildSegments } from './line-breaker/segment-builder.js';
 /** WORD_JUSTIFIED_INTERWORD_COMPRESSION for the paragraph; the object form
  * also says whether a line-end U+3000 hangs from the visible fit
  * (WORD_LINE_END_SPACE_HANGS: not with wordWrap off). */
-export type JustifiedCompressionOption = boolean | Readonly<{ lineEndIdeographicSpaceHangs: boolean }>;
+export type JustifiedCompressionOption = boolean | Readonly<{
+  lineEndIdeographicSpaceHangs: boolean;
+  /** No positive-expansion plan: acquire gap work only for contraction. */
+  admissionOnly?: boolean;
+}>;
 
 export function layoutLines(
   ctx: MeasurementTextContext,
@@ -200,6 +204,8 @@ export function layoutLines(
     marginRightPx, baseRtl, isJustified, stretchLastLine, startBoundary, bidiOrdering,
     widthPolicy, verticalGlyphMeasurement, overflowPunct,
     justifiedCompression: justifiedCompression !== false,
+    justifiedCompressionAdmissionOnly: typeof justifiedCompression === 'object'
+      && justifiedCompression.admissionOnly === true,
     lineEndIdeographicSpaceHangs: typeof justifiedCompression === 'object'
       ? justifiedCompression.lineEndIdeographicSpaceHangs
       : justifiedCompression,

@@ -1729,7 +1729,14 @@ export function planLine(input: PlanLineInput): LineLayout {
     perGapPt = distribution?.perGap ?? 0;
     stretchByIndex = distribution?.perSeg ?? null;
     distributedWidthPt = distributedDelta(distribution);
-  } else if (line.justifiedCompressionPt !== undefined) {
+  } else if (line.justifiedCompressionPt !== undefined
+    && (line.justifiedCompressionPt > 0
+      || (input.alignment !== 'distribute' && input.alignment !== 'lowKashida'))) {
+    // The added distribute/lowKashida capability owns admission and accepted
+    // contraction only. Uncompressed lines retain their previous positive
+    // geometry: source gaps inside opposite-direction run slices still lack
+    // physical-edge ownership (#2090), so this scalar fit plan cannot replace
+    // that expansion model. Existing both/justify C0 planning stays unchanged.
     const model = line.gapPlan;
     if (!model) throw new Error('Justified line is missing its retained gap plan');
     const retainedNaturalWidthPt = naturalWidthPt;
