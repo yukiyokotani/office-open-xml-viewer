@@ -114,8 +114,6 @@ export interface LineBreakerPassInput {
    * available width less its reserve (absent: the whole width; paint still
    * justifies to the full width), and WORD_RTL_JUSTIFIED_VISIBLE_FIT. */
   readonly lineFit?: LineFitWidth;
-  /** Separate soft-edge admission; does not change reserve or retained paint. */
-  readonly rtlLeftSoftFit?: boolean;
   readonly passContext: Readonly<{
     probeHeights: readonly number[] | null;
     decimalOrder?: LineOrderResolver;

@@ -19,7 +19,14 @@ const CLOSING_PAIRS = new Set(['。」', '、」', '」」', '」。', '」、',
  * bounded acquisition. Compatibility shape contexts do not retain WML authority. */
 export function closingPairScopeApplies(paragraph: ParagraphLayoutSource, context: ParagraphLayoutContext,
   environment: ParagraphMeasurementEnvironment): boolean {
-  return environment.closingPairRootSource === true && context.hasEastAsianText && !paragraph.framePr
+  // The registered left/both/Thai allocation is distinct from Kashida:
+  // low/medium/high retain the full first cell in all five measured profiles.
+  // Other alignments retain existing geometry until source-owned tracking and
+  // placement authority is established. This reads the parser-resolved value
+  // (both -> justify); unknown or missing values do not establish eligibility.
+  return (paragraph.alignment === 'left' || paragraph.alignment === 'justify'
+    || paragraph.alignment === 'thaiDistribute')
+    && environment.closingPairRootSource === true && context.hasEastAsianText && !paragraph.framePr
     && !context.runDirectionUnauthored && !context.baseRtl && !context.hasRuby
     && !context.lineGrid.active && !context.characterGrid.active
     && environment.pageWritingMode === 'horizontal-tb' && !environment.verticalPageFrame;

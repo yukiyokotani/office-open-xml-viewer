@@ -91,7 +91,6 @@ export type BreakOpportunityIteratorContext = Pick<
   | 'justifiedCompression'
   | 'justifiedCompressionAdmissionOnly'
   | 'lineFit'
-  | 'rtlLeftSoftFit'
   | 'isJustified'
   | 'stretchLastLine'
   | 'widthPolicy'
@@ -408,9 +407,7 @@ function processTextSegment(context: BreakOpportunityIteratorContext, seg: Layou
   // Library containment policy: an RTL line is anchored at its right edge,
   // so even an invisible trailing-space advance shifts visible LTR cells left.
   // Count that advance during fitting instead of admitting glyphs past the band,
-  // except for justified visible fitting or the separately admitted LEFT
-  // word-rtl-left-soft-fit policy. LEFT retains its natural paint and therefore
-  // gains no containment or hanging adjustment from this fitting comparison.
+  // except on the justified lines WORD_RTL_JUSTIFIED_VISIBLE_FIT measured.
   const fitWidthFor = (
     widthPx: number,
     trailingSpacePx: number,

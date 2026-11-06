@@ -5,7 +5,6 @@ import { acquireShapeTextBoxLayout } from './layout/paragraph.js';
 import { textBoxAcquisitionInput } from './parser-model.js';
 import type { ParagraphLayoutContext } from './layout-context.js';
 import type { DocxDocumentModel, ShapeRun } from './types';
-import { measureParagraphIntrinsicWidths } from './layout/intrinsic-width.js';
 import { layoutBodyModel } from './test-support/document-layout.test-support.js';
 import type { LineLayout, TextPlacement } from './layout/types.js';
 import type { BodyElement, DocParagraph, DocSettings, DocxTextRun, SectionProps } from './types';
@@ -315,6 +314,9 @@ describe('WORD_RTL_JUSTIFIED_VISIBLE_FIT', () => {
     for (const settings of MODES) {
       const [both] = lines(para([textRun(hebrew)], 'both', rtl), settings);
       expect(wordsOn(both!), `mode ${settings?.compatibilityMode}`).toBe(7);
+      // Unmeasured alignments keep charging the line-end space.
+      const [start] = lines(para([textRun(hebrew)], 'left', rtl), settings);
+      expect(wordsOn(start!)).toBe(6);
     }
   });
 
@@ -548,82 +550,4 @@ it('does not infer authored Arabic direction from a flattened compatibility text
   // flattened public shape model cannot establish that source provenance.
   expect(characters(body[0]!).length / 3).toBe(7);
   expect(characters(child.lines[0]!).length / 3).toBe(8);
-});
-
-it.each([
-  { word: '\u0628\u062a\u062b\u062c', run: { rtl: true }, name: 'explicit RTL Arabic' },
-  { word: 'abcd', run: {}, name: 'unmarked Latin' },
-])('fits a soft-wrapped left-aligned RTL paragraph with $name by its visible prefix', ({ word, run }) => {
-  // Independent deterministic advances: four-character words are 40pt;
-  // U+0020 is 10pt. Seven words are 340pt visible / 350pt with their
-  // terminal separator, against a 345pt band. Both seven-word groups, including the final source SPACE, must fit.
-  const content = Array.from({ length: 14 }, () => word).join(' ') + ' ';
-  const paragraph = para([textRun(content, run)], 'left', { bidi: true, indentRight: 15, wordWrap: true });
-  const retained = lines(paragraph, MODE_15);
-  expect(retained.map(wordsOn)).toEqual([7, 7]);
-  expect(retained.map(line => line.placements.filter((p): p is TextPlacement => p.kind === 'text')
-    .reduce((sum, placement) => sum + placement.advancePt, 0))).toEqual([350, 350]);
-  const charged = lines({ ...paragraph, wordWrap: false } as BodyElement, MODE_15);
-  expect(charged.map(wordsOn)).toEqual([6, 6, 2]);
-  const logical = retained.flatMap(line => line.placements
-    .filter((p): p is TextPlacement => p.kind === 'text'))
-    .sort((a, b) => a.range.start - b.range.start);
-  expect(logical.map(p => p.text).join('')).toBe(content);
-  let cursor = 0;
-  for (const placement of logical) {
-    expect(placement.range.start).toBe(cursor);
-    expect(placement.range.end - placement.range.start).toBe(placement.text.length);
-    cursor = placement.range.end;
-  }
-  expect(cursor).toBe(content.length);
-});
-
-it('keeps charged terminal SPACE and natural LEFT paint after admitting the final word', () => {
-  const content = 'a'.repeat(34) + ' ';
-  const narrow = lines(para([textRun(content)], 'left', { bidi: true, wordWrap: true, indentRight: 15 }), MODE_15);
-  const natural = lines(para([textRun(content)], 'left', { bidi: true, wordWrap: true }), MODE_15);
-  expect(narrow).toHaveLength(1); // No erroneous final SPACE-only line.
-  expect(natural).toHaveLength(1);
-  const source = narrow[0]!.placements.filter((p): p is TextPlacement => p.kind === 'text');
-  expect(source.map(p => p.text).join('')).toBe(content);
-  expect(source.reduce((sum, p) => sum + p.advancePt, 0)).toBe(350);
-  // These are the existing natural paint positions, not new hanging credit.
-  expect(characters(narrow[0]!)).toEqual(characters(natural[0]!));
-  expect(start(narrow[0]!)).toBe(30);
-  expect(end(narrow[0]!)).toBe(370);
-});
-
-it('still wraps a final visible word that exceeds the LEFT band', () => {
-  // Eight40pt words + seven10pt spaces =390pt; the final word must move.
-  const content = Array.from({ length: 8 }, () => 'abcd').join(' ');
-  const retained = lines(para([textRun(content)], 'left', { bidi: true, wordWrap: true, indentRight: 15 }), MODE_15);
-  expect(retained.map(wordsOn)).toEqual([7, 1]);
-  expect(retained.flatMap(line => line.placements.filter((p): p is TextPlacement => p.kind === 'text'))
-    .sort((a, b) => a.range.start - b.range.start).map(p => p.text).join('')).toBe(content);
-});
-
-it('keeps terminal SPACE charged in production RTL LEFT intrinsic width', () => {
-  const content = Array.from({ length: 14 }, () => 'abcd').join(' ') + ' ';
-  const paragraph = para([textRun(content)], 'left', { bidi: true, wordWrap: true });
-  if (paragraph.type !== 'paragraph') throw new Error('expected paragraph');
-  const context: ParagraphLayoutContext = {
-    lineGrid: { active: false, pitchPt: null },
-    characterGrid: { active: false, kind: null, pitchPt: null, deltaPt: 0 },
-    rightIndentGrid: { pitchPt: null, paragraphAllowsAdjustment: true },
-    physicalIndentLeftPt: 0, physicalIndentRightPt: 0, firstIndentPt: 0,
-    lineSpacing: null, spaceBeforePt: 0, spaceAfterPt: 0, baseRtl: true,
-    isJustified: false, stretchLastLine: false, tabStops: [], hasRuby: false, hasEastAsianText: false,
-    kinsoku: DEFAULT_KINSOKU_RULES, defaultTabPt: 36,
-  };
-  const measure = makeCtx();
-  const model: DocxDocumentModel = { body: [paragraph], section, settings: MODE_15,
-    headers: { default: null, first: null, even: null }, footers: { default: null, first: null, even: null },
-    footnotes: [], endnotes: [], fontFamilyClasses: {} };
-  const intrinsic = measureParagraphIntrinsicWidths(paragraph, context, 1000,
-    { context: measure, fontFamilyClasses: {} }, { pageIndex: 0, totalPages: 1,
-      pageWritingMode: 'horizontal-tb', documentHasEastAsianText: false, compatibilityMode: 15,
-      layoutServices: createLayoutServices(model, { measureContext: measure }) });
-  // 14 * (four10pt glyphs + one10pt source SPACE); no bounded-fit deduction.
-  expect(intrinsic.maxWidthPt).toBe(700);
-  expect(intrinsic.minWidthPt).toBe(40);
 });

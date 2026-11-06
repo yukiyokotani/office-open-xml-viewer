@@ -79,7 +79,7 @@ it('retains paragraph one-mark refusal when the separate edge view permits the f
   const permitted = { ...DEFAULT_KINSOKU_RULES, lineStartForbidden: new Set<number>() };
   const result = layoutLines(ctx, [segment], 20, 0, 1, [], undefined, {}, 0,
     DEFAULT_KINSOKU_RULES, undefined, 36, 20, false, false, false,
-    undefined, 'bounded', undefined, true, false, undefined, 'one', undefined, undefined, permitted);
+    undefined, 'bounded', undefined, true, false, undefined, 'one', undefined, permitted);
   expect(result[0]!.segments.flatMap(piece => 'text' in piece ? [piece.text] : []).join('')).toBe('あい');
 });
 

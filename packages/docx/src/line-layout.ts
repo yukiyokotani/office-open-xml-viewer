@@ -53,7 +53,6 @@ export function layoutLines(
   lineFit?: LineFitWidth,
   cjkClosingMarkHang?: CjkClosingMarkHang,
   bidiOrdering?: BidiTabOrderPolicy,
-  rtlLeftSoftFit?: boolean,
   lineEdgeRules?: KinsokuRules,
 ): LayoutLine[];
 
@@ -111,7 +110,6 @@ export function layoutLines(
   // WORD_JUSTIFICATION_PUNCTUATION_HANG, absent outside its measured scope.
   cjkClosingMarkHang?: CjkClosingMarkHang,
   bidiOrdering?: BidiTabOrderPolicy,
-  rtlLeftSoftFit?: boolean,
   lineEdgeRules?: KinsokuRules,
   passContext?: Readonly<{
     probeHeights: readonly number[] | null;
@@ -160,7 +158,6 @@ export function layoutLines(
       lineFit,
       cjkClosingMarkHang,
       bidiOrdering,
-      rtlLeftSoftFit,
       lineEdgeRules,
       { probeHeights, probeFloors, preparedFloatWrap, decimalOrder },
     );
@@ -216,7 +213,6 @@ export function layoutLines(
       ? justifiedCompression.lineEndIdeographicSpaceHangs
       : justifiedCompression,
     ...(lineFit ? { lineFit } : {}),
-    ...(rtlLeftSoftFit && widthPolicy === 'bounded' ? { rtlLeftSoftFit: true } : {}),
     ...(cjkClosingMarkHang ? { cjkClosingMarkHang } : {}), passContext,
   });
 }
