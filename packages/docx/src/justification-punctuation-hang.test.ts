@@ -114,14 +114,20 @@ describe('word-justification-punctuation-hang', () => {
     }
   });
 
-  it('preserves paragraph-off, document-off and unmeasured-mode hanging behavior', () => {
-    // False excludes both the pre-15 one-mark bound and the mode-15 push.
-    for (const [alignment, mode, mark] of [['center', 14, '。」'], ['left', 15, '。']] as const) {
-      const body = { ...withAlignment(overflowing(mark), alignment), kinsoku: false } as BodyElement;
-      expect(text(lines(body, { compatibilityMode: mode })[0]!)).toBe(KANA.slice(0, 36) + mark);
+  it('keeps excluded hanging behavior while applying admitted mode15 paragraph-OFF no-hang', () => {
+    // Center remains outside the approved OFF source class. Literal LEFT
+    // mode15 now keeps the full fitting Kana prefix without hanging the mark;
+    // it must not inherit the ON rule's preceding-character push either.
+    const excluded = { ...withAlignment(overflowing('。」'), 'center'), kinsoku: false } as BodyElement;
+    expect(text(lines(excluded, { compatibilityMode: 14 })[0]!)).toBe(KANA.slice(0, 36) + '。」');
+    const admitted = { ...withAlignment(overflowing('。'), 'left'), kinsoku: false } as BodyElement;
+    expect(text(lines(admitted, { compatibilityMode: 15 })[0]!)).toBe(KANA.slice(0, 36));
+    // Global document OFF is not the new paragraph-OFF capability. BOTH
+    // exercises its legacy 'one' dispatch, RIGHT its undefined dispatch.
+    for (const alignment of ['both', 'right']) {
+      expect(text(lines(withAlignment(overflowing('。」'), alignment), { compatibilityMode: 15, kinsoku: false })[0]!))
+        .toBe(KANA.slice(0, 36) + '。」');
     }
-    expect(text(lines(withAlignment(overflowing('。」'), 'right'), { compatibilityMode: 15, kinsoku: false })[0]!))
-      .toBe(KANA.slice(0, 36) + '。」');
     for (const mode of [13, 16]) {
       expect(text(lines(withAlignment(overflowing('。」'), 'center'), { compatibilityMode: mode })[0]!))
         .toBe(KANA.slice(0, 36) + '。」');
