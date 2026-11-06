@@ -62,6 +62,7 @@ import type { LayoutOptions } from './options.js';
 import { createStoryLayoutCache, type StoryLayoutCache } from './story-layout-cache.js';
 import {
   createLayoutServicesRuntimeView,
+  layoutSourceStoreOf,
   fieldAcquisitionContextOf,
   footnoteAcquisitionWorkBudgetOf,
   paragraphAcquisitionCacheOf,
@@ -96,7 +97,7 @@ import {
   physicalSectionGeometry,
 } from './context.js';
 import { isAllRotatedVerticalTextDirection, isVerticalTextDirection, physicalLayoutSection, verticalLayoutSection } from './section-orientation.js';
-import { gridForParagraphContext, paragraphMeasurementEnvironment } from './measurement-environment.js';
+import { gridForParagraphContext, nativeUnitMinimumBodyBand, paragraphMeasurementEnvironment } from './measurement-environment.js';
 import { createRevisionAuthorColorResolver } from './track-changes.js';
 import { BODY_STORY_CONTEXT, MAIN_BODY_STORY_CONTEXT, bodyAnchorReferenceFrames, retainedTableRecord, resolveBodyParagraphLayoutContext, resolveStateParagraphLayoutContext, withTableCellStory } from './acquisition-state.js';
 import { applyNumberingBodyOffset, resolveNumberingMarkerGeometry } from './numbering-marker.js';
@@ -589,6 +590,15 @@ function acquireBodyParagraphAtLocation(
     bottom: 'bottom' as const,
   };
   const context = resolveBodyParagraphLayoutContext(state, paragraph);
+  const exclusions = paragraphWrapExclusions(state.floats, location.flowDomainId);
+  const sourceStore = state.layoutServices && layoutSourceStoreOf(state.layoutServices);
+  const minimumBand = sourceStore && nativeUnitMinimumBodyBand(sourceStore,
+    state.sectionLayout, state.storyContext, paragraph, context,
+    availableInlineExtentPt, exclusions.length !== 0);
+  const measurementEnvironment = paragraphMeasurementEnvironment(state);
+  const environment = minimumBand === undefined ? measurementEnvironment : {
+    ...measurementEnvironment, nativeUnitMinimumBandPt: minimumBand,
+  };
   const topBorder = paragraphContextWithTopBorder(
     context,
     paragraph,
@@ -612,8 +622,8 @@ function acquireBodyParagraphAtLocation(
         suppressSpaceBefore: topBorder.suppressSpaceBefore,
       },
       measurer: { context: state.ctx, fontFamilyClasses: state.fontFamilyClasses },
-      environment: paragraphMeasurementEnvironment(state),
-      exclusions: paragraphWrapExclusions(state.floats, location.flowDomainId),
+      environment,
+      exclusions,
       anchorCollisions: retainedAnchorCollisions ?? paragraphAnchorCollisions(state.floats),
       containerShading: state.containerShading,
       paragraphBorderEdges: edges,

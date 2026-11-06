@@ -41,12 +41,28 @@ function sharedContext(width: number, height: number): RasterContext | null {
   return shared.context;
 }
 
-function rasterize(context: RasterContext, font: string, text: string, width: number, height: number): Uint8ClampedArray {
+/** Owned scratch surfaces may be resized between calls (which resets Canvas
+ * state). Set/read/restore the requested base for each actual native operation. */
+function withDirection<T>(context: RasterContext, base: 'ltr' | 'rtl' | undefined, action: () => T): T {
+  if (base === undefined) return action();
+  const previous = context.direction;
+  const previousAlign = context.textAlign;
+  try {
+    context.direction = base;
+    context.textAlign = 'left';
+    if (context.direction !== base || context.textAlign !== 'left') {
+      throw new TypeError('Canvas did not honor directed glyph proof and left anchor');
+    }
+    return action();
+  } finally { context.direction = previous; context.textAlign = previousAlign; }
+}
+
+function rasterize(context: RasterContext, font: string, text: string, width: number, height: number, base?: 'ltr' | 'rtl'): Uint8ClampedArray {
   context.clearRect(0, 0, width, height);
   context.font = font;
   context.textBaseline = 'alphabetic';
   context.fillStyle = '#000';
-  context.fillText(text, PROBE_EM_PX / 2, Math.round(height * 0.7));
+  withDirection(context, base, () => context.fillText(text, PROBE_EM_PX / 2, Math.round(height * 0.7)));
   return context.getImageData(0, 0, width, height).data;
 }
 
@@ -70,17 +86,17 @@ export function sameGlyphRaster(request: Readonly<GlyphRasterComparisonRequest>)
   const measure = sharedContext(1, PROBE_EM_PX * 2);
   if (!measure) return false;
   measure.font = nativeFont;
-  const nativeWidth = measure.measureText(probe).width;
+  const nativeWidth = withDirection(measure, request.baseDirection, () => measure.measureText(probe).width);
   measure.font = faceFont;
-  const faceWidth = measure.measureText(probe).width;
+  const faceWidth = withDirection(measure, request.baseDirection, () => measure.measureText(probe).width);
   if (!(Number.isFinite(nativeWidth) && nativeWidth > 0) || nativeWidth !== faceWidth) return false;
   const width = Math.ceil(nativeWidth + PROBE_EM_PX);
   const height = PROBE_EM_PX * 2;
   const context = sharedContext(width, height);
   if (!context) return false;
   try {
-    const native = rasterize(context, nativeFont, probe, width, height);
-    const face = rasterize(context, faceFont, probe, width, height);
+    const native = rasterize(context, nativeFont, probe, width, height, request.baseDirection);
+    const face = rasterize(context, faceFont, probe, width, height, request.baseDirection);
     let ink = false;
     for (let index = 0; index < native.length; index++) {
       if (native[index] !== face[index]) return false;
@@ -121,7 +137,8 @@ export function ownsGlyphs(request: Readonly<GlyphOwnershipRequest>): boolean {
   const font = `${request.style} ${request.weight} 100px ${quoteCssFontFamily(request.coverageProbeFamily)}`;
   let context: RasterContext | null | undefined;
   for (const part of parts) {
-    const key = `${font}\u0000${part}`;
+    const key = request.baseDirection === undefined ? `${font}\u0000${part}`
+      : `directed\u0000${JSON.stringify([font, part, request.baseDirection])}`;
     let owned = ownership.get(key);
     if (owned === undefined) {
       context ??= sharedContext(1, PROBE_EM_PX * 2);
@@ -129,7 +146,9 @@ export function ownsGlyphs(request: Readonly<GlyphOwnershipRequest>): boolean {
       context.font = font;
       // Owned glyphs keep zero advance AND zero ink (the outlines scale too);
       // a fallback, even a zero-advance combining mark, keeps positive ink.
-      const metrics = context.measureText(part);
+      const metrics = request.baseDirection === undefined
+        ? context.measureText(part)
+        : withDirection(context, request.baseDirection, () => context!.measureText(part));
       const inkWidth = (metrics.actualBoundingBoxLeft ?? 0) + (metrics.actualBoundingBoxRight ?? 0);
       const inkHeight = (metrics.actualBoundingBoxAscent ?? 0) + (metrics.actualBoundingBoxDescent ?? 0);
       owned = metrics.width === 0 && Number.isFinite(inkWidth) && Number.isFinite(inkHeight)

@@ -368,6 +368,8 @@ const EXACT_ACQUISITION_SURFACE_MEMBERS = new Map([
   ])],
   [MEASUREMENT_CAPABILITIES, new Map([
     ['MeasurementTextContext', new Set([
+      'direction',
+      'textAlign',
       'font',
       'letterSpacing',
       'fontKerning',

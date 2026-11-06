@@ -1,3 +1,4 @@
+import { advanceLineBoundary } from './source-cursor.js';
 import { popMixedLineItem, replaceLastMixedLineItem } from './mixed-space-fit.js';
 import type { KinsokuRules } from '@silurus/ooxml-core';
 import { crossRunKinsokuRetract, graphemeClusterOffsets } from '@silurus/ooxml-core';
@@ -70,10 +71,7 @@ export function retractLeadingKinsoku(
     // onto this newly-created suffix.
     joinPrev: undefined,
     hardJoinPrev: undefined,
-    src: {
-      segIndex: lastText.src!.segIndex,
-      charOffset: lastText.src!.charOffset + split,
-    },
+    src: advanceLineBoundary(lastText.src!, split),
     seaBreaks: rebaseSeaBreaks(lastText.seaBreaks, split),
   };
 

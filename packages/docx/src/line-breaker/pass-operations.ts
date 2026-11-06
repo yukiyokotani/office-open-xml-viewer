@@ -1,3 +1,5 @@
+import { shapeNativeSourceRequest } from './native-unit-contract.js';
+import { advanceLineBoundary } from './source-cursor.js';
 import { physicalDecimalAlignmentPoint } from './decimal-anchor.js';
 import { tabLineOrderModel } from './tabs.js';
 import { lineEndSpaceCharged } from './atomic-units.js';
@@ -1616,7 +1618,7 @@ export function performStrNaturalAdvance(
   };
   const leading = start <= 0 && text.length > 0 ? leadingAutoSpacePx(operationState, s) : 0;
   if (s.textLayoutService && s.textShapeRequest) {
-    const shaped = s.textLayoutService.shape({
+    const shaped = shapeNativeSourceRequest(s.textLayoutService, {
       ...sliceTextShapeRequest(s.textShapeRequest, Math.max(0, start), Math.max(0, start) + text.length),
       fontSizePt: effectiveFontPx(s),
       measure: true,
@@ -2376,10 +2378,7 @@ export function performAppendQueuedIdeographicSpaceSegment(
       hardJoinPrev: undefined,
       ...slicedTextMetadata(follower, hangingText.length, follower.text.length),
       src: follower.src
-        ? {
-            segIndex: follower.src.segIndex,
-            charOffset: follower.src.charOffset + hangingText.length,
-          }
+        ? advanceLineBoundary(follower.src!, hangingText.length)
         : undefined,
     });
   }
@@ -2681,10 +2680,7 @@ export function performQueueEmergencyTail(
     // it onto the tail would make the next line overflow again.
     joinPrev: undefined,
     hardJoinPrev: undefined,
-    src: {
-      segIndex: segment.src!.segIndex,
-      charOffset: segment.src!.charOffset + split,
-    },
+    src: advanceLineBoundary(segment.src!, split),
   });
 }
 

@@ -31,6 +31,12 @@ export function acquireCanvasGlyphContours(request: GlyphContourRequest): readon
       ctx.translate(-ox, -oy);
       ctx.fillStyle = 'white';
       ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+      // This surface is owned/disposed by this acquisition; a resize creates
+      // fresh state. Contours must use the same explicit base as acquired ink.
+      if (request.baseDirection !== undefined) {
+        ctx.direction = request.baseDirection;
+        if (ctx.direction !== request.baseDirection) throw new TypeError('Canvas did not honor directed glyph contours');
+      }
       let x = 0;
       for (const span of request.spans) {
         ctx.font = canvasFontString(span.fontRoute, request.fontSizePt, span.font.weight, span.font.style);

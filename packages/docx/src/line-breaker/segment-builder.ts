@@ -1,3 +1,5 @@
+import { ownSourceCursor } from './source-cursor.js';
+import { acquireNativeSourceUnits, eligibleNativeSourceText } from './native-source-units.js';
 import { revisionIsOmitted } from '../layout/revision-visibility.js';
 import { type TextBreakWindow } from './text-break-window.js';
 import type { DocxTextRun, FieldRun } from '../types';
@@ -912,7 +914,9 @@ export function buildSegments(
   assignEastAsianAutoSpace(segs, environment);
   withdrawMixedSpaceEligibilityOutsideScope(segs);
 
-  return segs;
+  const nativeSourceText = environment.nativeUnitMinimumBandPt === undefined
+    ? undefined : eligibleNativeSourceText(runs);
+  return ownSourceCursor(acquireNativeSourceUnits(segs, nativeSourceText, environment), nativeSourceText);
 }
 
 // UAX #29 GB9 extenders and ZWJ can hide a base character's adjacency.
@@ -1425,7 +1429,8 @@ function emitResolvedTextSegment(
     lineMetric: familyLineMetric } = selectedFontLineMetric(resolvedSpan?.font, localFont, naturalMetricAllowed,
       allowsReferenceFontMetric(indexedFontMetrics(environment.layoutServices?.text.fontMetrics
         ?? environment.layoutServices?.text.localMetrics ?? {}), resolvedSpan?.font),
-      environment.layoutServices ? { text: environment.layoutServices.text, probe: text } : undefined);
+      environment.layoutServices ? { text: environment.layoutServices.text, probe: text,
+        ...(textShapeRequest.baseDirection !== undefined ? { baseDirection: textShapeRequest.baseDirection } : {}) } : undefined);
   // LIBRARY_SYNTHESIZED_FACE_LINE_GEOMETRY does not extend to the East Asian
   // floor of a run painted in another slot (see that rule's scope).
   const { lineMetric: eaLineMetric } = selectedFontLineMetric(eaResolution, localEaFloor, naturalMetricAllowed,
@@ -1746,6 +1751,8 @@ function appendRunsToSegments(
           segment.metricProbeText = probe;
           segment.sourceRunIndex = runIndex;
           if (segment.textShapeRequest) {
+            segment.nativeLevelUnit = undefined;
+            segment.nativeVisiblePrefix = undefined;
             segment.textShapeRequest = Object.freeze(independentTextShapeRequest(segment.textShapeRequest, ''));
           }
         }
@@ -1788,6 +1795,8 @@ function appendRunsToSegments(
             if (segment.fontSource === 'native' && segment.fontInstalledFamily !== true) segment.metricProbeText = 'x';
             segment.sourceRunIndex = runIndex;
             if (segment.textShapeRequest) {
+              segment.nativeLevelUnit = undefined;
+              segment.nativeVisiblePrefix = undefined;
               segment.textShapeRequest = Object.freeze(independentTextShapeRequest(segment.textShapeRequest, ''));
             }
           }

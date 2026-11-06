@@ -17,6 +17,7 @@ import {
 import { acquireRegisteredParagraph } from './registered-paragraph-acquisition.js';
 import {
   createFieldAcquisitionServicesView,
+  createLayoutServicesRuntimeView,
   createParagraphAcquisitionCacheServicesView,
   paragraphAcquisitionCacheOf,
 } from './runtime-state.js';
@@ -149,6 +150,47 @@ function options(
 }
 
 describe('paragraph acquisition cache', () => {
+  it('does not reuse directed body topology for equal-width unadmitted or incapable acquisition', () => {
+    const ctx = Object.assign(measureContext(), { direction: 'inherit' as CanvasDirection, textAlign: 'left' as CanvasTextAlign });
+    const services = createParagraphAcquisitionCacheServicesView(createLayoutServices(model(), { measureContext: ctx }));
+    const paragraph = textParagraph('ابتXray Yoke ابت.');
+    paragraph.bidi = true;
+    const input = paragraphAcquisitionInput(paragraph, source);
+    const base = options(services, { context: { ...context, baseRtl: true } });
+    const admitted = { ...base, environment: { ...base.environment, nativeUnitMinimumBandPt: 468 } };
+    const hasMixed = (result: ReturnType<typeof acquireParagraphResult>) => result.layout.lines
+      .flatMap(line => line.placements).filter(piece => piece.kind === 'text')
+      .flatMap(piece => piece.paintOps).some(op => /[ابت]/u.test(op.text) && /[A-Za-z]/u.test(op.text));
+    expect(hasMixed(acquireParagraphResult(input, admitted))).toBe(false);
+    // Same paragraph, dimensions and memo owner, but frame/intrinsic callers
+    // do not supply the semantic body band. Both placement and line memos miss.
+    expect(hasMixed(acquireParagraphResult(input, base))).toBe(true);
+    const { acquireProjectableNativeUnits: _capability, ...ordinary } = services.text;
+    const legacy = createLayoutServicesRuntimeView(services, { text: Object.freeze(ordinary) });
+    expect(hasMixed(acquireParagraphResult(input, { ...admitted,
+      environment: { ...admitted.environment, layoutServices: legacy } }))).toBe(true);
+    const originalEngine = getDefaultBidiEngine();
+    let bundles = 0;
+    const changing = createLayoutServicesRuntimeView(services, { text: Object.freeze({ ...services.text,
+      acquireProjectableNativeUnits(requests: Parameters<NonNullable<typeof services.text.acquireProjectableNativeUnits>>[0]) {
+        bundles++;
+        const result = services.text.acquireProjectableNativeUnits!(requests);
+        // Even reinstalling the SAME native engine changes its lifecycle.
+        setBidiEngine(originalEngine);
+        return result;
+      },
+    }) });
+    const fresh = paragraphAcquisitionInput({ ...paragraph, runs: [...paragraph.runs] }, source);
+    try {
+      expect(hasMixed(acquireParagraphResult(fresh, { ...admitted,
+        environment: { ...admitted.environment, layoutServices: changing } }))).toBe(true);
+      expect(bundles).toBe(1);
+      // The new lifecycle cannot hit the previous ordinary deferral snapshot.
+      expect(hasMixed(acquireParagraphResult(fresh, admitted))).toBe(false);
+    } finally { setBidiEngine(originalEngine); }
+
+  });
+
   it('reacquires decimal geometry when manual-break expansion changes', () => {
     const services = scopedServices();
     const paragraph = textParagraph();

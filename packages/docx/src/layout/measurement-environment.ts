@@ -11,9 +11,11 @@ import {
   paragraphCharacterGrid,
   type ParagraphMeasurementEnvironment,
 } from '../paragraph-measure.js';
-import type { ParagraphLayoutContext, StoryContext } from '../layout-context.js';
+import type { ParagraphLayoutContext, SectionLayoutContext, StoryContext } from '../layout-context.js';
 import type { BodyMeasurementContext } from './acquisition-context.js';
 import { sectionWritingMode } from './coordinate-space.js';
+import type { LayoutSourceStore } from './layout-source-store.js';
+import type { ParagraphLayoutSource } from './text.js';
 
 function kashidaLevelOf(alignment: string | null | undefined): KashidaLevel | null {
   if (alignment === 'lowKashida') return 'low';
@@ -159,4 +161,35 @@ export function gridForParagraphContext(
     characterPitchPt: characterGrid?.characterPitchPt ?? null,
     charSpacePt: characterGrid?.charSpacePt ?? null,
   };
+}
+
+/** Conservative library admission for Unicode 17 / UAX #9 rev.51 §3.5
+ * source-level shaping units. This is not an Office fit rule. A fixed section
+ * band and the ORIGINAL first-line indent are retained across continuations;
+ * current-page empty exclusions alone cannot exclude a later anchor. Frame /
+ * AutoFit intrinsic search ceilings never enter this owner. */
+export function nativeUnitMinimumBodyBand(
+  source: LayoutSourceStore,
+  section: SectionLayoutContext,
+  story: StoryContext,
+  paragraph: ParagraphLayoutSource,
+  context: ParagraphLayoutContext,
+  availableWidthPt: number,
+  hasExclusions: boolean,
+): number | undefined {
+  const column = section.columns[0];
+  if (source.nativeUnitBodyBandHasFloatingSource || hasExclusions
+    || story.story !== 'body' || story.containers.length !== 0
+    || section.columns.length !== 1 || !column || column.wPt !== availableWidthPt
+    || section.textDirection !== 'lrTb' || section.sectionFlow !== undefined
+    || context.runDirectionUnauthored || !context.baseRtl || context.isJustified
+    || context.hasRuby || context.lineGrid.active || context.characterGrid.active
+    || (context.rightIndentGrid.paragraphAllowsAdjustment && context.rightIndentGrid.pitchPt != null)
+    || context.wordWrap === false
+    || context.tabStops.length !== 0 || paragraph.framePr !== undefined
+    || paragraph.numbering != null || (paragraph.alignment !== 'left' && paragraph.alignment !== 'start')
+    || paragraph.runs.length !== 1 || paragraph.runs[0]?.type !== 'text') return undefined;
+  const width = Math.max(1, availableWidthPt - context.physicalIndentLeftPt - context.physicalIndentRightPt);
+  const band = width - Math.max(0, context.firstIndentPt);
+  return Number.isFinite(band) && band > 0 ? band : undefined;
 }
