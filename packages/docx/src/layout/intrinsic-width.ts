@@ -1,3 +1,4 @@
+import { sameNativeLevelUnit } from '../line-breaker/native-unit-contract.js';
 import { textBreakWindow, textBreakOffsets } from '../line-breaker/text-break-window.js';
 import { uprightResourceOrientation } from './coordinate-space.js';
 import { LineMeasurementAdapter, kernedSpaceSeamIdentity } from '../line-breaker/measurement-adapter.js';
@@ -215,6 +216,7 @@ function mergeCompatibleTextSegments(
       previous
       && 'text' in previous
       && 'text' in segment
+      && sameNativeLevelUnit(previous, segment)
       && !previous.optionalHyphen && !segment.optionalHyphen
       // Keep a conditional endpoint's following protected seam addressable
       // for the same eligibility predicate consumed by actual line breaking.

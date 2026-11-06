@@ -8,19 +8,24 @@ import { layoutDocument } from '../document-layout.js';
 import { createLayoutServices } from '../layout-runtime.js';
 import { resolveDefaultTabPt } from '../line-breaker/tabs.js';
 import { SegmentQueue } from '../line-breaker/segment-queue.js';
+import { textRunsForPage } from '../text-run-projection.js';
 
 beforeAll(async () => {
   await init({ module_or_path: await readFile(new URL('../wasm/docx_parser_bg.wasm', import.meta.url)) });
 });
 
 // Every character advances 5 pt; the text band runs from 72 to 540 pt.
-function paragraphLines(bytes: Uint8Array, advancePt = 5) {
+function paragraphDocumentLayout(bytes: Uint8Array, advancePt = 5) {
   const archive = new DocxArchive(bytes);
   let model;
   try {
     model = normalizeInternalDocumentModel(JSON.parse(new TextDecoder().decode(archive.parse()))).document;
   } finally { archive.free(); }
-  const layout = layoutDocument(model, createLayoutServices(model, { measureContext: measureContext(advancePt) }), { currentDateMs: 0 });
+  return layoutDocument(model, createLayoutServices(model, { measureContext: measureContext(advancePt) }), { currentDateMs: 0 });
+}
+
+function paragraphLines(bytes: Uint8Array, advancePt = 5) {
+  const layout = paragraphDocumentLayout(bytes, advancePt);
   const paragraph = layout.pages[0]?.layers.body.find((node) => node.kind === 'paragraph');
   if (paragraph?.kind !== 'paragraph') throw new Error('Missing paragraph');
   return paragraph.lines;
@@ -266,5 +271,126 @@ describe('resolveDefaultTabPt', () => {
 
   it.each([1e-300, 1e-14, 0.01, 0.05, 18])('keeps the authored interval %s', (value) => {
     expect(resolveDefaultTabPt({ defaultTabStop: value } as never)).toBe(value);
+  });
+});
+
+describe('source-owned RTL tab-cell justification', () => {
+  it('gives equal source spaces equal visible expansion without moving the label seam', () => {
+    // A trailing-aligned cell contains homogeneous Hebrew visible islands. Equal 5 pt glyph metrics make every source U+0020 the same width;
+    // justification may enlarge those gaps, not move their allocation to a
+    // different source seam. The long cell soft-wraps, so `both` justifies it.
+    const text = Array.from({ length: 20 }, () => 'אבגד').join(' ');
+    const [line] = paragraphLines(documentBytes('', true, 0, {
+      alignment: 'right', count: 1, stop: 7200, prefix: 'ab', text,
+      noFloat: true, runRtl: true, jc: 'both', compatibilityMode: 15,
+    }));
+    const words = line!.placements.filter((node) => node.kind === 'text')
+      .flatMap(node => node.paintOps.filter(op => /\S/.test(op.text)).map(op => ({
+        text: op.text.trim(),
+        left: node.origin.xPt + op.offset.xPt,
+        right: node.origin.xPt + op.offset.xPt + [...op.text.trim()].length * 5,
+      }))).sort((a, b) => a.left - b.left);
+    const label = words.find(word => word.text === 'ab')!;
+    const cell = words.filter(word => word !== label);
+    const gaps = cell.slice(1).map((word, index) => word.left - cell[index]!.right);
+    expect(cell.length).toBeGreaterThan(2);
+    expect(cell.at(-1)!.right).toBeCloseTo(label.left);
+    for (const gap of gaps) expect(gap).toBeCloseTo(gaps[0]!);
+  });
+
+  it('preserves the real numeric decimal anchor and complete source coverage in the mixed-host fallback', () => {
+    // The period has a different host HL1 level from the digits. This source
+    // island remains on the complete legacy path; do not guess its internal
+    // paint topology or change #2070's actual stop acquisition.
+    const text = `12.5 ${Array.from({ length: 20 }, () => 'אבגד').join(' ')}`;
+    const all = paragraphLines(documentBytes('', true, 0, {
+      alignment: 'decimal', count: 1, stop: 7200, prefix: 'ab', text,
+      noFloat: true, runRtl: true, jc: 'both', compatibilityMode: 15,
+    }));
+    const numeric = all[0]!.placements.find(p => p.kind === 'text' && p.text.trim() === '12.5');
+    if (numeric?.kind !== 'text') throw new Error('Missing decimal source');
+    const period = numeric.clusters.find(c => c.range.start === numeric.range.start + 2)!;
+    // Existing justified fit-back keeps the full terminal cell against its
+    // label, not re-tabbed to the ordinary stop after spreading. The2glyph
+    // label ends at540; the4glyph number abuts it and its period follows2glyphs.
+    expect(numeric.origin.xPt + period.offset.xPt).toBeCloseTo(540 - 2 * 5 - 4 * 5 + 2 * 5);
+    const source = all.flatMap(line => line.placements).sort((a, b) => a.range.start - b.range.start);
+    let cursor = 0;
+    for (const placement of source) {
+      expect(placement.range.start).toBe(cursor);
+      cursor = placement.range.end;
+    }
+    expect(source.map(p => p.kind === 'text' ? p.text : p.kind === 'tab' ? '\t' : '').join(''))
+      .toBe(`ab\t${text}`);
+  });
+
+  it('retains each consecutive source space after a supplementary character in the projected box', () => {
+    // Source UTF16 positions differ from code-point cuts after the emoji.
+    // Four visible glyphs per word, with two U+0020 between words: 80 pt
+    // natural in a 468 pt band. The four spaces each receive (468-80)/4.
+    const text = 'אב😀ד  הוזח  טיכל';
+    const layout = paragraphDocumentLayout(documentBytes('', true, 0, {
+      alignment: 'left', count: 0, text, noFloat: true, runRtl: true,
+      jc: 'distribute', compatibilityMode: 15,
+    }));
+    const paragraph = layout.pages[0]!.layers.body.find(node => node.kind === 'paragraph');
+    if (paragraph?.kind !== 'paragraph') throw new Error('Missing paragraph');
+    expect(paragraph.lines).toHaveLength(1);
+    const placements = paragraph.lines[0]!.placements.filter(node => node.kind === 'text');
+    const sourceOrder = [...placements].sort((a, b) => a.range.start - b.range.start);
+    expect(sourceOrder.map(node => node.text).join('')).toBe(text);
+    let cursor = 0;
+    let spaces = 0;
+    for (const placement of sourceOrder) {
+      expect(placement.range.start).toBe(cursor);
+      let clusterCursor = placement.range.start;
+      let advancePt = 0;
+      for (const cluster of placement.clusters) {
+        expect(cluster.range.start).toBe(clusterCursor);
+        const source = text.slice(cluster.range.start, cluster.range.end);
+        if (source === ' ') {
+          expect(cluster.advancePt).toBeCloseTo(102);
+          spaces += 1;
+        }
+        expect(cluster.advancePt).toBeGreaterThanOrEqual(0);
+        advancePt += cluster.advancePt;
+        clusterCursor = cluster.range.end;
+      }
+      expect(clusterCursor).toBe(placement.range.end);
+      expect(advancePt).toBeCloseTo(placement.advancePt);
+      expect(placement.bounds.widthPt).toBeCloseTo(advancePt);
+      cursor = placement.range.end;
+      // The same source intervals, including zero-ink whitespace, reach paint.
+      let painted = placement.range.start;
+      for (const operation of placement.paintOps) {
+        expect(operation.range.start).toBe(painted);
+        painted = operation.range.end;
+      }
+      expect(painted).toBe(placement.range.end);
+    }
+    expect(cursor).toBe(text.length);
+    expect(spaces).toBe(4);
+    const words = [...text.matchAll(/\S+/gu)].map(match => {
+      const start = match.index;
+      const end = start + match[0].length;
+      const intervals = placements.flatMap(placement => placement.paintOps
+        .filter(operation => operation.range.start >= start && operation.range.end <= end)
+        .map(operation => ({
+          left: placement.origin.xPt + operation.offset.xPt,
+          width: placement.clusters.filter(cluster => cluster.range.start >= operation.range.start
+            && cluster.range.end <= operation.range.end).reduce((sum, cluster) => sum + cluster.advancePt, 0),
+        })));
+      return {
+        left: Math.min(...intervals.map(interval => interval.left)),
+        right: Math.max(...intervals.map(interval => interval.left + interval.width)),
+      };
+    }).sort((a, b) => a.left - b.left);
+    expect(words[0]!.left).toBeCloseTo(72);
+    expect(words.at(-1)!.right).toBeCloseTo(540);
+    expect(words[1]!.left - words[0]!.right).toBeCloseTo(204);
+    expect(words[2]!.left - words[1]!.right).toBeCloseTo(204);
+    const projected = textRunsForPage(layout, 0, { scale: 2 });
+    expect(projected.map(run => run.text).sort()).toEqual(placements.map(node => node.text).sort());
+    expect(projected.reduce((sum, run) => sum + run.w, 0)).toBeCloseTo(468 * 2);
   });
 });

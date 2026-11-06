@@ -1,3 +1,4 @@
+import { advanceLineBoundary } from './source-cursor.js';
 import { isInklessLineItem } from './break-queue.js';
 import { lineEndSpaceCharged, lineTrailingSpaceSuffixWidth, measureFitTextUnit, measureJoinedTextUnit } from './atomic-units.js';
 import { placeOptionalHyphenPrefix } from './optional-hyphens.js';
@@ -313,10 +314,7 @@ function processTextSegment(context: BreakOpportunityIteratorContext, seg: Layou
       measuredWidth: 0,
       ...slicedTextMetadata(s, visibleBeforeParagraphFinalTail.length, s.text.length),
       src: s.src
-        ? {
-            segIndex: s.src.segIndex,
-            charOffset: s.src.charOffset + visibleBeforeParagraphFinalTail.length,
-          }
+        ? advanceLineBoundary(s.src!, visibleBeforeParagraphFinalTail.length)
         : undefined,
     };
     breakerState.queue.unshift(trailingSegment);
@@ -1946,10 +1944,7 @@ function splitCjkOverflow(context: BreakOpportunityIteratorContext, frame: TextF
         text: tail,
         ...slicedTextMetadata(s, prefix.length, s.text.length),
         measuredWidth: 0,
-        src: {
-          segIndex: s.src!.segIndex,
-          charOffset: s.src!.charOffset + prefix.length,
-        },
+        src: advanceLineBoundary(s.src!, prefix.length),
       });
     } else {
       appendQueuedIdeographicSpaceSegment(s);
@@ -2014,10 +2009,7 @@ function splitCjkOverflow(context: BreakOpportunityIteratorContext, frame: TextF
           text: tail,
           ...slicedTextMetadata(s, firstChar.length, s.text.length),
           measuredWidth: 0,
-          src: {
-            segIndex: s.src!.segIndex,
-            charOffset: s.src!.charOffset + firstChar.length,
-          },
+          src: advanceLineBoundary(s.src!, firstChar.length),
         });
       } else {
         appendQueuedIdeographicSpaceSegment(s);
@@ -2100,7 +2092,7 @@ function splitSeaOverflow(context: BreakOpportunityIteratorContext, frame: TextF
         text: tail,
         ...slicedTextMetadata(s, split, s.text.length),
         measuredWidth: 0,
-        src: { segIndex: s.src!.segIndex, charOffset: s.src!.charOffset + split },
+        src: advanceLineBoundary(s.src!, split),
         seaBreaks: rebaseSeaBreaks(s.seaBreaks, split),
       });
     }
@@ -2161,7 +2153,7 @@ function splitSeaOverflow(context: BreakOpportunityIteratorContext, frame: TextF
         text: tail,
         ...slicedTextMetadata(s, gsplit, s.text.length),
         measuredWidth: 0,
-        src: { segIndex: s.src!.segIndex, charOffset: s.src!.charOffset + gsplit },
+        src: advanceLineBoundary(s.src!, gsplit),
         seaBreaks: rebaseSeaBreaks(s.seaBreaks, gsplit),
       });
     }
