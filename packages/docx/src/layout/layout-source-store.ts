@@ -16,8 +16,6 @@ import type { DeepReadonly, ParsedUnsupportedTextBoxBlock } from './types.js';
 import { imageResourceKey, sourceKey, vmlPictureResourceKey, vmlStrokeResourceKey, vmlEdgeResourceKey } from './source-key.js';
 import { indexSealedPaintResourceDescriptors } from './paint-resources.js';
 import { sealPlainData } from './plain-data.js';
-import { acquireOriginalRtlArabicEofSource } from './source-eof-space.js';
-import type { OriginalRtlArabicEofSource } from '../line-breaker/model.js';
 import {
   isReservedNoteSeparatorInstance,
   reservedNoteSeparatorRole,
@@ -34,8 +32,6 @@ import {
 } from './table-source-acquisition.js';
 
 export interface LayoutSourceAcquisition {
-  /** Complete canonical source proof, independent of continuation position. */
-  originalRtlArabicEofSource(source: SourceRef): OriginalRtlArabicEofSource | undefined;
   rtlSoftPresentationSource(source: SourceRef): RtlSoftPresentationSource | undefined;
   readonly acquisitionInputs: BodyAcquisitionInputProjections;
   effectiveTablePositioning(table: TableLayoutSource): DeepReadonly<TblpPr> | null;
@@ -442,10 +438,6 @@ function sealLayoutSourceStoreWithBody(
   // pagination therefore cannot add a future anchor to this sealed source.
   let nativeUnitBodyBandHasFloatingSource = false;
   const paragraphBySource = new Map<string, LayoutParagraphAcquisitionFact>();
-  // Lazy source facts belong to this sealed document only. Explicit null owns
-  // a lexical refusal too: continuations do not rescan the whole original run.
-  // No eager all-paragraph scan, global text cache or source-occurrence key.
-  const originalEofSources = new WeakMap<ParagraphAcquisitionInput, OriginalRtlArabicEofSource | null>();
   for (const fact of input.acquisitionFacts.paragraphs) {
     assertExactOwnKeys(fact, [
       'source', 'publicAnchorBridges', 'numberingMarkerFallbackFontSizePt',
@@ -575,17 +567,6 @@ function sealLayoutSourceStoreWithBody(
       return softPresentationSources.get(paragraph) ?? undefined;
     },
     acquisitionInputs: projections,
-    originalRtlArabicEofSource(source) {
-      const fact = paragraphBySource.get(sourceKey(source));
-      if (!fact) throw new Error(`Unknown paragraph acquisition source: ${sourceKey(source)}`);
-      const paragraph = blocks.resolve(source);
-      if (paragraph.type !== 'paragraph') throw new Error(`Paragraph source kind mismatch: ${sourceKey(source)}`);
-      const retained = originalEofSources.get(paragraph);
-      if (retained !== undefined) return retained ?? undefined;
-      const authority = acquireOriginalRtlArabicEofSource(paragraph);
-      originalEofSources.set(paragraph, authority ?? null);
-      return authority;
-    },
     effectiveTablePositioning(table) {
       const fact = tableByIdentity.get(table);
       if (!fact) throw new Error('Unknown table acquisition input');

@@ -2099,17 +2099,6 @@ function appendRunsToSegments(
     for (let index = emittedStart; index < segs.length; index += 1) {
       const segment = segs[index];
       segment.sourceRunIndex = runIndex;
-      const eofSource = environment.originalRtlArabicEofSource;
-      if (eofSource !== undefined && runIndex === 0 && 'text' in segment) {
-        const request = segment.textShapeRequest;
-        const offset = request?.substituteContext?.offset;
-        if (offset !== undefined && request?.substituteContext?.text === eofSource.text
-          && eofSource.text.slice(offset, offset + segment.text.length) === segment.text) {
-          segment.originalRtlArabicEofSource = eofSource;
-          segment.sourceTextSequence = eofSource.sequence;
-          segment.sourceTextOffset = offset;
-        }
-      }
       if (sequence) {
         segment.sourceTextSequence = sequence.sources;
         // Authored optional controls need the displayed source sweep even

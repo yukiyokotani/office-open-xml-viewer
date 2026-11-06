@@ -97,7 +97,7 @@ import {
   physicalSectionGeometry,
 } from './context.js';
 import { isAllRotatedVerticalTextDirection, isVerticalTextDirection, physicalLayoutSection, verticalLayoutSection } from './section-orientation.js';
-import { gridForParagraphContext, nativeUnitMinimumBodyBand, originalRtlArabicEofSource, paragraphMeasurementEnvironment, rtlLeftSoftPlacementAdmission } from './measurement-environment.js';
+import { gridForParagraphContext, nativeUnitMinimumBodyBand, paragraphMeasurementEnvironment } from './measurement-environment.js';
 import { createRevisionAuthorColorResolver } from './track-changes.js';
 import { BODY_STORY_CONTEXT, MAIN_BODY_STORY_CONTEXT, bodyAnchorReferenceFrames, retainedTableRecord, resolveBodyParagraphLayoutContext, resolveStateParagraphLayoutContext, withTableCellStory } from './acquisition-state.js';
 import { applyNumberingBodyOffset, resolveNumberingMarkerGeometry } from './numbering-marker.js';
@@ -596,16 +596,8 @@ function acquireBodyParagraphAtLocation(
     state.sectionLayout, state.storyContext, paragraph, context,
     availableInlineExtentPt, exclusions.length !== 0);
   const measurementEnvironment = paragraphMeasurementEnvironment(state);
-  const eofSource = sourceStore && measurementEnvironment.compatibilityMode === 15
-    ? originalRtlArabicEofSource(sourceStore, state.sectionLayout, state.storyContext, paragraph, context, source) : undefined;
-  const rtlLeftSoft = sourceStore && rtlLeftSoftPlacementAdmission(sourceStore,
-    state.sectionLayout, state.storyContext, paragraph, context, source,
-    measurementEnvironment.compatibilityMode, exclusions.length !== 0);
-  const environment = minimumBand === undefined && eofSource === undefined && rtlLeftSoft !== true ? measurementEnvironment : {
-    ...measurementEnvironment,
-    ...(minimumBand === undefined ? {} : { nativeUnitMinimumBandPt: minimumBand }),
-    ...(eofSource === undefined ? {} : { originalRtlArabicEofSource: eofSource }),
-    ...(rtlLeftSoft === true ? { rtlLeftSoftPlacementAdmitted: true as const } : {}),
+  const environment = minimumBand === undefined ? measurementEnvironment : {
+    ...measurementEnvironment, nativeUnitMinimumBandPt: minimumBand,
   };
   const topBorder = paragraphContextWithTopBorder(
     context,

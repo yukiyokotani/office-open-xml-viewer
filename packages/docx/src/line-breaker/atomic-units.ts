@@ -6,8 +6,6 @@ import { hasCJKBreakOpportunity } from './text-runs.js';
 
 export interface AtomicTextMeasurement {
   readonly baseRtl: boolean;
-  /** Admission only; no final paint or hanging authority. */
-  readonly rtlLeftSoftFit?: boolean;
   /** WORD_RTL_JUSTIFIED_VISIBLE_FIT: right-to-left lines fit their visible prefix. */
   readonly lineFit?: Readonly<{ rtlVisiblePrefix: boolean }>;
   readonly reservePrefixWork: (utf16Units: number) => void;
@@ -17,26 +15,8 @@ export interface AtomicTextMeasurement {
 
 /** Whether line fitting charges a line-end U+0020: right-to-left lines do
  * (library containment policy) unless WORD_RTL_JUSTIFIED_VISIBLE_FIT applies. */
-export function lineEndSpaceCharged(
-  state: Pick<AtomicTextMeasurement, 'baseRtl' | 'lineFit' | 'rtlLeftSoftFit'>,
-  segment?: LayoutTextSeg, prefix = segment?.text,
-): boolean {
-  if (state.baseRtl && state.lineFit?.rtlVisiblePrefix !== true && state.rtlLeftSoftFit !== true) return true;
-  const authority = segment?.originalRtlArabicEofSource;
-  const source = authority?.text;
-  const sequence = segment?.sourceTextSequence;
-  const offset = segment?.sourceTextOffset;
-  // Only a prospective candidate reaching the COMPLETE authored source end
-  // charges this measured separator. Soft prefixes and fragment ends retain
-  // their existing fit; queue exhaustion is deliberately not consulted.
-  return source !== undefined && prefix !== undefined && prefix.endsWith(' ')
-    && segment?.sourceRunIndex === 0 && offset !== undefined
-    && sequence === authority?.sequence && sequence?.length === 1 && sequence[0]?.runIndex === 0
-    && sequence[0].start === 0 && sequence[0].end === source.length
-    && offset + prefix.length === source.length
-    && segment.textShapeRequest?.substituteContext?.text === source
-    && segment.textShapeRequest.substituteContext.offset === offset
-    && source.slice(offset) === prefix;
+export function lineEndSpaceCharged(state: Pick<AtomicTextMeasurement, 'baseRtl' | 'lineFit'>): boolean {
+  return state.baseRtl && state.lineFit?.rtlVisiblePrefix !== true;
 }
 
 /** Advance of the U+0020 suffix that ends `items` across members (a run of
@@ -165,7 +145,7 @@ export function measureJoinedTextUnit(
     const fw = end === f.text.length ? segAdvance(f) : strAdvance(f, prefix);
     groupW += fw;
     const trimmed = prefix.replace(/ +$/, '');
-    const trailing = !fixedCell && !lineEndSpaceCharged(measurement, f, prefix) && prefix.endsWith(' ')
+    const trailing = !fixedCell && !lineEndSpaceCharged(measurement) && prefix.endsWith(' ')
       ? fw - strAdvance(f, trimmed) : 0;
     groupTrail = trimmed.length === 0 && groupTrail > 0 ? groupTrail + trailing : trailing;
     if (end < f.text.length || !fixedCell && explicitEnd !== undefined && hardEnd === undefined) break;
