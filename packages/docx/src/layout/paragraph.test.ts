@@ -2449,7 +2449,9 @@ describe('planLine visual geometry', () => {
   it.each([
     { first: 'אבXray ', rtl: false },
     { first: 'אבXray ', rtl: true },
-    { first: '12.5 ', rtl: true },
+    // The decimal interior is now uniform; its terminal period still keeps
+    // the numeric word mixed. Plain 12.5 is covered by the production tab test.
+    { first: '12.5. ', rtl: true },
   ])('keeps the complete legacy line for mixed visible islands ($first, rtl=$rtl)', ({ first, rtl }) => {
     const piece = (text: string, start: number, marked: boolean) => ({
       ...measuredText(text, start, text.length * 5, marked), rtl: marked,
