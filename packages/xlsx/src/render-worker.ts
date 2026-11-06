@@ -62,7 +62,7 @@ import {
   measureWorksheet,
   type WorksheetCacheUsage,
 } from './worksheet-resource-limits.js';
-import type { ParsedWorkbook, Worksheet } from './types.js';
+import type { CellValue, ParsedWorkbook, Worksheet } from './types.js';
 import { bindWorksheetPolicy } from './worksheet-policy-context.js';
 import { WorksheetViewProjectionCache } from './worker-protocol.js';
 import { evictWorkerWorksheets } from './internal/worksheet-cache.js';
@@ -141,6 +141,46 @@ function startFontLoad(parsed: ParsedWorkbook, sources: readonly FontSource[]): 
 }
 const sheetCache = new Map<number, Worksheet>();
 const provisionalSheets = new Map<number, Worksheet>();
+/**
+ * Opt-in recalculation patches (`applyRecalculatedValues`) awaiting the
+ * admitted terminal. The main thread recalcs AFTER the worker materializes
+ * the sheet (cached `<v>`) but BEFORE it ACKs the terminal — so a patch can
+ * arrive while only the preview is cached. The patch is applied immediately
+ * when a model is present AND stashed for the admission callback, which
+ * consumes it onto the terminal; overwrites are idempotent, so both orders
+ * converge. Cleared with the cache (parse/reset/evict) so a stale patch can
+ * never meet a later admission.
+ */
+const pendingRecalcPatches = new Map<number, Array<{ row: number; col: number; value: CellValue }>>();
+
+/** Overwrite matching cells' values in place (unknown rows/cells skipped —
+ *  the worker copy always derives from the same archive as main's). */
+function applyRecalculatedCells(
+  worksheet: Worksheet,
+  cells: ReadonlyArray<{ row: number; col: number; value: CellValue }>,
+): void {
+  const byRow = new Map<number, Map<number, { value: CellValue }>>();
+  for (const row of worksheet.rows) {
+    let cols = byRow.get(row.index);
+    if (!cols) {
+      cols = new Map();
+      byRow.set(row.index, cols);
+    }
+    for (const cell of row.cells) cols.set(cell.col, cell);
+  }
+  for (const patch of cells) {
+    const cell = byRow.get(patch.row)?.get(patch.col);
+    if (cell) cell.value = patch.value;
+  }
+}
+
+/** Consume a stashed patch onto a just-admitted terminal (no-op absent). */
+function consumePendingRecalcPatch(sheetIndex: number, worksheet: Worksheet): void {
+  const patch = pendingRecalcPatches.get(sheetIndex);
+  if (!patch) return;
+  pendingRecalcPatches.delete(sheetIndex);
+  applyRecalculatedCells(worksheet, patch);
+}
 const viewProjectionCache = new WorksheetViewProjectionCache();
 const sheetCacheUsage = new Map<number, WorksheetCacheUsage>();
 let retainedSheetUsage: WorksheetCacheUsage = {
@@ -179,6 +219,9 @@ const worksheetPull = new WorksheetPullWorker(
     );
     bindWorksheetPolicy(worksheet, worksheetPolicy);
     bindCellFontLanguage(worksheet, japaneseCellFonts);
+    // Opt-in recalculation: the main thread's patch (if any) was computed
+    // from this same archive model — apply it so the retained copy matches.
+    consumePendingRecalcPatch(sheetIndex, worksheet);
     sheetCache.set(sheetIndex, worksheet);
     return {
       commit: () => {
@@ -265,7 +308,22 @@ self.onmessage = async (e: MessageEvent<
         req.sheetIndices, sheetCache, sheetCacheUsage, retainedSheetUsage, viewProjectionCache,
         worksheetPolicy,
       );
+      for (const sheetIndex of req.sheetIndices) pendingRecalcPatches.delete(sheetIndex);
       post({ type: 'worksheetsEvicted', id: req.id });
+    } catch (error) {
+      post({ type: 'error', id: req.id, ...serializeWorkerError(error) });
+    }
+    return;
+  }
+  if (req.type === 'applyRecalculatedValues') {
+    try {
+      // Applied now AND stashed for admission: the patch may land while only
+      // the preview is cached (main recalcs pre-ACK). Both writes are the
+      // same idempotent overwrite, so patch/admit in either order converges.
+      const cached = sheetCache.get(req.sheetIndex);
+      if (cached) applyRecalculatedCells(cached, req.cells);
+      pendingRecalcPatches.set(req.sheetIndex, req.cells);
+      post({ type: 'recalculatedValuesApplied', id: req.id });
     } catch (error) {
       post({ type: 'error', id: req.id, ...serializeWorkerError(error) });
     }
@@ -338,6 +396,7 @@ self.onmessage = async (e: MessageEvent<
       officeSheetLoads = new WeakMap();
       officeSheetLoadQueue = Promise.resolve();
       sheetCache.clear();
+      pendingRecalcPatches.clear();
       viewProjectionCache.clear();
       sheetCacheUsage.clear();
       retainedSheetUsage = { rows: 0, cells: 0, ownedUtf8Bytes: 0, jsonBytes: 0 };
@@ -582,6 +641,7 @@ self.onmessage = async (e: MessageEvent<
       workbook = null;
       archiveBacked = false;
       sheetCache.clear();
+      pendingRecalcPatches.clear();
       viewProjectionCache.clear();
       sheetCacheUsage.clear();
       retainedSheetUsage = { rows: 0, cells: 0, ownedUtf8Bytes: 0, jsonBytes: 0 };

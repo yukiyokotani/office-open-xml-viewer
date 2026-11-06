@@ -979,6 +979,20 @@ export interface Cell {
    *  informational only (for example selection context): formulas are never
    *  calculated, and the cell always renders its cached `value`. */
   formula?: string;
+  /** `<f t>` formula type (ECMA-376 §18.3.1.40 `ST_CellFormulaType`:
+   *  `normal` | `array` | `dataTable` | `shared`), when authored. Absent ⇒
+   *  `normal`. Recalc-only metadata: the renderer ignores it. A `shared`
+   *  anchor carries `formula` text plus `formulaRef`/`formulaSi`; followers
+   *  carry the type plus `formulaSi` with NO `formula` text. `dataTable`
+   *  cells are never recalculated (cached value kept). */
+  formulaType?: string;
+  /** `<f ref>` range for `shared`/`array` formulas (e.g. `B1:B2`). Present
+   *  on the anchor cell; followers omit it. Recalc-only. */
+  formulaRef?: string;
+  /** `<f si>` shared-group index linking followers to their anchor's
+   *  formula text. Recalc-only: followers expand the anchor with shifted
+   *  relative refs (see `expandSharedFormula`). */
+  formulaSi?: number;
   /** Whether this cell displays its phonetic hint (furigana). The parser
    *  resolves it as `cell/@ph ?? row/@ph ?? false` — the per-cell `<c ph>`
    *  (ECMA-376 §18.3.1.4) wins when present (an explicit `ph="0"` overrides an
