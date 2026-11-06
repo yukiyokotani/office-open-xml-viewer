@@ -100,6 +100,8 @@ import {
   type DistributeResult,
   type SegStretch,
 } from '../text-distribute.js';
+import { priorityKashidaInsertionCandidates } from '../arabic-joining.js';
+import type { RtlSoftPresentationSource } from './rtl-soft-presentation.js';
 import { computeKashidaDistribution, type KashidaLevel } from '../kashida-justify.js';
 import { imageResourceKey, vmlPictureResourceKey, vmlStrokeResourceKey, vmlEdgeResourceKey } from './source-key.js';
 import { stableFingerprint } from './fingerprint.js';
@@ -161,6 +163,7 @@ import {
 } from './paragraph-wrap-registry.js';
 import {
   paragraphAcquisitionCacheOf,
+  layoutSourceStoreOf,
   type ParagraphAcquisitionRuntimeCache,
 } from './runtime-state.js';
 import {
@@ -426,6 +429,7 @@ export interface MeasuredLinePlanInput {
 }
 
 export interface PlanLineInput {
+  readonly rtlSoftPresentation?: RtlSoftPresentationSource;
   readonly paragraphXPt: number;
   readonly availableWidthPt: number;
   readonly alignment?: string;
@@ -1530,6 +1534,11 @@ function withAutoSpaceExpansion(
   return merged;
 }
 
+function kashidaParticipant(segment: MeasuredLinePlanSegment, index: number, afterLastTab: number): segment is MeasuredTextPlanSegment {
+  return segment.kind === 'text' && index >= afterLastTab
+    && segment.basePaintOps.length === 1 && segment.basePaintOps[0]!.naturalAdvancePt === undefined;
+}
+
 /** Converts a measured line snapshot into final point-space visual geometry.
  * Bidi order, alignment, compression, justification, and tab advances are
  * resolved here; paint consumes the resulting placements without source access. */
@@ -1568,6 +1577,12 @@ export function planLine(input: PlanLineInput): LineLayout {
   const justification = lineEndRule === 'character' && bidi ? 'word' : lineEndRule;
   const applyJustify = justification !== null;
   const originalAfterLastTab = lastTabSegmentIndex(segments) + 1;
+  const prospectiveSoftPresentation = input.rtlSoftPresentation !== undefined
+    && !line.endsWithBreak && !input.isLastLine && originalAfterLastTab > 0
+    && hasLogicalTailSpace(segments)
+    && (input.alignment === 'distribute' || (input.alignment === 'lowKashida'
+      && segments.every((segment, index) => !kashidaParticipant(segment, index, originalAfterLastTab)
+        || priorityKashidaInsertionCandidates(segment.text).length === 0)));
   // Stage 1 capability: only unambiguously nonnegative natural word slack.
   // Accepted compression, hang-funded negative budgets, character topology,
   // compatibility-shape provenance and rewrite-capable Kashida stay legacy.
@@ -1582,16 +1597,17 @@ export function planLine(input: PlanLineInput): LineLayout {
     && segments.every(segment => segment.kind === 'text' && segment.nativeBaseDirection !== undefined);
   if (bidi && !characterSpreadBidi && !input.runDirectionUnauthored
     && (justification === 'word' || justification === 'word-or-centre'
-      || chargedNativeUnits)
-    && kashidaLevel(input.alignment) === null && lineSlackPt >= 0
+      || chargedNativeUnits || prospectiveSoftPresentation)
+    && (kashidaLevel(input.alignment) === null || prospectiveSoftPresentation) && lineSlackPt >= 0
     && line.gapPlan === undefined && line.justifiedCompressionPt === undefined) {
     // A source-tail SPACE needs an established terminal budget before this
     // representation can own its gaps. Distribute currently lacks that hanging
-    // policy (#2071); preserve its COMPLETE old line rather than invent credit
+    // policy outside the registered Hebrew/numeric soft capability; preserve its
+    // COMPLETE old line rather than invent credit
     // or combine fine paint with an incomplete coarse terminal budget.
     // Certified fixed-band native units retain FULL charged tail SPACE. No
     // hanging credit or justification budget is introduced for LEFT/START.
-    const terminalBudgetKnown = chargedNativeUnits || wordLineEndSpaceHangs(bidi, input.wordWrap !== false)
+    const terminalBudgetKnown = prospectiveSoftPresentation || chargedNativeUnits || wordLineEndSpaceHangs(bidi, input.wordWrap !== false)
       || (input.displayMathJustification === undefined
         && wordRtlJustifiedVisibleFitApplies(input.alignment, input.baseRtl === true, input.wordWrap !== false));
     const hasTerminalSpace = hasLogicalTailSpace(segments);
@@ -1639,7 +1655,8 @@ export function planLine(input: PlanLineInput): LineLayout {
   // The breaker's gate (wordJustifiedLineFit) is the same helper; a display
   // math line holds no line-end space.
   const rtlVisibleEdge = input.displayMathJustification === undefined
-    && wordRtlJustifiedVisibleFitApplies(input.alignment, input.baseRtl === true, input.wordWrap !== false);
+    && (wordRtlJustifiedVisibleFitApplies(input.alignment, input.baseRtl === true, input.wordWrap !== false)
+      || (prospectiveSoftPresentation && sourceCells !== undefined));
   // The line-end spaces hang on the side where they are drawn; spaces drawn
   // between other segments cannot hang and stay in the line.
   const rtlLineEnd = rtlVisibleEdge
@@ -1663,10 +1680,7 @@ export function planLine(input: PlanLineInput): LineLayout {
     // slack is redistributed over the remaining segments.
     const excluded = new Set<number>();
     const distribute = () => computeKashidaDistribution(
-      segments.map((segment, segmentIndex) => segment.kind === 'text'
-        && segmentIndex >= afterLastTab
-        && segment.basePaintOps.length === 1
-        && segment.basePaintOps[0]!.naturalAdvancePt === undefined
+      segments.map((segment, segmentIndex) => kashidaParticipant(segment, segmentIndex, afterLastTab)
         && !excluded.has(segmentIndex)
         ? { text: segment.text }
         : {}),
@@ -3862,6 +3876,7 @@ function planMeasuredLines(
   resourceOrientation?: import('./types.js').UprightResourceOrientation,
   ulTrailSpace = false,
   doNotExpandShiftReturn = false,
+  rtlSoftPresentation?: RtlSoftPresentationSource,
 ): readonly LineLayout[] {
   // WORD_GRID_LINE_CONTENT_FIT_ADMISSION covers plain captions only. Decide
   // authored paragraph eligibility before continuation/keep-next slicing removes
@@ -4143,6 +4158,9 @@ function planMeasuredLines(
       : undefined;
     const planned = planLine({
       paragraphXPt, availableWidthPt, alignment: paragraph.alignment,
+      ...(rtlSoftPresentation && lineEndOffset < rtlSoftPresentation.end
+        && Number.isFinite(lineStartOffset) && lineStartOffset <= rtlSoftPresentation.lastTab
+        && lineEndOffset > rtlSoftPresentation.lastTab ? { rtlSoftPresentation } : {}),
       baseRtl: context.baseRtl,
       // A list label's lines keep the first-line indent through the body's
       // first line (LayoutLine.listLabelFirstIndent).
@@ -7093,6 +7111,27 @@ function projectAcquiredParagraphLines(
   const numberingPlan = options.continuesFromPrevious
     ? undefined
     : retainedNumberingPlan(paragraph, planningContext, options);
+  // Registered word-rtl-hebrew-numeric-soft-presentation is final-only:
+  // fitting and charged acquisition remain unchanged. Missing source ownership
+  // or a sliced continuation cannot manufacture a genuine soft boundary.
+  const softPresentationEligible = (paragraph.alignment === 'distribute' || paragraph.alignment === 'lowKashida')
+    && options.context.baseRtl && options.context.wordWrap !== false
+    && !options.context.runDirectionUnauthored && !options.context.hasRuby
+    && !options.context.lineGrid.active && !options.context.characterGrid.active
+    && !(options.context.rightIndentGrid.paragraphAllowsAdjustment && options.context.rightIndentGrid.pitchPt != null)
+    && (options.environment.compatibilityMode === undefined || options.environment.compatibilityMode === 14
+      || options.environment.compatibilityMode === 15)
+    && options.source.story === 'body' && options.source.storyInstance === 'body'
+    && options.source.path.length === 1 && options.ordinaryFlow && options.anchorCellBounds === undefined
+    && !options.environment.verticalPageFrame && options.environment.pageWritingMode !== 'vertical-rl'
+    && options.environment.pageWritingMode !== 'vertical-lr'
+    && options.sourceRangeStart === undefined && !options.continuesFromPrevious
+    && options.placement.wrap === undefined && options.exclusions.length === 0
+    && paragraph.framePr === undefined && paragraph.numbering == null;
+  const store = softPresentationEligible && options.environment.layoutServices
+    ? layoutSourceStoreOf(options.environment.layoutServices) : undefined;
+  const softPresentation = store && !store.nativeUnitBodyBandHasFloatingSource
+    ? store.acquisition.rtlSoftPresentationSource(options.source) : undefined;
   let lines = planMeasuredLines(
     measured, paragraph, paragraphXPt, availableWidthPt, options.source, options.id, planningContext,
     occurrences, numberingPlan, options.environment.layoutServices?.text,
@@ -7106,6 +7145,7 @@ function projectAcquiredParagraphLines(
     ),
     options.environment.ulTrailSpace === true,
     options.environment.doNotExpandShiftReturn === true,
+    softPresentation,
   );
   if (options.sourceRangeStart !== undefined) {
     lines = rebaseMeasuredLineRanges(lines, options.sourceRangeStart);
