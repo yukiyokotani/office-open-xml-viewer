@@ -3491,7 +3491,7 @@ function acquireTableColumnInput(
                 ? Number.MAX_SAFE_INTEGER
                 : contentWPt,
               { context: state.ctx, fontFamilyClasses: state.fontFamilyClasses },
-              paragraphMeasurementEnvironment(state),
+              paragraphMeasurementEnvironment(state, cellStory),
               numbering,
               { preserveWhitespaceOnlyContent: true },
             );
@@ -3506,7 +3506,7 @@ function acquireTableColumnInput(
               { ...context, firstIndentPt: 0 },
               Number.MAX_SAFE_INTEGER,
               { context: state.ctx, fontFamilyClasses: state.fontFamilyClasses },
-              paragraphMeasurementEnvironment(state),
+              paragraphMeasurementEnvironment(state, cellStory),
               numbering,
               { preserveWhitespaceOnlyContent: true },
             );

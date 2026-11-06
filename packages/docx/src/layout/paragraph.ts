@@ -1,3 +1,4 @@
+import { closingPairScopeApplies } from '../line-breaker/closing-pair-advance.js';
 import { hasNativeUnitReceipt, hasNativeVisiblePrefix } from '../line-breaker/native-unit-contract.js';
 import { prepareSourceSpaceCells, type SourceSpaceCells } from './source-space-cells.js';
 import { hasRtlDecimalTabCapability } from '../line-breaker/tabs.js';
@@ -2829,6 +2830,14 @@ function retainedNumberingPlan(
     compatibilityMode: options.environment.compatibilityMode,
     baseRtl: context.baseRtl,
   }, service);
+}
+
+/** Do not inherit the pair policy into a nested story when a caller carries
+ * its parent's environment. Source ownership is known at acquisition, not paint. */
+function closingPairRootSourceEligible(options: Pick<ParagraphAcquisitionOptions,
+  'source' | 'ordinaryFlow' | 'anchorCellBounds'>): boolean {
+  return options.source.story === 'body' && options.source.storyInstance === 'body'
+    && options.source.path.length === 1 && options.ordinaryFlow && options.anchorCellBounds === undefined;
 }
 
 /** The measured frame belongs to ordinary root body paragraphs, never a
@@ -6224,6 +6233,8 @@ function paragraphAcquisitionKey(
     // Story/ordinary-flow/cell ownership now changes first-line measurement,
     // not merely retained placement. Own the same admission in both keys.
     numberedWindowScopeEligible(options),
+    // This acquired geometry is shared by intrinsic and bounded consumers.
+    closingPairRootSourceEligible(options) && closingPairScopeApplies(paragraph, context, environment),
     lineOnly
       ? [plainPlacement.paragraphXPt, plainPlacement.availableWidthPt, plainPlacement.noWrap ?? false]
       : [
@@ -6523,6 +6534,9 @@ export function acquireParagraphResult(
     && (options.source.story !== 'body' || options.source.storyInstance !== 'body'
       || options.source.path.length !== 1 || !options.ordinaryFlow || options.anchorCellBounds !== undefined)) {
     options = { ...options, environment: { ...options.environment, originalRtlArabicEofSource: undefined } };
+  }
+  if (options.environment.closingPairRootSource && !closingPairRootSourceEligible(options)) {
+    options = { ...options, environment: { ...options.environment, closingPairRootSource: undefined } };
   }
   const cache = options.environment.layoutServices
     ? paragraphAcquisitionCacheOf(options.environment.layoutServices)

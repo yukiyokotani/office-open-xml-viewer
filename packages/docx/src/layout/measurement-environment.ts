@@ -70,8 +70,14 @@ export function docDefaultFontSizePt(document: DocxDocumentModel): number {
 
 export function paragraphMeasurementEnvironment(
   state: BodyMeasurementContext,
+  // Intrinsic cell measurement retains its parent's page environment. Only
+  // the closing-pair source provenance comes from the actual entered story;
+  // every other policy below continues to use the original state.
+  closingPairSourceStory: StoryContext | undefined = state.storyContext,
 ): ParagraphMeasurementEnvironment {
   return {
+    ...(closingPairSourceStory?.story === 'body' && closingPairSourceStory.containers.length === 0
+      ? { closingPairRootSource: true as const } : {}),
     pageIndex: state.pageIndex,
     totalPages: state.totalPages,
     displayPageNumber: state.displayPageNumber,
@@ -217,5 +223,9 @@ export function originalRtlArabicEofSource(
     || context.tabStops.length !== 0 || paragraph.framePr !== undefined
     || paragraph.numbering != null || paragraph.alignment !== 'left'
     || paragraph.runs.length !== 1) return undefined;
+  const run = paragraph.runs[0];
+  // Cheap necessary conditions avoid source-store lookup for ordinary runs;
+  // the canonical source owner retains the complete cached lexical proof.
+  if (run?.type !== 'text' || run.rtl !== true || !run.text.endsWith(' ')) return undefined;
   return source.acquisition.originalRtlArabicEofSource(sourceRef);
 }

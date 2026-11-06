@@ -726,6 +726,10 @@ export interface DocGridCtx {
 export interface LineLayoutEnvironment {
   /** Root-body complete source; never a fragment/queue EOF authority. */
   readonly originalRtlArabicEofSource?: OriginalRtlArabicEofSource;
+  /** Dedicated ordinary main-body-root provenance, not a float/native capability. */
+  readonly closingPairRootSource?: true;
+  /** Resolved once from root provenance, paragraph direction and axes. */
+  readonly closingPairAdvanceAdmitted?: boolean;
   /** Private fixed plain-body capability. Presence is semantic admission, not
    * merely an available width; always reserves the original first indent. */
   readonly nativeUnitMinimumBandPt?: number;

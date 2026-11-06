@@ -1,3 +1,4 @@
+import { retainClosingPairAdvances } from './closing-pair-advance.js';
 import { ownSourceCursor } from './source-cursor.js';
 import { acquireNativeSourceUnits, eligibleNativeSourceText } from './native-source-units.js';
 import { revisionIsOmitted } from '../layout/revision-visibility.js';
@@ -816,6 +817,7 @@ export function finalizeBuiltSegments(
   }
 
   retainHorizontalPunctuationInkClearance(segs);
+  retainClosingPairAdvances(runs, environment, segs);
 }
 
 export function buildSegments(
