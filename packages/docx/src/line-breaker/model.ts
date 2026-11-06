@@ -724,6 +724,9 @@ export interface DocGridCtx {
  * document-level East Asian flag is used only for content-less paragraph-mark
  * metrics; content lines use ParagraphLayoutContext.hasEastAsianText. */
 export interface LineLayoutEnvironment {
+  /** Private positive-only admission for ordinary root-body RTL LEFT fitting.
+   * This is placement authority, distinct from original source EOF ownership. */
+  readonly rtlLeftSoftPlacementAdmitted?: true;
   /** Root-body complete source; never a fragment/queue EOF authority. */
   readonly originalRtlArabicEofSource?: OriginalRtlArabicEofSource;
   /** Dedicated ordinary main-body-root provenance, not a float/native capability. */

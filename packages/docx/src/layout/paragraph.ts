@@ -160,6 +160,7 @@ import {
   createParagraphWrapRegistry,
 } from './paragraph-wrap-registry.js';
 import {
+  layoutSourceStoreOf,
   paragraphAcquisitionCacheOf,
   type ParagraphAcquisitionRuntimeCache,
 } from './runtime-state.js';
@@ -2838,6 +2839,29 @@ function closingPairRootSourceEligible(options: Pick<ParagraphAcquisitionOptions
   'source' | 'ordinaryFlow' | 'anchorCellBounds'>): boolean {
   return options.source.story === 'body' && options.source.storyInstance === 'body'
     && options.source.path.length === 1 && options.ordinaryFlow && options.anchorCellBounds === undefined;
+}
+
+/** A parent's RTL-soft placement fact cannot license a nested acquisition.
+ * The sealed store owns complete-document float absence; source/placement
+ * and resolved context below belong to this acquisition, before cache reuse. */
+function rtlLeftSoftPlacementStillEligible(
+  paragraph: ParagraphAcquisitionInput, options: ParagraphAcquisitionOptions,
+): boolean {
+  const { source, context, environment } = options;
+  if (source.story !== 'body' || source.storyInstance !== 'body' || source.path.length !== 1
+    || !options.ordinaryFlow || options.anchorCellBounds !== undefined
+    || options.exclusions.length !== 0 || options.placement.wrap !== undefined
+    || paragraph.framePr !== undefined || paragraph.numbering != null || context.tabStops.length !== 0
+    || context.runDirectionUnauthored || !context.baseRtl || paragraph.alignment !== 'left'
+    || context.wordWrap === false || context.hasRuby || context.lineGrid.active || context.characterGrid.active
+    || environment.verticalCJK === true || environment.verticalPageFrame === true
+    || environment.pageWritingMode !== 'horizontal-tb'
+    || (environment.compatibilityMode !== undefined && environment.compatibilityMode !== 11
+      && environment.compatibilityMode !== 12 && environment.compatibilityMode !== 14
+      && environment.compatibilityMode !== 15)) return false;
+  const store = environment.layoutServices && layoutSourceStoreOf(environment.layoutServices);
+  return store !== undefined && !store.nativeUnitBodyBandHasFloatingSource
+    && store.blocks.body[source.path[0]!] === paragraph;
 }
 
 /** The measured frame belongs to ordinary root body paragraphs, never a
@@ -6225,7 +6249,9 @@ function paragraphAcquisitionKey(
   // Fixed-order tuples avoid the recursive generic fingerprint cost on this hot
   // path. A different property insertion order may conservatively miss for the
   // explicitly JSON-valued geometry below, but can never alias different facts.
-  return `${lineOnly ? 'paragraph-line-breaking-v1' : 'paragraph-acquisition-v1'}:${JSON.stringify([
+  // Only positive RTL-soft placements add a tag. Ordinary keys keep their
+  // previous representation; reusable lines cannot cross into charged cells.
+  return `${lineOnly ? 'paragraph-line-breaking-v1' : 'paragraph-acquisition-v1'}:${environment.rtlLeftSoftPlacementAdmitted === true ? 'rtl-left-soft:' : ''}${JSON.stringify([
     lineOnly ? null : options.id,
     lineOnly ? null : [options.source.story, options.source.storyInstance, options.source.path],
     lineOnly ? null : options.flowDomainId,
@@ -6529,6 +6555,10 @@ export function acquireParagraphResult(
   options: ParagraphAcquisitionOptions,
   continuation?: Parameters<typeof measureParagraph>[5],
 ): AcquiredParagraphResult {
+  if (options.environment.rtlLeftSoftPlacementAdmitted === true
+    && !rtlLeftSoftPlacementStillEligible(paragraph, options)) {
+    options = { ...options, environment: { ...options.environment, rtlLeftSoftPlacementAdmitted: undefined } };
+  }
   // Never inherit original body EOF authority into a nested acquisition.
   if (options.environment.originalRtlArabicEofSource !== undefined
     && (options.source.story !== 'body' || options.source.storyInstance !== 'body'

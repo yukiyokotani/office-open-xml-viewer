@@ -718,8 +718,12 @@ export function measureParagraph(
     // atomic/fixed regions and flattened unknown-direction inputs retain their
     // existing admission. Float windows require charged physical containment;
     // native units require nonnegative charged source-SPACE slack. Neither
-    // representation owns this soft-only exception. No acquired width changes.
-    !context.runDirectionUnauthored && context.baseRtl && paragraph.alignment === 'left'
+    // representation owns this soft-only exception. Its distinct placement
+    // fact excludes nested stories/cells, frames, floats and active grids;
+    // complete-source EOF ownership does not grant that authority.
+    // No acquired width changes.
+    environment.rtlLeftSoftPlacementAdmitted === true
+      && !context.runDirectionUnauthored && context.baseRtl && paragraph.alignment === 'left'
       && context.wordWrap !== false && placement.wrap === undefined
       && (environment.compatibilityMode === undefined
         || environment.compatibilityMode === 11 || environment.compatibilityMode === 12

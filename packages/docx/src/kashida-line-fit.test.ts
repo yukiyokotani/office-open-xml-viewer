@@ -8,7 +8,7 @@ import type { DocxDocumentModel, ShapeRun } from './types';
 import { measureParagraphIntrinsicWidths } from './layout/intrinsic-width.js';
 import { layoutBodyModel } from './test-support/document-layout.test-support.js';
 import type { LineLayout, TextPlacement } from './layout/types.js';
-import type { BodyElement, DocParagraph, DocSettings, DocxTextRun, SectionProps } from './types';
+import type { BodyElement, DocParagraph, DocSettings, DocTable, DocxTextRun, SectionProps } from './types';
 
 // WORD_KASHIDA_LINE_FIT (#2008): Windows Word reserves 10% (mediumKashida)
 // and 20% (highKashida) of the line width in line fit, still justifies the
@@ -604,6 +604,47 @@ it.each([
     cursor = placement.range.end;
   }
   expect(cursor).toBe(content.length);
+});
+
+it('keeps charged RTL LEFT fitting in a fixed cell while admitting the same root source softly', () => {
+  // Each word is40pt plus a10pt separator. In the same345pt content band,
+  // the approved root exception admits7 words; the cell must still charge
+  // all350pt and therefore admit only6. Both retain the full700pt source.
+  const content = Array.from({ length: 14 }, () => '\u0628\u062a\u062b\u062c').join(' ') + ' ';
+  const paragraph = para([textRun(content, { rtl: true })], 'left', { bidi: true, wordWrap: true });
+  const bandSection = { ...section, marginRight: 35 };
+  const borders = { top: null, right: null, bottom: null, left: null, insideH: null, insideV: null };
+  const table = { type: 'table', layout: 'fixed', colWidths: [345], widthPt: 345, borders, jc: 'left',
+    cellMarginTop: 0, cellMarginBottom: 0, cellMarginLeft: 0, cellMarginRight: 0,
+    rows: [{ rowHeight: null, rowHeightRule: 'auto', isHeader: false,
+      cells: [{ content: [paragraph], colSpan: 1, vMerge: null, borders, background: null,
+        vAlign: 'top', widthPt: 345, widthPct: null, marginTop: 0, marginBottom: 0,
+        marginLeft: 0, marginRight: 0 }] }] } as unknown as DocTable & { type: 'table' };
+  // Reuse one public paragraph in the root and cell within the same layout.
+  const body = layoutBodyModel([paragraph, table], bandSection, makeCtx(), {}, MODE_15).pages[0]!.layers.body;
+  const root = body[0]!;
+  if (root.kind !== 'paragraph') throw Error('Missing root paragraph');
+  const retained = body[1]!;
+  if (retained.kind !== 'table') throw Error('Missing fixed table');
+  const cell = retained.rows[0]!.cells[0]!;
+  const nested = cell.blocks[0]!.layout;
+  if (nested.kind !== 'paragraph') throw Error('Missing cell paragraph');
+  expect(root.flowBounds.widthPt).toBe(345);
+  expect(cell.contentBounds.widthPt).toBe(345);
+  expect(root.lines.map(wordsOn)).toEqual([7, 7]);
+  expect(nested.lines.map(wordsOn)).toEqual([6, 6, 2]);
+  for (const layout of [root, nested]) {
+    const placements = layout.lines.flatMap(line => line.placements
+      .filter((p): p is TextPlacement => p.kind === 'text')).sort((a, b) => a.range.start - b.range.start);
+    expect(placements.map(p => p.text).join('')).toBe(content);
+    expect(placements.reduce((sum, p) => sum + p.advancePt, 0)).toBe(700);
+    let cursor = 0;
+    for (const placement of placements) {
+      expect(placement.range.start).toBe(cursor);
+      cursor = placement.range.end;
+    }
+    expect(cursor).toBe(content.length);
+  }
 });
 
 it('keeps charged terminal SPACE and natural LEFT paint after admitting the final word', () => {
