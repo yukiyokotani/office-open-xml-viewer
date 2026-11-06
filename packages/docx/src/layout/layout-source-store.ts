@@ -1,3 +1,4 @@
+import { rtlSoftPresentationSource, type RtlSoftPresentationSource } from './rtl-soft-presentation.js';
 import type {
   BodyElement,
   DocNote,
@@ -31,6 +32,7 @@ import {
 } from './table-source-acquisition.js';
 
 export interface LayoutSourceAcquisition {
+  rtlSoftPresentationSource(source: SourceRef): RtlSoftPresentationSource | undefined;
   readonly acquisitionInputs: BodyAcquisitionInputProjections;
   effectiveTablePositioning(table: TableLayoutSource): DeepReadonly<TblpPr> | null;
   publicAnchorBridge(
@@ -555,7 +557,15 @@ function sealLayoutSourceStoreWithBody(
       return paragraph;
     },
   } satisfies BodyAcquisitionInputProjections);
+  const softPresentationSources = new WeakMap<ParagraphAcquisitionInput, RtlSoftPresentationSource | null>();
   const acquisition = Object.freeze({
+    rtlSoftPresentationSource(source) {
+      if (!paragraphBySource.has(sourceKey(source))) throw new Error(`Unknown paragraph acquisition source: ${sourceKey(source)}`);
+      const paragraph = blocks.resolve(source);
+      if (paragraph.type !== 'paragraph') throw new Error(`Paragraph source kind mismatch: ${sourceKey(source)}`);
+      if (!softPresentationSources.has(paragraph)) softPresentationSources.set(paragraph, rtlSoftPresentationSource(paragraph) ?? null);
+      return softPresentationSources.get(paragraph) ?? undefined;
+    },
     acquisitionInputs: projections,
     effectiveTablePositioning(table) {
       const fact = tableByIdentity.get(table);
