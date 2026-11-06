@@ -1723,6 +1723,22 @@ pub struct Cell {
     /// always shows the cached `<v>` in `value`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub formula: Option<String>,
+    /// `<f t>` formula type (`ST_CellFormulaType`: `normal` | `array` |
+    /// `dataTable` | `shared`, ECMA-376 §18.3.1.40), when authored. Absent
+    /// implies `normal`. Recalc-only metadata: the renderer ignores it. A
+    /// `shared` anchor carries text plus `formula_ref`/`formula_si`;
+    /// followers carry the type plus `formula_si` with NO text (their cached
+    /// `<v>` is still parsed into `value`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub formula_type: Option<String>,
+    /// `<f ref>` range for `shared`/`array` formulas (e.g. `B1:B2`).
+    /// Present on the anchor cell; followers omit it. Recalc-only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub formula_ref: Option<String>,
+    /// `<f si>` shared-group index linking followers to their anchor's
+    /// formula text. Recalc-only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub formula_si: Option<u32>,
     /// ECMA-376 §18.3.1.4 `<c ph="1">` — whether this cell should display its
     /// phonetic hint (furigana). Defaults to `false` (the schema default), so a
     /// cell whose String Item carries `<rPh>` runs still shows NO furigana
@@ -2106,6 +2122,9 @@ mod tests {
                     value: CellValue::Empty,
                     style_index: None,
                     formula: None,
+                    formula_type: None,
+                    formula_ref: None,
+                    formula_si: None,
                     show_phonetic: false,
                 },
                 Cell {
@@ -2114,6 +2133,9 @@ mod tests {
                     value: CellValue::Number { number: 42.5 },
                     style_index: Some(0),
                     formula: None,
+                    formula_type: None,
+                    formula_ref: None,
+                    formula_si: None,
                     show_phonetic: false,
                 },
             ],

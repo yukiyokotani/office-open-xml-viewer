@@ -371,6 +371,7 @@ function viewerLoadOptions(opts: LoadOptions, mode: 'main' | 'worker'): LoadOpti
     regionMap: opts.regionMap,
     chartEx: opts.chartEx,
     tiff: opts.tiff,
+    recalculateFormulas: opts.recalculateFormulas,
     mode,
   };
   return {

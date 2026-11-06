@@ -163,6 +163,9 @@ export interface Cell {
     value: CellValue;
     styleIndex?: number;
     formula?: string;
+    formulaType?: string;
+    formulaRef?: string;
+    formulaSi?: number;
     showPhonetic?: boolean;
 }
 export interface CellAddress {
@@ -1515,6 +1518,7 @@ export interface LoadOptions extends LoadOptions__emitterCollision1 {
     mode?: 'main' | 'worker';
     legacyXls?: ModelSource<'xlsx'>;
     ods?: ModelSource<'xlsx'>;
+    recalculateFormulas?: boolean;
 }
 interface LoadOptions__emitterCollision1 {
     fonts?: readonly FontSource[];

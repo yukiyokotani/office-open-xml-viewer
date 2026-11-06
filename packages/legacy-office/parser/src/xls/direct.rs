@@ -548,6 +548,12 @@ fn project_sheet(
                     }
                     None => None,
                 },
+                // BIFF shared formulas are not expanded here (no anchor/ref
+                // tracking in this path): followers keep cached values under
+                // recalc, matching the pre-extension OOXML behavior.
+                formula_type: None,
+                formula_ref: None,
+                formula_si: None,
                 show_phonetic: false,
             });
         }

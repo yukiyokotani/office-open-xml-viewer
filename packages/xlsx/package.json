@@ -60,6 +60,7 @@
     "vite-plugin-wasm": "^3.6.0"
   },
   "dependencies": {
-    "@silurus/ooxml-core": "workspace:*"
+    "@silurus/ooxml-core": "workspace:*",
+    "formualizer": "0.13.0"
   }
 }

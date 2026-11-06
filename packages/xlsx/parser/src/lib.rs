@@ -1051,6 +1051,9 @@ mod retained_model_limit_tests {
             value,
             style_index: None,
             formula: formula.map(str::to_string),
+            formula_type: None,
+            formula_ref: None,
+            formula_si: None,
             show_phonetic: false,
         }
     }
@@ -3825,12 +3828,30 @@ fn parse_row_cells(
 
         // Formula text, if any (<f>…</f>). Carried as information only; the
         // renderer never calculates it and always shows the cached <v>.
-        let formula: Option<String> = c_node
-            .children()
-            .find(|n| n.tag_name().name() == "f")
+        let f_node = c_node.children().find(|n| n.tag_name().name() == "f");
+        let formula: Option<String> = f_node
             .and_then(|n| n.text())
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
+
+        // Shared/array formula attributes (ECMA-376 §18.3.1.40
+        // `CT_CellFormula`): only the anchor cell carries `<f>` text, while
+        // followers carry `<f t="shared" si="N"/>` with their own cached
+        // `<v>`. Retained as recalc-only metadata so followers can be
+        // expanded with shifted relative refs; the renderer still shows the
+        // cached `<v>`. Absent attributes stay `None` (wire-stable).
+        let (formula_type, formula_ref, formula_si) = match f_node {
+            Some(f) => (
+                f.attribute("t")
+                    .map(|s| s.to_string())
+                    .filter(|s| !s.is_empty()),
+                f.attribute("ref")
+                    .map(|s| s.to_string())
+                    .filter(|s| !s.is_empty()),
+                f.attribute("si").and_then(|s| s.parse::<u32>().ok()),
+            ),
+            None => (None, None, None),
+        };
 
         let v_node = c_node.children().find(|n| n.tag_name().name() == "v");
         let v_text = v_node.and_then(|n| n.text()).unwrap_or("").to_string();
@@ -3904,6 +3925,9 @@ fn parse_row_cells(
             value,
             style_index,
             formula,
+            formula_type,
+            formula_ref,
+            formula_si,
             show_phonetic,
         });
     }
@@ -7586,6 +7610,56 @@ mod phonetic_tests {
             json[1].get("showPhonetic").is_none(),
             "override cell (resolved false) omits showPhonetic — reads back as ?? false"
         );
+    }
+
+    /// ECMA-376 §18.3.1.40 shared formulas: only the anchor cell carries
+    /// `<f>` text; followers carry `<f t="shared" si="N"/>` with their own
+    /// cached `<v>`. The parser retains `t`/`ref`/`si` as recalc-only
+    /// metadata so followers expand with shifted relative refs, while the
+    /// renderer still shows the cached `<v>`. A normal formula cell carries
+    /// no shared attributes (wire-stable: new fields are serde-skipped).
+    #[test]
+    fn shared_formula_attributes_retained_for_recalc_expansion() {
+        let xml = format!(
+            r#"<worksheet xmlns="{ns}"><sheetData>
+              <row r="1">
+                <c r="A1"><v>3</v></c>
+                <c r="B1"><f t="shared" ref="B1:B2" si="0">A1*2</f><v>6</v></c>
+              </row>
+              <row r="2">
+                <c r="A2"><v>4</v></c>
+                <c r="B2"><f t="shared" si="0"/><v>8</v></c>
+              </row>
+            </sheetData></worksheet>"#,
+            ns = NS,
+        );
+        let (ws, _) = parse_worksheet(&xml, &[], &[], "Sheet1").expect("parse");
+        let anchor = &ws.rows[0].cells[1];
+        assert_eq!(anchor.formula.as_deref(), Some("A1*2"));
+        assert_eq!(anchor.formula_type.as_deref(), Some("shared"));
+        assert_eq!(anchor.formula_ref.as_deref(), Some("B1:B2"));
+        assert_eq!(anchor.formula_si, Some(0));
+        let follower = &ws.rows[1].cells[1];
+        assert!(
+            follower.formula.is_none(),
+            "follower carries no <f> text"
+        );
+        assert_eq!(follower.formula_type.as_deref(), Some("shared"));
+        assert_eq!(follower.formula_si, Some(0));
+        assert!(
+            follower.formula_ref.is_none(),
+            "follower omits ref (anchor-only)"
+        );
+        // A normal cell carries no shared attributes (wire-stable).
+        let plain = &ws.rows[0].cells[0];
+        assert!(plain.formula_type.is_none());
+        assert!(plain.formula_ref.is_none());
+        assert!(plain.formula_si.is_none());
+        // The new fields cross the worker JSON boundary camelCased, and are
+        // omitted when absent so existing payloads are byte-identical.
+        let json = serde_json::to_value(&ws.rows[0].cells).expect("serialize cells");
+        assert_eq!(json[1].get("formulaType"), Some(&serde_json::Value::String("shared".into())));
+        assert!(json[0].get("formulaType").is_none());
     }
 
     /// An inline string (`t="inlineStr"`) carries its own `<rPh>` runs straight
