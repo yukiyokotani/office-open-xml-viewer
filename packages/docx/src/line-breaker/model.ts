@@ -717,6 +717,10 @@ export interface DocGridCtx {
  * document-level East Asian flag is used only for content-less paragraph-mark
  * metrics; content lines use ParagraphLayoutContext.hasEastAsianText. */
 export interface LineLayoutEnvironment {
+  /** Dedicated ordinary main-body-root provenance, not a float/native capability. */
+  readonly closingPairRootSource?: true;
+  /** Resolved once from root provenance, paragraph direction and axes. */
+  readonly closingPairAdvanceAdmitted?: boolean;
   /** Private fixed plain-body capability. Presence is semantic admission, not
    * merely an available width; always reserves the original first indent. */
   readonly nativeUnitMinimumBandPt?: number;
