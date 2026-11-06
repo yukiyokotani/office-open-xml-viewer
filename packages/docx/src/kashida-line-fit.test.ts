@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { DEFAULT_KINSOKU_RULES } from '@silurus/ooxml-core';
+import { measureParagraphIntrinsicWidths } from './layout/intrinsic-width.js';
 import { createLayoutServices } from './layout-runtime.js';
 import { acquireShapeTextBoxLayout } from './layout/paragraph.js';
 import { textBoxAcquisitionInput } from './parser-model.js';
@@ -7,7 +8,7 @@ import type { ParagraphLayoutContext } from './layout-context.js';
 import type { DocxDocumentModel, ShapeRun } from './types';
 import { layoutBodyModel } from './test-support/document-layout.test-support.js';
 import type { LineLayout, TextPlacement } from './layout/types.js';
-import type { BodyElement, DocParagraph, DocSettings, DocxTextRun, SectionProps } from './types';
+import type { BodyElement, DocParagraph, DocSettings, DocTable, DocxTextRun, SectionProps } from './types';
 
 // WORD_KASHIDA_LINE_FIT (#2008): Windows Word reserves 10% (mediumKashida)
 // and 20% (highKashida) of the line width in line fit, still justifies the
@@ -314,9 +315,6 @@ describe('WORD_RTL_JUSTIFIED_VISIBLE_FIT', () => {
     for (const settings of MODES) {
       const [both] = lines(para([textRun(hebrew)], 'both', rtl), settings);
       expect(wordsOn(both!), `mode ${settings?.compatibilityMode}`).toBe(7);
-      // Unmeasured alignments keep charging the line-end space.
-      const [start] = lines(para([textRun(hebrew)], 'left', rtl), settings);
-      expect(wordsOn(start!)).toBe(6);
     }
   });
 
@@ -603,4 +601,135 @@ it.each([
     cursor = line.range.end;
   }
   expect(cursor).toBe(source.length);
+});
+
+it.each([
+  { word: '\u0628\u062a\u062b\u062c', run: { rtl: true }, name: 'explicit RTL Arabic' },
+  { word: 'abcd', run: {}, name: 'unmarked Latin' },
+])('fits a soft-wrapped left-aligned RTL paragraph with $name by its visible prefix', ({ word, run }) => {
+  // Independent deterministic advances: four-character words are 40pt;
+  // U+0020 is 10pt. Seven words are 340pt visible / 350pt with their
+  // terminal separator, against a 345pt band. Both seven-word groups, including the final source SPACE, must fit.
+  const content = Array.from({ length: 14 }, () => word).join(' ') + ' ';
+  const paragraph = para([textRun(content, run)], 'left', { bidi: true, indentRight: 15, wordWrap: true });
+  const retained = lines(paragraph, MODE_15);
+  expect(retained.map(wordsOn)).toEqual([7, 7]);
+  expect(retained.map(line => line.placements.filter((p): p is TextPlacement => p.kind === 'text')
+    .reduce((sum, placement) => sum + placement.advancePt, 0))).toEqual([350, 350]);
+  const charged = lines({ ...paragraph, wordWrap: false } as BodyElement, MODE_15);
+  expect(charged.map(wordsOn)).toEqual([6, 6, 2]);
+  const logical = retained.flatMap(line => line.placements
+    .filter((p): p is TextPlacement => p.kind === 'text'))
+    .sort((a, b) => a.range.start - b.range.start);
+  expect(logical.map(p => p.text).join('')).toBe(content);
+  let cursor = 0;
+  for (const placement of logical) {
+    expect(placement.range.start).toBe(cursor);
+    expect(placement.range.end - placement.range.start).toBe(placement.text.length);
+    cursor = placement.range.end;
+  }
+  expect(cursor).toBe(content.length);
+});
+
+it('keeps charged terminal SPACE and natural LEFT paint after admitting the final word', () => {
+  const content = 'a'.repeat(34) + ' ';
+  const narrow = lines(para([textRun(content)], 'left', { bidi: true, wordWrap: true, indentRight: 15 }), MODE_15);
+  const natural = lines(para([textRun(content)], 'left', { bidi: true, wordWrap: true }), MODE_15);
+  expect(narrow).toHaveLength(1); // No erroneous final SPACE-only line.
+  expect(natural).toHaveLength(1);
+  const source = narrow[0]!.placements.filter((p): p is TextPlacement => p.kind === 'text');
+  expect(source.map(p => p.text).join('')).toBe(content);
+  expect(source.reduce((sum, p) => sum + p.advancePt, 0)).toBe(350);
+  // These are the existing natural paint positions, not new hanging credit.
+  expect(characters(narrow[0]!)).toEqual(characters(natural[0]!));
+  expect(start(narrow[0]!)).toBe(30);
+  expect(end(narrow[0]!)).toBe(370);
+});
+
+it('still wraps a final visible word that exceeds the LEFT band', () => {
+  // Eight40pt words + seven10pt spaces =390pt; the final word must move.
+  const content = Array.from({ length: 8 }, () => 'abcd').join(' ');
+  const retained = lines(para([textRun(content)], 'left', { bidi: true, wordWrap: true, indentRight: 15 }), MODE_15);
+  expect(retained.map(wordsOn)).toEqual([7, 1]);
+  expect(retained.flatMap(line => line.placements.filter((p): p is TextPlacement => p.kind === 'text'))
+    .sort((a, b) => a.range.start - b.range.start).map(p => p.text).join('')).toBe(content);
+});
+
+it('keeps terminal SPACE charged in production RTL LEFT intrinsic width', () => {
+  const content = Array.from({ length: 14 }, () => 'abcd').join(' ') + ' ';
+  const paragraph = para([textRun(content)], 'left', { bidi: true, wordWrap: true });
+  if (paragraph.type !== 'paragraph') throw new Error('expected paragraph');
+  const context: ParagraphLayoutContext = {
+    lineGrid: { active: false, pitchPt: null },
+    characterGrid: { active: false, kind: null, pitchPt: null, deltaPt: 0 },
+    rightIndentGrid: { pitchPt: null, paragraphAllowsAdjustment: true },
+    physicalIndentLeftPt: 0, physicalIndentRightPt: 0, firstIndentPt: 0,
+    lineSpacing: null, spaceBeforePt: 0, spaceAfterPt: 0, baseRtl: true,
+    isJustified: false, stretchLastLine: false, tabStops: [], hasRuby: false, hasEastAsianText: false,
+    kinsoku: DEFAULT_KINSOKU_RULES, defaultTabPt: 36,
+  };
+  const measure = makeCtx();
+  const model: DocxDocumentModel = { body: [paragraph], section, settings: MODE_15,
+    headers: { default: null, first: null, even: null }, footers: { default: null, first: null, even: null },
+    footnotes: [], endnotes: [], fontFamilyClasses: {} };
+  const intrinsic = measureParagraphIntrinsicWidths(paragraph, context, 1000,
+    { context: measure, fontFamilyClasses: {} }, { pageIndex: 0, totalPages: 1,
+      pageWritingMode: 'horizontal-tb', documentHasEastAsianText: false, compatibilityMode: 15,
+      layoutServices: createLayoutServices(model, { measureContext: measure }) });
+  // 14 * (four10pt glyphs + one10pt source SPACE); no bounded-fit deduction.
+  expect(intrinsic.maxWidthPt).toBe(700);
+  expect(intrinsic.minWidthPt).toBe(40);
+});
+
+it('keeps charged RTL LEFT fitting in a fixed cell while admitting the same root source softly', () => {
+  // Each word is40pt plus a10pt separator. In the same345pt content band,
+  // the approved root exception admits7 words; the cell must still charge
+  // all350pt and therefore admit only6. Both retain the full700pt source.
+  const content = Array.from({ length: 14 }, () => '\u0628\u062a\u062b\u062c').join(' ') + ' ';
+  const paragraph = para([textRun(content, { rtl: true })], 'left', { bidi: true, wordWrap: true });
+  const bandSection = { ...section, marginRight: 35 };
+  const borders = { top: null, right: null, bottom: null, left: null, insideH: null, insideV: null };
+  const table = { type: 'table', layout: 'fixed', colWidths: [345], widthPt: 345, borders, jc: 'left',
+    cellMarginTop: 0, cellMarginBottom: 0, cellMarginLeft: 0, cellMarginRight: 0,
+    rows: [{ rowHeight: null, rowHeightRule: 'auto', isHeader: false,
+      cells: [{ content: [paragraph], colSpan: 1, vMerge: null, borders, background: null,
+        vAlign: 'top', widthPt: 345, widthPct: null, marginTop: 0, marginBottom: 0,
+        marginLeft: 0, marginRight: 0 }] }] } as unknown as DocTable & { type: 'table' };
+  // Reuse one public paragraph in the root and cell within the same layout.
+  const body = layoutBodyModel([paragraph, table], bandSection, makeCtx(), {}, MODE_15).pages[0]!.layers.body;
+  const root = body[0]!;
+  if (root.kind !== 'paragraph') throw Error('Missing root paragraph');
+  const retained = body[1]!;
+  if (retained.kind !== 'table') throw Error('Missing fixed table');
+  const cell = retained.rows[0]!.cells[0]!;
+  const nested = cell.blocks[0]!.layout;
+  if (nested.kind !== 'paragraph') throw Error('Missing cell paragraph');
+  expect(root.flowBounds.widthPt).toBe(345);
+  expect(cell.contentBounds.widthPt).toBe(345);
+  expect(root.lines.map(wordsOn)).toEqual([7, 7]);
+  expect(nested.lines.map(wordsOn)).toEqual([6, 6, 2]);
+  for (const layout of [root, nested]) {
+    const placements = layout.lines.flatMap(line => line.placements
+      .filter((p): p is TextPlacement => p.kind === 'text')).sort((a, b) => a.range.start - b.range.start);
+    expect(placements.map(p => p.text).join('')).toBe(content);
+    expect(placements.reduce((sum, p) => sum + p.advancePt, 0)).toBe(700);
+    let cursor = 0;
+    for (const placement of placements) {
+      expect(placement.range.start).toBe(cursor);
+      cursor = placement.range.end;
+    }
+    expect(cursor).toBe(content.length);
+  }
+});
+
+
+it('preserves ordinary LTR fitting and retained source SPACE charge', () => {
+  const content = Array.from({ length: 14 }, () => 'abcd').join(' ') + ' ';
+  const paragraph = para([textRun(content, { rtl: true })], 'left', { wordWrap: true, indentRight: 15 });
+  const retained = lines(paragraph, MODE_15);
+  expect(retained.map(wordsOn)).toEqual([7, 7]);
+  const pieces = retained.flatMap(line => line.placements.filter((p): p is TextPlacement => p.kind === 'text'))
+    .sort((a, b) => a.range.start - b.range.start);
+  expect(pieces.map(p => p.text).join('')).toBe(content);
+  expect(pieces.reduce((sum, p) => sum + p.advancePt, 0)).toBe(700);
 });

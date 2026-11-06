@@ -203,3 +203,26 @@ export function nativeUnitMinimumBodyBand(
   const band = width - Math.max(0, context.firstIndentPt);
   return Number.isFinite(band) && band > 0 ? band : undefined;
 }
+
+/** Placement boundary of word-rtl-left-soft-fit. The complete sealed store's
+ * float fact covers future anchors too; it is geometry, not native or final-source
+ * admission. No source scan or lexical authority is needed for this fact. */
+export function rtlLeftSoftPlacementAdmission(
+  source: LayoutSourceStore, section: SectionLayoutContext, story: StoryContext,
+  paragraph: ParagraphLayoutSource, context: ParagraphLayoutContext,
+  sourceRef: import('./types.js').SourceRef,
+  compatibilityMode: number | undefined, hasExclusions: boolean,
+): true | undefined {
+  if (context.runDirectionUnauthored || !context.baseRtl || paragraph.alignment !== 'left'
+    || context.wordWrap === false
+    || (compatibilityMode !== undefined && compatibilityMode !== 11 && compatibilityMode !== 12
+      && compatibilityMode !== 14 && compatibilityMode !== 15)
+    || source.nativeUnitBodyBandHasFloatingSource || hasExclusions
+    || story.story !== 'body' || story.containers.length !== 0 || story.quarterTurned
+    || sourceRef.story !== 'body' || sourceRef.storyInstance !== 'body' || sourceRef.path.length !== 1
+    || source.blocks.body[sourceRef.path[0]!] !== paragraph
+    || section.columns.length !== 1 || section.textDirection !== 'lrTb' || section.sectionFlow !== undefined
+    || paragraph.framePr !== undefined || paragraph.numbering != null || context.tabStops.length !== 0
+    || context.hasRuby || context.lineGrid.active || context.characterGrid.active) return undefined;
+  return true;
+}

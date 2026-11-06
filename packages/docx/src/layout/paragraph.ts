@@ -2846,6 +2846,29 @@ function retainedNumberingPlan(
   }, service);
 }
 
+/** A parent's RTL-soft placement fact cannot license a nested acquisition.
+ * The sealed store owns complete-document float absence; source/placement
+ * and resolved context below belong to this acquisition, before cache reuse. */
+function rtlLeftSoftPlacementStillEligible(
+  paragraph: ParagraphAcquisitionInput, options: ParagraphAcquisitionOptions,
+): boolean {
+  const { source, context, environment } = options;
+  if (source.story !== 'body' || source.storyInstance !== 'body' || source.path.length !== 1
+    || !options.ordinaryFlow || options.anchorCellBounds !== undefined
+    || options.exclusions.length !== 0 || options.placement.wrap !== undefined
+    || paragraph.framePr !== undefined || paragraph.numbering != null || context.tabStops.length !== 0
+    || context.runDirectionUnauthored || !context.baseRtl || paragraph.alignment !== 'left'
+    || context.wordWrap === false || context.hasRuby || context.lineGrid.active || context.characterGrid.active
+    || environment.verticalCJK === true || environment.verticalPageFrame === true
+    || environment.pageWritingMode !== 'horizontal-tb'
+    || (environment.compatibilityMode !== undefined && environment.compatibilityMode !== 11
+      && environment.compatibilityMode !== 12 && environment.compatibilityMode !== 14
+      && environment.compatibilityMode !== 15)) return false;
+  const store = environment.layoutServices && layoutSourceStoreOf(environment.layoutServices);
+  return store !== undefined && !store.nativeUnitBodyBandHasFloatingSource
+    && store.blocks.body[source.path[0]!] === paragraph;
+}
+
 /** Do not inherit the pair policy into a nested story when a caller carries
  * its parent's environment. Source ownership is known at acquisition, not paint. */
 function closingPairRootSourceEligible(options: Pick<ParagraphAcquisitionOptions,
@@ -6248,7 +6271,9 @@ function paragraphAcquisitionKey(
   // Fixed-order tuples avoid the recursive generic fingerprint cost on this hot
   // path. A different property insertion order may conservatively miss for the
   // explicitly JSON-valued geometry below, but can never alias different facts.
-  return `${lineOnly ? 'paragraph-line-breaking-v1' : 'paragraph-acquisition-v1'}:${JSON.stringify([
+  // Tag only admitted roots; ordinary keys remain unchanged, and reusable
+  // measured lines cannot carry the root exception into a charged cell.
+  return `${lineOnly ? 'paragraph-line-breaking-v1' : 'paragraph-acquisition-v1'}:${environment.rtlLeftSoftPlacementAdmitted === true ? 'rtl-left-soft:' : ''}${JSON.stringify([
     lineOnly ? null : options.id,
     lineOnly ? null : [options.source.story, options.source.storyInstance, options.source.path],
     lineOnly ? null : options.flowDomainId,
@@ -6556,6 +6581,11 @@ export function acquireParagraphResult(
   options: ParagraphAcquisitionOptions,
   continuation?: Parameters<typeof measureParagraph>[5],
 ): AcquiredParagraphResult {
+  // A positive parent fact cannot enter nested acquisition or either cache.
+  if (options.environment.rtlLeftSoftPlacementAdmitted === true
+    && !rtlLeftSoftPlacementStillEligible(paragraph, options)) {
+    options = { ...options, environment: { ...options.environment, rtlLeftSoftPlacementAdmitted: undefined } };
+  }
   if (options.environment.closingPairRootSource && !closingPairRootSourceEligible(options)) {
     options = { ...options, environment: { ...options.environment, closingPairRootSource: undefined } };
   }

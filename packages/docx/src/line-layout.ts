@@ -54,6 +54,7 @@ export function layoutLines(
   cjkClosingMarkHang?: CjkClosingMarkHang,
   bidiOrdering?: BidiTabOrderPolicy,
   lineEdgeRules?: KinsokuRules,
+  rtlLeftSoftFit?: boolean,
 ): LayoutLine[];
 
 export function layoutLines(
@@ -111,6 +112,7 @@ export function layoutLines(
   cjkClosingMarkHang?: CjkClosingMarkHang,
   bidiOrdering?: BidiTabOrderPolicy,
   lineEdgeRules?: KinsokuRules,
+  rtlLeftSoftFit?: boolean,
   passContext?: Readonly<{
     probeHeights: readonly number[] | null;
     decimalOrder?: LineOrderResolver;
@@ -159,6 +161,7 @@ export function layoutLines(
       cjkClosingMarkHang,
       bidiOrdering,
       lineEdgeRules,
+      rtlLeftSoftFit,
       { probeHeights, probeFloors, preparedFloatWrap, decimalOrder },
     );
     // DrawingML wrap=none (§21.1.2.1.1) removes only the automatic break at the
@@ -213,6 +216,7 @@ export function layoutLines(
       ? justifiedCompression.lineEndIdeographicSpaceHangs
       : justifiedCompression,
     ...(lineFit ? { lineFit } : {}),
+    ...(rtlLeftSoftFit && widthPolicy === 'bounded' ? { rtlLeftSoftFit: true } : {}),
     ...(cjkClosingMarkHang ? { cjkClosingMarkHang } : {}), passContext,
   });
 }

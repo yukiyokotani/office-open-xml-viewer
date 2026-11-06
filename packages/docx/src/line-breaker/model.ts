@@ -717,6 +717,8 @@ export interface DocGridCtx {
  * document-level East Asian flag is used only for content-less paragraph-mark
  * metrics; content lines use ParagraphLayoutContext.hasEastAsianText. */
 export interface LineLayoutEnvironment {
+  /** Private positive-only ordinary root-body RTL LEFT fitting authority. */
+  readonly rtlLeftSoftPlacementAdmitted?: true;
   /** Dedicated ordinary main-body-root provenance, not a float/native capability. */
   readonly closingPairRootSource?: true;
   /** Resolved once from root provenance, paragraph direction and axes. */
