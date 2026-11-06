@@ -70,6 +70,10 @@ export interface ParagraphMeasurementEnvironment extends LineLayoutEnvironment {
   /** §17.15.3.5 doNotExpandShiftReturn: lines ended by a manual break stay
    * unjustified. */
   readonly doNotExpandShiftReturn?: boolean;
+  readonly doNotSuppressIndentation?: boolean;
+  readonly ww11IndentRules?: boolean;
+  readonly doNotUseIndentAsNumberingTabStop?: boolean;
+  readonly noTabHangInd?: boolean;
 }
 
 export interface TextMeasurer {

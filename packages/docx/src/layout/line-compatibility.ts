@@ -1263,6 +1263,15 @@ export const WORD_DICTIONARY_SEA_ATOMIC_CHUNK = defineCompatibilityRule({
   description: 'Move a glued dictionary Southeast-Asian chunk to a fresh line whole when it fits that full line, using dictionary breaks only when the chunk itself is overlong. Evidence (observed Office behaviour): Word PDF calibration fixture in issue #991 / PR #1003.',
 });
 
+export const WORD_NUMBERED_WINDOW_FRAME = defineCompatibilityRule({
+  id: 'word-numbered-window-frame',
+  evidence: {
+    kind: 'regression-test',
+    reference: 'packages/docx/src/layout/legacy-numbered-window-frame.test.ts#rebases automatic and authored stops without rebasing the implicit hanging stop',
+  },
+  description: 'Observed Office legacy false-flag frame: the original 40 numbered float-window rows and 48 controlled compatibility variants distinguish implicit hanging stops, custom stops, automatic grids, equality/pre-start exclusions, narrow heads and tight windows. The supported class is compatibility mode absent, 12 or 14; doNotSuppressIndentation, ww11IndentRules, doNotUseIndentAsNumberingTabStop and noTabHangInd must not be true. It is restricted to ordinary root-body horizontal LTR left/start paragraphs with self-owned initially unresolved floats, no external exclusions, no East Asian text or active line/character grid, a nonempty left text marker with TAB suffix, nonpositive first indent and supported left stops. For actual window origin g, left indent L and hanging H, marker origin is g+L-H; the implicit stop is max(L,g), custom stop c is g+c and the automatic grid is based at g. Actual marker advance q and the first atom are admitted in that same per-window frame through initial breaking, retry and retained placement; no font-derived offset or width correction is added. This is a bounded observation, not the true-flag rule of Part 4 sections 14.8.3.12, 14.8.3.16 or 14.8.3.31. Modern modes, RTL, external/mixed or pre-resolved exclusions, true flags and unsupported geometry retain the established path. Eight original below-float Y residuals remain; source partitions and horizontal improvement do not establish complete Word equivalence.',
+});
+
 /** Issue #2055 controls (blk-0898-floats-num-mode15, Windows Word 16.0.20527,
  * Courier New 12): a "1." marker with tab, space and nothing suffixes, left
  * 50 pt hanging 50 pt, square floats leaving the gaps [0,100], [150,250] and

@@ -17,7 +17,7 @@ const W = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main
 // A 144pt square-wrapped picture at the 54pt margin, distR 9pt: wrap edge 207pt.
 const float = '<w:r><w:drawing><wp:anchor distT="0" distB="0" distL="114300" distR="114300" simplePos="0" relativeHeight="1" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="column"><wp:posOffset>0</wp:posOffset></wp:positionH><wp:positionV relativeFrom="paragraph"><wp:posOffset>0</wp:posOffset></wp:positionV><wp:extent cx="1828800" cy="914400"/><wp:effectExtent l="0" t="0" r="0" b="0"/><wp:wrapSquare wrapText="bothSides"/><wp:docPr id="1" name="F"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPr id="1" name="F"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="rIdMissing"/></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="1828800" cy="914400"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>';
 
-function bytes(ind: string, levelTabs = '', styleOrigin?: string, variant: { empty?: boolean; rtl?: boolean; defaultsPPr?: string } = {}): Uint8Array {
+function bytes(ind: string, levelTabs = '', styleOrigin?: string, variant: { empty?: boolean; rtl?: boolean; defaultsPPr?: string; compatFlags?: string } = {}): Uint8Array {
   const enc = new TextEncoder();
   const p = (body: string, ppr = '') => `<w:p><w:pPr>${ppr}<w:spacing w:before="0" w:after="0"/></w:pPr>${body}</w:p>`;
   const item = p(variant.empty ? '' : '<w:r><w:t>word</w:t></w:r>', (styleOrigin === undefined
@@ -29,22 +29,33 @@ function bytes(ind: string, levelTabs = '', styleOrigin?: string, variant: { emp
   const styles = `<w:styles ${W}><w:docDefaults><w:pPrDefault><w:pPr>${variant.defaultsPPr ?? ''}</w:pPr></w:pPrDefault></w:docDefaults><w:style w:type="paragraph" w:styleId="ListItem"><w:name w:val="List Item"/><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr>${styleOrigin ?? ''}</w:pPr></w:style></w:styles>`;
   const doc = `<w:document ${W}><w:body>${p(`${floatXml}<w:r><w:t>host</w:t></w:r>`)}${item}<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1080" w:right="1080" w:bottom="1080" w:left="1080" w:header="720" w:footer="720" w:gutter="0"/></w:sectPr></w:body></w:document>`;
   const numbering = `<w:numbering ${W}><w:abstractNum w:abstractNumId="1"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:lvlJc w:val="left"/><w:pPr>${levelTabs}${ind}</w:pPr></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="1"/></w:num></w:numbering>`;
-  return storeZip(new Map([
+  const parts = new Map([
     ['[Content_Types].xml', enc.encode('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/></Types>')],
     ['_rels/.rels', enc.encode('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>')],
     ['word/_rels/document.xml.rels', enc.encode('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdN" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering" Target="numbering.xml"/><Relationship Id="rIdS" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>')],
     ['word/document.xml', enc.encode(doc)],
     ['word/numbering.xml', enc.encode(numbering)],
     ['word/styles.xml', enc.encode(styles)],
-  ]));
+  ]);
+  {
+    // The archived #1883 Office controls explicitly use mode 15.
+    parts.set('word/settings.xml', enc.encode(`<w:settings ${W}><w:compat><w:compatSetting w:name="compatibilityMode" w:uri="http://schemas.microsoft.com/office/word" w:val="15"/>${variant.compatFlags ?? ''}</w:compat></w:settings>`));
+    const append = (path: string, closing: string, entry: string) => parts.set(path,
+      enc.encode(new TextDecoder().decode(parts.get(path)).replace(closing, entry + closing)));
+    append('[Content_Types].xml', '</Types>', '<Override PartName="/word/settings.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml"/>');
+    append('word/_rels/document.xml.rels', '</Relationships>', '<Relationship Id="rIdSettings" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings" Target="settings.xml"/>');
+  }
+  return storeZip(parts);
+}
+
+function parsedFixture(input: Uint8Array) {
+  const archive = new DocxArchive(input);
+  try { return normalizeInternalDocumentModel(JSON.parse(new TextDecoder().decode(archive.parse()))).document; }
+  finally { archive.free(); }
 }
 
 function firstItemLine(input: Uint8Array) {
-  const archive = new DocxArchive(input);
-  let model;
-  try {
-    model = normalizeInternalDocumentModel(JSON.parse(new TextDecoder().decode(archive.parse()))).document;
-  } finally { archive.free(); }
+  const model = parsedFixture(input);
   const layout = layoutDocument(model, createLayoutServices(model, { measureContext: measureContext(5) }), { currentDateMs: 0 });
   const paragraphs = layout.pages[0]!.layers.body.filter((node) => node.kind === 'paragraph');
   const line = paragraphs[1]!.kind === 'paragraph' ? paragraphs[1]!.lines[0]! : undefined;
@@ -56,6 +67,17 @@ function firstItemLine(input: Uint8Array) {
     ...(body ? { bodyEnd: body.xPt + body.widthPt } : {}),
   };
 }
+
+it('retains explicit numbering compatibility facts through actual DOCX parsing and normalization', () => {
+  const flags = ['doNotSuppressIndentation', 'ww11IndentRules', 'doNotUseIndentAsNumberingTabStop', 'noTabHangInd'] as const;
+  const document = parsedFixture(bytes('<w:ind w:left="1000" w:hanging="1000"/>', '', undefined,
+    { compatFlags: flags.map(flag => `<w:${flag}/>`).join('') }));
+  const omitted = parsedFixture(bytes('<w:ind w:left="1000" w:hanging="1000"/>'));
+  for (const flag of flags) {
+    expect(document.settings?.[flag]).toBe(true);
+    expect(omitted.settings?.[flag]).toBeUndefined();
+  }
+});
 
 describe('numbered first line beside a square-wrapped float (#1883)', () => {
   // Windows Word 16.0 places the marker at max(max(indent, wrap) + firstLine,
@@ -157,6 +179,9 @@ function anchoredParagraphLines(floats: string, text: string | readonly string[]
 }
 
 describe('numbered first line across float gaps (#2055, word-numbered-first-line-gap-fit)', () => {
+  // This family uses the measured mode-15 absolute tab frame. Admission and
+  // punctuation boundaries compose that frame with existing layout contracts;
+  // they are not separate measurements of legacy Office behavior.
   // Square floats 60pt tall leave the gaps [0,100], [150,250] and [300,450]
   // of the column (page x 54 + gap). The level indents left 50 hanging 50 and
   // a 5pt marker; the 36pt default stops are measured from the margin.
@@ -167,7 +192,7 @@ describe('numbered first line across float gaps (#2055, word-numbered-first-line
     // A 75pt word: the first gap leaves 50pt after its 50pt hanging stop and
     // the second 70pt after the 180pt stop; the third resolves the 324pt stop
     // and leaves 126pt, so the line stays at the paragraph top there.
-    expect(anchoredParagraphLines(gaps, 'W'.repeat(15), numbered)[0]).toMatchObject({
+    expect(anchoredParagraphLines(gaps, 'W'.repeat(15), numbered, { compatibilityMode: 15 })[0]).toMatchObject({
       topPt: 0, marker: 54 + 300, body: 54 + 324, text: 'W'.repeat(15),
     });
   });
@@ -180,7 +205,7 @@ describe('numbered first line across float gaps (#2055, word-numbered-first-line
     // although that gap (80pt) is narrower than the first gap's 200pt body.
     const floats = squareShape(31, 210, 10, 60) + squareShape(32, 300, 204, 60);
     const custom = { marker: '1', ind: '<w:tabs><w:tab w:val="left" w:pos="4000"/></w:tabs><w:ind w:left="0" w:hanging="0"/>' };
-    expect(anchoredParagraphLines(floats, 'W'.repeat(8), custom)[0]).toMatchObject({
+    expect(anchoredParagraphLines(floats, 'W'.repeat(8), custom, { compatibilityMode: 15 })[0]).toMatchObject({
       topPt: 0, marker: 54 + 220, body: 54 + 252, text: 'W'.repeat(8),
     });
   });
@@ -192,7 +217,7 @@ describe('numbered first line across float gaps (#2055, word-numbered-first-line
     // leaves 100pt for the 40pt word, so the line stays at the paragraph top.
     const floats = squareShape(33, 100, 50, 60) + squareShape(34, 300, 204, 60);
     const custom = { marker: '1', ind: '<w:tabs><w:tab w:val="left" w:pos="4000"/></w:tabs><w:ind w:left="0" w:hanging="0"/>' };
-    expect(anchoredParagraphLines(floats, 'W'.repeat(8), custom)[0]).toMatchObject({
+    expect(anchoredParagraphLines(floats, 'W'.repeat(8), custom, { compatibilityMode: 15 })[0]).toMatchObject({
       topPt: 0, marker: 54 + 150, body: 54 + 200, text: 'W'.repeat(8),
     });
   });
@@ -204,13 +229,15 @@ describe('numbered first line across float gaps (#2055, word-numbered-first-line
     expect(lines[0]).toMatchObject({ topPt: 60, marker: 54, body: 54 + 50 });
   });
 
+  // These two CJK compositions retain the library's pre-15 hanging policy;
+  // they are not mode-15 or newly measured legacy Office numbering controls.
   it('lets break-time hanging punctuation admit a numbered first line\'s window', () => {
     // 10pt per character, a float over [0,477] and a custom stop at 489pt:
     // the marker sits at 477pt, its tab reaches 489pt and leaves 15pt, which
     // holds 漢 with the closing 。 hanging past the band edge. No window floor
     // may require the 20pt the pair takes without hanging.
     const custom = { marker: '1', ind: '<w:tabs><w:tab w:val="left" w:pos="9780"/></w:tabs><w:ind w:left="0" w:hanging="0"/>' };
-    expect(anchoredParagraphLines(squareShape(35, 0, 477, 60), '\u6f22\u3002', custom, { advancePt: 10 })[0]).toMatchObject({
+    expect(anchoredParagraphLines(squareShape(35, 0, 477, 60), '\u6f22\u3002', custom, { compatibilityMode: undefined, advancePt: 10 })[0]).toMatchObject({
       topPt: 0, marker: 54 + 477, body: 54 + 489, text: '\u6f22\u3002',
     });
   });
@@ -222,7 +249,7 @@ describe('numbered first line across float gaps (#2055, word-numbered-first-line
     // 15pt after its body and hangs the 。.
     const custom = { marker: '1', ind: '<w:tabs><w:tab w:val="left" w:pos="9780"/></w:tabs><w:ind w:left="0" w:hanging="0"/>' };
     expect(anchoredParagraphLines(squareShape(36, 100, 50, 60), '\u6f22\u3002', custom,
-      { advancePt: 10, anchorsLast: true })[0]).toMatchObject({
+      { compatibilityMode: undefined, advancePt: 10, anchorsLast: true })[0]).toMatchObject({
       topPt: 0, marker: 54 + 150, body: 54 + 489, text: '\u6f22\u3002',
     });
   });
@@ -233,7 +260,7 @@ describe('numbered first line across float gaps (#2055, word-numbered-first-line
     // leaves 15pt after its body and hangs the period.
     const custom = { marker: '1', ind: '<w:tabs><w:tab w:val="left" w:pos="1700"/><w:tab w:val="left" w:pos="9780"/></w:tabs><w:ind w:left="0" w:hanging="0"/>' };
     expect(anchoredParagraphLines(squareShape(39, 100, 50, 60), ['A', '.'], custom,
-      { advancePt: 10 })[0]).toMatchObject({ topPt: 0, text: 'A.' });
+      { compatibilityMode: 15, advancePt: 10 })[0]).toMatchObject({ topPt: 0, text: 'A.' });
   });
 
   it('hangs a lone mark after its float anchor on retry, as break time does', () => {
@@ -241,7 +268,7 @@ describe('numbered first line across float gaps (#2055, word-numbered-first-line
     // leaves 15pt after its body and hangs it.
     const custom = { marker: '1', ind: '<w:tabs><w:tab w:val="left" w:pos="1700"/><w:tab w:val="left" w:pos="9780"/></w:tabs><w:ind w:left="0" w:hanging="0"/>' };
     expect(anchoredParagraphLines(squareShape(40, 100, 50, 60), '.', custom,
-      { advancePt: 20 })[0]).toMatchObject({ topPt: 0, text: '.' });
+      { compatibilityMode: 15, advancePt: 20 })[0]).toMatchObject({ topPt: 0, text: '.' });
   });
 
   it('does not hang punctuation in a retried gap that ends at an exclusion', () => {
@@ -250,12 +277,12 @@ describe('numbered first line across float gaps (#2055, word-numbered-first-line
     // below the floats.
     const custom = { marker: '1', ind: '<w:tabs><w:tab w:val="left" w:pos="9480"/></w:tabs><w:ind w:left="0" w:hanging="0"/>' };
     expect(anchoredParagraphLines(squareShape(37, 100, 50, 60) + squareShape(38, 489, 15, 60), '\u6f22\u3002', custom,
-      { advancePt: 10, anchorsLast: true })[0]).toMatchObject({ topPt: 60, text: '\u6f22\u3002' });
+      { compatibilityMode: 15, advancePt: 10, anchorsLast: true })[0]).toMatchObject({ topPt: 60, text: '\u6f22\u3002' });
   });
 
   it('goes below the floats when no gap holds the word after its body', () => {
     // 130pt: wider than 126pt left in the third gap.
-    expect(anchoredParagraphLines(gaps, 'W'.repeat(26), numbered)[0]).toMatchObject({
+    expect(anchoredParagraphLines(gaps, 'W'.repeat(26), numbered, { compatibilityMode: 15 })[0]).toMatchObject({
       topPt: 60, marker: 54, body: 54 + 50,
     });
   });

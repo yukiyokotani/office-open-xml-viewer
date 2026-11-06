@@ -3548,6 +3548,14 @@ fn parse_document_settings(settings_xml: &str) -> Option<crate::types::DocumentS
     let adjust_line_height_in_table = compat_bool("adjustLineHeightInTable");
     let ul_trail_space = compat_bool("ulTrailSpace");
     let do_not_expand_shift_return = compat_bool("doNotExpandShiftReturn");
+    // Part4 §14.8.3.12 / independent Part1 AnnexL.1.16.2 legacy name:
+    // preserve explicit true/false, not
+    // inferred compatibility-mode defaults. Layout may exclude either true
+    // from its separately observed legacy false-flag numbering scope.
+    let do_not_suppress_indentation = compat_bool("doNotSuppressIndentation");
+    let ww11_indent_rules = compat_bool("ww11IndentRules");
+    let do_not_use_indent_as_numbering_tab_stop = compat_bool("doNotUseIndentAsNumberingTabStop");
+    let no_tab_hang_ind = compat_bool("noTabHangInd");
     let split_pg_break_and_para_mark = compat_bool("splitPgBreakAndParaMark");
 
     // ECMA-376 §22.1.2.30 `m:mathPr/m:defJc@m:val` — document-wide default math
@@ -3579,6 +3587,10 @@ fn parse_document_settings(settings_xml: &str) -> Option<crate::types::DocumentS
         && adjust_line_height_in_table.is_none()
         && ul_trail_space.is_none()
         && do_not_expand_shift_return.is_none()
+        && do_not_suppress_indentation.is_none()
+        && ww11_indent_rules.is_none()
+        && do_not_use_indent_as_numbering_tab_stop.is_none()
+        && no_tab_hang_ind.is_none()
         && compatibility_mode.is_none()
     {
         return None;
@@ -3599,6 +3611,10 @@ fn parse_document_settings(settings_xml: &str) -> Option<crate::types::DocumentS
         adjust_line_height_in_table,
         ul_trail_space,
         do_not_expand_shift_return,
+        do_not_suppress_indentation,
+        ww11_indent_rules,
+        do_not_use_indent_as_numbering_tab_stop,
+        no_tab_hang_ind,
         split_pg_break_and_para_mark,
         compatibility_mode,
     })
@@ -20414,6 +20430,26 @@ mod math_jc_tests {
 
         let empty = r#"<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"/>"#;
         assert!(parse_document_settings(empty).is_none());
+    }
+
+    #[test]
+    fn preserves_numbered_float_indentation_compatibility_flags() {
+        // Each fact alone must materialize settings, including explicit false.
+        for (name, value) in [
+            ("doNotSuppressIndentation", true),
+            ("ww11IndentRules", false),
+            ("doNotUseIndentAsNumberingTabStop", true),
+            ("noTabHangInd", false),
+        ] {
+            let xml = format!(
+                r#"<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:compat><w:{name} w:val="{}"/></w:compat></w:settings>"#,
+                if value { "1" } else { "0" }
+            );
+            let parsed = parse_document_settings(&xml).expect("explicit compatibility fact");
+            assert_eq!(serde_json::to_value(parsed).unwrap()[name], value);
+        }
+        let absent = r#"<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"/>"#;
+        assert!(parse_document_settings(absent).is_none());
     }
 
     // ECMA-376 §17.15.1.25: `<w:defaultTabStop>` (twips) surfaces as points; its

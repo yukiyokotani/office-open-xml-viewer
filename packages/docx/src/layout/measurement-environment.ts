@@ -99,6 +99,10 @@ export function paragraphMeasurementEnvironment(
     enableOpenTypeFeatures: state.layoutSettings.compat.enableOpenTypeFeatures,
     ...(state.layoutSettings.compat.ulTrailSpace ? { ulTrailSpace: true } : {}),
     ...(state.layoutSettings.compat.doNotExpandShiftReturn ? { doNotExpandShiftReturn: true } : {}),
+    doNotSuppressIndentation: state.layoutSettings.compat.doNotSuppressIndentation,
+    ww11IndentRules: state.layoutSettings.compat.ww11IndentRules,
+    doNotUseIndentAsNumberingTabStop: state.layoutSettings.compat.doNotUseIndentAsNumberingTabStop,
+    noTabHangInd: state.layoutSettings.compat.noTabHangInd,
     ...(state.layoutSettings.compat.compatibilityMode === undefined
       ? {}
       : { compatibilityMode: state.layoutSettings.compat.compatibilityMode }),
