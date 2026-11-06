@@ -1,3 +1,4 @@
+import { japaneseOffOrdinarySource } from './kinsoku-off-edges.js';
 import { rtlSoftPresentationSource, type RtlSoftPresentationSource } from './rtl-soft-presentation.js';
 import type {
   BodyElement,
@@ -11,7 +12,7 @@ import type { BodyLayoutInput } from './body-layout-input.js';
 import type { DocumentLayoutSettings } from '../layout-context.js';
 import type { ImageMetadataRecord, MathOccurrence } from './resources.js';
 import type { PaintResourceDescriptor, PaintResourceRegistry, SourceRef } from './types.js';
-import type { ParagraphAcquisitionInput } from './text.js';
+import type { ParagraphAcquisitionInput, ParagraphLayoutSource } from './text.js';
 import type { DeepReadonly, ParsedUnsupportedTextBoxBlock } from './types.js';
 import { imageResourceKey, sourceKey, vmlPictureResourceKey, vmlStrokeResourceKey, vmlEdgeResourceKey } from './source-key.js';
 import { indexSealedPaintResourceDescriptors } from './paint-resources.js';
@@ -98,6 +99,7 @@ export interface FatalParseFact {
 }
 
 export interface LayoutSourceDocumentFacts {
+  readonly hasCustomKinsokuRules?: true;
   readonly kinsoku: Readonly<{
     enabled: boolean;
     lineStartForbidden: readonly number[];
@@ -436,6 +438,8 @@ function sealLayoutSourceStoreWithBody(
   // adapter (materializeDocumentPullAdapterSession / render worker). Progressive
   // pagination therefore cannot add a future anchor to this sealed source.
   let nativeUnitBodyBandHasFloatingSource = false;
+  let rootParagraphOffSources: WeakSet<ParagraphLayoutSource> | undefined;
+  let japaneseOffSources: WeakMap<ParagraphLayoutSource, boolean> | undefined;
   const paragraphBySource = new Map<string, LayoutParagraphAcquisitionFact>();
   for (const fact of input.acquisitionFacts.paragraphs) {
     assertExactOwnKeys(fact, [
@@ -445,6 +449,10 @@ function sealLayoutSourceStoreWithBody(
     if (paragraphBySource.has(key)) throw new TypeError(`Duplicate paragraph acquisition source: ${key}`);
     paragraphBySource.set(key, fact);
     const paragraph = blocks.resolve(fact.source);
+    if (paragraph.type === 'paragraph' && paragraph.kinsoku === false
+      && fact.source.story === 'body' && fact.source.storyInstance === 'body' && fact.source.path.length === 1) {
+      (rootParagraphOffSources ??= new WeakSet()).add(paragraph);
+    }
     if (paragraph.type === 'paragraph' && (paragraph.framePr !== undefined
       || fact.publicAnchorBridges.some(bridge => bridge !== null)
       || paragraph.runs.some(run => run.type === 'anchorHost'
@@ -602,6 +610,19 @@ function sealLayoutSourceStoreWithBody(
   };
   const documentLayoutSettings: DocumentLayoutSettings = Object.freeze({
     ...input.documentLayoutFacts,
+    // Complete canonical facts are sealed before pagination. Reuse the once-
+    // owned float result; no prefix publication or additional document scan.
+    ...(rootParagraphOffSources && !nativeUnitBodyBandHasFloatingSource ? {
+      paragraphOffBodySource: (paragraph: ParagraphLayoutSource) => {
+        if (!rootParagraphOffSources?.has(paragraph)) return false;
+        japaneseOffSources ??= new WeakMap();
+        const retained = japaneseOffSources.get(paragraph);
+        if (retained !== undefined) return retained;
+        const admitted = japaneseOffOrdinarySource(paragraph);
+        japaneseOffSources.set(paragraph, admitted);
+        return admitted;
+      },
+    } : {}),
     kinsoku: Object.freeze({
       enabled: input.documentLayoutFacts.kinsoku.enabled,
       lineStartForbidden: immutableNumberSet(input.documentLayoutFacts.kinsoku.lineStartForbidden),

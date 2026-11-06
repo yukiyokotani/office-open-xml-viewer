@@ -107,6 +107,7 @@ export type BreakOpportunityIteratorContext = Pick<
   | 'ctx'
   | 'verticalGlyphMeasurement'
   | 'kinsoku'
+  | 'lineEdgeRules'
   | 'strNaturalAdvance'
   | 'retractCurrentLineForLeadingKinsoku'
   | 'keepLeadingKinsokuWithCurrentLine'
@@ -1707,7 +1708,7 @@ function splitCjkOverflow(context: BreakOpportunityIteratorContext, frame: TextF
     effectiveFontPx,
     ctx,
     verticalGlyphMeasurement,
-    kinsoku,
+    lineEdgeRules: kinsoku,
     strNaturalAdvance,
     retractCurrentLineForLeadingKinsoku,
     keepLeadingKinsokuWithCurrentLine,
@@ -1786,6 +1787,11 @@ function splitCjkOverflow(context: BreakOpportunityIteratorContext, frame: TextF
       overflowPunct &&
       breakerState.gapTransaction?.endsAtExclusion !== true &&
       split < allChars.length &&
+      // The admitted Japanese OFF class owns one extension from a fitting
+      // prefix (§17.3.1.21), not another mark after an overfull queued tail.
+      // Unmeasured/legacy policies retain their prior overflow behavior.
+      (context.cjkClosingMarkHang !== 'one-from-fitting-prefix'
+        || fitsLineWidth(breakerState.currentWidth, availW())) &&
       (breakerState.currentLine.length > 0 || split > 0) &&
       // word-justification-punctuation-hang (the following character may
       // sit in a later queued segment).
@@ -1793,7 +1799,7 @@ function splitCjkOverflow(context: BreakOpportunityIteratorContext, frame: TextF
         context.cjkClosingMarkHang,
         allChars[split]!,
         () => split + 1 < allChars.length ? allChars[split + 1] : queuedFollowingCharacter(context),
-        kinsoku,
+        context.kinsoku,
         s.verticalRun === true,
       ) &&
       wordIsOverflowPunctuation(

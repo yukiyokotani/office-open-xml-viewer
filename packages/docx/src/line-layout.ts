@@ -53,6 +53,7 @@ export function layoutLines(
   lineFit?: LineFitWidth,
   cjkClosingMarkHang?: CjkClosingMarkHang,
   bidiOrdering?: BidiTabOrderPolicy,
+  lineEdgeRules?: KinsokuRules,
 ): LayoutLine[];
 
 export function layoutLines(
@@ -109,6 +110,7 @@ export function layoutLines(
   // WORD_JUSTIFICATION_PUNCTUATION_HANG, absent outside its measured scope.
   cjkClosingMarkHang?: CjkClosingMarkHang,
   bidiOrdering?: BidiTabOrderPolicy,
+  lineEdgeRules?: KinsokuRules,
   passContext?: Readonly<{
     probeHeights: readonly number[] | null;
     decimalOrder?: LineOrderResolver;
@@ -156,6 +158,7 @@ export function layoutLines(
       lineFit,
       cjkClosingMarkHang,
       bidiOrdering,
+      lineEdgeRules,
       { probeHeights, probeFloors, preparedFloatWrap, decimalOrder },
     );
     // DrawingML wrap=none (§21.1.2.1.1) removes only the automatic break at the
@@ -200,7 +203,7 @@ export function layoutLines(
   }
   return runLineBreakerPass({
     ctx, segs, maxWidth, firstIndent, scale, tabStops, wrapCtx,
-    fontFamilyClasses, tabOriginPx, kinsoku, characterGrid, defaultTabPt,
+    fontFamilyClasses, tabOriginPx, kinsoku, lineEdgeRules, characterGrid, defaultTabPt,
     marginRightPx, baseRtl, isJustified, stretchLastLine, startBoundary, bidiOrdering,
     widthPolicy, verticalGlyphMeasurement, overflowPunct,
     justifiedCompression: justifiedCompression !== false,
