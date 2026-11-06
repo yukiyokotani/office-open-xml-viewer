@@ -1,3 +1,4 @@
+import { closingPairScopeApplies } from '../line-breaker/closing-pair-advance.js';
 import { sameNativeLevelUnit } from '../line-breaker/native-unit-contract.js';
 import { textBreakWindow, textBreakOffsets } from '../line-breaker/text-break-window.js';
 import { uprightResourceOrientation } from './coordinate-space.js';
@@ -713,6 +714,7 @@ export function measureParagraphIntrinsicWidths(
 
   const builtSegments = buildSegments(paragraph.runs, {
     ...environment,
+    closingPairAdvanceAdmitted: closingPairScopeApplies(paragraph, context, environment),
     uprightResourceOrientation: uprightResourceOrientation(environment.verticalPageFrame, environment.pageWritingMode),
     lineSpacing: context.lineSpacing,
     lineGridActive: context.lineGrid.active,

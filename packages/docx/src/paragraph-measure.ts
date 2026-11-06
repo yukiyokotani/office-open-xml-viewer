@@ -1,3 +1,4 @@
+import { closingPairScopeApplies } from './line-breaker/closing-pair-advance.js';
 import { segmentsHaveRtl } from './bidi-line.js';
 import { specifiedTextLineMetrics, specifiedTextParagraphIsHomogeneous } from './layout/specified-line-spacing.js';
 import { uprightResourceOrientation } from './layout/coordinate-space.js';
@@ -356,6 +357,7 @@ export function measureParagraph(
 
   const segments = buildSegments(paragraph.runs, {
     ...environment,
+    closingPairAdvanceAdmitted: closingPairScopeApplies(paragraph, context, environment),
     uprightResourceOrientation: uprightResourceOrientation(environment.verticalPageFrame, environment.pageWritingMode),
     lineSpacing: context.lineSpacing,
     lineGridActive: context.lineGrid.active,

@@ -1,3 +1,4 @@
+import { checkedMetadataUtf16Work, checkedPrefixWorkTotal } from '../line-breaker/prefix-work-budget.js';
 import { wordTextBoxVerticalMode } from './compatibility.js';
 import { wordArabicTextKerned } from './line-compatibility.js';
 import type { LayoutDiagnostic } from './types.js';
@@ -668,8 +669,22 @@ export function nativeVisiblePrefixMatches(
     && Number.isFinite(prefix.measurement.ascentPt) && Number.isFinite(prefix.measurement.descentPt);
 }
 
+export interface ContextualAdvanceBatchItem {
+  readonly request: Readonly<TextShapeRequest>;
+  readonly ranges: readonly Readonly<{ start: number; end: number }>[];
+  /** Preflighted caller-owned optional short-shape/proof metadata work. */
+  readonly additionalWorkUtf16?: number;
+}
+export interface ContextualAdvanceReceipt {
+  readonly shape: TextShapeResult;
+  readonly clusters: NonNullable<TextShapeResult['clusters']>;
+}
+
 export interface TextLayoutService {
   readonly fingerprint: string;
+  /** Optional bounded original-source prefix receipts. Unknown providers must
+   * decline before calls; these uncached receipts are not published geometry. */
+  acquireContextualAdvances?(batch: readonly ContextualAdvanceBatchItem[]): readonly ContextualAdvanceReceipt[] | undefined;
   /** Geometry keyed by a resolved resource identity. This is the authoritative
    * metric snapshot used by layout. */
   readonly fontMetrics?: Readonly<Record<string, Readonly<ResolvedFontMetric>>>;
@@ -976,6 +991,49 @@ export function textRouteOrdinalTableSize(service: TextLayoutService): number | 
   return routeOrdinalTableSizes.get(service)?.();
 }
 
+function contextualPrefixReader(
+  request: Readonly<TextShapeRequest>, spans: readonly TextShapeSpan[], totalAdvancePt: number,
+  measureContextualPrefix: (request: Readonly<GlyphMeasureRequest>) => GlyphMeasurement,
+  onMeasured?: (boundary: number, span: TextShapeSpan, request: Readonly<GlyphMeasureRequest>, measured: GlyphMeasurement) => void,
+): (boundary: number) => number {
+  const prefixAdvances = new Map<number, number>([
+    [0, 0],
+    [request.text.length, totalAdvancePt],
+  ]);
+  const prefixAdvance = (boundary: number): number => {
+    if (request.measure === false || boundary <= 0) return 0;
+    const retained = prefixAdvances.get(boundary);
+    if (retained !== undefined) return retained;
+    let advancePt = 0;
+    for (const span of spans) {
+      if (boundary >= span.end) {
+        advancePt += span.advancePt;
+        continue;
+      }
+      if (boundary <= span.start) break;
+      const prefixRequest: Readonly<GlyphMeasureRequest> = {
+        text: span.text.slice(0, boundary - span.start),
+        fontRoute: span.fontRoute,
+        fontSizePt: request.fontSizePt,
+        weight: span.font.weight,
+        style: span.font.style,
+        letterSpacingPt: request.letterSpacingPt ?? 0,
+        kerning: wordArabicTextKerned(span.text) ? true : request.kerning,
+        ...(request.baseDirection !== undefined ? { baseDirection: request.baseDirection } : {}),
+      };
+      const measuredPrefix = measureContextualPrefix(prefixRequest);
+      advancePt += measuredPrefix.advancePt;
+      onMeasured?.(boundary, span, prefixRequest, measuredPrefix);
+      break;
+    }
+    // One boundary is the trailing edge of one cluster and the leading
+    // edge of the next. Keep one contextual fact for this shape call.
+    prefixAdvances.set(boundary, advancePt);
+    return advancePt;
+  };
+  return prefixAdvance;
+}
+
 /**
  * Shape per script span because ECMA-376 §17.3.2.26 selects rFonts slots per
  * Unicode character; choosing one family for an entire mixed-script run loses
@@ -1024,6 +1082,7 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
     && (!(input.measurer.sameGlyphRaster || input.measurer.ownsGlyphs)
       || input.measurer.supportsDirectedAuxiliaries === true);
   const fingerprint = stableFingerprint('text', {
+    contextualAdvanceBatch: true,
     glyphContours: input.glyphContourFingerprint ?? 'unavailable',
     ...(directedCapable ? { directedMeasurement: true } : {}),
     ...(directedCapable && input.acquireProjectableNativeUnits ? { projectableNativeUnits: true } : {}),
@@ -1197,6 +1256,59 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
       }
     : undefined;
   const service: TextLayoutService = Object.freeze({
+    acquireContextualAdvances(batch: readonly ContextualAdvanceBatchItem[]) {
+      // Charge all source/context/key and possible span-prefix work BEFORE any
+      // optional acquisition, including cache hits. Dense long sources decline
+      // atomically; never acquire every grapheme or retain prefix-shaped keys.
+      let work = 0;
+      for (const { request, ranges, additionalWorkUtf16 = 0 } of batch) {
+        const additional = checkedPrefixWorkTotal(work, additionalWorkUtf16);
+        if (additional === undefined) return undefined;
+        work = additional;
+        const { text: _text, substituteContext: _context, ...metadata } = request;
+        const metadataWork = checkedMetadataUtf16Work(metadata);
+        const keyWork = metadataWork === undefined ? undefined : checkedPrefixWorkTotal(work, metadataWork);
+        if (keyWork === undefined) return undefined;
+        work = keyWork;
+        const fixed = checkedPrefixWorkTotal(request.text.length, request.text.length);
+        const contextWork = fixed === undefined ? undefined
+          : checkedPrefixWorkTotal(fixed, request.substituteContext?.text.length ?? request.text.length);
+        const next = contextWork === undefined ? undefined : checkedPrefixWorkTotal(work, contextWork);
+        if (next === undefined) return undefined;
+        work = next;
+        let previousEnd = 0;
+        for (const { start, end } of ranges) {
+          if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end)
+            || start < previousEnd || end <= start || end > request.text.length) return undefined;
+          previousEnd = end;
+          const startWork = checkedPrefixWorkTotal(work, start);
+          const endWork = startWork === undefined ? undefined : checkedPrefixWorkTotal(startWork, end);
+          if (endWork === undefined) return undefined;
+          work = endWork;
+        }
+      }
+      const receipts: ContextualAdvanceReceipt[] = [];
+      for (const { request, ranges } of batch) {
+        const shape = service.shape({ ...request, measure: true, clusterGeometry: false });
+        let boundaryIndex = 0;
+        // Ordered two-pointer validation: no range×grapheme scan or retained Set.
+        for (const range of ranges) for (const endpoint of [range.start, range.end]) {
+          while (boundaryIndex < shape.graphemeBoundaries.length
+            && shape.graphemeBoundaries[boundaryIndex]! < endpoint) boundaryIndex++;
+          if (shape.graphemeBoundaries[boundaryIndex] !== endpoint) return undefined;
+        }
+        const prefix = contextualPrefixReader({ ...request, measure: true }, shape.spans,
+          shape.advancePt, measureContextualPrefix);
+        const clusters = ranges.map(range => {
+          const offsetPt = prefix(range.start);
+          return Object.freeze({ range: Object.freeze({ ...range }), offsetPt,
+            advancePt: prefix(range.end) - offsetPt });
+        });
+        if (clusters.some(cluster => !Number.isFinite(cluster.offsetPt) || !Number.isFinite(cluster.advancePt))) return undefined;
+        receipts.push(Object.freeze({ shape, clusters: Object.freeze(clusters) }));
+      }
+      return Object.freeze(receipts);
+    },
     ...(directedCapable && input.acquireProjectableNativeUnits ? {
       acquireProjectableNativeUnits: (requests: readonly Readonly<TextShapeRequest & { baseDirection: NativeBaseDirection }>[]) =>
         input.acquireProjectableNativeUnits!(requests, request => {
@@ -1603,33 +1715,8 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
     const clusters = request.clusterGeometry === false
       ? undefined
       : (() => {
-          const prefixAdvances = new Map<number, number>([
-            [0, 0],
-            [request.text.length, totalAdvancePt],
-          ]);
-          const prefixAdvance = (boundary: number): number => {
-            if (request.measure === false || boundary <= 0) return 0;
-            const retained = prefixAdvances.get(boundary);
-            if (retained !== undefined) return retained;
-            let advancePt = 0;
-            for (const span of spans) {
-              if (boundary >= span.end) {
-                advancePt += span.advancePt;
-                continue;
-              }
-              if (boundary <= span.start) break;
-              const prefixRequest: Readonly<GlyphMeasureRequest> = {
-                text: span.text.slice(0, boundary - span.start),
-                fontRoute: span.fontRoute,
-                fontSizePt: request.fontSizePt,
-                weight: span.font.weight,
-                style: span.font.style,
-                letterSpacingPt: request.letterSpacingPt ?? 0,
-                kerning: wordArabicTextKerned(span.text) ? true : request.kerning,
-                ...(request.baseDirection !== undefined ? { baseDirection: request.baseDirection } : {}),
-              };
-              const measuredPrefix = measureContextualPrefix(prefixRequest);
-              advancePt += measuredPrefix.advancePt;
+          const prefixAdvance = contextualPrefixReader(request, spans, totalAdvancePt,
+            measureContextualPrefix, nativePrefixEnd === undefined ? undefined : (boundary, span, prefixRequest, measuredPrefix) => {
               // This exact native request already supplied the contextual
               // prefix advance. Retain its actual ink only at the FINAL
               // visible boundary; never retain every prefix measurement.
@@ -1654,13 +1741,7 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
                   }),
                 });
               }
-              break;
-            }
-            // One boundary is the trailing edge of one cluster and the leading
-            // edge of the next. Keep one contextual fact for this shape call.
-            prefixAdvances.set(boundary, advancePt);
-            return advancePt;
-          };
+            });
           const selected: Array<{ start: number; end: number }> = [];
           if (request.clusterGeometry === 'spaces') {
             // Scalar spaces need not start a grapheme (Prepend + SPACE).
