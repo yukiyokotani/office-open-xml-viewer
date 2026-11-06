@@ -708,7 +708,6 @@ export function measureParagraph(
       doNotExpandShiftReturn: environment.doNotExpandShiftReturn,
       endsAtHardBreak: context.endsAtHardBreak,
     },
-    context.lineEdgeRules,
   );
   if (lines.length === 0) return measureMarkOnly();
 

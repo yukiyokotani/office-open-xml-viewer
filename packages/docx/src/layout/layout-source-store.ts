@@ -97,7 +97,6 @@ export interface FatalParseFact {
 }
 
 export interface LayoutSourceDocumentFacts {
-  readonly hasCustomKinsokuRules?: true;
   readonly kinsoku: Readonly<{
     enabled: boolean;
     lineStartForbidden: readonly number[];

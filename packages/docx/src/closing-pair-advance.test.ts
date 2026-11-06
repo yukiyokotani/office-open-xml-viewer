@@ -111,22 +111,24 @@ describe('first-owner closing-pair allocation', () => {
   });
 
 
-  it('preserves a Kashida full cell while projecting an observed left boundary', () => {
+  it('preserves unsupported Kashida and Thai full cells while projecting an observed left boundary', () => {
     const source = 'あ。」い';
     const low = { ...paragraph([run(source)]), alignment: 'lowKashida' } as DocParagraph;
+    const thai = { ...paragraph([run(source)]), alignment: 'thaiDistribute' } as DocParagraph;
     const left = paragraph([run(source)]);
     const doc = model(low);
-    doc.body.push({ type: 'paragraph', ...left });
+    doc.body.push({ type: 'paragraph', ...thai }, { type: 'paragraph', ...left });
     doc.section.pageWidth = 48;
     const { canvas } = makeRecordingCanvas();
     const services = createLayoutServicesRuntimeView(createLayoutServices(doc, { measureContext: canvas.getContext('2d') }), { text: service() });
     const published = layoutDocument(doc, services).pages.flatMap(page => page.layers.body)
       .filter(node => node.kind === 'paragraph');
-    expect(published).toHaveLength(2);
+    expect(published).toHaveLength(3);
     const advances = published.map(p => p.lines.flatMap(line => line.placements)
       .filter(piece => piece.kind === 'text').flatMap(piece => piece.clusters)
       .map(cluster => [cluster.range.start, cluster.range.end, cluster.advancePt]));
     expect(advances).toEqual([
+      [[0, 1, 12], [1, 2, 12], [2, 3, 12], [3, 4, 12]],
       [[0, 1, 12], [1, 2, 12], [2, 3, 12], [3, 4, 12]],
       [[0, 1, 12], [1, 2, 6], [2, 3, 12], [3, 4, 12]],
     ]);

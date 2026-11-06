@@ -107,7 +107,6 @@ export type BreakOpportunityIteratorContext = Pick<
   | 'ctx'
   | 'verticalGlyphMeasurement'
   | 'kinsoku'
-  | 'lineEdgeRules'
   | 'strNaturalAdvance'
   | 'retractCurrentLineForLeadingKinsoku'
   | 'keepLeadingKinsokuWithCurrentLine'
@@ -1675,7 +1674,7 @@ function splitCjkOverflow(context: BreakOpportunityIteratorContext, frame: TextF
     effectiveFontPx,
     ctx,
     verticalGlyphMeasurement,
-    lineEdgeRules: kinsoku,
+    kinsoku,
     strNaturalAdvance,
     retractCurrentLineForLeadingKinsoku,
     keepLeadingKinsokuWithCurrentLine,
@@ -1761,7 +1760,7 @@ function splitCjkOverflow(context: BreakOpportunityIteratorContext, frame: TextF
         context.cjkClosingMarkHang,
         allChars[split]!,
         () => split + 1 < allChars.length ? allChars[split + 1] : queuedFollowingCharacter(context),
-        context.kinsoku,
+        kinsoku,
         s.verticalRun === true,
       ) &&
       wordIsOverflowPunctuation(

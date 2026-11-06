@@ -62,7 +62,7 @@ export function placeOptionalHyphenPrefix(
       const prefix = member.text.slice(0, marker.offset);
       const next = members[index + 1];
       if (!optionalHyphenBreakAllowed(member, marker.offset, next,
-        visiblePrefix || prefix.trim().length > 0, context.lineEdgeRules)) continue;
+        visiblePrefix || prefix.trim().length > 0, context.kinsoku)) continue;
       const glyph: LayoutTextSeg = { ...marker.glyph, ...RESET_SLICED_TEXT_MEASUREMENT,
         src: member.src ? { ...member.src, charOffset: member.src.charOffset + marker.offset } : undefined,
         optionalHyphenGlyph: true, joinPrev: true };

@@ -81,7 +81,6 @@ import {
 import type { LineBreakerPassInput } from './pass-driver.js';
 
 export interface PassOperationState extends LineBreakerPassInput {
-  readonly lineEdgeRules: LineBreakerPassInput['kinsoku'];
   /** The paragraph's own first-line offset (`firstIndent` reads the body
    * offset a float window resolved for a numbered first line instead). */
   readonly paragraphFirstIndent: number;
@@ -277,7 +276,7 @@ export function performMinimalLegalTextWidth(
 
 /** The prefix {@link performMinimalLegalTextWidth} measures. */
 function minimalLegalTextPrefix(operationState: PassOperationState, segment: LayoutTextSeg): string {
-  const { lineEdgeRules: kinsoku } = operationState;
+  const { kinsoku } = operationState;
   const text = segment.text;
   let end = text.length;
   if (segment.fitTextRegionIndex === undefined && !segment.ruby && !segment.tateChuYoko) {
@@ -2694,7 +2693,7 @@ export function performRetractCurrentLineForLeadingKinsoku(
   operationState: PassOperationState,
   next: LayoutTextSeg,
 ): CrossRunKinsokuRetraction {
-  const { breakerState, materializeLatinSpaceCompression, strAdvance, lineEdgeRules: kinsoku } = operationState;
+  const { breakerState, materializeLatinSpaceCompression, strAdvance, kinsoku } = operationState;
   return retractLeadingKinsoku(
     breakerState,
     kinsoku,
