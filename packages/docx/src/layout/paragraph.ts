@@ -5291,10 +5291,15 @@ function textBoxParagraphContext(
   const {
     endsAtHardBreak: _hostEndsAtHardBreak,
     cjkClosingMarkHang: _hostCjkClosingMarkHang,
+    lineEdgeRules: _hostLineEdgeRules,
+    documentKinsoku,
     ...host
   } = inherited;
   return {
     ...host,
+    // This compatibility shape is a separate paragraph; its host OFF toggle
+    // and observed line-edge exception do not describe its own source.
+    kinsoku: documentKinsoku ?? inherited.kinsoku,
     ...(paragraph.endsAtHardBreak === true ? { endsAtHardBreak: true as const } : {}),
     // This compatibility model can include flattened WML text; its direction
     // provenance is not authoritative. Complete WML stories bypass this path.
@@ -6275,6 +6280,11 @@ function paragraphAcquisitionKey(
       context.hasRuby,
       context.hasEastAsianText,
       cache.kinsokuKey(context.kinsoku),
+      // Tagged optional fields cannot collide with one another or shift an
+      // untagged scalar into another semantic position. Document rules own
+      // compatibility textbox children even when this host is paragraph-OFF.
+      ...(context.lineEdgeRules ? [['line-edge-rules', cache.kinsokuKey(context.lineEdgeRules)]] : []),
+      ...(context.documentKinsoku ? [['textbox-document-rules', cache.kinsokuKey(context.documentKinsoku)]] : []),
       context.defaultTabPt,
       context.overflowPunct !== false,
       context.cjkClosingMarkHang ?? null,
