@@ -4,7 +4,7 @@ import { wordArabicTextKerned, wordKerningApplies } from '../layout/line-compati
 import { graphemeClusterOffsets } from '@silurus/ooxml-core';
 import type { LayoutTextSeg } from '../line-layout.js';
 import type { MeasurementTextContext, VerticalGlyphMeasurementService } from '../layout/measurement-capabilities.js';
-import { calcEffectiveFontPx, semanticSlotStartIndex } from '../layout/text.js';
+import { calcEffectiveFontPx, semanticSlotStartIndex, type TextShapeResult } from '../layout/text.js';
 import {
   charScaleFactor,
   CONDENSED_CONTEXT_GRAPHEMES,
@@ -132,6 +132,22 @@ export class LineMeasurementAdapter {
     }
   }
 
+  /** Compression attempts acquire only contextual gap detail. Committed
+   * prefix advances and seam/face metadata remain owned by placement and the
+   * retained-line finalizer; reacquire the exact live request on each attempt. */
+  acquireCompressionSpaceClusters(segment: LayoutTextSeg): TextShapeResult['clusters'] {
+    if (!segment.textLayoutService || !segment.textShapeRequest) return undefined;
+    if (segment.textShapeRequest.text !== segment.text) {
+      throw new Error('Segment measurement does not match its retained text range context');
+    }
+    return segment.textLayoutService.shape({
+      ...segment.textShapeRequest,
+      fontSizePt: calcEffectiveFontPx(segment, this.scale),
+      measure: true,
+      clusterGeometry: 'spaces',
+    }).clusters;
+  }
+
   measureSegment(segment: LayoutTextSeg, clusterGeometry: boolean | 'spaces' = false): TextMetrics {
     if (segment.textLayoutService && segment.textShapeRequest) {
       if (segment.textShapeRequest.text !== segment.text) {
@@ -146,16 +162,22 @@ export class LineMeasurementAdapter {
       if (clusterGeometry) {
         if (clusterGeometry === 'spaces') segment.shapedSpaceClusters = shaped.clusters;
         else segment.shapedClusters = shaped.clusters;
-        segment.selectedFaceFontBox = {
-          ascentPt: shaped.ascentPt,
-          descentPt: shaped.descentPt,
-        };
-        segment.selectedFaceInkBounds = shaped.inkBounds ?? {
-          xMinPt: 0,
-          xMaxPt: shaped.advancePt,
-          ascentPt: shaped.ascentPt,
-          descentPt: shaped.descentPt,
-        };
+        // Visible spaces-only acquisition owns gap metrics, not published face
+        // geometry. The unconditional retained-line finalizer acquires full
+        // clusters and face metrics before these pieces leave the breaker.
+        // Empty/metric-only pieces are skipped there, so retain their writers.
+        if (clusterGeometry !== 'spaces' || segment.metricOnly || segment.text.length === 0) {
+          segment.selectedFaceFontBox = {
+            ascentPt: shaped.ascentPt,
+            descentPt: shaped.descentPt,
+          };
+          segment.selectedFaceInkBounds = shaped.inkBounds ?? {
+            xMinPt: 0,
+            xMaxPt: shaped.advancePt,
+            ascentPt: shaped.ascentPt,
+            descentPt: shaped.descentPt,
+          };
+        }
       }
       return {
         width: shaped.advancePt,
