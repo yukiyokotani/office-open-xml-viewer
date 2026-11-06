@@ -695,4 +695,58 @@ it('keeps terminal SPACE charged in production RTL LEFT intrinsic width', () => 
   // 14 * (four10pt glyphs + one10pt source SPACE); no bounded-fit deduction.
   expect(intrinsic.maxWidthPt).toBe(700);
   expect(intrinsic.minWidthPt).toBe(40);
+
+});
+
+it('shares BOTH soft SPACE presentation after a tab for Hebrew numeric distribute and zero-target low', () => {
+  const source = 'ID\t12.5 אבגד אבגד אבגד אבגד אבגד אבגד אבגד אבגד אבגד';
+  const acquire = (alignment: DocParagraph['alignment']) => lines(para([
+    textRun(source, { rtl: true }),
+  ], alignment, { bidi: true, wordWrap: true, tabStops: [{ pos: 40, alignment: 'left', leader: 'none' }] }), MODE_15);
+  const both = acquire('both');
+  expect(both.length).toBeGreaterThan(1);
+  const reference = characters(both[0]!);
+  for (const alignment of ['distribute', 'lowKashida'] as const) {
+    const actual = acquire(alignment);
+    expect(actual.map(line => line.range)).toEqual(both.map(line => line.range));
+    expect(characters(actual[0]!)).toEqual(reference);
+    // Every acquired source interval is retained exactly once, including TAB
+    // and the soft terminal SPACE; presentation cannot rewrite the source.
+    let cursor = 0;
+    for (const line of actual) {
+      expect(line.range.start).toBe(cursor);
+      cursor = line.range.end;
+    }
+    expect(cursor).toBe(source.length);
+    expect(actual.at(-1)!.range.end).toBe(source.length);
+  }
+  const legacy = (alignment: DocParagraph['alignment'], text: string, settings = MODE_15) =>
+    lines(para([textRun(text, { rtl: true })], alignment,
+      { bidi: true, wordWrap: true, tabStops: [{ pos: 40, alignment: 'left', leader: 'none' }] }), settings);
+  // A Latin after-tab source is not the measured Hebrew/numeric class.
+  const latin = source.replaceAll('אבגד', 'abcd');
+  expect(characters(legacy('distribute', latin)[0]!)).not.toEqual(characters(legacy('both', latin)[0]!));
+  // Mode12 is intentionally outside the measured profiles even though the
+  // same source could otherwise use the source-cell representation.
+  expect(characters(legacy('distribute', source, { compatibilityMode: 12 })[0]!))
+    .not.toEqual(characters(legacy('both', source, { compatibilityMode: 12 })[0]!));
+});
+
+it.each([
+  ['repeated decimal across authored runs', ['ID\t12.', '5.6 אבגד אבגד אבגד אבגד אבגד אבגד אבגד אבגד אבגד']],
+  ['format control in the earlier label', ['\u200eID\t12.5 אבגד אבגד אבגד אבגד אבגד אבגד אבגד אבגד אבגד']],
+])('retains ordinary presentation for %s', (_name, pieces) => {
+  const source = pieces.join('');
+  const acquire = (alignment: DocParagraph['alignment']) => lines(para(
+    pieces.map(text => textRun(text, { rtl: true })), alignment,
+    { bidi: true, wordWrap: true, tabStops: [{ pos: 40, alignment: 'left', leader: 'none' }] }), MODE_15);
+  const actual = acquire('distribute');
+  expect(actual.length).toBeGreaterThan(1);
+  expect(characters(actual[0]!)).not.toEqual(characters(acquire('both')[0]!));
+  let cursor = 0;
+  for (const line of actual) {
+    expect(line.range.start).toBe(cursor);
+    cursor = line.range.end;
+  }
+  expect(cursor).toBe(source.length);
 });
