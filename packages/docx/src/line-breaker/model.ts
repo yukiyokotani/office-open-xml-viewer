@@ -683,6 +683,9 @@ export interface WrapLayoutCtx {
    * leading edge the window moved. */
   numberingFirstLine?: Readonly<{
     authoredFirstIndentPx: number;
+    /** Approved legacy frame queries the raw column, including exclusions
+     * before/equal to the authored first-line edge. Distance from body origin. */
+    columnOriginInsetPx?: number;
     bodyIndentAt: (markerLeadingEdgePx: number) => number;
   }>;
 }

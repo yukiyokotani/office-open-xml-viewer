@@ -1262,6 +1262,10 @@ type DocRunContent = ({
     type: 'ptab';
 } & PTabRun);
 export interface DocSettings {
+    doNotSuppressIndentation?: boolean;
+    ww11IndentRules?: boolean;
+    doNotUseIndentAsNumberingTabStop?: boolean;
+    noTabHangInd?: boolean;
     footnoteLayoutLikeWW8?: boolean;
     doNotUseHtmlParagraphAutoSpacing?: boolean;
     kinsoku?: boolean;

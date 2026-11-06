@@ -179,6 +179,9 @@ export function resolveNumberingMarkerGeometry(
   input: Readonly<{
     authoredFirstIndentPt: number;
     physicalIndentLeftPt: number;
+    /** Observed legacy false-flag numbering window. Ordinary custom/grid
+     * coordinates follow this origin; the implicit indent stop does not. */
+    suffixFrameOriginPt?: number;
     tabStops: readonly TabStop[];
     defaultTabPt: number;
     compatibilityMode?: number;
@@ -244,12 +247,13 @@ export function resolveNumberingMarkerGeometry(
     bodyOffsetPt = 0;
     // `word-numbering-marker-overflow-tab-advance`
     if (markerEndPt > 0) {
-      const stop = numberingSuffixTabStop(
-        input.physicalIndentLeftPt + markerEndPt,
-        input.tabStops,
-        input.defaultTabPt,
-      );
-      bodyOffsetPt = stop ? stop.pos - input.physicalIndentLeftPt : markerEndPt;
+      const origin = input.suffixFrameOriginPt;
+      const stop = origin === undefined
+        ? numberingSuffixTabStop(input.physicalIndentLeftPt + markerEndPt, input.tabStops, input.defaultTabPt)
+        : numberingSuffixTabStop(input.physicalIndentLeftPt + markerEndPt - origin,
+          [...input.tabStops, { pos: Math.max(input.physicalIndentLeftPt, origin) - origin, alignment: 'num', leader: 'none' }],
+          input.defaultTabPt);
+      bodyOffsetPt = stop ? stop.pos + (origin ?? 0) - input.physicalIndentLeftPt : markerEndPt;
     }
   }
   // ECMA-376 §17.3.1.12 keeps paragraph content at the authored start indent.

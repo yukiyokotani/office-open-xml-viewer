@@ -110,6 +110,15 @@ export interface EmbeddedFontRef {
 }
 
 export interface DocSettings {
+  /** Part4 §14.8.3.12: retain authored state; true currently keeps the
+   * established layout, outside the observed legacy false-flag frame. */
+  doNotSuppressIndentation?: boolean;
+  /** Independent legacy name (Part1 AnnexL.1.16.2), not a mode default. */
+  ww11IndentRules?: boolean;
+  /** Part4 §14.8.3.16: ignore the implicit numbering-indent tab stop. */
+  doNotUseIndentAsNumberingTabStop?: boolean;
+  /** Part4 §14.8.3.31: suppress the implicit hanging-indent tab stop. */
+  noTabHangInd?: boolean;
   /** ECMA-376 Part 4 §14.8.3.20: allow reference-free text following a
    * continuous section break on a page containing earlier footnotes. */
   footnoteLayoutLikeWW8?: boolean;

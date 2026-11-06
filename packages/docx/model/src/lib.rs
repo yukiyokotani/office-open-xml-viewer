@@ -489,6 +489,19 @@ pub struct EmbeddedFont {
 #[derive(Serialize, Debug, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct DocumentSettings {
+    /// ECMA-376 Part4 §14.8.3.12. Retain explicit state so the legacy
+    /// false-flag numbering frame cannot admit an authored true setting.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub do_not_suppress_indentation: Option<bool>,
+    /// Independent legacy compatibility name (Part1 AnnexL.1.16.2).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ww11_indent_rules: Option<bool>,
+    /// Part4 §14.8.3.16: true ignores the implicit numbering-indent stop.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub do_not_use_indent_as_numbering_tab_stop: Option<bool>,
+    /// Part4 §14.8.3.31: true prevents creating the implicit hanging stop.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub no_tab_hang_ind: Option<bool>,
     /// ECMA-376 Part 4 §14.8.3.38: preserve the paragraph mark after a terminal
     /// page break. Applied during body normalization, before layout.
     #[serde(skip_serializing_if = "Option::is_none")]
