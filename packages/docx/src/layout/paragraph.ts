@@ -1,5 +1,4 @@
 import { prepareMixedRtlPitch, type MixedRtlPitchSource, type MixedRtlPitchPlan } from './mixed-rtl-pitch.js';
-import { layoutSourceStoreOf } from './runtime-state.js';
 import { closingPairScopeApplies } from '../line-breaker/closing-pair-advance.js';
 import { hasNativeUnitReceipt, hasNativeVisiblePrefix } from '../line-breaker/native-unit-contract.js';
 import { prepareSourceSpaceCells, type SourceSpaceCells } from './source-space-cells.js';
