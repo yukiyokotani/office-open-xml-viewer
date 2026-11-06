@@ -6295,6 +6295,7 @@ function paragraphAcquisitionKey(
         : null,
       lineOnly ? null : environment.pageWritingMode,
       environment.inlineObjectRunLeadingAdmitted === true,
+      ...(environment.originalRtlArabicEofSource === undefined ? [] : [['word-ltr-rtl-arabic-eof']]),
       // Equal numeric widths from frame/table/unknown callers do not grant
       // the fixed-body source topology used by native level units.
       environment.nativeUnitMinimumBandPt ?? null,
@@ -6517,6 +6518,12 @@ export function acquireParagraphResult(
   options: ParagraphAcquisitionOptions,
   continuation?: Parameters<typeof measureParagraph>[5],
 ): AcquiredParagraphResult {
+  // Never inherit original body EOF authority into a nested acquisition.
+  if (options.environment.originalRtlArabicEofSource !== undefined
+    && (options.source.story !== 'body' || options.source.storyInstance !== 'body'
+      || options.source.path.length !== 1 || !options.ordinaryFlow || options.anchorCellBounds !== undefined)) {
+    options = { ...options, environment: { ...options.environment, originalRtlArabicEofSource: undefined } };
+  }
   const cache = options.environment.layoutServices
     ? paragraphAcquisitionCacheOf(options.environment.layoutServices)
     : undefined;

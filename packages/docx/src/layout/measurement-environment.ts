@@ -197,3 +197,25 @@ export function nativeUnitMinimumBodyBand(
   const band = width - Math.max(0, context.firstIndentPt);
   return Number.isFinite(band) && band > 0 ? band : undefined;
 }
+
+/** Registered word-ltr-rtl-arabic-eof-space prospective-final fitting:
+ * literal LEFT / LTR body paragraphs with one authored RTL Arabic source
+ * charge their true original terminal SPACE, unlike earlier soft candidates.
+ * Arial/TNR source controls distinguish mode14 (unchanged). No physical tail
+ * translation, intrinsic width or final paint adjustment is licensed here.
+ * Complete-store float ownership excludes future anchors, not only this page. */
+export function originalRtlArabicEofSource(
+  source: LayoutSourceStore, section: SectionLayoutContext, story: StoryContext,
+  paragraph: ParagraphLayoutSource, context: ParagraphLayoutContext,
+  sourceRef: import('./types.js').SourceRef,
+): import('../line-breaker/model.js').OriginalRtlArabicEofSource | undefined {
+  if (source.nativeUnitBodyBandHasFloatingSource || story.story !== 'body'
+    || story.containers.length !== 0 || section.columns.length !== 1
+    || section.textDirection !== 'lrTb' || section.sectionFlow !== undefined
+    || context.runDirectionUnauthored || context.baseRtl || context.wordWrap === false
+    || context.hasRuby || context.lineGrid.active || context.characterGrid.active
+    || context.tabStops.length !== 0 || paragraph.framePr !== undefined
+    || paragraph.numbering != null || paragraph.alignment !== 'left'
+    || paragraph.runs.length !== 1) return undefined;
+  return source.acquisition.originalRtlArabicEofSource(sourceRef);
+}

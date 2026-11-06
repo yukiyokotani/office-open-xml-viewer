@@ -706,6 +706,28 @@ export function measureParagraph(
       doNotExpandShiftReturn: environment.doNotExpandShiftReturn,
       endsAtHardBreak: context.endsAtHardBreak,
     },
+    // `word-rtl-left-soft-fit`: separate from justified fitting and final
+    // hanging. Final source candidates still use this admission arithmetic;
+    // retained charged widths and natural LEFT paint remain independent.
+    // This can retain Latin ink outside a narrow band, not a containment proof.
+    // Resolved paragraph direction is independent of run rtl/cs
+    // (ECMA-376 §§17.3.1.6, 17.3.2.30); wordWrap inheritance is §17.3.1.45.
+    // Only ordinary source-text separators use this capability. Tabs, objects,
+    // atomic/fixed regions and flattened unknown-direction inputs retain their
+    // existing admission. Float windows require charged physical containment;
+    // native units require nonnegative charged source-SPACE slack. Neither
+    // representation owns this soft-only exception. No acquired width changes.
+    !context.runDirectionUnauthored && context.baseRtl && paragraph.alignment === 'left'
+      && context.wordWrap !== false && placement.wrap === undefined
+      && (environment.compatibilityMode === undefined
+        || environment.compatibilityMode === 11 || environment.compatibilityMode === 12
+        || environment.compatibilityMode === 14 || environment.compatibilityMode === 15)
+      && environment.verticalCJK !== true
+      && (environment.pageWritingMode === undefined || environment.pageWritingMode === 'horizontal-tb')
+      && segments.every(segment => 'text' in segment && segment.nativeLevelUnit === undefined
+        && segment.fitTextRegionIndex === undefined
+        && !segment.ruby && !segment.rubyPiece && !segment.metricOnly
+        && !segment.tateChuYoko && !segment.verticalRun),
   );
   if (lines.length === 0) return measureMarkOnly();
 

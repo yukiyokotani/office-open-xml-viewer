@@ -91,6 +91,7 @@ export type BreakOpportunityIteratorContext = Pick<
   | 'justifiedCompression'
   | 'justifiedCompressionAdmissionOnly'
   | 'lineFit'
+  | 'rtlLeftSoftFit'
   | 'isJustified'
   | 'stretchLastLine'
   | 'widthPolicy'
@@ -148,7 +149,7 @@ function placedAdvanceExceeds(
 ): boolean {
   const { breakerState, strAdvance, availW, fitsMeasuredWidth } = context;
   // A line-end U+3000 run hangs as whitespace (word-ideographic-space hang).
-  const visible = (lineEndSpaceCharged(context) ? placedText : placedText.replace(/ +$/u, ''))
+  const visible = (lineEndSpaceCharged(context, segment, placedText) ? placedText : placedText.replace(/ +$/u, ''))
     .replace(/\u3000+$/u, '');
   return !fitsMeasuredWidth(visibleLineWidth(context, visible) + strAdvance(segment, visible), availW());
 }
@@ -410,7 +411,7 @@ function processTextSegment(context: BreakOpportunityIteratorContext, seg: Layou
   const fitWidthFor = (
     widthPx: number,
     trailingSpacePx: number,
-  ): number => wordVisiblePrefixFitWidthPx(widthPx, trailingSpacePx, lineEndSpaceCharged(context));
+  ): number => wordVisiblePrefixFitWidthPx(widthPx, trailingSpacePx, lineEndSpaceCharged(context, s));
   const wForFit = fitWidthFor(prospectiveWidth, trailingSpaceW);
   // ECMA-376 §17.3.1.33 does not prescribe a line-breaking tolerance.
   // Word-for-Mac controls with Calibri and Arial, left/center/right aligned

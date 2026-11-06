@@ -24,7 +24,14 @@ export interface LineBoundary {
 }
 
 
+export interface OriginalRtlArabicEofSource {
+  readonly text: string;
+  readonly sequence: readonly import('./text-sequence.js').TextSequenceSource[];
+}
+
 export interface LayoutSegSource {
+  /** Complete-source EOF, minted before segment/continuation slicing. */
+  originalRtlArabicEofSource?: OriginalRtlArabicEofSource;
   src?: LineBoundary;
   /** Complete unchanged single-source partition; minted before line splitting. */
   sourceCursorStart?: number;
@@ -717,6 +724,8 @@ export interface DocGridCtx {
  * document-level East Asian flag is used only for content-less paragraph-mark
  * metrics; content lines use ParagraphLayoutContext.hasEastAsianText. */
 export interface LineLayoutEnvironment {
+  /** Root-body complete source; never a fragment/queue EOF authority. */
+  readonly originalRtlArabicEofSource?: OriginalRtlArabicEofSource;
   /** Private fixed plain-body capability. Presence is semantic admission, not
    * merely an available width; always reserves the original first indent. */
   readonly nativeUnitMinimumBandPt?: number;
