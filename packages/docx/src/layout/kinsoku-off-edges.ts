@@ -42,6 +42,16 @@ export function paragraphOffJapaneseAdmitted(
   return paragraph.kinsoku === false && settings.kinsoku.enabled
     && (mode === undefined || mode === 11 || mode === 12 || mode === 14 || mode === 15)
     && !settings.hasCustomKinsokuRules
+    // TODO(#2079): the registered CSC Kashida pair allocation is unresolved.
+    // Per-scalar compressed minima can lose natural/contextual pair allocation
+    // (6+6 versus 12+12 in the registered 12pt controls). An edge-only rewrite
+    // exposes that deficit; preserve this WHOLE
+    // paragraph until the compression owner supplies its contextual contract.
+    // The separately approved Thai cut-only exception is not this class.
+    && !((settings.characterSpacingControl === 'compressPunctuation'
+      || settings.characterSpacingControl === 'compressPunctuationAndJapaneseKana')
+      && (paragraph.alignment === 'lowKashida' || paragraph.alignment === 'mediumKashida'
+        || paragraph.alignment === 'highKashida'))
     && (paragraph.alignment === 'left' || paragraph.alignment === 'both' || paragraph.alignment === 'justify'
       || paragraph.alignment === 'distribute' || paragraph.alignment === 'lowKashida'
       || paragraph.alignment === 'mediumKashida' || paragraph.alignment === 'highKashida'

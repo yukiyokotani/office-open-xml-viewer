@@ -11,8 +11,8 @@ import type { BodyElement, DocParagraph, DocSettings, DocxDocumentModel, DocxTex
 const section: SectionProps = { pageWidth: 20, pageHeight: 400,
   marginTop: 0, marginRight: 0, marginBottom: 0, marginLeft: 0,
   headerDistance: 0, footerDistance: 0, titlePage: false, evenAndOddHeaders: false };
-function lines(text: string, alignment = 'left', settings: DocSettings = {},
-  overflowPunct = true, langEastAsia?: string, pieces?: readonly string[]): string[] {
+function paragraphLayout(text: string, alignment = 'left', settings: DocSettings = {},
+  overflowPunct = true, langEastAsia?: string, pieces?: readonly string[], widthPt = 20, tightPunctuation = false) {
   const run: DocxTextRun = { text, fontSize: 10, fontFamily: 'UnregisteredTestFace',
     bold: false, italic: false, underline: false, strikethrough: false,
     color: null, isLink: false, background: null, vertAlign: null, hyperlink: null,
@@ -22,12 +22,21 @@ function lines(text: string, alignment = 'left', settings: DocSettings = {},
     lineSpacing: null, numbering: null, tabStops: [],
     runs: (pieces ?? [text]).map((piece, index) => ({ type: 'text', ...run, text: piece, color: index ? 'FF0000' : null })) };
   const ctx = { font: '10px serif', letterSpacing: '0px', measureText: (value: string) => ({
-    width: [...value].length * 10, actualBoundingBoxAscent: 8, actualBoundingBoxDescent: 2,
-    fontBoundingBoxAscent: 8, fontBoundingBoxDescent: 2 }) } as unknown as CanvasRenderingContext2D;
-  const result = layoutBodyModel([paragraph], section, ctx, {}, settings).pages.flatMap(page => page.layers.body.flatMap(node =>
-    node.kind === 'paragraph' ? node.lines.map(line => line.placements.filter(p => p.kind === 'text').map(p => p.text).join('')) : []));
+    width: [...value].length * 10,
+    actualBoundingBoxAscent: 8,
+    actualBoundingBoxDescent: 2,
+    fontBoundingBoxAscent: 8,
+    fontBoundingBoxDescent: 2,
+    ...(tightPunctuation ? { actualBoundingBoxLeft: 0, actualBoundingBoxRight:
+      ([...value].length * 10 - (/[。」]$/u.test(value) ? 5 : 0)) } : {}) }) } as unknown as CanvasRenderingContext2D;
+  const published = layoutBodyModel([paragraph], { ...section, pageWidth: widthPt }, ctx, {}, settings)
+    .pages.flatMap(page => page.layers.body.flatMap(node => node.kind === 'paragraph' ? node.lines : []));
+  const result = published.map(line => line.placements.filter(p => p.kind === 'text').map(p => p.text).join(''));
   expect(result.join('')).toBe(text);
-  return result;
+  return { lines: result, placements: published.flatMap(line => line.placements) };
+}
+function lines(...args: Parameters<typeof paragraphLayout>): string[] {
+  return paragraphLayout(...args).lines;
 }
 
 it.each(['left', 'both', 'distribute'])('neither hangs nor pushes the mode15 Japanese OFF closing mark under %s', alignment => {
@@ -105,4 +114,38 @@ it('keeps the OFF intrinsic atom and max-content widths with an active bounded e
   // sizing contract. The bounded edge view permits 。, so using it here would
   // incorrectly reduce this existing two-character atom to one character.
   expect(result).toEqual({ minWidthPt: 20, maxWidthPt: 30 });
+});
+
+it('preserves the complete previous CSC Kashida paragraph while its pair allocation is unsupported', () => {
+  const source = 'あいうえ。」お';
+  // Independent 10pt cells with 5pt trailing punctuation ink reproduce the
+  // existing scalar 5+5 compression. The prior pushed source character
+  // accidentally offsets that pair deficit; an edge-only rewrite must not
+  // move the following glyph left by one full cell.
+  for (const [alignment, compression, mode] of [
+    ['lowKashida', 'compressPunctuation', 15],
+    ['highKashida', 'compressPunctuationAndJapaneseKana', undefined],
+  ] as const) {
+    const result = paragraphLayout(source, alignment, {
+      characterSpacingControl: compression, ...(mode === undefined ? {} : { compatibilityMode: mode }),
+    }, true, undefined, undefined, 40, true);
+    expect(result.lines).toEqual(['あいう', 'え。」お']);
+    const text = result.placements.filter(piece => piece.kind === 'text');
+    let cursor = 0;
+    for (const piece of [...text].sort((a, b) => a.range.start - b.range.start)) {
+      expect(piece.range.start).toBe(cursor);
+      expect(piece.range.end).toBe(cursor + piece.text.length);
+      expect(piece.text).toBe(source.slice(cursor, piece.range.end));
+      cursor = piece.range.end;
+    }
+    expect(cursor).toBe(source.length);
+    const following = text.flatMap(piece => piece.clusters.map(cluster => ({ piece, cluster })))
+      .find(({ cluster }) => cluster.range.start === 6)!;
+    expect(following.piece.origin.xPt + following.cluster.offset.xPt).toBe(20);
+  }
+  // Explicitly disabled compression retains the approved ordinary capability;
+  // the refusal is a whole source class, not a pair-text or mode selector.
+  expect(paragraphLayout(source, 'lowKashida', {
+    compatibilityMode: 15, characterSpacingControl: 'doNotCompress',
+  }, true, undefined, undefined, 40, true).lines).toEqual(['あいうえ', '。」お']);
 });
