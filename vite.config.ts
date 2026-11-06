@@ -278,7 +278,7 @@ export default defineConfig(({ command, mode }) => ({
         // re-test before removing this once it is fixed.
         chunkOptimization: { avoidRedundantChunkLoads: false },
       },
-      external: [/^node:/, 'skia-canvas'],
+      external: [/^node:/, 'skia-canvas', 'formualizer'],
       output: {
         assetFileNames: '[name][extname]',
         chunkFileNames: (chunk) =>
