@@ -1,3 +1,4 @@
+import { prepareMixedRtlPitch, type MixedRtlPitchSource, type MixedRtlPitchPlan } from './mixed-rtl-pitch.js';
 import { closingPairScopeApplies } from '../line-breaker/closing-pair-advance.js';
 import { hasNativeUnitReceipt, hasNativeVisiblePrefix } from '../line-breaker/native-unit-contract.js';
 import { prepareSourceSpaceCells, type SourceSpaceCells } from './source-space-cells.js';
@@ -429,6 +430,8 @@ export interface MeasuredLinePlanInput {
 }
 
 export interface PlanLineInput {
+  /** Private, original whole-source proof; never a public option or paint field. */
+  readonly mixedRtlPitchSource?: MixedRtlPitchSource;
   readonly rtlSoftPresentation?: RtlSoftPresentationSource;
   readonly paragraphXPt: number;
   readonly availableWidthPt: number;
@@ -1623,17 +1626,34 @@ export function planLine(input: PlanLineInput): LineLayout {
   if (hasChargedNativeSpace && !preparedSourceCells) {
     throw new TypeError('Selected native source bundle lost projectable SPACE geometry');
   }
+  let mixedPitch: MixedRtlPitchPlan | undefined;
+  let mixedResolved: ReturnType<typeof computeLineSourceCellOrder> | undefined;
+  if (input.mixedRtlPitchSource && input.isFirstLine && input.isLastLine && !line.endsWithBreak
+    && line.range.start === 0 && line.range.end === input.mixedRtlPitchSource.end
+    && lineSlackPt >= 0 && line.gapPlan === undefined && line.justifiedCompressionPt === undefined) {
+    const prepared = prepareSourceSpaceCells(segments);
+    if (prepared) {
+      // Acquisitions and provider callbacks precede the SAME host resolution.
+      // A rejected capability never changes the legacy parent/order/budget.
+      const candidate = prepareMixedRtlPitch(segments, prepared.materialize(),
+        input.mixedRtlPitchSource, effectiveAvailableWidthPt - physicalStartOffsetPt);
+      if (candidate) {
+        const host = computeLineSourceCellOrder(descriptors, prepared.projection, input.baseRtl, 'word');
+        if (host.view === 'cells') { mixedPitch = candidate; mixedResolved = host; }
+      }
+    }
+  }
   const orderModel = paragraphLineOrderModel({
     baseRtl: input.baseRtl, alignment: input.alignment,
     runDirectionUnauthored: input.runDirectionUnauthored, characterSpreadBidi,
   });
-  const resolved = preparedSourceCells
-    ? computeLineSourceCellOrder(descriptors, preparedSourceCells.projection, input.baseRtl, orderModel) : undefined;
+  const resolved = mixedResolved ?? (preparedSourceCells
+    ? computeLineSourceCellOrder(descriptors, preparedSourceCells.projection, input.baseRtl, orderModel) : undefined);
   if (hasChargedNativeSpace && resolved?.view !== 'cells') {
     throw new TypeError('Selected native source bundle lost its authored host projection');
   }
-  const sourceCells: SourceSpaceCells | undefined = resolved?.view === 'cells'
-    ? preparedSourceCells!.materialize() : undefined;
+  const sourceCells: SourceSpaceCells | undefined = mixedPitch?.cells ?? (resolved?.view === 'cells'
+    ? preparedSourceCells!.materialize() : undefined);
   if (sourceCells) segments = sourceCells.segments;
   const visual = resolved ? {
     order: resolved.order,
@@ -1745,7 +1765,13 @@ export function planLine(input: PlanLineInput): LineLayout {
   // WORD_LINE_END_JUSTIFICATION: a word-justified line without any opportunity
   // is centred instead (mode-15 distribute).
   let centreUnjustified = false;
-  if (justification === 'character' && !(line.justifiedCompressionPt! > 0)) {
+  if (mixedPitch) {
+    perGapPt = mixedPitch.deltaPt;
+    stretchByIndex = mixedPitch.stretches;
+    for (const stretch of mixedPitch.stretches.values()) {
+      distributedWidthPt += stretch.internalStretch + (stretch.trailingGap ? stretch.trailingDelta ?? perGapPt : 0);
+    }
+  } else if (justification === 'character' && !(line.justifiedCompressionPt! > 0)) {
     const justifySlackPt = lineSlackPt + hangingLineEndSpacePt;
     // Cuts fall on retained cluster starts and seams on UAX #29 boundaries;
     // formatting seams that only forbid a line break still open a gap.
@@ -3876,6 +3902,7 @@ function planMeasuredLines(
   resourceOrientation?: import('./types.js').UprightResourceOrientation,
   ulTrailSpace = false,
   doNotExpandShiftReturn = false,
+  mixedPitchSource?: MixedRtlPitchSource,
   rtlSoftPresentation?: RtlSoftPresentationSource,
 ): readonly LineLayout[] {
   // WORD_GRID_LINE_CONTENT_FIT_ADMISSION covers plain captions only. Decide
@@ -4157,6 +4184,7 @@ function planMeasuredLines(
       ? raw.segments[0] as LayoutMathSeg
       : undefined;
     const planned = planLine({
+      ...(mixedPitchSource ? { mixedRtlPitchSource: mixedPitchSource } : {}),
       paragraphXPt, availableWidthPt, alignment: paragraph.alignment,
       ...(rtlSoftPresentation && lineEndOffset < rtlSoftPresentation.end
         && Number.isFinite(lineStartOffset) && lineStartOffset <= rtlSoftPresentation.lastTab
@@ -7121,6 +7149,29 @@ function projectAcquiredParagraphLines(
   const numberingPlan = options.continuesFromPrevious
     ? undefined
     : retainedNumberingPlan(paragraph, planningContext, options);
+  // Eligibility is derived from the sealed source at FINAL projection, never
+  // stamped on acquired segments. Exact caches belong to this immutable runtime
+  // source; reusable measured partitions re-enter with their actual story/path.
+  let mixedPitchSource: MixedRtlPitchSource | undefined;
+  const mode = options.environment.compatibilityMode;
+  if (paragraph.alignment === 'distribute' && planningContext.baseRtl && (mode === undefined || mode === 14)
+    && options.source.story === 'body' && options.source.storyInstance === 'body'
+    && options.source.path.length === 1 && options.ordinaryFlow && options.anchorCellBounds === undefined
+    && !planningContext.runDirectionUnauthored
+    && !planningContext.lineGrid.active && !planningContext.characterGrid.active
+    && !planningContext.hasRuby && planningContext.wordWrap !== false
+    && options.environment.pageWritingMode === 'horizontal-tb' && !options.environment.verticalPageFrame
+    && !paragraph.framePr && !paragraph.numbering && !paragraph.tabStops?.length
+    && !options.continuesFromPrevious && options.sourceRangeStart === undefined
+    && !options.placement.wrap && options.exclusions.length === 0 && measured.lines.length === 1
+    && planningContext.firstIndentPt === 0 && planningContext.physicalIndentLeftPt === 0
+    && planningContext.physicalIndentRightPt === 0 && options.environment.layoutServices) {
+    const store = layoutSourceStoreOf(options.environment.layoutServices);
+    if (store?.readMixedRtlPitchSource) {
+      const original = store.blocks.resolve(options.source);
+      if (original.type === 'paragraph') mixedPitchSource = store.readMixedRtlPitchSource(original);
+    }
+  }
   // Registered word-rtl-hebrew-numeric-soft-presentation is final-only:
   // fitting and charged acquisition remain unchanged. Missing source ownership
   // or a sliced continuation cannot manufacture a genuine soft boundary.
@@ -7155,6 +7206,7 @@ function projectAcquiredParagraphLines(
     ),
     options.environment.ulTrailSpace === true,
     options.environment.doNotExpandShiftReturn === true,
+    mixedPitchSource,
     softPresentation,
   );
   if (options.sourceRangeStart !== undefined) {
