@@ -1,3 +1,4 @@
+import { closingPairScopeApplies } from '../line-breaker/closing-pair-advance.js';
 import { hasNativeUnitReceipt, hasNativeVisiblePrefix } from '../line-breaker/native-unit-contract.js';
 import { prepareSourceSpaceCells, type SourceSpaceCells } from './source-space-cells.js';
 import { hasRtlDecimalTabCapability } from '../line-breaker/tabs.js';
@@ -2831,6 +2832,14 @@ function retainedNumberingPlan(
   }, service);
 }
 
+/** Do not inherit the pair policy into a nested story when a caller carries
+ * its parent's environment. Source ownership is known at acquisition, not paint. */
+function closingPairRootSourceEligible(options: Pick<ParagraphAcquisitionOptions,
+  'source' | 'ordinaryFlow' | 'anchorCellBounds'>): boolean {
+  return options.source.story === 'body' && options.source.storyInstance === 'body'
+    && options.source.path.length === 1 && options.ordinaryFlow && options.anchorCellBounds === undefined;
+}
+
 /** The measured frame belongs to ordinary root body paragraphs, never a
  * frame, story, table cell, compatibility shape or active document grid.
  * Keep this semantic admission identical in the reusable line-cache key. */
@@ -5282,10 +5291,15 @@ function textBoxParagraphContext(
   const {
     endsAtHardBreak: _hostEndsAtHardBreak,
     cjkClosingMarkHang: _hostCjkClosingMarkHang,
+    lineEdgeRules: _hostLineEdgeRules,
+    documentKinsoku,
     ...host
   } = inherited;
   return {
     ...host,
+    // This compatibility shape is a separate paragraph; its host OFF toggle
+    // and observed line-edge exception do not describe its own source.
+    kinsoku: documentKinsoku ?? inherited.kinsoku,
     ...(paragraph.endsAtHardBreak === true ? { endsAtHardBreak: true as const } : {}),
     // This compatibility model can include flattened WML text; its direction
     // provenance is not authoritative. Complete WML stories bypass this path.
@@ -6224,6 +6238,8 @@ function paragraphAcquisitionKey(
     // Story/ordinary-flow/cell ownership now changes first-line measurement,
     // not merely retained placement. Own the same admission in both keys.
     numberedWindowScopeEligible(options),
+    // This acquired geometry is shared by intrinsic and bounded consumers.
+    closingPairRootSourceEligible(options) && closingPairScopeApplies(paragraph, context, environment),
     lineOnly
       ? [plainPlacement.paragraphXPt, plainPlacement.availableWidthPt, plainPlacement.noWrap ?? false]
       : [
@@ -6264,6 +6280,11 @@ function paragraphAcquisitionKey(
       context.hasRuby,
       context.hasEastAsianText,
       cache.kinsokuKey(context.kinsoku),
+      // Tagged optional fields cannot collide with one another or shift an
+      // untagged scalar into another semantic position. Document rules own
+      // compatibility textbox children even when this host is paragraph-OFF.
+      ...(context.lineEdgeRules ? [['line-edge-rules', cache.kinsokuKey(context.lineEdgeRules)]] : []),
+      ...(context.documentKinsoku ? [['textbox-document-rules', cache.kinsokuKey(context.documentKinsoku)]] : []),
       context.defaultTabPt,
       context.overflowPunct !== false,
       context.cjkClosingMarkHang ?? null,
@@ -6517,6 +6538,9 @@ export function acquireParagraphResult(
   options: ParagraphAcquisitionOptions,
   continuation?: Parameters<typeof measureParagraph>[5],
 ): AcquiredParagraphResult {
+  if (options.environment.closingPairRootSource && !closingPairRootSourceEligible(options)) {
+    options = { ...options, environment: { ...options.environment, closingPairRootSource: undefined } };
+  }
   const cache = options.environment.layoutServices
     ? paragraphAcquisitionCacheOf(options.environment.layoutServices)
     : undefined;

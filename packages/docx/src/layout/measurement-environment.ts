@@ -72,6 +72,8 @@ export function paragraphMeasurementEnvironment(
   state: BodyMeasurementContext,
 ): ParagraphMeasurementEnvironment {
   return {
+    ...(state.storyContext?.story === 'body' && state.storyContext.containers.length === 0
+      ? { closingPairRootSource: true as const } : {}),
     pageIndex: state.pageIndex,
     totalPages: state.totalPages,
     displayPageNumber: state.displayPageNumber,

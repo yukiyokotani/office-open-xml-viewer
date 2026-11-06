@@ -150,6 +150,33 @@ function options(
 }
 
 describe('paragraph acquisition cache', () => {
+  it('invalidates a warmed host when document rules change its compatibility textbox child', () => {
+    const services = scopedServices();
+    const paragraph = { ...textParagraph(), runs: [{
+      type: 'shape', inline: true, widthPt: 10, heightPt: 100, zOrder: 0,
+      anchorXPt: 0, anchorYPt: 0, anchorXFromMargin: false, anchorYFromPara: false,
+      subpaths: [], presetGeometry: 'rect', fill: null, stroke: null,
+      textAnchor: 't', textInsetL: 0, textInsetT: 0, textInsetR: 0, textInsetB: 0,
+      textBlocks: [{ text: 'あい々う', fontSizePt: 10, alignment: 'left',
+        runs: [{ text: 'あい々う', fontSizePt: 10, fontFamily: 'Test Sans' }] }],
+    } as DocRun] };
+    const input = paragraphAcquisitionInput(paragraph, source);
+    const disabled = { ...DEFAULT_KINSOKU_RULES, enabled: false };
+    const acquire = (documentEnabled: boolean) => {
+      const result = acquireParagraphResult(input, options(services, {
+        context: { ...context, kinsoku: disabled, overflowPunct: false,
+          documentKinsoku: documentEnabled ? DEFAULT_KINSOKU_RULES : disabled },
+      })).layout;
+      const child = result.textBoxes[0]?.story.blocks[0];
+      if (child?.kind !== 'paragraph') throw new Error('expected compatibility child');
+      return child.lines.map(line => line.placements
+        .filter(p => p.kind === 'text').map(p => p.text).join(''));
+    };
+    expect(acquire(true)).toEqual(['あ', 'い々', 'う']);
+    expect(acquire(false)).toEqual(['あい', '々う']);
+    expect(acquire(true)).toEqual(['あ', 'い々', 'う']);
+  });
+
   it('preserves external numbered frames across body, story, cell and grid cache contexts', () => {
     const services = scopedServices();
     const paragraph = { ...textParagraph('word'), indentLeft: 50, indentFirst: -50,

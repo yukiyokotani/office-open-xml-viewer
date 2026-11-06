@@ -91,6 +91,7 @@ export interface LineBreakerPassInput {
   readonly fontFamilyClasses: Record<string, string>;
   readonly tabOriginPx: number;
   readonly kinsoku: KinsokuRules;
+  readonly lineEdgeRules?: KinsokuRules;
   readonly characterGrid?: DocGridCtx;
   readonly defaultTabPt: number;
   readonly marginRightPx: number;
@@ -113,6 +114,8 @@ export interface LineBreakerPassInput {
    * available width less its reserve (absent: the whole width; paint still
    * justifies to the full width), and WORD_RTL_JUSTIFIED_VISIBLE_FIT. */
   readonly lineFit?: LineFitWidth;
+  /** Separate soft-edge admission; does not change reserve or retained paint. */
+  readonly rtlLeftSoftFit?: boolean;
   readonly passContext: Readonly<{
     probeHeights: readonly number[] | null;
     decimalOrder?: LineOrderResolver;
@@ -147,6 +150,9 @@ export function runLineBreakerPass(input: LineBreakerPassInput): LayoutLine[] {
     passContext,
   } = input;
 
+  // Only bounded layout admits the observed edge exception. Intrinsic and
+  // unwrapped passes keep the paragraph-owned OFF rules.
+  const lineEdgeRules = widthPolicy === 'bounded' ? input.lineEdgeRules ?? kinsoku : kinsoku;
   const { probeHeights, preparedFloatWrap } = passContext;
   const probeFloors = passContext.probeFloors ?? probeHeights;
   const breakerState = createLineBreakerState(maxWidth, wrapCtx);
@@ -252,7 +258,7 @@ export function runLineBreakerPass(input: LineBreakerPassInput): LayoutLine[] {
   const sourceEnd = sourceCursorEnd(segs);
   const endBoundary: LineBoundary = { segIndex: segs.length, charOffset: 0,
     ...(sourceEnd !== undefined ? { sourceTextStart: sourceEnd } : {}) };
-  breakerState.queue = new SegmentQueue(prepareBreakQueue(segs, startBoundary, kinsoku, scale, measurement));
+  breakerState.queue = new SegmentQueue(prepareBreakQueue(segs, startBoundary, lineEdgeRules, scale, measurement));
   // ECMA-376 §17.3.3.1: a terminal text-wrapping break opens an empty
   // line. Its preceding line consumes the sentinel, so pagination can resume
   // at the source end while that empty line still remains. Restore the same
@@ -407,6 +413,7 @@ export function runLineBreakerPass(input: LineBreakerPassInput): LayoutLine[] {
 
   operationState = {
     ...input,
+    lineEdgeRules,
     paragraphFirstIndent: input.firstIndent,
     reservePrefixWork: createPrefixWorkBudget(),
     probeHeights,
