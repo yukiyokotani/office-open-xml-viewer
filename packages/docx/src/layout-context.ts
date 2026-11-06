@@ -50,6 +50,10 @@ export interface DocumentLayoutSettings {
     readonly ulTrailSpace: boolean;
     /** §17.15.3.5 doNotExpandShiftReturn. */
     readonly doNotExpandShiftReturn: boolean;
+    readonly doNotSuppressIndentation?: boolean;
+    readonly ww11IndentRules?: boolean;
+    readonly doNotUseIndentAsNumberingTabStop?: boolean;
+    readonly noTabHangInd?: boolean;
     /** compatSetting compatibilityMode; undefined when the document omits it. */
     readonly compatibilityMode?: number;
   };
@@ -262,6 +266,10 @@ export function resolveDocumentLayoutSettings(
       enableOpenTypeFeatures: document.settings?.enableOpenTypeFeatures ?? false,
       ulTrailSpace: document.settings?.ulTrailSpace ?? false,
       doNotExpandShiftReturn: document.settings?.doNotExpandShiftReturn ?? false,
+      doNotSuppressIndentation: document.settings?.doNotSuppressIndentation,
+      ww11IndentRules: document.settings?.ww11IndentRules,
+      doNotUseIndentAsNumberingTabStop: document.settings?.doNotUseIndentAsNumberingTabStop,
+      noTabHangInd: document.settings?.noTabHangInd,
       ...(document.settings?.compatibilityMode !== undefined
         ? { compatibilityMode: document.settings.compatibilityMode }
         : {}),

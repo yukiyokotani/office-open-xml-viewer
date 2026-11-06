@@ -2844,6 +2844,17 @@ function retainedNumberingPlan(
   }, service);
 }
 
+/** The measured frame belongs to ordinary root body paragraphs, never a
+ * frame, story, table cell, compatibility shape or active document grid.
+ * Keep this semantic admission identical in the reusable line-cache key. */
+function numberedWindowScopeEligible(options: Pick<ParagraphAcquisitionOptions,
+  'source' | 'ordinaryFlow' | 'anchorCellBounds' | 'context'>): boolean {
+  return options.source.story === 'body' && options.source.storyInstance === 'body'
+    && options.source.path.length === 1 && options.ordinaryFlow
+    && options.anchorCellBounds === undefined && !options.context.runDirectionUnauthored
+    && !options.context.lineGrid.active && !options.context.characterGrid.active;
+}
+
 /** Body start for a numbered first line whose marker leading edge a float
  * moved (WrapLayoutCtx.numberingFirstLine; issue #1883). Only paragraphs whose
  * body offset is the resolved marker+suffix geometry take part: the RTL forms
@@ -2851,7 +2862,8 @@ function retainedNumberingPlan(
 function numberingFirstLineWindow(
   paragraph: ParagraphAcquisitionInput,
   context: ParagraphLayoutContext,
-  options: Pick<ParagraphAcquisitionOptions, 'environment'>,
+  options: Pick<ParagraphAcquisitionOptions, 'environment' | 'source' | 'ordinaryFlow' | 'anchorCellBounds' | 'context'>,
+  ownsUnresolvedFloatFrame: boolean,
 ): NonNullable<import('../line-breaker/model.js').WrapLayoutCtx['numberingFirstLine']> | undefined {
   const numbering = paragraph.numbering;
   const markerInput = paragraph.numberingMarkerShapeInput;
@@ -2861,10 +2873,40 @@ function numberingFirstLineWindow(
     || ((numbering?.suff || 'tab') === 'tab' && paragraph.indentFirst < 0);
   if (!numbering || !markerInput || !service || !usesResolvedBodyOffset
     || (numbering.text === '' && numbering.picBulletImagePath == null)) return undefined;
+  // `word-numbered-window-frame` (modes absent/12/14): marker,
+  // custom stops and automatic grid follow each actual column float window;
+  // the implicit hanging stop remains at max(indent, window). This is NOT
+  // Part4 §14.8.3.12's true-flag full-relative-indent rule. Preserve true,
+  // modern, RTL, non-left markers/suffixes and unsupported geometry unchanged.
+  // Part4 §14.8.3.16/.31 can remove the implicit stop; either true setting
+  // therefore also stays outside this observed frame, not normalized to false.
+  // Querying only the indented band loses an exclusion before/equal to its
+  // first edge; one column-owned frame must drive admission AND retained paint.
+  // Controls distinguish implicit/custom/grid stops, equality and pre-start
+  // floats, narrow multi-gap heads and tight windows. Empty items, positive
+  // first indents, non-left stops and out-of-column authored starts are outside
+  // this observed class. Widths/heads/grid intervals stay source-measured.
+  // Only self-owned, initially unresolved floats were measured. External/mixed
+  // exclusions and pre-resolved wrap contexts retain the established frame.
+  // East Asian hanging composition is unmeasured by this legacy Latin class.
+  const numberedWindowFrameApplies = ownsUnresolvedFloatFrame && !context.hasEastAsianText && numberedWindowScopeEligible(options) && !context.baseRtl && !options.environment.verticalCJK
+    && !options.environment.verticalPageFrame
+    && (options.environment.compatibilityMode === undefined
+      || options.environment.compatibilityMode === 12 || options.environment.compatibilityMode === 14)
+    && options.environment.doNotSuppressIndentation !== true && options.environment.ww11IndentRules !== true
+    && options.environment.doNotUseIndentAsNumberingTabStop !== true && options.environment.noTabHangInd !== true
+    && (paragraph.alignment == null || paragraph.alignment === 'left' || paragraph.alignment === 'start')
+    && (numbering.jc == null || numbering.jc === 'left') && (numbering.suff || 'tab') === 'tab'
+    && !numbering.picBulletImagePath && paragraph.indentFirst <= 0
+    && context.physicalIndentLeftPt + paragraph.indentFirst >= 0
+    && paragraph.tabStops.every(stop => stop.alignment === 'left')
+    && paragraph.runs.some(run => run.type === 'text' && run.text.trim().length > 0);
   return {
     authoredFirstIndentPx: paragraph.indentFirst,
+    ...(numberedWindowFrameApplies ? { columnOriginInsetPx: context.physicalIndentLeftPt } : {}),
     bodyIndentAt: (markerLeadingEdgePx) => resolveNumberingMarkerGeometry(numbering, markerInput, {
       authoredFirstIndentPt: markerLeadingEdgePx,
+      ...(numberedWindowFrameApplies ? { suffixFrameOriginPt: markerLeadingEdgePx - paragraph.indentFirst } : {}),
       // Tab stops are measured from the leading margin: the right one in RTL.
       physicalIndentLeftPt: context.baseRtl ? context.physicalIndentRightPt : context.physicalIndentLeftPt,
       tabStops: paragraph.tabStops,
@@ -6207,6 +6249,9 @@ function paragraphAcquisitionKey(
     lineOnly ? null : [options.source.story, options.source.storyInstance, options.source.path],
     lineOnly ? null : options.flowDomainId,
     lineOnly ? null : options.ordinaryFlow,
+    // Story/ordinary-flow/cell ownership now changes first-line measurement,
+    // not merely retained placement. Own the same admission in both keys.
+    numberedWindowScopeEligible(options),
     lineOnly
       ? [plainPlacement.paragraphXPt, plainPlacement.availableWidthPt, plainPlacement.noWrap ?? false]
       : [
@@ -6289,6 +6334,10 @@ function paragraphAcquisitionKey(
       environment.compatibilityMode ?? null,
       // Manual-break expansion also owns the acquired decimal order model.
       environment.doNotExpandShiftReturn === true,
+      environment.doNotSuppressIndentation === true,
+      environment.ww11IndentRules === true,
+      environment.doNotUseIndentAsNumberingTabStop === true,
+      environment.noTabHangInd === true,
       environment.documentHasEastAsianText,
       environment.useFeLayout ?? null,
       environment.balanceSingleByteDoubleByteWidth ?? null,
@@ -6522,6 +6571,8 @@ export function acquireParagraphResult(
     anchoredPayloadRun(run) ? [run.anchorAcquisitionInput!.occurrenceId] : []));
   for (const occurrenceId of externallyOwnedOccurrenceIds) occurrenceIds.delete(occurrenceId);
   const occurrenceCapacity = occurrenceIds.size;
+  const ownsUnresolvedFloatFrame = occurrenceCapacity > 0 && options.exclusions.length === 0
+    && options.placement.wrap === undefined;
   const initialOwnedExclusions: readonly WrapExclusion[] = Object.freeze([]);
   const initialExclusions = mergeParagraphExclusions(
     options.exclusions,
@@ -6533,7 +6584,7 @@ export function acquireParagraphResult(
     ? { ...options, context: { ...options.context, numberingMarkerGeometry: numberingPlan } }
     : options;
   const numberingFirstLine = numberingPlan
-    ? numberingFirstLineWindow(paragraph, acquisitionOptions.context, acquisitionOptions)
+    ? numberingFirstLineWindow(paragraph, acquisitionOptions.context, acquisitionOptions, ownsUnresolvedFloatFrame)
     : undefined;
   const measureWithExclusions = (
     exclusions: readonly WrapExclusion[],

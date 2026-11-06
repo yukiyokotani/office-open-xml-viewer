@@ -498,8 +498,10 @@ function numberedFirstLineBody(
   const base = baseRtl ? maxWidth - (xOffset + lineMaxWidth) : xOffset;
   const windowEdge = base + hangingOffset;
   const authored = numbering.authoredFirstIndentPx;
-  const leadingEdge = Math.max(Math.max(0, windowEdge) + authored, windowEdge);
-  if (leadingEdge <= authored) return null;
+  const leadingEdge = numbering.columnOriginInsetPx === undefined
+    ? Math.max(Math.max(0, windowEdge) + authored, windowEdge)
+    : windowEdge + numbering.columnOriginInsetPx + authored;
+  if (numbering.columnOriginInsetPx === undefined && leadingEdge <= authored) return null;
   return { windowEdge, leadingEdge, bodyIndent: Math.max(leadingEdge, numbering.bodyIndentAt(leadingEdge)) };
 }
 
@@ -560,7 +562,9 @@ function placeLineWindow(
   // same safe window, including the mirrored logical start of RTL paragraphs.
   const numbering = breakerState.isFirst ? wrapCtx.numberingFirstLine : undefined;
   const hangingOffset = breakerState.isFirst
-    ? Math.min(0, numbering ? numbering.authoredFirstIndentPx : firstIndent) : 0;
+    ? (numbering?.columnOriginInsetPx === undefined
+      ? Math.min(0, numbering ? numbering.authoredFirstIndentPx : firstIndent)
+      : -numbering.columnOriginInsetPx) : 0;
   const lineBandX = wrapCtx.paraX + (baseRtl ? 0 : hangingOffset);
   const lineBandWidth = maxWidth - hangingOffset;
   const reference = {
@@ -830,7 +834,8 @@ export function performRejectGap(
     // own marker body, so the retry admits windows by the text width they
     // leave rather than by one width requirement. The unit's advance is the
     // solver's lower bound (the body never starts before the window).
-    const hangingOffset = Math.min(0, numbering.authoredFirstIndentPx);
+    const hangingOffset = numbering.columnOriginInsetPx === undefined
+      ? Math.min(0, numbering.authoredFirstIndentPx) : -numbering.columnOriginInsetPx;
     const head = Math.max(transaction.numberingHead ?? 0, rejection.requiredWidth);
     // Break-time admission may hang the head's trailing punctuation.
     const hangingHead = Math.max(transaction.numberingHangingHead ?? 0,

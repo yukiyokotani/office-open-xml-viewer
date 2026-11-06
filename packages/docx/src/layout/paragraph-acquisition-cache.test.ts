@@ -150,6 +150,46 @@ function options(
 }
 
 describe('paragraph acquisition cache', () => {
+  it('preserves external numbered frames across body, story, cell and grid cache contexts', () => {
+    const services = scopedServices();
+    const paragraph = { ...textParagraph('word'), indentLeft: 50, indentFirst: -50,
+      numbering: { numId: 1, level: 0, format: 'decimal', text: '1.', indentLeft: 50,
+        tab: 50, suff: 'tab', jc: 'left', fontFamily: 'serif', fontSize: 10 } };
+    const base = options(services, {
+      context: { ...context, physicalIndentLeftPt: 50, firstIndentPt: 0 },
+      exclusions: [{ id: 'leading-float', wrap: 'square', bounds: { xPt: 72, yPt: 72, widthPt: 150, heightPt: 60 },
+        polygon: [], verticalOwnership: 'host' }],
+    });
+    const acquire = (overrides: Partial<ParagraphAcquisitionOptions>) => {
+      const selected = { ...base, ...overrides };
+      return acquireParagraphResult(paragraphAcquisitionInput(paragraph, selected.source), selected).layout.lines[0]!;
+    };
+    const markerBody = (line: ReturnType<typeof acquire>) => line.placements
+      .filter(p => p.kind === 'text').map(p => ({ text: p.text, x: p.origin.xPt, range: p.range }));
+    // This caller supplies an external exclusion, not a parser-owned anchor.
+    // Warm the body cache without borrowing the self-owned legacy capability.
+    const external = acquire({});
+    expect(markerBody(external)).toEqual(markerBody(acquire({
+      environment: { ...base.environment, doNotSuppressIndentation: true },
+    })));
+    const declined: Partial<ParagraphAcquisitionOptions>[] = [
+      { source: { story: 'header', storyInstance: 'header:default', path: [0] } },
+      { ordinaryFlow: false },
+      { source: { ...source, path: [0, 0, 0, 0] }, anchorCellBounds: { xPt: 72, yPt: 72, widthPt: 468, heightPt: 300 } },
+      { context: { ...base.context, runDirectionUnauthored: true } },
+      { context: { ...base.context, lineGrid: { active: true, pitchPt: 20 } } },
+      { context: { ...base.context, characterGrid: { active: true, kind: 'linesAndChars', deltaPt: 0, pitchPt: 10 } } },
+    ];
+    for (const override of declined) {
+      const actual = acquire(override);
+      const established = acquire({ ...override,
+        environment: { ...base.environment, doNotSuppressIndentation: true } });
+      // Same physical frame and source, unchanged established marker/body
+      // geometry. The true setting is only a bypass reference, not its Word rule.
+      expect(markerBody(actual)).toEqual(markerBody(established));
+    }
+  });
+
   it('does not reuse directed body topology for equal-width unadmitted or incapable acquisition', () => {
     const ctx = Object.assign(measureContext(), { direction: 'inherit' as CanvasDirection, textAlign: 'left' as CanvasTextAlign });
     const services = createParagraphAcquisitionCacheServicesView(createLayoutServices(model(), { measureContext: ctx }));
