@@ -164,3 +164,24 @@ it('declines excessive optional request metadata before new native tracking or g
   expect(result.trackedRequests).toBe(0);
   expect(result.ownershipRequests).toBe(0);
 });
+
+
+it.each(['ascii-to-arabic', 'arabic-to-ascii'] as const)(
+  'preserves the complete prior view for a no-SPACE %s word seam', direction => {
+    const base = paragraph();
+    const [arabic, ordinary] = base.runs;
+    const source = { ...base, runs: direction === 'ascii-to-arabic'
+      ? [{ ...ordinary, text: 'Xray' }, { ...arabic, text: 'كتاب قلم بيت' }]
+      : [{ ...arabic, text: 'كتاب قلم' }, { ...ordinary, text: 'Xray' }],
+    } as DocParagraph;
+    // The same source/provider with conflicting xAvg metadata already retains
+    // the complete old presentation. Do not repair only a pen or a final cut.
+    const prior = acquire(source, 14, true);
+    const current = acquire(source);
+    expect(current.published.lines).toEqual(prior.published.lines);
+    if (direction === 'ascii-to-arabic') {
+      // Four untracked10pt cells end at the240pt right edge, independently of
+      // the optional pitch equation. The old complete source remains intact.
+      expect(current.pens(0, 4)).toEqual([200, 210, 220, 230]);
+    }
+  });

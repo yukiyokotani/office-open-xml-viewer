@@ -54,6 +54,11 @@ export function mixedRtlPitchSource(paragraph: ParagraphLayoutSource): MixedRtlP
         pendingSpace = { ordinary: !run.rtl && !run.cs, before: previousKind };
       } else if (/^[\x21-\x7e]$/u.test(character)) {
         if (run.rtl || run.cs) return undefined;
+        // The registered view represents script-homogeneous U20-delimited
+        // words only. A direct cross-script seam has no established separate
+        // following-cut authority: keep the WHOLE old budget/order/paint,
+        // rather than deleting one cut or inventing a replacement allocation.
+        if (previousKind === 'arabic' && !previousSpace) return undefined;
         // Seam spaces adjacent to ordinary ASCII were ordinary-authored in
         // the registered evidence. An RTL-owned seam is a different UAX scope,
         // even for identical visible text, and retains its COMPLETE old view.
@@ -62,6 +67,7 @@ export function mixedRtlPitchSource(paragraph: ParagraphLayoutSource): MixedRtlP
         ascii = true; previousAscii = true; previousSpace = false;
       } else if (/^\p{Script=Arabic}$/u.test(character) && /^\p{Letter}$/u.test(character)) {
         if (!run.rtl) return undefined;
+        if (previousKind === 'ascii' && !previousSpace) return undefined;
         if (pendingSpace && (pendingSpace.before === 'ascii' ? !pendingSpace.ordinary : pendingSpace.ordinary)) return undefined;
         pendingSpace = undefined; previousKind = 'arabic';
         arabic = true; previousSpace = false;
