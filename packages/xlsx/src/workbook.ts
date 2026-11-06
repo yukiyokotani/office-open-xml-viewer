@@ -61,6 +61,7 @@ import { renderWorksheetViewport, xlsxRenderCommitGuardOf } from './render-orche
 import { xlsxOfficeFontRequests, xlsxWorksheetOfficeFontRequests } from './font-requests.js';
 import { officeRequestKey } from './shape-office-line.js';
 import { formatCellValue } from './number-format.js';
+import type { RecalcPatchedCell } from './recalc.js';
 import {
   addWorksheetUsage,
   addWorksheetCacheUsage,
@@ -179,6 +180,19 @@ export interface LoadOptions extends CoreLoadOptions {
    * nothing extra.
    */
   ods?: ModelSource<'xlsx'>;
+  /**
+   * Opt-in Excel formula recalculation (default `false`: cached `<v>` values
+   * render byte-identically to today). When `true`, each admitted worksheet's
+   * `<f>` formulas are evaluated with the Formualizer engine (MIT/Apache-2.0,
+   * lazily imported — the default bundle pays nothing) and computed results
+   * are written back into `cell.value`, so number formats, dates, `;;;`
+   * hiding and conditional formatting apply unchanged. Failures degrade to
+   * cached values per cell and never break the sheet. Cross-sheet refs use
+   * already-loaded sheets; admitting a sheet refreshes cached dependents
+   * that reference it. In `worker` mode computed values are forwarded to the
+   * render worker (same recalculation, no engine in-worker).
+   */
+  recalculateFormulas?: boolean;
 }
 
 
@@ -237,6 +251,10 @@ export class XlsxWorkbook {
   private chartEx: ChartExRenderer | undefined;
   /** Optional TIFF codec. Worker mode reconstructs the built-in implementation. */
   private tiff: TiffRenderer | undefined;
+  /** Opt-in formula recalculation (`LoadOptions.recalculateFormulas`,
+   *  default false). Set once per {@link load}; every terminal worksheet
+   *  admission below honors the load-time value. */
+  private recalculateFormulas = false;
   /** Web-font registrations are per FontFaceSet. Same-origin child windows have
    * their own set even when they share this workbook instance. */
   /** Validated `LoadOptions.fonts` (normalised from the deprecated
@@ -518,6 +536,7 @@ export class XlsxWorkbook {
     this.generation = (this.generation ?? 0) + 1;
     this.workerTimeoutMs = opts.workerTimeoutMs;
     this.cjkFallback = resolveCjkFallback(opts.cjkFallback);
+    this.recalculateFormulas = opts.recalculateFormulas ?? false;
     this.math = this._mode === 'worker' ? undefined : opts.math;
     this.threeD = this._mode === 'worker' ? undefined : opts.threeD;
     this.regionMap = this._mode === 'worker' ? undefined : opts.regionMap;
@@ -1173,6 +1192,14 @@ export class XlsxWorkbook {
         bindWorksheetPolicy(worksheet, policy);
         bindCellFontLanguage(worksheet, this.japaneseCellFonts);
         worksheet.rows = worksheet.parseError ? [] : rows;
+        // Opt-in formula recalculation (default off: the path below is
+        // byte-identical). Runs BEFORE usage measurement so admission
+        // accounting asserts the post-recalc model exactly. Recalc never
+        // throws: on ANY failure cached values remain and the load proceeds
+        // (worker-push failures excepted — see below).
+        if (this.recalculateFormulas && !worksheet.parseError) {
+          await this.recalculateTerminalWorksheet(sheetIndex, worksheet);
+        }
         // Terminal metadata contains no rows, but measure the final public model
         // to cover exact monolithic JSON before its cache admission.
         const measured = completeWorksheetUsage(
@@ -1305,6 +1332,182 @@ export class XlsxWorkbook {
       progress.fail(error);
       throw error;
     }
+  }
+
+  /**
+   * Opt-in formula recalculation for one terminal worksheet (see
+   * `LoadOptions.recalculateFormulas`). Evaluates `<f>` formulas with the
+   * Formualizer engine and writes results back into `cell.value`, so the
+   * usage measurement and cache admission that follow see the final model.
+   *
+   * Cross-sheet strategy (per-sheet + dependent refresh): the just-admitted
+   * sheet recalculates against already-materialized sheets via a synchronous
+   * cache lookup (no archive access — this runs inside the serialized archive
+   * operation, where a lease load would self-deadlock). Admitting a sheet
+   * then refreshes cached dependents referencing it, so chains converge
+   * regardless of open order; a dependent whose inputs are still unloaded
+   * keeps cached values until its dependencies arrive.
+   *
+   * Failure policy: recalc degrades to cached values per cell and never
+   * breaks admission — EXCEPT a failed worker push, which leaves the realms
+   * divergent. The terminal is not yet ACKed here, so the push rejection
+   * propagates to the existing pre-ACK handler below (worker destroyed),
+   * exactly like any other pre-ACK worker error. Never a silent mismatch.
+   */
+  private async recalculateTerminalWorksheet(sheetIndex: number, worksheet: Worksheet): Promise<void> {
+    const parsed = this.parsedWorkbook;
+    if (!parsed) return;
+    const sharedStrings = parsed.sharedStrings;
+    const date1904 = parsed.workbook.date1904 ?? false;
+    const capture: RecalcPatchedCell[] = [];
+    try {
+      const { recalculateWorksheet } = await import('./recalc.js');
+      await recalculateWorksheet(
+        worksheet,
+        {
+          sharedStrings,
+          date1904,
+          resolveSheet: (name: string) => this.findCachedWorksheetByName(name),
+        },
+        capture,
+      );
+    } catch {
+      // The engine itself never rejects (failures degrade per cell); this
+      // guards only the dynamic import. Cached values remain.
+      return;
+    }
+    if (this._mode === 'worker' && capture.length > 0) {
+      await this.pushRecalculatedValuesToWorker(sheetIndex, capture);
+    }
+    await this.refreshRecalcDependents(sheetIndex, worksheet.name, sharedStrings, date1904);
+  }
+
+  /** Synchronous case-insensitive cache lookup for recalc cross-sheet
+   *  inputs (mirrors the `resolveValidationList` name matching, workbook.ts).
+   *  Only already-materialized sheets resolve — terminal processing runs
+   *  inside the serialized archive operation, so a lease load here would
+   *  self-deadlock. Unresolved names keep cached values (see refresh below). */
+  private findCachedWorksheetByName(name: string): Worksheet | undefined {
+    const parsed = this.parsedWorkbook;
+    if (!parsed) return undefined;
+    const want = name.toLowerCase();
+    const sheets = parsed.workbook.sheets;
+    for (let i = 0; i < sheets.length; i++) {
+      if (sheets[i]?.name.toLowerCase() === want) return this.sheetCache.get(i);
+    }
+    return undefined;
+  }
+
+  /**
+   * Refresh cached sheets whose formulas reference the just-admitted sheet.
+   * Each dependent re-runs against current cache values (transitive chains
+   * converge through values: B already holds recomputed values when C that
+   * references B is admitted). Single pass, no cascade: a dependent's own
+   * admission already handled its dependencies.
+   *
+   * Accounting: recomputed values change retained bytes, so the dependent is
+   * re-measured and the cache totals adjusted exactly; on over-budget (or a
+   * failed worker push) its values roll back to cached and both realms agree.
+   * Per-dependent isolation: one poisoned sheet never breaks the admission.
+   */
+  private async refreshRecalcDependents(
+    admittedIndex: number,
+    admittedName: string,
+    sharedStrings: ParsedWorkbook['sharedStrings'],
+    date1904: boolean,
+  ): Promise<void> {
+    if (this.sheetCache.size === 0) return;
+    let recalc: typeof import('./recalc.js');
+    try {
+      recalc = await import('./recalc.js');
+    } catch {
+      return;
+    }
+    for (const [idx, ws] of this.sheetCache) {
+      if (idx === admittedIndex) continue;
+      let references = false;
+      try {
+        references = recalc.worksheetReferencesSheet(ws, admittedName);
+      } catch {
+        continue;
+      }
+      if (!references) continue;
+      // Snapshot formula-cell values: `cell.value` is replaced (never
+      // mutated in place), so saved references restore exactly.
+      const snapshot: Array<{ cell: Cell; value: Cell['value'] }> = [];
+      try {
+        for (const row of ws.rows) {
+          for (const cell of row.cells) {
+            if (cell.formula !== undefined || cell.formulaType === 'shared') {
+              snapshot.push({ cell, value: cell.value });
+            }
+          }
+        }
+      } catch {
+        continue;
+      }
+      const prevUsage = this.sheetCacheUsage.get(idx);
+      const restore = (): void => {
+        for (const { cell, value } of snapshot) cell.value = value;
+      };
+      const capture: RecalcPatchedCell[] = [];
+      try {
+        await recalc.recalculateWorksheet(
+          ws,
+          {
+            sharedStrings,
+            date1904,
+            resolveSheet: (name: string) => this.findCachedWorksheetByName(name),
+          },
+          capture,
+        );
+        // Push BEFORE accounting: on push failure values roll back with
+        // accounting untouched (still counts the cached model).
+        if (this._mode === 'worker' && capture.length > 0) {
+          await this.pushRecalculatedValuesToWorker(idx, capture);
+        }
+        this.adjustWorksheetCacheUsage(idx, ws, prevUsage);
+      } catch {
+        restore();
+      }
+    }
+  }
+
+  /**
+   * Re-measure a recalculated dependent and adjust admitted cache totals.
+   * Commits only when the re-measured model fits policy; otherwise throws
+   * (caller rolls values back) leaving totals untouched.
+   */
+  private adjustWorksheetCacheUsage(
+    sheetIndex: number,
+    ws: Worksheet,
+    prevUsage: WorksheetCacheUsage | undefined,
+  ): void {
+    const policy = this.worksheetPolicy;
+    const next = completeWorksheetUsage(ws, measureRows(ws.rows, policy), policy);
+    const zero = { rows: 0, cells: 0, ownedUtf8Bytes: 0, jsonBytes: 0 };
+    let remaining = addWorksheetCacheUsage(this.retainedSheetUsage, zero, prevUsage ?? zero, policy);
+    remaining = addWorksheetCacheUsage(remaining, next, {}, policy);
+    assertWorksheetCacheUsage(remaining, 'get-worksheet', undefined, undefined, policy);
+    this.retainedSheetUsage = remaining;
+    this.sheetCacheUsage.set(sheetIndex, next);
+  }
+
+  /**
+   * Forward recalculated cells to the render worker, whose own copy was
+   * admitted from the archive (cached values) before the main-thread recalc
+   * ran. The worker applies the patch at admission (see render-worker.ts):
+   * application is idempotent, so patch-before-admit and patch-after-admit
+   * orders converge. The caller awaits this before cache admission, so no
+   * viewport can render pre-patch values for the admitted sheet.
+   */
+  private async pushRecalculatedValuesToWorker(
+    sheetIndex: number,
+    cells: RecalcPatchedCell[],
+  ): Promise<void> {
+    await this.requireBridge().request(
+      (id) => ({ type: 'applyRecalculatedValues', id, sheetIndex, cells }) satisfies RenderWorkerRequest,
+    );
   }
 
   private ensureWorksheetPullClient(): XlsxWorksheetPullClient {
