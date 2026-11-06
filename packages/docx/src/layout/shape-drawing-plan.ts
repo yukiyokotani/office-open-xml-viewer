@@ -339,6 +339,7 @@ function planShapeDrawingBase(
           ? Math.hypot(...shape.vmlGroupTransform.slice(0, 4)) : 1;
         const shadowScale = affinePerspective ? Math.hypot(...shadow.matrix.slice(0, 4)) : 1;
         const contours = text.glyphContours({ spans: shaped.spans, fontSizePt,
+          ...(shaped.nativeBaseDirection !== undefined ? { baseDirection: shaped.nativeBaseDirection } : {}),
           ink: shaped.inkBounds, maximumScale: Math.max(...scales) * Math.max(1, groupScale)
             * Math.max(1, shadowScale) * (command.glyphTransform
             ? Math.hypot(command.glyphTransform.a, command.glyphTransform.b, command.glyphTransform.c, command.glyphTransform.d) : 1), maximumWork: maximumGeometryWork ?? Infinity });

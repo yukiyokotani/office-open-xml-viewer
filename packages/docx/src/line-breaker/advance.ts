@@ -1,3 +1,4 @@
+import { hasNativeUnitReceipt } from './native-unit-contract.js';
 import {
   CONDENSED_CONTEXT_GRAPHEMES,
   condensedClusterFloorPx,
@@ -15,6 +16,8 @@ import { type DocGridCtx, type LayoutSeg, type LayoutTextSeg } from './model.js'
  * segment split for wrapping must not retain geometry from the parent slice;
  * measurement and addToLine recompute these facts from the new text. */
 export const RESET_SLICED_TEXT_MEASUREMENT = {
+  nativeLevelUnit: undefined,
+  nativeVisiblePrefix: undefined,
   leadingWordBoundaryPx: undefined,
   shapedClusters: undefined,
   shapedSpaceClusters: undefined,
@@ -242,12 +245,19 @@ export function slicedTextMetadata(
   end: number,
 ): Pick<LayoutTextSeg,
   'punctuationCompressions' | 'noBreakRanges' | 'explicitBreaks' | 'textShapeRequest' | 'sourceTextOffset' | 'semanticSlotSpans' | 'semanticSlotRange' | 'script' | 'optionalHyphenBreaks'
-  | 'autoSpaceBeforePt' | 'autoSpaceLeadingPx'
+  | 'autoSpaceBeforePt' | 'autoSpaceLeadingPx' | 'nativeLevelUnit' | 'nativeVisiblePrefix'
 > {
   const slots = seg.semanticSlotSpans;
   const slotStart = (seg.semanticSlotRange?.start ?? 0) + start;
   const slotEnd = (seg.semanticSlotRange?.start ?? 0) + end;
   return {
+    // A source slice retains the original unit interval, never a generated
+    // text receipt. Its directed request is independently reacquired below.
+    ...(hasNativeUnitReceipt(seg) ? {
+      nativeLevelUnit: seg.nativeLevelUnit,
+      ...(seg.nativeVisiblePrefix && start === 0 && end > seg.nativeVisiblePrefix.endUTF16
+        ? { nativeVisiblePrefix: seg.nativeVisiblePrefix } : {}),
+    } : {}),
     ...(slots ? { semanticSlotSpans: slots,
       semanticSlotRange: Object.freeze({ start: slotStart, end: slotEnd }),
       script: slots[semanticSlotStartIndex(slots, slotStart)]?.script ?? seg.script,

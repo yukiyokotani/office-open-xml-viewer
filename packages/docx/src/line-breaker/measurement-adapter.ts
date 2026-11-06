@@ -1,3 +1,5 @@
+import { shapeNativeSourceRequest } from './native-unit-contract.js';
+import { sameNativeLevelUnit } from './native-unit-contract.js';
 import { wordArabicTextKerned, wordKerningApplies } from '../layout/line-compatibility.js';
 import { graphemeClusterOffsets } from '@silurus/ooxml-core';
 import type { LayoutTextSeg } from '../line-layout.js';
@@ -45,7 +47,7 @@ function hasLiveSlotSeam(segment: LayoutTextSeg | undefined): boolean {
 export function kernedSpaceSeamIdentity(left: LayoutTextSeg, right: LayoutTextSeg, scale: number): boolean {
   const l = left.textShapeRequest;
   const r = right.textShapeRequest;
-  return !!l && !!r && l.kerning === true && r.kerning === true
+  return sameNativeLevelUnit(left, right) && !!l && !!r && l.kerning === true && r.kerning === true
     && !!right.textLayoutService && right.textLayoutService === left.textLayoutService
     && !left.tateChuYoko && !right.tateChuYoko
     && !left.ruby && !right.ruby && !left.rubyPiece && !right.rubyPiece
@@ -135,7 +137,7 @@ export class LineMeasurementAdapter {
       if (segment.textShapeRequest.text !== segment.text) {
         throw new Error('Segment measurement does not match its retained text range context');
       }
-      const shaped = segment.textLayoutService.shape({
+      const shaped = shapeNativeSourceRequest(segment.textLayoutService, {
         ...segment.textShapeRequest,
         fontSizePt: calcEffectiveFontPx(segment, this.scale),
         measure: true,
@@ -194,7 +196,7 @@ export class LineMeasurementAdapter {
     const r = right.textShapeRequest;
     const service = right.textLayoutService;
     const physicalUnit = hasLiveSlotSeam(left) || hasLiveSlotSeam(right);
-    if (!left || !l || !r || !service || service !== left.textLayoutService
+    if (!left || !sameNativeLevelUnit(left, right) || !l || !r || !service || service !== left.textLayoutService
       || !left.text.endsWith(' ') || right.text.startsWith(' ') || !right.text
       || left.metricOnly || right.metricOnly || left.ruby || right.ruby
       || left.fitTextRegionIndex !== undefined || right.fitTextRegionIndex !== undefined
@@ -212,7 +214,7 @@ export class LineMeasurementAdapter {
     const lc = l.substituteContext;
     const rc = r.substituteContext;
     if (!lc || !rc || lc.text !== rc.text || lc.offset + left.text.length !== rc.offset) return 0;
-    const measure = (request: typeof r) => service.shape({ ...request,
+    const measure = (request: typeof r) => shapeNativeSourceRequest(service, { ...request,
       fontSizePt: calcEffectiveFontPx(right, this.scale), measure: true, clusterGeometry: false });
     const joined = measure({ ...l, text: left.text + right.text,
       registeredLatinPieceText: undefined,

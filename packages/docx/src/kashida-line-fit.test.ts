@@ -88,6 +88,12 @@ function characters(line: LineLayout): Array<{ character: string; xPt: number }>
 }
 const start = (line: LineLayout): number => characters(line)[0]!.xPt;
 const end = (line: LineLayout): number => characters(line).at(-1)!.xPt + 10;
+const paintedWords = (line: LineLayout) => line.placements
+  .filter((p): p is TextPlacement => p.kind === 'text')
+  .flatMap(placement => placement.paintOps.filter(op => /\S/.test(op.text)).map(op => ({
+    text: op.text.trim(), left: placement.origin.xPt + op.offset.xPt,
+    width: [...op.text.trim()].length * 10,
+  }))).sort((a, b) => a.left - b.left);
 
 const MODES: Array<DocSettings | undefined> = [undefined, { compatibilityMode: 14 }, MODE_15];
 // Twenty 40 pt words: a line of n words is 50n - 10 pt wide.
@@ -104,14 +110,47 @@ it('places the authored leading label before its Arabic island in production lay
     .toBe(content);
 });
 
-it('preserves distribute ordering while its gap slots lack source ownership', () => {
+it('keeps the authored label at the left of a validated distribute source-cell span', () => {
   const content = 'Label זהו טקסט';
   const [first] = lines(para([textRun(content)], 'distribute', { bidi: true }), MODE_15);
   const placed = first!.placements.filter((p): p is TextPlacement => p.kind === 'text');
-  expect([...placed].sort((a, b) => a.origin.xPt - b.origin.xPt).map(p => p.text.trim()))
-    .toEqual(['טקסט', 'זהו', 'Label']);
+  expect(placed.filter(p => /\S/.test(p.text)).sort((a, b) => a.origin.xPt - b.origin.xPt).map(p => p.text.trim()))
+    .toEqual(['Label', 'טקסט', 'זהו']);
   expect([...placed].sort((a, b) => a.range.start - b.range.start).map(p => p.text).join(''))
     .toBe(content);
+});
+
+it.each([
+  { leadingSpaceOwner: 'ltr', before: 'אבגד הוזח', latin: ' Xray ', origins: [20, 100, 180, 260, 340] },
+  { leadingSpaceOwner: 'rtl', before: 'אבגד הוזח ', latin: 'Xray ', origins: [20, 100, 140, 260, 340] },
+])('keeps four source spaces in their authored $leadingSpaceOwner span', ({ before, latin, origins }) => {
+  // Same visible text and 240pt natural width in a360pt band. Each source
+  // SPACE owns40pt, but two spaces on the Latin word's right share one gap
+  // when its preceding SPACE belongs to the RTL run instead of the LTR span.
+  const runs = [textRun(before, { rtl: true }), textRun(latin), textRun('טיכל מנסע', { rtl: true })];
+  const [first] = lines(para(runs, 'distribute', { bidi: true }), MODE_15);
+  const words = paintedWords(first!);
+  expect(words.map(word => word.text)).toEqual(['מנסע', 'טיכל', 'Xray', 'הוזח', 'אבגד']);
+  expect(words.map(word => word.left)).toEqual(origins);
+  expect(words.at(-1)!.left + words.at(-1)!.width).toBe(380);
+  const source = first!.placements.filter((p): p is TextPlacement => p.kind === 'text')
+    .sort((a, b) => a.range.start - b.range.start);
+  expect(source.map(p => p.text).join('')).toBe('אבגד הוזח Xray טיכל מנסע');
+  expect(source.filter(p => p.text === ' ').map(p => p.advancePt)).toEqual([40, 40, 40, 40]);
+});
+
+it('resolves the space inside an LTR word group in its complete RTL host', () => {
+  // The middle space is bounded by two L words and must retain their even
+  // level. Resolving each space alone at RTL base would reverse Xray/Yoke.
+  const [first] = lines(para([
+    textRun('אבגד', { rtl: true }), textRun(' Xray Yoke '), textRun('הוזח', { rtl: true }),
+  ], 'distribute', { bidi: true }), MODE_15);
+  const words = paintedWords(first!);
+  expect(words.map(word => word.text)).toEqual(['הוזח', 'Xray', 'Yoke', 'אבגד']);
+  // Four 40 pt words leave 200 pt for the three source spaces.
+  for (let index = 1; index < words.length; index += 1) {
+    expect(words[index]!.left - words[index - 1]!.left - words[index - 1]!.width).toBeCloseTo(200 / 3);
+  }
 });
 
 it('preserves a mixed-level paint slice until its internal islands are retained', () => {

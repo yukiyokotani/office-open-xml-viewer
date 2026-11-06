@@ -132,6 +132,10 @@ export function createLayoutServices(
   const context: MeasurementTextContext | null = canvasContext === null
     ? null
     : Object.freeze({
+        get textAlign() { return canvasContext.textAlign; },
+        set textAlign(value: CanvasTextAlign | undefined) { if (value !== undefined) canvasContext.textAlign = value; },
+        get direction() { return canvasContext.direction; },
+        set direction(value: CanvasDirection | undefined) { if (value !== undefined) canvasContext.direction = value; },
         get font() { return canvasContext.font; },
         set font(value: string) { canvasContext.font = value; },
         get letterSpacing() { return canvasContext.letterSpacing; },

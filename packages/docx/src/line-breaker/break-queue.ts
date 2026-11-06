@@ -1,3 +1,4 @@
+import { remapSourceBoundary } from './source-cursor.js';
 import { createMixedSpaceState } from './mixed-space-fit.js';
 import { LineMeasurementAdapter } from './measurement-adapter.js';
 import type { KinsokuRules } from '@silurus/ooxml-core';
@@ -19,8 +20,10 @@ export function prepareBreakQueue(
   scale: number,
   measurement: LineMeasurementAdapter,
 ): LayoutSeg[] {
+  startBoundary = startBoundary ? remapSourceBoundary(segs, startBoundary) : undefined;
   const sourcedSegs = segs.map((seg, segIndex) => {
-    seg.src = { segIndex, charOffset: 0 };
+    seg.src = { segIndex, charOffset: 0,
+      ...(seg.sourceCursorStart !== undefined ? { sourceTextStart: seg.sourceCursorStart } : {}) };
     // Issue #797 / #960 — attach the SEA (Thai/Lao/Khmer) break offsets ONCE per
     // segment (perf: never per line/char). Only for SEA text; non-SEA segments
     // keep `seaBreaks` absent so their wrap path is byte-identical. The set now

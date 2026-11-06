@@ -1,3 +1,4 @@
+import { sourceCursorEnd } from './source-cursor.js';
 import type { LineOrderResolver } from '../bidi-line.js';
 import type { BidiTabOrderPolicy } from './tabs.js';
 import { createPrefixWorkBudget } from './prefix-work-budget.js';
@@ -246,7 +247,9 @@ export function runLineBreakerPass(input: LineBreakerPassInput): LayoutLine[] {
     measurement.verticalInkExtra(s, text);
   const setMeasureFont = (font: string): void => measurement.setFont(font);
 
-  const endBoundary: LineBoundary = { segIndex: segs.length, charOffset: 0 };
+  const sourceEnd = sourceCursorEnd(segs);
+  const endBoundary: LineBoundary = { segIndex: segs.length, charOffset: 0,
+    ...(sourceEnd !== undefined ? { sourceTextStart: sourceEnd } : {}) };
   breakerState.queue = new SegmentQueue(prepareBreakQueue(segs, startBoundary, kinsoku, scale, measurement));
   // ECMA-376 §17.3.3.1: a terminal text-wrapping break opens an empty
   // line. Its preceding line consumes the sentinel, so pagination can resume

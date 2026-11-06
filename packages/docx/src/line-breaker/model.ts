@@ -16,6 +16,8 @@ export interface NoteNumbering {
 export interface LineBoundary {
   segIndex: number;
   charOffset: number;
+  /** Authoritative single-run UTF-16 anchor, independent of segment topology. */
+  sourceTextStart?: number;
   /** Source END after consuming a terminal §17.3.3.1 break, before laying
    * out the empty line it opened. Bare END means that line is complete. */
   trailingEmptyLine?: true;
@@ -24,6 +26,8 @@ export interface LineBoundary {
 
 export interface LayoutSegSource {
   src?: LineBoundary;
+  /** Complete unchanged single-source partition; minted before line splitting. */
+  sourceCursorStart?: number;
   /** Parser-boundary run occurrence retained independently of mutable source
    * objects. Unlike `src.segIndex` (the flattened segment stream), this remains
    * the original paragraph run index through line splitting. */
@@ -170,6 +174,10 @@ export interface LayoutTextSeg extends LayoutSegSource {
    * metrics are resolved through this same service during line layout. */
   textLayoutService?: TextLayoutService;
   textShapeRequest?: TextShapeRequest;
+  /** Source-owned native shaping unit. Not a word id or cache key. Author rtl
+   * remains independent; only an exact request/source match carries this base. */
+  nativeVisiblePrefix?: import('../layout/text.js').NativeVisiblePrefixAuthority;
+  nativeLevelUnit?: Readonly<{ sourceText: string; start: number; end: number; baseDirection: 'ltr' | 'rtl' }>;
   /** Run-context substitute decision, including false for excluded spans;
    * intrinsic merging must preserve the context for either decision. */
   substituteScope?: boolean;
@@ -724,6 +732,9 @@ export interface DocGridCtx {
  * document-level East Asian flag is used only for content-less paragraph-mark
  * metrics; content lines use ParagraphLayoutContext.hasEastAsianText. */
 export interface LineLayoutEnvironment {
+  /** Private fixed plain-body capability. Presence is semantic admission, not
+   * merely an available width; always reserves the original first indent. */
+  readonly nativeUnitMinimumBandPt?: number;
   readonly pageIndex: number;
   readonly totalPages: number;
   /** Effective §17.3.1.33 paragraph spacing. The Word OpenType
