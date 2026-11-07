@@ -820,11 +820,11 @@ describe('paragraphLayoutFromMeasurement retained authorities', () => {
     } as unknown as CanvasRenderingContext2D;
   }
 
-  function measureInlineParagraph(runs: DocParagraph['runs'], multiple = 1, options: { markFontSize?: number; context?: CanvasRenderingContext2D; documentHasEastAsianText?: boolean; compatibilityMode?: number; admitRunLeading?: boolean } = {}) {
+  function measureInlineParagraph(runs: DocParagraph['runs'], multiple: number | null = 1, options: { markFontSize?: number; context?: CanvasRenderingContext2D; documentHasEastAsianText?: boolean; compatibilityMode?: number; admitRunLeading?: boolean } = {}) {
     const selectedContext = options.context ?? measureContext;
     const value = {
       ...paragraph, runs, defaultFontSize: options.markFontSize ?? 10, defaultFontFamily: 'Test Sans',
-      lineSpacing: { rule: 'auto' as const, value: multiple },
+      lineSpacing: multiple === null ? null : { rule: 'auto' as const, value: multiple },
     };
     const context = { ...acquisitionContext, lineSpacing: value.lineSpacing };
     const placement = {
@@ -896,6 +896,18 @@ describe('paragraphLayoutFromMeasurement retained authorities', () => {
       const largeNode = measureInlineParagraph(mixed ? [large, suffix] : [large], 1, options);
       expect(largeNode.lines[0]!.advancePt).toBeCloseTo(40 + (mixed ? 1.6 : 0), 10);
     }
+  });
+
+  it('treats line spacing never specified as auto single for the drawing-run minimum (§17.3.1.33)', () => {
+    const context = inlineFontMetricContext();
+    const options = { context, markFontSize: 8 };
+    const drawing = { ...inlineShape(8), __inlineObjectOrigin: 'drawingml',
+      __inlineObjectFontFacts: { fontSize: 20, fontFamily: 'Test Sans' } };
+    const explicit = measureInlineParagraph([drawing], 1, options).lines[0]!;
+    const absent = measureInlineParagraph([drawing], null, options).lines[0]!;
+    expect(explicit.advancePt).toBeGreaterThan(8);
+    expect(absent.advancePt).toBe(explicit.advancePt);
+    expect(absent.baselinePt).toBe(explicit.baselinePt);
   });
 
   it('keeps the measured static VML textbox top while its run reserves advance below', () => {
