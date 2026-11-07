@@ -52,4 +52,17 @@ describe('inline wp:effectExtent (ECMA-376 §20.4.2.6)', () => {
     expect(seg.effectExtent).toEqual(logical);
     expect([seg.widthPt, seg.heightPt]).toEqual([20 + logical[0] + logical[2], 40 + logical[1] + logical[3]]);
   });
+
+  it('reserves the same box for a chart whether or not its resource is available', () => {
+    const extent: [number, number, number, number] = [2, 3, 5, 8];
+    const chart = imageSeg({ type: 'chart', widthPt: 20, heightPt: 40, anchor: false,
+      inlineEffectExtent: extent } as unknown as DocRun);
+    const unavailableChart = imageSeg({ type: 'unavailableDrawing', resourceKind: 'chart',
+      widthPt: 20, heightPt: 40, inlineEffectExtent: extent } as unknown as DocRun);
+    const unavailableImage = imageSeg({ type: 'unavailableDrawing', resourceKind: 'image',
+      widthPt: 20, heightPt: 40, inlineEffectExtent: extent } as unknown as DocRun);
+    expect([unavailableChart.widthPt, unavailableChart.heightPt]).toEqual([chart.widthPt, chart.heightPt]);
+    expect(unavailableChart.effectExtent).toBeUndefined();
+    expect([unavailableImage.widthPt, unavailableImage.heightPt]).toEqual([27, 51]);
+  });
 });

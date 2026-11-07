@@ -419,7 +419,11 @@ export function measureParagraph(
 
   // WORD_INLINE_PICTURE_AUTO_LEADING owns this source-provenance minimum.
   // Keep its single-spacing admission separate from automatic multiples above.
-  if (context.lineSpacing?.rule === 'auto' && context.lineSpacing.value === 1
+  // ECMA-376 §17.3.1.33: a line height never specified in the style hierarchy
+  // sizes each line automatically from its contents, the same allocation as
+  // authored auto single spacing, so both take this minimum.
+  if ((context.lineSpacing == null
+    || (context.lineSpacing.rule === 'auto' && context.lineSpacing.value === 1))
     && environment.inlineObjectRunLeadingAdmitted === true
     && environment.compatibilityMode === 15 && !paragraph.numbering && !paragraph.framePr
     && environment.pageWritingMode === 'horizontal-tb'

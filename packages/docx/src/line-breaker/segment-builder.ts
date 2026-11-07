@@ -1944,8 +1944,11 @@ function appendRunsToSegments(
       segs.push({
         imagePath: '',
         mimeType: '',
+        // The placeholder keeps the allocation its resource would have: an
+        // available chart reserves only wp:extent (see the chart branch), so
+        // an unavailable chart must not gain effect-extent padding either.
         ...inlineEffectExtentBox(
-          acquiredAnchor !== undefined ? undefined : run.inlineEffectExtent,
+          acquiredAnchor !== undefined || run.resourceKind === 'chart' ? undefined : run.inlineEffectExtent,
           run.widthPt, run.heightPt,
         ),
         anchor: acquiredAnchor !== undefined,

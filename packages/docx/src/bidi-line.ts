@@ -56,11 +56,14 @@ export const resolveNativeSourceLevelUnits = (segments: readonly unknown[], base
 // One anchor is retained per measured slice. Intra-slice resolved-level
 // boundaries are not retained, so punctuation or script changes inside one
 // slice can still be misplaced (#2076); this is not a complete bidi rewrite.
+/** The frozen production policy for one line-order model, shared by the
+ * canonical resolver and the native certificate (and their differential test). */
+export const lineOrderPolicy = (model: LineOrderModel): SegmentLineBidiOptions =>
+  model === 'word' ? authoredOptions : options;
+
 export const computeLineVisualOrder = (
   segments: readonly unknown[], baseRtl: boolean, model: LineOrderModel = 'line-level',
-): LineVisualOrder => computeSegmentLineVisualOrder(
-  segments, baseRtl, model === 'word' ? authoredOptions : options,
-);
+): LineVisualOrder => computeSegmentLineVisualOrder(segments, baseRtl, lineOrderPolicy(model));
 
 /** Final acquired source cells only; acquisition's coarse memo and decimal
  * anchors keep their established API/lifetime and native certificates. The
@@ -119,7 +122,7 @@ export function createLineOrderResolver(): LineOrderResolver {
   }> | undefined;
   return (segments, baseRtl, model = 'line-level') => {
     const active = lineOrderEngineIdentity();
-    const policy: SegmentLineBidiOptions = model === 'word' ? authoredOptions : options;
+    const policy = lineOrderPolicy(model);
     if (entry && entry.baseRtl === baseRtl && entry.model === model
       && sameEngineState(entry.engine, active) && entry.facts.length === segments.length
       && entry.facts.every((fact, i) => {
