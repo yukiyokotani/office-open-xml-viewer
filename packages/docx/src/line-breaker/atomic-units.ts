@@ -6,6 +6,8 @@ import { hasCJKBreakOpportunity } from './text-runs.js';
 
 export interface AtomicTextMeasurement {
   readonly baseRtl: boolean;
+  /** Admission only; never grants final-line hanging or justification. */
+  readonly rtlLeftSoftFit?: boolean;
   /** WORD_RTL_JUSTIFIED_VISIBLE_FIT: right-to-left lines fit their visible prefix. */
   readonly lineFit?: Readonly<{ rtlVisiblePrefix: boolean }>;
   readonly reservePrefixWork: (utf16Units: number) => void;
@@ -14,9 +16,10 @@ export interface AtomicTextMeasurement {
 }
 
 /** Whether line fitting charges a line-end U+0020: right-to-left lines do
- * (library containment policy) unless WORD_RTL_JUSTIFIED_VISIBLE_FIT applies. */
-export function lineEndSpaceCharged(state: Pick<AtomicTextMeasurement, 'baseRtl' | 'lineFit'>): boolean {
-  return state.baseRtl && state.lineFit?.rtlVisiblePrefix !== true;
+ * (library containment policy) unless justified visible fit or the separately
+ * admitted `word-rtl-left-soft-fit` bounded-pass capability applies. */
+export function lineEndSpaceCharged(state: Pick<AtomicTextMeasurement, 'baseRtl' | 'lineFit' | 'rtlLeftSoftFit'>): boolean {
+  return state.baseRtl && state.lineFit?.rtlVisiblePrefix !== true && state.rtlLeftSoftFit !== true;
 }
 
 /** Advance of the U+0020 suffix that ends `items` across members (a run of
