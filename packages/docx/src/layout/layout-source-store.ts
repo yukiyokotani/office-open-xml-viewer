@@ -18,8 +18,6 @@ import type { DeepReadonly, ParsedUnsupportedTextBoxBlock } from './types.js';
 import { imageResourceKey, sourceKey, vmlPictureResourceKey, vmlStrokeResourceKey, vmlEdgeResourceKey } from './source-key.js';
 import { indexSealedPaintResourceDescriptors } from './paint-resources.js';
 import { sealPlainData } from './plain-data.js';
-import { acquireOriginalRtlArabicEofSource } from './source-eof-space.js';
-import type { OriginalRtlArabicEofSource } from '../line-breaker/model.js';
 import {
   isReservedNoteSeparatorInstance,
   reservedNoteSeparatorRole,
@@ -36,8 +34,6 @@ import {
 } from './table-source-acquisition.js';
 
 export interface LayoutSourceAcquisition {
-  /** Complete canonical source proof, independent of continuation position. */
-  originalRtlArabicEofSource(source: SourceRef): OriginalRtlArabicEofSource | undefined;
   rtlSoftPresentationSource(source: SourceRef): RtlSoftPresentationSource | undefined;
   readonly acquisitionInputs: BodyAcquisitionInputProjections;
   effectiveTablePositioning(table: TableLayoutSource): DeepReadonly<TblpPr> | null;
@@ -583,16 +579,7 @@ function sealLayoutSourceStoreWithBody(
     },
   } satisfies BodyAcquisitionInputProjections);
   const softPresentationSources = new WeakMap<ParagraphAcquisitionInput, RtlSoftPresentationSource | null>();
-  // Canonical session owns positive and negative lexical proofs, not metrics.
-  const originalEofSources = new WeakMap<ParagraphAcquisitionInput, OriginalRtlArabicEofSource | null>();
   const acquisition = Object.freeze({
-    originalRtlArabicEofSource(source) {
-      if (!paragraphBySource.has(sourceKey(source))) throw new Error(`Unknown paragraph acquisition source: ${sourceKey(source)}`);
-      const paragraph = blocks.resolve(source);
-      if (paragraph.type !== 'paragraph') throw new Error(`Paragraph source kind mismatch: ${sourceKey(source)}`);
-      if (!originalEofSources.has(paragraph)) originalEofSources.set(paragraph, acquireOriginalRtlArabicEofSource(paragraph) ?? null);
-      return originalEofSources.get(paragraph) ?? undefined;
-    },
     rtlSoftPresentationSource(source) {
       if (!paragraphBySource.has(sourceKey(source))) throw new Error(`Unknown paragraph acquisition source: ${sourceKey(source)}`);
       const paragraph = blocks.resolve(source);
