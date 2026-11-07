@@ -6301,7 +6301,7 @@ function paragraphAcquisitionKey(
   // explicitly JSON-valued geometry below, but can never alias different facts.
   // Tag only admitted roots; ordinary keys remain unchanged, and reusable
   // measured lines cannot carry the root exception into a charged cell.
-  return `${lineOnly ? 'paragraph-line-breaking-v1' : 'paragraph-acquisition-v1'}:${environment.rtlLeftSoftPlacementAdmitted === true ? 'rtl-left-soft:' : ''}${JSON.stringify([
+  return `${lineOnly ? 'paragraph-line-breaking-v1' : 'paragraph-acquisition-v1'}:${environment.rtlLeftSoftPlacementAdmitted === true ? 'rtl-left-soft:' : ''}${environment.originalRtlArabicEofSource === undefined ? '' : 'rtl-arabic-eof:'}${JSON.stringify([
     lineOnly ? null : options.id,
     lineOnly ? null : [options.source.story, options.source.storyInstance, options.source.path],
     lineOnly ? null : options.flowDomainId,
@@ -6609,6 +6609,12 @@ export function acquireParagraphResult(
   options: ParagraphAcquisitionOptions,
   continuation?: Parameters<typeof measureParagraph>[5],
 ): AcquiredParagraphResult {
+  // Complete body authority cannot enter nested acquisition or either cache.
+  if (options.environment.originalRtlArabicEofSource !== undefined
+    && (options.source.story !== 'body' || options.source.storyInstance !== 'body'
+      || options.source.path.length !== 1 || !options.ordinaryFlow || options.anchorCellBounds !== undefined)) {
+    options = { ...options, environment: { ...options.environment, originalRtlArabicEofSource: undefined } };
+  }
   // A positive parent fact cannot enter nested acquisition or either cache.
   if (options.environment.rtlLeftSoftPlacementAdmitted === true
     && !rtlLeftSoftPlacementStillEligible(paragraph, options)) {

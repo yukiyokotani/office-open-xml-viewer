@@ -733,3 +733,56 @@ it('preserves ordinary LTR fitting and retained source SPACE charge', () => {
   expect(pieces.map(p => p.text).join('')).toBe(content);
   expect(pieces.reduce((sum, p) => sum + p.advancePt, 0)).toBe(700);
 });
+
+it('charges only the original EOF SPACE of a mode15 LTR paragraph with one RTL Arabic source', () => {
+  // Independent 40pt words / 10pt separators: twenty visible words use
+  // 990pt; their charged final separator uses 1000pt against a 995pt band.
+  const content = Array.from({ length: 40 }, () => '\u0628\u062a\u062b\u062c').join(' ') + ' ';
+  const paragraph = para([textRun(content, { rtl: true })], 'left', { wordWrap: true, indentRight: 15, widowControl: false });
+  const wideSection = { ...section, pageWidth: 1050, pageHeight: 80 };
+  const acquire = (mode: number) => layoutBodyModel([paragraph], wideSection, makeCtx(), {}, { compatibilityMode: mode });
+  const layout = acquire(15);
+  const retained = layout.pages.flatMap(page => page.layers.body.flatMap(node => node.kind === 'paragraph' ? node.lines : []));
+  expect(retained.map(wordsOn)).toEqual([20, 19, 1]);
+  expect(layout.pages.length).toBeGreaterThan(1);
+  expect(retained.map(line => line.placements.filter((p): p is TextPlacement => p.kind === 'text')
+    .reduce((sum, p) => sum + p.advancePt, 0))).toEqual([1000, 950, 50]);
+  expect(acquire(14).pages.flatMap(page => page.layers.body.flatMap(node => node.kind === 'paragraph' ? node.lines : [])).map(wordsOn))
+    .toEqual([20, 20]);
+  const placements = retained.flatMap(line => line.placements.filter((p): p is TextPlacement => p.kind === 'text'))
+    .sort((a, b) => a.range.start - b.range.start);
+  let cursor = 0;
+  for (const placement of placements) {
+    expect(placement.range.start).toBe(cursor);
+    expect(placement.range.end - placement.range.start).toBe(placement.text.length);
+    cursor = placement.range.end;
+  }
+  expect(cursor).toBe(content.length);
+  expect(placements.map(p => p.text).join('')).toBe(content);
+});
+
+it('does not infer the original EOF exception from flattened or unmarked runs', () => {
+  const content = Array.from({ length: 40 }, () => '\u0628\u062a\u062b\u062c').join(' ') + ' ';
+  for (const runs of [
+    [textRun(content)],
+    [textRun(content.slice(0, 100), { rtl: true }), textRun(content.slice(100), { rtl: true })],
+  ]) {
+    const paragraph = para(runs, 'left', { wordWrap: true, indentRight: 15, widowControl: false });
+    const result = layoutBodyModel([paragraph], { ...section, pageWidth: 1050 }, makeCtx(), {}, MODE_15);
+    const retained = result.pages.flatMap(page => page.layers.body.flatMap(node => node.kind === 'paragraph' ? node.lines : []));
+    expect(retained.map(wordsOn)).toEqual([20, 20]);
+    expect(retained.flatMap(line => line.placements.filter((p): p is TextPlacement => p.kind === 'text'))
+      .sort((a, b) => a.range.start - b.range.start).map(p => p.text).join('')).toBe(content);
+  }
+});
+
+
+it('preserves prior fitting for an unmeasured multiple-terminal-SPACE source', () => {
+  const content = Array.from({ length: 40 }, () => '\u0628\u062a\u062b\u062c').join(' ') + '  ';
+  const paragraph = para([textRun(content, { rtl: true })], 'left', { wordWrap: true, indentRight: 15, widowControl: false });
+  const result = layoutBodyModel([paragraph], { ...section, pageWidth: 1050 }, makeCtx(), {}, MODE_15);
+  const retained = result.pages.flatMap(page => page.layers.body.flatMap(node => node.kind === 'paragraph' ? node.lines : []));
+  expect(retained.map(wordsOn)).toEqual([20, 20]);
+  expect(retained.flatMap(line => line.placements.filter((p): p is TextPlacement => p.kind === 'text'))
+    .sort((a, b) => a.range.start - b.range.start).map(p => p.text).join('')).toBe(content);
+});

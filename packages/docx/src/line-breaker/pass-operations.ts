@@ -303,7 +303,7 @@ function minimalLegalTextPrefix(operationState: PassOperationState, segment: Lay
   }
   const prefix = text.slice(0, end);
   // The fit tests exclude a collapsible U+0020 suffix except in an RTL line.
-  return lineEndSpaceCharged(operationState) ? prefix : prefix.replace(/ +$/u, '');
+  return lineEndSpaceCharged(operationState, segment, prefix) ? prefix : prefix.replace(/ +$/u, '');
 }
 
 /** §17.3.1.21 at a line head: the width break-time admission
