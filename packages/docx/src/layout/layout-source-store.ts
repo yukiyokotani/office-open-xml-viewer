@@ -1,6 +1,4 @@
-import { mixedRtlPitchSource, type MixedRtlPitchSource } from './mixed-rtl-pitch.js';
 import { japaneseOffOrdinarySource } from './kinsoku-off-edges.js';
-import { rtlSoftPresentationSource, type RtlSoftPresentationSource } from './rtl-soft-presentation.js';
 import type {
   BodyElement,
   DocNote,
@@ -34,7 +32,6 @@ import {
 } from './table-source-acquisition.js';
 
 export interface LayoutSourceAcquisition {
-  rtlSoftPresentationSource(source: SourceRef): RtlSoftPresentationSource | undefined;
   readonly acquisitionInputs: BodyAcquisitionInputProjections;
   effectiveTablePositioning(table: TableLayoutSource): DeepReadonly<TblpPr> | null;
   publicAnchorBridge(
@@ -142,12 +139,6 @@ export interface LayoutSourceStore extends Readonly<Omit<LayoutSourceStoreInput,
    * from every sealed story so a later/page-owned anchor cannot change native
    * segment topology when an earlier paragraph resumes on another page. */
   readonly nativeUnitBodyBandHasFloatingSource: boolean;
-  /** Positive-only optional compatibility capability. All complete sealed
-   * sections use one fixed horizontal column; never inferred from a page's
-   * currently empty exclusions or another feature's admission flag. Only
-   * registered canonical roots can lazily memoize immutable lexical results,
-   * including refusal; placement and selected resource facts stay uncached. */
-  readonly readMixedRtlPitchSource?: (paragraph: ParagraphLayoutSource) => MixedRtlPitchSource | undefined;
   readonly blocks: LayoutBlockRepository;
   readonly acquisition: LayoutSourceAcquisition;
   readonly paintResources: PaintResourceRegistry;
@@ -445,7 +436,6 @@ function sealLayoutSourceStoreWithBody(
   // adapter (materializeDocumentPullAdapterSession / render worker). Progressive
   // pagination therefore cannot add a future anchor to this sealed source.
   let nativeUnitBodyBandHasFloatingSource = false;
-  let mixedRtlPitchCandidates: WeakSet<ParagraphLayoutSource> | undefined;
   let rootParagraphOffSources: WeakSet<ParagraphLayoutSource> | undefined;
   let japaneseOffSources: WeakMap<ParagraphLayoutSource, boolean> | undefined;
   const paragraphBySource = new Map<string, LayoutParagraphAcquisitionFact>();
@@ -457,11 +447,6 @@ function sealLayoutSourceStoreWithBody(
     if (paragraphBySource.has(key)) throw new TypeError(`Duplicate paragraph acquisition source: ${key}`);
     paragraphBySource.set(key, fact);
     const paragraph = blocks.resolve(fact.source);
-    if ((bodyLayoutInput.compatibilityMode === undefined || bodyLayoutInput.compatibilityMode === 14)
-      && fact.source.story === 'body' && fact.source.storyInstance === 'body' && fact.source.path.length === 1
-      && paragraph.type === 'paragraph' && paragraph.bidi && paragraph.alignment === 'distribute') {
-      (mixedRtlPitchCandidates ??= new WeakSet()).add(paragraph);
-    }
     if (paragraph.type === 'paragraph' && paragraph.kinsoku === false
       && fact.source.story === 'body' && fact.source.storyInstance === 'body' && fact.source.path.length === 1) {
       (rootParagraphOffSources ??= new WeakSet()).add(paragraph);
@@ -577,15 +562,7 @@ function sealLayoutSourceStoreWithBody(
       return paragraph;
     },
   } satisfies BodyAcquisitionInputProjections);
-  const softPresentationSources = new WeakMap<ParagraphAcquisitionInput, RtlSoftPresentationSource | null>();
   const acquisition = Object.freeze({
-    rtlSoftPresentationSource(source) {
-      if (!paragraphBySource.has(sourceKey(source))) throw new Error(`Unknown paragraph acquisition source: ${sourceKey(source)}`);
-      const paragraph = blocks.resolve(source);
-      if (paragraph.type !== 'paragraph') throw new Error(`Paragraph source kind mismatch: ${sourceKey(source)}`);
-      if (!softPresentationSources.has(paragraph)) softPresentationSources.set(paragraph, rtlSoftPresentationSource(paragraph) ?? null);
-      return softPresentationSources.get(paragraph) ?? undefined;
-    },
     acquisitionInputs: projections,
     effectiveTablePositioning(table) {
       const fact = tableByIdentity.get(table);
@@ -642,36 +619,7 @@ function sealLayoutSourceStoreWithBody(
       lineEndForbidden: immutableNumberSet(input.documentLayoutFacts.kinsoku.lineEndForbidden),
     }),
   });
-  // One complete-source section walk only when the source contains a possible
-  // candidate. Every future section is known before the store is published.
-  let mixedRtlPitchFixedBodyBand = false;
-  if (mixedRtlPitchCandidates && !nativeUnitBodyBandHasFloatingSource) {
-    const fixedHorizontalBand = (section: BodyLayoutInput['initialSection']) =>
-      section.context.columns.length === 1 && section.context.textDirection === 'lrTb'
-      && section.context.sectionFlow === undefined;
-    mixedRtlPitchFixedBodyBand = fixedHorizontalBand(bodyLayoutInput.initialSection)
-      && bodyLayoutInput.sequence.every(entry => entry.kind !== 'begin-section' || fixedHorizontalBand(entry.section));
-  }
-  // A lazy positive/null proof belongs ONLY to this sealed canonical source.
-  // Unknown identities cannot add cache entries. Count/grammar results are
-  // immutable; no placement, metric, width, provider or paint result is cached.
-  let readMixedRtlPitchSource: LayoutSourceStore['readMixedRtlPitchSource'];
-  if (mixedRtlPitchFixedBodyBand) {
-    const candidates = mixedRtlPitchCandidates!;
-    const proofs = new WeakMap<ParagraphLayoutSource, MixedRtlPitchSource | null>();
-    readMixedRtlPitchSource = paragraph => {
-      if (!candidates.has(paragraph)) return undefined;
-      let proof = proofs.get(paragraph);
-      if (proof === undefined) {
-        const acquired = mixedRtlPitchSource(paragraph);
-        proof = acquired === undefined ? null : Object.freeze(acquired);
-        proofs.set(paragraph, proof);
-      }
-      return proof ?? undefined;
-    };
-  }
   const store = Object.freeze({
-    ...(readMixedRtlPitchSource ? { readMixedRtlPitchSource } : {}),
     nativeUnitBodyBandHasFloatingSource,
     blocks,
     bodyLayoutInput,
