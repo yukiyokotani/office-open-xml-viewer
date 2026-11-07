@@ -722,13 +722,14 @@ export function measureParagraph(
     // representation owns this soft-only exception. Its distinct placement
     // fact excludes nested stories/cells, frames, floats and active grids;
     // other source capabilities do not grant that authority.
-    // No acquired width changes.
+    // Only measured absent/11/12/14 profiles admit this policy. Modern15 keeps
+    // prior fitting; neither document defaults nor acquired widths change.
     environment.rtlLeftSoftPlacementAdmitted === true
       && !context.runDirectionUnauthored && context.baseRtl && paragraph.alignment === 'left'
       && context.wordWrap !== false && placement.wrap === undefined
       && (environment.compatibilityMode === undefined
         || environment.compatibilityMode === 11 || environment.compatibilityMode === 12
-        || environment.compatibilityMode === 14 || environment.compatibilityMode === 15)
+        || environment.compatibilityMode === 14)
       && environment.verticalCJK !== true
       && (environment.pageWritingMode === undefined || environment.pageWritingMode === 'horizontal-tb')
       && segments.every(segment => 'text' in segment && segment.nativeLevelUnit === undefined

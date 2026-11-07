@@ -206,7 +206,10 @@ export function nativeUnitMinimumBodyBand(
 
 /** Placement boundary of word-rtl-left-soft-fit. The complete sealed store's
  * float fact covers future anchors too; it is geometry, not native or final-source
- * admission. No source scan or lexical authority is needed for this fact. */
+ * admission. No source scan or lexical authority is needed for this fact.
+ * Only measured legacy profiles absent/11/12/14 ship this capability. Modern15
+ * retains prior fitting while its whole-document flow mismatch remains open;
+ * this contraction changes no document defaults or physical paint authority. */
 export function rtlLeftSoftPlacementAdmission(
   source: LayoutSourceStore, section: SectionLayoutContext, story: StoryContext,
   paragraph: ParagraphLayoutSource, context: ParagraphLayoutContext,
@@ -216,7 +219,7 @@ export function rtlLeftSoftPlacementAdmission(
   if (context.runDirectionUnauthored || !context.baseRtl || paragraph.alignment !== 'left'
     || context.wordWrap === false
     || (compatibilityMode !== undefined && compatibilityMode !== 11 && compatibilityMode !== 12
-      && compatibilityMode !== 14 && compatibilityMode !== 15)
+      && compatibilityMode !== 14)
     || source.nativeUnitBodyBandHasFloatingSource || hasExclusions
     || story.story !== 'body' || story.containers.length !== 0 || story.quarterTurned
     || sourceRef.story !== 'body' || sourceRef.storyInstance !== 'body' || sourceRef.path.length !== 1

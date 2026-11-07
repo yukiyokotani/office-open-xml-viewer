@@ -2874,7 +2874,9 @@ function retainedNumberingPlan(
 
 /** A parent's RTL-soft placement fact cannot license a nested acquisition.
  * The sealed store owns complete-document float absence; source/placement
- * and resolved context below belong to this acquisition, before cache reuse. */
+ * and resolved context below belong to this acquisition, before cache reuse.
+ * Recheck the measured legacy-profile boundary too: an inherited positive fact
+ * must not activate modern15 or alias its unchanged ordinary cache entries. */
 function rtlLeftSoftPlacementStillEligible(
   paragraph: ParagraphAcquisitionInput, options: ParagraphAcquisitionOptions,
 ): boolean {
@@ -2888,8 +2890,7 @@ function rtlLeftSoftPlacementStillEligible(
     || environment.verticalCJK === true || environment.verticalPageFrame === true
     || environment.pageWritingMode !== 'horizontal-tb'
     || (environment.compatibilityMode !== undefined && environment.compatibilityMode !== 11
-      && environment.compatibilityMode !== 12 && environment.compatibilityMode !== 14
-      && environment.compatibilityMode !== 15)) return false;
+      && environment.compatibilityMode !== 12 && environment.compatibilityMode !== 14)) return false;
   const store = environment.layoutServices && layoutSourceStoreOf(environment.layoutServices);
   return store !== undefined && !store.nativeUnitBodyBandHasFloatingSource
     && store.blocks.body[source.path[0]!] === paragraph;

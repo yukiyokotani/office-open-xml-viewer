@@ -604,19 +604,19 @@ it.each([
 });
 
 it.each([
-  { word: '\u0628\u062a\u062b\u062c', run: { rtl: true }, name: 'explicit RTL Arabic' },
-  { word: 'abcd', run: {}, name: 'unmarked Latin' },
-])('fits a soft-wrapped left-aligned RTL paragraph with $name by its visible prefix', ({ word, run }) => {
+  { word: '\u0628\u062a\u062b\u062c', run: { rtl: true }, settings: { compatibilityMode: 14 }, name: 'explicit RTL Arabic in mode14' },
+  { word: 'abcd', run: {}, settings: undefined, name: 'unmarked Latin with absent profile' },
+])('fits a soft-wrapped left-aligned RTL paragraph with $name by its visible prefix', ({ word, run, settings }) => {
   // Independent deterministic advances: four-character words are 40pt;
   // U+0020 is 10pt. Seven words are 340pt visible / 350pt with their
   // terminal separator, against a 345pt band. Both seven-word groups, including the final source SPACE, must fit.
   const content = Array.from({ length: 14 }, () => word).join(' ') + ' ';
   const paragraph = para([textRun(content, run)], 'left', { bidi: true, indentRight: 15, wordWrap: true });
-  const retained = lines(paragraph, MODE_15);
+  const retained = lines(paragraph, settings);
   expect(retained.map(wordsOn)).toEqual([7, 7]);
   expect(retained.map(line => line.placements.filter((p): p is TextPlacement => p.kind === 'text')
     .reduce((sum, placement) => sum + placement.advancePt, 0))).toEqual([350, 350]);
-  const charged = lines({ ...paragraph, wordWrap: false } as BodyElement, MODE_15);
+  const charged = lines({ ...paragraph, wordWrap: false } as BodyElement, settings);
   expect(charged.map(wordsOn)).toEqual([6, 6, 2]);
   const logical = retained.flatMap(line => line.placements
     .filter((p): p is TextPlacement => p.kind === 'text'))
@@ -633,8 +633,8 @@ it.each([
 
 it('keeps charged terminal SPACE and natural LEFT paint after admitting the final word', () => {
   const content = 'a'.repeat(34) + ' ';
-  const narrow = lines(para([textRun(content)], 'left', { bidi: true, wordWrap: true, indentRight: 15 }), MODE_15);
-  const natural = lines(para([textRun(content)], 'left', { bidi: true, wordWrap: true }), MODE_15);
+  const narrow = lines(para([textRun(content)], 'left', { bidi: true, wordWrap: true, indentRight: 15 }), { compatibilityMode: 14 });
+  const natural = lines(para([textRun(content)], 'left', { bidi: true, wordWrap: true }), { compatibilityMode: 14 });
   expect(narrow).toHaveLength(1); // No erroneous final SPACE-only line.
   expect(natural).toHaveLength(1);
   const source = narrow[0]!.placements.filter((p): p is TextPlacement => p.kind === 'text');
@@ -649,7 +649,7 @@ it('keeps charged terminal SPACE and natural LEFT paint after admitting the fina
 it('still wraps a final visible word that exceeds the LEFT band', () => {
   // Eight40pt words + seven10pt spaces =390pt; the final word must move.
   const content = Array.from({ length: 8 }, () => 'abcd').join(' ');
-  const retained = lines(para([textRun(content)], 'left', { bidi: true, wordWrap: true, indentRight: 15 }), MODE_15);
+  const retained = lines(para([textRun(content)], 'left', { bidi: true, wordWrap: true, indentRight: 15 }), { compatibilityMode: 14 });
   expect(retained.map(wordsOn)).toEqual([7, 1]);
   expect(retained.flatMap(line => line.placements.filter((p): p is TextPlacement => p.kind === 'text'))
     .sort((a, b) => a.range.start - b.range.start).map(p => p.text).join('')).toBe(content);
@@ -696,7 +696,7 @@ it('keeps charged RTL LEFT fitting in a fixed cell while admitting the same root
         vAlign: 'top', widthPt: 345, widthPct: null, marginTop: 0, marginBottom: 0,
         marginLeft: 0, marginRight: 0 }] }] } as unknown as DocTable & { type: 'table' };
   // Reuse one public paragraph in the root and cell within the same layout.
-  const body = layoutBodyModel([paragraph, table], bandSection, makeCtx(), {}, MODE_15).pages[0]!.layers.body;
+  const body = layoutBodyModel([paragraph, table], bandSection, makeCtx(), {}, { compatibilityMode: 14 }).pages[0]!.layers.body;
   const root = body[0]!;
   if (root.kind !== 'paragraph') throw Error('Missing root paragraph');
   const retained = body[1]!;
@@ -723,8 +723,9 @@ it('keeps charged RTL LEFT fitting in a fixed cell while admitting the same root
 });
 
 
-it('preserves ordinary LTR fitting and retained source SPACE charge', () => {
-  const content = Array.from({ length: 14 }, () => 'abcd').join(' ') + ' ';
+it('preserves mode15 LTR fitting of an authored RTL Arabic source through true EOF', () => {
+  // The withdrawn EOF exception must not reappear under the pre15 RTL policy.
+  const content = Array.from({ length: 14 }, () => '\u0628\u062a\u062b\u062c').join(' ') + ' ';
   const paragraph = para([textRun(content, { rtl: true })], 'left', { wordWrap: true, indentRight: 15 });
   const retained = lines(paragraph, MODE_15);
   expect(retained.map(wordsOn)).toEqual([7, 7]);
@@ -732,4 +733,23 @@ it('preserves ordinary LTR fitting and retained source SPACE charge', () => {
     .sort((a, b) => a.range.start - b.range.start);
   expect(pieces.map(p => p.text).join('')).toBe(content);
   expect(pieces.reduce((sum, p) => sum + p.advancePt, 0)).toBe(700);
+});
+
+it('keeps mode15 RTL LEFT root fitting on its prior charged admission', () => {
+  // Same independent345pt band: seven40pt words plus separators charge350pt.
+  // The legacy visible-prefix policy must not be minted for modern mode15.
+  const content = Array.from({ length: 14 }, () => '\u0628\u062a\u062b\u062c').join(' ') + ' ';
+  const paragraph = para([textRun(content, { rtl: true })], 'left', { bidi: true, wordWrap: true, indentRight: 15 });
+  const retained = lines(paragraph, MODE_15);
+  expect(retained.map(wordsOn)).toEqual([6, 6, 2]);
+  const source = retained.flatMap(line => line.placements.filter((p): p is TextPlacement => p.kind === 'text'))
+    .sort((a, b) => a.range.start - b.range.start);
+  expect(source.map(p => p.text).join('')).toBe(content);
+  expect(source.reduce((sum, p) => sum + p.advancePt, 0)).toBe(700);
+  let cursor = 0;
+  for (const placement of source) {
+    expect(placement.range.start).toBe(cursor);
+    cursor = placement.range.end;
+  }
+  expect(cursor).toBe(content.length);
 });
