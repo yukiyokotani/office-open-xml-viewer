@@ -90,6 +90,9 @@ export function nextTabStop(
     // ECMA-376 §17.18.84: bar draws a vertical rule but "does not result in a
     // custom tab stop" and is skipped when positioning a tab character.
     if (stop.alignment === 'bar') continue;
+    // Library robustness policy (#2056): a stop whose position is not a
+    // finite coordinate (an overflowed unit conversion) cannot place content.
+    if (!Number.isFinite(stop.pos)) continue;
     if (stop.pos > maxCustomPx) maxCustomPx = stop.pos;
     if (stop.pos > curMarginPx && (custom === null || stop.pos < custom.pos)) custom = stop;
   }
@@ -98,9 +101,17 @@ export function nextTabStop(
   if (intervalPx > 0) {
     const epsilon = 1e-6;
     const from = Math.max(curMarginPx, maxCustomPx);
-    let pos = Math.ceil((from + epsilon) / intervalPx) * intervalPx;
+    const index = Math.ceil((from + epsilon) / intervalPx);
+    // §17.15.1.25 puts an automatic stop at every multiple of the interval.
+    // Library robustness policy (#2056): when the multiple's index overflows
+    // (an interval finer than the floating-point resolution at `from`), the
+    // next multiple lies within the epsilon tolerance used above, so the stop
+    // is taken there, as the finite path yields for slightly larger intervals.
+    let pos = Number.isFinite(index) ? index * intervalPx : from + epsilon;
     if (pos <= curMarginPx) pos += intervalPx;
-    automatic = { pos, alignment: 'left' };
+    // A multiple that is not a finite coordinate (an interval near the
+    // largest double) is no stop.
+    if (Number.isFinite(pos)) automatic = { pos, alignment: 'left' };
   }
 
   if (custom && automatic) return custom.pos <= automatic.pos ? custom : automatic;
