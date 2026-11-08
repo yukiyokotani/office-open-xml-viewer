@@ -1187,7 +1187,9 @@ function processTabSegment(
     tabWidth = 0;
   }
   tabWidth = Math.max(0, tabWidth);
-  if (tabFollowingUnitOverflows(context, tabWidth)) {
+  // A list label's separator tab is not glued to the body's first unit: that
+  // unit is split inside the word on the label's line instead (see above).
+  if (!listLabelTab && tabFollowingUnitOverflows(context, tabWidth)) {
     breakBeforeTab();
     return;
   }

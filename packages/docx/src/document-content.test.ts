@@ -19,7 +19,7 @@ describe('docx rendered text inventory', () => {
   it('preloads an inline drawing run face even when its text box has no text', () => {
     const doc = documentWithRun({ type: 'shape', inline: true, textBlocks: [],
       __inlineObjectFontFacts: { fontSize: 30, fontFamily: 'Courier New', bold: true } });
-    expect([...docxRenderedTextUsages(doc, 'google-preload')]
+    expect([...docxRenderedTextUsages(doc, 'font-demand')]
       .flatMap((usage) => usage.fontFamilies)).toContain('Courier New');
     expect(docxOfficeFontFallbackRequests(doc, {}))
       .toContainEqual({ family: 'Courier New', weight: 700, style: 'normal' });
