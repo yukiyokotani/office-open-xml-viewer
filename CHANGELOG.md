@@ -7,7 +7,10 @@ the corresponding minor release.
 
 ## 0.89.8 — 2026-11-09
 
-Compatible patch release. No migration is required.
+Compatible patch release. No migration is required. The document models gain
+optional, additive fields (Word paragraph, settings, table and drawing-run
+properties, PowerPoint shape-run complex-script properties, and chart
+secondary value-axis details); existing code is unaffected.
 
 - **Nuxt and other bundlers that alias assets:** the render-worker URLs that
   the package emits are now dot-relative, so consumers whose bundler aliases
@@ -23,12 +26,18 @@ Compatible patch release. No migration is required.
   - Spaces at the end of right-to-left lines hang past the margin under every
     alignment, as in Word (#2075).
   - In compatibility mode 15, the final space of a paragraph whose run
-    direction differs from the paragraph's takes part in line fitting (#2041).
+    direction differs from the paragraph's takes part in line fitting in
+    left, start, centred, right, end and lowKashida paragraphs (#2041).
+  - In compatibility mode 15, soft-wrapped lines of right-to-left
+    mediumKashida and highKashida paragraphs with unmarked Arabic runs count
+    their line-end spaces, as Word does (#2133).
 - **Word: line ends and justification:**
   - Spaces at the end of a line hang in justified, centred and right-aligned
     lines (#2013).
   - An overflowing ideographic space (U+3000) at a line end hangs in
-    compatibility mode 15 (#2011).
+    compatibility mode 15, and justification no longer widens U+3000
+    separators between Latin words; those next to East Asian text still
+    widen (#2011).
   - Justified lines ended by a manual break are stretched (#2009), and final
     lines of distributed paragraphs are set as in Word (#2010).
   - Latin lines in kashida and thaiDistribute paragraphs break at the same
@@ -37,6 +46,9 @@ Compatible patch release. No migration is required.
   - Kerning now includes pairs with a space, and `w:kern` 0 turns kerning off
     (#2029).
   - Lines that fit exactly are no longer pushed down by rounding (#2102).
+  - In compatibility mode 15, distributed and lowKashida lines of
+    left-to-right text keep a word that slightly overflows by compressing
+    the spaces between words, as justified lines do (#2072).
   - Authored spaces keep their share of justification (#2132).
 - **Word: Japanese and Chinese text:**
   - Closing marks hang only where Word hangs them: never in kashida or
