@@ -82,6 +82,7 @@ import {
   type BodySectionOccurrence,
 } from './layout/context.js';
 import { normalizeAdjacentTables, type AdjacentTableSequenceInput } from './layout/adjacent-tables.js';
+import { repeatedFootnoteLastReferenceIndexes } from './layout/note-reference-ownership.js';
 import { isWrapFloat } from './float-layout.js';
 import type {
   BodyLayoutAcquisitionInput,
@@ -1094,6 +1095,26 @@ function acquiredBodyTable(source: SourceRef, table: TableLayoutSource) {
   });
 }
 
+/** Each repeated footnote id with the sequence entry holding its last
+ * reference. Entries map one-to-one onto body elements except adjacent table
+ * groups, which hold several (`bodyLayoutSequenceInput`). */
+function repeatedFootnoteLastEntries(
+  body: readonly BodyElement[],
+  sequence: readonly BodyLayoutSequenceEntryFor<AcquiredBodySectionReference>[],
+): readonly Readonly<{ id: string; entryIndex: number }>[] {
+  const lastBodyIndex = repeatedFootnoteLastReferenceIndexes(body);
+  if (lastBodyIndex.size === 0) return Object.freeze([]);
+  const entryByBodyIndex: number[] = [];
+  sequence.forEach((entry, entryIndex) => {
+    const count = entry.kind === 'adjacent-table-group' ? entry.tables.length : 1;
+    for (let index = 0; index < count; index += 1) entryByBodyIndex.push(entryIndex);
+  });
+  return Object.freeze([...lastBodyIndex].map(([id, bodyIndex]) => Object.freeze({
+    id,
+    entryIndex: entryByBodyIndex[bodyIndex] ?? sequence.length,
+  })));
+}
+
 function bodyLayoutSequenceInput(
   body: readonly BodyElement[],
   sectionAtMarker: (bodyIndex: number) => AcquiredBodySectionReference,
@@ -1439,6 +1460,7 @@ export function bodyLayoutAcquisitionInput(doc: DocxDocumentModel): BodyLayoutAc
     footnoteLayoutLikeWW8: doc.settings?.footnoteLayoutLikeWW8,
     evenAndOddHeaders: doc.section.evenAndOddHeaders,
     endnoteIds: (doc.endnotes ?? []).map((note) => note.id),
+    repeatedFootnoteLastEntries: repeatedFootnoteLastEntries(doc.body, sequence),
     noteLayoutSettings: documentNoteLayoutSettingsInput(doc),
     pageLayoutSettings: documentPageLayoutSettingsInput(doc),
     parserDiagnostics: mapParseDiagnostics(
@@ -1609,19 +1631,33 @@ export function paragraphMarkShapeInput(
   paragraph: ParagraphLayoutSource,
 ): NumberingMarkerShapeInput | undefined {
   const facts = internalParagraph(paragraph).paragraphMarkFontFacts;
-  if (!facts) return undefined;
+  return facts ? nonContentRunShapeInput(facts, paragraph) : undefined;
+}
+
+/** Project the effective outer drawing-run font once; text-box text is a
+ * separate story and must not replace its object's automatic-leading face. */
+export function inlineObjectShapeInput(run: Readonly<{ type: string }>): NumberingMarkerShapeInput | undefined {
+  if (run.type !== 'image' && run.type !== 'shape') return undefined;
+  const facts = (run as { readonly __inlineObjectFontFacts?: InternalRunFontFacts }).__inlineObjectFontFacts;
+  return facts ? nonContentRunShapeInput(facts) : undefined;
+}
+
+function nonContentRunShapeInput(
+  facts: InternalRunFontFacts,
+  paragraph?: ParagraphLayoutSource,
+): NumberingMarkerShapeInput {
   const complexScript = facts.rtl === true || facts.cs === true;
-  const fallbackFontSizePt = paragraph.runs.find(
+  const fallbackFontSizePt = paragraph?.runs.find(
     (run): run is Extract<DocRun, { type: 'text' | 'field' }> => run.type === 'text' || run.type === 'field',
-  )?.fontSize ?? paragraph.defaultFontSize ?? 10;
+  )?.fontSize ?? paragraph?.defaultFontSize ?? 10;
   const fontSizePt = complexScript
     ? (facts.fontSizeCs ?? facts.fontSize ?? fallbackFontSizePt)
     : (facts.fontSize ?? fallbackFontSizePt);
-  const ascii = facts.fontFamily ?? paragraph.defaultFontFamily ?? null;
+  const ascii = facts.fontFamily ?? paragraph?.defaultFontFamily ?? null;
   const fallbackFonts: TextFontSlots = {
     ascii,
     highAnsi: facts.fontFamilyHighAnsi ?? ascii,
-    eastAsia: facts.fontFamilyEastAsia ?? paragraph.defaultFontFamilyEastAsia ?? ascii,
+    eastAsia: facts.fontFamilyEastAsia ?? paragraph?.defaultFontFamilyEastAsia ?? ascii,
     complexScript: facts.fontFamilyCs ?? ascii,
   };
   return Object.freeze({
@@ -1776,8 +1812,14 @@ export function paragraphAcquisitionInput(
       const {
         __anchorAcquisition: _privateAnchor,
         __listLabel: listLabel,
+        __inlineObjectFontFacts: _privateInlineFont,
+        __inlineObjectOrigin: privateInlineOrigin,
         ...publicRun
-      } = run as typeof run & InternalAnchorRunWire & Pick<InternalNoBreakHyphenWire, '__listLabel'>;
+      } = run as typeof run & InternalAnchorRunWire & Pick<InternalNoBreakHyphenWire, '__listLabel'>
+        & { __inlineObjectFontFacts?: InternalRunFontFacts; __inlineObjectOrigin?: string };
+      const inlineFont = inlineObjectShapeInput(originalRun);
+      const inlineOrigin = privateInlineOrigin === 'drawingml' || privateInlineOrigin === 'vmlStaticTextbox'
+        ? privateInlineOrigin : undefined;
       if (run.type !== 'shape') {
         const retainedRun = run.type === 'chart'
           ? (({ chart: _chartPayload, ...marker }) => ({
@@ -1787,6 +1829,8 @@ export function paragraphAcquisitionInput(
           : publicRun;
         return Object.freeze({
           ...structuredClone(retainedRun),
+          ...(inlineFont ? { inlineObjectShapeInput: inlineFont } : {}),
+          ...(inlineOrigin ? { inlineObjectOrigin: inlineOrigin } : {}),
           ...(anchorInput === undefined ? {} : { anchorAcquisitionInput: anchorInput }),
           ...(run.type === 'image' && isListLabel(listLabel) ? { listLabel } : {}),
         }) as ParagraphAcquisitionRun;
@@ -1811,6 +1855,8 @@ export function paragraphAcquisitionInput(
       return Object.freeze({
         type: 'shape' as const,
         ...structuredClone(retainedShape),
+        ...(inlineFont ? { inlineObjectShapeInput: inlineFont } : {}),
+        ...(inlineOrigin ? { inlineObjectOrigin: inlineOrigin } : {}),
         ...(vmlTextPathInput === undefined ? {} : { vmlTextPathInput }),
         ...((textBoxInput.kind === 'complete'
           ? textBoxInput.blockCount

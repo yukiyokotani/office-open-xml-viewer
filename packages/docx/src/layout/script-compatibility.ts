@@ -1,4 +1,19 @@
 import { defineCompatibilityRule } from './compatibility.js';
+import { unicodePunctuationOrSymbol } from '@silurus/ooxml-core/internal/bidi-line';
+
+export const WORD_RUN_DIRECTION_ISOLATE = defineCompatibilityRule({
+  id: 'word-run-direction-isolate',
+  evidence: {
+    kind: 'office-observation', syntheticFixtureId: 'bidi-run-direction-isolate',
+    application: 'Microsoft Word', version: '16.0.20527', platform: 'Windows',
+  },
+  description: 'ECMA-376 §17.3.1.6 and §17.3.2.30 distinguish paragraph direction and run direction. Observed Word ordering, not a prescribed OOXML bidi algorithm: consecutive text runs whose authored direction opposes the paragraph resolve as one UAX #9 directional isolate. An unmarked Latin label sharing a run with Arabic in a bidi paragraph therefore stays at the physical left of that run. Windows controls cover Arabic, Hebrew, Latin and digits, modes unset/11/12/14/15, medium/high kashida and logical start/end alignments. Paragraph-direction runs, tabs and objects retain their existing resolution. Library scope and representation boundaries: only RTL paragraphs opt in; compatibility shape text without authoritative run-direction provenance, coarse distribute/character-spread gap topology, and measured visible islands containing internal odd/even UAX level boundaries retain their existing ordering (#2076, #2090). Validated final source-space-cell word layout can retain original author scopes within its positive non-rewrite and established-terminal-budget capability; coarse acquisition remains unchanged. These limitations are not Word-specific exceptions. This rule changes final ordering only, not line fitting or source-space budgets.',
+});
+
+export function wordRunDirectionSpan(segment: unknown): 'ltr' | 'rtl' | undefined {
+  const { text, rtl } = segment as { text?: unknown; rtl?: unknown };
+  return typeof text === 'string' ? rtl === true ? 'rtl' : 'ltr' : undefined;
+}
 
 export const WORD_NEUTRAL_SCRIPT_ATTACHMENT = defineCompatibilityRule({
   id: 'word-neutral-script-attachment',
@@ -45,11 +60,9 @@ export const WORD_VERTICAL_TU_CORNER_PLACEMENT = defineCompatibilityRule({
   description: 'Keep a substituted vertical Tu comma or full stop at the font-designed upper-right cell position rather than ink-centering it geometrically. Evidence (observed Office behaviour): Word PDF of a corpus document in PR #793; follows the UAX #50 Tu class and JIS X 4051 corner placement.',
 });
 
-const RTL_AMBIGUOUS_CHARACTER = /[\p{P}\p{S}]/u;
-
-export function wordRtlAmbiguousCharacter(character: string): boolean {
-  return RTL_AMBIGUOUS_CHARACTER.test(character);
-}
+// The host HL1 policy retains the shared stateless predicate's identity;
+// native certification can recognize it without trusting arbitrary callbacks.
+export const wordRtlAmbiguousCharacter: (character: string) => boolean = unicodePunctuationOrSymbol;
 
 export function wordNeutralAttachesToActiveScript(character: string): boolean {
   return !/\p{L}/u.test(character);

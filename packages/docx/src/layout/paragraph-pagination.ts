@@ -77,7 +77,9 @@ function completingParagraphAdmissionExtentPt(
 }
 
 function compareLineBoundaries(left: LineBoundary, right: LineBoundary): number {
-  return left.segIndex - right.segIndex || left.charOffset - right.charOffset;
+  return left.sourceTextStart !== undefined && right.sourceTextStart !== undefined
+    ? (left.sourceTextStart + left.charOffset) - (right.sourceTextStart + right.charOffset)
+    : left.segIndex - right.segIndex || left.charOffset - right.charOffset;
 }
 
 export function selectParagraphFragment(

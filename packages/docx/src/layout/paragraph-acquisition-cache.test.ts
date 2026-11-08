@@ -1,4 +1,4 @@
-import { DEFAULT_KINSOKU_RULES } from '@silurus/ooxml-core';
+import { DEFAULT_KINSOKU_RULES, getDefaultBidiEngine, setBidiEngine } from '@silurus/ooxml-core';
 import { describe, expect, it } from 'vitest';
 import type { ParagraphLayoutContext } from '../layout-context.js';
 import { createLayoutServices } from '../layout-runtime.js';
@@ -17,6 +17,7 @@ import {
 import { acquireRegisteredParagraph } from './registered-paragraph-acquisition.js';
 import {
   createFieldAcquisitionServicesView,
+  createLayoutServicesRuntimeView,
   createParagraphAcquisitionCacheServicesView,
   paragraphAcquisitionCacheOf,
 } from './runtime-state.js';
@@ -149,6 +150,200 @@ function options(
 }
 
 describe('paragraph acquisition cache', () => {
+  it('invalidates a warmed host when document rules change its compatibility textbox child', () => {
+    const services = scopedServices();
+    const paragraph = { ...textParagraph(), runs: [{
+      type: 'shape', inline: true, widthPt: 10, heightPt: 100, zOrder: 0,
+      anchorXPt: 0, anchorYPt: 0, anchorXFromMargin: false, anchorYFromPara: false,
+      subpaths: [], presetGeometry: 'rect', fill: null, stroke: null,
+      textAnchor: 't', textInsetL: 0, textInsetT: 0, textInsetR: 0, textInsetB: 0,
+      textBlocks: [{ text: 'あい々う', fontSizePt: 10, alignment: 'left',
+        runs: [{ text: 'あい々う', fontSizePt: 10, fontFamily: 'Test Sans' }] }],
+    } as DocRun] };
+    const input = paragraphAcquisitionInput(paragraph, source);
+    const disabled = { ...DEFAULT_KINSOKU_RULES, enabled: false };
+    const acquire = (documentEnabled: boolean) => {
+      const result = acquireParagraphResult(input, options(services, {
+        context: { ...context, kinsoku: disabled, overflowPunct: false,
+          documentKinsoku: documentEnabled ? DEFAULT_KINSOKU_RULES : disabled },
+      })).layout;
+      const child = result.textBoxes[0]?.story.blocks[0];
+      if (child?.kind !== 'paragraph') throw new Error('expected compatibility child');
+      return child.lines.map(line => line.placements
+        .filter(p => p.kind === 'text').map(p => p.text).join(''));
+    };
+    expect(acquire(true)).toEqual(['あ', 'い々', 'う']);
+    expect(acquire(false)).toEqual(['あい', '々う']);
+    expect(acquire(true)).toEqual(['あ', 'い々', 'う']);
+  });
+
+  it('preserves external numbered frames across body, story, cell and grid cache contexts', () => {
+    const services = scopedServices();
+    const paragraph = { ...textParagraph('word'), indentLeft: 50, indentFirst: -50,
+      numbering: { numId: 1, level: 0, format: 'decimal', text: '1.', indentLeft: 50,
+        tab: 50, suff: 'tab', jc: 'left', fontFamily: 'serif', fontSize: 10 } };
+    const base = options(services, {
+      context: { ...context, physicalIndentLeftPt: 50, firstIndentPt: 0 },
+      exclusions: [{ id: 'leading-float', wrap: 'square', bounds: { xPt: 72, yPt: 72, widthPt: 150, heightPt: 60 },
+        polygon: [], verticalOwnership: 'host' }],
+    });
+    const acquire = (overrides: Partial<ParagraphAcquisitionOptions>) => {
+      const selected = { ...base, ...overrides };
+      return acquireParagraphResult(paragraphAcquisitionInput(paragraph, selected.source), selected).layout.lines[0]!;
+    };
+    const markerBody = (line: ReturnType<typeof acquire>) => line.placements
+      .filter(p => p.kind === 'text').map(p => ({ text: p.text, x: p.origin.xPt, range: p.range }));
+    // This caller supplies an external exclusion, not a parser-owned anchor.
+    // Warm the body cache without borrowing the self-owned legacy capability.
+    const external = acquire({});
+    expect(markerBody(external)).toEqual(markerBody(acquire({
+      environment: { ...base.environment, doNotSuppressIndentation: true },
+    })));
+    const declined: Partial<ParagraphAcquisitionOptions>[] = [
+      { source: { story: 'header', storyInstance: 'header:default', path: [0] } },
+      { ordinaryFlow: false },
+      { source: { ...source, path: [0, 0, 0, 0] }, anchorCellBounds: { xPt: 72, yPt: 72, widthPt: 468, heightPt: 300 } },
+      { context: { ...base.context, runDirectionUnauthored: true } },
+      { context: { ...base.context, lineGrid: { active: true, pitchPt: 20 } } },
+      { context: { ...base.context, characterGrid: { active: true, kind: 'linesAndChars', deltaPt: 0, pitchPt: 10 } } },
+    ];
+    for (const override of declined) {
+      const actual = acquire(override);
+      const established = acquire({ ...override,
+        environment: { ...base.environment, doNotSuppressIndentation: true } });
+      // Same physical frame and source, unchanged established marker/body
+      // geometry. The true setting is only a bypass reference, not its Word rule.
+      expect(markerBody(actual)).toEqual(markerBody(established));
+    }
+  });
+
+  it('does not reuse directed body topology for equal-width unadmitted or incapable acquisition', () => {
+    const ctx = Object.assign(measureContext(), { direction: 'inherit' as CanvasDirection, textAlign: 'left' as CanvasTextAlign });
+    const services = createParagraphAcquisitionCacheServicesView(createLayoutServices(model(), { measureContext: ctx }));
+    const paragraph = textParagraph('ابتXray Yoke ابت.');
+    paragraph.bidi = true;
+    const input = paragraphAcquisitionInput(paragraph, source);
+    const base = options(services, { context: { ...context, baseRtl: true } });
+    const admitted = { ...base, environment: { ...base.environment, nativeUnitMinimumBandPt: 468 } };
+    const hasMixed = (result: ReturnType<typeof acquireParagraphResult>) => result.layout.lines
+      .flatMap(line => line.placements).filter(piece => piece.kind === 'text')
+      .flatMap(piece => piece.paintOps).some(op => /[ابت]/u.test(op.text) && /[A-Za-z]/u.test(op.text));
+    expect(hasMixed(acquireParagraphResult(input, admitted))).toBe(false);
+    // Same paragraph, dimensions and memo owner, but frame/intrinsic callers
+    // do not supply the semantic body band. Both placement and line memos miss.
+    expect(hasMixed(acquireParagraphResult(input, base))).toBe(true);
+    const { acquireProjectableNativeUnits: _capability, ...ordinary } = services.text;
+    const legacy = createLayoutServicesRuntimeView(services, { text: Object.freeze(ordinary) });
+    expect(hasMixed(acquireParagraphResult(input, { ...admitted,
+      environment: { ...admitted.environment, layoutServices: legacy } }))).toBe(true);
+    const originalEngine = getDefaultBidiEngine();
+    let bundles = 0;
+    const changing = createLayoutServicesRuntimeView(services, { text: Object.freeze({ ...services.text,
+      acquireProjectableNativeUnits(requests: Parameters<NonNullable<typeof services.text.acquireProjectableNativeUnits>>[0]) {
+        bundles++;
+        const result = services.text.acquireProjectableNativeUnits!(requests);
+        // Even reinstalling the SAME native engine changes its lifecycle.
+        setBidiEngine(originalEngine);
+        return result;
+      },
+    }) });
+    const fresh = paragraphAcquisitionInput({ ...paragraph, runs: [...paragraph.runs] }, source);
+    try {
+      expect(hasMixed(acquireParagraphResult(fresh, { ...admitted,
+        environment: { ...admitted.environment, layoutServices: changing } }))).toBe(true);
+      expect(bundles).toBe(1);
+      // The new lifecycle cannot hit the previous ordinary deferral snapshot.
+      expect(hasMixed(acquireParagraphResult(fresh, admitted))).toBe(false);
+    } finally { setBidiEngine(originalEngine); }
+
+  });
+
+  it('reacquires decimal geometry when manual-break expansion changes', () => {
+    const services = scopedServices();
+    const paragraph = textParagraph();
+    const run = paragraph.runs[0] as Extract<DocRun, { type: 'text' }>;
+    paragraph.alignment = 'thaiDistribute';
+    paragraph.bidi = true;
+    paragraph.tabStops = [{ pos: 216, alignment: 'decimal', leader: 'none' }];
+    paragraph.runs = [
+      { ...run, text: 'AB' }, { ...run, text: '\t' },
+      { ...run, text: 'אבגד ', rtl: true },
+      { ...run, text: 'Label 12.50 هذا نص' },
+      { type: 'break', breakType: 'line' }, { ...run, text: 'tail' },
+    ];
+    const input = paragraphAcquisitionInput(paragraph, source);
+    const base = options(services, {
+      context: { ...context, baseRtl: true, isJustified: true, tabStops: paragraph.tabStops },
+    });
+    const at = (doNotExpandShiftReturn: boolean, startYPt: number) => ({
+      ...base,
+      environment: { ...base.environment, compatibilityMode: 15, doNotExpandShiftReturn },
+      placement: { ...base.placement, startYPt },
+    });
+    const geometry = (result: ReturnType<typeof acquireParagraphResult>) => result.layout.lines.map(line =>
+      line.placements.flatMap(placement => placement.kind === 'text'
+        ? [[placement.text, placement.origin.xPt, placement.origin.yPt, placement.advancePt]] : []));
+    const expanded = acquireParagraphResult(input, at(false, 72));
+    const cold = (startYPt: number) => acquireParagraphResult(
+      paragraphAcquisitionInput({ ...paragraph, runs: [...paragraph.runs] }, source), at(true, startYPt),
+    );
+    const coldSame = cold(72);
+    const coldMoved = cold(92);
+    expect(geometry(coldSame)).not.toEqual(geometry(expanded));
+    // Moving the paragraph bypasses exact-result reuse but can still reuse
+    // line acquisition; the changed tab anchor must agree with a cold layout.
+    expect(geometry(acquireParagraphResult(input, at(true, 92)))).toEqual(geometry(coldMoved));
+    expect(geometry(acquireParagraphResult(input, at(true, 72)))).toEqual(geometry(coldSame));
+  });
+
+  it('reacquires decimal geometry after provider lifecycle or method changes', () => {
+    const engine = getDefaultBidiEngine();
+    const geometry = (value: ReturnType<typeof acquireParagraphResult>) => value.layout.lines.map(line =>
+      line.placements.flatMap(p => p.kind === 'text'
+        ? [[p.text, p.origin.xPt, p.origin.yPt, p.advancePt]] : []));
+    try {
+      for (const change of ['same-object setter', 'method replacement']) {
+        let reverse = change === 'method replacement';
+        const adapter = {
+          computeLevels: (...args: Parameters<typeof engine.computeLevels>) => engine.computeLevels(...args),
+          reorderVisual: (...args: Parameters<typeof engine.reorderVisual>) => {
+            const order = engine.reorderVisual(...args);
+            return reverse ? order.reverse() : order;
+          },
+          getMirror: (...args: Parameters<typeof engine.getMirror>) => engine.getMirror(...args),
+        };
+        setBidiEngine(adapter);
+        const services = scopedServices();
+        const paragraph = textParagraph();
+        const run = paragraph.runs[0] as Extract<DocRun, { type: 'text' }>;
+        paragraph.bidi = true;
+        paragraph.alignment = 'left';
+        paragraph.tabStops = [{ pos: 216, alignment: 'decimal', leader: 'none' }];
+        paragraph.runs = [{ ...run, text: 'AB' }, { ...run, text: '\t' },
+          { ...run, text: '12.50 אבגד הוזח', rtl: true }];
+        const input = paragraphAcquisitionInput(paragraph, source);
+        const base = options(services, {
+          context: { ...context, baseRtl: true, tabStops: paragraph.tabStops },
+        });
+        const at = (startYPt: number) => ({ ...base,
+          environment: { ...base.environment, compatibilityMode: 15 },
+          placement: { ...base.placement, startYPt } });
+        const initial = geometry(acquireParagraphResult(input, at(72)));
+        if (change === 'same-object setter') { reverse = true; setBidiEngine(adapter); }
+        else adapter.reorderVisual = (...args) => engine.reorderVisual(...args);
+        const cold = (y: number) => geometry(acquireParagraphResult(
+          paragraphAcquisitionInput({ ...paragraph, runs: [...paragraph.runs] }, source), at(y),
+        ));
+        const coldSame = cold(72), coldMoved = cold(92);
+        expect(coldSame).not.toEqual(initial);
+        // Same placement exercises exact reuse; moving Y exercises the
+        // reusable measured-line owner. Both must use the current provider.
+        expect(geometry(acquireParagraphResult(input, at(72)))).toEqual(coldSame);
+        expect(geometry(acquireParagraphResult(input, at(92)))).toEqual(coldMoved);
+      }
+    } finally { setBidiEngine(engine); }
+  });
+
   it('disables zero-threshold content kerning whatever the compatibility mode', () => {
     const ctx = measureContext();
     ctx.measureText = function (text) {

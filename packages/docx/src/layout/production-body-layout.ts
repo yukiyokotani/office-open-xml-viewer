@@ -30,7 +30,7 @@ import {
 } from '../frame-geometry.js';
 import { resolveFloatingTableBoxPt } from '../float-table-geometry.js';
 import { xContainer, yContainer, resolveAnchorX, resolveAnchorY } from '../anchor-geometry.js';
-import { resolveParagraphLayoutContext, resolveSectionLayoutContext, type DocumentLayoutSettings, type SectionLayoutContext } from '../layout-context.js';
+import { enterTableCellStoryContext, resolveParagraphLayoutContext, resolveSectionLayoutContext, tableCellFlowsHorizontally, withoutClosingMarkHangAdmission, withoutCjkClosingMarkHang, type DocumentLayoutSettings, type SectionLayoutContext, type StoryContext } from '../layout-context.js';
 import type {
   BlockLayoutAlgorithms,
   BlockLayoutResult,
@@ -62,6 +62,7 @@ import type { LayoutOptions } from './options.js';
 import { createStoryLayoutCache, type StoryLayoutCache } from './story-layout-cache.js';
 import {
   createLayoutServicesRuntimeView,
+  layoutSourceStoreOf,
   fieldAcquisitionContextOf,
   footnoteAcquisitionWorkBudgetOf,
   paragraphAcquisitionCacheOf,
@@ -96,9 +97,9 @@ import {
   physicalSectionGeometry,
 } from './context.js';
 import { isAllRotatedVerticalTextDirection, isVerticalTextDirection, physicalLayoutSection, verticalLayoutSection } from './section-orientation.js';
-import { gridForParagraphContext, paragraphMeasurementEnvironment } from './measurement-environment.js';
+import { gridForParagraphContext, nativeUnitMinimumBodyBand, paragraphMeasurementEnvironment } from './measurement-environment.js';
 import { createRevisionAuthorColorResolver } from './track-changes.js';
-import { BODY_STORY_CONTEXT, bodyAnchorReferenceFrames, retainedTableRecord, resolveBodyParagraphLayoutContext, resolveStateParagraphLayoutContext, withTableCellStory } from './acquisition-state.js';
+import { BODY_STORY_CONTEXT, MAIN_BODY_STORY_CONTEXT, bodyAnchorReferenceFrames, retainedTableRecord, resolveBodyParagraphLayoutContext, resolveStateParagraphLayoutContext, withTableCellStory } from './acquisition-state.js';
 import { applyNumberingBodyOffset, resolveNumberingMarkerGeometry } from './numbering-marker.js';
 import { projectTableColumnLayoutInput, type TableSourceAcquisitionInput } from './table-source-acquisition.js';
 import { measureTableIntrinsicWidths, resolveTableColumnWidths, spacedAutoFitContentWidthsPt } from './table-columns.js';
@@ -273,7 +274,7 @@ function buildMeasureState(
     floatParaSeq: 0,
     layoutSettings,
     sectionLayout,
-    storyContext: BODY_STORY_CONTEXT,
+    storyContext: MAIN_BODY_STORY_CONTEXT,
     docEastAsian: layoutSettings.documentHasEastAsianText,
     fontFamilyClasses,
     resolvedLocalFonts,
@@ -284,7 +285,7 @@ function buildMeasureState(
       tableDecision: singleTableDecision,
       resolveColumns: resolveColumnWidths,
       createCellState: (state, contentWidthPt, cell) => ({
-        ...withTableCellStory(tableCellOwnerState(state)),
+        ...withTableCellStory(tableCellOwnerState(state), tableCellFlowsHorizontally(cell)),
         contentX: 0,
         contentW: contentWidthPt,
         y: 0,
@@ -554,6 +555,21 @@ function sourceElement(sourceStore: LayoutSourceStore, ref: SourceRef): LayoutFl
 function nestedSourceElement(sourceStore: LayoutSourceStore, ref: SourceRef): LayoutFlowBlock {
   return sourceStore.blocks.resolve(ref);
 }
+
+/** Whether every table cell enclosing the block at `ref` in its story flows
+ * horizontally (tableCellFlowsHorizontally), read from the source path
+ * (table, row, cell, block, ...) so re-acquisition restates the same
+ * WORD_JUSTIFICATION_PUNCTUATION_HANG admission as the first acquisition,
+ * whichever pagination path asks for it. */
+function sourceCellChainFlowsHorizontally(sourceStore: LayoutSourceStore, ref: SourceRef): boolean {
+  for (let depth = 0; depth + 3 < ref.path.length; depth += 3) {
+    const table = sourceStore.blocks.resolve({ ...ref, path: ref.path.slice(0, depth + 1) });
+    if (table.type !== 'table') return false;
+    const cell = table.rows[ref.path[depth + 1]!]?.cells[ref.path[depth + 2]!];
+    if (!cell || !tableCellFlowsHorizontally(cell)) return false;
+  }
+  return true;
+}
   /** Body acquisition stays at the kernel adapter because it resolves renderer
    * state into retained paragraph inputs; layout-owned projections below it
    * receive only immutable structural values. */
@@ -574,6 +590,15 @@ function acquireBodyParagraphAtLocation(
     bottom: 'bottom' as const,
   };
   const context = resolveBodyParagraphLayoutContext(state, paragraph);
+  const exclusions = paragraphWrapExclusions(state.floats, location.flowDomainId);
+  const sourceStore = state.layoutServices && layoutSourceStoreOf(state.layoutServices);
+  const minimumBand = sourceStore && nativeUnitMinimumBodyBand(sourceStore,
+    state.sectionLayout, state.storyContext, paragraph, context,
+    availableInlineExtentPt, exclusions.length !== 0);
+  const measurementEnvironment = paragraphMeasurementEnvironment(state);
+  const environment = minimumBand === undefined ? measurementEnvironment : {
+    ...measurementEnvironment, nativeUnitMinimumBandPt: minimumBand,
+  };
   const topBorder = paragraphContextWithTopBorder(
     context,
     paragraph,
@@ -597,8 +622,8 @@ function acquireBodyParagraphAtLocation(
         suppressSpaceBefore: topBorder.suppressSpaceBefore,
       },
       measurer: { context: state.ctx, fontFamilyClasses: state.fontFamilyClasses },
-      environment: paragraphMeasurementEnvironment(state),
-      exclusions: paragraphWrapExclusions(state.floats, location.flowDomainId),
+      environment,
+      exclusions,
       anchorCollisions: retainedAnchorCollisions ?? paragraphAnchorCollisions(state.floats),
       containerShading: state.containerShading,
       paragraphBorderEdges: edges,
@@ -973,6 +998,11 @@ function layoutBodyStory(
       containers: [],
       lineNumberingEligible: false,
       ...(request.container.quarterTurned ? { quarterTurned: true } : {}),
+      // WORD_JUSTIFICATION_PUNCTUATION_HANG: Word matches the main body in a
+      // header and a footnote (blk-0898-cjk-kincell); footers, endnotes, note
+      // separators and text-box stories are unmeasured.
+      ...(!separatorRoot && (request.source.story === 'header' || request.source.story === 'footnote')
+        ? { closingMarkHangAdmitted: true as const } : {}),
     },
   };
   if (fieldBlockIndex === undefined) preRegisterPageFloats(root, request.sourceStart?.blockIndex ?? 0, candidate);
@@ -2865,7 +2895,10 @@ function reacquireBodyTableBlock(
     )
     ? request.paragraphAnchorReferenceDeltaPt : undefined;
   const candidate: BodyAcquisitionState = {
-    ...withTableCellStory(tableCellOwnerState(state)),
+    ...withTableCellStory(
+      tableCellOwnerState(state),
+      sourceCellChainFlowsHorizontally(sourceStore, request.acquired.source),
+    ),
     contentX: 0,
     contentW: request.acquired.flowBounds.widthPt,
     y: request.acquired.flowBounds.yPt,
@@ -3384,9 +3417,13 @@ function acquireTableColumnInput(
   const format = decision.source.format;
   const { maximumTableWidthPt, isFixedNestedTable,
     contentGrowth, forcedFitOuterMarginsPt } = decision;
+  // WORD_JUSTIFICATION_PUNCTUATION_HANG admission of the cells measured
+  // below, entered exactly as cell acquisition enters them (createCellState).
+  const tableOwnerStory = state.storyContext ?? BODY_STORY_CONTEXT;
   const intrinsicWidthsForTable = (
     owner: TableLayoutSource,
     ownerDecision = decision,
+    ownerStory: StoryContext = tableOwnerStory,
   ): ((cell: DeepReadonly<DocTableCell>, preferredWidth: TablePreferredWidthConstraint | null) => ReturnType<typeof measureTableCellIntrinsicWidths>) => {
     const ownerFormat = ownerDecision.source.format;
     const ownerLayout = ownerDecision.effectiveLayout;
@@ -3395,88 +3432,96 @@ function acquireTableColumnInput(
       const acquired = ownerFormat.rows[rowIndex]?.cells[cellIndex]?.marginsPt;
       ownerMargins.set(cell, acquired ?? effCellMargins(cell, owner));
     }));
-    return (cell, preferredWidth) => measureTableCellIntrinsicWidths(
-      cell,
-      ownerMargins.get(cell as object) ?? effCellMargins(cell, owner),
-      {
-        paragraph: (paragraph) => {
-          const baseContext = resolveParagraphLayoutContext(
-            state.layoutSettings,
-            state.sectionLayout,
-            state.storyContext ?? BODY_STORY_CONTEXT,
-            paragraph,
-          );
-          const markerInput = paragraph.numbering
-            ? state.acquisitionInputs.numberingMarkerShapeInput(
-                paragraph.numbering,
-                getDefaultFontSize(paragraph),
-              )
-            : undefined;
-          const context = applyNumberingBodyOffset(baseContext, {
-            numbering: paragraph.numbering,
-            ...(markerInput ? { markerInput } : {}),
-            authoredFirstIndentPt: paragraph.indentFirst,
-            tabStops: paragraph.tabStops,
-            defaultTabPt: state.defaultTabPt,
-            service: state.layoutServices?.text,
-            clusterGeometry: false,
-          });
-          const numbering = context.numberingMarkerGeometry
-            ?? (paragraph.numbering && markerInput && state.layoutServices?.text
-              ? resolveNumberingMarkerGeometry(paragraph.numbering, markerInput, {
-                  authoredFirstIndentPt: paragraph.indentFirst,
-                  physicalIndentLeftPt: context.physicalIndentLeftPt,
-                  tabStops: paragraph.tabStops,
-                  defaultTabPt: state.defaultTabPt,
-                }, state.layoutServices.text, false)
-              : undefined);
-          const intrinsic = measureParagraphIntrinsicWidths(
-            paragraph,
-            context,
-            // §17.18.87 defines maximum content width without soft wrapping.
-            // Capping it at the band loses the relative demand of two growing
-            // columns (notably the 5:1 control). Only the measured auto-column
-            // growth path needs this uncapped interval; preferred and nested
-            // paths retain their existing measurement ceiling.
-            contentGrowth === 'band' && owner === table && ownerLayout !== 'fixed'
-              && preferredWidth === null
-              ? Number.MAX_SAFE_INTEGER
-              : contentWPt,
-            { context: state.ctx, fontFamilyClasses: state.fontFamilyClasses },
-            paragraphMeasurementEnvironment(state),
-            numbering,
-            { preserveWhitespaceOnlyContent: true },
-          );
-          if (cell.noWrap !== true || preferredWidth?.kind === 'dxa' || ownerLayout === 'fixed') return intrinsic;
-          // The nonbreaking text interval is independent of first-line
-          // positioning. Probe without a line-width ceiling: the ordinary
-          // maxWidthPt is capped at contentWPt, which is too small for an
-          // AutoFit noWrap minimum when tcW is omitted (§17.4.29, §17.4.71).
-          // Ordinary min/max still use the authored indent and width limit.
-          const unpositioned = measureParagraphIntrinsicWidths(
-            paragraph,
-            { ...context, firstIndentPt: 0 },
-            Number.MAX_SAFE_INTEGER,
-            { context: state.ctx, fontFamilyClasses: state.fontFamilyClasses },
-            paragraphMeasurementEnvironment(state),
-            numbering,
-            { preserveWhitespaceOnlyContent: true },
-          );
-          return { ...intrinsic, noWrapWidthPt: unpositioned.maxWidthPt };
+    return (cell, preferredWidth) => {
+      const cellStory = enterTableCellStoryContext(ownerStory, tableCellFlowsHorizontally(cell));
+      return measureTableCellIntrinsicWidths(
+        cell,
+        ownerMargins.get(cell as object) ?? effCellMargins(cell, owner),
+        {
+          paragraph: (paragraph) => {
+            const baseContext = resolveParagraphLayoutContext(
+              state.layoutSettings,
+              state.sectionLayout,
+              state.storyContext ?? BODY_STORY_CONTEXT,
+              paragraph,
+            );
+            const markerInput = paragraph.numbering
+              ? state.acquisitionInputs.numberingMarkerShapeInput(
+                  paragraph.numbering,
+                  getDefaultFontSize(paragraph),
+                )
+              : undefined;
+            const cellContext = cellStory.closingMarkHangAdmitted
+              ? baseContext : withoutCjkClosingMarkHang(baseContext);
+            const context = applyNumberingBodyOffset(cellContext, {
+              numbering: paragraph.numbering,
+              ...(markerInput ? { markerInput } : {}),
+              authoredFirstIndentPt: paragraph.indentFirst,
+              tabStops: paragraph.tabStops,
+              defaultTabPt: state.defaultTabPt,
+              service: state.layoutServices?.text,
+              clusterGeometry: false,
+              compatibilityMode: state.layoutSettings.compat.compatibilityMode,
+            });
+            const numbering = context.numberingMarkerGeometry
+              ?? (paragraph.numbering && markerInput && state.layoutServices?.text
+                ? resolveNumberingMarkerGeometry(paragraph.numbering, markerInput, {
+                    authoredFirstIndentPt: paragraph.indentFirst,
+                    physicalIndentLeftPt: context.physicalIndentLeftPt,
+                    tabStops: paragraph.tabStops,
+                    defaultTabPt: state.defaultTabPt,
+                    compatibilityMode: state.layoutSettings.compat.compatibilityMode,
+                    baseRtl: context.baseRtl,
+                  }, state.layoutServices.text, false)
+                : undefined);
+            const intrinsic = measureParagraphIntrinsicWidths(
+              paragraph,
+              context,
+              // §17.18.87 defines maximum content width without soft wrapping.
+              // Capping it at the band loses the relative demand of two growing
+              // columns (notably the 5:1 control). Only the measured auto-column
+              // growth path needs this uncapped interval; preferred and nested
+              // paths retain their existing measurement ceiling.
+              contentGrowth === 'band' && owner === table && ownerLayout !== 'fixed'
+                && preferredWidth === null
+                ? Number.MAX_SAFE_INTEGER
+                : contentWPt,
+              { context: state.ctx, fontFamilyClasses: state.fontFamilyClasses },
+              paragraphMeasurementEnvironment(state, cellStory),
+              numbering,
+              { preserveWhitespaceOnlyContent: true },
+            );
+            if (cell.noWrap !== true || preferredWidth?.kind === 'dxa' || ownerLayout === 'fixed') return intrinsic;
+            // The nonbreaking text interval is independent of first-line
+            // positioning. Probe without a line-width ceiling: the ordinary
+            // maxWidthPt is capped at contentWPt, which is too small for an
+            // AutoFit noWrap minimum when tcW is omitted (§17.4.29, §17.4.71).
+            // Ordinary min/max still use the authored indent and width limit.
+            const unpositioned = measureParagraphIntrinsicWidths(
+              paragraph,
+              { ...context, firstIndentPt: 0 },
+              Number.MAX_SAFE_INTEGER,
+              { context: state.ctx, fontFamilyClasses: state.fontFamilyClasses },
+              paragraphMeasurementEnvironment(state, cellStory),
+              numbering,
+              { preserveWhitespaceOnlyContent: true },
+            );
+            return { ...intrinsic, noWrapWidthPt: unpositioned.maxWidthPt };
+          },
+          nestedTable: (nested) => {
+            const source = state.acquisitionInputs.tableSourceAcquisitionInput(nested);
+            const nestedDecision = decideLogicalTable(nested, source, [{ table: nested, source }], contentWPt,
+              { ...tableDecisionEnvironment(state), topLevel: false, inTableCell: true,
+                tableCellDepth: (tableDecisionEnvironment(state).tableCellDepth ?? 0) + 1 });
+            const intrinsic = intrinsicWidthsForTable(nested, nestedDecision.logical, cellStory);
+            return measureTableIntrinsicWidths(projectTableColumnLayoutInput(source, contentWPt,
+              (row, cellIndex, preferred) => intrinsic(nested.rows[row]!.cells[cellIndex]!, preferred), contentWPt));
+          },
         },
-        nestedTable: (nested) => {
-          const source = state.acquisitionInputs.tableSourceAcquisitionInput(nested);
-          const nestedDecision = decideLogicalTable(nested, source, [{ table: nested, source }], contentWPt,
-            { ...tableDecisionEnvironment(state), topLevel: false, inTableCell: true,
-              tableCellDepth: (tableDecisionEnvironment(state).tableCellDepth ?? 0) + 1 });
-          const intrinsic = intrinsicWidthsForTable(nested, nestedDecision.logical);
-          return measureTableIntrinsicWidths(projectTableColumnLayoutInput(source, contentWPt,
-            (row, cellIndex, preferred) => intrinsic(nested.rows[row]!.cells[cellIndex]!, preferred), contentWPt));
-        },
-      },
-      ownerLayout,
-      preferredWidth,
-    );
+        ownerLayout,
+        preferredWidth,
+      );
+    };
   };
   const maximumWidthPt = isFixedNestedTable
     // ECMA-376 §17.18.87: the containing cell is not an implicit tblW.
@@ -3936,6 +3981,9 @@ function tableCellOwnerState(state: BodyAcquisitionState): BodyAcquisitionState 
   const { sectionFlow, ...section } = state.sectionLayout;
   return {
     ...(verticalPhysicalContentState(state) as BodyAcquisitionState),
+    // Upright content of a vertical section is outside the measured class of
+    // WORD_JUSTIFICATION_PUNCTUATION_HANG although it flows lrTb here.
+    storyContext: withoutClosingMarkHangAdmission(state.storyContext),
     uprightPhysicalTable: false,
     sectionLayout: {
       ...section,

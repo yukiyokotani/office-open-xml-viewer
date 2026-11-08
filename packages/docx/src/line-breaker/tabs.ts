@@ -1,7 +1,13 @@
+import type { LineOrderResolver } from '../bidi-line.js';
+import { paragraphLineOrderModel, type LineOrderModel } from '../bidi-line.js';
+import { wordLineEndJustification } from '../layout/line-compatibility.js';
+import { physicalDecimalAlignmentPoint } from './decimal-anchor.js';
 import type { TabStop, DocSettings } from '../types';
 import { nextTabStop, nextTabStopRtl, type ResolvedTabStop } from '../layout/text.js';
 import { wordFloatTabStopPosition, wordPositionalTabReferenceBox } from '../layout/line-compatibility.js';
 import { type LayoutImageSeg, type LayoutMathSeg, type LayoutSeg, type LayoutTabSeg, type LayoutTextSeg } from './model.js';
+import { hasCJKBreakOpportunity } from './text-runs.js';
+import { textBreakOffsets } from './text-break-window.js';
 
 /** ECMA-376 §17.15.1.25 — the ABSENT default for `<w:defaultTabStop>`: "If this
  *  element is omitted, then automatic tab stops should be generated at 720
@@ -10,7 +16,6 @@ import { type LayoutImageSeg, type LayoutMathSeg, type LayoutSeg, type LayoutTab
  *  this via {@link resolveDefaultTabPt}. Shared by line layout and the
  *  numbered-list marker's retained trailing-tab advance. */
 export const DEFAULT_TAB_PT = 36;
-
 
 /** ECMA-376 §17.15.1.25 — resolve the document's automatic tab-stop interval
  *  (pt): the explicit `<w:defaultTabStop>` value when present, else the spec
@@ -21,21 +26,61 @@ export function resolveDefaultTabPt(settings: DocSettings | undefined): number {
   const v = settings?.defaultTabStop;
   // §17.15.1.25 defines automatic stops as multiples of the interval, which is
   // undefined for a non-positive interval; fall back to the documented absent
-  // default (720 twips = 36pt) so the automatic grid always advances.
-  return v != null && v > 0 ? v : DEFAULT_TAB_PT;
+  // default (720 twips = 36pt) so the automatic grid always advances. Library
+  // robustness policy (#2056, no Word control): an interval whose reciprocal
+  // overflows (a subnormal length such as 5e-324 pt) cannot index the grid in
+  // floating point (the stop position becomes non-finite) and resolves the
+  // same way. Every other positive value, sub-twip ones included (a valid
+  // ST_PositiveUniversalMeasure such as "0.01pt"), is kept as authored.
+  return v != null && v > 0 && Number.isFinite(1 / v) ? v : DEFAULT_TAB_PT;
+}
+
+
+/** Measured scope of WORD_TAB_GLUED_TO_FOLLOWING_TEXT (layout/line-compatibility.ts):
+ * the text after the tab is one plain word in one run — a single text segment
+ * that does not start with whitespace, holds no break opportunity before its
+ * trailing spaces and is not continued by a joined segment across a formatting
+ * seam, and that runs in the paragraph's direction (a w:rtl run in a bidi
+ * paragraph, as the measured Hebrew rows; a left-to-right run otherwise: a
+ * Latin word in a bidi paragraph stays out, its tab ending the line as in the
+ * #1672 r4 controls). Optional hyphens, hyphen/URL breaks, no-break hyphens,
+ * CJK/SEA text, fitText, ruby, tate-chu-yoko and snapToChars grids were not
+ * measured; such a
+ * tab keeps the earlier behaviour (it may end the line). Shared by placement
+ * and intrinsic minima so both apply the rule to the same input class. */
+export function wordTabGlueUnit(
+  head: LayoutSeg | undefined,
+  follower: LayoutSeg | undefined,
+  snapToChars: boolean,
+  baseRtl: boolean,
+): head is LayoutTextSeg {
+  if (snapToChars || !head || !('text' in head) || (head.rtl === true) !== baseRtl) return false;
+  const text = head.text;
+  if (text.length === 0 || /^\s/u.test(text)) return false;
+  if (follower && 'text' in follower && follower.joinPrev === true) return false;
+  if (head.fitTextRegionIndex !== undefined || head.ruby || head.tateChuYoko || head.hardJoinPrev
+    || head.noBreakRanges?.length || head.seaBreaks !== undefined || head.optionalHyphen
+    || head.optionalHyphenBreaks?.length || hasCJKBreakOpportunity(text)) return false;
+  const visibleEnd = text.replace(/\s+$/u, '').length;
+  for (const offset of textBreakOffsets(head.explicitBreaks)) {
+    if (offset > 0 && offset < visibleEnd) return false;
+  }
+  return true;
 }
 
 
 /** Resolve normative stop eligibility, then project the displaced line frame
- * through WORD_TAB_DISPLACED_READING_FRAME in layout/line-compatibility.ts. */
+ * through WORD_TAB_DISPLACED_READING_FRAME in layout/line-compatibility.ts,
+ * which applies only to `displacedFrame` tabs (compatibility mode absent or <15). */
 export function nextLineTabStop(
   pen: number,
   stops: readonly ResolvedTabStop[],
   interval: number,
   leadingShift: number,
+  displacedFrame: boolean,
 ): ResolvedTabStop | null {
   const stop = nextTabStop(pen, stops, interval);
-  if (!stop || leadingShift <= 0) return stop;
+  if (!stop || leadingShift <= 0 || !displacedFrame) return stop;
   const custom = stops.some((entry) => entry.alignment !== 'bar' && entry.pos === stop.pos);
   return { ...stop, pos: wordFloatTabStopPosition(stop.pos, custom, leadingShift) };
 }
@@ -67,6 +112,20 @@ export interface BidiTabItem {
   readingGap?: number;
   /** Authored leader retained with a gap already allocated during fitting. */
   leader?: TabStop['leader'];
+  /** WORD_TAB_DISPLACED_READING_FRAME applies to this tab. */
+  displacedFrame?: boolean;
+  /** Its complete cell was admitted past the float window at placement. */
+  windowOverflow?: boolean;
+  /** WORD_ALIGNED_TAB_CELL_FIT_BACK: a fitted-back gap is deferred to paint. */
+  alignedFitBack?: boolean;
+  /** The complete cell's width (px) when {@link alignedFitBack} is set. */
+  cellWidth?: number;
+  /** Logical advance (px) from that cell's start to its decimal point. */
+  cellDecimal?: number;
+  /** Complete queued-cell physical anchor; distinct from the actual prefix. */
+  cellPhysicalDecimal?: number;
+  /** Resolve only for a decimal stop, after its role is known. */
+  resolvePhysicalDecimal?: () => number | undefined;
 }
 
 
@@ -76,6 +135,9 @@ export interface BidiTabResult {
   width: number;
   /** Leader to paint across this tab's span (`'none'`/undefined ⇒ blank). */
   leader?: TabStop['leader'];
+  /** WORD_ALIGNED_TAB_CELL_FIT_BACK: the deferred gap `width` (then 0) may
+   * still take from the line's slack (LayoutTabSeg.alignedGapLimit). */
+  alignedGapLimit?: number;
 }
 
 
@@ -163,6 +225,7 @@ function resolveBidiTabStops(
   const n = items.length;
   const width = items.map((it) => it.width);
   const leader: (TabStop['leader'] | undefined)[] = new Array(n).fill(undefined);
+  const gapLimit: (number | undefined)[] = new Array(n).fill(undefined);
 
   // Width of the content run immediately FOLLOWING index `i` in reading order
   // (up to the next tab / line end) — the trailing/centered stop needs it.
@@ -170,7 +233,7 @@ function resolveBidiTabStops(
   const followAlignmentWidth = (
     from: number,
     role: ReturnType<typeof tabAlignmentRole>,
-  ): Readonly<{ total: number; alignment: number }> => {
+  ): Readonly<{ total: number; alignment: number; decimal: number | undefined }> => {
     let total = 0;
     let decimal: number | undefined;
     for (let j = from; j < n; j++) {
@@ -180,14 +243,16 @@ function resolveBidiTabStops(
       }
       total += width[j];
     }
+    const physicalDecimal = role === 'decimal' ? items[from - 1]?.resolvePhysicalDecimal?.() : undefined;
     return {
       total,
+      decimal,
       alignment: role === 'center'
         ? total / 2
         : role === 'trailing'
           ? total
           : role === 'decimal'
-            ? decimal === undefined ? 0 : total - decimal
+            ? physicalDecimal !== undefined ? total - physicalDecimal : decimal === undefined ? 0 : total - decimal
             : 0,
     };
   };
@@ -225,7 +290,7 @@ function resolveBidiTabStops(
       continue;
     }
     const stop = frame
-      ? nextLineTabStop(pen, customStopsPx, intervalPx, frame.leadingShift)
+      ? nextLineTabStop(pen, customStopsPx, intervalPx, frame.leadingShift, it.displacedFrame === true)
       : nextTabStopRtl(pen, customStopsPx, intervalPx);
     if (!stop) {
       // No stop further left: the tab collapses (following content continues).
@@ -254,29 +319,92 @@ function resolveBidiTabStops(
     // band past that margin; expanding the clamp to that edge would move cells
     // that already fit (and charge larger earlier gaps before later-cell fit).
     // A positive trailing indent still limits allocation to its authored band.
-    // Only a narrowed float window replaces the margin clamp with its available
-    // edge. This is library containment policy, not an Office overflow rule.
+    // A narrowed float window replaces the margin clamp with its available
+    // edge (WORD_ALIGNED_TAB_CELL_FIT_BACK limits the cell to the window), except
+    // where WORD_TAB_DISPLACED_READING_FRAME lets the cell overflow the window.
     const bandLimit = frame?.narrowed
-      ? frame.bandEnd
+      ? it.windowOverflow === true ? Number.POSITIVE_INFINITY : frame.bandEnd
       : Math.min(leftLimitPx, frame?.bandEnd ?? leftLimitPx);
     // WORD_KASHIDA_LINE_FIT: content after a leading tab ends within the fit
     // width; an aligned cell may reach its stop anywhere in the band.
     const trailingLimit = frame?.fitEnd === undefined || role !== 'leading'
       ? bandLimit : Math.min(bandLimit, frame.fitEnd);
+    leader[i] = stop.leader;
+    if (role !== 'leading' && it.alignedFitBack === true) {
+      // WORD_ALIGNED_TAB_CELL_FIT_BACK judges the complete cell (to the
+      // paragraph end or line break, also where it wraps), as left-to-right
+      // placement does: when it does not fit at its stop it is fitted with no
+      // gap, and retained paint gives the gap the room the line leaves, up to
+      // the complete cell's stop-aligned gap, once the line's justification
+      // is known; a justified line keeps it empty (blk-0898-tabs-rtl D2 rows).
+      const cell = it.cellWidth ?? fw;
+      // The complete cell's own decimal point: its first line may end before it.
+      const decimal = it.cellWidth === undefined ? following.decimal : it.cellDecimal;
+      const cellAlignment = role === 'center' ? cell / 2 : role === 'trailing' ? cell
+        : it.cellPhysicalDecimal !== undefined ? cell - it.cellPhysicalDecimal
+          : decimal === undefined ? 0 : cell - decimal;
+      const cellTarget = stop.pos - cellAlignment;
+      // A decimal cell without a decimal point (the mirrored no-separator
+      // fallback) was not measured fitted back; it keeps the in-place walk.
+      if ((role !== 'decimal' || decimal !== undefined) && Math.max(cellTarget, pen) + cell > trailingLimit) {
+        width[i] = 0;
+        if (cellTarget > pen) gapLimit[i] = cellTarget - pen;
+        continue;
+      }
+    }
     if (target + fw > trailingLimit) target = trailingLimit - fw;
     // Never let a tab move the pen backwards (right).
     if (target < pen) target = pen;
     width[i] = target - pen;
-    leader[i] = stop.leader;
     pen = target;
   }
 
-  return { results: items.map((_, i) => ({ width: width[i], leader: leader[i] })), endPen: pen };
+  return {
+    results: items.map((_, i) => gapLimit[i] === undefined
+      ? { width: width[i], leader: leader[i] }
+      : { width: width[i], leader: leader[i], alignedGapLimit: gapLimit[i] }),
+    endPen: pen,
+  };
 }
 
 
+/** Physical decimal acquisition and its retained key share one capability
+ * gate. Ordinary LTR/default tabs do not read or instantiate a bidi provider. */
+export function hasRtlDecimalTabCapability(
+  baseRtl: boolean, stops: readonly Pick<TabStop, 'alignment'>[],
+): boolean {
+  return baseRtl && stops.some(stop => stop.alignment === 'decimal');
+}
+
+/** Acquisition shares the final paragraph's representation policy. */
+export interface BidiTabOrderPolicy {
+  readonly alignment?: string;
+  readonly runDirectionUnauthored?: boolean;
+  readonly lineEndJustificationBeforeMode15?: boolean;
+  readonly doNotExpandShiftReturn?: boolean;
+  readonly endsAtHardBreak?: boolean;
+}
+
+export function tabLineOrderModel(input: Readonly<{
+  baseRtl: boolean; bidiOrdering?: BidiTabOrderPolicy; isJustified?: boolean;
+  stretchLastLine?: boolean; endsWithBreak?: boolean;
+}>): LineOrderModel {
+  if (!input.bidiOrdering) return 'line-level';
+  const policy = input.bidiOrdering;
+  return paragraphLineOrderModel({ ...policy, baseRtl: input.baseRtl,
+    characterSpreadBidi: input.isJustified === true && wordLineEndJustification({
+      ...policy, isLastLine: false, stretchLastLine: input.stretchLastLine,
+    }, input.endsWithBreak === true) === 'character',
+  });
+}
+
 export interface BidiTabPostPassInput {
+  readonly decimalOrder?: LineOrderResolver;
   readonly baseRtl: boolean;
+  readonly bidiOrdering?: BidiTabOrderPolicy;
+  readonly isJustified?: boolean;
+  readonly stretchLastLine?: boolean;
+  readonly endsWithBreak?: boolean;
   /** WORD_KASHIDA_LINE_FIT: the line's fit width when it is narrower than its
    * band; resolved cells end within it, while stops keep the band's frame. */
   readonly fitWidth?: number;
@@ -329,7 +457,7 @@ export function bidiTabFrame(input: Pick<BidiTabPostPassInput,
 /** Resolve bidi tab positions after line content is known, in the visual frame. */
 export function applyBidiTabPostPass(input: BidiTabPostPassInput): number {
   if (!input.baseRtl || !input.currentLine.some((segment) => 'isTab' in segment)) return 0;
-  return resolveBidiTabRange(input, 0, bidiTabFrame(input).startPen).delta;
+  return resolveBidiTabRange(input, 0, bidiTabFrame(input).startPen, true).delta;
 }
 
 /** Called only at a tab boundary: all preceding cells are complete. Tabs reset
@@ -360,6 +488,7 @@ function resolveBidiTabRange(
   input: BidiTabPostPassInput,
   from: number,
   startPen: number,
+  projectPhysicalDecimal = false,
 ): { delta: number; endPen: number } {
   const {
     baseRtl,
@@ -385,6 +514,12 @@ function resolveBidiTabRange(
     ptab: 'isTab' in s ? s.ptab : undefined,
     readingGap: 'isTab' in s ? s.readingGap : undefined,
     leader: 'isTab' in s ? s.leader : undefined,
+    displacedFrame: 'isTab' in s ? s.displacedFloatTabFrame : undefined,
+    windowOverflow: 'isTab' in s ? s.windowOverflow : undefined,
+    alignedFitBack: 'isTab' in s ? s.alignedFitBack : undefined,
+    cellWidth: 'isTab' in s ? s.alignedCellWidth : undefined,
+    cellDecimal: 'isTab' in s ? s.alignedCellDecimal : undefined,
+    cellPhysicalDecimal: 'isTab' in s ? s.alignedCellPhysicalDecimal : undefined,
   }));
   for (let tabIndex = 0; tabIndex < currentLine.length; tabIndex += 1) {
     if (!('isTab' in currentLine[tabIndex]!)) continue;
@@ -398,10 +533,28 @@ function resolveBidiTabRange(
     const itemIndex = tabIndex + 1 + point.segmentIndex;
     const segment = currentLine[itemIndex]!;
     if ('text' in segment) {
-      items[itemIndex]!.decimalOffset = strAdvance(
-        segment,
-        segment.text.slice(0, point.charOffset),
-      );
+      const prefix = strAdvance(segment, segment.text.slice(0, point.charOffset));
+      items[itemIndex]!.decimalOffset = prefix;
+      const tab = currentLine[tabIndex]!;
+      // Library capability: terminal aligned cells retain full-context
+      // acquisition. Nonterminal decimal cells keep their previous allocation;
+      // the incremental stop walk does not retain that context, and repeatedly
+      // resolving its growing prefix would be quadratic. A supported source
+      // cell projects once at flush, never once per word or later continuation.
+      // The selector also supplies a numeric-end fallback. That fallback,
+      // including a prefix whose real period is on a later line, stays legacy.
+      if (projectPhysicalDecimal && 'isTab' in tab && tab.alignedFitBack
+        && segment.text[point.charOffset] === '.') {
+        items[tabIndex]!.resolvePhysicalDecimal = () => physicalDecimalAlignmentPoint({
+          segments: input.currentLine,
+          point: { ...point, segmentIndex: from + itemIndex },
+          cellStart: from + tabIndex + 1, cellEnd: from + cellEnd,
+          advances: input.currentLine.map(member => member.measuredWidth),
+          selectedPrefixAdvance: prefix + (segment.leadingWordBoundaryPx ?? 0),
+          model: tabLineOrderModel(input),
+          resolveOrder: input.decimalOrder,
+        });
+      }
     }
   }
   // Margin-anchored frame (§17.3.1.37 — stops measure from the TEXT MARGIN):
@@ -421,6 +574,7 @@ function resolveBidiTabRange(
     delta += res[i].width - s.measuredWidth;
     s.measuredWidth = res[i].width;
     (s as LayoutTabSeg).leader = res[i].leader;
+    (s as LayoutTabSeg).alignedGapLimit = res[i].alignedGapLimit;
   }
   return { delta, endPen };
 }

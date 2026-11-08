@@ -363,6 +363,9 @@ pub(super) fn project(
                             budget.push(
                                 &mut paragraph.runs,
                                 DocRun::Image(Box::new(ImageRun {
+                                    inline_object_font_facts: None,
+                                    inline_object_origin: None,
+                                    inline_effect_extent: None,
                                     image_path: image.resource_key,
                                     mime_type,
                                     svg_image_path: None,

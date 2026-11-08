@@ -1178,6 +1178,9 @@ impl<'a> Reader<'a> {
                 anchor_x_relative_from: None,
                 anchor_y_relative_from: None,
                 anchor_acquisition: None,
+                inline_object_font_facts: None,
+                inline_object_origin: None,
+                inline_effect_extent: None,
                 list_label: Some(align),
             })),
         ];

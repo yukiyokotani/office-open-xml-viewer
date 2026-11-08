@@ -15,6 +15,16 @@ export const BODY_STORY_CONTEXT: StoryContext = Object.freeze({
   lineNumberingEligible: true,
 });
 
+/** The main body's root story position, which carries
+ * StoryContext.closingMarkHangAdmitted (as do header and footnote story roots,
+ * production-body-layout.ts layoutBodyStory). BODY_STORY_CONTEXT, the
+ * fallback for states without a story, never admits. */
+export const MAIN_BODY_STORY_CONTEXT: StoryContext = Object.freeze({
+  ...BODY_STORY_CONTEXT,
+  closingMarkHangAdmitted: true,
+  inlineObjectRunLeadingAdmitted: true,
+});
+
 type ParagraphContextState = Pick<
   BodyAcquisitionState,
   'layoutSettings' | 'sectionLayout' | 'acquisitionInputs'
@@ -85,12 +95,13 @@ function applyNumberingContext(
     authoredFirstIndentPt: paragraph.indentFirst,
     tabStops: paragraph.tabStops,
     defaultTabPt: state.defaultTabPt,
+    compatibilityMode: state.layoutSettings.compat.compatibilityMode,
     service: state.layoutServices?.text,
   });
 }
 
 export function resolveBodyParagraphLayoutContext(
-  state: ParagraphContextState,
+  state: ParagraphContextState & Partial<Pick<BodyAcquisitionState, 'storyContext'>>,
   paragraph: ParagraphLayoutSource,
 ): ParagraphLayoutContext {
   return applyNumberingContext(
@@ -99,7 +110,10 @@ export function resolveBodyParagraphLayoutContext(
     resolveParagraphLayoutContext(
       state.layoutSettings,
       state.sectionLayout,
-      BODY_STORY_CONTEXT,
+      // A top-level paragraph keeps the main body's hang admission only
+      // when the state is the main body root itself (frame paragraphs
+      // reaching here stay outside the class by their framePr).
+      state.storyContext === MAIN_BODY_STORY_CONTEXT ? MAIN_BODY_STORY_CONTEXT : BODY_STORY_CONTEXT,
       paragraph,
     ),
   );
@@ -121,11 +135,15 @@ export function resolveStateParagraphLayoutContext(
   );
 }
 
-export function withTableCellStory(state: BodyAcquisitionState): BodyAcquisitionState {
+export function withTableCellStory(
+  state: BodyAcquisitionState,
+  cellFlowsHorizontally: boolean,
+): BodyAcquisitionState {
   return {
     ...state,
     storyContext: enterTableCellStoryContext(
       state.storyContext ?? BODY_STORY_CONTEXT,
+      cellFlowsHorizontally,
     ),
   };
 }

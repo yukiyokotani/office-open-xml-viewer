@@ -1,3 +1,8 @@
+import { closingPairScopeApplies } from '../line-breaker/closing-pair-advance.js';
+import { hasNativeUnitReceipt, hasNativeVisiblePrefix } from '../line-breaker/native-unit-contract.js';
+import { prepareSourceSpaceCells, type SourceSpaceCells } from './source-space-cells.js';
+import { hasRtlDecimalTabCapability } from '../line-breaker/tabs.js';
+import { wordLineEndJustification } from './line-compatibility.js';
 import {
   countedSpacingAdvance,
   countSpacingCharacters,
@@ -81,6 +86,9 @@ import { wordTrackChangeDecoration } from './paint-compatibility.js';
 import type { DocRun, ShapeRun } from '../types.js';
 import {
   computeLineVisualOrder,
+  computeLineSourceCellOrder,
+  lineOrderEngineIdentity,
+  paragraphLineOrderModel,
   jcIsFullyJustified,
   jcStretchesLastLine,
   resolveAlignEdge,
@@ -160,6 +168,7 @@ import {
   wordPreservesLowerLayerSameParagraphComposition,
   wordTextBoxVisibleAnchorExtentPt,
   wordGridPictureLineOriginPt,
+  wordStepsThroughWrapLines,
 } from './anchor-compatibility.js';
 import {
   wordRunVerticalAlignRaisePt,
@@ -253,6 +262,9 @@ export type MeasuredTextPlanSegment = Readonly<
     /** Acquisition-only authority used to shape the final contextual kashida string. */
     textLayoutService?: import('./text.js').TextLayoutService;
     textShapeRequest?: import('./text.js').TextShapeRequest;
+    /** Private acquisition receipt, consumed before publishing paint. */
+    nativeBaseDirection?: 'ltr' | 'rtl';
+    nativeVisiblePrefix?: import('./text.js').NativeVisiblePrefixAuthority;
     /** Selected face's font box, retained independently of authored decoration
      * so application overlays can use the same character-height rectangle. */
     selectedFaceFontBox?: Readonly<{ ascentPt: number; descentPt: number }>;
@@ -312,6 +324,8 @@ export interface MeasuredTabPlanSegment {
   readonly kind: 'tab';
   readonly range: import('./types.js').TextRange;
   readonly measuredWidthPt: number;
+  /** WORD_ALIGNED_TAB_CELL_FIT_BACK: gap the tab may still take from the slack. */
+  readonly alignedGapLimitPt?: number;
   readonly leader: import('./types.js').TabPlacement['leader'];
   readonly fontSizePt: number;
   readonly bold?: boolean;
@@ -348,7 +362,8 @@ export interface MeasuredResourcePlanSegment {
   readonly widthPt: number;
   readonly heightPt: number;
   readonly topOffsetPt: number;
-  /** Relative paint offset from the pen position; the advance is unchanged. */
+  /** Relative paint offset from the pen position (§20.4.2.6 inline effect
+   * extent before the object, or a list label's inset); the advance is unchanged. */
   readonly leftOffsetPt?: number;
   readonly orientation?: import('./types.js').UprightResourceOrientation;
 }
@@ -361,6 +376,8 @@ export interface MeasuredUnavailableResourcePlanSegment {
   readonly widthPt: number;
   readonly heightPt: number;
   readonly topOffsetPt: number;
+  /** §20.4.2.6 inline effect extent before the object; the advance is unchanged. */
+  readonly leftOffsetPt?: number;
   readonly drawingId: string;
 }
 
@@ -430,6 +447,9 @@ export interface PlanLineInput {
   readonly doNotExpandShiftReturn?: boolean;
   /** compatibilityMode is absent or below 15 (WORD_LINE_END_JUSTIFICATION). */
   readonly lineEndJustificationBeforeMode15?: boolean;
+  /** Compatibility shape-text fallback preserves its prior ordering when
+   * authoritative WordprocessingML direction provenance is unavailable. */
+  readonly runDirectionUnauthored?: boolean;
   /** A thaiDistribute paragraph below mode 15 with no character grid
    *  (WORD_THAI_DISTRIBUTE_PROPORTIONAL_SPREAD). */
   readonly thaiProportionalSpread?: boolean;
@@ -555,32 +575,6 @@ function thaiProportionalClusterAdvance(
     }
     return weight;
   };
-}
-
-/** How {@link WORD_LINE_END_JUSTIFICATION} justifies a line of a justified paragraph:
- * at its gaps ('word'), by an equal advance after every character
- * ('character'), at its gaps or else centred ('word-or-centre'), or not at all.
- * Soft-wrapped lines keep the paragraph's ordinary justification. */
-function lineEndJustification(
-  input: Pick<PlanLineInput, 'alignment' | 'isLastLine' | 'stretchLastLine'
-    | 'doNotExpandShiftReturn' | 'lineEndJustificationBeforeMode15' | 'endsAtHardBreak'>,
-  endsWithBreak: boolean,
-): 'word' | 'character' | 'word-or-centre' | null {
-  if (!endsWithBreak && !input.isLastLine) return 'word';
-  // A line ended by a page or column break is justified like a soft-wrapped
-  // line before compatibility mode 15 and like a final line from mode 15;
-  // doNotExpandShiftReturn does not apply to it.
-  const hardBreak = !endsWithBreak && input.endsAtHardBreak === true;
-  if (hardBreak && input.alignment !== 'distribute') {
-    return input.lineEndJustificationBeforeMode15 === true ? 'word' : null;
-  }
-  if (input.alignment === 'distribute' || (input.alignment === undefined && input.stretchLastLine)) {
-    return input.lineEndJustificationBeforeMode15 === true ? 'character' : 'word-or-centre';
-  }
-  if (!endsWithBreak || input.doNotExpandShiftReturn === true) return null;
-  return input.alignment === 'thaiDistribute' && input.lineEndJustificationBeforeMode15 !== true
-    ? 'character'
-    : 'word';
 }
 
 /** Whether a justified line ended by a manual break widens inter-CJK
@@ -1543,14 +1537,10 @@ export function planLine(input: PlanLineInput): LineLayout {
   const { line } = input;
   let segments = line.segments;
   const bidi = input.baseRtl || segmentsHaveRtl(segments);
-  const visual = computeLineVisualOrder(
-    segments.map((segment) => segment.kind === 'tab'
-      ? { isTab: true }
-      : segment.kind === 'text'
-        ? { text: segment.text, rtl: segment.rtl, digitsAsAN: segment.digitsAsAN }
-        : {}),
-    input.baseRtl,
-  );
+  // The existing character-spread gap model cannot place directional isolates.
+  const characterSpreadBidi = bidi && input.displayMathJustification === undefined
+    && resolveAlignEdge(input.alignment, input.baseRtl) === 'justify'
+    && wordLineEndJustification(input, line.endsWithBreak) === 'character';
   let naturalWidthPt = segments.reduce((sum, segment) => sum + segmentWidth(segment), 0);
   const lineLeftPt = input.paragraphXPt + line.xOffsetPt;
   // A margin-allocated tab cell widens this line's band past the trailing
@@ -1572,17 +1562,77 @@ export function planLine(input: PlanLineInput): LineLayout {
   const edge = input.displayMathJustification === undefined
     ? resolveAlignEdge(input.alignment, input.baseRtl)
     : displayMathEdge(input.displayMathJustification);
-  const lineEndRule = edge === 'justify' ? lineEndJustification(input, line.endsWithBreak) : null;
+  const lineEndRule = edge === 'justify' ? wordLineEndJustification(input, line.endsWithBreak) : null;
   // Right-to-left lines keep word justification (WORD_LINE_END_JUSTIFICATION
   // measured character spreading on left-to-right lines only).
   const justification = lineEndRule === 'character' && bidi ? 'word' : lineEndRule;
   const applyJustify = justification !== null;
-  // Lines that are not soft-wrapped are justified only after their last tab.
+  const originalAfterLastTab = lastTabSegmentIndex(segments) + 1;
+  // Stage 1 capability: only unambiguously nonnegative natural word slack.
+  // Accepted compression, hang-funded negative budgets, character topology,
+  // compatibility-shape provenance and rewrite-capable Kashida stay legacy.
+  // One fine view owns UAX order, terminal classification, gaps and paint;
+  // never choose it after measuring against a different coarse budget.
+  let preparedSourceCells: ReturnType<typeof prepareSourceSpaceCells>;
+  // The ordinary path pays one primitive presence check, not another source
+  // scan. A selected bundle is atomic, so only its first receipt enables the
+  // complete validation walk.
+  const chargedNativeUnits = segments[0]?.kind === 'text'
+    && segments[0].nativeBaseDirection !== undefined
+    && segments.every(segment => segment.kind === 'text' && segment.nativeBaseDirection !== undefined);
+  if (bidi && !characterSpreadBidi && !input.runDirectionUnauthored
+    && (justification === 'word' || justification === 'word-or-centre'
+      || chargedNativeUnits)
+    && kashidaLevel(input.alignment) === null && lineSlackPt >= 0
+    && line.gapPlan === undefined && line.justifiedCompressionPt === undefined) {
+    // A source-tail SPACE needs an established terminal budget before this
+    // representation can own its gaps. Distribute currently lacks that hanging
+    // policy (#2071); preserve its COMPLETE old line rather than invent credit
+    // or combine fine paint with an incomplete coarse terminal budget.
+    // Certified fixed-band native units retain FULL charged tail SPACE. No
+    // hanging credit or justification budget is introduced for LEFT/START.
+    const terminalBudgetKnown = chargedNativeUnits || wordLineEndSpaceHangs(bidi, input.wordWrap !== false)
+      || (input.displayMathJustification === undefined
+        && wordRtlJustifiedVisibleFitApplies(input.alignment, input.baseRtl === true, input.wordWrap !== false));
+    const hasTerminalSpace = hasLogicalTailSpace(segments);
+    if (!hasTerminalSpace || terminalBudgetKnown) preparedSourceCells = prepareSourceSpaceCells(segments);
+  }
+  const descriptors = segments.map(segment => segment.kind === 'tab'
+    ? { isTab: true }
+    : segment.kind === 'text'
+      ? { text: segment.text, rtl: segment.rtl, digitsAsAN: segment.digitsAsAN }
+      : {});
+  const hasChargedNativeSpace = chargedNativeUnits
+    && segments.some(segment => segment.kind === 'text' && segment.text.includes(' '));
+  if (hasChargedNativeSpace && !preparedSourceCells) {
+    throw new TypeError('Selected native source bundle lost projectable SPACE geometry');
+  }
+  const orderModel = paragraphLineOrderModel({
+    baseRtl: input.baseRtl, alignment: input.alignment,
+    runDirectionUnauthored: input.runDirectionUnauthored, characterSpreadBidi,
+  });
+  const resolved = preparedSourceCells
+    ? computeLineSourceCellOrder(descriptors, preparedSourceCells.projection, input.baseRtl, orderModel) : undefined;
+  if (hasChargedNativeSpace && resolved?.view !== 'cells') {
+    throw new TypeError('Selected native source bundle lost its authored host projection');
+  }
+  const sourceCells: SourceSpaceCells | undefined = resolved?.view === 'cells'
+    ? preparedSourceCells!.materialize() : undefined;
+  if (sourceCells) segments = sourceCells.segments;
+  const visual = resolved ? {
+    order: resolved.order,
+    // A validated SPACE uses its OWN level inside the ORIGINAL author span.
+    // A rejected mixed visible island returns only the full legacy parent view.
+    rtl: sourceCells ? resolved.rtl.map((rtl, index) => sourceCells!.spaceOnly[index]
+      ? (resolved.anchorLevels[index]! & 1) === 1 : rtl) : resolved.rtl,
+  } : computeLineVisualOrder(descriptors, input.baseRtl, orderModel);
   const softWrapped = !line.endsWithBreak && !input.isLastLine;
   // WORD_KASHIDA_LINE_FIT: soft-wrapped kashida and thaiDistribute lines
   // open no inter-CJK gaps.
   const softLineSpacesOnly = softWrapped && wordSoftLineJustifiesAtSpacesOnly(input.alignment);
-  const afterLastTab = softWrapped ? 0 : lastTabSegmentIndex(segments) + 1;
+  // Every line is justified only after its last tab: the stops before it keep
+  // their positions (WORD_ALIGNED_TAB_CELL_FIT_BACK; soft-wrapped lines too).
+  const afterLastTab = sourceCells?.parentCellStarts[originalAfterLastTab] ?? originalAfterLastTab;
   // WORD_RTL_JUSTIFIED_VISIBLE_FIT: the breaker admitted this right-to-left
   // line by its visible prefix, so its line-end U+0020 hangs past the line's
   // end edge and the visible text keeps the start edge.
@@ -1605,6 +1655,7 @@ export function planLine(input: PlanLineInput): LineLayout {
     ? Math.min(rtlInteriorPt, Math.max(0, -(lineSlackPt + rtlHangingSpacePt))) : 0;
   const rtlJustifySlackBonusPt = rtlHangingSpacePt + rtlInteriorAbsorbPt;
   const kashida = applyJustify ? kashidaLevel(input.alignment) : null;
+  let kashidaAppliedPt = 0;
   if (kashida && lineSlackPt + rtlJustifySlackBonusPt > 0) {
     // Kashida rewrites one contextual paint operation. A segment already split
     // into cluster-origin operations, or whose elongated text would reach the
@@ -1647,11 +1698,16 @@ export function planLine(input: PlanLineInput): LineLayout {
         if (!base) throw new Error('Kashida acquisition requires a contextual text paint operation');
         return {
           ...segment,
+          // Generated kashida text is an independent native request, never a
+          // receipt for the original source-level shaping unit.
+          nativeBaseDirection: undefined,
+          nativeVisiblePrefix: undefined,
           measuredWidthPt: segment.measuredWidthPt + plan.advanceDeltaPx,
           basePaintOps: [{ ...base, text: plan.text, sourceMapping: 'kashida' }],
         };
       });
       naturalWidthPt += distribution.appliedPx;
+      kashidaAppliedPt = distribution.appliedPx;
       lineSlackPt = distribution.residualPx - rtlJustifySlackBonusPt;
     }
   }
@@ -1686,7 +1742,14 @@ export function planLine(input: PlanLineInput): LineLayout {
     perGapPt = distribution?.perGap ?? 0;
     stretchByIndex = distribution?.perSeg ?? null;
     distributedWidthPt = distributedDelta(distribution);
-  } else if (line.justifiedCompressionPt !== undefined) {
+  } else if (line.justifiedCompressionPt !== undefined
+    && (line.justifiedCompressionPt > 0
+      || (input.alignment !== 'distribute' && input.alignment !== 'lowKashida'))) {
+    // The added distribute/lowKashida capability owns admission and accepted
+    // contraction only. Uncompressed lines retain their previous positive
+    // geometry: source gaps inside opposite-direction run slices still lack
+    // physical-edge ownership (#2090), so this scalar fit plan cannot replace
+    // that expansion model. Existing both/justify C0 planning stays unchanged.
     const model = line.gapPlan;
     if (!model) throw new Error('Justified line is missing its retained gap plan');
     const retainedNaturalWidthPt = naturalWidthPt;
@@ -1815,7 +1878,6 @@ export function planLine(input: PlanLineInput): LineLayout {
       residualPt -= absorbPt;
     }
   }
-  const drawnWidthPt = naturalWidthPt + distributedWidthPt;
   // WORD_FLOAT_GAP_FLOW aligns the visible word edge, while
   // the trailing separator remains source-owned. Its advance must not shift
   // centred/right-aligned gap text. Other soft-wrapped lines exclude their
@@ -1823,13 +1885,38 @@ export function planLine(input: PlanLineInput): LineLayout {
   const trailingSeparatorPt = line.availableWidthPt < input.availableWidthPt && !bidi
     ? trailingAdvancePt(segments, (text) => text.trimEnd().length)
     : hangingLineEndSpacePt;
+  // WORD_ALIGNED_TAB_CELL_FIT_BACK: an end/center/decimal cell fitted with no
+  // gap slides toward its stop by the room the line leaves (visible width),
+  // never past its stop-aligned gap. A justified line that distributed its
+  // slack keeps the gap empty, kashida elongation included (the measured
+  // lowKashida rows justify such a line; its slack is not the gap's). Only the
+  // line's last tab is elastic: widening an earlier one would move the later
+  // stops (placement never defers a cell that a later tab ends;
+  // break-opportunities alignedCellEndsAtTab).
+  if (distributedWidthPt <= 0 && kashidaAppliedPt <= 0 && !centreUnjustified) {
+    const elasticIndex = lastTabSegmentIndex(segments);
+    const elastic = segments[elasticIndex];
+    if (elastic?.kind === 'tab' && (elastic.alignedGapLimitPt ?? 0) > 0) {
+      const takePt = Math.max(0, Math.min(elastic.alignedGapLimitPt!, lineSlackPt + trailingSeparatorPt));
+      if (takePt > 0) {
+        segments = segments.map((segment, segmentIndex) => segmentIndex === elasticIndex && segment.kind === 'tab'
+          ? { ...segment, measuredWidthPt: segment.measuredWidthPt + takePt }
+          : segment);
+        naturalWidthPt += takePt;
+        lineSlackPt -= takePt;
+      }
+    }
+  }
+  const drawnWidthPt = naturalWidthPt + distributedWidthPt;
   const alignmentSlackPt = lineSlackPt - distributedWidthPt + trailingSeparatorPt;
   const naturalAlignmentOffsetPt = edge === 'right'
     ? alignmentSlackPt
     : edge === 'center' || centreUnjustified
       ? alignmentSlackPt / 2
-      : edge === 'justify' && input.baseRtl && (rtlVisibleEdge || !applyJustify
-        || ((!softWrapped || softLineSpacesOnly) && distributedWidthPt <= 0))
+      // A right-to-left justified line that distributes nothing (a single word,
+      // or a label alone before a tab moved by WORD_TAB_GLUED_TO_FOLLOWING_TEXT,
+      // soft-wrapped or not) stays at its start edge (blk-0898-tabs-move R rows).
+      : edge === 'justify' && input.baseRtl && (rtlVisibleEdge || !applyJustify || distributedWidthPt <= 0)
         // Right-hanging line-end spaces pass the start edge; the visible text
         // keeps it (blk-0898-kfit6 final lines keep their space inside).
         ? alignmentSlackPt + rtlRightHangPt
@@ -1845,8 +1932,16 @@ export function planLine(input: PlanLineInput): LineLayout {
     const segment = segments[segmentIndex];
     if (!segment) continue;
     const stretch = stretchByIndex?.get(segmentIndex);
-    const internalStretchPt = stretch?.internalStretch ?? 0;
-    const widthPt = segmentWidth(segment) + internalStretchPt;
+    // Each atomic source-space cell owns its existing positive allocation.
+    // Non-space cuts and every legacy/negative path keep their old plan.
+    const trailingDeltaPt = stretch?.trailingGap ? stretch.trailingDelta ?? perGapPt : 0;
+    const sourceSpaceDeltaPt = sourceCells?.spaceOnly[segmentIndex] && trailingDeltaPt > 0
+      ? trailingDeltaPt : 0;
+    const geometryStretch = sourceSpaceDeltaPt > 0 && stretch
+      ? { ...stretch, trailingGap: false, trailingDelta: 0 } : stretch;
+    const internalStretchPt = geometryStretch?.internalStretch ?? 0;
+    // Moving Q external into its atomic source cell preserves W+I+T.
+    const widthPt = segmentWidth(segment) + internalStretchPt + sourceSpaceDeltaPt;
     if (segment.kind === 'tab') {
       const bounds = { xPt, yPt: line.topPt, widthPt: segment.measuredWidthPt, heightPt: line.advancePt };
       const decorations = segment.underline
@@ -1892,7 +1987,7 @@ export function planLine(input: PlanLineInput): LineLayout {
         range: segment.range,
         drawingId: segment.drawingId,
         bounds: {
-          xPt: xPt + (segment.kind === 'inline-drawing' ? segment.leftOffsetPt ?? 0 : 0),
+          xPt: xPt + (segment.leftOffsetPt ?? 0),
           yPt: line.baselinePt + segment.topOffsetPt,
           widthPt: segment.widthPt,
           heightPt: segment.heightPt,
@@ -1925,13 +2020,20 @@ export function planLine(input: PlanLineInput): LineLayout {
         selectedFaceFontBox,
         retainedGeometry,
         direction: _direction,
+        nativeBaseDirection: _nativeBaseDirection,
+        nativeVisiblePrefix: _nativeVisiblePrefix,
         ...style
       } = segment;
-      const textGeometry = retainedTextGeometry(segment, stretch, perGapPt);
-      const direction = visual.rtl[segmentIndex] ? 'rtl' : 'ltr';
+      const geometry = retainedTextGeometry(segment, geometryStretch, perGapPt);
+      const textGeometry = sourceSpaceDeltaPt > 0 ? {
+        ...geometry,
+        clusters: [{ ...geometry.clusters[0]!, advancePt: geometry.clusters[0]!.advancePt + sourceSpaceDeltaPt }],
+      } : geometry;
+      const direction = !sourceCells?.spaceOnly[segmentIndex] && segment.nativeBaseDirection !== undefined
+        ? segment.nativeBaseDirection : visual.rtl[segmentIndex] ? 'rtl' : 'ltr';
       const trailingWhitespaceStart = segment.text.trimEnd().length;
-      const rtlLeadingGapPt = direction === 'rtl'
-        ? (style.fitText?.trailingPadPt ?? 0) + segment.clusters
+      const rtlLeadingGapPt = direction === 'rtl' && !sourceCells?.spaceOnly[segmentIndex]
+        ? (style.fitText?.trailingPadPt ?? 0) + textGeometry.clusters
             .filter((cluster) => cluster.range.start >= segment.range.start + trailingWhitespaceStart)
             .reduce((sum, cluster) => sum + cluster.advancePt, 0)
         : 0;
@@ -1949,7 +2051,7 @@ export function planLine(input: PlanLineInput): LineLayout {
         ? retainedRtlPaintOperations(placedPaintOps, textGeometry.clusters)
         : placedPaintOps;
       // `word-run-decoration-justified-advance`
-      const ownedTrailingSlackPt = stretch?.trailingGap ? stretch.trailingDelta ?? perGapPt : 0;
+      const ownedTrailingSlackPt = geometryStretch?.trailingGap ? geometryStretch.trailingDelta ?? perGapPt : 0;
       const origin = { xPt: xPt + rtlLeadingGapPt, yPt: line.baselinePt };
       const baselineOffsetPt = textGeometry.paintOps[0]?.offset.yPt ?? 0;
       const geometryOrigin = {
@@ -1998,6 +2100,9 @@ export function planLine(input: PlanLineInput): LineLayout {
         ...style,
         kind: 'text',
         origin,
+        // Source spaces now own their expansion in this same retained box.
+        // Text-run projection uses it unchanged. The transparent DOM layer's
+        // existing lack of per-space CSS pitch is not a new hit-test promise.
         bounds: { xPt, yPt: line.topPt, widthPt, heightPt: line.advancePt },
         highlightBounds,
         advancePt: widthPt,
@@ -2052,7 +2157,7 @@ export function planLine(input: PlanLineInput): LineLayout {
       placements.push(placed);
     }
     xPt += widthPt;
-    if (stretch?.trailingGap) xPt += stretch.trailingDelta ?? perGapPt;
+    if (geometryStretch?.trailingGap) xPt += geometryStretch.trailingDelta ?? perGapPt;
   }
   // WORD_LINE_END_SPACE_HANGS: no decoration over the hanging line-end
   // spaces; with ulTrailSpace (§17.15.3.8) they keep every decoration up to
@@ -2735,7 +2840,28 @@ function retainedNumberingPlan(
     physicalIndentLeftPt: context.physicalIndentLeftPt,
     tabStops: paragraph.tabStops,
     defaultTabPt: context.defaultTabPt,
+    compatibilityMode: options.environment.compatibilityMode,
+    baseRtl: context.baseRtl,
   }, service);
+}
+
+/** Do not inherit the pair policy into a nested story when a caller carries
+ * its parent's environment. Source ownership is known at acquisition, not paint. */
+function closingPairRootSourceEligible(options: Pick<ParagraphAcquisitionOptions,
+  'source' | 'ordinaryFlow' | 'anchorCellBounds'>): boolean {
+  return options.source.story === 'body' && options.source.storyInstance === 'body'
+    && options.source.path.length === 1 && options.ordinaryFlow && options.anchorCellBounds === undefined;
+}
+
+/** The measured frame belongs to ordinary root body paragraphs, never a
+ * frame, story, table cell, compatibility shape or active document grid.
+ * Keep this semantic admission identical in the reusable line-cache key. */
+function numberedWindowScopeEligible(options: Pick<ParagraphAcquisitionOptions,
+  'source' | 'ordinaryFlow' | 'anchorCellBounds' | 'context'>): boolean {
+  return options.source.story === 'body' && options.source.storyInstance === 'body'
+    && options.source.path.length === 1 && options.ordinaryFlow
+    && options.anchorCellBounds === undefined && !options.context.runDirectionUnauthored
+    && !options.context.lineGrid.active && !options.context.characterGrid.active;
 }
 
 /** Body start for a numbered first line whose marker leading edge a float
@@ -2745,7 +2871,8 @@ function retainedNumberingPlan(
 function numberingFirstLineWindow(
   paragraph: ParagraphAcquisitionInput,
   context: ParagraphLayoutContext,
-  options: Pick<ParagraphAcquisitionOptions, 'environment'>,
+  options: Pick<ParagraphAcquisitionOptions, 'environment' | 'source' | 'ordinaryFlow' | 'anchorCellBounds' | 'context'>,
+  ownsUnresolvedFloatFrame: boolean,
 ): NonNullable<import('../line-breaker/model.js').WrapLayoutCtx['numberingFirstLine']> | undefined {
   const numbering = paragraph.numbering;
   const markerInput = paragraph.numberingMarkerShapeInput;
@@ -2755,14 +2882,46 @@ function numberingFirstLineWindow(
     || ((numbering?.suff || 'tab') === 'tab' && paragraph.indentFirst < 0);
   if (!numbering || !markerInput || !service || !usesResolvedBodyOffset
     || (numbering.text === '' && numbering.picBulletImagePath == null)) return undefined;
+  // `word-numbered-window-frame` (modes absent/12/14): marker,
+  // custom stops and automatic grid follow each actual column float window;
+  // the implicit hanging stop remains at max(indent, window). This is NOT
+  // Part4 §14.8.3.12's true-flag full-relative-indent rule. Preserve true,
+  // modern, RTL, non-left markers/suffixes and unsupported geometry unchanged.
+  // Part4 §14.8.3.16/.31 can remove the implicit stop; either true setting
+  // therefore also stays outside this observed frame, not normalized to false.
+  // Querying only the indented band loses an exclusion before/equal to its
+  // first edge; one column-owned frame must drive admission AND retained paint.
+  // Controls distinguish implicit/custom/grid stops, equality and pre-start
+  // floats, narrow multi-gap heads and tight windows. Empty items, positive
+  // first indents, non-left stops and out-of-column authored starts are outside
+  // this observed class. Widths/heads/grid intervals stay source-measured.
+  // Only self-owned, initially unresolved floats were measured. External/mixed
+  // exclusions and pre-resolved wrap contexts retain the established frame.
+  // East Asian hanging composition is unmeasured by this legacy Latin class.
+  const numberedWindowFrameApplies = ownsUnresolvedFloatFrame && !context.hasEastAsianText && numberedWindowScopeEligible(options) && !context.baseRtl && !options.environment.verticalCJK
+    && !options.environment.verticalPageFrame
+    && (options.environment.compatibilityMode === undefined
+      || options.environment.compatibilityMode === 12 || options.environment.compatibilityMode === 14)
+    && options.environment.doNotSuppressIndentation !== true && options.environment.ww11IndentRules !== true
+    && options.environment.doNotUseIndentAsNumberingTabStop !== true && options.environment.noTabHangInd !== true
+    && (paragraph.alignment == null || paragraph.alignment === 'left' || paragraph.alignment === 'start')
+    && (numbering.jc == null || numbering.jc === 'left') && (numbering.suff || 'tab') === 'tab'
+    && !numbering.picBulletImagePath && paragraph.indentFirst <= 0
+    && context.physicalIndentLeftPt + paragraph.indentFirst >= 0
+    && paragraph.tabStops.every(stop => stop.alignment === 'left')
+    && paragraph.runs.some(run => run.type === 'text' && run.text.trim().length > 0);
   return {
     authoredFirstIndentPx: paragraph.indentFirst,
+    ...(numberedWindowFrameApplies ? { columnOriginInsetPx: context.physicalIndentLeftPt } : {}),
     bodyIndentAt: (markerLeadingEdgePx) => resolveNumberingMarkerGeometry(numbering, markerInput, {
       authoredFirstIndentPt: markerLeadingEdgePx,
+      ...(numberedWindowFrameApplies ? { suffixFrameOriginPt: markerLeadingEdgePx - paragraph.indentFirst } : {}),
       // Tab stops are measured from the leading margin: the right one in RTL.
       physicalIndentLeftPt: context.baseRtl ? context.physicalIndentRightPt : context.physicalIndentLeftPt,
       tabStops: paragraph.tabStops,
       defaultTabPt: context.defaultTabPt,
+      compatibilityMode: options.environment.compatibilityMode,
+      baseRtl: context.baseRtl,
     }, service).bodyOffsetPt,
   };
 }
@@ -3116,6 +3275,11 @@ function textPlanSegment(
   const trackingPt = segment.fitTextPerGapPx !== undefined ? 0 : charSpacingDeltaPx(segment, 1);
   const scaleX = segment.charScale ?? 1;
   const baselineOffsetPt = retainedBaselineOffsetPt(segment);
+  const ownsNativePrefix = hasNativeVisiblePrefix(segment);
+  if (hasNativeUnitReceipt(segment) && segment.textShapeRequest?.baseDirection === 'rtl'
+    && segment.text.endsWith(' ') && !ownsNativePrefix) {
+    throw new TypeError('Selected native RTL suffix lost its visible-prefix authority');
+  }
   const retainedGeometry = retainedGeometryPlan(segment, sourceOffset, projected.color);
   const candidateClusters = segment.shapedClusters;
   const shapedClusters = candidateClusters?.length
@@ -3541,6 +3705,8 @@ function textPlanSegment(
   return {
     ...style,
     kind: 'text', measuredWidthPt: segment.measuredWidth,
+    ...(hasNativeUnitReceipt(segment) ? { nativeBaseDirection: segment.nativeLevelUnit!.baseDirection } : {}),
+    ...(ownsNativePrefix ? { nativeVisiblePrefix: segment.nativeVisiblePrefix } : {}),
     ...(segment.leadingWordBoundaryPx ? { leadingSeamPairPt: segment.leadingWordBoundaryPx } : {}),
     characterGridDeltaPt: gridPt,
     ...(segment.latinSpaceCompressionPx ? {
@@ -3867,6 +4033,7 @@ function planMeasuredLines(
         segments.push({
           kind: 'tab', range: { start: segmentOffset, end: segmentOffset + occurrenceLength },
           measuredWidthPt: tab.measuredWidth, leader,
+          ...(tab.alignedGapLimit ? { alignedGapLimitPt: tab.alignedGapLimit } : {}),
           fontSizePt: tab.fontSize, bold: tab.bold, italic: tab.italic,
           ...(underline ? { underline } : {}),
           ...(leaderShape ? { leaderShape } : {}),
@@ -3876,16 +4043,21 @@ function planMeasuredLines(
         if (image.anchor) continue;
         const runIndex = sourceRunIndex(segment);
         const occurrence = runSource(source, runIndex ?? 0);
+        // §20.4.2.6: the segment box includes the inline effect extent; the
+        // object itself paints at its authored size inside it.
+        const [effectLeftPt, effectTopPt] = image.effectExtent ?? [0, 0];
+        const [objectWidthPt, objectHeightPt] = image.objectSizePt ?? [image.widthPt, image.heightPt];
         if (image.inlineShape) {
+          const leftOffsetPt = (image.inlineOffsetXPt ?? 0) + effectLeftPt;
           segments.push({
             kind: 'inline-drawing',
             range: { start: segmentOffset, end: segmentOffset + occurrenceLength },
             drawingId: `${paragraphId}:drawing:${runIndex ?? 0}`,
             measuredWidthPt: image.measuredWidth,
-            widthPt: image.widthPt,
-            heightPt: image.heightPt,
-            topOffsetPt: -image.heightPt + (image.inlineOffsetYPt ?? 0),
-            ...(image.inlineOffsetXPt ? { leftOffsetPt: image.inlineOffsetXPt } : {}),
+            widthPt: objectWidthPt,
+            heightPt: objectHeightPt,
+            topOffsetPt: -image.heightPt + effectTopPt + (image.inlineOffsetYPt ?? 0),
+            ...(leftOffsetPt ? { leftOffsetPt } : {}),
           });
           sourceOffset = Math.max(sourceOffset, segmentOffset + occurrenceLength);
           continue;
@@ -3896,9 +4068,10 @@ function planMeasuredLines(
             range: { start: segmentOffset, end: segmentOffset + occurrenceLength },
             resourceKind: image.unavailableResourceKind,
             measuredWidthPt: image.measuredWidth,
-            widthPt: image.widthPt,
-            heightPt: image.heightPt,
-            topOffsetPt: -image.heightPt,
+            widthPt: objectWidthPt,
+            heightPt: objectHeightPt,
+            topOffsetPt: -image.heightPt + effectTopPt,
+            ...(effectLeftPt ? { leftOffsetPt: effectLeftPt } : {}),
             drawingId: unavailableDrawingId(source, runIndex ?? 0),
           });
           sourceOffset = Math.max(sourceOffset, segmentOffset + occurrenceLength);
@@ -3918,9 +4091,10 @@ function planMeasuredLines(
           kind: 'resource', range: { start: segmentOffset, end: segmentOffset + occurrenceLength },
           ...(runIndex === undefined ? {} : { sourceRunIndex: runIndex }),
           resourceKey, resourceKind, measuredWidthPt: image.measuredWidth,
-          widthPt: image.widthPt, heightPt: image.heightPt,
-          topOffsetPt: labelTopPt ?? -image.heightPt,
-          ...(labelTopPt === undefined ? {} : { leftOffsetPt: LIST_LABEL_PICTURE_INSET_PT }),
+          widthPt: objectWidthPt, heightPt: objectHeightPt,
+          topOffsetPt: labelTopPt ?? -image.heightPt + effectTopPt,
+          ...(labelTopPt !== undefined ? { leftOffsetPt: LIST_LABEL_PICTURE_INSET_PT }
+            : effectLeftPt ? { leftOffsetPt: effectLeftPt } : {}),
           ...(resourceOrientation ? { orientation: resourceOrientation } : {}),
         });
       } else if ('math' in segment) {
@@ -3981,6 +4155,7 @@ function planMeasuredLines(
       ...(ulTrailSpace ? { ulTrailSpace } : {}),
       ...(doNotExpandShiftReturn ? { doNotExpandShiftReturn } : {}),
       ...(context.endsAtHardBreak ? { endsAtHardBreak: true } : {}),
+      ...(context.runDirectionUnauthored ? { runDirectionUnauthored: true } : {}),
       ...(compatibilityMode !== 15 ? { lineEndJustificationBeforeMode15: true } : {}),
       ...(paragraph.alignment === 'thaiDistribute' && (compatibilityMode ?? 0) < 15
         && !context.characterGrid.active ? { thaiProportionalSpread: true } : {}),
@@ -5138,11 +5313,25 @@ function textBoxParagraphContext(
   const hasEastAsianText = paragraph.runs.some((run) =>
     run.type === 'text' && EAST_ASIAN_RE.test(run.text));
   // Whether the paragraph ends at a page or column break is its own fact,
-  // never the host's (WORD_LINE_END_JUSTIFICATION).
-  const { endsAtHardBreak: _hostEndsAtHardBreak, ...host } = inherited;
+  // never the host's (WORD_LINE_END_JUSTIFICATION). A text-box paragraph is
+  // outside the measured class of WORD_JUSTIFICATION_PUNCTUATION_HANG, so it
+  // never takes the host's closing-mark policy either.
+  const {
+    endsAtHardBreak: _hostEndsAtHardBreak,
+    cjkClosingMarkHang: _hostCjkClosingMarkHang,
+    lineEdgeRules: _hostLineEdgeRules,
+    documentKinsoku,
+    ...host
+  } = inherited;
   return {
     ...host,
+    // This compatibility shape is a separate paragraph; its host OFF toggle
+    // and observed line-edge exception do not describe its own source.
+    kinsoku: documentKinsoku ?? inherited.kinsoku,
     ...(paragraph.endsAtHardBreak === true ? { endsAtHardBreak: true as const } : {}),
+    // This compatibility model can include flattened WML text; its direction
+    // provenance is not authoritative. Complete WML stories bypass this path.
+    runDirectionUnauthored: true,
     rightIndentGrid: {
       ...inherited.rightIndentGrid,
       paragraphAllowsAdjustment: paragraph.adjustRightInd !== false,
@@ -5893,6 +6082,7 @@ function measurementPlacement(
             ? pageReference.xPt + pageReference.widthPt
             : options.placement.paragraphXPt + options.placement.availableWidthPt,
           readingDirection: options.context.baseRtl ? 'rtl' : 'ltr',
+          stepThroughPolygons: wordStepsThroughWrapLines(options.environment.compatibilityMode),
         });
   return {
     ...options.placement,
@@ -6023,6 +6213,15 @@ function paragraphAcquisitionKey(
   } = options.placement;
   const context = options.context;
   const environment = options.environment;
+  // Decimal acquisition consumes the active provider before final placement.
+  // Key both exact results and reusable measured lines by its existing identity
+  // ordinals. The provider stays stable during this synchronous acquisition;
+  // later lifecycle/method changes must miss. Default/nondecimal paths perform
+  // no provider read or instantiation, and keep their original identity tuple.
+  const orderingEngine = (hasRtlDecimalTabCapability(context.baseRtl, context.tabStops)
+    || (environment.nativeUnitMinimumBandPt !== undefined
+      && layoutServices?.text.acquireProjectableNativeUnits !== undefined))
+    ? lineOrderEngineIdentity() : undefined;
   // Page-field values (ECMA-376 Part 1 §17.16.5.44 PAGE, §17.16.5.42 NUMPAGES,
   // §17.16.5.13 DATE, §17.16.5.65 TIME) reach measurement only through a field
   // run's result (resolveFieldText), and note numbers (§17.11) only through a
@@ -6042,6 +6241,20 @@ function paragraphAcquisitionKey(
     run.type !== 'text' && run.type !== 'field' && run.type !== 'break' && run.type !== 'ptab');
   const keysPageFields = hasFieldRun || nestsEnvironment;
   const keysNotes = hasNoteReference || nestsEnvironment;
+  // Placement's wrap identity preceded measurer identities in the original
+  // tuple. Preserve that ordinal assignment order while keeping the default
+  // path to its one existing two-element array (no empty spread allocation).
+  const wrapIdentity = !lineOnly && wrap ? cache.objectIdentity(wrap) : null;
+  const measurementIdentities = [
+    cache.objectIdentity(options.measurer.context),
+    cache.objectIdentity(options.measurer.fontFamilyClasses),
+  ];
+  if (orderingEngine) measurementIdentities.push(
+    cache.objectIdentity(orderingEngine.engine),
+    cache.objectIdentity(orderingEngine.token),
+    cache.objectIdentity(orderingEngine.compute),
+    cache.objectIdentity(orderingEngine.reorder),
+  );
   // Fixed-order tuples avoid the recursive generic fingerprint cost on this hot
   // path. A different property insertion order may conservatively miss for the
   // explicitly JSON-valued geometry below, but can never alias different facts.
@@ -6050,6 +6263,11 @@ function paragraphAcquisitionKey(
     lineOnly ? null : [options.source.story, options.source.storyInstance, options.source.path],
     lineOnly ? null : options.flowDomainId,
     lineOnly ? null : options.ordinaryFlow,
+    // Story/ordinary-flow/cell ownership now changes first-line measurement,
+    // not merely retained placement. Own the same admission in both keys.
+    numberedWindowScopeEligible(options),
+    // This acquired geometry is shared by intrinsic and bounded consumers.
+    closingPairRootSourceEligible(options) && closingPairScopeApplies(paragraph, context, environment),
     lineOnly
       ? [plainPlacement.paragraphXPt, plainPlacement.availableWidthPt, plainPlacement.noWrap ?? false]
       : [
@@ -6059,7 +6277,7 @@ function paragraphAcquisitionKey(
           plainPlacement.maximumYPt,
           plainPlacement.suppressSpaceBefore,
           plainPlacement.noWrap ?? false,
-          wrap ? cache.objectIdentity(wrap) : null,
+          wrapIdentity,
         ],
     [
       context.lineGrid.active,
@@ -6082,24 +6300,29 @@ function paragraphAcquisitionKey(
       context.spaceBeforePt,
       context.spaceAfterPt,
       context.baseRtl,
+      // Decimal-tab acquisition also consumes the final ordering policy.
+      context.runDirectionUnauthored === true,
       context.isJustified,
       context.stretchLastLine,
       context.tabStops.map((stop) => [stop.pos, stop.alignment, stop.leader]),
       context.hasRuby,
       context.hasEastAsianText,
       cache.kinsokuKey(context.kinsoku),
+      // Tagged optional fields cannot collide with one another or shift an
+      // untagged scalar into another semantic position. Document rules own
+      // compatibility textbox children even when this host is paragraph-OFF.
+      ...(context.lineEdgeRules ? [['line-edge-rules', cache.kinsokuKey(context.lineEdgeRules)]] : []),
+      ...(context.documentKinsoku ? [['textbox-document-rules', cache.kinsokuKey(context.documentKinsoku)]] : []),
       context.defaultTabPt,
       context.overflowPunct !== false,
+      context.cjkClosingMarkHang ?? null,
       context.numberingMarkerGeometry
         ? JSON.stringify(context.numberingMarkerGeometry)
         : null,
       context.mathDefJc ?? null,
       ...(lineOnly ? [context.characterGrid.pitchPt] : []),
     ],
-    [
-      cache.objectIdentity(options.measurer.context),
-      cache.objectIdentity(options.measurer.fontFamilyClasses),
-    ],
+    measurementIdentities,
     [
       keysPageFields ? environment.pageIndex : null,
       keysPageFields ? environment.totalPages : null,
@@ -6120,10 +6343,22 @@ function paragraphAcquisitionKey(
         ]
         : null,
       lineOnly ? null : environment.pageWritingMode,
+      environment.inlineObjectRunLeadingAdmitted === true,
+      // Equal numeric widths from frame/table/unknown callers do not grant
+      // the fixed-body source topology used by native level units.
+      environment.nativeUnitMinimumBandPt ?? null,
+      environment.nativeUnitMinimumBandPt === undefined ? null
+        : layoutServices?.text.acquireProjectableNativeUnits !== undefined,
       environment.verticalCJK ?? null,
       lineOnly ? null : environment.verticalPageFrame ?? null,
       // Mode owns acquired kerning and justified-compression decisions.
       environment.compatibilityMode ?? null,
+      // Manual-break expansion also owns the acquired decimal order model.
+      environment.doNotExpandShiftReturn === true,
+      environment.doNotSuppressIndentation === true,
+      environment.ww11IndentRules === true,
+      environment.doNotUseIndentAsNumberingTabStop === true,
+      environment.noTabHangInd === true,
       environment.documentHasEastAsianText,
       environment.useFeLayout ?? null,
       environment.balanceSingleByteDoubleByteWidth ?? null,
@@ -6331,6 +6566,9 @@ export function acquireParagraphResult(
   options: ParagraphAcquisitionOptions,
   continuation?: Parameters<typeof measureParagraph>[5],
 ): AcquiredParagraphResult {
+  if (options.environment.closingPairRootSource && !closingPairRootSourceEligible(options)) {
+    options = { ...options, environment: { ...options.environment, closingPairRootSource: undefined } };
+  }
   const cache = options.environment.layoutServices
     ? paragraphAcquisitionCacheOf(options.environment.layoutServices)
     : undefined;
@@ -6357,6 +6595,8 @@ export function acquireParagraphResult(
     anchoredPayloadRun(run) ? [run.anchorAcquisitionInput!.occurrenceId] : []));
   for (const occurrenceId of externallyOwnedOccurrenceIds) occurrenceIds.delete(occurrenceId);
   const occurrenceCapacity = occurrenceIds.size;
+  const ownsUnresolvedFloatFrame = occurrenceCapacity > 0 && options.exclusions.length === 0
+    && options.placement.wrap === undefined;
   const initialOwnedExclusions: readonly WrapExclusion[] = Object.freeze([]);
   const initialExclusions = mergeParagraphExclusions(
     options.exclusions,
@@ -6368,7 +6608,7 @@ export function acquireParagraphResult(
     ? { ...options, context: { ...options.context, numberingMarkerGeometry: numberingPlan } }
     : options;
   const numberingFirstLine = numberingPlan
-    ? numberingFirstLineWindow(paragraph, acquisitionOptions.context, acquisitionOptions)
+    ? numberingFirstLineWindow(paragraph, acquisitionOptions.context, acquisitionOptions, ownsUnresolvedFloatFrame)
     : undefined;
   const measureWithExclusions = (
     exclusions: readonly WrapExclusion[],
@@ -6641,6 +6881,9 @@ export interface RetainedFrameGroupOptions {
   ) => Readonly<{ bounds: LayoutRect; exclusionBounds: LayoutRect }>;
 }
 
+// A frame session retains complete descendant layouts under one stable bidi
+// provider. Changing the provider requires a fresh pagination/layout session;
+// local paragraph/memo invalidation does not revise retained frame groups.
 const retainedFrameGroupCache = new WeakMap<object, Map<string, RetainedFrameGroupAcquisition>>();
 
 function frameFingerprintValue(value: unknown): unknown {
@@ -7497,6 +7740,19 @@ export function sliceParagraphLayout(
   }, acquired, rebasedSelected);
 }
 
+
+/** Logical source presence is independent of acquired advance: authored
+ * tracking may make an atomic U+0020 exactly zero-width. Match the existing
+ * terminal walk through empty text and zero-advance anchor carriers. */
+function hasLogicalTailSpace(segments: readonly MeasuredLinePlanSegment[]): boolean {
+  for (let index = segments.length - 1; index >= 0; index--) {
+    const segment = segments[index]!;
+    if (segment.kind === 'anchor-host') continue;
+    if (segment.kind !== 'text') return false;
+    if (segment.text.length > 0) return segment.text.endsWith(' ');
+  }
+  return false;
+}
 
 /** Advance of a line's trailing separator: the clusters after each final text
  * segment's visible prefix (`visibleLength`), across trailing segments that

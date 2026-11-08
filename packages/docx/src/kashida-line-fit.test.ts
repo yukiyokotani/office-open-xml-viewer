@@ -1,4 +1,10 @@
 import { describe, it, expect } from 'vitest';
+import { DEFAULT_KINSOKU_RULES } from '@silurus/ooxml-core';
+import { createLayoutServices } from './layout-runtime.js';
+import { acquireShapeTextBoxLayout } from './layout/paragraph.js';
+import { textBoxAcquisitionInput } from './parser-model.js';
+import type { ParagraphLayoutContext } from './layout-context.js';
+import type { DocxDocumentModel, ShapeRun } from './types';
 import { layoutBodyModel } from './test-support/document-layout.test-support.js';
 import type { LineLayout, TextPlacement } from './layout/types.js';
 import type { BodyElement, DocParagraph, DocSettings, DocxTextRun, SectionProps } from './types';
@@ -82,23 +88,117 @@ function characters(line: LineLayout): Array<{ character: string; xPt: number }>
 }
 const start = (line: LineLayout): number => characters(line)[0]!.xPt;
 const end = (line: LineLayout): number => characters(line).at(-1)!.xPt + 10;
+const paintedWords = (line: LineLayout) => line.placements
+  .filter((p): p is TextPlacement => p.kind === 'text')
+  .flatMap(placement => placement.paintOps.filter(op => /\S/.test(op.text)).map(op => ({
+    text: op.text.trim(), left: placement.origin.xPt + op.offset.xPt,
+    width: [...op.text.trim()].length * 10,
+  }))).sort((a, b) => a.left - b.left);
 
 const MODES: Array<DocSettings | undefined> = [undefined, { compatibilityMode: 14 }, MODE_15];
 // Twenty 40 pt words: a line of n words is 50n - 10 pt wide.
 const WORDS = Array.from({ length: 20 }, () => 'aaaa').join(' ');
 const wordsOn = (line: LineLayout): number => characters(line).length / 4;
 
+it('preserves uncompressed mixed-run distribute extents while fitting gains compression', () => {
+  const [line] = lines(para([
+    textRun('Label '), textRun('אבגד אבג אבג', { rtl: true }),
+  ], 'distribute'), MODE_15);
+  // The short source fits naturally. Reusing scalar compression opportunities
+  // for its positive slack puts a gap beyond the final physical word instead
+  // of retaining the established full-band visible extent.
+  expect(start(line!)).toBeCloseTo(20);
+  expect(end(line!)).toBeCloseTo(380);
+});
+
+it('places the authored leading label before its Arabic island in production layout', () => {
+  const content = 'Label هذا نص عربي';
+  const [first] = lines(para([textRun(content)], 'left', { bidi: true }), MODE_15);
+  const placed = first!.placements.filter((p): p is TextPlacement => p.kind === 'text');
+  expect([...placed].sort((a, b) => a.origin.xPt - b.origin.xPt).map(p => p.text.trim()))
+    .toEqual(['Label', 'عربي', 'نص', 'هذا']);
+  expect([...placed].sort((a, b) => a.range.start - b.range.start).map(p => p.text).join(''))
+    .toBe(content);
+});
+
+it('keeps the authored label at the left of a validated distribute source-cell span', () => {
+  const content = 'Label זהו טקסט';
+  const [first] = lines(para([textRun(content)], 'distribute', { bidi: true }), MODE_15);
+  const placed = first!.placements.filter((p): p is TextPlacement => p.kind === 'text');
+  expect(placed.filter(p => /\S/.test(p.text)).sort((a, b) => a.origin.xPt - b.origin.xPt).map(p => p.text.trim()))
+    .toEqual(['Label', 'טקסט', 'זהו']);
+  expect([...placed].sort((a, b) => a.range.start - b.range.start).map(p => p.text).join(''))
+    .toBe(content);
+});
+
+it.each([
+  { leadingSpaceOwner: 'ltr', before: 'אבגד הוזח', latin: ' Xray ', origins: [20, 100, 180, 260, 340] },
+  { leadingSpaceOwner: 'rtl', before: 'אבגד הוזח ', latin: 'Xray ', origins: [20, 100, 140, 260, 340] },
+])('keeps four source spaces in their authored $leadingSpaceOwner span', ({ before, latin, origins }) => {
+  // Same visible text and 240pt natural width in a360pt band. Each source
+  // SPACE owns40pt, but two spaces on the Latin word's right share one gap
+  // when its preceding SPACE belongs to the RTL run instead of the LTR span.
+  const runs = [textRun(before, { rtl: true }), textRun(latin), textRun('טיכל מנסע', { rtl: true })];
+  const [first] = lines(para(runs, 'distribute', { bidi: true }), MODE_15);
+  const words = paintedWords(first!);
+  expect(words.map(word => word.text)).toEqual(['מנסע', 'טיכל', 'Xray', 'הוזח', 'אבגד']);
+  expect(words.map(word => word.left)).toEqual(origins);
+  expect(words.at(-1)!.left + words.at(-1)!.width).toBe(380);
+  const source = first!.placements.filter((p): p is TextPlacement => p.kind === 'text')
+    .sort((a, b) => a.range.start - b.range.start);
+  expect(source.map(p => p.text).join('')).toBe('אבגד הוזח Xray טיכל מנסע');
+  expect(source.filter(p => p.text === ' ').map(p => p.advancePt)).toEqual([40, 40, 40, 40]);
+});
+
+it('resolves the space inside an LTR word group in its complete RTL host', () => {
+  // The middle space is bounded by two L words and must retain their even
+  // level. Resolving each space alone at RTL base would reverse Xray/Yoke.
+  const [first] = lines(para([
+    textRun('אבגד', { rtl: true }), textRun(' Xray Yoke '), textRun('הוזח', { rtl: true }),
+  ], 'distribute', { bidi: true }), MODE_15);
+  const words = paintedWords(first!);
+  expect(words.map(word => word.text)).toEqual(['הוזח', 'Xray', 'Yoke', 'אבגד']);
+  // Four 40 pt words leave 200 pt for the three source spaces.
+  for (let index = 1; index < words.length; index += 1) {
+    expect(words[index]!.left - words[index - 1]!.left - words[index - 1]!.width).toBeCloseTo(200 / 3);
+  }
+});
+
+it('preserves a mixed-level paint slice until its internal islands are retained', () => {
+  const content = 'עבריתXray Yoke טקסט';
+  const [first] = lines(para([textRun(content)], 'left', { bidi: true }), MODE_15);
+  const placed = first!.placements.filter((p): p is TextPlacement => p.kind === 'text');
+  expect([...placed].sort((a, b) => a.origin.xPt - b.origin.xPt).map(p => p.text.trim()))
+    .toEqual(['טקסט', 'Yoke', 'עבריתXray']);
+  expect([...placed].sort((a, b) => a.range.start - b.range.start).map(p => p.text).join(''))
+    .toBe(content);
+});
+
+it('preserves existing LTR paragraph ordering outside the RTL label correction', () => {
+  const content = 'Label זהו טקסט';
+  const [first] = lines(para([textRun(content, { rtl: true })], 'left'), MODE_15);
+  const placed = first!.placements.filter((p): p is TextPlacement => p.kind === 'text');
+  expect([...placed].sort((a, b) => a.origin.xPt - b.origin.xPt).map(p => p.text.trim()))
+    .toEqual(['Label', 'טקסט', 'זהו']);
+  expect([...placed].sort((a, b) => a.range.start - b.range.start).map(p => p.text).join(''))
+    .toBe(content);
+});
+
 describe('WORD_KASHIDA_LINE_FIT', () => {
   it('keeps the full width before mode 15 under a negative trailing indent', () => {
-    // blk-0898-kfit9 S014-S016: a highKashida line of a 345.5pt window under a
-    // -40pt right indent holds 316.9pt. A -40pt right indent widens the band
-    // to 400pt: eight words (390 pt) fit, as in a both paragraph.
-    for (const settings of [undefined, { compatibilityMode: 14 }]) {
-      for (const alignment of ['mediumKashida', 'highKashida'] as const) {
-        const [first] = lines(para([textRun(WORDS)], alignment, { indentRight: -40 }), settings);
-        const [plain] = lines(para([textRun(WORDS)], 'both', { indentRight: -40 }), settings);
-        expect(wordsOn(first!), `${alignment} mode ${settings?.compatibilityMode}`).toBe(wordsOn(plain!));
-        expect(wordsOn(first!)).toBe(8);
+    // blk-0898-floats-negind (-5 to -56.7pt) and blk-0898-kfit9 S014-S016:
+    // every negative trailing indent removes the reserve before mode 15. A
+    // -40pt right indent widens the band to 400pt: eight words (390 pt) fit,
+    // as in a both paragraph; at -5pt (365pt) seven do, where the reserve of
+    // the column (72pt) would leave five.
+    for (const settings of [undefined, { compatibilityMode: 11 }, { compatibilityMode: 14 }]) {
+      for (const [indentRight, words] of [[-40, 8], [-5, 7]] as const) {
+        for (const alignment of ['mediumKashida', 'highKashida'] as const) {
+          const [first] = lines(para([textRun(WORDS)], alignment, { indentRight }), settings);
+          const [plain] = lines(para([textRun(WORDS)], 'both', { indentRight }), settings);
+          expect(wordsOn(first!), `${alignment} ${indentRight} mode ${settings?.compatibilityMode}`).toBe(wordsOn(plain!));
+          expect(wordsOn(first!)).toBe(words);
+        }
       }
     }
     // From mode 15 the share of the line's own width stays: 0.8 x 400 = 320 holds 6 words.
@@ -298,7 +398,10 @@ describe('WORD_RTL_JUSTIFIED_VISIBLE_FIT', () => {
     // leftmost, so its space sits between the two words and takes the 5 pt.
     const rtl = { bidi: true, indentRight: 15 } as Partial<DocParagraph>;
     for (const settings of MODES) {
-      const [final] = lines(para([textRun(`${'\u05d0'.repeat(25)} ${'a'.repeat(8)} `)], 'both', rtl), settings);
+      const [final] = lines(para([
+        textRun(`${'\u05d0'.repeat(25)} `, { rtl: true }),
+        textRun(`${'a'.repeat(8)} `),
+      ], 'both', rtl), settings);
       expect(characters(final!)).toHaveLength(33);
       expect(start(final!)).toBeCloseTo(35);
       expect(end(final!)).toBeCloseTo(380);
@@ -357,4 +460,94 @@ describe('WORD_RTL_JUSTIFIED_VISIBLE_FIT', () => {
       expect(xs.at(-1)! + 10).toBeLessThanOrEqual(380 + 1e-6);
     }
   });
+});
+it.each([
+  { alignment: 'mediumKashida', charged: 7, visible: 8 },
+  { alignment: 'highKashida', charged: 6, visible: 7 },
+] as const)('keeps Arabic source RTL ownership distinct in $alignment soft fitting', ({ alignment, charged, visible }) => {
+  // Three glyphs are 30pt and each space 10pt. The 345pt band leaves
+  // 310.5pt / 276pt after the existing 10% / 20% reserve respectively.
+  const arabic = Array.from({ length: 12 }, () => '\u0628\u062a\u062b').join(' ') + ' ';
+  const latin = Array.from({ length: 12 }, () => 'abc').join(' ') + ' ';
+  const acquire = (content: string, rtl?: boolean, cs?: boolean, settings = MODE_15) => lines(para([
+    textRun(content, { ...(rtl === undefined ? {} : { rtl }), ...(cs === undefined ? {} : { cs }) }),
+  // Mode14 reserves against the pre-indent360pt frame; a349pt line keeps
+  // the same visible/full-space boundary (313pt medium /277pt high).
+  ], alignment, { bidi: true, indentRight: settings.compatibilityMode === 14 ? 11 : 15, wordWrap: true }), settings);
+  const retainedCases = [
+    { content: arabic, retained: acquire(arabic), expected: charged },
+    { content: arabic, retained: acquire(arabic, false), expected: charged },
+    { content: arabic, retained: acquire(arabic, true), expected: visible },
+    { content: arabic, retained: acquire(arabic, undefined, true), expected: visible },
+    { content: arabic, retained: acquire(arabic, undefined, undefined, { compatibilityMode: 14 }), expected: visible },
+    // The original non-Arabic counters keep the existing visible fit.
+    { content: latin, retained: acquire(latin), expected: visible },
+  ];
+  if (alignment === 'mediumKashida') {
+    // A genuine authored formatting seam is outside the homogeneous source rule.
+    const cut = arabic.indexOf(' ') + 1;
+    retainedCases.push({ content: arabic, expected: visible, retained: lines(para([
+      textRun(arabic.slice(0, cut)), textRun(arabic.slice(cut), { bold: true }),
+    ], alignment, { bidi: true, indentRight: 15, wordWrap: true }), MODE_15) });
+  }
+  for (const { content, retained, expected } of retainedCases) {
+    const logical = retained.flatMap(line => line.placements
+      .filter((p): p is TextPlacement => p.kind === 'text'))
+      .sort((a, b) => a.range.start - b.range.start);
+    let cursor = 0;
+    for (const placement of logical) {
+      expect(placement.range.start).toBe(cursor);
+      expect(placement.range.end - placement.range.start).toBe(placement.text.length);
+      cursor = placement.range.end;
+    }
+    expect(cursor).toBe(content.length);
+    expect(logical.map(p => p.text).join('')).toBe(content);
+    const firstSource = retained[0]!.placements.filter((p): p is TextPlacement => p.kind === 'text')
+      .sort((a, b) => a.range.start - b.range.start).map(p => p.text).join('');
+    expect.soft(firstSource.trim().split(/\s+/), `sourceRTL ownership: expected ${expected}`).toHaveLength(expected);
+  }
+});
+
+
+it('does not infer authored Arabic direction from a flattened compatibility text box', () => {
+  const content = Array.from({ length: 12 }, () => '\u0628\u062a\u062b').join(' ') + ' ';
+  const body = lines(para([textRun(content)], 'mediumKashida', {
+    bidi: true, indentRight: 15, wordWrap: true,
+  }), MODE_15);
+  const ctx = makeCtx();
+  const model = { section, body: [], settings: MODE_15,
+    headers: { default: null, first: null, even: null },
+    footers: { default: null, first: null, even: null }, fontFamilyClasses: {},
+  } as unknown as DocxDocumentModel;
+  const context: ParagraphLayoutContext = {
+    lineGrid: { active: false, pitchPt: null },
+    characterGrid: { active: false, kind: null, pitchPt: null, deltaPt: 0 },
+    rightIndentGrid: { pitchPt: null, paragraphAllowsAdjustment: true },
+    physicalIndentLeftPt: 0, physicalIndentRightPt: 0, firstIndentPt: 0,
+    lineSpacing: null, spaceBeforePt: 0, spaceAfterPt: 0,
+    baseRtl: false, isJustified: false, stretchLastLine: false,
+    tabStops: [], hasRuby: false, hasEastAsianText: false,
+    kinsoku: DEFAULT_KINSOKU_RULES, defaultTabPt: 36, overflowPunct: true,
+  };
+  const shape = {
+    type: 'shape', zOrder: 0, subpaths: [], presetGeometry: 'rect', fill: null, stroke: null,
+    textBlocks: [{ text: content, fontSizePt: 20, alignment: 'mediumKashida', bidi: true,
+      runs: [{ text: content, fontSizePt: 20, fontFamily: 'NotInMetrics' }], }],
+    textAnchor: 't', textInsetL: 0, textInsetT: 0, textInsetR: 0, textInsetB: 0,
+  } as unknown as ShapeRun;
+  const source = { story: 'textbox' as const, storyInstance: 'compatibility', path: [] as number[] };
+  const acquired = acquireShapeTextBoxLayout(shape,
+    { xPt: 0, yPt: 0, widthPt: 345, heightPt: 400 }, {
+      id: 'compatibility', source, flowDomainId: 'compatibility', context,
+      measurer: { context: ctx, fontFamilyClasses: {} },
+      environment: { pageIndex: 0, totalPages: 1, compatibilityMode: 15, documentHasEastAsianText: false,
+        pageWritingMode: 'horizontal-tb', layoutServices: createLayoutServices(model, { measureContext: ctx }) },
+      input: textBoxAcquisitionInput(shape, source),
+    });
+  const child = acquired?.story.blocks[0];
+  if (child?.kind !== 'paragraph') throw new Error('expected compatibility paragraph');
+  // Same glyph/space metrics: body knows its source RTL was absent; the
+  // flattened public shape model cannot establish that source provenance.
+  expect(characters(body[0]!).length / 3).toBe(7);
+  expect(characters(child.lines[0]!).length / 3).toBe(8);
 });

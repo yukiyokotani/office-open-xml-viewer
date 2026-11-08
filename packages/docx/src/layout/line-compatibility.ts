@@ -1,18 +1,26 @@
+import { isCjkBreakChar } from '@silurus/ooxml-core';
 import { defineCompatibilityRule } from './compatibility.js';
 import { OFFICE_FAR_EAST_SINGLE_LINE_FACTOR, officeOpenTypeAutoLineRatios } from '@silurus/ooxml-core/internal/office-auto-line';
 import type { LineSpacing, TabStop } from '../types.js';
+import type { ParagraphLayoutSource } from './text.js';
 
 export const WORD_TAB_DISPLACED_READING_FRAME = defineCompatibilityRule({
   id: 'word-float-tab-reading-frame',
   evidence: {
     kind: 'office-observation',
-    syntheticFixtureId: 'tabs-floats-round3',
+    syntheticFixtureId: 'blk-0898',
     application: 'Microsoft Word',
-    version: '16.0.20430',
+    version: '16.0.20527.20088',
     platform: 'Windows',
   },
-  description: 'Issue #1672 controlled Word exports cover ordinary left/right/center/decimal tabs, one/two tabs, both paragraph directions and either float edge, with no-float counterexamples. Eligibility stays margin-relative (ECMA-376 §17.3.1.37), but an authored target moves with a float-displaced leading line edge. Library policy retains this observation only where text fits the available float band. Word also overflows some tab cells into floats or past the margin; that unspecified fallback is intentionally unsupported. Out-of-band targets break the line and following text uses ordinary legal-break and emergency fitting, without an overflow allowance or a fabricated wide reference band. Evidence: issue #1672 controls (PR #1698), re-exported in Windows Word 16.0.20430 for #1896 with every in-band line identical to the earlier export; only the four unsupported overflow cells differ.',
+  description: 'Stop eligibility stays margin-relative (ECMA-376 §17.3.1.37). With the compatibility mode absent or below 15, an authored stop moves with a float-displaced leading line edge, and a cell whose displaced target lies outside the float window is placed there anyway: it overlaps the float or runs past the margin (and off the page) instead of breaking the line. From mode 15 stops are not displaced; an end/center/decimal cell is limited to the window by WORD_ALIGNED_TAB_CELL_FIT_BACK and a left/start stop past the window breaks the line. Evidence: issue #1672 controls (mode absent; ordinary left/right/center/decimal tabs, one/two tabs, both directions, either float edge, no-float counterexamples; PR #1698, Windows re-export for #1896), and the blk-0898-tabs-float controls of #2047 (Windows Word 16.0.20527, modes absent, 14 and 15; Courier New 12; a 150 x 10 pt square-wrapped float at either column edge narrowing line 1; right stops at 200, 300, 360, 400 and 481.9 pt, center, decimal and left stops at 360/400 pt, a single word and a six-word cell, LTR rows and bidi end/start rows; jc left, both, distribute, lowKashida). Modes absent and 14 are identical: every cell sits at stop + displacement (for example right 360 pt beside a left float ends at 510 pt, past the 481.9 pt margin; right 481.9 pt ends off the page), or over the float when the float is on the trailing side. Mode 15 places every row at its undisplaced stop or limited to the window end. Two pre-15 rows (jc left six-word cell, jc distribute bidi start stop) were instead set below the float with undisplaced stops; their siblings with identical geometry under other justifications were not, and this unexplained exception is not emulated. The renderer reproduces 76 of the 84 #1672 positions exactly (all single-tab and in-window cases); in the 8 two-tab cases the second tab starts past the right margin, where Word advances it 14 pt at 10 and 20 pt (tabs-floats-overflow-font20) while the library keeps the automatic grid (10 pt further), an unexplained residual. Library scope: the overflow applies only when the rest of the paragraph (every later cell to the paragraph end or line break) is no wider than the paragraph, and not in a second gap on the same baseline (WORD_FLOAT_GAP_FLOW); longer content (an empty cell before a long one included) and continuation gaps were not measured and keep the window containment.',
 });
+
+/** The compatibility modes in which {@link WORD_TAB_DISPLACED_READING_FRAME}
+ * displaces stops and lets out-of-window cells overflow. */
+export function wordTabDisplacedReadingFrameApplies(compatibilityMode: number | undefined): boolean {
+  return compatibilityMode === undefined || compatibilityMode < 15;
+}
 
 /** Projection of {@link WORD_TAB_DISPLACED_READING_FRAME}. The caller has already
  * selected the next eligible stop in margin coordinates. */
@@ -23,6 +31,30 @@ export function wordFloatTabStopPosition(
 ): number {
   return custom ? stopPosition + Math.max(0, leadingShift) : stopPosition;
 }
+
+export const WORD_TAB_GLUED_TO_FOLLOWING_TEXT = defineCompatibilityRule({
+  id: 'word-tab-glued-to-following-text',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'blk-0898',
+    application: 'Microsoft Word',
+    version: '16.0.20527.20088',
+    platform: 'Windows',
+  },
+  description: 'A tab character offers a line break before itself but not after itself: it stays with the text that immediately follows it. When the first unbreakable unit after a tab does not fit behind the tab\'s stop, the line breaks before the tab, which moves to the next line and resolves its stop there; a tab that starts a line keeps its unit, which is then broken by characters in the room left behind the stop. A space after the tab is an ordinary break opportunity (the tab and space end the line). Evidence: #2051, blk-0898-tabs-move controls (Windows Word 16.0.20527, compatibility modes absent, 14 and 15 identical; Courier New 12; jc left, both, distribute, lowKashida and highKashida; LTR left stops and bidi start stops): label + tab + a 24-character word at a 324 pt stop (the tab moves and the word is broken after 21 characters, 8 under the highKashida line-fit reserve); two stops 144/324 pt with a 180 pt label (the word lands whole at 144 pt on line 2); a space before the tab (same); a space after the tab (the word starts line 2 at the margin); a leading tab (the word is broken after the stop on line 1); an automatic 36 pt stop (the word lands at 36 pt); an 80-character word (moved, then broken behind the stop on line 2); a 20-character word that fits (stays). Before, the tab ended line 1 and the word started line 2 at the margin. Library scope (wordTabGlueUnit in line-breaker/tabs.ts): every measured word was one plain run; a tab followed by a word that continues across a formatting seam, holds an optional hyphen, a hyphen/URL or SEA/CJK opportunity, a no-break hyphen, fitText, ruby or tate-chu-yoko, or that lies on a snapToChars grid, a word in a run against the paragraph direction (a left-to-right run in a bidi paragraph: the #1672 r4 controls end such a line with its tabs), a float-narrowed line, and a positional tab, keep the earlier behaviour (the tab may end the line). Intrinsic minimum widths apply the rule to the same input class (a leading stop needs its pen position plus the glued word).',
+});
+
+export const WORD_ALIGNED_TAB_CELL_FIT_BACK = defineCompatibilityRule({
+  id: 'word-aligned-tab-cell-fit-back',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'blk-0898',
+    application: 'Microsoft Word',
+    version: '16.0.20527.20088',
+    platform: 'Windows',
+  },
+  description: 'ECMA-376 §17.3.1.37/§17.18.84 align the text after an end (right), center or decimal stop to that stop; neither says what happens when the aligned cell does not fit the line. Word fits such a cell as if the tab had no gap and then lets the gap take the line\'s leftover room, up to the stop-aligned gap, so the cell slides back toward the pen and ends at the line (or float window) end. On a justified line that still has justification opportunities the gap stays empty and the slack is justified instead. A start (left) stop never slides: its gap is fixed at the stop and the cell wraps at the line end, in left-to-right and bidi paragraphs alike. Evidence: #2050, blk-0898-tabs-rtl controls (Windows Word 16.0.20527, compatibility modes absent, 14 and 15; Courier New 12; jc left, both, distribute and lowKashida; every row in a bidi paragraph with Hebrew text and as a left-to-right twin): start stops at 72/216/360 pt, a leading tab, an automatic stop and two stops keep their gaps (line 1 holds 11/7/3/7/8/5 four-character tokens, against 12/12/12/13/9/7 when the last gap shrank); a 216 pt start cell overflowing by 0.6 pt wraps its last token; a center stop at 360 pt whose 280.8 pt cell would end at 500.4 pt ends at the 481.9 pt margin instead (start 201.1 pt), and a decimal stop at 360 pt with an overflowing cell starts its cell at 42.6 pt, ending line 1 at the margin, under jc left; under both, distribute and lowKashida that line starts its cell at the pen and is justified. End and center cells wider than the room before the stop start at the pen. #2047 blk-0898-tabs-float controls in mode 15 limit end, center and decimal cells beside a float to the window end (right/center/decimal 400 pt beside a right float end at 331.9 pt). Right- and center-aligned paragraphs with such a cell are unmeasured and treated like left-aligned ones. Because tab stops stay put, justification widens only gaps after a line\'s last tab, soft-wrapped lines included: with two start stops at 144/288 pt the first cell keeps its natural spacing under both, distribute and lowKashida (before, its gap took a share of the slack and the second cell started 4.2 pt late). Library scope: the measured bidi rows held right-to-left (w:rtl) runs after the tab, so in a bidi paragraph only such a cell keeps its start gap or defers its fitted-back gap, while a cell starting with a left-to-right run keeps the earlier provisional gap that the bidi walk shrinks; a decimal cell without a real separator (only the numeric fallback point) keeps the earlier allocation in either direction (the in-place bidi walk, the stop-aligned left-to-right gap). Every measured fitted-back cell was the last on its line, so a cell ended by a later tab keeps the earlier stop-aligned gap (left-to-right) or the bidi walk\'s in-place fit, and only a line\'s last tab takes slack. Bidi lines defer the fitted-back gap like left-to-right ones (the D2 bidi rows: zero gap under both, distribute and lowKashida, the leftover room under left). A line whose slack goes into Arabic kashida elongation counts as justified and keeps the gap empty (unmeasured: the lowKashida rows were Latin and Hebrew). Under a WORD_KASHIDA_LINE_FIT reserve a fitted-back cell is admitted against the band, as an aligned cell is in both directions (centre cells under a reserve are unmeasured there).',
+});
 
 export const WORD_POSITIONAL_TAB_AVAILABLE_BAND = defineCompatibilityRule({
   id: 'word-positional-tab-available-band',
@@ -481,7 +513,7 @@ export const WORD_LINE_END_JUSTIFICATION = defineCompatibilityRule({
     version: '16.0.20527.20088',
     platform: 'Windows',
   },
-  description: 'How a justified paragraph (§17.18.44) justifies a line that does not end at a soft wrap. A line ended by a manual break (§17.3.3.1 br textWrapping, also clear=all, and cr) is justified like a soft-wrapped line unless doNotExpandShiftReturn (§17.15.3.5) is set; a single word stays at its natural width; under lowKashida, mediumKashida, highKashida and, before mode 15, thaiDistribute a space-free (CJK) line stays ragged. A line ended by a page or column break is justified like a soft-wrapped line before compatibility mode 15 and like a final line from mode 15, whatever doNotExpandShiftReturn says. Final lines stay unjustified, except distribute: before mode 15 (mode unset, 11, 12, 14) its final, break-ended and page/column-break-ended lines are spread by an equal advance after every grapheme cluster but the last, spaces included (fit residual 0.1-0.2pt), with hanging line-end spaces outside; from mode 15 they are justified at their gaps and centred when they have none (Latin single words; CJK lines widen their inter-character gaps). From mode 15 a thaiDistribute line ended by a manual break is spread per character too, single words included. Only gaps after the last tab are justified on these lines (kashida and automatic East Asian spacing included), and a line with a tab is not centred (unmeasured). Right-to-left lines keep word justification through the existing bidi gap model, which opens gaps only at segment seams: Word spreads the blk-0898-brk Hebrew distribute lines flush (per character before mode 15, at their gaps from mode 15), while a line whose gaps that model leaves closed stays at its logical start, as before this rule, and is centred only when it has no gap at all (a separate RTL justification limitation); a compressed mode-15 line keeps the opportunities its fit used. Fixed-pitch cells (fitText, character grid) stay whole in the character spread, and hanging ones take no part in it; one fitText region (§17.3.2.14) split over several runs stays whole, and so does a grapheme cluster continuing across a formatting seam (UAX #29 over the contiguous text: combining marks, regional-indicator pairs, emoji ZWJ sequences), while a seam that only forbids a line break still opens a gap. doNotExpandShiftReturn does not affect distribute (blk-0898-brk-nexp controls). Synthetic Windows Word controls blk-0898-brk-* and -hard-* in modes unset, 11, 12, 14 and 15, with and without doNotExpandShiftReturn, for both, distribute, low/medium/highKashida and thaiDistribute: Latin multi-word, single-word, CJK, mixed, tab, RTL Hebrew, zero-margin table cell, br clear=all, cr, break at the paragraph end, column and page breaks. All lines but mixed Latin/CJK lines match per character within 2.4pt; mixed lines keep the separate CJK/space weighting of ordinary justification.',
+  description: 'How a justified paragraph (§17.18.44) justifies a line that does not end at a soft wrap. A line ended by a manual break (§17.3.3.1 br textWrapping, also clear=all, and cr) is justified like a soft-wrapped line unless doNotExpandShiftReturn (§17.15.3.5) is set; a single word stays at its natural width; under lowKashida, mediumKashida, highKashida and, before mode 15, thaiDistribute a space-free (CJK) line stays ragged. A line ended by a page or column break is justified like a soft-wrapped line before compatibility mode 15 and like a final line from mode 15, whatever doNotExpandShiftReturn says. Final lines stay unjustified, except distribute: before mode 15 (mode unset, 11, 12, 14) its final, break-ended and page/column-break-ended lines are spread by an equal advance after every grapheme cluster but the last, spaces included (fit residual 0.1-0.2pt), with hanging line-end spaces outside; from mode 15 they are justified at their gaps and centred when they have none (Latin single words; CJK lines widen their inter-character gaps). From mode 15 a thaiDistribute line ended by a manual break is spread per character too, single words included. Only gaps after the last tab are justified on these lines (kashida and automatic East Asian spacing included), and a line with a tab is not centred (unmeasured). Right-to-left lines keep word justification. Existing mode-15 Word controls with unmarked Hebrew runs and a manual break spread ordinary source-space gaps flush across the band. Validated acquired source-space cells preserve those opportunities and their original run scopes; the prior segment-seam restriction was a library representation limitation, not a Word rule closing these spaces. Unsupported character-style, mixed-visible, terminal-budget and rewrite geometry keeps the original parent view and its alignment limits; a compressed mode-15 line keeps the opportunities its fit used. Fixed-pitch cells (fitText, character grid) stay whole in the character spread, and hanging ones take no part in it; one fitText region (§17.3.2.14) split over several runs stays whole, and so does a grapheme cluster continuing across a formatting seam (UAX #29 over the contiguous text: combining marks, regional-indicator pairs, emoji ZWJ sequences), while a seam that only forbids a line break still opens a gap. doNotExpandShiftReturn does not affect distribute (blk-0898-brk-nexp controls). Synthetic Windows Word controls blk-0898-brk-* and -hard-* in modes unset, 11, 12, 14 and 15, with and without doNotExpandShiftReturn, for both, distribute, low/medium/highKashida and thaiDistribute: Latin multi-word, single-word, CJK, mixed, tab, RTL Hebrew, zero-margin table cell, br clear=all, cr, break at the paragraph end, column and page breaks. All lines but mixed Latin/CJK lines match per character within 2.4pt; mixed lines keep the separate CJK/space weighting of ordinary justification.',
 });
 
 export const WORD_KASHIDA_LINE_FIT = defineCompatibilityRule({
@@ -493,7 +525,7 @@ export const WORD_KASHIDA_LINE_FIT = defineCompatibilityRule({
     version: '16.0.20527',
     platform: 'Windows',
   },
-  description: 'Line fit and soft-line justification of the kashida and Thai justification types (§17.18.44). A mediumKashida line takes the next word only while its natural width (hanging line-end spaces excluded) stays within its available width less a 10% reserve, and a highKashida line less a 20% reserve; lowKashida, both, distribute and thaiDistribute fit the whole width. From compatibility mode 15 the reserve is that share of the line\'s own width, so the line fits into 0.9 / 0.8 of the width between its indents, the first line after its first-line or hanging offset. In modes unset, 11, 12 and 14 (identical in every control) the reserve is that share of the width from the line\'s start edge (the paragraph\'s start indent, w:left / w:start in either direction, or a float edge narrowing that side; first-line and hanging offsets do not count) to its far edge (a float edge narrowing that side, else the column or table cell edge past the trailing indent), taken from the line\'s own width: a trailing indent and a first-line indent do not shrink it. An aligned (right) tab cell takes no reserve: it may reach its stop anywhere in the band, while the text before the tab keeps the reduced fit width. The reserve narrows the fit width of the line breaker only, the force-break of an over-wide word or CJK run included; paint still justifies every soft-wrapped line to the full width, so the reserve is spent by stretching. A soft-wrapped lowKashida, mediumKashida, highKashida or thaiDistribute line opens no inter-CJK gaps: its slack goes to its spaces, and a space-free CJK line keeps its natural width at the line start (both and distribute still spread CJK). Evidence: synthetic Windows Word 16.0.20527 controls blk-0898-kfit-mode{none,14,15} (K1-K6 Latin with short and long words, double spaces, Arial 10pt and Times New Roman 20pt; K7 MS Mincho CJK; K8 Tahoma Thai; full 481.9pt width), blk-0898-longword-mode{none,15}, blk-0898-kfitn-mode{none,15} (Times New Roman 12pt and Arial 10pt at full width, a 113.4pt right indent, 141.75pt indents on both sides and a 300pt right indent) and blk-0898-kfit5-mode{none,11,12,14,15} (right, both-side and left-only indents, a 70.9pt first-line indent, a 70.9pt hanging indent, left/right indents with a first-line indent, a 300pt cell of a table indented 50pt, and right-to-left Arabic paragraphs with no indent, a w:right and a w:left indent) and blk-0898-kfit6-mode{none,14,15} (Latin and Arabic bidi paragraphs, Arabic in left-to-right paragraphs, no / end / start indent) and blk-0898-kfit7-mode{none,15} (a tbRl section, vert and eaVert text boxes, 300pt cells with 5.4pt and 20pt margins and a first-line indent, 150pt square-wrapped floats at either column edge, right tabs, Thai). Admissible fit widths at full width are [0.89909, 0.90179) and [0.79931, 0.80018) of 481.9pt in every mode. Before mode 15, for example: right indent 113.4pt medium [320.2, 322.4) against 320.3; left indent 113.4pt high [283.6, 301.9) against 294.8; both-side indents high [129.6, 130.6) against 130.4; hanging indent medium first line [426.5, 441.5) against 440.8 and later lines [367.9, 388.9) against 369.9; first-line indent medium first line [336.2, 367.9) against 362.8. In mode 15: right indent 113.4pt high [286.9, 301.9) against 294.8; first-line indent medium first line [367.9, 406.2) against 369.9; both-side indents high [155.7, 159.0) against 158.7; the cell high [237.3, 242.2) against 240 in every mode. Cells with margins in mode 15: 0.9 / 0.8 of the cell text width (5.4pt margins: medium [258.9, 265.9) against 260.3, high [224.6, 235.9) against 231.4; 20pt margins: high [208.0, 208.9) against 208.0), and the first-line indent in a cell likewise. Float-narrowed lines (a 322.9pt window), in both modes: medium [289.2, 294.9) against 290.6 and high [251.3, 265.9) against 258.3, where a reserve of the column (274.7, 226.5) is contradicted. Right tabs: a highKashida cell ending at 425pt (past the 385.5pt fit) and a mediumKashida cell ending at the margin stay on their lines, while highKashida text before a margin tab wraps at the fit width. Vertical text: the tbRl Latin lines (728.5pt) and the mode-15 CJK lines break as horizontal lines of that length do. A fixed fraction of the indented width before mode 15, a reserve of the column for a float-narrowed line, a constant amount, or a reserve per space, character or em is contradicted. The renderer reproduces every Latin, CJK and Thai medium/high paragraph of these controls line for line except the mode-unset K7 CJK paragraphs, and K7 mixed label+CJK lines put all slack into the space, within 1.7pt per character. The kfit5 cell matches once its geometry matches Word: without a styles part Word gives that cell no left/right margins while the renderer applies 5.4pt (a separate table-geometry difference). Right-to-left paragraphs take w:left / w:start as the start indent and fit by their visible prefix (WORD_RTL_JUSTIFIED_VISIBLE_FIT); with it every kfit5 Arabic paragraph matches before mode 15, while in mode 15 the R0 paragraphs carry a separate Arabic measurement difference. The renderer reproduces the kfit7 tbRl Latin paragraphs, mode-15 tbRl CJK paragraphs, cells in mode 15, the right-floated paragraphs, the vert text box mediumKashida paragraph, the right tabs not beside a float, and the spaced Thai paragraphs line for line (Thai base characters within 0.4pt after the label line under both and the kashida types; thaiDistribute and final distribute lines keep their separate spreading differences). Differences there that are not this rule: before mode 15 Word sets cell text at another position and width than mode 15 (both included); vertical text boxes are laid out with a longer line than the renderer gives them (a one-character difference in both, a one-word difference in highKashida); a right tab beside a float, the label line of a Thai paragraph, a long Thai chunk and the pagination of the left-floated paragraph differ for every justification type. Left and leading tabs (blk-0898-kfit8-mode{none,15}: left stops at 72, 216 and 360pt after a label and before the text, both/medium/highKashida) keep the fit width for the text after the stop and match Word line for line within 0.6pt, except the highKashida label line with the 360pt stop, where Word carries the tab to the next line with its first word and breaks that word inside (a tab-wrap behaviour not reproduced). Right-to-left start stops differ for every justification type, both included (the renderer shrinks the last start-stop gap as its cell fills the line, where Word keeps the gap at the stop and wraps), a separate right-to-left tab difference. A float edge on the far side close to the band edge (blk-0898-kfit9-mode{none,14}: Courier New, a 57pt right indent, medium and high, the float edge 1-10pt inside the band edge) still ends the reserve base: every first line beside it holds the word whose end lies between the float-edge fit and the fit of the band edge less the trailing indent, as this rule gives. The renderer admits those lines by this rule; its float search after a rejected head unit asks the unchanged float solver on the real band for the smaller of the interior and far-edge widths, taking a window that holds its own kind\'s width, else steps on the line grid up to where the larger width is found; past 32 such steps on one line it takes the window of the larger width (library policy for an unmeasured geometry: a long run of far-edge windows that each fail their own width). Before mode 15 a negative trailing indent keeps the full width (kfit9, -40pt: a highKashida line of a 345.5pt window holds 316.9pt, a reserve of at most 28.7pt where a reserve to the container edge would be 61.1pt; mediumKashida lines there break alike either way). Unmeasured: centre tab cells under a reserve and first-line indents beside a float. Unreproduced: in mode unset Word sets the Latin label of a low/medium/highKashida CJK paragraph alone on its first line and breaks the CJK run without kinsoku; lowKashida and thaiDistribute CJK lines push a line-end U+3002 to the next line where the renderer hangs it. Thai cluster spreading of thaiDistribute, kashida elongation of Arabic words, East Asian automatic spacing on these lines and the mode-15 interword compression of both, distribute, lowKashida and thaiDistribute lines keep their separate models.',
+  description: 'Line fit and soft-line justification of the kashida and Thai justification types (§17.18.44). A mediumKashida line takes the next word only while its natural width (hanging line-end spaces excluded) stays within its available width less a 10% reserve, and a highKashida line less a 20% reserve; lowKashida, both, distribute and thaiDistribute fit the whole width. From compatibility mode 15 the reserve is that share of the line\'s own width, so the line fits into 0.9 / 0.8 of the width between its indents, the first line after its first-line or hanging offset. In modes unset, 11, 12 and 14 (identical in every control) the reserve is that share of the width from the line\'s start edge (the paragraph\'s start indent, w:left / w:start in either direction, or a float edge narrowing that side; first-line and hanging offsets do not count) to its far edge (a float edge narrowing that side, else the column or table cell edge past the trailing indent), taken from the line\'s own width: a trailing indent and a first-line indent do not shrink it. An aligned (right) tab cell takes no reserve: it may reach its stop anywhere in the band, while the text before the tab keeps the reduced fit width. The reserve narrows the fit width of the line breaker only, the force-break of an over-wide word or CJK run included; paint still justifies every soft-wrapped line to the full width, so the reserve is spent by stretching. A soft-wrapped lowKashida, mediumKashida, highKashida or thaiDistribute line opens no inter-CJK gaps: its slack goes to its spaces, and a space-free CJK line keeps its natural width at the line start (both and distribute still spread CJK). Evidence: synthetic Windows Word 16.0.20527 controls blk-0898-kfit-mode{none,14,15} (K1-K6 Latin with short and long words, double spaces, Arial 10pt and Times New Roman 20pt; K7 MS Mincho CJK; K8 Tahoma Thai; full 481.9pt width), blk-0898-longword-mode{none,15}, blk-0898-kfitn-mode{none,15} (Times New Roman 12pt and Arial 10pt at full width, a 113.4pt right indent, 141.75pt indents on both sides and a 300pt right indent) and blk-0898-kfit5-mode{none,11,12,14,15} (right, both-side and left-only indents, a 70.9pt first-line indent, a 70.9pt hanging indent, left/right indents with a first-line indent, a 300pt cell of a table indented 50pt, and right-to-left Arabic paragraphs with no indent, a w:right and a w:left indent) and blk-0898-kfit6-mode{none,14,15} (Latin and Arabic bidi paragraphs, Arabic in left-to-right paragraphs, no / end / start indent) and blk-0898-kfit7-mode{none,15} (a tbRl section, vert and eaVert text boxes, 300pt cells with 5.4pt and 20pt margins and a first-line indent, 150pt square-wrapped floats at either column edge, right tabs, Thai). Admissible fit widths at full width are [0.89909, 0.90179) and [0.79931, 0.80018) of 481.9pt in every mode. Before mode 15, for example: right indent 113.4pt medium [320.2, 322.4) against 320.3; left indent 113.4pt high [283.6, 301.9) against 294.8; both-side indents high [129.6, 130.6) against 130.4; hanging indent medium first line [426.5, 441.5) against 440.8 and later lines [367.9, 388.9) against 369.9; first-line indent medium first line [336.2, 367.9) against 362.8. In mode 15: right indent 113.4pt high [286.9, 301.9) against 294.8; first-line indent medium first line [367.9, 406.2) against 369.9; both-side indents high [155.7, 159.0) against 158.7; the cell high [237.3, 242.2) against 240 in every mode. Cells with margins in mode 15: 0.9 / 0.8 of the cell text width (5.4pt margins: medium [258.9, 265.9) against 260.3, high [224.6, 235.9) against 231.4; 20pt margins: high [208.0, 208.9) against 208.0), and the first-line indent in a cell likewise. Float-narrowed lines (a 322.9pt window), in both modes: medium [289.2, 294.9) against 290.6 and high [251.3, 265.9) against 258.3, where a reserve of the column (274.7, 226.5) is contradicted. Right tabs: a highKashida cell ending at 425pt (past the 385.5pt fit) and a mediumKashida cell ending at the margin stay on their lines, while highKashida text before a margin tab wraps at the fit width. Vertical text: the tbRl Latin lines (728.5pt) and the mode-15 CJK lines break as horizontal lines of that length do. A fixed fraction of the indented width before mode 15, a reserve of the column for a float-narrowed line, a constant amount, or a reserve per space, character or em is contradicted. The renderer reproduces every Latin, CJK and Thai medium/high paragraph of these controls line for line except the mode-unset K7 CJK paragraphs, and K7 mixed label+CJK lines put all slack into the space, within 1.7pt per character. The kfit5 cell matches once its geometry matches Word: without a styles part Word gives that cell no left/right margins while the renderer applies 5.4pt (a separate table-geometry difference). Right-to-left paragraphs take w:left / w:start as the start indent and fit by their visible prefix (WORD_RTL_JUSTIFIED_VISIBLE_FIT); with it every kfit5 Arabic paragraph matches before mode 15, while in mode 15 the R0 paragraphs carry a separate Arabic measurement difference. The renderer reproduces the kfit7 tbRl Latin paragraphs, mode-15 tbRl CJK paragraphs, cells in mode 15, the right-floated paragraphs, the vert text box mediumKashida paragraph, the right tabs not beside a float, and the spaced Thai paragraphs line for line (Thai base characters within 0.4pt after the label line under both and the kashida types; thaiDistribute and final distribute lines keep their separate spreading differences). Differences there that are not this rule: before mode 15 Word sets cell text at another position and width than mode 15 (both included); vertical text boxes are laid out with a longer line than the renderer gives them (a one-character difference in both, a one-word difference in highKashida); a right tab beside a float, the label line of a Thai paragraph, a long Thai chunk and the pagination of the left-floated paragraph differ for every justification type. Left and leading tabs (blk-0898-kfit8-mode{none,15}: left stops at 72, 216 and 360pt after a label and before the text, both/medium/highKashida) keep the fit width for the text after the stop and match Word line for line within 0.6pt, except the highKashida label line with the 360pt stop, where Word carries the tab to the next line with its first word and breaks that word inside (a tab-wrap behaviour not reproduced). Right-to-left start stops differ for every justification type, both included (the renderer shrinks the last start-stop gap as its cell fills the line, where Word keeps the gap at the stop and wraps), a separate right-to-left tab difference. A float edge on the far side close to the band edge (blk-0898-kfit9-mode{none,14}: Courier New, a 57pt right indent, medium and high, the float edge 1-10pt inside the band edge) still ends the reserve base: every first line beside it holds the word whose end lies between the float-edge fit and the fit of the band edge less the trailing indent, as this rule gives. The renderer admits those lines by this rule; its float search after a rejected head unit asks the unchanged float solver on the real band for the smaller of the interior and far-edge widths, taking a window that holds its own kind\'s width, else steps on the line grid up to where the larger width is found; past 32 such steps on one line it takes the window of the larger width (library policy for an unmeasured geometry: a long run of far-edge windows that each fail their own width). Before mode 15 any negative trailing indent removes the reserve: the line fits its whole width (blk-0898-floats-negind-mode{none,11,12,14,15}: a 100-character Courier New word force-broken at the fit, medium and high, start indents 0, 176.35 and 300pt each also 3.6pt further in, trailing indents -5 to -56.7pt: all 76 first lines in modes unset, 11, 12 and 14 hold floor(W / advance) characters, where a reserve of the width to the column edge (the rule for a non-negative trailing indent, which the same controls confirm at 0 and +40pt in 24 of 24 lines), of the line\'s own width or of the width to the page edge is contradicted in every line; mode 15 keeps its reserve of the line\'s own width in all 76; a float 1pt past the band edge and word-fit lines change nothing; kfit9, -40pt: a highKashida line of a 345.5pt window holds 316.9pt). Past the page edge (-80 and -120pt) Word ends the line about 5.6pt past the page edge for every justification type, both included, a separate negative-indent limit the renderer does not apply. Unmeasured: centre tab cells under a reserve and first-line indents beside a float. Unresolved (blk-0898-floats-strip, issue #2059: a left float makes the far-edge window too narrow for its reserve, a right float edge 1/4 or 3/4 of the far-edge strip inside the band follows on the next line): in mode 15 every line matches; before mode 15 a paragraph that is the first on its page, with a tight left float, sets the word below that float rather than in the strip window this rule admits (by 1.4pt medium, 2.9pt high), while a square left float breaks it on its first line, and the other paragraphs show the separate pre-15 behaviour of a paragraph anchoring its own floats; the renderer keeps its search there. Unreproduced: in mode unset Word sets the Latin label of a low/medium/highKashida CJK paragraph alone on its first line and breaks the CJK run without kinsoku; lowKashida and thaiDistribute CJK lines push a line-end U+3002 to the next line where the renderer hangs it. Thai cluster spreading of thaiDistribute, kashida elongation of Arabic words, East Asian automatic spacing on these lines and the mode-15 interword compression of both, distribute, lowKashida and thaiDistribute lines keep their separate models.',
 });
 
 /** Line-fit policy of {@link WORD_KASHIDA_LINE_FIT}: a line's text may fill
@@ -508,8 +540,8 @@ export function wordJustifiedLineFit(
   wordWrap: boolean,
   trailingIndentPt = 0,
 ): { readonly fraction: number; readonly reserveShare: number; readonly rtlVisiblePrefix: boolean } | undefined {
-  // Before mode 15 a negative trailing indent keeps the full width
-  // (blk-0898-kfit9: a highKashida line of a 345.5pt window holds 316.9pt).
+  // Before mode 15 a negative trailing indent, from -5pt, removes the reserve
+  // (blk-0898-floats-negind: 76 of 76 lines; blk-0898-kfit9).
   const reserve = compatibilityMode !== 15 && trailingIndentPt < 0 ? 0
     : alignment === 'mediumKashida' ? 0.1 : alignment === 'highKashida' ? 0.2 : 0;
   const rtlVisiblePrefix = wordRtlJustifiedVisibleFitApplies(alignment, baseRtl, wordWrap);
@@ -521,6 +553,40 @@ export function wordJustifiedLineFit(
     : { fraction: 1, reserveShare: reserve, rtlVisiblePrefix };
 }
 
+/** Observed Word 16.0.20527 compatibility, not an ECMA separator-charge rule.
+ * Paragraph bidi (§17.3.1.6) and resolved run rtl/cs (§17.3.2.30/7) are distinct.
+ * Mode15 homogeneous Arabic-bearing runs (including a same-run Latin label)
+ * in baseRTL medium/highKashida charge the actual soft-edge U+0020. Sole-run
+ * rtl=true countercontrols keep visible fitting; absent and explicit false
+ * agree. Medium-line separator6/8/8.5/12pt controls cross the existing fit
+ * band at the full measured advance. Both reserves remain unchanged.
+ * Arial12 establishes the class; face names are not admission predicates.
+ * Thirty source-bound accepted/next boundaries across three indent classes
+ * agree. Non-Arabic counterexamples require the Arabic-bearing gate. Other
+ * modes, mixed formatting/directions, fields/tabs/generated content and
+ * vertical contexts retain their existing policy. This never changes final
+ * line hanging or paint, and never remeasures source substrings. */
+export function wordUnmarkedArabicKashidaChargesSourceSpace(
+  paragraph: ParagraphLayoutSource,
+  compatibilityMode: number | undefined,
+  baseRtl: boolean,
+  wordWrap: boolean,
+  horizontal: boolean,
+): boolean {
+  if (compatibilityMode !== 15 || !baseRtl || !wordWrap
+    || (paragraph.alignment !== 'mediumKashida' && paragraph.alignment !== 'highKashida')
+    || !horizontal
+    || (paragraph.numbering !== null && paragraph.numbering !== undefined)
+    || paragraph.runs.length !== 1 || paragraph.complexFieldBoundaries !== undefined) return false;
+  const run = paragraph.runs[0]!;
+  if (run.type !== 'text' || run.rtl === true || run.cs === true
+    || run.ruby || run.noteRef || run.fitTextVal !== undefined
+    || ('optionalHyphen' in run && run.optionalHyphen)
+    || ('noteSeparatorCharacter' in run && run.noteSeparatorCharacter)
+    || /[\t\r\n\u00ad\ufffc]/u.test(run.text)) return false;
+  return /(?=\p{Script=Arabic})\p{Letter}/u.test(run.text);
+}
+
 export const WORD_RTL_JUSTIFIED_VISIBLE_FIT = defineCompatibilityRule({
   id: 'word-rtl-justified-visible-fit',
   evidence: {
@@ -530,7 +596,7 @@ export const WORD_RTL_JUSTIFIED_VISIBLE_FIT = defineCompatibilityRule({
     version: '16.0.20527',
     platform: 'Windows',
   },
-  description: 'A justified right-to-left paragraph (§17.3.1.6 bidi) with jc both, mediumKashida or highKashida and wordWrap on (§17.3.1.45; with it off nothing hangs and the space is charged) fits each line by its visible prefix: the U+0020 that ends the line does not count against the width, as on left-to-right lines (WORD_COLLAPSIBLE_LINE_EDGE_VISIBLE_FIT), replacing the library policy that charged it on right-to-left lines. The space then hangs: a justified line spreads its slack over the visible text, which fills the band, and the space stands outside it on the side it is drawn (left of right-to-left text; right of a Latin run drawn rightmost, past the start edge); an unjustified final line keeps the space inside the band while it fits there and otherwise starts at the band; line-end spaces split across runs are resolved run by run, each hanging only when nothing but other line-end spaces lies between it and the line\'s edge on its drawn side; a space drawn between segments cannot hang, so any overflow it leaves is absorbed into it and no visible glyph leaves the band (library policy for cases no control measured). Measured: the kfit6 Latin bidi lines match Word within 0.8pt per character for both and highKashida and 1.8pt for mediumKashida (final lines included; about 3pt before), and the justified kfit5 Arabic lines start within 0.4pt of Word at the left margin (3.3pt before). The WORD_KASHIDA_LINE_FIT reserve applies on top, taking w:left / w:start as the start indent. Evidence: synthetic Windows Word 16.0.20527 controls blk-0898-kfit6-mode{none,14,15}, Arial 12pt, both / mediumKashida / highKashida, each with no indent, a 113.4pt w:right and a 113.4pt w:left: Latin text in bidi paragraphs, Arabic rtl runs in left-to-right paragraphs, and Arabic in bidi paragraphs. With exact Arial advances, the Latin bidi mediumKashida paragraph with the start indent admits fit widths [330.9, 344.2) by visible width but [334.2, 347.5) with the line-end space charged, against the 331.7pt the reserve gives, before mode 15 and in mode 15 alike; only the visible fit is consistent. Arabic both paragraphs with either indent (no kashida) and the blk-0898-kfit5 Arabic medium/high paragraphs before mode 15 break as Word does only with the visible fit; with it every bidi paragraph of these controls matches before mode 15. Residuals: in mode 15 Word sets one Arabic character or word fewer on some lines (kfit6 Arabic medium with an indent, kfit5 R0) at the same fit width that breaks as the renderer does before mode 15, and an Arabic run in a left-to-right highKashida paragraph shows the same one-character difference, so this is a mode-15 Arabic measurement difference, not a fit rule. Mode-15 interword compression of right-to-left both lines (Word fits Latin bidi lines past the width) stays outside WORD_JUSTIFIED_INTERWORD_COMPRESSION, which keeps right-to-left lines out. Unmeasured, so keeping the charged line-end space: lowKashida, distribute and thaiDistribute right-to-left paragraphs, and left, centre and right aligned right-to-left lines.',
+  description: 'A justified right-to-left paragraph (§17.3.1.6 bidi) with jc both, mediumKashida or highKashida and wordWrap on (§17.3.1.45; with it off nothing hangs and the space is charged) fits each line by its visible prefix: the U+0020 that ends the line does not count against the width, as on left-to-right lines (WORD_COLLAPSIBLE_LINE_EDGE_VISIBLE_FIT), replacing the library policy that charged it on right-to-left lines. The space then hangs: a justified line spreads its slack over the visible text, which fills the band, and the space stands outside it on the side it is drawn (left of right-to-left text; right of a Latin run drawn rightmost, past the start edge); an unjustified final line keeps the space inside the band while it fits there and otherwise starts at the band; line-end spaces split across runs are resolved run by run, each hanging only when nothing but other line-end spaces lies between it and the line\'s edge on its drawn side; a space drawn between segments cannot hang, so any overflow it leaves is absorbed into it and no visible glyph leaves the band (library policy for cases no control measured). Measured: the kfit6 Latin bidi lines match Word within 0.8pt per character for both and highKashida and 1.8pt for mediumKashida (final lines included; about 3pt before), and the justified kfit5 Arabic lines start within 0.4pt of Word at the left margin (3.3pt before). The WORD_KASHIDA_LINE_FIT reserve applies on top, taking w:left / w:start as the start indent. Evidence: synthetic Windows Word 16.0.20527 controls blk-0898-kfit6-mode{none,14,15}, Arial 12pt, both / mediumKashida / highKashida, each with no indent, a 113.4pt w:right and a 113.4pt w:left: Latin text in bidi paragraphs, Arabic rtl runs in left-to-right paragraphs, and Arabic in bidi paragraphs. With exact Arial advances, the Latin bidi mediumKashida paragraph with the start indent admits fit widths [330.9, 344.2) by visible width but [334.2, 347.5) with the line-end space charged, against the 331.7pt the reserve gives, before mode 15 and in mode 15 alike; only the visible fit is consistent. Arabic both paragraphs with either indent (no kashida) and the blk-0898-kfit5 Arabic medium/high paragraphs before mode 15 break as Word does only with the visible fit; with it every bidi paragraph of these controls matches before mode 15. The later source-owned mode-15 rule wordUnmarkedArabicKashidaChargesSourceSpace supersedes visible admission only for its homogeneous unmarked Arabic-bearing baseRTL medium/high class; controlled run-RTL and separator-size counterexamples establish that boundary. Explicit RTL Arabic, non-Arabic and mixed-source classes retain this visible-prefix rule. Whole-source identity and embedded-font cmap audits show the historical explicit-RTL and LTR Arabic character-count residuals were PDF extraction artifacts; those counterclasses have no visible source-character wrap mismatch and retain their existing policy. Mode-15 interword compression of right-to-left both lines (Word fits Latin bidi lines past the width) stays outside WORD_JUSTIFIED_INTERWORD_COMPRESSION, which keeps right-to-left lines out. Unmeasured, so keeping the charged line-end space: lowKashida, distribute and thaiDistribute right-to-left paragraphs, and left, centre and right aligned right-to-left lines.',
 });
 
 /** Scope of {@link WORD_RTL_JUSTIFIED_VISIBLE_FIT}: right-to-left paragraphs
@@ -575,16 +641,38 @@ export const WORD_JUSTIFIED_INTERWORD_COMPRESSION = defineCompatibilityRule({
     version: '16.113',
     platform: 'macOS 27.0',
   },
-  description: 'Word 16.113 mode-15 both/justify LTR horizontal bounded lines without a character grid fit by their visible width. A U+0020 run supplies gaps only when its nearest non-space cells on both sides are text glyphs; every standalone consecutive space counts, NBSP does not. Grapheme clusters are atomic: a space with a combining extension remains fixed, including source seams. Tabs, inline objects, ruby, fixed-width fitText cells and line edges keep adjacent spaces fixed. The unmeasured fitText interaction preserves its existing fixed pitch and atomic wrapping (§17.3.2.14). Run face, size, fields, note references, symbol glyphs, soft/no-break hyphens and zero-width text do not gate eligibility. WORD_EAST_ASIAN_AUTO_SPACE gaps between text cells join this family with their natural width. With overflow C and natural opportunity sum S, accept C <= S/4 and C/(S + candidate line-end space width) <= 0.5 * E/Sprime, where E is the expansion without the candidate and Sprime includes that alternative line-end space. Fit, retained paint and justification use the breaker advances; kerning follows WORD_KERN_THRESHOLD_AUTHORITY. Paint allocates positive or negative slack proportionally: delta_i = slack*w_i/S; final lines receive accepted compression too. Ideographic/CJK/SEA expansion has no proportional evidence and keeps its separate unweighted opportunity family, except that a U+3000 whose nearest non-space cells on both sides are not CJK (Latin words separated by ideographic spaces) is no opportunity: Windows Word 16.0.20527 keeps it at its natural 12pt in mode 15 (blk-0898-u3000-mode15; mode unset and 11-14 expand it, 12 to 12.4pt) and leaves such a final line at its natural width, while a U+3000 next to CJK keeps its opportunity (blk-0898-u3cjk-mode15: CJK and mixed CJK/Latin lines with U+3000 separators within 2.2pt, 12pt before); lines with right-to-left text keep every opportunity, and a supplementary ideograph counts as CJK; sparse contextual space acquisition avoids shaping full overlong words during candidate fitting. Evidence: 240 Word controls bracket zero/one/many gaps, repeated spaces, separator runs, NBSP, mixed sizes/faces, fields, notes, symbols, hyphens, tabs, first indents, drop caps, floats, final lines, ruby and one/two inline objects of 0.5/1/2 em. Mixed-width second-boundary brackets agree. Independent 734- and 382-probe remeasurements preserve all uniform arithmetic verdicts; these overlapping sets substitute for the unavailable historical 758-set. Normative ST_Jc (§17.18.44) specifies inter-word justification, not this observed arithmetic. The final positive-threshold sweep agrees on 63/66 admissions and all 68 kerning-switch observations. Three Times New Roman admissions remain mismatches: K1-tnr-ot0-3, K1-tnr-ot1-2 and K1-tnr-ot1-3. Native Canvas measures both the complete source and its segmented prefix at 205.83984375pt, while the pinned-font HarfBuzz authority measures 204.5390625pt; no source-seam correction or empirical amount bridges that native shaping difference. A matched K1-tnr-ot0-2/K1-tnr-ot1-2 pair at 201.45pt has identical measured inputs (C=4.38984375pt, S=13.5pt, E=57.1248046875pt, Sprime=13.5pt, separator=4.5pt), yet Word rejects flag-off and accepts flag-on. The quarter bound rejects both in the library: flag-on remains a known mismatch. Together with corpus paragraph [213], PDF lines 376/377, and paragraph [843], PDF lines 1433/1434 (four lines), and the earlier flag-dependent observation, this is an accepted unresolved Word predicate, not evidence for a flag guard or a fitted coefficient; a 44-control investigation did not establish a general suppression rule (15/44 decision-balance and 30/44 grid-guard disagreements). Corpus paragraph [577], PDF lines 966/967, is left-aligned mode 14: the existing OpenType gate disables space fitting after the kerning correction. This accepted separate-mode limitation belongs to issue #1660/#1702 and its owner; this mode-15 rule does not extend into it. Font-table alternate-name/substitute-font selection differences are outside same-font fidelity acceptance. Direct letter seams and unequal typography remain shaping evidence gaps, with previous boundaries retained. Object/text origins also show a slack-independent export residual, which is not corrected with a fitted advance. Other alignments, modes, grids, RTL/vertical and unbounded widths retain their previous policy. Windows Word (Microsoft 365, ExportAsFixedFormat) controls of a justified 16pt bold Times New Roman line at 470/467.8/467pt in mode 15, each exported with and without lineWrapLikeWord6 (six controls of the IEEE line-fit matrix), give identical line ends and identical compressed gaps in every pair, so that switch does not exclude a line from this rule; the renderer reproduces all six.',
+  description: 'Word 16.113 mode-15 both/justify LTR horizontal bounded lines without a character grid fit by their visible width. A U+0020 run supplies gaps only when its nearest non-space cells on both sides are text glyphs; every standalone consecutive space counts, NBSP does not. Grapheme clusters are atomic: a space with a combining extension remains fixed, including source seams. Tabs, inline objects, ruby, fixed-width fitText cells and line edges keep adjacent spaces fixed. The unmeasured fitText interaction preserves its existing fixed pitch and atomic wrapping (§17.3.2.14). Run face, size, fields, note references, symbol glyphs, soft/no-break hyphens and zero-width text do not gate eligibility. WORD_EAST_ASIAN_AUTO_SPACE gaps between text cells join this family with their natural width. With overflow C and natural opportunity sum S, accept C <= S/4 and C/(S + candidate line-end space width) <= 0.5 * E/Sprime, where E is the expansion without the candidate and Sprime includes that alternative line-end space. Fit, retained paint and justification use the breaker advances; kerning follows WORD_KERN_THRESHOLD_AUTHORITY. Paint allocates positive or negative slack proportionally: delta_i = slack*w_i/S; final lines receive accepted compression too. Ideographic/CJK/SEA expansion has no proportional evidence and keeps its separate unweighted opportunity family, except that a U+3000 whose nearest non-space cells on both sides are not CJK (Latin words separated by ideographic spaces) is no opportunity: Windows Word 16.0.20527 keeps it at its natural 12pt in mode 15 (blk-0898-u3000-mode15; mode unset and 11-14 expand it, 12 to 12.4pt) and leaves such a final line at its natural width, while a U+3000 next to CJK keeps its opportunity (blk-0898-u3cjk-mode15: CJK and mixed CJK/Latin lines with U+3000 separators within 2.2pt, 12pt before); lines with right-to-left text keep every opportunity, and a supplementary ideograph counts as CJK; sparse contextual space acquisition avoids shaping full overlong words during candidate fitting. Evidence: 240 Word controls bracket zero/one/many gaps, repeated spaces, separator runs, NBSP, mixed sizes/faces, fields, notes, symbols, hyphens, tabs, first indents, drop caps, floats, final lines, ruby and one/two inline objects of 0.5/1/2 em. Mixed-width second-boundary brackets agree. Independent 734- and 382-probe remeasurements preserve all uniform arithmetic verdicts; these overlapping sets substitute for the unavailable historical 758-set. Normative ST_Jc (§17.18.44) specifies inter-word justification, not this observed arithmetic. The final positive-threshold sweep agrees on 63/66 admissions and all 68 kerning-switch observations. Three Times New Roman admissions remain mismatches: K1-tnr-ot0-3, K1-tnr-ot1-2 and K1-tnr-ot1-3. Native Canvas measures both the complete source and its segmented prefix at 205.83984375pt, while the pinned-font HarfBuzz authority measures 204.5390625pt; no source-seam correction or empirical amount bridges that native shaping difference. A matched K1-tnr-ot0-2/K1-tnr-ot1-2 pair at 201.45pt has identical measured inputs (C=4.38984375pt, S=13.5pt, E=57.1248046875pt, Sprime=13.5pt, separator=4.5pt), yet Word rejects flag-off and accepts flag-on. The quarter bound rejects both in the library: flag-on remains a known mismatch. Together with corpus paragraph [213], PDF lines 376/377, and paragraph [843], PDF lines 1433/1434 (four lines), and the earlier flag-dependent observation, this is an accepted unresolved Word predicate, not evidence for a flag guard or a fitted coefficient; a 44-control investigation did not establish a general suppression rule (15/44 decision-balance and 30/44 grid-guard disagreements). Corpus paragraph [577], PDF lines 966/967, is left-aligned mode 14: the existing OpenType gate disables space fitting after the kerning correction. This accepted separate-mode limitation belongs to issue #1660/#1702 and its owner; this mode-15 rule does not extend into it. Font-table alternate-name/substitute-font selection differences are outside same-font fidelity acceptance. Direct letter seams and unequal typography remain shaping evidence gaps, with previous boundaries retained. Object/text origins also show a slack-independent export residual, which is not corrected with a fitted advance. The distribute/lowKashida extension has the bounded evidence recorded beside the admission gate below. Other alignments, modes, grids, RTL/vertical and unbounded widths retain their previous policy. Windows Word (Microsoft 365, ExportAsFixedFormat) controls of a justified 16pt bold Times New Roman line at 470/467.8/467pt in mode 15, each exported with and without lineWrapLikeWord6 (six controls of the IEEE line-fit matrix), give identical line ends and identical compressed gaps in every pair, so that switch does not exclude a line from this rule; the renderer reproduces all six.',
 });
 
-/** Gate governed by {@link WORD_JUSTIFIED_INTERWORD_COMPRESSION}. */
+/** Gate governed by {@link WORD_JUSTIFIED_INTERWORD_COMPRESSION}.
+ * ECMA-376 §17.18.44 specifies justification classes, not this fit arithmetic.
+ * Windows Word 16.0.20527 also admits the same near-overflow word under
+ * distribute/lowKashida as under both: Courier New 12pt LTR start-tab final
+ * cells and end-/center-tab wrapped cells in a 481.9pt band. All three classes
+ * have identical first-line source glyph origins/advances; modes unset/14
+ * instead move that word down. This bounded cross-alignment observation reuses
+ * the existing proportional comparison and quarter-space cap, without claiming
+ * that their thresholds were independently swept for the two new alignments.
+ * The added alignments enable admission/contraction only; uncompressed
+ * expansion retains its existing projection until bidi gaps have source-owned
+ * physical edges. Paragraph acquisition additionally bounds the new alignments
+ * to base-LTR content without strong RTL text or authored RTL marks; the scalar
+ * gap model does not own mixed/RTL source edges. Existing both/justify behavior
+ * and the grid, width and shaping exclusions remain unchanged.
+ */
 export function wordJustifiedInterwordCompressionApplies(
   alignment: string | null | undefined,
   compatibilityMode: number | undefined,
 ): boolean {
-  return (alignment === 'both' || alignment === 'justify')
+  return (alignment === 'both' || alignment === 'justify'
+    || alignment === 'distribute' || alignment === 'lowKashida')
     && compatibilityMode === 15;
+}
+
+/** The existing quarter-space cap, shared with conservative refusal proofs.
+ * An upper bound on S can certify refusal only; it cannot admit a line. */
+export function wordJustifiedCompressionExceedsCap(overflow: number, naturalGapSum: number): boolean {
+  return overflow > naturalGapSum / 4;
 }
 
 /** Observed proportional comparison. All lengths share one unit. Line-end
@@ -598,7 +686,7 @@ export function wordJustifiedInterwordCompressionFactor(input: Readonly<{
 }>): number | undefined {
   const { overflow: C, naturalGapSum: S, previousOpportunitySum: Sprime,
     expansionWithoutCandidate: E, candidateLineEndSeparator: t } = input;
-  if (!(C > 0) || !(S > 0) || !(Sprime > 0) || C > S / 4) return undefined;
+  if (!(C > 0) || !(S > 0) || !(Sprime > 0) || wordJustifiedCompressionExceedsCap(C, S)) return undefined;
   return C / (S + t) <= 0.5 * E / Sprime ? C / S : undefined;
 }
 
@@ -609,6 +697,18 @@ export const WORD_OVERFLOW_PUNCTUATION_LANGUAGE_SETS = defineCompatibilityRule({
     reference: '[MS-OE376] §2.1.56',
   },
   description: 'Apply the language-specific punctuation sets documented for Word in [MS-OE376] §2.1.56 to Chinese, Japanese, and Korean language runs, and let overflowPunct override kinsoku when both rules affect the same character. When an effective East Asian language is absent, content that actually selects the East Asian script path retains the union as a bounded fallback.',
+});
+
+export const WORD_JUSTIFICATION_PUNCTUATION_HANG = defineCompatibilityRule({
+  id: 'word-justification-punctuation-hang',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'blk-0898-cjk-kin',
+    application: 'Microsoft Word',
+    version: '16.0.20527',
+    platform: 'Windows',
+  },
+  description: 'Which paragraphs let an overflowPunct (§17.3.1.21) closing mark hang past the line end, and how many. lowKashida, mediumKashida, highKashida and thaiDistribute paragraphs never hang one: the mark stays inside the line and kinsoku moves the character before it down with it (from compatibility mode 14; before mode 14 the kashida types instead break their CJK text without kinsoku, a separate unimplemented rule, and thaiDistribute already pushes). At most one mark hangs: when the character after a hangable mark may not start a line either (。」), nothing hangs and kinsoku moves the character before the pair down. Evidence: synthetic Windows Word 16.0.20527 controls blk-0898-cjk-kin-mode{none,11,12,14,15}, MS Mincho 12pt at the full 481.9pt width, every jc (left, both, distribute, low/medium/highKashida, thaiDistribute): 。 that fits at the last slot; 。, 、, 」, 々 and 。」 one slot past the margin; the same with eastAsia ja-JP, with overflowPunct off and with kinsoku off; and after a Latin label whose remainder leaves 4.5-6.3pt. Table cells, headers and footnotes: blk-0898-cjk-kincell-mode{none,11,12,14,15} repeat every row above inside a one-cell lrTb table with cell margins 0, with left/right margins 108 twips, and nested one level (each cell content width equal to the body width), and eight O1/O5 rows (every jc) in the default header and in a footnote. The header and footnote rows break exactly as the body rows in every mode. In every cell variant and every mode a table cell never hangs a mark: every row that hangs in the body (O1, O2, O3, O1j and PO1-PO3 under left, both and distribute; left only before mode 15) pushes the character before the mark instead, and with kinsoku off (N2) the mark starts the next line; every other row (kashida and thaiDistribute, 々, 。」, fitting marks) breaks exactly as in the body. Scope (admitted positively, everything else keeps the previous overflowPunct behaviour): CJK marks in ordinary (non-frame), left-to-right paragraphs with overflowPunct on and a measured alignment (left, both, distribute and the kashida and Thai types, with their Strict spellings start and justify; additionally center/right/end in the measured kinsoku-on version profiles below), in an lrTb section without a document grid, at the top level of the main body, a header or a footnote, or in a table cell of the main body whose authored text direction (and every enclosing cell) is horizontal, where no mark hangs. Footers, endnotes, note separators, text boxes, frames, cells of headers and notes, rotated or other authored-vertical cells, upright tables of vertical sections, centred and right-aligned paragraphs outside those kinsoku-on profiles, Latin and complex-script marks, right-to-left, vertical and grid paragraphs are unmeasured and keep their hang. The character after the mark is taken across run seams. Every kashida and thaiDistribute row from mode 14 (and thaiDistribute in every mode) pushes (line 1 one character short of the capacity, line 2 starting with the character and the mark); both and distribute hang 。、」 in every mode and push 。」 and 々. Additional kinsoku-on controls in modes unset, 11, 12, 14 and 15 establish left/center/right and Strict start/end: nonjustified body text hangs one mark before 15 and pushes it in 15; horizontal table cells never hang. Explicit compressPunctuation and doNotCompress countercontrols retain this version/alignment result, so character-spacing compression is not its selector. This extension retains the previous paragraph-off and document-off behavior, including the separate unresolved paragraph-off line-breaking limitation (#2079), and does not extrapolate unmeasured modes.',
 });
 
 export const WORD_OVERFLOW_PUNCTUATION_LATIN_PARENT_RUN = defineCompatibilityRule({
@@ -899,6 +999,91 @@ const ALL_WORD_OVERFLOW_PUNCTUATION = new Set([
 ]);
 const LATIN_WORD_OVERFLOW_PUNCTUATION = new Set(['.', ',']);
 
+/** Registered CJK punctuation authority. 'one'/'none' retain the established
+ * measured policy; undefined preserves unmeasured legacy overflow behavior.
+ * 'one-from-fitting-prefix' is the approved Japanese pre15 paragraph-OFF
+ * body class: the same one-mark refusal plus an actually fitting unextended
+ * prefix. It does not normalize document-OFF or other legacy callers. */
+export type CjkClosingMarkHang = 'one' | 'none' | 'one-from-fitting-prefix';
+
+/** The policy for a paragraph in the measured class (see
+ * StoryContext.closingMarkHangAdmitted in layout-context.ts) with a measured
+ * alignment, 'none' throughout inside a table cell; `undefined` keeps the
+ * unmeasured overflowPunct behaviour. `start`
+ * is the Strict spelling of `left` and `justify` that of `both` (§17.18.44);
+ * the class is left-to-right only, where they coincide. */
+export function wordCjkClosingMarkHang(
+  alignment: string | null | undefined,
+  measuredScope: boolean,
+  insideTableCell = false,
+  paragraphKinsokuOff = false,
+  compatibilityMode?: number,
+  documentKinsokuEnabled = true,
+  boundedJapaneseParagraphOff = false,
+): CjkClosingMarkHang | undefined {
+  if (!measuredScope) return undefined;
+  // Registered word-paragraph-off-japanese-line-edges: the approved mode15
+  // OFF body class permits the head but grants no punctuation extension.
+  // Pre15 one-mark admission and existing Kashida/Thai none remain separate.
+  if (boundedJapaneseParagraphOff && paragraphKinsokuOff && documentKinsokuEnabled) {
+    if (compatibilityMode === 15) return 'none';
+    if ((compatibilityMode === undefined || compatibilityMode === 11 || compatibilityMode === 12 || compatibilityMode === 14)
+      && (alignment === 'left' || alignment === 'both' || alignment === 'justify' || alignment === 'distribute')) {
+      return 'one-from-fitting-prefix';
+    }
+  }
+  // §17.3.1.16 defines forbidden line edges, not this Office-version switch.
+  // Observed ON controls: unset/11/12/14 hang one mark for nonjustified LTR
+  // text; 15 pushes it with its preceding character. Center/right (Strict end)
+  // and horizontal table cells were independently measured in those profiles.
+  // Explicit punctuation-compression on/off does not select this rule.
+  // Outside the separately admitted Japanese OFF class above, other modes,
+  // document-off and paragraph-off retain their exact old hanging policy.
+  const measuredOnProfile = compatibilityMode === undefined
+    || compatibilityMode === 11 || compatibilityMode === 12
+    || compatibilityMode === 14 || compatibilityMode === 15;
+  if (documentKinsokuEnabled && !paragraphKinsokuOff && measuredOnProfile
+    && (alignment === 'left' || alignment === 'start' || alignment === 'center'
+      || alignment === 'right' || alignment === 'end')) {
+    return insideTableCell || compatibilityMode === 15 ? 'none' : 'one';
+  }
+  switch (alignment) {
+    case 'lowKashida':
+    case 'mediumKashida':
+    case 'highKashida':
+    case 'thaiDistribute':
+      return 'none';
+    case 'left':
+    case 'start':
+    case 'both':
+    case 'justify':
+    case 'distribute':
+      // A table cell never hangs the mark (blk-0898-cjk-kincell).
+      return insideTableCell ? 'none' : 'one';
+    default:
+      return undefined;
+  }
+}
+
+/** Whether {@link WORD_JUSTIFICATION_PUNCTUATION_HANG} refuses to hang `mark`
+ * given the character after it (`next` yields it on demand: undefined when
+ * nothing, or no text, follows). Only a CJK mark in horizontal text is
+ * judged; everything else keeps its hang, and `next` is read only when the
+ * one-mark limit needs it. */
+export function wordCjkClosingMarkHangRefused(
+  policy: CjkClosingMarkHang | undefined,
+  mark: string,
+  next: () => string | undefined,
+  kinsoku: Readonly<{ enabled: boolean; lineStartForbidden: ReadonlySet<number> }>,
+  verticalRun: boolean,
+): boolean {
+  if (policy === undefined || verticalRun || !isCjkBreakChar(mark.codePointAt(0)!)) return false;
+  if (policy === 'none') return true;
+  if (!kinsoku.enabled) return false;
+  const following = next();
+  return following !== undefined && kinsoku.lineStartForbidden.has(following.codePointAt(0)!);
+}
+
 export const RTL_PRIMARY_SUBTAGS = new Set([
   'ar', 'fa', 'ur', 'he', 'iw', 'yi', 'ji', 'ps', 'sd', 'ug', 'dv', 'syr', 'ckb',
 ]);
@@ -1023,6 +1208,37 @@ export const WORD_NUMBERING_SUFFIX_COINCIDENT_LIST_TAB = defineCompatibilityRule
   description: 'For the tab synthesized by a numbering suffix, accept an authored numeric list tab coincident with the shaped marker end instead of advancing to the next automatic tab stop. Library policy, no Office measurement: coincident list-tab handling from PR #1080; no control.',
 });
 
+export const WORD_NUMBERING_SPACE_SUFFIX_ARIAL = defineCompatibilityRule({
+  id: 'word-numbering-space-suffix-arial',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'blk-0898-numsp',
+    application: 'Microsoft Word',
+    version: '16.0.20527',
+    platform: 'Windows',
+  },
+  description: 'A numbering level with w:suff="space" separates marker and body by one U+0020 space in Arial at the marker font size, independently of marker, paragraph-mark, run, docDefaults and Normal-style fonts. All 48 rows of blk-0898-numsp-{nostyles,styles}-mode{none,14,15} identify the suffix PDF span as ArialMT at the marker size. Measured classes (PDF space advance in pt; nominal Arial comparison): level Courier New 12, mark absent or Verdana 16, run Courier New 12 or Georgia 18: 3.38 (Arial 12 = 3.33; Courier New 12 = 7.20, Verdana 16 = 5.63, Georgia 18 = 4.34); level Courier New without size, mark Verdana 16: marker Courier New 16, space 4.48 (Arial 16 = 4.44); level size 12 only, mark Verdana 16: marker Verdana 12, space 3.33 (Verdana 12 = 4.22); no level rPr, mark Verdana 16: marker Verdana 16, space 4.41 (Arial 16 = 4.44); level Verdana 16, mark Courier New 12: space 4.41 (Arial 16 = 4.44); docDefaults Tahoma 8 and Normal Trebuchet MS 10, no level/mark rPr: marker Trebuchet MS 10, space 2.72 (Arial 10 = 2.78; Trebuchet 10 = 3.01); no styles part or level/mark rPr: built-in host default YuMincho 10.5, space 2.90 (Arial 10.5 = 2.92). Identical in modes unset, 14 and 15, the only measured modes; unmeasured modes 11/12/13 and all other explicit modes keep the previous marker-font space. Scope: the measured classes only — left-to-right paragraphs, regular (not bold or italic, not complex-script) markers in ordinary Latin and East Asian faces, picture bullets excluded. Right-to-left paragraphs, bold or italic markers, complex-script markers, symbol-encoded markers (Private Use Area text or text the shared symbol-font table remaps) and modes 11/12/13 are unmeasured and keep the previous marker-face space. Advances come from TextLayoutService font data and its metric-compatible fallback, never these comparison numbers or a fitted em fraction. ECMA-376 §17.9.28 and §17.18.46 specify the space character, not this font choice.',
+});
+
+/** WORD_NUMBERING_SPACE_SUFFIX_ARIAL admission: the measured classes only;
+ * everything else keeps the space in the marker's own face. */
+export function wordNumberingSpaceSuffixUsesArial(input: Readonly<{
+  compatibilityMode: number | undefined;
+  leftToRight: boolean;
+  markerWeight: number;
+  markerStyle: 'normal' | 'italic';
+  complexScriptMarker: boolean;
+  symbolMarker: boolean;
+}>): boolean {
+  void WORD_NUMBERING_SPACE_SUFFIX_ARIAL;
+  return (input.compatibilityMode === undefined || input.compatibilityMode === 14 || input.compatibilityMode === 15)
+    && input.leftToRight
+    && input.markerWeight <= 400
+    && input.markerStyle === 'normal'
+    && !input.complexScriptMarker
+    && !input.symbolMarker;
+}
+
 export const WORD_NUMBERING_MARKER_PARAGRAPH_MARK_FALLBACK = defineCompatibilityRule({
   id: 'word-numbering-marker-paragraph-mark-fallback',
   evidence: {
@@ -1060,6 +1276,55 @@ export const WORD_DICTIONARY_SEA_ATOMIC_CHUNK = defineCompatibilityRule({
   },
   description: 'Move a glued dictionary Southeast-Asian chunk to a fresh line whole when it fits that full line, using dictionary breaks only when the chunk itself is overlong. Evidence (observed Office behaviour): Word PDF calibration fixture in issue #991 / PR #1003.',
 });
+
+export const WORD_NUMBERED_WINDOW_FRAME = defineCompatibilityRule({
+  id: 'word-numbered-window-frame',
+  evidence: {
+    kind: 'regression-test',
+    reference: 'packages/docx/src/layout/legacy-numbered-window-frame.test.ts#rebases automatic and authored stops without rebasing the implicit hanging stop',
+  },
+  description: 'Observed Office legacy false-flag frame: the original 40 numbered float-window rows and 48 controlled compatibility variants distinguish implicit hanging stops, custom stops, automatic grids, equality/pre-start exclusions, narrow heads and tight windows. The supported class is compatibility mode absent, 12 or 14; doNotSuppressIndentation, ww11IndentRules, doNotUseIndentAsNumberingTabStop and noTabHangInd must not be true. It is restricted to ordinary root-body horizontal LTR left/start paragraphs with self-owned initially unresolved floats, no external exclusions, no East Asian text or active line/character grid, a nonempty left text marker with TAB suffix, nonpositive first indent and supported left stops. For actual window origin g, left indent L and hanging H, marker origin is g+L-H; the implicit stop is max(L,g), custom stop c is g+c and the automatic grid is based at g. Actual marker advance q and the first atom are admitted in that same per-window frame through initial breaking, retry and retained placement; no font-derived offset or width correction is added. This is a bounded observation, not the true-flag rule of Part 4 sections 14.8.3.12, 14.8.3.16 or 14.8.3.31. Modern modes, RTL, external/mixed or pre-resolved exclusions, true flags and unsupported geometry retain the established path. Eight original below-float Y residuals remain; source partitions and horizontal improvement do not establish complete Word equivalence.',
+});
+
+/** Issue #2055 controls (blk-0898-floats-num-mode15, Windows Word 16.0.20527,
+ * Courier New 12): a "1." marker with tab, space and nothing suffixes, left
+ * 50 pt hanging 50 pt, square floats leaving the gaps [0,100], [150,250] and
+ * [300,450] pt, 15-19 character head words, and a custom stop at 340 pt; a
+ * tight triangle on the left whose edge moves the marker between line-grid
+ * positions. */
+export const WORD_NUMBERED_FIRST_LINE_GAP_FIT = defineCompatibilityRule({
+  id: 'word-numbered-first-line-gap-fit',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'blk-0898-floats-num',
+    application: 'Microsoft Word',
+    version: '16.0.20527',
+    platform: 'Windows',
+  },
+  description: 'A numbered first line beside floats takes the first window, in reading order and then down the page, that holds its first word after the marker body that window resolves (the body offset the indents give is no width floor for a window, before or after a rejection, so admission stays with break-time placement, hanging punctuation included; this follows from the per-window body: no control has that offset wider than a later window) (the WORD_NUMBERING_MARKER marker edge and suffix tab of issue #1883, per window): in mode 15 a 15 or 17 character word goes to the [300,450] gap with the marker at 300 and the body at the 324 pt default stop (the 340 pt custom stop for the custom row), although the first gap leaves 50 pt after its 50 pt body; an 18 or 19 character word that no gap holds goes below the floats (60 pt) with the body at 50 pt; beside the tight triangle the line steps to the grid line whose edge resolves a 144 pt body. Space and nothing suffixes follow the same order. Modes unset and 14 differ for a paragraph that anchors its own floats (the [300,450] body at the 336 pt stop, the 17 character and custom-stop rows below the floats, and the triangle rows at other positions), a separate pre-15 anchor-paragraph behaviour that is not reproduced. The suffix-space font discrepancy in these controls (marker-face 7.2 pt versus Word 3.34 pt) is handled separately by WORD_NUMBERING_SPACE_SUFFIX_ARIAL.',
+});
+
+/** Issue #2057 controls (blk-0898-floats-head-mode15, Windows Word 16.0.20527,
+ * Courier New 12; both, left, distribute and the three kashida types). */
+export const WORD_OVERLONG_HEAD_AFTER_ANCHOR = defineCompatibilityRule({
+  id: 'word-overlong-head-after-anchor',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'blk-0898-floats-head',
+    application: 'Microsoft Word',
+    version: '16.0.20527',
+    platform: 'Windows',
+  },
+  description: 'A first word wider than the whole line that follows the anchor of a floating object starts on the first line that admits it: in mode 15 an 80 character word (576 pt) beside a 100 pt window, under a 10 or 40 pt square float, is broken from the float bottom (66 + 14 characters at 10 and 40 pt), as a word that fits the band moves whole to the float bottom. The anchor character has no advance, so the line holding only it is the word\'s empty line; ending that line first would set the word one line lower. The same holds in every mode for a float that does not narrow the line (blk-0898-floats-negind, a 720 pt word after the anchor of a float 1 pt past the band edge: its first piece starts the paragraph in modes unset, 11, 12, 14 and 15). Before mode 15 (modes unset and 14) Word instead breaks a narrowed anchor paragraph\'s first word inside the window (40 pt: 5 characters, 100 pt: 13, fewer under medium and high kashida) on every line beside the float when the paragraph is the first on its page; that behaviour is not reproduced (see WORD_FLOAT_GAP_FLOW, which keeps moving such a word below the object). Library scope policy preserves the earlier anchor-only line allocation whenever a pre-15 window narrows or displaces the line; applying the mode-15 suppression there can move an unchanged glyph line farther from Word. The controls hold Latin words only (one run; a word joined across differently formatted runs takes the same line); a Thai, Lao or Khmer dictionary word wider than the line after an anchor (alone or joined with other runs into one unit) is not measured and keeps the previous behaviour (the anchor-only line is ended before the word), pending Word measurements.',
+});
+
+/** WORD_OVERLONG_HEAD_AFTER_ANCHOR only establishes the narrowed/displaced
+ * rule in mode 15. Preserve prior allocation in older or unauthored modes;
+ * their anchored-head behavior differs, and modes 11–13 are unmeasured.
+ * An unchanged full-width line keeps the separately measured all-mode rule. */
+export function wordPreservesPre15AnchorLine(compatibilityMode?: number): boolean {
+  return compatibilityMode !== 15;
+}
 
 export const WORD_OVERLONG_TOKEN_EMERGENCY_BREAK = defineCompatibilityRule({
   id: 'word-overlong-token-emergency-break',
@@ -1169,8 +1434,27 @@ export const WORD_INLINE_PICTURE_AUTO_LEADING = defineCompatibilityRule({
     version: '16.113.2',
     platform: 'macOS 27.0',
   },
-  description: 'For an inline picture with automatic spacing at or above one line, add the authored leading of the selected text/paragraph-mark face to the natural picture/text baseline union, rather than multiplying the picture height. Image-only, text-only and alternating 28.35pt-picture controls at line=240/259 and exact=259 distinguish the two advances; earlier Word controls covered picture heights 5–255pt at auto multiples 1, 1.079 and 1.15. Exact spacing and non-picture lines retain their own allocation.',
+  description: 'For an inline picture or drawing shape (wp:inline WPS or in-flow VML text box) with automatic spacing at or above one line, add the authored leading of the selected text/paragraph-mark face to the natural drawing/text baseline union, rather than multiplying the drawing height. Image-only, text-only and alternating 28.35pt-picture controls at line=240/259 and exact=259 distinguish the two advances; earlier Word controls covered picture heights 5–255pt at auto multiples 1, 1.079 and 1.15. Windows Word 16.0.20527 issue #2063 PDF controls (72 inline cases across no-styles/docDefaults documents, compatibility mode omitted/15) also establish box-only single spacing equal to box height and mixed-text box bottoms on the baseline. At 1.5 spacing a 40pt box with a 10pt Times New Roman mark adds about 5.74pt, not 20pt. Additional Windows mode-15 controls with Times New Roman, Arial and Yu Mincho distinguish document defaults, resolved Normal/default styles, an applied paragraph style, direct drawing-run font/size and direct paragraph-mark formatting: automatic leading follows the effective outer drawing run, with paragraph style below direct run rPr; a direct paragraph mark does not select it. Literal pictures and WPS shapes agree. Grid-snapped allocation remains independent, and the existing document-script font-slot policy is preserved. When an authored face is unavailable, the selected fallback supplies its own metrics; direct paragraph-mark size must not compensate for that resource difference. ECMA-376 §17.7.5.1 leaves omitted document defaults application-defined. Without document/style font declarations, preserve unspecified font slots and selected generic metrics rather than guessing an Office host default or borrowing the direct paragraph mark. In controlled inline-object clones, explicit Times New Roman 10pt default-font declarations make the renderer’s source-case page boundaries agree with Word; their fontless originals can differ. Fully authored Windows mode-15 auto-single controls use outer run8/20pt, object8/40pt and mark8pt: 16 WPS cases cover Times New Roman/Arial, four literal-picture cases cover Times New Roman, and four static VML textbox cases cover Times New Roman. DrawingML WPS and literal pictures reserve their outer-run natural minimum as extra ascent while preserving actual suffix descent; large objects retain their actual geometry. The static in-flow VML textbox controls have the same minimum advance but keep their object top, reserving extra below the visible box. The minimum is limited to horizontal off-grid main-body flow, with mixed ordinary text admitted only for DrawingML; mixed VML, relative VML, active WordArt including retained textbox content, unknown/public origins, ruby, numbering, frames and other stories remain outside this measured class. The parser retains actual source provenance; this minimum is not an invisible glyph or additional descent. The earlier box-height-only observation applies when the resolved outer-run minimum does not exceed the actual union. Minimum-height (atLeast) spacing remains outside this outer-run minimum rule. Controlled cases retain a preexisting object-top mismatch with Word even when line advance agrees; synthetic host metrics must not compensate for that separate limitation. Exact spacing and lines without inline pictures/shapes retain their own allocation.',
 });
+
+/** Observed outer-run leading selection is bounded to mode-15 box-only body
+ * paragraphs. The caller additionally admits only horizontal off-grid root
+ * body flow; other stories, mixed text and legacy modes keep their old route. */
+export function wordInlineDrawingRunLeadingApplies(
+  compatibilityMode: number | undefined,
+  paragraph: Readonly<{
+    lineSpacing?: Readonly<LineSpacing> | null;
+    numbering?: unknown;
+    framePr?: unknown;
+    runs: readonly Readonly<{ type: string; anchor?: boolean; inline?: boolean }>[];
+  }>,
+): boolean {
+  return compatibilityMode === 15 && !paragraph.numbering && !paragraph.framePr
+    && paragraph.lineSpacing?.rule === 'auto' && paragraph.lineSpacing.value > 1
+    && paragraph.runs.length > 0
+    && paragraph.runs.every(run => (run.type === 'image' && run.anchor !== true)
+      || (run.type === 'shape' && run.inline === true));
+}
 
 /** Word-observed inline-picture projection of ECMA-376 §17.3.1.33. */
 export function wordInlinePictureAutoLineHeightPx(
@@ -1300,3 +1584,44 @@ export function wordSpecifiedTextLineMetrics(input: Readonly<{
     baselineOffsetPt: advancePt - (normalPt - input.singlePt) / 2 - input.descentPt,
   };
 }
+
+/** How {@link WORD_LINE_END_JUSTIFICATION} justifies a line of a justified paragraph:
+ * at its gaps ('word'), by an equal advance after every character
+ * ('character'), at its gaps or else centred ('word-or-centre'), or not at all.
+ * Soft-wrapped lines keep the paragraph's ordinary justification. */
+export function wordLineEndJustification(
+  input: Readonly<{ alignment?: string; isLastLine: boolean; stretchLastLine?: boolean;
+    doNotExpandShiftReturn?: boolean; lineEndJustificationBeforeMode15?: boolean; endsAtHardBreak?: boolean }>,
+  endsWithBreak: boolean,
+): 'word' | 'character' | 'word-or-centre' | null {
+  if (!endsWithBreak && !input.isLastLine) return 'word';
+  // A line ended by a page or column break is justified like a soft-wrapped
+  // line before compatibility mode 15 and like a final line from mode 15;
+  // doNotExpandShiftReturn does not apply to it.
+  const hardBreak = !endsWithBreak && input.endsAtHardBreak === true;
+  if (hardBreak && input.alignment !== 'distribute') {
+    return input.lineEndJustificationBeforeMode15 === true ? 'word' : null;
+  }
+  if (input.alignment === 'distribute' || (input.alignment === undefined && input.stretchLastLine)) {
+    return input.lineEndJustificationBeforeMode15 === true ? 'character' : 'word-or-centre';
+  }
+  if (!endsWithBreak || input.doNotExpandShiftReturn === true) return null;
+  return input.alignment === 'thaiDistribute' && input.lineEndJustificationBeforeMode15 !== true
+    ? 'character'
+    : 'word';
+}
+
+/** Source-bound Word controls: fixed/proportional selected faces, first-owner
+ *8/12/20pt, language defaults and second-owner formatting seams. */
+export const WORD_FIRST_OWNER_CLOSING_PAIR_ADVANCE = defineCompatibilityRule({
+  id: 'word-first-owner-closing-pair-advance',
+  evidence: { kind: 'regression-test', reference: 'packages/docx/src/closing-pair-advance.test.ts#shares acquisition advance through intrinsic width, a carried line and published paint' },
+  description: 'Observed first-owner allocation for the seven closing pairs 。」, 、」, 」」, 」。, 」、, 」「 and ）（. At12pt, unset/11/12/14/15 preserve half of the selected ideographic cell in the measured left/both class; low/medium/high Kashida retain the full first cell across those profiles. Only resolved left and justify (WML both) are admitted. Final carried Thai boundaries also measure half-cell allocation, but internal soft-line reductions require tracking that the existing Thai space-only expansion model does not provide; the complete Thai paragraph remains unchanged until that source-owned spacing contract is established. This is a library capability limit, not a claim that Thai never compresses. Distribute includes tracking and retains small raw farther pen residuals; it, right, center and unknown alignments retain existing geometry until source-owned placement authority is established, not because Word never compresses there. The seven-pair profile evidence is left-aligned; the carried period/close boundary additionally establishes both, not a complete pair/alignment cross product. Varied first8/20pt, language and proportional counters were measured in15, with formatting seams also unset. This is not an all-size/profile sweep. Ordinary authoritative horizontal LTR main-body-root text without active grids uses explicit ja-JP EA or an approved absent-EA Japanese library default; explicit English remains unchanged. Exact local tuple, source glyph ownership and actual raster route identity are required, with native first=cell, pair-minus-second=first and unchanged contextual first. Proportional, already-native/CSC reduced and unknown resources, protected or transformed sources and other story/axis classes remain unchanged. The first source owns size, route and context across eligible seams; the following source supplies adjacency only. Bounded optional prefix work can decline atomically without changing the mandatory breaker quota. The retained source-indexed adjustment feeds intrinsic width, fit, clusters and paint once, never a line-start paint patch.',
+});
+
+/** Paragraph edges and one-character overflow are independent authorities. */
+export const WORD_PARAGRAPH_OFF_JAPANESE_LINE_EDGES = defineCompatibilityRule({
+  id: 'word-paragraph-off-japanese-line-edges',
+  evidence: { kind: 'regression-test', reference: 'packages/docx/src/kinsoku-off-edges.test.ts#neither hangs nor pushes the mode15 Japanese OFF closing mark under %s' },
+  description: 'Observed original Japanese paragraph-OFF body controls in unset/11/12/14/15: mode15 LEFT/BOTH/distribute and Kashida/Thai alignments retain the closing mark at the next line head without hanging or pushing; pre15 LEFT/BOTH/distribute retain one hanging mark. The version distinction is observed Office compatibility, not implied by ECMA37617.3.1.16. Initial capability requires canonical ordinary single-column horizontal LTR root body, document rules originally enabled, no complete-store floats, grid/frame/section flow, custom table presence including empty, numbering/tabs, ruby, controls, transformed/protected/nontext or complex/RTL runs. Homogeneous explicit Japanese is admitted; absent EA language requires actual Kana and does not synthesize a language tag. Chinese/Korean/mixed language and unmeasured placements keep previous behavior. Explicit punctuation or punctuation/kana compression with low/medium/high Kashida also retains its complete previous paragraph geometry: the existing scalar minima can allocate 6+6pt where the measured 12pt Word ON and OFF pair retains 12+12pt. Changing only the edges exposes that unresolved compression deficit. This withdraws unproved capability until the source-owned compression contract is established (#2079); it does not claim that Word ignores paragraph OFF in that class. Original controls without explicit compression remain admitted. The separately approved pre15 explicit punctuation/kana-compression Thai edge exception retains document head/tail prohibitions except the existing ten confirmed closing heads with overflow on; overflow off retains them all. Kana compression grants no additional head permissions. Head legality, tail legality and the one-character extension budget remain independent. The separate bounded edge view never supplies hanging, compression grouping, intrinsic or paint authority. Existing intrinsic paragraph-table atoms remain unchanged when the paragraph toggle is off. Word-box/partition observations do not establish all ink, source-SPACE or caret geometry.',
+});

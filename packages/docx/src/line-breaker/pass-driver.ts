@@ -1,3 +1,6 @@
+import { sourceCursorEnd } from './source-cursor.js';
+import type { LineOrderResolver } from '../bidi-line.js';
+import type { BidiTabOrderPolicy } from './tabs.js';
 import { createPrefixWorkBudget } from './prefix-work-budget.js';
 import { LineMeasurementAdapter } from './measurement-adapter.js';
 import type { TabStop } from '../types';
@@ -7,7 +10,7 @@ import type {
   MeasurementTextContext,
   VerticalGlyphMeasurementService,
 } from '../layout/measurement-capabilities.js';
-import { wordUniformRunPositionPaintPt } from '../layout/line-compatibility.js';
+import { wordUniformRunPositionPaintPt, type CjkClosingMarkHang } from '../layout/line-compatibility.js';
 import { calcEffectiveFontPx } from '../layout/text.js';
 import {
   type DocGridCtx,
@@ -88,17 +91,23 @@ export interface LineBreakerPassInput {
   readonly fontFamilyClasses: Record<string, string>;
   readonly tabOriginPx: number;
   readonly kinsoku: KinsokuRules;
+  readonly lineEdgeRules?: KinsokuRules;
   readonly characterGrid?: DocGridCtx;
   readonly defaultTabPt: number;
   readonly marginRightPx: number;
   readonly baseRtl: boolean;
+  readonly bidiOrdering?: BidiTabOrderPolicy;
   readonly isJustified: boolean;
   readonly stretchLastLine: boolean;
   readonly startBoundary?: LineBoundary;
   readonly widthPolicy: 'bounded' | 'intrinsic' | 'unwrapped';
   readonly verticalGlyphMeasurement?: VerticalGlyphMeasurementService;
   readonly overflowPunct: boolean;
+  /** WORD_JUSTIFICATION_PUNCTUATION_HANG; absent outside its measured scope. */
+  readonly cjkClosingMarkHang?: CjkClosingMarkHang;
   readonly justifiedCompression?: boolean;
+  /** Acquisition-only capability: no unused positive-expansion gap plan. */
+  readonly justifiedCompressionAdmissionOnly?: boolean;
   /** A line-end U+3000 hangs from the visible fit (WORD_LINE_END_SPACE_HANGS). */
   readonly lineEndIdeographicSpaceHangs?: boolean;
   /** WORD_KASHIDA_LINE_FIT: a bounded line's text may fill `fraction` of its
@@ -107,6 +116,7 @@ export interface LineBreakerPassInput {
   readonly lineFit?: LineFitWidth;
   readonly passContext: Readonly<{
     probeHeights: readonly number[] | null;
+    decimalOrder?: LineOrderResolver;
     /** Monotone per-physical-line exclusion probe heights (≥ probeHeights). */
     probeFloors?: readonly number[] | null;
     preparedFloatWrap?: PreparedFloatWrap;
@@ -138,6 +148,9 @@ export function runLineBreakerPass(input: LineBreakerPassInput): LayoutLine[] {
     passContext,
   } = input;
 
+  // Only bounded layout admits the observed edge exception. Intrinsic and
+  // unwrapped passes keep the paragraph-owned OFF rules.
+  const lineEdgeRules = widthPolicy === 'bounded' ? input.lineEdgeRules ?? kinsoku : kinsoku;
   const { probeHeights, preparedFloatWrap } = passContext;
   const probeFloors = passContext.probeFloors ?? probeHeights;
   const breakerState = createLineBreakerState(maxWidth, wrapCtx);
@@ -240,8 +253,10 @@ export function runLineBreakerPass(input: LineBreakerPassInput): LayoutLine[] {
     measurement.verticalInkExtra(s, text);
   const setMeasureFont = (font: string): void => measurement.setFont(font);
 
-  const endBoundary: LineBoundary = { segIndex: segs.length, charOffset: 0 };
-  breakerState.queue = new SegmentQueue(prepareBreakQueue(segs, startBoundary, kinsoku, scale, measurement));
+  const sourceEnd = sourceCursorEnd(segs);
+  const endBoundary: LineBoundary = { segIndex: segs.length, charOffset: 0,
+    ...(sourceEnd !== undefined ? { sourceTextStart: sourceEnd } : {}) };
+  breakerState.queue = new SegmentQueue(prepareBreakQueue(segs, startBoundary, lineEdgeRules, scale, measurement));
   // ECMA-376 §17.3.3.1: a terminal text-wrapping break opens an empty
   // line. Its preceding line consumes the sentinel, so pagination can resume
   // at the source end while that empty line still remains. Restore the same
@@ -334,10 +349,11 @@ export function runLineBreakerPass(input: LineBreakerPassInput): LayoutLine[] {
   const decimalAlignmentPrefixWidth = (segments: readonly LayoutSeg[]): number | undefined =>
     performDecimalAlignmentPrefixWidth(operationState, segments);
 
-  const tabFollowingMetrics = (): Readonly<{
+  const tabFollowingMetrics = (physicalDecimalTab?: LayoutTabSeg): Readonly<{
     totalWidth: number;
     decimalPrefixWidth?: number;
-  }> => performTabFollowingMetrics(operationState);
+    physicalDecimalOffset?: number;
+  }> => performTabFollowingMetrics(operationState, physicalDecimalTab);
 
   // A `<w:br/>` always starts a new line (§17.3.3.1) — when it is the LAST
   // content of the paragraph, the new line is empty but still occupies one line
@@ -395,6 +411,8 @@ export function runLineBreakerPass(input: LineBreakerPassInput): LayoutLine[] {
 
   operationState = {
     ...input,
+    lineEdgeRules,
+    paragraphFirstIndent: input.firstIndent,
     reservePrefixWork: createPrefixWorkBudget(),
     probeHeights,
     probeFloors,

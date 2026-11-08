@@ -1,3 +1,4 @@
+import { japaneseOffOrdinarySource } from './kinsoku-off-edges.js';
 import type {
   BodyElement,
   DocNote,
@@ -10,7 +11,7 @@ import type { BodyLayoutInput } from './body-layout-input.js';
 import type { DocumentLayoutSettings } from '../layout-context.js';
 import type { ImageMetadataRecord, MathOccurrence } from './resources.js';
 import type { PaintResourceDescriptor, PaintResourceRegistry, SourceRef } from './types.js';
-import type { ParagraphAcquisitionInput } from './text.js';
+import type { ParagraphAcquisitionInput, ParagraphLayoutSource } from './text.js';
 import type { DeepReadonly, ParsedUnsupportedTextBoxBlock } from './types.js';
 import { imageResourceKey, sourceKey, vmlPictureResourceKey, vmlStrokeResourceKey, vmlEdgeResourceKey } from './source-key.js';
 import { indexSealedPaintResourceDescriptors } from './paint-resources.js';
@@ -96,6 +97,7 @@ export interface FatalParseFact {
 }
 
 export interface LayoutSourceDocumentFacts {
+  readonly hasCustomKinsokuRules?: true;
   readonly kinsoku: Readonly<{
     enabled: boolean;
     lineStartForbidden: readonly number[];
@@ -133,6 +135,10 @@ export interface LayoutSourceStoreInput {
  * snapshot, so later public-model mutation cannot alter layout or paint facts.
  */
 export interface LayoutSourceStore extends Readonly<Omit<LayoutSourceStoreInput, 'blockRepository' | 'acquisitionFacts' | 'paintDescriptors' | 'documentLayoutFacts'>> {
+  /** Conservative library capability, not an OOXML wrap rule. Computed once
+   * from every sealed story so a later/page-owned anchor cannot change native
+   * segment topology when an earlier paragraph resumes on another page. */
+  readonly nativeUnitBodyBandHasFloatingSource: boolean;
   readonly blocks: LayoutBlockRepository;
   readonly acquisition: LayoutSourceAcquisition;
   readonly paintResources: PaintResourceRegistry;
@@ -425,6 +431,13 @@ function sealLayoutSourceStoreWithBody(
   ] as const) {
     if (!Object.isFrozen(value)) throw new TypeError(`Layout source ${label} must be sealed`);
   }
+  // The model adapter seals only its complete canonical graph. Pull transport
+  // drains through the terminal `complete` envelope before invoking that same
+  // adapter (materializeDocumentPullAdapterSession / render worker). Progressive
+  // pagination therefore cannot add a future anchor to this sealed source.
+  let nativeUnitBodyBandHasFloatingSource = false;
+  let rootParagraphOffSources: WeakSet<ParagraphLayoutSource> | undefined;
+  let japaneseOffSources: WeakMap<ParagraphLayoutSource, boolean> | undefined;
   const paragraphBySource = new Map<string, LayoutParagraphAcquisitionFact>();
   for (const fact of input.acquisitionFacts.paragraphs) {
     assertExactOwnKeys(fact, [
@@ -433,6 +446,17 @@ function sealLayoutSourceStoreWithBody(
     const key = sourceKey(fact.source);
     if (paragraphBySource.has(key)) throw new TypeError(`Duplicate paragraph acquisition source: ${key}`);
     paragraphBySource.set(key, fact);
+    const paragraph = blocks.resolve(fact.source);
+    if (paragraph.type === 'paragraph' && paragraph.kinsoku === false
+      && fact.source.story === 'body' && fact.source.storyInstance === 'body' && fact.source.path.length === 1) {
+      (rootParagraphOffSources ??= new WeakSet()).add(paragraph);
+    }
+    if (paragraph.type === 'paragraph' && (paragraph.framePr !== undefined
+      || fact.publicAnchorBridges.some(bridge => bridge !== null)
+      || paragraph.runs.some(run => run.type === 'anchorHost'
+        || ('anchorAcquisitionInput' in run && run.anchorAcquisitionInput !== undefined)))) {
+      nativeUnitBodyBandHasFloatingSource = true;
+    }
   }
   const tableSourceKeys = new Set<string>();
   const tableByIdentity = new WeakMap<TableLayoutSource, LayoutTableAcquisitionFact>();
@@ -444,6 +468,9 @@ function sealLayoutSourceStoreWithBody(
     const table = blocks.resolve(fact.source);
     if (table.type !== 'table') throw new TypeError('Table acquisition fact must identify a table');
     tableByIdentity.set(table, fact);
+    if (!fact.input.format.ordinaryFlow || fact.input.format.positioning !== null) {
+      nativeUnitBodyBandHasFloatingSource = true;
+    }
   }
   for (const source of blocks.sources) {
     const block = blocks.resolve(source);
@@ -573,6 +600,19 @@ function sealLayoutSourceStoreWithBody(
   };
   const documentLayoutSettings: DocumentLayoutSettings = Object.freeze({
     ...input.documentLayoutFacts,
+    // Complete canonical facts are sealed before pagination. Reuse the once-
+    // owned float result; no prefix publication or additional document scan.
+    ...(rootParagraphOffSources && !nativeUnitBodyBandHasFloatingSource ? {
+      paragraphOffBodySource: (paragraph: ParagraphLayoutSource) => {
+        if (!rootParagraphOffSources?.has(paragraph)) return false;
+        japaneseOffSources ??= new WeakMap();
+        const retained = japaneseOffSources.get(paragraph);
+        if (retained !== undefined) return retained;
+        const admitted = japaneseOffOrdinarySource(paragraph);
+        japaneseOffSources.set(paragraph, admitted);
+        return admitted;
+      },
+    } : {}),
     kinsoku: Object.freeze({
       enabled: input.documentLayoutFacts.kinsoku.enabled,
       lineStartForbidden: immutableNumberSet(input.documentLayoutFacts.kinsoku.lineStartForbidden),
@@ -580,6 +620,7 @@ function sealLayoutSourceStoreWithBody(
     }),
   });
   const store = Object.freeze({
+    nativeUnitBodyBandHasFloatingSource,
     blocks,
     bodyLayoutInput,
     section: input.section,

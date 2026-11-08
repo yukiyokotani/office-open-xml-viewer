@@ -40,6 +40,9 @@ import type { LayoutServices } from './types.js';
  * drawings), and the markup-view author colour resolver bypasses the memo.
  * The memo lives on the pagination services view, the scope of the paragraph
  * acquisition memo, so it is fresh for every document layout or variant.
+ * Retained cell layouts require a stable bidi provider for that pagination
+ * execution. After changing the provider, start a new layout; local ordering
+ * invalidation does not revise whole retained tables or within-pass records.
  */
 type FieldClass = 'value' | 'identity' | 'session' | 'replaced';
 

@@ -491,6 +491,19 @@ pub struct EmbeddedFont {
 #[derive(Serialize, Debug, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct DocumentSettings {
+    /// ECMA-376 Part4 §14.8.3.12. Retain explicit state so the legacy
+    /// false-flag numbering frame cannot admit an authored true setting.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub do_not_suppress_indentation: Option<bool>,
+    /// Independent legacy compatibility name (Part1 AnnexL.1.16.2).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ww11_indent_rules: Option<bool>,
+    /// Part4 §14.8.3.16: true ignores the implicit numbering-indent stop.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub do_not_use_indent_as_numbering_tab_stop: Option<bool>,
+    /// Part4 §14.8.3.31: true prevents creating the implicit hanging stop.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub no_tab_hang_ind: Option<bool>,
     /// ECMA-376 Part 4 §14.8.3.38: preserve the paragraph mark after a terminal
     /// page break. Applied during body normalization, before layout.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1257,6 +1270,10 @@ pub struct DocParagraph {
     /// `Some(false)` when disabled; omitted (`None`) means the default, on.
     #[serde(rename = "wordWrap", skip_serializing_if = "Option::is_none", default)]
     pub word_wrap: Option<bool>,
+    /// ECMA-376 §17.3.1.16 `w:kinsoku` resolved through the style cascade:
+    /// `Some(false)` when disabled; omitted (`None`) means the default, on.
+    #[serde(rename = "kinsoku", skip_serializing_if = "Option::is_none", default)]
+    pub kinsoku: Option<bool>,
     /// The paragraph piece ends where its source paragraph has a page or column
     /// break (`w:br w:type="page|column"`, §17.3.3.1), which normalization
     /// turns into a body-level break after this piece. `Some(true)` only.
@@ -1999,11 +2016,38 @@ pub struct VmlEdgeStroke {
     pub pattern: Option<Duotone>,
 }
 
+/// Source provenance for the bounded inline outer-run minimum policy.
+#[derive(Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InlineObjectOrigin {
+    #[serde(rename = "drawingml")]
+    DrawingMl,
+    #[serde(rename = "vmlStaticTextbox")]
+    VmlStaticTextbox,
+}
+
 /// A drawn shape (wps:wsp inside wp:anchor). Positioned like an anchor image
 /// and rendered via core's buildCustomPath + paint primitives.
 #[derive(Serialize, Debug, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ShapeRun {
+    /// Effective WordprocessingML drawing-run font (§17.7.2, §17.3.2.26).
+    /// Inline automatic leading uses this run, not the directly formatted
+    /// paragraph mark; kept private until immutable acquisition projection.
+    #[serde(
+        rename = "__inlineObjectFontFacts",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub inline_object_font_facts: Option<Box<RunFontFacts>>,
+    /// Actual parser origin, not inferred from geometry or font metrics.
+    #[serde(
+        rename = "__inlineObjectOrigin",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub inline_object_origin: Option<InlineObjectOrigin>,
+    /// ECMA-376 §20.4.2.6 `wp:effectExtent` of an inline (`wp:inline`) shape,
+    /// [left, top, right, bottom] in points; `None` for anchors and zero.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inline_effect_extent: Option<[f64; 4]>,
     /// True when this WPS shape is hosted by `wp:inline` and therefore
     /// participates in paragraph line flow like a glyph-sized drawing object.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
@@ -3311,6 +3355,25 @@ pub use ooxml_common::blip::{BlipEffect, Duotone, SrcRect};
 #[derive(Serialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ImageRun {
+    /// Effective WordprocessingML drawing-run font (§17.7.2, §17.3.2.26).
+    /// Inline automatic leading uses this run, not the directly formatted
+    /// paragraph mark; kept private until immutable acquisition projection.
+    #[serde(
+        rename = "__inlineObjectFontFacts",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub inline_object_font_facts: Option<Box<RunFontFacts>>,
+    /// Actual parser origin, not inferred from geometry or font metrics.
+    #[serde(
+        rename = "__inlineObjectOrigin",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub inline_object_origin: Option<InlineObjectOrigin>,
+    /// ECMA-376 §20.4.2.6 `wp:effectExtent` of an inline (`wp:inline`) picture,
+    /// [left, top, right, bottom] in points: extra extent the line reserves
+    /// around the picture. `None` for anchors and an all-zero extent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inline_effect_extent: Option<[f64; 4]>,
     /// Embedded zip path of the raster blip (e.g. `word/media/image1.png`), the
     /// raster fallback (PNG/JPEG), or the SVG part itself when the blip embeds no
     /// raster `r:embed`. The renderer fetches the bytes lazily by path rather
@@ -3448,6 +3511,11 @@ pub enum UnavailableDrawingResourceKind {
 #[derive(Serialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct UnavailableDrawingRun {
+    /// ECMA-376 §20.4.2.6 `wp:effectExtent` of a `wp:inline` container,
+    /// [left, top, right, bottom] in points (signed `ST_Coordinate`); `None`
+    /// for anchors and an all-zero extent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inline_effect_extent: Option<[f64; 4]>,
     pub resource_kind: UnavailableDrawingResourceKind,
     pub width_pt: f64,
     pub height_pt: f64,
@@ -3484,6 +3552,11 @@ fn is_true(v: &bool) -> bool {
 #[derive(Serialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ChartRun {
+    /// Authored inline `wp:effectExtent` (ECMA-376 §20.4.2.6), physical
+    /// [left, top, right, bottom] points. Retained for fidelity; chart layout
+    /// currently keeps `wp:extent` and does not reserve effect padding.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inline_effect_extent: Option<[f64; 4]>,
     /// The shared chart model (barChart / lineChart / pie / …). Emitted 1:1 as
     /// the `chart` object the core `renderChart` consumes.
     pub chart: ooxml_common::chart::ChartModel,
