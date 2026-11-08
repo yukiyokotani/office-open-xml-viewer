@@ -1,7 +1,7 @@
 import { defineConfig, type Plugin } from 'vite';
 import wasm from 'vite-plugin-wasm';
 import { dts } from 'rolldown-plugin-dts';
-import { resolve, dirname, basename } from 'path';
+import { resolve, dirname, basename, posix } from 'path';
 import { fileURLToPath } from 'url';
 import { readFile } from 'fs/promises';
 import { rolldown } from 'rolldown';
@@ -42,15 +42,6 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
  * bare `.wasm`, and every `?url` here is a real on-disk asset we want emitted —
  * exactly what Vite's non-lib mode would do anyway.
  */
-/** Prefix `./` to bare relative `new URL('<file>', import.meta.url)` literals
- * (#2134). Absolute paths, `./`/`../` paths and URLs with a scheme are kept. */
-export function dotRelativeImportMetaUrls(code: string): string {
-  return code.replace(
-    /new URL\((["'`])(?![./]|[A-Za-z][A-Za-z0-9+.-]*:)([^"'`\\\s]+)\1(\s*,\s*import\.meta\.url\s*\))/g,
-    (_match, quote: string, file: string, rest: string) => `new URL(${quote}./${file}${quote}${rest}`,
-  );
-}
-
 export function wasmAssetUrl(
   readAsset: (path: string) => Promise<Uint8Array> = readFile,
   modulePlugins: Plugin[] = [],
@@ -92,17 +83,6 @@ export function wasmAssetUrl(
       // webpack consumer. The single-level form is the exact shape webpack 5 /
       // Turbopack / Vite statically rewrite when re-bundling our `.mjs`.
       return `export default import.meta.ROLLUP_FILE_URL_${referenceId};`;
-    },
-    generateBundle(output, bundle) {
-      if (output.format !== 'es') return;
-      // A consumer bundler re-resolves `new URL('<literal>', import.meta.url)`.
-      // Vite resolves a literal that does not start with `.` through the app's
-      // aliases first, and Nuxt (like any app with an `assets` alias) maps
-      // `assets/render-worker-*.js` to its own folder, so the worker was never
-      // emitted (#2134). Every bundled sibling URL is therefore dot-relative.
-      for (const chunk of Object.values(bundle)) {
-        if (chunk.type === 'chunk') chunk.code = dotRelativeImportMetaUrls(chunk.code);
-      }
     },
     renderChunk(code, _chunk, output) {
       if (output.format !== 'cjs') return null;
@@ -214,6 +194,19 @@ export default defineConfig(({ command, mode }) => ({
   // standalone module workers and sibling assets when consumers serve the
   // package below a subpath or from a CDN.
   base: './',
+  experimental: {
+    // A consumer bundler re-resolves `new URL('<literal>', import.meta.url)`.
+    // Vite resolves a literal that does not start with `.` through the app's
+    // aliases first; Nuxt (like any app with an `assets` alias) maps the
+    // render workers' `assets/render-worker-*.js` to its own folder, so the
+    // worker was never emitted (#2134). JS-hosted built URLs are therefore
+    // written dot-relative to the module that references them.
+    renderBuiltUrl: (filename, { hostId, hostType }) => {
+      if (hostType !== 'js') return { relative: true };
+      const path = posix.relative(posix.dirname(hostId), filename);
+      return { runtime: `new URL(${JSON.stringify(path.startsWith('.') ? path : `./${path}`)}, import.meta.url).href` };
+    },
+  },
   plugins: [
     docxCompatibilityMetadata(),
     optionalRendererMarkers(),
