@@ -188,6 +188,19 @@ describe('first-line indents beside floats through the DOCX parser', () => {
     }
   });
 
+  it('classifies a joined word by its whole tail after an RTL leading tab', () => {
+    // A Latin prefix joined to a bold rtl Hebrew suffix ends the line: the
+    // joined word is drawn right to left at the left extreme, so its space
+    // hangs and the word stays on the first line.
+    for (const mode of [undefined, 14, 15]) {
+      const text = Array.from({ length: 16 }, () => 'abcd').join(' ');
+      const paragraph = layoutParagraph(documentBytes('w:right="900"', true, 0,
+        { alignment: 'left', count: 1, stop: 720, text: `${text} ab`, noFloat: true, compatibilityMode: mode,
+          textXml: `<w:t xml:space="preserve">${text} ab</w:t></w:r><w:r><w:rPr><w:b/><w:rtl/></w:rPr><w:t xml:space="preserve">\u05d2\u05d3 </w:t>` }));
+      expect(paragraph.lines, `mode ${mode}`).toHaveLength(1);
+    }
+  });
+
   it('wraps a margin ptab cell wider than the paragraph band', () => {
     const paragraph = layoutParagraph(documentBytes('w:right="7200"', false, 0,
       { alignment: 'right', count: 1, text: 'word '.repeat(10).trim(), positional: true, noFloat: true }));
