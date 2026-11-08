@@ -672,8 +672,12 @@ export const WORD_JUSTIFIED_INTERWORD_COMPRESSION = defineCompatibilityRule({
  * expansion retains its existing projection until bidi gaps have source-owned
  * physical edges. Paragraph acquisition additionally bounds the new alignments
  * to base-LTR content without strong RTL text or authored RTL marks; the scalar
- * gap model does not own mixed/RTL source edges. Existing both/justify behavior
- * and the grid, width and shaping exclusions remain unchanged.
+ * gap model does not own mixed/RTL source edges. The new alignments also
+ * never admit a unit or prefix with an internal CJK break opportunity: the
+ * issue #1660 mode-15 distribute controls (BIZ UDGothic 8.5pt, 甲甲甲甲 + 乙乙 +
+ * 丙丙丙丙 at 106.25-108.40pt) wrap the last ideograph where the cap would admit
+ * it. Existing both/justify behavior and the grid, width and shaping
+ * exclusions remain unchanged.
  */
 export function wordJustifiedInterwordCompressionApplies(
   alignment: string | null | undefined,
