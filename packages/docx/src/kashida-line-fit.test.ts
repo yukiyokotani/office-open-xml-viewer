@@ -392,9 +392,11 @@ describe('WORD_RTL_LINE_END_SPACE_HANGS', () => {
     // cannot hang and is charged (controls-1672 tabs-content-fitting-r4 rtl
     // rows): the line holds one word fewer than its visible width admits.
     const rtl = { bidi: true, indentRight: 15 } as Partial<DocParagraph>;
-    const text = Array.from({ length: 20 }, (_, index) => index % 2 === 0 ? 'abcd' : '\u05d0\u05d1\u05d2\u05d3').join(' ');
+    // Hebrew runs carry w:rtl, as Word writes them (§17.3.2.30).
+    const runs = Array.from({ length: 20 }, (_, index) => index % 2 === 0
+      ? textRun('abcd ') : textRun('\u05d0\u05d1\u05d2\u05d3 ', { rtl: true }));
     for (const settings of MODES) {
-      const [line] = lines(para([textRun(text)], 'both', rtl), settings);
+      const [line] = lines(para(runs, 'both', rtl), settings);
       expect(characters(line!)).toHaveLength(24);
       expect(start(line!)).toBeGreaterThanOrEqual(35 - 1e-6);
       expect(end(line!)).toBeLessThanOrEqual(380 + 1e-6);
@@ -448,7 +450,7 @@ describe('WORD_RTL_LINE_END_SPACE_HANGS', () => {
     const rtl = { bidi: true, indentRight: 15 } as Partial<DocParagraph>;
     const soft = textRun('', { optionalHyphen: true } as Partial<DocxTextRun>);
     for (const settings of MODES) {
-      const [first] = lines(para([textRun(`${'\u05d0'.repeat(25)} `), textRun('aaaa'), soft, textRun('aaaa ')], 'both', rtl), settings);
+      const [first] = lines(para([textRun(`${'\u05d0'.repeat(25)} `, { rtl: true }), textRun('aaaa'), soft, textRun('aaaa ')], 'both', rtl), settings);
       const text = characters(first!).map(({ character }) => character).join('');
       expect(text, `mode ${settings?.compatibilityMode}`).toContain('-');
       expect(characters(first!).filter(({ character }) => character === 'a')).toHaveLength(4);
@@ -515,7 +517,7 @@ describe('WORD_RTL_LINE_END_SPACE_HANGS', () => {
     // the line and charged: it moves to the next line.
     const rtl = { bidi: true } as Partial<DocParagraph>;
     for (const settings of MODES) {
-      const [first] = lines(para([textRun(`${'a'.repeat(15)} `), textRun(`${'\u05d0'.repeat(13)}  `),
+      const [first] = lines(para([textRun(`${'a'.repeat(15)} `), textRun(`${'\u05d0'.repeat(13)}  `, { rtl: true }),
         textRun(`${'a'.repeat(4)}  `), textRun('bbbbb')], 'both', rtl), settings);
       const xs = characters(first!).map(({ xPt }) => xPt);
       expect(xs).toHaveLength(28);

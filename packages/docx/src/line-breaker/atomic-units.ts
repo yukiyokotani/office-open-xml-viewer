@@ -19,49 +19,20 @@ export function lineEndSpaceCharged(state: Pick<AtomicTextMeasurement, 'baseRtl'
   return state.baseRtl && state.lineFit?.rtlVisiblePrefix !== true;
 }
 
-/** A right-to-left letter (Hebrew, Arabic and the other RTL scripts' letters;
- * digits, including Arabic-Indic ones, are weak and do not count). */
-const RTL_LETTER = /(?=[\u0590-\u08FF\uFB1D-\uFDFF\uFE70-\uFEFF])\p{L}/u;
-
-/** Incremental scan of a current line for a tab or right-to-left letter. The
- * line grows by appends and shrinks by pops/truncation within one line, and
- * a flush starts a new array, so only items past the scanned prefix are read:
- * each item is visited once per line, not once per candidate. */
-const lineScans = new WeakMap<readonly LayoutSeg[], { scanned: number; foundAt: number }>();
-function lineHoldsTabOrRtlLetter(line: readonly LayoutSeg[]): boolean {
-  let entry = lineScans.get(line);
-  if (!entry) lineScans.set(line, entry = { scanned: 0, foundAt: -1 });
-  if (entry.foundAt >= line.length) entry.foundAt = -1;
-  if (entry.scanned > line.length) entry.scanned = line.length;
-  if (entry.foundAt >= 0) return true;
-  for (; entry.scanned < line.length; entry.scanned += 1) {
-    const item = line[entry.scanned]!;
-    if ('isTab' in item || ('text' in item && RTL_LETTER.test(item.text))) {
-      entry.foundAt = entry.scanned;
-      entry.scanned += 1;
-      return true;
-    }
-  }
-  return false;
-}
-
-/** WORD_RTL_LINE_END_SPACE_HANGS: the line-end space of a segment drawn left
- * to right on a right-to-left line is drawn at that segment's right, so it
- * hangs only while the segment is drawn rightmost; after a tab or
- * right-to-left text on the line it is drawn inside the line and stays
- * charged. As line planning resolves it, a segment holding any right-to-left
- * letter is drawn right to left (its space then ends the line on the left),
- * and one holding Latin letters or digits but no right-to-left letter is drawn
- * left to right. `text` is the segment's (or joined word's) text. */
-export function rtlLineEndSpaceInterior(
-  state: Pick<AtomicTextMeasurement, 'baseRtl'>,
-  text: string,
-  line: readonly LayoutSeg[],
+/** WORD_RTL_LINE_END_SPACE_HANGS: on a right-to-left line, the line-end space
+ * of the last item hangs only when that item is drawn at a line extreme on the
+ * side where it draws the space: leftmost when drawn right to left, rightmost
+ * when drawn left to right (after a tab or right-to-left text, a left-to-right
+ * run's space sits inside the line). `order` is the line's visual order with
+ * the item last in logical order, as line planning resolves it
+ * (resolveRtlLineEndSpaces walks the same extremes). */
+export function rtlLineEndSpaceHangsAt(
+  order: Readonly<{ order: readonly number[]; rtl: readonly boolean[] }>,
+  index: number,
 ): boolean {
-  if (!state.baseRtl || !text.endsWith(' ')) return false;
-  const trimmed = text.replace(/ +$/u, '');
-  if (RTL_LETTER.test(trimmed) || !/[\p{L}\p{Nd}]/u.test(trimmed)) return false;
-  return lineHoldsTabOrRtlLetter(line);
+  const visual = order.order;
+  if (visual.length === 0) return true;
+  return order.rtl[index] === true ? visual[0] === index : visual.at(-1) === index;
 }
 
 /** Advance of the U+0020 suffix that ends `items` across members (a run of
