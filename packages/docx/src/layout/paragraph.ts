@@ -1915,23 +1915,22 @@ export function planLine(input: PlanLineInput): LineLayout {
     ? naturalAlignmentOffsetPt
     : Math.max(0, input.paragraphXPt + input.decimalAutoTabPt - drawnWidthPt - lineStartPt);
   let xPt = lineStartPt + alignmentOffsetPt;
-  if (rtlVisibleEdge && input.decimalAutoTabPt === undefined) {
+  if (rtlVisibleEdge && input.decimalAutoTabPt === undefined
+    && !segments.some(segment => segment.kind === 'tab')) {
     // WORD_RTL_LINE_END_SPACE_HANGS admitted the line by its visible width:
     // whatever the alignment, the line-end spaces drawn at either extreme
-    // may stand outside the band, the visible text may not.
+    // may stand outside the band, the visible text may not. The correction
+    // applies only where those spaces explain the whole overflow; a tab line
+    // keeps its stop geometry, and any other overflow keeps Word's geometry.
     const bandEndPt = lineStartPt + effectiveAvailableWidthPt - physicalStartOffsetPt;
-    // Only the overflow those spaces caused is corrected: other placement
-    // (a tab past the margin, say) keeps Word's geometry. The fit admitted
-    // the visible width, so at most one edge can overflow.
-    let correctablePt = rtlLineEnd.leftPt + rtlLineEnd.rightPt;
-    const visibleEndPt = xPt + drawnWidthPt - rtlLineEnd.rightPt;
-    if (visibleEndPt > bandEndPt + 1e-9) {
-      const shiftPt = Math.min(visibleEndPt - bandEndPt, correctablePt);
-      xPt -= shiftPt;
-      correctablePt -= shiftPt;
+    const hangPt = rtlLineEnd.leftPt + rtlLineEnd.rightPt;
+    const endOverflowPt = xPt + drawnWidthPt - rtlLineEnd.rightPt - bandEndPt;
+    const startOverflowPt = lineStartPt - (xPt + rtlLineEnd.leftPt);
+    if (endOverflowPt > 1e-9 && endOverflowPt <= hangPt + 1e-9 && startOverflowPt + endOverflowPt <= 1e-9) {
+      xPt -= endOverflowPt;
+    } else if (startOverflowPt > 1e-9 && startOverflowPt <= hangPt + 1e-9 && endOverflowPt + startOverflowPt <= 1e-9) {
+      xPt += startOverflowPt;
     }
-    const visibleStartPt = xPt + rtlLineEnd.leftPt;
-    if (visibleStartPt < lineStartPt - 1e-9) xPt += Math.min(lineStartPt - visibleStartPt, correctablePt);
   }
   const placements: ParagraphPlacement[] = [];
   const terminalDecorationTrims = new Map<number, number>();

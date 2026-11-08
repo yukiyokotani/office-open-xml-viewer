@@ -124,6 +124,18 @@ describe('first-line indents beside floats through the DOCX parser', () => {
 
   // Positional tabs keep the #1675 containment policy; their Word placement
   // past a right indent is an open follow-up (see margin-tab-allocation.test).
+  it('keeps a displaced RTL tab line where Word draws it, hanging space or not', () => {
+    // WORD_RTL_LINE_END_SPACE_HANGS corrects only overflow the line-end spaces
+    // explain: this line's 32 pt overflow comes from its tab past the band.
+    const paragraph = layoutParagraph(documentBytes('w:left="720" w:hanging="720"', true, 268,
+      { alignment: 'left', count: 1, text: '\u05d0\u05d1\u05d2\u05d3 ', noFloat: false }));
+    const placements = paragraph.lines[0]!.placements;
+    const tab = placements.find((node) => node.kind === 'tab');
+    const text = placements.find((node) => node.kind === 'text' && node.text.trim() !== '');
+    expect(tab && tab.bounds.xPt + tab.bounds.widthPt).toBeCloseTo(340, 6);
+    expect(text?.bounds.xPt).toBeLessThan(72);
+  });
+
   it('wraps a margin ptab cell wider than the paragraph band', () => {
     const paragraph = layoutParagraph(documentBytes('w:right="7200"', false, 0,
       { alignment: 'right', count: 1, text: 'word '.repeat(10).trim(), positional: true, noFloat: true }));
