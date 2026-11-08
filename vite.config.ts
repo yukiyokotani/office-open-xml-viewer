@@ -1,7 +1,7 @@
 import { defineConfig, type Plugin } from 'vite';
 import wasm from 'vite-plugin-wasm';
 import { dts } from 'rolldown-plugin-dts';
-import { resolve, dirname, basename } from 'path';
+import { resolve, dirname, basename, posix } from 'path';
 import { fileURLToPath } from 'url';
 import { readFile } from 'fs/promises';
 import { rolldown } from 'rolldown';
@@ -194,6 +194,19 @@ export default defineConfig(({ command, mode }) => ({
   // standalone module workers and sibling assets when consumers serve the
   // package below a subpath or from a CDN.
   base: './',
+  experimental: {
+    // A consumer bundler re-resolves `new URL('<literal>', import.meta.url)`.
+    // Vite resolves a literal that does not start with `.` through the app's
+    // aliases first; Nuxt (like any app with an `assets` alias) maps the
+    // render workers' `assets/render-worker-*.js` to its own folder, so the
+    // worker was never emitted (#2134). JS-hosted built URLs are therefore
+    // written dot-relative to the module that references them.
+    renderBuiltUrl: (filename, { hostId, hostType }) => {
+      if (hostType !== 'js') return { relative: true };
+      const path = posix.relative(posix.dirname(hostId), filename);
+      return { runtime: `new URL(${JSON.stringify(path.startsWith('.') ? path : `./${path}`)}, import.meta.url).href` };
+    },
+  },
   plugins: [
     docxCompatibilityMetadata(),
     optionalRendererMarkers(),
