@@ -124,6 +124,83 @@ describe('first-line indents beside floats through the DOCX parser', () => {
 
   // Positional tabs keep the #1675 containment policy; their Word placement
   // past a right indent is an open follow-up (see margin-tab-allocation.test).
+  it('keeps a displaced RTL tab line where Word draws it, hanging space or not', () => {
+    // WORD_RTL_LINE_END_SPACE_HANGS corrects only overflow the line-end spaces
+    // explain: this line's 32 pt overflow comes from its tab past the band.
+    const paragraph = layoutParagraph(documentBytes('w:left="720" w:hanging="720"', true, 268,
+      { alignment: 'left', count: 1, text: '\u05d0\u05d1\u05d2\u05d3 ', noFloat: false }));
+    const placements = paragraph.lines[0]!.placements;
+    const tab = placements.find((node) => node.kind === 'tab');
+    const text = placements.find((node) => node.kind === 'text' && node.text.trim() !== '');
+    if (tab?.kind !== 'tab' || text?.kind !== 'text') throw new Error('Missing tab or text placement');
+    expect(tab.bounds!.xPt + tab.bounds!.widthPt).toBeCloseTo(340, 6);
+    expect(text.bounds.xPt).toBeLessThan(72);
+  });
+
+  it.each(['left', 'center', 'right', 'end'])('keeps a hanging RTL tab line inside the band under jc=%s', (jc) => {
+    // WORD_RTL_LINE_END_SPACE_HANGS admits the line by its visible width; its
+    // visible text (label, tab and Hebrew words) stays in the band [109, 540].
+    const hebrew = Array.from({ length: 20 }, () => '\u05d0\u05d1\u05d2\u05d3').join(' ');
+    const paragraph = layoutParagraph(documentBytes('w:right="740"', true, 0,
+      { alignment: 'left', count: 1, stop: 720, prefix: 'AB', text: hebrew, noFloat: true, jc, runRtl: true }));
+    for (const line of paragraph.lines) {
+      for (const node of line.placements) {
+        if (node.kind !== 'text' || node.text.trim() === '') continue;
+        const visible = node.clusters.filter((cluster) => node.text[cluster.range.start - node.range.start]?.trim());
+        for (const cluster of visible) {
+          const x = node.origin.xPt + cluster.offset.xPt;
+          expect(Math.min(x, x + cluster.advancePt), `${jc} ${node.text}`).toBeGreaterThanOrEqual(109 - 1e-6);
+          expect(Math.max(x, x + cluster.advancePt), `${jc} ${node.text}`).toBeLessThanOrEqual(540 + 1e-6);
+        }
+      }
+    }
+  });
+
+  it('charges the line-end space of Latin text after an RTL leading tab', () => {
+    // WORD_RTL_LINE_END_SPACE_HANGS: after the tab, the Latin run's line-end
+    // space is drawn inside the line (controls-1672 rtl rows: Word keeps the
+    // word count of a charged space), so the first line takes no extra word.
+    // With w:right 900 the 17th word fits by its visible width alone.
+    const paragraph = layoutParagraph(documentBytes('w:right="900"', true, 0,
+      { alignment: 'left', count: 1, stop: 720, text: Array.from({ length: 30 }, () => 'abcd').join(' '), noFloat: true }));
+    const first = paragraph.lines[0]!.placements.flatMap((node) => node.kind === 'text' ? [node.text] : [])
+      .join('').trim().split(/ +/).filter(Boolean);
+    expect(first).toHaveLength(16);
+  });
+
+  it('hangs a separately formatted line-end space and keeps justified tab lines as planned', () => {
+    // WORD_RTL_LINE_END_SPACE_HANGS: a spaces-only run hangs at the line's
+    // extreme, and justified lines (planned by source cells) keep the visible
+    // fit: seventeen words stay on one line in both cases.
+    const text = `${Array.from({ length: 17 }, () => 'abcd').join(' ')} `;
+    const count = (paragraph: ReturnType<typeof layoutParagraph>) => paragraph.lines[0]!.placements
+      .flatMap((node) => node.kind === 'text' ? [node.text] : []).join('').trim().split(/ +/).filter(Boolean).length;
+    for (const jc of ['left', 'both', 'distribute', 'lowKashida']) {
+      const bold = layoutParagraph(documentBytes('w:right="900"', true, 0,
+        { alignment: 'left', count: 1, stop: 720, text, boldFrom: text.length - 1, noFloat: true, jc }));
+      expect(bold.lines, `bold space ${jc}`).toHaveLength(1);
+      expect(count(bold), `bold space ${jc}`).toBe(17);
+    }
+    for (const jc of ['both', 'distribute']) {
+      const justified = layoutParagraph(documentBytes('w:right="900"', true, 0,
+        { alignment: 'left', count: 1, stop: 720, text: Array.from({ length: 30 }, () => 'abcd').join(' '), noFloat: true, jc }));
+      expect(count(justified), `justified ${jc}`).toBe(17);
+    }
+  });
+
+  it('classifies a joined word by its whole tail after an RTL leading tab', () => {
+    // A Latin prefix joined to a bold rtl Hebrew suffix ends the line: the
+    // joined word is drawn right to left at the left extreme, so its space
+    // hangs and the word stays on the first line.
+    for (const mode of [undefined, 14, 15]) {
+      const text = Array.from({ length: 16 }, () => 'abcd').join(' ');
+      const paragraph = layoutParagraph(documentBytes('w:right="900"', true, 0,
+        { alignment: 'left', count: 1, stop: 720, text: `${text} ab`, noFloat: true, compatibilityMode: mode,
+          textXml: `<w:t xml:space="preserve">${text} ab</w:t></w:r><w:r><w:rPr><w:b/><w:rtl/></w:rPr><w:t xml:space="preserve">\u05d2\u05d3 </w:t>` }));
+      expect(paragraph.lines, `mode ${mode}`).toHaveLength(1);
+    }
+  });
+
   it('wraps a margin ptab cell wider than the paragraph band', () => {
     const paragraph = layoutParagraph(documentBytes('w:right="7200"', false, 0,
       { alignment: 'right', count: 1, text: 'word '.repeat(10).trim(), positional: true, noFloat: true }));

@@ -1,4 +1,7 @@
-import { lineEndSpaceCharged, trailingSpaceSuffixWidth } from './atomic-units.js';
+import { lineEndSpaceCharged, rtlLineEndSpaceHangsAt, trailingSpaceSuffixWidth } from './atomic-units.js';
+import { computeLineVisualOrder } from '../bidi-line.js';
+import { tabLineOrderModel } from './tabs.js';
+import type { LayoutSeg } from './model.js';
 import type { BreakOpportunityIteratorContext } from './break-opportunities.js';
 import { seamPairAdvance } from './pass-operations.js';
 import type { LayoutTextSeg } from './model.js';
@@ -78,10 +81,13 @@ export function placeOptionalHyphenPrefix(
   }
   // A collapsible trailing space does not force an otherwise fitting word
   // to select an optional hyphen; the whole U+0020 suffix of the joined word
-  // is excluded, across members. RTL keeps its ordinary containment policy
-  // outside WORD_RTL_JUSTIFIED_VISIBLE_FIT.
+  // is excluded, across members, where it can hang (WORD_RTL_LINE_END_SPACE_HANGS).
   if (!lineEndSpaceCharged(context)) {
-    width -= trailingSpaceSuffixWidth(members.filter((member) => !member.optionalHyphen), context);
+    const suffix = trailingSpaceSuffixWidth(members.filter((member) => !member.optionalHyphen), context);
+    // Only a word its hanging space alone admits needs that space's drawn side.
+    if (suffix > 0 && !(context.baseRtl && context.fitsMeasuredWidth(width - suffix, context.availW())
+      && !context.fitsMeasuredWidth(width, context.availW())
+      && rtlLineEndSpaceInside(context, members.filter((member) => !member.optionalHyphen)))) width -= suffix;
   }
   if (context.fitsMeasuredWidth(width, context.availW())) return false;
   // An unselected owner cannot bypass the existing registered-face space
@@ -137,4 +143,28 @@ export function placeOptionalHyphenPrefix(
   context.addToLine(candidate.glyph, glyphBox.width, glyphBox.height, glyphBox.ascent, glyphBox.descent);
   context.flush(undefined, false, context.breakerState.queue.peek()?.src);
   return true;
+}
+
+/** WORD_RTL_LINE_END_SPACE_HANGS: whether the line-end space of `tail` (the
+ * line's last items) would be drawn inside a right-to-left line, which
+ * charges it, rather than at the extreme where it hangs. Resolved by the same
+ * line order as line planning, and asked only for a candidate its hanging
+ * space alone admits (one per line), so the walk costs one line per line. */
+export function rtlLineEndSpaceInside(
+  context: Pick<BreakOpportunityIteratorContext, 'baseRtl' | 'breakerState' | 'bidiOrdering' | 'isJustified' | 'stretchLastLine'>,
+  tail: readonly LayoutSeg[],
+): boolean {
+  if (!context.baseRtl || tail.length === 0 || context.isJustified) return false;
+  // Measured on unjustified tab lines (controls-1672 rtl Latin rows after a
+  // leading tab), where line planning orders whole segments as resolved here.
+  // Elsewhere an interior space keeps the existing library policy: admitted by
+  // the visible width and absorbed into the space by line planning.
+  if (!context.breakerState.currentLine.some((item) => 'isTab' in item)) return false;
+  // A spaces-only item hangs at either extreme, as line planning walks it.
+  const last = tail.at(-1)!;
+  if (!('text' in last) || last.text.trim() === '') return false;
+  const items = [...context.breakerState.currentLine, ...tail];
+  const model = tabLineOrderModel({ baseRtl: true, bidiOrdering: context.bidiOrdering,
+    isJustified: context.isJustified, stretchLastLine: context.stretchLastLine });
+  return !rtlLineEndSpaceHangsAt(computeLineVisualOrder(items, true, model), items.length - 1);
 }

@@ -305,8 +305,8 @@ describe('WORD_KASHIDA_LINE_FIT', () => {
   });
 });
 
-describe('WORD_RTL_JUSTIFIED_VISIBLE_FIT', () => {
-  it('fits a justified right-to-left line by its visible prefix', () => {
+describe('WORD_RTL_LINE_END_SPACE_HANGS', () => {
+  it('fits a right-to-left line by its visible prefix under every alignment', () => {
     // A 345 pt line: seven words are 340 pt visible, 350 pt with the line-end
     // space.
     const hebrew = Array.from({ length: 20 }, () => '\u05d0\u05d1\u05d2\u05d3').join(' ');
@@ -314,9 +314,11 @@ describe('WORD_RTL_JUSTIFIED_VISIBLE_FIT', () => {
     for (const settings of MODES) {
       const [both] = lines(para([textRun(hebrew)], 'both', rtl), settings);
       expect(wordsOn(both!), `mode ${settings?.compatibilityMode}`).toBe(7);
-      // Unmeasured alignments keep charging the line-end space.
-      const [start] = lines(para([textRun(hebrew)], 'left', rtl), settings);
-      expect(wordsOn(start!)).toBe(6);
+      // Left and the other alignments hang it alike (#2075).
+      for (const alignment of ['left', 'center', 'right', 'distribute', 'lowKashida'] as const) {
+        const [line] = lines(para([textRun(hebrew)], alignment, rtl), settings);
+        expect(wordsOn(line!), `${alignment} mode ${settings?.compatibilityMode}`).toBe(7);
+      }
     }
   });
 
@@ -348,6 +350,42 @@ describe('WORD_RTL_JUSTIFIED_VISIBLE_FIT', () => {
       expect(end(latin!)).toBeCloseTo(380);
     }
   });
+  it('keeps the visible text of a hanging line in the band under every alignment', () => {
+    // The band runs from x = 35 to x = 380; seven words are 340 pt visible
+    // and 350 pt with the line-end space, so the space must stand outside.
+    const rtl = { bidi: true, indentRight: 15 } as Partial<DocParagraph>;
+    const hebrew = Array.from({ length: 20 }, () => '\u05d0\u05d1\u05d2\u05d3').join(' ');
+    for (const settings of MODES) {
+      for (const text of [hebrew, WORDS]) {
+        for (const alignment of ['left', 'start', 'center', 'right', 'end', 'distribute', 'lowKashida'] as const) {
+          const [line] = lines(para([textRun(text)], alignment, rtl), settings);
+          const label = `${alignment} mode ${settings?.compatibilityMode} ${text === WORDS ? 'latin' : 'hebrew'}`;
+          expect(wordsOn(line!), label).toBe(7);
+          expect(start(line!), label).toBeGreaterThanOrEqual(35 - 1e-6);
+          expect(end(line!), label).toBeLessThanOrEqual(380 + 1e-6);
+        }
+      }
+    }
+  });
+  it('keeps a lowKashida line-end space inside the band while it fits', () => {
+    // Word spreads lowKashida lines only in part: the line-end space stays in
+    // the band unless the line overflows, and only the overflow hangs. Six
+    // words and a space (300 pt) leave a 45 pt slack in the 345 pt band; a
+    // seventh word does not fit there, so the line holds six words.
+    const rtl = { bidi: true, indentRight: 15 } as Partial<DocParagraph>;
+    const word = '\u05d0\u05d1\u05d2\u05d3';
+    const text = Array.from({ length: 6 }, () => word).join(' ') + ` ${'\u05d0'.repeat(10)} ${word}`;
+    for (const settings of MODES) {
+      const [first] = lines(para([textRun(text)], 'lowKashida', rtl), settings);
+      const clusters = first!.placements.filter((p): p is TextPlacement => p.kind === 'text')
+        .flatMap((placement) => placement.clusters.map((cluster) => placement.origin.xPt + cluster.offset.xPt));
+      expect(wordsOn(first!), `mode ${settings?.compatibilityMode}`).toBe(6);
+      // The space keeps the band's last 10 pt: the visible text starts at 45.
+      expect(start(first!), `mode ${settings?.compatibilityMode}`).toBeCloseTo(45, 6);
+      expect(Math.min(...clusters)).toBeGreaterThanOrEqual(35 - 1e-6);
+    }
+  });
+
   it('fits a split or hyphenatable right-to-left word by the visible prefix too', () => {
     // A 345 pt band: 150 pt + space + 180 pt is 340 pt visible (350 pt with
     // the line-end space) and stays on the first line.
@@ -392,6 +430,17 @@ describe('WORD_RTL_JUSTIFIED_VISIBLE_FIT', () => {
       expect(end(short!)).toBeCloseTo(370);
     }
   });
+  it('hangs a Latin line-end space after Arabic-Indic digits, which are not right-to-left letters', () => {
+    // 25 digits, a space, 8 Latin letters and a space: 340 pt visible in the
+    // 345 pt band. The digits are weak, so the Latin run is drawn rightmost
+    // and its space hangs: one line.
+    const rtl = { bidi: true, indentRight: 15 } as Partial<DocParagraph>;
+    for (const settings of MODES) {
+      const all = lines(para([textRun(`${'\u0661'.repeat(25)} `), textRun(`${'b'.repeat(8)} `)], 'both', rtl), settings);
+      expect(all, `mode ${settings?.compatibilityMode}`).toHaveLength(1);
+    }
+  });
+
   it('absorbs an overflowing line-end space drawn between segments of a final line', () => {
     // A 250 pt Hebrew word, a space, an 80 pt Latin word and its space: 340 pt
     // visible, 350 pt in all, in a 345 pt band. The Latin word is drawn
