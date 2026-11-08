@@ -188,6 +188,30 @@ describe('WORD_JUSTIFIED_INTERWORD_COMPRESSION', () => {
     }
   });
 
+  it('keeps the natural breakable fit of CJK units under distribute and lowKashida', async () => {
+    // Issue #1660 mode-15 distribute controls: Word wraps the last ideograph
+    // of a CJK word that follows a space instead of compressing the line's
+    // U+0020 gaps, although the overflow is within the quarter-space cap.
+    // Courier stub: every glyph advances 1229/2048 em at 12pt (7.37pt).
+    const advance = 12 * 1229 / 2048;
+    const text = '甲甲甲甲 乙乙 丙丙丙丙';
+    for (const alignment of ['distribute', 'lowKashida'] as const) {
+      const canvas = georgiaCanvas();
+      const context = canvas.getContext('2d') as CanvasRenderingContext2D;
+      const measure = context.measureText.bind(context);
+      context.measureText = value => {
+        const width = [...value].length * Number(/([\d.]+)px/.exec(context.font)?.[1] ?? 12) * 1229 / 2048;
+        return { ...measure(value), width, actualBoundingBoxRight: width };
+      };
+      // 12 glyphs with two spaces; 0.4 of a glyph short of the natural width,
+      // well inside the quarter of the two spaces' width.
+      const element = paragraph(text, alignment, 12, false, { fontFamily: 'Courier New' });
+      const lines = await renderLines(element, advance * 11.6, { compatibilityMode: 15 }, {}, canvas);
+      const visible = lines.map(line => line.map(run => run.text).join('').replace(/ +$/, ''));
+      expect.soft(visible, alignment).toEqual(['甲甲甲甲 乙乙 丙丙丙', '丙']);
+    }
+  });
+
   it('preserves a native space-to-letter pair only when its tokens share a line', async () => {
     // An independent whole-string measure owns this boundary: the stub adds
     // a 200/2048 em space-T pair, in addition to its ordinary letter pairs.
