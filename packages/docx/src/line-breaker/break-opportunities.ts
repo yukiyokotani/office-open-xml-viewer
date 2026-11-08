@@ -409,10 +409,12 @@ function processTextSegment(context: BreakOpportunityIteratorContext, seg: Layou
   const fitWidthFor = (
     widthPx: number,
     trailingSpacePx: number,
-    _next?: LayoutSeg,
+    next: LayoutSeg | undefined,
     pieces?: readonly { readonly segment: LayoutSeg }[],
   ): number => {
     const fit = wordVisiblePrefixFitWidthPx(widthPx, trailingSpacePx, lineEndSpaceCharged(context));
+    if (fit !== widthPx && next === undefined
+      && wordMode15FinalSpaceCharged(context, pieces ? pieces.at(-1)!.segment : s)) return widthPx;
     // Only a candidate its hanging space alone admits needs that space's
     // drawn side; a space drawn inside the line stays charged.
     if (fit === widthPx || !context.baseRtl
@@ -420,7 +422,7 @@ function processTextSegment(context: BreakOpportunityIteratorContext, seg: Layou
       || !context.fitsMeasuredWidth(breakerState.currentWidth + fit, availW())) return fit;
     return rtlLineEndSpaceInside(context, pieces ? pieces.map((piece) => piece.segment) : [s]) ? widthPx : fit;
   };
-  const wForFit = fitWidthFor(prospectiveWidth, trailingSpaceW);
+  const wForFit = fitWidthFor(prospectiveWidth, trailingSpaceW, breakerState.queue.peek());
   // ECMA-376 §17.3.1.33 does not prescribe a line-breaking tolerance.
   // Word-for-Mac controls with Calibri and Arial, left/center/right aligned
   // 10pt table cells, wrap a trailing Latin word below its natural advance
@@ -2191,4 +2193,19 @@ function splitSeaOverflow(context: BreakOpportunityIteratorContext, frame: TextF
       });
     }
   }
+}
+
+const MODE15_FINAL_SPACE_ALIGNMENTS = new Set(['left', 'start', 'center', 'right', 'end', 'lowKashida']);
+
+/** Scope of WORD_MODE15_MIXED_DIRECTION_FINAL_SPACE: mode 15, the paragraph's
+ * final U+0020 in a run whose direction differs from the paragraph's, under
+ * the alignments the rule names. */
+function wordMode15FinalSpaceCharged(
+  context: Pick<BreakOpportunityIteratorContext, 'baseRtl' | 'bidiOrdering'>,
+  last: LayoutSeg,
+): boolean {
+  const policy = context.bidiOrdering;
+  if (!policy || policy.lineEndJustificationBeforeMode15 !== false || policy.runDirectionUnauthored) return false;
+  if (!MODE15_FINAL_SPACE_ALIGNMENTS.has(policy.alignment ?? 'left')) return false;
+  return 'text' in last && last.text.endsWith(' ') && (last.rtl === true) !== context.baseRtl;
 }

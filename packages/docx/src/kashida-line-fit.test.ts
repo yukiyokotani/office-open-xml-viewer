@@ -386,6 +386,29 @@ describe('WORD_RTL_LINE_END_SPACE_HANGS', () => {
     }
   });
 
+  it('charges a mode-15 paragraph-final space whose run direction differs from the paragraph', () => {
+    // WORD_MODE15_MIXED_DIRECTION_FINAL_SPACE: seven 40 pt words and their
+    // final space fill 340 + 10 pt of a 345 pt band. In mode 15 the final space
+    // of a w:rtl run in a left-to-right paragraph, or of an unmarked run in a
+    // bidi paragraph, counts, so the last word wraps; matched directions and
+    // earlier modes keep the visible fit and one line.
+    const hebrew = `${Array.from({ length: 7 }, () => '\u05d0\u05d1\u05d2\u05d3').join(' ')} `;
+    const latin = `${Array.from({ length: 7 }, () => 'abcd').join(' ')} `;
+    const cases = [
+      { text: hebrew, run: { rtl: true }, ppr: { indentRight: 15 }, mismatched: true },
+      { text: latin, run: {}, ppr: { bidi: true, indentRight: 15 }, mismatched: true },
+      { text: hebrew, run: { rtl: true }, ppr: { bidi: true, indentRight: 15 }, mismatched: false },
+      { text: latin, run: {}, ppr: { indentRight: 15 }, mismatched: false },
+    ];
+    for (const settings of MODES) {
+      for (const [index, item] of cases.entries()) {
+        const all = lines(para([textRun(item.text, item.run as Partial<DocxTextRun>)], 'left', item.ppr as Partial<DocParagraph>), settings);
+        const mode15 = settings?.compatibilityMode === 15;
+        expect(all, `case ${index} mode ${settings?.compatibilityMode}`).toHaveLength(mode15 && item.mismatched ? 2 : 1);
+      }
+    }
+  });
+
   it('fits a split or hyphenatable right-to-left word by the visible prefix too', () => {
     // A 345 pt band: 150 pt + space + 180 pt is 340 pt visible (350 pt with
     // the line-end space) and stays on the first line.
