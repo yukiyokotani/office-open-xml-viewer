@@ -1200,8 +1200,22 @@ pub(super) fn parse_classic_impl(
                 bar_direction: child(*group, "barDir").and_then(|node| attr(&node, "val")),
                 scatter_style: child(*group, "scatterStyle").and_then(|node| attr(&node, "val")),
                 radar_style: child(*group, "radarStyle").and_then(|node| attr(&node, "val")),
-                vary_colors: child(*group, "varyColors")
-                    .map(|_| bool_child(*group, "varyColors").unwrap_or(true)),
+                vary_colors: {
+                    let explicit = child(*group, "varyColors")
+                        .map(|_| bool_child(*group, "varyColors").unwrap_or(true));
+                    match explicit {
+                        // Observed Office behavior: a lone bar/column group
+                        // with no `<c:varyColors>` element paints per-point
+                        // colors (the default Excel column chart), exactly
+                        // like the pie family. An explicit `val="0"` stays
+                        // monochrome. Line/scatter/radar keep the
+                        // explicitly-enabled rule below.
+                        None if (kind == "bar" || kind == "bar3D") && series_count == 1 => {
+                            Some(true)
+                        }
+                        other => other,
+                    }
+                },
                 gap_width,
                 overlap,
                 bubble_scale: child(*group, "bubbleScale")
@@ -2944,9 +2958,13 @@ pub(super) fn parse_classic_impl(
 
     // §21.2.2.227 varyColors chart-level flag. Pie/doughnut preserve the
     // effective boolean because an explicit false makes unspecified points
-    // inherit the single series fill. Lone bar/column charts expose only an
-    // explicitly enabled case; §21.2.2.227 defaults the `val` attribute to
-    // true when the element exists, not the element itself when absent.
+    // inherit the single series fill. Lone bar/column charts follow the same
+    // observed Office behavior: a missing element varies (the default Excel
+    // column chart paints per-point colors with a per-category legend), so
+    // only an explicit `val="0"` suppresses it. §21.2.2.227 defaults the
+    // `val` attribute to true when the element exists, not the element
+    // itself when absent — the absent-means-vary rule for these two families
+    // is an observed Office fallback, not a schema default.
     let vary_colors = {
         let is_pie_family = matches!(chart_type.as_str(), "pie" | "doughnut" | "ofPie");
         let is_bar_family = chart_type.contains("Bar");
@@ -2961,10 +2979,10 @@ pub(super) fn parse_classic_impl(
             let vary = first_series
                 .and_then(|series| series.parent())
                 .and_then(|g| bool_child(g, "varyColors"));
-            if vary == Some(true) {
-                Some(true)
-            } else {
+            if vary == Some(false) {
                 None
+            } else {
+                Some(true)
             }
         } else {
             None
