@@ -132,8 +132,9 @@ describe('first-line indents beside floats through the DOCX parser', () => {
     const placements = paragraph.lines[0]!.placements;
     const tab = placements.find((node) => node.kind === 'tab');
     const text = placements.find((node) => node.kind === 'text' && node.text.trim() !== '');
-    expect(tab && tab.bounds.xPt + tab.bounds.widthPt).toBeCloseTo(340, 6);
-    expect(text?.bounds.xPt).toBeLessThan(72);
+    if (tab?.kind !== 'tab' || text?.kind !== 'text') throw new Error('Missing tab or text placement');
+    expect(tab.bounds!.xPt + tab.bounds!.widthPt).toBeCloseTo(340, 6);
+    expect(text.bounds.xPt).toBeLessThan(72);
   });
 
   it.each(['left', 'center', 'right', 'end'])('keeps a hanging RTL tab line inside the band under jc=%s', (jc) => {
