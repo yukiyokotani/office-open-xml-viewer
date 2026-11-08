@@ -5,6 +5,116 @@ semantic versioning. While the major version is zero, minor releases may contain
 explicitly documented breaking changes; patch releases remain compatible with
 the corresponding minor release.
 
+## 0.89.8 — 2026-11-09
+
+Compatible patch release. No migration is required.
+
+- **Nuxt and other bundlers that alias assets:** the render-worker URLs that
+  the package emits are now dot-relative, so consumers whose bundler aliases
+  asset paths (Nuxt among them) bundle the workers instead of failing to load
+  them (#2134).
+- **Word: right-to-left and mixed-direction text:**
+  - A leading Latin label in a right-to-left paragraph stays where Word draws
+    it (#2046).
+  - Words that mix scripts keep their native direction across the word
+    boundary (#2076).
+  - Decimal tabs line up with the visual cell positions (#2070).
+  - Numeric separators keep their numbers together (#2131).
+  - Spaces at the end of right-to-left lines hang past the margin under every
+    alignment, as in Word (#2075).
+  - In compatibility mode 15, the final space of a paragraph whose run
+    direction differs from the paragraph's takes part in line fitting (#2041).
+- **Word: line ends and justification:**
+  - Spaces at the end of a line hang in justified, centred and right-aligned
+    lines (#2013).
+  - An overflowing ideographic space (U+3000) at a line end hangs in
+    compatibility mode 15 (#2011).
+  - Justified lines ended by a manual break are stretched (#2009), and final
+    lines of distributed paragraphs are set as in Word (#2010).
+  - Latin lines in kashida and thaiDistribute paragraphs break at the same
+    words as in Word (#2008), and thaiDistribute lines before compatibility
+    mode 15 spread in proportion to the character advances (#2045).
+  - Kerning now includes pairs with a space, and `w:kern` 0 turns kerning off
+    (#2029).
+  - Lines that fit exactly are no longer pushed down by rounding (#2102).
+  - Authored spaces keep their share of justification (#2132).
+- **Word: Japanese and Chinese text:**
+  - Closing marks hang only where Word hangs them: never in kashida or
+    thaiDistribute lines or in table cells, and at most one per line (#2038).
+  - Punctuation hanging in lines that are not justified follows the
+    compatibility mode (#2080).
+  - Consecutive closing and opening brackets and punctuation take half a
+    character cell, now for every measured pair and on lines and
+    lines-and-characters grids (#2082, #2144).
+  - Paragraphs with Japanese line-breaking rules turned off break as in Word.
+  - On a lines-and-characters document grid, lines in compatibility mode 15
+    use the full text width (#2152).
+- **Word tables:**
+  - Cells without authored margins use zero margins, and tables indented by a
+    style are placed as in Word.
+  - Centred, right-aligned and end-aligned tables ignore a direct table indent
+    (#2040), and so does a negative indent on a once-nested table (#2067).
+  - Auto-fit tables with automatic widths fit their content at every
+    alignment (#2065).
+  - The row left-margin hang also applies in older compatibility modes and
+    outside the main body (#2064).
+  - Tables with cell spacing are laid out as in Word (#2066).
+  - When a cell repeats `w:tcMar`, the last margin wins, and a logical
+    start or end margin takes precedence over left or right (#2125).
+  - Chained page-breaking tables across sections settle instead of looping
+    (#2012).
+- **Word tabs, floats and numbering:**
+  - Tab cells fit the same way on every line (#2047).
+  - Text and numbering beside floating objects fit as in Word (#2054).
+  - Numbered text in older documents stays aligned beside floats (#2084).
+- **Word text boxes and inline objects:**
+  - Text-box runs keep their direction and complex-script formatting (#2078).
+  - DrawingML text-box insets start inside the outline (#2069), and vertical
+    text boxes keep each inset on its physical edge, so their lines are no
+    longer shorter than in Word (#2044).
+  - Inline pictures and text boxes keep their frame size and line height
+    (#2063).
+- **Word pagination:** an empty line after a final break survives pagination
+  (#2099), and progressive rendering keeps already published pages final while
+  notes overflow (#2113).
+- **Word footnotes and endnotes:** notes too long for one page continue on the
+  next page instead of failing to render (#2061).
+- **PowerPoint text colour:** text boxes, shapes and grouped text without a
+  colour of their own now take the presentation's default text style colour
+  through the slide's colour map, as PowerPoint does. On a master that swaps
+  the text colour to light, such text is now white instead of black on a dark
+  background. Text with no colour anywhere in its chain paints black, like
+  PowerPoint. On masters without their own text styles, first-level titles and
+  every level of subtitle and body text keep the theme text colour. Hyperlinks
+  marked to use the text colour (`a14:hlinkClr val="tx"`) keep the inherited
+  text colour instead of the theme hyperlink colour. Models passed directly to
+  `renderSlide` keep the 0.89.7 fallback colour (#1989).
+- **PowerPoint list styles:** character formatting on a list style's default
+  paragraph properties (`a:defPPr`), such as bold, italic, underline, fonts,
+  language or hyperlinks, no longer reaches text, as in PowerPoint (#1992).
+- **Excel charts with smoothed lines:** the automatic value axis now covers the
+  drawn smoothed curve, as in Excel, so a curve that overshoots its points is
+  no longer clipped. On 100% stacked charts the axis widens to the next
+  percent step when the curve crosses 0% or 100%, unless that bound is set in
+  the chart. Thanks to @ToBeSuperior for the contribution (#1983).
+- **Excel combo charts with a secondary axis:** charts whose secondary category
+  axis is deleted, such as columns with a line on the secondary axis, now draw
+  the secondary series against the shared categories instead of showing
+  "Unsupported chart" when both groups can share one category mapping. Area
+  charts with a line on the secondary value axis now draw as well. Stacked and
+  100% stacked lines or areas on a secondary axis over columns scale that axis
+  to their stacked values instead of the raw values. Category spacing now
+  comes from the primary value axis even when the secondary value axis is
+  listed first in the chart. Thanks to @ToBeSuperior for the contribution
+  (#1984).
+- **Fonts named like built-in object properties:** Word documents whose run
+  fonts, and Excel workbooks whose Normal font, are named `constructor` or
+  `__proto__` now open instead of failing with a `TypeError` (#1946).
+- **Unreadable Word document body:** a DOCX whose `word/document.xml` cannot be
+  parsed now opens with the "This document could not be displayed" page. Before,
+  `load()` rejected with a `RangeError` because that page had a 0×0 size. It now
+  uses the ECMA-376 default page size, US Letter.
+
 ## 0.89.7 — 2026-10-29
 
 Compatible patch release. No migration is required.
