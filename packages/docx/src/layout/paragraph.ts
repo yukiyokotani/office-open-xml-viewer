@@ -1915,13 +1915,13 @@ export function planLine(input: PlanLineInput): LineLayout {
     ? naturalAlignmentOffsetPt
     : Math.max(0, input.paragraphXPt + input.decimalAutoTabPt - drawnWidthPt - lineStartPt);
   let xPt = lineStartPt + alignmentOffsetPt;
-  if (rtlVisibleEdge && input.decimalAutoTabPt === undefined
-    && !segments.some(segment => segment.kind === 'tab')) {
+  if (rtlVisibleEdge && input.decimalAutoTabPt === undefined) {
     // WORD_RTL_LINE_END_SPACE_HANGS admitted the line by its visible width:
     // whatever the alignment, the line-end spaces drawn at either extreme
-    // may stand outside the band, the visible text may not. The correction
-    // applies only where those spaces explain the whole overflow; a tab line
-    // keeps its stop geometry, and any other overflow keeps Word's geometry.
+    // may stand outside the band, the visible text may not (as the unjustified
+    // placement above hangs only the overflow). The correction applies only
+    // where those spaces explain the whole overflow, so a tab displaced past
+    // the band keeps Word's geometry.
     const bandEndPt = lineStartPt + effectiveAvailableWidthPt - physicalStartOffsetPt;
     const hangPt = rtlLineEnd.leftPt + rtlLineEnd.rightPt;
     const endOverflowPt = xPt + drawnWidthPt - rtlLineEnd.rightPt - bandEndPt;

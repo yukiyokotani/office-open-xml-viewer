@@ -136,6 +136,25 @@ describe('first-line indents beside floats through the DOCX parser', () => {
     expect(text?.bounds.xPt).toBeLessThan(72);
   });
 
+  it.each(['left', 'center', 'right', 'end'])('keeps a hanging RTL tab line inside the band under jc=%s', (jc) => {
+    // WORD_RTL_LINE_END_SPACE_HANGS admits the line by its visible width; its
+    // visible text (label, tab and Hebrew words) stays in the band [109, 540].
+    const hebrew = Array.from({ length: 20 }, () => '\u05d0\u05d1\u05d2\u05d3').join(' ');
+    const paragraph = layoutParagraph(documentBytes('w:right="740"', true, 0,
+      { alignment: 'left', count: 1, stop: 720, prefix: 'AB', text: hebrew, noFloat: true, jc, runRtl: true }));
+    for (const line of paragraph.lines) {
+      for (const node of line.placements) {
+        if (node.kind !== 'text' || node.text.trim() === '') continue;
+        const visible = node.clusters.filter((cluster) => node.text[cluster.range.start - node.range.start]?.trim());
+        for (const cluster of visible) {
+          const x = node.origin.xPt + cluster.offset.xPt;
+          expect(Math.min(x, x + cluster.advancePt), `${jc} ${node.text}`).toBeGreaterThanOrEqual(109 - 1e-6);
+          expect(Math.max(x, x + cluster.advancePt), `${jc} ${node.text}`).toBeLessThanOrEqual(540 + 1e-6);
+        }
+      }
+    }
+  });
+
   it('wraps a margin ptab cell wider than the paragraph band', () => {
     const paragraph = layoutParagraph(documentBytes('w:right="7200"', false, 0,
       { alignment: 'right', count: 1, text: 'word '.repeat(10).trim(), positional: true, noFloat: true }));
