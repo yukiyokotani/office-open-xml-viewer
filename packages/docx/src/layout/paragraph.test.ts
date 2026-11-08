@@ -2488,7 +2488,7 @@ describe('planLine visual geometry', () => {
       .toBe(`${first}Yoke טקסט`);
   });
 
-  it.each([0, 5])('keeps a source-tail SPACE of %s pt on the complete legacy budget path', (spaceAdvancePt) => {
+  it.each([0, 5])('spreads a distribute RTL line by its visible prefix with a %s pt source-tail SPACE', (spaceAdvancePt) => {
     const piece = (text: string, start: number) => ({
       ...measuredText(text, start, [...text].reduce((sum, char) => sum + (char === ' ' ? spaceAdvancePt : 5), 0), true), rtl: true,
       clusters: [...text].map((_character, index) => ({
@@ -2504,11 +2504,14 @@ describe('planLine visual geometry', () => {
       line: { range: { start: 0, end: 10 }, topPt: 0, baselinePt: 8, advancePt: 10,
         xOffsetPt: 0, availableWidthPt: 100, endsWithBreak: false, segments },
     });
-    // Source presence, including an exact zero-advance SPACE, has no
-    // established distribute hanging budget. Preserve its
-    // entire allocation/paint, rather than combining a new fine gap model
-    // with that incomplete terminal budget.
-    expect(project(false)).toEqual(project(true));
+    // WORD_RTL_LINE_END_SPACE_HANGS: the line-end SPACE hangs past the end
+    // (left) edge, and the visible words spread over the whole band.
+    const texts = project(false).placements.filter((p): p is TextPlacement => p.kind === 'text');
+    const visible = texts.filter((p) => p.text.trim() !== '');
+    expect(Math.min(...visible.map((p) => p.bounds.xPt))).toBeCloseTo(0, 6);
+    expect(Math.max(...visible.map((p) => p.bounds.xPt + p.bounds.widthPt))).toBeCloseTo(100, 6);
+    const tail = texts.find((p) => p.range.start === 9)!;
+    expect(tail.bounds.xPt + tail.bounds.widthPt).toBeLessThanOrEqual(1e-6);
   });
 
   it('preserves a contextual operation when a space cut would remove a visible head across NBSP', () => {
