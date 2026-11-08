@@ -1642,7 +1642,14 @@ export function planLine(input: PlanLineInput): LineLayout {
   const rtlInteriorPt = rtlLineEnd.interior.reduce((sum, { widthPt }) => sum + widthPt, 0);
   const rtlInteriorAbsorbPt = applyJustify
     ? Math.min(rtlInteriorPt, Math.max(0, -(lineSlackPt + rtlHangingSpacePt))) : 0;
-  const rtlJustifySlackBonusPt = rtlHangingSpacePt + rtlInteriorAbsorbPt;
+  // A lowKashida line keeps its line-end space inside the band while it fits
+  // there, as an unjustified line does: Word spreads lowKashida lines only in
+  // part, and spreading the hanging space too moves them farther from it
+  // (blk-0898-bidi-fit lowKashida rows). Only an overflow hangs.
+  const rtlHangsWhole = applyJustify && input.alignment !== 'lowKashida';
+  const rtlHangCreditPt = rtlHangsWhole
+    ? rtlHangingSpacePt : Math.min(rtlHangingSpacePt, Math.max(0, -lineSlackPt));
+  const rtlJustifySlackBonusPt = rtlHangCreditPt + rtlInteriorAbsorbPt;
   const kashida = applyJustify ? kashidaLevel(input.alignment) : null;
   let kashidaAppliedPt = 0;
   if (kashida && lineSlackPt + rtlJustifySlackBonusPt > 0) {
@@ -1844,8 +1851,8 @@ export function planLine(input: PlanLineInput): LineLayout {
   let rtlRightHangPt = 0;
   if (rtlVisibleEdge) {
     const overflowPt = distributedWidthPt - lineSlackPt;
-    rtlRightHangPt = applyJustify ? rtlLineEnd.rightPt : Math.min(Math.max(0, overflowPt), rtlLineEnd.rightPt);
-    const leftHangPt = applyJustify
+    rtlRightHangPt = rtlHangsWhole ? rtlLineEnd.rightPt : Math.min(Math.max(0, overflowPt), rtlLineEnd.rightPt);
+    const leftHangPt = rtlHangsWhole
       ? rtlLineEnd.leftPt
       : Math.min(Math.max(0, overflowPt - rtlRightHangPt), rtlLineEnd.leftPt);
     let residualPt = overflowPt - rtlRightHangPt - leftHangPt;

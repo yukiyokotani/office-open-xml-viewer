@@ -367,6 +367,25 @@ describe('WORD_RTL_LINE_END_SPACE_HANGS', () => {
       }
     }
   });
+  it('keeps a lowKashida line-end space inside the band while it fits', () => {
+    // Word spreads lowKashida lines only in part: the line-end space stays in
+    // the band unless the line overflows, and only the overflow hangs. Six
+    // words and a space (300 pt) leave a 45 pt slack in the 345 pt band; a
+    // seventh word does not fit there, so the line holds six words.
+    const rtl = { bidi: true, indentRight: 15 } as Partial<DocParagraph>;
+    const word = '\u05d0\u05d1\u05d2\u05d3';
+    const text = Array.from({ length: 6 }, () => word).join(' ') + ` ${'\u05d0'.repeat(10)} ${word}`;
+    for (const settings of MODES) {
+      const [first] = lines(para([textRun(text)], 'lowKashida', rtl), settings);
+      const clusters = first!.placements.filter((p): p is TextPlacement => p.kind === 'text')
+        .flatMap((placement) => placement.clusters.map((cluster) => placement.origin.xPt + cluster.offset.xPt));
+      expect(wordsOn(first!), `mode ${settings?.compatibilityMode}`).toBe(6);
+      // The space keeps the band's last 10 pt: the visible text starts at 45.
+      expect(start(first!), `mode ${settings?.compatibilityMode}`).toBeCloseTo(45, 6);
+      expect(Math.min(...clusters)).toBeGreaterThanOrEqual(35 - 1e-6);
+    }
+  });
+
   it('fits a split or hyphenatable right-to-left word by the visible prefix too', () => {
     // A 345 pt band: 150 pt + space + 180 pt is 340 pt visible (350 pt with
     // the line-end space) and stays on the first line.
