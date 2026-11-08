@@ -155,6 +155,10 @@ export function rtlLineEndSpaceInside(
   tail: readonly LayoutSeg[],
 ): boolean {
   if (!context.baseRtl || tail.length === 0) return false;
+  // Measured on tab lines (controls-1672 rtl Latin rows after a leading tab).
+  // Elsewhere an interior space keeps the existing library policy: admitted by
+  // the visible width and absorbed into the space by line planning.
+  if (!context.breakerState.currentLine.some((item) => 'isTab' in item)) return false;
   const items = [...context.breakerState.currentLine, ...tail];
   const model = tabLineOrderModel({ baseRtl: true, bidiOrdering: context.bidiOrdering,
     isJustified: context.isJustified, stretchLastLine: context.stretchLastLine });

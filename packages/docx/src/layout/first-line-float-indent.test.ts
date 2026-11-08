@@ -156,6 +156,18 @@ describe('first-line indents beside floats through the DOCX parser', () => {
     }
   });
 
+  it('charges the line-end space of Latin text after an RTL leading tab', () => {
+    // WORD_RTL_LINE_END_SPACE_HANGS: after the tab, the Latin run's line-end
+    // space is drawn inside the line (controls-1672 rtl rows: Word keeps the
+    // word count of a charged space), so the first line takes no extra word.
+    // With w:right 900 the 17th word fits by its visible width alone.
+    const paragraph = layoutParagraph(documentBytes('w:right="900"', true, 0,
+      { alignment: 'left', count: 1, stop: 720, text: Array.from({ length: 30 }, () => 'abcd').join(' '), noFloat: true }));
+    const first = paragraph.lines[0]!.placements.flatMap((node) => node.kind === 'text' ? [node.text] : [])
+      .join('').trim().split(/ +/).filter(Boolean);
+    expect(first).toHaveLength(16);
+  });
+
   it('wraps a margin ptab cell wider than the paragraph band', () => {
     const paragraph = layoutParagraph(documentBytes('w:right="7200"', false, 0,
       { alignment: 'right', count: 1, text: 'word '.repeat(10).trim(), positional: true, noFloat: true }));
