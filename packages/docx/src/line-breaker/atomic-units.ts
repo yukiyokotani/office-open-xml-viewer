@@ -45,11 +45,14 @@ function lineHoldsTabOrRtlLetter(line: readonly LayoutSeg[]): boolean {
   return false;
 }
 
-/** WORD_RTL_LINE_END_SPACE_HANGS: the line-end space of a left-to-right run on
- * a right-to-left line is drawn at that run's right, so it hangs only while the
- * run is drawn rightmost; after a tab or right-to-left text on the line (or in
- * the run itself) it is drawn inside the line and stays charged. `text` is the
- * run's (or joined word's) text ending in the space. */
+/** WORD_RTL_LINE_END_SPACE_HANGS: the line-end space of a segment drawn left
+ * to right on a right-to-left line is drawn at that segment's right, so it
+ * hangs only while the segment is drawn rightmost; after a tab or
+ * right-to-left text on the line it is drawn inside the line and stays
+ * charged. As line planning resolves it, a segment holding any right-to-left
+ * letter is drawn right to left (its space then ends the line on the left),
+ * and one holding Latin letters or digits but no right-to-left letter is drawn
+ * left to right. `text` is the segment's (or joined word's) text. */
 export function rtlLineEndSpaceInterior(
   state: Pick<AtomicTextMeasurement, 'baseRtl'>,
   text: string,
@@ -57,9 +60,8 @@ export function rtlLineEndSpaceInterior(
 ): boolean {
   if (!state.baseRtl || !text.endsWith(' ')) return false;
   const trimmed = text.replace(/ +$/u, '');
-  const last = /\p{L}(?=\P{L}*$)/u.exec(trimmed)?.[0];
-  if (last === undefined || RTL_LETTER.test(last)) return false;
-  return RTL_LETTER.test(trimmed) || lineHoldsTabOrRtlLetter(line);
+  if (RTL_LETTER.test(trimmed) || !/[\p{L}\p{Nd}]/u.test(trimmed)) return false;
+  return lineHoldsTabOrRtlLetter(line);
 }
 
 /** Advance of the U+0020 suffix that ends `items` across members (a run of

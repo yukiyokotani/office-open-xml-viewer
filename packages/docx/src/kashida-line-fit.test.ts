@@ -424,6 +424,23 @@ describe('WORD_RTL_LINE_END_SPACE_HANGS', () => {
     }
   });
 
+  it('charges a digit word after Hebrew and hangs a mixed Hebrew-Latin word', () => {
+    // 345 pt band: Hebrew x25 + space (260 pt), then an 8-character word and
+    // its space. Digits are drawn left to right, inside the line, so their
+    // space is charged and the word wraps; a word holding a Hebrew letter is
+    // drawn right to left, its space ends the line on the left and hangs.
+    const rtl = { bidi: true, indentRight: 15 } as Partial<DocParagraph>;
+    for (const settings of MODES) {
+      for (const digits of ['12345678 ', '\u0661'.repeat(8) + ' ']) {
+        const all = lines(para([textRun(`${'\u05d0'.repeat(25)} `), textRun(digits)], 'both', rtl), settings);
+        expect(all, `digits mode ${settings?.compatibilityMode}`).toHaveLength(2);
+      }
+      const mixed = lines(para([textRun(`${'\u05d0'.repeat(25)} `), textRun(`\u05d0${'a'.repeat(7)} `)], 'both', rtl), settings);
+      expect(mixed, `mixed mode ${settings?.compatibilityMode}`).toHaveLength(1);
+      expect(start(mixed[0]!)).toBeGreaterThanOrEqual(35 - 1e-6);
+    }
+  });
+
   it('selects an optional hyphen where an interior line-end space is charged', () => {
     // 25 Hebrew letters and a space, then aaaa<soft hyphen>aaaa and a space:
     // the Latin word's space is drawn inside the line, so the whole word
