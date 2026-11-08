@@ -1843,8 +1843,9 @@ export function planLine(input: PlanLineInput): LineLayout {
   }
 
   // WORD_RTL_LINE_END_SPACE_HANGS admitted this line by its visible width.
-  // A justified line hangs its line-end spaces outside the band in full; an
-  // unjustified one keeps them inside while they fit and hangs only the
+  // A justified line (lowKashida excepted, see rtlHangsWhole) hangs its
+  // line-end spaces outside the band in full; an unjustified or lowKashida
+  // one keeps them inside while they fit and hangs only the
   // overflow, right side first. Overflow left after hanging is absorbed into
   // the spaces drawn between segments: the next segment on each one's drawn
   // side moves over it, so the visible text stays inside the band.

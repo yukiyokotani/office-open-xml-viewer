@@ -410,7 +410,7 @@ function processTextSegment(context: BreakOpportunityIteratorContext, seg: Layou
     widthPx: number,
     trailingSpacePx: number,
     _next?: LayoutSeg,
-    tail: readonly LayoutSeg[] = [s],
+    pieces?: readonly { readonly segment: LayoutSeg }[],
   ): number => {
     const fit = wordVisiblePrefixFitWidthPx(widthPx, trailingSpacePx, lineEndSpaceCharged(context));
     // Only a candidate its hanging space alone admits needs that space's
@@ -418,7 +418,7 @@ function processTextSegment(context: BreakOpportunityIteratorContext, seg: Layou
     if (fit === widthPx || !context.baseRtl
       || context.fitsMeasuredWidth(breakerState.currentWidth + widthPx, availW())
       || !context.fitsMeasuredWidth(breakerState.currentWidth + fit, availW())) return fit;
-    return rtlLineEndSpaceInside(context, tail) ? widthPx : fit;
+    return rtlLineEndSpaceInside(context, pieces ? pieces.map((piece) => piece.segment) : [s]) ? widthPx : fit;
   };
   const wForFit = fitWidthFor(prospectiveWidth, trailingSpaceW);
   // ECMA-376 §17.3.1.33 does not prescribe a line-breaking tolerance.
@@ -1555,7 +1555,7 @@ function prepareAtomicTextFit(
     w: number;
     trailingSpaceW: number;
     sDictSea: boolean;
-    fitWidthFor: (widthPx: number, trailingSpacePx: number, next: LayoutSeg | undefined, tail?: readonly LayoutSeg[]) => number;
+    fitWidthFor: (widthPx: number, trailingSpacePx: number, next: LayoutSeg | undefined, pieces?: readonly { readonly segment: LayoutSeg }[]) => number;
   },
 ): boolean {
   const { breakerState, flush, availW, segAdvance, strAdvance } = context;
@@ -1567,7 +1567,7 @@ function prepareAtomicTextFit(
   // that opportunity before placing the leader; otherwise the tail forces overflow.
   if (!preferWholeWord && s.explicitBreaks && follower?.joinPrev) {
     const whole = measureJoinedTextUnit(s, breakerState.queue, context, w, trailingSpaceW, 0, false, 'whole-leader');
-    if (!fitsLineWidth(breakerState.currentWidth + fitWidthFor(whole.width, whole.trailingSpace, whole.next, whole.pieces.map((piece) => piece.segment)), availW())) {
+    if (!fitsLineWidth(breakerState.currentWidth + fitWidthFor(whole.width, whole.trailingSpace, whole.next, whole.pieces), availW())) {
       // The prefix keeps the leader's WORD_KERNED_SPACE_PAIRS seam pair.
       const split = context.explicitTextSplit(s,
         availW() - breakerState.currentWidth - (s.leadingWordBoundaryPx ?? 0));
@@ -1591,7 +1591,7 @@ function prepareAtomicTextFit(
       !(s.seaBreaks && s.seaBreaks.length > 0))
   ) {
     const group = measureJoinedTextUnit(s, breakerState.queue, context, w, trailingSpaceW, 0, false, preferWholeWord ? 'whole-word' : 'prefix');
-    const groupFitWidth = fitWidthFor(group.width, group.trailingSpace, group.next, group.pieces.map((piece) => piece.segment));
+    const groupFitWidth = fitWidthFor(group.width, group.trailingSpace, group.next, group.pieces);
     // WORD_OVERLONG_HEAD_AFTER_ANCHOR: a line holding only inkless items
     // (anchor characters, mark metrics) is still the unit's empty line. The
     // rule is measured for Latin words only: a unit holding SEA dictionary
@@ -1634,7 +1634,7 @@ function prepareAtomicTextFit(
   ) {
     let chunkW = w;
     let chunkTrail = trailingSpaceW;
-    const chunkTail: LayoutSeg[] = [s];
+    const chunkTail: { segment: LayoutSeg }[] = [{ segment: s }];
     let next = breakerState.queue.peek();
     if (!s.text.endsWith(' ')) {
       const following = breakerState.queue[Symbol.iterator]();
@@ -1647,7 +1647,7 @@ function prepareAtomicTextFit(
         const fw = segAdvance(ft);
         const fTrim = ft.text.replace(/ +$/, '');
         chunkW += fw;
-        chunkTail.push(ft);
+        chunkTail.push({ segment: ft });
         chunkTrail = ft.text.endsWith(' ') ? fw - strAdvance(ft, fTrim) : 0;
         if (ft.text.endsWith(' ')) {
           next = following.next().value;
