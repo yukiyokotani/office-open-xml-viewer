@@ -1,4 +1,4 @@
-import { lineEndSpaceCharged, trailingSpaceSuffixWidth } from './atomic-units.js';
+import { lineEndSpaceCharged, rtlLineEndSpaceInterior, trailingSpaceSuffixWidth } from './atomic-units.js';
 import type { BreakOpportunityIteratorContext } from './break-opportunities.js';
 import { seamPairAdvance } from './pass-operations.js';
 import type { LayoutTextSeg } from './model.js';
@@ -78,9 +78,10 @@ export function placeOptionalHyphenPrefix(
   }
   // A collapsible trailing space does not force an otherwise fitting word
   // to select an optional hyphen; the whole U+0020 suffix of the joined word
-  // is excluded, across members. RTL keeps its ordinary containment policy
-  // outside WORD_RTL_LINE_END_SPACE_HANGS.
-  if (!lineEndSpaceCharged(context)) {
+  // is excluded, across members, where it can hang (WORD_RTL_LINE_END_SPACE_HANGS).
+  const wordText = members.filter((member) => !member.optionalHyphen).map((member) => member.text).join('');
+  if (!lineEndSpaceCharged(context)
+    && !rtlLineEndSpaceInterior(context, wordText, context.breakerState.currentLine)) {
     width -= trailingSpaceSuffixWidth(members.filter((member) => !member.optionalHyphen), context);
   }
   if (context.fitsMeasuredWidth(width, context.availW())) return false;

@@ -413,6 +413,31 @@ describe('WORD_RTL_LINE_END_SPACE_HANGS', () => {
       expect(end(short!)).toBeCloseTo(370);
     }
   });
+  it('hangs a Latin line-end space after Arabic-Indic digits, which are not right-to-left letters', () => {
+    // 25 digits, a space, 8 Latin letters and a space: 340 pt visible in the
+    // 345 pt band. The digits are weak, so the Latin run is drawn rightmost
+    // and its space hangs: one line.
+    const rtl = { bidi: true, indentRight: 15 } as Partial<DocParagraph>;
+    for (const settings of MODES) {
+      const all = lines(para([textRun(`${'\u0661'.repeat(25)} `), textRun(`${'b'.repeat(8)} `)], 'both', rtl), settings);
+      expect(all, `mode ${settings?.compatibilityMode}`).toHaveLength(1);
+    }
+  });
+
+  it('selects an optional hyphen where an interior line-end space is charged', () => {
+    // 25 Hebrew letters and a space, then aaaa<soft hyphen>aaaa and a space:
+    // the Latin word's space is drawn inside the line, so the whole word
+    // (350 pt) does not fit the 345 pt band, while 'aaaa-' does.
+    const rtl = { bidi: true, indentRight: 15 } as Partial<DocParagraph>;
+    const soft = textRun('', { optionalHyphen: true } as Partial<DocxTextRun>);
+    for (const settings of MODES) {
+      const [first] = lines(para([textRun(`${'\u05d0'.repeat(25)} `), textRun('aaaa'), soft, textRun('aaaa ')], 'both', rtl), settings);
+      const text = characters(first!).map(({ character }) => character).join('');
+      expect(text, `mode ${settings?.compatibilityMode}`).toContain('-');
+      expect(characters(first!).filter(({ character }) => character === 'a')).toHaveLength(4);
+    }
+  });
+
   it('wraps a Latin word whose line-end space would be drawn between segments', () => {
     // A 250 pt Hebrew word, a space, an 80 pt Latin word and its space: 340 pt
     // visible, 350 pt in all, in a 345 pt band. The Latin word is drawn

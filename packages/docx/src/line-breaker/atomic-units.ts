@@ -19,24 +19,47 @@ export function lineEndSpaceCharged(state: Pick<AtomicTextMeasurement, 'baseRtl'
   return state.baseRtl && state.lineFit?.rtlVisiblePrefix !== true;
 }
 
-const RTL_STRONG = /[\u0590-\u08FF\uFB1D-\uFDFF\uFE70-\uFEFF]/u;
+/** A right-to-left letter (Hebrew, Arabic and the other RTL scripts' letters;
+ * digits, including Arabic-Indic ones, are weak and do not count). */
+const RTL_LETTER = /(?=[\u0590-\u08FF\uFB1D-\uFDFF\uFE70-\uFEFF])\p{L}/u;
+
+/** Incremental scan of a current line for a tab or right-to-left letter. The
+ * line grows by appends and shrinks by pops/truncation within one line, and
+ * a flush starts a new array, so only items past the scanned prefix are read:
+ * each item is visited once per line, not once per candidate. */
+const lineScans = new WeakMap<readonly LayoutSeg[], { scanned: number; foundAt: number }>();
+function lineHoldsTabOrRtlLetter(line: readonly LayoutSeg[]): boolean {
+  let entry = lineScans.get(line);
+  if (!entry) lineScans.set(line, entry = { scanned: 0, foundAt: -1 });
+  if (entry.foundAt >= line.length) entry.foundAt = -1;
+  if (entry.scanned > line.length) entry.scanned = line.length;
+  if (entry.foundAt >= 0) return true;
+  for (; entry.scanned < line.length; entry.scanned += 1) {
+    const item = line[entry.scanned]!;
+    if ('isTab' in item || ('text' in item && RTL_LETTER.test(item.text))) {
+      entry.foundAt = entry.scanned;
+      entry.scanned += 1;
+      return true;
+    }
+  }
+  return false;
+}
 
 /** WORD_RTL_LINE_END_SPACE_HANGS: the line-end space of a left-to-right run on
  * a right-to-left line is drawn at that run's right, so it hangs only while the
- * run is drawn rightmost; after a tab or right-to-left text on the line it is
- * drawn inside the line and stays charged. */
+ * run is drawn rightmost; after a tab or right-to-left text on the line (or in
+ * the run itself) it is drawn inside the line and stays charged. `text` is the
+ * run's (or joined word's) text ending in the space. */
 export function rtlLineEndSpaceInterior(
   state: Pick<AtomicTextMeasurement, 'baseRtl'>,
-  segment: LayoutTextSeg,
+  text: string,
   line: readonly LayoutSeg[],
 ): boolean {
-  if (!state.baseRtl || segment.rtl === true || !segment.text.endsWith(' ')) return false;
-  const trimmed = segment.text.replace(/ +$/u, '');
+  if (!state.baseRtl || !text.endsWith(' ')) return false;
+  const trimmed = text.replace(/ +$/u, '');
   const last = /\p{L}(?=\P{L}*$)/u.exec(trimmed)?.[0];
-  if (last === undefined || RTL_STRONG.test(last)) return false;
-  if (RTL_STRONG.test(trimmed)) return true;
-  return line.some((item) => 'isTab' in item
-    || ('text' in item && (item.rtl === true || RTL_STRONG.test(item.text))));
+  if (last === undefined || RTL_LETTER.test(last)) return false;
+  return RTL_LETTER.test(trimmed) || lineHoldsTabOrRtlLetter(line);
 }
 
 /** Advance of the U+0020 suffix that ends `items` across members (a run of
