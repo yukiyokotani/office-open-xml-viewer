@@ -458,9 +458,12 @@ describe('WORD_JUSTIFIED_INTERWORD_COMPRESSION', () => {
   });
 
   // Closed paragraph/layout classes are outside the measured Word rule.
-  // Compare their actual partitions with the previous mode-14 policy.
+  // Compare their actual partitions with the previous mode-14 policy. The
+  // linesAndChars row opts out of the pre-15 grid line-width reduction
+  // (WORD_GRID_RIGHT_INDENT_PITCH_ALIGNMENT), which mode 15 does not apply,
+  // so the two modes differ only in the compression rule under test.
   it.each([
-    ['linesAndChars', paragraph(CONTROL, 'both'), { docGridType: 'linesAndChars', docGridLinePitch: 18, docGridCharSpace: 0 }, {}],
+    ['linesAndChars', { ...paragraph(CONTROL, 'both'), adjustRightInd: false } as BodyElement, { docGridType: 'linesAndChars', docGridLinePitch: 18, docGridCharSpace: 0 }, {}],
     ['snapToChars', paragraph(CONTROL, 'both'), { docGridType: 'snapToChars', docGridLinePitch: 18, docGridCharSpace: 0 }, {}],
     ['medium kashida', paragraph(CONTROL, 'mediumKashida'), {}, {}],
     ['RTL', withRuns([textRun(CONTROL)], { bidi: true }), {}, {}],

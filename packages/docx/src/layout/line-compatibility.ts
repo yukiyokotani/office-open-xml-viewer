@@ -294,8 +294,16 @@ export const WORD_GRID_RIGHT_INDENT_PITCH_ALIGNMENT = defineCompatibilityRule({
     version: '16.111.1',
     platform: 'macOS 26.5.2',
   },
-  description: 'For body paragraphs whose ECMA-376 §17.3.1.1 adjustment is enabled on a linesAndChars character grid, Word reduces the physical line width to the greatest whole character-pitch multiple not exceeding the available width. The observed matrix covers exact and non-exact widths, zero and negative charSpace, explicit opt-out, line-only control, both physical indent sides, and the separately registered table-cell exception.',
+  description: 'For body paragraphs whose ECMA-376 §17.3.1.1 adjustment is enabled on a linesAndChars character grid, Word reduces the physical line width to the greatest whole character-pitch multiple not exceeding the available width. The observed matrix covers exact and non-exact widths, zero and negative charSpace, explicit opt-out, line-only control, both physical indent sides, and the separately registered table-cell exception. Windows Word 16.0.20527 controls (issue #2152: w2152 and w2152b, 84 documents, 258 labelled lines; MS Mincho 9-14pt text, charSpace -1024/0/1024/4096, Normal 10/10.5/12pt, text widths 450/481.9/500pt, left/right/both indents, adjustRightInd off) apply the reduction with the compatibility mode absent or below 15 only: the line loses the remainder of the section text width over the pitch whatever the paragraph indents, and every pre-15 case matches. In mode 15 no case is reduced (for example 40 MS Mincho 12pt characters on a 481.9pt line with a 10.5pt pitch, where the reduction allows 39).',
 });
+
+/** The compatibility modes in which {@link WORD_GRID_RIGHT_INDENT_PITCH_ALIGNMENT}
+ * applies. */
+export function wordGridRightIndentPitchAlignmentApplies(
+  compatibilityMode: number | undefined,
+): boolean {
+  return compatibilityMode === undefined || compatibilityMode < 15;
+}
 
 /** Word compatibility projection governed by
  * {@link WORD_GRID_RIGHT_INDENT_PITCH_ALIGNMENT}. */
