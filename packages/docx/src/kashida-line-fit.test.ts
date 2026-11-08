@@ -350,6 +350,23 @@ describe('WORD_RTL_LINE_END_SPACE_HANGS', () => {
       expect(end(latin!)).toBeCloseTo(380);
     }
   });
+  it('keeps the visible text of a hanging line in the band under every alignment', () => {
+    // The band runs from x = 35 to x = 380; seven words are 340 pt visible
+    // and 350 pt with the line-end space, so the space must stand outside.
+    const rtl = { bidi: true, indentRight: 15 } as Partial<DocParagraph>;
+    const hebrew = Array.from({ length: 20 }, () => '\u05d0\u05d1\u05d2\u05d3').join(' ');
+    for (const settings of MODES) {
+      for (const text of [hebrew, WORDS]) {
+        for (const alignment of ['left', 'start', 'center', 'right', 'end', 'distribute', 'lowKashida'] as const) {
+          const [line] = lines(para([textRun(text)], alignment, rtl), settings);
+          const label = `${alignment} mode ${settings?.compatibilityMode} ${text === WORDS ? 'latin' : 'hebrew'}`;
+          expect(wordsOn(line!), label).toBe(7);
+          expect(start(line!), label).toBeGreaterThanOrEqual(35 - 1e-6);
+          expect(end(line!), label).toBeLessThanOrEqual(380 + 1e-6);
+        }
+      }
+    }
+  });
   it('fits a split or hyphenatable right-to-left word by the visible prefix too', () => {
     // A 345 pt band: 150 pt + space + 180 pt is 340 pt visible (350 pt with
     // the line-end space) and stays on the first line.

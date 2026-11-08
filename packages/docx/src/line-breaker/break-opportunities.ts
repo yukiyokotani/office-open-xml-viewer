@@ -141,7 +141,7 @@ function joinedUnitStart(line: readonly LayoutSeg[]): number {
 
 /** The single rollback predicate of a narrowed gap: the head unit's placed
  * advance (from the line start, joined followers included, collapsible
- * U+0020 suffix excluded outside RTL) exceeds the fragment. */
+ * U+0020 suffix excluded unless lineEndSpaceCharged) exceeds the fragment. */
 function placedAdvanceExceeds(
   context: BreakOpportunityIteratorContext,
   segment: LayoutTextSeg,

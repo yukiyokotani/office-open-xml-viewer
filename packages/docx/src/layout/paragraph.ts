@@ -1556,8 +1556,8 @@ export function planLine(input: PlanLineInput): LineLayout {
   const justification = lineEndRule === 'character' && bidi ? 'word' : lineEndRule;
   const applyJustify = justification !== null;
   const originalAfterLastTab = lastTabSegmentIndex(segments) + 1;
-  // Stage 1 capability: only unambiguously nonnegative natural word slack.
-  // Accepted compression, hang-funded negative budgets, character topology,
+  // Stage 1 capability: only nonnegative natural word slack, or negative slack
+  // funded by WORD_RTL_LINE_END_SPACE_HANGS. Accepted compression, character topology,
   // compatibility-shape provenance and rewrite-capable Kashida stay legacy.
   // One fine view owns UAX order, terminal classification, gaps and paint;
   // never choose it after measuring against a different coarse budget.
@@ -1576,7 +1576,7 @@ export function planLine(input: PlanLineInput): LineLayout {
     && kashidaLevel(input.alignment) === null
     // WORD_RTL_LINE_END_SPACE_HANGS admits a line by its visible prefix, so
     // only the hanging line-end space may take the slack below zero.
-    && lineSlackPt + (rtlVisibleFit ? trailingAdvancePt(segments, (text) => text.trimEnd().length) : 0) >= -1e-6
+    && lineSlackPt + (rtlVisibleFit ? trailingAdvancePt(segments, (text) => text.replace(/ +$/u, '').length) : 0) >= -1e-6
     && line.gapPlan === undefined && line.justifiedCompressionPt === undefined) {
     // A source-tail SPACE needs an established terminal budget before this
     // representation can own its gaps: WORD_RTL_LINE_END_SPACE_HANGS gives
@@ -1915,6 +1915,24 @@ export function planLine(input: PlanLineInput): LineLayout {
     ? naturalAlignmentOffsetPt
     : Math.max(0, input.paragraphXPt + input.decimalAutoTabPt - drawnWidthPt - lineStartPt);
   let xPt = lineStartPt + alignmentOffsetPt;
+  if (rtlVisibleEdge && input.decimalAutoTabPt === undefined) {
+    // WORD_RTL_LINE_END_SPACE_HANGS admitted the line by its visible width:
+    // whatever the alignment, the line-end spaces drawn at either extreme
+    // may stand outside the band, the visible text may not.
+    const bandEndPt = lineStartPt + effectiveAvailableWidthPt - physicalStartOffsetPt;
+    // Only the overflow those spaces caused is corrected: other placement
+    // (a tab past the margin, say) keeps Word's geometry. The fit admitted
+    // the visible width, so at most one edge can overflow.
+    let correctablePt = rtlLineEnd.leftPt + rtlLineEnd.rightPt;
+    const visibleEndPt = xPt + drawnWidthPt - rtlLineEnd.rightPt;
+    if (visibleEndPt > bandEndPt + 1e-9) {
+      const shiftPt = Math.min(visibleEndPt - bandEndPt, correctablePt);
+      xPt -= shiftPt;
+      correctablePt -= shiftPt;
+    }
+    const visibleStartPt = xPt + rtlLineEnd.leftPt;
+    if (visibleStartPt < lineStartPt - 1e-9) xPt += Math.min(lineStartPt - visibleStartPt, correctablePt);
+  }
   const placements: ParagraphPlacement[] = [];
   const terminalDecorationTrims = new Map<number, number>();
   for (const segmentIndex of visual.order) {

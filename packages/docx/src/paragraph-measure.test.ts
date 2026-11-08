@@ -1520,8 +1520,9 @@ function bandViolation(lines: readonly PlacedLine[], obstacle: FloatRect, rtl: b
   for (const line of lines) {
     const height = line.height;
     const total = line.segments.reduce((sum, segment) => sum + segment.width, 0);
-    // WORD_RTL_LINE_END_SPACE_HANGS: the line-end spaces hang past the end
-    // edge, outside the band, as they do on left-to-right lines.
+    // WORD_RTL_LINE_END_SPACE_HANGS: planLine keeps the visible text of a
+    // right-to-left line inside its band and lets the line-end spaces (drawn
+    // at its left end) stand outside it, as on left-to-right lines.
     let hang = 0;
     for (const segment of [...line.segments].reverse()) {
       hang += segment.width - segment.visible;
