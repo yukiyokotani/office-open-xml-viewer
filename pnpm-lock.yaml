@@ -7,10 +7,6 @@ settings:
 importers:
 
   .:
-    dependencies:
-      formualizer:
-        specifier: 0.13.0
-        version: 0.13.0
     devDependencies:
       '@ast-grep/cli':
         specifier: ^0.43.0
@@ -326,9 +322,6 @@ importers:
       '@silurus/ooxml-core':
         specifier: workspace:*
         version: link:../core
-      formualizer:
-        specifier: 0.13.0
-        version: 0.13.0
     devDependencies:
       '@playwright/test':
         specifier: ^1.64.1
@@ -3025,9 +3018,6 @@ packages:
   form-data@4.0.6:
     resolution: {integrity: sha512-vKatAh4SlVfgbv+YtmhiRjhEMJsYpsG1Y2rMQtR+SVSbytsSD1YGzDIcrAJmdFec88u/+VoGmxnl+80gL1tRCQ==}
     engines: {node: '>= 6'}
-
-  formualizer@0.13.0:
-    resolution: {integrity: sha512-i9HzZOp/BNRd0nBYPVA+u7uCZdMAO2Yey/ZPysYzFrbM+WxALoyjlaAiS2Gq0B2NG91sWJk23bIap+p/Oxn+Jw==}
 
   fs-constants@1.0.0:
     resolution: {integrity: sha512-y6OAwoSIf7FyjMIv94u+b5rdheZEjzR63GTyZJm5qh4Bi+2YgwLCcI/fPFZkL5PSixOt6ZNKm+w+Hfp/Bciwow==}
@@ -7134,8 +7124,6 @@ snapshots:
       es-set-tostringtag: 2.1.0
       hasown: 2.0.4
       mime-types: 2.1.35
-
-  formualizer@0.13.0: {}
 
   fs-constants@1.0.0:
     optional: true

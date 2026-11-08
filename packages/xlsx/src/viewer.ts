@@ -372,6 +372,7 @@ function viewerLoadOptions(opts: LoadOptions, mode: 'main' | 'worker'): LoadOpti
     chartEx: opts.chartEx,
     tiff: opts.tiff,
     recalculateFormulas: opts.recalculateFormulas,
+    formualizerWasm: opts.formualizerWasm,
     mode,
   };
   return {

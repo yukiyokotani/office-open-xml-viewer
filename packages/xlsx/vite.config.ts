@@ -40,12 +40,6 @@ export default defineConfig({
     },
     target: 'esnext',
     rollupOptions: {
-      // Formualizer ships WASM with top-level await: bundling it breaks the
-      // CJS output (and would inline ~10 MB into the format chunk). Keep the
-      // lazy `import('formualizer')` in recalc.ts external so both ESM and CJS
-      // resolve it from node_modules at recalc time; the default (opt-out)
-      // path never imports it and pays nothing.
-      external: ['formualizer'],
       output: {
         assetFileNames: '[name][extname]',
       },

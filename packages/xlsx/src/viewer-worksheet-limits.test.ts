@@ -151,6 +151,8 @@ describe('self-loading viewers forward xlsxWorksheetLimits (#1917)', () => {
       chartEx: sentinel('chartEx'),
       tiff: sentinel('tiff'),
       mode: 'main',
+      recalculateFormulas: true,
+      formualizerWasm: '/custom-fml.wasm',
       legacyXls: { target: 'xlsx', claim: () => false, beginLoad: vi.fn() },
     } as unknown as Required<LoadOptions>;
     const expectedKeys = Object.keys(options).sort();

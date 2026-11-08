@@ -1519,6 +1519,7 @@ export interface LoadOptions extends LoadOptions__emitterCollision1 {
     legacyXls?: ModelSource<'xlsx'>;
     ods?: ModelSource<'xlsx'>;
     recalculateFormulas?: boolean;
+    formualizerWasm?: string | URL | Uint8Array;
 }
 interface LoadOptions__emitterCollision1 {
     fonts?: readonly FontSource[];

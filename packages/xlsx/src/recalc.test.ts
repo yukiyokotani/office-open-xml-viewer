@@ -1,3 +1,5 @@
+/// <reference types="node" />
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import {
   expandSharedFormula,
@@ -52,6 +54,11 @@ function sheet(
 
 const NO_STRINGS: SharedString[] = [];
 
+/** Engine bytes for environments without a fetchable `?url` asset (vitest). */
+const WASM_BYTES = new Uint8Array(
+  readFileSync(new URL('./vendor/formualizer_wasm_bg.wasm', import.meta.url)),
+);
+
 function get(ws: Worksheet, row: number, col: number): Cell {
   const found = ws.rows.flatMap((r) => r.cells).find((c) => c.row === row && c.col === col);
   if (!found) throw new Error(`cell r${row}c${col} missing`);
@@ -66,7 +73,7 @@ describe('recalc: SUM / chain across cells', () => {
       // Stale cache (would be 3): recalc overwrites with the computed value.
       cell(3, 1, { type: 'number', number: 999 }, 'SUM(A1:A2)'),
     ]);
-    const stats = await recalculateWorksheet(ws, { sharedStrings: NO_STRINGS, date1904: false });
+    const stats = await recalculateWorksheet(ws, { sharedStrings: NO_STRINGS, date1904: false, formualizerWasm: WASM_BYTES });
     expect(get(ws, 3, 1).value).toEqual({ type: 'number', number: 3 });
     expect(get(ws, 3, 1).formula).toBe('SUM(A1:A2)');
     expect(stats).toMatchObject({ recalculated: 1, failed: 0, skipped: 0 });
@@ -78,7 +85,7 @@ describe('recalc: SUM / chain across cells', () => {
       cell(2, 1, { type: 'number', number: 0 }, 'A1*2'),
       cell(3, 1, { type: 'number', number: 0 }, 'A2+1'),
     ]);
-    await recalculateWorksheet(ws, { sharedStrings: NO_STRINGS, date1904: false });
+    await recalculateWorksheet(ws, { sharedStrings: NO_STRINGS, date1904: false, formualizerWasm: WASM_BYTES });
     expect(get(ws, 2, 1).value).toEqual({ type: 'number', number: 8 });
     expect(get(ws, 3, 1).value).toEqual({ type: 'number', number: 9 });
   });
@@ -89,7 +96,7 @@ describe('recalc: SUM / chain across cells', () => {
       cell(1, 2, { type: 'text', text: 'hi' }),
       cell(1, 3, { type: 'number', number: 0 }, 'A1*2'),
     ]);
-    await recalculateWorksheet(ws, { sharedStrings: NO_STRINGS, date1904: false });
+    await recalculateWorksheet(ws, { sharedStrings: NO_STRINGS, date1904: false, formualizerWasm: WASM_BYTES });
     expect(get(ws, 1, 1).value).toEqual({ type: 'number', number: 1.5 });
     expect(get(ws, 1, 2).value).toEqual({ type: 'text', text: 'hi' });
   });
@@ -106,7 +113,7 @@ describe('recalc: cross-sheet references', () => {
         { name: 'Sheet1', ws: s1 },
         { name: 'Sheet2', ws: s2 },
       ],
-      { sharedStrings: NO_STRINGS, date1904: false },
+      { sharedStrings: NO_STRINGS, date1904: false, formualizerWasm: WASM_BYTES },
     );
     expect(get(s1, 1, 1).value).toEqual({ type: 'number', number: 20 });
     expect(stats.get('sheet1')?.recalculated).toBe(1);
@@ -120,6 +127,7 @@ describe('recalc: cross-sheet references', () => {
     const stats = await recalculateWorksheet(s1, {
       sharedStrings: NO_STRINGS,
       date1904: false,
+      formualizerWasm: WASM_BYTES,
       resolveSheet: (name) => (name.toLowerCase() === 'sheet2' ? s2 : undefined),
     });
     expect(get(s1, 1, 1).value).toEqual({ type: 'number', number: 12 });
@@ -136,6 +144,7 @@ describe('recalc: cross-sheet references', () => {
     const stats = await recalculateWorksheet(s1, {
       sharedStrings: NO_STRINGS,
       date1904: false,
+      formualizerWasm: WASM_BYTES,
       resolveSheet: async (name) => (name.toLowerCase() === 'sheet2' ? s2 : undefined),
     });
     expect(get(s1, 1, 1).value).toEqual({ type: 'number', number: 15 });
@@ -149,6 +158,7 @@ describe('recalc: cross-sheet references', () => {
     const stats = await recalculateWorksheet(s1, {
       sharedStrings: NO_STRINGS,
       date1904: false,
+      formualizerWasm: WASM_BYTES,
       resolveSheet: () => undefined,
     });
     // Formualizer reports #REF! for the unknown sheet — an Excel code, so
@@ -164,7 +174,7 @@ describe('recalc: cross-sheet references', () => {
       cell(3, 1, { type: 'text', text: 'plain' }),
     ]);
     const captured: Array<{ row: number; col: number; value: Cell['value'] }> = [];
-    await recalculateWorksheet(ws, { sharedStrings: NO_STRINGS, date1904: false }, captured);
+    await recalculateWorksheet(ws, { sharedStrings: NO_STRINGS, date1904: false, formualizerWasm: WASM_BYTES }, captured);
     expect(captured).toEqual([{ row: 2, col: 1, value: { type: 'number', number: 4 } }]);
   });
 });
@@ -175,7 +185,7 @@ describe('recalc: volatile consistency (TODAY)', () => {
       cell(1, 1, { type: 'number', number: 0 }, 'TODAY()'),
       cell(2, 1, { type: 'number', number: 0 }, 'A1+1'),
     ]);
-    await recalculateWorksheet(ws, { sharedStrings: NO_STRINGS, date1904: false });
+    await recalculateWorksheet(ws, { sharedStrings: NO_STRINGS, date1904: false, formualizerWasm: WASM_BYTES });
     const today = get(ws, 1, 1).value;
     const tomorrow = get(ws, 2, 1).value;
     expect(today.type).toBe('number');
@@ -192,7 +202,7 @@ describe('recalc: volatile consistency (TODAY)', () => {
 describe('recalc: errors', () => {
   it('maps =1/0 to the #DIV/0! error branch (not text/number)', async () => {
     const ws = sheet('S1', [cell(1, 1, { type: 'number', number: 0 }, '1/0')]);
-    const stats = await recalculateWorksheet(ws, { sharedStrings: NO_STRINGS, date1904: false });
+    const stats = await recalculateWorksheet(ws, { sharedStrings: NO_STRINGS, date1904: false, formualizerWasm: WASM_BYTES });
     expect(get(ws, 1, 1).value).toEqual({ type: 'error', error: '#DIV/0!' });
     expect(stats.recalculated).toBe(1);
   });
@@ -202,7 +212,7 @@ describe('recalc: errors', () => {
       cell(1, 1, { type: 'error', error: '#N/A' }),
       cell(2, 1, { type: 'number', number: 0 }, 'A1+1'),
     ]);
-    await recalculateWorksheet(ws, { sharedStrings: NO_STRINGS, date1904: false });
+    await recalculateWorksheet(ws, { sharedStrings: NO_STRINGS, date1904: false, formualizerWasm: WASM_BYTES });
     expect(get(ws, 2, 1).value).toEqual({ type: 'error', error: '#N/A' });
   });
 
@@ -211,7 +221,7 @@ describe('recalc: errors', () => {
       cell(1, 1, { type: 'number', number: 5 }, 'B1+1'),
       cell(1, 2, { type: 'number', number: 6 }, 'A1+1'),
     ]);
-    const stats = await recalculateWorksheet(ws, { sharedStrings: NO_STRINGS, date1904: false });
+    const stats = await recalculateWorksheet(ws, { sharedStrings: NO_STRINGS, date1904: false, formualizerWasm: WASM_BYTES });
     expect(get(ws, 1, 1).value).toEqual({ type: 'number', number: 5 });
     expect(get(ws, 1, 2).value).toEqual({ type: 'number', number: 6 });
     expect(stats.failed).toBe(2);
@@ -226,7 +236,7 @@ describe('recalc: shared-string inputs', () => {
       cell(1, 1, { type: 'shared', si: 0 }),
       cell(2, 1, { type: 'text', text: '' }, 'LEN(A1)'),
     ]);
-    await recalculateWorksheet(ws, { sharedStrings: strings, date1904: false });
+    await recalculateWorksheet(ws, { sharedStrings: strings, date1904: false, formualizerWasm: WASM_BYTES });
     expect(get(ws, 2, 1).value).toEqual({ type: 'number', number: 5 });
   });
 });
@@ -234,7 +244,7 @@ describe('recalc: shared-string inputs', () => {
 describe('recalc: date systems', () => {
   it('matches the 1900 epoch by default (DATE serial 44927)', async () => {
     const ws = sheet('S1', [cell(1, 1, { type: 'number', number: 0 }, 'DATE(2023,1,1)')]);
-    await recalculateWorksheet(ws, { sharedStrings: NO_STRINGS, date1904: false });
+    await recalculateWorksheet(ws, { sharedStrings: NO_STRINGS, date1904: false, formualizerWasm: WASM_BYTES });
     expect(get(ws, 1, 1).value).toEqual({ type: 'number', number: 44927 });
   });
 
@@ -242,7 +252,7 @@ describe('recalc: date systems', () => {
     const ws = sheet('S1', [cell(1, 1, { type: 'number', number: 0 }, 'DATE(2023,1,1)')], {
       date1904: true,
     });
-    await recalculateWorksheet(ws, { sharedStrings: NO_STRINGS, date1904: true });
+    await recalculateWorksheet(ws, { sharedStrings: NO_STRINGS, date1904: true, formualizerWasm: WASM_BYTES });
     expect(get(ws, 1, 1).value).toEqual({ type: 'number', number: 43465 });
   });
 });
@@ -254,7 +264,7 @@ describe('recalc: uncached formula cells (no <v>)', () => {
       cell(1, 2, { type: 'number', number: 4 }),
       cell(1, 3, { type: 'empty' }, 'SUM(A1:B1)'),
     ]);
-    await recalculateWorksheet(ws, { sharedStrings: NO_STRINGS, date1904: false });
+    await recalculateWorksheet(ws, { sharedStrings: NO_STRINGS, date1904: false, formualizerWasm: WASM_BYTES });
     expect(get(ws, 1, 3).value).toEqual({ type: 'number', number: 7 });
   });
 });
@@ -268,6 +278,7 @@ describe('recalc: resource cap', () => {
     const stats = await recalculateWorksheet(ws, {
       sharedStrings: NO_STRINGS,
       date1904: false,
+      formualizerWasm: WASM_BYTES,
       maxCells: 1,
     });
     expect(get(ws, 2, 1).value).toEqual({ type: 'number', number: 0 });
@@ -278,7 +289,7 @@ describe('recalc: resource cap', () => {
     const ws = sheet('S1', [
       cell(1, 1, { type: 'text', text: 'cached' }, 'REPT("x",40000)'),
     ]);
-    const stats = await recalculateWorksheet(ws, { sharedStrings: NO_STRINGS, date1904: false });
+    const stats = await recalculateWorksheet(ws, { sharedStrings: NO_STRINGS, date1904: false, formualizerWasm: WASM_BYTES });
     // Formualizer caps the result as Excel does: #VALUE! is an Excel error,
     // so the recomputed error is written (not silently cached).
     expect(get(ws, 1, 1).value).toEqual({ type: 'error', error: '#VALUE!' });
@@ -290,7 +301,7 @@ describe('recalc: resource cap', () => {
       cell(1, 1, { type: 'text', text: 'y'.repeat(40000) }),
       cell(1, 2, { type: 'text', text: 'cached' }, 'A1'),
     ]);
-    const stats = await recalculateWorksheet(ws, { sharedStrings: NO_STRINGS, date1904: false });
+    const stats = await recalculateWorksheet(ws, { sharedStrings: NO_STRINGS, date1904: false, formualizerWasm: WASM_BYTES });
     expect(get(ws, 1, 2).value).toEqual({ type: 'text', text: 'cached' });
     expect(stats).toMatchObject({ recalculated: 0, failed: 1, skipped: 0 });
   });
@@ -334,7 +345,7 @@ describe('recalc: shared formulas (anchor + followers)', () => {
       // Follower B2: no text, only t/si, with a stale cache.
       follower(2, 2, { type: 'number', number: 0 }, 0),
     ]);
-    const stats = await recalculateWorksheet(ws, { sharedStrings: NO_STRINGS, date1904: false });
+    const stats = await recalculateWorksheet(ws, { sharedStrings: NO_STRINGS, date1904: false, formualizerWasm: WASM_BYTES });
     expect(get(ws, 1, 2).value).toEqual({ type: 'number', number: 6 });
     // =A1*2 shifted by (2-1, 2-2) → =A2*2 → 8, not the stale 0.
     expect(get(ws, 2, 2).value).toEqual({ type: 'number', number: 8 });
@@ -349,7 +360,7 @@ describe('recalc: shared formulas (anchor + followers)', () => {
       { row: 1, col: 2, value: { type: 'number', number: 0 }, formula: '$A1+$C$1', formulaType: 'shared', formulaRef: 'B1:B2', formulaSi: 0 },
       follower(2, 2, { type: 'number', number: 0 }, 0),
     ]);
-    await recalculateWorksheet(ws, { sharedStrings: NO_STRINGS, date1904: false });
+    await recalculateWorksheet(ws, { sharedStrings: NO_STRINGS, date1904: false, formualizerWasm: WASM_BYTES });
     expect(get(ws, 1, 2).value).toEqual({ type: 'number', number: 13 });
     // $A1 → $A2 (13→14), $C$1 pinned → 4+10.
     expect(get(ws, 2, 2).value).toEqual({ type: 'number', number: 14 });
@@ -357,7 +368,7 @@ describe('recalc: shared formulas (anchor + followers)', () => {
 
   it('keeps orphan followers (no anchor for si) on cached values', async () => {
     const ws = sheet('S1', [follower(1, 1, { type: 'number', number: 42 }, 7)]);
-    const stats = await recalculateWorksheet(ws, { sharedStrings: NO_STRINGS, date1904: false });
+    const stats = await recalculateWorksheet(ws, { sharedStrings: NO_STRINGS, date1904: false, formualizerWasm: WASM_BYTES });
     expect(get(ws, 1, 1).value).toEqual({ type: 'number', number: 42 });
     expect(stats).toMatchObject({ recalculated: 0, failed: 0, skipped: 0 });
   });
@@ -371,7 +382,7 @@ describe('recalc: dataTable formulas are never evaluated', () => {
         formula: 'TABLE(,C1)', formulaType: 'dataTable', formulaRef: 'A1:A2',
       },
     ]);
-    const stats = await recalculateWorksheet(ws, { sharedStrings: NO_STRINGS, date1904: false });
+    const stats = await recalculateWorksheet(ws, { sharedStrings: NO_STRINGS, date1904: false, formualizerWasm: WASM_BYTES });
     expect(get(ws, 1, 1).value).toEqual({ type: 'number', number: 5 });
     expect(stats).toMatchObject({ recalculated: 0, failed: 1, skipped: 0 });
   });

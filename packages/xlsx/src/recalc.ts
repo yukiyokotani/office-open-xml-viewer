@@ -1,4 +1,6 @@
 import type { Cell, CellValue, SharedString, Worksheet } from './types.js';
+import { loadFormualizerEngine } from './formualizer-loader.js';
+import type { FormualizerEngine } from './vendor/formualizer_wasm_bg.js';
 
 /**
  * Opt-in Excel formula recalculation (Formualizer-backed).
@@ -7,8 +9,8 @@ import type { Cell, CellValue, SharedString, Worksheet } from './types.js';
  * (packages/xlsx/CLAUDE.md §"数式の扱い": cell `<f>` formulas are NEVER
  * calculated, the renderer always shows the cached `<v>`). Everything here
  * runs ONLY when the caller opts in via `LoadOptions.recalculateFormulas`.
- * The default path never imports Formualizer (lazy `await import`, so the
- * default bundle pays nothing) and never touches `cell.value`.
+ * The default path never loads Formualizer (memoized lazy init in
+ * `formualizer-loader.ts`, so the default bundle pays nothing) and never touches `cell.value`.
  *
  * Injection point: every rendered cell goes through
  * `formatCellValueWithColor(cell, ...)` (number-format.ts), which reads ONLY
@@ -51,6 +53,14 @@ export interface RecalcContext {
   /** Cap on total cells fed to Formualizer (literals + formulas). Whole
    *  recalc is skipped when exceeded. Default {@link DEFAULT_RECALC_MAX_CELLS}. */
   maxCells?: number;
+  /** Override for the Formualizer WASM source: a URL (CDN / self-hosted
+   *  copy) or the raw bytes. Defaults to the asset emitted next to the
+   *  bundle chunks; consumers whose bundler does not re-emit
+   *  `new URL(..., import.meta.url)` assets (notably Angular/esbuild) stage
+   *  `formualizer_wasm_bg.wasm` themselves, exactly like the parser WASMs
+   *  (`LoadOptions.wasmUrl`). Raw bytes cover environments without a
+   *  fetchable URL (SSR, tests). */
+  formualizerWasm?: string | URL | Uint8Array;
 }
 
 export interface RecalcStats {
@@ -142,6 +152,7 @@ export async function recalculateWorksheet(
   const perSheet = await recalculateWorksheets(feed, {
     sharedStrings: ctx.sharedStrings,
     date1904: ctx.date1904,
+    formualizerWasm: ctx.formualizerWasm,
     maxCells: ctx.maxCells,
     mutate: new Set([ws.name.toLowerCase()]),
     capture: captured,
@@ -163,6 +174,7 @@ export async function recalculateWorksheets(
     sharedStrings: SharedString[];
     date1904: boolean;
     maxCells?: number;
+    formualizerWasm?: string | URL | Uint8Array;
     mutate?: Set<string>;
     /** Per-sheet capture of overwritten cells (keyed by lowercase sheet
      *  name) for worker-boundary forwarding. Only mutated sheets capture. */
@@ -226,9 +238,9 @@ export async function recalculateWorksheets(
 
   // Lazy init: the default (opt-out) path never loads Formualizer WASM.
   // The module (and its WASM bytes) stay out of the default bundle chunk.
-  let formModule: typeof import('formualizer');
+  let formModule: FormualizerEngine;
   try {
-    formModule = await loadFormualizerModule();
+    formModule = await loadFormualizerModule(opts.formualizerWasm);
   } catch {
     for (const { name } of sheets) {
       statFor(name).failed += targetsBySheet.get(name.toLowerCase())?.length ?? 0;
@@ -407,14 +419,10 @@ export async function recalculateWorksheets(
 /** Memoized Formualizer WASM init: the default path never imports it, and
  *  concurrent recalcs share one init. Reset on failure so a later recalc can
  *  retry instead of pinning a rejected promise. */
-let formInit: Promise<typeof import('formualizer')> | null = null;
-function loadFormualizerModule(): Promise<typeof import('formualizer')> {
+let formInit: Promise<FormualizerEngine> | null = null;
+function loadFormualizerModule(source?: string | URL | Uint8Array): Promise<FormualizerEngine> {
   if (!formInit) {
-    formInit = (async () => {
-      const mod = await import('formualizer');
-      await mod.default();
-      return mod;
-    })();
+    formInit = loadFormualizerEngine(source);
     formInit.catch(() => {
       formInit = null;
     });

@@ -66,7 +66,11 @@ pnpm add @silurus/ooxml
 >   `.wasm` into your served output and point the viewer at it with the
 >   `wasmUrl` load option. For Angular CLI, copy the required
 >   `*_parser_bg.wasm` asset from `node_modules/@silurus/ooxml/dist` into the
->   served output and pass its public URL to the viewer.
+>   served output and pass its public URL to the viewer. Opt-in formula
+>   recalculation (`LoadOptions.recalculateFormulas`) needs its own engine
+>   file staged the same way: copy `formualizer_wasm_bg.wasm` from
+>   `node_modules/@silurus/ooxml/dist` next to the chunks (or pass
+>   `LoadOptions.formualizerWasm` for a CDN / self-hosted copy).
 >
 > `wasmUrl` also serves the parser WASM from a CDN or any path you control:
 >

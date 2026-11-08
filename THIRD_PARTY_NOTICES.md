@@ -54,6 +54,30 @@ document actually contains an equation.
   the installed `node_modules` tree), so there is no additional NOTICE
   content to reproduce beyond the attribution above.
 
+### Formualizer engine (`formualizer_wasm_bg.js` + `.wasm`)
+
+The opt-in spreadsheet recalculation (`LoadOptions.recalculateFormulas`,
+`@silurus/ooxml-xlsx` only) evaluates formulas with the Formualizer engine.
+The published package vendors two files byte-identical from the
+[`formualizer@0.13.0`](https://www.npmjs.com/package/formualizer) npm
+package (`packages/xlsx/src/vendor/`), because the package's own entry
+loads its WASM via wasm-pack `--target bundler` output
+(`import … from "./formualizer_wasm_bg.wasm"`), which bundlers without a
+WASM plugin (notably the Angular application builder / esbuild) reject;
+the wrapper itself is plain JavaScript, so the library instantiates the
+sibling `.wasm` bytes by hand instead. The engine loads lazily — only when
+recalculation is opted in — and the `.wasm` ships in the npm tarball as a
+static asset staged by consumers exactly like the parser WASMs.
+
+- **Formualizer** — Copyright © the Formualizer authors. Licensed under
+  the MIT License OR the Apache License, Version 2.0 (the npm package
+  carries both `LICENSE-MIT` and `LICENSE-APACHE`).
+  <https://github.com/PSU3D0/formualizer>
+
+  The vendored JavaScript contains no Apache-2.0 §4(d) `NOTICE` content,
+  so there is no additional NOTICE text to reproduce beyond the
+  attribution above.
+
 ### Build-time only (not shipped)
 
 The library also declares `esbuild` (MIT) as a build-time dependency

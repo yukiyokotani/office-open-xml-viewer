@@ -193,6 +193,15 @@ export interface LoadOptions extends CoreLoadOptions {
    * render worker (same recalculation, no engine in-worker).
    */
   recalculateFormulas?: boolean;
+  /**
+   * Override for the Formualizer WASM asset URL used by opt-in recalculation
+   * (CDN / self-hosted copy). Defaults to the asset emitted next to the
+   * bundle chunks; consumers whose bundler does not re-emit
+   * `new URL(..., import.meta.url)` assets (notably Angular/esbuild) stage
+   * `formualizer_wasm_bg.wasm` themselves, exactly like the parser WASMs
+   * (`wasmUrl`), and only need this when the staged location differs.
+   */
+  formualizerWasm?: string | URL | Uint8Array;
 }
 
 
@@ -255,6 +264,7 @@ export class XlsxWorkbook {
    *  default false). Set once per {@link load}; every terminal worksheet
    *  admission below honors the load-time value. */
   private recalculateFormulas = false;
+  private formualizerWasm: string | URL | Uint8Array | undefined = undefined;
   /** Web-font registrations are per FontFaceSet. Same-origin child windows have
    * their own set even when they share this workbook instance. */
   /** Validated `LoadOptions.fonts` (normalised from the deprecated
@@ -537,6 +547,7 @@ export class XlsxWorkbook {
     this.workerTimeoutMs = opts.workerTimeoutMs;
     this.cjkFallback = resolveCjkFallback(opts.cjkFallback);
     this.recalculateFormulas = opts.recalculateFormulas ?? false;
+    this.formualizerWasm = opts.formualizerWasm;
     this.math = this._mode === 'worker' ? undefined : opts.math;
     this.threeD = this._mode === 'worker' ? undefined : opts.threeD;
     this.regionMap = this._mode === 'worker' ? undefined : opts.regionMap;
@@ -1367,6 +1378,7 @@ export class XlsxWorkbook {
         {
           sharedStrings,
           date1904,
+          formualizerWasm: this.formualizerWasm,
           resolveSheet: (name: string) => this.findCachedWorksheetByName(name),
         },
         capture,
@@ -1457,6 +1469,7 @@ export class XlsxWorkbook {
           {
             sharedStrings,
             date1904,
+            formualizerWasm: this.formualizerWasm,
             resolveSheet: (name: string) => this.findCachedWorksheetByName(name),
           },
           capture,
