@@ -233,9 +233,11 @@ describe('first-line indents beside floats through the DOCX parser', () => {
         if (text.text.trim().length === 0) continue;
         // Trailing spaces contribute advance but no ink, and normally hang
         // outside the fitted band. Check the visible text extent instead.
+        // A right-to-left line's end is its left edge, where its line-end
+        // space hangs (WORD_RTL_LINE_END_SPACE_HANGS).
         const trailingSpaceWidth = (text.text.length - text.text.trimEnd().length) * 5;
-        const left = text.bounds.xPt;
-        const right = text.bounds.xPt + text.bounds.widthPt - trailingSpaceWidth;
+        const left = text.bounds.xPt + (entry.rtl ? trailingSpaceWidth : 0);
+        const right = text.bounds.xPt + text.bounds.widthPt - (entry.rtl ? 0 : trailingSpaceWidth);
         expect(left).toBeGreaterThanOrEqual(72);
         expect(right).toBeLessThanOrEqual(540);
         if (text.bounds.yPt < 172 && entry.float !== 'none') {

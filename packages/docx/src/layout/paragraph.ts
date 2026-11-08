@@ -32,7 +32,7 @@ import { shadowInkBounds } from './vml-shadow.js';
 import { createParagraphAnchorReferenceWorkBudget } from './resource-budgets.js';
 import { addExactRational, exactRationalFromNumber, exactRationalToNumberUp } from './exact-geometry.js';
 import { revisionIsOmitted } from './revision-visibility.js';
-import { wordArabicTextKerned, wordEastAsianAutoSpaceJustifiedMaximumPt, wordKerningApplies, wordLineEndSpaceHangs, wordRtlJustifiedVisibleFitApplies, wordSoftLineJustifiesAtSpacesOnly } from './line-compatibility.js';
+import { wordArabicTextKerned, wordEastAsianAutoSpaceJustifiedMaximumPt, wordKerningApplies, wordLineEndSpaceHangs, wordRtlLineEndSpaceHangs, wordSoftLineJustifiesAtSpacesOnly } from './line-compatibility.js';
 import type { LineGapPlan } from '../line-breaker/line-gaps.js';
 import { distributeLineSlack as distributeProportionalSlack, enumerateGaps, graphemeClusterOffsets, isSeaGraphemeExtend, type LineGap } from '@silurus/ooxml-core';
 import { specifiedTextLineMetrics, specifiedTextParagraphIsHomogeneous } from './specified-line-spacing.js';
@@ -743,7 +743,7 @@ interface RtlInteriorSpace {
   readonly widthPt: number;
 }
 
-/** WORD_RTL_JUSTIFIED_VISIBLE_FIT: where a right-to-left line's line-end
+/** WORD_RTL_LINE_END_SPACE_HANGS: where a right-to-left line's line-end
  * U+0020 spaces are drawn. Spaces at the line's right extreme (spaces-only
  * segments drawn rightmost, then the right end of a left-to-right segment)
  * and at its left extreme (spaces-only segments drawn leftmost, then the left
@@ -1565,23 +1565,25 @@ export function planLine(input: PlanLineInput): LineLayout {
   // The ordinary path pays one primitive presence check, not another source
   // scan. A selected bundle is atomic, so only its first receipt enables the
   // complete validation walk.
+  const rtlVisibleFit = input.displayMathJustification === undefined
+    && wordRtlLineEndSpaceHangs(input.baseRtl === true, input.wordWrap !== false);
   const chargedNativeUnits = segments[0]?.kind === 'text'
     && segments[0].nativeBaseDirection !== undefined
     && segments.every(segment => segment.kind === 'text' && segment.nativeBaseDirection !== undefined);
   if (bidi && !characterSpreadBidi && !input.runDirectionUnauthored
     && (justification === 'word' || justification === 'word-or-centre'
       || chargedNativeUnits)
-    && kashidaLevel(input.alignment) === null && lineSlackPt >= 0
+    && kashidaLevel(input.alignment) === null
+    // WORD_RTL_LINE_END_SPACE_HANGS admits a line by its visible prefix, so
+    // only the hanging line-end space may take the slack below zero.
+    && lineSlackPt + (rtlVisibleFit ? trailingAdvancePt(segments, (text) => text.trimEnd().length) : 0) >= -1e-6
     && line.gapPlan === undefined && line.justifiedCompressionPt === undefined) {
     // A source-tail SPACE needs an established terminal budget before this
-    // representation can own its gaps. Distribute currently lacks that hanging
-    // policy (#2071); preserve its COMPLETE old line rather than invent credit
-    // or combine fine paint with an incomplete coarse terminal budget.
-    // Certified fixed-band native units retain FULL charged tail SPACE. No
-    // hanging credit or justification budget is introduced for LEFT/START.
+    // representation can own its gaps: WORD_RTL_LINE_END_SPACE_HANGS gives
+    // every right-to-left alignment one, and certified fixed-band native units
+    // retain their charged tail SPACE.
     const terminalBudgetKnown = chargedNativeUnits || wordLineEndSpaceHangs(bidi, input.wordWrap !== false)
-      || (input.displayMathJustification === undefined
-        && wordRtlJustifiedVisibleFitApplies(input.alignment, input.baseRtl === true, input.wordWrap !== false));
+      || rtlVisibleFit;
     const hasTerminalSpace = hasLogicalTailSpace(segments);
     if (!hasTerminalSpace || terminalBudgetKnown) preparedSourceCells = prepareSourceSpaceCells(segments);
   }
@@ -1621,13 +1623,12 @@ export function planLine(input: PlanLineInput): LineLayout {
   // Every line is justified only after its last tab: the stops before it keep
   // their positions (WORD_ALIGNED_TAB_CELL_FIT_BACK; soft-wrapped lines too).
   const afterLastTab = sourceCells?.parentCellStarts[originalAfterLastTab] ?? originalAfterLastTab;
-  // WORD_RTL_JUSTIFIED_VISIBLE_FIT: the breaker admitted this right-to-left
+  // WORD_RTL_LINE_END_SPACE_HANGS: the breaker admitted this right-to-left
   // line by its visible prefix, so its line-end U+0020 hangs past the line's
   // end edge and the visible text keeps the start edge.
   // The breaker's gate (wordJustifiedLineFit) is the same helper; a display
   // math line holds no line-end space.
-  const rtlVisibleEdge = input.displayMathJustification === undefined
-    && wordRtlJustifiedVisibleFitApplies(input.alignment, input.baseRtl === true, input.wordWrap !== false);
+  const rtlVisibleEdge = rtlVisibleFit;
   // The line-end spaces hang on the side where they are drawn; spaces drawn
   // between other segments cannot hang and stay in the line.
   const rtlLineEnd = rtlVisibleEdge
@@ -1834,7 +1835,7 @@ export function planLine(input: PlanLineInput): LineLayout {
       && centresWithoutOpportunity(segments, distSegments, bidi, firstContentIndex) && afterLastTab === 0;
   }
 
-  // WORD_RTL_JUSTIFIED_VISIBLE_FIT admitted this line by its visible width.
+  // WORD_RTL_LINE_END_SPACE_HANGS admitted this line by its visible width.
   // A justified line hangs its line-end spaces outside the band in full; an
   // unjustified one keeps them inside while they fit and hangs only the
   // overflow, right side first. Overflow left after hanging is absorbed into

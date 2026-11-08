@@ -1520,7 +1520,14 @@ function bandViolation(lines: readonly PlacedLine[], obstacle: FloatRect, rtl: b
   for (const line of lines) {
     const height = line.height;
     const total = line.segments.reduce((sum, segment) => sum + segment.width, 0);
-    let pen = line.left + (rtl ? line.width - total : 0);
+    // WORD_RTL_LINE_END_SPACE_HANGS: the line-end spaces hang past the end
+    // edge, outside the band, as they do on left-to-right lines.
+    let hang = 0;
+    for (const segment of [...line.segments].reverse()) {
+      hang += segment.width - segment.visible;
+      if (segment.visible > 1e-9) break;
+    }
+    let pen = line.left + (rtl ? line.width - total + hang : 0);
     for (const segment of line.segments) {
       const start = pen;
       const end = pen + segment.visible;

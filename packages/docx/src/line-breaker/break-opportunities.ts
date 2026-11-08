@@ -404,10 +404,8 @@ function processTextSegment(context: BreakOpportunityIteratorContext, seg: Layou
       mixedLineHasVisibleText(breakerState));
   s.mixedNaturalTrailingSpacePx = mixedSpaces ? trailingSpaceW : undefined;
   s.mixedNaturalTrailingSpaceCount = mixedSpaces ? s.text.length - trimmed.length : undefined;
-  // Library containment policy: an RTL line is anchored at its right edge,
-  // so even an invisible trailing-space advance shifts visible LTR cells left.
-  // Count that advance during fitting instead of admitting glyphs past the band,
-  // except on the justified lines WORD_RTL_JUSTIFIED_VISIBLE_FIT measured.
+  // WORD_RTL_LINE_END_SPACE_HANGS: a right-to-left line, like a left-to-right
+  // one, fits by its visible prefix (wordWrap off keeps the space charged).
   const fitWidthFor = (
     widthPx: number,
     trailingSpacePx: number,

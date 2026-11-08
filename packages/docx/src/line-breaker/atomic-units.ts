@@ -6,7 +6,7 @@ import { hasCJKBreakOpportunity } from './text-runs.js';
 
 export interface AtomicTextMeasurement {
   readonly baseRtl: boolean;
-  /** WORD_RTL_JUSTIFIED_VISIBLE_FIT: right-to-left lines fit their visible prefix. */
+  /** WORD_RTL_LINE_END_SPACE_HANGS: right-to-left lines fit their visible prefix. */
   readonly lineFit?: Readonly<{ rtlVisiblePrefix: boolean }>;
   readonly reservePrefixWork: (utf16Units: number) => void;
   readonly segAdvance: (segment: LayoutTextSeg) => number;
@@ -14,7 +14,7 @@ export interface AtomicTextMeasurement {
 }
 
 /** Whether line fitting charges a line-end U+0020: right-to-left lines do
- * (library containment policy) unless WORD_RTL_JUSTIFIED_VISIBLE_FIT applies. */
+ * (library containment policy) unless WORD_RTL_LINE_END_SPACE_HANGS applies. */
 export function lineEndSpaceCharged(state: Pick<AtomicTextMeasurement, 'baseRtl' | 'lineFit'>): boolean {
   return state.baseRtl && state.lineFit?.rtlVisiblePrefix !== true;
 }

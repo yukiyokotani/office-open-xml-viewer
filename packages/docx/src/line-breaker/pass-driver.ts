@@ -71,7 +71,7 @@ import {
 import type { PassOperationState } from './pass-operations.js';
 
 /** Paragraph line-fit policy: the WORD_KASHIDA_LINE_FIT reserve and the
- * WORD_RTL_JUSTIFIED_VISIBLE_FIT visible-prefix fit of right-to-left lines. */
+ * WORD_RTL_LINE_END_SPACE_HANGS visible-prefix fit of right-to-left lines. */
 export interface LineFitWidth {
   readonly fraction: number;
   /** Share of the line's start-to-far-edge width reserved (before mode 15). */
@@ -112,7 +112,7 @@ export interface LineBreakerPassInput {
   readonly lineEndIdeographicSpaceHangs?: boolean;
   /** WORD_KASHIDA_LINE_FIT: a bounded line's text may fill `fraction` of its
    * available width less its reserve (absent: the whole width; paint still
-   * justifies to the full width), and WORD_RTL_JUSTIFIED_VISIBLE_FIT. */
+   * justifies to the full width), and WORD_RTL_LINE_END_SPACE_HANGS. */
   readonly lineFit?: LineFitWidth;
   readonly passContext: Readonly<{
     probeHeights: readonly number[] | null;

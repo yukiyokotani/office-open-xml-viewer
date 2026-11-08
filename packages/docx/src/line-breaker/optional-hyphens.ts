@@ -79,7 +79,7 @@ export function placeOptionalHyphenPrefix(
   // A collapsible trailing space does not force an otherwise fitting word
   // to select an optional hyphen; the whole U+0020 suffix of the joined word
   // is excluded, across members. RTL keeps its ordinary containment policy
-  // outside WORD_RTL_JUSTIFIED_VISIBLE_FIT.
+  // outside WORD_RTL_LINE_END_SPACE_HANGS.
   if (!lineEndSpaceCharged(context)) {
     width -= trailingSpaceSuffixWidth(members.filter((member) => !member.optionalHyphen), context);
   }

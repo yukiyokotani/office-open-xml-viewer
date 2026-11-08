@@ -305,8 +305,8 @@ describe('WORD_KASHIDA_LINE_FIT', () => {
   });
 });
 
-describe('WORD_RTL_JUSTIFIED_VISIBLE_FIT', () => {
-  it('fits a justified right-to-left line by its visible prefix', () => {
+describe('WORD_RTL_LINE_END_SPACE_HANGS', () => {
+  it('fits a right-to-left line by its visible prefix under every alignment', () => {
     // A 345 pt line: seven words are 340 pt visible, 350 pt with the line-end
     // space.
     const hebrew = Array.from({ length: 20 }, () => '\u05d0\u05d1\u05d2\u05d3').join(' ');
@@ -314,9 +314,11 @@ describe('WORD_RTL_JUSTIFIED_VISIBLE_FIT', () => {
     for (const settings of MODES) {
       const [both] = lines(para([textRun(hebrew)], 'both', rtl), settings);
       expect(wordsOn(both!), `mode ${settings?.compatibilityMode}`).toBe(7);
-      // Unmeasured alignments keep charging the line-end space.
-      const [start] = lines(para([textRun(hebrew)], 'left', rtl), settings);
-      expect(wordsOn(start!)).toBe(6);
+      // Left and the other alignments hang it alike (#2075).
+      for (const alignment of ['left', 'center', 'right', 'distribute', 'lowKashida'] as const) {
+        const [line] = lines(para([textRun(hebrew)], alignment, rtl), settings);
+        expect(wordsOn(line!), `${alignment} mode ${settings?.compatibilityMode}`).toBe(7);
+      }
     }
   });
 
