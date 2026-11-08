@@ -1292,6 +1292,10 @@ export function performAddToLine(
     characterGrid,
   } = operationState;
 
+  // A refused WORD_JUSTIFIED_INTERWORD_COMPRESSION unit ends with its last
+  // member, however that member reaches the line (a space after an ideograph
+  // bypasses the compression path), so later units stay eligible.
+  if (breakerState.justifiedUnitEnd === s) breakerState.justifiedUnitEnd = undefined;
   let committedWidth = w;
   if ('text' in s && s.autoSpaceBeforePt !== undefined) {
     const delta = resolveAutoSpaceAtPlacement(operationState, s);

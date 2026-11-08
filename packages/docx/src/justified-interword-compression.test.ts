@@ -363,6 +363,37 @@ describe('WORD_JUSTIFIED_INTERWORD_COMPRESSION', () => {
     ...(paragraph('', 'both') as DocParagraph), runs, ...extra,
   }) as unknown as BodyElement;
 
+  it('keeps later Latin admissions after a refused CJK unit with a styled space', async () => {
+    // A refused CJK unit ends with its separately styled space, which reaches
+    // the line without the compression path; the Latin words after it must
+    // stay eligible, so distribute and lowKashida break like both/justify
+    // (whose admission they share for Latin words). Courier stub: every glyph
+    // advances 1229/2048 em.
+    const tail = 'Quiet rivers carry morning light across the valley';
+    const courier = () => {
+      const canvas = georgiaCanvas();
+      const context = canvas.getContext('2d') as CanvasRenderingContext2D;
+      const measure = context.measureText.bind(context);
+      context.measureText = value => {
+        const width = [...value].length * Number(/([\d.]+)px/.exec(context.font)?.[1] ?? 12) * 1229 / 2048;
+        return { ...measure(value), width, actualBoundingBoxRight: width };
+      };
+      return canvas;
+    };
+    const run = (text: string, extra: Partial<DocxTextRun> = {}) =>
+      textRun(text, { fontSize: 12, fontFamily: 'Courier New', ...extra });
+    const partition = async (alignment: DocParagraph['alignment'], width: number) =>
+      (await renderLines(withRuns([
+        run('Lead 丙丙'), run(' ', { color: 'ff0000' }), run(tail),
+      ], { alignment }), width, undefined, {}, courier())).map(words);
+    for (let width = 80; width <= 120; width += 0.25) {
+      const justified = await partition('both', width);
+      for (const alignment of ['distribute', 'lowKashida'] as const) {
+        expect.soft(await partition(alignment, width), `${alignment} at ${width}pt`).toEqual(justified);
+      }
+    }
+  });
+
   it('fits a word split at an authored style seam as one candidate', async () => {
     const [first] = await renderLines(withRuns([
       textRun('Quiet rivers carry morning light across the val'),
