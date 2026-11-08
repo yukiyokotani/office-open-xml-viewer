@@ -128,5 +128,10 @@ export function smoothCurveExtent(
       }
     }
   }
-  return Number.isFinite(lo) ? [fromSpace(lo), fromSpace(hi)] : null;
+  if (!Number.isFinite(lo)) return null;
+  // A logarithmic extent beyond the double range underflows to zero or
+  // overflows to Infinity; keep it a positive finite bound.
+  return log
+    ? [Math.max(fromSpace(lo), Number.MIN_VALUE), Math.min(fromSpace(hi), Number.MAX_VALUE)]
+    : [lo, hi];
 }
