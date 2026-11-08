@@ -23,9 +23,8 @@ const RTL_STRONG = /[\u0590-\u08FF\uFB1D-\uFDFF\uFE70-\uFEFF]/u;
 
 /** WORD_RTL_LINE_END_SPACE_HANGS: the line-end space of a left-to-right run on
  * a right-to-left line is drawn at that run's right, so it hangs only while the
- * run is drawn rightmost. A tab or right-to-left text before it on the line
- * (blk-0898-tabs / controls-1672 rtl rows) keeps the space inside the line,
- * where Word charges it. */
+ * run is drawn rightmost; after a tab or right-to-left text on the line it is
+ * drawn inside the line and stays charged. */
 export function rtlLineEndSpaceInterior(
   state: Pick<AtomicTextMeasurement, 'baseRtl'>,
   segment: LayoutTextSeg,
