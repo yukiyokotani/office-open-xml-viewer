@@ -16455,7 +16455,7 @@ fn parse_table_cell(
     // edge element replacing an earlier one (#2125 controls), so an empty or
     // partial element does not reset the edges another one sets.
     let tc_mars = tc_pr.map(|p| children_w(p, "tcMar")).unwrap_or_default();
-    let tc_mar_edge = |name: &str| tc_mars.iter().filter_map(|m| child_w(*m, name)).last();
+    let tc_mar_edge = |name: &str| tc_mars.iter().rev().find_map(|m| child_w(*m, name));
     let edge_mar = |name: &str| {
         tc_mar_edge(name)
             .and_then(|n| attr_w(n, "w"))
