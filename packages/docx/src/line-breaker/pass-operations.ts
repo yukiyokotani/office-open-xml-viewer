@@ -302,7 +302,8 @@ function minimalLegalTextPrefix(operationState: PassOperationState, segment: Lay
     }
   }
   const prefix = text.slice(0, end);
-  // The fit tests exclude a collapsible U+0020 suffix except in an RTL line.
+  // The fit tests exclude a collapsible U+0020 suffix unless lineEndSpaceCharged
+  // (wordWrap off, or the narrower mode-15 unmarked Arabic source-space class).
   return lineEndSpaceCharged(operationState) ? prefix : prefix.replace(/ +$/u, '');
 }
 
