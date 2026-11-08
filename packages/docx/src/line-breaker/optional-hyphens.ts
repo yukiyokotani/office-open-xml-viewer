@@ -154,11 +154,15 @@ export function rtlLineEndSpaceInside(
   context: Pick<BreakOpportunityIteratorContext, 'baseRtl' | 'breakerState' | 'bidiOrdering' | 'isJustified' | 'stretchLastLine'>,
   tail: readonly LayoutSeg[],
 ): boolean {
-  if (!context.baseRtl || tail.length === 0) return false;
-  // Measured on tab lines (controls-1672 rtl Latin rows after a leading tab).
+  if (!context.baseRtl || tail.length === 0 || context.isJustified) return false;
+  // Measured on unjustified tab lines (controls-1672 rtl Latin rows after a
+  // leading tab), where line planning orders whole segments as resolved here.
   // Elsewhere an interior space keeps the existing library policy: admitted by
   // the visible width and absorbed into the space by line planning.
   if (!context.breakerState.currentLine.some((item) => 'isTab' in item)) return false;
+  // A spaces-only item hangs at either extreme, as line planning walks it.
+  const last = tail.at(-1)!;
+  if (!('text' in last) || last.text.trim() === '') return false;
   const items = [...context.breakerState.currentLine, ...tail];
   const model = tabLineOrderModel({ baseRtl: true, bidiOrdering: context.bidiOrdering,
     isJustified: context.isJustified, stretchLastLine: context.stretchLastLine });

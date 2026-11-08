@@ -168,6 +168,26 @@ describe('first-line indents beside floats through the DOCX parser', () => {
     expect(first).toHaveLength(16);
   });
 
+  it('hangs a separately formatted line-end space and keeps justified tab lines as planned', () => {
+    // WORD_RTL_LINE_END_SPACE_HANGS: a spaces-only run hangs at the line's
+    // extreme, and justified lines (planned by source cells) keep the visible
+    // fit: seventeen words stay on one line in both cases.
+    const text = `${Array.from({ length: 17 }, () => 'abcd').join(' ')} `;
+    const count = (paragraph: ReturnType<typeof layoutParagraph>) => paragraph.lines[0]!.placements
+      .flatMap((node) => node.kind === 'text' ? [node.text] : []).join('').trim().split(/ +/).filter(Boolean).length;
+    for (const jc of ['left', 'both', 'distribute', 'lowKashida']) {
+      const bold = layoutParagraph(documentBytes('w:right="900"', true, 0,
+        { alignment: 'left', count: 1, stop: 720, text, boldFrom: text.length - 1, noFloat: true, jc }));
+      expect(bold.lines, `bold space ${jc}`).toHaveLength(1);
+      expect(count(bold), `bold space ${jc}`).toBe(17);
+    }
+    for (const jc of ['both', 'distribute']) {
+      const justified = layoutParagraph(documentBytes('w:right="900"', true, 0,
+        { alignment: 'left', count: 1, stop: 720, text: Array.from({ length: 30 }, () => 'abcd').join(' '), noFloat: true, jc }));
+      expect(count(justified), `justified ${jc}`).toBe(17);
+    }
+  });
+
   it('wraps a margin ptab cell wider than the paragraph band', () => {
     const paragraph = layoutParagraph(documentBytes('w:right="7200"', false, 0,
       { alignment: 'right', count: 1, text: 'word '.repeat(10).trim(), positional: true, noFloat: true }));
