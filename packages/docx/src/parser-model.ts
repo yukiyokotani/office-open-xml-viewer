@@ -798,8 +798,10 @@ function effectiveTableCellMargins(
     const logicalEdge = edge === 'left'
       ? (bidi ? 'end' : 'start')
       : (bidi ? 'start' : 'end');
-    return { width: margins?.[edge] ?? margins?.[logicalEdge], edge: logicalEdge,
-      physicalLeftAuthored: edge === 'left' && margins?.left != null };
+    // Word takes the logical start/end over a physical left/right for the
+    // same edge, whichever comes first (#2125 controls, merged tcMar).
+    return { width: margins?.[logicalEdge] ?? margins?.[edge], edge: logicalEdge,
+      physicalLeftAuthored: edge === 'left' && margins?.left != null && margins?.[logicalEdge] == null };
   };
   const selectMargin = (
     edge: TableMarginEdge,

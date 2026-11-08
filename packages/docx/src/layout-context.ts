@@ -492,8 +492,11 @@ export function resolveParagraphLayoutContext(
         && !baseRtl
         && section.textDirection === 'lrTb'
         && section.sectionFlow === undefined
-        && !isSectionLineGrid(section.grid.kind)
-        && !characterGridActive,
+        // The bounded Japanese paragraph-OFF class is measured with and
+        // without a document grid (w2144-kinoff controls); the ON policy is
+        // measured grid-free only.
+        && ((!isSectionLineGrid(section.grid.kind) && !characterGridActive)
+          || (paragraphOffAdmitted && paragraph.kinsoku === false)),
       insideTableCell,
       // The retained paragraph fact only admits the ON hanging extension.
       // Paragraph-OFF edge policy is resolved independently above.

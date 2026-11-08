@@ -409,10 +409,12 @@ function processTextSegment(context: BreakOpportunityIteratorContext, seg: Layou
   const fitWidthFor = (
     widthPx: number,
     trailingSpacePx: number,
-    _next?: LayoutSeg,
+    next: LayoutSeg | undefined,
     pieces?: readonly { readonly segment: LayoutSeg }[],
   ): number => {
     const fit = wordVisiblePrefixFitWidthPx(widthPx, trailingSpacePx, lineEndSpaceCharged(context));
+    const finalSpacePx = mode15FinalSpaceChargePx(context, pieces ? pieces.at(-1)!.segment : s, next);
+    if (finalSpacePx !== undefined) return widthPx + finalSpacePx;
     // Only a candidate its hanging space alone admits needs that space's
     // drawn side; a space drawn inside the line stays charged.
     if (fit === widthPx || !context.baseRtl
@@ -420,7 +422,7 @@ function processTextSegment(context: BreakOpportunityIteratorContext, seg: Layou
       || !context.fitsMeasuredWidth(breakerState.currentWidth + fit, availW())) return fit;
     return rtlLineEndSpaceInside(context, pieces ? pieces.map((piece) => piece.segment) : [s]) ? widthPx : fit;
   };
-  const wForFit = fitWidthFor(prospectiveWidth, trailingSpaceW);
+  const wForFit = fitWidthFor(prospectiveWidth, trailingSpaceW, breakerState.queue.peek());
   // ECMA-376 §17.3.1.33 does not prescribe a line-breaking tolerance.
   // Word-for-Mac controls with Calibri and Arial, left/center/right aligned
   // 10pt table cells, wrap a trailing Latin word below its natural advance
@@ -2226,4 +2228,38 @@ function splitSeaOverflow(context: BreakOpportunityIteratorContext, frame: TextF
       });
     }
   }
+}
+
+const MODE15_FINAL_SPACE_ALIGNMENTS = new Set(['left', 'start', 'center', 'right', 'end', 'lowKashida']);
+
+/** WORD_MODE15_MIXED_DIRECTION_FINAL_SPACE: the width to charge on top of a
+ * candidate that ends the paragraph's text (`last`, followed by `next` and the
+ * rest of the queue), or undefined when the rule does not apply. The final
+ * space may end `last` itself (0: its own advance stays charged) or follow it
+ * in space-only items (their advance); zero-advance items after it do not end
+ * the paragraph's text. A space-only candidate is judged with the word before
+ * it, so it never wraps alone. */
+function mode15FinalSpaceChargePx(
+  context: Pick<BreakOpportunityIteratorContext, 'baseRtl' | 'bidiOrdering' | 'breakerState' | 'segAdvance'>,
+  last: LayoutSeg,
+  next: LayoutSeg | undefined,
+): number | undefined {
+  const policy = context.bidiOrdering;
+  if (!policy || policy.lineEndJustificationBeforeMode15 !== false || policy.runDirectionUnauthored
+    || !MODE15_FINAL_SPACE_ALIGNMENTS.has(policy.alignment ?? 'left')
+    || !('text' in last) || last.text.trim() === '') return undefined;
+  let spaceOwner: LayoutTextSeg | undefined = last.text.endsWith(' ') ? last : undefined;
+  let extraPx = 0;
+  if (next !== undefined) {
+    let started = false;
+    for (const item of context.breakerState.queue) {
+      if (!started) { if (item !== next) continue; started = true; }
+      if ('text' in item && item.text !== '' && /^ +$/u.test(item.text)) {
+        spaceOwner = item; extraPx += context.segAdvance(item);
+      } else if (!isInklessLineItem(item)) return undefined;
+    }
+    if (!started) return undefined;
+  }
+  if (!spaceOwner || (spaceOwner.rtl === true) === context.baseRtl) return undefined;
+  return extraPx;
 }
