@@ -150,6 +150,22 @@ describe('first-owner closing-pair allocation', () => {
       .toEqual(Array.from({ length: 24 }, (_, start) => [start, start + 1, firstOwners.includes(start) ? 6 : 12]));
   });
 
+  it('projects closing, stop and comma pairs by class, not only the sampled seven (#2144)', () => {
+    // w2144-pairs: Word sets the first of every closing bracket, full stop or
+    // comma followed by another of them or an opening bracket at half a cell.
+    const source = 'あ』」い）」う。）え」（お，「か';
+    const doc = model(paragraph([run(source)]));
+    const { canvas } = makeRecordingCanvas();
+    const services = createLayoutServicesRuntimeView(createLayoutServices(doc, { measureContext: canvas.getContext('2d') }), { text: service() });
+    const published = layoutDocument(doc, services).pages[0].layers.body.find(n => n.kind === 'paragraph');
+    if (!published || published.kind !== 'paragraph') throw Error('Missing paragraph');
+    const clusters = published.lines.flatMap(line => line.placements)
+      .filter(piece => piece.kind === 'text').flatMap(piece => piece.clusters);
+    const firstOwners = [1, 4, 7, 10, 13];
+    expect(clusters.map(cluster => [cluster.range.start, cluster.range.end, cluster.advancePt]))
+      .toEqual(Array.from({ length: 16 }, (_, start) => [start, start + 1, firstOwners.includes(start) ? 6 : 12]));
+  });
+
   it('preserves identical-format source ownership across a split pair', () => {
     const doc = model(paragraph([run('あ。'), run('」い')]));
     const { canvas } = makeRecordingCanvas();

@@ -13,7 +13,15 @@ import type { LayoutSeg, LayoutTextSeg, LineLayoutEnvironment } from './model.js
  * boundaries preserve their old geometry. Evidence and the explicit absent-EA
  * Japanese library default are registered in layout/line-compatibility.ts;
  * document CSC eligibility is independent. */
-const CLOSING_PAIRS = new Set(['。」', '、」', '」」', '」。', '」、', '」「', '）（']);
+// JIS X 4051 classes: closing brackets (cl-02), full stops (cl-06) and
+// commas (cl-07) take half a cell before another of them or an opening
+// bracket (cl-01). Windows Word controls w2144-pairs (all 12 x 16 measured
+// pairs, no grid, lines grid and lines-and-chars grid, modes unset/14/15)
+// compress every such pair alike.
+const CLOSING_CLASS = new Set([...'」』）］｝〕〉》】〙〗〟｠', ...'。．', ...'、，']);
+const PAIR_FOLLOWER_CLASS = new Set([...CLOSING_CLASS, ...'「『（［｛〔〈《【〘〖〝｟']);
+const isClosingPair = (pair: string): boolean => pair.length === 2
+  && CLOSING_CLASS.has(pair[0]!) && PAIR_FOLLOWER_CLASS.has(pair[1]!);
 
 /** Dedicated root-story provenance, resolved identically for intrinsic and
  * bounded acquisition. Compatibility shape contexts do not retain WML authority. */
@@ -28,7 +36,6 @@ export function closingPairScopeApplies(paragraph: ParagraphLayoutSource, contex
   return (paragraph.alignment === 'left' || paragraph.alignment === 'justify')
     && environment.closingPairRootSource === true && context.hasEastAsianText && !paragraph.framePr
     && !context.runDirectionUnauthored && !context.baseRtl && !context.hasRuby
-    && !context.lineGrid.active && !context.characterGrid.active
     && environment.pageWritingMode === 'horizontal-tb' && !environment.verticalPageFrame;
 }
 
@@ -88,7 +95,7 @@ export function retainClosingPairAdvances(runs: readonly ParagraphLayoutSource['
       const pair = first + (second ?? '');
       while (compressionIndex < (segment.punctuationCompressions?.length ?? 0)
         && segment.punctuationCompressions![compressionIndex]!.end < start + 1) compressionIndex++;
-      if (!CLOSING_PAIRS.has(pair) || segment.punctuationCompressions?.[compressionIndex]?.end === start + 1) continue;
+      if (!isClosingPair(pair) || segment.punctuationCompressions?.[compressionIndex]?.end === start + 1) continue;
       ranges.push({ start, end: start + 1 }); pairs.push(pair);
     }
     if (ranges.length) groups.push({ segment, ranges, pairs });

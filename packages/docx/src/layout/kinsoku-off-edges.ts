@@ -42,7 +42,7 @@ export function paragraphOffJapaneseAdmitted(
   return paragraph.kinsoku === false && settings.kinsoku.enabled
     && (mode === undefined || mode === 11 || mode === 12 || mode === 14 || mode === 15)
     && !settings.hasCustomKinsokuRules
-    // TODO(#2079): the registered CSC Kashida pair allocation is unresolved.
+    // The registered CSC Kashida pair allocation is unresolved (library limit).
     // Per-scalar compressed minima can lose natural/contextual pair allocation
     // (6+6 versus 12+12 in the registered 12pt controls). An edge-only rewrite
     // exposes that deficit; preserve this WHOLE
@@ -59,7 +59,7 @@ export function paragraphOffJapaneseAdmitted(
     && story.story === 'body' && story.containers.length === 0 && !story.quarterTurned
     && paragraph.framePr == null && paragraph.bidi !== true && paragraph.wordWrap !== false
     && section.columns.length === 1 && section.textDirection === 'lrTb'
-    && section.sectionFlow === undefined && section.grid.kind === 'none'
+    && section.sectionFlow === undefined
     && paragraph.numbering == null && paragraph.tabStops.length === 0
     && settings.paragraphOffBodySource?.(paragraph) === true;
 }
