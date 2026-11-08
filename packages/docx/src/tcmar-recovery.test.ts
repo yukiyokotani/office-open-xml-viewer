@@ -53,10 +53,11 @@ function layout(bytes: Uint8Array, advancePt: number) {
 // edge in document order (a later edge element wins; an empty or partial one
 // keeps the others), and takes start over left for the same edge. Measured on
 // Windows Word controls w2125-tcmar-{plain,tblmar288}-mode{14,15}.
-const cellTextX = (tcMar: string) => {
-  const table = '<w:tbl><w:tblPr><w:tblW w:w="4000" w:type="dxa"/><w:tblLayout w:type="fixed"/></w:tblPr>'
+const cellTextX = (tcMar: string, tblPr = '') => {
+  const table = `<w:tbl><w:tblPr><w:tblW w:w="4000" w:type="dxa"/><w:tblLayout w:type="fixed"/>${tblPr}</w:tblPr>`
     + '<w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:tcW w:w="4000" w:type="dxa"/>'
     + `${tcMar}</w:tcPr><w:p><w:r><w:t>Xa</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:p/>`;
+  // (tblPr may add table-level margins or an indent.)
   const result = layout(docxBytes(table, '<w:pgSz w:w="11906" w:h="16838"/>'
     + '<w:pgMar w:top="1134" w:right="1134" w:bottom="1134" w:left="1134" w:header="567" w:footer="567" w:gutter="0"/>'), 5);
   const find = (nodes: readonly unknown[]): number | undefined => {
@@ -86,5 +87,12 @@ describe('repeated w:tcMar recovery (#2125)', () => {
     expect(cellTextX(mar({ left: 240 }) + mar({ left: 480 }) + mar({ left: 720 }))).toBeCloseTo(single, 6);
     expect(cellTextX(mar({ start: 720 }) + mar({ left: 0 }))).toBeCloseTo(single, 6);
     expect(cellTextX(mar({ left: 0 }) + mar({ start: 720 }))).toBeCloseTo(single, 6);
+  });
+
+  it('takes the margin provenance from the winning logical edge', () => {
+    // An ignored physical left beside a winning start must not switch on the
+    // physical-left table placement (a mode-14 table at tblInd 0).
+    const tbl = '<w:tblInd w:w="0" w:type="dxa"/>';
+    expect(cellTextX(mar({ start: 720, left: 0 }), tbl)).toBeCloseTo(cellTextX(mar({ start: 720 }), tbl), 6);
   });
 });

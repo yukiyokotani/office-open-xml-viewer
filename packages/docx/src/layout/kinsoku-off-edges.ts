@@ -60,6 +60,9 @@ export function paragraphOffJapaneseAdmitted(
     && paragraph.framePr == null && paragraph.bidi !== true && paragraph.wordWrap !== false
     && section.columns.length === 1 && section.textDirection === 'lrTb'
     && section.sectionFlow === undefined
+    // The registered grids: lines, and lines-and-chars without a charSpace delta.
+    && (section.grid.kind === 'none' || section.grid.kind === 'lines'
+      || (section.grid.kind === 'linesAndChars' && !section.grid.charSpacePt))
     && paragraph.numbering == null && paragraph.tabStops.length === 0
     && settings.paragraphOffBodySource?.(paragraph) === true;
 }

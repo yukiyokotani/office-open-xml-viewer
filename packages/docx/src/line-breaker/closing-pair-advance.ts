@@ -13,13 +13,11 @@ import type { LayoutSeg, LayoutTextSeg, LineLayoutEnvironment } from './model.js
  * boundaries preserve their old geometry. Evidence and the explicit absent-EA
  * Japanese library default are registered in layout/line-compatibility.ts;
  * document CSC eligibility is independent. */
-// JIS X 4051 classes: closing brackets (cl-02), full stops (cl-06) and
-// commas (cl-07) take half a cell before another of them or an opening
-// bracket (cl-01). Windows Word controls w2144-pairs (all 12 x 16 measured
-// pairs, no grid, lines grid and lines-and-chars grid, modes unset/14/15)
-// compress every such pair alike.
-const CLOSING_CLASS = new Set([...'」』）］｝〕〉》】〙〗〟｠', ...'。．', ...'、，']);
-const PAIR_FOLLOWER_CLASS = new Set([...CLOSING_CLASS, ...'「『（［｛〔〈《【〘〖〝｟']);
+// Pair classes of WORD_FIRST_OWNER_CLOSING_PAIR_ADVANCE: JIS X 4051 closing
+// brackets (cl-02), full stops (cl-06) and commas (cl-07) before another of
+// them or an opening bracket (cl-01), limited to the registered members.
+const CLOSING_CLASS = new Set([...'。、．，」』）】〉》〕｝']);
+const PAIR_FOLLOWER_CLASS = new Set([...'」』）】〉》〕｝、。「『（【〈《〔｛']);
 const isClosingPair = (pair: string): boolean => pair.length === 2
   && CLOSING_CLASS.has(pair[0]!) && PAIR_FOLLOWER_CLASS.has(pair[1]!);
 
@@ -36,6 +34,9 @@ export function closingPairScopeApplies(paragraph: ParagraphLayoutSource, contex
   return (paragraph.alignment === 'left' || paragraph.alignment === 'justify')
     && environment.closingPairRootSource === true && context.hasEastAsianText && !paragraph.framePr
     && !context.runDirectionUnauthored && !context.baseRtl && !context.hasRuby
+    // The registered grids: lines, and lines-and-chars without a charSpace delta.
+    && (!context.characterGrid.active
+      || (context.characterGrid.kind === 'linesAndChars' && context.characterGrid.deltaPt === 0))
     && environment.pageWritingMode === 'horizontal-tb' && !environment.verticalPageFrame;
 }
 

@@ -413,8 +413,8 @@ function processTextSegment(context: BreakOpportunityIteratorContext, seg: Layou
     pieces?: readonly { readonly segment: LayoutSeg }[],
   ): number => {
     const fit = wordVisiblePrefixFitWidthPx(widthPx, trailingSpacePx, lineEndSpaceCharged(context));
-    if (fit !== widthPx && next === undefined
-      && wordMode15FinalSpaceCharged(context, pieces ? pieces.at(-1)!.segment : s)) return widthPx;
+    const finalSpacePx = mode15FinalSpaceChargePx(context, pieces ? pieces.at(-1)!.segment : s, next);
+    if (finalSpacePx !== undefined) return widthPx + finalSpacePx;
     // Only a candidate its hanging space alone admits needs that space's
     // drawn side; a space drawn inside the line stays charged.
     if (fit === widthPx || !context.baseRtl
@@ -2197,15 +2197,34 @@ function splitSeaOverflow(context: BreakOpportunityIteratorContext, frame: TextF
 
 const MODE15_FINAL_SPACE_ALIGNMENTS = new Set(['left', 'start', 'center', 'right', 'end', 'lowKashida']);
 
-/** Scope of WORD_MODE15_MIXED_DIRECTION_FINAL_SPACE: mode 15, the paragraph's
- * final U+0020 in a run whose direction differs from the paragraph's, under
- * the alignments the rule names. */
-function wordMode15FinalSpaceCharged(
-  context: Pick<BreakOpportunityIteratorContext, 'baseRtl' | 'bidiOrdering'>,
+/** WORD_MODE15_MIXED_DIRECTION_FINAL_SPACE: the width to charge on top of a
+ * candidate that ends the paragraph's text (`last`, followed by `next` and the
+ * rest of the queue), or undefined when the rule does not apply. The final
+ * space may end `last` itself (0: its own advance stays charged) or follow it
+ * in space-only items (their advance); zero-advance items after it do not end
+ * the paragraph's text. A space-only candidate is judged with the word before
+ * it, so it never wraps alone. */
+function mode15FinalSpaceChargePx(
+  context: Pick<BreakOpportunityIteratorContext, 'baseRtl' | 'bidiOrdering' | 'breakerState' | 'segAdvance'>,
   last: LayoutSeg,
-): boolean {
+  next: LayoutSeg | undefined,
+): number | undefined {
   const policy = context.bidiOrdering;
-  if (!policy || policy.lineEndJustificationBeforeMode15 !== false || policy.runDirectionUnauthored) return false;
-  if (!MODE15_FINAL_SPACE_ALIGNMENTS.has(policy.alignment ?? 'left')) return false;
-  return 'text' in last && last.text.endsWith(' ') && (last.rtl === true) !== context.baseRtl;
+  if (!policy || policy.lineEndJustificationBeforeMode15 !== false || policy.runDirectionUnauthored
+    || !MODE15_FINAL_SPACE_ALIGNMENTS.has(policy.alignment ?? 'left')
+    || !('text' in last) || last.text.trim() === '') return undefined;
+  let spaceOwner: LayoutTextSeg | undefined = last.text.endsWith(' ') ? last : undefined;
+  let extraPx = 0;
+  if (next !== undefined) {
+    let started = false;
+    for (const item of context.breakerState.queue) {
+      if (!started) { if (item !== next) continue; started = true; }
+      if ('text' in item && item.text !== '' && /^ +$/u.test(item.text)) {
+        spaceOwner = item; extraPx += context.segAdvance(item);
+      } else if (!isInklessLineItem(item)) return undefined;
+    }
+    if (!started) return undefined;
+  }
+  if (!spaceOwner || (spaceOwner.rtl === true) === context.baseRtl) return undefined;
+  return extraPx;
 }

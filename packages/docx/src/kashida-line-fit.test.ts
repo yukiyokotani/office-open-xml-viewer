@@ -405,6 +405,11 @@ describe('WORD_RTL_LINE_END_SPACE_HANGS', () => {
         const all = lines(para([textRun(item.text, item.run as Partial<DocxTextRun>)], 'left', item.ppr as Partial<DocParagraph>), settings);
         const mode15 = settings?.compatibilityMode === 15;
         expect(all, `case ${index} mode ${settings?.compatibilityMode}`).toHaveLength(mode15 && item.mismatched ? 2 : 1);
+        // A separately formatted final space is judged with its word: the same
+        // break, never a space-only line.
+        const split = lines(para([textRun(item.text.trimEnd(), item.run as Partial<DocxTextRun>),
+          textRun(' ', { ...(item.run as Partial<DocxTextRun>), color: 'FF0000' })], 'left', item.ppr as Partial<DocParagraph>), settings);
+        expect(split.map(wordsOn), `split case ${index} mode ${settings?.compatibilityMode}`).toEqual(all.map(wordsOn));
       }
     }
   });
