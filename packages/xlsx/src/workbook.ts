@@ -80,6 +80,7 @@ import {
   type ResolvedList,
 } from './validation-list.js';
 import type {
+  RecalcChartPatch,
   RenderWorkerRequest,
   RenderWorkerResponse,
   WireRenderViewportOptions,
@@ -1379,7 +1380,62 @@ export class XlsxWorkbook {
     if (this._mode === 'worker' && capture.length > 0) {
       await this.pushRecalculatedValuesToWorker(sheetIndex, capture);
     }
-    await this.refreshRecalcDependents(sheetIndex, worksheet.name, sharedStrings, date1904);
+    const recalculated = await this.refreshRecalcDependents(sheetIndex, worksheet.name, sharedStrings, date1904);
+    if (capture.length > 0) recalculated.add(worksheet.name.toLowerCase());
+    // The terminal is not yet admitted to the cache, but its charts resolve
+    // against its own (just-recalculated) cells — pass it explicitly so it
+    // is both visited and visible to cross-sheet lookups.
+    await this.refreshRecalculatedCharts(recalculated, sheetIndex, worksheet);
+  }
+
+  /**
+   * Re-resolve cache-free chart series from recalculated cell values (see
+   * chart-series-refresh.ts). Charts bake parse-time values, so without this
+   * a cache-free chart on a recalculated sheet would keep painting empty
+   * series. Runs in both modes (the main-thread model always needs it); in
+   * worker mode the patches ride `applyRecalculatedValues` to the worker's
+   * archive-materialized copy. A chart-only follow-up push carries
+   * `cells: []` — cell application is a no-op and chart replacement is
+   * idempotent, so either push order converges.
+   */
+  private async refreshRecalculatedCharts(
+    recalculated: ReadonlySet<string>,
+    terminalIndex?: number,
+    terminalWorksheet?: Worksheet,
+  ): Promise<void> {
+    if (recalculated.size === 0) return;
+    let refresh: typeof import('./chart-series-refresh.js');
+    try {
+      refresh = await import('./chart-series-refresh.js');
+    } catch {
+      return;
+    }
+    // Admission order: the terminal is not in the cache yet. Overlay it so
+    // its own charts refresh and every formula can read its new values.
+    const byIndex = new Map(this.sheetCache);
+    if (terminalIndex !== undefined && terminalWorksheet) {
+      byIndex.set(terminalIndex, terminalWorksheet);
+    }
+    if (byIndex.size === 0) return;
+    const models = [...byIndex.values()];
+    for (const [sheetIndex, ws] of byIndex) {
+      if (!ws.charts || ws.charts.length === 0) continue;
+      let charts: RecalcChartPatch[];
+      try {
+        charts = refresh.refreshWorksheetCharts(ws, { sheets: models }, recalculated);
+      } catch {
+        continue;
+      }
+      if (charts.length === 0) continue;
+      if (this._mode === 'worker') {
+        try {
+          await this.pushRecalculatedValuesToWorker(sheetIndex, [], charts);
+        } catch {
+          // Cell values are already forwarded; a failed chart follow-up
+          // leaves worker charts stale but never breaks the sheet.
+        }
+      }
+    }
   }
 
   /** Synchronous case-insensitive cache lookup for recalc cross-sheet
@@ -1415,13 +1471,14 @@ export class XlsxWorkbook {
     admittedName: string,
     sharedStrings: ParsedWorkbook['sharedStrings'],
     date1904: boolean,
-  ): Promise<void> {
-    if (this.sheetCache.size === 0) return;
+  ): Promise<Set<string>> {
+    const recalculated = new Set<string>();
+    if (this.sheetCache.size === 0) return recalculated;
     let recalc: typeof import('./recalc.js');
     try {
       recalc = await import('./recalc.js');
     } catch {
-      return;
+      return recalculated;
     }
     for (const [idx, ws] of this.sheetCache) {
       if (idx === admittedIndex) continue;
@@ -1467,10 +1524,12 @@ export class XlsxWorkbook {
           await this.pushRecalculatedValuesToWorker(idx, capture);
         }
         this.adjustWorksheetCacheUsage(idx, ws, prevUsage);
+        if (capture.length > 0) recalculated.add(ws.name.toLowerCase());
       } catch {
         restore();
       }
     }
+    return recalculated;
   }
 
   /**
@@ -1504,9 +1563,10 @@ export class XlsxWorkbook {
   private async pushRecalculatedValuesToWorker(
     sheetIndex: number,
     cells: RecalcPatchedCell[],
+    charts?: RecalcChartPatch[],
   ): Promise<void> {
     await this.requireBridge().request(
-      (id) => ({ type: 'applyRecalculatedValues', id, sheetIndex, cells }) satisfies RenderWorkerRequest,
+      (id) => ({ type: 'applyRecalculatedValues', id, sheetIndex, cells, ...(charts ? { charts } : {}) }) satisfies RenderWorkerRequest,
     );
   }
 

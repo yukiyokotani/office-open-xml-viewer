@@ -640,6 +640,7 @@ export interface ChartModel {
     categories: string[];
     categorySourceHidden?: boolean[] | null;
     categoryLevels?: string[][] | null;
+    categoryFormula?: string | null;
     series: ChartSeries[];
     plotGroups?: ChartPlotGroup[] | null;
     chartTextBoxes?: ChartTextBox[] | null;
@@ -981,6 +982,8 @@ export interface ChartSeries {
     lineWidthEmu?: number | null;
     threeDShape?: 'box' | 'cylinder' | 'cone' | 'coneToMax' | 'pyramid' | 'pyramidToMax' | string | null;
     values: (number | null)[];
+    valueFormula?: string | null;
+    categoryFormula?: string | null;
     sourceHidden?: boolean[] | null;
     dataPointColors?: (string | null)[] | null;
     explosion?: number | null;

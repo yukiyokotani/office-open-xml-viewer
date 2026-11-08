@@ -67,7 +67,7 @@ import { bindWorksheetPolicy } from './worksheet-policy-context.js';
 import { WorksheetViewProjectionCache } from './worker-protocol.js';
 import { evictWorkerWorksheets } from './internal/worksheet-cache.js';
 import { readXlsxArchiveBootstrap, type XlsxArchiveBootstrap } from './internal/archive-bootstrap-source.js';
-import type { RenderWorkerRequest, RenderWorkerResponse } from './worker-protocol.js';
+import type { RecalcChartPatch, RenderWorkerRequest, RenderWorkerResponse } from './worker-protocol.js';
 import { isWorksheetPullCommand, WorksheetPullWorker } from './worksheet-pull-source-worker.js';
 import type { WorkerWorksheetSourceOwner, WorkerWorksheetArchive } from './internal/worker-worksheet-source.js';
 
@@ -151,7 +151,7 @@ const provisionalSheets = new Map<number, Worksheet>();
  * converge. Cleared with the cache (parse/reset/evict) so a stale patch can
  * never meet a later admission.
  */
-const pendingRecalcPatches = new Map<number, Array<{ row: number; col: number; value: CellValue }>>();
+const pendingRecalcPatches = new Map<number, { cells: Array<{ row: number; col: number; value: CellValue }>; charts?: RecalcChartPatch[] }>();
 
 /** Overwrite matching cells' values in place (unknown rows/cells skipped —
  *  the worker copy always derives from the same archive as main's). */
@@ -179,7 +179,30 @@ function consumePendingRecalcPatch(sheetIndex: number, worksheet: Worksheet): vo
   const patch = pendingRecalcPatches.get(sheetIndex);
   if (!patch) return;
   pendingRecalcPatches.delete(sheetIndex);
-  applyRecalculatedCells(worksheet, patch);
+  applyRecalculatedCells(worksheet, patch.cells);
+  if (patch.charts) applyRecalculatedCharts(worksheet, patch.charts);
+}
+
+/**
+ * Replace cache-free chart series (and shared categories) with their
+ * recalculated values in place. Indices are document order, identical in
+ * both realms; out-of-range entries are skipped so a model-shape skew can
+ * never corrupt the retained copy. Wholesale replacement is idempotent.
+ */
+function applyRecalculatedCharts(worksheet: Worksheet, charts: RecalcChartPatch[]): void {
+  if (!worksheet.charts) return;
+  for (const patch of charts) {
+    const anchor = worksheet.charts[patch.chartIndex];
+    const chart = anchor?.chart;
+    if (!chart || !chart.series) continue;
+    if (patch.categories) chart.categories = [...patch.categories];
+    for (const seriesPatch of patch.series) {
+      const series = chart.series[seriesPatch.seriesIndex];
+      if (!series) continue;
+      if (seriesPatch.values) series.values = [...seriesPatch.values];
+      if (seriesPatch.categories) series.categories = [...seriesPatch.categories];
+    }
+  }
 }
 const viewProjectionCache = new WorksheetViewProjectionCache();
 const sheetCacheUsage = new Map<number, WorksheetCacheUsage>();
@@ -321,8 +344,18 @@ self.onmessage = async (e: MessageEvent<
       // the preview is cached (main recalcs pre-ACK). Both writes are the
       // same idempotent overwrite, so patch/admit in either order converges.
       const cached = sheetCache.get(req.sheetIndex);
-      if (cached) applyRecalculatedCells(cached, req.cells);
-      pendingRecalcPatches.set(req.sheetIndex, req.cells);
+      if (cached) {
+        applyRecalculatedCells(cached, req.cells);
+        if (req.charts) applyRecalculatedCharts(cached, req.charts);
+      }
+      // Merge with any stashed patch (a chart-only follow-up must not drop
+      // stashed cells, and vice versa); wholesale array replacement on each
+      // apply keeps every order convergent.
+      const stashed = pendingRecalcPatches.get(req.sheetIndex);
+      pendingRecalcPatches.set(req.sheetIndex, {
+        cells: [...(stashed?.cells ?? []), ...req.cells],
+        charts: [...(stashed?.charts ?? []), ...(req.charts ?? [])],
+      });
       post({ type: 'recalculatedValuesApplied', id: req.id });
     } catch (error) {
       post({ type: 'error', id: req.id, ...serializeWorkerError(error) });
