@@ -9,8 +9,8 @@ the corresponding minor release.
 
 Compatible patch release. No migration is required. The document models gain
 optional, additive fields (Word paragraph, settings, table and drawing-run
-properties, PowerPoint shape-run complex-script properties, and chart
-secondary value-axis details); existing code is unaffected.
+properties, Word shape-text-run direction and complex-script properties, and
+chart secondary value-axis details); existing code is unaffected.
 
 - **Nuxt and other bundlers that alias assets:** the render-worker URLs that
   the package emits are now dot-relative, so consumers whose bundler aliases
