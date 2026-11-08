@@ -2062,7 +2062,12 @@ export function fitJustifiedCompression(state: Pick<PassOperationState,
   // ordinary breakable fit (issue #1660 controls: Word wraps the last ideograph
   // of a distributed CJK word instead of compressing the line's spaces).
   if (state.justifiedCompressionAdmissionOnly === true
-    && members.some(member => 'text' in member && hasCJKBreakOpportunity(member.text))) return false;
+    && members.some(member => 'text' in member && hasCJKBreakOpportunity(member.text))) {
+    // Record the refused unit as the refusal path below does, so its later
+    // members are not collected again (linear in the unit length).
+    if (members.length > 1) breaker.justifiedUnitEnd = members.at(-1);
+    return false;
+  }
   let previousText = breaker.currentLine.at(-1);
   const boundaries: number[] = [];
   const boxes = members.map((member, index) => {
