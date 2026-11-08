@@ -413,6 +413,28 @@ describe('layout context resolvers', () => {
       paragraphAllowsAdjustment: false,
     });
     expect(paragraphGridRightAdjustmentPt(tableCell, 481.9)).toBe(0);
+
+    // Issue #2152: Windows Word reduces the line width only below mode 15.
+    for (const [compatibilityMode, pitchPt] of [[14, 9], [15, null], [16, null]] as const) {
+      const modeSettings = resolveDocumentLayoutSettings(
+        documentModel({ settings: { compatibilityMode } }),
+        { normalStyleFontSizePt: 9 },
+      );
+      const modeContext = resolveParagraphLayoutContext(
+        modeSettings,
+        resolveSectionLayoutContext(modeSettings, section({
+          docGridType: 'linesAndChars',
+          docGridLinePitch: 20,
+          docGridCharSpace: 0,
+        })),
+        bodyStory,
+        paragraph(),
+      );
+      expect(modeContext.characterGrid.pitchPt).toBe(9);
+      expect(modeContext.rightIndentGrid.pitchPt).toBe(pitchPt);
+      expect(paragraphGridRightAdjustmentPt(modeContext, 481.9))
+        .toBeCloseTo(pitchPt == null ? 0 : 4.9, 9);
+    }
   });
 
   it('adds the hanging indent as an implicit leading tab without hiding a bar rule', () => {

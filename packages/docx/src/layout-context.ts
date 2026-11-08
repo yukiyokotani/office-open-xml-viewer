@@ -13,6 +13,7 @@ import { prepareBodyFrameMetadata } from './layout/frame.js';
 import {
   wordAuthoredTabReplacesImplicitHangingStop,
   wordContainerAllowsGridRightIndentAdjustment,
+  wordGridRightIndentPitchAlignmentApplies,
   wordGridRightIndentAdjustmentPt,
   wordCjkClosingMarkHang,
   type CjkClosingMarkHang,
@@ -407,6 +408,7 @@ export function resolveParagraphLayoutContext(
     ? settings.normalStyleFontSizePt + (section.grid.charSpacePt ?? 0)
     : null;
   const rightIndentPitchPt = section.grid.kind === 'linesAndChars'
+    && wordGridRightIndentPitchAlignmentApplies(settings.compat.compatibilityMode)
     ? characterPitchPt
     : null;
 
