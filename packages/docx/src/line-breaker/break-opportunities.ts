@@ -1,7 +1,7 @@
 import { candidateUnitIsSingleton } from './line-gaps.js';
 import { advanceLineBoundary } from './source-cursor.js';
 import { isInklessLineItem } from './break-queue.js';
-import { lineEndSpaceCharged, lineTrailingSpaceSuffixWidth, measureFitTextUnit, measureJoinedTextUnit } from './atomic-units.js';
+import { lineEndSpaceCharged, lineTrailingSpaceSuffixWidth, measureFitTextUnit, measureJoinedTextUnit, rtlLineEndSpaceInterior } from './atomic-units.js';
 import { placeOptionalHyphenPrefix } from './optional-hyphens.js';
 import {
   kinsokuAdjustedSplit,
@@ -409,7 +409,8 @@ function processTextSegment(context: BreakOpportunityIteratorContext, seg: Layou
   const fitWidthFor = (
     widthPx: number,
     trailingSpacePx: number,
-  ): number => wordVisiblePrefixFitWidthPx(widthPx, trailingSpacePx, lineEndSpaceCharged(context));
+  ): number => wordVisiblePrefixFitWidthPx(widthPx, trailingSpacePx,
+    lineEndSpaceCharged(context) || rtlLineEndSpaceInterior(context, s, breakerState.currentLine));
   const wForFit = fitWidthFor(prospectiveWidth, trailingSpaceW);
   // ECMA-376 §17.3.1.33 does not prescribe a line-breaking tolerance.
   // Word-for-Mac controls with Calibri and Arial, left/center/right aligned

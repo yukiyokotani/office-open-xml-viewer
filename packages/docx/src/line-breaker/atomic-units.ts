@@ -19,6 +19,27 @@ export function lineEndSpaceCharged(state: Pick<AtomicTextMeasurement, 'baseRtl'
   return state.baseRtl && state.lineFit?.rtlVisiblePrefix !== true;
 }
 
+const RTL_STRONG = /[\u0590-\u08FF\uFB1D-\uFDFF\uFE70-\uFEFF]/u;
+
+/** WORD_RTL_LINE_END_SPACE_HANGS: the line-end space of a left-to-right run on
+ * a right-to-left line is drawn at that run's right, so it hangs only while the
+ * run is drawn rightmost. A tab or right-to-left text before it on the line
+ * (blk-0898-tabs / controls-1672 rtl rows) keeps the space inside the line,
+ * where Word charges it. */
+export function rtlLineEndSpaceInterior(
+  state: Pick<AtomicTextMeasurement, 'baseRtl'>,
+  segment: LayoutTextSeg,
+  line: readonly LayoutSeg[],
+): boolean {
+  if (!state.baseRtl || segment.rtl === true || !segment.text.endsWith(' ')) return false;
+  const trimmed = segment.text.replace(/ +$/u, '');
+  const last = /\p{L}(?=\P{L}*$)/u.exec(trimmed)?.[0];
+  if (last === undefined || RTL_STRONG.test(last)) return false;
+  if (RTL_STRONG.test(trimmed)) return true;
+  return line.some((item) => 'isTab' in item
+    || ('text' in item && (item.rtl === true || RTL_STRONG.test(item.text))));
+}
+
 /** Advance of the U+0020 suffix that ends `items` across members (a run of
  * spaces may span separately formatted segments); zero-width markers are
  * looked through. The single suffix measure of every visible-prefix fit. */

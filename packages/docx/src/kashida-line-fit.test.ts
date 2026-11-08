@@ -386,14 +386,16 @@ describe('WORD_RTL_LINE_END_SPACE_HANGS', () => {
     }
   });
 
-  it('keeps a mixed-direction justified line inside the band when its line-end space is drawn inside', () => {
-    // Alternating Latin and Hebrew words; the line ends with a Latin word
-    // drawn leftmost, so its line-end space sits between runs.
+  it('charges a mixed-direction line-end space drawn inside the line', () => {
+    // Alternating Latin and Hebrew words; a line ending with a Latin word has
+    // its line-end space drawn at the Latin run's right, between runs, so it
+    // cannot hang and is charged (controls-1672 tabs-content-fitting-r4 rtl
+    // rows): the line holds one word fewer than its visible width admits.
     const rtl = { bidi: true, indentRight: 15 } as Partial<DocParagraph>;
     const text = Array.from({ length: 20 }, (_, index) => index % 2 === 0 ? 'abcd' : '\u05d0\u05d1\u05d2\u05d3').join(' ');
     for (const settings of MODES) {
       const [line] = lines(para([textRun(text)], 'both', rtl), settings);
-      expect(characters(line!)).toHaveLength(28);
+      expect(characters(line!)).toHaveLength(24);
       expect(start(line!)).toBeGreaterThanOrEqual(35 - 1e-6);
       expect(end(line!)).toBeLessThanOrEqual(380 + 1e-6);
     }
@@ -411,18 +413,19 @@ describe('WORD_RTL_LINE_END_SPACE_HANGS', () => {
       expect(end(short!)).toBeCloseTo(370);
     }
   });
-  it('absorbs an overflowing line-end space drawn between segments of a final line', () => {
+  it('wraps a Latin word whose line-end space would be drawn between segments', () => {
     // A 250 pt Hebrew word, a space, an 80 pt Latin word and its space: 340 pt
     // visible, 350 pt in all, in a 345 pt band. The Latin word is drawn
-    // leftmost, so its space sits between the two words and takes the 5 pt.
+    // leftmost, so its space sits between the two words: it is charged and
+    // the Latin word moves to the next line.
     const rtl = { bidi: true, indentRight: 15 } as Partial<DocParagraph>;
     for (const settings of MODES) {
       const [final] = lines(para([
         textRun(`${'\u05d0'.repeat(25)} `, { rtl: true }),
         textRun(`${'a'.repeat(8)} `),
       ], 'both', rtl), settings);
-      expect(characters(final!)).toHaveLength(33);
-      expect(start(final!)).toBeCloseTo(35);
+      expect(characters(final!)).toHaveLength(25);
+      expect(start(final!)).toBeGreaterThanOrEqual(35 - 1e-6);
       expect(end(final!)).toBeCloseTo(380);
     }
   });
@@ -463,15 +466,17 @@ describe('WORD_RTL_LINE_END_SPACE_HANGS', () => {
       expect(end(first!)).toBeCloseTo(365);
     }
   });
-  it('absorbs an admitted interior line-end space before justification, with no glyph overlap', () => {
+  it('charges an interior line-end space and keeps the line without glyph overlap', () => {
     // 360 pt band from x = 20; runs a×15 + space, Hebrew×13 + two spaces,
-    // a×4 + two spaces, another word: 370 pt natural, 350 pt visible.
+    // a×4 + two spaces, another word: 370 pt natural, 350 pt visible. The
+    // a×4 run ends the line after Hebrew text, so its spaces are drawn inside
+    // the line and charged: it moves to the next line.
     const rtl = { bidi: true } as Partial<DocParagraph>;
     for (const settings of MODES) {
       const [first] = lines(para([textRun(`${'a'.repeat(15)} `), textRun(`${'\u05d0'.repeat(13)}  `),
         textRun(`${'a'.repeat(4)}  `), textRun('bbbbb')], 'both', rtl), settings);
       const xs = characters(first!).map(({ xPt }) => xPt);
-      expect(xs).toHaveLength(32);
+      expect(xs).toHaveLength(28);
       for (let index = 1; index < xs.length; index += 1) {
         expect(xs[index]! - xs[index - 1]!).toBeGreaterThanOrEqual(10 - 1e-6);
       }
