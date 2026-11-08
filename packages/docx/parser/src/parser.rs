@@ -15505,17 +15505,23 @@ fn table_layout_kind_acquisition(
 }
 
 fn table_margin_acquisition(node: Option<roxmltree::Node>) -> Option<TableMarginAcquisitionWire> {
-    node.map(|m| TableMarginAcquisitionWire {
-        top: table_width_acquisition(child_w(m, "top")),
-        bottom: table_width_acquisition(child_w(m, "bottom")),
+    node.map(|m| table_margin_acquisition_with(&|name: &str| child_w(m, name)))
+}
+
+fn table_margin_acquisition_with<'a, 'i>(
+    edge: &dyn Fn(&str) -> Option<roxmltree::Node<'a, 'i>>,
+) -> TableMarginAcquisitionWire {
+    TableMarginAcquisitionWire {
+        top: table_width_acquisition(edge("top")),
+        bottom: table_width_acquisition(edge("bottom")),
         // Keep logical and legacy physical names independently. Collapsing
         // start/end into left/right here loses the information needed to apply
         // §17.4.68 after bidi direction is known.
-        start: table_width_acquisition(child_w(m, "start")),
-        end: table_width_acquisition(child_w(m, "end")),
-        left: table_width_acquisition(child_w(m, "left")),
-        right: table_width_acquisition(child_w(m, "right")),
-    })
+        start: table_width_acquisition(edge("start")),
+        end: table_width_acquisition(edge("end")),
+        left: table_width_acquisition(edge("left")),
+        right: table_width_acquisition(edge("right")),
+    }
 }
 
 fn table_property_exception_acquisition(
@@ -16507,10 +16513,14 @@ fn parse_table_cell(
     // Per-cell margins (ECMA-376 §17.4.42 `<w:tcPr><w:tcMar>`). Each edge,
     // when present, overrides the table-level `<w:tblCellMar>` default; absent
     // edges stay None so the renderer falls back to the table default.
-    let tc_mar = tc_pr.and_then(|p| child_w(p, "tcMar"));
+    // The schema allows one tcMar (CT_TcPrBase, maxOccurs 1). Repeated ones
+    // are malformed; Word recovers them edge by edge in document order, a later
+    // edge element replacing an earlier one (#2125 controls), so an empty or
+    // partial element does not reset the edges another one sets.
+    let tc_mars = tc_pr.map(|p| children_w(p, "tcMar")).unwrap_or_default();
+    let tc_mar_edge = |name: &str| tc_mars.iter().rev().find_map(|m| child_w(*m, name));
     let edge_mar = |name: &str| {
-        tc_mar
-            .and_then(|m| child_w(m, name))
+        tc_mar_edge(name)
             .and_then(|n| attr_w(n, "w"))
             .map(|v| twips_to_pt(&v))
     };
@@ -16520,7 +16530,7 @@ fn parse_table_cell(
     let margin_right = edge_mar("right");
     let table_cell_layout = TableCellLayoutAcquisitionWire {
         preferred_width: table_width_acquisition(tc_w),
-        margins: table_margin_acquisition(tc_mar),
+        margins: (!tc_mars.is_empty()).then(|| table_margin_acquisition_with(&tc_mar_edge)),
     };
 
     // ECMA-376 §17.4.7: a cell may contain paragraphs AND nested tables in

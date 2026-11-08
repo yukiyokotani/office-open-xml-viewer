@@ -12,7 +12,8 @@ const section: SectionProps = { pageWidth: 20, pageHeight: 400,
   marginTop: 0, marginRight: 0, marginBottom: 0, marginLeft: 0,
   headerDistance: 0, footerDistance: 0, titlePage: false, evenAndOddHeaders: false };
 function paragraphLayout(text: string, alignment = 'left', settings: DocSettings = {},
-  overflowPunct = true, langEastAsia?: string, pieces?: readonly string[], widthPt = 20, tightPunctuation = false) {
+  overflowPunct = true, langEastAsia?: string, pieces?: readonly string[], widthPt = 20, tightPunctuation = false,
+  sectionExtra: Partial<SectionProps> = {}) {
   const run: DocxTextRun = { text, fontSize: 10, fontFamily: 'UnregisteredTestFace',
     bold: false, italic: false, underline: false, strikethrough: false,
     color: null, isLink: false, background: null, vertAlign: null, hyperlink: null,
@@ -29,7 +30,7 @@ function paragraphLayout(text: string, alignment = 'left', settings: DocSettings
     fontBoundingBoxDescent: 2,
     ...(tightPunctuation ? { actualBoundingBoxLeft: 0, actualBoundingBoxRight:
       ([...value].length * 10 - (/[。」]$/u.test(value) ? 5 : 0)) } : {}) }) } as unknown as CanvasRenderingContext2D;
-  const published = layoutBodyModel([paragraph], { ...section, pageWidth: widthPt }, ctx, {}, settings)
+  const published = layoutBodyModel([paragraph], { ...section, ...sectionExtra, pageWidth: widthPt }, ctx, {}, settings)
     .pages.flatMap(page => page.layers.body.flatMap(node => node.kind === 'paragraph' ? node.lines : []));
   const result = published.map(line => line.placements.filter(p => p.kind === 'text').map(p => p.text).join(''));
   expect(result.join('')).toBe(text);
@@ -41,6 +42,14 @@ function lines(...args: Parameters<typeof paragraphLayout>): string[] {
 
 it.each(['left', 'both', 'distribute'])('neither hangs nor pushes the mode15 Japanese OFF closing mark under %s', alignment => {
   expect(lines('あい。う', alignment, { compatibilityMode: 15 })).toEqual(['あい', '。う']);
+});
+
+// #2144: Windows Word controls w2144-kinoff-{lines,chars}: the OFF edges are
+// the same with a document grid as without one.
+it.each(['lines', 'linesAndChars'] as const)('applies the mode15 Japanese OFF edges under a %s grid', type => {
+  const grid: Partial<SectionProps> = { docGridType: type, docGridLinePitch: 12, docGridCharSpace: 0 };
+  expect(paragraphLayout('あい。う', 'left', { compatibilityMode: 15 }, true, undefined, undefined, 20, false, grid).lines)
+    .toEqual(['あい', '。う']);
 });
 it('retains the pre15 OFF one-mark budget across adjacent closing marks', () => {
   expect(lines('あい。う', 'both', { compatibilityMode: 14 })).toEqual(['あい。', 'う']);
