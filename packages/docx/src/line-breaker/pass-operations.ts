@@ -1306,6 +1306,10 @@ export function performAddToLine(
     characterGrid,
   } = operationState;
 
+  // A refused WORD_JUSTIFIED_INTERWORD_COMPRESSION unit ends with its last
+  // member, however that member reaches the line (a space after an ideograph
+  // bypasses the compression path), so later units stay eligible.
+  if (breakerState.justifiedUnitEnd === s) breakerState.justifiedUnitEnd = undefined;
   let committedWidth = w;
   if ('text' in s && s.autoSpaceBeforePt !== undefined) {
     const delta = resolveAutoSpaceAtPlacement(operationState, s);
@@ -1975,7 +1979,7 @@ function gapSegment(state: Pick<PassOperationState, 'strAdvance' | 'scale' | 'ch
  * prefix is admitted (0 when it fits naturally), or undefined when refused.
  * The same gap model and factor as a whole unit (fitJustifiedCompression). */
 export function justifiedPrefixCompression(state: Pick<PassOperationState,
-  'justifiedCompression' | 'baseRtl' | 'widthPolicy' | 'characterGrid' | 'breakerState'
+  'justifiedCompression' | 'justifiedCompressionAdmissionOnly' | 'baseRtl' | 'widthPolicy' | 'characterGrid' | 'breakerState'
   | 'strAdvance' | 'availW' | 'scale'>, s: LayoutTextSeg, prefix: string): number | undefined {
   const { breakerState: breaker } = state;
   if (!justifiedCompressionApplies(state) || s.fitTextRegionIndex !== undefined
@@ -1991,6 +1995,9 @@ export function justifiedPrefixCompression(state: Pick<PassOperationState,
   const model = lineGapModel([gapSegment(state, candidate)], previous, false);
   const overflow = model.visibleWidthPx - state.availW();
   if (!(overflow > 0)) return 0;
+  // Admission-only (distribute/lowKashida): CJK content keeps its natural
+  // breakable fit, as in fitJustifiedCompression.
+  if (state.justifiedCompressionAdmissionOnly === true) return undefined;
   return wordJustifiedInterwordCompressionFactor({
     overflow, naturalGapSum: model.S,
     candidateLineEndSeparator: model.lineEndSeparatorPx,
@@ -2075,6 +2082,17 @@ export function fitJustifiedCompression(state: Pick<PassOperationState,
   // Opaque successors stay with their own placement path. Ruby is itself an
   // opaque, measured text unit and participates without opening adjacent gaps.
   if (members.some(member => !('text' in member))) return false;
+  // The distribute/lowKashida (admission-only) extension is measured for
+  // Latin words only. A unit with an internal CJK break opportunity keeps the
+  // ordinary breakable fit (issue #1660 controls: Word wraps the last ideograph
+  // of a distributed CJK word instead of compressing the line's spaces).
+  if (state.justifiedCompressionAdmissionOnly === true
+    && members.some(member => 'text' in member && hasCJKBreakOpportunity(member.text))) {
+    // Record the refused unit as the refusal path below does, so its later
+    // members are not collected again (linear in the unit length).
+    if (members.length > 1) breaker.justifiedUnitEnd = members.at(-1);
+    return false;
+  }
   let previousText = breaker.currentLine.at(-1);
   const boundaries: number[] = [];
   const boxes = members.map((member, index) => {
