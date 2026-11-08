@@ -92,7 +92,7 @@ class LoopbackWorker implements WorkerLike {
   terminate(): void {}
 }
 
-async function loadWorker() {
+async function loadWorker(variant: 'parser' | 'model-source' = 'parser') {
   vi.resetModules();
   const scope = {
     onmessage: null as ((event: MessageEvent) => Promise<void>) | null,
@@ -107,6 +107,10 @@ async function loadWorker() {
   await dispatch({
     kind: 'parse', id: 100, buffer: new ArrayBuffer(1),
     resourcePolicy: { maxArchiveEntryBytes: null, maxTotalInflatedBytes: null, maxArchiveEntries: null },
+    ...(variant === 'model-source' ? {
+      source: { protocol: 'ooxml-model-source-module/v2', target: 'pptx', moduleUrl: 'x', config: {} },
+      sourceOwnerUrl: new URL('./test-support/worker-source-owner.ts', import.meta.url).href,
+    } : {}),
   });
   expect(worker.received).toContainEqual(expect.objectContaining({ kind: 'presentationReady', id: 100 }));
   const bridge = new WorkerBridge<RenderWorkerResponse>(worker, {
@@ -173,4 +177,22 @@ describe('PPTX render worker bitmap surface', () => {
     }));
     expect(worker.received).toContainEqual(expect.objectContaining({ kind: 'runsCollected', id: 8 }));
   });
+});
+
+describe('PPTX render worker parsed text-colour chain', () => {
+  // Issue #1989's hard black default needs the built-in parser's resolved
+  // colour chain; a model source keeps the 0.89.7 fallback.
+  it.each([['parser', true], ['model-source', false]] as const)(
+    'passes parsedTextChain for %s slides when painting and collecting runs', async (variant, expected) => {
+      const { presentation } = await loadWorker(variant);
+
+      await presentation.renderSlideToBitmap(0, { width: 320, dpr: 1 });
+      await presentation.collectSlideRuns(0, 320);
+
+      expect(mocks.render).toHaveBeenCalledTimes(2);
+      for (const call of mocks.render.mock.calls) {
+        expect((call[4] as { parsedTextChain?: boolean }).parsedTextChain).toBe(expected);
+      }
+    },
+  );
 });

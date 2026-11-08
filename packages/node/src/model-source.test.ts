@@ -5,6 +5,7 @@ import type { ModelSource, ModelSourceConfig, ModelSourceTarget } from '@silurus
 import { computeMdw } from '../../xlsx/src/renderer.ts';
 import { openDocxDocument } from './docx.ts';
 import { openPptxPresentation } from './pptx.ts';
+import { isParsedPptxSlide } from './pptx-parsed-slides.ts';
 import type { NodeCanvasFactory } from './render.ts';
 import { minimalDocx } from './test-ooxml-package.ts';
 import { openXlsxWorkbook } from './xlsx.ts';
@@ -179,6 +180,22 @@ describe('Node sessions with a model source', () => {
     expect(slides).toBe(session.slideCount);
     await session.close();
     expect(minimal.closes()).toBe(1);
+  }, 30_000);
+
+  it('marks only built-in parser slides as a parsed text-colour chain', async () => {
+    // Issue #1989's hard black default needs the parser's resolved colour
+    // chain; model-source slides keep the 0.89.7 fallback.
+    const marks = async (session: Awaited<ReturnType<typeof openPptxPresentation>>) => {
+      const result: boolean[] = [];
+      for await (const slide of session.slides()) result.push(isParsedPptxSlide(slide));
+      return result;
+    };
+    const parsed = await marks(await openPptxPresentation(pptxSample));
+    expect(parsed.length).toBeGreaterThan(0);
+    expect(parsed.every(Boolean)).toBe(true);
+    const sourced = await marks(await openPptxPresentation(pptxSample, { legacyPpt: fakeSource('pptx').source }));
+    expect(sourced.length).toBeGreaterThan(0);
+    expect(sourced.some(Boolean)).toBe(false);
   }, 30_000);
 
   it('keeps unclaimed input on the OOXML path and fails closed on invalid sources', async () => {

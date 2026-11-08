@@ -28,6 +28,8 @@ export async function openPptxSource(
   return new PptxPresentationSessionImpl(
     acquired.closeArchive, archive, acquired.bootstrap,
     acquired.metrics, options.signal, resolveCjkFallback(options.cjkFallback),
+    // A model source's slides have no proven parsed colour chain.
+    false,
   );
 }
 
