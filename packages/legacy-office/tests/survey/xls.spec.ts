@@ -33,14 +33,14 @@ test.describe('legacy XLS corpus survey', () => {
       const width = 1100;
       const directXls = resolve(packagesDir, 'legacy-office/src/legacy-xls.ts');
       await page.goto(`${viewerOrigin('xls')}/tests/visual/fixture.html`);
-      const rendered = await page.evaluate(async ({ file, width: requested, module }) => {
+      const rendered = await page.evaluate(async ({ file, width: requested, module, corpusUrl }) => {
         const pages: string[] = [];
         try {
           const { XlsxWorkbook } = await import('/src/workbook.ts');
           const { legacyXls } = await import(/* @vite-ignore */ module);
           // The dev server decodes paths with decodeURI, which keeps reserved
           // escapes such as %2B; encodeURI leaves those characters literal.
-          const response = await fetch(`/private/xls/${encodeURI(file)}`);
+          const response = await fetch(`${corpusUrl}/${encodeURI(file)}`);
           if (!response.ok) throw new Error(`fetch failed: ${response.status}`);
           const bytes = await response.arrayBuffer();
           // Excel column widths and drawing anchors depend on the Normal
@@ -67,7 +67,7 @@ test.describe('legacy XLS corpus survey', () => {
         } catch (error) {
           return { pages, error: String(error instanceof Error ? error.message : error) };
         }
-      }, { file: name, width, module: `/@fs${directXls}` }) as Rendered;
+      }, { file: name, width, module: `/@fs${directXls}`, corpusUrl: `/@fs${corpus}` }) as Rendered;
 
       const pagesReport = [];
       const count = Math.max(reference.length, rendered.pages.length);
