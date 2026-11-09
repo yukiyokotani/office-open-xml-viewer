@@ -10,7 +10,7 @@ import { PNG } from 'pngjs';
 import { packagesDir, viewerOrigin, padded, pdfPages, sideBySide, type Rendered } from './survey.js';
 
 const enabled = process.env.LEGACY_CORPUS === '1';
-const corpus = resolve(packagesDir, 'pptx/public/private/ppt');
+const corpus = resolve(packagesDir, 'legacy-office/public/private/ppt');
 const filter = process.env.LEGACY_CORPUS_FILTER;
 const names = enabled && existsSync(corpus)
   ? readdirSync(corpus)
