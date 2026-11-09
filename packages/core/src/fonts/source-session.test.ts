@@ -1,3 +1,4 @@
+import { readFile } from 'node:fs/promises';
 import { setFlagsFromString } from 'node:v8';
 import { runInNewContext } from 'node:vm';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -994,5 +995,35 @@ describe('FontSourceSession: script-scoped substitution proof (FontSessionDemand
     await session.ensure({ ...demand(['Authored'], [0x646]), substituteScripts: { authored: ['arabic'] } });
     expect(set.faces).toHaveLength(1);
     session.release();
+  });
+});
+
+describe('FontSourceSession: served face tables', () => {
+  // Synthetic fixture (scripts/generate-fixture-font.py): hhea/typo lineGap 300
+  // of 1000 UPM, Latin 1 code page declared.
+  const fixtureGap = async () => {
+    const bytes = await readFile(new URL('../../../../tests/fixtures/fonts/ooxml-fixture-gap.ttf', import.meta.url));
+    return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+  };
+
+  it('snapshots the OpenType tables of a face registered from owned bytes', async () => {
+    const set = fakeSet();
+    const session = open([fontFiles({ faces: [{ family: 'Calibri', data: await fixtureGap() }] })], set);
+    const loaded = await session.ensure(demand(['Calibri']));
+    expect(loaded.faces).toHaveLength(1);
+    expect(loaded.faces[0]!.resourceMetrics).toMatchObject({
+      unitsPerEm: 1000, hheaAscent: 800, hheaDescent: -200, hheaLineGap: 300, farEastCodePage: false,
+    });
+  });
+
+  it('has no tables for a face the browser fetches itself, or for bytes it cannot parse', async () => {
+    const set = fakeSet();
+    const session = open([fontFiles({ faces: [
+      { family: 'Url Face', url: 'https://app.example/face.woff2' },
+      { family: 'Opaque Face', data: new Uint8Array(64).fill(7).buffer },
+    ] })], set);
+    const loaded = await session.ensure(demand(['Url Face', 'Opaque Face']));
+    expect(loaded.faces).toHaveLength(2);
+    expect(loaded.faces.every((face) => face.resourceMetrics === undefined)).toBe(true);
   });
 });

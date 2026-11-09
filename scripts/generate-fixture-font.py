@@ -1,9 +1,12 @@
 """Generate the synthetic font-source test fonts (design §12.1).
 
-Writes two TrueType fonts under tests/fixtures/fonts/:
+Writes three TrueType fonts under tests/fixtures/fonts/:
 
 - ooxml-fixture.ttf: printable ASCII, U+00A0 and U+00B7;
-- ooxml-fixture-jp.ttf: U+3000-U+3005, U+3041-U+3046 and U+4E00-U+4E05.
+- ooxml-fixture-jp.ttf: U+3000-U+3005, U+3041-U+3046 and U+4E00-U+4E05;
+- ooxml-fixture-gap.ttf: the Latin set with a non-zero line gap (hhea and
+  OS/2 typo lineGap 300) and a declared Latin 1 code page, so line-metric tests
+  can tell a face's own normal line from its gap-less font box.
 
 Every glyph is a synthetic rectangle (no outline is derived from any existing
 font, so the files carry no third-party copyright). Advances are fixed per
@@ -42,7 +45,7 @@ def empty():
     return TTGlyphPen(None).glyph()
 
 
-def build(path: Path, family: str, code_points: list[int], advance: int) -> None:
+def build(path: Path, family: str, code_points: list[int], advance: int, line_gap: int = 0) -> None:
     glyph_order = ['.notdef']
     glyphs = {'.notdef': rectangle(advance, ASCENT, 40)}
     metrics = {'.notdef': (advance, 40)}
@@ -64,7 +67,7 @@ def build(path: Path, family: str, code_points: list[int], advance: int) -> None
     builder.setupCharacterMap(cmap)
     builder.setupGlyf(glyphs)
     builder.setupHorizontalMetrics(metrics)
-    builder.setupHorizontalHeader(ascent=ASCENT, descent=-DESCENT)
+    builder.setupHorizontalHeader(ascent=ASCENT, descent=-DESCENT, lineGap=line_gap)
     builder.setupNameTable({
         'familyName': family,
         'styleName': 'Regular',
@@ -75,9 +78,10 @@ def build(path: Path, family: str, code_points: list[int], advance: int) -> None
         'licenseDescription': 'Synthetic test font of the office-open-xml-viewer project (MIT).',
     })
     builder.setupOS2(
-        sTypoAscender=ASCENT, sTypoDescender=-DESCENT, sTypoLineGap=0,
+        sTypoAscender=ASCENT, sTypoDescender=-DESCENT, sTypoLineGap=line_gap,
         usWinAscent=ASCENT, usWinDescent=DESCENT, achVendID='OOXV',
         fsType=0, usWeightClass=400,
+        **({'ulCodePageRange1': 1} if line_gap else {}),
     )
     builder.setupPost()
     builder.setupHead(unitsPerEm=UPM, created=0, modified=0)
@@ -90,6 +94,7 @@ def main() -> None:
     jp = list(range(0x3000, 0x3006)) + list(range(0x3041, 0x3047)) + list(range(0x4E00, 0x4E06))
     build(OUT / 'ooxml-fixture.ttf', 'Ooxml Fixture', latin, 600)
     build(OUT / 'ooxml-fixture-jp.ttf', 'Ooxml Fixture JP', jp, 1000)
+    build(OUT / 'ooxml-fixture-gap.ttf', 'Ooxml Fixture Gap', latin, 600, line_gap=300)
 
 
 if __name__ == '__main__':

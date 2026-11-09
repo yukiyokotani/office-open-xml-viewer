@@ -64,6 +64,7 @@ import {
   type ResolverFaceRequest,
 } from './face-download.js';
 import { resolveFontFiles } from './files-source.js';
+import { parseOpenTypeResourceMetrics, type OpenTypeLineMetrics } from './open-type-metrics.js';
 import { concludeFamilies } from './resolver-failures.js';
 import {
   claimResolverCandidates,
@@ -109,6 +110,13 @@ export interface LoadedSourceFace {
   /** Index of the supplying source in the session's `sources`. */
   readonly sourceIndex: number;
   readonly face: FontFace;
+  /** OpenType tables of the exact bytes this face was registered from, when
+   * the session holds them (`data` faces, library-acquired downloads) and
+   * they are a static sfnt the resource parser accepts. Absent for faces the
+   * browser fetched itself (`url` without library acquisition), WOFF/WOFF2
+   * and variable fonts. Formats project these tables with their own line
+   * rules, exactly as for a document-embedded face. */
+  readonly resourceMetrics?: OpenTypeLineMetrics;
 }
 
 /** What the renderers consume after each ensure. */
@@ -149,6 +157,22 @@ export interface FontSourceSessionOptions {
   readonly acquiredFacesOwnedBySession?: boolean;
 }
 
+
+/** Parsed tables per registered face. A face shared by sessions of one realm
+ * was created from one signature (content included), so its bytes, and hence
+ * its tables, are the same for every holder. */
+const faceResourceMetrics = new WeakMap<FontFace, OpenTypeLineMetrics | null>();
+
+function resourceMetricsOf(face: FontFace, data: ArrayBuffer | undefined): OpenTypeLineMetrics | undefined {
+  if (data === undefined) return undefined;
+  let metrics = faceResourceMetrics.get(face);
+  if (metrics === undefined) {
+    try { metrics = parseOpenTypeResourceMetrics(new Uint8Array(data)); }
+    catch { metrics = null; }
+    faceResourceMetrics.set(face, metrics);
+  }
+  return metrics ?? undefined;
+}
 
 const EMPTY_SNAPSHOT: LoadedFontSources = Object.freeze({
   faces: Object.freeze([]),
@@ -873,6 +897,7 @@ export class FontSourceSession {
     for (const entry of this.owned.values()) {
       if (entry.face.status !== 'loaded') continue;
       const { declaration } = entry;
+      const resourceMetrics = resourceMetricsOf(entry.face, declaration.data);
       faces.push(Object.freeze({
         family: declaration.family,
         weight: declaration.weight ?? 'normal',
@@ -881,6 +906,7 @@ export class FontSourceSession {
         unicodeRange: declaration.unicodeRange ?? 'U+0-10FFFF',
         sourceIndex: entry.sourceIndex,
         face: entry.face,
+        ...(resourceMetrics ? { resourceMetrics } : {}),
       }));
     }
     const substitutions = new Map<string, { readonly family: string; readonly script?: FontSubstituteScript }>();

@@ -13,6 +13,7 @@ import {
 import type { ResolvedFontMetric } from '@silurus/ooxml-core';
 import type { FontSubstituteScript, OfficeFontFallbackRoute } from '@silurus/ooxml-core';
 import { scriptScopedSubstitutedFamilies } from '../font-substitution-scope.js';
+import { sourceFontLineMetrics, sourceFontResourceIdentity } from '../source-font-metrics.js';
 import type { LoadedEmbeddedFontRoute } from '../embedded-fonts.js';
 import { normalizeFontFamilyUncached } from '../line-layout.js';
 import type { LayoutSourceStore } from './layout-source-store.js';
@@ -184,7 +185,13 @@ export function createProductionTextLayoutService(
       ? requested : `${requested}:${route.weight}:${route.style}`;
     return [[key, route.metric]];
   }));
+  const fontSet = options.fontSet === undefined ? activeFontSet() : options.fontSet;
+  // Served faces are sized from their own tables (source-font-metrics.ts),
+  // exactly as an installed or embedded face with the same tables.
+  const sourceMetrics = options.sourceFonts
+    ? sourceFontLineMetrics(options.sourceFonts.loaded, fontSet) : {};
   const fontMetrics = snapshotFontMetrics({
+    ...sourceMetrics,
     ...localMetrics,
     ...officeMetrics,
     ...unshadowed(options.fontMetrics),
@@ -249,6 +256,7 @@ export function createProductionTextLayoutService(
           requestedFamily: name,
           resolvedFamily: displayFamily,
           source: substitution ? 'substitute' : 'source',
+          resourceIdentity: sourceFontResourceIdentity(displayFamily),
           ...(substitution?.script === undefined ? {} : { script: substitution.script }),
           weight,
           style,
@@ -270,7 +278,6 @@ export function createProductionTextLayoutService(
   // than the pinned reference for a different version of the same family.
   // A face loaded after this snapshot needs a new layout service/pagination.
   const requestedNames = new Set(routedFontFamilies.map(normalizedFaceFamily));
-  const fontSet = options.fontSet === undefined ? activeFontSet() : options.fontSet;
   // Any loaded application face declaring an authored family shadows the
   // system family for every tuple, whatever its descriptors (oblique, weight
   // 950...), even ones the exact-tuple inventory below cannot represent.
