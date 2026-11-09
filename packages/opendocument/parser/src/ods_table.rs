@@ -63,8 +63,19 @@ pub fn read_view_settings(root: roxmltree::Node<'_, '_>) -> HashMap<String, View
     else {
         return tables;
     };
-    let global_grid = item(view, "ShowGrid").map(|v| v == "true");
-    let global_zeros = item(view, "ShowZeroValues").map(|v| v == "true");
+    // View settings first, then the document configuration
+    // (`ooo:configuration-settings`), where LibreOffice keeps them too.
+    let configuration = root.descendants().find(|n| {
+        xml::is(*n, NS_CONFIG, "config-item-set")
+            && n.attribute((NS_CONFIG, "name")) == Some("ooo:configuration-settings")
+    });
+    let setting = |name: &str| {
+        item(view, name)
+            .or_else(|| configuration.and_then(|c| item(c, name)))
+            .map(|v| v == "true")
+    };
+    let global_grid = setting("ShowGrid");
+    let global_zeros = setting("ShowZeroValues");
     if let Some(map) = view.children().find(|n| {
         xml::is(*n, NS_CONFIG, "config-item-map-named")
             && n.attribute((NS_CONFIG, "name")) == Some("Tables")

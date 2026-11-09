@@ -121,6 +121,30 @@ pub fn paragraph_text(node: roxmltree::Node<'_, '_>) -> String {
     out
 }
 
+/// Split a space-separated list of cell range addresses (§18.3.6), leaving
+/// spaces inside quoted sheet names alone.
+pub fn split_addresses(list: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut quoted = false;
+    let mut start = 0;
+    for (i, c) in list.char_indices() {
+        match c {
+            '\'' => quoted = !quoted,
+            c if c.is_whitespace() && !quoted => {
+                if start < i {
+                    out.push(&list[start..i]);
+                }
+                start = i + c.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    if start < list.len() {
+        out.push(&list[start..]);
+    }
+    out
+}
+
 pub fn inline_text(node: roxmltree::Node<'_, '_>, out: &mut String) {
     for child in node.children() {
         if child.is_text() {

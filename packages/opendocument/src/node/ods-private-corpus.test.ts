@@ -8,7 +8,7 @@
 //   OOXML_ODS_CORPUS=1 npx vitest run packages/opendocument/src/node/ods-private-corpus.test.ts
 //
 // Optional: ODS_CORPUS_FILTER=<substring>, ODS_CORPUS_LIMIT=<n>,
-// ODS_CORPUS_VISUAL=0 (text only). Results go to the main checkout's
+// ODS_CORPUS_VISUAL=0 (text only), ODS_CORPUS_DUMP=1 (keep the paintings). Results go to the main checkout's
 // git-ignored packages/opendocument/public/private/harness/ods-<label>/.
 // Full-corpus runs hold /private/tmp/ooxml-vrt.lock while they run.
 import { execFileSync } from 'node:child_process';
@@ -87,7 +87,7 @@ function texts(workbook: Materialized): Map<string, string> {
   return out;
 }
 
-async function paint(workbook: Materialized): Promise<Uint8ClampedArray | null> {
+async function paint(workbook: Materialized, dump?: string): Promise<Uint8ClampedArray | null> {
   if (!skia || workbook.worksheets.length === 0) return null;
   const factory = skiaFactory();
   const canvas = factory.createCanvas(VIEW_SIZE.width, VIEW_SIZE.height);
@@ -100,6 +100,9 @@ async function paint(workbook: Materialized): Promise<Uint8ClampedArray | null> 
       canvas as unknown as HTMLCanvasElement, VIEW,
       { ...VIEW_SIZE, dpr: 1, ...(mdw ? { authoritativeMdw: mdw } : {}) } as never,
     );
+    if (dump) {
+      await writeFile(dump, await (canvas as unknown as { toBuffer(format: string): Promise<Buffer> }).toBuffer('png'));
+    }
     const context = canvas.getContext('2d') as unknown as CanvasRenderingContext2D;
     return context.getImageData(0, 0, VIEW_SIZE.width, VIEW_SIZE.height).data;
   } finally {
@@ -188,7 +191,10 @@ describe.skipIf(!run)('ODS private corpus', () => {
           result.matched = matched;
           result.mismatches = mismatches;
           if (visual) {
-            const [pa, pb] = [await paint(ods), await paint(xlsx)];
+            // ODS_CORPUS_DUMP=1 keeps both paintings as PNG for inspection.
+            const dump = process.env.ODS_CORPUS_DUMP === '1' ? join(out, 'png', file.replace(/[\\/]/g, '__')) : undefined;
+            if (dump) mkdirSync(join(out, 'png'), { recursive: true });
+            const [pa, pb] = [await paint(ods, dump && `${dump}.ods.png`), await paint(xlsx, dump && `${dump}.xlsx.png`)];
             if (pa && pb) result.visual = visualDiff(pa, pb);
           }
         }

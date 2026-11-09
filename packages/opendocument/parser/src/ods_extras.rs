@@ -89,7 +89,7 @@ fn split_colon(reference: &str) -> Vec<&str> {
 /// reference list with absolute references (`Sheet1!$A$1:$B$2,Sheet1!$D$4`).
 pub fn convert_range_list(addresses: &str) -> Option<String> {
     let mut out = Vec::new();
-    for address in addresses.split_whitespace() {
+    for address in crate::odf_text::split_addresses(addresses) {
         let (sheet, (r1, c1), (r2, c2)) = parse_range(address)?;
         let prefix = sheet.as_deref().map(sheet_prefix).unwrap_or_default();
         let a = format!("${}${}", super::column_letters(c1), r1);
@@ -404,8 +404,8 @@ pub(crate) fn conditional_formats(
                 let Some(target) = format.attribute((NS_CALCEXT, "target-range-address")) else {
                     continue;
                 };
-                let sqref: Vec<CellRange> = target
-                    .split_whitespace()
+                let sqref: Vec<CellRange> = crate::odf_text::split_addresses(target)
+                    .into_iter()
                     .filter_map(range_of)
                     .map(|(_, r)| r)
                     .collect();

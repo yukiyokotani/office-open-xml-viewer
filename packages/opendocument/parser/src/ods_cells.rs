@@ -441,8 +441,7 @@ pub fn resolve(
         Some("lr-tb") | Some("lr") => None,
         _ => None,
     };
-    let own_font_color =
-        font.color.is_some() && get(chain, "text:style:use-window-font-color") != Some("true");
+    let own_font_color = font.color.is_some();
     CellFormat {
         font,
         fill,
@@ -499,10 +498,23 @@ pub fn font_of(chain: &[&Style], faces: &HashMap<String, String>, base: Option<&
     if let Some(strike) = get(chain, "text:style:text-line-through-style") {
         font.strike = strike != "none";
     }
-    if get(chain, "text:style:use-window-font-color") == Some("true") {
-        font.color = None;
-    } else if let Some(color) = get(chain, "text:fo:color").and_then(hex_color) {
-        font.color = Some(color);
+    // The nearest style that sets either the colour or the automatic
+    // (window) colour decides (§20.209 / §20.391, per-attribute cascade
+    // read as LibreOffice reads it: one font colour property).
+    for style in chain {
+        let window = style.properties.get("text:style:use-window-font-color");
+        let color = style.properties.get("text:fo:color");
+        if window.is_none() && color.is_none() {
+            continue;
+        }
+        if window.is_some_and(|w| w == "true") && color.is_none() {
+            font.color = None;
+        } else if let Some(color) = color.and_then(|c| hex_color(c)) {
+            font.color = Some(color);
+        } else if window.is_some_and(|w| w == "true") {
+            font.color = None;
+        }
+        break;
     }
     if let Some(position) = get(chain, "text:style:text-position") {
         let first = position.split_whitespace().next().unwrap_or("");

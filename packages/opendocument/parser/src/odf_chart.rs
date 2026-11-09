@@ -24,8 +24,7 @@ use crate::ods_number::DataStyles;
 use crate::package::OdfPackage;
 use crate::xml::{self, NS_OFFICE, NS_TABLE, NS_TEXT};
 use ooxml_common::chart::{
-    canonical_chart_type, ChartModel, ChartPlotGroup, ChartSeries, ChartSeriesDataLabels,
-    ChartThreeD,
+    canonical_chart_type, ChartModel, ChartSeries, ChartSeriesDataLabels, ChartThreeD,
 };
 use std::collections::HashMap;
 
@@ -125,6 +124,10 @@ pub fn read_chart_document(
         faces: &faces,
         local: LocalTable::read(chart)?,
         resolver,
+        dashes: styles_doc
+            .as_ref()
+            .map(|doc| stroke_dashes(doc.root_element()))
+            .unwrap_or_default(),
     };
     reader.chart(chart, &mut data).map(Some)
 }
@@ -134,6 +137,8 @@ struct Reader<'a> {
     faces: &'a HashMap<String, String>,
     local: LocalTable,
     resolver: Option<&'a dyn RangeResolver>,
+    /// `draw:stroke-dash` definitions (§16.41) as DrawingML presets.
+    dashes: HashMap<String, &'static str>,
 }
 
 /// The chart's `local-table` (§11.1 data table): a grid with the header
@@ -181,7 +186,7 @@ impl LocalTable {
                     .find(|n| xml::is(*n, crate::xml::NS_SVG, "desc"))
                     .and_then(|n| n.text());
                 if let Some(desc) = desc {
-                    for range in desc.split_whitespace() {
+                    for range in crate::odf_text::split_addresses(desc) {
                         table
                             .sources
                             .insert(range.to_string(), (cells.len(), table.cells.len()));
@@ -283,7 +288,7 @@ struct Paint {
     line: Option<String>,
     line_hidden: bool,
     line_width: Option<u32>,
-    dashed: bool,
+    dash: Option<&'static str>,
 }
 
 impl Reader<'_> {
@@ -329,7 +334,11 @@ impl Reader<'_> {
             line_width: get(chain, "graphic:svg:stroke-width")
                 .and_then(length_pt)
                 .map(emu),
-            dashed: stroke == Some("dash"),
+            dash: (stroke == Some("dash")).then(|| {
+                get(chain, "graphic:draw:stroke-dash")
+                    .and_then(|name| self.dashes.get(name).copied())
+                    .unwrap_or("dash")
+            }),
         }
     }
 
@@ -342,7 +351,7 @@ impl Reader<'_> {
     fn range(&self, address: &str) -> Vec<(CellData, String)> {
         // Several space-separated ranges are concatenated (§18.3.5).
         let mut out = Vec::new();
-        for part in address.split_whitespace() {
+        for part in crate::odf_text::split_addresses(address) {
             let local_first =
                 part.starts_with("local-table.") || part.starts_with("'local-table'.");
             let resolved = if local_first {
@@ -568,16 +577,7 @@ impl Reader<'_> {
             }
         }
         self.axes(plot, &mut model, data);
-        self.series(
-            plot,
-            &plot_chain,
-            class,
-            primary,
-            grouping,
-            horizontal,
-            &mut model,
-            data,
-        )?;
+        self.series(plot, &plot_chain, class, primary, &mut model, data)?;
         Ok(model)
     }
 
@@ -751,8 +751,6 @@ impl Reader<'_> {
         plot_chain: &[&Style],
         class: &str,
         primary: &str,
-        grouping: &str,
-        horizontal: bool,
         model: &mut ChartModel,
         data: &mut DataStyles,
     ) -> Result<(), String> {
@@ -773,7 +771,6 @@ impl Reader<'_> {
             .take(MAX_SERIES)
             .collect();
         let mut series_models = Vec::new();
-        let mut groups: Vec<(String, usize, usize, bool)> = Vec::new();
         for (index, node) in nodes.iter().enumerate() {
             let node = *node;
             let series_class = node
@@ -850,7 +847,31 @@ impl Reader<'_> {
             if paint.line_hidden && line_drawn {
                 series.line_hidden = Some(true);
             }
-            let _ = paint.dashed;
+            // A classic series' own fill and line travel in its element
+            // style, as the DrawingML parser carries the series `c:spPr`:
+            // `draw:fill="none"` / `draw:stroke="none"` paint nothing.
+            let filled_series = !line_drawn || kind == "scatter";
+            if paint.dash.is_some() || paint.line_hidden || paint.fill_hidden && filled_series {
+                series.chartex_style = Some(ooxml_common::chart::ChartExElementStyle {
+                    shape_properties_present: Some(true),
+                    line_dash: paint.dash.map(str::to_string),
+                    line_dash_authored: paint.dash.map(|_| true),
+                    fill_hidden: (paint.fill_hidden && filled_series).then_some(true),
+                    fill_paint_authored: paint.fill.as_ref().map(|_| true),
+                    fill_colors: paint.fill.clone().map(|c| vec![Some(c)]),
+                    line_hidden: paint.line_hidden.then_some(true),
+                    line_paint_authored: paint.line.as_ref().map(|_| true),
+                    line_colors: paint.line.clone().map(|c| vec![Some(c)]),
+                    line_width_emu: paint.line_width,
+                    ..Default::default()
+                });
+            }
+            if paint.fill_hidden && !line_drawn {
+                series.color = paint.line.clone();
+            }
+            if paint.line_hidden {
+                series.line_hidden = Some(true);
+            }
             // Scatter and bubble: domains are x (and for bubble y, x) values.
             match kind {
                 "scatter" => {
@@ -1001,11 +1022,6 @@ impl Reader<'_> {
             if !trendlines.is_empty() {
                 series.trend_lines = Some(trendlines);
             }
-            let secondary = series.use_secondary_axis == Some(true);
-            match groups.last_mut() {
-                Some((k, _, count, s)) if *k == kind && *s == secondary => *count += 1,
-                _ => groups.push((kind.to_string(), index, 1, secondary)),
-            }
             series_models.push(series);
         }
         if series_models.is_empty() {
@@ -1028,44 +1044,9 @@ impl Reader<'_> {
         } else {
             categories
         };
-        // Combination charts keep one plot group per contiguous family.
-        if groups.len() > 1 {
-            let plot_groups = groups
-                .iter()
-                .map(|(kind, start, count, secondary)| ChartPlotGroup {
-                    kind: kind.clone(),
-                    series_start: *start,
-                    series_count: *count,
-                    category_axis: if *secondary { "secondary" } else { "primary" }.into(),
-                    value_axis: if *secondary { "secondary" } else { "primary" }.into(),
-                    series_axis: "none".into(),
-                    axis_ids: None,
-                    grouping: match kind.as_str() {
-                        "bar" => Some(grouping.to_string()),
-                        "line" | "area" => Some(
-                            if grouping == "clustered" {
-                                "standard"
-                            } else {
-                                grouping
-                            }
-                            .to_string(),
-                        ),
-                        _ => None,
-                    },
-                    bar_direction: (kind == "bar")
-                        .then(|| if horizontal { "bar" } else { "col" }.to_string()),
-                    scatter_style: None,
-                    radar_style: None,
-                    vary_colors: None,
-                    gap_width: model.bar_gap_width,
-                    overlap: model.bar_overlap,
-                    bubble_scale: None,
-                    bubble_size_represents: None,
-                    show_negative_bubbles: None,
-                })
-                .collect();
-            model.plot_groups = Some(plot_groups);
-        }
+        // Combinations are carried per series (`series_type`,
+        // `use_secondary_axis`), which the renderer's classic path draws on
+        // the shared category axis.
         if primary == "stock" {
             model.stock_hi_low_lines = Some(true);
             if get(plot_chain, "chart:chart:japanese-candle-stick") == Some("true") {
@@ -1146,6 +1127,69 @@ fn merge_font(base: TextFont, over: Option<TextFont>) -> TextFont {
     }
 }
 
+/// `draw:stroke-dash` (§16.41): dot runs and distance relative to the line
+/// width, matched to the DrawingML preset with the same pattern (§20.1.10.48).
+fn stroke_dashes(root: roxmltree::Node<'_, '_>) -> HashMap<String, &'static str> {
+    let draw = crate::xml::NS_DRAW;
+    let mut out = HashMap::new();
+    for node in root
+        .descendants()
+        .filter(|n| xml::is(*n, draw, "stroke-dash"))
+    {
+        let Some(name) = node.attribute((draw, "name")) else {
+            continue;
+        };
+        let length = |key: &str| -> f64 {
+            node.attribute((draw, key))
+                .and_then(|v| percent(v).or_else(|| length_pt(v).map(|pt| pt / 0.75)))
+                .unwrap_or(1.0)
+        };
+        let count = |key: &str| -> u32 {
+            node.attribute((draw, key))
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0)
+        };
+        let (d1, l1, d2, l2) = (
+            count("dots1"),
+            length("dots1-length"),
+            count("dots2"),
+            length("dots2-length"),
+        );
+        let gap = length("distance");
+        let preset = match (d1, d2) {
+            (_, 0) | (0, _) => {
+                let dash = if d1 > 0 { l1 } else { l2 };
+                if dash <= 1.5 {
+                    "sysDot"
+                } else if dash >= 6.0 {
+                    "lgDash"
+                } else if gap <= 1.5 {
+                    "sysDash"
+                } else {
+                    "dash"
+                }
+            }
+            (_, n) => {
+                let long = l1.max(l2);
+                match (long >= 6.0, n >= 2 || d1 >= 2) {
+                    (true, true) => "lgDashDotDot",
+                    (true, false) => "lgDashDot",
+                    (false, true) => "sysDashDotDot",
+                    (false, false) => {
+                        if gap <= 1.5 {
+                            "sysDashDot"
+                        } else {
+                            "dashDot"
+                        }
+                    }
+                }
+            }
+        };
+        out.insert(name.to_string(), preset);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1208,7 +1252,7 @@ mod tests {
         let labels = model.series[0].series_data_labels.as_ref().unwrap();
         assert!(labels.show_val);
         assert_eq!(labels.position.as_deref(), Some("outEnd"));
-        assert_eq!(model.plot_groups.as_ref().map(Vec::len), Some(2));
+        assert!(model.plot_groups.is_none());
     }
 
     struct Fixed;
