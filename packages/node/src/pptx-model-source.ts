@@ -6,7 +6,10 @@ import type { OoxmlNodeSessionOptions } from './session-options.ts';
 import { resolveNodeSessionInput } from './model-source.ts';
 import { PptxPresentationSessionImpl, type OpenPptxPresentationOptions } from './pptx.ts';
 
-export type PptxModelSourceAcquisition = ReturnType<typeof acquirePptxSessionFromArchive>;
+export type PptxModelSourceAcquisition = ReturnType<typeof acquirePptxSessionFromArchive> & {
+  /** True when the built-in parser opened the input (the source declined it). */
+  readonly parsedTextChain: boolean;
+};
 
 export async function openPptxSource(
   buffer: ArrayBuffer | Uint8Array,
@@ -28,6 +31,9 @@ export async function openPptxSource(
   return new PptxPresentationSessionImpl(
     acquired.closeArchive, archive, acquired.bootstrap,
     acquired.metrics, options.signal, resolveCjkFallback(options.cjkFallback),
+    // A model source's slides have no proven parsed colour chain; input the
+    // source declined went through the built-in parser and keeps it.
+    acquired.parsedTextChain,
   );
 }
 
@@ -46,7 +52,7 @@ export async function acquirePptxInput(
     buffer, 'pptx', { ...options, sources: [options.legacyPpt, options.odp] }, validatePptxModelSourceArchive,
   );
   if (input.kind === 'ooxml') {
-    return acquirePptxNodeSession(input.bytes, wasmModule(), options);
+    return { ...await acquirePptxNodeSession(input.bytes, wasmModule(), options), parsedTextChain: true };
   }
   try {
     validatePptxModelSourceViewDefaults(input.opened.viewDefaults);
@@ -54,9 +60,12 @@ export async function acquirePptxInput(
     try { input.opened.close(); } catch {}
     throw error;
   }
-  return acquirePptxSessionFromArchive({
-    archive: input.opened.archive,
-    sourceByteLength: input.sourceByteLength,
-    closeArchive: input.opened.close,
-  }, options);
+  return {
+    ...acquirePptxSessionFromArchive({
+      archive: input.opened.archive,
+      sourceByteLength: input.sourceByteLength,
+      closeArchive: input.opened.close,
+    }, options),
+    parsedTextChain: false,
+  };
 }

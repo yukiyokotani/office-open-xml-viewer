@@ -154,6 +154,10 @@ export class PptxPresentationSessionImpl implements PptxPresentationSession {
     private readonly metrics: OoxmlResourceMetricsSession,
     private readonly signal?: AbortSignal,
     private readonly cjkFallback?: CjkLang,
+    /** Slides come from this package's own parser, so their text colour
+     * chains are fully resolved (issue #1989). A model source passes false
+     * and keeps the 0.89.7 theme or `defaultTextColor` fallback. */
+    private readonly parsedTextChain = true,
   ) {
     this.slideCount = bootstrap.slideCount;
     this.slideWidth = bootstrap.slideWidth;
@@ -258,7 +262,7 @@ export class PptxPresentationSessionImpl implements PptxPresentationSession {
         ));
         this.metrics.observeUsage(this.usage);
         this.consumedSlides = index + 1;
-        markParsedPptxSlide(slide);
+        if (this.parsedTextChain) markParsedPptxSlide(slide);
         yield slide;
       }
     } catch (error) {
