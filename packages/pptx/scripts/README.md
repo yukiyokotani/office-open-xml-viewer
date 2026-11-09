@@ -20,3 +20,13 @@ node scripts/extract-presets.mjs scripts/preset-shape-definitions.xml ../core/sr
 The runtime engine (`packages/core/src/shape/preset-geometry/`) consumes only the generated JSON;
 the XML is kept in-tree so anyone can re-run the extractor and audit the
 compact output against the source.
+
+# Preset text-warp definitions
+
+`preset-text-warp-definitions.xml` is the ECMA-376 Part 1 §20.1.9.19
+`presetTextWarpDefinitions.xml` file. `extract-text-warps.mjs` converts it to
+the compact JSON that the shared preset-geometry evaluator reads:
+
+```bash
+node scripts/extract-text-warps.mjs scripts/preset-text-warp-definitions.xml ../core/src/shape/preset-geometry/text-warp-presets.json
+```

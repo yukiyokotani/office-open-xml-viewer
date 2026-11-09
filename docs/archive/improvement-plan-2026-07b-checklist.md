@@ -5,7 +5,7 @@
 > 実装、テスト、open issue を参照し、資料の位置付けは [`README.md`](README.md)
 > を参照する。
 
-`docs/improvement-plan-2026-07b.md` の実行トラッカー。項目 ID(CH1, XF2, WD3, IX1, SC5, RB1, PD1, QA6, AR1 …)は計画本文の表を参照。
+`docs/archive/improvement-plan-2026-07b.md` の実行トラッカー。項目 ID(CH1, XF2, WD3, IX1, SC5, RB1, PD1, QA6, AR1 …)は計画本文の表を参照。
 チェック状態はこの履歴資料が最後に更新された時点の記録であり、今後の作業管理には使用しない。
 
 ## 前提・引き継ぎ事項
