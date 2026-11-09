@@ -83,6 +83,7 @@ const fingerprint = sha256(JSON.stringify({
   odtWasm: sha256(readFileSync(odtWasm)),
   native: sha256(readFileSync(nativeBinary)),
   maxPages: process.env.ODF_HARNESS_MAX_PAGES ?? '0',
+  loFaces: process.env.ODF_HARNESS_LO_FACES ?? '0',
 }));
 const fingerprintPath = join(runDir, 'fingerprint.txt');
 if (existsSync(join(runDir, 'results')) && readdirSync(join(runDir, 'results')).length > 0) {

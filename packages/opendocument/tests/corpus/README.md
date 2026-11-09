@@ -55,6 +55,14 @@ rejection, and the report lists files where the browser result and the
 native result disagree. Set `ODF_HARNESS_MAX_PAGES=N` to compare only the
 first N pages of each document for a quick sample.
 
+The renderer loads the opt-in equation and TIFF renderers, as the DOCX visual
+fixture does. `ODF_HARNESS_LO_FACES=1` also serves, through the `fonts` load
+option, the faces LibreOffice drew each PDF with (`fonts.mjs`: read with
+`pdffonts`/`pdftohtml`; LibreOffice's Carlito/Caladea replacements, its
+fallback faces for families this machine lacks, and its bundled fonts). It
+is off by default: the DOCX layout measures a served face's line box without
+the face's hhea line gap, so served faces skew line pitch.
+
 Page scores:
 
 - **Layout diff** (primary): the share of inked pixels, on either side, with
