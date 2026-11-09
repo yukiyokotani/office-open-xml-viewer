@@ -18,6 +18,16 @@
 - 条件付き書式の数式（`expression` 等）は、キャッシュ値を入力とする部分的な
   評価器（`src/formula.ts`）で評価する。この評価器の中の `TODAY()` / `NOW()`
   は現在時刻を参照する。完全な評価は #1547 で追跡。
+- 例外: `feature/spreadsheet-formulas-support` ブランチは上記方針の意図的な
+  フォークである。`LoadOptions.recalculateFormulas: true` のオプトイン時のみ
+  `src/recalc.ts` が Formualizer（MIT / Apache-2.0）で `<f>` を再計算し、
+  結果を `cell.value` に書き戻す（`cell.formula` は不変）。エンジン本体は
+  `src/vendor/` に同梱した Formualizer のプレーン JS ラッパー +
+  `.wasm` 静的アセットを `formualizer-loader.ts` が手動インスタンス化する
+  （npm パッケージの bundler 向け glue は Angular/esbuild が拒否するため
+  直接 import しない）。デフォルト（未指定）
+  は従来通りバイト同一。`formula.ts`・`number-format.ts`・`renderer.ts` の呼び出し
+  側は変更禁止。再計算の失敗はキャッシュ値にフォールバックし、描画を壊さない。
 
 ## ディレクトリ構成（主要なもの）
 

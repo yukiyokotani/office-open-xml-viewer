@@ -66,7 +66,11 @@ pnpm add @silurus/ooxml
 >   `.wasm` into your served output and point the viewer at it with the
 >   `wasmUrl` load option. For Angular CLI, copy the required
 >   `*_parser_bg.wasm` asset from `node_modules/@silurus/ooxml/dist` into the
->   served output and pass its public URL to the viewer.
+>   served output and pass its public URL to the viewer. Opt-in formula
+>   recalculation (`LoadOptions.recalculateFormulas`) needs its own engine
+>   file staged the same way: copy `formualizer_wasm_bg.wasm` from
+>   `node_modules/@silurus/ooxml/dist` next to the chunks (or pass
+>   `LoadOptions.formualizerWasm` for a CDN / self-hosted copy).
 >
 > `wasmUrl` also serves the parser WASM from a CDN or any path you control:
 >
@@ -907,7 +911,7 @@ file without uploading it.
 | **Workbook** | Multiple sheets, sheet names | ✅ |
 | | Sheet tab colors (`<sheetPr><tabColor>` — theme / tint / indexed / rgb) | ✅ |
 | **Cells** | Text, number, boolean, error values | ✅ |
-| | Formula results (cached `<v>` only; formulas, including `TODAY()` / `NOW()`, are never recalculated) | ✅ |
+| | Formula results (cached `<v>` by default — formulas, including `TODAY()` / `NOW()`, are never recalculated unless you opt in with `recalculateFormulas: true`, which evaluates them via the Formualizer engine — MIT/Apache-2.0-licensed, lazily loaded) | ✅ |
 | | Dates (ECMA-376 date format codes) | ✅ |
 | | Rich text (per-run formatting) | ✅ |
 | | East-Asian furigana (`<rPh>` §18.4.6 + `<phoneticPr>` §18.4.3 — drawn when a cell opts in via `ph="1"`; row-level `<row ph>` inheritance) | ✅ |

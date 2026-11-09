@@ -1,5 +1,6 @@
 import { inheritCellFontLanguage } from './internal/cell-font-language.js';
 import type {
+  CellValue,
   ViewportRange,
   RenderViewportOptions,
   WorkerResponse,
@@ -314,6 +315,12 @@ export type RenderWorkerRequest =
     }
   | { type: 'releaseViewProjection'; projectionId: number }
   | { type: 'evictWorksheets'; id: number; sheetIndices: number[] }
+  // Opt-in formula recalculation (`LoadOptions.recalculateFormulas`): the
+  // main thread evaluates and forwards overwritten formula cells. The worker
+  // applies them to its archive-materialized copy (which holds cached `<v>`),
+  // so worker renders match the main-thread model without running the
+  // engine in-worker. Application is idempotent — see render-worker.
+  | { type: 'applyRecalculatedValues'; id: number; sheetIndex: number; cells: Array<{ row: number; col: number; value: CellValue }> }
   // Worker render mode decodes images in-worker via a getImage closure; this arm
   // exists only for protocol parity with worker.ts (so a stray extractImage
   // never hangs). The render worker reads bytes straight from its retained
@@ -346,4 +353,5 @@ export type RenderWorkerResponse =
   // as `resolve-on-main`. Nothing was painted; tentative input only.
   | { type: 'errorPlaceholderRequired'; id: number; sheetIndex: number }
   | { type: 'worksheetsEvicted'; id: number }
+  | { type: 'recalculatedValuesApplied'; id: number }
   | ({ type: 'sheetSessionOpened'; id: number } & PullSessionIdentity<number>);
