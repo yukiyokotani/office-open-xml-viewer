@@ -100,7 +100,8 @@ chart secondary value-axis details); existing code is unaffected.
   every level of subtitle and body text keep the theme text colour. Hyperlinks
   marked to use the text colour (`a14:hlinkClr val="tx"`) keep the inherited
   text colour instead of the theme hyperlink colour. Models passed directly to
-  `renderSlide` keep the 0.89.7 fallback colour (#1989).
+  `renderSlide`, and slides from a model source such as `legacyPpt`, keep the
+  0.89.7 fallback colour (#1989).
 - **PowerPoint list styles:** character formatting on a list style's default
   paragraph properties (`a:defPPr`), such as bold, italic, underline, fonts,
   language or hyperlinks, no longer reaches text, as in PowerPoint (#1992).
