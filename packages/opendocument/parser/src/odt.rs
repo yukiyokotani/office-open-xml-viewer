@@ -854,24 +854,26 @@ impl<'a> Reader<'a> {
                 .unwrap_or(0.0)
         };
         let rtl = matches!(cascade.get(NS_STYLE, "writing-mode"), Some("rl-tb" | "rl"));
+        // DOCX alignment is logical in a right-to-left paragraph (left is the
+        // start edge); ODF's start/end are logical, left/right physical
+        // (XSL §7.15.9).
         let alignment = match cascade.get(NS_FO, "text-align") {
-            None => "left",
-            Some("start") => {
+            None | Some("start") => "left",
+            Some("end") => "right",
+            Some("left") => {
                 if rtl {
                     "right"
                 } else {
                     "left"
                 }
             }
-            Some("end") => {
+            Some("right") => {
                 if rtl {
                     "left"
                 } else {
                     "right"
                 }
             }
-            Some("left") => "left",
-            Some("right") => "right",
             Some("center") => "center",
             // §20.216 fo:text-align-last: a justified last line too.
             Some("justify") if cascade.get(NS_FO, "text-align-last") == Some("justify") => {
@@ -1267,6 +1269,14 @@ impl<'a> Reader<'a> {
                             }
                         }
                     };
+                    // Spacing taller than the page body pushes the paragraph
+                    // past any page in LibreOffice too; it is capped so the
+                    // paragraph's first line (about 1.5 em) still fits a
+                    // page, which the DOCX pagination requires.
+                    let line = paragraph.default_font_size.unwrap_or(12.0) * 1.5;
+                    paragraph.space_before = paragraph
+                        .space_before
+                        .min((self.text_height - line).max(0.0));
                     paragraph.space_after = 0.0;
                     paragraph.contextual_spacing = false;
                     break_pending = collected.page_break_after;
