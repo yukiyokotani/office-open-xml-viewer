@@ -12711,20 +12711,24 @@ mod tests {
             )),
             Some(vec![
                 PathPaint {
+                    fill_rule: None,
                     fill: None,
                     stroke: false
                 },
                 PathPaint {
+                    fill_rule: None,
                     fill: Some("none".into()),
                     stroke: true
                 },
                 PathPaint {
+                    fill_rule: None,
                     fill: Some("darken".into()),
                     stroke: true
                 },
             ])
         );
         let json = serde_json::to_string(&PathPaint {
+            fill_rule: None,
             fill: None,
             stroke: false,
         })

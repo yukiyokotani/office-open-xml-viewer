@@ -69,3 +69,7 @@ required-features = ["odp"]
 [[example]]
 name = "inspect_ods"
 required-features = ["ods"]
+
+[[example]]
+name = "inspect_odp_charts"
+required-features = ["odp"]

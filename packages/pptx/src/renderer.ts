@@ -1549,6 +1549,12 @@ const INDIC_CS_GLYPH_RE = /[\p{Script=Devanagari}\p{Script=Thai}\p{Script=Bengal
 /** PowerPoint paints non-zero DrawingML baseline runs at about 65% of their
  * authored size. The authored size still owns line height and baseline offset;
  * this helper is only for the glyph font used by measure and paint. */
+/** LibreOffice editeng `constScaleLevels` (font scale, Y spacing scale). */
+const LIBREOFFICE_SHRINK_LEVELS: readonly (readonly [number, number])[] = [
+  [1.0, 0.9], [0.925, 0.9], [0.85, 0.9], [0.85, 0.8], [0.775, 0.8], [0.7, 0.8],
+  [0.625, 0.8], [0.55, 0.8], [0.475, 0.8], [0.4, 0.8], [0.325, 0.8], [0.25, 0.8],
+];
+
 function baselineDrawSizePx(authoredSizePx: number, baseline: number | undefined): number {
   return baseline != null && baseline !== 0 ? authoredSizePx * 0.65 : authoredSizePx;
 }
@@ -4284,6 +4290,8 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
       el.custGeom.forEach((cmds, index) => {
         const paint = pathPaint[index];
         const filled = paint.fill !== 'none';
+        // Model sources may fill a path's subpaths even-odd (OpenDocument).
+        const fillRule: CanvasFillRule = paint.fillRule === 'evenodd' ? 'evenodd' : 'nonzero';
         if (silhouette && !filled) return;
         target.beginPath();
         buildCustomPath(target, [cmds], bx, by, bw, bh);
@@ -4294,14 +4302,14 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
             try { painted = paintImageFill(target); } finally { target.restore(); }
           } else if (tFill) {
             target.fillStyle = tFill;
-            target.fill();
+            target.fill(fillRule);
             painted = true;
           }
           const overlay = painted && !silhouette ? pathFillModeOverlay(paint.fill) : null;
           if (overlay) {
             target.save();
             target.fillStyle = overlay;
-            target.fill();
+            target.fill(fillRule);
             target.restore();
           }
           if (painted && !silhouette && !shadowCleared) {
@@ -5183,13 +5191,19 @@ export function renderTextBody(
   }
 
   // buildLayout runs Pass 1 at a given font scale (1.0 = normal; <1 = normAutoFit shrink)
-  const buildLayout = (fontScale: number, metric: boolean): {
+  // `spacingScale` (model sources with shrinkOnOverflow): LibreOffice's
+  // spacing factor, which scales proportional/single line heights and
+  // paragraph spacing instead of PowerPoint's lnSpcReduction/fontScale.
+  const buildLayout = (fontScale: number, metric: boolean, spacingScale?: number): {
     allLines: LineEntry[];
     totalHeight: number;
     requiredHeight: number;
     metricOk: boolean;
   } => {
   const bodyDefaultFontSizePx = (body.defaultFontSize ?? 18) * PT_TO_EMU * scale * fontScale;
+  const lineSpacingReduction = spacingScale != null
+    ? 1 - spacingScale
+    : body.autoFit === 'norm' && body.lnSpcReduction != null ? body.lnSpcReduction : null;
   const allLines: LineEntry[] = [];
   let totalHeight = 0;
   // Visual bounds may be taller than the baseline advance. This is especially
@@ -5256,8 +5270,9 @@ export function renderTextBody(
     // spaceBefore/After are in hundredths of a point → convert to canvas px.
     // Percentage forms (ECMA-376 §21.1.2.3.11 spcPct) are resolved per line
     // below, against the text size of the line the spacing is attached to.
-    const spaceBeforePx = para.spaceBefore != null ? (para.spaceBefore / 100) * PT_TO_EMU * scale * fontScale : 0;
-    const spaceAfterPx  = para.spaceAfter  != null ? (para.spaceAfter  / 100) * PT_TO_EMU * scale * fontScale : 0;
+    const paraSpacingScale = spacingScale ?? fontScale;
+    const spaceBeforePx = para.spaceBefore != null ? (para.spaceBefore / 100) * PT_TO_EMU * scale * paraSpacingScale : 0;
+    const spaceAfterPx  = para.spaceAfter  != null ? (para.spaceAfter  / 100) * PT_TO_EMU * scale * paraSpacingScale : 0;
 
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];
@@ -5383,8 +5398,12 @@ export function renderTextBody(
       // attribute applies only to paragraphs with percentage line spacing." pct
       // and the implicit single (= 100 % percentage) qualify; an absolute
       // spcPts height does not.
-      if (body.autoFit === 'norm' && body.lnSpcReduction != null && para.spaceLine?.type !== 'pts') {
-        lineHeight *= 1 - body.lnSpcReduction;
+      // LibreOffice leaves an explicit 100% proportional line unscaled
+      // (editeng CreateLines: only Prop != 100 and Off take fSpacingY).
+      const loUnscaled = spacingScale != null && para.spaceLine?.type === 'pct'
+        && para.spaceLine.val === 100000;
+      if (lineSpacingReduction != null && para.spaceLine?.type !== 'pts' && !loUnscaled) {
+        lineHeight *= 1 - lineSpacingReduction;
       }
       // PowerPoint's metric line (#1610, powerpoint-line-metrics.ts): the
       // same 1.2 × size box, split at the baseline by the runs' faces and
@@ -5440,7 +5459,7 @@ export function renderTextBody(
           ? { type: 'pts' as const, val: powerPointExactLinePoints(para.spaceLine.val) }
           : para.spaceLine;
         const box = drawingMlSpacedLineBox(natural, spacing, PT_TO_EMU * scale,
-          body.autoFit === 'norm' && body.lnSpcReduction != null ? body.lnSpcReduction : 0);
+          loUnscaled ? 0 : lineSpacingReduction ?? 0);
         lineHeight = box.ascent + box.descent;
         metricAscent = box.ascent;
         metricNaturalDescent = natural.descent;
@@ -5522,11 +5541,11 @@ export function renderTextBody(
   // Try PowerPoint's metric line model first; a body with any face outside
   // it is laid out again with the ordinary model.
   let useMetricLines = true;
-  const layoutAt = (fontScale: number) => {
-    let layout = buildLayout(fontScale, useMetricLines);
+  const layoutAt = (fontScale: number, spacingScale?: number) => {
+    let layout = buildLayout(fontScale, useMetricLines, spacingScale);
     if (useMetricLines && !layout.metricOk) {
       useMetricLines = false;
-      layout = buildLayout(fontScale, false);
+      layout = buildLayout(fontScale, false, spacingScale);
     }
     return layout;
   };
@@ -5546,17 +5565,18 @@ export function renderTextBody(
     if (body.fontScale != null && body.fontScale > 0) {
       if (body.fontScale < 1.0) ({ allLines, requiredHeight } = layoutAt(body.fontScale));
     } else if (body.shrinkOnOverflow && !measureOnly) {
-      // ODF style:shrink-to-fit (model sources): the largest scale at which
-      // the laid-out text fits the frame's content height (LibreOffice
-      // Impress derives it at layout time; nothing is stored in the file).
+      // ODF style:shrink-to-fit (model sources): LibreOffice stores no scale
+      // and derives it while formatting (editeng ImpEditEngine::
+      // ScaleContentToFitWindow). When the text overflows the frame's
+      // content height it tries these (font, spacing) levels in order and
+      // keeps the first that fits, else the last. The spacing factor scales
+      // single/proportional line heights and paragraph spacing.
       const available = Math.max(0, bh - tPad - bPad);
-      if (requiredHeight > available && available > 0) {
-        let lo = 0.05, hi = 1.0;
-        for (let step = 0; step < 10; step += 1) {
-          const mid = (lo + hi) / 2;
-          if (layoutAt(mid).requiredHeight <= available) lo = mid; else hi = mid;
+      if (requiredHeight > available) {
+        for (const [font, spacing] of LIBREOFFICE_SHRINK_LEVELS) {
+          ({ allLines, requiredHeight } = layoutAt(font, spacing));
+          if (requiredHeight <= available) break;
         }
-        ({ allLines, requiredHeight } = layoutAt(lo));
       }
     }
   }

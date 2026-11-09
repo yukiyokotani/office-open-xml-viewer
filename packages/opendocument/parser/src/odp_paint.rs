@@ -86,7 +86,26 @@ pub fn fill(
             } else {
                 "FFFFFF00".to_string()
             };
-            hatch_fill(h, bg, opacity)
+            match hatch_svg(h, &bg, opacity, area) {
+                Some(svg) => {
+                    let (path, resource) = ctx.media.generated("hatch", svg, area);
+                    Fill::Image {
+                        image_path: path.clone(),
+                        mime_type: resource.mime.to_string(),
+                        svg_image_path: Some(path),
+                        dpi: None,
+                        rot_with_shape: Some(true),
+                        src_rect: None,
+                        fill_rect: None,
+                        stretch: true,
+                        tile: None,
+                        alpha: None,
+                        duotone: None,
+                        blip_effects: Vec::new(),
+                    }
+                }
+                None => hatch_fill(h, bg, opacity),
+            }
         }
         "bitmap" => {
             let image = props
@@ -440,6 +459,80 @@ pub fn combined_gradient(g: Nd<'_>, og: Nd<'_>) -> Option<Fill> {
         .map(|&o| (o, with_alpha(&sample(&cs, o).1, sample(&os, o).0)))
         .collect();
     Some(ramp_fill(&colour, &painted))
+}
+
+/// `draw:hatch` (§16.42) drawn exactly for an area of `area` EMU: parallel
+/// hairlines `draw:distance` apart at `draw:rotation` (counter-clockwise),
+/// a second family at +90° for `double` and a third at +45° for `triple`,
+/// over the area colour when `draw:fill-hatch-solid` is set. Lines run
+/// through the area centre, as LibreOffice's hatch texture is laid out on the
+/// object range. The SVG stretches over the area like a picture fill, so it
+/// turns and mirrors with the shape. `None` for an empty area.
+fn hatch_svg(h: Nd<'_>, bg: &str, opacity: f64, area: (f64, f64)) -> Option<Vec<u8>> {
+    let (w, ht) = area;
+    if !(w > 0.0 && ht > 0.0) {
+        return None;
+    }
+    let fg = h
+        .attribute((NS_DRAW, "color"))
+        .and_then(color)
+        .unwrap_or_else(|| "000000".into());
+    let distance = h
+        .attribute((NS_DRAW, "distance"))
+        .and_then(length_emu)
+        .unwrap_or(0.1 * 360_000.0)
+        .max(9_525.0);
+    let rotation = match h.attribute((NS_DRAW, "rotation")) {
+        Some(v) if v.trim().chars().all(|c| c.is_ascii_digit() || c == '-') => {
+            v.trim().parse::<f64>().unwrap_or(0.0) / 10.0
+        }
+        Some(v) => angle_degrees(v).unwrap_or(0.0),
+        None => 0.0,
+    };
+    let families: &[f64] = match h.attribute((NS_DRAW, "style")).unwrap_or("single") {
+        "double" => &[0.0, 90.0],
+        "triple" => &[0.0, 90.0, 45.0],
+        _ => &[0.0],
+    };
+    // Implementation bound on the lines drawn (very fine hatches on large
+    // areas): beyond it the distance is widened.
+    let half_diag = 0.5 * w.hypot(ht);
+    let mut step = distance;
+    let per_family = (2.0 * half_diag / step).ceil();
+    if per_family > 4000.0 {
+        step = 2.0 * half_diag / 4000.0;
+    }
+    let mut d = String::new();
+    let (cx, cy) = (w / 2.0, ht / 2.0);
+    for extra in families {
+        // Counter-clockwise on the page: direction (cos, -sin).
+        let a = (rotation + extra).to_radians();
+        let (dx, dy) = (a.cos(), -a.sin());
+        let (nx, ny) = (-dy, dx);
+        let count = (half_diag / step).ceil() as i64;
+        for k in -count..=count {
+            let off = k as f64 * step;
+            let (px, py) = (cx + nx * off, cy + ny * off);
+            let (x0, y0) = (px - dx * half_diag, py - dy * half_diag);
+            let (x1, y1) = (px + dx * half_diag, py + dy * half_diag);
+            d.push_str(&format!("M{x0:.0} {y0:.0}L{x1:.0} {y1:.0}"));
+        }
+    }
+    let background = if bg.len() == 6 {
+        format!(r##"<rect width="{w:.0}" height="{ht:.0}" fill="#{bg}"/>"##)
+    } else if bg.len() == 8 && !bg.ends_with("00") {
+        let alpha = u8::from_str_radix(&bg[6..8], 16).unwrap_or(255) as f64 / 255.0;
+        format!(
+            r##"<rect width="{w:.0}" height="{ht:.0}" fill="#{}" fill-opacity="{alpha:.3}"/>"##,
+            &bg[..6]
+        )
+    } else {
+        String::new()
+    };
+    let svg = format!(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {w:.0} {ht:.0}" width="{w:.0}" height="{ht:.0}" preserveAspectRatio="none">{background}<path d="{d}" stroke="#{fg}" stroke-opacity="{opacity:.3}" stroke-width="9525" fill="none"/></svg>"##
+    );
+    Some(svg.into_bytes())
 }
 
 /// `draw:hatch` (§16.41) as the nearest DrawingML preset pattern: line

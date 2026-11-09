@@ -909,6 +909,11 @@ pub struct PathPaint {
     pub fill: Option<String>,
     /// Whether the path is stroked.
     pub stroke: bool,
+    /// Canvas fill rule of the path's subpaths: `evenodd` for sources that
+    /// fill poly-polygons alternately (OpenDocument shapes, as LibreOffice
+    /// draws them); `None` is DrawingML's nonzero.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fill_rule: Option<String>,
 }
 
 /// A single path command inside a custGeom pathLst.

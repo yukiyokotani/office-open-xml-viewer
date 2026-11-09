@@ -74,6 +74,14 @@ describe('normAutofit without stored fontScale (PowerPoint PDF controls)', () =>
     expect(paintedSizes(text, 44)).toEqual([24, 24, 24]);
   });
 
+  it('model sources with shrinkOnOverflow take the first LibreOffice level that fits', () => {
+    // Three 24 pt lines (28.8 pt each, 86.4 pt): 80 pt fits at spacing 0.9
+    // alone; 60 pt needs a font level (0.85); ample room keeps 24 pt.
+    expect(paintedSizes(body({ shrinkOnOverflow: true }), 140)).toEqual([24, 24, 24]);
+    expect(paintedSizes(body({ shrinkOnOverflow: true }), 80)).toEqual([24, 24, 24]);
+    expect(paintedSizes(body({ shrinkOnOverflow: true }), 60)).toEqual([20.4, 20.4, 20.4]);
+  });
+
   it('uses a stored scale even when it does not match the content', () => {
     expect(paintedSizes(body({ fontScale: 0.5 }), 140)).toEqual([12, 12, 12]);
   });

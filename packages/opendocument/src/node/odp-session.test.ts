@@ -5,7 +5,7 @@
 import { describe, expect, it } from 'vitest';
 import { buildOdpFixture } from '../odp-fixture.js';
 import { testOdpSource } from '../test-sources.js';
-import { materializePptxPresentation } from './node-facade.js';
+import { materializePptxPresentation, openPptxPresentation } from './node-facade.js';
 
 type Run = { type: string; text?: string; fontSize?: number; bold?: boolean; color?: string; fontFamily?: string; fieldType?: string };
 type Paragraph = { runs: Run[]; marL: number; indent: number; bullet: { type: string; char?: string }; alignment: string };
@@ -139,6 +139,28 @@ describe('ODP through the PPTX Node session', () => {
     expect(element.chart.series).toHaveLength(1);
   });
 
+  it('draws hatches exactly as an SVG area picture', async () => {
+    const bytes = buildOdpFixture({
+      styles: '<draw:hatch draw:name="h1" draw:style="double" draw:color="#ff0000" draw:distance="0.5cm" draw:rotation="450"/>',
+      automaticStyles: '<style:style style:name="gr1" style:family="graphic"><style:graphic-properties draw:fill="hatch" draw:fill-hatch-name="h1" draw:fill-hatch-solid="true" draw:fill-color="#ffff00" draw:stroke="none"/></style:style>',
+      pages: '<draw:page draw:master-page-name="M"><draw:rect draw:style-name="gr1" svg:x="0cm" svg:y="0cm" svg:width="4cm" svg:height="2cm"/></draw:page>',
+    });
+    const session = await openPptxPresentation(bytes, { odp: testOdpSource() });
+    try {
+      const slide = (await session.slides().next()).value as unknown as { elements: { fill: { fillType: string; imagePath: string; stretch: boolean } }[] };
+      const fill = slide.elements[0]!.fill;
+      expect(fill).toMatchObject({ fillType: 'image', stretch: true });
+      const svg = await (await session.getImage(fill.imagePath, 'image/svg+xml')).text();
+      expect(svg).toContain('viewBox="0 0 1440000 720000"');
+      expect(svg).toContain('fill="#FFFF00"');
+      expect(svg).toContain('stroke="#FF0000"');
+      // Two families of 0.5 cm lines over the 4.47 cm diagonal.
+      expect(svg.match(/M/gu)!.length).toBe(2 * (2 * Math.ceil(0.5 * Math.hypot(4, 2) / 0.5) + 1));
+    } finally {
+      await session.close();
+    }
+  });
+
   it('maps gradients, markers and hidden slides; rejects encrypted packages', async () => {
     const model = await open(buildOdpFixture({
       styles: '<draw:gradient draw:name="g1" draw:style="linear" draw:start-color="#000000" draw:end-color="#ffffff" draw:angle="0deg" draw:border="0%"/>'
@@ -151,6 +173,8 @@ describe('ODP through the PPTX Node session', () => {
         + '<draw:page draw:style-name="dp2" draw:master-page-name="M"/>',
     }));
     const [rect, line, arrow] = model.slides[0]!.elements;
+    // LibreOffice fills subpaths alternately.
+    expect((rect as unknown as { custGeomPaint: { fillRule: string }[] }).custGeomPaint[0]!.fillRule).toBe('evenodd');
     expect(rect!.fill).toMatchObject({ fillType: 'gradient', angle: 90, stops: [{ position: 0, color: '000000' }, { position: 1, color: 'FFFFFF' }] });
     expect(line!.stroke).toMatchObject({ color: 'FF0000', width: cm(0.1) });
     // The 0.4cm × 0.6cm arrow's tip sits on the line end; the line stops under it.

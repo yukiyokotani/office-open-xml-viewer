@@ -157,6 +157,7 @@ pub fn read(package: &OdfPackage) -> Result<OdpDeck, String> {
             page_names: &page_names,
             budget: &mut budget,
             next_id: 1,
+            page_size: (width, height),
         };
         slides.push(reader.slide(*page, master, &decls)?);
     }
@@ -194,6 +195,8 @@ struct SlideReader<'a, 'r, 'p> {
     page_names: &'r HashMap<String, usize>,
     budget: &'r mut usize,
     next_id: u32,
+    /// Slide size in EMU (page backgrounds are laid out on it).
+    page_size: (f64, f64),
 }
 
 /// Placeholder classes of a master page that are layout templates, not
@@ -246,7 +249,7 @@ impl<'a, 'r, 'p> SlideReader<'a, 'r, 'p> {
 
         // Background (§20.4): the slide's own fill, else the master's, unless
         // presentation:background-visible hides the master background.
-        let area = (0.0, 0.0);
+        let area = self.page_size;
         let own_fill = page_props.get(NS_DRAW, "fill");
         let mut background = None;
         if matches!(own_fill, Some(kind) if kind != "none") {
@@ -1389,7 +1392,6 @@ fn normalize(geometry: &Geometry, w: f64, h: f64) -> (Vec<Vec<PathCmd>>, Option<
     let ny = |y: f64| if h > 0.0 { y / h } else { 0.0 };
     let mut paths = Vec::with_capacity(geometry.paths.len());
     let mut paint = Vec::with_capacity(geometry.paths.len());
-    let mut custom_paint = false;
     for path in &geometry.paths {
         let cmds = path
             .segs
@@ -1420,13 +1422,16 @@ fn normalize(geometry: &Geometry, w: f64, h: f64) -> (Vec<Vec<PathCmd>>, Option<
         } else {
             path.fill_mode.map(str::to_string)
         };
-        custom_paint |= fill.is_some() || !path.stroke;
+        // LibreOffice fills a path's subpaths alternately (even-odd, the
+        // VCL poly-polygon rule): a subpath inside another is a hole whatever
+        // its winding, and self-intersections leave holes.
         paint.push(PathPaint {
             fill,
             stroke: path.stroke,
+            fill_rule: Some("evenodd".to_string()),
         });
     }
-    (paths, custom_paint.then_some(paint))
+    (paths, Some(paint))
 }
 
 fn plain_shape(

@@ -86,6 +86,21 @@ impl<'p> Media<'p> {
         Some((path, resource))
     }
 
+    /// Register generated SVG content (an exact hatch fill) under a
+    /// synthetic resource key no package item can take (`odp-generated/`).
+    pub fn generated(&mut self, kind: &str, svg: Vec<u8>, size: (f64, f64)) -> (String, Resource) {
+        let key = format!("odp-generated/{kind}-{}.svg", self.converted.len());
+        let resource = Resource {
+            mime: "image/svg+xml",
+            pixels: None,
+            dpi: None,
+            frame: Some(size),
+        };
+        self.converted.insert(key.clone(), svg);
+        self.admitted.insert(key.clone(), resource.clone());
+        (key, resource)
+    }
+
     pub fn package(&self) -> &'p OdfPackage {
         self.package
     }
