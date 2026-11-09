@@ -246,6 +246,14 @@ impl<'a, 'i> Pages<'a, 'i> {
             .any(|layout| layout.usage == "mirrored")
     }
 
+    /// Horizontal writing without a layout grid on the page style's body
+    /// pages: the scope in which LibreOffice's fixed-line placement was
+    /// measured.
+    pub fn plain_horizontal(&self, master: &str) -> bool {
+        let layout = self.layout(self.body_master(master));
+        layout.text_direction.is_none() && layout.grid.is_none()
+    }
+
     pub fn footnote_separator(&self, master: &str) -> Option<NoteSeparatorMark> {
         self.layout(self.body_master(master)).footnote_separator
     }

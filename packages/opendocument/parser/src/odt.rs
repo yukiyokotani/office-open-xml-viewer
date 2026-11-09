@@ -1025,10 +1025,14 @@ impl<'a> Reader<'a> {
                 .get(NS_LOEXT, "word-spacing-minimum")
                 .and_then(|v| percent(v).ok())
                 .is_some_and(|v| v < 1.0);
+        // LibreOffice's placement of fixed and minimum lines, within its
+        // measured scope (horizontal pages without a layout grid; vertical
+        // and grid pages keep the DOCX placement, which the corpus matches
+        // better there).
         let line_extra_above = matches!(
             line_spacing.as_ref().map(|spacing| spacing.rule.as_str()),
             Some("exact" | "atLeast")
-        );
+        ) && self.pages.plain_horizontal(&self.current_master);
         let paragraph = DocParagraph {
             alignment: alignment.into(),
             indent_left,
