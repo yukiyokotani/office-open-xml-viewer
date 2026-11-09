@@ -294,6 +294,8 @@ pub fn body_frame(graphic: &Props<'_>) -> TextBody {
         compat_ln_spc: None,
         text_warp: None,
         shrink_on_overflow: shrink,
+        // LibreOffice lays text out with the fonts' natural line height.
+        font_line_metrics: true,
     }
 }
 

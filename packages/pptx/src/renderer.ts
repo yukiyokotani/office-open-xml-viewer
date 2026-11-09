@@ -1549,6 +1549,44 @@ const INDIC_CS_GLYPH_RE = /[\p{Script=Devanagari}\p{Script=Thai}\p{Script=Bengal
 /** PowerPoint paints non-zero DrawingML baseline runs at about 65% of their
  * authored size. The authored size still owns line height and baseline offset;
  * this helper is only for the glyph font used by measure and paint. */
+/**
+ * LibreOffice editeng's line box (ImpEditEngine::CreateLines) for a line
+ * whose natural box is the fonts' ascent + descent, under the paragraph's
+ * line spacing and the shrink spacing factor `spacing` (1 = none):
+ * proportional below 100% shrinks the height and caps the ascent at 80% of
+ * the scaled text height; above 100% the extra height goes above the
+ * baseline; single spacing (and 100%, which LibreOffice reads as single)
+ * takes the spacing factor with the ascent capped at 80%; a fixed height
+ * moves the difference above the baseline.
+ */
+export function libreOfficeLineBox(
+  natural: { ascent: number; descent: number },
+  spaceLine: { type: 'pct' | 'pts'; val: number } | null | undefined,
+  pxPerEmu: number,
+  spacing: number,
+): { ascent: number; descent: number } {
+  const height = natural.ascent + natural.descent;
+  let ascent = natural.ascent;
+  let total = height;
+  if (spaceLine?.type === 'pts') {
+    total = spaceLine.val * 12700 * pxPerEmu * spacing;
+    ascent += total - height;
+  } else {
+    const prop = spaceLine?.type === 'pct' ? spaceLine.val / 100000 : 1;
+    if (prop > 0 && prop < 1) {
+      total = height * prop * spacing;
+      ascent = Math.min(ascent, height * spacing * prop * 0.8);
+    } else if (prop > 1) {
+      total = height * prop * spacing;
+      ascent -= height - total;
+    } else if (spacing < 1) {
+      total = height * spacing;
+      ascent = Math.min(ascent, total * 0.8);
+    }
+  }
+  return { ascent, descent: total - ascent };
+}
+
 /** LibreOffice editeng `constScaleLevels` (font scale, Y spacing scale). */
 const LIBREOFFICE_SHRINK_LEVELS: readonly (readonly [number, number])[] = [
   [1.0, 0.9], [0.925, 0.9], [0.85, 0.9], [0.85, 0.8], [0.775, 0.8], [0.7, 0.8],
@@ -5291,7 +5329,16 @@ export function renderTextBody(
       // spAutoFit, but PowerPoint does not repeat that box as the implicit
       // baseline pitch when `<a:lnSpc>` is omitted.
       let resolvedFontLine = 0;
+      // fontLineMetrics (model sources): the line's natural box is the
+      // largest ascent and the largest descent of its fonts.
+      let fontAscent = 0, fontDescent = 0;
       for (const seg of line.segments) {
+        if (body.fontLineMetrics && !seg.math && !seg.isTab && seg.font) {
+          ctx.font = seg.font;
+          const m = ctx.measureText(FONT_BASELINE_SENTINEL);
+          fontAscent = Math.max(fontAscent, m.fontBoundingBoxAscent ?? seg.sizePx * 0.8);
+          fontDescent = Math.max(fontDescent, m.fontBoundingBoxDescent ?? seg.sizePx * 0.2);
+        }
         // For an equation, the line must be at least as tall as its own font
         // size (so a short label like "y"/"p"/"z" gets the normal font-ascent
         // baseline and sits where PowerPoint puts it — not floated up by its
@@ -5363,7 +5410,17 @@ export function renderTextBody(
       // percentage spacing therefore consumes the painted natural line box
       // even for one final line. Omitted lnSpc keeps its glyph-box exception
       // in a positive row. Neither path uses a substituted font's design box.
-      const naturalSingle = maxSizePx * 1.2;
+      if (body.fontLineMetrics && fontAscent + fontDescent === 0) {
+        // An empty line: the face and size of its end-of-paragraph mark.
+        const end = para.endRunProperties;
+        const family = end?.fontFamily ?? para.defFontFamily ?? 'sans-serif';
+        ctx.font = `${end?.bold ? 'bold ' : ''}${maxSizePx}px "${family}"`;
+        const m = ctx.measureText(FONT_BASELINE_SENTINEL);
+        fontAscent = m.fontBoundingBoxAscent ?? maxSizePx * 0.8;
+        fontDescent = m.fontBoundingBoxDescent ?? maxSizePx * 0.2;
+      }
+      const naturalSingle = body.fontLineMetrics ? fontAscent + fontDescent : maxSizePx * 1.2;
+      if (body.fontLineMetrics) metricOk = false;
       const useResolvedFontMetrics = isSpAutoFit && resolvedFontLine > naturalSingle;
       // A live resolved font box describes containment, not baseline advance.
       // Keeping the two values separate prevents a tall Meiryo design box from
@@ -5447,7 +5504,13 @@ export function renderTextBody(
           seg.fontAlgnOffsetPx = offset;
         }
       }
-      if (metric && metricOk && !(measureOnly && !isSpAutoFit && !measureNaturalLineSpacing && !para.spaceLine)) {
+      if (body.fontLineMetrics) {
+        const box = libreOfficeLineBox({ ascent: fontAscent, descent: fontDescent }, para.spaceLine,
+          PT_TO_EMU * scale, lineSpacingReduction != null ? 1 - lineSpacingReduction : 1);
+        lineHeight = box.ascent + box.descent;
+        metricAscent = box.ascent;
+        metricNaturalDescent = fontDescent;
+      } else if (metric && metricOk && !(measureOnly && !isSpAutoFit && !measureNaturalLineSpacing && !para.spaceLine)) {
         const natural = alignedLine ?? (compatOff
           ? powerPointCompatOffNaturalLine(metricRuns.map((r) => ({ sizePx: r.sizePx, box: r.face.excel! })))
           : metricRuns.length > 0

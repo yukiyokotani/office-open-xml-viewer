@@ -298,6 +298,11 @@ export interface TextBody {
    */
   shrinkOnOverflow?: boolean;
   /**
+   * Model sources only: lines use the font's natural ascent + descent with
+   * LibreOffice's spacing rules instead of PowerPoint's 1.2 × size model.
+   */
+  fontLineMetrics?: boolean;
+  /**
    * `<a:bodyPr numCol>` (ECMA-376 §20.1.10.34) — number of text columns inside
    * the shape. Defaults to 1; values > 1 cause the renderer to flow paragraphs
    * across N columns left-to-right, top-to-bottom.

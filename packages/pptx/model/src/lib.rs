@@ -1064,6 +1064,13 @@ pub struct TextBody {
     #[serde(skip_serializing_if = "is_false")]
     #[serde(default)]
     pub shrink_on_overflow: bool,
+    /// Lines take the font's natural line height (ascent + descent of the
+    /// face as the host reports it) with LibreOffice editeng's proportional,
+    /// fixed and minimum spacing rules, instead of PowerPoint's 1.2 × size
+    /// model. Model sources only (OpenDocument); DrawingML never sets it.
+    #[serde(skip_serializing_if = "is_false")]
+    #[serde(default)]
+    pub font_line_metrics: bool,
 }
 
 pub fn one_u32() -> u32 {
