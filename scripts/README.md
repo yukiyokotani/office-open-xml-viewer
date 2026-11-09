@@ -24,8 +24,12 @@ Rerun one when its input changes, then commit the regenerated output with it.
 Other committed generators live beside their output:
 
 - `packages/core/scripts/gen-*.mjs` and `packages/docx/scripts/gen-arabic-joining.mjs`
-  — Unicode property tables (`*.generated.ts`) from the UCD files next to them;
-  run each with `node <path>`.
+  — Unicode property tables (`*.generated.ts`); run each with `node <path>`.
+  `gen-joining-type.mjs`, `gen-vertical-orientation.mjs` and
+  `gen-arabic-joining.mjs` read the UCD copies committed next to them (and
+  download them only when a copy is missing); `gen-bidi-char-data.mjs` and
+  `gen-line-break-class.mjs` always download their UCD 17.0.0 inputs from
+  unicode.org, so they need network access.
 - `packages/pptx/scripts/` — preset shape and text-warp geometry JSON; see
   its [README](../packages/pptx/scripts/README.md).
 - `tests/patterns/fixtures/build-*.py` — the synthetic PPTX pattern fixtures
