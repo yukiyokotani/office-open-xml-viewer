@@ -683,9 +683,28 @@ impl<'a, 'r, 'p> SlideReader<'a, 'r, 'p> {
             base: ctx.base,
             slide_background: ctx.background.as_ref(),
         };
-        let fill = paint::fill(&graphic, &mut paint_ctx, (placed.w, placed.h));
+        // Fontwork (§19.164 draw:text-path): the geometry is the path the
+        // text follows, not a painted outline. The LibreOffice fontwork
+        // shapes are the DrawingML text warps they were imported from.
+        let warp = node
+            .children()
+            .find(|c| xml::is(*c, NS_DRAW, "enhanced-geometry"))
+            .filter(|eg| eg.attribute((NS_DRAW, "text-path")) == Some("true"))
+            .map(|eg| fontwork_warp(eg.attribute((NS_DRAW, "type")).unwrap_or("")));
+        let mut fill = paint::fill(&graphic, &mut paint_ctx, (placed.w, placed.h));
+        let mut stroke = line.stroke;
+        if warp.is_some() {
+            fill = None;
+            stroke = None;
+        }
         let background = solid_color(&fill).or_else(|| ctx.background_color.clone());
-        let text_body = self.text(node, ctx, &styles, &graphic, background)?;
+        let mut text_body = self.text(node, ctx, &styles, &graphic, background)?;
+        if let (Some(body), Some(preset)) = (&mut text_body, warp) {
+            body.text_warp = Some(pptx_model::TextWarp {
+                preset: preset.to_string(),
+                adj: Vec::new(),
+            });
+        }
         let text_rect = geometry.text_area.map(|(l, t, tw, th)| {
             // The renderer lays text out in the unmirrored frame and turns it
             // by 180° for a vertical mirror; place the area so the displayed
@@ -710,7 +729,7 @@ impl<'a, 'r, 'p> SlideReader<'a, 'r, 'p> {
             flip_v,
             geometry: "custGeom".into(),
             fill,
-            stroke: line.stroke,
+            stroke,
             text_body,
             default_text_color: None,
             cust_geom: Some(cust_geom),
@@ -1062,6 +1081,52 @@ impl<'a, 'r, 'p> SlideReader<'a, 'r, 'p> {
         };
         out.push(SlideElement::Picture(picture));
         Ok(())
+    }
+}
+
+/// LibreOffice's fontwork shape types and the DrawingML text warps they
+/// correspond to (the pairs LibreOffice's OOXML filter converts between).
+fn fontwork_warp(kind: &str) -> &'static str {
+    match kind {
+        "fontwork-stop" => "textStop",
+        "fontwork-triangle-up" => "textTriangle",
+        "fontwork-triangle-down" => "textTriangleInverted",
+        "fontwork-chevron-up" => "textChevron",
+        "fontwork-chevron-down" => "textChevronInverted",
+        "fontwork-ring-inside" => "textRingInside",
+        "fontwork-ring-outside" => "textRingOutside",
+        "fontwork-arch-up-curve" => "textArchUp",
+        "fontwork-arch-down-curve" => "textArchDown",
+        "fontwork-circle-curve" => "textCircle",
+        "fontwork-open-circle-curve" => "textButton",
+        "fontwork-arch-up-pour" => "textArchUpPour",
+        "fontwork-arch-down-pour" => "textArchDownPour",
+        "fontwork-circle-pour" => "textCirclePour",
+        "fontwork-open-circle-pour" => "textButtonPour",
+        "fontwork-curve-up" => "textCurveUp",
+        "fontwork-curve-down" => "textCurveDown",
+        "fontwork-fade-up-and-right" => "textCascadeUp",
+        "fontwork-fade-up-and-left" => "textCascadeDown",
+        "fontwork-wave" => "textWave1",
+        "mso-spt159" => "textWave2",
+        "mso-spt160" => "textDoubleWave1",
+        "fontwork-inflate" => "textInflate",
+        "mso-spt161" => "textDeflate",
+        "mso-spt162" => "textInflateBottom",
+        "mso-spt163" => "textDeflateBottom",
+        "mso-spt164" => "textInflateTop",
+        "mso-spt165" => "textDeflateTop",
+        "mso-spt166" => "textDeflateInflate",
+        "mso-spt167" => "textDeflateInflateDeflate",
+        "fontwork-fade-right" => "textFadeRight",
+        "fontwork-fade-left" => "textFadeLeft",
+        "fontwork-fade-up" => "textFadeUp",
+        "fontwork-fade-down" => "textFadeDown",
+        "fontwork-slant-up" => "textSlantUp",
+        "fontwork-slant-down" => "textSlantDown",
+        "mso-spt174" => "textCanUp",
+        "mso-spt175" => "textCanDown",
+        _ => "textPlain",
     }
 }
 

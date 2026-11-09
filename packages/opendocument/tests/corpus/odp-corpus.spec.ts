@@ -37,7 +37,20 @@ const imagesDir = join(runDir, 'images');
 mkdirSync(resultsDir, { recursive: true });
 mkdirSync(imagesDir, { recursive: true });
 
-const inputsHash = (file: CorpusFile): string => createHash('sha256').update(readFileSync(file.odp))
+const LO_FONTS = process.env.ODF_HARNESS_LO_FONTS ?? '/Applications/LibreOffice.app/Contents/Resources/fonts/truetype';
+/** LibreOffice's metric-compatible replacement table (VCL.xcu). */
+const LO_REPLACEMENTS: [string, string, string, string][] = [
+  ['Calibri', 'Carlito', 'Carlito-Regular.ttf'], ['Cambria', 'Caladea', 'Caladea-Regular.ttf'],
+  ['Arial', 'LiberationSans', 'LiberationSans-Regular.ttf'], ['Times New Roman', 'LiberationSerif', 'LiberationSerif-Regular.ttf'],
+  ['Courier New', 'LiberationMono', 'LiberationMono-Regular.ttf'],
+].flatMap(([family, stem]) => [
+  [family, `${stem}-Regular.ttf`, '400', 'normal'],
+  [family, `${stem}-Bold.ttf`, '700', 'normal'],
+  [family, `${stem}-Italic.ttf`, '400', 'italic'],
+  [family, `${stem}-BoldItalic.ttf`, '700', 'italic'],
+] as [string, string, string, string][]);
+
+const inputsHash =(file: CorpusFile): string => createHash('sha256').update(readFileSync(file.odp))
   .update(existsSync(file.pdf) ? readFileSync(file.pdf) : '').digest('hex');
 
 function pdfPages(pdf: string, prefix: string): PNG[] {
@@ -153,7 +166,26 @@ for (const file of files) {
     await page.route('**/__odf_harness/input', (route) => route.fulfill({
       status: 200, contentType: 'application/octet-stream', body: readFileSync(file.odp),
     }));
+    // Harness environment parity (not reader behaviour): LibreOffice draws
+    // the PDF with its bundled metric-compatible replacements for Office
+    // fonts this machine lacks. Register the same files under the requested
+    // family names so both sides measure text with the same metrics.
+    await page.route('**/__odf_harness/font/*', (route) => {
+      const name = decodeURIComponent(route.request().url().split('/').pop()!);
+      const path = join(LO_FONTS, name);
+      return existsSync(path)
+        ? route.fulfill({ status: 200, contentType: 'font/ttf', body: readFileSync(path) })
+        : route.fulfill({ status: 404 });
+    });
     await page.goto('/tests/visual/non-ooxml-fixture.html');
+    await page.evaluate(async (faces) => {
+      for (const [family, file, weight, style] of faces) {
+        try {
+          const face = new FontFace(family, `url(/__odf_harness/font/${encodeURIComponent(file)})`, { weight, style });
+          document.fonts.add(await face.load());
+        } catch { /* a missing replacement leaves the browser fallback */ }
+      }
+    }, LO_REPLACEMENTS);
     const loaded = await page.evaluate(async ({ odpModule }) => {
       const { PptxPresentation } = await import('/src/index.ts');
       const { createOdp } = await import(odpModule);
