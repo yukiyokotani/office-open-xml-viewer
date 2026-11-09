@@ -154,13 +154,11 @@ specification differently, the reader follows LibreOffice:
 The DOCX layout draws some features differently from LibreOffice:
 
 - automatic hyphenation (`fo:hyphenate`) is not applied;
-- text wraps around floating objects with the paragraph indents measured
-  from the page, where LibreOffice measures them from the object;
-- fixed and minimum line heights place text in the line box as Word does
-  (LibreOffice puts all extra space above the text);
+- fixed and minimum line heights place extra space above the text, as
+  LibreOffice does, only on horizontal pages without a layout grid;
 - LibreOffice spreads a justified line's spare width in whole layout units;
-- page and section backgrounds, character shadows, outlines and reliefs,
-  overlines and Graphite font shaping are not drawn;
+- section backgrounds, character shadows, outlines and reliefs, overlines
+  and Graphite font shaping are not drawn (page backgrounds are);
 - charts and other embedded objects without a formula are drawn only when
   their replacement picture is a format the renderer draws;
 - widow and orphan counts above two are treated as two;
