@@ -20,41 +20,6 @@ Important directories:
 - `site/` — public site.
 - `.storybook/` — unified Storybook config.
 
-## Worktree Startup Checklist
-
-After reading this file:
-
-1. Run `pwd` and identify the worktree role from the path.
-2. Ensure `spec` exists in the worktree as a symlink to the main checkout's
-   ignored OOXML specification directory, following step 4 of the Standard
-   Development Flow.
-3. Read the package-level `AGENTS.md` for any package you will edit.
-4. Follow the ownership limits under Worktree Roles unless the user explicitly
-   asks for a cross-package change.
-
-## Worktree Roles
-
-Some agent sessions run in package-scoped worktrees:
-
-- `.claude/worktrees/pptx` or `ooxml-pptx` → PPTX session; edit
-  `packages/pptx` only unless the task requires shared code.
-- DOCX-focused worktrees should primarily edit `packages/docx`.
-- XLSX-focused worktrees should primarily edit `packages/xlsx`.
-
-Reading other packages is fine. Editing other packages should happen only for a
-coherent cross-package fix described in Cross-Package Integration.
-
-## Parallel Session Safety
-
-Multiple agent sessions (for example Claude and Codex) may run at once.
-
-- Treat unexpected dirty files as user or peer-agent work.
-- Do not revert or overwrite unrelated changes.
-- Preserve dirty work before switching branches or pulling.
-- Private samples, local sample stories, WASM outputs, VRT screenshots, and
-  reference images remain local/generated unless the user explicitly asks to
-  commit them.
-
 ## Standard Development Flow
 
 Use this flow for ordinary bug fixes and feature work:
@@ -87,6 +52,33 @@ Use this flow for ordinary bug fixes and feature work:
 8. Push the feature branch, create a PR, wait for checks when practical, and merge
    with a merge commit. Do not squash.
 
+## Worktrees and Parallel Sessions
+
+After reading this file:
+
+1. Run `pwd` and identify the worktree role from the path.
+2. Ensure `spec` exists in the worktree as a symlink to the main checkout's
+   ignored OOXML specification directory (step 4 of the Standard Development
+   Flow).
+3. Read the package-level `AGENTS.md` for any package you will edit.
+4. Follow the ownership limits below unless the user explicitly asks for a
+   cross-package change.
+
+Some agent sessions run in package-scoped worktrees:
+
+- `.claude/worktrees/pptx` or `ooxml-pptx` → PPTX session; edit
+  `packages/pptx` only unless the task requires shared code.
+- DOCX-focused worktrees should primarily edit `packages/docx`.
+- XLSX-focused worktrees should primarily edit `packages/xlsx`.
+
+Reading other packages is fine. Editing other packages should happen only for a
+coherent cross-package fix described in Cross-Package Integration.
+
+Multiple agent sessions (for example Claude and Codex) may run at once. Treat
+unexpected dirty files as user or peer-agent work, and do not revert or
+overwrite unrelated changes; preserve them as in step 2 of the Standard
+Development Flow.
+
 ## Git and PR Rules
 
 - Never push directly to `main`.
@@ -115,7 +107,7 @@ Use this flow for ordinary bug fixes and feature work:
   tasks. Examples:
   - Codex: `Co-Authored-By: Codex <model-name> <noreply@openai.com>`
   - Claude/Fable: `Co-Authored-By: Claude <model-name> <noreply@anthropic.com>`
-- If Claude starts or delegates work to Codex, include both trailers in the
+- If Claude starts, directs, or delegates work to Codex, include both trailers in the
   resulting commit, including the model each agent actually used for that task.
   This preserves the human-readable provenance of the orchestration layer and
   the implementation agent.
@@ -314,7 +306,9 @@ Typical local-only paths:
 - `packages/*/src/*privateDemo.stories.ts`
 
 Generated build output such as `packages/*/src/wasm/` is also git-ignored and
-must not be committed; rebuild it instead of copying it between worktrees.
+must not be committed; rebuild it instead of copying it between worktrees. VRT
+screenshots and diffs also stay local unless the user explicitly asks to commit
+them.
 
 When using a Codex/Claude worktree, copy local private stories/samples from the
 main local checkout if needed. Avoid copying `.DS_Store`, temporary Office lock
