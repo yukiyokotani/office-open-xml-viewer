@@ -64,5 +64,20 @@ Page scores:
 - **Ink diff** and **page diff**: the raw pixelmatch counts, normalized by the
   inked area and by the page area.
 
-ODS and ODP have no readers yet. The corpus already holds their files and
-PDFs; add a spec for each family when its reader lands.
+## 3. Run the ODP harness
+
+```bash
+node packages/opendocument/tests/corpus/run-odp.mjs [--filter substr] [--jobs N]
+```
+
+It classifies every ODP natively (`inspect_odp`: admission and hidden
+slides, which LibreOffice's PDF export skips), renders each shown slide in
+Chrome through the `odp` model source and the PPTX renderer
+(`odp-corpus.spec.ts`), and compares it with its PDF page. Slides are mostly
+full-bleed colour, so the layout score compares edge structure (pixels whose
+colour differs from a neighbour) instead of ink: the share of edge pixels,
+on either side, with no edge on the other side within 2 px. Results go to
+`harness/odp-<sha>/` (`report.md`, `summary.json`, `worst/`). The run holds
+`/private/tmp/ooxml-vrt.lock`; `--no-lock` is for small subsets only.
+
+ODS has no reader yet.

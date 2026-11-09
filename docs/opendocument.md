@@ -10,12 +10,13 @@ The companion pins its `@silurus/ooxml` peer to the exact same version. A
 stale runtime or model-source protocol fails before input loading with
 `CompanionRuntimeMismatchError` (`code: 'companion-runtime-mismatch'`).
 
-OpenDocument text can be opened with the ordinary DOCX viewers and loaders
-through an optional model source:
+OpenDocument text and presentations can be opened with the ordinary DOCX
+and PPTX viewers and loaders through optional model sources:
 
 | Input | Entry | Reader / factory | Option | Loaders and viewers |
 | --- | --- | --- | --- | --- |
 | ODT, OTT | `@silurus/ooxml-opendocument/odt` | `odt` / `createOdt()` | `odt` | `DocxViewer`, `DocxScrollViewer`, `DocxDocument.load`, `openDocxDocument`, `materializeDocxDocument` |
+| ODP, OTP | `@silurus/ooxml-opendocument/odp` | `odp` / `createOdp()` | `odp` | `PptxViewer`, `PptxScrollViewer`, `PptxPresentation.load`, `openPptxPresentation`, `materializePptxPresentation` |
 
 ```typescript
 import { DocxViewer } from '@silurus/ooxml/docx';
@@ -146,3 +147,60 @@ raised/lowered text, fixed and minimum line heights, proportional line
 heights below 100%, tables, frames and images, notes, fields,
 comments, tracked changes, headers and footers, Asian and complex scripts,
 and other formatting reject for now. The subset grows release by release.
+
+## Presentations (ODP)
+
+```typescript
+import { PptxViewer } from '@silurus/ooxml/pptx';
+import { odp } from '@silurus/ooxml-opendocument/odp';
+
+const viewer = new PptxViewer(canvas, { odp });
+await viewer.load(odpOrPptxBytes);
+```
+
+The ODP reader maps a presentation directly into the PPTX slide model; the
+ordinary PPTX renderer draws it. Its assets are `odp-source-module.mjs` and
+`opendocument_odp_bg.wasm`; `createOdp({ moduleUrl, wasmUrl })` relocates
+them as for ODT. The source claims a package by its leading `mimetype`
+(`application/vnd.oasis.opendocument.presentation` and `-template`).
+
+Unlike the text reader, the presentation reader is not fail-closed: it
+renders every presentation feature it reads, following ODF 1.3 and, where
+the specification leaves a choice, LibreOffice Impress. Only corrupt,
+encrypted or unsafe packages and packages over the resource limits reject.
+It reads:
+
+- slides and master pages: master background objects, the header, footer,
+  date/time and page-number frames with the slide's display settings and
+  declarations, slide and master backgrounds, hidden slides and speaker
+  notes;
+- the style cascade of graphic and presentation styles (with the per-level
+  outline styles of outline placeholders), paragraph and text styles, and
+  list styles with their indents, bullet characters and pictures, and
+  number labels;
+- custom shapes from their enhanced geometry (formulas, modifiers, every
+  path command, text areas, mirroring), rectangles, ellipses and arcs,
+  polygons, paths, lines, connectors, captions, groups, transforms and shape
+  hyperlinks;
+- area fills (solid, every gradient style with borders and multi-colour
+  stops, uniform and gradient transparency, hatches as the nearest pattern,
+  bitmaps stretched, tiled or placed once), lines with dashes, caps, joins
+  and markers, shadows, glow and soft edges;
+- text: fonts per script, sizes, weight, posture, colours (including
+  automatic colour), underline and strike-through, raised and lowered text,
+  capitals, letter spacing, highlighting, outline and shadowed text, tabs,
+  line breaks, fields and hyperlinks; paragraph alignment, indents,
+  spacing, line height, tab stops, columns, text anchoring, padding,
+  wrapping and shrink-on-overflow;
+- pictures (cropping, mirroring, colour modes, luminance/contrast,
+  transparency), StarView metafile pictures (converted to SVG), embedded
+  objects and OLE objects through their replacement pictures, and tables
+  (column widths, row heights, spans, cell fills, borders, templates).
+
+Known gaps: charts are drawn from their replacement picture until the
+OpenDocument chart mapping lands (a chart without a stored replacement is
+not drawn); 3D extrusion of custom shapes and fontwork text paths are drawn
+flat; animations and transitions are not played; text measurement follows
+the fonts available to the browser, so text set in fonts LibreOffice
+substitutes (for example metric-compatible replacements) can wrap
+differently.
