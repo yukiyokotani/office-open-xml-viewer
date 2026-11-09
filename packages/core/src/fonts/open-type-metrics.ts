@@ -1,5 +1,13 @@
 /** Raw line metrics read from one OpenType face. Values remain in design units;
  * format consumers decide which table and compatibility rule governs layout. */
+import {
+  lineMetricsVaryAlong,
+  metricDelta,
+  parseOpenTypeVariation,
+  variationCoordinates,
+  type OpenTypeVariation,
+} from './open-type-variations.js';
+
 export interface OpenTypeLineMetrics {
   readonly unitsPerEm: number;
   /** Positive OS/2 xAvgCharWidth / head.unitsPerEm, from this selected face.
@@ -25,6 +33,11 @@ export interface OpenTypeLineMetrics {
   /** Scalar ranges proven by the caller-resource parser; omitted by the legacy
    * line-metric API so its existing embedded-font policy remains unchanged. */
   readonly unicodeRanges?: readonly (readonly [number, number])[];
+  /** fvar/avar/MVAR of a variable font; present only when the caller asked
+   * for variations ({@link parseOpenTypeResourceMetrics} `variations`). The
+   * other fields are then the default instance; see
+   * {@link instanceOpenTypeLineMetrics}. */
+  readonly variation?: OpenTypeVariation;
 }
 
 const tagValue = (tag: string): number => (
@@ -394,14 +407,52 @@ export function parseOpenTypeLineMetrics(
 export function parseOpenTypeResourceMetrics(
   bytes: Uint8Array,
   faceIndex?: number,
+  options: Readonly<{ variations?: boolean }> = {},
 ): OpenTypeLineMetrics | null {
-  return readOpenTypeLineMetrics(bytes, faceIndex, true);
+  return readOpenTypeLineMetrics(bytes, faceIndex, true, options.variations === true);
+}
+
+/**
+ * Line metrics of one instance of a variable font: the default-instance
+ * values plus the MVAR deltas at `axisValues` (user-space values by axis tag;
+ * a missing axis takes its fvar default). A static font is returned as is.
+ * Returns null when a line metric varies along `opsz`: the browser sets that
+ * axis from the font size (CSS `font-optical-sizing: auto`), so one size-free
+ * line ratio does not exist for the face.
+ */
+export function instanceOpenTypeLineMetrics(
+  metrics: OpenTypeLineMetrics,
+  axisValues: Readonly<Record<string, number>>,
+): OpenTypeLineMetrics | null {
+  const variation = metrics.variation;
+  if (!variation) return metrics;
+  if (lineMetricsVaryAlong(variation, 'opsz')) return null;
+  const coords = variationCoordinates(variation, axisValues);
+  const delta = (tag: Parameters<typeof metricDelta>[1]) => metricDelta(variation, tag, coords);
+  const { variation: _variation, ...base } = metrics;
+  void _variation;
+  return Object.freeze({
+    ...base,
+    hheaAscent: metrics.hheaAscent + delta('hasc'),
+    hheaDescent: metrics.hheaDescent + delta('hdsc'),
+    hheaLineGap: metrics.hheaLineGap + delta('hlgp'),
+    ...(metrics.winAscent === undefined ? {} : {
+      winAscent: metrics.winAscent + delta('hcla'),
+      winDescent: (metrics.winDescent ?? 0) + delta('hcld'),
+    }),
+    ...(metrics.typoAscent === undefined ? {} : {
+      typoAscent: metrics.typoAscent + delta('tasc'),
+      typoDescent: (metrics.typoDescent ?? 0) + delta('tdsc'),
+      typoLineGap: (metrics.typoLineGap ?? 0) + delta('tlgp'),
+    }),
+  });
 }
 
 function readOpenTypeLineMetrics(
   bytes: Uint8Array,
   faceIndex: number | undefined,
   resourceCoverage: boolean,
+  variations = false,
 ): OpenTypeLineMetrics | null {
   if ((faceIndex !== undefined && (!Number.isSafeInteger(faceIndex) || faceIndex < 0))
     || bytes.byteLength < 12) return null;
@@ -439,7 +490,18 @@ function readOpenTypeLineMetrics(
   // Caller-resource layout does not resolve axes or apply those deltas yet, so
   // default-instance tables cannot certify a requested weight/style. Restrict
   // this opt-in authority to static sfnt; the legacy embedded parser is unchanged.
-  if (resourceCoverage && tables.has(FVAR)) return null;
+  // A caller that instances the face (instanceOpenTypeLineMetrics) opts in.
+  let variation: OpenTypeVariation | undefined;
+  if (tables.has(FVAR)) {
+    if (!resourceCoverage) {
+      // Legacy embedded parser: unchanged.
+    } else if (!variations) {
+      return null;
+    } else {
+      variation = parseOpenTypeVariation(view, tables, tagValue) ?? undefined;
+      if (!variation) return null;
+    }
+  }
 
   const head = tables.get(HEAD);
   const hhea = tables.get(HHEA);
@@ -484,5 +546,6 @@ function readOpenTypeLineMetrics(
       winDescent: view.getUint16(os2.offset + 76),
       useTypoMetrics: (view.getUint16(os2.offset + 62) & 0x0080) !== 0,
     } : {}),
+    ...(variation ? { variation } : {}),
   });
 }

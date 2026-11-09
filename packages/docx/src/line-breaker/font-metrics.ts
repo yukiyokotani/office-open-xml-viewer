@@ -158,7 +158,8 @@ export function metricMatchesSelectedFont(
       ? identity?.startsWith('embedded:') === true
       : identity === selected.resourceIdentity;
   }
-  if (selected.source === 'local' || selected.source === 'substitute' || selected.source === 'source') {
+  if (selected.source === 'local' || selected.source === 'substitute' || selected.source === 'source'
+    || selected.source === 'css') {
     // The same CSS tuple may be supplied by an unrelated caller or another
     // loaded face. Only the resource that created this resolver route may lend
     // vertical geometry; a matching family name is insufficient.
@@ -262,10 +263,12 @@ export function selectResourceMetric(
       ? metric : undefined;
   }
   // A served face (`source`, or a `substitute` claimed through a font
-  // source) carries its source identity; only metrics parsed from that served
-  // family's own faces match it (source-font-metrics.ts).
+  // source) and an application FontFace (`css`) carry a resource identity;
+  // only metrics built from that family's own faces match it
+  // (source-font-metrics.ts).
   if (selected.source !== 'embedded' && selected.source !== 'local'
-    && selected.source !== 'substitute' && selected.source !== 'source') return undefined;
+    && selected.source !== 'substitute' && selected.source !== 'source'
+    && selected.source !== 'css') return undefined;
   const candidates = index.get(resolutionMetricKey(selected)) ?? [];
   let first: ResolvedFontMetric | undefined;
   for (const metric of candidates) {

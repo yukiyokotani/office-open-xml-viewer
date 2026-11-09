@@ -8,6 +8,8 @@ import { wordOpenTypeAutoLineRatios } from './layout/line-compatibility.js';
 import { referenceFontLineMetrics } from './reference-font-line-metrics.js';
 import { fontFiles } from '@silurus/ooxml-core/internal/font-sources';
 import type { DocRun, DocxDocumentModel } from './types.js';
+import { sourceFontLineMetrics } from './source-font-metrics.js';
+import type { PreparedServedFaceLines } from './served-face-lines.js';
 
 // A face served through the `fonts` option paints the text, so its own tables
 // size the line, exactly as an installed or embedded face with the same tables
@@ -16,6 +18,8 @@ import type { DocRun, DocxDocumentModel } from './types.js';
 
 const FIXTURE = readFileSync(new URL('../../../tests/fixtures/fonts/ooxml-fixture-gap.ttf', import.meta.url));
 const TABLES = parseOpenTypeResourceMetrics(new Uint8Array(FIXTURE))!;
+const VARIABLE = parseOpenTypeResourceMetrics(new Uint8Array(readFileSync(
+  new URL('../../../tests/fixtures/fonts/ooxml-fixture-gap-var.ttf', import.meta.url))), undefined, { variations: true })!;
 
 const ASCENT = 0.8;
 const DESCENT = 0.2;
@@ -144,5 +148,64 @@ describe('served font line metrics', () => {
     const faces = [{ family: 'Ooxml Fixture Gap', weight: '400', style: 'normal', unicodeRange: 'U+0-40', resourceMetrics: TABLES }];
     expect(lineEm('Ooxml Fixture Gap', faces, undefined, '123')).toBeCloseTo(word.lineHeightRatio, 6);
     expect(lineEm('Ooxml Fixture Gap', faces, undefined, 'Hello')).toBeCloseTo(ASCENT + DESCENT, 6);
+  });
+
+  it('sizes a variable face at the instance CSS selects for each tuple', () => {
+    // Masters wght 400/900: ascender 800/900, lineGap 300/500; wght 700 is
+    // 0.6 of the way: (860 + 200 + 420) / 1000.
+    const served = { family: 'Ooxml Fixture Gap', weight: '100 900', style: 'normal', resourceMetrics: VARIABLE };
+    const doc = model('Ooxml Fixture Gap');
+    const ctx = canvasBoxContext();
+    const services = createLayoutServices(doc, {
+      measureContext: ctx,
+      ...sourceFontLayoutOptions(doc, [served], { sources: [fontFiles({ faces: [{ family: 'Ooxml Fixture Gap', url: 'https://app.example/var.ttf' }] })] }),
+    });
+    const em = (bold: boolean) => {
+      const segments = buildSegments([{ ...run('Ooxml Fixture Gap'), bold } as DocRun], { pageIndex: 0, totalPages: 1, layoutServices: services });
+      const [line] = layoutLines(ctx, segments, 400, 0, 1);
+      return (line!.ascent + line!.descent) / 10;
+    };
+    expect(em(false)).toBeCloseTo(1.3, 6);
+    expect(em(true)).toBeCloseTo(1.48, 6);
+  });
+
+  it('clamps a variable instance to the weight descriptor (a 400-only face paints bold synthesized)', () => {
+    const loaded = sourceFontLayoutOptions(model('V'), [{ family: 'V', weight: '400', style: 'normal', resourceMetrics: VARIABLE }],
+      { sources: [fontFiles({ faces: [{ family: 'V', url: 'https://app.example/v.ttf' }] })] }).sourceFonts.loaded;
+    const metrics = Object.values(sourceFontLineMetrics(loaded, null));
+    expect(metrics.find((metric) => metric.weight === 700 && metric.style === 'normal')!.lineHeightRatio).toBeCloseTo(1.3, 9);
+  });
+
+  it('projects a measured normal line for a face without tables, owned by its private family', () => {
+    const loaded = sourceFontLayoutOptions(model('Measured Face'), [{ family: 'Measured Face', weight: '400', style: 'normal', unicodeRange: 'U+0-FF' }],
+      { sources: [fontFiles({ faces: [{ family: 'Measured Face', url: 'https://app.example/m.woff2' }] })] }).sourceFonts.loaded;
+    const line = { ascentRatio: 0.8, descentRatio: 0.2, lineGapRatio: 0.3 };
+    const prepared: PreparedServedFaceLines = {
+      faceLines: new Map([[0, { ownershipFamily: '__probe', lines: { '400:normal': line, '700:normal': line, '400:italic': null, '700:italic': line } }]]),
+      familyLines: new Map(),
+    };
+    const metrics = Object.values(sourceFontLineMetrics(loaded, null, prepared));
+    const regular = metrics.find((metric) => metric.weight === 400 && metric.style === 'normal')!;
+    expect(regular).toMatchObject({
+      family: 'Measured Face', requiresGlyphCoverage: true, nativeRoutePrimaryFamily: '"__probe"',
+      farEastCodePage: false, unicodeRanges: [[0, 0xff]],
+    });
+    expect(regular.lineHeightRatio).toBeCloseTo(1.3, 9);
+    expect(regular.designAscentRatio).toBeCloseTo(1.1, 9);
+    // An unmeasurable tuple is declined (its spans keep the Canvas box).
+    expect(metrics.some((metric) => metric.weight === 400 && metric.style === 'italic')).toBe(false);
+    // Without its ownership sentinels (no DOM here) the line keeps the Canvas box.
+    expect(lineEm('Measured Face', [{ family: 'Measured Face', weight: '400', style: 'normal' }])).toBeCloseTo(ASCENT + DESCENT, 6);
+  });
+
+  it('declines a measured line for a family the catalogue classifies as Far East', () => {
+    // A CSS normal line cannot show OS/2 code pages or usWin (Word: 1.3 × usWin).
+    const loaded = sourceFontLayoutOptions(model('Yu Gothic'), [{ family: 'Yu Gothic', weight: '400', style: 'normal' }],
+      { sources: [fontFiles({ faces: [{ family: 'Yu Gothic', url: 'https://app.example/yu.woff2' }] })] }).sourceFonts.loaded;
+    const line = { ascentRatio: 0.8, descentRatio: 0.2, lineGapRatio: 0.3 };
+    const prepared: PreparedServedFaceLines = {
+      faceLines: new Map([[0, { ownershipFamily: '__probe', lines: { '400:normal': line } }]]), familyLines: new Map(),
+    };
+    expect(Object.keys(sourceFontLineMetrics(loaded, null, prepared))).toEqual([]);
   });
 });

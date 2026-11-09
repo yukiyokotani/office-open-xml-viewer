@@ -1,12 +1,16 @@
 """Generate the synthetic font-source test fonts (design §12.1).
 
-Writes three TrueType fonts under tests/fixtures/fonts/:
+Writes these fonts under tests/fixtures/fonts/:
 
 - ooxml-fixture.ttf: printable ASCII, U+00A0 and U+00B7;
 - ooxml-fixture-jp.ttf: U+3000-U+3005, U+3041-U+3046 and U+4E00-U+4E05;
 - ooxml-fixture-gap.ttf: the Latin set with a non-zero line gap (hhea and
   OS/2 typo lineGap 300) and a declared Latin 1 code page, so line-metric tests
-  can tell a face's own normal line from its gap-less font box.
+  can tell a face's own normal line from its gap-less font box;
+- ooxml-fixture-gap.woff / .woff2: the same font as WOFF 1.0 and WOFF 2.0;
+- ooxml-fixture-gap-var.ttf: a variable version (wght 100-900) whose Black
+  master has ascender 900 and lineGap 500, so MVAR varies hasc/hlgp (and the
+  OS/2 typo/win values) with the weight.
 
 Every glyph is a synthetic rectangle (no outline is derived from any existing
 font, so the files carry no third-party copyright). Advances are fixed per
@@ -14,7 +18,7 @@ code point and heights vary with the code point, so a page painted with the
 fixture differs visibly from any host fallback and is deterministic across
 platforms. Run with:
 
-    uv run --no-project --with fonttools==4.67.0 python scripts/generate-fixture-font.py
+    uv run --no-project --with fonttools==4.67.0 --with brotli==1.1.0 python scripts/generate-fixture-font.py
 
 The generated files are committed so browser tests never need Python.
 """
@@ -45,7 +49,8 @@ def empty():
     return TTGlyphPen(None).glyph()
 
 
-def build(path: Path, family: str, code_points: list[int], advance: int, line_gap: int = 0) -> None:
+def build(path: Path | None, family: str, code_points: list[int], advance: int, line_gap: int = 0,
+          ascent: int = ASCENT, weight: int = 400, style_name: str = 'Regular') -> FontBuilder:
     glyph_order = ['.notdef']
     glyphs = {'.notdef': rectangle(advance, ASCENT, 40)}
     metrics = {'.notdef': (advance, 40)}
@@ -67,26 +72,58 @@ def build(path: Path, family: str, code_points: list[int], advance: int, line_ga
     builder.setupCharacterMap(cmap)
     builder.setupGlyf(glyphs)
     builder.setupHorizontalMetrics(metrics)
-    builder.setupHorizontalHeader(ascent=ASCENT, descent=-DESCENT, lineGap=line_gap)
+    builder.setupHorizontalHeader(ascent=ascent, descent=-DESCENT, lineGap=line_gap)
     builder.setupNameTable({
         'familyName': family,
-        'styleName': 'Regular',
-        'uniqueFontIdentifier': f'{family} Regular synthetic test font',
-        'fullName': f'{family} Regular',
-        'psName': family.replace(' ', '') + '-Regular',
+        'styleName': style_name,
+        'uniqueFontIdentifier': f'{family} {style_name} synthetic test font',
+        'fullName': f'{family} {style_name}',
+        'psName': family.replace(' ', '') + '-' + style_name,
         'version': 'Version 1.000',
         'licenseDescription': 'Synthetic test font of the office-open-xml-viewer project (MIT).',
     })
     builder.setupOS2(
-        sTypoAscender=ASCENT, sTypoDescender=-DESCENT, sTypoLineGap=line_gap,
-        usWinAscent=ASCENT, usWinDescent=DESCENT, achVendID='OOXV',
-        fsType=0, usWeightClass=400,
+        sTypoAscender=ascent, sTypoDescender=-DESCENT, sTypoLineGap=line_gap,
+        usWinAscent=ascent, usWinDescent=DESCENT, achVendID='OOXV',
+        fsType=0, usWeightClass=weight,
         **({'ulCodePageRange1': 1} if line_gap else {}),
     )
     builder.setupPost()
     builder.setupHead(unitsPerEm=UPM, created=0, modified=0)
+    if path is not None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        builder.save(str(path))
+    return builder
+
+
+def build_variable(path: Path, family: str, code_points: list[int]) -> None:
+    from fontTools.designspaceLib import AxisDescriptor, DesignSpaceDocument, SourceDescriptor
+    from fontTools.varLib import build as build_varfont
+
+    doc = DesignSpaceDocument()
+    axis = AxisDescriptor()
+    axis.tag, axis.name, axis.minimum, axis.default, axis.maximum = 'wght', 'Weight', 100, 400, 900
+    doc.addAxis(axis)
+    masters = [(100, 'Thin', 800, 300), (400, 'Regular', 800, 300), (900, 'Black', 900, 500)]
+    for weight, style, ascent, gap in masters:
+        source = SourceDescriptor()
+        source.font = build(None, family, code_points, 600, line_gap=gap, ascent=ascent,
+                            weight=weight, style_name=style).font
+        source.location = {'Weight': weight}
+        source.styleName = style
+        doc.addSource(source)
+    font, _, _ = build_varfont(doc)
     path.parent.mkdir(parents=True, exist_ok=True)
-    builder.save(str(path))
+    font.save(str(path))
+
+
+def save_flavors(path: Path) -> None:
+    from fontTools.ttLib import TTFont
+
+    for flavor in ('woff', 'woff2'):
+        font = TTFont(str(path))
+        font.flavor = flavor
+        font.save(str(path.with_suffix('.' + flavor)))
 
 
 def main() -> None:
@@ -95,6 +132,8 @@ def main() -> None:
     build(OUT / 'ooxml-fixture.ttf', 'Ooxml Fixture', latin, 600)
     build(OUT / 'ooxml-fixture-jp.ttf', 'Ooxml Fixture JP', jp, 1000)
     build(OUT / 'ooxml-fixture-gap.ttf', 'Ooxml Fixture Gap', latin, 600, line_gap=300)
+    save_flavors(OUT / 'ooxml-fixture-gap.ttf')
+    build_variable(OUT / 'ooxml-fixture-gap-var.ttf', 'Ooxml Fixture Gap Var', latin)
 
 
 if __name__ == '__main__':

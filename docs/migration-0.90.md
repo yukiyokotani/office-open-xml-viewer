@@ -343,8 +343,15 @@ for the Noto CJK families.
   This applies to stylesheets and font files, as with Google Fonts today.
 - `fontCssApi()`, `fontCss()` and `fontFiles()` take `credentials`:
   - `'same-origin'` (the default): stylesheets are fetched with it, and font
-    files are loaded by the browser, which also sends credentials to the same
-    origin only (the CSS font-loading rules).
+    files are loaded with the same rule (credentials to the same origin only,
+    as CSS font loading does). `fontCssApi()` and `fontCss()` faces are loaded
+    by the browser. `fontFiles()` `url` faces are fetched by the library
+    itself (`fetch()`, CORS mode) when the document first needs them, so that
+    layout can read each face's own line metrics. The face is then registered
+    from the fetched bytes, so each file is downloaded once. A `unicode-range`
+    subset that only a later step needs (a later PPTX slide or XLSX sheet) is
+    left to the browser. These bytes count like `data` faces (see
+    [Resource limits](#resource-limits)).
   - `'omit'`: no cookies or HTTP authentication are sent at all. The library
     fetches the stylesheet and the font files itself, with
     `credentials: 'omit'`. It fetches every face of a claimed family when the
@@ -368,9 +375,14 @@ for the Noto CJK families.
   `connect-src`. The library downloads the stylesheet with `fetch()`; it does
   not inject a `<link>`.
 - Font file origins need `font-src`. Add `data:` or `blob:` to `font-src` when
-  you use those URLs. Font files the library downloads itself (a source with
-  `credentials: 'omit'`, and resolver URLs in worker mode) need `connect-src`
-  as well.
+  you use those URLs. Font files the library downloads itself (`fontFiles()`
+  `url` faces, a source with `credentials: 'omit'`, and resolver URLs in
+  worker mode) need `connect-src` as well.
+- Faces whose metric tables the library cannot read (faces the browser loads
+  itself, and WOFF2 files where the browser has no native Brotli
+  `DecompressionStream`) are registered once more under a private family to
+  measure their line height in the page. That second load of the same URL is
+  normally answered from the HTTP cache.
 - `data` buffers are not fetched, so they need no `font-src` entry.
 - For Google Fonts, the policy is `connect-src https://fonts.googleapis.com`
   and `font-src https://fonts.gstatic.com`. A mirror uses its own two origins.
@@ -398,8 +410,9 @@ for the Noto CJK families.
   followed by 14 s of face loading.
 - In worker mode the page owns the deadline of a resolver call. The worker
   sends the time left of its resolution deadline with each request.
-- A face file the library fetches itself (a resolver face in worker mode, a
-  source with `credentials: 'omit'`) is fetched in the face-loading phase,
+- A face file the library fetches itself (a `fontFiles()` `url` face, a
+  resolver face in worker mode, a source with `credentials: 'omit'`) is
+  fetched in the face-loading phase,
   within its deadline, at most six at a time. A face that cannot be fetched
   fails like a face that cannot load: it is left out with a `console.warn`,
   and the family is not passed to another source or substitute. For XLSX in
@@ -438,7 +451,10 @@ or hostile source, not a network problem.
 The library does not count the bytes of `url` faces the browser downloads.
 Font files the library downloads itself (see
 [Network, CORS and cookies](#network-cors-and-cookies)) count like `data`
-faces. A document whose painted text has more than 65,536 distinct
+faces, so a `fontFiles()` `url` face over 30 MiB fails with
+`font-source-limit`. Reading a WOFF or WOFF2 file's metric tables inflates
+it, at most 120 MiB per file. Beyond that the tables are not read and the face
+is measured instead; this is not an error. A document whose painted text has more than 65,536 distinct
 characters loads every subset; that is not an error.
 
 ## Licences

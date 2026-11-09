@@ -58,7 +58,30 @@ function fakeSet() {
 }
 type FakeSet = ReturnType<typeof fakeSet>;
 const asSet = (set: FakeSet) => set as unknown as FontFaceSet;
-const urlOf = (face: FakeFontFace) => (typeof face.source === 'string' ? /url\("(.*)"\)/.exec(face.source)?.[1] : undefined);
+// `fontFiles` URL faces are fetched by the library and registered from their
+// bytes. The default font-file response body is the URL's own text, so a face
+// registered from fetched bytes still names the file it came from.
+const FETCHED_FONT_PREFIX = 'fetched-font:';
+const fetchedFontBody = (url: string) => new TextEncoder().encode(FETCHED_FONT_PREFIX + url).buffer as ArrayBuffer;
+const urlOf = (face: FakeFontFace) => {
+  if (typeof face.source === 'string') return /url\("(.*)"\)/.exec(face.source)?.[1];
+  const text = new TextDecoder().decode(face.source);
+  return text.startsWith(FETCHED_FONT_PREFIX) ? text.slice(FETCHED_FONT_PREFIX.length) : undefined;
+};
+const FONT_FILE_URL = /^https:\/\/[^?#]*\.(?:woff2?|ttf|otf)$/;
+
+/** A font-file response for a URL no route names (the default `fetch`). */
+function fontFileResponse(url: string) {
+  const body = fetchedFontBody(url);
+  return {
+    ok: true, status: 200, url,
+    headers: { get: () => null },
+    text: async (): Promise<string> => '',
+    arrayBuffer: async (): Promise<ArrayBuffer> => body.slice(0),
+  };
+}
+const defaultFontFetch = () => vi.fn(async (url: string) => FONT_FILE_URL.test(url)
+  ? fontFileResponse(url) : { ok: false, status: 404, url, text: async (): Promise<string> => '' });
 
 interface Route {
   css?: string;
@@ -69,6 +92,8 @@ interface Route {
   gate?: Promise<void>;
   /** Body size of a font file response. */
   bytes?: number;
+  /** Body of a font file response (instead of `bytes`). */
+  body?: ArrayBuffer;
 }
 
 function installFetch(routes: Record<string, Route>) {
@@ -82,11 +107,14 @@ function installFetch(routes: Record<string, Route>) {
         init?.signal?.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })));
       });
     }
-    if (!route) return { ok: false, status: 404, url, text: async (): Promise<string> => '' };
+    if (!route) {
+      return FONT_FILE_URL.test(url) ? fontFileResponse(url)
+        : { ok: false, status: 404, url, text: async (): Promise<string> => '' };
+    }
     return {
       ok: (route.status ?? 200) < 400, status: route.status ?? 200, url: route.url ?? url,
       text: async (): Promise<string> => route.css ?? '',
-      arrayBuffer: async (): Promise<ArrayBuffer> => new Uint8Array(route.bytes ?? 0).fill(7).buffer,
+      arrayBuffer: async (): Promise<ArrayBuffer> => route.body?.slice(0) ?? new Uint8Array(route.bytes ?? 0).fill(7).buffer,
     };
   });
   G.fetch = fetchMock;
@@ -114,6 +142,7 @@ function open(sources: readonly FontSource[], set: FakeSet, signal?: AbortSignal
 let warn: ReturnType<typeof vi.spyOn>;
 beforeEach(() => {
   G.FontFace = FakeFontFace;
+  G.fetch = defaultFontFetch();
   FakeFontFace.loadImpl = () => Promise.resolve();
   warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
 });
@@ -232,13 +261,23 @@ describe('FontSourceSession: credentials omit', () => {
     expect(retainedFontSourceBytes()).toBe(0);
   });
 
-  it('keeps the default to the browser, and fails only the faces whose download fails', async () => {
-    const { calls } = installFetch({ 'https://app.example/a.woff2': { bytes: 4 } });
+  it('fetches demanded fontFiles faces itself by default, and fails only the faces whose download fails', async () => {
+    const { calls } = installFetch({
+      'https://app.example/a.woff2': { bytes: 4 }, 'https://app.example/missing.woff2': { status: 404 },
+    });
     const lazy = fakeSet();
-    await open([fontFiles({ faces: [{ family: 'File', url: 'https://app.example/a.woff2' }], credentials: 'same-origin' })], lazy)
-      .ensure(demand(['File']));
-    expect(lazy.faces.map(urlOf)).toEqual(['https://app.example/a.woff2']);
-    expect(calls).toHaveLength(0);
+    await open([fontFiles({ faces: [
+      { family: 'File', url: 'https://app.example/a.woff2', unicodeRange: 'U+0-FF' },
+      // Not demanded yet: registered by URL, left to the browser when needed.
+      { family: 'File', url: 'https://app.example/cjk.woff2', unicodeRange: 'U+4E00-9FFF' },
+    ], credentials: 'same-origin' })], lazy)
+      .ensure(demand(['File'], [0x41]));
+    // Registered from the fetched bytes (one download), in declaration order.
+    expect(lazy.faces.map((face) => typeof face.source === 'string' ? urlOf(face) : face.source.byteLength))
+      .toEqual([4, 'https://app.example/cjk.woff2']);
+    expect(calls.map((call) => [call.url, call.init?.credentials, call.init?.mode]))
+      .toEqual([['https://app.example/a.woff2', 'same-origin', 'cors']]);
+    calls.length = 0;
 
     const set = fakeSet();
     const loaded = await open([fontFiles({
@@ -399,7 +438,8 @@ describe('FontSourceSession: claim-once chaining', () => {
     ]);
     expect(loaded.faces.map((face) => face.sourceIndex)).toEqual([1, 0, 1]);
     expect(loaded.substitutions.get('calibri')).toEqual({ family: 'Carlito' });
-    expect(calls).toHaveLength(1);
+    // The stylesheet, and the fontFiles face the library fetches itself.
+    expect(calls.map((call) => call.url)).toEqual(['https://fonts.example/all.css', 'https://app.example/carlito.woff2']);
   });
 
   it('never consults a later source for a family whose source failed', async () => {
@@ -421,7 +461,8 @@ describe('FontSourceSession: claim-once chaining', () => {
     ], fakeSet());
     const loaded = await session.ensure(demand(['Brand']));
     expect(loaded.faces).toEqual([]);
-    expect(calls).toHaveLength(0);
+    // Only the claimed face's own file; the stylesheet is never consulted.
+    expect(calls.map((call) => call.url)).toEqual(['https://app.example/broken.woff2']);
     expect(warn).toHaveBeenCalledTimes(1);
     // One warning per family per session.
     await session.ensure(demand(['Brand'], [0x41]));
@@ -999,31 +1040,54 @@ describe('FontSourceSession: script-scoped substitution proof (FontSessionDemand
 });
 
 describe('FontSourceSession: served face tables', () => {
-  // Synthetic fixture (scripts/generate-fixture-font.py): hhea/typo lineGap 300
-  // of 1000 UPM, Latin 1 code page declared.
-  const fixtureGap = async () => {
-    const bytes = await readFile(new URL('../../../../tests/fixtures/fonts/ooxml-fixture-gap.ttf', import.meta.url));
+  // Synthetic fixtures (scripts/generate-fixture-font.py): hhea/typo lineGap
+  // 300 of 1000 UPM, Latin 1 code page declared.
+  const fixture = async (name: string) => {
+    const bytes = await readFile(new URL(`../../../../tests/fixtures/fonts/${name}`, import.meta.url));
     return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
   };
+  const GAP = { unitsPerEm: 1000, hheaAscent: 800, hheaDescent: -200, hheaLineGap: 300, farEastCodePage: false };
 
-  it('snapshots the OpenType tables of a face registered from owned bytes', async () => {
-    const set = fakeSet();
-    const session = open([fontFiles({ faces: [{ family: 'Calibri', data: await fixtureGap() }] })], set);
-    const loaded = await session.ensure(demand(['Calibri']));
-    expect(loaded.faces).toHaveLength(1);
-    expect(loaded.faces[0]!.resourceMetrics).toMatchObject({
-      unitsPerEm: 1000, hheaAscent: 800, hheaDescent: -200, hheaLineGap: 300, farEastCodePage: false,
+  it.each(['ooxml-fixture-gap.ttf', 'ooxml-fixture-gap.woff', 'ooxml-fixture-gap.woff2'])(
+    'snapshots the OpenType tables of a data face (%s)', async (name) => {
+      const set = fakeSet();
+      const session = open([fontFiles({ faces: [{ family: 'Calibri', data: await fixture(name) }] })], set);
+      const loaded = await session.ensure(demand(['Calibri']));
+      expect(loaded.faces).toHaveLength(1);
+      expect(loaded.faces[0]!.resourceMetrics).toMatchObject(GAP);
+      expect(loaded.faces[0]!.probeSource).toBeUndefined();
     });
+
+  it('snapshots the tables of a fontFiles URL face the library fetched, downloading it once', async () => {
+    const { calls } = installFetch({ 'https://app.example/gap.woff2': { body: await fixture('ooxml-fixture-gap.woff2') } });
+    const set = fakeSet();
+    const loaded = await open([fontFiles({ faces: [{ family: 'Calibri', url: 'https://app.example/gap.woff2' }] })], set)
+      .ensure(demand(['Calibri']));
+    expect(loaded.faces[0]!.resourceMetrics).toMatchObject(GAP);
+    expect(calls).toHaveLength(1);
+    expect(set.faces).toHaveLength(1);
+    expect(set.faces[0]!.source).toBeInstanceOf(ArrayBuffer);
   });
 
-  it('has no tables for a face the browser fetches itself, or for bytes it cannot parse', async () => {
+  it('keeps a variable face\'s variation data for instancing', async () => {
     const set = fakeSet();
-    const session = open([fontFiles({ faces: [
-      { family: 'Url Face', url: 'https://app.example/face.woff2' },
-      { family: 'Opaque Face', data: new Uint8Array(64).fill(7).buffer },
-    ] })], set);
-    const loaded = await session.ensure(demand(['Url Face', 'Opaque Face']));
+    const loaded = await open([fontFiles({ faces: [{ family: 'Var', data: await fixture('ooxml-fixture-gap-var.ttf'), weight: '100 900' }] })], set)
+      .ensure(demand(['Var']));
+    expect(loaded.faces[0]!.resourceMetrics?.variation?.axes.map((axis) => axis.tag)).toEqual(['wght']);
+  });
+
+  it('hands out the probe source of a face without readable tables', async () => {
+    installFetch({ 'https://fonts.example/v.css': { css: rule('Css Face', 'css.woff2') } });
+    const set = fakeSet();
+    const opaque = new Uint8Array(64).fill(7).buffer;
+    const loaded = await open([
+      fontFiles({ faces: [{ family: 'Opaque Face', data: opaque }] }),
+      fontCss({ url: 'https://fonts.example/v.css' }),
+    ], set).ensure(demand(['Opaque Face', 'Css Face']));
     expect(loaded.faces).toHaveLength(2);
     expect(loaded.faces.every((face) => face.resourceMetrics === undefined)).toBe(true);
+    // The browser fetched the stylesheet face: its url() value; the opaque
+    // data face: its own bytes.
+    expect(loaded.faces.map((face) => face.probeSource)).toEqual([opaque, 'url("https://fonts.example/css.woff2")']);
   });
 });

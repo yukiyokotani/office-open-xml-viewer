@@ -1,13 +1,25 @@
-import type { OpenTypeLineMetrics, ResolvedFontMetric } from '@silurus/ooxml-core';
-import { fontFamilyKey, parseUnicodeRange, type LoadedFontSources } from '@silurus/ooxml-core/internal/font-sources';
+import { findReferenceFontMetrics, type LocalFontNormalLine, type OpenTypeLineMetrics, type ResolvedFontMetric } from '@silurus/ooxml-core';
+import { quoteCssFontFamily } from '@silurus/ooxml-core/internal/css-font-family';
+import {
+  fontFamilyKey,
+  instanceOpenTypeLineMetrics,
+  parseUnicodeRange,
+  type LoadedFontSources,
+} from '@silurus/ooxml-core/internal/font-sources';
 import { wordOpenTypeAutoLineRatios } from './layout/line-compatibility.js';
 import { cssMatchedFace } from './line-breaker/font-metrics.js';
+import { NO_SERVED_FACE_LINES, WML_TUPLES, tupleKey, type PreparedServedFaceLines, type ServedFaceLine } from './served-face-lines.js';
 
 /** Resource identity of the faces a font source serves under one family. The
  * resolver gives the served route this identity, and only metrics built here
  * from that family's own loaded faces carry it. */
 export function sourceFontResourceIdentity(servedFamily: string): string {
   return `font-source:${fontFamilyKey(servedFamily)}`;
+}
+
+/** Resource identity of an application-registered FontFace family. */
+export function appFontResourceIdentity(family: string): string {
+  return `app-face:${fontFamilyKey(family)}`;
 }
 
 /** Word's automatic single line for one face's own tables: the projection a
@@ -24,6 +36,7 @@ export function wordResourceLineMetric(openType: OpenTypeLineMetrics): {
 
 type Range = readonly [number, number];
 type SourceFace = LoadedFontSources['faces'][number];
+type Style = 'normal' | 'italic';
 
 function normalizedRanges(ranges: readonly Range[]): [number, number][] {
   const merged: [number, number][] = [];
@@ -49,108 +62,168 @@ function intersectRanges(a: readonly Range[], b: readonly Range[]): Range[] {
   return out;
 }
 
-function descriptorWeight(value: string): number | undefined {
-  const weight = value.trim().toLowerCase();
-  if (weight === 'normal') return 400;
-  if (weight === 'bold') return 700;
-  if (!/^\d+$/.test(weight)) return undefined;
-  const numeric = Number(weight);
-  return numeric >= 1 && numeric <= 1000 ? numeric : undefined;
+const frozenRanges = (ranges: readonly Range[]) =>
+  Object.freeze(normalizedRanges(ranges).map((range) => Object.freeze(range as Range)));
+
+/** CSS `font-weight` descriptor: one value or a `min max` range. */
+function descriptorWeight(value: string): readonly [number, number] | undefined {
+  const parts = value.trim().toLowerCase().split(/\s+/);
+  const one = (part: string) => part === 'normal' ? 400 : part === 'bold' ? 700
+    : /^\d+(?:\.\d+)?$/.test(part) && Number(part) >= 1 && Number(part) <= 1000 ? Number(part) : undefined;
+  const values = parts.map(one);
+  if (parts.length > 2 || values.some((value) => value === undefined)) return undefined;
+  const low = values[0]!;
+  const high = values[1] ?? low;
+  return low <= high ? [low, high] : [high, low];
 }
 
-function descriptorStyle(value: string): 'normal' | 'italic' | undefined {
+function descriptorStyle(value: string): Style | undefined {
   const style = value.trim().toLowerCase();
   return style === 'normal' || style === 'italic' ? style : undefined;
 }
 
 const displayFamily = (family: string) => family.trim().replace(/^(['"])(.*)\1$/, '$2');
+const clamp = (value: number, [low, high]: readonly [number, number]) => Math.min(high, Math.max(low, value));
+
+/** CSS Fonts 4 §5.2 measures a weight range by its nearest value: the face
+ * matches as if its weight were the request clamped to the range. */
+function matchedSet<T extends { range: readonly [number, number]; style: Style }>(
+  faces: readonly T[], weight: number, style: Style,
+): T[] {
+  const candidates = faces.map((face) => ({ face, weight: clamp(weight, face.range), style: face.style }));
+  const matched = cssMatchedFace(candidates, weight, style);
+  return matched ? candidates.filter((candidate) => candidate.weight === matched.weight
+    && candidate.style === matched.style && candidate.face.range[0] <= matched.weight
+    && matched.weight <= candidate.face.range[1]).map(({ face }) => face) : [];
+}
+
+/** The measured line of one tuple as resource geometry (the projection of
+ * host-font-line-metrics.ts: leading above the baseline, Canvas descent
+ * below), sized only where the measured face is proven to draw. A CSS normal
+ * line cannot expose OS/2 code-page bits or usWin, so a family the catalog
+ * classifies as Far East (Word's 1.3 × usWin line, #1832) is declined, as for
+ * installed faces. */
+function measuredMetric(
+  served: string, line: LocalFontNormalLine | null | undefined, ownership: ServedFaceLine,
+): Omit<ResolvedFontMetric, 'family' | 'weight' | 'style' | 'sourceIdentity'> | undefined {
+  if (!line) return undefined;
+  if (findReferenceFontMetrics(served).some((profile) => profile.farEastCodePage !== false)) return undefined;
+  const ascent = line.ascentRatio + line.lineGapRatio;
+  const descent = line.descentRatio;
+  if (!(Number.isFinite(ascent) && Number.isFinite(descent) && ascent >= 0 && descent >= 0 && ascent + descent > 0)) return undefined;
+  return {
+    farEastCodePage: false,
+    requiresGlyphCoverage: true,
+    nativeRoutePrimaryFamily: quoteCssFontFamily(ownership.ownershipFamily),
+    lineHeightRatio: ascent + descent,
+    designAscentRatio: ascent,
+    designDescentRatio: descent,
+    lineGapRatio: line.lineGapRatio,
+  };
+}
 
 /**
- * Vertical geometry of the faces the `fonts` option served, from each face's
- * own OpenType tables. Layout follows the face that paints: a served face is
- * sized exactly as an installed face with the same tables (catalog projection)
- * or a document-embedded face (embedded-fonts.ts), never from the Canvas font
- * box, which omits the line gap.
+ * Vertical geometry of the faces the `fonts` option served, and of
+ * application-registered FontFaces of authored families. Layout follows the
+ * face that paints: a served face is sized exactly as an installed or embedded
+ * face with the same tables, never from the Canvas font box, which omits the
+ * line gap.
  *
- * For each WordprocessingML tuple (regular/bold × upright/italic) the served
- * family's loaded faces are narrowed by CSS Fonts 4 §5.2 matching; every face
- * of the matched descriptor set contributes one metric limited to the scalars
- * it both declares (`unicode-range`) and maps (cmap), so a subset lends
- * geometry only to spans it paints. A tuple is declined (its spans keep the
- * Canvas box) when the tables of any face of the matched set are unavailable
- * (a face the browser fetched itself, WOFF/WOFF2, variable fonts). A family is
- * declined when a face's descriptors are outside what this matching models, or
- * when another loaded face in the painting FontFaceSet declares the family.
+ * - Tables (`resourceMetrics`): Word's projection of the face's own tables,
+ *   at the variable instance CSS selects for the tuple (`wght` = the weight
+ *   clamped to the face's weight descriptor, `ital` = 1 for an italic face,
+ *   other axes at their defaults), limited to declared unicode-range ∩ cmap.
+ * - No tables: the face's measured normal line (served-face-lines.ts),
+ *   limited to its declared unicode-range and to clusters the route
+ *   sentinels prove it draws.
+ *
+ * For each WordprocessingML tuple the served family's faces are narrowed by
+ * CSS Fonts 4 §5.2 matching; every face of the matched set contributes one
+ * metric. A tuple is declined (its spans keep the Canvas box) when a face of
+ * the matched set has neither; a family is declined when a face's descriptors
+ * are outside this matching (oblique, non-normal stretch), or when another
+ * loaded face in the painting FontFaceSet declares the family.
  */
 export function sourceFontLineMetrics(
-  loaded: LoadedFontSources,
+  loaded: LoadedFontSources | undefined,
   fontSet: FontFaceSet | null | undefined,
+  prepared: PreparedServedFaceLines = NO_SERVED_FACE_LINES,
 ): Record<string, ResolvedFontMetric> {
-  const byFamily = new Map<string, { display: string; faces: SourceFace[] }>();
-  for (const face of loaded.faces) {
+  const metrics: Record<string, ResolvedFontMetric> = Object.create(null);
+  const byFamily = new Map<string, { display: string; faces: { face: SourceFace; index: number }[] }>();
+  (loaded?.faces ?? []).forEach((face, index) => {
     const key = fontFamilyKey(face.family);
-    if (!key) continue;
+    if (!key) return;
     const group = byFamily.get(key);
-    if (group) group.faces.push(face);
-    else byFamily.set(key, { display: displayFamily(face.family), faces: [face] });
-  }
-  const sessionFaces = new Set(loaded.faces.map((face) => face.face));
+    if (group) group.faces.push({ face, index });
+    else byFamily.set(key, { display: displayFamily(face.family), faces: [{ face, index }] });
+  });
+  const sessionFaces = new Set(loaded?.faces.map((face) => face.face) ?? []);
   const foreignFamilies = new Set<string>();
   if (fontSet && typeof fontSet[Symbol.iterator] === 'function') {
     for (const face of fontSet) {
       if (face.status === 'loaded' && !sessionFaces.has(face)) foreignFamilies.add(fontFamilyKey(displayFamily(face.family)));
     }
   }
-  const metrics: Record<string, ResolvedFontMetric> = Object.create(null);
   for (const [key, { display, faces }] of byFamily) {
     if (foreignFamilies.has(key)) continue;
-    const tuples: { face: SourceFace; weight: number; style: 'normal' | 'italic' }[] = [];
+    const described: { face: SourceFace; index: number; range: readonly [number, number]; style: Style }[] = [];
     let modelled = true;
-    for (const face of faces) {
-      const weight = descriptorWeight(face.weight);
+    for (const { face, index } of faces) {
+      const range = descriptorWeight(face.weight);
       const style = descriptorStyle(face.style);
-      if (weight === undefined || style === undefined || face.stretch.trim().toLowerCase() !== 'normal') {
-        modelled = false;
-        break;
-      }
-      tuples.push({ face, weight, style });
+      if (!range || !style || face.stretch.trim().toLowerCase() !== 'normal') { modelled = false; break; }
+      described.push({ face, index, range, style });
     }
     if (!modelled) continue;
     const identity = sourceFontResourceIdentity(display);
-    for (const weight of [400, 700]) {
-      for (const style of ['normal', 'italic'] as const) {
-        const matched = cssMatchedFace(tuples, weight, style);
-        if (!matched) continue;
-        const projected = tuples
-          .filter((tuple) => tuple.weight === matched.weight && tuple.style === matched.style)
-          .map(({ face }) => {
-            const openType = face.resourceMetrics;
-            const line = openType && wordResourceLineMetric(openType);
-            const declared = parseUnicodeRange(face.unicodeRange);
-            if (!openType?.unicodeRanges || !line || !declared) return undefined;
-            return {
-              line,
-              ranges: Object.freeze(intersectRanges(normalizedRanges(declared), normalizedRanges(openType.unicodeRanges))),
-              eastAsian: openType.hasEastAsianCmap,
-            };
+    for (const { weight, style } of WML_TUPLES) {
+      const set = matchedSet(described, weight, style);
+      const projected = set.map(({ face, index, range, style: faceStyle }) => {
+        const declared = parseUnicodeRange(face.unicodeRange);
+        if (!declared) return undefined;
+        if (face.resourceMetrics) {
+          const instance = instanceOpenTypeLineMetrics(face.resourceMetrics, {
+            // An upright face drawn for an italic request is slanted by
+            // synthesis, not by its ital axis.
+            wght: clamp(weight, range), ital: faceStyle === 'italic' ? 1 : 0,
           });
-        if (projected.some((entry) => entry === undefined)) continue;
-        projected.forEach((entry, index) => {
-          const { line, ranges, eastAsian } = entry!;
-          metrics[`${identity}\u0000${weight}\u0000${style}\u0000${index}`] = Object.freeze({
-            family: display,
-            weight,
-            style,
-            sourceIdentity: identity,
-            synthesized: false,
+          const line = instance && wordResourceLineMetric(instance);
+          if (!instance?.unicodeRanges || !line) return undefined;
+          return {
             lineHeightRatio: line.lineHeightRatio,
             designAscentRatio: line.designAscentRatio,
             designDescentRatio: line.designDescentRatio,
-            unicodeRanges: ranges,
-            ...(eastAsian ? { eastAsianLineHeightRatio: line.lineHeightRatio } : {}),
-          });
+            unicodeRanges: Object.freeze(intersectRanges(normalizedRanges(declared), normalizedRanges(instance.unicodeRanges))),
+            ...(instance.hasEastAsianCmap ? { eastAsianLineHeightRatio: line.lineHeightRatio } : {}),
+          };
+        }
+        const ownership = prepared.faceLines.get(index);
+        const measured = ownership && measuredMetric(display, ownership.lines[tupleKey(weight, style)], ownership);
+        return measured && { ...measured, unicodeRanges: frozenRanges(declared) };
+      });
+      if (projected.length === 0 || projected.some((entry) => entry === undefined)) continue;
+      projected.forEach((entry, position) => {
+        metrics[`${identity}\u0000${weight}\u0000${style}\u0000${position}`] = Object.freeze({
+          family: display, weight, style, sourceIdentity: identity, synthesized: false, ...entry!,
         });
-      }
+      });
+    }
+  }
+  // Application-registered faces (served-face-lines.ts appRegisteredFaces).
+  for (const [key, ownership] of prepared.familyLines) {
+    if (byFamily.has(key)) continue;
+    const family = ownership.ownershipFamily;
+    const identity = appFontResourceIdentity(family);
+    const face = fontSet && typeof fontSet[Symbol.iterator] === 'function'
+      ? [...fontSet].find((candidate) => fontFamilyKey(displayFamily(candidate.family)) === key) : undefined;
+    const declared = parseUnicodeRange(face?.unicodeRange) ?? [[0, 0x10ffff] as const];
+    for (const { weight, style } of WML_TUPLES) {
+      const measured = measuredMetric(family, ownership.lines[tupleKey(weight, style)], ownership);
+      if (!measured) continue;
+      metrics[`${identity}\u0000${weight}\u0000${style}`] = Object.freeze({
+        family, weight, style, sourceIdentity: identity, synthesized: false, ...measured, unicodeRanges: frozenRanges(declared),
+      });
     }
   }
   return metrics;

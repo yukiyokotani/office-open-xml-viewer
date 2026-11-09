@@ -65,6 +65,7 @@ import {
 } from './face-download.js';
 import { resolveFontFiles } from './files-source.js';
 import { parseOpenTypeResourceMetrics, type OpenTypeLineMetrics } from './open-type-metrics.js';
+import { metricSfnt } from './web-font-sfnt.js';
 import { concludeFamilies } from './resolver-failures.js';
 import {
   claimResolverCandidates,
@@ -111,12 +112,18 @@ export interface LoadedSourceFace {
   readonly sourceIndex: number;
   readonly face: FontFace;
   /** OpenType tables of the exact bytes this face was registered from, when
-   * the session holds them (`data` faces, library-acquired downloads) and
-   * they are a static sfnt the resource parser accepts. Absent for faces the
-   * browser fetched itself (`url` without library acquisition), WOFF/WOFF2
-   * and variable fonts. Formats project these tables with their own line
-   * rules, exactly as for a document-embedded face. */
+   * the session holds them (`data` faces and library-acquired downloads,
+   * which include every `fontFiles` URL face the first demand needs) and the
+   * parser reads them: TrueType/OpenType, WOFF, and WOFF2 where the engine
+   * inflates Brotli natively. A variable font carries its `variation` data
+   * for {@link instanceOpenTypeLineMetrics}. Formats project these tables
+   * with their own line rules, exactly as for a document-embedded face. */
   readonly resourceMetrics?: OpenTypeLineMetrics;
+  /** When `resourceMetrics` is absent: the source this face was registered
+   * from (a CSS `url()` value or the owned bytes), so a format can register
+   * it again alone under a private family and measure it in the DOM. Absent
+   * for a face the tables were read from. */
+  readonly probeSource?: string | ArrayBuffer;
 }
 
 /** What the renderers consume after each ensure. */
@@ -158,20 +165,20 @@ export interface FontSourceSessionOptions {
 }
 
 
-/** Parsed tables per registered face. A face shared by sessions of one realm
- * was created from one signature (content included), so its bytes, and hence
- * its tables, are the same for every holder. */
+/** Parsed tables per registered face (null: unreadable). A face shared by
+ * sessions of one realm was created from one signature (content included),
+ * so its bytes, and hence its tables, are the same for every holder. */
 const faceResourceMetrics = new WeakMap<FontFace, OpenTypeLineMetrics | null>();
 
-function resourceMetricsOf(face: FontFace, data: ArrayBuffer | undefined): OpenTypeLineMetrics | undefined {
-  if (data === undefined) return undefined;
-  let metrics = faceResourceMetrics.get(face);
-  if (metrics === undefined) {
-    try { metrics = parseOpenTypeResourceMetrics(new Uint8Array(data)); }
-    catch { metrics = null; }
-    faceResourceMetrics.set(face, metrics);
-  }
-  return metrics ?? undefined;
+/** Read the metric tables of `data` once per face (WOFF/WOFF2 inflate). */
+async function prepareResourceMetrics(face: FontFace, data: ArrayBuffer): Promise<void> {
+  if (faceResourceMetrics.has(face)) return;
+  let metrics: OpenTypeLineMetrics | null = null;
+  try {
+    const sfnt = await metricSfnt(data);
+    if (sfnt instanceof Uint8Array) metrics = parseOpenTypeResourceMetrics(sfnt, undefined, { variations: true });
+  } catch { metrics = null; }
+  faceResourceMetrics.set(face, metrics);
 }
 
 const EMPTY_SNAPSHOT: LoadedFontSources = Object.freeze({
@@ -570,6 +577,10 @@ export class FontSourceSession {
       loadCeiling?.dispose();
     }
     if (this.closed) return this.settledState();
+    await Promise.all([...this.owned.values()].flatMap((entry) =>
+      entry.face.status === 'loaded' && entry.declaration.data !== undefined
+        ? [prepareResourceMetrics(entry.face, entry.declaration.data)] : []));
+    if (this.closed) return this.settledState();
     this.warn(failures);
     this.snapshot = this.takeSnapshot();
     return this.snapshot;
@@ -584,6 +595,7 @@ export class FontSourceSession {
   private async acquire(resolved: Map<string, FamilyState>, ceiling: ReturnType<typeof ceilingSignal>): Promise<boolean> {
     type Claimed = Extract<FamilyState, { kind: 'claimed' }>;
     const omitted: [string, Claimed][] = [];
+    const files: [string, Claimed][] = [];
     const bridged = new Map<number, [string, Claimed][]>();
     for (const entry of resolved) {
       const state = entry[1];
@@ -591,18 +603,36 @@ export class FontSourceSession {
       const source = this.sources[state.sourceIndex];
       if (source.kind !== 'font-resolver') {
         if (source.credentials === 'omit') omitted.push([entry[0], state]);
+        else if (source.kind === 'font-files') files.push([entry[0], state]);
       } else if (this.acquireResolverFaces) {
         bridged.set(state.sourceIndex, [...bridged.get(state.sourceIndex) ?? [], [entry[0], state]]);
       }
     }
-    if (!omitted.length && !bridged.size) return false;
+    if (!omitted.length && !files.length && !bridged.size) return false;
     const deadline = Date.now() + ceiling.remaining();
     const context = { signal: ceiling.signal, cancel: this.controller.signal, deadline, holder: this };
     const urlsOf = (state: Claimed) => state.declarations.filter(isDownloadableFace).map(({ url }) => url as string);
+    // A `fontFiles` URL face is fetched by the library, with the CSS
+    // font-loading credentials (same-origin), so its bytes are held like a
+    // `data` face and its tables can be read; the FontFace is registered
+    // from those bytes, so the file is downloaded once. Laziness is kept:
+    // only faces the demand so far needs are fetched here; a subset needed
+    // only by a later delta is registered by URL and loaded by the browser.
+    const sortedPoints = this.all ? [] : [...this.points].sort((a, b) => a - b);
+    const demanded = (declaration: FontFaceDeclaration) => {
+      if (!isDownloadableFace(declaration)) return false;
+      const ranges = parseUnicodeRange(declaration.unicodeRange);
+      return this.all || ranges === null || rangeIntersects(ranges, sortedPoints);
+    };
     const batches: Promise<[readonly [string, Claimed][], ReadonlyMap<string, FaceAcquisition>]>[] = [];
     if (omitted.length) {
       batches.push(acquireFaceUrls(omitted.flatMap(([, state]) => urlsOf(state)), { credentials: 'omit', ...context })
         .then((outcomes) => [omitted, outcomes]));
+    }
+    if (files.length) {
+      const urls = files.flatMap(([, state]) => state.declarations.filter(demanded).map(({ url }) => url as string));
+      batches.push(acquireFaceUrls(urls, { credentials: 'same-origin', ...context })
+        .then((outcomes) => [files, outcomes]));
     }
     const acquire = this.acquireResolverFaces;
     for (const [sourceIndex, claimed] of bridged) {
@@ -637,8 +667,11 @@ export class FontSourceSession {
     for (const [claimed, outcomes] of settled) {
       for (const [key, state] of claimed) {
         let reason: string | undefined;
+        const libraryFetched = this.sources[state.sourceIndex]?.kind !== 'font-files'
+          || (this.sources[state.sourceIndex] as { credentials?: string }).credentials === 'omit'
+          ? isDownloadableFace : demanded;
         const declarations = state.declarations.flatMap((declaration) => {
-          if (!isDownloadableFace(declaration)) return [declaration];
+          if (!libraryFetched(declaration)) return [declaration];
           const outcome = outcomes.get(declaration.url as string) ?? { reason: 'font download failed' };
           if ('data' in outcome) return [withAcquiredBytes(declaration, outcome.data)];
           reason ??= outcome.reason;
@@ -897,7 +930,9 @@ export class FontSourceSession {
     for (const entry of this.owned.values()) {
       if (entry.face.status !== 'loaded') continue;
       const { declaration } = entry;
-      const resourceMetrics = resourceMetricsOf(entry.face, declaration.data);
+      const resourceMetrics = faceResourceMetrics.get(entry.face) ?? undefined;
+      const probeSource = resourceMetrics ? undefined
+        : declaration.data ?? (declaration.url === undefined ? undefined : cssUrl(declaration.url));
       faces.push(Object.freeze({
         family: declaration.family,
         weight: declaration.weight ?? 'normal',
@@ -907,6 +942,7 @@ export class FontSourceSession {
         sourceIndex: entry.sourceIndex,
         face: entry.face,
         ...(resourceMetrics ? { resourceMetrics } : {}),
+        ...(probeSource === undefined ? {} : { probeSource }),
       }));
     }
     const substitutions = new Map<string, { readonly family: string; readonly script?: FontSubstituteScript }>();

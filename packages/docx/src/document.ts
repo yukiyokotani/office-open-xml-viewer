@@ -1,4 +1,6 @@
 import { measureHostFontLines, loadDocxOfficeFontFallbacks as loadOfficeFontFallbacks } from './host-font-line-metrics.js';
+import { measureServedFaceLines, prepareServedFaceLines } from './served-face-lines.js';
+import { documentRoutedFontFamilies } from './layout/production-services.js';
 import { recordResourceDiagnostics, resourceDiagnosticsOf } from './resource-diagnostics.js';
 import type { DocxDiagnostic } from './types.js';
 import { resolveCjkFallback, type CjkLang } from '@silurus/ooxml-core';
@@ -766,8 +768,19 @@ export class DocxDocument {
         };
         const nativeRoutes = await nativeRoutesPending;
         checkAbort();
+        // Served faces without readable tables, and application FontFaces of
+        // authored families, are measured here (served-face-lines.ts).
+        const servedFaceLines = await prepareServedFaceLines(
+          sourceFonts?.loaded, activeFontSet(), documentRoutedFontFamilies(doc._source),
+        );
+        if (signal?.aborted || doc._nativeRouteFacesReleased) {
+          unloadOfficeFontFallbacks(servedFaceLines.faces);
+          throw new PaginationAbortError();
+        }
+        doc._nativeRouteFaces.push(...servedFaceLines.faces);
         runtime.services = createLayoutServices(doc._source, {
           ...serviceOptions,
+          servedFaceLines,
           nativeRouteMetrics: nativeRoutes && nativeRoutes.faces.length > 0
             ? admitDocxNativeRouteLines(nativeRoutes.lines, activeFontSet())
             : undefined,
@@ -1169,6 +1182,13 @@ export class DocxDocument {
       void measureHostFontLines(res.routes).catch(() => []).then(measurements => {
         if (res.forId !== this._parseRequestId) return;
         this._worker.postMessage({ type: 'hostFontLinesMeasured', forId: res.forId, measurements } satisfies RenderWorkerRequest);
+      });
+      return;
+    }
+    if (res.type === 'measureServedFaceLines') {
+      void measureServedFaceLines(res.requests).catch(() => []).then(measurements => {
+        if (res.forId !== this._parseRequestId) return;
+        this._worker.postMessage({ type: 'servedFaceLinesMeasured', forId: res.forId, measurements } satisfies RenderWorkerRequest);
       });
       return;
     }
