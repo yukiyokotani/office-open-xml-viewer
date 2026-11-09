@@ -24,7 +24,7 @@ import type {
   Worksheet, Styles, Cell, CellValue, CellFont, CellFill, Border, BorderEdge, CellXf,
   ViewportRange, RenderViewportOptions, XlsxTextRunInfo,
   Dxf,
-  Run, GradientFillSpec, ShapeInfo, ShapeAnchor, ImageAnchor, ChartAnchor,
+  Run, GradientFillSpec, ShapeInfo, ShapeHatchFill, ShapeImageFill, ShapeAnchor, ImageAnchor, ChartAnchor,
   SlicerItem, SlicerStyle, SlicerElementStyle,
   PhoneticRun, PhoneticProperties, PhoneticAlignment, Duotone, PathInfo,
   XlsxLoadedFontSources,
@@ -4717,7 +4717,7 @@ function drawShape(
   }
 
   if (shape.geom.type === 'custom') {
-    const fill = resolveSpreadsheetShapeFill(ctx, shape, sw, sh, cs);
+    const fill = resolveSpreadsheetShapeFill(ctx, shape, sw, sh, cs, loadedImages);
     for (const path of shape.geom.paths) {
       if (path.w <= 0 || path.h <= 0) continue;
       ctx.beginPath();
@@ -4742,7 +4742,7 @@ function drawShape(
     // renders with its true outline instead of the old rect fallback. The
     // engine returns false for presets it doesn't carry; only then do we fall
     // back to a plain rectangle.
-    const baseFill = resolveSpreadsheetShapeFill(ctx, shape, sw, sh, cs);
+    const baseFill = resolveSpreadsheetShapeFill(ctx, shape, sw, sh, cs, loadedImages);
     const applyAndStroke = shape.strokeColor && shape.strokeWidth > 0
       ? () => strokeShapePath(ctx, shape, sw, sh, cs)
       : null;
@@ -4763,7 +4763,8 @@ function drawShape(
     if (!drawn) {
       ctx.beginPath();
       ctx.rect(0, 0, sw, sh);
-      fillAndStroke(ctx, shape, sw, sh, cs);
+      fillShape(ctx, shape, sw, sh, cs, baseFill);
+      strokeShapePath(ctx, shape, sw, sh, cs);
     }
   } else if (shape.geom.type === 'image') {
     // Image leaf inside a group (e.g. a sun-emoji clip-art nested in the
@@ -5356,16 +5357,6 @@ export function drawShapeText(
   }
 }
 
-function fillAndStroke(
-  ctx: CanvasRenderingContext2D,
-  shape: ShapeInfo,
-  width: number,
-  height: number,
-  cs: number,
-): void {
-  fillShape(ctx, shape, width, height, cs);
-  strokeShapePath(ctx, shape, width, height, cs);
-}
 
 /** Excel's printed DrawingML pattern stays on the page axes through shape
  * rotation, reflection and a rotated group. The fill itself is phased from
@@ -5401,7 +5392,12 @@ function resolveSpreadsheetShapeFill(
   width: number,
   height: number,
   cs: number,
+  loadedImages?: Map<string, CanvasImageSource | null>,
 ): ReturnType<typeof resolveFill> {
+  if (shape.fill?.fillType === 'hatch') return resolveHatchFill(ctx, shape.fill, cs);
+  if (shape.fill?.fillType === 'image') {
+    return resolveImageShapeFill(ctx, shape.fill, width, height, cs, loadedImages);
+  }
   const fill = shape.fill ?? (shape.fillColor
     ? { fillType: 'solid' as const, color: shape.fillColor }
     : null);
@@ -5416,6 +5412,100 @@ function resolveSpreadsheetShapeFill(
     axisAlignedPatternTransform(shape, width, height),
     (target, x, y, w, h) => appendSpreadsheetShapeOutline(target, shape, x, y, w, h),
   );
+}
+
+/** One hatch tile per colour/spacing/family set and context scale. */
+const hatchTileCache = new Map<string, HTMLCanvasElement | OffscreenCanvas>();
+const MAX_HATCH_TILES = 64;
+
+/**
+ * An OpenDocument hatch (ODF 1.3 Part 3 §16.42): line families
+ * `distancePt` apart, rotated `angle` degrees counter-clockwise, over the
+ * optional background. The tile holds one period of every family (the
+ * diagonal of a triple hatch runs corner to corner of the square period).
+ */
+function resolveHatchFill(
+  ctx: CanvasRenderingContext2D,
+  fill: ShapeHatchFill,
+  cs: number,
+): CanvasPattern | string | null {
+  const period = Math.max(2, Math.round(fill.distancePt * PT_TO_PX * cs));
+  const key = `${fill.color}|${fill.background ?? ''}|${period}|${fill.lines}|${cs}`;
+  let tile = hatchTileCache.get(key);
+  if (!tile) {
+    const canvas = createAuxCanvas(period, period);
+    const tctx = canvas?.getContext('2d') as CanvasRenderingContext2D | null | undefined;
+    if (!canvas || !tctx) return fill.background ?? fill.color;
+    if (fill.background) {
+      tctx.fillStyle = fill.background;
+      tctx.fillRect(0, 0, period, period);
+    }
+    tctx.strokeStyle = fill.color;
+    tctx.lineWidth = Math.max(1, cs);
+    tctx.beginPath();
+    tctx.moveTo(0, 0.5);
+    tctx.lineTo(period, 0.5);
+    if (fill.lines >= 2) {
+      tctx.moveTo(0.5, 0);
+      tctx.lineTo(0.5, period);
+    }
+    if (fill.lines >= 3) {
+      tctx.moveTo(0, period);
+      tctx.lineTo(period, 0);
+    }
+    tctx.stroke();
+    if (hatchTileCache.size >= MAX_HATCH_TILES) {
+      const oldest = hatchTileCache.keys().next().value;
+      if (oldest !== undefined) hatchTileCache.delete(oldest);
+    }
+    hatchTileCache.set(key, canvas);
+    tile = canvas;
+  }
+  const pattern = ctx.createPattern(tile as CanvasImageSource, 'repeat');
+  if (!pattern) return fill.background ?? fill.color;
+  if (typeof pattern.setTransform === 'function' && fill.angle % 360 !== 0) {
+    // Counter-clockwise on the page is a negative canvas rotation (y down).
+    const radians = (-fill.angle * Math.PI) / 180;
+    pattern.setTransform({
+      a: Math.cos(radians), b: Math.sin(radians),
+      c: -Math.sin(radians), d: Math.cos(radians), e: 0, f: 0,
+    });
+  }
+  return pattern;
+}
+
+/**
+ * A picture fill (OpenDocument `draw:fill-image`, §16.41): stretched over
+ * the shape box, or repeated from its top-left at the tile size (the
+ * image's natural size at 96 DPI where an edge is not authored). The image
+ * is pre-decoded by the render orchestrator under its package path.
+ */
+function resolveImageShapeFill(
+  ctx: CanvasRenderingContext2D,
+  fill: ShapeImageFill,
+  width: number,
+  height: number,
+  cs: number,
+  loadedImages?: Map<string, CanvasImageSource | null>,
+): CanvasPattern | null {
+  const image = loadedImages?.get(fill.imagePath);
+  if (!image) return null;
+  const natural = image as { width?: number; height?: number };
+  const iw = Number(natural.width) || 0;
+  const ih = Number(natural.height) || 0;
+  if (iw <= 0 || ih <= 0) return null;
+  const pattern = ctx.createPattern(image, fill.tile ? 'repeat' : 'no-repeat');
+  if (!pattern) return null;
+  const targetW = fill.tile
+    ? (fill.tileWidthPt !== undefined ? fill.tileWidthPt * PT_TO_PX : iw) * cs
+    : width;
+  const targetH = fill.tile
+    ? (fill.tileHeightPt !== undefined ? fill.tileHeightPt * PT_TO_PX : ih) * cs
+    : height;
+  if (typeof pattern.setTransform === 'function') {
+    pattern.setTransform({ a: targetW / iw, b: 0, c: 0, d: targetH / ih, e: 0, f: 0 });
+  }
+  return pattern;
 }
 
 /** Fill the current path; reuse one raster across a custom shape's subpaths. */

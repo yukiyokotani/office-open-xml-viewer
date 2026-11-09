@@ -932,6 +932,7 @@ pub struct ShapeInfo {
 #[derive(Debug, Serialize, Clone)]
 #[serde(tag = "fillType", rename_all = "camelCase")]
 pub enum ShapeStrokeFill {
+    #[serde(rename_all = "camelCase")]
     Gradient {
         stops: Vec<ooxml_common::fill::GradStop>,
         angle: f64,
@@ -962,6 +963,7 @@ pub enum ShapeFill {
     Solid {
         color: String,
     },
+    #[serde(rename_all = "camelCase")]
     Gradient {
         stops: Vec<ooxml_common::fill::GradStop>,
         angle: f64,
@@ -983,6 +985,34 @@ pub enum ShapeFill {
         fg: String,
         bg: String,
         preset: String,
+    },
+    /// Parallel hatch lines over an optional background (an OpenDocument
+    /// `draw:hatch`, ODF 1.3 Part 3 §16.42; DrawingML has no equivalent).
+    /// Colours are `#RRGGBB`; `angle` is degrees counter-clockwise of the
+    /// first line family; `lines` is 1, 2 (crossed) or 3 (with a diagonal).
+    #[serde(rename_all = "camelCase")]
+    Hatch {
+        color: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        background: Option<String>,
+        angle: f64,
+        distance_pt: f64,
+        lines: u8,
+    },
+    /// A picture filling the shape outline (an OpenDocument
+    /// `draw:fill-image`, §16.41, or a DrawingML `a:blipFill` §20.1.8.14):
+    /// stretched over the shape, or tiled from its top-left at the tile size
+    /// (points; an absent edge keeps the image's natural size at 96 DPI).
+    #[serde(rename_all = "camelCase")]
+    Image {
+        image_path: String,
+        mime_type: String,
+        #[serde(skip_serializing_if = "std::ops::Not::not", default)]
+        tile: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tile_width_pt: Option<f64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tile_height_pt: Option<f64>,
     },
 }
 
@@ -2064,6 +2094,48 @@ pub struct ParsedWorkbook {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shape_fill_variants_serialize_camel_case_fields() {
+        let gradient = ShapeFill::Gradient {
+            stops: Vec::new(),
+            angle: 0.0,
+            grad_type: "path".into(),
+            scaled: None,
+            path: Some("circle".into()),
+            fill_to_rect: Some(ooxml_common::fill::FillRect::default()),
+            tile_rect: None,
+            flip: None,
+            rot_with_shape: Some(false),
+        };
+        let json = serde_json::to_value(&gradient).unwrap();
+        assert_eq!(json["fillType"], "gradient");
+        assert_eq!(json["gradType"], "path");
+        assert!(json.get("fillToRect").is_some());
+        assert_eq!(json["rotWithShape"], false);
+        let hatch = ShapeFill::Hatch {
+            color: "#000000".into(),
+            background: None,
+            angle: 45.0,
+            distance_pt: 2.0,
+            lines: 2,
+        };
+        assert_eq!(
+            serde_json::to_value(&hatch).unwrap(),
+            serde_json::json!({"fillType": "hatch", "color": "#000000", "angle": 45.0, "distancePt": 2.0, "lines": 2})
+        );
+        let image = ShapeFill::Image {
+            image_path: "Pictures/a.png".into(),
+            mime_type: "image/png".into(),
+            tile: true,
+            tile_width_pt: Some(10.0),
+            tile_height_pt: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&image).unwrap(),
+            serde_json::json!({"fillType": "image", "imagePath": "Pictures/a.png", "mimeType": "image/png", "tile": true, "tileWidthPt": 10.0})
+        );
+    }
 
     #[test]
     fn workbook_metadata_serialization_preserves_field_order_and_defaults() {

@@ -11,7 +11,33 @@ import type {
   BlipEffect,
 } from '@silurus/ooxml-core';
 
-export type ShapeFill = Exclude<Fill, { fillType: 'image' } | { fillType: 'none' }>;
+export type ShapeFill = Exclude<Fill, { fillType: 'image' } | { fillType: 'none' }>
+  | ShapeHatchFill | ShapeImageFill;
+
+/** Parallel hatch lines over an optional background (an OpenDocument
+ *  `draw:hatch`, ODF 1.3 Part 3 §16.42). Colours are `#RRGGBB`; `angle` is
+ *  degrees counter-clockwise of the first line family; `lines` 2 adds the
+ *  perpendicular family, 3 also the diagonal. */
+export interface ShapeHatchFill {
+  fillType: 'hatch';
+  color: string;
+  background?: string;
+  angle: number;
+  distancePt: number;
+  lines: number;
+}
+
+/** A picture filling the shape outline (an OpenDocument `draw:fill-image`,
+ *  §16.41): stretched over the shape, or tiled from its top-left at the tile
+ *  size in points (an absent edge keeps the natural size at 96 DPI). */
+export interface ShapeImageFill {
+  fillType: 'image';
+  imagePath: string;
+  mimeType: string;
+  tile?: boolean;
+  tileWidthPt?: number;
+  tileHeightPt?: number;
+}
 import type {
   NormalizedOoxmlResourcePolicy,
   PullSessionIdentity,

@@ -105,6 +105,8 @@ pub(crate) struct Context {
     pub store: StyleStore,
     pub data: DataStyles,
     pub faces: HashMap<String, String>,
+    /// Named gradients, hatches and fill images (`office:styles`).
+    pub fills: crate::odf_fill::FillDefs,
     pub xfs: XfBuilder,
     /// Days from the null date (§19.636 `table:null-date`) to 1899-12-30.
     pub null_date_shift: i64,
@@ -158,11 +160,13 @@ pub fn read(package: &OdfPackage) -> Result<OdsWorkbook, String> {
     let mut store = StyleStore::default();
     let mut data = DataStyles::default();
     let mut faces = HashMap::new();
+    let mut fills = crate::odf_fill::FillDefs::default();
     odf_props::font_faces(styles_root, &mut faces);
     odf_props::font_faces(content_root, &mut faces);
     for child in styles_root.children().filter(|n| n.is_element()) {
         if xml::is(child, NS_OFFICE, "styles") {
             store.add(child, false)?;
+            fills.add(child);
             data.add(child);
         } else if xml::is(child, NS_OFFICE, "automatic-styles") {
             data.add(child);
@@ -204,6 +208,7 @@ pub fn read(package: &OdfPackage) -> Result<OdsWorkbook, String> {
         store,
         data,
         faces,
+        fills,
         xfs,
         null_date_shift,
         date1904,

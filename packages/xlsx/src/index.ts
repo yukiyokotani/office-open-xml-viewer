@@ -264,6 +264,8 @@ export type {
   ShapeAnchor,
   ShapeInfo,
   ShapeFill,
+  ShapeHatchFill,
+  ShapeImageFill,
   ShapeGeom,
   ShapeText,
   ShapeParagraph,

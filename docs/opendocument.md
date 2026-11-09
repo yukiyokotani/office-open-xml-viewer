@@ -206,7 +206,10 @@ painted at the authored size.
 Not representable in the workbook model, and therefore not shown: page
 layout, headers and footers (the workbook viewer shows the grid, not printed
 pages; print ranges become `_xlnm.Print_Area` names). Data pilot tables are
-shown as the cells LibreOffice saved for them. Custom shapes are drawn from
+shown as the cells LibreOffice saved for them. Shape area fills are solid
+colours, gradients (linear, axial, radial, ellipsoid, square, rectangular,
+with border and centre; the rotation of a non-linear gradient is not
+applied), hatches and stretched or tiled pictures. Custom shapes are drawn from
 their preset or their enhanced-geometry path (equations are evaluated; arcs
 are flattened to short segments). Embedded objects that are not charts are
 drawn from their replacement image

@@ -439,7 +439,7 @@ fn read_drawing(
         }
         if let Some(text_box) = node.children().find(|n| xml::is(*n, NS_DRAW, "text-box")) {
             let shape = shape_info(ctx, text_box, &style_chain, "rect", z, rotation, rect);
-            push_shape(&mut ctx.budget, worksheet, rect, shape)?;
+            push_shape_checked(ctx, package, worksheet, rect, shape)?;
         }
         return Ok(());
     }
@@ -501,7 +501,7 @@ fn read_drawing(
             shape.fill_color = None;
         }
     }
-    push_shape(&mut ctx.budget, worksheet, rect, shape)
+    push_shape_checked(ctx, package, worksheet, rect, shape)
 }
 
 /// LibreOffice writes imported OOXML preset shapes as `ooxml-<preset>`
@@ -744,15 +744,11 @@ fn shape_info(
     rotation: f64,
     _rect: Rect,
 ) -> ShapeInfo {
-    let opacity = get(chain, "graphic:draw:opacity").and_then(percent);
-    let fill_color = match get(chain, "graphic:draw:fill") {
-        Some("none") => None,
-        Some("solid") | None => get(chain, "graphic:draw:fill-color").and_then(shape_color),
-        // Gradient, hatch and bitmap fills are drawn with the gradient's
-        // start colour, the hatch's background or the fill colour.
-        Some(_) => get(chain, "graphic:draw:fill-color").and_then(shape_color),
+    let fill = shape_fill(ctx.fills.resolve(chain));
+    let fill_color = match &fill {
+        Some(xlsx_model::ShapeFill::Solid { color }) => Some(color.clone()),
+        _ => None,
     };
-    let _ = opacity;
     let stroke = get(chain, "graphic:draw:stroke");
     let stroke_color = if stroke == Some("none") {
         None
@@ -776,8 +772,8 @@ fn shape_info(
         rot: rotation,
         flip_h: false,
         flip_v: false,
-        fill_color: fill_color.clone(),
-        fill: fill_color.map(|color| xlsx_model::ShapeFill::Solid { color }),
+        fill_color,
+        fill,
         stroke_color,
         stroke_width,
         stroke_fill: None,
@@ -949,6 +945,17 @@ fn push_text_run(runs: &mut Vec<xlsx_model::ShapeTextRun>, text: &str, font: &xl
         font_face_ea: None,
         font_face_cs: None,
     });
+}
+
+fn push_shape_checked(
+    ctx: &mut Context,
+    package: &OdfPackage,
+    worksheet: &mut Worksheet,
+    rect: Rect,
+    mut shape: ShapeInfo,
+) -> Result<(), String> {
+    admit_fill_image(package, &mut ctx.images, &mut shape)?;
+    push_shape(&mut ctx.budget, worksheet, rect, shape)
 }
 
 fn push_shape(
@@ -1190,6 +1197,81 @@ impl crate::odf_chart::RangeResolver for SheetResolver<'_> {
     fn hidden(&self, _address: &str) -> Option<Vec<bool>> {
         None
     }
+}
+
+/// An area fill (`odf_fill`) in the workbook drawing model. A picture fill
+/// is admitted by the caller once its bytes are known to decode.
+fn shape_fill(fill: crate::odf_fill::Fill) -> Option<xlsx_model::ShapeFill> {
+    use crate::odf_fill::{Fill, GradientShape};
+    Some(match fill {
+        Fill::None => return None,
+        Fill::Solid(hex) => xlsx_model::ShapeFill::Solid {
+            color: format!("#{hex}"),
+        },
+        Fill::Gradient(gradient) => {
+            let (angle, grad_type, path, fill_to_rect) = match gradient.shape {
+                GradientShape::Linear { angle } => (angle, "linear", None, None),
+                GradientShape::Path { path, focus } => {
+                    (0.0, "radial", Some(path.to_string()), Some(focus))
+                }
+            };
+            xlsx_model::ShapeFill::Gradient {
+                stops: gradient.stops,
+                angle,
+                grad_type: grad_type.into(),
+                scaled: None,
+                path,
+                fill_to_rect,
+                tile_rect: None,
+                flip: None,
+                rot_with_shape: Some(true),
+            }
+        }
+        Fill::Hatch(hatch) => xlsx_model::ShapeFill::Hatch {
+            color: format!("#{}", hatch.color),
+            background: hatch.background.map(|c| format!("#{c}")),
+            angle: hatch.angle,
+            distance_pt: hatch.distance_pt,
+            lines: hatch.lines,
+        },
+        Fill::Picture(picture) => xlsx_model::ShapeFill::Image {
+            image_path: picture.path,
+            mime_type: String::new(),
+            tile: picture.tile.is_some(),
+            tile_width_pt: picture.tile.and_then(|t| t.0),
+            tile_height_pt: picture.tile.and_then(|t| t.1),
+        },
+    })
+}
+
+/// Admit a picture fill's image (its MIME type from the bytes); a fill
+/// whose image is missing or not browser-decodable paints nothing.
+fn admit_fill_image(
+    package: &OdfPackage,
+    admitted: &mut std::collections::BTreeSet<String>,
+    shape: &mut ShapeInfo,
+) -> Result<(), String> {
+    let Some(xlsx_model::ShapeFill::Image {
+        image_path,
+        mime_type,
+        ..
+    }) = shape.fill.as_mut()
+    else {
+        return Ok(());
+    };
+    let mime = if package.contains(image_path) {
+        image_mime(&read_image_bytes(package, image_path)?)
+    } else {
+        None
+    };
+    match mime {
+        Some(mime) => {
+            *mime_type = mime.to_string();
+            admitted.insert(image_path.clone());
+        }
+        None => shape.fill = None,
+    }
+    Ok(())
 }
 
 /// Drawing colours in the workbook model are CSS `#RRGGBB` (as the

@@ -4,7 +4,10 @@
 import { describe, expect, it } from 'vitest';
 import { buildOdsFixture } from '../ods-fixture.js';
 import { testOdsSource } from '../test-sources.js';
-import { formatCellValue, materializeXlsxWorkbook, skia, skiaFactory } from './ods-facade.js';
+import {
+  formatCellValue, installImageBitmapShim, installOffscreenCanvasShim, materializeXlsxWorkbook,
+  renderWorksheetViewport, skia, skiaFactory,
+} from './ods-facade.js';
 
 type Cell = { col: number; row: number; value: { type: string; text?: string; number?: number }; styleIndex?: number };
 type Worksheet = {
@@ -148,6 +151,56 @@ describe('ODS through the XLSX Node session', () => {
     expect(scale?.type).toBe('colorScale');
     expect(sheet.dataValidations).toEqual([expect.objectContaining({ sqref: 'C1', validationType: 'list', formula1: '"a,b"' })]);
     expect(sheet.sparklineGroups[0]).toMatchObject({ kind: 'column', sparklines: [{ row: 1, col: 4, values: [1, 5] }] });
+  });
+
+  it('maps gradient, hatch and picture area fills of shapes and paints them', async () => {
+    const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4"><rect width="4" height="4" fill="#00ff00"/></svg>';
+    const shape = (style: string, y: string) =>
+      `<draw:custom-shape draw:style-name="${style}" svg:width="3cm" svg:height="1.5cm" svg:x="0cm" svg:y="${y}"><draw:enhanced-geometry svg:viewBox="0 0 21600 21600" draw:type="rectangle"/></draw:custom-shape>`;
+    const { sheets, workbook } = await open(buildOdsFixture({
+      styles: '<draw:gradient draw:name="G" draw:style="radial" draw:cx="50%" draw:cy="50%" draw:start-color="#000000" draw:end-color="#ffffff" draw:border="0%"/>'
+        + '<draw:gradient draw:name="L" draw:style="linear" draw:start-color="#ff0000" draw:end-color="#0000ff" draw:angle="90deg"/>'
+        + '<draw:hatch draw:name="H" draw:style="double" draw:color="#0000ff" draw:distance="0.2cm" draw:rotation="450"/>'
+        + '<draw:fill-image draw:name="P" xlink:href="Pictures/p.svg"/>',
+      automaticStyles: '<style:style style:name="g1" style:family="graphic"><style:graphic-properties draw:fill="gradient" draw:fill-gradient-name="G" draw:stroke="none"/></style:style>'
+        + '<style:style style:name="g2" style:family="graphic"><style:graphic-properties draw:fill="gradient" draw:fill-gradient-name="L" draw:stroke="none"/></style:style>'
+        + '<style:style style:name="g3" style:family="graphic"><style:graphic-properties draw:fill="hatch" draw:fill-hatch-name="H" draw:fill-hatch-solid="true" draw:fill-color="#ffff00" draw:stroke="none"/></style:style>'
+        + '<style:style style:name="g4" style:family="graphic"><style:graphic-properties draw:fill="bitmap" draw:fill-image-name="P" style:repeat="stretch" draw:stroke="none"/></style:style>',
+      body: '<table:table table:name="S"><table:table-column table:number-columns-repeated="4"/><table:table-row><table:table-cell/></table:table-row>'
+        + `<table:shapes>${shape('g1', '0cm')}${shape('g2', '2cm')}${shape('g3', '4cm')}${shape('g4', '6cm')}</table:shapes></table:table>`,
+      extraFiles: [['Pictures/p.svg', svg]],
+    }));
+    type Fill = { fillType: string; gradType?: string; path?: string; angle?: number; stops?: Array<{ position: number; color: string }>; lines?: number; background?: string; imagePath?: string; mimeType?: string };
+    const fills = (sheets[0] as unknown as { shapeGroups: Array<{ shapes: Array<{ fill?: Fill }> }> })
+      .shapeGroups.map(g => g.shapes[0]!.fill!);
+    expect(fills[0]).toMatchObject({ fillType: 'gradient', gradType: 'radial', path: 'circle',
+      stops: [{ position: 0, color: 'FFFFFF' }, { position: 1, color: '000000' }] });
+    expect(fills[1]).toMatchObject({ fillType: 'gradient', gradType: 'linear', angle: 0 });
+    expect(fills[2]).toMatchObject({ fillType: 'hatch', color: '#0000FF', background: '#FFFF00', angle: 45, lines: 2 });
+    expect(fills[3]).toMatchObject({ fillType: 'image', imagePath: 'Pictures/p.svg', mimeType: 'image/svg+xml' });
+    if (!skia) return;
+    const factory = skiaFactory();
+    const canvas = factory.createCanvas(200, 300);
+    const restoreImage = installImageBitmapShim(factory);
+    const restoreOffscreen = installOffscreenCanvasShim(factory);
+    try {
+      await renderWorksheetViewport({ ws: workbook.worksheets[0]!, styles: workbook.workbookIndex.styles } as never,
+        canvas as unknown as HTMLCanvasElement, { row: 1, col: 1, rows: 20, cols: 4 }, { width: 200, height: 300, dpr: 1 } as never);
+    } finally { restoreOffscreen(); restoreImage(); }
+    const pixels = (canvas.getContext('2d') as unknown as CanvasRenderingContext2D).getImageData(0, 0, 200, 300).data;
+    const at = (x: number, y: number) => Array.from(pixels.slice((y * 200 + x) * 4, (y * 200 + x) * 4 + 3));
+    // Shapes start below the column header and right of the row header;
+    // sample inside each box. (The picture fill decodes only with a host
+    // image loader, so its paint is covered by the model assertion.)
+    const header = 20;
+    const top = (cm: number) => header + Math.round((cm * 96) / 2.54);
+    // Linear red → blue from left to right.
+    const [left, right] = [at(60, top(2) + 25), at(150, top(2) + 25)];
+    expect(left[0]! > left[2]! && right[2]! > right[0]!).toBe(true);
+    // The hatch paints both its yellow background and blue lines.
+    const hatch = Array.from({ length: 30 }, (_, i) => at(60 + i, top(4) + 25));
+    expect(hatch.some(([r, g, b]) => r! > 200 && g! > 200 && b! < 80)).toBe(true);
+    expect(hatch.some(([r, g, b]) => b! > 150 && r! < 120 && g! < 120)).toBe(true);
   });
 
   it('rejects encrypted and corrupt packages, claims only spreadsheets', async () => {

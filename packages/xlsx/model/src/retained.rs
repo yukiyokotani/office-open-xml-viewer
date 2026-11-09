@@ -476,6 +476,18 @@ impl RetainedBytes for ShapeFill {
                 .saturating_add(fg.heap_bytes())
                 .saturating_add(bg.heap_bytes())
                 .saturating_add(preset.heap_bytes()),
+            Self::Hatch {
+                color, background, ..
+            } => 0u64
+                .saturating_add(color.heap_bytes())
+                .saturating_add(background.heap_bytes()),
+            Self::Image {
+                image_path,
+                mime_type,
+                ..
+            } => 0u64
+                .saturating_add(image_path.heap_bytes())
+                .saturating_add(mime_type.heap_bytes()),
         }
     }
 }
