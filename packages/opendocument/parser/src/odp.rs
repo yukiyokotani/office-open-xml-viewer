@@ -990,6 +990,40 @@ impl<'a, 'r, 'p> SlideReader<'a, 'r, 'p> {
             out.push(element);
             return Ok(());
         }
+        // Charts (§10.4.2 draw:object holding an office:chart document) are
+        // read into the shared chart model with their own data table
+        // (`table:table` local to the chart). An object that is not a chart,
+        // or a chart the reader cannot read, falls back to its replacement
+        // picture below, as LibreOffice shows it.
+        for child in &children {
+            if !xml::is(*child, NS_DRAW, "object") {
+                continue;
+            }
+            let Some(href) = child.attribute((NS_XLINK, "href")) else {
+                continue;
+            };
+            let Some(crate::iri::Target::Package { path, .. }) =
+                crate::iri::resolve(ctx.base, href)
+            else {
+                continue;
+            };
+            if let Ok(Some(chart)) =
+                crate::odf_chart::read_chart_object(self.media.package(), &path, None)
+            {
+                out.push(SlideElement::Chart(pptx_model::ChartElement {
+                    id: Some(self.id()),
+                    x: placed.x.round() as i64,
+                    y: placed.y.round() as i64,
+                    width: placed.w.round() as i64,
+                    height: placed.h.round() as i64,
+                    rotation: placed.rot,
+                    flip_h: false,
+                    flip_v: placed.flip_v,
+                    chart,
+                }));
+                return Ok(());
+            }
+        }
         // Images, objects (charts, OLE) and plugins: the first renderable
         // image among the frame's alternatives (§10.4.2: the first child is
         // the preferred representation; later draw:image children are

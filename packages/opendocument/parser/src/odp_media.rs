@@ -86,6 +86,10 @@ impl<'p> Media<'p> {
         Some((path, resource))
     }
 
+    pub fn package(&self) -> &'p OdfPackage {
+        self.package
+    }
+
     pub fn into_admitted(self) -> (HashMap<String, Resource>, HashMap<String, Vec<u8>>) {
         (self.admitted, self.converted)
     }

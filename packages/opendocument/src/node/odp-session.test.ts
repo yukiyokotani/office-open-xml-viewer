@@ -119,6 +119,26 @@ describe('ODP through the PPTX Node session', () => {
     expect(table.rows![1]!.cells[1]!.textBody!.paragraphs[0]!.runs[0]!.text).toBe('b');
   });
 
+  it('reads chart objects from their own data table', async () => {
+    const ns = 'xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:chart="urn:oasis:names:tc:opendocument:xmlns:chart:1.0" xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" xmlns:svg="urn:oasis:names:tc:opendocument:xmlns:svg-compatible:1.0"';
+    const row = (label: string, value: number) => `<table:table-row><table:table-cell office:value-type="string"><text:p>${label}</text:p></table:table-cell><table:table-cell office:value-type="float" office:value="${value}"><text:p>${value}</text:p></table:table-cell></table:table-row>`;
+    const chart = `<?xml version="1.0" encoding="UTF-8"?><office:document-content ${ns} office:version="1.3"><office:body><office:chart>`
+      + '<chart:chart chart:class="chart:bar" svg:width="10cm" svg:height="6cm"><chart:plot-area table:cell-range-address="local-table.$A$1:.$B$3">'
+      + '<chart:axis chart:dimension="x" chart:name="primary-x"><chart:categories table:cell-range-address="local-table.$A$2:.$A$3"/></chart:axis><chart:axis chart:dimension="y" chart:name="primary-y"/>'
+      + '<chart:series chart:class="chart:bar" chart:values-cell-range-address="local-table.$B$2:.$B$3" chart:label-cell-address="local-table.$B$1"/></chart:plot-area>'
+      + '<table:table table:name="local-table"><table:table-header-columns><table:table-column/></table:table-header-columns><table:table-columns><table:table-column/></table:table-columns>'
+      + '<table:table-header-rows><table:table-row><table:table-cell><text:p/></table:table-cell><table:table-cell office:value-type="string"><text:p>S1</text:p></table:table-cell></table:table-row></table:table-header-rows>'
+      + `<table:table-rows>${row('a', 3)}${row('b', 5)}</table:table-rows></table:table></chart:chart></office:chart></office:body></office:document-content>`;
+    const model = await open(buildOdpFixture({
+      pages: '<draw:page draw:master-page-name="M"><draw:frame svg:x="1cm" svg:y="1cm" svg:width="10cm" svg:height="6cm"><draw:object xlink:href="./Object 1"/><draw:image xlink:href="./ObjectReplacements/Object 1"/></draw:frame></draw:page>',
+      extraFiles: [['Object 1/content.xml', chart]],
+    }));
+    const element = model.slides[0]!.elements[0] as unknown as { type: string; x: number; chart: { series: { values?: unknown[] }[] } };
+    expect(element.type).toBe('chart');
+    expect(element.x).toBe(cm(1));
+    expect(element.chart.series).toHaveLength(1);
+  });
+
   it('maps gradients, markers and hidden slides; rejects encrypted packages', async () => {
     const model = await open(buildOdpFixture({
       styles: '<draw:gradient draw:name="g1" draw:style="linear" draw:start-color="#000000" draw:end-color="#ffffff" draw:angle="0deg" draw:border="0%"/>'

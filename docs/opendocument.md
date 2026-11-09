@@ -197,9 +197,9 @@ It reads:
   objects and OLE objects through their replacement pictures, and tables
   (column widths, row heights, spans, cell fills, borders, templates).
 
-Known gaps: charts are drawn from their replacement picture until the
-OpenDocument chart mapping lands (a chart without a stored replacement is
-not drawn); 3D extrusion of custom shapes and fontwork text paths are drawn
+Charts (`draw:object` frames holding an `office:chart` document) are read
+with their own data table into the shared chart model; an object the chart
+reader cannot read is drawn from its replacement picture. Known gaps: 3D extrusion of custom shapes and fontwork text paths are drawn
 flat; animations and transitions are not played; text measurement follows
 the fonts available to the browser, so text set in fonts LibreOffice
 substitutes (for example metric-compatible replacements) can wrap

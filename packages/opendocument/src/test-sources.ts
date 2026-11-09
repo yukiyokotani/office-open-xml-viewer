@@ -14,6 +14,8 @@ export const testOdtSource = () => createOdt({
 export const testOdpSource = () => createOdp({
   wasmUrl: here('./wasm-odp/opendocument_odp_bg.wasm'),
   moduleUrl: here('./odp-source-module.ts'),
+});
+
 export const testOdsSource = () => createOds({
   wasmUrl: here('./wasm-ods/opendocument_ods_bg.wasm'),
   moduleUrl: here('./ods-source-module.ts'),
