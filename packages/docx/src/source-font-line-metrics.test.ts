@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { parseOpenTypeResourceMetrics } from '@silurus/ooxml-core';
+import { findReferenceFontMetrics, parseOpenTypeResourceMetrics } from '@silurus/ooxml-core';
 import { sourceFontLayoutOptions } from './testing/font-sources.js';
 import { createLayoutServices } from './layout-runtime.js';
 import { buildSegments, layoutLines } from './line-layout.js';
@@ -198,14 +198,25 @@ describe('served font line metrics', () => {
     expect(lineEm('Measured Face', [{ family: 'Measured Face', weight: '400', style: 'normal' }])).toBeCloseTo(ASCENT + DESCENT, 6);
   });
 
-  it('declines a measured line for a family the catalogue classifies as Far East', () => {
-    // A CSS normal line cannot show OS/2 code pages or usWin (Word: 1.3 × usWin).
+  it('identifies a measured Far East face by the catalogue, else declines it', () => {
+    // A CSS normal line cannot show OS/2 code pages or usWin (Word: 1.3 x usWin),
+    // but a box equal to the catalogued face's identifies its tables.
     const loaded = sourceFontLayoutOptions(model('Yu Gothic'), [{ family: 'Yu Gothic', weight: '400', style: 'normal' }],
       { sources: [fontFiles({ faces: [{ family: 'Yu Gothic', url: 'https://app.example/yu.woff2' }] })] }).sourceFonts.loaded;
-    const line = { ascentRatio: 0.8, descentRatio: 0.2, lineGapRatio: 0.3 };
-    const prepared: PreparedServedFaceLines = {
+    const prepared = (line: { ascentRatio: number; descentRatio: number; lineGapRatio: number }): PreparedServedFaceLines => ({
       faceLines: new Map([[0, { ownershipFamily: '__probe', lines: { '400:normal': line } }]]), familyLines: new Map(),
-    };
-    expect(Object.keys(sourceFontLineMetrics(loaded, null, prepared))).toEqual([]);
+    });
+    const profiles = findReferenceFontMetrics('Yu Gothic', { weight: 400, style: 'normal' });
+    expect(profiles.length).toBeGreaterThan(0);
+    const [ascender, descender, gap] = profiles[0]!.hhea;
+    const em = profiles[0]!.unitsPerEm;
+    const catalogued = Object.values(sourceFontLineMetrics(loaded, null,
+      prepared({ ascentRatio: ascender / em, descentRatio: -descender / em, lineGapRatio: gap / em })));
+    expect(catalogued).toHaveLength(1);
+    expect(catalogued[0]).toMatchObject({ farEastCodePage: true, nativeRoutePrimaryFamily: '"__probe"' });
+    expect(catalogued[0]!.lineHeightRatio).toBeCloseTo(referenceFontLineMetrics('Yu Gothic')!.lineHeightRatio, 9);
+    // Other data under the same name: not identified, declined (Canvas box).
+    expect(Object.keys(sourceFontLineMetrics(loaded, null,
+      prepared({ ascentRatio: 0.8, descentRatio: 0.2, lineGapRatio: 0.3 })))).toEqual([]);
   });
 });

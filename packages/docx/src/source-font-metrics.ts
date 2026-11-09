@@ -1,4 +1,10 @@
-import { findReferenceFontMetrics, type LocalFontNormalLine, type OpenTypeLineMetrics, type ResolvedFontMetric } from '@silurus/ooxml-core';
+import {
+  findReferenceFontMetrics,
+  type LocalFontNormalLine,
+  type OpenTypeLineMetrics,
+  type ReferenceFontMetricProfile,
+  type ResolvedFontMetric,
+} from '@silurus/ooxml-core';
 import { quoteCssFontFamily } from '@silurus/ooxml-core/internal/css-font-family';
 import {
   fontFamilyKey,
@@ -97,24 +103,78 @@ function matchedSet<T extends { range: readonly [number, number]; style: Style }
     && matched.weight <= candidate.face.range[1]).map(({ face }) => face) : [];
 }
 
+/** Two quantized measurements per em (the strut height is an integer CSS
+ * pixel, the Canvas box carries sub-pixel rounding) at the probe em. */
+const PROFILE_MATCH_TOLERANCE_EM = 2 / 1024;
+
+/** The vertical boxes a rasterizer may report for a catalogued face as its
+ * CSS normal line: hhea, usWin, or typo when USE_TYPO_METRICS is set. */
+function profileBoxes(profile: ReferenceFontMetricProfile): (readonly [number, number, number])[] {
+  const em = profile.unitsPerEm;
+  const boxes: (readonly [number, number, number])[] = [[profile.hhea[0] / em, -profile.hhea[1] / em, profile.hhea[2] / em]];
+  if (profile.win) boxes.push([profile.win[0] / em, profile.win[1] / em, 0]);
+  if (profile.typoMetrics) boxes.push([profile.typoMetrics[0] / em, -profile.typoMetrics[1] / em, profile.typoMetrics[2] / em]);
+  return boxes;
+}
+
+/**
+ * Word's line for a measured face the catalogue classifies as Far East. A CSS
+ * normal line cannot show OS/2 code pages or usWin (Word: 1.3 × usWin, #1832),
+ * but it can identify the data: when the measured box equals a box the
+ * catalogue records for this family and tuple, the catalogue's tables are
+ * this face's, and their Word projection applies exactly as for an installed
+ * face. Every matching profile must project to the same line; no match, or
+ * disagreeing matches, decline.
+ */
+function catalogueFarEastLine(
+  served: string, weight: number, style: Style, line: LocalFontNormalLine,
+): { lineHeightRatio: number; designAscentRatio: number; designDescentRatio: number } | undefined {
+  const matching = findReferenceFontMetrics(served, { weight, style }).filter((profile) =>
+    profileBoxes(profile).some(([ascent, descent, gap]) =>
+      Math.abs(line.ascentRatio - ascent) <= PROFILE_MATCH_TOLERANCE_EM
+      && Math.abs(line.descentRatio - descent) <= PROFILE_MATCH_TOLERANCE_EM
+      && Math.abs(line.lineGapRatio - gap) <= PROFILE_MATCH_TOLERANCE_EM));
+  let result: { lineHeightRatio: number; designAscentRatio: number; designDescentRatio: number } | undefined;
+  for (const profile of matching) {
+    if (profile.farEastCodePage !== true || !profile.win) return undefined;
+    const projected = wordOpenTypeAutoLineRatios({
+      unitsPerEm: profile.unitsPerEm,
+      hheaAscent: profile.hhea[0], hheaDescent: profile.hhea[1], hheaLineGap: profile.hhea[2],
+      winAscent: profile.win[0], winDescent: profile.win[1], farEastCodePage: true,
+    });
+    if (!projected || (result && (projected.lineHeightRatio !== result.lineHeightRatio
+      || projected.designAscentRatio !== result.designAscentRatio
+      || projected.designDescentRatio !== result.designDescentRatio))) return undefined;
+    result = projected;
+  }
+  return result;
+}
+
 /** The measured line of one tuple as resource geometry (the projection of
  * host-font-line-metrics.ts: leading above the baseline, Canvas descent
- * below), sized only where the measured face is proven to draw. A CSS normal
- * line cannot expose OS/2 code-page bits or usWin, so a family the catalog
- * classifies as Far East (Word's 1.3 × usWin line, #1832) is declined, as for
- * installed faces. */
+ * below), sized only where the measured face is proven to draw. A family the
+ * catalogue classifies as Far East takes the catalogue's Word line when the
+ * measurement identifies the catalogued data (catalogueFarEastLine), and is
+ * declined otherwise, as for installed faces. */
 function measuredMetric(
-  served: string, line: LocalFontNormalLine | null | undefined, ownership: ServedFaceLine,
+  served: string, weight: number, style: Style,
+  line: LocalFontNormalLine | null | undefined, ownership: ServedFaceLine,
 ): Omit<ResolvedFontMetric, 'family' | 'weight' | 'style' | 'sourceIdentity'> | undefined {
   if (!line) return undefined;
-  if (findReferenceFontMetrics(served).some((profile) => profile.farEastCodePage !== false)) return undefined;
+  const ownedBy = {
+    requiresGlyphCoverage: true,
+    nativeRoutePrimaryFamily: quoteCssFontFamily(ownership.ownershipFamily),
+  } as const;
+  if (findReferenceFontMetrics(served).some((profile) => profile.farEastCodePage !== false)) {
+    const farEast = catalogueFarEastLine(served, weight, style, line);
+    return farEast && { farEastCodePage: true, ...ownedBy, ...farEast };
+  }
   const ascent = line.ascentRatio + line.lineGapRatio;
   const descent = line.descentRatio;
   if (!(Number.isFinite(ascent) && Number.isFinite(descent) && ascent >= 0 && descent >= 0 && ascent + descent > 0)) return undefined;
   return {
     farEastCodePage: false,
-    requiresGlyphCoverage: true,
-    nativeRoutePrimaryFamily: quoteCssFontFamily(ownership.ownershipFamily),
+    ...ownedBy,
     lineHeightRatio: ascent + descent,
     designAscentRatio: ascent,
     designDescentRatio: descent,
@@ -199,7 +259,7 @@ export function sourceFontLineMetrics(
           };
         }
         const ownership = prepared.faceLines.get(index);
-        const measured = ownership && measuredMetric(display, ownership.lines[tupleKey(weight, style)], ownership);
+        const measured = ownership && measuredMetric(display, weight, style, ownership.lines[tupleKey(weight, style)], ownership);
         return measured && { ...measured, unicodeRanges: frozenRanges(declared) };
       });
       if (projected.length === 0 || projected.some((entry) => entry === undefined)) continue;
@@ -219,7 +279,7 @@ export function sourceFontLineMetrics(
       ? [...fontSet].find((candidate) => fontFamilyKey(displayFamily(candidate.family)) === key) : undefined;
     const declared = parseUnicodeRange(face?.unicodeRange) ?? [[0, 0x10ffff] as const];
     for (const { weight, style } of WML_TUPLES) {
-      const measured = measuredMetric(family, ownership.lines[tupleKey(weight, style)], ownership);
+      const measured = measuredMetric(family, weight, style, ownership.lines[tupleKey(weight, style)], ownership);
       if (!measured) continue;
       metrics[`${identity}\u0000${weight}\u0000${style}`] = Object.freeze({
         family, weight, style, sourceIdentity: identity, synthesized: false, ...measured, unicodeRanges: frozenRanges(declared),
