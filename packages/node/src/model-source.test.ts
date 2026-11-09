@@ -196,6 +196,12 @@ describe('Node sessions with a model source', () => {
     const sourced = await marks(await openPptxPresentation(pptxSample, { legacyPpt: fakeSource('pptx').source }));
     expect(sourced.length).toBeGreaterThan(0);
     expect(sourced.some(Boolean)).toBe(false);
+    // A source that declines the input leaves it on the built-in parser.
+    const declined = fakeSource('pptx', {}, () => false);
+    const fallback = await marks(await openPptxPresentation(pptxSample, { legacyPpt: declined.source }));
+    expect(declined.source.claim).toHaveBeenCalled();
+    expect(fallback.length).toBeGreaterThan(0);
+    expect(fallback.every(Boolean)).toBe(true);
   }, 30_000);
 
   it('keeps unclaimed input on the OOXML path and fails closed on invalid sources', async () => {
