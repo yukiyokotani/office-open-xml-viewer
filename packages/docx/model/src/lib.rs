@@ -590,6 +590,15 @@ pub struct DocumentSettings {
         skip_serializing_if = "std::ops::Not::not"
     )]
     pub footnote_column_bands: bool,
+    /// Private producer flag (never set by the DOCX parsers): lines snapped
+    /// to an active line grid count cells from each face's own line box,
+    /// without Word's Far East 1.3 x usWin rule, as LibreOffice does
+    /// (unsnapped lines keep the 1.3 box there too).
+    #[serde(
+        rename = "__plainFontLineBoxes",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    pub plain_font_line_boxes: bool,
 }
 
 /// Single track-changes event extracted from a body revision wrapper.

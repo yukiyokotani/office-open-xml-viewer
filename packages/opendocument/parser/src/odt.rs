@@ -230,6 +230,10 @@ pub fn read(package: &OdfPackage) -> Result<(Document, Vec<OwnedDocumentResource
         // under the column holding its reference and continues at the top of
         // the next column's area.
         footnote_column_bands: true,
+        // LibreOffice counts grid cells for a snapped line from the face's
+        // own box, without Word's Far East 1.3 x usWin rule (measured:
+        // MS Mincho and Meiryo grid controls; unsnapped lines keep 1.3).
+        plain_font_line_boxes: true,
         ..DocumentSettings::default()
     });
     document.footnotes = std::mem::take(&mut reader.footnotes);
@@ -1074,13 +1078,16 @@ impl<'a> Reader<'a> {
                 .and_then(|v| percent(v).ok())
                 .is_some_and(|v| v < 1.0);
         // LibreOffice's placement of fixed and minimum lines, within its
-        // measured scope (horizontal pages without a layout grid; vertical
-        // and grid pages keep the DOCX placement, which the corpus matches
-        // better there).
+        // measured scope: horizontal pages without a layout grid, and
+        // paragraphs that do not snap to a page's grid. Vertical pages and
+        // snapping paragraphs keep the DOCX placement, which the corpus
+        // matches better there.
         let line_extra_above = matches!(
             line_spacing.as_ref().map(|spacing| spacing.rule.as_str()),
             Some("exact" | "atLeast")
-        ) && self.pages.plain_horizontal(&self.current_master);
+        ) && (self.pages.plain_horizontal(&self.current_master)
+            || (self.pages.horizontal(&self.current_master)
+                && cascade.get(NS_STYLE, "snap-to-layout-grid") == Some("false")));
         let paragraph = DocParagraph {
             alignment: alignment.into(),
             indent_left,

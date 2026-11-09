@@ -422,6 +422,7 @@ export function createProductionTextLayoutService(
     }),
     cjkFallback: options.cjkFallback,
     fontMetrics,
+    ...(source.fonts.plainLineBoxes ? { plainLineBoxes: true } : {}),
     eastAsiaFontCharsets: fontFamilyCharsets,
     genericFamilies: Object.fromEntries(routedFontFamilies.map((family) => [
       family,

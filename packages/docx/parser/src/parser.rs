@@ -3618,6 +3618,7 @@ fn parse_document_settings(settings_xml: &str) -> Option<crate::types::DocumentS
         split_pg_break_and_para_mark,
         compatibility_mode,
         footnote_column_bands: false,
+        plain_font_line_boxes: false,
     })
 }
 
