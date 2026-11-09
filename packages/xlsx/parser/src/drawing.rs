@@ -595,6 +595,9 @@ fn xlsx_fill_fallback_color(fill: &ShapeFill) -> Option<String> {
             .or_else(|| stops.last())
             .map(|stop| format!("#{}", stop.color.to_uppercase())),
         ShapeFill::Pattern { fg, .. } => Some(format!("#{}", fg.to_uppercase())),
+        // Not produced by the SpreadsheetML parser (OpenDocument fills).
+        ShapeFill::Hatch { color, .. } => Some(color.clone()),
+        ShapeFill::Image { .. } => None,
     }
 }
 

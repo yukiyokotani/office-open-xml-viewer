@@ -38,6 +38,8 @@ mod odp_wasm;
 #[cfg(feature = "odf-chart")]
 pub mod odf_chart;
 #[cfg(feature = "odf-chart")]
+pub mod odf_fill;
+#[cfg(feature = "odf-chart")]
 pub mod odf_props;
 #[cfg(feature = "odf-chart")]
 pub mod odf_text;
