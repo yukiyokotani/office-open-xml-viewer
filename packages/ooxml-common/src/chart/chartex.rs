@@ -1666,6 +1666,7 @@ fn parse_chartex_impl(
         name: series_name,
         chartex_format_idx: Some(series_format_index(series_node)),
         values: raw_values,
+        value_formula: None,
         color,
         fill_pattern: None,
         invert_if_negative: None,
@@ -1686,6 +1687,7 @@ fn parse_chartex_impl(
         explosion: None,
         data_label_colors,
         categories: None,
+        category_formula: None,
         bubble_x_source_is_string: None,
         bubble_sizes: None,
         bubble_3d_group_default: None,
@@ -2173,6 +2175,7 @@ fn parse_chartex_impl(
         categories,
         category_source_hidden: None,
         category_levels: None,
+        category_formula: None,
         series,
         plot_groups: None,
         // chartEx layouts color by branch/series index, not §21.2.2.227

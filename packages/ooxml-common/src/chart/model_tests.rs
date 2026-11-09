@@ -73,6 +73,7 @@ mod tests {
             categories: vec!["A".to_string(), "B".to_string()],
             category_source_hidden: None,
             category_levels: None,
+            category_formula: None,
             series: vec![ChartSeries {
                 name: "S1".to_string(),
                 chartex_format_idx: None,
@@ -92,6 +93,7 @@ mod tests {
                 line_width_emu: None,
                 three_d_shape: None,
                 values: vec![Some(1.0), None, Some(3.0)],
+                value_formula: None,
                 source_hidden: None,
                 data_point_colors: None,
                 explosion: None,
@@ -107,6 +109,7 @@ mod tests {
                 bar_group_overlap: None,
                 use_secondary_axis: None,
                 categories: None,
+                category_formula: None,
                 bubble_x_source_is_string: None,
                 show_marker: None,
                 val_format_code: None,

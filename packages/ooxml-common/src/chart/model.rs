@@ -452,6 +452,13 @@ pub struct ChartModel {
     pub category_source_hidden: Option<Vec<bool>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub category_levels: Option<Vec<Vec<String>>>,
+    /// Authored formula behind the chart-level `categories` (first series'
+    /// `<c:cat>` / scatter `<c:xVal>` `<c:strRef><c:f>`), present only when
+    /// that source is cache-free. Series that fall back to the shared
+    /// categories (`ChartSeries.categories == None`) refresh through this
+    /// formula; see `ChartSeries::value_formula`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category_formula: Option<String>,
     pub series: Vec<ChartSeries>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plot_groups: Option<Vec<ChartPlotGroup>>,
@@ -1593,6 +1600,22 @@ pub struct ChartSeries {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub three_d_shape: Option<String>,
     pub values: Vec<Option<f64>>,
+    /// Authored value-source formula (`<c:val>` / scatter `<c:yVal>` `<c:numRef><c:f>`,
+    /// ECMA-376-1 §21.2.2.123) when the series carries no authored cache or
+    /// literal — i.e. the series genuinely needs host resolution. Retained so
+    /// hosts that evaluate formulas after parsing (notably XLSX opt-in
+    /// recalculation, whose results postdate parsing) can re-resolve the
+    /// series from live cell values. `None` means the baked `values` are
+    /// authoritative and must not be refreshed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value_formula: Option<String>,
+    /// Authored category-source formula (`<c:cat>` / scatter `<c:xVal>`
+    /// `<c:strRef><c:f>`) under the same cache-free condition as
+    /// `value_formula`. Only set when this series keeps its own categories;
+    /// series that fall back to the chart-level `categories` leave this
+    /// unset and the chart-level `category_formula` governs instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category_formula: Option<String>,
     /// Host-resolved visibility provenance aligned with `values`. A true slot
     /// means at least one required source cell is in a hidden row or column.
     #[serde(default, skip_serializing_if = "Option::is_none")]

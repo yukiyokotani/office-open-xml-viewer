@@ -163,6 +163,9 @@ export interface Cell {
     value: CellValue;
     styleIndex?: number;
     formula?: string;
+    formulaType?: string;
+    formulaRef?: string;
+    formulaSi?: number;
     showPhonetic?: boolean;
 }
 export interface CellAddress {
@@ -637,6 +640,7 @@ export interface ChartModel {
     categories: string[];
     categorySourceHidden?: boolean[] | null;
     categoryLevels?: string[][] | null;
+    categoryFormula?: string | null;
     series: ChartSeries[];
     plotGroups?: ChartPlotGroup[] | null;
     chartTextBoxes?: ChartTextBox[] | null;
@@ -978,6 +982,8 @@ export interface ChartSeries {
     lineWidthEmu?: number | null;
     threeDShape?: 'box' | 'cylinder' | 'cone' | 'coneToMax' | 'pyramid' | 'pyramidToMax' | string | null;
     values: (number | null)[];
+    valueFormula?: string | null;
+    categoryFormula?: string | null;
     sourceHidden?: boolean[] | null;
     dataPointColors?: (string | null)[] | null;
     explosion?: number | null;
@@ -1515,6 +1521,7 @@ export interface LoadOptions extends LoadOptions__emitterCollision1 {
     mode?: 'main' | 'worker';
     legacyXls?: ModelSource<'xlsx'>;
     ods?: ModelSource<'xlsx'>;
+    recalculateFormulas?: boolean;
 }
 interface LoadOptions__emitterCollision1 {
     fonts?: readonly FontSource[];

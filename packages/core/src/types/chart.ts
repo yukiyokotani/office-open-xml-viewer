@@ -68,6 +68,22 @@ export interface ChartSeries {
   threeDShape?: 'box' | 'cylinder' | 'cone' | 'coneToMax' | 'pyramid' | 'pyramidToMax' | string | null;
   /** Numeric values; null = missing data point. */
   values: (number | null)[];
+  /**
+   * Authored value-source formula (`<c:val>` / scatter `<c:yVal>`
+   * `<c:numRef><c:f>`), present only when the series carries no authored
+   * cache or literal. Hosts that evaluate formulas after parsing (notably
+   * XLSX opt-in recalculation) re-resolve this against live cell values;
+   * when absent the baked `values` are authoritative and must not change.
+   */
+  valueFormula?: string | null;
+  /**
+   * Authored category-source formula (`<c:cat>` / scatter `<c:xVal>`
+   * `<c:strRef><c:f>`), under the same cache-free condition as
+   * `valueFormula`. Only set when this series keeps its own categories;
+   * series that fall back to the chart-level `categories` leave this unset
+   * and `ChartModel.categoryFormula` governs instead.
+   */
+  categoryFormula?: string | null;
   /** Host-resolved visibility provenance for the cells supplying each plotted
    * value (and X/bubble-size cells for scatter/bubble). `true` means at least
    * one required source cell is in a hidden row or column. The shared renderer
@@ -841,6 +857,13 @@ export interface ChartModel {
    * of its category span.
    */
   categoryLevels?: string[][] | null;
+  /**
+   * Authored formula behind the shared `categories` (first series'
+   * `<c:cat>` / scatter `<c:xVal>` `<c:strRef><c:f>`), present only when that
+   * source is cache-free. Series that fall back to the shared categories
+   * refresh through this formula; see `ChartSeries.valueFormula`.
+   */
+  categoryFormula?: string | null;
   series: ChartSeries[];
   /** Ordered classic chart groups. Absent keeps legacy public models on the
    * existing single-family compatibility path. */

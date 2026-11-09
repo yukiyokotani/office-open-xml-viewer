@@ -907,7 +907,7 @@ file without uploading it.
 | **Workbook** | Multiple sheets, sheet names | ✅ |
 | | Sheet tab colors (`<sheetPr><tabColor>` — theme / tint / indexed / rgb) | ✅ |
 | **Cells** | Text, number, boolean, error values | ✅ |
-| | Formula results (cached `<v>` only; formulas, including `TODAY()` / `NOW()`, are never recalculated) | ✅ |
+| | Formula results (cached `<v>` by default — formulas, including `TODAY()` / `NOW()`, are never recalculated unless you opt in with `recalculateFormulas: true`, which evaluates them via the Formualizer engine — MIT/Apache-2.0-licensed, lazily loaded) | ✅ |
 | | Dates (ECMA-376 date format codes) | ✅ |
 | | Rich text (per-run formatting) | ✅ |
 | | East-Asian furigana (`<rPh>` §18.4.6 + `<phoneticPr>` §18.4.3 — drawn when a cell opts in via `ph="1"`; row-level `<row ph>` inheritance) | ✅ |

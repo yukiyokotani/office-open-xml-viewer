@@ -1200,8 +1200,22 @@ pub(super) fn parse_classic_impl(
                 bar_direction: child(*group, "barDir").and_then(|node| attr(&node, "val")),
                 scatter_style: child(*group, "scatterStyle").and_then(|node| attr(&node, "val")),
                 radar_style: child(*group, "radarStyle").and_then(|node| attr(&node, "val")),
-                vary_colors: child(*group, "varyColors")
-                    .map(|_| bool_child(*group, "varyColors").unwrap_or(true)),
+                vary_colors: {
+                    let explicit = child(*group, "varyColors")
+                        .map(|_| bool_child(*group, "varyColors").unwrap_or(true));
+                    match explicit {
+                        // Observed Office behavior: a lone bar/column group
+                        // with no `<c:varyColors>` element paints per-point
+                        // colors (the default Excel column chart), exactly
+                        // like the pie family. An explicit `val="0"` stays
+                        // monochrome. Line/scatter/radar keep the
+                        // explicitly-enabled rule below.
+                        None if (kind == "bar" || kind == "bar3D") && series_count == 1 => {
+                            Some(true)
+                        }
+                        other => other,
+                    }
+                },
                 gap_width,
                 overlap,
                 bubble_scale: child(*group, "bubbleScale")
@@ -1538,26 +1552,37 @@ pub(super) fn parse_classic_impl(
             // copies. `ChartSeries.categories = None` explicitly means to fall
             // back to `ChartModel.categories` (the shared TS contract). Authored
             // caches/literals and genuinely distinct formulas remain per-series.
-            let series_categories: Option<Vec<String>> = {
+            let (series_categories, series_category_formula): (
+                Option<Vec<String>>,
+                Option<String>,
+            ) = {
                 let own_formula = external_reference_formula(*ser, own_category_tag);
                 let shares_chart_categories = own_category_tag == category_tag
                     && (series_position == 0
                         || (own_formula.is_some()
                             && own_formula.as_deref() == shared_category_formula.as_deref()));
                 if shares_chart_categories {
-                    None
+                    (None, None)
                 } else {
                     let has_own_source = ser.children().any(|node| {
                         node.is_element() && node.tag_name().name() == own_category_tag
                     });
-                    match collect_string_source(*ser, own_category_tag, references) {
+                    let categories = match collect_string_source(*ser, own_category_tag, references) {
                         Some(own) if series_is_scatter_like || !own.is_empty() => Some(own),
                         // A distinct scatter/bubble X source that cannot be
                         // resolved must not inherit the first series' X values.
                         // `Some([])` explicitly suppresses that fallback.
                         None if series_is_scatter_like && has_own_source => Some(Vec::new()),
                         _ => None,
-                    }
+                    };
+                    // Keep the live formula only alongside categories this
+                    // series owns: chart-level fallbacks refresh through the
+                    // chart-level formula, and authored caches stay frozen.
+                    let formula = categories
+                        .is_some()
+                        .then(|| own_formula)
+                        .flatten();
+                    (categories, formula)
                 }
             };
             let bubble_x_source_is_string = bubble_group
@@ -2053,6 +2078,7 @@ pub(super) fn parse_classic_impl(
                     .copied()
                     .and_then(|index| u32::try_from(index).ok()),
                 values,
+                value_formula: external_reference_formula(*ser, val_tag),
                 source_hidden,
                 color,
                 fill_pattern: parse_series_pattern_fill(*ser, color_resolver),
@@ -2094,6 +2120,7 @@ pub(super) fn parse_classic_impl(
                 // path that currently consumes this separate color array.
                 data_label_colors: None,
                 categories: series_categories,
+                category_formula: series_category_formula,
                 bubble_x_source_is_string,
                 bubble_sizes,
                 bubble_3d_group_default,
@@ -2931,9 +2958,13 @@ pub(super) fn parse_classic_impl(
 
     // §21.2.2.227 varyColors chart-level flag. Pie/doughnut preserve the
     // effective boolean because an explicit false makes unspecified points
-    // inherit the single series fill. Lone bar/column charts expose only an
-    // explicitly enabled case; §21.2.2.227 defaults the `val` attribute to
-    // true when the element exists, not the element itself when absent.
+    // inherit the single series fill. Lone bar/column charts follow the same
+    // observed Office behavior: a missing element varies (the default Excel
+    // column chart paints per-point colors with a per-category legend), so
+    // only an explicit `val="0"` suppresses it. §21.2.2.227 defaults the
+    // `val` attribute to true when the element exists, not the element
+    // itself when absent — the absent-means-vary rule for these two families
+    // is an observed Office fallback, not a schema default.
     let vary_colors = {
         let is_pie_family = matches!(chart_type.as_str(), "pie" | "doughnut" | "ofPie");
         let is_bar_family = chart_type.contains("Bar");
@@ -2948,10 +2979,10 @@ pub(super) fn parse_classic_impl(
             let vary = first_series
                 .and_then(|series| series.parent())
                 .and_then(|g| bool_child(g, "varyColors"));
-            if vary == Some(true) {
-                Some(true)
-            } else {
+            if vary == Some(false) {
                 None
+            } else {
+                Some(true)
             }
         } else {
             None
@@ -3162,6 +3193,7 @@ pub(super) fn parse_classic_impl(
         categories,
         category_source_hidden,
         category_levels,
+        category_formula: shared_category_formula,
         series,
         plot_groups: Some(plot_groups),
         vary_colors,

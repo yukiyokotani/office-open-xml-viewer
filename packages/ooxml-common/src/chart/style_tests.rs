@@ -2294,11 +2294,12 @@ mod tests {
         assert_eq!(colors2[2], None);
     }
 
-    /// A SINGLE-series bar chart with `<c:varyColors>` ABSENT keeps its
-    /// per-series paint. §21.2.2.227 defaults only the `val` attribute when the
-    /// element is present; it does not make an absent element effective.
+    /// A SINGLE-series bar chart with `<c:varyColors>` ABSENT varies by
+    /// point (observed Office behavior: the default Excel column chart
+    /// paints per-point colors with a per-category legend). Only an
+    /// explicit `val="0"` keeps the single per-series paint.
     #[test]
-    fn parse_chart_part_bar_single_series_without_vary_colors_keeps_series_color() {
+    fn parse_chart_part_bar_single_series_without_vary_colors_varies_by_point() {
         let group = format!(
             r#"<c:barChart><c:barDir val="col"/><c:grouping val="clustered"/>{CH13_SER}</c:barChart>"#
         );
@@ -2312,8 +2313,14 @@ mod tests {
             },
         )
         .expect("bar parses");
-        assert_eq!(m.vary_colors, None);
+        assert_eq!(m.vary_colors, Some(true));
+        // No direct `<c:dPt>` fills: automatic per-point paint belongs to
+        // the classic style roles (point-indexed once the group varies).
         assert!(m.series[0].data_point_colors.is_none());
+        assert_eq!(
+            m.plot_groups.as_ref().expect("plot groups")[0].vary_colors,
+            Some(true)
+        );
     }
 
     /// A SINGLE-series bar chart with an explicit `<c:varyColors val="0"/>`

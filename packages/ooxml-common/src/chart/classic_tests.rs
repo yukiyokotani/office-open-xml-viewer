@@ -3100,4 +3100,57 @@ mod tests {
             Some("midCat")
         );
     }
+
+    /// Cache-free series keep their `<c:f>` source formulas on the model so
+    /// hosts that evaluate after parsing (XLSX opt-in recalculation) can
+    /// re-resolve them from live values. Authored caches stay authoritative
+    /// and retain no formula.
+    #[test]
+    fn cache_free_series_retain_source_formulas() {
+        let chart = |val: &str, cat: &str| {
+            format!(
+                r#"<c:chartSpace xmlns:c="{C_NS}"><c:chart><c:plotArea><c:barChart><c:barDir val="col"/><c:ser><c:idx val="0"/><c:tx><c:v>Revenue</c:v></c:tx>{cat}{val}</c:ser></c:barChart></c:plotArea></c:chart></c:chartSpace>"#
+            )
+        };
+        let live_refs = |val: &str, cat: &str| {
+            chart(
+                &format!(
+                    r#"<c:val><c:numRef><c:f>{val}</c:f></c:numRef></c:val>"#
+                ),
+                &format!(
+                    r#"<c:cat><c:strRef><c:f>{cat}</c:f></c:strRef></c:cat>"#
+                ),
+            )
+        };
+        let parse = |xml: &str| {
+            let doc = root_of(xml);
+            let context = ChartParseContext {
+                host: ChartHost::Excel,
+                ..ChartParseContext::new(&FixtureResolver, None, None, None, None)
+            };
+            parse_chart_part(doc.root_element(), &context).expect("chart parses")
+        };
+        // Cache-free: formulas retained on the series and the chart level.
+        let model = parse(&live_refs("'Summary'!$C$4:$C$9", "'Summary'!$A$4:$A$9"));
+        let series = &model.series[0];
+        assert_eq!(
+            series.value_formula.as_deref(),
+            Some("'Summary'!$C$4:$C$9")
+        );
+        assert_eq!(series.category_formula, None);
+        assert_eq!(
+            model.category_formula.as_deref(),
+            Some("'Summary'!$A$4:$A$9")
+        );
+        // Authored caches stay authoritative: no formula retained.
+        let cached = chart(
+            r#"<c:val><c:numRef><c:f>S!$A$1</c:f><c:numCache><c:ptCount val="1"/><c:pt idx="0"><c:v>1</c:v></c:pt></c:numCache></c:numRef></c:val>"#,
+            r#"<c:cat><c:strRef><c:f>S!$A$1</c:f><c:strCache><c:ptCount val="1"/><c:pt idx="0"><c:v>a</c:v></c:pt></c:strCache></c:strRef></c:cat>"#,
+        );
+        let model = parse(&cached);
+        let series = &model.series[0];
+        assert_eq!(series.value_formula, None);
+        assert_eq!(series.category_formula, None);
+        assert_eq!(model.category_formula, None);
+    }
 }
