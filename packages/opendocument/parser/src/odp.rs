@@ -721,13 +721,27 @@ impl<'a, 'r, 'p> SlideReader<'a, 'r, 'p> {
             }
         });
         let (cust_geom, cust_geom_paint) = normalize(&geometry, w, h);
+        // An extruded custom shape is drawn through the 3-D scene; its 2-D
+        // rotation is part of the camera revolution.
+        let extrusion = if kind == "custom-shape" {
+            node.children()
+                .find(|c| xml::is(*c, NS_DRAW, "enhanced-geometry"))
+                .and_then(|eg| crate::odp_extrusion::scene(eg, &graphic, -placed.rot))
+        } else {
+            None
+        };
+        let (scene3d, sp3d) = match extrusion {
+            Some((scene, sp)) => (Some(scene), Some(sp)),
+            None => (None, None),
+        };
+        let rotation = if scene3d.is_some() { 0.0 } else { placed.rot };
         let element = ShapeElement {
             math_fallback: None,
             x: placed.x.round() as i64,
             y: placed.y.round() as i64,
             width: placed.w.round() as i64,
             height: placed.h.round() as i64,
-            rotation: placed.rot,
+            rotation,
             flip_h,
             flip_v,
             geometry: "custGeom".into(),
@@ -757,8 +771,8 @@ impl<'a, 'r, 'p> SlideReader<'a, 'r, 'p> {
             placeholder_type: placeholder_type(node),
             placeholder_idx: None,
             text_rect,
-            scene3d: None,
-            sp3d: None,
+            scene3d,
+            sp3d,
         };
         out.push(SlideElement::Shape(element));
         out.extend(markers);

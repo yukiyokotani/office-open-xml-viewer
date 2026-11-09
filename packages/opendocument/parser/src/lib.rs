@@ -20,6 +20,8 @@ mod odp_cursor;
 #[cfg(feature = "odp")]
 pub mod odp_geometry;
 #[cfg(feature = "odp")]
+mod odp_extrusion;
+#[cfg(feature = "odp")]
 mod odp_media;
 #[cfg(feature = "odp")]
 mod odp_paint;

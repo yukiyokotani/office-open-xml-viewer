@@ -162,6 +162,12 @@ for (const file of files) {
       rmSync(resultPath);
     }
     const started = Date.now();
+    // Page errors and console errors/warnings, recorded with the result.
+    const consoleLog: string[] = [];
+    page.on('console', (message) => {
+      if (message.type() === 'error' || message.type() === 'warning') consoleLog.push(message.text().slice(0, 300));
+    });
+    page.on('pageerror', (error) => consoleLog.push(String(error).slice(0, 300)));
     const pdfCount = existsSync(file.pdf) ? pdfPageCount(file.pdf) : 0;
     await page.route('**/__odf_harness/input', (route) => route.fulfill({
       status: 200, contentType: 'application/octet-stream', body: readFileSync(file.odp),
@@ -277,6 +283,7 @@ for (const file of files) {
       ...(shownCount !== undefined ? { slideCount: result.slideCount, shownCount, slideCountMatch: shownCount === pdfCount } : {}),
       ...(result.slides ? { slides } : {}),
       ms: Date.now() - started,
+      ...(consoleLog.length ? { consoleLog: consoleLog.slice(0, 20) } : {}),
     }, null, 2)}\n`);
   });
 }
