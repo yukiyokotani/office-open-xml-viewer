@@ -37,6 +37,8 @@ impl Resource {
 pub struct Media<'p> {
     package: &'p OdfPackage,
     admitted: HashMap<String, Resource>,
+    /// StarView metafiles converted to SVG, by package path.
+    converted: HashMap<String, Vec<u8>>,
 }
 
 impl<'p> Media<'p> {
@@ -44,6 +46,7 @@ impl<'p> Media<'p> {
         Self {
             package,
             admitted: HashMap::new(),
+            converted: HashMap::new(),
         }
     }
 
@@ -67,13 +70,24 @@ impl<'p> Media<'p> {
                 operation.read_bytes_bounded(&path, MAX_HEADER_BYTES)
             })
             .ok()?;
-        let resource = sniff(&bytes)?;
+        let resource = if bytes.starts_with(b"VCLMTF") {
+            let converted = crate::odp_svm::to_svg(&bytes)?;
+            self.converted.insert(path.clone(), converted.svg);
+            Resource {
+                mime: "image/svg+xml",
+                pixels: None,
+                dpi: None,
+                frame: Some(converted.size_emu),
+            }
+        } else {
+            sniff(&bytes)?
+        };
         self.admitted.insert(path.clone(), resource.clone());
         Some((path, resource))
     }
 
-    pub fn into_admitted(self) -> HashMap<String, Resource> {
-        self.admitted
+    pub fn into_admitted(self) -> (HashMap<String, Resource>, HashMap<String, Vec<u8>>) {
+        (self.admitted, self.converted)
     }
 }
 
@@ -179,7 +193,7 @@ pub fn sniff(bytes: &[u8]) -> Option<Resource> {
         });
     }
     if bytes.starts_with(b"VCLMTF") {
-        // StarView metafile: no renderer in the PPTX pipeline.
+        // StarView metafiles are converted by `Media::admit`.
         return None;
     }
     let head = std::str::from_utf8(&bytes[..bytes.len().min(1024)]).unwrap_or("");

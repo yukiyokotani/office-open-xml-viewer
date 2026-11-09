@@ -26,6 +26,8 @@ mod odp_paint;
 #[cfg(feature = "odp")]
 mod odp_style;
 #[cfg(feature = "odp")]
+mod odp_svm;
+#[cfg(feature = "odp")]
 mod odp_table;
 #[cfg(feature = "odp")]
 mod odp_text;

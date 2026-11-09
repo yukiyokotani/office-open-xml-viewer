@@ -169,6 +169,9 @@ impl OdpCursor {
         if !deck.resources.contains_key(path) {
             return Err("unknown OpenDocument resource".to_string());
         }
+        if let Some(converted) = deck.converted.get(path) {
+            return Ok(converted.clone());
+        }
         package
             .session()
             .run_operation("odp-image", |operation| operation.read_bytes(path))

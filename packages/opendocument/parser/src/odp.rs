@@ -47,6 +47,8 @@ pub struct OdpDeck {
     pub height: i64,
     pub slides: Vec<Slide>,
     pub resources: HashMap<String, Resource>,
+    /// Converted resources (StarView metafiles as SVG), by package path.
+    pub converted: HashMap<String, Vec<u8>>,
     pub hyperlink_colors: Option<(String, String)>,
 }
 
@@ -158,11 +160,13 @@ pub fn read(package: &OdfPackage) -> Result<OdpDeck, String> {
         };
         slides.push(reader.slide(*page, master, &decls)?);
     }
+    let (resources, converted) = media.into_admitted();
     Ok(OdpDeck {
         width: width.round() as i64,
         height: height.round() as i64,
         slides,
-        resources: media.into_admitted(),
+        resources,
+        converted,
         hyperlink_colors,
     })
 }

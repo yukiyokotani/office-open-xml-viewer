@@ -253,7 +253,10 @@ fn sample(stops: &[(f64, f64, String)], t: f64) -> (f64, String) {
 /// Express a ramp in the DrawingML gradient model. Returns the fill with
 /// stops positioned along the DrawingML axis (0 = start of the linear axis,
 /// or the centre of a path gradient), using `paint(offset)` for each stop.
-fn ramp_fill(r: &Ramp, offsets: &[f64], paint: impl Fn(f64) -> String) -> Fill {
+/// Stops are (offset from the start colour, colour); equal offsets keep
+/// hard colour steps.
+fn ramp_fill(r: &Ramp, ramp_stops: &[(f64, String)]) -> Fill {
+    let first = ramp_stops.first().map(|s| s.1.clone()).unwrap_or_default();
     let b = r.border;
     let mut stops: Vec<GradStop> = Vec::new();
     let push = |stops: &mut Vec<GradStop>, position: f64, color: String| {
@@ -270,23 +273,23 @@ fn ramp_fill(r: &Ramp, offsets: &[f64], paint: impl Fn(f64) -> String) -> Fill {
         "axial" => {
             // Start colour at both edges, end colour on the centre line; the
             // border holds the start colour at each edge.
-            for &o in offsets {
-                push(&mut stops, (b + (1.0 - b) * o) * 0.5, paint(o));
+            for (o, c) in ramp_stops {
+                push(&mut stops, (b + (1.0 - b) * o) * 0.5, c.clone());
             }
-            for &o in offsets.iter().rev() {
-                push(&mut stops, 1.0 - (b + (1.0 - b) * o) * 0.5, paint(o));
+            for (o, c) in ramp_stops.iter().rev() {
+                push(&mut stops, 1.0 - (b + (1.0 - b) * o) * 0.5, c.clone());
             }
             if b > 0.0 {
                 stops.insert(
                     0,
                     GradStop {
                         position: 0.0,
-                        color: paint(0.0),
+                        color: first.clone(),
                     },
                 );
                 stops.push(GradStop {
                     position: 1.0,
-                    color: paint(0.0),
+                    color: first.clone(),
                 });
             }
             Fill::Gradient {
@@ -304,13 +307,13 @@ fn ramp_fill(r: &Ramp, offsets: &[f64], paint: impl Fn(f64) -> String) -> Fill {
         "radial" | "ellipsoid" | "square" | "rectangular" => {
             // Start colour outside, end colour at the centre (cx, cy); the
             // border is the outer band of start colour.
-            for &o in offsets.iter().rev() {
-                push(&mut stops, (1.0 - b) * (1.0 - o), paint(o));
+            for (o, c) in ramp_stops.iter().rev() {
+                push(&mut stops, (1.0 - b) * (1.0 - o), c.clone());
             }
             if b > 0.0 {
                 stops.push(GradStop {
                     position: 1.0,
-                    color: paint(0.0),
+                    color: first.clone(),
                 });
             }
             let path = if matches!(r.style.as_str(), "square" | "rectangular") {
@@ -337,10 +340,10 @@ fn ramp_fill(r: &Ramp, offsets: &[f64], paint: impl Fn(f64) -> String) -> Fill {
         }
         _ => {
             if b > 0.0 {
-                push(&mut stops, 0.0, paint(0.0));
+                push(&mut stops, 0.0, first.clone());
             }
-            for &o in offsets {
-                push(&mut stops, b + (1.0 - b) * o, paint(o));
+            for (o, c) in ramp_stops {
+                push(&mut stops, b + (1.0 - b) * o, c.clone());
             }
             Fill::Gradient {
                 stops,
@@ -359,9 +362,13 @@ fn ramp_fill(r: &Ramp, offsets: &[f64], paint: impl Fn(f64) -> String) -> Fill {
 
 fn gradient_fill(g: Nd<'_>, _props: &Props<'_>) -> Option<Fill> {
     let r = color_ramp(g)?;
-    let offsets: Vec<f64> = r.stops.iter().map(|s| s.0).collect();
-    let stops = r.stops.clone();
-    Some(ramp_fill(&r, &offsets, |o| sample(&stops, o).1))
+    Some(ramp_fill(
+        &r,
+        &r.stops
+            .iter()
+            .map(|s| (s.0, s.2.clone()))
+            .collect::<Vec<_>>(),
+    ))
 }
 
 fn same_geometry(a: &Ramp, b: &Ramp) -> bool {
@@ -376,9 +383,13 @@ fn same_geometry(a: &Ramp, b: &Ramp) -> bool {
 /// a gradient of the same colour whose stops carry the opacity.
 fn opacity_gradient_fill(c: &str, og: Nd<'_>) -> Fill {
     let r = opacity_ramp(og);
-    let offsets: Vec<f64> = r.stops.iter().map(|s| s.0).collect();
-    let stops = r.stops.clone();
-    ramp_fill(&r, &offsets, |o| with_alpha(c, sample(&stops, o).0))
+    ramp_fill(
+        &r,
+        &r.stops
+            .iter()
+            .map(|s| (s.0, with_alpha(c, s.1)))
+            .collect::<Vec<_>>(),
+    )
 }
 
 fn apply_opacity(fill: &mut Fill, opacity: f64, gradient: Option<Nd<'_>>) {
@@ -424,9 +435,11 @@ pub fn combined_gradient(g: Nd<'_>, og: Nd<'_>) -> Option<Fill> {
     offsets.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
     let cs = colour.stops.clone();
     let os = opacity.stops.clone();
-    Some(ramp_fill(&colour, &offsets, |o| {
-        with_alpha(&sample(&cs, o).1, sample(&os, o).0)
-    }))
+    let painted: Vec<(f64, String)> = offsets
+        .iter()
+        .map(|&o| (o, with_alpha(&sample(&cs, o).1, sample(&os, o).0)))
+        .collect();
+    Some(ramp_fill(&colour, &painted))
 }
 
 /// `draw:hatch` (§16.41) as the nearest DrawingML preset pattern: line
