@@ -468,6 +468,44 @@ impl<'a> Reader<'a> {
         self.list_child(paragraph)
     }
 
+    /// A heading numbered by the list style its paragraph style names, at
+    /// its outline level, in one list per list style.
+    pub(super) fn styled_list_paragraph(
+        &mut self,
+        node: roxmltree::Node<'a, 'a>,
+        style: &str,
+        level: u32,
+    ) -> Result<Option<ListParagraph<'a>>, String> {
+        let level = level.clamp(1, MAX_LEVELS);
+        let key = format!("\u{2}{style}");
+        let chain = match self.lists.numbered.get(&key) {
+            Some(chain) => *chain,
+            None => {
+                self.lists.chains.push(Chain::default());
+                let chain = self.lists.chains.len() - 1;
+                self.lists.numbered.insert(key, chain);
+                chain
+            }
+        };
+        let frame = Frame {
+            chain,
+            style: style.to_string(),
+            level,
+        };
+        let definition = self.list_level(style, level)?;
+        let start = node
+            .attribute((NS_TEXT, "start-value"))
+            .and_then(|v| v.parse::<u32>().ok());
+        let values = self.count(&frame, start)?;
+        let label = self.label(&frame, &definition, &values)?;
+        Ok(Some(ListParagraph {
+            margin: definition.margin,
+            indent: definition.indent,
+            tab: definition.tab,
+            label: Some(label),
+        }))
+    }
+
     /// Heading numbering (§16.36): the outline style's level counted over
     /// the document's headings. A level without a label leaves the heading
     /// unnumbered and its geometry to its paragraph style.

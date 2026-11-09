@@ -61,6 +61,12 @@ struct Layout {
     borders: Option<PageBorders>,
     grid: Option<(&'static str, f64, Option<f64>)>,
     footnote_separator: Option<NoteSeparatorMark>,
+    /// The page's area fill (§20.175 fo:background-color, §20.120 draw:fill
+    /// and companions on the page layout or its drawing page, or a
+    /// `style:background-image`), held as a graphic style for the shared
+    /// fill reader.
+    background: Option<crate::style::Style>,
+    background_image: Option<(String, bool)>,
 }
 
 struct Master<'a, 'i> {
@@ -84,6 +90,8 @@ pub(super) struct MasterStories {
     pub footers: HeadersFooters,
     pub title_page: bool,
     pub has_left: bool,
+    /// Whether the page style shows a header / footer region.
+    pub shown: [bool; 2],
 }
 
 fn default_section() -> SectionProps {
@@ -114,6 +122,8 @@ impl<'a, 'i> Pages<'a, 'i> {
             borders: None,
             grid: None,
             footnote_separator: None,
+            background: None,
+            background_image: None,
         };
         // §16.8: properties a page layout leaves unspecified come from the
         // default page layout.
@@ -298,6 +308,7 @@ fn region(node: roxmltree::Node<'_, '_>) -> Option<Region> {
 }
 
 fn read_page_properties(node: roxmltree::Node<'_, '_>, layout: &mut Layout) {
+    read_background(node, layout);
     let section = &mut layout.section;
     let get = |ns: &str, name: &str| node.attribute((ns, name)).and_then(|v| length_pt(v).ok());
     if let Some(width) = get(NS_FO, "page-width").filter(|v| *v > 0.0) {
@@ -440,6 +451,54 @@ fn read_page_properties(node: roxmltree::Node<'_, '_>, layout: &mut Layout) {
             }
             _ => {}
         }
+    }
+}
+
+/// A page's area fill: fo:background-color, the draw:fill attributes and a
+/// background image, from page layout or drawing page properties.
+fn read_background(node: roxmltree::Node<'_, '_>, layout: &mut Layout) {
+    let attributes: HashMap<(String, String), String> = crate::style::attributes(node)
+        .into_iter()
+        .filter(|((ns, name), _)| {
+            (ns == NS_FO && name == "background-color")
+                || (ns == NS_DRAW && (name.starts_with("fill") || name == "opacity"))
+                || (ns == NS_STYLE && name == "repeat")
+        })
+        .collect();
+    let visible = attributes
+        .get(&(NS_FO.to_string(), "background-color".to_string()))
+        .is_some_and(|v| v != "transparent")
+        || attributes
+            .get(&(NS_DRAW.to_string(), "fill".to_string()))
+            .is_some_and(|v| v != "none");
+    if visible {
+        layout.background = Some(crate::style::Style {
+            name: String::new(),
+            family: "graphic".into(),
+            parent: None,
+            automatic: true,
+            attributes: HashMap::new(),
+            groups: HashMap::from([(
+                "graphic-properties".to_string(),
+                crate::style::Properties {
+                    attributes,
+                    ..crate::style::Properties::default()
+                },
+            )]),
+        });
+    }
+    if let Some(image) = node
+        .children()
+        .find(|n| xml::is(*n, NS_STYLE, "background-image"))
+        .filter(|n| n.attribute((NS_XLINK, "href")).is_some())
+    {
+        layout.background_image = Some((
+            image
+                .attribute((NS_XLINK, "href"))
+                .unwrap_or("")
+                .to_string(),
+            image.attribute((NS_STYLE, "repeat")) != Some("stretch"),
+        ));
     }
 }
 
@@ -736,6 +795,7 @@ impl<'a> Reader<'a> {
                 footers: HeadersFooters::default(),
                 title_page: false,
                 has_left: false,
+                shown: [false; 2],
             });
         };
         let node = master_page.node;
@@ -746,6 +806,7 @@ impl<'a> Reader<'a> {
             footers: HeadersFooters::default(),
             title_page: false,
             has_left: false,
+            shown: [false; 2],
         };
         for (kind, region) in [("header", layout.header), ("footer", layout.footer)] {
             let shown = |name: &str| {
@@ -769,6 +830,7 @@ impl<'a> Reader<'a> {
                 }
                 continue;
             };
+            out.shown[usize::from(kind == "footer")] = true;
             let region = region.unwrap_or_default();
             let width = geometry.text_width - region.margin_left - region.margin_right;
             let build = |reader: &mut Self,
@@ -816,6 +878,23 @@ impl<'a> Reader<'a> {
                 out.footers = set;
             }
         }
+        // The page background, drawn behind the text on every page by an
+        // anchored, page-sized shape in each header story.
+        if let Some(background) = self.page_background(layout)? {
+            let paragraph =
+                || BodyElement::Paragraph(Box::new(anchor_paragraph(vec![background.clone()])));
+            out.headers
+                .default
+                .get_or_insert_with(HeaderFooter::default)
+                .body
+                .insert(0, paragraph());
+            for story in [&mut out.headers.first, &mut out.headers.even]
+                .into_iter()
+                .flatten()
+            {
+                story.body.insert(0, paragraph());
+            }
+        }
         // A first page with only one region's first variant uses the other
         // region's ordinary story.
         if out.title_page {
@@ -854,15 +933,10 @@ impl<'a> Reader<'a> {
         // height (see the module documentation).
         section.header_distance = section.margin_top;
         section.footer_distance = section.margin_bottom;
-        let shows = |set: &HeadersFooters| {
-            set.default
-                .as_ref()
-                .is_some_and(|story| !story.body.is_empty())
-        };
-        if let Some(header) = layout.header.filter(|_| shows(&stories.headers)) {
+        if let Some(header) = layout.header.filter(|_| stories.shown[0]) {
             section.margin_top += header.height;
         }
-        if let Some(footer) = layout.footer.filter(|_| shows(&stories.footers)) {
+        if let Some(footer) = layout.footer.filter(|_| stories.shown[1]) {
             section.margin_bottom += footer.height;
         }
         section.title_page = stories.title_page;
@@ -909,6 +983,49 @@ impl<'a> Reader<'a> {
             page_geometry: None,
         };
         Ok((section, headers, footers, stories.title_page, placement))
+    }
+
+    /// The page background as a behind-text shape covering the page.
+    fn page_background(&mut self, layout: &'a Layout) -> Result<Option<DocRun>, String> {
+        let mut fill = match &layout.background {
+            Some(style) => self.background_fill(style),
+            None => None,
+        };
+        if fill.is_none() {
+            if let Some((href, tile)) = &layout.background_image {
+                if let Some((path, mime)) = self.package_image(href)? {
+                    fill = Some(docx_model::ShapeFill::Image {
+                        image_path: path,
+                        mime_type: mime.into(),
+                        svg_image_path: None,
+                        src_rect: None,
+                        fill_rect: None,
+                        tile: tile.then(|| {
+                            Box::new(ooxml_common::fill::TileInfo {
+                                tx: None,
+                                ty: None,
+                                sx: None,
+                                sy: None,
+                                flip: None,
+                                algn: None,
+                            })
+                        }),
+                        alpha: None,
+                        duotone: None,
+                        blip_effects: Vec::new(),
+                        vml: None,
+                    });
+                }
+            }
+        }
+        let Some(fill) = fill else {
+            return Ok(None);
+        };
+        Ok(Some(self.page_background_shape(
+            fill,
+            layout.section.page_width,
+            layout.section.page_height,
+        )))
     }
 
     fn default_font_size(&self) -> f64 {

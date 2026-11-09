@@ -426,7 +426,23 @@ impl<'a> Reader<'a> {
         if self.list_paragraph.is_none()
             && node.attribute((NS_TEXT, "is-list-header")) != Some("true")
         {
-            self.list_paragraph = self.outline_paragraph(node, level)?;
+            // A paragraph style naming a list style (§19.509
+            // style:list-style-name) overrides the outline numbering: an
+            // empty name removes it (LibreOffice).
+            let chain = self.paragraph_chain(node.attribute((NS_TEXT, "style-name")));
+            let link = chain.iter().find_map(|style| {
+                style
+                    .style()
+                    .attributes
+                    .get(&(NS_STYLE.to_string(), "list-style-name".to_string()))
+            });
+            match link.map(String::as_str) {
+                Some("") => {}
+                Some(name) if self.sheet.find_list(self.scope, name).is_some() => {
+                    self.list_paragraph = self.styled_list_paragraph(node, name, level)?;
+                }
+                _ => self.list_paragraph = self.outline_paragraph(node, level)?,
+            }
         }
         self.paragraph(node, Some(level))
     }
@@ -608,19 +624,36 @@ impl<'a> Reader<'a> {
         // The paragraph's own text properties describe its mark (empty
         // paragraph height) and the text outside spans.
         let mut inline = Inline::new(chain.into());
-        let mark = self.run_properties(&inline.contexts, 0, ScriptClass::Latin)?;
+        // The paragraph mark's formatting: LibreOffice's paragraph-marker
+        // character style (`loext:marker-style-name`) over the paragraph's.
+        let mark_context = match node
+            .attribute((NS_LOEXT, "marker-style-name"))
+            .and_then(|name| self.sheet.find(self.scope, Family::Text, name))
+        {
+            Some(style) => {
+                let styles = self.style_chain(style);
+                inline.contexts.push(TextContext {
+                    styles,
+                    parent: Some(0),
+                    link: None,
+                });
+                (inline.contexts.len() - 1) as u32
+            }
+            None => 0,
+        };
+        let mark = self.run_properties(&inline.contexts, mark_context, ScriptClass::Latin)?;
+        let mark_asian = self.run_properties(&inline.contexts, mark_context, ScriptClass::Asian)?;
         self.charge_construction(
             std::mem::size_of::<Collected>()
                 + std::mem::size_of::<BodyElement>()
                 + 5 * mark.family.len(),
         )?;
-        collected.paragraph.paragraph_mark_font_facts = Some(mark.font_facts());
+        let mut mark_facts = mark.font_facts();
+        mark_facts.font_family_east_asia = Some(mark_asian.family.to_string());
+        collected.paragraph.paragraph_mark_font_facts = Some(mark_facts);
         collected.paragraph.default_font_size = Some(mark.size);
         collected.paragraph.default_font_family = Some(mark.family.to_string());
-        collected.paragraph.default_font_family_east_asia = {
-            let asian = self.run_properties(&inline.contexts, 0, ScriptClass::Asian)?;
-            Some(asian.family.to_string())
-        };
+        collected.paragraph.default_font_family_east_asia = Some(mark_asian.family.to_string());
         if mark.hidden {
             collected.paragraph.mark_vanish = true;
         }
@@ -1053,6 +1086,11 @@ impl<'a> Reader<'a> {
             // the text (measured: the text sits on the line box's bottom
             // less its descent).
             line_extra_above,
+            // LibreOffice applies paragraph indents from the edge of the
+            // area beside a wrapped float (measured: a hanging list item
+            // beside a left float starts its label at the float's edge plus
+            // the first-line position).
+            indents_from_floats: true,
             // §20.302 style:punctuation-wrap hanging, §20.296 style:line-break
             // strict, §20.346 style:text-autospace.
             overflow_punct: cascade.get(NS_STYLE, "punctuation-wrap") != Some("simple"),

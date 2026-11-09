@@ -36,7 +36,8 @@ node packages/opendocument/tests/corpus/run.mjs
 Options:
 
 - `--build`: rebuild the DOCX and ODT WASM first.
-- `--filter <substring>` and `--limit N`: run a subset.
+- `--filter <substring>`, `--list <file of corpus-relative paths>` and
+  `--limit N`: run a subset.
 - `--jobs N`: the number of Chrome workers.
 - `--fresh`: discard the previous results under the same label.
 

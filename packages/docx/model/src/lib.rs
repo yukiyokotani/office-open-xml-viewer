@@ -1200,6 +1200,14 @@ pub struct DocParagraph {
         skip_serializing_if = "std::ops::Not::not"
     )]
     pub line_extra_above: bool,
+    /// The paragraph's indents are measured from the edge of the area beside
+    /// a floating object instead of from the column (LibreOffice). DOCX never
+    /// sets it.
+    #[serde(
+        rename = "__indentsFromFloats",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    pub indents_from_floats: bool,
     /// Explicit tab stops from w:tabs. Empty means use default tab interval.
     pub tab_stops: Vec<TabStop>,
     pub runs: Vec<DocRun>,

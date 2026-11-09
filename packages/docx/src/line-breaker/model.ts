@@ -653,6 +653,10 @@ export interface WrapLayoutCtx {
   columnXPt: number;
   /** Absolute px width of the paragraph's raw COLUMN band. See columnXPt. */
   columnWidthPt: number;
+  /** A model source's paragraph whose indents are measured from the edge of
+   *  the area beside a floating object rather than from the column
+   *  (LibreOffice; `__indentsFromFloats`). DOCX never sets it. */
+  indentsFromFloats?: boolean;
   floats: FloatRect[];  // legacy float geometry supplied directly by renderer paths
   /** Minimum clear side-gap for an anchor-host-only paragraph mark. Such a
    *  zero-advance metric placeholder preserves the anchor character's line box,

@@ -33,6 +33,7 @@ const { values: args } = parseArgs({
     build: { type: 'boolean', default: false },
     jobs: { type: 'string', default: '4' },
     filter: { type: 'string' },
+    list: { type: 'string' },
     limit: { type: 'string' },
     label: { type: 'string' },
     fresh: { type: 'boolean', default: false },
@@ -116,6 +117,11 @@ let files = walk(odtRoot).sort()
   })
   .filter((file) => existsSync(file.pdf));
 if (args.filter) files = files.filter((file) => file.rel.includes(args.filter));
+// --list <file>: only the corpus-relative paths listed one per line.
+if (args.list) {
+  const wanted = new Set(readFileSync(args.list, 'utf8').split('\n').map((line) => line.trim()).filter(Boolean));
+  files = files.filter((file) => wanted.has(file.rel));
+}
 if (args.limit) files = files.slice(0, Number(args.limit));
 writeFileSync(join(runDir, 'files.json'), `${JSON.stringify(files, null, 2)}\n`);
 console.log(`${files.length} ODT files with LibreOffice PDFs -> ${runDir}`);

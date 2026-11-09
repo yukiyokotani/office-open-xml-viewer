@@ -487,3 +487,39 @@ fn deeply_nested_content_stays_bounded() {
         assert!(read(&package).err().unwrap().contains("nests beyond"));
     }
 }
+
+#[test]
+fn heading_styles_naming_a_list_style_override_outline_numbering() {
+    let styles = r##"<style:style style:name="Plain" style:family="paragraph" style:list-style-name=""/><text:outline-style style:name="Outline"><text:outline-level-style text:level="1" style:num-format="1" style:num-suffix="."><style:list-level-properties text:list-level-position-and-space-mode="label-alignment"><style:list-level-label-alignment text:label-followed-by="space"/></style:list-level-properties></text:outline-level-style></text:outline-style>"##;
+    let document = read_fixture(Fixture {
+        styles,
+        body: r#"<text:h text:outline-level="1">Numbered</text:h><text:h text:style-name="Plain" text:outline-level="1">Plain</text:h>"#,
+        ..Fixture::default()
+    });
+    let p = paragraphs(&document.body);
+    assert_eq!(texts(p[0]), ["1.", " ", "Numbered"]);
+    assert_eq!(texts(p[1]), ["Plain"]);
+}
+
+#[test]
+fn page_backgrounds_draw_behind_every_page_and_paragraphs_indent_from_floats() {
+    let document = read_fixture(Fixture {
+        page: r##" fo:background-color="#ffeedd""##,
+        body: "<text:p>x</text:p>",
+        ..Fixture::default()
+    });
+    // No header region: the story carries only the background, and the
+    // body margin is unchanged.
+    assert!((document.section.margin_top - 20.0 * 72.0 / 25.4).abs() < 1e-6);
+    let header = document.headers.default.as_ref().unwrap();
+    let p = paragraphs(&header.body)[0];
+    let DocRun::Shape(shape) = &p.runs[1] else {
+        panic!()
+    };
+    assert!(shape.behind_doc);
+    assert!((shape.width_pt - 210.0 * 72.0 / 25.4).abs() < 1e-6);
+    assert!(
+        matches!(&shape.fill, Some(docx_model::ShapeFill::Solid { color }) if color == "ffeedd")
+    );
+    assert!(paragraphs(&document.body)[0].indents_from_floats);
+}

@@ -745,6 +745,50 @@ impl<'a> Reader<'a> {
         shape.anchor_acquisition = Some(acquisition);
     }
 
+    /// A page background's fill from its captured properties.
+    pub(super) fn background_fill(&mut self, style: &'a crate::style::Style) -> Option<ShapeFill> {
+        let graphic = Graphic {
+            cascade: Cascade::new(vec![StyleRef::new(style)], "graphic-properties"),
+        };
+        self.fill(&graphic, true)
+    }
+
+    /// A behind-text shape covering the page, anchored to the page.
+    pub(super) fn page_background_shape(
+        &mut self,
+        fill: ShapeFill,
+        width: f64,
+        height: f64,
+    ) -> DocRun {
+        let placement = Placement {
+            inline: false,
+            horizontal: (
+                "page".into(),
+                AnchorAxisChoiceWire::Offset { value_pt: 0.0 },
+            ),
+            vertical: (
+                "page".into(),
+                AnchorAxisChoiceWire::Offset { value_pt: 0.0 },
+            ),
+            wrap: AnchorWrapKindWire::None,
+            side: None,
+            behind: true,
+            distances: [0.0; 4],
+            z_order: 0,
+            allow_overlap: true,
+            polygon: None,
+        };
+        let mut shape = ShapeRun {
+            width_pt: width,
+            height_pt: height,
+            preset_geometry: Some("rect".into()),
+            fill: Some(fill),
+            ..ShapeRun::default()
+        };
+        self.anchor_shape(&mut shape, &placement);
+        DocRun::Shape(Box::new(shape))
+    }
+
     /// The area fill of a graphic style (§20.120 draw:fill and its
     /// companions), or of a frame's `fo:background-color`.
     fn fill(&mut self, graphic: &Graphic<'a>, frame: bool) -> Option<ShapeFill> {

@@ -297,6 +297,8 @@ export function measureParagraph(
         // COLUMN band, not the indented mark band above.
         columnXPt: placement.paragraphXPt,
         columnWidthPt: placement.availableWidthPt,
+        ...((paragraph as { readonly __indentsFromFloats?: boolean }).__indentsFromFloats === true
+          ? { indentsFromFloats: true } : {}),
       });
       markTopPt = window.topYPt;
       const numbering = environment.numberingFirstLine;

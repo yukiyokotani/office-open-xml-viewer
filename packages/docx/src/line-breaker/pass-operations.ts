@@ -589,6 +589,28 @@ function placeLineWindow(
     : undefined;
   const query = (topY: number, x: number, width: number, height: number,
     requiredWidth = transaction.requirement, admits?: typeof admitsWindow) => {
+    // LibreOffice measures the paragraph's indents from the edge of the
+    // area beside a float: the window is solved on the column band and the
+    // band's indents are applied inside it.
+    if (wrapCtx.indentsFromFloats === true && !admits) {
+      const columnRight = wrapCtx.columnXPt + wrapCtx.columnWidthPt;
+      const insetLeft = x - wrapCtx.columnXPt;
+      const insetRight = columnRight - (x + width);
+      if (insetLeft >= 0 && insetRight >= 0 && (insetLeft > 0 || insetRight > 0)) {
+        const window = solveWindow(topY, wrapCtx.columnXPt, wrapCtx.columnWidthPt, height,
+          requiredWidth + insetLeft + insetRight, undefined);
+        const left = wrapCtx.columnXPt + window.xOffset + insetLeft;
+        return {
+          topY: window.topY,
+          xOffset: left - x,
+          maxWidth: Math.max(0, window.maxWidth - insetLeft - insetRight),
+        };
+      }
+    }
+    return solveWindow(topY, x, width, height, requiredWidth, admits);
+  };
+  const solveWindow = (topY: number, x: number, width: number, height: number,
+    requiredWidth: number, admits: typeof admitsWindow) => {
     if (wrapCtx.lineWindow) {
       const win = wrapCtx.lineWindow({
         topYPt: topY, minimumStartWidthPt: requiredWidth,
