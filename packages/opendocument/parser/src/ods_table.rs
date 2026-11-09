@@ -408,9 +408,55 @@ fn promote_column_formats(
     }
     // Per column: the blank xf seen so far (None: conflicting), and rows.
     let mut seen: Vec<(Option<u32>, u32, bool)> = vec![(None, 0, true); width + 1];
-    let mut next_row = 1u32;
     let mut rows: Vec<roxmltree::Node<'_, '_>> = Vec::new();
     collect_row_nodes(table, &mut rows);
+    // Only a table that reaches the last row can format whole columns, and
+    // only columns whose last row paints differently from the column
+    // default are candidates; the scan below visits those columns only.
+    let total: u64 = rows
+        .iter()
+        .map(|r| u64::from(repeat(*r, "number-rows-repeated")))
+        .sum();
+    if total < u64::from(MAX_ROWS) {
+        return;
+    }
+    let mut candidates: Vec<(usize, usize)> = Vec::new();
+    if let Some(last_row) = rows.last() {
+        let row_default = last_row.attribute((NS_TABLE, "default-cell-style-name"));
+        let mut col = 1usize;
+        for cell in last_row.children().filter(|n| {
+            xml::is(*n, NS_TABLE, "table-cell") || xml::is(*n, NS_TABLE, "covered-table-cell")
+        }) {
+            if col > width {
+                break;
+            }
+            let last = (col + repeat(cell, "number-columns-repeated") as usize - 1).min(width);
+            let own = cell.attribute((NS_TABLE, "style-name")).or(row_default);
+            let mut c = col;
+            while c <= last {
+                let column = columns
+                    .iter()
+                    .find(|k| k.first as usize <= c && c <= k.last as usize);
+                let segment_last = column.map_or(last, |k| (k.last as usize).min(last));
+                let style = own
+                    .map(str::to_string)
+                    .or_else(|| column.and_then(|k| k.default_style.clone()));
+                let xf = ctx
+                    .xfs
+                    .xf_for(&ctx.store, &mut ctx.data, &ctx.faces, style.as_deref());
+                let default = column.map_or(0, |k| k.default_xf);
+                if ctx.xfs.blank_signature(xf) != ctx.xfs.blank_signature(default) {
+                    candidates.push((c, segment_last));
+                }
+                c = segment_last + 1;
+            }
+            col = last + 1;
+        }
+    }
+    if candidates.is_empty() {
+        return;
+    }
+    let mut next_row = 1u32;
     for row in rows {
         if next_row > MAX_ROWS {
             break;
@@ -442,7 +488,12 @@ fn promote_column_formats(
                 let xf = ctx
                     .xfs
                     .xf_for(&ctx.store, &mut ctx.data, &ctx.faces, style.as_deref());
-                for slot in &mut seen[c..=segment_last] {
+                let slots = candidates
+                    .iter()
+                    .filter(|(a, b)| *a <= segment_last && c <= *b)
+                    .flat_map(|(a, b)| (*a).max(c)..=(*b).min(segment_last));
+                for index in slots {
+                    let slot = &mut seen[index];
                     if has_content {
                         // Content cells keep their own format; they do not
                         // decide the column's.
@@ -758,6 +809,8 @@ fn read_row<'a, 'input>(
             let span_cols = repeat(cell, "number-columns-spanned");
             let span_rows = repeat(cell, "number-rows-spanned");
             if span_cols > 1 || span_rows > 1 {
+                ctx.budget
+                    .bytes(((last - first + 1) as usize).saturating_mul(32))?;
                 for row in first..=last {
                     walker.merges.push(MergeCell {
                         top: row,
