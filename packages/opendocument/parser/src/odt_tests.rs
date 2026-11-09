@@ -451,3 +451,39 @@ fn custom_shapes_evaluate_their_geometry() {
         matches!(shape.subpaths[0][0], docx_model::PathCmd::MoveTo { x, y } if x == 0.5 && y == 0.0)
     );
 }
+
+#[test]
+fn deeply_nested_content_stays_bounded() {
+    let groups = format!(
+        "<text:p>{}<draw:rect text:anchor-type=\"paragraph\" svg:width=\"1pt\" svg:height=\"1pt\"/>{}x</text:p>",
+        "<draw:g text:anchor-type=\"paragraph\">".repeat(60),
+        "</draw:g>".repeat(60)
+    );
+    let sections = format!(
+        "{}<text:p>deep</text:p>{}",
+        "<text:section text:name=\"s\">".repeat(60),
+        "</text:section>".repeat(60)
+    );
+    for body in [groups, sections] {
+        let styles = format!(
+            r#"<office:document-styles {NS} office:version="1.3"><office:styles/><office:master-styles><style:master-page style:name="Standard"/></office:master-styles></office:document-styles>"#
+        );
+        let content = format!(
+            r#"<office:document-content {NS} office:version="1.3"><office:body><office:text>{body}</office:text></office:body></office:document-content>"#
+        );
+        let files = [
+            ("META-INF/manifest.xml", manifest(ODT, "")),
+            ("styles.xml", styles),
+            ("content.xml", content),
+        ];
+        let files: Vec<(&str, &[u8])> = files.iter().map(|(n, b)| (*n, b.as_bytes())).collect();
+        let package = OdfPackage::open(
+            package_bytes(ODT, &files),
+            OoxmlFormat::Docx,
+            PackageLimits::default(),
+            &MEDIA_TYPES,
+        )
+        .unwrap();
+        assert!(read(&package).err().unwrap().contains("nests beyond"));
+    }
+}

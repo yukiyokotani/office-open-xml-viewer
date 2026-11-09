@@ -64,7 +64,7 @@ pub const MEDIA_TYPES: [&str; 2] = [
 const MAX_INLINE_DEPTH: usize = 32;
 /// Implementation bound on nested block containers (sections, lists, tables,
 /// frames, notes).
-const MAX_BLOCK_DEPTH: usize = 48;
+const MAX_BLOCK_DEPTH: usize = 32;
 /// Implementation bound on retained text, the dominant construction cost of
 /// this reader; the DOCX cursor additionally enforces its JSON ceilings.
 const MAX_RETAINED_TEXT_BYTES: usize = 64 * 1024 * 1024;
