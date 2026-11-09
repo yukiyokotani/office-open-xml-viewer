@@ -268,6 +268,13 @@ impl<'a, 'i> Pages<'a, 'i> {
         layout.text_direction.is_none() && layout.grid.is_none()
     }
 
+    /// Horizontal writing on the page style's body pages, grid or not.
+    pub fn horizontal(&self, master: &str) -> bool {
+        self.layout(self.body_master(master))
+            .text_direction
+            .is_none()
+    }
+
     pub fn footnote_separator(&self, master: &str) -> Option<NoteSeparatorMark> {
         self.layout(self.body_master(master)).footnote_separator
     }
