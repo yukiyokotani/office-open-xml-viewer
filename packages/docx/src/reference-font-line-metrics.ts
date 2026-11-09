@@ -14,7 +14,6 @@ export interface ReferenceFontLineMetrics {
 }
 
 const projectedProfiles = new WeakMap<object, ReferenceFontLineMetrics | null>();
-const plainProfiles = new WeakMap<object, ReferenceFontLineMetrics | null>();
 
 // Layout asks for the same few (family, weight, style) tuples for every text
 // segment. The answer is a pure function of the immutable generated catalog,
@@ -86,9 +85,8 @@ export function referenceFontDecorationMetrics(
   return geometry;
 }
 
-function project(profile: ReferenceFontMetricProfile, plain = false): ReferenceFontLineMetrics | null {
-  const cache = plain ? plainProfiles : projectedProfiles;
-  const retained = cache.get(profile);
+function project(profile: ReferenceFontMetricProfile): ReferenceFontLineMetrics | null {
+  const retained = projectedProfiles.get(profile);
   if (retained !== undefined) return retained;
   // The catalog cannot prove the installed/painted face. Its class is used
   // only as vertical reference geometry, and unknown OS/2 data is declined.
@@ -99,9 +97,7 @@ function project(profile: ReferenceFontMetricProfile, plain = false): ReferenceF
     hheaLineGap: profile.hhea[2],
     winAscent: profile.win?.[0],
     winDescent: profile.win?.[1],
-    // A producer whose layout uses every face's own box (plain) never takes
-    // Word's Far East 1.3 x usWin projection.
-    farEastCodePage: plain ? false : profile.farEastCodePage,
+    farEastCodePage: profile.farEastCodePage,
   });
   const result = projected?.lineHeightRatio != null
     && projected.designAscentRatio != null
@@ -113,15 +109,14 @@ function project(profile: ReferenceFontMetricProfile, plain = false): ReferenceF
         designDescentRatio: projected.designDescentRatio,
       })
     : null;
-  cache.set(profile, result);
+  projectedProfiles.set(profile, result);
   return result;
 }
 
 function identicalProjection(
   profiles: readonly ReferenceFontMetricProfile[],
-  plain = false,
 ): ReferenceFontLineMetrics | undefined {
-  const projected = profiles.map((profile) => project(profile, plain));
+  const projected = profiles.map(project);
   const first = projected[0];
   if (!first || projected.some((candidate) => !candidate
     || candidate.farEastCodePage !== first.farEastCodePage
@@ -172,9 +167,8 @@ export function referenceFontLineMetrics(
   family: string | null | undefined,
   weight = 400,
   style: 'normal' | 'italic' = 'normal',
-  plain = false,
 ): ReferenceFontLineMetrics | undefined {
-  return identicalProjection(preferredProfiles(family, weight, style), plain);
+  return identicalProjection(preferredProfiles(family, weight, style));
 }
 
 /** Metadata-only OS/2 average width for a native face selected by Canvas.

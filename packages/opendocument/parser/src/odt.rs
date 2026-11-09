@@ -230,10 +230,6 @@ pub fn read(package: &OdfPackage) -> Result<(Document, Vec<OwnedDocumentResource
         // under the column holding its reference and continues at the top of
         // the next column's area.
         footnote_column_bands: true,
-        // LibreOffice counts grid cells for a snapped line from the face's
-        // own box, without Word's Far East 1.3 x usWin rule (measured:
-        // MS Mincho and Meiryo grid controls; unsnapped lines keep 1.3).
-        plain_font_line_boxes: true,
         ..DocumentSettings::default()
     });
     document.footnotes = std::mem::take(&mut reader.footnotes);

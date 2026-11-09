@@ -701,8 +701,6 @@ export interface TextLayoutService {
   readonly fontMetrics?: Readonly<Record<string, Readonly<ResolvedFontMetric>>>;
   /** @deprecated Compatibility alias for {@link fontMetrics}. */
   readonly localMetrics: Readonly<Record<string, Readonly<ResolvedFontMetric>>>;
-  /** Producer grid line boxes (TextLayoutServiceInput.plainLineBoxes). */
-  readonly plainLineBoxes?: boolean;
   resolve(request: Readonly<TextFontResolveRequest>): FontResolution;
   shape(request: Readonly<TextShapeRequest>): TextShapeResult;
   /** Available only when measurement and every installed auxiliary explicitly
@@ -744,10 +742,6 @@ export interface TextLayoutServiceInput {
   readonly localMetrics?: Readonly<Record<string, Readonly<ResolvedFontMetric>>>;
   readonly eastAsiaFontCharsets?: Readonly<Record<string, string>>;
   readonly genericFamilies?: Readonly<Record<string, 'serif' | 'sans-serif' | 'monospace'>>;
-  /** Producer line boxes (never OOXML): lines snapped to an active line
-   * grid count grid cells from each catalogued face's own hhea box, without
-   * Word's Far East 1.3 x usWin projection, as LibreOffice does. */
-  readonly plainLineBoxes?: boolean;
 }
 
 /** Generic tail for an authored DOCX face. fontTable family/pitch metadata is
@@ -1109,7 +1103,6 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
     fontMetrics,
     eastAsiaFontCharsets,
     genericFamilies,
-    ...(input.plainLineBoxes ? { plainLineBoxes: true } : {}),
   });
   const resolve = (request: Readonly<TextFontResolveRequest>): FontResolution => {
     const authoredFamily = requestedFamily(request, request.slot);
@@ -1352,7 +1345,6 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
     fingerprint,
     fontMetrics,
     localMetrics: fontMetrics,
-    ...(input.plainLineBoxes ? { plainLineBoxes: true as const } : {}),
     resolve,
     sourceScopeKey(request: Readonly<TextShapeRequest>): string | undefined {
       if (!SCOPE_SLOTS.some(slot => input.fonts.scopedSubstituteScript?.(

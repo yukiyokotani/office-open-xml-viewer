@@ -55,10 +55,9 @@ function cssMatchedFace<T extends FaceTuple>(faces: readonly T[], weight: number
 export function authoredReferenceVerticalMetric(
   selected: FontResolution,
   synthesis?: SynthesizedFaceProbe,
-  plain = false,
 ): ReferenceFontLineMetrics | undefined {
   void LIBRARY_SYNTHESIZED_FACE_LINE_GEOMETRY;
-  const exact = referenceFontLineMetrics(selected.requestedFamily, selected.weight, selected.style, plain);
+  const exact = referenceFontLineMetrics(selected.requestedFamily, selected.weight, selected.style);
   if (exact || !synthesis?.text.sameGlyphRaster
     || selected.source !== 'native' || selected.installedFamily !== true) return exact;
   const faces = synthesis.text.exactLocalFaces?.(selected.requestedFamily) ?? [];
@@ -66,7 +65,7 @@ export function authoredReferenceVerticalMetric(
   // Glyph ownership: the span's own graphemes (and the raster probe's) must
   // come from the matched exact source, not from a fallback face.
   if (!matched?.coverageProbeFamily || !synthesis.text.ownsGlyphs) return undefined;
-  const reference = referenceFontLineMetrics(selected.requestedFamily, matched.weight, matched.style, plain);
+  const reference = referenceFontLineMetrics(selected.requestedFamily, matched.weight, matched.style);
   // Face identity is a property of the route and tuple, as for the regular
   // catalog tuple this extends (which admits a native installed route without
   // per-glyph proof). One fixed probe per script class bounds the work to a
@@ -95,14 +94,13 @@ export function selectedFontLineMetric(
   naturalMetricAllowed: boolean,
   referenceMetricAllowed = true,
   synthesis?: SynthesizedFaceProbe,
-  plain = false,
 ) {
   const resourceMetric = (naturalMetricAllowed || localFont?.designAscentRatio == null)
     && (localFont?.lineHeightRatio != null || localFont?.designAscentRatio != null
       || localFont?.eastAsianLineHeightRatio != null) ? localFont : undefined;
   const referenceMetric = naturalMetricAllowed && referenceMetricAllowed && !resourceMetric
     && mayUseAuthoredReferenceVerticalMetric(selected)
-    ? authoredReferenceVerticalMetric(selected, synthesis, plain)
+    ? authoredReferenceVerticalMetric(selected, synthesis)
     : undefined;
   return { resourceMetric, referenceMetric, lineMetric: resourceMetric ?? referenceMetric };
 }

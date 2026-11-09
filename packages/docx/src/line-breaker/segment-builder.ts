@@ -1453,14 +1453,12 @@ function emitResolvedTextSegment(
       allowsReferenceFontMetric(indexedFontMetrics(environment.layoutServices?.text.fontMetrics
         ?? environment.layoutServices?.text.localMetrics ?? {}), resolvedSpan?.font),
       environment.layoutServices ? { text: environment.layoutServices.text, probe: text,
-        ...(textShapeRequest.baseDirection !== undefined ? { baseDirection: textShapeRequest.baseDirection } : {}) } : undefined,
-      environment.layoutServices?.text.plainLineBoxes === true && environment.lineGridActive === true);
+        ...(textShapeRequest.baseDirection !== undefined ? { baseDirection: textShapeRequest.baseDirection } : {}) } : undefined);
   // LIBRARY_SYNTHESIZED_FACE_LINE_GEOMETRY does not extend to the East Asian
   // floor of a run painted in another slot (see that rule's scope).
   const { lineMetric: eaLineMetric } = selectedFontLineMetric(eaResolution, localEaFloor, naturalMetricAllowed,
       allowsReferenceFontMetric(indexedFontMetrics(environment.layoutServices?.text.fontMetrics
-        ?? environment.layoutServices?.text.localMetrics ?? {}), eaResolution), undefined,
-      environment.layoutServices?.text.plainLineBoxes === true && environment.lineGridActive === true);
+        ?? environment.layoutServices?.text.localMetrics ?? {}), eaResolution));
   const resolvedEaFloorFamily =
     eaResolution?.resolvedFamily ?? localEaFloor?.family ?? eaFontFamily;
   // WORD_USE_FE_LAYOUT_INHERITED_GRID_MINIMUM was observed for an active
@@ -2080,8 +2078,7 @@ function appendRunsToSegments(
           // LIBRARY_SYNTHESIZED_FACE_LINE_GEOMETRY covers measured text
           // spans and paragraph marks only; an anchor host is outside its
           // evidence, so only an exact catalogued tuple lends its geometry.
-          ? referenceFontLineMetrics(selected.requestedFamily, weight, style,
-            environment.layoutServices?.text.plainLineBoxes === true && environment.lineGridActive === true)
+          ? referenceFontLineMetrics(selected.requestedFamily, weight, style)
           : undefined;
       const familyLineMetric = resourceMetric ?? referenceMetric;
       segs.push({

@@ -175,10 +175,6 @@ export interface DocSettings {
    *  multi-column section owns its footnote band, as LibreOffice lays out
    *  footnotes. */
   __footnoteColumnBands?: boolean;
-  /** Private producer flag (never authored by OOXML): lines snapped to an
-   *  active line grid count cells from each face's own line box, without
-   *  Word's Far East 1.3 x usWin rule, as LibreOffice does. */
-  __plainFontLineBoxes?: boolean;
 }
 
 export interface DocRevision {

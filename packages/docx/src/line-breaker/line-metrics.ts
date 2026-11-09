@@ -414,9 +414,7 @@ export function paragraphMarkLineMetrics(
       && allowsReferenceFontMetric(indexedFontMetrics(
         textLayoutService.fontMetrics ?? textLayoutService.localMetrics ?? {},
       ), selectedFont)
-      ? authoredReferenceVerticalMetric(selectedFont, { text: textLayoutService, probe: markProbe },
-        textLayoutService.plainLineBoxes === true && (grid?.linePitchPt ?? 0) > 0
-          && grid?.type != null && grid.type !== 'default')
+      ? authoredReferenceVerticalMetric(selectedFont, { text: textLayoutService, probe: markProbe })
       : undefined;
     if (naturalMetricAllowed && !resolvedLocalFont && !referenceMarkMetric
       && selectedFont?.source === 'native' && ctx) {
