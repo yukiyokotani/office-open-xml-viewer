@@ -4926,7 +4926,7 @@ enum OldParaPiece {
 ///   - `BreakType::RenderedPage` — Word's `<w:lastRenderedPageBreak/>` hint
 ///     (ECMA-376 §17.3.1.20), a layout cache that is NOT authoritative. We
 ///     paginate ourselves, so it is ignored uniformly and stripped (never
-///     mixed with self-pagination per the package CLAUDE.md). Verified
+///     mixed with self-pagination per the package AGENTS.md). Verified
 ///     behavior-invariant on the ruby sample that used to need it.
 ///
 /// `<w:lastRenderedPageBreak/>` is often emitted by Word at the very
@@ -4943,7 +4943,7 @@ fn old_split_para_on_page_breaks(para: DocParagraph) -> Vec<OldParaPiece> {
     // cache, not an authoritative break (ECMA-376 §17.3.1.20). We paginate the
     // body ourselves (computePages, TS side), so these hints are ignored
     // uniformly and stripped here — only a hard `<w:br w:type="page"/>` splits a
-    // paragraph. Per the package CLAUDE.md, honoring vs ignoring the hint must
+    // paragraph. Per the package AGENTS.md, honoring vs ignoring the hint must
     // not be mixed. (It was previously honored only inside ruby paragraphs as a
     // stopgap for a ruby line-height drift that the docGrid-aware line metrics
     // have since absorbed: with this gate gone, private/sample-5 — 66 ruby runs,
@@ -27030,7 +27030,7 @@ mod column_tests {
     /// A leading `<w:lastRenderedPageBreak/>` (Word's ignored layout hint, not a hard
     /// break) must still be stripped WITHOUT injecting a body-level break — only a
     /// hard `<w:br w:type="page"/>` advances the page. Guards the leading-break fix
-    /// against re-honoring the hint (package CLAUDE.md: never mix honoring/ignoring
+    /// against re-honoring the hint (package AGENTS.md: never mix honoring/ignoring
     /// `<w:lastRenderedPageBreak/>`).
     #[test]
     fn leading_rendered_page_break_hint_does_not_advance_page() {
