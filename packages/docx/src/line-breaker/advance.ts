@@ -34,7 +34,7 @@ export const RESET_SLICED_TEXT_MEASUREMENT = {
 /** Code points whose presence marks a line as East Asian for docGrid line-cell
  *  rounding: CJK symbols/punctuation, Hiragana, Katakana, CJK Unified +
  *  Extension A, compatibility ideographs, Hangul, and fullwidth forms. Content
- *  test only — not a font-name heuristic (cf. packages/docx/CLAUDE.md). */
+ *  test only — not a font-name heuristic (cf. packages/docx/AGENTS.md). */
 /** Per-character character-grid delta in px, before applying the grid's scope. */
 export function gridCharDeltaPx(grid: DocGridCtx | undefined, scale: number): number {
   if (!grid || grid.charSpacePt == null) return 0;

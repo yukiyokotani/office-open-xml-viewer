@@ -1,7 +1,3 @@
----
-name: docx-architecture-audit
-description: Audit the office-open-xml-viewer DOCX layout architecture for a single immutable layout-to-paint pipeline. Use after major DOCX layout, pagination, measurement, paint, parser-model, worker, or compatibility changes, and before declaring Issue #1037-style architecture work complete.
----
 
 # DOCX Architecture Audit
 

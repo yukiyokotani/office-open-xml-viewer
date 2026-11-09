@@ -20,6 +20,41 @@ Important directories:
 - `site/` — public site.
 - `.storybook/` — unified Storybook config.
 
+## Worktree Startup Checklist
+
+After reading this file:
+
+1. Run `pwd` and identify the worktree role from the path.
+2. Ensure `spec` exists in the worktree as a symlink to the main checkout's
+   ignored OOXML specification directory, following step 4 of the Standard
+   Development Flow.
+3. Read the package-level `AGENTS.md` for any package you will edit.
+4. Follow the ownership limits under Worktree Roles unless the user explicitly
+   asks for a cross-package change.
+
+## Worktree Roles
+
+Some agent sessions run in package-scoped worktrees:
+
+- `.claude/worktrees/pptx` or `ooxml-pptx` → PPTX session; edit
+  `packages/pptx` only unless the task requires shared code.
+- DOCX-focused worktrees should primarily edit `packages/docx`.
+- XLSX-focused worktrees should primarily edit `packages/xlsx`.
+
+Reading other packages is fine. Editing other packages should happen only for a
+coherent cross-package fix described in Cross-Package Integration.
+
+## Parallel Session Safety
+
+Multiple agent sessions (for example Claude and Codex) may run at once.
+
+- Treat unexpected dirty files as user or peer-agent work.
+- Do not revert or overwrite unrelated changes.
+- Preserve dirty work before switching branches or pulling.
+- Private samples, local sample stories, WASM outputs, VRT screenshots, and
+  reference images remain local/generated unless the user explicitly asks to
+  commit them.
+
 ## Standard Development Flow
 
 Use this flow for ordinary bug fixes and feature work:
@@ -261,6 +296,10 @@ or PR description; do not silently waive an unresolved item.
   renderer as the self-VRT oracle and keep Office-reference fidelity evaluation
   separate. Investigate every unexplained difference; do not weaken comparison
   thresholds merely to make the review pass.
+- **DOCX architecture:** After major DOCX layout, pagination, measurement,
+  paint, parser-model, worker, or compatibility changes, and before declaring
+  Issue #1037-style architecture work complete, also follow
+  `docs/docx-architecture-audit.md`.
 
 ## Private Samples and Storybook
 
