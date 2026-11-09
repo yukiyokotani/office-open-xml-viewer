@@ -303,6 +303,10 @@ Typical local-only paths:
 - `packages/docx/public/private/docx/`
 - `packages/xlsx/public/private/xlsx/`
 - `packages/pptx/public/private/pptx/`
+- `packages/legacy-office/public/private/{doc,xls,ppt}/` (DOC/XLS/PPT samples
+  and the paired OOXML controls)
+- `packages/opendocument/public/private/{odt,ods,odp}/` (LibreOffice-converted
+  ODF corpus and its PDFs)
 - `packages/*/src/*privateDemo.stories.ts`
 
 Generated build output such as `packages/*/src/wasm/` is also git-ignored and

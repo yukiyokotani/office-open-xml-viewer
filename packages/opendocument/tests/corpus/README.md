@@ -21,7 +21,7 @@ the corpus and every report live under the main checkout's git-ignored
 node packages/opendocument/tests/corpus/convert.mjs --jobs 6
 ```
 
-Converts `packages/{docx,xlsx,pptx}/public/private/**` into
+Converts the OOXML files under `packages/{docx,xlsx,pptx,legacy-office}/public/private/**` into
 `packages/opendocument/public/private/{odt,ods,odp}/<same relative path>`,
 plus `<name>.pdf` exported by LibreOffice from the converted ODF file. Existing
 outputs are kept. Failures go to `convert-failures.local.jsonl` and are skipped
