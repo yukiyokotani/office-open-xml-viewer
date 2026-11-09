@@ -6553,6 +6553,7 @@ fn parse_paragraph_cond_at_depth_with_diagnostics(
         line_spacing,
         numbering,
         no_hanging_indent_tab: false,
+        justified_compression: false,
         tab_stops,
         runs,
         run_revisions,
@@ -16415,6 +16416,7 @@ fn parse_table_row(
         row_height_rule,
         is_header,
         cant_split,
+        cuts_in_place: false,
         table_row_layout,
     }
 }

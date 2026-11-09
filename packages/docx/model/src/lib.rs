@@ -1184,6 +1184,14 @@ pub struct DocParagraph {
         skip_serializing_if = "std::ops::Not::not"
     )]
     pub no_hanging_indent_tab: bool,
+    /// The producer compresses the spaces of a justified line to fit more
+    /// text, as Word does in compatibility mode 15 (LibreOffice's
+    /// JustifyLinesWithShrinking). DOCX never sets it; mode 15 decides.
+    #[serde(
+        rename = "__justifiedCompression",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    pub justified_compression: bool,
     /// Explicit tab stops from w:tabs. Empty means use default tab interval.
     pub tab_stops: Vec<TabStop>,
     pub runs: Vec<DocRun>,
@@ -3889,6 +3897,11 @@ pub struct DocTableRow {
     /// ECMA-376 §17.4.6 w:cantSplit. When true, this row must not be split
     /// across page boundaries.
     pub cant_split: bool,
+    /// The row is cut at a page as LibreOffice cuts it: a row whose fragment
+    /// would overflow only by the bottom rule a page slice appends is cut so
+    /// the rule fits instead of moving whole. DOCX never sets it.
+    #[serde(rename = "__cutsInPlace", skip_serializing_if = "std::ops::Not::not")]
+    pub cuts_in_place: bool,
     #[serde(rename = "__tableRowLayout")]
     pub table_row_layout: TableRowLayoutAcquisitionWire,
 }
