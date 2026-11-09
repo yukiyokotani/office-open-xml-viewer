@@ -3,7 +3,7 @@ language: TypeScript
 severity: error
 rule:
   pattern: $X!
-message: Public-facing examples must use `as Type`, not the non-null assertion `!` (root CLAUDE.md "コード例の規約").
+message: Public-facing examples must use `as Type`, not the non-null assertion `!` (root AGENTS.md "Documentation and Public Examples").
 note: |
   README / docs / Storybook example code uses explicit `as Type` assertions
   instead of postfix `!`. No auto-fix: the correct target type cannot be
