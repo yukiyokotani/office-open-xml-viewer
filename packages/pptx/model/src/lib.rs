@@ -1052,6 +1052,13 @@ pub struct TextBody {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(default)]
     pub text_warp: Option<TextWarp>,
+    /// Shrink on overflow without a stored scale (ODF 1.3 Part 3 §20.358
+    /// `style:shrink-to-fit`): the renderer derives the largest font scale
+    /// at which the text fits the frame, as LibreOffice Impress does. DrawingML
+    /// sources never set it (PowerPoint applies only a stored `fontScale`).
+    #[serde(skip_serializing_if = "is_false")]
+    #[serde(default)]
+    pub shrink_on_overflow: bool,
 }
 
 pub fn one_u32() -> u32 {

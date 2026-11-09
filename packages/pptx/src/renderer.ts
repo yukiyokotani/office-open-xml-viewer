@@ -5545,6 +5545,19 @@ export function renderTextBody(
   if (body.autoFit === 'norm') {
     if (body.fontScale != null && body.fontScale > 0) {
       if (body.fontScale < 1.0) ({ allLines, requiredHeight } = layoutAt(body.fontScale));
+    } else if (body.shrinkOnOverflow && !measureOnly) {
+      // ODF style:shrink-to-fit (model sources): the largest scale at which
+      // the laid-out text fits the frame's content height (LibreOffice
+      // Impress derives it at layout time; nothing is stored in the file).
+      const available = Math.max(0, bh - tPad - bPad);
+      if (requiredHeight > available && available > 0) {
+        let lo = 0.05, hi = 1.0;
+        for (let step = 0; step < 10; step += 1) {
+          const mid = (lo + hi) / 2;
+          if (layoutAt(mid).requiredHeight <= available) lo = mid; else hi = mid;
+        }
+        ({ allLines, requiredHeight } = layoutAt(lo));
+      }
     }
   }
 

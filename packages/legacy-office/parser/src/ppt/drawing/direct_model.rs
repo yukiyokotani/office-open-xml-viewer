@@ -1348,6 +1348,7 @@ impl Context<'_> {
             anchor_ctr: false,
             compat_ln_spc: None,
             text_warp: None,
+            shrink_on_overflow: false,
         }))
     }
 

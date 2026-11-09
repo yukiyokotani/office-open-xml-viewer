@@ -293,6 +293,11 @@ export interface TextBody {
    *  (e.g. 0.20 for `lnSpcReduction="20000"`). Null/absent when not stored. */
   lnSpcReduction?: number | null;
   /**
+   * ODF `style:shrink-to-fit` without a stored scale (model sources only):
+   * shrink the font until the text fits the frame, as LibreOffice does.
+   */
+  shrinkOnOverflow?: boolean;
+  /**
    * `<a:bodyPr numCol>` (ECMA-376 §20.1.10.34) — number of text columns inside
    * the shape. Defaults to 1; values > 1 cause the renderer to flow paragraphs
    * across N columns left-to-right, top-to-bottom.
