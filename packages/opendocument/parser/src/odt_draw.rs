@@ -1276,7 +1276,7 @@ fn contour_polygon(frame: roxmltree::Node<'_, '_>) -> Option<docx_model::AnchorP
             })
         })
         .collect();
-    (points.len() >= 3).then(|| docx_model::AnchorPolygonWire {
+    (points.len() >= 3).then_some(docx_model::AnchorPolygonWire {
         edited: false,
         coordinate_space: docx_model::AnchorPolygonSpaceWire {
             width: 21600,

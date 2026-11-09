@@ -45,6 +45,9 @@ pub(super) struct Geometry {
 struct Region {
     /// Height of the region's content (min or fixed).
     height: f64,
+    /// Spacing between the region and the body (`fo:margin-bottom` of a
+    /// header, `fo:margin-top` of a footer), within `height`.
+    spacing: f64,
     margin_left: f64,
     margin_right: f64,
 }
@@ -278,17 +281,17 @@ fn read_layout(node: roxmltree::Node<'_, '_>, layout: &mut Layout) {
         match (child.tag_name().namespace(), child.tag_name().name()) {
             (Some(NS_STYLE), "page-layout-properties") => read_page_properties(child, layout),
             (Some(NS_STYLE), "header-style") => {
-                layout.header = region(child);
+                layout.header = region(child, "margin-bottom");
             }
             (Some(NS_STYLE), "footer-style") => {
-                layout.footer = region(child);
+                layout.footer = region(child, "margin-top");
             }
             _ => {}
         }
     }
 }
 
-fn region(node: roxmltree::Node<'_, '_>) -> Option<Region> {
+fn region(node: roxmltree::Node<'_, '_>, spacing: &str) -> Option<Region> {
     let properties = node
         .children()
         .find(|n| xml::is(*n, NS_STYLE, "header-footer-properties"))?;
@@ -302,6 +305,7 @@ fn region(node: roxmltree::Node<'_, '_>) -> Option<Region> {
             .or_else(|| get(NS_FO, "min-height"))
             .unwrap_or(0.0)
             .max(0.0),
+        spacing: get(NS_FO, spacing).unwrap_or(0.0).max(0.0),
         margin_left: get(NS_FO, "margin-left").unwrap_or(0.0),
         margin_right: get(NS_FO, "margin-right").unwrap_or(0.0),
     })
@@ -846,6 +850,29 @@ impl<'a> Reader<'a> {
                         p.indent_right += region.margin_right;
                     }
                 }
+                // LibreOffice keeps the region's spacing between a header
+                // taller than its height and the body (and between the body
+                // and a footer): the spacing joins the region's content, so a
+                // DOCX region that grows past the body margin pushes the body
+                // by its content plus the spacing.
+                let edge = if kind == "header" {
+                    body.iter_mut().rev().find_map(|e| match e {
+                        BodyElement::Paragraph(p) => Some(p),
+                        _ => None,
+                    })
+                } else {
+                    body.iter_mut().find_map(|e| match e {
+                        BodyElement::Paragraph(p) => Some(p),
+                        _ => None,
+                    })
+                };
+                if let Some(paragraph) = edge {
+                    if kind == "header" {
+                        paragraph.space_after += region.spacing;
+                    } else {
+                        paragraph.space_before += region.spacing;
+                    }
+                }
                 Ok(HeaderFooter { body })
             };
             // Lifetimes: master nodes live as long as the styles document.
@@ -935,6 +962,11 @@ impl<'a> Reader<'a> {
         section.footer_distance = section.margin_bottom;
         if let Some(header) = layout.header.filter(|_| stories.shown[0]) {
             section.margin_top += header.height;
+        }
+        // A header story that only carries the page background sits at the
+        // page's top edge, where its empty line cannot reach the body.
+        if !stories.shown[0] {
+            section.header_distance = 0.0;
         }
         if let Some(footer) = layout.footer.filter(|_| stories.shown[1]) {
             section.margin_bottom += footer.height;

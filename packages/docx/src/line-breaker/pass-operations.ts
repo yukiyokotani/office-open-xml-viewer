@@ -592,19 +592,21 @@ function placeLineWindow(
     // LibreOffice measures the paragraph's indents from the edge of the
     // area beside a float: the window is solved on the column band and the
     // band's indents are applied inside it.
-    if (wrapCtx.indentsFromFloats === true && !admits) {
+    if (wrapCtx.indentsFromFloats === true) {
       const columnRight = wrapCtx.columnXPt + wrapCtx.columnWidthPt;
       const insetLeft = x - wrapCtx.columnXPt;
       const insetRight = columnRight - (x + width);
       if (insetLeft >= 0 && insetRight >= 0 && (insetLeft > 0 || insetRight > 0)) {
-        const window = solveWindow(topY, wrapCtx.columnXPt, wrapCtx.columnWidthPt, height,
-          requiredWidth + insetLeft + insetRight, undefined);
-        const left = wrapCtx.columnXPt + window.xOffset + insetLeft;
-        return {
-          topY: window.topY,
-          xOffset: left - x,
+        // A column window seen from the paragraph band (the admission
+        // callback judges paragraph-band windows).
+        const onBand = (window: Readonly<{ xOffset: number; maxWidth: number }>) => ({
+          xOffset: wrapCtx.columnXPt + window.xOffset + insetLeft - x,
           maxWidth: Math.max(0, window.maxWidth - insetLeft - insetRight),
-        };
+        });
+        const window = solveWindow(topY, wrapCtx.columnXPt, wrapCtx.columnWidthPt, height,
+          requiredWidth + insetLeft + insetRight,
+          admits ? (candidate) => admits(onBand(candidate)) : undefined);
+        return { topY: window.topY, ...onBand(window) };
       }
     }
     return solveWindow(topY, x, width, height, requiredWidth, admits);
