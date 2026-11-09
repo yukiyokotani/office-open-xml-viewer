@@ -381,7 +381,8 @@ self.onmessage = async (event: MessageEvent<RenderWorkerRequest | WorkerSvgDecod
           dpr: request.dpr,
           imageResources: request.imageResources,
           defaultTextColor: compact.defaultTextColor,
-          parsedTextChain: true,
+          // A model source's slides have no proven parsed colour chain.
+          parsedTextChain: source === undefined,
           cjkFallback,
           majorFont: compact.majorFont,
           minorFont: compact.minorFont,
@@ -422,7 +423,8 @@ self.onmessage = async (event: MessageEvent<RenderWorkerRequest | WorkerSvgDecod
         await renderSlideWithEmbeddedFonts(canvas, slide, compact.slideWidth, compact.slideHeight, {
           width: request.width,
           defaultTextColor: compact.defaultTextColor,
-          parsedTextChain: true,
+          // A model source's slides have no proven parsed colour chain.
+          parsedTextChain: source === undefined,
           cjkFallback,
           majorFont: compact.majorFont,
           minorFont: compact.minorFont,
