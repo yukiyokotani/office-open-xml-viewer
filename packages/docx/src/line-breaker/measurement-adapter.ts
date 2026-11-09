@@ -47,7 +47,9 @@ function hasLiveSlotSeam(segment: LayoutTextSeg | undefined): boolean {
 export function kernedSpaceSeamIdentity(left: LayoutTextSeg, right: LayoutTextSeg, scale: number): boolean {
   const l = left.textShapeRequest;
   const r = right.textShapeRequest;
-  return sameNativeLevelUnit(left, right) && !!l && !!r && l.kerning === true && r.kerning === true
+  // Field comparisons run before the native-unit receipt check, which slices
+  // source text.
+  return !!l && !!r && l.kerning === true && r.kerning === true
     && !!right.textLayoutService && right.textLayoutService === left.textLayoutService
     && !left.tateChuYoko && !right.tateChuYoko
     && !left.ruby && !right.ruby && !left.rubyPiece && !right.rubyPiece
@@ -63,7 +65,8 @@ export function kernedSpaceSeamIdentity(left: LayoutTextSeg, right: LayoutTextSe
     && l.weight === r.weight && l.style === r.style
     && charScaleFactor(left) === charScaleFactor(right)
     && left.sourceRunIndex !== undefined && left.sourceRunIndex === right.sourceRunIndex
-    && left.sourceTextSequence === right.sourceTextSequence;
+    && left.sourceTextSequence === right.sourceTextSequence
+    && sameNativeLevelUnit(left, right);
 }
 
 /** Owns the Canvas state used by one line-breaking pass. The state recorded here
@@ -73,6 +76,8 @@ export class LineMeasurementAdapter {
   private selectedFont: string | null = null;
   private readonly initialFont: string;
   private selectedKerning: CanvasFontKerning | null;
+  /** Kerned space-seam pairs measured in this pass, by font and clusters. */
+  private readonly kernedSeamPairs = new Map<string, number>();
   readonly letterSpacing: string;
 
   constructor(
@@ -217,22 +222,24 @@ export class LineMeasurementAdapter {
     const l = left?.textShapeRequest;
     const r = right.textShapeRequest;
     const service = right.textLayoutService;
-    const physicalUnit = hasLiveSlotSeam(left) || hasLiveSlotSeam(right);
-    if (!left || !sameNativeLevelUnit(left, right) || !l || !r || !service || service !== left.textLayoutService
+    if (!left || !l || !r || l.kerning !== true || !service || service !== left.textLayoutService
       || !left.text.endsWith(' ') || right.text.startsWith(' ') || !right.text
       || left.metricOnly || right.metricOnly || left.ruby || right.ruby
       || left.fitTextRegionIndex !== undefined || right.fitTextRegionIndex !== undefined
       || left.verticalRun || right.verticalRun || left.rtl || right.rtl
-      || l.complexScript || r.complexScript || l.kerning !== true
+      || l.complexScript || r.complexScript
       || (left.script !== 'ascii' && left.script !== 'highAnsi')
       || (right.script !== 'ascii' && right.script !== 'highAnsi')
-      || (!physicalUnit && left.script !== right.script)
       || left.fontRoute?.fingerprint !== right.fontRoute?.fingerprint
       || calcEffectiveFontPx(left, this.scale) !== calcEffectiveFontPx(right, this.scale)
       || l.weight !== r.weight || l.style !== r.style || l.kerning !== r.kerning
       || charScaleFactor(left) !== charScaleFactor(right)
       || left.sourceRunIndex === undefined || left.sourceRunIndex !== right.sourceRunIndex
       || left.sourceTextSequence !== right.sourceTextSequence) return 0;
+    // The slot and native-unit checks walk spans and slice source text, so
+    // they run after the field comparisons.
+    const physicalUnit = hasLiveSlotSeam(left) || hasLiveSlotSeam(right);
+    if ((!physicalUnit && left.script !== right.script) || !sameNativeLevelUnit(left, right)) return 0;
     const lc = l.substituteContext;
     const rc = r.substituteContext;
     if (!lc || !rc || lc.text !== rc.text || lc.offset + left.text.length !== rc.offset) return 0;
@@ -275,13 +282,20 @@ export class LineMeasurementAdapter {
     const before = left.text.slice(graphemeClusterOffsets(left.text).at(-1) ?? 0);
     const after = right.text.slice(0, graphemeClusterOffsets(right.text)[0] ?? right.text.length);
     const font = this.fontForSegment(left);
+    // One pass keeps one Canvas state apart from the font and kerning set
+    // here, so the pair of a face and two clusters is measured once per pass.
+    const key = `${font}\u0000${before}\u0000${after}`;
+    const cached = this.kernedSeamPairs.get(key);
+    if (cached !== undefined) return cached * charScaleFactor(right);
     const previousFont = this.selectedFont ?? this.initialFont;
     const previousKerning = this.context.fontKerning;
     this.setFont(font);
     this.context.fontKerning = 'normal';
     try {
       const width = (text: string) => this.context.measureText(text).width;
-      return (width(before + after) - width(before) - width(after)) * charScaleFactor(right);
+      const pair = width(before + after) - width(before) - width(after);
+      this.kernedSeamPairs.set(key, pair);
+      return pair * charScaleFactor(right);
     } finally {
       this.context.font = previousFont;
       this.selectedFont = previousFont;
