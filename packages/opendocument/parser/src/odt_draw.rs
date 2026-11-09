@@ -1196,11 +1196,8 @@ impl<'a> Reader<'a> {
     fn group(&mut self, node: roxmltree::Node<'a, 'a>) -> Result<Option<DocRun>, String> {
         let mut runs = Vec::new();
         for child in node.children().filter(|n| n.is_element()) {
-            let run = match child.tag_name().name() {
-                "g" => self.group(child)?,
-                "frame" => self.frame(child)?,
-                _ => self.shape(child, None)?,
-            };
+            // Through `drawing`, which bounds the nesting depth.
+            let run = self.drawing(child, None)?;
             if let Some(run) = run {
                 runs.push(run);
             }

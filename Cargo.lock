@@ -618,6 +618,7 @@ dependencies = [
  "ooxml-common",
  "png",
  "roxmltree",
+ "serde_json",
  "wasm-bindgen",
  "zip",
  "zune-core",
