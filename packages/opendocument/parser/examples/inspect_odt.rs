@@ -1,5 +1,5 @@
 //! Local inspection: admit or reject ODT files and print the reason or the
-//! paragraph count. `cargo run --example inspect_odt --features odt -- <files>`
+//! paragraph count (ODT_DUMP=1 prints the DOCX model as JSON). `cargo run --example inspect_odt --features odt -- <files>`
 use opendocument_parser::{
     odt,
     package::{OdfPackage, PackageLimits},
@@ -15,6 +15,10 @@ fn main() {
         )
         .and_then(|package| odt::read(&package));
         match result {
+            Ok((document, _)) if std::env::var("ODT_DUMP").is_ok() => {
+                // ODT_DUMP=1: the DOCX model as JSON (local debugging).
+                println!("{}", serde_json::to_string_pretty(&document).expect("json"));
+            }
             Ok((document, images)) => println!(
                 "{path}: admitted, {} body elements, {} images",
                 document.body.len(),

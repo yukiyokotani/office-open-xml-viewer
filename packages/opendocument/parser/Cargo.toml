@@ -30,6 +30,7 @@ zune-jpeg = { version = "0.5", default-features = false, features = ["std"], opt
 zune-core = { version = "0.5", default-features = false, features = ["std"], optional = true }
 
 [dev-dependencies]
+serde_json = { workspace = true }
 zip = { workspace = true }
 flate2 = { workspace = true }
 

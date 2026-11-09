@@ -424,7 +424,15 @@ impl<'a> Reader<'a> {
                         page_start: None,
                         block: 0,
                     });
+                } else {
+                    // The first block names the initial page style.
+                    self.current_master = master.to_string();
+                    if let Some(first) = self.sections.last_mut() {
+                        first.master = master.to_string();
+                        first.columns = self.pages.columns(master);
+                    }
                 }
+                self.apply_page_geometry();
             }
         }
         self.blocks.push(Block::Table(Box::new(TableBlock {

@@ -131,6 +131,19 @@ struct Placement {
     z_order: u32,
     /// LibreOffice `loext:allow-overlap` (default true).
     allow_overlap: bool,
+    /// `draw:contour-polygon` (§10.4.12) in the 21600 wrap-polygon space.
+    polygon: Option<docx_model::AnchorPolygonWire>,
+}
+
+impl Placement {
+    /// The wrap kind drawn: a contour wrap without its polygon wraps around
+    /// the object's box.
+    fn effective_wrap(&self) -> AnchorWrapKindWire {
+        match (self.wrap, &self.polygon) {
+            (AnchorWrapKindWire::Tight, None) => AnchorWrapKindWire::Square,
+            (kind, _) => kind,
+        }
+    }
 }
 
 /// `style:wrap` (§20.384) and `style:wrap-contour` (§20.385).
@@ -300,6 +313,7 @@ impl<'a> Reader<'a> {
             distances,
             z_order,
             allow_overlap: graphic.get(NS_LOEXT, "allow-overlap") != Some("false"),
+            polygon: contour_polygon(node),
         }
     }
 
@@ -346,8 +360,14 @@ impl<'a> Reader<'a> {
             },
             anchor_distances: edges.clone(),
             wrap: AnchorWrapWire {
-                kind: placement.wrap,
-                authored_kinds: vec![match placement.wrap {
+                // A contour wrap needs its polygon; without one it wraps
+                // around the frame's box.
+                kind: placement.effective_wrap(),
+                polygon: placement
+                    .polygon
+                    .clone()
+                    .filter(|_| placement.wrap == AnchorWrapKindWire::Tight),
+                authored_kinds: vec![match placement.effective_wrap() {
                     AnchorWrapKindWire::TopAndBottom => "wrapTopAndBottom",
                     AnchorWrapKindWire::Square => "wrapSquare",
                     AnchorWrapKindWire::Tight => "wrapTight",
@@ -356,7 +376,7 @@ impl<'a> Reader<'a> {
                 .into()],
                 side: placement.side.map(str::to_string),
                 distances: edges,
-                ..AnchorWrapWire::default()
+                effect_extent: None,
             },
             behavior: AnchorBehaviorWire {
                 behind_doc: Some(placement.behind),
@@ -576,7 +596,7 @@ impl<'a> Reader<'a> {
         image.anchor_y_align = y_align;
         image.anchor_x_relative_from = Some(placement.horizontal.0.clone());
         image.anchor_y_relative_from = Some(placement.vertical.0.clone());
-        image.wrap_mode = Some(wrap_mode(placement.wrap).into());
+        image.wrap_mode = Some(wrap_mode(placement.effective_wrap()).into());
         image.wrap_side = placement.side.map(str::to_string);
         image.dist_top = placement.distances[0];
         image.dist_right = placement.distances[1];
@@ -716,7 +736,7 @@ impl<'a> Reader<'a> {
         shape.anchor_y_relative_from = Some(placement.vertical.0.clone());
         shape.behind_doc = placement.behind;
         shape.z_order = placement.z_order;
-        shape.wrap_mode = Some(wrap_mode(placement.wrap).into());
+        shape.wrap_mode = Some(wrap_mode(placement.effective_wrap()).into());
         shape.wrap_side = placement.side.map(str::to_string);
         shape.dist_top = placement.distances[0];
         shape.dist_right = placement.distances[1];
@@ -1192,6 +1212,38 @@ impl<'a> Reader<'a> {
         self.pending_anchors.extend(runs);
         Ok(first)
     }
+}
+
+/// `draw:contour-polygon` points in its view box, scaled to DOCX's
+/// 21600-unit wrap polygon space.
+fn contour_polygon(frame: roxmltree::Node<'_, '_>) -> Option<docx_model::AnchorPolygonWire> {
+    let contour = frame
+        .children()
+        .find(|n| xml::is(*n, NS_DRAW, "contour-polygon"))?;
+    let view = view_box(contour)?;
+    let points: Vec<docx_model::AnchorPointWire> = contour
+        .attribute((NS_DRAW, "points"))?
+        .split_whitespace()
+        .filter_map(|pair| {
+            let (x, y) = pair.split_once(',')?;
+            let (x, y): (f64, f64) = (x.parse().ok()?, y.parse().ok()?);
+            Some(docx_model::AnchorPointWire {
+                x: Some(((x - view.0) / view.2 * 21600.0).round() as i64),
+                y: Some(((y - view.1) / view.3 * 21600.0).round() as i64),
+                raw_x: None,
+                raw_y: None,
+            })
+        })
+        .collect();
+    (points.len() >= 3).then(|| docx_model::AnchorPolygonWire {
+        edited: false,
+        coordinate_space: docx_model::AnchorPolygonSpaceWire {
+            width: 21600,
+            height: 21600,
+        },
+        points,
+        invalid_point_count: 0,
+    })
 }
 
 fn wrap_mode(kind: AnchorWrapKindWire) -> &'static str {
