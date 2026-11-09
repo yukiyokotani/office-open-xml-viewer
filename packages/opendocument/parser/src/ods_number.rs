@@ -26,12 +26,16 @@ const NS_FO: &str = crate::xml::NS_FO;
 
 /// The code standing for SpreadsheetML's built-in short date (id 14).
 pub const BUILTIN_SHORT_DATE: &str = "#builtin:14";
+/// The code standing for the built-in short date and time (id 22).
+pub const BUILTIN_SHORT_DATE_TIME: &str = "#builtin:22";
 
 /// A format code where a built-in id cannot be named (differential formats,
 /// chart axes): the built-in short date as its §18.8.30 definition.
 pub fn literal_code(code: &str) -> String {
     if code == BUILTIN_SHORT_DATE {
         "mm-dd-yy".into()
+    } else if code == BUILTIN_SHORT_DATE_TIME {
+        "m/d/yy h:mm".into()
     } else {
         code.to_string()
     }
@@ -407,6 +411,10 @@ fn section_code(style: roxmltree::Node<'_, '_>, kind: DataKind) -> (String, bool
         sorted.sort_unstable();
         if numeric && sorted == ["day", "month", "year"] {
             return (BUILTIN_SHORT_DATE.into(), false);
+        }
+        // With hours and minutes it is the short date-time, built-in 22.
+        if numeric && sorted == ["day", "hours", "minutes", "month", "year"] {
+            return (BUILTIN_SHORT_DATE_TIME.into(), false);
         }
     }
     let mut general = false;
