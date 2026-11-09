@@ -21,7 +21,7 @@ export default defineConfig({
   build: {
     target: 'esnext',
     lib: {
-      entry: { odt: resolve(here, 'src/odt.ts') },
+      entry: { odt: resolve(here, 'src/odt.ts'), odp: resolve(here, 'src/odp.ts') },
       formats: ['es'],
       fileName: (_format, name) => name.endsWith('.d')
         ? `.types-work/${name.slice(0, -2)}.d.ts` : `${name}.mjs`,

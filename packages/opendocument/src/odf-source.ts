@@ -8,7 +8,7 @@ import type { ModelSource, ModelSourceModuleDescriptor, ModelSourceTarget } from
 import { assertCompanionRuntime, MODEL_SOURCE_MODULE_PROTOCOL } from '@silurus/ooxml/internal/companion';
 import { COMPANION_VERSION } from '../../../src/companion-version.js';
 
-export type OdfFamily = 'odt';
+export type OdfFamily = 'odt' | 'odp';
 
 /** Options accepted by every OpenDocument source factory. */
 export interface OpenDocumentSourceOptions {
@@ -26,7 +26,7 @@ const URL_PROTOCOLS: Readonly<Record<'wasmUrl' | 'moduleUrl', ReadonlySet<string
   moduleUrl: new Set(['http:', 'https:', 'file:', 'blob:']),
 };
 
-const TARGETS: Readonly<Record<OdfFamily, ModelSourceTarget>> = { odt: 'docx' };
+const TARGETS: Readonly<Record<OdfFamily, ModelSourceTarget>> = { odt: 'docx', odp: 'pptx' };
 
 /**
  * OpenDocument Part 2 §3.3 media types each family claims. A packaged ODT
@@ -35,6 +35,10 @@ const TARGETS: Readonly<Record<OdfFamily, ModelSourceTarget>> = { odt: 'docx' };
  */
 const MEDIA_TYPES: Readonly<Record<OdfFamily, readonly string[]>> = {
   odt: ['application/vnd.oasis.opendocument.text', 'application/vnd.oasis.opendocument.text-template'],
+  odp: [
+    'application/vnd.oasis.opendocument.presentation',
+    'application/vnd.oasis.opendocument.presentation-template',
+  ],
 };
 
 const MIMETYPE_NAME = new TextEncoder().encode('mimetype');

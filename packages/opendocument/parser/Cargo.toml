@@ -20,6 +20,7 @@ odt = [
     "dep:zune-core",
     "dep:crc32fast",
 ]
+odp = ["dep:js-sys", "dep:pptx-model"]
 
 [dependencies]
 console_error_panic_hook = { workspace = true }
@@ -29,6 +30,7 @@ roxmltree = { workspace = true }
 ooxml-common = { workspace = true }
 crc32fast = { workspace = true, optional = true }
 docx-model = { workspace = true, optional = true, features = ["owned-source-cursor"] }
+pptx-model = { workspace = true, optional = true }
 png = { version = "0.18", default-features = false, optional = true }
 gif = { version = "0.14", default-features = false, features = ["std"], optional = true }
 zune-jpeg = { version = "0.5", default-features = false, features = ["std"], optional = true }
@@ -37,6 +39,7 @@ zune-core = { version = "0.5", default-features = false, features = ["std"], opt
 [dev-dependencies]
 zip = { workspace = true }
 flate2 = { workspace = true }
+serde_json = { workspace = true }
 
 [package.metadata.wasm-pack.profile.release]
 wasm-opt = ["-Oz"]
@@ -47,3 +50,7 @@ omit-default-module-path = true
 [[example]]
 name = "inspect_odt"
 required-features = ["odt"]
+
+[[example]]
+name = "inspect_odp"
+required-features = ["odp"]
