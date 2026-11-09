@@ -3,12 +3,14 @@
 //! numbering configuration (§16.29, §16.30), mapped onto DOCX sections.
 //!
 //! ODF measures the page margins to the header's top and the footer's
-//! bottom, with the header's height (`fo:min-height` or `svg:height`) and its
-//! spacing (`fo:margin-bottom`) between the header and the body. DOCX
-//! measures the header from the page edge (header distance) and the body
-//! from the page edge (top margin), so the body margin is the page margin
-//! plus the header's height and spacing. A header taller than its minimum
-//! height pushes the body down in both (DOCX without the spacing).
+//! bottom. LibreOffice's header height (`fo:min-height` or `svg:height`)
+//! includes its spacing to the body (`fo:margin-bottom`), so the body starts
+//! the height below the margin (measured: a 0.601 cm header with 0.501 cm
+//! spacing starts the body 0.601 cm below the margin). DOCX measures the
+//! header from the page edge (header distance) and the body from the page
+//! edge (top margin), so the body margin is the page margin plus the
+//! header's height. A header taller than its height pushes the body down
+//! in both (LibreOffice keeps the spacing below it, DOCX does not).
 
 use super::*;
 use docx_model::{
@@ -43,8 +45,6 @@ pub(super) struct Geometry {
 struct Region {
     /// Height of the region's content (min or fixed).
     height: f64,
-    /// Spacing between the region and the body.
-    spacing: f64,
     margin_left: f64,
     margin_right: f64,
 }
@@ -260,17 +260,17 @@ fn read_layout(node: roxmltree::Node<'_, '_>, layout: &mut Layout) {
         match (child.tag_name().namespace(), child.tag_name().name()) {
             (Some(NS_STYLE), "page-layout-properties") => read_page_properties(child, layout),
             (Some(NS_STYLE), "header-style") => {
-                layout.header = region(child, "margin-bottom");
+                layout.header = region(child);
             }
             (Some(NS_STYLE), "footer-style") => {
-                layout.footer = region(child, "margin-top");
+                layout.footer = region(child);
             }
             _ => {}
         }
     }
 }
 
-fn region(node: roxmltree::Node<'_, '_>, spacing: &str) -> Option<Region> {
+fn region(node: roxmltree::Node<'_, '_>) -> Option<Region> {
     let properties = node
         .children()
         .find(|n| xml::is(*n, NS_STYLE, "header-footer-properties"))?;
@@ -284,7 +284,6 @@ fn region(node: roxmltree::Node<'_, '_>, spacing: &str) -> Option<Region> {
             .or_else(|| get(NS_FO, "min-height"))
             .unwrap_or(0.0)
             .max(0.0),
-        spacing: get(NS_FO, spacing).unwrap_or(0.0).max(0.0),
         margin_left: get(NS_FO, "margin-left").unwrap_or(0.0),
         margin_right: get(NS_FO, "margin-right").unwrap_or(0.0),
     })
@@ -375,15 +374,15 @@ fn read_page_properties(node: roxmltree::Node<'_, '_>, layout: &mut Layout) {
             // §20.307: each grid line holds the base text and its ruby.
             let ruby = get(NS_STYLE, "layout-grid-ruby-height").unwrap_or(0.0);
             let char_width = get(NS_STYLE, "layout-grid-base-width");
+            // §20.313 style:layout-grid-snap-to: text snaps to the
+            // character grid only when true (the default).
+            let chars = mode == "both"
+                && node.attribute((NS_STYLE, "layout-grid-snap-to")) != Some("false");
             if base + ruby > 0.0 {
                 layout.grid = Some((
-                    if mode == "both" {
-                        "linesAndChars"
-                    } else {
-                        "lines"
-                    },
+                    if chars { "linesAndChars" } else { "lines" },
                     base + ruby,
-                    if mode == "both" { char_width } else { None },
+                    if chars { char_width } else { None },
                 ));
             }
         }
@@ -642,14 +641,29 @@ impl NotesConfiguration {
         }
     }
 
-    /// The text style of a note's number inside the note (§19.774).
-    pub fn citation_style(&self, kind: &str) -> Option<&str> {
-        self.config(kind).and_then(|c| c.citation.as_deref())
+    /// The text style of a note's number inside the note (§19.774); without
+    /// one, LibreOffice's default "Footnote Symbol" / "Endnote Symbol".
+    pub fn citation_style(&self, kind: &str) -> &str {
+        self.config(kind)
+            .and_then(|c| c.citation.as_deref())
+            .unwrap_or(if kind == "endnote" {
+                "Endnote_20_Symbol"
+            } else {
+                "Footnote_20_Symbol"
+            })
     }
 
-    /// The text style of a note's citation in the text flow (§19.773).
-    pub fn body_citation_style(&self, kind: &str) -> Option<&str> {
-        self.config(kind).and_then(|c| c.body_citation.as_deref())
+    /// The text style of a note's citation in the text flow (§19.773);
+    /// without one, LibreOffice's default "Footnote anchor" / "Endnote
+    /// anchor".
+    pub fn body_citation_style(&self, kind: &str) -> &str {
+        self.config(kind)
+            .and_then(|c| c.body_citation.as_deref())
+            .unwrap_or(if kind == "endnote" {
+                "Endnote_20_anchor"
+            } else {
+                "Footnote_20_anchor"
+            })
     }
 
     pub fn wire(&self, pages: &Pages<'_, '_>, master: &str) -> Option<NoteLayoutSettingsWire> {
@@ -829,7 +843,7 @@ impl<'a> Reader<'a> {
         let stories = self.master_stories(&start.master)?;
         let mut section = layout.section.clone();
         // Header and footer regions: the body starts below the header's
-        // height and spacing (see the module documentation).
+        // height (see the module documentation).
         section.header_distance = section.margin_top;
         section.footer_distance = section.margin_bottom;
         let shows = |set: &HeadersFooters| {
@@ -838,10 +852,10 @@ impl<'a> Reader<'a> {
                 .is_some_and(|story| !story.body.is_empty())
         };
         if let Some(header) = layout.header.filter(|_| shows(&stories.headers)) {
-            section.margin_top += header.height + header.spacing;
+            section.margin_top += header.height;
         }
         if let Some(footer) = layout.footer.filter(|_| shows(&stories.footers)) {
-            section.margin_bottom += footer.height + footer.spacing;
+            section.margin_bottom += footer.height;
         }
         section.title_page = stories.title_page;
         section.section_start = Some(start.kind.to_string());

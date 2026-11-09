@@ -785,7 +785,7 @@ impl<'a> Reader<'a> {
         // `text:citation-style-name`), followed by a tab to the hanging
         // indent where the paragraph has one (LibreOffice places the body
         // text at the indent).
-        let style = self.notes_config.citation_style(kind).map(str::to_string);
+        let style = Some(self.notes_config.citation_style(kind).to_string());
         if let Some(BodyElement::Paragraph(first)) = content.first_mut() {
             let mut runs = Vec::new();
             let mark = self.note_mark_run(kind, style.as_deref(), first, label.as_deref())?;
@@ -814,11 +814,8 @@ impl<'a> Reader<'a> {
         }
         // The citation in the text flow takes the configuration's body
         // citation style (§19.773) over the enclosing formatting.
-        let citation_context = match self
-            .notes_config
-            .body_citation_style(kind)
-            .and_then(|name| self.sheet.find_common(Family::Text, name))
-        {
+        let body_style = self.notes_config.body_citation_style(kind);
+        let citation_context = match self.sheet.find_common(Family::Text, body_style) {
             Some(style) if inline.contexts.len() < MAX_PARAGRAPH_CONTEXTS => {
                 let styles = self.style_chain(style);
                 let link = inline.contexts[context as usize].link.clone();

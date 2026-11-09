@@ -249,8 +249,8 @@ fn page_headers_footers_and_first_page_regions() {
     });
     let mm = 72.0 / 25.4;
     assert!((document.section.header_distance - 20.0 * mm).abs() < 1e-6);
-    assert!((document.section.margin_top - (20.0 * mm + 15.0)).abs() < 1e-6);
-    assert!((document.section.margin_bottom - (20.0 * mm + 12.0)).abs() < 1e-6);
+    assert!((document.section.margin_top - (20.0 * mm + 10.0)).abs() < 1e-6);
+    assert!((document.section.margin_bottom - (20.0 * mm + 8.0)).abs() < 1e-6);
     assert!(document.section.title_page);
     let header = document.headers.default.as_ref().unwrap();
     assert_eq!(
