@@ -28,6 +28,7 @@ type MutablePresentation = {
   _chartEx: LoadOptions['chartEx'];
   _tiff: LoadOptions['tiff'];
   _fonts: readonly FontSource[] | undefined;
+  _parsedTextChain: boolean;
   _preflight: {
     fontPreloadNames: readonly (string | null)[];
     fontPreloadFacts?: PptxFontDemandFacts;
@@ -104,6 +105,8 @@ export async function loadPptxModelSource(
         state._chartEx = mode === 'worker' ? undefined : opts.chartEx;
         state._tiff = mode === 'worker' ? undefined : opts.tiff;
         state._fonts = opts.fonts;
+        // A model source's slides have no proven parsed colour chain.
+        state._parsedTextChain = false;
         warnUnserializableRenderers(opts, mode, renderers);
         const progressive = opts.progressiveLayout ? {
           onProgress: opts.onLayoutProgress,

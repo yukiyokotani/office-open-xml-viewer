@@ -264,6 +264,10 @@ export class PptxPresentation {
   /** Validated `LoadOptions.fonts` (normalised from the deprecated
    *  `useGoogleFonts`); undefined without sources. */
   private _fonts: readonly FontSource[] | undefined;
+  /** Slides come from this package's own parser, so their text colour chains
+   * are fully resolved (issue #1989). A caller-supplied model source sets this
+   * false and keeps the 0.89.7 theme or `defaultTextColor` fallback. */
+  private _parsedTextChain = true;
   private _metrics: OoxmlResourceMetricsSession | null = null;
   private readonly _worker: Worker;
   private readonly _bridge: WorkerBridge<
@@ -1241,7 +1245,7 @@ export class PptxPresentation {
             width,
             dpr,
             defaultTextColor: compact.defaultTextColor,
-          parsedTextChain: true,
+            parsedTextChain: this._parsedTextChain,
             cjkFallback: this._cjkFallback,
             majorFont: compact.majorFont,
             minorFont: compact.minorFont,
