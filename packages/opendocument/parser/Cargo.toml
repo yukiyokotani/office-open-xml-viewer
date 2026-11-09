@@ -14,11 +14,6 @@ crate-type = ["cdylib", "rlib"]
 odt = [
     "dep:js-sys",
     "dep:docx-model",
-    "dep:png",
-    "dep:gif",
-    "dep:zune-jpeg",
-    "dep:zune-core",
-    "dep:crc32fast",
 ]
 
 [dependencies]

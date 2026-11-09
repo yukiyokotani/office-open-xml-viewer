@@ -52,97 +52,116 @@ packaged OpenDocument text document must carry (ODF 1.3 Part 2 §3.3, Part 3
 OOXML path unchanged. The ZIP is read with the same structural checks and
 inflation limits as OOXML packages, including the caller's `resourceLimits`;
 item names are compared exactly. Encrypted packages reject with
-`unsupported-encryption`.
+`unsupported-encryption`. The declared ODF version is not checked: older
+documents are read by the ODF 1.3 rules.
 
-## Supported content
+## Rendering policy
 
-The reader is fail-closed: a document that uses anything outside the admitted
-subset rejects as a whole with `OoxmlError.code === 'unsupported-content'`
-instead of being shown partially. It never executes scripts or fetches
-external resources.
+The reader renders every OpenDocument text feature it meets. Each one is
+read as ODF 1.3 Part 3 specifies and mapped onto the DOCX document model;
+where the specification leaves a choice to the consumer, or LibreOffice
+reads it differently, LibreOffice is the reference. A document is rejected
+only when it is corrupt, encrypted or unsafe, or when it exceeds a resource
+limit (the caller's ZIP limits, the XML limits and the reader's construction
+budget). A feature the DOCX model cannot express exactly is drawn with its
+nearest DOCX equivalent instead of refusing the document, so a document may
+show small differences from LibreOffice. The reader never executes scripts,
+macros or forms, and never fetches external resources (linked files outside
+the package are not drawn).
 
-Currently admitted:
+## What is rendered
 
-- paragraphs, headings (without heading numbering), plain sections, spans,
-  spaces, soft hyphens and line breaks between visible text set in the same
-  font;
-- page size and margins of a single page style without displayed headers or
-  footers;
-- paragraph indents, left/centre/right/justified alignment (a justified
-  paragraph with a line break only where LibreOffice leaves that line
-  unjustified, and not with space shrinking), proportional line height
-  from 100% to 300% on text of one font and size, solid paragraph backgrounds
-  (except two consecutive filled paragraphs with spacing between them), page
-  breaks, keep-with-next / keep-together, widow/orphan control of two lines,
-  and paragraph spacing including contextual spacing;
-- character fonts, sizes, bold, italic, single/double underline and
-  strike-through, colours, background colour and pair kerning on or off
-  (where a style sets it; LibreOffice kerns text whose styles never do). Where LibreOffice's
-  settings make a space not size its line, the space must be in the face of
-  the adjacent text on its line and no larger, and decorated spaces that end
-  a paragraph or precede a line break are admitted only where LibreOffice
-  leaves them undecorated (its Word-compatible trailing-blank setting); a
-  trailing no-break or other Unicode space keeps its decoration in both;
-- text in the Latin script class of ODF Part 3 Table 22, including the
-  spaces, punctuation, symbols and emoji the table leaves unassigned.
-- lists in label alignment mode, numbered as LibreOffice numbers them
-  (continued lists, items nested without a paragraph of their own, list
-  headers), with decimal, letter and Roman labels or text bullets, labels
-  aligned at their start, end or centre, the level's character style and
-  bullet face, and a tab, space or nothing after the label. Pictures as
-  bullets are admitted when the package holds them as PNG, GIF or baseline
-  JPEG files that decode completely, without rotation or animation.
-  JPEG additionally admits the exact known 3,144-byte sRGB IEC61966-2.1
-  profiles with perceptual or media-relative colorimetric rendering intent;
-  other JPEG profiles and all PNG/GIF colour profiles remain unsupported.
-  Pictures are placed in the middle of their line, no taller than the font
-  size of the paragraph's first character and followed by a tab or nothing. LibreOffice's other number formats, headings
-  in lists, a second sublist within one item, empty labelled paragraphs,
-  decorated labels, labels that could wrap and labelled paragraphs that are
-  centred or right-aligned reject for now.
+- Text: paragraphs, headings, spans, white space (`text:s`, tabs, line
+  breaks, soft hyphens), hyperlinks, bookmarks, fields (page number and
+  page count are computed by the layout; every other field shows its
+  stored value), rubies, hidden text and paragraphs, and the accepted state
+  of tracked changes (insertions shown, deletions left out).
+- Character properties: font faces of the Western, Asian and complex script
+  classes (each class keeps its own face, size, weight and posture), sizes
+  including percentages and relative sizes, weight, posture, colours with
+  transparency, background, underline styles, types, widths and colours,
+  strike-through, letter spacing, horizontal scaling, raised and lowered
+  text, upper case, small capitals, lower case and title case, pair
+  kerning, emphasis marks, two lines in one, rotated characters, character
+  borders and languages.
+- Paragraph properties: indents including automatic first-line indents,
+  spacing (adjacent margins add, as in LibreOffice), contextual spacing,
+  alignment (start/end follow the writing direction; a justified last
+  line), proportional, fixed, minimum and leading line heights, borders
+  and padding, backgrounds and area fills, tab stops and leaders,
+  keep-with-next and keep-together, widows and orphans, page and column
+  breaks, right-to-left paragraphs, Asian line breaking, hanging
+  punctuation, autospacing, layout-grid snapping and drop caps.
+- Lists and heading numbering: every list and outline numbering style,
+  continued and restarted lists, list headers, nested lists with their own
+  styles, numbered paragraphs, label alignment and the older label width
+  and position mode, bullets, pictures as bullets and LibreOffice's number
+  formats (Roman, letters, circled numbers, Asian counting systems, other
+  alphabets and digit sets, ordinals and words).
+- Pages: page sizes, margins, gutters, borders and padding, page number
+  formats and restarts, page columns with separators, layout grids,
+  vertical writing, left/right page usage, several page styles in one
+  document (each change starts a DOCX section), first-page styles,
+  headers and footers including left-page and first-page variants, notes
+  configuration and footnote separators, and line numbering.
+- Sections: columns (balanced at the section end, as DOCX continuous
+  sections are), section indents, and hidden sections.
+- Notes: footnotes and endnotes with automatic or custom citations, in the
+  configured number format.
+- Tables: column grids from absolute or relative widths, alignment and
+  margins, spanned and covered cells, repeated header rows, row heights,
+  rows kept together, cell borders (all line styles), padding,
+  backgrounds, vertical alignment and text direction, and nested tables.
+- Drawings: pictures (PNG, JPEG, GIF, BMP, TIFF, WebP, SVG, EMF and WMF,
+  linked in the package or embedded as base64) with cropping, mirroring,
+  opacity and colour modes; text frames; custom shapes, whose enhanced
+  geometry (equations, modifiers and the full path command set) is
+  evaluated; rectangles, ellipses, lines, polylines, polygons, paths and
+  groups; fills (solid, gradient, hatch and bitmap), lines with dashes,
+  joins, caps and arrowheads; anchoring as character, to the character,
+  paragraph or page, with every horizontal and vertical position and
+  relation, wrapping modes, distances, stacking and overlap control; and
+  formula objects, whose MathML is drawn as math.
+- Embedded fonts (`svg:font-face-src`) are registered for the document.
 
-Four behaviours follow LibreOffice where ODF leaves the choice to the
-consumer or LibreOffice reads the specification differently; each applies
-only within its measured scope:
+## LibreOffice compatibility rules
+
+Where ODF leaves the behaviour to the consumer, or LibreOffice reads the
+specification differently, the reader follows LibreOffice:
 
 - proportional line height scales the font's natural line height;
-- spaces, punctuation, symbols and emoji outside Table 22 take the script
-  class of the preceding character (the following one at paragraph start);
+- spaces, punctuation, symbols and emoji outside ODF's script table take the
+  script class of the preceding character (the following one at paragraph
+  start);
 - the nearest style that sets a font colour or the automatic colour decides
   the colour;
 - automatic text colour over a character or paragraph background is black
-  or white by LibreOffice's `Color::IsDark()` rule.
+  or white by LibreOffice's `Color::IsDark()` rule;
+- list labels are numbered and placed as LibreOffice numbers and places
+  them (continued lists, phantom parents, label alignment, the list tab
+  stop and tab grid);
+- `BalanceSpacesAndIdeographicSpaces`, `DoNotJustifyLinesWithManualBreak`,
+  `JustifyLinesWithShrinking` and `TabsRelativeToIndent` from
+  `settings.xml` are applied;
+- table columns are fitted to the table as LibreOffice fits them, rows are
+  cut at a page as LibreOffice cuts them, and shared cell edges keep the
+  wider rule;
+- superscript and subscript without an explicit raise use LibreOffice's
+  automatic escapement.
 
-Three known differences from LibreOffice remain in admitted documents:
+## Known differences from LibreOffice
 
-- LibreOffice spreads a justified line's spare width in whole layout
-  units, so its justified lines can end up to about 1.6 pt short of the
-  margin; the viewer ends them at the margin;
-- with LibreOffice's default settings, a decorated space at a wrapped
-  line's end is underlined or struck through in LibreOffice and left
-  undecorated by the viewer;
-- LibreOffice shapes Graphite fonts (such as Linux Libertine G) with their
-  own Graphite rules, which keep pair kerning even where a style turns it
-  off; browsers do not implement Graphite and shape these fonts from their
-  OpenType tables.
+The DOCX layout draws some features differently from LibreOffice:
 
-LibreOffice's layout settings (`settings.xml`) that Word-derived documents
-carry are admitted where they were measured to change nothing the reader
-admits; the others must keep LibreOffice's new-document values, except
-`BalanceSpacesAndIdeographicSpaces`, which is applied as LibreOffice applies
-it: a space at the start or end of a text portion (portions end at
-formatting changes, bookmarks, reference marks, soft hyphens, no-break
-spaces and hyphens, zero-width spaces, word joiners and line breaks), or
-next to another space, advances half its Asian font size. Where the reader
-cannot tell whether LibreOffice starts a portion next to such a space (for
-example the same formatting spelled differently in two spans, or spans that
-differ only in language), the document rejects. A
-justified paragraph with such a space anywhere except where it ends the
-paragraph or precedes a line break rejects,
-because LibreOffice then lays out its lines differently.
-
-Tabs, letter spacing, horizontal scaling,
-raised/lowered text, fixed and minimum line heights, proportional line
-heights below 100%, tables, frames and images, notes, fields,
-comments, tracked changes, headers and footers, Asian and complex scripts,
-and other formatting reject for now. The subset grows release by release.
+- automatic hyphenation (`fo:hyphenate`) is not applied;
+- text wraps around floating objects with the paragraph indents measured
+  from the page, where LibreOffice measures them from the object;
+- fixed and minimum line heights place text in the line box as Word does
+  (LibreOffice puts all extra space above the text);
+- LibreOffice spreads a justified line's spare width in whole layout units;
+- page and section backgrounds, character shadows, outlines and reliefs,
+  overlines and Graphite font shaping are not drawn;
+- charts and other embedded objects without a formula are drawn only when
+  their replacement picture is a format the renderer draws;
+- widow and orphan counts above two are treated as two;
+- the text box chain (`draw:chain-next-name`) is not flowed across boxes.

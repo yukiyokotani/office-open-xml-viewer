@@ -1,6 +1,6 @@
 // OpenDocument text through the Node DOCX session: the claimed package is
-// admitted into the DOCX model, or rejected as a whole with a typed,
-// content-free reason.
+// read into the DOCX model; only encrypted, corrupt or oversized input is
+// rejected, with a typed reason.
 import { describe, expect, it } from 'vitest';
 import { OoxmlError } from '@silurus/ooxml-core';
 import { buildOdtFixture } from '../odt-fixture.js';
@@ -33,13 +33,14 @@ describe('ODT through the DOCX Node session', () => {
     expect(second).toMatchObject({ spaceBefore: 16, spaceAfter: 0 });
   });
 
-  it('rejects content outside the admitted subset with a typed reason', async () => {
-    const list = buildOdtFixture({ body: '<text:list><text:list-item><text:p>item</text:p></text:list-item></text:list>' });
-    await expect(open(list)).rejects.toMatchObject({
-      code: 'unsupported-content', details: { format: 'odt', reason: 'source-subset' },
-    });
-    const header = buildOdtFixture({ body: '<text:p>x</text:p>', masterContent: '<style:header><text:p>h</text:p></style:header>' });
-    await expect(open(header)).rejects.toMatchObject({ code: 'unsupported-content' });
+  it('renders lists and headers and rejects only encrypted input', async () => {
+    const list = await open(buildOdtFixture({
+      styles: '<text:list-style style:name="L"><text:list-level-style-bullet text:level="1" text:bullet-char="•"/></text:list-style>',
+      body: '<text:list text:style-name="L"><text:list-item><text:p>item</text:p></text:list-item></text:list>',
+    }));
+    expect(list.body[0]?.runs.map(r => r.text)).toEqual(['•', '\t', 'item']);
+    const header = await open(buildOdtFixture({ body: '<text:p>x</text:p>', masterContent: '<style:header><text:p>h</text:p></style:header>' }));
+    expect(header.body[0]?.runs[0]?.text).toBe('x');
     const encrypted = buildOdtFixture({
       body: '<text:p>x</text:p>',
       manifestExtra: '<manifest:file-entry manifest:full-path="content.xml" manifest:media-type="text/xml"><manifest:encryption-data/></manifest:file-entry>',

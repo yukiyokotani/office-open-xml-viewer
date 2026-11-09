@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // One-command ODT corpus harness (#1934), run from the checkout under test:
 //
-//   node packages/opendocument/tests/corpus/run.mjs [--rules off|on] [--build]
+//   node packages/opendocument/tests/corpus/run.mjs [--build]
 //     [--jobs 4] [--filter substr] [--limit N] [--label name] [--fresh]
 //     [--worst 40] [--port 5191]
 //
@@ -15,34 +15,21 @@
 // 4. Writes report.md / summary.json and side-by-side images of the worst
 //    pages (report.mjs).
 //
-// --rules on is a dry run with the pending LibreOffice compatibility rules
-// (CompatRules) enabled: the harness flips LIBREOFFICE_RULES in an isolated
-// copy of the reader's crates under target/ and builds a separate WASM and
-// native binary from it; the checkout itself is never edited.
-//
-// --unmask-settings renders the browser pass through that diagnostic build too
-// (DIAGNOSTIC: acceptance then is not the shipped reader's). It exercises the
-// page diff on files the real reader rejects only for those flags; the flags
-// themselves are Word-compatibility layout modes, so part of each diff is
-// theirs.
-//
-// Every run also classifies the files natively with the settings.xml layout
-// flag check disabled (diagnostic only): LibreOffice writes Word-compatibility
-// flags into every DOCX-derived ODT, which would otherwise hide all content
-// rejections behind `compatibility-setting`.
+// Rejection is now limited to corrupt, encrypted or oversized input, so the
+// useful measure is the page diff distribution; the native pass still records
+// any rejection reason.
 //
 // Output: <corpus>/packages/opendocument/public/private/harness/<label>/
 // (git-ignored). A rerun with the same label resumes; --fresh starts over.
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { cpSync, existsSync, mkdirSync, unlinkSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, unlinkSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { parseArgs } from 'node:util';
 import { checkoutRoot, corpusRepo, inputsHash } from './paths.mjs';
 
 const { values: args } = parseArgs({
   options: {
-    rules: { type: 'string', default: 'off' },
     build: { type: 'boolean', default: false },
     jobs: { type: 'string', default: '4' },
     filter: { type: 'string' },
@@ -52,10 +39,8 @@ const { values: args } = parseArgs({
     worst: { type: 'string', default: '40' },
     port: { type: 'string', default: '5191' },
     'skip-browser': { type: 'boolean', default: false },
-    'unmask-settings': { type: 'boolean', default: false },
   },
 });
-if (!['off', 'on'].includes(args.rules)) throw new Error('--rules must be off or on');
 
 const corpus = join(corpusRepo(), 'packages/opendocument/public/private');
 const odtRoot = join(corpus, 'odt');
@@ -66,7 +51,7 @@ const git = (...argv) => execFileSync('git', argv, { cwd: checkoutRoot, encoding
 const sha = git('rev-parse', '--short=10', 'HEAD');
 const dirty = git('status', '--porcelain', '--untracked-files=no').length > 0;
 const label = args.label
-  ?? `${sha}${dirty ? '-dirty' : ''}-rules-${args.rules}${args['unmask-settings'] ? '-settings-unmasked' : ''}`;
+  ?? `${sha}${dirty ? '-dirty' : ''}`;
 // The label names a directory under the ignored harness folder; nothing else.
 if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(label)) throw new Error(`invalid --label ${JSON.stringify(label)}`);
 const runDir = join(corpus, 'harness', label);
@@ -80,88 +65,8 @@ if (args.build || !existsSync(docxWasm)) run('pnpm', ['wasm'], { cwd: join(check
 if (args.build || !existsSync(odtWasm)) run('pnpm', ['wasm:odt'], { cwd: join(checkoutRoot, 'packages/opendocument') });
 
 const exampleArgs = ['build', '--release', '--example', 'inspect_odt', '--features', 'odt'];
-const odtSource = join(parserDir, 'src/odt.rs');
-
-/** Pending LibreOffice compatibility rules all switched on. */
-function rulesOn(text) {
-  const block = /(pub const LIBREOFFICE_RULES: CompatRules = CompatRules \{)([^}]*)(\})/u;
-  const match = block.exec(text);
-  if (!match || !/:\s*false/u.test(match[2])) throw new Error('LIBREOFFICE_RULES block not found or already all on');
-  return text.replace(block, (_, open, body, close) => `${open}${body.replace(/:\s*false/gu, ': true')}${close}`);
-}
-
-/** Diagnostic only: settings.xml layout flags no longer reject the file. */
-function settingsUnmasked(text) {
-  const check = 'return Err(unsupported("compatibility-setting"));';
-  if (text.split(check).length !== 2) throw new Error('compatibility-setting check not found exactly once');
-  return text.replace(check, 'continue;');
-}
-
-/** Crates the ODT reader builds from; the isolated workspace holds only these. */
-const ISOLATED_CRATES = ['packages/ooxml-common', 'packages/docx/model', 'packages/opendocument/parser'];
-
-/**
- * Build the native classifier (and optionally the WASM) from a patched COPY
- * of the reader's crates under target/, never touching the checkout: other
- * builds and concurrent harness runs always see the real source. Returns the
- * native binary path.
- */
-function patchedBuild(name, patches, wasmOut) {
-  const workspace = join(checkoutRoot, `target/odf-harness-src/${name}-${process.pid}`);
-  rmSync(workspace, { recursive: true, force: true });
-  try {
-    for (const crate of ISOLATED_CRATES) {
-      cpSync(join(checkoutRoot, crate), join(workspace, crate), {
-        recursive: true,
-        filter: (path) => !/[\\/](target|pkg)$/u.test(path),
-      });
-    }
-    const manifest = readFileSync(join(checkoutRoot, 'Cargo.toml'), 'utf8')
-      .replace(/members\s*=\s*\[[^\]]*\]/u, `members = ${JSON.stringify(ISOLATED_CRATES)}`);
-    writeFileSync(join(workspace, 'Cargo.toml'), manifest);
-    cpSync(join(checkoutRoot, 'Cargo.lock'), join(workspace, 'Cargo.lock'));
-    const source = join(workspace, 'packages/opendocument/parser/src/odt.rs');
-    writeFileSync(source, patches.reduce((text, patch) => patch(text), readFileSync(source, 'utf8')));
-    const env = { ...process.env, CARGO_TARGET_DIR: join(checkoutRoot, `target/odf-harness-${name}`) };
-    const crateDir = join(workspace, 'packages/opendocument/parser');
-    run('cargo', exampleArgs, { cwd: crateDir, env });
-    if (wasmOut) {
-      run('wasm-pack', ['build', '--target', 'web', '--out-dir', wasmOut, '--out-name', 'opendocument_odt', '--features', 'odt'],
-        { cwd: crateDir, env });
-    }
-    return join(env.CARGO_TARGET_DIR, 'release/examples/inspect_odt');
-  } finally {
-    rmSync(workspace, { recursive: true, force: true });
-  }
-}
-
-const rulePatches = args.rules === 'on' ? [rulesOn] : [];
-let nativeBinary;
-let customWasm;
-if (args.rules === 'off') {
-  run('cargo', exampleArgs, { cwd: parserDir });
-  nativeBinary = join(checkoutRoot, 'target/release/examples/inspect_odt');
-} else {
-  const wasmOut = join(runDir, 'wasm-rules-on');
-  nativeBinary = patchedBuild('rules-on', rulePatches, wasmOut);
-  customWasm = join(wasmOut, 'opendocument_odt_bg.wasm');
-}
-// With --unmask-settings the browser pass also renders through the
-// diagnostic build, so files rejected only for settings.xml flags open.
-const unmaskedWasmOut = args['unmask-settings'] ? join(runDir, 'wasm-settings-unmasked') : undefined;
-// The diagnostic patch targets one source line of the reader. When the
-// reader's settings check no longer has that shape, the default run skips the
-// diagnostic pass (with a warning) rather than failing; --unmask-settings,
-// which depends on it, still fails.
-let unmaskedBinary;
-try {
-  settingsUnmasked(readFileSync(odtSource, 'utf8'));
-  unmaskedBinary = patchedBuild(`settings-unmasked-rules-${args.rules}`, [...rulePatches, settingsUnmasked], unmaskedWasmOut);
-} catch (error) {
-  if (args['unmask-settings'] || !/compatibility-setting check not found/u.test(String(error))) throw error;
-  console.warn(`skipping the settings-unmasked diagnostic: ${error.message}`);
-}
-if (unmaskedWasmOut) customWasm = join(unmaskedWasmOut, 'opendocument_odt_bg.wasm');
+run('cargo', exampleArgs, { cwd: parserDir });
+const nativeBinary = join(checkoutRoot, 'target/release/examples/inspect_odt');
 
 // ---- resume guard ------------------------------------------------------------
 // Results are reused only by a run of the same code: the fingerprint covers
@@ -174,10 +79,8 @@ const fingerprint = sha256(JSON.stringify({
   untracked: sha256(JSON.stringify(git('ls-files', '--others', '--exclude-standard', '-z').split('\0').filter(Boolean).sort()
     .map((path) => [path, sha256(readFileSync(join(checkoutRoot, path)))]))),
   docxWasm: sha256(readFileSync(docxWasm)),
-  odtWasm: sha256(readFileSync(customWasm ?? odtWasm)),
+  odtWasm: sha256(readFileSync(odtWasm)),
   native: sha256(readFileSync(nativeBinary)),
-  rules: args.rules,
-  unmaskSettings: args['unmask-settings'],
   maxPages: process.env.ODF_HARNESS_MAX_PAGES ?? '0',
 }));
 const fingerprintPath = join(runDir, 'fingerprint.txt');
@@ -191,7 +94,7 @@ writeFileSync(fingerprintPath, `${fingerprint}\n`);
 // Recorded once the resume guard has accepted this run, and before any
 // classification or result is written, so report.mjs keeps the run's mode
 // even for an interrupted run.
-writeFileSync(join(runDir, 'meta.json'), `${JSON.stringify({ sha, dirty, rules: args.rules, unmaskSettings: args['unmask-settings'], label }, null, 2)}\n`);
+writeFileSync(join(runDir, 'meta.json'), `${JSON.stringify({ sha, dirty, label }, null, 2)}\n`);
 
 // ---- file list ---------------------------------------------------------------
 function walk(dir, out = []) {
@@ -239,28 +142,6 @@ function classifyAll(binary) {
   return out;
 }
 writeFileSync(join(runDir, 'native.json'), `${JSON.stringify(classifyAll(nativeBinary), null, 2)}\n`);
-// The settings.xml check runs before the content is read, so it masks every
-// later rejection; this pass shows what each file would hit next.
-const unmaskedPath = join(runDir, 'native-settings-unmasked.json');
-if (unmaskedBinary) writeFileSync(unmaskedPath, `${JSON.stringify(classifyAll(unmaskedBinary), null, 2)}\n`);
-else rmSync(unmaskedPath, { force: true });
-
-// Which layout flags each `compatibility-setting` rejection carries, against
-// the reader's LAYOUT_SETTINGS table in this checkout.
-const layoutTable = /const LAYOUT_SETTINGS[^=]*=\s*\[([\s\S]*?)\];/u.exec(readFileSync(odtSource, 'utf8'));
-if (!layoutTable) console.warn('LAYOUT_SETTINGS not found in odt.rs; the report omits the layout-flag breakdown');
-const expected = new Map([...(layoutTable?.[1] ?? '').matchAll(/\(\s*"([^"]+)",\s*"([^"]*)",?\s*\)/gu)].map((m) => [m[1], m[2]]));
-const native = JSON.parse(readFileSync(join(runDir, 'native.json'), 'utf8'));
-const settingsFlags = {};
-for (const file of files) {
-  if (!layoutTable || !native[file.id]?.startsWith('ODF_UNSUPPORTED:compatibility-setting')) continue;
-  const xml = spawnSync('unzip', ['-p', file.odt, 'settings.xml'], { encoding: 'utf8', maxBuffer: 64 << 20 }).stdout;
-  settingsFlags[file.id] = [...xml.matchAll(/<config:config-item config:name="([^"]+)"[^>]*>([^<]*)<\/config:config-item>/gu)]
-    .filter(([, name, value]) => expected.has(name) && expected.get(name) !== value.trim())
-    .map(([, name, value]) => `${name}=${value.trim()}`);
-}
-writeFileSync(join(runDir, 'settings-flags.json'), `${JSON.stringify(settingsFlags, null, 2)}\n`);
-
 // Drop cached results whose ODT or PDF changed since they were written, so a
 // failed retry cannot leave an old score standing (the spec does the same).
 const resultsDir = join(runDir, 'results');
@@ -288,7 +169,6 @@ if (!args['skip-browser']) {
       ODF_HARNESS_CHECKOUT: checkoutRoot,
       ODF_HARNESS_JOBS: args.jobs,
       ODF_HARNESS_PORT: args.port,
-      ...(customWasm ? { ODF_HARNESS_WASM: customWasm } : {}),
     },
   });
   // Failing tests (timeouts, crashes) are recorded by their missing result;
