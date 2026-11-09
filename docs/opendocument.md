@@ -205,7 +205,9 @@ painted at the authored size.
 
 Not representable in the workbook model, and therefore not shown: page
 layout, headers and footers (the workbook viewer shows the grid, not printed
-pages), data pilot tables, and drawings whose geometry LibreOffice stores as
-an enhanced-geometry formula path (custom shapes other than preset shapes).
-Embedded objects that are not charts are drawn from their replacement image
+pages; print ranges become `_xlnm.Print_Area` names). Data pilot tables are
+shown as the cells LibreOffice saved for them. Custom shapes are drawn from
+their preset or their enhanced-geometry path (equations are evaluated; arcs
+are flattened to short segments). Embedded objects that are not charts are
+drawn from their replacement image
 when the package stores it in a browser-decodable format.

@@ -15,7 +15,6 @@ use std::collections::BTreeMap;
 use xlsx_model::{ChartAnchor, DrawingAnchorTag, ImageAnchor, ShapeAnchor, ShapeInfo, Worksheet};
 
 const NS_TABLE: &str = crate::xml::NS_TABLE;
-const NS_FO: &str = crate::xml::NS_FO;
 pub const EMU_PER_PX: i64 = 9525;
 const EMU_PER_PT: f64 = 12_700.0;
 
@@ -748,10 +747,10 @@ fn shape_info(
     let opacity = get(chain, "graphic:draw:opacity").and_then(percent);
     let fill_color = match get(chain, "graphic:draw:fill") {
         Some("none") => None,
-        Some("solid") | None => get(chain, "graphic:draw:fill-color").and_then(hex_color),
+        Some("solid") | None => get(chain, "graphic:draw:fill-color").and_then(shape_color),
         // Gradient, hatch and bitmap fills are drawn with the gradient's
         // start colour, the hatch's background or the fill colour.
-        Some(_) => get(chain, "graphic:draw:fill-color").and_then(hex_color),
+        Some(_) => get(chain, "graphic:draw:fill-color").and_then(shape_color),
     };
     let _ = opacity;
     let stroke = get(chain, "graphic:draw:stroke");
@@ -759,8 +758,8 @@ fn shape_info(
         None
     } else {
         get(chain, "graphic:svg:stroke-color")
-            .and_then(hex_color)
-            .or_else(|| Some("000000".into()))
+            .and_then(shape_color)
+            .or_else(|| Some("#000000".into()))
     };
     let stroke_width = get(chain, "graphic:svg:stroke-width")
         .and_then(length_pt)
@@ -945,7 +944,7 @@ fn push_text_run(runs: &mut Vec<xlsx_model::ShapeTextRun>, text: &str, font: &xl
         italic: font.italic,
         size: font.size,
         spacing: None,
-        color: font.color.clone(),
+        color: font.color.as_ref().map(|c| format!("#{c}")),
         font_face: font.name.clone(),
         font_face_ea: None,
         font_face_cs: None,
@@ -1193,7 +1192,8 @@ impl crate::odf_chart::RangeResolver for SheetResolver<'_> {
     }
 }
 
-#[allow(dead_code)]
-fn _fo(_: &str) -> &str {
-    NS_FO
+/// Drawing colours in the workbook model are CSS `#RRGGBB` (as the
+/// SpreadsheetML drawing parser emits them), unlike cell-style colours.
+fn shape_color(value: &str) -> Option<String> {
+    hex_color(value).map(|hex| format!("#{hex}"))
 }

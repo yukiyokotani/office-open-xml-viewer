@@ -121,6 +121,35 @@ describe('ODS through the XLSX Node session', () => {
     expect(anchored!.chart.series.map(s => [s.name, s.values])).toEqual([['Sales', [3, 5]]]);
   });
 
+  it('maps conditional formats, validations and sparklines over the cells', async () => {
+    const { sheets, workbook } = await open(buildOdsFixture({
+      styles: '<style:style style:name="Good" style:family="table-cell" style:parent-style-name="Default"><style:table-cell-properties fo:background-color="#c6efce"/></style:style>',
+      body: '<table:content-validations><table:content-validation table:name="val1" table:condition="of:cell-content-is-in-list(&quot;a&quot;;&quot;b&quot;)" table:allow-empty-cell="true"/></table:content-validations>'
+        + '<table:table table:name="S"><table:table-column table:number-columns-repeated="4"/>'
+        + '<table:table-row><table:table-cell office:value-type="float" office:value="1"/><table:table-cell office:value-type="float" office:value="5"/>'
+        + '<table:table-cell table:content-validation-name="val1" office:value-type="string"><text:p>a</text:p></table:table-cell><table:table-cell/></table:table-row>'
+        + '<calcext:conditional-formats><calcext:conditional-format calcext:target-range-address="S.A1:S.B1">'
+        + '<calcext:condition calcext:apply-style-name="Good" calcext:value="&gt;2" calcext:base-cell-address="S.A1"/></calcext:conditional-format>'
+        + '<calcext:conditional-format calcext:target-range-address="S.A1:S.B1"><calcext:color-scale>'
+        + '<calcext:color-scale-entry calcext:value="0" calcext:type="minimum" calcext:color="#ffffff"/><calcext:color-scale-entry calcext:value="0" calcext:type="maximum" calcext:color="#ff0000"/>'
+        + '</calcext:color-scale></calcext:conditional-format></calcext:conditional-formats>'
+        + '<calcext:sparkline-groups><calcext:sparkline-group calcext:type="column" calcext:color-series="#376092"><calcext:sparklines>'
+        + '<calcext:sparkline calcext:cell-address="S.D1" calcext:data-range="S.A1:S.B1"/></calcext:sparklines></calcext:sparkline-group></calcext:sparkline-groups>'
+        + '</table:table>',
+    }));
+    const sheet = sheets[0] as unknown as {
+      conditionalFormats: Array<{ sqref: unknown[]; rules: Array<{ type: string; operator?: string; formulas?: string[]; dxfId?: number }> }>;
+      dataValidations: Array<{ sqref: string; validationType: string; formula1: string }>;
+      sparklineGroups: Array<{ kind: string; sparklines: Array<{ row: number; col: number; values: Array<number | null> }> }>;
+    };
+    const [cellIs, scale] = sheet.conditionalFormats.map(f => f.rules[0]!);
+    expect(cellIs).toMatchObject({ type: 'cellIs', operator: 'greaterThan', formulas: ['2'] });
+    expect(workbook.workbookIndex.styles.dxfs[cellIs!.dxfId!]?.fill).toMatchObject({ fgColor: 'C6EFCE' });
+    expect(scale?.type).toBe('colorScale');
+    expect(sheet.dataValidations).toEqual([expect.objectContaining({ sqref: 'C1', validationType: 'list', formula1: '"a,b"' })]);
+    expect(sheet.sparklineGroups[0]).toMatchObject({ kind: 'column', sparklines: [{ row: 1, col: 4, values: [1, 5] }] });
+  });
+
   it('rejects encrypted and corrupt packages, claims only spreadsheets', async () => {
     const source = testOdsSource();
     expect(source.claim(buildOdsFixture({ body: '<table:table table:name="S"/>' }))).toBe(true);
