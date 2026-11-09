@@ -5398,11 +5398,10 @@ export function renderTextBody(
       // attribute applies only to paragraphs with percentage line spacing." pct
       // and the implicit single (= 100 % percentage) qualify; an absolute
       // spcPts height does not.
-      // LibreOffice leaves an explicit 100% proportional line unscaled
-      // (editeng CreateLines: only Prop != 100 and Off take fSpacingY).
-      const loUnscaled = spacingScale != null && para.spaceLine?.type === 'pct'
-        && para.spaceLine.val === 100000;
-      if (lineSpacingReduction != null && para.spaceLine?.type !== 'pts' && !loUnscaled) {
+      // LibreOffice's spacing factor (editeng CreateLines) scales single and
+      // proportional lines alike: its ODF import reads a 100% line height as
+      // single spacing (the Off rule), which the factor scales too.
+      if (lineSpacingReduction != null && para.spaceLine?.type !== 'pts') {
         lineHeight *= 1 - lineSpacingReduction;
       }
       // PowerPoint's metric line (#1610, powerpoint-line-metrics.ts): the
@@ -5459,7 +5458,7 @@ export function renderTextBody(
           ? { type: 'pts' as const, val: powerPointExactLinePoints(para.spaceLine.val) }
           : para.spaceLine;
         const box = drawingMlSpacedLineBox(natural, spacing, PT_TO_EMU * scale,
-          loUnscaled ? 0 : lineSpacingReduction ?? 0);
+          lineSpacingReduction ?? 0);
         lineHeight = box.ascent + box.descent;
         metricAscent = box.ascent;
         metricNaturalDescent = natural.descent;
