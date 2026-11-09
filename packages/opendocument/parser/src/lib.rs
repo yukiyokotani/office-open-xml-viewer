@@ -12,3 +12,5 @@ pub mod xml;
 pub mod odt;
 #[cfg(feature = "odt")]
 mod odt_wasm;
+#[cfg(feature = "odt")]
+mod svm;
