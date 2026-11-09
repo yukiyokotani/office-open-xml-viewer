@@ -3943,7 +3943,15 @@ function planMeasuredLines(
       && context.lineSpacing?.rule === 'atLeast'
       && compatibilityMode === 15
       && !context.lineGrid.active && raw.topY === undefined;
-    const baselinePt = specified
+    // A model source's fixed or minimum line with all extra space above the
+    // text (`__lineExtraAbove`, LibreOffice's placement; DOCX never sets it):
+    // the baseline sits the text's descent above the line box's bottom.
+    const extraAboveLine = (paragraph as { readonly __lineExtraAbove?: boolean }).__lineExtraAbove === true
+      && (context.lineSpacing?.rule === 'exact' || context.lineSpacing?.rule === 'atLeast')
+      && raw.topY === undefined;
+    const baselinePt = extraAboveLine
+      ? measuredLine.topYPt + measuredLine.advancePt - (raw.visibleDescent ?? raw.descent)
+      : specified
       ? measuredLine.topYPt + specified.baselineOffsetPt
       : exactRubyLine
         ? measuredLine.topYPt + context.lineSpacing!.value * 4 / 5

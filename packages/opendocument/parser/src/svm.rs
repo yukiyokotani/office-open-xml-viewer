@@ -1,6 +1,7 @@
 //! StarView metafiles (`VCLMTF`, LibreOffice's native vector picture format,
-//! stored as `Pictures/*.svm`) converted to SVG for the PPTX renderer, which
-//! draws SVG pictures natively.
+//! stored as `Pictures/*.svm` and as object replacement pictures) converted
+//! to SVG, which the DOCX and PPTX renderers draw natively. Shared by the
+//! ODT and ODP readers.
 //!
 //! The record layout follows LibreOffice's `SvmReader`: a header (map mode,
 //! preferred size, action count) and actions of `u16 type`, a version/length
@@ -208,6 +209,7 @@ fn escape(text: &str) -> String {
 /// The natural size of a metafile in EMU (its preferred size).
 pub struct Converted {
     pub svg: Vec<u8>,
+    #[allow(dead_code)] // the ODP reader sizes pictures by it
     pub size_emu: (f64, f64),
 }
 

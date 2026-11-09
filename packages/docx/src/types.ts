@@ -171,6 +171,10 @@ export interface DocSettings {
   /** `w:compat/w:compatSetting[@w:name="compatibilityMode"]` (Word URI) — the
    *  Word version whose layout rules the document uses (for example 14, 15). */
   compatibilityMode?: number;
+  /** Private producer flag (never authored by OOXML): every column of a
+   *  multi-column section owns its footnote band, as LibreOffice lays out
+   *  footnotes. */
+  __footnoteColumnBands?: boolean;
 }
 
 export interface DocRevision {

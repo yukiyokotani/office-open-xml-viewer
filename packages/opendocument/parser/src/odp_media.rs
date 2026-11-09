@@ -71,7 +71,7 @@ impl<'p> Media<'p> {
             })
             .ok()?;
         let resource = if bytes.starts_with(b"VCLMTF") {
-            let converted = crate::odp_svm::to_svg(&bytes)?;
+            let converted = crate::svm::to_svg(&bytes)?;
             self.converted.insert(path.clone(), converted.svg);
             Resource {
                 mime: "image/svg+xml",

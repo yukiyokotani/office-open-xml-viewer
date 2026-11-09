@@ -14,11 +14,6 @@ crate-type = ["cdylib", "rlib"]
 odt = [
     "dep:js-sys",
     "dep:docx-model",
-    "dep:png",
-    "dep:gif",
-    "dep:zune-jpeg",
-    "dep:zune-core",
-    "dep:crc32fast",
 ]
 odp = ["odf-chart", "dep:js-sys", "dep:pptx-model"]
 # The ODF chart reader, shared by the spreadsheet and presentation readers.
@@ -48,9 +43,9 @@ zune-jpeg = { version = "0.5", default-features = false, features = ["std"], opt
 zune-core = { version = "0.5", default-features = false, features = ["std"], optional = true }
 
 [dev-dependencies]
+serde_json = { workspace = true }
 zip = { workspace = true }
 flate2 = { workspace = true }
-serde_json = { workspace = true }
 
 [package.metadata.wasm-pack.profile.release]
 wasm-opt = ["-Oz"]

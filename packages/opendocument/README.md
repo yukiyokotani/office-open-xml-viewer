@@ -35,8 +35,10 @@ It maps the presentation directly into the PPTX slide model and renders every
 feature it reads, rejecting only corrupt, encrypted or over-limit packages
 (see `docs/opendocument.md`).
 
-The ODT reader is fail-closed: a document that uses anything outside the admitted
-subset is rejected as a whole with `OoxmlError.code === 'unsupported-content'`
-instead of being shown partially. The admitted subset is currently narrow
-(paragraphs, headings and character formatting of Latin-script text on one page
-style) and grows release by release.
+The reader renders every OpenDocument text feature, following the ODF 1.3
+specification and, where it leaves a choice, LibreOffice. It rejects only
+corrupt, encrypted or unsafe input and input beyond the resource limits;
+features the DOCX model cannot express exactly are drawn with their nearest
+DOCX equivalent, so small differences from LibreOffice remain. See
+[docs/opendocument.md](../../docs/opendocument.md) for what is rendered and
+the known differences.

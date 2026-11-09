@@ -581,6 +581,15 @@ pub struct DocumentSettings {
     /// `None` when absent or not a non-negative integer.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub compatibility_mode: Option<u32>,
+    /// Private producer flag (never set by the DOCX parsers): each column of
+    /// a multi-column section owns the footnote band of the references it
+    /// holds, as LibreOffice lays out footnotes in columns. The DOCX layout
+    /// otherwise selects the band by `compatibility_mode`.
+    #[serde(
+        rename = "__footnoteColumnBands",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    pub footnote_column_bands: bool,
 }
 
 /// Single track-changes event extracted from a body revision wrapper.
@@ -1184,6 +1193,30 @@ pub struct DocParagraph {
         skip_serializing_if = "std::ops::Not::not"
     )]
     pub no_hanging_indent_tab: bool,
+    /// The producer compresses the spaces of a justified line to fit more
+    /// text, as Word does in compatibility mode 15 (LibreOffice's
+    /// JustifyLinesWithShrinking). DOCX never sets it; mode 15 decides.
+    #[serde(
+        rename = "__justifiedCompression",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    pub justified_compression: bool,
+    /// Fixed and minimum line heights place all extra space above the text
+    /// (LibreOffice: the baseline sits the text's descent above the line
+    /// box's bottom). DOCX never sets it; Word's partition applies.
+    #[serde(
+        rename = "__lineExtraAbove",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    pub line_extra_above: bool,
+    /// The paragraph's indents are measured from the edge of the area beside
+    /// a floating object instead of from the column (LibreOffice). DOCX never
+    /// sets it.
+    #[serde(
+        rename = "__indentsFromFloats",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    pub indents_from_floats: bool,
     /// Explicit tab stops from w:tabs. Empty means use default tab interval.
     pub tab_stops: Vec<TabStop>,
     pub runs: Vec<DocRun>,
@@ -3889,6 +3922,11 @@ pub struct DocTableRow {
     /// ECMA-376 §17.4.6 w:cantSplit. When true, this row must not be split
     /// across page boundaries.
     pub cant_split: bool,
+    /// The row is cut at a page as LibreOffice cuts it: a row whose fragment
+    /// would overflow only by the bottom rule a page slice appends is cut so
+    /// the rule fits instead of moving whole. DOCX never sets it.
+    #[serde(rename = "__cutsInPlace", skip_serializing_if = "std::ops::Not::not")]
+    pub cuts_in_place: bool,
     #[serde(rename = "__tableRowLayout")]
     pub table_row_layout: TableRowLayoutAcquisitionWire,
 }

@@ -297,6 +297,8 @@ export function measureParagraph(
         // COLUMN band, not the indented mark band above.
         columnXPt: placement.paragraphXPt,
         columnWidthPt: placement.availableWidthPt,
+        ...((paragraph as { readonly __indentsFromFloats?: boolean }).__indentsFromFloats === true
+          ? { indentsFromFloats: true } : {}),
       });
       markTopPt = window.topYPt;
       const numbering = environment.numberingFirstLine;
@@ -688,9 +690,9 @@ export function measureParagraph(
     placement.noWrap ? 'unwrapped' : undefined,
     environment.verticalGlyphMeasurement,
     context.overflowPunct !== false,
-    wordJustifiedInterwordCompressionApplies(
+    (wordJustifiedInterwordCompressionApplies(
       paragraph.alignment, environment.compatibilityMode,
-    ) && environment.verticalCJK !== true
+    ) || producerJustifiedCompression(paragraph)) && environment.verticalCJK !== true
       // The added alignment capability is bounded to the existing LTR gap
       // representation. Strong RTL text and authored HL1 marks need physical
       // source-gap ownership; the scalar fit allowance does not own those
@@ -794,4 +796,13 @@ export function measureParagraph(
     ),
     placement: recordedPlacement,
   };
+}
+
+/** A model source's paragraph that compresses justified spaces as Word's
+ * mode 15 does (`__justifiedCompression`, set by the ODT reader for
+ * LibreOffice's JustifyLinesWithShrinking); DOCX never sets it. */
+function producerJustifiedCompression(paragraph: Readonly<{ alignment?: string | null }>): boolean {
+  const alignment = paragraph.alignment;
+  return (paragraph as { readonly __justifiedCompression?: boolean }).__justifiedCompression === true
+    && (alignment === 'both' || alignment === 'justify' || alignment === 'distribute');
 }

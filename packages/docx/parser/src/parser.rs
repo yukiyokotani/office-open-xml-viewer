@@ -3617,6 +3617,7 @@ fn parse_document_settings(settings_xml: &str) -> Option<crate::types::DocumentS
         no_tab_hang_ind,
         split_pg_break_and_para_mark,
         compatibility_mode,
+        footnote_column_bands: false,
     })
 }
 
@@ -6553,6 +6554,9 @@ fn parse_paragraph_cond_at_depth_with_diagnostics(
         line_spacing,
         numbering,
         no_hanging_indent_tab: false,
+        justified_compression: false,
+        line_extra_above: false,
+        indents_from_floats: false,
         tab_stops,
         runs,
         run_revisions,
@@ -16415,6 +16419,7 @@ fn parse_table_row(
         row_height_rule,
         is_header,
         cant_split,
+        cuts_in_place: false,
         table_row_layout,
     }
 }

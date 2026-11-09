@@ -25,6 +25,13 @@ const STORED_ENTRY_OVERHEAD: usize = 64;
 pub enum Family {
     Paragraph,
     Text,
+    Table,
+    TableColumn,
+    TableRow,
+    TableCell,
+    Graphic,
+    Section,
+    Ruby,
 }
 
 impl Family {
@@ -32,6 +39,13 @@ impl Family {
         match self {
             Family::Paragraph => "paragraph",
             Family::Text => "text",
+            Family::Table => "table",
+            Family::TableColumn => "table-column",
+            Family::TableRow => "table-row",
+            Family::TableCell => "table-cell",
+            Family::Graphic => "graphic",
+            Family::Section => "section",
+            Family::Ruby => "ruby",
         }
     }
 }
@@ -102,6 +116,9 @@ pub struct StyleSheet {
     automatic: HashMap<(Scope, String, String), Style>,
     list_common: HashMap<String, ListStyle>,
     list_automatic: HashMap<(Scope, String), ListStyle>,
+    /// `text:outline-style` (§16.36): heading numbering, captured like a list
+    /// style.
+    outline: Option<ListStyle>,
 }
 
 /// A `text:list-style` (§16.30): its captured level definitions, and each
@@ -152,6 +169,25 @@ impl StyleSheet {
             }
         }
         Ok(())
+    }
+
+    /// Capture `text:outline-style` children of `office:styles` (§16.36).
+    pub fn add_outline(&mut self, parent: roxmltree::Node<'_, '_>) -> Result<(), String> {
+        for node in parent
+            .children()
+            .filter(|n| xml::is(*n, NS_TEXT, "outline-style"))
+        {
+            self.charge(node)?;
+            let mut list = read_list_style_named(node, String::new())?;
+            list.name = node.attribute((NS_STYLE, "name")).unwrap_or("").to_string();
+            self.outline = Some(list);
+        }
+        Ok(())
+    }
+
+    /// The document's outline style, if any.
+    pub fn outline(&self) -> Option<&ListStyle> {
+        self.outline.as_ref()
     }
 
     pub fn add_automatic(
@@ -268,10 +304,13 @@ impl StyleSheet {
                 return Err(invalid("a style parent chain is cyclic or too deep"));
             }
             charge(1 + current.family.len() + parent.len())?;
-            let next = self
+            // A missing parent ends the chain (LibreOffice ignores it).
+            let Some(next) = self
                 .common
                 .get(&(current.family.clone(), parent.to_string()))
-                .ok_or_else(|| invalid("a style names a missing parent style"))?;
+            else {
+                break;
+            };
             chain.push(StyleRef { style: next });
             current = next;
         }
@@ -370,32 +409,26 @@ fn read_list_style(node: roxmltree::Node<'_, '_>) -> Result<ListStyle, String> {
         .attribute((NS_STYLE, "name"))
         .ok_or_else(|| invalid("a list style has no name"))?
         .to_string();
+    read_list_style_named(node, name)
+}
+
+fn read_list_style_named(node: roxmltree::Node<'_, '_>, name: String) -> Result<ListStyle, String> {
     let element = capture(node, 0)?;
-    // LibreOffice applies the last of repeated level definitions; the reader
-    // takes none.
-    let mut levels = HashSet::new();
-    for level in node.children().filter(|n| n.is_element()) {
-        if !levels.insert(list_level_number(level)?) {
-            return Err(crate::error::unsupported("list-level-duplicate"));
-        }
-        // Each property group occurs once per level (LibreOffice applies the
-        // last of repeated ones).
-        let mut groups = HashSet::new();
-        for group in level.children().filter(|n| n.is_element()) {
-            if !groups.insert(group.tag_name().name()) {
-                return Err(invalid("a list level repeats a property group"));
-            }
-        }
-    }
+    // Repeated level definitions: LibreOffice applies the last one, and so
+    // does the map below (readers look levels up through `level_text` and the
+    // captured element, last match first).
     let mut level_text = HashMap::new();
     for level in node.children().filter(|n| n.is_element()) {
         let Some(text) = level
             .children()
-            .find(|n| xml::is(*n, NS_STYLE, "text-properties"))
+            .rfind(|n| xml::is(*n, NS_STYLE, "text-properties"))
         else {
             continue;
         };
-        let key = list_level_number(level)?.to_string();
+        let Ok(number) = list_level_number(level) else {
+            continue;
+        };
+        let key = number.to_string();
         let style = Style {
             name: String::new(),
             family: "text".to_string(),
@@ -410,9 +443,7 @@ fn read_list_style(node: roxmltree::Node<'_, '_>) -> Result<ListStyle, String> {
                 },
             )]),
         };
-        if level_text.insert(key, style).is_some() {
-            return Err(invalid("a list style repeats a level"));
-        }
+        level_text.insert(key, style);
     }
     Ok(ListStyle {
         name,
@@ -455,7 +486,8 @@ fn read_style_body(node: roxmltree::Node<'_, '_>, name: String) -> Result<Style,
         let group = match (child.tag_name().namespace(), child.tag_name().name()) {
             (Some(NS_STYLE), name) => name.to_string(),
             (Some(crate::xml::NS_LOEXT), "graphic-properties") => LOEXT_GRAPHIC.to_string(),
-            _ => return Err(crate::error::unsupported("style-child")),
+            // Other producers' extension groups carry nothing ODF defines.
+            _ => continue,
         };
         let mut properties = Properties {
             attributes: attributes(child),
@@ -465,21 +497,14 @@ fn read_style_body(node: roxmltree::Node<'_, '_>, name: String) -> Result<Style,
             // Each element-valued property occurs at most once per group.
             let captured = capture(element, 0)?;
             properties.element_nodes += captured.nodes();
-            match properties
+            // A repeated element-valued property: the first is kept.
+            properties
                 .elements
                 .entry(element.tag_name().name().to_string())
-            {
-                std::collections::hash_map::Entry::Occupied(_) => {
-                    return Err(invalid("a style repeats an element-valued property"));
-                }
-                std::collections::hash_map::Entry::Vacant(entry) => {
-                    entry.insert(vec![captured]);
-                }
-            }
+                .or_insert_with(|| vec![captured]);
         }
-        if groups.insert(group, properties).is_some() {
-            return Err(invalid("a style repeats a property group"));
-        }
+        // A repeated property group: the first is kept.
+        groups.entry(group).or_insert(properties);
     }
     Ok(Style {
         name,
@@ -510,17 +535,19 @@ pub fn attributes(node: roxmltree::Node<'_, '_>) -> HashMap<Key, String> {
 const MAX_CAPTURE_DEPTH: usize = 8;
 
 fn capture(node: roxmltree::Node<'_, '_>, depth: usize) -> Result<Element, String> {
-    if depth > MAX_CAPTURE_DEPTH {
-        return Err(crate::error::unsupported("style-nesting"));
-    }
+    // Deeper descendants are not captured (no property nests that far).
+    let children = if depth >= MAX_CAPTURE_DEPTH {
+        Vec::new()
+    } else {
+        node.children()
+            .filter(|n| n.is_element())
+            .map(|child| capture(child, depth + 1))
+            .collect::<Result<_, _>>()?
+    };
     Ok(Element {
         namespace: node.tag_name().namespace().unwrap_or("").to_string(),
         name: node.tag_name().name().to_string(),
         attributes: attributes(node),
-        children: node
-            .children()
-            .filter(|n| n.is_element())
-            .map(|child| capture(child, depth + 1))
-            .collect::<Result<_, _>>()?,
+        children,
     })
 }

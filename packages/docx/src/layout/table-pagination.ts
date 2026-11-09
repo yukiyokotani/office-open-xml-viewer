@@ -144,6 +144,11 @@ export interface PageDependentTableBlockRequest {
 
 export interface TableFragmentContext {
   readonly availableHeightPt: number;
+  /** Set only on the retry of a pass whose `cutsInPlace` row was admitted
+   * whole but overflowed by the fragment's appended bottom rule: that input
+   * row is cut (selection of a whole row ignores the rule; a cut reserves
+   * it). */
+  readonly cutRowIndex?: number;
   readonly freshPageHeightPt: number;
   readonly placement: FlowBlockPlacement;
   readonly services: LayoutServices;
@@ -2406,7 +2411,7 @@ function takeTableFragmentPass(
         - (context.availableHeightPt - availablePt)
       : retainedHeightPt;
     if (canTakeWhole) {
-      if (wholeHeightPt <= availablePt + EPSILON_PT) {
+      if (wholeHeightPt <= availablePt + EPSILON_PT && rowIndex !== context.cutRowIndex) {
         selected.push(selectedWholeRow(row, 'source', 0, false, preparedRow.resolved));
         admissionRows.push(row);
         floatRegistry = preparedRow.registry;
@@ -2649,6 +2654,26 @@ function takeTableFragmentPass(
       cells: Object.freeze([]),
     });
     fragment = materializeFragment(source, selected, context);
+  }
+  {
+    // A producer row that cuts in place (TableRowFormatInput.cutsInPlace),
+    // admitted whole only because whole-row selection does not reserve the
+    // fragment's appended bottom rule, is cut so the rule fits, as
+    // LibreOffice cuts it, instead of being deferred whole below. An exact
+    // row is not cut (LibreOffice moves it whole too).
+    const last = selected.at(-1);
+    const row = last && sourceRowFor(source, last.logicalRowIndex);
+    if (fragment.advancePt > context.availableHeightPt + EPSILON_PT
+      && context.cutRowIndex === undefined
+      && last?.ownership === 'source'
+      && last.fragmentIndex === 0
+      && row?.cutsInPlace === true
+      && row.heightRule !== 'exact') {
+      return takeTableFragmentPass(source, cursor, {
+        ...context,
+        cutRowIndex: inputRowIndexOf(source, last.logicalRowIndex),
+      }, hints);
+    }
   }
   while (fragment.advancePt > context.availableHeightPt + EPSILON_PT) {
     const last = selected.at(-1);

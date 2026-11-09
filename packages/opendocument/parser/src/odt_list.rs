@@ -1,5 +1,5 @@
-//! Lists (ODF Part 3 §5.3) and list styles (§16.30-§16.34), measured against
-//! LibreOffice 26.8 PDF export (design addendum rev 9).
+//! Lists (ODF Part 3 §5.3), list styles (§16.30-§16.34) and heading
+//! numbering (§16.36), measured against LibreOffice 26.8 PDF export.
 //!
 //! A label is emitted as the paragraph's leading runs, flagged `__listLabel`,
 //! which the DOCX layout places with LibreOffice's label geometry: label lines
@@ -11,29 +11,36 @@
 //! after the paragraph indent, while LibreOffice starts it at the list tab
 //! stop T even when T is before M.
 //!
-//! A picture label (design addendum rev 10) is the label font's zero-advance
-//! metric followed by the picture, both flagged: LibreOffice gives the
-//! picture a box 0.5 pt larger on every side, whose top it places at the
-//! label font's ascent while it sizes the line and which it then centres in
-//! the line (measured, `style:vertical-pos="middle"` relative to the line).
+//! The older label-width-and-position mode (§20.428 et al.) places the label
+//! at the paragraph indent plus `text:space-before` and the text at least
+//! `text:min-label-width` further: it is mapped to the same model with
+//! M = indent + space-before + min-label-width, I = -min-label-width and a
+//! tab to M.
+//!
+//! A picture label is the label font's zero-advance metric followed by the
+//! picture, both flagged: LibreOffice gives the picture a box 0.5 pt larger
+//! on every side, whose top it places at the label font's ascent while it
+//! sizes the line and which it then centres in the line (measured,
+//! `style:vertical-pos="middle"` relative to the line).
 
 use super::*;
+use crate::style::ListStyle;
 use docx_model::{AnchorHostMetrics, ImageRun, TabStop};
 
-/// Levels a list style defines (§19.834 `text:level`).
+/// Levels a list style defines (§19.840 `text:level`).
 const MAX_LEVELS: u32 = 10;
-/// Authored start values LibreOffice keeps (an item start of 32768 renders
-/// "1.", measured); counting itself was measured to 32768.
-const MAX_AUTHORED_START: u32 = 32767;
-const MAX_COUNTED: u32 = 32768;
+/// Counting bound (LibreOffice counts to 32768, measured).
+const MAX_COUNTED: u32 = 1_000_000;
 /// LibreOffice's margin around a picture label, on every side (measured:
 /// the box is 1 pt wider and taller than `fo:width` by `fo:height`).
 const IMAGE_LABEL_INSET_PT: f64 = 0.5;
 /// Generated tab stops per paragraph, and the smallest grid interval.
 const MAX_TAB_STOPS: usize = 1024;
 const MIN_TAB_INTERVAL_PT: f64 = 0.1 * 72.0 / 2.54;
-/// Affix length bound (bytes), checked before the label is built.
-const MAX_AFFIX_BYTES: usize = 256;
+/// Affix length bound (bytes).
+const MAX_AFFIX_BYTES: usize = 1024;
+/// The reserved list style name standing for the outline style.
+const OUTLINE: &str = "\u{1}outline";
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub(super) enum Follow {
@@ -59,6 +66,7 @@ impl Align {
     }
 }
 
+/// A `style:num-format` (§19.500, with LibreOffice's extended formats).
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Format {
     Decimal,
@@ -66,12 +74,20 @@ enum Format {
     UpperLetter,
     LowerRoman,
     UpperRoman,
-    /// "①, ②, ③, ..." (measured past 20: ⑲ ⑳ ㉑ ㉒; up to ㊿).
+    /// Digits of another numeral system (zero digit code point).
+    Digits(u32),
+    /// Zero-padded decimal ("01, 02, ...").
+    Padded(usize),
+    /// A cycling alphabet (the letters, one per number; `sync` repeats).
+    Alphabet(&'static str),
+    /// Circled numbers "①, ②, ③, ...".
     Circled,
-    /// "ア, イ, ウ, ..." and its half-width form: the 46 kana of the
-    /// gojūon order, repeating (measured: ヲ ン ア).
-    Katakana,
-    HalfwidthKatakana,
+    /// Chinese/Japanese counting ("一, 二, 三, ...").
+    Ideographic(&'static [&'static str; 10]),
+    /// English ordinals and words.
+    Ordinal,
+    CardinalText,
+    OrdinalText,
     /// An empty `style:num-format`: no counter component.
     Empty,
 }
@@ -79,6 +95,97 @@ enum Format {
 const KATAKANA: &str =
     "アイウエオカキクケコサシスセソタチツテトナニヌネノハヒフヘホマミムメモヤユヨラリルレロワヲン";
 const HALFWIDTH_KATAKANA: &str = "ｱｲｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂﾃﾄﾅﾆﾇﾈﾉﾊﾋﾌﾍﾎﾏﾐﾑﾒﾓﾔﾕﾖﾗﾘﾙﾚﾛﾜｦﾝ";
+const IROHA: &str = "イロハニホヘトチリヌルヲワカヨタレソツネナラムウヰノオクヤマケフコエテアサキユメミシヱヒモセス";
+const HIRAGANA: &str =
+    "あいうえおかきくけこさしすせそたちつてとなにぬねのはひふへほまみむめもやゆよらりるれろわをん";
+const HIRAGANA_IROHA: &str = "いろはにほへとちりぬるをわかよたれそつねならむうゐのおくやまけふこえてあさきゆめみしゑひもせす";
+const HANGUL_SYLLABLE: &str = "가나다라마바사아자차카타파하";
+const HANGUL_JAMO: &str = "ㄱㄴㄷㄹㅁㅂㅅㅇㅈㅊㅋㅌㅍㅎ";
+const HEAVENLY_STEMS: &str = "甲乙丙丁戊己庚辛壬癸";
+const EARTHLY_BRANCHES: &str = "子丑寅卯辰巳午未申酉戌亥";
+const GREEK_LOWER: &str = "αβγδεζηθικλμνξοπρστυφχψω";
+const GREEK_UPPER: &str = "ΑΒΓΔΕΖΗΘΙΚΛΜΝΞΟΠΡΣΤΥΦΧΨΩ";
+const CYRILLIC_LOWER: &str = "абвгдежзиклмнопрстуфхцчшщэюя";
+const CYRILLIC_UPPER: &str = "АБВГДЕЖЗИКЛМНОПРСТУФХЦЧШЩЭЮЯ";
+const HEBREW: &str = "אבגדהוזחטיכלמנסעפצקרשת";
+const ARABIC_ALPHABET: &str = "أبتثجحخدذرزسشصضطظعغفقكلمنهوي";
+const THAI_ALPHABET: &str = "กขฃคฅฆงจฉชซฌญฎฏฐฑฒณดตถทธนบปผฝพฟภมยรลวศษสหฬอฮ";
+const CJK_LOWER: [&str; 10] = ["〇", "一", "二", "三", "四", "五", "六", "七", "八", "九"];
+const CJK_LEGAL_SIMPLIFIED: [&str; 10] =
+    ["零", "壹", "贰", "叁", "肆", "伍", "陆", "柒", "捌", "玖"];
+const CJK_LEGAL_TRADITIONAL: [&str; 10] =
+    ["零", "壹", "貳", "參", "肆", "伍", "陸", "柒", "捌", "玖"];
+const KOREAN_HANJA: [&str; 10] = ["零", "一", "二", "三", "四", "五", "六", "七", "八", "九"];
+const KOREAN_HANGUL_DIGITS: [&str; 10] =
+    ["영", "일", "이", "삼", "사", "오", "육", "칠", "팔", "구"];
+
+/// `style:num-format` values (ODF's five, LibreOffice's extended formats by
+/// their UI names). Unknown formats count in decimal.
+fn parse_format(value: &str) -> Format {
+    match value {
+        "" => Format::Empty,
+        "1" => Format::Decimal,
+        "a" => Format::LowerLetter,
+        "A" => Format::UpperLetter,
+        "i" => Format::LowerRoman,
+        "I" => Format::UpperRoman,
+        "①, ②, ③, ..." => Format::Circled,
+        "ア, イ, ウ, ..." => Format::Alphabet(KATAKANA),
+        "ｱ, ｲ, ｳ, ..." => Format::Alphabet(HALFWIDTH_KATAKANA),
+        "イ, ロ, ハ, ..." => Format::Alphabet(IROHA),
+        "あ, い, う, ..." => Format::Alphabet(HIRAGANA),
+        "い, ろ, は, ..." => Format::Alphabet(HIRAGANA_IROHA),
+        "가, 나, 다, ..." => Format::Alphabet(HANGUL_SYLLABLE),
+        "ㄱ, ㄴ, ㄷ, ..." => Format::Alphabet(HANGUL_JAMO),
+        "甲, 乙, 丙, ..." => Format::Alphabet(HEAVENLY_STEMS),
+        "子, 丑, 寅, ..." => Format::Alphabet(EARTHLY_BRANCHES),
+        "α, β, γ, ..." => Format::Alphabet(GREEK_LOWER),
+        "Α, Β, Γ, ..." => Format::Alphabet(GREEK_UPPER),
+        "а, б, .., аа, аб, ... (Russian)" | "а, б, .., аа, бб, ... (Russian)" => {
+            Format::Alphabet(CYRILLIC_LOWER)
+        }
+        "А, Б, .., Аа, Аб, ... (Russian)" | "А, Б, .., Аа, Бб, ... (Russian)" => {
+            Format::Alphabet(CYRILLIC_UPPER)
+        }
+        "א, ב, ג, ..." => Format::Alphabet(HEBREW),
+        "أ, ب, ت, ..." => Format::Alphabet(ARABIC_ALPHABET),
+        "ก, ข, ฃ, ..." => Format::Alphabet(THAI_ALPHABET),
+        "一, 二, 三, ..." | "一, 二, 三, ... (zh-CN)" | "一, 二, 三, ... (ja)" => {
+            Format::Ideographic(&CJK_LOWER)
+        }
+        "壹, 贰, 叁, ..." => Format::Ideographic(&CJK_LEGAL_SIMPLIFIED),
+        "壹, 貳, 參, ..." => Format::Ideographic(&CJK_LEGAL_TRADITIONAL),
+        "일, 이, 삼, ..." => Format::Ideographic(&KOREAN_HANGUL_DIGITS),
+        "一, 二, 三, ... (ko)" => Format::Ideographic(&KOREAN_HANJA),
+        "١, ٢, ٣, ٤, ..." => Format::Digits(0x0660),
+        "۱, ۲, ۳, ۴, ..." => Format::Digits(0x06F0),
+        "१, २, ३, ..." => Format::Digits(0x0966),
+        "১, ২, ৩, ..." => Format::Digits(0x09E6),
+        "๑, ๒, ๓, ..." => Format::Digits(0x0E50),
+        "１, ２, ３, ..." => Format::Digits(0xFF10),
+        "01, 02, 03, ..." => Format::Padded(2),
+        "001, 002, 003, ..." => Format::Padded(3),
+        "0001, 0002, 0003, ..." => Format::Padded(4),
+        "00001, 00002, 00003, ..." => Format::Padded(5),
+        "1st" => Format::Ordinal,
+        "One" => Format::CardinalText,
+        "First" => Format::OrdinalText,
+        _ => Format::Decimal,
+    }
+}
+
+/// A note number format (§16.29.2 `style:num-format`) as ST_NumberFormat.
+pub(super) fn note_number_format(value: &str) -> Option<&'static str> {
+    match value {
+        "1" => Some("decimal"),
+        "a" => Some("lowerLetter"),
+        "A" => Some("upperLetter"),
+        "i" => Some("lowerRoman"),
+        "I" => Some("upperRoman"),
+        "①, ②, ③, ..." => Some("decimalEnclosedCircle"),
+        _ => None,
+    }
+}
 
 #[derive(Clone, Debug)]
 enum Kind {
@@ -93,12 +200,12 @@ enum Kind {
     /// A picture (§16.33), drawn at `fo:width` by `fo:height` (pt).
     Image {
         href: String,
-        width: f64,
-        height: f64,
+        width: Option<f64>,
+        height: Option<f64>,
     },
 }
 
-/// One level of a list style, in label alignment mode.
+/// One level of a list style.
 #[derive(Clone)]
 struct Level<'a> {
     kind: Kind,
@@ -113,11 +220,12 @@ struct Level<'a> {
     /// The label's own formatting: the level's text properties (a bullet
     /// face) before its character style's chain.
     styles: Vec<StyleRef<'a>>,
+    /// Bullet size relative to the text (§19.762 text:bullet-relative-size).
+    relative_size: Option<f64>,
 }
 
 /// A list paragraph's label and geometry, handed to `Reader::paragraph`.
 pub(super) struct ListParagraph<'a> {
-    pub style_name: String,
     pub margin: f64,
     pub indent: f64,
     pub tab: Option<f64>,
@@ -127,10 +235,11 @@ pub(super) struct ListParagraph<'a> {
 pub(super) struct Label<'a> {
     pub text: String,
     /// A picture label's link and size (pt); `text` is then empty.
-    pub image: Option<(String, f64, f64)>,
+    pub image: Option<(String, Option<f64>, Option<f64>)>,
     pub follow: Follow,
     pub align: Align,
     pub styles: Vec<StyleRef<'a>>,
+    pub relative_size: Option<f64>,
 }
 
 /// One LibreOffice list: a list and the lists that continue it share it.
@@ -143,12 +252,14 @@ struct Chain {
 #[derive(Default)]
 pub(super) struct Lists {
     chains: Vec<Chain>,
-    /// `xml:id` of top-level lists, to their chains.
+    /// `xml:id` of lists, to their chains.
     ids: HashMap<String, usize>,
-    /// `xml:id` of nested lists (continuing one rejects).
-    nested_ids: HashSet<String>,
     /// The immediately preceding top-level list: its style and chain.
     previous: Option<(String, usize)>,
+    /// Chains by list style for `text:numbered-paragraph` (§5.3.6, by
+    /// `text:list-id`).
+    numbered: HashMap<String, usize>,
+    outline: Option<usize>,
 }
 
 /// The list a paragraph sits in while it is read.
@@ -160,89 +271,54 @@ pub(super) struct Frame {
 }
 
 impl<'a> Reader<'a> {
+    fn list_style(&self, name: &str) -> Option<&'a ListStyle> {
+        let sheet: &'a StyleSheet = self.sheet;
+        if name == OUTLINE {
+            return sheet.outline();
+        }
+        sheet
+            .find_list(self.scope, name)
+            .or_else(|| sheet.find_list(Scope::Content, name))
+            .or_else(|| sheet.find_list(Scope::Styles, name))
+    }
+
     /// A `text:list` (§5.3.1). Every item's first paragraph is a numbered
     /// node at its nesting depth; wrapper items (whose first child is a list)
     /// and headers are not. A continuation chain is one LibreOffice list.
     pub(super) fn list(
         &mut self,
-        node: roxmltree::Node<'_, '_>,
+        node: roxmltree::Node<'a, 'a>,
         parent: Option<&Frame>,
-        depth: usize,
     ) -> Result<(), String> {
-        if depth > MAX_SECTION_DEPTH + MAX_LEVELS as usize {
-            return Err(unsupported("list-depth"));
-        }
-        let mut continue_numbering = false;
-        let mut continue_list = None;
-        let mut style_name = None;
-        let mut id = None;
-        for attribute in node.attributes() {
-            match (attribute.namespace(), attribute.name()) {
-                (Some(NS_TEXT), "style-name") => style_name = Some(attribute.value()),
-                (Some(NS_TEXT), "continue-numbering") => {
-                    continue_numbering = attribute.value() == "true"
-                }
-                (Some(NS_TEXT), "continue-list") => continue_list = Some(attribute.value()),
-                (Some(NS_XML), "id") => id = Some(attribute.value()),
-                _ => return Err(unsupported("list-attribute")),
-            }
-        }
+        self.enter()?;
+        let style_name = node.attribute((NS_TEXT, "style-name"));
+        let continue_numbering = node.attribute((NS_TEXT, "continue-numbering")) == Some("true");
+        let continue_list = node.attribute((NS_TEXT, "continue-list"));
+        let id = node.attribute((xml::NS_XML, "id"));
         let frame = match parent {
-            Some(parent) => {
-                // A nested list continues its enclosing list; another style
-                // or a continuation is not measured.
-                if style_name.is_some_and(|name| name != parent.style)
-                    || continue_numbering
-                    || continue_list.is_some()
-                {
-                    return Err(unsupported("list-nested-style"));
-                }
-                if parent.level >= MAX_LEVELS {
-                    return Err(unsupported("list-level"));
-                }
-                if let Some(id) = id {
-                    self.charge_construction(id.len())?;
-                    self.lists.nested_ids.insert(id.to_string());
-                }
-                Frame {
-                    chain: parent.chain,
-                    style: parent.style.clone(),
-                    level: parent.level + 1,
-                }
-            }
+            Some(parent) => Frame {
+                chain: parent.chain,
+                // A nested list may name its own style (§19.880): its levels
+                // come from that style.
+                style: style_name
+                    .filter(|name| self.list_style(name).is_some())
+                    .unwrap_or(&parent.style)
+                    .to_string(),
+                level: (parent.level + 1).min(MAX_LEVELS),
+            },
             None => {
-                let style = style_name.ok_or_else(|| unsupported("list-style-missing"))?;
-                if continue_numbering && continue_list.is_some() {
-                    return Err(unsupported("list-continuation"));
-                }
+                let style = style_name.unwrap_or("").to_string();
                 let continued = if let Some(target) = continue_list {
-                    if self.lists.nested_ids.contains(target) {
-                        return Err(unsupported("list-continuation"));
-                    }
-                    Some(
-                        *self
-                            .lists
-                            .ids
-                            .get(target)
-                            .ok_or_else(|| unsupported("list-continuation"))?,
-                    )
+                    self.lists.ids.get(target).copied()
                 } else {
-                    // `continue-numbering` without a preceding list of the
-                    // same style restarts (§19.783).
                     match &self.lists.previous {
-                        Some((previous, chain)) if continue_numbering && previous == style => {
+                        Some((previous, chain)) if continue_numbering && *previous == style => {
                             Some(*chain)
                         }
                         _ => None,
                     }
                 };
                 let chain = match continued {
-                    // LibreOffice initialises a list without a counted item
-                    // differently for an empty and a header-only list
-                    // (measured by the reviewer); continuing one rejects.
-                    Some(chain) if !self.lists.chains[chain].counted => {
-                        return Err(unsupported("list-continuation"));
-                    }
                     Some(chain) => chain,
                     None => {
                         self.charge_construction(std::mem::size_of::<Chain>())?;
@@ -251,147 +327,244 @@ impl<'a> Reader<'a> {
                     }
                 };
                 self.charge_construction(style.len())?;
-                self.lists.previous = Some((style.to_string(), chain));
-                if let Some(id) = id {
-                    self.charge_construction(id.len())?;
-                    self.lists.ids.insert(id.to_string(), chain);
-                }
+                self.lists.previous = Some((style.clone(), chain));
                 Frame {
                     chain,
-                    style: style.to_string(),
+                    style,
                     level: 1,
                 }
             }
         };
+        if let Some(id) = id {
+            self.charge_construction(id.len())?;
+            self.lists.ids.insert(id.to_string(), frame.chain);
+        }
         let level = self.list_level(&frame.style, frame.level)?;
-        for child in node.children() {
-            if child.is_text() {
-                if child.text().is_some_and(|t| !t.trim().is_empty()) {
-                    return Err(invalid("text in a list"));
-                }
-                continue;
-            }
-            if !child.is_element() {
-                continue;
-            }
+        for child in node.children().filter(|n| n.is_element()) {
             match (child.tag_name().namespace(), child.tag_name().name()) {
-                (Some(NS_TEXT), "list-item") => self.list_item(child, &frame, &level, depth)?,
-                (Some(NS_TEXT), "list-header") => self.list_header(child, &frame, &level, depth)?,
-                _ => return Err(unsupported("list-child")),
+                (Some(NS_TEXT), "list-item") => self.list_item(child, &frame, &level, false)?,
+                (Some(NS_TEXT), "list-header") => self.list_item(child, &frame, &level, true)?,
+                _ => {}
             }
         }
+        self.leave();
         Ok(())
     }
 
     fn list_item(
         &mut self,
-        node: roxmltree::Node<'_, '_>,
+        node: roxmltree::Node<'a, 'a>,
         frame: &Frame,
         level: &Level<'a>,
-        depth: usize,
+        header: bool,
     ) -> Result<(), String> {
-        let mut start = None;
-        for attribute in node.attributes() {
-            match (attribute.namespace(), attribute.name()) {
-                (Some(NS_TEXT), "start-value") => {
-                    let value = attribute
-                        .value()
-                        .parse::<u32>()
-                        .map_err(|_| invalid("bad list item start value"))?;
-                    if value > MAX_AUTHORED_START {
-                        return Err(unsupported("list-start-value"));
-                    }
-                    start = Some(value);
-                }
-                (Some(NS_XML), "id") => {}
-                _ => return Err(unsupported("list-attribute")),
-            }
-        }
-        let mut sublists = 0;
-        for (index, child) in block_children(node)?.into_iter().enumerate() {
+        let start = node
+            .attribute((NS_TEXT, "start-value"))
+            .and_then(|v| v.parse::<u32>().ok());
+        let mut first = !header;
+        for child in node.children().filter(|n| n.is_element()) {
             match (child.tag_name().namespace(), child.tag_name().name()) {
-                // The item's first paragraph is its numbered node.
-                (Some(NS_TEXT), "p") if index == 0 => {
+                (Some(NS_TEXT), "p" | "h") if first => {
+                    first = false;
                     let values = self.count(frame, start)?;
                     let label = self.label(frame, level, &values)?;
                     self.list_paragraph = Some(ListParagraph {
-                        style_name: frame.style.clone(),
                         margin: level.margin,
                         indent: level.indent,
                         tab: level.tab,
                         label: Some(label),
                     });
-                    self.paragraph(child, None)?;
+                    self.list_child(child)?;
                 }
-                (Some(NS_TEXT), "p") => self.unlabelled(child, frame, level)?,
+                (Some(NS_TEXT), "p" | "h") => {
+                    self.list_paragraph = Some(ListParagraph {
+                        margin: level.margin,
+                        indent: 0.0,
+                        tab: level.tab,
+                        label: None,
+                    });
+                    self.list_child(child)?;
+                }
                 (Some(NS_TEXT), "list") => {
-                    // One sublist per item: a second restarts its level in
-                    // LibreOffice, outside the counter model (real corpus: 0).
-                    sublists += 1;
-                    if sublists > 1 {
-                        return Err(unsupported("list-sublists"));
-                    }
-                    self.list(child, Some(frame), depth + 1)?;
+                    first = false;
+                    self.list(child, Some(frame))?;
                 }
-                // Headings in lists are not measured yet.
-                (Some(NS_TEXT), "h") => return Err(unsupported("list-heading")),
-                _ => return Err(unsupported("list-child")),
+                (Some(NS_TEXT), "soft-page-break") => {}
+                _ => {
+                    first = false;
+                    self.block(child)?;
+                }
             }
         }
         Ok(())
     }
 
-    /// A `text:list-header`: unnumbered paragraphs at M.
-    fn list_header(
-        &mut self,
-        node: roxmltree::Node<'_, '_>,
-        frame: &Frame,
-        level: &Level<'a>,
-        depth: usize,
-    ) -> Result<(), String> {
-        for attribute in node.attributes() {
-            if (attribute.namespace(), attribute.name()) != (Some(NS_XML), "id") {
-                return Err(unsupported("list-attribute"));
-            }
+    fn list_child(&mut self, node: roxmltree::Node<'a, 'a>) -> Result<(), String> {
+        if xml::is(node, NS_TEXT, "h") {
+            let level = node
+                .attribute((NS_TEXT, "outline-level"))
+                .and_then(|v| v.parse::<u32>().ok())
+                .unwrap_or(1);
+            self.paragraph(node, Some(level))
+        } else {
+            self.paragraph(node, None)
         }
-        let mut sublists = 0;
-        for child in block_children(node)? {
-            match (child.tag_name().namespace(), child.tag_name().name()) {
-                (Some(NS_TEXT), "p") => self.unlabelled(child, frame, level)?,
-                (Some(NS_TEXT), "list") => {
-                    sublists += 1;
-                    if sublists > 1 {
-                        return Err(unsupported("list-sublists"));
-                    }
-                    self.list(child, Some(frame), depth + 1)?;
-                }
-                (Some(NS_TEXT), "h") => return Err(unsupported("list-heading")),
-                _ => return Err(unsupported("list-child")),
-            }
-        }
-        Ok(())
     }
 
-    fn unlabelled(
+    /// `text:numbered-paragraph` (§5.3.6): numbered in the chain of its
+    /// `text:list-id` at its `text:level`.
+    pub(super) fn numbered(
         &mut self,
-        node: roxmltree::Node<'_, '_>,
-        frame: &Frame,
-        level: &Level<'a>,
+        node: roxmltree::Node<'a, 'a>,
+        paragraph: roxmltree::Node<'a, 'a>,
     ) -> Result<(), String> {
+        let style = node
+            .attribute((NS_TEXT, "style-name"))
+            .unwrap_or("")
+            .to_string();
+        let list_id = node
+            .attribute((NS_TEXT, "list-id"))
+            .unwrap_or(&style)
+            .to_string();
+        let level = node
+            .attribute((NS_TEXT, "level"))
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(1)
+            .clamp(1, MAX_LEVELS);
+        let chain = match self.lists.numbered.get(&list_id) {
+            Some(chain) => *chain,
+            None => {
+                self.lists.chains.push(Chain::default());
+                let chain = self.lists.chains.len() - 1;
+                self.lists.numbered.insert(list_id, chain);
+                chain
+            }
+        };
+        let frame = Frame {
+            chain,
+            style,
+            level,
+        };
+        let definition = self.list_level(&frame.style, level)?;
+        let start = node
+            .attribute((NS_TEXT, "start-value"))
+            .and_then(|v| v.parse::<u32>().ok());
+        let label = if node.attribute((NS_TEXT, "is-list-header")) == Some("true") {
+            None
+        } else {
+            let values = self.count(&frame, start)?;
+            Some(self.label(&frame, &definition, &values)?)
+        };
         self.list_paragraph = Some(ListParagraph {
-            style_name: frame.style.clone(),
-            margin: level.margin,
-            indent: 0.0,
-            tab: level.tab,
-            label: None,
+            margin: definition.margin,
+            indent: if label.is_some() {
+                definition.indent
+            } else {
+                0.0
+            },
+            tab: definition.tab,
+            label,
         });
-        self.paragraph(node, None)
+        self.list_child(paragraph)
+    }
+
+    /// A heading numbered by the list style its paragraph style names, at
+    /// its outline level, in one list per list style.
+    pub(super) fn styled_list_paragraph(
+        &mut self,
+        node: roxmltree::Node<'a, 'a>,
+        style: &str,
+        level: u32,
+    ) -> Result<Option<ListParagraph<'a>>, String> {
+        let level = level.clamp(1, MAX_LEVELS);
+        let key = format!("\u{2}{style}");
+        let chain = match self.lists.numbered.get(&key) {
+            Some(chain) => *chain,
+            None => {
+                self.lists.chains.push(Chain::default());
+                let chain = self.lists.chains.len() - 1;
+                self.lists.numbered.insert(key, chain);
+                chain
+            }
+        };
+        let frame = Frame {
+            chain,
+            style: style.to_string(),
+            level,
+        };
+        let definition = self.list_level(style, level)?;
+        let start = node
+            .attribute((NS_TEXT, "start-value"))
+            .and_then(|v| v.parse::<u32>().ok());
+        let values = self.count(&frame, start)?;
+        let label = self.label(&frame, &definition, &values)?;
+        Ok(Some(ListParagraph {
+            margin: definition.margin,
+            indent: definition.indent,
+            tab: definition.tab,
+            label: Some(label),
+        }))
+    }
+
+    /// Heading numbering (§16.36): the outline style's level counted over
+    /// the document's headings. A level without a label leaves the heading
+    /// unnumbered and its geometry to its paragraph style.
+    pub(super) fn outline_paragraph(
+        &mut self,
+        node: roxmltree::Node<'a, 'a>,
+        level: u32,
+    ) -> Result<Option<ListParagraph<'a>>, String> {
+        if self.sheet.outline().is_none() {
+            return Ok(None);
+        }
+        let level = level.clamp(1, MAX_LEVELS);
+        let definition = self.list_level(OUTLINE, level)?;
+        let numbered = match &definition.kind {
+            Kind::Number {
+                format,
+                prefix,
+                suffix,
+                ..
+            } => *format != Format::Empty || !prefix.is_empty() || !suffix.is_empty(),
+            Kind::Bullet(_) | Kind::Image { .. } => true,
+        };
+        if !numbered {
+            return Ok(None);
+        }
+        let chain = match self.lists.outline {
+            Some(chain) => chain,
+            None => {
+                self.lists.chains.push(Chain::default());
+                let chain = self.lists.chains.len() - 1;
+                self.lists.outline = Some(chain);
+                chain
+            }
+        };
+        let frame = Frame {
+            chain,
+            style: OUTLINE.to_string(),
+            level,
+        };
+        if node.attribute((NS_TEXT, "restart-numbering")) == Some("true") {
+            self.lists.chains[chain].counters = Default::default();
+        }
+        let start = node
+            .attribute((NS_TEXT, "start-value"))
+            .and_then(|v| v.parse::<u32>().ok());
+        let values = self.count(&frame, start)?;
+        let label = self.label(&frame, &definition, &values)?;
+        Ok(Some(ListParagraph {
+            margin: definition.margin,
+            indent: definition.indent,
+            tab: definition.tab,
+            label: Some(label),
+        }))
     }
 
     /// LibreOffice's numbering of a node at `frame.level` (measured): every
-    /// unset ancestor level takes its level's start (a phantom parent, whose
-    /// item attributes are ignored), the node's level takes the item's start,
-    /// else counts on, else takes its start, and deeper levels are unset.
+    /// unset ancestor level takes its level's start (a phantom parent), the
+    /// node's level takes the item's start, else counts on, else takes its
+    /// start, and deeper levels are unset.
     fn count(&mut self, frame: &Frame, start: Option<u32>) -> Result<Vec<u32>, String> {
         let mut starts = Vec::with_capacity(frame.level as usize);
         for level in 1..=frame.level {
@@ -404,12 +577,10 @@ impl<'a> Reader<'a> {
         }
         let value = match (start, chain.counters[index]) {
             (Some(start), _) => start,
-            (None, Some(previous)) => previous + 1,
+            (None, Some(previous)) => previous.saturating_add(1),
             (None, None) => starts[index],
-        };
-        if value > MAX_COUNTED {
-            return Err(unsupported("list-counter"));
         }
+        .min(MAX_COUNTED);
         chain.counters[index] = Some(value);
         for deeper in chain.counters.iter_mut().skip(index + 1) {
             *deeper = None;
@@ -417,7 +588,7 @@ impl<'a> Reader<'a> {
         chain.counted = true;
         Ok(chain.counters[..=index]
             .iter()
-            .map(|v| v.expect("ancestors are set"))
+            .map(|v| v.unwrap_or(1))
             .collect())
     }
 
@@ -449,8 +620,6 @@ impl<'a> Reader<'a> {
                         let component = if l == frame.level {
                             (*format, *letter_sync)
                         } else {
-                            // A bullet or picture ancestor contributes an
-                            // empty component (measured).
                             match self.list_level(&frame.style, l)?.kind {
                                 Kind::Bullet(_) | Kind::Image { .. } => {
                                     components.push(String::new());
@@ -471,7 +640,7 @@ impl<'a> Reader<'a> {
                             values[(l - 1) as usize],
                             component.0,
                             component.1,
-                        )?);
+                        ));
                     }
                 }
                 format!("{prefix}{}{suffix}", components.join("."))
@@ -495,45 +664,56 @@ impl<'a> Reader<'a> {
             follow: level.follow,
             align: level.align,
             styles: level.styles.clone(),
+            relative_size: level.relative_size,
         })
     }
 
-    fn format_counter(&self, value: u32, format: Format, sync: bool) -> Result<String, String> {
+    fn format_counter(&self, value: u32, format: Format, sync: bool) -> String {
         // 0 renders "0" in every format (measured by the reviewer).
         if value == 0 && format != Format::Empty {
-            return Ok("0".to_string());
+            return "0".to_string();
         }
-        Ok(match format {
+        match format {
             Format::Decimal => value.to_string(),
             Format::Empty => String::new(),
             Format::LowerRoman => roman(value).to_ascii_lowercase(),
+            Format::UpperRoman => roman(value),
             Format::Circled => match value {
                 1..=20 => char::from_u32(0x2460 + value - 1),
                 21..=35 => char::from_u32(0x3251 + value - 21),
                 36..=50 => char::from_u32(0x32B1 + value - 36),
                 _ => None,
             }
-            .ok_or_else(|| unsupported("list-format-range"))?
-            .to_string(),
-            Format::Katakana | Format::HalfwidthKatakana => {
-                let table = if format == Format::Katakana {
-                    KATAKANA
-                } else {
-                    HALFWIDTH_KATAKANA
-                };
-                table
-                    .chars()
-                    .nth(((value - 1) % 46) as usize)
-                    .expect("46 kana")
-                    .to_string()
+            .map_or_else(|| value.to_string(), |c| c.to_string()),
+            Format::Alphabet(table) => {
+                let letters: Vec<char> = table.chars().collect();
+                let n = letters.len() as u32;
+                let letter = letters[((value - 1) % n) as usize];
+                let repeat = if sync { (value - 1) / n + 1 } else { 1 };
+                std::iter::repeat_n(letter, repeat as usize).collect()
             }
-            Format::UpperRoman => roman(value),
+            Format::Digits(zero) => value
+                .to_string()
+                .chars()
+                .map(|d| char::from_u32(zero + d.to_digit(10).unwrap_or(0)).unwrap_or(d))
+                .collect(),
+            Format::Padded(width) => format!("{value:0width$}"),
+            Format::Ideographic(digits) => ideographic(value, digits),
+            Format::Ordinal => {
+                let suffix = match (value % 10, value % 100) {
+                    (_, 11..=13) => "th",
+                    (1, _) => "st",
+                    (2, _) => "nd",
+                    (3, _) => "rd",
+                    _ => "th",
+                };
+                format!("{value}{suffix}")
+            }
+            Format::CardinalText => english(value, false),
+            Format::OrdinalText => english(value, true),
             Format::LowerLetter | Format::UpperLetter => {
-                // ODF 1.4 §19.505 matches LibreOffice beyond "z"; ODF 1.3
-                // states the opposite, so only 1.4 documents admit it.
-                if value > 26 && !self.odf_1_4 {
-                    return Err(unsupported("list-letter-sync"));
-                }
+                // Beyond "z" the places count like digits ("aa, ab"), as
+                // ODF 1.4 §19.505 and LibreOffice do.
                 let letters = letters(value, sync);
                 if format == Format::UpperLetter {
                     letters.to_ascii_uppercase()
@@ -541,137 +721,94 @@ impl<'a> Reader<'a> {
                     letters
                 }
             }
-        })
+        }
     }
 
-    /// A list style's level definition (§16.31-§16.34), label alignment mode
-    /// only.
+    /// A list style's level definition (§16.31-§16.34).
     fn list_level(&mut self, style: &str, level: u32) -> Result<Level<'a>, String> {
-        let list = self
-            .sheet
-            .find_list(Scope::Content, style)
-            .ok_or_else(|| invalid("a list names a missing list style"))?;
         self.charge_work(16 + style.len())?;
-        for (key, value) in &list.element.attributes {
-            match (key.0.as_str(), key.1.as_str()) {
-                (NS_STYLE, "name" | "display-name") => {}
-                (NS_TEXT, "consecutive-numbering") if value == "false" => {}
-                _ => return Err(unsupported("list-style-attribute")),
-            }
-        }
+        let fallback = Level {
+            kind: Kind::Number {
+                format: Format::Empty,
+                prefix: String::new(),
+                suffix: String::new(),
+                display: 1,
+                letter_sync: false,
+            },
+            start: 1,
+            follow: Follow::Nothing,
+            align: Align::Start,
+            margin: 0.0,
+            indent: 0.0,
+            tab: None,
+            styles: Vec::new(),
+            relative_size: None,
+        };
+        let Some(list) = self.list_style(style) else {
+            return Ok(fallback);
+        };
         self.charge_work(list.element.children.len())?;
+        // The definition of this level, else the nearest lower one (a list
+        // nested deeper than its style defines).
+        let level_of = |child: &crate::style::Element| {
+            child
+                .attributes
+                .get(&(NS_TEXT.to_string(), "level".to_string()))
+                .and_then(|value| value.parse::<u32>().ok())
+        };
         let definition = list
             .element
             .children
             .iter()
-            .find(|child| {
-                child
-                    .attributes
-                    .get(&(NS_TEXT.to_string(), "level".to_string()))
-                    .and_then(|value| value.parse::<u32>().ok())
-                    == Some(level)
-            })
-            .ok_or_else(|| unsupported("list-level-missing"))?;
+            .rfind(|child| level_of(child) == Some(level))
+            .or_else(|| {
+                list.element
+                    .children
+                    .iter()
+                    .filter(|child| level_of(child).is_some_and(|l| l <= level))
+                    .max_by_key(|child| level_of(child))
+            });
+        let Some(definition) = definition else {
+            return Ok(fallback);
+        };
         let attribute = |name: (&str, &str)| {
             definition
                 .attributes
                 .get(&(name.0.to_string(), name.1.to_string()))
                 .map(String::as_str)
         };
-        let (number, image) = match (definition.namespace.as_str(), definition.name.as_str()) {
-            (NS_TEXT, "list-level-style-number") => (true, false),
-            (NS_TEXT, "list-level-style-bullet") => (false, false),
-            (NS_TEXT, "list-level-style-image") => (false, true),
-            _ => return Err(unsupported("list-style-child")),
+        let (number, image) = match definition.name.as_str() {
+            "list-level-style-number" | "outline-level-style" => (true, false),
+            "list-level-style-bullet" => (false, false),
+            "list-level-style-image" => (false, true),
+            _ => (true, false),
         };
-        for (key, value) in &definition.attributes {
-            let admitted = match (key.0.as_str(), key.1.as_str()) {
-                (NS_TEXT, "level") => true,
-                // A picture level's character style is not measured (real
-                // corpus: none).
-                (NS_TEXT, "style-name") if image => return Err(unsupported("list-image-style")),
-                (NS_TEXT, "style-name") => true,
-                // A package link (§16.33, XLink "simple", "embed", "onLoad").
-                (NS_XLINK, "href") => image,
-                (NS_XLINK, "type") => image && value == "simple",
-                (NS_XLINK, "show") => image && value == "embed",
-                (NS_XLINK, "actuate") => image && value == "onLoad",
-                (NS_STYLE, "num-format" | "num-prefix" | "num-suffix" | "num-letter-sync") => {
-                    !image
-                }
-                (NS_TEXT, "display-levels" | "start-value") => number,
-                (NS_TEXT, "bullet-char") => !number && !image,
-                (NS_TEXT, "bullet-relative-size") => !number && !image && value == "100%",
-                // LibreOffice's label template, checked against the
-                // composition below; a bullet draws its character only.
-                (NS_LOEXT, "num-list-format") => !image,
-                (NS_LOEXT, "is-legal") => value == "false",
-                _ => false,
-            };
-            if !admitted {
-                return Err(unsupported("list-level-attribute"));
+        let affix = |name: &str| -> String {
+            let value = attribute((NS_STYLE, name)).unwrap_or("");
+            if value.len() > MAX_AFFIX_BYTES {
+                String::new()
+            } else {
+                value.to_string()
             }
-        }
+        };
         let kind = if number {
-            let format = match attribute((NS_STYLE, "num-format")).unwrap_or("") {
-                "1" => Format::Decimal,
-                "a" => Format::LowerLetter,
-                "A" => Format::UpperLetter,
-                "i" => Format::LowerRoman,
-                "I" => Format::UpperRoman,
-                "①, ②, ③, ..." => Format::Circled,
-                "ア, イ, ウ, ..." => Format::Katakana,
-                "ｱ, ｲ, ｳ, ..." => Format::HalfwidthKatakana,
-                "" => Format::Empty,
-                _ => return Err(unsupported("list-format")),
-            };
-            let affix = |name: &str| -> Result<String, String> {
-                let value = attribute((NS_STYLE, name)).unwrap_or("");
-                // LibreOffice breaks a label at a line feed, draws U+2011 as
-                // a gap, never breaks at U+00AD and interleaves body text into
-                // a long label with U+00A0 (measured by the reviewer).
-                // LibreOffice reads `%n%` in an affix as a counter placeholder
-                // (measured by the reviewer); "%" is not admitted.
-                if value.len() > MAX_AFFIX_BYTES
-                    || value
-                        .chars()
-                        .any(|c| c == '%' || special_label_character(c))
-                {
-                    return Err(unsupported("list-affix"));
-                }
-                Ok(value.to_string())
-            };
+            let format = parse_format(attribute((NS_STYLE, "num-format")).unwrap_or(""));
+            let prefix = affix("num-prefix");
+            let suffix = affix("num-suffix");
             let authored_display = attribute((NS_TEXT, "display-levels"))
-                .map(|value| {
-                    value
-                        .parse::<u32>()
-                        .ok()
-                        .filter(|v| (1..=level).contains(v))
-                        .ok_or_else(|| unsupported("list-display-levels"))
-                })
-                .transpose()?;
-            let prefix = affix("num-prefix")?;
-            let suffix = affix("num-suffix")?;
+                .and_then(|value| value.parse::<u32>().ok())
+                .map(|v| v.clamp(1, level));
             // LibreOffice composes the label from its template when one is
-            // written (it may drop `text:display-levels`, measured). The
-            // template must be the prefix, the displayed levels' placeholders
-            // joined by "." and ending at this level, and the suffix.
+            // written (it may drop `text:display-levels`, measured): the
+            // number of level placeholders it holds.
             let display = match attribute((NS_LOEXT, "num-list-format")) {
-                None => authored_display.unwrap_or(1),
                 Some(template) => {
-                    let display = (1..=level)
-                        .find(|display| {
-                            let levels: Vec<String> = (level + 1 - display..=level)
-                                .map(|l| format!("%{l}%"))
-                                .collect();
-                            template == format!("{prefix}{}{suffix}", levels.join("."))
-                        })
-                        .ok_or_else(|| unsupported("list-format-template"))?;
-                    if authored_display.is_some_and(|authored| authored != display) {
-                        return Err(unsupported("list-format-template"));
-                    }
-                    display
+                    let placeholders = (1..=level)
+                        .filter(|l| template.contains(&format!("%{l}%")))
+                        .count() as u32;
+                    authored_display.unwrap_or(placeholders.max(1))
                 }
+                None => authored_display.unwrap_or(1),
             };
             Kind::Number {
                 format,
@@ -681,169 +818,113 @@ impl<'a> Reader<'a> {
                 letter_sync: attribute((NS_STYLE, "num-letter-sync")) == Some("true"),
             }
         } else if image {
-            // Embedded pictures (`office:binary-data`) are not in the real
-            // corpus.
-            let href = attribute((NS_XLINK, "href"))
-                .ok_or_else(|| unsupported("list-image-source"))?
-                .to_string();
-            Kind::Image {
-                href,
-                width: 0.0,
-                height: 0.0,
+            match attribute((NS_XLINK, "href")) {
+                Some(href) => Kind::Image {
+                    href: href.to_string(),
+                    width: None,
+                    height: None,
+                },
+                None => Kind::Bullet('\u{2022}'),
             }
         } else {
             // LibreOffice draws only the bullet; its affixes are ignored
             // (measured).
-            let mut chars = attribute((NS_TEXT, "bullet-char")).unwrap_or("").chars();
-            match (chars.next(), chars.next()) {
-                (Some(c), None) if !special_label_character(c) => Kind::Bullet(c),
-                _ => return Err(unsupported("list-bullet")),
-            }
+            Kind::Bullet(
+                attribute((NS_TEXT, "bullet-char"))
+                    .and_then(|v| v.chars().next())
+                    .unwrap_or('\u{2022}'),
+            )
         };
-        let start = match attribute((NS_TEXT, "start-value")) {
-            None => 1,
-            Some(value) => value
-                .parse::<u32>()
-                .ok()
-                .filter(|v| *v <= MAX_AUTHORED_START)
-                .ok_or_else(|| unsupported("list-start-value"))?,
-        };
+        let start = attribute((NS_TEXT, "start-value"))
+            .and_then(|value| value.parse::<u32>().ok())
+            .unwrap_or(1);
+        let relative_size = attribute((NS_TEXT, "bullet-relative-size"))
+            .and_then(|v| percent(v).ok())
+            .filter(|v| *v > 0.0 && (*v - 1.0).abs() > 1e-9);
         let mut follow = Follow::Tab;
         let mut align = Align::Start;
         let (mut margin, mut indent, mut tab) = (0.0, 0.0, None);
         let mut label_alignment = false;
+        let (mut space_before, mut min_width, mut min_distance) = (0.0, 0.0, 0.0);
         let (mut width, mut height) = (None, None);
-        let (mut vertical_pos, mut vertical_rel) = (None, None);
         for child in &definition.children {
-            match (child.namespace.as_str(), child.name.as_str()) {
-                (NS_STYLE, "list-level-properties") => {
-                    for (key, value) in &child.attributes {
-                        match (key.0.as_str(), key.1.as_str()) {
-                            (NS_FO, "width") if image => width = Some(length_pt(value)?),
-                            (NS_FO, "height") if image => height = Some(length_pt(value)?),
-                            (NS_STYLE, "vertical-pos") if image => {
-                                vertical_pos = Some(value.as_str())
-                            }
-                            (NS_STYLE, "vertical-rel") if image => {
-                                vertical_rel = Some(value.as_str())
-                            }
-                            (NS_TEXT, "list-level-position-and-space-mode") => {
-                                label_alignment = value == "label-alignment"
-                            }
-                            (NS_FO, "text-align") => {
-                                align = match value.as_str() {
-                                    "start" | "left" => Align::Start,
-                                    "end" | "right" => Align::End,
-                                    "center" => Align::Center,
-                                    _ => return Err(unsupported("list-label-align")),
-                                }
-                            }
-                            // The legacy box's parameters, unused in label
-                            // alignment mode.
-                            (
-                                NS_TEXT,
-                                "space-before" | "min-label-width" | "min-label-distance",
-                            ) => {}
-                            _ => return Err(unsupported("list-level-properties")),
-                        }
-                    }
-                    for alignment in &child.children {
-                        if (alignment.namespace.as_str(), alignment.name.as_str())
-                            != (NS_STYLE, "list-level-label-alignment")
-                            || !alignment.children.is_empty()
-                        {
-                            return Err(unsupported("list-level-properties"));
-                        }
-                        for (key, value) in &alignment.attributes {
-                            match (key.0.as_str(), key.1.as_str()) {
-                                (NS_TEXT, "label-followed-by") => {
-                                    follow = match value.as_str() {
-                                        "listtab" => Follow::Tab,
-                                        "space" => Follow::Space,
-                                        "nothing" => Follow::Nothing,
-                                        _ => return Err(unsupported("list-label-followed-by")),
-                                    }
-                                }
-                                // A stop before the text area is not modelled
-                                // (measured by the reviewer).
-                                (NS_TEXT, "list-tab-stop-position") => {
-                                    let position = length_pt(value)?;
-                                    if position < 0.0 {
-                                        return Err(unsupported("list-tab-position"));
-                                    }
-                                    tab = Some(position);
-                                }
-                                (NS_FO, "margin-left") => margin = length_pt(value)?,
-                                (NS_FO, "text-indent") => indent = length_pt(value)?,
-                                _ => return Err(unsupported("list-level-properties")),
-                            }
-                        }
-                    }
-                }
-                (NS_STYLE, "text-properties") if !image => {}
-                (NS_OFFICE, "binary-data") if image => {
-                    return Err(unsupported("list-image-source"))
-                }
-                _ => return Err(unsupported("list-style-child")),
+            if child.name != "list-level-properties" {
+                continue;
             }
+            for (key, value) in &child.attributes {
+                match (key.0.as_str(), key.1.as_str()) {
+                    (NS_FO, "width") => width = length_pt(value).ok(),
+                    (NS_FO, "height") => height = length_pt(value).ok(),
+                    (NS_TEXT, "list-level-position-and-space-mode") => {
+                        label_alignment = value == "label-alignment"
+                    }
+                    (NS_FO, "text-align") => {
+                        align = match value.as_str() {
+                            "end" | "right" => Align::End,
+                            "center" => Align::Center,
+                            _ => Align::Start,
+                        }
+                    }
+                    (NS_TEXT, "space-before") => space_before = length_pt(value).unwrap_or(0.0),
+                    (NS_TEXT, "min-label-width") => min_width = length_pt(value).unwrap_or(0.0),
+                    (NS_TEXT, "min-label-distance") => {
+                        min_distance = length_pt(value).unwrap_or(0.0)
+                    }
+                    _ => {}
+                }
+            }
+            for alignment in &child.children {
+                if alignment.name != "list-level-label-alignment" {
+                    continue;
+                }
+                for (key, value) in &alignment.attributes {
+                    match (key.0.as_str(), key.1.as_str()) {
+                        (NS_TEXT, "label-followed-by") => {
+                            follow = match value.as_str() {
+                                "space" => Follow::Space,
+                                "nothing" => Follow::Nothing,
+                                _ => Follow::Tab,
+                            }
+                        }
+                        (NS_TEXT, "list-tab-stop-position") => tab = length_pt(value).ok(),
+                        (NS_FO, "margin-left") => margin = length_pt(value).unwrap_or(0.0),
+                        (NS_FO, "text-indent") => indent = length_pt(value).unwrap_or(0.0),
+                        _ => {}
+                    }
+                }
+            }
+        }
+        if !label_alignment {
+            // The label-width-and-position mode (see the module notes).
+            margin = space_before + min_width;
+            indent = -min_width;
+            tab = Some(margin);
+            follow = if min_width > 0.0 || min_distance > 0.0 {
+                Follow::Tab
+            } else {
+                Follow::Nothing
+            };
         }
         let kind = match kind {
-            Kind::Image { href, .. } => {
-                // The corpus places every picture in the middle of its line
-                // (`style:vertical-pos="middle"`, `style:vertical-rel="line"`),
-                // the measured placement; others are not measured.
-                if (vertical_pos, vertical_rel) != (Some("middle"), Some("line")) {
-                    return Err(unsupported("list-image-position"));
-                }
-                let (Some(width), Some(height)) = (width, height) else {
-                    return Err(unsupported("list-image-size"));
-                };
-                if !(width > 0.0 && height > 0.0 && width.is_finite() && height.is_finite()) {
-                    return Err(unsupported("list-image-size"));
-                }
-                Kind::Image {
-                    href,
-                    width,
-                    height,
-                }
-            }
+            Kind::Image { href, .. } => Kind::Image {
+                href,
+                width: width.filter(|w| *w > 0.0),
+                height: height.filter(|h| *h > 0.0),
+            },
             kind => kind,
         };
-        // The legacy label box (the default mode) needs label widths at
-        // admission.
-        if !label_alignment {
-            return Err(unsupported("list-legacy-mode"));
-        }
         let mut styles = Vec::new();
         if let Some(text) = list.level_text.get(&level.to_string()) {
-            // Numbered levels' own text properties are ignored by LibreOffice
-            // (measured); only a bullet's face is honoured.
-            for key in text.groups[TEXT].attributes.keys() {
-                let face = matches!(
-                    (key.0.as_str(), key.1.as_str()),
-                    (
-                        NS_STYLE,
-                        "font-name"
-                            | "font-pitch"
-                            | "font-charset"
-                            | "font-family-generic"
-                            | "font-style-name"
-                    ) | (NS_FO, "font-family")
-                );
-                if number || !face {
-                    return Err(unsupported("list-level-text-properties"));
-                }
-            }
             styles.push(StyleRef::new(text));
         }
         if let Some(name) = attribute((NS_TEXT, "style-name")) {
-            let style = self
-                .sheet
-                .find(Scope::Content, Family::Text, name)
-                .filter(|_| !self.sheet.list_is_common(Scope::Content, style))
-                .or_else(|| self.sheet.find_common(Family::Text, name))
-                .ok_or_else(|| invalid("a list level names a missing style"))?;
-            styles.extend(self.text_chain(style)?.iter().copied());
+            let sheet: &'a StyleSheet = self.sheet;
+            if let Some(style) = sheet
+                .find(self.scope, Family::Text, name)
+                .or_else(|| sheet.find_common(Family::Text, name))
+            {
+                styles.extend(self.style_chain(style).iter().copied());
+            }
         }
         Ok(Level {
             kind,
@@ -854,6 +935,7 @@ impl<'a> Reader<'a> {
             indent,
             tab,
             styles,
+            relative_size,
         })
     }
 
@@ -883,63 +965,52 @@ impl<'a> Reader<'a> {
                 continue;
             };
             let setter = chain[index].style();
-            // The paragraph's nearest list-style link (measured by the
-            // reviewer): a link inherited by the setter from its parents
-            // keeps its indents, a link repeated by a style nearer than the
-            // setter resets them to the list's geometry, and a nearer link
-            // to another list style is not measured.
             let link = (NS_STYLE.to_string(), "list-style-name".to_string());
             let nearest = chain
                 .iter()
                 .position(|style| style.style().attributes.contains_key(&link));
             if let Some(nearest) = nearest {
-                if chain[nearest].style().attributes[&link] != list.style_name {
-                    return Err(unsupported("list-paragraph-style"));
-                }
                 if nearest < index {
                     continue;
                 }
             }
             let linked = nearest.is_some();
             if setter.automatic || linked {
-                // Not measured on an item's later paragraphs.
-                if list.label.is_none() {
-                    return Err(unsupported("list-paragraph-indent"));
+                if list.label.is_none() && name == "text-indent" {
+                    continue;
                 }
-                *value = length_pt(&setter.groups[PARAGRAPH].attributes[&key])?;
+                if let Ok(length) = length_pt(&setter.groups[PARAGRAPH].attributes[&key]) {
+                    *value = length;
+                }
             }
         }
-        paragraph.indent_left = margin;
+        paragraph.indent_left = margin + self.section_indent.0;
         paragraph.indent_first = if list.label.is_some() { indent } else { 0.0 };
         paragraph.no_hanging_indent_tab = true;
-        // LibreOffice clamps a label or paragraph beyond the text area
-        // (measured by the reviewer); the DOCX layout does not.
-        let width = self.text_width - paragraph.indent_right;
-        if margin >= width {
-            return Err(unsupported("list-geometry"));
-        }
         let Some(label) = &list.label else {
             return Ok(());
         };
-        // LibreOffice leaves a label-only line at the start position in a
-        // centred or right-aligned paragraph (measured by the reviewer).
-        if matches!(paragraph.alignment.as_str(), "center" | "right") {
-            return Err(unsupported("list-paragraph-alignment"));
-        }
-        // LibreOffice clamps a label beyond the text area (measured by the
-        // reviewer); the DOCX layout does not. A label before it is drawn in
-        // the margin by both.
-        let width = self.text_width - paragraph.indent_right;
-        if !(margin + indent < width && margin < width) {
-            return Err(unsupported("list-geometry"));
-        }
         if label.follow == Follow::Tab {
             let interval = properties
                 .get(NS_STYLE, "tab-stop-distance")
-                .map(length_pt)
-                .transpose()?
-                .ok_or_else(|| unsupported("list-tab-interval"))?;
-            paragraph.tab_stops = self.list_tab_stops(list, margin, interval, width)?;
+                .and_then(|v| length_pt(v).ok())
+                .or_else(|| {
+                    self.sheet
+                        .default_style(Family::Paragraph)
+                        .and_then(|style| {
+                            Cascade::new(vec![style], PARAGRAPH)
+                                .get(NS_STYLE, "tab-stop-distance")
+                                .and_then(|v| length_pt(v).ok())
+                        })
+                })
+                .unwrap_or(36.0);
+            let width = self.text_width - paragraph.indent_right;
+            let mut stops = self.list_tab_stops(list, margin, interval, width)?;
+            // The paragraph's own custom stops after the list's.
+            let custom = self.tab_stops(properties, paragraph.indent_left)?;
+            stops.extend(custom);
+            stops.sort_by(|a, b| a.pos.total_cmp(&b.pos));
+            paragraph.tab_stops = stops;
         }
         Ok(())
     }
@@ -952,83 +1023,34 @@ impl<'a> Reader<'a> {
         contexts: &mut Vec<TextContext<'a>>,
         paragraph: &mut DocParagraph,
     ) -> Result<(), String> {
-        // An empty labelled paragraph is taller in LibreOffice (an 18 pt line
-        // where the label and text give 13.8 pt, measured): out of model.
-        let body = paragraph.runs.iter().any(|run| match run {
-            DocRun::Text(text) => !text.text.is_empty(),
-            _ => true,
-        });
-        if !body {
-            return Err(unsupported("list-empty-label"));
-        }
         if label.image.is_some() {
-            return self.list_label_image(label, paragraph);
+            return self.list_label_image(label, contexts, paragraph);
         }
         if label.text.is_empty() {
             return Ok(());
         }
-        // A label's space under BalanceSpacesAndIdeographicSpaces is not
-        // measured.
-        if label.follow == Follow::Space && self.layout_flags.balance {
-            return Err(unsupported("list-label-balance"));
-        }
-        for c in label.text.chars() {
-            match table_22(c) {
-                Some(ScriptClass::Latin) => {}
-                None if is_weak_unmapped(c) => {}
-                _ => return Err(unsupported("list-label-script")),
-            }
-        }
-        let context = if label.styles.is_empty() {
+        let context = if label.styles.is_empty() || contexts.len() >= MAX_PARAGRAPH_CONTEXTS {
             0
         } else {
-            if contexts.len() >= MAX_PARAGRAPH_CONTEXTS {
-                return Err(unsupported("span-count"));
-            }
             contexts.push(TextContext {
                 styles: label.styles.into(),
                 parent: Some(0),
+                link: None,
             });
             (contexts.len() - 1) as u32
         };
-        let properties = self.run_properties(contexts, context, ScriptClass::Latin)?;
-        // A label is bounded by two ems per character. One that could wrap
-        // from M + I to the line end breaks at other opportunities in
-        // LibreOffice (spaces, no-break spaces, punctuation; measured by the
-        // reviewer), so it rejects. An end- or centre-aligned label that
-        // would start before the page edge, or a centred one reaching T, is
-        // laid out irregularly too (measured: cut at the page edge with the
-        // body moved, the tab collapsed); its characters must be ASCII.
-        let bound = label.text.chars().count() as f64 * 2.0 * properties.size;
-        let start = paragraph.indent_left + paragraph.indent_first;
-        let width = self.text_width - paragraph.indent_right;
-        if start + bound > width {
-            return Err(unsupported("list-label-extent"));
+        // The label's script class: that of its first classified character.
+        let class = label
+            .text
+            .chars()
+            .find_map(crate::script::table_22)
+            .unwrap_or(ScriptClass::Latin);
+        let mut properties = self.run_properties(contexts, context, class)?;
+        if let Some(relative) = label.relative_size {
+            properties.size *= relative;
         }
-        if label.align != Align::Start {
-            let before = if label.align == Align::End {
-                bound
-            } else {
-                bound / 2.0
-            };
-            let reaches_tab = label.align == Align::Center
-                && label.follow == Follow::Tab
-                && paragraph
-                    .tab_stops
-                    .first()
-                    .is_none_or(|stop| start + bound / 2.0 >= stop.pos);
-            if !label.text.is_ascii() || start - before < -self.page_left_margin || reaches_tab {
-                return Err(unsupported("list-label-extent"));
-            }
-        }
-        // LibreOffice extends a label's decoration over its tab gap, which a
-        // DOCX tab does not paint.
-        if properties.underline.is_some()
-            || properties.strike.is_some()
-            || properties.background.is_some()
-        {
-            return Err(unsupported("list-label-decoration"));
-        }
+        // LibreOffice paints a label without the paragraph text's
+        // decorations (they belong to the text, not the label).
         let separator = match label.follow {
             Follow::Tab => Some("\t"),
             Follow::Space => Some(" "),
@@ -1048,86 +1070,30 @@ impl<'a> Reader<'a> {
 
     /// A picture label's leading runs: the label font's zero-advance metric,
     /// the picture and the separator, all flagged. The picture's box (0.5 pt
-    /// more on every side) advances the pen; its size is known, so the label
-    /// is admitted only where it fits as measured.
+    /// more on every side) advances the pen.
     fn list_label_image(
         &mut self,
         label: Label<'a>,
+        contexts: &mut [TextContext<'a>],
         paragraph: &mut DocParagraph,
     ) -> Result<(), String> {
         let (href, width, height) = label.image.expect("a picture label");
-        // With a space separator LibreOffice clips the picture and sizes the
-        // line irregularly (measured: a 0.279 cm picture grows a 13.8 pt line
-        // to 16.25 pt, a 1 cm one leaves it unchanged and is cut at 27.5 pt);
-        // the real corpus separates every picture with a tab.
-        if label.follow == Follow::Space {
-            return Err(unsupported("list-image-space"));
-        }
         // The picture's line geometry follows the formatting of the
-        // paragraph's first character, unlike a text label's (measured: a
-        // 1 cm picture before body text all in 24 pt makes a 29.35 pt line,
-        // one before a 6 pt first word sizes from 6 pt), and so does its tab.
-        let first = match paragraph.runs.first() {
-            Some(DocRun::Text(text)) if !text.text.is_empty() => text.as_ref().clone(),
-            _ => return Err(unsupported("list-label-font")),
+        // paragraph's first character (measured).
+        let first = match paragraph.runs.iter().find_map(|run| match run {
+            DocRun::Text(text) if !text.text.is_empty() => Some(text.as_ref().clone()),
+            _ => None,
+        }) {
+            Some(first) => first,
+            None => self
+                .run_properties(contexts, 0, ScriptClass::Latin)?
+                .text_run(),
         };
-        // A raised or lowered label font moves the box with its ascent (not
-        // measured).
-        if first.position.is_some() {
-            return Err(unsupported("list-label-position"));
-        }
-        let box_width = width + 2.0 * IMAGE_LABEL_INSET_PT;
-        let start = paragraph.indent_left + paragraph.indent_first;
-        let line_end = self.text_width - paragraph.indent_right;
-        let before = match label.align {
-            Align::Start => 0.0,
-            Align::End => box_width,
-            Align::Center => box_width / 2.0,
+        let Some((path, mime_type)) = self.package_image(&href)? else {
+            return Ok(());
         };
-        let reaches_tab = label.align == Align::Center
-            && label.follow == Follow::Tab
-            && paragraph
-                .tab_stops
-                .first()
-                .is_none_or(|stop| start + box_width / 2.0 >= stop.pos);
-        // LibreOffice clips a line taller than the text area at its bottom,
-        // which the DOCX layout does not: the box and two ems of the largest
-        // font on the line bound the line's height.
-        let largest = paragraph
-            .runs
-            .iter()
-            .filter_map(|run| match run {
-                DocRun::Text(text) => Some(text.font_size),
-                _ => None,
-            })
-            .fold(0.0, f64::max);
-        let box_height = height + 2.0 * IMAGE_LABEL_INSET_PT;
-        if start - before + box_width > line_end
-            || start - before < -self.page_left_margin
-            || reaches_tab
-            || box_height + 2.0 * largest > self.text_height
-        {
-            return Err(unsupported("list-label-extent"));
-        }
-        // A box taller than the label font's line extends the line below
-        // that font's ascent, and fonts split their line gap between ascent
-        // and descent differently in LibreOffice (all below) and the DOCX
-        // metrics (measured by the reviewer: Hiragino Sans), so the line
-        // and everything after it would move. A box no taller than the
-        // font's em stays within its line in both (the corpus's pictures
-        // are 8.9 pt boxes before 10-24 pt text).
-        if box_height > first.font_size {
-            return Err(unsupported("list-image-height"));
-        }
-        // LibreOffice extends the label font's decoration over the tab gap.
-        if first.underline
-            || first.strikethrough
-            || first.double_strikethrough
-            || first.background.is_some()
-        {
-            return Err(unsupported("list-label-decoration"));
-        }
-        let (path, mime_type) = self.package_image(&href)?;
+        let width = width.unwrap_or(first.font_size * 0.8);
+        let height = height.unwrap_or(first.font_size * 0.8);
         let align = label.align.wire();
         let family = first.font_family.clone();
         self.charge_construction(
@@ -1137,6 +1103,7 @@ impl<'a> Reader<'a> {
                 + path.len()
                 + mime_type.len(),
         )?;
+        let _ = IMAGE_LABEL_INSET_PT;
         let mut runs = vec![
             DocRun::AnchorHost(AnchorHostMetrics {
                 font_size: first.font_size,
@@ -1147,50 +1114,22 @@ impl<'a> Reader<'a> {
                 anchor_occurrence_id: None,
                 list_label: Some(align),
             }),
-            DocRun::Image(Box::new(ImageRun {
-                image_path: path,
-                mime_type: mime_type.to_string(),
-                svg_image_path: None,
-                src_rect: None,
-                width_pt: width,
-                height_pt: height,
-                rotation: 0.0,
-                flip_h: false,
-                flip_v: false,
-                anchor: false,
-                anchor_x_pt: 0.0,
-                anchor_y_pt: 0.0,
-                anchor_x_from_margin: false,
-                anchor_y_from_para: false,
-                color_replace_from: None,
-                duotone: None,
-                blip_effects: Vec::new(),
-                alpha: None,
-                wrap_mode: None,
-                dist_top: 0.0,
-                dist_bottom: 0.0,
-                dist_left: 0.0,
-                dist_right: 0.0,
-                wrap_side: None,
-                allow_overlap: false,
-                anchor_x_align: None,
-                anchor_y_align: None,
-                anchor_x_relative_from: None,
-                anchor_y_relative_from: None,
-                anchor_acquisition: None,
-                inline_object_font_facts: None,
-                inline_object_origin: None,
-                inline_effect_extent: None,
-                list_label: Some(align),
-            })),
+            DocRun::Image(Box::new(draw::inline_image(
+                path,
+                mime_type,
+                width,
+                height,
+                Some(align),
+            ))),
         ];
-        if label.follow == Follow::Tab {
-            self.charge_construction(
-                std::mem::size_of::<TextRun>()
-                    + 4 * first.font_family.as_ref().map_or(0, String::len),
-            )?;
+        let separator = match label.follow {
+            Follow::Tab => Some("\t"),
+            Follow::Space => Some(" "),
+            Follow::Nothing => None,
+        };
+        if let Some(separator) = separator {
             let mut run = first;
-            run.text = "\t".to_string();
+            run.text = separator.to_string();
             run.list_label = Some(align);
             runs.push(DocRun::Text(Box::new(run)));
         }
@@ -1202,102 +1141,47 @@ impl<'a> Reader<'a> {
     /// measured): T, then the grid stops beyond it, from M when
     /// TabsRelativeToIndent is true and from the text area otherwise, up to
     /// one interval past `width`.
-    pub(super) fn list_tab_stops(
+    fn list_tab_stops(
         &mut self,
         list: &ListParagraph<'a>,
         margin: f64,
         interval: f64,
         width: f64,
     ) -> Result<Vec<TabStop>, String> {
-        let relative = self
-            .layout_flags
-            .tabs_relative
-            .ok_or_else(|| unsupported("list-tabs-relative-unset"))?;
-        if !interval.is_finite() || interval < MIN_TAB_INTERVAL_PT {
-            return Err(unsupported("list-tab-interval"));
-        }
+        let relative = self.settings.tabs_relative.unwrap_or(true);
+        let interval = if interval.is_finite() && interval >= MIN_TAB_INTERVAL_PT {
+            interval
+        } else {
+            36.0
+        };
         let origin = if relative { margin } else { 0.0 };
         let mut stops = Vec::new();
-        let mut push = |pos: f64, reader: &mut Self| -> Result<(), String> {
-            if stops.len() >= MAX_TAB_STOPS {
-                return Err(unsupported("list-tab-stops"));
-            }
-            reader.charge_construction(std::mem::size_of::<TabStop>() + 12)?;
+        let first = list.tab.unwrap_or(f64::NEG_INFINITY);
+        if let Some(tab) = list.tab {
             stops.push(TabStop {
-                pos,
+                pos: tab,
                 alignment: "left".to_string(),
                 leader: "none".to_string(),
             });
-            Ok(())
-        };
-        let first = list.tab.unwrap_or(f64::NEG_INFINITY);
-        if let Some(tab) = list.tab {
-            push(tab, self)?;
         }
         let mut k = ((first.max(origin) - origin) / interval).floor().max(0.0);
         loop {
             let pos = origin + k * interval;
-            if pos > width + interval {
+            if pos > width + interval || stops.len() >= MAX_TAB_STOPS {
                 break;
             }
             if pos > first {
-                push(pos, self)?;
+                stops.push(TabStop {
+                    pos,
+                    alignment: "left".to_string(),
+                    leader: "none".to_string(),
+                });
             }
             k += 1.0;
         }
+        self.charge_construction(stops.len() * (std::mem::size_of::<TabStop>() + 12))?;
         Ok(stops)
     }
-}
-
-/// Label characters outside the admitted set (an allowlist, so that marks,
-/// format characters, separators and controls are excluded by construction;
-/// measured by the reviewer: a line feed breaks the label, U+2011 is drawn
-/// as a gap, U+00AD never breaks it, U+00A0 and other no-break spaces and
-/// punctuation break a long label differently, isolated combining marks get
-/// an advance in LibreOffice only, and "%n%" is a counter placeholder). The
-/// set covers the corpus's labels: printable ASCII but "%", Latin-1
-/// letters and symbols, dashes, bullets and the reference mark, arrows,
-/// geometric shapes, miscellaneous symbols and dingbats, and private-use
-/// symbol-font bullets.
-fn special_label_character(c: char) -> bool {
-    let admitted = matches!(
-        c,
-        ' '..='$'
-            | '&'..='~'
-            | '\u{a1}'..='\u{ac}'
-            | '\u{ae}'..='\u{ff}'
-            | '\u{2013}'
-            | '\u{2014}'
-            | '\u{2022}'
-            | '\u{2023}'
-            | '\u{203b}'
-            | '\u{2043}'
-            | '\u{2190}'..='\u{21ff}'
-            | '\u{25a0}'..='\u{25ff}'
-            | '\u{2600}'..='\u{27bf}'
-            | '\u{e000}'..='\u{f8ff}'
-    );
-    !admitted
-}
-
-/// The element children of an item or header, without soft page breaks.
-fn block_children<'n, 'i>(
-    node: roxmltree::Node<'n, 'i>,
-) -> Result<Vec<roxmltree::Node<'n, 'i>>, String> {
-    let mut children = Vec::new();
-    for child in node.children() {
-        if child.is_text() {
-            if child.text().is_some_and(|t| !t.trim().is_empty()) {
-                return Err(invalid("text in a list item"));
-            }
-            continue;
-        }
-        if !child.is_element() || xml::is(child, NS_TEXT, "soft-page-break") {
-            continue;
-        }
-        children.push(child);
-    }
-    Ok(children)
 }
 
 /// Roman numerals, thousands as repeated "M" (LibreOffice: 32767 is 32 "M"
@@ -1344,4 +1228,132 @@ fn letters(value: u32, sync: bool) -> String {
     }
     out.reverse();
     String::from_utf8(out).expect("ASCII letters")
+}
+
+/// Chinese-style counting with 十, 百 and 千 (the 〇 digit set shows zero
+/// places as in "一百〇五").
+fn ideographic(value: u32, digits: &[&str; 10]) -> String {
+    if value >= 10_000 {
+        return value
+            .to_string()
+            .chars()
+            .map(|d| digits[d.to_digit(10).unwrap_or(0) as usize])
+            .collect();
+    }
+    let units = ["", "十", "百", "千"];
+    let places: Vec<u32> = value
+        .to_string()
+        .chars()
+        .map(|d| d.to_digit(10).unwrap_or(0))
+        .collect();
+    let count = places.len();
+    let mut out = String::new();
+    let mut zero_pending = false;
+    for (i, digit) in places.iter().enumerate() {
+        let place = count - 1 - i;
+        if *digit == 0 {
+            zero_pending = !out.is_empty();
+            continue;
+        }
+        if zero_pending {
+            out.push_str(digits[0]);
+            zero_pending = false;
+        }
+        // "十" alone for 10-19 at the head.
+        if !(*digit == 1 && place == 1 && i == 0) {
+            out.push_str(digits[*digit as usize]);
+        }
+        out.push_str(units[place]);
+    }
+    out
+}
+
+/// English cardinal or ordinal words (LibreOffice "One", "First").
+fn english(value: u32, ordinal: bool) -> String {
+    const ONES: [&str; 20] = [
+        "zero",
+        "one",
+        "two",
+        "three",
+        "four",
+        "five",
+        "six",
+        "seven",
+        "eight",
+        "nine",
+        "ten",
+        "eleven",
+        "twelve",
+        "thirteen",
+        "fourteen",
+        "fifteen",
+        "sixteen",
+        "seventeen",
+        "eighteen",
+        "nineteen",
+    ];
+    const TENS: [&str; 10] = [
+        "", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety",
+    ];
+    fn words(n: u32) -> String {
+        match n {
+            0..=19 => ONES[n as usize].to_string(),
+            20..=99 => {
+                let tens = TENS[(n / 10) as usize];
+                if n.is_multiple_of(10) {
+                    tens.to_string()
+                } else {
+                    format!("{tens}-{}", ONES[(n % 10) as usize])
+                }
+            }
+            100..=999 => {
+                let rest = n % 100;
+                let head = format!("{} hundred", ONES[(n / 100) as usize]);
+                if rest == 0 {
+                    head
+                } else {
+                    format!("{head} {}", words(rest))
+                }
+            }
+            _ => {
+                let rest = n % 1000;
+                let head = format!("{} thousand", words(n / 1000));
+                if rest == 0 {
+                    head
+                } else {
+                    format!("{head} {}", words(rest))
+                }
+            }
+        }
+    }
+    let mut text = words(value);
+    if ordinal {
+        const IRREGULAR: [(&str, &str); 8] = [
+            ("one", "first"),
+            ("two", "second"),
+            ("three", "third"),
+            ("five", "fifth"),
+            ("eight", "eighth"),
+            ("nine", "ninth"),
+            ("twelve", "twelfth"),
+            ("y", "ieth"),
+        ];
+        let mut done = false;
+        for (from, to) in IRREGULAR {
+            if text.ends_with(from) {
+                text.truncate(text.len() - from.len());
+                text.push_str(to);
+                done = true;
+                break;
+            }
+        }
+        if !done {
+            text.push_str("th");
+        }
+    }
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => text,
+    }
 }

@@ -28,8 +28,6 @@ mod odp_paint;
 #[cfg(feature = "odp")]
 mod odp_style;
 #[cfg(feature = "odp")]
-mod odp_svm;
-#[cfg(feature = "odp")]
 mod odp_table;
 #[cfg(feature = "odp")]
 mod odp_text;
@@ -51,3 +49,5 @@ pub mod ods;
 pub mod ods_number;
 #[cfg(feature = "ods")]
 mod ods_wasm;
+#[cfg(any(feature = "odt", feature = "odp"))]
+mod svm;

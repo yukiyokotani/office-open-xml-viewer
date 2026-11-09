@@ -916,6 +916,8 @@ export function tableFormatInput(table: TableLayoutSource): TableFormatInput {
     return {
       height: rowWire?.height ? privateTableRowHeight(rowWire.height) : publicTableRowHeight(row),
       cantSplit: row.cantSplit === true,
+      ...((row as { __cutsInPlace?: boolean }).__cutsInPlace === true
+        ? { cutsInPlace: true as const } : {}),
       repeatedHeader: row.isHeader === true,
       cellSpacingPt: wordTableCellSpacingPt(
         rowWire?.cellSpacing,
@@ -1460,6 +1462,7 @@ export function bodyLayoutAcquisitionInput(doc: DocxDocumentModel): BodyLayoutAc
     sectionIndex,
     compatibilityMode: doc.settings?.compatibilityMode,
     footnoteLayoutLikeWW8: doc.settings?.footnoteLayoutLikeWW8,
+    ...(doc.settings?.__footnoteColumnBands === true ? { producerFootnoteColumnBands: true } : {}),
     evenAndOddHeaders: doc.section.evenAndOddHeaders,
     endnoteIds: (doc.endnotes ?? []).map((note) => note.id),
     repeatedFootnoteLastEntries: repeatedFootnoteLastEntries(doc.body, sequence),
