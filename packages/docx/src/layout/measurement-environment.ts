@@ -75,9 +75,11 @@ export function paragraphMeasurementEnvironment(
   // every other policy below continues to use the original state.
   closingPairSourceStory: StoryContext | undefined = state.storyContext,
 ): ParagraphMeasurementEnvironment {
-  return {
-    ...(closingPairSourceStory?.story === 'body' && closingPairSourceStory.containers.length === 0
-      ? { closingPairRootSource: true as const } : {}),
+  // Optional flags are assigned after the literal rather than spread into it:
+  // this runs once per measured paragraph, and conditional spreads cost an
+  // extra object allocation and copy each.
+  const compat = state.layoutSettings.compat;
+  const environment: { -readonly [K in keyof ParagraphMeasurementEnvironment]: ParagraphMeasurementEnvironment[K] } = {
     pageIndex: state.pageIndex,
     totalPages: state.totalPages,
     displayPageNumber: state.displayPageNumber,
@@ -88,34 +90,36 @@ export function paragraphMeasurementEnvironment(
     noteNumbers: state.noteNumbers,
     noteNumbering: state.noteNumbering,
     noteReferenceNumber: state.noteReferenceNumber,
-    ...(state.storyContext?.story === 'body'
-      && state.storyContext.containers.length === 0
-      && state.storyContext.inlineObjectRunLeadingAdmitted === true
-      ? { inlineObjectRunLeadingAdmitted: true as const } : {}),
     pageWritingMode: sectionWritingMode(state.sectionLayout),
     // §17.6.20 btLr uses the horizontal line model rotated wholesale.
     verticalCJK: state.verticalCJK && !state.verticalAllRotated,
     verticalPageFrame: state.verticalCJK === true,
     documentHasEastAsianText: state.docEastAsian,
-    useFeLayout: state.layoutSettings.compat.useFeLayout,
-    balanceSingleByteDoubleByteWidth:
-      state.layoutSettings.compat.balanceSingleByteDoubleByteWidth,
+    useFeLayout: compat.useFeLayout,
+    balanceSingleByteDoubleByteWidth: compat.balanceSingleByteDoubleByteWidth,
     characterSpacingControl: state.layoutSettings.characterSpacingControl,
-    lineWrapLikeWord6: state.layoutSettings.compat.lineWrapLikeWord6,
-    enableOpenTypeFeatures: state.layoutSettings.compat.enableOpenTypeFeatures,
-    ...(state.layoutSettings.compat.ulTrailSpace ? { ulTrailSpace: true } : {}),
-    ...(state.layoutSettings.compat.doNotExpandShiftReturn ? { doNotExpandShiftReturn: true } : {}),
-    doNotSuppressIndentation: state.layoutSettings.compat.doNotSuppressIndentation,
-    ww11IndentRules: state.layoutSettings.compat.ww11IndentRules,
-    doNotUseIndentAsNumberingTabStop: state.layoutSettings.compat.doNotUseIndentAsNumberingTabStop,
-    noTabHangInd: state.layoutSettings.compat.noTabHangInd,
-    ...(state.layoutSettings.compat.compatibilityMode === undefined
-      ? {}
-      : { compatibilityMode: state.layoutSettings.compat.compatibilityMode }),
+    lineWrapLikeWord6: compat.lineWrapLikeWord6,
+    enableOpenTypeFeatures: compat.enableOpenTypeFeatures,
+    doNotSuppressIndentation: compat.doNotSuppressIndentation,
+    ww11IndentRules: compat.ww11IndentRules,
+    doNotUseIndentAsNumberingTabStop: compat.doNotUseIndentAsNumberingTabStop,
+    noTabHangInd: compat.noTabHangInd,
     resolvedLocalFonts: state.resolvedLocalFonts,
     layoutServices: state.layoutServices,
     verticalGlyphMeasurement: state.verticalGlyphMeasurement,
   };
+  if (closingPairSourceStory?.story === 'body' && closingPairSourceStory.containers.length === 0) {
+    environment.closingPairRootSource = true;
+  }
+  if (state.storyContext?.story === 'body'
+    && state.storyContext.containers.length === 0
+    && state.storyContext.inlineObjectRunLeadingAdmitted === true) {
+    environment.inlineObjectRunLeadingAdmitted = true;
+  }
+  if (compat.ulTrailSpace) environment.ulTrailSpace = true;
+  if (compat.doNotExpandShiftReturn) environment.doNotExpandShiftReturn = true;
+  if (compat.compatibilityMode !== undefined) environment.compatibilityMode = compat.compatibilityMode;
+  return environment;
 }
 
 /** Build-segment environment for direct acquisition measurement. `btLr` clears

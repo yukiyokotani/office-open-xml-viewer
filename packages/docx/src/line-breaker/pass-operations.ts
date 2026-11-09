@@ -2182,6 +2182,10 @@ export function seamPairAdvance(
   if (state.widthPolicy === 'intrinsic' && (previous.semanticSlotSpans || s.semanticSlotSpans)) {
     return state.measurement.wordBoundaryAdvance(previous, s);
   }
+  // Cheap declines first: the seam oracle pairs only kerned text with
+  // exactly one side of the seam a U+0020, and returns no pair otherwise.
+  if (previous.textShapeRequest?.kerning !== true || !previous.text || !s.text
+    || previous.text.endsWith(' ') === s.text.startsWith(' ')) return 0;
   const { characterGrid, scale } = state;
   if (snapToCharsClass(s, characterGrid) || snapToCharsClass(previous, characterGrid)) return 0;
   let pair = state.measurement.kernedSpaceSeamAdvance(previous, s);
