@@ -523,3 +523,21 @@ fn page_backgrounds_draw_behind_every_page_and_paragraphs_indent_from_floats() {
     );
     assert!(paragraphs(&document.body)[0].indents_from_floats);
 }
+
+#[test]
+fn an_unbalanced_section_ending_the_document_stays_the_last_section() {
+    let automatic = r##"<style:style style:name="S2" style:family="section"><style:section-properties text:dont-balance-text-columns="true"><style:columns fo:column-count="2" fo:column-gap="12pt"/></style:section-properties></style:style>"##;
+    let body = r##"<text:p>one</text:p><text:section text:name="s" text:style-name="S2"><text:p>two</text:p></text:section>"##;
+    let document = read_fixture(Fixture {
+        automatic,
+        body,
+        ..Fixture::default()
+    });
+    // No continuous section follows (it would balance the columns), and
+    // LibreOffice's per-column footnote areas are requested.
+    assert_eq!(document.section.columns.as_ref().map(|c| c.count), Some(2));
+    assert!(document
+        .settings
+        .as_ref()
+        .is_some_and(|s| s.footnote_column_bands));
+}

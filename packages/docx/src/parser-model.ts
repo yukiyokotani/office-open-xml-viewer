@@ -1462,6 +1462,7 @@ export function bodyLayoutAcquisitionInput(doc: DocxDocumentModel): BodyLayoutAc
     sectionIndex,
     compatibilityMode: doc.settings?.compatibilityMode,
     footnoteLayoutLikeWW8: doc.settings?.footnoteLayoutLikeWW8,
+    ...(doc.settings?.__footnoteColumnBands === true ? { producerFootnoteColumnBands: true } : {}),
     evenAndOddHeaders: doc.section.evenAndOddHeaders,
     endnoteIds: (doc.endnotes ?? []).map((note) => note.id),
     repeatedFootnoteLastEntries: repeatedFootnoteLastEntries(doc.body, sequence),

@@ -1598,6 +1598,7 @@ function* paginateBodyPassSteps(
   const perColumnFootnoteBands = (): boolean => wordPerColumnFootnoteBandsApply(
     input.compatibilityMode,
     activeRegion(state).columns.length,
+    input.producerFootnoteColumnBands === true,
   );
   const activeFootnoteBandId = (): string => {
     const pageBand = pageFootnoteBandId(state.flow.pageIndex);

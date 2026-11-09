@@ -207,6 +207,8 @@ export interface BodyLayoutInput {
   /** `w:compatSetting` compatibilityMode value from settings (§17.15.3.4). */
   readonly compatibilityMode?: number;
   readonly footnoteLayoutLikeWW8?: boolean;
+  /** Producer footnote layout: every column owns its note band. */
+  readonly producerFootnoteColumnBands?: boolean;
   readonly source: SourceRef;
   readonly initialSection: BodySectionLayoutInput;
   readonly sequence: readonly BodyLayoutSequenceEntry[];
@@ -252,6 +254,8 @@ export interface NoteNumberingInput {
 export interface BodyLayoutAcquisitionInput {
   readonly compatibilityMode?: number;
   readonly footnoteLayoutLikeWW8?: boolean;
+  /** Producer footnote layout: every column owns its note band. */
+  readonly producerFootnoteColumnBands?: boolean;
   readonly sectionIndex: BodySectionIndexInput;
   readonly evenAndOddHeaders: boolean;
   readonly parserDiagnostics?: readonly LayoutDiagnostic[];
@@ -408,6 +412,7 @@ export function projectBodyLayoutInput(acquired: BodyLayoutAcquisitionInput): Bo
     source: { story: 'body', storyInstance: 'body', path: [] },
     compatibilityMode: acquired.compatibilityMode,
     footnoteLayoutLikeWW8: acquired.footnoteLayoutLikeWW8,
+    ...(acquired.producerFootnoteColumnBands ? { producerFootnoteColumnBands: true } : {}),
     initialSection,
     sequence,
     parserDiagnostics: acquired.parserDiagnostics ?? [],

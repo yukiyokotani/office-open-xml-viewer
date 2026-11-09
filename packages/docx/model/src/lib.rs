@@ -581,6 +581,15 @@ pub struct DocumentSettings {
     /// `None` when absent or not a non-negative integer.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub compatibility_mode: Option<u32>,
+    /// Private producer flag (never set by the DOCX parsers): each column of
+    /// a multi-column section owns the footnote band of the references it
+    /// holds, as LibreOffice lays out footnotes in columns. The DOCX layout
+    /// otherwise selects the band by `compatibility_mode`.
+    #[serde(
+        rename = "__footnoteColumnBands",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    pub footnote_column_bands: bool,
 }
 
 /// Single track-changes event extracted from a body revision wrapper.

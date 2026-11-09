@@ -226,6 +226,10 @@ pub fn read(package: &OdfPackage) -> Result<(Document, Vec<OwnedDocumentResource
         // manual break unjustified, as DOCX doNotExpandShiftReturn does
         // (§17.15.3.5).
         do_not_expand_shift_return: reader.settings.no_justify_breaks.then_some(true),
+        // LibreOffice gives each column its own footnote area: a note sits
+        // under the column holding its reference and continues at the top of
+        // the next column's area.
+        footnote_column_bands: true,
         ..DocumentSettings::default()
     });
     document.footnotes = std::mem::take(&mut reader.footnotes);
@@ -494,7 +498,18 @@ impl<'a> Reader<'a> {
         self.walk_blocks(node)?;
         self.area = enclosing_area;
         self.section_indent = enclosing_indent;
-        if sectioned {
+        // §20.336 text:dont-balance-text-columns: an unbalanced section that
+        // ends the document stays the last DOCX section, which the layout
+        // does not balance (a continuous section after it would).
+        let unbalanced_end = properties
+            .and_then(|p| {
+                p.attributes
+                    .get(&(NS_TEXT.to_string(), "dont-balance-text-columns".to_string()))
+            })
+            .is_some_and(|v| v == "true")
+            && node.next_siblings().skip(1).all(|n| !n.is_element())
+            && node.parent().is_some_and(|p| xml::is(p, NS_OFFICE, "text"));
+        if sectioned && !unbalanced_end {
             self.start_section(page::SectionStart {
                 master: self.current_master.clone(),
                 kind: "continuous",
@@ -1211,7 +1226,7 @@ impl<'a> Reader<'a> {
             .package
             .session()
             .run_operation("odf-image", |operation| operation.read_bytes(&path))?;
-        let Some(mime_type) = image::sniff(&bytes) else {
+        let Some((bytes, mime_type)) = picture(bytes) else {
             return Ok(None);
         };
         self.charge_construction(bytes.len() + 2 * path.len() + 64)?;
@@ -1231,7 +1246,7 @@ impl<'a> Reader<'a> {
         let Some(bytes) = image::base64(data) else {
             return Ok(None);
         };
-        let Some(mime_type) = image::sniff(&bytes) else {
+        let Some((bytes, mime_type)) = picture(bytes) else {
             return Ok(None);
         };
         let key = format!("odt-binary/{}", self.images.len());
@@ -1699,3 +1714,13 @@ fn font_facts_of(run: &TextRun) -> RunFontFacts {
 #[cfg(test)]
 #[path = "odt_tests.rs"]
 mod tests;
+
+/// Picture bytes in a format the renderer draws, with their media type. A
+/// StarView metafile (LibreOffice's object replacement format) is converted
+/// to SVG.
+fn picture(bytes: Vec<u8>) -> Option<(Vec<u8>, &'static str)> {
+    if let Some(mime_type) = image::sniff(&bytes) {
+        return Some((bytes, mime_type));
+    }
+    crate::svm::to_svg(&bytes).map(|converted| (converted.svg, "image/svg+xml"))
+}
