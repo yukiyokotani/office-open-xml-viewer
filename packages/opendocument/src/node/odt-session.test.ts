@@ -38,7 +38,7 @@ describe('ODT through the DOCX Node session', () => {
       styles: '<text:list-style style:name="L"><text:list-level-style-bullet text:level="1" text:bullet-char="•"/></text:list-style>',
       body: '<text:list text:style-name="L"><text:list-item><text:p>item</text:p></text:list-item></text:list>',
     }));
-    expect(list.body[0]?.runs.map(r => r.text)).toEqual(['•', '\t', 'item']);
+    expect(list.body[0]?.runs.map(r => r.text)).toEqual(['•', 'item']);
     const header = await open(buildOdtFixture({ body: '<text:p>x</text:p>', masterContent: '<style:header><text:p>h</text:p></style:header>' }));
     expect(header.body[0]?.runs[0]?.text).toBe('x');
     const encrypted = buildOdtFixture({
