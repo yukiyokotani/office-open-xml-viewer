@@ -1192,6 +1192,14 @@ pub struct DocParagraph {
         skip_serializing_if = "std::ops::Not::not"
     )]
     pub justified_compression: bool,
+    /// Fixed and minimum line heights place all extra space above the text
+    /// (LibreOffice: the baseline sits the text's descent above the line
+    /// box's bottom). DOCX never sets it; Word's partition applies.
+    #[serde(
+        rename = "__lineExtraAbove",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    pub line_extra_above: bool,
     /// Explicit tab stops from w:tabs. Empty means use default tab interval.
     pub tab_stops: Vec<TabStop>,
     pub runs: Vec<DocRun>,

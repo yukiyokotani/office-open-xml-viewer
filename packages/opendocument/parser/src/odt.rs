@@ -1025,6 +1025,10 @@ impl<'a> Reader<'a> {
                 .get(NS_LOEXT, "word-spacing-minimum")
                 .and_then(|v| percent(v).ok())
                 .is_some_and(|v| v < 1.0);
+        let line_extra_above = matches!(
+            line_spacing.as_ref().map(|spacing| spacing.rule.as_str()),
+            Some("exact" | "atLeast")
+        );
         let paragraph = DocParagraph {
             alignment: alignment.into(),
             indent_left,
@@ -1041,6 +1045,10 @@ impl<'a> Reader<'a> {
             bidi: rtl.then_some(true),
             justified_compression: justified_compression
                 && matches!(alignment, "both" | "distribute"),
+            // LibreOffice places a fixed or minimum line's extra height above
+            // the text (measured: the text sits on the line box's bottom
+            // less its descent).
+            line_extra_above,
             // §20.302 style:punctuation-wrap hanging, §20.296 style:line-break
             // strict, §20.346 style:text-autospace.
             overflow_punct: cascade.get(NS_STYLE, "punctuation-wrap") != Some("simple"),

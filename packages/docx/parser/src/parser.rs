@@ -6554,6 +6554,7 @@ fn parse_paragraph_cond_at_depth_with_diagnostics(
         numbering,
         no_hanging_indent_tab: false,
         justified_compression: false,
+        line_extra_above: false,
         tab_stops,
         runs,
         run_revisions,
