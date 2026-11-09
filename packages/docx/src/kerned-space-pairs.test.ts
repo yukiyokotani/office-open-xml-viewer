@@ -311,3 +311,24 @@ const INTRINSIC_CONTEXT: ParagraphLayoutContext = {
   isJustified: false, stretchLastLine: false, tabStops: [], hasRuby: false, hasEastAsianText: false,
   kinsoku: { enabled: true, lineStartForbidden: new Set(), lineEndForbidden: new Set() }, defaultTabPt: 36,
 };
+
+describe('kerned slot-seam pair measurement work', () => {
+  it('measures a repeated slot-seam pair once per line-breaking pass', () => {
+    // Every U+2019 + U+0020 seam below is the same face and clusters, so a
+    // pass measures that pair once and reuses it at each later seam.
+    const seams = 12;
+    const text = Array.from({ length: seams }, () => 'x ’').join(' ') + ' x';
+    const ctx = context();
+    const measure = ctx.measureText.bind(ctx);
+    let pairProbes = 0;
+    ctx.measureText = (value: string) => {
+      if (value === '’ ') pairProbes += 1;
+      return measure(value);
+    };
+    const doc = modelOf(paragraphOf([run(text, { kerning: 2 })]), 2000, 15);
+    const result = lines(layoutDocument(doc, createLayoutServices(doc, { measureContext: ctx })));
+    expect(result).toHaveLength(1);
+    expect(pairProbes).toBeGreaterThan(0);
+    expect(pairProbes).toBeLessThan(seams);
+  });
+});
