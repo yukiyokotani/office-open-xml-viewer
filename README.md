@@ -250,6 +250,30 @@ No migration is required without the add-on. See the [legacy Office guide](https
 for viewer and Node examples, and [Experimental legacy Office sources](docs/legacy-office-conversion.md)
 for the full support boundaries.
 
+### Experimental OpenDocument spreadsheet source
+
+OpenDocument spreadsheets (`.ods`, `.ots`) open in the ordinary XLSX viewers
+and loaders through the experimental `@silurus/ooxml-opendocument` add-on's
+`ods` entry. Install matching versions of both packages:
+
+```sh
+npm i @silurus/ooxml @silurus/ooxml-opendocument
+```
+
+```typescript
+import { XlsxViewer } from '@silurus/ooxml/xlsx';
+import { ods } from '@silurus/ooxml-opendocument/ods';
+
+const container = document.getElementById('viewer') as HTMLElement;
+const viewer = new XlsxViewer(container, { ods });
+await viewer.load(odsOrXlsxBytes);
+```
+
+The reader maps sheets, cells, formats, drawings and charts directly into the
+workbook model; no OOXML package is generated. Use `createOds({ wasmUrl,
+moduleUrl })` for custom asset URLs. See
+[Experimental OpenDocument sources](docs/opendocument.md) for what is read.
+
 ### Optional rendering modules
 
 Classic DrawingML 2-D chart families are included in every format entry.

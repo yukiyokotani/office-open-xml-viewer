@@ -35,3 +35,15 @@ mod odp_text;
 mod odp_units;
 #[cfg(feature = "odp")]
 mod odp_wasm;
+#[cfg(feature = "odf-chart")]
+pub mod odf_chart;
+#[cfg(feature = "odf-chart")]
+pub mod odf_props;
+#[cfg(feature = "odf-chart")]
+pub mod odf_text;
+#[cfg(feature = "ods")]
+pub mod ods;
+#[cfg(feature = "odf-chart")]
+pub mod ods_number;
+#[cfg(feature = "ods")]
+mod ods_wasm;
