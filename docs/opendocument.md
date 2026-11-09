@@ -146,3 +146,66 @@ raised/lowered text, fixed and minimum line heights, proportional line
 heights below 100%, tables, frames and images, notes, fields,
 comments, tracked changes, headers and footers, Asian and complex scripts,
 and other formatting reject for now. The subset grows release by release.
+
+## Spreadsheets (ODS)
+
+OpenDocument spreadsheets open with the ordinary XLSX viewers and loaders:
+
+| Input | Entry | Reader / factory | Option | Loaders and viewers |
+| --- | --- | --- | --- | --- |
+| ODS, OTS | `@silurus/ooxml-opendocument/ods` | `ods` / `createOds()` | `ods` | `XlsxViewer`, `XlsxWorkbook.load`, `openXlsxWorkbook`, `materializeXlsxWorkbook` |
+
+```typescript
+import { XlsxViewer } from '@silurus/ooxml/xlsx';
+import { ods } from '@silurus/ooxml-opendocument/ods';
+
+const container = document.getElementById('viewer') as HTMLElement;
+const viewer = new XlsxViewer(container, { ods });
+await viewer.load(odsOrXlsxBytes);
+```
+
+The source claims a package by its leading `mimetype`
+(`application/vnd.oasis.opendocument.spreadsheet` or `-template`) and loads
+`ods-source-module.mjs` and `opendocument_ods_bg.wasm` the same way as the ODT
+reader. Unlike the ODT reader it is not fail-closed: every spreadsheet feature
+the workbook model can express is read from its ODF definition, and only
+corrupt, encrypted or unsafe packages, or packages over the resource limits,
+reject. Where ODF leaves a choice to the application, LibreOffice Calc is the
+reference.
+
+What is read:
+
+- tables as sheets (hidden tables, tab colours, right-to-left tables),
+  columns and rows with their repeat counts (kept as runs, so LibreOffice's
+  million-row fillers cost nothing), widths, heights, hidden and grouped
+  (outlined) rows and columns, frozen panes, grid and zero-value display;
+- cell values of every `office:value-type` (float, percentage, currency,
+  date, time, boolean, string), error results, and the cached value of
+  formula cells (formulas are kept as text and never calculated);
+- merged cells (`table:number-columns-spanned` / `-rows-spanned`), rich text
+  spans, line breaks and spaces inside a cell, hyperlinks and annotations;
+- cell styles: fonts, colours, bold, italic, underline, strike-through,
+  super/subscript, fills, borders (including diagonals), alignment, wrap,
+  shrink to fit, rotation, stacked text and indents;
+- data styles (number, currency, percentage, scientific, fraction, date,
+  time, boolean and text styles, with `style:map` conditions), converted to
+  the format codes the workbook renderer evaluates;
+- named ranges and expressions, print ranges, database ranges with filter
+  buttons, content validations, conditional formats (cell conditions, colour
+  scales, data bars, icon sets) and sparklines;
+- pictures, text boxes and shapes anchored to cells or to the sheet, and
+  embedded charts (bar, column, line, area, pie, ring, scatter, bubble,
+  radar, filled radar and stock charts and their combinations, with titles,
+  legends, axes, gridlines, data labels, series and point colours) read from
+  the sheet's cells or the chart's own data table.
+
+Column widths are authored lengths; the reader asks the renderer for the
+default cell font's digit width and encodes each width so that the grid is
+painted at the authored size.
+
+Not representable in the workbook model, and therefore not shown: page
+layout, headers and footers (the workbook viewer shows the grid, not printed
+pages), data pilot tables, and drawings whose geometry LibreOffice stores as
+an enhanced-geometry formula path (custom shapes other than preset shapes).
+Embedded objects that are not charts are drawn from their replacement image
+when the package stores it in a browser-decodable format.

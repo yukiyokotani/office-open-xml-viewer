@@ -1,0 +1,1259 @@
+//! ODF charts (Part 3 §11 `chart:chart`, in an embedded object's
+//! `content.xml`) as the shared OOXML chart model
+//! (`ooxml_common::chart::ChartModel`) that the XLSX, PPTX and DOCX renderers
+//! draw.
+//!
+//! Shared by the spreadsheet and presentation readers. A caller passes the
+//! object's package directory (the `draw:object` `xlink:href` without `./`,
+//! e.g. `Object 1`) and, for a spreadsheet, a [`RangeResolver`] over its
+//! tables. Data comes from the cell ranges each series names
+//! (`chart:values-cell-range-address`, `chart:categories`,
+//! `chart:domain`); a range on the chart's own `local-table` (internal data,
+//! as in presentations) and any range the resolver cannot read are taken
+//! from that local table, which LibreOffice always writes as the chart's
+//! data cache.
+//!
+//! ```ignore
+//! let chart = odf_chart::read_chart_object(&package, "Object 1", None)?;
+//! ```
+
+use crate::odf_props::{
+    self, get, get_element, hex_color, length_pt, percent, Style, StyleStore, NS_CHART,
+};
+use crate::ods_number::DataStyles;
+use crate::package::OdfPackage;
+use crate::xml::{self, NS_OFFICE, NS_TABLE, NS_TEXT};
+use ooxml_common::chart::{
+    canonical_chart_type, ChartModel, ChartPlotGroup, ChartSeries, ChartSeriesDataLabels,
+    ChartThreeD,
+};
+use std::collections::HashMap;
+
+/// Implementation bounds on one chart: series, points per series.
+const MAX_SERIES: usize = 4096;
+const MAX_POINTS: usize = 1_048_576;
+/// Implementation bound on the local table's cells.
+const MAX_LOCAL_CELLS: usize = 4_000_000;
+
+/// LibreOffice's default series palette (used for series without a fill).
+const DEFAULT_COLORS: [&str; 12] = [
+    "004586", "FF420E", "FFD320", "579D1C", "7E0021", "83CAFF", "314004", "AECF00", "4B1F6F",
+    "FF950E", "C5000B", "0084D1",
+];
+
+/// One cell of a range, as a chart reads it.
+#[derive(Clone, Debug, PartialEq)]
+pub enum CellData {
+    Empty,
+    Number(f64),
+    Text(String),
+}
+
+/// Cell ranges outside the chart (a spreadsheet's tables).
+pub trait RangeResolver {
+    /// The cells of an ODF range address (`Sheet1.A1:Sheet1.A9`) in row-major
+    /// order, or `None` when the address names no readable range.
+    fn cells(&self, address: &str) -> Option<Vec<CellData>>;
+    /// Hidden flags of the same cells, when known.
+    fn hidden(&self, address: &str) -> Option<Vec<bool>>;
+}
+
+/// Read the chart object stored under `object_dir` (`Object 1`). `Ok(None)`
+/// when the object is not a chart (another embedded document type).
+pub fn read_chart_object(
+    package: &OdfPackage,
+    object_dir: &str,
+    resolver: Option<&dyn RangeResolver>,
+) -> Result<Option<ChartModel>, String> {
+    let dir = object_dir.trim_start_matches("./").trim_end_matches('/');
+    let content_path = format!("{dir}/content.xml");
+    if !package.contains(&content_path) {
+        return Ok(None);
+    }
+    let content = package.read_text(&content_path)?;
+    let styles_path = format!("{dir}/styles.xml");
+    let styles = if package.contains(&styles_path) {
+        Some(package.read_text(&styles_path)?)
+    } else {
+        None
+    };
+    read_chart_document(&content, styles.as_deref(), resolver)
+}
+
+/// Read a chart from the object's `content.xml` (and `styles.xml`) text.
+pub fn read_chart_document(
+    content: &str,
+    styles: Option<&str>,
+    resolver: Option<&dyn RangeResolver>,
+) -> Result<Option<ChartModel>, String> {
+    let content_doc = xml::parse(content)?;
+    let styles_doc = match styles {
+        Some(text) => Some(xml::parse(text)?),
+        None => None,
+    };
+    let mut store = StyleStore::default();
+    let mut data = DataStyles::default();
+    let mut faces = HashMap::new();
+    if let Some(doc) = &styles_doc {
+        odf_props::font_faces(doc.root_element(), &mut faces);
+        for child in doc.root_element().children().filter(|n| n.is_element()) {
+            if xml::is(child, NS_OFFICE, "styles") {
+                store.add(child, false)?;
+                data.add(child);
+            }
+        }
+    }
+    let root = content_doc.root_element();
+    odf_props::font_faces(root, &mut faces);
+    for child in root
+        .children()
+        .filter(|n| xml::is(*n, NS_OFFICE, "automatic-styles"))
+    {
+        store.add(child, true)?;
+        data.add(child);
+    }
+    let Some(chart) = root
+        .children()
+        .find(|n| xml::is(*n, NS_OFFICE, "body"))
+        .and_then(|b| b.children().find(|n| xml::is(*n, NS_OFFICE, "chart")))
+        .and_then(|c| c.children().find(|n| xml::is(*n, NS_CHART, "chart")))
+    else {
+        return Ok(None);
+    };
+    let reader = Reader {
+        store: &store,
+        faces: &faces,
+        local: LocalTable::read(chart)?,
+        resolver,
+    };
+    reader.chart(chart, &mut data).map(Some)
+}
+
+struct Reader<'a> {
+    store: &'a StyleStore,
+    faces: &'a HashMap<String, String>,
+    local: LocalTable,
+    resolver: Option<&'a dyn RangeResolver>,
+}
+
+/// The chart's `local-table` (§11.1 data table): a grid with the header
+/// row and column included, plus each cell's `svg:desc` source range.
+#[derive(Default)]
+struct LocalTable {
+    cells: Vec<Vec<(CellData, String)>>,
+    /// Source range address → (column, first data row).
+    sources: HashMap<String, (usize, usize)>,
+}
+
+impl LocalTable {
+    fn read(chart: roxmltree::Node<'_, '_>) -> Result<Self, String> {
+        let mut table = Self::default();
+        let Some(node) = chart.children().find(|n| xml::is(*n, NS_TABLE, "table")) else {
+            return Ok(table);
+        };
+        let mut count = 0usize;
+        for row in node
+            .descendants()
+            .filter(|n| xml::is(*n, NS_TABLE, "table-row"))
+        {
+            let mut cells = Vec::new();
+            for cell in row
+                .children()
+                .filter(|n| xml::is(*n, NS_TABLE, "table-cell"))
+            {
+                let repeat = cell
+                    .attribute((NS_TABLE, "number-columns-repeated"))
+                    .and_then(|v| v.parse::<usize>().ok())
+                    .unwrap_or(1)
+                    .clamp(1, 1024);
+                let text = crate::odf_text::paragraph_text(cell);
+                let value = match cell.attribute((NS_OFFICE, "value-type")) {
+                    Some("float") | Some("percentage") | Some("currency") => cell
+                        .attribute((NS_OFFICE, "value"))
+                        .and_then(|v| v.parse::<f64>().ok())
+                        .map_or(CellData::Empty, CellData::Number),
+                    Some("string") => CellData::Text(text.clone()),
+                    _ if !text.is_empty() => CellData::Text(text.clone()),
+                    _ => CellData::Empty,
+                };
+                let desc = cell
+                    .descendants()
+                    .find(|n| xml::is(*n, crate::xml::NS_SVG, "desc"))
+                    .and_then(|n| n.text());
+                if let Some(desc) = desc {
+                    for range in desc.split_whitespace() {
+                        table
+                            .sources
+                            .insert(range.to_string(), (cells.len(), table.cells.len()));
+                    }
+                }
+                for _ in 0..repeat {
+                    cells.push((value.clone(), text.clone()));
+                }
+                count += repeat;
+                if count > MAX_LOCAL_CELLS {
+                    return Err("OpenDocument chart exceeds the data table limit".into());
+                }
+            }
+            table.cells.push(cells);
+        }
+        Ok(table)
+    }
+
+    fn get(&self, row: usize, col: usize) -> Option<&(CellData, String)> {
+        self.cells.get(row)?.get(col)
+    }
+
+    /// The local-table cells of a range on `local-table` (A1 = top-left).
+    fn range(&self, address: &str) -> Option<Vec<(CellData, String)>> {
+        let (sheet, (r1, c1), (r2, c2)) = crate::odf_text::parse_range(address)?;
+        if sheet.as_deref().is_some_and(|s| s != "local-table") {
+            return None;
+        }
+        let mut out = Vec::new();
+        for row in r1..=r2 {
+            for col in c1..=c2 {
+                out.push(
+                    self.get(row as usize - 1, col as usize - 1)
+                        .cloned()
+                        .unwrap_or((CellData::Empty, String::new())),
+                );
+                if out.len() > MAX_POINTS {
+                    return None;
+                }
+            }
+        }
+        Some(out)
+    }
+
+    /// Cached cells of an external source range, via the `svg:desc`
+    /// annotations LibreOffice writes on the first cell of each column.
+    fn cached(&self, address: &str) -> Option<Vec<(CellData, String)>> {
+        let (col, row) = *self.sources.get(address)?;
+        let (_, (r1, c1), (r2, c2)) = crate::odf_text::parse_range(address)?;
+        let count = ((r2 - r1 + 1) as usize).max((c2 - c1 + 1) as usize);
+        let horizontal = r1 == r2 && c2 > c1;
+        Some(
+            (0..count)
+                .map(|i| {
+                    let (r, c) = if horizontal {
+                        (row, col + i)
+                    } else {
+                        (row + i, col)
+                    };
+                    self.get(r, c)
+                        .cloned()
+                        .unwrap_or((CellData::Empty, String::new()))
+                })
+                .collect(),
+        )
+    }
+}
+
+fn number_text(value: f64) -> String {
+    if value.fract() == 0.0 && value.abs() < 1e15 {
+        format!("{}", value as i64)
+    } else {
+        let text = format!("{value}");
+        text
+    }
+}
+
+fn hpt(pt: f64) -> i32 {
+    (pt * 100.0).round() as i32
+}
+
+fn emu(pt: f64) -> u32 {
+    (pt * 12_700.0).round().max(0.0) as u32
+}
+
+/// Text properties of a chart element style.
+struct TextFont {
+    size: Option<i32>,
+    bold: Option<bool>,
+    italic: Option<bool>,
+    color: Option<String>,
+    face: Option<String>,
+}
+
+/// Fill and stroke of a chart element style (§20.130, §20.164).
+struct Paint {
+    fill: Option<String>,
+    fill_hidden: bool,
+    line: Option<String>,
+    line_hidden: bool,
+    line_width: Option<u32>,
+    dashed: bool,
+}
+
+impl Reader<'_> {
+    fn chain(&self, node: roxmltree::Node<'_, '_>) -> Vec<&Style> {
+        self.store
+            .chain("chart", node.attribute((NS_CHART, "style-name")))
+    }
+
+    fn font(&self, chain: &[&Style]) -> TextFont {
+        TextFont {
+            size: get(chain, "text:fo:font-size").and_then(length_pt).map(hpt),
+            bold: get(chain, "text:fo:font-weight")
+                .map(|w| w == "bold" || w.parse::<u32>().is_ok_and(|v| v >= 600)),
+            italic: get(chain, "text:fo:font-style").map(|s| s == "italic" || s == "oblique"),
+            color: get(chain, "text:fo:color").and_then(hex_color),
+            face: get(chain, "text:style:font-name")
+                .map(|name| {
+                    self.faces
+                        .get(name)
+                        .cloned()
+                        .unwrap_or_else(|| name.to_string())
+                })
+                .or_else(|| get(chain, "text:fo:font-family").map(odf_props::unquote_family)),
+        }
+    }
+
+    fn paint(&self, chain: &[&Style]) -> Paint {
+        let fill_kind = get(chain, "graphic:draw:fill");
+        let stroke = get(chain, "graphic:draw:stroke");
+        Paint {
+            fill: if fill_kind == Some("none") {
+                None
+            } else {
+                get(chain, "graphic:draw:fill-color").and_then(hex_color)
+            },
+            fill_hidden: fill_kind == Some("none"),
+            line: if stroke == Some("none") {
+                None
+            } else {
+                get(chain, "graphic:svg:stroke-color").and_then(hex_color)
+            },
+            line_hidden: stroke == Some("none"),
+            line_width: get(chain, "graphic:svg:stroke-width")
+                .and_then(length_pt)
+                .map(emu),
+            dashed: stroke == Some("dash"),
+        }
+    }
+
+    /// The text of a title-like element (`text:p` children).
+    fn text(node: roxmltree::Node<'_, '_>) -> String {
+        crate::odf_text::paragraph_text(node)
+    }
+
+    /// Resolve a range: the resolver, else the local table.
+    fn range(&self, address: &str) -> Vec<(CellData, String)> {
+        // Several space-separated ranges are concatenated (§18.3.5).
+        let mut out = Vec::new();
+        for part in address.split_whitespace() {
+            let local_first =
+                part.starts_with("local-table.") || part.starts_with("'local-table'.");
+            let resolved = if local_first {
+                self.local.range(part)
+            } else {
+                self.resolver
+                    .and_then(|r| r.cells(part))
+                    .map(|cells| {
+                        let cached = self.local.cached(part);
+                        cells
+                            .into_iter()
+                            .enumerate()
+                            .map(|(i, cell)| {
+                                // Display text from the cache when the source
+                                // value is a number (formatted categories).
+                                let text = match &cell {
+                                    CellData::Text(t) => t.clone(),
+                                    CellData::Number(n) => cached
+                                        .as_ref()
+                                        .and_then(|c| c.get(i))
+                                        .map(|(_, t)| t.clone())
+                                        .filter(|t| !t.is_empty())
+                                        .unwrap_or_else(|| number_text(*n)),
+                                    CellData::Empty => String::new(),
+                                };
+                                (cell, text)
+                            })
+                            .collect()
+                    })
+                    .or_else(|| self.local.cached(part))
+                    .or_else(|| self.local.range(part))
+            };
+            out.extend(resolved.unwrap_or_default());
+            if out.len() > MAX_POINTS {
+                out.truncate(MAX_POINTS);
+                break;
+            }
+        }
+        out
+    }
+
+    fn chart(
+        &self,
+        chart: roxmltree::Node<'_, '_>,
+        data: &mut DataStyles,
+    ) -> Result<ChartModel, String> {
+        let class = chart
+            .attribute((NS_CHART, "class"))
+            .unwrap_or("chart:bar")
+            .trim_start_matches("chart:");
+        let plot = chart
+            .children()
+            .find(|n| xml::is(*n, NS_CHART, "plot-area"));
+        let plot_chain = plot.map(|p| self.chain(p)).unwrap_or_default();
+        let flag = |key: &str| get(&plot_chain, &format!("chart:chart:{key}")) == Some("true");
+        let horizontal = flag("vertical");
+        let grouping = if flag("percentage") {
+            "percentStacked"
+        } else if flag("stacked") {
+            "stacked"
+        } else {
+            "clustered"
+        };
+        let family = |class: &str| -> &'static str {
+            match class {
+                "bar" | "gantt" => "bar",
+                "line" => "line",
+                "area" => "area",
+                "circle" => "pie",
+                "ring" => "doughnut",
+                "scatter" => "scatter",
+                "bubble" => "bubble",
+                "radar" | "filled-radar" => "radar",
+                "stock" => "stock",
+                "surface" => "surface",
+                _ => "bar",
+            }
+        };
+        let primary = family(class);
+        let chart_type = match primary {
+            "bar" | "line" | "area" => canonical_chart_type(
+                primary,
+                if horizontal { "bar" } else { "col" },
+                if primary == "bar" {
+                    grouping
+                } else if grouping == "clustered" {
+                    "standard"
+                } else {
+                    grouping
+                },
+            ),
+            other => other.to_string(),
+        };
+        let mut model = ChartModel {
+            chart_type,
+            cat_axis_cross_between: if matches!(primary, "bar") {
+                "between".into()
+            } else {
+                "midCat".into()
+            },
+            val_axis_major_tick_mark: "out".into(),
+            cat_axis_major_tick_mark: "out".into(),
+            plot_visible_only: Some(
+                get(&plot_chain, "chart:chart:include-hidden-cells") != Some("true"),
+            ),
+            ..ChartModel::default()
+        };
+        if matches!(primary, "line" | "area") && grouping != "clustered" {
+            // Category axis crossing for stacked line/area is unchanged.
+        }
+        if primary == "radar" {
+            model.radar_style = Some(
+                if class == "filled-radar" {
+                    "filled"
+                } else {
+                    "marker"
+                }
+                .into(),
+            );
+        }
+        if primary == "scatter" {
+            model.scatter_style = Some(
+                if get(&plot_chain, "chart:chart:lines") == Some("false") {
+                    "marker"
+                } else {
+                    "lineMarker"
+                }
+                .into(),
+            );
+        }
+        if flag("three-dimensional") {
+            model.three_d = Some(ChartThreeD {
+                view_3d_present: Some(true),
+                ..ChartThreeD::default()
+            });
+        }
+        model.disp_blanks_as = match get(&plot_chain, "chart:chart:treat-empty-cells") {
+            Some("use-zero") => Some("zero".into()),
+            Some("ignore") => Some("span".into()),
+            Some("leave-gap") => Some("gap".into()),
+            _ => None,
+        };
+        // Chart area (§11.1 chart:chart style).
+        let area = self.paint(&self.chain(chart));
+        model.chart_bg = area.fill;
+        model.chart_fill_hidden = area.fill_hidden.then_some(true);
+        model.chart_border_color = area.line;
+        model.chart_border_width_emu = area.line_width;
+        model.chart_border_hidden = area.line_hidden.then_some(true);
+        // Title.
+        if let Some(title) = chart.children().find(|n| xml::is(*n, NS_CHART, "title")) {
+            let text = Self::text(title);
+            let font = self.font(&self.chain(title));
+            let span_font = title
+                .descendants()
+                .find(|n| xml::is(*n, NS_TEXT, "span"))
+                .and_then(|s| s.attribute((NS_TEXT, "style-name")))
+                .map(|name| self.font(&self.store.chain("text", Some(name))));
+            let font = merge_font(font, span_font);
+            model.title_present = true;
+            model.title = Some(text);
+            model.title_font_size_hpt = font.size;
+            model.title_font_bold = font.bold;
+            model.title_font_italic = font.italic;
+            model.title_font_color = font.color;
+            model.title_font_face = font.face;
+        }
+        // Legend.
+        if let Some(legend) = chart.children().find(|n| xml::is(*n, NS_CHART, "legend")) {
+            model.show_legend = true;
+            model.legend_pos = Some(
+                match legend.attribute((NS_CHART, "legend-position")) {
+                    Some("start") => "l",
+                    Some("top") => "t",
+                    Some("bottom") => "b",
+                    Some("top-end") => "tr",
+                    Some("top-start") => "t",
+                    Some("bottom-start") | Some("bottom-end") => "b",
+                    _ => "r",
+                }
+                .into(),
+            );
+            let chain = self.chain(legend);
+            let font = self.font(&chain);
+            model.legend_font_size_hpt = font.size;
+            model.legend_font_bold = font.bold;
+            model.legend_font_italic = font.italic;
+            model.legend_font_color = font.color;
+            model.legend_font_face = font.face;
+            let paint = self.paint(&chain);
+            model.legend_fill_color = paint.fill;
+            model.legend_fill_hidden = paint.fill_hidden.then_some(true);
+            model.legend_line_color = paint.line;
+            model.legend_line_hidden = paint.line_hidden.then_some(true);
+        }
+        let Some(plot) = plot else {
+            model.authored_without_series = true;
+            return Ok(model);
+        };
+        // Plot area background is the wall (§11.6).
+        if let Some(wall) = plot.children().find(|n| xml::is(*n, NS_CHART, "wall")) {
+            let paint = self.paint(&self.chain(wall));
+            model.plot_area_bg = paint.fill;
+            model.plot_area_fill_hidden = paint.fill_hidden.then_some(true);
+            model.plot_area_line_color = paint.line;
+            model.plot_area_line_width_emu = paint.line_width;
+            model.plot_area_line_hidden = paint.line_hidden.then_some(true);
+        }
+        // Pie geometry: angle offset (§20.17 chart:angle-offset, degrees
+        // counter-clockwise from 3 o'clock) as the first-slice angle
+        // (degrees clockwise from 12 o'clock).
+        if matches!(primary, "pie" | "doughnut") {
+            let offset = get(&plot_chain, "chart:chart:angle-offset")
+                .and_then(|v| v.parse::<f64>().ok())
+                .unwrap_or(90.0);
+            model.first_slice_angle = Some(((90.0 - offset).rem_euclid(360.0)).round() as u32);
+            if primary == "doughnut" {
+                model.hole_size = get(&plot_chain, "chart:chart:hole-size")
+                    .or_else(|| get(&plot_chain, "chart:loext:hole-size"))
+                    .and_then(percent)
+                    .map(|v| (v * 100.0).round() as u32)
+                    .or(Some(50));
+            }
+        }
+        self.axes(plot, &mut model, data);
+        self.series(
+            plot,
+            &plot_chain,
+            class,
+            primary,
+            grouping,
+            horizontal,
+            &mut model,
+            data,
+        )?;
+        Ok(model)
+    }
+
+    fn axes(&self, plot: roxmltree::Node<'_, '_>, model: &mut ChartModel, data: &mut DataStyles) {
+        for axis in plot.children().filter(|n| xml::is(*n, NS_CHART, "axis")) {
+            let dimension = axis.attribute((NS_CHART, "dimension")).unwrap_or("");
+            let name = axis.attribute((NS_CHART, "name")).unwrap_or("");
+            let chain = self.chain(axis);
+            let prop = |key: &str| get(&chain, &format!("chart:chart:{key}"));
+            let number = |key: &str| prop(key).and_then(|v| v.parse::<f64>().ok());
+            let font = self.font(&chain);
+            let paint = self.paint(&chain);
+            let visible = prop("visible") != Some("false");
+            let labels = prop("display-label") != Some("false");
+            let tick = |inner: &str, outer: &str| -> String {
+                match (prop(inner) == Some("true"), prop(outer) == Some("true")) {
+                    (true, true) => "cross",
+                    (true, false) => "in",
+                    (false, true) => "out",
+                    (false, false) => "none",
+                }
+                .into()
+            };
+            let major_tick = tick("tick-marks-major-inner", "tick-marks-major-outer");
+            let minor_tick = tick("tick-marks-minor-inner", "tick-marks-minor-outer");
+            let title = axis
+                .children()
+                .find(|n| xml::is(*n, NS_CHART, "title"))
+                .map(|t| (Self::text(t), self.font(&self.chain(t))));
+            let grid = |class: &str| {
+                axis.children()
+                    .find(|n| {
+                        xml::is(*n, NS_CHART, "grid")
+                            && n.attribute((NS_CHART, "class")).unwrap_or("major") == class
+                    })
+                    .map(|g| self.paint(&self.chain(g)))
+            };
+            let format_code = chain
+                .iter()
+                .find_map(|s| s.data_style.as_deref())
+                .filter(|_| prop("link-data-style-to-source") != Some("true"))
+                .and_then(|name| data.code(name))
+                .map(|(code, _)| crate::ods_number::literal_code(&code))
+                .filter(|code| code != "General");
+            let secondary = name.starts_with("secondary");
+            match (dimension, secondary) {
+                ("x", false) => {
+                    model.cat_axis_hidden = !visible;
+                    model.cat_axis_line_hidden = paint.line_hidden;
+                    model.cat_axis_line_color = paint.line;
+                    model.cat_axis_line_width_emu = paint.line_width;
+                    model.cat_axis_major_tick_mark = major_tick;
+                    model.cat_axis_minor_tick_mark = Some(minor_tick);
+                    if !labels {
+                        model.cat_axis_tick_label_pos = Some("none".into());
+                    }
+                    model.cat_axis_font_size_hpt = font.size;
+                    model.cat_axis_font_bold = font.bold;
+                    model.cat_axis_font_italic = font.italic;
+                    model.cat_axis_font_color = font.color;
+                    model.cat_axis_font_face = font.face;
+                    model.cat_axis_orientation =
+                        (prop("reverse-direction") == Some("true")).then(|| "maxMin".into());
+                    model.cat_axis_min = number("minimum");
+                    model.cat_axis_max = number("maximum");
+                    model.cat_axis_major_unit = number("interval-major");
+                    model.cat_axis_log_base = (prop("logarithmic") == Some("true")).then_some(10.0);
+                    model.cat_axis_format_code = format_code;
+                    if let Some(rotation) = get(&chain, "chart:style:rotation-angle")
+                        .and_then(|v| v.parse::<f64>().ok())
+                        .filter(|r| *r != 0.0)
+                    {
+                        model.cat_axis_label_rotation = Some((-rotation * 60_000.0).round() as i32);
+                    }
+                    if let Some((text, font)) = title {
+                        model.cat_axis_title = Some(text);
+                        model.cat_axis_title_font_size_hpt = font.size;
+                        model.cat_axis_title_font_bold = font.bold;
+                        model.cat_axis_title_font_color = font.color;
+                    }
+                    if let Some(grid) = grid("major") {
+                        model.cat_axis_major_gridlines = Some(true);
+                        model.cat_axis_gridline_color = grid.line;
+                        model.cat_axis_gridline_width_emu = grid.line_width;
+                    }
+                    if let Some(grid) = grid("minor") {
+                        model.cat_axis_minor_gridlines = Some(true);
+                        model.cat_axis_minor_gridline_color = grid.line;
+                    }
+                }
+                ("y", false) => {
+                    model.val_axis_hidden = !visible;
+                    model.val_axis_line_hidden = paint.line_hidden;
+                    model.val_axis_line_color = paint.line;
+                    model.val_axis_line_width_emu = paint.line_width;
+                    model.val_axis_major_tick_mark = major_tick;
+                    model.val_axis_minor_tick_mark = Some(minor_tick);
+                    if !labels {
+                        model.val_axis_tick_label_pos = Some("none".into());
+                    }
+                    model.val_axis_font_size_hpt = font.size;
+                    model.val_axis_font_bold = font.bold;
+                    model.val_axis_font_italic = font.italic;
+                    model.val_axis_font_color = font.color;
+                    model.val_axis_font_face = font.face;
+                    model.val_axis_orientation =
+                        (prop("reverse-direction") == Some("true")).then(|| "maxMin".into());
+                    model.val_min = number("minimum");
+                    model.val_max = number("maximum");
+                    model.val_axis_major_unit = number("interval-major");
+                    if let (Some(major), Some(divisor)) =
+                        (number("interval-major"), number("interval-minor-divisor"))
+                    {
+                        if divisor > 0.0 {
+                            model.val_axis_minor_unit = Some(major / divisor);
+                        }
+                    }
+                    model.val_axis_log_base = (prop("logarithmic") == Some("true")).then_some(10.0);
+                    model.val_axis_format_code = format_code;
+                    model.bar_gap_width = number("gap-width").map(|v| v.round() as i32);
+                    model.bar_overlap = number("overlap").map(|v| v.round() as i32);
+                    if let Some((text, font)) = title {
+                        model.val_axis_title = Some(text);
+                        model.val_axis_title_font_size_hpt = font.size;
+                        model.val_axis_title_font_bold = font.bold;
+                        model.val_axis_title_font_color = font.color;
+                    }
+                    if let Some(grid) = grid("major") {
+                        model.val_axis_major_gridlines = Some(true);
+                        model.val_axis_gridline_color = grid.line;
+                        model.val_axis_gridline_width_emu = grid.line_width;
+                    } else {
+                        model.val_axis_major_gridlines = Some(false);
+                    }
+                    if let Some(grid) = grid("minor") {
+                        model.val_axis_minor_gridlines = Some(true);
+                        model.val_axis_minor_gridline_color = grid.line;
+                    }
+                }
+                ("y", true) => {
+                    let value = serde_json::json!({
+                        "hidden": !visible,
+                        "majorTickMark": major_tick,
+                        "minorGridlines": grid("minor").is_some(),
+                        "majorGridlines": grid("major").is_some(),
+                        "lineHidden": paint.line_hidden,
+                        "min": number("minimum"),
+                        "max": number("maximum"),
+                        "majorUnit": number("interval-major"),
+                        "title": title.as_ref().map(|(t, _)| t.clone()),
+                        "fontColor": font.color,
+                        "fontSizeHpt": font.size,
+                        "fontBold": font.bold,
+                        "lineColor": paint.line,
+                        "formatCode": format_code,
+                        "orientation": (prop("reverse-direction") == Some("true")).then_some("maxMin"),
+                        "logBase": (prop("logarithmic") == Some("true")).then_some(10.0),
+                        "tickLabelPos": (!labels).then_some("none"),
+                    });
+                    model.secondary_val_axis = serde_json::from_value(value).ok();
+                }
+                _ => {}
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn series(
+        &self,
+        plot: roxmltree::Node<'_, '_>,
+        plot_chain: &[&Style],
+        class: &str,
+        primary: &str,
+        grouping: &str,
+        horizontal: bool,
+        model: &mut ChartModel,
+        data: &mut DataStyles,
+    ) -> Result<(), String> {
+        let categories: Vec<String> = plot
+            .descendants()
+            .find(|n| xml::is(*n, NS_CHART, "categories"))
+            .and_then(|c| c.attribute((NS_TABLE, "cell-range-address")))
+            .map(|address| {
+                self.range(address)
+                    .into_iter()
+                    .map(|(_, text)| text)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let nodes: Vec<_> = plot
+            .children()
+            .filter(|n| xml::is(*n, NS_CHART, "series"))
+            .take(MAX_SERIES)
+            .collect();
+        let mut series_models = Vec::new();
+        let mut groups: Vec<(String, usize, usize, bool)> = Vec::new();
+        for (index, node) in nodes.iter().enumerate() {
+            let node = *node;
+            let series_class = node
+                .attribute((NS_CHART, "class"))
+                .map(|c| c.trim_start_matches("chart:"))
+                .unwrap_or(class);
+            let kind = match series_class {
+                "bar" | "gantt" => "bar",
+                "line" => "line",
+                "area" => "area",
+                "circle" => "pie",
+                "ring" => "doughnut",
+                "scatter" => "scatter",
+                "bubble" => "bubble",
+                "radar" | "filled-radar" => "radar",
+                "stock" => "stock",
+                _ => primary,
+            };
+            let values: Vec<Option<f64>> = node
+                .attribute((NS_CHART, "values-cell-range-address"))
+                .map(|address| {
+                    self.range(address)
+                        .into_iter()
+                        .map(|(cell, _)| match cell {
+                            CellData::Number(n) => Some(n),
+                            _ => None,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let name = node
+                .attribute((NS_CHART, "label-cell-address"))
+                .map(|address| {
+                    self.range(address)
+                        .into_iter()
+                        .map(|(_, text)| text)
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                })
+                .unwrap_or_else(|| format!("Series{}", index + 1));
+            let domains: Vec<Vec<(CellData, String)>> = node
+                .children()
+                .filter(|n| xml::is(*n, NS_CHART, "domain"))
+                .filter_map(|d| d.attribute((NS_TABLE, "cell-range-address")))
+                .map(|address| self.range(address))
+                .collect();
+            let chain = self.chain(node);
+            let paint = self.paint(&chain);
+            let line_drawn = matches!(kind, "line" | "scatter")
+                || kind == "radar" && series_class != "filled-radar";
+            let palette = DEFAULT_COLORS[index % DEFAULT_COLORS.len()].to_string();
+            let mut series = ChartSeries {
+                name,
+                series_type: Some(
+                    match kind {
+                        "doughnut" => "doughnut",
+                        other => other,
+                    }
+                    .to_string(),
+                ),
+                use_secondary_axis: (node.attribute((NS_CHART, "attached-axis"))
+                    == Some("secondary-y"))
+                .then_some(true),
+                ..ChartSeries::default()
+            };
+            series.color = if line_drawn {
+                paint.line.clone().or(paint.fill.clone())
+            } else {
+                paint.fill.clone()
+            }
+            .or(Some(palette));
+            series.line_color = paint.line.clone();
+            series.line_width_emu = paint.line_width;
+            if paint.line_hidden && line_drawn {
+                series.line_hidden = Some(true);
+            }
+            let _ = paint.dashed;
+            // Scatter and bubble: domains are x (and for bubble y, x) values.
+            match kind {
+                "scatter" => {
+                    if let Some(x) = domains.first() {
+                        series.categories = Some(x.iter().map(|(_, t)| t.clone()).collect());
+                    }
+                    series.values = values;
+                }
+                "bubble" => {
+                    // §19.12: values are the bubble sizes; the first domain
+                    // the y values, the second the x values.
+                    series.bubble_sizes = Some(values);
+                    series.values = domains
+                        .first()
+                        .map(|d| {
+                            d.iter()
+                                .map(|(c, _)| {
+                                    if let CellData::Number(n) = c {
+                                        Some(*n)
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    if let Some(x) = domains.get(1) {
+                        series.categories = Some(x.iter().map(|(_, t)| t.clone()).collect());
+                    }
+                }
+                _ => {
+                    series.values = values;
+                    if !categories.is_empty() {
+                        series.categories = Some(categories.clone());
+                    }
+                }
+            }
+            // Markers (§20.53 chart:symbol-type).
+            match get(&chain, "chart:chart:symbol-type") {
+                Some("none") => series.show_marker = Some(false),
+                Some("named-symbol") => {
+                    series.show_marker = Some(true);
+                    series.marker_symbol = get(&chain, "chart:chart:symbol-name").map(|s| {
+                        match s {
+                            "square" => "square",
+                            "diamond" => "diamond",
+                            "arrow-down" | "arrow-up" | "arrow-left" | "arrow-right" => "triangle",
+                            "circle" => "circle",
+                            "star" => "star",
+                            "x" => "x",
+                            "plus" => "plus",
+                            "asterisk" => "star",
+                            "horizontal-bar" => "dash",
+                            "vertical-bar" => "dash",
+                            _ => "square",
+                        }
+                        .to_string()
+                    });
+                    series.marker_fill = paint.fill.clone();
+                    series.marker_line = paint.line.clone();
+                }
+                _ => {}
+            }
+            if let Some(size) = get(&chain, "chart:chart:symbol-width").and_then(length_pt) {
+                series.marker_size = Some(size);
+            }
+            if get(&chain, "chart:chart:interpolation").is_some_and(|i| i != "none") {
+                series.smooth = Some(true);
+            }
+            if let Some(offset) =
+                get(&chain, "chart:chart:pie-offset").and_then(|v| v.parse::<f64>().ok())
+            {
+                if offset > 0.0 {
+                    series.explosion = Some(offset.round() as u32);
+                }
+            }
+            if let Some(labels) = self.data_labels(&chain, data) {
+                series.series_data_labels = Some(labels);
+            }
+            // Data points (§11.13): per-point styles and repeats.
+            let mut point_colors: Vec<Option<String>> = Vec::new();
+            let mut any_point = false;
+            for point in node
+                .children()
+                .filter(|n| xml::is(*n, NS_CHART, "data-point"))
+            {
+                let repeat = point
+                    .attribute((NS_CHART, "repeated"))
+                    .and_then(|v| v.parse::<usize>().ok())
+                    .unwrap_or(1)
+                    .clamp(1, MAX_POINTS);
+                let color = point.attribute((NS_CHART, "style-name")).and_then(|_| {
+                    let chain = self.chain(point);
+                    let p = self.paint(&chain);
+                    if line_drawn {
+                        p.line.or(p.fill)
+                    } else {
+                        p.fill
+                    }
+                });
+                any_point |= color.is_some();
+                for _ in 0..repeat {
+                    if point_colors.len() >= MAX_POINTS {
+                        break;
+                    }
+                    point_colors.push(color.clone());
+                }
+            }
+            if any_point {
+                series.data_point_colors = Some(point_colors);
+            }
+            // Regression curves (§11.16) as trendlines.
+            let trendlines: Vec<ooxml_common::chart::ChartTrendline> = node
+                .children()
+                .filter(|n| xml::is(*n, NS_CHART, "regression-curve"))
+                .filter_map(|curve| {
+                    let chain = self.chain(curve);
+                    let kind = match get(&chain, "chart:chart:regression-type")? {
+                        "linear" => "linear",
+                        "logarithmic" => "log",
+                        "exponential" => "exp",
+                        "power" => "power",
+                        "polynomial" => "poly",
+                        "moving-average" => "movingAvg",
+                        _ => return None,
+                    };
+                    let paint = self.paint(&chain);
+                    let mut value = serde_json::json!({ "trendlineType": kind });
+                    if let Some(order) = get(&chain, "chart:chart:regression-max-degree")
+                        .or_else(|| get(&chain, "chart:loext:regression-max-degree"))
+                        .and_then(|v| v.parse::<u32>().ok())
+                    {
+                        value["order"] = order.into();
+                    }
+                    if let Some(period) = get(&chain, "chart:chart:regression-period")
+                        .or_else(|| get(&chain, "chart:loext:regression-period"))
+                        .and_then(|v| v.parse::<u32>().ok())
+                    {
+                        value["period"] = period.into();
+                    }
+                    let mut trend: ooxml_common::chart::ChartTrendline =
+                        serde_json::from_value(value).ok()?;
+                    let _ = paint;
+                    trend.name = None;
+                    Some(trend)
+                })
+                .collect();
+            if !trendlines.is_empty() {
+                series.trend_lines = Some(trendlines);
+            }
+            let secondary = series.use_secondary_axis == Some(true);
+            match groups.last_mut() {
+                Some((k, _, count, s)) if *k == kind && *s == secondary => *count += 1,
+                _ => groups.push((kind.to_string(), index, 1, secondary)),
+            }
+            series_models.push(series);
+        }
+        if series_models.is_empty() {
+            model.authored_without_series = true;
+        }
+        // Varying colors per point (§20.10 chart:varying-color… LibreOffice
+        // writes the pie slices as styled data points).
+        model.categories = if categories.is_empty() {
+            series_models
+                .first()
+                .and_then(|s| s.categories.clone())
+                .unwrap_or_else(|| {
+                    let count = series_models
+                        .iter()
+                        .map(|s| s.values.len())
+                        .max()
+                        .unwrap_or(0);
+                    (1..=count).map(|i| i.to_string()).collect()
+                })
+        } else {
+            categories
+        };
+        // Combination charts keep one plot group per contiguous family.
+        if groups.len() > 1 {
+            let plot_groups = groups
+                .iter()
+                .map(|(kind, start, count, secondary)| ChartPlotGroup {
+                    kind: kind.clone(),
+                    series_start: *start,
+                    series_count: *count,
+                    category_axis: if *secondary { "secondary" } else { "primary" }.into(),
+                    value_axis: if *secondary { "secondary" } else { "primary" }.into(),
+                    series_axis: "none".into(),
+                    axis_ids: None,
+                    grouping: match kind.as_str() {
+                        "bar" => Some(grouping.to_string()),
+                        "line" | "area" => Some(
+                            if grouping == "clustered" {
+                                "standard"
+                            } else {
+                                grouping
+                            }
+                            .to_string(),
+                        ),
+                        _ => None,
+                    },
+                    bar_direction: (kind == "bar")
+                        .then(|| if horizontal { "bar" } else { "col" }.to_string()),
+                    scatter_style: None,
+                    radar_style: None,
+                    vary_colors: None,
+                    gap_width: model.bar_gap_width,
+                    overlap: model.bar_overlap,
+                    bubble_scale: None,
+                    bubble_size_represents: None,
+                    show_negative_bubbles: None,
+                })
+                .collect();
+            model.plot_groups = Some(plot_groups);
+        }
+        if primary == "stock" {
+            model.stock_hi_low_lines = Some(true);
+            if get(plot_chain, "chart:chart:japanese-candle-stick") == Some("true") {
+                model.stock_up_down_bars = Some(true);
+            }
+        }
+        model.show_data_labels = series_models.iter().any(|s| s.series_data_labels.is_some());
+        model.series = series_models;
+        Ok(())
+    }
+
+    /// Series data labels (§20.32-§20.36 chart:data-label-*).
+    fn data_labels(
+        &self,
+        chain: &[&Style],
+        data: &mut DataStyles,
+    ) -> Option<ChartSeriesDataLabels> {
+        let number = get(chain, "chart:chart:data-label-number");
+        let show_val = matches!(number, Some("value") | Some("value-and-percentage"));
+        let show_percent = matches!(number, Some("percentage") | Some("value-and-percentage"));
+        let show_cat_name = get(chain, "chart:chart:data-label-text") == Some("true");
+        let show_ser_name = get(chain, "chart:chart:data-label-series") == Some("true");
+        if !(show_val || show_percent || show_cat_name || show_ser_name) {
+            return None;
+        }
+        let font = self.font(chain);
+        let separator = get_element(chain, "chart:chart:label-separator")
+            .and_then(|e| e.get("#text"))
+            .cloned();
+        let format_code = chain
+            .iter()
+            .find_map(|s| s.data_style.as_deref())
+            .filter(|_| get(chain, "chart:chart:link-data-style-to-source") != Some("true"))
+            .and_then(|name| data.code(name))
+            .map(|(code, _)| crate::ods_number::literal_code(&code))
+            .filter(|code| code != "General");
+        Some(ChartSeriesDataLabels {
+            show_val,
+            show_percent,
+            show_cat_name,
+            show_ser_name,
+            position: get(chain, "chart:chart:label-position").map(|p| {
+                match p {
+                    "outside" => "outEnd",
+                    "inside" => "inEnd",
+                    "center" => "ctr",
+                    "top" => "t",
+                    "bottom" => "b",
+                    "left" => "l",
+                    "right" => "r",
+                    "near-origin" => "inBase",
+                    _ => "bestFit",
+                }
+                .to_string()
+            }),
+            font_color: font.color,
+            font_size_hpt: font.size,
+            font_bold: font.bold,
+            font_italic: font.italic,
+            font_face: font.face,
+            separator,
+            format_code,
+            ..ChartSeriesDataLabels::default()
+        })
+    }
+}
+
+fn merge_font(base: TextFont, over: Option<TextFont>) -> TextFont {
+    match over {
+        None => base,
+        Some(o) => TextFont {
+            size: o.size.or(base.size),
+            bold: o.bold.or(base.bold),
+            italic: o.italic.or(base.italic),
+            color: o.color.or(base.color),
+            face: o.face.or(base.face),
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const NS: &str = concat!(
+        r##"xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" "##,
+        r##"xmlns:style="urn:oasis:names:tc:opendocument:xmlns:style:1.0" "##,
+        r##"xmlns:chart="urn:oasis:names:tc:opendocument:xmlns:chart:1.0" "##,
+        r##"xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0" "##,
+        r##"xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" "##,
+        r##"xmlns:draw="urn:oasis:names:tc:opendocument:xmlns:drawing:1.0" "##,
+        r##"xmlns:svg="urn:oasis:names:tc:opendocument:xmlns:svg-compatible:1.0" "##,
+        r##"xmlns:fo="urn:oasis:names:tc:opendocument:xmlns:xsl-fo-compatible:1.0""##
+    );
+
+    fn chart(body: &str, styles: &str) -> String {
+        format!(
+            r##"<office:document-content {NS} office:version="1.3"><office:automatic-styles>{styles}</office:automatic-styles><office:body><office:chart>{body}</office:chart></office:body></office:document-content>"##
+        )
+    }
+
+    const LOCAL: &str = concat!(
+        r##"<table:table table:name="local-table"><table:table-header-rows><table:table-row>"##,
+        r##"<table:table-cell><text:p/></table:table-cell>"##,
+        r##"<table:table-cell office:value-type="string"><text:p>Sales</text:p></table:table-cell>"##,
+        r##"<table:table-cell office:value-type="string"><text:p>Cost</text:p></table:table-cell>"##,
+        r##"</table:table-row></table:table-header-rows><table:table-rows>"##,
+        r##"<table:table-row><table:table-cell office:value-type="string"><text:p>Q1</text:p></table:table-cell><table:table-cell office:value-type="float" office:value="10"><text:p>10</text:p></table:table-cell><table:table-cell office:value-type="float" office:value="4"><text:p>4</text:p></table:table-cell></table:table-row>"##,
+        r##"<table:table-row><table:table-cell office:value-type="string"><text:p>Q2</text:p></table:table-cell><table:table-cell office:value-type="float" office:value="12"><text:p>12</text:p></table:table-cell><table:table-cell office:value-type="float" office:value="5"><text:p>5</text:p></table:table-cell></table:table-row>"##,
+        r##"</table:table-rows></table:table>"##
+    );
+
+    #[test]
+    fn internal_data_bar_line_combination() {
+        let body = format!(
+            r##"<chart:chart chart:class="chart:bar"><chart:title><text:p>Revenue</text:p></chart:title><chart:legend chart:legend-position="bottom"/><chart:plot-area chart:style-name="pa"><chart:axis chart:dimension="x" chart:name="primary-x"><chart:categories table:cell-range-address="local-table.A2:.A3"/></chart:axis><chart:axis chart:dimension="y" chart:name="primary-y" chart:style-name="ay"><chart:grid chart:class="major"/></chart:axis><chart:series chart:style-name="s1" chart:values-cell-range-address="local-table.B2:.B3" chart:label-cell-address="local-table.B1"/><chart:series chart:class="chart:line" chart:style-name="s2" chart:values-cell-range-address="local-table.C2:.C3" chart:label-cell-address="local-table.C1"/></chart:plot-area>{LOCAL}</chart:chart>"##
+        );
+        let styles = concat!(
+            r##"<style:style style:name="pa" style:family="chart"><style:chart-properties chart:stacked="true"/></style:style>"##,
+            r##"<style:style style:name="ay" style:family="chart"><style:chart-properties chart:minimum="0" chart:maximum="20" chart:gap-width="50"/></style:style>"##,
+            r##"<style:style style:name="s1" style:family="chart"><style:chart-properties chart:data-label-number="value" chart:label-position="outside"/><style:graphic-properties draw:fill-color="#4472c4"/></style:style>"##,
+            r##"<style:style style:name="s2" style:family="chart"><style:graphic-properties svg:stroke-color="#ed7d31"/></style:style>"##,
+        );
+        let model = read_chart_document(&chart(&body, styles), None, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(model.chart_type, "stackedBar");
+        assert_eq!(model.title.as_deref(), Some("Revenue"));
+        assert_eq!(model.legend_pos.as_deref(), Some("b"));
+        assert_eq!(model.categories, ["Q1", "Q2"]);
+        assert_eq!(model.series.len(), 2);
+        assert_eq!(model.series[0].name, "Sales");
+        assert_eq!(model.series[0].values, [Some(10.0), Some(12.0)]);
+        assert_eq!(model.series[0].color.as_deref(), Some("4472C4"));
+        assert_eq!(model.series[1].series_type.as_deref(), Some("line"));
+        assert_eq!(model.series[1].color.as_deref(), Some("ED7D31"));
+        assert_eq!((model.val_min, model.val_max), (Some(0.0), Some(20.0)));
+        assert_eq!(model.bar_gap_width, Some(50));
+        assert_eq!(model.val_axis_major_gridlines, Some(true));
+        let labels = model.series[0].series_data_labels.as_ref().unwrap();
+        assert!(labels.show_val);
+        assert_eq!(labels.position.as_deref(), Some("outEnd"));
+        assert_eq!(model.plot_groups.as_ref().map(Vec::len), Some(2));
+    }
+
+    struct Fixed;
+    impl RangeResolver for Fixed {
+        fn cells(&self, address: &str) -> Option<Vec<CellData>> {
+            match address {
+                "Sheet1.A2:Sheet1.A3" => {
+                    Some(vec![CellData::Number(45292.0), CellData::Number(45323.0)])
+                }
+                "Sheet1.B2:Sheet1.B3" => Some(vec![CellData::Number(1.0), CellData::Number(2.0)]),
+                "Sheet1.B1" => Some(vec![CellData::Text("Units".into())]),
+                _ => None,
+            }
+        }
+        fn hidden(&self, _: &str) -> Option<Vec<bool>> {
+            None
+        }
+    }
+
+    #[test]
+    fn sheet_ranges_with_cached_display_text_and_pie_geometry() {
+        let local = concat!(
+            r##"<table:table table:name="local-table"><table:table-rows>"##,
+            r##"<table:table-row><table:table-cell office:value-type="string"><text:p>Jan 24</text:p><draw:g><svg:desc>Sheet1.A2:Sheet1.A3</svg:desc></draw:g></table:table-cell></table:table-row>"##,
+            r##"<table:table-row><table:table-cell office:value-type="string"><text:p>Feb 24</text:p></table:table-cell></table:table-row>"##,
+            r##"</table:table-rows></table:table>"##
+        );
+        let body = format!(
+            r##"<chart:chart chart:class="chart:circle"><chart:plot-area chart:style-name="pa"><chart:axis chart:dimension="x" chart:name="primary-x"><chart:categories table:cell-range-address="Sheet1.A2:Sheet1.A3"/></chart:axis><chart:series chart:values-cell-range-address="Sheet1.B2:Sheet1.B3" chart:label-cell-address="Sheet1.B1"><chart:data-point chart:style-name="p1"/><chart:data-point chart:style-name="p2"/></chart:series></chart:plot-area>{local}</chart:chart>"##
+        );
+        let styles = concat!(
+            r##"<style:style style:name="pa" style:family="chart"><style:chart-properties chart:angle-offset="0"/></style:style>"##,
+            r##"<style:style style:name="p1" style:family="chart"><style:graphic-properties draw:fill-color="#ff0000"/></style:style>"##,
+            r##"<style:style style:name="p2" style:family="chart"><style:graphic-properties draw:fill-color="#00ff00"/></style:style>"##,
+        );
+        let model = read_chart_document(&chart(&body, styles), None, Some(&Fixed))
+            .unwrap()
+            .unwrap();
+        assert_eq!(model.chart_type, "pie");
+        assert_eq!(model.categories, ["Jan 24", "Feb 24"]);
+        assert_eq!(model.series[0].name, "Units");
+        assert_eq!(model.first_slice_angle, Some(90));
+        assert_eq!(
+            model.series[0].data_point_colors,
+            Some(vec![Some("FF0000".into()), Some("00FF00".into())])
+        );
+    }
+}
