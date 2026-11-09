@@ -10,7 +10,8 @@
 //! header from the page edge (header distance) and the body from the page
 //! edge (top margin), so the body margin is the page margin plus the
 //! header's height. A header taller than its height pushes the body down
-//! in both (LibreOffice keeps the spacing below it, DOCX does not).
+//! in both. LibreOffice keeps the spacing below it unless the region uses
+//! dynamic spacing; DOCX never keeps it.
 
 use super::*;
 use docx_model::{
@@ -305,7 +306,14 @@ fn region(node: roxmltree::Node<'_, '_>, spacing: &str) -> Option<Region> {
             .or_else(|| get(NS_FO, "min-height"))
             .unwrap_or(0.0)
             .max(0.0),
-        spacing: get(NS_FO, spacing).unwrap_or(0.0).max(0.0),
+        // With dynamic spacing (§20.354, the Word-compatible mode) a grown
+        // region eats into its spacing, which DOCX already does; otherwise
+        // LibreOffice keeps the spacing below the grown content.
+        spacing: if properties.attribute((NS_STYLE, "dynamic-spacing")) == Some("true") {
+            0.0
+        } else {
+            get(NS_FO, spacing).unwrap_or(0.0).max(0.0)
+        },
         margin_left: get(NS_FO, "margin-left").unwrap_or(0.0),
         margin_right: get(NS_FO, "margin-right").unwrap_or(0.0),
     })
