@@ -2296,8 +2296,8 @@ fn vml_ole_preview<'a>(
     // VML `<v:imagedata>` names the preview via `o:relid` (Excel's usual form)
     // or `r:id`; both resolve through the VML part's own rels. The trailing
     // bare-`id` fallback is XLSX's historical behaviour and is kept as-is.
-    let rid = ooxml_common::vml::imagedata_rel_id(imagedata)
-        .or_else(|| imagedata.attribute("id"))?;
+    let rid =
+        ooxml_common::vml::imagedata_rel_id(imagedata).or_else(|| imagedata.attribute("id"))?;
     let target = vml_rels.get(rid)?;
     let media_path = resolve_zip_path(vml_path, target);
     archive.index_for_name(&media_path)?;

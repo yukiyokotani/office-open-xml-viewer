@@ -48,7 +48,14 @@ pub fn imagedata_image_part(
     rels: &BTreeMap<String, RelTarget>,
     vml_part: &str,
 ) -> Option<String> {
-    let rel = rels.get(imagedata_rel_id(imagedata)?)?;
+    image_rel_part(rels.get(imagedata_rel_id(imagedata)?)?, vml_part)
+}
+
+/// The image part a VML part's relationship names: `None` unless the
+/// relationship is internal and of the image type (see
+/// [`imagedata_image_part`]). Lets a caller keep relationships unresolved and
+/// resolve only on use.
+pub fn image_rel_part(rel: &RelTarget, vml_part: &str) -> Option<String> {
     if rel.mode != TargetMode::Internal {
         return None;
     }
@@ -157,8 +164,13 @@ mod tests {
         };
         let part = "ppt/drawings/vmlDrawing1.vml";
         for ty in IMAGE_REL_TYPES {
-            let map = rels(&format!(r#"<Relationship Id="rId1" Type="{ty}" Target="../media/image1.png"/>"#));
-            assert_eq!(imagedata_image_part(data, &map, part).as_deref(), Some("ppt/media/image1.png"));
+            let map = rels(&format!(
+                r#"<Relationship Id="rId1" Type="{ty}" Target="../media/image1.png"/>"#
+            ));
+            assert_eq!(
+                imagedata_image_part(data, &map, part).as_deref(),
+                Some("ppt/media/image1.png")
+            );
         }
         // External: the relative-looking Target must not resolve to a package part.
         let external = rels(&format!(
@@ -167,7 +179,9 @@ mod tests {
         ));
         assert_eq!(imagedata_image_part(data, &external, part), None);
         // Wrong type, missing type, missing relationship.
-        let ole = rels(r#"<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/oleObject" Target="../media/image1.png"/>"#);
+        let ole = rels(
+            r#"<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/oleObject" Target="../media/image1.png"/>"#,
+        );
         assert_eq!(imagedata_image_part(data, &ole, part), None);
         let untyped = rels(r#"<Relationship Id="rId1" Target="../media/image1.png"/>"#);
         assert_eq!(imagedata_image_part(data, &untyped, part), None);

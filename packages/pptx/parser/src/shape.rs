@@ -3491,7 +3491,8 @@ fn parse_graphic_frame(
                 // from binary .ppt writes a bare spid-only oleObj with no MCE
                 // Fallback). §19.3.2.4 `spid` names the shape in the part's
                 // legacy VML drawing, whose `<v:imagedata>` is the preview.
-                if let Some(mut pic) = vml_ole_preview_picture(&spid, &t, slide_part, node.document(), zip)
+                if let Some(mut pic) =
+                    vml_ole_preview_picture(&spid, &t, slide_part, node.document(), zip)
                 {
                     pic.id = own_cnv_pr(node).and_then(|cnv| attr(&cnv, "id"));
                     out.push(SlideElement::Picture(pic));
@@ -3508,18 +3509,19 @@ const VML_DRAWING_REL_TYPES: &[&str] = &[
     "http://purl.oclc.org/ooxml/officeDocument/relationships/vmlDrawing",
 ];
 
-/// One VML OLE preview: the resolved image part and its imagedata crop. The
-/// path is shared by every shape that uses the same relationship, so the index
-/// holds one string per distinct relationship, not one per shape.
-#[derive(Debug, Clone)]
-pub(crate) struct VmlOlePreview {
-    image_path: std::rc::Rc<str>,
-    src_rect: Option<ooxml_common::blip::SrcRect>,
+/// One part's VML OLE previews, kept *unresolved*: for each SPID that the host
+/// part references, the position of its imagedata relationship in `rels` and
+/// its crop. Targets are resolved only when a `<p:oleObj>` is looked up, so the
+/// retained bytes are the VML part name once, the raw targets of the
+/// relationships the referenced shapes use (bounded by the VML rels part), and
+/// the referenced SPID keys (bounded by the host part) — never a resolved path
+/// per shape or per relationship.
+#[derive(Debug, Default)]
+pub(crate) struct VmlOlePreviewIndex {
+    vml_part: String,
+    rels: Vec<ooxml_common::rels::RelTarget>,
+    entries: HashMap<String, (usize, Option<ooxml_common::blip::SrcRect>)>,
 }
-
-/// `o:spid` → preview for the VML shapes that the host part's `<p:oleObj spid>`
-/// elements reference.
-pub(crate) type VmlOlePreviewIndex = HashMap<String, VmlOlePreview>;
 
 #[cfg(test)]
 thread_local! {
@@ -3527,16 +3529,12 @@ thread_local! {
     static VML_OLE_INDEX_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-/// Build the SPID → preview index of `part`'s legacy VML drawing (its implicit
-/// `vmlDrawing` relationship, Part 1 §15.2.20). Each `v:shape` with an
-/// `o:spid` and a `<v:imagedata>` whose relationship is an internal image
-/// relationship of the VML part contributes one entry. An unreadable or
-/// malformed part yields an empty index, which is cached like a full one.
-///
-/// Memory is bounded by the inputs, not by the VML shape count: only SPIDs that
-/// `host` (the part's own XML) references from a `<p:oleObj spid>` are indexed,
-/// and each relationship resolves to one shared path string. Entries are thus
-/// at most the host's oleObj count, and path bytes at most the VML rels' size.
+/// Build the SPID → relationship index of `part`'s legacy VML drawing (its
+/// implicit `vmlDrawing` relationship, Part 1 §15.2.20). Only SPIDs that
+/// `host` (the part's own XML) references from a `<p:oleObj spid>` are kept,
+/// and only when their `<v:imagedata>` relationship exists in the VML part's
+/// rels. An unreadable or malformed part yields an empty index, which is cached
+/// like a full one.
 fn build_vml_ole_preview_index(
     part: &str,
     host: &roxmltree::Document,
@@ -3544,7 +3542,7 @@ fn build_vml_ole_preview_index(
 ) -> VmlOlePreviewIndex {
     #[cfg(test)]
     VML_OLE_INDEX_BUILDS.with(|count| count.set(count.get() + 1));
-    let mut index = VmlOlePreviewIndex::new();
+    let mut index = VmlOlePreviewIndex::default();
     let referenced: std::collections::HashSet<&str> = host
         .descendants()
         .filter(|n| n.is_element() && n.tag_name().name() == "oleObj")
@@ -3571,9 +3569,9 @@ fn build_vml_ole_preview_index(
     let Ok(vml_doc) = crate::parse_preflighted_pptx_xml(&vml_xml) else {
         return index;
     };
-    // The VML part's own rels, keeping TargetMode and Type so only internal
-    // image relationships resolve.
-    let vml_rels = read_zip_str(zip, &ooxml_common::rels::relationship_part_path(&vml_path))
+    // The VML part's own rels, keeping TargetMode and Type so that only
+    // internal image relationships resolve at lookup.
+    let mut vml_rels = read_zip_str(zip, &ooxml_common::rels::relationship_part_path(&vml_path))
         .ok()
         .and_then(|xml| {
             crate::parse_preflighted_pptx_xml(&xml)
@@ -3581,8 +3579,8 @@ fn build_vml_ole_preview_index(
                 .map(|doc| ooxml_common::rels::parse_rels_document(&doc))
         })
         .unwrap_or_default();
-    // rId → shared resolved image path (None: not an internal image part).
-    let mut paths: HashMap<&str, Option<std::rc::Rc<str>>> = HashMap::new();
+    // rId → position in `index.rels`, so each used relationship is kept once.
+    let mut rel_slots: HashMap<String, usize> = HashMap::new();
     for shape in vml_doc
         .descendants()
         .filter(|n| n.is_element() && n.tag_name().name() == "shape")
@@ -3590,7 +3588,7 @@ fn build_vml_ole_preview_index(
         let Some(spid) = shape.attribute((ooxml_common::vml::OFFICE_NS, "spid")) else {
             continue;
         };
-        if !referenced.contains(spid) || index.contains_key(spid) {
+        if !referenced.contains(spid) || index.entries.contains_key(spid) {
             // Unreferenced by the host, or a later duplicate (the first shape
             // with a given spid wins, as a lookup would).
             continue;
@@ -3604,26 +3602,24 @@ fn build_vml_ole_preview_index(
         let Some(rid) = ooxml_common::vml::imagedata_rel_id(imagedata) else {
             continue;
         };
-        let image_path = paths
-            .entry(rid)
-            .or_insert_with(|| {
-                ooxml_common::vml::imagedata_image_part(imagedata, &vml_rels, &vml_path)
-                    // Only a genuine image part enters the picture pipeline
-                    // (the preview is typically EMF/WMF/PNG).
-                    .filter(|path| mime_from_ext(path).starts_with("image/"))
-                    .map(std::rc::Rc::from)
-            })
-            .clone();
-        let Some(image_path) = image_path else {
-            continue;
+        let slot = match rel_slots.get(rid) {
+            Some(slot) => *slot,
+            None => {
+                let Some(rel) = vml_rels.remove(rid) else {
+                    continue;
+                };
+                index.rels.push(rel);
+                rel_slots.insert(rid.to_owned(), index.rels.len() - 1);
+                index.rels.len() - 1
+            }
         };
-        index.insert(
+        index.entries.insert(
             spid.to_owned(),
-            VmlOlePreview {
-                image_path,
-                src_rect: ooxml_common::vml::imagedata_crop(imagedata),
-            },
+            (slot, ooxml_common::vml::imagedata_crop(imagedata)),
         );
+    }
+    if !index.entries.is_empty() {
+        index.vml_part = vml_path;
     }
     index
 }
@@ -3632,10 +3628,10 @@ fn build_vml_ole_preview_index(
 /// drawing of `part` (a slide, layout or master — each may carry its own
 /// implicit `vmlDrawing` relationship, Part 1 §15.2.20). The `v:shape` whose
 /// `o:spid` equals `spid` names its picture through `<v:imagedata o:relid>`,
-/// resolved against the VML part's own rels (internal image relationships
-/// only). The graphicFrame `<p:xfrm>` is authoritative for placement, exactly
-/// as for the `<p:pic>` preview; the imagedata crop insets become the
-/// picture's source rectangle.
+/// resolved against the VML part's own rels: only an internal image
+/// relationship naming an existing package entry qualifies. The graphicFrame
+/// `<p:xfrm>` is authoritative for placement, exactly as for the `<p:pic>`
+/// preview; the imagedata crop insets become the picture's source rectangle.
 ///
 /// The drawing is indexed once per part and operation (`PptxZip::ole_vml_previews`),
 /// so N objects cost one read and parse of the host rels, drawing and VML rels.
@@ -3657,9 +3653,16 @@ fn vml_ole_preview_picture(
             index
         }
     };
-    let preview = index.get(spid)?;
-    let image_path = preview.image_path.to_string();
+    let (slot, src_rect) = *index.entries.get(spid)?;
+    let image_path = ooxml_common::vml::image_rel_part(&index.rels[slot], &index.vml_part)?;
+    // Only a genuine, existing image part enters the picture pipeline (the
+    // preview is typically EMF/WMF/PNG). `index_for_name` reads the central
+    // directory only.
+    zip.index_for_name(&image_path)?;
     let mime_type = mime_from_ext(&image_path).to_owned();
+    if !mime_type.starts_with("image/") {
+        return None;
+    }
     // The same bounded 24-byte header probe as the `<p:pic>` path.
     let head = read_zip_head(zip, &image_path, 24).ok()?;
     let size = png_size_from_bytes(&head);
@@ -3681,7 +3684,7 @@ fn vml_ole_preview_picture(
         fill: None,
         prst_geom: None,
         prst_adjust: None,
-        src_rect: preview.src_rect,
+        src_rect,
         alpha: None,
         duotone: None,
         blip_effects: Vec::new(),
@@ -5593,7 +5596,10 @@ mod ole_tests {
             let mut zip = zip_with(&[
                 (rels_path.as_str(), part_rels.as_bytes()),
                 ("ppt/drawings/vmlDrawing1.vml", vml.as_bytes()),
-                ("ppt/drawings/_rels/vmlDrawing1.vml.rels", vml_rels.as_bytes()),
+                (
+                    "ppt/drawings/_rels/vmlDrawing1.vml.rels",
+                    vml_rels.as_bytes(),
+                ),
                 ("ppt/media/image1.png", &png),
                 ("ppt/media/other.png", &png),
             ]);
@@ -5613,7 +5619,10 @@ mod ole_tests {
                 DepthGuard::root(),
             );
             let [SlideElement::Picture(p)] = out.as_slice() else {
-                panic!("{part}: expected exactly one preview picture, got {}", out.len());
+                panic!(
+                    "{part}: expected exactly one preview picture, got {}",
+                    out.len()
+                );
             };
             assert_eq!(p.image_path, "ppt/media/image1.png", "{part}");
             assert_eq!(p.mime_type, "image/png");
@@ -5676,7 +5685,10 @@ mod ole_tests {
         zip_with(&[
             ("ppt/slides/_rels/slide1.xml.rels", slide_rels.as_bytes()),
             ("ppt/drawings/vmlDrawing1.vml", vml.as_bytes()),
-            ("ppt/drawings/_rels/vmlDrawing1.vml.rels", vml_rels.as_bytes()),
+            (
+                "ppt/drawings/_rels/vmlDrawing1.vml.rels",
+                vml_rels.as_bytes(),
+            ),
             ("ppt/media/image1.png", &png),
         ])
     }
@@ -5718,14 +5730,24 @@ mod ole_tests {
         const N: usize = 40;
         let mut zip = vml_zip(
             N,
-            &format!(r#"<Relationship Id="rId1" Type="{REL}/image" Target="../media/image1.png"/>"#),
+            &format!(
+                r#"<Relationship Id="rId1" Type="{REL}/image" Target="../media/image1.png"/>"#
+            ),
         );
         let before = index_builds();
         let frames: String = (0..N)
             .map(|n| spid_frame(n + 2, &format!("_x0000_s{}", 1025 + n)))
             .collect();
-        assert_eq!(run_tree(&frames, &mut zip).len(), N, "every object draws its preview");
-        assert_eq!(index_builds() - before, 1, "one index build for {N} objects");
+        assert_eq!(
+            run_tree(&frames, &mut zip).len(),
+            N,
+            "every object draws its preview"
+        );
+        assert_eq!(
+            index_builds() - before,
+            1,
+            "one index build for {N} objects"
+        );
 
         // A part without a vmlDrawing caches its (empty) index as well.
         let mut zip = zip_with(&[(
@@ -5735,15 +5757,19 @@ mod ole_tests {
         let before = index_builds();
         let frames: String = (0..N).map(|n| spid_frame(n + 2, "_x0000_s1025")).collect();
         assert!(run_tree(&frames, &mut zip).is_empty());
-        assert_eq!(index_builds() - before, 1, "a failed lookup is not repeated");
+        assert_eq!(
+            index_builds() - before,
+            1,
+            "a failed lookup is not repeated"
+        );
     }
 
     /// Review finding: index memory must scale with what the host references
     /// and with distinct relationships, not with VML shapes. A drawing of many
     /// shapes that all point at one long image path keeps only the SPIDs the
-    /// slide's `<p:oleObj>` elements name, and they share a single path string.
+    /// slide's `<p:oleObj>` elements name, sharing one unresolved relationship.
     #[test]
-    fn vml_ole_preview_index_holds_referenced_spids_with_shared_paths() {
+    fn vml_ole_preview_index_holds_only_referenced_spids() {
         const SHAPES: usize = 5_000;
         let long_name = "x".repeat(8 * 1024);
         let target = format!("../media/{long_name}.png");
@@ -5768,7 +5794,10 @@ mod ole_tests {
         let mut zip = zip_with(&[
             ("ppt/slides/_rels/slide1.xml.rels", slide_rels.as_bytes()),
             ("ppt/drawings/vmlDrawing1.vml", vml.as_bytes()),
-            ("ppt/drawings/_rels/vmlDrawing1.vml.rels", vml_rels.as_bytes()),
+            (
+                "ppt/drawings/_rels/vmlDrawing1.vml.rels",
+                vml_rels.as_bytes(),
+            ),
             (image_part.as_str(), &png),
         ]);
         // The slide references three of the 5,000 shapes (one twice).
@@ -5791,11 +5820,74 @@ mod ole_tests {
             .ole_vml_previews
             .get("ppt/slides/slide1.xml")
             .expect("index cached for the slide part");
-        assert_eq!(index.len(), 3, "only referenced SPIDs are indexed");
-        let paths: Vec<_> = index.values().map(|preview| preview.image_path.clone()).collect();
+        assert_eq!(index.entries.len(), 3, "only referenced SPIDs are indexed");
+        assert_eq!(
+            index.rels.len(),
+            1,
+            "one unresolved relationship kept, not one per shape"
+        );
+    }
+
+    /// Review finding (round 3): resolved paths carried the VML part's
+    /// directory, so many distinct relationships under a long directory
+    /// amplified memory. The index keeps only unresolved relationships used by
+    /// referenced SPIDs plus the VML part name once, and resolves on lookup,
+    /// where the target must name an existing package entry.
+    #[test]
+    fn vml_ole_preview_index_keeps_unresolved_rels_under_long_directory() {
+        const RELS: usize = 2_000;
+        let dir = format!("ppt/{}", "d".repeat(8 * 1024));
+        let vml_part = format!("{dir}/vmlDrawing1.vml");
+        let mut vml = String::from(
+            r#"<xml xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office">"#,
+        );
+        let mut vml_rels = format!(r#"<Relationships xmlns="{RELS_NS}">"#);
+        for n in 0..RELS {
+            vml.push_str(&format!(
+                r#"<v:shape o:spid="_x0000_s{}"><v:imagedata o:relid="rId{n}"/></v:shape>"#,
+                1025 + n
+            ));
+            vml_rels.push_str(&format!(
+                r#"<Relationship Id="rId{n}" Type="{REL}/image" Target="img{n}.png"/>"#
+            ));
+        }
+        vml.push_str("</xml>");
+        vml_rels.push_str("</Relationships>");
+        let slide_rels = format!(
+            r#"<Relationships xmlns="{RELS_NS}"><Relationship Id="rIdVml" Type="{REL}/vmlDrawing" Target="/{vml_part}"/></Relationships>"#
+        );
+        let vml_rels_part = format!("{dir}/_rels/vmlDrawing1.vml.rels");
+        let present = format!("{dir}/img0.png");
+        let png = tiny_png();
+        let mut zip = zip_with(&[
+            ("ppt/slides/_rels/slide1.xml.rels", slide_rels.as_bytes()),
+            (vml_part.as_str(), vml.as_bytes()),
+            (vml_rels_part.as_str(), vml_rels.as_bytes()),
+            (present.as_str(), &png),
+        ]);
+        // Two referenced objects: rId0's image exists, rId1's does not.
+        let frames = [spid_frame(2, "_x0000_s1025"), spid_frame(3, "_x0000_s1026")].concat();
+        let out = run_tree(&frames, &mut zip);
+        let [SlideElement::Picture(p)] = out.as_slice() else {
+            panic!(
+                "only the preview whose part exists is drawn, got {}",
+                out.len()
+            )
+        };
+        assert_eq!(p.image_path, present);
+
+        let index = zip.ole_vml_previews.get("ppt/slides/slide1.xml").unwrap();
+        assert_eq!(index.entries.len(), 2);
+        assert_eq!(
+            index.rels.len(),
+            2,
+            "only the referenced relationships are kept"
+        );
+        assert_eq!(index.vml_part, vml_part, "the long directory is kept once");
+        let retained_targets: usize = index.rels.iter().map(|rel| rel.target.len()).sum();
         assert!(
-            paths.iter().all(|path| std::rc::Rc::ptr_eq(path, &paths[0])),
-            "one shared path string per relationship"
+            retained_targets < 64,
+            "targets stay unresolved: {retained_targets} bytes"
         );
     }
 
