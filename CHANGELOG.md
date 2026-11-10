@@ -5,6 +5,15 @@ semantic versioning. While the major version is zero, minor releases may contain
 explicitly documented breaking changes; patch releases remain compatible with
 the corresponding minor release.
 
+## 0.89.9 — Unreleased
+
+Compatible patch release. No migration is required.
+
+- **Word: picture watermarks with Washout:** a VML picture's brightness and
+  contrast (`gain`/`blacklevel`, which Word's Watermark dialog writes for
+  Washout) now fade the picture as Word does, instead of drawing it at full
+  contrast over the text (#2175).
+
 ## 0.89.8 — 2026-11-09
 
 Compatible patch release. No migration is required. The document models gain

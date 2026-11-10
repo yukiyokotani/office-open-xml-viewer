@@ -14536,7 +14536,7 @@ fn vml_image_run(
     let anchor_acquisition =
         anchor.then(|| vml_word_anchor_acquisition(shape, definition, style, width_pt, height_pt));
 
-    ImageRun {
+    let mut picture = ImageRun {
         inline_object_font_facts: None,
         inline_object_origin: None,
         inline_effect_extent: None,
@@ -14570,7 +14570,10 @@ fn vml_image_run(
         anchor_x_relative_from,
         anchor_y_relative_from,
         anchor_acquisition,
-    }
+    };
+    // Every VML picture path shares the effective imagedata effects.
+    vml_image::apply_effects(&mut picture, shape, definition);
+    picture
 }
 
 /// Parse a bare legacy VML `<w:pict>` picture — a `<v:shape>` (or
@@ -23899,6 +23902,28 @@ mod svg_blip_tests {
                 "{container}"
             );
         }
+    }
+
+    /// Issue #2175: Word's Watermark dialog writes Washout on a standalone VML
+    /// picture as gain/blacklevel. It must reach the same `<a:lum>` correction
+    /// Word writes for Washout on a DrawingML picture.
+    #[test]
+    fn vml_picture_watermark_washout_is_a_luminance_correction() {
+        let body = r#"<w:p><w:r><w:pict xmlns:v="urn:schemas-microsoft-com:vml"
+            xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+            <v:shape style="position:absolute;width:200pt;height:100pt;z-index:-1">
+              <v:imagedata r:id="rIdPng" gain="19661f" blacklevel="22938f"/>
+            </v:shape></w:pict></w:r></w:p>"#;
+        let doc = parse_from_bytes(&build_docx_with_media(body)).expect("parse must succeed");
+        let image = only_image(&doc);
+        let [BlipEffect::Luminance { bright, contrast }] = image.blip_effects.as_slice() else {
+            panic!(
+                "expected one luminance effect, got {:?}",
+                image.blip_effects
+            );
+        };
+        assert!((bright - 0.7).abs() < 1e-4, "bright {bright}");
+        assert!((contrast + 0.7).abs() < 1e-4, "contrast {contrast}");
     }
 
     /// A picture without a `<a:duotone>` leaves `duotone` None — guards the new
