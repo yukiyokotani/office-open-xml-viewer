@@ -8,6 +8,8 @@
 
 use crate::blip::SrcRect;
 use crate::ns::relationships;
+use crate::rels::{RelTarget, TargetMode};
+use std::collections::BTreeMap;
 
 /// `urn:schemas-microsoft-com:office:office` (the `o:` prefix).
 pub const OFFICE_NS: &str = "urn:schemas-microsoft-com:office:office";
@@ -26,6 +28,34 @@ pub fn imagedata_rel_id<'a>(imagedata: roxmltree::Node<'a, '_>) -> Option<&'a st
         .or_else(|| imagedata.attribute("relid"))
         .or_else(|| imagedata.attribute((relationships::TRANSITIONAL, "id")))
         .or_else(|| imagedata.attribute((relationships::STRICT, "id")))
+}
+
+/// OPC image relationship type (ECMA-376 Part 1 §15.2.14), Transitional and
+/// Strict.
+pub const IMAGE_REL_TYPES: &[&str] = &[
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image",
+    "http://purl.oclc.org/ooxml/officeDocument/relationships/image",
+];
+
+/// Resolve a `<v:imagedata>` preview to the image part it names, through the
+/// rels of `vml_part` (the part holding the VML). Only an *internal*
+/// relationship whose type is the image relationship qualifies: an External
+/// relationship names no package part (ECMA-376 Part 2 §9.3), even when its
+/// `Target` happens to look like a relative part path, and a relationship of
+/// any other type names a part that is not a picture.
+pub fn imagedata_image_part(
+    imagedata: roxmltree::Node,
+    rels: &BTreeMap<String, RelTarget>,
+    vml_part: &str,
+) -> Option<String> {
+    let rel = rels.get(imagedata_rel_id(imagedata)?)?;
+    if rel.mode != TargetMode::Internal {
+        return None;
+    }
+    if !IMAGE_REL_TYPES.contains(&rel.relationship_type.as_deref()?) {
+        return None;
+    }
+    rel.resolve_part(vml_part)
 }
 
 /// `<v:imagedata>` crop insets (Part 4 §19.1.2.11 `cropleft`/`croptop`/
@@ -114,5 +144,33 @@ mod tests {
         assert_eq!(imagedata_rel_id(data), None);
 
         assert!(imagedata_for_spid(&doc, "_x0000_s9999").is_none());
+    }
+
+    #[test]
+    fn imagedata_image_part_requires_internal_image_relationship() {
+        let doc = roxmltree::Document::parse(VML).unwrap();
+        let data = imagedata_for_spid(&doc, "_x0000_s1026").unwrap(); // o:relid="rId1"
+        let rels = |xml: &str| {
+            crate::rels::parse_rels(&format!(
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">{xml}</Relationships>"#
+            ))
+        };
+        let part = "ppt/drawings/vmlDrawing1.vml";
+        for ty in IMAGE_REL_TYPES {
+            let map = rels(&format!(r#"<Relationship Id="rId1" Type="{ty}" Target="../media/image1.png"/>"#));
+            assert_eq!(imagedata_image_part(data, &map, part).as_deref(), Some("ppt/media/image1.png"));
+        }
+        // External: the relative-looking Target must not resolve to a package part.
+        let external = rels(&format!(
+            r#"<Relationship Id="rId1" Type="{}" Target="../media/image1.png" TargetMode="External"/>"#,
+            IMAGE_REL_TYPES[0]
+        ));
+        assert_eq!(imagedata_image_part(data, &external, part), None);
+        // Wrong type, missing type, missing relationship.
+        let ole = rels(r#"<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/oleObject" Target="../media/image1.png"/>"#);
+        assert_eq!(imagedata_image_part(data, &ole, part), None);
+        let untyped = rels(r#"<Relationship Id="rId1" Target="../media/image1.png"/>"#);
+        assert_eq!(imagedata_image_part(data, &untyped, part), None);
+        assert_eq!(imagedata_image_part(data, &rels(""), part), None);
     }
 }

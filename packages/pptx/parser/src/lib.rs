@@ -894,6 +894,13 @@ impl PptxArchive {
 pub(crate) struct PptxZip {
     session: PackageSessionHandle,
     operation: RetainedPackageOperation,
+    /// Per host part (slide/layout/master), the SPID → preview index of its
+    /// legacy VML drawing, built on first use and kept for the operation so
+    /// N spid-only OLE objects read and parse the drawing once (an empty index
+    /// records a part whose drawing is missing or unusable). Cleared at every
+    /// operation start, so a later operation never reuses an earlier one's
+    /// reads or failures.
+    pub(crate) ole_vml_previews: HashMap<String, Rc<VmlOlePreviewIndex>>,
 }
 
 impl PptxZip {
@@ -903,6 +910,7 @@ impl PptxZip {
     }
 
     fn begin_operation(&mut self, name: &str) -> Result<(), String> {
+        self.ole_vml_previews.clear();
         self.operation.begin(&self.session, name)
     }
 
@@ -2256,6 +2264,7 @@ fn open_zip_with_policy(
     .map(|session| PptxZip {
         session,
         operation: RetainedPackageOperation::new("pptx"),
+        ole_vml_previews: HashMap::new(),
     })
     .map_err(ooxml_common::zip::tag_container_error)
 }

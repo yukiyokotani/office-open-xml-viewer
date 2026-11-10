@@ -503,7 +503,10 @@ export class PptxViewer implements ZoomableViewer {
 
   /**
    * Switch the hidden-slide mode at runtime and re-render. Entering `'skip'`
-   * while on a hidden slide advances to the nearest visible slide.
+   * while on a hidden slide advances to the nearest visible slide. Entering or
+   * leaving `'skip'` changes which slides find may match, so it clears the
+   * current search (matches, active match and highlights); call
+   * {@link findText} again.
    */
   async setHiddenSlideMode(mode: HiddenSlideMode): Promise<void> {
     const generation = this._beginNavigation();
@@ -910,13 +913,14 @@ export class PptxViewer implements ZoomableViewer {
   }
 
   /**
-   * IX2 — find every occurrence of `query` across all slides and highlight them
-   * (a soft box per match on the highlight overlay). Returns every match in
-   * document order, each tagged with its `{ slide }` (0-based). Case-insensitive
-   * by default; pass `{ caseSensitive: true }` for an exact match.
+   * IX2 — find every occurrence of `query` and highlight them (a soft box per
+   * match on the highlight overlay). Returns every match in document order, each
+   * tagged with its `{ slide }` (0-based). Case-insensitive by default; pass
+   * `{ caseSensitive: true }` for an exact match.
    *
-   * Scans all slides (each rendered once offscreen to read its text; the visible
-   * slide reuses its on-screen render). IX6 — works in BOTH `mode: 'main'` and
+   * Scans every slide, except that with `hiddenSlideMode: 'skip'` hidden slides
+   * are neither scanned nor matched (each scanned slide is rendered once
+   * offscreen to read its text; the visible slide reuses its on-screen render). IX6 — works in BOTH `mode: 'main'` and
    * `mode: 'worker'`: in worker mode each slide's run geometry is collected
    * off-thread and shipped back, so find returns the same matches on the same
    * code path. An empty query clears the find.
