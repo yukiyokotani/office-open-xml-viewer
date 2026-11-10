@@ -14493,29 +14493,9 @@ fn resolved_vml_textpath_bool(
         })
 }
 
-// Part 4 §19.1.2.11: crop insets are fractions, percentages, or signed
-// 16.16 fixed-point values. Preserve negative insets for the existing srcRect
-// pipeline; clamping here would discard authored outsets.
+// Part 4 §19.1.2.11 crop insets; shared with the PPTX/XLSX VML OLE previews.
 fn vml_image_crop(node: roxmltree::Node) -> Option<SrcRect> {
-    let fraction = |name| {
-        node.attribute(name)
-            .and_then(|s| {
-                s.trim()
-                    .strip_suffix('%')
-                    .and_then(|s| s.parse::<f64>().ok())
-                    .map(|n| n / 100.0)
-                    .or_else(|| parse_vml_opacity(s))
-            })
-            .filter(|n| n.is_finite())
-            .unwrap_or(0.0)
-    };
-    let crop = SrcRect {
-        l: fraction("cropleft"),
-        t: fraction("croptop"),
-        r: fraction("cropright"),
-        b: fraction("cropbottom"),
-    };
-    (crop.l != 0.0 || crop.t != 0.0 || crop.r != 0.0 || crop.b != 0.0).then_some(crop)
+    ooxml_common::vml::imagedata_crop(node)
 }
 
 /// VML `id` is an object identifier. Only relationship-namespace id/pict
