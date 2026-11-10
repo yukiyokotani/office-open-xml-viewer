@@ -3,8 +3,10 @@
  * maps and the `MVAR` deltas of the global vertical metrics
  * (https://learn.microsoft.com/en-us/typography/opentype/spec/otvaroverview,
  * .../fvar, .../avar, .../mvar). Only the values a line box needs are
- * instanced: hhea ascender/descender/lineGap (`hasc`/`hdsc`/`hlgp`), OS/2
- * usWin (`hcla`/`hcld`) and OS/2 typo (`tasc`/`tdsc`/`tlgp`).
+ * instanced, by the MVAR value-tag table: OS/2 sTypoAscender / sTypoDescender
+ * / sTypoLineGap (`hasc`/`hdsc`/`hlgp`) and OS/2 usWinAscent / usWinDescent
+ * (`hcla`/`hcld`). MVAR defines no tag for the hhea ascender, descender or
+ * lineGap, so those keep their default-instance values in every instance.
  */
 
 export interface OpenTypeVariationAxis {
@@ -28,7 +30,7 @@ export interface OpenTypeVariation {
   readonly metrics: ReadonlyMap<string, MetricDeltas>;
 }
 
-export const LINE_METRIC_MVAR_TAGS = ['hasc', 'hdsc', 'hlgp', 'hcla', 'hcld', 'tasc', 'tdsc', 'tlgp'] as const;
+export const LINE_METRIC_MVAR_TAGS = ['hasc', 'hdsc', 'hlgp', 'hcla', 'hcld'] as const;
 export type LineMetricMvarTag = typeof LINE_METRIC_MVAR_TAGS[number];
 
 type Table = { offset: number; length: number } | undefined;
@@ -220,11 +222,19 @@ export function variationCoordinates(variation: OpenTypeVariation, values: Reado
   });
 }
 
-/** Whether any line-metric delta varies along `axisTag` (e.g. `opsz`). */
-export function lineMetricsVaryAlong(variation: OpenTypeVariation, axisTag: string): boolean {
+/** Whether a line-metric delta (of `tags`, default every kept tag) varies
+ * along `axisTag` (e.g. `opsz`). */
+export function lineMetricsVaryAlong(
+  variation: OpenTypeVariation,
+  axisTag: string,
+  tags: readonly LineMetricMvarTag[] = LINE_METRIC_MVAR_TAGS,
+): boolean {
   const axis = variation.axes.findIndex((candidate) => candidate.tag === axisTag);
   if (axis < 0) return false;
-  for (const { regions, deltas } of variation.metrics.values()) {
+  for (const tag of tags) {
+    const entry = variation.metrics.get(tag);
+    if (!entry) continue;
+    const { regions, deltas } = entry;
     if (regions.some((region, index) => deltas[index] !== 0 && variation.regions[region]!.axes[axis]![1] !== 0)) return true;
   }
   return false;

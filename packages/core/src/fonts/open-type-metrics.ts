@@ -5,6 +5,7 @@ import {
   metricDelta,
   parseOpenTypeVariation,
   variationCoordinates,
+  type LineMetricMvarTag,
   type OpenTypeVariation,
 } from './open-type-variations.js';
 
@@ -416,34 +417,35 @@ export function parseOpenTypeResourceMetrics(
  * Line metrics of one instance of a variable font: the default-instance
  * values plus the MVAR deltas at `axisValues` (user-space values by axis tag;
  * a missing axis takes its fvar default). A static font is returned as is.
- * Returns null when a line metric varies along `opsz`: the browser sets that
- * axis from the font size (CSS `font-optical-sizing: auto`), so one size-free
- * line ratio does not exist for the face.
+ * MVAR tags follow the OpenType value-tag table: `hasc`/`hdsc`/`hlgp` vary
+ * the OS/2 typo values, `hcla`/`hcld` usWin; the hhea values have no tag and
+ * never vary. Returns null when a value of `opszTags` (default: every one of
+ * them) varies along `opsz`: the browser sets that axis from the font size
+ * (CSS `font-optical-sizing: auto`), so one size-free value does not exist.
+ * A caller passes only the tags its projection reads.
  */
 export function instanceOpenTypeLineMetrics(
   metrics: OpenTypeLineMetrics,
   axisValues: Readonly<Record<string, number>>,
+  opszTags?: readonly LineMetricMvarTag[],
 ): OpenTypeLineMetrics | null {
   const variation = metrics.variation;
   if (!variation) return metrics;
-  if (lineMetricsVaryAlong(variation, 'opsz')) return null;
+  if (lineMetricsVaryAlong(variation, 'opsz', opszTags)) return null;
   const coords = variationCoordinates(variation, axisValues);
   const delta = (tag: Parameters<typeof metricDelta>[1]) => metricDelta(variation, tag, coords);
   const { variation: _variation, ...base } = metrics;
   void _variation;
   return Object.freeze({
     ...base,
-    hheaAscent: metrics.hheaAscent + delta('hasc'),
-    hheaDescent: metrics.hheaDescent + delta('hdsc'),
-    hheaLineGap: metrics.hheaLineGap + delta('hlgp'),
     ...(metrics.winAscent === undefined ? {} : {
       winAscent: metrics.winAscent + delta('hcla'),
       winDescent: (metrics.winDescent ?? 0) + delta('hcld'),
     }),
     ...(metrics.typoAscent === undefined ? {} : {
-      typoAscent: metrics.typoAscent + delta('tasc'),
-      typoDescent: (metrics.typoDescent ?? 0) + delta('tdsc'),
-      typoLineGap: (metrics.typoLineGap ?? 0) + delta('tlgp'),
+      typoAscent: metrics.typoAscent + delta('hasc'),
+      typoDescent: (metrics.typoDescent ?? 0) + delta('hdsc'),
+      typoLineGap: (metrics.typoLineGap ?? 0) + delta('hlgp'),
     }),
   });
 }

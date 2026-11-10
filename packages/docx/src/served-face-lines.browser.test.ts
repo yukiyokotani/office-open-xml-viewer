@@ -127,8 +127,9 @@ describe('served face line metrics in the browser', () => {
 
   it('sizes a variable face at the instance the run selects', async (test) => {
     if (!browser) test.skip();
-    // wght 400: (800 + 200 + 300) / 1000; wght 700: (860 + 200 + 420) / 1000.
+    // The Latin projection reads hhea, which MVAR does not vary: every
+    // instance keeps (800 + 200 + 300) / 1000.
     for (const pitch of await pitches(docx('Ooxml Var Gap'), 'files-var')) expect(pitch).toBeCloseTo(1.3, 2);
-    for (const pitch of await pitches(docx('Ooxml Var Gap', true), 'files-var')) expect(pitch).toBeCloseTo(1.48, 2);
+    for (const pitch of await pitches(docx('Ooxml Var Gap', true), 'files-var')) expect(pitch).toBeCloseTo(1.3, 2);
   }, 60_000);
 });

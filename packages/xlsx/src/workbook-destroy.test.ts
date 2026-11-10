@@ -93,7 +93,11 @@ function installFontFaceSet(gate: Promise<void> = Promise.resolve(), missingLoca
   };
   G.FontFace = FakeFontFace;
   G.document = { fonts: set };
-  G.fetch = vi.fn(async () => { throw new Error('no network'); });
+  // Only the face file the library fetches itself is answered.
+  G.fetch = vi.fn(async (url: string) => {
+    if (!/\.woff2$/.test(url)) throw new Error('no network');
+    return { ok: true, status: 200, url, arrayBuffer: async () => new Uint8Array(16).buffer };
+  });
   delete G.self;
   return { added };
 }

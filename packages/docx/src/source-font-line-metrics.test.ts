@@ -151,8 +151,8 @@ describe('served font line metrics', () => {
   });
 
   it('sizes a variable face at the instance CSS selects for each tuple', () => {
-    // Masters wght 400/900: ascender 800/900, lineGap 300/500; wght 700 is
-    // 0.6 of the way: (860 + 200 + 420) / 1000.
+    // MVAR has no tag for the hhea values the Latin projection reads, so every
+    // instance keeps the default hhea line: (800 + 200 + 300) / 1000.
     const served = { family: 'Ooxml Fixture Gap', weight: '100 900', style: 'normal', resourceMetrics: VARIABLE };
     const doc = model('Ooxml Fixture Gap');
     const ctx = canvasBoxContext();
@@ -166,7 +166,29 @@ describe('served font line metrics', () => {
       return (line!.ascent + line!.descent) / 10;
     };
     expect(em(false)).toBeCloseTo(1.3, 6);
-    expect(em(true)).toBeCloseTo(1.48, 6);
+    expect(em(true)).toBeCloseTo(1.3, 6);
+  });
+
+  it('applies the usWin deltas (hcla/hcld) of the instance to a Far East variable face', () => {
+    // The fixture's usWinAscent masters are 800/900 (wght 400/900); wght 700
+    // is 0.6 of the way: 860. The class is the parsed one, set Far East here.
+    const farEast = { ...VARIABLE, farEastCodePage: true };
+    const loaded = sourceFontLayoutOptions(model('V'), [{ family: 'V', weight: '100 900', style: 'normal', resourceMetrics: farEast }],
+      { sources: [fontFiles({ faces: [{ family: 'V', url: 'https://app.example/v.ttf' }] })] }).sourceFonts.loaded;
+    const metrics = Object.values(sourceFontLineMetrics(loaded, null));
+    const at = (winAscent: number) => wordOpenTypeAutoLineRatios({ ...TABLES, winAscent, winDescent: 200, farEastCodePage: true })!.lineHeightRatio;
+    const bold = metrics.find((metric) => metric.weight === 700 && metric.style === 'normal')!;
+    const regular = metrics.find((metric) => metric.weight === 400 && metric.style === 'normal')!;
+    expect(regular.lineHeightRatio).toBeCloseTo(at(800), 9);
+    expect(bold.lineHeightRatio).toBeCloseTo(at(860), 9);
+    expect(bold.farEastCodePage).toBe(true);
+  });
+
+  it('carries the parsed code-page class of a table-backed face', () => {
+    const loaded = sourceFontLayoutOptions(model('Ooxml Fixture Gap'), [{ family: 'Ooxml Fixture Gap', weight: '400', style: 'normal', resourceMetrics: TABLES }],
+      { sources: [fontFiles({ faces: [{ family: 'Ooxml Fixture Gap', url: 'https://app.example/gap.ttf' }] })] }).sourceFonts.loaded;
+    // Grid allocation (segment-builder.ts) reads an explicit false.
+    expect(Object.values(sourceFontLineMetrics(loaded, null)).every((metric) => metric.farEastCodePage === false)).toBe(true);
   });
 
   it('clamps a variable instance to the weight descriptor (a 400-only face paints bold synthesized)', () => {
@@ -188,8 +210,10 @@ describe('served font line metrics', () => {
     const regular = metrics.find((metric) => metric.weight === 400 && metric.style === 'normal')!;
     expect(regular).toMatchObject({
       family: 'Measured Face', requiresGlyphCoverage: true, nativeRoutePrimaryFamily: '"__probe"',
-      farEastCodePage: false, unicodeRanges: [[0, 0xff]],
+      unicodeRanges: [[0, 0xff]],
     });
+    // A CSS normal line cannot show the code pages: the class stays unknown.
+    expect(regular.farEastCodePage).toBeUndefined();
     expect(regular.lineHeightRatio).toBeCloseTo(1.3, 9);
     expect(regular.designAscentRatio).toBeCloseTo(1.1, 9);
     // An unmeasurable tuple is declined (its spans keep the Canvas box).
@@ -198,9 +222,10 @@ describe('served font line metrics', () => {
     expect(lineEm('Measured Face', [{ family: 'Measured Face', weight: '400', style: 'normal' }])).toBeCloseTo(ASCENT + DESCENT, 6);
   });
 
-  it('identifies a measured Far East face by the catalogue, else declines it', () => {
-    // A CSS normal line cannot show OS/2 code pages or usWin (Word: 1.3 x usWin),
-    // but a box equal to the catalogued face's identifies its tables.
+  it('declines a measured face of a family the catalogue lists as Far East', () => {
+    // A CSS normal line shows neither the code pages nor usWin, and two fonts
+    // can share an hhea box with different usWin: nothing is inferred from it,
+    // not even for a box equal to the catalogued face's.
     const loaded = sourceFontLayoutOptions(model('Yu Gothic'), [{ family: 'Yu Gothic', weight: '400', style: 'normal' }],
       { sources: [fontFiles({ faces: [{ family: 'Yu Gothic', url: 'https://app.example/yu.woff2' }] })] }).sourceFonts.loaded;
     const prepared = (line: { ascentRatio: number; descentRatio: number; lineGapRatio: number }): PreparedServedFaceLines => ({
@@ -210,12 +235,8 @@ describe('served font line metrics', () => {
     expect(profiles.length).toBeGreaterThan(0);
     const [ascender, descender, gap] = profiles[0]!.hhea;
     const em = profiles[0]!.unitsPerEm;
-    const catalogued = Object.values(sourceFontLineMetrics(loaded, null,
-      prepared({ ascentRatio: ascender / em, descentRatio: -descender / em, lineGapRatio: gap / em })));
-    expect(catalogued).toHaveLength(1);
-    expect(catalogued[0]).toMatchObject({ farEastCodePage: true, nativeRoutePrimaryFamily: '"__probe"' });
-    expect(catalogued[0]!.lineHeightRatio).toBeCloseTo(referenceFontLineMetrics('Yu Gothic')!.lineHeightRatio, 9);
-    // Other data under the same name: not identified, declined (Canvas box).
+    expect(Object.keys(sourceFontLineMetrics(loaded, null,
+      prepared({ ascentRatio: ascender / em, descentRatio: -descender / em, lineGapRatio: gap / em })))).toEqual([]);
     expect(Object.keys(sourceFontLineMetrics(loaded, null,
       prepared({ ascentRatio: 0.8, descentRatio: 0.2, lineGapRatio: 0.3 })))).toEqual([]);
   });

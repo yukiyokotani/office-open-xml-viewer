@@ -6,7 +6,7 @@ import { OoxmlError } from '../errors/ooxml-error.js';
 import { HARD_MAX_FONT_SOURCE_FACE_BYTES, HARD_MAX_FONT_SOURCE_FAMILIES } from '../worker/resource-policy.generated.js';
 import { googleFonts } from './presets/google-fonts.js';
 import { liveSourceCacheCount, sourceCacheEntryCount } from './source-cache.js';
-import { FontSourceSession, retainedFontSourceBytes, type FontSessionDemand } from './source-session.js';
+import { FontSourceSession, fontSourceFaceIdentity, retainedFontSourceBytes, type FontSessionDemand } from './source-session.js';
 import {
   fontCssApi,
   fontCss,
@@ -166,25 +166,75 @@ describe('FontSourceSession: lazy unicode-range loading', () => {
   const SHEET = rule('Noto Sans JP', 'latin.woff2', LATIN) + rule('Noto Sans JP', 'kana.woff2', KANA)
     + rule('Noto Sans JP', 'cjk.woff2', CJK);
 
-  it('registers every subset in order but loads only those the scalars intersect', async () => {
-    installFetch({ [SHEET_URL]: { css: SHEET } });
+  it('fetches, registers and loads only the subsets the scalars intersect', async () => {
+    const { calls } = installFetch({ [SHEET_URL]: { css: SHEET } });
     const set = fakeSet();
     const session = open([fontCss({ url: SHEET_URL })], set);
 
     const first = await session.ensure(demand([], [0x4d, 0x41, 0x41], ['Noto Sans JP']));
-    expect(set.faces.map(urlOf)).toEqual([
-      'https://fonts.example/latin.woff2', 'https://fonts.example/kana.woff2', 'https://fonts.example/cjk.woff2',
-    ]);
-    expect(set.faces.map((face) => face.loadCalls)).toEqual([1, 0, 0]);
+    // Registered from the fetched bytes; the other subsets are neither
+    // fetched nor registered yet.
+    expect(set.faces.map(urlOf)).toEqual(['https://fonts.example/latin.woff2']);
+    expect(set.faces.every((face) => typeof face.source !== 'string')).toBe(true);
+    expect(set.faces.map((face) => face.loadCalls)).toEqual([1]);
     expect(first.faces.map((face) => face.unicodeRange)).toEqual(['U+0000-00FF']);
 
-    // A later delta loads only the newly intersected subset.
+    // A later delta fetches and loads only the newly intersected subset.
     const second = await session.ensure(demand([], [0x3042]));
-    expect(set.faces.map((face) => face.loadCalls)).toEqual([1, 1, 0]);
+    expect(set.faces.map(urlOf)).toEqual(['https://fonts.example/latin.woff2', 'https://fonts.example/kana.woff2']);
+    expect(set.faces.map((face) => face.loadCalls)).toEqual([1, 1]);
     expect(second.faces).toHaveLength(2);
 
     await session.ensure(demand([], 'all'));
     expect(set.faces.map((face) => face.loadCalls)).toEqual([1, 1, 1]);
+    // One request per subset, ever.
+    expect(fileCalls(calls).map((call) => call.url)).toEqual([
+      'https://fonts.example/latin.woff2', 'https://fonts.example/kana.woff2', 'https://fonts.example/cjk.woff2',
+    ]);
+  });
+
+  it('registers overlapping subsets together, in declaration order, whatever is demanded first', async () => {
+    // U+0-FF overlaps U+80-17F, so the two are one overlap component: needing
+    // either registers both, in declaration order, keeping CSS precedence
+    // (the later declaration wins U+80-FF). The kana subset is apart.
+    const sheet = rule('Brand', 'base.woff2', 'unicode-range: U+0-FF;') + rule('Brand', 'kana.woff2', KANA)
+      + rule('Brand', 'ext.woff2', 'unicode-range: U+80-17F;');
+    installFetch({ [SHEET_URL]: { css: sheet } });
+    const set = fakeSet();
+    const session = open([fontCss({ url: SHEET_URL })], set);
+    await session.ensure(demand(['Brand'], [0x3042]));
+    await session.ensure(demand(['Brand'], [0x150]));
+    expect(set.faces.map(urlOf)).toEqual([
+      'https://fonts.example/kana.woff2', 'https://fonts.example/base.woff2', 'https://fonts.example/ext.woff2',
+    ]);
+  });
+
+  it('gives a face one registration across documents, whichever subsets each demands first', async () => {
+    const { calls } = installFetch({ [SHEET_URL]: { css: SHEET } });
+    const set = fakeSet();
+    const source = fontCss({ url: SHEET_URL });
+    const latinFirst = open([source], set);
+    const kanaFirst = open([source], set);
+    const [a, b] = await Promise.all([
+      latinFirst.ensure(demand(['Noto Sans JP'], [0x41])),
+      kanaFirst.ensure(demand(['Noto Sans JP'], [0x3042])),
+    ]);
+    expect(set.faces.map(urlOf).sort()).toEqual(['https://fonts.example/kana.woff2', 'https://fonts.example/latin.woff2']);
+    // Each document's later demand reuses the other's registration and the
+    // bytes this realm keeps: no new request, no new registration.
+    const [a2, b2] = await Promise.all([
+      latinFirst.ensure(demand(['Noto Sans JP'], [0x3042])),
+      kanaFirst.ensure(demand(['Noto Sans JP'], [0x41])),
+    ]);
+    expect(set.faces).toHaveLength(2);
+    expect(fileCalls(calls)).toHaveLength(2);
+    expect(a.faces).toHaveLength(1);
+    expect(b.faces).toHaveLength(1);
+    expect(new Set([...a2.faces, ...b2.faces].map((face) => face.face)).size).toBe(2);
+    // Both registrations carry the source's identity, for every session.
+    const id = fontSourceFaceIdentity(a2.faces[0]!.face);
+    expect(id).toBeDefined();
+    expect(b2.faces.every((face) => fontSourceFaceIdentity(face.face) === id)).toBe(true);
   });
 
   it('applies the same laziness to font-css-api presets and to font files', async () => {
@@ -198,11 +248,10 @@ describe('FontSourceSession: lazy unicode-range loading', () => {
       { family: 'Bundled', url: 'https://app.example/b-jp.woff2', unicodeRange: 'U+3000-30FF' },
     ] });
     const loaded = await open([files, preset], set).ensure(demand(['Calibri', 'Bundled'], [0x61]));
+    // Only the demanded subsets are fetched and registered.
     expect(set.faces.map((face) => [urlOf(face), face.loadCalls])).toEqual([
       ['https://fonts.gstatic.example/c-latin.woff2', 1],
-      ['https://fonts.gstatic.example/c-greek.woff2', 0],
       ['https://app.example/b-latin.woff2', 1],
-      ['https://app.example/b-jp.woff2', 0],
     ]);
     expect(loaded.substitutions.get('calibri')).toEqual({ family: 'Carlito' });
     expect(loaded.regularAliases.get('carlito regular')).toBe('Carlito');
@@ -278,13 +327,13 @@ describe('FontSourceSession: credentials omit', () => {
     const lazy = fakeSet();
     await open([fontFiles({ faces: [
       { family: 'File', url: 'https://app.example/a.woff2', unicodeRange: 'U+0-FF' },
-      // Not demanded yet: registered by URL, left to the browser when needed.
+      // Not demanded yet: neither fetched nor registered.
       { family: 'File', url: 'https://app.example/cjk.woff2', unicodeRange: 'U+4E00-9FFF' },
     ], credentials: 'same-origin' })], lazy)
       .ensure(demand(['File'], [0x41]));
-    // Registered from the fetched bytes (one download), in declaration order.
+    // Registered from the fetched bytes (one download).
     expect(lazy.faces.map((face) => typeof face.source === 'string' ? urlOf(face) : face.source.byteLength))
-      .toEqual([4, 'https://app.example/cjk.woff2']);
+      .toEqual([4]);
     expect(calls.map((call) => [call.url, call.init?.credentials, call.init?.mode]))
       .toEqual([['https://app.example/a.woff2', 'same-origin', 'cors']]);
     calls.length = 0;
@@ -1065,6 +1114,22 @@ describe('FontSourceSession: script-scoped substitution proof (FontSessionDemand
 });
 
 describe('FontSourceSession: served face tables', () => {
+  it('fetches a resolver URL face once in this realm, as worker mode does, and registers its bytes', async () => {
+    const url = 'https://fonts.app.example/private.ttf';
+    const gap = new Uint8Array(await readFile(new URL('../../../../tests/fixtures/fonts/ooxml-fixture-gap.ttf', import.meta.url)));
+    const { calls } = installFetch({ [url]: { body: gap.buffer.slice(gap.byteOffset, gap.byteOffset + gap.byteLength) as ArrayBuffer } });
+    const set = fakeSet();
+    const loaded = await open([fontResolver((request) => request.families.map((family) => ({ family, url })))], set)
+      .ensure(demand(['Private']));
+    // One request (no second load of the URL by FontFace, whatever the
+    // cache headers), with the CSS font-loading credentials.
+    expect(calls.map((call) => [call.url, call.init?.credentials])).toEqual([[url, 'same-origin']]);
+    expect(set.faces.every((face) => typeof face.source !== 'string')).toBe(true);
+    // Its own tables are read; nothing is left to measure again.
+    expect(loaded.faces[0]?.resourceMetrics?.hheaLineGap).toBe(300);
+    expect(loaded.faces[0]?.probeSource).toBeUndefined();
+  });
+
   // Synthetic fixtures (scripts/generate-fixture-font.py): hhea/typo lineGap
   // 300 of 1000 UPM, Latin 1 code page declared.
   const fixture = async (name: string) => {
@@ -1107,20 +1172,21 @@ describe('FontSourceSession: served face tables', () => {
     });
     const set = fakeSet();
     const opaque = new Uint8Array(64).fill(7).buffer;
+    const inline = 'data:font/ttf;base64,AAAA';
     const session = open([
-      fontFiles({ faces: [{ family: 'Opaque Face', data: opaque }] }),
+      fontFiles({ faces: [{ family: 'Opaque Face', data: opaque }, { family: 'Inline Face', url: inline }] }),
       fontCss({ url: 'https://fonts.example/v.css' }),
     ], set);
-    const first = await session.ensure(demand(['Opaque Face', 'Css Face'], [0x61]));
-    expect(first.faces).toHaveLength(2);
+    const first = await session.ensure(demand(['Opaque Face', 'Inline Face', 'Css Face'], [0x61]));
+    expect(first.faces).toHaveLength(3);
     expect(first.faces.every((face) => face.resourceMetrics === undefined)).toBe(true);
-    // A data face, or a stylesheet face the library fetched: their own bytes.
-    expect(first.faces.map((face) => face.probeSource)).toEqual([opaque, fetchedFontBody('https://fonts.example/css.woff2')]);
-    expect(fileCalls(calls).map((call) => call.url)).toEqual(['https://fonts.example/css.woff2']);
-    // A subset only a later delta needs was registered by URL, so the
-    // browser fetched it: its url() value.
-    const later = await session.ensure(demand(['Opaque Face', 'Css Face'], [0x3042]));
-    expect(later.faces.map((face) => face.probeSource).at(-1)).toBe('url("https://fonts.example/css-kana.woff2")');
-    expect(fileCalls(calls)).toHaveLength(1);
+    // A data face, or a stylesheet face the library fetched: their own
+    // bytes; an inline data: URL face: its url() value.
+    expect(first.faces.map((face) => face.probeSource))
+      .toEqual([opaque, `url("${inline}")`, fetchedFontBody('https://fonts.example/css.woff2')]);
+    // A later delta's subset is fetched by the library too.
+    const later = await session.ensure(demand([], [0x3042]));
+    expect(later.faces.map((face) => face.probeSource).at(-1)).toEqual(fetchedFontBody('https://fonts.example/css-kana.woff2'));
+    expect(fileCalls(calls)).toHaveLength(2);
   });
 });

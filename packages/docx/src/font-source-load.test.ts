@@ -139,7 +139,7 @@ describe('loadDocxFontSources', () => {
     const plan = { ...docxFontFamilyPlan(latin, [SOURCE], undefined, { routes: {} }), fallbackFamilies: ['Noto Sans JP'] };
     const loaded = await loadDocxFontSources(latin, plan, [SOURCE], { fontSet: set });
     // A demanded subset is registered from the bytes the library fetched;
-    // the others stay URL faces the browser would load.
+    // the others are neither fetched nor registered.
     const sourceName = (source: unknown) => typeof source === 'string' ? source
       : `bytes:${new TextDecoder().decode(source as ArrayBuffer)}`;
     const status = () => Object.fromEntries(faces.filter((face) => face.family === 'Noto Sans JP')
@@ -148,7 +148,6 @@ describe('loadDocxFontSources', () => {
       'bytes:https://fonts.example/jp-latin.woff2': 'loaded',
       // U+3042 and U+4E00, layout probes (LAYOUT_SYNTHESIZED_SCALARS).
       'bytes:https://fonts.example/jp-kana.woff2': 'loaded',
-      'url("https://fonts.example/jp-kanji.woff2")': 'unloaded',
     });
     expect(loaded.loaded.substitutions.get('calibri')).toEqual({ family: 'Carlito' });
     expect(loaded.names).toEqual(['Calibri', 'Noto Sans JP']);

@@ -184,6 +184,8 @@ function getImage(path: string, mimeType: string): Promise<Blob> {
 
 const hostFontMeasurements = new Map<number, (measurements: HostFontLineMeasurement[]) => void>();
 const servedFaceMeasurements = new Map<number, (measurements: ServedFaceLineMeasurement[]) => void>();
+/** Aborted when a parse is superseded (served-face-lines.ts probe waits). */
+let servedFaceProbe = new AbortController();
 const nativeRouteMeasurements = new Map<number, (lines: (NativeRouteNormalLine | null)[]) => void>();
 
 self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest | WorkerSvgDecodeResponse>) => {
@@ -244,6 +246,9 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest | WorkerSvgDecod
       hostFontMeasurements.clear();
       for (const resolve of servedFaceMeasurements.values()) resolve([]);
       servedFaceMeasurements.clear();
+      // A superseded parse's probe waits end and release their registrations.
+      servedFaceProbe.abort();
+      servedFaceProbe = new AbortController();
       // A superseded parse's measurement reply is discarded by the host.
       for (const resolve of nativeRouteMeasurements.values()) resolve([]);
       nativeRouteMeasurements.clear();
@@ -464,7 +469,7 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest | WorkerSvgDecod
           : [];
         if (requestedGeneration !== parseGeneration) throw new Error('render-worker parse was superseded');
         const servedFaceLines = await prepareServedFaceLines(
-          loadedSources?.loaded, activeFontSet(), [], servedMeasurements,
+          loadedSources?.loaded, activeFontSet(), [], servedMeasurements, servedFaceProbe.signal,
         );
         officeFaces = [...officeFaces, ...servedFaceLines.faces];
         if (requestedGeneration !== parseGeneration) throw new Error('render-worker parse was superseded');

@@ -33,14 +33,16 @@ is removed in 0.91.0. See the [0.89 to 0.90 migration guide](docs/migration-0.90
   subsets that the document's text paints, as PPTX already did.
 - **Served font line heights:** DOCX lays out a face from the `fonts` option
   with Word's line rule from the face's own OpenType tables (including the
-  line gap and, for variable fonts, MVAR), as for an installed or embedded
-  face. Before, such a face got the canvas font box, which leaves out the line
-  gap, so its lines were too tight. To read the tables, the library now
-  fetches the font files of `googleFonts()`, `fontCssApi()`, `fontCss()` and
-  `fontFiles()` itself with `fetch()` (one request per needed
-  `unicode-range` subset, as before) and registers each face from those
-  bytes. **CSP:** the font file host (for example `fonts.gstatic.com`) now
-  needs `connect-src` as well as `font-src`.
+  line gap and, for variable fonts, the MVAR usWin deltas), as for an
+  installed or embedded face. Before, such a face got the canvas font box,
+  which leaves out the line gap, so its lines were too tight. To read the
+  tables, the library now fetches the font files of `googleFonts()`,
+  `fontCssApi()`, `fontCss()`, `fontFiles()` and, in main mode too,
+  `fontResolver()` itself with `fetch()` (one request per needed
+  `unicode-range` subset, or per face of a claimed `fontResolver()` family;
+  the same requests in main and worker mode) and registers each face from those bytes. **CSP:** the font file
+  host (for example `fonts.gstatic.com`) now needs `connect-src` as well as
+  `font-src`.
 - **Resource safety:** font sources have fixed limits and fail closed with the
   new `OoxmlError` code `font-source-limit`.
 - **Failed package parts:** a new `partFailures` getter on `DocxDocument`,

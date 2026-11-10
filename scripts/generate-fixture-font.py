@@ -9,8 +9,8 @@ Writes these fonts under tests/fixtures/fonts/:
   can tell a face's own normal line from its gap-less font box;
 - ooxml-fixture-gap.woff / .woff2: the same font as WOFF 1.0 and WOFF 2.0;
 - ooxml-fixture-gap-var.ttf: a variable version (wght 100-900) whose Black
-  master has ascender 900 and lineGap 500, so MVAR varies hasc/hlgp (and the
-  OS/2 typo/win values) with the weight.
+  master has ascender 900 and lineGap 500, so MVAR varies the OS/2 typo values
+  (hasc/hlgp) and usWin (hcla) with the weight; hhea has no MVAR tag.
 
 Every glyph is a synthetic rectangle (no outline is derived from any existing
 font, so the files carry no third-party copyright). Advances are fixed per

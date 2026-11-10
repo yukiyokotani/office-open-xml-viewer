@@ -14,12 +14,17 @@
  *   is bundled: without native support the tables are unavailable
  *   (`'unsupported'`) and callers measure the face instead.
  *
- * Inflation is bounded by the bytes it actually produces (never by a size the
- * file declares): {@link MAX_INFLATED_BYTES} per file.
+ * One budget per file, {@link MAX_INFLATED_BYTES}, covers everything the
+ * decode inflates and allocates: it is checked against the declared sizes
+ * before any table buffer is allocated, and against the bytes actually
+ * produced while inflating (never trusting a declared size). WOFF 1.0 counts
+ * every kept table, inflated or stored; WOFF 2.0 inflates its stream only up
+ * to the end of the last kept table. A directory that repeats a tag is
+ * malformed. Brotli support is checked before anything is allocated.
  */
 import { HARD_MAX_FONT_SOURCE_FACE_BYTES } from '../worker/resource-policy.generated.js';
 
-/** Ceiling on the bytes one file may inflate to (tables kept or skipped). */
+/** Ceiling on the bytes one file's decode may inflate and allocate in all. */
 export const MAX_INFLATED_BYTES = HARD_MAX_FONT_SOURCE_FACE_BYTES * 4;
 
 const KEPT = ['head', 'hhea', 'OS/2', 'cmap', 'fvar', 'avar', 'MVAR'];
@@ -52,11 +57,14 @@ export function nativeBrotliAvailable(): boolean {
 }
 
 /** Inflate `input`, keeping only the byte ranges `keep` selects (offsets in
- * the inflated stream), within {@link MAX_INFLATED_BYTES}. */
+ * the inflated stream), producing at most `limit` bytes; reading stops once
+ * `until` bytes were produced. Returns the bytes produced, or null. */
 async function inflate(
   format: string,
   input: Uint8Array,
   keep: (offset: number, chunk: Uint8Array) => void,
+  limit: number,
+  until = Infinity,
 ): Promise<number | null> {
   let stream: ReadableStream<Uint8Array>;
   try {
@@ -72,9 +80,10 @@ async function inflate(
       const { done, value } = await reader.read();
       if (done) break;
       if (!value) continue;
-      if (total + value.byteLength > MAX_INFLATED_BYTES) { await reader.cancel().catch(() => undefined); return null; }
+      if (total + value.byteLength > limit) { await reader.cancel().catch(() => undefined); return null; }
       keep(total, value);
       total += value.byteLength;
+      if (total >= until) { await reader.cancel().catch(() => undefined); break; }
     }
   } catch {
     return null;
@@ -114,22 +123,32 @@ async function woff1(view: DataView, bytes: Uint8Array): Promise<Uint8Array | nu
   const flavor = view.getUint32(4);
   const count = view.getUint16(12);
   if (44 + count * 20 > bytes.byteLength) return null;
-  const tables = new Map<string, Uint8Array>();
+  // Directory pass: validate and size every kept table before allocating.
+  const kept: { tag: string; stored: Uint8Array; origLength: number }[] = [];
+  const seen = new Set<string>();
+  let budget = 0;
   for (let index = 0; index < count; index++) {
     const record = 44 + index * 20;
     const tag = tagOf(view, record);
+    if (seen.has(tag)) return null;
+    seen.add(tag);
     if (!KEPT.includes(tag)) continue;
     const offset = view.getUint32(record + 4);
     const compLength = view.getUint32(record + 8);
     const origLength = view.getUint32(record + 12);
     if (offset + compLength > bytes.byteLength || compLength > origLength) return null;
-    const stored = bytes.subarray(offset, offset + compLength);
-    if (compLength === origLength) { tables.set(tag, stored.slice()); continue; }
-    // The declared original length sizes the buffer; the inflated bytes are
-    // accounted as they arrive and must match it exactly.
-    if (origLength > MAX_INFLATED_BYTES) return null;
+    budget += origLength;
+    if (budget > MAX_INFLATED_BYTES) return null;
+    kept.push({ tag, stored: bytes.subarray(offset, offset + compLength), origLength });
+  }
+  const tables = new Map<string, Uint8Array>();
+  for (const { tag, stored, origLength } of kept) {
+    if (stored.byteLength === origLength) { tables.set(tag, stored.slice()); continue; }
+    // The declared original length sizes the buffer (within the file's
+    // budget above); the inflated bytes are counted as they arrive and must
+    // match it exactly.
     const table = { start: 0, bytes: new Uint8Array(origLength) };
-    const total = await inflate('deflate', stored, (at, chunk) => collect(table, at, chunk));
+    const total = await inflate('deflate', stored, (at, chunk) => collect(table, at, chunk), origLength);
     if (total !== origLength) return null;
     tables.set(tag, table.bytes);
   }
@@ -158,7 +177,8 @@ async function woff2(view: DataView, bytes: Uint8Array): Promise<Uint8Array | nu
   const count = view.getUint16(12);
   const compressedLength = view.getUint32(20);
   const cursor = { offset: 48 };
-  const wanted: { tag: string; start: number; bytes: Uint8Array }[] = [];
+  const wanted: { tag: string; start: number; length: number }[] = [];
+  const seen = new Set<string>();
   let streamOffset = 0;
   for (let index = 0; index < count; index++) {
     if (cursor.offset >= bytes.byteLength) return null;
@@ -172,6 +192,8 @@ async function woff2(view: DataView, bytes: Uint8Array): Promise<Uint8Array | nu
       tag = WOFF2_TAGS[flags & 0x3f] ?? '';
       if (!tag) return null;
     }
+    if (seen.has(tag)) return null;
+    seen.add(tag);
     const version = flags >> 6;
     const origLength = base128(view, cursor, bytes.byteLength);
     if (origLength === null) return null;
@@ -180,18 +202,27 @@ async function woff2(view: DataView, bytes: Uint8Array): Promise<Uint8Array | nu
     if (length === null) return null;
     // Kept tables are never transformed (§5); a transformed one is malformed.
     if (KEPT.includes(tag)) {
-      if (transformed || origLength > MAX_INFLATED_BYTES) return null;
-      wanted.push({ tag, start: streamOffset, bytes: new Uint8Array(origLength) });
+      if (transformed) return null;
+      wanted.push({ tag, start: streamOffset, length: origLength });
     }
     streamOffset += length;
+    if (streamOffset > Number.MAX_SAFE_INTEGER) return null;
   }
   if (cursor.offset + compressedLength > bytes.byteLength) return null;
   if (!nativeBrotliAvailable()) return 'unsupported';
+  // The stream is inflated only up to the end of the last kept table (the
+  // last chunk may run past it); what is inflated plus the kept buffers
+  // stays within the file's budget.
+  if (wanted.length === 0) return null;
+  const end = wanted.reduce((max, table) => Math.max(max, table.start + table.length), 0);
+  const allocated = wanted.reduce((sum, table) => sum + table.length, 0);
+  if (end + allocated > MAX_INFLATED_BYTES) return null;
+  const tables = wanted.map((table) => ({ tag: table.tag, start: table.start, bytes: new Uint8Array(table.length) }));
   const total = await inflate('brotli', bytes.subarray(cursor.offset, cursor.offset + compressedLength), (at, chunk) => {
-    for (const table of wanted) collect(table, at, chunk);
-  });
-  if (total === null || total < streamOffset) return null;
-  return assembleSfnt(flavor, new Map(wanted.map((table) => [table.tag, table.bytes])));
+    for (const table of tables) collect(table, at, chunk);
+  }, MAX_INFLATED_BYTES - allocated, end);
+  if (total === null || total < end) return null;
+  return assembleSfnt(flavor, new Map(tables.map((table) => [table.tag, table.bytes])));
 }
 
 /**

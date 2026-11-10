@@ -45,10 +45,9 @@ export const FONT_SOURCE_PROTOCOL = 'ooxml-font-source/v1';
  * answers through {@link fontResolver}.
  *
  * - `'same-origin'` (the default) matches CSS font fetching: the stylesheet is
- *   fetched with it, and so are the `url` faces the demand so far needs
- *   (the library fetches them itself so their tables can be read; see
- *   `face-download.ts`). A subset only a later delta needs is left to
- *   `FontFace.load()`, which sends credentials to the same origin only.
+ *   fetched with it, and so is each `url` face when the demand first needs
+ *   it (the library fetches faces itself so their tables can be read; see
+ *   `face-download.ts`), with credentials to the same origin only.
  * - `'omit'` sends no cookies or HTTP authentication at all: the stylesheet
  *   and every `url` face of a claimed family are fetched by the library with
  *   `credentials: 'omit'` (face bytes then count like `data` faces). The
@@ -105,11 +104,10 @@ export type FontSource = FontCssApiSource | FontCssSource | FontFilesSource | Fo
 export interface FontFaceDeclaration {
   /** CSS family it registers under. */
   readonly family: string;
-  /** Absolute http(s), blob: or data: URL. Downloaded by the library itself
-   * in the painting realm (see {@link FontSourceCredentials}) or, in worker
-   * mode, in the page for a {@link fontResolver} answer; else (a data: URL,
-   * a subset only a later delta needs, a main-mode resolver answer) fetched
-   * by `FontFace.load()`. */
+  /** Absolute http(s), blob: or data: URL. An http(s) or blob: URL is
+   * downloaded by the library itself in the painting realm (see
+   * {@link FontSourceCredentials}) or, in worker mode, in the page for a
+   * {@link fontResolver} answer; a data: URL is left to `FontFace`. */
   readonly url?: string;
   /** Owned font bytes; transferred once to a worker. */
   readonly data?: ArrayBuffer;

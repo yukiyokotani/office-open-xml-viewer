@@ -18,19 +18,24 @@
  *    allow-list miss, a family absent from a stylesheet or file list) passes
  *    it on;
  *    The claimed `url` faces of a source with `credentials: 'omit'`, and of
- *    a resolver when the session acquires resolver faces (the worker bridge,
- *    an XLSX viewer realm of a worker-mode workbook), are then fetched by the
- *    library (`face-download.ts`) within the face-loading ceiling; a face
- *    that cannot be fetched fails like a face that cannot load;
+ *    a resolver (through the worker bridge in a worker, in this realm
+ *    otherwise), are then fetched by the library (`face-download.ts`) within
+ *    the face-loading ceiling; a face that cannot be fetched fails like a
+ *    face that cannot load. Other sources' `url` faces are fetched the same
+ *    way when the demand needs them (step 3);
  * 2. **admits** the claimed declarations against the generated ceilings
  *    (families per session, declarations per session, retained bytes per
  *    realm). A breach rejects with `OoxmlError('font-source-limit')`, releases
  *    the session and is rethrown by every later ensure: it is a misconfigured
  *    or hostile source, not network weather;
- * 3. **registers** every declaration of a claimed family, in declaration
- *    order, through the refcounted per-realm registry (`font-registry.ts`).
- *    Registering excluded subsets too keeps overlapping `unicode-range`
- *    precedence independent of the order demand arrives in;
+ * 3. **registers** the declarations of a claimed family, in declaration
+ *    order, through the refcounted per-realm registry (`font-registry.ts`):
+ *    every one at claim for `credentials: 'omit'` and resolver sources;
+ *    otherwise by overlap component, when the demand first intersects it,
+ *    after fetching its `url` faces (so each is registered from its bytes,
+ *    once, whichever subsets are demanded first). A component holds every
+ *    declaration whose `unicode-range` overlaps another's, so overlapping
+ *    precedence is independent of the order demand arrives in;
  * 4. **loads** (`FontFace.load()`) only faces whose `unicode-range`
  *    intersects the demanded scalars (every face for `'all'`, and faces
  *    without a range always). Canvas never triggers a load itself, so an
@@ -56,6 +61,7 @@ import { parseUnicodeRange, resolveCssSource } from './css-source.js';
 import {
   FONT_DEADLINE_REASON,
   acquireFaceUrls,
+  inRealmResolverFaceAcquirer,
   isDownloadableFace,
   releaseAcquiredFaces,
   withAcquiredBytes,
@@ -112,17 +118,17 @@ export interface LoadedSourceFace {
   readonly sourceIndex: number;
   readonly face: FontFace;
   /** OpenType tables of the exact bytes this face was registered from, when
-   * the session holds them (`data` faces and library-acquired downloads,
-   * which include every `fontFiles` URL face the first demand needs) and the
-   * parser reads them: TrueType/OpenType, WOFF, and WOFF2 where the engine
+   * the session holds them (`data` faces and every library-acquired
+   * http(s) / blob: download) and the parser reads them: TrueType/OpenType, WOFF, and WOFF2 where the engine
    * inflates Brotli natively. A variable font carries its `variation` data
    * for {@link instanceOpenTypeLineMetrics}. Formats project these tables
    * with their own line rules, exactly as for a document-embedded face. */
   readonly resourceMetrics?: OpenTypeLineMetrics;
   /** When `resourceMetrics` is absent: the source this face was registered
-   * from (a CSS `url()` value or the owned bytes), so a format can register
-   * it again alone under a private family and measure it in the DOM. Absent
-   * for a face the tables were read from. */
+   * from (the owned bytes, or the `url()` of an inline data: URL), so a
+   * format can register it again alone under a private family and measure
+   * it in the DOM without a request. Absent for a face the tables were read
+   * from. */
   readonly probeSource?: string | ArrayBuffer;
 }
 
@@ -167,11 +173,53 @@ export interface FontSourceSessionOptions {
 
 /** Parsed tables per registered face (null: unreadable). A face shared by
  * sessions of one realm was created from one signature (content included),
- * so its bytes, and hence its tables, are the same for every holder. */
+ * so its bytes, and hence its tables, are the same for every holder. Decoding
+ * is serialised through {@link withDecodeSlot}. */
 const faceResourceMetrics = new WeakMap<FontFace, OpenTypeLineMetrics | null>();
 
+/** Source identity (`SourceCache.id`) of every face a session registered,
+ * so a format can tell the faces of one source, registered by any session of
+ * this realm, from a face the application registered itself. */
+const sourceFaceIdentities = new WeakMap<FontFace, string>();
+
+/** The source identity a font-source session registered `face` under, or
+ * undefined for a face no session registered. */
+export function fontSourceFaceIdentity(face: FontFace): string | undefined {
+  return sourceFaceIdentities.get(face);
+}
+
+/** Concurrent metric-table decodes per realm: a WOFF/WOFF2 decode inflates
+ * up to `MAX_INFLATED_BYTES`, so few run at once. */
+const MAX_CONCURRENT_DECODES = 2;
+let activeDecodes = 0;
+const decodeQueue: (() => void)[] = [];
+
+async function withDecodeSlot<T>(run: () => Promise<T>): Promise<T> {
+  if (activeDecodes >= MAX_CONCURRENT_DECODES) await new Promise<void>((resolve) => decodeQueue.push(resolve));
+  else activeDecodes++;
+  try {
+    return await run();
+  } finally {
+    const next = decodeQueue.shift();
+    if (next) next();
+    else activeDecodes--;
+  }
+}
+
 /** Read the metric tables of `data` once per face (WOFF/WOFF2 inflate). */
-async function prepareResourceMetrics(face: FontFace, data: ArrayBuffer): Promise<void> {
+const pendingResourceMetrics = new WeakMap<FontFace, Promise<void>>();
+
+function prepareResourceMetrics(face: FontFace, data: ArrayBuffer): Promise<void> {
+  if (faceResourceMetrics.has(face)) return Promise.resolve();
+  let pending = pendingResourceMetrics.get(face);
+  if (!pending) {
+    pending = withDecodeSlot(() => decodeResourceMetrics(face, data));
+    pendingResourceMetrics.set(face, pending);
+  }
+  return pending;
+}
+
+async function decodeResourceMetrics(face: FontFace, data: ArrayBuffer): Promise<void> {
   if (faceResourceMetrics.has(face)) return;
   let metrics: OpenTypeLineMetrics | null = null;
   try {
@@ -285,6 +333,52 @@ function rangeIntersects(ranges: readonly (readonly [number, number])[], sorted:
   return false;
 }
 
+/**
+ * Overlap components of a family's declarations: two declarations whose
+ * `unicode-range`s overlap (a declaration without one overlaps every other)
+ * share a component, transitively. CSS font matching orders only faces that
+ * can serve the same scalar (CSS Fonts 4 §4.5, §5), so registering whole
+ * components, each in declaration order, keeps every precedence the full
+ * declaration order defines, whatever order components are needed in.
+ */
+function overlapComponents(declarations: readonly FontFaceDeclaration[]): number[] {
+  const parent = declarations.map((_, index) => index);
+  const find = (index: number): number => {
+    while (parent[index] !== index) { parent[index] = parent[parent[index]!]!; index = parent[index]!; }
+    return index;
+  };
+  const union = (a: number, b: number) => { const ra = find(a), rb = find(b); if (ra !== rb) parent[Math.max(ra, rb)] = Math.min(ra, rb); };
+  const intervals: [number, number, number][] = [];
+  let unbounded = -1;
+  declarations.forEach((declaration, index) => {
+    const ranges = parseUnicodeRange(declaration.unicodeRange);
+    if (ranges === null) {
+      if (unbounded < 0) unbounded = index;
+      else union(unbounded, index);
+      return;
+    }
+    for (const [lo, hi] of ranges) intervals.push([lo, hi, index]);
+  });
+  if (unbounded >= 0) for (let index = 0; index < declarations.length; index++) union(unbounded, index);
+  intervals.sort((a, b) => a[0] - b[0]);
+  let reach = -1;
+  let owner = -1;
+  for (const [lo, hi, index] of intervals) {
+    if (lo <= reach) union(owner, index);
+    if (hi > reach) { reach = hi; owner = index; }
+  }
+  return declarations.map((_, index) => find(index));
+}
+
+/** One declaration's identity for the declaration ceiling: its family,
+ * descriptors and source (URL, or the owned bytes' content key). */
+function declarationKey(declaration: FontFaceDeclaration): string {
+  return [
+    fontFamilyKey(declaration.family), declaration.weight ?? '', declaration.style ?? '', declaration.stretch ?? '',
+    declaration.unicodeRange ?? '', declaration.data !== undefined ? fontContentKey(declaration.data) : declaration.url ?? '',
+  ].join('|');
+}
+
 /** A CSS `url()` for a validated absolute URL (data: URLs are kept verbatim
  * by validation and may contain characters a CSS string must escape). */
 function cssUrl(url: string): string {
@@ -374,10 +468,26 @@ interface OwnedFace {
   outcome?: boolean;
 }
 
+/** The demand-driven faces of a claimed family whose `url` faces the library
+ * fetches when they are needed (a `fontCss` / `fontCssApi` / `fontFiles`
+ * source with the default credentials). Declarations are registered by
+ * overlap component (see {@link overlapComponents}), so a face is acquired
+ * and registered once, from its bytes, whichever subsets are demanded first,
+ * and overlapping `unicode-range` precedence keeps declaration order. */
+interface DemandFaces {
+  /** Overlap component of each declaration. */
+  readonly component: readonly number[];
+  /** Per declaration: registered, or dropped (its download failed). */
+  readonly settled: boolean[];
+}
+
 type FamilyState =
   | { readonly kind: 'claimed'; readonly name: string; readonly sourceIndex: number; readonly served: string;
-    readonly substitution?: FontSubstitution; readonly declarations: readonly FontFaceDeclaration[];
+    /** Current representation: a lazily fetched face is replaced by its
+     * bytes once acquired. */
+    readonly substitution?: FontSubstitution; readonly declarations: FontFaceDeclaration[];
     readonly faces: OwnedFace[];
+    readonly demand?: DemandFaces;
     /** A library-fetched face of the family failed (the family is warned). */
     readonly downloadFailure?: string }
   | { readonly kind: 'failed'; readonly name: string; readonly reason: string }
@@ -420,6 +530,8 @@ export class FontSourceSession {
   private queue: Promise<unknown> = Promise.resolve();
   private readonly families = new Map<string, FamilyState>();
   private readonly owned = new Map<string, OwnedFace>();
+  /** Every declaration this session claimed (by {@link declarationKey}). */
+  private readonly claimedDeclarations = new Set<string>();
   private all = false;
   private readonly points = new Set<number>();
   private readonly warned = new Set<string>();
@@ -431,7 +543,10 @@ export class FontSourceSession {
     this.runResolver = options.runResolver ?? runResolverInRealm;
     this.resolverFailures = options.resolverFailures;
     this.runnerOwnsCeiling = options.resolverCeilingOwnedByRunner === true;
-    this.acquireResolverFaces = options.acquireResolverFaces;
+    // A resolver's claimed URL faces are always fetched by the library: by
+    // the page for a worker (the bridge), and in this realm otherwise, so
+    // both modes send the same requests and hold the bytes.
+    this.acquireResolverFaces = options.acquireResolverFaces ?? inRealmResolverFaceAcquirer(options.resolverFailures);
     this.ownsAcquiredFaces = options.acquiredFacesOwnedBySession === true;
     this.caches = this.sources.map(acquireSourceCache);
     const signal = options.signal;
@@ -476,6 +591,7 @@ export class FontSourceSession {
     releaseFaces([...this.owned.values()].map((entry) => entry.face));
     if (this.fontSet) for (const entry of this.owned.values()) if (entry.charged) refundBytes(this.fontSet, entry.signature);
     this.owned.clear();
+    this.claimedDeclarations.clear();
     this.families.clear();
     this.points.clear();
     for (const cache of this.caches) cache.release();
@@ -559,18 +675,32 @@ export class FontSourceSession {
     // run yet when a busy realm receives the reply.
     const loadCeiling = acquired && ceiling.remaining() === 0
       ? ceilingSignal(this.controller.signal, FONT_LOAD_CEILING_MS) : undefined;
+    // The declaration ceiling covers every claimed declaration, registered
+    // now or on demand later, so a breach fails at claim whatever the text.
+    for (const state of resolved.values()) {
+      if (state.kind !== 'claimed') continue;
+      for (const declaration of state.declarations) this.claimedDeclarations.add(`${state.sourceIndex}\u0000${declarationKey(declaration)}`);
+    }
+    if (this.claimedDeclarations.size > HARD_MAX_FONT_SOURCE_DECLARATIONS) {
+      throw fontSourceLimitError('declarations', HARD_MAX_FONT_SOURCE_DECLARATIONS, this.claimedDeclarations.size);
+    }
     const registered = new Set<OwnedFace>();
     const failures = new Map<string, string>();
     for (const { name, scripts } of fresh) {
       const key = fontFamilyKey(name);
-      const state = resolved.get(key) ?? { kind: 'absent', name, scripts };
+      let state = resolved.get(key) ?? { kind: 'absent', name, scripts };
+      if (state.kind === 'claimed' && this.fetchesOnDemand(state)) {
+        state = { ...state, demand: { component: overlapComponents(state.declarations), settled: state.declarations.map(() => false) } };
+      }
       this.families.set(key, state);
       if (state.kind === 'failed') failures.set(name, state.reason);
       if (state.kind === 'claimed') {
         if (state.downloadFailure !== undefined) failures.set(name, state.downloadFailure);
-        this.register(state, registered, failures);
+        if (!state.demand) this.register(state, registered, failures);
       }
     }
+    await this.registerDemanded(registered, failures, ceiling);
+    if (this.closed) return this.settledState();
     try {
       await this.load(delta, registered, failures, (loadCeiling ?? ceiling).signal);
     } finally {
@@ -595,7 +725,6 @@ export class FontSourceSession {
   private async acquire(resolved: Map<string, FamilyState>, ceiling: ReturnType<typeof ceilingSignal>): Promise<boolean> {
     type Claimed = Extract<FamilyState, { kind: 'claimed' }>;
     const omitted: [string, Claimed][] = [];
-    const sameOrigin: [string, Claimed][] = [];
     const bridged = new Map<number, [string, Claimed][]>();
     for (const entry of resolved) {
       const state = entry[1];
@@ -603,37 +732,18 @@ export class FontSourceSession {
       const source = this.sources[state.sourceIndex];
       if (source.kind !== 'font-resolver') {
         if (source.credentials === 'omit') omitted.push([entry[0], state]);
-        else sameOrigin.push([entry[0], state]);
       } else if (this.acquireResolverFaces) {
         bridged.set(state.sourceIndex, [...bridged.get(state.sourceIndex) ?? [], [entry[0], state]]);
       }
     }
-    if (!omitted.length && !sameOrigin.length && !bridged.size) return false;
+    if (!omitted.length && !bridged.size) return false;
     const deadline = Date.now() + ceiling.remaining();
     const context = { signal: ceiling.signal, cancel: this.controller.signal, deadline, holder: this };
     const urlsOf = (state: Claimed) => state.declarations.filter(isDownloadableFace).map(({ url }) => url as string);
-    // A URL face of a `fontCss` / `fontCssApi` / `fontFiles` source is
-    // fetched by the library, with the CSS font-loading credentials
-    // (same-origin, CORS), so its bytes are held like a `data` face and its
-    // tables can be read; the FontFace is registered from those bytes, so
-    // the file is downloaded once. Laziness is kept: only the subsets the
-    // demand so far needs are fetched here; a subset needed only by a later
-    // delta is registered by URL and loaded by the browser.
-    const sortedPoints = this.all ? [] : [...this.points].sort((a, b) => a - b);
-    const demanded = (declaration: FontFaceDeclaration) => {
-      if (!isDownloadableFace(declaration)) return false;
-      const ranges = parseUnicodeRange(declaration.unicodeRange);
-      return this.all || ranges === null || rangeIntersects(ranges, sortedPoints);
-    };
     const batches: Promise<[readonly [string, Claimed][], ReadonlyMap<string, FaceAcquisition>]>[] = [];
     if (omitted.length) {
       batches.push(acquireFaceUrls(omitted.flatMap(([, state]) => urlsOf(state)), { credentials: 'omit', ...context })
         .then((outcomes) => [omitted, outcomes]));
-    }
-    if (sameOrigin.length) {
-      const urls = sameOrigin.flatMap(([, state]) => state.declarations.filter(demanded).map(({ url }) => url as string));
-      batches.push(acquireFaceUrls(urls, { credentials: 'same-origin', ...context })
-        .then((outcomes) => [sameOrigin, outcomes]));
     }
     const acquire = this.acquireResolverFaces;
     for (const [sourceIndex, claimed] of bridged) {
@@ -668,11 +778,8 @@ export class FontSourceSession {
     for (const [claimed, outcomes] of settled) {
       for (const [key, state] of claimed) {
         let reason: string | undefined;
-        const source = this.sources[state.sourceIndex];
-        const libraryFetched = source?.kind === 'font-resolver' || source?.credentials === 'omit'
-          ? isDownloadableFace : demanded;
         const declarations = state.declarations.flatMap((declaration) => {
-          if (!libraryFetched(declaration)) return [declaration];
+          if (!isDownloadableFace(declaration)) return [declaration];
           const outcome = outcomes.get(declaration.url as string) ?? { reason: 'font download failed' };
           if ('data' in outcome) return [withAcquiredBytes(declaration, outcome.data)];
           reason ??= outcome.reason;
@@ -682,6 +789,76 @@ export class FontSourceSession {
       }
     }
     return bridged.size > 0;
+  }
+
+  /** Whether `state`'s URL faces are fetched on demand ({@link DemandFaces}):
+   * a `fontCss` / `fontCssApi` / `fontFiles` source with the default
+   * credentials. A source with `credentials: 'omit'` and a resolver are
+   * acquired when the family is claimed ({@link acquire}). */
+  private fetchesOnDemand(state: Extract<FamilyState, { kind: 'claimed' }>): boolean {
+    const source = this.sources[state.sourceIndex];
+    return source !== undefined && source.kind !== 'font-resolver' && source.credentials !== 'omit';
+  }
+
+  /**
+   * Fetch and register the on-demand faces the demand so far needs: every
+   * not yet registered overlap component of a claimed family that holds a
+   * declaration intersecting the cumulative scalars (or every one, for
+   * 'all'; a declaration without a range always). A `url` face is fetched by
+   * the library with the CSS font-loading credentials (same-origin, CORS), one
+   * request per face, shared with other sessions of this realm while any of
+   * them holds it, and is registered from those bytes, so its tables can be
+   * read and the file is downloaded once. A face that cannot be fetched is
+   * dropped and its family warned.
+   */
+  private async registerDemanded(
+    registered: Set<OwnedFace>,
+    failures: Map<string, string>,
+    ceiling: ReturnType<typeof ceilingSignal>,
+  ): Promise<void> {
+    type Claimed = Extract<FamilyState, { kind: 'claimed' }>;
+    const sorted = this.all ? [] : [...this.points].sort((a, b) => a - b);
+    const work: { state: Claimed; demand: DemandFaces; indices: number[] }[] = [];
+    for (const state of this.families.values()) {
+      if (state.kind !== 'claimed' || !state.demand) continue;
+      const { component, settled } = state.demand;
+      const needed = new Set<number>();
+      state.declarations.forEach((declaration, index) => {
+        if (settled[index]) return;
+        const ranges = parseUnicodeRange(declaration.unicodeRange);
+        if (this.all || ranges === null || rangeIntersects(ranges, sorted)) needed.add(component[index]!);
+      });
+      if (!needed.size) continue;
+      const indices = state.declarations.flatMap((_, index) => !settled[index] && needed.has(component[index]!) ? [index] : []);
+      work.push({ state, demand: state.demand, indices });
+    }
+    if (!work.length) return;
+    const urls = work.flatMap(({ state, indices }) => indices.flatMap((index) => {
+      const declaration = state.declarations[index]!;
+      return isDownloadableFace(declaration) ? [declaration.url as string] : [];
+    }));
+    const outcomes = urls.length
+      ? await acquireFaceUrls(urls, {
+        credentials: 'same-origin', signal: ceiling.signal, deadline: Date.now() + ceiling.remaining(), holder: this,
+      })
+      : new Map<string, FaceAcquisition>();
+    if (this.closed) throw createAbortError('Font source session released');
+    for (const { state, demand, indices } of work) {
+      const ready: number[] = [];
+      for (const index of indices) {
+        demand.settled[index] = true;
+        const declaration = state.declarations[index]!;
+        if (!isDownloadableFace(declaration)) { ready.push(index); continue; }
+        const outcome = outcomes.get(declaration.url as string) ?? { reason: 'font download failed' };
+        if ('data' in outcome) {
+          state.declarations[index] = withAcquiredBytes(declaration, outcome.data);
+          ready.push(index);
+        } else if (!failures.has(state.name)) {
+          failures.set(state.name, outcome.reason);
+        }
+      }
+      this.register(state, registered, failures, ready);
+    }
   }
 
   /** Merge demanded scalars; returns the newly demanded ones, or 'all' when
@@ -746,7 +923,9 @@ export class FontSourceSession {
             result.set(key, {
               kind: 'claimed', name: entry.name, sourceIndex, served: answer.served,
               ...(answer.substitution ? { substitution: answer.substitution } : {}),
-              declarations: answer.declarations, faces: [],
+              // A copy: on-demand faces replace their entries with bytes, and the
+              // answer is shared through the source cache.
+              declarations: [...answer.declarations], faces: [],
             });
           }
         }
@@ -813,14 +992,21 @@ export class FontSourceSession {
     });
   }
 
-  /** Admit and register one claimed family's declarations, in order. */
-  private register(state: Extract<FamilyState, { kind: 'claimed' }>, registered: Set<OwnedFace>, failures: Map<string, string>): void {
+  /** Admit and register one claimed family's declarations (`indices`,
+   * ascending; default all), in order. */
+  private register(
+    state: Extract<FamilyState, { kind: 'claimed' }>,
+    registered: Set<OwnedFace>,
+    failures: Map<string, string>,
+    indices?: readonly number[],
+  ): void {
     const set = this.fontSet as FontFaceSet;
     const sourceId = this.caches[state.sourceIndex].id;
+    const chosen = indices ? indices.map((index) => state.declarations[index]!) : state.declarations;
     // Registry signature (design §4.4): source identity × family × every
     // descriptor × content, so two origins never share a face and two
     // documents on one source share one face per FontFaceSet.
-    const signed = state.declarations.map((declaration) => {
+    const signed = chosen.map((declaration) => {
       const { data, url = '' } = declaration;
       const dataUrl = data === undefined && /^\s*data:/i.test(url);
       const signature = [
@@ -863,6 +1049,7 @@ export class FontSourceSession {
           const created = new FontFace(declaration.family, data ?? cssUrl(url), descriptors);
           try { set.add(created); }
           catch (error) { set.delete(created); throw error; }
+          sourceFaceIdentities.set(created, sourceId);
           return created;
         }));
       } catch (error) {

@@ -672,7 +672,7 @@ each format entry.
 - **Lazy subsets:** only the `unicode-range` subsets that intersect the painted
   text are loaded, and installed faces with the authored name are never
   replaced. The library fetches the font files itself (`fetch()`), so DOCX can
-  read each face's line metrics. `fontResolver` URLs in worker mode and
+  read each face's line metrics. `fontResolver` URLs and
   sources with `credentials: 'omit'` are fetched for every face of a claimed
   family.
 - **Deployment:** cross-origin font URLs need CORS. Stylesheet origins need

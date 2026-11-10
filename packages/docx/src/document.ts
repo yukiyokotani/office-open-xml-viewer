@@ -778,9 +778,21 @@ export class DocxDocument {
         checkAbort();
         // Served faces without readable tables, and application FontFaces of
         // authored families, are measured here (served-face-lines.ts).
-        const servedFaceLines = await prepareServedFaceLines(
-          sourceFonts?.loaded, activeFontSet(), documentRoutedFontFamilies(doc._source),
-        );
+        // Bounded and abortable: destroy() or the load's signal ends the wait
+        // and releases every probe registration.
+        const probe = new AbortController();
+        const onLoadAbort = () => probe.abort();
+        signal?.addEventListener('abort', onLoadAbort, { once: true });
+        doc._servedFaceProbe = probe;
+        let servedFaceLines: Awaited<ReturnType<typeof prepareServedFaceLines>>;
+        try {
+          servedFaceLines = await prepareServedFaceLines(
+            sourceFonts?.loaded, activeFontSet(), documentRoutedFontFamilies(doc._source), undefined, probe.signal,
+          );
+        } finally {
+          signal?.removeEventListener('abort', onLoadAbort);
+          if (doc._servedFaceProbe === probe) doc._servedFaceProbe = null;
+        }
         if (signal?.aborted || doc._nativeRouteFacesReleased) {
           unloadOfficeFontFallbacks(servedFaceLines.faces);
           throw new PaginationAbortError();
@@ -1036,6 +1048,10 @@ export class DocxDocument {
 
   /** Pending main-mode font-source load, aborted by {@link destroy}. */
   private _fontSourceLoad: AbortController | null = null;
+  /** The pending served-face probe wait (served-face-lines.ts). */
+  private _servedFaceProbe: AbortController | null = null;
+  /** Aborted by destroy(): ends worker-mode probe measurements. */
+  private _probeLifetime: AbortController | null = null;
 
   /**
    * Main mode: resolve, register and load this document's font sources into
@@ -1194,7 +1210,7 @@ export class DocxDocument {
       return;
     }
     if (res.type === 'measureServedFaceLines') {
-      void measureServedFaceLines(res.requests).catch(() => []).then(measurements => {
+      void measureServedFaceLines(res.requests, (this._probeLifetime ??= new AbortController()).signal).catch(() => []).then(measurements => {
         if (res.forId !== this._parseRequestId) return;
         this._worker.postMessage({ type: 'servedFaceLinesMeasured', forId: res.forId, measurements } satisfies RenderWorkerRequest);
       });
@@ -1583,6 +1599,9 @@ export class DocxDocument {
     // destroyed too, and nothing leaks into `document.fonts` (SPA memory).
     this._fontSourceLoad?.abort();
     this._fontSourceLoad = null;
+    this._servedFaceProbe?.abort();
+    this._servedFaceProbe = null;
+    this._probeLifetime?.abort();
     this._fontResolverBridge?.dispose();
     this._fontResolverBridge = null;
     const fontSourceSession = this._fontSourceSession;

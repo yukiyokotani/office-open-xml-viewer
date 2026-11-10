@@ -89,3 +89,4 @@ export {
 } from '../fonts/chart-font-sources.js';
 export { instanceOpenTypeLineMetrics } from '../fonts/open-type-metrics.js';
 export { retainFace, releaseFaces } from '../fonts/font-registry.js';
+export { fontSourceFaceIdentity } from '../fonts/source-session.js';

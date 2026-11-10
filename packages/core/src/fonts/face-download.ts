@@ -2,19 +2,19 @@
  * Library acquisition of `url` faces. Library resource policy, not OOXML
  * behaviour.
  *
- * The library fetches face files itself, and hands the bytes to `FontFace` as
- * a `data` face (so their OpenType tables can be read for line metrics), in
- * three cases; any other `url` face is left to `FontFace.load()`:
+ * The library fetches every http(s) / blob: face file itself, and hands the
+ * bytes to `FontFace` as a `data` face (so their OpenType tables can be read
+ * for line metrics); only data: URLs are left to `FontFace`:
  *
  * - a `fontCssApi` / `fontCss` / `fontFiles` source with the default
- *   credentials (`'same-origin'`, as CSS font fetching): the faces whose
- *   `unicode-range` the demand so far intersects, when their family is
- *   claimed (one request per demanded subset);
+ *   credentials (`'same-origin'`, as CSS font fetching): each face when the
+ *   demand first needs it (one request per demanded subset);
  * - a source configured with `credentials: 'omit'` (`fontCssApi`, `fontCss`,
  *   `fontFiles`): CSS font fetching always sends same-origin credentials, so
  *   omitting them needs a request of the library's own, in the painting realm;
- * - a {@link fontResolver} answer of a worker-mode document: the page fetches
- *   the claimed faces' http(s) / blob: URLs and the worker receives the bytes
+ * - a {@link fontResolver} answer: fetched in the page realm, for a
+ *   main-mode document by its own session ({@link inRealmResolverFaceAcquirer}),
+ *   for a worker-mode document by the page, and the worker receives the bytes
  *   (`resolver-bridge-host.ts`), so cookies, HTTP authentication and Referer
  *   checks see the page exactly as when the page paints. The viewer-realm
  *   sessions of an XLSX worker-mode workbook acquire through the same cache,
