@@ -81,9 +81,7 @@ describe('symbolFontToUnicode', () => {
     expect(symbolFontToUnicode(ch(0xf0b7), null)).toBe(ch(0xf0b7));
     expect(symbolFontToUnicode(ch(0xf0b7), undefined)).toBe(ch(0xf0b7));
     // A code point with no entry in the selected table falls through unchanged
-    // rather than guessing: Symbol 0x60 radicalex has only a Corporate-Use
-    // target, and 0xF0 is unassigned in Microsoft's Symbol.
-    expect(symbolFontToUnicode(ch(0xf060), 'Symbol')).toBe(ch(0xf060));
+    // rather than guessing: 0xF0 is unassigned in Microsoft's Symbol.
     expect(symbolFontToUnicode(ch(0xf0f0), 'Symbol')).toBe(ch(0xf0f0));
   });
 
@@ -165,6 +163,7 @@ describe('symbolFontToUnicode — full Symbol encoding', () => {
     both(0xe6, '⎛'); both(0xef, '⎪'); both(0xf4, '⎮'); both(0xfe, '⎭');
     both(0xbd, '⏐'); both(0xbe, '⎯');
     both(0xd2, '®'); both(0xe3, '©'); both(0xd4, '™');
+    both(0x60, '‾'); // radicalex: the top bar Office draws
   });
 
   it('converts every code point of a multi-character string', () => {

@@ -65,7 +65,7 @@ import {
  * 0x41..0x5A / 0x61..0x7A, the operators, relations, arrows and set symbols in
  * 0xA0..0xFE, and the bracket pieces. Symbol text arrives either as these bare
  * codes (an ASCII "abcp" in a Symbol run is αβχπ) or F0-shifted (U+F061…), and
- * both resolve. 0x60 radicalex, 0xF0 and 0x7F..0x9F have no target.
+ * both resolve. 0xF0 and 0x7F..0x9F are unassigned and have no target.
  */
 export const SYMBOL_MAP: Record<number, string> = Object.fromEntries(
   Object.entries({ ...ADOBE_SYMBOL_UNICODE, ...SYMBOL_CORPORATE_USE_UNICODE })

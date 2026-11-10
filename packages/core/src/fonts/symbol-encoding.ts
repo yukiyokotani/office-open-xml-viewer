@@ -71,8 +71,12 @@ export const ADOBE_SYMBOL_UNICODE: Readonly<Record<number, number>> = {
 //     integralex: the U+239B..U+23AE bracket-piece block, added in Unicode 3.2
 //     for these Symbol-font pieces (name for name: parenlefttp = LEFT
 //     PARENTHESIS UPPER HOOK, braceleftmid = LEFT CURLY BRACKET MIDDLE PIECE).
-// 0x60 radicalex (U+F8E5) has no standard counterpart and stays font-coded.
+//   - 0x60 radicalex: the bar that extends a radical sign over its operand,
+//     drawn at the top of the em box. Unicode has no radical-extension piece;
+//     U+203E OVERLINE is the standard character of that form, and a Windows
+//     PowerPoint PDF of Symbol U+F060 shows exactly such a top bar.
 export const SYMBOL_CORPORATE_USE_UNICODE: Readonly<Record<number, number>> = {
+  0x60: 0x203e,
   0xbd: 0x23d0, 0xbe: 0x23af,
   0xd2: 0x00ae, 0xd3: 0x00a9, 0xd4: 0x2122,
   0xe2: 0x00ae, 0xe3: 0x00a9, 0xe4: 0x2122,
