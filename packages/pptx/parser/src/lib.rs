@@ -980,6 +980,12 @@ impl PptxZip {
     fn index_for_name(&self, path: &str) -> Option<()> {
         self.session.contains_entry(path).then_some(())
     }
+
+    /// Stored ZIP item name of the part equivalent to `path` (ECMA-376 Part 2
+    /// §6.2.2.3), i.e. the entry's identity independent of name spelling.
+    fn entry_name(&self, path: &str) -> Option<String> {
+        self.session.entry_name(path)
+    }
 }
 
 fn settle_pptx_operation<T>(zip: &mut PptxZip, result: Result<T, String>) -> Result<T, String> {

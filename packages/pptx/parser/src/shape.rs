@@ -3514,36 +3514,48 @@ const VML_DRAWING_REL_TYPES: &[&str] = &[
 /// relationship is an internal image relationship naming an *existing* package
 /// entry with an image media type contributes an entry. External, non-image and
 /// dangling relationships are dropped before anything is stored. Each entry
-/// holds the SPID, the crop, and a path interned per distinct existing entry,
-/// so no relationship target and no per-shape path string is retained.
-///
-/// Allocation bounds (all in budgeted inputs):
-/// - entries: at most one per `v:shape` in the VML part; the SPID strings are
-///   copies of attribute bytes, so the total is O(VML part bytes);
-/// - crops: a fixed 32 bytes per entry;
-/// - paths: one `Rc<str>` per distinct existing ZIP entry, so their bytes are at
-///   most the package's central-directory names;
-/// - the parsed VML and its rels are transient (dropped when the index is
-///   built) and bounded by the PPTX XML size and DOM-complexity limits.
+/// holds the SPID, the crop, and the operation-wide interned name of the image
+/// entry, so no relationship target and no per-shape or per-index path string
+/// is retained.
 #[derive(Debug, Default)]
 pub(crate) struct VmlOlePreviewIndex {
     entries: HashMap<String, (std::rc::Rc<str>, Option<ooxml_common::blip::SrcRect>)>,
 }
 
-/// Per-operation OLE preview state on `PptxZip`: the shared index of each
-/// distinct VML part read in this operation (so every VML part is read and
-/// parsed once, whatever the number of hosts sharing it), plus a single-slot
-/// host → VML part mapping for the host part currently being walked.
+/// Per-operation OLE preview state on `PptxZip`.
+///
+/// Identity is the *stored* ZIP entry name returned by the package lookup
+/// (`PackageSession::entry_name`), so names that are equivalent under ECMA-376
+/// Part 2 §6.2.2.3 (ASCII case folding, percent-encoding) share one entry:
+/// - `entries` interns each existing entry name used here (VML parts and
+///   preview images) once per operation, so each entry has at most one
+///   `Rc<str>`;
+/// - `by_vml_part` holds one index per distinct VML entry, shared by every host
+///   that uses it, so each VML part is read and parsed once per operation;
+/// - `host` is a single slot mapping the host part being walked to its VML
+///   entry.
 #[derive(Debug, Default)]
 pub(crate) struct VmlOlePreviewCache {
+    entries: std::collections::HashSet<std::rc::Rc<str>>,
     by_vml_part: HashMap<std::rc::Rc<str>, std::rc::Rc<VmlOlePreviewIndex>>,
     host: Option<(String, Option<std::rc::Rc<str>>)>,
 }
 
 impl VmlOlePreviewCache {
     pub(crate) fn clear(&mut self) {
+        self.entries.clear();
         self.by_vml_part.clear();
         self.host = None;
+    }
+
+    /// The single shared allocation for a stored entry name.
+    fn intern(&mut self, stored: String) -> std::rc::Rc<str> {
+        if let Some(existing) = self.entries.get(stored.as_str()) {
+            return existing.clone();
+        }
+        let interned: std::rc::Rc<str> = std::rc::Rc::from(stored);
+        self.entries.insert(interned.clone());
+        interned
     }
 }
 
@@ -3553,19 +3565,20 @@ thread_local! {
     static VML_OLE_INDEX_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-/// The VML drawing part that `host`'s implicit `vmlDrawing` relationship names
-/// (Part 1 §15.2.20), if any.
+/// The stored entry name of the VML drawing part that `host`'s implicit
+/// `vmlDrawing` relationship names (Part 1 §15.2.20), if it exists.
 fn host_vml_part(host: &str, zip: &mut PptxZip) -> Option<String> {
     let rels_xml = read_zip_str(zip, &ooxml_common::rels::relationship_part_path(host)).ok()?;
     let rels_doc = crate::parse_preflighted_pptx_xml(&rels_xml).ok()?;
     let target =
         ooxml_common::rels::find_internal_rel_target_by_types(&rels_doc, VML_DRAWING_REL_TYPES)?;
-    ooxml_common::rels::resolve_part_name(host, &target)
+    zip.entry_name(&ooxml_common::rels::resolve_part_name(host, &target)?)
 }
 
-/// Build the filtered preview index of one VML part (see
+/// Build the filtered preview index of one VML entry (see
 /// [`VmlOlePreviewIndex`]). An unreadable or malformed part yields an empty
-/// index, which is cached like a full one.
+/// index, which is cached like a full one. Image entry names are interned in
+/// `zip.ole_vml_previews`.
 fn build_vml_ole_preview_index(vml_path: &str, zip: &mut PptxZip) -> VmlOlePreviewIndex {
     #[cfg(test)]
     VML_OLE_INDEX_BUILDS.with(|count| count.set(count.get() + 1));
@@ -3587,9 +3600,6 @@ fn build_vml_ole_preview_index(vml_path: &str, zip: &mut PptxZip) -> VmlOlePrevi
         .unwrap_or_default();
     // rId → interned existing image entry (None: filtered out). Transient.
     let mut by_rel: HashMap<&str, Option<std::rc::Rc<str>>> = HashMap::new();
-    // Resolved entry name → its single shared allocation. Transient map; the
-    // retained `Rc<str>`s are one per distinct existing entry.
-    let mut interned: HashMap<String, std::rc::Rc<str>> = HashMap::new();
     for shape in vml_doc
         .descendants()
         .filter(|n| n.is_element() && n.tag_name().name() == "shape")
@@ -3609,25 +3619,24 @@ fn build_vml_ole_preview_index(vml_path: &str, zip: &mut PptxZip) -> VmlOlePrevi
         let Some(rid) = ooxml_common::vml::imagedata_rel_id(imagedata) else {
             continue;
         };
-        let path = by_rel
-            .entry(rid)
-            .or_insert_with(|| {
-                let path = ooxml_common::vml::image_rel_part(vml_rels.get(rid)?, vml_path)?;
-                // Only a genuine, existing image part enters the picture
-                // pipeline (the preview is typically EMF/WMF/PNG).
-                // `index_for_name` reads the central directory only.
-                if !mime_from_ext(&path).starts_with("image/") {
-                    return None;
-                }
-                zip.index_for_name(&path)?;
-                Some(
-                    interned
-                        .entry(path)
-                        .or_insert_with_key(|path| std::rc::Rc::from(path.as_str()))
-                        .clone(),
-                )
-            })
-            .clone();
+        let path = match by_rel.get(rid) {
+            Some(path) => path.clone(),
+            None => {
+                let path = (|| {
+                    let path = ooxml_common::vml::image_rel_part(vml_rels.get(rid)?, vml_path)?;
+                    // Only a genuine, existing image part enters the picture
+                    // pipeline (the preview is typically EMF/WMF/PNG). The
+                    // lookup reads the central directory only.
+                    let stored = zip.entry_name(&path)?;
+                    if !mime_from_ext(&stored).starts_with("image/") {
+                        return None;
+                    }
+                    Some(zip.ole_vml_previews.intern(stored))
+                })();
+                by_rel.insert(rid, path.clone());
+                path
+            }
+        };
         let Some(path) = path else {
             continue;
         };
@@ -3649,7 +3658,7 @@ fn build_vml_ole_preview_index(vml_path: &str, zip: &mut PptxZip) -> VmlOlePrevi
 /// preview; the imagedata crop insets become the picture's source rectangle.
 ///
 /// The host → VML mapping is re-derived only when the host part changes, and
-/// each VML part is indexed once per operation and shared by all hosts.
+/// each VML entry is indexed once per operation and shared by all hosts.
 fn vml_ole_preview_picture(
     spid: &str,
     gf: &Transform,
@@ -3662,14 +3671,8 @@ fn vml_ole_preview_picture(
     let vml_part = match &zip.ole_vml_previews.host {
         Some((host, vml_part)) if host == part => vml_part.clone(),
         _ => {
-            let vml_part = host_vml_part(part, zip).map(|path| {
-                // Share the key allocation with an existing index entry.
-                zip.ole_vml_previews
-                    .by_vml_part
-                    .get_key_value(path.as_str())
-                    .map(|(key, _)| key.clone())
-                    .unwrap_or_else(|| std::rc::Rc::from(path.as_str()))
-            });
+            let vml_part =
+                host_vml_part(part, zip).map(|stored| zip.ole_vml_previews.intern(stored));
             zip.ole_vml_previews.host = Some((part.to_owned(), vml_part.clone()));
             vml_part
         }
@@ -5972,6 +5975,146 @@ mod ole_tests {
                 .entries
                 .is_empty()
         );
+    }
+
+    /// Parse one spid-only frame as a shape of host part `host`.
+    fn run_host(host: &str, spid: &str, zip: &mut PptxZip) -> Vec<SlideElement> {
+        let frame = spid_frame(2, spid);
+        let doc = roxmltree::Document::parse(&frame).unwrap();
+        let mut out = Vec::new();
+        parse_sp_tree_node(
+            doc.root_element(),
+            &LayoutPlaceholders::default(),
+            host,
+            &HashMap::new(),
+            &HashMap::new(),
+            zip,
+            &HashMap::new(),
+            &mut out,
+            false,
+            None,
+            DepthGuard::root(),
+        );
+        out
+    }
+
+    /// Review finding (round 5): the cache is keyed by ZIP entry identity, not
+    /// by the spelling of the resolved name. Hosts whose rels name the same
+    /// VML part with case-variant spellings (equivalent under Part 2
+    /// §6.2.2.3) share one index and one parse.
+    #[test]
+    fn vml_ole_preview_case_variant_vml_aliases_build_one_index() {
+        let vml = r#"<xml xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office"><v:shape o:spid="_x0000_s1025"><v:imagedata o:relid="rId1"/></v:shape></xml>"#;
+        let vml_rels = format!(
+            r#"<Relationships xmlns="{RELS_NS}"><Relationship Id="rId1" Type="{REL}/image" Target="../media/image1.png"/></Relationships>"#
+        );
+        let host_rels = |target: &str| {
+            format!(
+                r#"<Relationships xmlns="{RELS_NS}"><Relationship Id="rIdVml" Type="{REL}/vmlDrawing" Target="{target}"/></Relationships>"#
+            )
+        };
+        let spellings = [
+            "../drawings/vmlDrawing1.vml",
+            "../drawings/VMLDRAWING1.vml",
+            "../Drawings/vmldrawing1.VML",
+        ];
+        let rels: Vec<String> = spellings.iter().map(|t| host_rels(t)).collect();
+        let rels_paths: Vec<String> = (1..=spellings.len())
+            .map(|n| format!("ppt/slides/_rels/slide{n}.xml.rels"))
+            .collect();
+        let png = tiny_png();
+        let mut parts: Vec<(&str, &[u8])> = rels_paths
+            .iter()
+            .zip(&rels)
+            .map(|(path, xml)| (path.as_str(), xml.as_bytes()))
+            .collect();
+        parts.push(("ppt/drawings/vmlDrawing1.vml", vml.as_bytes()));
+        parts.push((
+            "ppt/drawings/_rels/vmlDrawing1.vml.rels",
+            vml_rels.as_bytes(),
+        ));
+        parts.push(("ppt/media/image1.png", &png));
+        let mut zip = zip_with(&parts);
+        let before = index_builds();
+        for n in 1..=spellings.len() {
+            let out = run_host(
+                &format!("ppt/slides/slide{n}.xml"),
+                "_x0000_s1025",
+                &mut zip,
+            );
+            assert_eq!(out.len(), 1, "slide{n} draws its preview");
+        }
+        assert_eq!(index_builds() - before, 1, "one parse for all spellings");
+        assert_eq!(zip.ole_vml_previews.by_vml_part.len(), 1);
+        assert!(zip
+            .ole_vml_previews
+            .by_vml_part
+            .contains_key("ppt/drawings/vmlDrawing1.vml"));
+    }
+
+    /// Review finding (round 5): image entry names are interned once per
+    /// operation by entry identity, so many VML parts that reference the same
+    /// image under a long directory (with differing spellings) keep one path
+    /// allocation for it, not one per VML index.
+    #[test]
+    fn vml_ole_preview_many_vml_parts_share_one_image_allocation() {
+        const VMLS: usize = 50;
+        let dir = format!("ppt/{}", "m".repeat(4 * 1024));
+        let image = format!("{dir}/image1.png");
+        let png = tiny_png();
+        let mut owned: Vec<(String, String)> = Vec::new();
+        for n in 1..=VMLS {
+            // Alternate the spelling of the shared image target.
+            let target = if n % 2 == 0 {
+                format!("/{image}")
+            } else {
+                format!("/{}", image.to_ascii_uppercase())
+            };
+            owned.push((
+                format!("ppt/slides/_rels/slide{n}.xml.rels"),
+                format!(
+                    r#"<Relationships xmlns="{RELS_NS}"><Relationship Id="rIdVml" Type="{REL}/vmlDrawing" Target="../drawings/vmlDrawing{n}.vml"/></Relationships>"#
+                ),
+            ));
+            owned.push((
+                format!("ppt/drawings/vmlDrawing{n}.vml"),
+                r#"<xml xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office"><v:shape o:spid="_x0000_s1025"><v:imagedata o:relid="rId1"/></v:shape></xml>"#.to_string(),
+            ));
+            owned.push((
+                format!("ppt/drawings/_rels/vmlDrawing{n}.vml.rels"),
+                format!(
+                    r#"<Relationships xmlns="{RELS_NS}"><Relationship Id="rId1" Type="{REL}/image" Target="{target}"/></Relationships>"#
+                ),
+            ));
+        }
+        let mut parts: Vec<(&str, &[u8])> = owned
+            .iter()
+            .map(|(path, xml)| (path.as_str(), xml.as_bytes()))
+            .collect();
+        parts.push((image.as_str(), &png));
+        let mut zip = zip_with(&parts);
+        for n in 1..=VMLS {
+            let out = run_host(
+                &format!("ppt/slides/slide{n}.xml"),
+                "_x0000_s1025",
+                &mut zip,
+            );
+            let [SlideElement::Picture(p)] = out.as_slice() else {
+                panic!("slide{n}: expected one preview")
+            };
+            assert_eq!(p.image_path, image, "the stored entry name is used");
+        }
+        let cache = &zip.ole_vml_previews;
+        assert_eq!(cache.by_vml_part.len(), VMLS);
+        let first = cache.by_vml_part.values().next().unwrap().entries["_x0000_s1025"]
+            .0
+            .clone();
+        assert!(cache
+            .by_vml_part
+            .values()
+            .all(|index| std::rc::Rc::ptr_eq(&index.entries["_x0000_s1025"].0, &first)));
+        // One interned name per VML entry plus one for the shared image.
+        assert_eq!(cache.entries.len(), VMLS + 1);
     }
 
     /// Review finding: the VML rels keep TargetMode and Type. An External
