@@ -118,12 +118,12 @@ function profileBoxes(profile: ReferenceFontMetricProfile): (readonly [number, n
 }
 
 /**
- * Word's line for a measured face the catalogue classifies as Far East. A CSS
- * normal line cannot show OS/2 code pages or usWin (Word: 1.3 × usWin, #1832),
- * but it can identify the data: when the measured box equals a box the
- * catalogue records for this family and tuple, the catalogue's tables are
- * this face's, and their Word projection applies exactly as for an installed
- * face. Every matching profile must project to the same line; no match, or
+ * The auto line of a measured face the catalogue classifies as Far East. A
+ * CSS normal line cannot show OS/2 code pages or usWin (the Far East line is
+ * 1.3 × usWin, #1832), but it can identify the data: when the measured box
+ * equals a box the catalogue records for this family and tuple, the
+ * catalogue's tables are this face's, and wordOpenTypeAutoLineRatios is
+ * applied to them exactly as for an installed face. Every matching profile must project to the same line; no match, or
  * disagreeing matches, decline.
  */
 function catalogueFarEastLine(
