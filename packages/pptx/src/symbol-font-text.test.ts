@@ -57,9 +57,9 @@ function run(text: string, fontFamily: string, fontFamilySym?: string): TextRunD
   } as TextRunData;
 }
 
-describe('Symbol-encoded PPTX runs (#2177)', () => {
+describe('Symbol- and dingbat-encoded PPTX runs (#2177)', () => {
   it('maps F0-shifted Greek, operators and arrows in a Symbol run', () => {
-    const fills = render([run('', 'Symbol')]);
+    const fills = render([run('\uF061\uF062\uF063\uF070\uF0E5\uF0AE', 'Symbol')]);
     expect(fills.map((f) => f.text).join('')).toBe('αβχπ∑→');
     expect(fills.every((f) => !f.font.includes('Symbol'))).toBe(true);
   });
@@ -71,8 +71,13 @@ describe('Symbol-encoded PPTX runs (#2177)', () => {
     expect(greek?.font).not.toContain('Symbol');
   });
 
+  it('maps bare and F0-shifted codes in Wingdings and Webdings runs', () => {
+    expect(render([run('J\uF0FC', 'Wingdings')]).map((f) => f.text).join('')).toBe('☺✓');
+    expect(render([run('\uF021', 'Webdings')]).map((f) => f.text).join('')).toBe('\u{1F577}');
+  });
+
   it('leaves ASCII alone when only a:sym names Symbol', () => {
-    const fills = render([run('ab', 'Arial', 'Symbol')]);
+    const fills = render([run('ab\uF061', 'Arial', 'Symbol')]);
     expect(fills.map((f) => f.text).join('')).toBe('abα');
   });
 });

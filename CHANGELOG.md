@@ -7,12 +7,13 @@ the corresponding minor release.
 
 ## 0.89.9 — Unreleased
 
-- **Word and PowerPoint: Symbol font:** text in the Symbol font now uses the
-  font's whole encoding, so Greek letters, mathematical operators, arrows and
-  bracket pieces draw as their Unicode characters instead of empty boxes or
-  Latin letters. This covers both private-use code points (as inserted through
-  Insert → Symbol) and plain ASCII in a Symbol run, in Word runs, `w:sym`,
-  PowerPoint runs and `a:sym` (#2177).
+- **Word and PowerPoint: Symbol, Wingdings and Webdings fonts:** text in the
+  Symbol, Wingdings, Wingdings 2, Wingdings 3 and Webdings fonts now uses each
+  font's whole encoding. Greek letters, mathematical operators, arrows,
+  bracket pieces, pictographs and ornaments draw as their Unicode characters
+  instead of empty boxes or Latin letters. This covers both private-use code
+  points (as inserted through Insert → Symbol) and plain ASCII in such a run,
+  in Word runs, `w:sym`, PowerPoint runs and `a:sym` (#2177).
 
 ## 0.89.8 — 2026-11-09
 

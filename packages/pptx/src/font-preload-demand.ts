@@ -1,4 +1,4 @@
-import { hasStrongRtl } from '@silurus/ooxml-core';
+import { hasStrongRtl, isSymbolFontFamily } from '@silurus/ooxml-core';
 import { FONT_TRACKING_SENTINEL, FONT_BASELINE_SENTINEL, FONT_SPACE_SENTINEL } from '@silurus/ooxml-core/internal/font-measurement-sentinels';
 import type { FontPreloadDemand, TextBody } from '@silurus/ooxml-core';
 import { fontPreloadInertScalar } from './font-preload-inert-text.js';
@@ -47,9 +47,9 @@ export function collectSlideFontDemand(
       for (const run of para.runs) {
         if (run.type === 'break') continue;
         if (run.type !== 'text' || run.fontFamilySym || run.fieldType && run.fieldType !== 'slidenum') return false;
-        // A Symbol Latin face draws its ASCII text as other characters (Greek,
-        // operators), so the authored scalars are not the painted ones.
-        if ((run.fontFamily ?? para.defFontFamily)?.trim().toLowerCase() === 'symbol') return false;
+        // A symbol-font Latin face (Symbol, Wingdings, Webdings) draws its ASCII
+        // text as other characters, so the authored scalars are not the painted ones.
+        if (isSymbolFontFamily((run.fontFamily ?? para.defFontFamily)?.trim())) return false;
         if (!add(run.text) || !add(preparedPowerPointText(run, slide.slideNumber))) return false;
       }
     }
