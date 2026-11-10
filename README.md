@@ -580,8 +580,10 @@ While `layoutComplete` is false, `pageCount` and the callback's `total` argument
 mean pages available so far, not the final total. The page callbacks fire again
 when that count grows, even if the visible page does not change. Await
 `waitUntilLayoutComplete()` before printing, exporting, or snapshotting a final count.
-In-document `NUMPAGES` fields are repainted with their authoritative value after
-pagination converges. See the [progressive layout guide](https://ooxml.silurus.dev/docx#progressive-layout)
+`DocxViewer` and `DocxScrollViewer` repaint provisional pages, including
+in-document `NUMPAGES` fields, with their authoritative layout after pagination
+converges. Code that calls `DocxDocument.renderPage()` directly owns its canvases
+and must render those pages again after `waitUntilLayoutComplete()`. See the [progressive layout guide](https://ooxml.silurus.dev/docx#progressive-layout)
 and [DOCX API reference](https://ooxml.silurus.dev/api/docx).
 
 ### Progressive PPTX layout

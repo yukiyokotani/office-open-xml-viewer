@@ -58,8 +58,11 @@ console.log('Final page count:', viewer.pageCount);`;
         <article>
           <h3>Page fields converge too</h3>
           <p>
-            In-document <code>NUMPAGES</code> fields are repainted with the authoritative value
-            after pagination converges. Application-owned “Page X of Y” UI should use the
+            <code>DocxViewer</code> and <code>DocxScrollViewer</code> repaint provisional pages,
+            including in-document <code>NUMPAGES</code> fields, with the authoritative layout after
+            pagination converges. Code that calls <code>DocxDocument.renderPage()</code> directly
+            owns its canvases and must render those pages again after
+            <code>waitUntilLayoutComplete()</code>. Application-owned “Page X of Y” UI should use the
             callback’s <code>layoutComplete</code> flag to mark provisional totals.
           </p>
         </article>

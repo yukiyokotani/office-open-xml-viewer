@@ -84,7 +84,11 @@ fn luminance(shape: roxmltree::Node, definition: Option<roxmltree::Node>) -> Opt
         None => Some(default),
         Some(raw) => parse_vml_opacity(raw).filter(|n| n.is_finite()),
     };
-    let gain = value("gain", 1.0)?;
+    // MS-ODRAW §2.3.23.11 ranges pictureContrast from 0 (no contrast) up;
+    // Microsoft's VML reference describes a negative gain as reversed
+    // contrast. That is outside the measured transfer, so a negative gain is
+    // withheld and disclosed rather than clamped to a flat image.
+    let gain = value("gain", 1.0).filter(|gain| *gain >= 0.0)?;
     let blacklevel = value("blacklevel", 0.0)?;
     if gain == 1.0 && blacklevel == 0.0 {
         return None;
@@ -96,8 +100,11 @@ fn luminance(shape: roxmltree::Node, definition: Option<roxmltree::Node>) -> Opt
     if combined {
         return None;
     }
-    let k = gain.max(0.0);
-    let contrast = if k <= 1.0 { k - 1.0 } else { 1.0 - 1.0 / k };
+    let contrast = if gain <= 1.0 {
+        gain - 1.0
+    } else {
+        1.0 - 1.0 / gain
+    };
     Some(BlipEffect::Luminance {
         bright: (blacklevel * 2.0).clamp(-1.0, 1.0),
         contrast: contrast.clamp(-1.0, 1.0),
@@ -213,6 +220,7 @@ mod tests {
           <v:image style="width:20;height:10" src="media/a.png" blacklevel="-0.25"/>
           <v:image style="width:20;height:10" src="media/a.png" gain="19661f" grayscale="t"/>
           <v:image style="width:20;height:10" src="media/a.png" gain="1" blacklevel="0"/>
+          <v:image style="width:20;height:10" src="media/a.png" gain="-0.5"/>
         </v:group>"##,
         )
         .unwrap();
@@ -242,5 +250,10 @@ mod tests {
         let neutral = acquire(nodes[3], None, &media).unwrap();
         assert!(neutral.blip_effects.is_empty());
         assert!(!incomplete(nodes[3], None));
+        // Negative gain (reversed contrast) is outside the measured transfer:
+        // withheld and disclosed, never clamped to a flat image.
+        let reversed = acquire(nodes[4], None, &media).unwrap();
+        assert!(reversed.blip_effects.is_empty());
+        assert!(incomplete(nodes[4], None));
     }
 }

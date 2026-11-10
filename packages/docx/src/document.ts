@@ -191,7 +191,10 @@ export interface LoadOptions extends CoreLoadOptions {
    *
    * Early pages are provisional because later header/footer, field or anchored
    * object convergence can still repaginate them. The finished layout is
-   * byte-identical to a blocking load either way.
+   * byte-identical to a blocking load either way. `DocxViewer` and
+   * `DocxScrollViewer` repaint their pages when it lands; callers of
+   * {@link DocxDocument.renderPage} own their canvases and must render again
+   * after {@link onLayoutComplete} or {@link DocxDocument.waitUntilLayoutComplete}.
    *
    * Await {@link DocxDocument.waitUntilLayoutComplete} before anything that needs the
    * whole document: page-count-sensitive UI, text search, bookmark navigation,

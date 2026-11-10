@@ -133,7 +133,7 @@ const DOCX_PROGRESSIVE_LAYOUT: ApiOption = {
   name: 'progressiveLayout',
   type: 'boolean',
   def: 'false',
-  desc: 'Resolve load() when the opening pages are paintable and continue the same canonical pagination session in the background. While layoutComplete is false, pageCount is the pages available so far rather than the final total. Works in main and worker modes; worker mode also keeps the remaining pagination off the UI thread.',
+  desc: 'Resolve load() when the opening pages are paintable and continue the same canonical pagination session in the background. While layoutComplete is false, pageCount is the pages available so far rather than the final total. Works in main and worker modes; worker mode also keeps the remaining pagination off the UI thread. DocxViewer and DocxScrollViewer repaint provisional pages when the authoritative layout lands; direct DocxDocument.renderPage() callers own their canvases and must render again after waitUntilLayoutComplete().',
   emphasis: 'While layoutComplete is false, pageCount is the pages available so far rather than the final total.',
   detailsHref: '/docx#progressive-layout',
   detailsLabel: 'Progressive layout guide',

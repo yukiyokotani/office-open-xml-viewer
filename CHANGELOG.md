@@ -7,8 +7,6 @@ the corresponding minor release.
 
 ## 0.89.9 — Unreleased
 
-Compatible patch release. No migration is required.
-
 - **Word: picture watermarks with Washout:** a VML picture's brightness and
   contrast (`gain`/`blacklevel`, which Word's Watermark dialog writes for
   Washout) now fade the picture as Word does, instead of drawing it at full
