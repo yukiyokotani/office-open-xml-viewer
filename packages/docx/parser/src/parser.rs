@@ -8892,7 +8892,9 @@ fn parse_run_inner(
                             ) {
                                 attach_drawing_run_facts(&mut group_runs);
                                 runs.extend(group_runs);
-                            } else if let Some(img) = parse_vml_pict_image(inner, media_map) {
+                            } else if let Some(img) =
+                                parse_vml_pict_image(inner, media_map, diagnostics)
+                            {
                                 let mut pict_runs = vec![DocRun::Image(Box::new(img))];
                                 attach_drawing_run_facts(&mut pict_runs);
                                 runs.extend(pict_runs);
@@ -8936,7 +8938,7 @@ fn parse_run_inner(
                 ) {
                     attach_drawing_run_facts(&mut group_runs);
                     runs.extend(group_runs);
-                } else if let Some(img) = parse_vml_pict_image(child, media_map) {
+                } else if let Some(img) = parse_vml_pict_image(child, media_map, diagnostics) {
                     let mut pict_runs = vec![DocRun::Image(Box::new(img))];
                     attach_drawing_run_facts(&mut pict_runs);
                     runs.extend(pict_runs);
@@ -8983,7 +8985,7 @@ fn parse_run_inner(
                         &attach_drawing_run_facts,
                     );
                     runs.extend(drawing_runs);
-                } else if let Some(img) = parse_object_ole_image(child, media_map) {
+                } else if let Some(img) = parse_object_ole_image(child, media_map, diagnostics) {
                     let anchored = img.anchor;
                     let mut object_runs = vec![DocRun::Image(Box::new(img))];
                     // Inline OLE previews retain their established allocation:
@@ -14516,7 +14518,7 @@ fn vml_image_run(
     let anchor_acquisition =
         anchor.then(|| vml_word_anchor_acquisition(shape, definition, style, width_pt, height_pt));
 
-    ImageRun {
+    let mut picture = ImageRun {
         inline_object_font_facts: None,
         inline_object_origin: None,
         inline_effect_extent: None,
@@ -14550,6 +14552,26 @@ fn vml_image_run(
         anchor_x_relative_from,
         anchor_y_relative_from,
         anchor_acquisition,
+    };
+    // Every VML picture path shares the effective imagedata effects.
+    vml_image::apply_effects(&mut picture, shape, definition);
+    picture
+}
+
+/// Standalone VML pictures (inline or anchored picts in any story, and OLE
+/// previews) disclose imagedata effects `vml_image::incomplete` leaves
+/// unapplied, through the same diagnostic as grouped VML leaves.
+fn disclose_incomplete_vml_picture(
+    shape: roxmltree::Node,
+    definition: Option<roxmltree::Node>,
+    diagnostics: &mut Vec<PendingParseDiagnostic>,
+) {
+    if vml_image::incomplete(shape, definition) {
+        push_pending_parse_diagnostic(
+            diagnostics,
+            PARSE_DIAGNOSTIC_CODE_UNSUPPORTED_VML_CONTENT,
+            PARSE_DIAGNOSTIC_SEVERITY_UNSUPPORTED_VML_CONTENT,
+        );
     }
 }
 
@@ -14573,6 +14595,7 @@ fn vml_image_run(
 fn parse_vml_pict_image(
     pict: roxmltree::Node,
     media_map: &HashMap<String, String>,
+    diagnostics: &mut Vec<PendingParseDiagnostic>,
 ) -> Option<ImageRun> {
     let is_shape = |n: &roxmltree::Node| {
         n.is_element() && matches!(n.tag_name().name(), "shape" | "rect" | "roundrect" | "oval")
@@ -14601,6 +14624,7 @@ fn parse_vml_pict_image(
     }
 
     Some(with_vml_shape_type(pict, shape, |definition| {
+        disclose_incomplete_vml_picture(shape, definition, diagnostics);
         vml_image_run(
             shape, definition, image_path, width_pt, height_pt, imagedata,
         )
@@ -14626,6 +14650,7 @@ fn parse_vml_pict_image(
 fn parse_object_ole_image(
     object: roxmltree::Node,
     media_map: &HashMap<String, String>,
+    diagnostics: &mut Vec<PendingParseDiagnostic>,
 ) -> Option<ImageRun> {
     // The preview lives in the first VML shape's `<v:imagedata r:id>`.
     let imagedata = object
@@ -14666,6 +14691,7 @@ fn parse_object_ole_image(
     }
 
     Some(with_vml_shape_type(object, shape, |definition| {
+        disclose_incomplete_vml_picture(shape, definition, diagnostics);
         vml_image_run(
             shape, definition, image_path, width_pt, height_pt, imagedata,
         )
@@ -23877,6 +23903,115 @@ mod svg_blip_tests {
                     {"type": "luminance", "bright": 0.0, "contrast": -0.5}
                 ]),
                 "{container}"
+            );
+        }
+    }
+
+    /// Issue #2175: Word's Watermark dialog writes Washout on a standalone VML
+    /// picture as gain/blacklevel. It must reach the same `<a:lum>` correction
+    /// Word writes for Washout on a DrawingML picture.
+    #[test]
+    fn vml_picture_watermark_washout_is_a_luminance_correction() {
+        let body = r#"<w:p><w:r><w:pict xmlns:v="urn:schemas-microsoft-com:vml"
+            xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+            <v:shape style="position:absolute;width:200pt;height:100pt;z-index:-1">
+              <v:imagedata r:id="rIdPng" gain="19661f" blacklevel="22938f"/>
+            </v:shape></w:pict></w:r></w:p>"#;
+        let doc = parse_from_bytes(&build_docx_with_media(body)).expect("parse must succeed");
+        let image = only_image(&doc);
+        let [BlipEffect::Luminance { bright, contrast }] = image.blip_effects.as_slice() else {
+            panic!(
+                "expected one luminance effect, got {:?}",
+                image.blip_effects
+            );
+        };
+        assert!((bright - 0.7).abs() < 1e-4, "bright {bright}");
+        assert!((contrast + 0.7).abs() < 1e-4, "contrast {contrast}");
+    }
+
+    /// Standalone VML pictures disclose effects they leave unapplied, in every
+    /// story and for OLE previews: Washout with grayscale has no measured
+    /// order, so grayscale draws, Washout is withheld, and that is disclosed.
+    #[test]
+    fn standalone_vml_pictures_disclose_withheld_effects_in_every_path() {
+        use std::io::Write;
+        use zip::write::SimpleFileOptions;
+        let w = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+        let r = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+        let ns = format!(r#"xmlns:w="{w}" xmlns:r="{r}" xmlns:v="urn:schemas-microsoft-com:vml""#);
+        let effects = r#"gain="19661f" blacklevel="22938f" grayscale="t""#;
+        let pict = format!(
+            r#"<w:p><w:r><w:pict><v:shape style="width:20pt;height:10pt"><v:imagedata src="media/a.png" {effects}/></v:shape></w:pict></w:r></w:p>"#
+        );
+        let object = format!(
+            r#"<w:p><w:r><w:object w:dxaOrig="400" w:dyaOrig="200"><v:shape style="width:20pt;height:10pt"><v:imagedata r:id="img" {effects}/></v:shape></w:object></w:r></w:p>"#
+        );
+        let document = format!(
+            r#"<w:document {ns}><w:body>{pict}{object}
+            <w:sectPr><w:headerReference w:type="default" r:id="header"/><w:footerReference w:type="default" r:id="footer"/></w:sectPr>
+            </w:body></w:document>"#
+        );
+        let parts = [
+            ("word/document.xml".to_string(), document),
+            (
+                "word/header.xml".to_string(),
+                format!("<w:hdr {ns}>{pict}</w:hdr>"),
+            ),
+            (
+                "word/footer.xml".to_string(),
+                format!("<w:ftr {ns}>{pict}</w:ftr>"),
+            ),
+            ("word/media/a.png".to_string(), "png".to_string()),
+            (
+                "word/_rels/document.xml.rels".to_string(),
+                format!(
+                    r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="header" Type="{r}/header" Target="header.xml"/><Relationship Id="footer" Type="{r}/footer" Target="footer.xml"/><Relationship Id="img" Type="{r}/image" Target="media/a.png"/></Relationships>"#
+                ),
+            ),
+        ];
+        let mut bytes = Vec::new();
+        {
+            let mut writer = zip::ZipWriter::new(Cursor::new(&mut bytes));
+            write_test_content_types(&mut writer);
+            for (path, xml) in parts {
+                writer
+                    .start_file(path, SimpleFileOptions::default())
+                    .unwrap();
+                writer.write_all(xml.as_bytes()).unwrap();
+            }
+            writer.finish().unwrap();
+        }
+        for streamed in [false, true] {
+            let doc = if streamed {
+                parse_from_bytes_streamed_with_limits(&bytes, None, None, "standalone-vml-test")
+            } else {
+                parse_from_bytes(&bytes)
+            }
+            .unwrap();
+            let images: Vec<&ImageRun> = doc
+                .body
+                .iter()
+                .filter_map(|el| match el {
+                    BodyElement::Paragraph(p) => Some(p.runs.iter()),
+                    _ => None,
+                })
+                .flatten()
+                .filter_map(|run| match run {
+                    DocRun::Image(image) => Some(image.as_ref()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(images.len(), 2, "pict and OLE preview, streamed={streamed}");
+            assert!(images
+                .iter()
+                .all(|image| image.duotone.is_some() && image.blip_effects.is_empty()));
+            assert_eq!(
+                doc.diagnostics
+                    .iter()
+                    .filter(|d| d.code == PARSE_DIAGNOSTIC_CODE_UNSUPPORTED_VML_CONTENT)
+                    .count(),
+                4,
+                "body pict, body OLE preview, header, footer; streamed={streamed}"
             );
         }
     }

@@ -2533,7 +2533,7 @@ export interface ShapeRun {
     }>;
     presetGeometry?: string | null;
     adjValues?: Array<number | null>;
-    vmlPicture?: Pick<ImageRun, 'imagePath' | 'mimeType' | 'srcRect' | 'colorReplaceFrom' | 'duotone'>;
+    vmlPicture?: Pick<ImageRun, 'imagePath' | 'mimeType' | 'srcRect' | 'colorReplaceFrom' | 'duotone' | 'blipEffects'>;
     fill: ShapeFill | null;
     stroke: string | null;
     strokeWidth?: number;
