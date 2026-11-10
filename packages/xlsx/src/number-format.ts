@@ -345,18 +345,30 @@ function formatGeneralText(num: number): string {
  * - any other number format keeps its text and shows "#" across the cell when
  *   that text is too wide (Excel never spills or clips a number).
  * Non-numeric cells and texts that fit are returned unchanged.
+ *
+ * `measuredInAuthoredFace` says whether `fits` measures in the face Excel
+ * decides with. When a stand-in face paints, its glyph proportions differ from
+ * the authored face's, so a "#" fill could hide a value Excel shows: the text
+ * is kept instead (an explicit format unchanged, General at its shortest form).
  */
 export function fitFormattedNumber(
   cell: Cell,
   formatted: FormattedCell,
   fits: (text: string) => boolean,
+  measuredInAuthoredFace = true,
 ): FormattedCell {
   if (cell.value.type !== 'number' || formatted.fill || fits(formatted.text)) return formatted;
   const color = formatted.color === undefined ? {} : { color: formatted.color };
   if (formatted.general) {
-    const text = formatGeneralNumber(cell.value.number, fits);
+    let shortest: string | null = null;
+    const text = formatGeneralNumber(cell.value.number, (candidate) => {
+      shortest = candidate;
+      return fits(candidate);
+    });
     if (text !== null) return { text, ...color, general: true };
+    if (!measuredInAuthoredFace && shortest !== null) return { text: shortest, ...color, general: true };
   }
+  if (!measuredInAuthoredFace) return formatted;
   return { text: '#', ...color, fill: true };
 }
 

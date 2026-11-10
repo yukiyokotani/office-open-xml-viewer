@@ -1589,20 +1589,50 @@ function drawMultiLineRichText(
   }
 }
 
-/** Fits a numeric cell's formatted text to the width its text may use, measured
- *  in the cell's current `ctx.font`: General shortens (ECMA-376 §18.8.30),
- *  every other number format shows "#" across the cell when too wide (issue
- *  #2179). Shrink-to-fit cells scale instead, and rotated or stacked text has
- *  no horizontal width to fit, so those keep their text. */
+/** ECMA-376 §18.3.1.13 col@width: a column's pixel width is its text area plus
+ *  "4 pixels of margin padding (two on each side), plus 1 pixel padding for
+ *  the gridlines". */
+const COLUMN_TEXT_PADDING_PX = 5;
+
+/** Whether `font` paints with its authored face: a positively loaded exact
+ *  local route, or a FontFace the document declares under that family. A
+ *  CSS fallback or metric substitute is not the face Excel measures with. */
+function paintsAuthoredFace(ctx: CanvasRenderingContext2D, font: CellFont): boolean {
+  const family = cachedThemeCellFont(font, themeCellFontByContext.get(ctx)).family;
+  const route = officeRoute(ctx, family, font.bold, font.italic);
+  if (route?.source === 'local') return true;
+  if (!family) return false;
+  const fontSet = (isHTMLCanvas(ctx.canvas) ? ctx.canvas.ownerDocument?.fonts : undefined)
+    ?? activeFontSet();
+  return hasDeclaredFamilyFace(family, fontSet);
+}
+
+/** Fits a numeric cell's formatted text to the column's text area (§18.3.1.13,
+ *  less `reservedW` for indent or an icon), measured in the cell's current
+ *  `ctx.font`: General shortens (§18.8.30), every other number format shows
+ *  "#" across the cell when too wide (issue #2179). The "#" is shown only when
+ *  the authored face paints (see {@link fitFormattedNumber}) and no icon-set
+ *  icon shares the cell: Excel reserves the icon's width, but its size is not
+ *  documented (Microsoft only says it grows with the font size), so this
+ *  renderer's icon box cannot decide a "#" Excel might not show. Shrink-to-fit
+ *  cells scale instead, and rotated or stacked text has no horizontal width to
+ *  fit, so those keep their text. */
 function fitNumberToCell(
   ctx: CanvasRenderingContext2D,
   cell: Cell,
   formatted: FormattedCell,
   xf: CellXf,
-  availableW: number,
+  font: CellFont,
+  cellW: number,
+  reservedW: number,
+  hasIcon: boolean,
 ): FormattedCell {
   if (cell.value.type !== 'number' || xf.shrinkToFit || xf.textRotation) return formatted;
-  return fitFormattedNumber(cell, formatted, (text) => ctx.measureText(text).width <= availableW);
+  const availableW = cellW - reservedW - COLUMN_TEXT_PADDING_PX;
+  return fitFormattedNumber(
+    cell, formatted, (text) => ctx.measureText(text).width <= availableW,
+    !hasIcon && paintsAuthoredFace(ctx, font),
+  );
 }
 
 /** Invalid date/time display follows Excel's hash fill (issue #1710).
@@ -2155,7 +2185,7 @@ function renderQuadrant(
     const indentPx = xf.indent ? Math.round(xf.indent * 3 * rc.mdw) : 0;
     const leftPad = paddingX + (alignH === 'left' || !xf.alignH ? indentPx : 0);
     // A number fits the merged width (issue #2179), as in the main loop.
-    const formatted = fitNumberToCell(ctx, cell, unfitted, xf, cW - leftPad - paddingX);
+    const formatted = fitNumberToCell(ctx, cell, unfitted, xf, fontForDraw, cW, leftPad - paddingX, false);
     const text = formatted.text;
 
     ctx.save();
@@ -2566,8 +2596,9 @@ function renderQuadrant(
       // text (merged cells use the merged width, centerContinuous its range),
       // shortening in General or showing "#" otherwise (issue #2179).
       const formatted = fitNumberToCell(
-        ctx, cell, unfitted, xf,
-        (alignH === 'centerContinuous' ? centerContinuousW : cellW) - leftPad - paddingX,
+        ctx, cell, unfitted, xf, fontForDraw,
+        alignH === 'centerContinuous' ? centerContinuousW : cellW, leftPad - paddingX,
+        iconSz > 0,
       );
       const text = formatted.text;
 

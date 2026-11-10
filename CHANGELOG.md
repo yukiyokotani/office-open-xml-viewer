@@ -12,7 +12,8 @@ the corresponding minor release.
   and switching to scientific notation (`3.141593`, `1.23E+14`), and shows `#`
   across the cell when no form fits. Without a width limit it shows at most 11
   characters, sign excluded. Numbers in any other format show `#` across the
-  cell instead of being clipped (#2179).
+  cell instead of being clipped when the workbook's own font is available and
+  no icon-set icon shares the cell (#2179).
 
 ## 0.89.8 — 2026-11-09
 
