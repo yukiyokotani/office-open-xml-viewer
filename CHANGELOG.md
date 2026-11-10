@@ -5,7 +5,13 @@ semantic versioning. While the major version is zero, minor releases may contain
 explicitly documented breaking changes; patch releases remain compatible with
 the corresponding minor release.
 
-## 0.89.9 — Unreleased
+## 0.89.9 — 2026-11-10
+
+Compatible patch release. No migration is required for ordinary use. Two
+behaviour changes are worth checking: PowerPoint's `'skip'` mode no longer
+opens a hidden slide through `goToSlide()`, hyperlinks or search, and an MCP
+client that special-cases `-32602` for bad tool arguments must also handle
+`result.isError`. Both are described below.
 
 - **Word: picture watermarks with Washout:** a VML picture's brightness and
   contrast (`gain`/`blacklevel`, which Word's Watermark dialog writes for
