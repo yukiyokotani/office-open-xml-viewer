@@ -12,7 +12,8 @@ the corresponding minor release.
   bracket pieces draw as their Unicode characters instead of empty boxes or
   Latin letters. This covers both private-use code points (as inserted through
   Insert → Symbol) and plain ASCII in a Symbol run, in Word runs, `w:sym`,
-  PowerPoint runs and `a:sym` (#2177).
+  PowerPoint runs and `a:sym`. Where the system's Symbol font draws these
+  codes itself (Windows), it keeps drawing them (#2177).
 
 ## 0.89.8 — 2026-11-09
 

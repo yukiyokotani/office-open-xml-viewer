@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { renderTextBody } from './renderer.js';
 import type { Paragraph, TextBody } from './types';
 import type { TextRunData } from '@silurus/ooxml-core';
+import { setSymbolFaceProbeForTesting } from '@silurus/ooxml-core/testing';
 
 // Issue #2177: text in the Symbol font is stored in Symbol's own encoding,
 // either F0-shifted (U+F061) or as bare ASCII ("a") in a run whose Latin face
@@ -69,6 +70,17 @@ describe('Symbol-encoded PPTX runs (#2177)', () => {
     expect(fills.map((f) => f.text).join('')).toBe('αβχπ 1');
     const greek = fills.find((f) => f.text.includes('α'));
     expect(greek?.font).not.toContain('Symbol');
+  });
+
+  it('draws Symbol codes natively in a symbol-encoded host Symbol face', () => {
+    setSymbolFaceProbeForTesting(() => true);
+    try {
+      const fills = render([run('a\uF062', 'Symbol')]);
+      expect(fills.map((f) => f.text).join('')).toBe('a\uF062');
+      expect(fills.every((f) => f.font.includes('Symbol'))).toBe(true);
+    } finally {
+      setSymbolFaceProbeForTesting(undefined);
+    }
   });
 
   it('leaves ASCII alone when only a:sym names Symbol', () => {

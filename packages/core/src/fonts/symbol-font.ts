@@ -138,6 +138,60 @@ const SYMBOL_LOOKUP = withPua(SYMBOL_MAP);
 const WINGDINGS_LOOKUP = withPua(WINGDINGS_MAP);
 
 /**
+ * Whether the host's "Symbol" face draws Symbol's own font codes. Microsoft's
+ * Symbol (always on Windows) carries a symbol cmap (OpenType platform 3
+ * encoding 0) at U+F020..U+F0FF, and text shaping also resolves bare codes
+ * 0x20..0xFF through it, so the authored face draws the intended glyph
+ * natively and must keep drawing it. Apple's Symbol (macOS) is Unicode-encoded
+ * and has no glyph for those codes, and most other hosts have no Symbol at
+ * all; only there does the text need the Unicode conversion.
+ * https://learn.microsoft.com/en-us/typography/opentype/spec/cmap
+ *
+ * Capability probe: Symbol codes are measured in the authored face (backed by
+ * an absent family) and in the absent family alone. Without a face that owns
+ * the codes both resolve to the same fallback, so equal widths; a
+ * symbol-encoded Symbol gives its own advances. Without a Canvas (Node
+ * without a DOM, unit tests) the probe reports false and the text is
+ * converted. Checked once per realm: system faces do not change during a
+ * session.
+ */
+type SymbolFaceProbe = () => boolean;
+
+const SYMBOL_PROBE_TEXT = '\uF061\uF062\uF067\uF070\uF0E5\uF0B6';
+const ABSENT_PROBE_FAMILY = 'ooxml-symbol-probe-absent-face';
+
+function canvasSymbolFaceProbe(): boolean {
+  let ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D | null = null;
+  try {
+    if (typeof OffscreenCanvas !== 'undefined') ctx = new OffscreenCanvas(1, 1).getContext('2d');
+    else if (typeof document !== 'undefined') ctx = document.createElement('canvas').getContext('2d');
+  } catch {
+    ctx = null;
+  }
+  if (!ctx || typeof ctx.measureText !== 'function') return false;
+  ctx.font = `100px "Symbol", "${ABSENT_PROBE_FAMILY}"`;
+  const authored = ctx.measureText(SYMBOL_PROBE_TEXT).width;
+  ctx.font = `100px "${ABSENT_PROBE_FAMILY}"`;
+  const absent = ctx.measureText(SYMBOL_PROBE_TEXT).width;
+  return Number.isFinite(authored) && Math.abs(authored - absent) > 0.5;
+}
+
+let symbolFaceProbe: SymbolFaceProbe = canvasSymbolFaceProbe;
+let symbolFaceDrawsCodes: boolean | undefined;
+
+function hostSymbolFaceDrawsCodes(): boolean {
+  symbolFaceDrawsCodes ??= symbolFaceProbe();
+  return symbolFaceDrawsCodes;
+}
+
+/** Test seam: replace the host Symbol-face probe (`undefined` restores the
+ *  Canvas probe) and forget the cached answer. Not part of the public API. */
+export function setSymbolFaceProbeForTesting(probe: SymbolFaceProbe | undefined): void {
+  symbolFaceProbe = probe ?? canvasSymbolFaceProbe;
+  symbolFaceDrawsCodes = undefined;
+}
+
+/**
  * Normalize Symbol/Wingdings code points to their Unicode equivalents, one
  * code point at a time (a single character in the common case).
  *
@@ -157,7 +211,9 @@ const WINGDINGS_LOOKUP = withPua(WINGDINGS_MAP);
  *
  * Returns `char` unchanged when `fontFamily` is null/undefined, is not one of the
  * two mapped families, or has no mapping in the selected table (passthrough —
- * better the bare code point than a wrong glyph).
+ * better the bare code point than a wrong glyph). Symbol text is also returned
+ * unchanged when the host's Symbol face is symbol-encoded and so draws the
+ * codes itself (see the probe above).
  *
  * @param char       the marker/run text as stored in the OOXML (often one
  *                   PUA code point such as U+F0B7)
@@ -173,7 +229,7 @@ export function symbolFontToUnicode(
     lower === 'wingdings'
       ? WINGDINGS_LOOKUP
       : lower === 'symbol'
-        ? SYMBOL_LOOKUP
+        ? (hostSymbolFaceDrawsCodes() ? null : SYMBOL_LOOKUP)
         : null;
   if (!table) return char;
   // Each code point is converted independently, so a multi-character marker

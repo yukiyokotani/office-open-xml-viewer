@@ -1,9 +1,10 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   SYMBOL_MAP,
   symbolFontToUnicode,
   isSymbolFontFamily,
   symbolTextToUnicodeSegments,
+  setSymbolFaceProbeForTesting,
 } from './symbol-font';
 
 const ch = (code: number): string => String.fromCharCode(code);
@@ -238,5 +239,56 @@ describe('symbolTextToUnicodeSegments', () => {
     expect(symbolTextToUnicodeSegments('', 'Wingdings')).toEqual([
       { text: '', mapped: false },
     ]);
+  });
+});
+
+// Approach A: convert only where the host's Symbol face cannot draw the codes.
+describe('a symbol-encoded host Symbol face', () => {
+  afterEach(() => setSymbolFaceProbeForTesting(undefined));
+
+  it('keeps Symbol codes (bare and F0-shifted) for the native face', () => {
+    setSymbolFaceProbeForTesting(() => true);
+    expect(symbolFontToUnicode('\uF061\uF0B7', 'Symbol')).toBe('\uF061\uF0B7');
+    expect(symbolTextToUnicodeSegments('abcp', 'Symbol')).toEqual([{ text: 'abcp', mapped: false }]);
+    // Wingdings keeps its own table; the probe concerns Symbol only.
+    expect(symbolFontToUnicode(ch(0xf0a7), 'Wingdings')).toBe('▪');
+  });
+
+  it('converts when the host Symbol face is missing or Unicode-encoded', () => {
+    setSymbolFaceProbeForTesting(() => false);
+    expect(symbolFontToUnicode('\uF061b', 'Symbol')).toBe('αβ');
+  });
+
+  // The Canvas probe: a face that owns the codes changes their advances.
+  it('detects a symbol-encoded face by its advances in a Canvas', () => {
+    const fakeCanvas = (ownsCodes: boolean) => class {
+      getContext() {
+        let font = '';
+        return {
+          get font() { return font; }, set font(v: string) { font = v; },
+          measureText: (t: string) => ({
+            width: [...t].length * (ownsCodes && font.includes('"Symbol"') ? 55 : 60),
+          }),
+        };
+      }
+    };
+    try {
+      vi.stubGlobal('OffscreenCanvas', fakeCanvas(true));
+      setSymbolFaceProbeForTesting(undefined);
+      expect(symbolFontToUnicode('a', 'Symbol')).toBe('a');
+      vi.stubGlobal('OffscreenCanvas', fakeCanvas(false));
+      setSymbolFaceProbeForTesting(undefined);
+      expect(symbolFontToUnicode('a', 'Symbol')).toBe('α');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('probes the host once per realm', () => {
+    let calls = 0;
+    setSymbolFaceProbeForTesting(() => { calls++; return true; });
+    symbolFontToUnicode('a', 'Symbol');
+    symbolFontToUnicode('b', 'Symbol');
+    expect(calls).toBe(1);
   });
 });

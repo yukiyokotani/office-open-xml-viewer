@@ -16,6 +16,7 @@ import { layoutSourceStore } from '../layout-source-model-adapter.js';
 import { privateResourceLookupOf } from './runtime-state.js';
 import { normalizeInternalDocumentModel } from '../parser-model.js';
 import { canvasFontString } from '@silurus/ooxml-core';
+import { setSymbolFaceProbeForTesting } from '@silurus/ooxml-core/testing';
 import { referenceFontLineMetrics } from '../reference-font-line-metrics.js';
 
 function measureContext(): CanvasRenderingContext2D {
@@ -135,6 +136,22 @@ describe('production layout service integration', () => {
 
     expect(text.map((segment) => segment.text).join('')).toBe('αβχπα∑');
     expect(text.every((segment) => segment.fontFamily !== 'Symbol')).toBe(true);
+  });
+
+  it('keeps Symbol codes in a symbol-encoded host Symbol face', () => {
+    setSymbolFaceProbeForTesting(() => true);
+    try {
+      const services = createLayoutServices(model(), { measureContext: measureContext() });
+      const symbol = { fontFamily: 'Symbol', fontFamilyHighAnsi: 'Symbol' };
+      const segments = buildSegments([textRun('a\uF062', symbol)],
+        { pageIndex: 0, totalPages: 1, layoutServices: services });
+      const text = segments.filter((segment) => 'text' in segment)
+        .map((segment) => segment as { text: string; fontFamily?: string | null });
+      expect(text.map((segment) => segment.text).join('')).toBe('a\uF062');
+      expect(text.every((segment) => segment.fontFamily === 'Symbol')).toBe(true);
+    } finally {
+      setSymbolFaceProbeForTesting(undefined);
+    }
   });
 
   it('carries the w:kern threshold through the text service measure adapter', () => {
