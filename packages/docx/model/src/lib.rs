@@ -1201,9 +1201,11 @@ pub struct DocParagraph {
         skip_serializing_if = "std::ops::Not::not"
     )]
     pub justified_compression: bool,
-    /// Fixed and minimum line heights place all extra space above the text
-    /// (LibreOffice: the baseline sits the text's descent above the line
-    /// box's bottom). DOCX never sets it; Word's partition applies.
+    /// LibreOffice's fixed and minimum line placement: a minimum line puts
+    /// all extra space above the text (the baseline sits the text's descent
+    /// above the line box's bottom); a fixed line puts its baseline four
+    /// fifths of the way down the line box. DOCX never sets it; Word's
+    /// partition applies.
     #[serde(
         rename = "__lineExtraAbove",
         skip_serializing_if = "std::ops::Not::not"

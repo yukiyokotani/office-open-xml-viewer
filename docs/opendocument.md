@@ -154,8 +154,10 @@ specification differently, the reader follows LibreOffice:
 The DOCX layout draws some features differently from LibreOffice:
 
 - automatic hyphenation (`fo:hyphenate`) is not applied;
-- fixed and minimum line heights place extra space above the text, as
-  LibreOffice does, only on horizontal pages without a layout grid;
+- LibreOffice's fixed and minimum line placement (a fixed line's baseline
+  four fifths of the way down the line; a minimum line's extra space above
+  the text) applies only on horizontal pages, to paragraphs that do not snap
+  to a layout grid;
 - LibreOffice spreads a justified line's spare width in whole layout units;
 - section backgrounds, character shadows, outlines and reliefs, overlines
   and Graphite font shaping are not drawn (page backgrounds are);

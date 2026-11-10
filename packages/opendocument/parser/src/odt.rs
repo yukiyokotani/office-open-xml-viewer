@@ -1100,9 +1100,9 @@ impl<'a> Reader<'a> {
             bidi: rtl.then_some(true),
             justified_compression: justified_compression
                 && matches!(alignment, "both" | "distribute"),
-            // LibreOffice places a fixed or minimum line's extra height above
-            // the text (measured: the text sits on the line box's bottom
-            // less its descent).
+            // LibreOffice places a minimum line's extra height above the
+            // text and a fixed line's baseline at four fifths of its height
+            // (SwTextFormatter::CalcRealHeight; rr3 fixed-line controls).
             line_extra_above,
             // LibreOffice applies paragraph indents from the edge of the
             // area beside a wrapped float (measured: a hanging list item
