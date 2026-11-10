@@ -207,8 +207,8 @@ jobs:
         env:
           OOXML_REQUIRE_SKIA: '1'
 
-      # Python regressions for the legacy-office probe tools and the font
-      # reference-metrics generator. uv supplies their pinned dependencies.
+      # Python regression for the font reference-metrics generator. uv supplies
+      # its pinned dependency.
       - uses: astral-sh/setup-uv@v6
 
       - name: Python tool tests

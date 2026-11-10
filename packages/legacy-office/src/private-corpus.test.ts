@@ -40,7 +40,7 @@ const formats = [
   {
     from: 'doc',
     to: 'docx',
-    directory: new URL('../../docx/public/private/', import.meta.url),
+    directory: new URL('../public/private/doc/', import.meta.url),
     open: (bytes: Uint8Array, source = observed(testDocSource())) => ({
       claimed: source.claimed,
       done: materializeDocxDocument(bytes, { legacyDoc: source.source }),
@@ -49,7 +49,7 @@ const formats = [
   {
     from: 'xls',
     to: 'xlsx',
-    directory: new URL('../../xlsx/public/private/', import.meta.url),
+    directory: new URL('../public/private/xls/', import.meta.url),
     // The factory canvas measures the Normal font; without it drawings are omitted.
     open: (bytes: Uint8Array, source = observed(testXlsSource())) => ({
       claimed: source.claimed,
@@ -62,7 +62,7 @@ const formats = [
   {
     from: 'ppt',
     to: 'pptx',
-    directory: new URL('../../pptx/public/private/', import.meta.url),
+    directory: new URL('../public/private/ppt/', import.meta.url),
     open: (bytes: Uint8Array, source = observed(testPptSource())) => ({
       claimed: source.claimed,
       done: materializePptxPresentation(bytes, { legacyPpt: source.source }),
@@ -72,7 +72,7 @@ const formats = [
 
 async function corpusFiles(format: (typeof formats)[number]): Promise<{ directory: string; names: string[] }> {
   const directory = corpusRoot
-    ? join(corpusRoot, 'packages', format.to, 'public', 'private')
+    ? join(corpusRoot, 'packages', 'legacy-office', 'public', 'private', format.from)
     : fileURLToPath(format.directory);
   const names: string[] = [];
   // Retain relative directories: equal basenames are distinct corpus inputs.

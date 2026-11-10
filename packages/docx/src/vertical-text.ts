@@ -1036,7 +1036,7 @@ export interface Box {
  * this logical projection, in the same frame as the flow) AND {@link drawUprightBox}
  * (which un-swaps it back to the upright physical image). Because the two derive
  * from one box, the wrap band and the painted image stay locked together
- * (packages/docx/CLAUDE.md — no duplicated geometry).
+ * (packages/docx/AGENTS.md — no duplicated geometry).
  *
  * Acquisition passes canonical points; the algebra remains valid for any
  * consistent linear unit.

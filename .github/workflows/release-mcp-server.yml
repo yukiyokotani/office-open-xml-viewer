@@ -6,7 +6,7 @@ name: Release MCP Server Binaries
 # extension small.
 #
 # Triggered when a `gh release create v*` is run (per the release procedure in
-# the root CLAUDE.md). Can also be invoked manually for an existing tag.
+# the root AGENTS.md). Can also be invoked manually for an existing tag.
 
 on:
   release:

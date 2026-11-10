@@ -7,7 +7,7 @@ reviewed pull requests while preserving the public API. The final architecture
 and its CI gates are now the maintained source of truth.
 
 This design completes and supersedes the transitional boundaries in
-`docs/docx-layout-context-fragments-design.md`. The existing fragment work is the
+`docs/archive/docx-layout-context-fragments-design.md`. The existing fragment work is the
 starting point, not the final architecture.
 
 The implementation history is retained in Issue #1037. The migration roadmap
