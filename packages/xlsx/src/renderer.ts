@@ -1594,29 +1594,87 @@ function drawMultiLineRichText(
  *  the gridlines". */
 const COLUMN_TEXT_PADDING_PX = 5;
 
-/** Whether `font` paints with its authored face: a positively loaded exact
- *  local route, or a FontFace the document declares under that family. A
- *  CSS fallback or metric substitute is not the face Excel measures with. */
-function paintsAuthoredFace(ctx: CanvasRenderingContext2D, font: CellFont): boolean {
-  const family = cachedThemeCellFont(font, themeCellFontByContext.get(ctx)).family;
-  const route = officeRoute(ctx, family, font.bold, font.italic);
-  if (route?.source === 'local') return true;
-  if (!family) return false;
+/** Whether a CSS font-weight descriptor (`400`, `bold`, `100 900`) covers `weight`. */
+function faceWeightCovers(descriptor: string, weight: number): boolean {
+  const values = descriptor.trim().split(/\s+/).map((part) =>
+    part === 'normal' ? 400 : part === 'bold' ? 700 : Number(part));
+  if (values.length === 0 || values.some((value) => !Number.isFinite(value))) return false;
+  return weight >= values[0] && weight <= (values[1] ?? values[0]);
+}
+
+/** Whether the document holds a FontFace for `family` at `weight`/`style`
+ *  whose load has completed (`status === 'loaded'`): an unloaded or failed
+ *  face never paints. Memoized per render, so the font set is scanned once
+ *  per face rather than per cell. */
+function loadedAuthoredFace(
+  ctx: CanvasRenderingContext2D,
+  family: string, weight: number, style: 'normal' | 'italic',
+  memo: Map<string, boolean>,
+): boolean {
+  const key = `${family.toLocaleLowerCase('en-US')}\u0000${weight}\u0000${style}`;
+  const known = memo.get(key);
+  if (known !== undefined) return known;
   const fontSet = (isHTMLCanvas(ctx.canvas) ? ctx.canvas.ownerDocument?.fonts : undefined)
     ?? activeFontSet();
-  return hasDeclaredFamilyFace(family, fontSet);
+  let loaded = false;
+  if (fontSet && typeof fontSet[Symbol.iterator] === 'function') {
+    const requested = family.trim().toLocaleLowerCase('en-US');
+    for (const face of fontSet) {
+      if (face.status !== 'loaded') continue;
+      if (face.family.trim().replace(/^(['"])(.*)\1$/u, '$2').toLocaleLowerCase('en-US') !== requested) continue;
+      const italic = face.style === 'italic' || face.style.startsWith('oblique');
+      if (italic !== (style === 'italic') || !faceWeightCovers(face.weight, weight)) continue;
+      loaded = true;
+      break;
+    }
+  }
+  memo.set(key, loaded);
+  return loaded;
+}
+
+/** Whether `text` paints entirely in the face that leads `font`'s stack, in
+ *  its authored weight and style, so a width measured here is the width Excel
+ *  measures. The leading face is the exact local route when one is bound, or
+ *  the authored family; either must be a loaded FontFace (see
+ *  {@link loadedAuthoredFace}). Coverage is proved without a glyph table: the
+ *  text measures the same behind two different generic fallbacks only when no
+ *  character falls back. Anything else is a stand-in, whose glyph proportions
+ *  differ from the authored face's. */
+function paintsInAuthoredFace(
+  ctx: CanvasRenderingContext2D, font: CellFont, text: string, memo: Map<string, boolean>,
+): boolean {
+  const selected = cachedThemeCellFont(font, themeCellFontByContext.get(ctx));
+  const route = officeRoute(ctx, selected.family, font.bold, font.italic);
+  if (route && route.source !== 'local') return false;
+  const family = route?.family ?? selected.family;
+  if (!family) return false;
+  const style = font.italic ? 'italic' : 'normal';
+  if (!loadedAuthoredFace(ctx, family, selected.weight, style, memo)) return false;
+  const previous = ctx.font;
+  try {
+    const face = `${style} ${selected.weight} 100px ${quoteCssFontFamily(family)}`;
+    ctx.font = `${face}, monospace`;
+    const monospace = ctx.measureText(text).width;
+    ctx.font = `${face}, serif`;
+    return ctx.measureText(text).width === monospace;
+  } finally {
+    ctx.font = previous;
+  }
 }
 
 /** Fits a numeric cell's formatted text to the column's text area (§18.3.1.13,
  *  less `reservedW` for indent or an icon), measured in the cell's current
  *  `ctx.font`: General shortens (§18.8.30), every other number format shows
  *  "#" across the cell when too wide (issue #2179). The "#" is shown only when
- *  the authored face paints (see {@link fitFormattedNumber}) and no icon-set
- *  icon shares the cell: Excel reserves the icon's width, but its size is not
- *  documented (Microsoft only says it grows with the font size), so this
- *  renderer's icon box cannot decide a "#" Excel might not show. Shrink-to-fit
- *  cells scale instead, and rotated or stacked text has no horizontal width to
- *  fit, so those keep their text. */
+ *  no icon-set icon shares the cell and the authored face paints the text
+ *  (see {@link fitFormattedNumber}); that check runs only when a "#" is due.
+ *  Excel reserves an icon's width, but its size is not documented (Microsoft
+ *  only says it grows with the font size), so this renderer's icon box cannot
+ *  decide a "#" Excel might not show.
+ *
+ *  Shrink-to-fit cells scale instead, rotated or stacked text has no
+ *  horizontal width to fit, and wrapped cells keep the text that the
+ *  automatic row height was measured with, so those keep their text. */
 function fitNumberToCell(
   ctx: CanvasRenderingContext2D,
   cell: Cell,
@@ -1626,12 +1684,13 @@ function fitNumberToCell(
   cellW: number,
   reservedW: number,
   hasIcon: boolean,
+  memo: Map<string, boolean>,
 ): FormattedCell {
-  if (cell.value.type !== 'number' || xf.shrinkToFit || xf.textRotation) return formatted;
+  if (cell.value.type !== 'number' || xf.shrinkToFit || xf.textRotation || xf.wrapText) return formatted;
   const availableW = cellW - reservedW - COLUMN_TEXT_PADDING_PX;
   return fitFormattedNumber(
     cell, formatted, (text) => ctx.measureText(text).width <= availableW,
-    !hasIcon && paintsAuthoredFace(ctx, font),
+    () => !hasIcon && paintsInAuthoredFace(ctx, font, formatted.text, memo),
   );
 }
 
@@ -1858,6 +1917,9 @@ interface RenderContext {
    *  (ECMA-376 §18.3.1.13). Used by `colWidthToPx` to convert character-
    *  unit column widths into pixels. */
   mdw: number;
+  /** Per-render memo of {@link loadedAuthoredFace}: whether a loaded FontFace
+   *  serves a family/weight/style, so the font set is scanned once per face. */
+  loadedFaceMemo: Map<string, boolean>;
   /** Sheet-level right-to-left grid mirror (ECMA-376 §18.3.1.87
    *  `<sheetView rightToLeft>`). When true the whole grid is mirrored:
    *  column A sits at the right edge, columns flow right-to-left, and the
@@ -2184,8 +2246,14 @@ function renderQuadrant(
     // character widths (MDW) of the workbook's normal-style font.
     const indentPx = xf.indent ? Math.round(xf.indent * 3 * rc.mdw) : 0;
     const leftPad = paddingX + (alignH === 'left' || !xf.alignH ? indentPx : 0);
-    // A number fits the merged width (issue #2179), as in the main loop.
-    const formatted = fitNumberToCell(ctx, cell, unfitted, xf, fontForDraw, cW, leftPad - paddingX, false);
+    // A number fits the merged width (issue #2179) exactly as in the main loop,
+    // including the icon-set reservation and its "#" exemption, so the value
+    // does not change when the anchor scrolls out of view.
+    const iconReserve = cf.iconSet ? Math.max(8, Math.round(Math.min(cW, cH) * 0.55)) + 4 : 0;
+    const formatted = fitNumberToCell(
+      ctx, cell, unfitted, xf, fontForDraw, cW,
+      leftPad - paddingX + iconReserve, !!cf.iconSet, rc.loadedFaceMemo,
+    );
     const text = formatted.text;
 
     ctx.save();
@@ -2598,7 +2666,7 @@ function renderQuadrant(
       const formatted = fitNumberToCell(
         ctx, cell, unfitted, xf, fontForDraw,
         alignH === 'centerContinuous' ? centerContinuousW : cellW, leftPad - paddingX,
-        iconSz > 0,
+        iconSz > 0, rc.loadedFaceMemo,
       );
       const text = formatted.text;
 
@@ -3996,6 +4064,7 @@ export function renderViewport(
     selectionLastCol: Number.POSITIVE_INFINITY,
     textRuns: opts.onTextRun ? { owned: new Map(), foreign: new Map() } : undefined,
     mdw,
+    loadedFaceMemo: new Map(),
     rtl: worksheet.rightToLeft === true,
     canvasW,
     threeD: opts.threeD,

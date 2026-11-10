@@ -36,11 +36,13 @@ the corresponding minor release.
   and switching into or out of `'skip'` clears the current search (#2181).
 - **Excel: numbers wider than their column:** a General-format number now
   shortens to the cell's width as Excel does, dropping rounded decimal places
-  and switching to scientific notation (`3.141593`, `1.23E+14`), and shows `#`
-  across the cell when no form fits. Without a width limit it shows at most 11
-  characters, sign excluded. Numbers in any other format show `#` across the
-  cell instead of being clipped when the workbook's own font is available and
-  no icon-set icon shares the cell (#2179).
+  and switching to scientific notation (`3.141593`, `1.23E+14`). Without a
+  width limit it shows at most 11 characters, sign excluded. When even the
+  shortest form is too wide, and numbers in any other format that are too
+  wide, show `#` across the cell instead of being clipped, but only when the
+  workbook's own font is loaded and draws the text and no icon-set icon shares
+  the cell. Wrapped cells keep wrapping. Find matches the shortened text as
+  well as the full one (#2179).
 
 ## 0.89.8 — 2026-11-09
 

@@ -346,16 +346,17 @@ function formatGeneralText(num: number): string {
  *   that text is too wide (Excel never spills or clips a number).
  * Non-numeric cells and texts that fit are returned unchanged.
  *
- * `measuredInAuthoredFace` says whether `fits` measures in the face Excel
- * decides with. When a stand-in face paints, its glyph proportions differ from
- * the authored face's, so a "#" fill could hide a value Excel shows: the text
- * is kept instead (an explicit format unchanged, General at its shortest form).
+ * `hashAllowed` is asked only when a "#" fill is due. It says whether `fits`
+ * measures the way Excel decides (the authored face paints the text). When a
+ * stand-in face paints, its glyph proportions differ from the authored face's,
+ * so a "#" fill could hide a value Excel shows: the text is kept instead (an
+ * explicit format unchanged, General at its shortest form).
  */
 export function fitFormattedNumber(
   cell: Cell,
   formatted: FormattedCell,
   fits: (text: string) => boolean,
-  measuredInAuthoredFace = true,
+  hashAllowed: () => boolean = () => true,
 ): FormattedCell {
   if (cell.value.type !== 'number' || formatted.fill || fits(formatted.text)) return formatted;
   const color = formatted.color === undefined ? {} : { color: formatted.color };
@@ -366,10 +367,31 @@ export function fitFormattedNumber(
       return fits(candidate);
     });
     if (text !== null) return { text, ...color, general: true };
-    if (!measuredInAuthoredFace && shortest !== null) return { text: shortest, ...color, general: true };
+    if (hashAllowed()) return { text: '#', ...color, fill: true };
+    return shortest === null ? formatted : { text: shortest, ...color, general: true };
   }
-  if (!measuredInAuthoredFace) return formatted;
-  return { text: '#', ...color, fill: true };
+  return hashAllowed() ? { text: '#', ...color, fill: true } : formatted;
+}
+
+/**
+ * Every text a cell can display: one entry, or, for a General number, each
+ * distinct form {@link formatGeneralNumber} can shorten it to (widest first,
+ * the unconstrained text leading). Find indexes these, because the shown form
+ * depends on the column width and font, which only paint knows.
+ */
+export function cellDisplayTexts(
+  cell: Cell,
+  styles: Styles,
+  date1904 = false,
+): string[] {
+  const formatted = formatCellValueWithColor(cell, styles, null, date1904);
+  if (cell.value.type !== 'number' || !formatted.general) return [formatted.text];
+  const forms: string[] = [];
+  formatGeneralNumber(cell.value.number, (candidate) => {
+    forms.push(candidate);
+    return false;
+  });
+  return forms.length > 0 ? forms : [formatted.text];
 }
 
 function applyFormat(num: number, numFmtId: number, formatCode: string | null, date1904 = false): FormattedCell {

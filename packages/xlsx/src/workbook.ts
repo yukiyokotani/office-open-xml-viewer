@@ -53,7 +53,7 @@ import { selectSheetVisibility } from './sheet-visibility.js';
 import { renderWorksheetViewport } from './render-orchestrator.js';
 import { XLSX_GOOGLE_FONTS, xlsxFontPreloadNames, xlsxOfficeFontRequests, xlsxWorksheetOfficeFontRequests } from './google-fonts.js';
 import { officeRequestKey } from './shape-office-line.js';
-import { formatCellValue } from './number-format.js';
+import { cellDisplayTexts, formatCellValue } from './number-format.js';
 import {
   addWorksheetUsage,
   addWorksheetCacheUsage,
@@ -115,6 +115,8 @@ export const prepareXlsxViewerRowHeights = Symbol('prepare-xlsx-viewer-row-heigh
 export const releaseXlsxViewerProjection = Symbol('release-xlsx-viewer-projection');
 /** @internal XlsxSheetViewer-only source dispatcher. */
 export const loadXlsxSheetSource = Symbol('load-xlsx-sheet-source');
+/** @internal Viewer find: every text a cell may display at some column width. */
+export const xlsxCellDisplayTexts = Symbol('xlsx-cell-display-texts');
 
 interface RetainedFontSet {
   refs: number;
@@ -1262,6 +1264,14 @@ export class XlsxWorkbook {
   cellText(ws: Worksheet, cell: Cell): string {
     if (!this.parsedWorkbook) return '';
     return formatCellValue(cell, this.parsedWorkbook.styles, null, ws.date1904);
+  }
+
+  /** @internal {@link cellText} followed by each shorter form a General number
+   *  can display at a narrower column (ECMA-376 §18.8.30); paint picks one by
+   *  width, so find matches any of them. Empty before the workbook is loaded. */
+  [xlsxCellDisplayTexts](ws: Worksheet, cell: Cell): string[] {
+    if (!this.parsedWorkbook) return [];
+    return cellDisplayTexts(cell, this.parsedWorkbook.styles, ws.date1904);
   }
 
   /** Render a sheet viewport into `target`. Image bytes and decoded-image cache

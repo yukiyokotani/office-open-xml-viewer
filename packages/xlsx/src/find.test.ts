@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { XlsxFindController, type FindCell } from './find.js';
-import { formatCellValueWithColor } from './number-format.js';
+import { cellDisplayTexts, formatCellValueWithColor, formatGeneralNumber } from './number-format.js';
 import type { Styles } from './types.js';
 
 /** Minimal Styles carrying a single custom numFmt at style index 0. */
@@ -174,6 +174,26 @@ describe('XlsxFindController cursor + highlights', () => {
     expect(hl.find((h) => h.row === 1)?.active).toBe(true);
     expect(hl.find((h) => h.row === 2)?.active).toBe(false);
     expect(c.sheetHighlights(1)).toHaveLength(0);
+  });
+
+  it('finds a General number by the shortened form paint shows (issue #2179)', async () => {
+    const general = makeStyles('General');
+    const pi = { row: 2, col: 3, styleIndex: 0, value: { type: 'number' as const, number: Math.PI } };
+    const [text, ...alternates] = cellDisplayTexts(pi, general);
+    const c = controllerFor([{ name: 'S', cells: [{ row: 2, col: 3, text, alternates }] }]);
+    // The width-fitted text (e.g. an 8-character column) and the full text both match.
+    const shown = formatGeneralNumber(Math.PI, (form) => form.length <= 8);
+    expect(shown).toBe('3.141593');
+    const fitted = await c.find('3.141593');
+    expect(fitted).toHaveLength(1);
+    expect(fitted[0].text).toBe('3.141593');
+    expect(fitted[0].location).toMatchObject({ ref: 'C2', row: 2, col: 3 });
+    // A query every form contains still counts the cell once.
+    expect(await c.find('3.14')).toHaveLength(1);
+    expect(await c.find('3.141592654')).toHaveLength(1);
+    // The highlight is the whole matched cell, independent of which form matched.
+    c.next();
+    expect(c.sheetHighlights(0)).toEqual([{ row: 2, col: 3, active: true }]);
   });
 
   it('invalidate clears matches + cursor', async () => {

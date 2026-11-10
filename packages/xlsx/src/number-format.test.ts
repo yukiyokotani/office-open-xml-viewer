@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { fitFormattedNumber, formatCellValue, formatCellValueWithColor, formatGeneralNumber } from './number-format.js';
+import { cellDisplayTexts, fitFormattedNumber, formatCellValue, formatCellValueWithColor, formatGeneralNumber } from './number-format.js';
 import type { Cell, Styles } from './types.js';
 
 const FMT_ID = 164; // first free custom id
@@ -229,13 +229,34 @@ describe('General format — fitting the available width (ECMA-376 §18.8.30, is
     expect(fitFormattedNumber(numCell(1.5), short, fit)).toBe(short);
     // A stand-in face never hides a value Excel may show: explicit formats keep
     // their text, General keeps its shortest form.
-    expect(fitFormattedNumber(numCell(123456.789), fixed, fit, false)).toBe(fixed);
-    expect(fitFormattedNumber(numCell(Math.PI), general, chars(1), false)).toEqual({ text: '3', general: true });
-    expect(fitFormattedNumber(numCell(123456789), general, chars(4), false).fill).toBeUndefined();
-    expect(fitFormattedNumber(numCell(Math.PI), general, fit, false)).toEqual({ text: '3.141593', general: true });
+    expect(fitFormattedNumber(numCell(123456.789), fixed, fit, () => false)).toBe(fixed);
+    expect(fitFormattedNumber(numCell(Math.PI), general, chars(1), () => false)).toEqual({ text: '3', general: true });
+    const bigGeneral = formatCellValueWithColor(numCell(123456789), styles('General'));
+    expect(fitFormattedNumber(numCell(123456789), bigGeneral, chars(4), () => false))
+      .toEqual({ text: '1E+08', general: true });
+    expect(fitFormattedNumber(numCell(123456789), bigGeneral, chars(4), () => true))
+      .toEqual({ text: '#', fill: true });
+    expect(fitFormattedNumber(numCell(Math.PI), general, fit, () => false)).toEqual({ text: '3.141593', general: true });
+    // The face check runs only when a "#" is actually due.
+    let asked = 0;
+    const ask = () => { asked++; return true; };
+    fitFormattedNumber(numCell(Math.PI), general, fit, ask);
+    fitFormattedNumber(numCell(1.5), short, fit, ask);
+    expect(asked).toBe(0);
+    fitFormattedNumber(numCell(123456.789), fixed, fit, ask);
+    expect(asked).toBe(1);
     const text: Cell = { row: 1, col: 1, value: { type: 'text', text: 'a long text value' }, styleIndex: 0 };
     const textFormatted = formatCellValueWithColor(text, styles('General'));
     expect(fitFormattedNumber(text, textFormatted, fit)).toBe(textFormatted);
+  });
+  it('lists every General form a cell can display, for find', () => {
+    const forms = cellDisplayTexts(numCell(Math.PI), styles('General'));
+    expect(forms[0]).toBe('3.141592654');
+    expect(forms).toContain('3.141593');
+    expect(forms).toContain('3');
+    expect(new Set(forms).size).toBe(forms.length);
+    expect(cellDisplayTexts(numCell(-123456789012345), styles('General'))).toContain('-1.23E+14');
+    expect(cellDisplayTexts(numCell(Math.PI), styles('0.00'))).toEqual(['3.14']);
   });
 });
 

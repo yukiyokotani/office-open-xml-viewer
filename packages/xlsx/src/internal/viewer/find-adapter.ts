@@ -1,7 +1,7 @@
 import type { FindHighlightColors, FindMatch, FindMatchesOptions } from '@silurus/ooxml-core';
 import type { Worksheet } from '../../types.js';
 import type { XlsxWorkbook } from '../../workbook.js';
-import { acquireXlsxWorksheet } from '../../workbook.js';
+import { acquireXlsxWorksheet, xlsxCellDisplayTexts } from '../../workbook.js';
 import { HEADER_W, HEADER_H, getGridGeometryForWorksheet } from '../../renderer.js';
 import { XlsxFindController, type FindCell, type XlsxMatchLocation } from '../../find.js';
 import type { SheetOverlayHost } from '../sheet-surface.js';
@@ -68,8 +68,13 @@ export class FindAdapter {
       const cells: FindCell[] = [];
       for (const row of ws.rows) {
         for (const cell of row.cells) {
-          const text = wb.cellText(ws, cell);
-          if (text !== '') cells.push({ row: cell.row, col: cell.col, text });
+          // The unconstrained display text, then each shorter General form
+          // paint may show at the cell's width (issue #2179).
+          const [text = '', ...alternates] = wb[xlsxCellDisplayTexts](ws, cell);
+          if (text === '') continue;
+          cells.push(alternates.length > 0
+            ? { row: cell.row, col: cell.col, text, alternates }
+            : { row: cell.row, col: cell.col, text });
         }
       }
       return cells;
