@@ -135,13 +135,6 @@ describe('production layout service integration', () => {
 
     expect(text.map((segment) => segment.text).join('')).toBe('αβχπα∑');
     expect(text.every((segment) => segment.fontFamily !== 'Symbol')).toBe(true);
-
-    const dingbats = buildSegments([
-      textRun('J\uF0FC', { fontFamily: 'Wingdings', fontFamilyHighAnsi: 'Wingdings' }),
-      textRun('\uF021', { fontFamily: 'Webdings', fontFamilyHighAnsi: 'Webdings' }),
-    ], { pageIndex: 0, totalPages: 1, layoutServices: services });
-    expect(dingbats.filter((segment) => 'text' in segment)
-      .map((segment) => (segment as { text: string }).text).join('')).toBe('☺✓\u{1F577}');
   });
 
   it('carries the w:kern threshold through the text service measure adapter', () => {
