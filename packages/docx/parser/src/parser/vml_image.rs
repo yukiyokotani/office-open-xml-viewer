@@ -61,19 +61,15 @@ fn authored_luminance(shape: roxmltree::Node, definition: Option<roxmltree::Node
 /// `gain` (image intensity) and `blacklevel` (image brightness), Part 4
 /// §19.1.2.11, as the shared `<a:lum>` picture correction (§20.1.8.42).
 ///
-/// Part 4 names both attributes without a transfer function. They are the
-/// VML serialization of the Office Art picture properties pictureContrast and
-/// pictureBrightness (MS-ODRAW §§2.3.23.11-12) and carry the same 16.16 raw
-/// values: Word's Watermark dialog writes Washout as gain="19661f"
-/// blacklevel="22938f" (0x4ccd, 0x599a); PowerPoint converts the binary pair
-/// 0x4ccd/0x599a to `<a:lum bright="70000" contrast="-70000"/>`, which is also
-/// what Word writes for Washout on a DrawingML picture. The shared luminance
-/// transfer was measured from PowerPoint PDF exports of a gray ramp under a
-/// bright x contrast grid (0, +-35%, +-70%, +-100%), for `<a:lum>` and for the
-/// binary properties, the latter with the stored contrast used directly as
-/// the slope k (core `blip-effects.ts`; legacy PPT picture projection). So
-/// gain is k (contrast = k - 1 for k <= 1, 1 - 1/k above) and blacklevel is
-/// half the brightness fraction (raw 0x8000 = bright 1).
+/// Part 4 names both attributes without a transfer function. They carry
+/// 16.16 fixed-point values (the `f` suffix): Word's Watermark dialog writes
+/// Washout as gain="19661f" blacklevel="22938f", and Word writes the same
+/// effect on a DrawingML picture as `<a:lum bright="70000" contrast="-70000"/>`.
+/// The shared luminance transfer (core `blip-effects.ts`) was measured from
+/// Office PDF exports of a gray ramp under a bright x contrast grid (0, +-35%,
+/// +-70%, +-100%), with a stored contrast slope k used directly. So gain is
+/// k (contrast = k - 1 for k <= 1, 1 - 1/k above) and blacklevel is half the
+/// brightness fraction (0x8000 = bright 1).
 ///
 /// Office's order relative to gamma, grayscale, bilevel and chromakey is
 /// unmeasured, so such a combination withholds the correction and stays
@@ -84,7 +80,7 @@ fn luminance(shape: roxmltree::Node, definition: Option<roxmltree::Node>) -> Opt
         None => Some(default),
         Some(raw) => parse_vml_opacity(raw).filter(|n| n.is_finite()),
     };
-    // MS-ODRAW §2.3.23.11 ranges pictureContrast from 0 (no contrast) up;
+    // The measured transfer covers a contrast slope from 0 (no contrast) up;
     // Microsoft's VML reference describes a negative gain as reversed
     // contrast. That is outside the measured transfer, so a negative gain is
     // withheld and disclosed rather than clamped to a flat image.
