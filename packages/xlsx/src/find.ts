@@ -30,6 +30,11 @@ export interface FindCell {
   row: number;
   col: number;
   text: string;
+  /** Other texts the cell may display. A General number shortens to its
+   *  column width at paint (ECMA-376 §18.8.30), so find also matches each
+   *  shorter form; `text` is searched first, and the cell's matches come from
+   *  the first of these texts that has any, so no cell is counted twice. */
+  alternates?: readonly string[];
 }
 
 /** Where an xlsx match lives: the sheet, its name, and the cell (A1 + row/col). */
@@ -132,14 +137,17 @@ export class XlsxFindController {
       if (generation !== this._generation) return [];
       const sheetName = this._sheetName(sheet);
       for (const cell of cells) {
-        const index = buildTextIndex([{ text: cell.text }]);
-        const hits = findMatches(index, query, opts);
-        // Each occurrence within the cell is one match (browser find-count
-        // semantics); the located text is the matched substring in original case.
-        for (const tm of hits) {
-          const slice = tm.slices[0];
-          const text = cell.text.slice(slice.start, slice.end);
-          matches.push({ sheet, sheetName, row: cell.row, col: cell.col, text });
+        for (const candidate of [cell.text, ...(cell.alternates ?? [])]) {
+          const index = buildTextIndex([{ text: candidate }]);
+          const hits = findMatches(index, query, opts);
+          // Each occurrence within the cell is one match (browser find-count
+          // semantics); the located text is the matched substring in original case.
+          for (const tm of hits) {
+            const slice = tm.slices[0];
+            const text = candidate.slice(slice.start, slice.end);
+            matches.push({ sheet, sheetName, row: cell.row, col: cell.col, text });
+          }
+          if (hits.length > 0) break;
         }
       }
     }
