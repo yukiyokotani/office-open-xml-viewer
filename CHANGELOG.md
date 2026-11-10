@@ -17,6 +17,12 @@ the corresponding minor release.
   type name as a top-level `title`, and arguments that fail to deserialize
   now return an `isError` tool result instead of a JSON-RPC `-32602` error,
   as the MCP 2025-11-25 specification asks, so the model can correct them.
+  This applies whichever protocol version is negotiated; unknown tools still
+  return `-32602`. Ordinary MCP clients need no changes, but a client that
+  special-cases `-32602` for bad arguments must also handle `result.isError`.
+  rmcp also limits an incoming message to 16 MiB and drops a larger one
+  without a response, so the caller times out; the server's path-based tool
+  requests are far below that.
 
 ## 0.89.8 — 2026-11-09
 
