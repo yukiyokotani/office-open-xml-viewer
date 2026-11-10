@@ -204,6 +204,11 @@ export interface LoadOptions extends CoreLoadOptions {
    * stays in the render worker, so the opening pages arrive without a blank
    * wait AND the remaining layout never competes for main-thread frames.
    *
+   * Pages shown before layout completes are provisional and can differ from the
+   * final layout: page breaks may move, and content can occasionally overlap
+   * (for example body text running into a footer taller than the bottom
+   * margin). Every page is laid out and redrawn when layout completes.
+   *
    * Off by default: `load()` resolving before the document is fully laid out is
    * a behaviour change existing callers should opt into.
    */

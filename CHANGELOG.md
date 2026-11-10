@@ -13,6 +13,10 @@ Compatible patch release. No migration is required.
   contrast (`gain`/`blacklevel`, which Word's Watermark dialog writes for
   Washout) now fade the picture as Word does, instead of drawing it at full
   contrast over the text (#2175).
+- **Docs:** `progressiveLayout` now states that pages shown before layout
+  completes are provisional. Page breaks may move and content can occasionally
+  overlap, for example body text over a footer taller than the bottom margin
+  (#2178). Every page is redrawn correctly once layout completes.
 
 ## 0.89.8 — 2026-11-09
 
