@@ -1120,6 +1120,11 @@ export interface SharedString {
 export interface NumFmt {
   numFmtId: number;
   formatCode: string;
+  /** Per numeric section of `formatCode` (the text section excluded), the
+   *  divisor applied to the value once the section is selected: an
+   *  OpenDocument `number:display-factor` (ODF 1.3 Part 3 §19.346), which a
+   *  SpreadsheetML code cannot spell. Absent: no section divides. */
+  sectionDivisors?: number[];
 }
 
 export interface Styles {

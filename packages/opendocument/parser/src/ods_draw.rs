@@ -11,6 +11,7 @@ use super::{parse_cell, Context, OdsSheet, MAX_COLS, MAX_DRAWINGS, MAX_ROWS};
 use crate::odf_props::{get, hex_color, length_pt, percent, Style};
 use crate::package::OdfPackage;
 use crate::xml::{self, NS_DRAW, NS_SVG, NS_TEXT, NS_XLINK};
+use ooxml_common::chart::RetainedBytes;
 use std::collections::BTreeMap;
 use xlsx_model::{ChartAnchor, DrawingAnchorTag, ImageAnchor, ShapeAnchor, ShapeInfo, Worksheet};
 
@@ -254,13 +255,14 @@ fn z_index(node: roxmltree::Node<'_, '_>, fallback: usize) -> u64 {
         .unwrap_or(fallback as u64)
 }
 
-/// A package path from an `xlink:href` (`./Pictures/a.png` → `Pictures/a.png`).
+/// The package file an `xlink:href` of `content.xml` names, resolved as a
+/// relative IRI (ODF Part 2 §3.7: `./Pictures/a%20b.png` →
+/// `Pictures/a b.png`); `None` outside the package or for the package root.
 pub fn package_path(href: &str) -> Option<String> {
-    if href.contains("://") || href.starts_with('/') || href.contains("..") {
-        return None;
+    match crate::iri::resolve("content.xml", href)? {
+        crate::iri::Target::Package { path, .. } if !path.is_empty() => Some(path),
+        _ => None,
     }
-    let path = href.trim_start_matches("./");
-    (!path.is_empty()).then(|| path.to_string())
 }
 
 /// MIME type of an image the renderer can decode, from its first bytes.
@@ -484,7 +486,7 @@ fn read_drawing(
             pt_attr(node, NS_SVG, "width").unwrap_or(0.0),
             pt_attr(node, NS_SVG, "height").unwrap_or(0.0),
         );
-        shape.geom = match super::shape_path::custom_geometry(node, size) {
+        shape.geom = match super::shape_path::custom_geometry(node, size)? {
             Some(paths) => xlsx_model::ShapeGeom::Custom { paths },
             None => xlsx_model::ShapeGeom::Preset {
                 name: "rect".into(),
@@ -492,8 +494,8 @@ fn read_drawing(
             },
         };
     }
-    if matches!(name, "polygon" | "polyline" | "path") {
-        if let Some(geom) = polygon_geometry(node, name) {
+    if matches!(name, "polygon" | "polyline") {
+        if let Some(geom) = polygon_geometry(node, name)? {
             shape.geom = geom;
         }
         if name == "polyline" {
@@ -501,7 +503,36 @@ fn read_drawing(
             shape.fill_color = None;
         }
     }
+    if name == "path" {
+        // §10.3.7 draw:path: SVG path data (`svg:d`) in the `svg:viewBox`
+        // space, which defaults to the shape's own size.
+        if let Some(d) = node.attribute((NS_SVG, "d")) {
+            let view = view_box(node).unwrap_or((
+                0.0,
+                0.0,
+                pt_attr(node, NS_SVG, "width").unwrap_or(1.0),
+                pt_attr(node, NS_SVG, "height").unwrap_or(1.0),
+            ));
+            if let Some(path) = super::shape_path::svg_path(d, view)? {
+                shape.geom = xlsx_model::ShapeGeom::Custom { paths: vec![path] };
+            }
+        }
+    }
     push_shape_checked(ctx, package, worksheet, rect, shape)
+}
+
+/// `svg:viewBox` (§19.570): x, y, width, height.
+fn view_box(node: roxmltree::Node<'_, '_>) -> Option<(f64, f64, f64, f64)> {
+    let view: Vec<f64> = node
+        .attribute((NS_SVG, "viewBox"))?
+        .split(|c: char| c.is_whitespace() || c == ',')
+        .filter(|v| !v.is_empty())
+        .map(|v| v.parse().ok())
+        .collect::<Option<_>>()?;
+    match view.as_slice() {
+        [x, y, w, h] if view.iter().all(|v| v.is_finite()) => Some((*x, *y, *w, *h)),
+        _ => None,
+    }
 }
 
 /// LibreOffice writes imported OOXML preset shapes as `ooxml-<preset>`
@@ -700,19 +731,32 @@ const OOXML_PRESETS: &[&str] = &[
     "can",
 ];
 
-fn polygon_geometry(node: roxmltree::Node<'_, '_>, name: &str) -> Option<xlsx_model::ShapeGeom> {
-    let points = node.attribute((NS_DRAW, "points"))?;
-    let view: Vec<f64> = node
-        .attribute((NS_SVG, "viewBox"))?
-        .split_whitespace()
-        .filter_map(|v| v.parse().ok())
-        .collect();
-    let (vw, vh) = (*view.get(2)?, *view.get(3)?);
-    let (vx, vy) = (view[0], view[1]);
+/// Implementation bound on the points of one polygon or polyline; more
+/// reject the document.
+const MAX_POLYGON_POINTS: usize = 200_000;
+
+/// §10.3.4 / §10.3.5 `draw:points` (§19.162: `x,y` pairs) in the
+/// `svg:viewBox` space. `Ok(None)` for malformed point data.
+fn polygon_geometry(
+    node: roxmltree::Node<'_, '_>,
+    name: &str,
+) -> Result<Option<xlsx_model::ShapeGeom>, String> {
+    let (Some(points), Some((vx, vy, vw, vh))) =
+        (node.attribute((NS_DRAW, "points")), view_box(node))
+    else {
+        return Ok(None);
+    };
     let mut commands = Vec::new();
     for (i, pair) in points.split_whitespace().enumerate() {
-        let (x, y) = pair.split_once(',')?;
-        let (x, y) = (x.parse::<f64>().ok()? - vx, y.parse::<f64>().ok()? - vy);
+        if i >= MAX_POLYGON_POINTS {
+            return Err(crate::error::resource("shape geometry"));
+        }
+        let Some((x, y)) = pair
+            .split_once(',')
+            .and_then(|(x, y)| Some((x.parse::<f64>().ok()? - vx, y.parse::<f64>().ok()? - vy)))
+        else {
+            return Ok(None);
+        };
         commands.push(if i == 0 {
             xlsx_model::PathCmd::MoveTo { x, y }
         } else {
@@ -722,7 +766,7 @@ fn polygon_geometry(node: roxmltree::Node<'_, '_>, name: &str) -> Option<xlsx_mo
     if name == "polygon" {
         commands.push(xlsx_model::PathCmd::Close);
     }
-    Some(xlsx_model::ShapeGeom::Custom {
+    Ok(Some(xlsx_model::ShapeGeom::Custom {
         paths: vec![xlsx_model::PathInfo {
             w: vw.max(1.0),
             h: vh.max(1.0),
@@ -730,7 +774,7 @@ fn polygon_geometry(node: roxmltree::Node<'_, '_>, name: &str) -> Option<xlsx_mo
             stroke: true,
             commands,
         }],
-    })
+    }))
 }
 
 /// Fill and stroke of a graphic style chain (§20.130 draw:fill, §20.164
@@ -915,14 +959,8 @@ fn collect_shape_runs(
                 let span = super::cells::font_of(&chain, &ctx.faces, Some(font));
                 collect_shape_runs(ctx, child, &span, runs);
             }
-            "s" => {
-                let count = child
-                    .attribute((NS_TEXT, "c"))
-                    .and_then(|c| c.parse::<usize>().ok())
-                    .unwrap_or(1)
-                    .min(4096);
-                push_text_run(runs, &" ".repeat(count), font);
-            }
+            // `content.xml` is bounded by `check_space_runs` before reading.
+            "s" => push_text_run(runs, &" ".repeat(crate::odf_text::space_count(child)), font),
             "tab" => push_text_run(runs, "\t", font),
             "line-break" => runs.push(xlsx_model::ShapeTextRun::Break),
             _ => collect_shape_runs(ctx, child, font, runs),
@@ -964,7 +1002,10 @@ fn push_shape(
     rect: Rect,
     shape: ShapeInfo,
 ) -> Result<(), String> {
-    budget.bytes(1024)?;
+    // The anchor's fixed size plus the shape's text and geometry.
+    budget.bytes(
+        1024usize.saturating_add(usize::try_from(shape.heap_bytes()).unwrap_or(usize::MAX)),
+    )?;
     worksheet.shape_groups.push(ShapeAnchor {
         from_col: rect.from_col,
         from_col_off: rect.from_col_off,
@@ -1102,17 +1143,20 @@ pub(crate) fn resolve_charts(
     for chart in pending {
         let resolver = SheetResolver { sheets, ctx };
         let model = crate::odf_chart::read_chart_object(package, &chart.object, Some(&resolver));
+        // A structurally invalid object is drawn from its replacement; a
+        // resource limit or package failure rejects the workbook.
         let model = match model {
             Ok(model) => model,
-            Err(error) if error.starts_with("OpenDocument spreadsheet exceeds") => {
-                return Err(error)
-            }
-            Err(_) => None,
+            Err(error) if crate::error::is_invalid(&error) => None,
+            Err(error) => return Err(error),
         };
         let rect = chart.rect;
         match model {
             Some(model) => {
-                ctx.budget.bytes(4096)?;
+                ctx.budget
+                    .bytes(4096usize.saturating_add(
+                        usize::try_from(model.heap_bytes()).unwrap_or(usize::MAX),
+                    ))?;
                 sheets[chart.sheet].worksheet.charts.push(ChartAnchor {
                     z_order: chart.z_order,
                     from_col: rect.from_col,
@@ -1162,16 +1206,24 @@ struct SheetResolver<'a> {
 }
 
 impl crate::odf_chart::RangeResolver for SheetResolver<'_> {
-    fn cells(&self, address: &str) -> Option<Vec<crate::odf_chart::CellData>> {
-        let (sheet, (r1, c1), (r2, c2)) = super::parse_range(address)?;
-        let sheet = self
+    fn cells(
+        &self,
+        address: &str,
+        budget: &crate::odf_chart::ChartBudget,
+    ) -> Result<Option<Vec<crate::odf_chart::CellData>>, String> {
+        let Some((sheet, (r1, c1), (r2, c2))) = super::parse_range(address) else {
+            return Ok(None);
+        };
+        let Some(sheet) = self
             .sheets
             .iter()
-            .find(|s| sheet.as_deref().is_none_or(|name| name == s.name))?;
+            .find(|s| sheet.as_deref().is_none_or(|name| name == s.name))
+        else {
+            return Ok(None);
+        };
         let count = (u64::from(r2 - r1) + 1) * (u64::from(c2 - c1) + 1);
-        if count > 1_048_576 {
-            return None;
-        }
+        // Points and their text are admitted before they are copied.
+        budget.points(usize::try_from(count).unwrap_or(usize::MAX))?;
         let _ = &self.ctx;
         let mut out = Vec::with_capacity(count as usize);
         for row in r1..=r2 {
@@ -1182,6 +1234,7 @@ impl crate::odf_chart::RangeResolver for SheetResolver<'_> {
                         crate::odf_chart::CellData::Number(*number)
                     }
                     Some(xlsx_model::CellValue::Text { text, .. }) => {
+                        budget.bytes(text.len())?;
                         crate::odf_chart::CellData::Text(text.clone())
                     }
                     Some(xlsx_model::CellValue::Bool { bool }) => {
@@ -1191,7 +1244,7 @@ impl crate::odf_chart::RangeResolver for SheetResolver<'_> {
                 });
             }
         }
-        Some(out)
+        Ok(Some(out))
     }
 
     fn hidden(&self, _address: &str) -> Option<Vec<bool>> {

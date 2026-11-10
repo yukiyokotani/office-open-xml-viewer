@@ -213,6 +213,7 @@ impl ResolvedStyleSheet {
                 .map(|(num_fmt_id, format_code)| xlsx_model::NumFmt {
                     num_fmt_id: num_fmt_id.into(),
                     format_code,
+                    section_divisors: Vec::new(),
                 })
                 .collect(),
             dxfs: self.dxfs,

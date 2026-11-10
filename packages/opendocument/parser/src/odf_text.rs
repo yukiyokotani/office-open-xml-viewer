@@ -145,6 +145,52 @@ pub fn split_addresses(list: &str) -> Vec<&str> {
     out
 }
 
+/// A namespace-qualified attribute value (`of:=SUM(…)`, §18.3.12
+/// namespacedToken, §19.595 `table:condition`) without its prefix when the
+/// prefix is a namespace bound where the attribute is written; any other
+/// text is returned whole.
+pub fn without_bound_prefix<'a>(node: roxmltree::Node<'_, '_>, value: &'a str) -> &'a str {
+    match value.split_once(':') {
+        Some((prefix, rest))
+            if !prefix.is_empty()
+                && prefix
+                    .chars()
+                    .all(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | '.'))
+                && node.lookup_namespace_uri(Some(prefix)).is_some() =>
+        {
+            rest
+        }
+        _ => value,
+    }
+}
+
+/// Implementation bound on the spaces all `text:s` elements of one part
+/// expand to (§6.1.3 `text:c`); a part over it rejects the document, so a
+/// reader never allocates an unbounded run of spaces.
+pub const MAX_PART_SPACES: usize = 16 * 1024 * 1024;
+
+/// The spaces one `text:s` stands for (§19.763 `text:c`, default 1).
+pub fn space_count(node: roxmltree::Node<'_, '_>) -> usize {
+    node.attribute((crate::xml::NS_TEXT, "c"))
+        .and_then(|c| c.trim().parse::<usize>().ok())
+        .unwrap_or(1)
+}
+
+/// Reject a part whose `text:s` elements expand past [`MAX_PART_SPACES`].
+pub fn check_space_runs(root: roxmltree::Node<'_, '_>) -> Result<(), String> {
+    let mut total = 0usize;
+    for node in root
+        .descendants()
+        .filter(|n| xml::is(*n, crate::xml::NS_TEXT, "s"))
+    {
+        total = total.saturating_add(space_count(node));
+        if total > MAX_PART_SPACES {
+            return Err(crate::error::resource("text space"));
+        }
+    }
+    Ok(())
+}
+
 pub fn inline_text(node: roxmltree::Node<'_, '_>, out: &mut String) {
     for child in node.children() {
         if child.is_text() {
@@ -155,14 +201,8 @@ pub fn inline_text(node: roxmltree::Node<'_, '_>, out: &mut String) {
             continue;
         }
         match child.tag_name().name() {
-            "s" => {
-                let count = child
-                    .attribute((crate::xml::NS_TEXT, "c"))
-                    .and_then(|c| c.parse::<usize>().ok())
-                    .unwrap_or(1)
-                    .min(4096);
-                out.extend(std::iter::repeat_n(' ', count));
-            }
+            // Readers bound every part with `check_space_runs` first.
+            "s" => out.extend(std::iter::repeat_n(' ', space_count(child))),
             "tab" => out.push('\t'),
             "line-break" => out.push('\n'),
             "note" | "ruby-text" => {}

@@ -291,6 +291,7 @@ pub(crate) fn parse_dxf(dxf_node: roxmltree::Node, theme_colors: &[String]) -> D
                 d.num_fmt = Some(NumFmt {
                     num_fmt_id,
                     format_code,
+                    section_divisors: Vec::new(),
                 });
             }
             _ => {}
@@ -315,6 +316,7 @@ pub(crate) fn parse_num_fmts(doc: &roxmltree::Document) -> Vec<NumFmt> {
                 fmts.push(NumFmt {
                     num_fmt_id,
                     format_code,
+                    section_divisors: Vec::new(),
                 });
             }
             break;

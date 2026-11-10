@@ -57,7 +57,7 @@ export interface CfResult {
   /** Number format override from a matched CF dxf. Higher-priority rules win
    *  (first match through the rule list). Falls back to the cell's own style
    *  numFmt if unset. */
-  numFmt?: { numFmtId: number; formatCode: string | null };
+  numFmt?: { numFmtId: number; formatCode: string | null; sectionDivisors?: number[] };
   dataBar?: { color: string; ratio: number; gradient: boolean };
   iconSet?: { name: string; index: number };
   /** Per-edge borders from matched CF rules (merged on top of the cell's base
@@ -362,6 +362,7 @@ function applyDxfToResult(result: CfResult, dxf: Dxf | null | undefined): void {
     result.numFmt = {
       numFmtId: dxf.numFmt.numFmtId,
       formatCode: dxf.numFmt.formatCode || null,
+      ...(dxf.numFmt.sectionDivisors?.length ? { sectionDivisors: dxf.numFmt.sectionDivisors } : {}),
     };
   }
   if (dxf.border) {

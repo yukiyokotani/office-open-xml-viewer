@@ -127,6 +127,8 @@ struct Template {
     value: Value,
     xf: u32,
     formula: Option<String>,
+    /// The bytes each copy holds (text, runs, formula).
+    bytes: usize,
 }
 
 /// A run of rows: (first, last, height px, custom height, (hidden, outline level)).
@@ -205,6 +207,8 @@ pub(crate) fn read_table<'a, 'input>(
         comments: Vec::new(),
         anchored: Vec::new(),
         validations: Vec::new(),
+        style_maps: Vec::new(),
+        style_map_last: HashMap::new(),
         next_row: 1,
         sheet_index: index,
     };
@@ -387,6 +391,7 @@ pub(crate) fn read_table<'a, 'input>(
             column_px,
             default_col_px,
             validation_refs: walker.validations,
+            style_map_refs: walker.style_maps,
         },
         charts,
     ))
@@ -653,6 +658,11 @@ struct RowWalker<'a, 'input> {
     comments: Vec<xlsx_model::XlsxComment>,
     anchored: Vec<Anchored<'a, 'input>>,
     validations: Vec<(String, xlsx_model::CellRange)>,
+    /// Ranges of cells whose style has `style:map` conditions.
+    style_maps: Vec<(String, xlsx_model::CellRange)>,
+    /// (style, first column, last column) → its last range, to extend it
+    /// down over the next rows.
+    style_map_last: HashMap<(String, u32, u32), usize>,
     next_row: u32,
     #[allow(dead_code)]
     sheet_index: usize,
@@ -781,6 +791,14 @@ fn read_row<'a, 'input>(
                 .or(row_default)
                 .map(str::to_string)
                 .or(column_style);
+            let style_name = style.as_deref().unwrap_or("Default");
+            if ctx
+                .store
+                .find("table-cell", style_name)
+                .is_some_and(|s| !s.maps.is_empty())
+            {
+                record_style_map(ctx, walker, style_name, (first, c), (last, segment_last))?;
+            }
             let xf = ctx
                 .xfs
                 .xf_for(&ctx.store, &mut ctx.data, &ctx.faces, style.as_deref());
@@ -791,13 +809,15 @@ fn read_row<'a, 'input>(
             let paints = ctx.xfs.blank_signature(xf) != ctx.xfs.blank_signature(column_xf);
             if has_value || paints || formula.is_some() {
                 for c in c..=segment_last {
+                    // Admitted before the copy is made.
+                    ctx.budget.cell(text_bytes)?;
                     templates.push(Template {
                         col: c,
                         value: value.clone(),
                         xf,
                         formula: formula.clone(),
+                        bytes: text_bytes,
                     });
-                    ctx.budget.cell(text_bytes)?;
                 }
             }
             c = segment_last + 1;
@@ -832,23 +852,41 @@ fn read_row<'a, 'input>(
                 },
             ));
         }
-        // Links, annotations and drawings of the first cell of the block.
+        // Links and annotations are cell content: every repeated cell of
+        // the block carries them (§19.675 / §19.680), each admitted to the
+        // budget before it is stored. Drawings are anchored once, at the
+        // block's first cell, as LibreOffice anchors them.
         if !covered || cell.children().any(|n| n.is_element()) {
-            for row in first..=last.min(first + 255) {
-                if let Some(link) = cell
-                    .descendants()
-                    .find(|n| xml::is(*n, NS_TEXT, "a"))
-                    .and_then(|a| a.attribute((NS_XLINK, "href")))
-                {
-                    for c in col..=cell_last.min(col + 255) {
-                        walker.hyperlinks.push(hyperlink(c, row, link));
+            let link = cell
+                .descendants()
+                .find(|n| xml::is(*n, NS_TEXT, "a"))
+                .and_then(|a| a.attribute((NS_XLINK, "href")));
+            let annotation = cell
+                .children()
+                .find(|n| xml::is(*n, NS_OFFICE, "annotation"));
+            if link.is_some() || annotation.is_some() {
+                let note_text = annotation.map(super::paragraph_text);
+                // A note holds its text, author and date: at most the
+                // annotation's character data.
+                let note_bytes = annotation.map_or(0, |a| {
+                    a.descendants()
+                        .filter(|n| n.is_text())
+                        .map(|n| n.text().map_or(0, str::len))
+                        .fold(128usize, usize::saturating_add)
+                });
+                for row in first..=last {
+                    for c in col..=cell_last {
+                        if let Some(link) = link {
+                            ctx.budget.bytes(64usize.saturating_add(link.len()))?;
+                            walker.hyperlinks.push(hyperlink(c, row, link));
+                        }
+                        if let (Some(annotation), Some(text)) = (annotation, &note_text) {
+                            ctx.budget.bytes(note_bytes)?;
+                            walker
+                                .comments
+                                .push(comment(annotation, text.clone(), row, c));
+                        }
                     }
-                }
-                if let Some(annotation) = cell
-                    .children()
-                    .find(|n| xml::is(*n, NS_OFFICE, "annotation"))
-                {
-                    walker.comments.push(comment(annotation, row, col));
                 }
             }
             for child in cell.children().filter(|n| is_drawing(*n)) {
@@ -862,6 +900,13 @@ fn read_row<'a, 'input>(
     }
     if !templates.is_empty() {
         for row in first..=last {
+            // The first occurrence was admitted with its templates; each
+            // repeat is admitted before it is copied.
+            if row != first {
+                for t in &templates {
+                    ctx.budget.cell(t.bytes)?;
+                }
+            }
             let cells: Vec<Cell> = templates
                 .iter()
                 .map(|t| Cell {
@@ -884,15 +929,6 @@ fn read_row<'a, 'input>(
                     show_phonetic: false,
                 })
                 .collect();
-            if row != first {
-                for t in &templates {
-                    let bytes = match &t.value {
-                        Value::Text(text, _) => text.len(),
-                        _ => 0,
-                    };
-                    ctx.budget.cell(bytes)?;
-                }
-            }
             walker.rows.push(Row {
                 index: row,
                 height: None,
@@ -904,6 +940,37 @@ fn read_row<'a, 'input>(
             });
         }
     }
+    Ok(())
+}
+
+/// Note the cells (rows × columns) whose style carries `style:map`
+/// conditions, extending the style's range from the rows above.
+fn record_style_map(
+    ctx: &mut Context,
+    walker: &mut RowWalker<'_, '_>,
+    style: &str,
+    (top, left): (u32, u32),
+    (bottom, right): (u32, u32),
+) -> Result<(), String> {
+    let key = (style.to_string(), left, right);
+    if let Some(index) = walker.style_map_last.get(&key) {
+        let range = &mut walker.style_maps[*index].1;
+        if range.bottom.saturating_add(1) == top {
+            range.bottom = bottom;
+            return Ok(());
+        }
+    }
+    ctx.budget.bytes(64usize.saturating_add(style.len()))?;
+    walker.style_map_last.insert(key, walker.style_maps.len());
+    walker.style_maps.push((
+        style.to_string(),
+        xlsx_model::CellRange {
+            top,
+            left,
+            bottom,
+            right,
+        },
+    ));
     Ok(())
 }
 
@@ -961,7 +1028,12 @@ fn hyperlink(col: u32, row: u32, href: &str) -> Hyperlink {
     }
 }
 
-fn comment(annotation: roxmltree::Node<'_, '_>, row: u32, col: u32) -> xlsx_model::XlsxComment {
+fn comment(
+    annotation: roxmltree::Node<'_, '_>,
+    text: String,
+    row: u32,
+    col: u32,
+) -> xlsx_model::XlsxComment {
     let author = annotation
         .children()
         .find(|n| xml::is(*n, NS_DC, "creator"))
@@ -980,7 +1052,7 @@ fn comment(annotation: roxmltree::Node<'_, '_>, row: u32, col: u32) -> xlsx_mode
         author,
         date,
         root_text: None,
-        text: super::paragraph_text(annotation),
+        text,
         resolved: None,
         replies: Vec::new(),
     }
@@ -1007,7 +1079,9 @@ fn cell_value(
     };
     if calc_type == Some("error") {
         let text = super::paragraph_text(cell);
-        let size = text.len();
+        let size = text
+            .len()
+            .saturating_add(formula.as_ref().map_or(0, String::len));
         return (Value::Error(text), formula, size);
     }
     let value = match value_type {
@@ -1077,10 +1151,16 @@ fn cell_value(
         }
         other => other,
     };
+    // Every copy of the cell holds its text, its runs and its formula.
     let size = match &value {
-        Value::Text(text, runs) => text.len() + runs.as_ref().map_or(0, |r| r.len() * 64),
+        Value::Text(text, runs) => text.len().saturating_add(runs.as_ref().map_or(0, |r| {
+            r.iter()
+                .map(|run| 64usize.saturating_add(run.text.len()))
+                .fold(0usize, usize::saturating_add)
+        })),
         _ => 0,
-    };
+    }
+    .saturating_add(formula.as_ref().map_or(0, String::len));
     (value, formula, size)
 }
 
@@ -1152,14 +1232,12 @@ fn collect_runs(
             continue;
         }
         match child.tag_name().name() {
-            "s" => {
-                let count = child
-                    .attribute((NS_TEXT, "c"))
-                    .and_then(|c| c.parse::<usize>().ok())
-                    .unwrap_or(1)
-                    .min(4096);
-                push_run(runs, &" ".repeat(count), style);
-            }
+            // `content.xml` is bounded by `check_space_runs` before reading.
+            "s" => push_run(
+                runs,
+                &" ".repeat(crate::odf_text::space_count(child)),
+                style,
+            ),
             "tab" => push_run(runs, "\t", style),
             "line-break" => push_run(runs, "\n", style),
             "span" => {

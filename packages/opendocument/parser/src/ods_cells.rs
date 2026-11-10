@@ -4,7 +4,7 @@
 //! number formats.
 
 use crate::odf_props::{self, get, hex_color, length_pt, Style, StyleStore};
-use crate::ods_number::{DataKind, DataStyles};
+use crate::ods_number::{DataKind, DataStyles, FormatCode};
 use std::collections::HashMap;
 use xlsx_model::{Border, BorderEdge, CellXf, Dxf, Fill, Font, NumFmt, RunFont, Styles};
 
@@ -31,13 +31,16 @@ pub struct CellFormat {
     pub font: Font,
     pub fill: Fill,
     pub border: Border,
-    pub num_fmt: Option<(String, DataKind)>,
+    pub num_fmt: Option<(FormatCode, DataKind)>,
     pub xf: CellXf,
     pub indent_pt: f64,
 }
 
 impl XfBuilder {
-    pub fn new(store: &StyleStore, faces: &HashMap<String, String>) -> Self {
+    /// A builder whose xf 0 is the `Default` cell style (§16.2: the style
+    /// of cells that name none), as SpreadsheetML's xf 0 is the Normal
+    /// format of unstyled cells.
+    pub fn new(store: &StyleStore, data: &mut DataStyles, faces: &HashMap<String, String>) -> Self {
         let chain = store.chain("table-cell", Some("Default"));
         let default_font = font_of(&chain, faces, None);
         let mut builder = Self {
@@ -64,6 +67,8 @@ impl XfBuilder {
             ..Fill::default()
         });
         builder.intern_border(Border::default());
+        let default_xf = builder.xf_for(store, data, faces, None);
+        debug_assert_eq!(default_xf, 0);
         builder
     }
 
@@ -130,7 +135,7 @@ impl XfBuilder {
             return xf;
         };
         let mut copy = clone_xf(base);
-        copy.num_fmt_id = self.intern_num_fmt(code);
+        copy.num_fmt_id = self.intern_num_fmt(&FormatCode::plain(code));
         let indent = self.indent_pt.get(xf as usize).copied().unwrap_or(0.0);
         self.intern_xf(copy, indent, Some(kind))
     }
@@ -142,7 +147,7 @@ impl XfBuilder {
         xf.border_id = self.intern_border(format.border);
         let kind = format.num_fmt.as_ref().map(|(_, kind)| *kind);
         xf.num_fmt_id = match &format.num_fmt {
-            Some((code, _)) => self.intern_num_fmt(code),
+            Some((format, _)) => self.intern_num_fmt(format),
             None => 0,
         };
         self.intern_xf(xf, format.indent_pt, kind)
@@ -189,25 +194,34 @@ impl XfBuilder {
         })
     }
 
-    pub fn intern_num_fmt(&mut self, code: &str) -> u32 {
-        if code == "General" {
+    /// The number-format id of `format`: built-in ids for General and the
+    /// built-in short date / date-time, an interned custom code otherwise
+    /// (a General code that divides is a custom code: built-ins carry no
+    /// divisors).
+    pub fn intern_num_fmt(&mut self, format: &FormatCode) -> u32 {
+        if format.is_general() {
             return 0;
         }
-        if let Some(id) = code
-            .strip_prefix("#builtin:")
-            .and_then(|id| id.parse::<u32>().ok())
-        {
-            return id;
+        if format.divisors.is_empty() {
+            if let Some(id) = format
+                .code
+                .strip_prefix("#builtin:")
+                .and_then(|id| id.parse::<u32>().ok())
+            {
+                return id;
+            }
         }
-        if let Some(id) = self.num_fmts.get(code) {
+        let key = format!("{}\u{0}{:?}", format.code, format.divisors);
+        if let Some(id) = self.num_fmts.get(&key) {
             return *id;
         }
         let id = FIRST_CUSTOM_NUMFMT + self.styles.num_fmts.len() as u32;
         self.styles.num_fmts.push(NumFmt {
             num_fmt_id: id,
-            format_code: code.to_string(),
+            format_code: crate::ods_number::literal_code(&format.code),
+            section_divisors: format.divisors.clone(),
         });
-        self.num_fmts.insert(code.to_string(), id);
+        self.num_fmts.insert(key, id);
         id
     }
 
@@ -259,9 +273,10 @@ impl XfBuilder {
                 .any(|s| s.data_style.is_some())
                 .then_some(format.num_fmt.as_ref())
                 .flatten()
-                .map(|(code, _)| NumFmt {
-                    num_fmt_id: self.intern_num_fmt(code),
-                    format_code: crate::ods_number::literal_code(code),
+                .map(|(format, _)| NumFmt {
+                    num_fmt_id: self.intern_num_fmt(format),
+                    format_code: crate::ods_number::literal_code(&format.code),
+                    section_divisors: format.divisors.clone(),
                 }),
             font_toggles: font_set.then(|| xlsx_model::DxfFontToggles {
                 bold: has("text:fo:font-weight").then_some(format.font.bold),
@@ -376,7 +391,7 @@ pub fn resolve(
                 data.code(name)
             }
         })
-        .filter(|(code, _)| code != "General");
+        .filter(|(format, _)| !format.is_general());
     // §20.250 style:text-align-source: `value-type` aligns by the value's
     // type (SpreadsheetML General); `fix` uses fo:text-align.
     let fixed = get(chain, "cell:style:text-align-source") != Some("value-type");

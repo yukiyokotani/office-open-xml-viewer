@@ -42,10 +42,138 @@ pub fn literal_code(code: &str) -> String {
 }
 
 /// Implementation bound on one generated format code (SpreadsheetML limits
-/// a code to 255 characters; LibreOffice codes are far shorter).
+/// a code to 255 characters; LibreOffice codes are far shorter). A longer
+/// code rejects the document.
 const MAX_CODE_CHARS: usize = 1024;
-/// Implementation bound on `style:map` sections composed into one code.
-const MAX_MAP_SECTIONS: usize = 3;
+/// The numeric sections a SpreadsheetML code holds before its text section
+/// (§18.8.30: at most four sections, the fourth formats text). A data style
+/// whose `style:map` conditions need more rejects the document.
+const MAX_NUMERIC_SECTIONS: usize = 3;
+
+/// A format code with the §19.346 `number:display-factor` of each numeric
+/// section: the displayed number is the value divided by the factor. Empty
+/// `divisors` means no section scales.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FormatCode {
+    pub code: String,
+    /// Per numeric section, in code order (the text section excluded).
+    pub divisors: Vec<f64>,
+}
+
+impl FormatCode {
+    pub fn plain(code: impl Into<String>) -> Self {
+        Self {
+            code: code.into(),
+            divisors: Vec::new(),
+        }
+    }
+
+    /// Whether this is the plain standard (General) format.
+    pub fn is_general(&self) -> bool {
+        self.code == "General" && self.divisors.is_empty()
+    }
+
+    /// The code for consumers without per-section divisors (chart axes and
+    /// labels): a factor that is a power of 1000 is the code's exact
+    /// trailing-comma scaling (§18.8.30 "thousands separator"); any other
+    /// factor has no code spelling and leaves the section unscaled.
+    pub fn chart_code(&self) -> String {
+        let code = literal_code(&self.code);
+        if self.divisors.is_empty() {
+            return code;
+        }
+        let sections = split_sections(&code);
+        let mut numeric = 0usize;
+        let text_index = (sections.len() >= 4).then_some(3);
+        sections
+            .iter()
+            .enumerate()
+            .map(|(index, section)| {
+                if Some(index) == text_index {
+                    return section.to_string();
+                }
+                let divisor = self.divisors.get(numeric).copied().unwrap_or(1.0);
+                numeric += 1;
+                match thousands_power(divisor) {
+                    Some(commas) if commas > 0 => with_scaling_commas(section, commas),
+                    _ => section.to_string(),
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(";")
+    }
+}
+
+/// `k` when `factor` is exactly 1000^k.
+fn thousands_power(factor: f64) -> Option<usize> {
+    let mut value = factor;
+    let mut k = 0usize;
+    while value >= 1000.0 && k < 8 {
+        value /= 1000.0;
+        k += 1;
+    }
+    (value == 1.0).then_some(k)
+}
+
+/// Split a code at its top-level `;` (outside quotes, escapes, brackets).
+fn split_sections(code: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut start = 0usize;
+    let mut quoted = false;
+    let mut bracket = false;
+    let mut escaped = false;
+    for (index, c) in code.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match c {
+            '\\' if !quoted => escaped = true,
+            '"' => quoted = !quoted,
+            '[' if !quoted => bracket = true,
+            ']' if !quoted => bracket = false,
+            ';' if !quoted && !bracket => {
+                out.push(&code[start..index]);
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    out.push(&code[start..]);
+    out
+}
+
+/// Insert `commas` scaling commas right after the last digit placeholder of
+/// a numeric section (before any literal suffix).
+fn with_scaling_commas(section: &str, commas: usize) -> String {
+    let mut last_digit = None;
+    let mut quoted = false;
+    let mut bracket = false;
+    let mut escaped = false;
+    for (index, c) in section.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match c {
+            '\\' if !quoted => escaped = true,
+            '"' => quoted = !quoted,
+            '[' if !quoted => bracket = true,
+            ']' if !quoted => bracket = false,
+            '0' | '#' | '?' if !quoted && !bracket => last_digit = Some(index),
+            _ => {}
+        }
+    }
+    match last_digit {
+        Some(index) => {
+            let mut out = section[..=index].to_string();
+            out.push_str(&",".repeat(commas));
+            out.push_str(&section[index + 1..]);
+            out
+        }
+        None => section.to_string(),
+    }
+}
 
 /// What a data style formats, which decides how `office:value-type` cells
 /// are shown when the style does not match (§19.389).
@@ -64,6 +192,8 @@ pub enum DataKind {
 struct Section {
     kind: DataKind,
     code: String,
+    /// §19.346 `number:display-factor` of the style's number (1: none).
+    divisor: f64,
     /// `style:map` children: (condition, applied style name).
     maps: Vec<(String, String)>,
     /// `number:volatile` and other attributes are irrelevant here.
@@ -74,7 +204,7 @@ struct Section {
 #[derive(Default)]
 pub struct DataStyles {
     sections: HashMap<String, Section>,
-    resolved: HashMap<String, (String, DataKind)>,
+    resolved: HashMap<String, (FormatCode, DataKind)>,
 }
 
 impl DataStyles {
@@ -97,7 +227,7 @@ impl DataStyles {
             let Some(name) = node.attribute((NS_STYLE, "name")) else {
                 continue;
             };
-            let (code, general) = section_code(node, kind);
+            let (code, general, divisor) = section_code(node, kind);
             let maps = node
                 .children()
                 .filter(|n| xml::is(*n, NS_STYLE, "map"))
@@ -113,6 +243,7 @@ impl DataStyles {
                 Section {
                     kind,
                     code,
+                    divisor,
                     maps,
                     general,
                 },
@@ -120,45 +251,78 @@ impl DataStyles {
         }
     }
 
+    /// Resolve every data style once, rejecting the document when one needs
+    /// more than a SpreadsheetML code holds (more numeric sections than
+    /// [`MAX_NUMERIC_SECTIONS`], or a code over [`MAX_CODE_CHARS`]). Readers
+    /// call it after the last [`add`](Self::add), so [`code`](Self::code)
+    /// never meets an over-limit style.
+    pub fn check(&mut self) -> Result<(), String> {
+        let mut names: Vec<String> = self.sections.keys().cloned().collect();
+        names.sort_unstable();
+        for name in names {
+            self.resolve(&name)?;
+        }
+        Ok(())
+    }
+
     /// The format code (and kind) of the data style `name`; `None` when the
     /// document does not define it.
-    pub fn code(&mut self, name: &str) -> Option<(String, DataKind)> {
+    pub fn code(&mut self, name: &str) -> Option<(FormatCode, DataKind)> {
+        self.resolve(name).ok().flatten()
+    }
+
+    fn resolve(&mut self, name: &str) -> Result<Option<(FormatCode, DataKind)>, String> {
         if let Some(found) = self.resolved.get(name) {
-            return Some(found.clone());
+            return Ok(Some(found.clone()));
         }
-        let section = self.sections.get(name)?.clone();
-        let code = if section.maps.is_empty() {
-            section.code.clone()
-        } else {
-            self.compose(&section)
+        let Some(section) = self.sections.get(name).cloned() else {
+            return Ok(None);
         };
-        let mut code: String = code.chars().take(MAX_CODE_CHARS).collect();
-        if code.is_empty() {
+        let mut format = if section.maps.is_empty() {
+            FormatCode {
+                code: section.code.clone(),
+                divisors: if section.kind != DataKind::Text && section.divisor != 1.0 {
+                    vec![section.divisor]
+                } else {
+                    Vec::new()
+                },
+            }
+        } else {
+            self.compose(&section)?
+        };
+        if format.code.chars().count() > MAX_CODE_CHARS {
+            return Err(crate::error::resource("number format code"));
+        }
+        if format.code.is_empty() {
             // Nothing is shown for the values the style formats: empty
             // numeric sections, or an empty text section (§18.8.30).
-            code = if section.kind == DataKind::Text {
-                "General;General;General;".into()
+            format = FormatCode::plain(if section.kind == DataKind::Text {
+                "General;General;General;"
             } else {
-                ";;".into()
-            };
+                ";;"
+            });
+        }
+        if format.divisors.iter().all(|d| *d == 1.0) {
+            format.divisors.clear();
         }
         self.resolved
-            .insert(name.to_string(), (code.clone(), section.kind));
-        Some((code, section.kind))
+            .insert(name.to_string(), (format.clone(), section.kind));
+        Ok(Some((format, section.kind)))
     }
 
     /// Whether `name` is the plain "General" number style.
     pub fn is_general(&self, name: &str) -> bool {
         self.sections
             .get(name)
-            .is_some_and(|s| s.general && s.maps.is_empty())
+            .is_some_and(|s| s.general && s.maps.is_empty() && s.divisor == 1.0)
     }
 
-    fn compose(&self, base: &Section) -> String {
+    fn compose(&self, base: &Section) -> Result<FormatCode, String> {
         let mapped = |name: &str| -> Option<&Section> { self.sections.get(name) };
-        let mut numeric: Vec<(Option<String>, String)> = Vec::new();
+        // (condition, code, divisor) of each numeric map target.
+        let mut numeric: Vec<(String, String, f64)> = Vec::new();
         let mut text: Option<String> = None;
-        for (condition, target) in base.maps.iter().take(MAX_MAP_SECTIONS) {
+        for (condition, target) in &base.maps {
             let Some(section) = mapped(target) else {
                 continue;
             };
@@ -166,55 +330,74 @@ impl DataStyles {
                 text = Some(section.code.clone());
                 continue;
             }
-            numeric.push((Some(condition_code(condition)), section.code.clone()));
+            if numeric.len() >= MAX_NUMERIC_SECTIONS {
+                return Err(crate::error::resource("number format section"));
+            }
+            numeric.push((
+                condition_code(condition),
+                section.code.clone(),
+                section.divisor,
+            ));
         }
         let base_code = if base.kind == DataKind::Text {
             text.get_or_insert_with(|| base.code.clone());
             // Numbers no map matches show in the standard format.
-            Some("General".to_string())
+            ("General".to_string(), 1.0)
         } else {
-            Some(base.code.clone())
+            (base.code.clone(), base.divisor)
         };
-        let conditions: Vec<&str> = numeric.iter().filter_map(|(c, _)| c.as_deref()).collect();
-        let mut sections: Vec<String> = Vec::new();
-        match (conditions.as_slice(), &base_code) {
+        let conditions: Vec<&str> = numeric.iter().map(|(c, _, _)| c.as_str()).collect();
+        let mut sections: Vec<(String, f64)> = Vec::new();
+        match conditions.as_slice() {
             // §16.3 conditions LibreOffice writes for sign-dependent formats.
-            (["[>0]", "[<0]", "[=0]"], _) => {
-                for (_, code) in &numeric {
-                    sections.push(code.clone());
+            ["[>0]", "[<0]", "[=0]"] => {
+                for (_, code, divisor) in &numeric {
+                    sections.push((code.clone(), *divisor));
                 }
             }
-            (["[>=0]"], Some(base)) => {
-                sections.push(numeric[0].1.clone());
-                sections.push(base.clone());
+            ["[>=0]"] => {
+                sections.push((numeric[0].1.clone(), numeric[0].2));
+                sections.push(base_code);
             }
-            (["[>0]", "[<0]"], Some(base)) => {
-                sections.push(numeric[0].1.clone());
-                sections.push(numeric[1].1.clone());
-                sections.push(base.clone());
+            ["[>0]", "[<0]"] => {
+                sections.push((numeric[0].1.clone(), numeric[0].2));
+                sections.push((numeric[1].1.clone(), numeric[1].2));
+                sections.push(base_code);
             }
             _ => {
-                for (condition, code) in &numeric {
-                    sections.push(format!("{}{}", condition.as_deref().unwrap_or(""), code));
+                for (condition, code, divisor) in &numeric {
+                    sections.push((format!("{condition}{code}"), *divisor));
                 }
-                if let Some(base) = &base_code {
-                    sections.push(base.clone());
-                }
+                sections.push(base_code);
             }
+        }
+        if sections.len() > MAX_NUMERIC_SECTIONS {
+            return Err(crate::error::resource("number format section"));
         }
         if let Some(text) = text {
-            while sections.len() < 3 {
-                sections.push(
-                    sections
-                        .first()
-                        .cloned()
-                        .unwrap_or_else(|| "General".into()),
-                );
+            while sections.len() < MAX_NUMERIC_SECTIONS {
+                let first = sections
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| ("General".into(), 1.0));
+                sections.push(first);
             }
-            sections.truncate(3);
-            sections.push(text);
+            let divisors = sections.iter().map(|(_, d)| *d).collect();
+            let mut codes: Vec<String> = sections.into_iter().map(|(c, _)| c).collect();
+            codes.push(text);
+            return Ok(FormatCode {
+                code: codes.join(";"),
+                divisors,
+            });
         }
-        sections.join(";")
+        Ok(FormatCode {
+            code: sections
+                .iter()
+                .map(|(c, _)| c.as_str())
+                .collect::<Vec<_>>()
+                .join(";"),
+            divisors: sections.iter().map(|(_, d)| *d).collect(),
+        })
     }
 }
 
@@ -370,10 +553,11 @@ fn decimals(node: roxmltree::Node<'_, '_>) -> String {
     out
 }
 
-/// The code of one data-style element's children, and whether it is the
-/// plain "General" number.
-fn section_code(style: roxmltree::Node<'_, '_>, kind: DataKind) -> (String, bool) {
+/// The code of one data-style element's children, whether it is the plain
+/// "General" number, and its `number:display-factor` (1: none).
+fn section_code(style: roxmltree::Node<'_, '_>, kind: DataKind) -> (String, bool, f64) {
     let mut code = String::new();
+    let mut divisor = 1.0f64;
     if let Some(token) = color_token(style) {
         code.push_str(token);
     }
@@ -410,11 +594,11 @@ fn section_code(style: roxmltree::Node<'_, '_>, kind: DataKind) -> (String, bool
         let mut sorted = fields.clone();
         sorted.sort_unstable();
         if numeric && sorted == ["day", "month", "year"] {
-            return (BUILTIN_SHORT_DATE.into(), false);
+            return (BUILTIN_SHORT_DATE.into(), false, 1.0);
         }
         // With hours and minutes it is the short date-time, built-in 22.
         if numeric && sorted == ["day", "hours", "minutes", "month", "year"] {
-            return (BUILTIN_SHORT_DATE_TIME.into(), false);
+            return (BUILTIN_SHORT_DATE_TIME.into(), false, 1.0);
         }
     }
     let mut general = false;
@@ -438,14 +622,14 @@ fn section_code(style: roxmltree::Node<'_, '_>, kind: DataKind) -> (String, bool
                     code.push_str(&integer_digits(child, min_int, grouping));
                     code.push_str(&decimals(child));
                 }
-                if let Some(factor) =
-                    attr(child, "display-factor").and_then(|v| v.parse::<f64>().ok())
+                // §19.346: the displayed number is the value divided by the
+                // factor. Only a finite positive factor scales; any other
+                // value (`0`, negative, `INF`, `NaN`) is not a scale factor.
+                if let Some(factor) = attr(child, "display-factor")
+                    .and_then(|v| v.trim().parse::<f64>().ok())
+                    .filter(|f| f.is_finite() && *f > 0.0)
                 {
-                    let mut f = factor;
-                    while f >= 999.5 {
-                        code.push(',');
-                        f /= 1000.0;
-                    }
+                    divisor = factor;
                 }
             }
             "scientific-number" => {
@@ -618,9 +802,10 @@ fn section_code(style: roxmltree::Node<'_, '_>, kind: DataKind) -> (String, bool
                 _ => "General".into(),
             },
             true,
+            1.0,
         );
     }
-    (code, general)
+    (code, general, divisor)
 }
 
 #[cfg(test)]
@@ -649,17 +834,17 @@ mod tests {
             r##"<number:number-style style:name="F"><number:fraction number:min-integer-digits="0" number:min-numerator-digits="1" number:min-denominator-digits="2"/></number:number-style>"##,
             r##"<number:text-style style:name="T"><number:text-content/></number:text-style>"##,
         ));
-        assert_eq!(data.code("N0").unwrap().0, "General");
+        assert_eq!(data.code("N0").unwrap().0.code, "General");
         assert!(data.is_general("N0"));
-        assert_eq!(data.code("N1").unwrap().0, "#,##0.00");
-        assert_eq!(data.code("P").unwrap().0, "0.0%");
+        assert_eq!(data.code("N1").unwrap().0.code, "#,##0.00");
+        assert_eq!(data.code("P").unwrap().0.code, "0.0%");
         assert_eq!(
-            data.code("C0").unwrap().0,
+            data.code("C0").unwrap().0.code,
             "\"€\" #,##0.00;[Red]-\"€\" #,##0.00"
         );
-        assert_eq!(data.code("S").unwrap().0, "0.00E+00");
-        assert_eq!(data.code("F").unwrap().0, "# ?/??");
-        assert_eq!(data.code("T").unwrap().0, "@");
+        assert_eq!(data.code("S").unwrap().0.code, "0.00E+00");
+        assert_eq!(data.code("F").unwrap().0.code, "# ?/??");
+        assert_eq!(data.code("T").unwrap().0.code, "@");
     }
 
     #[test]
@@ -670,10 +855,10 @@ mod tests {
             r##"<number:time-style style:name="T" number:truncate-on-overflow="false"><number:hours/><number:text>:</number:text><number:minutes number:style="long"/><number:text>:</number:text><number:seconds number:style="long" number:decimal-places="2"/></number:time-style>"##,
             r##"<number:date-style style:name="J"><number:era number:style="long" number:calendar="gengou"/><number:year number:calendar="gengou"/><number:text>年</number:text></number:date-style>"##,
         ));
-        assert_eq!(data.code("D").unwrap().0, "yyyy-mm-dd");
-        assert_eq!(data.code("D2").unwrap().0, "d-mmm h:mm AM/PM");
-        assert_eq!(data.code("T").unwrap().0, "[h]:mm:ss.00");
-        assert_eq!(data.code("J").unwrap().0, "[$-411]ggge\"年\"");
+        assert_eq!(data.code("D").unwrap().0.code, "yyyy-mm-dd");
+        assert_eq!(data.code("D2").unwrap().0.code, "d-mmm h:mm AM/PM");
+        assert_eq!(data.code("T").unwrap().0.code, "[h]:mm:ss.00");
+        assert_eq!(data.code("J").unwrap().0.code, "[$-411]ggge\"年\"");
     }
 
     #[test]
@@ -685,8 +870,81 @@ mod tests {
             r##"<number:number-style style:name="Z"><number:text>-</number:text><style:map style:condition="value()&gt;0" style:apply-style-name="P"/><style:map style:condition="value()&lt;0" style:apply-style-name="N"/></number:number-style>"##,
             r##"<number:text-style style:name="ALL"><number:text-content/><style:map style:condition="value()&gt;0" style:apply-style-name="P"/><style:map style:condition="value()&lt;0" style:apply-style-name="N"/></number:text-style>"##,
         ));
-        assert_eq!(data.code("Z").unwrap().0, "0;(0);-");
-        assert_eq!(data.code("TX").unwrap().0, "\\\"@");
-        assert_eq!(data.code("ALL").unwrap().0, "0;(0);General;@");
+        assert_eq!(data.code("Z").unwrap().0.code, "0;(0);-");
+        assert_eq!(data.code("TX").unwrap().0.code, "\\\"@");
+        assert_eq!(data.code("ALL").unwrap().0.code, "0;(0);General;@");
+    }
+
+    #[test]
+    fn display_factors_divide_each_section() {
+        let mut data = codes(concat!(
+            r##"<number:number-style style:name="K"><number:number number:decimal-places="1" number:min-integer-digits="1" number:display-factor="1000"/></number:number-style>"##,
+            r##"<number:number-style style:name="TEN"><number:number number:decimal-places="0" number:min-integer-digits="1" number:display-factor="10"/></number:number-style>"##,
+            r##"<number:number-style style:name="G"><number:number number:display-factor="2000"/></number:number-style>"##,
+            r##"<number:number-style style:name="NEG"><number:text>(</number:text><number:number number:min-integer-digits="1" number:decimal-places="0"/><number:text>)</number:text></number:number-style>"##,
+            r##"<number:number-style style:name="MIX"><number:number number:min-integer-digits="1" number:decimal-places="0"/><style:map style:condition="value()&gt;=0" style:apply-style-name="TEN"/></number:number-style>"##,
+        ));
+        data.check().unwrap();
+        let (k, _) = data.code("K").unwrap();
+        assert_eq!(
+            (k.code.as_str(), k.divisors.as_slice()),
+            ("0.0", &[1000.0][..])
+        );
+        assert_eq!(k.chart_code(), "0.0,");
+        let (ten, _) = data.code("TEN").unwrap();
+        assert_eq!(
+            (ten.code.as_str(), ten.divisors.as_slice()),
+            ("0", &[10.0][..])
+        );
+        // No code spelling divides by 10: chart axes keep the plain code.
+        assert_eq!(ten.chart_code(), "0");
+        let (general, _) = data.code("G").unwrap();
+        assert_eq!(general.divisors, [2000.0]);
+        assert!(!data.is_general("G"));
+        let (mix, _) = data.code("MIX").unwrap();
+        assert_eq!(
+            (mix.code.as_str(), mix.divisors.as_slice()),
+            ("0;0", &[10.0, 1.0][..])
+        );
+    }
+
+    #[test]
+    fn non_finite_display_factors_terminate_and_do_not_scale() {
+        let mut data = codes(concat!(
+            r##"<number:number-style style:name="INF"><number:number number:decimal-places="0" number:min-integer-digits="1" number:display-factor="INF"/></number:number-style>"##,
+            r##"<number:number-style style:name="NAN"><number:number number:decimal-places="0" number:min-integer-digits="1" number:display-factor="NaN"/></number:number-style>"##,
+            r##"<number:number-style style:name="ZERO"><number:number number:decimal-places="0" number:min-integer-digits="1" number:display-factor="0"/></number:number-style>"##,
+        ));
+        data.check().unwrap();
+        for name in ["INF", "NAN", "ZERO"] {
+            let (format, _) = data.code(name).unwrap();
+            assert_eq!(format, FormatCode::plain("0"), "{name}");
+        }
+    }
+
+    #[test]
+    fn styles_beyond_a_spreadsheet_code_reject() {
+        let maps: String = (0..4)
+            .map(|i| {
+                format!(
+                    r#"<style:map style:condition="value()&gt;{i}" style:apply-style-name="P"/>"#
+                )
+            })
+            .collect();
+        let mut data = codes(&format!(
+            r##"<number:number-style style:name="P"><number:number number:min-integer-digits="1"/></number:number-style><number:number-style style:name="M"><number:number number:min-integer-digits="1"/>{maps}</number:number-style>"##
+        ));
+        assert_eq!(
+            data.check(),
+            Err(crate::error::resource("number format section"))
+        );
+        let long = "x".repeat(MAX_CODE_CHARS + 1);
+        let mut data = codes(&format!(
+            r##"<number:number-style style:name="L"><number:number number:min-integer-digits="1"/><number:text>{long}</number:text></number:number-style>"##
+        ));
+        assert_eq!(
+            data.check(),
+            Err(crate::error::resource("number format code"))
+        );
     }
 }

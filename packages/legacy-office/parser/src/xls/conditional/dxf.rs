@@ -108,10 +108,12 @@ fn dxfn(
                 .map(|id| xlsx_model::NumFmt {
                     num_fmt_id: id.into(),
                     format_code: code.clone(),
+                    section_divisors: Vec::new(),
                 })
                 .or(Some(xlsx_model::NumFmt {
                     num_fmt_id: 0,
                     format_code: code,
+                    section_divisors: Vec::new(),
                 }))
         } else {
             let id = byte(data, at + 1)?;
@@ -119,6 +121,7 @@ fn dxfn(
             Some(xlsx_model::NumFmt {
                 num_fmt_id: id.into(),
                 format_code: context.styles.format_code(id.into()).unwrap_or_default(),
+                section_divisors: Vec::new(),
             })
         };
         // ifmtNinch leaves the number format unchanged.

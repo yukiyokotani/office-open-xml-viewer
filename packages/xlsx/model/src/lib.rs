@@ -2081,6 +2081,14 @@ pub struct CellXf {
 pub struct NumFmt {
     pub num_fmt_id: u32,
     pub format_code: String,
+    /// Per numeric section of `format_code` (the text section excluded), the
+    /// divisor the selected section applies to the value before formatting:
+    /// an OpenDocument `number:display-factor` (ODF 1.3 Part 3 §19.346),
+    /// which SpreadsheetML codes cannot spell except for powers of 1000.
+    /// Sections are still selected on the undivided value. Empty (never
+    /// emitted by the SpreadsheetML parser) means no section divides.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub section_divisors: Vec<f64>,
 }
 
 #[derive(Debug, Serialize)]

@@ -269,7 +269,8 @@ retained_struct!(ImageAnchor {
 
 retained_struct!(NumFmt {
     num_fmt_id,
-    format_code
+    format_code,
+    section_divisors
 });
 
 impl RetainedBytes for PathCmd {

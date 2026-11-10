@@ -33,6 +33,9 @@ pub(crate) mod shape_path;
 pub(crate) mod table;
 #[path = "ods_wire.rs"]
 pub mod wire;
+#[cfg(test)]
+#[path = "ods_tests.rs"]
+mod workbook_tests;
 
 pub use crate::odf_text::*;
 pub use cells::XfBuilder;
@@ -131,6 +134,9 @@ pub struct OdsSheet {
     pub default_col_px: u32,
     /// Cells naming a content validation (§19.616), by validation name.
     pub validation_refs: Vec<(String, xlsx_model::CellRange)>,
+    /// Cell ranges whose cell style carries §16.3 `style:map` conditions,
+    /// by style name.
+    pub style_map_refs: Vec<(String, xlsx_model::CellRange)>,
 }
 
 pub struct OdsWorkbook {
@@ -146,13 +152,23 @@ pub struct OdsWorkbook {
 }
 
 pub fn read(package: &OdfPackage) -> Result<OdsWorkbook, String> {
-    let styles_text = package.read_text("styles.xml")?;
+    // ODF Part 3 §2.2.1: `styles.xml` is optional; a package may carry its
+    // spreadsheet and automatic styles in `content.xml` alone.
+    let styles_text = if package.contains("styles.xml") {
+        Some(package.read_text("styles.xml")?)
+    } else {
+        None
+    };
     let content_text = package.read_text("content.xml")?;
-    let styles_doc = xml::parse(&styles_text)?;
+    let styles_doc = match &styles_text {
+        Some(text) => Some(xml::parse(text)?),
+        None => None,
+    };
     let content_doc = xml::parse(&content_text)?;
-    let styles_root = styles_doc.root_element();
+    let styles_root = styles_doc.as_ref().map(|doc| doc.root_element());
     let content_root = content_doc.root_element();
-    if !xml::is(styles_root, NS_OFFICE, "document-styles")
+    crate::odf_text::check_space_runs(content_root)?;
+    if styles_root.is_some_and(|root| !xml::is(root, NS_OFFICE, "document-styles"))
         || !xml::is(content_root, NS_OFFICE, "document-content")
     {
         return Err(invalid("styles.xml or content.xml has an unexpected root"));
@@ -161,12 +177,18 @@ pub fn read(package: &OdfPackage) -> Result<OdsWorkbook, String> {
     let mut data = DataStyles::default();
     let mut faces = HashMap::new();
     let mut fills = crate::odf_fill::FillDefs::default();
-    odf_props::font_faces(styles_root, &mut faces);
+    if let Some(styles_root) = styles_root {
+        odf_props::font_faces(styles_root, &mut faces);
+    }
     odf_props::font_faces(content_root, &mut faces);
-    for child in styles_root.children().filter(|n| n.is_element()) {
+    for child in styles_root
+        .iter()
+        .flat_map(|root| root.children())
+        .filter(|n| n.is_element())
+    {
         if xml::is(child, NS_OFFICE, "styles") {
             store.add(child, false)?;
-            fills.add(child);
+            fills.add(child, "styles.xml")?;
             data.add(child);
         } else if xml::is(child, NS_OFFICE, "automatic-styles") {
             data.add(child);
@@ -178,6 +200,8 @@ pub fn read(package: &OdfPackage) -> Result<OdsWorkbook, String> {
             data.add(child);
         }
     }
+    store.check_chains()?;
+    data.check()?;
     let spreadsheet = content_root
         .children()
         .find(|n| xml::is(*n, NS_OFFICE, "body"))
@@ -187,7 +211,7 @@ pub fn read(package: &OdfPackage) -> Result<OdsWorkbook, String> {
         })
         .ok_or_else(|| invalid("content.xml has no office:spreadsheet body"))?;
     let (null_date_shift, date1904) = null_date(spreadsheet);
-    let xfs = XfBuilder::new(&store, &faces);
+    let xfs = XfBuilder::new(&store, &mut data, &faces);
     let default_font = xfs.default_font();
     let views = if package.contains("settings.xml") {
         let text = package.read_text("settings.xml")?;

@@ -13,6 +13,14 @@ use xlsx_model::{CellRange, CfRule, CfStop, CfValue, ConditionalFormat, DataVali
 /// text (`SUM(A1:B2,Sheet2!C3)`): references in brackets become A1 references
 /// with a `Sheet!` prefix, `;` parameter separators become `,`.
 pub fn convert_formula(formula: &str) -> String {
+    convert_formula_shifted(formula, (0, 0))
+}
+
+/// [`convert_formula`] with every relative row / column reference moved by
+/// `(rows, cols)`: a formula written relative to one base cell (§19.587
+/// `table:base-cell-address`) restated relative to another. A reference
+/// moved off the grid becomes `#REF!`.
+pub fn convert_formula_shifted(formula: &str, shift: (i64, i64)) -> String {
     let body = formula
         .split_once(':')
         .filter(|(ns, _)| !ns.contains(['(', '"', '[']) && ns.len() <= 8)
@@ -39,7 +47,7 @@ pub fn convert_formula(formula: &str) -> String {
                     }
                     reference.push(d);
                 }
-                out.push_str(&convert_reference(&reference));
+                out.push_str(&convert_reference(&reference, shift));
             }
             ';' => out.push(','),
             _ => out.push(c),
@@ -49,7 +57,7 @@ pub fn convert_formula(formula: &str) -> String {
 }
 
 /// One bracketed OpenFormula reference (`$Sheet1.A1:.B2`).
-fn convert_reference(reference: &str) -> String {
+fn convert_reference(reference: &str, shift: (i64, i64)) -> String {
     let mut parts = Vec::new();
     let mut sheet_seen: Option<String> = None;
     for (i, part) in split_colon(reference).into_iter().enumerate() {
@@ -62,9 +70,64 @@ fn convert_reference(reference: &str) -> String {
             (Some(name), _) if Some(name) != sheet_seen.as_ref() => sheet_prefix(name),
             _ => String::new(),
         };
+        let cell = if shift == (0, 0) {
+            cell.to_string()
+        } else {
+            match shift_cell(cell, shift) {
+                Some(cell) => cell,
+                None => return "#REF!".into(),
+            }
+        };
         parts.push(format!("{prefix}{cell}"));
     }
     parts.join(":")
+}
+
+/// `$A1` moved by (rows, cols) where not absolute; `None` off the grid.
+/// Anything that is not a cell reference is kept.
+fn shift_cell(cell: &str, (rows, cols): (i64, i64)) -> Option<String> {
+    let bytes = cell.as_bytes();
+    let mut at = 0usize;
+    let col_absolute = bytes.first() == Some(&b'$');
+    if col_absolute {
+        at += 1;
+    }
+    let letters_start = at;
+    while bytes.get(at).is_some_and(u8::is_ascii_alphabetic) {
+        at += 1;
+    }
+    let letters = &cell[letters_start..at];
+    let row_absolute = bytes.get(at) == Some(&b'$');
+    if row_absolute {
+        at += 1;
+    }
+    let digits = &cell[at..];
+    if letters.is_empty() || digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return Some(cell.to_string());
+    }
+    let (row, col) = super::parse_cell(&format!("{letters}{digits}"))?;
+    let col = if col_absolute {
+        i64::from(col)
+    } else {
+        i64::from(col) + cols
+    };
+    let row = if row_absolute {
+        i64::from(row)
+    } else {
+        i64::from(row) + rows
+    };
+    if !(1..=i64::from(super::MAX_COLS)).contains(&col)
+        || !(1..=i64::from(super::MAX_ROWS)).contains(&row)
+    {
+        return None;
+    }
+    Some(format!(
+        "{}{}{}{}",
+        if col_absolute { "$" } else { "" },
+        super::column_letters(col as u32),
+        if row_absolute { "$" } else { "" },
+        row
+    ))
 }
 
 fn split_colon(reference: &str) -> Vec<&str> {
@@ -243,7 +306,12 @@ pub fn content_validations(spreadsheet: roxmltree::Node<'_, '_>, sheets: &mut [O
                 error_message: None,
             };
             if let Some(condition) = node.attribute((NS_TABLE, "condition")) {
-                read_validation_condition(&convert_namespace(condition), &mut validation);
+                // §19.595: the condition's namespace prefix is resolved
+                // through the bindings in scope, not by its spelling.
+                read_validation_condition(
+                    crate::odf_text::without_bound_prefix(node, condition),
+                    &mut validation,
+                );
             }
             if let Some(help) = node
                 .children()
@@ -262,14 +330,6 @@ pub fn content_validations(spreadsheet: roxmltree::Node<'_, '_>, sheets: &mut [O
             sheet.worksheet.data_validations.push(validation);
         }
     }
-}
-
-fn convert_namespace(condition: &str) -> String {
-    condition
-        .strip_prefix("of:")
-        .or_else(|| condition.strip_prefix("ooo:"))
-        .unwrap_or(condition)
-        .to_string()
 }
 
 fn range_text(range: &CellRange) -> String {
@@ -383,13 +443,35 @@ fn read_validation_condition(condition: &str, validation: &mut DataValidation) {
     }
 }
 
-/// LibreOffice conditional formats (`calcext:conditional-format`) and
-/// sparkline groups (`calcext:sparkline-group`) of each table.
+/// The move from a base cell (§19.587 `base-cell-address`) to the anchor
+/// a SpreadsheetML conditional formula is relative to (the top-left cell
+/// of its first range).
+fn base_shift(base: Option<&str>, anchor: &CellRange) -> (i64, i64) {
+    match base.and_then(parse_range) {
+        Some((_, (row, col), _)) => (
+            i64::from(anchor.top) - i64::from(row),
+            i64::from(anchor.left) - i64::from(col),
+        ),
+        None => (0, 0),
+    }
+}
+
+/// Conditional formatting of each table: LibreOffice's conditional formats
+/// (`calcext:conditional-format`) or, in a document without them, the
+/// standard conditions of the cell styles (§16.3 `style:map`, as
+/// LibreOffice reads a document: its own conditional formats supersede the
+/// `style:map` copies it also writes), and sparkline groups
+/// (`calcext:sparkline-group`).
 pub(crate) fn conditional_formats(
     ctx: &mut Context,
     tables: &[roxmltree::Node<'_, '_>],
     sheets: &mut [OdsSheet],
 ) -> Result<(), String> {
+    let calcext = tables.iter().any(|table| {
+        table
+            .children()
+            .any(|n| xml::is(n, NS_CALCEXT, "conditional-formats"))
+    });
     for (index, table) in tables.iter().enumerate() {
         let mut formats = Vec::new();
         let mut priority = 1i32;
@@ -415,28 +497,116 @@ pub(crate) fn conditional_formats(
                 let anchor = format!("{}{}", super::column_letters(sqref[0].left), sqref[0].top);
                 let mut rules = Vec::new();
                 for rule in format.children().filter(|n| n.is_element()) {
-                    if let Some(rule) = cf_rule(ctx, rule, priority, &anchor) {
+                    let shift =
+                        base_shift(rule.attribute((NS_CALCEXT, "base-cell-address")), &sqref[0]);
+                    if let Some(rule) = cf_rule(ctx, rule, priority, &anchor, shift) {
                         rules.push(rule);
                         priority += 1;
                     }
                 }
                 if !rules.is_empty() {
+                    ctx.budget
+                        .bytes(256usize.saturating_mul(rules.len() + sqref.len()))?;
                     formats.push(ConditionalFormat { sqref, rules });
                 }
             }
         }
         if let Some(sheet) = sheets.get_mut(index) {
+            if !calcext {
+                let refs = std::mem::take(&mut sheet.style_map_refs);
+                style_map_formats(ctx, refs, &mut priority, &mut formats)?;
+            }
             sheet.worksheet.conditional_formats = formats;
         }
     }
     // Sparklines read cell values from every table.
     for (index, table) in tables.iter().enumerate() {
-        let groups = sparkline_groups(*table, sheets as &[OdsSheet]);
+        let groups = sparkline_groups(*table, sheets as &[OdsSheet], &mut ctx.budget)?;
         if let Some(sheet) = sheets.get_mut(index) {
             sheet.worksheet.sparkline_groups = groups;
         }
     }
     Ok(())
+}
+
+/// The §16.3 `style:map` conditions of the cell styles used on one sheet,
+/// over the ranges whose cells use each style, in style order. The applied
+/// style is the differential format; formulas are restated from the map's
+/// base cell to the first range.
+fn style_map_formats(
+    ctx: &mut Context,
+    refs: Vec<(String, CellRange)>,
+    priority: &mut i32,
+    formats: &mut Vec<ConditionalFormat>,
+) -> Result<(), String> {
+    let mut by_style: Vec<(String, Vec<CellRange>)> = Vec::new();
+    for (style, range) in refs {
+        match by_style.iter_mut().find(|(name, _)| *name == style) {
+            Some((_, ranges)) => ranges.push(range),
+            None => by_style.push((style, vec![range])),
+        }
+    }
+    for (style, sqref) in by_style {
+        let Some(maps) = ctx.store.find("table-cell", &style).map(|s| s.maps.clone()) else {
+            continue;
+        };
+        let anchor = format!("{}{}", super::column_letters(sqref[0].left), sqref[0].top);
+        let mut rules = Vec::new();
+        for map in maps {
+            let shift = base_shift(map.base_cell_address.as_deref(), &sqref[0]);
+            let dxf = ctx
+                .xfs
+                .dxf_for(&ctx.store, &mut ctx.data, &ctx.faces, &map.apply_style_name);
+            if let Some(rule) = style_map_rule(&map.condition, Some(dxf), *priority, &anchor, shift)
+            {
+                rules.push(rule);
+                *priority += 1;
+            }
+        }
+        if !rules.is_empty() {
+            ctx.budget
+                .bytes(256usize.saturating_mul(rules.len() + sqref.len()))?;
+            formats.push(ConditionalFormat { sqref, rules });
+        }
+    }
+    Ok(())
+}
+
+/// One §16.3 table-cell condition: `cell-content() op value`,
+/// `cell-content-is-between(a, b)`, `cell-content-is-not-between(a, b)` or
+/// `is-true-formula(formula)`. Other conditions do not apply to cells.
+fn style_map_rule(
+    condition: &str,
+    dxf_id: Option<u32>,
+    priority: i32,
+    anchor: &str,
+    shift: (i64, i64),
+) -> Option<CfRule> {
+    let condition = condition.trim();
+    if let Some(rest) = condition.strip_prefix("cell-content()") {
+        let rest = rest.trim();
+        if !rest.starts_with(['<', '>', '=', '!']) {
+            return None;
+        }
+        return condition_rule(rest, dxf_id, priority, anchor, shift);
+    }
+    for (name, calcext) in [
+        ("cell-content-is-not-between", "not-between"),
+        ("cell-content-is-between", "between"),
+        ("is-true-formula", "formula-is"),
+    ] {
+        if condition.starts_with(&format!("{name}(")) {
+            let args = call_args(condition, name)?;
+            return condition_rule(
+                &format!("{calcext}({})", args.join(";")),
+                dxf_id,
+                priority,
+                anchor,
+                shift,
+            );
+        }
+    }
+    None
 }
 
 fn cf_value(node: roxmltree::Node<'_, '_>) -> CfValue {
@@ -470,6 +640,7 @@ fn cf_rule(
     node: roxmltree::Node<'_, '_>,
     priority: i32,
     anchor: &str,
+    shift: (i64, i64),
 ) -> Option<CfRule> {
     match node.tag_name().name() {
         "color-scale" => {
@@ -542,7 +713,7 @@ fn cf_rule(
                     .dxf_for(&ctx.store, &mut ctx.data, &ctx.faces, style),
             );
             let value = node.attribute((NS_CALCEXT, "value"))?.trim();
-            condition_rule(value, dxf, priority, anchor)
+            condition_rule(value, dxf, priority, anchor, shift)
         }
         "date-is" => {
             let style = node.attribute((NS_CALCEXT, "style"))?;
@@ -562,7 +733,14 @@ fn cf_rule(
 
 /// One `calcext:condition` value (LibreOffice's condition grammar, which
 /// follows ODF 1.2 `style:map` conditions).
-fn condition_rule(value: &str, dxf_id: Option<u32>, priority: i32, anchor: &str) -> Option<CfRule> {
+fn condition_rule(
+    value: &str,
+    dxf_id: Option<u32>,
+    priority: i32,
+    anchor: &str,
+    shift: (i64, i64),
+) -> Option<CfRule> {
+    let convert_formula = |formula: &str| convert_formula_shifted(formula, shift);
     let cell_is = |operator: &str, formulas: Vec<String>| CfRule::CellIs {
         operator: operator.into(),
         formulas,
@@ -687,7 +865,8 @@ fn condition_rule(value: &str, dxf_id: Option<u32>, priority: i32, anchor: &str)
 fn sparkline_groups(
     table: roxmltree::Node<'_, '_>,
     sheets: &[OdsSheet],
-) -> Vec<xlsx_model::SparklineGroup> {
+    budget: &mut super::Budget,
+) -> Result<Vec<xlsx_model::SparklineGroup>, String> {
     let mut groups = Vec::new();
     for container in table
         .children()
@@ -711,10 +890,11 @@ fn sparkline_groups(
                 else {
                     continue;
                 };
-                let values = spark
-                    .attribute((NS_CALCEXT, "data-range"))
-                    .and_then(|r| range_values(sheets, r))
-                    .unwrap_or_default();
+                let values = match spark.attribute((NS_CALCEXT, "data-range")) {
+                    Some(range) => range_values(sheets, range, budget)?.unwrap_or_default(),
+                    None => Vec::new(),
+                };
+                budget.bytes(64)?;
                 sparklines.push(xlsx_model::Sparkline { row, col, values });
             }
             groups.push(xlsx_model::SparklineGroup {
@@ -755,18 +935,34 @@ fn sparkline_groups(
             });
         }
     }
-    groups
+    Ok(groups)
 }
 
-fn range_values(sheets: &[OdsSheet], address: &str) -> Option<Vec<Option<f64>>> {
-    let (sheet, (r1, c1), (r2, c2)) = parse_range(address)?;
-    let sheet = sheets
+/// Implementation bound on the cells of one sparkline's data range; a
+/// larger range rejects the document.
+const MAX_SPARKLINE_POINTS: u64 = 1_048_576;
+
+fn range_values(
+    sheets: &[OdsSheet],
+    address: &str,
+    budget: &mut super::Budget,
+) -> Result<Option<Vec<Option<f64>>>, String> {
+    let Some((sheet, (r1, c1), (r2, c2))) = parse_range(address) else {
+        return Ok(None);
+    };
+    let Some(sheet) = sheets
         .iter()
-        .find(|s| sheet.as_deref().is_none_or(|n| n == s.name))?;
-    if (u64::from(r2 - r1) + 1) * (u64::from(c2 - c1) + 1) > 1_048_576 {
-        return None;
+        .find(|s| sheet.as_deref().is_none_or(|n| n == s.name))
+    else {
+        return Ok(None);
+    };
+    let count = (u64::from(r2 - r1) + 1).saturating_mul(u64::from(c2 - c1) + 1);
+    if count > MAX_SPARKLINE_POINTS {
+        return Err(super::resource("sparkline range"));
     }
-    let mut out = Vec::new();
+    // Admitted before the values are collected.
+    budget.bytes((count as usize).saturating_mul(16))?;
+    let mut out = Vec::with_capacity(count as usize);
     for row in r1..=r2 {
         for col in c1..=c2 {
             out.push(
@@ -777,7 +973,7 @@ fn range_values(sheets: &[OdsSheet], address: &str) -> Option<Vec<Option<f64>>> 
             );
         }
     }
-    Some(out)
+    Ok(Some(out))
 }
 
 #[cfg(test)]
@@ -806,7 +1002,7 @@ mod tests {
 
     #[test]
     fn conditions_and_validations() {
-        match condition_rule("between(1;5)", Some(0), 1, "A1").unwrap() {
+        match condition_rule("between(1;5)", Some(0), 1, "A1", (0, 0)).unwrap() {
             CfRule::CellIs {
                 operator, formulas, ..
             } => {
@@ -815,7 +1011,7 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
-        match condition_rule("contains-text(\"x\")", Some(0), 1, "B2").unwrap() {
+        match condition_rule("contains-text(\"x\")", Some(0), 1, "B2", (0, 0)).unwrap() {
             CfRule::Expression { formula, .. } => {
                 assert_eq!(formula, "NOT(ISERROR(SEARCH(\"x\",B2)))")
             }

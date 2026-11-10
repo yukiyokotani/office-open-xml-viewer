@@ -44,10 +44,14 @@ export interface FormattedCell {
  * (find, validation-list, workbook.cellText) are unaffected — the renderer,
  * which needs the colour, calls {@link formatCellValueWithColor} instead.
  */
+/** A conditional-format number format: a dxf's id and code, with the
+ *  section divisors of an OpenDocument display factor. */
+type CfNumFmt = { numFmtId: number; formatCode: string | null; sectionDivisors?: number[] };
+
 export function formatCellValue(
   cell: Cell,
   styles: Styles,
-  cfNumFmt?: { numFmtId: number; formatCode: string | null } | null,
+  cfNumFmt?: CfNumFmt | null,
   date1904 = false,
 ): string {
   return formatCellValueWithColor(cell, styles, cfNumFmt, date1904).text;
@@ -56,7 +60,7 @@ export function formatCellValue(
 export function formatCellValueWithColor(
   cell: Cell,
   styles: Styles,
-  cfNumFmt?: { numFmtId: number; formatCode: string | null } | null,
+  cfNumFmt?: CfNumFmt | null,
   /** Workbook date system (`<workbookPr date1904>`, §18.2.28). `true` resolves
    *  serial dates against the 1904 epoch (§18.17.4.1). Defaults to false (1900
    *  date system) so callers that don't thread the flag are unaffected. */
@@ -66,11 +70,13 @@ export function formatCellValueWithColor(
   // honour the same precedence: CF dxf numFmt > style numFmt (§18.8.15).
   const xf = styles.cellXfs[cell.styleIndex ?? 0];
   const styleNumFmtId = xf?.numFmtId ?? 0;
-  const styleFmt = styles.numFmts?.find(f => f.numFmtId === styleNumFmtId)?.formatCode ?? null;
+  const styleNumFmt = styles.numFmts?.find(f => f.numFmtId === styleNumFmtId);
+  const styleFmt = styleNumFmt?.formatCode ?? null;
   const effectiveFmtId = cfNumFmt?.numFmtId ?? styleNumFmtId;
   // A matched differential format replaces the id/code pair. An absent CF
   // code implies its built-in format, rather than inheriting the base code.
   const effectiveFmt = cfNumFmt ? cfNumFmt.formatCode : styleFmt;
+  const divisors = cfNumFmt ? cfNumFmt.sectionDivisors : styleNumFmt?.sectionDivisors;
 
   // Non-numeric cells still need to honour the 4th format section (text).
   // §18.8.30: format sections are positive;negative;zero;text. An empty text
@@ -90,7 +96,13 @@ export function formatCellValueWithColor(
   // cached values the producing application saved together are authoritative.
   // A formula cell without a cached value is rendered like any other empty
   // cell, regardless of which function it calls.
-  return applyFormat(cell.value.number, effectiveFmtId, effectiveFmt, date1904);
+  return applyFormat(cell.value.number, effectiveFmtId, effectiveFmt, date1904, divisors);
+}
+
+/** The divisor of numeric section `index`: a finite positive factor, else 1. */
+function sectionDivisor(divisors: readonly number[] | undefined, index: number): number {
+  const divisor = divisors?.[index];
+  return divisor !== undefined && Number.isFinite(divisor) && divisor > 0 ? divisor : 1;
 }
 
 /**
@@ -278,7 +290,13 @@ function formatGeneralNumber(num: number): string {
   return negative ? `-${body}` : body;
 }
 
-function applyFormat(num: number, numFmtId: number, formatCode: string | null, date1904 = false): FormattedCell {
+function applyFormat(
+  num: number,
+  numFmtId: number,
+  formatCode: string | null,
+  date1904 = false,
+  divisors?: readonly number[],
+): FormattedCell {
   // Built-in 14 is Excel's locale-sensitive short-date format rather than a
   // file-authored pattern. Use the host application's UI locale, while keeping
   // UTC fields so the Excel serial cannot cross a calendar-day boundary in a
@@ -290,11 +308,13 @@ function applyFormat(num: number, numFmtId: number, formatCode: string | null, d
   // of numFmtId. LibreOffice writes a custom numFmt (id ≥ 164) with
   // formatCode="General"; tokenizing it as a literal pattern would render the
   // word "General" instead of the value (issue #358).
-  if (formatCode && formatCode.trim().toLowerCase() === 'general') return { text: formatGeneralNumber(num) };
+  if (formatCode && formatCode.trim().toLowerCase() === 'general') {
+    return { text: formatGeneralNumber(num / sectionDivisor(divisors, 0)) };
+  }
   // §18.8.30 implies a built-in code when no numFmt is authored. An explicit
   // code (including a differential format layered by §18.8.15) takes precedence
   // over that fallback, even when its numFmtId also names a built-in format.
-  if (formatCode) return applyFormatCode(num, formatCode, date1904);
+  if (formatCode) return applyFormatCode(num, formatCode, date1904, divisors);
   const builtinFmt = BUILTIN_DATE_FMT[numFmtId];
   if (builtinFmt) return dateFormattedCell(formatExcelDateTime(num, builtinFmt, date1904), num, date1904);
   // Built-in numeric numFmtIds without an explicit formatCode. Route the ones
@@ -917,7 +937,13 @@ function assembleFixed(lex: LexedSection, intText: string, fracText: string, exp
  * per-section colour, and the numeric grammar. Returns the display string and
  * any section colour.
  */
-function applyFormatCode(num: number, formatCode: string, date1904 = false): FormattedCell {
+function applyFormatCode(
+  value: number,
+  formatCode: string,
+  date1904 = false,
+  divisors?: readonly number[],
+): FormattedCell {
+  let num = value;
   const rawSections = splitFormatSections(formatCode);
   // The text section never formats a number (§18.8.30): leave it out of the
   // positional and conditional selection below.
@@ -971,6 +997,9 @@ function applyFormatCode(num: number, formatCode: string, date1904 = false): For
     }
   }
 
+  // An OpenDocument display factor (ODF 1.3 Part 3 §19.346) divides the
+  // value once its section is chosen on the undivided value.
+  num /= sectionDivisor(divisors, parsed.indexOf(chosen));
   // Date/time is a property of the selected section (§18.8.30): `0.00;h:mm`
   // formats a positive value as a number and only a negative one as a time.
   const serial = useMagnitude ? Math.abs(num) : num;

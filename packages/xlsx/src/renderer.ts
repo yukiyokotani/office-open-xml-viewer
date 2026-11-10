@@ -4759,6 +4759,9 @@ function drawShape(
       // xlsx shapes carry no drop shadow on the body, so there's nothing to
       // clear between the engine's fill and stroke passes.
       () => {},
+      shape.fill?.fillType === 'hatch'
+        ? { paintFill: target => fillShape(target, shape, sw, sh, cs, null) }
+        : undefined,
     );
     if (!drawn) {
       ctx.beginPath();
@@ -5394,7 +5397,8 @@ function resolveSpreadsheetShapeFill(
   cs: number,
   loadedImages?: Map<string, CanvasImageSource | null>,
 ): ReturnType<typeof resolveFill> {
-  if (shape.fill?.fillType === 'hatch') return resolveHatchFill(ctx, shape.fill, cs);
+  // A hatch has no fill style: `fillShape` strokes its lines in the path.
+  if (shape.fill?.fillType === 'hatch') return null;
   if (shape.fill?.fillType === 'image') {
     return resolveImageShapeFill(ctx, shape.fill, width, height, cs, loadedImages);
   }
@@ -5414,64 +5418,106 @@ function resolveSpreadsheetShapeFill(
   );
 }
 
-/** One hatch tile per colour/spacing/family set and context scale. */
-const hatchTileCache = new Map<string, HTMLCanvasElement | OffscreenCanvas>();
-const MAX_HATCH_TILES = 64;
+/** Hatch lines closer than this many device pixels merge into one tone. */
+const HATCH_MIN_DEVICE_SPACING = 2;
+/** Guard on the lines of one hatch family where the context cannot report
+ *  its transform (then the shape box, not the visible canvas, is covered). */
+const MAX_HATCH_LINES = 16_384;
+
+/** The part of the local box `[0, width] × [0, height]` on the canvas, in
+ *  local coordinates, and the context's device pixels per local unit. */
+function visibleLocalBox(
+  ctx: CanvasRenderingContext2D,
+  width: number,
+  height: number,
+): { box: [number, number, number, number]; unit: number } {
+  const box: [number, number, number, number] = [Math.min(0, width), Math.min(0, height), Math.max(0, width), Math.max(0, height)];
+  const transform = typeof ctx.getTransform === 'function' ? ctx.getTransform() : null;
+  const canvas = ctx.canvas as { width?: number; height?: number } | undefined;
+  if (!transform || !canvas?.width || !canvas.height) return { box, unit: 1 };
+  const { a, b, c, d, e, f } = transform;
+  const det = a * d - b * c;
+  const unit = Math.sqrt(Math.abs(det));
+  if (!Number.isFinite(unit) || unit === 0) return { box, unit: 1 };
+  // Device corners mapped back through the inverse 2D affine transform.
+  const corners = [[0, 0], [canvas.width, 0], [0, canvas.height], [canvas.width, canvas.height]]
+    .map(([x, y]) => ({
+      x: (d * (x - e) - c * (y - f)) / det,
+      y: (a * (y - f) - b * (x - e)) / det,
+    }));
+  const xs = corners.map(p => p.x);
+  const ys = corners.map(p => p.y);
+  return {
+    box: [
+      Math.max(box[0], Math.min(...xs)), Math.max(box[1], Math.min(...ys)),
+      Math.min(box[2], Math.max(...xs)), Math.min(box[3], Math.max(...ys)),
+    ],
+    unit,
+  };
+}
 
 /**
- * An OpenDocument hatch (ODF 1.3 Part 3 §16.42): line families
- * `distancePt` apart, rotated `angle` degrees counter-clockwise, over the
- * optional background. The tile holds one period of every family (the
- * diagonal of a triple hatch runs corner to corner of the square period).
+ * Paint an OpenDocument hatch (ODF 1.3 Part 3 §16.42 `draw:hatch`) into
+ * the current path: the optional background, then line families
+ * `distancePt` apart, the first rotated `angle` degrees counter-clockwise
+ * (§19.226 `draw:rotation`), a `double` hatch adding the perpendicular
+ * family and a `triple` hatch also the family 45° clockwise to the axis
+ * (§19.218.3). The lines are stroked directly inside the path's clip, over
+ * the visible part of the shape only, and never closer than
+ * {@link HATCH_MIN_DEVICE_SPACING} device pixels: the work and memory are
+ * bounded by the canvas size, whatever the authored spacing and zoom. The
+ * current path is left intact for the stroke that follows.
  */
-function resolveHatchFill(
+function paintHatchFill(
   ctx: CanvasRenderingContext2D,
   fill: ShapeHatchFill,
+  width: number,
+  height: number,
   cs: number,
-): CanvasPattern | string | null {
-  const period = Math.max(2, Math.round(fill.distancePt * PT_TO_PX * cs));
-  const key = `${fill.color}|${fill.background ?? ''}|${period}|${fill.lines}|${cs}`;
-  let tile = hatchTileCache.get(key);
-  if (!tile) {
-    const canvas = createAuxCanvas(period, period);
-    const tctx = canvas?.getContext('2d') as CanvasRenderingContext2D | null | undefined;
-    if (!canvas || !tctx) return fill.background ?? fill.color;
-    if (fill.background) {
-      tctx.fillStyle = fill.background;
-      tctx.fillRect(0, 0, period, period);
-    }
-    tctx.strokeStyle = fill.color;
-    tctx.lineWidth = Math.max(1, cs);
-    tctx.beginPath();
-    tctx.moveTo(0, 0.5);
-    tctx.lineTo(period, 0.5);
-    if (fill.lines >= 2) {
-      tctx.moveTo(0.5, 0);
-      tctx.lineTo(0.5, period);
-    }
-    if (fill.lines >= 3) {
-      tctx.moveTo(0, period);
-      tctx.lineTo(period, 0);
-    }
-    tctx.stroke();
-    if (hatchTileCache.size >= MAX_HATCH_TILES) {
-      const oldest = hatchTileCache.keys().next().value;
-      if (oldest !== undefined) hatchTileCache.delete(oldest);
-    }
-    hatchTileCache.set(key, canvas);
-    tile = canvas;
+): boolean {
+  if (fill.background) {
+    ctx.fillStyle = fill.background;
+    ctx.fill();
   }
-  const pattern = ctx.createPattern(tile as CanvasImageSource, 'repeat');
-  if (!pattern) return fill.background ?? fill.color;
-  if (typeof pattern.setTransform === 'function' && fill.angle % 360 !== 0) {
-    // Counter-clockwise on the page is a negative canvas rotation (y down).
-    const radians = (-fill.angle * Math.PI) / 180;
-    pattern.setTransform({
-      a: Math.cos(radians), b: Math.sin(radians),
-      c: -Math.sin(radians), d: Math.cos(radians), e: 0, f: 0,
-    });
+  const { box: [x0, y0, x1, y1], unit } = visibleLocalBox(ctx, width, height);
+  if (!(x1 > x0 && y1 > y0)) return true;
+  const authored = fill.distancePt * PT_TO_PX * cs;
+  const extent = Math.hypot(x1 - x0, y1 - y0);
+  const period = Math.max(
+    Number.isFinite(authored) && authored > 0 ? authored : 0,
+    HATCH_MIN_DEVICE_SPACING / unit,
+    extent / MAX_HATCH_LINES,
+  );
+  const axis = (-fill.angle * Math.PI) / 180;
+  const families = [axis];
+  if (fill.lines >= 2) families.push(axis + Math.PI / 2);
+  if (fill.lines >= 3) families.push(axis + Math.PI / 4);
+  const corners = [[x0, y0], [x1, y0], [x0, y1], [x1, y1]];
+  const lineWidth = Math.max(1, cs);
+  ctx.save();
+  ctx.clip();
+  ctx.fillStyle = fill.color;
+  for (const angle of families) {
+    const dx = Math.cos(angle);
+    const dy = Math.sin(angle);
+    // In the family's frame (x along the lines), line k lies at y = k ·
+    // period; x spans the visible box. Each line is a thin filled rect:
+    // `fillRect` leaves the current path intact for the stroke after.
+    const along = corners.map(([x, y]) => x * dx + y * dy);
+    const across = corners.map(([x, y]) => -x * dy + y * dx);
+    const tMin = Math.min(...along);
+    const tMax = Math.max(...along);
+    const first = Math.ceil(Math.min(...across) / period);
+    const last = Math.floor(Math.max(...across) / period);
+    ctx.save();
+    ctx.rotate(angle);
+    for (let k = first; k <= last; k++) {
+      ctx.fillRect(tMin, k * period - lineWidth / 2, tMax - tMin, lineWidth);
+    }
+    ctx.restore();
   }
-  return pattern;
+  ctx.restore();
+  return true;
 }
 
 /**
@@ -5514,6 +5560,7 @@ function fillShape(
   width: number, height: number, cs: number,
   paint = resolveSpreadsheetShapeFill(ctx, shape, width, height, cs),
 ): boolean {
+  if (shape.fill?.fillType === 'hatch') return paintHatchFill(ctx, shape.fill, width, height, cs);
   if (!paint) return false;
   ctx.fillStyle = paint;
   ctx.fill();

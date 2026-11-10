@@ -10,12 +10,14 @@
 //! (§20.1.8.41, degrees clockwise from left-to-right) or a path shade
 //! (§20.1.8.46) with its focus rectangle (§20.1.8.30 `a:fillToRect`).
 
+use crate::iri::Target;
 use crate::odf_props::{get, hex_color, length_pt, percent, Style};
-use crate::xml::{self, NS_DRAW, NS_XLINK};
+use crate::xml::{self, NS_DRAW, NS_LOEXT, NS_SVG, NS_XLINK};
 use ooxml_common::fill::{FillRect, GradStop};
 use std::collections::HashMap;
 
-/// Implementation bound on the stops of one gradient.
+/// Implementation bound on the stops of one gradient; more reject the
+/// document.
 const MAX_GRADIENT_STOPS: usize = 256;
 
 /// A gradient's geometry in DrawingML terms.
@@ -131,29 +133,37 @@ fn scaled(hex: &str, intensity: f64) -> String {
 }
 
 impl FillDefs {
-    /// Read the definitions below `office:styles`.
-    pub fn add(&mut self, styles: roxmltree::Node<'_, '_>) {
+    /// Read the definitions below `office:styles` of the package file
+    /// `file_entry` (`styles.xml`), against which picture references
+    /// resolve (ODF Part 2 §3.7).
+    pub fn add(&mut self, styles: roxmltree::Node<'_, '_>, file_entry: &str) -> Result<(), String> {
         for node in styles.children().filter(|n| n.is_element()) {
             let Some(name) = node.attribute((NS_DRAW, "name")) else {
                 continue;
             };
             let attr = |key: &str| node.attribute((NS_DRAW, key));
             if xml::is(node, NS_DRAW, "gradient") {
-                let stops = node
+                // LibreOffice 7.6 multi-colour stops: `loext:gradient-stop`
+                // with `svg:offset` and `loext:color-value`.
+                let stop_nodes: Vec<_> = node
                     .children()
-                    .filter(|n| n.is_element() && n.tag_name().name() == "gradient-stop")
-                    .take(MAX_GRADIENT_STOPS)
+                    .filter(|n| xml::is(*n, NS_LOEXT, "gradient-stop"))
+                    .collect();
+                if stop_nodes.len() > MAX_GRADIENT_STOPS {
+                    return Err(crate::error::resource("gradient stop"));
+                }
+                let stops = stop_nodes
+                    .into_iter()
                     .filter_map(|stop| {
                         let offset = stop
-                            .attributes()
-                            .find(|a| a.name() == "offset")?
-                            .value()
+                            .attribute((NS_SVG, "offset"))?
+                            .trim()
                             .parse::<f64>()
-                            .ok()?;
+                            .ok()
+                            .filter(|v| v.is_finite())?;
                         let color = stop
-                            .attributes()
-                            .find(|a| a.name() == "color-value")
-                            .and_then(|a| hex_color(a.value()))?;
+                            .attribute((NS_LOEXT, "color-value"))
+                            .and_then(hex_color)?;
                         Some((offset.clamp(0.0, 1.0), color))
                     })
                     .collect();
@@ -195,11 +205,19 @@ impl FillDefs {
                     },
                 );
             } else if xml::is(node, NS_DRAW, "fill-image") {
-                if let Some(href) = node.attribute((NS_XLINK, "href")) {
-                    self.images.insert(name.to_string(), href.to_string());
+                // §16.41: the image is a package file named by an IRI
+                // relative to the containing file (Part 2 §3.7).
+                if let Some(Target::Package { path, .. }) = node
+                    .attribute((NS_XLINK, "href"))
+                    .and_then(|href| crate::iri::resolve(file_entry, href))
+                {
+                    if !path.is_empty() {
+                        self.images.insert(name.to_string(), path);
+                    }
                 }
             }
         }
+        Ok(())
     }
 
     /// The fill of a graphic style chain (`graphic:` properties).
@@ -236,23 +254,20 @@ impl FillDefs {
                 ),
             Some("bitmap") => property("fill-image-name")
                 .and_then(|name| self.images.get(name))
-                .and_then(|href| {
-                    let path = href.trim_start_matches("./");
-                    (!path.contains("://") && !path.contains("..") && !path.is_empty()).then(|| {
-                        let repeat = get(chain, "graphic:style:repeat").unwrap_or("repeat");
-                        Fill::Picture(Picture {
-                            path: path.to_string(),
-                            tile: (repeat == "repeat").then(|| {
-                                (
-                                    property("fill-image-width")
-                                        .and_then(length_pt)
-                                        .filter(|v| *v > 0.0),
-                                    property("fill-image-height")
-                                        .and_then(length_pt)
-                                        .filter(|v| *v > 0.0),
-                                )
-                            }),
-                        })
+                .map(|path| {
+                    let repeat = get(chain, "graphic:style:repeat").unwrap_or("repeat");
+                    Fill::Picture(Picture {
+                        path: path.clone(),
+                        tile: (repeat == "repeat").then(|| {
+                            (
+                                property("fill-image-width")
+                                    .and_then(length_pt)
+                                    .filter(|v| *v > 0.0),
+                                property("fill-image-height")
+                                    .and_then(length_pt)
+                                    .filter(|v| *v > 0.0),
+                            )
+                        }),
                     })
                 })
                 .unwrap_or_else(|| solid().map_or(Fill::None, Fill::Solid)),
@@ -339,7 +354,10 @@ fn gradient(def: &GradientDef) -> Gradient {
             Gradient {
                 stops,
                 shape: GradientShape::Path {
-                    path: if matches!(style, "square" | "rectangular") {
+                    // §19.218.2 spells the rectangular blend `rectangle` in
+                    // its definitions and `rectangular` in its value list
+                    // and schema (which LibreOffice writes): both are read.
+                    path: if matches!(style, "square" | "rectangular" | "rectangle") {
                         "rect"
                     } else {
                         "circle"
@@ -368,7 +386,7 @@ mod tests {
         );
         let document = roxmltree::Document::parse(&xml).unwrap();
         let mut fills = FillDefs::default();
-        fills.add(document.root_element());
+        fills.add(document.root_element(), "styles.xml").unwrap();
         let mut store = StyleStore::default();
         store.add(document.root_element(), false).unwrap();
         fills.resolve(&store.chain("graphic", Some("g")))
@@ -471,5 +489,71 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn picture_references_resolve_as_package_iris() {
+        let encoded = resolve(
+            r#"<draw:fill-image draw:name="P" xlink:href="./Pictures/a%20b.png"/>"#,
+            r#"draw:fill="bitmap" draw:fill-image-name="P" style:repeat="stretch""#,
+        );
+        assert_eq!(
+            encoded,
+            Fill::Picture(Picture {
+                path: "Pictures/a b.png".into(),
+                tile: None
+            })
+        );
+        // Outside the package: no picture, the solid colour applies.
+        let external = resolve(
+            r#"<draw:fill-image draw:name="P" xlink:href="../p.png"/>"#,
+            r##"draw:fill="bitmap" draw:fill-image-name="P" draw:fill-color="#00ff00""##,
+        );
+        assert_eq!(external, Fill::Solid("00FF00".into()));
+    }
+
+    #[test]
+    fn rectangle_spellings_and_namespaced_stops() {
+        for style in ["rectangle", "rectangular"] {
+            let fill = resolve(
+                &format!(
+                    r##"<draw:gradient draw:name="R" draw:style="{style}" draw:start-color="#000000" draw:end-color="#ffffff"/>"##
+                ),
+                r#"draw:fill="gradient" draw:fill-gradient-name="R""#,
+            );
+            let Fill::Gradient(g) = fill else { panic!() };
+            assert!(
+                matches!(g.shape, GradientShape::Path { path: "rect", .. }),
+                "{style}"
+            );
+        }
+        // Stops count only in their own namespaces (`loext:gradient-stop`,
+        // `svg:offset`, `loext:color-value`).
+        let stops = resolve(
+            &format!(
+                r##"<draw:gradient draw:name="S" draw:style="linear" xmlns:loext="{NS_LOEXT}" xmlns:x="urn:x"><loext:gradient-stop svg:offset="0" loext:color-value="#ff0000"/><x:gradient-stop svg:offset="0.5" loext:color-value="#00ff00"/><loext:gradient-stop svg:offset="1" loext:color-value="#0000ff"/></draw:gradient>"##
+            ),
+            r#"draw:fill="gradient" draw:fill-gradient-name="S""#,
+        );
+        let Fill::Gradient(g) = stops else { panic!() };
+        assert_eq!(
+            g.stops.iter().map(|s| s.color.as_str()).collect::<Vec<_>>(),
+            ["FF0000", "0000FF"]
+        );
+    }
+
+    #[test]
+    fn too_many_gradient_stops_reject() {
+        let stops: String = (0..=MAX_GRADIENT_STOPS)
+            .map(|_| r##"<loext:gradient-stop svg:offset="0" loext:color-value="#ff0000"/>"##)
+            .collect();
+        let xml = format!(
+            r##"<office:styles xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:draw="{NS_DRAW}" xmlns:svg="{NS_SVG}" xmlns:loext="{NS_LOEXT}"><draw:gradient draw:name="G">{stops}</draw:gradient></office:styles>"##
+        );
+        let document = roxmltree::Document::parse(&xml).unwrap();
+        assert_eq!(
+            FillDefs::default().add(document.root_element(), "styles.xml"),
+            Err(crate::error::resource("gradient stop"))
+        );
     }
 }

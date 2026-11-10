@@ -11,7 +11,9 @@
 use crate::xml::{self, NS_STYLE};
 use std::collections::HashMap;
 
-/// Implementation bound on a parent chain; a cycle is a container error.
+/// Implementation bound on a parent chain (the style itself included): a
+/// longer chain rejects the document and a cycle is a structural error
+/// (`StyleStore::check_chains`).
 const MAX_PARENT_DEPTH: usize = 64;
 /// Implementation bound on stored style data (owned strings plus a fixed
 /// per-entry overhead), charged before a style is stored.
@@ -131,6 +133,50 @@ impl StyleStore {
             .checked_add(bytes)
             .filter(|total| *total <= MAX_STYLE_BYTES)
             .ok_or_else(|| "OpenDocument styles exceed the style storage limit".to_string())?;
+        Ok(())
+    }
+
+    /// Check every parent chain once all styles are read: a chain longer
+    /// than [`MAX_PARENT_DEPTH`] rejects the document (a resource limit), a
+    /// cycle is a structural error. [`chain`](Self::chain) then never stops
+    /// early on a valid document.
+    pub fn check_chains(&self) -> Result<(), String> {
+        let parent_of = |style: &Style| {
+            style
+                .parent
+                .as_deref()
+                .and_then(|parent| self.styles.get(&(style.family.clone(), parent.to_string())))
+        };
+        // Chain length (the style itself included) of each common ancestor.
+        let mut depth_of: HashMap<(&str, &str), usize> = HashMap::new();
+        for start in self.automatic.values().chain(self.styles.values()) {
+            let mut path: Vec<&Style> = Vec::new();
+            let mut base = 0usize;
+            let mut next = parent_of(start);
+            while let Some(parent) = next {
+                if let Some(depth) = depth_of.get(&(parent.family.as_str(), parent.name.as_str())) {
+                    base = *depth;
+                    break;
+                }
+                if path.iter().any(|s| std::ptr::eq(*s, parent)) {
+                    return Err(crate::error::invalid("a style inherits from itself"));
+                }
+                path.push(parent);
+                if path.len() + 1 > MAX_PARENT_DEPTH {
+                    return Err(crate::error::resource("style inheritance depth"));
+                }
+                next = parent_of(parent);
+            }
+            if base + path.len() + 1 > MAX_PARENT_DEPTH {
+                return Err(crate::error::resource("style inheritance depth"));
+            }
+            for (index, member) in path.iter().enumerate() {
+                depth_of.insert(
+                    (member.family.as_str(), member.name.as_str()),
+                    base + path.len() - index,
+                );
+            }
+        }
         Ok(())
     }
 
