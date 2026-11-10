@@ -266,8 +266,12 @@ describe('a symbol-encoded host Symbol face', () => {
         let font = '';
         return {
           get font() { return font; }, set font(v: string) { font = v; },
+          // A face that owns the codes gives each its own advance; otherwise
+          // every code draws the same missing-glyph box, whose width also
+          // depends on the primary face.
           measureText: (t: string) => ({
-            width: [...t].length * (ownsCodes && font.includes('"Symbol"') ? 55 : 60),
+            width: ownsCodes && font.includes('"Symbol"') ? 40 + t.charCodeAt(0) % 7
+              : font.includes('"Symbol"') ? 55 : 60,
           }),
         };
       }

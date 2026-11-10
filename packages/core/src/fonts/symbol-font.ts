@@ -147,17 +147,20 @@ const WINGDINGS_LOOKUP = withPua(WINGDINGS_MAP);
  * all; only there does the text need the Unicode conversion.
  * https://learn.microsoft.com/en-us/typography/opentype/spec/cmap
  *
- * Capability probe: Symbol codes are measured in the authored face (backed by
- * an absent family) and in the absent family alone. Without a face that owns
- * the codes both resolve to the same fallback, so equal widths; a
- * symbol-encoded Symbol gives its own advances. Without a Canvas (Node
- * without a DOM, unit tests) the probe reports false and the text is
- * converted. Checked once per realm: system faces do not change during a
- * session.
+ * Capability probe: each probe code is measured in the authored face (backed
+ * by an absent family) and in the absent family alone. Symbol's glyphs for
+ * these codes (α β γ π ∑ ∂) have different advances. A face that lacks them
+ * draws one missing-glyph box (or the same fallback) for every code, so its
+ * advances are all equal; and a fallback face that happens to own them gives
+ * the absent family the same advances. So the codes count as drawn natively
+ * only when their advances in the authored face both vary and differ from the
+ * absent family's. Without a Canvas (Node without a DOM, unit tests) the probe
+ * reports false and the text is converted. Checked once per realm: system
+ * faces do not change during a session.
  */
 type SymbolFaceProbe = () => boolean;
 
-const SYMBOL_PROBE_TEXT = '\uF061\uF062\uF067\uF070\uF0E5\uF0B6';
+const SYMBOL_PROBE_CODES = ['\uF061', '\uF062', '\uF067', '\uF070', '\uF0E5', '\uF0B6'];
 const ABSENT_PROBE_FAMILY = 'ooxml-symbol-probe-absent-face';
 
 function canvasSymbolFaceProbe(): boolean {
@@ -169,11 +172,16 @@ function canvasSymbolFaceProbe(): boolean {
     ctx = null;
   }
   if (!ctx || typeof ctx.measureText !== 'function') return false;
-  ctx.font = `100px "Symbol", "${ABSENT_PROBE_FAMILY}"`;
-  const authored = ctx.measureText(SYMBOL_PROBE_TEXT).width;
-  ctx.font = `100px "${ABSENT_PROBE_FAMILY}"`;
-  const absent = ctx.measureText(SYMBOL_PROBE_TEXT).width;
-  return Number.isFinite(authored) && Math.abs(authored - absent) > 0.5;
+  const advances = (font: string): number[] => {
+    ctx!.font = font;
+    return SYMBOL_PROBE_CODES.map((code) => ctx!.measureText(code).width);
+  };
+  const authored = advances(`100px "Symbol", "${ABSENT_PROBE_FAMILY}"`);
+  const absent = advances(`100px "${ABSENT_PROBE_FAMILY}"`);
+  if (!authored.every(Number.isFinite)) return false;
+  const varies = authored.some((width) => Math.abs(width - authored[0]) > 0.5);
+  const ownAdvances = authored.some((width, i) => Math.abs(width - absent[i]) > 0.5);
+  return varies && ownAdvances;
 }
 
 let symbolFaceProbe: SymbolFaceProbe = canvasSymbolFaceProbe;
