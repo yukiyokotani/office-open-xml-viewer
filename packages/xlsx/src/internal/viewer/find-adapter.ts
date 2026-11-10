@@ -66,11 +66,13 @@ export class FindAdapter {
     try {
       const ws = lease.worksheet;
       const cells: FindCell[] = [];
+      const displayTexts = wb[xlsxCellDisplayTexts](ws);
       for (const row of ws.rows) {
         for (const cell of row.cells) {
-          // The unconstrained display text, then each shorter General form
+          // The unconstrained display text under the effective number format
+          // (conditional formatting included), then each shorter General form
           // paint may show at the cell's width (issue #2179).
-          const [text = '', ...alternates] = wb[xlsxCellDisplayTexts](ws, cell);
+          const [text = '', ...alternates] = displayTexts(cell);
           if (text === '') continue;
           cells.push(alternates.length > 0
             ? { row: cell.row, col: cell.col, text, alternates }

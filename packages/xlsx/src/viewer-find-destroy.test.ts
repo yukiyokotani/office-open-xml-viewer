@@ -23,7 +23,7 @@ function makeFakeWorkbook(): XlsxWorkbook {
     getWorksheet: () => Promise.resolve(ws),
     acquireWorksheetLease: async () => ({ worksheet: ws, release: () => undefined }),
     cellText: () => 'hello world',
-    [xlsxCellDisplayTexts]: () => ['hello world'],
+    [xlsxCellDisplayTexts]: () => () => ['hello world'],
     destroy: vi.fn(),
     isHidden: () => false,
   } as unknown as XlsxWorkbook;

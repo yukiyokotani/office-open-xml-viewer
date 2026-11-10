@@ -1,23 +1,19 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { renderViewport } from './renderer.js';
 import type { Styles, Worksheet } from './types.js';
 
-type FaceStub = { family: string; weight: string; style: string; status: string };
-
-/** Paints one General number (123456789) in a merged A1:C1 whose width leaves
- *  room for two characters, so no General form fits (issue #2179). Returns the
- *  texts drawn. The anchor is on screen, or scrolled out of view with the
- *  merge still visible. */
-function paint(opts: { icon: boolean; anchorOffscreen: boolean; faces: FaceStub[]; uncovered?: boolean; wrap?: boolean }): string[] {
-  vi.stubGlobal('document', { fonts: opts.faces });
+/** Paints one number in a merged A1:C1 of `charWidth`-character columns and
+ *  returns the texts drawn. The anchor is on screen, or scrolled out of view
+ *  with the merge still visible (issue #2179). */
+function paint(opts: {
+  value: number; anchorOffscreen: boolean; charWidth: number;
+  icon?: boolean; wrap?: boolean; formatCode?: string;
+}): string[] {
   const texts: string[] = [];
   const noop = () => {};
   const ctx = new Proxy({
     canvas: { width: 600, height: 300 },
-    // `uncovered`: some glyph falls back, so the serif fallback measures wider.
-    measureText(this: { font?: string }, text: string) {
-      return { width: text.length * 7 + (opts.uncovered && /serif$/.test(this.font ?? '') ? 1 : 0) };
-    },
+    measureText: (text: string) => ({ width: text.length * 7 }),
     fillText: (text: string) => texts.push(text),
   } as Record<string | symbol, unknown>, {
     get: (target, key) => key in target ? target[key] : noop,
@@ -26,16 +22,19 @@ function paint(opts: { icon: boolean; anchorOffscreen: boolean; faces: FaceStub[
   const styles: Styles = {
     fonts: [{ name: 'Arial', size: 11, bold: false, italic: false, underline: false, strike: false, color: null }],
     fills: [], borders: [], dxfs: [],
-    cellXfs: [{ fontId: 0, fillId: 0, borderId: 0, numFmtId: 0, wrapText: opts.wrap === true }] as Styles['cellXfs'],
-    numFmts: [],
+    cellXfs: [{
+      fontId: 0, fillId: 0, borderId: 0, numFmtId: opts.formatCode ? 164 : 0, wrapText: opts.wrap === true,
+    }] as Styles['cellXfs'],
+    numFmts: opts.formatCode ? [{ numFmtId: 164, formatCode: opts.formatCode }] : [],
   };
+  const w = opts.charWidth;
   const ws = {
     name: 'General',
     rows: [{ index: 1, height: null, cells: [
-      { row: 1, col: 1, styleIndex: 0, value: { type: 'number', number: 123456789 } },
+      { row: 1, col: 1, styleIndex: 0, value: { type: 'number', number: opts.value } },
     ] }],
-    colWidths: { 1: 1, 2: 1, 3: 1 }, rowHeights: {},
-    defaultColWidth: 1, defaultRowHeight: 15,
+    colWidths: { 1: w, 2: w, 3: w }, rowHeights: {},
+    defaultColWidth: w, defaultRowHeight: 15,
     mergeCells: [{ top: 1, left: 1, bottom: 1, right: 3 }],
     freezeRows: 0, freezeCols: 0, images: [], charts: [],
     conditionalFormats: opts.icon ? [{
@@ -52,52 +51,45 @@ function paint(opts: { icon: boolean; anchorOffscreen: boolean; faces: FaceStub[
   return texts;
 }
 
-const LOADED_ARIAL: FaceStub = { family: 'Arial', weight: '400', style: 'normal', status: 'loaded' };
 const hashes = (texts: string[]) => texts.filter((text) => /^#+$/.test(text));
+const both = [false, true];
 
-afterEach(() => { vi.unstubAllGlobals(); });
-
-describe('General numbers too wide for a merged cell (issue #2179)', () => {
-  it.each([false, true])('fills "#" when the authored face is loaded (anchor offscreen: %s)', (anchorOffscreen) => {
-    const texts = paint({ icon: false, anchorOffscreen, faces: [LOADED_ARIAL] });
-    expect(hashes(texts)).toHaveLength(1);
-    expect(texts).not.toContain('1E+08');
+describe('General numbers in a merged cell (issue #2179)', () => {
+  it.each(both)('shortens to the merged width (anchor offscreen: %s)', (anchorOffscreen) => {
+    // Three 3-character columns leave room for nine 7 px characters.
+    const narrow = paint({ value: Math.PI, anchorOffscreen, charWidth: 3 });
+    expect(narrow).toContain('3.1415927');
+    expect(narrow).not.toContain('3.141592654');
   });
 
-  it.each([false, true])('keeps the shortest form beside an icon-set icon (anchor offscreen: %s)', (anchorOffscreen) => {
-    const texts = paint({ icon: true, anchorOffscreen, faces: [LOADED_ARIAL] });
+  it('shortens identically whether the anchor is on screen or not, icon included', () => {
+    for (const icon of [false, true]) {
+      const shown = (anchorOffscreen: boolean) =>
+        paint({ value: Math.PI, anchorOffscreen, charWidth: 3, icon }).filter((t) => t.startsWith('3'));
+      expect(shown(true)).toEqual(shown(false));
+    }
+    // The icon reserves width, so the icon cell shows a shorter form.
+    const plain = paint({ value: Math.PI, anchorOffscreen: true, charWidth: 3 }).find((t) => t.startsWith('3'));
+    const iconed = paint({ value: Math.PI, anchorOffscreen: true, charWidth: 3, icon: true }).find((t) => t.startsWith('3'));
+    expect((iconed ?? '').length).toBeLessThan((plain ?? '').length);
+  });
+
+  it.each(both)('keeps the shortest form instead of a "#" fill (anchor offscreen: %s)', (anchorOffscreen) => {
+    const texts = paint({ value: 123456789, anchorOffscreen, charWidth: 1 });
     expect(hashes(texts)).toHaveLength(0);
     expect(texts).toContain('1E+08');
   });
 
-  it('leaves a wrapped cell to the wrap painter, as its automatic row height was measured', () => {
-    for (const anchorOffscreen of [false, true]) {
-      const texts = paint({ icon: false, anchorOffscreen, faces: [LOADED_ARIAL], wrap: true });
-      expect(hashes(texts)).toHaveLength(0);
-      expect(texts).not.toContain('1E+08');
-      expect(texts.join('')).toContain('123456789');
-    }
+  it.each(both)('leaves an explicit format unchanged when too wide (anchor offscreen: %s)', (anchorOffscreen) => {
+    const texts = paint({ value: 123456.789, anchorOffscreen, charWidth: 1, formatCode: '0.000' });
+    expect(hashes(texts)).toHaveLength(0);
+    expect(texts).toContain('123456.789');
   });
 
-  it('keeps the shortest form when the loaded face does not cover the text', () => {
-    for (const anchorOffscreen of [false, true]) {
-      const texts = paint({ icon: false, anchorOffscreen, faces: [LOADED_ARIAL], uncovered: true });
-      expect(hashes(texts)).toHaveLength(0);
-      expect(texts).toContain('1E+08');
-    }
-  });
-
-  it.each([
-    ['unloaded', { ...LOADED_ARIAL, status: 'unloaded' }],
-    ['failed', { ...LOADED_ARIAL, status: 'error' }],
-    ['bold-only', { ...LOADED_ARIAL, weight: '700' }],
-    ['italic-only', { ...LOADED_ARIAL, style: 'italic' }],
-    ['another family', { ...LOADED_ARIAL, family: 'Calibri' }],
-  ] as const)('keeps the shortest form when the face is %s', (_, face) => {
-    for (const anchorOffscreen of [false, true]) {
-      const texts = paint({ icon: false, anchorOffscreen, faces: [face] });
-      expect(hashes(texts)).toHaveLength(0);
-      expect(texts).toContain('1E+08');
-    }
+  it.each(both)('leaves a wrapped cell to the wrap painter (anchor offscreen: %s)', (anchorOffscreen) => {
+    const texts = paint({ value: 123456789, anchorOffscreen, charWidth: 1, wrap: true });
+    expect(hashes(texts)).toHaveLength(0);
+    expect(texts).not.toContain('1E+08');
+    expect(texts.join('')).toContain('123456789');
   });
 });

@@ -35,7 +35,7 @@ export interface FormattedCell {
   /** Paint '#' across the available cell width, rather than a literal hash. */
   fill?: boolean;
   /** The text is a number in the General format, which shortens to the
-   *  available width (§18.8.30) instead of showing "#". */
+   *  available width (§18.8.30). */
   general?: boolean;
 }
 
@@ -315,7 +315,7 @@ function generalForBudget(value: DecimalDigits, budget: number): string | null {
  * Narrower budgets first drop rounded decimal places, then switch to
  * exponential form as the §18.8.30 conditions require. Without `fits`, only
  * the cap applies (the text of a wide enough column). Returns `null` when no
- * form fits, which the renderer paints as a `#` fill.
+ * form fits (§18.8.30 then shows "#"; {@link fitGeneralNumber} keeps the shortest form).
  */
 export function formatGeneralNumber(num: number, fits?: (text: string) => boolean): string | null {
   if (!Number.isFinite(num)) return String(num);
@@ -339,52 +339,45 @@ function formatGeneralText(num: number): string {
 }
 
 /**
- * Fits a formatted numeric cell to its available width:
- * - a General number shortens as {@link formatGeneralNumber} specifies
- *   (§18.8.30), or shows "#" across the cell when no form fits;
- * - any other number format keeps its text and shows "#" across the cell when
- *   that text is too wide (Excel never spills or clips a number).
- * Non-numeric cells and texts that fit are returned unchanged.
- *
- * `hashAllowed` is asked only when a "#" fill is due. It says whether `fits`
- * measures the way Excel decides (the authored face paints the text). When a
- * stand-in face paints, its glyph proportions differ from the authored face's,
- * so a "#" fill could hide a value Excel shows: the text is kept instead (an
- * explicit format unchanged, General at its shortest form).
+ * Shortens a General number to its available width, as
+ * {@link formatGeneralNumber} specifies (§18.8.30). When even the shortest
+ * form does not fit, that shortest form is kept (and clipped by paint) rather
+ * than replaced by Excel's "#" fill, so a value is never hidden. Every other
+ * number format, non-numeric cells and texts that fit are returned unchanged.
  */
-export function fitFormattedNumber(
+export function fitGeneralNumber(
   cell: Cell,
   formatted: FormattedCell,
   fits: (text: string) => boolean,
-  hashAllowed: () => boolean = () => true,
 ): FormattedCell {
-  if (cell.value.type !== 'number' || formatted.fill || fits(formatted.text)) return formatted;
-  const color = formatted.color === undefined ? {} : { color: formatted.color };
-  if (formatted.general) {
-    let shortest: string | null = null;
-    const text = formatGeneralNumber(cell.value.number, (candidate) => {
-      shortest = candidate;
-      return fits(candidate);
-    });
-    if (text !== null) return { text, ...color, general: true };
-    if (hashAllowed()) return { text: '#', ...color, fill: true };
-    return shortest === null ? formatted : { text: shortest, ...color, general: true };
-  }
-  return hashAllowed() ? { text: '#', ...color, fill: true } : formatted;
+  if (cell.value.type !== 'number' || !formatted.general || fits(formatted.text)) return formatted;
+  let shortest: string | null = null;
+  const text = formatGeneralNumber(cell.value.number, (candidate) => {
+    shortest = candidate;
+    return fits(candidate);
+  });
+  const shown = text ?? shortest;
+  if (shown === null) return formatted;
+  return formatted.color === undefined
+    ? { text: shown, general: true }
+    : { text: shown, color: formatted.color, general: true };
 }
 
 /**
- * Every text a cell can display: one entry, or, for a General number, each
- * distinct form {@link formatGeneralNumber} can shorten it to (widest first,
- * the unconstrained text leading). Find indexes these, because the shown form
- * depends on the column width and font, which only paint knows.
+ * Every text a cell can display under its effective number format (the
+ * conditional-formatting override included): one entry, or, for a General
+ * number, each distinct form {@link fitGeneralNumber} can shorten it to,
+ * widest first with the unconstrained text leading. Find indexes these,
+ * because the shown form depends on the column width and font, which only
+ * paint knows.
  */
 export function cellDisplayTexts(
   cell: Cell,
   styles: Styles,
+  cfNumFmt?: { numFmtId: number; formatCode: string | null } | null,
   date1904 = false,
 ): string[] {
-  const formatted = formatCellValueWithColor(cell, styles, null, date1904);
+  const formatted = formatCellValueWithColor(cell, styles, cfNumFmt, date1904);
   if (cell.value.type !== 'number' || !formatted.general) return [formatted.text];
   const forms: string[] = [];
   formatGeneralNumber(cell.value.number, (candidate) => {
