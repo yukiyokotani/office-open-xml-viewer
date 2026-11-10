@@ -3482,9 +3482,103 @@ fn parse_graphic_frame(
                     pic.id = own_cnv_pr(node).and_then(|cnv| attr(&cnv, "id"));
                     out.push(SlideElement::Picture(pic));
                 }
+            } else if let Some(spid) = gd
+                .descendants()
+                .filter(|n| n.is_element() && n.tag_name().name() == "oleObj")
+                .find_map(|ole| attr(&ole, "spid"))
+            {
+                // No oleObj carries a `<p:pic>` (a deck PowerPoint converted
+                // from binary .ppt writes a bare spid-only oleObj with no MCE
+                // Fallback). §19.3.2.4 `spid` names the shape in the part's
+                // legacy VML drawing, whose `<v:imagedata>` is the preview.
+                if let Some(mut pic) = vml_ole_preview_picture(&spid, &t, slide_part, zip) {
+                    pic.id = own_cnv_pr(node).and_then(|cnv| attr(&cnv, "id"));
+                    out.push(SlideElement::Picture(pic));
+                }
             }
         }
     }
+}
+
+/// Relationship types of the VML Drawing part (ECMA-376 Part 1 §15.2.20),
+/// Transitional and Strict.
+const VML_DRAWING_REL_TYPES: &[&str] = &[
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/vmlDrawing",
+    "http://purl.oclc.org/ooxml/officeDocument/relationships/vmlDrawing",
+];
+
+/// Build the preview picture of a spid-only `<p:oleObj>` from the legacy VML
+/// drawing of `part` (a slide, layout or master — each may carry its own
+/// implicit `vmlDrawing` relationship, Part 1 §15.2.20). The `v:shape` whose
+/// `o:spid` equals `spid` names its picture through `<v:imagedata o:relid>`,
+/// resolved against the VML part's own rels. The graphicFrame `<p:xfrm>` is
+/// authoritative for placement, exactly as for the `<p:pic>` preview; the
+/// imagedata crop insets become the picture's source rectangle.
+///
+/// The VML part is read only here, i.e. only for a graphicFrame that has an OLE
+/// object without a `<p:pic>`; an unreadable or malformed part yields `None`.
+fn vml_ole_preview_picture(
+    spid: &str,
+    gf: &Transform,
+    part: &str,
+    zip: &mut PptxZip,
+) -> Option<PictureElement> {
+    if gf.cx == 0 || gf.cy == 0 {
+        return None;
+    }
+    let part_rels_xml =
+        read_zip_str(zip, &ooxml_common::rels::relationship_part_path(part)).ok()?;
+    let part_rels_doc = crate::parse_preflighted_pptx_xml(&part_rels_xml).ok()?;
+    let vml_target =
+        ooxml_common::rels::find_internal_rel_target_by_types(&part_rels_doc, VML_DRAWING_REL_TYPES)?;
+    let vml_path = resolve_path(part, &vml_target);
+    let vml_xml = read_zip_str(zip, &vml_path).ok()?;
+    let vml_doc = crate::parse_preflighted_pptx_xml(&vml_xml).ok()?;
+    let imagedata = ooxml_common::vml::imagedata_for_spid(&vml_doc, spid)?;
+    let rid = ooxml_common::vml::imagedata_rel_id(imagedata)?;
+    let vml_rels_xml =
+        read_zip_str(zip, &ooxml_common::rels::relationship_part_path(&vml_path)).ok()?;
+    let vml_rels = crate::parse_rels(&vml_rels_xml);
+    let image_path = resolve_path(&vml_path, vml_rels.get(rid)?);
+    // Only a genuine image part enters the picture pipeline (the preview is
+    // typically EMF/WMF/PNG); a mis-typed target never feeds other bytes.
+    let mime_type = mime_from_ext(&image_path).to_owned();
+    if !mime_type.starts_with("image/") {
+        return None;
+    }
+    let head = read_zip_head(zip, &image_path, 24).ok()?;
+    let size = png_size_from_bytes(&head);
+    Some(PictureElement {
+        id: None,
+        x: gf.x,
+        y: gf.y,
+        width: gf.cx,
+        height: gf.cy,
+        rotation: gf.rot,
+        flip_h: gf.flip_h,
+        flip_v: gf.flip_v,
+        image_path,
+        mime_type,
+        svg_image_path: None,
+        intrinsic_width_px: size.map(|(w, _)| w),
+        intrinsic_height_px: size.map(|(_, h)| h),
+        stroke: None,
+        fill: None,
+        prst_geom: None,
+        prst_adjust: None,
+        src_rect: ooxml_common::vml::imagedata_crop(imagedata),
+        alpha: None,
+        duotone: None,
+        blip_effects: Vec::new(),
+        cust_geom: None,
+        shadow: None,
+        inner_shadow: None,
+        glow: None,
+        soft_edge: None,
+        reflection: None,
+        scene3d: None,
+        sp3d: None,
+    })
 }
 
 /// Render a SmartArt diagram's pre-baked fallback drawing (drawing1.xml).
@@ -5341,6 +5435,91 @@ mod ole_tests {
             "an oleObj with no preview pic must emit nothing, got {} element(s)",
             out.len()
         );
+    }
+
+    /// Issue #2176: a deck PowerPoint converted from binary .ppt writes a bare
+    /// `<p:oleObj spid>` with no `<p:pic>` and no MCE Fallback. The preview is
+    /// the `<v:imagedata o:relid>` of the VML shape whose `o:spid` matches,
+    /// resolved through the VML part's own rels. Placement comes from the
+    /// graphicFrame; imagedata crop becomes the source rectangle. The same
+    /// structure works from a layout (any part with a vmlDrawing relationship).
+    #[test]
+    fn spid_only_ole_object_draws_vml_preview_from_slide_and_layout() {
+        const R: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+        let vml = r##"<xml xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office">
+            <v:shape id="Object_x0020_2" o:spid="_x0000_s1025" type="#_x0000_t75"><v:imagedata o:relid="rId2"/></v:shape>
+            <v:shape id="Object_x0020_3" o:spid="_x0000_s1026" type="#_x0000_t75">
+              <v:imagedata o:relid="rId1" cropleft="10%" o:title=""/></v:shape></xml>"##;
+        let vml_rels = format!(
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+              <Relationship Id="rId1" Type="{R}/image" Target="../media/image1.png"/>
+              <Relationship Id="rId2" Type="{R}/image" Target="../media/other.png"/></Relationships>"#
+        );
+        let part_rels = format!(
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+              <Relationship Id="rIdOle" Type="{R}/oleObject" Target="../embeddings/oleObject1.bin"/>
+              <Relationship Id="rIdVml" Type="{R}/vmlDrawing" Target="../drawings/vmlDrawing1.vml"/></Relationships>"#
+        );
+        let png = tiny_png();
+        let xml = format!(
+            r#"<p:graphicFrame {ns}>
+              <p:nvGraphicFramePr><p:cNvPr id="7" name="Object 3"/><p:cNvGraphicFramePr/><p:nvPr/></p:nvGraphicFramePr>
+              <p:xfrm><a:off x="4500000" y="500000"/><a:ext cx="2540000" cy="1524000"/></p:xfrm>
+              <a:graphic><a:graphicData uri="{uri}">
+                <p:oleObj spid="_x0000_s1026" name="Equation" r:id="rIdOle" progId="Equation.3"><p:embed/></p:oleObj>
+              </a:graphicData></a:graphic>
+            </p:graphicFrame>"#,
+            ns = ns(),
+            uri = OLE_URI,
+        );
+        for part in ["ppt/slides/slide1.xml", "ppt/slideLayouts/slideLayout1.xml"] {
+            let (dir, file) = part.rsplit_once('/').unwrap();
+            let rels_path = format!("{dir}/_rels/{file}.rels");
+            let mut zip = zip_with(&[
+                (rels_path.as_str(), part_rels.as_bytes()),
+                ("ppt/drawings/vmlDrawing1.vml", vml.as_bytes()),
+                ("ppt/drawings/_rels/vmlDrawing1.vml.rels", vml_rels.as_bytes()),
+                ("ppt/media/image1.png", &png),
+                ("ppt/media/other.png", &png),
+            ]);
+            let doc = roxmltree::Document::parse(&xml).unwrap();
+            let mut out = Vec::new();
+            parse_sp_tree_node(
+                doc.root_element(),
+                &LayoutPlaceholders::default(),
+                part,
+                &HashMap::new(),
+                &HashMap::new(),
+                &mut zip,
+                &HashMap::new(),
+                &mut out,
+                false,
+                None,
+                DepthGuard::root(),
+            );
+            let [SlideElement::Picture(p)] = out.as_slice() else {
+                panic!("{part}: expected exactly one preview picture, got {}", out.len());
+            };
+            assert_eq!(p.image_path, "ppt/media/image1.png", "{part}");
+            assert_eq!(p.mime_type, "image/png");
+            assert_eq!(p.id.as_deref(), Some("7"));
+            assert_eq!(
+                (p.x, p.y, p.width, p.height),
+                (4_500_000, 500_000, 2_540_000, 1_524_000)
+            );
+            assert_eq!(
+                (p.intrinsic_width_px, p.intrinsic_height_px),
+                (Some(2), Some(2))
+            );
+            assert_eq!(p.src_rect.map(|r| r.l), Some(0.1));
+        }
+
+        // Without a vmlDrawing relationship the object still emits nothing.
+        let mut zip = zip_with(&[(
+            "ppt/slides/_rels/slide1.xml.rels",
+            br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"/>"#,
+        )]);
+        assert!(run(&xml, &mut zip, &HashMap::new()).is_empty());
     }
 }
 

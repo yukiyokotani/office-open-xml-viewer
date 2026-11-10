@@ -2294,18 +2294,10 @@ fn vml_ole_preview<'a>(
         .descendants()
         .find(|n| n.is_element() && n.tag_name().name() == "imagedata")?;
     // VML `<v:imagedata>` names the preview via `o:relid` (Excel's usual form)
-    // or `r:id`; both resolve through the VML part's own rels.
-    let rid = imagedata
-        .attribute(("urn:schemas-microsoft-com:office:office", "relid"))
-        .or_else(|| imagedata.attribute("relid"))
-        .or_else(|| {
-            attr_ns(
-                &imagedata,
-                relationships::TRANSITIONAL,
-                relationships::STRICT,
-                "id",
-            )
-        })?;
+    // or `r:id`; both resolve through the VML part's own rels. The trailing
+    // bare-`id` fallback is XLSX's historical behaviour and is kept as-is.
+    let rid = ooxml_common::vml::imagedata_rel_id(imagedata)
+        .or_else(|| imagedata.attribute("id"))?;
     let target = vml_rels.get(rid)?;
     let media_path = resolve_zip_path(vml_path, target);
     archive.index_for_name(&media_path)?;

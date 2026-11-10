@@ -5,6 +5,17 @@ semantic versioning. While the major version is zero, minor releases may contain
 explicitly documented breaking changes; patch releases remain compatible with
 the corresponding minor release.
 
+## 0.89.9 — Unreleased
+
+- **PowerPoint: OLE objects converted from binary .ppt:** an embedded object
+  (typically an equation) whose preview picture is stored only in the slide's
+  legacy VML drawing (`p:oleObj spid` with no `p:pic`) now shows that picture.
+  Layouts and masters are covered too (#2176).
+- **PowerPoint: hidden slides in `'skip'` mode:** `PptxViewer` never draws a
+  hidden slide. `goToSlide()` and internal hyperlinks aimed at one land on the
+  next shown slide, else the previous one; `findText()` no longer matches hidden
+  slides, so `findNext()` / `findPrev()` never open one (#2181).
+
 ## 0.89.8 — 2026-11-09
 
 Compatible patch release. No migration is required. The document models gain
