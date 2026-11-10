@@ -36,7 +36,8 @@
  * SOURCES (authoritative, cited per entry below):
  *   - Symbol:   Adobe "Symbol Encoding to Unicode", unicode.org/Public/MAPPINGS/
  *               VENDORS/ADOBE/symbol.txt (field 1 = Unicode, field 2 = Symbol
- *               code point). This is the Adobe Symbol PostScript encoding.
+ *               code point). This is the Adobe Symbol PostScript encoding;
+ *               the full table lives in symbol-encoding.ts.
  *   - Wingdings: the Microsoft Wingdings cmap as standardized in the Unicode
  *               proposals L2/11-052 and L2/11-344 (the glyph repertoire that
  *               added the Wingdings pictographs to Unicode 7.0). The byte→Unicode
@@ -52,37 +53,24 @@
  * substitute a *wrong* but available glyph. Better tofu than a wrong glyph.
  */
 
+import {
+  ADOBE_SYMBOL_UNICODE,
+  SYMBOL_CORPORATE_USE_UNICODE,
+} from './symbol-encoding.js';
+
 /**
- * Adobe Symbol encoding → Unicode (subset).
- *
- * Values taken directly from Adobe's `symbol.txt` (Symbol code point → Unicode).
- * Only the entries that (a) appear as markers/inline symbols in practice and
- * (b) have a faithful BMP Unicode target are listed; pure math/Greek letters are
- * omitted (they already round-trip as their own Unicode characters when the
- * Symbol font is unavailable is irrelevant — Word stores those as the real Greek
- * letters, not Symbol code points).
+ * Symbol encoding → Unicode: every assigned code 0x20..0xFE that has a
+ * standard Unicode target (symbol-encoding.ts records the source table, its
+ * terms, and each deviation). That covers the Greek capitals and lowercase at
+ * 0x41..0x5A / 0x61..0x7A, the operators, relations, arrows and set symbols in
+ * 0xA0..0xFE, and the bracket pieces. Symbol text arrives either as these bare
+ * codes (an ASCII "abcp" in a Symbol run is αβχπ) or F0-shifted (U+F061…), and
+ * both resolve. 0x60 radicalex, 0xF0 and 0x7F..0x9F have no target.
  */
-export const SYMBOL_MAP: Record<number, string> = {
-  // symbol.txt: 0xA7 → U+2663 BLACK CLUB SUIT
-  0xa7: '♣',
-  // symbol.txt: 0xA8 → U+2666, 0xA9 → U+2665, 0xAA → U+2660 (card suits)
-  0xa8: '♦', 0xa9: '♥', 0xaa: '♠',
-  // symbol.txt arrows: 0xAB → U+2194, 0xAC → U+2190, 0xAD → U+2191,
-  // 0xAE → U+2192, 0xAF → U+2193
-  0xab: '↔', 0xac: '←', 0xad: '↑', 0xae: '→', 0xaf: '↓',
-  // symbol.txt: 0xB7 → U+2022 BULLET
-  0xb7: '•',
-  // symbol.txt: 0xB8 → U+00F7 DIVISION SIGN (restored from PR #519 removal)
-  0xb8: '÷',
-  // symbol.txt: 0xB9 → U+2260 NOT EQUAL TO (restored from PR #519 removal)
-  0xb9: '≠',
-  // symbol.txt: 0xD7 → U+22C5 DOT OPERATOR; 0xB4 → U+00D7 MULTIPLICATION SIGN
-  0xb4: '×',
-  // symbol.txt: 0xB1 → U+00B1 PLUS-MINUS SIGN; 0xB0 → U+00B0 DEGREE SIGN
-  0xb0: '°', 0xb1: '±',
-  // symbol.txt: 0xA3 → U+2264 LESS-THAN OR EQUAL TO; 0xB3 → U+2265 GREATER-THAN OR EQUAL TO
-  0xa3: '≤', 0xb3: '≥',
-};
+export const SYMBOL_MAP: Record<number, string> = Object.fromEntries(
+  Object.entries({ ...ADOBE_SYMBOL_UNICODE, ...SYMBOL_CORPORATE_USE_UNICODE })
+    .map(([code, unicode]) => [Number(code), String.fromCodePoint(unicode)]),
+);
 
 /**
  * Microsoft Wingdings cmap → Unicode (subset).
@@ -150,7 +138,8 @@ const SYMBOL_LOOKUP = withPua(SYMBOL_MAP);
 const WINGDINGS_LOOKUP = withPua(WINGDINGS_MAP);
 
 /**
- * Normalize a single Symbol/Wingdings code point to its Unicode equivalent.
+ * Normalize Symbol/Wingdings code points to their Unicode equivalents, one
+ * code point at a time (a single character in the common case).
  *
  * The lookup table is chosen by `fontFamily` via a TRIMMED EXACT match (case-
  * insensitive): exactly "symbol" selects the Adobe Symbol encoding
@@ -170,7 +159,7 @@ const WINGDINGS_LOOKUP = withPua(WINGDINGS_MAP);
  * two mapped families, or has no mapping in the selected table (passthrough —
  * better the bare code point than a wrong glyph).
  *
- * @param char       the marker/run character as stored in the OOXML (often a
+ * @param char       the marker/run text as stored in the OOXML (often one
  *                   PUA code point such as U+F0B7)
  * @param fontFamily the requested font family (ascii / hAnsi axis)
  */
@@ -187,8 +176,11 @@ export function symbolFontToUnicode(
         ? SYMBOL_LOOKUP
         : null;
   if (!table) return char;
-  const code = char.charCodeAt(0);
-  return table[code] ?? char;
+  // Each code point is converted independently, so a multi-character marker
+  // (a `w:lvlText` such as "1." in a Symbol run) keeps every character.
+  let out = '';
+  for (const ch of char) out += table[ch.codePointAt(0)!] ?? ch;
+  return out;
 }
 
 /**

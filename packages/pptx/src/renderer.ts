@@ -1938,8 +1938,15 @@ export function paragraphInputRuns(
         );
       let face = eaGlyph ? familyEa : csFace;
       let share = lineMetricFor(face, bold, italic, rc);
-      if (/[\uf020-\uf0ff]/u.test(ch) && (familySym != null || isSymbolFontFamily(family))) {
-        const symbolFamily = familySym ?? family;
+      // A Symbol-font Latin slot stores its text in Symbol's own 8-bit
+      // encoding too, so a bare code such as "a" is alpha (issue #2177). The
+      // a:sym face (§21.1.2.3.10) only owns the F0-shifted private codes.
+      // Codes that are their own Unicode (space, digits) keep the run's stack.
+      const bareSymbolCode = cp >= 0x20 && cp <= 0xff
+        && family.trim().toLowerCase() === 'symbol' && symbolFontToUnicode(ch, family) !== ch;
+      if (bareSymbolCode || (/[\uf020-\uf0ff]/u.test(ch)
+        && (familySym != null || isSymbolFontFamily(family)))) {
+        const symbolFamily = bareSymbolCode ? family : familySym ?? family;
         const mapped = symbolFontToUnicode(ch, symbolFamily);
         glyph = mapped + cluster.slice(ch.length);
         font = buildFont(bold, italic, drawSizePx,

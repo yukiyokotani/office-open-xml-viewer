@@ -47,6 +47,9 @@ export function collectSlideFontDemand(
       for (const run of para.runs) {
         if (run.type === 'break') continue;
         if (run.type !== 'text' || run.fontFamilySym || run.fieldType && run.fieldType !== 'slidenum') return false;
+        // A Symbol Latin face draws its ASCII text as other characters (Greek,
+        // operators), so the authored scalars are not the painted ones.
+        if ((run.fontFamily ?? para.defFontFamily)?.trim().toLowerCase() === 'symbol') return false;
         if (!add(run.text) || !add(preparedPowerPointText(run, slide.slideNumber))) return false;
       }
     }

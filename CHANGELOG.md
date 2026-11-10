@@ -5,6 +5,15 @@ semantic versioning. While the major version is zero, minor releases may contain
 explicitly documented breaking changes; patch releases remain compatible with
 the corresponding minor release.
 
+## 0.89.9 — Unreleased
+
+- **Word and PowerPoint: Symbol font:** text in the Symbol font now uses the
+  font's whole encoding, so Greek letters, mathematical operators, arrows and
+  bracket pieces draw as their Unicode characters instead of empty boxes or
+  Latin letters. This covers both private-use code points (as inserted through
+  Insert → Symbol) and plain ASCII in a Symbol run, in Word runs, `w:sym`,
+  PowerPoint runs and `a:sym` (#2177).
+
 ## 0.89.8 — 2026-11-09
 
 Compatible patch release. No migration is required. The document models gain

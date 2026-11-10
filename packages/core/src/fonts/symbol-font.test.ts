@@ -74,15 +74,17 @@ describe('symbolFontToUnicode', () => {
   it('passes characters through for non-symbol fonts', () => {
     expect(symbolFontToUnicode(ch(0xb7), 'Calibri')).toBe(ch(0xb7));
     expect(symbolFontToUnicode(ch(0xa7), 'Times New Roman')).toBe(ch(0xa7));
-    expect(symbolFontToUnicode('A', 'Symbol')).toBe('A');
+    expect(symbolFontToUnicode('a', 'Calibri')).toBe('a');
   });
 
   it('passes through when the family is missing or unmapped', () => {
     expect(symbolFontToUnicode(ch(0xf0b7), null)).toBe(ch(0xf0b7));
     expect(symbolFontToUnicode(ch(0xf0b7), undefined)).toBe(ch(0xf0b7));
     // A code point with no entry in the selected table falls through unchanged
-    // rather than guessing (e.g. 0x21 is "!" in Symbol, not a dingbat).
-    expect(symbolFontToUnicode(ch(0x21), 'Symbol')).toBe(ch(0x21));
+    // rather than guessing: Symbol 0x60 radicalex has only a Corporate-Use
+    // target, and 0xF0 is unassigned in Microsoft's Symbol.
+    expect(symbolFontToUnicode(ch(0xf060), 'Symbol')).toBe(ch(0xf060));
+    expect(symbolFontToUnicode(ch(0xf0f0), 'Symbol')).toBe(ch(0xf0f0));
   });
 
   it('matches exactly "wingdings" (case-insensitive, trimmed) for the Wingdings table', () => {
@@ -104,15 +106,13 @@ describe('symbolFontToUnicode', () => {
     expect(symbolFontToUnicode(ch(0xa7), 'Wingdings')).toBe('▪');
   });
 
-  // Pencil/scissors/faces are Wingdings glyphs only. In Symbol, 0x21 is "!" and
-  // 0x22 is "∀" — so these dingbats must NOT leak across the font gate.
+  // Pencil/scissors/glasses are Wingdings glyphs only. In Symbol, 0x21 is "!",
+  // 0x22 is "∀" and 0x24 is "∃" — so these dingbats must NOT leak across the
+  // font gate.
   it('keeps Wingdings dingbats out of the Symbol table', () => {
-    expect(SYMBOL_MAP[0x21]).toBeUndefined();
-    expect(SYMBOL_MAP[0x22]).toBeUndefined();
-    expect(SYMBOL_MAP[0x24]).toBeUndefined();
-    expect(symbolFontToUnicode(ch(0x21), 'Symbol')).toBe(ch(0x21));
-    expect(symbolFontToUnicode(ch(0x22), 'Symbol')).toBe(ch(0x22));
-    expect(symbolFontToUnicode(ch(0x24), 'Symbol')).toBe(ch(0x24));
+    expect(symbolFontToUnicode(ch(0x21), 'Symbol')).toBe('!');
+    expect(symbolFontToUnicode(ch(0x22), 'Symbol')).toBe('∀');
+    expect(symbolFontToUnicode(ch(0x24), 'Symbol')).toBe('∃');
   });
 
   // Wingdings 0x21 "pencil" → U+270F PENCIL, 0x22 "scissors" → U+2702 BLACK
@@ -123,6 +123,53 @@ describe('symbolFontToUnicode', () => {
     expect(symbolFontToUnicode(ch(0xf021), 'Wingdings')).toBe('✏');
     expect(symbolFontToUnicode(ch(0x22), 'Wingdings')).toBe('✂');
     expect(symbolFontToUnicode(ch(0xf022), 'Wingdings')).toBe('✂');
+  });
+});
+
+// Issue #2177: the whole Adobe Symbol repertoire (unicode.org VENDORS/ADOBE/
+// symbol.txt), not only bullets and arrows.
+describe('symbolFontToUnicode — full Symbol encoding', () => {
+  const both = (code: number, expected: string) => {
+    expect(symbolFontToUnicode(ch(code), 'Symbol')).toBe(expected);
+    expect(symbolFontToUnicode(ch(0xf000 + code), 'Symbol')).toBe(expected);
+  };
+
+  it('maps Greek capitals and lowercase, bare (ASCII) and F0-shifted', () => {
+    both(0x41, 'Α'); both(0x43, 'Χ'); both(0x44, 'Δ'); both(0x47, 'Γ');
+    both(0x51, 'Θ'); both(0x53, 'Σ'); both(0x57, 'Ω'); both(0x5a, 'Ζ');
+    both(0x61, 'α'); both(0x62, 'β'); both(0x63, 'χ'); both(0x6c, 'λ');
+    both(0x6d, 'μ'); both(0x70, 'π'); both(0x77, 'ω'); both(0x7a, 'ζ');
+    // Symbol's two phis: 0x66 is the stroked phi, 0x6A the open, looped one.
+    both(0x66, 'ϕ'); both(0x6a, 'φ');
+    // Every letter slot resolves, none passes through as Latin.
+    for (let code = 0x41; code <= 0x5a; code++) {
+      expect(SYMBOL_MAP[code]).toMatch(/\p{Script=Greek}/u);
+      expect(SYMBOL_MAP[code + 0x20]).toMatch(/\p{Script=Greek}/u);
+    }
+  });
+
+  it('maps operators, relations and set symbols', () => {
+    both(0x22, '∀'); both(0x24, '∃'); both(0x2d, '−'); both(0x40, '≅');
+    both(0x5c, '∴'); both(0x7e, '∼'); both(0xa5, '∞'); both(0xb6, '∂');
+    both(0xbb, '≈'); both(0xc6, '∅'); both(0xce, '∈'); both(0xd1, '∇');
+    both(0xd5, '∏'); both(0xd6, '√'); both(0xe5, '∑'); both(0xf2, '∫');
+  });
+
+  it('maps arrows, the euro and identity punctuation', () => {
+    both(0xab, '↔'); both(0xae, '→'); both(0xbf, '↵'); both(0xde, '⇒');
+    both(0xdb, '⇔'); both(0xa0, '€');
+    both(0x28, '('); both(0x31, '1');
+  });
+
+  it('maps the Corporate-Use pieces to their standard Unicode characters', () => {
+    both(0xe6, '⎛'); both(0xef, '⎪'); both(0xf4, '⎮'); both(0xfe, '⎭');
+    both(0xbd, '⏐'); both(0xbe, '⎯');
+    both(0xd2, '®'); both(0xe3, '©'); both(0xd4, '™');
+  });
+
+  it('converts every code point of a multi-character string', () => {
+    expect(symbolFontToUnicode('abcp', 'Symbol')).toBe('αβχπ');
+    expect(symbolFontToUnicode('a.', 'Symbol')).toBe('α.');
   });
 });
 
@@ -177,6 +224,15 @@ describe('symbolTextToUnicodeSegments', () => {
     // Wingdings 0x24 → U+1F453 EYEGLASSES (astral). Must survive as one glyph.
     const segs = symbolTextToUnicodeSegments(ch(0x24), 'Wingdings');
     expect(segs).toEqual([{ text: '\u{1F453}', mapped: true }]);
+  });
+
+  it('maps ASCII Symbol text and keeps identity codes in the Symbol face', () => {
+    expect(symbolTextToUnicodeSegments('a+b 1', 'Symbol')).toEqual([
+      { text: 'α', mapped: true },
+      { text: '+', mapped: false },
+      { text: 'β', mapped: true },
+      { text: ' 1', mapped: false },
+    ]);
   });
 
   it('handles the empty string', () => {

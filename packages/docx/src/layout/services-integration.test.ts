@@ -123,6 +123,20 @@ describe('production layout service integration', () => {
     expect((text[0] as { fontFamily?: string | null }).fontFamily).not.toBe('Symbol');
   });
 
+  it('maps ASCII and private-use Symbol text through the full Symbol encoding (#2177)', () => {
+    const services = createLayoutServices(model(), { measureContext: measureContext() });
+    const symbol = { fontFamily: 'Symbol', fontFamilyHighAnsi: 'Symbol' };
+    const segments = buildSegments([
+      textRun('abcp', symbol),
+      textRun('\uF061\uF0E5', symbol),
+    ], { pageIndex: 0, totalPages: 1, layoutServices: services });
+    const text = segments.filter((segment) => 'text' in segment)
+      .map((segment) => segment as { text: string; fontFamily?: string | null });
+
+    expect(text.map((segment) => segment.text).join('')).toBe('αβχπα∑');
+    expect(text.every((segment) => segment.fontFamily !== 'Symbol')).toBe(true);
+  });
+
   it('carries the w:kern threshold through the text service measure adapter', () => {
     let fontKerning: CanvasFontKerning = 'auto';
     const states: CanvasFontKerning[] = [];
