@@ -23,6 +23,17 @@ the corresponding minor release.
   rmcp also limits an incoming message to 16 MiB and drops a larger one
   without a response, so the caller times out; the server's path-based tool
   requests are far below that.
+- **PowerPoint: OLE objects converted from binary .ppt:** an embedded object
+  (typically an equation) whose preview picture is stored only in the slide's
+  legacy VML drawing (`p:oleObj spid` with no `p:pic`) now shows that picture.
+  Layouts and masters are covered too (#2176).
+- **PowerPoint: hidden slides in `'skip'` mode:** this changes the previously
+  documented skip-mode behaviour, under which an explicit `goToSlide()` to a
+  hidden slide was honoured. `PptxViewer` now draws a hidden slide only when
+  every slide is hidden. `goToSlide()` and internal hyperlinks aimed at a hidden
+  slide land on the next shown slide, else the previous one. `findText()` no
+  longer matches hidden slides, so `findNext()` / `findPrev()` never open one,
+  and switching into or out of `'skip'` clears the current search (#2181).
 
 ## 0.89.8 — 2026-11-09
 

@@ -894,6 +894,11 @@ impl PptxArchive {
 pub(crate) struct PptxZip {
     session: PackageSessionHandle,
     operation: RetainedPackageOperation,
+    /// spid-only OLE previews: one filtered index per distinct VML drawing
+    /// part read in this operation (shared by every host part that uses it),
+    /// plus the current host's VML part. Cleared at every operation start, so
+    /// a later operation never reuses an earlier one's reads or failures.
+    pub(crate) ole_vml_previews: VmlOlePreviewCache,
 }
 
 impl PptxZip {
@@ -903,6 +908,7 @@ impl PptxZip {
     }
 
     fn begin_operation(&mut self, name: &str) -> Result<(), String> {
+        self.ole_vml_previews.clear();
         self.operation.begin(&self.session, name)
     }
 
@@ -973,6 +979,12 @@ impl PptxZip {
 
     fn index_for_name(&self, path: &str) -> Option<()> {
         self.session.contains_entry(path).then_some(())
+    }
+
+    /// Stored ZIP item name of the part equivalent to `path` (ECMA-376 Part 2
+    /// §6.2.2.3), i.e. the entry's identity independent of name spelling.
+    fn entry_name(&self, path: &str) -> Option<String> {
+        self.session.entry_name(path)
     }
 }
 
@@ -2256,6 +2268,7 @@ fn open_zip_with_policy(
     .map(|session| PptxZip {
         session,
         operation: RetainedPackageOperation::new("pptx"),
+        ole_vml_previews: VmlOlePreviewCache::default(),
     })
     .map_err(ooxml_common::zip::tag_container_error)
 }

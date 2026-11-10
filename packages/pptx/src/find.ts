@@ -30,8 +30,12 @@ function matchStaysWithinSearchContainer(runs: PptxTextRunInfo[], slices: TextMa
 }
 
 export class PptxFindController extends UnitFindController<PptxTextRunInfo, PptxMatchLocation> {
-  constructor(count: () => number, collectRuns: (slide: number) => Promise<PptxTextRunInfo[]>) {
-    super(count, collectRuns, (slide) => ({ slide }), matchStaysWithinSearchContainer);
+  constructor(
+    count: () => number,
+    collectRuns: (slide: number) => Promise<PptxTextRunInfo[]>,
+    includeSlide?: (slide: number) => boolean,
+  ) {
+    super(count, collectRuns, (slide) => ({ slide }), matchStaysWithinSearchContainer, includeSlide);
   }
 
   slideRuns(slide: number): PptxTextRunInfo[] | undefined { return this.unitRuns(slide); }

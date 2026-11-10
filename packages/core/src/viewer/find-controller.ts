@@ -23,6 +23,9 @@ export class UnitFindController<Run extends SearchRun, Location> {
     private readonly _collectRuns: (unit: number) => Promise<Run[]>,
     private readonly _location: (unit: number) => Location,
     private readonly _acceptMatch: (runs: Run[], slices: TextMatch['slices']) => boolean = () => true,
+    /** Units excluded from the search (e.g. hidden slides the viewer never
+     *  draws) are neither collected nor matched. Evaluated per `find`. */
+    private readonly _includeUnit: (unit: number) => boolean = () => true,
   ) {}
 
   invalidate(): void {
@@ -71,7 +74,10 @@ export class UnitFindController<Run extends SearchRun, Location> {
     const runsRevision = this._runsRevision;
     const unitRuns = new Map(this._runs);
     const units = this._count();
+    const included: boolean[] = [];
+    for (let unit = 0; unit < units; unit++) included.push(this._includeUnit(unit));
     for (let unit = 0; unit < units; unit++) {
+      if (!included[unit]) continue;
       let runs = unitRuns.get(unit);
       if (!runs) {
         try {
@@ -93,6 +99,7 @@ export class UnitFindController<Run extends SearchRun, Location> {
       : new Map([...unitRuns, ...this._runs]);
     const matches: ResolvedMatch[] = [];
     for (let unit = 0; unit < units; unit++) {
+      if (!included[unit]) continue;
       const runs = committedRuns.get(unit) ?? [];
       for (const match of findMatches(buildTextIndex(runs), query, opts)) {
         if (!this._acceptMatch(runs, match.slices)) continue;
