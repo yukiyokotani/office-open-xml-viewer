@@ -189,6 +189,14 @@ describe('served font line metrics', () => {
       { sources: [fontFiles({ faces: [{ family: 'Ooxml Fixture Gap', url: 'https://app.example/gap.ttf' }] })] }).sourceFonts.loaded;
     // Grid allocation (segment-builder.ts) reads an explicit false.
     expect(Object.values(sourceFontLineMetrics(loaded, null)).every((metric) => metric.farEastCodePage === false)).toBe(true);
+    const doc = model('Ooxml Fixture Gap');
+    const services = createLayoutServices(doc, {
+      measureContext: canvasBoxContext(),
+      ...sourceFontLayoutOptions(doc, [{ family: 'Ooxml Fixture Gap', weight: '400', style: 'normal', resourceMetrics: TABLES }],
+        { sources: [fontFiles({ faces: [{ family: 'Ooxml Fixture Gap', url: 'https://app.example/gap.ttf' }] })] }),
+    });
+    const [segment] = buildSegments([run('Ooxml Fixture Gap')], { pageIndex: 0, totalPages: 1, layoutServices: services });
+    expect((segment as { resolvedLatinGridCellAllocation?: boolean }).resolvedLatinGridCellAllocation).toBe(true);
   });
 
   it('clamps a variable instance to the weight descriptor (a 400-only face paints bold synthesized)', () => {
