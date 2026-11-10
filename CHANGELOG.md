@@ -38,6 +38,15 @@ the corresponding minor release.
   slide land on the next shown slide, else the previous one. `findText()` no
   longer matches hidden slides, so `findNext()` / `findPrev()` never open one,
   and switching into or out of `'skip'` clears the current search (#2181).
+- **Excel: General numbers wider than their column:** a General-format number
+  now shortens to the cell's width as Excel does, dropping rounded decimal
+  places and switching to scientific notation (`3.141593`, `1.23E+14`),
+  instead of losing its leading digits to clipping. When even the shortest
+  form is too wide, that form is shown (clipped as before) rather than Excel's
+  `#` fill. Without a width limit, General shows at most 11 characters, sign
+  excluded. Wrapped cells keep wrapping, and find matches the shortened text as
+  well as the full one. Numbers in other formats and dates are unchanged;
+  Excel's `###` for those when too wide is planned for 0.90 (#2179).
 - **Docs:** `progressiveLayout` now states that pages shown before layout
   completes are provisional. Page breaks may move and content can occasionally
   overlap, for example body text over a footer taller than the bottom margin
