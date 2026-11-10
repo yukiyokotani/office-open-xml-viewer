@@ -148,6 +148,9 @@ specification differently, the reader follows LibreOffice:
   wider rule;
 - superscript and subscript without an explicit raise use LibreOffice's
   automatic escapement.
+- a line snapped to a layout grid takes as many cells as the face's own
+  line box needs (without Word's 1.3 East Asian box), and the page admits it
+  only when all of its cells fit.
 
 ## Known differences from LibreOffice
 

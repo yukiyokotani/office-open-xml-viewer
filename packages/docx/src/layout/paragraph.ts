@@ -3894,7 +3894,12 @@ function planMeasuredLines(
   // border edges. Include CT_PBdr's between/bar rules even when no edge is painted in
   // this slice. The shared admission predicate separately whitelists retained
   // plain text paint, including run-level formatting, on each terminal line.
-  const allowsGridLeadingOverhang = !paragraph.shading
+  // A model source whose grid lines take whole cells (`plainLineBoxes`,
+  // LibreOffice: a snapped line's real height is its cell count times the
+  // pitch, and the page admits it only when the whole height fits) never
+  // lends the grid leading.
+  const allowsGridLeadingOverhang = textService?.plainLineBoxes !== true
+    && !paragraph.shading
     && !Object.values(paragraph.borders ?? {}).some(Boolean)
     && !Object.values(paragraph.typographyInput?.borders ?? {}).some(Boolean)
     && !paragraph.tabStops?.some(stop => stop.alignment === 'bar');

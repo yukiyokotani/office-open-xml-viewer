@@ -505,6 +505,7 @@ function buildLayoutSourceModelAdapter(
     renderedFamilies: docxRenderedFontFamilies(privateDocument),
     scriptCjkLanguage: docxScriptCjkLanguage(privateDocument),
     defaultBodyFontSizePt: docDefaultFontSizePt(privateDocument),
+    ...(privateDocument.settings?.__plainFontLineBoxes === true ? { plainLineBoxes: true } : {}),
   };
 
   // Acquire while parser sidecars are still attached. On the builder-owned

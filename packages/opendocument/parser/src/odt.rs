@@ -230,6 +230,12 @@ pub fn read(package: &OdfPackage) -> Result<(Document, Vec<OwnedDocumentResource
         // under the column holding its reference and continues at the top of
         // the next column's area.
         footnote_column_bands: true,
+        // LibreOffice counts grid cells for a snapped line from the face's
+        // own box, without Word's Far East 1.3 x usWin rule (measured:
+        // MS Mincho and Meiryo grid controls; unsnapped lines keep 1.3),
+        // and admits a snapped line at the page bottom only when its whole
+        // cells fit (rr3 family D: 文 stays at 16.4pt left, moves at 16.35pt).
+        plain_font_line_boxes: true,
         ..DocumentSettings::default()
     });
     document.footnotes = std::mem::take(&mut reader.footnotes);
