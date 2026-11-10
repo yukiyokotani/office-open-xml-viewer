@@ -7,6 +7,33 @@ the corresponding minor release.
 
 ## 0.89.9 — Unreleased
 
+- **MCP server dependencies:** the `ooxml-mcp-server` binaries now build on
+  `rmcp` 3.9 and `tokio` 1.54, which clears RUSTSEC-2026-0462 (unbounded
+  response buffering in rmcp's Streamable HTTP client, which the stdio server
+  does not use) and RUSTSEC-2026-0386. Tool names, descriptions, annotations,
+  input properties, instructions, results and protocol-version negotiation
+  are unchanged. Three details follow rmcp: `serverInfo.version` reports the
+  bundled rmcp version, tool input schemas no longer carry the internal Rust
+  type name as a top-level `title`, and arguments that fail to deserialize
+  now return an `isError` tool result instead of a JSON-RPC `-32602` error,
+  as the MCP 2025-11-25 specification asks, so the model can correct them.
+  This applies whichever protocol version is negotiated; unknown tools still
+  return `-32602`. Ordinary MCP clients need no changes, but a client that
+  special-cases `-32602` for bad arguments must also handle `result.isError`.
+  rmcp also limits an incoming message to 16 MiB and drops a larger one
+  without a response, so the caller times out; the server's path-based tool
+  requests are far below that.
+- **PowerPoint: OLE objects converted from binary .ppt:** an embedded object
+  (typically an equation) whose preview picture is stored only in the slide's
+  legacy VML drawing (`p:oleObj spid` with no `p:pic`) now shows that picture.
+  Layouts and masters are covered too (#2176).
+- **PowerPoint: hidden slides in `'skip'` mode:** this changes the previously
+  documented skip-mode behaviour, under which an explicit `goToSlide()` to a
+  hidden slide was honoured. `PptxViewer` now draws a hidden slide only when
+  every slide is hidden. `goToSlide()` and internal hyperlinks aimed at a hidden
+  slide land on the next shown slide, else the previous one. `findText()` no
+  longer matches hidden slides, so `findNext()` / `findPrev()` never open one,
+  and switching into or out of `'skip'` clears the current search (#2181).
 - **Excel: numbers wider than their column:** a General-format number now
   shortens to the cell's width as Excel does, dropping rounded decimal places
   and switching to scientific notation (`3.141593`, `1.23E+14`), and shows `#`
