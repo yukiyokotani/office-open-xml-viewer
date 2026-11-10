@@ -595,7 +595,7 @@ export class FontSourceSession {
   private async acquire(resolved: Map<string, FamilyState>, ceiling: ReturnType<typeof ceilingSignal>): Promise<boolean> {
     type Claimed = Extract<FamilyState, { kind: 'claimed' }>;
     const omitted: [string, Claimed][] = [];
-    const files: [string, Claimed][] = [];
+    const sameOrigin: [string, Claimed][] = [];
     const bridged = new Map<number, [string, Claimed][]>();
     for (const entry of resolved) {
       const state = entry[1];
@@ -603,21 +603,22 @@ export class FontSourceSession {
       const source = this.sources[state.sourceIndex];
       if (source.kind !== 'font-resolver') {
         if (source.credentials === 'omit') omitted.push([entry[0], state]);
-        else if (source.kind === 'font-files') files.push([entry[0], state]);
+        else sameOrigin.push([entry[0], state]);
       } else if (this.acquireResolverFaces) {
         bridged.set(state.sourceIndex, [...bridged.get(state.sourceIndex) ?? [], [entry[0], state]]);
       }
     }
-    if (!omitted.length && !files.length && !bridged.size) return false;
+    if (!omitted.length && !sameOrigin.length && !bridged.size) return false;
     const deadline = Date.now() + ceiling.remaining();
     const context = { signal: ceiling.signal, cancel: this.controller.signal, deadline, holder: this };
     const urlsOf = (state: Claimed) => state.declarations.filter(isDownloadableFace).map(({ url }) => url as string);
-    // A `fontFiles` URL face is fetched by the library, with the CSS
-    // font-loading credentials (same-origin), so its bytes are held like a
-    // `data` face and its tables can be read; the FontFace is registered
-    // from those bytes, so the file is downloaded once. Laziness is kept:
-    // only faces the demand so far needs are fetched here; a subset needed
-    // only by a later delta is registered by URL and loaded by the browser.
+    // A URL face of a `fontCss` / `fontCssApi` / `fontFiles` source is
+    // fetched by the library, with the CSS font-loading credentials
+    // (same-origin, CORS), so its bytes are held like a `data` face and its
+    // tables can be read; the FontFace is registered from those bytes, so
+    // the file is downloaded once. Laziness is kept: only the subsets the
+    // demand so far needs are fetched here; a subset needed only by a later
+    // delta is registered by URL and loaded by the browser.
     const sortedPoints = this.all ? [] : [...this.points].sort((a, b) => a - b);
     const demanded = (declaration: FontFaceDeclaration) => {
       if (!isDownloadableFace(declaration)) return false;
@@ -629,10 +630,10 @@ export class FontSourceSession {
       batches.push(acquireFaceUrls(omitted.flatMap(([, state]) => urlsOf(state)), { credentials: 'omit', ...context })
         .then((outcomes) => [omitted, outcomes]));
     }
-    if (files.length) {
-      const urls = files.flatMap(([, state]) => state.declarations.filter(demanded).map(({ url }) => url as string));
+    if (sameOrigin.length) {
+      const urls = sameOrigin.flatMap(([, state]) => state.declarations.filter(demanded).map(({ url }) => url as string));
       batches.push(acquireFaceUrls(urls, { credentials: 'same-origin', ...context })
-        .then((outcomes) => [files, outcomes]));
+        .then((outcomes) => [sameOrigin, outcomes]));
     }
     const acquire = this.acquireResolverFaces;
     for (const [sourceIndex, claimed] of bridged) {
@@ -667,8 +668,8 @@ export class FontSourceSession {
     for (const [claimed, outcomes] of settled) {
       for (const [key, state] of claimed) {
         let reason: string | undefined;
-        const libraryFetched = this.sources[state.sourceIndex]?.kind !== 'font-files'
-          || (this.sources[state.sourceIndex] as { credentials?: string }).credentials === 'omit'
+        const source = this.sources[state.sourceIndex];
+        const libraryFetched = source?.kind === 'font-resolver' || source?.credentials === 'omit'
           ? isDownloadableFace : demanded;
         const declarations = state.declarations.flatMap((declaration) => {
           if (!libraryFetched(declaration)) return [declaration];

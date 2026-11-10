@@ -115,7 +115,7 @@ describe('served face line metrics in the browser', () => {
     for (const pitch of await pitches(docx('Ooxml Fixture Gap'), kind)) expect(pitch).toBeCloseTo(1.3, 2);
   }, 60_000);
 
-  it('sizes a browser-fetched stylesheet face from its measured normal line', async (test) => {
+  it('sizes a stylesheet face from its own tables (library fetch)', async (test) => {
     if (!browser) test.skip();
     for (const pitch of await pitches(docx('Ooxml Css Gap'), 'css')) expect(pitch).toBeCloseTo(1.3, 2);
   }, 60_000);

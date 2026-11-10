@@ -665,13 +665,14 @@ each format entry.
   keeps the host fallback with a `console.warn`, and no other source is tried.
 - **Lazy subsets:** only the `unicode-range` subsets that intersect the painted
   text are loaded, and installed faces with the authored name are never
-  replaced. Font files the library fetches itself (`fontResolver` URLs in
-  worker mode, sources with `credentials: 'omit'`) are fetched for every face
-  of a claimed family.
+  replaced. The library fetches the font files itself (`fetch()`), so DOCX can
+  read each face's line metrics. `fontResolver` URLs in worker mode and
+  sources with `credentials: 'omit'` are fetched for every face of a claimed
+  family.
 - **Deployment:** cross-origin font URLs need CORS. Stylesheet origins need
-  `connect-src` and font file origins need `font-src` in your CSP; font files
-  the library fetches itself (`fontResolver` URLs in worker mode, sources with
-  `credentials: 'omit'`) also need `connect-src`. Optionally
+  `connect-src` in your CSP, and font file origins need both `connect-src`
+  and `font-src` (for Google Fonts: `connect-src https://fonts.googleapis.com
+  https://fonts.gstatic.com` and `font-src https://fonts.gstatic.com`). Optionally
   add `<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>` for
   Google Fonts. Source limits fail closed with
   `OoxmlError('font-source-limit')`.

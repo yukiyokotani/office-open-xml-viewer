@@ -100,7 +100,10 @@ function installGoogleFontFaceSet(): { added: FakeFace[] } {
   };
   G.FontFace = FakeFontFace;
   G.document = { fonts: set };
-  G.fetch = async () => ({ ok: true, text: async () => GOOGLE_CSS });
+  // The stylesheet, and the face file the library fetches itself.
+  G.fetch = async (url: string) => (/\.woff2$/.test(url)
+    ? { ok: true, status: 200, url, arrayBuffer: async () => new Uint8Array(16).buffer }
+    : { ok: true, text: async () => GOOGLE_CSS });
   delete G.self;
   return { added };
 }

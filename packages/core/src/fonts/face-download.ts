@@ -2,10 +2,14 @@
  * Library acquisition of `url` faces. Library resource policy, not OOXML
  * behaviour.
  *
- * Face files are normally left to `FontFace.load()` in the painting realm.
- * The library fetches them itself, and hands the bytes to `FontFace` as a
- * `data` face, in two cases only:
+ * The library fetches face files itself, and hands the bytes to `FontFace` as
+ * a `data` face (so their OpenType tables can be read for line metrics), in
+ * three cases; any other `url` face is left to `FontFace.load()`:
  *
+ * - a `fontCssApi` / `fontCss` / `fontFiles` source with the default
+ *   credentials (`'same-origin'`, as CSS font fetching): the faces whose
+ *   `unicode-range` the demand so far intersects, when their family is
+ *   claimed (one request per demanded subset);
  * - a source configured with `credentials: 'omit'` (`fontCssApi`, `fontCss`,
  *   `fontFiles`): CSS font fetching always sends same-origin credentials, so
  *   omitting them needs a request of the library's own, in the painting realm;

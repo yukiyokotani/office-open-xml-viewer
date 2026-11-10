@@ -3,7 +3,7 @@
  *
  * A `font-files` source ({@link fontFiles}) declares its faces up front, so it
  * resolves synchronously and fetches nothing at resolution: URL faces are
- * fetched later by `FontFace.load()` in the painting realm, only when their
+ * fetched later in the painting realm (`face-download.ts`), only when their
  * `unicode-range` intersects the demanded scalars, and `data` faces are
  * registered from the owned bytes. The same index matching answers a
  * `font-css` stylesheet once it is parsed (`css-source.ts`).

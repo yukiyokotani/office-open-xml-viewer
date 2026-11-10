@@ -69,6 +69,10 @@ const urlOf = (face: FakeFontFace) => {
   return text.startsWith(FETCHED_FONT_PREFIX) ? text.slice(FETCHED_FONT_PREFIX.length) : undefined;
 };
 const FONT_FILE_URL = /^https:\/\/[^?#]*\.(?:woff2?|ttf|otf)$/;
+/** Requests other than font files (stylesheets). */
+const sheetCalls = <T extends { url: string }>(calls: readonly T[]) => calls.filter((call) => !FONT_FILE_URL.test(call.url));
+/** Font-file requests (the library fetches demanded CSS faces itself). */
+const fileCalls = <T extends { url: string }>(calls: readonly T[]) => calls.filter((call) => FONT_FILE_URL.test(call.url));
 
 /** A font-file response for a URL no route names (the default `fetch`). */
 function fontFileResponse(url: string) {
@@ -219,8 +223,14 @@ describe('FontSourceSession: stylesheet URLs', () => {
     expect(set.faces.map(urlOf)).toEqual([
       'https://cdn.internal.example/v7/files/brand.woff2', 'https://cdn.internal.example/abs/serif.woff2',
     ]);
-    expect(calls).toHaveLength(1);
-    expect(calls[0].init?.credentials).toBe('same-origin');
+    // The stylesheet, then each demanded face (fetched by the library with
+    // the CSS font-loading credentials and registered from its bytes).
+    expect(calls.map((call) => [call.url, call.init?.credentials])).toEqual([
+      ['https://fonts.internal.example:8443/kit.css', 'same-origin'],
+      ['https://cdn.internal.example/v7/files/brand.woff2', 'same-origin'],
+      ['https://cdn.internal.example/abs/serif.woff2', 'same-origin'],
+    ]);
+    expect(set.faces.every((face) => typeof face.source !== 'string')).toBe(true);
   });
 });
 
@@ -318,7 +328,8 @@ describe('FontSourceSession: isolation and sharing', () => {
       open([googleFonts({ cssOrigin: MIRROR })], mirrorSet).ensure(demand(['Calibri'])),
       open([googleFonts({ cssOrigin: INTERNAL })], internalSet).ensure(demand(['Calibri'])),
     ]);
-    expect(calls.map((call) => new URL(call.url).origin).sort()).toEqual([INTERNAL, MIRROR]);
+    expect(sheetCalls(calls).map((call) => new URL(call.url).origin).sort()).toEqual([INTERNAL, MIRROR]);
+    expect(fileCalls(calls).map((call) => call.url)).toEqual([`${INTERNAL}/carlito.woff2`]);
     expect(mirror.faces).toEqual([]);
     expect(mirror.substitutions.size).toBe(0);
     expect(internal.faces.map((face) => urlOf(face.face as unknown as FakeFontFace)))
@@ -334,7 +345,8 @@ describe('FontSourceSession: isolation and sharing', () => {
     const a = open([fontCss({ url: 'https://fonts.example/a.css' })], set);
     const b = open([fontCss({ url: 'https://fonts.example/a.css' })], set);
     const [loadedA, loadedB] = await Promise.all([a.ensure(demand(['Brand'])), b.ensure(demand(['Brand']))]);
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    // One stylesheet and one face download, shared by both documents.
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual(['https://fonts.example/a.css', 'https://fonts.example/brand.woff2']);
     expect(set.faces).toHaveLength(1);
     expect(loadedA.faces[0].face).toBe(loadedB.faces[0].face);
 
@@ -374,8 +386,12 @@ describe('FontSourceSession: isolation and sharing', () => {
     const set = fakeSet();
     const loaded = await open([googleFonts({ cssOrigin: CN })], set)
       .ensure(demand(['Calibri'], [0x61, 0x3042], ['Noto Sans JP']));
-    expect(calls).toHaveLength(2);
-    expect(calls.every((call) => new URL(call.url).origin === CN)).toBe(true);
+    expect(sheetCalls(calls)).toHaveLength(2);
+    expect(sheetCalls(calls).every((call) => new URL(call.url).origin === CN)).toBe(true);
+    // The face files come from the URLs the mirror's CSS names.
+    expect(fileCalls(calls).map((call) => call.url)).toEqual([
+      'https://fonts.gstatic.cn/s/carlito/latin.woff2', 'https://fonts.gstatic.cn/s/notosansjp/kana.woff2',
+    ]);
     const contacted = [...calls.map((call) => call.url), ...set.faces.map(urlOf)];
     expect(contacted.filter((url) => /fonts\.(googleapis|gstatic)\.com/.test(String(url)))).toEqual([]);
     expect(loaded.faces.map((face) => face.family)).toEqual(['Carlito', 'Noto Sans JP']);
@@ -396,7 +412,8 @@ describe('FontSourceSession: isolation and sharing', () => {
     ]);
     // One stylesheet request and one registered face per origin, although the
     // family and descriptors are identical.
-    expect(calls.map((call) => call.url).sort()).toEqual([carlitoAt(MIRROR), carlitoAt(OTHER)].sort());
+    expect(sheetCalls(calls).map((call) => call.url).sort()).toEqual([carlitoAt(MIRROR), carlitoAt(OTHER)].sort());
+    expect(fileCalls(calls).map((call) => call.url).sort()).toEqual([`${MIRROR}/carlito.woff2`, `${OTHER}/carlito.woff2`]);
     expect(set.faces.map(urlOf).sort()).toEqual([`${MIRROR}/carlito.woff2`, `${OTHER}/carlito.woff2`]);
     expect(urlOf(loadedFirst.faces[0].face as unknown as FakeFontFace)).toBe(`${MIRROR}/carlito.woff2`);
     expect(urlOf(loadedSecond.faces[0].face as unknown as FakeFontFace)).toBe(`${OTHER}/carlito.woff2`);
@@ -417,7 +434,10 @@ describe('FontSourceSession: isolation and sharing', () => {
     await first.ensure(demand(['Brand']));
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect((await open([source], fakeSet()).ensure(demand(['Brand']))).faces).toHaveLength(1);
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    // The stylesheet again, then the face file.
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      'https://fonts.example/a.css', 'https://fonts.example/a.css', 'https://fonts.example/brand.woff2',
+    ]);
   });
 });
 
@@ -438,8 +458,11 @@ describe('FontSourceSession: claim-once chaining', () => {
     ]);
     expect(loaded.faces.map((face) => face.sourceIndex)).toEqual([1, 0, 1]);
     expect(loaded.substitutions.get('calibri')).toEqual({ family: 'Carlito' });
-    // The stylesheet, and the fontFiles face the library fetches itself.
-    expect(calls.map((call) => call.url)).toEqual(['https://fonts.example/all.css', 'https://app.example/carlito.woff2']);
+    // The stylesheet, and every claimed face, which the library fetches itself.
+    expect(sheetCalls(calls).map((call) => call.url)).toEqual(['https://fonts.example/all.css']);
+    expect(fileCalls(calls).map((call) => call.url).sort()).toEqual([
+      'https://app.example/carlito.woff2', 'https://fonts.example/css-carlito.woff2', 'https://fonts.example/other.woff2',
+    ]);
   });
 
   it('never consults a later source for a family whose source failed', async () => {
@@ -489,10 +512,12 @@ describe('FontSourceSession: claim-once chaining', () => {
       families: ['Private', 'Calibri'], fallbackFamilies: ['Noto Sans JP'],
     }]);
     expect(loaded.faces.map((face) => face.family)).toEqual(['Private', 'Carlito']);
-    // The cached resolution and the registered face are both real copies.
-    expect(retainedFontSourceBytes()).toBe(6);
+    // The cached resolution and the registered face are both real copies,
+    // and the Carlito file the library fetched is kept and registered too.
+    const carlitoFile = fetchedFontBody('https://fonts.googleapis.com/carlito.woff2').byteLength;
+    expect(retainedFontSourceBytes()).toBe(6 + 2 * carlitoFile);
     // Noto Sans JP passed through the resolver to the preset.
-    expect(calls.map((call) => new URL(call.url).searchParams.get('family')))
+    expect(sheetCalls(calls).map((call) => new URL(call.url).searchParams.get('family')))
       .toEqual(['Carlito:ital,wght@0,400;0,700;1,400;1,700', 'Noto Sans JP:wght@400;700']);
 
     const failing = fontResolver(() => { throw new Error('token expired'); });
@@ -1008,7 +1033,7 @@ describe('FontSourceSession: script-scoped substitution proof (FontSessionDemand
       ...demand(['Sakkal Majalla'], [0x645]), substituteScripts: { 'sakkal majalla': ['arabic'] },
     });
     expect(arabic.substitutions.get('sakkal majalla')).toEqual({ family: 'Noto Naskh Arabic', script: 'arabic' });
-    expect(calls.map(({ url }) => url)).toEqual([NASKH]);
+    expect(sheetCalls(calls).map(({ url }) => url)).toEqual([NASKH]);
     // Unscoped substitutions and the family's own faces are never restricted.
     const files = fontFiles({ faces: [{ family: 'Sakkal Majalla', url: 'https://app.example/s.woff2' }] });
     const own = await open([files, preset], set).ensure({
@@ -1077,17 +1102,25 @@ describe('FontSourceSession: served face tables', () => {
   });
 
   it('hands out the probe source of a face without readable tables', async () => {
-    installFetch({ 'https://fonts.example/v.css': { css: rule('Css Face', 'css.woff2') } });
+    const { calls } = installFetch({
+      'https://fonts.example/v.css': { css: rule('Css Face', 'css.woff2', LATIN) + rule('Css Face', 'css-kana.woff2', KANA) },
+    });
     const set = fakeSet();
     const opaque = new Uint8Array(64).fill(7).buffer;
-    const loaded = await open([
+    const session = open([
       fontFiles({ faces: [{ family: 'Opaque Face', data: opaque }] }),
       fontCss({ url: 'https://fonts.example/v.css' }),
-    ], set).ensure(demand(['Opaque Face', 'Css Face']));
-    expect(loaded.faces).toHaveLength(2);
-    expect(loaded.faces.every((face) => face.resourceMetrics === undefined)).toBe(true);
-    // The browser fetched the stylesheet face: its url() value; the opaque
-    // data face: its own bytes.
-    expect(loaded.faces.map((face) => face.probeSource)).toEqual([opaque, 'url("https://fonts.example/css.woff2")']);
+    ], set);
+    const first = await session.ensure(demand(['Opaque Face', 'Css Face'], [0x61]));
+    expect(first.faces).toHaveLength(2);
+    expect(first.faces.every((face) => face.resourceMetrics === undefined)).toBe(true);
+    // A data face, or a stylesheet face the library fetched: their own bytes.
+    expect(first.faces.map((face) => face.probeSource)).toEqual([opaque, fetchedFontBody('https://fonts.example/css.woff2')]);
+    expect(fileCalls(calls).map((call) => call.url)).toEqual(['https://fonts.example/css.woff2']);
+    // A subset only a later delta needs was registered by URL, so the
+    // browser fetched it: its url() value.
+    const later = await session.ensure(demand(['Opaque Face', 'Css Face'], [0x3042]));
+    expect(later.faces.map((face) => face.probeSource).at(-1)).toBe('url("https://fonts.example/css-kana.woff2")');
+    expect(fileCalls(calls)).toHaveLength(1);
   });
 });
