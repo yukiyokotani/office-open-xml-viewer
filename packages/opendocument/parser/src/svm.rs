@@ -22,6 +22,9 @@ const MAX_ACTIONS: u32 = 2_000_000;
 const MAX_SVG_BYTES: usize = 64 * 1024 * 1024;
 const MAX_STACK: usize = 1024;
 
+/// A polygon's points and its optional per-point flags (`tools::Polygon`).
+type FlaggedPolygon = (Vec<(f64, f64)>, Option<Vec<u8>>);
+
 struct Reader<'a> {
     b: &'a [u8],
     p: usize,
@@ -90,7 +93,7 @@ impl<'a> Reader<'a> {
         Some(out)
     }
     /// `tools::Polygon::Read`: compat, points, and optional point flags.
-    fn polygon_with_flags(&mut self) -> Option<(Vec<(f64, f64)>, Option<Vec<u8>>)> {
+    fn polygon_with_flags(&mut self) -> Option<FlaggedPolygon> {
         let (_, end) = self.compat()?;
         let points = self.polygon()?;
         let flags = if self.u8()? != 0 {
@@ -283,16 +286,13 @@ pub fn to_svg(bytes: &[u8]) -> Option<Converted> {
                 }
                 _ => out.push_str(r#" fill="none""#),
             }
-            match (stroke, s.line) {
-                (true, Some(c)) => {
-                    let _ = write!(
-                        out,
-                        r#" stroke="{}" stroke-width="{:.2}""#,
-                        css(c),
-                        width.max(len_scale(1.0)).max(width)
-                    );
-                }
-                _ => {}
+            if let (true, Some(c)) = (stroke, s.line) {
+                let _ = write!(
+                    out,
+                    r#" stroke="{}" stroke-width="{:.2}""#,
+                    css(c),
+                    width.max(len_scale(1.0)).max(width)
+                );
             }
             out
         };
@@ -434,7 +434,7 @@ pub fn to_svg(bytes: &[u8]) -> Option<Converted> {
                     r.p = end;
                     continue;
                 };
-                let mut polys: Vec<(Vec<(f64, f64)>, Option<Vec<u8>>)> = Vec::new();
+                let mut polys: Vec<FlaggedPolygon> = Vec::new();
                 for _ in 0..n {
                     match a.polygon() {
                         Some(p) => polys.push((p, None)),
@@ -473,7 +473,7 @@ pub fn to_svg(bytes: &[u8]) -> Option<Converted> {
                 );
             }
             // TEXT, TEXTARRAY, STRETCHTEXT
-            112 | 113 | 114 => {
+            112..=114 => {
                 let Some(origin) = a.point() else {
                     r.p = end;
                     continue;
