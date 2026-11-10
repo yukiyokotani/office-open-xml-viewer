@@ -124,9 +124,13 @@ export interface PptxViewerOptions extends Pick<RenderOptions, 'width' | 'dpr' |
   /**
    * How hidden slides (`<p:sld show="0">`, §19.3.1.38) are presented:
    * - `'show'` (default): drawn like any other slide.
-   * - `'skip'`: sequential navigation (`nextSlide`/`prevSlide`, initial load)
-   *   jumps over them; absolute indices are unchanged, and an explicit
-   *   `goToSlide(i)` to a hidden slide is still honored.
+   * - `'skip'`: hidden slides are never drawn. Sequential navigation
+   *   (`nextSlide`/`prevSlide`, initial load) jumps over them; `goToSlide(i)`
+   *   (and an internal hyperlink or find match) aimed at a hidden slide lands on
+   *   the next shown slide after it, else the nearest shown slide before it;
+   *   `findText` returns no matches on hidden slides. Absolute indices are
+   *   unchanged. If every slide is hidden there is nothing to skip to, and the
+   *   requested slide is drawn as in `'show'`.
    * - `'dim'`: drawn under a translucent overlay (PowerPoint thumbnail look).
    *
    * Named to match the {@link PptxViewer.hiddenSlideMode} getter and
@@ -301,6 +305,8 @@ export class PptxViewer implements ZoomableViewer {
     this._find = new PptxFindController(
       () => this.slideCount,
       (slide) => this._collectSlideRuns(slide),
+      // 'skip' never draws a hidden slide, so find neither scans nor matches it.
+      (slide) => !(this._hiddenMode === 'skip' && this.engine?.isHidden(slide)),
     );
     if (borrowedPresentation) this._bindLayoutPresentation(borrowedPresentation);
   }
@@ -385,7 +391,12 @@ export class PptxViewer implements ZoomableViewer {
     if (selectionInvalidated && !this.destroyed) this._emitSelectionContextChange();
   }
 
-  /** Navigate to a specific slide (0-indexed). */
+  /**
+   * Navigate to a specific slide (0-indexed; out-of-range indices clamp). With
+   * `hiddenSlideMode: 'skip'` a hidden target is replaced by the next shown
+   * slide after it, else the nearest shown slide before it (see
+   * {@link PptxViewerOptions.hiddenSlideMode}).
+   */
   async goToSlide(index: number): Promise<void> {
     const generation = this._beginNavigation();
     await this._goToSlide(index, generation);
@@ -394,7 +405,15 @@ export class PptxViewer implements ZoomableViewer {
   private async _goToSlide(index: number, generation: number): Promise<void> {
     if (generation !== this._navigationGeneration) return;
     if (!this.engine || this.slideCount === 0) return;
-    const next = Math.max(0, Math.min(index, this.slideCount - 1));
+    let next = Math.max(0, Math.min(index, this.slideCount - 1));
+    if (this._hiddenMode === 'skip') {
+      const shown = await this._nearestShownSlide(next, generation);
+      if (generation !== this._navigationGeneration) return;
+      // `undefined`: every slide is hidden, so the target is drawn as in 'show'
+      // (as the initial load does). `null`: the slide never became available;
+      // the render below reports that exactly as before.
+      if (typeof shown === 'number') next = shown;
+    }
     const changed = next !== this.currentSlide;
     if (changed) this._invalidateElementSelection(false);
     this.currentSlide = next;
@@ -421,16 +440,44 @@ export class PptxViewer implements ZoomableViewer {
     const engine = this.engine;
     const from = this.currentSlide;
     if (this._hiddenMode !== 'skip' || !engine) return from + dir;
-    for (let i = from + dir; i >= 0 && i < this.slideCount; i += dir) {
+    const found = await this._scanShown(from + dir, dir, generation);
+    return typeof found === 'number' ? found : from;
+  }
+
+  /**
+   * First non-hidden slide from `start` (inclusive) in direction `dir`, waiting
+   * for progressively laid-out slides. `undefined` when there is none; `null`
+   * when the scan was superseded or a slide never became available.
+   */
+  private async _scanShown(
+    start: number,
+    dir: 1 | -1,
+    generation: number,
+  ): Promise<number | undefined | null> {
+    const engine = this.engine;
+    if (!engine) return null;
+    for (let i = start; i >= 0 && i < this.slideCount; i += dir) {
       if (i >= engine.availableSlideCount) {
         if (!engine.layoutComplete) this._setLoading(true);
         if (!await this._waitForSlide(engine, i, () => generation === this._navigationGeneration)) {
-          return from;
+          return null;
         }
       }
       if (!engine.isHidden(i)) return i;
     }
-    return from;
+    return undefined;
+  }
+
+  /** Skip-mode target for an absolute jump: `index` itself when shown, else the
+   *  next shown slide after it, else the nearest shown slide before it (the
+   *  same direction preference as {@link setHiddenSlideMode}). */
+  private async _nearestShownSlide(
+    index: number,
+    generation: number,
+  ): Promise<number | undefined | null> {
+    const forward = await this._scanShown(index, 1, generation);
+    if (forward !== undefined) return forward;
+    return await this._scanShown(index - 1, -1, generation);
   }
 
   /** Initial slide for load() / mode switch: skip mode lands on a visible one. */
@@ -456,10 +503,16 @@ export class PptxViewer implements ZoomableViewer {
 
   /**
    * Switch the hidden-slide mode at runtime and re-render. Entering `'skip'`
-   * while on a hidden slide advances to the nearest visible slide.
+   * while on a hidden slide advances to the nearest visible slide. Entering or
+   * leaving `'skip'` changes which slides find may match, so it clears the
+   * current search (matches, active match and highlights); call
+   * {@link findText} again.
    */
   async setHiddenSlideMode(mode: HiddenSlideMode): Promise<void> {
     const generation = this._beginNavigation();
+    // Entering or leaving 'skip' changes which slides find may match, so the
+    // current find (and its highlights) is cleared; call findText again.
+    if ((this._hiddenMode === 'skip') !== (mode === 'skip')) this._invalidateFind();
     this._hiddenMode = mode;
     let next = this.currentSlide;
     if (mode === 'skip' && this.engine) {
@@ -860,13 +913,14 @@ export class PptxViewer implements ZoomableViewer {
   }
 
   /**
-   * IX2 — find every occurrence of `query` across all slides and highlight them
-   * (a soft box per match on the highlight overlay). Returns every match in
-   * document order, each tagged with its `{ slide }` (0-based). Case-insensitive
-   * by default; pass `{ caseSensitive: true }` for an exact match.
+   * IX2 — find every occurrence of `query` and highlight them (a soft box per
+   * match on the highlight overlay). Returns every match in document order, each
+   * tagged with its `{ slide }` (0-based). Case-insensitive by default; pass
+   * `{ caseSensitive: true }` for an exact match.
    *
-   * Scans all slides (each rendered once offscreen to read its text; the visible
-   * slide reuses its on-screen render). IX6 — works in BOTH `mode: 'main'` and
+   * Scans every slide, except that with `hiddenSlideMode: 'skip'` hidden slides
+   * are neither scanned nor matched (each scanned slide is rendered once
+   * offscreen to read its text; the visible slide reuses its on-screen render). IX6 — works in BOTH `mode: 'main'` and
    * `mode: 'worker'`: in worker mode each slide's run geometry is collected
    * off-thread and shipped back, so find returns the same matches on the same
    * code path. An empty query clears the find.
