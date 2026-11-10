@@ -191,10 +191,7 @@ export interface LoadOptions extends CoreLoadOptions {
    *
    * Early pages are provisional because later header/footer, field or anchored
    * object convergence can still repaginate them. The finished layout is
-   * byte-identical to a blocking load either way. `DocxViewer` and
-   * `DocxScrollViewer` repaint their pages when it lands; callers of
-   * {@link DocxDocument.renderPage} own their canvases and must render again
-   * after {@link onLayoutComplete} or {@link DocxDocument.waitUntilLayoutComplete}.
+   * byte-identical to a blocking load either way.
    *
    * Await {@link DocxDocument.waitUntilLayoutComplete} before anything that needs the
    * whole document: page-count-sensitive UI, text search, bookmark navigation,
@@ -206,6 +203,14 @@ export interface LoadOptions extends CoreLoadOptions {
    * metadata for whichever one the load chose. In worker mode the pagination
    * stays in the render worker, so the opening pages arrive without a blank
    * wait AND the remaining layout never competes for main-thread frames.
+   *
+   * Pages shown before layout completes are provisional and can differ from the
+   * final layout: page breaks may move, and content can occasionally overlap
+   * (for example body text running into a footer taller than the bottom
+   * margin). `DocxViewer` and `DocxScrollViewer` redraw every page when layout
+   * completes; callers of {@link DocxDocument.renderPage} own their canvases
+   * and must render again after {@link onLayoutComplete} or
+   * {@link DocxDocument.waitUntilLayoutComplete}.
    *
    * Off by default: `load()` resolving before the document is fully laid out is
    * a behaviour change existing callers should opt into.

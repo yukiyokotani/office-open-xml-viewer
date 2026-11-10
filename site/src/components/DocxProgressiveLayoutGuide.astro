@@ -56,6 +56,16 @@ console.log('Final page count:', viewer.pageCount);`;
           </p>
         </article>
         <article>
+          <h3>Pages settle too</h3>
+          <p>
+            Pages shown before layout completes are provisional. Page breaks may move and content
+            can occasionally overlap, for example body text over a tall footer.
+            <code>DocxViewer</code> and <code>DocxScrollViewer</code> redraw every page once layout
+            completes; code that calls <code>DocxDocument.renderPage()</code> directly must render
+            its pages again.
+          </p>
+        </article>
+        <article>
           <h3>Page fields converge too</h3>
           <p>
             <code>DocxViewer</code> and <code>DocxScrollViewer</code> repaint provisional pages,

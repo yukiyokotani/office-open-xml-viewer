@@ -551,7 +551,11 @@ For a large DOCX file, set `progressiveLayout: true` to resolve `load()` when th
 opening pages are paintable while the same paginator continues in the background.
 It is available on `DocxViewer`, `DocxScrollViewer`, and `DocxDocument.load()` in
 both render modes. Pair it with `mode: 'worker'` when the remaining layout and
-paint work should also stay off the UI thread.
+paint work should also stay off the UI thread. Pages shown before layout
+completes are provisional: page breaks may move and content can occasionally
+overlap. `DocxViewer` and `DocxScrollViewer` redraw every page once layout
+completes; code that calls `DocxDocument.renderPage()` directly must render its
+pages again after `waitUntilLayoutComplete()`.
 
 ```typescript
 import { DocxScrollViewer } from '@silurus/ooxml/docx';
