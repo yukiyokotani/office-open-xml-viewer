@@ -72,6 +72,7 @@ import {
 import { resolveFontFiles } from './files-source.js';
 import { parseOpenTypeResourceMetrics, type OpenTypeLineMetrics } from './open-type-metrics.js';
 import { metricSfnt } from './web-font-sfnt.js';
+import { DecodeQueue } from './decode-queue.js';
 import { concludeFamilies } from './resolver-failures.js';
 import {
   claimResolverCandidates,
@@ -174,7 +175,7 @@ export interface FontSourceSessionOptions {
 /** Parsed tables per registered face (null: unreadable). A face shared by
  * sessions of one realm was created from one signature (content included),
  * so its bytes, and hence its tables, are the same for every holder. Decoding
- * is serialised through {@link withDecodeSlot}. */
+ * is bounded through {@link metricDecodes}. */
 const faceResourceMetrics = new WeakMap<FontFace, OpenTypeLineMetrics | null>();
 
 /** Source identity (`SourceCache.id`) of every face a session registered,
@@ -188,35 +189,21 @@ export function fontSourceFaceIdentity(face: FontFace): string | undefined {
   return sourceFaceIdentities.get(face);
 }
 
-/** Concurrent metric-table decodes per realm: a WOFF/WOFF2 decode inflates
- * up to `MAX_INFLATED_BYTES`, so few run at once. */
-const MAX_CONCURRENT_DECODES = 2;
-let activeDecodes = 0;
-const decodeQueue: (() => void)[] = [];
+/** Metric-table decodes of this realm: a WOFF/WOFF2 decode inflates up to
+ * `MAX_INFLATED_BYTES`, so at most two run at once; a released document's
+ * queued decodes are dropped (`decode-queue.ts`). */
+const metricDecodes = new DecodeQueue(2);
 
-async function withDecodeSlot<T>(run: () => Promise<T>): Promise<T> {
-  if (activeDecodes >= MAX_CONCURRENT_DECODES) await new Promise<void>((resolve) => decodeQueue.push(resolve));
-  else activeDecodes++;
-  try {
-    return await run();
-  } finally {
-    const next = decodeQueue.shift();
-    if (next) next();
-    else activeDecodes--;
-  }
+/** Read the metric tables of `data` once per face, on behalf of `holder`;
+ * rejects with an `AbortError` once `signal` aborts. */
+function prepareResourceMetrics(face: FontFace, data: ArrayBuffer, holder: object, signal: AbortSignal): Promise<void> {
+  if (faceResourceMetrics.has(face)) return Promise.resolve();
+  return metricDecodes.run(face, holder, () => decodeResourceMetrics(face, data), signal);
 }
 
-/** Read the metric tables of `data` once per face (WOFF/WOFF2 inflate). */
-const pendingResourceMetrics = new WeakMap<FontFace, Promise<void>>();
-
-function prepareResourceMetrics(face: FontFace, data: ArrayBuffer): Promise<void> {
-  if (faceResourceMetrics.has(face)) return Promise.resolve();
-  let pending = pendingResourceMetrics.get(face);
-  if (!pending) {
-    pending = withDecodeSlot(() => decodeResourceMetrics(face, data));
-    pendingResourceMetrics.set(face, pending);
-  }
-  return pending;
+/** Decodes queued or running in this realm (tests, leak checks). */
+export function pendingMetricDecodeCount(): number {
+  return metricDecodes.size;
 }
 
 async function decodeResourceMetrics(face: FontFace, data: ArrayBuffer): Promise<void> {
@@ -596,6 +583,7 @@ export class FontSourceSession {
     this.points.clear();
     for (const cache of this.caches) cache.release();
     releaseAcquiredFaces(this);
+    metricDecodes.release(this);
     this.acquiredFaces.clear();
     refundRetainedBytes(this.acquiredFaceBytes);
     this.acquiredFaceBytes = 0;
@@ -709,7 +697,7 @@ export class FontSourceSession {
     if (this.closed) return this.settledState();
     await Promise.all([...this.owned.values()].flatMap((entry) =>
       entry.face.status === 'loaded' && entry.declaration.data !== undefined
-        ? [prepareResourceMetrics(entry.face, entry.declaration.data)] : []));
+        ? [prepareResourceMetrics(entry.face, entry.declaration.data, this, this.controller.signal)] : []));
     if (this.closed) return this.settledState();
     this.warn(failures);
     this.snapshot = this.takeSnapshot();

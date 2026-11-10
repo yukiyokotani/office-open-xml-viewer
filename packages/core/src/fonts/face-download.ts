@@ -31,7 +31,20 @@
  * breach rejects with `OoxmlError('font-source-limit')` and aborts the rest of
  * the batch. A network error, a non-OK status or a missed deadline fails that
  * face only. A completed download is shared by every holder of the same
- * (credentials, URL) until the last holder releases it; a failure is not kept.
+ * (credentials, URL) until the last holder releases it.
+ *
+ * Every holder of a (credentials, URL) in this realm gets one outcome while
+ * any of them holds it: the faces it decides are registered in one shared
+ * FontFaceSet, so a face one document laid out without must not appear for
+ * another (it would repaint the first, and an earlier overlapping
+ * declaration registered after a later one would reverse CSS
+ * `unicode-range` precedence). The first terminal outcome is kept for its
+ * holders: kept bytes are adopted by a requester whose own request failed
+ * or timed out, and a kept failure is adopted by later requesters (and by
+ * one whose own request completed after it) instead of being retried. A
+ * failure is kept only while a holder that adopted it is open, so a document
+ * opened after every such holder closed retries. A cancellation (the
+ * requester released) is no outcome.
  */
 import { fontSourceLimitError } from '../errors/font-source-limit.js';
 import { OoxmlError } from '../errors/ooxml-error.js';
@@ -167,6 +180,23 @@ class Entry {
 /** Kept and in-flight acquisitions, by `credentials\0url`. */
 const entries = new Map<string, Entry>();
 
+/** Kept failures, by `credentials\0url`: the reason and the holders that
+ * adopted it (see the module comment). */
+const failures = new Map<string, { readonly reason: string; readonly holders: Set<object> }>();
+
+function keptFailure(key: string, holder: object): FaceAcquisition | undefined {
+  const failure = failures.get(key);
+  if (!failure) return undefined;
+  failure.holders.add(holder);
+  return { reason: failure.reason };
+}
+
+function keepFailure(key: string, holder: object, reason: string): void {
+  const failure = failures.get(key);
+  if (failure) failure.holders.add(holder);
+  else failures.set(key, { reason, holders: new Set([holder]) });
+}
+
 function dropEntry(key: string, entry: Entry): void {
   if (entries.get(key) === entry) entries.delete(key);
   refundRetainedBytes(entry.charged);
@@ -300,6 +330,10 @@ export async function acquireFaceUrls(
   },
 ): Promise<Map<string, FaceAcquisition>> {
   const { credentials, holder, deadline } = options;
+  // A deadline ends the wait with an outcome; any other abort of `signal` is
+  // a cancellation (the requester is gone), which decides nothing.
+  const cancelled = () => releasedHolders.has(holder)
+    || (options.signal.aborted && options.signal.reason !== FONT_DEADLINE_REASON);
   const batch = new AbortController();
   const onAbort = () => batch.abort();
   options.signal.addEventListener('abort', onAbort, { once: true });
@@ -307,13 +341,39 @@ export async function acquireFaceUrls(
   try {
     const unique = [...new Set(urls)];
     const results = await Promise.all(unique.map(async (url): Promise<[string, FaceAcquisition]> => {
+      const key = `${credentials}\u0000${url}`;
+      if (!releasedHolders.has(holder) && !entries.get(key)?.settled) {
+        const failed = keptFailure(key, holder);
+        if (failed) return [url, failed];
+      }
+      let result: FaceAcquisition;
       try {
-        const result = await acquireOne(url, credentials, batch.signal, holder);
-        return [url, Date.now() > deadline ? { reason: 'timed out' } : result];
+        result = await acquireOne(url, credentials, batch.signal, holder);
+        if (Date.now() > deadline && 'data' in result) {
+          // Missed the deadline: the bytes stay only if another holder keeps them.
+          const entry = entries.get(key);
+          if (entry) returnLease(key, entry, holder);
+          result = { reason: 'timed out' };
+        }
       } catch (error) {
         if (error instanceof OoxmlError) { batch.abort(); throw error; }
-        return [url, { reason: 'timed out' }];
+        result = { reason: 'timed out' };
       }
+      if (cancelled()) return [url, 'data' in result ? result : { reason: 'timed out' }];
+      if ('data' in result) {
+        // Another holder's failure came first: adopt it, keep no bytes.
+        if (failures.has(key)) {
+          const entry = entries.get(key);
+          if (entry) returnLease(key, entry, holder);
+          return [url, keptFailure(key, holder)!];
+        }
+        return [url, result];
+      }
+      // Bytes another holder keeps come first; else this failure is kept.
+      const kept = keptAcquisition(url, credentials, holder);
+      if (kept) return [url, { data: kept }];
+      keepFailure(key, holder, result.reason);
+      return [url, result];
     }));
     return new Map(results);
   } finally {
@@ -324,6 +384,9 @@ export async function acquireFaceUrls(
 /** Return every acquisition `holder` keeps; idempotent. */
 export function releaseAcquiredFaces(holder: object): void {
   releasedHolders.add(holder);
+  for (const [key, failure] of [...failures]) {
+    if (failure.holders.delete(holder) && failure.holders.size === 0) failures.delete(key);
+  }
   for (const [key, entry] of [...entries]) {
     if (!entry.leases.delete(holder)) continue;
     if (entry.leases.size === 0 && entry.settled) dropEntry(key, entry);
@@ -332,7 +395,7 @@ export function releaseAcquiredFaces(holder: object): void {
 
 /** Acquisitions this realm keeps or runs (tests, leak checks). */
 export function acquiredFaceCount(): number {
-  return entries.size;
+  return entries.size + failures.size;
 }
 
 /** `declaration` with its acquired bytes in place of the URL. */

@@ -69,6 +69,19 @@ describe('metric tables of web font files', () => {
     expect(await metricSfnt(over)).toBeNull();
   });
 
+  it('counts the assembled sfnt itself in the budget', async () => {
+    // One kept table declared just under the budget: alone it would fit, but
+    // the sfnt it is assembled into (header, records, the other tables) does
+    // not. Rejected from the declared sizes, before the buffer exists.
+    const over = editedWoff((view, records) => {
+      const compressed = records.find((at) => tagAt(view, at) === 'cmap' && view.getUint32(at + 8) < view.getUint32(at + 12))
+        ?? records.find((at) => ['head', 'hhea', 'OS/2'].includes(tagAt(view, at)) && view.getUint32(at + 8) < view.getUint32(at + 12));
+      expect(compressed).toBeDefined();
+      view.setUint32(compressed! + 12, MAX_INFLATED_BYTES - 8);
+    });
+    expect(await metricSfnt(over)).toBeNull();
+  });
+
   it('checks Brotli support before allocating any WOFF2 table', async () => {
     const Native = globalThis.DecompressionStream;
     vi.stubGlobal('DecompressionStream', class extends Native {

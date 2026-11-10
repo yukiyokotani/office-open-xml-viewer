@@ -6,7 +6,7 @@ import { OoxmlError } from '../errors/ooxml-error.js';
 import { HARD_MAX_FONT_SOURCE_FACE_BYTES, HARD_MAX_FONT_SOURCE_FAMILIES } from '../worker/resource-policy.generated.js';
 import { googleFonts } from './presets/google-fonts.js';
 import { liveSourceCacheCount, sourceCacheEntryCount } from './source-cache.js';
-import { FontSourceSession, fontSourceFaceIdentity, retainedFontSourceBytes, type FontSessionDemand } from './source-session.js';
+import { FontSourceSession, fontSourceFaceIdentity, pendingMetricDecodeCount, retainedFontSourceBytes, type FontSessionDemand } from './source-session.js';
 import {
   fontCssApi,
   fontCss,
@@ -153,6 +153,8 @@ beforeEach(() => {
 afterEach(() => {
   for (const session of sessions.splice(0)) session.release();
   expect(liveSourceCacheCount()).toBe(0);
+  // Released sessions leave no queued metric decode behind.
+  expect(pendingMetricDecodeCount()).toBe(0);
   expect(retainedFontSourceBytes()).toBe(0);
   Object.assign(G, ORIGINAL);
   vi.restoreAllMocks();
@@ -207,6 +209,34 @@ describe('FontSourceSession: lazy unicode-range loading', () => {
     expect(set.faces.map(urlOf)).toEqual([
       'https://fonts.example/kana.woff2', 'https://fonts.example/base.woff2', 'https://fonts.example/ext.woff2',
     ]);
+  });
+
+  it('keeps one outcome per face while a document holds it, so overlapping precedence never reverses', async () => {
+    // A (U+0-FF) and B (U+80-17F) overlap: one component, declared A then B,
+    // so B wins U+80-FF. Document 1 cannot fetch A and lays out with B alone.
+    const sheet = rule('Brand', 'a.woff2', 'unicode-range: U+0-FF;') + rule('Brand', 'b.woff2', 'unicode-range: U+80-17F;');
+    const routes: Record<string, Route> = { [SHEET_URL]: { css: sheet }, 'https://fonts.example/a.woff2': { status: 503 } };
+    const { calls } = installFetch(routes);
+    const set = fakeSet();
+    const source = fontCss({ url: SHEET_URL });
+    const first = open([source], set);
+    await first.ensure(demand(['Brand'], [0x41]));
+    expect(set.faces.map(urlOf)).toEqual(['https://fonts.example/b.woff2']);
+    // A would load now, but document 2 adopts document 1's outcome: no
+    // retry, and A never appears to repaint document 1 or to be registered
+    // after B (which would reverse CSS precedence).
+    delete routes['https://fonts.example/a.woff2'];
+    const second = open([source], set);
+    await second.ensure(demand(['Brand'], [0x41]));
+    expect(set.faces.map(urlOf)).toEqual(['https://fonts.example/b.woff2']);
+    expect(fileCalls(calls).map((call) => call.url).filter((url) => url.endsWith('/a.woff2'))).toHaveLength(1);
+    // Once every holder closed, a new document retries and registers the
+    // component in declaration order.
+    first.release();
+    second.release();
+    const third = open([source], set);
+    await third.ensure(demand(['Brand'], [0x41]));
+    expect(set.faces.map(urlOf)).toEqual(['https://fonts.example/a.woff2', 'https://fonts.example/b.woff2']);
   });
 
   it('gives a face one registration across documents, whichever subsets each demands first', async () => {

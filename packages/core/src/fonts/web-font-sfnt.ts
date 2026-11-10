@@ -14,12 +14,13 @@
  *   is bundled: without native support the tables are unavailable
  *   (`'unsupported'`) and callers measure the face instead.
  *
- * One budget per file, {@link MAX_INFLATED_BYTES}, covers everything the
- * decode inflates and allocates: it is checked against the declared sizes
- * before any table buffer is allocated, and against the bytes actually
- * produced while inflating (never trusting a declared size). WOFF 1.0 counts
- * every kept table, inflated or stored; WOFF 2.0 inflates its stream only up
- * to the end of the last kept table. A directory that repeats a tag is
+ * One budget per file, {@link MAX_INFLATED_BYTES}, covers everything a decode
+ * holds at once: the single output buffer (the assembled sfnt; tables are
+ * inflated straight into it, never into a copy) is sized from the declared
+ * table lengths and checked before it is allocated, and the bytes actually
+ * inflated meanwhile are counted as they arrive (never trusting a declared
+ * size). WOFF 2.0 inflates its stream only up to the end of the last kept
+ * table. A directory that repeats a tag is
  * malformed. Brotli support is checked before anything is allocated.
  */
 import { HARD_MAX_FONT_SOURCE_FACE_BYTES } from '../worker/resource-policy.generated.js';
@@ -98,24 +99,35 @@ function collect(table: { start: number; bytes: Uint8Array }, offset: number, ch
   if (from < to) table.bytes.set(chunk.subarray(from - offset, to - offset), from - table.start);
 }
 
-/** A minimal sfnt holding `tables` (OpenType §5: offset table + records). */
-function assembleSfnt(flavor: number, tables: ReadonlyMap<string, Uint8Array>): Uint8Array {
-  const tags = [...tables.keys()].sort();
-  let size = 12 + tags.length * 16;
+/**
+ * The one buffer a decode holds: a minimal sfnt (OpenType §5: offset table
+ * and records) laid out for `tables`, whose bodies the caller fills in place
+ * through `slices` (inflating straight into them, never into a copy). Null
+ * when the sfnt would exceed `budget` bytes.
+ */
+function allocateSfnt(
+  flavor: number,
+  tables: readonly { readonly tag: string; readonly length: number }[],
+  budget: number,
+): { out: Uint8Array; slices: Map<string, Uint8Array> } | null {
+  const sorted = [...tables].sort((a, b) => (a.tag < b.tag ? -1 : a.tag > b.tag ? 1 : 0));
+  let size = 12 + sorted.length * 16;
   const offsets: number[] = [];
-  for (const tag of tags) { offsets.push(size); size += (tables.get(tag)!.byteLength + 3) & ~3; }
+  for (const { length } of sorted) { offsets.push(size); size += (length + 3) & ~3; }
+  if (size > budget) return null;
   const out = new Uint8Array(size);
   const view = new DataView(out.buffer);
   view.setUint32(0, flavor);
-  view.setUint16(4, tags.length);
-  tags.forEach((tag, index) => {
+  view.setUint16(4, sorted.length);
+  const slices = new Map<string, Uint8Array>();
+  sorted.forEach(({ tag, length }, index) => {
     const record = 12 + index * 16;
     for (let char = 0; char < 4; char++) view.setUint8(record + char, tag.charCodeAt(char));
     view.setUint32(record + 8, offsets[index]!);
-    view.setUint32(record + 12, tables.get(tag)!.byteLength);
-    out.set(tables.get(tag)!, offsets[index]!);
+    view.setUint32(record + 12, length);
+    slices.set(tag, out.subarray(offsets[index]!, offsets[index]! + length));
   });
-  return out;
+  return { out, slices };
 }
 
 async function woff1(view: DataView, bytes: Uint8Array): Promise<Uint8Array | null> {
@@ -124,9 +136,8 @@ async function woff1(view: DataView, bytes: Uint8Array): Promise<Uint8Array | nu
   const count = view.getUint16(12);
   if (44 + count * 20 > bytes.byteLength) return null;
   // Directory pass: validate and size every kept table before allocating.
-  const kept: { tag: string; stored: Uint8Array; origLength: number }[] = [];
+  const kept: { tag: string; stored: Uint8Array; length: number }[] = [];
   const seen = new Set<string>();
-  let budget = 0;
   for (let index = 0; index < count; index++) {
     const record = 44 + index * 20;
     const tag = tagOf(view, record);
@@ -137,22 +148,22 @@ async function woff1(view: DataView, bytes: Uint8Array): Promise<Uint8Array | nu
     const compLength = view.getUint32(record + 8);
     const origLength = view.getUint32(record + 12);
     if (offset + compLength > bytes.byteLength || compLength > origLength) return null;
-    budget += origLength;
-    if (budget > MAX_INFLATED_BYTES) return null;
-    kept.push({ tag, stored: bytes.subarray(offset, offset + compLength), origLength });
+    kept.push({ tag, stored: bytes.subarray(offset, offset + compLength), length: origLength });
   }
-  const tables = new Map<string, Uint8Array>();
-  for (const { tag, stored, origLength } of kept) {
-    if (stored.byteLength === origLength) { tables.set(tag, stored.slice()); continue; }
-    // The declared original length sizes the buffer (within the file's
-    // budget above); the inflated bytes are counted as they arrive and must
-    // match it exactly.
-    const table = { start: 0, bytes: new Uint8Array(origLength) };
-    const total = await inflate('deflate', stored, (at, chunk) => collect(table, at, chunk), origLength);
-    if (total !== origLength) return null;
-    tables.set(tag, table.bytes);
+  // The assembled sfnt is the only buffer held; each table inflates into
+  // its slice, one transient chunk at a time.
+  const sfnt = allocateSfnt(flavor, kept, MAX_INFLATED_BYTES);
+  if (!sfnt) return null;
+  for (const { tag, stored, length } of kept) {
+    const slice = sfnt.slices.get(tag)!;
+    if (stored.byteLength === length) { slice.set(stored); continue; }
+    // The inflated bytes are counted as they arrive and must match the
+    // declared length exactly.
+    const table = { start: 0, bytes: slice };
+    const total = await inflate('deflate', stored, (at, chunk) => collect(table, at, chunk), length);
+    if (total !== length) return null;
   }
-  return assembleSfnt(flavor, tables);
+  return sfnt.out;
 }
 
 /** WOFF2 §4.1 UIntBase128. */
@@ -215,14 +226,16 @@ async function woff2(view: DataView, bytes: Uint8Array): Promise<Uint8Array | nu
   // stays within the file's budget.
   if (wanted.length === 0) return null;
   const end = wanted.reduce((max, table) => Math.max(max, table.start + table.length), 0);
-  const allocated = wanted.reduce((sum, table) => sum + table.length, 0);
-  if (end + allocated > MAX_INFLATED_BYTES) return null;
-  const tables = wanted.map((table) => ({ tag: table.tag, start: table.start, bytes: new Uint8Array(table.length) }));
+  // The assembled sfnt is the only buffer held (tables inflate into its
+  // slices); it and the stream bytes inflated meanwhile share the budget.
+  const sfnt = allocateSfnt(flavor, wanted, MAX_INFLATED_BYTES - end);
+  if (!sfnt) return null;
+  const tables = wanted.map((table) => ({ start: table.start, bytes: sfnt.slices.get(table.tag)! }));
   const total = await inflate('brotli', bytes.subarray(cursor.offset, cursor.offset + compressedLength), (at, chunk) => {
     for (const table of tables) collect(table, at, chunk);
-  }, MAX_INFLATED_BYTES - allocated, end);
+  }, MAX_INFLATED_BYTES - sfnt.out.byteLength, end);
   if (total === null || total < end) return null;
-  return assembleSfnt(flavor, new Map(tables.map((table) => [table.tag, table.bytes])));
+  return sfnt.out;
 }
 
 /**
