@@ -5,6 +5,25 @@ semantic versioning. While the major version is zero, minor releases may contain
 explicitly documented breaking changes; patch releases remain compatible with
 the corresponding minor release.
 
+## 0.89.9 — Unreleased
+
+- **MCP server dependencies:** the `ooxml-mcp-server` binaries now build on
+  `rmcp` 3.9 and `tokio` 1.54, which clears RUSTSEC-2026-0462 (unbounded
+  response buffering in rmcp's Streamable HTTP client, which the stdio server
+  does not use) and RUSTSEC-2026-0386. Tool names, descriptions, annotations,
+  input properties, instructions, results and protocol-version negotiation
+  are unchanged. Three details follow rmcp: `serverInfo.version` reports the
+  bundled rmcp version, tool input schemas no longer carry the internal Rust
+  type name as a top-level `title`, and arguments that fail to deserialize
+  now return an `isError` tool result instead of a JSON-RPC `-32602` error,
+  as the MCP 2025-11-25 specification asks, so the model can correct them.
+  This applies whichever protocol version is negotiated; unknown tools still
+  return `-32602`. Ordinary MCP clients need no changes, but a client that
+  special-cases `-32602` for bad arguments must also handle `result.isError`.
+  rmcp also limits an incoming message to 16 MiB and drops a larger one
+  without a response, so the caller times out; the server's path-based tool
+  requests are far below that.
+
 ## 0.89.8 — 2026-11-09
 
 Compatible patch release. No migration is required. The document models gain
