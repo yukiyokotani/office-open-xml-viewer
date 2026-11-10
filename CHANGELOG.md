@@ -7,6 +7,10 @@ the corresponding minor release.
 
 ## 0.89.9 — Unreleased
 
+- **Word: picture watermarks with Washout:** a VML picture's brightness and
+  contrast (`gain`/`blacklevel`, which Word's Watermark dialog writes for
+  Washout) now fade the picture as Word does, instead of drawing it at full
+  contrast over the text (#2175).
 - **MCP server dependencies:** the `ooxml-mcp-server` binaries now build on
   `rmcp` 3.9 and `tokio` 1.54, which clears RUSTSEC-2026-0462 (unbounded
   response buffering in rmcp's Streamable HTTP client, which the stdio server
@@ -43,6 +47,12 @@ the corresponding minor release.
   excluded. Wrapped cells keep wrapping, and find matches the shortened text as
   well as the full one. Numbers in other formats and dates are unchanged;
   Excel's `###` for those when too wide is planned for 0.90 (#2179).
+- **Docs:** `progressiveLayout` now states that pages shown before layout
+  completes are provisional. Page breaks may move and content can occasionally
+  overlap, for example body text over a footer taller than the bottom margin
+  (#2178). `DocxViewer` and `DocxScrollViewer` redraw every page once layout
+  completes; code that calls `DocxDocument.renderPage()` directly must render
+  its pages again.
 
 ## 0.89.8 — 2026-11-09
 
