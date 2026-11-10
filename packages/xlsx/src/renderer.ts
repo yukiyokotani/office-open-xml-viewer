@@ -40,7 +40,7 @@ import {
   type ShapeRunLineRatios,
 } from './shape-office-line.js';
 import { XLSX_GOOGLE_FONTS } from './google-fonts.js';
-import { formatCellValueWithColor } from './number-format.js';
+import { fitFormattedNumber, formatCellValueWithColor, type FormattedCell } from './number-format.js';
 import { type CfContext, type CfResult, compileCf, evaluateCf } from './conditional-format.js';
 import { computeLineVisualOrder, cellBaseRtl, resolveCellBidi } from './bidi-line.js';
 import { formatA1, parseA1 } from './a1.js';
@@ -1589,6 +1589,22 @@ function drawMultiLineRichText(
   }
 }
 
+/** Fits a numeric cell's formatted text to the width its text may use, measured
+ *  in the cell's current `ctx.font`: General shortens (ECMA-376 §18.8.30),
+ *  every other number format shows "#" across the cell when too wide (issue
+ *  #2179). Shrink-to-fit cells scale instead, and rotated or stacked text has
+ *  no horizontal width to fit, so those keep their text. */
+function fitNumberToCell(
+  ctx: CanvasRenderingContext2D,
+  cell: Cell,
+  formatted: FormattedCell,
+  xf: CellXf,
+  availableW: number,
+): FormattedCell {
+  if (cell.value.type !== 'number' || xf.shrinkToFit || xf.textRotation) return formatted;
+  return fitFormattedNumber(cell, formatted, (text) => ctx.measureText(text).width <= availableW);
+}
+
 /** Invalid date/time display follows Excel's hash fill (issue #1710).
  * Formatting APIs expose only '#'; painting repeats it in the visible cell
  * width. Bound the allocation by the target canvas, including huge/offscreen
@@ -2114,12 +2130,11 @@ function renderQuadrant(
     mergeBorderTasks.push(() => renderBorder(ctx, preBorder, aCx, aCy, cW, cH, dpr));
 
     if (!cell) continue;
-    const formatted = formatCellValueWithColor(cell, styles, cf.numFmt, rc.worksheet.date1904);
-    const text = formatted.text;
-    if (!text || (text === '0' && rc.worksheet.showZeros === false)) continue;
+    const unfitted = formatCellValueWithColor(cell, styles, cf.numFmt, rc.worksheet.date1904);
+    if (!unfitted.text || (unfitted.text === '0' && rc.worksheet.showZeros === false)) continue;
 
     const fontForDraw = layeredCellFont(font, cf, styleFormat);
-    ctx.font = buildFont(ctx, fontForDraw, cs, cjkFallback, text);
+    ctx.font = buildFont(ctx, fontForDraw, cs, cjkFallback, unfitted.text);
     const hyperlinkUrl = rc.hyperlinkMap.get(key);
     // Colour precedence (as the main path): hyperlink theme colour >
     // conditional-formatting font colour > number-format section colour
@@ -2129,7 +2144,7 @@ function renderQuadrant(
     const tableFontColor = styleFontColor(styleFormat, xf);
     const textColor = hyperlinkUrl
       ? '#0563C1'
-      : (cf.fontColor ?? formatted.color ?? tableFontColor ?? font.color);
+      : (cf.fontColor ?? unfitted.color ?? tableFontColor ?? font.color);
     ctx.fillStyle = textColor ? hexToRgba(textColor) : '#000000';
 
     const paddingX = 3, paddingY = 2;
@@ -2139,6 +2154,9 @@ function renderQuadrant(
     // character widths (MDW) of the workbook's normal-style font.
     const indentPx = xf.indent ? Math.round(xf.indent * 3 * rc.mdw) : 0;
     const leftPad = paddingX + (alignH === 'left' || !xf.alignH ? indentPx : 0);
+    // A number fits the merged width (issue #2179), as in the main loop.
+    const formatted = fitNumberToCell(ctx, cell, unfitted, xf, cW - leftPad - paddingX);
+    const text = formatted.text;
 
     ctx.save();
     ctx.beginPath();
@@ -2485,15 +2503,14 @@ function renderQuadrant(
       }
 
       if (!cell) continue;
-      const formatted = formatCellValueWithColor(cell, styles, cf.numFmt, rc.worksheet.date1904);
-      const text = formatted.text;
-      if (!text || (text === '0' && rc.worksheet.showZeros === false)) continue;
+      const unfitted = formatCellValueWithColor(cell, styles, cf.numFmt, rc.worksheet.date1904);
+      if (!unfitted.text || (unfitted.text === '0' && rc.worksheet.showZeros === false)) continue;
 
       textTasks.push(() => {
       // CF is the top layer: a matched rule's toggle, on or off, overrides
       // the cell, table and PivotTable formatting beneath it (CfResult).
       const fontForDraw = layeredCellFont(font, cf, styleFormat);
-      ctx.font = buildFont(ctx, fontForDraw, cs, cjkFallback, text);
+      ctx.font = buildFont(ctx, fontForDraw, cs, cjkFallback, unfitted.text);
       const hyperlinkUrl = rc.hyperlinkMap.get(key);
       // Colour precedence: hyperlink > conditional-formatting font colour >
       // number-format section colour ([Red] etc., §18.8.30) > Table /
@@ -2502,7 +2519,7 @@ function renderQuadrant(
       const tableFontColor = styleFontColor(styleFormat, xf);
       const textColor = hyperlinkUrl
         ? '#0563C1'
-        : (cf.fontColor ?? formatted.color ?? tableFontColor ?? font.color);
+        : (cf.fontColor ?? unfitted.color ?? tableFontColor ?? font.color);
       ctx.fillStyle = textColor ? hexToRgba(textColor) : '#000000';
 
       const paddingX = 3;
@@ -2544,6 +2561,15 @@ function renderQuadrant(
       const centerContinuousX = rc.rtl
         ? cx - (centerContinuousW - cellW)
         : cx;
+
+      // Numbers never spill: they fit the width their alignment gives the
+      // text (merged cells use the merged width, centerContinuous its range),
+      // shortening in General or showing "#" otherwise (issue #2179).
+      const formatted = fitNumberToCell(
+        ctx, cell, unfitted, xf,
+        (alignH === 'centerContinuous' ? centerContinuousW : cellW) - leftPad - paddingX,
+      );
+      const text = formatted.text;
 
       // Text overflow into adjacent empty cells is observed Excel display
       // behavior when `wrapText=false`; OOXML persists the cell's alignment

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { formatCellValue, formatCellValueWithColor } from './number-format.js';
+import { fitFormattedNumber, formatCellValue, formatCellValueWithColor, formatGeneralNumber } from './number-format.js';
 import type { Cell, Styles } from './types.js';
 
 const FMT_ID = 164; // first free custom id
@@ -97,20 +97,17 @@ describe('General format code (§18.8.30 / LibreOffice custom numFmt)', () => {
   });
 });
 
-describe('General format — 11 significant digit rounding (XL2)', () => {
-  // Excel's General format is not raw float round-trip: the display engine
-  // rounds to 11 significant digits (15-digit internal precision minus the
-  // ~4 digits Excel reserves for display robustness), so binary floating
-  // point noise from arithmetic (e.g. 0.1 + 0.2) never surfaces to the user.
-  // This table pins the rounding + trailing-zero-trim + exponential-switch
-  // rules against `formatGeneralNumber` (see number-format.ts for the exact
-  // exponent thresholds and their rationale).
+describe('General format — 11-character cap (ECMA-376 §18.8.30)', () => {
+  // §18.8.30 caps General at 11 characters, sign excluded, leading zeros and
+  // the decimal separator included. The display works on 15 significant
+  // digits, so binary floating point noise (0.1 + 0.2) never surfaces.
   it('rounds binary floating point noise away', () => {
     expect(fmt(0.1 + 0.2, 'General')).toBe('0.3');
     expect(fmt(-(0.1 + 0.2), 'General')).toBe('-0.3');
   });
-  it('rounds a repeating decimal to 11 significant digits', () => {
-    expect(fmt(1 / 3, 'General')).toBe('0.33333333333');
+  it('rounds a repeating decimal to 11 characters, counting the leading zero and point', () => {
+    expect(fmt(1 / 3, 'General')).toBe('0.333333333');
+    expect(fmt(-1 / 3, 'General')).toBe('-0.333333333');
   });
   it('leaves an 11-digit integer untouched', () => {
     expect(fmt(12345678901, 'General')).toBe('12345678901');
@@ -120,8 +117,9 @@ describe('General format — 11 significant digit rounding (XL2)', () => {
     // General format has already committed to scientific notation.
     expect(fmt(123456789012, 'General')).toBe('1.23457E+11');
   });
-  it('rounds a many-decimal value to 11 significant digits', () => {
-    expect(fmt(1234.5678901234, 'General')).toBe('1234.5678901');
+  it('rounds a many-decimal value to 11 characters', () => {
+    expect(fmt(1234.5678901234, 'General')).toBe('1234.56789');
+    expect(fmt(Math.PI, 'General')).toBe('3.141592654');
   });
   it('applies the same rounding to negative numbers, sign excluded from digit count', () => {
     expect(fmt(-0.30000000000000004, 'General')).toBe('-0.3');
@@ -135,8 +133,16 @@ describe('General format — 11 significant digit rounding (XL2)', () => {
   it('keeps a small-but-not-tiny decimal in fixed-point form', () => {
     expect(fmt(0.00001, 'General')).toBe('0.00001');
   });
-  it('switches at the documented exponent boundary (1e-6 range)', () => {
-    expect(fmt(0.000001, 'General')).toBe('1E-06');
+  it('keeps a small value fixed while every significant digit fits the cap', () => {
+    // §18.8.30 condition 4 switches only when fixed point loses digits.
+    expect(fmt(0.000001, 'General')).toBe('0.000001');
+    expect(fmt(0.000000001, 'General')).toBe('0.000000001');
+    expect(fmt(0.0000123, 'General')).toBe('0.0000123');
+  });
+  it('switches a lossy small value to exponential when that shows more digits', () => {
+    expect(fmt(0.0000123456789, 'General')).toBe('1.23457E-05');
+    // Exponent -4: both forms show six digits, so fixed point stays.
+    expect(fmt(0.000123456789012, 'General')).toBe('0.000123457');
   });
   it('trims trailing zeros from an exact decimal', () => {
     expect(fmt(100, 'General')).toBe('100');
@@ -149,6 +155,81 @@ describe('General format — 11 significant digit rounding (XL2)', () => {
     // non-obvious case the code comment cites), so it renders "1E+11" rather
     // than a spurious "99999999999" or "100000000000".
     expect(fmt(99999999999.6, 'General')).toBe('1E+11');
+  });
+});
+
+describe('General format — fitting the available width (ECMA-376 §18.8.30, issue #2179)', () => {
+  // A width given as a character count: every character one unit wide.
+  const chars = (n: number) => (text: string) => text.length <= n;
+  // Proportional widths in 1/1000 em of a Calibri-like face, so the point and
+  // the sign are narrower than a digit.
+  const widths: Record<string, number> = { '.': 252, '-': 306, '+': 498, E: 488 };
+  const em = (max: number) => (text: string) =>
+    [...text].reduce((sum, ch) => sum + (widths[ch] ?? 507), 0) <= max;
+
+  it('shortens the issue values at an eight-character width', () => {
+    const fit = chars(8);
+    expect(formatGeneralNumber(Math.PI, fit)).toBe('3.141593');
+    expect(formatGeneralNumber(1 / 3, fit)).toBe('0.333333');
+    expect(formatGeneralNumber(0.000123456789012, fit)).toBe('0.000123');
+    expect(formatGeneralNumber(123456789012345, fit)).toBe('1.23E+14');
+  });
+  it('drops decimals with rounding before the integer part has to go', () => {
+    expect(formatGeneralNumber(123456789.123456, chars(9))).toBe('123456789');
+    expect(formatGeneralNumber(123456789.987, chars(9))).toBe('123456790');
+    expect(formatGeneralNumber(25.76, chars(2))).toBe('26');
+    expect(formatGeneralNumber(9999.96, chars(6))).toBe('10000');
+  });
+  it('switches an integer wider than the column to exponential form', () => {
+    expect(formatGeneralNumber(123456789, chars(8))).toBe('1.23E+08');
+    expect(formatGeneralNumber(123456789, chars(7))).toBe('1.2E+08');
+    expect(formatGeneralNumber(123456789, chars(5))).toBe('1E+08');
+    expect(formatGeneralNumber(99999.6, chars(5))).toBe('1E+05');
+  });
+  it('switches a small number to exponential once fixed point would show fewer digits', () => {
+    expect(formatGeneralNumber(0.0000123, chars(9))).toBe('0.0000123');
+    expect(formatGeneralNumber(0.0000123, chars(8))).toBe('1.23E-05');
+    expect(formatGeneralNumber(0.0000123, chars(6))).toBe('1E-05');
+    // Exponent -4 at eight characters: both forms show three digits.
+    expect(formatGeneralNumber(0.000123456, chars(8))).toBe('0.000123');
+    // Not even one non-zero digit fits in fixed point, so exponential form.
+    expect(formatGeneralNumber(0.000123, chars(5))).toBe('1E-04');
+  });
+  it('keeps the sign outside the cap but inside the width', () => {
+    expect(formatGeneralNumber(-1 / 3)).toBe('-0.333333333');
+    expect(formatGeneralNumber(-Math.PI, chars(8))).toBe('-3.14159');
+    expect(formatGeneralNumber(-123456789012345, chars(8))).toBe('-1.2E+14');
+  });
+  it('returns null (a # fill) when not even the shortest form fits', () => {
+    expect(formatGeneralNumber(123456789, chars(4))).toBe(null);
+    expect(formatGeneralNumber(0.3, chars(1))).toBe(null);
+    expect(formatGeneralNumber(0, chars(0))).toBe(null);
+    expect(formatGeneralNumber(7, chars(1))).toBe('7');
+  });
+  it('measures with proportional glyph widths', () => {
+    // Nine digits (4563) do not fit 4400; "3.1415927" (8 digits + point) does.
+    expect(formatGeneralNumber(Math.PI, em(4400))).toBe('3.1415927');
+    // Each character budget has one General form: nine characters is
+    // "123456789", so the narrower nine-character "1.235E+08" is never
+    // offered and the eight-character form follows.
+    expect(formatGeneralNumber(123456789.123456, em(4400))).toBe('1.23E+08');
+    expect(formatGeneralNumber(123456789.123456, em(4600))).toBe('123456789');
+  });
+  it('fits only General numbers; other formats show # when too wide', () => {
+    const fit = chars(8);
+    const general = formatCellValueWithColor(numCell(Math.PI), styles('General'));
+    expect(fitFormattedNumber(numCell(Math.PI), general, fit)).toEqual({ text: '3.141593', general: true });
+    const builtin = formatCellValueWithColor(numCell(Math.PI), builtinStyles(0));
+    expect(fitFormattedNumber(numCell(Math.PI), builtin, fit)).toEqual({ text: '3.141593', general: true });
+    const fixed = formatCellValueWithColor(numCell(123456.789), styles('0.000'));
+    expect(fitFormattedNumber(numCell(123456.789), fixed, fit)).toEqual({ text: '#', fill: true });
+    const red = formatCellValueWithColor(numCell(123456.789), styles('[Red]0.000'));
+    expect(fitFormattedNumber(numCell(123456.789), red, fit)).toEqual({ text: '#', color: '#FF0000', fill: true });
+    const short = formatCellValueWithColor(numCell(1.5), styles('0.00'));
+    expect(fitFormattedNumber(numCell(1.5), short, fit)).toBe(short);
+    const text: Cell = { row: 1, col: 1, value: { type: 'text', text: 'a long text value' }, styleIndex: 0 };
+    const textFormatted = formatCellValueWithColor(text, styles('General'));
+    expect(fitFormattedNumber(text, textFormatted, fit)).toBe(textFormatted);
   });
 });
 
