@@ -68,12 +68,13 @@ jobs:
           cargo test -p legacy-office-parser --all-features
 
   # RB8 — dependency vulnerability audit. Report-only for now
-  # (continue-on-error): one known advisory already exists at introduction —
-  # RUSTSEC-2026-0190 (anyhow < 1.0.103 unsound `Error::downcast_mut`), pulled
-  # in only by the non-shipped ooxml-mcp-server crate, not the wasm parsers or
-  # the npm package. Starting non-blocking surfaces advisories in the CI log
-  # without gating the whole repo on a transitive dev-tool issue; flip to
-  # blocking (drop continue-on-error) once the backlog is at zero.
+  # (continue-on-error). The workspace lockfile covers the wasm parsers and the
+  # ooxml-mcp-server crate, whose binaries are shipped with every GitHub
+  # Release by release-mcp-server.yml, so advisories against it (for example
+  # in rmcp or tokio) affect a released artifact and must be fixed, not
+  # waived. Starting non-blocking surfaces advisories in the CI log without
+  # gating unrelated PRs on a newly published advisory; flip to blocking (drop
+  # continue-on-error) once the backlog has stayed at zero.
   audit:
     runs-on: ubuntu-latest
     timeout-minutes: 15
