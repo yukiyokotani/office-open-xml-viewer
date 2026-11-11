@@ -7,6 +7,7 @@
 use super::{parse_range, sheet_prefix, split_sheet, Context, OdsSheet, NS_TABLE};
 use crate::odf_props::NS_CALCEXT;
 use crate::xml;
+use std::collections::HashMap;
 use xlsx_model::{CellRange, CfRule, CfStop, CfValue, ConditionalFormat, DataValidation};
 
 /// OpenFormula (`of:=SUM([.A1:.B2];[$Sheet2.C3])`) as SpreadsheetML formula
@@ -266,70 +267,92 @@ pub fn database_ranges(
 
 /// `table:content-validation` (§19.595 table:condition) as SpreadsheetML
 /// data validations over the cells that name them.
-pub fn content_validations(spreadsheet: roxmltree::Node<'_, '_>, sheets: &mut [OdsSheet]) {
+///
+/// A definition is read once; every sheet that uses it holds its own copy,
+/// admitted to `budget` at its retained size before it is made.
+pub(crate) fn content_validations(
+    budget: &mut super::Budget,
+    spreadsheet: roxmltree::Node<'_, '_>,
+    sheets: &mut [OdsSheet],
+) -> Result<(), String> {
     let Some(container) = spreadsheet
         .children()
         .find(|n| xml::is(*n, NS_TABLE, "content-validations"))
     else {
-        return;
+        return Ok(());
     };
-    for sheet in sheets.iter_mut() {
-        let refs = std::mem::take(&mut sheet.validation_refs);
-        if refs.is_empty() {
+    // Each sheet's referenced ranges, by validation name.
+    let mut refs: Vec<HashMap<String, Vec<CellRange>>> = sheets
+        .iter_mut()
+        .map(|sheet| {
+            let mut by_name: HashMap<String, Vec<CellRange>> = HashMap::new();
+            for (name, range) in std::mem::take(&mut sheet.validation_refs) {
+                by_name.entry(name).or_default().push(range);
+            }
+            by_name
+        })
+        .collect();
+    if refs.iter().all(HashMap::is_empty) {
+        return Ok(());
+    }
+    for node in container
+        .children()
+        .filter(|n| xml::is(*n, NS_TABLE, "content-validation"))
+    {
+        let Some(name) = node.attribute((NS_TABLE, "name")) else {
+            continue;
+        };
+        if !refs.iter().any(|by_name| by_name.contains_key(name)) {
             continue;
         }
-        for node in container
+        let mut validation = DataValidation {
+            sqref: String::new(),
+            validation_type: None,
+            operator: None,
+            formula1: None,
+            formula2: None,
+            allow_blank: node.attribute((NS_TABLE, "allow-empty-cell")) != Some("false"),
+            prompt_title: None,
+            prompt: None,
+            error_title: None,
+            error_message: None,
+        };
+        if let Some(condition) = node.attribute((NS_TABLE, "condition")) {
+            // §19.595: the condition's namespace prefix is resolved
+            // through the bindings in scope, not by its spelling.
+            read_validation_condition(
+                crate::odf_text::without_bound_prefix(node, condition),
+                &mut validation,
+            );
+        }
+        if let Some(help) = node
             .children()
-            .filter(|n| xml::is(*n, NS_TABLE, "content-validation"))
+            .find(|n| xml::is(*n, NS_TABLE, "help-message"))
         {
-            let Some(name) = node.attribute((NS_TABLE, "name")) else {
+            validation.prompt_title = help.attribute((NS_TABLE, "title")).map(str::to_string);
+            validation.prompt = Some(super::paragraph_text(help));
+        }
+        if let Some(error) = node
+            .children()
+            .find(|n| xml::is(*n, NS_TABLE, "error-message"))
+        {
+            validation.error_title = error.attribute((NS_TABLE, "title")).map(str::to_string);
+            validation.error_message = Some(super::paragraph_text(error));
+        }
+        let cost = super::retained_size(&validation);
+        for (sheet, by_name) in sheets.iter_mut().zip(refs.iter_mut()) {
+            let Some(ranges) = by_name.remove(name) else {
                 continue;
             };
-            let sqref: Vec<String> = refs
-                .iter()
-                .filter(|(n, _)| n == name)
-                .map(|(_, r)| range_text(r))
-                .collect();
-            if sqref.is_empty() {
-                continue;
-            }
-            let mut validation = DataValidation {
-                sqref: sqref.join(" "),
-                validation_type: None,
-                operator: None,
-                formula1: None,
-                formula2: None,
-                allow_blank: node.attribute((NS_TABLE, "allow-empty-cell")) != Some("false"),
-                prompt_title: None,
-                prompt: None,
-                error_title: None,
-                error_message: None,
-            };
-            if let Some(condition) = node.attribute((NS_TABLE, "condition")) {
-                // §19.595: the condition's namespace prefix is resolved
-                // through the bindings in scope, not by its spelling.
-                read_validation_condition(
-                    crate::odf_text::without_bound_prefix(node, condition),
-                    &mut validation,
-                );
-            }
-            if let Some(help) = node
-                .children()
-                .find(|n| xml::is(*n, NS_TABLE, "help-message"))
-            {
-                validation.prompt_title = help.attribute((NS_TABLE, "title")).map(str::to_string);
-                validation.prompt = Some(super::paragraph_text(help));
-            }
-            if let Some(error) = node
-                .children()
-                .find(|n| xml::is(*n, NS_TABLE, "error-message"))
-            {
-                validation.error_title = error.attribute((NS_TABLE, "title")).map(str::to_string);
-                validation.error_message = Some(super::paragraph_text(error));
-            }
-            sheet.worksheet.data_validations.push(validation);
+            let sqref = ranges.iter().map(range_text).collect::<Vec<_>>().join(" ");
+            budget.bytes(cost.saturating_add(sqref.len()))?;
+            sheet.worksheet.data_validations.push(DataValidation {
+                sqref,
+                ..validation.clone()
+            });
         }
     }
+    Ok(())
 }
 
 fn range_text(range: &CellRange) -> String {
@@ -505,9 +528,9 @@ pub(crate) fn conditional_formats(
                     }
                 }
                 if !rules.is_empty() {
-                    ctx.budget
-                        .bytes(256usize.saturating_mul(rules.len() + sqref.len()))?;
-                    formats.push(ConditionalFormat { sqref, rules });
+                    let format = ConditionalFormat { sqref, rules };
+                    ctx.budget.bytes(super::retained_size(&format))?;
+                    formats.push(format);
                 }
             }
         }
@@ -540,10 +563,14 @@ fn style_map_formats(
     formats: &mut Vec<ConditionalFormat>,
 ) -> Result<(), String> {
     let mut by_style: Vec<(String, Vec<CellRange>)> = Vec::new();
+    let mut index: HashMap<String, usize> = HashMap::new();
     for (style, range) in refs {
-        match by_style.iter_mut().find(|(name, _)| *name == style) {
-            Some((_, ranges)) => ranges.push(range),
-            None => by_style.push((style, vec![range])),
+        match index.get(&style) {
+            Some(at) => by_style[*at].1.push(range),
+            None => {
+                index.insert(style.clone(), by_style.len());
+                by_style.push((style, vec![range]));
+            }
         }
     }
     for (style, sqref) in by_style {
@@ -564,9 +591,11 @@ fn style_map_formats(
             }
         }
         if !rules.is_empty() {
-            ctx.budget
-                .bytes(256usize.saturating_mul(rules.len() + sqref.len()))?;
-            formats.push(ConditionalFormat { sqref, rules });
+            // One format per style and sheet: each sheet's copy of the
+            // style's conditions is admitted at its retained size.
+            let format = ConditionalFormat { sqref, rules };
+            ctx.budget.bytes(super::retained_size(&format))?;
+            formats.push(format);
         }
     }
     Ok(())

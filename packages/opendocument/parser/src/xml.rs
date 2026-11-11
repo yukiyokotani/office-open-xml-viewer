@@ -239,9 +239,49 @@ pub fn is(node: roxmltree::Node<'_, '_>, namespace: &str, name: &str) -> bool {
         && node.tag_name().name() == name
 }
 
+/// A positive-integer count attribute (`xsd:positiveInteger`: table
+/// repeats and spans §19.675 / §19.676 / §19.680 / §19.681, chart point
+/// repeats §19.21). Absent or not a positive integer is the default 1. A
+/// positive integer beyond the `u32` implementation bound rejects as a
+/// resource limit: it never wraps or falls back to 1, which would shift the
+/// data that follows.
+pub fn count_attribute(
+    node: roxmltree::Node<'_, '_>,
+    namespace: &str,
+    name: &str,
+) -> Result<u32, String> {
+    let Some(value) = node.attribute((namespace, name)) else {
+        return Ok(1);
+    };
+    let value = value.trim();
+    let digits = value.strip_prefix('+').unwrap_or(value);
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return Ok(1);
+    }
+    match digits.parse::<u32>() {
+        Ok(count) => Ok(count.max(1)),
+        Err(_) => Err(crate::error::resource("repeat count")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn count_attributes_reject_values_beyond_the_bound() {
+        let doc = roxmltree::Document::parse(
+            r#"<r xmlns:t="urn:t" t:a="4294967296" t:b="+7" t:c="0" t:d="x" t:e="4294967295"/>"#,
+        )
+        .unwrap();
+        let root = doc.root_element();
+        assert!(count_attribute(root, "urn:t", "a").is_err());
+        assert_eq!(count_attribute(root, "urn:t", "b"), Ok(7));
+        assert_eq!(count_attribute(root, "urn:t", "c"), Ok(1));
+        assert_eq!(count_attribute(root, "urn:t", "d"), Ok(1));
+        assert_eq!(count_attribute(root, "urn:t", "e"), Ok(u32::MAX));
+        assert_eq!(count_attribute(root, "urn:t", "missing"), Ok(1));
+    }
 
     #[test]
     fn preflight_bounds_attributes_namespaces_and_depth() {

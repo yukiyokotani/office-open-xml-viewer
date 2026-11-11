@@ -1507,6 +1507,7 @@ function drawThreeDDataLabel(
     percentRatio: percentValue != null && Number.isFinite(percentValue) ? percentValue : undefined,
     formatCode: override?.formatCode
       ?? defaults?.formatCode ?? chart.dataLabelFormatCode ?? series.valFormatCode,
+    formatDivisors: override?.formatCode != null ? null : defaults?.formatDivisors,
     percentFormatCode: override?.formatCode
       ?? defaults?.formatCode ?? chart.dataLabelFormatCode ?? '0%',
     date1904: chart.date1904,
@@ -4468,6 +4469,7 @@ function renderCartesian(
             : value,
         percent ? chart.valAxisFormatCode ?? '0%' : chart.valAxisFormatCode,
         chart.date1904,
+        chart.valAxisFormatDivisors,
       ), point.x + labelNormal.x * labelOffset, point.y + labelNormal.y * labelOffset,
       axisLabelLineHeightPx(valueFontPx));
     }
@@ -4487,6 +4489,7 @@ function renderCartesian(
         String(categories[index] ?? index + 1),
         chart.catAxisFormatCode,
         chart.date1904,
+        chart.catAxisFormatDivisors,
       )
     );
     let rotation = authoredCategoryRotation(chart);
@@ -4848,6 +4851,7 @@ function renderPie(
         percentRatio: slice.percentValue,
         formatCode: labelOverride?.formatCode
           ?? defaults?.formatCode ?? chart.dataLabelFormatCode ?? series.valFormatCode,
+        formatDivisors: labelOverride?.formatCode != null ? null : defaults?.formatDivisors,
         separator: labelOverride?.separator ?? defaults?.separator,
         date1904: chart.date1904,
       });

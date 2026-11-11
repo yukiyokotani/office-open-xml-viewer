@@ -30,6 +30,15 @@ describe('section divisors', () => {
     expect(formatCellValue(number(250), styles('General', [100]))).toBe('2.5');
   });
 
+  it('formats a General section as General, divided by its own factor', () => {
+    // A mapped data style composes `General;General` with per-section factors.
+    const code = styles('General;General', [100, 10]);
+    expect(formatCellValue(number(250), code)).toBe('2.5');
+    // The negative section formats the magnitude.
+    expect(formatCellValue(number(-250), code)).toBe('25');
+    expect(formatCellValue(number(-250), styles('[Red]General;[Blue]General', []))).toBe('250');
+  });
+
   it('selects the section on the undivided value, then divides by its own factor', () => {
     // [>=1000] picks the first section for 1500 even though 1500/1000 < 1000.
     const code = styles('[>=1000]0.0" k";0', [1000, 1]);

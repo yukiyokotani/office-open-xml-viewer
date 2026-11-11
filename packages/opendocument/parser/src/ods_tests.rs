@@ -269,3 +269,159 @@ fn unbounded_inputs_reject() {
         Some(resource("sparkline range"))
     );
 }
+
+#[test]
+fn repeated_notes_are_charged_their_expanded_text() {
+    // A note of 1 MiB of `text:s` spaces repeated across 1024 columns holds
+    // 1 GiB of text: each copy is admitted at its expanded size.
+    let note = |cols: u32| {
+        content(
+            "",
+            &table(&format!(
+                r#"<table:table-row><table:table-cell table:number-columns-repeated="{cols}"><office:annotation><text:p><text:s text:c="1048576"/></text:p></office:annotation></table:table-cell></table:table-row>"#
+            )),
+        )
+    };
+    let workbook = read_text(&note(2), Some(&styles(""))).unwrap();
+    let comments = &workbook.sheets[0].worksheet.comments;
+    assert_eq!(comments.len(), 2);
+    assert_eq!(comments[1].cell_ref, "B1");
+    assert_eq!(comments[1].text.len(), 1024 * 1024);
+    assert_eq!(
+        read_text(&note(1024), Some(&styles(""))).err(),
+        Some(resource("model size"))
+    );
+}
+
+#[test]
+fn repeated_rich_text_is_charged_its_run_fonts() {
+    // A one-character span whose font family is 100 KiB, repeated over
+    // 256 × 256 cells: every copy holds the family name.
+    let family = "F".repeat(100 * 1024);
+    let automatic = format!(
+        r#"<style:style style:name="T1" style:family="text"><style:text-properties fo:font-family="{family}"/></style:style>"#
+    );
+    let rich = |rows: u32, cols: u32| {
+        content(
+            &automatic,
+            &table(&format!(
+                r#"<table:table-row table:number-rows-repeated="{rows}"><table:table-cell table:number-columns-repeated="{cols}" office:value-type="string"><text:p><text:span text:style-name="T1">x</text:span></text:p></table:table-cell></table:table-row>"#
+            )),
+        )
+    };
+    let workbook = read_text(&rich(2, 2), Some(&styles(""))).unwrap();
+    let cell = &workbook.sheets[0].rows[1].cells[1];
+    match &cell.value {
+        xlsx_model::CellValue::Text {
+            runs: Some(runs), ..
+        } => {
+            assert_eq!(
+                runs[0].font.as_ref().and_then(|f| f.name.as_deref()),
+                Some(family.as_str())
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(
+        read_text(&rich(256, 256), Some(&styles(""))).err(),
+        Some(resource("model size"))
+    );
+}
+
+#[test]
+fn global_names_are_charged_per_sheet() {
+    // One 1 MiB global expression copied into each of 1024 sheets.
+    let expression = format!("of:=&quot;{}&quot;", "e".repeat(1024 * 1024));
+    let names = |sheets: usize| {
+        let tables: String = (0..sheets)
+            .map(|i| format!(r#"<table:table table:name="S{i}"><table:table-row><table:table-cell/></table:table-row></table:table>"#))
+            .collect();
+        content(
+            "",
+            &format!(
+                r#"{tables}<table:named-expressions><table:named-expression table:name="Big" table:expression="{expression}"/></table:named-expressions>"#
+            ),
+        )
+    };
+    let workbook = read_text(&names(2), Some(&styles(""))).unwrap();
+    assert_eq!(workbook.sheets[1].worksheet.defined_names.len(), 1);
+    assert_eq!(
+        read_text(&names(1024), Some(&styles(""))).err(),
+        Some(resource("model size"))
+    );
+}
+
+#[test]
+fn repeat_counts_past_the_bound_reject() {
+    for row in [
+        r#"<table:table-row table:number-rows-repeated="4294967296"><table:table-cell/></table:table-row>"#,
+        r#"<table:table-row><table:table-cell table:number-columns-repeated="99999999999"/></table:table-row>"#,
+        r#"<table:table-row><table:table-cell table:number-columns-spanned="4294967296"/></table:table-row>"#,
+    ] {
+        let body = content("", &table(row));
+        assert_eq!(
+            read_text(&body, Some(&styles(""))).err(),
+            Some(crate::error::resource("repeat count")),
+            "{row}"
+        );
+    }
+    let columns = content(
+        "",
+        r#"<table:table table:name="Sheet1"><table:table-column table:number-columns-repeated="4294967296"/><table:table-row><table:table-cell/></table:table-row></table:table>"#,
+    );
+    assert_eq!(
+        read_text(&columns, Some(&styles(""))).err(),
+        Some(crate::error::resource("repeat count"))
+    );
+}
+
+#[test]
+fn style_map_conditions_resolve_their_namespace_prefix() {
+    // §19.472: `of:` bound to OpenFormula is the default namespace written
+    // out; a condition in another namespace is ignored.
+    let automatic = concat!(
+        r#"<style:style style:name="ce1" style:family="table-cell" style:parent-style-name="Default" xmlns:of="urn:oasis:names:tc:opendocument:xmlns:of:1.2" xmlns:x="urn:other">"#,
+        r#"<style:map style:condition="of:cell-content()&gt;0" style:apply-style-name="Good" style:base-cell-address="Sheet1.A1"/>"#,
+        r#"<style:map style:condition="x:cell-content()&lt;0" style:apply-style-name="Good" style:base-cell-address="Sheet1.A1"/>"#,
+        r#"</style:style>"#
+    );
+    let common = r##"<style:style style:name="Good" style:family="table-cell" style:parent-style-name="Default"><style:table-cell-properties fo:background-color="#00ff00"/></style:style>"##;
+    let body = table(
+        r#"<table:table-row><table:table-cell table:style-name="ce1" office:value-type="float" office:value="3"><text:p>3</text:p></table:table-cell></table:table-row>"#,
+    );
+    let workbook = read_text(&content(automatic, &body), Some(&styles(common))).unwrap();
+    let formats = &workbook.sheets[0].worksheet.conditional_formats;
+    assert_eq!(formats.len(), 1);
+    assert_eq!(formats[0].rules.len(), 1);
+    assert!(
+        matches!(&formats[0].rules[0], xlsx_model::CfRule::CellIs { operator, .. } if operator == "greaterThan")
+    );
+}
+
+#[test]
+fn validations_are_charged_per_sheet() {
+    // One validation with a 1 MiB message, used on each of 1024 sheets.
+    let message = "m".repeat(1024 * 1024);
+    let validations = |sheets: usize| {
+        let tables: String = (0..sheets)
+            .map(|i| format!(r#"<table:table table:name="S{i}"><table:table-row><table:table-cell table:content-validation-name="V"/></table:table-row></table:table>"#))
+            .collect();
+        content(
+            "",
+            &format!(
+                r#"<table:content-validations><table:content-validation table:name="V" table:condition="of:cell-content-is-whole-number()"><table:error-message table:title="t"><text:p>{message}</text:p></table:error-message></table:content-validation></table:content-validations>{tables}"#
+            ),
+        )
+    };
+    let workbook = read_text(&validations(2), Some(&styles(""))).unwrap();
+    let validation = &workbook.sheets[1].worksheet.data_validations[0];
+    assert_eq!(validation.sqref, "A1");
+    assert_eq!(
+        validation.error_message.as_deref().map(str::len),
+        Some(1024 * 1024)
+    );
+    assert_eq!(
+        read_text(&validations(1024), Some(&styles(""))).err(),
+        Some(resource("model size"))
+    );
+}

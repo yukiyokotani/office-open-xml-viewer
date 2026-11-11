@@ -482,7 +482,7 @@ function renderWaterfallChart(
   const wrappedCategories = cats.slice(0, n).map(category =>
     wrapMeasuredText(
       ctx,
-      formatCategoryLabel(category, chart.catAxisFormatCode, chart.date1904),
+      formatCategoryLabel(category, chart.catAxisFormatCode, chart.date1904, chart.catAxisFormatDivisors),
       Math.max(1, estimatedSlotW - 8),
     )
   );
@@ -1084,6 +1084,7 @@ function chartExPercentageAxis(chart: ChartModel): SecondaryValueAxis {
     title: chart.secondaryValAxis?.title ?? null,
     hidden: chart.secondaryValAxis?.hidden ?? false,
     formatCode: chart.secondaryValAxis?.formatCode ?? '0%',
+    formatDivisors: chart.secondaryValAxis?.formatCode != null ? chart.secondaryValAxis.formatDivisors : null,
     fontColor: chart.secondaryValAxis?.fontColor ?? null,
     fontSizeHpt: chart.secondaryValAxis?.fontSizeHpt ?? null,
     fontFace: chart.secondaryValAxis?.fontFace ?? null,

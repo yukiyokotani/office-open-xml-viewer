@@ -18,6 +18,7 @@ use crate::error::invalid;
 use crate::odf_props::{self, StyleStore};
 use crate::ods_number::DataStyles;
 use crate::package::OdfPackage;
+pub(crate) use crate::retained_size;
 use crate::xml::{self, NS_OFFICE};
 use std::collections::{BTreeSet, HashMap};
 
@@ -77,9 +78,11 @@ impl Budget {
     pub(crate) fn new() -> Self {
         Self { cells: 0, bytes: 0 }
     }
-    pub(crate) fn cell(&mut self, text_bytes: usize) -> Result<(), String> {
+    /// Admit one materialized cell retaining `bytes` (its
+    /// [`retained_size`]).
+    pub(crate) fn cell(&mut self, bytes: usize) -> Result<(), String> {
         self.cells += 1;
-        self.bytes = self.bytes.saturating_add(64 + text_bytes);
+        self.bytes = self.bytes.saturating_add(bytes);
         if self.cells > MAX_CELLS {
             return Err(resource("cell count"));
         }
@@ -269,11 +272,14 @@ pub fn read(package: &OdfPackage) -> Result<OdsWorkbook, String> {
         }
     }
     extras::database_ranges(spreadsheet, &mut sheets, &sheet_names, &mut defined_names);
-    extras::content_validations(spreadsheet, &mut sheets);
+    extras::content_validations(&mut context.budget, spreadsheet, &mut sheets)?;
     extras::conditional_formats(&mut context, tables.as_slice(), &mut sheets)?;
     // Defined names in scope for each sheet (workbook-global, then local).
+    // Every sheet holds its own copy of each global name: each copy is
+    // admitted before it is made.
     for (index, sheet) in sheets.iter_mut().enumerate() {
-        sheet.worksheet.defined_names = defined_names
+        let mut names = Vec::new();
+        for (name, _, formula) in defined_names
             .iter()
             .filter(|(_, scope, _)| scope.is_none())
             .chain(
@@ -281,11 +287,18 @@ pub fn read(package: &OdfPackage) -> Result<OdsWorkbook, String> {
                     .iter()
                     .filter(|(_, scope, _)| *scope == Some(index)),
             )
-            .map(|(name, _, formula)| xlsx_model::DefinedName {
+        {
+            context.budget.bytes(
+                std::mem::size_of::<xlsx_model::DefinedName>()
+                    .saturating_add(name.len())
+                    .saturating_add(formula.len()),
+            )?;
+            names.push(xlsx_model::DefinedName {
                 name: name.clone(),
                 formula: formula.clone(),
-            })
-            .collect();
+            });
+        }
+        sheet.worksheet.defined_names = names;
     }
     let (styles, xf_indent_pt) = context.xfs.finish();
     Ok(OdsWorkbook {

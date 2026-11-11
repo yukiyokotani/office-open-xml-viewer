@@ -164,3 +164,23 @@ describe('shared date formatting range (#1710)', () => {
     expect(formatChartValWithCode(2958466 - 0.4 / 86400000, 'yyyy-mm-dd h:mm:ss')).toBe('9999-12-31 23:59:59');
   });
 });
+
+describe('section divisors (OpenDocument display factor)', () => {
+  it('divides any factor once the section is chosen on the undivided value', () => {
+    expect(formatChartValWithCode(100, '0', false, [10])).toBe('10');
+    expect(formatChartValWithCode(5000, '0.0', false, [2000])).toBe('2.5');
+    expect(formatChartValWithCode(-50, '0;(0)', false, [1, 10])).toBe('(5)');
+    expect(formatCategoryLabel('100', '0', false, [10])).toBe('10');
+  });
+  it('divides General codes and General sections', () => {
+    expect(formatChartValWithCode(2500, 'General', false, [1000])).toBe('2.5');
+    expect(formatChartValWithCode(250, 'General;General', false, [100, 10])).toBe('2.5');
+    expect(formatChartValWithCode(-250, 'General;General', false, [100, 10])).toBe('25');
+    expect(formatChartValWithCode(-250, 'General;General')).toBe('250');
+  });
+  it('ignores absent, non-positive or non-finite divisors', () => {
+    expect(formatChartValWithCode(42, '0', false, null)).toBe('42');
+    expect(formatChartValWithCode(42, '0', false, [0])).toBe('42');
+    expect(formatChartValWithCode(42, '0', false, [Number.NaN])).toBe('42');
+  });
+});

@@ -1136,6 +1136,12 @@ function applyFormatCode(
   // Date/time is a property of the selected section (§18.8.30): `0.00;h:mm`
   // formats a positive value as a number and only a negative one as a time.
   const serial = useMagnitude ? Math.abs(num) : num;
+  // A section whose whole body is the General keyword (`[Red]General`,
+  // `General;General`) formats its (magnitude) value as General (§18.8.30).
+  if (chosen.body.trim().toLowerCase() === 'general') {
+    const text = formatGeneralText(serial);
+    return chosen.color ? { text, color: chosen.color } : { text };
+  }
   const formatted = isDateFormatSection(chosen.body)
     ? dateFormattedCell(formatExcelDateTime(serial, chosen.body, date1904), serial, date1904)
     : { text: renderNumericSection(num, chosen.body, useMagnitude) };

@@ -17,6 +17,9 @@ export interface EffectiveDataLabelTextOptions {
   percentRatio?: number;
   bubbleSize?: number;
   formatCode?: string | null;
+  /** Section divisors of `formatCode` (an OpenDocument display factor), for
+   *  the value and bubble-size text; the percentage has its own format. */
+  formatDivisors?: readonly number[] | null;
   percentFormatCode?: string | null;
   date1904?: boolean;
   separator?: string | null;
@@ -37,6 +40,7 @@ export function effectiveDataLabelText(options: EffectiveDataLabelTextOptions): 
       : 1;
     parts.push(formatChartValWithCode(
       options.sourceValue / divisor, options.formatCode ?? null, options.date1904,
+      options.formatDivisors,
     ));
   }
   if (options.showPercent && options.percentRatio != null) {
@@ -49,6 +53,7 @@ export function effectiveDataLabelText(options: EffectiveDataLabelTextOptions): 
   if (options.showBubbleSize && options.bubbleSize != null) {
     parts.push(formatChartValWithCode(
       options.bubbleSize, options.formatCode ?? null, options.date1904,
+      options.formatDivisors,
     ));
   }
   return parts.filter(part => part !== '').join(

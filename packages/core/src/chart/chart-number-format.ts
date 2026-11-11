@@ -113,12 +113,16 @@ export function formatChartValWithCode(
   /** Chart date system (`<c:date1904>`, §21.2.2.38). `true` resolves serial
    *  date codes against the 1904 epoch. Defaults to false (1900 system). */
   date1904 = false,
+  /** Per numeric section of `code`, the divisor applied once the section is
+   *  chosen on the undivided value (an OpenDocument display factor, ODF 1.3
+   *  Part 3 §19.346), exactly as worksheet cells apply it. */
+  divisors?: readonly number[] | null,
 ): string {
   // Absent `code`, or the reserved "General" keyword (ECMA-376 §18.8.30), both
   // mean the General number format. LibreOffice charts emit
   // `<c:numFmt formatCode="General">`; tokenizing it as a literal pattern would
   // render the word "General" instead of the value (issue #358).
-  if (!code || code.trim().toLowerCase() === 'general') return formatChartVal(v);
+  if (!code || isGeneralSection(code)) return formatChartVal(v / sectionDivisor(divisors, 0));
   // Section selection per §18.8.30: positive;negative;zero, with the text
   // section left out (it never formats a number). When the negative section
   // is omitted, a negative number is formatted with the positive section and
@@ -127,12 +131,14 @@ export function formatChartValWithCode(
   const textIndex = textSectionIndex(sections);
   const numeric = sections.filter((_, i) => i !== textIndex);
   if (numeric.length === 0) return formatChartVal(v);
-  let section: string;
-  if (v > 0) section = numeric[0];
-  else if (v < 0) section = numeric[1] ?? numeric[0];
-  else section = numeric[2] ?? numeric[0];
+  const index = v > 0 ? 0 : v < 0 ? (numeric.length > 1 ? 1 : 0) : (numeric.length > 2 ? 2 : 0);
+  const section = numeric[index];
   if (section === '') return '';
   const explicitNegative = v < 0 && numeric.length >= 2;
+  v /= sectionDivisor(divisors, index);
+  // A section that is the General keyword (`General;General`) formats its
+  // value as General: the magnitude in an explicit negative section.
+  if (isGeneralSection(section)) return formatChartVal(explicitNegative ? -v : v);
   // Date/time is a property of the selected section: the value is a serial
   // date (scatter / time-series axes), rendered by the same formatter as
   // worksheet cells.
@@ -160,6 +166,8 @@ export function formatCategoryLabel(
   /** Chart date system (`<c:date1904>`, §21.2.2.38). Threaded to the date
    *  formatter for serial-date category labels. Defaults to false. */
   date1904 = false,
+  /** Section divisors of `code` ({@link formatChartValWithCode}). */
+  divisors?: readonly number[] | null,
 ): string {
   if (!code) return raw;
   // Only numeric-looking categories are formatted. `Number('')` and
@@ -168,7 +176,18 @@ export function formatCategoryLabel(
   if (raw.trim() === '') return raw;
   const num = Number(raw);
   if (!Number.isFinite(num)) return raw;
-  return formatChartValWithCode(num, code, date1904);
+  return formatChartValWithCode(num, code, date1904, divisors);
+}
+
+/** The divisor of numeric section `index`: a finite positive factor, else 1. */
+function sectionDivisor(divisors: readonly number[] | null | undefined, index: number): number {
+  const divisor = divisors?.[index];
+  return divisor != null && Number.isFinite(divisor) && divisor > 0 ? divisor : 1;
+}
+
+/** Whether a code or section is the reserved General keyword (§18.8.30). */
+function isGeneralSection(section: string): boolean {
+  return section.trim().toLowerCase() === 'general';
 }
 
 function applyChartNumberSection(abs: number, section: string): string {

@@ -73,105 +73,16 @@ impl FormatCode {
         self.code == "General" && self.divisors.is_empty()
     }
 
-    /// The code for consumers without per-section divisors (chart axes and
-    /// labels): a factor that is a power of 1000 is the code's exact
-    /// trailing-comma scaling (§18.8.30 "thousands separator"); any other
-    /// factor has no code spelling and leaves the section unscaled.
-    pub fn chart_code(&self) -> String {
-        let code = literal_code(&self.code);
-        if self.divisors.is_empty() {
-            return code;
-        }
-        let sections = split_sections(&code);
-        let mut numeric = 0usize;
-        let text_index = (sections.len() >= 4).then_some(3);
-        sections
+    /// The code and section divisors for a chart axis or data label
+    /// (`ChartModel::*_format_code` / `*_format_divisors`): the chart
+    /// formatter divides each section exactly as the cell formatter does.
+    pub fn chart_format(&self) -> (String, Option<Vec<f64>>) {
+        let divisors = self
+            .divisors
             .iter()
-            .enumerate()
-            .map(|(index, section)| {
-                if Some(index) == text_index {
-                    return section.to_string();
-                }
-                let divisor = self.divisors.get(numeric).copied().unwrap_or(1.0);
-                numeric += 1;
-                match thousands_power(divisor) {
-                    Some(commas) if commas > 0 => with_scaling_commas(section, commas),
-                    _ => section.to_string(),
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(";")
-    }
-}
-
-/// `k` when `factor` is exactly 1000^k.
-fn thousands_power(factor: f64) -> Option<usize> {
-    let mut value = factor;
-    let mut k = 0usize;
-    while value >= 1000.0 && k < 8 {
-        value /= 1000.0;
-        k += 1;
-    }
-    (value == 1.0).then_some(k)
-}
-
-/// Split a code at its top-level `;` (outside quotes, escapes, brackets).
-fn split_sections(code: &str) -> Vec<&str> {
-    let mut out = Vec::new();
-    let mut start = 0usize;
-    let mut quoted = false;
-    let mut bracket = false;
-    let mut escaped = false;
-    for (index, c) in code.char_indices() {
-        if escaped {
-            escaped = false;
-            continue;
-        }
-        match c {
-            '\\' if !quoted => escaped = true,
-            '"' => quoted = !quoted,
-            '[' if !quoted => bracket = true,
-            ']' if !quoted => bracket = false,
-            ';' if !quoted && !bracket => {
-                out.push(&code[start..index]);
-                start = index + 1;
-            }
-            _ => {}
-        }
-    }
-    out.push(&code[start..]);
-    out
-}
-
-/// Insert `commas` scaling commas right after the last digit placeholder of
-/// a numeric section (before any literal suffix).
-fn with_scaling_commas(section: &str, commas: usize) -> String {
-    let mut last_digit = None;
-    let mut quoted = false;
-    let mut bracket = false;
-    let mut escaped = false;
-    for (index, c) in section.char_indices() {
-        if escaped {
-            escaped = false;
-            continue;
-        }
-        match c {
-            '\\' if !quoted => escaped = true,
-            '"' => quoted = !quoted,
-            '[' if !quoted => bracket = true,
-            ']' if !quoted => bracket = false,
-            '0' | '#' | '?' if !quoted && !bracket => last_digit = Some(index),
-            _ => {}
-        }
-    }
-    match last_digit {
-        Some(index) => {
-            let mut out = section[..=index].to_string();
-            out.push_str(&",".repeat(commas));
-            out.push_str(&section[index + 1..]);
-            out
-        }
-        None => section.to_string(),
+            .any(|d| *d != 1.0)
+            .then(|| self.divisors.clone());
+        (literal_code(&self.code), divisors)
     }
 }
 
@@ -232,8 +143,9 @@ impl DataStyles {
                 .children()
                 .filter(|n| xml::is(*n, NS_STYLE, "map"))
                 .filter_map(|map| {
+                    let condition = map.attribute((NS_STYLE, "condition"))?;
                     Some((
-                        map.attribute((NS_STYLE, "condition"))?.to_string(),
+                        crate::odf_props::of_condition(map, condition)?.to_string(),
                         map.attribute((NS_STYLE, "apply-style-name"))?.to_string(),
                     ))
                 })
@@ -333,11 +245,12 @@ impl DataStyles {
             if numeric.len() >= MAX_NUMERIC_SECTIONS {
                 return Err(crate::error::resource("number format section"));
             }
-            numeric.push((
-                condition_code(condition),
-                section.code.clone(),
-                section.divisor,
-            ));
+            // A condition that is not `value() op number` is not
+            // recognized; its map is ignored (§19.472).
+            let Some(condition) = condition_code(condition) else {
+                continue;
+            };
+            numeric.push((condition, section.code.clone(), section.divisor));
         }
         let base_code = if base.kind == DataKind::Text {
             text.get_or_insert_with(|| base.code.clone());
@@ -401,20 +314,19 @@ impl DataStyles {
     }
 }
 
-/// `value()>=0` → `[>=0]` (§16.3: `value()` compared with a number).
-fn condition_code(condition: &str) -> String {
-    let condition = condition.trim();
-    let rest = condition
-        .strip_prefix("value()")
-        .unwrap_or(condition)
-        .trim();
+/// `value()>=0` → `[>=0]` (§16.3: `value()` compared with a number);
+/// `None` for any other condition.
+fn condition_code(condition: &str) -> Option<String> {
+    let rest = condition.trim().strip_prefix("value()")?.trim();
     for op in [">=", "<=", "!=", "<>", ">", "<", "="] {
         if let Some(value) = rest.strip_prefix(op) {
+            let value = value.trim();
+            value.parse::<f64>().ok()?;
             let op = if op == "!=" { "<>" } else { op };
-            return format!("[{op}{}]", value.trim());
+            return Some(format!("[{op}{value}]"));
         }
     }
-    String::new()
+    None
 }
 
 /// Quote a literal for a format code: `"text"`, with `"` written as `\"`.
@@ -890,16 +802,21 @@ mod tests {
             (k.code.as_str(), k.divisors.as_slice()),
             ("0.0", &[1000.0][..])
         );
-        assert_eq!(k.chart_code(), "0.0,");
+        assert_eq!(k.chart_format(), ("0.0".into(), Some(vec![1000.0])));
         let (ten, _) = data.code("TEN").unwrap();
         assert_eq!(
             (ten.code.as_str(), ten.divisors.as_slice()),
             ("0", &[10.0][..])
         );
-        // No code spelling divides by 10: chart axes keep the plain code.
-        assert_eq!(ten.chart_code(), "0");
+        // Charts divide by any factor, as cells do.
+        assert_eq!(ten.chart_format(), ("0".into(), Some(vec![10.0])));
         let (general, _) = data.code("G").unwrap();
         assert_eq!(general.divisors, [2000.0]);
+        // A General code keeps its factor on chart axes and labels.
+        assert_eq!(
+            general.chart_format(),
+            ("General".into(), Some(vec![2000.0]))
+        );
         assert!(!data.is_general("G"));
         let (mix, _) = data.code("MIX").unwrap();
         assert_eq!(
@@ -946,5 +863,20 @@ mod tests {
             data.check(),
             Err(crate::error::resource("number format code"))
         );
+    }
+
+    #[test]
+    fn map_conditions_resolve_their_namespace_prefix() {
+        let mut data = codes(concat!(
+            r##"<number:number-style style:name="P"><number:number number:decimal-places="0" number:min-integer-digits="1"/></number:number-style>"##,
+            r##"<number:number-style style:name="OF" xmlns:of="urn:oasis:names:tc:opendocument:xmlns:of:1.2"><number:text>-</number:text><number:number number:decimal-places="0" number:min-integer-digits="1"/><style:map style:condition="of:value()&gt;=0" style:apply-style-name="P"/></number:number-style>"##,
+            r##"<number:number-style style:name="X" xmlns:x="urn:other"><number:text>-</number:text><number:number number:decimal-places="0" number:min-integer-digits="1"/><style:map style:condition="x:value()&gt;=0" style:apply-style-name="P"/></number:number-style>"##,
+            r##"<number:number-style style:name="BAD"><number:text>-</number:text><number:number number:decimal-places="0" number:min-integer-digits="1"/><style:map style:condition="value()" style:apply-style-name="P"/></number:number-style>"##,
+        ));
+        assert_eq!(data.code("OF").unwrap().0.code, "0;-0");
+        // A condition in another namespace, or none §16.3 defines, is
+        // ignored: it never becomes an unconditional section.
+        assert_eq!(data.code("X").unwrap().0.code, "-0");
+        assert_eq!(data.code("BAD").unwrap().0.code, "-0");
     }
 }

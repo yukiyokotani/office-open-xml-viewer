@@ -659,6 +659,100 @@ impl RetainedBytes for ShapeTextRun {
     }
 }
 
+// Cell content and notes, as readers that copy repeated cells admit them.
+retained_struct!(Cell {
+    col,
+    row,
+    value,
+    style_index,
+    formula,
+    show_phonetic
+});
+
+impl RetainedBytes for CellValue {
+    fn heap_bytes(&self) -> u64 {
+        match self {
+            Self::Empty => 0,
+            Self::Text {
+                text,
+                runs,
+                phonetic_runs,
+                phonetic_pr,
+            } => 0u64
+                .saturating_add(text.heap_bytes())
+                .saturating_add(runs.heap_bytes())
+                .saturating_add(phonetic_runs.heap_bytes())
+                .saturating_add(phonetic_pr.heap_bytes()),
+            Self::Number { number } => number.heap_bytes(),
+            Self::Bool { bool } => bool.heap_bytes(),
+            Self::Error { error } => error.heap_bytes(),
+            Self::Shared { si } => si.heap_bytes(),
+        }
+    }
+}
+
+retained_struct!(Run { text, font });
+
+retained_struct!(RunFont {
+    bold,
+    italic,
+    underline,
+    strike,
+    size,
+    color,
+    name,
+    underline_style,
+    vert_align,
+    normal_color,
+    authored_color
+});
+
+retained_struct!(PhoneticRun { sb, eb, text });
+
+retained_struct!(PhoneticProperties {
+    font_id,
+    r#type,
+    alignment
+});
+
+retained_struct!(MergeCell {
+    top,
+    left,
+    bottom,
+    right
+});
+
+retained_struct!(XlsxComment {
+    kind,
+    cell_ref,
+    id,
+    person_id,
+    author,
+    date,
+    root_text,
+    text,
+    resolved,
+    replies
+});
+
+impl RetainedBytes for XlsxCommentKind {
+    fn heap_bytes(&self) -> u64 {
+        match self {
+            Self::Note | Self::Thread => 0,
+        }
+    }
+}
+
+retained_struct!(XlsxCommentReply {
+    id,
+    parent_id,
+    person_id,
+    author,
+    date,
+    text,
+    resolved
+});
+
 retained_struct!(TableColumnInfo {
     data_dxf_id,
     header_row_dxf_id,

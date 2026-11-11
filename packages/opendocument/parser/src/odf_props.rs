@@ -40,6 +40,9 @@ pub fn prefix(namespace: Option<&str>) -> &'static str {
 }
 
 pub const NS_CHART: &str = "urn:oasis:names:tc:opendocument:xmlns:chart:1.0";
+/// OpenFormula (ODF 1.3 Part 4), the default namespace of `style:map`
+/// conditions (§19.472).
+pub const NS_OF: &str = "urn:oasis:names:tc:opendocument:xmlns:of:1.2";
 pub const NS_CHARTOOO: &str = "http://openoffice.org/2010/chart";
 pub const NS_CALCEXT: &str = "urn:org:documentfoundation:names:experimental:calc:xmlns:calcext:1.0";
 
@@ -253,7 +256,9 @@ fn read_style(node: roxmltree::Node<'_, '_>) -> Style {
     for child in node.children().filter(|n| n.is_element()) {
         if xml::is(child, NS_STYLE, "map") {
             if let (Some(condition), Some(apply)) = (
-                child.attribute((NS_STYLE, "condition")),
+                child
+                    .attribute((NS_STYLE, "condition"))
+                    .and_then(|c| of_condition(child, c)),
                 child.attribute((NS_STYLE, "apply-style-name")),
             ) {
                 style.maps.push(StyleMap {
@@ -378,6 +383,29 @@ pub fn font_faces(root: roxmltree::Node<'_, '_>, faces: &mut HashMap<String, Str
             }
         }
     }
+}
+
+/// A `style:map` condition (§19.472) in the OpenFormula namespace, without
+/// its namespace prefix. The prefix is resolved through the bindings in
+/// scope where the map is written; a missing prefix defaults to
+/// OpenFormula. A condition in any other (or an unbound) namespace is not
+/// recognized: `None`, and its map is ignored, as §19.472 requires.
+pub fn of_condition<'a>(node: roxmltree::Node<'_, '_>, value: &'a str) -> Option<&'a str> {
+    let value = value.trim();
+    match value.split_once(':') {
+        Some((prefix, rest)) if is_ncname(prefix) => {
+            (node.lookup_namespace_uri(Some(prefix)) == Some(NS_OF)).then_some(rest.trim())
+        }
+        _ => Some(value),
+    }
+}
+
+/// An XML NCName (a namespace prefix): a letter or `_`, then letters,
+/// digits, `-`, `_` or `.`.
+fn is_ncname(text: &str) -> bool {
+    let mut chars = text.chars();
+    chars.next().is_some_and(|c| c.is_alphabetic() || c == '_')
+        && chars.all(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | '.'))
 }
 
 #[cfg(test)]

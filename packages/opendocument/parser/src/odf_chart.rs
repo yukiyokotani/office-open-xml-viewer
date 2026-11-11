@@ -198,12 +198,9 @@ struct LocalTable {
 }
 
 /// A table repeat count (§19.675 / §19.680, a positive integer; absent or
-/// unreadable is 1).
-fn repeat_count(node: roxmltree::Node<'_, '_>, name: &str) -> usize {
-    node.attribute((NS_TABLE, name))
-        .and_then(|v| v.trim().parse::<usize>().ok())
-        .unwrap_or(1)
-        .max(1)
+/// unreadable is 1; one beyond the implementation bound rejects).
+fn repeat_count(node: roxmltree::Node<'_, '_>, name: &str) -> Result<usize, String> {
+    xml::count_attribute(node, NS_TABLE, name).map(|n| n as usize)
 }
 
 impl LocalTable {
@@ -221,12 +218,12 @@ impl LocalTable {
             .descendants()
             .filter(|n| xml::is(*n, NS_TABLE, "table-row"))
         {
-            let row_repeat = repeat_count(row, "number-rows-repeated");
+            let row_repeat = repeat_count(row, "number-rows-repeated")?;
             let mut cells: Vec<(CellData, String)> = Vec::new();
             for cell in row.children().filter(|n| {
                 xml::is(*n, NS_TABLE, "table-cell") || xml::is(*n, NS_TABLE, "covered-table-cell")
             }) {
-                let repeat = repeat_count(cell, "number-columns-repeated");
+                let repeat = repeat_count(cell, "number-columns-repeated")?;
                 let row_cells = cells.len().saturating_add(repeat);
                 if count.saturating_add(row_cells.saturating_mul(row_repeat)) > MAX_LOCAL_CELLS {
                     return Err(chart_limit("chart data table"));
@@ -743,7 +740,11 @@ impl Reader<'_> {
                 .filter(|_| prop("link-data-style-to-source") != Some("true"))
                 .and_then(|name| data.code(name))
                 .filter(|(format, _)| !format.is_general())
-                .map(|(format, _)| format.chart_code());
+                .map(|(format, _)| format.chart_format());
+            let (format_code, format_divisors) = match format_code {
+                Some((code, divisors)) => (Some(code), divisors),
+                None => (None, None),
+            };
             let secondary = name.starts_with("secondary");
             match (dimension, secondary) {
                 ("x", false) => {
@@ -768,6 +769,7 @@ impl Reader<'_> {
                     model.cat_axis_major_unit = number("interval-major");
                     model.cat_axis_log_base = (prop("logarithmic") == Some("true")).then_some(10.0);
                     model.cat_axis_format_code = format_code;
+                    model.cat_axis_format_divisors = format_divisors;
                     if let Some(rotation) = get(&chain, "chart:style:rotation-angle")
                         .and_then(|v| v.parse::<f64>().ok())
                         .filter(|r| *r != 0.0)
@@ -819,6 +821,7 @@ impl Reader<'_> {
                     }
                     model.val_axis_log_base = (prop("logarithmic") == Some("true")).then_some(10.0);
                     model.val_axis_format_code = format_code;
+                    model.val_axis_format_divisors = format_divisors;
                     model.bar_gap_width = number("gap-width").map(|v| v.round() as i32);
                     model.bar_overlap = number("overlap").map(|v| v.round() as i32);
                     if let Some((text, font)) = title {
@@ -855,6 +858,7 @@ impl Reader<'_> {
                         "fontBold": font.bold,
                         "lineColor": paint.line,
                         "formatCode": format_code,
+                        "formatDivisors": format_divisors,
                         "orientation": (prop("reverse-direction") == Some("true")).then_some("maxMin"),
                         "logBase": (prop("logarithmic") == Some("true")).then_some(10.0),
                         "tickLabelPos": (!labels).then_some("none"),
@@ -1001,6 +1005,7 @@ impl Reader<'_> {
                 series.line_hidden = Some(true);
             }
             // Scatter and bubble: domains are x (and for bubble y, x) values.
+            let mut categories_charged = 0usize;
             match kind {
                 "scatter" => {
                     if let Some(x) = domains.first() {
@@ -1035,6 +1040,7 @@ impl Reader<'_> {
                     if !categories.is_empty() {
                         // Each series holds its own copy of the categories.
                         self.budget.bytes(categories_bytes)?;
+                        categories_charged = categories_bytes;
                         series.categories = Some(categories.clone());
                     }
                 }
@@ -1090,11 +1096,7 @@ impl Reader<'_> {
             {
                 // §19.21 chart:repeated: the point style covers that many
                 // points; more points than a series holds reject.
-                let repeat = point
-                    .attribute((NS_CHART, "repeated"))
-                    .and_then(|v| v.trim().parse::<usize>().ok())
-                    .unwrap_or(1)
-                    .max(1);
+                let repeat = xml::count_attribute(point, NS_CHART, "repeated")? as usize;
                 if point_colors.len().saturating_add(repeat) > MAX_POINTS {
                     return Err(chart_limit("chart point"));
                 }
@@ -1155,6 +1157,14 @@ impl Reader<'_> {
             if !trendlines.is_empty() {
                 series.trend_lines = Some(trendlines);
             }
+            // Each series holds its own copies of the strings its (possibly
+            // shared) styles define: label separator and font, number
+            // format, paint, markers, trendlines. The series' whole retained
+            // size is admitted before it is kept (the categories copy was
+            // admitted before it was made), so a style shared by every
+            // series is charged once per series.
+            self.budget
+                .bytes(crate::retained_size(&series).saturating_sub(categories_charged))?;
             series_models.push(series);
         }
         if series_models.is_empty() {
@@ -1215,7 +1225,11 @@ impl Reader<'_> {
             .filter(|_| get(chain, "chart:chart:link-data-style-to-source") != Some("true"))
             .and_then(|name| data.code(name))
             .filter(|(format, _)| !format.is_general())
-            .map(|(format, _)| format.chart_code());
+            .map(|(format, _)| format.chart_format());
+        let (format_code, format_divisors) = match format_code {
+            Some((code, divisors)) => (Some(code), divisors),
+            None => (None, None),
+        };
         Some(ChartSeriesDataLabels {
             show_val,
             show_percent,
@@ -1242,6 +1256,7 @@ impl Reader<'_> {
             font_face: font.face,
             separator,
             format_code,
+            format_divisors,
             ..ChartSeriesDataLabels::default()
         })
     }
@@ -1523,5 +1538,82 @@ mod tests {
             model.series[0].data_point_colors,
             Some(vec![Some("FF0000".into()), Some("00FF00".into())])
         );
+    }
+
+    #[test]
+    fn per_series_label_styles_are_charged_per_series() {
+        // One shared style with a 1 MiB label separator, used by 300 series:
+        // every series holds its own copy.
+        let separator = "s".repeat(1024 * 1024);
+        let styles = format!(
+            r##"<style:style style:name="S" style:family="chart"><style:chart-properties chart:data-label-number="value"><chart:label-separator><text:p>{separator}</text:p></chart:label-separator></style:chart-properties></style:style>"##
+        );
+        let series = |count: usize| {
+            let series: String = (0..count)
+                .map(|_| r##"<chart:series chart:style-name="S"/>"##)
+                .collect();
+            chart(
+                &format!(
+                    r##"<chart:chart chart:class="chart:bar"><chart:plot-area>{series}</chart:plot-area></chart:chart>"##
+                ),
+                &styles,
+            )
+        };
+        let model = read_chart_document(&series(2), None, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            model.series[1]
+                .series_data_labels
+                .as_ref()
+                .and_then(|l| l.separator.as_deref())
+                .map(str::len),
+            Some(1024 * 1024)
+        );
+        assert_eq!(
+            read_chart_document(&series(300), None, None).err(),
+            Some(chart_limit("chart data"))
+        );
+    }
+
+    #[test]
+    fn chart_repeat_counts_past_the_bound_reject() {
+        let rows = r##"<table:table table:name="local-table"><table:table-rows><table:table-row table:number-rows-repeated="4294967296"><table:table-cell/></table:table-row></table:table-rows></table:table>"##;
+        assert_eq!(
+            read_chart_document(&chart(&line_series("local-table.A1", rows), ""), None, None).err(),
+            Some(crate::error::resource("repeat count"))
+        );
+        let points = r##"<chart:chart chart:class="chart:bar"><chart:plot-area><chart:series><chart:data-point chart:repeated="18446744073709551616"/></chart:series></chart:plot-area></chart:chart>"##;
+        assert_eq!(
+            read_chart_document(&chart(points, ""), None, None).err(),
+            Some(crate::error::resource("repeat count"))
+        );
+    }
+
+    #[test]
+    fn display_factors_reach_chart_axes_and_labels() {
+        let number = r##"xmlns:number="urn:oasis:names:tc:opendocument:xmlns:datastyle:1.0""##;
+        let styles = format!(
+            concat!(
+                r##"<number:number-style {number} style:name="N10"><number:number number:decimal-places="0" number:min-integer-digits="1" number:display-factor="10"/></number:number-style>"##,
+                r##"<number:number-style {number} style:name="GK"><number:number number:display-factor="1000"/></number:number-style>"##,
+                r##"<style:style style:name="ay" style:family="chart" style:data-style-name="N10"><style:chart-properties chart:link-data-style-to-source="false"/></style:style>"##,
+                r##"<style:style style:name="s1" style:family="chart" style:data-style-name="GK"><style:chart-properties chart:data-label-number="value" chart:link-data-style-to-source="false"/></style:style>"##,
+            ),
+            number = number
+        );
+        let body = format!(
+            r##"<chart:chart chart:class="chart:bar"><chart:plot-area><chart:axis chart:dimension="x" chart:name="primary-x"><chart:categories table:cell-range-address="local-table.A2:.A3"/></chart:axis><chart:axis chart:dimension="y" chart:name="primary-y" chart:style-name="ay"/><chart:series chart:style-name="s1" chart:values-cell-range-address="local-table.B2:.B3"/></chart:plot-area>{LOCAL}</chart:chart>"##
+        );
+        let model = read_chart_document(&chart(&body, &styles), None, None)
+            .unwrap()
+            .unwrap();
+        // Any factor, not only powers of 1000, divides as in cells.
+        assert_eq!(model.val_axis_format_code.as_deref(), Some("0"));
+        assert_eq!(model.val_axis_format_divisors, Some(vec![10.0]));
+        // A General code keeps its factor.
+        let labels = model.series[0].series_data_labels.as_ref().unwrap();
+        assert_eq!(labels.format_code.as_deref(), Some("General"));
+        assert_eq!(labels.format_divisors, Some(vec![1000.0]));
     }
 }
