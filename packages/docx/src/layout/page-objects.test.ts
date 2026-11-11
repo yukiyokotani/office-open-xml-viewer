@@ -26,18 +26,20 @@ const PNG = Uint8Array.from(Buffer.from(
 ));
 const encoder = new TextEncoder();
 
-type Box = Readonly<{ x: number; y: number; w: number; h: number; id: number }>;
+type Box = Readonly<{ x: number; y: number; w: number; h: number; id: number; alignBottom?: boolean }>;
 const DEFAULT_BOX: Box = { x: 72, y: 200, w: 200, h: 120, id: 1 };
 
 function anchorXml(box: Box = DEFAULT_BOX): string {
   // Default: 200 x 120 pt at page (72, 200), square wrap on both sides.
-  const { x, y, w, h, id } = box;
+  const { x, y, w, h, id, alignBottom } = box;
   return '<w:r><w:drawing>'
     + '<wp:anchor distT="0" distB="0" distL="0" distR="0" simplePos="0" '
     + `relativeHeight="${251659264 + id}" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1">`
     + '<wp:simplePos x="0" y="0"/>'
     + `<wp:positionH relativeFrom="page"><wp:posOffset>${x * EMU}</wp:posOffset></wp:positionH>`
-    + `<wp:positionV relativeFrom="page"><wp:posOffset>${y * EMU}</wp:posOffset></wp:positionV>`
+    + (alignBottom
+      ? '<wp:positionV relativeFrom="page"><wp:align>bottom</wp:align></wp:positionV>'
+      : `<wp:positionV relativeFrom="page"><wp:posOffset>${y * EMU}</wp:posOffset></wp:positionV>`)
     + `<wp:extent cx="${w * EMU}" cy="${h * EMU}"/><wp:effectExtent l="0" t="0" r="0" b="0"/>`
     + `<wp:wrapSquare wrapText="bothSides"/><wp:docPr id="${id}" name="Anchor ${id}"/>`
     + '<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">'
@@ -50,14 +52,24 @@ function anchorXml(box: Box = DEFAULT_BOX): string {
 
 /** Paragraph 0 holds the anchor (and paragraph `bodyAnchorAt`, when given,
  * a second body page anchor); the others are one labelled line each. */
-function docx(paragraphCount: number, box: Box = DEFAULT_BOX, bodyAnchorAt?: number): Uint8Array {
+function docx(
+  paragraphCount: number,
+  box: Box = DEFAULT_BOX,
+  bodyAnchorAt?: number,
+  oddSectionAfter?: number,
+): Uint8Array {
   const body = Array.from({ length: paragraphCount }, (_, index) => {
     const label = `P${String(index).padStart(3, '0')} words words words words words words words words`;
     const content = index === 0 ? anchorXml(box)
       : `<w:r><w:t>${label}</w:t></w:r>`
         + (index === bodyAnchorAt ? anchorXml({ x: 300, y: 500, w: 150, h: 100, id: 2 }) : '');
+    // A section ending here; the next one starts on an odd page.
+    const sectPr = index === oddSectionAfter
+      ? '<w:sectPr><w:pgSz w:w="12240" w:h="15840"/>'
+        + '<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/></w:sectPr>'
+      : '';
     return '<w:p><w:pPr><w:widowControl w:val="0"/>'
-      + '<w:spacing w:before="0" w:after="0" w:line="480" w:lineRule="exact"/></w:pPr>'
+      + '<w:spacing w:before="0" w:after="0" w:line="480" w:lineRule="exact"/>' + sectPr + '</w:pPr>'
       + content + '</w:p>';
   }).join('');
   const document = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
@@ -69,7 +81,9 @@ function docx(paragraphCount: number, box: Box = DEFAULT_BOX, bodyAnchorAt?: num
     + body
     + '<w:sectPr><w:pgSz w:w="12240" w:h="15840"/>'
     + '<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/>'
-    + '<w:cols w:space="720"/></w:sectPr></w:body></w:document>';
+    + '<w:cols w:space="720"/>'
+    + (oddSectionAfter !== undefined ? '<w:type w:val="oddPage"/>' : '')
+    + '</w:sectPr></w:body></w:document>';
   return storeZip(new Map([
     ['[Content_Types].xml', encoder.encode('<?xml version="1.0" encoding="UTF-8"?>'
       + '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
@@ -112,8 +126,14 @@ function measureContext(): CanvasRenderingContext2D {
 
 /** The parsed document; with `page`, its anchor paragraph moves out of the
  * body into a page object on that page (an empty paragraph keeps its slot). */
-function model(paragraphCount: number, page?: number, box?: Box, bodyAnchorAt?: number): DocxDocumentModel {
-  const archive = new DocxArchive(docx(paragraphCount, box, bodyAnchorAt));
+function model(
+  paragraphCount: number,
+  page?: number,
+  box?: Box,
+  bodyAnchorAt?: number,
+  oddSectionAfter?: number,
+): DocxDocumentModel {
+  const archive = new DocxArchive(docx(paragraphCount, box, bodyAnchorAt, oddSectionAfter));
   let raw: DocxDocumentModel & { __pageObjects?: unknown };
   try {
     raw = JSON.parse(new TextDecoder().decode(archive.parse()));
@@ -225,6 +245,21 @@ describe('producer page objects', () => {
   it('take a page-sized wrapping drawing without exhausting a band', () => {
     const result = layout(model(60, 3, { x: 0, y: 0, w: 612, h: 792, id: 1 }));
     expect(drawingPages(result)).toEqual([3]);
+  });
+
+  it('paint on a parity blank page', () => {
+    // Page 1 ends a section; the next starts on an odd page, so physical
+    // page 2 is a parity blank that holds the page object.
+    const result = layout(model(10, 2, undefined, undefined, 4));
+    expect(result.pages.length).toBe(3);
+    expect(drawingPages(result)).toEqual([2]);
+  });
+
+  it('resolve page-relative alignment against the physical page', () => {
+    const result = layout(model(10, 2, { x: 72, y: 0, w: 200, h: 120, id: 1, alignBottom: true }));
+    const page = result.pages[1]!;
+    const drawing = page.layers.header.flatMap((node) => node.kind === 'paragraph' ? node.drawings : [])[0]!;
+    expect(Math.round(drawing.flowBounds.yPt)).toBe(792 - 120);
   });
 
   it('leave a document without page objects as it was', () => {

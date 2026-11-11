@@ -779,6 +779,18 @@ fn style_anchors_and_groups_keep_their_page() {
         .map(|object| (object.page, object.body.len()))
         .collect();
     assert_eq!(pages, [(2, 2), (3, 1)]);
+    // The group members take the group's page anchoring.
+    for host in paragraphs(&document.page_objects[0].body) {
+        let shape = host
+            .runs
+            .iter()
+            .find_map(|run| match run {
+                DocRun::Shape(shape) => Some(shape),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(shape.anchor_y_relative_from.as_deref(), Some("page"));
+    }
     assert!(!paragraphs(&document.body)[0]
         .runs
         .iter()

@@ -293,8 +293,12 @@ impl<'a> Reader<'a> {
                     .saturating_add(2 * std::mem::size_of::<docx_model::AnchorPolygonWire>()),
             )?;
         }
+        // A group member has no anchor of its own: it takes its group's
+        // (§10.3.15; the group is the anchored object).
+        let inherited = self.group_anchor.clone();
         let anchor = node
             .attribute((NS_TEXT, "anchor-type"))
+            .or(inherited.as_deref())
             .or_else(|| graphic.get(NS_TEXT, "anchor-type"))
             .unwrap_or("paragraph");
         let x = node
@@ -1398,6 +1402,22 @@ impl<'a> Reader<'a> {
     /// `draw:g` (§10.3.15): its members as separate shapes on the group's
     /// anchor (DOCX anchors hold one object each).
     fn group(&mut self, node: roxmltree::Node<'a, 'a>) -> Result<Option<DocRun>, String> {
+        let graphic = self.graphic(node)?;
+        let anchor = node
+            .attribute((NS_TEXT, "anchor-type"))
+            .or_else(|| graphic.get(NS_TEXT, "anchor-type"))
+            // An as-character group cannot stay one inline object in the
+            // DOCX model; its members keep their paragraph anchoring.
+            .filter(|anchor| *anchor != "as-char")
+            .map(str::to_string)
+            .or_else(|| self.group_anchor.clone());
+        let saved = std::mem::replace(&mut self.group_anchor, anchor);
+        let result = self.group_members(node);
+        self.group_anchor = saved;
+        result
+    }
+
+    fn group_members(&mut self, node: roxmltree::Node<'a, 'a>) -> Result<Option<DocRun>, String> {
         let mut runs = Vec::new();
         for child in node.children().filter(|n| n.is_element()) {
             // Through `drawing`, which bounds the nesting depth.

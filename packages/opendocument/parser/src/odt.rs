@@ -214,6 +214,7 @@ pub fn read(package: &OdfPackage) -> Result<(Document, Vec<OwnedDocumentResource
         repeat_work: 0,
         intrinsic: HashMap::new(),
         page_objects: BTreeMap::new(),
+        group_anchor: None,
         rejected_images: HashSet::new(),
         section_markers: 0,
         region_cache: HashMap::new(),
@@ -401,6 +402,8 @@ struct Reader<'a> {
     level_cache: HashMap<(Scope, String, u32), list::Level<'a>>,
     /// Each master page's own region stories, built once.
     region_cache: HashMap<String, Rc<page::MasterStories>>,
+    /// The anchor type of the enclosing drawing group (its members take it).
+    group_anchor: Option<String>,
     /// Drawings anchored to an explicit physical page, by page (1-based).
     page_objects: BTreeMap<u32, Vec<DocRun>>,
     /// Each retained picture's intrinsic size by key (scanned once).

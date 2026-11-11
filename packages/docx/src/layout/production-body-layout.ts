@@ -973,8 +973,12 @@ function layoutBodyStory(
     displayPageNumber: request.pageNumber?.displayNumber ?? pageFieldContext?.displayPageNumber ?? request.pageIndex + 1,
     pageNumberFormat: request.pageNumber?.format ?? pageFieldContext?.pageNumberFormat ?? state.pageNumberFormat,
     pageWidth: request.section.geometry.pageWidth,
+    // A note band's unbounded flow has no page frame of its own. A page
+    // story with unbounded flow (only a producer page object's header-class
+    // story) keeps its physical page, which its page-positioned drawings
+    // resolve against.
     pageH:
-      request.container.capacity === 'unbounded'
+      request.container.capacity === 'unbounded' && request.container.kind !== 'header'
         ? Number.MAX_SAFE_INTEGER
         : request.section.geometry.pageHeight,
     marginLeft: request.section.geometry.marginLeft,

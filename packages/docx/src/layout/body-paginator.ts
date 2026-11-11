@@ -4263,6 +4263,9 @@ function composePageStories(
       .flatMap((node) => nestedStoryDiagnostics(node, visited)));
     return Object.freeze({
       ...page,
+      // A parity blank page holding a page object is no longer blank: it
+      // carries that drawing (LibreOffice draws it on the inserted page).
+      ...(page.parityBlank ? { parityBlank: false } : {}),
       flowDomains: Object.freeze([...page.flowDomains, ...storyDomains]),
       layers: createPageLayers(entries),
       readingOrder: Object.freeze([
