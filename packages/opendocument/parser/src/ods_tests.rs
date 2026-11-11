@@ -849,3 +849,41 @@ fn shape_text_defaults_come_after_the_graphic_and_paragraph_styles() {
         ]
     );
 }
+
+#[test]
+fn a_cell_percentage_keeps_its_basis_inside_a_paragraph_context() {
+    // 150% of the table-cell default's 10pt is 15pt in the cell's font and
+    // in its paragraph's runs alike, whatever the paragraph default says.
+    let common = r#"<style:default-style style:family="table-cell"><style:text-properties fo:font-size="10pt"/></style:default-style><style:default-style style:family="paragraph"><style:text-properties fo:font-size="20pt"/></style:default-style><style:style style:name="S" style:family="table-cell"><style:text-properties fo:font-size="150%"/></style:style><style:style style:name="P" style:family="paragraph"><style:text-properties fo:font-style="italic"/></style:style>"#;
+    let body = content(
+        "",
+        &table(
+            r#"<table:table-row><table:table-cell table:style-name="S" office:value-type="string"><text:p text:style-name="P">x</text:p></table:table-cell></table:table-row>"#,
+        ),
+    );
+    let workbook = read_text(&body, Some(&styles(common))).unwrap();
+    let cell = &workbook.sheets[0].rows[0].cells[0];
+    let styles = workbook.styles.as_ref().unwrap();
+    let xf = &styles.cell_xfs[cell.style_index.unwrap() as usize];
+    assert_eq!(styles.fonts[xf.font_id as usize].size, 15.0);
+    assert_eq!(run_fonts(cell)[0].3, Some(15.0));
+}
+
+#[test]
+fn window_colour_off_inherits_the_parent_colour() {
+    // §20.395: `false` selects fo:color, inherited from the parent here.
+    let common = r##"<style:style style:name="Red" style:family="table-cell"><style:text-properties fo:color="#ff0000"/></style:style><style:style style:name="Child" style:family="table-cell" style:parent-style-name="Red"><style:text-properties style:use-window-font-color="false"/></style:style>"##;
+    let body = content(
+        "",
+        &table(
+            r#"<table:table-row><table:table-cell table:style-name="Child" office:value-type="float" office:value="1"><text:p>1</text:p></table:table-cell></table:table-row>"#,
+        ),
+    );
+    let workbook = read_text(&body, Some(&styles(common))).unwrap();
+    let styles = workbook.styles.as_ref().unwrap();
+    let xf = &styles.cell_xfs[workbook.sheets[0].rows[0].cells[0].style_index.unwrap() as usize];
+    assert_eq!(
+        styles.fonts[xf.font_id as usize].color.as_deref(),
+        Some("FF0000")
+    );
+}

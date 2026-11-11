@@ -186,6 +186,10 @@ describe('section divisors (OpenDocument display factor)', () => {
     expect(formatChartValWithCode(-5, '[<0]\\-0.0;0', false)).toBe('-5.0');
     expect(formatChartValWithCode(5, '[<0]0;[>10]0', false)).toBe('#');
   });
+  it('reads a condition value with an explicit plus sign', () => {
+    expect(formatChartValWithCode(1, '[>=+2]0;0.00')).toBe('1.00');
+    expect(formatChartValWithCode(3, '[>=+2]0;0.00')).toBe('3');
+  });
   it('reads an unclosed bracket run in linear time', () => {
     const started = performance.now();
     expect(typeof formatChartValWithCode(1, '['.repeat(200_000))).toBe('string');

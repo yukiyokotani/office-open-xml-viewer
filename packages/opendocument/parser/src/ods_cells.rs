@@ -618,7 +618,10 @@ impl PartialFont {
         for style in chain {
             let window = style.properties.get("text:style:use-window-font-color");
             let color = style.properties.get("text:fo:color");
-            if window.is_none() && color.is_none() {
+            // `use-window-font-color="false"` selects `fo:color` (§20.395):
+            // without one of its own the style sets nothing, and the
+            // colour is inherited.
+            if color.is_none() && window.is_none_or(|w| w != "true") {
                 continue;
             }
             if window.is_some_and(|w| w == "true") && color.is_none() {
@@ -643,6 +646,15 @@ impl PartialFont {
             });
         }
         font
+    }
+
+    /// A pending percentage resolved against `base` points: the font height
+    /// of the style family's default, which the percentage's chain scales.
+    pub fn with_size_base(mut self, base: f64) -> Self {
+        if let Some(FontSize::Factor(f)) = self.size {
+            self.size = Some(FontSize::Points(base * f));
+        }
+        self
     }
 
     /// `self` (an inner context) over `outer`: what `self` leaves unset is

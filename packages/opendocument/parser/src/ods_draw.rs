@@ -927,7 +927,7 @@ fn shape_text(
     // sets, and a run's font is that over the default style of its
     // innermost context's family (§16.2), so a family default never
     // overrides the graphic style or a surrounding context.
-    let graphic = PartialFont::of(chain, &ctx.faces);
+    let graphic = PartialFont::of(chain, &ctx.faces).with_size_base(10.0);
     let mut out = Vec::new();
     for p in paragraphs {
         let p_chain = ctx

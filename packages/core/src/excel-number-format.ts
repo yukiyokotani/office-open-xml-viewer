@@ -67,7 +67,7 @@ export function parseFormatSection(section: string): ParsedFormatSection {
       const inner = section.slice(i + 1, end);
       const lower = inner.toLowerCase();
       const idxMatch = lower.match(/^color(\d{1,2})$/);
-      const condMatch = inner.match(/^(<=|>=|<>|<|>|=)\s*(-?[0-9.]+(?:[eE][-+]?\d+)?)$/);
+      const condMatch = inner.match(/^(<=|>=|<>|<|>|=)\s*([-+]?[0-9.]+(?:[eE][-+]?\d+)?)$/);
       if (hasOwnKey(NAMED_COLORS, lower)) {
         color = NAMED_COLORS[lower];
       } else if (idxMatch) {

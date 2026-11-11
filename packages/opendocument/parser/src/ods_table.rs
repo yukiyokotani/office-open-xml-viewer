@@ -1417,10 +1417,20 @@ fn rich_text(
         .or(styles.row)
         .or(styles.column)
         .unwrap_or("Default");
+    let cell_default: Vec<&crate::odf_props::Style> =
+        ctx.store.default_style("table-cell").into_iter().collect();
+    let document_font = super::cells::font_of(&cell_default, &ctx.faces, None);
+    // A percentage of the cell's style scales the table-cell default, as
+    // the cell's own font does, whatever context its text sits in.
     let cell_partial = Rc::new(TextContext {
-        set: PartialFont::of(&ctx.store.chain_own("table-cell", name), &ctx.faces),
+        set: PartialFont::of(&ctx.store.chain_own("table-cell", name), &ctx.faces)
+            .with_size_base(document_font.size),
         family: "table-cell",
     });
+    // A paragraph without a style of its own keeps the cell's formatting:
+    // Calc formats cell text from the cell style, and LibreOffice's
+    // paragraph-family default (where it keeps its Writer fonts) never
+    // reaches unstyled cell text.
     let mut runs: Vec<(String, Option<Rc<TextContext>>)> = Vec::new();
     let mut first = true;
     for p in cell
@@ -1440,9 +1450,6 @@ fn rich_text(
     if runs.iter().all(|(_, context)| context.is_none()) {
         return Ok((text, None));
     }
-    let cell_default: Vec<&crate::odf_props::Style> =
-        ctx.store.default_style("table-cell").into_iter().collect();
-    let document_font = super::cells::font_of(&cell_default, &ctx.faces, None);
     let family_default = |family: &str| {
         let default: Vec<&crate::odf_props::Style> =
             ctx.store.default_style(family).into_iter().collect();
