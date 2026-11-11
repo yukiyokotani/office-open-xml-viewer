@@ -1193,6 +1193,18 @@ export type LoadedFontSubstitutions = ReadonlyMap<string, { readonly family: str
  *
  * Exported for unit testing the fallback ordering.
  */
+/** The family a font source served for `authoredFamily` that joins the stack
+ * of `text` (cssFontStack), when its face loaded and its script scope covers
+ * the text. */
+function loadedSubstitute(
+  authoredFamily: string,
+  text: string,
+  substitutions: LoadedFontSubstitutions | undefined,
+): string | undefined {
+  const loaded = substitutions?.get(fontFamilyKey(authoredFamily));
+  return loaded && substituteEntryCoversText(loaded, text, 'any') ? loaded.family : undefined;
+}
+
 export function cssFontStack(
   normalized: string,
   authoredFamily = normalized,
@@ -1209,8 +1221,7 @@ export function cssFontStack(
   // face still wins. Script-scoped visual substitutes (core
   // substitute-script.ts) join only a run that contains their script: a CSS
   // stack cannot split a run.
-  const loaded = substitutions?.get(fontFamilyKey(authoredFamily));
-  const sub = loaded && substituteEntryCoversText(loaded, text, 'any') ? loaded.family : undefined;
+  const sub = loadedSubstitute(authoredFamily, text, substitutions);
   const subPart = sub ? `${quoteCssFontFamily(sub)}, ` : '';
   // Arabic faces lead with script fallbacks only for Arabic runs.
   const arabicFamilies = arabicFallbackFamilies(generic === 'serif');
@@ -1504,15 +1515,27 @@ function symbolFaceSegments(
 ): SymbolTextSegment[] {
   const { authoredFamily, officeRoute } = selectOfficeFace(family, bold, italic, rc);
   if (!rc.symbolFaces) return bare ? [{ text, mapped: false }] : symbolTextToUnicodeSegments(text, authoredFamily);
+  // The faces that paint the code are those the run's stack names before its
+  // generic tail (cssFontStack): the selected face, then a loaded substitute
+  // of the authored family. Held bytes decide only for the selected face
+  // alone; with a substitute the pair is measured.
   const primary = officeRoute?.family ?? family;
+  const substitute = loadedSubstitute(authoredFamily, text, rc.fontSubstitutions);
+  const families = substitute ? [primary, substitute] : [primary];
+  const weight = bold ? 700 : 400;
+  const style = italic ? 'italic' as const : 'normal' as const;
   const selection = {
-    familyText: quoteCssFontFamily(primary),
-    weight: bold ? 700 : 400,
-    style: italic ? 'italic' as const : 'normal' as const,
-    encoding: rc.symbolFaceEncodings?.get(symbolFaceKey(primary, bold ? 700 : 400, italic ? 'italic' : 'normal')),
+    familyText: families.map(quoteCssFontFamily).join(', '),
+    families,
+    weight,
+    style,
+    encoding: substitute ? undefined : rc.symbolFaceEncodings?.get(symbolFaceKey(primary, weight, style)),
   };
   if (bare && rc.symbolFaces.encoding(selection).kind === 'unknown') return [{ text, mapped: false }];
-  return rc.symbolFaces.segments(text, authoredFamily, selection);
+  // Converted text paints in the generic sans-serif stack (paragraphInputRuns,
+  // paragraphBullet); its colour proof is made in that stack.
+  return rc.symbolFaces.segments(text, authoredFamily, selection,
+    (converted) => buildFont(bold, italic, 32, 'sans-serif', rc, converted));
 }
 
 /** The authored family behind a normalized one (an embedded alias). */
@@ -8583,8 +8606,11 @@ async function renderSlideLeased(
     fontSubstitutions: opts.fontSubstitutions,
     // Symbol-font faces are judged in this render's painting context, once per
     // render: a render sees one set of font resources (core symbol-face.ts).
+    // Measurements are shared across renders of the same font state (the
+    // realm's FontFaceSet and the registered faces of the measured families).
     symbolFaces: createSymbolFaceOracle(
       canvas.getContext('2d') as CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D | null,
+      { shared: true },
     ),
     symbolFaceEncodings: opts.symbolFaceEncodings,
     // The backing store may have been clamped below `canvasSize × dpr`; downstream

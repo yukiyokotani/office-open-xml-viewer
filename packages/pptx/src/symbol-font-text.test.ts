@@ -13,7 +13,8 @@ interface Fill { text: string; font: string }
 
 /** A painting context whose "Symbol" face, when installed, is symbol-encoded
  *  (codes 0x21..0xFE, bare and F0-shifted, one glyph each). */
-function context(installed: boolean, fills: Fill[]): CanvasRenderingContext2D {
+function context(installed: boolean | string, fills: Fill[]): CanvasRenderingContext2D {
+  const face = `"${typeof installed === 'string' ? installed : 'Symbol'}"`;
   let font = '20px serif';
   return {
     get font() { return font; }, set font(v: string) { font = v; },
@@ -21,7 +22,7 @@ function context(installed: boolean, fills: Fill[]): CanvasRenderingContext2D {
     measureText: (s: string) => {
       const cp = s.codePointAt(0) ?? 0;
       const code = cp >= 0xf000 ? cp - 0xf000 : cp;
-      const owned = installed && font.includes('"Symbol"') && code >= 0x21 && code <= 0xfe;
+      const owned = installed !== false && font.includes(face) && code >= 0x21 && code <= 0xfe;
       return {
         width: s.length === 1 ? (owned ? 100 + code : cp >= 0xf000 ? 7 : 5 + (cp % 5)) : [...s].length * 20,
         actualBoundingBoxAscent: 16, actualBoundingBoxDescent: 4,
@@ -38,7 +39,8 @@ function context(installed: boolean, fills: Fill[]): CanvasRenderingContext2D {
 }
 
 function render(runs: TextRunData[], options: Readonly<{
-  installed?: boolean; encodings?: ReadonlyMap<string, SymbolFaceEncoding>; bullet?: Paragraph['bullet'];
+  installed?: boolean | string; encodings?: ReadonlyMap<string, SymbolFaceEncoding>; bullet?: Paragraph['bullet'];
+  substitute?: string;
 }> = {}): Fill[] {
   const fills: Fill[] = [];
   const ctx = context(options.installed ?? false, fills);
@@ -57,6 +59,7 @@ function render(runs: TextRunData[], options: Readonly<{
     themeMajorFont: null, themeMinorFont: null, dpr: 1,
     symbolFaces: createSymbolFaceOracle(ctx),
     ...(options.encodings ? { symbolFaceEncodings: options.encodings } : {}),
+    ...(options.substitute ? { fontSubstitutions: new Map([['symbol', { family: options.substitute }]]) } : {}),
   };
   renderTextBody(ctx, body, 0, 0, 2000, 400, 1 / 12700, null, 0, false, false, '#000000', undefined, rc, () => {});
   return fills;
@@ -90,6 +93,12 @@ describe('symbol-encoded PPTX runs (#2177)', () => {
     // that paints map only 0x61: 0x62 converts.
     const held = new Map([['symbol|400|normal', { kind: 'known', pua: symbolCodeSet([0x61]), bare: symbolCodeSet([0x61]) } as const]]);
     expect(painted(render([run('\uF061\uF062', 'Symbol')], { installed: true, encodings: held }))).toBe('\uF061β');
+  });
+
+  it('judges the face that paints: a loaded substitute of the authored family', () => {
+    // Symbol is missing; the served substitute "Fixture Sub" is symbol-encoded.
+    const fills = render([run('\uF061', 'Symbol')], { installed: 'Fixture Sub', substitute: 'Fixture Sub' });
+    expect(painted(fills)).toBe('\uF061');
   });
 
   it('leaves ASCII alone when only a:sym names Symbol', () => {

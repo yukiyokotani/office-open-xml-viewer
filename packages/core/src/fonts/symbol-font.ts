@@ -109,11 +109,9 @@ const FULL_LOOKUPS: ReadonlyMap<SymbolFontKey, Readonly<Record<number, string>>>
  * had none.
  */
 const LEGACY_LOOKUPS: ReadonlyMap<SymbolFontKey, Readonly<Record<number, string>>> = new Map<SymbolFontKey, Readonly<Record<number, string>>>([
-  ['symbol', {
-    0xa3: '≤', 0xa7: '♣', 0xa8: '♦', 0xa9: '♥', 0xaa: '♠', 0xab: '↔', 0xac: '←',
-    0xad: '↑', 0xae: '→', 0xaf: '↓', 0xb0: '°', 0xb1: '±', 0xb3: '≥', 0xb4: '×',
-    0xb7: '•', 0xb8: '÷', 0xb9: '≠',
-  }],
+  // The 0.89 Symbol subset: the same targets as the full table, by code.
+  ['symbol', Object.fromEntries([0xa3, 0xa7, 0xa8, 0xa9, 0xaa, 0xab, 0xac, 0xad, 0xae, 0xaf, 0xb0, 0xb1, 0xb3, 0xb4, 0xb7, 0xb8, 0xb9]
+    .map((code) => [code, SYMBOL_MAP[code]!]))],
   ['wingdings', {
     0x21: '✏', 0x22: '✂', 0x24: '\u{1F453}', 0x4a: '☺', 0x4b: '\u{1F610}', 0x4c: '☹',
     0x6c: '●', 0x6e: '■', 0x74: '◆', 0x76: '❖', 0x77: '◆', 0xa7: '▪',

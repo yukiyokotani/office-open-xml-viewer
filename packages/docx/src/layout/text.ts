@@ -761,7 +761,12 @@ export interface TextLayoutServiceInput {
    * cmap bytes, else measurement in the measuring context). Absent: the face
    * cannot be judged and the 0.89 subset converts. Its decisions depend only
    * on this service's resources and context, like measured advances. */
-  readonly symbolText?: (text: string, family: string, resolution: FontResolution) => readonly SymbolTextSegment[];
+  readonly symbolText?: (
+    text: string, family: string, resolution: FontResolution,
+    /** The route converted text paints with: every authored slot cleared,
+     * the scalar's own slot and the run's weight/style (segment-builder). */
+    convertedRoute: (converted: string) => FontResolution,
+  ) => readonly SymbolTextSegment[];
 }
 
 /** Generic tail for an authored DOCX face. fontTable family/pitch metadata is
@@ -1389,7 +1394,11 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
         const family = requestedFamily(request, slot);
         if (!family || !isSymbolFontFamily(family)) { push({ text: character, mapped: false }); continue; }
         const parts = input.symbolText
-          ? input.symbolText(character, family, resolve({ ...request, text: character, slot }))
+          ? input.symbolText(character, family, resolve({ ...request, text: character, slot }), (converted) => {
+            const cleared = { ...request, fonts: { ascii: null, highAnsi: null, eastAsia: null, complexScript: null },
+              themeFonts: undefined, themeFontPresence: undefined };
+            return resolve({ ...cleared, text: converted, slot: scalarSlot(cleared, converted) });
+          })
           : symbolTextToUnicodeSegments(character, family);
         for (const part of parts) push(part);
       }

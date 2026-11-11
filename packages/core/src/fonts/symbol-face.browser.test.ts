@@ -86,7 +86,7 @@ describe.skipIf(!existsSync(chromium.executablePath()))('symbol face measurement
       const ctx = document.querySelector('canvas')!.getContext('2d')!;
       const oracle = api.createSymbolFaceOracle(ctx);
       const sel = (familyText: string) => ({ familyText, weight: 400, style: 'normal' as const });
-      const mono = api.createSymbolMonochromeProbe(ctx, 'sans-serif');
+      const mono = api.createSymbolMonochromeProbe(ctx, '32px sans-serif');
       return {
         installed: oracle.segments('\uF061a', 'Symbol', sel('"Fixture Symbol Face"')),
         missing: oracle.segments('\uF061a', 'Symbol', sel('"Ooxml Absent Symbol Face 7"')),

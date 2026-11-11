@@ -238,6 +238,8 @@ export {
   symbolCmapEncoding,
   symbolFaceKey,
   type SymbolFaceOracle,
+  type SymbolFaceOracleOptions,
+  type SymbolFallbackFont,
   type SymbolFaceSelection,
   type SymbolProbeContext,
 } from './fonts/symbol-face';

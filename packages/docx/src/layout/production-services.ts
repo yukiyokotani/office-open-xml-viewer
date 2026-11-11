@@ -471,7 +471,7 @@ export function createProductionTextLayoutService(
       // LoadedFontSources.symbolEncodings), else a measurement of that face in this very
       // measuring context. One oracle and one held-encoding memo per service,
       // so new font resources (a new service) re-judge.
-      const oracle = createSymbolFaceOracle(context, 'sans-serif', options.symbolProbeOwner);
+      const oracle = createSymbolFaceOracle(context, { probeOwner: options.symbolProbeOwner });
       const servedEncoding = (family: string, weight: number, style: 'normal' | 'italic'): SymbolFaceEncoding | undefined =>
         options.sourceFonts?.loaded.symbolEncodings?.get(symbolFaceKey(family, weight, style));
       const held = new Map<string, SymbolFaceEncoding | undefined>();
@@ -491,12 +491,17 @@ export function createProductionTextLayoutService(
           ? servedEncoding(resolution.resolvedFamily, resolution.weight, resolution.style) : undefined;
       };
       return {
-        symbolText: (text: string, family: string, resolution: import('./font-service.js').FontResolution) =>
+        symbolText: (text: string, family: string, resolution: import('./font-service.js').FontResolution,
+          convertedRoute: (converted: string) => import('./font-service.js').FontResolution) =>
           oracle.segments(text, family, {
             familyText: quoteCssFontFamily(resolution.resolvedFamily),
             weight: resolution.weight,
             style: resolution.style,
             encoding: heldEncoding(resolution),
+          }, (converted) => {
+            // The colour proof is for the route the converted text paints with.
+            const route = convertedRoute(converted);
+            return canvasFontString(route.route, 32, route.weight, route.style);
           }),
       };
     })(),

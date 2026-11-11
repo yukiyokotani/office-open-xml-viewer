@@ -12,7 +12,6 @@ import {
   SYMBOL_FACE_UNKNOWN,
   symbolCodeSet,
   type SymbolFaceEncoding,
-  type SymbolTextOptions,
   type SymbolTextSegment,
   symbolTextToUnicodeSegments,
 } from './symbol-font.js';
@@ -179,7 +178,9 @@ export function symbolCmapEncoding(bytes: Uint8Array, faceIndex?: number): Symbo
     return Object.freeze({
       kind: 'known',
       pua: symbolCodeSet(symbol.pua),
-      bare: symbolCodeSet([...symbol.bare, ...symbol.pua].filter((code) => code >= 0x20)),
+      // DEL and SOFT HYPHEN are default-ignorable as bare characters: shapers
+      // draw nothing for them even through a symbol cmap (see identityProbe).
+      bare: symbolCodeSet([...symbol.bare, ...symbol.pua].filter((code) => code >= 0x20 && !BARE_IGNORED.has(code))),
     });
   } catch {
     return null;
@@ -215,7 +216,8 @@ const same = (a: readonly number[], b: readonly number[]) => a.every((value, ind
  * face (as in 0.89, where no table but Symbol's 0xAD converted them); their
  * bare forms are never owned. A face whose bytes the library holds is read
  * exactly instead. The space 0x20 needs no judgement: no table converts it. */
-const identityProbe = (code: number) => code !== 0x7f && code !== 0xad;
+const BARE_IGNORED: ReadonlySet<number> = new Set([0x7f, 0xad]);
+const identityProbe = (code: number) => !BARE_IGNORED.has(code);
 
 /**
  * Measure which codes the face `familyText` (CSS family syntax, the selected
@@ -314,18 +316,23 @@ function scratchCanvas(owner: unknown): ProbeCanvas | null {
 }
 
 /**
- * Whether `familyList` paints `text` without colour in the realm of `owner`
- * (a measuring/painting 2D context): drawn in opaque black, a monochrome
- * glyph leaves only black pixels, while a colour emoji face paints its own
- * colours. Undefined (inconclusive) when no scratch canvas exists, it cannot
- * be read back, or the drawing left no ink to judge.
+ * Whether `font` (a CSS font shorthand: the route converted text paints with)
+ * paints `text` without colour in the realm of `owner` (a measuring/painting
+ * 2D context): drawn in opaque black, a monochrome glyph leaves only black
+ * pixels, while a colour emoji face paints its own colours. Undefined
+ * (inconclusive) when no scratch canvas exists, it cannot be read back, or
+ * the drawing left no ink to judge. Results are cached per font and text.
  */
-export function createSymbolMonochromeProbe(owner: unknown, familyList: string): (text: string) => boolean | undefined {
+export function createSymbolMonochromeProbe(
+  owner: unknown,
+  defaultFont = '32px sans-serif',
+): (text: string, font?: string) => boolean | undefined {
   let ctx: CanvasRenderingContext2D | null | undefined;
   let created = false;
   const results = new Map<string, boolean | undefined>();
-  return (text: string) => {
-    if (results.has(text)) return results.get(text);
+  return (text: string, font = defaultFont) => {
+    const key = `${font}\u0000${text}`;
+    if (results.has(key)) return results.get(key);
     if (!created) {
       created = true;
       try {
@@ -340,7 +347,7 @@ export function createSymbolMonochromeProbe(owner: unknown, familyList: string):
         ctx.globalCompositeOperation = 'source-over';
         ctx.fillStyle = '#000';
         ctx.textBaseline = 'middle';
-        ctx.font = `32px ${familyList}`;
+        ctx.font = font;
         ctx.fillText(text, 4, 24);
         const data = ctx.getImageData(0, 0, 48, 48).data;
         let ink = false;
@@ -356,7 +363,7 @@ export function createSymbolMonochromeProbe(owner: unknown, familyList: string):
       }
     }
     if (results.size >= 1024) results.delete(results.keys().next().value!);
-    results.set(text, monochrome);
+    results.set(key, monochrome);
     return monochrome;
   };
 }
@@ -369,7 +376,26 @@ export interface SymbolFaceSelection {
   readonly weight: number;
   readonly style: 'normal' | 'italic';
   readonly encoding?: SymbolFaceEncoding | null;
+  /** The families of `familyText` (unquoted); with a shared cache, the
+   * registered faces of these families are part of the cache key. */
+  readonly families?: readonly string[];
 }
+
+export interface SymbolFaceOracleOptions {
+  /** The real 2D context when `context` wraps it: colour probes draw on a
+   * scratch canvas of its realm. Defaults to `context`. */
+  readonly probeOwner?: unknown;
+  /** Measurements shared across oracles of this realm (PPTX renders the
+   * same font state on every render): keyed by the measuring realm's
+   * FontFaceSet, the selection, and the registered faces of the selection's
+   * families, so a face added or removed for those families re-measures.
+   * Host-installed fonts do not change during a session. */
+  readonly shared?: boolean;
+}
+
+/** The CSS font converted text paints with, at a probe size, for one
+ * converted string (its slot route, weight and style). */
+export type SymbolFallbackFont = (text: string) => string;
 
 /**
  * Per-owner decisions for one set of font resources in one context. A format
@@ -378,35 +404,70 @@ export interface SymbolFaceSelection {
  */
 export interface SymbolFaceOracle {
   encoding(selection: SymbolFaceSelection): SymbolFaceEncoding;
-  segments(text: string, fontFamily: string | null | undefined, selection: SymbolFaceSelection): SymbolTextSegment[];
+  segments(
+    text: string,
+    fontFamily: string | null | undefined,
+    selection: SymbolFaceSelection,
+    fallbackFont?: SymbolFallbackFont,
+  ): SymbolTextSegment[];
+}
+
+const sharedEncodings = new WeakMap<object, Map<string, SymbolFaceEncoding>>();
+const sharedWithoutFontSet = new Map<string, SymbolFaceEncoding>();
+
+function realmFontSet(owner: unknown): FontFaceSet | null {
+  const element = (owner as { canvas?: { ownerDocument?: Document } } | null)?.canvas;
+  if (element?.ownerDocument?.fonts) return element.ownerDocument.fonts;
+  const scope = globalThis as { document?: Document; fonts?: FontFaceSet };
+  return scope.document?.fonts ?? scope.fonts ?? null;
+}
+
+/** The registered faces of `families` in `fontSet`, as a cache-key part. */
+function registeredFacesToken(fontSet: FontFaceSet | null, families: readonly string[] | undefined): string {
+  if (!fontSet || !families?.length || typeof fontSet[Symbol.iterator] !== 'function') return '';
+  const wanted = new Set(families.map((family) => family.trim().toLowerCase()));
+  const parts: string[] = [];
+  for (const face of fontSet) {
+    const family = face.family.replace(/^(['"])(.*)\1$/u, '$2').trim().toLowerCase();
+    if (wanted.has(family)) parts.push([family, face.weight, face.style, face.stretch, face.unicodeRange, face.status].join(','));
+  }
+  return parts.join(';');
 }
 
 export function createSymbolFaceOracle(
   context: SymbolProbeContext | null | undefined,
-  fallbackFamilyList = 'sans-serif',
-  /** The real 2D context when `context` wraps it: colour probes draw on a
-   * scratch canvas of its realm. Defaults to `context`. */
-  probeOwner: unknown = context,
+  options: SymbolFaceOracleOptions = {},
 ): SymbolFaceOracle {
-  const encodings = new Map<string, SymbolFaceEncoding>();
-  const monochrome = createSymbolMonochromeProbe(probeOwner ?? context, fallbackFamilyList);
-  const options = (encoding: SymbolFaceEncoding): SymbolTextOptions => ({ encoding, monochrome });
+  const probeOwner = options.probeOwner ?? context;
+  const fontSet = options.shared ? realmFontSet(probeOwner) : null;
+  const encodings = !options.shared ? new Map<string, SymbolFaceEncoding>()
+    : fontSet ? sharedEncodings.get(fontSet) ?? (() => {
+      const map = new Map<string, SymbolFaceEncoding>();
+      sharedEncodings.set(fontSet, map);
+      return map;
+    })() : sharedWithoutFontSet;
+  const probe = createSymbolMonochromeProbe(probeOwner);
   const encoding = (selection: SymbolFaceSelection): SymbolFaceEncoding => {
     if (selection.encoding) return selection.encoding;
-    const key = JSON.stringify([selection.familyText, selection.weight, selection.style]);
+    const key = JSON.stringify([selection.familyText, selection.weight, selection.style,
+      options.shared ? registeredFacesToken(fontSet, selection.families) : '']);
     let result = encodings.get(key);
     if (!result) {
       result = measureSymbolFaceEncoding(context, selection.familyText, selection.weight, selection.style);
-      if (encodings.size >= 256) encodings.delete(encodings.keys().next().value!);
+      if (encodings.size >= 512) encodings.delete(encodings.keys().next().value!);
       encodings.set(key, result);
     }
     return result;
   };
   return Object.freeze({
     encoding,
-    segments(text: string, fontFamily: string | null | undefined, selection: SymbolFaceSelection) {
+    segments(text: string, fontFamily: string | null | undefined, selection: SymbolFaceSelection,
+      fallbackFont?: SymbolFallbackFont) {
       const judged = encoding(selection);
-      const segments = symbolTextToUnicodeSegments(text, fontFamily, options(judged));
+      const segments = symbolTextToUnicodeSegments(text, fontFamily, {
+        encoding: judged,
+        monochrome: (converted) => probe(converted, fallbackFont?.(converted)),
+      });
       const drawsNone = judged.kind === 'known' && !/[^0]/u.test(judged.pua) && !/[^0]/u.test(judged.bare);
       return drawsNone
         ? segments.map((part) => (part.mapped ? { ...part, unicodeFace: true as const } : part))

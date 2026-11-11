@@ -38,6 +38,15 @@ describe('symbol text conversion for a face that lacks the codes', () => {
     expect(symbolFontToUnicode(ch(0xf0f0), 'Symbol', missing)).toBe(ch(0xf0f0));
   });
 
+  it('decodes the stored Adobe table exactly (160 entries, pinned hash)', () => {
+    let h = 0;
+    for (let code = 0x20; code <= 0xfe; code++) {
+      const unicode = ADOBE_SYMBOL_UNICODE[code];
+      if (unicode !== undefined) h = (Math.imul(h, 31) + unicode * (code - 0x1f)) >>> 0;
+    }
+    expect([Object.keys(ADOBE_SYMBOL_UNICODE).length, h]).toEqual([160, 110040407]);
+  });
+
   it('agrees with Adobe symbol.txt except the recorded phi exchange', () => {
     for (const [key, unicode] of Object.entries(ADOBE_SYMBOL_UNICODE)) {
       const code = Number(key);
@@ -124,6 +133,12 @@ describe('symbolCmapEncoding', () => {
     expect(symbolCmapEncoding(new Uint8Array(8))).toBeNull();
   });
 
+  it('never owns a default-ignorable bare code, though its PUA form is mapped', () => {
+    // Shapers draw nothing for a bare SOFT HYPHEN, even through a symbol cmap.
+    const encoding = symbolCmapEncoding(symbolFixtureFontBytes({ cmap: 'symbol', first: 0xa0, last: 0xb0 }))!;
+    expect(symbolFontToUnicode('\u00AD\uF0AD', 'Symbol', { encoding })).toBe('\u2191\uF0AD');
+  });
+
   it('leaves a face with both a symbol and a Unicode subtable to measurement', () => {
     // Engines disagree on which subtable they read, so the bytes cannot decide.
     expect(symbolCmapEncoding(symbolFixtureFontBytes({ cmap: 'both', first: 0x40, last: 0x7a }))).toBeNull();
@@ -181,7 +196,7 @@ describe('createSymbolMonochromeProbe', () => {
       }
     }
     const owner = { canvas: new NodeCanvas(1, 1) };
-    expect(createSymbolMonochromeProbe(owner, 'sans-serif')('\u2665\uFE0E')).toBe(true);
+    expect(createSymbolMonochromeProbe(owner, '32px sans-serif')('\u2665\uFE0E')).toBe(true);
     expect(created).toBe(2);
   });
 });
@@ -216,6 +231,18 @@ describe('measureSymbolFaceEncoding', () => {
   it('is inconclusive without a context or with one that measures nothing', () => {
     expect(measureSymbolFaceEncoding(null, '"Sym"')).toBe(SYMBOL_FACE_UNKNOWN);
     expect(measureSymbolFaceEncoding({ font: '', measureText: () => ({ width: 0 }) }, '"Sym"')).toBe(SYMBOL_FACE_UNKNOWN);
+  });
+
+  it('shares measurements across oracles of one realm when asked to', () => {
+    let calls = 0;
+    const ctx = { font: '', measureText: (text: string) => { calls++; return { width: text.length + (text === 'i' ? 1 : 2) }; } };
+    const selection = { familyText: '"Shared Probe Face"', weight: 400, style: 'normal' as const, families: ['Shared Probe Face'] };
+    createSymbolFaceOracle(ctx, { shared: true }).encoding(selection);
+    const first = calls;
+    createSymbolFaceOracle(ctx, { shared: true }).encoding(selection);
+    expect(calls).toBe(first);
+    createSymbolFaceOracle(ctx).encoding(selection);
+    expect(calls).toBeGreaterThan(first);
   });
 
   it('prefers held bytes over measurement and caches per selection', () => {

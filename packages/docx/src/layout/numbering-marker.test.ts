@@ -186,7 +186,7 @@ describe('resolveNumberingMarkerGeometry', () => {
     expect(requests[0]).toEqual({ text: '\u2022', cs: null });
   });
 
-  it('keeps a partly native marker as one authored run in a right-to-left paragraph', () => {
+  it('converts a partly native marker per code and places its pieces in bidi order (RTL)', () => {
     const requests: { text: string; ascii: string | null | undefined }[] = [];
     const base = createTextLayoutService({
       fonts: createFontResolver([]),
@@ -202,13 +202,15 @@ describe('resolveNumberingMarkerGeometry', () => {
       return base.shape(request);
     } };
     const geometry = resolveNumberingMarkerGeometry(
-      { numId: 1, level: 0, format: 'bullet', text: 'ab', suff: 'tab', indentLeft: 0, tab: 36, fontFamily: 'Symbol' },
+      { numId: 1, level: 0, format: 'bullet', text: 'a\uF0AE', suff: 'tab', indentLeft: 0, tab: 36, fontFamily: 'Symbol' },
       { fontSizePt: 12, fonts: { ascii: 'Symbol', highAnsi: 'Symbol', eastAsia: 'Symbol', complexScript: 'Symbol' },
         weight: 400, style: 'normal', complexScript: false },
       { authoredFirstIndentPt: 0, physicalIndentLeftPt: 0, tabStops: [], defaultTabPt: 36, baseRtl: true }, service,
     );
-    expect(geometry.markerText).toBe('ab');
-    expect(requests[0]).toEqual({ text: 'ab', ascii: 'Symbol' });
+    expect(geometry.markerText).toBe('a\u2192');
+    // "a" (L) and "→" (neutral, resolved R at the paragraph end) appear as [→, a].
+    expect(geometry.shape?.spans.map((span) => [span.text, span.start])).toEqual([['\u2192', 1], ['a', 0]]);
+    expect(requests.slice(0, 2)).toEqual([{ text: 'a', ascii: 'Symbol' }, { text: '\u2192', ascii: null }]);
   });
 
   it.each([
