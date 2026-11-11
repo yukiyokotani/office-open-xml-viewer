@@ -1,8 +1,14 @@
 import type { ParsedWorkbook, Row, Worksheet } from '@silurus/ooxml-xlsx';
-import type { ModelSource, OoxmlResourceUsageSnapshot } from '@silurus/ooxml-core';
+import {
+  OoxmlResourceLimitError,
+  type ModelSource,
+  type OoxmlResourceUsageSnapshot,
+} from '@silurus/ooxml-core';
 import {
   decodeOoxmlResourceUsage,
   parseResourceLimitError,
+  HARD_MAX_RAW_PART_CACHE_BYTES,
+  HARD_MAX_RAW_PART_CACHE_ENTRIES,
   type OoxmlResourceMetricsSession,
   type PullSessionCommand,
   type PullSessionResponse,
@@ -29,6 +35,8 @@ import {
   type XlsxNodeArchive,
 } from '@silurus/ooxml-xlsx/internal/session';
 import { InProcessPullTransport } from '@silurus/ooxml-core/internal/in-process-pull-transport';
+import { BoundedRawPartCache } from '@silurus/ooxml-core/internal/bounded-raw-part-cache';
+import { throwIfAborted } from '@silurus/ooxml-core/internal/abort';
 import type { OoxmlNodeSessionOptions } from './session-options.ts';
 import { createLazyWasmModule, resolveWasm } from './wasm-loader.ts';
 import { usingOwnedSession } from '@silurus/ooxml-core/internal/owned-session';
@@ -103,6 +111,16 @@ export interface XlsxWorkbookSession {
   readonly sheetNames: ReadonlyArray<string>;
   readonly resourceUsage: OoxmlResourceUsageSnapshot | undefined;
   worksheetRows(sheetIndex: number): AsyncGenerator<XlsxWorksheetRowChunk, void, void>;
+  /**
+   * Raw bytes of one picture a worksheet model names (an image's
+   * `imagePath`), as a Blob of `mimeType` (default
+   * `application/octet-stream`). Paths are `.xlsx` package part paths or the
+   * paths a `legacyXls` / `ods` source gives its pictures. Same contract as
+   * `PptxPresentationSession.getImage`: reads charge the session's archive
+   * budgets, results are kept in a bounded raw-part cache, a resource-limit
+   * failure fails the session, and the call rejects after `close()`.
+   */
+  getImage(path: string, mimeType?: string): Promise<Blob>;
   close(): Promise<void>;
 }
 
@@ -164,6 +182,12 @@ export class XlsxWorkbookSessionImpl implements XlsxWorkbookSession {
   private completedWorksheets = 0;
   private rowBatches = 0;
   private emittedRows = 0;
+  private released = false;
+  private resourceFailure: OoxmlResourceLimitError | undefined;
+  private readonly rawParts = new BoundedRawPartCache({
+    maxEntries: HARD_MAX_RAW_PART_CACHE_ENTRIES,
+    maxBytes: HARD_MAX_RAW_PART_CACHE_BYTES,
+  });
 
   constructor(
     private readonly closeArchive: () => void,
@@ -203,8 +227,13 @@ export class XlsxWorkbookSessionImpl implements XlsxWorkbookSession {
 
   get resourceUsage(): OoxmlResourceUsageSnapshot | undefined {
     if (this.closed) return this.lastUsage;
+    return this.refreshResourceUsage();
+  }
+
+  private refreshResourceUsage(): OoxmlResourceUsageSnapshot | undefined {
     try {
       this.lastUsage = decodeUsage(this.archive.resource_usage());
+      this.metrics.observeUsage(this.lastUsage);
     } catch {
       // Keep the last valid diagnostic after a trapped or closing archive.
     }
@@ -220,7 +249,7 @@ export class XlsxWorkbookSessionImpl implements XlsxWorkbookSession {
   async *worksheetRows(
     sheetIndex: number,
   ): AsyncGenerator<XlsxWorksheetRowChunk, void, void> {
-    if (this.closed) throw new Error('XLSX workbook session is closed');
+    this.assertOpen();
     if (this.active) throw new Error('another XLSX worksheet row stream is already active');
     if (!Number.isSafeInteger(sheetIndex) || sheetIndex < 0) {
       throw new RangeError('sheetIndex must be a non-negative safe integer');
@@ -281,11 +310,33 @@ export class XlsxWorkbookSessionImpl implements XlsxWorkbookSession {
     }
   }
 
+  async getImage(path: string, mimeType = 'application/octet-stream'): Promise<Blob> {
+    this.assertOpen();
+    return this.rawParts.get(path, mimeType, () => {
+      // A load scheduled before close() never reaches the freed archive.
+      if (this.released) throw new Error('XLSX workbook session is closed');
+      throwIfAborted(this.signal, 'XLSX workbook session was aborted');
+      const bytes = this.archive.extract_image(path);
+      this.refreshResourceUsage();
+      return new Blob([bytes as BlobPart], { type: mimeType });
+    }).catch((error: unknown) => {
+      const normalized = parseResourceLimitError(error) ?? error;
+      if (normalized instanceof OoxmlResourceLimitError) this.resourceFailure ??= normalized;
+      this.metrics.fail(normalized);
+      throw normalized;
+    });
+  }
+
   close(): Promise<void> {
     if (this.closePromise) return this.closePromise;
     this.closed = true;
     this.closePromise = this.release();
     return this.closePromise;
+  }
+
+  private assertOpen(): void {
+    if (this.closed) throw new Error('XLSX workbook session is closed');
+    if (this.resourceFailure) throw this.resourceFailure;
   }
 
   private cleanupOperation(
@@ -321,6 +372,8 @@ export class XlsxWorkbookSessionImpl implements XlsxWorkbookSession {
       }
     }
     this.transport.terminate();
+    this.rawParts.clear();
+    this.released = true;
     try {
       this.closeArchive();
     } catch (error) {

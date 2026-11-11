@@ -10,7 +10,7 @@ import { PNG } from 'pngjs';
 import { packagesDir, viewerOrigin, padded, pdfPages, sideBySide, type Rendered } from './survey.js';
 
 const enabled = process.env.LEGACY_CORPUS === '1';
-const corpus = resolve(packagesDir, 'pptx/public/private/ppt');
+const corpus = resolve(packagesDir, 'legacy-office/public/private/ppt');
 const filter = process.env.LEGACY_CORPUS_FILTER;
 const names = enabled && existsSync(corpus)
   ? readdirSync(corpus)
@@ -33,14 +33,14 @@ test.describe('legacy PPT corpus survey', () => {
       const width = reference[0]?.width ?? 960;
       const directPpt = resolve(packagesDir, 'legacy-office/src/legacy-ppt.ts');
       await page.goto(`${viewerOrigin('ppt')}/tests/visual/fixture.html`);
-      const rendered = await page.evaluate(async ({ file, width: requested, module }) => {
+      const rendered = await page.evaluate(async ({ file, width: requested, module, corpusUrl }) => {
         const pages: string[] = [];
         try {
           const { PptxPresentation } = await import('/src/presentation.ts');
           const { legacyPpt } = await import(/* @vite-ignore */ module);
           // The dev server decodes paths with decodeURI, which keeps reserved
           // escapes such as %2B; encodeURI leaves those characters literal.
-          const response = await fetch(`/private/ppt/${encodeURI(file)}`);
+          const response = await fetch(`${corpusUrl}/${encodeURI(file)}`);
           if (!response.ok) throw new Error(`fetch failed: ${response.status}`);
           const bytes = await response.arrayBuffer();
           const presentation = await PptxPresentation.load(bytes, {
@@ -59,7 +59,7 @@ test.describe('legacy PPT corpus survey', () => {
         } catch (error) {
           return { pages, error: String(error instanceof Error ? error.message : error) };
         }
-      }, { file: name, width, module: `/@fs${directPpt}` }) as Rendered;
+      }, { file: name, width, module: `/@fs${directPpt}`, corpusUrl: `/@fs${corpus}` }) as Rendered;
 
       const pagesReport = [];
       const count = Math.max(reference.length, rendered.pages.length);

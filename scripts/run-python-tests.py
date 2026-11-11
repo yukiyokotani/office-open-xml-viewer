@@ -1,9 +1,8 @@
-"""Run the repository's Python tool regressions as one unittest suite.
+"""Run the repository's Python generator regressions as one unittest suite.
 
-The tests live beside the tools they cover and use `<tool>.test.py` names,
-which unittest discovery cannot import as modules. Load each file by path
-instead. Run through `pnpm test:python`, which supplies the third-party
-dependencies (python-docx, lxml, fontTools) with uv.
+Each file is loaded by path, so tests may sit beside the generator they cover
+under any file name. Run through `pnpm test:python`, which supplies the
+third-party dependency (fontTools) with uv.
 """
 
 import importlib.util
@@ -13,7 +12,6 @@ import unittest
 
 ROOT = Path(__file__).resolve().parent.parent
 FILES = [
-    *sorted((ROOT / 'packages/legacy-office/tools').glob('*.test.py')),
     ROOT / 'scripts/test_generate_font_reference_metrics.py',
 ]
 

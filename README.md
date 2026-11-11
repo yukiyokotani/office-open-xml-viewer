@@ -33,7 +33,7 @@ A browser-based viewer for Office Open XML documents that renders to an HTML Can
 The parsers are written in Rust and compiled to WebAssembly; the renderers use the Canvas 2D API.
 Each format also exposes a headless engine (`DocxDocument` / `XlsxWorkbook` / `PptxPresentation`) that renders into any caller-supplied canvas, so you can compose your own UI — scroll views, thumbnail grids, master-detail panes — instead of being locked into the built-in viewer. See the [live framework examples](https://ooxml.silurus.dev/frameworks/) for runnable React, Vue, Svelte, and Solid projects.
 
-Optional, experimental [legacy Office add-on](https://ooxml.silurus.dev/legacy-office/) reads a supported subset of `.doc`, `.xls` and `.ppt` with the same viewers.
+Optional, experimental [legacy Office add-on](https://ooxml.silurus.dev/legacy-office/) reads a supported subset of `.doc`, `.xls` and `.ppt` with the same viewers, and an optional, experimental [OpenDocument add-on](docs/opendocument.md) reads `.odt`.
 
 ## Project scope: read-only viewing
 
@@ -250,29 +250,35 @@ No migration is required without the add-on. See the [legacy Office guide](https
 for viewer and Node examples, and [Experimental legacy Office sources](docs/legacy-office-conversion.md)
 for the full support boundaries.
 
-### Experimental OpenDocument spreadsheet source
+### Experimental OpenDocument sources
 
-OpenDocument spreadsheets (`.ods`, `.ots`) open in the ordinary XLSX viewers
-and loaders through the experimental `@silurus/ooxml-opendocument` add-on's
-`ods` entry. Install matching versions of both packages:
+OpenDocument files are read directly into the same models through the
+experimental `@silurus/ooxml-opendocument` add-on, one opt-in entry per format:
+`@silurus/ooxml-opendocument/odt` for `.odt` / `.ott` with the DOCX viewers and
+loaders, `@silurus/ooxml-opendocument/odp` for `.odp` / `.otp` with the PPTX
+ones and `@silurus/ooxml-opendocument/ods` for `.ods` / `.ots` with the XLSX
+ones. Install matching versions of both packages:
 
 ```sh
 npm i @silurus/ooxml @silurus/ooxml-opendocument
 ```
 
 ```typescript
-import { XlsxViewer } from '@silurus/ooxml/xlsx';
-import { ods } from '@silurus/ooxml-opendocument/ods';
+import { DocxViewer } from '@silurus/ooxml/docx';
+import { odt } from '@silurus/ooxml-opendocument/odt';
 
-const container = document.getElementById('viewer') as HTMLElement;
-const viewer = new XlsxViewer(container, { ods });
-await viewer.load(odsOrXlsxBytes);
+const canvas = document.querySelector('canvas') as HTMLCanvasElement;
+const viewer = new DocxViewer(canvas, { odt });
+await viewer.load(odtOrDocxBytes);
 ```
 
-The reader maps sheets, cells, formats, drawings and charts directly into the
-workbook model; no OOXML package is generated. Use `createOds({ wasmUrl,
-moduleUrl })` for custom asset URLs. See
-[Experimental OpenDocument sources](docs/opendocument.md) for what is read.
+The `odp` and `ods` entries are passed the same way (`new PptxViewer(canvas,
+{ odp })`, `new XlsxViewer(container, { ods })`). Like the legacy readers,
+importing an entry fetches nothing, custom asset URLs go through
+`createOdt` / `createOdp` / `createOds({ wasmUrl, moduleUrl })`, and the
+package versions must match exactly. See
+[Experimental OpenDocument sources](docs/opendocument.md) for the supported
+content and deployment notes.
 
 ### Optional rendering modules
 
@@ -575,7 +581,11 @@ For a large DOCX file, set `progressiveLayout: true` to resolve `load()` when th
 opening pages are paintable while the same paginator continues in the background.
 It is available on `DocxViewer`, `DocxScrollViewer`, and `DocxDocument.load()` in
 both render modes. Pair it with `mode: 'worker'` when the remaining layout and
-paint work should also stay off the UI thread.
+paint work should also stay off the UI thread. Pages shown before layout
+completes are provisional: page breaks may move and content can occasionally
+overlap. `DocxViewer` and `DocxScrollViewer` redraw every page once layout
+completes; code that calls `DocxDocument.renderPage()` directly must render its
+pages again after `waitUntilLayoutComplete()`.
 
 ```typescript
 import { DocxScrollViewer } from '@silurus/ooxml/docx';
@@ -604,8 +614,10 @@ While `layoutComplete` is false, `pageCount` and the callback's `total` argument
 mean pages available so far, not the final total. The page callbacks fire again
 when that count grows, even if the visible page does not change. Await
 `waitUntilLayoutComplete()` before printing, exporting, or snapshotting a final count.
-In-document `NUMPAGES` fields are repainted with their authoritative value after
-pagination converges. See the [progressive layout guide](https://ooxml.silurus.dev/docx#progressive-layout)
+`DocxViewer` and `DocxScrollViewer` repaint provisional pages, including
+in-document `NUMPAGES` fields, with their authoritative layout after pagination
+converges. Code that calls `DocxDocument.renderPage()` directly owns its canvases
+and must render those pages again after `waitUntilLayoutComplete()`. See the [progressive layout guide](https://ooxml.silurus.dev/docx#progressive-layout)
 and [DOCX API reference](https://ooxml.silurus.dev/api/docx).
 
 ### Progressive PPTX layout
@@ -689,13 +701,14 @@ each format entry.
   keeps the host fallback with a `console.warn`, and no other source is tried.
 - **Lazy subsets:** only the `unicode-range` subsets that intersect the painted
   text are loaded, and installed faces with the authored name are never
-  replaced. Font files the library fetches itself (`fontResolver` URLs in
-  worker mode, sources with `credentials: 'omit'`) are fetched for every face
-  of a claimed family.
+  replaced. The library fetches the font files itself (`fetch()`), so DOCX can
+  read each face's line metrics. `fontResolver` URLs and
+  sources with `credentials: 'omit'` are fetched for every face of a claimed
+  family.
 - **Deployment:** cross-origin font URLs need CORS. Stylesheet origins need
-  `connect-src` and font file origins need `font-src` in your CSP; font files
-  the library fetches itself (`fontResolver` URLs in worker mode, sources with
-  `credentials: 'omit'`) also need `connect-src`. Optionally
+  `connect-src` in your CSP, and font file origins need both `connect-src`
+  and `font-src` (for Google Fonts: `connect-src https://fonts.googleapis.com
+  https://fonts.gstatic.com` and `font-src https://fonts.gstatic.com`). Optionally
   add `<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>` for
   Google Fonts. Source limits fail closed with
   `OoxmlError('font-source-limit')`.
@@ -1099,7 +1112,7 @@ file without uploading it.
 ## Companion packages
 
 - **[`packages/markdown/`](packages/markdown/)** — internal workspace adapter and `ooxml-md` development CLI for the same GitHub-flavoured Markdown projection exposed by each format model's `toMarkdown()` method.
-- **[`packages/node/`](packages/node/)** — the implementation behind the public Node-only `@silurus/ooxml/node` subpath. Its canonical APIs are the explicitly owned, bounded `openPptxPresentation`, `openDocxDocument`, and `openXlsxWorkbook` sessions. Async `materializePptxPresentation`, `materializeDocxDocument`, `materializeXlsxWorkbookIndex`, `materializeXlsxWorksheet`, and `materializeXlsxWorkbook` are provided when a complete caller-owned graph is actually needed. Each `open*` call returns an explicit, idempotent `close()`-able session; PPTX streams `slides()`, DOCX completes format-required sequential pagination before streaming `pages()`, and XLSX parses its workbook index once before sequential `worksheetRows(sheetIndex)` streams reuse the retained archive. Useful for CI checks and headless rendering pipelines; canvas rendering accepts a user-supplied backend such as `skia-canvas` without making it a runtime dependency.
+- **[`packages/node/`](packages/node/)** — the implementation behind the public Node-only `@silurus/ooxml/node` subpath. Its canonical APIs are the explicitly owned, bounded `openPptxPresentation`, `openDocxDocument`, and `openXlsxWorkbook` sessions. Async `materializePptxPresentation`, `materializeDocxDocument`, `materializeXlsxWorkbookIndex`, `materializeXlsxWorksheet`, and `materializeXlsxWorkbook` are provided when a complete caller-owned graph is actually needed. Each `open*` call returns an explicit, idempotent `close()`-able session; PPTX streams `slides()`, DOCX completes format-required sequential pagination before streaming `pages()`, and XLSX parses its workbook index once before sequential `worksheetRows(sheetIndex)` streams reuse the retained archive. All three sessions read the bytes of a picture named by the model through `getImage(path, mimeType)`, including the reader-owned paths of the opt-in DOC, XLS, PPT and OpenDocument sources; this charges the session's resource limits and rejects after `close()`. Useful for CI checks and headless rendering pipelines; canvas rendering accepts a user-supplied backend such as `skia-canvas` without making it a runtime dependency.
   See the [0.75 to 0.76 migration guide](docs/migration-0.76.md) for every removed synchronous helper and its replacement.
 - **[`packages/vscode-extension/`](packages/vscode-extension/)** — VS Code extension (`ooxml-viewer`) that registers `CustomEditorProvider`s for `.docx`, `.xlsx`, and `.pptx`, and (opt-in) auto-installs and registers the `ooxml-mcp-server` for GitHub Copilot Chat in Agent mode, including active Viewer selection. Claude Code and Codex can configure the same binary separately for path-based file tools, but do not receive the active selection bridge. The preview is offline by default; an opt-in `ooxmlViewer.useGoogleFonts` setting (off, and force-disabled in untrusted workspaces) loads optional webfont substitutes and script fallbacks, widening the webview CSP to the Google Fonts CDN only while enabled.
 - **[`packages/mcp-server/`](packages/mcp-server/)** — Rust MCP server (`ooxml-mcp-server`) exposing the parsers as tools for AI agents (Claude, Copilot, Codex, etc.). Provides structured queries (`docx_get_structure`, `xlsx_get_cell_range`, `pptx_get_slide_structure`, …) so agents can inspect OOXML files without shelling out to `unzip`. Prebuilt binaries are attached to each [GitHub Release](https://github.com/yukiyokotani/office-open-xml-viewer/releases) for macOS / Linux / Windows; the VS Code extension downloads them on demand.

@@ -84,12 +84,13 @@ jobs:
           cargo test -p opendocument-parser --features ods
 
   # RB8 — dependency vulnerability audit. Report-only for now
-  # (continue-on-error): one known advisory already exists at introduction —
-  # RUSTSEC-2026-0190 (anyhow < 1.0.103 unsound `Error::downcast_mut`), pulled
-  # in only by the non-shipped ooxml-mcp-server crate, not the wasm parsers or
-  # the npm package. Starting non-blocking surfaces advisories in the CI log
-  # without gating the whole repo on a transitive dev-tool issue; flip to
-  # blocking (drop continue-on-error) once the backlog is at zero.
+  # (continue-on-error). The workspace lockfile covers the wasm parsers and the
+  # ooxml-mcp-server crate, whose binaries are shipped with every GitHub
+  # Release by release-mcp-server.yml, so advisories against it (for example
+  # in rmcp or tokio) affect a released artifact and must be fixed, not
+  # waived. Starting non-blocking surfaces advisories in the CI log without
+  # gating unrelated PRs on a newly published advisory; flip to blocking (drop
+  # continue-on-error) once the backlog has stayed at zero.
   audit:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -207,8 +208,8 @@ jobs:
         env:
           OOXML_REQUIRE_SKIA: '1'
 
-      # Python regressions for the legacy-office probe tools and the font
-      # reference-metrics generator. uv supplies their pinned dependencies.
+      # Python regression for the font reference-metrics generator. uv supplies
+      # its pinned dependency.
       - uses: astral-sh/setup-uv@v6
 
       - name: Python tool tests
@@ -244,7 +245,7 @@ jobs:
           pnpm check:public-type-exports
           pnpm check:public-api:built
           pnpm check:no-inline-wasm
-          pnpm check:relative-wasm-urls dist packages/legacy-office/dist
+          pnpm check:relative-wasm-urls dist packages/legacy-office/dist packages/opendocument/dist
 
       - name: Install Playwright Chrome (only if missing)
         timeout-minutes: 5

@@ -841,6 +841,7 @@ export function snapshotFontMetrics(
         family: metric.family,
         ...(metric.requiresGlyphCoverage === undefined ? {} : { requiresGlyphCoverage: metric.requiresGlyphCoverage }),
         ...(metric.glyphCoverageProbeFamily === undefined ? {} : { glyphCoverageProbeFamily: metric.glyphCoverageProbeFamily }),
+        ...(metric.nativeRoutePrimaryFamily === undefined ? {} : { nativeRoutePrimaryFamily: metric.nativeRoutePrimaryFamily }),
         ...(metric.farEastCodePage === undefined ? {} : { farEastCodePage: metric.farEastCodePage }),
         ...(metric.lineHeightRatio === undefined ? {} : { lineHeightRatio: metric.lineHeightRatio }),
         ...(metric.designAscentRatio === undefined ? {} : { designAscentRatio: metric.designAscentRatio }),

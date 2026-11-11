@@ -141,6 +141,8 @@ function collectDescriptorCandidates(
           srcRect: picture.srcRect,
           colorReplaceFrom: picture.colorReplaceFrom,
           duotone: picture.duotone,
+          // gain/blacklevel resolve to a §20.1.8.42 luminance correction.
+          blipEffects: picture.blipEffects,
         }, vmlPictureResourceKey(source, picture.imagePath));
     }
     const storyInstance = `${source.story}:${source.storyInstance}:${source.path.join('.')}`;

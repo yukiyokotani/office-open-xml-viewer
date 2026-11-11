@@ -5,7 +5,7 @@
 > 実装、テスト、open issue を参照し、資料の位置付けは [`README.md`](README.md)
 > を参照する。
 
-`docs/improvement-plan-2026-07b.md` の実行トラッカー。項目 ID(CH1, XF2, WD3, IX1, SC5, RB1, PD1, QA6, AR1 …)は計画本文の表を参照。
+`docs/archive/improvement-plan-2026-07b.md` の実行トラッカー。項目 ID(CH1, XF2, WD3, IX1, SC5, RB1, PD1, QA6, AR1 …)は計画本文の表を参照。
 チェック状態はこの履歴資料が最後に更新された時点の記録であり、今後の作業管理には使用しない。
 
 ## 前提・引き継ぎ事項
@@ -14,7 +14,7 @@
 - VRT はローカル専用。**レンダリングに触る修正は必ず `pnpm build:wasm && pnpm vrt` を回してから push。**
 - 参照画像の更新(`UPDATE_REFS=1`)はユーザー明示指示のみ。**新規参照が必要な項目(CH12 docx チャート、CH15 chartEx、XF9 縦書き 等)は着手前にユーザーと参照更新の段取りを合意する。**(WD4 kern は PR #813 で参照更新済み・消化済み)
 - perf 項目(SC 系)は PR にベンチ前後比較を記載(bench-parse / bench-handle + 対象別の合成 fixture)。
-- 横断修正は CLAUDE.md の規定どおり core / ooxml-common を含む1本の協調 PR にまとめてよい(commit は 1 関心 = 1 commit)。
+- 横断修正は AGENTS.md の規定どおり core / ooxml-common を含む1本の協調 PR にまとめてよい(commit は 1 関心 = 1 commit)。
 - セキュリティ項目(RB 系)は「悪意入力の再現 fixture + 修正後に無害化されることのテスト」をセットで。
 - 既知の継続スレッド: issue #698(SPACE_SHRINK_RATIO)、A2 残り 120 プリセット移行(参照更新承認とセット)は本計画と別トラック。
 

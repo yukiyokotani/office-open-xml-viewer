@@ -6,10 +6,16 @@ import {
   type FontSubstitution,
   type LoadedFontSources,
 } from '@silurus/ooxml-core/internal/font-sources';
+import type { OpenTypeLineMetrics } from '@silurus/ooxml-core';
 import { declaredFontSubstitutions, docxFontFamilyPlan } from '../font-plan.js';
 import type { DocxDocumentModel } from '../types.js';
 
-type LoadedFaceRecord = Readonly<{ family: string; weight?: string; style?: string; status?: string }>;
+type LoadedFaceRecord = Readonly<{
+  family: string; weight?: string; style?: string; status?: string;
+  unicodeRange?: string;
+  /** Parsed tables of the face's bytes, as a session snapshots them. */
+  resourceMetrics?: OpenTypeLineMetrics;
+}>;
 
 /**
  * Layout-service options for a unit test that stands in for a completed
@@ -53,9 +59,10 @@ export function sourceFontLayoutOptions(
           weight: face.weight ?? '400',
           style: face.style ?? 'normal',
           stretch: 'normal',
-          unicodeRange: 'U+0-10FFFF',
+          unicodeRange: face.unicodeRange ?? 'U+0-10FFFF',
           sourceIndex: 0,
           face: face as FontFace,
+          ...(face.resourceMetrics ? { resourceMetrics: face.resourceMetrics } : {}),
         })),
         substitutions,
         regularAliases: new Map(),

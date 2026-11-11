@@ -109,6 +109,10 @@ function install() {
   const fetched: string[] = [];
   G.fetch = vi.fn(async (url: string) => {
     fetched.push(url);
+    // A face file the library fetches itself: its body names the file.
+    if (/\.woff2$/.test(url)) {
+      return { ok: true, status: 200, url, arrayBuffer: async () => new TextEncoder().encode(url).buffer };
+    }
     const css = url.includes('Noto') ? NOTO_CSS : url.includes('Carlito') ? CARLITO_CSS : '';
     return { ok: css !== '', status: css ? 200 : 404, url, text: async () => css };
   });
@@ -134,20 +138,27 @@ describe('loadDocxFontSources', () => {
     const latin = docWith([text('Hello')]);
     const plan = { ...docxFontFamilyPlan(latin, [SOURCE], undefined, { routes: {} }), fallbackFamilies: ['Noto Sans JP'] };
     const loaded = await loadDocxFontSources(latin, plan, [SOURCE], { fontSet: set });
+    // A demanded subset is registered from the bytes the library fetched;
+    // the others are neither fetched nor registered.
+    const sourceName = (source: unknown) => typeof source === 'string' ? source
+      : `bytes:${new TextDecoder().decode(source as ArrayBuffer)}`;
     const status = () => Object.fromEntries(faces.filter((face) => face.family === 'Noto Sans JP')
-      .map((face) => [face.source, face.status]));
+      .map((face) => [sourceName(face.source), face.status]));
     expect(status()).toEqual({
-      'url("https://fonts.example/jp-latin.woff2")': 'loaded',
+      'bytes:https://fonts.example/jp-latin.woff2': 'loaded',
       // U+3042 and U+4E00, layout probes (LAYOUT_SYNTHESIZED_SCALARS).
-      'url("https://fonts.example/jp-kana.woff2")': 'loaded',
-      'url("https://fonts.example/jp-kanji.woff2")': 'unloaded',
+      'bytes:https://fonts.example/jp-kana.woff2': 'loaded',
     });
     expect(loaded.loaded.substitutions.get('calibri')).toEqual({ family: 'Carlito' });
     expect(loaded.names).toEqual(['Calibri', 'Noto Sans JP']);
-    // One stylesheet per served family; Calibri is asked for through Carlito.
+    // One stylesheet per served family (Calibri is asked for through
+    // Carlito), and one request per demanded subset.
     expect(fetched.sort()).toEqual([
+      'https://fonts.example/carlito.woff2',
       'https://fonts.example/css?family=Carlito',
       'https://fonts.example/css?family=Noto+Sans+JP',
+      'https://fonts.example/jp-kana.woff2',
+      'https://fonts.example/jp-latin.woff2',
     ]);
     loaded.session.release();
     expect(faces).toHaveLength(0);
