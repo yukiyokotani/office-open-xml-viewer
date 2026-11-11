@@ -58,6 +58,15 @@ is removed in 0.91.0. See the [0.89 to 0.90 migration guide](docs/migration-0.90
   line) or a function of the failure. The function runs on the main thread,
   including in worker mode. Without the option the placeholder is unchanged.
   This is additive, so no migration is needed (#1974).
+- **Node picture bytes:** `DocxDocumentSession` and `XlsxWorkbookSession`
+  (from `openDocxDocument` and `openXlsxWorkbook` in `@silurus/ooxml/node`)
+  now have `getImage(path, mimeType?)`, as `PptxPresentationSession` already
+  had. It returns the bytes of a picture the model names as a `Blob`, for
+  `.docx`/`.xlsx` part paths and for the paths of the `legacyDoc`,
+  `legacyXls`, `odt` and `ods` sources (such as `legacy-doc/image/0`). Reads
+  count against the session's resource limits, a resource-limit failure
+  fails the session, and the call rejects after `close()`. This is additive,
+  so no migration is needed (#2180).
 - **Fixed:** a DOCX whose `word/document.xml` cannot be parsed now opens with
   the "This document could not be displayed" page. Before, `load()` rejected
   with a `RangeError` because the placeholder page had a 0×0 size. The page
