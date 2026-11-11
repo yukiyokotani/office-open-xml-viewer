@@ -8,7 +8,7 @@ import { buildPptxHighlightLayer, type PptxHighlightMatch } from './find-highlig
 import { PptxFindController, type PptxMatchLocation } from './find';
 import { PptxPresentation, type LoadOptions } from './presentation';
 import type { PresentationHandle } from './presentation-handle';
-import { countVisible } from './hidden';
+import { countVisible, resolveHiddenSlideDim, type HiddenSlideMode } from './hidden';
 import type { DimOptions } from './types';
 import {
   type HyperlinkTarget,
@@ -62,11 +62,7 @@ type InternalPptxViewerOptions = PptxViewerOptions & {
   [borrowedPresentationOption]?: PptxPresentation;
 };
 
-/** How {@link PptxViewer} presents hidden slides (`<p:sld show="0">`). */
-export type HiddenSlideMode = 'show' | 'skip' | 'dim';
-
-/** Default `'dim'` overlay: 60% white (hidden content shows at 40%). */
-const DEFAULT_HIDDEN_DIM: DimOptions = { color: '#ffffff', opacity: 0.6 };
+export type { HiddenSlideMode } from './hidden';
 
 export interface PptxViewerOptions extends Pick<RenderOptions, 'width' | 'dpr' | 'imageResources'>, LoadOptions {
   /** Called when a slide finishes rendering or progressive availability changes. */
@@ -531,10 +527,7 @@ export class PptxViewer implements ZoomableViewer {
 
   /** Resolved `'dim'` overlay (defaults merged with the `hiddenSlideDim` option). */
   private _dim(): DimOptions {
-    return {
-      color: this.opts.hiddenSlideDim?.color ?? DEFAULT_HIDDEN_DIM.color,
-      opacity: this.opts.hiddenSlideDim?.opacity ?? DEFAULT_HIDDEN_DIM.opacity,
-    };
+    return resolveHiddenSlideDim(this.opts.hiddenSlideDim);
   }
 
   /**

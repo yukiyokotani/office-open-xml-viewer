@@ -16,6 +16,9 @@ interface NavigationHooks<Slot extends NavigationSlot> {
   scale(): number;
   scrollPoint(slide: number, x: number, y: number, options?: Options): void;
   scrollToSlide(slide: number, options?: Options): void;
+  /** Whether `slide` is laid out (`hiddenSlideMode: 'skip'` leaves hidden
+   *  slides out). Asked once the slide's metadata is available. */
+  reachable?(slide: number): boolean;
   select(commentId: string, slide: number): void;
   ownBackground<T>(operation: () => Promise<T>): Promise<T>;
 }
@@ -129,6 +132,7 @@ export class PptxScrollCommentNavigation<Slot extends NavigationSlot> {
     }
     if (this.hooks.destroyed()) throw new Error('PptxScrollViewer is destroyed');
     if (generation !== this.generation || presentation !== this.hooks.presentation()) return false;
+    if (this.hooks.reachable && !this.hooks.reachable(slide)) return false;
     const comment = presentation.getComments(slide)[commentIndex];
     if (!comment) return false;
     const bounds = await this.resolveBounds(slide, comment);
