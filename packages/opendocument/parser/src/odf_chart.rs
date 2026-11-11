@@ -46,12 +46,27 @@ fn chart_limit(what: &str) -> String {
 }
 
 /// Resource accounting of one chart, charged before data is copied.
-#[derive(Default)]
 pub struct ChartBudget {
     bytes: std::cell::Cell<usize>,
+    limit: usize,
+}
+
+impl Default for ChartBudget {
+    fn default() -> Self {
+        Self::with_limit(MAX_CHART_BYTES)
+    }
 }
 
 impl ChartBudget {
+    /// A budget of at most `limit` bytes (never above the per-chart bound):
+    /// a reader that keeps several charts passes what it has left.
+    pub fn with_limit(limit: usize) -> Self {
+        Self {
+            bytes: std::cell::Cell::new(0),
+            limit: limit.min(MAX_CHART_BYTES),
+        }
+    }
+
     /// Admit `count` points of one range (each also charged
     /// [`POINT_BYTES`]).
     pub fn points(&self, count: usize) -> Result<(), String> {
@@ -65,7 +80,7 @@ impl ChartBudget {
     pub fn bytes(&self, bytes: usize) -> Result<(), String> {
         let total = self.bytes.get().saturating_add(bytes);
         self.bytes.set(total);
-        if total > MAX_CHART_BYTES {
+        if total > self.limit {
             return Err(chart_limit("chart data"));
         }
         Ok(())
@@ -104,6 +119,17 @@ pub fn read_chart_object(
     object_dir: &str,
     resolver: Option<&dyn RangeResolver>,
 ) -> Result<Option<ChartModel>, String> {
+    read_chart_object_within(package, object_dir, resolver, MAX_CHART_BYTES)
+}
+
+/// [`read_chart_object`] holding at most `limit` bytes of chart data while
+/// it reads (and never more than the per-chart bound).
+pub fn read_chart_object_within(
+    package: &OdfPackage,
+    object_dir: &str,
+    resolver: Option<&dyn RangeResolver>,
+    limit: usize,
+) -> Result<Option<ChartModel>, String> {
     let dir = object_dir.trim_start_matches("./").trim_end_matches('/');
     let content_path = format!("{dir}/content.xml");
     if !package.contains(&content_path) {
@@ -116,7 +142,7 @@ pub fn read_chart_object(
     } else {
         None
     };
-    read_chart_document(&content, styles.as_deref(), resolver)
+    read_chart_document_within(&content, styles.as_deref(), resolver, limit)
 }
 
 /// Read a chart from the object's `content.xml` (and `styles.xml`) text.
@@ -124,6 +150,15 @@ pub fn read_chart_document(
     content: &str,
     styles: Option<&str>,
     resolver: Option<&dyn RangeResolver>,
+) -> Result<Option<ChartModel>, String> {
+    read_chart_document_within(content, styles, resolver, MAX_CHART_BYTES)
+}
+
+fn read_chart_document_within(
+    content: &str,
+    styles: Option<&str>,
+    resolver: Option<&dyn RangeResolver>,
+    limit: usize,
 ) -> Result<Option<ChartModel>, String> {
     let content_doc = xml::parse(content)?;
     let styles_doc = match styles {
@@ -162,7 +197,7 @@ pub fn read_chart_document(
     else {
         return Ok(None);
     };
-    let budget = ChartBudget::default();
+    let budget = ChartBudget::with_limit(limit);
     let local = LocalTable::read(chart, &budget)?;
     let reader = Reader {
         store: &store,

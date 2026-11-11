@@ -700,9 +700,12 @@ export {
   excelDateTimeSectionNameTexts,
   formatExcelDateTime,
   isDateFormatSection,
+  parseFormatSection,
+  selectFormatSection,
   splitFormatSections,
   textSectionIndex,
 } from './excel-number-format';
+export type { ParsedFormatSection, SelectedFormatSection } from './excel-number-format';
 export { highlightBox } from './text/highlight-box';
 export {
   distributeLineSlack,

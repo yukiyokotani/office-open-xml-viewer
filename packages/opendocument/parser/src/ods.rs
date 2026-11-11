@@ -68,36 +68,107 @@ pub const MAX_DRAWINGS: usize = 65_536;
 /// ECMA-376 §18.3.1.13 fallback digit width when the host does not measure.
 pub const MDW_FALLBACK: f64 = 8.0;
 
-/// Resource accounting shared by the table and drawing readers.
+/// Resource accounting of one workbook. Every structure the reader keeps,
+/// and every copy it makes by repetition or by resolving a shared style, is
+/// charged here before it is stored. The table, style, drawing and chart
+/// readers share it through [`BudgetRef`], so none holds retained data
+/// outside it.
 pub(crate) struct Budget {
-    cells: usize,
-    bytes: usize,
+    cells: std::cell::Cell<usize>,
+    bytes: std::cell::Cell<usize>,
+    limit: usize,
+}
+
+/// The workbook budget, shared by every reader that retains data.
+pub(crate) type BudgetRef = std::rc::Rc<Budget>;
+
+/// Accounted size of one ordered-map entry: `BTreeMap` nodes are at least
+/// half full, so twice the entry plus the node's share of its links.
+pub(crate) fn map_entry_bytes<K, V>() -> usize {
+    2 * (std::mem::size_of::<K>() + std::mem::size_of::<V>()) + 16
+}
+
+/// Accounted size of one hash-map entry with its key's text: a table at
+/// most half full plus control bytes.
+pub(crate) fn hash_entry_bytes<K, V>(key_text: usize) -> usize {
+    2 * (std::mem::size_of::<K>() + std::mem::size_of::<V>() + 1) + key_text
 }
 
 impl Budget {
-    pub(crate) fn new() -> Self {
-        Self { cells: 0, bytes: 0 }
+    pub(crate) fn new() -> BudgetRef {
+        Self::with_limit(MAX_MODEL_BYTES)
+    }
+    pub(crate) fn with_limit(limit: usize) -> BudgetRef {
+        std::rc::Rc::new(Self {
+            cells: std::cell::Cell::new(0),
+            bytes: std::cell::Cell::new(0),
+            limit: limit.min(MAX_MODEL_BYTES),
+        })
     }
     /// Admit one materialized cell retaining `bytes` (its
     /// [`retained_size`]).
-    pub(crate) fn cell(&mut self, bytes: usize) -> Result<(), String> {
-        self.cells += 1;
-        self.bytes = self.bytes.saturating_add(bytes);
-        if self.cells > MAX_CELLS {
+    pub(crate) fn cell(&self, bytes: usize) -> Result<(), String> {
+        let cells = self.cells.get().saturating_add(1);
+        self.cells.set(cells);
+        if cells > MAX_CELLS {
             return Err(resource("cell count"));
         }
-        self.check()
+        self.bytes(bytes)
     }
-    pub(crate) fn bytes(&mut self, bytes: usize) -> Result<(), String> {
-        self.bytes = self.bytes.saturating_add(bytes);
-        self.check()
-    }
-    fn check(&self) -> Result<(), String> {
-        if self.bytes > MAX_MODEL_BYTES {
+    pub(crate) fn bytes(&self, bytes: usize) -> Result<(), String> {
+        let total = self.bytes.get().saturating_add(bytes);
+        self.bytes.set(total);
+        if total > self.limit {
             Err(resource("model size"))
         } else {
             Ok(())
         }
+    }
+    /// Admit the slots `vec` allocates when one more element is pushed: the
+    /// exact growth of the standard library's amortized policy (double, at
+    /// least 8 / 4 / 1 slots by element size), so a vector's capacity is
+    /// always charged.
+    pub(crate) fn grow<T>(&self, vec: &Vec<T>) -> Result<(), String> {
+        if vec.len() < vec.capacity() || std::mem::size_of::<T>() == 0 {
+            return Ok(());
+        }
+        let size = std::mem::size_of::<T>();
+        let min = if size == 1 {
+            8
+        } else if size <= 1024 {
+            4
+        } else {
+            1
+        };
+        let capacity = vec.capacity().saturating_mul(2).max(min);
+        self.bytes((capacity - vec.capacity()).saturating_mul(size))
+    }
+    /// Admit `value`'s owned heap and its slot in `vec`, then store it.
+    pub(crate) fn push<T: ooxml_common::chart::RetainedBytes>(
+        &self,
+        vec: &mut Vec<T>,
+        value: T,
+    ) -> Result<(), String> {
+        self.bytes(usize::try_from(value.heap_bytes()).unwrap_or(usize::MAX))?;
+        self.grow(vec)?;
+        vec.push(value);
+        Ok(())
+    }
+    /// A copy of `value`, admitted at its retained size before it is made.
+    pub(crate) fn copy<T: Clone + ooxml_common::chart::RetainedBytes>(
+        &self,
+        value: &T,
+    ) -> Result<T, String> {
+        self.bytes(retained_size(value))?;
+        Ok(value.clone())
+    }
+    /// Model bytes charged so far (transient copies included).
+    pub(crate) fn used(&self) -> usize {
+        self.bytes.get()
+    }
+    /// Model bytes still available.
+    pub(crate) fn remaining(&self) -> usize {
+        self.limit.saturating_sub(self.bytes.get())
     }
 }
 
@@ -117,7 +188,7 @@ pub(crate) struct Context {
     /// Days from the null date (§19.636 `table:null-date`) to 1899-12-30.
     pub null_date_shift: i64,
     pub date1904: bool,
-    pub budget: Budget,
+    pub budget: BudgetRef,
     /// Package images referenced by drawings (paths).
     pub images: BTreeSet<String>,
     pub drawing_count: usize,
@@ -155,6 +226,29 @@ pub struct OdsWorkbook {
 }
 
 pub fn read(package: &OdfPackage) -> Result<OdsWorkbook, String> {
+    read_within(package, Budget::new())
+}
+
+/// [`read`] charging `budget`. Every structure of the returned workbook is
+/// admitted to it before it is stored (debug builds check the charged total
+/// against the workbook's exhaustive retained size).
+pub(crate) fn read_within(package: &OdfPackage, budget: BudgetRef) -> Result<OdsWorkbook, String> {
+    let workbook = read_charged(package, &budget)?;
+    // A charge over the limit always rejects where it is made; this keeps
+    // the outcome fail-closed should any caller ever discard one.
+    if budget.remaining() == 0 && budget.used() > budget.limit {
+        return Err(resource("model size"));
+    }
+    debug_assert!(
+        retained_size(&workbook) <= budget.used(),
+        "retained {} > charged {}",
+        retained_size(&workbook),
+        budget.used()
+    );
+    Ok(workbook)
+}
+
+fn read_charged(package: &OdfPackage, budget: &BudgetRef) -> Result<OdsWorkbook, String> {
     // ODF Part 3 §2.2.1: `styles.xml` is optional; a package may carry its
     // spreadsheet and automatic styles in `content.xml` alone.
     let styles_text = if package.contains("styles.xml") {
@@ -214,8 +308,9 @@ pub fn read(package: &OdfPackage) -> Result<OdsWorkbook, String> {
         })
         .ok_or_else(|| invalid("content.xml has no office:spreadsheet body"))?;
     let (null_date_shift, date1904) = null_date(spreadsheet);
-    let xfs = XfBuilder::new(&store, &mut data, &faces);
+    let xfs = XfBuilder::new(&store, &mut data, &faces, budget.clone())?;
     let default_font = xfs.default_font();
+    budget.bytes(default_font.0.capacity())?;
     let views = if package.contains("settings.xml") {
         let text = package.read_text("settings.xml")?;
         let document = xml::parse(&text)?;
@@ -227,6 +322,16 @@ pub fn read(package: &OdfPackage) -> Result<OdsWorkbook, String> {
         .children()
         .filter(|n| xml::is(*n, NS_TABLE, "table"))
         .collect();
+    // Each table: its sheet record (whatever it holds is charged as it is
+    // read) and its name, kept here, in the context and in the sheet.
+    for table in &tables {
+        let name = table.attribute((NS_TABLE, "name")).unwrap_or("").len();
+        budget.bytes(
+            std::mem::size_of::<OdsSheet>()
+                .saturating_add(3 * std::mem::size_of::<String>())
+                .saturating_add(name.saturating_mul(3)),
+        )?;
+    }
     let sheet_names: Vec<String> = tables
         .iter()
         .map(|t| t.attribute((NS_TABLE, "name")).unwrap_or("").to_string())
@@ -239,7 +344,7 @@ pub fn read(package: &OdfPackage) -> Result<OdsWorkbook, String> {
         xfs,
         null_date_shift,
         date1904,
-        budget: Budget::new(),
+        budget: budget.clone(),
         images: BTreeSet::new(),
         drawing_count: 0,
         sheet_names: sheet_names.clone(),
@@ -263,36 +368,52 @@ pub fn read(package: &OdfPackage) -> Result<OdsWorkbook, String> {
         &mut context,
         &mut warnings,
     )?;
-    let mut defined_names = extras::named_expressions(spreadsheet, &sheet_names);
+    let mut defined_names = extras::named_expressions(budget, spreadsheet, &sheet_names)?;
     for (index, node) in tables.iter().enumerate() {
         if let Some(ranges) = node.attribute((NS_TABLE, "print-ranges")) {
             if let Some(formula) = extras::convert_range_list(ranges) {
-                defined_names.push(("_xlnm.Print_Area".into(), Some(index), formula));
+                budget.push(
+                    &mut defined_names,
+                    ("_xlnm.Print_Area".into(), Some(index), formula),
+                )?;
             }
         }
     }
-    extras::database_ranges(spreadsheet, &mut sheets, &sheet_names, &mut defined_names);
-    extras::content_validations(&mut context.budget, spreadsheet, &mut sheets)?;
+    extras::database_ranges(
+        budget,
+        spreadsheet,
+        &mut sheets,
+        &sheet_names,
+        &mut defined_names,
+    )?;
+    extras::content_validations(budget, spreadsheet, &mut sheets)?;
     extras::conditional_formats(&mut context, tables.as_slice(), &mut sheets)?;
     // Defined names in scope for each sheet (workbook-global, then local).
     // Every sheet holds its own copy of each global name: each copy is
     // admitted before it is made.
     for (index, sheet) in sheets.iter_mut().enumerate() {
-        let mut names = Vec::new();
-        for (name, _, formula) in defined_names
-            .iter()
-            .filter(|(_, scope, _)| scope.is_none())
-            .chain(
-                defined_names
-                    .iter()
-                    .filter(|(_, scope, _)| *scope == Some(index)),
-            )
-        {
-            context.budget.bytes(
-                std::mem::size_of::<xlsx_model::DefinedName>()
-                    .saturating_add(name.len())
-                    .saturating_add(formula.len()),
-            )?;
+        let in_scope = || {
+            defined_names
+                .iter()
+                .filter(|(_, scope, _)| scope.is_none())
+                .chain(
+                    defined_names
+                        .iter()
+                        .filter(move |(_, scope, _)| *scope == Some(index)),
+                )
+        };
+        let mut cost = 0usize;
+        let mut count = 0usize;
+        for (name, _, formula) in in_scope() {
+            count += 1;
+            cost = cost
+                .saturating_add(std::mem::size_of::<xlsx_model::DefinedName>())
+                .saturating_add(name.len())
+                .saturating_add(formula.len());
+        }
+        budget.bytes(cost)?;
+        let mut names = Vec::with_capacity(count);
+        for (name, _, formula) in in_scope() {
             names.push(xlsx_model::DefinedName {
                 name: name.clone(),
                 formula: formula.clone(),
@@ -311,6 +432,59 @@ pub fn read(package: &OdfPackage) -> Result<OdsWorkbook, String> {
         images: context.images,
         warnings,
     })
+}
+
+/// Exhaustive retained storage of a read workbook (debug check of the
+/// budget; a new field fails to compile until it is counted).
+impl ooxml_common::chart::RetainedBytes for OdsSheet {
+    fn heap_bytes(&self) -> u64 {
+        let Self {
+            name,
+            visibility: _,
+            tab_color,
+            worksheet,
+            rows,
+            column_px,
+            default_col_px: _,
+            validation_refs,
+            style_map_refs,
+        } = self;
+        name.heap_bytes()
+            .saturating_add(tab_color.heap_bytes())
+            .saturating_add(worksheet.heap_bytes())
+            .saturating_add(rows.heap_bytes())
+            .saturating_add(column_px.heap_bytes())
+            .saturating_add(validation_refs.heap_bytes())
+            .saturating_add(style_map_refs.heap_bytes())
+    }
+}
+
+impl ooxml_common::chart::RetainedBytes for OdsWorkbook {
+    fn heap_bytes(&self) -> u64 {
+        let Self {
+            sheets,
+            styles,
+            xf_indent_pt,
+            date1904: _,
+            defined_names,
+            default_font,
+            images,
+            warnings,
+        } = self;
+        let images = images.iter().fold(0u64, |total, path| {
+            total
+                .saturating_add(path.heap_bytes())
+                .saturating_add(map_entry_bytes::<String, ()>() as u64)
+        });
+        sheets
+            .heap_bytes()
+            .saturating_add(styles.heap_bytes())
+            .saturating_add(xf_indent_pt.heap_bytes())
+            .saturating_add(defined_names.heap_bytes())
+            .saturating_add(default_font.0.heap_bytes())
+            .saturating_add(images)
+            .saturating_add(warnings.heap_bytes())
+    }
 }
 
 impl OdsWorkbook {

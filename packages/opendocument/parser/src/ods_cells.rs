@@ -12,6 +12,9 @@ use xlsx_model::{Border, BorderEdge, CellXf, Dxf, Fill, Font, NumFmt, RunFont, S
 const FIRST_CUSTOM_NUMFMT: u32 = 164;
 
 pub struct XfBuilder {
+    /// Every interned entry (and its key) is charged here before it is
+    /// stored: the interner is the one place styles enter the model.
+    budget: crate::ods::BudgetRef,
     styles: Styles,
     fonts: HashMap<String, u32>,
     fills: HashMap<String, u32>,
@@ -40,10 +43,18 @@ impl XfBuilder {
     /// A builder whose xf 0 is the `Default` cell style (§16.2: the style
     /// of cells that name none), as SpreadsheetML's xf 0 is the Normal
     /// format of unstyled cells.
-    pub fn new(store: &StyleStore, data: &mut DataStyles, faces: &HashMap<String, String>) -> Self {
+    pub(crate) fn new(
+        store: &StyleStore,
+        data: &mut DataStyles,
+        faces: &HashMap<String, String>,
+        budget: crate::ods::BudgetRef,
+    ) -> Result<Self, String> {
         let chain = store.chain("table-cell", Some("Default"));
         let default_font = font_of(&chain, faces, None);
+        // The builder's own copy of the default font.
+        budget.bytes(crate::retained_size(&default_font))?;
         let mut builder = Self {
+            budget,
             styles: Styles::default(),
             fonts: HashMap::new(),
             fills: HashMap::new(),
@@ -57,19 +68,33 @@ impl XfBuilder {
             default_font: default_font.clone(),
         };
         // §18.8.21 / §18.8.20: fill 0 is none, fill 1 gray125 by convention.
-        builder.intern_font(default_font);
+        builder.intern_font(default_font)?;
         builder.intern_fill(Fill {
             pattern_type: "none".into(),
             ..Fill::default()
-        });
+        })?;
         builder.intern_fill(Fill {
             pattern_type: "gray125".into(),
             ..Fill::default()
-        });
-        builder.intern_border(Border::default());
-        let default_xf = builder.xf_for(store, data, faces, None);
+        })?;
+        builder.intern_border(Border::default())?;
+        let default_xf = builder.xf_for(store, data, faces, None)?;
         debug_assert_eq!(default_xf, 0);
-        builder
+        Ok(builder)
+    }
+
+    /// Admit one new interned entry's owned heap and its map key (callers
+    /// admit its vector slot with [`crate::ods::Budget::grow`]).
+    fn admit<T: ooxml_common::chart::RetainedBytes>(
+        &self,
+        value: &T,
+        key_text: usize,
+    ) -> Result<(), String> {
+        self.budget.bytes(
+            usize::try_from(value.heap_bytes())
+                .unwrap_or(usize::MAX)
+                .saturating_add(crate::ods::hash_entry_bytes::<String, u32>(key_text)),
+        )
     }
 
     /// (family, size pt, bold, italic) of the default cell font: the host
@@ -101,17 +126,21 @@ impl XfBuilder {
         data: &mut DataStyles,
         faces: &HashMap<String, String>,
         style: Option<&str>,
-    ) -> u32 {
+    ) -> Result<u32, String> {
         let key = style.map(str::to_string);
         if let Some(found) = self.by_style.get(&key) {
-            return *found;
+            return Ok(*found);
         }
         let name = style.unwrap_or("Default");
         let chain = store.chain("table-cell", Some(name));
         let format = resolve(&chain, data, faces);
-        let index = self.intern_format(format);
+        let index = self.intern_format(format)?;
+        self.budget
+            .bytes(crate::ods::hash_entry_bytes::<Option<String>, u32>(
+                key.as_ref().map_or(0, String::len),
+            ))?;
         self.by_style.insert(key, index);
-        index
+        Ok(index)
     }
 
     /// What an empty cell with this xf paints: its fill and borders. Two
@@ -130,77 +159,102 @@ impl XfBuilder {
 
     /// Intern `xf` with its number format replaced by `code` (a cell whose
     /// value type has no matching data style).
-    pub fn with_num_fmt(&mut self, xf: u32, code: &str, kind: DataKind) -> u32 {
+    pub fn with_num_fmt(&mut self, xf: u32, code: &str, kind: DataKind) -> Result<u32, String> {
         let Some(base) = self.styles.cell_xfs.get(xf as usize) else {
-            return xf;
+            return Ok(xf);
         };
         let mut copy = clone_xf(base);
-        copy.num_fmt_id = self.intern_num_fmt(&FormatCode::plain(code));
+        copy.num_fmt_id = self.intern_num_fmt(&FormatCode::plain(code))?;
         let indent = self.indent_pt.get(xf as usize).copied().unwrap_or(0.0);
         self.intern_xf(copy, indent, Some(kind))
     }
 
-    fn intern_format(&mut self, format: CellFormat) -> u32 {
+    fn intern_format(&mut self, format: CellFormat) -> Result<u32, String> {
         let mut xf = format.xf;
-        xf.font_id = self.intern_font(format.font);
-        xf.fill_id = self.intern_fill(format.fill);
-        xf.border_id = self.intern_border(format.border);
+        xf.font_id = self.intern_font(format.font)?;
+        xf.fill_id = self.intern_fill(format.fill)?;
+        xf.border_id = self.intern_border(format.border)?;
         let kind = format.num_fmt.as_ref().map(|(_, kind)| *kind);
         xf.num_fmt_id = match &format.num_fmt {
-            Some((format, _)) => self.intern_num_fmt(format),
+            Some((format, _)) => self.intern_num_fmt(format)?,
             None => 0,
         };
         self.intern_xf(xf, format.indent_pt, kind)
     }
 
-    fn intern_xf(&mut self, xf: CellXf, indent_pt: f64, kind: Option<DataKind>) -> u32 {
+    fn intern_xf(
+        &mut self,
+        xf: CellXf,
+        indent_pt: f64,
+        kind: Option<DataKind>,
+    ) -> Result<u32, String> {
         let key = format!(
             "{}|{}",
             serde_json::to_string(&xf).unwrap_or_default(),
             indent_pt
         );
         if let Some(found) = self.xfs.get(&key) {
-            return *found;
+            return Ok(*found);
         }
+        // The xf, its key, and its indent and kind slots.
+        self.admit(&xf, key.len())?;
+        self.budget.grow(&self.styles.cell_xfs)?;
+        self.budget.grow(&self.indent_pt)?;
+        self.budget.grow(&self.kinds)?;
         let index = self.styles.cell_xfs.len() as u32;
         self.styles.cell_xfs.push(xf);
         self.indent_pt.push(indent_pt);
         self.kinds.push(kind);
         self.xfs.insert(key, index);
-        index
+        Ok(index)
     }
 
-    pub fn intern_font(&mut self, font: Font) -> u32 {
+    pub fn intern_font(&mut self, font: Font) -> Result<u32, String> {
         let key = serde_json::to_string(&font).unwrap_or_default();
-        *self.fonts.entry(key).or_insert_with(|| {
-            self.styles.fonts.push(font);
-            self.styles.fonts.len() as u32 - 1
-        })
+        if let Some(found) = self.fonts.get(&key) {
+            return Ok(*found);
+        }
+        self.admit(&font, key.len())?;
+        self.budget.grow(&self.styles.fonts)?;
+        self.styles.fonts.push(font);
+        let index = self.styles.fonts.len() as u32 - 1;
+        self.fonts.insert(key, index);
+        Ok(index)
     }
 
-    fn intern_fill(&mut self, fill: Fill) -> u32 {
+    fn intern_fill(&mut self, fill: Fill) -> Result<u32, String> {
         let key = serde_json::to_string(&fill).unwrap_or_default();
-        *self.fills.entry(key).or_insert_with(|| {
-            self.styles.fills.push(fill);
-            self.styles.fills.len() as u32 - 1
-        })
+        if let Some(found) = self.fills.get(&key) {
+            return Ok(*found);
+        }
+        self.admit(&fill, key.len())?;
+        self.budget.grow(&self.styles.fills)?;
+        self.styles.fills.push(fill);
+        let index = self.styles.fills.len() as u32 - 1;
+        self.fills.insert(key, index);
+        Ok(index)
     }
 
-    fn intern_border(&mut self, border: Border) -> u32 {
+    fn intern_border(&mut self, border: Border) -> Result<u32, String> {
         let key = serde_json::to_string(&border).unwrap_or_default();
-        *self.borders.entry(key).or_insert_with(|| {
-            self.styles.borders.push(border);
-            self.styles.borders.len() as u32 - 1
-        })
+        if let Some(found) = self.borders.get(&key) {
+            return Ok(*found);
+        }
+        self.admit(&border, key.len())?;
+        self.budget.grow(&self.styles.borders)?;
+        self.styles.borders.push(border);
+        let index = self.styles.borders.len() as u32 - 1;
+        self.borders.insert(key, index);
+        Ok(index)
     }
 
     /// The number-format id of `format`: built-in ids for General and the
     /// built-in short date / date-time, an interned custom code otherwise
     /// (a General code that divides is a custom code: built-ins carry no
     /// divisors).
-    pub fn intern_num_fmt(&mut self, format: &FormatCode) -> u32 {
+    pub fn intern_num_fmt(&mut self, format: &FormatCode) -> Result<u32, String> {
         if format.is_general() {
-            return 0;
+            return Ok(0);
         }
         if format.divisors.is_empty() {
             if let Some(id) = format
@@ -208,21 +262,24 @@ impl XfBuilder {
                 .strip_prefix("#builtin:")
                 .and_then(|id| id.parse::<u32>().ok())
             {
-                return id;
+                return Ok(id);
             }
         }
         let key = format!("{}\u{0}{:?}", format.code, format.divisors);
         if let Some(id) = self.num_fmts.get(&key) {
-            return *id;
+            return Ok(*id);
         }
         let id = FIRST_CUSTOM_NUMFMT + self.styles.num_fmts.len() as u32;
-        self.styles.num_fmts.push(NumFmt {
+        let num_fmt = NumFmt {
             num_fmt_id: id,
             format_code: crate::ods_number::literal_code(&format.code),
             section_divisors: format.divisors.clone(),
-        });
+        };
+        self.admit(&num_fmt, key.len())?;
+        self.budget.grow(&self.styles.num_fmts)?;
+        self.styles.num_fmts.push(num_fmt);
         self.num_fmts.insert(key, id);
-        id
+        Ok(id)
     }
 
     /// A differential format for a conditional style (§16.3 map target).
@@ -232,9 +289,9 @@ impl XfBuilder {
         data: &mut DataStyles,
         faces: &HashMap<String, String>,
         style: &str,
-    ) -> u32 {
+    ) -> Result<u32, String> {
         if let Some(found) = self.dxfs.get(style) {
-            return *found;
+            return Ok(*found);
         }
         // Only the properties the conditional style sets itself (and its
         // parents below `Default`) differ from the cell's own format.
@@ -273,11 +330,14 @@ impl XfBuilder {
                 .any(|s| s.data_style.is_some())
                 .then_some(format.num_fmt.as_ref())
                 .flatten()
-                .map(|(format, _)| NumFmt {
-                    num_fmt_id: self.intern_num_fmt(format),
-                    format_code: crate::ods_number::literal_code(&format.code),
-                    section_divisors: format.divisors.clone(),
-                }),
+                .map(|(format, _)| {
+                    Ok::<_, String>(NumFmt {
+                        num_fmt_id: self.intern_num_fmt(format)?,
+                        format_code: crate::ods_number::literal_code(&format.code),
+                        section_divisors: format.divisors.clone(),
+                    })
+                })
+                .transpose()?,
             font_toggles: font_set.then(|| xlsx_model::DxfFontToggles {
                 bold: has("text:fo:font-weight").then_some(format.font.bold),
                 italic: has("text:fo:font-style").then_some(format.font.italic),
@@ -286,10 +346,12 @@ impl XfBuilder {
                 automatic_color: None,
             }),
         };
+        self.admit(&dxf, style.len())?;
+        self.budget.grow(&self.styles.dxfs)?;
         let index = self.styles.dxfs.len() as u32;
         self.styles.dxfs.push(dxf);
         self.dxfs.insert(style.to_string(), index);
-        index
+        Ok(index)
     }
 
     /// The run font of a `text:span` style over a cell's font.

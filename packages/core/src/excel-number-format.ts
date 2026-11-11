@@ -3,6 +3,161 @@
 // section, date/time section detection and date/time rendering.
 
 import { excelSerialToUtcDate, isExcelDisplayDateSerial } from './excel-date';
+import { hasOwnKey } from './internal/own-key';
+
+/** §18.8.30 "Specify colors": the eight named section colours (p.1787). */
+const NAMED_COLORS: Record<string, string> = {
+  black: '#000000', blue: '#0000FF', cyan: '#00FFFF', green: '#008000',
+  magenta: '#FF00FF', red: '#FF0000', white: '#FFFFFF', yellow: '#FFFF00',
+};
+
+// Legacy indexed colour palette (§18.8.27, indices 0-63). `[ColorN]` maps N→
+// indexed=(N+7): the spec note says "[Color1] refers to indexed=8 ... [Color3]
+// for Red". Kept in sync with the Rust parser's INDEXED_COLORS.
+const INDEXED_COLORS: readonly string[] = [
+  '#000000', '#FFFFFF', '#FF0000', '#00FF00', '#0000FF', '#FFFF00', '#FF00FF', '#00FFFF', // 0-7
+  '#000000', '#FFFFFF', '#FF0000', '#00FF00', '#0000FF', '#FFFF00', '#FF00FF', '#00FFFF', // 8-15
+  '#800000', '#008000', '#000080', '#808000', '#800080', '#008080', '#C0C0C0', '#808080', // 16-23
+  '#9999FF', '#993366', '#FFFFCC', '#CCFFFF', '#660066', '#FF8080', '#0066CC', '#CCCCFF', // 24-31
+  '#000080', '#FF00FF', '#FFFF00', '#00FFFF', '#800080', '#800000', '#008080', '#0000FF', // 32-39
+  '#00CCFF', '#CCFFFF', '#CCFFCC', '#FFFF99', '#99CCFF', '#FF99CC', '#CC99FF', '#FFCC99', // 40-47
+  '#3366FF', '#33CCCC', '#99CC00', '#FFCC00', '#FF9900', '#FF6600', '#666699', '#969696', // 48-55
+  '#003366', '#339966', '#003300', '#333300', '#993300', '#993366', '#333399', '#333333', // 56-63
+];
+
+interface SectionCondition {
+  op: '<' | '<=' | '>' | '>=' | '=' | '<>';
+  value: number;
+}
+
+/** One numeric format section with its leading modifiers read. */
+export interface ParsedFormatSection {
+  /** Raw section body with colour and condition `[...]` modifiers removed. */
+  body: string;
+  color?: string;
+  condition?: SectionCondition;
+}
+
+/** Parse a section's `[...]` modifiers (colour, condition, currency).
+ *  Currency `[$sym-LCID]` is left *in* the body (its `$sym` is emitted as a
+ *  literal by the tokenizer); only colour and condition brackets are consumed
+ *  here. */
+export function parseFormatSection(section: string): ParsedFormatSection {
+  let body = '';
+  let color: string | undefined;
+  let condition: SectionCondition | undefined;
+  let i = 0;
+  while (i < section.length) {
+    const ch = section[i];
+    if (ch === '"') { // pass a quoted literal straight through
+      body += ch; i++;
+      while (i < section.length && section[i] !== '"') body += section[i++];
+      if (i < section.length) body += section[i++];
+    } else if (ch === '\\' || ch === '_' || ch === '*') {
+      // An escape or a pad / fill pair: its operand is never a delimiter.
+      body += ch;
+      if (i + 1 < section.length) body += section[i + 1];
+      i += 2;
+    } else if (ch === '[') {
+      const end = section.indexOf(']', i);
+      if (end < 0) { body += ch; i++; continue; }
+      const inner = section.slice(i + 1, end);
+      const lower = inner.toLowerCase();
+      const idxMatch = lower.match(/^color(\d{1,2})$/);
+      const condMatch = inner.match(/^(<=|>=|<>|<|>|=)\s*(-?[0-9.]+(?:[eE][-+]?\d+)?)$/);
+      if (hasOwnKey(NAMED_COLORS, lower)) {
+        color = NAMED_COLORS[lower];
+      } else if (idxMatch) {
+        const n = parseInt(idxMatch[1], 10);
+        // §18.8.30: [ColorN] → indexed=(N+7); valid N is 1..56.
+        if (n >= 1 && n <= 56) color = INDEXED_COLORS[n + 7] ?? color;
+      } else if (condMatch) {
+        condition = { op: condMatch[1] as SectionCondition['op'], value: Number(condMatch[2]) };
+      } else {
+        // Currency / locale / elapsed brackets stay in the body for the
+        // tokenizer to interpret (`[$sym-LCID]`), so re-emit them verbatim.
+        body += section.slice(i, end + 1);
+      }
+      i = end + 1;
+    } else {
+      body += ch; i++;
+    }
+  }
+  return { body, color, condition };
+}
+
+function testCondition(cond: SectionCondition, num: number): boolean {
+  switch (cond.op) {
+    case '<': return num < cond.value;
+    case '<=': return num <= cond.value;
+    case '>': return num > cond.value;
+    case '>=': return num >= cond.value;
+    case '=': return num === cond.value;
+    case '<>': return num !== cond.value;
+  }
+}
+
+/** The numeric section a value formats with (§18.8.30). */
+export interface SelectedFormatSection {
+  section: ParsedFormatSection;
+  /** Index among the numeric sections (the text section left out): the
+   *  index of the section's display divisor. */
+  index: number;
+  /** The section formats the value's magnitude (its literals carry the
+   *  sign): a positional negative section, or a negative value claimed by
+   *  a section's own condition. */
+  useMagnitude: boolean;
+}
+
+/**
+ * Choose the numeric section of `formatCode` for `value`, as worksheet
+ * cells and chart labels both do. `null` when the code has no numeric
+ * section; `'none'` when sections carry conditions and none matches with no
+ * unconditional section to fall back on (Excel shows `#`).
+ */
+export function selectFormatSection(
+  value: number,
+  formatCode: string,
+): SelectedFormatSection | 'none' | null {
+  const raw = splitFormatSections(formatCode);
+  // The text section never formats a number (§18.8.30).
+  const textIndex = textSectionIndex(raw);
+  const parsed = raw.filter((_, i) => i !== textIndex).map(parseFormatSection);
+  if (parsed.length === 0) return null;
+  // Conditional sections (§18.8.30 "Specify conditions"): if any section
+  // carries a `[cond]`, section selection is condition-driven: the first
+  // section whose condition matches wins; a section without a condition is
+  // the "else". This overrides the positional pos/neg/zero rule.
+  if (parsed.some(s => s.condition)) {
+    for (let index = 0; index < parsed.length; index++) {
+      const section = parsed[index];
+      if (!section.condition) return { section, index, useMagnitude: false };
+      if (testCondition(section.condition, value)) {
+        // A section selected by its own matching condition formats the
+        // value's magnitude: its literals carry the sign presentation, like
+        // the positional negative section (§18.8.30 p.1785 example
+        // `$0.00" Surplus";$-0.00" Shortage"`). The unconditional "else"
+        // keeps the value's sign, like the positional fallback.
+        return { section, index, useMagnitude: value < 0 };
+      }
+    }
+    return 'none';
+  }
+  // Positional selection: positive;negative;zero (§18.8.31 p.1783).
+  if (value > 0) return { section: parsed[0], index: 0, useMagnitude: false };
+  if (value < 0) {
+    return parsed.length > 1
+      ? { section: parsed[1], index: 1, useMagnitude: true }
+      : { section: parsed[0], index: 0, useMagnitude: false };
+  }
+  const index = parsed.length > 2 ? 2 : 0;
+  return { section: parsed[index], index, useMagnitude: false };
+}
+
+/** Whether a section body is the reserved General keyword (§18.8.30). */
+export function isGeneralSectionBody(body: string): boolean {
+  return body.trim().toLowerCase() === 'general';
+}
 
 /** Index of the text section (§18.8.30), or -1: the fourth section when
  *  there are four, otherwise the last section when it holds an `@`

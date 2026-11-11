@@ -6,10 +6,10 @@ import {
   isDateFormatSection,
   isExcelDisplayDateSerial,
   roundDecimalHalfUp,
+  selectFormatSection,
   splitFormatSections,
   textSectionIndex,
 } from '@silurus/ooxml-core';
-import { hasOwnKey } from '@silurus/ooxml-core/internal/own-key';
 import type { Cell, CellValue, Styles } from './types.js';
 
 function cellValueText(value: CellValue): string {
@@ -569,96 +569,8 @@ function dateFormattedCell(text: string, serial: number, date1904: boolean): For
 // conditional/coloured sections all follow the spec exactly.
 // ════════════════════════════════════════════════════════════════════════════
 
-/** §18.8.30 "Specify colors": the eight named section colours (p.1787). */
-const NAMED_COLORS: Record<string, string> = {
-  black: '#000000', blue: '#0000FF', cyan: '#00FFFF', green: '#008000',
-  magenta: '#FF00FF', red: '#FF0000', white: '#FFFFFF', yellow: '#FFFF00',
-};
-
-// Legacy indexed colour palette (§18.8.27, indices 0-63). `[ColorN]` maps N→
-// indexed=(N+7): the spec note says "[Color1] refers to indexed=8 ... [Color3]
-// for Red". Kept in sync with the Rust parser's INDEXED_COLORS.
-const INDEXED_COLORS: readonly string[] = [
-  '#000000', '#FFFFFF', '#FF0000', '#00FF00', '#0000FF', '#FFFF00', '#FF00FF', '#00FFFF', // 0-7
-  '#000000', '#FFFFFF', '#FF0000', '#00FF00', '#0000FF', '#FFFF00', '#FF00FF', '#00FFFF', // 8-15
-  '#800000', '#008000', '#000080', '#808000', '#800080', '#008080', '#C0C0C0', '#808080', // 16-23
-  '#9999FF', '#993366', '#FFFFCC', '#CCFFFF', '#660066', '#FF8080', '#0066CC', '#CCCCFF', // 24-31
-  '#000080', '#FF00FF', '#FFFF00', '#00FFFF', '#800080', '#800000', '#008080', '#0000FF', // 32-39
-  '#00CCFF', '#CCFFFF', '#CCFFCC', '#FFFF99', '#99CCFF', '#FF99CC', '#CC99FF', '#FFCC99', // 40-47
-  '#3366FF', '#33CCCC', '#99CC00', '#FFCC00', '#FF9900', '#FF6600', '#666699', '#969696', // 48-55
-  '#003366', '#339966', '#003300', '#333300', '#993300', '#993366', '#333399', '#333333', // 56-63
-];
-
-interface SectionCondition {
-  op: '<' | '<=' | '>' | '>=' | '=' | '<>';
-  value: number;
-}
-
-interface ParsedSection {
-  /** Raw section body with `[...]` modifiers stripped out. */
-  body: string;
-  color?: string;
-  condition?: SectionCondition;
-}
-
-/** Parse a section's leading `[...]` modifiers (colour, condition, currency).
- *  Currency `[$sym-LCID]` is left *in* the body (its `$sym` is emitted as a
- *  literal by the tokenizer); only colour and condition brackets are consumed
- *  here. */
-function parseSection(section: string): ParsedSection {
-  let body = '';
-  let color: string | undefined;
-  let condition: SectionCondition | undefined;
-  let i = 0;
-  while (i < section.length) {
-    const ch = section[i];
-    if (ch === '"') { // pass a quoted literal straight through
-      body += ch; i++;
-      while (i < section.length && section[i] !== '"') body += section[i++];
-      if (i < section.length) body += section[i++];
-    } else if (ch === '\\' || ch === '_' || ch === '*') {
-      // An escape or a pad / fill pair: its operand is never a delimiter.
-      body += ch;
-      if (i + 1 < section.length) body += section[i + 1];
-      i += 2;
-    } else if (ch === '[') {
-      const end = section.indexOf(']', i);
-      if (end < 0) { body += ch; i++; continue; }
-      const inner = section.slice(i + 1, end);
-      const lower = inner.toLowerCase();
-      const idxMatch = lower.match(/^color(\d{1,2})$/);
-      const condMatch = inner.match(/^(<=|>=|<>|<|>|=)\s*(-?[0-9.]+(?:[eE][-+]?\d+)?)$/);
-      if (hasOwnKey(NAMED_COLORS, lower)) {
-        color = NAMED_COLORS[lower];
-      } else if (idxMatch) {
-        const n = parseInt(idxMatch[1], 10);
-        // §18.8.30: [ColorN] → indexed=(N+7); valid N is 1..56.
-        if (n >= 1 && n <= 56) color = INDEXED_COLORS[n + 7] ?? color;
-      } else if (condMatch) {
-        condition = { op: condMatch[1] as SectionCondition['op'], value: Number(condMatch[2]) };
-      } else {
-        // Currency / locale / elapsed brackets stay in the body for the
-        // tokenizer to interpret (`[$sym-LCID]`), so re-emit them verbatim.
-        body += section.slice(i, end + 1);
-      }
-      i = end + 1;
-    } else {
-      body += ch; i++;
-    }
-  }
-  return { body, color, condition };
-}
-
-function testCondition(cond: SectionCondition, num: number): boolean {
-  switch (cond.op) {
-    case '<': return num < cond.value;
-    case '<=': return num <= cond.value;
-    case '>': return num > cond.value;
-    case '>=': return num >= cond.value;
-    case '=': return num === cond.value;
-    case '<>': return num !== cond.value;
-  }
-}
+// Section modifiers (colour, condition) and section selection are shared
+// with chart labels: `parseFormatSection` / `selectFormatSection` in core.
 
 /**
  * The lexed pieces of one numeric section. Literal text and placeholder runs
@@ -700,7 +612,7 @@ type SecPart =
 /**
  * Lex one numeric section body (already stripped of `[...]` colour/condition
  * modifiers) into a `LexedSection`. Currency `[$sym-LCID]` brackets that
- * survived `parseSection` are expanded here to their literal symbol.
+ * survived `parseFormatSection` are expanded here to their literal symbol.
  */
 function lexSection(body: string): LexedSection {
   const parts: SecPart[] = [];
@@ -1077,62 +989,17 @@ function applyFormatCode(
   divisors?: readonly number[],
 ): FormattedCell {
   let num = value;
-  const rawSections = splitFormatSections(formatCode);
-  // The text section never formats a number (§18.8.30): leave it out of the
-  // positional and conditional selection below.
-  const textIndex = textSectionIndex(rawSections);
-  const parsed = rawSections.filter((_, i) => i !== textIndex).map(parseSection);
-  if (parsed.length === 0) return { text: formatGeneralText(num), general: true };
-
-  // Conditional sections (§18.8.30 "Specify conditions"): if any section
-  // carries a `[cond]`, section selection is condition-driven — the first
-  // section whose condition matches wins; a trailing section without a
-  // condition is the "else". This overrides the positional pos/neg/zero rule.
-  const hasConditions = parsed.some(s => s.condition);
-  let chosen: ParsedSection | undefined;
-  let useMagnitude = false;
-
-  if (hasConditions) {
-    let matchedByCondition = false;
-    for (const sec of parsed) {
-      if (sec.condition) {
-        if (testCondition(sec.condition, num)) { chosen = sec; matchedByCondition = true; break; }
-      } else {
-        // Unconditional section acts as the default/else clause.
-        chosen = chosen ?? sec;
-        if (chosen === sec) break;
-      }
-    }
-    if (!chosen) {
-      // No criterion met and no else → Excel shows "#" across the cell.
-      return { text: '#' };
-    }
-    // Sign semantics (§18.8.30 / §18.8.31): a section selected by its own
-    // matching condition formats the value's *magnitude* — the section's
-    // literals carry the sign presentation, exactly like the positional
-    // negative section (the spec's `$0.00" Surplus";$-0.00" Shortage"` example
-    // on p.1785 shows -125.74 as "$-125.74 Shortage": magnitude plus the
-    // section's own literal `-`; built-ins 37-40 use parentheses the same way).
-    // Prepending the sign on top would double it: `[<0]\-0.0` @ -5 would print
-    // "--5.0". The unconditional "else" section, by contrast, mirrors the
-    // positional fallback rule (a negative formatted by the only/positive
-    // section keeps its sign, e.g. `0.0` @ -5 → "-5.0"), so a value that no
-    // condition claimed keeps its sign there.
-    useMagnitude = matchedByCondition && num < 0;
-  } else {
-    // Positional selection: positive;negative;zero (§18.8.31 p.1783).
-    if (num > 0) chosen = parsed[0];
-    else if (num < 0) {
-      if (parsed.length > 1) { chosen = parsed[1]; useMagnitude = true; }
-      else chosen = parsed[0];
-    } else {
-      chosen = parsed.length > 2 ? parsed[2] : parsed[0];
-    }
-  }
+  // Positional (positive;negative;zero) or condition-driven selection, the
+  // text section left out (§18.8.30); shared with chart labels.
+  const selected = selectFormatSection(num, formatCode);
+  if (selected === null) return { text: formatGeneralText(num), general: true };
+  // No criterion met and no else → Excel shows "#" across the cell.
+  if (selected === 'none') return { text: '#' };
+  const { section: chosen, useMagnitude } = selected;
 
   // An OpenDocument display factor (ODF 1.3 Part 3 §19.346) divides the
   // value once its section is chosen on the undivided value.
-  num /= sectionDivisor(divisors, parsed.indexOf(chosen));
+  num /= sectionDivisor(divisors, selected.index);
   // Date/time is a property of the selected section (§18.8.30): `0.00;h:mm`
   // formats a positive value as a number and only a negative one as a time.
   const serial = useMagnitude ? Math.abs(num) : num;

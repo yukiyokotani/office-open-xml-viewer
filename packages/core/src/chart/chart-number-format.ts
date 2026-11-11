@@ -9,6 +9,8 @@ import { excelSerialToUtcDate, isExcelDisplayDateSerial } from '../excel-date';
 import {
   formatExcelDateTime,
   isDateFormatSection,
+  isGeneralSectionBody,
+  selectFormatSection,
   splitFormatSections,
   textSectionIndex,
 } from '../excel-number-format';
@@ -123,22 +125,28 @@ export function formatChartValWithCode(
   // `<c:numFmt formatCode="General">`; tokenizing it as a literal pattern would
   // render the word "General" instead of the value (issue #358).
   if (!code || isGeneralSection(code)) return formatChartVal(v / sectionDivisor(divisors, 0));
-  // Section selection per §18.8.30: positive;negative;zero, with the text
-  // section left out (it never formats a number). When the negative section
-  // is omitted, a negative number is formatted with the positive section and
-  // a leading minus.
+  // Section selection per §18.8.30, shared with worksheet cells: explicit
+  // conditions (`[>=1000]`) when any section has one, else
+  // positive;negative;zero, with the text section left out (it never formats
+  // a number). When the negative section is omitted, a negative number is
+  // formatted with the positive section and a leading minus.
+  const selected = selectFormatSection(v, code);
+  if (selected === null) return formatChartVal(v);
+  // No condition met and no unconditional section: Excel shows `#`.
+  if (selected === 'none') return '#';
   const sections = splitFormatSections(code);
   const textIndex = textSectionIndex(sections);
-  const numeric = sections.filter((_, i) => i !== textIndex);
-  if (numeric.length === 0) return formatChartVal(v);
-  const index = v > 0 ? 0 : v < 0 ? (numeric.length > 1 ? 1 : 0) : (numeric.length > 2 ? 2 : 0);
-  const section = numeric[index];
+  const section = sections.filter((_, i) => i !== textIndex)[selected.index];
   if (section === '') return '';
-  const explicitNegative = v < 0 && numeric.length >= 2;
-  v /= sectionDivisor(divisors, index);
-  // A section that is the General keyword (`General;General`) formats its
-  // value as General: the magnitude in an explicit negative section.
-  if (isGeneralSection(section)) return formatChartVal(explicitNegative ? -v : v);
+  // The section formats the magnitude: its literals carry the sign.
+  const explicitNegative = selected.useMagnitude;
+  v /= sectionDivisor(divisors, selected.index);
+  // A section whose body is the General keyword (`General;General`,
+  // `[Red]General`) formats its value as General: the magnitude in a section
+  // that carries the sign itself.
+  if (isGeneralSectionBody(selected.section.body)) {
+    return formatChartVal(explicitNegative ? -v : v);
+  }
   // Date/time is a property of the selected section: the value is a serial
   // date (scatter / time-series axes), rendered by the same formatter as
   // worksheet cells.

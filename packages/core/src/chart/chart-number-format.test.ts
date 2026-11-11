@@ -178,6 +178,19 @@ describe('section divisors (OpenDocument display factor)', () => {
     expect(formatChartValWithCode(-250, 'General;General', false, [100, 10])).toBe('25');
     expect(formatChartValWithCode(-250, 'General;General')).toBe('250');
   });
+  it('chooses explicitly conditioned sections as worksheet cells do', () => {
+    const code = '[>=1000]0.0" k";0';
+    expect(formatChartValWithCode(999, code, false, [1000, 1])).toBe('999');
+    expect(formatChartValWithCode(2500, code, false, [1000, 1])).toBe('2.5 k');
+    expect(formatChartValWithCode(-50, code, false, [1000, 1])).toBe('-50');
+    expect(formatChartValWithCode(-5, '[<0]\\-0.0;0', false)).toBe('-5.0');
+    expect(formatChartValWithCode(5, '[<0]0;[>10]0', false)).toBe('#');
+  });
+  it('formats decorated General sections as General', () => {
+    expect(formatChartValWithCode(250, '[Red]General', false, [100])).toBe('2.5');
+    expect(formatChartValWithCode(-250, '0;[Red]General', false, [1, 10])).toBe('25');
+    expect(formatChartValWithCode(7, '[Blue]General')).toBe('7');
+  });
   it('ignores absent, non-positive or non-finite divisors', () => {
     expect(formatChartValWithCode(42, '0', false, null)).toBe('42');
     expect(formatChartValWithCode(42, '0', false, [0])).toBe('42');

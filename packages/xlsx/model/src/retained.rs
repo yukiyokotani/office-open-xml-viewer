@@ -782,6 +782,182 @@ retained_struct!(TableInfo {
     columns
 });
 
+// A whole worksheet and the workbook styles, for readers that bound the
+// model they build (exhaustive: a new field fails to compile).
+retained_struct!(Worksheet {
+    name,
+    is_chart_sheet,
+    is_dialog_sheet,
+    rows,
+    col_widths,
+    col_width_ranges,
+    col_style_ranges,
+    row_heights,
+    col_outline_levels,
+    col_collapsed,
+    col_hidden,
+    default_col_width,
+    base_col_width,
+    default_col_width_is_ui,
+    default_row_height,
+    default_row_height_custom,
+    merge_cells,
+    freeze_rows,
+    freeze_cols,
+    conditional_formats,
+    images,
+    charts,
+    shape_groups,
+    show_zeros,
+    show_gridlines,
+    right_to_left,
+    outline_pr,
+    tab_color,
+    auto_filter,
+    hyperlinks,
+    comment_refs,
+    comments,
+    data_validations,
+    defined_names,
+    tables,
+    slicers,
+    pivot_tables,
+    pivot_diagnostics,
+    sparkline_groups,
+    default_font_family,
+    default_font_size,
+    default_font_bold,
+    default_font_italic,
+    normal_font_size,
+    theme_japanese_major_font,
+    theme_japanese_minor_font,
+    date1904,
+    parse_error
+});
+
+retained_struct!(Row {
+    index,
+    height,
+    custom_height,
+    cells,
+    outline_level,
+    collapsed,
+    hidden
+});
+
+retained_struct!(ColumnWidthRange { min, max, width });
+
+retained_struct!(ColumnStyleRange {
+    min,
+    max,
+    style_index
+});
+
+retained_struct!(OutlinePr {
+    summary_below,
+    summary_right
+});
+
+retained_struct!(SlicerAnchor {
+    from_col,
+    from_col_off,
+    from_row,
+    from_row_off,
+    to_col,
+    to_col_off,
+    to_row,
+    to_row_off,
+    caption,
+    items,
+    style
+});
+
+retained_struct!(SlicerItem { name, selected });
+
+retained_struct!(SlicerStyle {
+    whole,
+    header,
+    selected_item_with_data,
+    unselected_item_with_data
+});
+
+retained_struct!(SlicerElementStyle {
+    font_color,
+    font_size,
+    font_bold,
+    font_family,
+    fill_color,
+    border_color
+});
+
+retained_struct!(PivotDiagnostic { part, reason });
+
+impl RetainedBytes for PivotDiagnosticReason {
+    fn heap_bytes(&self) -> u64 {
+        0
+    }
+}
+
+retained_struct!(SparklineGroup {
+    kind,
+    markers,
+    high,
+    low,
+    first,
+    last,
+    negative,
+    display_x_axis,
+    display_empty_cells_as,
+    min_axis_type,
+    max_axis_type,
+    manual_min,
+    manual_max,
+    line_weight,
+    color_series,
+    color_negative,
+    color_axis,
+    color_markers,
+    color_first,
+    color_last,
+    color_high,
+    color_low,
+    sparklines
+});
+
+impl RetainedBytes for SparklineType {
+    fn heap_bytes(&self) -> u64 {
+        match self {
+            Self::Line | Self::Column | Self::Stem => 0,
+        }
+    }
+}
+
+retained_struct!(Sparkline { row, col, values });
+
+retained_struct!(Styles {
+    fonts,
+    fills,
+    borders,
+    cell_xfs,
+    num_fmts,
+    dxfs
+});
+
+retained_struct!(CellXf {
+    font_id,
+    fill_id,
+    border_id,
+    num_fmt_id,
+    align_h,
+    align_v,
+    wrap_text,
+    indent,
+    text_rotation,
+    shrink_to_fit,
+    reading_order,
+    own_font_color
+});
+
 #[cfg(test)]
 mod tests {
     use super::*;

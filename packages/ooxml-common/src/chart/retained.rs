@@ -87,6 +87,15 @@ impl<A: RetainedBytes, B: RetainedBytes> RetainedBytes for (A, B) {
     }
 }
 
+impl<A: RetainedBytes, B: RetainedBytes, C: RetainedBytes> RetainedBytes for (A, B, C) {
+    fn heap_bytes(&self) -> u64 {
+        self.0
+            .heap_bytes()
+            .saturating_add(self.1.heap_bytes())
+            .saturating_add(self.2.heap_bytes())
+    }
+}
+
 impl<K: RetainedBytes, V: RetainedBytes, S: BuildHasher> RetainedBytes for HashMap<K, V, S> {
     fn heap_bytes(&self) -> u64 {
         let slots = u64::try_from(self.capacity())

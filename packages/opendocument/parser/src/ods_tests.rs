@@ -45,6 +45,32 @@ fn read_files(files: &[(&str, &[u8])]) -> Result<OdsWorkbook, String> {
     read(&package)
 }
 
+/// Read `content` and `styles` under a model budget of `limit` bytes.
+fn read_within_limit(content: &str, styles: &str, limit: usize) -> Result<OdsWorkbook, String> {
+    let manifest = manifest(ODS, "");
+    let files: Vec<(&str, &[u8])> = vec![
+        ("META-INF/manifest.xml", manifest.as_bytes()),
+        ("content.xml", content.as_bytes()),
+        ("styles.xml", styles.as_bytes()),
+    ];
+    let package = OdfPackage::open(
+        package_bytes(ODS, &files),
+        OoxmlFormat::Xlsx,
+        PackageLimits::default(),
+        &MEDIA_TYPES,
+    )?;
+    read_within(&package, Budget::with_limit(limit))
+}
+
+/// A styles part whose `Default` cell style uses font face `F`, declared
+/// with a `family_len`-byte family name.
+fn styles_with_default_family(family_len: usize, common: &str) -> String {
+    format!(
+        r#"<office:document-styles {NS} office:version="1.3"><office:font-face-decls><style:font-face style:name="F" svg:font-family="{}"/></office:font-face-decls><office:styles><style:style style:name="Default" style:family="table-cell"><style:text-properties style:font-name="F"/></style:style>{common}</office:styles></office:document-styles>"#,
+        "f".repeat(family_len)
+    )
+}
+
 fn read_text(content: &str, styles: Option<&str>) -> Result<OdsWorkbook, String> {
     let mut files: Vec<(&str, &[u8])> = vec![("content.xml", content.as_bytes())];
     if let Some(styles) = styles {
@@ -422,6 +448,122 @@ fn validations_are_charged_per_sheet() {
     );
     assert_eq!(
         read_text(&validations(1024), Some(&styles(""))).err(),
+        Some(resource("model size"))
+    );
+}
+
+const MIB: usize = 1024 * 1024;
+
+fn empty_tables(sheets: usize, columns: &str) -> String {
+    (0..sheets)
+        .map(|i| format!(r#"<table:table table:name="S{i}">{columns}<table:table-row><table:table-cell/></table:table-row></table:table>"#))
+        .collect()
+}
+
+#[test]
+fn the_default_family_is_charged_per_sheet() {
+    // Every worksheet keeps its own copy of the 64 KiB default family.
+    let styles = styles_with_default_family(64 * 1024, "");
+    let workbook = read_within_limit(&content("", &empty_tables(2, "")), &styles, 2 * MIB).unwrap();
+    assert_eq!(
+        workbook.sheets[1]
+            .worksheet
+            .default_font_family
+            .as_deref()
+            .map(str::len),
+        Some(64 * 1024)
+    );
+    assert_eq!(
+        read_within_limit(&content("", &empty_tables(64, "")), &styles, 2 * MIB).err(),
+        Some(resource("model size"))
+    );
+}
+
+#[test]
+fn interned_fonts_are_charged_with_their_keys() {
+    // Styles that differ only in size each intern a font holding the
+    // 64 KiB family, and a key that spells it.
+    let sized = |count: usize| -> String {
+        (0..count)
+            .map(|i| format!(r#"<style:style style:name="s{i}" style:family="table-cell" style:parent-style-name="Default"><style:text-properties fo:font-size="{}pt"/></style:style>"#, i + 1))
+            .collect()
+    };
+    let cells = |count: usize| -> String {
+        let cells: String = (0..count)
+            .map(|i| format!(r#"<table:table-cell table:style-name="s{i}" office:value-type="float" office:value="1"><text:p>1</text:p></table:table-cell>"#))
+            .collect();
+        table(&format!("<table:table-row>{cells}</table:table-row>"))
+    };
+    let family = 64 * 1024;
+    let workbook = read_within_limit(
+        &content("", &cells(4)),
+        &styles_with_default_family(family, &sized(4)),
+        2 * MIB,
+    )
+    .unwrap();
+    assert_eq!(workbook.styles.as_ref().unwrap().fonts.len(), 5);
+    assert_eq!(
+        read_within_limit(
+            &content("", &cells(32)),
+            &styles_with_default_family(family, &sized(32)),
+            2 * MIB,
+        )
+        .err(),
+        Some(resource("model size"))
+    );
+}
+
+#[test]
+fn repeated_column_metadata_is_charged_per_sheet() {
+    // A hidden, outlined column repeated across the whole grid: one map
+    // entry per column per sheet.
+    let columns = r#"<table:table-column-group><table:table-column table:visibility="collapse" table:number-columns-repeated="16384"/></table:table-column-group>"#;
+    let workbook = read_within_limit(
+        &content("", &empty_tables(2, columns)),
+        &styles(""),
+        4 * MIB,
+    )
+    .unwrap();
+    assert_eq!(workbook.sheets[1].worksheet.col_hidden.len(), 16_384);
+    assert_eq!(
+        workbook.sheets[1].worksheet.col_outline_levels.len(),
+        16_384
+    );
+    assert_eq!(
+        read_within_limit(
+            &content("", &empty_tables(16, columns)),
+            &styles(""),
+            4 * MIB
+        )
+        .err(),
+        Some(resource("model size"))
+    );
+}
+
+#[test]
+fn shape_text_runs_are_charged_their_font_copies() {
+    // Short spans in one text box; every run holds its own copy of the
+    // graphic style's 64 KiB family, admitted before it is made.
+    let sheet = |spans: usize| {
+        let spans: String = (0..spans).map(|_| r#"<text:span>x</text:span>y"#).collect();
+        content(
+            r#"<style:style style:name="gr1" style:family="graphic"><style:text-properties style:font-name="F"/></style:style>"#,
+            &table(&format!(
+                r#"<table:table-row><table:table-cell><draw:frame draw:style-name="gr1" svg:width="2cm" svg:height="1cm"><draw:text-box><text:p>{spans}</text:p></draw:text-box></draw:frame></table:table-cell></table:table-row>"#
+            )),
+        )
+    };
+    let styles = styles_with_default_family(64 * 1024, "");
+    let workbook = read_within_limit(&sheet(4), &styles, 4 * MIB).unwrap();
+    let shape = &workbook.sheets[0].worksheet.shape_groups[0].shapes[0];
+    let runs = &shape.text.as_ref().unwrap().paragraphs[0].runs;
+    assert_eq!(runs.len(), 8);
+    assert!(matches!(
+        &runs[0],
+        xlsx_model::ShapeTextRun::Text { font_face: Some(face), .. } if face.len() == 64 * 1024
+    ));
+    assert_eq!(
+        read_within_limit(&sheet(4096), &styles, 4 * MIB).err(),
         Some(resource("model size"))
     );
 }
