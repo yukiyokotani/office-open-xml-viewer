@@ -293,6 +293,32 @@ describe('PptxScrollViewer hidden-slide review fixes', () => {
     v.destroy();
   });
 
+  it('worker mode: setHiddenSlideMode waits for the paint that replaces an in-flight bitmap', async () => {
+    const engine = new FakePptxEngine(3, SLIDE_W_EMU, SLIDE_H_EMU, 'worker', true);
+    const bitmap = vi.spyOn(engine, 'renderSlideToBitmap');
+    const { v } = setup(3, [1], 'show', { engine, viewport: 400 });
+    const settle = async () => { for (let i = 0; i < 20; i++) await Promise.resolve(); };
+    // Slide 1's first bitmap is still in flight when the mode changes.
+    const first = engine.bitmapCalls.find((call) => call.slide === 1);
+    expect(first).toBeDefined();
+    let done = false;
+    void v.setHiddenSlideMode('dim').then(() => { done = true; });
+    await settle();
+    expect(done).toBe(false);
+    // The superseded bitmap lands; the dimmed replacement is dispatched.
+    first?.resolve();
+    await settle();
+    expect(done).toBe(false);
+    const replacement = engine.bitmapCalls.filter((call) => call.slide === 1).at(-1);
+    expect(replacement).not.toBe(first);
+    expect(bitmap.mock.calls.filter((call) => call[0] === 1).at(-1)?.[1]?.dim?.opacity).toBe(0.6);
+    replacement?.resolve();
+    await settle();
+    expect(done).toBe(true);
+    for (const call of engine.bitmapCalls) call.resolve();
+    v.destroy();
+  });
+
   it('progressive skip inspects each slide once over the whole load, and show mode not at all', () => {
     for (const mode of ['skip', 'show'] as const) {
       const engine = new FakePptxEngine(40, SLIDE_W_EMU, SLIDE_H_EMU);
