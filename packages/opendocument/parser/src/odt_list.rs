@@ -207,7 +207,7 @@ enum Kind {
 
 /// One level of a list style.
 #[derive(Clone)]
-struct Level<'a> {
+pub(super) struct Level<'a> {
     kind: Kind,
     start: u32,
     follow: Follow,
@@ -728,9 +728,21 @@ impl<'a> Reader<'a> {
         }
     }
 
-    /// A list style's level definition (§16.31-§16.34).
+    /// A list style's level definition (§16.31-§16.34), resolved once per
+    /// scope, style and level; later uses copy the bounded definition.
     fn list_level(&mut self, style: &str, level: u32) -> Result<Level<'a>, String> {
         self.charge_work(16 + style.len())?;
+        let key = (self.scope, style.to_string(), level);
+        if let Some(cached) = self.level_cache.get(&key) {
+            return Ok(cached.clone());
+        }
+        let resolved = self.resolve_list_level(style, level)?;
+        self.charge_construction(std::mem::size_of::<Level<'a>>() + 2 * style.len() + 2048)?;
+        self.level_cache.insert(key, resolved.clone());
+        Ok(resolved)
+    }
+
+    fn resolve_list_level(&mut self, style: &str, level: u32) -> Result<Level<'a>, String> {
         let fallback = Level {
             kind: Kind::Number {
                 format: Format::Empty,
@@ -751,7 +763,9 @@ impl<'a> Reader<'a> {
         let Some(list) = self.list_style(style) else {
             return Ok(fallback);
         };
-        self.charge_work(list.element.children.len())?;
+        // The level search and its format templates read the whole
+        // captured definition, attribute bytes included.
+        self.charge_work(list.element.nodes())?;
         // The definition of this level, else the nearest lower one (a list
         // nested deeper than its style defines).
         let level_of = |child: &crate::style::Element| {

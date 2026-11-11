@@ -84,7 +84,7 @@ impl Element {
     /// The cost of reading the element: one unit per node and attribute
     /// plus every attribute's bytes, descendants included (a reader parses
     /// the values each time it resolves the group).
-    fn nodes(&self) -> usize {
+    pub fn nodes(&self) -> usize {
         let own = self
             .attributes
             .iter()

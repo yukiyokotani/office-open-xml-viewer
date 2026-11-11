@@ -880,6 +880,10 @@ impl<'a> Reader<'a> {
             }
             base = properties.text_run();
         }
+        // The mark run, and the custom label run when there is one, each own
+        // a copy of the base properties: charged before they are made.
+        let copies = 1 + usize::from(label.is_some());
+        self.charge_construction(copies * run_copy_bytes(&base) + label.map_or(0, str::len))?;
         let mut runs = Vec::new();
         let mut mark = base.clone();
         mark.text = String::new();

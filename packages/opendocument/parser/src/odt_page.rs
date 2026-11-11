@@ -622,11 +622,22 @@ pub(super) fn columns(
                 .get(&(NS_STYLE.to_string(), "style".to_string()))
                 .is_none_or(|style| style != "none")
     });
-    let columns: Vec<&crate::style::Element> = element
+    // The authored columns are collected only when they match the count
+    // (at most MAX_STYLE_COLUMNS of them).
+    let authored = element
         .children
         .iter()
         .filter(|child| child.name == "column")
-        .collect();
+        .count();
+    let columns: Vec<&crate::style::Element> = if authored == count {
+        element
+            .children
+            .iter()
+            .filter(|child| child.name == "column")
+            .collect()
+    } else {
+        Vec::new()
+    };
     if columns.len() == count {
         fn get<'e>(column: &'e crate::style::Element, ns: &str, name: &str) -> Option<&'e str> {
             column
@@ -846,8 +857,29 @@ impl<'a> Reader<'a> {
         }
         let pages = self.pages;
         let body_master = pages.body_master(master).to_string();
-        let mut stories = self.region_stories(&body_master)?;
-        if body_master != master {
+        let base = self.region_stories_cached(&body_master)?;
+        if body_master == master {
+            self.headers.insert(master.to_string(), base.clone());
+            return Ok(base);
+        }
+        // A first-page style shares its body style's stories: they are
+        // built once (cached by that master) and copied here, each copy
+        // charged its build cost.
+        let total = base
+            .costs
+            .iter()
+            .flatten()
+            .fold(0usize, |sum, cost| sum.saturating_add(*cost));
+        self.charge_construction(total)?;
+        let mut stories = MasterStories {
+            headers: base.headers.clone(),
+            footers: base.footers.clone(),
+            title_page: base.title_page,
+            has_left: base.has_left,
+            shown: base.shown,
+            costs: base.costs,
+        };
+        {
             // A first-page style followed by the body style: its own
             // regions are the section's first-page ones.
             // Moved out of the first style's own stories, not copied.
@@ -868,6 +900,17 @@ impl<'a> Reader<'a> {
         }
         let stories = Rc::new(stories);
         self.headers.insert(master.to_string(), stories.clone());
+        Ok(stories)
+    }
+
+    /// One master page's own region stories, built once.
+    fn region_stories_cached(&mut self, master: &str) -> Result<Rc<MasterStories>, String> {
+        if let Some(stories) = self.region_cache.get(master) {
+            return Ok(stories.clone());
+        }
+        let stories = Rc::new(self.region_stories(master)?);
+        self.region_cache
+            .insert(master.to_string(), stories.clone());
         Ok(stories)
     }
 

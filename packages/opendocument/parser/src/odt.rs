@@ -203,6 +203,10 @@ pub fn read(package: &OdfPackage) -> Result<(Document, Vec<OwnedDocumentResource
         resource_bytes: 0,
         repeat_work: 0,
         intrinsic: HashMap::new(),
+        rejected_images: HashSet::new(),
+        section_markers: 0,
+        region_cache: HashMap::new(),
+        level_cache: HashMap::new(),
         contextual_spacing_defined: version != Some("1.2"),
     };
     // The first section: the initial master page, with its page layout's
@@ -353,6 +357,14 @@ struct Reader<'a> {
     construction_bytes: usize,
     /// Source bytes read again for repeated table rows and cells.
     repeat_work: usize,
+    /// Package files that are not pictures (read once, never again).
+    rejected_images: HashSet<String>,
+    /// Section markers among the current story's blocks.
+    section_markers: usize,
+    /// Resolved list levels by scope, list style and level.
+    level_cache: HashMap<(Scope, String, u32), list::Level<'a>>,
+    /// Each master page's own region stories, built once.
+    region_cache: HashMap<String, Rc<page::MasterStories>>,
     /// Each retained picture's intrinsic size by key (scanned once).
     intrinsic: HashMap<String, Option<(f64, f64)>>,
     /// The part of `construction_bytes` charged for package resources
@@ -504,7 +516,11 @@ impl<'a> Reader<'a> {
             .and_then(|p| p.elements.get("columns"))
             .and_then(|elements| elements.first())
         {
-            Some(columns) => page::columns(columns, self.text_width - indent.0 - indent.1)?,
+            Some(columns) => {
+                // Reading the captured columns element is style work.
+                self.charge_work(columns.children.len().saturating_add(1))?;
+                page::columns(columns, self.text_width - indent.0 - indent.1)?
+            }
             None => None,
         };
         let enclosing_indent = self.section_indent;
@@ -560,6 +576,7 @@ impl<'a> Reader<'a> {
         start.block = self.blocks.len();
         self.sections.push(start);
         self.blocks.push(Block::Section(self.sections.len() - 1));
+        self.section_markers += 1;
         Ok(())
     }
 
@@ -571,6 +588,7 @@ impl<'a> Reader<'a> {
         width: f64,
     ) -> Result<Vec<BodyElement>, String> {
         let saved_blocks = std::mem::take(&mut self.blocks);
+        let saved_markers = std::mem::replace(&mut self.section_markers, 0);
         let saved_story = std::mem::replace(&mut self.story, Story::Contained);
         let saved_width = std::mem::replace(&mut self.text_width, width.max(1.0));
         let saved_indent = std::mem::replace(&mut self.section_indent, (0.0, 0.0));
@@ -582,6 +600,7 @@ impl<'a> Reader<'a> {
         let walked = self.walk_blocks(node);
         self.area = enclosing_area;
         let blocks = std::mem::replace(&mut self.blocks, saved_blocks);
+        self.section_markers = saved_markers;
         self.story = saved_story;
         self.text_width = saved_width;
         self.section_indent = saved_indent;
@@ -903,10 +922,10 @@ impl<'a> Reader<'a> {
 
     /// Whether the body already holds content before the current block (a
     /// page style named on the first paragraph starts no new page).
+    /// Whether the current story holds a block other than a section marker
+    /// (O(1): the markers in it are counted as they are pushed).
     fn has_body_content(&self) -> bool {
-        self.blocks
-            .iter()
-            .any(|block| !matches!(block, Block::Section(_)))
+        self.blocks.len() > self.section_markers
     }
 
     /// Text area of the current master page.
@@ -1081,6 +1100,7 @@ impl<'a> Reader<'a> {
                 *value = relative_length(chain, PARAGRAPH, NS_FO, name, relative);
             }
         }
+        self.charge_cascade(chain, LOEXT_GRAPHIC)?;
         let shading = paragraph_fill(cascade, &Cascade::new(chain.to_vec(), LOEXT_GRAPHIC));
         // Borders and padding (§20.183, §20.217): a bordered side keeps its
         // padding as the border's distance from the text; LibreOffice also
@@ -1280,7 +1300,7 @@ impl<'a> Reader<'a> {
         if let Some(mime_type) = self.image_types.get(&path) {
             return Ok(Some((path, mime_type)));
         }
-        if !self.package.contains(&path) {
+        if !self.package.contains(&path) || self.rejected_images.contains(&path) {
             return Ok(None);
         }
         let bytes = self
@@ -1288,6 +1308,8 @@ impl<'a> Reader<'a> {
             .session()
             .run_operation("odf-image", |operation| operation.read_bytes(&path))?;
         let Some((bytes, mime_type)) = picture(bytes, self.construction_left()) else {
+            self.charge_construction(path.len() + 64)?;
+            self.rejected_images.insert(path);
             return Ok(None);
         };
         self.charge_resource(bytes.len() + 3 * path.len() + 96)?;
