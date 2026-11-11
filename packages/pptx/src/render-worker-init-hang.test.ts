@@ -365,35 +365,41 @@ describe('pptx render-worker.ts — init failure never hangs a request (AR4)', S
 });
 
 
+const sourceName = (source: string | ArrayBuffer) => typeof source === 'string' ? source : new TextDecoder().decode(source);
+
 describe('font-source subset readiness in progressive render owners', SUITE_OPTIONS, () => {
   it.each(['default', 'source'] as const)('loads a later subset of an already requested family before publication (%s)', async (variant) => {
     subsetSlides = ['A', 'B'];
     initMock.mockResolvedValue(undefined);
     if (variant === 'source') openSourceMock.mockResolvedValue({ archive: new FakePptxArchive(new Uint8Array()), viewDefaults: {}, close: vi.fn() });
     const a = deferred<void>(), b = deferred<void>();
-    const faces: Array<{ source: string; loadCalls: number }> = [];
+    const faces: Array<{ name: string; loadCalls: number }> = [];
     class SubsetFace {
       loadCalls = 0;
-      constructor(public family: string, public source: string) {}
-      load() { this.loadCalls++; return (this.source.includes('a.woff2') ? a.promise : b.promise).then(() => this); }
+      // The library fetches each subset and registers its bytes (here the
+      // fake body names the file).
+      readonly name: string;
+      constructor(public family: string, source: string | ArrayBuffer) { this.name = sourceName(source); }
+      load() { this.loadCalls++; return (this.name.includes('a.woff2') ? a.promise : b.promise).then(() => this); }
     }
     vi.stubGlobal('FontFace', SubsetFace);
-    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, text: async () => `
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => ({ ok: true, status: 200, url, text: async () => `
       @font-face { font-family: Carlito; src: url(b.woff2); unicode-range: U+0042; }
       @font-face { font-family: Carlito; src: url(a.woff2); unicode-range: U+0041; }
-    ` })));
+    `, arrayBuffer: async () => new TextEncoder().encode(url).buffer })));
     const fake = await loadRenderWorker();
     fake.fonts = { add: (f: FontFace) => faces.push(f as unknown as typeof faces[number]), delete: () => true } as unknown as FontFaceSet;
     fake.onmessage?.({ data: { kind: 'init', wasmUrl: 'x' } } as MessageEvent);
     fake.onmessage?.({ data: { kind: 'parse', id: 71, buffer: new ArrayBuffer(4), resourcePolicy, fonts: [googleFonts()], progressiveLayout: true,
       ...(variant === 'source' ? { source: modelSource, sourceOwnerUrl: './internal/worker-presentation-source.js' } : {}),
     } } as MessageEvent);
-    await settle(() => expect(faces.map(f => f.loadCalls)).toEqual([0, 1]));
+    // Only the subset the first slide needs is fetched and registered.
+    await settle(() => expect(faces.map(f => [f.name.slice(-7), f.loadCalls])).toEqual([['a.woff2', 1]]));
     expect(fake.posted.some((m) => (m as { kind: string }).kind === 'presentationLayoutPartial')).toBe(false);
     a.resolve();
     await settle(() => expect(fake.posted).toContainEqual(expect.objectContaining({ kind: 'presentationLayoutPartial', availableSlides: 1 })));
     fake.onmessage?.({ data: { kind: 'continuePresentationPreflight', forId: 71, availableSlides: 1 } } as MessageEvent);
-    await settle(() => expect(faces.map(f => f.loadCalls)).toEqual([1, 1]));
+    await settle(() => expect(faces.map(f => [f.name.slice(-7), f.loadCalls])).toEqual([['a.woff2', 1], ['b.woff2', 1]]));
     expect(fake.posted).not.toContainEqual(expect.objectContaining({ kind: 'presentationLayoutPartial', availableSlides: 2 }));
     b.resolve();
     await settle(() => expect(fake.posted).toContainEqual(expect.objectContaining({ kind: 'presentationLayoutPartial', availableSlides: 2 })));
@@ -413,17 +419,18 @@ describe('font-source subset readiness in progressive render owners', SUITE_OPTI
     const faces: Array<{ source: string; status: string }> = [];
     class SubsetFace {
       status = 'unloaded';
-      constructor(public family: string, public source: string) {}
+      readonly source: string;
+      constructor(public family: string, source: string | ArrayBuffer) { this.source = sourceName(source); }
       load() { this.status = 'loaded'; return Promise.resolve(this); }
     }
     vi.stubGlobal('FontFace', SubsetFace);
     vi.stubGlobal('OffscreenCanvas', class { constructor(_width: number, _height: number) {} });
     // Same stylesheet as above: core caches it per URL across module resets.
     // Demand for 'A' plus the ii/M/space sentinels excludes only U+0042.
-    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, text: async () => `
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => ({ ok: true, status: 200, url, text: async () => `
       @font-face { font-family: Carlito; src: url(b.woff2); unicode-range: U+0042; }
       @font-face { font-family: Carlito; src: url(a.woff2); unicode-range: U+0041; }
-    ` })));
+    `, arrayBuffer: async () => new TextEncoder().encode(url).buffer })));
     const fake = await loadRenderWorker();
     fake.fonts = { add: (f: FontFace) => faces.push(f as unknown as typeof faces[number]), delete: () => true } as unknown as FontFaceSet;
     const send = (data: unknown) => fake.onmessage?.({ data } as MessageEvent);

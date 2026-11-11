@@ -51,6 +51,8 @@ const textSlide = (index: number, text: string): Slide => ({ index, slideNumber:
 describe('progressive PPTX font-source loading', () => {
   it('widens a family\'s substitution scope when a later slide proves its script', async () => {
     vi.stubGlobal('FontFace', FakeFontFace);
+    // The face file the library fetches itself.
+    vi.stubGlobal('fetch', async (url: string) => ({ ok: true, status: 200, url, arrayBuffer: async () => new Uint8Array(16).buffer }));
     try {
       const sources = [fontFiles({
         faces: [{ family: 'Served', url: 'https://app.example/served.woff2' }],

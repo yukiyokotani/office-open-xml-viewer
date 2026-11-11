@@ -108,6 +108,8 @@ export function createLayoutServices(
     readonly embeddedRoutes?: readonly LoadedEmbeddedFontRoute[];
     readonly officeRoutes?: readonly OfficeFontFallbackRoute[];
     readonly sourceFonts?: Readonly<{ names: readonly string[]; loaded: LoadedFontSources }>;
+    /** Measured served/application face lines (served-face-lines.ts). */
+    readonly servedFaceLines?: import('./served-face-lines.js').PreparedServedFaceLines;
     readonly installedSubstituteFamilies?: readonly string[];
     readonly installedFamilies?: readonly string[];
     readonly allowFootnoteContinuation?: boolean;

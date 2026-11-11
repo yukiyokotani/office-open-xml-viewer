@@ -35,18 +35,37 @@ export function measureLocalFontNormalLine(
   emPx: number,
   ownerDocument: Document | null,
 ): LocalFontNormalLine | null {
-  if (face.status !== 'loaded' || !Number.isFinite(emPx) || emPx <= 0
-    || !ownerDocument?.body || ownerDocument.fonts !== fontSet) return null;
+  if (face.status !== 'loaded') return null;
   const cached = measuredLines.get(face);
   if (cached?.emPx === emPx) return cached.metric;
+  const metric = measureFontFaceNormalLine(face, face.weight, face.style, fontSet, context, emPx, ownerDocument);
+  measuredLines.set(face, { emPx, metric });
+  return metric;
+}
+
+/** {@link measureLocalFontNormalLine} for an explicit weight/style tuple of
+ * the face's family (a variable face measured at one instance, or a tuple
+ * the family synthesizes). Not cached: callers own their reuse. The family
+ * must resolve to `face` alone for the measurement to describe it. */
+export function measureFontFaceNormalLine(
+  face: FontFace,
+  weight: string | number,
+  style: string,
+  fontSet: FontFaceSet,
+  context: CanvasFontBoxProbeContext,
+  emPx: number,
+  ownerDocument: Document | null,
+): LocalFontNormalLine | null {
+  if (face.status !== 'loaded' || !Number.isFinite(emPx) || emPx <= 0
+    || !ownerDocument?.body || ownerDocument.fonts !== fontSet) return null;
   // Engines may clamp a large requested size, so a successful measurement does
   // not prove the requested scale. Accept an em only when the box measured at
   // half that size scales linearly; otherwise halve and retry, and decline
   // (catalog fallback) when no measured scale is linear.
   let result: LocalFontNormalLine | null = null;
   for (let em = emPx, attempt = 0; attempt < LINEAR_PROBE_ATTEMPTS; em /= 2, attempt++) {
-    const full = measureNormalBox(face, context, em, ownerDocument);
-    const half = full && measureNormalBox(face, context, em / 2, ownerDocument);
+    const full = measureNormalBox(face.family, weight, style, context, em, ownerDocument);
+    const half = full && measureNormalBox(face.family, weight, style, context, em / 2, ownerDocument);
     if (!full || !half) break;
     if (scalesLinearly(full, half)) {
       result = Object.freeze({
@@ -57,7 +76,6 @@ export function measureLocalFontNormalLine(
       break;
     }
   }
-  measuredLines.set(face, { emPx, metric: result });
   return result;
 }
 
@@ -67,10 +85,11 @@ const LINEAR_PROBE_ATTEMPTS = 4;
 interface NormalBox { readonly height: number; readonly ascent: number; readonly descent: number }
 
 function measureNormalBox(
-  face: FontFace, context: CanvasFontBoxProbeContext, emPx: number, ownerDocument: Document,
+  faceFamily: string, weight: string | number, style: string,
+  context: CanvasFontBoxProbeContext, emPx: number, ownerDocument: Document,
 ): NormalBox | null {
-  const family = quoteCssFontFamily(face.family);
-  const font = `${face.style} ${face.weight} ${emPx}px ${family}`;
+  const family = quoteCssFontFamily(faceFamily);
+  const font = `${style} ${weight} ${emPx}px ${family}`;
   // The strut lives in a closed shadow tree so application stylesheets
   // (including !important rules) cannot restyle it; the computed family is
   // checked as well, so the DOM height belongs to the face Canvas measures.

@@ -915,11 +915,16 @@ describe('fontResolver bridge: the page fetches resolver URLs', () => {
     });
     const source = fontResolver(() => [...URL_FACES(), { family: 'Private Face', url: 'data:font/woff2;base64,AAAA', style: 'italic' }]);
 
-    // Main mode is unchanged: the browser loads the URLs (FontFace sources).
+    // Main mode fetches the same URLs in its own realm (the same requests as
+    // worker mode, which the page makes for the worker).
     const { session: direct, set: directSet } = mainSession([source]);
     await direct.ensure(demand(['Private Face']));
-    expect(directSet.faces.map((face) => face.bytes)).toEqual([0, 0, 0]);
-    expect(calls).toHaveLength(0);
+    expect(directSet.faces.map((face) => face.bytes)).toEqual([40, 70, 0]);
+    expect(calls.map((call) => [call.url, call.init?.credentials])).toEqual([
+      ['https://fonts.app.example/private-400.woff2', 'same-origin'],
+      ['https://fonts.app.example/private-700.woff2', 'same-origin'],
+    ]);
+    calls.length = 0;
     direct.release();
 
     const link = bridge([source]);
