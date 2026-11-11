@@ -8,7 +8,8 @@ import {
   symbolTextToUnicodeSegments,
   type SymbolFaceEncoding,
 } from './symbol-font';
-import { createSymbolFaceOracle, measureSymbolFaceEncoding, symbolCmapEncoding, symbolEncodingOfFaces } from './symbol-face';
+import { createSymbolFaceOracle, measureSymbolFaceEncoding, symbolCmapEncoding } from './symbol-face';
+import { symbolEncodingOfFaces } from './symbol-face-sources';
 import { ADOBE_SYMBOL_UNICODE } from './symbol-encoding';
 import { symbolFixtureFontBytes } from '../testing/symbol-font-fixture';
 

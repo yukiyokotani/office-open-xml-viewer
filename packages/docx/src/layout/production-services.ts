@@ -11,7 +11,7 @@ import {
   canvasFontString,
   createSymbolFaceOracle,
   fontFaceWeightCovers,
-  symbolEncodingOfFaces,
+  symbolFaceKey,
   type SymbolFaceEncoding,
 } from '@silurus/ooxml-core';
 import { quoteCssFontFamily } from '@silurus/ooxml-core/internal/css-font-family';
@@ -468,13 +468,12 @@ export function createProductionTextLayoutService(
       // Symbol-encoded text (core symbol-font.ts) is judged against the face
       // each resolution selects: the cmap of bytes this document holds
       // (embedded faces; served faces whose tables were read, core
-      // symbolEncodingOfFaces), else a measurement of that face in this very
+      // LoadedFontSources.symbolEncodings), else a measurement of that face in this very
       // measuring context. One oracle and one held-encoding memo per service,
       // so new font resources (a new service) re-judge.
       const oracle = createSymbolFaceOracle(context, 'sans-serif', options.symbolProbeOwner);
       const servedEncoding = (family: string, weight: number, style: 'normal' | 'italic'): SymbolFaceEncoding | undefined =>
-        symbolEncodingOfFaces((options.sourceFonts?.loaded.faces ?? []).filter((face) =>
-          normalizedFaceFamily(face.family) === normalizedFaceFamily(family)), weight, style);
+        options.sourceFonts?.loaded.symbolEncodings?.get(symbolFaceKey(family, weight, style));
       const held = new Map<string, SymbolFaceEncoding | undefined>();
       const heldEncoding = (resolution: import('./font-service.js').FontResolution): SymbolFaceEncoding | undefined => {
         const key = `${resolution.source}|${resolution.resolvedFamily}|${resolution.weight}|${resolution.style}`;

@@ -236,7 +236,6 @@ export {
   createSymbolMonochromeProbe,
   measureSymbolFaceEncoding,
   symbolCmapEncoding,
-  symbolEncodingOfFaces,
   symbolFaceKey,
   type SymbolFaceOracle,
   type SymbolFaceSelection,

@@ -1,4 +1,4 @@
-import { isSymbolFontFamily, symbolFontToUnicode, symbolTextToUnicodeSegments, SYMBOL_FACE_UNICODE } from '@silurus/ooxml-core';
+import { isSymbolFontFamily, symbolTextToUnicodeSegments } from '@silurus/ooxml-core';
 import type { NumberingInfo, TabStop } from '../types.js';
 import { wordNumberingSpaceSuffixUsesArial, wordNumberingSuffixAcceptsCoincidentListTab } from './line-compatibility.js';
 import { nextTabStop, type TextLayoutService, type TextShapeResult } from './text.js';
@@ -272,7 +272,8 @@ export function resolveNumberingMarkerGeometry(
   // generic route), like a converted run segment; the codes the face keeps
   // are shaped in the marker's slots, and the pieces are joined in order.
   // A face known to draw no symbol code (missing, or Unicode-encoded like
-  // Apple's Symbol) has no symbol cmap, so converted text keeps its slots,
+  // Apple's Symbol) has no symbol cmap, so converted text keeps its slots
+  // when they all name that face,
   // except an emoji-capable one: its monochrome proof is for the generic route.
   const markerFamily = numbering.fontFamily ?? markerInput.fonts.ascii ?? null;
   const slots = [markerInput.fonts, markerInput.themeFonts].flatMap((fonts) => fonts
@@ -294,11 +295,15 @@ export function resolveNumberingMarkerGeometry(
     : service.symbolText?.(symbolRequest) ?? symbolTextToUnicodeSegments(numbering.text, markerFamily);
   // Pieces are joined in logical order, which is the visual order only in a
   // left-to-right paragraph. In a right-to-left one (or an unknown direction)
-  // a mixed marker is shaped as one run, converted as for a face that draws
-  // no code, since Canvas bidi orders a single run (rare: a symbol marker of
-  // several codes its face draws only in part).
+  // a marker stays one run, as Canvas bidi orders a single run: converted
+  // text with plain characters (".") is shaped as converted; a marker that
+  // keeps some symbol codes in its face keeps all its authored codes in the
+  // marker slots, so the converted ones stay unconverted there (a documented
+  // limitation of a rare case: several codes the face draws only in part).
+  const keepsSymbolCodes = judged?.some((part) => !part.mapped && /[\uF020-\uF0FF]/u.test(part.text)) === true;
   const markerSegments = judged && judged.length > 1 && input.baseRtl !== false
-    ? [{ text: symbolFontToUnicode(numbering.text, markerFamily, { encoding: SYMBOL_FACE_UNICODE }), mapped: true }]
+    ? [keepsSymbolCodes ? { text: numbering.text, mapped: false }
+      : { text: judged.map((part) => part.text).join(''), mapped: true }]
     : judged;
   const markerText = numbering.picBulletImagePath
     ? ''
@@ -310,9 +315,13 @@ export function resolveNumberingMarkerGeometry(
     themeFontPresence: undefined,
   };
   const markerParts = markerSegments ?? [{ text: markerText, mapped: false }];
+  // The judged face is the marker slots' family only when they name one family:
+  // otherwise converted text (say "(") could take another slot's symbol face.
+  const uniformSlots = new Set(slots.filter(Boolean).map((family) => family!.trim().toLowerCase())).size <= 1;
   const partLayouts = markerText
     ? markerParts.map((part) => shapeNumberingMarkerText(
-        part.mapped && !(part.unicodeFace && !part.text.includes('\uFE0E')) ? convertedInput : markerInput, part.text, 1, service, clusterGeometry,
+        part.mapped && !(part.unicodeFace && uniformSlots && !part.text.includes('\uFE0E'))
+          ? convertedInput : markerInput, part.text, 1, service, clusterGeometry,
       ))
     : [];
   const markerLayout = partLayouts.length === 0 || partLayouts.some((layout) => !layout)

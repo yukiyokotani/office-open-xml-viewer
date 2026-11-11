@@ -7,7 +7,6 @@ import {
   type OfficeFontFallbackRequest,
   isSymbolFontFamily,
   symbolCmapEncoding,
-  symbolEncodingOfFaces,
   symbolFaceKey,
   type SymbolFaceEncoding,
 } from '@silurus/ooxml-core';
@@ -32,28 +31,14 @@ export interface LoadedPptxEmbeddedFonts {
  * Symbol-font faces whose bytes this presentation holds, by
  * {@link symbolFaceKey}: embedded faces (one per style slot, §19.2.1.9), and
  * served families whose faces CSS matching can pick for a tuple all have read
- * cmaps (core symbolEncodingOfFaces). The renderer prefers these cmap
+ * cmaps (LoadedFontSources.symbolEncodings). The renderer prefers these cmap
  * readings over measuring (renderer symbolFaceSegments).
  */
 export function pptxSymbolFaceEncodings(
   embedded: ReadonlyMap<string, SymbolFaceEncoding> | undefined,
   served: LoadedFontSources | undefined,
 ): ReadonlyMap<string, SymbolFaceEncoding> | undefined {
-  const out = new Map(embedded ?? []);
-  const byFamily = new Map<string, LoadedFontSources['faces'][number][]>();
-  for (const face of served?.faces ?? []) {
-    const key = face.family.trim().toLowerCase();
-    byFamily.set(key, [...(byFamily.get(key) ?? []), face]);
-  }
-  for (const [family, faces] of byFamily) {
-    if (!faces.some((face) => face.symbolEncoding)) continue;
-    for (const weight of [400, 700]) {
-      for (const style of ['normal', 'italic'] as const) {
-        const encoding = symbolEncodingOfFaces(faces, weight, style);
-        if (encoding) out.set(symbolFaceKey(family, weight, style), encoding);
-      }
-    }
-  }
+  const out = new Map([...(embedded ?? []), ...(served?.symbolEncodings ?? [])]);
   return out.size > 0 ? out : undefined;
 }
 
