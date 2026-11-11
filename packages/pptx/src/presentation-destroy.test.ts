@@ -87,7 +87,8 @@ function installFontFaceSet(): { added: FakeFace[] } {
   };
   G.FontFace = FakeFontFace;
   G.document = { fonts: set };
-  G.fetch = async () => ({ ok: true, text: async () => CSS });
+  // The stylesheet, and the face files the library fetches itself.
+  G.fetch = async (url: string) => ({ ok: true, status: 200, url, text: async () => CSS, arrayBuffer: async () => new Uint8Array(16).buffer });
   delete G.self;
   return { added };
 }
@@ -278,7 +279,7 @@ describe('PptxPresentation.destroy() — rejects in-flight worker requests', () 
     G.Worker = SilentWorker;
     G.location = { href: 'http://localhost/' };
     installFontFaceSet();
-    const fetch = vi.fn(async () => ({ ok: true, text: async () => CSS }));
+    const fetch = vi.fn(async () => ({ ok: true, text: async () => CSS, arrayBuffer: async () => new Uint8Array(16).buffer }));
     G.fetch = fetch;
     vi.spyOn(
       PptxPresentation.prototype as unknown as {
@@ -415,13 +416,17 @@ it.each(['ordinary', 'selected-source'] as const)('filters ordinary Window prelo
   G.Worker = SilentWorker;
   G.location = { href: 'http://localhost/' };
   const { added } = installFontFaceSet();
-  G.fetch = vi.fn(async () => ({ ok: true, text: async () => `
+  G.fetch = vi.fn(async (url: string) => ({ ok: true, status: 200, url, text: async () => `
     @font-face { font-family: Carlito; src: url(b.woff2); unicode-range: U+0042; }
     @font-face { font-family: Carlito; src: url(a.woff2); unicode-range: U+0041; }
-  ` }));
+  `, arrayBuffer: async () => new TextEncoder().encode(url).buffer }));
   const loads: string[] = [];
   G.FontFace = class {
-    constructor(public family: string, public source: string) {}
+    readonly source: string;
+    // A fetched subset is registered from its bytes (the fake body names it).
+    constructor(public family: string, source: string | ArrayBuffer) {
+      this.source = typeof source === 'string' ? source : new TextDecoder().decode(source);
+    }
     load() { loads.push(this.source); return Promise.resolve(this); }
   };
   vi.spyOn(PptxPresentation.prototype as unknown as {
@@ -441,7 +446,8 @@ it.each(['ordinary', 'selected-source'] as const)('filters ordinary Window prelo
   const presentation = await PptxPresentation.load(new ArrayBuffer(0), { fonts: [googleFonts()],
     ...(variant === 'selected-source' ? { legacyPpt: source } : {}),
   });
-  expect(added).toHaveLength(2);
+  // Only the subset the demanded scalars cover is fetched and registered.
+  expect(added).toHaveLength(1);
   // The family presence probe loads local() sources first; of the source
   // faces only the subset the demanded scalars cover loads.
   expect(loads.filter((source) => !source.startsWith('local('))).toEqual([expect.stringContaining('a.woff2')]);

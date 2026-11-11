@@ -47,6 +47,11 @@ import { prepareMathRuns, renderLayoutSourceToCanvas } from './renderer';
 import { createLayoutServices, nativeRouteLineRequests } from './layout-runtime.js';
 import { completeDocxFontPresence, declaredFontSubstitutions, docxFontFamilyPlan, docxOfficeFontFallbackRequests } from './font-plan.js';
 import { loadDocxFontSources, type DocxLoadedFontSources } from './font-source-load.js';
+import {
+  prepareServedFaceLines,
+  servedFaceLineRequests,
+  type ServedFaceLineMeasurement,
+} from './served-face-lines.js';
 import { assertFontSourceDescriptors, chartFontSubstitutions, WorkerFontResolverClient, type FontSource } from '@silurus/ooxml-core/internal/font-sources';
 import { loadEmbeddedFonts } from './embedded-fonts';
 import type {
@@ -178,6 +183,9 @@ function getImage(path: string, mimeType: string): Promise<Blob> {
 }
 
 const hostFontMeasurements = new Map<number, (measurements: HostFontLineMeasurement[]) => void>();
+const servedFaceMeasurements = new Map<number, (measurements: ServedFaceLineMeasurement[]) => void>();
+/** Aborted when a parse is superseded (served-face-lines.ts probe waits). */
+let servedFaceProbe = new AbortController();
 const nativeRouteMeasurements = new Map<number, (lines: (NativeRouteNormalLine | null)[]) => void>();
 
 self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest | WorkerSvgDecodeResponse>) => {
@@ -209,6 +217,11 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest | WorkerSvgDecod
     hostFontMeasurements.delete(req.forId);
     return;
   }
+  if (req.type === 'servedFaceLinesMeasured') {
+    servedFaceMeasurements.get(req.forId)?.(req.measurements);
+    servedFaceMeasurements.delete(req.forId);
+    return;
+  }
   if (req.type === 'nativeRouteLinesMeasured') {
     nativeRouteMeasurements.get(req.forId)?.(req.lines);
     nativeRouteMeasurements.delete(req.forId);
@@ -231,6 +244,11 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest | WorkerSvgDecod
       fontResolverClient.reset();
       for (const resolve of hostFontMeasurements.values()) resolve([]);
       hostFontMeasurements.clear();
+      for (const resolve of servedFaceMeasurements.values()) resolve([]);
+      servedFaceMeasurements.clear();
+      // A superseded parse's probe waits end and release their registrations.
+      servedFaceProbe.abort();
+      servedFaceProbe = new AbortController();
       // A superseded parse's measurement reply is discarded by the host.
       for (const resolve of nativeRouteMeasurements.values()) resolve([]);
       nativeRouteMeasurements.clear();
@@ -440,6 +458,21 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest | WorkerSvgDecod
           mathResources: preparedMath?.records,
           mathDrawables: preparedMath?.drawables,
         };
+        // Served faces without readable tables (served-face-lines.ts): the
+        // page measures them; this realm keeps their private families.
+        const servedRequests = loadedSources ? servedFaceLineRequests(loadedSources.loaded) : [];
+        const servedMeasurements = servedRequests.length > 0
+          ? await new Promise<ServedFaceLineMeasurement[]>(resolve => {
+              servedFaceMeasurements.set(id, resolve);
+              post({ type: 'measureServedFaceLines', forId: id, requests: servedRequests });
+            })
+          : [];
+        if (requestedGeneration !== parseGeneration) throw new Error('render-worker parse was superseded');
+        const servedFaceLines = await prepareServedFaceLines(
+          loadedSources?.loaded, activeFontSet(), [], servedMeasurements, servedFaceProbe.signal,
+        );
+        officeFaces = [...officeFaces, ...servedFaceLines.faces];
+        if (requestedGeneration !== parseGeneration) throw new Error('render-worker parse was superseded');
         let nativeRouteMetrics: ReturnType<typeof admitDocxNativeRouteLines> | undefined;
         const nativeRouteLines = await pendingNativeRouteLines;
         officeFaces = [...officeFaces, ...nativeSentinels];
@@ -447,7 +480,7 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest | WorkerSvgDecod
           nativeRouteMetrics = admitDocxNativeRouteLines(nativeRouteLines, activeFontSet());
         }
         if (requestedGeneration !== parseGeneration) throw new Error('render-worker parse was superseded');
-        const layoutServices = createLayoutServices(source, { ...serviceOptions, nativeRouteMetrics });
+        const layoutServices = createLayoutServices(source, { ...serviceOptions, servedFaceLines, nativeRouteMetrics });
         const requestedDoc = retainRenderWorkerDocumentLayout(
           source,
           layoutServices,

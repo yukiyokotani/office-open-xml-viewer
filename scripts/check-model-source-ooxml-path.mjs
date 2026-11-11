@@ -145,6 +145,7 @@ function ooxmlAwaits(node, code, pptxFontOwnerRefactor = false) {
 }
 
 const NATIVE_ROUTE_BARRIER = 'nativeRoutesPending';
+const SERVED_FACE_BARRIER = 'prepareServedFaceLines';
 
 export function auditAwaitCase(file, name, previous, current) {
   const pptxFontOwnerRefactor = file === 'packages/pptx/src/presentation.ts' && name === 'load';
@@ -160,6 +161,19 @@ export function auditAwaitCase(file, name, previous, current) {
     const index = candidate.indexOf(NATIVE_ROUTE_BARRIER);
     if (index > 0 && candidate[index - 1] === 'prepareMathRuns'
       && candidate.lastIndexOf(NATIVE_ROUTE_BARRIER) === index) {
+      candidate = [...candidate.slice(0, index), ...candidate.slice(index + 1)];
+    }
+  }
+  // DOCX served-face line metrics add one bounded, abortable font-preparation
+  // barrier (measuring served or application faces whose tables cannot be
+  // read) directly after the native route barrier. Accept exactly that one
+  // insertion at exactly that position while the merge base predates it; any
+  // other addition, removal or reordering still fails.
+  if (file === 'packages/docx/src/document.ts' && name === 'load'
+    && !baseline.includes(SERVED_FACE_BARRIER)) {
+    const index = candidate.indexOf(SERVED_FACE_BARRIER);
+    if (index > 0 && candidate[index - 1] === NATIVE_ROUTE_BARRIER
+      && candidate.lastIndexOf(SERVED_FACE_BARRIER) === index) {
       candidate = [...candidate.slice(0, index), ...candidate.slice(index + 1)];
     }
   }

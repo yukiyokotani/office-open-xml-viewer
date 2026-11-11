@@ -47,9 +47,10 @@ describe('buildContentSecurityPolicy', () => {
     expect(fontSrc).toContain('https://fonts.gstatic.com');
     expect(fontSrc).not.toContain('googleapis');
 
-    // Font binaries are fetched by the font engine, never by fetch().
+    // The library fetch()es the font subsets it lays out with → connect-src.
     const connectSrc = csp.match(/connect-src ([^;]*)/)?.[1] ?? '';
-    expect(connectSrc).not.toContain('gstatic');
+    expect(connectSrc).toContain('https://fonts.gstatic.com');
+    expect(connectSrc.match(/https:\/\/[^ ]+/g)).toEqual(['https://fonts.googleapis.com', 'https://fonts.gstatic.com']);
     expect(csp).toContain(`media-src ${CSP_SOURCE} blob:`);
   });
 });

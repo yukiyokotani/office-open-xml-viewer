@@ -228,7 +228,8 @@ application. The worker never fetches the URLs the function returns: once a
 family is claimed, the page fetches its `http(s)` and `blob:` faces and sends
 the worker the bytes, so cookies, HTTP authentication and Referer checks see
 the page in both modes. The page fetches only URLs the function returned for
-that document. In main mode the browser loads the URLs, as before.
+that document. In main mode the library fetches the same URLs itself, with
+the same credentials, so both modes send the same requests.
 
 The `demand` argument contains:
 
@@ -240,11 +241,10 @@ The `demand` argument contains:
 Return every face you have for each family you answer: all weights, styles
 and `unicode-range` subsets. A family is resolved once per document, so a face
 you leave out is not asked for again. The renderer picks the weight and style
-of each run. In main mode it loads only the `unicode-range` subsets of the
-characters it paints; in worker mode the page fetches every `http(s)` and
-`blob:` face of a claimed family when the family is claimed, as for
-`credentials: 'omit'` sources, so a resolver serving many subsets per family
-costs more there. A resolver may answer only some families. With `substitutes`, a
+of each run. In both modes the library fetches every `http(s)` and `blob:`
+face of a claimed family when the family is claimed, as for
+`credentials: 'omit'` sources, so a resolver that serves many
+`unicode-range` subsets per family costs one request per subset. A resolver may answer only some families. With `substitutes`, a
 family may also be answered with faces of its substitute's `use` family.
 
 The function returns `FontFaceDeclaration` objects with the same fields as
@@ -343,8 +343,18 @@ for the Noto CJK families.
   This applies to stylesheets and font files, as with Google Fonts today.
 - `fontCssApi()`, `fontCss()` and `fontFiles()` take `credentials`:
   - `'same-origin'` (the default): stylesheets are fetched with it, and font
-    files are loaded by the browser, which also sends credentials to the same
-    origin only (the CSS font-loading rules).
+    files are loaded with the same rule (credentials to the same origin only,
+    as CSS font loading does). Font files (`fontCssApi()` and `fontCss()`
+    faces, and `fontFiles()` `url` faces) are fetched by the library itself
+    (`fetch()`, CORS mode) when the document's text first needs them,
+    including a subset that only a later step needs (a later PPTX slide or
+    XLSX sheet), so that layout can read each face's own line metrics. The
+    face is then registered from the fetched bytes, so each file is
+    downloaded once. A subset is fetched only when the text needs it, or
+    when its `unicode-range` overlaps one that is needed (overlapping faces
+    are registered together to keep their CSS order). Documents in the same
+    realm share each fetched file while any of them is open. These bytes
+    count like `data` faces (see [Resource limits](#resource-limits)).
   - `'omit'`: no cookies or HTTP authentication are sent at all. The library
     fetches the stylesheet and the font files itself, with
     `credentials: 'omit'`. It fetches every face of a claimed family when the
@@ -354,10 +364,11 @@ for the Noto CJK families.
     [Resource limits](#resource-limits)).
   - `'include'` and custom headers are not supported.
 - `googleFonts()` takes no `credentials`: its requests go to another origin,
-  which receives no cookies with the default.
-- `fontResolver()` URLs are loaded with the CSS font-loading rules: by the
-  browser in main mode, and by the page with `credentials: 'same-origin'` in
-  worker mode.
+  which receives no cookies with the default. Its font files are fetched by
+  the library like those of `fontCssApi()`.
+- `fontResolver()` URLs are fetched by the library with the CSS
+  font-loading rules (`credentials: 'same-origin'`, CORS): in the page in
+  main mode, and by the page for the worker in worker mode.
 - Cookies are never sent to another origin. For an authenticated service on
   another origin, use `fontResolver` and return `data` bytes or a signed URL.
 - A hosted source receives the end user's IP address and User-Agent.
@@ -368,12 +379,19 @@ for the Noto CJK families.
   `connect-src`. The library downloads the stylesheet with `fetch()`; it does
   not inject a `<link>`.
 - Font file origins need `font-src`. Add `data:` or `blob:` to `font-src` when
-  you use those URLs. Font files the library downloads itself (a source with
-  `credentials: 'omit'`, and resolver URLs in worker mode) need `connect-src`
-  as well.
+  you use those URLs. Font files the library downloads itself need
+  `connect-src` as well. That is every font file of `googleFonts()`,
+  `fontCssApi()`, `fontCss()` and `fontFiles()` (`url` faces), and every
+  resolver URL. So list a font file host under both directives.
+- In DOCX, a face whose metric tables the library cannot read is registered
+  once more under a private family to measure its line height in the page:
+  WOFF2 bytes where the browser has no native Brotli `DecompressionStream`,
+  and an inline `data:` URL face. This second registration reuses the same
+  bytes or `data:` URL, so it sends no request.
 - `data` buffers are not fetched, so they need no `font-src` entry.
-- For Google Fonts, the policy is `connect-src https://fonts.googleapis.com`
-  and `font-src https://fonts.gstatic.com`. A mirror uses its own two origins.
+- For Google Fonts, the policy is
+  `connect-src https://fonts.googleapis.com https://fonts.gstatic.com` and
+  `font-src https://fonts.gstatic.com`. A mirror uses its own two origins.
 
 ### Resolver buffers and timing
 
@@ -395,15 +413,24 @@ for the Noto CJK families.
      keep their host fallback for that step.
 
   A step can therefore take up to about 30 s, for example 14 s of resolution
-  followed by 14 s of face loading.
+  followed by 14 s of face loading. In DOCX, measuring a face whose tables
+  cannot be read (see [Content Security Policy](#content-security-policy))
+  waits at most another 15 s; a face not measured by then keeps the Canvas
+  font box. Destroying the document ends that wait.
 - In worker mode the page owns the deadline of a resolver call. The worker
   sends the time left of its resolution deadline with each request.
-- A face file the library fetches itself (a resolver face in worker mode, a
-  source with `credentials: 'omit'`) is fetched in the face-loading phase,
+- A face file the library fetches itself (see
+  [Network, CORS and cookies](#network-cors-and-cookies)) is
+  fetched in the face-loading phase,
   within its deadline, at most six at a time. A face that cannot be fetched
   fails like a face that cannot load: it is left out with a `console.warn`,
   and the family is not passed to another source or substitute. For XLSX in
   worker mode, the viewer and the worker share each fetch and its outcome.
+  Documents open in the same realm share each face file's outcome too, since
+  they paint from one set of registered faces: while a document that could
+  not fetch a face is open, another document does not retry it (and a
+  document whose own request failed uses the file another one holds). A
+  document opened after those have closed retries.
 - A resolver is called only for families that no earlier call answered and no
   live cache entry covers. Within a document that means once per family. For
   XLSX in worker mode, the
@@ -435,11 +462,20 @@ up front make the factory throw immediately. Otherwise the error rejects
 document's later font loads reject too. A limit breach means a misconfigured
 or hostile source, not a network problem.
 
-The library does not count the bytes of `url` faces the browser downloads.
-Font files the library downloads itself (see
+The library does not count the bytes of `url` faces the browser downloads
+(only inline `data:` URLs are left to the browser, and those count by their
+decoded size). Font files the library downloads itself (see
 [Network, CORS and cookies](#network-cors-and-cookies)) count like `data`
-faces. A document whose painted text has more than 65,536 distinct
-characters loads every subset; that is not an error.
+faces, so a library-fetched face file over 30 MiB fails with
+`font-source-limit`. Reading a WOFF or WOFF2 file's metric tables inflates
+only those tables (for WOFF2, the compressed stream up to the last of them).
+Everything one file's decode inflates and allocates is held to 120 MiB in
+total, checked against the declared sizes before any buffer is allocated,
+and at most two files are decoded at a time per realm. A file beyond that,
+or one whose table directory repeats a tag, keeps its face but not its
+tables (DOCX then measures it); this is not an error. A document whose
+painted text has more than 65,536 distinct characters loads every subset;
+that is not an error.
 
 ## Licences
 
