@@ -143,7 +143,8 @@ export interface PptxViewerOptions extends Pick<RenderOptions, 'width' | 'dpr' |
    *   the next shown slide after it, else the nearest shown slide before it;
    *   `findText` returns no matches on hidden slides. Absolute indices are
    *   unchanged. If every slide is hidden there is nothing to skip to, and the
-   *   requested slide is drawn as in `'show'`.
+   *   deck behaves as in `'show'`: the requested slide is drawn and `findText`
+   *   matches every slide.
    * - `'dim'`: drawn under a translucent overlay (PowerPoint thumbnail look).
    *
    * Named to match the {@link PptxViewer.hiddenSlideMode} getter and
@@ -218,6 +219,9 @@ export class PptxViewer implements ZoomableViewer {
   private currentSlide = 0;
   private _renderedSlide = -1;
   private _hiddenMode: HiddenSlideMode;
+  /** Whether the running find leaves hidden slides out: `'skip'` with at least
+   *  one shown slide. Decided once per find, after layout completes. */
+  private _findSkipsHidden = false;
   private handle: PresentationHandle | null = null;
   private readonly _mode: 'main' | 'worker';
   private readonly renderDispatcher: StaticCanvasRenderDispatcher;
@@ -321,8 +325,9 @@ export class PptxViewer implements ZoomableViewer {
     this._find = new PptxFindController(
       () => this.slideCount,
       (slide) => this._collectSlideRuns(slide),
-      // 'skip' never draws a hidden slide, so find neither scans nor matches it.
-      (slide) => !(this._hiddenMode === 'skip' && this.engine?.isHidden(slide)),
+      // 'skip' never draws a hidden slide, so find neither scans nor matches
+      // it, unless every slide is hidden and the deck behaves as in 'show'.
+      (slide) => !(this._findSkipsHidden && this.engine?.isHidden(slide)),
     );
     if (borrowedPresentation) this._bindLayoutPresentation(borrowedPresentation);
   }
@@ -964,7 +969,7 @@ export class PptxViewer implements ZoomableViewer {
    * `{ caseSensitive: true }` for an exact match.
    *
    * Scans every slide, except that with `hiddenSlideMode: 'skip'` hidden slides
-   * are neither scanned nor matched (each scanned slide is rendered once
+   * are neither scanned nor matched unless every slide is hidden (each scanned slide is rendered once
    * offscreen to read its text; the visible slide reuses its on-screen render). IX6 — works in BOTH `mode: 'main'` and
    * `mode: 'worker'`: in worker mode each slide's run geometry is collected
    * off-thread and shipped back, so find returns the same matches on the same
@@ -988,6 +993,7 @@ export class PptxViewer implements ZoomableViewer {
       );
     }
     if (this.destroyed || generation !== this._findGeneration || engine !== this.engine) return [];
+    this._findSkipsHidden = this._hiddenMode === 'skip' && this.visibleSlideCount > 0;
     const matches = await this.errorRouter.ownAwaitable(() => this._find.find(query, opts));
     if (this.destroyed || generation !== this._findGeneration || engine !== this.engine) return [];
     this._redrawHighlights();

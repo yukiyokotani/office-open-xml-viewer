@@ -81,10 +81,13 @@ describe("PptxViewer hiddenSlideMode: 'skip' (#2181)", () => {
     viewer.destroy();
   });
 
-  it('an all-hidden deck has nothing to skip to, so the slide is drawn as in show mode', async () => {
+  it('an all-hidden deck has nothing to skip to, so it behaves as in show mode', async () => {
     const { viewer } = viewerFor([0, 1], 2);
     await viewer.goToSlide(1);
     expect(viewer.slideIndex).toBe(1);
+    // Find matches every slide too, consistent with what is drawn.
+    const matches = await viewer.findText('needle');
+    expect(matches.map((match) => match.location.slide)).toEqual([0, 1]);
     viewer.destroy();
   });
 

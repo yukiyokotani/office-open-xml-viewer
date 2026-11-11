@@ -72,6 +72,10 @@ is removed in 0.91.0. See the [0.89 to 0.90 migration guide](docs/migration-0.90
   (`onVisibleSlideChange`, `topVisibleSlide`, find locations) stay absolute
   deck indices, as in `PptxViewer`. `'dim'` draws hidden slides under the same
   overlay as `PptxViewer`. The default `'show'` is unchanged (#2181).
+- **Every slide hidden:** with `hiddenSlideMode: 'skip'` and every slide
+  hidden, both `PptxViewer` and `PptxScrollViewer` now behave fully as in
+  `'show'`. This changes 0.89.9, where `PptxViewer` drew the requested slide
+  but `findText()` returned no matches; it now matches every slide (#2181).
 - **Deprecated:** `useGoogleFonts` is an alias of `fonts: [googleFonts()]` and
   warns once per JavaScript realm. Combining `useGoogleFonts: true` with
   `fonts` throws a `TypeError`. The VS Code extension keeps its
