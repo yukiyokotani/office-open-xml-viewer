@@ -1006,13 +1006,17 @@ fn collect_shape_runs(
             continue;
         }
         match child.tag_name().name() {
-            "span" => {
-                let chain = ctx
-                    .store
-                    .chain("text", child.attribute((NS_TEXT, "style-name")));
-                let span = super::cells::font_of(&chain, &ctx.faces, Some(font));
-                collect_shape_runs(ctx, child, &span, runs)?;
-            }
+            // A span's own style chain over the font around it, as in
+            // cells: the text family default does not override what the
+            // paragraph or an enclosing span sets.
+            "span" => match child.attribute((NS_TEXT, "style-name")) {
+                Some(name) => {
+                    let chain = ctx.store.chain_own("text", name);
+                    let span = super::cells::font_of(&chain, &ctx.faces, Some(font));
+                    collect_shape_runs(ctx, child, &span, runs)?;
+                }
+                None => collect_shape_runs(ctx, child, font, runs)?,
+            },
             // `content.xml` is bounded by `check_space_runs` before reading.
             "s" => push_text_run(
                 ctx,
