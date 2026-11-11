@@ -537,8 +537,11 @@ fn section_code(style: roxmltree::Node<'_, '_>, kind: DataKind) -> (String, bool
                     code.push_str(&decimals(child));
                 }
                 // §19.346: the displayed number is the value divided by the
-                // factor. Only a finite positive factor scales; any other
-                // value (`0`, negative, `INF`, `NaN`) is not a scale factor.
+                // factor (an xsd:double, sign unrestricted). Only a finite
+                // positive factor scales, as LibreOffice reads it
+                // (xmloff `SvXMLNumFormatContext::AddNumber` scales only for
+                // a factor above 0, so a negative factor shows the value
+                // unscaled); `0`, `INF` and `NaN` are no factor either.
                 if let Some(factor) = attr(child, "display-factor")
                     .and_then(|v| v.trim().parse::<f64>().ok())
                     .filter(|f| f.is_finite() && *f > 0.0)
@@ -833,9 +836,11 @@ mod tests {
             r##"<number:number-style style:name="INF"><number:number number:decimal-places="0" number:min-integer-digits="1" number:display-factor="INF"/></number:number-style>"##,
             r##"<number:number-style style:name="NAN"><number:number number:decimal-places="0" number:min-integer-digits="1" number:display-factor="NaN"/></number:number-style>"##,
             r##"<number:number-style style:name="ZERO"><number:number number:decimal-places="0" number:min-integer-digits="1" number:display-factor="0"/></number:number-style>"##,
+            // Negative: LibreOffice shows the value unscaled.
+            r##"<number:number-style style:name="NEG"><number:number number:decimal-places="0" number:min-integer-digits="1" number:display-factor="-10"/></number:number-style>"##,
         ));
         data.check().unwrap();
-        for name in ["INF", "NAN", "ZERO"] {
+        for name in ["INF", "NAN", "ZERO", "NEG"] {
             let (format, _) = data.code(name).unwrap();
             assert_eq!(format, FormatCode::plain("0"), "{name}");
         }

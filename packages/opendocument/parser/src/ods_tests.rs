@@ -721,3 +721,74 @@ fn calcext_formats_supersede_style_maps_only_on_their_own_table() {
     let workbook = read_text(&content(automatic, body), Some(&styles(common))).unwrap();
     assert_eq!(workbook.sheets[0].worksheet.conditional_formats.len(), 1);
 }
+
+/// (text, bold, italic, size, colour) of one run.
+type RunFacts = (String, bool, bool, Option<f64>, Option<String>);
+
+/// The facts of each run of a cell.
+fn run_fonts(cell: &xlsx_model::Cell) -> Vec<RunFacts> {
+    let xlsx_model::CellValue::Text {
+        runs: Some(runs), ..
+    } = &cell.value
+    else {
+        panic!("no runs: {:?}", cell.value);
+    };
+    runs.iter()
+        .map(|r| {
+            let font = r.font.as_ref().unwrap();
+            (
+                r.text.clone(),
+                font.bold,
+                font.italic,
+                font.size,
+                font.color.clone(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn the_text_family_default_is_the_last_fallback_of_a_span() {
+    let common = r##"<style:default-style style:family="text"><style:text-properties fo:color="#ff0000"/></style:default-style>"##;
+    let automatic = r#"<style:style style:name="I" style:family="text"><style:text-properties fo:font-style="italic"/></style:style>"#;
+    let body = content(
+        automatic,
+        &table(
+            r#"<table:table-row><table:table-cell office:value-type="string"><text:p><text:span text:style-name="I">x</text:span></text:p></table:table-cell></table:table-row>"#,
+        ),
+    );
+    let workbook = read_text(&body, Some(&styles(common))).unwrap();
+    let runs = run_fonts(&workbook.sheets[0].rows[0].cells[0]);
+    assert_eq!(runs[0].4.as_deref(), Some("FF0000"));
+    assert!(runs[0].2);
+}
+
+#[test]
+fn repeated_rich_text_takes_each_column_default() {
+    let automatic = r#"<style:style style:name="bold" style:family="table-cell"><style:text-properties fo:font-weight="bold"/></style:style><style:style style:name="plain" style:family="table-cell"><style:text-properties fo:font-weight="normal"/></style:style><style:style style:name="I" style:family="text"><style:text-properties fo:font-style="italic"/></style:style>"#;
+    let body = content(
+        automatic,
+        r#"<table:table table:name="S"><table:table-column table:default-cell-style-name="bold"/><table:table-column table:default-cell-style-name="plain"/><table:table-row><table:table-cell table:number-columns-repeated="2" office:value-type="string"><text:p><text:span text:style-name="I">x</text:span></text:p></table:table-cell></table:table-row></table:table>"#,
+    );
+    let workbook = read_text(&body, Some(&styles(""))).unwrap();
+    let cells = &workbook.sheets[0].rows[0].cells;
+    let a = run_fonts(&cells[0]);
+    let b = run_fonts(&cells[1]);
+    assert!(a[0].1 && a[0].2, "{a:?}");
+    assert!(!b[0].1 && b[0].2, "{b:?}");
+}
+
+#[test]
+fn percentage_font_sizes_scale_the_parent_style() {
+    // §20.190: 150% of the parent style's 20pt is 30pt, whatever the cell.
+    let common = r#"<style:style style:name="Base" style:family="paragraph"><style:text-properties fo:font-size="20pt"/></style:style><style:style style:name="Relative" style:family="paragraph" style:parent-style-name="Base"><style:text-properties fo:font-size="150%"/></style:style>"#;
+    let body = content(
+        "",
+        &table(
+            r#"<table:table-row><table:table-cell office:value-type="string"><text:p text:style-name="Relative">x</text:p></table:table-cell></table:table-row>"#,
+        ),
+    );
+    let workbook = read_text(&body, Some(&styles(common))).unwrap();
+    let runs = run_fonts(&workbook.sheets[0].rows[0].cells[0]);
+    assert_eq!(runs[0].3, Some(30.0));
+}

@@ -1001,14 +1001,35 @@ fn read_row<'a, 'input>(
             if has_value || paints || formula.is_some() {
                 let template = match prototype.take() {
                     Some(t) if t.cell.style_index == Some(xf) => t,
-                    _ => Template::new(Cell {
-                        col,
-                        row: first,
-                        value: copy_value(&value),
-                        style_index: Some(xf),
-                        formula: formula.clone(),
-                        show_phonetic: false,
-                    }),
+                    _ => {
+                        // Rich text of a cell without its own or a row
+                        // style resolves its runs over each column's
+                        // default style: a later column with another
+                        // format reads them again (charged as they are).
+                        let rich = matches!(&value, CellValue::Text { runs: Some(_), .. });
+                        let value = if rich && c != col && own_style.or(row_default).is_none() {
+                            cell_value(
+                                ctx,
+                                cell,
+                                own_style,
+                                row_default,
+                                c,
+                                columns,
+                                column_default,
+                            )?
+                            .0
+                        } else {
+                            copy_value(&value)
+                        };
+                        Template::new(Cell {
+                            col,
+                            row: first,
+                            value,
+                            style_index: Some(xf),
+                            formula: formula.clone(),
+                            show_phonetic: false,
+                        })
+                    }
                 };
                 for c in c..=segment_last {
                     // Admitted before the copy is made.
@@ -1327,7 +1348,7 @@ fn cell_value(
                 let xf = ctx
                     .xfs
                     .xf_for(&ctx.store, &mut ctx.data, &ctx.faces, styles)?;
-                let (text, runs) = rich_text(ctx, cell, xf)?;
+                let (text, runs) = rich_text(ctx, cell, xf, styles)?;
                 if value_type.is_none() && text.is_empty() {
                     CellValue::Empty
                 } else {
@@ -1375,8 +1396,28 @@ fn rich_text(
     ctx: &mut Context,
     cell: roxmltree::Node<'_, '_>,
     xf: u32,
+    styles: CellStyles<'_>,
 ) -> Result<(String, Option<Vec<Run>>), String> {
     let cell_font = ctx.xfs.font_of_xf(xf);
+    // What a paragraph or span style leaves unset is searched in the cell's
+    // style chain, then the text family default (§16.2, the initial
+    // family's default), and last the table-cell default (where
+    // LibreOffice keeps the document's default font).
+    let outer = {
+        let cell_default: Vec<&crate::odf_props::Style> =
+            ctx.store.default_style("table-cell").into_iter().collect();
+        let mut base = super::cells::font_of(&cell_default, &ctx.faces, None);
+        if let Some(text_default) = ctx.store.default_style("text") {
+            base = super::cells::font_of(&[text_default], &ctx.faces, Some(&base));
+        }
+        let name = styles
+            .cell
+            .or(styles.row)
+            .or(styles.column)
+            .unwrap_or("Default");
+        let chain = ctx.store.chain_own("table-cell", name);
+        super::cells::font_of(&chain, &ctx.faces, Some(&base))
+    };
     let mut runs: Vec<(String, Option<Rc<Font>>)> = Vec::new();
     let mut first = true;
     for p in cell
@@ -1389,8 +1430,8 @@ fn rich_text(
         first = false;
         let paragraph = p
             .attribute((NS_TEXT, "style-name"))
-            .and_then(|name| context_font(ctx, "paragraph", name, &cell_font));
-        collect_runs(ctx, p, &paragraph, &cell_font, &mut runs);
+            .and_then(|name| context_font(ctx, "paragraph", name, &outer));
+        collect_runs(ctx, p, &paragraph, &outer, &mut runs);
     }
     let text: String = runs.iter().map(|(t, _)| t.as_str()).collect();
     if runs.iter().all(|(_, font)| font.is_none()) {

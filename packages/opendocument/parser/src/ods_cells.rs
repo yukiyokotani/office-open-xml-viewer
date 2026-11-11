@@ -562,6 +562,28 @@ pub fn resolve(
 }
 
 /// The font of a style chain over `base` (or the defaults).
+/// The font size a chain gives (§20.190 `fo:font-size`): the nearest
+/// length, scaled by every percentage below it, a percentage being relative
+/// to its parent style's font height; `base` (the surrounding font) when no
+/// style in the chain sets a length.
+fn chain_font_size(chain: &[&Style], base: f64) -> f64 {
+    let mut factor = 1.0;
+    for style in chain {
+        let Some(size) = style.properties.get("text:fo:font-size") else {
+            continue;
+        };
+        if let Some(pt) = length_pt(size) {
+            return pt * factor;
+        }
+        match odf_props::percent(size) {
+            Some(fraction) => factor *= fraction,
+            // An unreadable size sets nothing.
+            None => break,
+        }
+    }
+    base * factor
+}
+
 pub fn font_of(chain: &[&Style], faces: &HashMap<String, String>, base: Option<&Font>) -> Font {
     let mut font = base.cloned().unwrap_or(Font {
         size: 10.0,
@@ -572,13 +594,7 @@ pub fn font_of(chain: &[&Style], faces: &HashMap<String, String>, base: Option<&
     } else if let Some(family) = get(chain, "text:fo:font-family") {
         font.name = Some(odf_props::unquote_family(family));
     }
-    if let Some(size) = get(chain, "text:fo:font-size") {
-        if let Some(pt) = length_pt(size) {
-            font.size = pt;
-        } else if let Some(fraction) = odf_props::percent(size) {
-            font.size *= fraction;
-        }
-    }
+    font.size = chain_font_size(chain, font.size);
     if let Some(weight) = get(chain, "text:fo:font-weight") {
         font.bold = weight == "bold" || weight.parse::<u32>().is_ok_and(|w| w >= 600);
     }
