@@ -9,7 +9,7 @@ import { describe, expect, it } from 'vitest';
 import { buildXlsPicturesFixture, picturePng, pictureWmf } from '../xls-pictures-fixture.js';
 import { TEST_SOURCE_URLS, testXlsSource } from '../test-sources.js';
 import { openModelSource } from '../legacy-xls-source-module.js';
-import { materializeXlsxWorkbook } from './node-facade.js';
+import { materializeXlsxWorkbook, openXlsxWorkbook } from './node-facade.js';
 import { digitWidthFactory } from './xls-host-layout-fixture.js';
 
 const EMU_PER_PIXEL = 9525;
@@ -52,6 +52,21 @@ describe('XLS pictures', () => {
       nativeExtCx: 1166813, nativeExtCy: 523875,
     })]);
     expect(await media(bytes, worksheet.images![0]!.imagePath)).toEqual(picturePng);
+  });
+
+  it('returns the picture bytes through the public workbook session', async () => {
+    const bytes = buildXlsPicturesFixture({ behavior: 0 });
+    const session = await openXlsxWorkbook(bytes, { legacyXls: testXlsSource(), factory: digitWidthFactory(7) });
+    try {
+      let images: ReadonlyArray<{ imagePath: string; mimeType: string }> = [];
+      for await (const unit of session.worksheetRows(0)) {
+        if (unit.kind === 'finished') images = unit.worksheet.images ?? [];
+      }
+      expect(images).toHaveLength(1);
+      const image = await session.getImage(images[0]!.imagePath, images[0]!.mimeType);
+      expect(image.type).toBe('image/png');
+      expect(new Uint8Array(await image.arrayBuffer())).toEqual(picturePng);
+    } finally { await session.close(); }
   });
 
   it('keeps WMF media and its MIME type', async () => {

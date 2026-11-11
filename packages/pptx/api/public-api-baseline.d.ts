@@ -1920,6 +1920,9 @@ export class PptxScrollViewer implements ZoomableViewer {
     scrollToSlide(index: number, opts?: {
         behavior?: 'auto' | 'smooth';
     }): void;
+    setHiddenSlideMode(mode: HiddenSlideMode): Promise<void>;
+    get hiddenSlideMode(): HiddenSlideMode;
+    get visibleSlideCount(): number;
     goToComment(slideIndex: number, commentIndex: number, opts?: {
         behavior?: 'auto' | 'smooth';
     }): Promise<boolean>;
@@ -1948,6 +1951,8 @@ export interface PptxScrollViewerOptions extends Pick<RenderSlideOptions, 'width
     onSelectionContextChange?: (context: PptxSelectionContext | null) => void;
     onContextMenu?: (event: ViewerContextMenuEvent<PptxSelectionContext>) => void;
     findHighlightColors?: FindHighlightColors;
+    hiddenSlideMode?: HiddenSlideMode;
+    hiddenSlideDim?: Partial<DimOptions>;
     enableMediaPlayback?: boolean;
     mediaOverscan?: number;
     zoomMin?: number;

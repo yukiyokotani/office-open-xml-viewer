@@ -227,6 +227,14 @@ const CORPORA = {
     manifestDirectory: 'demo',
     stemPattern: /^demo\/[^/\\]+$/,
   },
+  // The demo decks rendered through PptxScrollViewer: same inputs as `demo`,
+  // separate outputs and manifests.
+  'demo-scroll': {
+    publicPrefix: '',
+    outputPrefix: 'scroll-viewer/',
+    manifestDirectory: 'scroll-viewer-demo',
+    stemPattern: /^demo\/[^/\\]+$/,
+  },
   private: {
     publicPrefix: 'private/',
     outputPrefix: 'private-corpus/',

@@ -9,6 +9,7 @@ import { generateSyntheticXlsx } from '../scripts/generate-synthetic-xlsx.mjs';
 import { OoxmlError } from '@silurus/ooxml-core';
 import { nonOoxmlInputs } from '@silurus/ooxml-core/testing';
 import { materializeXlsxWorkbook, openXlsxWorkbook } from './xlsx.ts';
+import { storedZip } from './test-ooxml-package.ts';
 
 let directory = '';
 let bytes: Buffer;
@@ -126,6 +127,62 @@ describe('Node bounded XLSX workbook session', () => {
     });
   });
 
+  it('extracts picture parts through the session-owned bounded cache and rejects after close', async () => {
+    const extract = vi.spyOn(archivePrototype(), 'extract_image');
+    try {
+      const session = await openXlsxWorkbook(pictureWorkbook());
+      const first = await session.getImage('xl/media/image1.png', 'image/png');
+      expect(await session.getImage('xl/media/image1.png', 'image/png')).toBe(first);
+      expect(first.type).toBe('image/png');
+      expect(new Uint8Array(await first.arrayBuffer())).toEqual(PICTURE);
+      expect((await session.getImage('xl/media/image1.png')).type).toBe('application/octet-stream');
+      expect(extract).toHaveBeenCalledTimes(1);
+      expect(session.resourceUsage?.distinctInflatedBytes).toBeGreaterThanOrEqual(PICTURE.byteLength);
+      await session.close();
+      await expect(session.getImage('xl/media/image1.png', 'image/png')).rejects.toThrow(/closed/);
+      expect(extract).toHaveBeenCalledTimes(1);
+    } finally {
+      extract.mockRestore();
+    }
+  });
+
+  it('reports the counters of earlier picture reads when a later operation fails', async () => {
+    const onResourceMetrics = vi.fn();
+    const picture = new Uint8Array(65_536);
+    const session = await openXlsxWorkbook(pictureWorkbook(picture), { onResourceMetrics });
+    try {
+      await session.getImage('xl/media/image1.png', 'image/png');
+      // A missing entry is an untyped failure, so the report keeps the
+      // session's last observed usage rather than a violation checkpoint.
+      await expect(session.getImage('xl/media/missing.png', 'image/png')).rejects.toThrow();
+      expect(onResourceMetrics).toHaveBeenCalledWith(expect.objectContaining({
+        status: 'error',
+        usage: expect.objectContaining({
+          distinctInflatedBytes: expect.toSatisfy((bytes: number) => bytes >= picture.byteLength),
+        }),
+      }));
+    } finally {
+      await session.close();
+    }
+  });
+
+  it('fails the session when a picture read exceeds the archive entry budget', async () => {
+    const session = await openXlsxWorkbook(pictureWorkbook(new Uint8Array(4096)), {
+      resourceLimits: { maxArchiveEntryBytes: 2048 },
+    });
+    try {
+      const failure = await session.getImage('xl/media/image1.png', 'image/png').then(
+        () => { throw new Error('resolved an over-budget picture'); },
+        (error: unknown) => error,
+      );
+      expect(failure).toMatchObject({ name: 'OoxmlResourceLimitError', code: 'ooxml-resource-limit' });
+      await expect(session.getImage('xl/media/image1.png', 'image/png')).rejects.toBe(failure);
+      await expect(session.worksheetRows(0).next()).rejects.toBe(failure);
+    } finally {
+      await session.close();
+    }
+  });
+
   it('invalidates sibling sessions after a trap and recovers on a fresh generation', async () => {
     const openCursor = vi.spyOn(archivePrototype(), 'open_sheet_cursor')
       .mockImplementationOnce(() => { throw new RangeError('synthetic trap'); });
@@ -161,7 +218,25 @@ async function collectRows(
 type ArchivePrototype = {
   free(): void;
   open_sheet_cursor(sheetIndex: number, name: string): void;
+  extract_image(path: string): Uint8Array;
 };
+
+/** PNG signature plus a few bytes; extraction never decodes it. */
+const PICTURE = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3, 4]);
+
+/** A one-sheet workbook that carries one media part. */
+function pictureWorkbook(picture: Uint8Array = PICTURE): Uint8Array {
+  const ns = 'http://schemas.openxmlformats.org';
+  return storedZip({
+    '[Content_Types].xml': `<?xml version="1.0" encoding="UTF-8"?><Types xmlns="${ns}/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>`,
+    '_rels/.rels': `<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="${ns}/package/2006/relationships"><Relationship Id="rId1" Type="${ns}/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>`,
+    'xl/workbook.xml': `<?xml version="1.0" encoding="UTF-8"?><workbook xmlns="${ns}/spreadsheetml/2006/main" xmlns:r="${ns}/officeDocument/2006/relationships"><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets></workbook>`,
+    'xl/_rels/workbook.xml.rels': `<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="${ns}/package/2006/relationships"><Relationship Id="rId1" Type="${ns}/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="${ns}/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>`,
+    'xl/styles.xml': `<?xml version="1.0" encoding="UTF-8"?><styleSheet xmlns="${ns}/spreadsheetml/2006/main"><fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts><fills count="1"><fill><patternFill patternType="none"/></fill></fills><borders count="1"><border/></borders><cellXfs count="1"><xf/></cellXfs></styleSheet>`,
+    'xl/worksheets/sheet1.xml': `<?xml version="1.0" encoding="UTF-8"?><worksheet xmlns="${ns}/spreadsheetml/2006/main"><sheetData/></worksheet>`,
+    'xl/media/image1.png': picture,
+  });
+}
 
 function archivePrototype(): ArchivePrototype {
   return (xlsxWasm as unknown as { XlsxArchive: { prototype: ArchivePrototype } })

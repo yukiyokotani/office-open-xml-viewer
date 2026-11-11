@@ -58,10 +58,33 @@ is removed in 0.91.0. See the [0.89 to 0.90 migration guide](docs/migration-0.90
   line) or a function of the failure. The function runs on the main thread,
   including in worker mode. Without the option the placeholder is unchanged.
   This is additive, so no migration is needed (#1974).
+- **Node picture bytes:** `DocxDocumentSession` and `XlsxWorkbookSession`
+  (from `openDocxDocument` and `openXlsxWorkbook` in `@silurus/ooxml/node`)
+  now have `getImage(path, mimeType?)`, as `PptxPresentationSession` already
+  had. It returns the bytes of a picture the model names as a `Blob`, for
+  `.docx`/`.xlsx` part paths and for the paths of the `legacyDoc`,
+  `legacyXls`, `odt` and `ods` sources (such as `legacy-doc/image/0`). Reads
+  count against the session's resource limits, a resource-limit failure
+  fails the session, and the call rejects after `close()`. This is additive,
+  so no migration is needed (#2180).
 - **Fixed:** a DOCX whose `word/document.xml` cannot be parsed now opens with
   the "This document could not be displayed" page. Before, `load()` rejected
   with a `RangeError` because the placeholder page had a 0×0 size. The page
   now uses the ECMA-376 default page size, US Letter (#1974).
+- **Hidden slides in the scroll viewer:** `PptxScrollViewer` takes the
+  `hiddenSlideMode: 'show' | 'skip' | 'dim'` and `hiddenSlideDim` options of
+  `PptxViewer`, plus `setHiddenSlideMode()`, `hiddenSlideMode` and
+  `visibleSlideCount`. `'skip'` leaves hidden slides out of the scroll:
+  `scrollToSlide()` and internal hyperlinks aimed at a hidden slide land on the
+  next shown slide (else the previous one), `findText()` does not match hidden
+  slides, and `goToComment()` on one resolves `false`. Reported indices
+  (`onVisibleSlideChange`, `topVisibleSlide`, find locations) stay absolute
+  deck indices, as in `PptxViewer`. `'dim'` draws hidden slides under the same
+  overlay as `PptxViewer`. The default `'show'` is unchanged (#2181).
+- **Every slide hidden:** with `hiddenSlideMode: 'skip'` and every slide
+  hidden, both `PptxViewer` and `PptxScrollViewer` now behave fully as in
+  `'show'`. This changes 0.89.9, where `PptxViewer` drew the requested slide
+  but `findText()` returned no matches; it now matches every slide (#2181).
 - **Deprecated:** `useGoogleFonts` is an alias of `fonts: [googleFonts()]` and
   warns once per JavaScript realm. Combining `useGoogleFonts: true` with
   `fonts` throws a `TypeError`. The VS Code extension keeps its
