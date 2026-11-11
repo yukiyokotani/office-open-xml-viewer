@@ -179,6 +179,10 @@ impl Budget {
         }
         Ok(())
     }
+    #[cfg(test)]
+    pub(crate) fn steps_used(&self) -> usize {
+        self.steps.get()
+    }
     /// Model bytes charged so far (transient copies included).
     pub(crate) fn used(&self) -> usize {
         self.bytes.get()
@@ -214,6 +218,9 @@ pub(crate) struct Context {
     pub sheet_names: Vec<String>,
     /// Position of each sheet name (the first table of the name).
     pub sheet_index: HashMap<String, usize>,
+    /// Each embedded chart object read so far (by package path): frames
+    /// that reference one object share its single read.
+    pub chart_objects: HashMap<String, Option<ooxml_common::chart::ChartModel>>,
 }
 
 /// One table: its worksheet model (rows held apart for the cursor) and the
@@ -286,11 +293,12 @@ fn read_charged(package: &OdfPackage, budget: &BudgetRef) -> Result<OdsWorkbook,
     let styles_root = styles_doc.as_ref().map(|doc| doc.root_element());
     let content_root = content_doc.root_element();
     crate::odf_text::check_space_runs(content_root)?;
-    // Font names are copied into every font that inherits them: bounded
-    // before any style resolves.
-    crate::odf_text::check_font_names(content_root)?;
+    // Style values (names, families, lengths) are resolved per cell, row and
+    // run and families copied into fonts: bounded before any style
+    // resolves.
+    crate::odf_text::check_style_values(content_root)?;
     if let Some(root) = styles_root {
-        crate::odf_text::check_font_names(root)?;
+        crate::odf_text::check_style_values(root)?;
     }
     if styles_root.is_some_and(|root| !xml::is(root, NS_OFFICE, "document-styles"))
         || !xml::is(content_root, NS_OFFICE, "document-content")
@@ -386,6 +394,7 @@ fn read_charged(package: &OdfPackage, budget: &BudgetRef) -> Result<OdsWorkbook,
         drawing_count: 0,
         sheet_names: sheet_names.clone(),
         sheet_index,
+        chart_objects: HashMap::new(),
     };
     let mut sheets = Vec::with_capacity(tables.len());
     let mut pending_charts = Vec::new();

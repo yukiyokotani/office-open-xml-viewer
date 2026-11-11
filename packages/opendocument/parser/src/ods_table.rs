@@ -486,7 +486,7 @@ pub(crate) fn read_table<'a, 'input>(
                     .saturating_mul(std::mem::size_of::<(u32, i64)>()),
             ),
     )?;
-    let geometry = draw::Grid::new(&column_px, &worksheet, default_row_px);
+    let geometry = draw::Grid::new(&column_px, default_col_px, &worksheet, default_row_px);
     let charts = draw::read_drawings(
         ctx,
         package,
@@ -931,6 +931,23 @@ fn read_row<'a, 'input>(
                     &style,
                     (first, column.first.max(col)),
                     (last, column.last.min(cell_last)),
+                )?;
+            }
+            // Columns past the declared runs take the `Default` style.
+            let declared = columns.last().map_or(0, |c| c.last);
+            if cell_last > declared
+                && ctx
+                    .store
+                    .find("table-cell", "Default")
+                    .is_some_and(|s| !s.maps.is_empty())
+            {
+                ctx.budget.steps(1)?;
+                record_style_map(
+                    ctx,
+                    walker,
+                    "Default",
+                    (first, col.max(declared + 1)),
+                    (last, cell_last),
                 )?;
             }
         }

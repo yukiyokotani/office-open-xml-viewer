@@ -30,13 +30,18 @@ pub struct Grid {
     /// the summed difference of every override up to and including it.
     rows: Vec<(u32, i64)>,
     default_row_px: u32,
+    /// Width of a column past the authored runs: the worksheet's default
+    /// column width, as the renderer lays those columns out.
+    trailing_col_px: i64,
 }
 
-/// Width of a column past the authored runs.
-const TRAILING_COL_PX: i64 = 64;
-
 impl Grid {
-    pub fn new(columns: &[(u32, u32, u32)], worksheet: &Worksheet, default_row_px: u32) -> Self {
+    pub fn new(
+        columns: &[(u32, u32, u32)],
+        default_col_px: u32,
+        worksheet: &Worksheet,
+        default_row_px: u32,
+    ) -> Self {
         let mut column_left = Vec::with_capacity(columns.len() + 1);
         let mut x = 0i64;
         for (first, last, px) in columns {
@@ -58,6 +63,7 @@ impl Grid {
             column_left,
             rows,
             default_row_px,
+            trailing_col_px: i64::from(default_col_px.max(1)),
         }
     }
 
@@ -76,7 +82,8 @@ impl Grid {
             }
             _ => {
                 let covered = if at == 0 { 0 } else { self.columns[at - 1].1 };
-                self.column_left[at] + i64::from(col0.saturating_sub(covered)) * TRAILING_COL_PX
+                self.column_left[at]
+                    + i64::from(col0.saturating_sub(covered)) * self.trailing_col_px
             }
         }
     }
@@ -106,12 +113,12 @@ impl Grid {
             return (col - 1, offset % px);
         }
         let covered = self.covered();
-        let col = i64::from(covered) + 1 + (x - total) / TRAILING_COL_PX;
+        let col = i64::from(covered) + 1 + (x - total) / self.trailing_col_px;
         if col >= i64::from(MAX_COLS) {
             let last = MAX_COLS - 1;
             return (last, x - self.col_left(last));
         }
-        (col as u32 - 1, (x - total) % TRAILING_COL_PX)
+        (col as u32 - 1, (x - total) % self.trailing_col_px)
     }
 
     pub fn locate_y(&self, y: i64) -> (u32, i64) {
@@ -1243,20 +1250,43 @@ pub(crate) fn resolve_charts(
     warnings: &mut Vec<String>,
 ) -> Result<(), String> {
     for chart in pending {
-        let resolver = SheetResolver { sheets, ctx };
-        // A chart in flight holds at most what the workbook has left.
-        let model = crate::odf_chart::read_chart_object_within(
-            package,
-            &chart.object,
-            Some(&resolver),
-            ctx.budget.remaining(),
-        );
-        // A structurally invalid object is drawn from its replacement; a
-        // resource limit or package failure rejects the workbook.
-        let model = match model {
-            Ok(model) => model,
-            Err(error) if crate::error::is_invalid(&error) => None,
-            Err(error) => return Err(error),
+        // Each object is read once; every further frame that shows it
+        // takes a copy admitted at its retained size.
+        let model = match ctx.chart_objects.get(&chart.object) {
+            Some(model) => match model {
+                Some(model) => Some(ctx.budget.copy(model)?),
+                None => None,
+            },
+            None => {
+                let resolver = SheetResolver { sheets, ctx };
+                // A chart in flight holds at most what the workbook has left.
+                let model = crate::odf_chart::read_chart_object_within(
+                    package,
+                    &chart.object,
+                    Some(&resolver),
+                    ctx.budget.remaining(),
+                );
+                // A structurally invalid object is drawn from its
+                // replacement; a resource limit or package failure rejects
+                // the workbook.
+                let model = match model {
+                    Ok(model) => model,
+                    Err(error) if crate::error::is_invalid(&error) => None,
+                    Err(error) => return Err(error),
+                };
+                // The cache keeps its own copy (and the path).
+                ctx.budget.bytes(
+                    model
+                        .as_ref()
+                        .map_or(0, crate::retained_size)
+                        .saturating_add(super::hash_entry_bytes::<String, Option<()>>(
+                            chart.object.len(),
+                        )),
+                )?;
+                ctx.chart_objects
+                    .insert(chart.object.clone(), model.as_ref().cloned());
+                model
+            }
         };
         let rect = chart.rect;
         match model {
@@ -1449,12 +1479,12 @@ mod tests {
         for (row, pt) in [(2u32, 30.0), (3, 0.0), (7, 48.0), (1000, 3.0)] {
             worksheet.row_heights.insert(row, pt);
         }
-        let grid = Grid::new(&columns, &worksheet, 17);
+        let grid = Grid::new(&columns, 70, &worksheet, 17);
         let width = |col: u32| -> i64 {
             columns
                 .iter()
                 .find(|(first, last, _)| *first <= col && col <= *last)
-                .map_or(64, |(_, _, px)| i64::from(*px))
+                .map_or(70, |(_, _, px)| i64::from(*px))
         };
         let mut left = 0i64;
         for col0 in 0..40u32 {
@@ -1474,7 +1504,7 @@ mod tests {
             }
             assert_eq!(grid.locate_x(x), expected, "locate_x {x}");
         }
-        assert_eq!(grid.locate_x(i64::from(MAX_COLS) * 64 * 2).0, MAX_COLS - 1);
+        assert_eq!(grid.locate_x(i64::from(MAX_COLS) * 70 * 2).0, MAX_COLS - 1);
         let height = |row: u32| -> i64 {
             worksheet
                 .row_heights

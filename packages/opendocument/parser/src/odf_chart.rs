@@ -165,9 +165,9 @@ fn read_chart_document_within(
         Some(text) => Some(xml::parse(text)?),
         None => None,
     };
-    crate::odf_text::check_font_names(content_doc.root_element())?;
+    crate::odf_text::check_style_values(content_doc.root_element())?;
     if let Some(doc) = &styles_doc {
-        crate::odf_text::check_font_names(doc.root_element())?;
+        crate::odf_text::check_style_values(doc.root_element())?;
     }
     let mut store = StyleStore::default();
     let mut data = DataStyles::default();

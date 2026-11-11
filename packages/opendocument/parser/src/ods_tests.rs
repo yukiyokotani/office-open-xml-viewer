@@ -478,7 +478,7 @@ fn empty_tables(sheets: usize, columns: &str) -> String {
         .collect()
 }
 
-const FAMILY: usize = crate::odf_text::MAX_FONT_NAME_BYTES;
+const FAMILY: usize = crate::odf_text::MAX_STYLE_VALUE_BYTES;
 
 #[test]
 fn the_default_family_is_charged_per_sheet() {
@@ -551,10 +551,10 @@ fn shape_text_runs_are_charged_their_font_copies() {
 }
 
 #[test]
-fn font_names_past_the_bound_reject() {
+fn style_values_past_the_bound_reject() {
     let body = content("", &empty_tables(1, ""));
     let (workbook, _) = read_charging(&body, &styles_with_default_family(FAMILY + 1, ""));
-    assert_eq!(workbook.err(), Some(crate::error::resource("font name")));
+    assert_eq!(workbook.err(), Some(crate::error::resource("style value")));
 }
 
 #[test]
@@ -569,8 +569,50 @@ fn blank_cells_over_many_column_runs_walk_nothing() {
         "",
         &format!(r#"<table:table table:name="S">{columns}{rows}</table:table>"#),
     );
-    let started = std::time::Instant::now();
-    let workbook = read_text(&body, Some(&styles(""))).unwrap();
+    let manifest = manifest(ODS, "");
+    let styles = styles("");
+    let files: Vec<(&str, &[u8])> = vec![
+        ("META-INF/manifest.xml", manifest.as_bytes()),
+        ("content.xml", body.as_bytes()),
+        ("styles.xml", styles.as_bytes()),
+    ];
+    let package = OdfPackage::open(
+        package_bytes(ODS, &files),
+        OoxmlFormat::Xlsx,
+        PackageLimits::default(),
+        &MEDIA_TYPES,
+    )
+    .unwrap();
+    let budget = Budget::new();
+    let workbook = read_within(&package, budget.clone()).unwrap();
     assert!(workbook.sheets[0].rows.is_empty());
-    assert!(started.elapsed() < std::time::Duration::from_secs(20));
+    // Only the formatted-column scan's first pass; no row walks a run.
+    assert!(budget.steps_used() < 4_096, "{}", budget.steps_used());
+}
+
+#[test]
+fn default_style_conditions_reach_columns_past_the_declared_runs() {
+    // Only column A is declared; the `Default` style carries a condition,
+    // so both unstyled blank cells are covered by it.
+    let styles = format!(
+        r##"<office:document-styles {NS} office:version="1.3"><office:styles><style:style style:name="Default" style:family="table-cell"><style:map style:condition="is-true-formula(1)" style:apply-style-name="Hit"/></style:style><style:style style:name="Hit" style:family="table-cell" style:parent-style-name="Default"><style:table-cell-properties fo:background-color="#ff0000"/></style:style></office:styles></office:document-styles>"##
+    );
+    let body = content(
+        "",
+        r#"<table:table table:name="S"><table:table-column/><table:table-row><table:table-cell/><table:table-cell/></table:table-row></table:table>"#,
+    );
+    let workbook = read_text(&body, Some(&styles)).unwrap();
+    let formats = &workbook.sheets[0].worksheet.conditional_formats;
+    let covered: Vec<(u32, u32)> = formats
+        .iter()
+        .flat_map(|f| f.sqref.iter().map(|r| (r.left, r.right)))
+        .collect();
+    assert!(
+        covered.iter().any(|(l, r)| *l <= 1 && 1 <= *r),
+        "{covered:?}"
+    );
+    assert!(
+        covered.iter().any(|(l, r)| *l <= 2 && 2 <= *r),
+        "{covered:?}"
+    );
 }

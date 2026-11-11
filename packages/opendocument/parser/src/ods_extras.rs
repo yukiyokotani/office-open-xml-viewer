@@ -580,9 +580,24 @@ fn style_map_formats(
         }
     }
     for (style, sqref) in by_style {
-        let Some(maps) = ctx.store.find("table-cell", &style).map(|s| s.maps.clone()) else {
+        // Each sheet works on its own copy of the style's conditions
+        // (restated from its own anchor): the copy is admitted before it is
+        // made, whether or not its conditions are recognized.
+        let Some(found) = ctx.store.find("table-cell", &style) else {
             continue;
         };
+        let size: usize = found
+            .maps
+            .iter()
+            .map(|map| {
+                std::mem::size_of_val(map)
+                    + map.condition.len()
+                    + map.apply_style_name.len()
+                    + map.base_cell_address.as_ref().map_or(0, String::len)
+            })
+            .sum();
+        ctx.budget.bytes(size)?;
+        let maps = found.maps.clone();
         let anchor = format!("{}{}", super::column_letters(sqref[0].left), sqref[0].top);
         let mut rules = Vec::new();
         for map in maps {

@@ -191,24 +191,37 @@ pub fn check_space_runs(root: roxmltree::Node<'_, '_>) -> Result<(), String> {
     Ok(())
 }
 
-/// Implementation bound on one font family or font-face name (`svg` /
-/// `fo:font-family`, `style:font-name*`, a face's `style:name`). Readers copy
-/// a resolved family into every font, text run and axis that inherits it,
-/// so the bound keeps each copy (and each nesting level's) small; a longer
-/// name rejects the part.
-pub const MAX_FONT_NAME_BYTES: usize = 1024;
+/// Implementation bound on one style value: any attribute of a style,
+/// font-face, property or data-style element (`style:` / `number:`
+/// namespaces: names, font families, lengths, colours), and any style
+/// reference (`*style-name`) anywhere. Readers resolve a style value once
+/// per cell, row, run or axis that inherits it, and copy families into each
+/// font, so the bound keeps that repeated work and each copy small; a longer
+/// value rejects the part. (LibreOffice's values are a few dozen bytes.)
+pub const MAX_STYLE_VALUE_BYTES: usize = 1024;
+/// The bound on a `style:map` condition (§19.472), a formula.
+pub const MAX_STYLE_CONDITION_BYTES: usize = 4096;
 
-/// Reject a part naming a font longer than [`MAX_FONT_NAME_BYTES`].
-pub fn check_font_names(root: roxmltree::Node<'_, '_>) -> Result<(), String> {
+const NS_DATASTYLE: &str = "urn:oasis:names:tc:opendocument:xmlns:datastyle:1.0";
+
+/// Reject a part with a style value over [`MAX_STYLE_VALUE_BYTES`] (a map
+/// condition over [`MAX_STYLE_CONDITION_BYTES`]).
+pub fn check_style_values(root: roxmltree::Node<'_, '_>) -> Result<(), String> {
     for node in root.descendants().filter(|n| n.is_element()) {
-        let face = xml::is(node, crate::xml::NS_STYLE, "font-face");
+        let namespace = node.tag_name().namespace();
+        let style_element =
+            namespace == Some(crate::xml::NS_STYLE) || namespace == Some(NS_DATASTYLE);
         for attribute in node.attributes() {
             let name = attribute.name();
-            let font = name.starts_with("font-family")
-                || name.starts_with("font-name")
-                || face && name == "name";
-            if font && attribute.value().len() > MAX_FONT_NAME_BYTES {
-                return Err(crate::error::resource("font name"));
+            let bound = if style_element && name == "condition" {
+                MAX_STYLE_CONDITION_BYTES
+            } else if style_element || name.ends_with("style-name") {
+                MAX_STYLE_VALUE_BYTES
+            } else {
+                continue;
+            };
+            if attribute.value().len() > bound {
+                return Err(crate::error::resource("style value"));
             }
         }
     }
