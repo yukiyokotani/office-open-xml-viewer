@@ -1966,6 +1966,16 @@ mod tests {
     }
 
     #[test]
+    fn continuation_sees_the_object_list_style() {
+        let styles = r#"<text:list-style style:name="A"><text:list-level-style-number text:level="1" style:num-format="1" style:num-suffix="."/></text:list-style><style:style style:name="PA" style:family="paragraph" style:list-style-name="A"/>"#;
+        let body = r#"<draw:frame svg:width="10cm" svg:height="5cm" draw:text-style-name="PA"><draw:text-box><text:list text:style-name="A"><text:list-item><text:p>a</text:p></text:list-item></text:list><text:list text:continue-numbering="true"><text:list-item><text:p>b</text:p></text:list-item></text:list></draw:text-box></draw:frame>"#;
+        let deck = deck(styles, "", "", &page(body)).unwrap();
+        let slide0 = model(&deck, 0);
+        let shape = shapes(&slide0)[0];
+        assert_eq!(labels(shape.text_body.as_ref().unwrap()), ["1.", "2."]);
+    }
+
+    #[test]
     fn a_continued_list_counts_its_own_continuation() {
         let styles = r#"<text:list-style style:name="L1"><text:list-level-style-number text:level="1" style:num-format="1" style:num-suffix="."/></text:list-style>"#;
         let item = |t: &str| format!("<text:list-item><text:p>{t}</text:p></text:list-item>");

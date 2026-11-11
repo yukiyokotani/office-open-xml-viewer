@@ -43,10 +43,19 @@ pub fn props_cost(props: &Props<'_>) -> usize {
 /// opacity, fill image, table template) with more nodes than a style
 /// record may have: every use reads it again.
 fn check_definition(node: Nd<'_>) -> Result<(), String> {
+    let error = || invalid("a drawing definition exceeds the style record limits");
     if node.descendants().nth(MAX_STYLE_NODES).is_some() {
-        return Err(invalid(
-            "a drawing definition exceeds the style record limits",
-        ));
+        return Err(error());
+    }
+    let marker = xml::is(node, NS_DRAW, "marker");
+    for n in node.descendants().filter(|n| n.is_element()) {
+        let long = n.attributes().any(|a| {
+            a.value().len() > MAX_PROPERTY_VALUE_BYTES
+                && !(marker && a.namespace() == Some(NS_SVG) && a.name() == "d")
+        });
+        if long {
+            return Err(error());
+        }
     }
     Ok(())
 }
@@ -55,6 +64,13 @@ fn check_definition(node: Nd<'_>) -> Result<(), String> {
 fn check_style_record(style: Nd<'_>) -> Result<(), String> {
     let error = || invalid("a style exceeds the style record limits");
     if style.descendants().nth(MAX_STYLE_NODES).is_some() {
+        return Err(error());
+    }
+    // Every attribute of the record (its own and its nested ones).
+    if style.descendants().filter(|n| n.is_element()).any(|n| {
+        n.attributes()
+            .any(|a| a.value().len() > MAX_PROPERTY_VALUE_BYTES)
+    }) {
         return Err(error());
     }
     let mut children = 0usize;

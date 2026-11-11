@@ -11,6 +11,9 @@
 use crate::xml::{self, NS_STYLE};
 use std::collections::HashMap;
 
+/// Implementation bound on a style identifier (name, parent, family, data
+/// style) in bytes.
+const MAX_STYLE_NAME_BYTES: usize = 1024;
 /// Implementation bound on a parent chain; a cycle is a container error.
 const MAX_PARENT_DEPTH: usize = 64;
 /// Implementation bound on stored style data (owned strings plus a fixed
@@ -102,6 +105,19 @@ impl StyleStore {
                 continue;
             }
             self.charge(node)?;
+            // Identifiers are looked up (copied and hashed) on every use of
+            // the style: bounded like any short name.
+            let long = |name: &str| {
+                node.attribute((NS_STYLE, name))
+                    .is_some_and(|v| v.len() > MAX_STYLE_NAME_BYTES)
+            };
+            if long("name")
+                || long("parent-style-name")
+                || long("family")
+                || long("data-style-name")
+            {
+                return Err("OpenDocument style name exceeds the style name limit".to_string());
+            }
             let style = read_style(node);
             if default {
                 self.defaults.insert(style.family.clone(), style);

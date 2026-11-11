@@ -227,6 +227,9 @@ struct ListInstances<'a, 'p> {
     payload: &'p TextPayload<'p>,
     sheet: &'a Sheet<'a>,
     scope: Scope,
+    /// The styles of the object the text belongs to (the list style
+    /// cascade continues through them).
+    object: &'p ObjectStyles<'a>,
     /// Depth of continuation resolution across texts.
     nesting: usize,
     count: usize,
@@ -333,10 +336,12 @@ fn list_numbers<'a>(
         return Ok(None);
     }
     sheet.list_numbers.borrow_mut().insert(key, None);
+    let object = container_object_styles(sheet, scope, container)?;
     let mut instances = ListInstances {
         payload,
         sheet,
         scope,
+        object: &object,
         nesting,
         count: 0,
         previous: None,
@@ -403,6 +408,7 @@ pub fn text_body<'a>(
         payload: env.payload,
         sheet: env.sheet,
         scope: env.scope,
+        object: &env.object,
         nesting: 0,
         count: 0,
         previous: None,
@@ -481,7 +487,7 @@ fn collect_list<'a>(
     } else {
         outer.style
     };
-    let numbering_style = effective_list_style(instances, list_node)?.or(outer.numbering_style);
+    let numbering_style = effective_list_style(instances, list_node, outer)?;
     // A nested list numbers within its enclosing list's instance, at its
     // own level; an explicit continuation resumes that level's sequence.
     let list_id = list_node.attribute((crate::xml::NS_XML, "id"));
@@ -652,17 +658,26 @@ fn list_style<'a>(
     env: &TextEnv<'a, '_>,
     styles: &[Nd<'a>],
 ) -> Option<Nd<'a>> {
-    if let Some(name) = list
-        .style
-        .and_then(|l| l.attribute((NS_TEXT, "style-name")))
-    {
-        if let Some(found) = env.sheet.list(env.scope, name) {
+    resolve_list_style(env.sheet, env.scope, list.style, styles)
+}
+
+/// The list style cascade (shared by rendering and continuation checks):
+/// the nearest `text:list` naming a style, else the first of `styles` that
+/// selects one or embeds one in its graphic properties.
+fn resolve_list_style<'a>(
+    sheet: &Sheet<'a>,
+    scope: Scope,
+    named: Option<Nd<'a>>,
+    styles: &[Nd<'a>],
+) -> Option<Nd<'a>> {
+    if let Some(name) = named.and_then(|l| l.attribute((NS_TEXT, "style-name"))) {
+        if let Some(found) = sheet.list(scope, name) {
             return Some(found);
         }
     }
     for style in styles {
         if let Some(name) = style.attribute((NS_STYLE, "list-style-name")) {
-            if let Some(found) = env.sheet.list(env.scope, name) {
+            if let Some(found) = sheet.list(scope, name) {
                 return Some(found);
             }
         }
@@ -969,10 +984,25 @@ impl<'a> Numbering<'a> {
 fn effective_list_style<'a>(
     instances: &ListInstances<'a, '_>,
     list: Nd<'a>,
+    outer: &ListContext<'a>,
 ) -> Result<Option<Nd<'a>>, String> {
     let (sheet, scope) = (instances.sheet, instances.scope);
-    if let Some(name) = list.attribute((NS_TEXT, "style-name")) {
-        return Ok(sheet.list(scope, name));
+    // The nearest list naming a style, as rendering resolves it.
+    let named = if list.attribute((NS_TEXT, "style-name")).is_some() {
+        Some(list)
+    } else {
+        outer.style
+    };
+    let level = outer.depth;
+    let cascade = |first: Option<Nd<'a>>| -> Option<Nd<'a>> {
+        let mut styles = first
+            .map(|p| paragraph_chain(sheet, scope, p))
+            .unwrap_or_default();
+        styles.extend(instances.object.for_level(sheet, level));
+        resolve_list_style(sheet, scope, named, &styles)
+    };
+    if named.is_some_and(|l| l.attribute((NS_TEXT, "style-name")).is_some()) {
+        return Ok(cascade(None));
     }
     let first = |parent: Nd<'a>, pick: &dyn Fn(Nd<'a>) -> bool| -> Result<Option<Nd<'a>>, String> {
         for child in parent.children() {
@@ -1001,12 +1031,46 @@ fn effective_list_style<'a>(
             node = block;
             continue;
         }
-        return Ok(paragraph_chain(sheet, scope, block)
-            .iter()
-            .find_map(|s| s.attribute((NS_STYLE, "list-style-name")))
-            .and_then(|name| sheet.list(scope, name)));
+        return Ok(cascade(Some(block)));
     }
-    Ok(None)
+    Ok(cascade(None))
+}
+
+/// The styles of the object holding a text (the frame of a text box, else
+/// the element itself), for continuation resolution outside rendering:
+/// its presentation or graphic style chain, its text style and the default
+/// graphic style (a placeholder's per-level outline styles are not known
+/// here).
+fn container_object_styles<'a>(
+    sheet: &'a Sheet<'a>,
+    scope: Scope,
+    container: Nd<'a>,
+) -> Result<ObjectStyles<'a>, String> {
+    let object = if xml::is(container, NS_DRAW, "text-box") {
+        container.parent_element().unwrap_or(container)
+    } else {
+        container
+    };
+    let (family, name) = match object.attribute((NS_PRESENTATION, "style-name")) {
+        Some(name) => ("presentation", Some(name)),
+        None => ("graphic", object.attribute((NS_DRAW, "style-name"))),
+    };
+    let chain = match name {
+        Some(name) => sheet.chain(scope, family, name)?,
+        None => Vec::new(),
+    };
+    let text_style = object
+        .attribute((NS_DRAW, "text-style-name"))
+        .map(|n| sheet.chain(scope, "paragraph", n))
+        .transpose()?
+        .unwrap_or_default();
+    Ok(ObjectStyles {
+        chain,
+        automatic: None,
+        outline_master: None,
+        text_style,
+        defaults: sheet.default_style("graphic").into_iter().collect(),
+    })
 }
 
 /// The label of a list item (§16.31–§16.33 list level styles).
@@ -1616,6 +1680,7 @@ fn walk_inline<'a>(
         env.payload.step(1 + stack.len())?;
         if child.is_text() {
             let text = child.text().unwrap_or("");
+            env.payload.step(text.len() / 64)?;
             push_text(
                 runs,
                 style_for!(stack),

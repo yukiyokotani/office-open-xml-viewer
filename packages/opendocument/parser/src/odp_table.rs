@@ -71,6 +71,9 @@ pub fn table<'a>(
     // and each cell record (borders, fill, strings) before it is kept.
     let payload = TextPayload::new(text_work);
     for (r, row) in rows_nodes.iter().enumerate() {
+        // Each expanded row is traversed (cells, then spans): charged by its
+        // markup, comments and text included.
+        payload.step(1 + row.range().len() / 32)?;
         let height = match row_heights.get(&row.id()) {
             Some(height) => *height,
             None => {
@@ -113,6 +116,8 @@ pub fn table<'a>(
                 if cells_total > MAX_CELLS || c >= MAX_COLUMNS {
                     return Err("OpenDocument table exceeds the cell limit".to_string());
                 }
+                // Each repeat reads the cell's markup again.
+                payload.step(1 + cell.range().len() / 64)?;
                 let template_style = template
                     .as_ref()
                     .and_then(|t| t.style_for(r, c, row_count, cols.len(), &flag));
