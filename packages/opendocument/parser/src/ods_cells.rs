@@ -562,85 +562,179 @@ pub fn resolve(
 }
 
 /// The font of a style chain over `base` (or the defaults).
+/// A font size as a style chain gives it (§20.190): a length, or a
+/// percentage still waiting for the size it scales.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum FontSize {
+    Points(f64),
+    Factor(f64),
+}
+
+/// The font properties a style chain sets, each `None` when no style of
+/// the chain sets it. Contexts nest (a span in a paragraph in a cell): an
+/// inner context's partial font overlays the outer one's, and the run's
+/// font is realized last over the defaults (§16.2), so a default never
+/// overrides what a surrounding context set.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PartialFont {
+    name: Option<String>,
+    size: Option<FontSize>,
+    bold: Option<bool>,
+    italic: Option<bool>,
+    underline: Option<(bool, Option<String>)>,
+    strike: Option<bool>,
+    color: Option<Option<String>>,
+    vert_align: Option<Option<String>>,
+}
+
+impl PartialFont {
+    /// What `chain` sets.
+    pub fn of(chain: &[&Style], faces: &HashMap<String, String>) -> Self {
+        let mut font = Self::default();
+        if let Some(name) = get(chain, "text:style:font-name") {
+            font.name = Some(faces.get(name).cloned().unwrap_or_else(|| name.to_string()));
+        } else if let Some(family) = get(chain, "text:fo:font-family") {
+            font.name = Some(odf_props::unquote_family(family));
+        }
+        font.size = chain_font_size(chain);
+        if let Some(weight) = get(chain, "text:fo:font-weight") {
+            font.bold = Some(weight == "bold" || weight.parse::<u32>().is_ok_and(|w| w >= 600));
+        }
+        if let Some(style) = get(chain, "text:fo:font-style") {
+            font.italic = Some(matches!(style, "italic" | "oblique"));
+        }
+        if let Some(underline) = get(chain, "text:style:text-underline-style") {
+            let on = underline != "none";
+            let style = (on && get(chain, "text:style:text-underline-type") == Some("double"))
+                .then(|| "double".to_string());
+            font.underline = Some((on, style));
+        }
+        if let Some(strike) = get(chain, "text:style:text-line-through-style") {
+            font.strike = Some(strike != "none");
+        }
+        // The nearest style that sets either the colour or the automatic
+        // (window) colour decides (§20.209 / §20.391, per-attribute cascade
+        // read as LibreOffice reads it: one font colour property).
+        for style in chain {
+            let window = style.properties.get("text:style:use-window-font-color");
+            let color = style.properties.get("text:fo:color");
+            if window.is_none() && color.is_none() {
+                continue;
+            }
+            if window.is_some_and(|w| w == "true") && color.is_none() {
+                font.color = Some(None);
+            } else if let Some(color) = color.and_then(|c| hex_color(c)) {
+                font.color = Some(Some(color));
+            } else if window.is_some_and(|w| w == "true") {
+                font.color = Some(None);
+            }
+            break;
+        }
+        if let Some(position) = get(chain, "text:style:text-position") {
+            let first = position.split_whitespace().next().unwrap_or("");
+            font.vert_align = Some(match first {
+                "super" => Some("superscript".into()),
+                "sub" => Some("subscript".into()),
+                value => match odf_props::percent(value) {
+                    Some(v) if v > 0.0 => Some("superscript".into()),
+                    Some(v) if v < 0.0 => Some("subscript".into()),
+                    _ => None,
+                },
+            });
+        }
+        font
+    }
+
+    /// `self` (an inner context) over `outer`: what `self` leaves unset is
+    /// `outer`'s; a pending percentage scales `outer`'s size.
+    pub fn over(&self, outer: &PartialFont) -> PartialFont {
+        PartialFont {
+            name: self.name.clone().or_else(|| outer.name.clone()),
+            size: match (self.size, outer.size) {
+                (Some(FontSize::Factor(f)), Some(FontSize::Points(pt))) => {
+                    Some(FontSize::Points(pt * f))
+                }
+                (Some(FontSize::Factor(f)), Some(FontSize::Factor(g))) => {
+                    Some(FontSize::Factor(f * g))
+                }
+                (Some(size), _) => Some(size),
+                (None, size) => size,
+            },
+            bold: self.bold.or(outer.bold),
+            italic: self.italic.or(outer.italic),
+            underline: self.underline.clone().or_else(|| outer.underline.clone()),
+            strike: self.strike.or(outer.strike),
+            color: self.color.clone().or_else(|| outer.color.clone()),
+            vert_align: self.vert_align.clone().or_else(|| outer.vert_align.clone()),
+        }
+    }
+
+    /// The font these properties make over `base`.
+    pub fn realize(&self, base: &Font) -> Font {
+        let mut font = base.clone();
+        if let Some(name) = &self.name {
+            font.name = Some(name.clone());
+        }
+        match self.size {
+            Some(FontSize::Points(pt)) => font.size = pt,
+            Some(FontSize::Factor(f)) => font.size *= f,
+            None => {}
+        }
+        if let Some(bold) = self.bold {
+            font.bold = bold;
+        }
+        if let Some(italic) = self.italic {
+            font.italic = italic;
+        }
+        if let Some((on, style)) = &self.underline {
+            font.underline = *on;
+            font.underline_style = style.clone();
+        }
+        if let Some(strike) = self.strike {
+            font.strike = strike;
+        }
+        if let Some(color) = &self.color {
+            font.color = color.clone();
+        }
+        if let Some(vert_align) = &self.vert_align {
+            font.vert_align = vert_align.clone();
+        }
+        font
+    }
+}
+
 /// The font size a chain gives (§20.190 `fo:font-size`): the nearest
 /// length, scaled by every percentage below it, a percentage being relative
-/// to its parent style's font height; `base` (the surrounding font) when no
-/// style in the chain sets a length.
-fn chain_font_size(chain: &[&Style], base: f64) -> f64 {
+/// to its parent style's font height; a factor still to apply when no style
+/// of the chain sets a length.
+fn chain_font_size(chain: &[&Style]) -> Option<FontSize> {
     let mut factor = 1.0;
+    let mut any = false;
     for style in chain {
         let Some(size) = style.properties.get("text:fo:font-size") else {
             continue;
         };
         if let Some(pt) = length_pt(size) {
-            return pt * factor;
+            return Some(FontSize::Points(pt * factor));
         }
         match odf_props::percent(size) {
-            Some(fraction) => factor *= fraction,
+            Some(fraction) => {
+                factor *= fraction;
+                any = true;
+            }
             // An unreadable size sets nothing.
             None => break,
         }
     }
-    base * factor
+    any.then_some(FontSize::Factor(factor))
 }
 
 pub fn font_of(chain: &[&Style], faces: &HashMap<String, String>, base: Option<&Font>) -> Font {
-    let mut font = base.cloned().unwrap_or(Font {
+    let base = base.cloned().unwrap_or(Font {
         size: 10.0,
         ..Font::default()
     });
-    if let Some(name) = get(chain, "text:style:font-name") {
-        font.name = Some(faces.get(name).cloned().unwrap_or_else(|| name.to_string()));
-    } else if let Some(family) = get(chain, "text:fo:font-family") {
-        font.name = Some(odf_props::unquote_family(family));
-    }
-    font.size = chain_font_size(chain, font.size);
-    if let Some(weight) = get(chain, "text:fo:font-weight") {
-        font.bold = weight == "bold" || weight.parse::<u32>().is_ok_and(|w| w >= 600);
-    }
-    if let Some(style) = get(chain, "text:fo:font-style") {
-        font.italic = matches!(style, "italic" | "oblique");
-    }
-    if let Some(underline) = get(chain, "text:style:text-underline-style") {
-        font.underline = underline != "none";
-        font.underline_style = (font.underline
-            && get(chain, "text:style:text-underline-type") == Some("double"))
-        .then(|| "double".to_string());
-    }
-    if let Some(strike) = get(chain, "text:style:text-line-through-style") {
-        font.strike = strike != "none";
-    }
-    // The nearest style that sets either the colour or the automatic
-    // (window) colour decides (§20.209 / §20.391, per-attribute cascade
-    // read as LibreOffice reads it: one font colour property).
-    for style in chain {
-        let window = style.properties.get("text:style:use-window-font-color");
-        let color = style.properties.get("text:fo:color");
-        if window.is_none() && color.is_none() {
-            continue;
-        }
-        if window.is_some_and(|w| w == "true") && color.is_none() {
-            font.color = None;
-        } else if let Some(color) = color.and_then(|c| hex_color(c)) {
-            font.color = Some(color);
-        } else if window.is_some_and(|w| w == "true") {
-            font.color = None;
-        }
-        break;
-    }
-    if let Some(position) = get(chain, "text:style:text-position") {
-        let first = position.split_whitespace().next().unwrap_or("");
-        font.vert_align = match first {
-            "super" => Some("superscript".into()),
-            "sub" => Some("subscript".into()),
-            value => match odf_props::percent(value) {
-                Some(v) if v > 0.0 => Some("superscript".into()),
-                Some(v) if v < 0.0 => Some("subscript".into()),
-                _ => None,
-            },
-        };
-    }
-    font
+    PartialFont::of(chain, faces).realize(&base)
 }
 
 /// `0.74pt solid #000000` (§20.183 fo:border) as a SpreadsheetML edge.

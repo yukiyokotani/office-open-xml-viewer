@@ -6,6 +6,7 @@
 //! Both become SpreadsheetML two-cell anchors (ECMA-376 Part 1 §20.5.2.33)
 //! on the reader's pixel grid.
 
+use super::cells::PartialFont;
 use super::table::Anchored;
 use super::{parse_cell, Context, OdsSheet, MAX_COLS, MAX_DRAWINGS, MAX_ROWS};
 use crate::odf_props::{get, hex_color, length_pt, percent, Style};
@@ -922,7 +923,11 @@ fn shape_text(
     if paragraphs.is_empty() {
         return Ok(None);
     }
-    let base_font = super::cells::font_of(chain, &ctx.faces, None);
+    // What the graphic style sets; each paragraph and span overlays what it
+    // sets, and a run's font is that over the default style of its
+    // innermost context's family (§16.2), so a family default never
+    // overrides the graphic style or a surrounding context.
+    let graphic = PartialFont::of(chain, &ctx.faces);
     let mut out = Vec::new();
     for p in paragraphs {
         let p_chain = ctx
@@ -935,9 +940,15 @@ fn shape_text(
                 Some("justify") => "just",
                 _ => "l",
             };
-        let p_font = super::cells::font_of(&p_chain, &ctx.faces, Some(&base_font));
+        let p_set = match p.attribute((NS_TEXT, "style-name")) {
+            Some(name) => {
+                PartialFont::of(&ctx.store.chain_own("paragraph", name), &ctx.faces).over(&graphic)
+            }
+            None => graphic.clone(),
+        };
+        let p_font = context_font(ctx, &p_set, "paragraph");
         let mut runs = Vec::new();
-        collect_shape_runs(ctx, p, &p_font, &mut runs)?;
+        collect_shape_runs(ctx, p, &p_set, &p_font, &mut runs)?;
         // The paragraph record (its alignment token is at most 4 bytes).
         ctx.budget.bytes(4)?;
         ctx.budget.grow(&out)?;
@@ -991,9 +1002,21 @@ fn shape_text(
     }))
 }
 
+/// The font of a shape text context: what it and its surroundings set,
+/// over its family's default style.
+fn context_font(ctx: &Context, set: &PartialFont, family: &str) -> xlsx_model::Font {
+    let default: Vec<&Style> = ctx.store.default_style(family).into_iter().collect();
+    set.over(&PartialFont::of(&default, &ctx.faces))
+        .realize(&xlsx_model::Font {
+            size: 10.0,
+            ..xlsx_model::Font::default()
+        })
+}
+
 fn collect_shape_runs(
     ctx: &Context,
     node: roxmltree::Node<'_, '_>,
+    set: &PartialFont,
     font: &xlsx_model::Font,
     runs: &mut Vec<xlsx_model::ShapeTextRun>,
 ) -> Result<(), String> {
@@ -1006,16 +1029,16 @@ fn collect_shape_runs(
             continue;
         }
         match child.tag_name().name() {
-            // A span's own style chain over the font around it, as in
-            // cells: the text family default does not override what the
-            // paragraph or an enclosing span sets.
+            // A span's own style chain over what the paragraph and the
+            // enclosing spans set, then the text family default.
             "span" => match child.attribute((NS_TEXT, "style-name")) {
                 Some(name) => {
                     let chain = ctx.store.chain_own("text", name);
-                    let span = super::cells::font_of(&chain, &ctx.faces, Some(font));
-                    collect_shape_runs(ctx, child, &span, runs)?;
+                    let span_set = PartialFont::of(&chain, &ctx.faces).over(set);
+                    let span = context_font(ctx, &span_set, "text");
+                    collect_shape_runs(ctx, child, &span_set, &span, runs)?;
                 }
-                None => collect_shape_runs(ctx, child, font, runs)?,
+                None => collect_shape_runs(ctx, child, set, font, runs)?,
             },
             // `content.xml` is bounded by `check_space_runs` before reading.
             "s" => push_text_run(
@@ -1026,7 +1049,7 @@ fn collect_shape_runs(
             )?,
             "tab" => push_text_run(ctx, runs, "\t", font)?,
             "line-break" => ctx.budget.push(runs, xlsx_model::ShapeTextRun::Break)?,
-            _ => collect_shape_runs(ctx, child, font, runs)?,
+            _ => collect_shape_runs(ctx, child, set, font, runs)?,
         }
     }
     Ok(())

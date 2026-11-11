@@ -654,7 +654,9 @@ pub(crate) fn date_serial(value: &str, null_shift: i64, date1904: bool) -> Optio
     let mut fraction = 0.0;
     if let Some(time) = value.split('T').nth(1) {
         let time = time.trim_end_matches('Z');
-        let time = time.split(['+']).next().unwrap_or(time);
+        // A zone offset (§19.372 xsd:dateTime, either sign) is dropped: the
+        // authored local time is shown.
+        let time = time.split(['+', '-']).next().unwrap_or(time);
         let mut parts = time.splitn(3, ':');
         let h: f64 = parts.next()?.parse().ok()?;
         let m: f64 = parts.next().unwrap_or("0").parse().ok()?;
@@ -770,6 +772,15 @@ mod tests {
         assert_eq!(date_serial("1900-03-01", 0, false), Some(61.0));
         assert_eq!(date_serial("1899-12-31", 0, false), Some(1.0));
         assert_eq!(date_serial("2024-01-05T12:00:00", 0, false), Some(45296.5));
+        // A zone offset of either sign keeps the authored local time.
+        assert_eq!(
+            date_serial("2024-01-05T12:00:00-05:00", 0, false),
+            Some(45296.5)
+        );
+        assert_eq!(
+            date_serial("2024-01-05T12:00:00+05:00", 0, false),
+            Some(45296.5)
+        );
         assert_eq!(date_serial("1904-01-02", 0, true), Some(1.0));
         assert_eq!(duration_days("PT12H"), Some(0.5));
         assert_eq!(duration_days("-PT36H00M00S"), Some(-1.5));

@@ -8,7 +8,7 @@
 //! one run.
 
 use super::{
-    cells::{CellStyles, XfBuilder},
+    cells::{CellStyles, PartialFont, XfBuilder},
     column_letters, date_serial, draw, duration_days, hash_entry_bytes, map_entry_bytes, pt_to_px,
     Context, OdsSheet, MAX_COLS, MAX_ROWS, NS_TABLE,
 };
@@ -18,7 +18,7 @@ use crate::package::OdfPackage;
 use crate::xml::{self, NS_OFFICE, NS_TEXT, NS_XLINK};
 use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
-use xlsx_model::{Cell, CellValue, Font, Hyperlink, MergeCell, Row, Run, Worksheet};
+use xlsx_model::{Cell, CellValue, Hyperlink, MergeCell, Row, Run, Worksheet};
 
 const NS_CALCEXT: &str = crate::odf_props::NS_CALCEXT;
 const NS_CONFIG: &str = crate::xml::NS_CONFIG;
@@ -966,6 +966,10 @@ fn read_row<'a, 'input>(
         // The prototype of the last format seen in this authored cell; its
         // copies are made from it.
         let mut prototype: Option<Template> = None;
+        // The column style the prototype's rich-text runs were read over.
+        let mut prototype_column: Option<Rc<str>> = None;
+        let rich = matches!(&value, CellValue::Text { runs: Some(_), .. })
+            && own_style.or(row_default).is_none();
         // Drawings, annotations, links and spans belong to the first row of
         // a repeated block only when it is not repeated (LibreOffice never
         // repeats rows that carry them).
@@ -1000,14 +1004,19 @@ fn read_row<'a, 'input>(
             let paints = ctx.xfs.blank_signature(xf) != ctx.xfs.blank_signature(column_xf);
             if has_value || paints || formula.is_some() {
                 let template = match prototype.take() {
-                    Some(t) if t.cell.style_index == Some(xf) => t,
+                    // Runs read over a column style serve only that style.
+                    Some(t)
+                        if t.cell.style_index == Some(xf)
+                            && (!rich || prototype_column == column_style) =>
+                    {
+                        t
+                    }
                     _ => {
                         // Rich text of a cell without its own or a row
                         // style resolves its runs over each column's
                         // default style: a later column with another
-                        // format reads them again (charged as they are).
-                        let rich = matches!(&value, CellValue::Text { runs: Some(_), .. });
-                        let value = if rich && c != col && own_style.or(row_default).is_none() {
+                        // style reads them again (charged as they are).
+                        let value = if rich && c != col {
                             cell_value(
                                 ctx,
                                 cell,
@@ -1037,6 +1046,7 @@ fn read_row<'a, 'input>(
                     templates.push((c, template.clone()));
                 }
                 prototype = Some(template);
+                prototype_column = column_style.clone();
             }
             c = segment_last + 1;
         }
@@ -1388,10 +1398,13 @@ fn text_value(text: String, runs: Option<Vec<Run>>) -> CellValue {
 }
 
 /// Cell text with runs (§6.1.7) when a paragraph or `text:span` style
-/// formats text. Each formatting context resolves its font once, over the
-/// font of the context around it (the cell, its paragraph, the enclosing
-/// spans: §16.2), so nesting costs one style chain per span; each run's
-/// font is a copy (its family name included), admitted as it is made.
+/// formats text. Each formatting context resolves what its own style chain
+/// sets once, over what the context around it sets (the cell's style, its
+/// paragraph, the enclosing spans: §16.2), so nesting costs one style chain
+/// per span. A run's font is that, then the default style of the
+/// innermost context's family (the initial family), then the table-cell
+/// default where LibreOffice keeps the document font. Each run's font is a
+/// copy (its family name included), admitted as it is made.
 fn rich_text(
     ctx: &mut Context,
     cell: roxmltree::Node<'_, '_>,
@@ -1399,26 +1412,16 @@ fn rich_text(
     styles: CellStyles<'_>,
 ) -> Result<(String, Option<Vec<Run>>), String> {
     let cell_font = ctx.xfs.font_of_xf(xf);
-    // What a paragraph or span style leaves unset is searched in the cell's
-    // style chain, then the text family default (§16.2, the initial
-    // family's default), and last the table-cell default (where
-    // LibreOffice keeps the document's default font).
-    let outer = {
-        let cell_default: Vec<&crate::odf_props::Style> =
-            ctx.store.default_style("table-cell").into_iter().collect();
-        let mut base = super::cells::font_of(&cell_default, &ctx.faces, None);
-        if let Some(text_default) = ctx.store.default_style("text") {
-            base = super::cells::font_of(&[text_default], &ctx.faces, Some(&base));
-        }
-        let name = styles
-            .cell
-            .or(styles.row)
-            .or(styles.column)
-            .unwrap_or("Default");
-        let chain = ctx.store.chain_own("table-cell", name);
-        super::cells::font_of(&chain, &ctx.faces, Some(&base))
-    };
-    let mut runs: Vec<(String, Option<Rc<Font>>)> = Vec::new();
+    let name = styles
+        .cell
+        .or(styles.row)
+        .or(styles.column)
+        .unwrap_or("Default");
+    let cell_partial = Rc::new(TextContext {
+        set: PartialFont::of(&ctx.store.chain_own("table-cell", name), &ctx.faces),
+        family: "table-cell",
+    });
+    let mut runs: Vec<(String, Option<Rc<TextContext>>)> = Vec::new();
     let mut first = true;
     for p in cell
         .children()
@@ -1430,20 +1433,41 @@ fn rich_text(
         first = false;
         let paragraph = p
             .attribute((NS_TEXT, "style-name"))
-            .and_then(|name| context_font(ctx, "paragraph", name, &outer));
-        collect_runs(ctx, p, &paragraph, &outer, &mut runs);
+            .and_then(|name| text_context(ctx, "paragraph", name, &cell_partial));
+        collect_runs(ctx, p, &paragraph, &cell_partial, &mut runs);
     }
     let text: String = runs.iter().map(|(t, _)| t.as_str()).collect();
-    if runs.iter().all(|(_, font)| font.is_none()) {
+    if runs.iter().all(|(_, context)| context.is_none()) {
         return Ok((text, None));
     }
+    let cell_default: Vec<&crate::odf_props::Style> =
+        ctx.store.default_style("table-cell").into_iter().collect();
+    let document_font = super::cells::font_of(&cell_default, &ctx.faces, None);
+    let family_default = |family: &str| {
+        let default: Vec<&crate::odf_props::Style> =
+            ctx.store.default_style(family).into_iter().collect();
+        PartialFont::of(&default, &ctx.faces)
+    };
+    let defaults = [
+        ("paragraph", family_default("paragraph")),
+        ("text", family_default("text")),
+    ];
     let mut out = Vec::with_capacity(runs.len());
-    for (text, font) in runs {
+    for (text, context) in runs {
+        let font = match &context {
+            Some(context) => {
+                let default = defaults
+                    .iter()
+                    .find(|(family, _)| *family == context.family)
+                    .map(|(_, d)| d.clone())
+                    .unwrap_or_default();
+                super::cells::run_font_of(&context.set.over(&default).realize(&document_font))
+            }
+            None => super::cells::run_font_of(&cell_font),
+        };
         let run = Run {
             text,
-            font: Some(super::cells::run_font_of(
-                font.as_deref().unwrap_or(&cell_font),
-            )),
+            font: Some(font),
         };
         ctx.budget.bytes(super::retained_size(&run))?;
         out.push(run);
@@ -1451,23 +1475,36 @@ fn rich_text(
     Ok((text, Some(out)))
 }
 
-/// The font of a formatting context: style `name` of `family` (its own
-/// chain, without the family default) over the font around it. `None`
-/// when the document does not define the style (the context changes
-/// nothing).
-fn context_font(ctx: &Context, family: &str, name: &str, outer: &Font) -> Option<Rc<Font>> {
-    ctx.store.find(family, name)?;
-    let chain = ctx.store.chain_own(family, name);
-    Some(Rc::new(super::cells::font_of(
-        &chain,
-        &ctx.faces,
-        Some(outer),
-    )))
+/// A formatting context of cell text: what it and the contexts around it
+/// set, and its style family.
+struct TextContext {
+    set: PartialFont,
+    family: &'static str,
 }
 
-fn push_run(runs: &mut Vec<(String, Option<Rc<Font>>)>, text: &str, font: &Option<Rc<Font>>) {
+/// The context of style `name` of `family` inside `outer`. `None` when the
+/// document does not define the style (the context changes nothing).
+fn text_context(
+    ctx: &Context,
+    family: &'static str,
+    name: &str,
+    outer: &TextContext,
+) -> Option<Rc<TextContext>> {
+    ctx.store.find(family, name)?;
+    let chain = ctx.store.chain_own(family, name);
+    Some(Rc::new(TextContext {
+        set: PartialFont::of(&chain, &ctx.faces).over(&outer.set),
+        family,
+    }))
+}
+
+fn push_run(
+    runs: &mut Vec<(String, Option<Rc<TextContext>>)>,
+    text: &str,
+    context: &Option<Rc<TextContext>>,
+) {
     if let Some(last) = runs.last_mut() {
-        let same = match (&last.1, font) {
+        let same = match (&last.1, context) {
             (None, None) => true,
             (Some(a), Some(b)) => Rc::ptr_eq(a, b),
             _ => false,
@@ -1477,19 +1514,19 @@ fn push_run(runs: &mut Vec<(String, Option<Rc<Font>>)>, text: &str, font: &Optio
             return;
         }
     }
-    runs.push((text.to_string(), font.clone()));
+    runs.push((text.to_string(), context.clone()));
 }
 
 fn collect_runs(
     ctx: &Context,
     node: roxmltree::Node<'_, '_>,
-    font: &Option<Rc<Font>>,
-    cell_font: &Font,
-    runs: &mut Vec<(String, Option<Rc<Font>>)>,
+    context: &Option<Rc<TextContext>>,
+    cell: &Rc<TextContext>,
+    runs: &mut Vec<(String, Option<Rc<TextContext>>)>,
 ) {
     for child in node.children() {
         if child.is_text() {
-            push_run(runs, child.text().unwrap_or(""), font);
+            push_run(runs, child.text().unwrap_or(""), context);
             continue;
         }
         if child.tag_name().namespace() != Some(NS_TEXT) {
@@ -1497,21 +1534,25 @@ fn collect_runs(
         }
         match child.tag_name().name() {
             // `content.xml` is bounded by `check_space_runs` before reading.
-            "s" => push_run(runs, &" ".repeat(crate::odf_text::space_count(child)), font),
-            "tab" => push_run(runs, "\t", font),
-            "line-break" => push_run(runs, "\n", font),
+            "s" => push_run(
+                runs,
+                &" ".repeat(crate::odf_text::space_count(child)),
+                context,
+            ),
+            "tab" => push_run(runs, "\t", context),
+            "line-break" => push_run(runs, "\n", context),
             "span" => {
-                let outer = font.as_deref().unwrap_or(cell_font);
+                let outer = context.as_ref().unwrap_or(cell);
                 let inner = child
                     .attribute((NS_TEXT, "style-name"))
-                    .and_then(|name| context_font(ctx, "text", name, outer));
+                    .and_then(|name| text_context(ctx, "text", name, outer));
                 match inner {
-                    Some(inner) => collect_runs(ctx, child, &Some(inner), cell_font, runs),
-                    None => collect_runs(ctx, child, font, cell_font, runs),
+                    Some(inner) => collect_runs(ctx, child, &Some(inner), cell, runs),
+                    None => collect_runs(ctx, child, context, cell, runs),
                 }
             }
             "note" | "ruby-text" => {}
-            _ => collect_runs(ctx, child, font, cell_font, runs),
+            _ => collect_runs(ctx, child, context, cell, runs),
         }
     }
 }

@@ -792,3 +792,60 @@ fn percentage_font_sizes_scale_the_parent_style() {
     let runs = run_fonts(&workbook.sheets[0].rows[0].cells[0]);
     assert_eq!(runs[0].3, Some(30.0));
 }
+
+#[test]
+fn a_cell_paragraph_falls_back_to_the_paragraph_family_default() {
+    // §16.2: the initial family of `<text:p text:style-name="P">` is
+    // paragraph, so its default (red) applies, not the text default.
+    let common = r##"<style:default-style style:family="paragraph"><style:text-properties fo:color="#ff0000"/></style:default-style><style:default-style style:family="text"><style:text-properties fo:color="#0000ff"/></style:default-style>"##;
+    let automatic = r#"<style:style style:name="P" style:family="paragraph"><style:text-properties fo:font-style="italic"/></style:style>"#;
+    let body = content(
+        automatic,
+        &table(
+            r#"<table:table-row><table:table-cell office:value-type="string"><text:p text:style-name="P">x</text:p></table:table-cell></table:table-row>"#,
+        ),
+    );
+    let workbook = read_text(&body, Some(&styles(common))).unwrap();
+    let runs = run_fonts(&workbook.sheets[0].rows[0].cells[0]);
+    assert_eq!(runs[0].4.as_deref(), Some("FF0000"));
+}
+
+#[test]
+fn shape_text_defaults_come_after_the_graphic_and_paragraph_styles() {
+    // The graphic style's green beats the paragraph default's red; a span
+    // setting only italic keeps the paragraph's bold over the text
+    // default's normal weight, and an unset colour still reaches the
+    // text default where nothing else sets one.
+    let common = r##"<style:default-style style:family="paragraph"><style:text-properties fo:color="#ff0000"/></style:default-style><style:default-style style:family="text"><style:text-properties fo:font-weight="normal"/></style:default-style>"##;
+    let automatic = r##"<style:style style:name="gr1" style:family="graphic"><style:text-properties fo:color="#00ff00"/></style:style><style:style style:name="P" style:family="paragraph"><style:text-properties fo:font-weight="bold"/></style:style><style:style style:name="I" style:family="text"><style:text-properties fo:font-style="italic"/></style:style>"##;
+    let body = content(
+        automatic,
+        &table(
+            r#"<table:table-row><table:table-cell><draw:frame draw:style-name="gr1" svg:width="2cm" svg:height="1cm"><draw:text-box><text:p text:style-name="P">a<text:span text:style-name="I">b</text:span></text:p></draw:text-box></draw:frame></table:table-cell></table:table-row>"#,
+        ),
+    );
+    let workbook = read_text(&body, Some(&styles(common))).unwrap();
+    let shape = &workbook.sheets[0].worksheet.shape_groups[0].shapes[0];
+    let runs: Vec<(String, bool, bool, Option<String>)> = shape.text.as_ref().unwrap().paragraphs
+        [0]
+    .runs
+    .iter()
+    .filter_map(|run| match run {
+        xlsx_model::ShapeTextRun::Text {
+            text,
+            bold,
+            italic,
+            color,
+            ..
+        } => Some((text.clone(), *bold, *italic, color.clone())),
+        _ => None,
+    })
+    .collect();
+    assert_eq!(
+        runs,
+        [
+            ("a".to_string(), true, false, Some("#00FF00".to_string())),
+            ("b".to_string(), true, true, Some("#00FF00".to_string())),
+        ]
+    );
+}
