@@ -333,7 +333,7 @@ export function resolveNumberingMarkerGeometry(
   // installed Wingdings in another slot) it is shaped without the slots, as
   // is an emoji-capable one: its monochrome proof is for the generic route.
   const safeInSlots = (text: string) => !text.includes('\uFE0E') && [...text].every((character) => {
-    const family = service.scalarFamily?.(keptSlots, character);
+    const family = service.scalarFamily?.(markerSlots, character);
     if (family === undefined) return false;
     if (!isSymbolFontFamily(family)) return true;
     const probe = service.symbolText?.({ ...symbolRequest, text: '\uF0B7',
@@ -343,8 +343,8 @@ export function resolveNumberingMarkerGeometry(
   });
   const partLayouts = markerText
     ? markerParts.map((part) => shapeNumberingMarkerText(
-        part.mapped && !(part.unicodeFace && safeInSlots(part.text))
-          ? convertedInput : keptInput, part.text, 1, service, clusterGeometry,
+        !part.mapped ? keptInput : part.unicodeFace && safeInSlots(part.text) ? markerInput : convertedInput,
+        part.text, 1, service, clusterGeometry,
       ))
     : [];
   const markerLayout = partLayouts.length === 0 || partLayouts.some((layout) => !layout)
