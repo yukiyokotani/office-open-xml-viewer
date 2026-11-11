@@ -279,17 +279,28 @@ export function resolveNumberingMarkerGeometry(
     ? [fonts.ascii, fonts.highAnsi, fonts.eastAsia, fonts.complexScript] : []);
   // Slots carry the effective level rPr; a model whose slots do not name the
   // marker's symbol family (older/public models) judges that family alone.
-  const slotted = slots.some(isSymbolFontFamily);
-  const symbolRequest = {
-    fonts: slotted ? markerInput.fonts
-      : { ascii: markerFamily, highAnsi: markerFamily, eastAsia: markerFamily, complexScript: markerFamily },
-    themeFonts: slotted ? markerInput.themeFonts : undefined,
-    themeFontPresence: slotted ? markerInput.themeFontPresence : undefined,
+  // A slot whose family is not the marker's symbol font (say a complex-script
+  // marker whose cs slot names a text face) would draw the codes as plain
+  // text, while Word draws the lvlText codes in that symbol font; such a
+  // marker is judged, and its kept codes shaped, in the marker family alone.
+  const markerSlots = {
+    fonts: markerInput.fonts, themeFonts: markerInput.themeFonts, themeFontPresence: markerInput.themeFontPresence,
     weight: markerInput.weight, style: markerInput.style, complexScript: markerInput.complexScript,
-    fontHint: markerInput.fontHint, eastAsiaLanguage: markerInput.eastAsiaLanguage, text: numbering.text,
+    fontHint: markerInput.fontHint, eastAsiaLanguage: markerInput.eastAsiaLanguage,
   };
-  const judged = numbering.picBulletImagePath
-    || ![markerFamily, ...slots].some(isSymbolFontFamily)
+  const slotted = service.scalarFamily
+    ? [...numbering.text].every((character) => isSymbolFontFamily(service.scalarFamily!(markerSlots, character)))
+    : slots.some(isSymbolFontFamily);
+  const symbolMarker = !numbering.picBulletImagePath && [markerFamily, ...slots].some(isSymbolFontFamily);
+  const keptInput: NumberingMarkerShapeInput = slotted || !symbolMarker || !isSymbolFontFamily(markerFamily) ? markerInput : {
+    ...markerInput,
+    fonts: { ascii: markerFamily, highAnsi: markerFamily, eastAsia: markerFamily, complexScript: markerFamily },
+    themeFonts: undefined,
+    themeFontPresence: undefined,
+  };
+  const keptSlots = { ...markerSlots, fonts: keptInput.fonts, themeFonts: keptInput.themeFonts, themeFontPresence: keptInput.themeFontPresence };
+  const symbolRequest = { ...keptSlots, text: numbering.text };
+  const judged = !symbolMarker
     ? null
     : service.symbolText?.(symbolRequest) ?? symbolTextToUnicodeSegments(numbering.text, markerFamily);
   // Pieces are joined in logical order, which is the visual order only in a
@@ -321,13 +332,8 @@ export function resolveNumberingMarkerGeometry(
   // draws none (judged with a probe code). Otherwise (say "(" taking an
   // installed Wingdings in another slot) it is shaped without the slots, as
   // is an emoji-capable one: its monochrome proof is for the generic route.
-  const markerSlots = {
-    fonts: markerInput.fonts, themeFonts: markerInput.themeFonts, themeFontPresence: markerInput.themeFontPresence,
-    weight: markerInput.weight, style: markerInput.style, complexScript: markerInput.complexScript,
-    fontHint: markerInput.fontHint, eastAsiaLanguage: markerInput.eastAsiaLanguage,
-  };
   const safeInSlots = (text: string) => !text.includes('\uFE0E') && [...text].every((character) => {
-    const family = service.scalarFamily?.(markerSlots, character);
+    const family = service.scalarFamily?.(keptSlots, character);
     if (family === undefined) return false;
     if (!isSymbolFontFamily(family)) return true;
     const probe = service.symbolText?.({ ...symbolRequest, text: '\uF0B7',
@@ -338,7 +344,7 @@ export function resolveNumberingMarkerGeometry(
   const partLayouts = markerText
     ? markerParts.map((part) => shapeNumberingMarkerText(
         part.mapped && !(part.unicodeFace && safeInSlots(part.text))
-          ? convertedInput : markerInput, part.text, 1, service, clusterGeometry,
+          ? convertedInput : keptInput, part.text, 1, service, clusterGeometry,
       ))
     : [];
   const markerLayout = partLayouts.length === 0 || partLayouts.some((layout) => !layout)

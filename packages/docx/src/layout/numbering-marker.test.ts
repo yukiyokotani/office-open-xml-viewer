@@ -162,6 +162,30 @@ describe('resolveNumberingMarkerGeometry', () => {
     expect(requests[0]).toEqual({ text: '\u2022', ascii: 'Symbol' });
   });
 
+  it('judges a complex-script symbol marker in its symbol family, not its cs text face', () => {
+    // The cs slot names a text face; Word still draws the lvlText code in Symbol.
+    const requests: { text: string; cs: string | null | undefined }[] = [];
+    const base = createTextLayoutService({
+      fonts: createFontResolver([]),
+      measurer: { fingerprint: 'marker-symbol-cs', measure: (request) => ({
+        advancePt: request.text.length * 6, ascentPt: 8, descentPt: 2,
+      }) },
+      symbolText: (markerText, family) => symbolTextToUnicodeSegments(markerText, family, { encoding: SYMBOL_FACE_UNICODE }),
+    });
+    const service: TextLayoutService = { ...base, shape(request) {
+      requests.push({ text: request.text, cs: request.fonts.complexScript });
+      return base.shape(request);
+    } };
+    const geometry = resolveNumberingMarkerGeometry(
+      { numId: 1, level: 0, format: 'bullet', text: '\uF0B7', suff: 'tab', indentLeft: 0, tab: 36, fontFamily: 'Symbol' },
+      { fontSizePt: 12, fonts: { ascii: 'Symbol', highAnsi: 'Symbol', eastAsia: 'Symbol', complexScript: 'Times New Roman' },
+        weight: 400, style: 'normal', complexScript: true },
+      { authoredFirstIndentPt: 0, physicalIndentLeftPt: 0, tabStops: [], defaultTabPt: 36, baseRtl: true }, service,
+    );
+    expect(geometry.markerText).toBe('\u2022');
+    expect(requests[0]).toEqual({ text: '\u2022', cs: null });
+  });
+
   it('keeps a partly native marker as one authored run in a right-to-left paragraph', () => {
     const requests: { text: string; ascii: string | null | undefined }[] = [];
     const base = createTextLayoutService({
