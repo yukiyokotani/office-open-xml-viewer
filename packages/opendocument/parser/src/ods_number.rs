@@ -233,13 +233,15 @@ impl DataStyles {
         let mapped = |name: &str| -> Option<&Section> { self.sections.get(name) };
         // (condition, code, divisor) of each numeric map target.
         let mut numeric: Vec<(String, String, f64)> = Vec::new();
-        let mut text: Option<String> = None;
+        // The text section: the last text map's code, borrowed so that many
+        // maps to one large text style copy nothing.
+        let mut text: Option<&str> = None;
         for (condition, target) in &base.maps {
             let Some(section) = mapped(target) else {
                 continue;
             };
             if section.kind == DataKind::Text {
-                text = Some(section.code.clone());
+                text = Some(section.code.as_str());
                 continue;
             }
             if numeric.len() >= MAX_NUMERIC_SECTIONS {
@@ -253,7 +255,7 @@ impl DataStyles {
             numeric.push((condition, section.code.clone(), section.divisor));
         }
         let base_code = if base.kind == DataKind::Text {
-            text.get_or_insert_with(|| base.code.clone());
+            text.get_or_insert(base.code.as_str());
             // Numbers no map matches show in the standard format.
             ("General".to_string(), 1.0)
         } else {
@@ -297,7 +299,7 @@ impl DataStyles {
             }
             let divisors = sections.iter().map(|(_, d)| *d).collect();
             let mut codes: Vec<String> = sections.into_iter().map(|(c, _)| c).collect();
-            codes.push(text);
+            codes.push(text.to_string());
             return Ok(FormatCode {
                 code: codes.join(";"),
                 divisors,

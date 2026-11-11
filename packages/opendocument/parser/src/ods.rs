@@ -62,6 +62,10 @@ pub const MAX_CELLS: usize = 8_000_000;
 /// Implementation bound on the retained model of one workbook (strings and
 /// fixed per-entry overheads), charged as content is materialized.
 pub const MAX_MODEL_BYTES: usize = 512 * 1024 * 1024;
+/// Implementation bound on the grid-walk steps of one workbook (each column
+/// segment of an authored cell, each per-column slot of the formatted-column
+/// scan).
+pub const MAX_WALK_STEPS: usize = 64 * 1024 * 1024;
 /// Implementation bound on charts and drawings per workbook.
 pub const MAX_DRAWINGS: usize = 65_536;
 
@@ -75,6 +79,7 @@ pub const MDW_FALLBACK: f64 = 8.0;
 /// outside it.
 pub(crate) struct Budget {
     cells: std::cell::Cell<usize>,
+    steps: std::cell::Cell<usize>,
     bytes: std::cell::Cell<usize>,
     limit: usize,
 }
@@ -101,6 +106,7 @@ impl Budget {
     pub(crate) fn with_limit(limit: usize) -> BudgetRef {
         std::rc::Rc::new(Self {
             cells: std::cell::Cell::new(0),
+            steps: std::cell::Cell::new(0),
             bytes: std::cell::Cell::new(0),
             limit: limit.min(MAX_MODEL_BYTES),
         })
@@ -162,6 +168,17 @@ impl Budget {
         self.bytes(retained_size(value))?;
         Ok(value.clone())
     }
+    /// Admit `count` steps of walking the grid (column segments and
+    /// per-column slots a row visits). Bounds the work repeated cells over
+    /// many column runs can cause where they materialize nothing.
+    pub(crate) fn steps(&self, count: usize) -> Result<(), String> {
+        let steps = self.steps.get().saturating_add(count);
+        self.steps.set(steps);
+        if steps > MAX_WALK_STEPS {
+            return Err(resource("table walk"));
+        }
+        Ok(())
+    }
     /// Model bytes charged so far (transient copies included).
     pub(crate) fn used(&self) -> usize {
         self.bytes.get()
@@ -191,8 +208,12 @@ pub(crate) struct Context {
     pub budget: BudgetRef,
     /// Package images referenced by drawings (paths).
     pub images: BTreeSet<String>,
+    /// Each referenced package image's facts, read once.
+    pub image_facts: HashMap<String, draw::ImageFact>,
     pub drawing_count: usize,
     pub sheet_names: Vec<String>,
+    /// Position of each sheet name (the first table of the name).
+    pub sheet_index: HashMap<String, usize>,
 }
 
 /// One table: its worksheet model (rows held apart for the cursor) and the
@@ -265,6 +286,12 @@ fn read_charged(package: &OdfPackage, budget: &BudgetRef) -> Result<OdsWorkbook,
     let styles_root = styles_doc.as_ref().map(|doc| doc.root_element());
     let content_root = content_doc.root_element();
     crate::odf_text::check_space_runs(content_root)?;
+    // Font names are copied into every font that inherits them: bounded
+    // before any style resolves.
+    crate::odf_text::check_font_names(content_root)?;
+    if let Some(root) = styles_root {
+        crate::odf_text::check_font_names(root)?;
+    }
     if styles_root.is_some_and(|root| !xml::is(root, NS_OFFICE, "document-styles"))
         || !xml::is(content_root, NS_OFFICE, "document-content")
     {
@@ -336,6 +363,15 @@ fn read_charged(package: &OdfPackage, budget: &BudgetRef) -> Result<OdsWorkbook,
         .iter()
         .map(|t| t.attribute((NS_TABLE, "name")).unwrap_or("").to_string())
         .collect();
+    // Sheet positions by name (the first table of a name), so name lookups
+    // never scan every sheet.
+    let mut sheet_index: HashMap<String, usize> = HashMap::new();
+    for (index, name) in sheet_names.iter().enumerate() {
+        if !sheet_index.contains_key(name) {
+            budget.bytes(hash_entry_bytes::<String, usize>(name.len()))?;
+            sheet_index.insert(name.clone(), index);
+        }
+    }
     let mut context = Context {
         store,
         data,
@@ -346,8 +382,10 @@ fn read_charged(package: &OdfPackage, budget: &BudgetRef) -> Result<OdsWorkbook,
         date1904,
         budget: budget.clone(),
         images: BTreeSet::new(),
+        image_facts: HashMap::new(),
         drawing_count: 0,
         sheet_names: sheet_names.clone(),
+        sheet_index,
     };
     let mut sheets = Vec::with_capacity(tables.len());
     let mut pending_charts = Vec::new();
@@ -368,7 +406,7 @@ fn read_charged(package: &OdfPackage, budget: &BudgetRef) -> Result<OdsWorkbook,
         &mut context,
         &mut warnings,
     )?;
-    let mut defined_names = extras::named_expressions(budget, spreadsheet, &sheet_names)?;
+    let mut defined_names = extras::named_expressions(budget, spreadsheet, &context.sheet_index)?;
     for (index, node) in tables.iter().enumerate() {
         if let Some(ranges) = node.attribute((NS_TABLE, "print-ranges")) {
             if let Some(formula) = extras::convert_range_list(ranges) {
@@ -383,7 +421,7 @@ fn read_charged(package: &OdfPackage, budget: &BudgetRef) -> Result<OdsWorkbook,
         budget,
         spreadsheet,
         &mut sheets,
-        &sheet_names,
+        &context.sheet_index,
         &mut defined_names,
     )?;
     extras::content_validations(budget, spreadsheet, &mut sheets)?;
@@ -391,16 +429,32 @@ fn read_charged(package: &OdfPackage, budget: &BudgetRef) -> Result<OdsWorkbook,
     // Defined names in scope for each sheet (workbook-global, then local).
     // Every sheet holds its own copy of each global name: each copy is
     // admitted before it is made.
+    // Names grouped by scope once (workbook-global, then each sheet's).
+    let global: Vec<usize> = (0..defined_names.len())
+        .filter(|at| defined_names[*at].1.is_none())
+        .collect();
+    let mut local: Vec<Vec<usize>> = vec![Vec::new(); sheets.len()];
+    budget.bytes(
+        defined_names
+            .len()
+            .saturating_mul(2 * std::mem::size_of::<usize>())
+            .saturating_add(
+                sheets
+                    .len()
+                    .saturating_mul(std::mem::size_of::<Vec<usize>>()),
+            ),
+    )?;
+    for (at, (_, scope, _)) in defined_names.iter().enumerate() {
+        if let Some(list) = scope.and_then(|index| local.get_mut(index)) {
+            list.push(at);
+        }
+    }
     for (index, sheet) in sheets.iter_mut().enumerate() {
         let in_scope = || {
-            defined_names
+            global
                 .iter()
-                .filter(|(_, scope, _)| scope.is_none())
-                .chain(
-                    defined_names
-                        .iter()
-                        .filter(move |(_, scope, _)| *scope == Some(index)),
-                )
+                .chain(local[index].iter())
+                .map(|at| &defined_names[*at])
         };
         let mut cost = 0usize;
         let mut count = 0usize;
@@ -675,6 +729,19 @@ pub fn bootstrap(workbook: &mut OdsWorkbook) -> xlsx_model::ParsedWorkbook {
         },
         styles: workbook.styles.take().unwrap_or_default(),
         shared_strings: Vec::new(),
+    }
+}
+
+/// The sheet a range names (the first of that name), or the first sheet
+/// for a range without a sheet name.
+pub(crate) fn sheet_named<'a>(
+    sheets: &'a [OdsSheet],
+    index: &HashMap<String, usize>,
+    name: Option<&str>,
+) -> Option<&'a OdsSheet> {
+    match name {
+        None => sheets.first(),
+        Some(name) => index.get(name).and_then(|at| sheets.get(*at)),
     }
 }
 

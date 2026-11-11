@@ -191,6 +191,30 @@ pub fn check_space_runs(root: roxmltree::Node<'_, '_>) -> Result<(), String> {
     Ok(())
 }
 
+/// Implementation bound on one font family or font-face name (`svg` /
+/// `fo:font-family`, `style:font-name*`, a face's `style:name`). Readers copy
+/// a resolved family into every font, text run and axis that inherits it,
+/// so the bound keeps each copy (and each nesting level's) small; a longer
+/// name rejects the part.
+pub const MAX_FONT_NAME_BYTES: usize = 1024;
+
+/// Reject a part naming a font longer than [`MAX_FONT_NAME_BYTES`].
+pub fn check_font_names(root: roxmltree::Node<'_, '_>) -> Result<(), String> {
+    for node in root.descendants().filter(|n| n.is_element()) {
+        let face = xml::is(node, crate::xml::NS_STYLE, "font-face");
+        for attribute in node.attributes() {
+            let name = attribute.name();
+            let font = name.starts_with("font-family")
+                || name.starts_with("font-name")
+                || face && name == "name";
+            if font && attribute.value().len() > MAX_FONT_NAME_BYTES {
+                return Err(crate::error::resource("font name"));
+            }
+        }
+    }
+    Ok(())
+}
+
 pub fn inline_text(node: roxmltree::Node<'_, '_>, out: &mut String) {
     for child in node.children() {
         if child.is_text() {

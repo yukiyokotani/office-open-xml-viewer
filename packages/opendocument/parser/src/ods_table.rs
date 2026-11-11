@@ -133,6 +133,13 @@ impl Template {
     }
 }
 
+/// The column run holding 1-based column `col` (runs are contiguous and in
+/// column order).
+fn column_at(columns: &[Column], col: u32) -> Option<&Column> {
+    let at = columns.partition_point(|c| c.last < col);
+    columns.get(at).filter(|c| c.first <= col)
+}
+
 /// The owned heap of `value` (its inline size is its vector slot's).
 fn heap_size<T: ooxml_common::chart::RetainedBytes>(value: &T) -> usize {
     usize::try_from(value.heap_bytes()).unwrap_or(usize::MAX)
@@ -241,12 +248,25 @@ pub(crate) fn read_table<'a, 'input>(
     }
     promote_column_formats(ctx, table, &mut columns)?;
     let default_xf_for_col = |col: u32, columns: &[Column]| -> (u32, Option<Rc<str>>) {
-        columns
-            .iter()
-            .find(|c| c.first <= col && col <= c.last)
+        column_at(columns, col)
             .map(|c| (c.default_xf, c.default_style.clone()))
             .unwrap_or((0, None))
     };
+    // Column runs whose default cell style carries §16.3 conditions: the
+    // only runs an unstyled blank cell must visit.
+    let mapped_runs: Vec<usize> = columns
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| {
+            ctx.store
+                .find(
+                    "table-cell",
+                    c.default_style.as_deref().unwrap_or("Default"),
+                )
+                .is_some_and(|s| !s.maps.is_empty())
+        })
+        .map(|(index, _)| index)
+        .collect();
 
     // ── Rows ───────────────────────────────────────────────────────────
     let mut walker = RowWalker {
@@ -259,6 +279,7 @@ pub(crate) fn read_table<'a, 'input>(
         validations: Vec::new(),
         style_maps: Vec::new(),
         style_map_last: HashMap::new(),
+        mapped_runs,
         next_row: 1,
         sheet_index: index,
     };
@@ -453,16 +474,16 @@ pub(crate) fn read_table<'a, 'input>(
     {
         worksheet.outline_pr = Some(xlsx_model::OutlinePr::default());
     }
-    // The drawing grid's copy of the column runs and row heights.
+    // The drawing grid's copy of the column runs with their left edges, and
+    // its row-height prefix sums.
     ctx.budget.bytes(
-        column_px
-            .len()
-            .saturating_mul(std::mem::size_of::<(u32, u32, u32)>())
+        (column_px.len() + 1)
+            .saturating_mul(std::mem::size_of::<(u32, u32, u32)>() + std::mem::size_of::<i64>())
             .saturating_add(
                 worksheet
                     .row_heights
                     .len()
-                    .saturating_mul(map_entry_bytes::<u32, u32>()),
+                    .saturating_mul(std::mem::size_of::<(u32, i64)>()),
             ),
     )?;
     let geometry = draw::Grid::new(&column_px, &worksheet, default_row_px);
@@ -538,9 +559,8 @@ fn promote_column_formats(
             let own = cell.attribute((NS_TABLE, "style-name")).or(row_default);
             let mut c = col;
             while c <= last {
-                let column = columns
-                    .iter()
-                    .find(|k| k.first as usize <= c && c <= k.last as usize);
+                ctx.budget.steps(1)?;
+                let column = column_at(columns, c as u32);
                 let segment_last = column.map_or(last, |k| (k.last as usize).min(last));
                 let style = own.or_else(|| column.and_then(|k| k.default_style.as_deref()));
                 let xf = ctx
@@ -580,18 +600,25 @@ fn promote_column_formats(
             let own = cell.attribute((NS_TABLE, "style-name")).or(row_default);
             let mut c = col;
             while c <= last {
-                let column = columns
-                    .iter()
-                    .find(|k| k.first as usize <= c && c <= k.last as usize);
+                ctx.budget.steps(1)?;
+                let column = column_at(columns, c as u32);
                 let segment_last = column.map_or(last, |k| (k.last as usize).min(last));
                 let style = own.or_else(|| column.and_then(|k| k.default_style.as_deref()));
                 let xf = ctx
                     .xfs
                     .xf_for(&ctx.store, &mut ctx.data, &ctx.faces, style)?;
-                let slots = candidates
+                // Candidates are disjoint and in column order: only those
+                // overlapping the segment are visited, each column once.
+                let from = candidates.partition_point(|(_, b)| *b < c);
+                let overlapping: Vec<(usize, usize)> = candidates[from..]
                     .iter()
-                    .filter(|(a, b)| *a <= segment_last && c <= *b)
-                    .flat_map(|(a, b)| (*a).max(c)..=(*b).min(segment_last));
+                    .take_while(|(a, _)| *a <= segment_last)
+                    .map(|(a, b)| ((*a).max(c), (*b).min(segment_last)))
+                    .collect();
+                for (a, b) in &overlapping {
+                    ctx.budget.steps(b - a + 1)?;
+                }
+                let slots = overlapping.into_iter().flat_map(|(a, b)| a..=b);
                 for index in slots {
                     let slot = &mut seen[index];
                     if has_content {
@@ -759,6 +786,8 @@ struct RowWalker<'a, 'input> {
     /// (style, first column, last column) → its last range, to extend it
     /// down over the next rows.
     style_map_last: HashMap<(String, u32, u32), usize>,
+    /// Indices of the column runs whose default style has conditions.
+    mapped_runs: Vec<usize>,
     next_row: u32,
     #[allow(dead_code)]
     sheet_index: usize,
@@ -872,6 +901,39 @@ fn read_row<'a, 'input>(
             column_default,
         )?;
         let has_value = !matches!(value, CellValue::Empty);
+        // A blank cell (no value type, no content, no own or row style)
+        // takes its column's default everywhere: it paints nothing of its
+        // own, so only runs whose default style has conditions are visited.
+        let unstyled_blank = !has_value
+            && formula.is_none()
+            && own_style.or(row_default).is_none()
+            && cell.attribute((NS_OFFICE, "value-type")).is_none()
+            && !cell.children().any(|n| n.is_element());
+        if unstyled_blank {
+            let from = walker
+                .mapped_runs
+                .partition_point(|run| columns[*run].last < col);
+            let runs: Vec<usize> = walker.mapped_runs[from..]
+                .iter()
+                .copied()
+                .take_while(|run| columns[*run].first <= cell_last)
+                .collect();
+            for run in runs {
+                ctx.budget.steps(1)?;
+                let column = &columns[run];
+                let style = column
+                    .default_style
+                    .clone()
+                    .unwrap_or_else(|| Rc::from("Default"));
+                record_style_map(
+                    ctx,
+                    walker,
+                    &style,
+                    (first, column.first.max(col)),
+                    (last, column.last.min(cell_last)),
+                )?;
+            }
+        }
         // The prototype of the last format seen in this authored cell; its
         // copies are made from it.
         let mut prototype: Option<Template> = None;
@@ -879,12 +941,11 @@ fn read_row<'a, 'input>(
         // a repeated block only when it is not repeated (LibreOffice never
         // repeats rows that carry them).
         // Walk the repeated cells as segments of constant column default.
-        let mut c = col;
+        let mut c = if unstyled_blank { cell_last + 1 } else { col };
         while c <= cell_last {
-            let segment_last = columns
-                .iter()
-                .find(|column| column.first <= c && c <= column.last)
-                .map_or(cell_last, |column| column.last.min(cell_last));
+            ctx.budget.steps(1)?;
+            let segment_last =
+                column_at(columns, c).map_or(cell_last, |column| column.last.min(cell_last));
             let (column_xf, column_style) = column_default(c, columns);
             let style = own_style.or(row_default).or(column_style.as_deref());
             let style_name = style.unwrap_or("Default");

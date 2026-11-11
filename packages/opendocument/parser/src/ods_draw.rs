@@ -11,78 +11,107 @@ use super::{parse_cell, Context, OdsSheet, MAX_COLS, MAX_DRAWINGS, MAX_ROWS};
 use crate::odf_props::{get, hex_color, length_pt, percent, Style};
 use crate::package::OdfPackage;
 use crate::xml::{self, NS_DRAW, NS_SVG, NS_TEXT, NS_XLINK};
-use std::collections::BTreeMap;
+use std::collections::HashMap;
 use xlsx_model::{ChartAnchor, DrawingAnchorTag, ImageAnchor, ShapeAnchor, ShapeInfo, Worksheet};
 
 const NS_TABLE: &str = crate::xml::NS_TABLE;
 pub const EMU_PER_PX: i64 = 9525;
 const EMU_PER_PT: f64 = 12_700.0;
 
-/// The rendered pixel grid of one worksheet.
+/// The rendered pixel grid of one worksheet, as prefix sums: every lookup
+/// is a binary search, so placing a drawing costs O(log) of the grid
+/// whatever its column runs and row-height overrides.
 pub struct Grid {
+    /// Column runs (first, last, px), contiguous from column 1.
     columns: Vec<(u32, u32, u32)>,
-    rows: BTreeMap<u32, u32>,
+    /// Left edge (px) of each run; one more entry for the end of the last.
+    column_left: Vec<i64>,
+    /// Rows whose height differs from the default (1-based, ascending) with
+    /// the summed difference of every override up to and including it.
+    rows: Vec<(u32, i64)>,
     default_row_px: u32,
 }
 
+/// Width of a column past the authored runs.
+const TRAILING_COL_PX: i64 = 64;
+
 impl Grid {
     pub fn new(columns: &[(u32, u32, u32)], worksheet: &Worksheet, default_row_px: u32) -> Self {
+        let mut column_left = Vec::with_capacity(columns.len() + 1);
+        let mut x = 0i64;
+        for (first, last, px) in columns {
+            column_left.push(x);
+            x += i64::from(last - first + 1) * i64::from(*px);
+        }
+        column_left.push(x);
+        let mut delta = 0i64;
         let rows = worksheet
             .row_heights
             .iter()
-            .map(|(row, pt)| (*row, super::pt_to_px(*pt)))
+            .map(|(row, pt)| {
+                delta += i64::from(super::pt_to_px(*pt)) - i64::from(default_row_px);
+                (*row, delta)
+            })
             .collect();
         Self {
             columns: columns.to_vec(),
+            column_left,
             rows,
             default_row_px,
         }
     }
 
-    fn col_px(&self, col: u32) -> u32 {
-        self.columns
-            .iter()
-            .find(|(first, last, _)| *first <= col && col <= *last)
-            .map_or(64, |(_, _, px)| *px)
+    /// The last column the authored runs cover (0 when none).
+    fn covered(&self) -> u32 {
+        self.columns.last().map_or(0, |(_, last, _)| *last)
     }
 
     /// Left edge of 0-based column `col0`.
     pub fn col_left(&self, col0: u32) -> i64 {
-        let mut x = 0i64;
-        let mut covered = 0u32;
-        for (first, last, px) in &self.columns {
-            if *first > col0 {
-                break;
+        // The run holding 1-based column `col0` (the last one left of it).
+        let at = self.columns.partition_point(|(_, last, _)| *last < col0);
+        match self.columns.get(at) {
+            Some((first, _, px)) if *first <= col0 => {
+                self.column_left[at] + i64::from(col0 - first + 1) * i64::from(*px)
             }
-            let end = (*last).min(col0);
-            x += i64::from(end - first + 1) * i64::from(*px);
-            covered = end;
+            _ => {
+                let covered = if at == 0 { 0 } else { self.columns[at - 1].1 };
+                self.column_left[at] + i64::from(col0.saturating_sub(covered)) * TRAILING_COL_PX
+            }
         }
-        x + i64::from(col0.saturating_sub(covered)) * 64
     }
 
     pub fn row_top(&self, row0: u32) -> i64 {
-        let mut y = i64::from(row0) * i64::from(self.default_row_px);
         if row0 == 0 {
             return 0;
         }
-        for (_, px) in self.rows.range(1..=row0) {
-            y += i64::from(*px) - i64::from(self.default_row_px);
-        }
-        y
+        // Overrides of rows 1..=row0.
+        let at = self.rows.partition_point(|(row, _)| *row <= row0);
+        let delta = if at == 0 { 0 } else { self.rows[at - 1].1 };
+        i64::from(row0) * i64::from(self.default_row_px) + delta
     }
 
-    /// (0-based column, offset px) containing `x`.
+    /// (0-based column, offset px) containing `x`; zero-width columns never
+    /// contain a point, and the last column takes everything past it.
     pub fn locate_x(&self, x: i64) -> (u32, i64) {
-        let mut left = 0i64;
-        for col in 1..=MAX_COLS {
-            let width = i64::from(self.col_px(col));
-            if x < left + width || col == MAX_COLS {
-                return (col - 1, x - left);
-            }
-            left += width;
+        let total = *self.column_left.last().unwrap_or(&0);
+        if x < total {
+            // The first run whose right edge is past `x` (zero-width runs
+            // end where they start, so they are passed over).
+            let at = self.column_left[1..].partition_point(|right| *right <= x);
+            let (first, _, px) = self.columns[at];
+            let offset = x - self.column_left[at];
+            let px = i64::from(px.max(1));
+            let col = first + (offset / px) as u32;
+            return (col - 1, offset % px);
         }
-        (MAX_COLS - 1, 0)
+        let covered = self.covered();
+        let col = i64::from(covered) + 1 + (x - total) / TRAILING_COL_PX;
+        if col >= i64::from(MAX_COLS) {
+            let last = MAX_COLS - 1;
+            return (last, x - self.col_left(last));
+        }
+        (col as u32 - 1, (x - total) % TRAILING_COL_PX)
     }
 
     pub fn locate_y(&self, y: i64) -> (u32, i64) {
@@ -434,6 +463,7 @@ fn read_drawing(
             push_image(
                 &ctx.budget,
                 &mut ctx.images,
+                &mut ctx.image_facts,
                 package,
                 &images,
                 rect,
@@ -1024,7 +1054,13 @@ fn push_shape_checked(
     rect: Rect,
     mut shape: ShapeInfo,
 ) -> Result<(), String> {
-    admit_fill_image(&ctx.budget, package, &mut ctx.images, &mut shape)?;
+    admit_fill_image(
+        &ctx.budget,
+        package,
+        &mut ctx.images,
+        &mut ctx.image_facts,
+        &mut shape,
+    )?;
     push_shape(&ctx.budget, worksheet, rect, shape)
 }
 
@@ -1056,10 +1092,37 @@ fn push_shape(
     budget.push(&mut worksheet.shape_groups, anchor)
 }
 
+/// What the reader needs of a package image: its decodable MIME type and
+/// pixel size (`None`: missing or not browser-decodable).
+pub(crate) type ImageFact = Option<(&'static str, Option<(f64, f64)>)>;
+
+/// The facts of package image `path`, read once per workbook however many
+/// drawings and fills reference it.
+fn image_fact(
+    budget: &super::Budget,
+    facts: &mut HashMap<String, ImageFact>,
+    package: &OdfPackage,
+    path: &str,
+) -> Result<ImageFact, String> {
+    if let Some(fact) = facts.get(path) {
+        return Ok(*fact);
+    }
+    let fact = if package.contains(path) {
+        let bytes = read_image_bytes(package, path)?;
+        image_mime(&bytes).map(|mime| (mime, image_size(&bytes)))
+    } else {
+        None
+    };
+    budget.bytes(super::hash_entry_bytes::<String, ImageFact>(path.len()))?;
+    facts.insert(path.to_string(), fact);
+    Ok(fact)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn push_image(
     budget: &super::Budget,
     admitted: &mut std::collections::BTreeSet<String>,
+    facts: &mut HashMap<String, ImageFact>,
     package: &OdfPackage,
     images: &[String],
     rect: Rect,
@@ -1072,30 +1135,24 @@ fn push_image(
     let mut raster = None;
     let mut svg = None;
     for path in images {
-        if !package.contains(path) {
-            continue;
-        }
-        let bytes = read_image_bytes(package, path)?;
-        match image_mime(&bytes) {
-            Some("image/svg+xml") => {
-                svg.get_or_insert((path.clone(), bytes));
+        match image_fact(budget, facts, package, path)? {
+            Some(("image/svg+xml", size)) => {
+                svg.get_or_insert((path.clone(), size));
             }
-            Some(mime) => {
-                raster.get_or_insert((path.clone(), mime, bytes));
+            Some((mime, size)) => {
+                raster.get_or_insert((path.clone(), mime, size));
             }
             None => {}
         }
     }
-    let (image_path, mime_type, bytes) = match (&raster, &svg) {
-        (Some((path, mime, bytes)), _) => (path.clone(), mime.to_string(), bytes.as_slice()),
-        (None, Some((path, bytes))) => {
-            (path.clone(), "image/svg+xml".to_string(), bytes.as_slice())
-        }
+    let (image_path, mime_type, size) = match (&raster, &svg) {
+        (Some((path, mime, size)), _) => (path.clone(), mime.to_string(), *size),
+        (None, Some((path, size))) => (path.clone(), "image/svg+xml".to_string(), *size),
         // StarView metafiles (LibreOffice object replacements) have no
         // browser decoder.
         (None, None) => return Ok(()),
     };
-    let src_rect = get(chain, "graphic:fo:clip").and_then(|clip| crop(clip, bytes));
+    let src_rect = get(chain, "graphic:fo:clip").and_then(|clip| crop(clip, size));
     let alpha = get(chain, "graphic:draw:image-opacity")
         .and_then(percent)
         .filter(|a| *a < 1.0);
@@ -1155,7 +1212,7 @@ fn admit_image_path(
 
 /// `fo:clip` `rect(top, right, bottom, left)` (§20.179), lengths measured on
 /// the image at its natural size (96 DPI), as SpreadsheetML crop fractions.
-fn crop(value: &str, bytes: &[u8]) -> Option<xlsx_model::SrcRect> {
+fn crop(value: &str, size: Option<(f64, f64)>) -> Option<xlsx_model::SrcRect> {
     let inner = value.trim().strip_prefix("rect(")?.strip_suffix(')')?;
     let parts: Vec<f64> = inner
         .split(|c: char| c == ',' || c.is_whitespace())
@@ -1165,7 +1222,7 @@ fn crop(value: &str, bytes: &[u8]) -> Option<xlsx_model::SrcRect> {
     if parts.len() != 4 || parts.iter().all(|v| *v == 0.0) {
         return None;
     }
-    let (w, h) = image_size(bytes)?;
+    let (w, h) = size?;
     // Natural size in points at 96 DPI.
     let (w, h) = (w * 0.75, h * 0.75);
     Some(xlsx_model::SrcRect {
@@ -1233,6 +1290,7 @@ pub(crate) fn resolve_charts(
                 let result = push_image(
                     &ctx.budget,
                     &mut ctx.images,
+                    &mut ctx.image_facts,
                     package,
                     &images,
                     rect,
@@ -1264,10 +1322,7 @@ impl crate::odf_chart::RangeResolver for SheetResolver<'_> {
         let Some((sheet, (r1, c1), (r2, c2))) = super::parse_range(address) else {
             return Ok(None);
         };
-        let Some(sheet) = self
-            .sheets
-            .iter()
-            .find(|s| sheet.as_deref().is_none_or(|name| name == s.name))
+        let Some(sheet) = super::sheet_named(self.sheets, &self.ctx.sheet_index, sheet.as_deref())
         else {
             return Ok(None);
         };
@@ -1353,6 +1408,7 @@ fn admit_fill_image(
     budget: &super::Budget,
     package: &OdfPackage,
     admitted: &mut std::collections::BTreeSet<String>,
+    facts: &mut HashMap<String, ImageFact>,
     shape: &mut ShapeInfo,
 ) -> Result<(), String> {
     let Some(xlsx_model::ShapeFill::Image {
@@ -1363,11 +1419,7 @@ fn admit_fill_image(
     else {
         return Ok(());
     };
-    let mime = if package.contains(image_path) {
-        image_mime(&read_image_bytes(package, image_path)?)
-    } else {
-        None
-    };
+    let mime = image_fact(budget, facts, package, image_path)?.map(|(mime, _)| mime);
     match mime {
         Some(mime) => {
             *mime_type = mime.to_string();
@@ -1382,4 +1434,57 @@ fn admit_fill_image(
 /// SpreadsheetML drawing parser emits them), unlike cell-style colours.
 fn shape_color(value: &str) -> Option<String> {
     hex_color(value).map(|hex| format!("#{hex}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The grid's lookups agree with walking it column by column and row by
+    /// row (zero-width runs, trailing default columns, height overrides).
+    #[test]
+    fn grid_lookups_match_a_linear_walk() {
+        let columns = [(1, 3, 40), (4, 4, 0), (5, 9, 17), (10, 10, 0), (11, 12, 90)];
+        let mut worksheet = Worksheet::placeholder("S", String::new());
+        for (row, pt) in [(2u32, 30.0), (3, 0.0), (7, 48.0), (1000, 3.0)] {
+            worksheet.row_heights.insert(row, pt);
+        }
+        let grid = Grid::new(&columns, &worksheet, 17);
+        let width = |col: u32| -> i64 {
+            columns
+                .iter()
+                .find(|(first, last, _)| *first <= col && col <= *last)
+                .map_or(64, |(_, _, px)| i64::from(*px))
+        };
+        let mut left = 0i64;
+        for col0 in 0..40u32 {
+            assert_eq!(grid.col_left(col0), left, "col_left {col0}");
+            left += width(col0 + 1);
+        }
+        for x in (0..2_000).step_by(7) {
+            let mut left = 0i64;
+            let mut expected = (MAX_COLS - 1, 0);
+            for col in 1..=MAX_COLS {
+                let w = width(col);
+                if x < left + w || col == MAX_COLS {
+                    expected = (col - 1, x - left);
+                    break;
+                }
+                left += w;
+            }
+            assert_eq!(grid.locate_x(x), expected, "locate_x {x}");
+        }
+        assert_eq!(grid.locate_x(i64::from(MAX_COLS) * 64 * 2).0, MAX_COLS - 1);
+        let height = |row: u32| -> i64 {
+            worksheet
+                .row_heights
+                .get(&row)
+                .map_or(17, |pt| i64::from(super::super::pt_to_px(*pt)))
+        };
+        let mut top = 0i64;
+        for row0 in 0..1_200u32 {
+            assert_eq!(grid.row_top(row0), top, "row_top {row0}");
+            top += height(row0 + 1);
+        }
+    }
 }

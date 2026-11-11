@@ -185,7 +185,7 @@ fn range_of(address: &str) -> Option<(Option<String>, CellRange)> {
 pub(crate) fn named_expressions(
     budget: &super::Budget,
     spreadsheet: roxmltree::Node<'_, '_>,
-    sheet_names: &[String],
+    sheet_index: &HashMap<String, usize>,
 ) -> Result<Vec<(String, Option<usize>, String)>, String> {
     let mut names = Vec::new();
     let mut read =
@@ -213,9 +213,9 @@ pub(crate) fn named_expressions(
         if xml::is(child, NS_TABLE, "named-expressions") {
             read(child, None)?;
         } else if xml::is(child, NS_TABLE, "table") {
-            let index = sheet_names
-                .iter()
-                .position(|n| Some(n.as_str()) == child.attribute((NS_TABLE, "name")));
+            let index = sheet_index
+                .get(child.attribute((NS_TABLE, "name")).unwrap_or(""))
+                .copied();
             for local in child
                 .children()
                 .filter(|n| xml::is(*n, NS_TABLE, "named-expressions"))
@@ -233,7 +233,7 @@ pub(crate) fn database_ranges(
     budget: &super::Budget,
     spreadsheet: roxmltree::Node<'_, '_>,
     sheets: &mut [OdsSheet],
-    sheet_names: &[String],
+    sheet_index: &HashMap<String, usize>,
     names: &mut Vec<(String, Option<usize>, String)>,
 ) -> Result<(), String> {
     for ranges in spreadsheet
@@ -252,7 +252,7 @@ pub(crate) fn database_ranges(
             };
             let index = sheet
                 .as_deref()
-                .and_then(|name| sheet_names.iter().position(|n| n == name));
+                .and_then(|name| sheet_index.get(name).copied());
             if let Some(name) = range.attribute((NS_TABLE, "name")) {
                 if !name.starts_with("__Anonymous_Sheet_DB__") {
                     if let Some(formula) = convert_range_list(address) {
@@ -287,17 +287,19 @@ pub(crate) fn content_validations(
         return Ok(());
     };
     // Each sheet's referenced ranges, by validation name.
-    let mut refs: Vec<HashMap<String, Vec<CellRange>>> = sheets
-        .iter_mut()
-        .map(|sheet| {
-            let mut by_name: HashMap<String, Vec<CellRange>> = HashMap::new();
-            for (name, range) in std::mem::take(&mut sheet.validation_refs) {
-                by_name.entry(name).or_default().push(range);
+    // Validation name → the sheets (in order) that reference it, each with
+    // its ranges: a definition visits only the sheets that use it.
+    let mut refs: HashMap<String, Vec<(usize, Vec<CellRange>)>> = HashMap::new();
+    for (index, sheet) in sheets.iter_mut().enumerate() {
+        for (name, range) in std::mem::take(&mut sheet.validation_refs) {
+            let users = refs.entry(name).or_default();
+            match users.last_mut() {
+                Some((last, ranges)) if *last == index => ranges.push(range),
+                _ => users.push((index, vec![range])),
             }
-            by_name
-        })
-        .collect();
-    if refs.iter().all(HashMap::is_empty) {
+        }
+    }
+    if refs.is_empty() {
         return Ok(());
     }
     for node in container
@@ -307,9 +309,9 @@ pub(crate) fn content_validations(
         let Some(name) = node.attribute((NS_TABLE, "name")) else {
             continue;
         };
-        if !refs.iter().any(|by_name| by_name.contains_key(name)) {
+        let Some(users) = refs.remove(name) else {
             continue;
-        }
+        };
         let mut validation = DataValidation {
             sqref: String::new(),
             validation_type: None,
@@ -345,15 +347,11 @@ pub(crate) fn content_validations(
             validation.error_message = Some(super::paragraph_text(error));
         }
         let cost = super::retained_size(&validation);
-        for (sheet, by_name) in sheets.iter_mut().zip(refs.iter_mut()) {
-            let Some(ranges) = by_name.remove(name) else {
-                continue;
-            };
+        for (index, ranges) in users {
+            let sheet = &mut sheets[index];
             let sqref = ranges.iter().map(range_text).collect::<Vec<_>>().join(" ");
-            budget.bytes(
-                cost.saturating_add(sqref.capacity())
-                    .saturating_add(std::mem::size_of::<DataValidation>()),
-            )?;
+            budget.bytes(cost.saturating_add(sqref.capacity()))?;
+            budget.grow(&sheet.worksheet.data_validations)?;
             sheet.worksheet.data_validations.push(DataValidation {
                 sqref,
                 ..validation.clone()
@@ -551,7 +549,8 @@ pub(crate) fn conditional_formats(
     }
     // Sparklines read cell values from every table.
     for (index, table) in tables.iter().enumerate() {
-        let groups = sparkline_groups(*table, sheets as &[OdsSheet], &ctx.budget)?;
+        let groups =
+            sparkline_groups(*table, sheets as &[OdsSheet], &ctx.sheet_index, &ctx.budget)?;
         if let Some(sheet) = sheets.get_mut(index) {
             sheet.worksheet.sparkline_groups = groups;
         }
@@ -917,6 +916,7 @@ fn condition_rule(
 fn sparkline_groups(
     table: roxmltree::Node<'_, '_>,
     sheets: &[OdsSheet],
+    sheet_index: &HashMap<String, usize>,
     budget: &super::Budget,
 ) -> Result<Vec<xlsx_model::SparklineGroup>, String> {
     let mut groups = Vec::new();
@@ -943,7 +943,9 @@ fn sparkline_groups(
                     continue;
                 };
                 let values = match spark.attribute((NS_CALCEXT, "data-range")) {
-                    Some(range) => range_values(sheets, range, budget)?.unwrap_or_default(),
+                    Some(range) => {
+                        range_values(sheets, sheet_index, range, budget)?.unwrap_or_default()
+                    }
                     None => Vec::new(),
                 };
                 budget.push(&mut sparklines, xlsx_model::Sparkline { row, col, values })?;
@@ -998,16 +1000,14 @@ const MAX_SPARKLINE_POINTS: u64 = 1_048_576;
 
 fn range_values(
     sheets: &[OdsSheet],
+    sheet_index: &HashMap<String, usize>,
     address: &str,
     budget: &super::Budget,
 ) -> Result<Option<Vec<Option<f64>>>, String> {
     let Some((sheet, (r1, c1), (r2, c2))) = parse_range(address) else {
         return Ok(None);
     };
-    let Some(sheet) = sheets
-        .iter()
-        .find(|s| sheet.as_deref().is_none_or(|n| n == s.name))
-    else {
+    let Some(sheet) = super::sheet_named(sheets, sheet_index, sheet.as_deref()) else {
         return Ok(None);
     };
     let count = (u64::from(r2 - r1) + 1).saturating_mul(u64::from(c2 - c1) + 1);

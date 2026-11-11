@@ -21,7 +21,10 @@ pub struct XfBuilder {
     borders: HashMap<String, u32>,
     num_fmts: HashMap<String, u32>,
     xfs: HashMap<String, u32>,
-    by_style: HashMap<Option<String>, u32>,
+    /// xf of each named cell style (`None` key: cells that name none),
+    /// looked up without allocating.
+    by_style: HashMap<String, u32>,
+    unstyled: Option<u32>,
     dxfs: HashMap<String, u32>,
     indent_pt: Vec<f64>,
     /// Data kind of each xf's number format (`None`: General).
@@ -62,6 +65,7 @@ impl XfBuilder {
             num_fmts: HashMap::new(),
             xfs: HashMap::new(),
             by_style: HashMap::new(),
+            unstyled: None,
             dxfs: HashMap::new(),
             indent_pt: Vec::new(),
             kinds: Vec::new(),
@@ -127,19 +131,25 @@ impl XfBuilder {
         faces: &HashMap<String, String>,
         style: Option<&str>,
     ) -> Result<u32, String> {
-        let key = style.map(str::to_string);
-        if let Some(found) = self.by_style.get(&key) {
-            return Ok(*found);
+        let found = match style {
+            Some(name) => self.by_style.get(name).copied(),
+            None => self.unstyled,
+        };
+        if let Some(found) = found {
+            return Ok(found);
         }
         let name = style.unwrap_or("Default");
         let chain = store.chain("table-cell", Some(name));
         let format = resolve(&chain, data, faces);
         let index = self.intern_format(format)?;
-        self.budget
-            .bytes(crate::ods::hash_entry_bytes::<Option<String>, u32>(
-                key.as_ref().map_or(0, String::len),
-            ))?;
-        self.by_style.insert(key, index);
+        match style {
+            Some(name) => {
+                self.budget
+                    .bytes(crate::ods::hash_entry_bytes::<String, u32>(name.len()))?;
+                self.by_style.insert(name.to_string(), index);
+            }
+            None => self.unstyled = Some(index),
+        }
         Ok(index)
     }
 
