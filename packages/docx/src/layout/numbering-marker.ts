@@ -1,4 +1,4 @@
-import { isSymbolFontFamily, symbolTextToUnicodeSegments } from '@silurus/ooxml-core';
+import { isSymbolFontFamily, symbolTextToUnicodeSegments, SYMBOL_FACE_UNICODE } from '@silurus/ooxml-core';
 import type { NumberingInfo, TabStop } from '../types.js';
 import { wordNumberingSpaceSuffixUsesArial, wordNumberingSuffixAcceptsCoincidentListTab } from './line-compatibility.js';
 import { nextTabStop, type TextLayoutService, type TextShapeResult } from './text.js';
@@ -300,7 +300,8 @@ export function resolveNumberingMarkerGeometry(
   // keeps some symbol codes in its face keeps all its authored codes in the
   // marker slots, so the converted ones stay unconverted there (a documented
   // limitation of a rare case: several codes the face draws only in part).
-  const keepsSymbolCodes = judged?.some((part) => !part.mapped && /[\uF020-\uF0FF]/u.test(part.text)) === true;
+  const keepsSymbolCodes = judged?.some((part) => !part.mapped && symbolTextToUnicodeSegments(part.text, markerFamily,
+    { encoding: SYMBOL_FACE_UNICODE, monochrome: () => true }).some((piece) => piece.mapped)) === true;
   const markerSegments = judged && judged.length > 1 && input.baseRtl !== false
     ? [keepsSymbolCodes ? { text: numbering.text, mapped: false }
       : { text: judged.map((part) => part.text).join(''), mapped: true }]

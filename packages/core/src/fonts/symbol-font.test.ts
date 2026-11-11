@@ -8,7 +8,7 @@ import {
   symbolTextToUnicodeSegments,
   type SymbolFaceEncoding,
 } from './symbol-font';
-import { createSymbolFaceOracle, measureSymbolFaceEncoding, symbolCmapEncoding } from './symbol-face';
+import { createSymbolFaceOracle, createSymbolMonochromeProbe, measureSymbolFaceEncoding, symbolCmapEncoding } from './symbol-face';
 import { symbolEncodingOfFaces } from './symbol-face-sources';
 import { ADOBE_SYMBOL_UNICODE } from './symbol-encoding';
 import { symbolFixtureFontBytes } from '../testing/symbol-font-fixture';
@@ -164,6 +164,25 @@ describe('symbolEncodingOfFaces', () => {
     expect(symbolFontToUnicode('a', 'Symbol', {
       encoding: symbolEncodingOfFaces([symbolFace('U+0-10FFFF'), shadowing], 400, 'normal')!,
     })).toBe(ch(0x3b1));
+  });
+});
+
+describe('createSymbolMonochromeProbe', () => {
+  it('draws on another canvas of the painting canvas class (Node canvases)', () => {
+    let created = 0;
+    class NodeCanvas {
+      constructor(readonly width: number, readonly height: number) { created++; }
+      getContext() {
+        return {
+          clearRect() {}, fillText() {}, font: '', fillStyle: '', textBaseline: '',
+          globalAlpha: 1, globalCompositeOperation: '',
+          getImageData: () => ({ data: new Uint8ClampedArray([0, 0, 0, 255]) }),
+        };
+      }
+    }
+    const owner = { canvas: new NodeCanvas(1, 1) };
+    expect(createSymbolMonochromeProbe(owner, 'sans-serif')('\u2665\uFE0E')).toBe(true);
+    expect(created).toBe(2);
   });
 });
 

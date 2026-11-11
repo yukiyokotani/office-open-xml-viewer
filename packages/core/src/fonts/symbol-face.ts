@@ -299,6 +299,15 @@ function scratchCanvas(owner: unknown): ProbeCanvas | null {
       canvas.height = 48;
       return canvas;
     }
+    // A detached canvas (OffscreenCanvas, or a Node canvas implementation such
+    // as @napi-rs/canvas or skia-canvas): another canvas of its own class.
+    const Ctor = (element as { constructor?: unknown } | undefined)?.constructor;
+    if (typeof Ctor === 'function' && Ctor !== Object) {
+      try {
+        const canvas = new (Ctor as new (width: number, height: number) => ProbeCanvas)(48, 48);
+        if (typeof canvas.getContext === 'function') return canvas;
+      } catch { /* not constructible this way */ }
+    }
     if (typeof OffscreenCanvas !== 'undefined') return new OffscreenCanvas(48, 48);
   } catch { /* no scratch canvas */ }
   return null;

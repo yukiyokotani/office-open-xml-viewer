@@ -136,6 +136,31 @@ describe('resolveNumberingMarkerGeometry', () => {
     expect(geometry.markerWidthPt).toBe(geometry.shape?.advancePt);
   });
 
+  it('keeps a partly native marker as one authored run in a right-to-left paragraph', () => {
+    const requests: { text: string; ascii: string | null | undefined }[] = [];
+    const base = createTextLayoutService({
+      fonts: createFontResolver([]),
+      measurer: { fingerprint: 'marker-symbol-rtl', measure: (request) => ({
+        advancePt: request.text.length * 6, ascentPt: 8, descentPt: 2,
+      }) },
+      symbolText: (markerText, family) => symbolTextToUnicodeSegments(markerText, family, {
+        encoding: { kind: 'known', pua: symbolCodeSet([0x61]), bare: symbolCodeSet([0x61]) },
+      }),
+    });
+    const service: TextLayoutService = { ...base, shape(request) {
+      requests.push({ text: request.text, ascii: request.fonts.ascii });
+      return base.shape(request);
+    } };
+    const geometry = resolveNumberingMarkerGeometry(
+      { numId: 1, level: 0, format: 'bullet', text: 'ab', suff: 'tab', indentLeft: 0, tab: 36, fontFamily: 'Symbol' },
+      { fontSizePt: 12, fonts: { ascii: 'Symbol', highAnsi: 'Symbol', eastAsia: 'Symbol', complexScript: 'Symbol' },
+        weight: 400, style: 'normal', complexScript: false },
+      { authoredFirstIndentPt: 0, physicalIndentLeftPt: 0, tabStops: [], defaultTabPt: 36, baseRtl: true }, service,
+    );
+    expect(geometry.markerText).toBe('ab');
+    expect(requests[0]).toEqual({ text: 'ab', ascii: 'Symbol' });
+  });
+
   it.each([
     [undefined, 3.75], [14, 3.75], [15, 3.75],
     [11, 7.5], [12, 7.5], [13, 7.5],
