@@ -173,6 +173,16 @@ const session = await openDocxDocument(legacyDocBytes, {
 });
 ```
 
+A picture's `imagePath` in the DOC model is a reader-owned key such as
+`legacy-doc/image/0`, not a ZIP part. Read its bytes through the open session:
+
+```typescript
+const picture = await session.getImage(run.imagePath, run.mimeType); // Blob
+```
+
+`openXlsxWorkbook(bytes, { legacyXls })` sessions offer the same `getImage`
+for worksheet pictures, and `openPptxPresentation` sessions already do.
+
 Both browser rendering modes and progressive layout use the same retained
 layout pipeline. The native source remains alive for image reads until the
 document is destroyed; finishing a model cursor does not dispose it.

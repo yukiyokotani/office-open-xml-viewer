@@ -509,13 +509,26 @@ Release checklist:
    - `site/package.json`,
    - `packages/mcp-server/Cargo.toml`.
 
-   After bumping the root version, run `pnpm sync:versions` to synchronize
-   `packages/legacy-office/package.json` (the public
-   `@silurus/ooxml-legacy-office` package), its exact `@silurus/ooxml` peer pin,
-   and the compiled companion runtime version. Run `pnpm install --lockfile-only`
-   and `pnpm check:versions`; CI and publishing reject any mismatch. Both npm
-   packages publish from the same tag, viewer first; retries skip exact versions
-   already present on npm.
+   After bumping the root version, run `pnpm sync:versions` to synchronize the
+   companion packages `packages/legacy-office/package.json`
+   (`@silurus/ooxml-legacy-office`) and `packages/opendocument/package.json`
+   (`@silurus/ooxml-opendocument`), their exact `@silurus/ooxml` peer pins, and
+   the compiled companion runtime version (`src/companion-version.ts`). Run
+   `pnpm install --lockfile-only` and `pnpm check:versions`; CI and publishing
+   reject any mismatch. All three npm packages publish from the same tag
+   (`scripts/publish-packages.mjs`): the viewer first, then legacy-office, then
+   opendocument; retries skip exact versions already present on npm.
+   `pnpm build:wasm` builds one OpenDocument reader per `./<format>` export of
+   the opendocument package through its `wasm:<format>` script, and
+   `pnpm test:packed-packages` expects exactly those formats' assets in the
+   tarball, so a new format needs only its export, script and build entry.
+   `publish.yml` authenticates with the `NPM_TOKEN` secret (plus OIDC for
+   provenance). Before the first release of a new companion package, the
+   repository owner must make sure that token can create new packages in the
+   `@silurus` scope (or publish the package once by hand and grant the token
+   access to it); a token limited to existing packages fails with E404/E403
+   after the viewer has already published, and the retry dispatch then
+   publishes only the missing companions.
 6. Run `cargo check -p ooxml-mcp-server` after bumping the MCP server so
    `Cargo.lock` follows.
 7. Open PR `chore(release): 0.x.0`.

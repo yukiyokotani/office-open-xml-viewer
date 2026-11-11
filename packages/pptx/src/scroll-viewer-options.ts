@@ -2,6 +2,8 @@ import type { FindHighlightColors, HyperlinkTarget, ViewerContextMenuEvent } fro
 import type { LoadOptions, RenderSlideOptions } from './presentation';
 import type { PptxSelectionContext } from './element-selection';
 import type { PptxCommentsOptions } from './comment-margin';
+import type { HiddenSlideMode } from './hidden';
+import type { DimOptions } from './types';
 
 /**
  * Options for {@link PptxScrollViewer}. Only the `width` and `dpr` per-slide
@@ -58,6 +60,35 @@ export interface PptxScrollViewerOptions extends Pick<RenderSlideOptions, 'width
   /** CSS backgrounds for ordinary and active in-document search matches. */
   findHighlightColors?: FindHighlightColors;
   /**
+   * How hidden slides (`<p:sld show="0">`, §19.3.1.38) are presented, with the
+   * same rules as `PptxViewerOptions.hiddenSlideMode`:
+   * - `'show'` (default): laid out and drawn like any other slide.
+   * - `'skip'`: hidden slides are left out of the scroll layout (no slot, no
+   *   gap, no scroll extent). `scrollToSlide(i)` (and an internal hyperlink)
+   *   aimed at a hidden slide lands on the next shown slide after it, else the
+   *   nearest shown slide before it; `findText` returns no matches on hidden
+   *   slides; `goToComment` on a hidden slide resolves `false`. Every reported
+   *   index stays the deck's absolute slide index, as in `PptxViewer`:
+   *   `onVisibleSlideChange(topIndex, total)` reports the absolute index of the
+   *   top shown slide and `total` = `slideCount` (use
+   *   {@link PptxScrollViewer.visibleSlideCount} for the shown count), and
+   *   `topVisibleSlide`, find match locations and hyperlink targets are
+   *   absolute too. If every slide is hidden there is nothing to skip to, and
+   *   the deck is laid out, searched and navigated as in `'show'`. With
+   *   `progressiveLayout`, a slide whose metadata is not published yet is laid
+   *   out as shown until it is known; the top visible slide keeps its place
+   *   when later slides drop out.
+   * - `'dim'`: drawn under a translucent overlay (PowerPoint thumbnail look).
+   *
+   * Change it at runtime with {@link PptxScrollViewer.setHiddenSlideMode}.
+   */
+  hiddenSlideMode?: HiddenSlideMode;
+  /**
+   * Overrides for the `'dim'` overlay. Merged over the default
+   * `{ color: '#ffffff', opacity: 0.6 }`, as in `PptxViewerOptions.hiddenSlideDim`.
+   */
+  hiddenSlideDim?: Partial<DimOptions>;
+  /**
    * Enable interactive audio/video playback. When true, mounted slides render
    * through {@link PptxPresentation.presentSlide} only while they are inside the
    * real viewport plus {@link mediaOverscan}. Other mounted slides retain static
@@ -112,7 +143,8 @@ export interface PptxScrollViewerOptions extends Pick<RenderSlideOptions, 'width
   pageShadow?: string | false;
   /** Fires when the top-most visible slide changes. `topIndex` from
    *  `computeVisibleRange` (the first slide intersecting the viewport top,
-   *  EXCLUDING overscan). */
+   *  EXCLUDING overscan). Both `topIndex` and `total` are absolute deck
+   *  values (`total` = `slideCount`), also with `hiddenSlideMode: 'skip'`. */
   onVisibleSlideChange?: (topIndex: number, total: number, layoutComplete: boolean) => void;
   /** IX9 — fires whenever the zoom factor actually changes (`1` = 100% = a slide
    *  at its natural EMU→px size): from {@link PptxScrollViewer.setScale},
