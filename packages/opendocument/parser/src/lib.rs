@@ -13,14 +13,22 @@ pub mod odt;
 #[cfg(feature = "odt")]
 mod odt_wasm;
 
+#[cfg(feature = "odf-chart")]
+pub mod odf_chart;
+#[cfg(feature = "odf-chart")]
+pub mod odf_fill;
+#[cfg(feature = "odf-chart")]
+pub mod odf_props;
+#[cfg(feature = "odf-chart")]
+pub mod odf_text;
 #[cfg(feature = "odp")]
 pub mod odp;
 #[cfg(feature = "odp")]
 mod odp_cursor;
 #[cfg(feature = "odp")]
-pub mod odp_geometry;
-#[cfg(feature = "odp")]
 mod odp_extrusion;
+#[cfg(feature = "odp")]
+pub mod odp_geometry;
 #[cfg(feature = "odp")]
 mod odp_media;
 #[cfg(feature = "odp")]
@@ -35,14 +43,6 @@ mod odp_text;
 mod odp_units;
 #[cfg(feature = "odp")]
 mod odp_wasm;
-#[cfg(feature = "odf-chart")]
-pub mod odf_chart;
-#[cfg(feature = "odf-chart")]
-pub mod odf_fill;
-#[cfg(feature = "odf-chart")]
-pub mod odf_props;
-#[cfg(feature = "odf-chart")]
-pub mod odf_text;
 #[cfg(feature = "ods")]
 pub mod ods;
 #[cfg(feature = "odf-chart")]

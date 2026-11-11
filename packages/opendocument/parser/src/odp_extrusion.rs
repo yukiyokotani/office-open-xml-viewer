@@ -227,14 +227,16 @@ pub fn scene(
             "perspectiveFront".to_string()
         }
     };
+    // §19.152: the default depth is `36pt 0`.
+    const DEFAULT_DEPTH: f64 = 36.0 * 12_700.0;
     let (depth, fraction) = pair("extrusion-depth")
         .map(|(a, b)| {
             (
-                length_emu(&a).unwrap_or(0.0),
+                length_emu(&a).unwrap_or(DEFAULT_DEPTH),
                 b.parse::<f64>().unwrap_or(0.0),
             )
         })
-        .unwrap_or((0.0, 0.0));
+        .unwrap_or((DEFAULT_DEPTH, 0.0));
     let extrusion_clr = (eg.attribute((NS_DRAW, "extrusion-color")) == Some("true"))
         .then(|| graphic.get(NS_DRAW, "secondary-fill-color").and_then(color))
         .flatten();

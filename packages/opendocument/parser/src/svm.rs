@@ -27,6 +27,9 @@ struct Reader<'a> {
     p: usize,
 }
 
+/// A polygon's points and optional point flags.
+type Polygon = (Vec<(f64, f64)>, Option<Vec<u8>>);
+
 impl<'a> Reader<'a> {
     fn u8(&mut self) -> Option<u8> {
         let v = *self.b.get(self.p)?;
@@ -90,7 +93,7 @@ impl<'a> Reader<'a> {
         Some(out)
     }
     /// `tools::Polygon::Read`: compat, points, and optional point flags.
-    fn polygon_with_flags(&mut self) -> Option<(Vec<(f64, f64)>, Option<Vec<u8>>)> {
+    fn polygon_with_flags(&mut self) -> Option<Polygon> {
         let (_, end) = self.compat()?;
         let points = self.polygon()?;
         let flags = if self.u8()? != 0 {
@@ -167,7 +170,8 @@ fn read_map_mode(r: &mut Reader<'_>, current: Option<&MapMode>) -> Option<MapMod
 
 #[derive(Clone)]
 struct Font {
-    family: String,
+    /// Shared: pushed states copy it (`MAX_STACK` deep).
+    family: std::rc::Rc<str>,
     height: f64,
     weight: u16,
     italic: bool,
@@ -245,7 +249,7 @@ pub fn to_svg(bytes: &[u8]) -> Option<Converted> {
         text: 0,
         align: 0,
         font: Font {
-            family: String::new(),
+            family: std::rc::Rc::from(""),
             height: 0.0,
             weight: 5,
             italic: false,
@@ -283,21 +287,23 @@ pub fn to_svg(bytes: &[u8]) -> Option<Converted> {
                 }
                 _ => out.push_str(r#" fill="none""#),
             }
-            match (stroke, s.line) {
-                (true, Some(c)) => {
-                    let _ = write!(
-                        out,
-                        r#" stroke="{}" stroke-width="{:.2}""#,
-                        css(c),
-                        width.max(len_scale(1.0)).max(width)
-                    );
-                }
-                _ => {}
+            if let (true, Some(c)) = (stroke, s.line) {
+                let _ = write!(
+                    out,
+                    r#" stroke="{}" stroke-width="{:.2}""#,
+                    css(c),
+                    width.max(len_scale(1.0)).max(width)
+                );
             }
             out
         };
-        let path_data = |points: &[(f64, f64)], flags: Option<&[u8]>, close: bool| -> String {
-            let mut d = String::new();
+        // Path data written straight into the output, within its bound
+        // (checked as each command is written; `None` past it).
+        let path_data = |d: &mut String,
+                         points: &[(f64, f64)],
+                         flags: Option<&[u8]>,
+                         close: bool|
+         -> Option<()> {
             let mut i = 0;
             while i < points.len() {
                 let (x, y) = pt(points[i]);
@@ -315,11 +321,14 @@ pub fn to_svg(bytes: &[u8]) -> Option<Converted> {
                     let _ = write!(d, "L{x:.2} {y:.2}");
                     i += 1;
                 }
+                if d.len() > MAX_SVG_BYTES {
+                    return None;
+                }
             }
-            if close && !d.is_empty() {
+            if close && !points.is_empty() {
                 d.push('Z');
             }
-            d
+            Some(())
         };
         match kind {
             // LINE
@@ -406,8 +415,9 @@ pub fn to_svg(bytes: &[u8]) -> Option<Converted> {
                             flags = f;
                         }
                     }
-                    let d = path_data(&points, flags.as_deref(), false);
-                    let _ = write!(body, r#"<path d="{d}"{}/>"#, paint(&state, false, true, w));
+                    body.push_str(r#"<path d=""#);
+                    path_data(&mut body, &points, flags.as_deref(), false)?;
+                    let _ = write!(body, r#""{}/>"#, paint(&state, false, true, w));
                 }
             }
             // POLYGON
@@ -420,10 +430,11 @@ pub fn to_svg(bytes: &[u8]) -> Option<Converted> {
                             flags = f;
                         }
                     }
-                    let d = path_data(&points, flags.as_deref(), true);
+                    body.push_str(r#"<path d=""#);
+                    path_data(&mut body, &points, flags.as_deref(), true)?;
                     let _ = write!(
                         body,
-                        r#"<path d="{d}" fill-rule="evenodd"{}/>"#,
+                        r#"" fill-rule="evenodd"{}/>"#,
                         paint(&state, true, true, 0.0)
                     );
                 }
@@ -434,7 +445,7 @@ pub fn to_svg(bytes: &[u8]) -> Option<Converted> {
                     r.p = end;
                     continue;
                 };
-                let mut polys: Vec<(Vec<(f64, f64)>, Option<Vec<u8>>)> = Vec::new();
+                let mut polys: Vec<Polygon> = Vec::new();
                 for _ in 0..n {
                     match a.polygon() {
                         Some(p) => polys.push((p, None)),
@@ -457,23 +468,23 @@ pub fn to_svg(bytes: &[u8]) -> Option<Converted> {
                         }
                     }
                 }
-                let d: String = polys
-                    .iter()
-                    .map(|(p, f)| path_data(p, f.as_deref(), true))
-                    .collect();
                 let alpha = if opacity < 1.0 {
                     format!(r#" opacity="{opacity:.3}""#)
                 } else {
                     String::new()
                 };
+                body.push_str(r#"<path d=""#);
+                for (p, f) in &polys {
+                    path_data(&mut body, p, f.as_deref(), true)?;
+                }
                 let _ = write!(
                     body,
-                    r#"<path d="{d}" fill-rule="evenodd"{}{alpha}/>"#,
+                    r#"" fill-rule="evenodd"{}{alpha}/>"#,
                     paint(&state, true, kind == 111, 0.0)
                 );
             }
             // TEXT, TEXTARRAY, STRETCHTEXT
-            112 | 113 | 114 => {
+            112..=114 => {
                 let Some(origin) = a.point() else {
                     r.p = end;
                     continue;
@@ -506,10 +517,17 @@ pub fn to_svg(bytes: &[u8]) -> Option<Converted> {
                         }
                     }
                 }
-                let chars: Vec<char> = text.chars().collect();
-                let start = index.min(chars.len());
-                let stop = start.saturating_add(len).min(chars.len());
-                let shown: Vec<char> = chars[start..stop].to_vec();
+                // The shown text, escaped (at most 6 bytes per input byte) with
+                // the family, must fit the output bound before it is copied.
+                let escaped_bound = text
+                    .len()
+                    .min(len.saturating_mul(4))
+                    .saturating_add(state.font.family.len())
+                    .saturating_mul(6);
+                if body.len().saturating_add(escaped_bound) > MAX_SVG_BYTES {
+                    return None;
+                }
+                let shown: Vec<char> = text.chars().skip(index).take(len).collect();
                 if shown.iter().all(|c| c.is_whitespace()) {
                     r.p = end;
                     continue;
@@ -685,7 +703,7 @@ fn read_font(r: &mut Reader<'_>) -> Option<Font> {
     let _ = version;
     r.p = end;
     Some(Font {
-        family,
+        family: std::rc::Rc::from(family),
         height,
         weight,
         italic: italic != 0,

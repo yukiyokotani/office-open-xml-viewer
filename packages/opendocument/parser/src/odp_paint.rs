@@ -86,24 +86,36 @@ pub fn fill(
             } else {
                 "FFFFFF00".to_string()
             };
-            match hatch_svg(h, &bg, opacity, area) {
-                Some(svg) => {
-                    let (path, resource) = ctx.media.generated("hatch", svg, area);
-                    Fill::Image {
-                        image_path: path.clone(),
-                        mime_type: resource.mime.to_string(),
-                        svg_image_path: Some(path),
-                        dpi: None,
-                        rot_with_shape: Some(true),
-                        src_rect: None,
-                        fill_rect: None,
-                        stretch: true,
-                        tile: None,
-                        alpha: None,
-                        duotone: None,
-                        blip_effects: Vec::new(),
-                    }
-                }
+            // The SVG is a function of the hatch's attributes, the area colour,
+            // the opacity and the area size: the same ones reuse one picture.
+            let attr = |name: &str| h.attribute((NS_DRAW, name)).unwrap_or("");
+            let description = format!(
+                "hatch|{}|{}|{}|{}|{bg}|{opacity:.3}|{:.0}|{:.0}",
+                attr("color"),
+                attr("distance"),
+                attr("rotation"),
+                attr("style"),
+                area.0,
+                area.1
+            );
+            let generated = ctx.media.generated("hatch", description, area, || {
+                hatch_svg(h, &bg, opacity, area)
+            });
+            match generated {
+                Some((path, resource)) => Fill::Image {
+                    image_path: path.clone(),
+                    mime_type: resource.mime.to_string(),
+                    svg_image_path: Some(path),
+                    dpi: None,
+                    rot_with_shape: Some(true),
+                    src_rect: None,
+                    fill_rect: None,
+                    stretch: true,
+                    tile: None,
+                    alpha: None,
+                    duotone: None,
+                    blip_effects: Vec::new(),
+                },
                 None => hatch_fill(h, bg, opacity),
             }
         }
@@ -174,11 +186,16 @@ fn ramp(node: Nd<'_>) -> Ramp {
     }
 }
 
+/// Implementation bound on the stops of one colour or opacity gradient
+/// (later stops are not read), as in the shared fill reader.
+const MAX_GRADIENT_STOPS: usize = 256;
+
 fn color_ramp(g: Nd<'_>) -> Option<Ramp> {
     let mut r = ramp(g);
     let stops: Vec<(f64, f64, String)> = g
         .children()
         .filter(|c| crate::xml::is(*c, NS_LOEXT, "gradient-stop"))
+        .take(MAX_GRADIENT_STOPS)
         .filter_map(|c| {
             let offset: f64 = c.attribute((NS_SVG, "offset"))?.trim().parse().ok()?;
             let value = c.attribute((NS_LOEXT, "color-value")).and_then(color)?;
@@ -225,6 +242,7 @@ fn opacity_ramp(o: Nd<'_>) -> Ramp {
     let stops: Vec<(f64, f64, String)> = o
         .children()
         .filter(|c| crate::xml::is(*c, NS_LOEXT, "opacity-stop"))
+        .take(MAX_GRADIENT_STOPS)
         .filter_map(|c| {
             let offset: f64 = c.attribute((NS_SVG, "offset"))?.trim().parse().ok()?;
             let value: f64 = c.attribute((NS_SVG, "stop-opacity"))?.trim().parse().ok()?;
@@ -247,13 +265,17 @@ fn opacity_ramp(o: Nd<'_>) -> Ramp {
     r
 }
 
-fn sample(stops: &[(f64, f64, String)], t: f64) -> (f64, String) {
+/// Sample a ramp at `t`, searching from window `*from` (advanced to the
+/// window found, for ascending `t`). The stops are in file order, as the
+/// unsorted search before them found them.
+fn sample_from(stops: &[(f64, f64, String)], t: f64, from: &mut usize) -> (f64, String) {
     let first = &stops[0];
     if t <= first.0 {
         return (first.1, first.2.clone());
     }
-    for pair in stops.windows(2) {
+    for (k, pair) in stops.windows(2).enumerate().skip(*from) {
         let (a, b) = (&pair[0], &pair[1]);
+        *from = k;
         if t <= b.0 {
             let span = b.0 - a.0;
             let u = if span > 0.0 { (t - a.0) / span } else { 1.0 };
@@ -452,11 +474,16 @@ pub fn combined_gradient(g: Nd<'_>, og: Nd<'_>) -> Option<Fill> {
         .collect();
     offsets.sort_by(|a, b| a.total_cmp(b));
     offsets.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
-    let cs = colour.stops.clone();
-    let os = opacity.stops.clone();
+    // Both ramps are sampled at ascending offsets, each from where the
+    // previous sample was found (linear in the stop counts).
+    let (mut ci, mut oi) = (0usize, 0usize);
     let painted: Vec<(f64, String)> = offsets
         .iter()
-        .map(|&o| (o, with_alpha(&sample(&cs, o).1, sample(&os, o).0)))
+        .map(|&o| {
+            let c = sample_from(&colour.stops, o, &mut ci).1;
+            let a = sample_from(&opacity.stops, o, &mut oi).0;
+            (o, with_alpha(&c, a))
+        })
         .collect();
     Some(ramp_fill(&colour, &painted))
 }

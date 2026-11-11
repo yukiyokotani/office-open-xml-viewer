@@ -10,6 +10,11 @@ use std::collections::HashMap;
 
 /// Implementation bound on the header bytes read to size an image.
 const MAX_HEADER_BYTES: usize = 64 * 1024 * 1024;
+/// Implementation bound on what an opened deck retains: the slide model
+/// (each element is charged as it is kept, master objects once per slide
+/// that shows them) and the resources the reader generates (converted
+/// metafiles, hatch pictures).
+pub const MAX_RETAINED_BYTES: usize = 512 * 1024 * 1024;
 
 #[derive(Clone, Debug)]
 pub struct Resource {
@@ -39,6 +44,14 @@ pub struct Media<'p> {
     admitted: HashMap<String, Resource>,
     /// StarView metafiles converted to SVG, by package path.
     converted: HashMap<String, Vec<u8>>,
+    /// Generated resources by the description they were generated from, so
+    /// a repeated description (a master hatch on every slide) is reused.
+    generated: HashMap<String, (String, Resource)>,
+    /// Remaining retained bytes (see [`MAX_RETAINED_BYTES`]).
+    retained: usize,
+    /// Set when a charge that cannot return an error failed; the reader
+    /// checks it after every object.
+    exhausted: bool,
 }
 
 impl<'p> Media<'p> {
@@ -47,6 +60,32 @@ impl<'p> Media<'p> {
             package,
             admitted: HashMap::new(),
             converted: HashMap::new(),
+            generated: HashMap::new(),
+            retained: MAX_RETAINED_BYTES,
+            exhausted: false,
+        }
+    }
+
+    /// Charge `bytes` the deck retains, before they are kept.
+    pub fn charge(&mut self, bytes: usize) -> Result<(), String> {
+        match self.retained.checked_sub(bytes) {
+            Some(left) if !self.exhausted => {
+                self.retained = left;
+                Ok(())
+            }
+            _ => {
+                self.exhausted = true;
+                Err(retained_error())
+            }
+        }
+    }
+
+    /// The deck is still within its retained-size limit.
+    pub fn status(&self) -> Result<(), String> {
+        if self.exhausted {
+            Err(retained_error())
+        } else {
+            Ok(())
         }
     }
 
@@ -72,6 +111,7 @@ impl<'p> Media<'p> {
             .ok()?;
         let resource = if bytes.starts_with(b"VCLMTF") {
             let converted = crate::svm::to_svg(&bytes)?;
+            self.charge(converted.svg.len()).ok()?;
             self.converted.insert(path.clone(), converted.svg);
             Resource {
                 mime: "image/svg+xml",
@@ -88,8 +128,24 @@ impl<'p> Media<'p> {
 
     /// Register generated SVG content (an exact hatch fill) under a
     /// synthetic resource key no package item can take (`odp-generated/`).
-    pub fn generated(&mut self, kind: &str, svg: Vec<u8>, size: (f64, f64)) -> (String, Resource) {
-        let key = format!("odp-generated/{kind}-{}.svg", self.converted.len());
+    /// `description` identifies the content: the same description reuses the
+    /// resource generated first. `None` when `make` produces nothing or the
+    /// content exceeds the retained-size limit (the reader then rejects the
+    /// deck through [`Media::status`]).
+    pub fn generated(
+        &mut self,
+        kind: &str,
+        description: String,
+        size: (f64, f64),
+        make: impl FnOnce() -> Option<Vec<u8>>,
+    ) -> Option<(String, Resource)> {
+        if let Some(found) = self.generated.get(&description) {
+            return Some(found.clone());
+        }
+        let svg = make()?;
+        self.charge(svg.len().saturating_add(description.len()))
+            .ok()?;
+        let key = format!("odp-generated/{kind}-{}.svg", self.generated.len());
         let resource = Resource {
             mime: "image/svg+xml",
             pixels: None,
@@ -98,7 +154,9 @@ impl<'p> Media<'p> {
         };
         self.converted.insert(key.clone(), svg);
         self.admitted.insert(key.clone(), resource.clone());
-        (key, resource)
+        self.generated
+            .insert(description, (key.clone(), resource.clone()));
+        Some((key, resource))
     }
 
     pub fn package(&self) -> &'p OdfPackage {
@@ -108,6 +166,10 @@ impl<'p> Media<'p> {
     pub fn into_admitted(self) -> (HashMap<String, Resource>, HashMap<String, Vec<u8>>) {
         (self.admitted, self.converted)
     }
+}
+
+fn retained_error() -> String {
+    "OpenDocument presentation exceeds the retained-size limit".to_string()
 }
 
 /// Identify an image by its signature (file names in ODF packages carry no
@@ -134,7 +196,8 @@ pub fn sniff(bytes: &[u8]) -> Option<Resource> {
             if kind == b"IDAT" || kind == b"IEND" {
                 break;
             }
-            pos = pos.checked_add(12 + len)?;
+            // Checked: a length near u32::MAX must not wrap on 32-bit targets.
+            pos = pos.checked_add(len.checked_add(12)?)?;
         }
         return Some(Resource {
             mime: "image/png",
@@ -241,6 +304,10 @@ fn jpeg(bytes: &[u8]) -> Resource {
             continue;
         }
         let len = u16::from_be_bytes([bytes[pos + 2], bytes[pos + 3]]) as usize;
+        // A segment length counts its own two bytes; a smaller one is corrupt.
+        if len < 2 {
+            break;
+        }
         let body = &bytes[pos + 4..(pos + 2 + len).min(bytes.len())];
         match marker {
             0xE0 if body.starts_with(b"JFIF\0") && body.len() >= 12 => {
@@ -299,5 +366,23 @@ mod tests {
         let (dx, _) = r.dpi.unwrap();
         assert!((dx - 200.0).abs() < 0.1);
         assert!(sniff(b"VCLMTF....").is_none());
+    }
+
+    #[test]
+    fn corrupt_header_lengths_end_the_scan() {
+        // A PNG chunk length that would wrap `pos` on 32-bit targets.
+        let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+        png.extend_from_slice(&13u32.to_be_bytes());
+        png.extend_from_slice(b"IHDR");
+        png.extend_from_slice(&[0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0, 0, 0, 0, 0]);
+        png.extend_from_slice(&0xffff_fff4u32.to_be_bytes());
+        png.extend_from_slice(b"tEXt");
+        png.extend_from_slice(&[0; 16]);
+        assert_eq!(sniff(&png).unwrap().pixels, Some((1, 1)));
+        // JPEG segment lengths below 2.
+        for len in [0u8, 1] {
+            let jpeg = [0xFF, 0xD8, 0xFF, 0xE0, 0x00, len, 0, 0];
+            assert_eq!(sniff(&jpeg).unwrap().pixels, None);
+        }
     }
 }

@@ -15,7 +15,7 @@ odt = [
     "dep:js-sys",
     "dep:docx-model",
 ]
-odp = ["odf-chart", "dep:js-sys", "dep:pptx-model"]
+odp = ["odf-chart", "dep:js-sys", "dep:pptx-model", "dep:serde"]
 # The ODF chart reader, shared by the spreadsheet and presentation readers.
 odf-chart = ["dep:serde_json"]
 ods = [

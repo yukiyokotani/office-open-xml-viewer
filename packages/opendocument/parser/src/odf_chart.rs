@@ -33,6 +33,10 @@ const MAX_SERIES: usize = 4096;
 const MAX_POINTS: usize = 1_048_576;
 /// Implementation bound on the local table's cells.
 const MAX_LOCAL_CELLS: usize = 4_000_000;
+/// Implementation bound on the data points one chart reads over all of its
+/// ranges (series values, categories, labels); later ranges are truncated
+/// like a single range past [`MAX_POINTS`].
+const MAX_CHART_POINTS: usize = 4_000_000;
 
 /// LibreOffice's default series palette (used for series without a fill).
 const DEFAULT_COLORS: [&str; 12] = [
@@ -124,6 +128,7 @@ pub fn read_chart_document(
         faces: &faces,
         local: LocalTable::read(chart)?,
         resolver,
+        points: std::cell::Cell::new(MAX_CHART_POINTS),
         dashes: styles_doc
             .as_ref()
             .map(|doc| stroke_dashes(doc.root_element()))
@@ -137,6 +142,8 @@ struct Reader<'a> {
     faces: &'a HashMap<String, String>,
     local: LocalTable,
     resolver: Option<&'a dyn RangeResolver>,
+    /// Points left of [`MAX_CHART_POINTS`].
+    points: std::cell::Cell<usize>,
     /// `draw:stroke-dash` definitions (§16.41) as DrawingML presets.
     dashes: HashMap<String, &'static str>,
 }
@@ -236,15 +243,21 @@ impl LocalTable {
     fn cached(&self, address: &str) -> Option<Vec<(CellData, String)>> {
         let (col, row) = *self.sources.get(address)?;
         let (_, (r1, c1), (r2, c2)) = crate::odf_text::parse_range(address)?;
-        let count = ((r2 - r1 + 1) as usize).max((c2 - c1 + 1) as usize);
+        // The address is file data (up to u32 rows): the count is bounded
+        // before anything is collected, as a local range is.
+        let span = |a: u32, b: u32| usize::try_from(b - a).unwrap_or(usize::MAX);
+        let count = span(r1, r2)
+            .max(span(c1, c2))
+            .saturating_add(1)
+            .min(MAX_POINTS);
         let horizontal = r1 == r2 && c2 > c1;
         Some(
             (0..count)
                 .map(|i| {
                     let (r, c) = if horizontal {
-                        (row, col + i)
+                        (row, col.saturating_add(i))
                     } else {
-                        (row + i, col)
+                        (row.saturating_add(i), col)
                     };
                     self.get(r, c)
                         .cloned()
@@ -384,9 +397,16 @@ impl Reader<'_> {
                     .or_else(|| self.local.cached(part))
                     .or_else(|| self.local.range(part))
             };
-            out.extend(resolved.unwrap_or_default());
+            let mut resolved = resolved.unwrap_or_default();
+            let left = self.points.get();
+            resolved.truncate(left);
+            self.points.set(left - resolved.len());
+            out.extend(resolved);
             if out.len() > MAX_POINTS {
                 out.truncate(MAX_POINTS);
+                break;
+            }
+            if self.points.get() == 0 {
                 break;
             }
         }
@@ -1193,6 +1213,14 @@ fn stroke_dashes(root: roxmltree::Node<'_, '_>) -> HashMap<String, &'static str>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cached_ranges_are_bounded_before_they_are_collected() {
+        let mut table = LocalTable::default();
+        let address = "Sheet1.A1:Sheet1.A4294967295";
+        table.sources.insert(address.to_string(), (0, 0));
+        assert_eq!(table.cached(address).unwrap().len(), MAX_POINTS);
+    }
 
     const NS: &str = concat!(
         r##"xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" "##,

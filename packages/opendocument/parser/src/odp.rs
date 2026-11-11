@@ -28,6 +28,7 @@ use pptx_model::{
     SlideElementOrigin, SlideElementSource, SlideTheme, TextBody,
 };
 use std::collections::HashMap;
+use std::rc::Rc;
 
 pub const MEDIA_TYPES: [&str; 2] = [
     "application/vnd.oasis.opendocument.presentation",
@@ -35,7 +36,9 @@ pub const MEDIA_TYPES: [&str; 2] = [
 ];
 
 /// Implementation bound on the elements of the whole deck (all slides,
-/// master objects repeated per slide included).
+/// master objects repeated per slide included), charged as each object's
+/// elements are kept. Their retained bytes are charged at the same point
+/// against `odp_media::MAX_RETAINED_BYTES`.
 const MAX_DECK_ELEMENTS: usize = 2_000_000;
 /// Implementation bound on group nesting.
 const MAX_GROUP_DEPTH: usize = 64;
@@ -86,13 +89,17 @@ pub fn read(package: &OdfPackage) -> Result<OdpDeck, String> {
                 .find(|n| xml::is(*n, NS_OFFICE, "presentation"))
         })
         .ok_or_else(|| invalid("the document has no office:presentation body"))?;
-    let mut decls: HashMap<(&str, &str), String> = HashMap::new();
+    let mut media = Media::new(package);
+    // Header/footer declarations: one shared copy each, charged once.
+    let mut decls: HashMap<(&str, &str), Rc<str>> = HashMap::new();
     for child in presentation.children().filter(|n| n.is_element()) {
         if child.tag_name().namespace() == Some(NS_PRESENTATION) {
             let kind = child.tag_name().name();
             if matches!(kind, "footer-decl" | "header-decl" | "date-time-decl") {
                 if let Some(name) = child.attribute((NS_PRESENTATION, "name")) {
-                    decls.insert((kind, name), text::plain_text_inline(child));
+                    let value = text::plain_text_inline(child)?;
+                    media.charge(value.len())?;
+                    decls.insert((kind, name), value);
                 }
             }
         }
@@ -137,8 +144,8 @@ pub fn read(package: &OdfPackage) -> Result<OdpDeck, String> {
         .and_then(|(w, h)| Some((w?, h?)))
         .unwrap_or((28.0 * 360_000.0, 21.0 * 360_000.0));
 
-    let mut media = Media::new(package);
     let mut budget = MAX_DECK_ELEMENTS;
+    let mut charts: HashMap<String, Option<pptx_model::ChartModel>> = HashMap::new();
     let mut slides = Vec::with_capacity(pages.len());
     let mut hyperlink_colors = None;
     for (index, page) in pages.iter().enumerate() {
@@ -156,6 +163,7 @@ pub fn read(package: &OdfPackage) -> Result<OdpDeck, String> {
             count: pages.len(),
             page_names: &page_names,
             budget: &mut budget,
+            charts: &mut charts,
             next_id: 1,
             page_size: (width, height),
         };
@@ -194,6 +202,9 @@ struct SlideReader<'a, 'r, 'p> {
     count: usize,
     page_names: &'r HashMap<String, usize>,
     budget: &'r mut usize,
+    /// Chart objects read so far by package path (`None`: not a chart),
+    /// so a chart a master shows on every slide is read once.
+    charts: &'r mut HashMap<String, Option<pptx_model::ChartModel>>,
     next_id: u32,
     /// Slide size in EMU (page backgrounds are laid out on it).
     page_size: (f64, f64),
@@ -216,10 +227,13 @@ struct ObjectContext<'a> {
     master_name: Option<&'a str>,
     background: Option<Fill>,
     background_color: Option<String>,
-    footer: Option<String>,
-    header: Option<String>,
-    date_time: Option<String>,
+    footer: Option<Rc<str>>,
+    header: Option<Rc<str>>,
+    date_time: Option<Rc<str>>,
     link: Option<String>,
+    /// The slide's master page, for placeholders that take their placement
+    /// from it (§19.431); `None` for the master's own objects.
+    master: Option<Nd<'a>>,
 }
 
 impl<'a, 'r, 'p> SlideReader<'a, 'r, 'p> {
@@ -227,7 +241,7 @@ impl<'a, 'r, 'p> SlideReader<'a, 'r, 'p> {
         &mut self,
         page: Nd<'a>,
         master: Option<Nd<'a>>,
-        decls: &HashMap<(&str, &str), String>,
+        decls: &HashMap<(&str, &str), Rc<str>>,
     ) -> Result<Slide, String> {
         let sheet = self.sheet;
         let page_styles = page
@@ -277,7 +291,11 @@ impl<'a, 'r, 'p> SlideReader<'a, 'r, 'p> {
                 .map(|s| s.color[..6.min(s.color.len())].to_string()),
             _ => None,
         };
-        let decl = |kind: &str, attr: &str| -> Option<String> {
+        if let Some(fill) = &background {
+            self.media.charge(text::record_bytes(fill)?)?;
+        }
+        self.media.status()?;
+        let decl = |kind: &str, attr: &str| -> Option<Rc<str>> {
             let name = page.attribute((NS_PRESENTATION, attr))?;
             decls.get(&(kind, name)).cloned()
         };
@@ -301,22 +319,25 @@ impl<'a, 'r, 'p> SlideReader<'a, 'r, 'p> {
                     header: header.clone(),
                     date_time: date_time.clone(),
                     link: None,
+                    master: None,
                 };
-                for child in master.children().filter(|n| n.is_element()) {
-                    let class = child.attribute((NS_PRESENTATION, "class")).unwrap_or("");
-                    if is_master_template(class) {
-                        continue;
-                    }
-                    let shown = match class {
-                        "footer" => flag("display-footer"),
-                        "header" => flag("display-header"),
-                        "date-time" => flag("display-date-time"),
-                        "page-number" => flag("display-page-number"),
-                        _ => true,
-                    };
-                    if shown {
-                        self.object(child, &ctx, &mut elements, 0)?;
-                    }
+                let shown: Vec<Nd<'a>> = master
+                    .children()
+                    .filter(|n| n.is_element())
+                    .filter(|child| {
+                        let class = child.attribute((NS_PRESENTATION, "class")).unwrap_or("");
+                        !is_master_template(class)
+                            && match class {
+                                "footer" => flag("display-footer"),
+                                "header" => flag("display-header"),
+                                "date-time" => flag("display-date-time"),
+                                "page-number" => flag("display-page-number"),
+                                _ => true,
+                            }
+                    })
+                    .collect();
+                for child in stacking_order(shown) {
+                    self.object(child, &ctx, &mut elements, 0)?;
                 }
             }
         }
@@ -335,30 +356,35 @@ impl<'a, 'r, 'p> SlideReader<'a, 'r, 'p> {
             header,
             date_time,
             link: None,
+            master,
         };
         let mut notes = None;
+        let mut objects = Vec::new();
         for child in page.children().filter(|n| n.is_element()) {
             if xml::is(child, NS_PRESENTATION, "notes") {
-                let text = child
-                    .children()
-                    .filter(|n| n.attribute((NS_PRESENTATION, "class")) == Some("notes"))
-                    .map(text::plain_text)
-                    .collect::<Vec<_>>()
-                    .join("\n");
+                let text = text::notes_text(
+                    child
+                        .children()
+                        .filter(|n| n.attribute((NS_PRESENTATION, "class")) == Some("notes")),
+                )?;
                 if !text.trim().is_empty() {
+                    self.media.charge(text.len())?;
                     notes = Some(text);
                 }
                 continue;
             }
+            objects.push(child);
+        }
+        for child in stacking_order(objects) {
             self.object(child, &ctx, &mut elements, 0)?;
         }
         sources.extend((master_count..elements.len()).map(|_| SlideElementSource {
             origin: SlideElementOrigin::Slide,
         }));
-        *self.budget = self
-            .budget
-            .checked_sub(elements.len())
-            .ok_or_else(|| "OpenDocument presentation exceeds the element limit".to_string())?;
+        self.media.charge(
+            std::mem::size_of::<Slide>()
+                + elements.len() * std::mem::size_of::<SlideElementSource>(),
+        )?;
         Ok(Slide {
             theme: Some(SlideTheme {
                 default_text_color: Some("000000".into()),
@@ -467,14 +493,56 @@ impl<'a, 'r, 'p> SlideReader<'a, 'r, 'p> {
                     self.object(child, &inner, out, depth + 1)?;
                 }
             }
-            "frame" => self.frame(node, ctx, out)?,
+            "frame" => {
+                let before = out.len();
+                self.frame(node, ctx, out)?;
+                self.retain(&out[before..])?;
+            }
             "custom-shape" | "rect" | "ellipse" | "circle" | "line" | "polyline" | "polygon"
             | "regular-polygon" | "path" | "connector" | "caption" | "measure" => {
-                self.shape(node, ctx, out)?
+                let before = out.len();
+                self.shape(node, ctx, out)?;
+                self.retain(&out[before..])?;
             }
             _ => {}
         }
         Ok(())
+    }
+
+    /// Charge the elements one object produced against the deck's element
+    /// and retained-size bounds as they are kept (the object's own content
+    /// was bounded while it was read: text per object, geometry per shape,
+    /// cells per table, points per chart).
+    fn retain(&mut self, elements: &[SlideElement]) -> Result<(), String> {
+        *self.budget = self
+            .budget
+            .checked_sub(elements.len())
+            .ok_or_else(|| "OpenDocument presentation exceeds the element limit".to_string())?;
+        for element in elements {
+            self.media.charge(retained_bytes(element)?)?;
+        }
+        // Resources generated for the object (hatches, metafiles).
+        self.media.status()
+    }
+
+    /// The node whose size and position a frame takes: with
+    /// `presentation:user-transformed="false"` (§19.431) the master page's
+    /// presentation shape of the same class, else the frame itself.
+    fn placement_node(node: Nd<'a>, ctx: &ObjectContext<'a>) -> Nd<'a> {
+        if node.attribute((NS_PRESENTATION, "user-transformed")) != Some("false") {
+            return node;
+        }
+        let (Some(class), Some(master)) = (node.attribute((NS_PRESENTATION, "class")), ctx.master)
+        else {
+            return node;
+        };
+        master
+            .children()
+            .find(|c| {
+                xml::is(*c, NS_DRAW, "frame")
+                    && c.attribute((NS_PRESENTATION, "class")) == Some(class)
+            })
+            .unwrap_or(node)
     }
 
     /// The placed box of an object: svg:x/y/width/height then draw:transform.
@@ -943,6 +1011,7 @@ impl<'a, 'r, 'p> SlideReader<'a, 'r, 'p> {
             date_time: ctx.date_time.clone(),
             background,
             pages: self.page_names,
+            payload: &text::TextPayload::new(),
         };
         text::text_body(container, &env, self.media, graphic)
     }
@@ -955,8 +1024,9 @@ impl<'a, 'r, 'p> SlideReader<'a, 'r, 'p> {
     ) -> Result<(), String> {
         let styles = self.object_styles(node, ctx)?;
         let graphic = Self::graphic_props(&styles);
-        let (w, h) = Self::size(node);
-        let placed = Self::placement(node, w, h);
+        let geometry_node = Self::placement_node(node, ctx);
+        let (w, h) = Self::size(geometry_node);
+        let placed = Self::placement(geometry_node, w, h);
         let children: Vec<Nd> = node.children().filter(|n| n.is_element()).collect();
         let has = |name: &str| children.iter().any(|c| c.tag_name().name() == name);
         if let Some(table) = children.iter().find(|c| xml::is(**c, NS_TABLE, "table")) {
@@ -1024,9 +1094,18 @@ impl<'a, 'r, 'p> SlideReader<'a, 'r, 'p> {
             else {
                 continue;
             };
-            if let Ok(Some(chart)) =
-                crate::odf_chart::read_chart_object(self.media.package(), &path, None)
-            {
+            let cached = match self.charts.get(&path) {
+                Some(found) => found.clone(),
+                None => {
+                    let read =
+                        crate::odf_chart::read_chart_object(self.media.package(), &path, None)
+                            .ok()
+                            .flatten();
+                    self.charts.insert(path.clone(), read.clone());
+                    read
+                }
+            };
+            if let Some(chart) = cached {
                 out.push(SlideElement::Chart(pptx_model::ChartElement {
                     id: Some(self.id()),
                     x: placed.x.round() as i64,
@@ -1193,7 +1272,85 @@ fn clone_ctx<'a>(ctx: &ObjectContext<'a>) -> ObjectContext<'a> {
         header: ctx.header.clone(),
         date_time: ctx.date_time.clone(),
         link: ctx.link.clone(),
+        master: ctx.master,
     }
+}
+
+/// Drawing objects in stacking order (§19.231 `draw:z-index`, ascending
+/// from back to front; document order where it is absent or equal). An
+/// object without a z-index stays right after the object before it.
+fn stacking_order<'a>(nodes: Vec<Nd<'a>>) -> Vec<Nd<'a>> {
+    let mut previous = 0u64;
+    let mut keyed: Vec<(u64, usize, Nd<'a>)> = nodes
+        .into_iter()
+        .enumerate()
+        .map(|(i, node)| {
+            let key = node
+                .attribute((NS_DRAW, "z-index"))
+                .and_then(|v| v.trim().parse::<u64>().ok())
+                .unwrap_or(previous);
+            previous = key;
+            (key, i, node)
+        })
+        .collect();
+    keyed.sort_by_key(|(key, i, _)| (*key, *i));
+    keyed.into_iter().map(|(_, _, node)| node).collect()
+}
+
+/// Retained bytes of one slide element: its serialized size plus the fixed
+/// size of its repeated records (paragraphs and runs, table rows and cells,
+/// path commands, chart series, values and categories), which the
+/// serialized form understates.
+fn retained_bytes(element: &SlideElement) -> Result<usize, String> {
+    use std::mem::size_of;
+    let mut bytes = text::record_bytes(element)?;
+    let mut add = |count: usize, size: usize| {
+        bytes = bytes.saturating_add(count.saturating_mul(size));
+    };
+    let body = |body: &TextBody, add: &mut dyn FnMut(usize, usize)| {
+        add(body.paragraphs.len(), size_of::<pptx_model::Paragraph>());
+        for p in &body.paragraphs {
+            add(p.runs.len(), size_of::<pptx_model::TextRun>());
+        }
+    };
+    match element {
+        SlideElement::Shape(shape) => {
+            if let Some(b) = &shape.text_body {
+                body(b, &mut add);
+            }
+            for path in shape.cust_geom.iter().flatten() {
+                add(path.len(), size_of::<PathCmd>());
+            }
+        }
+        SlideElement::Table(table) => {
+            add(table.rows.len(), size_of::<pptx_model::TableRow>());
+            for row in &table.rows {
+                add(row.cells.len(), size_of::<pptx_model::TableCell>());
+                for cell in &row.cells {
+                    if let Some(b) = &cell.text_body {
+                        body(b, &mut add);
+                    }
+                }
+            }
+        }
+        SlideElement::Chart(chart) => {
+            let model = &chart.chart;
+            add(model.categories.len(), size_of::<String>());
+            add(
+                model.series.len(),
+                size_of::<ooxml_common::chart::ChartSeries>(),
+            );
+            for series in &model.series {
+                add(series.values.len(), size_of::<Option<f64>>());
+                add(
+                    series.categories.as_ref().map_or(0, Vec::len),
+                    size_of::<String>(),
+                );
+            }
+        }
+        _ => {}
+    }
+    Ok(bytes)
 }
 
 fn placeholder_type(node: Nd<'_>) -> Option<String> {
@@ -1496,4 +1653,180 @@ fn plain_shape(
         scene3d: None,
         sp3d: None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::package::tests::{manifest, package_bytes};
+    use crate::package::PackageLimits;
+    use ooxml_common::resource::OoxmlFormat;
+    use pptx_model::Bullet;
+
+    const NS: &str = r##"xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:style="urn:oasis:names:tc:opendocument:xmlns:style:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0" xmlns:fo="urn:oasis:names:tc:opendocument:xmlns:xsl-fo-compatible:1.0" xmlns:svg="urn:oasis:names:tc:opendocument:xmlns:svg-compatible:1.0" xmlns:draw="urn:oasis:names:tc:opendocument:xmlns:drawing:1.0" xmlns:presentation="urn:oasis:names:tc:opendocument:xmlns:presentation:1.0" xmlns:xlink="http://www.w3.org/1999/xlink" xmlns:loext="urn:org:documentfoundation:names:experimental:office:xmlns:loext:1.0""##;
+    const ODP: &str = "application/vnd.oasis.opendocument.presentation";
+
+    /// A deck: `styles` (office:styles children), `master` (children of the
+    /// "Default" master page), `automatic` (content automatic styles) and
+    /// the `pages` (draw:page elements).
+    fn deck(styles: &str, master: &str, automatic: &str, pages: &str) -> Result<OdpDeck, String> {
+        let styles_xml = format!(
+            r##"<office:document-styles {NS} office:version="1.3"><office:styles>{styles}</office:styles><office:automatic-styles><style:page-layout style:name="pm1"><style:page-layout-properties fo:page-width="28cm" fo:page-height="21cm"/></style:page-layout></office:automatic-styles><office:master-styles><style:master-page style:name="Default" style:page-layout-name="pm1">{master}</style:master-page></office:master-styles></office:document-styles>"##
+        );
+        let content = format!(
+            r##"<office:document-content {NS} office:version="1.3"><office:automatic-styles>{automatic}</office:automatic-styles><office:body><office:presentation>{pages}</office:presentation></office:body></office:document-content>"##
+        );
+        let files = [
+            ("META-INF/manifest.xml", manifest(ODP, "")),
+            ("styles.xml", styles_xml),
+            ("content.xml", content),
+        ];
+        let files: Vec<(&str, &[u8])> = files
+            .iter()
+            .map(|(name, body)| (*name, body.as_bytes()))
+            .collect();
+        let package = OdfPackage::open(
+            package_bytes(ODP, &files),
+            OoxmlFormat::Pptx,
+            PackageLimits::default(),
+            &MEDIA_TYPES,
+        )?;
+        read(&package)
+    }
+
+    fn page(body: &str) -> String {
+        format!(r#"<draw:page draw:name="p1" draw:master-page-name="Default">{body}</draw:page>"#)
+    }
+
+    fn shapes(slide: &Slide) -> Vec<&ShapeElement> {
+        slide
+            .elements
+            .iter()
+            .filter_map(|e| match e {
+                SlideElement::Shape(s) => Some(s),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn labels(body: &TextBody) -> Vec<String> {
+        body.paragraphs
+            .iter()
+            .map(|p| match &p.bullet {
+                Bullet::Char { ch, .. } => ch.clone(),
+                _ => String::new(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn list_numbering_follows_list_identity() {
+        let styles = r#"<text:list-style style:name="L1"><text:list-level-style-number text:level="1" style:num-format="1" style:num-suffix="."/></text:list-style>"#;
+        let item = |t: &str| format!("<text:list-item><text:p>{t}</text:p></text:list-item>");
+        let body = format!(
+            r#"<draw:frame svg:width="10cm" svg:height="5cm"><draw:text-box><text:list text:style-name="L1" xml:id="a">{}{}</text:list><text:list text:style-name="L1" text:continue-numbering="false">{}</text:list><text:list text:style-name="L1" text:continue-numbering="true">{}</text:list><text:list text:style-name="L1" text:continue-list="a">{}</text:list><text:list text:style-name="L1">{}</text:list></draw:text-box></draw:frame>"#,
+            item("a"),
+            item("b"),
+            item("c"),
+            item("d"),
+            item("e"),
+            item("f")
+        );
+        let deck = deck(styles, "", "", &page(&body)).unwrap();
+        let shape = shapes(&deck.slides[0])[0];
+        assert_eq!(
+            labels(shape.text_body.as_ref().unwrap()),
+            ["1.", "2.", "1.", "2.", "3.", "1."]
+        );
+    }
+
+    #[test]
+    fn huge_table_spans_are_clamped_to_the_grid() {
+        let body = r#"<draw:frame svg:width="10cm" svg:height="5cm"><table:table><table:table-column table:number-columns-repeated="2"/><table:table-row><table:table-cell table:number-columns-spanned="4294967295" table:number-rows-spanned="4294967295"><text:p>x</text:p></table:table-cell><table:covered-table-cell/></table:table-row><table:table-row><table:covered-table-cell table:number-columns-repeated="2"/></table:table-row></table:table></draw:frame>"#;
+        let deck = deck("", "", "", &page(body)).unwrap();
+        let SlideElement::Table(table) = &deck.slides[0].elements[0] else {
+            panic!("{:?}", deck.slides[0].elements);
+        };
+        let first = &table.rows[0].cells[0];
+        assert_eq!((first.grid_span, first.row_span), (2, 2));
+        assert!(table.rows[1].cells[1].v_merge);
+    }
+
+    #[test]
+    fn table_cell_padding_sets_the_cell_insets() {
+        let automatic = r#"<style:style style:name="ce1" style:family="table-cell"><style:table-cell-properties fo:padding="0.1cm" fo:padding-left="0.3cm"/></style:style>"#;
+        let body = r#"<draw:frame svg:width="10cm" svg:height="5cm"><table:table><table:table-column/><table:table-row><table:table-cell table:style-name="ce1"><text:p>x</text:p></table:table-cell></table:table-row></table:table></draw:frame>"#;
+        let deck = deck("", "", automatic, &page(body)).unwrap();
+        let SlideElement::Table(table) = &deck.slides[0].elements[0] else {
+            panic!();
+        };
+        let body = table.rows[0].cells[0].text_body.as_ref().unwrap();
+        assert_eq!(
+            (body.l_ins, body.t_ins, body.r_ins),
+            (108_000, 36_000, 36_000)
+        );
+    }
+
+    #[test]
+    fn untransformed_placeholders_take_the_master_placement() {
+        let master = r#"<draw:frame presentation:class="title" svg:x="2cm" svg:y="1cm" svg:width="20cm" svg:height="3cm"><draw:text-box/></draw:frame>"#;
+        let body = r#"<draw:frame presentation:class="title" presentation:user-transformed="false" svg:x="9cm" svg:y="9cm" svg:width="1cm" svg:height="1cm"><draw:text-box><text:p>T</text:p></draw:text-box></draw:frame><draw:frame presentation:class="title" presentation:user-transformed="true" svg:x="9cm" svg:y="9cm" svg:width="1cm" svg:height="1cm"><draw:text-box><text:p>U</text:p></draw:text-box></draw:frame>"#;
+        let deck = deck("", master, "", &page(body)).unwrap();
+        let s = shapes(&deck.slides[0]);
+        assert_eq!(
+            (s[0].x, s[0].y, s[0].width, s[0].height),
+            (720_000, 360_000, 7_200_000, 1_080_000)
+        );
+        assert_eq!((s[1].x, s[1].width), (3_240_000, 360_000));
+    }
+
+    #[test]
+    fn z_index_orders_objects_back_to_front() {
+        let frame = |name: &str, z: &str| {
+            format!(r#"<draw:rect draw:name="{name}" {z} svg:width="1cm" svg:height="1cm"/>"#)
+        };
+        let body = [
+            frame("c", r#"draw:z-index="2""#),
+            frame("a", r#"draw:z-index="0""#),
+            frame("a2", ""),
+            frame("b", r#"draw:z-index="1""#),
+        ]
+        .concat();
+        let deck = deck("", "", "", &page(&body)).unwrap();
+        let names: Vec<_> = shapes(&deck.slides[0])
+            .iter()
+            .map(|s| s.name.clone().unwrap())
+            .collect();
+        assert_eq!(names, ["a", "a2", "b", "c"]);
+    }
+
+    #[test]
+    fn extrusion_depth_defaults_to_36pt() {
+        let body = r#"<draw:custom-shape svg:width="2cm" svg:height="2cm"><draw:enhanced-geometry draw:extrusion="true" draw:enhanced-path="M 0 0 L 21600 0 21600 21600 Z N"/></draw:custom-shape>"#;
+        let deck = deck("", "", "", &page(body)).unwrap();
+        let sp3d = shapes(&deck.slides[0])[0].sp3d.as_ref().unwrap();
+        assert_eq!(sp3d.extrusion_h, 457_200);
+    }
+
+    #[test]
+    fn the_text_limit_covers_every_paragraph_of_an_object() {
+        // Each paragraph alone is far below the limit; together they exceed it.
+        let spaces = r#"<text:s text:c="1024"/>"#.repeat(2_000);
+        let paragraphs = format!("<text:p>{spaces}</text:p>").repeat(20);
+        let body = format!(
+            r#"<draw:frame svg:width="10cm" svg:height="5cm"><draw:text-box>{paragraphs}</draw:text-box></draw:frame>"#
+        );
+        let error = deck("", "", "", &page(&body)).err().unwrap();
+        assert!(error.contains("text limit"), "{error}");
+    }
+
+    #[test]
+    fn a_master_hatch_is_generated_once_for_every_slide() {
+        let styles = r##"<draw:hatch draw:name="h1" draw:style="double" draw:color="#000000" draw:distance="0.1cm" draw:rotation="450"/><style:style style:name="gr1" style:family="graphic"><style:graphic-properties draw:fill="hatch" draw:fill-hatch-name="h1"/></style:style>"##;
+        let master = r#"<draw:rect draw:style-name="gr1" svg:width="5cm" svg:height="5cm"/>"#;
+        let pages = page("").repeat(5);
+        let deck = deck(styles, master, "", &pages).unwrap();
+        assert_eq!(deck.slides.len(), 5);
+        assert_eq!(deck.converted.len(), 1);
+    }
 }

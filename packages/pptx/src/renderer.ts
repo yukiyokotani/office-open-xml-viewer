@@ -1546,15 +1546,36 @@ function firstLineIndentPxFor(hasBullet: boolean, indentPx: number): number {
 // The core predicate covers the RTL cs axis. DrawingML also routes Indic and
 // Southeast Asian shaping scripts through a:cs when that font slot is present.
 const INDIC_CS_GLYPH_RE = /[\p{Script=Devanagari}\p{Script=Thai}\p{Script=Bengali}\p{Script=Tamil}\p{Script=Telugu}\p{Script=Kannada}\p{Script=Malayalam}\p{Script=Gujarati}\p{Script=Gurmukhi}\p{Script=Oriya}\p{Script=Sinhala}\p{Script=Khmer}\p{Script=Lao}\p{Script=Myanmar}\p{Script=Tibetan}]/u;
-/** PowerPoint paints non-zero DrawingML baseline runs at about 65% of their
- * authored size. The authored size still owns line height and baseline offset;
- * this helper is only for the glyph font used by measure and paint. */
 /** LibreOffice editeng `constScaleLevels` (font scale, Y spacing scale). */
 const LIBREOFFICE_SHRINK_LEVELS: readonly (readonly [number, number])[] = [
   [1.0, 0.9], [0.925, 0.9], [0.85, 0.9], [0.85, 0.8], [0.775, 0.8], [0.7, 0.8],
   [0.625, 0.8], [0.55, 0.8], [0.475, 0.8], [0.4, 0.8], [0.325, 0.8], [0.25, 0.8],
 ];
 
+/** Whether a laid-out line's advance exceeds its text width (a non-wrapping
+ * body's line; the first-line indent shift included). */
+function lineOverflowsWidth(
+  ctx: CanvasRenderingContext2D,
+  entry: { line: LayoutLine; textMaxW: number; textXOffset: number },
+): boolean {
+  let width = entry.textXOffset;
+  for (const seg of entry.line.segments) {
+    if (seg.isTab) {
+      width += seg.tabWidthPx ?? 0;
+    } else if (seg.math) {
+      width += seg.math.width;
+    } else if (seg.text) {
+      ctx.font = seg.font;
+      width += (seg.leadingLetterSpacingPx ?? 0)
+        + measureTextAdvance(ctx, seg.text, seg.letterSpacingPx ?? 0);
+    }
+  }
+  return width > entry.textMaxW + 0.5;
+}
+
+/** PowerPoint paints non-zero DrawingML baseline runs at about 65% of their
+ * authored size. The authored size still owns line height and baseline offset;
+ * this helper is only for the glyph font used by measure and paint. */
 function baselineDrawSizePx(authoredSizePx: number, baseline: number | undefined): number {
   return baseline != null && baseline !== 0 ? authoredSizePx * 0.65 : authoredSizePx;
 }
@@ -4249,14 +4270,16 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
         : null;
     const tClearShadow = () => clearShadow(target);
     const evenOddFill = geom === 'donut' || geom === 'smileyface' || geom === 'frame';
+    // `evenOdd`: a custom path's own fill rule (model sources), which the
+    // picture clip follows like a solid fill does.
     const paintImageFill = imageFill && !silhouette
-      ? (paintCtx: CanvasRenderingContext2D) => paintPreparedShapeImageFill(
+      ? (paintCtx: CanvasRenderingContext2D, evenOdd = evenOddFill) => paintPreparedShapeImageFill(
           paintCtx,
           imageFill,
           preparedImageFill,
           { x: bx, y: by, w: bw, h: bh },
           scale,
-          evenOddFill,
+          evenOdd,
           el,
         )
       : undefined;
@@ -4299,7 +4322,9 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
           let painted = false;
           if (paintImageFill) {
             target.save();
-            try { painted = paintImageFill(target); } finally { target.restore(); }
+            try {
+              painted = paintImageFill(target, evenOddFill || fillRule === 'evenodd');
+            } finally { target.restore(); }
           } else if (tFill) {
             target.fillStyle = tFill;
             target.fill(fillRule);
@@ -5570,11 +5595,15 @@ export function renderTextBody(
       // content height it tries these (font, spacing) levels in order and
       // keeps the first that fits, else the last. The spacing factor scales
       // single/proportional line heights and paragraph spacing.
+      // The content must fit the frame both ways (ODF §20.360): with
+      // fo:wrap-option="no-wrap" a line may also overflow the width.
       const available = Math.max(0, bh - tPad - bPad);
-      if (requiredHeight > available) {
+      const overflows = (lines: LineEntry[], height: number) =>
+        height > available || (!doWrap && lines.some((entry) => lineOverflowsWidth(ctx, entry)));
+      if (overflows(allLines, requiredHeight)) {
         for (const [font, spacing] of LIBREOFFICE_SHRINK_LEVELS) {
           ({ allLines, requiredHeight } = layoutAt(font, spacing));
-          if (requiredHeight <= available) break;
+          if (!overflows(allLines, requiredHeight)) break;
         }
       }
     }

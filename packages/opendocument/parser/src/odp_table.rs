@@ -7,7 +7,7 @@ use crate::odp_paint::{self as paint, PaintContext};
 use crate::odp_style::{
     Nd, Props, Scope, Sheet, LOEXT_GRAPHIC, PARAGRAPH, TABLE_CELL, TABLE_COLUMN, TABLE_ROW,
 };
-use crate::odp_text::{self as text, ObjectStyles, TextEnv};
+use crate::odp_text::{self as text, ObjectStyles, TextEnv, TextPayload};
 use crate::odp_units::{color, length_emu};
 use crate::xml::{self, NS_FO, NS_STYLE, NS_TABLE, NS_TEXT};
 use pptx_model::{SlideElement, Stroke, TableCell, TableElement, TableRow};
@@ -64,6 +64,9 @@ pub fn table<'a>(
     let row_count = rows_nodes.len();
     let mut rows = Vec::with_capacity(row_count);
     let mut cells_total = 0usize;
+    // One text payload for the whole table; each cell record is charged to
+    // it before the cell is read.
+    let payload = TextPayload::new();
     for (r, row) in rows_nodes.iter().enumerate() {
         let row_props = row
             .attribute((NS_TABLE, "style-name"))
@@ -106,6 +109,7 @@ pub fn table<'a>(
                 if let Some(t) = template_style.and_then(|n| sheet.find(scope, "table-cell", n)) {
                     chain.push(t);
                 }
+                payload.charge(std::mem::size_of::<TableCell>())?;
                 cells.push(build_cell(
                     sheet,
                     media,
@@ -118,6 +122,7 @@ pub fn table<'a>(
                     slide_index,
                     slide_count,
                     pages,
+                    &payload,
                 )?);
                 c += 1;
             }
@@ -156,13 +161,23 @@ pub fn table<'a>(
                 .collect()
         })
         .collect();
+    // Spans are clamped to the grid that exists (a span past the last row
+    // or column covers what is there), so the model never claims more cells
+    // than the table has and the merge walk below stays inside the grid.
+    let row_total = rows.len();
     for (r, row) in rows.iter_mut().enumerate() {
+        let row_len = row.cells.len();
         for (c, cell) in row.cells.iter_mut().enumerate() {
             let (cs, rs) = spans[r].get(c).copied().unwrap_or((1, 1));
-            cell.grid_span = cs;
-            cell.row_span = rs;
+            cell.grid_span = clamp_span(cs, row_len - c);
+            cell.row_span = clamp_span(rs, row_total - r);
         }
     }
+    // Every step of the walk marks an existing cell, and each covered cell
+    // is marked once in a well-formed table (spans do not overlap), so the
+    // walk is bounded by the cell count; overlapping spans that would mark
+    // more cells than the table has are malformed.
+    let mut visits = 0usize;
     for r in 0..rows.len() {
         for c in 0..rows[r].cells.len() {
             let (cs, rs) = (
@@ -173,19 +188,26 @@ pub fn table<'a>(
                 continue;
             }
             for dr in 0..rs {
-                for dc in 0..cs {
+                // A row too short to hold the span's columns ends it.
+                let Some(row) = rows.get_mut(r + dr) else {
+                    break;
+                };
+                if row.cells.len() <= c {
+                    break;
+                }
+                let end = c.saturating_add(cs).min(row.cells.len());
+                for (dc, target) in row.cells[c..end].iter_mut().enumerate() {
                     if dr == 0 && dc == 0 {
                         continue;
                     }
-                    if let Some(target) = rows
-                        .get_mut(r + dr)
-                        .and_then(|row| row.cells.get_mut(c + dc))
-                    {
-                        if dr == 0 {
-                            target.h_merge = true;
-                        } else {
-                            target.v_merge = true;
-                        }
+                    visits += 1;
+                    if visits > cells_total {
+                        return Err("OpenDocument table spans overlap".to_string());
+                    }
+                    if dr == 0 {
+                        target.h_merge = true;
+                    } else {
+                        target.v_merge = true;
                     }
                 }
             }
@@ -235,6 +257,12 @@ pub fn table<'a>(
     };
     out.push(SlideElement::Table(table));
     Ok(())
+}
+
+/// A file span clamped to the `available` cells from its origin (at least 1).
+fn clamp_span(span: u32, available: usize) -> u32 {
+    let available = u32::try_from(available.max(1)).unwrap_or(u32::MAX);
+    span.clamp(1, available)
 }
 
 fn push_columns<'a>(
@@ -416,6 +444,7 @@ fn build_cell<'a>(
     slide_index: usize,
     slide_count: usize,
     pages: &HashMap<String, usize>,
+    payload: &TextPayload,
 ) -> Result<TableCell, String> {
     let mut graphic = Props::new();
     graphic.extend_styles(chain, LOEXT_GRAPHIC);
@@ -464,6 +493,7 @@ fn build_cell<'a>(
         date_time: None,
         background,
         pages,
+        payload,
     };
     let mut body = if covered {
         None
@@ -493,6 +523,27 @@ fn build_cell<'a>(
             body.vert = "vert".into();
         }
         body.wrap = "square".into();
+        // Cell padding (§20.230 fo:padding in table-cell-properties) over the
+        // graphic padding the text frame read.
+        let padding = |side: &str| {
+            cell_props
+                .get(NS_FO, side)
+                .or_else(|| cell_props.get(NS_FO, "padding"))
+                .and_then(length_emu)
+                .map(|v| v.round() as i64)
+        };
+        if let Some(v) = padding("padding-left") {
+            body.l_ins = v;
+        }
+        if let Some(v) = padding("padding-right") {
+            body.r_ins = v;
+        }
+        if let Some(v) = padding("padding-top") {
+            body.t_ins = v;
+        }
+        if let Some(v) = padding("padding-bottom") {
+            body.b_ins = v;
+        }
     }
     let has_text = cell
         .children()

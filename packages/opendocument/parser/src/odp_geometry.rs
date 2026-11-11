@@ -20,6 +20,13 @@ pub const MAX_SEGMENTS_PER_SHAPE: usize = 200_000;
 const MAX_FORMULA_WORK: usize = 2_000_000;
 /// Implementation bound on formula nesting (parser recursion).
 const MAX_FORMULA_DEPTH: usize = 64;
+/// Implementation bound on the nodes of one parsed formula. It also bounds
+/// the depth of the expression tree (a flat `a+b+…` chain is left-deep), so
+/// evaluating and dropping a tree never recurses deeper than this.
+const MAX_FORMULA_NODES: usize = 512;
+/// Implementation bound on nested evaluation across equation references
+/// (`?f1` → `?f2` → …): deeper chains evaluate to 0 like a cycle.
+const MAX_EVAL_DEPTH: usize = 512;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Seg {
@@ -699,6 +706,7 @@ struct FormulaParser<'s, 'n> {
     pos: usize,
     names: &'n HashMap<&'n str, usize>,
     depth: usize,
+    nodes: usize,
 }
 
 impl<'s, 'n> FormulaParser<'s, 'n> {
@@ -711,6 +719,11 @@ impl<'s, 'n> FormulaParser<'s, 'n> {
         self.skip();
         self.bytes.get(self.pos).copied()
     }
+    /// Count one expression node against the formula's node bound.
+    fn node(&mut self) -> Option<()> {
+        self.nodes += 1;
+        (self.nodes <= MAX_FORMULA_NODES).then_some(())
+    }
     fn expr(&mut self) -> Option<Expr> {
         self.depth += 1;
         if self.depth > MAX_FORMULA_DEPTH {
@@ -719,6 +732,7 @@ impl<'s, 'n> FormulaParser<'s, 'n> {
         let mut left = self.term()?;
         while let Some(op @ (b'+' | b'-')) = self.peek() {
             self.pos += 1;
+            self.node()?;
             let right = self.term()?;
             left = Expr::Bin(op as char, Box::new(left), Box::new(right));
         }
@@ -729,6 +743,7 @@ impl<'s, 'n> FormulaParser<'s, 'n> {
         let mut left = self.unary()?;
         while let Some(op @ (b'*' | b'/')) = self.peek() {
             self.pos += 1;
+            self.node()?;
             let right = self.unary()?;
             left = Expr::Bin(op as char, Box::new(left), Box::new(right));
         }
@@ -738,6 +753,7 @@ impl<'s, 'n> FormulaParser<'s, 'n> {
         match self.peek()? {
             b'-' => {
                 self.pos += 1;
+                self.node()?;
                 self.depth += 1;
                 if self.depth > MAX_FORMULA_DEPTH {
                     return None;
@@ -754,6 +770,7 @@ impl<'s, 'n> FormulaParser<'s, 'n> {
         }
     }
     fn primary(&mut self) -> Option<Expr> {
+        self.node()?;
         let b = self.peek()?;
         if b == b'(' {
             self.pos += 1;
@@ -895,14 +912,23 @@ struct Evaluator {
     has_fill: bool,
     has_stroke: bool,
     work: usize,
+    /// Current evaluation nesting (expression levels and equation hops).
+    depth: usize,
 }
 
 impl Evaluator {
     fn eval(&mut self, e: &Expr) -> f64 {
         self.work += 1;
-        if self.work > MAX_FORMULA_WORK {
+        if self.work > MAX_FORMULA_WORK || self.depth >= MAX_EVAL_DEPTH {
             return 0.0;
         }
+        self.depth += 1;
+        let v = self.eval_inner(e);
+        self.depth -= 1;
+        v
+    }
+
+    fn eval_inner(&mut self, e: &Expr) -> f64 {
         let v = match e {
             Expr::Num(n) => *n,
             Expr::Eq(i) => self.equation(*i),
@@ -971,8 +997,9 @@ impl Evaluator {
         if let Some(Some(v)) = self.values.get(i) {
             return *v;
         }
-        if i >= self.exprs.len() || self.busy[i] {
-            // A cyclic reference evaluates to 0 (LibreOffice does the same).
+        if i >= self.exprs.len() || self.busy[i] || self.depth >= MAX_EVAL_DEPTH {
+            // A cyclic reference evaluates to 0 (LibreOffice does the same);
+            // so does a chain of references beyond the nesting bound.
             return 0.0;
         }
         self.busy[i] = true;
@@ -1028,6 +1055,7 @@ pub fn enhanced_geometry(
                 pos: 0,
                 names: &names,
                 depth: 0,
+                nodes: 0,
             };
             let e = p.expr()?;
             (p.peek().is_none()).then_some(e)
@@ -1057,6 +1085,7 @@ pub fn enhanced_geometry(
         has_fill: frame.has_fill,
         has_stroke: frame.has_stroke,
         work: 0,
+        depth: 0,
     };
     let path = node
         .attribute((NS_DRAWOOO, "enhanced-path"))
@@ -1233,7 +1262,8 @@ fn build_paths(
     let mut start: (f64, f64) = (0.0, 0.0);
     let mut command = 'M';
     let mut quadrant_x = true;
-    let mut total = 0usize;
+    // Segments of the paths already finished (running total for the bound).
+    let mut finished = 0usize;
     let scale_for = |index: usize| -> (f64, f64, f64, f64) {
         if let (Some(&w), Some(&h)) = (sub_views.get(index * 2), sub_views.get(index * 2 + 1)) {
             if w > 0.0 && h > 0.0 {
@@ -1267,6 +1297,7 @@ fn build_paths(
         }};
     }
     while i < tokens.len() {
+        let step_start = i;
         let cmd = match &tokens[i] {
             PathToken::Cmd(c) => {
                 i += 1;
@@ -1274,7 +1305,13 @@ fn build_paths(
             }
             PathToken::Param(_) => {
                 // Repeated parameter groups continue the last command; a
-                // moveto continues as lineto.
+                // moveto continues as lineto. A command without parameters
+                // (Z N F S H I J K) does not repeat: a stray parameter after
+                // it is skipped, so every step consumes a token.
+                if matches!(command, 'Z' | 'N' | 'F' | 'S' | 'H' | 'I' | 'J' | 'K') {
+                    i += 1;
+                    continue;
+                }
                 match command {
                     'M' => 'L',
                     'U' => 'T',
@@ -1284,6 +1321,7 @@ fn build_paths(
                 }
             }
         };
+
         command = cmd;
         let (ox, oy, sx, sy) = scale;
         let px = |v: f64| (v - ox) * sx;
@@ -1326,6 +1364,7 @@ fn build_paths(
             }
             'N' => {
                 if !current.segs.is_empty() {
+                    finished += current.segs.len();
                     geometry.paths.push(std::mem::take(&mut current));
                 }
                 current = GeoPath {
@@ -1451,14 +1490,15 @@ fn build_paths(
                 break;
             }
         }
-        total = total.max(current.segs.len());
-        if geometry.paths.iter().map(|p| p.segs.len()).sum::<usize>() + current.segs.len()
-            > MAX_SEGMENTS_PER_SHAPE
-        {
+        if finished + current.segs.len() > MAX_SEGMENTS_PER_SHAPE {
             return Err("OpenDocument shape exceeds the geometry limit".to_string());
         }
+        // Every step consumes at least one token (its command letter or its
+        // parameters); a step that did not ends the path.
+        if i == step_start {
+            break;
+        }
     }
-    let _ = total;
     if !current.segs.is_empty() {
         geometry.paths.push(current);
     }
@@ -1669,6 +1709,66 @@ mod tests {
     }
 
     const NS: &str = r#"xmlns:draw="urn:oasis:names:tc:opendocument:xmlns:drawing:1.0" xmlns:svg="urn:oasis:names:tc:opendocument:xmlns:svg-compatible:1.0" xmlns:drawooo="http://openoffice.org/2010/draw""#;
+
+    fn frame() -> ShapeFrame {
+        ShapeFrame {
+            width: 360_000.0,
+            height: 360_000.0,
+            has_fill: true,
+            has_stroke: true,
+        }
+    }
+
+    #[test]
+    fn parameters_after_parameterless_commands_are_skipped() {
+        for path in ["F 0", "M 0 0 L 1 1 N 5 6 7", "M 0 0 L 10 10 Z 1 2 S 3"] {
+            let xml = format!(r#"<draw:enhanced-geometry {NS} draw:enhanced-path="{path}"/>"#);
+            let d = doc(&xml);
+            let g = enhanced_geometry(d.root_element(), &frame()).unwrap();
+            assert!(g.paths.iter().all(|p| p.segs.len() <= 3), "{path}: {g:?}");
+        }
+    }
+
+    #[test]
+    fn long_equation_chains_and_flat_sums_stay_bounded() {
+        // A chain of references deeper than the evaluation bound, and a flat
+        // sum longer than the node bound: both evaluate (to bounded values)
+        // without exhausting the stack.
+        let mut equations = String::from(r#"<draw:equation draw:name="f0" draw:formula="1"/>"#);
+        for i in 1..5000 {
+            equations.push_str(&format!(
+                r#"<draw:equation draw:name="f{i}" draw:formula="?f{} +1"/>"#,
+                i - 1
+            ));
+        }
+        let flat = vec!["1"; 100_000].join("+");
+        equations.push_str(&format!(
+            r#"<draw:equation draw:name="flat" draw:formula="{flat}"/>"#
+        ));
+        let xml = format!(
+            r#"<draw:enhanced-geometry {NS} draw:enhanced-path="M 0 0 L ?f4999 ?flat N">{equations}</draw:enhanced-geometry>"#
+        );
+        let d = doc(&xml);
+        let g = enhanced_geometry(d.root_element(), &frame()).unwrap();
+        let Seg::Line(x, y) = g.paths[0].segs[1] else {
+            panic!("{g:?}");
+        };
+        assert!(x.is_finite() && x < 5000.0 * 360_000.0 / 21_600.0, "{x}");
+        // The over-long sum does not parse and evaluates to 0.
+        assert_eq!(y, 0.0);
+    }
+
+    #[test]
+    fn many_short_paths_are_counted_incrementally() {
+        let path = "M 0 0 L 1 1 N ".repeat(60_000);
+        let xml = format!(r#"<draw:enhanced-geometry {NS} draw:enhanced-path="{path}"/>"#);
+        let d = doc(&xml);
+        assert!(enhanced_geometry(d.root_element(), &frame()).is_ok());
+        let path = "M 0 0 L 1 1 N ".repeat(110_000);
+        let xml = format!(r#"<draw:enhanced-geometry {NS} draw:enhanced-path="{path}"/>"#);
+        let d = doc(&xml);
+        assert!(enhanced_geometry(d.root_element(), &frame()).is_err());
+    }
 
     #[test]
     fn transforms_compose_left_to_right_with_counter_clockwise_rotation() {

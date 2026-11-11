@@ -15,14 +15,71 @@ use crate::xml::{self, NS_DRAW, NS_FO, NS_LOEXT, NS_STYLE, NS_TEXT, NS_XLINK};
 use ooxml_common::effect::Shadow;
 use ooxml_common::text::SpaceLine;
 use pptx_model::{Bullet, Paragraph, TabStop, TextBody, TextOutline, TextRun, TextRunData};
+use std::cell::Cell;
 use std::collections::{BTreeMap, HashMap};
+use std::rc::Rc;
+
+/// The remaining text payload and work of one object (see
+/// [`MAX_OBJECT_TEXT_BYTES`], [`MAX_OBJECT_TEXT_WORK`]).
+pub struct TextPayload {
+    bytes: Cell<usize>,
+    work: Cell<usize>,
+}
+
+impl TextPayload {
+    pub fn new() -> Self {
+        Self {
+            bytes: Cell::new(MAX_OBJECT_TEXT_BYTES),
+            work: Cell::new(MAX_OBJECT_TEXT_WORK),
+        }
+    }
+    /// Charge `bytes` before they are retained.
+    pub fn charge(&self, bytes: usize) -> Result<(), String> {
+        let left = self
+            .bytes
+            .get()
+            .checked_sub(bytes)
+            .ok_or_else(|| "OpenDocument text exceeds the text limit".to_string())?;
+        self.bytes.set(left);
+        Ok(())
+    }
+    /// Charge `steps` of inline-walk work.
+    pub fn step(&self, steps: usize) -> Result<(), String> {
+        let left = self
+            .work
+            .get()
+            .checked_sub(steps)
+            .ok_or_else(|| "OpenDocument text exceeds the text work limit".to_string())?;
+        self.work.set(left);
+        Ok(())
+    }
+}
+
+/// Retained bytes of a model record: its fixed size plus its serialized
+/// strings and lists (the JSON size bounds what the record owns on the heap
+/// beyond its fixed part).
+pub fn record_bytes<T: serde::Serialize>(value: &T) -> Result<usize, String> {
+    let measured = ooxml_common::json_measurement::measure_json(value)?;
+    usize::try_from(measured.json_bytes)
+        .ok()
+        .and_then(|n| n.checked_add(std::mem::size_of::<T>()))
+        .ok_or_else(|| "OpenDocument object exceeds the retained-size limit".to_string())
+}
 
 pub const NS_PRESENTATION: &str = "urn:oasis:names:tc:opendocument:xmlns:presentation:1.0";
 
 /// Implementation bound on paragraphs per text body.
 const MAX_PARAGRAPHS: usize = 100_000;
-/// Implementation bound on the text one object holds (bytes).
-const MAX_TEXT_BYTES: usize = 16 * 1024 * 1024;
+/// Implementation bound on the text payload of one object: a shape's text
+/// body, or every cell of one table together. It counts the bytes each run
+/// and paragraph retains (text, strings, and the fixed size of the model
+/// record), charged before the record is kept.
+pub const MAX_OBJECT_TEXT_BYTES: usize = 32 * 1024 * 1024;
+/// Implementation bound on the inline nodes one object's text visits,
+/// weighted by the span nesting each one resolves its style through.
+pub const MAX_OBJECT_TEXT_WORK: usize = 16 * 1024 * 1024;
+/// Implementation bound on the text of one slide's speaker notes (bytes).
+const MAX_NOTES_BYTES: usize = 16 * 1024 * 1024;
 /// Implementation bound on element nesting inside a paragraph.
 const MAX_SPAN_DEPTH: usize = 64;
 
@@ -82,17 +139,16 @@ pub struct TextEnv<'a, 'e> {
     pub slide_number: usize,
     pub slide_count: usize,
     /// Texts of the slide's `presentation:footer`, `header` and `date-time`.
-    pub footer: Option<String>,
-    pub header: Option<String>,
-    pub date_time: Option<String>,
+    /// Shared with every object of the slide (one copy per declaration).
+    pub footer: Option<Rc<str>>,
+    pub header: Option<Rc<str>>,
+    pub date_time: Option<Rc<str>>,
     /// Background behind the text, for automatic font colours.
     pub background: Option<String>,
     /// Slide names (`draw:name`) to slide indexes, for internal links.
     pub pages: &'e HashMap<String, usize>,
-}
-
-struct Counter {
-    work: usize,
+    /// The object's text payload (shared by every cell of a table).
+    pub payload: &'e TextPayload,
 }
 
 /// Paragraph context while walking lists.
@@ -106,6 +162,47 @@ struct ListContext<'a> {
     /// apply to it; headers and following paragraphs have none).
     labelled: bool,
     start_value: Option<u32>,
+    /// The list instance the paragraph numbers in (§5.3.1: a top-level
+    /// `text:list` starts one unless it continues an earlier list); `None`
+    /// outside lists.
+    instance: Option<usize>,
+}
+
+/// List instances of one text body, for `text:continue-numbering` and
+/// `text:continue-list` (§19.785, §19.786).
+#[derive(Default)]
+struct ListInstances<'a> {
+    count: usize,
+    /// The last top-level list: its instance and list style name.
+    previous: Option<(usize, Option<&'a str>)>,
+    /// `xml:id` of top-level lists to their instance.
+    ids: HashMap<&'a str, usize>,
+}
+
+impl<'a> ListInstances<'a> {
+    /// The instance a top-level `text:list` numbers in: the list it names
+    /// by `text:continue-list`, else with `text:continue-numbering="true"`
+    /// the preceding list when it has the same list style, else a new one.
+    fn top_level(&mut self, list: Nd<'a>) -> usize {
+        let style = list.attribute((NS_TEXT, "style-name"));
+        let continued = match list.attribute((NS_TEXT, "continue-list")) {
+            Some(id) => self.ids.get(id).copied(),
+            None => (list.attribute((NS_TEXT, "continue-numbering")) == Some("true"))
+                .then_some(self.previous)
+                .flatten()
+                .filter(|(_, previous_style)| *previous_style == style)
+                .map(|(instance, _)| instance),
+        };
+        let instance = continued.unwrap_or_else(|| {
+            self.count += 1;
+            self.count
+        });
+        if let Some(id) = list.attribute((crate::xml::NS_XML, "id")) {
+            self.ids.insert(id, instance);
+        }
+        self.previous = Some((instance, style));
+        instance
+    }
 }
 
 /// Build the text body of an object from its text container (the
@@ -118,6 +215,7 @@ pub fn text_body<'a>(
     graphic: &Props<'a>,
 ) -> Result<Option<TextBody>, String> {
     let mut items: Vec<(Nd<'a>, ListContext<'a>)> = Vec::new();
+    let mut instances = ListInstances::default();
     collect_blocks(
         container,
         ListContext {
@@ -125,22 +223,20 @@ pub fn text_body<'a>(
             style: None,
             labelled: false,
             start_value: None,
+            instance: None,
         },
         &mut items,
+        &mut instances,
         0,
     )?;
     if items.is_empty() {
         return Ok(None);
     }
     let mut body = body_frame(graphic);
-    let mut counters: Vec<(usize, Option<u32>)> = Vec::new(); // per paragraph: (depth, number)
-    let mut counter = Counter { work: 0 };
+    let mut counters = Numbering::default();
     for (node, list) in &items {
-        let paragraph = paragraph(*node, list, env, media, &mut counters, &mut counter)?;
+        let paragraph = paragraph(*node, list, env, media, &mut counters)?;
         body.paragraphs.push(paragraph);
-        if body.paragraphs.len() > MAX_PARAGRAPHS {
-            return Err("OpenDocument text exceeds the paragraph limit".to_string());
-        }
     }
     Ok(Some(body))
 }
@@ -149,6 +245,7 @@ fn collect_blocks<'a>(
     parent: Nd<'a>,
     list: ListContext<'a>,
     out: &mut Vec<(Nd<'a>, ListContext<'a>)>,
+    instances: &mut ListInstances<'a>,
     depth: usize,
 ) -> Result<(), String> {
     if depth > MAX_SPAN_DEPTH {
@@ -156,13 +253,24 @@ fn collect_blocks<'a>(
     }
     for child in parent.children().filter(|n| n.is_element()) {
         if xml::is(child, NS_TEXT, "p") || xml::is(child, NS_TEXT, "h") {
-            out.push((child, list.clone()));
+            push_block(out, (child, list.clone()))?;
         } else if xml::is(child, NS_TEXT, "list") {
-            collect_list(child, &list, out, depth + 1)?;
+            collect_list(child, &list, out, instances, depth + 1)?;
         } else if xml::is(child, NS_TEXT, "section") || xml::is(child, NS_TEXT, "soft-page-break") {
-            collect_blocks(child, list.clone(), out, depth + 1)?;
+            collect_blocks(child, list.clone(), out, instances, depth + 1)?;
         }
     }
+    Ok(())
+}
+
+fn push_block<'a>(
+    out: &mut Vec<(Nd<'a>, ListContext<'a>)>,
+    item: (Nd<'a>, ListContext<'a>),
+) -> Result<(), String> {
+    if out.len() >= MAX_PARAGRAPHS {
+        return Err("OpenDocument text exceeds the paragraph limit".to_string());
+    }
+    out.push(item);
     Ok(())
 }
 
@@ -172,6 +280,7 @@ fn collect_list<'a>(
     list_node: Nd<'a>,
     outer: &ListContext<'a>,
     out: &mut Vec<(Nd<'a>, ListContext<'a>)>,
+    instances: &mut ListInstances<'a>,
     depth: usize,
 ) -> Result<(), String> {
     if depth > MAX_SPAN_DEPTH {
@@ -182,11 +291,17 @@ fn collect_list<'a>(
     } else {
         outer.style
     };
+    // A nested list numbers within its enclosing list's instance.
+    let instance = match outer.instance {
+        Some(instance) => instance,
+        None => instances.top_level(list_node),
+    };
     let inner = ListContext {
         depth: outer.depth + 1,
         style,
         labelled: false,
         start_value: None,
+        instance: Some(instance),
     };
     for item in list_node.children().filter(|n| n.is_element()) {
         let header = xml::is(item, NS_TEXT, "list-header");
@@ -199,17 +314,20 @@ fn collect_list<'a>(
             .and_then(|v| v.parse().ok());
         for block in item.children().filter(|n| n.is_element()) {
             if xml::is(block, NS_TEXT, "list") {
-                collect_list(block, &inner, out, depth + 1)?;
+                collect_list(block, &inner, out, instances, depth + 1)?;
                 first = false;
             } else if xml::is(block, NS_TEXT, "p") || xml::is(block, NS_TEXT, "h") {
-                out.push((
-                    block,
-                    ListContext {
-                        labelled: first,
-                        start_value: if first { start_value } else { None },
-                        ..inner.clone()
-                    },
-                ));
+                push_block(
+                    out,
+                    (
+                        block,
+                        ListContext {
+                            labelled: first,
+                            start_value: if first { start_value } else { None },
+                            ..inner.clone()
+                        },
+                    ),
+                )?;
                 first = false;
             }
         }
@@ -349,8 +467,7 @@ fn paragraph<'a>(
     list: &ListContext<'a>,
     env: &TextEnv<'a, '_>,
     media: &mut Media<'_>,
-    counters: &mut Vec<(usize, Option<u32>)>,
-    counter: &mut Counter,
+    counters: &mut Numbering,
 ) -> Result<Paragraph, String> {
     let level = list.depth.saturating_sub(1);
     let object_styles = env.object.for_level(env.sheet, level);
@@ -454,15 +571,15 @@ fn paragraph<'a>(
             mar_l = space_before + min_label + margin_left;
             indent = -min_label + text_indent;
         }
+        let mut number = None;
         if list.labelled {
-            let (label, number) = list_label(level_node, list, env, media, counters)?;
+            let (label, n) = list_label(level_node, list, env, media, counters)?;
             bullet = label;
-            counters.push((list.depth, number));
-        } else {
-            counters.push((list.depth, None));
+            number = n;
         }
+        counters.record(list, number);
     } else {
-        counters.push((list.depth, None));
+        counters.record(list, None);
     }
 
     let tab_stops = para_props
@@ -496,23 +613,11 @@ fn paragraph<'a>(
 
     let base_run = run_properties(&text_props, env);
     let mut runs = Vec::new();
-    let mut text_bytes = 0usize;
     let mut stack: Vec<Nd<'a>> = Vec::new();
-    walk_inline(
-        node,
-        &mut stack,
-        &styles,
-        env,
-        media,
-        &mut runs,
-        &mut text_bytes,
-        None,
-        0,
-        counter,
-    )?;
+    walk_inline(node, &mut stack, &styles, env, &mut runs, None, 0)?;
     let end_run = base_run.clone();
     // A label's colour/size follow the first run when the list does not set them.
-    Ok(Paragraph {
+    let paragraph = Paragraph {
         alignment: alignment.to_string(),
         mar_l: mar_l.round() as i64,
         mar_r: margin_right.round() as i64,
@@ -534,10 +639,44 @@ fn paragraph<'a>(
         rtl,
         ea_ln_brk: true,
         font_algn: None,
-        runs,
+        runs: Vec::new(),
         math_fallbacks: Vec::new(),
         end_run_properties: Some(Box::new(end_run)),
-    })
+    };
+    // The paragraph record itself (its runs were charged as they were read).
+    env.payload.charge(record_bytes(&paragraph)?)?;
+    Ok(Paragraph { runs, ..paragraph })
+}
+
+/// List numbering state of one text body (§19.785, §19.786): per list
+/// instance and depth, the number of the latest item at that depth that no
+/// shallower item of the instance has ended (`Some(None)`: an unnumbered
+/// paragraph, which restarts the sequence). Paragraphs outside lists and of
+/// other instances do not affect an instance.
+#[derive(Default)]
+struct Numbering {
+    instances: HashMap<usize, Vec<Option<Option<u32>>>>,
+}
+
+impl Numbering {
+    /// The latest entry at `list`'s depth in its instance.
+    fn previous(&self, list: &ListContext<'_>) -> Option<Option<u32>> {
+        let levels = self.instances.get(&list.instance?)?;
+        levels.get(list.depth).copied().flatten()
+    }
+
+    fn record(&mut self, list: &ListContext<'_>, number: Option<u32>) {
+        let Some(instance) = list.instance else {
+            return;
+        };
+        let levels = self.instances.entry(instance).or_default();
+        if levels.len() <= list.depth {
+            levels.resize(list.depth + 1, None);
+        }
+        levels[list.depth] = Some(number);
+        // A shallower or equal item ends the deeper sequences.
+        levels.truncate(list.depth + 1);
+    }
 }
 
 /// The label of a list item (§16.31–§16.33 list level styles).
@@ -546,7 +685,7 @@ fn list_label(
     list: &ListContext<'_>,
     env: &TextEnv<'_, '_>,
     media: &mut Media<'_>,
-    counters: &[(usize, Option<u32>)],
+    counters: &Numbering,
 ) -> Result<(Bullet, Option<u32>), String> {
     let level_text = level_node
         .children()
@@ -619,30 +758,18 @@ fn list_label(
         ));
     }
     if xml::is(level_node, NS_TEXT, "list-level-style-number") {
-        // Count back over the earlier paragraphs of the object: equal depth
-        // with a label continues the sequence, a shallower one ends it.
+        // The earlier items of the same list instance (§19.785, §19.786):
+        // an equal-depth numbered item continues the sequence; a shallower
+        // item ends it (a nested list restarts under each parent item).
         let start = level_node
             .attribute((NS_TEXT, "start-value"))
             .and_then(|v| v.parse::<u32>().ok())
             .unwrap_or(1);
-        let mut number = list.start_value.unwrap_or(0);
-        if list.start_value.is_none() {
-            number = start;
-            for (depth, n) in counters.iter().rev() {
-                if *depth < list.depth {
-                    break;
-                }
-                if *depth == list.depth {
-                    match n {
-                        Some(previous) => {
-                            number = previous + 1;
-                            break;
-                        }
-                        None => break,
-                    }
-                }
-            }
-        }
+        let number = match (list.start_value, counters.previous(list)) {
+            (Some(value), _) => value,
+            (None, Some(Some(n))) => n.saturating_add(1),
+            (None, _) => start,
+        };
         let format = level_node
             .attribute((NS_STYLE, "num-format"))
             .unwrap_or("1");
@@ -1040,7 +1167,7 @@ fn run_style(props: &Props<'_>, env: &TextEnv<'_, '_>) -> RunStyle {
         hyperlink_mouse_over_action: None,
         shadow,
         reflection: None,
-        outline: outline_on.then(|| TextOutline {
+        outline: outline_on.then_some(TextOutline {
             width: 9525,
             color: colour,
             fill: None,
@@ -1112,12 +1239,9 @@ fn walk_inline<'a>(
     stack: &mut Vec<Nd<'a>>,
     paragraph_styles: &[Nd<'a>],
     env: &TextEnv<'a, '_>,
-    media: &mut Media<'_>,
     runs: &mut Vec<TextRun>,
-    text_bytes: &mut usize,
     link: Option<&str>,
     depth: usize,
-    counter: &mut Counter,
 ) -> Result<(), String> {
     if depth > MAX_SPAN_DEPTH {
         return Err(crate::error::invalid("text spans are nested too deeply"));
@@ -1137,7 +1261,8 @@ fn walk_inline<'a>(
         run_style(&props, env)
     };
     for child in node.children() {
-        counter.work += 1;
+        // Each node costs its style resolution through the open spans.
+        env.payload.step(1 + stack.len())?;
         if child.is_text() {
             let text = child.text().unwrap_or("");
             push_text(
@@ -1146,7 +1271,6 @@ fn walk_inline<'a>(
                 &collapse_whitespace(text),
                 link,
                 env,
-                text_bytes,
             )?;
             continue;
         }
@@ -1158,18 +1282,7 @@ fn walk_inline<'a>(
         match (ns, name) {
             (Some(NS_TEXT), "span") => {
                 stack.push(child);
-                walk_inline(
-                    child,
-                    stack,
-                    paragraph_styles,
-                    env,
-                    media,
-                    runs,
-                    text_bytes,
-                    link,
-                    depth + 1,
-                    counter,
-                )?;
+                walk_inline(child, stack, paragraph_styles, env, runs, link, depth + 1)?;
                 stack.pop();
             }
             (Some(NS_TEXT), "a") => {
@@ -1180,12 +1293,9 @@ fn walk_inline<'a>(
                     stack,
                     paragraph_styles,
                     env,
-                    media,
                     runs,
-                    text_bytes,
                     href.or(link),
                     depth + 1,
-                    counter,
                 )?;
                 stack.pop();
             }
@@ -1195,39 +1305,34 @@ fn walk_inline<'a>(
                     .and_then(|c| c.parse::<usize>().ok())
                     .unwrap_or(1)
                     .clamp(1, 1024);
-                push_text(
-                    runs,
-                    &style_for(stack),
-                    &" ".repeat(count),
-                    link,
-                    env,
-                    text_bytes,
-                )?;
+                push_text(runs, &style_for(stack), &" ".repeat(count), link, env)?;
             }
             (Some(NS_TEXT), "tab") => {
-                push_text(runs, &style_for(stack), "\t", link, env, text_bytes)?;
+                push_text(runs, &style_for(stack), "\t", link, env)?;
             }
             (Some(NS_TEXT), "line-break") => {
                 let s = style_for(stack);
-                runs.push(TextRun::Break {
+                let run = TextRun::Break {
                     font_size: s.data.font_size,
                     font_family: s.data.font_family.clone(),
                     bold: s.data.bold,
                     italic: s.data.italic,
                     character_attributes: BTreeMap::new(),
                     character_child_attributes: BTreeMap::new(),
-                });
+                };
+                env.payload.charge(record_bytes(&run)?)?;
+                runs.push(run);
             }
             (Some(NS_TEXT), "page-number") => {
                 let format = child.attribute((NS_STYLE, "num-format")).unwrap_or("1");
                 let mut s = style_for(stack);
                 s.data.field_type = Some("slidenum".into());
                 let text = format_number(env.slide_number as u32, format);
-                push_text(runs, &s, &text, link, env, text_bytes)?;
+                push_text(runs, &s, &text, link, env)?;
             }
             (Some(NS_TEXT), "page-count") => {
                 let text = env.slide_count.to_string();
-                push_text(runs, &style_for(stack), &text, link, env, text_bytes)?;
+                push_text(runs, &style_for(stack), &text, link, env)?;
             }
             (Some(NS_PRESENTATION), "footer")
             | (Some(NS_PRESENTATION), "header")
@@ -1238,7 +1343,7 @@ fn walk_inline<'a>(
                     _ => env.date_time.clone(),
                 };
                 if let Some(text) = value {
-                    push_text(runs, &style_for(stack), &text, link, env, text_bytes)?;
+                    push_text(runs, &style_for(stack), &text, link, env)?;
                 }
             }
             (Some(NS_TEXT), "note")
@@ -1258,35 +1363,13 @@ fn walk_inline<'a>(
             | (Some(crate::xml::NS_OFFICE), "annotation-end") => {}
             (Some(NS_TEXT), "ruby") => {
                 if let Some(base) = child.children().find(|c| xml::is(*c, NS_TEXT, "ruby-base")) {
-                    walk_inline(
-                        base,
-                        stack,
-                        paragraph_styles,
-                        env,
-                        media,
-                        runs,
-                        text_bytes,
-                        link,
-                        depth + 1,
-                        counter,
-                    )?;
+                    walk_inline(base, stack, paragraph_styles, env, runs, link, depth + 1)?;
                 }
             }
             _ => {
                 // Other fields (dates, titles, file names, …) show their
                 // stored representation.
-                walk_inline(
-                    child,
-                    stack,
-                    paragraph_styles,
-                    env,
-                    media,
-                    runs,
-                    text_bytes,
-                    link,
-                    depth + 1,
-                    counter,
-                )?;
+                walk_inline(child, stack, paragraph_styles, env, runs, link, depth + 1)?;
             }
         }
     }
@@ -1318,15 +1401,13 @@ fn push_text(
     text: &str,
     link: Option<&str>,
     env: &TextEnv<'_, '_>,
-    text_bytes: &mut usize,
 ) -> Result<(), String> {
     if text.is_empty() {
         return Ok(());
     }
-    *text_bytes += text.len();
-    if *text_bytes > MAX_TEXT_BYTES {
-        return Err("OpenDocument text exceeds the text limit".to_string());
-    }
+    // The text (a case transform may grow it; it is charged again with
+    // each run record below) before any copy is made.
+    env.payload.charge(text.len())?;
     let (hyperlink, action) = match link {
         Some(href) => match href.strip_prefix('#') {
             Some(page) => match env.pages.get(page) {
@@ -1388,7 +1469,9 @@ fn push_text(
         data.hyperlink = hyperlink.clone();
         data.hyperlink_action = action.clone();
         data.hyperlink_uses_text_fill = hyperlink.is_some();
-        runs.push(TextRun::Text(data));
+        let run = TextRun::Text(data);
+        env.payload.charge(record_bytes(&run)?)?;
+        runs.push(run);
     }
     Ok(())
 }
@@ -1414,52 +1497,76 @@ pub fn slide_part_name(index: usize) -> String {
     format!("odp/slide{}", index + 1)
 }
 
-/// Plain text of a container (speaker notes).
-pub fn plain_text(container: Nd<'_>) -> String {
-    let mut paragraphs = Vec::new();
-    for p in container
-        .descendants()
-        .filter(|n| xml::is(*n, NS_TEXT, "p") || xml::is(*n, NS_TEXT, "h"))
-    {
-        let mut text = String::new();
-        for d in p.descendants() {
-            if d.is_text() {
-                text.push_str(&collapse_whitespace(d.text().unwrap_or("")));
-            } else if xml::is(d, NS_TEXT, "s") {
-                let n = d
-                    .attribute((NS_TEXT, "c"))
-                    .and_then(|c| c.parse::<usize>().ok())
-                    .unwrap_or(1)
-                    .min(1024);
-                text.push_str(&" ".repeat(n));
-            } else if xml::is(d, NS_TEXT, "tab") {
-                text.push('\t');
-            } else if xml::is(d, NS_TEXT, "line-break") {
-                text.push('\n');
+/// Plain text of speaker notes: the paragraphs of the containers, one per
+/// line, within [`MAX_NOTES_BYTES`] (checked before each piece is added).
+pub fn notes_text<'a>(containers: impl Iterator<Item = Nd<'a>>) -> Result<String, String> {
+    let mut text = String::new();
+    let mut first = true;
+    let push = |text: &mut String, piece: &str| -> Result<(), String> {
+        if text.len().saturating_add(piece.len()) > MAX_NOTES_BYTES {
+            return Err("OpenDocument speaker notes exceed the text limit".to_string());
+        }
+        text.push_str(piece);
+        Ok(())
+    };
+    for container in containers {
+        for p in container
+            .descendants()
+            .filter(|n| xml::is(*n, NS_TEXT, "p") || xml::is(*n, NS_TEXT, "h"))
+        {
+            if !first {
+                push(&mut text, "\n")?;
+            }
+            first = false;
+            for d in p.descendants() {
+                if d.is_text() {
+                    push(&mut text, &collapse_whitespace(d.text().unwrap_or("")))?;
+                } else if xml::is(d, NS_TEXT, "s") {
+                    let n = d
+                        .attribute((NS_TEXT, "c"))
+                        .and_then(|c| c.parse::<usize>().ok())
+                        .unwrap_or(1)
+                        .min(1024);
+                    for _ in 0..n {
+                        push(&mut text, " ")?;
+                    }
+                } else if xml::is(d, NS_TEXT, "tab") {
+                    push(&mut text, "\t")?;
+                } else if xml::is(d, NS_TEXT, "line-break") {
+                    push(&mut text, "\n")?;
+                }
             }
         }
-        paragraphs.push(text);
     }
-    paragraphs.join("\n")
+    Ok(text)
 }
 
 /// Text content of an element whose children are inline text (a
-/// `presentation:footer-decl`, §9.10.1).
-pub fn plain_text_inline(node: Nd<'_>) -> String {
+/// `presentation:footer-decl`, §9.10.1), within [`MAX_NOTES_BYTES`].
+pub fn plain_text_inline(node: Nd<'_>) -> Result<Rc<str>, String> {
     let mut text = String::new();
+    let mut push = |piece: &str| -> Result<(), String> {
+        if text.len().saturating_add(piece.len()) > MAX_NOTES_BYTES {
+            return Err("OpenDocument header or footer exceeds the text limit".to_string());
+        }
+        text.push_str(piece);
+        Ok(())
+    };
     for d in node.descendants() {
         if d.is_text() {
-            text.push_str(&collapse_whitespace(d.text().unwrap_or("")));
+            push(&collapse_whitespace(d.text().unwrap_or("")))?;
         } else if xml::is(d, NS_TEXT, "s") {
             let n = d
                 .attribute((NS_TEXT, "c"))
                 .and_then(|c| c.parse::<usize>().ok())
                 .unwrap_or(1)
                 .min(1024);
-            text.push_str(&" ".repeat(n));
+            for _ in 0..n {
+                push(" ")?;
+            }
         } else if xml::is(d, NS_TEXT, "tab") {
-            text.push('\t');
+            push("\t")?;
         }
     }
-    text
+    Ok(Rc::from(text))
 }
