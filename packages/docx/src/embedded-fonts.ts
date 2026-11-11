@@ -187,6 +187,9 @@ export async function loadEmbeddedFonts(
               sourceIdentity: `embedded:${family}`,
               synthesized: false,
               ...(line ? {
+                // The parsed class, as the installed-face catalogue carries
+                // it (reference-font-line-metrics.ts): grid allocation reads it.
+                farEastCodePage: openType!.farEastCodePage!,
                 lineHeightRatio: line.lineHeightRatio,
                 designAscentRatio: line.designAscentRatio,
                 designDescentRatio: line.designDescentRatio,

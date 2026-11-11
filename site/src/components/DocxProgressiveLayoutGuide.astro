@@ -56,10 +56,23 @@ console.log('Final page count:', viewer.pageCount);`;
           </p>
         </article>
         <article>
+          <h3>Pages settle too</h3>
+          <p>
+            Pages shown before layout completes are provisional. Page breaks may move and content
+            can occasionally overlap, for example body text over a tall footer.
+            <code>DocxViewer</code> and <code>DocxScrollViewer</code> redraw every page once layout
+            completes; code that calls <code>DocxDocument.renderPage()</code> directly must render
+            its pages again.
+          </p>
+        </article>
+        <article>
           <h3>Page fields converge too</h3>
           <p>
-            In-document <code>NUMPAGES</code> fields are repainted with the authoritative value
-            after pagination converges. Application-owned “Page X of Y” UI should use the
+            <code>DocxViewer</code> and <code>DocxScrollViewer</code> repaint provisional pages,
+            including in-document <code>NUMPAGES</code> fields, with the authoritative layout after
+            pagination converges. Code that calls <code>DocxDocument.renderPage()</code> directly
+            owns its canvases and must render those pages again after
+            <code>waitUntilLayoutComplete()</code>. Application-owned “Page X of Y” UI should use the
             callback’s <code>layoutComplete</code> flag to mark provisional totals.
           </p>
         </article>

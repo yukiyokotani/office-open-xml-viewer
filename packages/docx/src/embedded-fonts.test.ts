@@ -232,6 +232,38 @@ describe('loadEmbeddedFonts (ECMA-376 §17.8.1 / §17.8.3)', () => {
     });
   });
 
+  it.each([
+    ['a Far East', 1 << 17, true, false],
+    ['an ordinary', 1, false, true],
+  ] as const)('carries the parsed class of %s face to grid allocation', async (_name, codePages, farEast, latinGrid) => {
+    installFontFaceSet();
+    const loaded = await loadEmbeddedFonts(modelWith([{
+      fontName: 'Classed Face', style: 'regular',
+      partPath: 'word/fonts/font1.ttf', fontKey: '',
+    }]), async () => metricSfnt(codePages));
+    expect(loaded.metrics['classed face']?.farEastCodePage).toBe(farEast);
+    const textService = createTextLayoutService({
+      fonts: createFontResolver([{ ...loaded.routes[0], source: 'embedded' }]),
+      measurer: {
+        fingerprint: 'classed-embedded-face',
+        measure: (request) => ({ advancePt: [...request.text].length * 5, ascentPt: 8, descentPt: 2 }),
+      },
+      fontMetrics: snapshotFontMetrics(loaded.metrics),
+    });
+    const [segment] = buildSegments([{
+      // The fixture's cmap maps CJK ideographs only.
+      type: 'text', text: '国', fontFamily: 'Classed Face', fontFamilyEastAsia: 'Classed Face',
+      fontSize: 10, bold: false, italic: false, underline: false, strikethrough: false,
+    } as DocRun], {
+      pageIndex: 0, totalPages: 1,
+      layoutServices: { text: textService } as unknown as
+        NonNullable<Parameters<typeof buildSegments>[1]['layoutServices']>,
+    }) as LayoutTextSeg[];
+    // Latin whole-cell grid allocation needs an explicit non-Far-East class
+    // (segment-builder.ts resolvedLatinGridCellAllocation).
+    expect(segment!.resolvedLatinGridCellAllocation).toBe(latinGrid);
+  });
+
   it('does not lend a subset face line height to an uncovered fallback glyph', async () => {
     installFontFaceSet();
     const loaded = await loadEmbeddedFonts(modelWith([{

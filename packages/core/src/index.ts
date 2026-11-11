@@ -800,6 +800,7 @@ export {
 } from './fonts/local-metrics';
 export {
   measureLocalFontNormalLine,
+  measureFontFaceNormalLine,
   loadLocalFontCoverageProbe,
   localFontMetricCoversText,
   measureLocalFontSourceNormalLine,

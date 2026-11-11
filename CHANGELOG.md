@@ -31,6 +31,18 @@ is removed in 0.91.0. See the [0.89 to 0.90 migration guide](docs/migration-0.90
   (#1497).
 - **Fewer font downloads:** DOCX and XLSX now load only the `unicode-range`
   subsets that the document's text paints, as PPTX already did.
+- **Served font line heights:** DOCX lays out a face from the `fonts` option
+  with Word's line rule from the face's own OpenType tables (including the
+  line gap and, for variable fonts, the MVAR usWin deltas), as for an
+  installed or embedded face. Before, such a face got the canvas font box,
+  which leaves out the line gap, so its lines were too tight. To read the
+  tables, the library now fetches the font files of `googleFonts()`,
+  `fontCssApi()`, `fontCss()`, `fontFiles()` and, in main mode too,
+  `fontResolver()` itself with `fetch()` (one request per needed
+  `unicode-range` subset, or per face of a claimed `fontResolver()` family;
+  the same requests in main and worker mode) and registers each face from those bytes. **CSP:** the font file
+  host (for example `fonts.gstatic.com`) now needs `connect-src` as well as
+  `font-src`.
 - **Resource safety:** font sources have fixed limits and fail closed with the
   new `OoxmlError` code `font-source-limit`.
 - **Failed package parts:** a new `partFailures` getter on `DocxDocument`,
@@ -54,6 +66,61 @@ is removed in 0.91.0. See the [0.89 to 0.90 migration guide](docs/migration-0.90
   warns once per JavaScript realm. Combining `useGoogleFonts: true` with
   `fonts` throws a `TypeError`. The VS Code extension keeps its
   `ooxmlViewer.useGoogleFonts` setting.
+
+## 0.89.9 — 2026-11-10
+
+Compatible patch release. No migration is required for ordinary use. Two
+behaviour changes are worth checking: PowerPoint's `'skip'` mode no longer
+opens a hidden slide through `goToSlide()`, hyperlinks or search, and an MCP
+client that special-cases `-32602` for bad tool arguments must also handle
+`result.isError`. Both are described below.
+
+- **Word: picture watermarks with Washout:** a VML picture's brightness and
+  contrast (`gain`/`blacklevel`, which Word's Watermark dialog writes for
+  Washout) now fade the picture as Word does, instead of drawing it at full
+  contrast over the text (#2175).
+- **MCP server dependencies:** the `ooxml-mcp-server` binaries now build on
+  `rmcp` 3.9 and `tokio` 1.54, which clears RUSTSEC-2026-0462 (unbounded
+  response buffering in rmcp's Streamable HTTP client, which the stdio server
+  does not use) and RUSTSEC-2026-0386. Tool names, descriptions, annotations,
+  input properties, instructions, results and protocol-version negotiation
+  are unchanged. Three details follow rmcp: `serverInfo.version` reports the
+  bundled rmcp version, tool input schemas no longer carry the internal Rust
+  type name as a top-level `title`, and arguments that fail to deserialize
+  now return an `isError` tool result instead of a JSON-RPC `-32602` error,
+  as the MCP 2025-11-25 specification asks, so the model can correct them.
+  This applies whichever protocol version is negotiated; unknown tools still
+  return `-32602`. Ordinary MCP clients need no changes, but a client that
+  special-cases `-32602` for bad arguments must also handle `result.isError`.
+  rmcp also limits an incoming message to 16 MiB and drops a larger one
+  without a response, so the caller times out; the server's path-based tool
+  requests are far below that.
+- **PowerPoint: OLE objects converted from binary .ppt:** an embedded object
+  (typically an equation) whose preview picture is stored only in the slide's
+  legacy VML drawing (`p:oleObj spid` with no `p:pic`) now shows that picture.
+  Layouts and masters are covered too (#2176).
+- **PowerPoint: hidden slides in `'skip'` mode:** this changes the previously
+  documented skip-mode behaviour, under which an explicit `goToSlide()` to a
+  hidden slide was honoured. `PptxViewer` now draws a hidden slide only when
+  every slide is hidden. `goToSlide()` and internal hyperlinks aimed at a hidden
+  slide land on the next shown slide, else the previous one. `findText()` no
+  longer matches hidden slides, so `findNext()` / `findPrev()` never open one,
+  and switching into or out of `'skip'` clears the current search (#2181).
+- **Excel: General numbers wider than their column:** a General-format number
+  now shortens to the cell's width as Excel does, dropping rounded decimal
+  places and switching to scientific notation (`3.141593`, `1.23E+14`),
+  instead of losing its leading digits to clipping. When even the shortest
+  form is too wide, that form is shown (clipped as before) rather than Excel's
+  `#` fill. Without a width limit, General shows at most 11 characters, sign
+  excluded. Wrapped cells keep wrapping, and find matches the shortened text as
+  well as the full one. Numbers in other formats and dates are unchanged;
+  Excel's `###` for those when too wide is planned for 0.90 (#2179).
+- **Docs:** `progressiveLayout` now states that pages shown before layout
+  completes are provisional. Page breaks may move and content can occasionally
+  overlap, for example body text over a footer taller than the bottom margin
+  (#2178). `DocxViewer` and `DocxScrollViewer` redraw every page once layout
+  completes; code that calls `DocxDocument.renderPage()` directly must render
+  its pages again.
 
 ## 0.89.8 — 2026-11-09
 

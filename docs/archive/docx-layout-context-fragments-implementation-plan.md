@@ -3,7 +3,7 @@
 > **Completed historical plan (2026-08-17):** The immutable
 > layout-to-paint migration described here has been delivered. The unchecked
 > task boxes preserve the original execution plan and are not current backlog.
-> Use [`docx-layout-engine-redesign.md`](docx-layout-engine-redesign.md) for the
+> Use [`docx-layout-engine-redesign.md`](../docx-layout-engine-redesign.md) for the
 > current architecture and gates, and [`README.md`](README.md) for document
 > classification.
 
@@ -237,8 +237,8 @@ feat(docx): preserve run character-grid participation
 ### Task 3: Verify and merge PR 1
 
 **Files:**
-- Verify: `docs/docx-layout-context-fragments-design.md`
-- Verify: `docs/docx-layout-context-fragments-implementation-plan.md`
+- Verify: `docs/archive/docx-layout-context-fragments-design.md`
+- Verify: `docs/archive/docx-layout-context-fragments-implementation-plan.md`
 - Verify: parser and TypeScript files changed in Tasks 1-2.
 
 **Interfaces:**

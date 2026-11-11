@@ -112,6 +112,7 @@ export type WireRenderPageOptions = Omit<RenderPageOptions, 'onTextRun' | 'error
 export type RenderWorkerRequest =
   | { type: 'init'; wasmUrl: string }
   | { type: 'hostFontLinesMeasured'; forId: number; measurements: import('./host-font-line-metrics.js').HostFontLineMeasurement[] }
+  | { type: 'servedFaceLinesMeasured'; forId: number; measurements: import('./served-face-lines.js').ServedFaceLineMeasurement[] }
   | { type: 'nativeRouteLinesMeasured'; forId: number; lines: (import('@silurus/ooxml-core').NativeRouteNormalLine | null)[] }
   // `currentDateMs` / `showTrackedChanges` select the layout VARIANT the worker
   // paginates and reports metadata for. They are acquisition inputs, not paint
@@ -174,6 +175,7 @@ export type RenderWorkerWireRequest =
 
 export type RenderWorkerResponse =
   | { type: 'measureHostFontLines'; forId: number; routes: import('@silurus/ooxml-core').OfficeFontFallbackRoute[] }
+  | { type: 'measureServedFaceLines'; forId: number; requests: import('./served-face-lines.js').ServedFaceLineRequest[] }
   | { type: 'measureNativeRouteLines'; forId: number; requests: import('@silurus/ooxml-core').NativeRouteLineRequest[] }
   | Exclude<WorkerResponse, { type: 'documentSessionOpened' }>
   | PullSessionResponse<ArrayBuffer, number>

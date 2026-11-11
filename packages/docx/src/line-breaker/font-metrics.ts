@@ -21,7 +21,7 @@ type FaceTuple = Readonly<{ weight: number; style: 'normal' | 'italic' }>;
  * weight: above 500 heavier ascending then lighter descending; below 400
  * lighter descending then heavier ascending; 400–500 heavier up to 500, then
  * lighter descending, then above 500 ascending. */
-function cssMatchedFace<T extends FaceTuple>(faces: readonly T[], weight: number, style: 'normal' | 'italic'): T | undefined {
+export function cssMatchedFace<T extends FaceTuple>(faces: readonly T[], weight: number, style: 'normal' | 'italic'): T | undefined {
   for (const candidateStyle of style === 'italic' ? ['italic', 'normal'] as const : ['normal', 'italic'] as const) {
     const sameStyle = faces.filter((face) => face.style === candidateStyle);
     if (sameStyle.length === 0) continue;
@@ -160,7 +160,8 @@ export function metricMatchesSelectedFont(
       ? identity?.startsWith('embedded:') === true
       : identity === selected.resourceIdentity;
   }
-  if (selected.source === 'local' || selected.source === 'substitute') {
+  if (selected.source === 'local' || selected.source === 'substitute' || selected.source === 'source'
+    || selected.source === 'css') {
     // The same CSS tuple may be supplied by an unrelated caller or another
     // loaded face. Only the resource that created this resolver route may lend
     // vertical geometry; a matching family name is insufficient.
@@ -263,8 +264,13 @@ export function selectResourceMetric(
     return metric && metricCoversText(metric, probeText, selected.route, paintsGlyphs)
       ? metric : undefined;
   }
+  // A served face (`source`, or a `substitute` claimed through a font
+  // source) and an application FontFace (`css`) carry a resource identity;
+  // only metrics built from that family's own faces match it
+  // (source-font-metrics.ts).
   if (selected.source !== 'embedded' && selected.source !== 'local'
-    && selected.source !== 'substitute') return undefined;
+    && selected.source !== 'substitute' && selected.source !== 'source'
+    && selected.source !== 'css') return undefined;
   const candidates = index.get(resolutionMetricKey(selected)) ?? [];
   let first: ResolvedFontMetric | undefined;
   for (const metric of candidates) {

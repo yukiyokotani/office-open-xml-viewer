@@ -4928,7 +4928,7 @@ enum OldParaPiece {
 ///   - `BreakType::RenderedPage` — Word's `<w:lastRenderedPageBreak/>` hint
 ///     (ECMA-376 §17.3.1.20), a layout cache that is NOT authoritative. We
 ///     paginate ourselves, so it is ignored uniformly and stripped (never
-///     mixed with self-pagination per the package CLAUDE.md). Verified
+///     mixed with self-pagination per the package AGENTS.md). Verified
 ///     behavior-invariant on the ruby sample that used to need it.
 ///
 /// `<w:lastRenderedPageBreak/>` is often emitted by Word at the very
@@ -4945,7 +4945,7 @@ fn old_split_para_on_page_breaks(para: DocParagraph) -> Vec<OldParaPiece> {
     // cache, not an authoritative break (ECMA-376 §17.3.1.20). We paginate the
     // body ourselves (computePages, TS side), so these hints are ignored
     // uniformly and stripped here — only a hard `<w:br w:type="page"/>` splits a
-    // paragraph. Per the package CLAUDE.md, honoring vs ignoring the hint must
+    // paragraph. Per the package AGENTS.md, honoring vs ignoring the hint must
     // not be mixed. (It was previously honored only inside ruby paragraphs as a
     // stopgap for a ruby line-height drift that the docGrid-aware line metrics
     // have since absorbed: with this gate gone, private/sample-5 — 66 ruby runs,
@@ -8909,7 +8909,9 @@ fn parse_run_inner(
                             ) {
                                 attach_drawing_run_facts(&mut group_runs);
                                 runs.extend(group_runs);
-                            } else if let Some(img) = parse_vml_pict_image(inner, media_map) {
+                            } else if let Some(img) =
+                                parse_vml_pict_image(inner, media_map, diagnostics)
+                            {
                                 let mut pict_runs = vec![DocRun::Image(Box::new(img))];
                                 attach_drawing_run_facts(&mut pict_runs);
                                 runs.extend(pict_runs);
@@ -8953,7 +8955,7 @@ fn parse_run_inner(
                 ) {
                     attach_drawing_run_facts(&mut group_runs);
                     runs.extend(group_runs);
-                } else if let Some(img) = parse_vml_pict_image(child, media_map) {
+                } else if let Some(img) = parse_vml_pict_image(child, media_map, diagnostics) {
                     let mut pict_runs = vec![DocRun::Image(Box::new(img))];
                     attach_drawing_run_facts(&mut pict_runs);
                     runs.extend(pict_runs);
@@ -9000,7 +9002,7 @@ fn parse_run_inner(
                         &attach_drawing_run_facts,
                     );
                     runs.extend(drawing_runs);
-                } else if let Some(img) = parse_object_ole_image(child, media_map) {
+                } else if let Some(img) = parse_object_ole_image(child, media_map, diagnostics) {
                     let anchored = img.anchor;
                     let mut object_runs = vec![DocRun::Image(Box::new(img))];
                     // Inline OLE previews retain their established allocation:
@@ -14498,29 +14500,9 @@ fn resolved_vml_textpath_bool(
         })
 }
 
-// Part 4 §19.1.2.11: crop insets are fractions, percentages, or signed
-// 16.16 fixed-point values. Preserve negative insets for the existing srcRect
-// pipeline; clamping here would discard authored outsets.
+// Part 4 §19.1.2.11 crop insets; shared with the PPTX/XLSX VML OLE previews.
 fn vml_image_crop(node: roxmltree::Node) -> Option<SrcRect> {
-    let fraction = |name| {
-        node.attribute(name)
-            .and_then(|s| {
-                s.trim()
-                    .strip_suffix('%')
-                    .and_then(|s| s.parse::<f64>().ok())
-                    .map(|n| n / 100.0)
-                    .or_else(|| parse_vml_opacity(s))
-            })
-            .filter(|n| n.is_finite())
-            .unwrap_or(0.0)
-    };
-    let crop = SrcRect {
-        l: fraction("cropleft"),
-        t: fraction("croptop"),
-        r: fraction("cropright"),
-        b: fraction("cropbottom"),
-    };
-    (crop.l != 0.0 || crop.t != 0.0 || crop.r != 0.0 || crop.b != 0.0).then_some(crop)
+    ooxml_common::vml::imagedata_crop(node)
 }
 
 /// VML `id` is an object identifier. Only relationship-namespace id/pict
@@ -14603,7 +14585,7 @@ fn vml_image_run(
     let anchor_acquisition =
         anchor.then(|| vml_word_anchor_acquisition(shape, definition, style, width_pt, height_pt));
 
-    ImageRun {
+    let mut picture = ImageRun {
         inline_object_font_facts: None,
         inline_object_origin: None,
         inline_effect_extent: None,
@@ -14638,6 +14620,26 @@ fn vml_image_run(
         anchor_y_relative_from,
         anchor_acquisition,
         list_label: None,
+    };
+    // Every VML picture path shares the effective imagedata effects.
+    vml_image::apply_effects(&mut picture, shape, definition);
+    picture
+}
+
+/// Standalone VML pictures (inline or anchored picts in any story, and OLE
+/// previews) disclose imagedata effects `vml_image::incomplete` leaves
+/// unapplied, through the same diagnostic as grouped VML leaves.
+fn disclose_incomplete_vml_picture(
+    shape: roxmltree::Node,
+    definition: Option<roxmltree::Node>,
+    diagnostics: &mut Vec<PendingParseDiagnostic>,
+) {
+    if vml_image::incomplete(shape, definition) {
+        push_pending_parse_diagnostic(
+            diagnostics,
+            PARSE_DIAGNOSTIC_CODE_UNSUPPORTED_VML_CONTENT,
+            PARSE_DIAGNOSTIC_SEVERITY_UNSUPPORTED_VML_CONTENT,
+        );
     }
 }
 
@@ -14661,6 +14663,7 @@ fn vml_image_run(
 fn parse_vml_pict_image(
     pict: roxmltree::Node,
     media_map: &HashMap<String, String>,
+    diagnostics: &mut Vec<PendingParseDiagnostic>,
 ) -> Option<ImageRun> {
     let is_shape = |n: &roxmltree::Node| {
         n.is_element() && matches!(n.tag_name().name(), "shape" | "rect" | "roundrect" | "oval")
@@ -14689,6 +14692,7 @@ fn parse_vml_pict_image(
     }
 
     Some(with_vml_shape_type(pict, shape, |definition| {
+        disclose_incomplete_vml_picture(shape, definition, diagnostics);
         vml_image_run(
             shape, definition, image_path, width_pt, height_pt, imagedata,
         )
@@ -14714,6 +14718,7 @@ fn parse_vml_pict_image(
 fn parse_object_ole_image(
     object: roxmltree::Node,
     media_map: &HashMap<String, String>,
+    diagnostics: &mut Vec<PendingParseDiagnostic>,
 ) -> Option<ImageRun> {
     // The preview lives in the first VML shape's `<v:imagedata r:id>`.
     let imagedata = object
@@ -14754,6 +14759,7 @@ fn parse_object_ole_image(
     }
 
     Some(with_vml_shape_type(object, shape, |definition| {
+        disclose_incomplete_vml_picture(shape, definition, diagnostics);
         vml_image_run(
             shape, definition, image_path, width_pt, height_pt, imagedata,
         )
@@ -24011,6 +24017,115 @@ mod svg_blip_tests {
         }
     }
 
+    /// Issue #2175: Word's Watermark dialog writes Washout on a standalone VML
+    /// picture as gain/blacklevel. It must reach the same `<a:lum>` correction
+    /// Word writes for Washout on a DrawingML picture.
+    #[test]
+    fn vml_picture_watermark_washout_is_a_luminance_correction() {
+        let body = r#"<w:p><w:r><w:pict xmlns:v="urn:schemas-microsoft-com:vml"
+            xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+            <v:shape style="position:absolute;width:200pt;height:100pt;z-index:-1">
+              <v:imagedata r:id="rIdPng" gain="19661f" blacklevel="22938f"/>
+            </v:shape></w:pict></w:r></w:p>"#;
+        let doc = parse_from_bytes(&build_docx_with_media(body)).expect("parse must succeed");
+        let image = only_image(&doc);
+        let [BlipEffect::Luminance { bright, contrast }] = image.blip_effects.as_slice() else {
+            panic!(
+                "expected one luminance effect, got {:?}",
+                image.blip_effects
+            );
+        };
+        assert!((bright - 0.7).abs() < 1e-4, "bright {bright}");
+        assert!((contrast + 0.7).abs() < 1e-4, "contrast {contrast}");
+    }
+
+    /// Standalone VML pictures disclose effects they leave unapplied, in every
+    /// story and for OLE previews: Washout with grayscale has no measured
+    /// order, so grayscale draws, Washout is withheld, and that is disclosed.
+    #[test]
+    fn standalone_vml_pictures_disclose_withheld_effects_in_every_path() {
+        use std::io::Write;
+        use zip::write::SimpleFileOptions;
+        let w = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+        let r = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+        let ns = format!(r#"xmlns:w="{w}" xmlns:r="{r}" xmlns:v="urn:schemas-microsoft-com:vml""#);
+        let effects = r#"gain="19661f" blacklevel="22938f" grayscale="t""#;
+        let pict = format!(
+            r#"<w:p><w:r><w:pict><v:shape style="width:20pt;height:10pt"><v:imagedata src="media/a.png" {effects}/></v:shape></w:pict></w:r></w:p>"#
+        );
+        let object = format!(
+            r#"<w:p><w:r><w:object w:dxaOrig="400" w:dyaOrig="200"><v:shape style="width:20pt;height:10pt"><v:imagedata r:id="img" {effects}/></v:shape></w:object></w:r></w:p>"#
+        );
+        let document = format!(
+            r#"<w:document {ns}><w:body>{pict}{object}
+            <w:sectPr><w:headerReference w:type="default" r:id="header"/><w:footerReference w:type="default" r:id="footer"/></w:sectPr>
+            </w:body></w:document>"#
+        );
+        let parts = [
+            ("word/document.xml".to_string(), document),
+            (
+                "word/header.xml".to_string(),
+                format!("<w:hdr {ns}>{pict}</w:hdr>"),
+            ),
+            (
+                "word/footer.xml".to_string(),
+                format!("<w:ftr {ns}>{pict}</w:ftr>"),
+            ),
+            ("word/media/a.png".to_string(), "png".to_string()),
+            (
+                "word/_rels/document.xml.rels".to_string(),
+                format!(
+                    r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="header" Type="{r}/header" Target="header.xml"/><Relationship Id="footer" Type="{r}/footer" Target="footer.xml"/><Relationship Id="img" Type="{r}/image" Target="media/a.png"/></Relationships>"#
+                ),
+            ),
+        ];
+        let mut bytes = Vec::new();
+        {
+            let mut writer = zip::ZipWriter::new(Cursor::new(&mut bytes));
+            write_test_content_types(&mut writer);
+            for (path, xml) in parts {
+                writer
+                    .start_file(path, SimpleFileOptions::default())
+                    .unwrap();
+                writer.write_all(xml.as_bytes()).unwrap();
+            }
+            writer.finish().unwrap();
+        }
+        for streamed in [false, true] {
+            let doc = if streamed {
+                parse_from_bytes_streamed_with_limits(&bytes, None, None, "standalone-vml-test")
+            } else {
+                parse_from_bytes(&bytes)
+            }
+            .unwrap();
+            let images: Vec<&ImageRun> = doc
+                .body
+                .iter()
+                .filter_map(|el| match el {
+                    BodyElement::Paragraph(p) => Some(p.runs.iter()),
+                    _ => None,
+                })
+                .flatten()
+                .filter_map(|run| match run {
+                    DocRun::Image(image) => Some(image.as_ref()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(images.len(), 2, "pict and OLE preview, streamed={streamed}");
+            assert!(images
+                .iter()
+                .all(|image| image.duotone.is_some() && image.blip_effects.is_empty()));
+            assert_eq!(
+                doc.diagnostics
+                    .iter()
+                    .filter(|d| d.code == PARSE_DIAGNOSTIC_CODE_UNSUPPORTED_VML_CONTENT)
+                    .count(),
+                4,
+                "body pict, body OLE preview, header, footer; streamed={streamed}"
+            );
+        }
+    }
+
     /// A picture without a `<a:duotone>` leaves `duotone` None — guards the new
     /// branch from firing spuriously, so non-duotone pictures stay unchanged.
     #[test]
@@ -27036,7 +27151,7 @@ mod column_tests {
     /// A leading `<w:lastRenderedPageBreak/>` (Word's ignored layout hint, not a hard
     /// break) must still be stripped WITHOUT injecting a body-level break — only a
     /// hard `<w:br w:type="page"/>` advances the page. Guards the leading-break fix
-    /// against re-honoring the hint (package CLAUDE.md: never mix honoring/ignoring
+    /// against re-honoring the hint (package AGENTS.md: never mix honoring/ignoring
     /// `<w:lastRenderedPageBreak/>`).
     #[test]
     fn leading_rendered_page_break_hint_does_not_advance_page() {

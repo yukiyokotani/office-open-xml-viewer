@@ -2,6 +2,7 @@ import { acquireCanvasGlyphContours } from '../native-glyph-contours.js';
 import { type CjkLang } from '@silurus/ooxml-core';
 import {
   fontFamilyKey,
+  fontSourceFaceIdentity,
   type FontSubstitution,
   type LoadedFontSources,
 } from '@silurus/ooxml-core/internal/font-sources';
@@ -13,6 +14,8 @@ import {
 import type { ResolvedFontMetric } from '@silurus/ooxml-core';
 import type { FontSubstituteScript, OfficeFontFallbackRoute } from '@silurus/ooxml-core';
 import { scriptScopedSubstitutedFamilies } from '../font-substitution-scope.js';
+import { appFontResourceIdentity, sourceFontLineMetrics, sourceFontResourceIdentity } from '../source-font-metrics.js';
+import type { PreparedServedFaceLines } from '../served-face-lines.js';
 import type { LoadedEmbeddedFontRoute } from '../embedded-fonts.js';
 import { normalizeFontFamilyUncached } from '../line-layout.js';
 import type { LayoutSourceStore } from './layout-source-store.js';
@@ -73,6 +76,9 @@ export interface ProductionLayoutServiceOptions {
   /** Faces the font sources loaded for this document (`font-source-load.ts`):
    * the demanded names in demand order and the session snapshot. */
   readonly sourceFonts?: Readonly<{ names: readonly string[]; loaded: LoadedFontSources }>;
+  /** Measured normal lines of served faces without readable tables and of
+   * application-registered faces (served-face-lines.ts). */
+  readonly servedFaceLines?: PreparedServedFaceLines;
   /** Normalized families whose authored face is installed; they are never
    * routed to a different-family substitute (`docxFontFamilyPlan`). */
   readonly installedSubstituteFamilies?: readonly string[];
@@ -107,6 +113,18 @@ function docxScriptScopedFamilies(
         .filter((substitution) => substitution.script === script && fontFamilyKey(substitution.use) !== key)
         .map((substitution) => substitution.use))],
     }]));
+}
+
+/** Every family layout can route for this document (authored, classified,
+ * pitched and theme families). */
+export function documentRoutedFontFamilies(source: LayoutSourceStore): string[] {
+  return [...new Set([
+    ...Object.keys(source.fonts.familyClasses),
+    ...Object.keys(source.fonts.familyPitches),
+    ...source.fonts.renderedFamilies,
+    ...(source.fonts.majorFamily ? [source.fonts.majorFamily] : []),
+    ...(source.fonts.minorFamily ? [source.fonts.minorFamily] : []),
+  ])];
 }
 
 /** The production text service alone: font inventory, resolver and Canvas
@@ -184,7 +202,15 @@ export function createProductionTextLayoutService(
       ? requested : `${requested}:${route.weight}:${route.style}`;
     return [[key, route.metric]];
   }));
+  const fontSet = options.fontSet === undefined ? activeFontSet() : options.fontSet;
+  // Served faces are sized from their own tables (source-font-metrics.ts),
+  // exactly as an installed or embedded face with the same tables.
+  const sourceMetrics = options.sourceFonts || options.servedFaceLines
+    ? sourceFontLineMetrics(options.sourceFonts?.loaded, fontSet, options.servedFaceLines) : {};
+  const appFaceIdentities = new Set(Object.values(sourceMetrics)
+    .flatMap((metric) => metric.sourceIdentity?.startsWith('app-face:') ? [metric.sourceIdentity] : []));
   const fontMetrics = snapshotFontMetrics({
+    ...sourceMetrics,
     ...localMetrics,
     ...officeMetrics,
     ...unshadowed(options.fontMetrics),
@@ -249,6 +275,7 @@ export function createProductionTextLayoutService(
           requestedFamily: name,
           resolvedFamily: displayFamily,
           source: substitution ? 'substitute' : 'source',
+          resourceIdentity: sourceFontResourceIdentity(displayFamily),
           ...(substitution?.script === undefined ? {} : { script: substitution.script }),
           weight,
           style,
@@ -257,32 +284,39 @@ export function createProductionTextLayoutService(
     }
   }
   const context = options.measureContext;
-  const routedFontFamilies = [...new Set([
-    ...Object.keys(source.fonts.familyClasses),
-    ...Object.keys(source.fonts.familyPitches),
-    ...source.fonts.renderedFamilies,
-    ...(source.fonts.majorFamily ? [source.fonts.majorFamily] : []),
-    ...(source.fonts.minorFamily ? [source.fonts.minorFamily] : []),
-  ])];
+  const routedFontFamilies = documentRoutedFontFamilies(source);
   // An application-owned @font-face with the authored family is a real Canvas
   // route, even though the library cannot read its font bytes. Snapshot loaded
   // tuples at service creation so line layout uses Canvas's own line box rather
   // than the pinned reference for a different version of the same family.
   // A face loaded after this snapshot needs a new layout service/pagination.
   const requestedNames = new Set(routedFontFamilies.map(normalizedFaceFamily));
-  const fontSet = options.fontSet === undefined ? activeFontSet() : options.fontSet;
   // Any loaded application face declaring an authored family shadows the
   // system family for every tuple, whatever its descriptors (oblique, weight
   // 950...), even ones the exact-tuple inventory below cannot represent.
   const shadowedFamilies = new Set<string>();
   if (fontSet && typeof fontSet[Symbol.iterator] === 'function') {
+    // The session's own faces resolve through their `source` inventory
+    // above (with their resource identity), not as application faces.
+    // So do the same source's faces another document of this realm
+    // registered (other subsets of the same files).
+    const sessionFaces = new Set(options.sourceFonts?.loaded.faces.map((face) => face.face) ?? []);
+    const sessionSources = new Set(options.sourceFonts?.loaded.faces.flatMap((face) => {
+      const id = fontSourceFaceIdentity(face.face);
+      return id === undefined ? [] : [id];
+    }) ?? []);
     for (const face of fontSet) {
       if (!requestedNames.has(normalizedFaceFamily(face.family))) continue;
       if (face.status === 'loaded') shadowedFamilies.add(normalizedFaceFamily(face.family));
+      if (sessionFaces.has(face)) continue;
+      const faceSource = fontSourceFaceIdentity(face);
+      if (faceSource !== undefined && sessionSources.has(faceSource)) continue;
       for (const loaded of loadedFaces([face])) {
+        const appIdentity = appFontResourceIdentity(loaded.displayFamily);
         inventory.push({
           requestedFamily: loaded.displayFamily,
           resolvedFamily: loaded.displayFamily,
+          ...(appFaceIdentities.has(appIdentity) ? { resourceIdentity: appIdentity } : {}),
           source: 'css',
           weight: loaded.weight,
           style: loaded.style,

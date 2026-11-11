@@ -551,7 +551,11 @@ For a large DOCX file, set `progressiveLayout: true` to resolve `load()` when th
 opening pages are paintable while the same paginator continues in the background.
 It is available on `DocxViewer`, `DocxScrollViewer`, and `DocxDocument.load()` in
 both render modes. Pair it with `mode: 'worker'` when the remaining layout and
-paint work should also stay off the UI thread.
+paint work should also stay off the UI thread. Pages shown before layout
+completes are provisional: page breaks may move and content can occasionally
+overlap. `DocxViewer` and `DocxScrollViewer` redraw every page once layout
+completes; code that calls `DocxDocument.renderPage()` directly must render its
+pages again after `waitUntilLayoutComplete()`.
 
 ```typescript
 import { DocxScrollViewer } from '@silurus/ooxml/docx';
@@ -580,8 +584,10 @@ While `layoutComplete` is false, `pageCount` and the callback's `total` argument
 mean pages available so far, not the final total. The page callbacks fire again
 when that count grows, even if the visible page does not change. Await
 `waitUntilLayoutComplete()` before printing, exporting, or snapshotting a final count.
-In-document `NUMPAGES` fields are repainted with their authoritative value after
-pagination converges. See the [progressive layout guide](https://ooxml.silurus.dev/docx#progressive-layout)
+`DocxViewer` and `DocxScrollViewer` repaint provisional pages, including
+in-document `NUMPAGES` fields, with their authoritative layout after pagination
+converges. Code that calls `DocxDocument.renderPage()` directly owns its canvases
+and must render those pages again after `waitUntilLayoutComplete()`. See the [progressive layout guide](https://ooxml.silurus.dev/docx#progressive-layout)
 and [DOCX API reference](https://ooxml.silurus.dev/api/docx).
 
 ### Progressive PPTX layout
@@ -665,13 +671,14 @@ each format entry.
   keeps the host fallback with a `console.warn`, and no other source is tried.
 - **Lazy subsets:** only the `unicode-range` subsets that intersect the painted
   text are loaded, and installed faces with the authored name are never
-  replaced. Font files the library fetches itself (`fontResolver` URLs in
-  worker mode, sources with `credentials: 'omit'`) are fetched for every face
-  of a claimed family.
+  replaced. The library fetches the font files itself (`fetch()`), so DOCX can
+  read each face's line metrics. `fontResolver` URLs and
+  sources with `credentials: 'omit'` are fetched for every face of a claimed
+  family.
 - **Deployment:** cross-origin font URLs need CORS. Stylesheet origins need
-  `connect-src` and font file origins need `font-src` in your CSP; font files
-  the library fetches itself (`fontResolver` URLs in worker mode, sources with
-  `credentials: 'omit'`) also need `connect-src`. Optionally
+  `connect-src` in your CSP, and font file origins need both `connect-src`
+  and `font-src` (for Google Fonts: `connect-src https://fonts.googleapis.com
+  https://fonts.gstatic.com` and `font-src https://fonts.gstatic.com`). Optionally
   add `<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>` for
   Google Fonts. Source limits fail closed with
   `OoxmlError('font-source-limit')`.

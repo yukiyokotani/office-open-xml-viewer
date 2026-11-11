@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 
-/** Origin that serves the Google Fonts *stylesheets* (`<link rel="stylesheet">`). */
+/** Origin that serves the Google Fonts *stylesheets*. */
 const GOOGLE_FONTS_CSS_ORIGIN = 'https://fonts.googleapis.com';
 /** Origin that serves the actual `.woff2` font binaries referenced by the CSS. */
 const GOOGLE_FONTS_FILES_ORIGIN = 'https://fonts.gstatic.com';
@@ -13,13 +13,15 @@ const GOOGLE_FONTS_FILES_ORIGIN = 'https://fonts.gstatic.com';
  * When `useGoogleFonts` is false the policy is fully offline: the only allowed
  * origin is the extension's own `cspSource`. When true we widen exactly two
  * directives, no more:
- *   - `connect-src` gains {@link GOOGLE_FONTS_CSS_ORIGIN}: the font-source
- *     session (`packages/core/src/fonts/source-session.ts`) `fetch()`es each
- *     Google Fonts stylesheet itself and parses its `@font-face` rules (no
- *     `<link rel="stylesheet">` is injected, so `style-src` stays as is).
- *   - `font-src` gains {@link GOOGLE_FONTS_FILES_ORIGIN} because the `@font-face`
- *     rules in that CSS point their `src:` at `fonts.gstatic.com` woff2 files,
- *     which the browser font engine fetches (`FontFace.load()`).
+ *   - `connect-src` gains {@link GOOGLE_FONTS_CSS_ORIGIN} and
+ *     {@link GOOGLE_FONTS_FILES_ORIGIN}: the font-source session
+ *     (`packages/core/src/fonts/source-session.ts`) `fetch()`es each Google
+ *     Fonts stylesheet itself and parses its `@font-face` rules (no
+ *     `<link rel="stylesheet">` is injected, so `style-src` stays as is), and
+ *     `fetch()`es the woff2 subsets the document needs so layout can read
+ *     their line metrics.
+ *   - `font-src` gains {@link GOOGLE_FONTS_FILES_ORIGIN}: a subset only a later
+ *     step needs is loaded by the browser font engine (`FontFace.load()`).
  */
 export function buildContentSecurityPolicy(
   cspSource: string,
@@ -30,7 +32,7 @@ export function buildContentSecurityPolicy(
     ? `font-src ${cspSource} ${GOOGLE_FONTS_FILES_ORIGIN};`
     : `font-src ${cspSource};`;
   const connectSrc = useGoogleFonts
-    ? `connect-src ${cspSource} data: blob: ${GOOGLE_FONTS_CSS_ORIGIN};`
+    ? `connect-src ${cspSource} data: blob: ${GOOGLE_FONTS_CSS_ORIGIN} ${GOOGLE_FONTS_FILES_ORIGIN};`
     : `connect-src ${cspSource} data: blob:;`;
 
   return [
