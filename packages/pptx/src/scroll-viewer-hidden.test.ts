@@ -220,3 +220,106 @@ describe('PptxScrollViewer.setHiddenSlideMode', () => {
     v.destroy();
   });
 });
+
+describe('PptxScrollViewer hidden-slide review fixes', () => {
+  it('a dim switch during a zoom burst repaints at the current scale and the settle still covers the rest', async () => {
+    vi.useFakeTimers();
+    try {
+      const { v, renderSlide } = setup(3, [1], 'show', { viewport: 400, opts: { enableTextSelection: true } });
+      await Promise.resolve();
+      v.setScale(v.getScale() * 2); // preview stretch; settle debounced
+      renderSlide.mockClear();
+      await v.setHiddenSlideMode('dim');
+      const slots = (v as unknown as {
+        _slots: Map<number, { renderedScale: number; textLayer: FakeEl | null }>;
+      })._slots;
+      // The hidden slide repainted at the new scale, without a preview stretch.
+      expect(renderSlide.mock.calls.map((call) => call[1])).toEqual([1]);
+      expect(renderSlide.mock.calls[0]?.[2]?.width).toBe(400);
+      expect(slots.get(1)?.renderedScale).toBe(v.getScale());
+      expect(slots.get(1)?.textLayer?.style.transform ?? '').toBe('');
+      // Shown slides still preview at the old scale until the settle repaints them.
+      expect(slots.get(0)?.renderedScale).not.toBe(v.getScale());
+      vi.advanceTimersByTime(200);
+      for (let i = 0; i < 5; i++) await Promise.resolve();
+      expect([...slots.values()].every((slot) => slot.renderedScale === v.getScale())).toBe(true);
+      v.destroy();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a switch to skip during goToComment bounds resolution does not select the now-hidden comment', async () => {
+    const engine = new FakePptxEngine(3, SLIDE_W_EMU, SLIDE_H_EMU);
+    engine.commentsBySlide = [[], [{
+      x: 0, y: 0, text: 'c',
+      anchors: [{ type: 'slide' }, { type: 'drawingElement', elementId: 'e1' }],
+    } as never], []];
+    const { v } = setup(3, [1], 'show', { engine, opts: { comments: true } });
+    const navigation = v.goToComment(1, 0);
+    void v.setHiddenSlideMode('skip');
+    expect(await navigation).toBe(false);
+    expect(v.getSelectionContext()).toBeNull();
+    v.destroy();
+  });
+
+  it('setHiddenSlideMode resolves only after every affected mounted slide has painted', async () => {
+    const engine = new FakePptxEngine(6, SLIDE_W_EMU, SLIDE_H_EMU, 'main', true);
+    const { v } = setup(6, [1], 'show', { engine, viewport: 300 });
+    for (const call of engine.renderCalls) call.resolve();
+    const track = (promise: Promise<void>) => {
+      let done = false;
+      void promise.then(() => { done = true; });
+      return async () => {
+        for (let i = 0; i < 20; i++) await Promise.resolve();
+        return done;
+      };
+    };
+    // 'dim' repaints the mounted hidden slide 1.
+    let before = engine.renderCalls.length;
+    let isDone = track(v.setHiddenSlideMode('dim'));
+    expect(await isDone()).toBe(false);
+    expect(engine.renderCalls.slice(before).map((call) => call.slide)).toEqual([1]);
+    for (const call of engine.renderCalls.slice(before)) call.resolve();
+    expect(await isDone()).toBe(true);
+    // 'skip' leaves slide 1 out, so slide 3 moves into the window.
+    before = engine.renderCalls.length;
+    isDone = track(v.setHiddenSlideMode('skip'));
+    expect(await isDone()).toBe(false);
+    const fresh = engine.renderCalls.slice(before);
+    expect(fresh.map((call) => call.slide)).toContain(3);
+    for (const call of fresh) call.resolve();
+    expect(await isDone()).toBe(true);
+    v.destroy();
+  });
+
+  it('progressive skip inspects each slide once over the whole load, and show mode not at all', () => {
+    for (const mode of ['skip', 'show'] as const) {
+      const engine = new FakePptxEngine(40, SLIDE_W_EMU, SLIDE_H_EMU);
+      engine.setLayoutProgress(1, false);
+      const { v } = setup(40, [5, 20], mode, { engine });
+      const isHidden = vi.spyOn(engine, 'isHidden');
+      for (let available = 2; available <= 40; available++) {
+        engine.setLayoutProgress(available, available === 40);
+      }
+      expect(isHidden).toHaveBeenCalledTimes(mode === 'skip' ? 39 : 0);
+      v.destroy();
+    }
+  });
+
+  it('keeps the signed offset of the top slide: leading padding and the trailing gap survive a relayout', async () => {
+    // scrollTop 0 sits in the leading padding above hidden slide 0.
+    const first = setup(6, [0], 'show');
+    await first.v.setHiddenSlideMode('skip');
+    expect(first.scrollHost.scrollTop).toBe(0);
+    first.v.destroy();
+
+    // 5 px into the gap below slide 2 stays 5 px into the gap below it.
+    const gap = setup(6, [1], 'show');
+    gap.scrollTo(LEADING + 3 * STRIDE - 5);
+    expect(gap.v.topVisibleSlide).toBe(2);
+    await gap.v.setHiddenSlideMode('skip');
+    expect(gap.scrollHost.scrollTop).toBe(LEADING + 2 * STRIDE - 5);
+    gap.v.destroy();
+  });
+});

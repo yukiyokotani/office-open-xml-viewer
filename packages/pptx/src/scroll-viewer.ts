@@ -370,8 +370,9 @@ export class PptxScrollViewer implements ZoomableViewer {
       this._commentNavigation.begin();
       this._partFailureDelivery.attach(null);
       this._layout.unbind();
-      this._shown = null;
-      this._positionOfSlide = null;
+      this._hiddenKnown = [];
+      this._hiddenFrontier = 0;
+      this._skipActive = false;
       if (previous) {
         for (const [index, slot] of [...this._slots]) this._recycleSlot(index, slot);
         this._visibleEvents.resetIndex();
@@ -472,12 +473,17 @@ export class PptxScrollViewer implements ZoomableViewer {
     (slide) => this._positionOf(slide) >= 0,
   );
   private _hiddenMode: HiddenSlideMode = 'show';
-  /** `'skip'` layout: the deck indices laid out, in order. `null` lays out every
-   *  slide (`'show'`, `'dim'`, a deck without hidden slides, or one whose every
-   *  slide is hidden), so layout positions equal deck indices. */
-  private _shown: number[] | null = null;
-  /** Deck index → layout position (`-1` = left out); set only with `_shown`. */
-  private _positionOfSlide: Int32Array | null = null;
+  /** Known hidden deck slides, ascending: every hidden slide below
+   *  {@link _hiddenFrontier}. Grows only as slide metadata is published, so a
+   *  deck without hidden slides never allocates. Tracked only in `'skip'`. */
+  private _hiddenKnown: number[] = [];
+  /** Slides `[0, _hiddenFrontier)` have been inspected for the hidden flag. */
+  private _hiddenFrontier = 0;
+  /** Whether the `'skip'` layout leaves slides out: `'skip'` with at least one
+   *  known hidden slide and at least one shown slide. Otherwise layout
+   *  positions equal deck indices (`'show'`, `'dim'`, no hidden slide, or every
+   *  slide hidden). */
+  private _skipActive = false;
   private _findGeneration = 0;
   private _findActive = false;
   private readonly _highlights = new HighlightLayerController<SlideSlot, PptxTextRunInfo, PptxMatchLocation>({
@@ -728,7 +734,7 @@ export class PptxScrollViewer implements ZoomableViewer {
   }
 
   /** Content offset of a layout position (a deck index unless `'skip'` leaves
-   *  slides out; see {@link _shown}). */
+   *  slides out; see {@link _skipActive}). */
   private _positionOffset(position: number): number {
     return this._viewport.verticalPadding().leading + position * (this._uniformSlideHeight + this._viewport.gap());
   }
@@ -775,94 +781,125 @@ export class PptxScrollViewer implements ZoomableViewer {
 
   /** Number of laid-out slides. */
   private _layoutCount(): number {
-    return this._shown?.length ?? this._pres?.slideCount ?? 0;
+    const count = this._pres?.slideCount ?? 0;
+    return this._skipActive ? count - this._hiddenKnown.length : count;
+  }
+
+  /** Number of known hidden slides below deck index `slide`. */
+  private _hiddenBelow(slide: number): number {
+    const hidden = this._hiddenKnown;
+    let lo = 0;
+    let hi = hidden.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if ((hidden[mid] as number) < slide) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo;
   }
 
   /** Deck slide index at a layout position. */
   private _slideAt(position: number): number {
-    return this._shown ? (this._shown[position] ?? -1) : position;
+    if (!this._skipActive) return position;
+    // The shown slide at `position` is `position + j`, where j counts hidden
+    // slides h_i with h_i - i <= position (h_i - i is non-decreasing).
+    const hidden = this._hiddenKnown;
+    let lo = 0;
+    let hi = hidden.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if ((hidden[mid] as number) - mid <= position) lo = mid + 1;
+      else hi = mid;
+    }
+    return position + lo;
   }
 
   /** Layout position of a deck slide index, `-1` when it is left out. */
   private _positionOf(slide: number): number {
-    return this._positionOfSlide ? (this._positionOfSlide[slide] ?? -1) : slide;
+    if (!this._skipActive) return slide;
+    const below = this._hiddenBelow(slide);
+    return this._hiddenKnown[below] === slide ? -1 : slide - below;
   }
 
   /** `'skip'` target position for deck slide `slide`: the slide itself when
    *  shown, else the next shown slide after it, else the nearest one before it
-   *  (the `PptxViewer.goToSlide` rule). Requires {@link _shown}. */
-  private _shownPositionFor(slide: number, shown: readonly number[]): number {
-    let lo = 0;
-    let hi = shown.length;
-    while (lo < hi) {
-      const mid = (lo + hi) >> 1;
-      if ((shown[mid] as number) < slide) lo = mid + 1;
-      else hi = mid;
-    }
-    return Math.min(lo, shown.length - 1);
+   *  (the `PptxViewer.goToSlide` rule). The shown slides before `slide` are
+   *  exactly the position of the next shown slide at or after it. */
+  private _shownPositionFor(slide: number): number {
+    return Math.min(slide - this._hiddenBelow(slide), this._layoutCount() - 1);
   }
 
-  /** The `'skip'` layout for the current presentation, or `null` for every
-   *  slide. A slide whose metadata is not published yet counts as shown. */
-  private _computeShownSlides(): number[] | null {
-    const pres = this._pres;
-    if (this._hiddenMode !== 'skip' || !pres) return null;
-    const count = pres.slideCount;
-    const known = Math.min(pres.availableSlideCount, count);
-    const shown: number[] = [];
-    for (let i = 0; i < count; i++) {
-      if (i >= known || !pres.isHidden(i)) shown.push(i);
-    }
-    // No hidden slide: identity. Every slide hidden: nothing to skip to, so the
-    // deck is laid out as in 'show' (PptxViewer draws the requested slide).
-    return shown.length === count || shown.length === 0 ? null : shown;
-  }
-
-  /** Recompute the `'skip'` layout; returns whether it changed. */
+  /** Bring the `'skip'` layout up to date with the published slide metadata;
+   *  returns whether the layout changed. Inspects only slides published since
+   *  the last call, so a progressive load costs Θ(slides) in all. A slide whose
+   *  metadata is not published yet counts as shown. */
   private _updateShownSlides(): boolean {
-    const next = this._computeShownSlides();
-    const previous = this._shown;
-    if (previous === next) return false;
-    if (previous && next && previous.length === next.length &&
-        previous.every((slide, position) => slide === next[position])) return false;
-    this._shown = next;
-    if (next) {
-      const map = new Int32Array(this._pres?.slideCount ?? 0).fill(-1);
-      next.forEach((slide, position) => { map[slide] = position; });
-      this._positionOfSlide = map;
+    const pres = this._pres;
+    const wasActive = this._skipActive;
+    const hiddenBefore = this._hiddenKnown.length;
+    if (this._hiddenMode === 'skip' && pres) {
+      const known = Math.min(pres.availableSlideCount, pres.slideCount);
+      for (let i = this._hiddenFrontier; i < known; i++) {
+        if (pres.isHidden(i)) this._hiddenKnown.push(i);
+      }
+      this._hiddenFrontier = Math.max(this._hiddenFrontier, known);
+      const hidden = this._hiddenKnown.length;
+      // Every slide hidden: nothing to skip to, so lay out as in 'show'.
+      this._skipActive = hidden > 0 && hidden < pres.slideCount;
     } else {
-      this._positionOfSlide = null;
+      this._skipActive = false;
     }
-    return true;
+    return this._skipActive !== wasActive ||
+      (this._skipActive && this._hiddenKnown.length !== hiddenBefore);
   }
 
-  /** The deck slide at the viewport top and how far into it the top is. */
-  private _topAnchor(): { slide: number; frac: number } | null {
+  /** The deck slide at the viewport top and the viewport top's signed offset
+   *  from that slide's top edge (negative in the leading padding, beyond the
+   *  slide height in the following gap). */
+  private _topAnchor(): { slide: number; offset: number } | null {
     if (!this._pres || !this._scaleEstablished || this._layoutCount() === 0) return null;
-    const { unit, frac } = this._navigation.contentAtViewportY(0);
-    return { slide: this._slideAt(unit), frac };
+    const top = this._scrollHost.scrollTop;
+    const position = this._positionAtOffset(top);
+    return { slide: this._slideAt(position), offset: top - this._positionOffset(position) };
   }
 
   /** Re-lay out after the `'skip'` layout changed, keeping `anchor` (the slide
    *  that was at the viewport top) in place; a slide that left the layout is
-   *  replaced by the `'skip'` target for it. */
-  private _relayoutKeeping(anchor: { slide: number; frac: number } | null): void {
+   *  replaced by the `'skip'` target for it, keeping a leading offset. New
+   *  slots' first renders are collected into `initialRenders` when given. */
+  private _relayoutKeeping(
+    anchor: { slide: number; offset: number } | null,
+    initialRenders?: Promise<void>[],
+  ): void {
     if (!this._pres) return;
     if (!anchor || !this._scaleEstablished) {
-      this._relayout();
+      this._relayout(initialRenders);
       return;
     }
     this._recomputeHeights();
     this._syncSpacer();
-    const position = this._shown
-      ? this._shownPositionFor(anchor.slide, this._shown)
+    const position = this._skipActive
+      ? this._shownPositionFor(anchor.slide)
       : Math.min(anchor.slide, this._layoutCount() - 1);
-    const frac = this._slideAt(position) === anchor.slide ? anchor.frac : 0;
+    const offset = this._slideAt(position) === anchor.slide ? anchor.offset : Math.min(anchor.offset, 0);
     const host = this._scrollHost;
     const maxTop = Math.max(0, this._rangeAt(0, 0).totalHeight - host.clientHeight);
-    host.scrollTop = Math.min(maxTop, Math.max(0,
-      this._positionOffset(position) + frac * this._uniformSlideHeight));
-    this._mountVisible();
+    host.scrollTop = Math.min(maxTop, Math.max(0, this._positionOffset(position) + offset));
+    this._mountVisible(initialRenders);
+    this._restoreZoomPreview();
+  }
+
+  /** A zoom burst stretches mounted slots until the debounced settle; a mount
+   *  repositions them at the new scale, so re-apply the stretch preview to
+   *  slots still painted at an older scale. Slots mounted fresh paint at the
+   *  current scale and are left alone. */
+  private _restoreZoomPreview(): void {
+    for (const slot of this._slots.values()) {
+      if (slot.renderedScale > 0 && slot.renderedScale !== this._scale) {
+        this._previewVisible();
+        return;
+      }
+    }
   }
 
   /** Apply newly known hidden-slide facts (progressive publication, find). */
@@ -1173,20 +1210,21 @@ export class PptxScrollViewer implements ZoomableViewer {
    * {@link PptxScrollViewerOptions.hiddenSlideMode}).
    */
   scrollToSlide(index: number, opts?: { behavior?: 'auto' | 'smooth' }): void {
-    const shown = this._shown;
-    if (!shown) {
+    if (!this._skipActive) {
       this._navigation.scrollToUnit(index, opts);
       return;
     }
     const slide = Math.max(0, Math.min(index, this.slideCount - 1));
-    this._navigation.scrollToUnit(this._shownPositionFor(slide, shown), opts);
+    this._navigation.scrollToUnit(this._shownPositionFor(slide), opts);
   }
 
   /**
    * Switch the hidden-slide mode at runtime. The scroll is laid out again with
    * the slide at the viewport top kept in place (in `'skip'`, a hidden top slide
    * gives way to the next shown slide, else the previous one), and slides whose
-   * look changes are redrawn. Entering or leaving `'skip'` changes which slides
+   * look changes are redrawn; the promise resolves once every affected mounted
+   * slide has painted. A pending `goToComment` is cancelled (resolves `false`).
+   * Entering or leaving `'skip'` changes which slides
    * find may match, so it clears the current search (matches, active match and
    * highlights); call {@link findText} again.
    */
@@ -1196,21 +1234,34 @@ export class PptxScrollViewer implements ZoomableViewer {
     if (mode === previous) return;
     const anchor = this._topAnchor();
     this._hiddenMode = mode;
+    // A comment navigation in flight may target a slide this mode leaves out.
+    this._commentNavigation.begin();
     if ((previous === 'skip') !== (mode === 'skip')) this.clearFind();
     const pres = this._pres;
     if (!pres) return;
     const layoutChanged = this._updateShownSlides();
+    let restyled = false;
     if ((previous === 'dim') !== (mode === 'dim')) {
-      // Redraw mounted hidden slides that stay laid out; slots of slides the
-      // new layout leaves out are recycled by the relayout below.
-      const mediaRange = this._opts.enableMediaPlayback ? this._mediaRange() : null;
+      // A mounted hidden slide changes look: recycle its slot so the remount
+      // below repaints it at the current scale through the normal mount path
+      // (no stale zoom-preview stretch, settle bookkeeping intact).
       for (const [slide, slot] of [...this._slots]) {
-        if (!pres.isHidden(slide) || slot.renderedSlide !== slide || this._positionOf(slide) < 0) continue;
-        slot.renderedSlide = -1;
-        void this._renderSlot(slide, slot, !!mediaRange && this._rangeContains(mediaRange, slide));
+        if (slide >= pres.availableSlideCount || !pres.isHidden(slide)) continue;
+        this._recycleSlot(slide, slot);
+        restyled = true;
       }
     }
-    if (layoutChanged) this._relayoutKeeping(anchor);
+    if (!layoutChanged && !restyled) return;
+    // Resolve once every affected mounted slide has painted, as PptxViewer's
+    // setHiddenSlideMode resolves after its re-render.
+    const renders: Promise<void>[] = [];
+    if (layoutChanged) {
+      this._relayoutKeeping(anchor, renders);
+    } else if (this._scaleEstablished) {
+      this._mountVisible(renders);
+      this._restoreZoomPreview();
+    }
+    await Promise.all(renders);
   }
 
   /** The current hidden-slide mode. */

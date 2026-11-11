@@ -138,6 +138,7 @@ export class PptxScrollCommentNavigation<Slot extends NavigationSlot> {
     const bounds = await this.resolveBounds(slide, comment);
     if (this.hooks.destroyed()) throw new Error('PptxScrollViewer is destroyed');
     if (generation !== this.generation || presentation !== this.hooks.presentation()) return false;
+    if (this.hooks.reachable && !this.hooks.reachable(slide)) return false;
     const anchors = comment.anchors ?? [];
     const hasSlidePoint = Number.isFinite(comment.x) && Number.isFinite(comment.y) &&
       (anchors.length === 0 || anchors.some((anchor) => anchor.type === 'slide'));
