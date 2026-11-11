@@ -686,3 +686,20 @@ fn repeated_rows_are_bounded_by_the_source_they_reread() {
     .expect("refused");
     assert!(error.contains("repetition limit"), "{error}");
 }
+
+#[test]
+fn column_redistribution_does_not_overflow() {
+    // Authored lengths are unbounded: products past i64 saturate.
+    let out = table::redistribute(&[i64::MAX / 2, i64::MAX / 2], i64::MAX);
+    assert_eq!(out.len(), 2);
+    assert_eq!(table::redistribute(&[100, 300], 800), [200, 600]);
+}
+
+#[test]
+fn iri_dot_segments_normalize_linearly() {
+    let href = format!("{}Pictures/a.png", "./".repeat(200_000));
+    assert!(matches!(
+        iri::resolve("content.xml", &href),
+        Some(iri::Target::Package { path, .. }) if path == "Pictures/a.png"
+    ));
+}

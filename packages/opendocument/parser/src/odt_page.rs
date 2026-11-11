@@ -774,7 +774,7 @@ impl NotesConfiguration {
                 start: node
                     .attribute((NS_TEXT, "start-value"))
                     .and_then(|v| v.parse::<i64>().ok())
-                    .map(|v| v + 1),
+                    .and_then(|v| v.checked_add(1)),
                 citation: node
                     .attribute((NS_TEXT, "citation-style-name"))
                     .map(str::to_string),

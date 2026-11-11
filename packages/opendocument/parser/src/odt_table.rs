@@ -29,22 +29,27 @@ type Attributes = HashMap<(String, String), String>;
 /// gives every column MINLAY (23) and shares the rest in proportion to the
 /// full widths; the last column takes what remains.
 pub(super) fn redistribute(a: &[i64], total: i64) -> Vec<i64> {
-    const MINLAY: i64 = 23;
-    let sum: i64 = a.iter().sum::<i64>().max(1);
-    let (base, spare): (Vec<i64>, i64) = if sum < total {
-        (a.to_vec(), total - sum)
+    // Computed in i128 and saturated back: authored widths and indents are
+    // unbounded lengths, so the products can pass i64.
+    const MINLAY: i128 = 23;
+    let clamp = |v: i128| v.clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64;
+    let wide: Vec<i128> = a.iter().map(|v| i128::from(*v)).collect();
+    let total = i128::from(total);
+    let sum: i128 = wide.iter().sum::<i128>().max(1);
+    let (base, spare): (Vec<i128>, i128) = if sum < total {
+        (wide.clone(), total - sum)
     } else {
-        (vec![MINLAY; a.len()], total - MINLAY * a.len() as i64)
+        (vec![MINLAY; a.len()], total - MINLAY * a.len() as i128)
     };
     let mut out = base.clone();
     let mut last = base[a.len() - 1] + spare;
     for i in 0..a.len() - 1 {
-        let extra = a[i] * spare / sum;
+        let extra = wide[i] * spare / sum;
         out[i] += extra;
         last -= extra;
     }
     out[a.len() - 1] = last;
-    out
+    out.into_iter().map(clamp).collect()
 }
 
 fn twips(points: f64) -> String {
@@ -555,7 +560,11 @@ impl<'a> Reader<'a> {
                         .attributes
                         .get(&(NS_STYLE.to_string(), "master-page-name".to_string()))
                 })
-                .filter(|name| !name.is_empty() && self.pages.has_master(name))
+                .filter(|name| {
+                    !name.is_empty()
+                        && self.charge_lookup(name).is_ok()
+                        && self.pages.has_master(name)
+                })
             {
                 if self.has_body_content() {
                     let kind = self.pages.start_kind(master);

@@ -830,6 +830,13 @@ impl<'a> Reader<'a> {
                 .and_then(|name| self.defs.get("gradient", name))
             {
                 Some(definition) => {
+                    // Each use rereads the shared definition.
+                    self.charge_work(
+                        definition
+                            .attributes()
+                            .fold(1usize, |sum, a| sum.saturating_add(1 + a.value().len()))
+                            .saturating_add(definition.children().count()),
+                    )?;
                     let stops = definition
                         .children()
                         .filter(|n| xml::is(*n, NS_LOEXT, "gradient-stop"))
@@ -875,6 +882,8 @@ impl<'a> Reader<'a> {
                 let Some(href) = href else {
                     return Ok(None);
                 };
+                // Each use resolves the shared link again.
+                self.charge_work(href.len().saturating_add(1))?;
                 let Some((path, mime)) = self.package_image(href)? else {
                     return Ok(None);
                 };

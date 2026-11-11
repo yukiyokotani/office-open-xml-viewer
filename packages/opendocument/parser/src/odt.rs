@@ -176,6 +176,7 @@ pub fn read(package: &OdfPackage) -> Result<(Document, Vec<OwnedDocumentResource
         lists: list::Lists::default(),
         list_paragraph: None,
         text_width: geometry.text_width,
+        page_writing: (pages.plain_horizontal(initial), pages.horizontal(initial)),
         text_height: geometry.text_height,
         page_left_margin: geometry.left,
         page_right_margin: geometry.right,
@@ -357,6 +358,9 @@ struct Reader<'a> {
     construction_bytes: usize,
     /// Source bytes read again for repeated table rows and cells.
     repeat_work: usize,
+    /// The current page style's writing: horizontal without a grid, and
+    /// horizontal (resolved when the page style changes).
+    page_writing: (bool, bool),
     /// Package files that are not pictures (read once, never again).
     rejected_images: HashSet<String>,
     /// Section markers among the current story's blocks.
@@ -479,6 +483,9 @@ impl<'a> Reader<'a> {
                     .attributes
                     .get(&(NS_STYLE.to_string(), "list-style-name".to_string()))
             });
+            if let Some(name) = link {
+                self.charge_lookup(name)?;
+            }
             match link.map(String::as_str) {
                 Some("") => {}
                 Some(name) if self.sheet.find_list(self.scope, name).is_some() => {
@@ -502,6 +509,11 @@ impl<'a> Reader<'a> {
         let style = node
             .attribute((NS_TEXT, "style-name"))
             .and_then(|name| self.sheet.find(self.scope, Family::Section, name));
+        if let Some(style) = style {
+            // Reading the section's properties (margins, columns) is style
+            // work, charged per section like every other resolution.
+            self.charge_cascade(&[style], "section-properties")?;
+        }
         let properties = style.and_then(|s| s.group("section-properties"));
         let indent = properties.map_or((0.0, 0.0), |p| {
             let get = |name: &str| {
@@ -646,6 +658,7 @@ impl<'a> Reader<'a> {
         });
         let mut page_break_before = false;
         if let Some(master) = master.filter(|name| !name.is_empty()) {
+            self.charge_lookup(master)?;
             if self.story == Story::Body && self.pages.has_master(master) {
                 let page_start = properties
                     .get(NS_STYLE, "page-number")
@@ -935,6 +948,16 @@ impl<'a> Reader<'a> {
         self.text_height = geometry.text_height;
         self.page_left_margin = geometry.left;
         self.page_right_margin = geometry.right;
+        self.page_writing = (
+            self.pages.plain_horizontal(&self.current_master),
+            self.pages.horizontal(&self.current_master),
+        );
+    }
+
+    /// Charges looking up a style-element reference (a master page or list
+    /// style name read from a shared style) by its length.
+    fn charge_lookup(&self, name: &str) -> Result<(), String> {
+        self.charge_work(name.len().saturating_add(1))
     }
 
     /// A paragraph style's chain plus the paragraph default style.
@@ -1159,8 +1182,8 @@ impl<'a> Reader<'a> {
         let line_extra_above = matches!(
             line_spacing.as_ref().map(|spacing| spacing.rule.as_str()),
             Some("exact" | "atLeast")
-        ) && (self.pages.plain_horizontal(&self.current_master)
-            || (self.pages.horizontal(&self.current_master)
+        ) && (self.page_writing.0
+            || (self.page_writing.1
                 && cascade.get(NS_STYLE, "snap-to-layout-grid") == Some("false")));
         let paragraph = DocParagraph {
             alignment: alignment.into(),
