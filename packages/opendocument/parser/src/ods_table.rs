@@ -18,7 +18,7 @@ use crate::package::OdfPackage;
 use crate::xml::{self, NS_OFFICE, NS_TEXT, NS_XLINK};
 use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
-use xlsx_model::{Cell, CellValue, Hyperlink, MergeCell, Row, Run, Worksheet};
+use xlsx_model::{Cell, CellValue, Font, Hyperlink, MergeCell, Row, Run, Worksheet};
 
 const NS_CALCEXT: &str = crate::odf_props::NS_CALCEXT;
 const NS_CONFIG: &str = crate::xml::NS_CONFIG;
@@ -1366,15 +1366,18 @@ fn text_value(text: String, runs: Option<Vec<Run>>) -> CellValue {
     }
 }
 
-/// Cell text with `text:span` runs (§6.1.7) when any span formats text.
-/// Runs borrow their style names from the document; each run's font is a
-/// copy (its family name included), admitted as it is made.
+/// Cell text with runs (§6.1.7) when a paragraph or `text:span` style
+/// formats text. Each formatting context resolves its font once, over the
+/// font of the context around it (the cell, its paragraph, the enclosing
+/// spans: §16.2), so nesting costs one style chain per span; each run's
+/// font is a copy (its family name included), admitted as it is made.
 fn rich_text(
     ctx: &mut Context,
     cell: roxmltree::Node<'_, '_>,
     xf: u32,
 ) -> Result<(String, Option<Vec<Run>>), String> {
-    let mut runs: Vec<(String, Option<SpanStyles<'_>>)> = Vec::new();
+    let cell_font = ctx.xfs.font_of_xf(xf);
+    let mut runs: Vec<(String, Option<Rc<Font>>)> = Vec::new();
     let mut first = true;
     for p in cell
         .children()
@@ -1384,35 +1387,22 @@ fn rich_text(
             push_run(&mut runs, "\n", &None);
         }
         first = false;
-        collect_runs(p, &None, &mut runs);
+        let paragraph = p
+            .attribute((NS_TEXT, "style-name"))
+            .and_then(|name| context_font(ctx, "paragraph", name, &cell_font));
+        collect_runs(ctx, p, &paragraph, &cell_font, &mut runs);
     }
     let text: String = runs.iter().map(|(t, _)| t.as_str()).collect();
-    if runs.iter().all(|(_, style)| style.is_none()) {
+    if runs.iter().all(|(_, font)| font.is_none()) {
         return Ok((text, None));
     }
-    let cell_font = ctx.xfs.font_of_xf(xf);
-    let base = xlsx_model::RunFont {
-        bold: cell_font.bold,
-        italic: cell_font.italic,
-        underline: cell_font.underline,
-        strike: cell_font.strike,
-        size: Some(cell_font.size),
-        color: cell_font.color.clone(),
-        name: cell_font.name.clone(),
-        underline_style: cell_font.underline_style.clone(),
-        vert_align: cell_font.vert_align.clone(),
-        ..xlsx_model::RunFont::default()
-    };
     let mut out = Vec::with_capacity(runs.len());
-    for (text, style) in runs {
+    for (text, font) in runs {
         let run = Run {
             text,
-            font: Some(match style {
-                Some(styles) => ctx
-                    .xfs
-                    .run_font(&ctx.store, &ctx.faces, &cell_font, &styles),
-                None => base.clone(),
-            }),
+            font: Some(super::cells::run_font_of(
+                font.as_deref().unwrap_or(&cell_font),
+            )),
         };
         ctx.budget.bytes(super::retained_size(&run))?;
         out.push(run);
@@ -1420,42 +1410,45 @@ fn rich_text(
     Ok((text, Some(out)))
 }
 
-/// The `text:span` styles in effect over a run, innermost first: a property
-/// one span does not set is searched in the spans around it (§16.2).
-type SpanStyles<'a> = Rc<Vec<&'a str>>;
-
-/// Whether two runs carry the same span styles (the same nesting, or the
-/// same single style).
-fn same_spans(a: &Option<SpanStyles<'_>>, b: &Option<SpanStyles<'_>>) -> bool {
-    match (a, b) {
-        (None, None) => true,
-        (Some(a), Some(b)) => Rc::ptr_eq(a, b) || a.len() == 1 && b.len() == 1 && a[0] == b[0],
-        _ => false,
-    }
+/// The font of a formatting context: style `name` of `family` (its own
+/// chain, without the family default) over the font around it. `None`
+/// when the document does not define the style (the context changes
+/// nothing).
+fn context_font(ctx: &Context, family: &str, name: &str, outer: &Font) -> Option<Rc<Font>> {
+    ctx.store.find(family, name)?;
+    let chain = ctx.store.chain_own(family, name);
+    Some(Rc::new(super::cells::font_of(
+        &chain,
+        &ctx.faces,
+        Some(outer),
+    )))
 }
 
-fn push_run<'a>(
-    runs: &mut Vec<(String, Option<SpanStyles<'a>>)>,
-    text: &str,
-    style: &Option<SpanStyles<'a>>,
-) {
+fn push_run(runs: &mut Vec<(String, Option<Rc<Font>>)>, text: &str, font: &Option<Rc<Font>>) {
     if let Some(last) = runs.last_mut() {
-        if same_spans(&last.1, style) {
+        let same = match (&last.1, font) {
+            (None, None) => true,
+            (Some(a), Some(b)) => Rc::ptr_eq(a, b),
+            _ => false,
+        };
+        if same {
             last.0.push_str(text);
             return;
         }
     }
-    runs.push((text.to_string(), style.clone()));
+    runs.push((text.to_string(), font.clone()));
 }
 
-fn collect_runs<'a>(
-    node: roxmltree::Node<'a, '_>,
-    style: &Option<SpanStyles<'a>>,
-    runs: &mut Vec<(String, Option<SpanStyles<'a>>)>,
+fn collect_runs(
+    ctx: &Context,
+    node: roxmltree::Node<'_, '_>,
+    font: &Option<Rc<Font>>,
+    cell_font: &Font,
+    runs: &mut Vec<(String, Option<Rc<Font>>)>,
 ) {
     for child in node.children() {
         if child.is_text() {
-            push_run(runs, child.text().unwrap_or(""), style);
+            push_run(runs, child.text().unwrap_or(""), font);
             continue;
         }
         if child.tag_name().namespace() != Some(NS_TEXT) {
@@ -1463,23 +1456,21 @@ fn collect_runs<'a>(
         }
         match child.tag_name().name() {
             // `content.xml` is bounded by `check_space_runs` before reading.
-            "s" => push_run(
-                runs,
-                &" ".repeat(crate::odf_text::space_count(child)),
-                style,
-            ),
-            "tab" => push_run(runs, "\t", style),
-            "line-break" => push_run(runs, "\n", style),
-            "span" => match child.attribute((NS_TEXT, "style-name")) {
-                Some(name) => {
-                    let mut inner = vec![name];
-                    inner.extend(style.iter().flat_map(|outer| outer.iter().copied()));
-                    collect_runs(child, &Some(Rc::new(inner)), runs);
+            "s" => push_run(runs, &" ".repeat(crate::odf_text::space_count(child)), font),
+            "tab" => push_run(runs, "\t", font),
+            "line-break" => push_run(runs, "\n", font),
+            "span" => {
+                let outer = font.as_deref().unwrap_or(cell_font);
+                let inner = child
+                    .attribute((NS_TEXT, "style-name"))
+                    .and_then(|name| context_font(ctx, "text", name, outer));
+                match inner {
+                    Some(inner) => collect_runs(ctx, child, &Some(inner), cell_font, runs),
+                    None => collect_runs(ctx, child, font, cell_font, runs),
                 }
-                None => collect_runs(child, style, runs),
-            },
+            }
             "note" | "ruby-text" => {}
-            _ => collect_runs(child, style, runs),
+            _ => collect_runs(ctx, child, font, cell_font, runs),
         }
     }
 }

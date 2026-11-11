@@ -496,12 +496,13 @@ pub(crate) fn conditional_formats(
     tables: &[roxmltree::Node<'_, '_>],
     sheets: &mut [OdsSheet],
 ) -> Result<(), String> {
-    let calcext = tables.iter().any(|table| {
-        table
-            .children()
-            .any(|n| xml::is(n, NS_CALCEXT, "conditional-formats"))
-    });
     for (index, table) in tables.iter().enumerate() {
+        // A table's calcext formats supersede the `style:map` copies
+        // LibreOffice writes of them into the same table's cell styles; a
+        // table without them keeps its styles' conditions.
+        let calcext = table
+            .children()
+            .any(|n| xml::is(n, NS_CALCEXT, "conditional-formats"));
         let mut formats = Vec::new();
         let mut priority = 1i32;
         for container in table

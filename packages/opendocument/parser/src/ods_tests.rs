@@ -638,9 +638,10 @@ fn default_style_conditions_reach_columns_past_the_declared_runs() {
 }
 
 #[test]
-fn cell_properties_continue_through_row_and_column_defaults() {
-    // §16.2: A1's own style sets only bold; its fill is searched in the
-    // row's default cell style, then in the column's.
+fn a_styled_cell_does_not_take_its_column_default_properties() {
+    // A1's own style sets only bold: as LibreOffice reads it (and the
+    // files it writes rely on), the column's default cell style does not
+    // fill in what the cell's style leaves unset.
     let automatic = r##"<style:style style:name="bold" style:family="table-cell"><style:text-properties fo:font-weight="bold"/></style:style><style:style style:name="yellow" style:family="table-cell"><style:table-cell-properties fo:background-color="#ffff00"/></style:style>"##;
     let body = content(
         automatic,
@@ -650,10 +651,7 @@ fn cell_properties_continue_through_row_and_column_defaults() {
     let styles = workbook.styles.as_ref().unwrap();
     let xf = &styles.cell_xfs[workbook.sheets[0].rows[0].cells[0].style_index.unwrap() as usize];
     assert!(styles.fonts[xf.font_id as usize].bold);
-    assert_eq!(
-        styles.fills[xf.fill_id as usize].fg_color.as_deref(),
-        Some("FFFF00")
-    );
+    assert_eq!(styles.fills[xf.fill_id as usize].fg_color, None);
 }
 
 #[test]
@@ -684,4 +682,42 @@ fn nested_spans_inherit_the_outer_span_formatting() {
         fonts,
         [("a", false, false), ("b", true, false), ("c", true, true)]
     );
+}
+
+#[test]
+fn paragraph_styles_format_cell_text_under_the_text_default() {
+    // The paragraph's bold applies; the text family default (normal
+    // weight) does not override what the cell and paragraph set.
+    let automatic = r#"<style:style style:name="P" style:family="paragraph"><style:text-properties fo:font-weight="bold"/></style:style><style:style style:name="I" style:family="text"><style:text-properties fo:font-style="italic"/></style:style>"#;
+    let common = r#"<style:default-style style:family="text"><style:text-properties fo:font-weight="normal"/></style:default-style>"#;
+    let body = content(
+        automatic,
+        &table(
+            r#"<table:table-row><table:table-cell office:value-type="string"><text:p text:style-name="P">a<text:span text:style-name="I">b</text:span></text:p></table:table-cell></table:table-row>"#,
+        ),
+    );
+    let workbook = read_text(&body, Some(&styles(common))).unwrap();
+    let xlsx_model::CellValue::Text {
+        runs: Some(runs), ..
+    } = &workbook.sheets[0].rows[0].cells[0].value
+    else {
+        panic!("no runs");
+    };
+    let fonts: Vec<(&str, bool, bool)> = runs
+        .iter()
+        .map(|r| {
+            let font = r.font.as_ref().unwrap();
+            (r.text.as_str(), font.bold, font.italic)
+        })
+        .collect();
+    assert_eq!(fonts, [("a", true, false), ("b", true, true)]);
+}
+
+#[test]
+fn calcext_formats_supersede_style_maps_only_on_their_own_table() {
+    let automatic = r#"<style:style style:name="ce1" style:family="table-cell"><style:map style:condition="is-true-formula(1)" style:apply-style-name="Good"/></style:style>"#;
+    let common = r##"<style:style style:name="Good" style:family="table-cell"><style:table-cell-properties fo:background-color="#00ff00"/></style:style>"##;
+    let body = r#"<table:table table:name="S"><table:table-row><table:table-cell table:style-name="ce1"/></table:table-row></table:table><table:table table:name="T"><table:table-row><table:table-cell/></table:table-row><calcext:conditional-formats/></table:table>"#;
+    let workbook = read_text(&content(automatic, body), Some(&styles(common))).unwrap();
+    assert_eq!(workbook.sheets[0].worksheet.conditional_formats.len(), 1);
 }

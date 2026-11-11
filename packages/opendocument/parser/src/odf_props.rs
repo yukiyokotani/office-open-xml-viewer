@@ -220,6 +220,19 @@ impl StyleStore {
         chain
     }
 
+    /// The style and its parents (common styles), nearest first, without
+    /// the family's default style: a context nested in another (a span in a
+    /// paragraph in a cell) inherits what its own chain leaves unset.
+    pub fn chain_own<'s>(&'s self, family: &str, name: &str) -> Vec<&'s Style> {
+        let mut chain = self.chain(family, Some(name));
+        if let (Some(last), Some(default)) = (chain.last(), self.defaults.get(family)) {
+            if std::ptr::eq(*last, default) {
+                chain.pop();
+            }
+        }
+        chain
+    }
+
     /// The style and its parents (common styles), nearest first, then the
     /// family's default style.
     pub fn chain<'s>(&'s self, family: &str, name: Option<&str>) -> Vec<&'s Style> {

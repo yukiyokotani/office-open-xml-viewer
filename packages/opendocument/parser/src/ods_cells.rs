@@ -31,9 +31,9 @@ pub struct XfBuilder {
     default_font: Font,
 }
 
-/// The styles a table cell's format is searched through (§16.2): its own
+/// The styles that may give a table cell its format: its own
 /// `table:style-name`, its row's and its column's
-/// `table:default-cell-style-name`.
+/// `table:default-cell-style-name` (the first present applies).
 #[derive(Clone, Copy, Default)]
 pub struct CellStyles<'a> {
     pub cell: Option<&'a str>,
@@ -131,10 +131,14 @@ impl XfBuilder {
         &self.default_font
     }
 
-    /// The xf of a table cell from its own style and its row's and
-    /// column's default cell styles, memoized by the styles. A property is
-    /// searched through them in that order (§16.2); a cell with none of
-    /// them takes the `Default` style.
+    /// The xf of a table cell, memoized by its style's identity. The cell's
+    /// style is its own, else its row's default cell style, else its
+    /// column's (§19.615 / §19.619), else `Default`; its properties are that
+    /// style's chain. LibreOffice reads a cell this way: it does not search
+    /// a styled cell's missing properties (its number format above all) in
+    /// the row and column defaults, and the files it writes rely on that
+    /// (measured over the private corpus, where searching them changes 81
+    /// displayed cells away from the original workbooks' text).
     pub fn xf_for(
         &mut self,
         store: &StyleStore,
@@ -142,19 +146,18 @@ impl XfBuilder {
         faces: &HashMap<String, String>,
         styles: CellStyles<'_>,
     ) -> Result<u32, String> {
-        let find = |name: Option<&str>| name.and_then(|name| store.find("table-cell", name));
-        let mut found: Vec<&Style> = [styles.cell, styles.row, styles.column]
-            .into_iter()
-            .filter_map(find)
-            .collect();
-        let identity = |at: usize| found.get(at).map_or(0, |s| *s as *const Style as usize);
-        let key = (identity(0), identity(1), identity(2));
+        let name = styles.cell.or(styles.row).or(styles.column);
+        // An unknown name resolves to the family default alone.
+        let style = store.find("table-cell", name.unwrap_or("Default"));
+        let key = (
+            style.map_or(0, |s| s as *const Style as usize),
+            usize::from(name.is_some()),
+            0,
+        );
         if let Some(index) = self.by_style.get(&key) {
             return Ok(*index);
         }
-        if found.is_empty() {
-            found.extend(store.find("table-cell", "Default"));
-        }
+        let found: Vec<&Style> = style.into_iter().collect();
         let chain = store.chain_through("table-cell", &found);
         let format = resolve(&chain, data, faces);
         let index = self.intern_format(format)?;
@@ -378,34 +381,6 @@ impl XfBuilder {
     }
 
     /// The run font of a `text:span` style over a cell's font.
-    pub fn run_font(
-        &self,
-        store: &StyleStore,
-        faces: &HashMap<String, String>,
-        cell_font: &Font,
-        span_styles: &[&str],
-    ) -> RunFont {
-        // The spans' styles, innermost first, then the cell's font.
-        let found: Vec<&Style> = span_styles
-            .iter()
-            .filter_map(|name| store.find("text", name))
-            .collect();
-        let chain = store.chain_through("text", &found);
-        let font = font_of(&chain, faces, Some(cell_font));
-        RunFont {
-            bold: font.bold,
-            italic: font.italic,
-            underline: font.underline,
-            strike: font.strike,
-            size: Some(font.size),
-            color: font.color,
-            name: font.name,
-            underline_style: font.underline_style,
-            vert_align: font.vert_align,
-            ..RunFont::default()
-        }
-    }
-
     pub fn font_of_xf(&self, xf: u32) -> Font {
         self.styles
             .cell_xfs
@@ -434,6 +409,22 @@ fn clone_xf(xf: &CellXf) -> CellXf {
         shrink_to_fit: xf.shrink_to_fit,
         reading_order: xf.reading_order,
         own_font_color: xf.own_font_color,
+    }
+}
+
+/// A rich-text run's font from a resolved context font.
+pub fn run_font_of(font: &Font) -> RunFont {
+    RunFont {
+        bold: font.bold,
+        italic: font.italic,
+        underline: font.underline,
+        strike: font.strike,
+        size: Some(font.size),
+        color: font.color.clone(),
+        name: font.name.clone(),
+        underline_style: font.underline_style.clone(),
+        vert_align: font.vert_align.clone(),
+        ..RunFont::default()
     }
 }
 
