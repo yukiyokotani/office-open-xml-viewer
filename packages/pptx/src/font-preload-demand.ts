@@ -1,5 +1,5 @@
 import { FontDemandScalarCollector } from '@silurus/ooxml-core/internal/font-scalar-demand';
-import type { FontPreloadDemand, TextBody } from '@silurus/ooxml-core';
+import { isSymbolFontFamily, type FontPreloadDemand, type TextBody } from '@silurus/ooxml-core';
 import { preparedPowerPointText } from './font-display-text.js';
 import type { Slide } from './types';
 
@@ -27,6 +27,9 @@ export function collectSlideFontDemand(
       for (const run of para.runs) {
         if (run.type === 'break') continue;
         if (run.type !== 'text' || run.fontFamilySym || run.fieldType && run.fieldType !== 'slidenum') return false;
+        // A symbol-font Latin face (Symbol, Wingdings 1-3, Webdings) may draw its
+        // text as other characters, so the authored scalars are not the painted ones.
+        if (isSymbolFontFamily((run.fontFamily ?? para.defFontFamily)?.split(',')[0]?.trim())) return false;
         if (!scalars.add(run.text) || !scalars.add(preparedPowerPointText(run, slide.slideNumber))) return false;
       }
     }

@@ -216,6 +216,7 @@ export function createLayoutServices(
     localMetrics,
     fontMetrics: inputFontMetrics,
     measureContext: context,
+    symbolProbeOwner: canvasContext,
     // A caller canvas may belong to a popup/iframe. CSS face admission must
     // inspect the FontFaceSet that also shapes this context's glyphs.
     fontSet: (isHTMLCanvas(canvasElement) ? canvasElement.ownerDocument?.fonts : undefined)

@@ -5,7 +5,13 @@ import {
   unregisterEmbeddedFonts,
   type EmbeddedFontFace,
   type OfficeFontFallbackRequest,
+  isSymbolFontFamily,
+  symbolCmapEncoding,
+  symbolEncodingOfFaces,
+  symbolFaceKey,
+  type SymbolFaceEncoding,
 } from '@silurus/ooxml-core';
+import type { LoadedFontSources } from '@silurus/ooxml-core/internal/font-sources';
 import { parseResourceLimitError } from '@silurus/ooxml-core/worker';
 import type { PptxEmbeddedFontRef } from './worker-protocol';
 
@@ -17,6 +23,38 @@ export interface LoadedPptxEmbeddedFonts {
   readonly authoredFamilies: ReadonlyMap<string, string>;
   /** Successfully registered authored family/style slots (§19.2.1.9). */
   readonly tuples: ReadonlySet<string>;
+  /** {@link symbolFaceKey} of a presentation-scoped face → the symbol codes
+   *  its bytes draw, for symbol-font families (core symbol-face.ts). */
+  readonly symbolEncodings: ReadonlyMap<string, SymbolFaceEncoding>;
+}
+
+/**
+ * Symbol-font faces whose bytes this presentation holds, by
+ * {@link symbolFaceKey}: embedded faces (one per style slot, §19.2.1.9), and
+ * served families whose faces CSS matching can pick for a tuple all have read
+ * cmaps (core symbolEncodingOfFaces). The renderer prefers these cmap
+ * readings over measuring (renderer symbolFaceSegments).
+ */
+export function pptxSymbolFaceEncodings(
+  embedded: ReadonlyMap<string, SymbolFaceEncoding> | undefined,
+  served: LoadedFontSources | undefined,
+): ReadonlyMap<string, SymbolFaceEncoding> | undefined {
+  const out = new Map(embedded ?? []);
+  const byFamily = new Map<string, LoadedFontSources['faces'][number][]>();
+  for (const face of served?.faces ?? []) {
+    const key = face.family.trim().toLowerCase();
+    byFamily.set(key, [...(byFamily.get(key) ?? []), face]);
+  }
+  for (const [family, faces] of byFamily) {
+    if (!faces.some((face) => face.symbolEncoding)) continue;
+    for (const weight of [400, 700]) {
+      for (const style of ['normal', 'italic'] as const) {
+        const encoding = symbolEncodingOfFaces(faces, weight, style);
+        if (encoding) out.set(symbolFaceKey(family, weight, style), encoding);
+      }
+    }
+  }
+  return out.size > 0 ? out : undefined;
 }
 
 /** Only an actually registered PresentationML face occupies its style slot. */
@@ -48,6 +86,7 @@ export async function loadEmbeddedFonts(
     aliases: new Map(),
     authoredFamilies: new Map(),
     tuples: new Set(),
+    symbolEncodings: new Map(),
   };
   const scope = nextFontScope++;
   const candidateAliases = new Map<string, string>();
@@ -61,6 +100,7 @@ export async function loadEmbeddedFonts(
   // batch is copied into FontFace storage before the next extraction begins.
   const loaded: FontFace[] = [];
   const held = new Set<FontFace>();
+  const symbolCandidates = new Map<string, SymbolFaceEncoding>();
   const batchSize = 2;
   try {
     for (let offset = 0; offset < refs.length; offset += batchSize) {
@@ -85,6 +125,14 @@ export async function loadEmbeddedFonts(
         },
       ));
       const loadable = faces.filter((face): face is EmbeddedFontFace => face !== null);
+      for (const face of loadable) {
+        const authored = refs.find((ref) => candidateAliases.get(normalizedFamily(ref.fontName)) === face.family)?.fontName;
+        const key = symbolFaceKey(face.family, face.weight === 'bold' ? 700 : 400, face.style === 'italic' ? 'italic' : 'normal');
+        if (!isSymbolFontFamily(authored) || symbolCandidates.has(key)) continue;
+        // Raw sfnt only (an EOT part has no readable cmap here; it is measured).
+        const encoding = symbolCmapEncoding(face.bytes);
+        if (encoding) symbolCandidates.set(key, encoding);
+      }
       if (loadable.length === 0) continue;
       for (const face of await registerEmbeddedFonts(loadable)) {
         if (held.has(face)) {
@@ -117,7 +165,12 @@ export async function loadEmbeddedFonts(
     const authored = authoredFamilies.get(face.family) as string;
     return `${authored}:${face.weight === 'bold' || face.weight === '700' ? 700 : 400}:${face.style === 'italic' ? 'italic' : 'normal'}`;
   }));
-  return { faces: loaded, aliases, authoredFamilies, tuples };
+  // Only a style slot whose face registered paints its bytes; a failed slot
+  // is painted by another face (CSS matching), which the renderer measures.
+  const registered = new Set(loaded.map((face) => symbolFaceKey(face.family,
+    face.weight === 'bold' || face.weight === '700' ? 700 : 400, face.style === 'italic' ? 'italic' : 'normal')));
+  const symbolEncodings = new Map([...symbolCandidates].filter(([key]) => registered.has(key)));
+  return { faces: loaded, aliases, authoredFamilies, tuples, symbolEncodings };
 }
 
 /** Do not register a web substitute for a family successfully loaded from the deck. */

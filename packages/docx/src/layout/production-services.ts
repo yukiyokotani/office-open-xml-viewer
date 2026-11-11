@@ -9,8 +9,12 @@ import {
 import {
   activeFontSet,
   canvasFontString,
+  createSymbolFaceOracle,
   fontFaceWeightCovers,
+  symbolEncodingOfFaces,
+  type SymbolFaceEncoding,
 } from '@silurus/ooxml-core';
+import { quoteCssFontFamily } from '@silurus/ooxml-core/internal/css-font-family';
 import type { ResolvedFontMetric } from '@silurus/ooxml-core';
 import type { FontSubstituteScript, OfficeFontFallbackRoute } from '@silurus/ooxml-core';
 import { scriptScopedSubstitutedFamilies } from '../font-substitution-scope.js';
@@ -66,6 +70,9 @@ export interface ProductionLayoutServiceOptions {
   readonly mathResources?: readonly MathLayoutResource[];
   readonly mathDrawables?: ReadonlyMap<string, CanvasImageSource>;
   readonly measureContext: MeasurementTextContext | null;
+  /** The 2D context behind {@link measureContext}: symbol-face colour probes
+   * draw on a scratch canvas of its realm (core symbol-face.ts). */
+  readonly symbolProbeOwner?: unknown;
   /** FontFaceSet of the measuring canvas, including foreign DOM realms. */
   readonly fontSet?: FontFaceSet | null;
   readonly verticalGlyphMeasurement: VerticalGlyphMeasurementService;
@@ -457,6 +464,43 @@ export function createProductionTextLayoutService(
     cjkFallback: options.cjkFallback,
     fontMetrics,
     eastAsiaFontCharsets: fontFamilyCharsets,
+    ...(() => {
+      // Symbol-encoded text (core symbol-font.ts) is judged against the face
+      // each resolution selects: the cmap of bytes this document holds
+      // (embedded faces; served faces whose tables were read, core
+      // symbolEncodingOfFaces), else a measurement of that face in this very
+      // measuring context. One oracle and one held-encoding memo per service,
+      // so new font resources (a new service) re-judge.
+      const oracle = createSymbolFaceOracle(context, 'sans-serif', options.symbolProbeOwner);
+      const servedEncoding = (family: string, weight: number, style: 'normal' | 'italic'): SymbolFaceEncoding | undefined =>
+        symbolEncodingOfFaces((options.sourceFonts?.loaded.faces ?? []).filter((face) =>
+          normalizedFaceFamily(face.family) === normalizedFaceFamily(family)), weight, style);
+      const held = new Map<string, SymbolFaceEncoding | undefined>();
+      const heldEncoding = (resolution: import('./font-service.js').FontResolution): SymbolFaceEncoding | undefined => {
+        const key = `${resolution.source}|${resolution.resolvedFamily}|${resolution.weight}|${resolution.style}`;
+        if (held.has(key)) return held.get(key);
+        const encoding = heldEncodingUncached(resolution);
+        held.set(key, encoding);
+        return encoding;
+      };
+      const heldEncodingUncached = (resolution: import('./font-service.js').FontResolution): SymbolFaceEncoding | undefined => {
+        if (resolution.source === 'embedded') {
+          return options.embeddedRoutes?.find((route) => route.resolvedFamily === resolution.resolvedFamily
+            && route.weight === resolution.weight && route.style === resolution.style)?.symbolEncoding;
+        }
+        return resolution.source === 'source' || resolution.source === 'substitute'
+          ? servedEncoding(resolution.resolvedFamily, resolution.weight, resolution.style) : undefined;
+      };
+      return {
+        symbolText: (text: string, family: string, resolution: import('./font-service.js').FontResolution) =>
+          oracle.segments(text, family, {
+            familyText: quoteCssFontFamily(resolution.resolvedFamily),
+            weight: resolution.weight,
+            style: resolution.style,
+            encoding: heldEncoding(resolution),
+          }),
+      };
+    })(),
     genericFamilies: Object.fromEntries(routedFontFamilies.map((family) => [
       family,
       classifyDocxFontGeneric(family, source.fonts.familyClasses, source.fonts.familyPitches),

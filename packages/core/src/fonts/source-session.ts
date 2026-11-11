@@ -72,6 +72,8 @@ import {
 import { resolveFontFiles } from './files-source.js';
 import { parseOpenTypeResourceMetrics, type OpenTypeLineMetrics } from './open-type-metrics.js';
 import { metricSfnt } from './web-font-sfnt.js';
+import { symbolCmapEncoding } from './symbol-face.js';
+import type { SymbolFaceEncoding } from './symbol-font.js';
 import { DecodeQueue } from './decode-queue.js';
 import { concludeFamilies } from './resolver-failures.js';
 import {
@@ -125,6 +127,9 @@ export interface LoadedSourceFace {
    * for {@link instanceOpenTypeLineMetrics}. Formats project these tables
    * with their own line rules, exactly as for a document-embedded face. */
   readonly resourceMetrics?: OpenTypeLineMetrics;
+  /** The symbol codes the exact bytes of this face draw (symbol-face.ts
+   * `symbolCmapEncoding`), when the session holds them and their cmap reads. */
+  readonly symbolEncoding?: SymbolFaceEncoding;
   /** When `resourceMetrics` is absent: the source this face was registered
    * from (the owned bytes, or the `url()` of an inline data: URL), so a
    * format can register it again alone under a private family and measure
@@ -177,6 +182,8 @@ export interface FontSourceSessionOptions {
  * so its bytes, and hence its tables, are the same for every holder. Decoding
  * is bounded through {@link metricDecodes}. */
 const faceResourceMetrics = new WeakMap<FontFace, OpenTypeLineMetrics | null>();
+/** Symbol cmap reading of the same bytes (null: unreadable). */
+const faceSymbolEncodings = new WeakMap<FontFace, SymbolFaceEncoding | null>();
 
 /** Source identity (`SourceCache.id`) of every face a session registered,
  * so a format can tell the faces of one source, registered by any session of
@@ -211,7 +218,10 @@ async function decodeResourceMetrics(face: FontFace, data: ArrayBuffer): Promise
   let metrics: OpenTypeLineMetrics | null = null;
   try {
     const sfnt = await metricSfnt(data);
-    if (sfnt instanceof Uint8Array) metrics = parseOpenTypeResourceMetrics(sfnt, undefined, { variations: true });
+    if (sfnt instanceof Uint8Array) {
+      metrics = parseOpenTypeResourceMetrics(sfnt, undefined, { variations: true });
+      faceSymbolEncodings.set(face, symbolCmapEncoding(sfnt));
+    }
   } catch { metrics = null; }
   faceResourceMetrics.set(face, metrics);
 }
@@ -1107,6 +1117,7 @@ export class FontSourceSession {
       if (entry.face.status !== 'loaded') continue;
       const { declaration } = entry;
       const resourceMetrics = faceResourceMetrics.get(entry.face) ?? undefined;
+      const symbolEncoding = faceSymbolEncodings.get(entry.face) ?? undefined;
       const probeSource = resourceMetrics ? undefined
         : declaration.data ?? (declaration.url === undefined ? undefined : cssUrl(declaration.url));
       faces.push(Object.freeze({
@@ -1118,6 +1129,7 @@ export class FontSourceSession {
         sourceIndex: entry.sourceIndex,
         face: entry.face,
         ...(resourceMetrics ? { resourceMetrics } : {}),
+        ...(symbolEncoding ? { symbolEncoding } : {}),
         ...(probeSource === undefined ? {} : { probeSource }),
       }));
     }

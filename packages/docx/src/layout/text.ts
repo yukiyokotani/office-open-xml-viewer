@@ -8,6 +8,9 @@ import {
   fontSubstituteScriptScope,
   graphemeClusterOffsets,
   normalizeFontMetricFamily,
+  isSymbolFontFamily,
+  symbolTextToUnicodeSegments,
+  type SymbolTextSegment,
   type CjkLang,
   type FontSubstituteScript,
   type ResolvedFontMetric,
@@ -721,7 +724,16 @@ export interface TextLayoutService {
   exactLocalFaces?(requestedFamily: string): readonly Readonly<{ resolvedFamily: string; weight: number; style: FontStyle; coverageProbeFamily?: string }>[];
   /** {@link GlyphMeasurer.ownsGlyphs} of this service's measurer. */
   ownsGlyphs?(request: Readonly<GlyphOwnershipRequest>): boolean;
+  /** Symbol-encoded text (core symbol-font.ts) as the faces this service
+   * selects draw it: each scalar takes its §17.3.2.26 slot, exactly as
+   * {@link shape} does, and only a symbol-font slot family is judged (see
+   * {@link TextLayoutServiceInput.symbolText}). */
+  symbolText?(request: Readonly<SymbolTextRequest>): readonly SymbolTextSegment[];
 }
+
+export type SymbolTextRequest = Pick<TextShapeRequest,
+  'text' | 'fonts' | 'themeFonts' | 'themeFontPresence' | 'complexScript' | 'fontHint' | 'eastAsiaLanguage' | 'eastAsiaFontCharset'>
+  & { readonly weight: number; readonly style: FontStyle };
 
 export interface TextLayoutServiceInput {
   readonly fonts: FontResolver;
@@ -742,6 +754,11 @@ export interface TextLayoutServiceInput {
   readonly localMetrics?: Readonly<Record<string, Readonly<ResolvedFontMetric>>>;
   readonly eastAsiaFontCharsets?: Readonly<Record<string, string>>;
   readonly genericFamilies?: Readonly<Record<string, 'serif' | 'sans-serif' | 'monospace'>>;
+  /** Judge symbol-encoded text against the resolved face (production: held
+   * cmap bytes, else measurement in the measuring context). Absent: the face
+   * cannot be judged and the 0.89 subset converts. Its decisions depend only
+   * on this service's resources and context, like measured advances. */
+  readonly symbolText?: (text: string, family: string, resolution: FontResolution) => readonly SymbolTextSegment[];
 }
 
 /** Generic tail for an authored DOCX face. fontTable family/pitch metadata is
@@ -1343,6 +1360,29 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
       } } : {}),
     ...(input.fonts.exactLocalFaces
       ? { exactLocalFaces: (family: string) => input.fonts.exactLocalFaces!(family) } : {}),
+    symbolText(request: Readonly<SymbolTextRequest>) {
+      const out: SymbolTextSegment[] = [];
+      const push = (part: SymbolTextSegment) => {
+        const last = out.at(-1);
+        if (last && last.mapped === part.mapped) out[out.length - 1] = { text: last.text + part.text, mapped: part.mapped };
+        else if (part.text) out.push(part);
+      };
+      for (const character of request.text) {
+        const slot = scriptSlot(character.codePointAt(0) ?? 0, request.complexScript ?? false,
+          request.fontHint, request.eastAsiaLanguage, request.eastAsiaFontCharset
+            ?? (() => {
+              const family = requestedFamily(request, 'eastAsia');
+              return family ? ownValue(eastAsiaFontCharsets, family.trim().toLowerCase()) : undefined;
+            })());
+        const family = requestedFamily(request, slot);
+        if (!family || !isSymbolFontFamily(family)) { push({ text: character, mapped: false }); continue; }
+        const parts = input.symbolText
+          ? input.symbolText(character, family, resolve({ ...request, text: character, slot }))
+          : symbolTextToUnicodeSegments(character, family);
+        for (const part of parts) push(part);
+      }
+      return out;
+    },
     fingerprint,
     fontMetrics,
     localMetrics: fontMetrics,

@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { symbolCodeSet, symbolTextToUnicodeSegments } from '@silurus/ooxml-core';
 import type { TextLayoutService } from './text.js';
 import { resolveNumberingMarkerGeometry } from './numbering-marker.js';
 import { createTextLayoutService } from './text.js';
@@ -73,6 +74,66 @@ describe('resolveNumberingMarkerGeometry', () => {
       return { advancePt: request.text.length * request.fontSizePt * em,
         ascentPt: request.fontSizePt * 0.8, descentPt: request.fontSizePt * 0.2 };
     } },
+  });
+
+  // #2177 review: a converted marker is Unicode text. Shaping it with the
+  // marker's Symbol family would let a symbol-encoded Symbol re-read U+00A9
+  // as its own code 0xA9 (a heart), so its slots are cleared. A code the face
+  // draws keeps the Symbol slots.
+  it.each([
+    ['lacks', [] as number[], '©\uFE0E', null],
+    ['draws', [0xd3], '\uF0D3', 'Symbol'],
+  ])('shapes a Symbol marker the face %s with the matching slots', (_case, owned, text, ascii) => {
+    const requests: { text: string; ascii: string | null | undefined }[] = [];
+    const base = createTextLayoutService({
+      fonts: createFontResolver([]),
+      measurer: { fingerprint: 'marker-symbol', measure: (request) => ({
+        advancePt: request.text.length * 6, ascentPt: 8, descentPt: 2,
+      }) },
+      symbolText: (markerText, family) => symbolTextToUnicodeSegments(markerText, family, {
+        encoding: { kind: 'known', pua: symbolCodeSet(owned), bare: symbolCodeSet(owned) },
+        monochrome: () => true,
+      }),
+    });
+    const service: TextLayoutService = { ...base, shape(request) {
+      requests.push({ text: request.text, ascii: request.fonts.ascii });
+      return base.shape(request);
+    } };
+    const geometry = resolveNumberingMarkerGeometry(
+      { numId: 1, level: 0, format: 'bullet', text: '\uF0D3', suff: 'tab', indentLeft: 0, tab: 36, fontFamily: 'Symbol' },
+      { fontSizePt: 12, fonts: { ascii: 'Symbol', highAnsi: 'Symbol', eastAsia: 'Symbol', complexScript: 'Symbol' },
+        weight: 400, style: 'normal', complexScript: false },
+      { authoredFirstIndentPt: 0, physicalIndentLeftPt: 0, tabStops: [], defaultTabPt: 36 }, service,
+    );
+    expect(geometry.markerText).toBe(text);
+    expect(requests.find((request) => request.text === text)?.ascii).toBe(ascii);
+  });
+
+  it('shapes a partly native Symbol marker piece by piece, in order', () => {
+    const requests: { text: string; ascii: string | null | undefined }[] = [];
+    const base = createTextLayoutService({
+      fonts: createFontResolver([]),
+      measurer: { fingerprint: 'marker-symbol-mixed', measure: (request) => ({
+        advancePt: request.text.length * 6, ascentPt: 8, descentPt: 2,
+      }) },
+      symbolText: (markerText, family) => symbolTextToUnicodeSegments(markerText, family, {
+        encoding: { kind: 'known', pua: symbolCodeSet([0x61]), bare: symbolCodeSet([0x61]) },
+      }),
+    });
+    const service: TextLayoutService = { ...base, shape(request) {
+      requests.push({ text: request.text, ascii: request.fonts.ascii });
+      return base.shape(request);
+    } };
+    const geometry = resolveNumberingMarkerGeometry(
+      { numId: 1, level: 0, format: 'bullet', text: '\uF061\uF062', suff: 'tab', indentLeft: 0, tab: 36, fontFamily: 'Symbol' },
+      { fontSizePt: 12, fonts: { ascii: 'Symbol', highAnsi: 'Symbol', eastAsia: 'Symbol', complexScript: 'Symbol' },
+        weight: 400, style: 'normal', complexScript: false },
+      { authoredFirstIndentPt: 0, physicalIndentLeftPt: 0, tabStops: [], defaultTabPt: 36 }, service,
+    );
+    expect(geometry.markerText).toBe('\uF061\u03b2');
+    expect(requests.slice(0, 2)).toEqual([{ text: '\uF061', ascii: 'Symbol' }, { text: '\u03b2', ascii: null }]);
+    expect(geometry.shape?.spans.map((span) => [span.text, span.start, span.end])).toEqual([['\uF061', 0, 1], ['\u03b2', 1, 2]]);
+    expect(geometry.markerWidthPt).toBe(geometry.shape?.advancePt);
   });
 
   it.each([

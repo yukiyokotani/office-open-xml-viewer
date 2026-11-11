@@ -1,187 +1,195 @@
 import { describe, expect, it } from 'vitest';
 import {
-  SYMBOL_MAP,
-  symbolFontToUnicode,
+  SYMBOL_FACE_UNICODE,
+  SYMBOL_FACE_UNKNOWN,
   isSymbolFontFamily,
+  symbolCodeSet,
+  symbolFontToUnicode,
   symbolTextToUnicodeSegments,
+  type SymbolFaceEncoding,
 } from './symbol-font';
+import { createSymbolFaceOracle, measureSymbolFaceEncoding, symbolCmapEncoding, symbolEncodingOfFaces } from './symbol-face';
+import { ADOBE_SYMBOL_UNICODE } from './symbol-encoding';
+import { symbolFixtureFontBytes } from '../testing/symbol-font-fixture';
 
-const ch = (code: number): string => String.fromCharCode(code);
-
-describe('symbolFontToUnicode', () => {
-  // The load-bearing case: list bullets. Word serializes a Symbol bullet as the
-  // PUA code point U+F0B7 and a Wingdings square as U+F0A7; both the bare and
-  // PUA-shifted forms must normalize so the marker draws in any fallback face.
-  it('maps Symbol / Wingdings bullet code points (bare + PUA) to Unicode', () => {
-    expect(symbolFontToUnicode(ch(0xf0b7), 'Symbol')).toBe('•');
-    expect(symbolFontToUnicode(ch(0xb7), 'Symbol')).toBe('•');
-    expect(symbolFontToUnicode(ch(0xf0a7), 'Wingdings')).toBe('▪');
-    expect(symbolFontToUnicode(ch(0xa7), 'Wingdings')).toBe('▪');
-  });
-
-  // The core reason for splitting into two tables: the SAME code point resolves
-  // to a DIFFERENT glyph depending on the font, because Symbol and Wingdings use
-  // different encodings. A single shared table cannot be correct for both.
-  it('resolves the same code point differently for Symbol vs Wingdings', () => {
-    // 0xA7: Adobe Symbol → U+2663 club; Wingdings cmap → U+25AA small square.
-    expect(symbolFontToUnicode(ch(0xa7), 'Symbol')).toBe('♣');
-    expect(symbolFontToUnicode(ch(0xa7), 'Wingdings')).toBe('▪');
-    // 0xB7: Adobe Symbol → U+2022 bullet; Wingdings cmap → a clock face
-    // (astral U+1F550), which we leave as passthrough rather than mismap.
-    expect(symbolFontToUnicode(ch(0xb7), 'Symbol')).toBe('•');
-    expect(symbolFontToUnicode(ch(0xb7), 'Wingdings')).toBe(ch(0xb7));
-    // 0xB8: Adobe Symbol → U+00F7 division; Wingdings → a clock face (passthrough).
-    expect(symbolFontToUnicode(ch(0xb8), 'Symbol')).toBe('÷');
-    expect(symbolFontToUnicode(ch(0xb8), 'Wingdings')).toBe(ch(0xb8));
-  });
-
-  // Restored ambiguous entries (removed in PR #519) now carry the correct
-  // font-specific value rather than a single guessed glyph.
-  it('restores the previously-removed code points with font-specific values', () => {
-    // Symbol side
-    expect(symbolFontToUnicode(ch(0xb8), 'Symbol')).toBe('÷'); // U+00F7
-    expect(symbolFontToUnicode(ch(0xb9), 'Symbol')).toBe('≠'); // U+2260
-    // Wingdings side
-    expect(symbolFontToUnicode(ch(0x24), 'Wingdings')).toBe('\u{1F453}'); // eyeglasses
-    expect(symbolFontToUnicode(ch(0x4b), 'Wingdings')).toBe('\u{1F610}'); // neutral face
-    expect(symbolFontToUnicode(ch(0x76), 'Wingdings')).toBe('❖'); // U+2756
-    expect(symbolFontToUnicode(ch(0xfe), 'Wingdings')).toBe('☑'); // U+2611 ballot box w/ check
-  });
-
-  it('maps the Wingdings barb arrow block', () => {
-    expect(symbolFontToUnicode(ch(0xf0e0), 'Wingdings')).toBe('→');
-    expect(symbolFontToUnicode(ch(0xdf), 'Wingdings')).toBe('←');
-  });
-
-  // Geometric markers. 0x74 lozenge6 / 0x77 rhombus4 are both SOLID glyphs —
-  // both must be the BLACK diamond, never the white ◇ (regression guard for the
-  // 0x77 fill error).
-  it('maps the Wingdings solid geometric markers to black glyphs', () => {
-    expect(symbolFontToUnicode(ch(0x6c), 'Wingdings')).toBe('●');
-    expect(symbolFontToUnicode(ch(0x6e), 'Wingdings')).toBe('■');
-    expect(symbolFontToUnicode(ch(0x74), 'Wingdings')).toBe('◆');
-    expect(symbolFontToUnicode(ch(0x77), 'Wingdings')).toBe('◆');
-  });
-
-  it('maps Symbol arrows from the Adobe encoding', () => {
-    // symbol.txt: 0xAE → U+2192 RIGHTWARDS ARROW, 0xAC → U+2190 LEFTWARDS ARROW
-    expect(symbolFontToUnicode(ch(0xae), 'Symbol')).toBe('→');
-    expect(symbolFontToUnicode(ch(0xac), 'Symbol')).toBe('←');
-  });
-
-  // The gate is keyed on the requested font family, not the character — a normal
-  // body font must never be remapped (a real "·" / "§" / "A" stays itself).
-  it('passes characters through for non-symbol fonts', () => {
-    expect(symbolFontToUnicode(ch(0xb7), 'Calibri')).toBe(ch(0xb7));
-    expect(symbolFontToUnicode(ch(0xa7), 'Times New Roman')).toBe(ch(0xa7));
-    expect(symbolFontToUnicode('A', 'Symbol')).toBe('A');
-  });
-
-  it('passes through when the family is missing or unmapped', () => {
-    expect(symbolFontToUnicode(ch(0xf0b7), null)).toBe(ch(0xf0b7));
-    expect(symbolFontToUnicode(ch(0xf0b7), undefined)).toBe(ch(0xf0b7));
-    // A code point with no entry in the selected table falls through unchanged
-    // rather than guessing (e.g. 0x21 is "!" in Symbol, not a dingbat).
-    expect(symbolFontToUnicode(ch(0x21), 'Symbol')).toBe(ch(0x21));
-  });
-
-  it('matches exactly "wingdings" (case-insensitive, trimmed) for the Wingdings table', () => {
-    expect(symbolFontToUnicode(ch(0xf0a7), 'WINGDINGS')).toBe('▪');
-    expect(symbolFontToUnicode(ch(0xf0a7), '  Wingdings  ')).toBe('▪');
-  });
-
-  // Wingdings 2 / 3 and Webdings use DIFFERENT private encodings than Wingdings 1,
-  // so they must NOT be looked up in the Wingdings 1 table (WINGDINGS_MAP) — doing
-  // so produces a *wrong* glyph. They are unmapped (passthrough) so the real font
-  // draws the intended glyph if installed; better the bare PUA point than tofu of a
-  // wrong glyph.
-  it('does NOT map Wingdings 2 / Wingdings 3 / Webdings through the Wingdings 1 table', () => {
-    expect(symbolFontToUnicode(ch(0xa7), 'Wingdings 2')).toBe(ch(0xa7));
-    expect(symbolFontToUnicode(ch(0xf0a7), 'Wingdings 2')).toBe(ch(0xf0a7));
-    expect(symbolFontToUnicode(ch(0xa7), 'Wingdings 3')).toBe(ch(0xa7));
-    expect(symbolFontToUnicode(ch(0xa7), 'Webdings')).toBe(ch(0xa7));
-    // Wingdings 1 itself still resolves the same code point to the square bullet.
-    expect(symbolFontToUnicode(ch(0xa7), 'Wingdings')).toBe('▪');
-  });
-
-  // Pencil/scissors/faces are Wingdings glyphs only. In Symbol, 0x21 is "!" and
-  // 0x22 is "∀" — so these dingbats must NOT leak across the font gate.
-  it('keeps Wingdings dingbats out of the Symbol table', () => {
-    expect(SYMBOL_MAP[0x21]).toBeUndefined();
-    expect(SYMBOL_MAP[0x22]).toBeUndefined();
-    expect(SYMBOL_MAP[0x24]).toBeUndefined();
-    expect(symbolFontToUnicode(ch(0x21), 'Symbol')).toBe(ch(0x21));
-    expect(symbolFontToUnicode(ch(0x22), 'Symbol')).toBe(ch(0x22));
-    expect(symbolFontToUnicode(ch(0x24), 'Symbol')).toBe(ch(0x24));
-  });
-
-  // Wingdings 0x21 "pencil" → U+270F PENCIL, 0x22 "scissors" → U+2702 BLACK
-  // SCISSORS — both faithful BMP dingbats that render in ordinary fallback fonts.
-  // (bare + PUA-shifted form.)
-  it('maps the Wingdings pencil (0x21) and scissors (0x22) to BMP dingbats', () => {
-    expect(symbolFontToUnicode(ch(0x21), 'Wingdings')).toBe('✏');
-    expect(symbolFontToUnicode(ch(0xf021), 'Wingdings')).toBe('✏');
-    expect(symbolFontToUnicode(ch(0x22), 'Wingdings')).toBe('✂');
-    expect(symbolFontToUnicode(ch(0xf022), 'Wingdings')).toBe('✂');
-  });
+const ch = (code: number): string => String.fromCodePoint(code);
+const VS15 = '\uFE0E';
+const missing = { encoding: SYMBOL_FACE_UNICODE };
+const mono = { encoding: SYMBOL_FACE_UNICODE, monochrome: () => true };
+const owning = (codes: number[]): SymbolFaceEncoding => ({
+  kind: 'known', pua: symbolCodeSet(codes), bare: symbolCodeSet(codes),
 });
 
-describe('isSymbolFontFamily', () => {
-  it('matches exactly "symbol" and any "wingdings" family', () => {
-    expect(isSymbolFontFamily('Symbol')).toBe(true);
-    expect(isSymbolFontFamily('SYMBOL')).toBe(true);
-    expect(isSymbolFontFamily('Wingdings')).toBe(true);
-    expect(isSymbolFontFamily('Wingdings 2')).toBe(true);
+describe('symbol text conversion for a face that lacks the codes', () => {
+  const both = (family: string, code: number, expected: string) => {
+    expect(symbolFontToUnicode(ch(code), family, missing)).toBe(expected);
+    expect(symbolFontToUnicode(ch(0xf000 + code), family, missing)).toBe(expected);
+  };
+
+  it('maps the whole Symbol repertoire, bare and F0-shifted (#2177)', () => {
+    both('Symbol', 0x61, ch(0x3b1)); both('Symbol', 0x62, ch(0x3b2)); both('Symbol', 0x63, ch(0x3c7));
+    both('Symbol', 0x70, ch(0x3c0)); both('Symbol', 0x53, ch(0x3a3)); both('Symbol', 0xe5, ch(0x2211));
+    both('Symbol', 0xf2, ch(0x222b)); both('Symbol', 0xb6, ch(0x2202)); both('Symbol', 0xb7, ch(0x2022));
+    both('Symbol', 0xa0, ch(0x20ac)); both('Symbol', 0xe6, ch(0x239b)); both('Symbol', 0x60, ch(0x203e));
+    // Phi: the documented exchange (looped 0x6A, stroked 0x66).
+    both('Symbol', 0x6a, ch(0x3c6)); both('Symbol', 0x66, ch(0x3d5));
+    expect(symbolFontToUnicode('abcp', 'Symbol', missing)).toBe('\u03b1\u03b2\u03c7\u03c0');
+    expect(symbolFontToUnicode(ch(0xf0f0), 'Symbol', missing)).toBe(ch(0xf0f0));
   });
 
-  it('does NOT match Webdings (no core table) or ordinary faces', () => {
-    // Webdings is intentionally excluded — core has no Webdings table, so the
-    // gate must not claim it can normalize a Webdings run.
-    expect(isSymbolFontFamily('Webdings')).toBe(false);
-    expect(isSymbolFontFamily('Calibri')).toBe(false);
-    // "Symbol" must be exact, not a substring (e.g. "SymbolMT" is a real Latin
-    // PostScript face), matching symbolFontToUnicode's own gate.
+  it('agrees with Adobe symbol.txt except the recorded phi exchange', () => {
+    for (const [key, unicode] of Object.entries(ADOBE_SYMBOL_UNICODE)) {
+      const code = Number(key);
+      const expected = ch(unicode);
+      if (expected === ch(code) || /(?![#*0-9])\p{Emoji}/u.test(expected)) continue;
+      expect(symbolFontToUnicode(ch(0xf000 + code), 'Symbol', missing)).toBe(expected);
+    }
+  });
+
+  it('keeps each family on its own table', () => {
+    // 0xA7 is a club in Symbol and a small square in Wingdings (both pictographs).
+    expect(symbolFontToUnicode(ch(0xf0a7), 'Symbol', mono)).toBe(ch(0x2663) + VS15);
+    expect(symbolFontToUnicode(ch(0xf0a7), 'Wingdings', mono)).toBe(ch(0x25aa) + VS15);
+    both('Wingdings 2', 0x80, ch(0x2609)); // SUN
+    both('Wingdings 3', 0x21, ch(0x2b60)); // LEFTWARDS TRIANGLE-HEADED ARROW
+    expect(symbolFontToUnicode('a', 'Calibri', missing)).toBe('a');
+    expect(isSymbolFontFamily(' WINGDINGS 2 ')).toBe(true);
     expect(isSymbolFontFamily('SymbolMT')).toBe(false);
-    expect(isSymbolFontFamily(null)).toBe(false);
-    expect(isSymbolFontFamily(undefined)).toBe(false);
+  });
+
+  // Pins the decoded N4384 tables (dingbat-encoding.ts stores deltas): mapped
+  // count and an order-sensitive hash of every (code, code point) pair, taken
+  // from the verified literal tables.
+  it.each([
+    ['Wingdings', 221, 2837286855], ['Wingdings 2', 216, 3816834078],
+    ['Wingdings 3', 207, 3231793635], ['Webdings', 222, 1275301490],
+  ])('decodes the whole %s table', (family, count, hash) => {
+    let mapped = 0;
+    let h = 0;
+    for (let code = 0x20; code <= 0xff; code++) {
+      const out = symbolFontToUnicode(ch(0xf000 + code), family, { ...missing, monochrome: () => true });
+      if (out === ch(0xf000 + code)) continue;
+      mapped++;
+      h = (Math.imul(h, 31) + out.codePointAt(0)! * (code - 0x20 + 1)) >>> 0;
+    }
+    expect([mapped, h]).toEqual([count, hash]);
+  });
+
+  it('writes pictographs with VS15 and converts them only when proven monochrome', () => {
+    // Symbol 0xA9 is BLACK HEART SUIT; Webdings 0x21 is SPIDER (U+1F577).
+    expect(symbolFontToUnicode(ch(0xf0a9), 'Symbol', mono)).toBe(ch(0x2665) + VS15);
+    expect(symbolFontToUnicode(ch(0xf021), 'Webdings', mono)).toBe(ch(0x1f577) + VS15);
+    expect(symbolFontToUnicode(ch(0xf0a9), 'Symbol', missing)).toBe(ch(0xf0a9));
+    expect(symbolFontToUnicode(ch(0xf021), 'Webdings', { ...mono, monochrome: () => false })).toBe(ch(0xf021));
+  });
+
+  it('splits at every mapped/unmapped boundary', () => {
+    expect(symbolTextToUnicodeSegments(ch(0xf061) + ch(0xf0f0) + ch(0xf062), 'Symbol', missing)).toEqual([
+      { text: ch(0x3b1), mapped: true }, { text: ch(0xf0f0), mapped: false }, { text: ch(0x3b2), mapped: true },
+    ]);
   });
 });
 
-describe('symbolTextToUnicodeSegments', () => {
-  it('returns the whole string unmapped for a non-symbol font', () => {
-    expect(symbolTextToUnicodeSegments('abc', 'Calibri')).toEqual([
-      { text: 'abc', mapped: false },
+describe('symbol text conversion for a face that draws the codes', () => {
+  it('keeps every code the selected face owns, per form', () => {
+    const encoding = owning([0x61, 0x62]);
+    expect(symbolTextToUnicodeSegments(ch(0xf061) + 'b' + ch(0xf063), 'Symbol', { encoding })).toEqual([
+      { text: ch(0xf061) + 'b', mapped: false }, { text: ch(0x3c7), mapped: true },
     ]);
-    expect(symbolTextToUnicodeSegments(ch(0xf0a7), null)).toEqual([
-      { text: ch(0xf0a7), mapped: false },
-    ]);
+    // A face that maps only the PUA form still converts the bare form.
+    const puaOnly: SymbolFaceEncoding = { kind: 'known', pua: symbolCodeSet([0x61]), bare: symbolCodeSet([]) };
+    expect(symbolFontToUnicode(ch(0xf061) + 'a', 'Symbol', { encoding: puaOnly })).toBe(ch(0xf061) + ch(0x3b1));
   });
 
-  it('maps every Wingdings PUA glyph and flags the run as mapped', () => {
-    // U+F0A7 (square) U+F0E0 (right arrow) → ▪ →
-    const segs = symbolTextToUnicodeSegments(ch(0xf0a7) + ch(0xf0e0), 'Wingdings');
-    expect(segs).toEqual([{ text: '▪→', mapped: true }]);
+  it('keeps the 0.89 subset when the face could not be judged', () => {
+    expect(symbolFontToUnicode(ch(0xf0b7) + ch(0xf061), 'Symbol', { encoding: SYMBOL_FACE_UNKNOWN }))
+      .toBe(ch(0x2022) + ch(0xf061));
+    expect(symbolFontToUnicode(ch(0xf0e0), 'Wingdings')).toBe(ch(0x2192));
+    expect(symbolFontToUnicode(ch(0xf0a7), 'Webdings')).toBe(ch(0xf0a7));
+  });
+});
+
+describe('symbolCmapEncoding', () => {
+  it('reads a symbol cmap exactly: PUA entries, and bare codes through the remap', () => {
+    const encoding = symbolCmapEncoding(symbolFixtureFontBytes({ cmap: 'symbol', first: 0x40, last: 0x7a }));
+    expect(encoding).toEqual(owning(Array.from({ length: 0x7a - 0x40 + 1 }, (_, i) => 0x40 + i)));
+    expect(symbolFontToUnicode(ch(0xf061) + ch(0xf07b), 'Symbol', { encoding: encoding! })).toBe(ch(0xf061) + '{');
   });
 
-  it('splits at mapped/unmapped boundaries so each run is single-font', () => {
-    // 0x41 'A' / 0x42 'B' have no Wingdings entry (passthrough); 0xF0A7 maps to ▪.
-    const segs = symbolTextToUnicodeSegments(ch(0x41) + ch(0xf0a7) + ch(0x42), 'Wingdings');
-    expect(segs).toEqual([
-      { text: ch(0x41), mapped: false },
-      { text: '▪', mapped: true },
-      { text: ch(0x42), mapped: false },
-    ]);
+  it('treats a Unicode cmap as drawing no symbol code', () => {
+    expect(symbolCmapEncoding(symbolFixtureFontBytes({ cmap: 'unicode', first: 0x20, last: 0x7e })))
+      .toEqual(SYMBOL_FACE_UNICODE);
+    expect(symbolCmapEncoding(new Uint8Array(8))).toBeNull();
   });
 
-  it('preserves astral targets by iterating code points', () => {
-    // Wingdings 0x24 → U+1F453 EYEGLASSES (astral). Must survive as one glyph.
-    const segs = symbolTextToUnicodeSegments(ch(0x24), 'Wingdings');
-    expect(segs).toEqual([{ text: '\u{1F453}', mapped: true }]);
+  it('leaves a face with both a symbol and a Unicode subtable to measurement', () => {
+    // Engines disagree on which subtable they read, so the bytes cannot decide.
+    expect(symbolCmapEncoding(symbolFixtureFontBytes({ cmap: 'both', first: 0x40, last: 0x7a }))).toBeNull();
+  });
+});
+
+describe('symbolEncodingOfFaces', () => {
+  const symbolFace = (unicodeRange: string, weight = 'normal', style = 'normal') => ({
+    weight, style, unicodeRange, symbolEncoding: owning([0x61, 0x62]),
   });
 
-  it('handles the empty string', () => {
-    expect(symbolTextToUnicodeSegments('', 'Wingdings')).toEqual([
-      { text: '', mapped: false },
-    ]);
+  it('owns a scalar only through the last matching face whose unicode-range covers it', () => {
+    const encoding = symbolEncodingOfFaces([symbolFace('U+F000-F0FF')], 400, 'normal')!;
+    // PUA-only range: the PUA form is drawn, the bare form falls back. A later
+    // Unicode face covering U+F062 lacks it, so the earlier face still draws it.
+    expect(symbolFontToUnicode(ch(0xf061) + 'a', 'Symbol', { encoding })).toBe(ch(0xf061) + ch(0x3b1));
+    const later = symbolEncodingOfFaces([
+      symbolFace('U+0-10FFFF'), { weight: 'normal', style: 'normal', unicodeRange: 'U+F062', symbolEncoding: SYMBOL_FACE_UNICODE },
+    ], 400, 'normal')!;
+    expect(symbolFontToUnicode(ch(0xf061) + ch(0xf062), 'Symbol', { encoding: later })).toBe(ch(0xf061) + ch(0xf062));
+  });
+
+  it('declines a tuple no face matches exactly, or a face without read bytes', () => {
+    expect(symbolEncodingOfFaces([symbolFace('U+0-10FFFF')], 700, 'normal')).toBeUndefined();
+    expect(symbolEncodingOfFaces([{ weight: 'normal', style: 'normal', unicodeRange: 'U+0-10FFFF' }], 400, 'normal'))
+      .toBeUndefined();
+  });
+});
+
+describe('measureSymbolFaceEncoding', () => {
+  // A context that draws the "Sym" face's codes 0x41..0x5A at width 2+code
+  // (both forms) and every other text at one width per character class.
+  const context = (owned: (code: number) => boolean) => ({
+    font: '10px sans-serif',
+    measureText(text: string) {
+      const code = text.codePointAt(0)!;
+      const symbolFace = this.font.includes('"Sym"');
+      const base = code >= 0xf000 ? code - 0xf000 : code;
+      if (symbolFace && owned(base)) return { width: 2 + base };
+      return { width: code >= 0xf000 ? 1 : text === 'i' ? 3 : 5 + (code % 7) };
+    },
+  });
+
+  it('owns exactly the codes whose bare and PUA forms draw identically in the face', () => {
+    const ctx = context((code) => code >= 0x41 && code <= 0x5a);
+    const letters = Array.from({ length: 26 }, (_, i) => 0x41 + i);
+    expect(measureSymbolFaceEncoding(ctx, '"Sym"')).toEqual({
+      kind: 'known', pua: symbolCodeSet([...letters, 0x7f, 0xad]), bare: symbolCodeSet(letters),
+    });
+    expect(measureSymbolFaceEncoding(ctx, '"Other"')).toEqual(SYMBOL_FACE_UNICODE);
+    expect(ctx.font).toBe('10px sans-serif');
+  });
+
+  it('is inconclusive without a context or with one that measures nothing', () => {
+    expect(measureSymbolFaceEncoding(null, '"Sym"')).toBe(SYMBOL_FACE_UNKNOWN);
+    expect(measureSymbolFaceEncoding({ font: '', measureText: () => ({ width: 0 }) }, '"Sym"')).toBe(SYMBOL_FACE_UNKNOWN);
+  });
+
+  it('prefers held bytes over measurement and caches per selection', () => {
+    let calls = 0;
+    const ctx = { font: '', measureText: (text: string) => { calls++; return { width: text.length + (text === 'i' ? 1 : 2) }; } };
+    const oracle = createSymbolFaceOracle(ctx);
+    const exact = owning([0x61]);
+    expect(oracle.encoding({ familyText: '"A"', weight: 400, style: 'normal', encoding: exact })).toBe(exact);
+    expect(calls).toBe(0);
+    oracle.encoding({ familyText: '"A"', weight: 400, style: 'normal' });
+    const measured = calls;
+    oracle.encoding({ familyText: '"A"', weight: 400, style: 'normal' });
+    expect(calls).toBe(measured);
   });
 });

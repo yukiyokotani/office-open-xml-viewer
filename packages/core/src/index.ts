@@ -221,8 +221,27 @@ export {
   symbolFontToUnicode,
   isSymbolFontFamily,
   symbolTextToUnicodeSegments,
+  symbolFontKey,
+  symbolCodeSet,
+  symbolCodeSetHas,
+  SYMBOL_FACE_UNICODE,
+  SYMBOL_FACE_UNKNOWN,
+  type SymbolFaceEncoding,
+  type SymbolFontKey,
+  type SymbolTextOptions,
   type SymbolTextSegment,
 } from './fonts/symbol-font';
+export {
+  createSymbolFaceOracle,
+  createSymbolMonochromeProbe,
+  measureSymbolFaceEncoding,
+  symbolCmapEncoding,
+  symbolEncodingOfFaces,
+  symbolFaceKey,
+  type SymbolFaceOracle,
+  type SymbolFaceSelection,
+  type SymbolProbeContext,
+} from './fonts/symbol-face';
 export { renderChart, collectChartFillRenderedSizes, assertChartFillRenderedSizeCount } from './chart/renderer';
 export { formatLocalizedExcelShortDate, localizedExcelShortDateTexts } from './chart/chart-number-format';
 export { autoResize, type AutoResizeOptions } from './autoResize';

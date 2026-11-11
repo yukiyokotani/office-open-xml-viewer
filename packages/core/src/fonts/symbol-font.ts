@@ -1,264 +1,261 @@
 /**
- * Symbol / Wingdings font-encoding → Unicode normalization.
+ * Symbol / Wingdings / Webdings font-encoding → Unicode normalization.
  *
- * The classic "Symbol" and "Wingdings" families do NOT use a Unicode cmap: they
- * ship a private, font-specific encoding where ordinary code points map to
- * pictographic glyphs. Crucially the two fonts use DIFFERENT encodings, so the
- * same code point is a different glyph in each (e.g. 0xB7 is BULLET "•" in
- * Symbol but a clock face in Wingdings; 0xA7 is BLACK CLUB SUIT "♣" in Symbol
- * but a small filled square "▪" in Wingdings). OOXML stores marker / run text as
- * the *font's own* code points — and Word commonly emits them in the Private Use
- * Area (U+F020–U+F0FF), so a Symbol bullet is serialized as U+F0B7 and a
- * Wingdings square as U+F0A7.
+ * "Symbol", "Wingdings", "Wingdings 2", "Wingdings 3" and "Webdings" are
+ * symbol-encoded fonts: each carries an OpenType symbol cmap (platform 3,
+ * encoding 0) whose codes 0x20..0xFF are the font's own glyphs, and the
+ * encodings disagree (0xB7 is BULLET in Symbol but a clock face in
+ * Wingdings). OOXML stores run and marker text as those codes, either
+ * F0-shifted into the Private Use Area (U+F020..U+F0FF, what Insert > Symbol
+ * writes) or bare (an ASCII "a" in a Symbol run is alpha).
+ * https://learn.microsoft.com/en-us/typography/opentype/spec/cmap
  *
- * Because the two encodings disagree on the same code points, a single shared
- * table cannot be correct for both fonts. We therefore keep TWO font-specific
- * tables ({@link SYMBOL_MAP}, {@link WINGDINGS_MAP}) and pick the right one from
- * the requested font family.
+ * ECMA-376 does not define these repertoires: §17.3.2.26 (`w:rFonts`),
+ * §17.3.3.30 (`w:sym`), §17.9.x (`w:lvlText`) and §21.1.2.3.10 (`a:sym`) name
+ * a font and a code; the glyph belongs to the font.
  *
- * ECMA-376 / ISO-29500 does NOT define these fonts' glyph repertoires:
- *   - §17.9.x  (numbering level text, `w:lvlText`) and §17.3.2.26 (`w:rPr`
- *     `w:rFonts`) for docx tell us WHICH font and WHICH code point, but the
- *     code-point→glyph mapping belongs to the font implementation, not the spec.
- *   - §21.1.2.3.10 (`a:sym`) for pptx is likewise just a font + char reference.
+ * Whether to convert is decided per SELECTED FACE (symbol-face.ts):
+ *   - a face that draws a code itself (a symbol-encoded face that maps it)
+ *     keeps the authored code, so an installed Windows/macOS Wingdings or
+ *     Windows Symbol keeps its own glyph, advance and colour;
+ *   - a code the selected face does not draw (the font is missing, or the face
+ *     is Unicode-encoded, as Apple's Symbol is) converts to the Unicode
+ *     character of the font's glyph, drawn in a Unicode fallback face;
+ *   - when the face could not be judged, the conversion is today's: only the
+ *     long-standing bullet/arrow subset ({@link LEGACY_LOOKUPS}).
+ * The PUA and bare forms are judged separately (a Unicode face never draws a
+ * bare code as the symbol glyph; a symbol cmap may map only one form).
  *
- * When such a marker is drawn in a generic fallback face (the Symbol/Wingdings
- * font is frequently unavailable, especially on non-Windows hosts), the PUA code
- * point has no glyph and renders as tofu (□). We normalize the well-known
- * Symbol/Wingdings code points — both their bare form (0xA7, 0xB7, …) and their
- * PUA-shifted form (0xF0A7, 0xF0B7, …) — to the equivalent Unicode characters
- * so the intended glyph (•, ▪, →, …) renders in any fallback font.
+ * A converted pictograph is written with U+FE0E VARIATION SELECTOR-15 (text
+ * presentation) and is converted only when the caller proves that this realm
+ * paints it monochrome (`monochrome`); otherwise the authored code is kept.
+ * Converted symbols must take the text colour, never a colour emoji face.
  *
- * This is a documented font-encoding → Unicode conversion, NOT a per-sample
- * heuristic: it is keyed solely on the requested font family ("symbol" /
- * "wingdings") and each font's published code-point repertoire.
- *
- * SOURCES (authoritative, cited per entry below):
- *   - Symbol:   Adobe "Symbol Encoding to Unicode", unicode.org/Public/MAPPINGS/
- *               VENDORS/ADOBE/symbol.txt (field 1 = Unicode, field 2 = Symbol
- *               code point). This is the Adobe Symbol PostScript encoding.
- *   - Wingdings: the Microsoft Wingdings cmap as standardized in the Unicode
- *               proposals L2/11-052 and L2/11-344 (the glyph repertoire that
- *               added the Wingdings pictographs to Unicode 7.0). The byte→Unicode
- *               targets below were cross-checked against the PostScript glyph
- *               names in the shipping Wingdings.ttf (e.g. 0x21 "pencil",
- *               0xA7 "square4", 0x24 "readingglasses").
- *
- * POLICY (carried over from PR #519): a code point is mapped ONLY when its target
- * is confirmed from the source above. Glyphs whose only faithful Unicode target
- * is an astral pictograph that renders as tofu in ordinary fallback fonts (e.g.
- * the Wingdings clock faces U+1F550…, the office/hand dingbats U+1F5xx) are left
- * as passthrough: emitting the bare PUA code point is no worse, and we never
- * substitute a *wrong* but available glyph. Better tofu than a wrong glyph.
+ * SOURCES (the tables record their provenance and every deviation):
+ *   - Symbol: Adobe "Symbol Encoding to Unicode" — symbol-encoding.ts.
+ *   - Wingdings, Wingdings 2, Wingdings 3, Webdings: WG2 N4384 = L2/12-368
+ *     section 7 — dingbat-encoding.ts.
  */
 
-/**
- * Adobe Symbol encoding → Unicode (subset).
- *
- * Values taken directly from Adobe's `symbol.txt` (Symbol code point → Unicode).
- * Only the entries that (a) appear as markers/inline symbols in practice and
- * (b) have a faithful BMP Unicode target are listed; pure math/Greek letters are
- * omitted (they already round-trip as their own Unicode characters when the
- * Symbol font is unavailable is irrelevant — Word stores those as the real Greek
- * letters, not Symbol code points).
- */
-export const SYMBOL_MAP: Record<number, string> = {
-  // symbol.txt: 0xA7 → U+2663 BLACK CLUB SUIT
-  0xa7: '♣',
-  // symbol.txt: 0xA8 → U+2666, 0xA9 → U+2665, 0xAA → U+2660 (card suits)
-  0xa8: '♦', 0xa9: '♥', 0xaa: '♠',
-  // symbol.txt arrows: 0xAB → U+2194, 0xAC → U+2190, 0xAD → U+2191,
-  // 0xAE → U+2192, 0xAF → U+2193
-  0xab: '↔', 0xac: '←', 0xad: '↑', 0xae: '→', 0xaf: '↓',
-  // symbol.txt: 0xB7 → U+2022 BULLET
-  0xb7: '•',
-  // symbol.txt: 0xB8 → U+00F7 DIVISION SIGN (restored from PR #519 removal)
-  0xb8: '÷',
-  // symbol.txt: 0xB9 → U+2260 NOT EQUAL TO (restored from PR #519 removal)
-  0xb9: '≠',
-  // symbol.txt: 0xD7 → U+22C5 DOT OPERATOR; 0xB4 → U+00D7 MULTIPLICATION SIGN
-  0xb4: '×',
-  // symbol.txt: 0xB1 → U+00B1 PLUS-MINUS SIGN; 0xB0 → U+00B0 DEGREE SIGN
-  0xb0: '°', 0xb1: '±',
-  // symbol.txt: 0xA3 → U+2264 LESS-THAN OR EQUAL TO; 0xB3 → U+2265 GREATER-THAN OR EQUAL TO
-  0xa3: '≤', 0xb3: '≥',
-};
+import {
+  ADOBE_SYMBOL_UNICODE,
+  SYMBOL_CORPORATE_USE_UNICODE,
+} from './symbol-encoding.js';
+import {
+  WEBDINGS_ENCODING,
+  WINGDINGS_2_ENCODING,
+  WINGDINGS_3_ENCODING,
+  WINGDINGS_ENCODING,
+} from './dingbat-encoding.js';
 
-/**
- * Microsoft Wingdings cmap → Unicode (subset).
- *
- * Each byte's glyph is identified from the shipping Wingdings.ttf PostScript
- * glyph names (e.g. 0xA7 "square4", 0x21 "pencil"); the Unicode 7.0 proposals
- * L2/11-052 / L2/11-344 catalogue those glyphs but at DEDICATED ASTRAL code
- * points (barb arrows U+1F868…, bold check/X U+1F5F6…) that tofu in ordinary
- * fonts. So the targets below are deliberate faithful BMP substitutions (→, ✓,
- * ▪, …), NOT those canonical astral code points. Entries whose only faithful
- * target is an astral pictograph (the office/hand/clock dingbats U+1F5xx /
- * U+1F55x) are OMITTED — passthrough, since the bare PUA point is no worse.
- */
-export const WINGDINGS_MAP: Record<number, string> = {
-  // 0x21 "pencil" → U+270F PENCIL; 0x22 "scissors" → U+2702 BLACK SCISSORS. Both
-  // are faithful BMP dingbats that render in any ordinary fallback font (unlike
-  // the Unicode-7.0 canonical unifications U+1F589 / U+2702, where the pencil is
-  // an astral PUA-adjacent glyph). The Dingbats ✏/✂ are the semantically exact
-  // glyphs, so this is a faithful substitution, not a guess.
-  // 0x23 is the SECOND Wingdings scissors variant ("scissorscutting"); its only
-  // distinct faithful target (U+2701/U+2703) is an obscure half-blade scissors
-  // that tofus in most fonts and is easily confused with 0x22, so it is left as
-  // passthrough rather than mapped to a near-duplicate ✂.
-  0x21: '✏', 0x22: '✂',
-  // 0x24 "readingglasses" → U+1F453 EYEGLASSES. Astral with no BMP equivalent;
-  // unlike the omitted clock/hand dingbats we DO map it because U+1F453 is the
-  // semantically exact glyph — it renders in an emoji-capable fallback and is
-  // never a *wrong* glyph (passthrough would always tofu the bare PUA point).
-  0x24: '\u{1F453}',
-  // 0x4A "smileface" → U+263A; 0x4B "neutralface" → U+1F610 (astral, exact —
-  // same rationale as 0x24); 0x4C "frownface" → U+2639.
-  0x4a: '☺', 0x4b: '\u{1F610}', 0x4c: '☹',
-  // 0x76 "xrhombus" → U+2756 BLACK DIAMOND MINUS WHITE X (restored from PR #519)
-  0x76: '❖',
-  // 0xA7 "square4" → U+25AA BLACK SMALL SQUARE (the Wingdings list bullet)
-  0xa7: '▪',
-  // 0x6C "circle6" → U+25CF BLACK CIRCLE; 0x6E "square6" → U+25A0 BLACK SQUARE.
-  // 0x74 "lozenge6" and 0x77 "rhombus4" are both SOLID/black diamond-family
-  // glyphs (a tall lozenge and a wider rhombus); BMP doesn't distinguish the
-  // proportion, so both approximate to U+25C6 BLACK DIAMOND. (0x77 was wrongly
-  // U+25C7 WHITE DIAMOND — a fill error — before this fix.)
-  0x6c: '●', 0x6e: '■', 0x74: '◆', 0x77: '◆',
-  // 0xFB "xmarkbld" → U+2717 BALLOT X; 0xFC "checkbld" → U+2713 CHECK MARK;
-  // 0xFD "boxxmarkbld" → U+2612 BALLOT BOX WITH X;
-  // 0xFE "boxcheckbld" → U+2611 BALLOT BOX WITH CHECK (restored from PR #519)
-  0xfb: '✗', 0xfc: '✓', 0xfd: '☒', 0xfe: '☑',
-  // Wingdings barb2 arrow block — 0xDF "barb2left" … 0xE6 "barb2se". Mapped to
-  // Unicode arrows so they render in any font when Wingdings is unavailable.
-  0xdf: '←', 0xe0: '→', 0xe1: '↑', 0xe2: '↓',
-  0xe3: '↖', 0xe4: '↗', 0xe5: '↙', 0xe6: '↘',
-};
+/** The symbol-encoded families this module has tables for (exact, trimmed,
+ * case-insensitive names). */
+export type SymbolFontKey = 'symbol' | 'wingdings' | 'wingdings 2' | 'wingdings 3' | 'webdings';
 
-/** Add the PUA-shifted (0xF000 + code) variant for every entry in `base`. */
-function withPua(base: Record<number, string>): Record<number, string> {
+const SYMBOL_FONT_KEYS: ReadonlySet<string> = new Set<SymbolFontKey>([
+  'symbol', 'wingdings', 'wingdings 2', 'wingdings 3', 'webdings',
+]);
+
+/** The table key of `fontFamily`, or undefined. An exact name match: a Latin
+ * face such as "SymbolMT" or "Wingdings Pro" is not one of these encodings. */
+export function symbolFontKey(fontFamily: string | null | undefined): SymbolFontKey | undefined {
+  const key = fontFamily?.trim().toLowerCase();
+  return key && SYMBOL_FONT_KEYS.has(key) ? key as SymbolFontKey : undefined;
+}
+
+/** True when `fontFamily` is one of the symbol-encoded families above. */
+export function isSymbolFontFamily(fontFamily: string | null | undefined): boolean {
+  return symbolFontKey(fontFamily) !== undefined;
+}
+
+/** Symbol encoding → Unicode: every assigned code 0x20..0xFE with a standard
+ * Unicode target (symbol-encoding.ts). */
+export const SYMBOL_MAP: Readonly<Record<number, string>> = Object.freeze(Object.fromEntries(
+  Object.entries({ ...ADOBE_SYMBOL_UNICODE, ...SYMBOL_CORPORATE_USE_UNICODE })
+    .map(([code, unicode]) => [Number(code), String.fromCodePoint(unicode)]),
+));
+
+/** Decode a dingbat-encoding.ts table (codes 0x20..0xFF as base-36 code
+ * point deltas, an empty token for no target) into a code → character table. */
+function dingbatTable(encoding: string): Record<number, string> {
   const out: Record<number, string> = {};
-  for (const key of Object.keys(base)) {
-    const code = Number(key);
-    out[code] = base[code];
-    out[0xf000 + code] = base[code];
+  let code = 0x20;
+  let cp = 0;
+  for (const token of encoding.split(',')) {
+    if (token) {
+      cp += Number.parseInt(token, 36);
+      out[code] = String.fromCodePoint(cp);
+    }
+    code++;
   }
   return out;
 }
 
-const SYMBOL_LOOKUP = withPua(SYMBOL_MAP);
-const WINGDINGS_LOOKUP = withPua(WINGDINGS_MAP);
+/** Microsoft Wingdings → Unicode (221 of 224 codes; dingbat-encoding.ts). */
+export const WINGDINGS_MAP: Readonly<Record<number, string>> = Object.freeze(dingbatTable(WINGDINGS_ENCODING));
+
+const FULL_LOOKUPS: ReadonlyMap<SymbolFontKey, Readonly<Record<number, string>>> = new Map([
+  ['symbol', SYMBOL_MAP],
+  ['wingdings', WINGDINGS_MAP],
+  ['wingdings 2', dingbatTable(WINGDINGS_2_ENCODING)],
+  ['wingdings 3', dingbatTable(WINGDINGS_3_ENCODING)],
+  ['webdings', dingbatTable(WEBDINGS_ENCODING)],
+]);
 
 /**
- * Normalize a single Symbol/Wingdings code point to its Unicode equivalent.
- *
- * The lookup table is chosen by `fontFamily` via a TRIMMED EXACT match (case-
- * insensitive): exactly "symbol" selects the Adobe Symbol encoding
- * ({@link SYMBOL_MAP}); exactly "wingdings" selects the Wingdings 1 cmap
- * ({@link WINGDINGS_MAP}). Both the bare code point (0xA7, 0xB7, …) and its
- * PUA-shifted form (0xF0A7, 0xF0B7, …) resolve.
- *
- * "Wingdings 2", "Wingdings 3" and "Webdings" use DIFFERENT private encodings —
- * the same code point is a different glyph than in Wingdings 1 — so they are
- * deliberately NOT matched and pass through unchanged (we have no table for
- * them). Routing them through the Wingdings 1 table would emit a *wrong* glyph;
- * passthrough lets the real font draw the intended glyph when installed, and a
- * bare PUA point is no worse than a wrong substitution. Add a dedicated table if
- * those repertoires are ever needed.
- *
- * Returns `char` unchanged when `fontFamily` is null/undefined, is not one of the
- * two mapped families, or has no mapping in the selected table (passthrough —
- * better the bare code point than a wrong glyph).
- *
- * @param char       the marker/run character as stored in the OOXML (often a
- *                   PUA code point such as U+F0B7)
- * @param fontFamily the requested font family (ascii / hAnsi axis)
+ * The conversion of 0.89, kept for faces that could not be judged (no
+ * measuring Canvas): the bullets, arrows and operators of the Symbol table,
+ * and Wingdings bullets with their BMP stand-ins. Wingdings 2/3 and Webdings
+ * had none.
  */
-export function symbolFontToUnicode(
-  char: string,
-  fontFamily: string | null | undefined,
-): string {
-  if (!fontFamily) return char;
-  const lower = fontFamily.trim().toLowerCase();
-  const table =
-    lower === 'wingdings'
-      ? WINGDINGS_LOOKUP
-      : lower === 'symbol'
-        ? SYMBOL_LOOKUP
-        : null;
-  if (!table) return char;
-  const code = char.charCodeAt(0);
-  return table[code] ?? char;
+const LEGACY_LOOKUPS: ReadonlyMap<SymbolFontKey, Readonly<Record<number, string>>> = new Map<SymbolFontKey, Readonly<Record<number, string>>>([
+  ['symbol', {
+    0xa3: '≤', 0xa7: '♣', 0xa8: '♦', 0xa9: '♥', 0xaa: '♠', 0xab: '↔', 0xac: '←',
+    0xad: '↑', 0xae: '→', 0xaf: '↓', 0xb0: '°', 0xb1: '±', 0xb3: '≥', 0xb4: '×',
+    0xb7: '•', 0xb8: '÷', 0xb9: '≠',
+  }],
+  ['wingdings', {
+    0x21: '✏', 0x22: '✂', 0x24: '\u{1F453}', 0x4a: '☺', 0x4b: '\u{1F610}', 0x4c: '☹',
+    0x6c: '●', 0x6e: '■', 0x74: '◆', 0x76: '❖', 0x77: '◆', 0xa7: '▪',
+    0xdf: '←', 0xe0: '→', 0xe1: '↑', 0xe2: '↓', 0xe3: '↖', 0xe4: '↗', 0xe5: '↙', 0xe6: '↘',
+    0xfb: '✗', 0xfc: '✓', 0xfd: '☒', 0xfe: '☑',
+  }],
+]);
+
+/**
+ * What one selected face draws of its symbol encoding. Plain data (it may
+ * cross a worker boundary or key a cache).
+ *   - `known`: `pua` / `bare` are 256-bit sets (64 hex digits, code 0x00 in
+ *     the first byte's high bit) of the codes the face itself draws as
+ *     U+F000+code / as the bare code. Both empty: the face is missing or is
+ *     not symbol-encoded.
+ *   - `unknown`: the face could not be judged; today's subset converts.
+ */
+export type SymbolFaceEncoding =
+  | Readonly<{ kind: 'known'; pua: string; bare: string }>
+  | Readonly<{ kind: 'unknown' }>;
+
+export const SYMBOL_FACE_UNKNOWN: SymbolFaceEncoding = Object.freeze({ kind: 'unknown' });
+const EMPTY_CODES = '0'.repeat(64);
+/** A face that draws no symbol code (missing, or Unicode-encoded). */
+export const SYMBOL_FACE_UNICODE: SymbolFaceEncoding = Object.freeze({ kind: 'known', pua: EMPTY_CODES, bare: EMPTY_CODES });
+
+/** Encode a set of codes 0x00..0xFF as a {@link SymbolFaceEncoding} bit set. */
+export function symbolCodeSet(codes: Iterable<number>): string {
+  const bytes = new Uint8Array(32);
+  for (const code of codes) {
+    if (Number.isInteger(code) && code >= 0 && code <= 0xff) bytes[code >> 3]! |= 0x80 >> (code & 7);
+  }
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
 }
 
-/**
- * True when `fontFamily` is one of the font-specific (non-Unicode-cmap)
- * encodings that {@link symbolFontToUnicode} knows how to normalize — currently
- * exactly "Symbol" and any "Wingdings" family (§17.3.2.26 / §21.1.2.3.10).
- *
- * The shared "is this a symbol font?" gate, used by both docx and pptx so they
- * don't hand-roll divergent regexes. It deliberately does NOT match "Webdings"
- * (core has no Webdings table yet — a Webdings PUA point would pass the gate
- * only to return unchanged) nor a Latin face like "SymbolMT" (the "symbol"
- * check is exact, not a substring), so a caller wanting either must add it
- * explicitly and accept passthrough.
- */
-export function isSymbolFontFamily(
-  fontFamily: string | null | undefined,
-): boolean {
-  if (!fontFamily) return false;
-  const lower = fontFamily.toLowerCase();
-  return lower === 'symbol' || lower.includes('wingdings');
+/** Whether a {@link symbolCodeSet} contains `code` (false for no set). */
+export function symbolCodeSetHas(set: string | undefined, code: number): boolean {
+  if (!set) return false;
+  const byte = Number.parseInt(set.slice((code >> 3) * 2, (code >> 3) * 2 + 2), 16);
+  return Number.isFinite(byte) && (byte & (0x80 >> (code & 7))) !== 0;
+}
+
+/** Targets with the Unicode Emoji property (UTS #51; ASCII keycap bases
+ * excluded, which no table converts to) may be drawn from a colour emoji face
+ * even with VS15 when no text face has them (CSS Fonts 4 §5.4 leaves the face
+ * to the engine), so they are written with VS15 and converted only when
+ * proven monochrome. Other characters, Extended_Pictographic reservations
+ * included, have no emoji presentation. */
+const EMOJI_CAPABLE = /(?![#*0-9])\p{Emoji}/u;
+const EMOJI_PRESENTATION = /\p{Emoji_Presentation}/u;
+const TEXT_PRESENTATION = String.fromCharCode(0xfe0e);
+
+export interface SymbolTextOptions {
+  /** The selected face's encoding (default: unknown, today's subset). */
+  readonly encoding?: SymbolFaceEncoding;
+  /** Whether this realm paints `text` (an emoji-capable character followed
+   * by VS15) in a monochrome face in the fallback route. Absent (no probe):
+   * only the 0.89 subset's text-default symbols convert. */
+  readonly monochrome?: (text: string) => boolean | undefined;
 }
 
 /** A maximal run of characters sharing a single rendering disposition. */
 export interface SymbolTextSegment {
-  /** The (possibly normalized) text for this run. */
-  text: string;
+  /** The (possibly converted) text for this run. */
+  readonly text: string;
   /**
-   * True when at least one character in `text` was mapped from the symbol
-   * font's private encoding to a Unicode equivalent. Such a segment must be
-   * drawn in a generic fallback face (the Symbol/Wingdings font, if present,
-   * would re-interpret the Unicode code point as the WRONG glyph); an unmapped
-   * segment keeps the requested symbol font so an installed Symbol/Wingdings
-   * still draws its native glyph.
+   * True when the text was converted to Unicode. Such a segment must be drawn
+   * in a Unicode fallback face, never the symbol family: a symbol cmap would
+   * re-read a converted character such as U+00A9 as its own code 0xA9 (a
+   * heart in Symbol). An unconverted segment keeps the symbol family.
    */
-  mapped: boolean;
+  readonly mapped: boolean;
+}
+
+function convertCodePoint(
+  ch: string,
+  key: SymbolFontKey,
+  options: SymbolTextOptions,
+): string | undefined {
+  const cp = ch.codePointAt(0)!;
+  const pua = cp >= 0xf020 && cp <= 0xf0ff;
+  const code = pua ? cp - 0xf000 : cp;
+  if (!pua && (cp < 0x20 || cp > 0xff)) return undefined;
+  const encoding = options.encoding ?? SYMBOL_FACE_UNKNOWN;
+  let target: string | undefined;
+  if (encoding.kind === 'unknown') {
+    target = LEGACY_LOOKUPS.get(key)?.[code];
+  } else {
+    if (symbolCodeSetHas(pua ? encoding.pua : encoding.bare, code)) return undefined;
+    target = FULL_LOOKUPS.get(key)?.[code];
+  }
+  if (target === undefined || target === ch) return undefined;
+  if (EMOJI_CAPABLE.test(target)) {
+    const text = target + TEXT_PRESENTATION;
+    const proof = options.monochrome?.(text);
+    if (proof !== undefined) return proof ? text : undefined;
+    // Inconclusive (no readable canvas in this realm): the 0.89 subset keeps
+    // its text-default symbols (▪, ✓, ☺), now with VS15; a character whose
+    // default presentation is emoji is kept as authored.
+    return encoding.kind === 'unknown' && !EMOJI_PRESENTATION.test(target) ? text : undefined;
+  }
+  return target;
 }
 
 /**
- * String-level companion to {@link symbolFontToUnicode}: normalize every
- * character of `text` through the font's private encoding and split the result
- * into maximal same-disposition runs so the caller can switch the draw font at
- * each mapped/unmapped boundary.
- *
- * When `fontFamily` is not a symbol font (per {@link isSymbolFontFamily}), the
- * whole string is returned as a single `{ text, mapped: false }` segment
- * unchanged — the caller then needs no special handling. Iterates by code point
- * so astral targets (e.g. Wingdings 0x24 → U+1F453) survive intact.
+ * Convert every code point of `text` that the selected face does not draw
+ * (see the module notes) and split the result into maximal same-disposition
+ * runs, so the caller can switch the draw font at each boundary. A family
+ * without a table yields one unmapped segment.
  */
 export function symbolTextToUnicodeSegments(
   text: string,
   fontFamily: string | null | undefined,
+  options: SymbolTextOptions = {},
 ): SymbolTextSegment[] {
-  if (!isSymbolFontFamily(fontFamily) || text.length === 0) {
-    return [{ text, mapped: false }];
-  }
+  const key = symbolFontKey(fontFamily);
+  if (!key || text.length === 0) return [{ text, mapped: false }];
   const out: SymbolTextSegment[] = [];
   let buf = '';
   let bufMapped: boolean | null = null;
   for (const ch of text) {
-    const normalized = symbolFontToUnicode(ch, fontFamily);
-    const mapped = normalized !== ch;
+    const converted = convertCodePoint(ch, key, options);
+    const mapped = converted !== undefined;
+    const piece = converted ?? ch;
     if (bufMapped === null || mapped === bufMapped) {
       bufMapped = mapped;
-      buf += normalized;
+      buf += piece;
     } else {
       out.push({ text: buf, mapped: bufMapped });
       bufMapped = mapped;
-      buf = normalized;
+      buf = piece;
     }
   }
   if (buf.length > 0) out.push({ text: buf, mapped: bufMapped ?? false });
   return out;
+}
+
+/** {@link symbolTextToUnicodeSegments}, joined. */
+export function symbolFontToUnicode(
+  char: string,
+  fontFamily: string | null | undefined,
+  options: SymbolTextOptions = {},
+): string {
+  return symbolTextToUnicodeSegments(char, fontFamily, options).map((part) => part.text).join('');
 }

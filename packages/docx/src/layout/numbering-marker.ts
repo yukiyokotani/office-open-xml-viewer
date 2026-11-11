@@ -1,4 +1,4 @@
-import { symbolFontToUnicode } from '@silurus/ooxml-core';
+import { isSymbolFontFamily, symbolTextToUnicodeSegments } from '@silurus/ooxml-core';
 import type { NumberingInfo, TabStop } from '../types.js';
 import { wordNumberingSpaceSuffixUsesArial, wordNumberingSuffixAcceptsCoincidentListTab } from './line-compatibility.js';
 import { nextTabStop, type TextLayoutService, type TextShapeResult } from './text.js';
@@ -154,6 +154,77 @@ export function shapeNumberingMarkerText(
   return { shape, fontSizePx: input.fontSizePt * scale, lineBox };
 }
 
+/** Join marker pieces shaped with different slots (a symbol marker whose
+ * selected face draws some codes, while others are converted) into one
+ * marker shape, in logical order: offsets, clusters and ink move by the
+ * preceding pieces; the line box takes the largest sides. */
+function joinMarkerLayouts(
+  parts: readonly Readonly<{ text: string; layout: NumberingMarkerTextLayout }>[],
+): NumberingMarkerTextLayout {
+  const spans: TextShapeResult['spans'][number][] = [];
+  const clusters: NonNullable<TextShapeResult['clusters']>[number][] = [];
+  const boundaries = new Set<number>([0]);
+  const diagnostics: TextShapeResult['diagnostics'][number][] = [];
+  let offset = 0;
+  let advancePt = 0;
+  let withClusters = true;
+  let ink: { xMinPt: number; xMaxPt: number; ascentPt: number; descentPt: number } | undefined;
+  let withInk = true;
+  for (const { text, layout: { shape } } of parts) {
+    for (const span of shape.spans) {
+      spans.push({
+        ...span,
+        start: span.start + offset,
+        end: span.end + offset,
+        ...(span.semanticSlotSpans ? {
+          semanticSlotSpans: span.semanticSlotSpans.map((slot) => ({ ...slot, start: slot.start + offset, end: slot.end + offset })),
+        } : {}),
+      });
+    }
+    if (shape.clusters) {
+      for (const cluster of shape.clusters) {
+        clusters.push({
+          range: { start: cluster.range.start + offset, end: cluster.range.end + offset },
+          offsetPt: cluster.offsetPt + advancePt,
+          advancePt: cluster.advancePt,
+        });
+      }
+    } else withClusters = false;
+    for (const boundary of shape.graphemeBoundaries) boundaries.add(boundary + offset);
+    diagnostics.push(...shape.diagnostics);
+    if (shape.inkBounds && withInk) {
+      const moved = { ...shape.inkBounds, xMinPt: shape.inkBounds.xMinPt + advancePt, xMaxPt: shape.inkBounds.xMaxPt + advancePt };
+      ink = ink ? {
+        xMinPt: Math.min(ink.xMinPt, moved.xMinPt), xMaxPt: Math.max(ink.xMaxPt, moved.xMaxPt),
+        ascentPt: Math.max(ink.ascentPt, moved.ascentPt), descentPt: Math.max(ink.descentPt, moved.descentPt),
+      } : moved;
+    } else withInk = false;
+    offset += text.length;
+    advancePt += shape.advancePt;
+  }
+  boundaries.add(offset);
+  const shapes = parts.map((part) => part.layout);
+  const shape: TextShapeResult = {
+    spans,
+    advancePt,
+    ascentPt: Math.max(...shapes.map((layout) => layout.shape.ascentPt)),
+    descentPt: Math.max(...shapes.map((layout) => layout.shape.descentPt)),
+    graphemeBoundaries: [...boundaries].sort((a, b) => a - b),
+    ...(withClusters ? { clusters } : {}),
+    ...(withInk && ink ? { inkBounds: ink } : {}),
+    diagnostics,
+  };
+  return {
+    shape,
+    fontSizePx: shapes[0]!.fontSizePx,
+    lineBox: {
+      ascentPt: Math.max(...shapes.map((layout) => layout.lineBox.ascentPt)),
+      descentPt: Math.max(...shapes.map((layout) => layout.lineBox.descentPt)),
+      intendedSinglePt: Math.max(...shapes.map((layout) => layout.lineBox.intendedSinglePt)),
+    },
+  };
+}
+
 /** Resolve the tab synthesized by w:suff="tab". ST_TabJc `num` identifies the
  * list tab between the marker and paragraph contents. The coincident-stop branch
  * is governed by WORD_NUMBERING_SUFFIX_COINCIDENT_LIST_TAB; ordinary tab
@@ -192,18 +263,52 @@ export function resolveNumberingMarkerGeometry(
   service: TextLayoutService,
   clusterGeometry = true,
 ): NumberingMarkerGeometry {
+  // A symbol-font marker (§17.9.x w:lvlText in Symbol/Wingdings...) is judged
+  // against the face the text service selects for it, exactly as run text
+  // (core symbol-font.ts). Converted characters are Unicode text: shaping
+  // them with the marker's symbol family would let its symbol cmap re-read
+  // e.g. U+00A9 as its own code 0xA9 (a heart in Symbol), so a converted
+  // marker is shaped with every authored slot cleared (a Unicode-capable
+  // generic route), like a converted run segment; the codes the face keeps
+  // are shaped in the marker's slots, and the pieces are joined in order.
+  const markerFamily = numbering.fontFamily ?? markerInput.fonts.ascii ?? null;
+  const slots = [markerInput.fonts, markerInput.themeFonts].flatMap((fonts) => fonts
+    ? [fonts.ascii, fonts.highAnsi, fonts.eastAsia, fonts.complexScript] : []);
+  // Slots carry the effective level rPr; a model whose slots do not name the
+  // marker's symbol family (older/public models) judges that family alone.
+  const slotted = slots.some(isSymbolFontFamily);
+  const symbolRequest = {
+    fonts: slotted ? markerInput.fonts
+      : { ascii: markerFamily, highAnsi: markerFamily, eastAsia: markerFamily, complexScript: markerFamily },
+    themeFonts: slotted ? markerInput.themeFonts : undefined,
+    themeFontPresence: slotted ? markerInput.themeFontPresence : undefined,
+    weight: markerInput.weight, style: markerInput.style, complexScript: markerInput.complexScript,
+    fontHint: markerInput.fontHint, eastAsiaLanguage: markerInput.eastAsiaLanguage, text: numbering.text,
+  };
+  const markerSegments = numbering.picBulletImagePath
+    || ![markerFamily, ...slots].some(isSymbolFontFamily)
+    ? null
+    : service.symbolText?.(symbolRequest) ?? symbolTextToUnicodeSegments(numbering.text, markerFamily);
   const markerText = numbering.picBulletImagePath
     ? ''
-    : symbolFontToUnicode(numbering.text, numbering.fontFamily ?? null);
-  const markerLayout = markerText
-    ? shapeNumberingMarkerText(
-        markerInput,
-        markerText,
-        1,
-        service,
-        clusterGeometry,
-      ) ?? null
-    : null;
+    : markerSegments ? markerSegments.map((part) => part.text).join('') : numbering.text;
+  const convertedInput: NumberingMarkerShapeInput = {
+    ...markerInput,
+    fonts: { ascii: null, highAnsi: null, eastAsia: null, complexScript: null },
+    themeFonts: undefined,
+    themeFontPresence: undefined,
+  };
+  const markerParts = markerSegments ?? [{ text: markerText, mapped: false }];
+  const partLayouts = markerText
+    ? markerParts.map((part) => shapeNumberingMarkerText(
+        part.mapped ? convertedInput : markerInput, part.text, 1, service, clusterGeometry,
+      ))
+    : [];
+  const markerLayout = partLayouts.length === 0 || partLayouts.some((layout) => !layout)
+    ? null
+    : partLayouts.length === 1
+      ? partLayouts[0]!
+      : joinMarkerLayouts(markerParts.map((part, index) => ({ text: part.text, layout: partLayouts[index]! })));
   const markerShape = markerLayout?.shape ?? null;
   const markerWidthPt = numbering.picBulletImagePath
     ? numbering.picBulletWidthPt ?? markerInput.fontSizePt

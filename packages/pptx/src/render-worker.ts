@@ -47,7 +47,8 @@ import type {
   RenderWorkerResponse,
 } from './worker-protocol';
 import { findPptxElementBoundsByIds, hitTestPptxSlideContext } from './element-selection';
-import { loadEmbeddedFonts, uncoveredOfficeFontRequests } from './embedded-fonts';
+import { loadEmbeddedFonts, pptxSymbolFaceEncodings, uncoveredOfficeFontRequests } from './embedded-fonts';
+import type { SymbolFaceEncoding } from '@silurus/ooxml-core';
 import { ProgressivePreflightGate } from './progressive-preflight-gate';
 import type { WorkerPresentationSourceOwner, WorkerCursorArchive } from './internal/worker-presentation-source';
 
@@ -105,6 +106,7 @@ function releaseOfficeFonts(): void {
 }
 let embeddedFontFaces: FontFace[] = [];
 let embeddedFontAliases: ReadonlyMap<string, string> = new Map();
+let embeddedSymbolEncodings: ReadonlyMap<string, SymbolFaceEncoding> = new Map();
 let embeddedFontAuthoredFamilies: ReadonlyMap<string, string> = new Map();
 let embeddedFontTuples: ReadonlySet<string> = new Set();
 let resourceUsage: OoxmlResourceUsageSnapshot | undefined;
@@ -210,6 +212,7 @@ async function openPresentation(request: Extract<RenderWorkerRequest, { kind: 'p
   dropSvgImageCache(getImage);
   fontsLoaded = Promise.resolve();
   embeddedFontAliases = new Map();
+  embeddedSymbolEncodings = new Map();
   embeddedFontAuthoredFamilies = new Map();
   embeddedFontTuples = new Set();
   resourceUsage = undefined;
@@ -229,6 +232,7 @@ async function openPresentation(request: Extract<RenderWorkerRequest, { kind: 'p
   embeddedFontAliases = embedded.aliases;
   embeddedFontAuthoredFamilies = embedded.authoredFamilies;
   embeddedFontTuples = embedded.tuples;
+  embeddedSymbolEncodings = embedded.symbolEncodings;
   cjkFallback = request.cjkFallback;
   // Font-source subset loading is library policy keyed to the slide model
   // alone, as in main mode. Registering an optional renderer does not widen it:
@@ -418,6 +422,7 @@ self.onmessage = async (event: MessageEvent<RenderWorkerRequest | WorkerSvgDecod
           officeFontRoutes,
           officeInstalledFamilies,
           fontSubstitutions: fontSources?.loaded.substitutions,
+          symbolFaceEncodings: pptxSymbolFaceEncodings(embeddedSymbolEncodings, fontSources?.loaded),
           fetchMedia: getMedia,
           fetchImage: getImage,
           svgDecoder: svgDecodeClient.decode,
@@ -461,6 +466,7 @@ self.onmessage = async (event: MessageEvent<RenderWorkerRequest | WorkerSvgDecod
           officeFontRoutes,
           officeInstalledFamilies,
           fontSubstitutions: fontSources?.loaded.substitutions,
+          symbolFaceEncodings: pptxSymbolFaceEncodings(embeddedSymbolEncodings, fontSources?.loaded),
           fetchMedia: getMedia,
           fetchImage: getImage,
           svgDecoder: svgDecodeClient.decode,

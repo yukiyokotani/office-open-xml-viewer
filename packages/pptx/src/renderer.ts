@@ -157,8 +157,13 @@ import {
   OoxmlError,
   isTiffDecodeError,
   highlightBox,
-  symbolFontToUnicode,
+  symbolTextToUnicodeSegments,
   isSymbolFontFamily,
+  createSymbolFaceOracle,
+  symbolFaceKey,
+  type SymbolFaceEncoding,
+  type SymbolFaceOracle,
+  type SymbolTextSegment,
   drawUnderline,
   DECORATION_LINE_WIDTH_EM,
   STRIKE_RISE_EM,
@@ -246,6 +251,12 @@ export interface RenderContext {
   /** Isolated FontFace alias → lower-cased authored family for fallback policy. */
   embeddedFontAuthoredFamilies?: ReadonlyMap<string, string>;
   embeddedFontTuples?: ReadonlySet<string>;
+  /** Symbol-font faces of this render (core symbol-face.ts), judged in the
+   *  painting context. Absent: the 0.89 conversion subset. */
+  symbolFaces?: SymbolFaceOracle;
+  /** core symbolFaceKey → the symbol codes the held bytes of
+   *  that face draw (embedded and served faces whose cmap was read). */
+  symbolFaceEncodings?: ReadonlyMap<string, SymbolFaceEncoding>;
   /** Theme hyperlink colour as a 6-char hex (no leading #), or null. */
   themeHlinkColor?: string | null;
   /**
@@ -1473,6 +1484,42 @@ function selectOfficeFace(normalized: string, bold: boolean, italic: boolean, rc
   return { authoredFamily, embedded: embeddedAuthored !== undefined, officeRoute };
 }
 
+/**
+ * Symbol-encoded text (core symbol-font.ts; ECMA-376 §21.1.2.3.10 `a:sym`,
+ * §21.1.2.3.7 `a:latin`, §21.1.2.4.3 `a:buFont`) as the face this render
+ * selects for `family` (normalized) draws it: the face that leads its stack
+ * (the presentation's embedded face, an exact Office route, else the authored
+ * family). Its held cmap answers when the bytes were read; otherwise the
+ * face is measured in this render's painting context. `bare`: whether bare
+ * codes 0x20..0xFF are symbol codes here (a Latin symbol face); they are
+ * left alone when the face could not be judged, as in 0.89.
+ */
+function symbolFaceSegments(
+  text: string,
+  family: string,
+  bold: boolean,
+  italic: boolean,
+  rc: RenderContext,
+  bare = false,
+): SymbolTextSegment[] {
+  const { authoredFamily, officeRoute } = selectOfficeFace(family, bold, italic, rc);
+  if (!rc.symbolFaces) return bare ? [{ text, mapped: false }] : symbolTextToUnicodeSegments(text, authoredFamily);
+  const primary = officeRoute?.family ?? family;
+  const selection = {
+    familyText: quoteCssFontFamily(primary),
+    weight: bold ? 700 : 400,
+    style: italic ? 'italic' as const : 'normal' as const,
+    encoding: rc.symbolFaceEncodings?.get(symbolFaceKey(primary, bold ? 700 : 400, italic ? 'italic' : 'normal')),
+  };
+  if (bare && rc.symbolFaces.encoding(selection).kind === 'unknown') return [{ text, mapped: false }];
+  return rc.symbolFaces.segments(text, authoredFamily, selection);
+}
+
+/** The authored family behind a normalized one (an embedded alias). */
+function authoredFamilyOf(family: string, rc: RenderContext): string {
+  return rc.embeddedFontAuthoredFamilies?.get(family) ?? family;
+}
+
 /** Whether an installed face of the family paints the authored name (see
  * AcquiredOfficeRoutes.installed): CSS font matching then paints that
  * installed family, synthesizing weight/style. */
@@ -1957,14 +2004,23 @@ export function paragraphInputRuns(
         );
       let face = eaGlyph ? familyEa : csFace;
       let share = lineMetricFor(face, bold, italic, rc);
-      if (/[\uf020-\uf0ff]/u.test(ch) && (familySym != null || isSymbolFontFamily(family))) {
-        const symbolFamily = familySym ?? family;
-        const mapped = symbolFontToUnicode(ch, symbolFamily);
-        glyph = mapped + cluster.slice(ch.length);
-        font = buildFont(bold, italic, drawSizePx,
-          mapped === ch ? symbolFamily : 'sans-serif', rc, glyph);
-        share = undefined;
-        face = mapped === ch ? symbolFamily : 'sans-serif';
+      // ECMA-376 §21.1.2.3.10: a:sym draws the F0-shifted symbol codes; a
+      // symbol Latin face (§21.1.2.3.7) draws them and its bare codes. Each
+      // is judged against the face this render selects (symbolFaceSegments).
+      const puaCode = cp >= 0xf020 && cp <= 0xf0ff;
+      const latinSymbol = !eaGlyph && !csGlyph && isSymbolFontFamily(authoredFamilyOf(family, rc));
+      const symbolFamily = puaCode ? familySym ?? (latinSymbol ? family : null)
+        : latinSymbol && cp > 0x20 && cp <= 0xff ? family : null;
+      if (symbolFamily) {
+        const segments = symbolFaceSegments(ch, symbolFamily, bold, italic, rc, !puaCode);
+        const converted = segments.some((part) => part.mapped);
+        if (converted || puaCode) {
+          glyph = segments.map((part) => part.text).join('') + cluster.slice(ch.length);
+          font = buildFont(bold, italic, drawSizePx,
+            converted ? 'sans-serif' : symbolFamily, rc, glyph);
+          share = undefined;
+          face = converted ? 'sans-serif' : symbolFamily;
+        }
       }
       // A Latin-slot curly quote next to an ideograph is a slot seam even when
       // both slots resolve to this font, in the measured en-US/ja-JP runs only
@@ -4701,7 +4757,9 @@ export function resolveBulletLabel(
   if (para.bullet.type === 'char') {
     // Reset counters when switching to char bullets.
     autoNumCounters.clear();
-    return hasContent ? symbolFontToUnicode(para.bullet.char, para.bullet.fontFamily ?? null) : '';
+    // The authored code; paragraphBullet converts it against the selected
+    // face (symbolFaceSegments), which needs the render context.
+    return hasContent ? para.bullet.char : '';
   }
   if (para.bullet.type === 'autoNum') {
     if (!hasContent) return '';
@@ -4790,9 +4848,15 @@ function paragraphBullet(body: TextBody, para: Paragraph, paraDefaultColor: stri
       : b.sizePct != null
         ? bulletBaseSizePx * (b.sizePct / 100)
         : bulletBaseSizePx;
-    // If the char was mapped to a Unicode symbol, use sans-serif for reliable rendering.
-    // Otherwise use the specified font (e.g. Wingdings on systems that have it).
-    const convertedFamily = bulletLabel !== b.char ? 'sans-serif' : normalizeFontFamily(b.fontFamily ?? null, rc);
+    // §21.1.2.4.3 a:buFont names the face of the marker code. A symbol face
+    // keeps every code it draws (Wingdings or Symbol where installed); a code
+    // it lacks converts to Unicode, drawn in sans-serif: the symbol face's
+    // cmap would re-read the converted character as its own code.
+    const markerFamily = normalizeFontFamily(b.fontFamily ?? null, rc);
+    const segments = bulletLabel && isSymbolFontFamily(authoredFamilyOf(markerFamily, rc))
+      ? symbolFaceSegments(bulletLabel, markerFamily, false, false, rc) : null;
+    if (segments) bulletLabel = segments.map((part) => part.text).join('');
+    const convertedFamily = segments?.some((part) => part.mapped) ? 'sans-serif' : markerFamily;
     bulletSizePx = bSizePx;
     bulletFamily = convertedFamily;
     bulletFont  = buildFont(false, false, bSizePx, convertedFamily, rc, bulletLabel,
@@ -8155,6 +8219,8 @@ type InternalSlideRenderOptions = SlideRenderOptions & {
   embeddedFontAliases?: ReadonlyMap<string, string>;
   embeddedFontAuthoredFamilies?: ReadonlyMap<string, string>;
   embeddedFontTuples?: ReadonlySet<string>;
+  /** See {@link RenderContext.symbolFaceEncodings}. */
+  symbolFaceEncodings?: ReadonlyMap<string, SymbolFaceEncoding>;
   svgDecoder?: SvgBlobDecoder;
   /** Placeholder text already resolved on the main thread. Takes precedence
    * over {@link SlideRenderOptions.errorPlaceholder}. */
@@ -8515,6 +8581,12 @@ async function renderSlideLeased(
     officeFontRoutes: opts.officeFontRoutes,
     officeInstalledFamilies: opts.officeInstalledFamilies,
     fontSubstitutions: opts.fontSubstitutions,
+    // Symbol-font faces are judged in this render's painting context, once per
+    // render: a render sees one set of font resources (core symbol-face.ts).
+    symbolFaces: createSymbolFaceOracle(
+      canvas.getContext('2d') as CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D | null,
+    ),
+    symbolFaceEncodings: opts.symbolFaceEncodings,
     // The backing store may have been clamped below `canvasSize × dpr`; downstream
     // crisp-offset math must use the SAME effective dpr the ctx was scaled by.
     dpr: effectiveDpr,

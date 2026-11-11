@@ -110,6 +110,57 @@ describe('production layout service integration', () => {
     expect(lines[0].segments.map((segment) => 'text' in segment ? segment.text : '')).toEqual(['a', '\u0301']);
   });
 
+  // A measuring context whose "Symbol" face (when `installed`) is symbol-
+  // encoded: it draws codes 0x21..0xFE bare and F0-shifted with one glyph each.
+  // Every other text has width by character, so the context is conclusive.
+  function symbolHostContext(installed: boolean | string): CanvasRenderingContext2D {
+    const face = `"${typeof installed === 'string' ? installed : 'Symbol'}"`;
+    const ctx = {
+      font: '',
+      letterSpacing: '0px',
+      fontKerning: 'auto',
+      measureText(text: string) {
+        const cp = text.codePointAt(0) ?? 0;
+        const code = cp >= 0xf000 ? cp - 0xf000 : cp;
+        const owned = installed !== false && this.font.includes(face) && code >= 0x21 && code <= 0xfe;
+        const width = owned ? 100 + code : cp >= 0xf000 ? 7 : 5 + (cp % 5);
+        return {
+          width: owned || text.length === 1 ? width : [...text].length * 8,
+          actualBoundingBoxAscent: 8, actualBoundingBoxDescent: 2,
+          fontBoundingBoxAscent: 8, fontBoundingBoxDescent: 2,
+        };
+      },
+    };
+    return ctx as unknown as CanvasRenderingContext2D;
+  }
+
+  const symbolText = (installed: boolean | string, runs: DocRun[]) => {
+    const services = createLayoutServices(model(), { measureContext: symbolHostContext(installed) });
+    return buildSegments(runs, { pageIndex: 0, totalPages: 1, layoutServices: services })
+      .filter((segment) => 'text' in segment)
+      .map((segment) => segment as { text: string; fontFamily?: string | null });
+  };
+  const symbol = { fontFamily: 'Symbol', fontFamilyHighAnsi: 'Symbol' };
+
+  it('converts Symbol text, bare and private-use, when the measured face lacks it (#2177)', () => {
+    const text = symbolText(false, [textRun('abcp', symbol), textRun('\uF061\uF0E5', symbol)]);
+    expect(text.map((segment) => segment.text).join('')).toBe('αβχπα∑');
+    expect(text.every((segment) => segment.fontFamily !== 'Symbol')).toBe(true);
+  });
+
+  it('judges each scalar against the face its rFonts slot selects', () => {
+    // §17.3.2.26: PUA scalars take the hAnsi slot. A Unicode-encoded Symbol on
+    // ascii does not decide them; the installed Wingdings on hAnsi keeps them.
+    const text = symbolText('Wingdings', [textRun('\uF0B7\uF0A7', { fontFamily: 'Symbol', fontFamilyHighAnsi: 'Wingdings' })]);
+    expect(text.map((segment) => segment.text).join('')).toBe('\uF0B7\uF0A7');
+  });
+
+  it('keeps the codes a symbol-encoded host face draws in that face', () => {
+    const text = symbolText(true, [textRun('a\uF062', symbol)]);
+    expect(text.map((segment) => segment.text).join('')).toBe('a\uF062');
+    expect(text.every((segment) => segment.fontFamily === 'Symbol')).toBe(true);
+  });
+
   it('normalizes service-backed w:sym private encoding before measurement and paint', () => {
     const services = createLayoutServices(model(), { measureContext: measureContext() });
     const segments = buildSegments([textRun('\uF0B0', {
