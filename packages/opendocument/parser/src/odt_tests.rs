@@ -30,6 +30,12 @@ fn read_fixture(fixture: Fixture<'_>) -> Document {
 }
 
 fn read_fixture_resources(fixture: Fixture<'_>) -> (Document, Vec<OwnedDocumentResource>) {
+    try_read_fixture(fixture).unwrap()
+}
+
+fn try_read_fixture(
+    fixture: Fixture<'_>,
+) -> Result<(Document, Vec<OwnedDocumentResource>), String> {
     let styles = format!(
         r##"<office:document-styles {NS} office:version="1.3">{FACES}<office:styles><style:default-style style:family="paragraph"><style:paragraph-properties style:tab-stop-distance="1.25cm"/><style:text-properties style:font-name="Serif" fo:font-size="12pt" style:font-name-asian="Mincho" style:font-size-asian="10.5pt" style:font-name-complex="Serif" style:font-size-complex="12pt"/></style:default-style>{}</office:styles><office:automatic-styles><style:page-layout style:name="pm1"><style:page-layout-properties fo:page-width="210mm" fo:page-height="297mm" fo:margin-top="20mm" fo:margin-bottom="20mm" fo:margin-left="25mm" fo:margin-right="25mm"{}/>{}</style:page-layout>{}</office:automatic-styles><office:master-styles><style:master-page style:name="Standard" style:page-layout-name="pm1">{}</style:master-page>{}</office:master-styles></office:document-styles>"##,
         fixture.styles,
@@ -61,7 +67,7 @@ fn read_fixture_resources(fixture: Fixture<'_>) -> (Document, Vec<OwnedDocumentR
         &MEDIA_TYPES,
     )
     .unwrap();
-    read(&package).unwrap()
+    read(&package)
 }
 
 fn paragraphs(elements: &[BodyElement]) -> Vec<&DocParagraph> {
@@ -540,4 +546,125 @@ fn an_unbalanced_section_ending_the_document_stays_the_last_section() {
         .settings
         .as_ref()
         .is_some_and(|s| s.footnote_column_bands));
+}
+
+#[test]
+fn column_counts_beyond_the_limit_are_refused() {
+    let automatic = r##"<style:style style:name="S" style:family="section"><style:section-properties><style:columns fo:column-count="4000000000"/></style:section-properties></style:style>"##;
+    let body =
+        r##"<text:section text:name="s" text:style-name="S"><text:p>a</text:p></text:section>"##;
+    let error = try_read_fixture(Fixture {
+        automatic,
+        body,
+        ..Fixture::default()
+    })
+    .err()
+    .expect("refused");
+    assert!(error.contains("column limit"), "{error}");
+}
+
+#[test]
+fn the_initial_page_style_keeps_its_columns() {
+    // §17.12 on the initial page style, with no master page named by the
+    // body: its first section is laid out in the layout's columns.
+    let page = r##"><style:columns fo:column-count="2" fo:column-gap="12pt"/></style:page-layout-properties><style:header-style"##;
+    let document = read_fixture(Fixture {
+        page,
+        body: "<text:p>a</text:p>",
+        ..Fixture::default()
+    });
+    assert_eq!(document.section.columns.as_ref().map(|c| c.count), Some(2));
+}
+
+#[test]
+fn repeated_cells_stream_up_to_the_last_column() {
+    let body = r##"<table:table><table:table-column table:number-columns-repeated="2"/><table:table-row table:number-rows-repeated="3"><table:table-cell table:number-columns-repeated="1000000"><text:p>x</text:p></table:table-cell><table:table-cell table:number-columns-repeated="1000000"/></table:table-row></table:table>"##;
+    let document = read_fixture(Fixture {
+        body,
+        ..Fixture::default()
+    });
+    let BodyElement::Table(table) = &document.body[0] else {
+        panic!("a table")
+    };
+    assert_eq!(table.rows.len(), 3);
+    // The row is wider than the declared columns: the grid grows to the
+    // column bound and the repetitions stop there.
+    assert_eq!(table.col_widths.len(), 1024);
+    assert!(table.rows.iter().all(|row| row.cells.len() == 1024));
+}
+
+#[test]
+fn cells_take_row_then_column_default_cell_styles() {
+    // §16.2: the cell's style, then its row's default cell style, then its
+    // column's, then the family default, property by property.
+    let automatic = r##"<style:style style:name="Own" style:family="table-cell"><style:table-cell-properties fo:padding="1pt"/></style:style><style:style style:name="RowCell" style:family="table-cell"><style:table-cell-properties fo:background-color="#ff0000" fo:padding="3pt"/></style:style><style:style style:name="ColCell" style:family="table-cell"><style:table-cell-properties fo:background-color="#0000ff" style:vertical-align="middle" fo:border="0.5pt solid #000000"/></style:style>"##;
+    let body = r##"<table:table><table:table-column table:default-cell-style-name="ColCell" table:number-columns-repeated="2"/><table:table-row table:default-cell-style-name="RowCell"><table:table-cell table:style-name="Own"><text:p>a</text:p></table:table-cell><table:table-cell><text:p>b</text:p></table:table-cell></table:table-row><table:table-row><table:table-cell><text:p>c</text:p></table:table-cell><table:table-cell table:style-name="Own"><text:p>d</text:p></table:table-cell></table:table-row></table:table>"##;
+    let document = read_fixture(Fixture {
+        automatic,
+        body,
+        ..Fixture::default()
+    });
+    let BodyElement::Table(table) = &document.body[0] else {
+        panic!("a table")
+    };
+    let cell = |row: usize, column: usize| &table.rows[row].cells[column];
+    // Own padding over the row default's; background from the row default
+    // over the column default's; alignment and border from the column.
+    assert_eq!(cell(0, 0).margin_top, Some(1.0));
+    assert_eq!(cell(0, 0).background.as_deref(), Some("ff0000"));
+    assert_eq!(cell(0, 0).v_align, "center");
+    assert!(cell(0, 0).borders.top.is_some());
+    assert_eq!(cell(0, 1).margin_top, Some(3.0));
+    assert_eq!(cell(0, 1).background.as_deref(), Some("ff0000"));
+    // Without a row default: the column default.
+    assert_eq!(cell(1, 0).background.as_deref(), Some("0000ff"));
+    assert_eq!(cell(1, 0).margin_top, Some(0.0));
+    assert_eq!(cell(1, 1).margin_top, Some(1.0));
+    assert_eq!(cell(1, 1).v_align, "center");
+}
+
+#[test]
+fn hidden_paragraph_fields_hide_their_paragraph() {
+    let body = r##"<text:p>shown</text:p><text:p><text:hidden-paragraph text:condition="ooow:1" text:is-hidden="true"/>hidden</text:p><text:p><text:span><text:hidden-paragraph text:condition="ooow:0" text:is-hidden="false"/>kept</text:span></text:p>"##;
+    let document = read_fixture(Fixture {
+        body,
+        ..Fixture::default()
+    });
+    let shown: Vec<Vec<String>> = paragraphs(&document.body)
+        .iter()
+        .map(|p| texts(p))
+        .collect();
+    assert_eq!(shown, [vec!["shown".to_string()], vec!["kept".to_string()]]);
+}
+
+#[test]
+fn phantom_list_ancestors_keep_the_counter_bound() {
+    let styles = r##"<text:list-style style:name="L"><text:list-level-style-number text:level="1" style:num-format="a" style:num-letter-sync="true" text:start-value="4294967295"/><text:list-level-style-number text:level="2" style:num-format="a" style:num-letter-sync="true" text:start-value="4294967295"/><text:list-level-style-number text:level="3" style:num-format="a" style:num-letter-sync="true" text:start-value="4294967295" text:display-levels="3"/></text:list-style>"##;
+    let body = r##"<text:list text:style-name="L"><text:list-item><text:list><text:list-item><text:list><text:list-item><text:p>deep</text:p></text:list-item></text:list></text:list-item></text:list></text:list-item></text:list>"##;
+    let document = read_fixture(Fixture {
+        styles,
+        body,
+        ..Fixture::default()
+    });
+    let label = texts(paragraphs(&document.body)[0])[0].clone();
+    // Three components of at most MAX_COUNTED / 26 + 1 letters each.
+    assert!(label.len() <= 3 * (1_000_000 / 26 + 2), "{}", label.len());
+}
+
+#[test]
+fn hyperlink_targets_are_charged_per_split_run() {
+    // One 4 MiB target around alternating Latin and Asian characters: each
+    // emitted run owns a copy of the target, so the copies reach the
+    // construction limit instead of retaining gigabytes.
+    let href = "x".repeat(4 << 20);
+    let text = "aあ".repeat(200);
+    let body =
+        format!(r##"<text:p><text:a xlink:href="https://e/{href}">{text}</text:a></text:p>"##);
+    let error = try_read_fixture(Fixture {
+        body: &body,
+        ..Fixture::default()
+    })
+    .err()
+    .expect("refused");
+    assert!(error.contains("construction limit"), "{error}");
 }

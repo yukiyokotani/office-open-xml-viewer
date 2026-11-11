@@ -88,6 +88,10 @@ const MAX_SEARCH_ORDER: usize = 256;
 /// run resolution visits each style of its search order and each attribute
 /// of the resolved property group (one unit each plus one per byte).
 const MAX_CASCADE_WORK: usize = 256 * 1024 * 1024;
+/// Estimated native size of one table cell and of one empty paragraph in it.
+const CELL_BYTES: usize = std::mem::size_of::<docx_model::DocTableCell>() + 256;
+const EMPTY_PARAGRAPH_BYTES: usize =
+    std::mem::size_of::<DocParagraph>() + std::mem::size_of::<CellElement>();
 
 /// The admitted document and the package files its runs reference by key.
 pub fn read(package: &OdfPackage) -> Result<(Document, Vec<OwnedDocumentResource>), String> {
@@ -193,16 +197,20 @@ pub fn read(package: &OdfPackage) -> Result<(Document, Vec<OwnedDocumentResource
         paragraph_count: 0,
         retained_text_bytes: 0,
         construction_bytes: 0,
+        resource_bytes: 0,
         contextual_spacing_defined: version != Some("1.2"),
     };
-    // The first section: the initial master page.
-    reader.sections.push(page::SectionStart {
+    // The first section: the initial master page, with its page layout's
+    // columns (§17.12) like every later page-style section.
+    let first = page::SectionStart {
         master: initial.to_string(),
         kind: "nextPage",
-        columns: None,
+        columns: pages.columns(initial),
         page_start: None,
         block: 0,
-    });
+    };
+    reader.charge_construction(page::section_bytes(&first))?;
+    reader.sections.push(first);
     reader.walk_blocks(body)?;
     let blocks = std::mem::take(&mut reader.blocks);
     let (body, section_marks) = reader.finish_body(blocks)?;
@@ -241,6 +249,7 @@ pub fn read(package: &OdfPackage) -> Result<(Document, Vec<OwnedDocumentResource
     document.footnotes = std::mem::take(&mut reader.footnotes);
     document.endnotes = std::mem::take(&mut reader.endnotes);
     document.note_layout_settings = notes.wire(&pages, &reader.current_master);
+    reader.check_budgets()?;
     let images = std::mem::take(&mut reader.images);
     Ok((document, images))
 }
@@ -337,6 +346,9 @@ struct Reader<'a> {
     paragraph_count: usize,
     retained_text_bytes: usize,
     construction_bytes: usize,
+    /// The part of `construction_bytes` charged for package resources
+    /// (pictures), which runs reference by key and so never copy.
+    resource_bytes: usize,
     contextual_spacing_defined: bool,
 }
 
@@ -479,10 +491,13 @@ impl<'a> Reader<'a> {
             };
             (get("margin-left"), get("margin-right"))
         });
-        let columns = properties
+        let columns = match properties
             .and_then(|p| p.elements.get("columns"))
             .and_then(|elements| elements.first())
-            .and_then(|columns| page::columns(columns, self.text_width - indent.0 - indent.1));
+        {
+            Some(columns) => page::columns(columns, self.text_width - indent.0 - indent.1)?,
+            None => None,
+        };
         let enclosing_indent = self.section_indent;
         self.section_indent = (enclosing_indent.0 + indent.0, enclosing_indent.1 + indent.1);
         // A section with its own columns is a continuous DOCX section; the
@@ -496,7 +511,7 @@ impl<'a> Reader<'a> {
                 columns: columns.clone(),
                 page_start: None,
                 block: 0,
-            });
+            })?;
         }
         let enclosing_area = self.area;
         self.next_area += 1;
@@ -522,15 +537,21 @@ impl<'a> Reader<'a> {
                 columns: enclosing_columns,
                 page_start: None,
                 block: 0,
-            });
+            })?;
         }
         Ok(())
     }
 
-    fn start_section(&mut self, mut start: page::SectionStart) {
+    /// Records a section start. Every section later becomes a DOCX section
+    /// break whose properties, columns and header/footer stories are copies;
+    /// the start and its fixed-size copies are charged here, the stories
+    /// when they are copied (`section_parts`).
+    fn start_section(&mut self, mut start: page::SectionStart) -> Result<(), String> {
+        self.charge_construction(page::section_bytes(&start))?;
         start.block = self.blocks.len();
         self.sections.push(start);
         self.blocks.push(Block::Section(self.sections.len() - 1));
+        Ok(())
     }
 
     /// Read `node`'s block content into a separate story (cell, frame, note,
@@ -572,11 +593,13 @@ impl<'a> Reader<'a> {
         node: roxmltree::Node<'a, 'a>,
         outline_level: Option<u32>,
     ) -> Result<(), String> {
-        self.paragraph_count += 1;
-        if self.paragraph_count > MAX_PARAGRAPHS {
-            return Err("OpenDocument text exceeds the paragraph limit".into());
-        }
+        self.count_paragraph()?;
         let list = self.list_paragraph.take();
+        // §7.7.11, §19.821: a hidden-paragraph field whose condition last
+        // evaluated true hides its whole paragraph.
+        if text::hidden_by_field(node) {
+            return Ok(());
+        }
         let chain = self.paragraph_chain(node.attribute((NS_TEXT, "style-name")));
         let named_style = chain
             .iter()
@@ -608,7 +631,7 @@ impl<'a> Reader<'a> {
                         columns: self.pages.columns(master),
                         page_start,
                         block: 0,
-                    });
+                    })?;
                 } else {
                     // The first paragraph names the initial page style.
                     self.current_master = master.to_string();
@@ -689,6 +712,8 @@ impl<'a> Reader<'a> {
         // earlier block.
         if !self.pending_anchors.is_empty() {
             let anchors = std::mem::take(&mut self.pending_anchors);
+            // Each anchor gains a host run copying the mark's faces.
+            self.charge_construction(anchors.len().saturating_mul(mark.retained_estimate()))?;
             let host = mark.text_run();
             let anchors: Vec<DocRun> = anchors
                 .into_iter()
@@ -789,8 +814,13 @@ impl<'a> Reader<'a> {
                 cap_runs.push(paragraph.runs.remove(index));
                 continue;
             }
-            let split: String = text.text.chars().take(remaining).collect();
-            let rest: String = text.text.chars().skip(remaining).collect();
+            // The run splits in two: the text moves (no copy of it), the
+            // second run's properties are a charged copy.
+            self.charge_construction(text::run_copy_bytes(text))?;
+            let original = std::mem::take(&mut text.text);
+            let split: String = original.chars().take(remaining).collect();
+            let rest: String = original.chars().skip(remaining).collect();
+            drop(original);
             let mut head = text.as_ref().clone();
             head.text = split;
             text.text = rest;
@@ -1235,10 +1265,10 @@ impl<'a> Reader<'a> {
             .package
             .session()
             .run_operation("odf-image", |operation| operation.read_bytes(&path))?;
-        let Some((bytes, mime_type)) = picture(bytes) else {
+        let Some((bytes, mime_type)) = picture(bytes, self.construction_left()) else {
             return Ok(None);
         };
-        self.charge_construction(bytes.len() + 2 * path.len() + 64)?;
+        self.charge_resource(bytes.len() + 2 * path.len() + 64)?;
         self.image_types.insert(path.clone(), mime_type);
         self.images.push(OwnedDocumentResource {
             key: path.clone(),
@@ -1255,9 +1285,11 @@ impl<'a> Reader<'a> {
         let Some(bytes) = image::base64(data) else {
             return Ok(None);
         };
-        let Some((bytes, mime_type)) = picture(bytes) else {
+        let Some((bytes, mime_type)) = picture(bytes, self.construction_left()) else {
             return Ok(None);
         };
+        // The retained picture (a converted metafile can outgrow its data).
+        self.charge_resource(bytes.len() + 64)?;
         let key = format!("odt-binary/{}", self.images.len());
         self.image_types.insert(key.clone(), mime_type);
         self.images.push(OwnedDocumentResource {
@@ -1268,12 +1300,71 @@ impl<'a> Reader<'a> {
         Ok(Some((key, mime_type)))
     }
 
+    /// A package resource's retained bytes: construction bytes that a copy
+    /// of a story referencing the resource does not repeat.
+    fn charge_resource(&mut self, bytes: usize) -> Result<(), String> {
+        self.charge_construction(bytes)?;
+        self.resource_bytes += bytes;
+        Ok(())
+    }
+
+    /// Construction bytes charged so far, less package resources: the
+    /// difference across building a story is what each copy of it costs.
+    fn copyable_bytes(&self) -> usize {
+        self.construction_bytes.saturating_sub(self.resource_bytes)
+    }
+
+    /// What the construction budget still admits.
+    fn construction_left(&self) -> usize {
+        MAX_CONSTRUCTION_BYTES.saturating_sub(self.construction_bytes)
+    }
+
+    /// Charges retained model bytes before they are allocated. An overrun is
+    /// sticky: the ledger stays exhausted, so a caller that dropped the error
+    /// still fails at the next charge and at the end of the read.
     fn charge_construction(&mut self, bytes: usize) -> Result<(), String> {
-        self.construction_bytes = self
+        match self
             .construction_bytes
             .checked_add(bytes)
             .filter(|total| *total <= MAX_CONSTRUCTION_BYTES)
-            .ok_or_else(|| "OpenDocument text exceeds the construction limit".to_string())?;
+        {
+            Some(total) => {
+                self.construction_bytes = total;
+                Ok(())
+            }
+            None => {
+                self.construction_bytes = usize::MAX;
+                Err("OpenDocument text exceeds the construction limit".to_string())
+            }
+        }
+    }
+
+    /// One paragraph against the document-wide paragraph bound.
+    fn count_paragraph(&mut self) -> Result<(), String> {
+        self.paragraph_count += 1;
+        if self.paragraph_count > MAX_PARAGRAPHS {
+            return Err("OpenDocument text exceeds the paragraph limit".into());
+        }
+        Ok(())
+    }
+
+    /// A table cell the reader builds itself (a covered position, a missing
+    /// cell, a vertical-merge continuation) with its one empty paragraph:
+    /// counted and charged before it is allocated.
+    fn charge_empty_cell(&mut self) -> Result<(), String> {
+        self.count_paragraph()?;
+        self.charge_construction(CELL_BYTES + EMPTY_PARAGRAPH_BYTES)
+    }
+
+    /// Fails when a budget was overrun anywhere during the read, even where
+    /// the overrun's error was not propagated.
+    fn check_budgets(&self) -> Result<(), String> {
+        if self.construction_bytes > MAX_CONSTRUCTION_BYTES {
+            return Err("OpenDocument text exceeds the construction limit".into());
+        }
+        if self.cascade_work.get() > MAX_CASCADE_WORK {
+            return Err("OpenDocument text exceeds the style resolution limit".into());
+        }
         Ok(())
     }
 
@@ -1293,15 +1384,24 @@ impl<'a> Reader<'a> {
         self.charge_work(work)
     }
 
+    /// Charges style resolution work; an overrun is sticky (see
+    /// `charge_construction`).
     fn charge_work(&self, work: usize) -> Result<(), String> {
-        let total = self
+        match self
             .cascade_work
             .get()
             .checked_add(work)
             .filter(|total| *total <= MAX_CASCADE_WORK)
-            .ok_or_else(|| "OpenDocument text exceeds the style resolution limit".to_string())?;
-        self.cascade_work.set(total);
-        Ok(())
+        {
+            Some(total) => {
+                self.cascade_work.set(total);
+                Ok(())
+            }
+            None => {
+                self.cascade_work.set(usize::MAX);
+                Err("OpenDocument text exceeds the style resolution limit".to_string())
+            }
+        }
     }
 
     fn occurrence(&mut self, prefix: &str) -> String {
@@ -1727,9 +1827,11 @@ mod tests;
 /// Picture bytes in a format the renderer draws, with their media type. A
 /// StarView metafile (LibreOffice's object replacement format) is converted
 /// to SVG.
-fn picture(bytes: Vec<u8>) -> Option<(Vec<u8>, &'static str)> {
+/// A picture's retained bytes and media type; a StarView metafile converts to
+/// SVG within `budget` bytes.
+fn picture(bytes: Vec<u8>, budget: usize) -> Option<(Vec<u8>, &'static str)> {
     if let Some(mime_type) = image::sniff(&bytes) {
         return Some((bytes, mime_type));
     }
-    crate::svm::to_svg(&bytes).map(|converted| (converted.svg, "image/svg+xml"))
+    crate::svm::to_svg(&bytes, budget).map(|converted| (converted.svg, "image/svg+xml"))
 }

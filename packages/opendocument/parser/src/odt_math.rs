@@ -9,31 +9,75 @@ const NS_MATH: &str = "http://www.w3.org/1998/Math/MathML";
 /// Implementation bound on MathML nesting.
 const MAX_DEPTH: usize = 64;
 
-/// The nodes of a MathML `math` element.
-pub(super) fn convert(math: roxmltree::Node<'_, '_>) -> Vec<MathNode> {
-    children(math, 0)
+/// Estimated native size of one converted node and its list slot (strings
+/// are charged by their length when the node is built).
+const NODE_BYTES: usize = std::mem::size_of::<MathNode>() + 32;
+
+/// The conversion's budget: every node is charged before it is built, so the
+/// retained tree is bounded by the caller's construction budget whatever
+/// the ratio of source bytes to nodes.
+struct Cx<'c> {
+    charge: &'c mut dyn FnMut(usize) -> Result<(), String>,
+    error: Option<String>,
+}
+
+impl Cx<'_> {
+    fn admit(&mut self, bytes: usize) -> bool {
+        if self.error.is_some() {
+            return false;
+        }
+        match (self.charge)(bytes) {
+            Ok(()) => true,
+            Err(error) => {
+                self.error = Some(error);
+                false
+            }
+        }
+    }
+}
+
+/// The nodes of a MathML `math` element, each charged to `charge` before
+/// it is built; a refused charge ends the conversion with its error.
+pub(super) fn convert(
+    math: roxmltree::Node<'_, '_>,
+    charge: &mut dyn FnMut(usize) -> Result<(), String>,
+) -> Result<Vec<MathNode>, String> {
+    let mut cx = Cx {
+        charge,
+        error: None,
+    };
+    let nodes = children(&mut cx, math, 0);
+    match cx.error {
+        Some(error) => Err(error),
+        None => Ok(nodes),
+    }
 }
 
 fn is_math(node: &roxmltree::Node<'_, '_>) -> bool {
     node.is_element() && node.tag_name().namespace() == Some(NS_MATH)
 }
 
-fn children(node: roxmltree::Node<'_, '_>, depth: usize) -> Vec<MathNode> {
+fn children(cx: &mut Cx<'_>, node: roxmltree::Node<'_, '_>, depth: usize) -> Vec<MathNode> {
     if depth > MAX_DEPTH {
         return Vec::new();
     }
     node.children()
         .filter(is_math)
-        .flat_map(|child| element(child, depth + 1))
+        .flat_map(|child| element(cx, child, depth + 1))
         .collect()
 }
 
 /// The `n`th element child as a node list.
-fn argument(node: roxmltree::Node<'_, '_>, n: usize, depth: usize) -> Vec<MathNode> {
+fn argument(
+    cx: &mut Cx<'_>,
+    node: roxmltree::Node<'_, '_>,
+    n: usize,
+    depth: usize,
+) -> Vec<MathNode> {
     node.children()
         .filter(is_math)
         .nth(n)
-        .map(|child| element(child, depth + 1))
+        .map(|child| element(cx, child, depth + 1))
         .unwrap_or_default()
 }
 
@@ -46,7 +90,9 @@ fn text(node: roxmltree::Node<'_, '_>) -> String {
         .to_string()
 }
 
-fn run(text: String, style: &str) -> MathNode {
+fn run(cx: &mut Cx<'_>, text: String, style: &str) -> MathNode {
+    // A refused charge leaves the conversion failed; the node is dropped.
+    cx.admit(text.len() + style.len());
     MathNode::Run {
         text,
         style: style.to_string(),
@@ -75,18 +121,18 @@ fn nary(op: &str) -> bool {
     )
 }
 
-fn element(node: roxmltree::Node<'_, '_>, depth: usize) -> Vec<MathNode> {
-    if depth > MAX_DEPTH {
+fn element(cx: &mut Cx<'_>, node: roxmltree::Node<'_, '_>, depth: usize) -> Vec<MathNode> {
+    if depth > MAX_DEPTH || !cx.admit(NODE_BYTES) {
         return Vec::new();
     }
     let name = node.tag_name().name();
     let variant = node.attribute("mathvariant");
     match name {
-        "semantics" => argument(node, 0, depth),
+        "semantics" => argument(cx, node, 0, depth),
         "annotation" | "annotation-xml" | "none" | "mprescripts" => Vec::new(),
         "mrow" | "mstyle" | "mpadded" | "merror" | "math" | "maction" => {
             vec![MathNode::Group {
-                items: children(node, depth),
+                items: children(cx, node, depth),
             }]
         }
         "mphantom" => vec![MathNode::Phant {
@@ -94,7 +140,7 @@ fn element(node: roxmltree::Node<'_, '_>, depth: usize) -> Vec<MathNode> {
             zero_wid: false,
             zero_asc: false,
             zero_desc: false,
-            base: children(node, depth),
+            base: children(cx, node, depth),
         }],
         // §3.2.3 mi: a single-character identifier is italic by default.
         "mi" => {
@@ -107,7 +153,7 @@ fn element(node: roxmltree::Node<'_, '_>, depth: usize) -> Vec<MathNode> {
                 _ if content.chars().count() == 1 => "italic",
                 _ => "roman",
             };
-            vec![run(content, style)]
+            vec![run(cx, content, style)]
         }
         "mn" | "mo" | "ms" => {
             let style = match variant {
@@ -115,27 +161,27 @@ fn element(node: roxmltree::Node<'_, '_>, depth: usize) -> Vec<MathNode> {
                 Some("italic") => "italic",
                 _ => "roman",
             };
-            vec![run(text(node), style)]
+            vec![run(cx, text(node), style)]
         }
-        "mtext" => vec![run(text(node), "roman")],
-        "mspace" => vec![run("\u{2009}".into(), "roman")],
+        "mtext" => vec![run(cx, text(node), "roman")],
+        "mspace" => vec![run(cx, "\u{2009}".into(), "roman")],
         "mfrac" => vec![MathNode::Fraction {
-            num: argument(node, 0, depth),
-            den: argument(node, 1, depth),
+            num: argument(cx, node, 0, depth),
+            den: argument(cx, node, 1, depth),
             bar: (node.attribute("linethickness") == Some("0")).then_some(false),
         }],
         "msqrt" => vec![MathNode::Radical {
             index: Vec::new(),
-            radicand: children(node, depth),
+            radicand: children(cx, node, depth),
         }],
         "mroot" => vec![MathNode::Radical {
-            index: argument(node, 1, depth),
-            radicand: argument(node, 0, depth),
+            index: argument(cx, node, 1, depth),
+            radicand: argument(cx, node, 0, depth),
         }],
         "msub" | "msup" | "msubsup" | "munder" | "mover" | "munderover" => {
-            let base = argument(node, 0, depth);
-            let first = argument(node, 1, depth);
-            let second = argument(node, 2, depth);
+            let base = argument(cx, node, 0, depth);
+            let first = argument(cx, node, 1, depth);
+            let second = argument(cx, node, 2, depth);
             let base_operator = node
                 .children()
                 .find(is_math)
@@ -203,7 +249,7 @@ fn element(node: roxmltree::Node<'_, '_>, depth: usize) -> Vec<MathNode> {
             let items: Vec<roxmltree::Node<'_, '_>> = node.children().filter(is_math).collect();
             let base = items
                 .first()
-                .map(|b| element(*b, depth + 1))
+                .map(|b| element(cx, *b, depth + 1))
                 .unwrap_or_default();
             let pre = items
                 .iter()
@@ -212,11 +258,11 @@ fn element(node: roxmltree::Node<'_, '_>, depth: usize) -> Vec<MathNode> {
                 Some(at) => vec![MathNode::SPre {
                     sub: items
                         .get(at + 1)
-                        .map(|n| element(*n, depth + 1))
+                        .map(|n| element(cx, *n, depth + 1))
                         .unwrap_or_default(),
                     sup: items
                         .get(at + 2)
-                        .map(|n| element(*n, depth + 1))
+                        .map(|n| element(cx, *n, depth + 1))
                         .unwrap_or_default(),
                     base,
                 }],
@@ -224,11 +270,11 @@ fn element(node: roxmltree::Node<'_, '_>, depth: usize) -> Vec<MathNode> {
                     base,
                     sub: items
                         .get(1)
-                        .map(|n| element(*n, depth + 1))
+                        .map(|n| element(cx, *n, depth + 1))
                         .unwrap_or_default(),
                     sup: items
                         .get(2)
-                        .map(|n| element(*n, depth + 1))
+                        .map(|n| element(cx, *n, depth + 1))
                         .unwrap_or_default(),
                 }],
             }
@@ -239,7 +285,7 @@ fn element(node: roxmltree::Node<'_, '_>, depth: usize) -> Vec<MathNode> {
             items: node
                 .children()
                 .filter(is_math)
-                .map(|child| element(child, depth + 1))
+                .map(|child| element(cx, child, depth + 1))
                 .collect(),
         }],
         "menclose" => vec![MathNode::BorderBox {
@@ -251,7 +297,7 @@ fn element(node: roxmltree::Node<'_, '_>, depth: usize) -> Vec<MathNode> {
             strike_v: false,
             strike_bltr: false,
             strike_tlbr: false,
-            base: children(node, depth),
+            base: children(cx, node, depth),
         }],
         "mtable" => vec![MathNode::Array {
             rows: node
@@ -260,13 +306,13 @@ fn element(node: roxmltree::Node<'_, '_>, depth: usize) -> Vec<MathNode> {
                 .map(|row| {
                     row.children()
                         .filter(|cell| is_math(cell) && cell.tag_name().name() == "mtd")
-                        .map(|cell| children(cell, depth + 2))
+                        .map(|cell| children(cx, cell, depth + 2))
                         .collect()
                 })
                 .collect(),
             align: "center".into(),
         }],
-        _ => children(node, depth),
+        _ => children(cx, node, depth),
     }
 }
 
@@ -278,7 +324,7 @@ mod tests {
     fn converts_presentation_mathml() {
         let xml = r#"<math xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msup><mi>x</mi><mn>2</mn></msup><mo>+</mo><mfrac><mi>a</mi><mi>b</mi></mfrac><msqrt><mi>y</mi></msqrt></mrow><annotation>x^2</annotation></semantics></math>"#;
         let doc = roxmltree::Document::parse(xml).unwrap();
-        let nodes = convert(doc.root_element());
+        let nodes = convert(doc.root_element(), &mut |_| Ok(())).unwrap();
         let MathNode::Group { items } = &nodes[0] else {
             panic!()
         };

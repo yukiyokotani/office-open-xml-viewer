@@ -167,7 +167,7 @@ fn wrap(graphic: &Graphic<'_>) -> (AnchorWrapKindWire, Option<&'static str>, boo
 }
 
 impl<'a> Reader<'a> {
-    fn graphic(&mut self, node: roxmltree::Node<'a, 'a>) -> Graphic<'a> {
+    fn graphic(&mut self, node: roxmltree::Node<'a, 'a>) -> Result<Graphic<'a>, String> {
         let mut chain: Vec<StyleRef<'a>> = match node
             .attribute((NS_DRAW, "style-name"))
             .and_then(|name| self.sheet.find(self.scope, Family::Graphic, name))
@@ -178,10 +178,10 @@ impl<'a> Reader<'a> {
         if let Some(default) = self.sheet.default_style(Family::Graphic) {
             chain.push(default);
         }
-        let _ = self.charge_cascade(&chain, "graphic-properties");
-        Graphic {
+        self.charge_cascade(&chain, "graphic-properties")?;
+        Ok(Graphic {
             cascade: Cascade::new(chain, "graphic-properties"),
-        }
+        })
     }
 
     /// A drawing element met in content: a run for the paragraph that
@@ -419,7 +419,7 @@ impl<'a> Reader<'a> {
     /// `draw:frame` (§10.4.2): a picture, a text box or an object's
     /// replacement picture.
     fn frame(&mut self, node: roxmltree::Node<'a, 'a>) -> Result<Option<DocRun>, String> {
-        let graphic = self.graphic(node);
+        let graphic = self.graphic(node)?;
         let (width, height) = self.frame_size(node, &graphic);
         let placement = self.placement(node, &graphic, (0.0, 0.0));
         let (rotation, _) =
@@ -558,7 +558,9 @@ impl<'a> Reader<'a> {
         if root.tag_name().name() != "math" {
             return Ok(None);
         }
-        let nodes = math::convert(root);
+        // Each referencing frame owns its tree, so each conversion charges
+        // every node it builds (the source bytes above cover the parse).
+        let nodes = math::convert(root, &mut |bytes| self.charge_construction(bytes))?;
         if nodes.is_empty() {
             return Ok(None);
         }
@@ -873,7 +875,7 @@ impl<'a> Reader<'a> {
         node: roxmltree::Node<'a, 'a>,
         group_offset: Option<(f64, f64)>,
     ) -> Result<Option<DocRun>, String> {
-        let graphic = self.graphic(node);
+        let graphic = self.graphic(node)?;
         let get = |name: &str| {
             node.attribute((NS_SVG, name))
                 .and_then(|v| length_pt(v).ok())

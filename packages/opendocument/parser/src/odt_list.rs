@@ -572,8 +572,10 @@ impl<'a> Reader<'a> {
         }
         let chain = &mut self.lists.chains[frame.chain];
         let index = (frame.level - 1) as usize;
+        // Every value entering a counter is held to MAX_COUNTED, phantom
+        // ancestors included, so no label component outgrows it.
         for (ancestor, ancestor_start) in starts.iter().enumerate().take(index) {
-            chain.counters[ancestor].get_or_insert(*ancestor_start);
+            chain.counters[ancestor].get_or_insert((*ancestor_start).min(MAX_COUNTED));
         }
         let value = match (start, chain.counters[index]) {
             (Some(start), _) => start,
@@ -669,6 +671,8 @@ impl<'a> Reader<'a> {
     }
 
     fn format_counter(&self, value: u32, format: Format, sync: bool) -> String {
+        // The counter bound holds here too, whatever path the value took.
+        let value = value.min(MAX_COUNTED);
         // 0 renders "0" in every format (measured by the reviewer).
         if value == 0 && format != Format::Empty {
             return "0".to_string();
@@ -837,7 +841,8 @@ impl<'a> Reader<'a> {
         };
         let start = attribute((NS_TEXT, "start-value"))
             .and_then(|value| value.parse::<u32>().ok())
-            .unwrap_or(1);
+            .unwrap_or(1)
+            .min(MAX_COUNTED);
         let relative_size = attribute((NS_TEXT, "bullet-relative-size"))
             .and_then(|v| percent(v).ok())
             .filter(|v| *v > 0.0 && (*v - 1.0).abs() > 1e-9);
@@ -1080,11 +1085,19 @@ impl<'a> Reader<'a> {
         let (href, width, height) = label.image.expect("a picture label");
         // The picture's line geometry follows the formatting of the
         // paragraph's first character (measured).
-        let first = match paragraph.runs.iter().find_map(|run| match run {
-            DocRun::Text(text) if !text.text.is_empty() => Some(text.as_ref().clone()),
+        // Only the first run's properties are read: its text is set aside
+        // while the properties are copied (a charged copy, no text).
+        let first = match paragraph.runs.iter_mut().find_map(|run| match run {
+            DocRun::Text(text) if !text.text.is_empty() => Some(text),
             _ => None,
         }) {
-            Some(first) => first,
+            Some(text) => {
+                self.charge_construction(text::run_copy_bytes(text))?;
+                let kept = std::mem::take(&mut text.text);
+                let first = text.as_ref().clone();
+                text.text = kept;
+                first
+            }
             None => self
                 .run_properties(contexts, 0, ScriptClass::Latin)?
                 .text_run(),

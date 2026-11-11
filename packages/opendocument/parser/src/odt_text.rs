@@ -792,7 +792,10 @@ impl<'a> Reader<'a> {
             runs.extend(mark);
             if first.indent_first < 0.0 {
                 let mut tab = match runs.last() {
-                    Some(DocRun::Text(run)) => run.as_ref().clone(),
+                    Some(DocRun::Text(run)) => {
+                        self.charge_construction(run_copy_bytes(run) + run.text.len())?;
+                        run.as_ref().clone()
+                    }
                     _ => TextRun::default(),
                 };
                 tab.text = "\t".into();
@@ -963,8 +966,12 @@ impl<'a> Reader<'a> {
                         entry.insert(self.run_properties(contexts, context, key.1)?);
                     }
                     let properties = &cache[&key];
-                    let run =
-                        self.item_run(&inline.items[item as usize], properties, contexts, context)?;
+                    let run = self.item_run(
+                        &mut inline.items[item as usize],
+                        properties,
+                        contexts,
+                        context,
+                    )?;
                     paragraph.runs.extend(run);
                     current = None;
                     continue;
@@ -1002,7 +1009,7 @@ impl<'a> Reader<'a> {
                 self.charge_construction(properties.retained_estimate())?;
                 let mut run = properties.text_run();
                 run.optional_hyphen = true;
-                self.apply_context(&mut run, contexts, context);
+                self.apply_context(&mut run, contexts, context)?;
                 paragraph.runs.push(DocRun::Text(Box::new(run)));
                 current = None;
                 continue;
@@ -1025,7 +1032,7 @@ impl<'a> Reader<'a> {
                 if rtl {
                     run.rtl = Some(true);
                 }
-                self.apply_context(&mut run, contexts, context);
+                self.apply_context(&mut run, contexts, context)?;
                 paragraph.runs.push(DocRun::Text(Box::new(run)));
             }
             current = Some((context, class, rtl));
@@ -1036,26 +1043,53 @@ impl<'a> Reader<'a> {
         Ok(())
     }
 
-    /// The hyperlink of a context, on a run.
-    fn apply_context(&self, run: &mut TextRun, contexts: &[TextContext<'a>], context: u32) {
+    /// The hyperlink of a context, on a run. Each run owns its copy of the
+    /// target, so every copy is charged before it is made.
+    fn apply_context(
+        &mut self,
+        run: &mut TextRun,
+        contexts: &[TextContext<'a>],
+        context: u32,
+    ) -> Result<(), String> {
         if let Some(link) = &contexts[context as usize].link {
+            let len = |value: &Option<String>| value.as_ref().map_or(0, String::len);
+            self.charge_construction(len(&link.0) + len(&link.1))?;
             run.is_link = true;
             run.hyperlink = link.0.clone();
             run.hyperlink_anchor = link.1.clone();
         }
+        Ok(())
     }
 
+    /// The runs of one item. Each item is emitted once, so its prebuilt run
+    /// moves out of the item (no second copy); every string copied into the
+    /// emitted runs is charged first.
     fn item_run(
         &mut self,
-        item: &Item,
+        item: &mut Item,
         properties: &RunProperties,
         contexts: &[TextContext<'a>],
         context: u32,
     ) -> Result<Vec<DocRun>, String> {
-        self.charge_construction(properties.retained_estimate())?;
+        let estimate = properties.retained_estimate();
+        let copies = match &*item {
+            // The object's font facts and its anchor host copy the faces.
+            Item::Run(_) => 2 * estimate,
+            Item::Field { fallback, .. } => estimate + fallback.len(),
+            Item::NoteReference { id, label, .. } => {
+                2 * estimate + 2 * (id.len() + label.as_ref().map_or(0, String::len))
+            }
+            Item::Ruby { base, text, .. } => estimate + base.len() + text.len(),
+        };
+        self.charge_construction(copies)?;
         Ok(match item {
             Item::Run(run) => {
-                let mut run = run.clone();
+                let mut run = std::mem::replace(
+                    run,
+                    DocRun::Break {
+                        break_type: BreakType::Line,
+                    },
+                );
                 match &mut run {
                     DocRun::Image(image) if !image.anchor => {
                         image.inline_object_font_facts =
@@ -1130,7 +1164,7 @@ impl<'a> Reader<'a> {
                     hps_raise_pt: None,
                     typography: None,
                 });
-                self.apply_context(&mut run, contexts, context);
+                self.apply_context(&mut run, contexts, context)?;
                 vec![DocRun::Text(Box::new(run))]
             }
         })
@@ -1205,6 +1239,61 @@ impl<'a> Reader<'a> {
 /// A floating drawing preceded by the zero-advance metrics of the character
 /// that carries its anchor (the DOCX anchor host), whose occurrence id ties
 /// the two together.
+/// The native size of a copy of `run` without its text: the run shells and
+/// every string the copy owns (faces, link, colours, languages).
+pub(super) fn run_copy_bytes(run: &TextRun) -> usize {
+    [
+        &run.underline_style,
+        &run.underline_color,
+        &run.color,
+        &run.font_family,
+        &run.font_family_high_ansi,
+        &run.font_family_east_asia,
+        &run.font_family_cs,
+        &run.font_hint,
+        &run.background,
+        &run.vert_align,
+        &run.hyperlink,
+        &run.hyperlink_anchor,
+        &run.highlight,
+        &run.emphasis_mark,
+        &run.lang_bidi,
+        &run.lang_east_asia,
+        &run.fit_text_id,
+        &run.east_asian_combine_brackets,
+    ]
+    .iter()
+    .map(|value| value.as_ref().map_or(0, String::len))
+    .sum::<usize>()
+        + std::mem::size_of::<DocRun>()
+        + std::mem::size_of::<TextRun>()
+        + 8 * run.no_break_hyphen_offsets.len()
+        + 64
+}
+
+/// Whether a `text:hidden-paragraph` field (§7.7.11) of this paragraph holds
+/// `text:is-hidden="true"` (§19.821: its condition last evaluated true, so
+/// the paragraph is not visible). The field sits in the paragraph's inline
+/// content (spans, links, meta), not in notes or drawings it carries.
+pub(super) fn hidden_by_field(paragraph: roxmltree::Node<'_, '_>) -> bool {
+    fn walk(node: roxmltree::Node<'_, '_>, depth: usize) -> bool {
+        if depth > MAX_INLINE_DEPTH {
+            return false;
+        }
+        node.children().filter(|n| n.is_element()).any(|child| {
+            match (child.tag_name().namespace(), child.tag_name().name()) {
+                (Some(NS_TEXT), "hidden-paragraph") => {
+                    child.attribute((NS_TEXT, "is-hidden")) == Some("true")
+                }
+                (Some(NS_TEXT), "note") => false,
+                (Some(NS_TEXT), _) | (Some(NS_LOEXT), _) => walk(child, depth + 1),
+                _ => false,
+            }
+        })
+    }
+    walk(paragraph, 0)
+}
+
 pub(super) fn with_anchor_host(run: DocRun, host: &TextRun) -> Vec<DocRun> {
     let occurrence = match &run {
         DocRun::Image(image) if image.anchor => image.anchor_acquisition.as_ref(),
@@ -1572,9 +1661,22 @@ impl RunProperties {
         )
     }
 
-    /// Native size of one emitted run, excluding its text.
+    /// Native size of one emitted run, excluding its text and link: the run
+    /// shells and every string `text_run` copies out of the properties.
     pub fn retained_estimate(&self) -> usize {
-        std::mem::size_of::<DocRun>() + std::mem::size_of::<TextRun>() + 4 * self.family.len() + 64
+        let len = |value: &Option<String>| value.as_ref().map_or(0, String::len);
+        std::mem::size_of::<DocRun>()
+            + std::mem::size_of::<TextRun>()
+            + 4 * self.family.len()
+            + len(&self.underline_color)
+            + len(&self.color)
+            + len(&self.background)
+            + self.border.as_ref().map_or(0, |(style, color, _)| {
+                style.len() + color.as_ref().map_or(0, String::len)
+            })
+            + self.lang_east_asia.as_ref().map_or(0, |lang| lang.len())
+            + self.lang_bidi.as_ref().map_or(0, |lang| lang.len())
+            + 64
     }
 
     pub fn text_run(&self) -> TextRun {

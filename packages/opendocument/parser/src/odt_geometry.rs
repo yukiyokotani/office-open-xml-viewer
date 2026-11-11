@@ -10,6 +10,10 @@ use std::collections::HashMap;
 const MAX_EQUATIONS: usize = 4096;
 const MAX_PATH_TOKENS: usize = 1 << 20;
 const MAX_DEPTH: usize = 64;
+/// Implementation bound on the recursion of one evaluation: referenced
+/// equations, parentheses and function arguments all count, so no formula
+/// shape nests the parser deeper than this.
+const MAX_NESTING: usize = 128;
 
 pub(super) struct Geometry {
     pub view_box: (f64, f64, f64, f64),
@@ -26,6 +30,8 @@ pub(super) struct Evaluator<'g> {
     geometry: &'g Geometry,
     cache: HashMap<String, f64>,
     depth: usize,
+    /// Current parser recursion (equations, parentheses, arguments).
+    nesting: usize,
 }
 
 impl<'g> Evaluator<'g> {
@@ -34,6 +40,7 @@ impl<'g> Evaluator<'g> {
             geometry,
             cache: HashMap::new(),
             depth: 0,
+            nesting: 0,
         }
     }
 
@@ -166,7 +173,22 @@ impl Parser<'_> {
         out
     }
 
+    /// One primary expression. Every recursive path of the grammar passes
+    /// through here, so the nesting bound covers parentheses, function
+    /// arguments, unary minus chains and referenced equations alike; past
+    /// the bound the rest of the formula is dropped and reads as 0.
     fn basic(&mut self, eval: &mut Evaluator<'_>) -> f64 {
+        if eval.nesting >= MAX_NESTING {
+            self.at = self.text.len();
+            return 0.0;
+        }
+        eval.nesting += 1;
+        let value = self.primary(eval);
+        eval.nesting -= 1;
+        value
+    }
+
+    fn primary(&mut self, eval: &mut Evaluator<'_>) -> f64 {
         match self.peek() {
             Some(b'(') => {
                 self.at += 1;
@@ -623,6 +645,23 @@ pub(super) fn evaluate(path: &str, geometry: &Geometry) -> Path {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn expression_nesting_is_bounded() {
+        // Parentheses, unary minus over parentheses and function arguments
+        // nest the parser; past the bound the formula reads as 0.
+        for formula in [
+            format!("{}1{}", "(".repeat(200_000), ")".repeat(200_000)),
+            format!("{}1{}", "abs(".repeat(200_000), ")".repeat(200_000)),
+            format!("{}1{}", "-(".repeat(200_000), ")".repeat(200_000)),
+        ] {
+            let geometry = geometry(&[("f0", formula.as_str())], &[]);
+            let mut eval = Evaluator::new(&geometry);
+            assert_eq!(eval.parameter("?f0"), 0.0);
+        }
+        let geometry = geometry(&[("f0", "((1+2))*abs(-3)")], &[]);
+        assert_eq!(Evaluator::new(&geometry).parameter("?f0"), 9.0);
+    }
 
     fn geometry(equations: &[(&str, &str)], modifiers: &[f64]) -> Geometry {
         Geometry {

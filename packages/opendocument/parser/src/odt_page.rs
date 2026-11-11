@@ -53,15 +53,22 @@ struct Region {
     margin_right: f64,
 }
 
+/// Implementation bound on the columns of one page or section style.
+const MAX_STYLE_COLUMNS: usize = 1024;
+
+/// One page layout. Every field that owns data of the document's size
+/// (fills, image link, column list) is shared, so a layout inherited from
+/// the default page layout (§16.8) copies a fixed-size record, never the
+/// default's data.
 #[derive(Clone)]
 struct Layout {
     section: SectionProps,
-    columns: Option<ColumnsSpec>,
+    columns: Option<Rc<ColumnsSpec>>,
     num_format: Option<&'static str>,
-    usage: String,
+    usage: &'static str,
     header: Option<Region>,
     footer: Option<Region>,
-    text_direction: Option<String>,
+    text_direction: Option<&'static str>,
     borders: Option<PageBorders>,
     grid: Option<(&'static str, f64, Option<f64>)>,
     footnote_separator: Option<NoteSeparatorMark>,
@@ -69,8 +76,8 @@ struct Layout {
     /// and companions on the page layout or its drawing page, or a
     /// `style:background-image`), held as a graphic style for the shared
     /// fill reader.
-    background: Option<crate::style::Style>,
-    background_image: Option<(String, bool)>,
+    background: Option<Rc<crate::style::Style>>,
+    background_image: Option<Rc<(String, bool)>>,
 }
 
 struct Master<'a, 'i> {
@@ -96,6 +103,26 @@ pub(super) struct MasterStories {
     pub has_left: bool,
     /// Whether the page style shows a header / footer region.
     pub shown: [bool; 2],
+    /// The construction bytes each story's tree was charged when it was
+    /// built (headers, footers × default, first, even): every copy of a
+    /// story is charged the same again before it is made.
+    pub costs: [[usize; 3]; 2],
+}
+
+/// The fixed native size of one section start and of the copies its DOCX
+/// section makes of it: the start itself (recorded and merged), the section
+/// properties, geometry, placement and break, and the column list in each.
+pub(super) fn section_bytes(start: &SectionStart) -> usize {
+    let columns = start.columns.as_ref().map_or(0, |columns| {
+        std::mem::size_of::<ColumnsSpec>() + columns.cols.len() * std::mem::size_of::<ColSpec>()
+    });
+    3 * (std::mem::size_of::<SectionStart>() + start.master.len())
+        + 5 * columns
+        + 2 * std::mem::size_of::<SectionProps>()
+        + std::mem::size_of::<SectionPlacementWire>()
+        + std::mem::size_of::<SectionGeom>()
+        + std::mem::size_of::<BodyElement>()
+        + 1024
 }
 
 fn default_section() -> SectionProps {
@@ -119,7 +146,7 @@ impl<'a, 'i> Pages<'a, 'i> {
             section: default_section(),
             columns: None,
             num_format: None,
-            usage: "all".into(),
+            usage: "all",
             header: None,
             footer: None,
             text_direction: None,
@@ -139,7 +166,7 @@ impl<'a, 'i> Pages<'a, 'i> {
                     .find(|n| xml::is(*n, NS_STYLE, "default-page-layout"))
             })
         {
-            read_layout(default, &mut default_layout);
+            read_layout(default, &mut default_layout)?;
         }
         let mut layouts = HashMap::new();
         for automatic in styles_root
@@ -154,7 +181,7 @@ impl<'a, 'i> Pages<'a, 'i> {
                     continue;
                 };
                 let mut layout = default_layout.clone();
-                read_layout(node, &mut layout);
+                read_layout(node, &mut layout)?;
                 layouts.insert(name.to_string(), layout);
             }
         }
@@ -229,14 +256,17 @@ impl<'a, 'i> Pages<'a, 'i> {
     }
 
     pub fn columns(&self, master: &str) -> Option<ColumnsSpec> {
-        self.layout(self.body_master(master)).columns.clone()
+        self.layout(self.body_master(master))
+            .columns
+            .as_deref()
+            .cloned()
     }
 
     /// How a section with this page style starts: on a right (odd) page for
     /// a right-only style, on a left one for a left-only style (§19.493
     /// style:page-usage).
     pub fn start_kind(&self, master: &str) -> &'static str {
-        match self.layout(master).usage.as_str() {
+        match self.layout(master).usage {
             "right" => "oddPage",
             "left" => "evenPage",
             _ => "nextPage",
@@ -281,13 +311,19 @@ impl<'a, 'i> Pages<'a, 'i> {
 }
 
 /// One page layout's properties.
-fn read_layout(node: roxmltree::Node<'_, '_>, layout: &mut Layout) {
+fn read_layout(node: roxmltree::Node<'_, '_>, layout: &mut Layout) -> Result<(), String> {
+    // §19.493 style:page-usage; other values read as "all".
     if let Some(usage) = node.attribute((NS_STYLE, "page-usage")) {
-        layout.usage = usage.to_string();
+        layout.usage = match usage {
+            "left" => "left",
+            "right" => "right",
+            "mirrored" => "mirrored",
+            _ => "all",
+        };
     }
     for child in node.children().filter(|n| n.is_element()) {
         match (child.tag_name().namespace(), child.tag_name().name()) {
-            (Some(NS_STYLE), "page-layout-properties") => read_page_properties(child, layout),
+            (Some(NS_STYLE), "page-layout-properties") => read_page_properties(child, layout)?,
             (Some(NS_STYLE), "header-style") => {
                 layout.header = region(child, "margin-bottom");
             }
@@ -297,6 +333,7 @@ fn read_layout(node: roxmltree::Node<'_, '_>, layout: &mut Layout) {
             _ => {}
         }
     }
+    Ok(())
 }
 
 fn region(node: roxmltree::Node<'_, '_>, spacing: &str) -> Option<Region> {
@@ -326,7 +363,7 @@ fn region(node: roxmltree::Node<'_, '_>, spacing: &str) -> Option<Region> {
     })
 }
 
-fn read_page_properties(node: roxmltree::Node<'_, '_>, layout: &mut Layout) {
+fn read_page_properties(node: roxmltree::Node<'_, '_>, layout: &mut Layout) -> Result<(), String> {
     read_background(node, layout);
     let section = &mut layout.section;
     let get = |ns: &str, name: &str| node.attribute((ns, name)).and_then(|v| length_pt(v).ok());
@@ -355,7 +392,7 @@ fn read_page_properties(node: roxmltree::Node<'_, '_>, layout: &mut Layout) {
         layout.num_format = page_number_format(format);
     }
     layout.text_direction = match node.attribute((NS_STYLE, "writing-mode")) {
-        Some("tb-rl" | "tb") => Some("tbRl".into()),
+        Some("tb-rl" | "tb") => Some("tbRl"),
         _ => layout.text_direction.take(),
     };
     // §20.183 page border and §20.217 padding: the text sits inside both.
@@ -447,7 +484,7 @@ fn read_page_properties(node: roxmltree::Node<'_, '_>, layout: &mut Layout) {
                         })
                         .collect(),
                 };
-                layout.columns = columns(&captured, width);
+                layout.columns = columns(&captured, width)?.map(Rc::new);
             }
             (Some(NS_STYLE), "footnote-sep") => {
                 let rel = child
@@ -471,6 +508,7 @@ fn read_page_properties(node: roxmltree::Node<'_, '_>, layout: &mut Layout) {
             _ => {}
         }
     }
+    Ok(())
 }
 
 /// A page's area fill: fo:background-color, the draw:fill attributes and a
@@ -491,7 +529,7 @@ fn read_background(node: roxmltree::Node<'_, '_>, layout: &mut Layout) {
             .get(&(NS_DRAW.to_string(), "fill".to_string()))
             .is_some_and(|v| v != "none");
     if visible {
-        layout.background = Some(crate::style::Style {
+        layout.background = Some(Rc::new(crate::style::Style {
             name: String::new(),
             family: "graphic".into(),
             parent: None,
@@ -504,20 +542,20 @@ fn read_background(node: roxmltree::Node<'_, '_>, layout: &mut Layout) {
                     ..crate::style::Properties::default()
                 },
             )]),
-        });
+        }));
     }
     if let Some(image) = node
         .children()
         .find(|n| xml::is(*n, NS_STYLE, "background-image"))
         .filter(|n| n.attribute((NS_XLINK, "href")).is_some())
     {
-        layout.background_image = Some((
+        layout.background_image = Some(Rc::new((
             image
                 .attribute((NS_XLINK, "href"))
                 .unwrap_or("")
                 .to_string(),
             image.attribute((NS_STYLE, "repeat")) != Some("stretch"),
-        ));
+        )));
     }
 }
 
@@ -537,7 +575,11 @@ fn page_number_format(format: &str) -> Option<&'static str> {
 /// `fo:column-gap`, or the `style:column` children's relative widths and
 /// indents within `width`; a separator line (`style:column-sep`) maps to the
 /// DOCX separator.
-pub(super) fn columns(element: &crate::style::Element, width: f64) -> Option<ColumnsSpec> {
+/// More than `MAX_STYLE_COLUMNS` columns is beyond the reader's limits.
+pub(super) fn columns(
+    element: &crate::style::Element,
+    width: f64,
+) -> Result<Option<ColumnsSpec>, String> {
     let attribute = |ns: &str, name: &str| {
         element
             .attributes
@@ -548,7 +590,10 @@ pub(super) fn columns(element: &crate::style::Element, width: f64) -> Option<Col
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(1);
     if count <= 1 {
-        return None;
+        return Ok(None);
+    }
+    if count > MAX_STYLE_COLUMNS {
+        return Err("OpenDocument columns exceed the column limit".into());
     }
     let gap = attribute(NS_FO, "column-gap")
         .and_then(|v| length_pt(v).ok())
@@ -617,17 +662,17 @@ pub(super) fn columns(element: &crate::style::Element, width: f64) -> Option<Col
                     .windows(2)
                     .all(|pair| (pair[0].space_pt - pair[1].space_pt).abs() < 0.05);
             let space = cols.first().map_or(gap, |c| c.space_pt);
-            return Some(ColumnsSpec {
+            return Ok(Some(ColumnsSpec {
                 count,
                 space_pt: space,
                 equal_width: equal,
                 sep,
                 cols,
-            });
+            }));
         }
     }
     let column_width = ((width - gap * (count - 1) as f64) / count as f64).max(1.0);
-    Some(ColumnsSpec {
+    Ok(Some(ColumnsSpec {
         count,
         space_pt: gap,
         equal_width: true,
@@ -638,7 +683,7 @@ pub(super) fn columns(element: &crate::style::Element, width: f64) -> Option<Col
                 space_pt: if i + 1 < count { gap } else { 0.0 },
             })
             .collect(),
-    })
+    }))
 }
 
 /// `text:linenumbering-configuration` (§16.30) as DOCX line numbering.
@@ -788,17 +833,20 @@ impl<'a> Reader<'a> {
         if body_master != master {
             // A first-page style followed by the body style: its own
             // regions are the section's first-page ones.
-            let first = self.region_stories(master)?;
+            // Moved out of the first style's own stories, not copied.
+            let mut first = self.region_stories(master)?;
             stories.headers.first = first
                 .headers
                 .default
-                .clone()
+                .take()
                 .or(Some(HeaderFooter::default()));
             stories.footers.first = first
                 .footers
                 .default
-                .clone()
+                .take()
                 .or(Some(HeaderFooter::default()));
+            stories.costs[0][1] = first.costs[0][0];
+            stories.costs[1][1] = first.costs[1][0];
             stories.title_page = true;
         }
         let stories = Rc::new(stories);
@@ -815,6 +863,7 @@ impl<'a> Reader<'a> {
                 title_page: false,
                 has_left: false,
                 shown: [false; 2],
+                costs: [[0; 3]; 2],
             });
         };
         let node = master_page.node;
@@ -826,6 +875,7 @@ impl<'a> Reader<'a> {
             title_page: false,
             has_left: false,
             shown: [false; 2],
+            costs: [[0; 3]; 2],
         };
         for (kind, region) in [("header", layout.header), ("footer", layout.footer)] {
             let shown = |name: &str| {
@@ -849,12 +899,15 @@ impl<'a> Reader<'a> {
                 }
                 continue;
             };
-            out.shown[usize::from(kind == "footer")] = true;
+            let which = usize::from(kind == "footer");
+            out.shown[which] = true;
             let region = region.unwrap_or_default();
             let width = geometry.text_width - region.margin_left - region.margin_right;
+            // A story and the construction bytes its tree was charged.
             let build = |reader: &mut Self,
                          node: roxmltree::Node<'a, 'a>|
-             -> Result<HeaderFooter, String> {
+             -> Result<(HeaderFooter, usize), String> {
+                let before = reader.copyable_bytes();
                 let saved_scope = std::mem::replace(&mut reader.scope, Scope::Styles);
                 let story = reader.contained_story(node, width);
                 reader.scope = saved_scope;
@@ -888,24 +941,32 @@ impl<'a> Reader<'a> {
                         paragraph.space_before += region.spacing;
                     }
                 }
-                Ok(HeaderFooter { body })
+                Ok((
+                    HeaderFooter { body },
+                    reader.copyable_bytes().saturating_sub(before),
+                ))
             };
             // Lifetimes: master nodes live as long as the styles document.
             let default_node: roxmltree::Node<'a, 'a> = unsafe_node(default);
-            let story = build(self, default_node)?;
+            let (story, cost) = build(self, default_node)?;
+            out.costs[which][0] = cost;
             let left = shown(&format!("{kind}-left")).map(unsafe_node);
             let first = shown(&format!("{kind}-first")).map(unsafe_node);
             let even = match left {
                 Some(left) => {
                     out.has_left = true;
-                    Some(build(self, left)?)
+                    let (story, cost) = build(self, left)?;
+                    out.costs[which][2] = cost;
+                    Some(story)
                 }
                 None => None,
             };
             let first_story = match first {
                 Some(first) => {
                     out.title_page = true;
-                    Some(build(self, first)?)
+                    let (story, cost) = build(self, first)?;
+                    out.costs[which][1] = cost;
+                    Some(story)
                 }
                 None => None,
             };
@@ -922,26 +983,37 @@ impl<'a> Reader<'a> {
         }
         // The page background, drawn behind the text on every page by an
         // anchored, page-sized shape in each header story.
+        let before = self.copyable_bytes();
         if let Some(background) = self.page_background(layout)? {
+            // Each header story owns a copy of the background shape and its
+            // paragraph: every copy is charged before it is made.
+            let copy = self.copyable_bytes().saturating_sub(before)
+                + std::mem::size_of::<DocParagraph>()
+                + std::mem::size_of::<BodyElement>();
             let paragraph =
                 || BodyElement::Paragraph(Box::new(anchor_paragraph(vec![background.clone()])));
+            self.charge_construction(copy)?;
+            out.costs[0][0] += copy;
             out.headers
                 .default
                 .get_or_insert_with(HeaderFooter::default)
                 .body
                 .insert(0, paragraph());
-            for story in [&mut out.headers.first, &mut out.headers.even]
-                .into_iter()
-                .flatten()
-            {
-                story.body.insert(0, paragraph());
+            for (slot, story) in [(1, &mut out.headers.first), (2, &mut out.headers.even)] {
+                if let Some(story) = story {
+                    self.charge_construction(copy)?;
+                    out.costs[0][slot] += copy;
+                    story.body.insert(0, paragraph());
+                }
             }
         }
         // A first page with only one region's first variant uses the other
         // region's ordinary story.
         if out.title_page {
-            for set in [&mut out.headers, &mut out.footers] {
+            for (which, set) in [(0, &mut out.headers), (1, &mut out.footers)] {
                 if set.first.is_none() {
+                    self.charge_construction(out.costs[which][0])?;
+                    out.costs[which][1] = out.costs[which][0];
                     set.first = set.default.clone();
                 }
             }
@@ -989,7 +1061,7 @@ impl<'a> Reader<'a> {
         section.title_page = stories.title_page;
         section.section_start = Some(start.kind.to_string());
         section.columns = start.columns.clone();
-        section.text_direction = layout.text_direction.clone();
+        section.text_direction = layout.text_direction.map(str::to_string);
         section.page_num_type =
             (layout.num_format.is_some() || start.page_start.is_some()).then(|| PageNumType {
                 start: start.page_start,
@@ -1005,11 +1077,19 @@ impl<'a> Reader<'a> {
                 ((width - base) * 4096.0).round()
             });
         }
+        // Every section owns its copies of the master's stories (DOCX
+        // sections resolve their header/footer references independently):
+        // each copy is charged its story's construction cost first.
+        let set_cost = |costs: &[usize; 3]| costs.iter().fold(0usize, |a, c| a.saturating_add(*c));
+        self.charge_construction(
+            set_cost(&stories.costs[0]).saturating_add(set_cost(&stories.costs[1])),
+        )?;
         let mut headers = stories.headers.clone();
         let mut footers = stories.footers.clone();
         if even_and_odd {
-            for set in [&mut headers, &mut footers] {
+            for (which, set) in [(0, &mut headers), (1, &mut footers)] {
                 if set.even.is_none() {
+                    self.charge_construction(stories.costs[which][0])?;
                     set.even = set.default.clone();
                 }
             }
@@ -1039,7 +1119,7 @@ impl<'a> Reader<'a> {
             None => None,
         };
         if fill.is_none() {
-            if let Some((href, tile)) = &layout.background_image {
+            if let Some((href, tile)) = layout.background_image.as_deref() {
                 if let Some((path, mime)) = self.package_image(href)? {
                     fill = Some(docx_model::ShapeFill::Image {
                         image_path: path,
