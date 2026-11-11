@@ -729,6 +729,9 @@ export interface TextLayoutService {
    * {@link shape} does, and only a symbol-font slot family is judged (see
    * {@link TextLayoutServiceInput.symbolText}). */
   symbolText?(request: Readonly<SymbolTextRequest>): readonly SymbolTextSegment[];
+  /** The authored family of the §17.3.2.26 slot that {@link shape} selects
+   * for `character` under `request`'s slots. */
+  scalarFamily?(request: Readonly<Omit<SymbolTextRequest, 'text'>>, character: string): string | null | undefined;
 }
 
 export type SymbolTextRequest = Pick<TextShapeRequest,
@@ -1110,6 +1113,15 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
     && (!input.glyphContours || input.glyphContoursSupportDirection === true)
     && (!(input.measurer.sameGlyphRaster || input.measurer.ownsGlyphs)
       || input.measurer.supportsDirectedAuxiliaries === true);
+  // The slot shape selects for one scalar (scriptSlot with this service's
+  // East Asian charset table), shared by symbolText and scalarFamily.
+  const scalarSlot = (request: Readonly<Omit<SymbolTextRequest, 'text'>>, character: string) =>
+    scriptSlot(character.codePointAt(0) ?? 0, request.complexScript ?? false,
+      request.fontHint, request.eastAsiaLanguage, request.eastAsiaFontCharset
+        ?? (() => {
+          const family = requestedFamily(request, 'eastAsia');
+          return family ? ownValue(eastAsiaFontCharsets, family.trim().toLowerCase()) : undefined;
+        })());
   const fingerprint = stableFingerprint('text', {
     contextualAdvanceBatch: true,
     glyphContours: input.glyphContourFingerprint ?? 'unavailable',
@@ -1360,6 +1372,9 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
       } } : {}),
     ...(input.fonts.exactLocalFaces
       ? { exactLocalFaces: (family: string) => input.fonts.exactLocalFaces!(family) } : {}),
+    scalarFamily(request: Readonly<Omit<SymbolTextRequest, 'text'>>, character: string) {
+      return requestedFamily(request, scalarSlot(request, character));
+    },
     symbolText(request: Readonly<SymbolTextRequest>) {
       const out: SymbolTextSegment[] = [];
       const push = (part: SymbolTextSegment) => {
@@ -1370,12 +1385,7 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
         else if (part.text) out.push(part);
       };
       for (const character of request.text) {
-        const slot = scriptSlot(character.codePointAt(0) ?? 0, request.complexScript ?? false,
-          request.fontHint, request.eastAsiaLanguage, request.eastAsiaFontCharset
-            ?? (() => {
-              const family = requestedFamily(request, 'eastAsia');
-              return family ? ownValue(eastAsiaFontCharsets, family.trim().toLowerCase()) : undefined;
-            })());
+        const slot = scalarSlot(request, character);
         const family = requestedFamily(request, slot);
         if (!family || !isSymbolFontFamily(family)) { push({ text: character, mapped: false }); continue; }
         const parts = input.symbolText

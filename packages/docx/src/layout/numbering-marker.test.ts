@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { symbolCodeSet, symbolTextToUnicodeSegments } from '@silurus/ooxml-core';
+import { SYMBOL_FACE_UNICODE, symbolCodeSet, symbolTextToUnicodeSegments } from '@silurus/ooxml-core';
 import type { TextLayoutService } from './text.js';
 import { resolveNumberingMarkerGeometry } from './numbering-marker.js';
 import { createTextLayoutService } from './text.js';
@@ -134,6 +134,32 @@ describe('resolveNumberingMarkerGeometry', () => {
     expect(requests.slice(0, 2)).toEqual([{ text: '\uF061', ascii: 'Symbol' }, { text: '\u03b2', ascii: null }]);
     expect(geometry.shape?.spans.map((span) => [span.text, span.start, span.end])).toEqual([['\uF061', 0, 1], ['\u03b2', 1, 2]]);
     expect(geometry.markerWidthPt).toBe(geometry.shape?.advancePt);
+  });
+
+  it('keeps the marker slots for text converted from a face that draws no symbol code', () => {
+    // Apple's Symbol is Unicode-encoded: U+F0B7 becomes "•", which that same
+    // face draws, as in 0.89. A symbol-encoded face elsewhere would clear them.
+    const requests: { text: string; ascii: string | null | undefined }[] = [];
+    const base = createTextLayoutService({
+      fonts: createFontResolver([]),
+      measurer: { fingerprint: 'marker-symbol-unicode-face', measure: (request) => ({
+        advancePt: request.text.length * 6, ascentPt: 8, descentPt: 2,
+      }) },
+      symbolText: (markerText, family) => symbolTextToUnicodeSegments(markerText, family, { encoding: SYMBOL_FACE_UNICODE })
+        .map((part) => (part.mapped ? { ...part, unicodeFace: true as const } : part)),
+    });
+    const service: TextLayoutService = { ...base, shape(request) {
+      requests.push({ text: request.text, ascii: request.fonts.ascii });
+      return base.shape(request);
+    } };
+    const geometry = resolveNumberingMarkerGeometry(
+      { numId: 1, level: 0, format: 'bullet', text: '\uF0B7', suff: 'tab', indentLeft: 0, tab: 36, fontFamily: 'Symbol' },
+      { fontSizePt: 12, fonts: { ascii: 'Symbol', highAnsi: 'Symbol', eastAsia: 'Symbol', complexScript: 'Symbol' },
+        weight: 400, style: 'normal', complexScript: false },
+      { authoredFirstIndentPt: 0, physicalIndentLeftPt: 0, tabStops: [], defaultTabPt: 36, baseRtl: false }, service,
+    );
+    expect(geometry.markerText).toBe('\u2022');
+    expect(requests[0]).toEqual({ text: '\u2022', ascii: 'Symbol' });
   });
 
   it('keeps a partly native marker as one authored run in a right-to-left paragraph', () => {

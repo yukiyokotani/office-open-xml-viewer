@@ -271,10 +271,9 @@ export function resolveNumberingMarkerGeometry(
   // marker is shaped with every authored slot cleared (a Unicode-capable
   // generic route), like a converted run segment; the codes the face keeps
   // are shaped in the marker's slots, and the pieces are joined in order.
-  // A face known to draw no symbol code (missing, or Unicode-encoded like
-  // Apple's Symbol) has no symbol cmap, so converted text keeps its slots
-  // when they all name that face,
-  // except an emoji-capable one: its monochrome proof is for the generic route.
+  // Converted text from a face known to draw no symbol code (missing, or
+  // Unicode-encoded like Apple's Symbol) keeps the slots when that is safe,
+  // as in 0.89 (see safeInSlots below).
   const markerFamily = numbering.fontFamily ?? markerInput.fonts.ascii ?? null;
   const slots = [markerInput.fonts, markerInput.themeFonts].flatMap((fonts) => fonts
     ? [fonts.ascii, fonts.highAnsi, fonts.eastAsia, fonts.complexScript] : []);
@@ -316,12 +315,29 @@ export function resolveNumberingMarkerGeometry(
     themeFontPresence: undefined,
   };
   const markerParts = markerSegments ?? [{ text: markerText, mapped: false }];
-  // The judged face is the marker slots' family only when they name one family:
-  // otherwise converted text (say "(") could take another slot's symbol face.
-  const uniformSlots = new Set(slots.filter(Boolean).map((family) => family!.trim().toLowerCase())).size <= 1;
+  // Converted text may keep the marker slots only when no character of it
+  // takes a symbol face there that draws symbol codes: the slot shaping
+  // selects for it names a non-symbol family, or a symbol family whose face
+  // draws none (judged with a probe code). Otherwise (say "(" taking an
+  // installed Wingdings in another slot) it is shaped without the slots, as
+  // is an emoji-capable one: its monochrome proof is for the generic route.
+  const markerSlots = {
+    fonts: markerInput.fonts, themeFonts: markerInput.themeFonts, themeFontPresence: markerInput.themeFontPresence,
+    weight: markerInput.weight, style: markerInput.style, complexScript: markerInput.complexScript,
+    fontHint: markerInput.fontHint, eastAsiaLanguage: markerInput.eastAsiaLanguage,
+  };
+  const safeInSlots = (text: string) => !text.includes('\uFE0E') && [...text].every((character) => {
+    const family = service.scalarFamily?.(markerSlots, character);
+    if (family === undefined) return false;
+    if (!isSymbolFontFamily(family)) return true;
+    const probe = service.symbolText?.({ ...symbolRequest, text: '\uF0B7',
+      fonts: { ascii: family, highAnsi: family, eastAsia: family, complexScript: family },
+      themeFonts: undefined, themeFontPresence: undefined });
+    return probe?.length === 1 && probe[0]!.unicodeFace === true;
+  });
   const partLayouts = markerText
     ? markerParts.map((part) => shapeNumberingMarkerText(
-        part.mapped && !(part.unicodeFace && uniformSlots && !part.text.includes('\uFE0E'))
+        part.mapped && !(part.unicodeFace && safeInSlots(part.text))
           ? convertedInput : markerInput, part.text, 1, service, clusterGeometry,
       ))
     : [];
