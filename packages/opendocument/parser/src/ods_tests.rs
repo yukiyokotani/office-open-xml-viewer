@@ -555,6 +555,26 @@ fn style_values_past_the_bound_reject() {
     let body = content("", &empty_tables(1, ""));
     let (workbook, _) = read_charging(&body, &styles_with_default_family(FAMILY + 1, ""));
     assert_eq!(workbook.err(), Some(crate::error::resource("style value")));
+    // A shared picture-fill path, a style reference and an extension
+    // property set are bounded alike.
+    let long = "p".repeat(FAMILY + 1);
+    for common in [
+        format!(r#"<draw:fill-image draw:name="I" xlink:href="Pictures/{long}.png"/>"#),
+        format!(
+            r#"<style:style style:name="g" style:family="graphic"><loext:graphic-properties xmlns:loext="urn:org:documentfoundation:names:experimental:office:xmlns:loext:1.0" svg:stroke-width="{long}"/></style:style>"#
+        ),
+    ] {
+        let (workbook, _) = read_charging(&body, &styles_with_default_family(1, &common));
+        assert_eq!(workbook.err(), Some(crate::error::resource("style value")));
+    }
+    let reference = content(
+        "",
+        &table(&format!(
+            r#"<table:table-row><table:table-cell table:style-name="{long}"/></table:table-row>"#
+        )),
+    );
+    let (workbook, _) = read_charging(&reference, &styles(""));
+    assert_eq!(workbook.err(), Some(crate::error::resource("style value")));
 }
 
 #[test]

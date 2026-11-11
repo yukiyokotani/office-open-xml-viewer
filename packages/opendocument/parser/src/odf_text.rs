@@ -192,9 +192,10 @@ pub fn check_space_runs(root: roxmltree::Node<'_, '_>) -> Result<(), String> {
 }
 
 /// Implementation bound on one style value: any attribute of a style,
-/// font-face, property or data-style element (`style:` / `number:`
-/// namespaces: names, font families, lengths, colours), and any style
-/// reference (`*style-name`) anywhere. Readers resolve a style value once
+/// font-face, property, data-style or picture-fill definition (`style:` /
+/// `number:` namespaces, `*-properties`, `draw:fill-image`: names, font
+/// families, lengths, colours, fill paths), and any style reference
+/// (`*style-name`) anywhere. Readers resolve a style value once
 /// per cell, row, run or axis that inherits it, and copy families into each
 /// font, so the bound keeps that repeated work and each copy small; a longer
 /// value rejects the part. (LibreOffice's values are a few dozen bytes.)
@@ -209,11 +210,14 @@ const NS_DATASTYLE: &str = "urn:oasis:names:tc:opendocument:xmlns:datastyle:1.0"
 pub fn check_style_values(root: roxmltree::Node<'_, '_>) -> Result<(), String> {
     for node in root.descendants().filter(|n| n.is_element()) {
         // Style, data-style and property elements, whatever the namespace
-        // of an extension property set (`loext:graphic-properties`).
+        // of an extension property set (`loext:graphic-properties`), and
+        // picture-fill definitions, whose package path every shape that
+        // uses the fill resolves.
         let namespace = node.tag_name().namespace();
         let style_element = namespace == Some(crate::xml::NS_STYLE)
             || namespace == Some(NS_DATASTYLE)
-            || node.tag_name().name().ends_with("-properties");
+            || node.tag_name().name().ends_with("-properties")
+            || xml::is(node, crate::xml::NS_DRAW, "fill-image");
         for attribute in node.attributes() {
             let name = attribute.name();
             let bound = if style_element && name == "condition" {
