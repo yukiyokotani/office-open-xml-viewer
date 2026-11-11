@@ -1966,27 +1966,28 @@ pub fn notes_text<'a>(containers: impl Iterator<Item = Nd<'a>>) -> Result<String
         text.push_str(piece);
         Ok(())
     };
-    let paragraph = |n: &Nd<'a>| xml::is(*n, NS_TEXT, "p") || xml::is(*n, NS_TEXT, "h");
+    let paragraph = |n: Nd<'a>| xml::is(n, NS_TEXT, "p") || xml::is(n, NS_TEXT, "h");
     for container in containers {
-        // Outermost paragraphs only: a paragraph nested in another (not
-        // valid ODF) is read as part of it, so every node is read once.
-        for p in container.descendants().filter(|n| {
-            paragraph(n)
-                && !n
-                    .ancestors()
-                    .skip(1)
-                    .take_while(|a| *a != container)
-                    .any(|a| paragraph(&a))
-        }) {
-            if !first {
-                push(&mut text, "\n")?;
+        // One traversal in document order that tracks whether it is inside
+        // a paragraph: each outermost paragraph is one line (a paragraph
+        // nested in another, not valid ODF, is read as part of it), and
+        // every node is visited once.
+        let mut stack: Vec<(Nd<'a>, bool)> = vec![(container, false)];
+        while let Some((node, inside)) = stack.pop() {
+            let starts = !inside && node != container && paragraph(node);
+            if starts {
+                if !first {
+                    push(&mut text, "\n")?;
+                }
+                first = false;
             }
-            first = false;
-            for d in p.descendants() {
-                if d.is_text() {
-                    push(&mut text, &collapse_whitespace(d.text().unwrap_or("")))?;
-                } else if xml::is(d, NS_TEXT, "s") {
-                    let n = d
+            let inside = inside || starts;
+            if inside {
+                if node.is_text() {
+                    push(&mut text, &collapse_whitespace(node.text().unwrap_or("")))?;
+                    continue;
+                } else if xml::is(node, NS_TEXT, "s") {
+                    let n = node
                         .attribute((NS_TEXT, "c"))
                         .and_then(|c| c.parse::<usize>().ok())
                         .unwrap_or(1)
@@ -1994,11 +1995,14 @@ pub fn notes_text<'a>(containers: impl Iterator<Item = Nd<'a>>) -> Result<String
                     for _ in 0..n {
                         push(&mut text, " ")?;
                     }
-                } else if xml::is(d, NS_TEXT, "tab") {
+                } else if xml::is(node, NS_TEXT, "tab") {
                     push(&mut text, "\t")?;
-                } else if xml::is(d, NS_TEXT, "line-break") {
+                } else if xml::is(node, NS_TEXT, "line-break") {
                     push(&mut text, "\n")?;
                 }
+            }
+            for child in node.children().collect::<Vec<_>>().into_iter().rev() {
+                stack.push((child, inside));
             }
         }
     }

@@ -182,6 +182,10 @@ impl<'a> Sheet<'a> {
                     let name = master
                         .attribute((NS_STYLE, "name"))
                         .ok_or_else(|| invalid("a master page has no name"))?;
+                    // Its name selects its outline styles for every paragraph.
+                    if name.len() > MAX_PROPERTY_VALUE_BYTES {
+                        return Err(invalid("a master page name exceeds the name limit"));
+                    }
                     if self.master_pages.insert(name, master).is_none() {
                         self.master_order.push(name);
                     }

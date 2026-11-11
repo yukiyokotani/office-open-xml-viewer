@@ -1976,6 +1976,14 @@ mod tests {
     }
 
     #[test]
+    fn speaker_notes_read_each_paragraph_once() {
+        let body = r#"<presentation:notes><draw:frame presentation:class="notes"><draw:text-box><text:p>One<text:s text:c="2"/>two</text:p><text:p>Three<text:p>nested</text:p></text:p></draw:text-box></draw:frame></presentation:notes>"#;
+        let deck = deck("", "", "", &page(body)).unwrap();
+        let slide0 = model(&deck, 0);
+        assert_eq!(slide0.notes.as_deref(), Some("One  two\nThreenested"));
+    }
+
+    #[test]
     fn a_continued_list_counts_its_own_continuation() {
         let styles = r#"<text:list-style style:name="L1"><text:list-level-style-number text:level="1" style:num-format="1" style:num-suffix="."/></text:list-style>"#;
         let item = |t: &str| format!("<text:list-item><text:p>{t}</text:p></text:list-item>");

@@ -14,6 +14,8 @@ use std::collections::HashMap;
 /// Implementation bound on a style identifier (name, parent, family, data
 /// style) in bytes.
 const MAX_STYLE_NAME_BYTES: usize = 1024;
+/// Implementation bound on one style property value in bytes.
+const MAX_PROPERTY_VALUE_BYTES: usize = 4096;
 /// Implementation bound on a parent chain; a cycle is a container error.
 const MAX_PARENT_DEPTH: usize = 64;
 /// Implementation bound on stored style data (owned strings plus a fixed
@@ -117,6 +119,13 @@ impl StyleStore {
                 || long("data-style-name")
             {
                 return Err("OpenDocument style name exceeds the style name limit".to_string());
+            }
+            // Property values are parsed on every lookup.
+            if node.descendants().filter(|n| n.is_element()).any(|n| {
+                n.attributes()
+                    .any(|a| a.value().len() > MAX_PROPERTY_VALUE_BYTES)
+            }) {
+                return Err("OpenDocument style property exceeds the value limit".to_string());
             }
             let style = read_style(node);
             if default {
