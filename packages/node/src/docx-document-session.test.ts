@@ -106,6 +106,51 @@ describe('Node bounded DOCX document session', () => {
     }
   });
 
+  it('extracts model pictures through the session-owned bounded cache and rejects after close', async () => {
+    const extract = vi.spyOn(archivePrototype(), 'extract_image');
+    try {
+      const session = await openDocxDocument(bytes, { factory, currentDate: 0 });
+      const first = await session.getImage('word/media/image1.jpeg', 'image/jpeg');
+      const second = await session.getImage('word/media/image1.jpeg', 'image/jpeg');
+      expect(first).toBe(second);
+      expect(first.type).toBe('image/jpeg');
+      // The demo package stores image1.jpeg as a 202,076-byte JPEG (SOI FF D8).
+      expect(first.size).toBe(202_076);
+      expect([...new Uint8Array(await first.slice(0, 2).arrayBuffer())]).toEqual([0xff, 0xd8]);
+      expect((await session.getImage('word/media/image1.jpeg')).type).toBe('application/octet-stream');
+      expect(extract).toHaveBeenCalledTimes(1);
+      expect(session.resourceUsage?.distinctInflatedBytes).toBeGreaterThanOrEqual(202_076);
+
+      await session.close();
+      await expect(session.getImage('word/media/image1.jpeg', 'image/jpeg')).rejects.toThrow(/closed/);
+      expect(extract).toHaveBeenCalledTimes(1);
+    } finally {
+      extract.mockRestore();
+    }
+  });
+
+  it('fails the session when a picture read exceeds the archive entry budget', async () => {
+    // document.xml (68,517 bytes) and every other non-media part fit; the
+    // 202,076-byte image1.jpeg does not.
+    const session = await openDocxDocument(bytes, {
+      factory,
+      currentDate: 0,
+      resourceLimits: { maxArchiveEntryBytes: 150_000 },
+    });
+    try {
+      const failure = await session.getImage('word/media/image1.jpeg', 'image/jpeg').then(
+        () => { throw new Error('resolved an over-budget picture'); },
+        (error: unknown) => error,
+      );
+      expect(failure).toMatchObject({ name: 'OoxmlResourceLimitError', code: 'ooxml-resource-limit' });
+      // A resource-limit failure fails the session, as in the PPTX session.
+      await expect(session.getImage('word/media/image3.jpeg', 'image/jpeg')).rejects.toBe(failure);
+      await expect(session.renderPage(0)).rejects.toBe(failure);
+    } finally {
+      await session.close();
+    }
+  });
+
   it('fans a render-time trap out to sibling sessions and recovers on the next open', async () => {
     const extract = vi.spyOn(archivePrototype(), 'extract_image')
       .mockImplementationOnce(() => { throw new RangeError('synthetic trap'); });

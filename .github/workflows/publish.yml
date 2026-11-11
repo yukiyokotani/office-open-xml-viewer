@@ -41,6 +41,7 @@ jobs:
             packages/xlsx/parser
             packages/docx/parser
             packages/legacy-office/parser
+            packages/opendocument/parser
 
       - name: Install wasm-pack
         run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
@@ -77,6 +78,9 @@ jobs:
         run: pnpm check:versions
 
       # ── Build ────────────────────────────────────────────────────────────────
+      # Builds the viewer parsers, the legacy readers and one OpenDocument reader
+      # per `@silurus/ooxml-opendocument` export (`wasm:<format>` cargo feature
+      # scripts, see scripts/build-opendocument-wasm.mjs).
       - name: Build WASM (all packages)
         run: pnpm build:wasm
 
@@ -135,13 +139,11 @@ jobs:
       # intentionally ESM-only: it ignores the node10 and node16-from-CJS
       # resolutions (which cannot succeed without a legacy CJS build we do not
       # ship) while still failing on any regression in the ESM / bundler columns.
-      - name: Verify both package exports (publint + attw)
+      - name: Verify all package exports (publint + attw)
         run: |
-          npx --yes publint
-          npx --yes @arethetypeswrong/cli --pack . --profile esm-only
-          cd packages/legacy-office
-          npx --yes publint
-          npx --yes @arethetypeswrong/cli --pack . --profile esm-only
+          for directory in . packages/legacy-office packages/opendocument; do
+            (cd "$directory" && npx --yes publint && npx --yes @arethetypeswrong/cli --pack . --profile esm-only)
+          done
 
       - name: Install Playwright Chrome (only if missing)
         timeout-minutes: 5
@@ -150,12 +152,15 @@ jobs:
             pnpm exec playwright install chrome --with-deps
           fi
 
-      - name: Smoke test both packed packages in Node and Vite
+      - name: Smoke test all packed packages in Node and Vite
         run: pnpm test:packed-packages
 
       # Exact-version retries: registry failures other than E404 fail closed.
-      # The root must be available before its exact-peer companion publishes.
-      - name: Publish viewer, then legacy companion
+      # The root must be available before its exact-peer companions publish
+      # (@silurus/ooxml-legacy-office, then @silurus/ooxml-opendocument).
+      # NPM_TOKEN must be allowed to create new @silurus packages for a
+      # companion's first release; see AGENTS.md "Release Workflow".
+      - name: Publish viewer, then companions
         run: node scripts/publish-packages.mjs
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
