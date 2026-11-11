@@ -112,6 +112,12 @@ pub trait RangeResolver {
     fn hidden(&self, address: &str) -> Option<Vec<bool>>;
 }
 
+/// The package directory of a chart object reference (`./Object 1/` →
+/// `Object 1`): the key under which a reader may share one object's read.
+pub fn object_dir(reference: &str) -> &str {
+    reference.trim_start_matches("./").trim_end_matches('/')
+}
+
 /// Read the chart object stored under `object_dir` (`Object 1`). `Ok(None)`
 /// when the object is not a chart (another embedded document type).
 pub fn read_chart_object(
@@ -130,7 +136,7 @@ pub fn read_chart_object_within(
     resolver: Option<&dyn RangeResolver>,
     limit: usize,
 ) -> Result<Option<ChartModel>, String> {
-    let dir = object_dir.trim_start_matches("./").trim_end_matches('/');
+    let dir = self::object_dir(object_dir);
     let content_path = format!("{dir}/content.xml");
     if !package.contains(&content_path) {
         return Ok(None);

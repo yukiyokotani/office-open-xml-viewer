@@ -208,9 +208,12 @@ const NS_DATASTYLE: &str = "urn:oasis:names:tc:opendocument:xmlns:datastyle:1.0"
 /// condition over [`MAX_STYLE_CONDITION_BYTES`]).
 pub fn check_style_values(root: roxmltree::Node<'_, '_>) -> Result<(), String> {
     for node in root.descendants().filter(|n| n.is_element()) {
+        // Style, data-style and property elements, whatever the namespace
+        // of an extension property set (`loext:graphic-properties`).
         let namespace = node.tag_name().namespace();
-        let style_element =
-            namespace == Some(crate::xml::NS_STYLE) || namespace == Some(NS_DATASTYLE);
+        let style_element = namespace == Some(crate::xml::NS_STYLE)
+            || namespace == Some(NS_DATASTYLE)
+            || node.tag_name().name().ends_with("-properties");
         for attribute in node.attributes() {
             let name = attribute.name();
             let bound = if style_element && name == "condition" {

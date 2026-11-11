@@ -63,7 +63,7 @@ impl Grid {
             column_left,
             rows,
             default_row_px,
-            trailing_col_px: i64::from(default_col_px.max(1)),
+            trailing_col_px: i64::from(default_col_px),
         }
     }
 
@@ -113,6 +113,12 @@ impl Grid {
             return (col - 1, offset % px);
         }
         let covered = self.covered();
+        if self.trailing_col_px == 0 {
+            // Zero-width trailing columns hold no point: the last column
+            // takes everything past the runs.
+            let last = MAX_COLS - 1;
+            return (last, x - self.col_left(last));
+        }
         let col = i64::from(covered) + 1 + (x - total) / self.trailing_col_px;
         if col >= i64::from(MAX_COLS) {
             let last = MAX_COLS - 1;
@@ -1251,8 +1257,10 @@ pub(crate) fn resolve_charts(
 ) -> Result<(), String> {
     for chart in pending {
         // Each object is read once; every further frame that shows it
-        // takes a copy admitted at its retained size.
-        let model = match ctx.chart_objects.get(&chart.object) {
+        // takes a copy admitted at its retained size. The key is the
+        // object directory the loader reads (`./` and trailing `/` removed).
+        let key = crate::odf_chart::object_dir(&chart.object).to_string();
+        let model = match ctx.chart_objects.get(&key) {
             Some(model) => match model {
                 Some(model) => Some(ctx.budget.copy(model)?),
                 None => None,
@@ -1279,12 +1287,9 @@ pub(crate) fn resolve_charts(
                     model
                         .as_ref()
                         .map_or(0, crate::retained_size)
-                        .saturating_add(super::hash_entry_bytes::<String, Option<()>>(
-                            chart.object.len(),
-                        )),
+                        .saturating_add(super::hash_entry_bytes::<String, Option<()>>(key.len())),
                 )?;
-                ctx.chart_objects
-                    .insert(chart.object.clone(), model.as_ref().cloned());
+                ctx.chart_objects.insert(key, model.as_ref().cloned());
                 model
             }
         };
@@ -1505,6 +1510,12 @@ mod tests {
             assert_eq!(grid.locate_x(x), expected, "locate_x {x}");
         }
         assert_eq!(grid.locate_x(i64::from(MAX_COLS) * 70 * 2).0, MAX_COLS - 1);
+        // Zero-width trailing columns: everything past the runs is in the
+        // last column, as a column-by-column walk finds it.
+        let zero = Grid::new(&[(1, 1, 96)], 0, &worksheet, 17);
+        assert_eq!(zero.col_left(5), 96);
+        assert_eq!(zero.locate_x(50), (0, 50));
+        assert_eq!(zero.locate_x(120), (MAX_COLS - 1, 24));
         let height = |row: u32| -> i64 {
             worksheet
                 .row_heights
