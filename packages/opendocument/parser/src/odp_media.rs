@@ -47,6 +47,9 @@ pub struct Media<'p> {
     /// Generated resources by the description they were generated from, so
     /// a repeated description (a master hatch on every slide) is reused.
     generated: HashMap<String, (String, Resource)>,
+    /// Package items that could not be admitted (unreadable, unknown type,
+    /// failed conversion): never read again.
+    failed: std::collections::HashSet<String>,
     /// Remaining retained bytes (see [`MAX_RETAINED_BYTES`]).
     retained: usize,
     /// Set when a charge that cannot return an error failed; the reader
@@ -61,6 +64,7 @@ impl<'p> Media<'p> {
             admitted: HashMap::new(),
             converted: HashMap::new(),
             generated: HashMap::new(),
+            failed: std::collections::HashSet::new(),
             retained: MAX_RETAINED_BYTES,
             exhausted: false,
         }
@@ -99,31 +103,43 @@ impl<'p> Media<'p> {
         if let Some(resource) = self.admitted.get(&path) {
             return Some((path, resource.clone()));
         }
-        if !self.package.contains(&path) {
+        if self.failed.contains(&path) || !self.package.contains(&path) {
             return None;
         }
+        match self.read_resource(&path) {
+            Some(resource) => {
+                self.admitted.insert(path.clone(), resource.clone());
+                Some((path, resource))
+            }
+            None => {
+                self.failed.insert(path);
+                None
+            }
+        }
+    }
+
+    /// Read, identify (and for a StarView metafile, convert) one item.
+    fn read_resource(&mut self, path: &str) -> Option<Resource> {
         let bytes = self
             .package
             .session()
             .run_operation("odp-media", |operation| {
-                operation.read_bytes_bounded(&path, MAX_HEADER_BYTES)
+                operation.read_bytes_bounded(path, MAX_HEADER_BYTES)
             })
             .ok()?;
-        let resource = if bytes.starts_with(b"VCLMTF") {
+        if bytes.starts_with(b"VCLMTF") {
             let converted = crate::svm::to_svg(&bytes)?;
             self.charge(converted.svg.len()).ok()?;
-            self.converted.insert(path.clone(), converted.svg);
-            Resource {
+            self.converted.insert(path.to_string(), converted.svg);
+            Some(Resource {
                 mime: "image/svg+xml",
                 pixels: None,
                 dpi: None,
                 frame: Some(converted.size_emu),
-            }
+            })
         } else {
-            sniff(&bytes)?
-        };
-        self.admitted.insert(path.clone(), resource.clone());
-        Some((path, resource))
+            sniff(&bytes)
+        }
     }
 
     /// Register generated SVG content (an exact hatch fill) under a

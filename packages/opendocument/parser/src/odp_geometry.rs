@@ -24,6 +24,14 @@ const MAX_FORMULA_DEPTH: usize = 64;
 /// the depth of the expression tree (a flat `a+b+…` chain is left-deep), so
 /// evaluating and dropping a tree never recurses deeper than this.
 const MAX_FORMULA_NODES: usize = 512;
+/// Implementation bound on the equations of one shape and on the nodes of
+/// all its formulas together (each formula is parsed, and counted, before
+/// it is kept).
+const MAX_EQUATIONS: usize = 16_384;
+const MAX_SHAPE_FORMULA_NODES: usize = 262_144;
+/// Implementation bound on the modifiers and sub-view sizes read.
+const MAX_MODIFIERS: usize = 1_024;
+const MAX_SUB_VIEW_VALUES: usize = 2 * 65_536;
 /// Implementation bound on nested evaluation across equation references
 /// (`?f1` → `?f2` → …): deeper chains evaluate to 0 like a cycle.
 const MAX_EVAL_DEPTH: usize = 512;
@@ -197,10 +205,17 @@ pub fn parse_transform(value: &str) -> Option<Affine> {
         let open = rest.find('(')?;
         let close = rest[open..].find(')')? + open;
         let name = rest[..open].trim();
-        let args: Vec<&str> = rest[open + 1..close]
+        // At most six arguments (a matrix); more make the transform invalid.
+        let mut args: Vec<&str> = Vec::with_capacity(6);
+        for arg in rest[open + 1..close]
             .split(|c: char| c == ',' || c.is_whitespace())
             .filter(|s| !s.is_empty())
-            .collect();
+        {
+            if args.len() == 6 {
+                return None;
+            }
+            args.push(arg);
+        }
         let num = |i: usize| -> Option<f64> { args.get(i)?.parse::<f64>().ok() };
         let len = |i: usize| -> Option<f64> {
             let arg = args.get(i)?;
@@ -646,13 +661,18 @@ pub fn parse_points(value: &str) -> Option<Vec<(f64, f64)>> {
 
 /// `svg:viewBox` (§19.570): "x y w h".
 pub fn parse_view_box(value: &str) -> Option<(f64, f64, f64, f64)> {
-    let v: Vec<f64> = value
+    let mut v = [0.0f64; 4];
+    let mut n = 0;
+    for part in value
         .split(|c: char| c == ',' || c.is_whitespace())
         .filter(|s| !s.is_empty())
-        .map(|s| s.parse::<f64>())
-        .collect::<Result<_, _>>()
-        .ok()?;
-    (v.len() == 4 && v.iter().all(|x| x.is_finite())).then(|| (v[0], v[1], v[2], v[3]))
+    {
+        // Exactly four numbers: a fifth is rejected before it is read.
+        let slot = v.get_mut(n)?;
+        *slot = part.parse::<f64>().ok().filter(|x| x.is_finite())?;
+        n += 1;
+    }
+    (n == 4).then_some((v[0], v[1], v[2], v[3]))
 }
 
 // ---------------------------------------------------------------------------
@@ -1044,19 +1064,25 @@ pub fn enhanced_geometry(
         view = (0.0, 0.0, log.0, log.1);
     }
     let mut names: HashMap<&str, usize> = HashMap::new();
-    let equations: Vec<_> = node
+    let mut equations = Vec::new();
+    for eq in node
         .children()
         .filter(|c| crate::xml::is(*c, NS_DRAW, "equation"))
-        .collect();
+    {
+        if equations.len() >= MAX_EQUATIONS {
+            return Err(invalid("a custom shape exceeds the formula limit"));
+        }
+        equations.push(eq);
+    }
     for (i, eq) in equations.iter().enumerate() {
         if let Some(name) = eq.attribute((NS_DRAW, "name")) {
             names.insert(name, i);
         }
     }
-    let exprs: Vec<Option<Expr>> = equations
-        .iter()
-        .map(|eq| {
-            let formula = eq.attribute((NS_DRAW, "formula"))?;
+    let mut total_nodes = 0usize;
+    let mut exprs: Vec<Option<Expr>> = Vec::with_capacity(equations.len());
+    for eq in &equations {
+        let parsed = eq.attribute((NS_DRAW, "formula")).and_then(|formula| {
             let mut p = FormulaParser {
                 bytes: formula.as_bytes(),
                 pos: 0,
@@ -1064,14 +1090,20 @@ pub fn enhanced_geometry(
                 depth: 0,
                 nodes: 0,
             };
-            let e = p.expr()?;
-            (p.peek().is_none()).then_some(e)
-        })
-        .collect();
+            let e = p.expr();
+            total_nodes += p.nodes;
+            e.filter(|_| p.peek().is_none())
+        });
+        if total_nodes > MAX_SHAPE_FORMULA_NODES {
+            return Err(invalid("a custom shape exceeds the formula limit"));
+        }
+        exprs.push(parsed);
+    }
     let modifiers: Vec<f64> = node
         .attribute((NS_DRAW, "modifiers"))
         .map(|m| {
             m.split_whitespace()
+                .take(MAX_MODIFIERS)
                 .map(|s| {
                     s.parse::<f64>()
                         .ok()
@@ -1102,6 +1134,7 @@ pub fn enhanced_geometry(
         .attribute((NS_DRAWOOO, "sub-view-size"))
         .map(|s| {
             s.split_whitespace()
+                .take(MAX_SUB_VIEW_VALUES)
                 .filter_map(|v| v.parse().ok())
                 .collect()
         })

@@ -19,18 +19,25 @@ use std::cell::Cell;
 use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 
+/// Implementation bound on the text work of the whole deck (every object,
+/// master objects once per slide that shows them).
+pub const MAX_DECK_TEXT_WORK: usize = 256 * 1024 * 1024;
+
 /// The remaining text payload and work of one object (see
-/// [`MAX_OBJECT_TEXT_BYTES`], [`MAX_OBJECT_TEXT_WORK`]).
-pub struct TextPayload {
+/// [`MAX_OBJECT_TEXT_BYTES`], [`MAX_OBJECT_TEXT_WORK`]); work is also
+/// charged to the deck's [`MAX_DECK_TEXT_WORK`].
+pub struct TextPayload<'d> {
     bytes: Cell<usize>,
     work: Cell<usize>,
+    deck_work: &'d Cell<usize>,
 }
 
-impl TextPayload {
-    pub fn new() -> Self {
+impl<'d> TextPayload<'d> {
+    pub fn new(deck_work: &'d Cell<usize>) -> Self {
         Self {
             bytes: Cell::new(MAX_OBJECT_TEXT_BYTES),
             work: Cell::new(MAX_OBJECT_TEXT_WORK),
+            deck_work,
         }
     }
     /// Charge `bytes` before they are retained.
@@ -43,14 +50,13 @@ impl TextPayload {
         self.bytes.set(left);
         Ok(())
     }
-    /// Charge `steps` of inline-walk work.
+    /// Charge `steps` of text work (nodes and style records visited).
     pub fn step(&self, steps: usize) -> Result<(), String> {
-        let left = self
-            .work
-            .get()
-            .checked_sub(steps)
-            .ok_or_else(|| "OpenDocument text exceeds the text work limit".to_string())?;
+        let error = || "OpenDocument text exceeds the text work limit".to_string();
+        let left = self.work.get().checked_sub(steps).ok_or_else(error)?;
+        let deck_left = self.deck_work.get().checked_sub(steps).ok_or_else(error)?;
         self.work.set(left);
+        self.deck_work.set(deck_left);
         Ok(())
     }
 }
@@ -148,7 +154,7 @@ pub struct TextEnv<'a, 'e> {
     /// Slide names (`draw:name`) to slide indexes, for internal links.
     pub pages: &'e HashMap<String, usize>,
     /// The object's text payload (shared by every cell of a table).
-    pub payload: &'e TextPayload,
+    pub payload: &'e TextPayload<'e>,
 }
 
 /// Paragraph context while walking lists.
@@ -169,9 +175,11 @@ struct ListContext<'a> {
     /// `xml:id` of the innermost `text:list`, which a later list may name in
     /// `text:continue-list`.
     list_id: Option<&'a str>,
-    /// How a nested list resumes when a parent item has ended the sequence
-    /// at its level.
+    /// How a nested list's first item continues (`text:continue-list`,
+    /// `text:continue-numbering`); applies to `first_in_list` only.
     resume: Resume<'a>,
+    /// Whether the paragraph is the first labelled one of its `text:list`.
+    first_in_list: bool,
 }
 
 /// The continuation a nested `text:list` asks for (§19.785, §19.786).
@@ -181,14 +189,18 @@ enum Resume<'a> {
     None,
     /// `text:continue-list`: the list with this `xml:id`.
     List(&'a str),
-    /// `text:continue-numbering="true"`: the preceding list at this level.
+    /// `text:continue-numbering="true"`: the preceding list at this level
+    /// when it has the same list style.
     Preceding,
+    /// `text:continue-numbering="false"`: a new sequence.
+    Restart,
 }
 
 /// List instances of one text body, for `text:continue-numbering` and
 /// `text:continue-list` (§19.785, §19.786).
-#[derive(Default)]
-struct ListInstances<'a> {
+struct ListInstances<'a, 'p> {
+    /// Charged for every block and list node visited.
+    payload: &'p TextPayload<'p>,
     count: usize,
     /// The last top-level list: its instance and list style name.
     previous: Option<(usize, Option<&'a str>)>,
@@ -196,7 +208,7 @@ struct ListInstances<'a> {
     ids: HashMap<&'a str, usize>,
 }
 
-impl<'a> ListInstances<'a> {
+impl<'a> ListInstances<'a, '_> {
     /// The instance a top-level `text:list` numbers in: the list it names
     /// by `text:continue-list`, else with `text:continue-numbering="true"`
     /// the preceding list when it has the same list style, else a new one.
@@ -232,7 +244,12 @@ pub fn text_body<'a>(
     graphic: &Props<'a>,
 ) -> Result<Option<TextBody>, String> {
     let mut items: Vec<(Nd<'a>, ListContext<'a>)> = Vec::new();
-    let mut instances = ListInstances::default();
+    let mut instances = ListInstances {
+        payload: env.payload,
+        count: 0,
+        previous: None,
+        ids: HashMap::new(),
+    };
     collect_blocks(
         container,
         ListContext {
@@ -243,6 +260,7 @@ pub fn text_body<'a>(
             instance: None,
             list_id: None,
             resume: Resume::None,
+            first_in_list: false,
         },
         &mut items,
         &mut instances,
@@ -264,13 +282,14 @@ fn collect_blocks<'a>(
     parent: Nd<'a>,
     list: ListContext<'a>,
     out: &mut Vec<(Nd<'a>, ListContext<'a>)>,
-    instances: &mut ListInstances<'a>,
+    instances: &mut ListInstances<'a, '_>,
     depth: usize,
 ) -> Result<(), String> {
     if depth > MAX_SPAN_DEPTH {
         return Err(crate::error::invalid("lists are nested too deeply"));
     }
     for child in parent.children().filter(|n| n.is_element()) {
+        instances.payload.step(1)?;
         if xml::is(child, NS_TEXT, "p") || xml::is(child, NS_TEXT, "h") {
             push_block(out, (child, list.clone()))?;
         } else if xml::is(child, NS_TEXT, "list") {
@@ -299,7 +318,7 @@ fn collect_list<'a>(
     list_node: Nd<'a>,
     outer: &ListContext<'a>,
     out: &mut Vec<(Nd<'a>, ListContext<'a>)>,
-    instances: &mut ListInstances<'a>,
+    instances: &mut ListInstances<'a, '_>,
     depth: usize,
 ) -> Result<(), String> {
     if depth > MAX_SPAN_DEPTH {
@@ -318,12 +337,17 @@ fn collect_list<'a>(
             if let Some(id) = list_id {
                 instances.ids.insert(id, instance);
             }
-            let resume = match list_node.attribute((NS_TEXT, "continue-list")) {
-                Some(id) => Resume::List(id),
-                None if list_node.attribute((NS_TEXT, "continue-numbering")) == Some("true") => {
-                    Resume::Preceding
-                }
-                None => Resume::None,
+            let resume = match (
+                list_node.attribute((NS_TEXT, "continue-list")),
+                list_node.attribute((NS_TEXT, "continue-numbering")),
+            ) {
+                (Some(id), _) => Resume::List(id),
+                (None, Some("true")) => Resume::Preceding,
+                (None, Some("false")) => Resume::Restart,
+                // Without either attribute a nested list continues its
+                // level within the enclosing list, as LibreOffice numbers
+                // the per-paragraph lists it writes.
+                (None, _) => Resume::None,
             };
             (instance, resume)
         }
@@ -337,8 +361,11 @@ fn collect_list<'a>(
         instance: Some(instance),
         list_id,
         resume,
+        first_in_list: false,
     };
+    let mut first_labelled = true;
     for item in list_node.children().filter(|n| n.is_element()) {
+        instances.payload.step(1)?;
         let header = xml::is(item, NS_TEXT, "list-header");
         if !(header || xml::is(item, NS_TEXT, "list-item")) {
             continue;
@@ -348,6 +375,7 @@ fn collect_list<'a>(
             .attribute((NS_TEXT, "start-value"))
             .and_then(|v| v.parse().ok());
         for block in item.children().filter(|n| n.is_element()) {
+            instances.payload.step(1)?;
             if xml::is(block, NS_TEXT, "list") {
                 collect_list(block, &inner, out, instances, depth + 1)?;
                 first = false;
@@ -359,10 +387,14 @@ fn collect_list<'a>(
                         ListContext {
                             labelled: first,
                             start_value: if first { start_value } else { None },
+                            first_in_list: first && first_labelled,
                             ..inner.clone()
                         },
                     ),
                 )?;
+                if first {
+                    first_labelled = false;
+                }
                 first = false;
             }
         }
@@ -483,12 +515,22 @@ fn list_style<'a>(
     None
 }
 
-fn list_level<'a>(list_style: Nd<'a>, level: usize) -> Option<Nd<'a>> {
-    list_style.children().filter(|n| n.is_element()).find(|n| {
-        n.attribute((NS_TEXT, "level"))
+/// The level style of `level`, each record inspected charged as work.
+fn list_level<'a>(
+    list_style: Nd<'a>,
+    level: usize,
+    payload: &TextPayload<'_>,
+) -> Result<Option<Nd<'a>>, String> {
+    for n in list_style.children().filter(|n| n.is_element()) {
+        payload.step(1)?;
+        if n.attribute((NS_TEXT, "level"))
             .and_then(|v| v.parse::<usize>().ok())
             == Some(level)
-    })
+        {
+            return Ok(Some(n));
+        }
+    }
+    Ok(None)
 }
 
 fn paragraph_chain<'a>(sheet: &Sheet<'a>, scope: Scope, node: Nd<'a>) -> Vec<Nd<'a>> {
@@ -568,7 +610,10 @@ fn paragraph<'a>(
     let list_style_node = (list.depth > 0)
         .then(|| list_style(list, env, &styles))
         .flatten();
-    let level_node = list_style_node.and_then(|ls| list_level(ls, list.depth.min(10)));
+    let level_node = match list_style_node {
+        Some(ls) => list_level(ls, list.depth.min(10), env.payload)?,
+        None => None,
+    };
     let mut mar_l = margin_left;
     let mut indent = text_indent;
     let mut bullet = Bullet::None;
@@ -647,6 +692,9 @@ fn paragraph<'a>(
         .map(|v| v.round() as i64);
 
     let base_run = run_properties(&text_props, env);
+    // Its copies (the end run and the paragraph defaults), before they are made.
+    env.payload
+        .charge(record_bytes(&base_run)?.saturating_mul(2))?;
     let mut runs = Vec::new();
     let mut stack: Vec<Nd<'a>> = Vec::new();
     walk_inline(node, &mut stack, &styles, env, &mut runs, None, 0)?;
@@ -693,8 +741,9 @@ fn paragraph<'a>(
 #[derive(Default)]
 struct Numbering<'a> {
     instances: HashMap<usize, Vec<Option<Option<u32>>>>,
-    /// Last number per (instance, depth), not ended by shallower items.
-    last_at_level: HashMap<(usize, usize), u32>,
+    /// Last number and list style per (instance, depth), not ended by
+    /// shallower items.
+    last_at_level: HashMap<(usize, usize), (u32, Option<&'a str>)>,
     /// Last number per list `xml:id`.
     last_of_list: HashMap<&'a str, u32>,
 }
@@ -703,18 +752,24 @@ impl<'a> Numbering<'a> {
     /// The number the next item of `list` continues from, if any.
     fn previous(&self, list: &ListContext<'a>) -> Option<u32> {
         let instance = list.instance?;
-        let current = self
-            .instances
-            .get(&instance)
-            .and_then(|levels| levels.get(list.depth).copied().flatten());
-        match current {
-            Some(number) => number,
-            None => match list.resume {
-                Resume::List(id) => self.last_of_list.get(id).copied(),
-                Resume::Preceding => self.last_at_level.get(&(instance, list.depth)).copied(),
-                Resume::None => None,
-            },
+        if list.first_in_list {
+            match list.resume {
+                Resume::List(id) => return self.last_of_list.get(id).copied(),
+                Resume::Preceding => {
+                    return self
+                        .last_at_level
+                        .get(&(instance, list.depth))
+                        .filter(|(_, style)| *style == list_style_name(list))
+                        .map(|(n, _)| *n)
+                }
+                Resume::Restart => return None,
+                Resume::None => {}
+            }
         }
+        self.instances
+            .get(&instance)
+            .and_then(|levels| levels.get(list.depth).copied().flatten())
+            .flatten()
     }
 
     fn record(&mut self, list: &ListContext<'a>, number: Option<u32>) {
@@ -729,12 +784,19 @@ impl<'a> Numbering<'a> {
         // A shallower or equal item ends the deeper sequences.
         levels.truncate(list.depth + 1);
         if let Some(n) = number {
-            self.last_at_level.insert((instance, list.depth), n);
+            self.last_at_level
+                .insert((instance, list.depth), (n, list_style_name(list)));
             if let Some(id) = list.list_id {
                 self.last_of_list.insert(id, n);
             }
         }
     }
+}
+
+/// The list style name a list context numbers with.
+fn list_style_name<'a>(list: &ListContext<'a>) -> Option<&'a str> {
+    list.style
+        .and_then(|l| l.attribute((NS_TEXT, "style-name")))
 }
 
 /// The label of a list item (§16.31–§16.33 list level styles).
@@ -1304,7 +1366,10 @@ fn walk_inline<'a>(
     if depth > MAX_SPAN_DEPTH {
         return Err(crate::error::invalid("text spans are nested too deeply"));
     }
-    let style_for = |stack: &Vec<Nd<'a>>| -> RunStyle {
+    // The run style of this span level, resolved once (on first use) for
+    // all of its direct children; resolving charges the style records it
+    // reads (each chain node and the attributes of its text properties).
+    let resolve = |stack: &Vec<Nd<'a>>| -> Result<RunStyle, String> {
         let mut nodes: Vec<Nd<'a>> = Vec::new();
         for span in stack.iter().rev() {
             if let Some(name) = span.attribute((NS_TEXT, "style-name")) {
@@ -1316,8 +1381,19 @@ fn walk_inline<'a>(
         nodes.extend(paragraph_styles.iter().copied());
         let mut props = Props::new();
         props.extend_styles(&nodes, TEXT);
-        run_style(&props, env)
+        let read: usize = props.nodes.iter().map(|n| n.attributes().len()).sum();
+        env.payload.step(nodes.len().saturating_add(read))?;
+        Ok(run_style(&props, env))
     };
+    let mut level: Option<RunStyle> = None;
+    macro_rules! style_for {
+        ($stack:expr) => {{
+            if level.is_none() {
+                level = Some(resolve($stack)?);
+            }
+            level.as_ref().expect("resolved above")
+        }};
+    }
     for child in node.children() {
         // Each node costs its style resolution through the open spans.
         env.payload.step(1 + stack.len())?;
@@ -1325,7 +1401,7 @@ fn walk_inline<'a>(
             let text = child.text().unwrap_or("");
             push_text(
                 runs,
-                &style_for(stack),
+                style_for!(stack),
                 &collapse_whitespace(text),
                 link,
                 env,
@@ -1363,13 +1439,13 @@ fn walk_inline<'a>(
                     .and_then(|c| c.parse::<usize>().ok())
                     .unwrap_or(1)
                     .clamp(1, 1024);
-                push_text(runs, &style_for(stack), &" ".repeat(count), link, env)?;
+                push_text(runs, style_for!(stack), &" ".repeat(count), link, env)?;
             }
             (Some(NS_TEXT), "tab") => {
-                push_text(runs, &style_for(stack), "\t", link, env)?;
+                push_text(runs, style_for!(stack), "\t", link, env)?;
             }
             (Some(NS_TEXT), "line-break") => {
-                let s = style_for(stack);
+                let s = style_for!(stack);
                 let run = TextRun::Break {
                     font_size: s.data.font_size,
                     font_family: s.data.font_family.clone(),
@@ -1383,14 +1459,14 @@ fn walk_inline<'a>(
             }
             (Some(NS_TEXT), "page-number") => {
                 let format = child.attribute((NS_STYLE, "num-format")).unwrap_or("1");
-                let mut s = style_for(stack);
+                let mut s = style_for!(stack).clone();
                 s.data.field_type = Some("slidenum".into());
                 let text = format_number(env.slide_number as u32, format);
                 push_text(runs, &s, &text, link, env)?;
             }
             (Some(NS_TEXT), "page-count") => {
                 let text = env.slide_count.to_string();
-                push_text(runs, &style_for(stack), &text, link, env)?;
+                push_text(runs, style_for!(stack), &text, link, env)?;
             }
             (Some(NS_PRESENTATION), "footer")
             | (Some(NS_PRESENTATION), "header")
@@ -1401,7 +1477,7 @@ fn walk_inline<'a>(
                     _ => env.date_time.clone(),
                 };
                 if let Some(text) = value {
-                    push_text(runs, &style_for(stack), &text, link, env)?;
+                    push_text(runs, style_for!(stack), &text, link, env)?;
                 }
             }
             (Some(NS_TEXT), "note")
@@ -1491,8 +1567,18 @@ fn push_text(
         || style.bold[2] != style.bold[0]
         || style.italic[1] != style.italic[0]
         || style.italic[2] != style.italic[0];
-    // Each portion becomes a run, charged and kept as soon as it is found.
+    // Each portion becomes a run, charged (the record its style copy, link
+    // and text will make) before the copy is made, and kept at once.
+    let style_bytes = record_bytes(&style.data)?;
+    let link_bytes =
+        hyperlink.as_ref().map_or(0, String::len) + action.as_ref().map_or(0, String::len);
     let mut emit = |script: Script, portion: String| -> Result<(), String> {
+        env.payload.charge(
+            style_bytes
+                .saturating_add(std::mem::size_of::<TextRun>())
+                .saturating_add(link_bytes)
+                .saturating_add(portion.len()),
+        )?;
         let index = match script {
             Script::Western => 0,
             Script::Asian => 1,
@@ -1508,9 +1594,7 @@ fn push_text(
         data.hyperlink = hyperlink.clone();
         data.hyperlink_action = action.clone();
         data.hyperlink_uses_text_fill = hyperlink.is_some();
-        let run = TextRun::Text(data);
-        env.payload.charge(record_bytes(&run)?)?;
-        runs.push(run);
+        runs.push(TextRun::Text(data));
         Ok(())
     };
     if needs_split {

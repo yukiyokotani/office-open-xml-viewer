@@ -95,6 +95,35 @@ impl ChartBudget {
 
 /// Fixed size of one resolved data point record.
 const POINT_BYTES: usize = std::mem::size_of::<(CellData, String)>();
+/// Fixed size of one source-range map entry (key, value, table slot).
+const SOURCE_ENTRY_BYTES: usize = std::mem::size_of::<(String, (usize, usize))>() * 2;
+
+/// The space-separated cell range addresses of a list (§18.3.6), read
+/// one at a time (spaces inside quoted sheet names are kept).
+fn addresses(list: &str) -> impl Iterator<Item = &str> {
+    let mut rest = list;
+    std::iter::from_fn(move || {
+        rest = rest.trim_start();
+        if rest.is_empty() {
+            return None;
+        }
+        let mut quoted = false;
+        let mut end = rest.len();
+        for (i, c) in rest.char_indices() {
+            match c {
+                '\'' => quoted = !quoted,
+                c if c.is_whitespace() && !quoted => {
+                    end = i;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        let (part, tail) = rest.split_at(end);
+        rest = tail;
+        Some(part)
+    })
+}
 
 /// LibreOffice's default series palette (used for series without a fill).
 const DEFAULT_COLORS: [&str; 12] = [
@@ -255,7 +284,11 @@ impl LocalTable {
                     .find(|n| xml::is(*n, crate::xml::NS_SVG, "desc"))
                     .and_then(|n| n.text());
                 if let Some(desc) = desc {
-                    for range in crate::odf_text::split_addresses(desc) {
+                    for range in addresses(desc) {
+                        // The owned key and its map entry.
+                        if !budget.charge(range.len().saturating_add(SOURCE_ENTRY_BYTES)) {
+                            return Err("OpenDocument chart exceeds the data limit".into());
+                        }
                         table
                             .sources
                             .insert(range.to_string(), (cells.len(), table.cells.len()));
@@ -516,7 +549,7 @@ impl Reader<'_> {
     fn range(&self, address: &str) -> Vec<(CellData, String)> {
         // Several space-separated ranges are concatenated (§18.3.5).
         let mut out = Vec::new();
-        for part in crate::odf_text::split_addresses(address) {
+        for part in addresses(address) {
             let local_first =
                 part.starts_with("local-table.") || part.starts_with("'local-table'.");
             if self.budget.exhausted.get() {
@@ -1203,6 +1236,26 @@ impl Reader<'_> {
             if !trendlines.is_empty() {
                 series.trend_lines = Some(trendlines);
             }
+            // The series record and its metadata (labels, trendlines,
+            // styles); its point data was charged as it was read.
+            let values = std::mem::take(&mut series.values);
+            let categories = series.categories.take();
+            let bubbles = series.bubble_sizes.take();
+            let colors = series.data_point_colors.take();
+            let metadata = ooxml_common::json_measurement::measure_json(&series)
+                .ok()
+                .and_then(|m| usize::try_from(m.json_bytes).ok())
+                .unwrap_or(usize::MAX);
+            if !self
+                .budget
+                .charge(metadata.saturating_add(std::mem::size_of::<ChartSeries>()))
+            {
+                return Err("OpenDocument chart exceeds the data limit".into());
+            }
+            series.values = values;
+            series.categories = categories;
+            series.bubble_sizes = bubbles;
+            series.data_point_colors = colors;
             series_models.push(series);
         }
         if series_models.is_empty() {

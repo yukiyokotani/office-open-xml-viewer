@@ -83,15 +83,20 @@ pub fn resolve(file_entry_path: &str, reference: &str) -> Option<Target> {
         break;
     }
     // Step 11/12: prefix segments (ZIP syntax, literal) + IRI segments
-    // (decoded once).
-    let mut segments = prefix;
+    // (decoded once), written into one output buffer.
+    let mut path: Vec<u8> = prefix.join("/").into_bytes();
+    let mut joined = prefix.len();
     if !buffer.is_empty() {
         for segment in buffer.split('/') {
-            segments.push(percent_decode(segment)?);
+            if joined > 0 {
+                path.push(b'/');
+            }
+            joined += 1;
+            percent_decode_into(segment, &mut path)?;
         }
     }
     Some(Target::Package {
-        path: segments.join("/"),
+        path: String::from_utf8(path).ok()?,
         fragment,
     })
 }
@@ -109,9 +114,9 @@ fn has_scheme(text: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
 }
 
-fn percent_decode(segment: &str) -> Option<String> {
+/// Percent-decode one IRI segment onto `out`.
+fn percent_decode_into(segment: &str, out: &mut Vec<u8>) -> Option<()> {
     let bytes = segment.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
     let mut index = 0;
     while index < bytes.len() {
         if bytes[index] == b'%' {
@@ -127,7 +132,7 @@ fn percent_decode(segment: &str) -> Option<String> {
             index += 1;
         }
     }
-    String::from_utf8(out).ok()
+    Some(())
 }
 
 #[cfg(test)]

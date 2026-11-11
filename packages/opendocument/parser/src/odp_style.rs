@@ -15,6 +15,37 @@ pub type Nd<'a> = roxmltree::Node<'a, 'a>;
 
 /// Implementation bound on a parent chain; a cycle is a container error.
 const MAX_PARENT_DEPTH: usize = 64;
+/// Implementation bounds on one style record, so every property lookup
+/// through a style costs a bounded amount: element children of a style
+/// (property elements, maps) or list style (levels), and the attributes and
+/// element children of one property element.
+const MAX_STYLE_CHILDREN: usize = 64;
+const MAX_PROPERTY_ATTRIBUTES: usize = 256;
+const MAX_PROPERTY_CHILDREN: usize = 64;
+
+/// Reject a style record past the bounds above.
+fn check_style_record(style: Nd<'_>) -> Result<(), String> {
+    let error = || invalid("a style exceeds the style record limits");
+    let mut children = 0usize;
+    for child in style.children().filter(|n| n.is_element()) {
+        children += 1;
+        if children > MAX_STYLE_CHILDREN {
+            return Err(error());
+        }
+        if child.attributes().len() > MAX_PROPERTY_ATTRIBUTES {
+            return Err(error());
+        }
+        if child
+            .children()
+            .filter(|n| n.is_element())
+            .nth(MAX_PROPERTY_CHILDREN)
+            .is_some()
+        {
+            return Err(error());
+        }
+    }
+    Ok(())
+}
 
 /// Which `office:automatic-styles` a reference belongs to (§3.15).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -82,6 +113,7 @@ impl<'a> Sheet<'a> {
             let local = node.tag_name().name();
             match (ns, local) {
                 (Some(NS_STYLE), "style") => {
+                    check_style_record(node)?;
                     let name = node
                         .attribute((NS_STYLE, "name"))
                         .ok_or_else(|| invalid("a style has no name"))?;
@@ -96,10 +128,12 @@ impl<'a> Sheet<'a> {
                     }
                 }
                 (Some(NS_STYLE), "default-style") => {
+                    check_style_record(node)?;
                     let family = node.attribute((NS_STYLE, "family")).unwrap_or("");
                     self.defaults.insert(family, node);
                 }
                 (Some(NS_TEXT), "list-style") => {
+                    check_style_record(node)?;
                     if let Some(name) = node.attribute((NS_STYLE, "name")) {
                         match scope {
                             Some(scope) => {

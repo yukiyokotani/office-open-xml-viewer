@@ -26,7 +26,7 @@ fn main() {
                     .filter(|s| s.hidden)
                     .map(|s| s.index)
                     .collect();
-                let elements: usize = deck.slides.iter().map(|s| s.elements.len()).sum();
+                let elements: usize = deck.slides.iter().map(|s| s.elements).sum();
                 println!(
                     "{path}: admitted, {} slides, hidden={hidden:?}, {elements} elements, {} resources",
                     deck.slides.len(),
@@ -34,7 +34,8 @@ fn main() {
                 );
                 if let Some(n) = dump {
                     if let Some(slide) = deck.slides.get(n) {
-                        println!("{}", serde_json::to_string_pretty(slide).unwrap());
+                        let value: serde_json::Value = serde_json::from_slice(&slide.json).unwrap();
+                        println!("{}", serde_json::to_string_pretty(&value).unwrap());
                     }
                 }
             }

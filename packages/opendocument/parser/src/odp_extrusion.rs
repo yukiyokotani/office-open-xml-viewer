@@ -199,6 +199,7 @@ pub fn scene(
             .attribute((NS_DRAW, "extrusion-viewpoint"))
             .unwrap_or("3.5cm -3.5cm 25cm")
             .split_whitespace()
+            .take(3)
             .filter_map(length_emu)
             .map(|e| e / 360.0)
             .collect();

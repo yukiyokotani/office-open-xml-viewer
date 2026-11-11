@@ -8,7 +8,6 @@ use ooxml_common::json_measurement::serialize_json_with_limit;
 use ooxml_common::pull::insufficient_credit_error;
 use ooxml_common::resource::{
     HardResourceLimitKind, HARD_MAX_PPTX_BOOTSTRAP_JSON_BYTES, HARD_MAX_PPTX_BOOTSTRAP_SLIDES,
-    HARD_MAX_PPTX_SLIDE_JSON_BYTES,
 };
 use pptx_model::{BootstrapSlide, PresentationBootstrap};
 
@@ -89,24 +88,14 @@ impl OdpCursor {
         }
         if self.prepared.is_none() {
             let (_, deck) = self.open()?;
-            let slide = deck
+            // The slide was serialized (within the PPTX slide JSON ceiling)
+            // when the deck was read.
+            let bytes = deck
                 .slides
                 .get(index)
-                .ok_or_else(|| "OpenDocument slide index out of range".to_string())?;
-            let bytes = match serialize_json_with_limit(
-                slide,
-                None,
-                HardResourceLimitKind::PptxSlideJsonBytes,
-                None,
-                HARD_MAX_PPTX_SLIDE_JSON_BYTES,
-                "OpenDocument slide exceeds the PPTX slide JSON ceiling",
-            ) {
-                Ok(bytes) => bytes,
-                Err(error) => {
-                    self.close();
-                    return Err(error);
-                }
-            };
+                .ok_or_else(|| "OpenDocument slide index out of range".to_string())?
+                .json
+                .clone();
             let length = bytes.len();
             self.prepared = Some(Prepared {
                 index,

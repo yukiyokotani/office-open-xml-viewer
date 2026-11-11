@@ -30,6 +30,7 @@ pub fn table<'a>(
     slide_index: usize,
     slide_count: usize,
     pages: &HashMap<String, usize>,
+    text_work: &std::cell::Cell<usize>,
     out: &mut Vec<SlideElement>,
 ) -> Result<(), String> {
     let template = node
@@ -66,7 +67,7 @@ pub fn table<'a>(
     let mut cells_total = 0usize;
     // One text payload for the whole table: the cells' text as it is read,
     // and each cell record (borders, fill, strings) before it is kept.
-    let payload = TextPayload::new();
+    let payload = TextPayload::new(text_work);
     for (r, row) in rows_nodes.iter().enumerate() {
         let row_props = row
             .attribute((NS_TABLE, "style-name"))
@@ -450,7 +451,7 @@ fn build_cell<'a>(
     slide_index: usize,
     slide_count: usize,
     pages: &HashMap<String, usize>,
-    payload: &TextPayload,
+    payload: &TextPayload<'_>,
 ) -> Result<TableCell, String> {
     let mut graphic = Props::new();
     graphic.extend_styles(chain, LOEXT_GRAPHIC);
@@ -528,7 +529,18 @@ fn build_cell<'a>(
         {
             body.vert = "vert".into();
         }
-        body.wrap = "square".into();
+        // Cell text frame (§20.230 table-cell-properties): wrapping, and
+        // shrink-to-fit (§20.360) as for a shape's text.
+        body.wrap = if cell_props.get(NS_FO, "wrap-option") == Some("no-wrap") {
+            "none"
+        } else {
+            "square"
+        }
+        .into();
+        if cell_props.get(NS_STYLE, "shrink-to-fit") == Some("true") {
+            body.auto_fit = "norm".into();
+            body.shrink_on_overflow = true;
+        }
         // Cell padding (§20.230 fo:padding in table-cell-properties) over the
         // graphic padding the text frame read.
         let padding = |side: &str| {
