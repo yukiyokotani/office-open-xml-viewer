@@ -110,6 +110,8 @@ pub fn table<'a>(
                 if let Some(t) = template_style.and_then(|n| sheet.find(scope, "table-cell", n)) {
                     chain.push(t);
                 }
+                // §16.4: the family's default style is the last fallback.
+                chain.extend(sheet.default_style("table-cell"));
                 let mut built = build_cell(
                     sheet,
                     media,
@@ -460,6 +462,14 @@ fn build_cell<'a>(
     cell_props.extend_styles(chain, TABLE_CELL);
     let mut para = Props::new();
     para.extend_styles(chain, PARAGRAPH);
+    // Reading the cell's formatting, text or not, is text work.
+    payload.step(
+        chain
+            .len()
+            .saturating_add(crate::odp_style::props_cost(&graphic))
+            .saturating_add(crate::odp_style::props_cost(&cell_props))
+            .saturating_add(crate::odp_style::props_cost(&para)),
+    )?;
     let side = |name: &str| {
         cell_props
             .get(NS_FO, name)

@@ -572,12 +572,16 @@ impl<'a, 'r, 'p> SlideReader<'a, 'r, 'p> {
                 }
             }
             "frame" => {
+                // A drawn object costs work in proportion to its markup
+                // (attributes, alternatives, text), each time it is drawn.
+                self.visit(node.range().len() / 64)?;
                 let before = out.len();
                 self.frame(node, ctx, out)?;
                 self.retain(&out[before..])?;
             }
             "custom-shape" | "rect" | "ellipse" | "circle" | "line" | "polyline" | "polygon"
             | "regular-polygon" | "path" | "connector" | "caption" | "measure" => {
+                self.visit(node.range().len() / 64)?;
                 let before = out.len();
                 self.shape(node, ctx, out)?;
                 self.retain(&out[before..])?;

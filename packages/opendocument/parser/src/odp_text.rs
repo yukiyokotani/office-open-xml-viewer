@@ -341,9 +341,19 @@ fn list_numbers<'a>(
         0,
     )?;
     let mut numbering = Numbering::default();
-    for (_, list) in items.iter().filter(|(_, l)| l.labelled && l.depth > 0) {
-        let start = list_style_name(list)
+    for (node, list) in items.iter().filter(|(_, l)| l.labelled && l.depth > 0) {
+        // The list style as rendering finds it: the list's, else one its
+        // paragraph styles select (an object's own list style is not
+        // known here).
+        let style = list_style_name(list)
             .and_then(|name| sheet.list(scope, name))
+            .or_else(|| {
+                paragraph_chain(sheet, scope, *node)
+                    .iter()
+                    .find_map(|s| s.attribute((NS_STYLE, "list-style-name")))
+                    .and_then(|name| sheet.list(scope, name))
+            });
+        let start = style
             .map(|style| list_level(style, list.depth.min(10), payload))
             .transpose()?
             .flatten()

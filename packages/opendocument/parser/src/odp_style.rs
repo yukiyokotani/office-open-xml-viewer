@@ -23,6 +23,9 @@ const MAX_STYLE_CHILDREN: usize = 64;
 const MAX_PROPERTY_ATTRIBUTES: usize = 256;
 const MAX_PROPERTY_CHILDREN: usize = 64;
 const MAX_PROPERTY_VALUE_BYTES: usize = 1024;
+/// All nodes of one style record (elements, text, comments; nested
+/// records such as tab stops included).
+const MAX_STYLE_NODES: usize = 4096;
 
 /// The work of reading a property cascade: each property element, each of
 /// its attributes, and their value bytes (in 64-byte units), which bounds
@@ -39,6 +42,9 @@ pub fn props_cost(props: &Props<'_>) -> usize {
 /// Reject a style record past the bounds above.
 fn check_style_record(style: Nd<'_>) -> Result<(), String> {
     let error = || invalid("a style exceeds the style record limits");
+    if style.descendants().nth(MAX_STYLE_NODES).is_some() {
+        return Err(error());
+    }
     let mut children = 0usize;
     for child in style.children().filter(|n| n.is_element()) {
         children += 1;
