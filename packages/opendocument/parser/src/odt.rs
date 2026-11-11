@@ -488,7 +488,7 @@ impl<'a> Reader<'a> {
             }
             match link.map(String::as_str) {
                 Some("") => {}
-                Some(name) if self.sheet.find_list(self.scope, name).is_some() => {
+                Some(name) if self.find_list_style(name).is_some() => {
                     self.list_paragraph = self.styled_list_paragraph(node, name, level)?;
                 }
                 _ => self.list_paragraph = self.outline_paragraph(node, level)?,
@@ -508,7 +508,7 @@ impl<'a> Reader<'a> {
         }
         let style = node
             .attribute((NS_TEXT, "style-name"))
-            .and_then(|name| self.sheet.find(self.scope, Family::Section, name));
+            .and_then(|name| self.find_style(Family::Section, name));
         if let Some(style) = style {
             // Reading the section's properties (margins, columns) is style
             // work, charged per section like every other resolution.
@@ -713,7 +713,7 @@ impl<'a> Reader<'a> {
         // character style (`loext:marker-style-name`) over the paragraph's.
         let mark_context = match node
             .attribute((NS_LOEXT, "marker-style-name"))
-            .and_then(|name| self.sheet.find(self.scope, Family::Text, name))
+            .and_then(|name| self.find_style(Family::Text, name))
         {
             Some(style) => {
                 let styles = self.style_chain(style);
@@ -885,7 +885,7 @@ impl<'a> Reader<'a> {
         let cap_size = line * f64::from(lines) / 1.15;
         // A character style for the cap (§19.494 style:style-name).
         let styled = attribute("style-name")
-            .and_then(|name| self.sheet.find(self.scope, Family::Text, name))
+            .and_then(|name| self.find_style(Family::Text, name))
             .map(|style| self.style_chain(style));
         // The cap style's properties, resolved once for every cap run.
         let styled = match styled {
@@ -960,10 +960,36 @@ impl<'a> Reader<'a> {
         self.charge_work(name.len().saturating_add(1))
     }
 
+    /// Every style lookup by name goes through these: the identifier's bytes
+    /// are charged as style work (an overrun is sticky, so it fails the next
+    /// propagating charge and the end of the read).
+    fn find_style(&self, family: Family, name: &str) -> Option<StyleRef<'a>> {
+        let _ = self.charge_lookup(name);
+        self.sheet.find(self.scope, family, name)
+    }
+
+    fn find_common_style(&self, family: Family, name: &str) -> Option<StyleRef<'a>> {
+        let _ = self.charge_lookup(name);
+        self.sheet.find_common(family, name)
+    }
+
+    fn find_list_style(&self, name: &str) -> Option<&'a crate::style::ListStyle> {
+        let _ = self.charge_lookup(name);
+        self.sheet.find_list(self.scope, name)
+    }
+
+    /// A drawing definition by kind and name; each use charges the name and
+    /// the definition's source size (it is read again per use).
+    fn definition(&self, kind: &'static str, name: &str) -> Option<roxmltree::Node<'a, 'a>> {
+        let (node, cost) = self.defs.get(kind, name)?;
+        let _ = self.charge_work(cost.saturating_add(name.len()));
+        Some(node)
+    }
+
     /// A paragraph style's chain plus the paragraph default style.
     fn paragraph_chain(&mut self, name: Option<&str>) -> Vec<StyleRef<'a>> {
         let mut chain: Vec<StyleRef<'a>> =
-            match name.and_then(|name| self.sheet.find(self.scope, Family::Paragraph, name)) {
+            match name.and_then(|name| self.find_style(Family::Paragraph, name)) {
                 Some(style) => self.style_chain(style).to_vec(),
                 None => Vec::new(),
             };
@@ -1926,6 +1952,20 @@ mod tests;
 /// Picture bytes in a format the renderer draws, with their media type. A
 /// StarView metafile (LibreOffice's object replacement format) is converted
 /// to SVG.
+/// The source size of a subtree: one unit per node plus its name, attribute
+/// and text bytes (what processing it again reads).
+fn source_bytes(node: roxmltree::Node<'_, '_>) -> usize {
+    node.descendants().fold(0usize, |sum, n| {
+        let own = 1
+            + n.tag_name().name().len()
+            + n.text().map_or(0, str::len)
+            + n.attributes()
+                .map(|a| a.name().len() + a.value().len() + 1)
+                .sum::<usize>();
+        sum.saturating_add(own)
+    })
+}
+
 /// A picture's retained bytes and media type; a StarView metafile converts to
 /// SVG within `budget` bytes.
 fn picture(bytes: Vec<u8>, budget: usize) -> Option<(Vec<u8>, &'static str)> {

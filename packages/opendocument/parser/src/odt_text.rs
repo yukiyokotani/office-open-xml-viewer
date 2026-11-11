@@ -637,7 +637,7 @@ impl<'a> Reader<'a> {
         if let Some(index) = inline.by_span.get(&(context, name.to_string())) {
             return Ok(*index);
         }
-        let Some(style) = self.sheet.find(self.scope, Family::Text, name) else {
+        let Some(style) = self.find_style(Family::Text, name) else {
             return Ok(context);
         };
         if inline.contexts.len() >= MAX_PARAGRAPH_CONTEXTS {
@@ -673,7 +673,7 @@ impl<'a> Reader<'a> {
         };
         let styles: Rc<[StyleRef<'a>]> = match node
             .attribute((NS_TEXT, "style-name"))
-            .and_then(|name| self.sheet.find(self.scope, Family::Text, name))
+            .and_then(|name| self.find_style(Family::Text, name))
         {
             Some(style) => self.style_chain(style),
             None => Rc::from(Vec::new()),
@@ -739,8 +739,10 @@ impl<'a> Reader<'a> {
             .children()
             .find(|n| xml::is(*n, NS_TEXT, "ruby-text"))
             .and_then(|n| n.attribute((NS_TEXT, "style-name")))
-            .and_then(|name| self.sheet.find(self.scope, Family::Text, name))
+            .and_then(|name| self.find_style(Family::Text, name))
             .and_then(|style| {
+                // Reading the style's text group is style work per use.
+                self.charge_cascade(&[style], TEXT).ok()?;
                 style
                     .group(TEXT)
                     .and_then(|g| {
@@ -832,7 +834,7 @@ impl<'a> Reader<'a> {
         // citation style (§19.773) over the enclosing formatting.
         let body_style = self.notes_config.body_citation_style(kind);
         self.charge_lookup(body_style)?;
-        let citation_context = match self.sheet.find_common(Family::Text, body_style) {
+        let citation_context = match self.find_common_style(Family::Text, body_style) {
             Some(style) if inline.contexts.len() < MAX_PARAGRAPH_CONTEXTS => {
                 let styles = self.style_chain(style);
                 let link = inline.contexts[context as usize].link.clone();
@@ -868,7 +870,7 @@ impl<'a> Reader<'a> {
             font_family_cs: paragraph.default_font_family.clone(),
             ..TextRun::default()
         };
-        if let Some(style) = style.and_then(|name| self.sheet.find_common(Family::Text, name)) {
+        if let Some(style) = style.and_then(|name| self.find_common_style(Family::Text, name)) {
             let mut chain = self.style_chain(style).to_vec();
             if let Some(default) = self.sheet.default_style(Family::Paragraph) {
                 chain.push(default);

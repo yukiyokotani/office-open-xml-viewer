@@ -540,7 +540,12 @@ pub fn to_svg(bytes: &[u8], max_svg_bytes: usize) -> Option<Converted> {
                 // The element's size before it is built: escaped text and
                 // family (at most 6 bytes per byte), one position per
                 // character and the fixed attributes.
-                let estimate = 6 * (text.len() + state.font.family.len()) + 16 * text.len() + 512;
+                let estimate = text
+                    .len()
+                    .saturating_add(state.font.family.len())
+                    .saturating_mul(6)
+                    .saturating_add(text.len().saturating_mul(16))
+                    .saturating_add(512);
                 if body.len().saturating_add(estimate) > limit {
                     return None;
                 }

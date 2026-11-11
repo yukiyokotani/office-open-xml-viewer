@@ -94,20 +94,6 @@ struct RowRun<'a> {
     repeat: usize,
 }
 
-/// The source size of a subtree: one unit per node plus its name, attribute and
-/// text bytes (what processing it again reads).
-fn source_bytes(node: roxmltree::Node<'_, '_>) -> usize {
-    node.descendants().fold(0usize, |sum, n| {
-        let own = 1
-            + n.tag_name().name().len()
-            + n.text().map_or(0, str::len)
-            + n.attributes()
-                .map(|a| a.name().len() + a.value().len() + 1)
-                .sum::<usize>();
-        sum.saturating_add(own)
-    })
-}
-
 /// A spanned cell still covering later rows.
 #[derive(Clone)]
 struct VerticalSpan {
@@ -142,7 +128,7 @@ impl<'a> Reader<'a> {
     ) -> Result<Attributes, String> {
         let mut chain: Vec<StyleRef<'a>> = Vec::new();
         for name in names.iter().flatten() {
-            if let Some(style) = self.sheet.find(self.scope, family, name) {
+            if let Some(style) = self.find_style(family, name) {
                 chain.extend(self.style_chain(style).iter().copied());
                 if chain.len() > MAX_SEARCH_ORDER {
                     return Err(
@@ -553,7 +539,7 @@ impl<'a> Reader<'a> {
         if self.story == Story::Body {
             if let Some(master) = node
                 .attribute((NS_TABLE, "style-name"))
-                .and_then(|name| self.sheet.find(self.scope, Family::Table, name))
+                .and_then(|name| self.find_style(Family::Table, name))
                 .and_then(|style| {
                     style
                         .style()

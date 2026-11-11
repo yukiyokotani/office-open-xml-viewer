@@ -23,7 +23,8 @@ use docx_model::{
 /// hatches, fill images, markers and dash styles, by `draw:name`.
 #[derive(Default)]
 pub(super) struct Definitions<'a> {
-    by_name: HashMap<(&'static str, String), roxmltree::Node<'a, 'a>>,
+    /// Each definition with its source size (charged per use).
+    by_name: HashMap<(&'static str, String), (roxmltree::Node<'a, 'a>, usize)>,
 }
 
 impl<'a> Definitions<'a> {
@@ -46,14 +47,20 @@ impl<'a> Definitions<'a> {
                     _ => continue,
                 };
                 if let Some(name) = node.attribute((NS_DRAW, "name")) {
-                    by_name.entry((kind, name.to_string())).or_insert(node);
+                    by_name
+                        .entry((kind, name.to_string()))
+                        .or_insert((node, source_bytes(node)));
                 }
             }
         }
         Self { by_name }
     }
 
-    fn get(&self, kind: &'static str, name: &str) -> Option<roxmltree::Node<'a, 'a>> {
+    pub(super) fn get(
+        &self,
+        kind: &'static str,
+        name: &str,
+    ) -> Option<(roxmltree::Node<'a, 'a>, usize)> {
         self.by_name.get(&(kind, name.to_string())).copied()
     }
 }
@@ -170,7 +177,7 @@ impl<'a> Reader<'a> {
     fn graphic(&mut self, node: roxmltree::Node<'a, 'a>) -> Result<Graphic<'a>, String> {
         let mut chain: Vec<StyleRef<'a>> = match node
             .attribute((NS_DRAW, "style-name"))
-            .and_then(|name| self.sheet.find(self.scope, Family::Graphic, name))
+            .and_then(|name| self.find_style(Family::Graphic, name))
         {
             Some(style) => self.style_chain(style).to_vec(),
             None => Vec::new(),
@@ -772,8 +779,10 @@ impl<'a> Reader<'a> {
         &mut self,
         style: &'a crate::style::Style,
     ) -> Result<Option<ShapeFill>, String> {
+        let style = StyleRef::new(style);
+        self.charge_cascade(&[style], "graphic-properties")?;
         let graphic = Graphic {
-            cascade: Cascade::new(vec![StyleRef::new(style)], "graphic-properties"),
+            cascade: Cascade::new(vec![style], "graphic-properties"),
         };
         self.fill(&graphic, true)
     }
@@ -827,16 +836,10 @@ impl<'a> Reader<'a> {
             }
             Some("gradient") => match graphic
                 .get(NS_DRAW, "fill-gradient-name")
-                .and_then(|name| self.defs.get("gradient", name))
+                .and_then(|name| self.definition("gradient", name))
             {
                 Some(definition) => {
-                    // Each use rereads the shared definition.
-                    self.charge_work(
-                        definition
-                            .attributes()
-                            .fold(1usize, |sum, a| sum.saturating_add(1 + a.value().len()))
-                            .saturating_add(definition.children().count()),
-                    )?;
+                    // (`definition` charged rereading the shared definition.)
                     let stops = definition
                         .children()
                         .filter(|n| xml::is(*n, NS_LOEXT, "gradient-stop"))
@@ -854,7 +857,7 @@ impl<'a> Reader<'a> {
             Some("hatch") => {
                 let hatch = graphic
                     .get(NS_DRAW, "fill-hatch-name")
-                    .and_then(|name| self.defs.get("hatch", name));
+                    .and_then(|name| self.definition("hatch", name));
                 let fg = hatch
                     .and_then(|h| color(h.attribute((NS_DRAW, "color"))))
                     .unwrap_or_else(|| "000000".into());
@@ -877,7 +880,7 @@ impl<'a> Reader<'a> {
             Some("bitmap") => {
                 let href = graphic
                     .get(NS_DRAW, "fill-image-name")
-                    .and_then(|name| self.defs.get("fill-image", name))
+                    .and_then(|name| self.definition("fill-image", name))
                     .and_then(|image| image.attribute((NS_XLINK, "href")));
                 let Some(href) = href else {
                     return Ok(None);
@@ -1277,7 +1280,7 @@ impl<'a> Reader<'a> {
         if stroke == "dash" {
             let dash = graphic
                 .get(NS_DRAW, "stroke-dash")
-                .and_then(|name| self.defs.get("stroke-dash", name));
+                .and_then(|name| self.definition("stroke-dash", name));
             let dotted = dash.is_some_and(|d| {
                 d.attribute((NS_DRAW, "dots1-length"))
                     .and_then(|v| v.strip_suffix('%').and_then(|n| n.parse::<f64>().ok()))

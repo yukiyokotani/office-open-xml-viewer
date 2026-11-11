@@ -82,17 +82,19 @@ struct Layout {
     background_image: Option<Rc<(String, bool)>>,
 }
 
+/// A master page with its page layout and next style resolved once (as
+/// indices), so later lookups never rehash the linked names.
 struct Master<'a, 'i> {
     name: String,
-    layout: Option<String>,
-    next: Option<String>,
+    layout: Option<usize>,
+    next: Option<usize>,
     node: roxmltree::Node<'a, 'i>,
 }
 
 pub(super) struct Pages<'a, 'i> {
     masters: Vec<Master<'a, 'i>>,
     by_name: HashMap<String, usize>,
-    layouts: HashMap<String, Layout>,
+    layouts: Vec<Layout>,
     default_layout: Layout,
 }
 
@@ -170,7 +172,8 @@ impl<'a, 'i> Pages<'a, 'i> {
         {
             read_layout(default, &mut default_layout)?;
         }
-        let mut layouts = HashMap::new();
+        let mut layout_index: HashMap<String, usize> = HashMap::new();
+        let mut layouts: Vec<Layout> = Vec::new();
         let mut layout_bytes = 0usize;
         for automatic in styles_root
             .children()
@@ -199,11 +202,19 @@ impl<'a, 'i> Pages<'a, 'i> {
                 if layout_bytes > MAX_PAGE_LAYOUT_BYTES {
                     return Err("OpenDocument page layouts exceed the construction limit".into());
                 }
-                layouts.insert(name.to_string(), layout);
+                // A later declaration of one name replaces the earlier.
+                match layout_index.get(name) {
+                    Some(&index) => layouts[index] = layout,
+                    None => {
+                        layout_index.insert(name.to_string(), layouts.len());
+                        layouts.push(layout);
+                    }
+                }
             }
         }
         let mut masters = Vec::new();
         let mut by_name = HashMap::new();
+        let mut next_names: Vec<Option<&str>> = Vec::new();
         if let Some(styles) = styles_root
             .children()
             .find(|n| xml::is(*n, NS_OFFICE, "master-styles"))
@@ -216,18 +227,22 @@ impl<'a, 'i> Pages<'a, 'i> {
                     continue;
                 };
                 by_name.entry(name.to_string()).or_insert(masters.len());
+                next_names.push(
+                    node.attribute((NS_STYLE, "next-style-name"))
+                        .filter(|next| *next != name),
+                );
                 masters.push(Master {
                     name: name.to_string(),
                     layout: node
                         .attribute((NS_STYLE, "page-layout-name"))
-                        .map(str::to_string),
-                    next: node
-                        .attribute((NS_STYLE, "next-style-name"))
-                        .filter(|next| *next != name)
-                        .map(str::to_string),
+                        .and_then(|layout| layout_index.get(layout).copied()),
+                    next: None,
                     node,
                 });
             }
+        }
+        for (master, next) in masters.iter_mut().zip(next_names) {
+            master.next = next.and_then(|next| by_name.get(next).copied());
         }
         Ok(Self {
             masters,
@@ -247,9 +262,8 @@ impl<'a, 'i> Pages<'a, 'i> {
 
     fn layout(&self, master: &str) -> &Layout {
         self.master(master)
-            .and_then(|m| m.layout.as_ref())
-            .and_then(|name| self.layouts.get(name))
-            .unwrap_or(&self.default_layout)
+            .and_then(|m| m.layout)
+            .map_or(&self.default_layout, |index| &self.layouts[index])
     }
 
     /// The master page whose layout the section's pages mostly use: a page
@@ -257,9 +271,8 @@ impl<'a, 'i> Pages<'a, 'i> {
     /// page only.
     fn body_master<'s>(&'s self, master: &'s str) -> &'s str {
         self.master(master)
-            .and_then(|m| m.next.as_deref())
-            .filter(|next| self.has_master(next))
-            .unwrap_or(master)
+            .and_then(|m| m.next)
+            .map_or(master, |index| self.masters[index].name.as_str())
     }
 
     /// The initial page style: the first paragraph's, else LibreOffice's
@@ -302,9 +315,7 @@ impl<'a, 'i> Pages<'a, 'i> {
     }
 
     fn mirrored(&self) -> bool {
-        self.layouts
-            .values()
-            .any(|layout| layout.usage == "mirrored")
+        self.layouts.iter().any(|layout| layout.usage == "mirrored")
     }
 
     /// Horizontal writing without a layout grid on the page style's body
