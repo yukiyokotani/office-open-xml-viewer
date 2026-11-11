@@ -105,8 +105,8 @@ export interface DocxDocumentSession extends AsyncIterable<DocxRenderedPage> {
    * Raw bytes of one picture the document model names (an image run's
    * `imagePath`), as a Blob of `mimeType` (default
    * `application/octet-stream`). Paths are the package part paths of a
-   * `.docx` (`word/media/image1.png`) or the paths a `legacyDoc` / `odt`
-   * source gives its pictures (`legacy-doc/image/0`). Same contract as
+   * `.docx` (`word/media/image1.png`) or the picture keys an application
+   * model source assigns in the model it produces. Same contract as
    * `PptxPresentationSession.getImage`: reads charge the session's archive
    * budgets, results share the session's bounded raw-part cache with page
    * rendering, a resource-limit failure fails the session, and the call
