@@ -269,6 +269,17 @@ impl<'a, 'i> Pages<'a, 'i> {
     /// The master page whose layout the section's pages mostly use: a page
     /// style followed by another (`style:next-style-name`) lends its first
     /// page only.
+    /// The layout of the master's body pages, through the resolved indices
+    /// (the linked master's name is never hashed again).
+    fn body_layout(&self, master: &str) -> &Layout {
+        let Some(own) = self.master(master) else {
+            return &self.default_layout;
+        };
+        let body = own.next.map_or(own, |index| &self.masters[index]);
+        body.layout
+            .map_or(&self.default_layout, |index| &self.layouts[index])
+    }
+
     fn body_master<'s>(&'s self, master: &'s str) -> &'s str {
         self.master(master)
             .and_then(|m| m.next)
@@ -286,10 +297,7 @@ impl<'a, 'i> Pages<'a, 'i> {
     }
 
     pub fn columns(&self, master: &str) -> Option<ColumnsSpec> {
-        self.layout(self.body_master(master))
-            .columns
-            .as_deref()
-            .cloned()
+        self.body_layout(master).columns.as_deref().cloned()
     }
 
     /// How a section with this page style starts: on a right (odd) page for
@@ -304,7 +312,7 @@ impl<'a, 'i> Pages<'a, 'i> {
     }
 
     pub fn geometry(&self, master: &str) -> Geometry {
-        let section = &self.layout(self.body_master(master)).section;
+        let section = &self.body_layout(master).section;
         Geometry {
             text_width: (section.page_width - section.margin_left - section.margin_right).max(1.0),
             text_height: (section.page_height - section.margin_top - section.margin_bottom)
@@ -322,19 +330,17 @@ impl<'a, 'i> Pages<'a, 'i> {
     /// pages: the scope in which LibreOffice's fixed-line placement was
     /// measured.
     pub fn plain_horizontal(&self, master: &str) -> bool {
-        let layout = self.layout(self.body_master(master));
+        let layout = self.body_layout(master);
         layout.text_direction.is_none() && layout.grid.is_none()
     }
 
     /// Horizontal writing on the page style's body pages, grid or not.
     pub fn horizontal(&self, master: &str) -> bool {
-        self.layout(self.body_master(master))
-            .text_direction
-            .is_none()
+        self.body_layout(master).text_direction.is_none()
     }
 
     pub fn footnote_separator(&self, master: &str) -> Option<NoteSeparatorMark> {
-        self.layout(self.body_master(master)).footnote_separator
+        self.body_layout(master).footnote_separator
     }
 }
 
@@ -1110,8 +1116,7 @@ impl<'a> Reader<'a> {
         String,
     > {
         let pages = self.pages;
-        let body_master = pages.body_master(&start.master).to_string();
-        let layout = pages.layout(&body_master).clone();
+        let layout = pages.body_layout(&start.master).clone();
         let stories = self.master_stories(&start.master)?;
         let mut section = layout.section.clone();
         // Header and footer regions: the body starts below the header's
@@ -1144,7 +1149,7 @@ impl<'a> Reader<'a> {
             section.doc_grid_type = Some(kind.into());
             section.doc_grid_line_pitch = Some(pitch);
             section.doc_grid_char_space = chars.map(|width| {
-                let base = self.default_font_size();
+                let base = self.default_font_size;
                 ((width - base) * 4096.0).round()
             });
         }
@@ -1191,6 +1196,8 @@ impl<'a> Reader<'a> {
         };
         if fill.is_none() {
             if let Some((href, tile)) = layout.background_image.as_deref() {
+                // Resolving the shared link is work per page style.
+                self.charge_work(href.len().saturating_add(1))?;
                 if let Some((path, mime)) = self.package_image(href)? {
                     // The fill owns its link (each header story copy too).
                     self.charge_construction(
@@ -1229,13 +1236,6 @@ impl<'a> Reader<'a> {
             layout.section.page_width,
             layout.section.page_height,
         )))
-    }
-
-    fn default_font_size(&self) -> f64 {
-        self.sheet
-            .default_style(Family::Paragraph)
-            .and_then(|style| text::paragraph_font_size(Cascade::new(vec![style], TEXT)))
-            .unwrap_or(12.0)
     }
 
     /// The final document: body elements with the section breaks between

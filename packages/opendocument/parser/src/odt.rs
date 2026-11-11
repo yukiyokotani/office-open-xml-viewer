@@ -176,6 +176,12 @@ pub fn read(package: &OdfPackage) -> Result<(Document, Vec<OwnedDocumentResource
         lists: list::Lists::default(),
         list_paragraph: None,
         text_width: geometry.text_width,
+        // The default paragraph font size, resolved once (section grids
+        // read it per section).
+        default_font_size: sheet
+            .default_style(Family::Paragraph)
+            .and_then(|style| text::paragraph_font_size(Cascade::new(vec![style], TEXT)))
+            .unwrap_or(12.0),
         page_writing: (pages.plain_horizontal(initial), pages.horizontal(initial)),
         text_height: geometry.text_height,
         page_left_margin: geometry.left,
@@ -358,6 +364,7 @@ struct Reader<'a> {
     construction_bytes: usize,
     /// Source bytes read again for repeated table rows and cells.
     repeat_work: usize,
+    default_font_size: f64,
     /// The current page style's writing: horizontal without a grid, and
     /// horizontal (resolved when the page style changes).
     page_writing: (bool, bool),
