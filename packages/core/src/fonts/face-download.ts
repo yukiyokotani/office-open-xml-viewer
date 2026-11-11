@@ -39,8 +39,9 @@
  * another (it would repaint the first, and an earlier overlapping
  * declaration registered after a later one would reverse CSS
  * `unicode-range` precedence). The first terminal outcome is kept for its
- * holders: kept bytes are adopted by a requester whose own request failed
- * or timed out, and a kept failure is adopted by later requesters (and by
+ * holders: bytes a holder accepted within its own deadline are adopted by a
+ * requester whose own request failed or timed out (bytes still held only by
+ * joins that have not validated them are not), and a kept failure is adopted by later requesters (and by
  * one whose own request completed after it) instead of being retried. A
  * failure is kept only while a holder that adopted it is open, so a document
  * opened after every such holder closed retries. A cancellation (the
@@ -171,6 +172,9 @@ class Entry {
   /** Retained bytes charged for this entry (while downloading and kept). */
   charged = 0;
   settled?: FaceAcquisition;
+  /** Some holder accepted the bytes within its own deadline. Until then they
+   * are only held by joins still being validated, and nobody adopts them. */
+  accepted = false;
 
   constructor(produce: (signal: AbortSignal, entry: Entry) => Promise<FaceAcquisition>, onAbandon: (entry: Entry) => void) {
     this.task = new SharedTask((signal) => produce(signal, this), () => onAbandon(this));
@@ -307,7 +311,7 @@ async function acquireOne(
 function keptAcquisition(url: string, credentials: FontSourceCredentials, holder: object): ArrayBuffer | undefined {
   if (releasedHolders.has(holder)) return undefined;
   const entry = entries.get(`${credentials}\u0000${url}`);
-  if (!entry?.settled || !('data' in entry.settled)) return undefined;
+  if (!entry?.settled || !('data' in entry.settled) || !entry.accepted) return undefined;
   takeLease(entry, holder);
   return entry.settled.data;
 }
@@ -367,6 +371,8 @@ export async function acquireFaceUrls(
           if (entry) returnLease(key, entry, holder);
           return [url, keptFailure(key, holder)!];
         }
+        const entry = entries.get(key);
+        if (entry) entry.accepted = true;
         return [url, result];
       }
       // Bytes another holder keeps come first; else this failure is kept.

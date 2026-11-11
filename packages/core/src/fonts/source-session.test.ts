@@ -211,6 +211,31 @@ describe('FontSourceSession: lazy unicode-range loading', () => {
     ]);
   });
 
+  it('rejects a face fetched after every requester\'s deadline, however many documents wait for it', async () => {
+    // The shared download completes after both documents' deadlines but
+    // before their ceiling timers run: each must reject it, as one document
+    // alone would, instead of adopting the other's provisional bytes.
+    const url = 'https://app.example/late.woff2';
+    const outcome = async (documents: number) => {
+      let open_ = () => undefined as void;
+      const gate = new Promise<void>((resolve) => { open_ = resolve; });
+      installFetch({ [url]: { bytes: 8, gate } });
+      const set = fakeSet();
+      const source = fontFiles({ faces: [{ family: 'Late', url }] });
+      const pending = Array.from({ length: documents }, () => open([source], set).ensure(demand(['Late'])));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      const now = Date.now();
+      const clock = vi.spyOn(Date, 'now').mockReturnValue(now + 60_000);
+      open_();
+      const loaded = await Promise.all(pending);
+      clock.mockRestore();
+      for (const session of sessions.splice(0)) session.release();
+      return { faces: loaded.map((snapshot) => snapshot.faces.length), registered: set.faces.length };
+    };
+    expect(await outcome(1)).toEqual({ faces: [0], registered: 0 });
+    expect(await outcome(2)).toEqual({ faces: [0, 0], registered: 0 });
+  });
+
   it('keeps one outcome per face while a document holds it, so overlapping precedence never reverses', async () => {
     // A (U+0-FF) and B (U+80-17F) overlap: one component, declared A then B,
     // so B wins U+80-FF. Document 1 cannot fetch A and lays out with B alone.
