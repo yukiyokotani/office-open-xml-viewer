@@ -32,6 +32,10 @@ export interface SlotScrollerHooks<Slot, Range extends SlotWindow> {
   afterMount?(range: Range): void;
   awaitInitialRender?(index: number): boolean;
   shouldSettle?(index: number, slot: Slot): boolean;
+  /** Maps a layout position of {@link range} to the unit index that owns it.
+   *  Omitted: identity. A viewer that leaves units out of its layout (PPTX
+   *  hidden slides in `'skip'` mode) lays out positions and keys slots by unit. */
+  unitAt?(position: number): number;
 }
 
 /** Owns bounded slot mounting, reuse and preview/settle scheduling. Render and
@@ -74,10 +78,11 @@ export class SlotScroller<Slot, Range extends SlotWindow> {
     if (this._destroyed || this.hooks.count() === 0) return;
     const range = this.hooks.range();
     this.lastRange = range;
+    const units = this.unitsIn(range);
     for (const [index, slot] of [...this.slots]) {
-      if (index < range.start || index > range.end) this.recycleSlot(index, slot);
+      if (!units.has(index)) this.recycleSlot(index, slot);
     }
-    for (let index = range.start; index <= range.end; index++) {
+    for (const index of units) {
       const existing = this.slots.get(index);
       if (existing) {
         if (!repositionExisting) continue;
@@ -106,10 +111,11 @@ export class SlotScroller<Slot, Range extends SlotWindow> {
     if (this._destroyed || this.hooks.count() === 0) return;
     const range = this.hooks.range();
     this.lastRange = range;
+    const units = this.unitsIn(range);
     for (const [index, slot] of [...this.slots]) {
-      if (index < range.start || index > range.end) this.recycleSlot(index, slot);
+      if (!units.has(index)) this.recycleSlot(index, slot);
     }
-    for (let index = range.start; index <= range.end; index++) {
+    for (const index of units) {
       const existing = this.slots.get(index);
       if (existing) {
         this.hooks.previewSlot(index, existing, range);
@@ -123,6 +129,16 @@ export class SlotScroller<Slot, Range extends SlotWindow> {
     }
     this.hooks.afterMount?.(range);
     this.hooks.onRange(range);
+  }
+
+  /** Units owning the window's positions, in layout order. */
+  private unitsIn(range: Range): Set<number> {
+    const units = new Set<number>();
+    const unitAt = this.hooks.unitAt;
+    for (let position = range.start; position <= range.end; position++) {
+      units.add(unitAt ? unitAt(position) : position);
+    }
+    return units;
   }
 
   scheduleSettle(delayMs: number): void {

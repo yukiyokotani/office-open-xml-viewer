@@ -5,6 +5,7 @@ import type { PptxPresentation } from './presentation';
 import type { PresentationHandle } from './presentation-handle';
 import type { PptxTextRunInfo } from './renderer';
 import { buildPptxTextLayer } from './text-layer';
+import type { DimOptions } from './types';
 
 export interface MediaSlot {
   canvas: HTMLCanvasElement;
@@ -33,6 +34,8 @@ interface MediaHooks<Slot extends MediaSlot> {
   mediaEnabled(): boolean;
   mediaRange(): VisibleWindow;
   rangeContains(range: VisibleWindow, slide: number): boolean;
+  /** Hidden-slide `'dim'` overlay for `slide`, if any. */
+  dim?(slide: number): DimOptions | undefined;
   shadow(): string | false;
   hyperlinkHandler(): ((target: HyperlinkTarget) => void) | undefined;
   refreshFindRuns(slide: number, runs: PptxTextRunInfo[]): void;
@@ -60,6 +63,7 @@ export class PptxScrollMediaController<Slot extends MediaSlot> {
     return presentation.presentSlide(slot.canvas, i, {
       width, dpr, imageResources: this.hooks.imageResources(),
       ...this.errorPlaceholderOption(),
+      ...this.dimOption(i),
       onTextRun: wantRuns ? (run) => runs.push(run) : undefined,
       onError: (error) => {
         if (generation === slot.presentationGeneration) this.hooks.reportError(error);
@@ -118,6 +122,7 @@ export class PptxScrollMediaController<Slot extends MediaSlot> {
     void presentation.presentSlide(spare, i, {
       width, dpr,
       ...this.errorPlaceholderOption(),
+      ...this.dimOption(i),
       onTextRun: wantRuns ? (run) => runs.push(run) : undefined,
       onError: (error) => {
         if (generation === slot.presentationGeneration) this.hooks.reportError(error);
@@ -156,6 +161,11 @@ export class PptxScrollMediaController<Slot extends MediaSlot> {
     return generation === slot.presentationGeneration && slot.mediaInteractive &&
       epoch === this.hooks.epoch() && this.hooks.slots().get(i) === slot &&
       slot.renderedSlide === i;
+  }
+
+  private dimOption(slide: number): { dim?: DimOptions } {
+    const dim = this.hooks.dim?.(slide);
+    return dim ? { dim } : {};
   }
 
   private errorPlaceholderOption() {
