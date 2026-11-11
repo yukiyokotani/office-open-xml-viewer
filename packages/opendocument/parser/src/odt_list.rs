@@ -199,7 +199,8 @@ enum Kind {
     Bullet(char),
     /// A picture (§16.33), drawn at `fo:width` by `fo:height` (pt).
     Image {
-        href: String,
+        /// Shared by every copy of the cached level.
+        href: Rc<str>,
         width: Option<f64>,
         height: Option<f64>,
     },
@@ -656,7 +657,7 @@ impl<'a> Reader<'a> {
                 height,
             } => {
                 self.charge_construction(href.len())?;
-                Some((href.clone(), *width, *height))
+                Some((href.to_string(), *width, *height))
             }
             _ => None,
         };
@@ -838,7 +839,7 @@ impl<'a> Reader<'a> {
         } else if image {
             match attribute((NS_XLINK, "href")) {
                 Some(href) => Kind::Image {
-                    href: href.to_string(),
+                    href: Rc::from(href),
                     width: None,
                     height: None,
                 },

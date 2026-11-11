@@ -518,7 +518,7 @@ impl<'a> Reader<'a> {
         {
             Some(columns) => {
                 // Reading the captured columns element is style work.
-                self.charge_work(columns.children.len().saturating_add(1))?;
+                self.charge_work(columns.nodes())?;
                 page::columns(columns, self.text_width - indent.0 - indent.1)?
             }
             None => None,
