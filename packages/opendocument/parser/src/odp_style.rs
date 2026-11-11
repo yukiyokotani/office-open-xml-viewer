@@ -22,6 +22,19 @@ const MAX_PARENT_DEPTH: usize = 64;
 const MAX_STYLE_CHILDREN: usize = 64;
 const MAX_PROPERTY_ATTRIBUTES: usize = 256;
 const MAX_PROPERTY_CHILDREN: usize = 64;
+const MAX_PROPERTY_VALUE_BYTES: usize = 1024;
+
+/// The work of reading a property cascade: each property element, each of
+/// its attributes, and their value bytes (in 64-byte units), which bounds
+/// the cost of the lookups and value parsing done through it.
+pub fn props_cost(props: &Props<'_>) -> usize {
+    props.nodes.iter().fold(0usize, |sum, node| {
+        let attributes = node
+            .attributes()
+            .fold(0usize, |s, a| s.saturating_add(1 + a.value().len() / 64));
+        sum.saturating_add(1).saturating_add(attributes)
+    })
+}
 
 /// Reject a style record past the bounds above.
 fn check_style_record(style: Nd<'_>) -> Result<(), String> {
@@ -32,7 +45,11 @@ fn check_style_record(style: Nd<'_>) -> Result<(), String> {
         if children > MAX_STYLE_CHILDREN {
             return Err(error());
         }
-        if child.attributes().len() > MAX_PROPERTY_ATTRIBUTES {
+        if child.attributes().len() > MAX_PROPERTY_ATTRIBUTES
+            || child
+                .attributes()
+                .any(|a| a.value().len() > MAX_PROPERTY_VALUE_BYTES)
+        {
             return Err(error());
         }
         if child
@@ -68,10 +85,18 @@ pub struct Sheet<'a> {
     pub master_order: Vec<&'a str>,
     page_layouts: HashMap<(Scope, &'a str), Nd<'a>>,
     font_faces: HashMap<&'a str, String>,
+    /// `text:list` elements with an `xml:id` (§19.785 continuation targets),
+    /// with the scope of their document.
+    pub list_ids: HashMap<&'a str, (Scope, Nd<'a>)>,
 }
 
 impl<'a> Sheet<'a> {
     pub fn add_document(&mut self, root: Nd<'a>, scope: Scope) -> Result<(), String> {
+        for list in root.descendants().filter(|n| xml::is(*n, NS_TEXT, "list")) {
+            if let Some(id) = list.attribute((xml::NS_XML, "id")) {
+                self.list_ids.entry(id).or_insert((scope, list));
+            }
+        }
         for child in root.children().filter(|n| n.is_element()) {
             if xml::is(child, NS_OFFICE, "font-face-decls") {
                 for face in child

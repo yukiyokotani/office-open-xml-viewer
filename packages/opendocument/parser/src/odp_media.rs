@@ -197,7 +197,7 @@ pub fn sniff(bytes: &[u8]) -> Option<Resource> {
         // pHYs (pixels per metre, unit 1).
         let mut dpi = None;
         let mut pos = 8usize;
-        while pos + 12 <= bytes.len() {
+        while pos.checked_add(12).is_some_and(|end| end <= bytes.len()) {
             let len = u32::from_be_bytes(bytes[pos..pos + 4].try_into().ok()?) as usize;
             let kind = &bytes[pos + 4..pos + 8];
             if kind == b"pHYs" && len >= 9 && pos + 8 + 9 <= bytes.len() {
@@ -212,8 +212,12 @@ pub fn sniff(bytes: &[u8]) -> Option<Resource> {
             if kind == b"IDAT" || kind == b"IEND" {
                 break;
             }
-            // Checked: a length near u32::MAX must not wrap on 32-bit targets.
-            pos = pos.checked_add(len.checked_add(12)?)?;
+            // Checked: a length near u32::MAX must not wrap on 32-bit
+            // targets, and the next chunk must lie inside the bytes read.
+            match pos.checked_add(len).and_then(|p| p.checked_add(12)) {
+                Some(next) if next <= bytes.len() => pos = next,
+                _ => break,
+            }
         }
         return Some(Resource {
             mime: "image/png",

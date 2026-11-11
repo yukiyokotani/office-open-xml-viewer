@@ -194,6 +194,9 @@ enum Resume<'a> {
     Preceding,
     /// `text:continue-numbering="false"`: a new sequence.
     Restart,
+    /// `text:continue-list` naming a list outside this text: continue
+    /// after that list's last number.
+    After(u32),
 }
 
 /// List instances of one text body, for `text:continue-numbering` and
@@ -201,6 +204,7 @@ enum Resume<'a> {
 struct ListInstances<'a, 'p> {
     /// Charged for every block and list node visited.
     payload: &'p TextPayload<'p>,
+    sheet: &'a Sheet<'a>,
     count: usize,
     /// The last top-level list: its instance and list style name.
     previous: Option<(usize, Option<&'a str>)>,
@@ -212,8 +216,16 @@ impl<'a> ListInstances<'a, '_> {
     /// The instance a top-level `text:list` numbers in: the list it names
     /// by `text:continue-list`, else with `text:continue-numbering="true"`
     /// the preceding list when it has the same list style, else a new one.
-    fn top_level(&mut self, list: Nd<'a>) -> usize {
+    fn top_level(&mut self, list: Nd<'a>) -> Result<(usize, Resume<'a>), String> {
         let style = list.attribute((NS_TEXT, "style-name"));
+        // A continued list outside this text (another frame or slide) is
+        // continued after its own last number.
+        let resume = match list.attribute((NS_TEXT, "continue-list")) {
+            Some(id) if !self.ids.contains_key(id) => self
+                .external_last(id, 0)?
+                .map_or(Resume::None, Resume::After),
+            _ => Resume::None,
+        };
         let continued = match list.attribute((NS_TEXT, "continue-list")) {
             Some(id) => self.ids.get(id).copied(),
             None => (list.attribute((NS_TEXT, "continue-numbering")) == Some("true"))
@@ -230,7 +242,65 @@ impl<'a> ListInstances<'a, '_> {
             self.ids.insert(id, instance);
         }
         self.previous = Some((instance, style));
-        instance
+        Ok((instance, resume))
+    }
+
+    /// The last item number of the list with `xml:id` `id` anywhere in the
+    /// document, from its own structure: its continuation, its level-1
+    /// start value and `text:start-value` items (each labelled item counts).
+    /// Chains of continuations are bounded; each item visited is charged.
+    fn external_last(&self, id: &str, depth: usize) -> Result<Option<u32>, String> {
+        let Some(&(scope, list)) = self.sheet.list_ids.get(id) else {
+            return Ok(None);
+        };
+        if depth > MAX_SPAN_DEPTH {
+            return Ok(None);
+        }
+        let mut current = match list.attribute((NS_TEXT, "continue-list")) {
+            Some(other) if other != id => self.external_last(other, depth + 1)?,
+            _ => None,
+        };
+        let start = list
+            .attribute((NS_TEXT, "style-name"))
+            .and_then(|name| self.sheet.list(scope, name))
+            .and_then(|style| {
+                style.children().filter(|n| n.is_element()).find(|n| {
+                    n.attribute((NS_TEXT, "level"))
+                        .and_then(|v| v.parse::<u32>().ok())
+                        == Some(1)
+                })
+            })
+            .and_then(|level| level.attribute((NS_TEXT, "start-value")))
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(1);
+        for item in list
+            .children()
+            .filter(|n| xml::is(*n, NS_TEXT, "list-item"))
+        {
+            self.payload.step(1)?;
+            // Labelled: its first block is a paragraph, not a nested list.
+            let labelled = item
+                .children()
+                .find(|c| {
+                    xml::is(*c, NS_TEXT, "p")
+                        || xml::is(*c, NS_TEXT, "h")
+                        || xml::is(*c, NS_TEXT, "list")
+                })
+                .is_some_and(|c| !xml::is(c, NS_TEXT, "list"));
+            if !labelled {
+                continue;
+            }
+            current = Some(
+                match item
+                    .attribute((NS_TEXT, "start-value"))
+                    .and_then(|v| v.parse::<u32>().ok())
+                {
+                    Some(value) => value,
+                    None => current.map_or(start, |n| n.saturating_add(1)),
+                },
+            );
+        }
+        Ok(current)
     }
 }
 
@@ -246,6 +316,7 @@ pub fn text_body<'a>(
     let mut items: Vec<(Nd<'a>, ListContext<'a>)> = Vec::new();
     let mut instances = ListInstances {
         payload: env.payload,
+        sheet: env.sheet,
         count: 0,
         previous: None,
         ids: HashMap::new(),
@@ -341,6 +412,9 @@ fn collect_list<'a>(
                 list_node.attribute((NS_TEXT, "continue-list")),
                 list_node.attribute((NS_TEXT, "continue-numbering")),
             ) {
+                (Some(id), _) if !instances.ids.contains_key(id) => instances
+                    .external_last(id, 0)?
+                    .map_or(Resume::Restart, Resume::After),
                 (Some(id), _) => Resume::List(id),
                 (None, Some("true")) => Resume::Preceding,
                 (None, Some("false")) => Resume::Restart,
@@ -351,7 +425,7 @@ fn collect_list<'a>(
             };
             (instance, resume)
         }
-        None => (instances.top_level(list_node), Resume::None),
+        None => instances.top_level(list_node)?,
     };
     let inner = ListContext {
         depth: outer.depth + 1,
@@ -554,6 +628,12 @@ fn paragraph<'a>(
     para_props.extend_styles(&styles, PARAGRAPH);
     let mut text_props = Props::new();
     text_props.extend_styles(&styles, TEXT);
+    env.payload.step(
+        styles
+            .len()
+            .saturating_add(crate::odp_style::props_cost(&para_props))
+            .saturating_add(crate::odp_style::props_cost(&text_props)),
+    )?;
 
     let alignment = match para_props.get(NS_FO, "text-align") {
         Some("center") => "ctr",
@@ -763,6 +843,7 @@ impl<'a> Numbering<'a> {
                         .map(|(n, _)| *n)
                 }
                 Resume::Restart => return None,
+                Resume::After(n) => return Some(n),
                 Resume::None => {}
             }
         }
@@ -1205,7 +1286,11 @@ fn run_style(props: &Props<'_>, env: &TextEnv<'_, '_>) -> RunStyle {
         .get(NS_FO, "text-shadow")
         .filter(|v| *v != "none")
         .map(|v| {
-            let parts: Vec<f64> = v.split_whitespace().filter_map(length_emu).collect();
+            let parts: Vec<f64> = v
+                .split_whitespace()
+                .filter_map(length_emu)
+                .take(2)
+                .collect();
             let (ox, oy) = (
                 parts.first().copied().unwrap_or(1.0 * EMU_PER_PT),
                 parts.get(1).copied().unwrap_or(1.0 * EMU_PER_PT),
@@ -1381,8 +1466,11 @@ fn walk_inline<'a>(
         nodes.extend(paragraph_styles.iter().copied());
         let mut props = Props::new();
         props.extend_styles(&nodes, TEXT);
-        let read: usize = props.nodes.iter().map(|n| n.attributes().len()).sum();
-        env.payload.step(nodes.len().saturating_add(read))?;
+        env.payload.step(
+            nodes
+                .len()
+                .saturating_add(crate::odp_style::props_cost(&props)),
+        )?;
         Ok(run_style(&props, env))
     };
     let mut level: Option<RunStyle> = None;

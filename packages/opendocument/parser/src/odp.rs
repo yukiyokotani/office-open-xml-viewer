@@ -51,7 +51,7 @@ const MAX_SLIDE_MODEL_BYTES: usize = 256 * 1024 * 1024;
 const MAX_GROUP_DEPTH: usize = 64;
 /// Implementation bound on the drawing-object nodes the whole deck visits
 /// (master objects once per slide that shows them, empty ones included).
-const MAX_DECK_VISITS: usize = 16_000_000;
+const MAX_DECK_VISITS: usize = 64_000_000;
 /// Implementation bound on the slides of a deck (the PPTX bootstrap limit).
 const MAX_SLIDES: usize = 10_000;
 
@@ -524,11 +524,13 @@ impl<'a, 'r, 'p> SlideReader<'a, 'r, 'p> {
         })
     }
 
-    fn graphic_props(styles: &ObjectStyles<'a>) -> Props<'a> {
+    /// The object's graphic properties; reading them is charged as visits.
+    fn graphic_props(&mut self, styles: &ObjectStyles<'a>) -> Result<Props<'a>, String> {
         let mut props = Props::new();
         props.extend_styles(&styles.chain, GRAPHIC);
         props.extend_styles(&styles.defaults, GRAPHIC);
-        props
+        self.visit(crate::odp_style::props_cost(&props))?;
+        Ok(props)
     }
 
     fn object(
@@ -679,7 +681,7 @@ impl<'a, 'r, 'p> SlideReader<'a, 'r, 'p> {
         out: &mut Vec<SlideElement>,
     ) -> Result<(), String> {
         let styles = self.object_styles(node, ctx)?;
-        let graphic = Self::graphic_props(&styles);
+        let graphic = self.graphic_props(&styles)?;
         let kind = node.tag_name().name();
         let line = paint::line(&graphic, self.sheet);
         let has_stroke = line.stroke.is_some();
@@ -1117,7 +1119,7 @@ impl<'a, 'r, 'p> SlideReader<'a, 'r, 'p> {
         out: &mut Vec<SlideElement>,
     ) -> Result<(), String> {
         let styles = self.object_styles(node, ctx)?;
-        let graphic = Self::graphic_props(&styles);
+        let graphic = self.graphic_props(&styles)?;
         let geometry_node = self.placement_node(node, ctx)?;
         let (w, h) = Self::size(geometry_node);
         let placed = Self::placement(geometry_node, w, h);
@@ -1196,6 +1198,10 @@ impl<'a, 'r, 'p> SlideReader<'a, 'r, 'p> {
                         crate::odf_chart::read_chart_object(self.media.package(), &path, None)
                             .ok()
                             .flatten();
+                    // The cached model is retained for the whole read.
+                    if let Some(model) = &read {
+                        self.media.charge(chart_bytes(model)?)?;
+                    }
                     self.charts.insert(path.clone(), read.clone());
                     read
                 }
@@ -1437,23 +1443,44 @@ fn model_bytes(element: &SlideElement) -> Result<usize, String> {
             }
         }
         SlideElement::Chart(chart) => {
-            let model = &chart.chart;
-            add(model.categories.len(), size_of::<String>());
-            add(
-                model.series.len(),
-                size_of::<ooxml_common::chart::ChartSeries>(),
-            );
-            for series in &model.series {
-                add(series.values.len(), size_of::<Option<f64>>());
-                add(
-                    series.categories.as_ref().map_or(0, Vec::len),
-                    size_of::<String>(),
-                );
-            }
+            add(chart_records(&chart.chart), 1);
         }
         _ => {}
     }
     Ok(bytes)
+}
+
+/// Fixed size of a chart model's repeated records (series, values,
+/// categories, trendlines), which its serialized form understates.
+fn chart_records(model: &pptx_model::ChartModel) -> usize {
+    use std::mem::size_of;
+    let mut bytes = model.categories.len().saturating_mul(size_of::<String>());
+    for series in &model.series {
+        bytes = bytes
+            .saturating_add(size_of::<ooxml_common::chart::ChartSeries>())
+            .saturating_add(series.values.len().saturating_mul(size_of::<Option<f64>>()))
+            .saturating_add(
+                series
+                    .categories
+                    .as_ref()
+                    .map_or(0, Vec::len)
+                    .saturating_mul(size_of::<String>()),
+            )
+            .saturating_add(
+                series
+                    .trend_lines
+                    .as_ref()
+                    .map_or(0, Vec::len)
+                    .saturating_mul(size_of::<ooxml_common::chart::ChartTrendline>()),
+            );
+    }
+    bytes
+}
+
+/// In-memory bytes of a chart model (serialized size, fixed size and
+/// repeated records).
+fn chart_bytes(model: &pptx_model::ChartModel) -> Result<usize, String> {
+    Ok(text::record_bytes(model)?.saturating_add(chart_records(model)))
 }
 
 fn placeholder_type(node: Nd<'_>) -> Option<String> {
@@ -1882,6 +1909,22 @@ mod tests {
             labels(shape.text_body.as_ref().unwrap()),
             ["1.", "1)", "2)", "10)", "3)", "1)"]
         );
+    }
+
+    #[test]
+    fn a_list_continues_a_list_of_another_frame() {
+        let styles = r#"<text:list-style style:name="L1"><text:list-level-style-number text:level="1" style:num-format="1" style:num-suffix="."/></text:list-style>"#;
+        let item = |t: &str| format!("<text:list-item><text:p>{t}</text:p></text:list-item>");
+        let body = format!(
+            r#"<draw:frame svg:width="10cm" svg:height="5cm"><draw:text-box><text:list text:style-name="L1" xml:id="a">{}{}</text:list></draw:text-box></draw:frame><draw:frame svg:width="10cm" svg:height="5cm"><draw:text-box><text:list text:style-name="L1" text:continue-list="a">{}</text:list></draw:text-box></draw:frame>"#,
+            item("x"),
+            item("y"),
+            item("z")
+        );
+        let deck = deck(styles, "", "", &page(&body)).unwrap();
+        let slide0 = model(&deck, 0);
+        let second = shapes(&slide0)[1];
+        assert_eq!(labels(second.text_body.as_ref().unwrap()), ["3."]);
     }
 
     #[test]

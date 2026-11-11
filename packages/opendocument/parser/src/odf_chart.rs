@@ -93,6 +93,9 @@ impl ChartBudget {
     }
 }
 
+/// Implementation bound on the regression curves of one series.
+const MAX_TRENDLINES: usize = 64;
+
 /// Fixed size of one resolved data point record.
 const POINT_BYTES: usize = std::mem::size_of::<(CellData, String)>();
 /// Fixed size of one source-range map entry (key, value, table slot).
@@ -1201,6 +1204,11 @@ impl Reader<'_> {
             let trendlines: Vec<ooxml_common::chart::ChartTrendline> = node
                 .children()
                 .filter(|n| xml::is(*n, NS_CHART, "regression-curve"))
+                .take(MAX_TRENDLINES)
+                .take_while(|_| {
+                    self.budget
+                        .charge(std::mem::size_of::<ooxml_common::chart::ChartTrendline>())
+                })
                 .filter_map(|curve| {
                     let chain = self.chain(curve);
                     let kind = match get(&chain, "chart:chart:regression-type")? {
