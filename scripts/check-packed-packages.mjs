@@ -3,6 +3,7 @@
 // Authored synthetic inputs keep this PR/release gate redistributable.
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { mkdtemp, mkdir, realpath, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -23,11 +24,20 @@ try {
     const files = packed[0].files.map(file => file.path).sort();
     const wasm = files.filter(path => path.endsWith('.wasm'));
     if (directory.endsWith('opendocument')) {
-      // Exactly the reader assets: never the local private corpus.
+      // Exactly the reader assets of every exported format (one cargo feature
+      // each): never the local private corpus, never a format without its WASM.
+      const manifest = JSON.parse(readFileSync(join(directory, 'package.json'), 'utf8'));
+      const formats = Object.keys(manifest.exports).map(entry => entry.replace(/^\.\//, ''));
       assert.deepEqual(files, [
-        'LICENSE', 'README.md', 'THIRD_PARTY_NOTICES.md', 'dist/odt-source-module.mjs', 'dist/odt.mjs',
-        'dist/opendocument_odt_bg.wasm', 'dist/types/odt.d.ts', 'package.json',
-      ]);
+        'LICENSE', 'README.md', 'THIRD_PARTY_NOTICES.md', 'package.json',
+        ...formats.flatMap(f => [`dist/${f}-source-module.mjs`, `dist/${f}.mjs`, `dist/opendocument_${f}_bg.wasm`, `dist/types/${f}.d.ts`]),
+      ].sort());
+      for (const [entry, target] of Object.entries(manifest.exports)) {
+        assert.deepEqual(target, { types: `./dist/types/${entry.slice(2)}.d.ts`, import: `./dist/${entry.slice(2)}.mjs`, default: `./dist/${entry.slice(2)}.mjs` });
+      }
+      assert.equal(manifest.sideEffects, false);
+      assert.equal(manifest.license, 'MIT');
+      assert.deepEqual(manifest.publishConfig, { access: 'public', provenance: true });
     } else if (directory !== root) {
       assert.deepEqual(wasm, ['doc', 'ppt', 'xls'].map(f => `dist/legacy_${f}_direct_bg.wasm`));
     } else {
