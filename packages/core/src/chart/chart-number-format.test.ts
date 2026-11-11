@@ -186,6 +186,11 @@ describe('section divisors (OpenDocument display factor)', () => {
     expect(formatChartValWithCode(-5, '[<0]\\-0.0;0', false)).toBe('-5.0');
     expect(formatChartValWithCode(5, '[<0]0;[>10]0', false)).toBe('#');
   });
+  it('reads an unclosed bracket run in linear time', () => {
+    const started = performance.now();
+    expect(typeof formatChartValWithCode(1, '['.repeat(200_000))).toBe('string');
+    expect(performance.now() - started).toBeLessThan(5_000);
+  });
   it('formats decorated General sections as General', () => {
     expect(formatChartValWithCode(250, '[Red]General', false, [100])).toBe('2.5');
     expect(formatChartValWithCode(-250, '0;[Red]General', false, [1, 10])).toBe('25');

@@ -21,15 +21,24 @@ pub struct XfBuilder {
     borders: HashMap<String, u32>,
     num_fmts: HashMap<String, u32>,
     xfs: HashMap<String, u32>,
-    /// xf of each named cell style (`None` key: cells that name none),
-    /// looked up without allocating.
-    by_style: HashMap<String, u32>,
-    unstyled: Option<u32>,
+    /// xf of each (cell, row default, column default) style triple, keyed
+    /// by the styles' identities (0: none), so lookups never allocate.
+    by_style: HashMap<(usize, usize, usize), u32>,
     dxfs: HashMap<String, u32>,
     indent_pt: Vec<f64>,
     /// Data kind of each xf's number format (`None`: General).
     kinds: Vec<Option<DataKind>>,
     default_font: Font,
+}
+
+/// The styles a table cell's format is searched through (§16.2): its own
+/// `table:style-name`, its row's and its column's
+/// `table:default-cell-style-name`.
+#[derive(Clone, Copy, Default)]
+pub struct CellStyles<'a> {
+    pub cell: Option<&'a str>,
+    pub row: Option<&'a str>,
+    pub column: Option<&'a str>,
 }
 
 /// The resolved properties of one cell style (or the default).
@@ -65,7 +74,6 @@ impl XfBuilder {
             num_fmts: HashMap::new(),
             xfs: HashMap::new(),
             by_style: HashMap::new(),
-            unstyled: None,
             dxfs: HashMap::new(),
             indent_pt: Vec::new(),
             kinds: Vec::new(),
@@ -82,7 +90,7 @@ impl XfBuilder {
             ..Fill::default()
         })?;
         builder.intern_border(Border::default())?;
-        let default_xf = builder.xf_for(store, data, faces, None)?;
+        let default_xf = builder.xf_for(store, data, faces, CellStyles::default())?;
         debug_assert_eq!(default_xf, 0);
         Ok(builder)
     }
@@ -123,33 +131,38 @@ impl XfBuilder {
         &self.default_font
     }
 
-    /// The xf of a cell style (`None`: the `Default` style), memoized by name.
+    /// The xf of a table cell from its own style and its row's and
+    /// column's default cell styles, memoized by the styles. A property is
+    /// searched through them in that order (§16.2); a cell with none of
+    /// them takes the `Default` style.
     pub fn xf_for(
         &mut self,
         store: &StyleStore,
         data: &mut DataStyles,
         faces: &HashMap<String, String>,
-        style: Option<&str>,
+        styles: CellStyles<'_>,
     ) -> Result<u32, String> {
-        let found = match style {
-            Some(name) => self.by_style.get(name).copied(),
-            None => self.unstyled,
-        };
-        if let Some(found) = found {
-            return Ok(found);
+        let find = |name: Option<&str>| name.and_then(|name| store.find("table-cell", name));
+        let mut found: Vec<&Style> = [styles.cell, styles.row, styles.column]
+            .into_iter()
+            .filter_map(find)
+            .collect();
+        let identity = |at: usize| found.get(at).map_or(0, |s| *s as *const Style as usize);
+        let key = (identity(0), identity(1), identity(2));
+        if let Some(index) = self.by_style.get(&key) {
+            return Ok(*index);
         }
-        let name = style.unwrap_or("Default");
-        let chain = store.chain("table-cell", Some(name));
+        if found.is_empty() {
+            found.extend(store.find("table-cell", "Default"));
+        }
+        let chain = store.chain_through("table-cell", &found);
         let format = resolve(&chain, data, faces);
         let index = self.intern_format(format)?;
-        match style {
-            Some(name) => {
-                self.budget
-                    .bytes(crate::ods::hash_entry_bytes::<String, u32>(name.len()))?;
-                self.by_style.insert(name.to_string(), index);
-            }
-            None => self.unstyled = Some(index),
-        }
+        self.budget
+            .bytes(crate::ods::hash_entry_bytes::<(usize, usize, usize), u32>(
+                0,
+            ))?;
+        self.by_style.insert(key, index);
         Ok(index)
     }
 
@@ -370,9 +383,14 @@ impl XfBuilder {
         store: &StyleStore,
         faces: &HashMap<String, String>,
         cell_font: &Font,
-        span_style: &str,
+        span_styles: &[&str],
     ) -> RunFont {
-        let chain = store.chain("text", Some(span_style));
+        // The spans' styles, innermost first, then the cell's font.
+        let found: Vec<&Style> = span_styles
+            .iter()
+            .filter_map(|name| store.find("text", name))
+            .collect();
+        let chain = store.chain_through("text", &found);
         let font = font_of(&chain, faces, Some(cell_font));
         RunFont {
             bold: font.bold,

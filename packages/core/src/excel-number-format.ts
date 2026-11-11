@@ -46,6 +46,9 @@ export function parseFormatSection(section: string): ParsedFormatSection {
   let body = '';
   let color: string | undefined;
   let condition: SectionCondition | undefined;
+  // Once no `]` follows, none follows any later `[` either: an unclosed
+  // run of brackets is copied without searching again (linear work).
+  let unclosed = false;
   let i = 0;
   while (i < section.length) {
     const ch = section[i];
@@ -59,8 +62,8 @@ export function parseFormatSection(section: string): ParsedFormatSection {
       if (i + 1 < section.length) body += section[i + 1];
       i += 2;
     } else if (ch === '[') {
-      const end = section.indexOf(']', i);
-      if (end < 0) { body += ch; i++; continue; }
+      const end = unclosed ? -1 : section.indexOf(']', i);
+      if (end < 0) { unclosed = true; body += ch; i++; continue; }
       const inner = section.slice(i + 1, end);
       const lower = inner.toLowerCase();
       const idxMatch = lower.match(/^color(\d{1,2})$/);

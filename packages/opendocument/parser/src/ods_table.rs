@@ -8,8 +8,9 @@
 //! one run.
 
 use super::{
-    cells::XfBuilder, column_letters, date_serial, draw, duration_days, hash_entry_bytes,
-    map_entry_bytes, pt_to_px, Context, OdsSheet, MAX_COLS, MAX_ROWS, NS_TABLE,
+    cells::{CellStyles, XfBuilder},
+    column_letters, date_serial, draw, duration_days, hash_entry_bytes, map_entry_bytes, pt_to_px,
+    Context, OdsSheet, MAX_COLS, MAX_ROWS, NS_TABLE,
 };
 use crate::odf_props::{get, hex_color, length_pt};
 use crate::ods_number::DataKind;
@@ -556,16 +557,20 @@ fn promote_column_formats(
             let last = col
                 .saturating_add(repeat(cell, "number-columns-repeated")? as usize - 1)
                 .min(width);
-            let own = cell.attribute((NS_TABLE, "style-name")).or(row_default);
+            let own = cell.attribute((NS_TABLE, "style-name"));
             let mut c = col;
             while c <= last {
                 ctx.budget.steps(1)?;
                 let column = column_at(columns, c as u32);
                 let segment_last = column.map_or(last, |k| (k.last as usize).min(last));
-                let style = own.or_else(|| column.and_then(|k| k.default_style.as_deref()));
+                let styles = CellStyles {
+                    cell: own,
+                    row: row_default,
+                    column: column.and_then(|k| k.default_style.as_deref()),
+                };
                 let xf = ctx
                     .xfs
-                    .xf_for(&ctx.store, &mut ctx.data, &ctx.faces, style)?;
+                    .xf_for(&ctx.store, &mut ctx.data, &ctx.faces, styles)?;
                 let default = column.map_or(0, |k| k.default_xf);
                 if ctx.xfs.blank_signature(xf) != ctx.xfs.blank_signature(default) {
                     candidates.push((c, segment_last));
@@ -597,16 +602,20 @@ fn promote_column_formats(
             let last = col.saturating_add(span - 1).min(width);
             let has_content = cell.attribute((NS_OFFICE, "value-type")).is_some()
                 || cell.children().any(|n| n.is_element());
-            let own = cell.attribute((NS_TABLE, "style-name")).or(row_default);
+            let own = cell.attribute((NS_TABLE, "style-name"));
             let mut c = col;
             while c <= last {
                 ctx.budget.steps(1)?;
                 let column = column_at(columns, c as u32);
                 let segment_last = column.map_or(last, |k| (k.last as usize).min(last));
-                let style = own.or_else(|| column.and_then(|k| k.default_style.as_deref()));
+                let styles = CellStyles {
+                    cell: own,
+                    row: row_default,
+                    column: column.and_then(|k| k.default_style.as_deref()),
+                };
                 let xf = ctx
                     .xfs
-                    .xf_for(&ctx.store, &mut ctx.data, &ctx.faces, style)?;
+                    .xf_for(&ctx.store, &mut ctx.data, &ctx.faces, styles)?;
                 // Candidates are disjoint and in column order: only those
                 // overlapping the segment are visited, each column once.
                 let from = candidates.partition_point(|(_, b)| *b < c);
@@ -752,7 +761,10 @@ fn collect_columns(
                     &ctx.store,
                     &mut ctx.data,
                     &ctx.faces,
-                    default_style.as_deref(),
+                    CellStyles {
+                        column: default_style.as_deref(),
+                        ..CellStyles::default()
+                    },
                 )?;
                 columns.push(Column {
                     first: *next,
@@ -973,9 +985,14 @@ fn read_row<'a, 'input>(
             {
                 record_style_map(ctx, walker, style_name, (first, c), (last, segment_last))?;
             }
+            let styles = CellStyles {
+                cell: own_style,
+                row: row_default,
+                column: column_style.as_deref(),
+            };
             let xf = ctx
                 .xfs
-                .xf_for(&ctx.store, &mut ctx.data, &ctx.faces, style)?;
+                .xf_for(&ctx.store, &mut ctx.data, &ctx.faces, styles)?;
             let xf = adjust_xf_for_value(&mut ctx.xfs, xf, cell)?;
             // An empty cell is materialized only when it paints differently
             // from its column's default (fill or borders); its font, number
@@ -1302,10 +1319,14 @@ fn cell_value(
             } else if has_paragraphs {
                 let (column_xf, column_style) = column_default(col, columns);
                 let _ = column_xf;
-                let style = own_style.or(row_default).or(column_style.as_deref());
+                let styles = CellStyles {
+                    cell: own_style,
+                    row: row_default,
+                    column: column_style.as_deref(),
+                };
                 let xf = ctx
                     .xfs
-                    .xf_for(&ctx.store, &mut ctx.data, &ctx.faces, style)?;
+                    .xf_for(&ctx.store, &mut ctx.data, &ctx.faces, styles)?;
                 let (text, runs) = rich_text(ctx, cell, xf)?;
                 if value_type.is_none() && text.is_empty() {
                     CellValue::Empty
@@ -1353,17 +1374,17 @@ fn rich_text(
     cell: roxmltree::Node<'_, '_>,
     xf: u32,
 ) -> Result<(String, Option<Vec<Run>>), String> {
-    let mut runs: Vec<(String, Option<&str>)> = Vec::new();
+    let mut runs: Vec<(String, Option<SpanStyles<'_>>)> = Vec::new();
     let mut first = true;
     for p in cell
         .children()
         .filter(|n| xml::is(*n, NS_TEXT, "p") || xml::is(*n, NS_TEXT, "h"))
     {
         if !first {
-            push_run(&mut runs, "\n", None);
+            push_run(&mut runs, "\n", &None);
         }
         first = false;
-        collect_runs(p, None, &mut runs);
+        collect_runs(p, &None, &mut runs);
     }
     let text: String = runs.iter().map(|(t, _)| t.as_str()).collect();
     if runs.iter().all(|(_, style)| style.is_none()) {
@@ -1387,7 +1408,9 @@ fn rich_text(
         let run = Run {
             text,
             font: Some(match style {
-                Some(style) => ctx.xfs.run_font(&ctx.store, &ctx.faces, &cell_font, style),
+                Some(styles) => ctx
+                    .xfs
+                    .run_font(&ctx.store, &ctx.faces, &cell_font, &styles),
                 None => base.clone(),
             }),
         };
@@ -1397,20 +1420,38 @@ fn rich_text(
     Ok((text, Some(out)))
 }
 
-fn push_run<'a>(runs: &mut Vec<(String, Option<&'a str>)>, text: &str, style: Option<&'a str>) {
+/// The `text:span` styles in effect over a run, innermost first: a property
+/// one span does not set is searched in the spans around it (§16.2).
+type SpanStyles<'a> = Rc<Vec<&'a str>>;
+
+/// Whether two runs carry the same span styles (the same nesting, or the
+/// same single style).
+fn same_spans(a: &Option<SpanStyles<'_>>, b: &Option<SpanStyles<'_>>) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(a), Some(b)) => Rc::ptr_eq(a, b) || a.len() == 1 && b.len() == 1 && a[0] == b[0],
+        _ => false,
+    }
+}
+
+fn push_run<'a>(
+    runs: &mut Vec<(String, Option<SpanStyles<'a>>)>,
+    text: &str,
+    style: &Option<SpanStyles<'a>>,
+) {
     if let Some(last) = runs.last_mut() {
-        if last.1 == style {
+        if same_spans(&last.1, style) {
             last.0.push_str(text);
             return;
         }
     }
-    runs.push((text.to_string(), style));
+    runs.push((text.to_string(), style.clone()));
 }
 
 fn collect_runs<'a>(
     node: roxmltree::Node<'a, '_>,
-    style: Option<&'a str>,
-    runs: &mut Vec<(String, Option<&'a str>)>,
+    style: &Option<SpanStyles<'a>>,
+    runs: &mut Vec<(String, Option<SpanStyles<'a>>)>,
 ) {
     for child in node.children() {
         if child.is_text() {
@@ -1429,10 +1470,14 @@ fn collect_runs<'a>(
             ),
             "tab" => push_run(runs, "\t", style),
             "line-break" => push_run(runs, "\n", style),
-            "span" => {
-                let inner = child.attribute((NS_TEXT, "style-name")).or(style);
-                collect_runs(child, inner, runs);
-            }
+            "span" => match child.attribute((NS_TEXT, "style-name")) {
+                Some(name) => {
+                    let mut inner = vec![name];
+                    inner.extend(style.iter().flat_map(|outer| outer.iter().copied()));
+                    collect_runs(child, &Some(Rc::new(inner)), runs);
+                }
+                None => collect_runs(child, style, runs),
+            },
             "note" | "ruby-text" => {}
             _ => collect_runs(child, style, runs),
         }

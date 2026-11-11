@@ -193,6 +193,33 @@ impl StyleStore {
         self.defaults.get(family)
     }
 
+    /// The search of a property through several styles in turn (§16.2: a
+    /// table cell's own style, then its row's and its column's default cell
+    /// styles): each style with its parents, nearest first, then the
+    /// family's default style.
+    pub fn chain_through<'s>(&'s self, family: &str, styles: &[&'s Style]) -> Vec<&'s Style> {
+        let mut chain: Vec<&Style> = Vec::new();
+        for style in styles {
+            let mut current = Some(*style);
+            let mut depth = 0;
+            while let Some(style) = current {
+                if depth >= MAX_PARENT_DEPTH || chain.iter().any(|s| std::ptr::eq(*s, style)) {
+                    break;
+                }
+                depth += 1;
+                chain.push(style);
+                current = style
+                    .parent
+                    .as_deref()
+                    .and_then(|parent| self.styles.get(&(family.to_string(), parent.to_string())));
+            }
+        }
+        if let Some(default) = self.defaults.get(family) {
+            chain.push(default);
+        }
+        chain
+    }
+
     /// The style and its parents (common styles), nearest first, then the
     /// family's default style.
     pub fn chain<'s>(&'s self, family: &str, name: Option<&str>) -> Vec<&'s Style> {

@@ -636,3 +636,52 @@ fn default_style_conditions_reach_columns_past_the_declared_runs() {
         "{covered:?}"
     );
 }
+
+#[test]
+fn cell_properties_continue_through_row_and_column_defaults() {
+    // §16.2: A1's own style sets only bold; its fill is searched in the
+    // row's default cell style, then in the column's.
+    let automatic = r##"<style:style style:name="bold" style:family="table-cell"><style:text-properties fo:font-weight="bold"/></style:style><style:style style:name="yellow" style:family="table-cell"><style:table-cell-properties fo:background-color="#ffff00"/></style:style>"##;
+    let body = content(
+        automatic,
+        r#"<table:table table:name="S"><table:table-column table:default-cell-style-name="yellow"/><table:table-row><table:table-cell table:style-name="bold" office:value-type="float" office:value="1"><text:p>1</text:p></table:table-cell></table:table-row></table:table>"#,
+    );
+    let workbook = read_text(&body, Some(&styles(""))).unwrap();
+    let styles = workbook.styles.as_ref().unwrap();
+    let xf = &styles.cell_xfs[workbook.sheets[0].rows[0].cells[0].style_index.unwrap() as usize];
+    assert!(styles.fonts[xf.font_id as usize].bold);
+    assert_eq!(
+        styles.fills[xf.fill_id as usize].fg_color.as_deref(),
+        Some("FFFF00")
+    );
+}
+
+#[test]
+fn nested_spans_inherit_the_outer_span_formatting() {
+    // §16.2: the inner span sets only italic; bold comes from the outer.
+    let automatic = r#"<style:style style:name="B" style:family="text"><style:text-properties fo:font-weight="bold"/></style:style><style:style style:name="I" style:family="text"><style:text-properties fo:font-style="italic"/></style:style>"#;
+    let body = content(
+        automatic,
+        &table(
+            r#"<table:table-row><table:table-cell office:value-type="string"><text:p>a<text:span text:style-name="B">b<text:span text:style-name="I">c</text:span></text:span></text:p></table:table-cell></table:table-row>"#,
+        ),
+    );
+    let workbook = read_text(&body, Some(&styles(""))).unwrap();
+    let xlsx_model::CellValue::Text {
+        runs: Some(runs), ..
+    } = &workbook.sheets[0].rows[0].cells[0].value
+    else {
+        panic!("no runs");
+    };
+    let fonts: Vec<(&str, bool, bool)> = runs
+        .iter()
+        .map(|r| {
+            let font = r.font.as_ref().unwrap();
+            (r.text.as_str(), font.bold, font.italic)
+        })
+        .collect();
+    assert_eq!(
+        fonts,
+        [("a", false, false), ("b", true, false), ("c", true, true)]
+    );
+}
