@@ -171,6 +171,7 @@ pub fn read(package: &OdfPackage) -> Result<OdpDeck, String> {
     let mut visits = MAX_DECK_VISITS;
     let text_work = std::cell::Cell::new(text::MAX_DECK_TEXT_WORK);
     let mut master_frames = HashMap::new();
+    let mut marker_paths = HashMap::new();
     // Masters whose theme was already searched (one scan each).
     let mut themes_searched: Vec<roxmltree::NodeId> = Vec::new();
     let mut charts: HashMap<String, Option<pptx_model::ChartModel>> = HashMap::new();
@@ -201,6 +202,7 @@ pub fn read(package: &OdfPackage) -> Result<OdpDeck, String> {
             master_frames: &mut master_frames,
             charts: &mut charts,
             slide_model: MAX_SLIDE_MODEL_BYTES,
+            marker_paths: &mut marker_paths,
             next_id: 1,
             page_size: (width, height),
         };
@@ -277,6 +279,8 @@ struct SlideReader<'a, 'r, 'p> {
     charts: &'r mut HashMap<String, Option<pptx_model::ChartModel>>,
     /// Model bytes left for this slide (see [`MAX_SLIDE_MODEL_BYTES`]).
     slide_model: usize,
+    /// Parsed marker paths by their definition's `svg:d` (address, length).
+    marker_paths: &'r mut HashMap<(usize, usize), Option<Vec<Seg>>>,
     next_id: u32,
     /// Slide size in EMU (page backgrounds are laid out on it).
     page_size: (f64, f64),
@@ -947,7 +951,7 @@ impl<'a, 'r, 'p> SlideReader<'a, 'r, 'p> {
     fn markers(
         &mut self,
         geometry: &mut Geometry,
-        line: &Line,
+        line: &Line<'a>,
         w: f64,
         h: f64,
         placed: &Placed,
@@ -1025,11 +1029,25 @@ impl<'a, 'r, 'p> SlideReader<'a, 'r, 'p> {
                 tip.1 - inward.1 * marker_len * docking,
             );
             let perp = (inward.1, -inward.0);
-            let Some(segs_marker) = parse_svg_path(&marker.d) else {
+            // Parsed once per marker definition (kept for the deck).
+            let key = (marker.d.as_ptr() as usize, marker.d.len());
+            if !self.marker_paths.contains_key(&key) {
+                let parsed = parse_svg_path(marker.d);
+                if let Some(segs) = &parsed {
+                    // Past the retained limit the deck fails at `retain`.
+                    let bytes = segs.len().saturating_mul(std::mem::size_of::<Seg>());
+                    if self.media.charge(bytes).is_err() {
+                        continue;
+                    }
+                }
+                self.marker_paths.insert(key, parsed);
+            }
+            let Some(segs_marker) = self.marker_paths.get(&key).and_then(Option::as_ref) else {
                 continue;
             };
             let mapped: Vec<Seg> = segs_marker
-                .into_iter()
+                .iter()
+                .cloned()
                 .map(|s| {
                     geo::map_seg(s, |u, v| {
                         let du = (u - vx - vw / 2.0) * scale;
@@ -1874,7 +1892,7 @@ mod tests {
         let shape = shapes(&slide0)[0];
         assert_eq!(
             labels(shape.text_body.as_ref().unwrap()),
-            ["1.", "2.", "1.", "2.", "3.", "1."]
+            ["1.", "2.", "1.", "2.", "3.", "4."]
         );
     }
 
@@ -1925,6 +1943,25 @@ mod tests {
         let slide0 = model(&deck, 0);
         let second = shapes(&slide0)[1];
         assert_eq!(labels(second.text_body.as_ref().unwrap()), ["3."]);
+    }
+
+    #[test]
+    fn a_continued_list_counts_its_own_continuation() {
+        let styles = r#"<text:list-style style:name="L1"><text:list-level-style-number text:level="1" style:num-format="1" style:num-suffix="."/></text:list-style>"#;
+        let item = |t: &str| format!("<text:list-item><text:p>{t}</text:p></text:list-item>");
+        let two = format!("{}{}", item("x"), item("y"));
+        let body = format!(
+            r#"<draw:frame svg:width="10cm" svg:height="5cm"><draw:text-box><text:list text:style-name="L1">{two}</text:list><text:list text:style-name="L1" xml:id="b" text:continue-numbering="true">{two}</text:list></draw:text-box></draw:frame><draw:frame svg:width="10cm" svg:height="5cm"><draw:text-box><text:list text:style-name="L1" text:continue-list="b">{}</text:list></draw:text-box></draw:frame>"#,
+            item("z")
+        );
+        let deck = deck(styles, "", "", &page(&body)).unwrap();
+        let slide0 = model(&deck, 0);
+        let s = shapes(&slide0);
+        assert_eq!(
+            labels(s[0].text_body.as_ref().unwrap()),
+            ["1.", "2.", "3.", "4."]
+        );
+        assert_eq!(labels(s[1].text_body.as_ref().unwrap()), ["5."]);
     }
 
     #[test]

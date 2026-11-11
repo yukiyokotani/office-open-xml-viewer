@@ -735,18 +735,20 @@ fn no_repeat_rect(area: (f64, f64), size: Option<(f64, f64)>, algn: &str) -> Opt
 }
 
 /// The resolved line of a drawing object (§20.164 `draw:stroke`).
-pub struct Line {
+pub struct Line<'a> {
     pub stroke: Option<Stroke>,
     /// Marker paths for the start and end, with their width in EMU and
     /// whether they are centred on the end point.
-    pub start_marker: Option<Marker>,
-    pub end_marker: Option<Marker>,
+    pub start_marker: Option<Marker<'a>>,
+    pub end_marker: Option<Marker<'a>>,
 }
 
 #[derive(Clone)]
-pub struct Marker {
+pub struct Marker<'a> {
     pub view_box: (f64, f64, f64, f64),
-    pub d: String,
+    /// The marker's `svg:d`, borrowed from its definition (parsed once per
+    /// definition by the reader).
+    pub d: &'a str,
     pub width: f64,
     pub center: bool,
     pub color: String,
@@ -756,7 +758,7 @@ pub struct Marker {
 /// wide; the model's thinnest line is used (1 px at 96 dpi).
 const HAIRLINE_EMU: i64 = 9525;
 
-pub fn line(props: &Props<'_>, sheet: &Sheet<'_>) -> Line {
+pub fn line<'a>(props: &Props<'a>, sheet: &Sheet<'a>) -> Line<'a> {
     let kind = props.get(NS_DRAW, "stroke").unwrap_or("solid");
     if kind == "none" {
         return Line {
@@ -809,13 +811,13 @@ pub fn line(props: &Props<'_>, sheet: &Sheet<'_>) -> Line {
             }
         }
     }
-    let marker = |which: &str| -> Option<Marker> {
+    let marker = |which: &str| -> Option<Marker<'a>> {
         let name = props.get(NS_DRAW, &format!("marker-{which}"))?;
         let node = sheet.named("marker", name)?;
         let view_box = node
             .attribute((NS_SVG, "viewBox"))
             .and_then(crate::odp_geometry::parse_view_box)?;
-        let d = node.attribute((NS_SVG, "d"))?.to_string();
+        let d = node.attribute((NS_SVG, "d"))?;
         let width = props
             .get(NS_DRAW, &format!("marker-{which}-width"))
             .and_then(length_emu)

@@ -199,12 +199,30 @@ enum Resume<'a> {
     After(u32),
 }
 
+impl ListContext<'_> {
+    /// The context of a paragraph outside lists.
+    fn outside() -> Self {
+        ListContext {
+            depth: 0,
+            style: None,
+            labelled: false,
+            start_value: None,
+            instance: None,
+            list_id: None,
+            resume: Resume::None,
+            first_in_list: false,
+        }
+    }
+}
+
 /// List instances of one text body, for `text:continue-numbering` and
 /// `text:continue-list` (§19.785, §19.786).
 struct ListInstances<'a, 'p> {
     /// Charged for every block and list node visited.
     payload: &'p TextPayload<'p>,
     sheet: &'a Sheet<'a>,
+    /// Depth of continuation resolution across texts.
+    nesting: usize,
     count: usize,
     /// The last top-level list: its instance and list style name.
     previous: Option<(usize, Option<&'a str>)>,
@@ -214,25 +232,32 @@ struct ListInstances<'a, 'p> {
 
 impl<'a> ListInstances<'a, '_> {
     /// The instance a top-level `text:list` numbers in: the list it names
-    /// by `text:continue-list`, else with `text:continue-numbering="true"`
-    /// the preceding list when it has the same list style, else a new one.
+    /// by `text:continue-list`; with `text:continue-numbering="true"` the
+    /// preceding list when it has the same list style (§19.786); with
+    /// `"false"` a new one. §19.786 defines no value for an absent
+    /// attribute: the list then continues the preceding list of the text,
+    /// as LibreOffice numbers consecutive lists (its own files mark only
+    /// some continuations).
     fn top_level(&mut self, list: Nd<'a>) -> Result<(usize, Resume<'a>), String> {
         let style = list.attribute((NS_TEXT, "style-name"));
         // A continued list outside this text (another frame or slide) is
         // continued after its own last number.
         let resume = match list.attribute((NS_TEXT, "continue-list")) {
-            Some(id) if !self.ids.contains_key(id) => self
-                .external_last(id, 0)?
-                .map_or(Resume::None, Resume::After),
+            Some(id) if !self.ids.contains_key(id) => {
+                self.external_last(id)?.map_or(Resume::None, Resume::After)
+            }
             _ => Resume::None,
         };
         let continued = match list.attribute((NS_TEXT, "continue-list")) {
             Some(id) => self.ids.get(id).copied(),
-            None => (list.attribute((NS_TEXT, "continue-numbering")) == Some("true"))
-                .then_some(self.previous)
-                .flatten()
-                .filter(|(_, previous_style)| *previous_style == style)
-                .map(|(instance, _)| instance),
+            None => match list.attribute((NS_TEXT, "continue-numbering")) {
+                Some("false") => None,
+                Some("true") => self
+                    .previous
+                    .filter(|(_, previous_style)| *previous_style == style)
+                    .map(|(instance, _)| instance),
+                _ => self.previous.map(|(instance, _)| instance),
+            },
         };
         let instance = continued.unwrap_or_else(|| {
             self.count += 1;
@@ -246,62 +271,104 @@ impl<'a> ListInstances<'a, '_> {
     }
 
     /// The last item number of the list with `xml:id` `id` anywhere in the
-    /// document, from its own structure: its continuation, its level-1
-    /// start value and `text:start-value` items (each labelled item counts).
-    /// Chains of continuations are bounded; each item visited is charged.
-    fn external_last(&self, id: &str, depth: usize) -> Result<Option<u32>, String> {
+    /// document: the numbering of the text that holds it, resolved once per
+    /// text for the whole deck with the same list semantics as a text body
+    /// (every labelled item counts as numbered). Nested resolutions are
+    /// bounded; a cycle resolves to no number.
+    fn external_last(&self, id: &str) -> Result<Option<u32>, String> {
         let Some(&(scope, list)) = self.sheet.list_ids.get(id) else {
             return Ok(None);
         };
-        if depth > MAX_SPAN_DEPTH {
-            return Ok(None);
+        let container = text_container(list);
+        let numbers = list_numbers(self.sheet, container, scope, self.payload, self.nesting + 1)?;
+        Ok(numbers.and_then(|n| n.get(id).copied()))
+    }
+}
+
+/// The element whose text holds `list`: its nearest ancestor that is not
+/// part of the list structure.
+fn text_container<'a>(list: Nd<'a>) -> Nd<'a> {
+    let mut node = list;
+    while let Some(parent) = node.parent_element() {
+        let structural = xml::is(parent, NS_TEXT, "list")
+            || xml::is(parent, NS_TEXT, "list-item")
+            || xml::is(parent, NS_TEXT, "list-header")
+            || xml::is(parent, NS_TEXT, "section");
+        if !structural {
+            return parent;
         }
-        let mut current = match list.attribute((NS_TEXT, "continue-list")) {
-            Some(other) if other != id => self.external_last(other, depth + 1)?,
-            _ => None,
-        };
-        let start = list
-            .attribute((NS_TEXT, "style-name"))
-            .and_then(|name| self.sheet.list(scope, name))
-            .and_then(|style| {
-                style.children().filter(|n| n.is_element()).find(|n| {
-                    n.attribute((NS_TEXT, "level"))
-                        .and_then(|v| v.parse::<u32>().ok())
-                        == Some(1)
-                })
-            })
+        node = parent;
+    }
+    node
+}
+
+/// The last number of each identified list of one text, cached in the
+/// sheet for the deck (`None` while it is being resolved, or past the
+/// nesting bound).
+fn list_numbers<'a>(
+    sheet: &'a Sheet<'a>,
+    container: Nd<'a>,
+    scope: crate::odp_style::Scope,
+    payload: &TextPayload<'_>,
+    nesting: usize,
+) -> Result<Option<Rc<HashMap<String, u32>>>, String> {
+    let key = (
+        container.document() as *const roxmltree::Document<'_> as usize,
+        container.id(),
+    );
+    if let Some(cached) = sheet.list_numbers.borrow().get(&key) {
+        payload.step(1)?;
+        return Ok(cached.clone());
+    }
+    if nesting > MAX_SPAN_DEPTH {
+        return Ok(None);
+    }
+    sheet.list_numbers.borrow_mut().insert(key, None);
+    let mut instances = ListInstances {
+        payload,
+        sheet,
+        nesting,
+        count: 0,
+        previous: None,
+        ids: HashMap::new(),
+    };
+    let mut items: Vec<(Nd<'a>, ListContext<'a>)> = Vec::new();
+    collect_blocks(
+        container,
+        ListContext::outside(),
+        &mut items,
+        &mut instances,
+        0,
+    )?;
+    let mut numbering = Numbering::default();
+    for (_, list) in items.iter().filter(|(_, l)| l.labelled && l.depth > 0) {
+        let start = list_style_name(list)
+            .and_then(|name| sheet.list(scope, name))
+            .map(|style| list_level(style, list.depth.min(10), payload))
+            .transpose()?
+            .flatten()
             .and_then(|level| level.attribute((NS_TEXT, "start-value")))
             .and_then(|v| v.parse::<u32>().ok())
             .unwrap_or(1);
-        for item in list
-            .children()
-            .filter(|n| xml::is(*n, NS_TEXT, "list-item"))
-        {
-            self.payload.step(1)?;
-            // Labelled: its first block is a paragraph, not a nested list.
-            let labelled = item
-                .children()
-                .find(|c| {
-                    xml::is(*c, NS_TEXT, "p")
-                        || xml::is(*c, NS_TEXT, "h")
-                        || xml::is(*c, NS_TEXT, "list")
-                })
-                .is_some_and(|c| !xml::is(c, NS_TEXT, "list"));
-            if !labelled {
-                continue;
-            }
-            current = Some(
-                match item
-                    .attribute((NS_TEXT, "start-value"))
-                    .and_then(|v| v.parse::<u32>().ok())
-                {
-                    Some(value) => value,
-                    None => current.map_or(start, |n| n.saturating_add(1)),
-                },
-            );
-        }
-        Ok(current)
+        let number = match (list.start_value, numbering.previous(list)) {
+            (Some(value), _) => value,
+            (None, Some(n)) => n.saturating_add(1),
+            (None, None) => start,
+        };
+        numbering.record(list, Some(number));
     }
+    let numbers: Rc<HashMap<String, u32>> = Rc::new(
+        numbering
+            .last_of_list
+            .into_iter()
+            .map(|(id, n)| (id.to_string(), n))
+            .collect(),
+    );
+    sheet
+        .list_numbers
+        .borrow_mut()
+        .insert(key, Some(numbers.clone()));
+    Ok(Some(numbers))
 }
 
 /// Build the text body of an object from its text container (the
@@ -317,22 +384,14 @@ pub fn text_body<'a>(
     let mut instances = ListInstances {
         payload: env.payload,
         sheet: env.sheet,
+        nesting: 0,
         count: 0,
         previous: None,
         ids: HashMap::new(),
     };
     collect_blocks(
         container,
-        ListContext {
-            depth: 0,
-            style: None,
-            labelled: false,
-            start_value: None,
-            instance: None,
-            list_id: None,
-            resume: Resume::None,
-            first_in_list: false,
-        },
+        ListContext::outside(),
         &mut items,
         &mut instances,
         0,
@@ -359,8 +418,11 @@ fn collect_blocks<'a>(
     if depth > MAX_SPAN_DEPTH {
         return Err(crate::error::invalid("lists are nested too deeply"));
     }
-    for child in parent.children().filter(|n| n.is_element()) {
+    for child in parent.children() {
         instances.payload.step(1)?;
+        if !child.is_element() {
+            continue;
+        }
         if xml::is(child, NS_TEXT, "p") || xml::is(child, NS_TEXT, "h") {
             push_block(out, (child, list.clone()))?;
         } else if xml::is(child, NS_TEXT, "list") {
@@ -413,7 +475,7 @@ fn collect_list<'a>(
                 list_node.attribute((NS_TEXT, "continue-numbering")),
             ) {
                 (Some(id), _) if !instances.ids.contains_key(id) => instances
-                    .external_last(id, 0)?
+                    .external_last(id)?
                     .map_or(Resume::Restart, Resume::After),
                 (Some(id), _) => Resume::List(id),
                 (None, Some("true")) => Resume::Preceding,
@@ -438,8 +500,11 @@ fn collect_list<'a>(
         first_in_list: false,
     };
     let mut first_labelled = true;
-    for item in list_node.children().filter(|n| n.is_element()) {
+    for item in list_node.children() {
         instances.payload.step(1)?;
+        if !item.is_element() {
+            continue;
+        }
         let header = xml::is(item, NS_TEXT, "list-header");
         if !(header || xml::is(item, NS_TEXT, "list-item")) {
             continue;
@@ -448,8 +513,11 @@ fn collect_list<'a>(
         let start_value = item
             .attribute((NS_TEXT, "start-value"))
             .and_then(|v| v.parse().ok());
-        for block in item.children().filter(|n| n.is_element()) {
+        for block in item.children() {
             instances.payload.step(1)?;
+            if !block.is_element() {
+                continue;
+            }
             if xml::is(block, NS_TEXT, "list") {
                 collect_list(block, &inner, out, instances, depth + 1)?;
                 first = false;

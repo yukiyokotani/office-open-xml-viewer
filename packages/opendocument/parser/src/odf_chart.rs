@@ -93,6 +93,9 @@ impl ChartBudget {
     }
 }
 
+/// Charge for reading one axis (its style, title and model record).
+const AXIS_BYTES: usize = 4096;
+
 /// Implementation bound on the regression curves of one series.
 const MAX_TRENDLINES: usize = 64;
 
@@ -486,21 +489,31 @@ impl Reader<'_> {
             .chain("chart", node.attribute((NS_CHART, "style-name")))
     }
 
+    /// A text style's font; the face it copies is charged first (an
+    /// exhausted budget leaves the face unset and fails the chart).
     fn font(&self, chain: &[&Style]) -> TextFont {
+        let face: Option<&str> = get(chain, "text:style:font-name")
+            .map(|name| self.faces.get(name).map_or(name, String::as_str))
+            .or_else(|| get(chain, "text:fo:font-family"));
+        let face = face
+            .filter(|f| {
+                self.budget
+                    .charge(std::mem::size_of::<TextFont>().saturating_add(f.len()))
+            })
+            .map(|f| {
+                if get(chain, "text:style:font-name").is_some() {
+                    f.to_string()
+                } else {
+                    odf_props::unquote_family(f)
+                }
+            });
         TextFont {
             size: get(chain, "text:fo:font-size").and_then(length_pt).map(hpt),
             bold: get(chain, "text:fo:font-weight")
                 .map(|w| w == "bold" || w.parse::<u32>().is_ok_and(|v| v >= 600)),
             italic: get(chain, "text:fo:font-style").map(|s| s == "italic" || s == "oblique"),
             color: get(chain, "text:fo:color").and_then(hex_color),
-            face: get(chain, "text:style:font-name")
-                .map(|name| {
-                    self.faces
-                        .get(name)
-                        .cloned()
-                        .unwrap_or_else(|| name.to_string())
-                })
-                .or_else(|| get(chain, "text:fo:font-family").map(odf_props::unquote_family)),
+            face,
         }
     }
 
@@ -794,6 +807,10 @@ impl Reader<'_> {
 
     fn axes(&self, plot: roxmltree::Node<'_, '_>, model: &mut ChartModel, data: &mut DataStyles) {
         for axis in plot.children().filter(|n| xml::is(*n, NS_CHART, "axis")) {
+            // Each axis record read (later axes of a dimension replace it).
+            if !self.budget.charge(AXIS_BYTES) {
+                break;
+            }
             let dimension = axis.attribute((NS_CHART, "dimension")).unwrap_or("");
             let name = axis.attribute((NS_CHART, "name")).unwrap_or("");
             let chain = self.chain(axis);

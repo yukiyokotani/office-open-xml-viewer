@@ -117,15 +117,20 @@ impl StyleStore {
     }
 
     fn charge(&mut self, node: roxmltree::Node<'_, '_>) -> Result<(), String> {
-        let bytes = node
-            .descendants()
-            .filter(|n| n.is_element())
-            .fold(0usize, |sum, e| {
-                e.attributes()
-                    .fold(sum.saturating_add(STORED_ENTRY_OVERHEAD), |sum, a| {
-                        sum.saturating_add(a.name().len() + a.value().len() + STORED_ENTRY_OVERHEAD)
-                    })
-            });
+        // Every element and attribute is stored, and the text of property
+        // children is copied (`#text`).
+        let bytes = node.descendants().fold(0usize, |sum, e| {
+            if e.is_text() {
+                return sum.saturating_add(e.text().map_or(0, str::len));
+            }
+            if !e.is_element() {
+                return sum;
+            }
+            e.attributes()
+                .fold(sum.saturating_add(STORED_ENTRY_OVERHEAD), |sum, a| {
+                    sum.saturating_add(a.name().len() + a.value().len() + STORED_ENTRY_OVERHEAD)
+                })
+        });
         self.stored_bytes = self
             .stored_bytes
             .checked_add(bytes)

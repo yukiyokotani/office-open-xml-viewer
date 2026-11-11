@@ -88,7 +88,16 @@ pub struct Sheet<'a> {
     /// `text:list` elements with an `xml:id` (§19.785 continuation targets),
     /// with the scope of their document.
     pub list_ids: HashMap<&'a str, (Scope, Nd<'a>)>,
+    /// Resolved list numbers per text, for continuations across texts
+    /// (`odp_text`); `None` while a text is being resolved.
+    pub list_numbers: ListNumbers,
 }
+
+/// Cache of the last numbers of the identified lists of each text, by the
+/// text's (document, node) identity.
+pub type ListNumbers = std::cell::RefCell<
+    HashMap<(usize, roxmltree::NodeId), Option<std::rc::Rc<HashMap<String, u32>>>>,
+>;
 
 impl<'a> Sheet<'a> {
     pub fn add_document(&mut self, root: Nd<'a>, scope: Scope) -> Result<(), String> {
