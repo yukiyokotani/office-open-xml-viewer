@@ -33,7 +33,7 @@ A browser-based viewer for Office Open XML documents that renders to an HTML Can
 The parsers are written in Rust and compiled to WebAssembly; the renderers use the Canvas 2D API.
 Each format also exposes a headless engine (`DocxDocument` / `XlsxWorkbook` / `PptxPresentation`) that renders into any caller-supplied canvas, so you can compose your own UI — scroll views, thumbnail grids, master-detail panes — instead of being locked into the built-in viewer. See the [live framework examples](https://ooxml.silurus.dev/frameworks/) for runnable React, Vue, Svelte, and Solid projects.
 
-Optional, experimental [legacy Office add-on](https://ooxml.silurus.dev/legacy-office/) reads a supported subset of `.doc`, `.xls` and `.ppt` with the same viewers.
+Optional, experimental [legacy Office add-on](https://ooxml.silurus.dev/legacy-office/) reads a supported subset of `.doc`, `.xls` and `.ppt` with the same viewers, and an optional, experimental [OpenDocument add-on](docs/opendocument.md) reads `.odt`.
 
 ## Project scope: read-only viewing
 
@@ -249,6 +249,31 @@ The package versions must match exactly; upgrade both together.
 No migration is required without the add-on. See the [legacy Office guide](https://ooxml.silurus.dev/legacy-office/)
 for viewer and Node examples, and [Experimental legacy Office sources](docs/legacy-office-conversion.md)
 for the full support boundaries.
+
+### Experimental OpenDocument sources
+
+OpenDocument files are read directly into the same models through the
+experimental `@silurus/ooxml-opendocument` add-on, one opt-in entry per format
+(currently `@silurus/ooxml-opendocument/odt` for `.odt` / `.ott` with the DOCX
+viewers and loaders). Install matching versions of both packages:
+
+```sh
+npm i @silurus/ooxml @silurus/ooxml-opendocument
+```
+
+```typescript
+import { DocxViewer } from '@silurus/ooxml/docx';
+import { odt } from '@silurus/ooxml-opendocument/odt';
+
+const canvas = document.querySelector('canvas') as HTMLCanvasElement;
+const viewer = new DocxViewer(canvas, { odt });
+await viewer.load(odtOrDocxBytes);
+```
+
+Like the legacy readers, importing the entry fetches nothing, custom asset URLs
+go through `createOdt({ wasmUrl, moduleUrl })`, and the package versions must
+match exactly. See [Experimental OpenDocument sources](docs/opendocument.md)
+for the supported content and deployment notes.
 
 ### Optional rendering modules
 

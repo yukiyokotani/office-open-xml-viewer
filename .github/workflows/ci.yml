@@ -243,7 +243,7 @@ jobs:
           pnpm check:public-type-exports
           pnpm check:public-api:built
           pnpm check:no-inline-wasm
-          pnpm check:relative-wasm-urls dist packages/legacy-office/dist
+          pnpm check:relative-wasm-urls dist packages/legacy-office/dist packages/opendocument/dist
 
       - name: Install Playwright Chrome (only if missing)
         timeout-minutes: 5
