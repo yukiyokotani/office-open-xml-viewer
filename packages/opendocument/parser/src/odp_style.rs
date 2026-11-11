@@ -39,6 +39,18 @@ pub fn props_cost(props: &Props<'_>) -> usize {
     })
 }
 
+/// Reject a named drawing definition (gradient, hatch, marker, dash,
+/// opacity, fill image, table template) with more nodes than a style
+/// record may have: every use reads it again.
+fn check_definition(node: Nd<'_>) -> Result<(), String> {
+    if node.descendants().nth(MAX_STYLE_NODES).is_some() {
+        return Err(invalid(
+            "a drawing definition exceeds the style record limits",
+        ));
+    }
+    Ok(())
+}
+
 /// Reject a style record past the bounds above.
 fn check_style_record(style: Nd<'_>) -> Result<(), String> {
     let error = || invalid("a style exceeds the style record limits");
@@ -192,11 +204,13 @@ impl<'a> Sheet<'a> {
                     }
                 }
                 (Some(crate::xml::NS_TABLE), "table-template") => {
+                    check_definition(node)?;
                     if let Some(name) = node.attribute((crate::xml::NS_TABLE, "name")) {
                         self.named.insert(("table-template", name), node);
                     }
                 }
                 (Some(NS_DRAW), kind) => {
+                    check_definition(node)?;
                     if let Some(name) = node.attribute((NS_DRAW, "name")) {
                         self.named.insert((kind, name), node);
                     }

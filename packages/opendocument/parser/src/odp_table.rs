@@ -65,22 +65,36 @@ pub fn table<'a>(
     let row_count = rows_nodes.len();
     let mut rows = Vec::with_capacity(row_count);
     let mut cells_total = 0usize;
+    // Row heights per source row (a repeated row is one node).
+    let mut row_heights: HashMap<roxmltree::NodeId, f64> = HashMap::new();
     // One text payload for the whole table: the cells' text as it is read,
     // and each cell record (borders, fill, strings) before it is kept.
     let payload = TextPayload::new(text_work);
     for (r, row) in rows_nodes.iter().enumerate() {
-        let row_props = row
-            .attribute((NS_TABLE, "style-name"))
-            .map(|n| sheet.chain(scope, "table-row", n))
-            .transpose()?
-            .unwrap_or_default();
-        let mut rp = Props::new();
-        rp.extend_styles(&row_props, TABLE_ROW);
-        let height = rp
-            .get(NS_STYLE, "row-height")
-            .or_else(|| rp.get(NS_STYLE, "min-row-height"))
-            .and_then(length_emu)
-            .unwrap_or(0.0);
+        let height = match row_heights.get(&row.id()) {
+            Some(height) => *height,
+            None => {
+                let row_props = row
+                    .attribute((NS_TABLE, "style-name"))
+                    .map(|n| sheet.chain(scope, "table-row", n))
+                    .transpose()?
+                    .unwrap_or_default();
+                let mut rp = Props::new();
+                rp.extend_styles(&row_props, TABLE_ROW);
+                payload.step(
+                    row_props
+                        .len()
+                        .saturating_add(crate::odp_style::props_cost(&rp)),
+                )?;
+                let height = rp
+                    .get(NS_STYLE, "row-height")
+                    .or_else(|| rp.get(NS_STYLE, "min-row-height"))
+                    .and_then(length_emu)
+                    .unwrap_or(0.0);
+                row_heights.insert(row.id(), height);
+                height
+            }
+        };
         let default_cell = row.attribute((NS_TABLE, "default-cell-style-name"));
         let mut cells = Vec::new();
         let mut c = 0usize;

@@ -180,6 +180,10 @@ struct ListContext<'a> {
     resume: Resume<'a>,
     /// Whether the paragraph is the first labelled one of its `text:list`.
     first_in_list: bool,
+    /// The numbering style in effect for continuation checks (§19.786):
+    /// the list's own style, else the one its first paragraph's styles
+    /// select, else the enclosing list's.
+    numbering_style: Option<Nd<'a>>,
 }
 
 /// The continuation a nested `text:list` asks for (§19.785, §19.786).
@@ -211,6 +215,7 @@ impl ListContext<'_> {
             list_id: None,
             resume: Resume::None,
             first_in_list: false,
+            numbering_style: None,
         }
     }
 }
@@ -221,11 +226,12 @@ struct ListInstances<'a, 'p> {
     /// Charged for every block and list node visited.
     payload: &'p TextPayload<'p>,
     sheet: &'a Sheet<'a>,
+    scope: Scope,
     /// Depth of continuation resolution across texts.
     nesting: usize,
     count: usize,
     /// The last top-level list: its instance and list style name.
-    previous: Option<(usize, Option<&'a str>)>,
+    previous: Option<(usize, Option<Nd<'a>>)>,
     /// `xml:id` of top-level lists to their instance.
     ids: HashMap<&'a str, usize>,
 }
@@ -238,8 +244,11 @@ impl<'a> ListInstances<'a, '_> {
     /// attribute: the list then continues the preceding list of the text,
     /// as LibreOffice numbers consecutive lists (its own files mark only
     /// some continuations).
-    fn top_level(&mut self, list: Nd<'a>) -> Result<(usize, Resume<'a>), String> {
-        let style = list.attribute((NS_TEXT, "style-name"));
+    fn top_level(
+        &mut self,
+        list: Nd<'a>,
+        style: Option<Nd<'a>>,
+    ) -> Result<(usize, Resume<'a>), String> {
         // A continued list outside this text (another frame or slide) is
         // continued after its own last number.
         let resume = match list.attribute((NS_TEXT, "continue-list")) {
@@ -327,6 +336,7 @@ fn list_numbers<'a>(
     let mut instances = ListInstances {
         payload,
         sheet,
+        scope,
         nesting,
         count: 0,
         previous: None,
@@ -345,14 +355,12 @@ fn list_numbers<'a>(
         // The list style as rendering finds it: the list's, else one its
         // paragraph styles select (an object's own list style is not
         // known here).
-        let style = list_style_name(list)
-            .and_then(|name| sheet.list(scope, name))
-            .or_else(|| {
-                paragraph_chain(sheet, scope, *node)
-                    .iter()
-                    .find_map(|s| s.attribute((NS_STYLE, "list-style-name")))
-                    .and_then(|name| sheet.list(scope, name))
-            });
+        let style = list.numbering_style.or_else(|| {
+            paragraph_chain(sheet, scope, *node)
+                .iter()
+                .find_map(|s| s.attribute((NS_STYLE, "list-style-name")))
+                .and_then(|name| sheet.list(scope, name))
+        });
         let start = style
             .map(|style| list_level(style, list.depth.min(10), payload))
             .transpose()?
@@ -394,6 +402,7 @@ pub fn text_body<'a>(
     let mut instances = ListInstances {
         payload: env.payload,
         sheet: env.sheet,
+        scope: env.scope,
         nesting: 0,
         count: 0,
         previous: None,
@@ -472,6 +481,7 @@ fn collect_list<'a>(
     } else {
         outer.style
     };
+    let numbering_style = effective_list_style(instances, list_node)?.or(outer.numbering_style);
     // A nested list numbers within its enclosing list's instance, at its
     // own level; an explicit continuation resumes that level's sequence.
     let list_id = list_node.attribute((crate::xml::NS_XML, "id"));
@@ -497,7 +507,7 @@ fn collect_list<'a>(
             };
             (instance, resume)
         }
-        None => instances.top_level(list_node)?,
+        None => instances.top_level(list_node, numbering_style)?,
     };
     let inner = ListContext {
         depth: outer.depth + 1,
@@ -508,6 +518,7 @@ fn collect_list<'a>(
         list_id,
         resume,
         first_in_list: false,
+        numbering_style,
     };
     let mut first_labelled = true;
     for item in list_node.children() {
@@ -901,7 +912,7 @@ struct Numbering<'a> {
     instances: HashMap<usize, Vec<Option<Option<u32>>>>,
     /// Last number and list style per (instance, depth), not ended by
     /// shallower items.
-    last_at_level: HashMap<(usize, usize), (u32, Option<&'a str>)>,
+    last_at_level: HashMap<(usize, usize), (u32, Option<Nd<'a>>)>,
     /// Last number per list `xml:id`.
     last_of_list: HashMap<&'a str, u32>,
 }
@@ -917,7 +928,7 @@ impl<'a> Numbering<'a> {
                     return self
                         .last_at_level
                         .get(&(instance, list.depth))
-                        .filter(|(_, style)| *style == list_style_name(list))
+                        .filter(|(_, style)| *style == list.numbering_style)
                         .map(|(n, _)| *n)
                 }
                 Resume::Restart => return None,
@@ -944,7 +955,7 @@ impl<'a> Numbering<'a> {
         levels.truncate(list.depth + 1);
         if let Some(n) = number {
             self.last_at_level
-                .insert((instance, list.depth), (n, list_style_name(list)));
+                .insert((instance, list.depth), (n, list.numbering_style));
             if let Some(id) = list.list_id {
                 self.last_of_list.insert(id, n);
             }
@@ -952,10 +963,50 @@ impl<'a> Numbering<'a> {
     }
 }
 
-/// The list style name a list context numbers with.
-fn list_style_name<'a>(list: &ListContext<'a>) -> Option<&'a str> {
-    list.style
-        .and_then(|l| l.attribute((NS_TEXT, "style-name")))
+/// The numbering style a `text:list` declares, else the one the paragraph
+/// styles of its first paragraph select (searched through leading nested
+/// lists; every node inspected is charged).
+fn effective_list_style<'a>(
+    instances: &ListInstances<'a, '_>,
+    list: Nd<'a>,
+) -> Result<Option<Nd<'a>>, String> {
+    let (sheet, scope) = (instances.sheet, instances.scope);
+    if let Some(name) = list.attribute((NS_TEXT, "style-name")) {
+        return Ok(sheet.list(scope, name));
+    }
+    let first = |parent: Nd<'a>, pick: &dyn Fn(Nd<'a>) -> bool| -> Result<Option<Nd<'a>>, String> {
+        for child in parent.children() {
+            instances.payload.step(1)?;
+            if child.is_element() && pick(child) {
+                return Ok(Some(child));
+            }
+        }
+        Ok(None)
+    };
+    let mut node = list;
+    for _ in 0..MAX_SPAN_DEPTH {
+        let Some(item) = first(node, &|c| {
+            xml::is(c, NS_TEXT, "list-item") || xml::is(c, NS_TEXT, "list-header")
+        })?
+        else {
+            return Ok(None);
+        };
+        let Some(block) = first(item, &|c| {
+            xml::is(c, NS_TEXT, "p") || xml::is(c, NS_TEXT, "h") || xml::is(c, NS_TEXT, "list")
+        })?
+        else {
+            return Ok(None);
+        };
+        if xml::is(block, NS_TEXT, "list") {
+            node = block;
+            continue;
+        }
+        return Ok(paragraph_chain(sheet, scope, block)
+            .iter()
+            .find_map(|s| s.attribute((NS_STYLE, "list-style-name")))
+            .and_then(|name| sheet.list(scope, name)));
+    }
+    Ok(None)
 }
 
 /// The label of a list item (§16.31–§16.33 list level styles).

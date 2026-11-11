@@ -1213,6 +1213,12 @@ impl<'a, 'r, 'p> SlideReader<'a, 'r, 'p> {
             else {
                 continue;
             };
+            // Keyed by the object directory as the chart reader resolves it,
+            // so spellings of one directory share one read.
+            let path = path
+                .trim_start_matches("./")
+                .trim_end_matches('/')
+                .to_string();
             let cached = match self.charts.get(&path) {
                 Some(found) => found.clone(),
                 None => {
@@ -1947,6 +1953,16 @@ mod tests {
         let slide0 = model(&deck, 0);
         let second = shapes(&slide0)[1];
         assert_eq!(labels(second.text_body.as_ref().unwrap()), ["3."]);
+    }
+
+    #[test]
+    fn continuation_compares_the_effective_numbering_styles() {
+        let styles = r#"<text:list-style style:name="L1"><text:list-level-style-number text:level="1" style:num-format="1" style:num-suffix="."/></text:list-style><text:list-style style:name="L2"><text:list-level-style-number text:level="1" style:num-format="1" style:num-suffix=")" text:start-value="10"/></text:list-style><style:style style:name="P2" style:family="paragraph" style:list-style-name="L2"/>"#;
+        let body = r#"<draw:frame svg:width="10cm" svg:height="5cm"><draw:text-box><text:list text:style-name="L1"><text:list-item><text:p>a</text:p></text:list-item></text:list><text:list text:continue-numbering="true"><text:list-item><text:p text:style-name="P2">b</text:p></text:list-item></text:list></draw:text-box></draw:frame>"#;
+        let deck = deck(styles, "", "", &page(body)).unwrap();
+        let slide0 = model(&deck, 0);
+        let shape = shapes(&slide0)[0];
+        assert_eq!(labels(shape.text_body.as_ref().unwrap()), ["1.", "10)"]);
     }
 
     #[test]
