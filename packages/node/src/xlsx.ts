@@ -233,6 +233,7 @@ export class XlsxWorkbookSessionImpl implements XlsxWorkbookSession {
   private refreshResourceUsage(): OoxmlResourceUsageSnapshot | undefined {
     try {
       this.lastUsage = decodeUsage(this.archive.resource_usage());
+      this.metrics.observeUsage(this.lastUsage);
     } catch {
       // Keep the last valid diagnostic after a trapped or closing archive.
     }

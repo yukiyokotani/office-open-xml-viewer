@@ -146,6 +146,26 @@ describe('Node bounded XLSX workbook session', () => {
     }
   });
 
+  it('reports the counters of earlier picture reads when a later operation fails', async () => {
+    const onResourceMetrics = vi.fn();
+    const picture = new Uint8Array(65_536);
+    const session = await openXlsxWorkbook(pictureWorkbook(picture), { onResourceMetrics });
+    try {
+      await session.getImage('xl/media/image1.png', 'image/png');
+      // A missing entry is an untyped failure, so the report keeps the
+      // session's last observed usage rather than a violation checkpoint.
+      await expect(session.getImage('xl/media/missing.png', 'image/png')).rejects.toThrow();
+      expect(onResourceMetrics).toHaveBeenCalledWith(expect.objectContaining({
+        status: 'error',
+        usage: expect.objectContaining({
+          distinctInflatedBytes: expect.toSatisfy((bytes: number) => bytes >= picture.byteLength),
+        }),
+      }));
+    } finally {
+      await session.close();
+    }
+  });
+
   it('fails the session when a picture read exceeds the archive entry budget', async () => {
     const session = await openXlsxWorkbook(pictureWorkbook(new Uint8Array(4096)), {
       resourceLimits: { maxArchiveEntryBytes: 2048 },
