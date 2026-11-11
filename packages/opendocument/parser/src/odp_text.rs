@@ -230,8 +230,6 @@ struct ListInstances<'a, 'p> {
     /// The styles of the object the text belongs to (the list style
     /// cascade continues through them).
     object: &'p ObjectStyles<'a>,
-    /// Depth of continuation resolution across texts.
-    nesting: usize,
     count: usize,
     /// The last top-level list: its instance and list style name.
     previous: Option<(usize, Option<Nd<'a>>)>,
@@ -251,13 +249,14 @@ impl<'a> ListInstances<'a, '_> {
         &mut self,
         list: Nd<'a>,
         style: Option<Nd<'a>>,
+        depth: usize,
     ) -> Result<(usize, Resume<'a>), String> {
         // A continued list outside this text (another frame or slide) is
         // continued after its own last number.
         let resume = match list.attribute((NS_TEXT, "continue-list")) {
-            Some(id) if !self.ids.contains_key(id) => {
-                self.external_last(id)?.map_or(Resume::None, Resume::After)
-            }
+            Some(id) if !self.ids.contains_key(id) => self
+                .external_last(id, depth)?
+                .map_or(Resume::None, Resume::After),
             _ => Resume::None,
         };
         let continued = match list.attribute((NS_TEXT, "continue-list")) {
@@ -287,12 +286,14 @@ impl<'a> ListInstances<'a, '_> {
     /// text for the whole deck with the same list semantics as a text body
     /// (every labelled item counts as numbered). Nested resolutions are
     /// bounded; a cycle resolves to no number.
-    fn external_last(&self, id: &str) -> Result<Option<u32>, String> {
+    /// `depth` is the list nesting of the caller: the resolution continues
+    /// it, so one nesting bound covers rendering and resolution together.
+    fn external_last(&self, id: &str, depth: usize) -> Result<Option<u32>, String> {
         let Some(&(scope, list)) = self.sheet.list_ids.get(id) else {
             return Ok(None);
         };
         let container = text_container(list);
-        let numbers = list_numbers(self.sheet, container, scope, self.payload, self.nesting + 1)?;
+        let numbers = list_numbers(self.sheet, container, scope, self.payload, depth + 1)?;
         Ok(numbers.and_then(|n| n.get(id).copied()))
     }
 }
@@ -342,7 +343,6 @@ fn list_numbers<'a>(
         sheet,
         scope,
         object: &object,
-        nesting,
         count: 0,
         previous: None,
         ids: HashMap::new(),
@@ -353,7 +353,7 @@ fn list_numbers<'a>(
         ListContext::outside(),
         &mut items,
         &mut instances,
-        0,
+        nesting,
     )?;
     let mut numbering = Numbering::default();
     for (node, list) in items.iter().filter(|(_, l)| l.labelled && l.depth > 0) {
@@ -409,7 +409,6 @@ pub fn text_body<'a>(
         sheet: env.sheet,
         scope: env.scope,
         object: &env.object,
-        nesting: 0,
         count: 0,
         previous: None,
         ids: HashMap::new(),
@@ -501,7 +500,7 @@ fn collect_list<'a>(
                 list_node.attribute((NS_TEXT, "continue-numbering")),
             ) {
                 (Some(id), _) if !instances.ids.contains_key(id) => instances
-                    .external_last(id)?
+                    .external_last(id, depth)?
                     .map_or(Resume::Restart, Resume::After),
                 (Some(id), _) => Resume::List(id),
                 (None, Some("true")) => Resume::Preceding,
@@ -513,7 +512,7 @@ fn collect_list<'a>(
             };
             (instance, resume)
         }
-        None => instances.top_level(list_node, numbering_style)?,
+        None => instances.top_level(list_node, numbering_style, depth)?,
     };
     let inner = ListContext {
         depth: outer.depth + 1,
@@ -735,6 +734,7 @@ fn paragraph<'a>(
     env.payload.step(
         styles
             .len()
+            .saturating_mul(2 * crate::odp_style::STYLE_SCAN_COST)
             .saturating_add(crate::odp_style::props_cost(&para_props))
             .saturating_add(crate::odp_style::props_cost(&text_props)),
     )?;
@@ -1694,6 +1694,7 @@ fn walk_inline<'a>(
         env.payload.step(
             nodes
                 .len()
+                .saturating_mul(crate::odp_style::STYLE_SCAN_COST)
                 .saturating_add(crate::odp_style::props_cost(&props)),
         )?;
         Ok(run_style(&props, env))

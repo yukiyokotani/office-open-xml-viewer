@@ -26,6 +26,12 @@ const MAX_PROPERTY_VALUE_BYTES: usize = 1024;
 /// All nodes of one style record (elements, text, comments; nested
 /// records such as tab stops included).
 const MAX_STYLE_NODES: usize = 4096;
+/// All direct children of one style record (any node type), so finding a
+/// property element in it scans at most this many.
+const MAX_STYLE_CHILD_NODES: usize = 64;
+/// The work charged for searching one style's children (in work units of
+/// 16 nodes), see [`MAX_STYLE_CHILD_NODES`].
+pub const STYLE_SCAN_COST: usize = MAX_STYLE_CHILD_NODES / 16;
 
 /// The work of reading a property cascade: each property element, each of
 /// its attributes, and their value bytes (in 64-byte units), which bounds
@@ -63,7 +69,9 @@ fn check_definition(node: Nd<'_>) -> Result<(), String> {
 /// Reject a style record past the bounds above.
 fn check_style_record(style: Nd<'_>) -> Result<(), String> {
     let error = || invalid("a style exceeds the style record limits");
-    if style.descendants().nth(MAX_STYLE_NODES).is_some() {
+    if style.descendants().nth(MAX_STYLE_NODES).is_some()
+        || style.children().nth(MAX_STYLE_CHILD_NODES).is_some()
+    {
         return Err(error());
     }
     // Every attribute of the record (its own and its nested ones).

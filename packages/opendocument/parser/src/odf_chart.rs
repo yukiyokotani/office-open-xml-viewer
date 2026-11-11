@@ -99,6 +99,16 @@ const AXIS_BYTES: usize = 4096;
 /// Implementation bound on the regression curves of one series.
 const MAX_TRENDLINES: usize = 64;
 
+/// The text bytes one data point record owns (its value's text and its
+/// display text), both copied with the record.
+fn owned_text_len(cell: &(CellData, String)) -> usize {
+    let value = match &cell.0 {
+        CellData::Text(t) => t.len(),
+        _ => 0,
+    };
+    value.saturating_add(cell.1.len())
+}
+
 /// Fixed size of one resolved data point record.
 const POINT_BYTES: usize = std::mem::size_of::<(CellData, String)>();
 /// Fixed size of one source-range map entry (key, value, table slot).
@@ -336,7 +346,7 @@ impl LocalTable {
                     return None;
                 }
                 let cell = self.get(row as usize - 1, col as usize - 1);
-                if !budget.point(cell.map_or(0, |(_, t)| t.len())) {
+                if !budget.point(cell.map_or(0, owned_text_len)) {
                     return Some(out);
                 }
                 out.push(cell.cloned().unwrap_or((CellData::Empty, String::new())));
@@ -366,7 +376,7 @@ impl LocalTable {
                 (row.saturating_add(i), col)
             };
             let cell = self.get(r, c);
-            if !budget.point(cell.map_or(0, |(_, t)| t.len())) {
+            if !budget.point(cell.map_or(0, owned_text_len)) {
                 break;
             }
             out.push(cell.cloned().unwrap_or((CellData::Empty, String::new())));
