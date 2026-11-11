@@ -3,7 +3,7 @@
 import { expect, it } from 'vitest';
 import { buildDocFixture, concat, little16, little32 } from '../test-fixtures.js';
 import { testDocSource } from '../test-sources.js';
-import { openDocxDocument, skia, skiaFactory } from './node-facade.js';
+import { materializeDocxDocument, openDocxDocument, skia, skiaFactory } from './node-facade.js';
 
 type Pixels = { width: number; height: number; getContext(kind: '2d'): { getImageData(x: number, y: number, w: number, h: number): { data: Uint8ClampedArray } } };
 function record(kind: number, options: number, bytes: Uint8Array): Uint8Array {
@@ -47,4 +47,27 @@ it.skipIf(!skia).each([0, 16384])('renders an inline PNG with fixed-point left c
     // A 16384/65536 left crop removes half of the red half.
     expect(red / blue).toBeCloseTo(crop === 0 ? 1 : 0.5, 1);
   } finally { await session.close(); }
+});
+
+it.skipIf(!skia)('returns the picture bytes for a synthetic legacy-doc image path through the session', async () => {
+  const { Canvas } = skia as NonNullable<typeof skia>;
+  const source = new Canvas(4, 2);
+  source.getContext('2d').fillRect(0, 0, 4, 2);
+  const png = new Uint8Array(await source.toBuffer('png'));
+  const bytes = buildDocFixture({ text: '\u0001', data: inlinePicture(png, 0), characterProperties: concat(little16(0x0855), new Uint8Array([1]), little16(0x6a03), little32(0)) });
+  type Run = { type: string; imagePath?: string; mimeType?: string };
+  const model = await materializeDocxDocument(bytes, { legacyDoc: testDocSource() }) as unknown as { body: { runs?: Run[] }[] };
+  const images = model.body.flatMap(block => block.runs ?? []).filter(run => run.type === 'image');
+  expect(images).toHaveLength(1);
+  const { imagePath, mimeType } = images[0] as Required<Run>;
+  expect(imagePath).toMatch(/^legacy-doc\/image\//);
+  expect(mimeType).toBe('image/png');
+
+  const session = await openDocxDocument(bytes, { factory: skiaFactory(), currentDate: 0, legacyDoc: testDocSource() });
+  try {
+    const image = await session.getImage(imagePath, mimeType);
+    expect(image.type).toBe('image/png');
+    expect(new Uint8Array(await image.arrayBuffer())).toEqual(png);
+  } finally { await session.close(); }
+  await expect(session.getImage(imagePath, mimeType)).rejects.toThrow(/closed/);
 });

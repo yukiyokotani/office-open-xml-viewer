@@ -42,6 +42,8 @@ export interface XlsxNodeArchive {
   ): void;
   parse(): Uint8Array;
   resource_usage(): Uint8Array;
+  /** Raw bytes of one picture part (or a model source's picture key). */
+  extract_image(path: string): Uint8Array;
   open_sheet_cursor(sheetIndex: number, name: string): void;
   pull_sheet_cursor(rowCredit: number): Uint8Array;
   sheet_cursor_pull_finished(): boolean;
