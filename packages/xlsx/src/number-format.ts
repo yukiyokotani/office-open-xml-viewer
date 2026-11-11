@@ -36,6 +36,9 @@ export interface FormattedCell {
   color?: string;
   /** Paint '#' across the available cell width, rather than a literal hash. */
   fill?: boolean;
+  /** The text is a number in the General format, which shortens to the
+   *  available width (§18.8.30). */
+  general?: boolean;
 }
 
 /**
@@ -209,85 +212,210 @@ const BUILTIN_NUMERIC_FMT: Record<number, string> = {
   48: '##0.0E+0',
 };
 
-// Excel's General format does not round-trip the raw IEEE-754 double: the
-// display engine rounds to 11 significant digits (of the 15-17 significant
-// digits a double can carry), which is what keeps binary floating point
-// noise from arithmetic (e.g. 0.1 + 0.2 === 0.30000000000000004) from ever
-// reaching the screen. See "Floating-point arithmetic may give inaccurate
-// results in Excel" (Microsoft KB78113) for the 15-digit internal precision
-// this display rounding sits on top of.
-const GENERAL_SIGNIFICANT_DIGITS = 11;
-// Once General has committed to scientific notation (see thresholds below),
-// Excel caps the mantissa at 6 significant digits (1 integer + 5 decimal),
-// e.g. 123456789012 -> "1.23457E+11", independent of the 11-digit budget
-// used for fixed-point display.
-const GENERAL_EXPONENTIAL_MANTISSA_DIGITS = 6;
+// ECMA-376 Part 1 §18.8.30 ("General" format, Numbers) specifies the General
+// display of a number:
+// - "display the full number up to 11 digits (inc. decimal point)"; its
+//   "Floating point rule" makes that a cap of 11 characters, "not including
+//   negative sign, but includes leading zeros and decimal separator".
+// - A number too large switches to exponential format; too many significant
+//   digits truncate (round) the display. "The optimal method of display is based
+//   on the available cell width", and when no form fits that width the cell
+//   shows "#" across its width.
+// - Exponential format needs room for at least five characters (`xE-xx`). It
+//   is used when the integer part does not fit, when not even one non-zero
+//   digit fits in fixed-point form (negative exponent), and when a lossy
+//   fixed-point form of a negative-exponent value would show fewer digits than
+//   the exponential form (§18.8.30 conditions 2-4).
+// The display works on Excel's 15-significant-digit value (Microsoft KB78113),
+// which also keeps binary noise (0.1 + 0.2 = 0.30000000000000004) off screen.
+// An exponential mantissa carries at most 6 significant digits
+// (`1.23457E+11`), as Excel and the SheetJS SSF / Apache POI General
+// emulations show.
+const GENERAL_MAX_CHARS = 11;
+const GENERAL_EXPONENTIAL_MAX_DECIMALS = 5;
+const GENERAL_SOURCE_DIGITS = 15;
 
-/** Strips trailing fractional zeros (and a dangling ".") from a fixed-point
- *  digit string. No-op for strings without a decimal point. */
-function trimTrailingZeros(digits: string): string {
-  if (!digits.includes('.')) return digits;
-  return digits.replace(/0+$/, '').replace(/\.$/, '');
+/** A positive finite value as 15 significant decimal digits `d0.d1d2… × 10^exp`. */
+interface DecimalDigits { digits: number[]; exp: number }
+
+function decimalDigits(abs: number): DecimalDigits {
+  const [mantissa, exponent] = abs.toExponential(GENERAL_SOURCE_DIGITS - 1).split('e');
+  return {
+    digits: mantissa.replace('.', '').split('').map(Number),
+    exp: Number(exponent),
+  };
 }
 
-/** Formats `exponent` the way Excel's General exponential notation does:
- *  always signed, at least two digits (E+05, E+11, E-09, ...). */
+/** Rounds `value` half-up to `count` significant digits. `count === 0` rounds
+ *  to the decade above the leading digit: one unit there, or zero (no digits);
+ *  a negative count is zero. */
+function roundSignificant(value: DecimalDigits, count: number): DecimalDigits {
+  if (count < 0) return { digits: [], exp: value.exp };
+  const kept = value.digits.slice(0, count);
+  if ((value.digits[count] ?? 0) < 5) return { digits: kept, exp: value.exp };
+  let i = kept.length - 1;
+  for (; i >= 0; i--) {
+    if (kept[i] === 9) kept[i] = 0;
+    else { kept[i] += 1; break; }
+  }
+  // Carry out of the leading digit (or count === 0 rounding up): 10^(exp+1).
+  if (i < 0) return { digits: [1], exp: value.exp + 1 };
+  return { digits: kept, exp: value.exp };
+}
+
+/** Fixed-point text of `value` rounded to `decimals` places, trailing
+ *  fractional zeros dropped; `null` when the rounded value is zero. */
+function fixedText(value: DecimalDigits, decimals: number): string | null {
+  const { digits, exp } = roundSignificant(value, value.exp + 1 + decimals);
+  if (!digits.some(d => d !== 0)) return null;
+  const digitAt = (power: number): number => {
+    const index = exp - power;
+    return index >= 0 && index < digits.length ? digits[index] : 0;
+  };
+  let intPart = '';
+  for (let power = Math.max(exp, 0); power >= 0; power--) intPart += digitAt(power);
+  let frac = '';
+  for (let power = -1; power >= -decimals; power--) frac += digitAt(power);
+  frac = frac.replace(/0+$/, '');
+  return frac ? `${intPart}.${frac}` : intPart;
+}
+
+/** Excel's General exponent: uppercase E, always signed, at least two digits. */
 function formatExcelExponent(exponent: number): string {
   const sign = exponent >= 0 ? '+' : '-';
-  const digits = Math.abs(exponent).toString().padStart(2, '0');
-  return `${sign}${digits}`;
+  return `E${sign}${Math.abs(exponent).toString().padStart(2, '0')}`;
 }
 
-/** Renders a finite, non-zero, non-negative number in Excel's General
- *  exponential style: mantissa trimmed to `GENERAL_EXPONENTIAL_MANTISSA_DIGITS`
- *  significant digits with trailing zeros dropped, uppercase `E`, signed
- *  2+-digit exponent (e.g. 123456789012 -> "1.23457E+11"). */
-function formatGeneralExponential(abs: number): string {
-  const [mantissa, exponent] = abs.toExponential(GENERAL_EXPONENTIAL_MANTISSA_DIGITS - 1).split('e');
-  return `${trimTrailingZeros(mantissa)}E${formatExcelExponent(Number(exponent))}`;
+/** The fixed-point General form within `budget` characters, or `null` when the
+ *  integer part does not fit or no non-zero digit would remain. */
+function generalFixed(value: DecimalDigits, budget: number): string | null {
+  if (value.exp >= 0) {
+    const intDigits = value.exp + 1;
+    if (intDigits > budget) return null;
+    // A rounding carry (9999.6 -> 10000) can add an integer digit; drop one
+    // more decimal and retry until the text fits the budget.
+    for (let decimals = Math.max(0, budget - intDigits - 1); decimals >= 0; decimals--) {
+      const text = fixedText(value, decimals);
+      if (text !== null && text.length <= budget) return text;
+    }
+    return null;
+  }
+  // "0." plus the decimals left in the budget; a one-character budget can only
+  // show a value that rounds to 1.
+  const text = fixedText(value, Math.max(0, budget - 2));
+  return text !== null && text.length <= budget ? text : null;
+}
+
+/** The exponential General form within `budget` characters (mantissa up to 6
+ *  significant digits, trailing zeros dropped), or `null` when even `dE+xx`
+ *  does not fit. */
+function generalExponential(value: DecimalDigits, budget: number): string | null {
+  for (let decimals = GENERAL_EXPONENTIAL_MAX_DECIMALS; decimals >= 0; decimals--) {
+    const { digits, exp } = roundSignificant(value, decimals + 1);
+    const frac = digits.slice(1).join('').replace(/0+$/, '');
+    const text = `${digits[0]}${frac ? `.${frac}` : ''}${formatExcelExponent(exp)}`;
+    if (text.length <= budget) return text;
+  }
+  return null;
+}
+
+/** Number of significant digits a General form shows. */
+function shownDigits(text: string): number {
+  return text.split('E')[0].replace('.', '').replace(/^0+/, '').length;
+}
+
+/** The General form of a positive value within a `budget`-character cap
+ *  (§18.8.30 conditions for switching to exponential format). */
+function generalForBudget(value: DecimalDigits, budget: number): string | null {
+  const fixed = generalFixed(value, budget);
+  const exponential = generalExponential(value, budget);
+  if (fixed === null || exponential === null) return fixed ?? exponential;
+  if (value.exp >= 0) return fixed;
+  // Negative exponent: keep fixed point while it shows every significant
+  // digit, or while exponential form would not show more of them.
+  const significant = value.digits.join('').replace(/0+$/, '').length;
+  const fixedDigits = shownDigits(fixed);
+  if (fixedDigits >= significant) return fixed;
+  return shownDigits(exponential) > fixedDigits ? exponential : fixed;
 }
 
 /**
- * Formats a number the way Excel's "General" cell format does: round to 11
- * significant digits (hiding binary floating-point round-trip noise like
- * 0.1 + 0.2), trim trailing fractional zeros, and switch to Excel-style
- * exponential notation ("1.23457E+11") once the value's decimal exponent
- * falls outside the fixed-point display budget.
- *
- * Thresholds:
- * - Integer part >= 12 digits (decimal exponent >= 11): Excel General is
- *   documented to switch 12+ digit numbers to scientific notation.
- * - Decimal exponent < -5 (value would need 6+ leading fractional zeros
- *   before the first significant digit): mirrors the same "11 significant
- *   digits must fit in the fixed-point budget" rule on the small-number
- *   side — not a numerically-documented Microsoft threshold, but the
- *   consistent extrapolation of the documented large-number rule.
- *
- * Column-width narrowing is not modeled: Excel shrinks a General value's
- * displayed precision further to fit a narrow column, but this function always
- * emits the full 11-significant-digit form regardless of the destination
- * column width, matching how the rest of this renderer treats layout as
- * independent of formatting.
+ * Formats a number the way Excel's General format does (ECMA-376 §18.8.30).
+ * Each character budget from the 11-character cap (sign excluded) down to one
+ * has a single General form; the first that `fits` accepts is the display.
+ * Narrower budgets first drop rounded decimal places, then switch to
+ * exponential form as the §18.8.30 conditions require. Without `fits`, only
+ * the cap applies (the text of a wide enough column). Returns `null` when no
+ * form fits (§18.8.30 then shows "#"; {@link fitGeneralNumber} keeps the shortest form).
  */
-function formatGeneralNumber(num: number): string {
+export function formatGeneralNumber(num: number, fits?: (text: string) => boolean): string | null {
   if (!Number.isFinite(num)) return String(num);
-  if (num === 0) return '0'; // canonicalizes -0 to "0"
+  if (num === 0) return !fits || fits('0') ? '0' : null; // canonicalizes -0 to "0"
+  const sign = num < 0 ? '-' : '';
+  const value = decimalDigits(Math.abs(num));
+  let previous: string | null = null;
+  for (let budget = GENERAL_MAX_CHARS; budget >= 1; budget--) {
+    const body = generalForBudget(value, budget);
+    if (body === null || body === previous) continue;
+    previous = body;
+    const text = sign + body;
+    if (!fits || fits(text)) return text;
+  }
+  return null;
+}
 
-  const negative = num < 0;
-  const abs = Math.abs(num);
+/** The General text without a width: the 11-character cap alone. */
+function formatGeneralText(num: number): string {
+  return formatGeneralNumber(num) ?? '';
+}
 
-  // Decimal exponent of the value once rounded to the target significant
-  // digits, derived from the (already-rounded) exponential form so a
-  // rounding carry that bumps the digit count (e.g. 99999999999.6 -> 1E+11)
-  // is reflected before the fixed-vs-exponential branch is chosen.
-  const exponent = Number(abs.toExponential(GENERAL_SIGNIFICANT_DIGITS - 1).split('e')[1]);
-  const useExponential = exponent >= GENERAL_SIGNIFICANT_DIGITS || exponent < -5;
+/**
+ * Shortens a General number to its available width, as
+ * {@link formatGeneralNumber} specifies (§18.8.30). When even the shortest
+ * form does not fit, that shortest form is kept (and clipped by paint) rather
+ * than replaced by Excel's "#" fill, so a value is never hidden. Every other
+ * number format, non-numeric cells and texts that fit are returned unchanged.
+ */
+export function fitGeneralNumber(
+  cell: Cell,
+  formatted: FormattedCell,
+  fits: (text: string) => boolean,
+): FormattedCell {
+  if (cell.value.type !== 'number' || !formatted.general || fits(formatted.text)) return formatted;
+  let shortest: string | null = null;
+  const text = formatGeneralNumber(cell.value.number, (candidate) => {
+    shortest = candidate;
+    return fits(candidate);
+  });
+  const shown = text ?? shortest;
+  if (shown === null) return formatted;
+  return formatted.color === undefined
+    ? { text: shown, general: true }
+    : { text: shown, color: formatted.color, general: true };
+}
 
-  const body = useExponential
-    ? formatGeneralExponential(abs)
-    : trimTrailingZeros(abs.toPrecision(GENERAL_SIGNIFICANT_DIGITS));
-
-  return negative ? `-${body}` : body;
+/**
+ * Every text a cell can display under its effective number format (the
+ * conditional-formatting override included): one entry, or, for a General
+ * number, each distinct form {@link fitGeneralNumber} can shorten it to,
+ * widest first with the unconstrained text leading. Find indexes these,
+ * because the shown form depends on the column width and font, which only
+ * paint knows.
+ */
+export function cellDisplayTexts(
+  cell: Cell,
+  styles: Styles,
+  cfNumFmt?: { numFmtId: number; formatCode: string | null } | null,
+  date1904 = false,
+): string[] {
+  const formatted = formatCellValueWithColor(cell, styles, cfNumFmt, date1904);
+  if (cell.value.type !== 'number' || !formatted.general) return [formatted.text];
+  const forms: string[] = [];
+  formatGeneralNumber(cell.value.number, (candidate) => {
+    forms.push(candidate);
+    return false;
+  });
+  return forms.length > 0 ? forms : [formatted.text];
 }
 
 function applyFormat(
@@ -309,7 +437,12 @@ function applyFormat(
   // formatCode="General"; tokenizing it as a literal pattern would render the
   // word "General" instead of the value (issue #358).
   if (formatCode && formatCode.trim().toLowerCase() === 'general') {
-    return { text: formatGeneralNumber(num / sectionDivisor(divisors, 0)) };
+    const divisor = sectionDivisor(divisors, 0);
+    // Width fitting re-derives the General forms from the cell's own value,
+    // so only an undivided General stays fittable.
+    return divisor === 1
+      ? { text: formatGeneralText(num), general: true }
+      : { text: formatGeneralText(num / divisor) };
   }
   // §18.8.30 implies a built-in code when no numFmt is authored. An explicit
   // code (including a differential format layered by §18.8.15) takes precedence
@@ -325,7 +458,7 @@ function applyFormat(
   if (builtinNumeric) return applyFormatCode(num, builtinNumeric);
   if (numFmtId === 49) return { text: String(num) };
   // 0 (General) and every unknown id.
-  return { text: formatGeneralNumber(num) };
+  return { text: formatGeneralText(num), general: true };
 }
 
 /** Number-format paint texts of a workbook's styles (see
@@ -949,7 +1082,7 @@ function applyFormatCode(
   // positional and conditional selection below.
   const textIndex = textSectionIndex(rawSections);
   const parsed = rawSections.filter((_, i) => i !== textIndex).map(parseSection);
-  if (parsed.length === 0) return { text: formatGeneralNumber(num) };
+  if (parsed.length === 0) return { text: formatGeneralText(num), general: true };
 
   // Conditional sections (§18.8.30 "Specify conditions"): if any section
   // carries a `[cond]`, section selection is condition-driven — the first

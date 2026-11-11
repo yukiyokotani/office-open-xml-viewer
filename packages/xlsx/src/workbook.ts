@@ -60,7 +60,8 @@ import { selectSheetVisibility } from './sheet-visibility.js';
 import { renderWorksheetViewport, xlsxRenderCommitGuardOf } from './render-orchestrator.js';
 import { xlsxOfficeFontRequests, xlsxWorksheetOfficeFontRequests } from './font-requests.js';
 import { officeRequestKey } from './shape-office-line.js';
-import { formatCellValue } from './number-format.js';
+import { cellDisplayTexts, formatCellValue } from './number-format.js';
+import { compileCf, evaluateCf } from './conditional-format.js';
 import {
   addWorksheetUsage,
   addWorksheetCacheUsage,
@@ -136,6 +137,8 @@ export const prepareXlsxViewerRowHeights = Symbol('prepare-xlsx-viewer-row-heigh
 export const releaseXlsxViewerProjection = Symbol('release-xlsx-viewer-projection');
 /** @internal XlsxSheetViewer-only source dispatcher. */
 export const loadXlsxSheetSource = Symbol('load-xlsx-sheet-source');
+/** @internal Viewer find: every text a cell may display at some column width. */
+export const xlsxCellDisplayTexts = Symbol('xlsx-cell-display-texts');
 
 interface RetainedFontSet {
   refs: number;
@@ -1486,6 +1489,23 @@ export class XlsxWorkbook {
   cellText(ws: Worksheet, cell: Cell): string {
     if (!this.parsedWorkbook) return '';
     return formatCellValue(cell, this.parsedWorkbook.styles, null, ws.date1904);
+  }
+
+  /** @internal For one worksheet, each cell's displayed text under its
+   *  effective number format, conditional formatting's override included (as
+   *  paint resolves it), followed by each shorter form a General number can
+   *  display at a narrower column (ECMA-376 §18.8.30); paint picks one by
+   *  width, so find matches any of them. The conditional formats are compiled
+   *  once per call. Every cell yields `[]` before the workbook is loaded. */
+  [xlsxCellDisplayTexts](ws: Worksheet): (cell: Cell) => string[] {
+    const parsed = this.parsedWorkbook;
+    if (!parsed) return () => [];
+    const styles = parsed.styles;
+    const cf = ws.conditionalFormats?.length ? compileCf(ws) : null;
+    return (cell) => {
+      const numFmt = cf ? evaluateCf(cell, cell.row, cell.col, cf, styles.dxfs ?? []).numFmt : null;
+      return cellDisplayTexts(cell, styles, numFmt, ws.date1904);
+    };
   }
 
   /** Render a sheet viewport into `target`. Image bytes and decoded-image cache

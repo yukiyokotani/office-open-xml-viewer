@@ -1,7 +1,7 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { XlsxViewer } from './viewer.js';
 import { installDom, makeContainer } from './viewer-destroy-test-dom.js';
-import type { XlsxWorkbook } from './workbook.js';
+import { xlsxCellDisplayTexts, type XlsxWorkbook } from './workbook.js';
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -23,6 +23,7 @@ function makeFakeWorkbook(): XlsxWorkbook {
     getWorksheet: () => Promise.resolve(ws),
     acquireWorksheetLease: async () => ({ worksheet: ws, release: () => undefined }),
     cellText: () => 'hello world',
+    [xlsxCellDisplayTexts]: () => () => ['hello world'],
     destroy: vi.fn(),
     isHidden: () => false,
   } as unknown as XlsxWorkbook;
