@@ -668,3 +668,21 @@ fn hyperlink_targets_are_charged_per_split_run() {
     .expect("refused");
     assert!(error.contains("construction limit"), "{error}");
 }
+
+#[test]
+fn repeated_rows_are_bounded_by_the_source_they_reread() {
+    // A row whose cell holds about 100 KB of ignored markup, repeated 10,000
+    // times: each pass rereads the markup, so the repetitions reach the
+    // repetition bound instead of a billion node visits.
+    let filler = "<text:soft-page-break/>".repeat(4_000);
+    let body = format!(
+        r##"<table:table><table:table-column/><table:table-row table:number-rows-repeated="10000"><table:table-cell>{filler}</table:table-cell></table:table-row></table:table>"##
+    );
+    let error = try_read_fixture(Fixture {
+        body: &body,
+        ..Fixture::default()
+    })
+    .err()
+    .expect("refused");
+    assert!(error.contains("repetition limit"), "{error}");
+}

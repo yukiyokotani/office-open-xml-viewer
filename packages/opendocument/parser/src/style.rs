@@ -81,9 +81,16 @@ pub struct Element {
 }
 
 impl Element {
-    /// Element nodes and their attributes, descendants included.
+    /// The cost of reading the element: one unit per node and attribute
+    /// plus every attribute's bytes, descendants included (a reader parses
+    /// the values each time it resolves the group).
     fn nodes(&self) -> usize {
-        1 + self.attributes.len() + self.children.iter().map(Element::nodes).sum::<usize>()
+        let own = self
+            .attributes
+            .iter()
+            .map(|((namespace, name), value)| 1 + namespace.len() + name.len() + value.len())
+            .sum::<usize>();
+        1 + own + self.children.iter().map(Element::nodes).sum::<usize>()
     }
 }
 

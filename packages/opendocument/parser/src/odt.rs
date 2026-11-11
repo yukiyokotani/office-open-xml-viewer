@@ -88,6 +88,9 @@ const MAX_SEARCH_ORDER: usize = 256;
 /// run resolution visits each style of its search order and each attribute
 /// of the resolved property group (one unit each plus one per byte).
 const MAX_CASCADE_WORK: usize = 256 * 1024 * 1024;
+/// Implementation bound on source bytes processed again for repeated table
+/// rows and cells, document-wide.
+const MAX_REPEAT_WORK: usize = 64 * 1024 * 1024;
 /// Estimated native size of one table cell and of one empty paragraph in it.
 const CELL_BYTES: usize = std::mem::size_of::<docx_model::DocTableCell>() + 256;
 const EMPTY_PARAGRAPH_BYTES: usize =
@@ -198,6 +201,8 @@ pub fn read(package: &OdfPackage) -> Result<(Document, Vec<OwnedDocumentResource
         retained_text_bytes: 0,
         construction_bytes: 0,
         resource_bytes: 0,
+        repeat_work: 0,
+        intrinsic: HashMap::new(),
         contextual_spacing_defined: version != Some("1.2"),
     };
     // The first section: the initial master page, with its page layout's
@@ -346,6 +351,10 @@ struct Reader<'a> {
     paragraph_count: usize,
     retained_text_bytes: usize,
     construction_bytes: usize,
+    /// Source bytes read again for repeated table rows and cells.
+    repeat_work: usize,
+    /// Each retained picture's intrinsic size by key (scanned once).
+    intrinsic: HashMap<String, Option<(f64, f64)>>,
     /// The part of `construction_bytes` charged for package resources
     /// (pictures), which runs reference by key and so never copy.
     resource_bytes: usize,
@@ -1281,8 +1290,10 @@ impl<'a> Reader<'a> {
         let Some((bytes, mime_type)) = picture(bytes, self.construction_left()) else {
             return Ok(None);
         };
-        self.charge_resource(bytes.len() + 2 * path.len() + 64)?;
+        self.charge_resource(bytes.len() + 3 * path.len() + 96)?;
         self.image_types.insert(path.clone(), mime_type);
+        self.intrinsic
+            .insert(path.clone(), image::intrinsic_size(&bytes));
         self.images.push(OwnedDocumentResource {
             key: path.clone(),
             mime_type: mime_type.to_string(),
@@ -1305,6 +1316,8 @@ impl<'a> Reader<'a> {
         self.charge_resource(bytes.len() + 64)?;
         let key = format!("odt-binary/{}", self.images.len());
         self.image_types.insert(key.clone(), mime_type);
+        self.intrinsic
+            .insert(key.clone(), image::intrinsic_size(&bytes));
         self.images.push(OwnedDocumentResource {
             key: key.clone(),
             mime_type: mime_type.to_string(),
@@ -1334,6 +1347,25 @@ impl<'a> Reader<'a> {
         if self.construction_bytes <= MAX_CONSTRUCTION_BYTES {
             self.construction_bytes = self.construction_bytes.saturating_sub(bytes);
         }
+    }
+
+    /// Charges one more pass over repeated source (a row or cell repeated
+    /// by `table:number-*-repeated`): `bytes` is the source size of what is
+    /// read again. Repetition multiplies processing, not input, so its total
+    /// is bounded on its own.
+    fn charge_repeat(&mut self, bytes: usize) -> Result<(), String> {
+        self.repeat_work = self
+            .repeat_work
+            .checked_add(bytes)
+            .filter(|total| *total <= MAX_REPEAT_WORK)
+            .ok_or_else(|| "OpenDocument text exceeds the repetition limit".to_string())?;
+        Ok(())
+    }
+
+    /// A retained picture's intrinsic size (scanned once, when the picture
+    /// is retained).
+    fn intrinsic_size(&self, key: &str) -> Option<(f64, f64)> {
+        self.intrinsic.get(key).copied().flatten()
     }
 
     /// What the construction budget still admits.

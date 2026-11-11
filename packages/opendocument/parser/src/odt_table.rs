@@ -89,6 +89,20 @@ struct RowRun<'a> {
     repeat: usize,
 }
 
+/// The source size of a subtree: one unit per node plus its name, attribute and
+/// text bytes (what processing it again reads).
+fn source_bytes(node: roxmltree::Node<'_, '_>) -> usize {
+    node.descendants().fold(0usize, |sum, n| {
+        let own = 1
+            + n.tag_name().name().len()
+            + n.text().map_or(0, str::len)
+            + n.attributes()
+                .map(|a| a.name().len() + a.value().len() + 1)
+                .sum::<usize>();
+        sum.saturating_add(own)
+    })
+}
+
 /// A spanned cell still covering later rows.
 #[derive(Clone)]
 struct VerticalSpan {
@@ -244,15 +258,21 @@ impl<'a> Reader<'a> {
         for run in rows {
             // The row's cell elements, found once for all its repetitions
             // (other children are never visited again).
-            let cells: Vec<roxmltree::Node<'a, 'a>> = run
+            let cells: Vec<(roxmltree::Node<'a, 'a>, usize)> = run
                 .node
                 .children()
                 .filter(|n| {
                     xml::is(*n, NS_TABLE, "table-cell")
                         || xml::is(*n, NS_TABLE, "covered-table-cell")
                 })
+                .map(|cell| (cell, source_bytes(cell)))
                 .collect();
-            for _ in 0..run.repeat {
+            let row_bytes = source_bytes(run.node);
+            for repetition in 0..run.repeat {
+                // Every pass after the first reads the row's source again.
+                if repetition > 0 {
+                    self.charge_repeat(row_bytes)?;
+                }
                 self.table_row(
                     run.node,
                     &cells,
@@ -285,7 +305,7 @@ impl<'a> Reader<'a> {
     fn table_row(
         &mut self,
         row: roxmltree::Node<'a, 'a>,
-        cell_nodes: &[roxmltree::Node<'a, 'a>],
+        cell_nodes: &[(roxmltree::Node<'a, 'a>, usize)],
         header: bool,
         col_widths: &[f64],
         columns: &[Column<'a>],
@@ -321,16 +341,20 @@ impl<'a> Reader<'a> {
             let mut cells: Vec<DocTableCell> = Vec::new();
             let mut column = 0usize;
             let mut skip = 0u32;
-            'cells: for &cell in cell_nodes {
+            'cells: for &(cell, cell_bytes) in cell_nodes {
                 let covered = xml::is(cell, NS_TABLE, "covered-table-cell");
                 let repeat = cell
                     .attribute((NS_TABLE, "number-columns-repeated"))
                     .and_then(|v| v.parse::<usize>().ok())
                     .unwrap_or(1)
                     .clamp(1, MAX_COLUMNS);
-                for _ in 0..repeat {
+                for repetition in 0..repeat {
                     if column >= col_widths.len() {
                         break 'cells;
+                    }
+                    // A repeated cell reads its source again.
+                    if repetition > 0 {
+                        self.charge_repeat(cell_bytes)?;
                     }
                     if covered {
                         if skip > 0 {

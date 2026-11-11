@@ -55,6 +55,8 @@ struct Region {
 
 /// Implementation bound on the columns of one page or section style.
 const MAX_STYLE_COLUMNS: usize = 1024;
+/// Implementation bound on the retained page layouts, all together.
+const MAX_PAGE_LAYOUT_BYTES: usize = 64 * 1024 * 1024;
 
 /// One page layout. Every field that owns data of the document's size
 /// (fills, image link, column list) is shared, so a layout inherited from
@@ -169,6 +171,7 @@ impl<'a, 'i> Pages<'a, 'i> {
             read_layout(default, &mut default_layout)?;
         }
         let mut layouts = HashMap::new();
+        let mut layout_bytes = 0usize;
         for automatic in styles_root
             .children()
             .filter(|n| xml::is(*n, NS_OFFICE, "automatic-styles"))
@@ -182,6 +185,20 @@ impl<'a, 'i> Pages<'a, 'i> {
                 };
                 let mut layout = default_layout.clone();
                 read_layout(node, &mut layout)?;
+                // Every page layout is retained, used or not: their total
+                // size is bounded (one layout's own columns are bounded by
+                // MAX_STYLE_COLUMNS before they are built).
+                layout_bytes = layout_bytes
+                    .saturating_add(std::mem::size_of::<Layout>() + 2 * name.len() + 64)
+                    .saturating_add(
+                        layout
+                            .columns
+                            .as_ref()
+                            .map_or(0, |c| c.cols.len() * std::mem::size_of::<ColSpec>()),
+                    );
+                if layout_bytes > MAX_PAGE_LAYOUT_BYTES {
+                    return Err("OpenDocument page layouts exceed the construction limit".into());
+                }
                 layouts.insert(name.to_string(), layout);
             }
         }
@@ -1121,6 +1138,10 @@ impl<'a> Reader<'a> {
         if fill.is_none() {
             if let Some((href, tile)) = layout.background_image.as_deref() {
                 if let Some((path, mime)) = self.package_image(href)? {
+                    // The fill owns its link (each header story copy too).
+                    self.charge_construction(
+                        std::mem::size_of::<docx_model::ShapeFill>() + path.len() + mime.len() + 64,
+                    )?;
                     fill = Some(docx_model::ShapeFill::Image {
                         image_path: path,
                         mime_type: mime.into(),
@@ -1148,6 +1169,7 @@ impl<'a> Reader<'a> {
         let Some(fill) = fill else {
             return Ok(None);
         };
+        self.charge_construction(std::mem::size_of::<docx_model::ShapeRun>() + 512)?;
         Ok(Some(self.page_background_shape(
             fill,
             layout.section.page_width,

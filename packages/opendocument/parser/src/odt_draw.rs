@@ -226,8 +226,9 @@ impl<'a> Reader<'a> {
         {
             let count = points.split_whitespace().count();
             self.charge_construction(
-                2 * count * std::mem::size_of::<docx_model::AnchorPointWire>()
-                    + 2 * std::mem::size_of::<docx_model::AnchorPolygonWire>(),
+                count
+                    .saturating_mul(2 * std::mem::size_of::<docx_model::AnchorPointWire>())
+                    .saturating_add(2 * std::mem::size_of::<docx_model::AnchorPolygonWire>()),
             )?;
         }
         let anchor = node
@@ -493,6 +494,14 @@ impl<'a> Reader<'a> {
         };
         let image_width = (width - padding("left") - padding("right")).max(0.1);
         let image_height = (height - padding("top") - padding("bottom")).max(0.1);
+        // The run owns its links (primary and SVG alternate): charged before
+        // they are copied in.
+        self.charge_construction(
+            std::mem::size_of::<ImageRun>()
+                + 2 * path.len()
+                + svg.as_ref().map_or(0, String::len)
+                + 64,
+        )?;
         let mut image = inline_image(path.clone(), mime, image_width, image_height, None);
         image.svg_image_path = svg.filter(|svg| *svg != path);
         image.rotation = rotation;
@@ -538,7 +547,6 @@ impl<'a> Reader<'a> {
                 .blip_effects
                 .push(docx_model::BlipEffect::Luminance { bright, contrast });
         }
-        self.charge_construction(std::mem::size_of::<ImageRun>() + path.len() + 64)?;
         if placement.inline {
             return Ok(Some(DocRun::Image(Box::new(image))));
         }
@@ -632,8 +640,7 @@ impl<'a> Reader<'a> {
         if values.len() != 4 || values.iter().all(|v| *v == 0.0) {
             return None;
         }
-        let bytes = &self.images.iter().find(|r| r.key == path)?.bytes;
-        let (width, height) = image::intrinsic_size(bytes)?;
+        let (width, height) = self.intrinsic_size(path)?;
         if width <= 0.0 || height <= 0.0 {
             return None;
         }
@@ -1008,10 +1015,10 @@ impl<'a> Reader<'a> {
                 let source = node.attribute((NS_DRAW, "points")).unwrap_or("");
                 // The point list and its commands, charged before they are
                 // built.
-                let count = source.split_whitespace().count() + 1;
-                self.charge_construction(
-                    count * (std::mem::size_of::<(f64, f64)>() + std::mem::size_of::<PathCmd>()),
-                )?;
+                let count = source.split_whitespace().count().saturating_add(1);
+                self.charge_construction(count.saturating_mul(
+                    std::mem::size_of::<(f64, f64)>() + std::mem::size_of::<PathCmd>(),
+                ))?;
                 let points: Vec<(f64, f64)> = source
                     .split_whitespace()
                     .filter_map(|pair| {
@@ -1048,7 +1055,10 @@ impl<'a> Reader<'a> {
                 let view = view_box(node).unwrap_or((0.0, 0.0, width.max(1.0), height.max(1.0)));
                 if let Some(d) = node.attribute((NS_SVG, "d")) {
                     // The parse holds at most one number per source byte.
-                    let scratch = (d.len() + 1) * std::mem::size_of::<(Option<char>, f64)>();
+                    let scratch = d
+                        .len()
+                        .saturating_add(1)
+                        .saturating_mul(std::mem::size_of::<(Option<char>, f64)>());
                     self.charge_construction(scratch)?;
                     let limit = self.construction_left() / std::mem::size_of::<PathCmd>();
                     let parsed = svg_path(d, view, limit);
@@ -1170,14 +1180,18 @@ impl<'a> Reader<'a> {
                 .children()
                 .filter(|n| xml::is(*n, NS_DRAW, "equation"))
                 .map(|e| {
-                    e.attributes().map(|a| a.value().len()).sum::<usize>()
-                        + 3 * std::mem::size_of::<String>()
-                        + 64
+                    e.attributes()
+                        .fold(0usize, |sum, a| sum.saturating_add(a.value().len()))
+                        .saturating_add(3 * std::mem::size_of::<String>() + 64)
                 })
-                .sum();
-            let scratch = (path.len() + 1) * (std::mem::size_of::<String>() + 8)
-                + path.len()
-                + 2 * equation_bytes;
+                .fold(0usize, usize::saturating_add);
+            // Saturating: an estimate past usize is refused, never wrapped.
+            let scratch = path
+                .len()
+                .saturating_add(1)
+                .saturating_mul(std::mem::size_of::<String>() + 8)
+                .saturating_add(path.len())
+                .saturating_add(equation_bytes.saturating_mul(2));
             self.charge_construction(scratch)?;
             let equations = node
                 .children()
@@ -1210,6 +1224,8 @@ impl<'a> Reader<'a> {
                 return Ok(());
             }
         }
+        // The preset name is copied per shape: charged first.
+        self.charge_construction(kind.len() + 32)?;
         shape.preset_geometry = Some(
             match kind.strip_prefix("ooxml-") {
                 Some(preset) => preset,
