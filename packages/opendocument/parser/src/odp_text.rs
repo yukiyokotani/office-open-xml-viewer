@@ -1046,6 +1046,38 @@ fn container_object_styles<'a>(
     scope: Scope,
     container: Nd<'a>,
 ) -> Result<ObjectStyles<'a>, String> {
+    // A table cell's text: the cell's style cascade (its own or its row's
+    // default cell style, then the table-cell default) before the styles
+    // of the frame holding the table, as the table reader builds them
+    // (a table template's region styles are not known here).
+    if xml::is(container, crate::xml::NS_TABLE, "table-cell") {
+        let frame = container
+            .ancestors()
+            .find(|a| xml::is(*a, NS_DRAW, "frame"))
+            .unwrap_or(container);
+        let mut styles = if frame == container {
+            ObjectStyles::default()
+        } else {
+            container_object_styles(sheet, scope, frame)?
+        };
+        let name = container
+            .attribute((crate::xml::NS_TABLE, "style-name"))
+            .or_else(|| {
+                container.parent_element().and_then(|row| {
+                    row.attribute((crate::xml::NS_TABLE, "default-cell-style-name"))
+                })
+            });
+        let mut chain = name
+            .map(|n| sheet.chain(scope, "table-cell", n))
+            .transpose()?
+            .unwrap_or_default();
+        chain.extend(sheet.default_style("table-cell"));
+        chain.extend(styles.chain.iter().copied());
+        styles.chain = chain;
+        styles.outline_master = None;
+        styles.automatic = None;
+        return Ok(styles);
+    }
     let object = if xml::is(container, NS_DRAW, "text-box") {
         container.parent_element().unwrap_or(container)
     } else {
@@ -1934,11 +1966,18 @@ pub fn notes_text<'a>(containers: impl Iterator<Item = Nd<'a>>) -> Result<String
         text.push_str(piece);
         Ok(())
     };
+    let paragraph = |n: &Nd<'a>| xml::is(*n, NS_TEXT, "p") || xml::is(*n, NS_TEXT, "h");
     for container in containers {
-        for p in container
-            .descendants()
-            .filter(|n| xml::is(*n, NS_TEXT, "p") || xml::is(*n, NS_TEXT, "h"))
-        {
+        // Outermost paragraphs only: a paragraph nested in another (not
+        // valid ODF) is read as part of it, so every node is read once.
+        for p in container.descendants().filter(|n| {
+            paragraph(n)
+                && !n
+                    .ancestors()
+                    .skip(1)
+                    .take_while(|a| *a != container)
+                    .any(|a| paragraph(&a))
+        }) {
             if !first {
                 push(&mut text, "\n")?;
             }

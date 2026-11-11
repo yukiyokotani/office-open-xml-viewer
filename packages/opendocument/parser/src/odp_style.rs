@@ -136,6 +136,15 @@ pub type ListNumbers = std::cell::RefCell<
 impl<'a> Sheet<'a> {
     pub fn add_document(&mut self, root: Nd<'a>, scope: Scope) -> Result<(), String> {
         for list in root.descendants().filter(|n| xml::is(*n, NS_TEXT, "list")) {
+            // List identities are hashed for every numbered item and
+            // continuation: bounded like any short name.
+            let long = |v: Option<&str>| v.is_some_and(|v| v.len() > MAX_PROPERTY_VALUE_BYTES);
+            if long(list.attribute((xml::NS_XML, "id")))
+                || long(list.attribute((NS_TEXT, "continue-list")))
+                || long(list.attribute((NS_TEXT, "style-name")))
+            {
+                return Err(invalid("a list identifier exceeds the name limit"));
+            }
             if let Some(id) = list.attribute((xml::NS_XML, "id")) {
                 self.list_ids.entry(id).or_insert((scope, list));
             }
@@ -146,6 +155,13 @@ impl<'a> Sheet<'a> {
                     .children()
                     .filter(|n| xml::is(*n, NS_STYLE, "font-face"))
                 {
+                    // Font names are copied into every run that uses them.
+                    if face
+                        .attributes()
+                        .any(|a| a.value().len() > MAX_PROPERTY_VALUE_BYTES)
+                    {
+                        return Err(invalid("a font face exceeds the name limit"));
+                    }
                     if let Some(name) = face.attribute((NS_STYLE, "name")) {
                         let family = face
                             .attribute((NS_SVG, "font-family"))
