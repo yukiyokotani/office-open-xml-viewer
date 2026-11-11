@@ -88,6 +88,9 @@ const MAX_SEARCH_ORDER: usize = 256;
 /// run resolution visits each style of its search order and each attribute
 /// of the resolved property group (one unit each plus one per byte).
 const MAX_CASCADE_WORK: usize = 256 * 1024 * 1024;
+/// Implementation bound on `text:anchor-page-number`: the DOCX layout's own
+/// page bound, since the document is extended to the highest anchored page.
+const MAX_ANCHOR_PAGE: u32 = 10_000;
 /// Implementation bound on source bytes processed again for repeated table
 /// rows and cells, document-wide.
 const MAX_REPEAT_WORK: usize = 64 * 1024 * 1024;
@@ -210,6 +213,7 @@ pub fn read(package: &OdfPackage) -> Result<(Document, Vec<OwnedDocumentResource
         resource_bytes: 0,
         repeat_work: 0,
         intrinsic: HashMap::new(),
+        page_objects: BTreeMap::new(),
         rejected_images: HashSet::new(),
         section_markers: 0,
         region_cache: HashMap::new(),
@@ -265,6 +269,20 @@ pub fn read(package: &OdfPackage) -> Result<(Document, Vec<OwnedDocumentResource
     document.footnotes = std::mem::take(&mut reader.footnotes);
     document.endnotes = std::mem::take(&mut reader.endnotes);
     document.note_layout_settings = notes.wire(&pages, &reader.current_master);
+    // Page objects: one story per page, its drawings carried by an empty
+    // host paragraph (each gains a host run, charged like body anchors).
+    let page_objects = std::mem::take(&mut reader.page_objects);
+    for (page, runs) in page_objects {
+        reader.charge_construction(
+            std::mem::size_of::<docx_model::PageObjectStory>()
+                + std::mem::size_of::<DocParagraph>()
+                + runs.len() * (std::mem::size_of::<DocRun>() + 128),
+        )?;
+        document.page_objects.push(docx_model::PageObjectStory {
+            page,
+            body: vec![BodyElement::Paragraph(Box::new(anchor_paragraph(runs)))],
+        });
+    }
     reader.check_budgets()?;
     let images = std::mem::take(&mut reader.images);
     Ok((document, images))
@@ -376,6 +394,8 @@ struct Reader<'a> {
     level_cache: HashMap<(Scope, String, u32), list::Level<'a>>,
     /// Each master page's own region stories, built once.
     region_cache: HashMap<String, Rc<page::MasterStories>>,
+    /// Drawings anchored to an explicit physical page, by page (1-based).
+    page_objects: BTreeMap<u32, Vec<DocRun>>,
     /// Each retained picture's intrinsic size by key (scanned once).
     intrinsic: HashMap<String, Option<(f64, f64)>>,
     /// The part of `construction_bytes` charged for package resources

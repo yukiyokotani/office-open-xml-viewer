@@ -89,7 +89,7 @@ import type {
   BodyLayoutInput,
   BodyLayoutSequenceEntryFor,
 } from './layout/body-layout-input.js';
-import { projectBodyLayoutInput } from './layout/body-layout-input.js';
+import { pageObjectStorySource, projectBodyLayoutInput } from './layout/body-layout-input.js';
 import type { BodyAcquisitionInputProjections } from './layout/acquisition-input-projections.js';
 import type { DocumentTypographySettingsInput } from './layout-context.js';
 import { isInklessParagraph } from './layout/paragraph-visibility.js';
@@ -257,8 +257,23 @@ export type InternalMathRun = Extract<DocRun, { type: 'math' }> & {
   readonly resourceKey: string;
 };
 
+/** Private producer wire (never authored by WordprocessingML): the drawings
+ * anchored to one explicit physical page (ODF `text:anchor-page-number`),
+ * as a page-local story. See `pageObjectStorySource`. */
+export interface PageObjectStoryWire {
+  /** The physical page, 1-based. */
+  readonly page: number;
+  body: BodyElement[];
+}
+
+/** The page objects of a model; empty for every DOCX document. */
+export function documentPageObjects(doc: DocxDocumentModel): readonly PageObjectStoryWire[] {
+  return (doc as InternalDocxDocumentModel).__pageObjects ?? [];
+}
+
 export interface InternalDocxDocumentModel extends DocxDocumentModel {
   fontFamilyCharsets?: Record<string, string>;
+  __pageObjects?: PageObjectStoryWire[];
   readonly diagnostics?: readonly ParseDiagnosticWire[];
   readonly __pageLayoutSettings?: Readonly<{
     mirrorMargins?: boolean;
@@ -1458,7 +1473,20 @@ export function bodyLayoutAcquisitionInput(doc: DocxDocumentModel): BodyLayoutAc
       startType: occurrence.startType,
     });
   });
+  // Producer page objects: each page's story and its wrapping drawings
+  // (page-owned on both axes, as `acquiredBodyParagraph` selects them).
+  const pageObjects = documentPageObjects(doc).map((object) => {
+    const source = pageObjectStorySource(object.page);
+    const wrapAnchors = object.body.flatMap((element, index) => {
+      if (element.type !== 'paragraph') return [];
+      const paragraphSource: SourceRef = Object.freeze({ ...source, path: Object.freeze([index]) as unknown as number[] });
+      return (acquiredBodyParagraph(element, paragraphSource).pageOwnedAnchorOccurrenceIds ?? [])
+        .map((occurrenceId) => Object.freeze({ occurrenceId, paragraphSource }));
+    });
+    return Object.freeze({ pageIndex: object.page - 1, source, wrapAnchors: Object.freeze(wrapAnchors) });
+  });
   return {
+    ...(pageObjects.length > 0 ? { pageObjects: Object.freeze(pageObjects) } : {}),
     sectionIndex,
     compatibilityMode: doc.settings?.compatibilityMode,
     footnoteLayoutLikeWW8: doc.settings?.footnoteLayoutLikeWW8,
@@ -2239,10 +2267,23 @@ function normalizeInternalDocumentModelWithOwnership(
   };
   const footnotes = normalizeNotes(doc.footnotes, 'footnote');
   const endnotes = normalizeNotes(doc.endnotes, 'endnote');
+  const sourcePageObjects = (doc as InternalDocxDocumentModel).__pageObjects;
+  let pageObjects = sourcePageObjects;
+  if (sourcePageObjects) {
+    let pageObjectsChanged = false;
+    const normalized = sourcePageObjects.map((object) => {
+      const objectBody = normalizeBody(object.body, 'header', `page-object:${object.page}`);
+      if (objectBody === object.body) return object;
+      pageObjectsChanged = true;
+      return { ...object, body: objectBody };
+    });
+    if (pageObjectsChanged) pageObjects = normalized;
+  }
   const changed = body !== doc.body || headers !== doc.headers || footers !== doc.footers
-    || footnotes !== doc.footnotes || endnotes !== doc.endnotes;
+    || footnotes !== doc.footnotes || endnotes !== doc.endnotes || pageObjects !== sourcePageObjects;
   const document = (changed
-    ? { ...doc, body, headers, footers, footnotes, endnotes }
+    ? { ...doc, body, headers, footers, footnotes, endnotes,
+        ...(pageObjects ? { __pageObjects: pageObjects } : {}) }
     : doc) as InternalDocxDocumentModel;
   const sectionPlacementInputs = projectSectionPlacementInputs(document);
   sectionPlacementInputsByDocument.set(document, sectionPlacementInputs);

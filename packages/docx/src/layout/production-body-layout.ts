@@ -92,6 +92,7 @@ import type {
   ReservedNoteSeparatorDefinitionInput,
   SelectedNoteSeparatorDefinitionInput,
 } from './body-layout-input.js';
+import { isPageObjectSource } from './body-layout-input.js';
 import {
   sectionBodyInsetPt as bodyMarginInsetPt,
   physicalSectionGeometry,
@@ -2427,7 +2428,10 @@ function prescanBodyPageAnchors(
         }),
       ];
     }
-    const paragraph = sourceElement(dependencies.source, anchor.paragraphSource);
+    // A producer page object's drawing lives in its page story, not the body.
+    const paragraph = isPageObjectSource(anchor.paragraphSource)
+      ? nestedSourceElement(dependencies.source, anchor.paragraphSource)
+      : sourceElement(dependencies.source, anchor.paragraphSource);
     if (paragraph.type !== 'paragraph') {
       throw new Error('Page-anchor prescan source kind mismatch');
     }

@@ -2015,6 +2015,8 @@ fn finish_document(
         diagnostics,
         // Healthy document: no degradation (RB7). Only `degraded_document` sets this.
         parse_error: None,
+        // WordprocessingML has no physical-page anchor (a producer-only wire).
+        page_objects: Vec::new(),
     })
 }
 

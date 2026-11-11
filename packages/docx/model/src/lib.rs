@@ -182,6 +182,23 @@ pub struct Document {
     /// renderer paints a visible error placeholder.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parse_error: Option<String>,
+    /// Private producer wire (never authored by WordprocessingML, which has
+    /// no physical-page anchor): stories of drawings anchored to an explicit
+    /// physical page, as ODF `text:anchor-page-number` (Part 3 §19.758)
+    /// anchors them. The layout paints each story on its page (1-based),
+    /// registers its wrapping drawings on that page's body, and extends the
+    /// document to the highest page. Empty, and omitted, for DOCX.
+    #[serde(rename = "__pageObjects", skip_serializing_if = "Vec::is_empty")]
+    pub page_objects: Vec<PageObjectStory>,
+}
+
+/// One physical page's anchored drawings (see `Document::page_objects`).
+#[derive(Serialize, Debug, Default, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct PageObjectStory {
+    /// The physical page, 1-based.
+    pub page: u32,
+    pub body: Vec<BodyElement>,
 }
 
 #[derive(Serialize)]

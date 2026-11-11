@@ -198,6 +198,21 @@ impl<'a> Reader<'a> {
         node: roxmltree::Node<'a, 'a>,
         _host: Option<(u32, &Inline<'a>)>,
     ) -> Result<Option<DocRun>, String> {
+        // §19.758-§19.759: a page-anchored drawing with an explicit physical
+        // page belongs to that page, wherever it is written (body, paragraph
+        // or a master page's header or footer, as LibreOffice reads it): it
+        // becomes a page object, not content of the story that holds it.
+        if let Some(page) = anchor_page_number(node)? {
+            let run = self.drawing_run(node)?;
+            if let Some(run) = run {
+                self.page_objects.entry(page).or_default().push(run);
+            }
+            return Ok(None);
+        }
+        self.drawing_run(node)
+    }
+
+    fn drawing_run(&mut self, node: roxmltree::Node<'a, 'a>) -> Result<Option<DocRun>, String> {
         self.enter()?;
         let result = match node.tag_name().name() {
             "frame" => self.frame(node),
@@ -1362,6 +1377,27 @@ impl<'a> Reader<'a> {
 
 /// `draw:contour-polygon` points in its view box, scaled to DOCX's
 /// 21600-unit wrap polygon space.
+/// `text:anchor-page-number` (§19.758) of a page-anchored drawing
+/// (§19.759 `text:anchor-type="page"`): its physical page, 1-based. Page
+/// numbers past the reader's page bound are refused (LibreOffice extends the
+/// document to the page, so the bound caps the pages a drawing can create).
+fn anchor_page_number(node: roxmltree::Node<'_, '_>) -> Result<Option<u32>, String> {
+    if node.attribute((NS_TEXT, "anchor-type")) != Some("page") {
+        return Ok(None);
+    }
+    let Some(page) = node
+        .attribute((NS_TEXT, "anchor-page-number"))
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|page| *page >= 1)
+    else {
+        return Ok(None);
+    };
+    if page > u64::from(MAX_ANCHOR_PAGE) {
+        return Err("OpenDocument page anchor exceeds the page limit".into());
+    }
+    Ok(Some(page as u32))
+}
+
 fn contour_polygon(frame: roxmltree::Node<'_, '_>) -> Option<docx_model::AnchorPolygonWire> {
     let contour = frame
         .children()

@@ -121,7 +121,11 @@ the package are not drawn).
   joins, caps and arrowheads; anchoring as character, to the character,
   paragraph or page, with every horizontal and vertical position and
   relation, wrapping modes, distances, stacking and overlap control; and
-  formula objects, whose MathML is drawn as math.
+  formula objects, whose MathML is drawn as math. A drawing anchored to a
+  physical page (`text:anchor-page-number`) is drawn on that page and wraps
+  that page's text, wherever it is written (the body, a paragraph, or a
+  master page's header or footer, as LibreOffice reads it), and the document
+  runs to that page with empty pages when it is past the content.
 - Embedded fonts (`svg:font-face-src`) are registered for the document.
 
 ## LibreOffice compatibility rules

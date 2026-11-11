@@ -703,3 +703,72 @@ fn iri_dot_segments_normalize_linearly() {
         Some(iri::Target::Package { path, .. }) if path == "Pictures/a.png"
     ));
 }
+
+#[test]
+fn page_numbered_anchors_become_page_objects() {
+    // §19.758: a page-anchored frame with a physical page belongs to that
+    // page, from the body or from a master page's header (LibreOffice moves
+    // both to the page); a page anchor without a page number stays with the
+    // next paragraph.
+    let frame = |page: &str| {
+        format!(
+            r##"<draw:frame text:anchor-type="page" {page} svg:x="1cm" svg:y="2cm" svg:width="3cm" svg:height="1cm"><draw:text-box><text:p>box</text:p></draw:text-box></draw:frame>"##
+        )
+    };
+    let master = format!(
+        r##"<style:header><text:p>Head{}</text:p></style:header>"##,
+        frame(r#"text:anchor-page-number="2""#)
+    );
+    let body = format!(
+        "{}{}{}<text:p>text</text:p>",
+        frame(r#"text:anchor-page-number="3""#),
+        frame(r#"text:anchor-page-number="3""#),
+        frame("")
+    );
+    let document = read_fixture(Fixture {
+        master: &master,
+        body: &body,
+        ..Fixture::default()
+    });
+    let pages: Vec<(u32, usize)> = document
+        .page_objects
+        .iter()
+        .map(|object| {
+            let BodyElement::Paragraph(host) = &object.body[0] else {
+                panic!("a host paragraph")
+            };
+            let shapes = host
+                .runs
+                .iter()
+                .filter(|run| matches!(run, DocRun::Shape(_)))
+                .count();
+            (object.page, shapes)
+        })
+        .collect();
+    assert_eq!(pages, [(2, 1), (3, 2)]);
+    // The unnumbered page anchor is carried by the body paragraph.
+    let shapes_in_body = paragraphs(&document.body)[0]
+        .runs
+        .iter()
+        .filter(|run| matches!(run, DocRun::Shape(_)))
+        .count();
+    assert_eq!(shapes_in_body, 1);
+    // The header keeps its text but not the page object.
+    let header = document.headers.default.as_ref().unwrap();
+    let BodyElement::Paragraph(head) = &header.body[0] else {
+        panic!()
+    };
+    assert!(!head.runs.iter().any(|run| matches!(run, DocRun::Shape(_))));
+}
+
+#[test]
+fn page_anchors_past_the_page_bound_are_refused() {
+    let body = r##"<draw:frame text:anchor-type="page" text:anchor-page-number="4000000000" svg:width="3cm" svg:height="1cm"><draw:text-box><text:p>x</text:p></draw:text-box></draw:frame><text:p>a</text:p>"##;
+    let error = try_read_fixture(Fixture {
+        body,
+        ..Fixture::default()
+    })
+    .err()
+    .expect("refused");
+    assert!(error.contains("page limit"), "{error}");
+}

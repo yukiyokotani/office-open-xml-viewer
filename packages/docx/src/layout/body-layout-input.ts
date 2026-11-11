@@ -203,6 +203,35 @@ export type BodyLayoutSequenceEntryFor<TSection> =
 
 export type BodyLayoutSequenceEntry = BodyLayoutSequenceEntryFor<BodySectionLayoutInput>;
 
+
+const PAGE_OBJECT_INSTANCE = 'page-object:';
+
+/** The story source of a producer page object on `page` (1-based): a
+ * header-class page story (laid out and painted like one) under its own
+ * instance, so no story-kind dispatch needs to know it. */
+export function pageObjectStorySource(page: number): SourceRef {
+  return Object.freeze({
+    story: 'header' as const,
+    storyInstance: `${PAGE_OBJECT_INSTANCE}${page}`,
+    path: [],
+  });
+}
+
+/** Whether a source lies in a producer page-object story. */
+export function isPageObjectSource(source: SourceRef): boolean {
+  return source.story === 'header' && source.storyInstance.startsWith(PAGE_OBJECT_INSTANCE);
+}
+
+/** A producer page object (never DOCX): the story of the drawings anchored to
+ * one physical page, and those of its drawings that wrap that page's body,
+ * registered at the page's start like page-owned anchors. */
+export interface PageObjectInput {
+  /** The physical page, 0-based. */
+  readonly pageIndex: number;
+  readonly source: SourceRef;
+  readonly wrapAnchors: readonly Readonly<{ occurrenceId: string; paragraphSource: SourceRef }>[];
+}
+
 export interface BodyLayoutInput {
   /** `w:compatSetting` compatibilityMode value from settings (§17.15.3.4). */
   readonly compatibilityMode?: number;
@@ -212,6 +241,8 @@ export interface BodyLayoutInput {
   readonly source: SourceRef;
   readonly initialSection: BodySectionLayoutInput;
   readonly sequence: readonly BodyLayoutSequenceEntry[];
+  /** Producer page objects, by page; absent for DOCX. */
+  readonly pageObjects?: readonly PageObjectInput[];
   /** Immutable parse facts; attached only after geometry convergence. */
   readonly parserDiagnostics?: readonly LayoutDiagnostic[];
   /** §17.11 document-end note stories, in authored numbering order. */
@@ -252,6 +283,7 @@ export interface NoteNumberingInput {
 }
 
 export interface BodyLayoutAcquisitionInput {
+  readonly pageObjects?: readonly PageObjectInput[];
   readonly compatibilityMode?: number;
   readonly footnoteLayoutLikeWW8?: boolean;
   /** Producer footnote layout: every column owns its note band. */
@@ -419,5 +451,7 @@ export function projectBodyLayoutInput(acquired: BodyLayoutAcquisitionInput): Bo
     endnoteIds: acquired.endnoteIds ?? [],
     repeatedFootnoteLastEntries: acquired.repeatedFootnoteLastEntries ?? [],
     noteLayoutSettings: acquired.noteLayoutSettings,
+    ...(acquired.pageObjects && acquired.pageObjects.length > 0
+      ? { pageObjects: acquired.pageObjects } : {}),
   }, 'DOCX body layout input') as BodyLayoutInput;
 }

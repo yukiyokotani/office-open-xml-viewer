@@ -11,10 +11,12 @@ import {
   reservedNoteSeparatorParagraphAcquisitionInput,
   selectedNoteSeparatorParagraphAcquisitionInput,
   tableSourceAcquisitionInput,
+  documentPageObjects,
   type InternalShapeRun,
   type NormalizedDocumentInput,
 } from './parser-model.js';
 import type { BodyAcquisitionInputProjections } from './layout/acquisition-input-projections.js';
+import { pageObjectStorySource } from './layout/body-layout-input.js';
 import type {
   BodyLayoutInput,
   ReservedNoteSeparatorRolesInput,
@@ -98,6 +100,16 @@ function forEachPart(
   }
 }
 
+/** A producer's page-object stories (header-class page stories). */
+function forEachPageObject(
+  document: DocxDocumentModel,
+  visit: (body: BodyElement[], source: SourceRef) => void,
+): void {
+  for (const object of documentPageObjects(document)) {
+    visit(object.body, { ...pageObjectStorySource(object.page), path: [] });
+  }
+}
+
 function traverseParagraphSources(
   document: DocxDocumentModel,
   projections: BodyAcquisitionInputProjections,
@@ -150,6 +162,7 @@ function traverseParagraphSources(
   visitBody(document.body, { story: 'body', storyInstance: 'body', path: [] });
   forEachPart(document.headers, 'header', null, visitBody);
   forEachPart(document.footers, 'footer', null, visitBody);
+  forEachPageObject(document, visitBody);
   for (const note of document.footnotes ?? []) {
     visitBody(note.content, { story: 'footnote', storyInstance: note.id, path: [] });
   }
@@ -163,6 +176,7 @@ function storyEntries(document: DocxDocumentModel): { source: SourceRef; body: B
   const add = (body: BodyElement[], source: SourceRef): void => { entries.push({ source, body }); };
   forEachPart(document.headers, 'header', null, add);
   forEachPart(document.footers, 'footer', null, add);
+  forEachPageObject(document, add);
   document.body.forEach((element, elementIndex) => {
     if (element.type !== 'sectionBreak') return;
     forEachPart(element.headers, 'header', `section:${elementIndex}`, add);
@@ -601,6 +615,13 @@ function buildLayoutSourceModelAdapter(
     ),
     headers: canonicalizeFinalParts(privateDocument.headers, 'header', paragraphInputs),
     footers: canonicalizeFinalParts(privateDocument.footers, 'footer', paragraphInputs),
+    ...(documentPageObjects(privateDocument).length === 0 ? {} : {
+      __pageObjects: documentPageObjects(privateDocument).map((object) => ({
+        page: object.page,
+        body: canonicalizeBody(object.body, { ...pageObjectStorySource(object.page), path: [] },
+          paragraphInputs),
+      })),
+    }),
     footnotes: footnotes.map(({ content, ...note }) => ({
       ...structuredClone(note),
       content: canonicalizeBody(content, {
