@@ -269,18 +269,25 @@ pub fn read(package: &OdfPackage) -> Result<(Document, Vec<OwnedDocumentResource
     document.footnotes = std::mem::take(&mut reader.footnotes);
     document.endnotes = std::mem::take(&mut reader.endnotes);
     document.note_layout_settings = notes.wire(&pages, &reader.current_master);
-    // Page objects: one story per page, its drawings carried by an empty
-    // host paragraph (each gains a host run, charged like body anchors).
+    // Page objects: one story per page, each drawing carried by its own
+    // empty host paragraph (so the layout resolves each in constant work),
+    // charged like body anchors.
     let page_objects = std::mem::take(&mut reader.page_objects);
     for (page, runs) in page_objects {
         reader.charge_construction(
             std::mem::size_of::<docx_model::PageObjectStory>()
-                + std::mem::size_of::<DocParagraph>()
-                + runs.len() * (std::mem::size_of::<DocRun>() + 128),
+                + runs.len()
+                    * (std::mem::size_of::<DocParagraph>()
+                        + std::mem::size_of::<BodyElement>()
+                        + std::mem::size_of::<DocRun>()
+                        + 128),
         )?;
         document.page_objects.push(docx_model::PageObjectStory {
             page,
-            body: vec![BodyElement::Paragraph(Box::new(anchor_paragraph(runs)))],
+            body: runs
+                .into_iter()
+                .map(|run| BodyElement::Paragraph(Box::new(anchor_paragraph(vec![run]))))
+                .collect(),
         });
     }
     reader.check_budgets()?;

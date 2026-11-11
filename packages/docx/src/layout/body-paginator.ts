@@ -10,7 +10,6 @@ import type {
   BodyParagraphSourceInput,
   BodySectionLayoutInput,
 } from './body-layout-input.js';
-import { isPageObjectSource } from './body-layout-input.js';
 import type {
   BodyAcquisitionLocation,
   BodyLayoutSession,
@@ -1315,7 +1314,9 @@ function* paginateBodyPassSteps(
   };
   // Producer page objects (never DOCX): their wrapping drawings register at
   // the opening prescan of their own page, whatever the flow. They depend on
-  // the page index alone, so every pass registers them identically.
+  // the page index alone, so every pass registers them identically; they are
+  // therefore not convergence reads (the recorded prescan holds only the
+  // flow's anchors, which the destination plan reproduces).
   const pageObjectAnchors = new Map<number, PageStartAnchors[number][]>();
   for (const object of input.pageObjects ?? []) {
     const anchors = pageObjectAnchors.get(object.pageIndex) ?? [];
@@ -1329,21 +1330,17 @@ function* paginateBodyPassSteps(
     pageObjectAnchors.set(object.pageIndex, anchors);
   }
   const pageOpeningDomains = new Map<number, string>();
-  const withPageObjects = (target: BodyPaginationState, anchors: PageStartAnchors): PageStartAnchors => {
-    if (pageObjectAnchors.size === 0) return anchors;
+  const pageObjectsAt = (target: BodyPaginationState): PageStartAnchors => {
+    if (pageObjectAnchors.size === 0) return Object.freeze([]);
     const location = acquisitionLocation(target);
     if (!pageOpeningDomains.has(location.pageIndex)) {
       pageOpeningDomains.set(location.pageIndex, location.flowDomainId);
     }
-    const objects = pageOpeningDomains.get(location.pageIndex) === location.flowDomainId
+    return Object.freeze(pageOpeningDomains.get(location.pageIndex) === location.flowDomainId
       ? pageObjectAnchors.get(location.pageIndex) ?? []
-      : [];
-    return objects.length === 0 ? anchors : Object.freeze([...anchors, ...objects]);
+      : []);
   };
-  const pageStartAnchors = (target: BodyPaginationState, startIndex: number): PageStartAnchors => (
-    withPageObjects(target, flowPageStartAnchors(target, startIndex))
-  );
-  const flowPageStartAnchors = (target: BodyPaginationState, startIndex: number): PageStartAnchors => {
+  const pageStartAnchors = (target: BodyPaginationState, startIndex: number): PageStartAnchors => {
     if (anchorDestinations !== null) {
       const location = acquisitionLocation(target);
       return plannedPageStartAnchors(anchorDestinations, location.pageIndex, location.flowDomainId);
@@ -1421,13 +1418,14 @@ function* paginateBodyPassSteps(
       registeredAnchorKeys.clear();
     }
     anchors.forEach((anchor) => registeredAnchorKeys.add(anchor.occurrenceId));
-    if (anchors.length === 0) return;
+    const pageObjects = pageObjectsAt(target);
+    if (anchors.length === 0 && pageObjects.length === 0) return;
     if (!session.prescanPageAnchors) {
       throw new Error('Page-owned anchors require canonical prescan acquisition');
     }
     const location = acquisitionLocation(target);
     const delta = session.prescanPageAnchors({
-      anchors,
+      anchors: pageObjects.length === 0 ? anchors : Object.freeze([...anchors, ...pageObjects]),
       location,
       availableInlineExtentPt: location.availableBounds.widthPt,
     });
@@ -4020,7 +4018,9 @@ function composePageStories(
   const pageObjectSources = new Map((pageObjects ?? []).map((object) => [object.pageIndex, object.source]));
   const visited = new WeakSet<object>();
   const pages = layout.pages.map((page, pageIndex) => {
-    if (page.parityBlank) return page;
+    // A parity blank page carries no stories, except a page object anchored
+    // to it (LibreOffice draws it there).
+    if (page.parityBlank && !pageObjectSources.has(page.pageIndex)) return page;
     const owner = owners.get(page.sectionOccurrenceId);
     if (!owner) throw new Error(`Unknown body section ${page.sectionOccurrenceId}`);
     if (!session.layoutStory) {
@@ -4088,8 +4088,8 @@ function composePageStories(
       }), kind, geometry);
       return translateStoryLayout(story, translation);
     };
-    const header = acquire('header');
-    const footer = acquire('footer');
+    const header = page.parityBlank ? null : acquire('header');
+    const footer = page.parityBlank ? null : acquire('footer');
     // The page's producer page objects: a header-class page story whose
     // drawings are positioned on the page (their wrap was registered on the
     // body at the page's start).
@@ -4104,6 +4104,9 @@ function composePageStories(
         container: {
           id: `story:page-objects:page:${page.pageIndex}`,
           kind: 'header',
+          // The story only carries page-positioned drawings; a drawing as
+          // large as the page must not exhaust a band.
+          capacity: 'unbounded',
           bounds: {
             xPt: inlineStartPt,
             yPt: 0,
@@ -4796,8 +4799,7 @@ function resolveAnchorLineTests(
     const tested = new Set(line);
     const exact = indexes.every((index) => {
       const event = events[index] as Extract<PageAnchorInputEvent, { kind: 'prescan' }>;
-      return pageStartAnchorsIdentity(event.anchors.filter((anchor) => !tested.has(anchor.occurrenceId)
-        && !(anchor.kind === 'drawing' && isPageObjectSource(anchor.paragraphSource))))
+      return pageStartAnchorsIdentity(event.anchors.filter((anchor) => !tested.has(anchor.occurrenceId)))
         === pageStartAnchorsIdentity(plannedPageStartAnchors(observed, pageIndex, event.flowDomainId));
     });
     if (exact) {

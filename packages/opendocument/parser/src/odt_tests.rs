@@ -734,14 +734,15 @@ fn page_numbered_anchors_become_page_objects() {
         .page_objects
         .iter()
         .map(|object| {
-            let BodyElement::Paragraph(host) = &object.body[0] else {
-                panic!("a host paragraph")
-            };
-            let shapes = host
-                .runs
+            let shapes = paragraphs(&object.body)
                 .iter()
-                .filter(|run| matches!(run, DocRun::Shape(_)))
-                .count();
+                .map(|host| {
+                    host.runs
+                        .iter()
+                        .filter(|run| matches!(run, DocRun::Shape(_)))
+                        .count()
+                })
+                .sum::<usize>();
             (object.page, shapes)
         })
         .collect();
@@ -759,6 +760,29 @@ fn page_numbered_anchors_become_page_objects() {
         panic!()
     };
     assert!(!head.runs.iter().any(|run| matches!(run, DocRun::Shape(_))));
+}
+
+#[test]
+fn style_anchors_and_groups_keep_their_page() {
+    // §20.417-§20.418: the anchor type and page may come from the graphic
+    // style; a page-anchored group keeps every member on its page.
+    let automatic = r##"<style:style style:name="gp" style:family="graphic"><style:graphic-properties text:anchor-type="page"/></style:style>"##;
+    let body = r##"<draw:frame draw:style-name="gp" text:anchor-page-number="3" svg:width="3cm" svg:height="1cm"><draw:text-box><text:p>x</text:p></draw:text-box></draw:frame><draw:g text:anchor-type="page" text:anchor-page-number="2"><draw:rect svg:x="0cm" svg:y="0cm" svg:width="1cm" svg:height="1cm"/><draw:rect svg:x="2cm" svg:y="0cm" svg:width="1cm" svg:height="1cm"/></draw:g><text:p>a</text:p>"##;
+    let document = read_fixture(Fixture {
+        automatic,
+        body,
+        ..Fixture::default()
+    });
+    let pages: Vec<(u32, usize)> = document
+        .page_objects
+        .iter()
+        .map(|object| (object.page, object.body.len()))
+        .collect();
+    assert_eq!(pages, [(2, 2), (3, 1)]);
+    assert!(!paragraphs(&document.body)[0]
+        .runs
+        .iter()
+        .any(|run| matches!(run, DocRun::Shape(_))));
 }
 
 #[test]

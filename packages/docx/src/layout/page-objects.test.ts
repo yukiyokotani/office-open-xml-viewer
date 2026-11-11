@@ -26,31 +26,39 @@ const PNG = Uint8Array.from(Buffer.from(
 ));
 const encoder = new TextEncoder();
 
-function anchorXml(): string {
-  // 200 x 120 pt at page (72, 200), square wrap on both sides.
+type Box = Readonly<{ x: number; y: number; w: number; h: number; id: number }>;
+const DEFAULT_BOX: Box = { x: 72, y: 200, w: 200, h: 120, id: 1 };
+
+function anchorXml(box: Box = DEFAULT_BOX): string {
+  // Default: 200 x 120 pt at page (72, 200), square wrap on both sides.
+  const { x, y, w, h, id } = box;
   return '<w:r><w:drawing>'
     + '<wp:anchor distT="0" distB="0" distL="0" distR="0" simplePos="0" '
-    + 'relativeHeight="251659265" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1">'
+    + `relativeHeight="${251659264 + id}" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1">`
     + '<wp:simplePos x="0" y="0"/>'
-    + `<wp:positionH relativeFrom="page"><wp:posOffset>${72 * EMU}</wp:posOffset></wp:positionH>`
-    + `<wp:positionV relativeFrom="page"><wp:posOffset>${200 * EMU}</wp:posOffset></wp:positionV>`
-    + `<wp:extent cx="${200 * EMU}" cy="${120 * EMU}"/><wp:effectExtent l="0" t="0" r="0" b="0"/>`
-    + '<wp:wrapSquare wrapText="bothSides"/><wp:docPr id="1" name="Anchor"/>'
+    + `<wp:positionH relativeFrom="page"><wp:posOffset>${x * EMU}</wp:posOffset></wp:positionH>`
+    + `<wp:positionV relativeFrom="page"><wp:posOffset>${y * EMU}</wp:posOffset></wp:positionV>`
+    + `<wp:extent cx="${w * EMU}" cy="${h * EMU}"/><wp:effectExtent l="0" t="0" r="0" b="0"/>`
+    + `<wp:wrapSquare wrapText="bothSides"/><wp:docPr id="${id}" name="Anchor ${id}"/>`
     + '<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">'
-    + '<pic:pic><pic:nvPicPr><pic:cNvPr id="1" name="a.png"/><pic:cNvPicPr/></pic:nvPicPr>'
+    + `<pic:pic><pic:nvPicPr><pic:cNvPr id="${id}" name="a.png"/><pic:cNvPicPr/></pic:nvPicPr>`
     + '<pic:blipFill><a:blip r:embed="rIdImage"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>'
-    + `<pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${200 * EMU}" cy="${120 * EMU}"/></a:xfrm>`
+    + `<pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${w * EMU}" cy="${h * EMU}"/></a:xfrm>`
     + '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic>'
     + '</a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>';
 }
 
-/** Paragraph 0 holds the anchor; the others are one labelled line each. */
-function docx(paragraphCount: number): Uint8Array {
+/** Paragraph 0 holds the anchor (and paragraph `bodyAnchorAt`, when given,
+ * a second body page anchor); the others are one labelled line each. */
+function docx(paragraphCount: number, box: Box = DEFAULT_BOX, bodyAnchorAt?: number): Uint8Array {
   const body = Array.from({ length: paragraphCount }, (_, index) => {
     const label = `P${String(index).padStart(3, '0')} words words words words words words words words`;
+    const content = index === 0 ? anchorXml(box)
+      : `<w:r><w:t>${label}</w:t></w:r>`
+        + (index === bodyAnchorAt ? anchorXml({ x: 300, y: 500, w: 150, h: 100, id: 2 }) : '');
     return '<w:p><w:pPr><w:widowControl w:val="0"/>'
       + '<w:spacing w:before="0" w:after="0" w:line="480" w:lineRule="exact"/></w:pPr>'
-      + (index === 0 ? anchorXml() : `<w:r><w:t>${label}</w:t></w:r>`) + '</w:p>';
+      + content + '</w:p>';
   }).join('');
   const document = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
     + '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" '
@@ -104,8 +112,8 @@ function measureContext(): CanvasRenderingContext2D {
 
 /** The parsed document; with `page`, its anchor paragraph moves out of the
  * body into a page object on that page (an empty paragraph keeps its slot). */
-function model(paragraphCount: number, page?: number): DocxDocumentModel {
-  const archive = new DocxArchive(docx(paragraphCount));
+function model(paragraphCount: number, page?: number, box?: Box, bodyAnchorAt?: number): DocxDocumentModel {
+  const archive = new DocxArchive(docx(paragraphCount, box, bodyAnchorAt));
   let raw: DocxDocumentModel & { __pageObjects?: unknown };
   try {
     raw = JSON.parse(new TextDecoder().decode(archive.parse()));
@@ -183,6 +191,7 @@ describe('producer page objects', () => {
       { onPreview: (preview) => { previews.push(preview); } },
     );
     expect(drawingPages(final as DocumentLayout)).toEqual([4]);
+    expect(previews.length).toBeGreaterThan(1);
     const fingerprint = (page: LayoutPage) => layoutFingerprint({ pages: [page], diagnostics: [] });
     for (const preview of previews) {
       preview.layout.pages.forEach((page, index) => {
@@ -191,6 +200,32 @@ describe('producer page objects', () => {
     }
     expect(layoutFingerprint(final as DocumentLayout)).toBe(layoutFingerprint(layout(doc)));
   }, 300_000);
+
+  it('converge beside body page anchors, publishing pages progressively', async () => {
+    // A body page anchor on page 5 starts anchor convergence; the page
+    // object on page 2 is not a convergence read, so previews still publish.
+    const doc = model(200, 2, undefined, 120);
+    const source = layoutSourceStore(doc);
+    const previews: ProgressiveLayoutPreview[] = [];
+    const final = await layoutDocumentProgressively(
+      source.bodyLayoutInput,
+      createLayoutServices(source, { measureContext: measureContext() }),
+      normalizeLayoutOptions(undefined, 0),
+      { onPreview: (preview) => { previews.push(preview); } },
+    );
+    expect(previews.some((preview) => preview.layout.pages.length >= 3)).toBe(true);
+    const fingerprint = (page: LayoutPage) => layoutFingerprint({ pages: [page], diagnostics: [] });
+    for (const preview of previews) {
+      preview.layout.pages.forEach((page, index) => {
+        expect(fingerprint(page as LayoutPage)).toBe(fingerprint(final.pages[index] as LayoutPage));
+      });
+    }
+  }, 300_000);
+
+  it('take a page-sized wrapping drawing without exhausting a band', () => {
+    const result = layout(model(60, 3, { x: 0, y: 0, w: 612, h: 792, id: 1 }));
+    expect(drawingPages(result)).toEqual([3]);
+  });
 
   it('leave a document without page objects as it was', () => {
     // The same document with its anchor in the body: pages 1-3, the drawing
