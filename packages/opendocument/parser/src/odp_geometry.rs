@@ -764,7 +764,14 @@ impl<'s, 'n> FormulaParser<'s, 'n> {
             }
             b'+' => {
                 self.pos += 1;
-                self.unary()
+                self.node()?;
+                self.depth += 1;
+                if self.depth > MAX_FORMULA_DEPTH {
+                    return None;
+                }
+                let inner = self.unary()?;
+                self.depth -= 1;
+                Some(inner)
             }
             _ => self.primary(),
         }
@@ -1149,10 +1156,21 @@ enum PathToken {
     Param(Param),
 }
 
+/// Implementation bound on the tokens of one enhanced path or text-area list.
+const MAX_PATH_TOKENS: usize = MAX_SEGMENTS_PER_SHAPE * 8;
+
 fn tokenize_path(path: &str, names: &HashMap<&str, usize>) -> Option<Vec<PathToken>> {
     let bytes = path.as_bytes();
     let mut pos = 0;
     let mut out = Vec::new();
+    // Checked before every token is kept.
+    let push = |out: &mut Vec<PathToken>, token: PathToken| -> Option<()> {
+        if out.len() >= MAX_PATH_TOKENS {
+            return None;
+        }
+        out.push(token);
+        Some(())
+    };
     while pos < bytes.len() {
         let b = bytes[pos];
         if b.is_ascii_whitespace() || b == b',' {
@@ -1167,9 +1185,10 @@ fn tokenize_path(path: &str, names: &HashMap<&str, usize>) -> Option<Vec<PathTok
             }
             let name = std::str::from_utf8(&bytes[start..pos]).ok()?;
             // An unknown equation evaluates to 0 (LibreOffice ignores it).
-            out.push(PathToken::Param(
-                names.get(name).map_or(Param::Num(0.0), |i| Param::Eq(*i)),
-            ));
+            push(
+                &mut out,
+                PathToken::Param(names.get(name).map_or(Param::Num(0.0), |i| Param::Eq(*i))),
+            )?;
             continue;
         }
         if b == b'$' {
@@ -1179,7 +1198,7 @@ fn tokenize_path(path: &str, names: &HashMap<&str, usize>) -> Option<Vec<PathTok
                 pos += 1;
             }
             let n: usize = std::str::from_utf8(&bytes[start..pos]).ok()?.parse().ok()?;
-            out.push(PathToken::Param(Param::Modifier(n)));
+            push(&mut out, PathToken::Param(Param::Modifier(n)))?;
             continue;
         }
         if b.is_ascii_digit() || b == b'.' || b == b'-' || b == b'+' {
@@ -1188,7 +1207,10 @@ fn tokenize_path(path: &str, names: &HashMap<&str, usize>) -> Option<Vec<PathTok
                 pos += 1;
             }
             let v = number(bytes, &mut pos)?;
-            out.push(PathToken::Param(Param::Num(if negative { -v } else { v })));
+            push(
+                &mut out,
+                PathToken::Param(Param::Num(if negative { -v } else { v })),
+            )?;
             continue;
         }
         if b.is_ascii_alphabetic() {
@@ -1214,18 +1236,15 @@ fn tokenize_path(path: &str, names: &HashMap<&str, usize>) -> Option<Vec<PathTok
                 _ => None,
             };
             if let Some(c) = constant {
-                out.push(PathToken::Param(Param::Const(c)));
+                push(&mut out, PathToken::Param(Param::Const(c)))?;
             } else {
                 // Commands are single letters and may be written together.
                 for c in word.chars() {
-                    out.push(PathToken::Cmd(c));
+                    push(&mut out, PathToken::Cmd(c))?;
                 }
             }
             continue;
         }
-        return None;
-    }
-    if out.len() > MAX_SEGMENTS_PER_SHAPE * 8 {
         return None;
     }
     Some(out)

@@ -58,6 +58,18 @@ impl<'a> Reader<'a> {
         let end = self.p.checked_add(len)?;
         (end <= self.b.len()).then_some((version, end))
     }
+    /// A nested compat record: a reader confined to its declared payload,
+    /// with this reader moved past it (never backwards, so a record cannot
+    /// be read twice).
+    fn nested(&mut self) -> Option<(u16, Reader<'a>)> {
+        let (version, end) = self.compat()?;
+        let inner = Reader {
+            b: &self.b[..end],
+            p: self.p,
+        };
+        self.p = end;
+        Some((version, inner))
+    }
     /// A colour: 0xTTRRGGBB (transparency in the high byte).
     fn color(&mut self) -> Option<u32> {
         self.u32()
@@ -94,19 +106,13 @@ impl<'a> Reader<'a> {
     }
     /// `tools::Polygon::Read`: compat, points, and optional point flags.
     fn polygon_with_flags(&mut self) -> Option<Polygon> {
-        let (_, end) = self.compat()?;
-        let points = self.polygon()?;
-        let flags = if self.u8()? != 0 {
-            let f = self
-                .b
-                .get(self.p..self.p.checked_add(points.len())?)?
-                .to_vec();
-            self.p += points.len();
-            Some(f)
+        let (_, mut r) = self.nested()?;
+        let points = r.polygon()?;
+        let flags = if r.u8()? != 0 {
+            Some(r.b.get(r.p..r.p.checked_add(points.len())?)?.to_vec())
         } else {
             None
         };
-        self.p = end;
         Some((points, flags))
     }
 }
@@ -136,7 +142,8 @@ fn unit_hmm(unit: u16) -> f64 {
 }
 
 fn read_map_mode(r: &mut Reader<'_>, current: Option<&MapMode>) -> Option<MapMode> {
-    let (_, end) = r.compat()?;
+    let (_, mut inner) = r.nested()?;
+    let r = &mut inner;
     let unit = r.u16()?;
     let origin = r.point()?;
     let fraction = |r: &mut Reader<'_>| -> Option<f64> {
@@ -146,7 +153,6 @@ fn read_map_mode(r: &mut Reader<'_>, current: Option<&MapMode>) -> Option<MapMod
     };
     let sx = fraction(r)?;
     let sy = fraction(r)?;
-    r.p = end;
     // MapUnit::MapRelative (13) moves the origin and multiplies the scale of
     // the current map mode.
     if unit == 13 {
@@ -672,16 +678,16 @@ pub fn to_svg(bytes: &[u8]) -> Option<Converted> {
 
 /// `LineInfo` (compat; style; width), returning the width.
 fn line_width(r: &mut Reader<'_>) -> Option<f64> {
-    let (_, end) = r.compat()?;
+    let (_, mut r) = r.nested()?;
     let _style = r.u16()?;
     let width = r.i32()? as f64;
-    r.p = end;
     Some(width)
 }
 
 /// `vcl::Font` as SvmReader reads it.
 fn read_font(r: &mut Reader<'_>) -> Option<Font> {
-    let (version, end) = r.compat()?;
+    let (version, mut inner) = r.nested()?;
+    let r = &mut inner;
     // Names are byte strings in the font's own charset; the family is
     // written before the charset is known, so it is read as a byte string
     // (LibreOffice writes ASCII family names here) unless the length prefix
@@ -701,7 +707,6 @@ fn read_font(r: &mut Reader<'_>) -> Option<Font> {
     let _width_type = r.u16()?;
     let orientation = r.u16()? as i16 as f64 / 10.0;
     let _ = version;
-    r.p = end;
     Some(Font {
         family: std::rc::Rc::from(family),
         height,

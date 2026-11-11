@@ -166,6 +166,23 @@ struct ListContext<'a> {
     /// `text:list` starts one unless it continues an earlier list); `None`
     /// outside lists.
     instance: Option<usize>,
+    /// `xml:id` of the innermost `text:list`, which a later list may name in
+    /// `text:continue-list`.
+    list_id: Option<&'a str>,
+    /// How a nested list resumes when a parent item has ended the sequence
+    /// at its level.
+    resume: Resume<'a>,
+}
+
+/// The continuation a nested `text:list` asks for (§19.785, §19.786).
+#[derive(Clone, Copy, Default, PartialEq)]
+enum Resume<'a> {
+    #[default]
+    None,
+    /// `text:continue-list`: the list with this `xml:id`.
+    List(&'a str),
+    /// `text:continue-numbering="true"`: the preceding list at this level.
+    Preceding,
 }
 
 /// List instances of one text body, for `text:continue-numbering` and
@@ -224,6 +241,8 @@ pub fn text_body<'a>(
             labelled: false,
             start_value: None,
             instance: None,
+            list_id: None,
+            resume: Resume::None,
         },
         &mut items,
         &mut instances,
@@ -291,10 +310,24 @@ fn collect_list<'a>(
     } else {
         outer.style
     };
-    // A nested list numbers within its enclosing list's instance.
-    let instance = match outer.instance {
-        Some(instance) => instance,
-        None => instances.top_level(list_node),
+    // A nested list numbers within its enclosing list's instance, at its
+    // own level; an explicit continuation resumes that level's sequence.
+    let list_id = list_node.attribute((crate::xml::NS_XML, "id"));
+    let (instance, resume) = match outer.instance {
+        Some(instance) => {
+            if let Some(id) = list_id {
+                instances.ids.insert(id, instance);
+            }
+            let resume = match list_node.attribute((NS_TEXT, "continue-list")) {
+                Some(id) => Resume::List(id),
+                None if list_node.attribute((NS_TEXT, "continue-numbering")) == Some("true") => {
+                    Resume::Preceding
+                }
+                None => Resume::None,
+            };
+            (instance, resume)
+        }
+        None => (instances.top_level(list_node), Resume::None),
     };
     let inner = ListContext {
         depth: outer.depth + 1,
@@ -302,6 +335,8 @@ fn collect_list<'a>(
         labelled: false,
         start_value: None,
         instance: Some(instance),
+        list_id,
+        resume,
     };
     for item in list_node.children().filter(|n| n.is_element()) {
         let header = xml::is(item, NS_TEXT, "list-header");
@@ -467,7 +502,7 @@ fn paragraph<'a>(
     list: &ListContext<'a>,
     env: &TextEnv<'a, '_>,
     media: &mut Media<'_>,
-    counters: &mut Numbering,
+    counters: &mut Numbering<'a>,
 ) -> Result<Paragraph, String> {
     let level = list.depth.saturating_sub(1);
     let object_styles = env.object.for_level(env.sheet, level);
@@ -571,14 +606,14 @@ fn paragraph<'a>(
             mar_l = space_before + min_label + margin_left;
             indent = -min_label + text_indent;
         }
-        let mut number = None;
+        // Only an item's labelled paragraph takes part in the numbering; the
+        // item's further paragraphs and list headers keep the sequence.
         if list.labelled {
-            let (label, n) = list_label(level_node, list, env, media, counters)?;
+            let (label, number) = list_label(level_node, list, env, media, counters)?;
             bullet = label;
-            number = n;
+            counters.record(list, number);
         }
-        counters.record(list, number);
-    } else {
+    } else if list.labelled {
         counters.record(list, None);
     }
 
@@ -649,23 +684,40 @@ fn paragraph<'a>(
 }
 
 /// List numbering state of one text body (§19.785, §19.786): per list
-/// instance and depth, the number of the latest item at that depth that no
-/// shallower item of the instance has ended (`Some(None)`: an unnumbered
-/// paragraph, which restarts the sequence). Paragraphs outside lists and of
-/// other instances do not affect an instance.
+/// instance and depth, the number of the latest labelled item at that depth
+/// that no shallower item of the instance has ended (`Some(None)`: a
+/// labelled item without a number, which restarts the sequence). Paragraphs
+/// outside lists and of other instances do not affect an instance. The last
+/// number of each level and of each identified list is also kept for
+/// explicit continuations.
 #[derive(Default)]
-struct Numbering {
+struct Numbering<'a> {
     instances: HashMap<usize, Vec<Option<Option<u32>>>>,
+    /// Last number per (instance, depth), not ended by shallower items.
+    last_at_level: HashMap<(usize, usize), u32>,
+    /// Last number per list `xml:id`.
+    last_of_list: HashMap<&'a str, u32>,
 }
 
-impl Numbering {
-    /// The latest entry at `list`'s depth in its instance.
-    fn previous(&self, list: &ListContext<'_>) -> Option<Option<u32>> {
-        let levels = self.instances.get(&list.instance?)?;
-        levels.get(list.depth).copied().flatten()
+impl<'a> Numbering<'a> {
+    /// The number the next item of `list` continues from, if any.
+    fn previous(&self, list: &ListContext<'a>) -> Option<u32> {
+        let instance = list.instance?;
+        let current = self
+            .instances
+            .get(&instance)
+            .and_then(|levels| levels.get(list.depth).copied().flatten());
+        match current {
+            Some(number) => number,
+            None => match list.resume {
+                Resume::List(id) => self.last_of_list.get(id).copied(),
+                Resume::Preceding => self.last_at_level.get(&(instance, list.depth)).copied(),
+                Resume::None => None,
+            },
+        }
     }
 
-    fn record(&mut self, list: &ListContext<'_>, number: Option<u32>) {
+    fn record(&mut self, list: &ListContext<'a>, number: Option<u32>) {
         let Some(instance) = list.instance else {
             return;
         };
@@ -676,16 +728,22 @@ impl Numbering {
         levels[list.depth] = Some(number);
         // A shallower or equal item ends the deeper sequences.
         levels.truncate(list.depth + 1);
+        if let Some(n) = number {
+            self.last_at_level.insert((instance, list.depth), n);
+            if let Some(id) = list.list_id {
+                self.last_of_list.insert(id, n);
+            }
+        }
     }
 }
 
 /// The label of a list item (§16.31–§16.33 list level styles).
-fn list_label(
-    level_node: Nd<'_>,
-    list: &ListContext<'_>,
-    env: &TextEnv<'_, '_>,
+fn list_label<'a>(
+    level_node: Nd<'a>,
+    list: &ListContext<'a>,
+    env: &TextEnv<'a, '_>,
     media: &mut Media<'_>,
-    counters: &Numbering,
+    counters: &Numbering<'a>,
 ) -> Result<(Bullet, Option<u32>), String> {
     let level_text = level_node
         .children()
@@ -767,8 +825,8 @@ fn list_label(
             .unwrap_or(1);
         let number = match (list.start_value, counters.previous(list)) {
             (Some(value), _) => value,
-            (None, Some(Some(n))) => n.saturating_add(1),
-            (None, _) => start,
+            (None, Some(n)) => n.saturating_add(1),
+            (None, None) => start,
         };
         let format = level_node
             .attribute((NS_STYLE, "num-format"))
@@ -1433,27 +1491,8 @@ fn push_text(
         || style.bold[2] != style.bold[0]
         || style.italic[1] != style.italic[0]
         || style.italic[2] != style.italic[0];
-    let mut portions: Vec<(Script, String)> = Vec::new();
-    if needs_split {
-        let mut current = Script::Western;
-        let mut buffer = String::new();
-        let mut started = false;
-        for c in transformed.chars() {
-            let script = script_of(c).unwrap_or(current);
-            if started && script != current && !buffer.is_empty() {
-                portions.push((current, std::mem::take(&mut buffer)));
-            }
-            current = script;
-            started = true;
-            buffer.push(c);
-        }
-        if !buffer.is_empty() {
-            portions.push((current, buffer));
-        }
-    } else {
-        portions.push((Script::Western, transformed));
-    }
-    for (script, portion) in portions {
+    // Each portion becomes a run, charged and kept as soon as it is found.
+    let mut emit = |script: Script, portion: String| -> Result<(), String> {
         let index = match script {
             Script::Western => 0,
             Script::Asian => 1,
@@ -1472,6 +1511,26 @@ fn push_text(
         let run = TextRun::Text(data);
         env.payload.charge(record_bytes(&run)?)?;
         runs.push(run);
+        Ok(())
+    };
+    if needs_split {
+        let mut current = Script::Western;
+        let mut buffer = String::new();
+        let mut started = false;
+        for c in transformed.chars() {
+            let script = script_of(c).unwrap_or(current);
+            if started && script != current && !buffer.is_empty() {
+                emit(current, std::mem::take(&mut buffer))?;
+            }
+            current = script;
+            started = true;
+            buffer.push(c);
+        }
+        if !buffer.is_empty() {
+            emit(current, buffer)?;
+        }
+    } else {
+        emit(Script::Western, transformed)?;
     }
     Ok(())
 }

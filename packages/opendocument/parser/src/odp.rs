@@ -42,6 +42,9 @@ pub const MEDIA_TYPES: [&str; 2] = [
 const MAX_DECK_ELEMENTS: usize = 2_000_000;
 /// Implementation bound on group nesting.
 const MAX_GROUP_DEPTH: usize = 64;
+/// Implementation bound on the drawing-object nodes the whole deck visits
+/// (master objects once per slide that shows them, empty ones included).
+const MAX_DECK_VISITS: usize = 16_000_000;
 /// Implementation bound on the slides of a deck (the PPTX bootstrap limit).
 const MAX_SLIDES: usize = 10_000;
 
@@ -145,6 +148,9 @@ pub fn read(package: &OdfPackage) -> Result<OdpDeck, String> {
         .unwrap_or((28.0 * 360_000.0, 21.0 * 360_000.0));
 
     let mut budget = MAX_DECK_ELEMENTS;
+    let mut visits = MAX_DECK_VISITS;
+    // Masters whose theme was already searched (one scan each).
+    let mut themes_searched: Vec<roxmltree::NodeId> = Vec::new();
     let mut charts: HashMap<String, Option<pptx_model::ChartModel>> = HashMap::new();
     let mut slides = Vec::with_capacity(pages.len());
     let mut hyperlink_colors = None;
@@ -153,8 +159,11 @@ pub fn read(package: &OdfPackage) -> Result<OdpDeck, String> {
             .attribute((NS_DRAW, "master-page-name"))
             .and_then(|name| sheet.master_pages.get(name).copied())
             .or(first_master);
-        if hyperlink_colors.is_none() {
-            hyperlink_colors = master.and_then(theme_hyperlinks);
+        if let Some(m) = master.filter(|_| hyperlink_colors.is_none()) {
+            if !themes_searched.contains(&m.id()) {
+                themes_searched.push(m.id());
+                hyperlink_colors = theme_hyperlinks(m);
+            }
         }
         let mut reader = SlideReader {
             sheet: &sheet,
@@ -163,6 +172,7 @@ pub fn read(package: &OdfPackage) -> Result<OdpDeck, String> {
             count: pages.len(),
             page_names: &page_names,
             budget: &mut budget,
+            visits: &mut visits,
             charts: &mut charts,
             next_id: 1,
             page_size: (width, height),
@@ -202,6 +212,8 @@ struct SlideReader<'a, 'r, 'p> {
     count: usize,
     page_names: &'r HashMap<String, usize>,
     budget: &'r mut usize,
+    /// Visits left of [`MAX_DECK_VISITS`].
+    visits: &'r mut usize,
     /// Chart objects read so far by package path (`None`: not a chart),
     /// so a chart a master shows on every slide is read once.
     charts: &'r mut HashMap<String, Option<pptx_model::ChartModel>>,
@@ -321,9 +333,10 @@ impl<'a, 'r, 'p> SlideReader<'a, 'r, 'p> {
                     link: None,
                     master: None,
                 };
-                let shown: Vec<Nd<'a>> = master
-                    .children()
-                    .filter(|n| n.is_element())
+                let children: Vec<Nd<'a>> = master.children().filter(|n| n.is_element()).collect();
+                self.visit(children.len())?;
+                let shown: Vec<Nd<'a>> = children
+                    .into_iter()
                     .filter(|child| {
                         let class = child.attribute((NS_PRESENTATION, "class")).unwrap_or("");
                         !is_master_template(class)
@@ -470,6 +483,7 @@ impl<'a, 'r, 'p> SlideReader<'a, 'r, 'p> {
         if depth > MAX_GROUP_DEPTH {
             return Err(invalid("drawing groups are nested too deeply"));
         }
+        self.visit(1)?;
         if node.tag_name().namespace() != Some(NS_DRAW) {
             return Ok(());
         }
@@ -506,6 +520,15 @@ impl<'a, 'r, 'p> SlideReader<'a, 'r, 'p> {
             }
             _ => {}
         }
+        Ok(())
+    }
+
+    /// Charge `count` object visits against the deck's bound.
+    fn visit(&mut self, count: usize) -> Result<(), String> {
+        *self.visits = self
+            .visits
+            .checked_sub(count)
+            .ok_or_else(|| "OpenDocument presentation exceeds the object limit".to_string())?;
         Ok(())
     }
 
@@ -1280,15 +1303,23 @@ fn clone_ctx<'a>(ctx: &ObjectContext<'a>) -> ObjectContext<'a> {
 /// from back to front; document order where it is absent or equal). An
 /// object without a z-index stays right after the object before it.
 fn stacking_order<'a>(nodes: Vec<Nd<'a>>) -> Vec<Nd<'a>> {
+    // A hyperlink (`draw:a`) stacks as the shape it wraps.
+    let z_index = |node: Nd<'a>| -> Option<u64> {
+        let shape = if xml::is(node, NS_DRAW, "a") {
+            node.children().find(|c| c.is_element())?
+        } else {
+            node
+        };
+        shape
+            .attribute((NS_DRAW, "z-index"))
+            .and_then(|v| v.trim().parse::<u64>().ok())
+    };
     let mut previous = 0u64;
     let mut keyed: Vec<(u64, usize, Nd<'a>)> = nodes
         .into_iter()
         .enumerate()
         .map(|(i, node)| {
-            let key = node
-                .attribute((NS_DRAW, "z-index"))
-                .and_then(|v| v.trim().parse::<u64>().ok())
-                .unwrap_or(previous);
+            let key = z_index(node).unwrap_or(previous);
             previous = key;
             (key, i, node)
         })
@@ -1738,6 +1769,29 @@ mod tests {
             labels(shape.text_body.as_ref().unwrap()),
             ["1.", "2.", "1.", "2.", "3.", "1."]
         );
+    }
+
+    #[test]
+    fn item_paragraphs_and_nested_continuations_keep_numbering() {
+        let styles = r#"<text:list-style style:name="L1"><text:list-level-style-number text:level="1" style:num-format="1" style:num-suffix="."/><text:list-level-style-number text:level="2" style:num-format="a" style:num-suffix=")"/></text:list-style>"#;
+        let body = r#"<draw:frame svg:width="10cm" svg:height="5cm"><draw:text-box><text:list text:style-name="L1"><text:list-item><text:p>A</text:p><text:p>A, continued</text:p><text:list xml:id="s"><text:list-item><text:p>a</text:p></text:list-item></text:list></text:list-item><text:list-item><text:p>B</text:p><text:list text:continue-list="s"><text:list-item><text:p>b</text:p></text:list-item></text:list></text:list-item><text:list-item><text:p>C</text:p><text:list><text:list-item><text:p>c</text:p></text:list-item></text:list></text:list-item></text:list></draw:text-box></draw:frame>"#;
+        let deck = deck(styles, "", "", &page(body)).unwrap();
+        let shape = shapes(&deck.slides[0])[0];
+        assert_eq!(
+            labels(shape.text_body.as_ref().unwrap()),
+            ["1.", "", "a)", "2.", "b)", "3.", "a)"]
+        );
+    }
+
+    #[test]
+    fn a_hyperlink_stacks_as_the_shape_it_wraps() {
+        let body = r#"<draw:a xlink:href="https://example.com/"><draw:rect draw:name="linked" draw:z-index="10" svg:width="1cm" svg:height="1cm"/></draw:a><draw:rect draw:name="plain" draw:z-index="1" svg:width="1cm" svg:height="1cm"/>"#;
+        let deck = deck("", "", "", &page(body)).unwrap();
+        let names: Vec<_> = shapes(&deck.slides[0])
+            .iter()
+            .map(|s| s.name.clone().unwrap())
+            .collect();
+        assert_eq!(names, ["plain", "linked"]);
     }
 
     #[test]

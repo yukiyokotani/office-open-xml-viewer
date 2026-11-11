@@ -43,8 +43,9 @@ pub fn resolve(file_entry_path: &str, reference: &str) -> Option<Target> {
     if without_fragment.is_empty() {
         return Some(Target::SameDocument { fragment });
     }
-    // Step 5/6: the IRI buffer and the file-entry directory prefix.
-    let mut buffer = without_fragment.to_string();
+    // Step 5/6: the IRI buffer and the file-entry directory prefix. The
+    // buffer is a borrowed slice advanced in place (no copy per step).
+    let mut buffer: &str = without_fragment;
     let mut prefix: Vec<String> = match file_entry_path.rfind('/') {
         Some(index) => file_entry_path[..index]
             .split('/')
@@ -55,12 +56,12 @@ pub fn resolve(file_entry_path: &str, reference: &str) -> Option<Target> {
     loop {
         // Step 7.
         if let Some(rest) = buffer.strip_prefix("./") {
-            buffer = rest.to_string();
+            buffer = rest;
             continue;
         }
         // Step 8.
         if buffer == "." {
-            buffer.clear();
+            buffer = "";
             break;
         }
         // Step 9: "..".
@@ -68,7 +69,7 @@ pub fn resolve(file_entry_path: &str, reference: &str) -> Option<Target> {
             if prefix.pop().is_none() {
                 return Some(Target::External);
             }
-            buffer.clear();
+            buffer = "";
             break;
         }
         // Step 10: "../".
@@ -76,7 +77,7 @@ pub fn resolve(file_entry_path: &str, reference: &str) -> Option<Target> {
             if prefix.pop().is_none() {
                 return Some(Target::External);
             }
-            buffer = rest.to_string();
+            buffer = rest;
             continue;
         }
         break;
@@ -138,6 +139,12 @@ mod tests {
             path: path.into(),
             fragment: None,
         })
+    }
+
+    #[test]
+    fn long_dot_segment_prefixes_resolve_in_linear_time() {
+        let href = format!("{}Pictures/a.png", "./".repeat(2_000_000));
+        assert_eq!(resolve("content.xml", &href), package("Pictures/a.png"));
     }
 
     #[test]

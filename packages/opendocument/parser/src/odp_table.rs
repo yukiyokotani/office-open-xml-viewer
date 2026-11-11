@@ -9,7 +9,7 @@ use crate::odp_style::{
 };
 use crate::odp_text::{self as text, ObjectStyles, TextEnv, TextPayload};
 use crate::odp_units::{color, length_emu};
-use crate::xml::{self, NS_FO, NS_STYLE, NS_TABLE, NS_TEXT};
+use crate::xml::{self, NS_FO, NS_STYLE, NS_TABLE};
 use pptx_model::{SlideElement, Stroke, TableCell, TableElement, TableRow};
 use std::collections::HashMap;
 
@@ -64,8 +64,8 @@ pub fn table<'a>(
     let row_count = rows_nodes.len();
     let mut rows = Vec::with_capacity(row_count);
     let mut cells_total = 0usize;
-    // One text payload for the whole table; each cell record is charged to
-    // it before the cell is read.
+    // One text payload for the whole table: the cells' text as it is read,
+    // and each cell record (borders, fill, strings) before it is kept.
     let payload = TextPayload::new();
     for (r, row) in rows_nodes.iter().enumerate() {
         let row_props = row
@@ -109,8 +109,7 @@ pub fn table<'a>(
                 if let Some(t) = template_style.and_then(|n| sheet.find(scope, "table-cell", n)) {
                     chain.push(t);
                 }
-                payload.charge(std::mem::size_of::<TableCell>())?;
-                cells.push(build_cell(
+                let mut built = build_cell(
                     sheet,
                     media,
                     cell,
@@ -123,7 +122,11 @@ pub fn table<'a>(
                     slide_count,
                     pages,
                     &payload,
-                )?);
+                )?;
+                let body = built.text_body.take();
+                payload.charge(text::record_bytes(&built)?)?;
+                built.text_body = body;
+                cells.push(built);
                 c += 1;
             }
         }
@@ -224,18 +227,21 @@ pub fn table<'a>(
     while cols.len() < ncols {
         cols.push(0);
     }
-    let known: i64 = cols.iter().sum();
+    // File lengths may be huge: sums and differences saturate.
+    let known: i64 = cols.iter().fold(0i64, |sum, w| sum.saturating_add(*w));
     let unknown = cols.iter().filter(|w| **w == 0).count() as i64;
     if unknown > 0 {
-        let share = ((placed.w.round() as i64 - known).max(0)) / unknown;
+        let share = ((placed.w.round() as i64).saturating_sub(known).max(0)) / unknown;
         for w in cols.iter_mut().filter(|w| **w == 0) {
             *w = share;
         }
     }
-    let known_h: i64 = rows.iter().map(|r| r.height).sum();
+    let known_h: i64 = rows
+        .iter()
+        .fold(0i64, |sum, r| sum.saturating_add(r.height));
     let unknown_h = rows.iter().filter(|r| r.height == 0).count() as i64;
     if unknown_h > 0 {
-        let share = ((placed.h.round() as i64 - known_h).max(0)) / unknown_h;
+        let share = ((placed.h.round() as i64).saturating_sub(known_h).max(0)) / unknown_h;
         for r in rows.iter_mut().filter(|r| r.height == 0) {
             r.height = share;
         }
@@ -545,10 +551,6 @@ fn build_cell<'a>(
             body.b_ins = v;
         }
     }
-    let has_text = cell
-        .children()
-        .any(|c| xml::is(c, NS_TEXT, "p") || xml::is(c, NS_TEXT, "list"));
-    let _ = has_text;
     Ok(TableCell {
         text_body: body,
         horz_overflow: None,
