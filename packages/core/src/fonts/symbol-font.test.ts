@@ -117,8 +117,9 @@ describe('symbolCmapEncoding', () => {
   });
 
   it('treats a Unicode cmap as drawing no symbol code', () => {
+    const latin = Array.from({ length: 0x7e - 0x20 + 1 }, (_, i) => 0x20 + i);
     expect(symbolCmapEncoding(symbolFixtureFontBytes({ cmap: 'unicode', first: 0x20, last: 0x7e })))
-      .toEqual(SYMBOL_FACE_UNICODE);
+      .toEqual({ ...SYMBOL_FACE_UNICODE, latin: symbolCodeSet(latin) });
     expect(symbolCmapEncoding(new Uint8Array(8))).toBeNull();
   });
 
@@ -148,19 +149,36 @@ describe('symbolEncodingOfFaces', () => {
     expect(symbolEncodingOfFaces([symbolFace('U+0-10FFFF')], 700, 'normal')).toBeUndefined();
     expect(symbolEncodingOfFaces([{ weight: 'normal', style: 'normal', unicodeRange: 'U+0-10FFFF' }], 400, 'normal'))
       .toBeUndefined();
+    // Only a condensed face carries the symbol cmap: normal-width text uses another face.
+    expect(symbolEncodingOfFaces([{ ...symbolFace('U+0-10FFFF'), stretch: 'condensed' }], 400, 'normal')).toBeUndefined();
+  });
+
+  it('looks past a later face that has no glyph for a bare code', () => {
+    // The later Unicode face maps only "B": "a" falls through to the symbol face.
+    const later = { weight: 'normal', style: 'normal', unicodeRange: 'U+0-10FFFF',
+      symbolEncoding: { ...SYMBOL_FACE_UNICODE, latin: symbolCodeSet([0x42]) } };
+    const encoding = symbolEncodingOfFaces([symbolFace('U+0-10FFFF'), later], 400, 'normal')!;
+    expect(symbolFontToUnicode('ab', 'Symbol', { encoding })).toBe('ab');
+    const shadowing = { ...later, symbolEncoding: { ...SYMBOL_FACE_UNICODE, latin: symbolCodeSet([0x61]) } };
+    expect(symbolFontToUnicode('a', 'Symbol', {
+      encoding: symbolEncodingOfFaces([symbolFace('U+0-10FFFF'), shadowing], 400, 'normal')!,
+    })).toBe(ch(0x3b1));
   });
 });
 
 describe('measureSymbolFaceEncoding', () => {
   // A context that draws the "Sym" face's codes 0x41..0x5A at width 2+code
-  // (both forms) and every other text at one width per character class.
+  // (both forms) and every other text at one width per character class. In
+  // a right-to-left direction a bare code is mirrored (another width), as
+  // "(" is, so the identity holds only when measured left to right.
   const context = (owned: (code: number) => boolean) => ({
     font: '10px sans-serif',
+    direction: 'rtl' as CanvasDirection,
     measureText(text: string) {
       const code = text.codePointAt(0)!;
       const symbolFace = this.font.includes('"Sym"');
       const base = code >= 0xf000 ? code - 0xf000 : code;
-      if (symbolFace && owned(base)) return { width: 2 + base };
+      if (symbolFace && owned(base)) return { width: 2 + base + (this.direction === 'rtl' && code < 0xf000 ? 1 : 0) };
       return { width: code >= 0xf000 ? 1 : text === 'i' ? 3 : 5 + (code % 7) };
     },
   });
@@ -172,7 +190,7 @@ describe('measureSymbolFaceEncoding', () => {
       kind: 'known', pua: symbolCodeSet([...letters, 0x7f, 0xad]), bare: symbolCodeSet(letters),
     });
     expect(measureSymbolFaceEncoding(ctx, '"Other"')).toEqual(SYMBOL_FACE_UNICODE);
-    expect(ctx.font).toBe('10px sans-serif');
+    expect([ctx.font, ctx.direction]).toEqual(['10px sans-serif', 'rtl']);
   });
 
   it('is inconclusive without a context or with one that measures nothing', () => {

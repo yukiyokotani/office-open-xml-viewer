@@ -146,7 +146,10 @@ export function symbolCmapEncoding(bytes: Uint8Array, faceIndex?: number): Symbo
     if (cmap < 0 || cmap + cmapLength > bytes.byteLength || cmapLength < 4) return null;
     const records = view.getUint16(cmap + 2);
     if (4 + records * 8 > cmapLength) return null;
-    const unicode: string[] = [];
+    // Per Unicode subtable: its PUA codes, and the bare codes it draws as the
+    // Unicode characters (Latin) they are (`latin`, used when several served
+    // faces share a family: such a face, not a later one, draws that code).
+    const unicode: { pua: string; latin: string }[] = [];
     let symbol: { pua: Set<number>; bare: Set<number> } | null = null;
     for (let index = 0; index < records; index++) {
       const record = cmap + 4 + index * 8;
@@ -160,7 +163,7 @@ export function symbolCmapEncoding(bytes: Uint8Array, faceIndex?: number): Symbo
       const codes = subtableCodes(view, cmap + relative, cmapLength - relative);
       if (!codes) return null;
       if (isUnicode) {
-        unicode.push(symbolCodeSet(codes.pua));
+        unicode.push({ pua: symbolCodeSet(codes.pua), latin: symbolCodeSet(codes.bare) });
         continue;
       }
       symbol ??= { pua: new Set(), bare: new Set() };
@@ -172,8 +175,8 @@ export function symbolCmapEncoding(bytes: Uint8Array, faceIndex?: number): Symbo
     // whose subtables disagree is not judged from its bytes: null, and the
     // caller measures it in its painting context instead.
     if (unicode.length > 0) {
-      if (symbol || unicode.some((set) => set !== unicode[0])) return null;
-      return Object.freeze({ kind: 'known', pua: unicode[0]!, bare: symbolCodeSet([]) });
+      if (symbol || unicode.some((set) => set.pua !== unicode[0]!.pua || set.latin !== unicode[0]!.latin)) return null;
+      return Object.freeze({ kind: 'known', pua: unicode[0]!.pua, bare: symbolCodeSet([]), latin: unicode[0]!.latin });
     }
     if (!symbol) return SYMBOL_FACE_UNICODE;
     return Object.freeze({
@@ -189,6 +192,8 @@ export function symbolCmapEncoding(bytes: Uint8Array, faceIndex?: number): Symbo
 /** The part of a 2D context the measurement needs. */
 export interface SymbolProbeContext {
   font: string;
+  direction?: CanvasDirection;
+  letterSpacing?: string;
   measureText(text: string): Pick<TextMetrics, 'width'> & Partial<Pick<TextMetrics,
     'actualBoundingBoxLeft' | 'actualBoundingBoxRight' | 'actualBoundingBoxAscent' | 'actualBoundingBoxDescent'>>;
 }
@@ -242,7 +247,14 @@ export function measureSymbolFaceEncoding(
 ): SymbolFaceEncoding {
   if (!context) return SYMBOL_FACE_UNKNOWN;
   const previous = context.font;
+  const previousDirection = context.direction;
+  const previousSpacing = context.letterSpacing;
   try {
+    // A bare code such as "(" is mirrored in a right-to-left context while
+    // its PUA form is not; spacing is no glyph property. Measure each alone,
+    // left to right, without spacing.
+    if (previousDirection !== undefined) context.direction = 'ltr';
+    if (previousSpacing !== undefined) context.letterSpacing = '0px';
     const prefix = `${style === 'italic' ? 'italic ' : ''}${weight} ${PROBE_PX}px `;
     const absent = `${prefix}"${ABSENT_FAMILY}"`;
     context.font = absent;
@@ -267,7 +279,11 @@ export function measureSymbolFaceEncoding(
   } catch {
     return SYMBOL_FACE_UNKNOWN;
   } finally {
-    try { context.font = previous; } catch { /* restored best-effort */ }
+    try {
+      context.font = previous;
+      if (previousDirection !== undefined) context.direction = previousDirection;
+      if (previousSpacing !== undefined) context.letterSpacing = previousSpacing;
+    } catch { /* restored best-effort */ }
   }
 }
 
@@ -383,7 +399,12 @@ export function createSymbolFaceOracle(
   return Object.freeze({
     encoding,
     segments(text: string, fontFamily: string | null | undefined, selection: SymbolFaceSelection) {
-      return symbolTextToUnicodeSegments(text, fontFamily, options(encoding(selection)));
+      const judged = encoding(selection);
+      const segments = symbolTextToUnicodeSegments(text, fontFamily, options(judged));
+      const drawsNone = judged.kind === 'known' && !/[^0]/u.test(judged.pua) && !/[^0]/u.test(judged.bare);
+      return drawsNone
+        ? segments.map((part) => (part.mapped ? { ...part, unicodeFace: true as const } : part))
+        : segments;
     },
   });
 }
@@ -399,21 +420,25 @@ export function symbolFaceKey(family: string, weight: number, style: 'normal' | 
  * §4.5, §5.3: faces whose `unicode-range` covers a scalar are tried, the
  * last-declared first, until one has a glyph for it).
  *   - A PUA code is owned when any covering face's cmap draws it.
- *   - A bare code is owned when the first covering face draws it as a symbol
- *     code. A Unicode face there may draw the bare code as a Latin letter; a
- *     symbol cmap cannot tell whether it has that letter, so this never
- *     looks past it (a missed later face converts the code: safe).
+ *   - A bare code is owned when the first covering face that has a glyph for
+ *     it draws it as a symbol code; a Unicode face that maps it draws the
+ *     Unicode character instead.
  * Undefined when no face matches the tuple exactly (matching then picks a
  * nearer face or synthesizes; the caller measures instead) or a matching
  * face's bytes were not read.
  */
 export function symbolEncodingOfFaces(
-  faces: readonly Readonly<{ weight: string; style: string; unicodeRange: string; symbolEncoding?: SymbolFaceEncoding }>[],
+  faces: readonly Readonly<{
+    weight: string; style: string; stretch?: string; unicodeRange: string; symbolEncoding?: SymbolFaceEncoding;
+  }>[],
   weight: number,
   style: 'normal' | 'italic',
 ): SymbolFaceEncoding | undefined {
+  // Text is requested at the normal width; a face of another stretch is
+  // matched only when the family has no normal one, which is left to measurement.
+  const normalWidth = (stretch: string | undefined) => !stretch || /^(?:normal|100%)$/iu.test(stretch.trim());
   const matching = faces.filter((face) => fontFaceWeightCovers(face.weight, weight)
-    && face.style.trim().toLowerCase() === style);
+    && face.style.trim().toLowerCase() === style && normalWidth(face.stretch));
   if (matching.length === 0) return undefined;
   const ranges: (readonly (readonly [number, number])[])[] = [];
   const encodings: Extract<SymbolFaceEncoding, { kind: 'known' }>[] = [];
@@ -429,7 +454,12 @@ export function symbolEncodingOfFaces(
     ranges[index]!.some(([lo, hi]) => lo <= scalar && scalar <= hi));
   for (let code = 0; code < 256; code++) {
     if (covering(0xf000 + code).some((encoding) => symbolCodeSetHas(encoding.pua, code))) pua.push(code);
-    if (symbolCodeSetHas(covering(code).at(-1)?.bare, code)) bare.push(code);
+    // The last-declared covering face that draws the bare code at all decides:
+    // as its symbol code (owned), or as the Unicode character (not owned).
+    for (const encoding of covering(code).reverse()) {
+      if (symbolCodeSetHas(encoding.bare, code)) { bare.push(code); break; }
+      if (symbolCodeSetHas(encoding.latin, code)) break;
+    }
   }
   return Object.freeze({ kind: 'known', pua: symbolCodeSet(pua), bare: symbolCodeSet(bare) });
 }

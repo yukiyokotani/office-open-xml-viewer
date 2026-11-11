@@ -1364,7 +1364,9 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
       const out: SymbolTextSegment[] = [];
       const push = (part: SymbolTextSegment) => {
         const last = out.at(-1);
-        if (last && last.mapped === part.mapped) out[out.length - 1] = { text: last.text + part.text, mapped: part.mapped };
+        if (last && last.mapped === part.mapped && last.unicodeFace === part.unicodeFace) {
+          out[out.length - 1] = { ...part, text: last.text + part.text };
+        }
         else if (part.text) out.push(part);
       };
       for (const character of request.text) {

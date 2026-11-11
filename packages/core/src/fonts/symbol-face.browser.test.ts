@@ -99,10 +99,11 @@ describe.skipIf(!existsSync(chromium.executablePath()))('symbol face measurement
       };
     });
     expect(result.installed).toEqual([{ text: '\uF061a', mapped: false }]);
-    expect(result.missing).toEqual([{ text: 'αα', mapped: true }]);
+    // An absent face draws no symbol code: converted text may keep its route.
+    expect(result.missing).toEqual([{ text: 'αα', mapped: true, unicodeFace: true }]);
     expect(result.missingHeart).toEqual(result.heartMonochrome
-      ? [{ text: '♥\uFE0E', mapped: true }] : [{ text: '\uF0A9', mapped: false }]);
+      ? [{ text: '♥\uFE0E', mapped: true, unicodeFace: true }] : [{ text: '\uF0A9', mapped: false }]);
     expect(result.thumbs).toEqual(result.thumbsMonochrome
-      ? [{ text: '\u{1F44D}\uFE0E', mapped: true }] : [{ text: '\uF043', mapped: false }]);
+      ? [{ text: '\u{1F44D}\uFE0E', mapped: true, unicodeFace: true }] : [{ text: '\uF043', mapped: false }]);
   });
 });

@@ -132,7 +132,7 @@ const LEGACY_LOOKUPS: ReadonlyMap<SymbolFontKey, Readonly<Record<number, string>
  *   - `unknown`: the face could not be judged; today's subset converts.
  */
 export type SymbolFaceEncoding =
-  | Readonly<{ kind: 'known'; pua: string; bare: string }>
+  | Readonly<{ kind: 'known'; pua: string; bare: string; latin?: string }>
   | Readonly<{ kind: 'unknown' }>;
 
 export const SYMBOL_FACE_UNKNOWN: SymbolFaceEncoding = Object.freeze({ kind: 'unknown' });
@@ -186,6 +186,13 @@ export interface SymbolTextSegment {
    * heart in Symbol). An unconverted segment keeps the symbol family.
    */
   readonly mapped: boolean;
+  /**
+   * Set on a converted segment when the selected face is known to draw no
+   * symbol code (missing, or Unicode-encoded such as Apple's Symbol): it has
+   * no symbol cmap to re-read the Unicode text, so a caller may keep that
+   * face's route for it instead of a generic one.
+   */
+  readonly unicodeFace?: true;
 }
 
 function convertCodePoint(

@@ -128,7 +128,7 @@ describe('resolveNumberingMarkerGeometry', () => {
       { numId: 1, level: 0, format: 'bullet', text: '\uF061\uF062', suff: 'tab', indentLeft: 0, tab: 36, fontFamily: 'Symbol' },
       { fontSizePt: 12, fonts: { ascii: 'Symbol', highAnsi: 'Symbol', eastAsia: 'Symbol', complexScript: 'Symbol' },
         weight: 400, style: 'normal', complexScript: false },
-      { authoredFirstIndentPt: 0, physicalIndentLeftPt: 0, tabStops: [], defaultTabPt: 36 }, service,
+      { authoredFirstIndentPt: 0, physicalIndentLeftPt: 0, tabStops: [], defaultTabPt: 36, baseRtl: false }, service,
     );
     expect(geometry.markerText).toBe('\uF061\u03b2');
     expect(requests.slice(0, 2)).toEqual([{ text: '\uF061', ascii: 'Symbol' }, { text: '\u03b2', ascii: null }]);
