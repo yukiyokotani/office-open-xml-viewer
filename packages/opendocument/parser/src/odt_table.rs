@@ -242,9 +242,20 @@ impl<'a> Reader<'a> {
         // notes, bookmarks and occurrence ids); the repetitions stream from
         // the row element, never expanded ahead of construction.
         for run in rows {
+            // The row's cell elements, found once for all its repetitions
+            // (other children are never visited again).
+            let cells: Vec<roxmltree::Node<'a, 'a>> = run
+                .node
+                .children()
+                .filter(|n| {
+                    xml::is(*n, NS_TABLE, "table-cell")
+                        || xml::is(*n, NS_TABLE, "covered-table-cell")
+                })
+                .collect();
             for _ in 0..run.repeat {
                 self.table_row(
                     run.node,
+                    &cells,
                     run.header,
                     &col_widths,
                     &columns,
@@ -274,6 +285,7 @@ impl<'a> Reader<'a> {
     fn table_row(
         &mut self,
         row: roxmltree::Node<'a, 'a>,
+        cell_nodes: &[roxmltree::Node<'a, 'a>],
         header: bool,
         col_widths: &[f64],
         columns: &[Column<'a>],
@@ -309,11 +321,8 @@ impl<'a> Reader<'a> {
             let mut cells: Vec<DocTableCell> = Vec::new();
             let mut column = 0usize;
             let mut skip = 0u32;
-            'cells: for cell in row.children().filter(|n| n.is_element()) {
+            'cells: for &cell in cell_nodes {
                 let covered = xml::is(cell, NS_TABLE, "covered-table-cell");
-                if !covered && !xml::is(cell, NS_TABLE, "table-cell") {
-                    continue;
-                }
                 let repeat = cell
                     .attribute((NS_TABLE, "number-columns-repeated"))
                     .and_then(|v| v.parse::<usize>().ok())

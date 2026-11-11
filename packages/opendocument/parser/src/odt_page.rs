@@ -1115,7 +1115,7 @@ impl<'a> Reader<'a> {
     /// The page background as a behind-text shape covering the page.
     fn page_background(&mut self, layout: &'a Layout) -> Result<Option<DocRun>, String> {
         let mut fill = match &layout.background {
-            Some(style) => self.background_fill(style),
+            Some(style) => self.background_fill(style)?,
             None => None,
         };
         if fill.is_none() {

@@ -81,8 +81,10 @@ pub(super) struct FontFaces {
     faces: HashMap<String, Face>,
     /// Interned property strings shared by every resolution that uses them.
     atoms: RefCell<HashSet<Rc<str>>>,
-    /// Embedded font files (§16.23 `svg:font-face-src`).
-    pub embedded: Vec<(String, String, &'static str)>,
+    /// Embedded font files (§16.23 `svg:font-face-src`), each package path
+    /// once; the family is the face's shared atom.
+    pub embedded: Vec<(Atom, String, &'static str)>,
+    embedded_paths: HashSet<String>,
 }
 
 /// An interned string: equal atoms are the same allocation, so cached run
@@ -165,12 +167,7 @@ impl FontFaces {
                     fragment: None,
                 }) = iri::resolve("content.xml", href)
                 {
-                    if package.contains(&path)
-                        && !self
-                            .embedded
-                            .iter()
-                            .any(|(_, existing, _)| *existing == path)
-                    {
+                    if package.contains(&path) && !self.embedded_paths.contains(&path) {
                         let style = match (
                             face.attribute((NS_SVG, "font-weight")).unwrap_or("normal"),
                             face.attribute((NS_SVG, "font-style")).unwrap_or("normal"),
@@ -180,7 +177,8 @@ impl FontFaces {
                             (_, "italic" | "oblique") => "italic",
                             _ => "regular",
                         };
-                        self.embedded.push((family.clone(), path, style));
+                        self.embedded_paths.insert(path.clone());
+                        self.embedded.push((value.family.clone(), path, style));
                     }
                 }
             }
@@ -263,26 +261,38 @@ impl Reader<'_> {
     /// package paths (DOCX reads a non-`.odttf` part as a plain font).
     pub(super) fn embedded_fonts(&mut self) -> Result<Vec<EmbeddedFont>, String> {
         let mut fonts = Vec::new();
-        for (family, path, style) in self.fonts.embedded.clone() {
-            let bytes = self
-                .package
-                .session()
-                .run_operation("odf-font", |operation| operation.read_bytes(&path))?;
-            self.charge_construction(bytes.len() + path.len() * 2 + family.len() + 64)?;
-            if !self.images.iter().any(|resource| resource.key == path) {
-                self.images.push(OwnedDocumentResource {
+        // Iterated by reference; every owned copy is charged before it is
+        // made, and each package path is retained once.
+        let faces = self.fonts;
+        // Keys already retained (pictures), copied once so the loop can charge.
+        let pictures: HashSet<String> = self.images.iter().map(|r| r.key.clone()).collect();
+        let mut retained: HashSet<&str> = HashSet::new();
+        let mut added = Vec::new();
+        for (family, path, style) in &faces.embedded {
+            self.charge_construction(
+                std::mem::size_of::<EmbeddedFont>() + 2 * path.len() + family.len() + 64,
+            )?;
+            if !pictures.contains(path) && retained.insert(path.as_str()) {
+                let bytes = self
+                    .package
+                    .session()
+                    .run_operation("odf-font", |operation| operation.read_bytes(path))?;
+                self.charge_resource(bytes.len() + 64)?;
+                added.push(OwnedDocumentResource {
                     key: path.clone(),
                     mime_type: "font/ttf".to_string(),
                     bytes,
                 });
             }
             fonts.push(EmbeddedFont {
-                font_name: family,
+                font_name: family.to_string(),
                 style: style.to_string(),
-                part_path: path,
+                part_path: path.clone(),
                 font_key: String::new(),
             });
         }
+        drop(retained);
+        self.images.extend(added);
         Ok(fonts)
     }
 }

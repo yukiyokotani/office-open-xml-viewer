@@ -216,7 +216,20 @@ impl<'a> Reader<'a> {
         node: roxmltree::Node<'a, 'a>,
         graphic: &Graphic<'a>,
         offset: (f64, f64),
-    ) -> Placement {
+    ) -> Result<Placement, String> {
+        // A contour polygon is held by the placement and copied into the
+        // anchor's acquisition: both copies are charged before parsing.
+        if let Some(points) = node
+            .children()
+            .find(|n| xml::is(*n, NS_DRAW, "contour-polygon"))
+            .and_then(|contour| contour.attribute((NS_DRAW, "points")))
+        {
+            let count = points.split_whitespace().count();
+            self.charge_construction(
+                2 * count * std::mem::size_of::<docx_model::AnchorPointWire>()
+                    + 2 * std::mem::size_of::<docx_model::AnchorPolygonWire>(),
+            )?;
+        }
         let anchor = node
             .attribute((NS_TEXT, "anchor-type"))
             .or_else(|| graphic.get(NS_TEXT, "anchor-type"))
@@ -303,7 +316,7 @@ impl<'a> Reader<'a> {
             },
             _ => AnchorAxisChoiceWire::Offset { value_pt: y },
         };
-        Placement {
+        Ok(Placement {
             inline: anchor == "as-char",
             horizontal: (horizontal_frame.into(), horizontal),
             vertical: (vertical_frame.into(), vertical),
@@ -314,7 +327,7 @@ impl<'a> Reader<'a> {
             z_order,
             allow_overlap: graphic.get(NS_LOEXT, "allow-overlap") != Some("false"),
             polygon: contour_polygon(node),
-        }
+        })
     }
 
     fn acquisition(
@@ -421,7 +434,7 @@ impl<'a> Reader<'a> {
     fn frame(&mut self, node: roxmltree::Node<'a, 'a>) -> Result<Option<DocRun>, String> {
         let graphic = self.graphic(node)?;
         let (width, height) = self.frame_size(node, &graphic);
-        let placement = self.placement(node, &graphic, (0.0, 0.0));
+        let placement = self.placement(node, &graphic, (0.0, 0.0))?;
         let (rotation, _) =
             transform_rotation(node.attribute((NS_DRAW, "transform")), width, height);
         if let Some(text_box) = node.children().find(|n| xml::is(*n, NS_DRAW, "text-box")) {
@@ -675,7 +688,7 @@ impl<'a> Reader<'a> {
         } else {
             height
         };
-        let fill = self.fill(graphic, true);
+        let fill = self.fill(graphic, true)?;
         let mut shape = ShapeRun {
             inline: placement.inline,
             width_pt: width,
@@ -748,7 +761,10 @@ impl<'a> Reader<'a> {
     }
 
     /// A page background's fill from its captured properties.
-    pub(super) fn background_fill(&mut self, style: &'a crate::style::Style) -> Option<ShapeFill> {
+    pub(super) fn background_fill(
+        &mut self,
+        style: &'a crate::style::Style,
+    ) -> Result<Option<ShapeFill>, String> {
         let graphic = Graphic {
             cascade: Cascade::new(vec![StyleRef::new(style)], "graphic-properties"),
         };
@@ -793,17 +809,34 @@ impl<'a> Reader<'a> {
 
     /// The area fill of a graphic style (§20.120 draw:fill and its
     /// companions), or of a frame's `fo:background-color`.
-    fn fill(&mut self, graphic: &Graphic<'a>, frame: bool) -> Option<ShapeFill> {
+    /// The fill of a graphic style. A gradient definition is shared, but each
+    /// fill owns its stops: they are charged before they are built.
+    fn fill(&mut self, graphic: &Graphic<'a>, frame: bool) -> Result<Option<ShapeFill>, String> {
         let color = |value: Option<&str>| value.and_then(|v| hex_color(v).ok());
-        match graphic.get(NS_DRAW, "fill") {
+        Ok(match graphic.get(NS_DRAW, "fill") {
             Some("none") => None,
             Some("solid") => {
                 color(graphic.get(NS_DRAW, "fill-color")).map(|color| ShapeFill::Solid { color })
             }
-            Some("gradient") => graphic
+            Some("gradient") => match graphic
                 .get(NS_DRAW, "fill-gradient-name")
                 .and_then(|name| self.defs.get("gradient", name))
-                .map(gradient),
+            {
+                Some(definition) => {
+                    let stops = definition
+                        .children()
+                        .filter(|n| xml::is(*n, NS_LOEXT, "gradient-stop"))
+                        .count()
+                        .max(3);
+                    self.charge_construction(
+                        std::mem::size_of::<ShapeFill>()
+                            + stops * (std::mem::size_of::<GradientStop>() + 8)
+                            + 64,
+                    )?;
+                    Some(gradient(definition))
+                }
+                None => None,
+            },
             Some("hatch") => {
                 let hatch = graphic
                     .get(NS_DRAW, "fill-hatch-name")
@@ -831,8 +864,16 @@ impl<'a> Reader<'a> {
                 let href = graphic
                     .get(NS_DRAW, "fill-image-name")
                     .and_then(|name| self.defs.get("fill-image", name))
-                    .and_then(|image| image.attribute((NS_XLINK, "href")))?;
-                let (path, mime) = self.package_image(href).ok()??;
+                    .and_then(|image| image.attribute((NS_XLINK, "href")));
+                let Some(href) = href else {
+                    return Ok(None);
+                };
+                let Some((path, mime)) = self.package_image(href)? else {
+                    return Ok(None);
+                };
+                self.charge_construction(
+                    std::mem::size_of::<ShapeFill>() + path.len() + mime.len() + 64,
+                )?;
                 let tile = (graphic.get(NS_STYLE, "repeat") == Some("repeat")).then(|| {
                     Box::new(ooxml_common::fill::TileInfo {
                         tx: None,
@@ -865,7 +906,7 @@ impl<'a> Reader<'a> {
             // Shapes default to LibreOffice's default graphic fill when the
             // style chain sets one.
             _ => color(graphic.get(NS_DRAW, "fill-color")).map(|color| ShapeFill::Solid { color }),
-        }
+        })
     }
 
     /// A drawing shape (§10.3, §10.6) as a DOCX shape with its geometry,
@@ -906,7 +947,7 @@ impl<'a> Reader<'a> {
         if let Some(offset) = group_offset {
             origin = (origin.0 + offset.0, origin.1 + offset.1);
         }
-        let mut placement = self.placement(node, &graphic, (0.0, 0.0));
+        let mut placement = self.placement(node, &graphic, (0.0, 0.0))?;
         placement.horizontal.1 = match placement.horizontal.1 {
             AnchorAxisChoiceWire::Offset { .. } => {
                 AnchorAxisChoiceWire::Offset { value_pt: origin.0 }
@@ -964,9 +1005,14 @@ impl<'a> Reader<'a> {
             }
             "polyline" | "polygon" => {
                 let view = view_box(node).unwrap_or((0.0, 0.0, width.max(1.0), height.max(1.0)));
-                let points: Vec<(f64, f64)> = node
-                    .attribute((NS_DRAW, "points"))
-                    .unwrap_or("")
+                let source = node.attribute((NS_DRAW, "points")).unwrap_or("");
+                // The point list and its commands, charged before they are
+                // built.
+                let count = source.split_whitespace().count() + 1;
+                self.charge_construction(
+                    count * (std::mem::size_of::<(f64, f64)>() + std::mem::size_of::<PathCmd>()),
+                )?;
+                let points: Vec<(f64, f64)> = source
                     .split_whitespace()
                     .filter_map(|pair| {
                         let (x, y) = pair.split_once(',')?;
@@ -1001,7 +1047,15 @@ impl<'a> Reader<'a> {
             "path" => {
                 let view = view_box(node).unwrap_or((0.0, 0.0, width.max(1.0), height.max(1.0)));
                 if let Some(d) = node.attribute((NS_SVG, "d")) {
-                    shape.subpaths = svg_path(d, view);
+                    // The parse holds at most one number per source byte.
+                    let scratch = (d.len() + 1) * std::mem::size_of::<(Option<char>, f64)>();
+                    self.charge_construction(scratch)?;
+                    let limit = self.construction_left() / std::mem::size_of::<PathCmd>();
+                    let parsed = svg_path(d, view, limit);
+                    self.release_scratch(scratch);
+                    shape.subpaths = parsed.ok_or_else(|| {
+                        "OpenDocument text exceeds the construction limit".to_string()
+                    })?;
                 }
             }
             "custom-shape" => {
@@ -1009,7 +1063,7 @@ impl<'a> Reader<'a> {
                     .children()
                     .find(|n| xml::is(*n, NS_DRAW, "enhanced-geometry"))
                 {
-                    self.enhanced_geometry(geometry, &graphic, &mut shape, width, height);
+                    self.enhanced_geometry(geometry, &graphic, &mut shape, width, height)?;
                 } else {
                     shape.preset_geometry = Some("rect".into());
                 }
@@ -1019,7 +1073,7 @@ impl<'a> Reader<'a> {
         // Fill and line.
         let closed = !matches!(name, "line" | "connector" | "measure" | "polyline");
         shape.fill = if closed {
-            self.fill(&graphic, false)
+            self.fill(&graphic, false)?
         } else {
             None
         };
@@ -1098,7 +1152,7 @@ impl<'a> Reader<'a> {
         shape: &mut ShapeRun,
         width: f64,
         height: f64,
-    ) {
+    ) -> Result<(), String> {
         let kind = node.attribute((NS_DRAW, "type")).unwrap_or("non-primitive");
         shape.flip_h = node.attribute((NS_DRAW, "mirror-horizontal")) == Some("true");
         shape.flip_v = node.attribute((NS_DRAW, "mirror-vertical")) == Some("true");
@@ -1109,6 +1163,22 @@ impl<'a> Reader<'a> {
             .filter_map(|v| v.parse::<f64>().ok())
             .collect();
         if let Some(path) = node.attribute((NS_DRAW, "enhanced-path")) {
+            // Scratch held while the path evaluates: its tokens (at most one
+            // per source byte, each a string), the equation table and the
+            // formula cache; released once the commands are built.
+            let equation_bytes: usize = node
+                .children()
+                .filter(|n| xml::is(*n, NS_DRAW, "equation"))
+                .map(|e| {
+                    e.attributes().map(|a| a.value().len()).sum::<usize>()
+                        + 3 * std::mem::size_of::<String>()
+                        + 64
+                })
+                .sum();
+            let scratch = (path.len() + 1) * (std::mem::size_of::<String>() + 8)
+                + path.len()
+                + 2 * equation_bytes;
+            self.charge_construction(scratch)?;
             let equations = node
                 .children()
                 .filter(|n| xml::is(*n, NS_DRAW, "equation"))
@@ -1127,13 +1197,17 @@ impl<'a> Reader<'a> {
                 has_fill: graphic.get(NS_DRAW, "fill") != Some("none"),
                 has_stroke: graphic.get(NS_DRAW, "stroke") != Some("none"),
             };
-            let path = geometry::evaluate(path, &geometry);
+            let limit = self.construction_left() / std::mem::size_of::<PathCmd>();
+            let path = geometry::evaluate(path, &geometry, limit);
+            self.release_scratch(scratch);
+            let path =
+                path.ok_or_else(|| "OpenDocument text exceeds the construction limit".to_string())?;
             if !path.subpaths.is_empty() {
                 shape.subpaths = path.subpaths;
                 if path.paint.iter().any(|p| p.fill.is_some() || !p.stroke) {
                     shape.subpath_paint = path.paint;
                 }
-                return;
+                return Ok(());
             }
         }
         shape.preset_geometry = Some(
@@ -1155,6 +1229,7 @@ impl<'a> Reader<'a> {
             }
             .to_string(),
         );
+        Ok(())
     }
 
     /// The line of a shape (§20.143 draw:stroke and companions).
@@ -1446,7 +1521,9 @@ fn gradient(node: roxmltree::Node<'_, '_>) -> ShapeFill {
 
 /// An SVG path (`svg:d`, §19.554) in the view box, normalized: absolute and
 /// relative M, L, H, V, C, S, Q, T, Z (arcs as lines).
-fn svg_path(d: &str, view: (f64, f64, f64, f64)) -> Vec<Vec<PathCmd>> {
+/// At most `max_commands` commands; `None` past that.
+fn svg_path(d: &str, view: (f64, f64, f64, f64), max_commands: usize) -> Option<Vec<Vec<PathCmd>>> {
+    let mut admitted = 0usize;
     let mut numbers: Vec<(Option<char>, f64)> = Vec::new();
     let mut current = String::new();
     let mut command: Option<char> = None;
@@ -1483,6 +1560,11 @@ fn svg_path(d: &str, view: (f64, f64, f64, f64)) -> Vec<Vec<PathCmd>> {
     let mut cmd = 'M';
     let mut index = 0;
     while index < numbers.len() {
+        // Each step adds at most one command.
+        admitted += 1;
+        if admitted > max_commands {
+            return None;
+        }
         if let Some(c) = numbers[index].0 {
             cmd = c;
             if matches!(c, 'Z' | 'z') {
@@ -1577,5 +1659,5 @@ fn svg_path(d: &str, view: (f64, f64, f64, f64)) -> Vec<Vec<PathCmd>> {
     if path.len() > 1 {
         paths.push(path);
     }
-    paths
+    Some(paths)
 }

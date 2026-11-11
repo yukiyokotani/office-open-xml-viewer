@@ -32,6 +32,9 @@ pub(super) struct Evaluator<'g> {
     depth: usize,
     /// Current parser recursion (equations, parentheses, arguments).
     nesting: usize,
+    /// Equations being evaluated: a reference back to one is a cycle and
+    /// reads as 0, so no equation is evaluated twice at once.
+    active: std::collections::HashSet<&'g str>,
 }
 
 impl<'g> Evaluator<'g> {
@@ -41,6 +44,7 @@ impl<'g> Evaluator<'g> {
             cache: HashMap::new(),
             depth: 0,
             nesting: 0,
+            active: std::collections::HashSet::new(),
         }
     }
 
@@ -70,9 +74,15 @@ impl<'g> Evaluator<'g> {
         if self.depth > MAX_DEPTH || self.cache.len() > MAX_EQUATIONS {
             return 0.0;
         }
-        let Some(formula) = self.geometry.equations.get(name).cloned() else {
+        // The formula is borrowed from the geometry (never copied per
+        // evaluation).
+        let geometry = self.geometry;
+        let Some((key, formula)) = geometry.equations.get_key_value(name) else {
             return 0.0;
         };
+        if !self.active.insert(key.as_str()) {
+            return 0.0;
+        }
         self.depth += 1;
         let mut parser = Parser {
             text: formula.as_bytes(),
@@ -80,6 +90,7 @@ impl<'g> Evaluator<'g> {
         };
         let value = parser.additive(self);
         self.depth -= 1;
+        self.active.remove(key.as_str());
         let value = if value.is_finite() { value } else { 0.0 };
         self.cache.insert(name.to_string(), value);
         value
@@ -346,6 +357,9 @@ struct Builder {
     stroke: bool,
     /// Sub-paths of the current set (one N-terminated group).
     group_start: usize,
+    /// Commands still admitted, and whether one was refused.
+    budget: usize,
+    over: bool,
 }
 
 impl Builder {
@@ -357,8 +371,22 @@ impl Builder {
         )
     }
 
+    /// One more command or paint entry within the evaluation's bound.
+    fn admit(&mut self) -> bool {
+        if self.budget == 0 {
+            self.over = true;
+            return false;
+        }
+        self.budget -= 1;
+        true
+    }
+
     fn finish_subpath(&mut self) {
         if self.current.len() > 1 {
+            if !self.admit() {
+                self.current.clear();
+                return;
+            }
             self.subpaths.push(std::mem::take(&mut self.current));
             self.paint.push(PathPaint {
                 fill_rule: None,
@@ -373,7 +401,9 @@ impl Builder {
     fn move_to(&mut self, p: (f64, f64)) {
         self.finish_subpath();
         let (x, y) = self.norm(p);
-        self.current.push(PathCmd::MoveTo { x, y });
+        if self.admit() {
+            self.current.push(PathCmd::MoveTo { x, y });
+        }
         self.point = p;
         self.start = p;
     }
@@ -383,7 +413,9 @@ impl Builder {
             self.move_to(self.point);
         }
         let (x, y) = self.norm(p);
-        self.current.push(PathCmd::LineTo { x, y });
+        if self.admit() {
+            self.current.push(PathCmd::LineTo { x, y });
+        }
         self.point = p;
     }
 
@@ -394,20 +426,24 @@ impl Builder {
         let (x1, y1) = self.norm(c1);
         let (x2, y2) = self.norm(c2);
         let (x, y) = self.norm(p);
-        self.current.push(PathCmd::CubicBezTo {
-            x1,
-            y1,
-            x2,
-            y2,
-            x,
-            y,
-        });
+        if self.admit() {
+            self.current.push(PathCmd::CubicBezTo {
+                x1,
+                y1,
+                x2,
+                y2,
+                x,
+                y,
+            });
+        }
         self.point = p;
     }
 
     fn close(&mut self) {
         if !self.current.is_empty() {
-            self.current.push(PathCmd::Close);
+            if self.admit() {
+                self.current.push(PathCmd::Close);
+            }
             self.point = self.start;
         }
     }
@@ -453,11 +489,14 @@ impl Builder {
     }
 }
 
-/// Evaluate an enhanced path (Table 10) into normalized commands.
-pub(super) fn evaluate(path: &str, geometry: &Geometry) -> Path {
+/// Evaluate an enhanced path (Table 10) into normalized commands, at most
+/// `max_commands` of them (commands and paint entries); `None` past that.
+pub(super) fn evaluate(path: &str, geometry: &Geometry, max_commands: usize) -> Option<Path> {
     let mut eval = Evaluator::new(geometry);
     let tokens = tokens(path);
     let mut builder = Builder {
+        budget: max_commands,
+        over: false,
         view_box: geometry.view_box,
         subpaths: Vec::new(),
         paint: Vec::new(),
@@ -636,10 +675,13 @@ pub(super) fn evaluate(path: &str, geometry: &Geometry) -> Path {
         }
     }
     builder.end_set();
-    Path {
+    if builder.over {
+        return None;
+    }
+    Some(Path {
         subpaths: builder.subpaths,
         paint: builder.paint,
-    }
+    })
 }
 
 #[cfg(test)]
@@ -659,6 +701,13 @@ mod tests {
             let mut eval = Evaluator::new(&geometry);
             assert_eq!(eval.parameter("?f0"), 0.0);
         }
+        // A cycle reads as 0 without re-entering the equation: a
+        // self-doubling reference stays linear.
+        let cyclic = geometry(&[("f", "?f+?f+1")], &[]);
+        assert_eq!(Evaluator::new(&cyclic).parameter("?f"), 1.0);
+        // The command bound refuses a path instead of building past it.
+        let empty = geometry(&[], &[]);
+        assert!(evaluate("M 0 0 L 1 1 2 2 3 3 Z N", &empty, 2).is_none());
         let geometry = geometry(&[("f0", "((1+2))*abs(-3)")], &[]);
         assert_eq!(Evaluator::new(&geometry).parameter("?f0"), 9.0);
     }
@@ -697,13 +746,13 @@ mod tests {
     #[test]
     fn evaluates_paths_into_normalized_commands() {
         let g = geometry(&[("f0", "21600")], &[]);
-        let path = evaluate("M 0 0 L ?f0 0 ?f0 21600 Z N", &g);
+        let path = evaluate("M 0 0 L ?f0 0 ?f0 21600 Z N", &g, usize::MAX).unwrap();
         assert_eq!(path.subpaths.len(), 1);
         match path.subpaths[0][2] {
             PathCmd::LineTo { x, y } => assert_eq!((x, y), (1.0, 1.0)),
             _ => panic!(),
         }
-        let ellipse = evaluate("U 10800 10800 10800 10800 0 360 Z N", &g);
+        let ellipse = evaluate("U 10800 10800 10800 10800 0 360 Z N", &g, usize::MAX).unwrap();
         assert_eq!(ellipse.subpaths.len(), 1);
         assert!(ellipse.subpaths[0].len() >= 5);
     }

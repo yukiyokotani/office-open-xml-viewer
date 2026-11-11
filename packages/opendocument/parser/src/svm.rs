@@ -179,7 +179,8 @@ fn read_map_mode(r: &mut Reader<'_>, current: Option<&MapMode>) -> Option<MapMod
 
 #[derive(Clone)]
 struct Font {
-    family: String,
+    /// Shared between the state stack's snapshots (PUSH copies the state).
+    family: std::rc::Rc<str>,
     height: f64,
     weight: u16,
     italic: bool,
@@ -267,7 +268,7 @@ pub fn to_svg(bytes: &[u8], max_svg_bytes: usize) -> Option<Converted> {
         text: 0,
         align: 0,
         font: Font {
-            family: String::new(),
+            family: std::rc::Rc::from(""),
             height: 0.0,
             weight: 5,
             italic: false,
@@ -722,7 +723,7 @@ fn read_font(r: &mut Reader<'_>) -> Option<Font> {
     let _ = version;
     r.p = end;
     Some(Font {
-        family,
+        family: family.into(),
         height,
         weight,
         italic: italic != 0,

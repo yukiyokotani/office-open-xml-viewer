@@ -690,7 +690,8 @@ impl<'a> Reader<'a> {
         self.charge_construction(
             std::mem::size_of::<Collected>()
                 + std::mem::size_of::<BodyElement>()
-                + 5 * mark.family.len(),
+                + 5 * mark.family.len()
+                + 2 * mark_asian.family.len(),
         )?;
         let mut mark_facts = mark.font_facts();
         mark_facts.font_family_east_asia = Some(mark_asian.family.to_string());
@@ -801,31 +802,36 @@ impl<'a> Reader<'a> {
             return Ok(None);
         }
         // Take the first `count` characters from the leading text runs.
+        // The whole leading runs move out in one drain; at most one more run
+        // splits.
         let mut remaining = count;
-        let mut cap_runs = Vec::new();
-        let index = 0;
-        while remaining > 0 && index < paragraph.runs.len() {
-            let DocRun::Text(text) = &mut paragraph.runs[index] else {
+        let mut whole = 0;
+        for run in &paragraph.runs {
+            let DocRun::Text(text) = run else {
                 break;
             };
             let chars = text.text.chars().count();
-            if chars <= remaining {
-                remaining -= chars;
-                cap_runs.push(paragraph.runs.remove(index));
-                continue;
+            if remaining == 0 || chars > remaining {
+                break;
             }
-            // The run splits in two: the text moves (no copy of it), the
-            // second run's properties are a charged copy.
-            self.charge_construction(text::run_copy_bytes(text))?;
-            let original = std::mem::take(&mut text.text);
-            let split: String = original.chars().take(remaining).collect();
-            let rest: String = original.chars().skip(remaining).collect();
-            drop(original);
-            let mut head = text.as_ref().clone();
-            head.text = split;
-            text.text = rest;
-            cap_runs.push(DocRun::Text(Box::new(head)));
-            remaining = 0;
+            remaining -= chars;
+            whole += 1;
+        }
+        let mut cap_runs: Vec<DocRun> = paragraph.runs.drain(..whole).collect();
+        if remaining > 0 {
+            if let Some(DocRun::Text(text)) = paragraph.runs.first_mut() {
+                // The run splits in two: the text moves (no copy of it), the
+                // second run's properties are a charged copy.
+                self.charge_construction(text::run_copy_bytes(text))?;
+                let original = std::mem::take(&mut text.text);
+                let split: String = original.chars().take(remaining).collect();
+                let rest: String = original.chars().skip(remaining).collect();
+                drop(original);
+                let mut head = text.as_ref().clone();
+                head.text = split;
+                text.text = rest;
+                cap_runs.push(DocRun::Text(Box::new(head)));
+            }
         }
         let size = paragraph.default_font_size.unwrap_or(12.0);
         let line = paragraph
@@ -840,15 +846,22 @@ impl<'a> Reader<'a> {
         let styled = attribute("style-name")
             .and_then(|name| self.sheet.find(self.scope, Family::Text, name))
             .map(|style| self.style_chain(style));
+        // The cap style's properties, resolved once for every cap run.
+        let styled = match styled {
+            Some(chain) => {
+                let contexts = vec![TextContext {
+                    styles: chain,
+                    parent: None,
+                    link: None,
+                }];
+                Some(self.run_properties(&contexts, 0, ScriptClass::Latin)?)
+            }
+            None => None,
+        };
         for run in &mut cap_runs {
             if let DocRun::Text(text) = run {
-                if let Some(chain) = &styled {
-                    let contexts = vec![TextContext {
-                        styles: chain.clone(),
-                        parent: None,
-                        link: None,
-                    }];
-                    let styled = self.run_properties(&contexts, 0, ScriptClass::Latin)?;
+                if let Some(styled) = &styled {
+                    self.charge_construction(styled.retained_estimate())?;
                     let mut replacement = styled.text_run();
                     replacement.text = std::mem::take(&mut text.text);
                     **text = replacement;
@@ -1312,6 +1325,15 @@ impl<'a> Reader<'a> {
     /// difference across building a story is what each copy of it costs.
     fn copyable_bytes(&self) -> usize {
         self.construction_bytes.saturating_sub(self.resource_bytes)
+    }
+
+    /// Returns scratch bytes charged for a transient buffer once it is
+    /// dropped (never below what was retained; an exhausted ledger stays
+    /// exhausted).
+    fn release_scratch(&mut self, bytes: usize) {
+        if self.construction_bytes <= MAX_CONSTRUCTION_BYTES {
+            self.construction_bytes = self.construction_bytes.saturating_sub(bytes);
+        }
     }
 
     /// What the construction budget still admits.
