@@ -517,6 +517,7 @@ impl<'a> Reader<'a> {
                 })
                 .filter(|name| !name.is_empty() && self.pages.has_master(name))
             {
+                let page_start = page_start(properties)?;
                 if self.has_body_content() {
                     let kind = self.pages.start_kind(master);
                     self.current_master = master.to_string();
@@ -524,7 +525,7 @@ impl<'a> Reader<'a> {
                         master: master.to_string(),
                         kind,
                         columns: self.pages.columns(master),
-                        page_start: None,
+                        page_start,
                         block: 0,
                     })?;
                 } else {
@@ -533,6 +534,7 @@ impl<'a> Reader<'a> {
                     if let Some(first) = self.sections.last_mut() {
                         first.master = master.to_string();
                         first.columns = self.pages.columns(master);
+                        first.page_start = page_start;
                     }
                 }
                 self.apply_page_geometry();

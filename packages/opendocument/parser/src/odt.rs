@@ -610,8 +610,12 @@ impl<'a> Reader<'a> {
         self.section_indent = (enclosing_indent.0 + indent.0, enclosing_indent.1 + indent.1);
         // A section with its own columns is a continuous DOCX section; the
         // content after it continues in the enclosing columns.
-        let sectioned = self.story == Story::Body && columns.is_some();
+        // A style that writes a single column sets it over enclosing columns
+        // too (§17.12).
         let enclosing_columns = self.sections.last().and_then(|s| s.columns.clone());
+        let sectioned = self.story == Story::Body
+            && (columns.is_some()
+                || (enclosing_columns.is_some() && properties.element("columns").is_some()));
         if sectioned {
             self.start_section(page::SectionStart {
                 master: self.current_master.clone(),
@@ -752,14 +756,7 @@ impl<'a> Reader<'a> {
         let mut page_break_before = false;
         if let Some(master) = master.filter(|name| !name.is_empty()) {
             if self.story == Story::Body && self.pages.has_master(master) {
-                // §20.328 style:page-number: a number restarts the count
-                // ("auto" continues it).
-                let page_start = xml::bounded_count(
-                    properties.get(NS_STYLE, "page-number"),
-                    i32::MAX as u64,
-                    "page number",
-                )?
-                .map(|start| start as i64);
+                let page_start = page_start(&properties)?;
                 if self.has_body_content() {
                     let kind = self.pages.start_kind(master);
                     self.current_master = master.to_string();
@@ -1926,6 +1923,18 @@ fn source_bytes(node: roxmltree::Node<'_, '_>) -> Result<usize, String> {
         sum = sum.saturating_add(own);
     }
     Ok(sum)
+}
+
+/// §20.328 style:page-number of a paragraph or table style that starts a
+/// page style: a number restarts the page count there ("auto" continues
+/// it).
+fn page_start(properties: &Cascade<'_>) -> Result<Option<i64>, String> {
+    Ok(xml::bounded_count(
+        properties.get(NS_STYLE, "page-number"),
+        i32::MAX as u64,
+        "page number",
+    )?
+    .map(|start| start as i64))
 }
 
 /// A non-negative integer of any length, saturating: for values that are

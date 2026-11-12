@@ -411,7 +411,9 @@ pub(super) enum Item {
     Ruby {
         base: String,
         text: String,
-        ruby_size: Option<f64>,
+        /// The ruby text's size: in points, or as a share of the base
+        /// text's size.
+        ruby_size: Option<(f64, bool)>,
     },
 }
 
@@ -735,9 +737,17 @@ impl<'a> Reader<'a> {
             .and_then(|n| n.attribute((NS_TEXT, "style-name")))
             .and_then(|name| self.find_style(Family::Text, name))
         {
-            Some(style) => Cascade::build(self.style_chain(style)?.to_vec(), TEXT)?
-                .get(NS_FO, "font-size")
-                .and_then(|v| length_pt(v).ok()),
+            Some(style) => {
+                let cascade = Cascade::build(self.style_chain(style)?.to_vec(), TEXT)?;
+                // A percentage refers to the parent style's size (§20.190),
+                // at the end of the chain to the base text's.
+                cascade
+                    .get(NS_FO, "font-size")
+                    .map(|_| match resolve_size(&cascade, "") {
+                        (_, Some(share)) => (share, true),
+                        (size, None) => (size, false),
+                    })
+            }
             None => None,
         };
         self.admit_chars(base.chars().count(), inline)?;
@@ -1147,7 +1157,11 @@ impl<'a> Reader<'a> {
                 run.text = base.clone();
                 run.ruby = Some(RubyAnnotation {
                     text: text.clone(),
-                    font_size_pt: ruby_size.unwrap_or(properties.size / 2.0),
+                    font_size_pt: match *ruby_size {
+                        Some((share, true)) => share * properties.size,
+                        Some((size, false)) => size,
+                        None => properties.size / 2.0,
+                    },
                     hps_raise_pt: None,
                     typography: None,
                 });

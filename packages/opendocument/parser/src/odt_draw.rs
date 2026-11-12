@@ -788,10 +788,15 @@ impl<'a> Reader<'a> {
             padding("right"),
             padding("bottom"),
         ];
-        let border = graphic
-            .get(NS_FO, "border")
-            .or_else(|| graphic.get(NS_FO, "border-top"))
-            .and_then(|value| parse_border(value, None));
+        // One border for the box: the first side that has one (the
+        // shorthand is written out as its sides).
+        let border = ["top", "left", "bottom", "right"]
+            .into_iter()
+            .find_map(|side| {
+                graphic
+                    .get(NS_FO, &format!("border-{side}"))
+                    .and_then(|value| parse_border(value, None))
+            });
         let border_width = border.as_ref().map_or(0.0, |b| b.width);
         let inner_width = (width - insets[0] - insets[2] - 2.0 * border_width).max(1.0);
         // The frame's paragraphs continue their property search in its
@@ -1045,6 +1050,8 @@ impl<'a> Reader<'a> {
             width,
             height,
         );
+        // The geometry of a line is relative to its untransformed box.
+        let box_origin = origin;
         if let Some(position) = translated {
             origin = position;
         }
@@ -1099,12 +1106,12 @@ impl<'a> Reader<'a> {
                 };
                 shape.subpaths = vec![vec![
                     PathCmd::MoveTo {
-                        x: n(x1, origin.0, width),
-                        y: n(y1, origin.1, height),
+                        x: n(x1, box_origin.0, width),
+                        y: n(y1, box_origin.1, height),
                     },
                     PathCmd::LineTo {
-                        x: n(x2, origin.0, width),
-                        y: n(y2, origin.1, height),
+                        x: n(x2, box_origin.0, width),
+                        y: n(y2, box_origin.1, height),
                     },
                 ]];
             }

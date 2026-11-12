@@ -1077,6 +1077,59 @@ fn shorthands_replace_inherited_sides_and_sections_inherit() {
 }
 
 #[test]
+fn single_column_sections_and_table_page_numbers() {
+    // §17.12: a section style that writes one column sets it inside a
+    // two-column page; the page's columns return after it.
+    let page = r##"><style:columns fo:column-count="2" fo:column-gap="12pt"/></style:page-layout-properties><style:header-style"##;
+    let automatic = r##"<style:style style:name="One" style:family="section"><style:section-properties><style:columns fo:column-count="1"/></style:section-properties></style:style><style:style style:name="T" style:family="table" style:master-page-name="Standard"><style:table-properties style:page-number="5"/></style:style><style:style style:name="Ruby" style:family="text" style:parent-style-name="RubyBase"><style:text-properties fo:font-size="50%"/></style:style>"##;
+    let styles = r##"<style:style style:name="RubyBase" style:family="text"><style:text-properties fo:font-size="20pt"/></style:style>"##;
+    let body = r##"<text:p>a</text:p><text:section text:name="s" text:style-name="One"><text:p>b</text:p></text:section><text:p><text:ruby><text:ruby-base>c</text:ruby-base><text:ruby-text text:style-name="Ruby">r</text:ruby-text></text:ruby></text:p><table:table table:style-name="T"><table:table-column/><table:table-row><table:table-cell><text:p>t</text:p></table:table-cell></table:table-row></table:table>"##;
+    let document = read_fixture(Fixture {
+        styles,
+        automatic,
+        page,
+        body,
+        ..Fixture::default()
+    });
+    let breaks: Vec<(Option<usize>, Option<i64>)> = document
+        .body
+        .iter()
+        .filter_map(|element| match element {
+            BodyElement::SectionBreak {
+                columns,
+                page_num_type,
+                ..
+            } => Some((
+                columns.as_ref().map(|c| c.count),
+                page_num_type.as_ref().and_then(|p| p.start),
+            )),
+            _ => None,
+        })
+        .collect();
+    // Two columns, one column (the section), two columns again, then the
+    // table's page style, whose page count restarts at 5 (§20.328).
+    assert_eq!(
+        breaks.iter().map(|b| b.0).collect::<Vec<_>>(),
+        [Some(2), None, Some(2)]
+    );
+    assert_eq!(
+        document
+            .section
+            .page_num_type
+            .as_ref()
+            .and_then(|p| p.start),
+        Some(5)
+    );
+    // A ruby text style's percentage refers to its parent style's size.
+    let ruby = paragraphs(&document.body)
+        .iter()
+        .flat_map(|p| text_runs(p))
+        .find_map(|run| run.ruby.as_ref())
+        .unwrap();
+    assert_eq!(ruby.font_size_pt, 10.0);
+}
+
+#[test]
 fn transforms_compose_in_order() {
     let corner = |transform: &str| {
         let body = format!(
