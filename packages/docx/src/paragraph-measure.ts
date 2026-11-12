@@ -799,7 +799,7 @@ export function measureParagraph(
 }
 
 /** A model source's paragraph that compresses justified spaces as Word's
- * mode 15 does (`__justifiedCompression`, set by the ODT reader for
+ * mode 15 does (`__justifiedCompression`, set by a model source for
  * LibreOffice's JustifyLinesWithShrinking); DOCX never sets it. */
 function producerJustifiedCompression(paragraph: Readonly<{ alignment?: string | null }>): boolean {
   const alignment = paragraph.alignment;
