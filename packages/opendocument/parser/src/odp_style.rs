@@ -148,6 +148,17 @@ pub type ListNumbers = std::cell::RefCell<
 
 impl<'a> Sheet<'a> {
     pub fn add_document(&mut self, root: Nd<'a>, scope: Scope) -> Result<(), String> {
+        for item in root
+            .descendants()
+            .filter(|n| xml::is(*n, NS_TEXT, "list-item"))
+        {
+            if item
+                .attribute((NS_TEXT, "style-override"))
+                .is_some_and(|v| v.len() > MAX_PROPERTY_VALUE_BYTES)
+            {
+                return Err(invalid("a list identifier exceeds the name limit"));
+            }
+        }
         for list in root.descendants().filter(|n| xml::is(*n, NS_TEXT, "list")) {
             // List identities are hashed for every numbered item and
             // continuation: bounded like any short name.
@@ -364,6 +375,35 @@ impl<'a> Props<'a> {
                 self.nodes.push(element);
             }
         }
+    }
+
+    /// A side property (`fo:padding-left`, …) with its shorthand: the
+    /// nearest element setting either wins (§16.2), the side before the
+    /// shorthand within one element.
+    pub fn side(&self, namespace: &str, side: &str, shorthand: &str) -> Option<&'a str> {
+        self.nodes.iter().find_map(|node| {
+            node.attribute((namespace, side))
+                .or_else(|| node.attribute((namespace, shorthand)))
+        })
+    }
+
+    /// The work of reading the named definitions a fill or line cascade
+    /// uses (gradients, opacity, hatches, fill images, dashes, markers),
+    /// in work units of 64 bytes of their markup.
+    pub fn definitions_cost(&self, sheet: &Sheet<'_>) -> usize {
+        [
+            ("fill-gradient-name", "gradient"),
+            ("opacity-name", "opacity"),
+            ("fill-hatch-name", "hatch"),
+            ("fill-image-name", "fill-image"),
+            ("stroke-dash", "stroke-dash"),
+            ("marker-start", "marker"),
+            ("marker-end", "marker"),
+        ]
+        .iter()
+        .filter_map(|(attribute, kind)| sheet.named(kind, self.get(NS_DRAW, attribute)?))
+        .map(|definition| 1 + definition.range().len() / 64)
+        .sum()
     }
 
     pub fn get(&self, namespace: &str, name: &str) -> Option<&'a str> {

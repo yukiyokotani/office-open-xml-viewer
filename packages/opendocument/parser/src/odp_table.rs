@@ -679,6 +679,7 @@ fn build_cell<'a>(
         slide_background: None,
     };
     let fill = if paint::has_fill_attribute(&graphic) {
+        payload.step(graphic.definitions_cost(sheet))?;
         paint::fill(&graphic, &mut paint_ctx, (0.0, 0.0))
     } else {
         paint::background_color(&cell_props).map(|c| pptx_model::Fill::Solid { color: c })
@@ -750,8 +751,7 @@ fn build_cell<'a>(
         // graphic padding the text frame read.
         let padding = |side: &str| {
             cell_props
-                .get(NS_FO, side)
-                .or_else(|| cell_props.get(NS_FO, "padding"))
+                .side(NS_FO, side, "padding")
                 .and_then(length_emu)
                 .map(|v| v.round() as i64)
         };

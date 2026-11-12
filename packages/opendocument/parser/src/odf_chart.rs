@@ -330,6 +330,26 @@ impl LocalTable {
                     return Err("OpenDocument chart exceeds the data table limit".into());
                 }
             }
+            // §19.681 table:number-rows-repeated: each repeat is a row of
+            // its own, charged before it is copied.
+            let rows_repeat = row
+                .attribute((NS_TABLE, "number-rows-repeated"))
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(1)
+                .clamp(1, MAX_LOCAL_CELLS);
+            if rows_repeat > 1 {
+                let row_bytes = cells.iter().fold(0usize, |sum, cell| {
+                    sum.saturating_add(POINT_BYTES)
+                        .saturating_add(owned_text_len(cell))
+                });
+                for _ in 1..rows_repeat {
+                    count = count.saturating_add(cells.len().max(1));
+                    if count > MAX_LOCAL_CELLS || !budget.charge(row_bytes.max(1)) {
+                        return Err("OpenDocument chart exceeds the data table limit".into());
+                    }
+                    table.cells.push(cells.clone());
+                }
+            }
             table.cells.push(cells);
         }
         Ok(table)

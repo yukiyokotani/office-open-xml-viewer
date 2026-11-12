@@ -553,13 +553,30 @@ fn collect_list<'a>(
         let start_value = item
             .attribute((NS_TEXT, "start-value"))
             .and_then(|v| v.parse().ok());
+        // §19.881 text:style-override: the item (and its sub-lists) use
+        // that list style instead of the list's.
+        let overridden;
+        let inner = match item
+            .attribute((NS_TEXT, "style-override"))
+            .and_then(|name| instances.sheet.list(instances.scope, name))
+        {
+            Some(style) => {
+                overridden = ListContext {
+                    style: Some(item),
+                    numbering_style: Some(style),
+                    ..inner.clone()
+                };
+                &overridden
+            }
+            None => &inner,
+        };
         for block in item.children() {
             instances.payload.step(1)?;
             if !block.is_element() {
                 continue;
             }
             if xml::is(block, NS_TEXT, "list") {
-                collect_list(block, &inner, out, instances, depth + 1)?;
+                collect_list(block, inner, out, instances, depth + 1)?;
                 first = false;
             } else if xml::is(block, NS_TEXT, "p") || xml::is(block, NS_TEXT, "h") {
                 push_block(
@@ -590,9 +607,8 @@ fn collect_list<'a>(
 pub fn body_frame(graphic: &Props<'_>) -> TextBody {
     let inset = |name: &str| {
         graphic
-            .get(NS_FO, name)
+            .side(NS_FO, name, "padding")
             .and_then(length_emu)
-            .or_else(|| graphic.get(NS_FO, "padding").and_then(length_emu))
             .unwrap_or(0.0)
             .round() as i64
     };
@@ -684,7 +700,11 @@ fn resolve_list_style<'a>(
     named: Option<Nd<'a>>,
     styles: &[Nd<'a>],
 ) -> Option<Nd<'a>> {
-    if let Some(name) = named.and_then(|l| l.attribute((NS_TEXT, "style-name"))) {
+    // A list names its style; an overriding list item names its own.
+    if let Some(name) = named.and_then(|l| {
+        l.attribute((NS_TEXT, "style-name"))
+            .or_else(|| l.attribute((NS_TEXT, "style-override")))
+    }) {
         if let Some(found) = sheet.list(scope, name) {
             return Some(found);
         }
