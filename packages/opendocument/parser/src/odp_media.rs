@@ -8,6 +8,10 @@ use crate::iri::{self, Target};
 use crate::package::OdfPackage;
 use std::collections::HashMap;
 
+/// The resource namespace of generated pictures (hatches); package items
+/// in it are not admitted.
+const GENERATED_PREFIX: &str = "odp-generated/";
+
 /// Implementation bound on the header bytes read to size an image.
 const MAX_HEADER_BYTES: usize = 64 * 1024 * 1024;
 /// Implementation bound on what an opened deck retains: the slide model
@@ -103,7 +107,12 @@ impl<'p> Media<'p> {
         if let Some(resource) = self.admitted.get(&path) {
             return Some((path, resource.clone()));
         }
-        if self.failed.contains(&path) || !self.package.contains(&path) {
+        // The generated-resource namespace is reserved: a package item named
+        // into it is never admitted, so it cannot be confused with one.
+        if path.starts_with(GENERATED_PREFIX)
+            || self.failed.contains(&path)
+            || !self.package.contains(&path)
+        {
             return None;
         }
         match self.read_resource(&path) {
@@ -161,7 +170,7 @@ impl<'p> Media<'p> {
         let svg = make()?;
         self.charge(svg.len().saturating_add(description.len()))
             .ok()?;
-        let key = format!("odp-generated/{kind}-{}.svg", self.generated.len());
+        let key = format!("{GENERATED_PREFIX}{kind}-{}.svg", self.generated.len());
         let resource = Resource {
             mime: "image/svg+xml",
             pixels: None,

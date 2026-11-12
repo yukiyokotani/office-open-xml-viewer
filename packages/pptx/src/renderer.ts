@@ -5595,11 +5595,25 @@ export function renderTextBody(
       // content height it tries these (font, spacing) levels in order and
       // keeps the first that fits, else the last. The spacing factor scales
       // single/proportional line heights and paragraph spacing.
-      // The content must fit the frame both ways (ODF §20.360): with
-      // fo:wrap-option="no-wrap" a line may also overflow the width.
+      // The content must fit the frame both ways (ODF §20.360): a line may
+      // overflow the width (no-wrap text, or an unbreakable piece wider
+      // than the column), and with several text columns the height that
+      // must fit is each column's share as the lines are distributed below.
       const available = Math.max(0, bh - tPad - bPad);
+      const heightOverflows = (lines: LineEntry[], height: number): boolean => {
+        if (numCol <= 1 || height <= available) return height > available;
+        const perColumn = Math.ceil(lines.length / numCol);
+        for (let start = 0; start < lines.length; start += perColumn) {
+          let columnHeight = 0;
+          for (const entry of lines.slice(start, start + perColumn)) {
+            columnHeight += entry.topGapPx + entry.linePx;
+          }
+          if (columnHeight > available + 0.5) return true;
+        }
+        return false;
+      };
       const overflows = (lines: LineEntry[], height: number) =>
-        height > available || (!doWrap && lines.some((entry) => lineOverflowsWidth(ctx, entry)));
+        heightOverflows(lines, height) || lines.some((entry) => lineOverflowsWidth(ctx, entry));
       if (overflows(allLines, requiredHeight)) {
         for (const [font, spacing] of LIBREOFFICE_SHRINK_LEVELS) {
           ({ allLines, requiredHeight } = layoutAt(font, spacing));

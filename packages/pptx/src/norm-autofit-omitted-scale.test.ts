@@ -53,9 +53,9 @@ function body(overrides: Partial<TextBody> = {}): TextBody {
   } as TextBody;
 }
 
-function paintedSizes(text: TextBody, boxHeight: number): number[] {
+function paintedSizes(text: TextBody, boxHeight: number, boxWidth = 400): number[] {
   const { ctx, fonts } = context();
-  renderTextBody(ctx, text, 0, 0, 400, boxHeight, SCALE);
+  renderTextBody(ctx, text, 0, 0, boxWidth, boxHeight, SCALE);
   return fonts.map((font) => Number(/([\d.]+)px/.exec(font)?.[1]));
 }
 
@@ -80,6 +80,22 @@ describe('normAutofit without stored fontScale (PowerPoint PDF controls)', () =>
     expect(paintedSizes(body({ shrinkOnOverflow: true }), 140)).toEqual([24, 24, 24]);
     expect(paintedSizes(body({ shrinkOnOverflow: true }), 80)).toEqual([24, 24, 24]);
     expect(paintedSizes(body({ shrinkOnOverflow: true }), 60)).toEqual([20.4, 20.4, 20.4]);
+  });
+
+  it('shrink-to-fit fits the text columns, not one column', () => {
+    // 86.4 pt in one column overflows 60 pt; two columns hold two lines
+    // (57.6 pt) and one, so nothing shrinks.
+    const text = body({ shrinkOnOverflow: true, numCol: 2, spcCol: 0 });
+    expect(paintedSizes(text, 60)).toEqual([24, 24, 24]);
+  });
+
+  it('shrink-to-fit shrinks wrapped text wider than its box', () => {
+    // A 9.6 pt wide box: no single 24 pt glyph (13.2 pt) fits, however the
+    // line breaks; at the 0.7 level (16.8 pt, 9.24 pt) it does.
+    const text = body({ shrinkOnOverflow: true, wrap: 'square' });
+    const sizes = paintedSizes(text, 2000, 9.6);
+    expect(sizes.length).toBeGreaterThan(0);
+    expect(new Set(sizes.map((s) => Math.round(s * 10) / 10))).toEqual(new Set([16.8]));
   });
 
   it('uses a stored scale even when it does not match the content', () => {

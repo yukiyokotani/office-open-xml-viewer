@@ -52,9 +52,12 @@ struct ChartBudget {
 
 impl ChartBudget {
     fn new() -> Self {
+        Self::with_bytes(MAX_CHART_BYTES)
+    }
+    fn with_bytes(bytes: usize) -> Self {
         Self {
             points: std::cell::Cell::new(MAX_CHART_POINTS),
-            bytes: std::cell::Cell::new(MAX_CHART_BYTES),
+            bytes: std::cell::Cell::new(bytes),
             exhausted: std::cell::Cell::new(false),
         }
     }
@@ -189,11 +192,54 @@ pub fn read_chart_object(
     read_chart_document(&content, styles.as_deref(), resolver)
 }
 
+/// [`read_chart_object`] within a caller's cumulative work budget (bytes):
+/// the parts' text and every byte the chart reader charges are taken from
+/// `work` before they are processed, so many charts together are bounded
+/// as well as each one.
+pub fn read_chart_object_within(
+    package: &OdfPackage,
+    object_dir: &str,
+    resolver: Option<&dyn RangeResolver>,
+    work: &std::cell::Cell<usize>,
+) -> Result<Option<ChartModel>, String> {
+    let exceeded = || "OpenDocument charts exceed the deck chart work limit".to_string();
+    let dir = object_dir.trim_start_matches("./").trim_end_matches('/');
+    let content_path = format!("{dir}/content.xml");
+    if !package.contains(&content_path) {
+        return Ok(None);
+    }
+    let content = package.read_text(&content_path)?;
+    let styles_path = format!("{dir}/styles.xml");
+    let styles = if package.contains(&styles_path) {
+        Some(package.read_text(&styles_path)?)
+    } else {
+        None
+    };
+    let parse = content
+        .len()
+        .saturating_add(styles.as_ref().map_or(0, String::len));
+    work.set(work.get().checked_sub(parse).ok_or_else(exceeded)?);
+    let budget = ChartBudget::with_bytes(MAX_CHART_BYTES.min(work.get()));
+    let start = budget.bytes.get();
+    let read = read_chart_with(&content, styles.as_deref(), resolver, &budget);
+    work.set(work.get() - (start - budget.bytes.get()));
+    read
+}
+
 /// Read a chart from the object's `content.xml` (and `styles.xml`) text.
 pub fn read_chart_document(
     content: &str,
     styles: Option<&str>,
     resolver: Option<&dyn RangeResolver>,
+) -> Result<Option<ChartModel>, String> {
+    read_chart_with(content, styles, resolver, &ChartBudget::new())
+}
+
+fn read_chart_with(
+    content: &str,
+    styles: Option<&str>,
+    resolver: Option<&dyn RangeResolver>,
+    budget: &ChartBudget,
 ) -> Result<Option<ChartModel>, String> {
     let content_doc = xml::parse(content)?;
     let styles_doc = match styles {
@@ -229,8 +275,7 @@ pub fn read_chart_document(
     else {
         return Ok(None);
     };
-    let budget = ChartBudget::new();
-    let local = LocalTable::read(chart, &budget)?;
+    let local = LocalTable::read(chart, budget)?;
     budget.check()?;
     let reader = Reader {
         store: &store,
@@ -253,7 +298,7 @@ struct Reader<'a> {
     faces: &'a HashMap<String, String>,
     local: LocalTable,
     resolver: Option<&'a dyn RangeResolver>,
-    budget: ChartBudget,
+    budget: &'a ChartBudget,
     /// `draw:stroke-dash` definitions (§16.41) as DrawingML presets.
     dashes: HashMap<String, &'static str>,
 }
@@ -614,7 +659,7 @@ impl Reader<'_> {
     /// A text element's text, charged to the chart's budget (empty once
     /// the budget is exhausted; the chart then fails).
     fn text(&self, node: roxmltree::Node<'_, '_>) -> String {
-        chart_text(node, &self.budget).unwrap_or_default()
+        chart_text(node, self.budget).unwrap_or_default()
     }
 
     /// A copy of a range's texts (a series' own categories), charged first.
@@ -638,12 +683,12 @@ impl Reader<'_> {
                 break;
             }
             let resolved = if local_first {
-                self.local.range(part, &self.budget)
+                self.local.range(part, self.budget)
             } else {
                 self.resolver
                     .and_then(|r| r.cells(part))
                     .map(|cells| {
-                        let cached = self.local.cached(part, &self.budget);
+                        let cached = self.local.cached(part, self.budget);
                         cells
                             .into_iter()
                             .enumerate()
@@ -671,8 +716,8 @@ impl Reader<'_> {
                             })
                             .collect()
                     })
-                    .or_else(|| self.local.cached(part, &self.budget))
-                    .or_else(|| self.local.range(part, &self.budget))
+                    .or_else(|| self.local.cached(part, self.budget))
+                    .or_else(|| self.local.range(part, self.budget))
             };
             out.extend(resolved.unwrap_or_default());
             if out.len() > MAX_POINTS {

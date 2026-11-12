@@ -52,6 +52,10 @@ const MAX_GROUP_DEPTH: usize = 64;
 /// Implementation bound on the drawing-object nodes the whole deck visits
 /// (master objects once per slide that shows them, empty ones included).
 const MAX_DECK_VISITS: usize = 64_000_000;
+/// Implementation bound on the bytes all embedded charts of the deck read
+/// and expand together (their parts' text and every record their readers
+/// charge); each distinct chart is read once.
+const MAX_DECK_CHART_WORK: usize = 1024 * 1024 * 1024;
 /// Implementation bound on the slides of a deck (the PPTX bootstrap limit).
 const MAX_SLIDES: usize = 10_000;
 
@@ -170,6 +174,7 @@ pub fn read(package: &OdfPackage) -> Result<OdpDeck, String> {
     let mut budget = MAX_DECK_ELEMENTS;
     let mut visits = MAX_DECK_VISITS;
     let text_work = std::cell::Cell::new(text::MAX_DECK_TEXT_WORK);
+    let chart_work = std::cell::Cell::new(MAX_DECK_CHART_WORK);
     let mut master_frames = HashMap::new();
     let mut marker_paths = HashMap::new();
     // Masters whose theme was already searched (one scan each).
@@ -199,6 +204,7 @@ pub fn read(package: &OdfPackage) -> Result<OdpDeck, String> {
             budget: &mut budget,
             visits: &mut visits,
             text_work: &text_work,
+            chart_work: &chart_work,
             master_frames: &mut master_frames,
             charts: &mut charts,
             slide_model: MAX_SLIDE_MODEL_BYTES,
@@ -271,6 +277,8 @@ struct SlideReader<'a, 'r, 'p> {
     visits: &'r mut usize,
     /// Text work left of `odp_text::MAX_DECK_TEXT_WORK`.
     text_work: &'r std::cell::Cell<usize>,
+    /// Chart reading work left of [`MAX_DECK_CHART_WORK`] (bytes).
+    chart_work: &'r std::cell::Cell<usize>,
     /// Each master's presentation frames by class, for placeholders that
     /// take their placement from the master (indexed once per master).
     master_frames: &'r mut HashMap<roxmltree::NodeId, HashMap<&'a str, Nd<'a>>>,
@@ -1280,10 +1288,14 @@ impl<'a, 'r, 'p> SlideReader<'a, 'r, 'p> {
             let cached = match self.charts.get(&path) {
                 Some(found) => found.clone(),
                 None => {
-                    let read =
-                        crate::odf_chart::read_chart_object(self.media.package(), &path, None)
-                            .ok()
-                            .flatten();
+                    let read = crate::odf_chart::read_chart_object_within(
+                        self.media.package(),
+                        &path,
+                        None,
+                        self.chart_work,
+                    )
+                    .ok()
+                    .flatten();
                     // The cached model is retained for the whole read.
                     if let Some(model) = &read {
                         self.media.charge(chart_bytes(model)?)?;
@@ -1922,6 +1934,16 @@ mod tests {
     /// "Default" master page), `automatic` (content automatic styles) and
     /// the `pages` (draw:page elements).
     fn deck(styles: &str, master: &str, automatic: &str, pages: &str) -> Result<OdpDeck, String> {
+        deck_with(styles, master, automatic, pages, &[])
+    }
+
+    fn deck_with(
+        styles: &str,
+        master: &str,
+        automatic: &str,
+        pages: &str,
+        extra: &[(&str, &[u8])],
+    ) -> Result<OdpDeck, String> {
         let styles_xml = format!(
             r##"<office:document-styles {NS} office:version="1.3"><office:styles>{styles}</office:styles><office:automatic-styles><style:page-layout style:name="pm1"><style:page-layout-properties fo:page-width="28cm" fo:page-height="21cm"/></style:page-layout></office:automatic-styles><office:master-styles><style:master-page style:name="Default" style:page-layout-name="pm1">{master}</style:master-page></office:master-styles></office:document-styles>"##
         );
@@ -1933,10 +1955,11 @@ mod tests {
             ("styles.xml", styles_xml),
             ("content.xml", content),
         ];
-        let files: Vec<(&str, &[u8])> = files
+        let mut files: Vec<(&str, &[u8])> = files
             .iter()
             .map(|(name, body)| (*name, body.as_bytes()))
             .collect();
+        files.extend(extra.iter().copied());
         let package = OdfPackage::open(
             package_bytes(ODP, &files),
             OoxmlFormat::Pptx,
@@ -2205,6 +2228,58 @@ mod tests {
         );
         let error = deck("", "", "", &page(&body)).err().unwrap();
         assert!(error.contains("text limit"), "{error}");
+    }
+
+    #[test]
+    fn package_items_cannot_take_the_generated_namespace() {
+        // A package picture named like a generated hatch is not admitted, so
+        // it can never stand in for (or be replaced by) a generated one.
+        let svg: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"/>"#;
+        let styles = r##"<draw:hatch draw:name="h1" draw:style="single" draw:color="#000000" draw:distance="0.1cm" draw:rotation="0"/><style:style style:name="gr1" style:family="graphic"><style:graphic-properties draw:fill="hatch" draw:fill-hatch-name="h1"/></style:style>"##;
+        let body = r#"<draw:frame svg:width="2cm" svg:height="2cm"><draw:image xlink:href="odp-generated/hatch-0.svg"/></draw:frame><draw:rect draw:style-name="gr1" svg:width="5cm" svg:height="5cm"/>"#;
+        let deck = deck_with(
+            styles,
+            "",
+            "",
+            &page(body),
+            &[("odp-generated/hatch-0.svg", svg)],
+        )
+        .unwrap();
+        let slide0 = model(&deck, 0);
+        assert!(!slide0
+            .elements
+            .iter()
+            .any(|e| matches!(e, SlideElement::Picture(_))));
+        assert_eq!(deck.converted.len(), 1);
+        assert!(matches!(shapes(&slide0)[0].fill, Some(Fill::Image { .. })));
+    }
+
+    #[test]
+    fn chart_reading_shares_one_deck_budget() {
+        let chart = r##"<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:chart="urn:oasis:names:tc:opendocument:xmlns:chart:1.0" office:version="1.3"><office:body><office:chart><chart:chart chart:class="chart:bar"/></office:chart></office:body></office:document-content>"##;
+        let files = [
+            ("META-INF/manifest.xml", manifest(ODP, "")),
+            ("Object 1/content.xml", chart.to_string()),
+        ];
+        let files: Vec<(&str, &[u8])> = files.iter().map(|(n, b)| (*n, b.as_bytes())).collect();
+        let package = OdfPackage::open(
+            package_bytes(ODP, &files),
+            OoxmlFormat::Pptx,
+            PackageLimits::default(),
+            &MEDIA_TYPES,
+        )
+        .unwrap();
+        let work = std::cell::Cell::new(chart.len() * 2 + 1);
+        for _ in 0..2 {
+            assert!(
+                crate::odf_chart::read_chart_object_within(&package, "Object 1", None, &work)
+                    .is_ok()
+            );
+        }
+        assert!(work.get() <= 1);
+        assert!(
+            crate::odf_chart::read_chart_object_within(&package, "Object 1", None, &work).is_err()
+        );
     }
 
     #[test]
