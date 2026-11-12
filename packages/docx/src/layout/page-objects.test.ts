@@ -26,17 +26,19 @@ const PNG = Uint8Array.from(Buffer.from(
 ));
 const encoder = new TextEncoder();
 
-type Box = Readonly<{ x: number; y: number; w: number; h: number; id: number; alignBottom?: boolean }>;
+type Box = Readonly<{ x: number; y: number; w: number; h: number; id: number; alignBottom?: boolean; columnRight?: boolean }>;
 const DEFAULT_BOX: Box = { x: 72, y: 200, w: 200, h: 120, id: 1 };
 
 function anchorXml(box: Box = DEFAULT_BOX): string {
   // Default: 200 x 120 pt at page (72, 200), square wrap on both sides.
-  const { x, y, w, h, id, alignBottom } = box;
+  const { x, y, w, h, id, alignBottom, columnRight } = box;
   return '<w:r><w:drawing>'
     + '<wp:anchor distT="0" distB="0" distL="0" distR="0" simplePos="0" '
     + `relativeHeight="${251659264 + id}" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1">`
     + '<wp:simplePos x="0" y="0"/>'
-    + `<wp:positionH relativeFrom="page"><wp:posOffset>${x * EMU}</wp:posOffset></wp:positionH>`
+    + (columnRight
+      ? '<wp:positionH relativeFrom="column"><wp:align>right</wp:align></wp:positionH>'
+      : `<wp:positionH relativeFrom="page"><wp:posOffset>${x * EMU}</wp:posOffset></wp:positionH>`)
     + (alignBottom
       ? '<wp:positionV relativeFrom="page"><wp:align>bottom</wp:align></wp:positionV>'
       : `<wp:positionV relativeFrom="page"><wp:posOffset>${y * EMU}</wp:posOffset></wp:positionV>`)
@@ -58,6 +60,7 @@ function docx(
   bodyAnchorAt?: number,
   oddSectionAfter?: number,
   vertical = false,
+  columns = 1,
 ): Uint8Array {
   const body = Array.from({ length: paragraphCount }, (_, index) => {
     const label = `P${String(index).padStart(3, '0')} words words words words words words words words`;
@@ -82,7 +85,7 @@ function docx(
     + body
     + '<w:sectPr><w:pgSz w:w="12240" w:h="15840"/>'
     + '<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/>'
-    + '<w:cols w:space="720"/>'
+    + (columns > 1 ? `<w:cols w:num="${columns}" w:space="480"/>` : '<w:cols w:space="720"/>')
     + (oddSectionAfter !== undefined ? '<w:type w:val="oddPage"/>' : '')
     + (vertical ? '<w:textDirection w:val="tbRl"/>' : '')
     + '</w:sectPr></w:body></w:document>';
@@ -136,8 +139,9 @@ function model(
   oddSectionAfter?: number,
   vertical = false,
   copies = 1,
+  columns = 1,
 ): DocxDocumentModel {
-  const archive = new DocxArchive(docx(paragraphCount, box, bodyAnchorAt, oddSectionAfter, vertical));
+  const archive = new DocxArchive(docx(paragraphCount, box, bodyAnchorAt, oddSectionAfter, vertical, columns));
   let raw: DocxDocumentModel & { __pageObjects?: unknown };
   try {
     raw = JSON.parse(new TextDecoder().decode(archive.parse()));
@@ -289,6 +293,18 @@ describe('producer page objects', () => {
     expect(drawings.length).toBe(300);
     expect(Date.now() - started).toBeLessThan(60_000);
   }, 120_000);
+
+  it('resolve column-relative positions in the frame they wrap in', () => {
+    // Two columns, a 100 pt object right-aligned to its column: as a page
+    // object on page 1 it paints where the same anchor in the body does.
+    const box = { x: 0, y: 200, w: 100, h: 100, id: 1, columnRight: true };
+    const x = (page?: number) => {
+      const result = layout(model(80, page, box, undefined, undefined, false, 1, 2));
+      return result.pages[0]!.layers.body
+        .flatMap((node) => node.kind === 'paragraph' ? node.drawings : [])[0]!.flowBounds.xPt;
+    };
+    expect(x(1)).toBeCloseTo(x(), 3);
+  });
 
   it('leave a document without page objects as it was', () => {
     // The same document with its anchor in the body: pages 1-3, the drawing

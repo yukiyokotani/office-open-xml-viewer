@@ -4106,11 +4106,20 @@ function composePageStories(
     // upright page frame.
     const blankPageObjects = page.parityBlank;
     const bodyGeometry = blankPageObjects ? geometry : page.section.geometry;
+    // The inline frame the prescan resolved the objects' exclusions in: the
+    // page's opening body flow domain (its first column), so column- and
+    // paragraph-relative positions paint where they wrap.
+    const openingDomainId = page.sectionRegions[0]?.flowDomainIds[0];
+    const openingDomain = blankPageObjects || openingDomainId === undefined
+      ? undefined
+      : page.flowDomains.find((domain) => domain.id === openingDomainId);
     const pageObjectBounds = Object.freeze({
-      xPt: Math.abs(bodyGeometry.marginLeft),
+      xPt: openingDomain ? openingDomain.logicalBounds.xPt : Math.abs(bodyGeometry.marginLeft),
       yPt: 0,
-      widthPt: Math.max(0, bodyGeometry.pageWidth
-        - Math.abs(bodyGeometry.marginLeft) - Math.abs(bodyGeometry.marginRight)),
+      widthPt: openingDomain
+        ? openingDomain.logicalBounds.widthPt
+        : Math.max(0, bodyGeometry.pageWidth
+          - Math.abs(bodyGeometry.marginLeft) - Math.abs(bodyGeometry.marginRight)),
       heightPt: bodyGeometry.pageHeight,
     });
     const pageObjectLayouts = (pageObjectSources.get(page.pageIndex) ?? []).map((source) => {
