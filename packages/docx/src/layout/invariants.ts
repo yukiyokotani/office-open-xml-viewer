@@ -1070,8 +1070,31 @@ function* assertDocumentLayoutUncheckedSteps(layout: DocumentLayout): Generator<
       }
     }
 
+    // Only pairs that can conflict are compared (same domain, body and note,
+    // two note stories), in the same (index, other) order as a full scan, so
+    // nodes of unrelated page stories add no pairwise work.
+    const indexesByDomain = new Map<string, number[]>();
+    const bodyIndexes: number[] = [];
+    const noteIndexes: number[] = [];
+    ordinary.forEach((node, index) => {
+      const list = indexesByDomain.get(node.flowDomainId) ?? [];
+      list.push(index);
+      indexesByDomain.set(node.flowDomainId, list);
+      const kind = domains.get(node.flowDomainId)?.kind;
+      if (kind === 'body') bodyIndexes.push(index);
+      if (kind === 'footnote' || kind === 'endnote') noteIndexes.push(index);
+    });
     for (let index = 0; index < ordinary.length; index += 1) {
-      for (let other = index + 1; other < ordinary.length; other += 1) {
+      const node = ordinary[index]!;
+      const kind = domains.get(node.flowDomainId)?.kind;
+      const candidates = new Set<number>(indexesByDomain.get(node.flowDomainId) ?? []);
+      if (kind === 'body') noteIndexes.forEach((other) => candidates.add(other));
+      if (kind === 'footnote' || kind === 'endnote') {
+        bodyIndexes.forEach((other) => candidates.add(other));
+        noteIndexes.forEach((other) => candidates.add(other));
+      }
+      const others = [...candidates].filter((other) => other > index).sort((a, b) => a - b);
+      for (const other of others) {
         const first = ordinary[index];
         const second = ordinary[other];
         if (!first || !second) continue;

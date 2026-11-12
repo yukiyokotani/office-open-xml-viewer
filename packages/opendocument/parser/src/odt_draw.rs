@@ -1430,7 +1430,10 @@ impl<'a> Reader<'a> {
                 Some("paragraph") => Some("paragraph"),
                 Some("char") => Some("char"),
                 Some("frame") => Some("frame"),
-                _ => None,
+                // An as-character group keeps its members' own anchoring.
+                Some("as-char") => None,
+                // §19.759: an omitted (or unknown) anchor type is paragraph.
+                _ => Some("paragraph"),
             }
         });
         let saved = std::mem::replace(&mut self.group_anchor, anchor);
