@@ -310,6 +310,9 @@ struct ObjectContext<'a> {
     /// The slide's master page, for placeholders that take their placement
     /// from it (§19.431); `None` for the master's own objects.
     master: Option<Nd<'a>>,
+    /// For a master's objects: the slide's display flags by placeholder
+    /// class (§20.234), applied to every object however deeply grouped.
+    shows: Option<[(&'static str, bool); 4]>,
 }
 
 impl<'a, 'r, 'p> SlideReader<'a, 'r, 'p> {
@@ -391,6 +394,13 @@ impl<'a, 'r, 'p> SlideReader<'a, 'r, 'p> {
 
         let mut elements = Vec::new();
         let mut sources = Vec::new();
+        // The display flags, resolved once for the slide.
+        let shows = [
+            ("footer", flag("display-footer")),
+            ("header", flag("display-header")),
+            ("date-time", flag("display-date-time")),
+            ("page-number", flag("display-page-number")),
+        ];
         if let Some(master) = master {
             if flag("background-objects-visible") {
                 let ctx = ObjectContext {
@@ -405,14 +415,8 @@ impl<'a, 'r, 'p> SlideReader<'a, 'r, 'p> {
                     date_time: date_time.clone(),
                     link: None,
                     master: None,
+                    shows: Some(shows),
                 };
-                // The display flags, resolved once for the slide.
-                let shows = [
-                    ("footer", flag("display-footer")),
-                    ("header", flag("display-header")),
-                    ("date-time", flag("display-date-time")),
-                    ("page-number", flag("display-page-number")),
-                ];
                 let children: Vec<Nd<'a>> = master.children().filter(|n| n.is_element()).collect();
                 // Every master node examined (comments and text included),
                 // and the wrapped shapes looked into, each slide.
@@ -457,6 +461,7 @@ impl<'a, 'r, 'p> SlideReader<'a, 'r, 'p> {
             date_time,
             link: None,
             master,
+            shows: None,
         };
         let mut notes = None;
         let mut objects = Vec::new();
@@ -577,6 +582,16 @@ impl<'a, 'r, 'p> SlideReader<'a, 'r, 'p> {
         if node.attribute((NS_PRESENTATION, "placeholder")) == Some("true") {
             return Ok(());
         }
+        // A master's layout templates and hidden header/footer fields are not
+        // drawn, wherever they are grouped.
+        if let Some(shows) = ctx.shows {
+            let class = node.attribute((NS_PRESENTATION, "class")).unwrap_or("");
+            if is_master_template(class)
+                || shows.iter().any(|(kind, shown)| *kind == class && !*shown)
+            {
+                return Ok(());
+            }
+        }
         match node.tag_name().name() {
             "g" => {
                 for child in node.children() {
@@ -663,16 +678,24 @@ impl<'a, 'r, 'p> SlideReader<'a, 'r, 'p> {
             return Ok(node);
         };
         if !self.master_frames.contains_key(&master.id()) {
+            // Presentation frames of the master in document order, through
+            // groups and hyperlinks (nesting bounded like drawing).
             let mut frames = HashMap::new();
             let mut visited = 0usize;
-            for child in master.children().filter(|c| c.is_element()) {
+            let mut stack: Vec<(Nd<'a>, usize)> = master.children().rev().map(|c| (c, 0)).collect();
+            while let Some((node, depth)) = stack.pop() {
                 visited += 1;
-                let shape = wrapped_shape(child);
-                if !xml::is(shape, NS_DRAW, "frame") {
+                if !node.is_element() {
                     continue;
                 }
-                if let Some(c) = shape.attribute((NS_PRESENTATION, "class")) {
-                    frames.entry(c).or_insert(shape);
+                if (xml::is(node, NS_DRAW, "g") || xml::is(node, NS_DRAW, "a"))
+                    && depth < MAX_GROUP_DEPTH
+                {
+                    stack.extend(node.children().rev().map(|c| (c, depth + 1)));
+                } else if xml::is(node, NS_DRAW, "frame") {
+                    if let Some(c) = node.attribute((NS_PRESENTATION, "class")) {
+                        frames.entry(c).or_insert(node);
+                    }
                 }
             }
             self.visit(visited)?;
@@ -1437,6 +1460,7 @@ fn clone_ctx<'a>(ctx: &ObjectContext<'a>) -> ObjectContext<'a> {
         date_time: ctx.date_time.clone(),
         link: ctx.link.clone(),
         master: ctx.master,
+        shows: ctx.shows,
     }
 }
 
