@@ -1120,17 +1120,21 @@ fn container_object_styles<'a>(
         } else {
             container_object_styles(sheet, scope, frame, payload)?
         };
-        let name = container
-            .attribute((crate::xml::NS_TABLE, "style-name"))
-            .or_else(|| {
-                container.parent_element().and_then(|row| {
-                    row.attribute((crate::xml::NS_TABLE, "default-cell-style-name"))
-                })
-            });
-        let mut chain = name
-            .map(|n| sheet.chain(scope, "table-cell", n))
-            .transpose()?
-            .unwrap_or_default();
+        // §16.2: the cell's style, then its row's and its column's default
+        // cell styles, as the table reader cascades them.
+        let mut chain = Vec::new();
+        for name in [
+            container.attribute((crate::xml::NS_TABLE, "style-name")),
+            container
+                .parent_element()
+                .and_then(|row| row.attribute((crate::xml::NS_TABLE, "default-cell-style-name"))),
+            crate::odp_table::column_default_style(container, payload)?,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            chain.extend(sheet.chain(scope, "table-cell", name)?);
+        }
         chain.extend(crate::odp_table::cell_template_style(
             sheet, scope, container, payload,
         )?);

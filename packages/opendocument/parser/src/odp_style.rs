@@ -96,11 +96,14 @@ fn check_style_record(style: Nd<'_>) -> Result<(), String> {
         {
             return Err(error());
         }
+        // Elements, and all nodes (comments and text included): lookups
+        // scan them.
         if child
             .children()
             .filter(|n| n.is_element())
             .nth(MAX_PROPERTY_CHILDREN)
             .is_some()
+            || child.children().nth(MAX_STYLE_CHILD_NODES).is_some()
         {
             return Err(error());
         }

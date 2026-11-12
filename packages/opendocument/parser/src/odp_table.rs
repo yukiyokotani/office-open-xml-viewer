@@ -43,16 +43,21 @@ pub fn table<'a>(
     // Reading the template definition (rebuilt for every table using it).
     payload.step(template_cost(sheet, node))?;
     let mut cols: Vec<i64> = Vec::new();
+    // The column element of each column (repeats expanded), for its
+    // default cell style.
+    let mut col_nodes: Vec<Nd<'a>> = Vec::new();
     let mut rows_nodes: Vec<Nd<'a>> = Vec::new();
     for child in node.children().filter(|n| n.is_element()) {
         match child.tag_name().name() {
-            "table-column" => push_columns(sheet, scope, child, &mut cols, &payload)?,
+            "table-column" => {
+                push_columns(sheet, scope, child, &mut cols, &mut col_nodes, &payload)?
+            }
             "table-columns" | "table-header-columns" => {
                 for c in child
                     .children()
                     .filter(|n| xml::is(*n, NS_TABLE, "table-column"))
                 {
-                    push_columns(sheet, scope, c, &mut cols, &payload)?;
+                    push_columns(sheet, scope, c, &mut cols, &mut col_nodes, &payload)?;
                 }
             }
             "table-row" => push_rows(child, &mut rows_nodes)?,
@@ -123,11 +128,21 @@ pub fn table<'a>(
                 let template_style = template
                     .as_ref()
                     .and_then(|t| t.style_for(r, c, row_count, cols.len(), &flag));
-                let style_name = cell.attribute((NS_TABLE, "style-name")).or(default_cell);
-                let mut chain = style_name
-                    .map(|n| sheet.chain(scope, "table-cell", n))
-                    .transpose()?
-                    .unwrap_or_default();
+                // §16.2: the cell's style, then its row's and its column's
+                // default cell styles.
+                let mut chain = Vec::new();
+                for name in [
+                    cell.attribute((NS_TABLE, "style-name")),
+                    default_cell,
+                    col_nodes
+                        .get(c)
+                        .and_then(|col| col.attribute((NS_TABLE, "default-cell-style-name"))),
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    chain.extend(sheet.chain(scope, "table-cell", name)?);
+                }
                 // The template's region style with its parents (§16.2).
                 if let Some(t) = template_style {
                     chain.extend(sheet.chain(scope, "table-cell", t)?);
@@ -381,6 +396,7 @@ fn push_columns<'a>(
     scope: Scope,
     column: Nd<'a>,
     cols: &mut Vec<i64>,
+    col_nodes: &mut Vec<Nd<'a>>,
     payload: &TextPayload<'_>,
 ) -> Result<(), String> {
     let repeat = column
@@ -410,8 +426,63 @@ fn push_columns<'a>(
             return Err("OpenDocument table exceeds the column limit".to_string());
         }
         cols.push(width);
+        col_nodes.push(column);
     }
     Ok(())
+}
+
+/// The default cell style of `cell`'s column (repeats expanded), every
+/// table node inspected charged as text work.
+pub fn column_default_style<'a>(
+    cell: Nd<'a>,
+    payload: &TextPayload<'_>,
+) -> Result<Option<&'a str>, String> {
+    let Some(row) = cell.parent_element() else {
+        return Ok(None);
+    };
+    let Some(table) = row.ancestors().find(|a| xml::is(*a, NS_TABLE, "table")) else {
+        return Ok(None);
+    };
+    let repeat = |n: Nd<'_>| {
+        n.attribute((NS_TABLE, "number-columns-repeated"))
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(1)
+            .clamp(1, MAX_COLUMNS)
+    };
+    let mut column = 0usize;
+    for c in row.children() {
+        payload.step(1)?;
+        if c == cell {
+            break;
+        }
+        if xml::is(c, NS_TABLE, "table-cell") || xml::is(c, NS_TABLE, "covered-table-cell") {
+            column = (column + repeat(c)).min(MAX_COLUMNS);
+        }
+    }
+    let mut first = 0usize;
+    for child in table.children() {
+        payload.step(1)?;
+        let group = ["table-columns", "table-header-columns"]
+            .iter()
+            .any(|n| xml::is(child, NS_TABLE, n));
+        let columns: Vec<Nd<'a>> = if group {
+            child.children().collect()
+        } else {
+            vec![child]
+        };
+        for col in columns {
+            payload.step(1)?;
+            if !xml::is(col, NS_TABLE, "table-column") {
+                continue;
+            }
+            let end = first.saturating_add(repeat(col));
+            if column < end {
+                return Ok(col.attribute((NS_TABLE, "default-cell-style-name")));
+            }
+            first = end;
+        }
+    }
+    Ok(None)
 }
 
 fn push_rows<'a>(row: Nd<'a>, rows: &mut Vec<Nd<'a>>) -> Result<(), String> {

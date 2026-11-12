@@ -552,6 +552,22 @@ impl<'a, 'r, 'p> SlideReader<'a, 'r, 'p> {
         props.extend_styles(&styles.chain, GRAPHIC);
         props.extend_styles(&styles.defaults, GRAPHIC);
         self.visit(crate::odp_style::props_cost(&props))?;
+        // The named definitions it uses are read again for this object.
+        let sheet = self.sheet;
+        let cost: usize = [
+            ("fill-gradient-name", "gradient"),
+            ("opacity-name", "opacity"),
+            ("fill-hatch-name", "hatch"),
+            ("fill-image-name", "fill-image"),
+            ("stroke-dash", "stroke-dash"),
+            ("marker-start", "marker"),
+            ("marker-end", "marker"),
+        ]
+        .iter()
+        .filter_map(|(attribute, kind)| sheet.named(kind, props.get(NS_DRAW, attribute)?))
+        .map(|definition| 1 + definition.range().len() / 64)
+        .sum();
+        self.visit(cost)?;
         Ok(props)
     }
 
