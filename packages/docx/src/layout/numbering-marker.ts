@@ -242,7 +242,10 @@ export function resolveNumberingMarkerGeometry(
   const drawnAsSymbol = (slotsOf: typeof markerSlots, text: string) =>
     [...text].some((character) => service.symbolDraws?.(slotsOf, character) === true);
   const anyConverted = judged.some((part) => part.mapped);
-  const converted = anyConverted && !drawnAsSymbol(keptSlots, numbering.text);
+  // "Draws another code": a code the judgement kept. (A native code that
+  // was nevertheless converted, see SymbolTextOptions.keepsShifted, is not.)
+  const converted = anyConverted
+    && !judged.some((part) => !part.mapped && drawnAsSymbol(keptSlots, part.text));
   // A wholly kept marker takes the judged text: a kept bare code may be
   // written F0-shifted there (core symbol-font.ts).
   const markerText = numbering.picBulletImagePath ? '' : converted || !anyConverted ? judgedText : numbering.text;

@@ -143,6 +143,29 @@ describe('resolveNumberingMarkerGeometry', () => {
     expect(service.symbolText!(slots('Symbol'))).toEqual([{ text: '', mapped: false }]);
   });
 
+  it('keeps the conversion of a native mirrored marker code whose shifted form would change slot family', () => {
+    // As above, for a one-code marker: the code is native, yet it converted;
+    // that is not a partly native marker, and the bare code must not return.
+    const requests: string[] = [];
+    const base = createTextLayoutService({
+      fonts: createFontResolver([]),
+      measurer: { fingerprint: 'marker-shift', measure: (request) => ({ advancePt: request.text.length * 6, ascentPt: 8, descentPt: 2 }) },
+      symbolText: (text, family, _resolution, _route, keepsShifted) => symbolTextToUnicodeSegments(text, family, {
+        native: () => true, monochrome: () => true, ...(keepsShifted ? { keepsShifted } : {}),
+      }),
+      symbolDraws: () => true,
+    });
+    const service: TextLayoutService = { ...base, shape(request) { requests.push(request.text); return base.shape(request); } };
+    const geometry = resolveNumberingMarkerGeometry(
+      { numId: 1, level: 0, format: 'bullet', text: '«', suff: 'tab', indentLeft: 0, tab: 36, fontFamily: 'Symbol' },
+      { fontSizePt: 12, fonts: { ascii: 'Symbol', highAnsi: 'Symbol', eastAsia: 'MS Mincho', complexScript: 'Symbol' },
+        weight: 400, style: 'normal', complexScript: false, fontHint: 'eastAsia' },
+      { authoredFirstIndentPt: 0, physicalIndentLeftPt: 0, tabStops: [], defaultTabPt: 36, baseRtl: true }, service,
+    );
+    expect(geometry.markerText).toBe('↔︎');
+    expect(requests).toEqual(['↔︎']);
+  });
+
   it('keeps the marker slots for text converted from a font that draws no symbol code', () => {
     // Apple's Symbol is Unicode-encoded: U+F0B7 becomes "•", which that same
     // face draws, as in 0.89.
