@@ -240,6 +240,7 @@ describe('resolveNumberingMarkerGeometry', () => {
     ['a\uF0D3', [['\u00A9\uFE0E', 'rtl'], ['a', 'ltr']]],
     // Other text stays whole, so Arabic keeps its joining.
     ['\u0633\u0644\u0627\u0645\uF028', [['(', 'rtl'], ['\u0633\u0644\u0627\u0645', 'rtl']]],
+    ['\uF061\u0633\u0644\u0627\u0645\uF028', [['(', 'rtl'], ['\u0633\u0644\u0627\u0645', 'rtl'], ['\uF061', 'ltr']]],
   ])('orders and directs RTL marker pieces of %j by their resolved levels', (text, expected) => {
     const base = createTextLayoutService({
       fonts: createFontResolver([]),
