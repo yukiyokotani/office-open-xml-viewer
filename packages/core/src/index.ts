@@ -817,8 +817,8 @@ export {
   measureLocalFontSourceNormalLine,
   type LocalFontNormalLine,
 } from './fonts/local-line-metrics';
+export { loadNativeRouteSentinels } from './fonts/route-sentinels';
 export {
-  loadNativeRouteSentinels,
   measureNativeRouteNormalLines,
   verifyNativeRouteNormalLines,
   type NativeRouteLineRequest,

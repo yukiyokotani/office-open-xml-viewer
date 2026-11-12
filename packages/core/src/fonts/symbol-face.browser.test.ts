@@ -5,7 +5,7 @@ import { existsSync } from 'node:fs';
 import { symbolFixtureFontBytes } from '../testing/symbol-font-fixture';
 
 type Api = typeof import('./symbol-face') & typeof import('./symbol-font')
-  & Pick<typeof import('./native-route-line-metrics'), 'loadNativeRouteSentinels'>;
+  & Pick<typeof import('./route-sentinels'), 'loadNativeRouteSentinels'>;
 
 // Real Chromium: the oracle asks the painting context through the route
 // sentinels. Registered fixture faces cover the symbol-encoded, the
@@ -23,7 +23,7 @@ describe.skipIf(!existsSync(chromium.executablePath()))('symbol face oracle in C
         load: id => id === entry ? [
           `export * from ${JSON.stringify(`${root}symbol-face.ts`)};`,
           `export * from ${JSON.stringify(`${root}symbol-font.ts`)};`,
-          `export { loadNativeRouteSentinels } from ${JSON.stringify(`${root}native-route-line-metrics.ts`)};`,
+          `export { loadNativeRouteSentinels } from ${JSON.stringify(`${root}route-sentinels.ts`)};`,
         ].join('\n') : null }],
       build: { write: false, minify: false, lib: { entry, formats: ['iife'], name: 'symbolFaceTest' } },
     });

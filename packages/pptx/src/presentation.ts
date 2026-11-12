@@ -315,7 +315,7 @@ export class PptxPresentation {
   /** Presence of the authored families demanded so far (main mode). */
   private _installedFamilies: import('./font-source-load.js').PptxInstalledFamilies | null = null;
   private readonly _officeFontLoads = new Map<FontFaceSet, Map<string, Promise<LoadedOfficeFontFallbacks>>>();
-  /** Route sentinels per FontFaceSet (core native-route-line-metrics.ts):
+  /** Route sentinels per FontFaceSet (core route-sentinels.ts):
    *  the symbol-font oracle of each render asks its painting context through
    *  them (core symbol-face.ts). Released in {@link destroy}. */
   private readonly _symbolSentinels = new Map<FontFaceSet, Promise<FontFace[] | null>>();

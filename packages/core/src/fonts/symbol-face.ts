@@ -6,7 +6,7 @@
  * with, so `unicode-range`, weight/style matching and synthesis, family-name
  * syntax, local() aliases and installed faces are all the engine's own.
  *
- * Sentinel mode (the route sentinels of native-route-line-metrics.ts are
+ * Sentinel mode (the route sentinels of route-sentinels.ts are
  * loaded in the context's realm). A sentinel maps every scalar, so appending
  * one to the font's named families ends font fallback there: a character the
  * named families do not draw is drawn by the sentinel, never by a generic or
@@ -38,7 +38,7 @@
  * not measure) nothing is judged and the 0.89 subset converts.
  */
 import { quoteCssFontFamily } from '../internal/css-font-family.js';
-import { SENTINEL_FAMILIES, parseFamilyList, sentinelsWork } from './native-route-line-metrics.js';
+import { SENTINEL_FAMILIES, parseFamilyList, sentinelsWork } from './route-sentinels.js';
 import { symbolTextToUnicodeSegments, type SymbolTextSegment } from './symbol-font.js';
 
 /** The part of a 2D context the measurement needs. */

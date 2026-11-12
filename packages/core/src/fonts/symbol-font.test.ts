@@ -5,7 +5,7 @@ import {
   symbolTextToUnicodeSegments,
 } from './symbol-font';
 import { createSymbolFaceOracle, createSymbolMonochromeProbe } from './symbol-face';
-import { SENTINEL_FAMILIES } from './native-route-line-metrics';
+import { SENTINEL_FAMILIES } from './route-sentinels';
 import { ADOBE_SYMBOL_UNICODE } from './symbol-encoding';
 
 const ch = (code: number): string => String.fromCodePoint(code);
@@ -241,7 +241,7 @@ describe('symbol face oracle without a FontFaceSet (plain mode: a Node canvas)',
 });
 
 describe('symbol face oracle with route sentinels (a font realm)', () => {
-  // The sentinels as native-route-line-metrics.ts registers them: each draws
+  // The sentinels as route-sentinels.ts registers them: each draws
   // every character, at its own advance, wherever no named family before it
   // does. Generic families and system fallback draw everything else.
   const SENTINEL = [
@@ -256,7 +256,7 @@ describe('symbol face oracle with route sentinels (a font realm)', () => {
       if (named !== undefined) return { width: named };
       const families = this.font.slice(this.font.indexOf('px ') + 3).split(', ');
       for (const family of families) {
-        const sentinel = loaded ? SENTINEL_FAMILIES.findIndex((name) => family === `"${name}"`) : -1;
+        const sentinel = loaded ? SENTINEL_FAMILIES.findIndex((name: string) => family === `"${name}"`) : -1;
         if (sentinel >= 0) {
           const scale = Number.parseFloat(/([\d.]+)px/.exec(this.font)![1]!) / 1024;
           const metric = SENTINEL[sentinel]!;
