@@ -404,6 +404,13 @@ impl<'a, 'r, 'p> SlideReader<'a, 'r, 'p> {
                     link: None,
                     master: None,
                 };
+                // The display flags, resolved once for the slide.
+                let shows = [
+                    ("footer", flag("display-footer")),
+                    ("header", flag("display-header")),
+                    ("date-time", flag("display-date-time")),
+                    ("page-number", flag("display-page-number")),
+                ];
                 let children: Vec<Nd<'a>> = master.children().filter(|n| n.is_element()).collect();
                 self.visit(children.len())?;
                 let shown: Vec<Nd<'a>> = children
@@ -414,13 +421,10 @@ impl<'a, 'r, 'p> SlideReader<'a, 'r, 'p> {
                             .attribute((NS_PRESENTATION, "class"))
                             .unwrap_or("");
                         !is_master_template(class)
-                            && match class {
-                                "footer" => flag("display-footer"),
-                                "header" => flag("display-header"),
-                                "date-time" => flag("display-date-time"),
-                                "page-number" => flag("display-page-number"),
-                                _ => true,
-                            }
+                            && shows
+                                .iter()
+                                .find(|(kind, _)| *kind == class)
+                                .is_none_or(|(_, shown)| *shown)
                     })
                     .collect();
                 for child in stacking_order(shown) {

@@ -368,11 +368,18 @@ fn list_numbers<'a>(
                 .find_map(|s| s.attribute((NS_STYLE, "list-style-name")))
                 .and_then(|name| sheet.list(scope, name))
         });
-        let start = style
+        let level = style
             .map(|style| list_level(style, list.depth.min(10), payload))
             .transpose()?
-            .flatten()
-            .and_then(|level| level.attribute((NS_TEXT, "start-value")))
+            .flatten();
+        // As rendering counts: only a numbered level takes a number; a
+        // bullet, picture or missing level records an unnumbered item.
+        let Some(level) = level.filter(|l| xml::is(*l, NS_TEXT, "list-level-style-number")) else {
+            numbering.record(list, None);
+            continue;
+        };
+        let start = level
+            .attribute((NS_TEXT, "start-value"))
             .and_then(|v| v.parse::<u32>().ok())
             .unwrap_or(1);
         let number = match (list.start_value, numbering.previous(list)) {
