@@ -33,11 +33,13 @@ const MAX_STYLE_CHILD_NODES: usize = 64;
 /// 16 nodes), see [`MAX_STYLE_CHILD_NODES`].
 pub const STYLE_SCAN_COST: usize = MAX_STYLE_CHILD_NODES / 16;
 
-/// The work of reading a property cascade: each property element, each of
-/// its attributes, and their value bytes (in 64-byte units), which bounds
-/// the cost of the lookups and value parsing done through it.
+/// The work of reading a property cascade: each style searched (found or
+/// not), each property element, each of its attributes, and their value
+/// bytes (in 64-byte units), which bounds the cost of the lookups and value
+/// parsing done through it.
 pub fn props_cost(props: &Props<'_>) -> usize {
-    props.nodes.iter().fold(0usize, |sum, node| {
+    let searches = props.searched.saturating_mul(STYLE_SCAN_COST);
+    props.nodes.iter().fold(searches, |sum, node| {
         let attributes = node
             .attributes()
             .fold(0usize, |s, a| s.saturating_add(1 + a.value().len() / 64));
@@ -338,15 +340,22 @@ pub fn unquote_family(value: &str) -> String {
 #[derive(Clone, Default)]
 pub struct Props<'a> {
     pub nodes: Vec<Nd<'a>>,
+    /// Styles searched for property elements, found or not (each search
+    /// scans the style's children, bounded at admission).
+    pub searched: usize,
 }
 
 impl<'a> Props<'a> {
     pub fn new() -> Self {
-        Self { nodes: Vec::new() }
+        Self {
+            nodes: Vec::new(),
+            searched: 0,
+        }
     }
 
     /// Append the `group` property element of each style (nearest first).
     pub fn extend_styles(&mut self, styles: &[Nd<'a>], group: (&str, &str)) {
+        self.searched = self.searched.saturating_add(styles.len());
         for style in styles {
             if let Some(element) = property_element(*style, group) {
                 self.nodes.push(element);

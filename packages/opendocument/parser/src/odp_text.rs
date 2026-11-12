@@ -734,7 +734,6 @@ fn paragraph<'a>(
     env.payload.step(
         styles
             .len()
-            .saturating_mul(2 * crate::odp_style::STYLE_SCAN_COST)
             .saturating_add(crate::odp_style::props_cost(&para_props))
             .saturating_add(crate::odp_style::props_cost(&text_props)),
     )?;
@@ -1694,7 +1693,6 @@ fn walk_inline<'a>(
         env.payload.step(
             nodes
                 .len()
-                .saturating_mul(crate::odp_style::STYLE_SCAN_COST)
                 .saturating_add(crate::odp_style::props_cost(&props)),
         )?;
         Ok(run_style(&props, env))
