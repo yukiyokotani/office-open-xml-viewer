@@ -1130,6 +1130,41 @@ fn single_column_sections_and_table_page_numbers() {
 }
 
 #[test]
+fn text_box_minimum_heights_replace_the_frame_height() {
+    let height = |frame: &str, text_box: &str| {
+        let body = format!(
+            r##"<text:p><draw:frame text:anchor-type="paragraph" svg:width="60pt"{frame}><draw:text-box{text_box}><text:p>t</text:p></draw:text-box></draw:frame>x</text:p>"##
+        );
+        let document = read_fixture(Fixture {
+            body: &body,
+            ..Fixture::default()
+        });
+        paragraphs(&document.body)[0]
+            .runs
+            .iter()
+            .find_map(|run| match run {
+                DocRun::Shape(shape) => Some(shape.height_pt),
+                _ => None,
+            })
+            .unwrap()
+    };
+    // §19.240: the text box's minimum height is the height, zero included
+    // (LibreOffice writes `fo:min-height="0cm"` for a frame that grows);
+    // without any height the box starts at one line.
+    assert_eq!(
+        height(r#" svg:height="50pt""#, r#" fo:min-height="80pt""#),
+        80.0
+    );
+    assert_eq!(
+        height(r#" svg:height="50pt""#, r#" fo:min-height="0cm""#),
+        0.0
+    );
+    assert_eq!(height("", r#" fo:min-height="0cm""#), 0.0);
+    assert_eq!(height(r#" svg:height="50pt""#, ""), 50.0);
+    assert_eq!(height("", ""), 12.0);
+}
+
+#[test]
 fn transforms_compose_in_order() {
     let corner = |transform: &str| {
         let body = format!(

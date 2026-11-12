@@ -537,13 +537,19 @@ impl<'a> Reader<'a> {
         let (width, mut height) = self.frame_size(node, &graphic);
         let text_box = node.kids().find(|n| xml::is(*n, NS_DRAW, "text-box"));
         // §19.240: a text box's `fo:min-height` replaces the frame's height
-        // (before the frame is positioned by its transform).
-        if let Some(minimum) = text_box
-            .and_then(|text_box| text_box.attribute((NS_FO, "min-height")))
-            .and_then(|v| length_pt(v).ok())
-            .filter(|minimum| *minimum >= 0.0)
-        {
-            height = minimum;
+        // (before the frame is positioned by its transform); zero is a
+        // height like any other, and the box grows from it. A text box
+        // with no height at all starts at one line.
+        if text_box.is_some() {
+            match text_box
+                .and_then(|text_box| text_box.attribute((NS_FO, "min-height")))
+                .and_then(|v| length_pt(v).ok())
+                .filter(|minimum| *minimum >= 0.0)
+            {
+                Some(minimum) => height = minimum,
+                None if height <= 0.0 => height = 12.0,
+                None => {}
+            }
         }
         let mut placement = self.placement(node, &graphic, (0.0, 0.0))?;
         // `draw:transform` (§19.228) positions the frame like a shape: the
@@ -837,7 +843,6 @@ impl<'a> Reader<'a> {
         let grows = frame.attribute((NS_FO, "min-height")).is_some()
             || text_box.attribute((NS_FO, "min-height")).is_some()
             || graphic.get(NS_DRAW, "auto-grow-height") == Some("true");
-        let height = if height <= 0.0 { 12.0 } else { height };
         let fill = self.fill(graphic, true)?;
         let mut shape = ShapeRun {
             inline: placement.inline,
