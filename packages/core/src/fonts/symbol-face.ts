@@ -92,9 +92,10 @@ function scratchCanvas(owner: unknown): ProbeCanvas | null {
 
 /**
  * Whether `font` (a CSS font shorthand: the route converted text paints with)
- * paints `text` without colour in the realm of `owner` (a measuring/painting
- * 2D context): drawn in opaque black, a monochrome glyph leaves only black
- * pixels, while a colour emoji face paints its own colours. Undefined
+ * paints `text` in the text colour in the realm of `owner` (a
+ * measuring/painting 2D context): drawn in red and then in blue, a glyph
+ * that takes the fill leaves only pixels of that colour, while a colour
+ * glyph paints its own (a fixed black palette entry included). Undefined
  * (inconclusive) when no scratch canvas exists, it cannot be read back, or
  * the drawing left no ink to judge. Results live as long as the probe.
  */
@@ -116,23 +117,32 @@ export function createSymbolMonochromeProbe(
     }
     let monochrome: boolean | undefined;
     if (ctx) {
-      try {
-        ctx.clearRect(0, 0, 48, 48);
-        ctx.globalAlpha = 1;
-        ctx.globalCompositeOperation = 'source-over';
-        ctx.fillStyle = '#000';
-        ctx.textBaseline = 'middle';
-        ctx.font = font;
-        ctx.fillText(text, 4, 24);
-        const data = ctx.getImageData(0, 0, 48, 48).data;
+      const context = ctx;
+      // Whether every solid pixel of the text drawn in `fill` has that
+      // colour (`channel` full, the other two empty). Faint antialiasing
+      // pixels are ink but carry too little colour to judge.
+      const follows = (fill: string, channel: number): boolean | undefined => {
+        context.clearRect(0, 0, 48, 48);
+        context.globalAlpha = 1;
+        context.globalCompositeOperation = 'source-over';
+        context.fillStyle = fill;
+        context.textBaseline = 'middle';
+        context.font = font;
+        context.fillText(text, 4, 24);
+        const data = context.getImageData(0, 0, 48, 48).data;
         let ink = false;
-        let colour = false;
         for (let index = 0; index < data.length; index += 4) {
           if (data[index + 3]! === 0) continue;
           ink = true;
-          if (data[index]! + data[index + 1]! + data[index + 2]! > 24) { colour = true; break; }
+          if (data[index + 3]! < 64) continue;
+          const own = data[index + channel]!;
+          if (own < 200 || data[index]! + data[index + 1]! + data[index + 2]! - own > 48) return false;
         }
-        monochrome = ink ? !colour : undefined;
+        return ink ? true : undefined;
+      };
+      try {
+        monochrome = follows('#f00', 0);
+        if (monochrome) monochrome = follows('#00f', 2);
       } catch {
         monochrome = undefined;
       }
@@ -184,9 +194,9 @@ export interface SymbolFaceOracle {
  * Symbol decisions in one measuring/painting context (see the module notes).
  * Verdicts are kept for the oracle's lifetime, which callers bound by the
  * font resources they lay out or render with (a DOCX text service, a PPTX
- * render), exactly like the advances measured in the same context; whether
- * the sentinels work is re-read with every {@link SymbolFaceOracle.segments}
- * and {@link SymbolFaceOracle.draws} call.
+ * render), exactly like the advances measured in the same context. A kept
+ * verdict is answered without touching the context; an unjudged code (the
+ * sentinels do not work yet) is not kept, so it is judged once they do.
  */
 export function createSymbolFaceOracle(
   context: SymbolProbeContext | null | undefined,
@@ -194,7 +204,7 @@ export function createSymbolFaceOracle(
 ): SymbolFaceOracle {
   const probeOwner = options.probeOwner ?? context;
   const monochrome = createSymbolMonochromeProbe(probeOwner);
-  const verdicts = new Map<string, boolean | undefined>();
+  const verdicts = new Map<string, boolean>();
   let font = '';
   const measure = (probeFont: string, text: string): number[] => {
     if (font !== probeFont) {
@@ -259,11 +269,7 @@ export function createSymbolFaceOracle(
     if (BARE_IGNORED.has(code)) return pua && identity(0x41) && differs(shifted);
     return identity(code);
   };
-  type Mode = 'sentinel' | 'plain' | null;
-  const readMode = (): Mode =>
-    sentinelsWork(context as never) ? 'sentinel' : realmFontSet(probeOwner) ? null : 'plain';
-  /** `state.mode` is read once per public call, before its first verdict. */
-  const decide = (character: string, paintFont: string, state: { mode?: Mode }): boolean | undefined => {
+  const decide = (character: string, paintFont: string): boolean | undefined => {
     const cp = character.codePointAt(0) ?? 0;
     const pua = cp >= 0xf020 && cp <= 0xf0ff;
     if (character.length !== 1 || (!pua && (cp < 0x20 || cp > 0xff))) return false;
@@ -272,25 +278,28 @@ export function createSymbolFaceOracle(
     // line-height.
     const split = /^(.*?)\d*\.?\d+px\s+(.+)$/su.exec(paintFont);
     if (!split) return undefined;
+    const key = `${split[1]}\u0000${split[2]}\u0000${character}`;
+    const kept = verdicts.get(key);
+    if (kept !== undefined) return kept;
     return probing(() => {
-      if (state.mode === undefined) state.mode = readMode();
-      const mode = state.mode;
+      // A realm has a FontFaceSet or not for good, so a kept verdict never
+      // outlives its mode.
+      const mode = sentinelsWork(context as never) ? 'sentinel' : realmFontSet(probeOwner) ? null : 'plain';
       if (!mode) return undefined;
-      const key = `${mode}\u0000${split[1]}\u0000${split[2]}\u0000${character}`;
-      if (verdicts.has(key)) return verdicts.get(key);
       font = '';
       const verdict = judge(mode, pua, pua ? cp - 0xf000 : cp, split[1]!, split[2]!);
-      if (verdicts.size >= 4096) verdicts.clear();
-      verdicts.set(key, verdict);
+      if (verdict !== undefined) {
+        if (verdicts.size >= 4096) verdicts.clear();
+        verdicts.set(key, verdict);
+      }
       return verdict;
     });
   };
   return Object.freeze({
-    draws: (code: string, paintFont: string) => decide(code, paintFont, {}),
+    draws: decide,
     segments(text: string, fontFamily: string | null | undefined, paintFont: string, fallbackFont?: SymbolFallbackFont) {
-      const state = {};
       return symbolTextToUnicodeSegments(text, fontFamily, {
-        native: (code) => decide(code, paintFont, state),
+        native: (code) => decide(code, paintFont),
         // A shaper may paint the VS15 apart from its base (another script
         // slot), so the base alone must be monochrome in its route too.
         monochrome: (converted) => {

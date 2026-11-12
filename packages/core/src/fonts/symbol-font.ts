@@ -137,9 +137,10 @@ export interface SymbolTextOptions {
    * glyph (symbol-face.ts). Undefined, or absent: it cannot be judged, and
    * only the 0.89 subset converts. Asked only for codes with a conversion. */
   readonly native?: (code: string) => boolean | undefined;
-  /** Whether this realm paints `text` (an emoji-capable character followed
-   * by VS15) in a monochrome face in the fallback route. Absent (no probe):
-   * only the 0.89 subset's text-default symbols convert. */
+  /** Whether this realm paints `text` (a converted target; an emoji-capable
+   * one is followed by VS15) in the text colour in the fallback route. An
+   * emoji-capable target converts only when this is true; any other target
+   * unless it is false. */
   readonly monochrome?: (text: string) => boolean | undefined;
 }
 
@@ -193,7 +194,10 @@ function convertCodePoint(
     // default presentation is emoji is kept as authored.
     return converted(native === undefined && !EMOJI_PRESENTATION.test(target) ? text : undefined);
   }
-  return converted(target);
+  // Any other target may still meet a colour glyph (colour fonts are not
+  // bound to the Emoji property): it converts unless proven not to take the
+  // text colour. Inconclusive converts, as a text-default character.
+  return options.monochrome?.(target) === false ? undefined : converted(target);
 }
 
 /**

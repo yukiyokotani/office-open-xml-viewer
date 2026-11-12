@@ -129,13 +129,16 @@ describe('resolveNumberingMarkerGeometry', () => {
     expect(requests).toEqual([{ text: '•', ascii: 'Symbol', cs: 'Symbol' }]);
   });
 
-  it('clears the slots when the symbol font would draw the converted text as its own codes', () => {
-    // Symbol 0xB8 is "÷" (U+00F7); a face lacking U+F0B8 but drawing a bare
-    // 0xF7 as its symbol glyph would re-read the converted character.
-    const { geometry, requests } = symbolMarker('', ['÷']);
+  it('clears the slots of converted text a symbol cmap could read as its own codes', () => {
+    // Symbol 0xB8 is "÷" (U+00F7). A symbol-encoded face that lacks U+F0B8
+    // (say one admitted for U+0000-00FF only) would re-read the converted
+    // character as its code 0xF7, and nothing can show that a face reads a
+    // Latin-1 character as itself: such text never keeps the symbol slots.
+    const { geometry, requests } = symbolMarker('', []);
     expect(geometry.markerText).toBe('÷');
     expect(requests).toEqual([{ text: '÷', ascii: null, cs: null }]);
-    expect(symbolMarker('', []).requests).toEqual([{ text: '÷', ascii: 'Symbol', cs: 'Symbol' }]);
+    // A target above U+00FF next to one below it: cleared as well.
+    expect(symbolMarker('', []).requests).toEqual([{ text: '•÷', ascii: null, cs: null }]);
   });
 
   it('shapes an emoji-capable target in the cleared route its monochrome proof was made in', () => {

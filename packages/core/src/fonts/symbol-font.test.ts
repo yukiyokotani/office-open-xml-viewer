@@ -134,43 +134,70 @@ describe('symbol text conversion for a font that draws the codes', () => {
   });
 });
 
+/** A Node-style canvas class whose text ink is `pixel(fillStyle, text)`. */
+const inkCanvas = (pixel: (fill: string, text: string) => number[], onCreate = () => {}) => class {
+  constructor(readonly width: number, readonly height: number) { onCreate(); }
+  getContext() {
+    let last = '';
+    return {
+      clearRect() {}, font: '', fillStyle: '', textBaseline: '', globalAlpha: 1, globalCompositeOperation: '',
+      fillText(text: string) { last = text; },
+      getImageData() { return { data: new Uint8ClampedArray(pixel(this.fillStyle, last)) }; },
+    };
+  }
+};
+const filled = (fill: string) => (fill === '#f00' ? [255, 0, 0, 255] : fill === '#00f' ? [0, 0, 255, 255] : [0, 0, 0, 255]);
+
 describe('createSymbolMonochromeProbe', () => {
   it('draws on another canvas of the painting canvas class (Node canvases)', () => {
     let created = 0;
-    class NodeCanvas {
-      constructor(readonly width: number, readonly height: number) { created++; }
-      getContext() {
-        return {
-          clearRect() {}, fillText() {}, font: '', fillStyle: '', textBaseline: '',
-          globalAlpha: 1, globalCompositeOperation: '',
-          getImageData: () => ({ data: new Uint8ClampedArray([0, 0, 0, 255]) }),
-        };
-      }
-    }
+    const NodeCanvas = inkCanvas(filled, () => { created++; });
     const owner = { canvas: new NodeCanvas(1, 1) };
     expect(createSymbolMonochromeProbe(owner, '32px sans-serif')('♥︎')).toBe(true);
     expect(created).toBe(2);
   });
+
+  it.each([
+    ['a fixed black palette', () => [0, 0, 0, 255]],
+    ['its own colours', () => [200, 30, 30, 255]],
+    ['one of the probe colours', () => [255, 0, 0, 255]],
+  ])('rejects a glyph painted in %s whatever the fill', (_case, pixel) => {
+    const Canvas = inkCanvas(pixel);
+    expect(createSymbolMonochromeProbe({ canvas: new Canvas(1, 1) })('♥︎')).toBe(false);
+  });
+
+  it('judges solid pixels only, and nothing without ink', () => {
+    // A faint antialiasing pixel carries too little colour to judge.
+    const Faint = inkCanvas((fill) => [...filled(fill), ...[90, 90, 90, 20]]);
+    expect(createSymbolMonochromeProbe({ canvas: new Faint(1, 1) })('x')).toBe(true);
+    const Empty = inkCanvas(() => [0, 0, 0, 0]);
+    expect(createSymbolMonochromeProbe({ canvas: new Empty(1, 1) })(' ')).toBeUndefined();
+  });
 });
 
 describe('oracle colour proof', () => {
+  const measureText = (text: string) => ({ width: text === 'i' ? 3 : 7 });
+  const withCanvas = (canvas: object) => ({ font: '', canvas, measureText });
+
   it('requires the base without VS15 to be monochrome too (a shaper may split them)', () => {
-    let last = '';
-    class Canvas {
-      constructor(readonly width: number, readonly height: number) {}
-      getContext() {
-        return {
-          clearRect() {}, font: '', fillStyle: '', textBaseline: '', globalAlpha: 1, globalCompositeOperation: '',
-          fillText(text: string) { last = text; },
-          // Colour unless the text carries VS15.
-          getImageData: () => ({ data: new Uint8ClampedArray(last.includes('︎') ? [0, 0, 0, 255] : [200, 30, 30, 255]) }),
-        };
-      }
-    }
-    const ctx = { font: '', canvas: new Canvas(1, 1), measureText: (text: string) => ({ width: text === 'i' ? 3 : 7 }) };
-    const oracle = createSymbolFaceOracle(ctx);
-    const parts = oracle.segments('', 'Symbol', '400 32px "Absent"');
-    expect(parts).toEqual([{ text: '', mapped: false }]);
+    // Colour unless the text carries VS15.
+    const Canvas = inkCanvas((fill, text) => (text.includes('︎') ? filled(fill) : [200, 30, 30, 255]));
+    const oracle = createSymbolFaceOracle(withCanvas(new Canvas(1, 1)));
+    expect(oracle.segments('', 'Symbol', '400 32px "Absent"')).toEqual([{ text: '', mapped: false }]);
+  });
+
+  it('keeps the authored code of any target a colour glyph would paint, emoji-capable or not', () => {
+    // Symbol 0x61 is alpha: no Emoji property, yet a colour face may hold it.
+    const Colour = inkCanvas(() => [0, 0, 0, 255]);
+    const coloured = createSymbolFaceOracle(withCanvas(new Colour(1, 1)));
+    expect(coloured.segments('', 'Symbol', '400 32px "Absent"')).toEqual([{ text: '', mapped: false }]);
+    const Plain = inkCanvas(filled);
+    const plain = createSymbolFaceOracle(withCanvas(new Plain(1, 1)));
+    expect(plain.segments('', 'Symbol', '400 32px "Absent"')).toEqual([{ text: 'α♥︎', mapped: true }]);
+    // No canvas to read back: a text-default target converts, an emoji-capable one is kept.
+    const blind = createSymbolFaceOracle({ font: '', measureText });
+    expect(blind.segments('', 'Symbol', '400 32px "Absent"'))
+      .toEqual([{ text: 'α', mapped: true }, { text: '', mapped: false }]);
   });
 });
 
@@ -247,11 +274,12 @@ describe('symbol face oracle without a FontFaceSet (plain mode: a Node canvas)',
     oracle.draws('A', '400 32px "A"');
     const measured = calls;
     expect(measured).toBeGreaterThan(0);
-    // Only the sentinel check is repeated.
+    // A kept verdict is answered without touching the context.
     oracle.draws('A', '400 32px "A"');
-    expect(calls).toBe(measured + 1);
+    oracle.segments('A', 'Symbol', '400 32px "A"');
+    expect(calls).toBe(measured);
     createSymbolFaceOracle(ctx).draws('A', '400 32px "A"');
-    expect(calls).toBe(measured * 2 + 1);
+    expect(calls).toBe(measured * 2);
   });
 });
 
@@ -309,7 +337,7 @@ describe('symbol face oracle with route sentinels (a font realm)', () => {
       .toEqual([{ text: ch(0x2022), mapped: true }, { text: ch(0xf061), mapped: false }]);
   });
 
-  it('reads whether the sentinels work with every call', () => {
+  it('keeps no verdict while the sentinels do not work, and judges once they do', () => {
     let loaded = false;
     const ctx = context(true);
     const measure = ctx.measureText;

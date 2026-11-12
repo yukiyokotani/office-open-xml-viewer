@@ -198,12 +198,14 @@ export function resolveNumberingMarkerGeometry(
   //   - no code converts: the authored codes, in the marker's symbol slots;
   //   - codes convert and the face draws none of the marker's codes (the font
   //     is missing or Unicode-encoded, like Apple's Symbol): the converted
-  //     text, in the authored slots as in 0.89 when no character of it would
-  //     be drawn there as a symbol code; else with every slot cleared (a
+  //     text. It keeps the authored slots, as in 0.89, only when every
+  //     character of it lies above U+00FF, where no symbol cmap reads a
+  //     character as a code; otherwise every slot is cleared (a
   //     Unicode-capable generic route), because a symbol cmap would re-read
-  //     e.g. a converted U+00A9 as its own code 0xA9 (a heart in Symbol). An
-  //     emoji-capable target also takes the cleared route, the one its
-  //     monochrome proof was made in;
+  //     e.g. a converted U+00A9 as its own code 0xA9 (a heart in Symbol), and
+  //     whether a face reads a Latin-1 character as itself cannot be
+  //     established. A target written with VS15 also takes the cleared
+  //     route, the one its colour proof was made in;
   //   - codes convert while the face draws another code of the same marker
   //     (a face with only part of its encoding): one run cannot take both
   //     routes, so the marker stays as authored, as before this conversion.
@@ -245,7 +247,7 @@ export function resolveNumberingMarkerGeometry(
   const markerLayout = markerText
     ? shapeNumberingMarkerText(
         !converted ? keptInput
-          : !markerText.includes('\uFE0E') && !drawnAsSymbol(markerSlots, markerText) ? markerInput
+          : [...markerText].every((character) => character.codePointAt(0)! > 0xff && character !== '\uFE0E') ? markerInput
             : { ...markerInput, fonts: { ascii: null, highAnsi: null, eastAsia: null, complexScript: null },
               themeFonts: undefined, themeFontPresence: undefined },
         markerText,
