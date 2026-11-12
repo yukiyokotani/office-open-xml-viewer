@@ -191,17 +191,23 @@ impl<'a> Reader<'a> {
         }
         // Rows may hold more cells than the declared columns: the grid is
         // as wide as the widest row, within the column bound.
+        // A cell's column span counts too (its covered cells may be left
+        // out), so no span is ever cut at the grid's edge.
         let mut needed = 0usize;
         for run in &rows {
             let mut width = 0usize;
+            let mut extent = 0usize;
             for cell in run.node.children().filter(|n| is_cell(*n)) {
                 budget::tick(1)?;
                 width += cell_repeat(cell)?;
-                if width > MAX_COLUMNS {
+                if xml::is(cell, NS_TABLE, "table-cell") {
+                    extent = extent.max(width - 1 + column_span(cell)?);
+                }
+                if width.max(extent) > MAX_COLUMNS {
                     return Err(resource("table column"));
                 }
             }
-            needed = needed.max(width);
+            needed = needed.max(width).max(extent);
         }
         while columns.len() < needed {
             columns.push(Column::default());
@@ -352,15 +358,10 @@ impl<'a> Reader<'a> {
                         column += 1;
                         continue;
                     }
-                    // Spans (§19.678, §19.679): within the grid's bounds a
-                    // span ends at the table's edge; beyond them it rejects.
-                    let span_columns = xml::bounded_count(
-                        cell.attribute((NS_TABLE, "number-columns-spanned")),
-                        MAX_COLUMNS as u64,
-                        "table column",
-                    )?
-                    .map_or(1, |span| span as usize)
-                    .clamp(1, col_widths.len() - column);
+                    // Spans (§19.678, §19.679). A row span past the table's
+                    // last row ends there, as the table does.
+                    // (The grid holds every span: see `needed`.)
+                    let span_columns = column_span(cell)?.min(col_widths.len() - column);
                     let span_rows = xml::bounded_count(
                         cell.attribute((NS_TABLE, "number-rows-spanned")),
                         MAX_ROWS as u64,
@@ -590,15 +591,15 @@ impl<'a> Reader<'a> {
                     if columns.len() + repeat > MAX_COLUMNS {
                         return Err(resource("table column"));
                     }
-                    columns.extend(std::iter::repeat_n(
-                        Column {
-                            absolute,
-                            share,
-                            default_cell_style: child
-                                .attribute((NS_TABLE, "default-cell-style-name")),
-                        },
-                        repeat,
-                    ));
+                    let column = Column {
+                        absolute,
+                        share,
+                        default_cell_style: child.attribute((NS_TABLE, "default-cell-style-name")),
+                    };
+                    for _ in 0..repeat {
+                        budget::tick(1)?;
+                        columns.push(column);
+                    }
                 }
                 (
                     Some(NS_TABLE),
@@ -753,6 +754,17 @@ impl<'a> Reader<'a> {
 /// A table cell element, covered or not.
 fn is_cell(node: roxmltree::Node<'_, '_>) -> bool {
     xml::is(node, NS_TABLE, "table-cell") || xml::is(node, NS_TABLE, "covered-table-cell")
+}
+
+/// `table:number-columns-spanned` of a cell (§19.678; default 1): a span
+/// over the column bound rejects.
+fn column_span(cell: roxmltree::Node<'_, '_>) -> Result<usize, String> {
+    Ok(xml::bounded_count(
+        cell.attribute((NS_TABLE, "number-columns-spanned")),
+        MAX_COLUMNS as u64,
+        "table column",
+    )?
+    .map_or(1, |span| (span as usize).max(1)))
 }
 
 /// `table:number-columns-repeated` of a cell or column (§19.675; default

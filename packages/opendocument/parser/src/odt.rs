@@ -491,14 +491,7 @@ impl<'a> Reader<'a> {
     fn block(&mut self, node: roxmltree::Node<'a, 'a>) -> Result<(), String> {
         match (node.tag_name().namespace(), node.tag_name().name()) {
             (Some(NS_TEXT), "p") => self.paragraph(node, None)?,
-            (Some(NS_TEXT), "h") => {
-                let level = node
-                    .attribute((NS_TEXT, "outline-level"))
-                    .and_then(|v| v.parse::<u32>().ok())
-                    .filter(|v| (1..=10).contains(v))
-                    .unwrap_or(1);
-                self.heading(node, level)?
-            }
+            (Some(NS_TEXT), "h") => self.heading(node, outline_level(node))?,
             (Some(NS_TEXT), "list") => self.list(node, None)?,
             (Some(NS_TEXT), "numbered-paragraph") => self.numbered_paragraph(node)?,
             (Some(NS_TABLE), "table") => self.table(node)?,
@@ -747,9 +740,14 @@ impl<'a> Reader<'a> {
         let mut page_break_before = false;
         if let Some(master) = master.filter(|name| !name.is_empty()) {
             if self.story == Story::Body && self.pages.has_master(master) {
-                let page_start = properties
-                    .get(NS_STYLE, "page-number")
-                    .and_then(|v| v.parse::<i64>().ok());
+                // §20.328 style:page-number: a number restarts the count
+                // ("auto" continues it).
+                let page_start = xml::bounded_count(
+                    properties.get(NS_STYLE, "page-number"),
+                    i32::MAX as u64,
+                    "page number",
+                )?
+                .map(|start| start as i64);
                 if self.has_body_content() {
                     let kind = self.pages.start_kind(master);
                     self.current_master = master.to_string();
@@ -896,9 +894,8 @@ impl<'a> Reader<'a> {
                 .get(&(NS_STYLE.to_string(), name.to_string()))
                 .map(String::as_str)
         };
-        let lines = attribute("lines")
-            .and_then(|v| v.parse::<u32>().ok())
-            .unwrap_or(1);
+        let lines = attribute("lines").and_then(unsigned).unwrap_or(1);
+        let lines = u32::try_from(lines).map_err(|_| resource("drop cap line"))?;
         if lines < 2 {
             return Ok(None);
         }
@@ -916,7 +913,10 @@ impl<'a> Reader<'a> {
                 .chars()
                 .take_while(|c| !c.is_whitespace())
                 .count(),
-            Some(value) => value.parse::<usize>().unwrap_or(1),
+            // (A length past the text is the whole text.)
+            Some(value) => {
+                unsigned(value).map_or(1, |length| usize::try_from(length).unwrap_or(usize::MAX))
+            }
             None => 1,
         }
         .min(first_text.chars().count());
@@ -1205,12 +1205,8 @@ impl<'a> Reader<'a> {
                     })
             }
         };
-        let count = |name: &str| -> u32 {
-            cascade
-                .get(NS_FO, name)
-                .and_then(|v| v.parse::<u32>().ok())
-                .unwrap_or(0)
-        };
+        let count =
+            |name: &str| -> u64 { cascade.get(NS_FO, name).and_then(unsigned).unwrap_or(0) };
         // DOCX widow control is two lines; any ODF widow or orphan count of
         // two or more turns it on.
         let widow_control = count("widows") >= 2 || count("orphans") >= 2;
@@ -1915,6 +1911,39 @@ fn source_bytes(node: roxmltree::Node<'_, '_>) -> usize {
                 .sum::<usize>();
         sum.saturating_add(own)
     })
+}
+
+/// A non-negative integer of any length, saturating: for values that are
+/// compared or clamped to a range the document itself gives (a level, a
+/// length within a text), where a larger number means the same as the
+/// largest. Counts that size something go through [`xml::bounded_count`].
+fn unsigned(value: &str) -> Option<u64> {
+    let value = value.trim();
+    let digits = value.strip_prefix('+').unwrap_or(value);
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    Some(digits.parse().unwrap_or(u64::MAX))
+}
+
+/// `text:outline-level` of a heading (§19.844; default 1), within the ten
+/// levels LibreOffice and the DOCX model have.
+fn outline_level(node: roxmltree::Node<'_, '_>) -> u32 {
+    node.attribute((NS_TEXT, "outline-level"))
+        .and_then(unsigned)
+        .map_or(1, |level| level.clamp(1, 10) as u32)
+}
+
+/// The character data of a subtree, a step per node.
+fn text_content(node: roxmltree::Node<'_, '_>) -> Result<String, String> {
+    let mut out = String::new();
+    for descendant in node.descendants() {
+        budget::tick(1)?;
+        if descendant.is_text() {
+            out.push_str(descendant.text().unwrap_or(""));
+        }
+    }
+    Ok(out)
 }
 
 /// Steps for reading `bytes` of source again (a repeated row or cell, a

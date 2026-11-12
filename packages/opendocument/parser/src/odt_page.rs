@@ -682,8 +682,9 @@ pub(super) fn columns<'e, S: ColumnsSource<'e>>(
             })
             .collect();
         if total > 0.0 {
-            let mut cols = Vec::with_capacity(count);
+            let mut cols = Vec::new();
             for i in 0..count {
+                budget::tick(1)?;
                 let outer = weights[i] / total * width;
                 let text = (outer - indents[i].0 - indents[i].1).max(1.0);
                 let space = if i + 1 < count {
@@ -713,17 +714,20 @@ pub(super) fn columns<'e, S: ColumnsSource<'e>>(
         }
     }
     let column_width = ((width - gap * (count - 1) as f64) / count as f64).max(1.0);
+    let mut cols = Vec::new();
+    for i in 0..count {
+        budget::tick(1)?;
+        cols.push(ColSpec {
+            width_pt: column_width,
+            space_pt: if i + 1 < count { gap } else { 0.0 },
+        });
+    }
     Ok(Some(ColumnsSpec {
         count,
         space_pt: gap,
         equal_width: true,
         sep,
-        cols: (0..count)
-            .map(|i| ColSpec {
-                width_pt: column_width,
-                space_pt: if i + 1 < count { gap } else { 0.0 },
-            })
-            .collect(),
+        cols,
     }))
 }
 
@@ -738,9 +742,10 @@ pub(super) fn line_numbering(styles: Option<roxmltree::Node<'_, '_>>) -> Option<
     Some(LineNumbering {
         count_by: node
             .attribute((NS_TEXT, "increment"))
-            .and_then(|v| v.parse::<i64>().ok())
+            .and_then(unsigned)
             .filter(|v| *v > 0)
-            .unwrap_or(1),
+            // (Counting by more lines than a document holds numbers none.)
+            .map_or(1, |v| v.min(i64::MAX as u64) as i64),
         start: 1,
         distance: node
             .attribute((NS_TEXT, "offset"))
@@ -785,10 +790,12 @@ impl NotesConfiguration {
                     .attribute((NS_STYLE, "num-format"))
                     .and_then(|f| list::note_number_format(f)),
                 // LibreOffice writes the offset from 1 (0 = start at 1).
-                start: node
-                    .attribute((NS_TEXT, "start-value"))
-                    .and_then(|v| v.parse::<i64>().ok())
-                    .and_then(|v| v.checked_add(1)),
+                start: xml::bounded_count(
+                    node.attribute((NS_TEXT, "start-value")),
+                    i32::MAX as u64,
+                    "note number",
+                )?
+                .map(|start| start as i64 + 1),
                 citation: node
                     .attribute((NS_TEXT, "citation-style-name"))
                     .map(str::to_string),
@@ -1123,8 +1130,8 @@ impl<'a> Reader<'a> {
         }
         // Every section owns its copies of the master's stories (DOCX
         // sections resolve their header/footer references independently).
-        // The limits are checked before each copy, so none is made past
-        // them.
+        // The limits are checked before each copy; the allocator's hard
+        // ceiling bounds what one copy can add past them.
         budget::tick(1)?;
         let mut headers = stories.headers.clone();
         budget::tick(1)?;

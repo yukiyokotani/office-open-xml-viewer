@@ -43,13 +43,15 @@ fn argument(
     }
 }
 
-fn text(node: roxmltree::Node<'_, '_>) -> String {
-    node.descendants()
-        .filter(|n| n.is_text())
-        .filter_map(|n| n.text())
-        .collect::<String>()
-        .trim()
-        .to_string()
+fn text(node: roxmltree::Node<'_, '_>) -> Result<String, String> {
+    let mut out = String::new();
+    for descendant in node.descendants() {
+        budget::tick(1)?;
+        if descendant.is_text() {
+            out.push_str(descendant.text().unwrap_or(""));
+        }
+    }
+    Ok(out.trim().to_string())
 }
 
 fn run(text: String, style: &str) -> MathNode {
@@ -105,7 +107,7 @@ fn element(node: roxmltree::Node<'_, '_>, depth: usize) -> Result<Vec<MathNode>,
         }],
         // §3.2.3 mi: a single-character identifier is italic by default.
         "mi" => {
-            let content = text(node);
+            let content = text(node)?;
             let style = match variant {
                 Some("normal") => "roman",
                 Some("bold") => "bold",
@@ -122,9 +124,9 @@ fn element(node: roxmltree::Node<'_, '_>, depth: usize) -> Result<Vec<MathNode>,
                 Some("italic") => "italic",
                 _ => "roman",
             };
-            vec![run(text(node), style)]
+            vec![run(text(node)?, style)]
         }
-        "mtext" => vec![run(text(node), "roman")],
+        "mtext" => vec![run(text(node)?, "roman")],
         "mspace" => vec![run("\u{2009}".into(), "roman")],
         "mfrac" => vec![MathNode::Fraction {
             num: argument(node, 0, depth)?,
@@ -148,6 +150,7 @@ fn element(node: roxmltree::Node<'_, '_>, depth: usize) -> Result<Vec<MathNode>,
                 .find(is_math)
                 .filter(|b| b.tag_name().name() == "mo")
                 .map(text)
+                .transpose()?
                 .filter(|op| nary(op));
             if let Some(op) = base_operator {
                 let (sub, sup) = match name {

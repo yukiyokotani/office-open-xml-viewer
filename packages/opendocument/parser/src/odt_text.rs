@@ -699,11 +699,7 @@ impl<'a> Reader<'a> {
         context: u32,
         inline: &mut Inline<'a>,
     ) -> Result<(), String> {
-        let fallback: String = node
-            .descendants()
-            .filter(|n| n.is_text())
-            .filter_map(|n| n.text())
-            .collect();
+        let fallback = text_content(node)?;
         self.admit_chars(1, inline)?;
         let index = inline.items.len() as u32;
         inline.items.push(Item::Field {
@@ -722,19 +718,14 @@ impl<'a> Reader<'a> {
         context: u32,
         inline: &mut Inline<'a>,
     ) -> Result<(), String> {
-        let text_of = |name: &str| -> String {
-            node.children()
-                .find(|n| xml::is(*n, NS_TEXT, name))
-                .map(|n| {
-                    n.descendants()
-                        .filter(|d| d.is_text())
-                        .filter_map(|d| d.text())
-                        .collect()
-                })
-                .unwrap_or_default()
+        let text_of = |name: &str| -> Result<String, String> {
+            match node.children().find(|n| xml::is(*n, NS_TEXT, name)) {
+                Some(child) => text_content(child),
+                None => Ok(String::new()),
+            }
         };
-        let base = text_of("ruby-base");
-        let text = text_of("ruby-text");
+        let base = text_of("ruby-base")?;
+        let text = text_of("ruby-text")?;
         if base.is_empty() {
             return Ok(());
         }

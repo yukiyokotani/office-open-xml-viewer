@@ -37,8 +37,6 @@ const IMAGE_LABEL_INSET_PT: f64 = 0.5;
 /// Generated tab stops per paragraph, and the smallest grid interval.
 const MAX_TAB_STOPS: usize = 1024;
 const MIN_TAB_INTERVAL_PT: f64 = 0.1 * 72.0 / 2.54;
-/// Affix length bound (bytes).
-const MAX_AFFIX_BYTES: usize = 1024;
 /// The reserved list style name standing for the outline style.
 const OUTLINE: &str = "\u{1}outline";
 
@@ -271,6 +269,15 @@ pub(super) struct Frame {
     level: u32,
 }
 
+/// A number a list counter starts at (§19.868 `text:start-value`): beyond
+/// the counting bound it is refused, never clipped.
+fn list_number(value: Option<&str>) -> Result<Option<u32>, String> {
+    Ok(
+        xml::bounded_count(value, u64::from(MAX_COUNTED), "list number")?
+            .map(|number| number as u32),
+    )
+}
+
 impl<'a> Reader<'a> {
     fn list_style(&self, name: &str) -> Option<&'a ListStyle> {
         let sheet: &'a StyleSheet = self.sheet;
@@ -358,9 +365,7 @@ impl<'a> Reader<'a> {
         level: &Level<'a>,
         header: bool,
     ) -> Result<(), String> {
-        let start = node
-            .attribute((NS_TEXT, "start-value"))
-            .and_then(|v| v.parse::<u32>().ok());
+        let start = list_number(node.attribute((NS_TEXT, "start-value")))?;
         let mut first = !header;
         for child in node.children().filter(|n| n.is_element()) {
             budget::tick(1)?;
@@ -402,11 +407,7 @@ impl<'a> Reader<'a> {
 
     fn list_child(&mut self, node: roxmltree::Node<'a, 'a>) -> Result<(), String> {
         if xml::is(node, NS_TEXT, "h") {
-            let level = node
-                .attribute((NS_TEXT, "outline-level"))
-                .and_then(|v| v.parse::<u32>().ok())
-                .unwrap_or(1);
-            self.paragraph(node, Some(level))
+            self.paragraph(node, Some(outline_level(node)))
         } else {
             self.paragraph(node, None)
         }
@@ -429,9 +430,8 @@ impl<'a> Reader<'a> {
             .to_string();
         let level = node
             .attribute((NS_TEXT, "level"))
-            .and_then(|v| v.parse::<u32>().ok())
-            .unwrap_or(1)
-            .clamp(1, MAX_LEVELS);
+            .and_then(unsigned)
+            .map_or(1, |level| level.clamp(1, u64::from(MAX_LEVELS)) as u32);
         let chain = match self.lists.numbered.get(&list_id) {
             Some(chain) => *chain,
             None => {
@@ -447,9 +447,7 @@ impl<'a> Reader<'a> {
             level,
         };
         let definition = self.list_level(&frame.style, level)?;
-        let start = node
-            .attribute((NS_TEXT, "start-value"))
-            .and_then(|v| v.parse::<u32>().ok());
+        let start = list_number(node.attribute((NS_TEXT, "start-value")))?;
         let label = if node.attribute((NS_TEXT, "is-list-header")) == Some("true") {
             None
         } else {
@@ -494,9 +492,7 @@ impl<'a> Reader<'a> {
             level,
         };
         let definition = self.list_level(style, level)?;
-        let start = node
-            .attribute((NS_TEXT, "start-value"))
-            .and_then(|v| v.parse::<u32>().ok());
+        let start = list_number(node.attribute((NS_TEXT, "start-value")))?;
         let values = self.count(&frame, start)?;
         let label = self.label(&frame, &definition, &values)?;
         Ok(Some(ListParagraph {
@@ -549,9 +545,7 @@ impl<'a> Reader<'a> {
         if node.attribute((NS_TEXT, "restart-numbering")) == Some("true") {
             self.lists.chains[chain].counters = Default::default();
         }
-        let start = node
-            .attribute((NS_TEXT, "start-value"))
-            .and_then(|v| v.parse::<u32>().ok());
+        let start = list_number(node.attribute((NS_TEXT, "start-value")))?;
         let values = self.count(&frame, start)?;
         let label = self.label(&frame, &definition, &values)?;
         Ok(Some(ListParagraph {
@@ -573,17 +567,20 @@ impl<'a> Reader<'a> {
         }
         let chain = &mut self.lists.chains[frame.chain];
         let index = (frame.level - 1) as usize;
-        // Every value entering a counter is held to MAX_COUNTED, phantom
-        // ancestors included, so no label component outgrows it.
+        // Every value entering a counter is within MAX_COUNTED (start values
+        // are read with that bound), so no label component outgrows it; a
+        // counter that counts past it is beyond the reader's limits.
         for (ancestor, ancestor_start) in starts.iter().enumerate().take(index) {
-            chain.counters[ancestor].get_or_insert((*ancestor_start).min(MAX_COUNTED));
+            chain.counters[ancestor].get_or_insert(*ancestor_start);
         }
         let value = match (start, chain.counters[index]) {
             (Some(start), _) => start,
-            (None, Some(previous)) => previous.saturating_add(1),
+            (None, Some(previous)) => previous + 1,
             (None, None) => starts[index],
+        };
+        if value > MAX_COUNTED {
+            return Err(resource("list number"));
         }
-        .min(MAX_COUNTED);
         chain.counters[index] = Some(value);
         for deeper in chain.counters.iter_mut().skip(index + 1) {
             *deeper = None;
@@ -643,7 +640,7 @@ impl<'a> Reader<'a> {
                             values[(l - 1) as usize],
                             component.0,
                             component.1,
-                        ));
+                        )?);
                     }
                 }
                 format!("{prefix}{}{suffix}", components.join("."))
@@ -667,18 +664,16 @@ impl<'a> Reader<'a> {
         })
     }
 
-    fn format_counter(&self, value: u32, format: Format, sync: bool) -> String {
-        // The counter bound holds here too, whatever path the value took.
-        let value = value.min(MAX_COUNTED);
+    fn format_counter(&self, value: u32, format: Format, sync: bool) -> Result<String, String> {
         // 0 renders "0" in every format (measured by the reviewer).
         if value == 0 && format != Format::Empty {
-            return "0".to_string();
+            return Ok("0".to_string());
         }
-        match format {
+        Ok(match format {
             Format::Decimal => value.to_string(),
             Format::Empty => String::new(),
-            Format::LowerRoman => roman(value).to_ascii_lowercase(),
-            Format::UpperRoman => roman(value),
+            Format::LowerRoman => roman(value)?.to_ascii_lowercase(),
+            Format::UpperRoman => roman(value)?,
             Format::Circled => match value {
                 1..=20 => char::from_u32(0x2460 + value - 1),
                 21..=35 => char::from_u32(0x3251 + value - 21),
@@ -691,7 +686,7 @@ impl<'a> Reader<'a> {
                 let n = letters.len() as u32;
                 let letter = letters[((value - 1) % n) as usize];
                 let repeat = if sync { (value - 1) / n + 1 } else { 1 };
-                std::iter::repeat_n(letter, repeat as usize).collect()
+                repeated(letter, repeat as usize)?
             }
             Format::Digits(zero) => value
                 .to_string()
@@ -715,14 +710,14 @@ impl<'a> Reader<'a> {
             Format::LowerLetter | Format::UpperLetter => {
                 // Beyond "z" the places count like digits ("aa, ab"), as
                 // ODF 1.4 §19.505 and LibreOffice do.
-                let letters = letters(value, sync);
+                let letters = letters(value, sync)?;
                 if format == Format::UpperLetter {
                     letters.to_ascii_uppercase()
                 } else {
                     letters
                 }
             }
-        }
+        })
     }
 
     /// A list style's level definition (§16.31-§16.34), resolved once per
@@ -797,21 +792,16 @@ impl<'a> Reader<'a> {
             "list-level-style-image" => (false, true),
             _ => (true, false),
         };
-        let affix = |name: &str| -> String {
-            let value = attribute((NS_STYLE, name)).unwrap_or("");
-            if value.len() > MAX_AFFIX_BYTES {
-                String::new()
-            } else {
-                value.to_string()
-            }
-        };
+        // (A list level's values are bounded by `style::check_values`.)
+        let affix =
+            |name: &str| -> String { attribute((NS_STYLE, name)).unwrap_or("").to_string() };
         let kind = if number {
             let format = parse_format(attribute((NS_STYLE, "num-format")).unwrap_or(""));
             let prefix = affix("num-prefix");
             let suffix = affix("num-suffix");
             let authored_display = attribute((NS_TEXT, "display-levels"))
-                .and_then(|value| value.parse::<u32>().ok())
-                .map(|v| v.clamp(1, level));
+                .and_then(unsigned)
+                .map(|v| v.clamp(1, u64::from(level)) as u32);
             // LibreOffice composes the label from its template when one is
             // written (it may drop `text:display-levels`, measured): the
             // number of level placeholders it holds.
@@ -849,10 +839,7 @@ impl<'a> Reader<'a> {
                     .unwrap_or('\u{2022}'),
             )
         };
-        let start = attribute((NS_TEXT, "start-value"))
-            .and_then(|value| value.parse::<u32>().ok())
-            .unwrap_or(1)
-            .min(MAX_COUNTED);
+        let start = list_number(attribute((NS_TEXT, "start-value")))?.unwrap_or(1);
         let relative_size = attribute((NS_TEXT, "bullet-relative-size"))
             .and_then(|v| percent(v).ok())
             .filter(|v| *v > 0.0 && (*v - 1.0).abs() > 1e-9);
@@ -1193,7 +1180,7 @@ impl<'a> Reader<'a> {
 
 /// Roman numerals, thousands as repeated "M" (LibreOffice: 32767 is 32 "M"
 /// and "DCCLXVII", measured by the reviewer).
-fn roman(mut value: u32) -> String {
+fn roman(mut value: u32) -> Result<String, String> {
     const TABLE: [(u32, &str); 13] = [
         (1000, "M"),
         (900, "CM"),
@@ -1209,22 +1196,40 @@ fn roman(mut value: u32) -> String {
         (4, "IV"),
         (1, "I"),
     ];
-    let mut out = String::new();
+    // The thousands are a run of the count's length; the rest is at most
+    // fifteen numerals.
+    let mut out = repeated('M', (value / 1000) as usize)?;
+    value %= 1000;
     for (unit, numeral) in TABLE {
         while value >= unit {
             out.push_str(numeral);
             value -= unit;
         }
     }
-    out
+    Ok(out)
+}
+
+/// `count` times `c`, written in pieces with a step each: a run as long as
+/// a number the file chose is never allocated at once.
+fn repeated(c: char, count: usize) -> Result<String, String> {
+    const PIECE: usize = 4096;
+    let mut out = String::new();
+    let mut left = count;
+    while left > 0 {
+        let piece = left.min(PIECE);
+        budget::tick(1)?;
+        out.extend(std::iter::repeat_n(c, piece));
+        left -= piece;
+    }
+    Ok(out)
 }
 
 /// Lower-case letters (ODF 1.4 §19.505): with letter sync every place repeats
 /// one letter ("aa, bb"), without it the places count like digits ("aa, ab").
-fn letters(value: u32, sync: bool) -> String {
+fn letters(value: u32, sync: bool) -> Result<String, String> {
     if sync {
         let letter = (b'a' + ((value - 1) % 26) as u8) as char;
-        return std::iter::repeat_n(letter, ((value - 1) / 26 + 1) as usize).collect();
+        return repeated(letter, ((value - 1) / 26 + 1) as usize);
     }
     let mut n = value;
     let mut out = Vec::new();
@@ -1234,7 +1239,7 @@ fn letters(value: u32, sync: bool) -> String {
         n /= 26;
     }
     out.reverse();
-    String::from_utf8(out).expect("ASCII letters")
+    Ok(String::from_utf8(out).expect("ASCII letters"))
 }
 
 /// Chinese-style counting with 十, 百 and 千 (the 〇 digit set shows zero

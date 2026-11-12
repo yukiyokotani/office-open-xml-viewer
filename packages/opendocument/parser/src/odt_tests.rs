@@ -697,8 +697,8 @@ fn cell_styles_continue_the_search_of_their_paragraphs() {
 
 #[test]
 fn shape_paragraphs_continue_their_search_in_the_graphic_style() {
-    // §16.2: a paragraph in a drawing shape continues its search in the
-    // shape's graphic style; a text box (a frame) is not a drawing shape.
+    // §16.2: a paragraph in a drawing shape or a text frame continues its
+    // search in the object's graphic style.
     let automatic = r##"<style:style style:name="gr1" style:family="graphic"><style:graphic-properties draw:fill="none"/><style:paragraph-properties fo:text-align="center"/><style:text-properties fo:font-size="30pt"/></style:style>"##;
     let body = r##"<text:p><draw:rect draw:style-name="gr1" text:anchor-type="paragraph" svg:width="80pt" svg:height="40pt"><text:p>in</text:p></draw:rect><draw:frame draw:style-name="gr1" text:anchor-type="paragraph" svg:width="80pt" svg:height="40pt"><draw:text-box><text:p>box</text:p></draw:text-box></draw:frame>x</text:p>"##;
     let document = read_fixture(Fixture {
@@ -721,7 +721,32 @@ fn shape_paragraphs_continue_their_search_in_the_graphic_style() {
         _ => panic!("a paragraph"),
     };
     assert_eq!(first(shapes[0]), ("center".to_string(), 30.0));
-    assert_eq!(first(shapes[1]), ("left".to_string(), 12.0));
+    assert_eq!(first(shapes[1]), ("center".to_string(), 30.0));
+}
+
+#[test]
+fn spans_widen_the_grid_and_frames_follow_their_transform() {
+    // A column span whose covered cells are left out still has its columns.
+    let body = r##"<table:table><table:table-column/><table:table-row><table:table-cell table:number-columns-spanned="3"><text:p>a</text:p></table:table-cell></table:table-row></table:table><text:p><draw:frame text:anchor-type="paragraph" svg:width="60pt" svg:height="20pt" draw:transform="translate(20pt 30pt)"><draw:text-box><text:p>t</text:p></draw:text-box></draw:frame>x</text:p>"##;
+    let document = read_fixture(Fixture {
+        body,
+        ..Fixture::default()
+    });
+    let BodyElement::Table(table) = &document.body[0] else {
+        panic!("a table")
+    };
+    assert_eq!(table.col_widths.len(), 3);
+    assert_eq!(table.rows[0].cells[0].col_span, 3);
+    // `draw:transform` positions a frame as it positions a shape.
+    let shape = paragraphs(&document.body)[0]
+        .runs
+        .iter()
+        .find_map(|run| match run {
+            DocRun::Shape(shape) => Some(shape),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!((shape.anchor_x_pt, shape.anchor_y_pt), (20.0, 30.0));
 }
 
 #[test]
@@ -781,17 +806,34 @@ fn hidden_paragraph_fields_hide_their_paragraph() {
 }
 
 #[test]
-fn phantom_list_ancestors_keep_the_counter_bound() {
-    let styles = r##"<text:list-style style:name="L"><text:list-level-style-number text:level="1" style:num-format="a" style:num-letter-sync="true" text:start-value="4294967295"/><text:list-level-style-number text:level="2" style:num-format="a" style:num-letter-sync="true" text:start-value="4294967295"/><text:list-level-style-number text:level="3" style:num-format="a" style:num-letter-sync="true" text:start-value="4294967295" text:display-levels="3"/></text:list-style>"##;
-    let body = r##"<text:list text:style-name="L"><text:list-item><text:list><text:list-item><text:list><text:list-item><text:p>deep</text:p></text:list-item></text:list></text:list-item></text:list></text:list-item></text:list>"##;
-    let document = read_fixture(Fixture {
-        styles,
-        body,
-        ..Fixture::default()
-    });
+fn list_numbers_keep_the_counter_bound() {
+    let read = |start: &str| {
+        let styles = format!(
+            r##"<text:list-style style:name="L"><text:list-level-style-number text:level="1" style:num-format="a" style:num-letter-sync="true" text:start-value="{start}"/><text:list-level-style-number text:level="2" style:num-format="a" style:num-letter-sync="true" text:start-value="{start}"/><text:list-level-style-number text:level="3" style:num-format="a" style:num-letter-sync="true" text:start-value="{start}" text:display-levels="3"/></text:list-style>"##
+        );
+        let body = r##"<text:list text:style-name="L"><text:list-item><text:list><text:list-item><text:list><text:list-item><text:p>deep</text:p></text:list-item><text:list-item><text:p>next</text:p></text:list-item></text:list></text:list-item></text:list></text:list-item></text:list>"##;
+        try_read_fixture(Fixture {
+            styles: &styles,
+            body,
+            ..Fixture::default()
+        })
+    };
+    // Phantom ancestors take their level's start: three components of at
+    // most MAX_COUNTED / 26 + 1 letters each.
+    let (document, _) = read("999999").unwrap();
     let label = texts(paragraphs(&document.body)[0])[0].clone();
-    // Three components of at most MAX_COUNTED / 26 + 1 letters each.
-    assert!(label.len() <= 3 * (1_000_000 / 26 + 2), "{}", label.len());
+    assert!(label.len() > 3 * 30_000 && label.len() <= 3 * (1_000_000 / 26 + 2));
+    // A start beyond the bound, and a counter counting past it, are
+    // refused: no number is clipped.
+    for start in [
+        "1000000",
+        "1000001",
+        "4294967295",
+        "99999999999999999999999",
+    ] {
+        let error = read(start).err().expect("refused");
+        assert!(error.contains("list number limit"), "{error}");
+    }
 }
 
 #[test]

@@ -25,14 +25,26 @@ const NS_DATASTYLE: &str = "urn:oasis:names:tc:opendocument:xmlns:datastyle:1.0"
 /// Reject a part with a style value over [`MAX_STYLE_VALUE_BYTES`] (a
 /// condition: [`MAX_STYLE_CONDITION_BYTES`]): the attributes of style,
 /// data-style and property elements (whatever the namespace of an extension
-/// property set) and every `*style-name` reference.
+/// property set), of list and outline level styles and the notes and line
+/// numbering configurations, and every `*style-name` reference.
 pub fn check_values(root: roxmltree::Node<'_, '_>) -> Result<(), String> {
     for node in root.descendants().filter(|n| n.is_element()) {
         budget::tick(1)?;
         let namespace = node.tag_name().namespace();
+        let name = node.tag_name().name();
         let style_element = namespace == Some(NS_STYLE)
             || namespace == Some(NS_DATASTYLE)
-            || node.tag_name().name().ends_with("-properties");
+            || name.ends_with("-properties")
+            || (namespace == Some(NS_TEXT)
+                && (name.starts_with("list-level-style-")
+                    || matches!(
+                        name,
+                        "list-style"
+                            | "outline-style"
+                            | "outline-level-style"
+                            | "notes-configuration"
+                            | "linenumbering-configuration"
+                    )));
         for attribute in node.attributes() {
             let name = attribute.name();
             let bound = if style_element && name == "condition" {
@@ -548,6 +560,7 @@ pub fn attributes(node: roxmltree::Node<'_, '_>) -> HashMap<Key, String> {
 const MAX_CAPTURE_DEPTH: usize = 8;
 
 fn capture(node: roxmltree::Node<'_, '_>, depth: usize) -> Result<Element, String> {
+    budget::tick(1)?;
     // Deeper descendants are not captured (no property nests that far).
     let children = if depth >= MAX_CAPTURE_DEPTH {
         Vec::new()

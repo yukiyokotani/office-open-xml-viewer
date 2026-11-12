@@ -323,11 +323,11 @@ impl<'a> Reader<'a> {
                 .max(0.0),
             graphic.length(NS_FO, "margin-left").unwrap_or(0.0).max(0.0),
         ];
-        let z_order = node
-            .attribute((NS_DRAW, "z-index"))
-            .and_then(|v| v.parse::<u32>().ok())
-            .unwrap_or(0)
-            .saturating_add(251_658_240);
+        let z_order = node.attribute((NS_DRAW, "z-index"));
+        // (DOCX relative heights above the text start at 251658240.)
+        let z_order = xml::bounded_count(z_order, u64::from(u32::MAX) - 251_658_240, "z-index")?
+            .map_or(0, |index| index as u32)
+            + 251_658_240;
         let page_anchor = anchor == "page";
         let horizontal_rel = graphic
             .get(NS_STYLE, "horizontal-rel")
@@ -500,9 +500,19 @@ impl<'a> Reader<'a> {
     fn frame(&mut self, node: roxmltree::Node<'a, 'a>) -> Result<Option<DocRun>, String> {
         let graphic = self.graphic(node)?;
         let (width, height) = self.frame_size(node, &graphic);
-        let placement = self.placement(node, &graphic, (0.0, 0.0))?;
-        let (rotation, _) =
+        let mut placement = self.placement(node, &graphic, (0.0, 0.0))?;
+        // `draw:transform` (§19.228) positions the frame like a shape: its
+        // translation replaces the offsets of `svg:x` and `svg:y`.
+        let (rotation, translated) =
             transform_rotation(node.attribute((NS_DRAW, "transform")), width, height);
+        if let Some((x, y)) = translated {
+            if let AnchorAxisChoiceWire::Offset { value_pt } = &mut placement.horizontal.1 {
+                *value_pt = x;
+            }
+            if let AnchorAxisChoiceWire::Offset { value_pt } = &mut placement.vertical.1 {
+                *value_pt = y;
+            }
+        }
         if let Some(text_box) = node.children().find(|n| xml::is(*n, NS_DRAW, "text-box")) {
             return self.text_box(node, text_box, &graphic, placement, width, height, rotation);
         }
@@ -767,7 +777,9 @@ impl<'a> Reader<'a> {
             .and_then(|value| parse_border(value, None));
         let border_width = border.as_ref().map_or(0.0, |b| b.width);
         let inner_width = (width - insets[0] - insets[2] - 2.0 * border_width).max(1.0);
-        let content = self.contained_story(text_box, inner_width)?;
+        // The frame's paragraphs continue their property search in its
+        // graphic style, like a drawing shape's (§16.2).
+        let content = self.contained_story_in(text_box, inner_width, graphic.chain.clone())?;
         let grows = frame.attribute((NS_FO, "min-height")).is_some()
             || text_box.attribute((NS_FO, "min-height")).is_some()
             || graphic.get(NS_DRAW, "auto-grow-height") == Some("true");
