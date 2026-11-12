@@ -316,17 +316,23 @@ describe('DrawingML <a:tbl> — shared interior gridline drawn once (spec-silent
     expect(horizontalAt(render(t), 18)).toHaveLength(1);
   });
 
-  it('grows a positive row for every painted baseline before the final glyph box', () => {
+  it.each([
+    { spaceLine: null, separateParagraphs: false, rowSpan: 1 },
+    { spaceLine: null, separateParagraphs: false, rowSpan: 2 },
+    { spaceLine: null, separateParagraphs: true, rowSpan: 1 },
+    { spaceLine: { type: 'pct', val: 100000 }, separateParagraphs: false, rowSpan: 1 },
+  ] as const)('grows a positive multiline row using painted line spacing (%j)', ({ spaceLine, separateParagraphs, rowSpan }) => {
     // [MS-OE376] §2.1.1347 gives Office's minimum-row rule. A lone terminal line
     // may fit by its glyph box, but multi-line content consumes every line box
-    // used by paint. Three 18pt lines at explicit 100% use 3 * 21.6pt plus
+    // used by paint. Three 18pt lines with implicit or explicit 100% spacing
+    // use 3 * 21.6pt plus
     // 3.6pt top/bottom insets = 72pt.
     const textBody = {
       verticalAnchor: 'ctr',
       paragraphs: [{
         alignment: 'l', marL: 0, marR: 0, indent: 0,
         spaceBefore: null, spaceAfter: null,
-        spaceLine: { type: 'pct', val: 100000 },
+        spaceLine,
         runs: [
           { type: 'text', text: 'one', fontSize: 18, fontFamily: 'Arial' },
           { type: 'break' },
@@ -341,7 +347,18 @@ describe('DrawingML <a:tbl> — shared interior gridline drawn once (spec-silent
       wrap: 'square', vert: 'horz', autoFit: 'none',
     } as unknown as TextBody;
     const t = tableOf([[cell({ textBody, borderB: ln() })]], [COL]);
-    t.rows[0].height = 60 * EMU;
+    if (separateParagraphs) {
+      const paragraph = textBody.paragraphs[0];
+      textBody.paragraphs = ['one', 'two', 'three'].map(text => ({
+        ...paragraph,
+        runs: [{ type: 'text', text, fontSize: 18, fontFamily: 'Arial', bold: false, italic: false, underline: false, strikethrough: false, color: null }],
+      }));
+    }
+    t.rows[0].height = 60 * EMU / rowSpan;
+    if (rowSpan === 2) {
+      t.rows[0].cells[0].rowSpan = 2;
+      t.rows.push({ height: 30 * EMU, cells: [cell({ vMerge: true })] });
+    }
     t.height = 72 * EMU;
 
     expect(horizontalAt(render(t), 72)).toHaveLength(1);

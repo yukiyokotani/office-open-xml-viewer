@@ -901,6 +901,8 @@ export interface ChartModel {
   plotAreaFillPaintAuthored?: boolean | null;
   /** `plotAreaBg` is a host automatic fallback, not direct formatting. */
   plotAreaFillAutomatic?: boolean | null;
+  /** PPTX-only observed 2-D pie/doughnut automatic frame; manual layout wins. */
+  powerpointRadialPlotFrame?: boolean | null;
   /** Direct plot-area outline paint and width. */
   plotAreaLineColor?: string | null;
   plotAreaLineFill?: SolidFill | GradientFill | PatternFill | null;

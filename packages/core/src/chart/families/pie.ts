@@ -327,13 +327,24 @@ export function renderPieChart(
   // A title band grown by authored lines can exhaust a small frame; paint no
   // plot into a non-positive rectangle, as the cartesian families do.
   if (!(pw > 0) || !(ph > 0)) return;
-  paintPlotAreaFrame(
-    ctx, chart, plotLeft, plotTop, pw, ph, ptToPx, shapeRotationDeg,
-  );
   const cx2 = frame.center.cx;
   const cy2 = frame.center.cy;
   // Pie radius (42 % of the plot): library policy from the initial renderer (#11).
   const outerR = Math.min(pw, ph) * 0.42;
+  // PPTX adapter selects this observed PowerPoint policy (automatic 2-D
+  // pie/doughnut controls with explicit gradient fill). ECMA-376 does not
+  // specify automatic plot bounds. Reuse the actual circle, without changing
+  // its radius policy; preserve manual rectangles and other hosts' behavior.
+  const circleFrame = chart.powerpointRadialPlotFrame === true
+    && !chart.plotAreaManualLayout && !chart.threeD;
+  paintPlotAreaFrame(
+    ctx, chart,
+    circleFrame ? cx2 - outerR : plotLeft,
+    circleFrame ? cy2 - outerR : plotTop,
+    circleFrame ? 2 * outerR : pw,
+    circleFrame ? 2 * outerR : ph,
+    ptToPx, shapeRotationDeg,
+  );
 
   // §21.2.2.52 firstSliceAng: the first slice begins `firstSliceAngle` degrees
   // clockwise from 12 o'clock. Canvas 0 rad points right (+x) and its angles

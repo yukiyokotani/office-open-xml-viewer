@@ -85,8 +85,10 @@ function recordingCtx(matchColor = '#4f81bd'): {
   counts: { polylineStrokes: number };
   texts: TextCall[];
   arcs: ArcCall[];
+  rects: Array<{ kind: string; color: string; x: number; y: number; w: number; h: number }>;
   markerStrokes: Array<{ color: string; width: number }>;
 } {
+  const rects: Array<{ kind: string; color: string; x: number; y: number; w: number; h: number }> = [];
   const texts: TextCall[] = [];
   const arcs: ArcCall[] = [];
   const markerStrokes: Array<{ color: string; width: number }> = [];
@@ -112,6 +114,9 @@ function recordingCtx(matchColor = '#4f81bd'): {
     get(_t, prop: string) {
       if (prop in state && typeof state[prop] !== 'function') return state[prop];
       switch (prop) {
+        case 'fillRect':
+        case 'strokeRect':
+          return (x: number, y: number, w: number, h: number) => rects.push({ kind: prop, color: String(state[prop === 'fillRect' ? 'fillStyle' : 'strokeStyle']), x, y, w, h });
         case 'measureText':
           return (t: string) => {
             const px = fontPx(String(state.font));
@@ -170,6 +175,7 @@ function recordingCtx(matchColor = '#4f81bd'): {
   return {
     ctx: new Proxy(state, handler) as unknown as CanvasRenderingContext2D,
     counts,
+    rects,
     texts,
     arcs,
     markerStrokes,
@@ -574,5 +580,43 @@ describe('authored radial and bubble geometry', () => {
     // Plot is 320×180. Excel's curve is shortSide*scale/(300+scale), so an
     // authored bubbleScale=40 gives a 21.176px diameter / 10.588px radius.
     expect(marker?.r).toBeCloseTo(10.588235, 4);
+  });
+});
+
+
+describe('PowerPoint radial plot frame', () => {
+  it.each(['pie', 'doughnut'])('fits the automatic %s frame to the circle and preserves authored paint', chartType => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType, powerpointRadialPlotFrame: true,
+      plotAreaBg: '123456', plotAreaLineColor: 'ABCDEF', plotAreaLineWidthEmu: 12700,
+      series: [series({ values: [3, 7, 5] })],
+    }), RECT, 1);
+    const { cx, cy, outerR } = pieGeometry(rec.arcs);
+    const fill = rec.rects.find(r => r.color === '#123456');
+    expect(fill).toMatchObject({ x: cx - outerR, y: cy - outerR, w: outerR * 2, h: outerR * 2 });
+    const line = rec.rects.find(r => r.color === '#ABCDEF');
+    expect(line).toMatchObject({ x: cx - outerR + 0.5, y: cy - outerR + 0.5, w: outerR * 2 - 1, h: outerR * 2 - 1 });
+  });
+
+  it('retains the automatic rectangle for hosts without the PowerPoint policy', () => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'pie', plotAreaBg: '123456', series: [series({ values: [3, 7, 5] })],
+    }), RECT, 1);
+    const fill = rec.rects.find(r => r.color === '#123456');
+    expect(fill?.w).toBe(RECT.w);
+    expect(fill?.h).toBeGreaterThan(pieGeometry(rec.arcs).outerR * 2);
+  });
+
+  it.each([false, true])('preserves the manual frame with PowerPoint policy=%s', powerpointRadialPlotFrame => {
+    const rec = recordingCtx();
+    renderChart(rec.ctx, baseModel({
+      chartType: 'doughnut', powerpointRadialPlotFrame,
+      plotAreaBg: '123456',
+      plotAreaManualLayout: { xMode: 'edge', yMode: 'edge', x: 0.1, y: 0.2, w: 0.7, h: 0.6 },
+      series: [series({ values: [3, 7, 5] })],
+    }), RECT, 1);
+    expect(rec.rects.find(r => r.color === '#123456')).toMatchObject({ x: 64, y: 72, w: 448, h: 216 });
   });
 });

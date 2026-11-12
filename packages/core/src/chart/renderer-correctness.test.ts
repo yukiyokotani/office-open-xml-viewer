@@ -7883,10 +7883,11 @@ describe('bar point styles, clustered order, and stacked labels', () => {
     expect(rec.rects.map(rect => rect.fs.toUpperCase())).toEqual(['#000000', '#1696D2']);
   });
 
-  it('places series order zero above later series in a horizontal clustered bar', () => {
+  it.each([undefined, 'minMax', 'maxMin'] as const)('places horizontal series along the category axis (%s)', orientation => {
     const rec = recordingCtx();
     renderChart(rec.ctx, baseModel({
       chartType: 'clusteredBarH',
+      catAxisOrientation: orientation,
       categories: ['Black'],
       series: [
         series({ name: 'Trust fund depleted', color: '1696D2', values: [16.2] }),
@@ -7895,7 +7896,9 @@ describe('bar point styles, clustered order, and stacked labels', () => {
     }), RECT, 1);
 
     const topToBottom = [...rec.rects].sort((a, b) => a.y - b.y);
-    expect(topToBottom.map(rect => rect.fs.toUpperCase())).toEqual(['#1696D2', '#000000']);
+    expect(topToBottom.map(rect => rect.fs.toUpperCase())).toEqual(
+      orientation === 'maxMin' ? ['#1696D2', '#000000'] : ['#000000', '#1696D2'],
+    );
   });
 
   it('uses series dLbls and centers their values inside a stacked bar by default', () => {

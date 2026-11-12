@@ -572,6 +572,7 @@ impl_retained_struct!(ChartModel {
     plot_area_fill_hidden,
     plot_area_fill_paint_authored,
     plot_area_fill_automatic,
+    powerpoint_radial_plot_frame,
     plot_area_line_color,
     plot_area_line_fill,
     plot_area_line_width_emu,

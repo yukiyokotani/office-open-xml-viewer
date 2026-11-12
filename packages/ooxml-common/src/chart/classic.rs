@@ -3210,6 +3210,7 @@ pub(super) fn parse_classic_impl(
         plot_area_fill_hidden: plot_area_fill_style.hidden,
         plot_area_fill_paint_authored: plot_area_fill_style.paint_authored,
         plot_area_fill_automatic,
+        powerpoint_radial_plot_frame: None,
         plot_area_line_color: plot_area_line_style.color,
         plot_area_line_fill: plot_area_line_style.fill,
         plot_area_line_width_emu: plot_area_line_style.width_emu,

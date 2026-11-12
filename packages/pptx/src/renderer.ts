@@ -5347,7 +5347,8 @@ export function renderTextBody(
       // changing only lnSpc to 100% or the margins to zero does not. Explicit
       // percentage spacing therefore consumes the painted natural line box
       // even for one final line. Omitted lnSpc keeps its glyph-box exception
-      // in a positive row. Neither path uses a substituted font's design box.
+      // for a lone line in a positive row. Neither path uses a substituted
+      // font's design box.
       const naturalSingle = maxSizePx * 1.2;
       const useResolvedFontMetrics = isSpAutoFit && resolvedFontLine > naturalSingle;
       // A live resolved font box describes containment, not baseline advance.
@@ -5365,7 +5366,11 @@ export function renderTextBody(
       );
       let lineHeight = paintedLineHeight;
       if (measureOnly && !isSpAutoFit && !measureNaturalLineSpacing) {
-        if (!para.spaceLine) {
+        // The positive-row glyph-box exception applies only to a lone
+        // line. Multiline measurement must use the same advance as paint;
+        // shrinking every measured line loses implicit leading at each wrap
+        // and lets later cell backgrounds cover the preceding row's text.
+        if (!para.spaceLine && body.paragraphs.length === 1 && lines.length === 1) {
           lineHeight = maxSizePx;
         }
       }

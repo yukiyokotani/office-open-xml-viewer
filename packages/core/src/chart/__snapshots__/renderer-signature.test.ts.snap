@@ -780,7 +780,7 @@ lineTo 552.8,335.45
 stroke ss=#e0e0e0 lw=0.5 dash=
 fillText "30" 552.8,345.45 fs=#555 font=11px sans-serif al=center bl=middle
 set fillStyle=#4472C4
-fillRect 30.775,264.1399,174.0083,25.931 fs=#4472C4
+fillRect 30.775,290.0708,174.0083,25.931 fs=#4472C4
 set font=bold 11px sans-serif
 save
 beginPath
@@ -788,52 +788,52 @@ rect 30.775,63.175,522.025,272.275
 clip
 set fillStyle=#333
 set textAlign=left
-fillText "10" 210.2833,277.1054 fs=#333 font=bold 11px sans-serif al=left bl=middle
+fillText "10" 210.2833,303.0363 fs=#333 font=bold 11px sans-serif al=left bl=middle
 restore
 set fillStyle=#ED7D31
-fillRect 30.775,290.0708,139.2067,25.931 fs=#ED7D31
+fillRect 30.775,264.1399,139.2067,25.931 fs=#ED7D31
 save
 beginPath
 rect 30.775,63.175,522.025,272.275
 clip
 set fillStyle=#333
-fillText "8" 175.4817,303.0363 fs=#333 font=bold 11px sans-serif al=left bl=middle
+fillText "8" 175.4817,277.1054 fs=#333 font=bold 11px sans-serif al=left bl=middle
 restore
 set fillStyle=#4472C4
-fillRect 30.775,173.3815,417.62,25.931 fs=#4472C4
+fillRect 30.775,199.3125,417.62,25.931 fs=#4472C4
 save
 beginPath
 rect 30.775,63.175,522.025,272.275
 clip
 set fillStyle=#333
-fillText "24" 453.895,186.347 fs=#333 font=bold 11px sans-serif al=left bl=middle
+fillText "24" 453.895,212.278 fs=#333 font=bold 11px sans-serif al=left bl=middle
 restore
 set fillStyle=#ED7D31
-fillRect 30.775,199.3125,261.0125,25.931 fs=#ED7D31
+fillRect 30.775,173.3815,261.0125,25.931 fs=#ED7D31
 save
 beginPath
 rect 30.775,63.175,522.025,272.275
 clip
 set fillStyle=#333
-fillText "15" 297.2875,212.278 fs=#333 font=bold 11px sans-serif al=left bl=middle
+fillText "15" 297.2875,186.347 fs=#333 font=bold 11px sans-serif al=left bl=middle
 restore
 set fillStyle=#4472C4
-fillRect 30.775,82.6232,295.8142,25.931 fs=#4472C4
+fillRect 30.775,108.5542,295.8142,25.931 fs=#4472C4
 save
 beginPath
 rect 30.775,63.175,522.025,272.275
 clip
 set fillStyle=#333
-fillText "17" 332.0892,95.5887 fs=#333 font=bold 11px sans-serif al=left bl=middle
+fillText "17" 332.0892,121.5196 fs=#333 font=bold 11px sans-serif al=left bl=middle
 restore
 set fillStyle=#ED7D31
-fillRect 30.775,108.5542,382.8183,25.931 fs=#ED7D31
+fillRect 30.775,82.6232,382.8183,25.931 fs=#ED7D31
 save
 beginPath
 rect 30.775,63.175,522.025,272.275
 clip
 set fillStyle=#333
-fillText "22" 419.0933,121.5196 fs=#333 font=bold 11px sans-serif al=left bl=middle
+fillText "22" 419.0933,95.5887 fs=#333 font=bold 11px sans-serif al=left bl=middle
 restore
 set fillStyle=#555
 set font=11px sans-serif

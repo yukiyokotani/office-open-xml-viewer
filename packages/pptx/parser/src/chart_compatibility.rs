@@ -20,9 +20,35 @@ use std::collections::BTreeMap;
 pub(crate) fn apply_powerpoint_classic_chart_space_frame(chart: &mut ChartModel) {
     chart.rounded_corners.get_or_insert(true);
 
+    // Observed PowerPoint compatibility, not an ECMA-376 §21.2.2.145
+    // automatic-layout rule. 2-D pie/doughnut controls at omitted/2/32/33/34/
+    // 41/48 have no automatic plot fill; explicit gradient paint occupies the
+    // circle's bounding square. Keep 3-D, of-pie and mixed groups outside this
+    // evidence boundary; the renderer preserves manual layout and authored lines.
+    let radial = matches!(chart.chart_type.as_str(), "pie" | "doughnut")
+        && chart.three_d.is_none()
+        && chart
+            .plot_groups
+            .as_ref()
+            .is_none_or(|groups| groups.iter().all(|group| group.kind == chart.chart_type));
+    if radial {
+        chart.powerpoint_radial_plot_frame = Some(true);
+    }
     let roles = chart
         .classic_chart_style_roles
         .get_or_insert_with(BTreeMap::new);
+    // PPTX styles 1..32 also suppress automatic cartesian plot fill, unlike
+    // ECMA-376 §21.2.3.46 Tables 1/3. PowerPoint controls and LibreOffice
+    // commit 87350de8737ca91ba71b356ca9f33fea99e74591 establish that boundary.
+    // Change built-in fill only: direct/linked paint, lines and effects win.
+    if radial || matches!(chart.legacy_chart_style.unwrap_or(2), 1..=32) {
+        if let Some(plot) = roles.get_mut("plotArea") {
+            plot.fill_colors = None;
+            plot.fill_paints = None;
+            plot.fill_hidden = Some(true);
+            plot.fill_paint_authored = Some(true);
+        }
+    }
     let style = match chart.legacy_chart_style.unwrap_or(2) {
         1..=32 => {
             roles.remove("chartArea");
@@ -96,6 +122,101 @@ mod tests {
         fn resolve_solid_fill(&self, _node: roxmltree::Node<'_, '_>) -> Option<String> {
             None
         }
+    }
+
+    #[test]
+    fn powerpoint_radial_plot_background_is_transparent_for_light_and_dark_styles() {
+        for (kind, transparent) in [("pie", true), ("doughnut", true), ("pie3D", false)] {
+            for style in [34, 48] {
+                let xml = format!(
+                    r#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><c:style val="{style}"/><c:chart><c:plotArea><c:{kind}Chart><c:ser><c:idx val="0"/><c:order val="0"/><c:val><c:numLit><c:pt idx="0"><c:v>1</c:v></c:pt></c:numLit></c:val></c:ser></c:{kind}Chart><c:spPr><a:solidFill><a:srgbClr val="123456"/></a:solidFill><a:ln><a:solidFill><a:srgbClr val="ABCDEF"/></a:solidFill></a:ln></c:spPr></c:plotArea></c:chart></c:chartSpace>"#
+                );
+                let chart =
+                    crate::chart::parse_legacy_chart(&xml, &std::collections::HashMap::new())
+                        .unwrap()
+                        .chart;
+                let role = &chart.classic_chart_style_roles.as_ref().unwrap()["plotArea"];
+                assert_eq!(
+                    role.fill_hidden == Some(true),
+                    transparent,
+                    "{kind} style={style}"
+                );
+                assert_eq!(
+                    chart.powerpoint_radial_plot_frame == Some(true),
+                    transparent
+                );
+                assert_eq!(chart.plot_area_bg.as_deref(), Some("123456"));
+                assert_eq!(chart.plot_area_line_color.as_deref(), Some("ABCDEF"));
+            }
+        }
+    }
+
+    #[test]
+    fn powerpoint_plot_background_defaults_preserve_authored_paint() {
+        for style in std::iter::once(None).chain((1..=48).map(Some)) {
+            for fill in [
+                "",
+                "<a:solidFill><a:srgbClr val=\"123456\"/></a:solidFill>",
+                "<a:noFill/>",
+            ] {
+                let style_xml = style
+                    .map(|v| format!("<c:style val=\"{v}\"/>"))
+                    .unwrap_or_default();
+                let shape = if fill.is_empty() {
+                    String::new()
+                } else {
+                    format!("<c:spPr>{fill}</c:spPr>")
+                };
+                let xml = format!(
+                    r#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">{style_xml}<c:chart><c:plotArea><c:barChart><c:barDir val="col"/><c:ser><c:idx val="0"/><c:order val="0"/><c:val><c:numLit><c:pt idx="0"><c:v>1</c:v></c:pt></c:numLit></c:val></c:ser></c:barChart>{shape}</c:plotArea></c:chart></c:chartSpace>"#
+                );
+                let element =
+                    crate::chart::parse_legacy_chart(&xml, &std::collections::HashMap::new())
+                        .unwrap();
+                let chart = element.chart;
+                let role = &chart.classic_chart_style_roles.as_ref().unwrap()["plotArea"];
+                assert_eq!(
+                    role.fill_hidden == Some(true),
+                    style.unwrap_or(2) <= 32,
+                    "style={style:?}"
+                );
+                if fill.contains("solidFill") {
+                    assert_eq!(chart.plot_area_bg.as_deref(), Some("123456"));
+                } else if fill.contains("noFill") {
+                    assert_eq!(chart.plot_area_fill_hidden, Some(true));
+                }
+                if style.unwrap_or(2) > 32 {
+                    assert!(role.fill_colors.as_ref().is_some_and(|v| v[0].is_some()));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn powerpoint_plot_background_preserves_linked_fill() {
+        let xml = r#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:style val="2"/><c:chart><c:plotArea><c:barChart><c:barDir val="col"/><c:ser><c:idx val="0"/><c:order val="0"/><c:val><c:numLit><c:pt idx="0"><c:v>1</c:v></c:pt></c:numLit></c:val></c:ser></c:barChart></c:plotArea></c:chart></c:chartSpace>"#;
+        let style = r#"<cs:chartStyle xmlns:cs="http://schemas.microsoft.com/office/drawing/2012/chartStyle" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><cs:plotArea><cs:spPr><a:solidFill><a:srgbClr val="123456"/></a:solidFill></cs:spPr></cs:plotArea></cs:chartStyle>"#;
+        let document = roxmltree::Document::parse(xml).unwrap();
+        let mut chart = ooxml_common::chart::parse_chart_part(
+            document.root_element(),
+            &ooxml_common::chart::ChartParseContext {
+                color_resolver: Some(&NoTheme),
+                style_xml: Some(style),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let linked_before = serde_json::to_value(&chart.chart_style_roles).unwrap();
+        assert!(linked_before.to_string().contains("123456"));
+        apply_powerpoint_classic_chart_space_frame(&mut chart);
+        assert_eq!(
+            serde_json::to_value(&chart.chart_style_roles).unwrap(),
+            linked_before
+        );
+        assert_eq!(
+            chart.classic_chart_style_roles.as_ref().unwrap()["plotArea"].fill_hidden,
+            Some(true)
+        );
     }
 
     #[test]

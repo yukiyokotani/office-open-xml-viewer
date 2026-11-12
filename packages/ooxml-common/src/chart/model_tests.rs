@@ -164,6 +164,7 @@ mod tests {
             plot_area_fill_hidden: None,
             plot_area_fill_paint_authored: None,
             plot_area_fill_automatic: None,
+            powerpoint_radial_plot_frame: None,
             plot_area_line_color: None,
             plot_area_line_fill: None,
             plot_area_line_width_emu: None,

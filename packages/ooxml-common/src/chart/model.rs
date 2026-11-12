@@ -479,6 +479,10 @@ pub struct ChartModel {
     /// direct formatting. Linked chart-style paint therefore has precedence.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plot_area_fill_automatic: Option<bool>,
+    /// PowerPoint's observed 2-D pie/doughnut automatic plot frame follows the
+    /// circle bounds. Selected only by the PPTX adapter; manual layout wins.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub powerpoint_radial_plot_frame: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plot_area_line_color: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

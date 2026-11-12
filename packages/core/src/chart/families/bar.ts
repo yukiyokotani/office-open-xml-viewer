@@ -1777,7 +1777,11 @@ export function renderBarChart(
         // A second overlay group restarts at its own first bar; using the
         // flattened plot-area series index pushes it outside the category
         // slot when preceding groups contain more series.
-        const siVisual = groupIndex;
+        // c:order (§21.2.2.128) supplies collection order. PowerPoint
+        // minMax/maxMin controls place that order along the category axis,
+        // not screen Y: minMax horizontal clusters run bottom-to-top.
+        // Apply the same mapping to bars and their adornment centers.
+        const siVisual = catRev ? groupIndex : group.length - 1 - groupIndex;
         const by = isStackedGroup
           ? categoryStart(ci, true) + catStart
           : categoryStart(ci, true) + catStart + siVisual * clusterGap;
@@ -1954,7 +1958,8 @@ export function renderBarChart(
     const geometry = clusterGeometry(group, categorySize);
     const start = categoryStart(categoryIndex, horizontal) + geometry.catStart;
     if (groupIsStacked(series)) return start + geometry.barW / 2;
-    return start + groupIndex * geometry.clusterGap + geometry.barW / 2;
+    const visualIndex = horizontal && !catRev ? group.length - 1 - groupIndex : groupIndex;
+    return start + visualIndex * geometry.clusterGap + geometry.barW / 2;
   };
   const continuousBarCategoryCenter = (series: ChartSeries, index: number): number => {
     if (Number.isInteger(index) && index >= 0 && index < n) {
@@ -1969,7 +1974,8 @@ export function renderBarChart(
       ? (catRev ? index : n - 1 - index)
       : (catRev ? n - 1 - index : index);
     const start = (horizontal ? py0 : px0) + slot * gap + geometry.catStart;
-    const visualIndex = groupIsStacked(series) ? 0 : groupIndex;
+    const visualIndex = groupIsStacked(series) ? 0
+      : horizontal && !catRev ? group.length - 1 - groupIndex : groupIndex;
     return start + visualIndex * geometry.clusterGap + geometry.barW / 2;
   };
   for (let seriesIndex = 0; seriesIndex < barSeries.length; seriesIndex++) {
