@@ -210,6 +210,13 @@ impl<'a> Reader<'a> {
             self.anchor_page_number(node)?
         };
         if let Some(page) = page {
+            // One page object per drawing element, however often the story
+            // holding it is read (a master's header can be read for several
+            // page styles).
+            let identity = (node.document() as *const _ as usize, node.id());
+            if !self.page_object_nodes.insert(identity) {
+                return Ok(None);
+            }
             // A group's further members join the pending anchors: they belong
             // to the page too.
             let before = self.pending_anchors.len();
@@ -1412,16 +1419,20 @@ impl<'a> Reader<'a> {
         // §19.759 values only (a validated, fixed-size anchor). An
         // as-character group cannot stay one inline object in the DOCX
         // model; its members keep their paragraph anchoring.
-        let anchor = match node
-            .attribute((NS_TEXT, "anchor-type"))
-            .or_else(|| graphic.get(NS_TEXT, "anchor-type"))
-        {
-            Some("page") => Some("page"),
-            Some("paragraph") => Some("paragraph"),
-            Some("char") => Some("char"),
-            Some("frame") => Some("frame"),
-            _ => self.group_anchor,
-        };
+        // The outermost group is the anchored object: an enclosing group's
+        // anchor wins over a nested group's own.
+        let anchor = self.group_anchor.or_else(|| {
+            match node
+                .attribute((NS_TEXT, "anchor-type"))
+                .or_else(|| graphic.get(NS_TEXT, "anchor-type"))
+            {
+                Some("page") => Some("page"),
+                Some("paragraph") => Some("paragraph"),
+                Some("char") => Some("char"),
+                Some("frame") => Some("frame"),
+                _ => None,
+            }
+        });
         let saved = std::mem::replace(&mut self.group_anchor, anchor);
         self.group_depth += 1;
         let result = self.group_members(node);

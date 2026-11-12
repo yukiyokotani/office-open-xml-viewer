@@ -216,6 +216,7 @@ pub fn read(package: &OdfPackage) -> Result<(Document, Vec<OwnedDocumentResource
         page_objects: BTreeMap::new(),
         group_anchor: None,
         group_depth: 0,
+        page_object_nodes: HashSet::new(),
         rejected_images: HashSet::new(),
         section_markers: 0,
         region_cache: HashMap::new(),
@@ -409,6 +410,8 @@ struct Reader<'a> {
     /// Drawing groups enclosing the current drawing: their members are not
     /// anchored objects of their own (never page objects).
     group_depth: usize,
+    /// Drawing elements already made page objects (by document and node).
+    page_object_nodes: HashSet<(usize, roxmltree::NodeId)>,
     /// Drawings anchored to an explicit physical page, by page (1-based).
     page_objects: BTreeMap<u32, Vec<DocRun>>,
     /// Each retained picture's intrinsic size by key (scanned once).

@@ -871,3 +871,35 @@ fn group_members_follow_their_group_not_their_own_page() {
         .unwrap();
     assert_eq!(shape.anchor_y_relative_from.as_deref(), Some("page"));
 }
+
+#[test]
+fn page_objects_are_extracted_once_and_nested_groups_keep_the_outer_anchor() {
+    // Masters that name each other as next style read the same header for
+    // two page styles; its page object is still one. A nested group takes
+    // the outermost group's page anchor.
+    let masters = r##"<style:master-page style:name="A" style:page-layout-name="pm1" style:next-style-name="B"><style:header><text:p>a<draw:rect text:anchor-type="page" text:anchor-page-number="2" svg:width="1cm" svg:height="1cm"/></text:p></style:header></style:master-page><style:master-page style:name="B" style:page-layout-name="pm1" style:next-style-name="A"><style:header><text:p>b</text:p></style:header></style:master-page>"##;
+    let automatic = r##"<style:style style:name="PA" style:family="paragraph" style:master-page-name="A"/><style:style style:name="PB" style:family="paragraph" style:master-page-name="B"/>"##;
+    let body = r##"<draw:g text:anchor-type="page" text:anchor-page-number="3"><draw:g text:anchor-type="paragraph"><draw:rect svg:width="1cm" svg:height="1cm"/></draw:g></draw:g><text:p text:style-name="PA">1</text:p><text:p text:style-name="PB">2</text:p><text:p text:style-name="PA">3</text:p>"##;
+    let document = read_fixture(Fixture {
+        masters,
+        automatic,
+        body,
+        ..Fixture::default()
+    });
+    let pages: Vec<u32> = document
+        .page_objects
+        .iter()
+        .map(|object| object.page)
+        .collect();
+    assert_eq!(pages, [2, 3]);
+    let host = paragraphs(&document.page_objects[1].body)[0];
+    let shape = host
+        .runs
+        .iter()
+        .find_map(|run| match run {
+            DocRun::Shape(shape) => Some(shape),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(shape.anchor_y_relative_from.as_deref(), Some("page"));
+}
