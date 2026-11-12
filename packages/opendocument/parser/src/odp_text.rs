@@ -1825,8 +1825,8 @@ fn walk_inline<'a>(
                     }
                     continue;
                 }
-                if let Some((style, carried_link)) = carried.take() {
-                    push_text(runs, &style, " ", carried_link.as_deref(), env)?;
+                if let Some(space) = carried.take() {
+                    emit_space(runs, space, ws.append, env)?;
                     pending_here = false;
                 } else if pending_here {
                     piece.push(' ');
@@ -1835,10 +1835,15 @@ fn walk_inline<'a>(
                 piece.push(c);
                 ws.started = true;
             }
+            let appended_piece = !piece.is_empty();
             push_text(runs, style_for!(stack), &piece, link, env)?;
             ws.pending = match carried {
                 Some(space) => Some(space),
-                None if pending_here => Some((style_for!(stack).clone(), link.map(str::to_string))),
+                None if pending_here => {
+                    // Right after this node's own text: it joins that run.
+                    ws.append = appended_piece;
+                    Some((style_for!(stack).clone(), link.map(str::to_string)))
+                }
                 None => None,
             };
             continue;
@@ -1857,8 +1862,8 @@ fn walk_inline<'a>(
                 "s" | "tab" | "line-break" | "page-number" | "page-count"
             ) | (Some(NS_PRESENTATION), "footer" | "header" | "date-time")
         ) {
-            if let Some((style, carried_link)) = ws.pending.take() {
-                push_text(runs, &style, " ", carried_link.as_deref(), env)?;
+            if let Some(space) = ws.pending.take() {
+                emit_space(runs, space, ws.append, env)?;
             }
             ws.started = true;
         }
@@ -1994,6 +1999,26 @@ fn walk_inline<'a>(
 struct Collapse {
     started: bool,
     pending: Option<(RunStyle, Option<String>)>,
+    /// The pending space directly follows the last run, of its style.
+    append: bool,
+}
+
+/// Emit a carried space: appended to the run it follows when that run has
+/// its style, else a run of its own.
+fn emit_space(
+    runs: &mut Vec<TextRun>,
+    (style, link): (RunStyle, Option<String>),
+    append: bool,
+    env: &TextEnv<'_, '_>,
+) -> Result<(), String> {
+    if append {
+        if let Some(TextRun::Text(data)) = runs.last_mut() {
+            env.payload.charge(1)?;
+            data.text.push(' ');
+            return Ok(());
+        }
+    }
+    push_text(runs, &style, " ", link.as_deref(), env)
 }
 
 /// §6.1.2 white-space processing: runs of spaces, tabs and newlines in text
