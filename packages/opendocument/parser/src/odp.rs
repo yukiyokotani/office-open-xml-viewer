@@ -412,7 +412,14 @@ impl<'a, 'r, 'p> SlideReader<'a, 'r, 'p> {
                     ("page-number", flag("display-page-number")),
                 ];
                 let children: Vec<Nd<'a>> = master.children().filter(|n| n.is_element()).collect();
-                self.visit(children.len())?;
+                // Every master node examined (comments and text included),
+                // and the wrapped shapes looked into, each slide.
+                self.visit(master.children().count())?;
+                for child in &children {
+                    if xml::is(*child, NS_DRAW, "a") {
+                        self.visit(child.children().count())?;
+                    }
+                }
                 let shown: Vec<Nd<'a>> = children
                     .into_iter()
                     .filter(|child| {
@@ -568,8 +575,11 @@ impl<'a, 'r, 'p> SlideReader<'a, 'r, 'p> {
         }
         match node.tag_name().name() {
             "g" => {
-                for child in node.children().filter(|n| n.is_element()) {
-                    self.object(child, ctx, out, depth + 1)?;
+                for child in node.children() {
+                    self.visit(1)?;
+                    if child.is_element() {
+                        self.object(child, ctx, out, depth + 1)?;
+                    }
                 }
             }
             "a" => {
@@ -581,8 +591,11 @@ impl<'a, 'r, 'p> SlideReader<'a, 'r, 'p> {
                     link,
                     ..clone_ctx(ctx)
                 };
-                for child in node.children().filter(|n| n.is_element()) {
-                    self.object(child, &inner, out, depth + 1)?;
+                for child in node.children() {
+                    self.visit(1)?;
+                    if child.is_element() {
+                        self.object(child, &inner, out, depth + 1)?;
+                    }
                 }
             }
             "frame" => {
