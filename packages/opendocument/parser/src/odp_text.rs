@@ -948,7 +948,16 @@ fn paragraph<'a>(
         .charge(record_bytes(&base_run)?.saturating_mul(2))?;
     let mut runs = Vec::new();
     let mut stack: Vec<Nd<'a>> = Vec::new();
-    walk_inline(node, &mut stack, &styles, env, &mut runs, None, 0)?;
+    walk_inline(
+        node,
+        &mut stack,
+        &styles,
+        env,
+        &mut runs,
+        None,
+        0,
+        &mut Collapse::default(),
+    )?;
     let end_run = base_run.clone();
     // A label's colour/size follow the first run when the list does not set them.
     let paragraph = Paragraph {
@@ -1759,6 +1768,7 @@ fn walk_inline<'a>(
     runs: &mut Vec<TextRun>,
     link: Option<&str>,
     depth: usize,
+    ws: &mut Collapse,
 ) -> Result<(), String> {
     if depth > MAX_SPAN_DEPTH {
         return Err(crate::error::invalid("text spans are nested too deeply"));
@@ -1802,13 +1812,35 @@ fn walk_inline<'a>(
         if child.is_text() {
             let text = child.text().unwrap_or("");
             env.payload.step(text.len() / 64)?;
-            push_text(
-                runs,
-                style_for!(stack),
-                &collapse_whitespace(text),
-                link,
-                env,
-            )?;
+            // §6.1.2: white space collapses over the whole paragraph. A space
+            // carried from an earlier node is emitted (in its own style) only
+            // when content follows; leading and trailing spaces are dropped.
+            let mut carried = ws.pending.take();
+            let mut pending_here = false;
+            let mut piece = String::new();
+            for c in text.chars() {
+                if matches!(c, ' ' | '\t' | '\n' | '\r') {
+                    if ws.started {
+                        pending_here = true;
+                    }
+                    continue;
+                }
+                if let Some((style, carried_link)) = carried.take() {
+                    push_text(runs, &style, " ", carried_link.as_deref(), env)?;
+                    pending_here = false;
+                } else if pending_here {
+                    piece.push(' ');
+                    pending_here = false;
+                }
+                piece.push(c);
+                ws.started = true;
+            }
+            push_text(runs, style_for!(stack), &piece, link, env)?;
+            ws.pending = match carried {
+                Some(space) => Some(space),
+                None if pending_here => Some((style_for!(stack).clone(), link.map(str::to_string))),
+                None => None,
+            };
             continue;
         }
         if !child.is_element() {
@@ -1816,10 +1848,33 @@ fn walk_inline<'a>(
         }
         let ns = child.tag_name().namespace();
         let name = child.tag_name().name();
+        // Spaces, tabs, breaks and fields are content: a carried space
+        // before them is kept.
+        if matches!(
+            (ns, name),
+            (
+                Some(NS_TEXT),
+                "s" | "tab" | "line-break" | "page-number" | "page-count"
+            ) | (Some(NS_PRESENTATION), "footer" | "header" | "date-time")
+        ) {
+            if let Some((style, carried_link)) = ws.pending.take() {
+                push_text(runs, &style, " ", carried_link.as_deref(), env)?;
+            }
+            ws.started = true;
+        }
         match (ns, name) {
             (Some(NS_TEXT), "span") => {
                 stack.push(child);
-                walk_inline(child, stack, paragraph_styles, env, runs, link, depth + 1)?;
+                walk_inline(
+                    child,
+                    stack,
+                    paragraph_styles,
+                    env,
+                    runs,
+                    link,
+                    depth + 1,
+                    ws,
+                )?;
                 stack.pop();
             }
             (Some(NS_TEXT), "a") => {
@@ -1833,6 +1888,7 @@ fn walk_inline<'a>(
                     runs,
                     href.or(link),
                     depth + 1,
+                    ws,
                 )?;
                 stack.pop();
             }
@@ -1900,17 +1956,44 @@ fn walk_inline<'a>(
             | (Some(crate::xml::NS_OFFICE), "annotation-end") => {}
             (Some(NS_TEXT), "ruby") => {
                 if let Some(base) = child.children().find(|c| xml::is(*c, NS_TEXT, "ruby-base")) {
-                    walk_inline(base, stack, paragraph_styles, env, runs, link, depth + 1)?;
+                    walk_inline(
+                        base,
+                        stack,
+                        paragraph_styles,
+                        env,
+                        runs,
+                        link,
+                        depth + 1,
+                        ws,
+                    )?;
                 }
             }
             _ => {
                 // Other fields (dates, titles, file names, …) show their
                 // stored representation.
-                walk_inline(child, stack, paragraph_styles, env, runs, link, depth + 1)?;
+                walk_inline(
+                    child,
+                    stack,
+                    paragraph_styles,
+                    env,
+                    runs,
+                    link,
+                    depth + 1,
+                    ws,
+                )?;
             }
         }
     }
     Ok(())
+}
+
+/// White-space collapsing state of one paragraph (§6.1.2): whether content
+/// has started, and a space waiting for following content (its style and
+/// link).
+#[derive(Default)]
+struct Collapse {
+    started: bool,
+    pending: Option<(RunStyle, Option<String>)>,
 }
 
 /// §6.1.2 white-space processing: runs of spaces, tabs and newlines in text

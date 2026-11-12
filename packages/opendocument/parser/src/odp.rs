@@ -2094,6 +2094,30 @@ mod tests {
     }
 
     #[test]
+    fn white_space_collapses_across_spans_of_a_paragraph() {
+        let body = r#"<draw:frame svg:width="10cm" svg:height="5cm"><draw:text-box><text:p>A <text:span> B</text:span></text:p><text:p>  lead <text:s/>x <text:span> </text:span></text:p><text:p>a<text:tab/> <text:line-break/> b</text:p></draw:text-box></draw:frame>"#;
+        let deck = deck("", "", "", &page(body)).unwrap();
+        let slide0 = model(&deck, 0);
+        let text: Vec<String> = shapes(&slide0)[0]
+            .text_body
+            .as_ref()
+            .unwrap()
+            .paragraphs
+            .iter()
+            .map(|p| {
+                p.runs
+                    .iter()
+                    .map(|r| match r {
+                        pptx_model::TextRun::Text(d) => d.text.clone(),
+                        _ => "<br>".to_string(),
+                    })
+                    .collect()
+            })
+            .collect();
+        assert_eq!(text, ["A B", "lead  x", "a\t <br> b"]);
+    }
+
+    #[test]
     fn speaker_notes_read_each_paragraph_once() {
         let body = r#"<presentation:notes><draw:frame presentation:class="notes"><draw:text-box><text:p>One<text:s text:c="2"/>two</text:p><text:p>Three<text:p>nested</text:p></text:p></draw:text-box></draw:frame></presentation:notes>"#;
         let deck = deck("", "", "", &page(body)).unwrap();
