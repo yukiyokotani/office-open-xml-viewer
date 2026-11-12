@@ -733,6 +733,10 @@ export interface TextLayoutService {
    * `request`'s slots is a symbol font whose face draws it as a symbol code
    * (core symbol-face.ts). Undefined: not judged. */
   symbolDraws?(request: Readonly<Omit<SymbolTextRequest, 'text'>>, character: string): boolean | undefined;
+  /** Whether the fonts {@link shape} selects for the characters of `text`
+   * under `request`'s slots paint them in the text colour: false when one
+   * is painted in its own colours, undefined when one is inconclusive. */
+  symbolMonochrome?(request: Readonly<Omit<SymbolTextRequest, 'text'>>, text: string): boolean | undefined;
   /** The authored family of the §17.3.2.26 slot that {@link shape} selects
    * for `character` under `request`'s slots. */
   scalarFamily?(request: Readonly<Omit<SymbolTextRequest, 'text'>>, character: string): string | null | undefined;
@@ -774,6 +778,9 @@ export interface TextLayoutServiceInput {
   /** Whether the resolved font draws one authored symbol code as its own
    * symbol glyph; undefined when it cannot be judged. */
   readonly symbolDraws?: (code: string, resolution: FontResolution) => boolean | undefined;
+  /** Whether the resolved font paints `text` in the text colour (never a
+   * colour glyph); undefined when inconclusive. */
+  readonly symbolMonochrome?: (text: string, resolution: FontResolution) => boolean | undefined;
 }
 
 /** Generic tail for an authored DOCX face. fontTable family/pitch metadata is
@@ -1391,6 +1398,16 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
       const slot = scalarSlot(request, character);
       if (!isSymbolFontFamily(requestedFamily(request, slot))) return false;
       return input.symbolDraws?.(character, resolve({ ...request, text: character, slot }));
+    },
+    symbolMonochrome(request: Readonly<Omit<SymbolTextRequest, 'text'>>, text: string) {
+      let proven: boolean | undefined = true;
+      for (const character of text) {
+        const verdict = input.symbolMonochrome?.(character,
+          resolve({ ...request, text: character, slot: scalarSlot(request, character) }));
+        if (verdict === false) return false;
+        if (verdict === undefined) proven = undefined;
+      }
+      return proven;
     },
     symbolText(request: Readonly<SymbolTextRequest>) {
       const out: SymbolTextSegment[] = [];

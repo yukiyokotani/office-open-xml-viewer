@@ -81,6 +81,8 @@ describe('resolveNumberingMarkerGeometry', () => {
   // as its own symbol glyphs.
   const symbolMarker = (text: string, native: readonly string[], options: Readonly<{
     complexScriptFace?: string; baseRtl?: boolean;
+    /** Families whose face paints text in its own colours. */
+    colourFamilies?: readonly string[];
   }> = {}) => {
     const requests: { text: string; ascii: string | null | undefined; cs: string | null | undefined }[] = [];
     const base = createTextLayoutService({
@@ -93,6 +95,7 @@ describe('resolveNumberingMarkerGeometry', () => {
         monochrome: () => true,
       }),
       symbolDraws: (code) => native.includes(code),
+      symbolMonochrome: (_text, resolution) => !options.colourFamilies?.includes(resolution.requestedFamily),
     });
     const service: TextLayoutService = { ...base, shape(request) {
       requests.push({ text: request.text, ascii: request.fonts.ascii, cs: request.fonts.complexScript });
@@ -127,6 +130,13 @@ describe('resolveNumberingMarkerGeometry', () => {
     const { geometry, requests } = symbolMarker('', []);
     expect(geometry.markerText).toBe('•');
     expect(requests).toEqual([{ text: '•', ascii: 'Symbol', cs: 'Symbol' }]);
+  });
+
+  it('gives up the authored slots where they would paint the converted text in colour', () => {
+    // The conversion's colour proof was made in the cleared route.
+    const { geometry, requests } = symbolMarker('\uF0B7', [], { colourFamilies: ['Symbol'] });
+    expect(geometry.markerText).toBe('\u2022');
+    expect(requests).toEqual([{ text: '\u2022', ascii: null, cs: null }]);
   });
 
   it('clears the slots of converted text a symbol cmap could read as its own codes', () => {

@@ -475,6 +475,8 @@ export function createProductionTextLayoutService(
           oracle.segments(text, family, fontOf(resolution), (converted) => fontOf(convertedRoute(converted))),
         symbolDraws: (code: string, resolution: import('./font-service.js').FontResolution) =>
           oracle.draws(code, fontOf(resolution)),
+        symbolMonochrome: (text: string, resolution: import('./font-service.js').FontResolution) =>
+          oracle.monochrome(text, fontOf(resolution)),
       };
     })(),
     genericFamilies: Object.fromEntries(routedFontFamilies.map((family) => [

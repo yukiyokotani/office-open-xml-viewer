@@ -120,7 +120,8 @@ export function createSymbolMonochromeProbe(
       const context = ctx;
       // Whether every solid pixel of the text drawn in `fill` has that
       // colour (`channel` full, the other two empty). Faint antialiasing
-      // pixels are ink but carry too little colour to judge.
+      // pixels carry too little colour to judge, so a drawing without one
+      // solid pixel (no ink, or a wholly translucent glyph) is inconclusive.
       const follows = (fill: string, channel: number): boolean | undefined => {
         context.clearRect(0, 0, 48, 48);
         context.globalAlpha = 1;
@@ -130,15 +131,14 @@ export function createSymbolMonochromeProbe(
         context.font = font;
         context.fillText(text, 4, 24);
         const data = context.getImageData(0, 0, 48, 48).data;
-        let ink = false;
+        let judged = false;
         for (let index = 0; index < data.length; index += 4) {
-          if (data[index + 3]! === 0) continue;
-          ink = true;
           if (data[index + 3]! < 64) continue;
+          judged = true;
           const own = data[index + channel]!;
           if (own < 200 || data[index]! + data[index + 1]! + data[index + 2]! - own > 48) return false;
         }
-        return ink ? true : undefined;
+        return judged ? true : undefined;
       };
       try {
         monochrome = follows('#f00', 0);
@@ -180,6 +180,9 @@ export interface SymbolFaceOracle {
    * `[style] [weight] <size>px <family list>`. Undefined: not judged.
    */
   draws(code: string, font: string): boolean | undefined;
+  /** Whether `font` (a Canvas font) paints `text` in the text colour
+   * ({@link createSymbolMonochromeProbe}); undefined: inconclusive. */
+  monochrome(text: string, font: string): boolean | undefined;
   /** {@link symbolTextToUnicodeSegments} of `text` in the symbol family
    * `fontFamily`, each code judged by {@link draws} in `font`. */
   segments(
@@ -297,6 +300,7 @@ export function createSymbolFaceOracle(
   };
   return Object.freeze({
     draws: decide,
+    monochrome: (text: string, paintFont: string) => monochrome(text, paintFont),
     segments(text: string, fontFamily: string | null | undefined, paintFont: string, fallbackFont?: SymbolFallbackFont) {
       return symbolTextToUnicodeSegments(text, fontFamily, {
         native: (code) => decide(code, paintFont),

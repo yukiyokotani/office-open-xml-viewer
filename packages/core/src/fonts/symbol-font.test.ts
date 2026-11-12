@@ -170,6 +170,9 @@ describe('createSymbolMonochromeProbe', () => {
     // A faint antialiasing pixel carries too little colour to judge.
     const Faint = inkCanvas((fill) => [...filled(fill), ...[90, 90, 90, 20]]);
     expect(createSymbolMonochromeProbe({ canvas: new Faint(1, 1) })('x')).toBe(true);
+    // A wholly translucent glyph has no pixel to judge: inconclusive, not proven.
+    const Translucent = inkCanvas(() => [200, 30, 30, 50]);
+    expect(createSymbolMonochromeProbe({ canvas: new Translucent(1, 1) })('\u{1F44D}\uFE0E')).toBeUndefined();
     const Empty = inkCanvas(() => [0, 0, 0, 0]);
     expect(createSymbolMonochromeProbe({ canvas: new Empty(1, 1) })(' ')).toBeUndefined();
   });

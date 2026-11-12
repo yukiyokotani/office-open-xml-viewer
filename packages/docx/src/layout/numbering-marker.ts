@@ -204,8 +204,10 @@ export function resolveNumberingMarkerGeometry(
   //     Unicode-capable generic route), because a symbol cmap would re-read
   //     e.g. a converted U+00A9 as its own code 0xA9 (a heart in Symbol), and
   //     whether a face reads a Latin-1 character as itself cannot be
-  //     established. A target written with VS15 also takes the cleared
-  //     route, the one its colour proof was made in;
+  //     established. The colour proof of the conversion was made in the
+  //     cleared route, so the authored slots are also given up where they
+  //     would paint the text in its own colours, and for a target written
+  //     with VS15;
   //   - codes convert while the face draws another code of the same marker
   //     (a face with only part of its encoding): one run cannot take both
   //     routes, so the marker stays as authored, as before this conversion.
@@ -247,7 +249,8 @@ export function resolveNumberingMarkerGeometry(
   const markerLayout = markerText
     ? shapeNumberingMarkerText(
         !converted ? keptInput
-          : [...markerText].every((character) => character.codePointAt(0)! > 0xff && character !== '\uFE0E') ? markerInput
+          : [...markerText].every((character) => character.codePointAt(0)! > 0xff && character !== '\uFE0E')
+            && service.symbolMonochrome?.(markerSlots, markerText) !== false ? markerInput
             : { ...markerInput, fonts: { ascii: null, highAnsi: null, eastAsia: null, complexScript: null },
               themeFonts: undefined, themeFontPresence: undefined },
         markerText,
