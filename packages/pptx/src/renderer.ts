@@ -7711,6 +7711,9 @@ export function renderTable(
       if (cell.hMerge || cell.vMerge) continue;
       if ((cell.rowSpan || 1) > 1) continue;
       if (!cell.textBody) continue;
+      // Shrink-to-fit text (model sources, ODF §20.360) fits the cell as
+      // authored: it shrinks instead of growing the row.
+      if (cell.textBody.shrinkOnOverflow) continue;
       if (row.height > 0 && !hasAuthoredRowGrowthSignal) continue;
       const cellW = spannedWidth(ci, cell.gridSpan || 1);
       const needed = (renderTextBody(
@@ -7731,6 +7734,7 @@ export function renderTable(
       if (cell.hMerge || cell.vMerge) continue;
       const span = cell.rowSpan || 1;
       if (span <= 1 || !cell.textBody) continue;
+      if (cell.textBody.shrinkOnOverflow) continue;
       const cellW = spannedWidth(ci, cell.gridSpan || 1);
       const hasAutoHeightRow = el.rows
         .slice(ri, Math.min(el.rows.length, ri + span))

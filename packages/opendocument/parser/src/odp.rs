@@ -562,7 +562,10 @@ impl<'a, 'r, 'p> SlideReader<'a, 'r, 'p> {
                 }
             }
             "a" => {
-                let link = node.attribute((NS_XLINK, "href")).map(str::to_string);
+                // The target is copied for this traversal: charged by size.
+                let href = node.attribute((NS_XLINK, "href"));
+                self.visit(href.map_or(0, |h| h.len() / 64))?;
+                let link = href.map(str::to_string);
                 let inner = ObjectContext {
                     link,
                     ..clone_ctx(ctx)

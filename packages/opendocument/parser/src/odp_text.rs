@@ -998,15 +998,27 @@ fn effective_list_style<'a>(
         outer.style
     };
     let level = outer.depth;
-    let cascade = |first: Option<Nd<'a>>| -> Option<Nd<'a>> {
+    // Each resolution scans the cascade (style children, their graphic
+    // properties' children): charged, found or not.
+    let cascade = |first: Option<Nd<'a>>| -> Result<Option<Nd<'a>>, String> {
+        let name_cost = named
+            .and_then(|l| l.attribute((NS_TEXT, "style-name")))
+            .map_or(0, |n| n.len() / 64);
         let mut styles = first
             .map(|p| paragraph_chain(sheet, scope, p))
             .unwrap_or_default();
         styles.extend(instances.object.for_level(sheet, level));
-        resolve_list_style(sheet, scope, named, &styles)
+        instances.payload.step(
+            1usize.saturating_add(name_cost).saturating_add(
+                styles
+                    .len()
+                    .saturating_mul(2 * crate::odp_style::STYLE_SCAN_COST),
+            ),
+        )?;
+        Ok(resolve_list_style(sheet, scope, named, &styles))
     };
     if named.is_some_and(|l| l.attribute((NS_TEXT, "style-name")).is_some()) {
-        return Ok(cascade(None));
+        return cascade(None);
     }
     let first = |parent: Nd<'a>, pick: &dyn Fn(Nd<'a>) -> bool| -> Result<Option<Nd<'a>>, String> {
         for child in parent.children() {
@@ -1035,9 +1047,9 @@ fn effective_list_style<'a>(
             node = block;
             continue;
         }
-        return Ok(cascade(Some(block)));
+        return cascade(Some(block));
     }
-    Ok(cascade(None))
+    cascade(None)
 }
 
 /// The styles of the object holding a text (the frame of a text box, else
