@@ -173,7 +173,9 @@ interface MarkerPiece extends SymbolTextSegment {
  * adjacent, share a resolved direction and a conversion disposition form one
  * piece. So no piece crosses an embedding-level boundary, a converted "("
  * paints in its resolved direction, a VS15 stays with its base, and Arabic
- * keeps its joining.
+ * keeps its joining. Limitation: explicit embedding, override and isolate
+ * controls (U+202A..U+202E, U+2066..U+2069) inside such a marker are not
+ * modelled; each becomes its own piece at the paragraph level.
  */
 function rtlMarkerPieces(segments: readonly SymbolTextSegment[]): MarkerPiece[] {
   // Graphemes of the whole marker (an authored VS15 or combining mark joins
