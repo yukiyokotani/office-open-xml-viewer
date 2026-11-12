@@ -5562,6 +5562,52 @@ function paintHatchFill(
   return true;
 }
 
+/**
+ * Paint a hatch at `alpha` into the current path. The opacity is of the
+ * whole fill (ODF §20.152), not of each line: crossings and the background
+ * under the lines must not show through twice, so the hatch is painted
+ * opaque on a layer the size of the shape's visible part and the layer is
+ * drawn once at `alpha`. Returns false where no layer can be made (the
+ * caller then paints the lines at `alpha` directly); the current path is
+ * left intact.
+ */
+function paintTranslucentHatchFill(
+  ctx: CanvasRenderingContext2D,
+  fill: ShapeHatchFill,
+  width: number,
+  height: number,
+  cs: number,
+  alpha: number,
+): boolean {
+  const transform = typeof ctx.getTransform === 'function' ? ctx.getTransform() : null;
+  if (!transform || typeof ctx.drawImage !== 'function') return false;
+  const { box: [x0, y0, x1, y1] } = visibleLocalBox(ctx, width, height);
+  if (!(x1 > x0 && y1 > y0)) return true;
+  const { a, b, c, d, e, f } = transform;
+  const corners = [[x0, y0], [x1, y0], [x0, y1], [x1, y1]]
+    .map(([x, y]) => [a * x + c * y + e, b * x + d * y + f]);
+  const left = Math.floor(Math.min(...corners.map(p => p[0])));
+  const top = Math.floor(Math.min(...corners.map(p => p[1])));
+  const layerWidth = Math.ceil(Math.max(...corners.map(p => p[0]))) - left;
+  const layerHeight = Math.ceil(Math.max(...corners.map(p => p[1]))) - top;
+  if (![left, top, layerWidth, layerHeight].every(Number.isFinite)) return false;
+  if (!(layerWidth > 0 && layerHeight > 0)) return true;
+  const layer = createAuxCanvas(layerWidth, layerHeight);
+  const layerCtx = layer?.getContext('2d') as CanvasRenderingContext2D | null | undefined;
+  if (!layer || !layerCtx) return false;
+  layerCtx.setTransform(a, b, c, d, e - left, f - top);
+  layerCtx.beginPath();
+  layerCtx.rect(x0, y0, x1 - x0, y1 - y0);
+  paintHatchFill(layerCtx, fill, width, height, cs);
+  ctx.save();
+  ctx.clip();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.globalAlpha *= alpha;
+  ctx.drawImage(layer, left, top);
+  ctx.restore();
+  return true;
+}
+
 /** The natural size of the image behind each picture-fill pattern, for the
  *  staggered painter (a pattern does not expose its image). */
 const imageFillNaturalSize = new WeakMap<CanvasPattern, { iw: number; ih: number }>();
@@ -5685,6 +5731,7 @@ function fillShape(
   const alpha = (fill?.fillType === 'hatch' || fill?.fillType === 'image') && fill.alpha !== undefined
     && Number.isFinite(fill.alpha) ? Math.min(1, Math.max(0, fill.alpha)) : 1;
   if (alpha >= 1) return fillShapeOpaque(ctx, shape, width, height, cs, paint);
+  if (fill?.fillType === 'hatch' && paintTranslucentHatchFill(ctx, fill, width, height, cs, alpha)) return true;
   const previous = ctx.globalAlpha;
   ctx.globalAlpha = previous * alpha;
   try {

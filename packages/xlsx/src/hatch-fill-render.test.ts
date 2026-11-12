@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { renderViewport } from './renderer.js';
 import type { ShapeFill, ShapeHatchFill, Styles, Worksheet } from './types.js';
 
@@ -40,6 +40,8 @@ function paint(fill: ShapeFill, size = 100, images?: Map<string, CanvasImageSour
   const patterns: { repetition: string; transform?: DOMMatrix2DInit }[] = [];
   /** Rectangles filled with a pattern: its offset then, and the rectangle. */
   const bands: { e?: number; f?: number; rect: number[] }[] = [];
+  /** Layers drawn onto the canvas: their opacity and device position. */
+  const layers: { alpha: number; x: number; y: number }[] = [];
   /** The opacity of each fill with a pattern. */
   const alphas: number[] = [];
   let lines = 0;
@@ -50,6 +52,12 @@ function paint(fill: ShapeFill, size = 100, images?: Map<string, CanvasImageSour
     get(target, prop) {
       if (prop === 'canvas') return { width: 400, height: 300 };
       if (prop === 'globalAlpha') return target.globalAlpha;
+      if (prop === 'drawImage') {
+        return (_image: unknown, x: number, y: number) => {
+          layers.push({ alpha: Number(target.globalAlpha), x, y });
+          calls.push('drawImage');
+        };
+      }
       if (prop === 'fill') {
         return () => {
           const style = target.fillStyle;
@@ -116,7 +124,7 @@ function paint(fill: ShapeFill, size = 100, images?: Map<string, CanvasImageSour
   } as unknown as Worksheet;
   renderViewport(ctx, ws, { fonts: [], fills: [], borders: [], cellXfs: [] } as unknown as Styles,
     { row: 1, col: 1, rows: 10, cols: 10 }, images ? { loadedImages: images } : {});
-  return { calls, lines, rotations, patterns, bands, alphas };
+  return { calls, lines, rotations, patterns, bands, alphas, layers };
 }
 
 const hatch = (distancePt: number, lines = 1, angle = 0): ShapeHatchFill => ({
@@ -159,6 +167,43 @@ describe('OpenDocument hatch fills', () => {
     const huge = paint(hatch(0.01, 2), 10_000_000).lines;
     expect(huge).toBeGreaterThan(100);
     expect(huge).toBeLessThanOrEqual(bound);
+  });
+});
+
+describe('translucent hatches', () => {
+  it('paints the hatch opaque on a layer and draws the layer once at its opacity', () => {
+    // Lines crossing at 50% must not show 75% at their crossings: the
+    // lines go to a layer (here a recording stand-in), not to the canvas.
+    let layerLines = 0;
+    const sizes: number[][] = [];
+    class Layer {
+      constructor(public width: number, public height: number) { sizes.push([width, height]); }
+      getContext() {
+        const state: Record<string, unknown> = {};
+        return new Proxy(state, {
+          get: (target, prop) => {
+            if (prop === 'canvas') return this;
+            if (prop === 'getTransform') return undefined;
+            if (prop === 'fillRect') return () => { if (String(target.fillStyle).toLowerCase() === HATCH) layerLines++; };
+            if (typeof prop === 'string') return () => {};
+          },
+          set: (target, prop, value) => { target[String(prop)] = value; return true; },
+        });
+      }
+    }
+    vi.stubGlobal('OffscreenCanvas', Layer);
+    try {
+      const painted = paint({ ...hatch(7.5, 2), alpha: 0.5 });
+      expect(painted.lines).toBe(0);
+      expect(layerLines).toBe(22);
+      expect(painted.layers).toHaveLength(1);
+      expect(painted.layers[0].alpha).toBe(0.5);
+      expect(sizes).toEqual([[100, 100]]);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+    // Without a layer the lines are painted directly, at the opacity.
+    expect(paint({ ...hatch(7.5, 2), alpha: 0.5 }).lines).toBe(22);
   });
 });
 

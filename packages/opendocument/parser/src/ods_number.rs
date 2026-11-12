@@ -498,7 +498,10 @@ fn color_token(node: roxmltree::Node<'_, '_>) -> Option<&'static str> {
         "#000000" => "[Black]",
         "#ffffff" => "[White]",
         "#ff0000" => "[Red]",
-        "#00ff00" => "[Green]",
+        // SpreadsheetML's `[Green]` is the dark green 008000 in the
+        // workbook formatter; `[Color4]` is this one (§18.8.30: `[ColorN]`
+        // is indexed colour N + 7).
+        "#00ff00" => "[Color4]",
         "#0000ff" => "[Blue]",
         "#ffff00" => "[Yellow]",
         "#ff00ff" => "[Magenta]",
@@ -891,6 +894,9 @@ fn section_code(
             1.0,
         ));
     }
+    // Plain General is the whole code: a colour or literal text beside the
+    // keyword is a format of its own.
+    let general = general && code == "General";
     Ok((code, general, divisor))
 }
 
@@ -1092,6 +1098,16 @@ mod tests {
             ("General".into(), Some(vec![2000.0]))
         );
         assert!(!data.is_general("G"));
+        // A coloured General is a format of its own; bright green is the
+        // indexed colour, not SpreadsheetML's dark `[Green]`.
+        let coloured = codes(concat!(
+            r##"<number:number-style style:name="R"><style:text-properties fo:color="#ff0000"/><number:number/></number:number-style>"##,
+            r##"<number:number-style style:name="L"><style:text-properties fo:color="#00ff00"/><number:number number:decimal-places="0" number:min-integer-digits="1"/></number:number-style>"##,
+        ));
+        assert!(!coloured.is_general("R"));
+        let mut coloured = coloured;
+        assert_eq!(coloured.code("R").unwrap().0.code, "[Red]General");
+        assert_eq!(coloured.code("L").unwrap().0.code, "[Color4]0");
         let (mix, _) = data.code("MIX").unwrap();
         assert_eq!(
             (mix.code.as_str(), mix.divisors.as_slice()),

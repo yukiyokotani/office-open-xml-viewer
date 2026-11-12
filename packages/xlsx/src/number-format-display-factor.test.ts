@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { formatCellValue } from './number-format.js';
+import { formatCellValue, formatCellValueWithColor } from './number-format.js';
 import type { Cell, Styles } from './types.js';
 
 // An OpenDocument `number:display-factor` (ODF 1.3 Part 3 §19.346) divides
@@ -57,6 +57,13 @@ describe('section divisors', () => {
     // The negative section formats the magnitude.
     expect(formatCellValue(number(-250), code)).toBe('25');
     expect(formatCellValue(number(-250), styles('[Red]General;[Blue]General', []))).toBe('250');
+  });
+
+  it('colours a General section, bright green by its indexed colour', () => {
+    // An OpenDocument data style's `fo:color` beside a number without
+    // decimal places; LibreOffice's green is 00FF00, `[Color4]`.
+    expect(formatCellValueWithColor(number(250), styles('[Red]General', []))).toMatchObject({ text: '250', color: '#FF0000' });
+    expect(formatCellValueWithColor(number(250), styles('[Color4]0', []))).toMatchObject({ text: '250', color: '#00FF00' });
   });
 
   it('selects the section on the undivided value, then divides by its own factor', () => {

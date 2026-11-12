@@ -191,7 +191,12 @@ impl XfBuilder {
     /// (a code and its section divisors); `None` for General.
     pub fn chart_format_of(&self, xf: u32) -> Option<(String, Option<Vec<f64>>)> {
         let id = self.styles.cell_xfs.get(xf as usize)?.num_fmt_id;
-        if let Some(format) = self.styles.num_fmts.iter().find(|f| f.num_fmt_id == id) {
+        // Custom formats are numbered in the order they are kept.
+        let custom = id
+            .checked_sub(FIRST_CUSTOM_NUMFMT)
+            .and_then(|index| self.styles.num_fmts.get(index as usize));
+        debug_assert!(custom.is_none_or(|format| format.num_fmt_id == id));
+        if let Some(format) = custom {
             let divisors = format
                 .section_divisors
                 .iter()
