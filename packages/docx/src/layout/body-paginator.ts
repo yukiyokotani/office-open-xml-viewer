@@ -4015,7 +4015,12 @@ function composePageStories(
   pageObjects: BodyLayoutInput['pageObjects'] = undefined,
 ): DocumentLayout {
   const storyDiagnostics: LayoutDiagnostic[] = [];
-  const pageObjectSources = new Map((pageObjects ?? []).map((object) => [object.pageIndex, object.source]));
+  const pageObjectSources = new Map<number, SourceRef[]>();
+  for (const object of pageObjects ?? []) {
+    const sources = pageObjectSources.get(object.pageIndex) ?? [];
+    sources.push(object.source);
+    pageObjectSources.set(object.pageIndex, sources);
+  }
   const visited = new WeakSet<object>();
   const pages = layout.pages.map((page, pageIndex) => {
     // A parity blank page carries no stories, except a page object anchored
@@ -4096,33 +4101,54 @@ function composePageStories(
     // frame (as the prescan resolved its exclusions, vertical pages too) and
     // painted in the body stacking context, so its drawings order with body
     // text and body anchors as body page anchors do.
-    const pageObjectSource = pageObjectSources.get(page.pageIndex);
     const bodyGeometry = page.section.geometry;
-    const pageObject = pageObjectSource ? (() => {
+    const pageObjectBounds = Object.freeze({
+      xPt: Math.abs(bodyGeometry.marginLeft),
+      yPt: 0,
+      widthPt: Math.max(0, bodyGeometry.pageWidth
+        - Math.abs(bodyGeometry.marginLeft) - Math.abs(bodyGeometry.marginRight)),
+      heightPt: bodyGeometry.pageHeight,
+    });
+    const pageObjectLayouts = (pageObjectSources.get(page.pageIndex) ?? []).map((source) => {
       const { story, translation } = layoutBandStory((band) => session.layoutStory!({
-        source: pageObjectSource,
+        source,
         pageStoryOwner: owner.sectionOccurrenceId,
         pageIndex: page.pageIndex,
         pageNumber: { displayNumber: page.pageNumber.displayNumber, format: page.pageNumber.format },
         section: page.section,
         container: {
-          id: `story:page-objects:page:${page.pageIndex}`,
+          id: `story:${source.storyInstance}`,
           kind: 'header',
           // The story only carries page-positioned drawings; a drawing as
           // large as the page must not exhaust a band.
           capacity: 'unbounded',
-          bounds: {
-            xPt: Math.abs(bodyGeometry.marginLeft),
-            yPt: 0,
-            widthPt: Math.max(0, bodyGeometry.pageWidth
-              - Math.abs(bodyGeometry.marginLeft) - Math.abs(bodyGeometry.marginRight)),
-            heightPt: bodyGeometry.pageHeight,
-          },
+          bounds: pageObjectBounds,
         },
         ...(band ? { bandTranslationPt: band } : {}),
       }), 'header', bodyGeometry);
-      return translateStoryLayout(story, translation);
-    })() : null;
+      return Object.freeze({ id: `story:${source.storyInstance}`, story: translateStoryLayout(story, translation) });
+    });
+    const pageObjectNodes = pageObjectLayouts.flatMap(({ story }) => story.blocks);
+    // The page objects' domains are in the body's section frame, as their
+    // contents are; physical bounds through the page's own transform.
+    const bodyRegion = page.sectionRegions[0];
+    const pageObjectDomains = pageObjectLayouts.map(({ id, story }) => {
+      const logicalBounds = Object.freeze({
+        xPt: pageObjectBounds.xPt,
+        yPt: story.flowBounds.yPt,
+        widthPt: pageObjectBounds.widthPt,
+        heightPt: story.advancePt,
+      });
+      return Object.freeze({
+        id,
+        kind: 'header' as const,
+        ...(bodyRegion ? { sectionRegionId: bodyRegion.id } : {}),
+        logicalBounds,
+        physicalBounds: bodyRegion
+          ? Object.freeze(transformRect(bodyRegion.coordinateSpace.logicalToPhysical, logicalBounds))
+          : logicalBounds,
+      });
+    });
     const retainedNotes = footnotesByPage.get(page.pageIndex) ?? [];
     const noteRegion = page.sectionRegions.at(-1);
     const noteStack = footnoteStack(page, retainedNotes, sessionNotePolicies.get(session));
@@ -4199,22 +4225,7 @@ function composePageStories(
               : logicalBounds,
           });
         })),
-      ...(pageObject ? [Object.freeze({
-        id: `story:page-objects:page:${page.pageIndex}`,
-        kind: 'header' as const,
-        logicalBounds: Object.freeze({
-          xPt: inlineStartPt,
-          yPt: pageObject.flowBounds.yPt,
-          widthPt: inlineExtentPt,
-          heightPt: pageObject.advancePt,
-        }),
-        physicalBounds: Object.freeze({
-          xPt: inlineStartPt,
-          yPt: pageObject.flowBounds.yPt,
-          widthPt: inlineExtentPt,
-          heightPt: pageObject.advancePt,
-        }),
-      })] : []),
+      ...pageObjectDomains,
       ...(footer ? [Object.freeze({
         id: `story:footer:page:${page.pageIndex}`,
         kind: 'footer' as const,
@@ -4250,9 +4261,9 @@ function composePageStories(
     const noteIndex = lastBodyIndex < 0 ? withHeader.length : lastBodyIndex + 1;
     const entries: PageLayerNode[] = [
       ...withHeader.slice(0, noteIndex),
-      ...(pageObject?.blocks.map((node): PageLayerNode => ({
+      ...pageObjectNodes.map((node): PageLayerNode => ({
         layer: 'body', node, coordinateSpace: 'section-logical',
-      })) ?? []),
+      })),
       ...notes.map((node): PageLayerNode => ({
         layer: 'notes', node, coordinateSpace: 'section-logical',
       })),
@@ -4263,7 +4274,7 @@ function composePageStories(
     ];
     // The body pass collected only body diagnostics; these stories are
     // composed here, so their own diagnostics are collected here.
-    storyDiagnostics.push(...[...(header?.blocks ?? []), ...(pageObject?.blocks ?? []), ...notes,
+    storyDiagnostics.push(...[...(header?.blocks ?? []), ...pageObjectNodes, ...notes,
       ...(footer?.blocks ?? [])]
       .flatMap((node) => nestedStoryDiagnostics(node, visited)));
     return Object.freeze({
@@ -4275,7 +4286,7 @@ function composePageStories(
       layers: createPageLayers(entries),
       readingOrder: Object.freeze([
         ...(header?.blocks.map((node) => node.id) ?? []),
-        ...(pageObject?.blocks.map((node) => node.id) ?? []),
+        ...pageObjectNodes.map((node) => node.id),
         ...page.readingOrder,
         ...notes.map((note) => note.id),
         ...(footer?.blocks.map((node) => node.id) ?? []),

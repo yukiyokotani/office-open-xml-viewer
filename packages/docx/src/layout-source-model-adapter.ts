@@ -105,9 +105,9 @@ function forEachPageObject(
   document: DocxDocumentModel,
   visit: (body: BodyElement[], source: SourceRef) => void,
 ): void {
-  for (const object of documentPageObjects(document)) {
-    visit(object.body, { ...pageObjectStorySource(object.page), path: [] });
-  }
+  documentPageObjects(document).forEach((object, ordinal) => {
+    visit(object.body, { ...pageObjectStorySource(ordinal), path: [] });
+  });
 }
 
 function traverseParagraphSources(
@@ -616,9 +616,9 @@ function buildLayoutSourceModelAdapter(
     headers: canonicalizeFinalParts(privateDocument.headers, 'header', paragraphInputs),
     footers: canonicalizeFinalParts(privateDocument.footers, 'footer', paragraphInputs),
     ...(documentPageObjects(privateDocument).length === 0 ? {} : {
-      __pageObjects: documentPageObjects(privateDocument).map((object) => ({
+      __pageObjects: documentPageObjects(privateDocument).map((object, ordinal) => ({
         page: object.page,
-        body: canonicalizeBody(object.body, { ...pageObjectStorySource(object.page), path: [] },
+        body: canonicalizeBody(object.body, { ...pageObjectStorySource(ordinal), path: [] },
           paragraphInputs),
       })),
     }),

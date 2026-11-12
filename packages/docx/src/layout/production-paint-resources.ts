@@ -248,9 +248,9 @@ function collectDescriptorCandidates(
   visitBody(doc.body, 'body', 'body');
   visitParts(doc.headers, 'header');
   visitParts(doc.footers, 'footer');
-  for (const object of documentPageObjects(doc)) {
-    visitBody(object.body, 'header', pageObjectStorySource(object.page).storyInstance);
-  }
+  documentPageObjects(doc).forEach((object, ordinal) => {
+    visitBody(object.body, 'header', pageObjectStorySource(ordinal).storyInstance);
+  });
   for (const note of doc.footnotes ?? []) visitBody(note.content, 'footnote', note.id);
   for (const note of doc.endnotes ?? []) visitBody(note.content, 'endnote', note.id);
 

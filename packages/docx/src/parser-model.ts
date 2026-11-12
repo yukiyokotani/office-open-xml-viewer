@@ -1475,8 +1475,8 @@ export function bodyLayoutAcquisitionInput(doc: DocxDocumentModel): BodyLayoutAc
   });
   // Producer page objects: each page's story and its wrapping drawings
   // (page-owned on both axes, as `acquiredBodyParagraph` selects them).
-  const pageObjects = documentPageObjects(doc).map((object) => {
-    const source = pageObjectStorySource(object.page);
+  const pageObjects = documentPageObjects(doc).map((object, ordinal) => {
+    const source = pageObjectStorySource(ordinal);
     const wrapAnchors = object.body.flatMap((element, index) => {
       if (element.type !== 'paragraph') return [];
       const paragraphSource: SourceRef = Object.freeze({ ...source, path: Object.freeze([index]) as unknown as number[] });
@@ -2271,8 +2271,8 @@ function normalizeInternalDocumentModelWithOwnership(
   let pageObjects = sourcePageObjects;
   if (sourcePageObjects) {
     let pageObjectsChanged = false;
-    const normalized = sourcePageObjects.map((object) => {
-      const objectBody = normalizeBody(object.body, 'header', `page-object:${object.page}`);
+    const normalized = sourcePageObjects.map((object, ordinal) => {
+      const objectBody = normalizeBody(object.body, 'header', pageObjectStorySource(ordinal).storyInstance);
       if (objectBody === object.body) return object;
       pageObjectsChanged = true;
       return { ...object, body: objectBody };

@@ -202,7 +202,13 @@ impl<'a> Reader<'a> {
         // page belongs to that page, wherever it is written (body, paragraph
         // or a master page's header or footer, as LibreOffice reads it): it
         // becomes a page object, not content of the story that holds it.
-        if let Some(page) = self.anchor_page_number(node)? {
+        // A group member's anchor is its group's (the group itself is the
+        // page object, or not one).
+        let page = match self.group_anchor {
+            Some(_) => None,
+            None => self.anchor_page_number(node)?,
+        };
+        if let Some(page) = page {
             // A group's further members join the pending anchors: they belong
             // to the page too.
             let before = self.pending_anchors.len();

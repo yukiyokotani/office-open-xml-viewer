@@ -206,13 +206,14 @@ export type BodyLayoutSequenceEntry = BodyLayoutSequenceEntryFor<BodySectionLayo
 
 const PAGE_OBJECT_INSTANCE = 'page-object:';
 
-/** The story source of a producer page object on `page` (1-based): a
- * header-class page story (laid out and painted like one) under its own
- * instance, so no story-kind dispatch needs to know it. */
-export function pageObjectStorySource(page: number): SourceRef {
+/** The story source of the producer page object at `ordinal` in the
+ * document's list: a header-class page story (laid out and painted like one)
+ * under its own instance, so no story-kind dispatch needs to know it. Each
+ * object is its own story, so objects never acquire each other's geometry. */
+export function pageObjectStorySource(ordinal: number): SourceRef {
   return Object.freeze({
     story: 'header' as const,
-    storyInstance: `${PAGE_OBJECT_INSTANCE}${page}`,
+    storyInstance: `${PAGE_OBJECT_INSTANCE}${ordinal}`,
     path: [],
   });
 }

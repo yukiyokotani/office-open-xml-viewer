@@ -746,7 +746,8 @@ fn page_numbered_anchors_become_page_objects() {
             (object.page, shapes)
         })
         .collect();
-    assert_eq!(pages, [(2, 1), (3, 2)]);
+    // One story per drawing.
+    assert_eq!(pages, [(2, 1), (3, 1), (3, 1)]);
     // The unnumbered page anchor is carried by the body paragraph.
     let shapes_in_body = paragraphs(&document.body)[0]
         .runs
@@ -778,9 +779,14 @@ fn style_anchors_and_groups_keep_their_page() {
         .iter()
         .map(|object| (object.page, object.body.len()))
         .collect();
-    assert_eq!(pages, [(2, 2), (3, 1)]);
+    assert_eq!(pages, [(2, 1), (2, 1), (3, 1)]);
     // The group members take the group's page anchoring.
-    for host in paragraphs(&document.page_objects[0].body) {
+    for host in document
+        .page_objects
+        .iter()
+        .filter(|object| object.page == 2)
+        .flat_map(|object| paragraphs(&object.body))
+    {
         let shape = host
             .runs
             .iter()
@@ -839,4 +845,16 @@ fn group_anchors_stop_at_contained_stories() {
         })
         .unwrap();
     assert!(inner_shape.inline);
+}
+
+#[test]
+fn group_members_follow_their_group_not_their_own_page() {
+    // The group is the anchored object: a member's own page anchor neither
+    // takes it out of the group nor extends the document.
+    let body = r##"<text:p><draw:g text:anchor-type="paragraph"><draw:rect text:anchor-type="page" text:anchor-page-number="5" svg:width="1cm" svg:height="1cm"/><draw:rect svg:x="2cm" svg:width="1cm" svg:height="1cm"/></draw:g>x</text:p>"##;
+    let document = read_fixture(Fixture {
+        body,
+        ..Fixture::default()
+    });
+    assert!(document.page_objects.is_empty());
 }

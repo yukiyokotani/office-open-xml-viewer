@@ -57,6 +57,7 @@ function docx(
   box: Box = DEFAULT_BOX,
   bodyAnchorAt?: number,
   oddSectionAfter?: number,
+  vertical = false,
 ): Uint8Array {
   const body = Array.from({ length: paragraphCount }, (_, index) => {
     const label = `P${String(index).padStart(3, '0')} words words words words words words words words`;
@@ -83,6 +84,7 @@ function docx(
     + '<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/>'
     + '<w:cols w:space="720"/>'
     + (oddSectionAfter !== undefined ? '<w:type w:val="oddPage"/>' : '')
+    + (vertical ? '<w:textDirection w:val="tbRl"/>' : '')
     + '</w:sectPr></w:body></w:document>';
   return storeZip(new Map([
     ['[Content_Types].xml', encoder.encode('<?xml version="1.0" encoding="UTF-8"?>'
@@ -132,8 +134,10 @@ function model(
   box?: Box,
   bodyAnchorAt?: number,
   oddSectionAfter?: number,
+  vertical = false,
+  copies = 1,
 ): DocxDocumentModel {
-  const archive = new DocxArchive(docx(paragraphCount, box, bodyAnchorAt, oddSectionAfter));
+  const archive = new DocxArchive(docx(paragraphCount, box, bodyAnchorAt, oddSectionAfter, vertical));
   let raw: DocxDocumentModel & { __pageObjects?: unknown };
   try {
     raw = JSON.parse(new TextDecoder().decode(archive.parse()));
@@ -142,7 +146,7 @@ function model(
   }
   if (page !== undefined) {
     const [host] = raw.body.splice(0, 1, { ...raw.body[0]!, runs: [] } as typeof raw.body[number]);
-    raw.__pageObjects = [{ page, body: [host] }];
+    raw.__pageObjects = Array.from({ length: copies }, () => ({ page, body: [structuredClone(host)] }));
   }
   return normalizeInternalDocumentModel(raw).document;
 }
@@ -271,6 +275,20 @@ describe('producer page objects', () => {
     expect(order[drawing]).toMatchObject({ layer: 'front', sourceLayer: 'body' });
     expect(drawing).toBeGreaterThan(lastText);
   });
+
+  it('lay out on a vertical page in the body frame', () => {
+    const result = layout(model(60, 2, undefined, undefined, undefined, true));
+    expect(drawingPages(result)).toContain(2);
+  });
+
+  it('stay independent of each other: many objects on one page', () => {
+    const started = Date.now();
+    const result = layout(model(30, 2, undefined, undefined, undefined, false, 300));
+    const drawings = result.pages[1]!.layers.body
+      .flatMap((node) => node.kind === 'paragraph' ? node.drawings : []);
+    expect(drawings.length).toBe(300);
+    expect(Date.now() - started).toBeLessThan(60_000);
+  }, 120_000);
 
   it('leave a document without page objects as it was', () => {
     // The same document with its anchor in the body: pages 1-3, the drawing

@@ -919,7 +919,10 @@ function* assertDocumentLayoutUncheckedSteps(layout: DocumentLayout): Generator<
     }
     const regionById = new Map(page.sectionRegions.map((region) => [region.id, region]));
     for (const domain of page.flowDomains) {
-      if (domain.kind !== 'footnote' && domain.kind !== 'endnote') continue;
+      // Note bands, and any page story that declares the section region its
+      // contents are laid out in (a producer page object), map through it.
+      if (domain.kind !== 'footnote' && domain.kind !== 'endnote'
+        && domain.sectionRegionId === undefined) continue;
       const storyRegion = domain.sectionRegionId
         ? regionById.get(domain.sectionRegionId)
         : page.sectionRegions[0];
