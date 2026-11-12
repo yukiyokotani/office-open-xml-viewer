@@ -1336,7 +1336,8 @@ fn shape_text(
         };
         let p_font = context_font(ctx, &p_set, "paragraph");
         let mut runs = Vec::new();
-        collect_shape_runs(ctx, p, &p_set, &p_font, &mut runs)?;
+        let mut collapse = crate::odf_text::Collapse::default();
+        collect_shape_runs(ctx, p, &p_set, &p_font, &mut collapse, &mut runs)?;
         out.push(xlsx_model::ShapeParagraph {
             align: align.into(),
             rtl: false,
@@ -1400,13 +1401,18 @@ fn collect_shape_runs(
     node: roxmltree::Node<'_, '_>,
     set: &PartialFont,
     font: &xlsx_model::Font,
+    collapse: &mut crate::odf_text::Collapse,
     runs: &mut Vec<xlsx_model::ShapeTextRun>,
 ) -> Result<(), String> {
     for child in node.children() {
         // One step per node: each may add a run or resolve a span style.
         budget::tick(1)?;
+        // §6.1.2: character data is collapsed across the paragraph; the
+        // space owed before this node's characters is written with them.
+        let mut piece = String::new();
         if child.is_text() {
-            push_text_run(runs, child.text().unwrap_or(""), font);
+            collapse.text(child.text().unwrap_or(""), &mut piece);
+            push_text_run(runs, &piece, font);
             continue;
         }
         if child.tag_name().namespace() != Some(NS_TEXT) {
@@ -1420,18 +1426,26 @@ fn collect_shape_runs(
                     let chain = ctx.store.chain_own("text", name);
                     let span_set = PartialFont::of(&chain, &ctx.faces).over(set);
                     let span = context_font(ctx, &span_set, "text");
-                    collect_shape_runs(ctx, child, &span_set, &span, runs)?;
+                    collect_shape_runs(ctx, child, &span_set, &span, collapse, runs)?;
                 }
-                None => collect_shape_runs(ctx, child, set, font, runs)?,
+                None => collect_shape_runs(ctx, child, set, font, collapse, runs)?,
             },
             "s" => {
-                let mut spaces = String::new();
-                budget::push_spaces(&mut spaces, crate::odf_text::space_count(child)?)?;
-                push_text_run(runs, &spaces, font);
+                collapse.element(&mut piece);
+                budget::push_spaces(&mut piece, crate::odf_text::space_count(child)?)?;
+                push_text_run(runs, &piece, font);
             }
-            "tab" => push_text_run(runs, "\t", font),
-            "line-break" => runs.push(xlsx_model::ShapeTextRun::Break),
-            _ => collect_shape_runs(ctx, child, set, font, runs)?,
+            "tab" => {
+                collapse.element(&mut piece);
+                piece.push('\t');
+                push_text_run(runs, &piece, font);
+            }
+            "line-break" => {
+                collapse.element(&mut piece);
+                push_text_run(runs, &piece, font);
+                runs.push(xlsx_model::ShapeTextRun::Break);
+            }
+            _ => collect_shape_runs(ctx, child, set, font, collapse, runs)?,
         }
     }
     Ok(())

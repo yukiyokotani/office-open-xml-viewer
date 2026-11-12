@@ -116,9 +116,51 @@ pub fn paragraph_text(node: roxmltree::Node<'_, '_>) -> Result<String, String> {
             out.push('\n');
         }
         first = false;
-        inline_text(p, &mut out)?;
+        inline_text(p, &mut Collapse::default(), &mut out)?;
     }
     Ok(out)
+}
+
+/// §6.1.2 white-space collapsing over the character data of one paragraph,
+/// across its spans: tab, carriage return and line feed are spaces, a run
+/// of spaces is one space, and the spaces that begin or end the paragraph
+/// are removed. `text:s`, `text:tab` and `text:line-break` stand for the
+/// characters they name and are not character data: a space beside one is
+/// kept, and only consecutive character-data spaces merge.
+///
+/// The state is fed in document order: [`Collapse::text`] for character
+/// data, [`Collapse::element`] before the characters of an element. A space
+/// is written with the text that follows it, so the space that ends a
+/// paragraph is never written.
+#[derive(Default)]
+pub struct Collapse {
+    /// Something of the paragraph has been written.
+    started: bool,
+    /// A space is owed before the next character.
+    pending: bool,
+}
+
+impl Collapse {
+    /// Append the collapsed form of character data to `out`.
+    pub fn text(&mut self, text: &str, out: &mut String) {
+        for c in text.chars() {
+            if matches!(c, ' ' | '\t' | '\r' | '\n') {
+                self.pending = self.started;
+            } else {
+                self.element(out);
+                out.push(c);
+            }
+        }
+    }
+
+    /// An element that stands for characters follows: write the space owed
+    /// before it.
+    pub fn element(&mut self, out: &mut String) {
+        if std::mem::take(&mut self.pending) {
+            out.push(' ');
+        }
+        self.started = true;
+    }
 }
 
 /// Split a space-separated list of cell range addresses (§18.3.6), leaving
@@ -327,22 +369,35 @@ pub fn check_style_values(root: roxmltree::Node<'_, '_>) -> Result<(), String> {
     Ok(())
 }
 
-pub fn inline_text(node: roxmltree::Node<'_, '_>, out: &mut String) -> Result<(), String> {
+pub fn inline_text(
+    node: roxmltree::Node<'_, '_>,
+    collapse: &mut Collapse,
+    out: &mut String,
+) -> Result<(), String> {
     for child in node.children() {
         crate::budget::tick(1)?;
         if child.is_text() {
-            out.push_str(child.text().unwrap_or(""));
+            collapse.text(child.text().unwrap_or(""), out);
             continue;
         }
         if child.tag_name().namespace() != Some(crate::xml::NS_TEXT) {
             continue;
         }
         match child.tag_name().name() {
-            "s" => crate::budget::push_spaces(out, space_count(child)?)?,
-            "tab" => out.push('\t'),
-            "line-break" => out.push('\n'),
+            "s" => {
+                collapse.element(out);
+                crate::budget::push_spaces(out, space_count(child)?)?
+            }
+            "tab" => {
+                collapse.element(out);
+                out.push('\t')
+            }
+            "line-break" => {
+                collapse.element(out);
+                out.push('\n')
+            }
             "note" | "ruby-text" => {}
-            _ => inline_text(child, out)?,
+            _ => inline_text(child, collapse, out)?,
         }
     }
     Ok(())

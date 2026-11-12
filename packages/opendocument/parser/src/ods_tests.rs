@@ -1284,6 +1284,43 @@ fn dashes_markers_and_validation_bases() {
 }
 
 #[test]
+fn white_space_collapses_across_a_paragraph() {
+    let automatic = r#"<style:style style:name="T1" style:family="text"><style:text-properties fo:font-weight="bold"/></style:style>"#;
+    let body = content(
+        automatic,
+        &table(concat!(
+            "<table:table-row>",
+            // Leading, trailing and repeated spaces of character data go,
+            // across the span; `text:s` and the space beside it stay.
+            "<table:table-cell office:value-type=\"string\"><text:p>  a \n\t b <text:span text:style-name=\"T1\"> c </text:span> <text:s text:c=\"2\"/> d  </text:p></table:table-cell>",
+            "<table:table-cell office:value-type=\"string\"><text:p> x <text:line-break/> y </text:p><text:p>\n  z\n</text:p></table:table-cell>",
+            "<table:table-cell office:value-type=\"string\"><text:p>   </text:p>",
+            "<draw:rect svg:width=\"2cm\" svg:height=\"1cm\"><text:p>\n  in   shape\n</text:p></draw:rect>",
+            "<office:annotation><text:p>  a   note </text:p></office:annotation>",
+            "</table:table-cell>",
+            "</table:table-row>"
+        )),
+    );
+    let workbook = read_text(&body, Some(&styles(""))).unwrap();
+    let sheet = &workbook.sheets[0].worksheet;
+    let text = |col: usize| {
+        let cell = &workbook.sheets[0].rows[0].cells[col];
+        match &cell.value {
+            xlsx_model::CellValue::Text { text, .. } => text.clone(),
+            other => panic!("{other:?}"),
+        }
+    };
+    assert_eq!(text(0), "a b c    d");
+    assert_eq!(text(1), "x \n y\nz");
+    assert_eq!(text(2), "");
+    let shape = sheet.shape_groups[0].shapes[0].text.as_ref().unwrap();
+    assert!(
+        matches!(&shape.paragraphs[0].runs[0], xlsx_model::ShapeTextRun::Text { text, .. } if text == "in shape")
+    );
+    assert_eq!(sheet.comments[0].text, "a note");
+}
+
+#[test]
 fn fills_and_lines_keep_their_opacity() {
     let automatic = r##"<style:style style:name="gr1" style:family="graphic"><style:graphic-properties draw:fill="solid" draw:fill-color="#ff0000" draw:opacity="50%" draw:stroke="solid" svg:stroke-color="#0000ff" svg:stroke-opacity="25%"/></style:style>"##;
     let body = content(
