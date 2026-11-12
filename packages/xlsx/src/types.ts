@@ -939,6 +939,10 @@ export interface Hyperlink {
 export interface ConditionalFormat {
   sqref: WorksheetCellRange[];
   rules: CfRule[];
+  /** Of this block's rules that apply a differential format, only the first
+   *  that matches a cell applies to it (an OpenDocument conditional format;
+   *  overlapping blocks still all apply). */
+  firstMatch?: boolean;
 }
 
 /**

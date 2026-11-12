@@ -556,7 +556,11 @@ pub(crate) fn conditional_formats(
                     }
                 }
                 if !rules.is_empty() {
-                    formats.push(ConditionalFormat { sqref, rules });
+                    formats.push(ConditionalFormat {
+                        sqref,
+                        rules,
+                        first_match: true,
+                    });
                 }
             }
         }
@@ -621,7 +625,11 @@ fn style_map_formats(
             }
         }
         if !rules.is_empty() {
-            formats.push(ConditionalFormat { sqref, rules });
+            formats.push(ConditionalFormat {
+                sqref,
+                rules,
+                first_match: true,
+            });
         }
     }
     Ok(())

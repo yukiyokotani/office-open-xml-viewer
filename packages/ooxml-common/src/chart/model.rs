@@ -2069,6 +2069,13 @@ pub struct ChartSeriesDataLabels {
     /// set by DrawingML parsers) or empty: no section divides.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub format_divisors: Option<Vec<f64>>,
+    /// The format of the percentage in a label, where it is not
+    /// `format_code`: an OpenDocument label formats its value and its
+    /// percentage by separate data styles (ODF 1.3 Part 3 §19.511
+    /// `style:percentage-data-style-name`). Absent (never set by DrawingML
+    /// parsers): the percentage takes `format_code`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub percent_format_code: Option<String>,
     /// `<c:dLbls><c:separator>` (§21.2.2.170) inserted between enabled label
     /// components. Office commonly stores a line break here for pie labels.
     #[serde(default, skip_serializing_if = "Option::is_none")]

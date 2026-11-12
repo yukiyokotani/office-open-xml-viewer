@@ -512,16 +512,22 @@ impl Reader<'_> {
         let fill_kind = get(chain, "graphic:draw:fill");
         let stroke = get(chain, "graphic:draw:stroke");
         Paint {
+            // §20.152 `draw:opacity` and §20.409 `svg:stroke-opacity` are
+            // the alpha of the colours (`RRGGBBAA`).
             fill: if fill_kind == Some("none") {
                 None
             } else {
-                get(chain, "graphic:draw:fill-color").and_then(hex_color)
+                get(chain, "graphic:draw:fill-color")
+                    .and_then(hex_color)
+                    .map(|colour| with_opacity(colour, get(chain, "graphic:draw:opacity")))
             },
             fill_hidden: fill_kind == Some("none"),
             line: if stroke == Some("none") {
                 None
             } else {
-                get(chain, "graphic:svg:stroke-color").and_then(hex_color)
+                get(chain, "graphic:svg:stroke-color")
+                    .and_then(hex_color)
+                    .map(|colour| with_opacity(colour, get(chain, "graphic:svg:stroke-opacity")))
             },
             line_hidden: stroke == Some("none"),
             line_width: get(chain, "graphic:svg:stroke-width")
@@ -1611,6 +1617,16 @@ impl Reader<'_> {
             Some((code, divisors)) => (Some(code), divisors),
             None => (None, None),
         };
+        // §19.511: the percentage of a label has its own data style, never
+        // the value's; without one LibreOffice shows whole percents.
+        let percent_format_code = show_percent.then(|| {
+            chain
+                .iter()
+                .find_map(|s| s.percentage_data_style.as_deref())
+                .and_then(|name| data.code(name))
+                .filter(|(format, _)| !format.is_general())
+                .map_or_else(|| "0%".to_string(), |(format, _)| format.chart_format().0)
+        });
         Some(ChartSeriesDataLabels {
             show_val,
             show_percent,
@@ -1638,8 +1654,17 @@ impl Reader<'_> {
             separator,
             format_code,
             format_divisors,
+            percent_format_code,
             ..ChartSeriesDataLabels::default()
         })
+    }
+}
+
+/// `colour` with the alpha of an opacity percentage, when it is not opaque.
+fn with_opacity(colour: String, opacity: Option<&str>) -> String {
+    match opacity.and_then(percent).filter(|v| v.is_finite()) {
+        Some(opacity) => crate::odf_fill::with_alpha(&colour, opacity),
+        None => colour,
     }
 }
 
@@ -2062,6 +2087,8 @@ mod tests {
         assert_eq!(model.val_axis_format_code.as_deref(), Some("0%"));
         let labels = model.series[0].series_data_labels.as_ref().unwrap();
         assert_eq!(labels.format_code.as_deref(), Some("0%"));
+        // No percentage is shown, so there is no percentage format.
+        assert_eq!(labels.percent_format_code, None);
         let model = read_chart_document(&chart(&body("own"), styles), None, Some(&Percent))
             .unwrap()
             .unwrap();
@@ -2131,6 +2158,38 @@ mod tests {
                 .as_deref(),
             Some("S.A1:S.A2")
         );
+    }
+
+    #[test]
+    fn percentage_labels_and_translucent_colours() {
+        let styles = concat!(
+            r##"<number:number-style xmlns:number="urn:oasis:names:tc:opendocument:xmlns:datastyle:1.0" style:name="N2"><number:number number:decimal-places="2" number:min-integer-digits="1"/></number:number-style>"##,
+            r##"<number:percentage-style xmlns:number="urn:oasis:names:tc:opendocument:xmlns:datastyle:1.0" style:name="N11"><number:number number:decimal-places="2" number:min-integer-digits="1"/><number:text>%</number:text></number:percentage-style>"##,
+            r##"<style:style style:name="own" style:family="chart" style:data-style-name="N2" style:percentage-data-style-name="N11"><style:chart-properties chart:data-label-number="value-and-percentage"/><style:graphic-properties draw:fill="solid" draw:fill-color="#ff0000" draw:opacity="50%" draw:stroke="solid" svg:stroke-color="#0000ff" svg:stroke-opacity="0%"/></style:style>"##,
+            r##"<style:style style:name="plain" style:family="chart" style:data-style-name="N2"><style:chart-properties chart:data-label-number="value-and-percentage"/></style:style>"##,
+        );
+        let body = |style: &str| {
+            format!(
+                r##"<chart:chart chart:class="chart:circle"><chart:plot-area><chart:series chart:style-name="{style}" chart:values-cell-range-address="Sheet1.P2:Sheet1.P3"/></chart:plot-area></chart:chart>"##
+            )
+        };
+        let read = |style: &str| {
+            read_chart_document(&chart(&body(style), styles), None, Some(&Fixed))
+                .unwrap()
+                .unwrap()
+        };
+        // §19.511: the percentage has its own data style.
+        let model = read("own");
+        let labels = model.series[0].series_data_labels.as_ref().unwrap();
+        assert_eq!(labels.format_code.as_deref(), Some("0.00"));
+        assert_eq!(labels.percent_format_code.as_deref(), Some("0.00%"));
+        // §20.152, §20.409: opacity is the alpha of the colours.
+        assert_eq!(model.series[0].color.as_deref(), Some("FF000080"));
+        // Without a percentage style the percentage is not the value's
+        // format: whole percents, as LibreOffice shows.
+        let model = read("plain");
+        let labels = model.series[0].series_data_labels.as_ref().unwrap();
+        assert_eq!(labels.percent_format_code.as_deref(), Some("0%"));
     }
 
     #[test]

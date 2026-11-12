@@ -522,6 +522,9 @@ export interface ChartSeriesDataLabels {
    *  `number:display-factor`, ODF 1.3 Part 3 §19.346). Absent: no section
    *  divides (DrawingML never sets it). */
   formatDivisors?: number[] | null;
+  /** The format of the percentage in a label where it is not `formatCode`
+   *  (an OpenDocument `style:percentage-data-style-name`). */
+  percentFormatCode?: string | null;
   /** `<c:dLbls><c:separator>` (§21.2.2.170), including authored line breaks. */
   separator?: string;
   /** Series-level bold default for data labels. */

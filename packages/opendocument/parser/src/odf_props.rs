@@ -73,6 +73,8 @@ pub struct Style {
     pub family: String,
     pub parent: Option<String>,
     pub data_style: Option<String>,
+    /// `style:percentage-data-style-name` (§19.511), of chart styles.
+    pub percentage_data_style: Option<String>,
     pub display_name: Option<String>,
     /// `style:master-page-name` and the other style-element attributes.
     pub attributes: HashMap<String, String>,
@@ -277,6 +279,9 @@ fn read_style(node: roxmltree::Node<'_, '_>) -> Result<Style, String> {
             .map(str::to_string),
         data_style: node
             .attribute((NS_STYLE, "data-style-name"))
+            .map(str::to_string),
+        percentage_data_style: node
+            .attribute((NS_STYLE, "percentage-data-style-name"))
             .map(str::to_string),
         display_name: node
             .attribute((NS_STYLE, "display-name"))

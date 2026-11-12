@@ -248,7 +248,10 @@ size, from their reference point, with its offsets and the tile stagger) or
 drawn once. Fills and lines keep their opacity; an opacity gradient is shown
 over a solid colour and over a colour gradient of the same geometry, and as
 its mean opacity over other fills. Chart axis and label number formats
-include scientific and fraction formats.
+include scientific and fraction formats; a label's percentage has its own
+format, and chart colours keep their opacity. Of the conditions of one
+conditional format, the first that holds for a cell gives it its style, as in
+LibreOffice; overlapping conditional formats all apply.
 
 The workbook grid has 1,048,576 rows and 16,384 columns: rows and columns
 of a table beyond it are not shown, as when LibreOffice saves such a table

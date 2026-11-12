@@ -389,6 +389,7 @@ pub(super) fn parse_chartex_series_labels(
         font_hidden: series_text_paint.hidden.then_some(true),
         format_code: child(labels, "numFmt").and_then(|node| attr(&node, "formatCode")),
         format_divisors: None,
+        percent_format_code: None,
         separator: child(labels, "separator").map(|node| node.text().unwrap_or("").to_owned()),
         font_bold: chart_text_bool_from_present_props(series_run_props, "b"),
         font_italic: chart_text_bool_from_present_props(series_run_props, "i"),

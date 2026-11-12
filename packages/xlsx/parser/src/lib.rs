@@ -2141,7 +2141,11 @@ fn parse_projected_worksheet(
             });
         }
         if !rules.is_empty() {
-            x14_formats.push(ConditionalFormat { sqref, rules });
+            x14_formats.push(ConditionalFormat {
+                sqref,
+                rules,
+                first_match: false,
+            });
         }
     }
 
@@ -2721,7 +2725,11 @@ fn parse_projected_worksheet(
                         }
                     }
                 }
-                conditional_formats.push(ConditionalFormat { sqref, rules });
+                conditional_formats.push(ConditionalFormat {
+                    sqref,
+                    rules,
+                    first_match: false,
+                });
             }
             _ => {}
         }

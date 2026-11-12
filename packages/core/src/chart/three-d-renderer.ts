@@ -1509,7 +1509,7 @@ function drawThreeDDataLabel(
       ?? defaults?.formatCode ?? chart.dataLabelFormatCode ?? series.valFormatCode,
     formatDivisors: override?.formatCode != null ? null : defaults?.formatDivisors,
     percentFormatCode: override?.formatCode
-      ?? defaults?.formatCode ?? chart.dataLabelFormatCode ?? '0%',
+      ?? defaults?.percentFormatCode ?? defaults?.formatCode ?? chart.dataLabelFormatCode ?? '0%',
     date1904: chart.date1904,
     separator: override?.separator ?? defaults?.separator,
   });

@@ -601,7 +601,7 @@ function drawPieRichLabels(
       percentRatio: vals[i] / total,
       formatCode: ov?.formatCode ?? def.formatCode ?? s.valFormatCode ?? null,
       formatDivisors: ov?.formatCode != null ? null : def.formatDivisors,
-      percentFormatCode: ov?.formatCode ?? def.formatCode ?? '0%',
+      percentFormatCode: ov?.formatCode ?? def.percentFormatCode ?? def.formatCode ?? '0%',
       date1904: chart.date1904 ?? false,
       separator: ov?.separator ?? def.separator,
     });
@@ -1074,7 +1074,7 @@ function drawPieCalloutLabels(
       percentRatio: vals[i] / total,
       formatCode: ov?.formatCode ?? def.formatCode ?? s.valFormatCode ?? null,
       formatDivisors: ov?.formatCode != null ? null : def.formatDivisors,
-      percentFormatCode: ov?.formatCode ?? def.formatCode ?? '0%',
+      percentFormatCode: ov?.formatCode ?? def.percentFormatCode ?? def.formatCode ?? '0%',
       date1904: chart.date1904 ?? false,
       separator: ov?.separator ?? def.separator,
       defaultSeparator: '\n',

@@ -229,5 +229,10 @@ describe('scientific and fraction sections', () => {
     expect(formatChartValWithCode(0.3, '# ?/8')).toBe('2/8');
     expect(formatChartValWithCode(1.5, '?/?')).toBe('3/2');
     expect(formatChartValWithCode(-1.5, '# ?/?')).toBe('-1 1/2');
+    expect(formatChartValWithCode(Math.PI, '# ???/???')).toBe('3 16/113');
+    expect(formatChartValWithCode(0.5, '?/?')).toBe('1/2');
+    // The search does not grow with the denominator's digits.
+    expect(formatChartValWithCode(1, '# ?/???????')).toBe('1');
+    expect(formatChartValWithCode(1 / 3, '# ?/???????')).toBe('1/3');
   });
 });

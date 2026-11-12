@@ -1545,6 +1545,14 @@ pub struct CellRange {
 pub struct ConditionalFormat {
     pub sqref: Vec<CellRange>,
     pub rules: Vec<CfRule>,
+    /// Of this block's rules that apply a differential format, only the
+    /// first that matches a cell applies to it: an OpenDocument conditional
+    /// format (LibreOffice takes the style of the first matching condition
+    /// of a `calcext:conditional-format`, and of the first matching
+    /// `style:map`, while overlapping blocks all apply). SpreadsheetML rules
+    /// are independent but for `stopIfTrue`.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub first_match: bool,
 }
 
 /// One `<cfRule>` (ECMA-376 §18.3.1.10).

@@ -1224,6 +1224,7 @@ impl_retained_struct!(ChartSeriesDataLabels {
     font_hidden,
     format_code,
     format_divisors,
+    percent_format_code,
     separator,
     font_bold,
     font_italic,

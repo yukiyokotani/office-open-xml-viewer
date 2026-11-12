@@ -494,7 +494,7 @@ impl FillDefs {
 }
 
 /// `hex` with the alpha of `opacity`, when it is not opaque.
-fn with_alpha(hex: &str, opacity: f64) -> String {
+pub(crate) fn with_alpha(hex: &str, opacity: f64) -> String {
     let alpha = (opacity.clamp(0.0, 1.0) * 255.0).round() as u8;
     match hex.get(..6) {
         Some(rgb) if alpha < 255 => format!("{rgb}{alpha:02X}"),

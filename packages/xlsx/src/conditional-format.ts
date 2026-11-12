@@ -11,6 +11,9 @@ import { getWorksheetPolicy } from './worksheet-policy-context.js';
 export interface CompiledCfRule {
   rule: CfRule;
   sqref: WorksheetCellRange[];
+  /** The rule's block, when only the block's first matching format applies
+   *  (`ConditionalFormat.firstMatch`). */
+  firstMatchBlock?: number;
   scaleMin?: number;
   scaleMax?: number;
   scaleStops?: number[];
@@ -181,13 +184,16 @@ export function compileCf(
     definedNames.set(dn.name, dn);
   }
   const blocks = worksheet.conditionalFormats ?? [];
-  for (const cf of blocks) {
+  for (const [block, cf] of blocks.entries()) {
     // New provenance-only blocks must not trigger cached-cell scans. Only
     // existing statistical/scale rules need range samples; reuse their work.
     const needsSamples = cf.rules.some(rule => rule.type !== 'expression' && rule.type !== 'cellIs' && rule.type !== 'other' && !(rule.type === 'dataBar' && rule.extThresholdFormula));
     const samples = needsSamples ? collectNumericValuesInRanges(worksheet, cf.sqref) : [];
     for (const rule of cf.rules) {
       const entry: CompiledCfRule = { rule, sqref: cf.sqref };
+      if (cf.firstMatch && rule.type !== 'colorScale' && rule.type !== 'dataBar' && rule.type !== 'iconSet') {
+        entry.firstMatchBlock = block;
+      }
       if (rule.type === 'colorScale') {
         entry.scaleStops = admitThresholds(entry, rule.stops.map(s => resolveCfvoValue(s, samples)));
       } else if (rule.type === 'dataBar') {
@@ -449,8 +455,11 @@ export function evaluateCf(
 ): CfResult {
   const result: CfResult = {};
   if (!cfCtx.compiled.length) return result;
+  /** First-match blocks whose format for this cell is decided. */
+  let decided: Set<number> | undefined;
   for (const entry of cfCtx.compiled) {
     if (!rangeContains(entry.sqref, row, col)) continue;
+    if (entry.firstMatchBlock !== undefined && decided?.has(entry.firstMatchBlock)) continue;
     const rule = entry.rule;
     const numVal = cellNumericValue(cell);
 
@@ -600,6 +609,7 @@ export function evaluateCf(
     // stopIfTrue="1" kept a lower-priority bold+underline `expression` rule
     // off every numeric cell it formatted, and the same rules without the
     // flag let it apply. Non-numeric cells in a scale range were not tested.
+    if (matched && entry.firstMatchBlock !== undefined) (decided ??= new Set()).add(entry.firstMatchBlock);
     if (matched && rule.stopIfTrue) break;
   }
   return result;

@@ -1449,6 +1449,7 @@ pub(super) fn parse_data_labels_node_with_paint_policy(
         font_hidden: default_text_paint.hidden.then_some(true),
         format_code,
         format_divisors: None,
+        percent_format_code: None,
         separator,
         font_bold: font_bold_default,
         font_italic: font_italic_default,

@@ -165,7 +165,11 @@ retained_struct!(ChartAnchor {
     chart
 });
 
-retained_struct!(ConditionalFormat { sqref, rules });
+retained_struct!(ConditionalFormat {
+    sqref,
+    rules,
+    first_match
+});
 
 retained_struct!(DataValidation {
     sqref,

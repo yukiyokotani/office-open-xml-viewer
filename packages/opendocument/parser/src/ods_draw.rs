@@ -940,14 +940,13 @@ fn shape_info(
             .and_then(percent)
             .filter(|v| v.is_finite())
             .map_or(1.0, |v| v.clamp(0.0, 1.0));
-        let alpha = (opacity * 255.0).round() as u8;
-        get(chain, "graphic:svg:stroke-color")
-            .and_then(shape_color)
-            .or_else(|| Some("#000000".into()))
-            .map(|colour| match alpha {
-                255 => colour,
-                alpha => format!("{colour}{alpha:02X}"),
-            })
+        let colour = get(chain, "graphic:svg:stroke-color")
+            .and_then(hex_color)
+            .unwrap_or_else(|| "000000".into());
+        Some(format!(
+            "#{}",
+            crate::odf_fill::with_alpha(&colour, opacity)
+        ))
     };
     let stroke_width = get(chain, "graphic:svg:stroke-width")
         .and_then(length_pt)
@@ -1567,10 +1566,6 @@ fn admit_fill_image(
 
 /// Drawing colours in the workbook model are CSS `#RRGGBB` (as the
 /// SpreadsheetML drawing parser emits them), unlike cell-style colours.
-fn shape_color(value: &str) -> Option<String> {
-    hex_color(value).map(|hex| format!("#{hex}"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -331,23 +331,27 @@ function applyChartNumberSection(abs: number, section: string): string {
   }).join('');
 }
 
-/** The fraction `numerator / denominator` nearest to `value` (0 ≤ value < 1
- *  or an improper value) with a denominator of at most `maxDenominator`,
- *  by the Stern–Brocot mediants between its floor and ceiling. */
+/** The fraction `numerator / denominator` nearest to the non-negative
+ *  `value` with a denominator of at most `maxDenominator`: the last
+ *  convergent of its continued fraction within the bound, or the last
+ *  semiconvergent after it, whichever is nearer. The terms of a continued
+ *  fraction grow the denominator at least as fast as the Fibonacci numbers,
+ *  so the loop is short whatever the bound. */
 function nearestFraction(value: number, maxDenominator: number): [number, number] {
-  const whole = Math.floor(value);
-  const rest = value - whole;
-  let [ln, ld, hn, hd] = [0, 1, 1, 1];
-  let best: [number, number] = rest < 0.5 ? [0, 1] : [1, 1];
-  for (;;) {
-    const n = ln + hn;
-    const d = ld + hd;
-    if (d > maxDenominator) break;
-    if (Math.abs(n / d - rest) < Math.abs(best[0] / best[1] - rest)) best = [n, d];
-    if (n / d === rest) break;
-    if (n / d < rest) { ln = n; ld = d; } else { hn = n; hd = d; }
+  let [p0, q0, p1, q1] = [0, 1, 1, 0];
+  let x = value;
+  for (let i = 0; i < 64; i++) {
+    const term = Math.floor(x);
+    const q2 = q0 + term * q1;
+    if (q2 > maxDenominator) break;
+    [p0, q0, p1, q1] = [p1, q1, p0 + term * p1, q2];
+    const rest = x - term;
+    if (rest < 1e-12) return [p1, q1];
+    x = 1 / rest;
   }
-  return [whole * best[1] + best[0], best[1]];
+  const steps = Math.floor((maxDenominator - q0) / q1);
+  const [sn, sd] = [p0 + steps * p1, q0 + steps * q1];
+  return Math.abs(sn / sd - value) < Math.abs(p1 / q1 - value) ? [sn, sd] : [p1, q1];
 }
 
 /** A fraction section: the digit run before `/` is the numerator, the runs
