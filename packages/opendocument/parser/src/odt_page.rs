@@ -76,8 +76,41 @@ struct Authored<'a, 'i> {
 /// Attribute values by (namespace, local name), borrowed from the XML.
 type Attributes<'a> = HashMap<(&'a str, &'a str), &'a str>;
 
+/// The side names of each side shorthand (`style::SIDE_SHORTHANDS`, in
+/// `style::SIDES` order), as borrowed keys.
+const SHORTHAND_SIDES: [[&str; 4]; 4] = [
+    ["margin-top", "margin-bottom", "margin-left", "margin-right"],
+    [
+        "padding-top",
+        "padding-bottom",
+        "padding-left",
+        "padding-right",
+    ],
+    ["border-top", "border-bottom", "border-left", "border-right"],
+    [
+        "border-line-width-top",
+        "border-line-width-bottom",
+        "border-line-width-left",
+        "border-line-width-right",
+    ],
+];
+
+/// Lays an element's attributes over `attributes`. A side shorthand also
+/// sets its four sides (a side the element sets itself wins), so that it
+/// replaces sides inherited from the default, as `style::attributes` does
+/// for styles.
 fn overlay<'a>(attributes: &mut Attributes<'a>, node: roxmltree::Node<'a, '_>) {
     // (An element holds at most 256 attributes.)
+    for ((namespace, name), sides) in crate::style::SIDE_SHORTHANDS
+        .into_iter()
+        .zip(SHORTHAND_SIDES)
+    {
+        if let Some(value) = node.attribute((namespace, name)) {
+            for side in sides {
+                attributes.insert((namespace, side), value);
+            }
+        }
+    }
     for attribute in node.attributes() {
         attributes.insert(
             (attribute.namespace().unwrap_or(""), attribute.name()),
@@ -409,14 +442,13 @@ fn resolve_layout(authored: &Authored<'_, '_>) -> Result<Layout, String> {
     if let Some(height) = get(NS_FO, "page-height").filter(|v| *v > 0.0) {
         section.page_height = height;
     }
-    let all = get(NS_FO, "margin");
     for (name, slot) in [
         ("margin-top", &mut section.margin_top),
         ("margin-bottom", &mut section.margin_bottom),
         ("margin-left", &mut section.margin_left),
         ("margin-right", &mut section.margin_right),
     ] {
-        if let Some(value) = get(NS_FO, name).or(all) {
+        if let Some(value) = get(NS_FO, name) {
             *slot = value.max(0.0);
         }
     }
@@ -426,19 +458,16 @@ fn resolve_layout(authored: &Authored<'_, '_>) -> Result<Layout, String> {
     }
     // §20.183 page border and §20.217 padding: the text sits inside both.
     let border = |side: &str| {
-        attribute(NS_FO, &format!("border-{side}"))
-            .or_else(|| attribute(NS_FO, "border"))
-            .and_then(|value| {
-                parse_border(
-                    value,
-                    attribute(NS_STYLE, &format!("border-line-width-{side}"))
-                        .or_else(|| attribute(NS_STYLE, "border-line-width")),
-                )
-            })
+        // (Shorthands are written out as sides when the layers merge.)
+        attribute(NS_FO, &format!("border-{side}")).and_then(|value| {
+            parse_border(
+                value,
+                attribute(NS_STYLE, &format!("border-line-width-{side}")),
+            )
+        })
     };
     let padding = |side: &str| {
         get(NS_FO, &format!("padding-{side}"))
-            .or_else(|| get(NS_FO, "padding"))
             .unwrap_or(0.0)
             .max(0.0)
     };

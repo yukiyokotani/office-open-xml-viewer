@@ -514,10 +514,20 @@ impl<'a> Reader<'a> {
         let graphic = self.graphic(node)?;
         let (width, height) = self.frame_size(node, &graphic);
         let mut placement = self.placement(node, &graphic, (0.0, 0.0))?;
-        // `draw:transform` (§19.228) positions the frame like a shape: its
-        // translation replaces the offsets of `svg:x` and `svg:y`.
-        let (rotation, translated) =
-            transform_rotation(node.attribute((NS_DRAW, "transform")), width, height);
+        // `draw:transform` (§19.228) positions the frame like a shape: the
+        // transformed box's corner replaces the offsets of `svg:x` and
+        // `svg:y`.
+        let at = |name: &str| {
+            node.attribute((NS_SVG, name))
+                .and_then(|v| length_pt(v).ok())
+                .unwrap_or(0.0)
+        };
+        let (rotation, translated) = transform_rotation(
+            node.attribute((NS_DRAW, "transform")),
+            (at("x"), at("y")),
+            width,
+            height,
+        );
         if let Some((x, y)) = translated {
             if let AnchorAxisChoiceWire::Offset { value_pt } = &mut placement.horizontal.1 {
                 *value_pt = x;
@@ -1029,8 +1039,12 @@ impl<'a> Reader<'a> {
             width = (x2 - x1).abs();
             height = (y2 - y1).abs();
         }
-        let (rotation, translated) =
-            transform_rotation(node.attribute((NS_DRAW, "transform")), width, height);
+        let (rotation, translated) = transform_rotation(
+            node.attribute((NS_DRAW, "transform")),
+            origin,
+            width,
+            height,
+        );
         if let Some(position) = translated {
             origin = position;
         }
@@ -1489,8 +1503,8 @@ fn view_box(node: roxmltree::Node<'_, '_>) -> Option<(f64, f64, f64, f64)> {
 }
 
 /// `draw:transform` (§19.228): the list of transforms composed in order
-/// into one affine map of the unrotated box at the origin, read as the
-/// box's rotation (DOCX clockwise degrees) and, where the list translates,
+/// into one affine map of the unrotated box at `origin`, read as the box's
+/// rotation (DOCX clockwise degrees) and, where the list holds a transform,
 /// the box's top-left corner (the map of its centre, less half its size).
 /// Scale and skew move the centre; the box keeps its size.
 ///
@@ -1498,7 +1512,12 @@ fn view_box(node: roxmltree::Node<'_, '_>) -> Option<(f64, f64, f64, f64)> {
 /// writes and reads (every rotated object of the corpus, for example
 /// `rotate (-1.5707963267949)` for a quarter turn). The specification's
 /// text says degrees; reading them so would turn every LibreOffice file.
-fn transform_rotation(value: Option<&str>, width: f64, height: f64) -> (f64, Option<(f64, f64)>) {
+fn transform_rotation(
+    value: Option<&str>,
+    origin: (f64, f64),
+    width: f64,
+    height: f64,
+) -> (f64, Option<(f64, f64)>) {
     let Some(value) = value else {
         return (0.0, None);
     };
@@ -1521,30 +1540,25 @@ fn transform_rotation(value: Option<&str>, width: f64, height: f64) -> (f64, Opt
                 let (s, c) = next(0.0).sin_cos();
                 Some([c, -s, s, c, 0.0, 0.0])
             }
-            "translate" => {
-                positioned = true;
-                Some([1.0, 0.0, 0.0, 1.0, next(0.0), next(0.0)])
-            }
+            "translate" => Some([1.0, 0.0, 0.0, 1.0, next(0.0), next(0.0)]),
             "scale" => {
                 let sx = next(1.0);
                 Some([sx, 0.0, 0.0, next(sx), 0.0, 0.0])
             }
             "skewX" => Some([1.0, 0.0, next(0.0).tan(), 1.0, 0.0, 0.0]),
             "skewY" => Some([1.0, next(0.0).tan(), 0.0, 1.0, 0.0, 0.0]),
-            "matrix" => {
-                positioned = true;
-                Some([
-                    next(1.0),
-                    next(0.0),
-                    next(0.0),
-                    next(1.0),
-                    next(0.0),
-                    next(0.0),
-                ])
-            }
+            "matrix" => Some([
+                next(1.0),
+                next(0.0),
+                next(0.0),
+                next(1.0),
+                next(0.0),
+                next(0.0),
+            ]),
             _ => None,
         };
         if let Some([a, b, c, d, e, f]) = step {
+            positioned = true;
             // This transform after the ones before it.
             let [pa, pb, pc, pd, pe, pf] = map;
             map = [
@@ -1566,8 +1580,9 @@ fn transform_rotation(value: Option<&str>, width: f64, height: f64) -> (f64, Opt
     let angle = (-b).atan2(a);
     let degrees = (-angle.to_degrees()).rem_euclid(360.0);
     let corner = positioned.then(|| {
-        let (cx, cy) = (width / 2.0, height / 2.0);
-        (a * cx + c * cy + e - cx, b * cx + d * cy + f - cy)
+        let (hx, hy) = (width / 2.0, height / 2.0);
+        let (cx, cy) = (origin.0 + hx, origin.1 + hy);
+        (a * cx + c * cy + e - hx, b * cx + d * cy + f - hy)
     });
     (degrees, corner)
 }

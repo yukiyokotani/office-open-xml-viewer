@@ -577,21 +577,30 @@ impl<'a> Reader<'a> {
         {
             return Ok(());
         }
-        let style = node
+        // The section style with its parents and the family's default
+        // style (§16.2).
+        let mut chain = match node
             .attribute((NS_TEXT, "style-name"))
-            .and_then(|name| self.find_style(Family::Section, name));
-        let properties = style.and_then(|s| s.group("section-properties"));
-        let indent = properties.map_or((0.0, 0.0), |p| {
+            .and_then(|name| self.find_style(Family::Section, name))
+        {
+            Some(style) => self.style_chain(style)?.to_vec(),
+            None => Vec::new(),
+        };
+        if let Some(default) = self.sheet.default_style(Family::Section) {
+            chain.push(default);
+        }
+        let properties = Cascade::build(chain, "section-properties")?;
+        let indent = {
             let get = |name: &str| {
-                p.attributes
-                    .get(&(NS_FO.to_string(), name.to_string()))
+                properties
+                    .get(NS_FO, name)
                     .and_then(|v| length_pt(v).ok())
                     .unwrap_or(0.0)
             };
             (get("margin-left"), get("margin-right"))
-        });
+        };
         let columns = match properties
-            .and_then(|p| p.elements.get("columns"))
+            .element("columns")
             .and_then(|elements| elements.first())
         {
             Some(columns) => page::columns(columns, self.text_width - indent.0 - indent.1)?,
@@ -621,14 +630,18 @@ impl<'a> Reader<'a> {
         // §20.336 text:dont-balance-text-columns: an unbalanced section that
         // ends the document stays the last DOCX section, which the layout
         // does not balance (a continuous section after it would).
-        let unbalanced_end = properties
-            .and_then(|p| {
-                p.attributes
-                    .get(&(NS_TEXT.to_string(), "dont-balance-text-columns".to_string()))
-            })
-            .is_some_and(|v| v == "true")
-            && node.next_siblings().skip(1).all(|n| !n.is_element())
+        let mut unbalanced_end = properties.get(NS_TEXT, "dont-balance-text-columns")
+            == Some("true")
             && node.parent().is_some_and(|p| xml::is(p, NS_OFFICE, "text"));
+        if unbalanced_end {
+            for sibling in node.next_siblings().skip(1) {
+                budget::tick(1)?;
+                if sibling.is_element() {
+                    unbalanced_end = false;
+                    break;
+                }
+            }
+        }
         if sectioned && !unbalanced_end {
             self.start_section(page::SectionStart {
                 master: self.current_master.clone(),

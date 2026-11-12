@@ -728,20 +728,18 @@ impl<'a> Reader<'a> {
         }
         // The ruby text's own style sets its size; LibreOffice's default
         // ruby text is half the base size.
-        let ruby_size = node
+        // (The style and its parents, §16.2.)
+        let ruby_size = match node
             .kids()
             .find(|n| xml::is(*n, NS_TEXT, "ruby-text"))
             .and_then(|n| n.attribute((NS_TEXT, "style-name")))
             .and_then(|name| self.find_style(Family::Text, name))
-            .and_then(|style| {
-                style
-                    .group(TEXT)
-                    .and_then(|g| {
-                        g.attributes
-                            .get(&(NS_FO.to_string(), "font-size".to_string()))
-                    })
-                    .and_then(|v| length_pt(v).ok())
-            });
+        {
+            Some(style) => Cascade::build(self.style_chain(style)?.to_vec(), TEXT)?
+                .get(NS_FO, "font-size")
+                .and_then(|v| length_pt(v).ok()),
+            None => None,
+        };
         self.admit_chars(base.chars().count(), inline)?;
         let index = inline.items.len() as u32;
         inline.items.push(Item::Ruby {

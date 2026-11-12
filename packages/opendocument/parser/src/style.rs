@@ -535,8 +535,24 @@ fn read_style_body(node: roxmltree::Node<'_, '_>, name: String) -> Result<Style,
     })
 }
 
+/// The shorthand properties that set four sides at once (§20.205
+/// fo:margin, §20.217 fo:padding, §20.183 fo:border, §20.185
+/// style:border-line-width), by namespace and name.
+pub const SIDE_SHORTHANDS: [(&str, &str); 4] = [
+    (crate::xml::NS_FO, "margin"),
+    (crate::xml::NS_FO, "padding"),
+    (crate::xml::NS_FO, "border"),
+    (NS_STYLE, "border-line-width"),
+];
+pub const SIDES: [&str; 4] = ["top", "bottom", "left", "right"];
+
+/// An element's attributes, with each side shorthand also written out as
+/// its four sides (a side the element sets itself wins). Sides are then
+/// ordinary properties: a style's shorthand replaces the sides of the
+/// styles it inherits from, and a reader of a side sees the shorthand.
 pub fn attributes(node: roxmltree::Node<'_, '_>) -> HashMap<Key, String> {
-    node.attributes()
+    let mut out: HashMap<Key, String> = node
+        .attributes()
         .map(|attribute| {
             (
                 (
@@ -546,7 +562,17 @@ pub fn attributes(node: roxmltree::Node<'_, '_>) -> HashMap<Key, String> {
                 attribute.value().to_string(),
             )
         })
-        .collect()
+        .collect();
+    for (namespace, name) in SIDE_SHORTHANDS {
+        let Some(value) = node.attribute((namespace, name)) else {
+            continue;
+        };
+        for side in SIDES {
+            out.entry((namespace.to_string(), format!("{name}-{side}")))
+                .or_insert_with(|| value.to_string());
+        }
+    }
+    out
 }
 
 /// Implementation bound: property child elements (tab stops, columns, list

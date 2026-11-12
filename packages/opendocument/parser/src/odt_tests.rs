@@ -1049,6 +1049,34 @@ fn page_layouts_resolve_over_the_default_property_by_property() {
 }
 
 #[test]
+fn shorthands_replace_inherited_sides_and_sections_inherit() {
+    // A shorthand is its four sides: a layout's `fo:margin` replaces the
+    // default layout's side, a style's replaces its parent's.
+    let styles = r##"<style:default-page-layout><style:page-layout-properties fo:margin-left="50pt" fo:border-left="2pt solid #000000"/></style:default-page-layout><style:style style:name="Base" style:family="paragraph"><style:paragraph-properties fo:margin-left="30pt" fo:margin-right="7pt"/></style:style><style:style style:name="Child" style:family="paragraph" style:parent-style-name="Base"><style:paragraph-properties fo:margin="4pt" fo:margin-right="9pt"/></style:style><style:style style:name="Cols" style:family="section"><style:section-properties fo:margin-left="11pt"><style:columns fo:column-count="2"/></style:section-properties></style:style>"##;
+    let automatic = r##"<style:style style:name="Sect1" style:family="section" style:parent-style-name="Cols"/>"##;
+    let body = r##"<text:p text:style-name="Child">a</text:p><text:section text:name="s" text:style-name="Sect1"><text:p>b</text:p></text:section>"##;
+    let document = read_fixture(Fixture {
+        styles,
+        automatic,
+        page: r#" fo:margin="10pt" fo:border="none""#,
+        body,
+        ..Fixture::default()
+    });
+    let first = paragraphs(&document.body)[0];
+    assert_eq!((first.indent_left, first.indent_right), (4.0, 9.0));
+    // A section style inherits its parent's columns and margins (§16.2).
+    let in_section = paragraphs(&document.body)[1];
+    assert_eq!(in_section.indent_left, 11.0);
+    assert!(document.body.iter().any(|element| matches!(
+        element,
+        BodyElement::SectionBreak { columns: Some(columns), .. } if columns.count == 2
+    )));
+    // (The fixture layout sets its own sides, which win over its shorthand.)
+    assert!((document.section.margin_left - 25.0 * 72.0 / 25.4).abs() < 1e-6);
+    assert!(document.section.page_borders.is_none());
+}
+
+#[test]
 fn transforms_compose_in_order() {
     let corner = |transform: &str| {
         let body = format!(
@@ -1084,6 +1112,9 @@ fn transforms_compose_in_order() {
         corner("rotate (1.5707963267949) translate (100pt 200pt)"),
         (80.0, 160.0, 270.0)
     ));
+    // Any transform positions the box, about the origin of its coordinate
+    // system: a scale moves the centre (30, 10) to (60, 20).
+    assert!(close(corner("scale(2)"), (30.0, 10.0, 0.0)));
     // The same turn after the translation turns the translation too.
     assert!(close(
         corner("translate (100pt 200pt) rotate (1.5707963267949)"),
