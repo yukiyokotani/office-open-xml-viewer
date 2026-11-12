@@ -206,6 +206,15 @@ describe('resolveNumberingMarkerGeometry', () => {
     expect(geometry.markerWidthPt).toBe(geometry.shape?.advancePt);
   });
 
+  it('keeps the mirror-safe form of the native codes of a partly native marker', () => {
+    // The face draws a bare U+00AB but lacks U+F0B7: the marker stays as
+    // authored, with the kept code F0-shifted as in body text, so
+    // right-to-left shaping cannot mirror it to another glyph.
+    const { geometry, requests } = symbolMarker('«', ['«', ''], { baseRtl: true });
+    expect(geometry.markerText).toBe('');
+    expect(requests).toEqual([{ text: '', ascii: 'Symbol', cs: 'Symbol' }]);
+  });
+
   it('judges a complex-script symbol marker in its symbol family, not its cs text face', () => {
     // The cs slot names a text face; Word still draws the lvlText code in
     // Symbol. A kept code is shaped in that family alone; converted text is

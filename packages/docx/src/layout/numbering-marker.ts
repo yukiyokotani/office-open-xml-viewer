@@ -246,9 +246,17 @@ export function resolveNumberingMarkerGeometry(
   // was nevertheless converted, see SymbolTextOptions.keepsShifted, is not.)
   const converted = anyConverted
     && !judged.some((part) => !part.mapped && drawnAsSymbol(keptSlots, part.text));
-  // A wholly kept marker takes the judged text: a kept bare code may be
-  // written F0-shifted there (core symbol-font.ts).
-  const markerText = numbering.picBulletImagePath ? '' : converted || !anyConverted ? judgedText : numbering.text;
+  // A kept code takes its judged form: a bare code that bidi mirroring would
+  // replace is written F0-shifted there (core symbol-font.ts). So a wholly
+  // kept marker is the judged text, and a partly native one is the authored
+  // text with each kept code in that form (judged code by code; the codes
+  // that would have converted stay as authored).
+  const authoredKept = () => [...numbering.text].map((character) => {
+    const parts = service.symbolText?.({ ...keptSlots, text: character });
+    return parts?.length === 1 && !parts[0]!.mapped ? parts[0]!.text : character;
+  }).join('');
+  const markerText = numbering.picBulletImagePath ? ''
+    : converted || !anyConverted ? judgedText : authoredKept();
   const markerLayout = markerText
     ? shapeNumberingMarkerText(
         !converted ? keptInput

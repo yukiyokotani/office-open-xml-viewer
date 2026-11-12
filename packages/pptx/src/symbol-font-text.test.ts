@@ -117,4 +117,10 @@ describe('symbol-encoded PPTX runs (#2177)', () => {
     const fills = render([run('x', 'Arial')], { bullet, installed: true });
     expect(fills.some((fill) => fill.text === '\uF0B7\uF0FF' && fill.font.includes('Symbol'))).toBe(true);
   });
+
+  it('keeps the mirror-safe form of the native codes of a partly native bullet', () => {
+    const bullet = { type: 'char', char: '\u00AB\uF0FF', fontFamily: 'Symbol' } as unknown as Paragraph['bullet'];
+    const fills = render([run('x', 'Arial')], { bullet, installed: true });
+    expect(fills.some((fill) => fill.text === '\uF0AB\uF0FF' && fill.font.includes('Symbol'))).toBe(true);
+  });
 });

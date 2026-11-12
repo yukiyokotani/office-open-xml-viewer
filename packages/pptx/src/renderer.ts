@@ -4874,6 +4874,12 @@ function paragraphBullet(body: TextBody, para: Paragraph, paraDefaultColor: stri
     // be written F0-shifted there.)
     if (segments && (converted || !segments.some((part) => part.mapped))) {
       bulletLabel = segments.map((part) => part.text).join('');
+    } else if (segments) {
+      // Partly native: as authored, each kept code in its judged form.
+      bulletLabel = [...bulletLabel].map((code) => {
+        const parts = symbolFaceSegments(code, markerFamily, false, false, rc, keptFont);
+        return parts.length === 1 && !parts[0]!.mapped ? parts[0]!.text : code;
+      }).join('');
     }
     const convertedFamily = converted ? 'sans-serif' : markerFamily;
     bulletSizePx = bSizePx;
