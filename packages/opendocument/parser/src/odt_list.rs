@@ -981,6 +981,13 @@ impl<'a> Reader<'a> {
                 if list.label.is_none() && name == "text-indent" {
                     continue;
                 }
+                // (§20.256: an automatic indent leaves fo:text-indent
+                // unused.)
+                if name == "text-indent"
+                    && properties.get(NS_STYLE, "auto-text-indent") == Some("true")
+                {
+                    continue;
+                }
                 let raw = &setter.groups[PARAGRAPH].attributes[&key];
                 if raw.ends_with('%') {
                     // A percentage of the parent style's value (§20.207,

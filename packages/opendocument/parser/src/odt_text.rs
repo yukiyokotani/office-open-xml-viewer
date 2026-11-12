@@ -945,7 +945,20 @@ impl<'a> Reader<'a> {
             current = entry.parent;
         }
         if let Some(default) = self.sheet.default_style(Family::Text) {
-            styles.push(default);
+            // The default of the family of the style first declared (§16.2):
+            // for a span, the text default comes before the paragraph
+            // default that ends the paragraph's own search order.
+            let span = contexts[context as usize].parent.is_some();
+            let paragraph_default = self.sheet.default_style(Family::Paragraph);
+            let ends_in_paragraph_default = styles
+                .last()
+                .zip(paragraph_default)
+                .is_some_and(|(last, default)| std::ptr::eq(last.style(), default.style()));
+            if span && ends_in_paragraph_default {
+                styles.insert(styles.len() - 1, default);
+            } else {
+                styles.push(default);
+            }
         }
         Ok(styles)
     }
