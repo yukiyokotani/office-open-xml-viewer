@@ -2337,4 +2337,45 @@ describe('layoutPages — vanished (hidden) empty-paragraph mark collapse (§17.
     // first page.
     expect(withOrdinaryEmpties.length).toBeGreaterThan(1);
   });
+
+  const hiddenWithPageBreak = (): BodyElement =>
+    ({ ...para({ markVanish: true }), pageBreakBefore: true } as BodyElement);
+  const pageFramed = (text: string): BodyElement => ({
+    ...para({ text, fontSize: 20 }),
+    framePr: {
+      dropCap: 'none', lines: 1, wrap: 'none', hAnchor: 'page', vAnchor: 'page',
+      hRule: 'auto', hSpace: 0, vSpace: 0, w: 100, x: 20, y: 0,
+    },
+  } as BodyElement);
+  const pageOf = (pages: readonly LayoutPage[], text: string): number =>
+    pages.findIndex((page) => page.layers.body.some((el) => textOf(el) === text));
+
+  it('keeps the page break of a hidden paragraph followed by a framed paragraph', () => {
+    const pages = layoutPages(
+      [para({ text: 'a' }), hiddenWithPageBreak(), pageFramed('framed'), para({ text: 'after' })],
+      section(),
+      makeCtx(),
+    );
+    expect(pages.length).toBe(2);
+    expect(pageOf(pages, 'after')).toBe(1);
+  });
+
+  it('keeps the page break of any paragraph in a hidden run followed by a table', () => {
+    const pages = layoutPages(
+      [para({ text: 'a' }), para({ markVanish: true }), hiddenWithPageBreak(), fixedTable([20])],
+      section(),
+      makeCtx(),
+    );
+    expect(pages.length).toBe(2);
+    expect(retainedTableOn(pages[1]!)).toBeDefined();
+  });
+
+  it('control: drops the page break of a hidden paragraph that merges into an ordinary paragraph', () => {
+    const pages = layoutPages(
+      [para({ text: 'a' }), hiddenWithPageBreak(), para({ text: 'b' })],
+      section(),
+      makeCtx(),
+    );
+    expect(pages.length).toBe(1);
+  });
 });
