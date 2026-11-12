@@ -348,7 +348,7 @@ export function resolveNumberingMarkerGeometry(
   // marker's symbol family (older/public models) judges that family alone.
   // A slot whose family is not the marker's symbol font (say a complex-script
   // marker whose cs slot names a text face) would draw the codes as plain
-  // text, while Word draws the lvlText codes in that symbol font; such a
+  // text, while the lvlText codes belong to that symbol font (§17.9.x); such a
   // marker is judged, and its kept codes shaped, in the marker family alone.
   const markerSlots = {
     fonts: markerInput.fonts, themeFonts: markerInput.themeFonts, themeFontPresence: markerInput.themeFontPresence,
