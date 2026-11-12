@@ -334,6 +334,10 @@ impl<'a, 'r, 'p> SlideReader<'a, 'r, 'p> {
         page_props.extend_styles(&page_styles, DRAWING_PAGE);
         let mut master_props = Props::new();
         master_props.extend_styles(&master_styles, DRAWING_PAGE);
+        self.visit(
+            crate::odp_style::props_cost(&page_props)
+                .saturating_add(crate::odp_style::props_cost(&master_props)),
+        )?;
         let flag = |name: &str| page_props.get(NS_PRESENTATION, name) != Some("false");
         let hidden = page_props.get(NS_PRESENTATION, "visibility") == Some("hidden");
 
@@ -405,7 +409,10 @@ impl<'a, 'r, 'p> SlideReader<'a, 'r, 'p> {
                 let shown: Vec<Nd<'a>> = children
                     .into_iter()
                     .filter(|child| {
-                        let class = child.attribute((NS_PRESENTATION, "class")).unwrap_or("");
+                        // A hyperlinked shape is classed by the shape it wraps.
+                        let class = wrapped_shape(*child)
+                            .attribute((NS_PRESENTATION, "class"))
+                            .unwrap_or("");
                         !is_master_template(class)
                             && match class {
                                 "footer" => flag("display-footer"),
@@ -637,10 +644,14 @@ impl<'a, 'r, 'p> SlideReader<'a, 'r, 'p> {
         if !self.master_frames.contains_key(&master.id()) {
             let mut frames = HashMap::new();
             let mut visited = 0usize;
-            for child in master.children().filter(|c| xml::is(*c, NS_DRAW, "frame")) {
+            for child in master.children().filter(|c| c.is_element()) {
                 visited += 1;
-                if let Some(c) = child.attribute((NS_PRESENTATION, "class")) {
-                    frames.entry(c).or_insert(child);
+                let shape = wrapped_shape(child);
+                if !xml::is(shape, NS_DRAW, "frame") {
+                    continue;
+                }
+                if let Some(c) = shape.attribute((NS_PRESENTATION, "class")) {
+                    frames.entry(c).or_insert(shape);
                 }
             }
             self.visit(visited)?;
@@ -1408,18 +1419,23 @@ fn clone_ctx<'a>(ctx: &ObjectContext<'a>) -> ObjectContext<'a> {
     }
 }
 
+/// The shape a drawing object is: the one a hyperlink (`draw:a`) wraps,
+/// else the object itself.
+fn wrapped_shape(node: Nd<'_>) -> Nd<'_> {
+    if xml::is(node, NS_DRAW, "a") {
+        node.children().find(|c| c.is_element()).unwrap_or(node)
+    } else {
+        node
+    }
+}
+
 /// Drawing objects in stacking order (§19.231 `draw:z-index`, ascending
 /// from back to front; document order where it is absent or equal). An
 /// object without a z-index stays right after the object before it.
 fn stacking_order<'a>(nodes: Vec<Nd<'a>>) -> Vec<Nd<'a>> {
     // A hyperlink (`draw:a`) stacks as the shape it wraps.
     let z_index = |node: Nd<'a>| -> Option<u64> {
-        let shape = if xml::is(node, NS_DRAW, "a") {
-            node.children().find(|c| c.is_element())?
-        } else {
-            node
-        };
-        shape
+        wrapped_shape(node)
             .attribute((NS_DRAW, "z-index"))
             .and_then(|v| v.trim().parse::<u64>().ok())
     };
