@@ -156,11 +156,20 @@ export interface SymbolTextSegment {
   readonly mapped: boolean;
 }
 
+/** Bare codes with the Bidi_Mirrored property: in right-to-left text a
+ * shaper replaces them with their mirror partner, which in a symbol font is
+ * an unrelated glyph ("\u00AB" is Symbol's left-right arrow, its partner
+ * "\u00BB" the almost-equal sign). */
+const BIDI_MIRRORED = /[()<>[\]{}\u00AB\u00BB]/u;
+
+/** The Unicode text of one authored character (`mapped`), the form it is
+ * kept in, or undefined: kept as authored. */
 function convertCodePoint(
   ch: string,
   key: SymbolFontKey,
   options: SymbolTextOptions,
-): string | undefined {
+): Readonly<{ text: string; mapped: boolean }> | undefined {
+  const converted = (text: string | undefined) => (text === undefined ? undefined : { text, mapped: true });
   const cp = ch.codePointAt(0)!;
   const pua = cp >= 0xf020 && cp <= 0xf0ff;
   const code = pua ? cp - 0xf000 : cp;
@@ -169,26 +178,31 @@ function convertCodePoint(
   const legacy = LEGACY_LOOKUPS.get(key)?.[code];
   if ((full ?? ch) === ch && (legacy ?? ch) === ch) return undefined;
   const native = options.native?.(ch);
-  if (native) return undefined;
+  // A native bare code that bidi mirroring would replace is kept as its
+  // F0-shifted form: the very glyph (that identity is what makes a bare code
+  // native, symbol-face.ts), which no direction mirrors.
+  if (native) return !pua && BIDI_MIRRORED.test(ch) ? { text: String.fromCharCode(0xf000 + code), mapped: false } : undefined;
   const target = native === undefined ? legacy : full;
   if (target === undefined || target === ch) return undefined;
   if (EMOJI_CAPABLE.test(target)) {
     const text = target + TEXT_PRESENTATION;
     const proof = options.monochrome?.(text);
-    if (proof !== undefined) return proof ? text : undefined;
+    if (proof !== undefined) return converted(proof ? text : undefined);
     // Inconclusive (no readable canvas in this realm): the 0.89 subset keeps
     // its text-default symbols (▪, ✓, ☺), now with VS15; a character whose
     // default presentation is emoji is kept as authored.
-    return native === undefined && !EMOJI_PRESENTATION.test(target) ? text : undefined;
+    return converted(native === undefined && !EMOJI_PRESENTATION.test(target) ? text : undefined);
   }
-  return target;
+  return converted(target);
 }
 
 /**
- * Convert every code point of `text` that the selected face does not draw
+ * Convert every code point of `text` that the painted font does not draw
  * (see the module notes) and split the result into maximal same-disposition
  * runs, so the caller can switch the draw font at each boundary. A family
- * without a table yields one unmapped segment.
+ * without a table yields one unmapped segment. An unmapped segment is the
+ * authored text, except that a native bare code which bidi mirroring would
+ * replace is written F0-shifted (same glyph, same font).
  */
 export function symbolTextToUnicodeSegments(
   text: string,
@@ -202,8 +216,8 @@ export function symbolTextToUnicodeSegments(
   let bufMapped: boolean | null = null;
   for (const ch of text) {
     const converted = convertCodePoint(ch, key, options);
-    const mapped = converted !== undefined;
-    const piece = converted ?? ch;
+    const mapped = converted?.mapped === true;
+    const piece = converted?.text ?? ch;
     if (bufMapped === null || mapped === bufMapped) {
       bufMapped = mapped;
       buf += piece;

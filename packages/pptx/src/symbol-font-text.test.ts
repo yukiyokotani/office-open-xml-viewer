@@ -105,6 +105,13 @@ describe('symbol-encoded PPTX runs (#2177)', () => {
     expect(installed.some((fill) => fill.text === '\uF0B7' && fill.font.includes('Symbol'))).toBe(true);
   });
 
+  it('paints a kept bare code that bidi mirroring would replace in its F0-shifted form', () => {
+    const bullet = { type: 'char', char: '\u00AB', fontFamily: 'Symbol' } as unknown as Paragraph['bullet'];
+    const fills = render([run('x\u00AB', 'Symbol')], { bullet, installed: true });
+    expect(fills.filter((fill) => fill.text.includes('\uF0AB')).length).toBeGreaterThanOrEqual(2);
+    expect(fills.some((fill) => fill.text.includes('\u00AB'))).toBe(false);
+  });
+
   it('keeps a bullet as authored when its font draws only some of its codes', () => {
     const bullet = { type: 'char', char: '\uF0B7\uF0FF', fontFamily: 'Symbol' } as unknown as Paragraph['bullet'];
     const fills = render([run('x', 'Arial')], { bullet, installed: true });

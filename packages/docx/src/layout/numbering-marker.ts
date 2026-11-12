@@ -231,13 +231,17 @@ export function resolveNumberingMarkerGeometry(
     themeFontPresence: undefined,
   };
   const keptSlots = { ...markerSlots, fonts: keptInput.fonts, themeFonts: keptInput.themeFonts, themeFontPresence: keptInput.themeFontPresence };
-  const convertedText = !symbolMarker ? numbering.text
-    : (service.symbolText?.({ ...keptSlots, text: numbering.text })
-      ?? symbolTextToUnicodeSegments(numbering.text, markerFamily)).map((part) => part.text).join('');
+  const judged = !symbolMarker ? [{ text: numbering.text, mapped: false }]
+    : service.symbolText?.({ ...keptSlots, text: numbering.text })
+      ?? symbolTextToUnicodeSegments(numbering.text, markerFamily);
+  const judgedText = judged.map((part) => part.text).join('');
   const drawnAsSymbol = (slotsOf: typeof markerSlots, text: string) =>
     [...text].some((character) => service.symbolDraws?.(slotsOf, character) === true);
-  const converted = convertedText !== numbering.text && !drawnAsSymbol(keptSlots, numbering.text);
-  const markerText = numbering.picBulletImagePath ? '' : converted ? convertedText : numbering.text;
+  const anyConverted = judged.some((part) => part.mapped);
+  const converted = anyConverted && !drawnAsSymbol(keptSlots, numbering.text);
+  // A wholly kept marker takes the judged text: a kept bare code may be
+  // written F0-shifted there (core symbol-font.ts).
+  const markerText = numbering.picBulletImagePath ? '' : converted || !anyConverted ? judgedText : numbering.text;
   const markerLayout = markerText
     ? shapeNumberingMarkerText(
         !converted ? keptInput

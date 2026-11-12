@@ -104,6 +104,21 @@ describe('symbol text conversion for a font that draws the codes', () => {
       .toBe(ch(0xf061) + ch(0x3b1));
   });
 
+  it('keeps a native bare code that bidi mirroring would replace as its F0-shifted form', () => {
+    // Right-to-left shaping turns a bare "\u00AB" into "\u00BB": in Symbol,
+    // the almost-equal sign instead of the left-right arrow. The shifted form
+    // is the same glyph and is never mirrored.
+    const native = () => true;
+    expect(symbolTextToUnicodeSegments('a\u00AB\uF0BB', 'Symbol', { native }))
+      .toEqual([{ text: 'a\uF0AB\uF0BB', mapped: false }]);
+    expect(symbolFontToUnicode('(x)', 'Wingdings', { native })).toBe('\uF028x\uF029');
+    // Symbol's own parentheses are parentheses: mirroring them is right.
+    expect(symbolFontToUnicode('(', 'Symbol', { native })).toBe('(');
+    // Not native, or not judged: converted as any other code.
+    expect(symbolFontToUnicode('\u00AB', 'Symbol', mono)).toBe('\u2194' + VS15);
+    expect(symbolFontToUnicode('\u00AB', 'Symbol')).toBe('\u2194' + VS15);
+  });
+
   it('asks only about codes that have a conversion', () => {
     const asked: string[] = [];
     // Digits are themselves in Symbol; 0xF0 has no target; "α" is no code.

@@ -1412,7 +1412,12 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
             return resolve({ ...cleared, text: converted, slot: scalarSlot(cleared, converted) });
           })
           : symbolTextToUnicodeSegments(character, family);
-        for (const part of parts) push(part);
+        // A kept bare code may come back F0-shifted (core symbol-font.ts): it
+        // is the same glyph only in the font it was judged in, so it stays
+        // bare when shaping would give the shifted form another slot family.
+        const shiftedElsewhere = parts.length === 1 && !parts[0]!.mapped && parts[0]!.text !== character
+          && requestedFamily(request, scalarSlot(request, parts[0]!.text))?.trim().toLowerCase() !== family.trim().toLowerCase();
+        for (const part of shiftedElsewhere ? [{ text: character, mapped: false }] : parts) push(part);
       }
       return out;
     },

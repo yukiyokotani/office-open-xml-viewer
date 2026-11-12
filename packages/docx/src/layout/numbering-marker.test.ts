@@ -115,6 +115,12 @@ describe('resolveNumberingMarkerGeometry', () => {
     expect(requests).toEqual([{ text: '', ascii: 'Symbol', cs: 'Symbol' }]);
   });
 
+  it('shapes a kept bare code that bidi mirroring would replace in its F0-shifted form', () => {
+    const { geometry, requests } = symbolMarker('\u00AB', ['\u00AB'], { baseRtl: true });
+    expect(geometry.markerText).toBe('\uF0AB');
+    expect(requests).toEqual([{ text: '\uF0AB', ascii: 'Symbol', cs: 'Symbol' }]);
+  });
+
   it('keeps the marker slots for text converted from a font that draws no symbol code', () => {
     // Apple's Symbol is Unicode-encoded: U+F0B7 becomes "•", which that same
     // face draws, as in 0.89.

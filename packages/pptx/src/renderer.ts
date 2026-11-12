@@ -2025,6 +2025,10 @@ export function paragraphInputRuns(
             converted ? 'sans-serif' : symbolFamily, rc, glyph);
           share = undefined;
           face = converted ? 'sans-serif' : symbolFamily;
+        } else if (segments[0]!.text !== ch) {
+          // A kept bare code written F0-shifted (core symbol-font.ts): the
+          // same glyph in this very font, which no direction mirrors.
+          glyph = segments[0]!.text + cluster.slice(ch.length);
         }
       }
       // A Latin-slot curly quote next to an ideograph is a slot seam even when
@@ -4866,7 +4870,11 @@ function paragraphBullet(body: TextBody, para: Paragraph, paraDefaultColor: stri
       ? symbolFaceSegments(bulletLabel, markerFamily, false, false, rc, keptFont) : null;
     const converted = segments?.some((part) => part.mapped) === true
       && ![...bulletLabel].some((code) => rc.symbolFaces?.draws(code, keptFont) === true);
-    if (segments && converted) bulletLabel = segments.map((part) => part.text).join('');
+    // (A wholly kept marker takes the judged text too: a kept bare code may
+    // be written F0-shifted there.)
+    if (segments && (converted || !segments.some((part) => part.mapped))) {
+      bulletLabel = segments.map((part) => part.text).join('');
+    }
     const convertedFamily = converted ? 'sans-serif' : markerFamily;
     bulletSizePx = bSizePx;
     bulletFamily = convertedFamily;
