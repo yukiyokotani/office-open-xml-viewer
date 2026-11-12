@@ -176,11 +176,54 @@ fn px(pt: f64) -> i64 {
     (pt * 96.0 / 72.0).round() as i64
 }
 
-/// `rotate (r) translate (x y)` (§19.229 draw:transform): the angle in
-/// degrees clockwise and the translated origin in points.
-fn transform(value: &str) -> Option<(f64, f64, f64)> {
-    let mut angle = 0.0;
-    let mut origin = None;
+/// A 2D affine map `x' = a·x + c·y + e`, `y' = b·x + d·y + f` (points, y
+/// down).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Affine {
+    a: f64,
+    b: f64,
+    c: f64,
+    d: f64,
+    e: f64,
+    f: f64,
+}
+
+impl Affine {
+    const IDENTITY: Self = Self {
+        a: 1.0,
+        b: 0.0,
+        c: 0.0,
+        d: 1.0,
+        e: 0.0,
+        f: 0.0,
+    };
+
+    /// `self` applied first, then `next`.
+    fn then(self, next: Self) -> Self {
+        Self {
+            a: next.a * self.a + next.c * self.b,
+            b: next.b * self.a + next.d * self.b,
+            c: next.a * self.c + next.c * self.d,
+            d: next.b * self.c + next.d * self.d,
+            e: next.a * self.e + next.c * self.f + next.e,
+            f: next.b * self.e + next.d * self.f + next.f,
+        }
+    }
+
+    fn apply(self, x: f64, y: f64) -> (f64, f64) {
+        (
+            self.a * x + self.c * y + self.e,
+            self.b * x + self.d * y + self.f,
+        )
+    }
+}
+
+/// §19.228 `draw:transform`: the listed transforms applied in order, as
+/// LibreOffice writes and reads them (`rotate (r) translate (x y)` turns
+/// the shape about its origin and then moves it; a positive angle turns
+/// counter-clockwise on the page). `None` when the list is malformed.
+fn transform(value: &str) -> Option<Affine> {
+    let mut map = Affine::IDENTITY;
     let mut rest = value;
     while let Some(open) = rest.find('(') {
         let name = rest[..open].trim();
@@ -189,20 +232,57 @@ fn transform(value: &str) -> Option<(f64, f64, f64)> {
             .split(|c: char| c == ',' || c.is_whitespace())
             .filter(|s| !s.is_empty())
             .collect();
-        match name {
-            "rotate" => angle = -args.first()?.parse::<f64>().ok()?.to_degrees(),
-            "translate" => {
-                origin = Some((
-                    length_pt(args.first()?)?,
-                    args.get(1).and_then(|v| length_pt(v)).unwrap_or(0.0),
-                ))
+        let number = |at: usize| args.get(at).and_then(|v| v.parse::<f64>().ok());
+        let length = |at: usize| args.get(at).and_then(|v| length_pt(v));
+        let step = match name {
+            "rotate" => {
+                let (sin, cos) = number(0)?.sin_cos();
+                Affine {
+                    a: cos,
+                    b: -sin,
+                    c: sin,
+                    d: cos,
+                    ..Affine::IDENTITY
+                }
             }
-            _ => {}
-        }
+            "translate" => Affine {
+                e: length(0)?,
+                f: length(1).unwrap_or(0.0),
+                ..Affine::IDENTITY
+            },
+            "scale" => {
+                let sx = number(0)?;
+                Affine {
+                    a: sx,
+                    d: number(1).unwrap_or(sx),
+                    ..Affine::IDENTITY
+                }
+            }
+            "skewX" => Affine {
+                c: -number(0)?.tan(),
+                ..Affine::IDENTITY
+            },
+            "skewY" => Affine {
+                b: -number(0)?.tan(),
+                ..Affine::IDENTITY
+            },
+            "matrix" => Affine {
+                a: number(0)?,
+                b: number(1)?,
+                c: number(2)?,
+                d: number(3)?,
+                e: length(4)?,
+                f: length(5)?,
+            },
+            _ => Affine::IDENTITY,
+        };
+        map = map.then(step);
         rest = &rest[close + 1..];
     }
-    let (x, y) = origin?;
-    Some((angle, x, y))
+    [map.a, map.b, map.c, map.d, map.e, map.f]
+        .iter()
+        .all(|v| v.is_finite())
+        .then_some(map)
 }
 
 /// Place a drawing: its rectangle on the grid and its rotation.
@@ -234,17 +314,26 @@ fn place(
         w = (x2 - x1).abs();
         h = (y2 - y1).abs();
     }
-    if let Some((angle, tx, ty)) = node.attribute((NS_DRAW, "transform")).and_then(transform) {
-        // The translated origin is the rotated top-left corner; SpreadsheetML
-        // anchors the unrotated box around the same centre.
-        let radians = angle.to_radians();
-        let (cx, cy) = (
-            tx + (w / 2.0) * radians.cos() - (h / 2.0) * radians.sin(),
-            ty + (w / 2.0) * radians.sin() + (h / 2.0) * radians.cos(),
-        );
+    if let Some(map) = node.attribute((NS_DRAW, "transform")).and_then(transform) {
+        // The drawing model holds a box, its rotation and its flips: the
+        // map's rotation and scale are applied about the box's mapped
+        // centre (SpreadsheetML anchors the unrotated box around it). A
+        // shear has no place in the model.
+        let (cx, cy) = map.apply(x + w / 2.0, y + h / 2.0);
+        let sx = map.a.hypot(map.b);
+        let sy = if sx > 0.0 {
+            ((map.a * map.d - map.b * map.c) / sx).abs()
+        } else {
+            map.c.hypot(map.d)
+        };
+        w *= sx;
+        h *= sy;
         x = cx - w / 2.0;
         y = cy - h / 2.0;
-        rotation = angle;
+        rotation = map.b.atan2(map.a).to_degrees();
+        if rotation.abs() < 1e-9 {
+            rotation = 0.0;
+        }
     }
     let (origin_x, origin_y) = match cell {
         Some((row0, col0)) => (grid.col_left(col0), grid.row_top(row0)),
@@ -919,24 +1008,40 @@ fn shape_text(
     // innermost context's family (§16.2), so a family default never
     // overrides the graphic style or a surrounding context.
     let graphic = PartialFont::of(chain, &ctx.faces).with_size_base(10.0);
+    // §19.227 `draw:text-style-name`: the paragraph style of the shape's
+    // text, under each paragraph's own style and over the graphic style. A
+    // text box carries it on its frame.
+    let shape_paragraph = node
+        .attribute((NS_DRAW, "text-style-name"))
+        .or_else(|| {
+            node.parent()
+                .filter(|parent| xml::is(*parent, NS_DRAW, "frame"))
+                .and_then(|frame| frame.attribute((NS_DRAW, "text-style-name")))
+        })
+        .filter(|name| ctx.store.find("paragraph", name).is_some());
+    let shape_chain = shape_paragraph
+        .map(|name| ctx.store.chain_own("paragraph", name))
+        .unwrap_or_default();
+    let shape_set = PartialFont::of(&shape_chain, &ctx.faces).over(&graphic);
     let mut out = Vec::new();
     for p in paragraphs {
         budget::tick(1)?;
         let p_chain = ctx
             .store
             .chain("paragraph", p.attribute((NS_TEXT, "style-name")));
-        let align =
-            match get(&p_chain, "par:fo:text-align").or_else(|| get(chain, "par:fo:text-align")) {
-                Some("center") => "ctr",
-                Some("end") | Some("right") => "r",
-                Some("justify") => "just",
-                _ => "l",
-            };
+        let align = match get(&p_chain, "par:fo:text-align")
+            .or_else(|| get(&shape_chain, "par:fo:text-align"))
+            .or_else(|| get(chain, "par:fo:text-align"))
+        {
+            Some("center") => "ctr",
+            Some("end") | Some("right") => "r",
+            Some("justify") => "just",
+            _ => "l",
+        };
         let p_set = match p.attribute((NS_TEXT, "style-name")) {
-            Some(name) => {
-                PartialFont::of(&ctx.store.chain_own("paragraph", name), &ctx.faces).over(&graphic)
-            }
-            None => graphic.clone(),
+            Some(name) => PartialFont::of(&ctx.store.chain_own("paragraph", name), &ctx.faces)
+                .over(&shape_set),
+            None => shape_set.clone(),
         };
         let p_font = context_font(ctx, &p_set, "paragraph");
         let mut runs = Vec::new();
@@ -1243,16 +1348,11 @@ pub(crate) fn resolve_charts(
                 // A structurally invalid object is drawn from its
                 // replacement; a resource limit or package failure rejects
                 // the workbook.
-                let mut model = match model {
+                let model = match model {
                     Ok(model) => model,
                     Err(error) if crate::error::is_invalid(&error) => None,
                     Err(error) => return Err(error),
                 };
-                // Chart values read from the tables are serials of the
-                // workbook's date system (§19.636 `table:null-date`).
-                if let Some(model) = model.as_mut() {
-                    model.date1904 = ctx.date1904;
-                }
                 ctx.chart_objects.insert(key, model.clone());
                 model
             }
@@ -1310,6 +1410,10 @@ struct SheetResolver<'a> {
 }
 
 impl crate::odf_chart::RangeResolver for SheetResolver<'_> {
+    fn date1904(&self) -> bool {
+        self.ctx.date1904
+    }
+
     fn cells(&self, address: &str) -> Result<Option<Vec<crate::odf_chart::SourceCell>>, String> {
         use crate::odf_chart::{CellData, SourceCell};
         let Some((sheet, (r1, c1), (r2, c2))) = super::parse_range(address) else {
@@ -1442,6 +1546,22 @@ fn shape_color(value: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transforms_compose_in_order() {
+        let close = |a: f64, b: f64| (a - b).abs() < 1e-9;
+        // Turn a quarter counter-clockwise about the origin, then move.
+        let map = transform("rotate (1.5707963267948966) translate (72pt 36pt)").unwrap();
+        let (x, y) = map.apply(10.0, 0.0);
+        assert!(close(x, 72.0) && close(y, 26.0), "{x} {y}");
+        assert!(close(map.b.atan2(map.a).to_degrees(), -90.0));
+        // A scale alone, and a matrix.
+        let map = transform("scale(2)").unwrap();
+        assert_eq!(map.apply(3.0, 4.0), (6.0, 8.0));
+        let map = transform("matrix(1 0 0 3 1in 0pt)").unwrap();
+        assert_eq!(map.apply(1.0, 1.0), (73.0, 3.0));
+        assert!(transform("rotate (x)").is_none());
+    }
 
     /// The grid's lookups agree with walking it column by column and row by
     /// row (zero-width runs, trailing default columns, height overrides).

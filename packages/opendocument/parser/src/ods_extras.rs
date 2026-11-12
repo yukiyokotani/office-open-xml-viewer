@@ -196,12 +196,30 @@ pub(crate) fn named_expressions(
                 let Some(name) = node.attribute((NS_TABLE, "name")) else {
                     continue;
                 };
+                // §19.590 `table:base-cell-address`: relative references of
+                // a name are written from its base cell. A SpreadsheetML
+                // defined name is relative to A1, so they are restated
+                // there (absolute references stay as they are).
+                let shift = match node
+                    .attribute((NS_TABLE, "base-cell-address"))
+                    .and_then(parse_range)
+                {
+                    Some((_, (row, col), _)) => (1 - i64::from(row), 1 - i64::from(col)),
+                    None => (0, 0),
+                };
                 let formula = if xml::is(node, NS_TABLE, "named-range") {
                     node.attribute((NS_TABLE, "cell-range-address"))
-                        .and_then(convert_range_list)
+                        .map(|addresses| {
+                            crate::odf_text::split_addresses(addresses)
+                                .into_iter()
+                                .map(|address| convert_reference(address, shift))
+                                .collect::<Vec<_>>()
+                                .join(",")
+                        })
+                        .filter(|formula| !formula.is_empty())
                 } else if xml::is(node, NS_TABLE, "named-expression") {
                     node.attribute((NS_TABLE, "expression"))
-                        .map(convert_formula)
+                        .map(|expression| convert_formula_shifted(expression, shift))
                 } else {
                     None
                 };

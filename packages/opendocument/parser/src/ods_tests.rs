@@ -945,3 +945,115 @@ fn attribute_strings_keep_the_formatting_of_matching_paragraphs() {
     assert_eq!(read(&cells[1]), ("North".to_string(), None));
     assert_eq!(read(&cells[2]), ("North".to_string(), None));
 }
+
+#[test]
+fn names_are_restated_from_their_base_cell() {
+    // §19.590: `[.A1]` written from B2 is "one up, one left"; a defined
+    // name is relative to A1, where that reference is off the grid, while
+    // `[.C3]` from B2 is B2 from A1.
+    let body = content(
+        "",
+        concat!(
+            r#"<table:table table:name="Sheet1"><table:table-row><table:table-cell/></table:table-row></table:table>"#,
+            r#"<table:named-expressions>"#,
+            r#"<table:named-expression table:name="Next" table:base-cell-address="$Sheet1.$B$2" table:expression="of:=[.C3]+[.$A$1]"/>"#,
+            r#"<table:named-expression table:name="Before" table:base-cell-address="$Sheet1.$B$2" table:expression="of:=[.A1]"/>"#,
+            r#"<table:named-range table:name="Block" table:base-cell-address="$Sheet1.$B$2" table:cell-range-address="$Sheet1.$A$1:.$B$2"/>"#,
+            r#"<table:named-range table:name="Near" table:base-cell-address="$Sheet1.$B$2" table:cell-range-address="Sheet1.B2:Sheet1.C2"/>"#,
+            r#"</table:named-expressions>"#
+        ),
+    );
+    let workbook = read_text(&body, Some(&styles(""))).unwrap();
+    let formula = |name: &str| {
+        workbook
+            .defined_names
+            .iter()
+            .find(|(n, _, _)| n == name)
+            .map(|(_, _, formula)| formula.as_str())
+    };
+    assert_eq!(formula("Next"), Some("B2+$A$1"));
+    assert_eq!(formula("Before"), Some("#REF!"));
+    assert_eq!(formula("Block"), Some("Sheet1!$A$1:$B$2"));
+    assert_eq!(formula("Near"), Some("Sheet1!A1:B1"));
+}
+
+#[test]
+fn a_condition_can_restore_the_general_format() {
+    let automatic = concat!(
+        r#"<number:number-style xmlns:number="urn:oasis:names:tc:opendocument:xmlns:datastyle:1.0" style:name="N2"><number:number number:decimal-places="2" number:min-integer-digits="1"/></number:number-style>"#,
+        r#"<number:number-style xmlns:number="urn:oasis:names:tc:opendocument:xmlns:datastyle:1.0" style:name="N0"><number:number number:min-integer-digits="1"/></number:number-style>"#,
+        r#"<style:style style:name="ce1" style:family="table-cell" style:parent-style-name="Default" style:data-style-name="N2">"#,
+        r#"<style:map style:condition="cell-content()&gt;0" style:apply-style-name="Plain"/><style:map style:condition="cell-content()&lt;0" style:apply-style-name="Bold"/></style:style>"#,
+        r#"<style:style style:name="Plain" style:family="table-cell" style:parent-style-name="Default" style:data-style-name="N0"/>"#,
+        r#"<style:style style:name="Bold" style:family="table-cell" style:parent-style-name="Default"><style:text-properties fo:font-weight="bold"/></style:style>"#,
+    );
+    let body = content(
+        automatic,
+        &table(
+            r#"<table:table-row><table:table-cell table:style-name="ce1" office:value-type="float" office:value="3"><text:p>3</text:p></table:table-cell></table:table-row>"#,
+        ),
+    );
+    let workbook = read_text(&body, Some(&styles(""))).unwrap();
+    let dxfs = &workbook.styles.as_ref().unwrap().dxfs;
+    // The style naming the General data style overrides the number format
+    // with General; the one naming none leaves it alone.
+    assert_eq!(
+        dxfs[0].num_fmt.as_ref().map(|f| f.format_code.as_str()),
+        Some("General")
+    );
+    assert!(dxfs[1].num_fmt.is_none());
+}
+
+#[test]
+fn shape_text_takes_the_shape_paragraph_style() {
+    let automatic = concat!(
+        r##"<style:style style:name="P1" style:family="paragraph"><style:paragraph-properties fo:text-align="center"/><style:text-properties fo:color="#ff0000" fo:font-size="20pt"/></style:style>"##,
+        r##"<style:style style:name="P2" style:family="paragraph"><style:text-properties fo:font-size="8pt"/></style:style>"##,
+    );
+    let body = content(
+        automatic,
+        &table(concat!(
+            r#"<table:table-row><table:table-cell>"#,
+            r#"<draw:rect draw:text-style-name="P1" svg:width="2cm" svg:height="1cm"><text:p>a</text:p><text:p text:style-name="P2">b</text:p></draw:rect>"#,
+            r#"<draw:frame draw:text-style-name="P1" svg:width="2cm" svg:height="1cm"><draw:text-box><text:p>c</text:p></draw:text-box></draw:frame>"#,
+            r#"</table:table-cell></table:table-row>"#
+        )),
+    );
+    let workbook = read_text(&body, Some(&styles(""))).unwrap();
+    let groups = &workbook.sheets[0].worksheet.shape_groups;
+    let run = |group: usize, paragraph: usize| {
+        let text = groups[group].shapes[0].text.as_ref().unwrap();
+        let p = &text.paragraphs[paragraph];
+        match &p.runs[0] {
+            xlsx_model::ShapeTextRun::Text { size, color, .. } => {
+                (p.align.clone(), *size, color.clone())
+            }
+            other => panic!("{other:?}"),
+        }
+    };
+    assert_eq!(run(0, 0), ("ctr".into(), 20.0, Some("#FF0000".into())));
+    // The paragraph's own style sets its size over the shape's.
+    assert_eq!(run(0, 1), ("ctr".into(), 8.0, Some("#FF0000".into())));
+    assert_eq!(run(1, 0), ("ctr".into(), 20.0, Some("#FF0000".into())));
+}
+
+#[test]
+fn a_scaled_shape_takes_its_scaled_size() {
+    let body = content(
+        "",
+        &table(concat!(
+            r#"<table:table-row><table:table-cell>"#,
+            r#"<draw:rect draw:transform="scale(2)" svg:width="1in" svg:height="0.5in"/>"#,
+            r#"<draw:rect draw:transform="rotate (0.5)" svg:width="1in" svg:height="1in"/>"#,
+            r#"</table:table-cell></table:table-row>"#
+        )),
+    );
+    let workbook = read_text(&body, Some(&styles(""))).unwrap();
+    let groups = &workbook.sheets[0].worksheet.shape_groups;
+    assert_eq!(
+        (groups[0].native_ext_cx, groups[0].native_ext_cy),
+        (2 * 914_400, 914_400)
+    );
+    // A rotation without a translation is still a rotation.
+    assert!((groups[1].shapes[0].rot + 0.5f64.to_degrees()).abs() < 1e-9);
+}

@@ -357,19 +357,25 @@ impl XfBuilder {
             .iter()
             .any(|k| has(k))
             .then(|| format.border.clone()),
-            num_fmt: chain
-                .iter()
-                .any(|s| s.data_style.is_some())
-                .then_some(format.num_fmt.as_ref())
-                .flatten()
-                .map(|(format, _)| {
-                    Ok::<_, String>(NumFmt {
-                        num_fmt_id: self.intern_num_fmt(format)?,
-                        format_code: crate::ods_number::literal_code(&format.code),
-                        section_divisors: format.divisors.clone(),
-                    })
-                })
-                .transpose()?,
+            // A conditional style that names a data style overrides the
+            // cell's number format with it, the General format included
+            // (the built-in id 0).
+            num_fmt: match (
+                chain.iter().any(|s| s.data_style.is_some()),
+                format.num_fmt.as_ref(),
+            ) {
+                (false, _) => None,
+                (true, Some((format, _))) => Some(NumFmt {
+                    num_fmt_id: self.intern_num_fmt(format)?,
+                    format_code: crate::ods_number::literal_code(&format.code),
+                    section_divisors: format.divisors.clone(),
+                }),
+                (true, None) => Some(NumFmt {
+                    num_fmt_id: 0,
+                    format_code: "General".into(),
+                    section_divisors: Vec::new(),
+                }),
+            },
             font_toggles: font_set.then(|| xlsx_model::DxfFontToggles {
                 bold: has("text:fo:font-weight").then_some(format.font.bold),
                 italic: has("text:fo:font-style").then_some(format.font.italic),

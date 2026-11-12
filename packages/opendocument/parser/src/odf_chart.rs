@@ -78,6 +78,11 @@ pub trait RangeResolver {
     /// resolver rejects a range over the point bound ([`check_points`])
     /// and walks its cells through [`crate::budget::each`].
     fn cells(&self, address: &str) -> Result<Option<Vec<SourceCell>>, String>;
+    /// Whether the resolver's dates are serials of the 1904 date system
+    /// (§19.636 `table:null-date`); the chart's own dates follow it.
+    fn date1904(&self) -> bool {
+        false
+    }
 }
 
 /// One point of a resolved range: its value, its display text, and whether
@@ -213,11 +218,13 @@ fn read_chart(
     else {
         return Ok(None);
     };
-    let local = LocalTable::read(chart)?;
+    let date1904 = resolver.is_some_and(|resolver| resolver.date1904());
+    let local = LocalTable::read(chart, date1904)?;
     let reader = Reader {
         store: &store,
         faces: &faces,
         local,
+        date1904,
         resolver,
         dashes: styles_root.map(stroke_dashes).unwrap_or_default(),
     };
@@ -228,6 +235,7 @@ struct Reader<'a> {
     store: &'a StyleStore,
     faces: &'a HashMap<String, String>,
     local: LocalTable,
+    date1904: bool,
     resolver: Option<&'a dyn RangeResolver>,
     /// `draw:stroke-dash` definitions (§16.41) as DrawingML presets.
     dashes: HashMap<String, &'static str>,
@@ -269,7 +277,7 @@ fn repeat_count(node: roxmltree::Node<'_, '_>, name: &str) -> Result<usize, Stri
 
 impl LocalTable {
     /// Read the grid; covered cells keep their grid positions (empty).
-    fn read(chart: roxmltree::Node<'_, '_>) -> Result<Self, String> {
+    fn read(chart: roxmltree::Node<'_, '_>, date1904: bool) -> Result<Self, String> {
         let mut table = Self::default();
         let Some(node) = chart.children().find(|n| xml::is(*n, NS_TABLE, "table")) else {
             return Ok(table);
@@ -313,6 +321,21 @@ impl LocalTable {
                         .attribute((NS_OFFICE, "value"))
                         .and_then(|v| v.parse::<f64>().ok())
                         .map_or(CellData::Empty, CellData::Number),
+                    // Dates, times and booleans are numbers to a chart, as
+                    // they are in a worksheet (§19.385).
+                    Some("date") => cell
+                        .attribute((NS_OFFICE, "date-value"))
+                        .and_then(|v| crate::odf_text::date_serial(v, date1904))
+                        .map_or(CellData::Empty, CellData::Number),
+                    Some("time") => cell
+                        .attribute((NS_OFFICE, "time-value"))
+                        .and_then(crate::odf_text::duration_days)
+                        .map_or(CellData::Empty, CellData::Number),
+                    Some("boolean") => match cell.attribute((NS_OFFICE, "boolean-value")) {
+                        Some("true") | Some("1") => CellData::Number(1.0),
+                        Some(_) => CellData::Number(0.0),
+                        None => CellData::Empty,
+                    },
                     Some("string") => CellData::Text(text.clone()),
                     _ if !text.is_empty() => CellData::Text(text.clone()),
                     _ => CellData::Empty,
@@ -733,6 +756,7 @@ impl Reader<'_> {
         };
         let mut model = ChartModel {
             chart_type,
+            date1904: self.date1904,
             cat_axis_cross_between: if matches!(primary, "bar") {
                 "between".into()
             } else {
@@ -1390,7 +1414,7 @@ impl Reader<'_> {
                     let mut value = serde_json::json!({ "trendlineType": kind });
                     if let Some(order) = get(&chain, "chart:chart:regression-max-degree")
                         .or_else(|| get(&chain, "chart:loext:regression-max-degree"))
-                        .and_then(|v| v.parse::<u32>().ok())
+                        .and_then(|v| v.trim().parse::<u32>().ok())
                     {
                         value["order"] = order.into();
                     }
@@ -1929,8 +1953,17 @@ mod tests {
         let local = concat!(
             r##"<table:table table:name="local-table"><table:table-rows>"##,
             r##"<table:table-row><table:table-cell office:value-type="string" office:string-value="North"/></table:table-row>"##,
+            r##"<table:table-row><table:table-cell office:value-type="date" office:date-value="1900-03-01"/><table:table-cell office:value-type="time" office:time-value="PT12H"/><table:table-cell office:value-type="boolean" office:boolean-value="true"/></table:table-row>"##,
             r##"</table:table-rows></table:table>"##
         );
+        // Local dates, times and booleans are numbers.
+        let typed = format!(
+            r##"<chart:chart chart:class="chart:line"><chart:plot-area><chart:series chart:values-cell-range-address="local-table.A2:.C2"/></chart:plot-area>{local}</chart:chart>"##
+        );
+        let model = read_chart_document(&chart(&typed, ""), None, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(model.series[0].values, [Some(61.0), Some(0.5), Some(1.0)]);
         let body = |plot_style: &str| {
             format!(
                 r##"<chart:chart chart:class="chart:bar"><chart:plot-area {plot_style}><chart:axis chart:dimension="x" chart:name="bottom"/><chart:axis chart:dimension="y" chart:name="left" chart:style-name="left"/><chart:axis chart:dimension="y" chart:name="right" chart:style-name="right"/><chart:series chart:values-cell-range-address="Sheet1.B2:Sheet1.B3" chart:label-cell-address="local-table.A1"/><chart:series chart:attached-axis="right" chart:values-cell-range-address="Sheet1.H2:Sheet1.H3"/></chart:plot-area>{local}</chart:chart>"##

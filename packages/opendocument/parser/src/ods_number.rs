@@ -458,16 +458,29 @@ fn attr<'a>(node: roxmltree::Node<'a, '_>, name: &str) -> Option<&'a str> {
 /// `number:min-integer-digits`, …). A count no code of
 /// [`MAX_CODE_CHARS`] could spell rejects the document; nothing is clipped.
 fn attr_u32(node: roxmltree::Node<'_, '_>, name: &str) -> Result<Option<u32>, String> {
-    let Some(count) = attr(node, name)
-        .or_else(|| node.attribute((NS_LOEXT, name)))
-        .and_then(|v| v.trim().parse::<u64>().ok())
-    else {
+    let count = xml::bounded_count(
+        attr(node, name).or_else(|| node.attribute((NS_LOEXT, name))),
+        MAX_CODE_CHARS as u64,
+        "number format code",
+    )?;
+    Ok(count.map(|count| count as u32))
+}
+
+/// The digits of an unsigned integer attribute, without leading zeros
+/// (`None` when absent, zero or not an unsigned integer). More digits than a
+/// code may hold reject the document.
+fn attr_digits<'a>(node: roxmltree::Node<'a, '_>, name: &str) -> Result<Option<&'a str>, String> {
+    let Some(value) = attr(node, name).or_else(|| node.attribute((NS_LOEXT, name))) else {
         return Ok(None);
     };
-    if count > MAX_CODE_CHARS as u64 {
+    let digits = value.trim().trim_start_matches('0');
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return Ok(None);
+    }
+    if digits.len() > MAX_CODE_CHARS {
         return Err(crate::error::resource("number format code"));
     }
-    Ok(Some(count as u32))
+    Ok(Some(digits))
 }
 
 fn long(node: roxmltree::Node<'_, '_>) -> bool {
@@ -509,13 +522,20 @@ fn integer_digits(
         .filter(|n| xml::is(*n, NS_NUMBER, "embedded-text"))
     {
         crate::budget::tick(1)?;
-        let Some(position) = attr(n, "position").and_then(|p| p.trim().parse::<i64>().ok()) else {
-            continue;
+        // §19.358 `number:position`: a negative position is before the
+        // last digit, like 0.
+        let position = match attr(n, "position").map(str::trim) {
+            Some(value) if value.starts_with('-') => 0,
+            value => {
+                let Some(position) =
+                    xml::bounded_count(value, MAX_CODE_CHARS as u64, "number format code")?
+                else {
+                    continue;
+                };
+                position as u32
+            }
         };
-        if position > MAX_CODE_CHARS as i64 {
-            return Err(crate::error::resource("number format code"));
-        }
-        embedded.push((position.max(0) as u32, n.text().unwrap_or("").to_string()));
+        embedded.push((position, n.text().unwrap_or("").to_string()));
     }
     let widest = embedded.iter().map(|(p, _)| *p).max().unwrap_or(0);
     // Text at position p needs a digit slot on its left to hold the higher
@@ -708,14 +728,10 @@ fn section_code(
                 // digits are always shown. As LibreOffice writes it: `##?`
                 // for a maximum of 999 with one minimum digit; without a
                 // maximum the minimum digits are the slots.
-                let fixed = attr(child, "denominator-value").filter(|v| v.parse::<u64>().is_ok());
+                let fixed = attr_digits(child, "denominator-value")?;
                 let min_digits = attr_u32(child, "min-denominator-digits")?.unwrap_or(0);
-                let slots = attr(child, "max-denominator-value")
-                    .or_else(|| child.attribute((NS_LOEXT, "max-denominator-value")))
-                    .and_then(|v| v.trim().parse::<u64>().ok())
-                    .filter(|max| *max > 0)
-                    .map_or(min_digits, |max| max.to_string().len() as u32)
-                    .min(30);
+                let slots = attr_digits(child, "max-denominator-value")?
+                    .map_or(min_digits, |max| max.len() as u32);
                 // LibreOffice shows a fraction that names no numerator
                 // digits, or no denominator at all, in its standard format
                 // (measured over the combinations of the four attributes).
@@ -930,6 +946,7 @@ mod tests {
         let mut data = codes(concat!(
             // 31 integer digits are 31 digits, not 30.
             r##"<number:number-style style:name="N31"><number:number number:decimal-places="0" number:min-integer-digits="31"/></number:number-style>"##,
+            r##"<number:number-style style:name="F31"><number:fraction number:min-numerator-digits="1" number:min-denominator-digits="31"/></number:number-style>"##,
             // A text style of literal text only.
             r##"<number:text-style style:name="LIT"><number:text>MASKED</number:text></number:text-style>"##,
             r##"<number:text-style style:name="AT"><number:text>a@b </number:text><number:text-content/></number:text-style>"##,
@@ -943,20 +960,25 @@ mod tests {
         ));
         let mut code = |name: &str| data.code(name).unwrap().0.code;
         assert_eq!(code("N31"), "0".repeat(31));
+        assert_eq!(code("F31"), format!("?/{}", "?".repeat(31)));
         assert_eq!(code("LIT"), "General;General;General;\"MASKED\"");
         assert_eq!(code("AT"), "\"a@b \"@");
         assert_eq!(code("MIN"), "mm");
         assert_eq!(code("MINX"), "[mm]");
         assert_eq!(code("COND"), "mm-dd-yy;yyyy");
         // A count no code could spell rejects the document.
-        let xml = format!(
-            r##"<office:automatic-styles xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:style="{NS_STYLE}" xmlns:number="{NS_NUMBER}"><number:number-style style:name="BIG"><number:number number:decimal-places="4000000000" number:min-integer-digits="1"/></number:number-style></office:automatic-styles>"##
-        );
-        let document = roxmltree::Document::parse(&xml).unwrap();
-        assert_eq!(
-            DataStyles::default().add(document.root_element()),
-            Err(crate::error::resource("number format code"))
-        );
+        // A count no code could spell rejects the document, however large.
+        for places in ["1025", "4000000000", "18446744073709551616"] {
+            let xml = format!(
+                r##"<office:automatic-styles xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:style="{NS_STYLE}" xmlns:number="{NS_NUMBER}"><number:number-style style:name="BIG"><number:number number:decimal-places="{places}" number:min-integer-digits="1"/></number:number-style></office:automatic-styles>"##
+            );
+            let document = roxmltree::Document::parse(&xml).unwrap();
+            assert_eq!(
+                DataStyles::default().add(document.root_element()),
+                Err(crate::error::resource("number format code")),
+                "{places}"
+            );
+        }
     }
 
     #[test]

@@ -254,7 +254,8 @@ as a workbook.
 Resource limits: while it builds the workbook, the reader may grow its heap
 by at most 512 MiB beyond the package's parsed XML, materialize at most 8
 million cells and take a bounded number of steps. A spreadsheet over a
-limit rejects with the resource-limit error instead of being shown in part. Custom shapes are drawn from
+limit is rejected with an error that names the limit, instead of being shown
+in part. Custom shapes are drawn from
 their preset or their enhanced-geometry path (equations are evaluated; arcs
 are flattened to short segments). Embedded objects that are not charts are
 drawn from their replacement image
