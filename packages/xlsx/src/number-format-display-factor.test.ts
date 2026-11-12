@@ -27,8 +27,8 @@ describe('section divisors', () => {
   });
 
   it('shows nothing for a zero whose zero section is empty', () => {
-    // The ODS reader's format for a formula result LibreOffice shows as
-    // nothing: the numeric zero with an empty zero section.
+    // A formula result shown as nothing: the numeric zero with an empty
+    // zero section.
     expect(formatCellValue(number(0), styles('0;-0;;@', []))).toBe('');
   });
 

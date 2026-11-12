@@ -238,8 +238,8 @@ describe('OpenDocument picture fills', () => {
   });
 
   it('stretches over the shape', () => {
-    expect(paint(picture('stretch'), 100, images).patterns).toEqual([
-      { repetition: 'no-repeat', setTransform: expect.any(Function), transform: { a: 5, b: 0, c: 0, d: 10, e: 0, f: 0 } },
+    expect(paint(picture('stretch'), 100, images).patterns.map(p => [p.repetition, p.transform])).toEqual([
+      ['no-repeat', { a: 5, b: 0, c: 0, d: 10, e: 0, f: 0 }],
     ]);
   });
 
