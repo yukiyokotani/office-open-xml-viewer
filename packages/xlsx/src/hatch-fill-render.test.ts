@@ -32,7 +32,10 @@ type Matrix = ReturnType<typeof matrix>;
 const HATCH = '#123456';
 
 /** Paint one `size` × `size` px rectangle with `fill` on a 400 × 300 canvas. */
-function paint(fill: ShapeFill, size = 100, images?: Map<string, CanvasImageSource | null>, preset = 'rect') {
+function paint(
+  fill: ShapeFill | undefined, size = 100, images?: Map<string, CanvasImageSource | null>, preset = 'rect',
+  more: Record<string, unknown> = {}, height = size,
+) {
   const calls: string[] = [];
   /** Rotations applied while the hatch colour is set, in degrees. */
   const rotations: number[] = [];
@@ -113,12 +116,13 @@ function paint(fill: ShapeFill, size = 100, images?: Map<string, CanvasImageSour
     freezeRows: 0, freezeCols: 0, conditionalFormats: [], charts: [], images: [],
     shapeGroups: [{
       fromCol: 0, fromColOff: 0, fromRow: 0, fromRowOff: 0,
-      toCol: 0, toColOff: size * 9525, toRow: 0, toRowOff: size * 9525,
+      toCol: 0, toColOff: size * 9525, toRow: 0, toRowOff: height * 9525,
       nativeExtCx: 0, nativeExtCy: 0,
       shapes: [{
         x: 0, y: 0, w: 1, h: 1, rot: 0, strokeWidth: 0,
         fill,
         geom: { type: 'preset', name: preset },
+        ...more,
       }],
     }],
   } as unknown as Worksheet;
@@ -167,6 +171,20 @@ describe('OpenDocument hatch fills', () => {
     const huge = paint(hatch(0.01, 2), 10_000_000).lines;
     expect(huge).toBeGreaterThan(100);
     expect(huge).toBeLessThanOrEqual(bound);
+  });
+});
+
+describe('lines without area', () => {
+  it('strokes a horizontal line, and draws nothing unstroked or without extent', () => {
+    const stroke = { strokeColor: '#000000', strokeWidth: 9525 };
+    const strokes = (more: Record<string, unknown>, height: number, width = 100) =>
+      paint(undefined, width, undefined, 'line', more, height).calls.filter(c => c === 'stroke').length;
+    // The grid strokes too: count what the shape adds.
+    const grid = strokes({}, 50);
+    expect(strokes(stroke, 50)).toBeGreaterThan(grid);
+    expect(strokes(stroke, 0)).toBe(strokes(stroke, 50));
+    expect(strokes({}, 0)).toBe(grid);
+    expect(strokes(stroke, 0, 0)).toBe(strokes({}, 0, 0));
   });
 });
 

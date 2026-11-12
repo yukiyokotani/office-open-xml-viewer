@@ -1143,6 +1143,46 @@ fn an_empty_view_box_leaves_the_path_in_the_shape_size() {
 }
 
 #[test]
+fn connectors_follow_their_path_and_straight_lines_keep_their_ends() {
+    let body = content(
+        "",
+        &table(concat!(
+            r#"<table:table-row><table:table-cell>"#,
+            // What LibreOffice writes for a standard connector from
+            // (14cm, 1cm) to (9cm, 4cm): sheet coordinates in 1/100 mm.
+            r#"<draw:connector svg:x1="14cm" svg:y1="1cm" svg:x2="9cm" svg:y2="4cm" svg:d="M14000 1000h-2500v3000h-2500" svg:viewBox="0 0 5001 3001"/>"#,
+            r#"<draw:connector draw:type="line" svg:x1="2cm" svg:y1="18cm" svg:x2="7cm" svg:y2="18cm" svg:d="M2000 18000h5000" svg:viewBox="0 0 5001 1"/>"#,
+            r#"</table:table-cell></table:table-row>"#
+        )),
+    );
+    let workbook = read_text(&body, Some(&styles(""))).unwrap();
+    let groups = &workbook.sheets[0].worksheet.shape_groups;
+    let bent = &groups[0].shapes[0];
+    let xlsx_model::ShapeGeom::Custom { paths } = &bent.geom else {
+        panic!("{:?}", bent.geom)
+    };
+    assert_eq!((paths[0].w, paths[0].h), (5000.0, 3000.0));
+    assert!(
+        matches!(paths[0].commands[0], xlsx_model::PathCmd::MoveTo { x, y } if (x, y) == (5000.0, 0.0))
+    );
+    assert!(
+        matches!(paths[0].commands[3], xlsx_model::PathCmd::LineTo { x, y } if (x, y) == (0.0, 3000.0))
+    );
+    assert!(!bent.flip_h && !bent.flip_v);
+    // 5 cm wide, from 9 cm.
+    assert_eq!(groups[0].native_ext_cx, 1_800_000);
+    // A straight connector is the line between its ends: a box without
+    // height, which the renderer strokes.
+    assert!(
+        matches!(&groups[1].shapes[0].geom, xlsx_model::ShapeGeom::Preset { name, .. } if name == "line")
+    );
+    assert_eq!(
+        (groups[1].native_ext_cx, groups[1].native_ext_cy),
+        (1_800_000, 0)
+    );
+}
+
+#[test]
 fn fills_and_lines_keep_their_opacity() {
     let automatic = r##"<style:style style:name="gr1" style:family="graphic"><style:graphic-properties draw:fill="solid" draw:fill-color="#ff0000" draw:opacity="50%" draw:stroke="solid" svg:stroke-color="#0000ff" svg:stroke-opacity="25%"/></style:style>"##;
     let body = content(

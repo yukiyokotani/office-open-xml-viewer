@@ -291,6 +291,7 @@ fn place(
     cell: Option<(u32, u32)>,
     grid: &Grid,
     sheet_names: &[String],
+    connector: Option<(f64, f64, f64, f64)>,
 ) -> Option<(Rect, f64)> {
     let width = pt_attr(node, NS_SVG, "width");
     let height = pt_attr(node, NS_SVG, "height");
@@ -313,6 +314,15 @@ fn place(
         y = y1.min(y2);
         w = (x2 - x1).abs();
         h = (y2 - y1).abs();
+        // A connector drawn from its path has the path's bounds, given
+        // from its start in hundredths of a millimetre.
+        if let Some((left, top, width, height)) = connector {
+            const PT_PER_UNIT: f64 = 72.0 / 2540.0;
+            x = x1 + left * PT_PER_UNIT;
+            y = y1 + top * PT_PER_UNIT;
+            w = width * PT_PER_UNIT;
+            h = height * PT_PER_UNIT;
+        }
     }
     if let Some(map) = node.attribute((NS_DRAW, "transform")).and_then(transform) {
         // The drawing model holds a box, its rotation and its flips: the
@@ -519,7 +529,19 @@ fn read_drawing(
     charts: &mut Vec<PendingChart>,
 ) -> Result<(), String> {
     let name = node.tag_name().name();
-    let Some((rect, rotation)) = place(node, cell, grid, &ctx.sheet_names) else {
+    // §10.3.10: `svg:d` is the geometry of a connector that is not the
+    // straight line between its ends.
+    let connector = match node.attribute((NS_SVG, "d")) {
+        Some(d) if name == "connector" => super::shape_path::connector_path(d)?,
+        _ => None,
+    };
+    let Some((rect, rotation)) = place(
+        node,
+        cell,
+        grid,
+        &ctx.sheet_names,
+        connector.as_ref().map(|(_, bounds)| *bounds),
+    ) else {
         return Ok(());
     };
     let z = z_index(node, order);
@@ -604,6 +626,12 @@ fn read_drawing(
         shape.flip_v = y2 < y1;
         shape.fill = None;
         shape.fill_color = None;
+        if let Some((path, _)) = connector {
+            // The path has its own direction.
+            shape.flip_h = false;
+            shape.flip_v = false;
+            shape.geom = xlsx_model::ShapeGeom::Custom { paths: vec![path] };
+        }
     }
     if name == "custom-shape" {
         // §19.229.3: `draw:type` names the shape for an editor and does

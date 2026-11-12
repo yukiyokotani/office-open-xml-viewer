@@ -4627,7 +4627,10 @@ function renderShapeGroups(
     const { x: x1, y: y1, width: w, height: h } = resolveWorksheetAnchorRect(
       ws, anchor, colAxis, rowAxis, cs,
     );
-    if (w <= 0 || h <= 0) continue;
+    // A box without area along one edge is a horizontal or vertical line
+    // (its stroke is all there is to draw); one without any extent, or with
+    // a negative one, is nothing.
+    if (!(w >= 0 && h >= 0 && (w > 0 || h > 0))) continue;
 
     const logicalCanvasX = scrollAreaX + (x1 - scrollOriginSheetX) - scrollOffsetX;
     const canvasX = sheetAnchoredRectX(logicalCanvasX, w, canvasW, rtl);
@@ -4645,7 +4648,9 @@ function renderShapeGroups(
       const sy = canvasY + shape.y * h;
       const sw = shape.w * w;
       const sh = shape.h * h;
-      if (sw <= 0 || sh <= 0) continue;
+      if (!(sw >= 0 && sh >= 0 && (sw > 0 || sh > 0))) continue;
+      // Only a stroked preset line is drawn without area.
+      if ((sw === 0 || sh === 0) && !(shape.geom?.type === 'preset' && shape.strokeColor && shape.strokeWidth > 0)) continue;
       drawShape(ctx, shape, sx, sy, sw, sh, cs, loadedImages, cjkFallback, anchor);
     }
   }

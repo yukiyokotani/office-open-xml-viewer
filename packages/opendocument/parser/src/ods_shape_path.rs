@@ -655,6 +655,93 @@ pub fn custom_geometry(
     Ok((!paths.is_empty()).then_some(paths))
 }
 
+/// `(x, y, width, height)`.
+pub type Bounds = (f64, f64, f64, f64);
+
+/// The path of a connector (§10.3.10 `svg:d`) and its bounds
+/// `(x, y, width, height)` relative to the connector's start point, both in
+/// the units of the path data. LibreOffice writes the path in hundredths
+/// of a millimetre in sheet coordinates, starting at the connector's start
+/// (`svg:x1`, `svg:y1`), and a `svg:viewBox` that holds only its size
+/// (measured with LibreOffice 26.8 on standard, line and curve connectors
+/// in both directions), so the path is placed by its first point. `None`
+/// for a path without area, which is the straight line between the ends.
+pub fn connector_path(d: &str) -> Result<Option<(PathInfo, Bounds)>, String> {
+    let Some(mut path) = svg_path(d, (0.0, 0.0, 1.0, 1.0))? else {
+        return Ok(None);
+    };
+    let mut points: Vec<(f64, f64)> = Vec::new();
+    for command in &path.commands {
+        match *command {
+            PathCmd::MoveTo { x, y } | PathCmd::LineTo { x, y } => points.push((x, y)),
+            PathCmd::CubicBezTo {
+                x1,
+                y1,
+                x2,
+                y2,
+                x3,
+                y3,
+            } => points.extend([(x1, y1), (x2, y2), (x3, y3)]),
+            PathCmd::QuadBezTo { x1, y1, x2, y2 } => points.extend([(x1, y1), (x2, y2)]),
+            PathCmd::Close => {}
+            // Arcs are flattened by `svg_path`.
+            PathCmd::ArcTo { .. } => return Ok(None),
+        }
+    }
+    let Some(&(start_x, start_y)) = points.first() else {
+        return Ok(None);
+    };
+    let fold = |pick: fn(&(f64, f64)) -> f64| {
+        points
+            .iter()
+            .map(pick)
+            .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), v| {
+                (lo.min(v), hi.max(v))
+            })
+    };
+    let (left, right) = fold(|p| p.0);
+    let (top, bottom) = fold(|p| p.1);
+    let (width, height) = (right - left, bottom - top);
+    if !(width > 0.0 && height > 0.0 && width.is_finite() && height.is_finite()) {
+        return Ok(None);
+    }
+    for command in &mut path.commands {
+        match command {
+            PathCmd::MoveTo { x, y } | PathCmd::LineTo { x, y } => {
+                *x -= left;
+                *y -= top;
+            }
+            PathCmd::CubicBezTo {
+                x1,
+                y1,
+                x2,
+                y2,
+                x3,
+                y3,
+            } => {
+                for x in [x1, x2, x3] {
+                    *x -= left;
+                }
+                for y in [y1, y2, y3] {
+                    *y -= top;
+                }
+            }
+            PathCmd::QuadBezTo { x1, y1, x2, y2 } => {
+                for x in [x1, x2] {
+                    *x -= left;
+                }
+                for y in [y1, y2] {
+                    *y -= top;
+                }
+            }
+            PathCmd::Close | PathCmd::ArcTo { .. } => {}
+        }
+    }
+    path.w = width;
+    path.h = height;
+    Ok(Some((path, (left - start_x, top - start_y, width, height))))
+}
+
 /// `svg:d` path data (SVG 1.1 §8.3, the geometry of ODF `draw:path`,
 /// Part 3 §10.3.7) in the coordinate space of `view` (`svg:viewBox`):
 /// moves, lines, horizontal/vertical lines, cubic and quadratic Béziers
