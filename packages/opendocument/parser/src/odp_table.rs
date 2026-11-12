@@ -40,6 +40,8 @@ pub fn table<'a>(
     // One text payload for the whole table: the cells' text as it is read,
     // and each cell record (borders, fill, strings) before it is kept.
     let payload = TextPayload::new(text_work);
+    // Reading the template definition (rebuilt for every table using it).
+    payload.step(template_cost(sheet, node))?;
     let mut cols: Vec<i64> = Vec::new();
     let mut rows_nodes: Vec<Nd<'a>> = Vec::new();
     for child in node.children().filter(|n| n.is_element()) {
@@ -319,6 +321,7 @@ fn template_region<'a>(
     let Some((row, table, template)) = found else {
         return Ok(None);
     };
+    payload.step(template_cost(sheet, table))?;
     let flag = |name: &str| table.attribute((NS_TABLE, name)) == Some("true");
     let repeat = |n: Nd<'_>, name: &str, max: usize| {
         n.attribute((NS_TABLE, name))
@@ -424,6 +427,15 @@ fn push_rows<'a>(row: Nd<'a>, rows: &mut Vec<Nd<'a>>) -> Result<(), String> {
         rows.push(row);
     }
     Ok(())
+}
+
+/// The work of reading the template `table` names: its markup (bounded at
+/// admission like a style record), in work units of 64 bytes.
+fn template_cost(sheet: &Sheet<'_>, table: Nd<'_>) -> usize {
+    table
+        .attribute((NS_TABLE, "template-name"))
+        .and_then(|name| sheet.named("table-template", name))
+        .map_or(0, |t| 1 + t.range().len() / 64)
 }
 
 /// A table template (§16.17 `table:table-template`): cell style names per

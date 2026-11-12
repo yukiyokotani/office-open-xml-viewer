@@ -878,7 +878,13 @@ fn paragraph<'a>(
         // Only an item's labelled paragraph takes part in the numbering; the
         // item's further paragraphs and list headers keep the sequence.
         if list.labelled {
-            let counted = consecutive_context(level_node, list);
+            // Only a numbered level joins a consecutive sequence; a bullet
+            // or picture item keeps its own level (and the sequence).
+            let counted = if xml::is(level_node, NS_TEXT, "list-level-style-number") {
+                consecutive_context(level_node, list)
+            } else {
+                list.clone()
+            };
             let (label, number) = list_label(level_node, &counted, env, media, counters)?;
             bullet = label;
             counters.record(&counted, number);
