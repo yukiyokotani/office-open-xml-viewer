@@ -1,4 +1,4 @@
-import { isSymbolFontFamily, symbolTextToUnicodeSegments } from '@silurus/ooxml-core';
+import { graphemeClusterOffsets, isSymbolFontFamily, symbolTextToUnicodeSegments, type SymbolTextSegment } from '@silurus/ooxml-core';
 import { computeSegmentLineVisualOrder } from '@silurus/ooxml-core/internal/bidi-line';
 import type { NumberingInfo, TabStop } from '../types.js';
 import { wordNumberingSpaceSuffixUsesArial, wordNumberingSuffixAcceptsCoincidentListTab } from './line-compatibility.js';
@@ -159,30 +159,63 @@ export function shapeNumberingMarkerText(
   return { shape, fontSizePx: input.fontSizePt * scale, lineBox };
 }
 
+/** A marker piece: one shaping run, at logical UTF-16 `start`, painted in
+ * direction `rtl`. */
+interface MarkerPiece extends SymbolTextSegment {
+  readonly start: number;
+  readonly rtl: boolean;
+}
+
+/**
+ * The pieces of a symbol marker in a right-to-left paragraph, in visual order.
+ * UAX #9 (core segment-line order, as body segments are) resolves every
+ * grapheme of the marker; consecutive visual graphemes that are logically
+ * adjacent, share a resolved direction and a conversion disposition form one
+ * piece. So no piece crosses an embedding-level boundary, a converted "("
+ * paints in its resolved direction, a VS15 stays with its base, and Arabic
+ * keeps its joining.
+ */
+function rtlMarkerPieces(segments: readonly SymbolTextSegment[]): MarkerPiece[] {
+  const graphemes: (SymbolTextSegment & { start: number })[] = [];
+  let start = 0;
+  for (const segment of segments) {
+    const cuts = [0, ...graphemeClusterOffsets(segment.text), segment.text.length];
+    for (let index = 0; index + 1 < cuts.length; index++) {
+      if (cuts[index] === cuts[index + 1]) continue;
+      graphemes.push({ ...segment, text: segment.text.slice(cuts[index], cuts[index + 1]), start: start + cuts[index]! });
+    }
+    start += segment.text.length;
+  }
+  const resolved = computeSegmentLineVisualOrder(graphemes.map((grapheme) => ({ text: grapheme.text })), true);
+  const pieces: (MarkerPiece & { last: number })[] = [];
+  for (const index of resolved.order) {
+    const grapheme = graphemes[index]!;
+    // `rtl` is indexed by logical segment.
+    const rtl = resolved.rtl[index] === true;
+    const previous = pieces.at(-1);
+    if (previous && previous.mapped === grapheme.mapped && previous.unicodeFace === grapheme.unicodeFace
+      && previous.rtl === rtl && previous.last === (rtl ? index + 1 : index - 1)) {
+      pieces[pieces.length - 1] = rtl
+        ? { ...previous, text: grapheme.text + previous.text, start: grapheme.start, last: index }
+        : { ...previous, text: previous.text + grapheme.text, last: index };
+    } else {
+      pieces.push({ ...grapheme, rtl, last: index });
+    }
+  }
+  return pieces.map(({ last: _last, ...piece }) => piece);
+}
+
 /** Join marker pieces shaped with different slots (a symbol marker whose
  * selected face draws some codes, while others are converted) into one
- * marker shape. Ranges stay logical; pieces are placed in the visual order
- * UAX #9 gives them in the paragraph direction (core segment-line order, as
- * body segments are), so pen offsets, clusters and ink move by the pieces
- * placed before them. Marker paint draws spans left to right in array order.
- * The line box takes the largest sides. */
+ * marker shape. Pieces arrive in visual order with their logical starts:
+ * ranges stay logical, while pen offsets, clusters and ink move by the
+ * pieces placed before them. Marker paint draws spans left to right in array
+ * order. The line box takes the largest sides. */
 function joinMarkerLayouts(
-  logicalParts: readonly Readonly<{ text: string; layout: NumberingMarkerTextLayout }>[],
-  baseRtl: boolean,
+  parts: readonly Readonly<{ start: number; rtl: boolean; text: string; layout: NumberingMarkerTextLayout }>[],
+  withDirections: boolean,
 ): NumberingMarkerTextLayout & { readonly spanDirections?: readonly ('ltr' | 'rtl')[] } {
-  const logicalStarts: number[] = [];
-  let logicalOffset = 0;
-  for (const part of logicalParts) {
-    logicalStarts.push(logicalOffset);
-    logicalOffset += part.text.length;
-  }
-  const resolved = baseRtl
-    ? computeSegmentLineVisualOrder(logicalParts.map((part) => ({ text: part.text })), true)
-    : { order: logicalParts.map((_, index) => index), rtl: logicalParts.map(() => false) };
-  // `rtl` is indexed by logical segment.
-  const parts = resolved.order.map((index) => ({
-    ...logicalParts[index]!, start: logicalStarts[index]!, rtl: resolved.rtl[index] === true,
-  }));
+  const logicalOffset = parts.reduce((sum, part) => sum + part.text.length, 0);
   const spanDirections: ('ltr' | 'rtl')[] = [];
   const spans: TextShapeResult['spans'][number][] = [];
   const clusters: NonNullable<TextShapeResult['clusters']>[number][] = [];
@@ -238,7 +271,7 @@ function joinMarkerLayouts(
   };
   return {
     shape,
-    ...(baseRtl ? { spanDirections } : {}),
+    ...(withDirections ? { spanDirections } : {}),
     fontSizePx: shapes[0]!.fontSizePx,
     lineBox: {
       ascentPt: Math.max(...shapes.map((layout) => layout.lineBox.ascentPt)),
@@ -326,30 +359,33 @@ export function resolveNumberingMarkerGeometry(
   const judged = !symbolMarker
     ? null
     : service.symbolText?.(symbolRequest) ?? symbolTextToUnicodeSegments(numbering.text, markerFamily);
-  // Each code is converted on its own, as in body runs; the pieces are
-  // placed in visual order (joinMarkerLayouts). In a right-to-left paragraph
-  // a mixed marker is split into one piece per converted code point and per
-  // authored symbol code, while runs of other text (such as Arabic) stay
-  // whole to keep their joining (a VS15 stays with
-  // its base, which it selects text presentation for), so no piece spans
-  // a resolved embedding-level boundary, and each piece paints in its own
-  // resolved direction (a converted "(" between native letters stays "(").
-  const markerSegments = judged && judged.length > 1 && input.baseRtl === true
-    ? judged.flatMap((part) => (part.text.match(part.mapped
-      ? /[^\uFE0E]\uFE0E?|\uFE0E/gsu
-      : /[\u0020-\u00FF\uF020-\uF0FF]|[^\u0020-\u00FF\uF020-\uF0FF]+/gsu) ?? [])
-      .map((piece) => ({ ...part, text: piece })))
-    : judged;
+  // Each code is converted on its own, as in body runs. A marker of one
+  // disposition is one run (Canvas orders it, bidi included). A mixed one is
+  // shaped piece by piece: in logical order in a left-to-right paragraph, and
+  // as UAX #9 level runs in visual order in a right-to-left one
+  // (rtlMarkerPieces).
+  const mixed = judged !== null && judged.length > 1;
+  const pieces: MarkerPiece[] | null = !judged ? null
+    : mixed && input.baseRtl === true ? rtlMarkerPieces(judged)
+      : (() => {
+        let start = 0;
+        return judged.map((part) => {
+          const piece = { ...part, start, rtl: false };
+          start += part.text.length;
+          return piece;
+        });
+      })();
+  const markerSegments = pieces;
   const markerText = numbering.picBulletImagePath
     ? ''
-    : markerSegments ? markerSegments.map((part) => part.text).join('') : numbering.text;
+    : judged ? judged.map((part) => part.text).join('') : numbering.text;
   const convertedInput: NumberingMarkerShapeInput = {
     ...markerInput,
     fonts: { ascii: null, highAnsi: null, eastAsia: null, complexScript: null },
     themeFonts: undefined,
     themeFontPresence: undefined,
   };
-  const markerParts = markerSegments ?? [{ text: markerText, mapped: false }];
+  const markerParts: readonly MarkerPiece[] = markerSegments ?? [{ text: markerText, mapped: false, start: 0, rtl: false }];
   // Converted text may keep the marker slots only when no character of it
   // takes a symbol face there that draws symbol codes: the slot shaping
   // selects for it names a non-symbol family, or a symbol family whose face
@@ -375,7 +411,7 @@ export function resolveNumberingMarkerGeometry(
     ? null
     : partLayouts.length === 1
       ? partLayouts[0]!
-      : joinMarkerLayouts(markerParts.map((part, index) => ({ text: part.text, layout: partLayouts[index]! })),
+      : joinMarkerLayouts(markerParts.map((part, index) => ({ ...part, layout: partLayouts[index]! })),
         input.baseRtl === true);
   const markerShape = markerLayout?.shape ?? null;
   const markerWidthPt = numbering.picBulletImagePath

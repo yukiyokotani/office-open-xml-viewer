@@ -210,7 +210,7 @@ describe('resolveNumberingMarkerGeometry', () => {
     expect(geometry.markerText).toBe('a\u2192');
     // "a" (L) and "→" (neutral, resolved R at the paragraph end) appear as [→, a].
     expect(geometry.shape?.spans.map((span) => [span.text, span.start])).toEqual([['\u2192', 1], ['a', 0]]);
-    expect(requests.slice(0, 2)).toEqual([{ text: 'a', ascii: 'Symbol' }, { text: '\u2192', ascii: null }]);
+    expect(requests).toEqual(expect.arrayContaining([{ text: 'a', ascii: 'Symbol' }, { text: '\u2192', ascii: null }]));
   });
 
   it('paints a converted neutral between native letters in its resolved direction (RTL)', () => {
@@ -241,6 +241,8 @@ describe('resolveNumberingMarkerGeometry', () => {
     // Other text stays whole, so Arabic keeps its joining.
     ['\u0633\u0644\u0627\u0645\uF028', [['(', 'rtl'], ['\u0633\u0644\u0627\u0645', 'rtl']]],
     ['\uF061\u0633\u0644\u0627\u0645\uF028', [['(', 'rtl'], ['\u0633\u0644\u0627\u0645', 'rtl'], ['\uF061', 'ltr']]],
+    ['\uF061\u0633\u0644\u0627\u0645\u4E2D\uF028', [['(', 'rtl'], ['\u4E2D', 'ltr'], ['\u0633\u0644\u0627\u0645', 'rtl'], ['\uF061', 'ltr']]],
+    ['\uF061\uFE0E\u0633\u0644\u0627\u0645\uF028', [['(', 'rtl'], ['\u0633\u0644\u0627\u0645', 'rtl'], ['\uF061\uFE0E', 'ltr']]],
   ])('orders and directs RTL marker pieces of %j by their resolved levels', (text, expected) => {
     const base = createTextLayoutService({
       fonts: createFontResolver([]),
