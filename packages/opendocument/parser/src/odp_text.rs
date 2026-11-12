@@ -339,7 +339,7 @@ fn list_numbers<'a>(
         return Ok(None);
     }
     sheet.list_numbers.borrow_mut().insert(key, None);
-    let object = container_object_styles(sheet, scope, container)?;
+    let object = container_object_styles(sheet, scope, container, payload)?;
     let mut instances = ListInstances {
         payload,
         sheet,
@@ -369,7 +369,7 @@ fn list_numbers<'a>(
                 .and_then(|name| sheet.list(scope, name))
         });
         let level = style
-            .map(|style| list_level(style, list.depth.min(10), payload))
+            .map(|style| list_level(style, list.depth, payload))
             .transpose()?
             .flatten();
         // As rendering counts: only a numbered level takes a number; a
@@ -378,16 +378,17 @@ fn list_numbers<'a>(
             numbering.record(list, None);
             continue;
         };
+        let counted = consecutive_context(level, list);
         let start = level
             .attribute((NS_TEXT, "start-value"))
             .and_then(|v| v.parse::<u32>().ok())
             .unwrap_or(1);
-        let number = match (list.start_value, numbering.previous(list)) {
+        let number = match (counted.start_value, numbering.previous(&counted)) {
             (Some(value), _) => value,
             (None, Some(n)) => n.saturating_add(1),
             (None, None) => start,
         };
-        numbering.record(list, Some(number));
+        numbering.record(&counted, Some(number));
     }
     let numbers: Rc<HashMap<String, u32>> = Rc::new(
         numbering
@@ -706,6 +707,23 @@ fn resolve_list_style<'a>(
     None
 }
 
+/// §19.784 `text:consecutive-numbering="true"`: the list style numbers all
+/// levels in one sequence, counted as one level.
+fn consecutive_context<'a>(level_node: Nd<'a>, list: &ListContext<'a>) -> ListContext<'a> {
+    let consecutive = level_node
+        .parent_element()
+        .and_then(|style| style.attribute((NS_TEXT, "consecutive-numbering")))
+        == Some("true");
+    if consecutive {
+        ListContext {
+            depth: 1,
+            ..list.clone()
+        }
+    } else {
+        list.clone()
+    }
+}
+
 /// The level style of `level`, each record inspected charged as work.
 /// §16.32: a level the list style does not define uses the next lower
 /// defined level.
@@ -817,7 +835,7 @@ fn paragraph<'a>(
         .then(|| list_style(list, env, &styles))
         .flatten();
     let level_node = match list_style_node {
-        Some(ls) => list_level(ls, list.depth.min(10), env.payload)?,
+        Some(ls) => list_level(ls, list.depth, env.payload)?,
         None => None,
     };
     let mut mar_l = margin_left;
@@ -860,9 +878,10 @@ fn paragraph<'a>(
         // Only an item's labelled paragraph takes part in the numbering; the
         // item's further paragraphs and list headers keep the sequence.
         if list.labelled {
-            let (label, number) = list_label(level_node, list, env, media, counters)?;
+            let counted = consecutive_context(level_node, list);
+            let (label, number) = list_label(level_node, &counted, env, media, counters)?;
             bullet = label;
-            counters.record(list, number);
+            counters.record(&counted, number);
         }
     } else if list.labelled {
         counters.record(list, None);
@@ -1079,6 +1098,7 @@ fn container_object_styles<'a>(
     sheet: &'a Sheet<'a>,
     scope: Scope,
     container: Nd<'a>,
+    payload: &TextPayload<'_>,
 ) -> Result<ObjectStyles<'a>, String> {
     // A table cell's text: the cell's style cascade (its own or its row's
     // default cell style, then the table-cell default) before the styles
@@ -1092,7 +1112,7 @@ fn container_object_styles<'a>(
         let mut styles = if frame == container {
             ObjectStyles::default()
         } else {
-            container_object_styles(sheet, scope, frame)?
+            container_object_styles(sheet, scope, frame, payload)?
         };
         let name = container
             .attribute((crate::xml::NS_TABLE, "style-name"))
@@ -1106,8 +1126,8 @@ fn container_object_styles<'a>(
             .transpose()?
             .unwrap_or_default();
         chain.extend(crate::odp_table::cell_template_style(
-            sheet, scope, container,
-        ));
+            sheet, scope, container, payload,
+        )?);
         chain.extend(sheet.default_style("table-cell"));
         chain.extend(styles.chain.iter().copied());
         styles.chain = chain;

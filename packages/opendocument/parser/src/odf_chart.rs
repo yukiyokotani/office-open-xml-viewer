@@ -93,6 +93,9 @@ impl ChartBudget {
     }
 }
 
+/// Charge for resolving one data point's style.
+const POINT_STYLE_BYTES: usize = 256;
+
 /// Charge for reading one axis (its style, title and model record).
 const AXIS_BYTES: usize = 4096;
 
@@ -1228,6 +1231,11 @@ impl Reader<'_> {
                 .children()
                 .filter(|n| xml::is(*n, NS_CHART, "data-point"))
             {
+                // Stop before resolving another point once no more can be
+                // kept; each resolution is charged.
+                if point_colors.len() >= MAX_POINTS || !self.budget.charge(POINT_STYLE_BYTES) {
+                    break;
+                }
                 let repeat = point
                     .attribute((NS_CHART, "repeated"))
                     .and_then(|v| v.parse::<usize>().ok())

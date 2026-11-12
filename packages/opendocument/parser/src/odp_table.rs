@@ -126,8 +126,9 @@ pub fn table<'a>(
                     .map(|n| sheet.chain(scope, "table-cell", n))
                     .transpose()?
                     .unwrap_or_default();
-                if let Some(t) = template_style.and_then(|n| sheet.find(scope, "table-cell", n)) {
-                    chain.push(t);
+                // The template's region style with its parents (§16.2).
+                if let Some(t) = template_style {
+                    chain.extend(sheet.chain(scope, "table-cell", t)?);
                 }
                 // §16.4: the family's default style is the last fallback.
                 chain.extend(sheet.default_style("table-cell"));
@@ -290,10 +291,34 @@ pub fn table<'a>(
 /// The table template's region style of `cell` as [`table`] resolves it
 /// (row and column positions with repeats expanded), for list continuation
 /// outside rendering. Bounded by the table's grid limits.
-pub fn cell_template_style<'a>(sheet: &'a Sheet<'a>, scope: Scope, cell: Nd<'a>) -> Option<Nd<'a>> {
-    let row = cell.parent_element()?;
-    let table = row.ancestors().find(|a| xml::is(*a, NS_TABLE, "table"))?;
-    let template = template(sheet, table.attribute((NS_TABLE, "template-name"))?)?;
+pub fn cell_template_style<'a>(
+    sheet: &'a Sheet<'a>,
+    scope: Scope,
+    cell: Nd<'a>,
+    payload: &TextPayload<'_>,
+) -> Result<Vec<Nd<'a>>, String> {
+    match template_region(sheet, cell, payload)? {
+        Some(name) => sheet.chain(scope, "table-cell", name),
+        None => Ok(Vec::new()),
+    }
+}
+
+/// The template region style name of `cell`, every table node inspected
+/// charged as text work.
+fn template_region<'a>(
+    sheet: &'a Sheet<'a>,
+    cell: Nd<'a>,
+    payload: &TextPayload<'_>,
+) -> Result<Option<&'a str>, String> {
+    let found = (|| {
+        let row = cell.parent_element()?;
+        let table = row.ancestors().find(|a| xml::is(*a, NS_TABLE, "table"))?;
+        let template = template(sheet, table.attribute((NS_TABLE, "template-name"))?)?;
+        Some((row, table, template))
+    })();
+    let Some((row, table, template)) = found else {
+        return Ok(None);
+    };
     let flag = |name: &str| table.attribute((NS_TABLE, name)) == Some("true");
     let repeat = |n: Nd<'_>, name: &str, max: usize| {
         n.attribute((NS_TABLE, name))
@@ -314,26 +339,32 @@ pub fn cell_template_style<'a>(sheet: &'a Sheet<'a>, scope: Scope, cell: Nd<'a>)
         }
         _ => {}
     };
-    for child in table.children().filter(|n| n.is_element()) {
+    for child in table.children() {
+        payload.step(1)?;
         match child.tag_name().name() {
-            "table-columns" | "table-header-columns" | "table-rows" | "table-header-rows" => child
-                .children()
-                .filter(|n| n.is_element())
-                .for_each(&mut visit),
+            "table-columns" | "table-header-columns" | "table-rows" | "table-header-rows" => {
+                for n in child.children() {
+                    payload.step(1)?;
+                    visit(n);
+                }
+            }
             _ => visit(child),
         }
     }
     let mut column = 0usize;
-    for c in row.children().filter(|n| {
-        xml::is(*n, NS_TABLE, "table-cell") || xml::is(*n, NS_TABLE, "covered-table-cell")
-    }) {
+    for c in row.children() {
+        payload.step(1)?;
         if c == cell {
             break;
         }
-        column = (column + repeat(c, "number-columns-repeated", MAX_COLUMNS)).min(MAX_COLUMNS);
+        if xml::is(c, NS_TABLE, "table-cell") || xml::is(c, NS_TABLE, "covered-table-cell") {
+            column = (column + repeat(c, "number-columns-repeated", MAX_COLUMNS)).min(MAX_COLUMNS);
+        }
     }
-    let name = template.style_for(row_index?, column, rows, cols, &flag)?;
-    sheet.find(scope, "table-cell", name)
+    let Some(row_index) = row_index else {
+        return Ok(None);
+    };
+    Ok(template.style_for(row_index, column, rows, cols, &flag))
 }
 
 /// A file span clamped to the `available` cells from its origin (at least 1).
@@ -420,38 +451,45 @@ impl<'a> Template<'a> {
         cols: usize,
         flag: &dyn Fn(&str) -> bool,
     ) -> Option<&'a str> {
+        // §16.20: the first applicable region in this order: first column,
+        // last column, first row, last row, banded rows, banded columns,
+        // body. Bands alternate from the first row/column (`odd-*` on the
+        // second, as LibreOffice writes them).
         let get = |k: &str| self.regions.get(k).copied();
-        if r == 0 && flag("use-first-row-styles") {
-            if let Some(s) = get("first-row") {
-                return Some(s);
+        let band = |i: usize, odd: &str, even: &str| {
+            if i % 2 == 1 {
+                get(odd)
+            } else {
+                get(even)
             }
-        }
-        if r + 1 == rows && flag("use-last-row-styles") {
-            if let Some(s) = get("last-row") {
-                return Some(s);
-            }
-        }
-        if c == 0 && flag("use-first-column-styles") {
-            if let Some(s) = get("first-column") {
-                return Some(s);
-            }
-        }
-        if c + 1 == cols && flag("use-last-column-styles") {
-            if let Some(s) = get("last-column") {
-                return Some(s);
-            }
-        }
-        if flag("use-banding-rows-styles") && r % 2 == 1 {
-            if let Some(s) = get("odd-rows") {
-                return Some(s);
-            }
-        }
-        if flag("use-banding-columns-styles") && c % 2 == 1 {
-            if let Some(s) = get("odd-columns") {
-                return Some(s);
-            }
-        }
-        get("body")
+        };
+        let regions = [
+            (
+                c == 0 && flag("use-first-column-styles"),
+                get("first-column"),
+            ),
+            (
+                c + 1 == cols && flag("use-last-column-styles"),
+                get("last-column"),
+            ),
+            (r == 0 && flag("use-first-row-styles"), get("first-row")),
+            (
+                r + 1 == rows && flag("use-last-row-styles"),
+                get("last-row"),
+            ),
+            (
+                flag("use-banding-rows-styles"),
+                band(r, "odd-rows", "even-rows"),
+            ),
+            (
+                flag("use-banding-columns-styles"),
+                band(c, "odd-columns", "even-columns"),
+            ),
+        ];
+        regions
+            .into_iter()
+            .find_map(|(applies, style)| style.filter(|_| applies))
+            .or_else(|| get("body"))
     }
 }
 
