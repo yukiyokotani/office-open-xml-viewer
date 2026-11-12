@@ -37,17 +37,20 @@ pub fn table<'a>(
         .attribute((NS_TABLE, "template-name"))
         .and_then(|name| template(sheet, name));
     let flag = |name: &str| node.attribute((NS_TABLE, name)) == Some("true");
+    // One text payload for the whole table: the cells' text as it is read,
+    // and each cell record (borders, fill, strings) before it is kept.
+    let payload = TextPayload::new(text_work);
     let mut cols: Vec<i64> = Vec::new();
     let mut rows_nodes: Vec<Nd<'a>> = Vec::new();
     for child in node.children().filter(|n| n.is_element()) {
         match child.tag_name().name() {
-            "table-column" => push_columns(sheet, scope, child, &mut cols)?,
+            "table-column" => push_columns(sheet, scope, child, &mut cols, &payload)?,
             "table-columns" | "table-header-columns" => {
                 for c in child
                     .children()
                     .filter(|n| xml::is(*n, NS_TABLE, "table-column"))
                 {
-                    push_columns(sheet, scope, c, &mut cols)?;
+                    push_columns(sheet, scope, c, &mut cols, &payload)?;
                 }
             }
             "table-row" => push_rows(child, &mut rows_nodes)?,
@@ -67,9 +70,6 @@ pub fn table<'a>(
     let mut cells_total = 0usize;
     // Row heights per source row (a repeated row is one node).
     let mut row_heights: HashMap<roxmltree::NodeId, f64> = HashMap::new();
-    // One text payload for the whole table: the cells' text as it is read,
-    // and each cell record (borders, fill, strings) before it is kept.
-    let payload = TextPayload::new(text_work);
     for (r, row) in rows_nodes.iter().enumerate() {
         // Each expanded row is traversed (cells, then spans): charged by its
         // markup, comments and text included.
@@ -298,6 +298,7 @@ fn push_columns<'a>(
     scope: Scope,
     column: Nd<'a>,
     cols: &mut Vec<i64>,
+    payload: &TextPayload<'_>,
 ) -> Result<(), String> {
     let repeat = column
         .attribute((NS_TABLE, "number-columns-repeated"))
@@ -311,6 +312,11 @@ fn push_columns<'a>(
         .unwrap_or_default();
     let mut props = Props::new();
     props.extend_styles(&chain, TABLE_COLUMN);
+    payload.step(
+        1usize
+            .saturating_add(column.range().len() / 64)
+            .saturating_add(crate::odp_style::props_cost(&props)),
+    )?;
     let width = props
         .get(NS_STYLE, "column-width")
         .and_then(length_emu)

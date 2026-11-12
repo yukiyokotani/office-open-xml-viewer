@@ -257,7 +257,9 @@ impl<'a> ListInstances<'a, '_> {
             Some(id) if !self.ids.contains_key(id) => self
                 .external_last(id, depth)?
                 .map_or(Resume::None, Resume::After),
-            _ => Resume::None,
+            // A list of this text: after that list's own last number.
+            Some(id) => Resume::List(id),
+            None => Resume::None,
         };
         let continued = match list.attribute((NS_TEXT, "continue-list")) {
             Some(id) => self.ids.get(id).copied(),

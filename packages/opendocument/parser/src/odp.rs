@@ -1504,7 +1504,38 @@ fn chart_records(model: &pptx_model::ChartModel) -> usize {
                     .map_or(0, Vec::len)
                     .saturating_mul(size_of::<ooxml_common::chart::ChartTrendline>()),
             );
+        // The per-point vectors the reader fills (colours, bubble sizes,
+        // hidden flags).
+        let len = |v: Option<usize>, size: usize| v.unwrap_or(0).saturating_mul(size);
+        bytes = bytes
+            .saturating_add(len(
+                series.data_point_colors.as_ref().map(Vec::len),
+                size_of::<Option<String>>(),
+            ))
+            .saturating_add(len(
+                series.data_label_colors.as_ref().map(Vec::len),
+                size_of::<Option<String>>(),
+            ))
+            .saturating_add(len(
+                series.bubble_sizes.as_ref().map(Vec::len),
+                size_of::<Option<f64>>(),
+            ))
+            .saturating_add(len(
+                series.source_hidden.as_ref().map(Vec::len),
+                size_of::<bool>(),
+            ))
+            .saturating_add(len(
+                series.cat_format_codes.as_ref().map(Vec::len),
+                size_of::<Option<String>>(),
+            ));
     }
+    bytes = bytes.saturating_add(
+        model
+            .category_source_hidden
+            .as_ref()
+            .map_or(0, Vec::len)
+            .saturating_mul(size_of::<bool>()),
+    );
     bytes
 }
 
@@ -1984,6 +2015,19 @@ mod tests {
         let deck = deck("", "", "", &page(body)).unwrap();
         let slide0 = model(&deck, 0);
         assert_eq!(slide0.notes.as_deref(), Some("One  two\nThreenested"));
+    }
+
+    #[test]
+    fn a_local_continuation_follows_the_named_list() {
+        let styles = r#"<text:list-style style:name="L1"><text:list-level-style-number text:level="1" style:num-format="1" style:num-suffix="."/></text:list-style>"#;
+        let body = r#"<draw:frame svg:width="10cm" svg:height="5cm"><draw:text-box><text:list text:style-name="L1" xml:id="a"><text:list-item><text:p>x</text:p></text:list-item><text:list-item><text:p>y</text:p></text:list-item></text:list><text:list text:style-name="L1" text:continue-numbering="true"><text:list-item text:start-value="10"><text:p>s</text:p></text:list-item></text:list><text:list text:style-name="L1" text:continue-list="a"><text:list-item><text:p>z</text:p></text:list-item></text:list></draw:text-box></draw:frame>"#;
+        let deck = deck(styles, "", "", &page(body)).unwrap();
+        let slide0 = model(&deck, 0);
+        let shape = shapes(&slide0)[0];
+        assert_eq!(
+            labels(shape.text_body.as_ref().unwrap()),
+            ["1.", "2.", "10.", "3."]
+        );
     }
 
     #[test]
