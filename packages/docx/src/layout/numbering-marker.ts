@@ -176,15 +176,19 @@ interface MarkerPiece extends SymbolTextSegment {
  * keeps its joining.
  */
 function rtlMarkerPieces(segments: readonly SymbolTextSegment[]): MarkerPiece[] {
+  // Graphemes of the whole marker (an authored VS15 or combining mark joins
+  // its base across dispositions); each takes its base's disposition.
+  const text = segments.map((segment) => segment.text).join('');
+  const owners: SymbolTextSegment[] = [];
+  for (const segment of segments) for (let unit = 0; unit < segment.text.length; unit++) owners.push(segment);
+  const cuts = [0, ...graphemeClusterOffsets(text), text.length];
   const graphemes: (SymbolTextSegment & { start: number })[] = [];
-  let start = 0;
-  for (const segment of segments) {
-    const cuts = [0, ...graphemeClusterOffsets(segment.text), segment.text.length];
-    for (let index = 0; index + 1 < cuts.length; index++) {
-      if (cuts[index] === cuts[index + 1]) continue;
-      graphemes.push({ ...segment, text: segment.text.slice(cuts[index], cuts[index + 1]), start: start + cuts[index]! });
-    }
-    start += segment.text.length;
+  for (let index = 0; index + 1 < cuts.length; index++) {
+    const from = cuts[index]!;
+    if (from === cuts[index + 1]) continue;
+    const owner = owners[from]!;
+    graphemes.push({ text: text.slice(from, cuts[index + 1]), mapped: owner.mapped,
+      ...(owner.unicodeFace ? { unicodeFace: true as const } : {}), start: from });
   }
   const resolved = computeSegmentLineVisualOrder(graphemes.map((grapheme) => ({ text: grapheme.text })), true);
   const pieces: (MarkerPiece & { last: number })[] = [];
@@ -226,7 +230,8 @@ function joinMarkerLayouts(
   let ink: { xMinPt: number; xMaxPt: number; ascentPt: number; descentPt: number } | undefined;
   let withInk = true;
   for (const { start: offset, rtl, layout: { shape } } of parts) {
-    for (const span of shape.spans) {
+    // A right-to-left piece paints its own spans right to left.
+    for (const span of rtl ? [...shape.spans].reverse() : shape.spans) {
       spanDirections.push(rtl ? 'rtl' : 'ltr');
       spans.push({
         ...span,
@@ -241,7 +246,9 @@ function joinMarkerLayouts(
       for (const cluster of shape.clusters) {
         clusters.push({
           range: { start: cluster.range.start + offset, end: cluster.range.end + offset },
-          offsetPt: cluster.offsetPt + advancePt,
+          // A right-to-left piece is laid out mirrored: its first logical
+          // cluster sits at its right edge.
+          offsetPt: advancePt + (rtl ? shape.advancePt - cluster.offsetPt - cluster.advancePt : cluster.offsetPt),
           advancePt: cluster.advancePt,
         });
       }
@@ -249,7 +256,9 @@ function joinMarkerLayouts(
     for (const boundary of shape.graphemeBoundaries) boundaries.add(boundary + offset);
     diagnostics.push(...shape.diagnostics);
     if (shape.inkBounds && withInk) {
-      const moved = { ...shape.inkBounds, xMinPt: shape.inkBounds.xMinPt + advancePt, xMaxPt: shape.inkBounds.xMaxPt + advancePt };
+      const moved = rtl
+        ? { ...shape.inkBounds, xMinPt: advancePt + shape.advancePt - shape.inkBounds.xMaxPt, xMaxPt: advancePt + shape.advancePt - shape.inkBounds.xMinPt }
+        : { ...shape.inkBounds, xMinPt: shape.inkBounds.xMinPt + advancePt, xMaxPt: shape.inkBounds.xMaxPt + advancePt };
       ink = ink ? {
         xMinPt: Math.min(ink.xMinPt, moved.xMinPt), xMaxPt: Math.max(ink.xMaxPt, moved.xMaxPt),
         ascentPt: Math.max(ink.ascentPt, moved.ascentPt), descentPt: Math.max(ink.descentPt, moved.descentPt),

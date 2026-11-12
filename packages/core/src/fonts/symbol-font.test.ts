@@ -201,6 +201,27 @@ describe('createSymbolMonochromeProbe', () => {
   });
 });
 
+describe('oracle colour proof', () => {
+  it('requires the base without VS15 to be monochrome too (a shaper may split them)', () => {
+    let last = '';
+    class Canvas {
+      constructor(readonly width: number, readonly height: number) {}
+      getContext() {
+        return {
+          clearRect() {}, font: '', fillStyle: '', textBaseline: '', globalAlpha: 1, globalCompositeOperation: '',
+          fillText(text: string) { last = text; },
+          // Colour unless the text carries VS15.
+          getImageData: () => ({ data: new Uint8ClampedArray(last.includes('\uFE0E') ? [0, 0, 0, 255] : [200, 30, 30, 255]) }),
+        };
+      }
+    }
+    const ctx = { font: '', canvas: new Canvas(1, 1), measureText: (text: string) => ({ width: text === 'i' ? 3 : 7 }) };
+    const oracle = createSymbolFaceOracle(ctx);
+    const parts = oracle.segments('\uF0A9', 'Symbol', { familyText: '"Absent"', weight: 400, style: 'normal', encoding: SYMBOL_FACE_UNICODE });
+    expect(parts).toEqual([{ text: '\uF0A9', mapped: false }]);
+  });
+});
+
 describe('measureSymbolFaceEncoding', () => {
   // A context that draws the "Sym" face's codes 0x41..0x5A at width 2+code
   // (both forms) and every other text at one width per character class. In

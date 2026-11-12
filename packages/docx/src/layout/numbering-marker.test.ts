@@ -243,6 +243,10 @@ describe('resolveNumberingMarkerGeometry', () => {
     ['\uF061\u0633\u0644\u0627\u0645\uF028', [['(', 'rtl'], ['\u0633\u0644\u0627\u0645', 'rtl'], ['\uF061', 'ltr']]],
     ['\uF061\u0633\u0644\u0627\u0645\u4E2D\uF028', [['(', 'rtl'], ['\u4E2D', 'ltr'], ['\u0633\u0644\u0627\u0645', 'rtl'], ['\uF061', 'ltr']]],
     ['\uF061\uFE0E\u0633\u0644\u0627\u0645\uF028', [['(', 'rtl'], ['\u0633\u0644\u0627\u0645', 'rtl'], ['\uF061\uFE0E', 'ltr']]],
+    // Converted pieces paint their spans right to left; an authored VS15 joins its base.
+    ['a\uF028\uF0B7', [['\u2022', 'rtl'], ['(', 'rtl'], ['a', 'ltr']]],
+    // The VS15 shares its base's piece; the shaper gives it its own (highAnsi) span, as in body text.
+    ['a\uF028\uFE0E', [['\uFE0E', 'rtl'], ['(', 'rtl'], ['a', 'ltr']]],
   ])('orders and directs RTL marker pieces of %j by their resolved levels', (text, expected) => {
     const base = createTextLayoutService({
       fonts: createFontResolver([]),

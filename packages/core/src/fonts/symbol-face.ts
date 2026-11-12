@@ -477,7 +477,14 @@ export function createSymbolFaceOracle(
       const judged = encoding(selection);
       const segments = symbolTextToUnicodeSegments(text, fontFamily, {
         encoding: judged,
-        monochrome: (converted) => probe(converted, fallbackFont?.(converted)),
+        // A shaper may paint the VS15 apart from its base (another script
+        // slot), so the base alone must be monochrome in its route too.
+        monochrome: (converted) => {
+          const base = converted.replace(/\uFE0E/gu, '');
+          const withSelector = probe(converted, fallbackFont?.(converted));
+          if (withSelector !== true || base === converted) return withSelector;
+          return probe(base, fallbackFont?.(base));
+        },
       });
       const drawsNone = judged.kind === 'known' && !/[^0]/u.test(judged.pua) && !/[^0]/u.test(judged.bare);
       return drawsNone
