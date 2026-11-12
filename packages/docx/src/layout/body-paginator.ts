@@ -4101,7 +4101,11 @@ function composePageStories(
     // frame (as the prescan resolved its exclusions, vertical pages too) and
     // painted in the body stacking context, so its drawings order with body
     // text and body anchors as body page anchors do.
-    const bodyGeometry = page.section.geometry;
+    // A parity blank page has no body region: its page objects (nothing to
+    // wrap there) are laid out like the page's other stories, in the
+    // upright page frame.
+    const blankPageObjects = page.parityBlank;
+    const bodyGeometry = blankPageObjects ? geometry : page.section.geometry;
     const pageObjectBounds = Object.freeze({
       xPt: Math.abs(bodyGeometry.marginLeft),
       yPt: 0,
@@ -4115,7 +4119,7 @@ function composePageStories(
         pageStoryOwner: owner.sectionOccurrenceId,
         pageIndex: page.pageIndex,
         pageNumber: { displayNumber: page.pageNumber.displayNumber, format: page.pageNumber.format },
-        section: page.section,
+        section: blankPageObjects ? pageStorySection : page.section,
         container: {
           id: `story:${source.storyInstance}`,
           kind: 'header',
@@ -4131,7 +4135,7 @@ function composePageStories(
     const pageObjectNodes = pageObjectLayouts.flatMap(({ story }) => story.blocks);
     // The page objects' domains are in the body's section frame, as their
     // contents are; physical bounds through the page's own transform.
-    const bodyRegion = page.sectionRegions[0];
+    const bodyRegion = blankPageObjects ? undefined : page.sectionRegions[0];
     const pageObjectDomains = pageObjectLayouts.map(({ id, story }) => {
       const logicalBounds = Object.freeze({
         xPt: pageObjectBounds.xPt,
@@ -4262,7 +4266,7 @@ function composePageStories(
     const entries: PageLayerNode[] = [
       ...withHeader.slice(0, noteIndex),
       ...pageObjectNodes.map((node): PageLayerNode => ({
-        layer: 'body', node, coordinateSpace: 'section-logical',
+        layer: 'body', node, coordinateSpace: blankPageObjects ? coordinateSpace : 'section-logical',
       })),
       ...notes.map((node): PageLayerNode => ({
         layer: 'notes', node, coordinateSpace: 'section-logical',

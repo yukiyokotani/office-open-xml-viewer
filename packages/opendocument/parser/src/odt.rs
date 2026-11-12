@@ -215,6 +215,7 @@ pub fn read(package: &OdfPackage) -> Result<(Document, Vec<OwnedDocumentResource
         intrinsic: HashMap::new(),
         page_objects: BTreeMap::new(),
         group_anchor: None,
+        group_depth: 0,
         rejected_images: HashSet::new(),
         section_markers: 0,
         region_cache: HashMap::new(),
@@ -405,6 +406,9 @@ struct Reader<'a> {
     region_cache: HashMap<String, Rc<page::MasterStories>>,
     /// The anchor type of the enclosing drawing group (its members take it).
     group_anchor: Option<&'static str>,
+    /// Drawing groups enclosing the current drawing: their members are not
+    /// anchored objects of their own (never page objects).
+    group_depth: usize,
     /// Drawings anchored to an explicit physical page, by page (1-based).
     page_objects: BTreeMap<u32, Vec<DocRun>>,
     /// Each retained picture's intrinsic size by key (scanned once).
@@ -645,6 +649,7 @@ impl<'a> Reader<'a> {
         let saved_anchors = std::mem::take(&mut self.pending_anchors);
         // A contained story (a text box in a group) anchors on its own.
         let saved_group_anchor = self.group_anchor.take();
+        let saved_group_depth = std::mem::replace(&mut self.group_depth, 0);
         let saved_list = self.list_paragraph.take();
         let enclosing_area = self.area;
         self.next_area += 1;
@@ -655,6 +660,7 @@ impl<'a> Reader<'a> {
         self.section_markers = saved_markers;
         self.story = saved_story;
         self.group_anchor = saved_group_anchor;
+        self.group_depth = saved_group_depth;
         self.text_width = saved_width;
         self.section_indent = saved_indent;
         // Frames anchored inside the story without a following paragraph.

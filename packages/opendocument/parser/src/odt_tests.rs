@@ -851,10 +851,23 @@ fn group_anchors_stop_at_contained_stories() {
 fn group_members_follow_their_group_not_their_own_page() {
     // The group is the anchored object: a member's own page anchor neither
     // takes it out of the group nor extends the document.
-    let body = r##"<text:p><draw:g text:anchor-type="paragraph"><draw:rect text:anchor-type="page" text:anchor-page-number="5" svg:width="1cm" svg:height="1cm"/><draw:rect svg:x="2cm" svg:width="1cm" svg:height="1cm"/></draw:g>x</text:p>"##;
+    let body = r##"<text:p><draw:g text:anchor-type="paragraph"><draw:rect text:anchor-type="page" text:anchor-page-number="5" svg:width="1cm" svg:height="1cm"/><draw:rect svg:x="2cm" svg:width="1cm" svg:height="1cm"/></draw:g><draw:g><draw:rect text:anchor-type="page" text:anchor-page-number="5" svg:width="1cm" svg:height="1cm"/></draw:g>x</text:p><draw:g text:anchor-type="page" text:anchor-page-number="2"><draw:rect text:anchor-type="paragraph" svg:width="1cm" svg:height="1cm"/></draw:g><text:p>y</text:p>"##;
     let document = read_fixture(Fixture {
         body,
         ..Fixture::default()
     });
-    assert!(document.page_objects.is_empty());
+    // Only the page-anchored group is a page object; its member, despite
+    // its own paragraph anchor, is positioned on the page like the group.
+    assert_eq!(document.page_objects.len(), 1);
+    assert_eq!(document.page_objects[0].page, 2);
+    let host = paragraphs(&document.page_objects[0].body)[0];
+    let shape = host
+        .runs
+        .iter()
+        .find_map(|run| match run {
+            DocRun::Shape(shape) => Some(shape),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(shape.anchor_y_relative_from.as_deref(), Some("page"));
 }

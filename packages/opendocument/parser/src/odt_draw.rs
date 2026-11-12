@@ -204,9 +204,10 @@ impl<'a> Reader<'a> {
         // becomes a page object, not content of the story that holds it.
         // A group member's anchor is its group's (the group itself is the
         // page object, or not one).
-        let page = match self.group_anchor {
-            Some(_) => None,
-            None => self.anchor_page_number(node)?,
+        let page = if self.group_depth > 0 {
+            None
+        } else {
+            self.anchor_page_number(node)?
         };
         if let Some(page) = page {
             // A group's further members join the pending anchors: they belong
@@ -301,9 +302,9 @@ impl<'a> Reader<'a> {
         }
         // A group member has no anchor of its own: it takes its group's
         // (§10.3.15; the group is the anchored object).
-        let anchor = node
-            .attribute((NS_TEXT, "anchor-type"))
-            .or(self.group_anchor)
+        let anchor = self
+            .group_anchor
+            .or_else(|| node.attribute((NS_TEXT, "anchor-type")))
             .or_else(|| graphic.get(NS_TEXT, "anchor-type"))
             .unwrap_or("paragraph");
         let x = node
@@ -1422,7 +1423,9 @@ impl<'a> Reader<'a> {
             _ => self.group_anchor,
         };
         let saved = std::mem::replace(&mut self.group_anchor, anchor);
+        self.group_depth += 1;
         let result = self.group_members(node);
+        self.group_depth -= 1;
         self.group_anchor = saved;
         result
     }
