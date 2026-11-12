@@ -328,12 +328,16 @@ export function resolveNumberingMarkerGeometry(
     : service.symbolText?.(symbolRequest) ?? symbolTextToUnicodeSegments(numbering.text, markerFamily);
   // Each code is converted on its own, as in body runs; the pieces are
   // placed in visual order (joinMarkerLayouts). In a right-to-left paragraph
-  // a mixed marker is split into one piece per code point (a VS15 stays with
+  // the symbol pieces of a mixed marker (converted, or authored symbol codes;
+  // other text such as Arabic stays whole to keep its joining) are split into
+  // one piece per code point (a VS15 stays with
   // its base, which it selects text presentation for), so no piece spans
   // a resolved embedding-level boundary, and each piece paints in its own
   // resolved direction (a converted "(" between native letters stays "(").
   const markerSegments = judged && judged.length > 1 && input.baseRtl === true
-    ? judged.flatMap((part) => (part.text.match(/[^\uFE0E]\uFE0E?|\uFE0E/gsu) ?? []).map((character) => ({ ...part, text: character })))
+    ? judged.flatMap((part) => (part.mapped || /^[\u0020-\u00FF\uF020-\uF0FF]*$/u.test(part.text)
+      ? (part.text.match(/[^\uFE0E]\uFE0E?|\uFE0E/gsu) ?? []).map((character) => ({ ...part, text: character }))
+      : [part]))
     : judged;
   const markerText = numbering.picBulletImagePath
     ? ''
