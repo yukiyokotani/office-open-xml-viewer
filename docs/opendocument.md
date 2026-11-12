@@ -62,8 +62,8 @@ read as ODF 1.3 Part 3 specifies and mapped onto the DOCX document model;
 where the specification leaves a choice to the consumer, or LibreOffice
 reads it differently, LibreOffice is the reference. A document is rejected
 only when it is corrupt, encrypted or unsafe, or when it exceeds a resource
-limit (the caller's ZIP limits, the XML limits and the reader's construction
-budget). A feature the DOCX model cannot express exactly is drawn with its
+limit (the caller's ZIP limits, the XML limits and the reader's own bounds on
+the memory it holds and the work it does, which its allocator measures). A feature the DOCX model cannot express exactly is drawn with its
 nearest DOCX equivalent instead of refusing the document, so a document may
 show small differences from LibreOffice. The reader never executes scripts,
 macros or forms, and never fetches external resources (linked files outside

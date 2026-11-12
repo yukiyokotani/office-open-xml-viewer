@@ -23,15 +23,16 @@ use docx_model::{
 /// hatches, fill images, markers and dash styles, by `draw:name`.
 #[derive(Default)]
 pub(super) struct Definitions<'a> {
-    /// Each definition with its source size (charged per use).
+    /// Each definition with its source size (a use reads it again).
     by_name: HashMap<(&'static str, String), (roxmltree::Node<'a, 'a>, usize)>,
 }
 
 impl<'a> Definitions<'a> {
-    pub fn read(styles: Option<roxmltree::Node<'a, 'a>>) -> Self {
+    pub fn read(styles: Option<roxmltree::Node<'a, 'a>>) -> Result<Self, String> {
         let mut by_name = HashMap::new();
         if let Some(styles) = styles {
             for node in styles.children().filter(|n| n.is_element()) {
+                budget::tick(1)?;
                 if node.tag_name().namespace() != Some(NS_DRAW) {
                     continue;
                 }
@@ -53,7 +54,7 @@ impl<'a> Definitions<'a> {
                 }
             }
         }
-        Self { by_name }
+        Ok(Self { by_name })
     }
 
     pub(super) fn get(
@@ -68,6 +69,9 @@ impl<'a> Definitions<'a> {
 /// A resolved graphic style (§16.2 over `style:graphic-properties`).
 struct Graphic<'a> {
     cascade: Cascade<'a>,
+    /// The style and its parents, without the family's default style: where
+    /// the paragraphs of a drawing shape continue their search (§16.2).
+    chain: Rc<[StyleRef<'a>]>,
 }
 
 impl<'a> Graphic<'a> {
@@ -175,19 +179,20 @@ fn wrap(graphic: &Graphic<'_>) -> (AnchorWrapKindWire, Option<&'static str>, boo
 
 impl<'a> Reader<'a> {
     fn graphic(&mut self, node: roxmltree::Node<'a, 'a>) -> Result<Graphic<'a>, String> {
-        let mut chain: Vec<StyleRef<'a>> = match node
+        let own: Rc<[StyleRef<'a>]> = match node
             .attribute((NS_DRAW, "style-name"))
             .and_then(|name| self.find_style(Family::Graphic, name))
         {
-            Some(style) => self.style_chain(style).to_vec(),
-            None => Vec::new(),
+            Some(style) => self.style_chain(style)?,
+            None => Rc::from(Vec::new()),
         };
+        let mut chain = own.to_vec();
         if let Some(default) = self.sheet.default_style(Family::Graphic) {
             chain.push(default);
         }
-        self.charge_cascade(&chain, "graphic-properties")?;
         Ok(Graphic {
-            cascade: Cascade::new(chain, "graphic-properties"),
+            cascade: Cascade::build(chain, "graphic-properties")?,
+            chain: own,
         })
     }
 
@@ -254,16 +259,11 @@ impl<'a> Reader<'a> {
         if anchor != Some("page") {
             return Ok(None);
         }
-        let Some(page) = page
-            .and_then(|v| v.trim().parse::<u64>().ok())
-            .filter(|page| *page >= 1)
-        else {
-            return Ok(None);
-        };
-        if page > u64::from(MAX_ANCHOR_PAGE) {
-            return Err("OpenDocument page anchor exceeds the page limit".into());
-        }
-        Ok(Some(page as u32))
+        Ok(
+            xml::bounded_count(page, u64::from(MAX_ANCHOR_PAGE), "page anchor")?
+                .filter(|page| *page >= 1)
+                .map(|page| page as u32),
+        )
     }
 
     fn drawing_run(&mut self, node: roxmltree::Node<'a, 'a>) -> Result<Option<DocRun>, String> {
@@ -293,20 +293,6 @@ impl<'a> Reader<'a> {
         graphic: &Graphic<'a>,
         offset: (f64, f64),
     ) -> Result<Placement, String> {
-        // A contour polygon is held by the placement and copied into the
-        // anchor's acquisition: both copies are charged before parsing.
-        if let Some(points) = node
-            .children()
-            .find(|n| xml::is(*n, NS_DRAW, "contour-polygon"))
-            .and_then(|contour| contour.attribute((NS_DRAW, "points")))
-        {
-            let count = points.split_whitespace().count();
-            self.charge_construction(
-                count
-                    .saturating_mul(2 * std::mem::size_of::<docx_model::AnchorPointWire>())
-                    .saturating_add(2 * std::mem::size_of::<docx_model::AnchorPolygonWire>()),
-            )?;
-        }
         // A group member has no anchor of its own: it takes its group's
         // (§10.3.15; the group is the anchored object).
         let anchor = self
@@ -406,7 +392,7 @@ impl<'a> Reader<'a> {
             distances,
             z_order,
             allow_overlap: graphic.get(NS_LOEXT, "allow-overlap") != Some("false"),
-            polygon: contour_polygon(node),
+            polygon: contour_polygon(node)?,
         })
     }
 
@@ -520,9 +506,36 @@ impl<'a> Reader<'a> {
         if let Some(text_box) = node.children().find(|n| xml::is(*n, NS_DRAW, "text-box")) {
             return self.text_box(node, text_box, &graphic, placement, width, height, rotation);
         }
-        // A formula object (MathML) draws as math in the line.
+        // A formula object (MathML) draws as math: in the line when the
+        // frame is anchored as a character, else as the content of the
+        // anchored frame, which keeps its position, size and wrap.
         if let Some(math) = self.formula_object(node)? {
-            return Ok(Some(math));
+            if placement.inline {
+                return Ok(Some(math));
+            }
+            self.count_paragraph()?;
+            let mut shape = ShapeRun {
+                width_pt: width,
+                height_pt: height,
+                rotation,
+                preset_geometry: Some("rect".into()),
+                text_box_content: vec![TextBoxBlockWire::Body(BodyElement::Paragraph(Box::new(
+                    DocParagraph {
+                        alignment: "left".into(),
+                        runs: vec![math],
+                        ..DocParagraph::default()
+                    },
+                )))],
+                text_anchor: Some("t".into()),
+                text_autofit: Some("none".into()),
+                text_inset_l: 0.0,
+                text_inset_t: 0.0,
+                text_inset_r: 0.0,
+                text_inset_b: 0.0,
+                ..ShapeRun::default()
+            };
+            self.anchor_shape(&mut shape, &placement);
+            return Ok(Some(DocRun::Shape(Box::new(shape))));
         }
         // The pictures of the frame: the first renderable one, with an SVG
         // original kept beside its raster replacement.
@@ -573,14 +586,6 @@ impl<'a> Reader<'a> {
         };
         let image_width = (width - padding("left") - padding("right")).max(0.1);
         let image_height = (height - padding("top") - padding("bottom")).max(0.1);
-        // The run owns its links (primary and SVG alternate): charged before
-        // they are copied in.
-        self.charge_construction(
-            std::mem::size_of::<ImageRun>()
-                + 2 * path.len()
-                + svg.as_ref().map_or(0, String::len)
-                + 64,
-        )?;
         let mut image = inline_image(path.clone(), mime, image_width, image_height, None);
         image.svg_image_path = svg.filter(|svg| *svg != path);
         image.rotation = rotation;
@@ -651,16 +656,16 @@ impl<'a> Reader<'a> {
         if !self.package.contains(&content) {
             return Ok(None);
         }
+        // Each referencing frame owns its tree: the sub-document is read
+        // and converted per frame.
+        budget::tick(1)?;
         let text = self.package.read_text(&content)?;
-        self.charge_construction(text.len())?;
         let document = xml::parse(&text)?;
         let root = document.root_element();
         if root.tag_name().name() != "math" {
             return Ok(None);
         }
-        // Each referencing frame owns its tree, so each conversion charges
-        // every node it builds (the source bytes above cover the parse).
-        let nodes = math::convert(root, &mut |bytes| self.charge_construction(bytes))?;
+        let nodes = math::convert(root)?;
         if nodes.is_empty() {
             return Ok(None);
         }
@@ -810,7 +815,6 @@ impl<'a> Reader<'a> {
             },
             ..ShapeRun::default()
         };
-        self.charge_construction(std::mem::size_of::<ShapeRun>() + 128)?;
         if !placement.inline {
             self.anchor_shape(&mut shape, &placement);
         }
@@ -852,9 +856,9 @@ impl<'a> Reader<'a> {
         style: &'a crate::style::Style,
     ) -> Result<Option<ShapeFill>, String> {
         let style = StyleRef::new(style);
-        self.charge_cascade(&[style], "graphic-properties")?;
         let graphic = Graphic {
-            cascade: Cascade::new(vec![style], "graphic-properties"),
+            cascade: Cascade::build(vec![style], "graphic-properties")?,
+            chain: Rc::from(Vec::new()),
         };
         self.fill(&graphic, true)
     }
@@ -896,40 +900,24 @@ impl<'a> Reader<'a> {
     }
 
     /// The area fill of a graphic style (§20.120 draw:fill and its
-    /// companions), or of a frame's `fo:background-color`.
-    /// The fill of a graphic style. A gradient definition is shared, but each
-    /// fill owns its stops: they are charged before they are built.
+    /// companions), or of a frame's `fo:background-color`. A gradient
+    /// definition is shared, but each fill owns its stops.
     fn fill(&mut self, graphic: &Graphic<'a>, frame: bool) -> Result<Option<ShapeFill>, String> {
         let color = |value: Option<&str>| value.and_then(|v| hex_color(v).ok());
+        let definition = |reader: &Self, kind: &'static str, attribute: &str| match graphic
+            .get(NS_DRAW, attribute)
+        {
+            Some(name) => reader.definition(kind, name),
+            None => Ok(None),
+        };
         Ok(match graphic.get(NS_DRAW, "fill") {
             Some("none") => None,
             Some("solid") => {
                 color(graphic.get(NS_DRAW, "fill-color")).map(|color| ShapeFill::Solid { color })
             }
-            Some("gradient") => match graphic
-                .get(NS_DRAW, "fill-gradient-name")
-                .and_then(|name| self.definition("gradient", name))
-            {
-                Some(definition) => {
-                    // (`definition` charged rereading the shared definition.)
-                    let stops = definition
-                        .children()
-                        .filter(|n| xml::is(*n, NS_LOEXT, "gradient-stop"))
-                        .count()
-                        .max(3);
-                    self.charge_construction(
-                        std::mem::size_of::<ShapeFill>()
-                            + stops * (std::mem::size_of::<GradientStop>() + 8)
-                            + 64,
-                    )?;
-                    Some(gradient(definition))
-                }
-                None => None,
-            },
+            Some("gradient") => definition(self, "gradient", "fill-gradient-name")?.map(gradient),
             Some("hatch") => {
-                let hatch = graphic
-                    .get(NS_DRAW, "fill-hatch-name")
-                    .and_then(|name| self.definition("hatch", name));
+                let hatch = definition(self, "hatch", "fill-hatch-name")?;
                 let fg = hatch
                     .and_then(|h| color(h.attribute((NS_DRAW, "color"))))
                     .unwrap_or_else(|| "000000".into());
@@ -950,21 +938,14 @@ impl<'a> Reader<'a> {
                 })
             }
             Some("bitmap") => {
-                let href = graphic
-                    .get(NS_DRAW, "fill-image-name")
-                    .and_then(|name| self.definition("fill-image", name))
+                let href = definition(self, "fill-image", "fill-image-name")?
                     .and_then(|image| image.attribute((NS_XLINK, "href")));
                 let Some(href) = href else {
                     return Ok(None);
                 };
-                // Each use resolves the shared link again.
-                self.charge_work(href.len().saturating_add(1))?;
                 let Some((path, mime)) = self.package_image(href)? else {
                     return Ok(None);
                 };
-                self.charge_construction(
-                    std::mem::size_of::<ShapeFill>() + path.len() + mime.len() + 64,
-                )?;
                 let tile = (graphic.get(NS_STYLE, "repeat") == Some("repeat")).then(|| {
                     Box::new(ooxml_common::fill::TileInfo {
                         tx: None,
@@ -1097,12 +1078,6 @@ impl<'a> Reader<'a> {
             "polyline" | "polygon" => {
                 let view = view_box(node).unwrap_or((0.0, 0.0, width.max(1.0), height.max(1.0)));
                 let source = node.attribute((NS_DRAW, "points")).unwrap_or("");
-                // The point list and its commands, charged before they are
-                // built.
-                let count = source.split_whitespace().count().saturating_add(1);
-                self.charge_construction(count.saturating_mul(
-                    std::mem::size_of::<(f64, f64)>() + std::mem::size_of::<PathCmd>(),
-                ))?;
                 let points: Vec<(f64, f64)> = source
                     .split_whitespace()
                     .filter_map(|pair| {
@@ -1110,6 +1085,7 @@ impl<'a> Reader<'a> {
                         Some((x.parse().ok()?, y.parse().ok()?))
                     })
                     .collect();
+                budget::tick(1)?;
                 let mut path = Vec::new();
                 for (index, (x, y)) in points.iter().enumerate() {
                     let x = if view.2 != 0.0 {
@@ -1138,18 +1114,7 @@ impl<'a> Reader<'a> {
             "path" => {
                 let view = view_box(node).unwrap_or((0.0, 0.0, width.max(1.0), height.max(1.0)));
                 if let Some(d) = node.attribute((NS_SVG, "d")) {
-                    // The parse holds at most one number per source byte.
-                    let scratch = d
-                        .len()
-                        .saturating_add(1)
-                        .saturating_mul(std::mem::size_of::<(Option<char>, f64)>());
-                    self.charge_construction(scratch)?;
-                    let limit = self.construction_left() / std::mem::size_of::<PathCmd>();
-                    let parsed = svg_path(d, view, limit);
-                    self.release_scratch(scratch);
-                    shape.subpaths = parsed.ok_or_else(|| {
-                        "OpenDocument text exceeds the construction limit".to_string()
-                    })?;
+                    shape.subpaths = svg_path(d, view)?;
                 }
             }
             "custom-shape" => {
@@ -1175,7 +1140,7 @@ impl<'a> Reader<'a> {
             .get(NS_DRAW, "opacity")
             .and_then(|v| percent(v).ok())
             .filter(|v| *v < 1.0);
-        self.line(&graphic, &mut shape);
+        self.line(&graphic, &mut shape)?;
         // Text in the shape (§10.6.1: paragraphs and lists).
         if node
             .children()
@@ -1195,10 +1160,10 @@ impl<'a> Reader<'a> {
                 padding("bottom"),
             ];
             let inner = (width - insets[0] - insets[2]).max(1.0);
-            let saved_scope = self.scope;
-            let content = self.contained_story(node, inner);
-            self.scope = saved_scope;
-            shape.text_box_content = content?.into_iter().map(TextBoxBlockWire::Body).collect();
+            // The paragraphs of a drawing shape continue their property
+            // search in the shape's graphic style (§16.2).
+            let content = self.contained_story_in(node, inner, graphic.chain.clone())?;
+            shape.text_box_content = content.into_iter().map(TextBoxBlockWire::Body).collect();
             shape.text_inset_l = insets[0];
             shape.text_inset_t = insets[1];
             shape.text_inset_r = insets[2];
@@ -1223,14 +1188,6 @@ impl<'a> Reader<'a> {
         if shape.subpaths.is_empty() && shape.preset_geometry.is_none() {
             return Ok(None);
         }
-        self.charge_construction(
-            std::mem::size_of::<ShapeRun>()
-                + shape
-                    .subpaths
-                    .iter()
-                    .map(|p| p.len() * std::mem::size_of::<PathCmd>())
-                    .sum::<usize>(),
-        )?;
         if !placement.inline {
             self.anchor_shape(&mut shape, &placement);
         }
@@ -1250,43 +1207,32 @@ impl<'a> Reader<'a> {
         let kind = node.attribute((NS_DRAW, "type")).unwrap_or("non-primitive");
         shape.flip_h = node.attribute((NS_DRAW, "mirror-horizontal")) == Some("true");
         shape.flip_v = node.attribute((NS_DRAW, "mirror-vertical")) == Some("true");
-        let modifiers: Vec<f64> = node
-            .attribute((NS_DRAW, "modifiers"))
-            .unwrap_or("")
-            .split_whitespace()
-            .filter_map(|v| v.parse::<f64>().ok())
-            .collect();
         if let Some(path) = node.attribute((NS_DRAW, "enhanced-path")) {
-            // Scratch held while the path evaluates: its tokens (at most one
-            // per source byte, each a string), the equation table and the
-            // formula cache; released once the commands are built.
-            let equation_bytes: usize = node
-                .children()
-                .filter(|n| xml::is(*n, NS_DRAW, "equation"))
-                .map(|e| {
-                    e.attributes()
-                        .fold(0usize, |sum, a| sum.saturating_add(a.value().len()))
-                        .saturating_add(3 * std::mem::size_of::<String>() + 64)
-                })
-                .fold(0usize, usize::saturating_add);
-            // Saturating: an estimate past usize is refused, never wrapped.
-            let scratch = path
-                .len()
-                .saturating_add(1)
-                .saturating_mul(std::mem::size_of::<String>() + 8)
-                .saturating_add(path.len())
-                .saturating_add(equation_bytes.saturating_mul(2));
-            self.charge_construction(scratch)?;
-            let equations = node
-                .children()
-                .filter(|n| xml::is(*n, NS_DRAW, "equation"))
-                .filter_map(|e| {
-                    Some((
-                        e.attribute((NS_DRAW, "name"))?.to_string(),
-                        e.attribute((NS_DRAW, "formula"))?.to_string(),
-                    ))
-                })
-                .collect();
+            // `draw:modifiers` (§19.196): the numbers `$n` refers to.
+            let mut modifiers: Vec<f64> = Vec::new();
+            for value in node
+                .attribute((NS_DRAW, "modifiers"))
+                .unwrap_or("")
+                .split_whitespace()
+            {
+                budget::tick(1)?;
+                modifiers.extend(value.parse::<f64>().ok());
+            }
+            // `draw:equation` (§10.6.3) definitions, within the reader's
+            // bound: a shape with more is rejected, not cut short.
+            let mut equations = HashMap::new();
+            for equation in node.children().filter(|n| xml::is(*n, NS_DRAW, "equation")) {
+                budget::tick(1)?;
+                if equations.len() >= geometry::MAX_EQUATIONS {
+                    return Err(resource("shape equation"));
+                }
+                if let (Some(name), Some(formula)) = (
+                    equation.attribute((NS_DRAW, "name")),
+                    equation.attribute((NS_DRAW, "formula")),
+                ) {
+                    equations.insert(name.to_string(), formula.to_string());
+                }
+            }
             let geometry = geometry::Geometry {
                 view_box: view_box(node).unwrap_or((0.0, 0.0, 21600.0, 21600.0)),
                 equations,
@@ -1295,11 +1241,7 @@ impl<'a> Reader<'a> {
                 has_fill: graphic.get(NS_DRAW, "fill") != Some("none"),
                 has_stroke: graphic.get(NS_DRAW, "stroke") != Some("none"),
             };
-            let limit = self.construction_left() / std::mem::size_of::<PathCmd>();
-            let path = geometry::evaluate(path, &geometry, limit);
-            self.release_scratch(scratch);
-            let path =
-                path.ok_or_else(|| "OpenDocument text exceeds the construction limit".to_string())?;
+            let path = geometry::evaluate(path, &geometry)?;
             if !path.subpaths.is_empty() {
                 shape.subpaths = path.subpaths;
                 if path.paint.iter().any(|p| p.fill.is_some() || !p.stroke) {
@@ -1308,8 +1250,6 @@ impl<'a> Reader<'a> {
                 return Ok(());
             }
         }
-        // The preset name is copied per shape: charged first.
-        self.charge_construction(kind.len() + 32)?;
         shape.preset_geometry = Some(
             match kind.strip_prefix("ooxml-") {
                 Some(preset) => preset,
@@ -1333,10 +1273,10 @@ impl<'a> Reader<'a> {
     }
 
     /// The line of a shape (§20.143 draw:stroke and companions).
-    fn line(&mut self, graphic: &Graphic<'a>, shape: &mut ShapeRun) {
+    fn line(&mut self, graphic: &Graphic<'a>, shape: &mut ShapeRun) -> Result<(), String> {
         let stroke = graphic.get(NS_DRAW, "stroke").unwrap_or("solid");
         if stroke == "none" {
-            return;
+            return Ok(());
         }
         shape.stroke = Some(
             graphic
@@ -1350,9 +1290,10 @@ impl<'a> Reader<'a> {
             .filter(|w| *w > 0.0)
             .unwrap_or(0.5);
         if stroke == "dash" {
-            let dash = graphic
-                .get(NS_DRAW, "stroke-dash")
-                .and_then(|name| self.definition("stroke-dash", name));
+            let dash = match graphic.get(NS_DRAW, "stroke-dash") {
+                Some(name) => self.definition("stroke-dash", name)?,
+                None => None,
+            };
             let dotted = dash.is_some_and(|d| {
                 d.attribute((NS_DRAW, "dots1-length"))
                     .and_then(|v| v.strip_suffix('%').and_then(|n| n.parse::<f64>().ok()))
@@ -1410,6 +1351,7 @@ impl<'a> Reader<'a> {
             graphic.get(NS_DRAW, "marker-end"),
             graphic.length(NS_DRAW, "marker-end-width"),
         );
+        Ok(())
     }
 
     /// `draw:g` (§10.3.15): its members as separate shapes on the group's
@@ -1447,6 +1389,7 @@ impl<'a> Reader<'a> {
     fn group_members(&mut self, node: roxmltree::Node<'a, 'a>) -> Result<Option<DocRun>, String> {
         let mut runs = Vec::new();
         for child in node.children().filter(|n| n.is_element()) {
+            budget::tick(1)?;
             // Through `drawing`, which bounds the nesting depth.
             let run = self.drawing(child, None)?;
             if let Some(run) = run {
@@ -1464,13 +1407,21 @@ impl<'a> Reader<'a> {
 
 /// `draw:contour-polygon` points in its view box, scaled to DOCX's
 /// 21600-unit wrap polygon space.
-fn contour_polygon(frame: roxmltree::Node<'_, '_>) -> Option<docx_model::AnchorPolygonWire> {
-    let contour = frame
+fn contour_polygon(
+    frame: roxmltree::Node<'_, '_>,
+) -> Result<Option<docx_model::AnchorPolygonWire>, String> {
+    let Some(contour) = frame
         .children()
-        .find(|n| xml::is(*n, NS_DRAW, "contour-polygon"))?;
-    let view = view_box(contour)?;
-    let points: Vec<docx_model::AnchorPointWire> = contour
-        .attribute((NS_DRAW, "points"))?
+        .find(|n| xml::is(*n, NS_DRAW, "contour-polygon"))
+    else {
+        return Ok(None);
+    };
+    let (Some(view), Some(source)) = (view_box(contour), contour.attribute((NS_DRAW, "points")))
+    else {
+        return Ok(None);
+    };
+    budget::tick(1)?;
+    let points: Vec<docx_model::AnchorPointWire> = source
         .split_whitespace()
         .filter_map(|pair| {
             let (x, y) = pair.split_once(',')?;
@@ -1483,15 +1434,17 @@ fn contour_polygon(frame: roxmltree::Node<'_, '_>) -> Option<docx_model::AnchorP
             })
         })
         .collect();
-    (points.len() >= 3).then_some(docx_model::AnchorPolygonWire {
-        edited: false,
-        coordinate_space: docx_model::AnchorPolygonSpaceWire {
-            width: 21600,
-            height: 21600,
-        },
-        points,
-        invalid_point_count: 0,
-    })
+    Ok(
+        (points.len() >= 3).then_some(docx_model::AnchorPolygonWire {
+            edited: false,
+            coordinate_space: docx_model::AnchorPolygonSpaceWire {
+                width: 21600,
+                height: 21600,
+            },
+            points,
+            invalid_point_count: 0,
+        }),
+    )
 }
 
 fn wrap_mode(kind: AnchorWrapKindWire) -> &'static str {
@@ -1651,9 +1604,7 @@ fn gradient(node: roxmltree::Node<'_, '_>) -> ShapeFill {
 
 /// An SVG path (`svg:d`, §19.554) in the view box, normalized: absolute and
 /// relative M, L, H, V, C, S, Q, T, Z (arcs as lines).
-/// At most `max_commands` commands; `None` past that.
-fn svg_path(d: &str, view: (f64, f64, f64, f64), max_commands: usize) -> Option<Vec<Vec<PathCmd>>> {
-    let mut admitted = 0usize;
+fn svg_path(d: &str, view: (f64, f64, f64, f64)) -> Result<Vec<Vec<PathCmd>>, String> {
     let mut numbers: Vec<(Option<char>, f64)> = Vec::new();
     let mut current = String::new();
     let mut command: Option<char> = None;
@@ -1691,10 +1642,7 @@ fn svg_path(d: &str, view: (f64, f64, f64, f64), max_commands: usize) -> Option<
     let mut index = 0;
     while index < numbers.len() {
         // Each step adds at most one command.
-        admitted += 1;
-        if admitted > max_commands {
-            return None;
-        }
+        budget::tick(1)?;
         if let Some(c) = numbers[index].0 {
             cmd = c;
             if matches!(c, 'Z' | 'z') {
@@ -1789,5 +1737,5 @@ fn svg_path(d: &str, view: (f64, f64, f64, f64), max_commands: usize) -> Option<
     if path.len() > 1 {
         paths.push(path);
     }
-    Some(paths)
+    Ok(paths)
 }

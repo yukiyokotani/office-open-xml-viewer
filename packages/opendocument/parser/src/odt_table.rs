@@ -20,9 +20,6 @@ use docx_model::{
 const MAX_COLUMNS: usize = 1024;
 const MAX_ROWS: usize = 100_000;
 
-/// A property group's attributes.
-type Attributes = HashMap<(String, String), String>;
-
 /// LibreOffice's fit of absolute column widths `a` (twips) to a left-aligned
 /// table `total` twips wide (`SwXMLTableContext::MakeTable_`, LibreOffice
 /// 26.8): a shortfall is shared in proportion to the widths; an excess
@@ -105,51 +102,39 @@ struct VerticalSpan {
 }
 
 impl<'a> Reader<'a> {
-    /// The attributes of one property group of a table-family style,
-    /// following its parents (§16.2).
+    /// One property group of a table-family style, following its parents
+    /// (§16.2).
     fn table_group(
         &mut self,
         family: Family,
         name: Option<&str>,
         group: Group,
-    ) -> Result<Attributes, String> {
-        self.table_group_search(family, &[name], group)
-    }
-
-    /// The §16.2 search for a table-family property group: each named
-    /// style's chain in turn (for a cell: its own style, its row's default
-    /// cell style, then its column's), then the family's default style. The
-    /// whole search order is charged as cascade work before it is resolved.
-    fn table_group_search(
-        &mut self,
-        family: Family,
-        names: &[Option<&str>],
-        group: Group,
-    ) -> Result<Attributes, String> {
-        let mut chain: Vec<StyleRef<'a>> = Vec::new();
-        for name in names.iter().flatten() {
-            if let Some(style) = self.find_style(family, name) {
-                chain.extend(self.style_chain(style).iter().copied());
-                if chain.len() > MAX_SEARCH_ORDER {
-                    return Err(
-                        "OpenDocument table styles exceed the style search order limit".into(),
-                    );
-                }
-            }
-        }
+    ) -> Result<Cascade<'a>, String> {
+        let mut chain = self.table_chain(family, &[name])?;
         if let Some(default) = self.sheet.default_style(family) {
             chain.push(default);
         }
-        self.charge_cascade(&chain, group)?;
-        let mut out = Attributes::new();
-        for style in chain.iter().rev() {
-            if let Some(properties) = style.group(group) {
-                for (key, value) in &properties.attributes {
-                    out.insert(key.clone(), value.clone());
+        Cascade::build(chain, group)
+    }
+
+    /// The §16.2 search order of table-family styles, without the family's
+    /// default style: each named style's chain in turn (for a cell: its own
+    /// style, its row's default cell style, then its column's, §19.619).
+    fn table_chain(
+        &mut self,
+        family: Family,
+        names: &[Option<&str>],
+    ) -> Result<Vec<StyleRef<'a>>, String> {
+        let mut chain: Vec<StyleRef<'a>> = Vec::new();
+        for name in names.iter().flatten() {
+            if let Some(style) = self.find_style(family, name) {
+                chain.extend(self.style_chain(style)?.iter().copied());
+                if chain.len() > MAX_SEARCH_ORDER {
+                    return Err(resource("style search order"));
                 }
             }
         }
-        Ok(out)
+        Ok(chain)
     }
 
     /// A `table:table` (§9.1.2).
@@ -161,17 +146,12 @@ impl<'a> Reader<'a> {
     }
 
     fn table_inner(&mut self, node: roxmltree::Node<'a, 'a>) -> Result<(), String> {
-        self.charge_construction(std::mem::size_of::<DocTable>())?;
         let properties = self.table_group(
             Family::Table,
             node.attribute((NS_TABLE, "style-name")),
             "table-properties",
         )?;
-        let get = |ns: &str, name: &str| {
-            properties
-                .get(&(ns.to_string(), name.to_string()))
-                .map(String::as_str)
-        };
+        let get = |ns: &str, name: &str| properties.get(ns, name);
         let length = |ns: &str, name: &str| get(ns, name).and_then(|v| length_pt(v).ok());
         let text_width = self.text_width - self.section_indent.0 - self.section_indent.1;
         let margin_left = length(NS_FO, "margin-left").unwrap_or(0.0);
@@ -209,28 +189,20 @@ impl<'a> Reader<'a> {
         if rows.is_empty() {
             return Ok(());
         }
-        // Rows may hold more cells than the declared columns; the sum
-        // saturates at the column bound (a repeat never expands here).
-        let row_width = |row: roxmltree::Node<'_, '_>| -> usize {
-            row.children()
-                .filter(|n| {
-                    xml::is(*n, NS_TABLE, "table-cell")
-                        || xml::is(*n, NS_TABLE, "covered-table-cell")
-                })
-                .map(|cell| {
-                    cell.attribute((NS_TABLE, "number-columns-repeated"))
-                        .and_then(|v| v.parse::<usize>().ok())
-                        .unwrap_or(1)
-                        .min(MAX_COLUMNS)
-                })
-                .fold(0usize, |sum, repeat| sum.saturating_add(repeat))
-        };
-        let needed = rows
-            .iter()
-            .map(|run| row_width(run.node))
-            .max()
-            .unwrap_or(0)
-            .min(MAX_COLUMNS);
+        // Rows may hold more cells than the declared columns: the grid is
+        // as wide as the widest row, within the column bound.
+        let mut needed = 0usize;
+        for run in &rows {
+            let mut width = 0usize;
+            for cell in run.node.children().filter(|n| is_cell(*n)) {
+                budget::tick(1)?;
+                width += cell_repeat(cell)?;
+                if width > MAX_COLUMNS {
+                    return Err(resource("table column"));
+                }
+            }
+            needed = needed.max(width);
+        }
         while columns.len() < needed {
             columns.push(Column::default());
         }
@@ -249,20 +221,20 @@ impl<'a> Reader<'a> {
         for run in rows {
             // The row's cell elements, found once for all its repetitions
             // (other children are never visited again).
-            let cells: Vec<(roxmltree::Node<'a, 'a>, usize)> = run
-                .node
-                .children()
-                .filter(|n| {
-                    xml::is(*n, NS_TABLE, "table-cell")
-                        || xml::is(*n, NS_TABLE, "covered-table-cell")
-                })
-                .map(|cell| (cell, source_bytes(cell)))
-                .collect();
-            let row_bytes = source_bytes(run.node);
+            let mut cells: Vec<roxmltree::Node<'a, 'a>> = Vec::new();
+            for cell in run.node.children().filter(|n| is_cell(*n)) {
+                budget::tick(1)?;
+                cells.push(cell);
+            }
+            let row_bytes = if run.repeat > 1 {
+                source_bytes(run.node)
+            } else {
+                0
+            };
             for repetition in 0..run.repeat {
                 // Every pass after the first reads the row's source again.
                 if repetition > 0 {
-                    self.charge_repeat(row_bytes)?;
+                    rescan(row_bytes)?;
                 }
                 self.table_row(
                     run.node,
@@ -289,14 +261,14 @@ impl<'a> Reader<'a> {
         )
     }
 
-    /// One table row (§9.1.3): its cells streamed from the row element, each
-    /// repetition and each built cell charged before it is allocated, and
-    /// none read past the table's last column.
+    /// One table row (§9.1.3): its cells streamed from the row element, a
+    /// step for each built cell, and none read past the table's last
+    /// column.
     #[allow(clippy::too_many_arguments)]
     fn table_row(
         &mut self,
         row: roxmltree::Node<'a, 'a>,
-        cell_nodes: &[(roxmltree::Node<'a, 'a>, usize)],
+        cell_nodes: &[roxmltree::Node<'a, 'a>],
         header: bool,
         col_widths: &[f64],
         columns: &[Column<'a>],
@@ -311,11 +283,7 @@ impl<'a> Reader<'a> {
                 row.attribute((NS_TABLE, "style-name")),
                 "table-row-properties",
             )?;
-            let row_get = |name: (&str, &str)| {
-                row_properties
-                    .get(&(name.0.to_string(), name.1.to_string()))
-                    .map(String::as_str)
-            };
+            let row_get = |name: (&str, &str)| row_properties.get(name.0, name.1);
             let (row_height, rule) = match (
                 row_get((NS_STYLE, "row-height")).and_then(|v| length_pt(v).ok()),
                 row_get((NS_STYLE, "min-row-height")).and_then(|v| length_pt(v).ok()),
@@ -332,20 +300,22 @@ impl<'a> Reader<'a> {
             let mut cells: Vec<DocTableCell> = Vec::new();
             let mut column = 0usize;
             let mut skip = 0u32;
-            'cells: for &(cell, cell_bytes) in cell_nodes {
+            'cells: for &cell in cell_nodes {
                 let covered = xml::is(cell, NS_TABLE, "covered-table-cell");
-                let repeat = cell
-                    .attribute((NS_TABLE, "number-columns-repeated"))
-                    .and_then(|v| v.parse::<usize>().ok())
-                    .unwrap_or(1)
-                    .clamp(1, MAX_COLUMNS);
+                let repeat = cell_repeat(cell)?;
+                let cell_bytes = if repeat > 1 && !covered {
+                    source_bytes(cell)
+                } else {
+                    0
+                };
                 for repetition in 0..repeat {
                     if column >= col_widths.len() {
                         break 'cells;
                     }
                     // A repeated cell reads its source again.
+                    budget::tick(1)?;
                     if repetition > 0 {
-                        self.charge_repeat(cell_bytes)?;
+                        rescan(cell_bytes)?;
                     }
                     if covered {
                         if skip > 0 {
@@ -353,7 +323,7 @@ impl<'a> Reader<'a> {
                             column += 1;
                             continue;
                         }
-                        self.charge_empty_cell()?;
+                        self.count_paragraph()?;
                         if let Some(span) = vertical[column].as_mut().filter(|s| s.remaining > 0) {
                             span.remaining -= 1;
                             let continuation = DocTableCell {
@@ -382,16 +352,22 @@ impl<'a> Reader<'a> {
                         column += 1;
                         continue;
                     }
-                    let span_columns = cell
-                        .attribute((NS_TABLE, "number-columns-spanned"))
-                        .and_then(|v| v.parse::<usize>().ok())
-                        .unwrap_or(1)
-                        .clamp(1, col_widths.len() - column);
-                    let span_rows = cell
-                        .attribute((NS_TABLE, "number-rows-spanned"))
-                        .and_then(|v| v.parse::<u32>().ok())
-                        .unwrap_or(1)
-                        .max(1);
+                    // Spans (§19.678, §19.679): within the grid's bounds a
+                    // span ends at the table's edge; beyond them it rejects.
+                    let span_columns = xml::bounded_count(
+                        cell.attribute((NS_TABLE, "number-columns-spanned")),
+                        MAX_COLUMNS as u64,
+                        "table column",
+                    )?
+                    .map_or(1, |span| span as usize)
+                    .clamp(1, col_widths.len() - column);
+                    let span_rows = xml::bounded_count(
+                        cell.attribute((NS_TABLE, "number-rows-spanned")),
+                        MAX_ROWS as u64,
+                        "table row",
+                    )?
+                    .map_or(1, |span| span as u32)
+                    .max(1);
                     let width: f64 = col_widths[column..column + span_columns].iter().sum();
                     // §16.2 for a cell: its own style, then the row's default
                     // cell style, then the column's (§19.619).
@@ -427,7 +403,7 @@ impl<'a> Reader<'a> {
                     column += 1;
                     continue;
                 }
-                self.charge_empty_cell()?;
+                self.count_paragraph()?;
                 cells.push(DocTableCell {
                     content: vec![CellElement::Paragraph(Box::default())],
                     col_span: 1,
@@ -437,7 +413,7 @@ impl<'a> Reader<'a> {
                 });
                 column += 1;
             }
-            self.charge_construction(std::mem::size_of::<DocTableRow>())?;
+            budget::tick(1)?;
             doc_rows.push(DocTableRow {
                 cells,
                 row_height,
@@ -464,20 +440,9 @@ impl<'a> Reader<'a> {
         jc: &'static str,
         margin_left: f64,
         (top, bottom): (f64, f64),
-        properties: &Attributes,
+        properties: &Cascade<'a>,
     ) -> Result<(), String> {
-        let get = |ns: &str, name: &str| {
-            properties
-                .get(&(ns.to_string(), name.to_string()))
-                .map(String::as_str)
-        };
-        // The grid is held twice (widths and the acquisition columns).
-        self.charge_construction(
-            col_widths.len()
-                * (2 * std::mem::size_of::<f64>()
-                    + std::mem::size_of::<TableGridColumnAcquisitionWire>()
-                    + 16),
-        )?;
+        let get = |ns: &str, name: &str| properties.get(ns, name);
         // Where a page break falls between two rows, LibreOffice draws their
         // shared edge again above the row continuing on the next page, and
         // below the row ending the page only where that row has a bottom
@@ -486,6 +451,7 @@ impl<'a> Reader<'a> {
         // the layout draws the shared edge once at the wider width either
         // way.
         for index in 1..doc_rows.len() {
+            budget::tick(1)?;
             let (above, below) = doc_rows.split_at_mut(index);
             if above[index - 1].cells.len() != below[0].cells.len() {
                 continue;
@@ -546,11 +512,7 @@ impl<'a> Reader<'a> {
                         .attributes
                         .get(&(NS_STYLE.to_string(), "master-page-name".to_string()))
                 })
-                .filter(|name| {
-                    !name.is_empty()
-                        && self.charge_lookup(name).is_ok()
-                        && self.pages.has_master(name)
-                })
+                .filter(|name| !name.is_empty() && self.pages.has_master(name))
             {
                 if self.has_body_content() {
                     let kind = self.pages.start_kind(master);
@@ -609,27 +571,24 @@ impl<'a> Reader<'a> {
         header: bool,
     ) -> Result<(), String> {
         for child in node.children().filter(|n| n.is_element()) {
+            budget::tick(1)?;
             match (child.tag_name().namespace(), child.tag_name().name()) {
                 (Some(NS_TABLE), "table-column") => {
-                    let repeat = child
-                        .attribute((NS_TABLE, "number-columns-repeated"))
-                        .and_then(|v| v.parse::<usize>().ok())
-                        .unwrap_or(1)
-                        .clamp(1, MAX_COLUMNS);
+                    let repeat = cell_repeat(child)?;
                     let properties = self.table_group(
                         Family::TableColumn,
                         child.attribute((NS_TABLE, "style-name")),
                         "table-column-properties",
                     )?;
                     let absolute = properties
-                        .get(&(NS_STYLE.to_string(), "column-width".to_string()))
+                        .get(NS_STYLE, "column-width")
                         .and_then(|v| length_pt(v).ok());
                     let share = properties
-                        .get(&(NS_STYLE.to_string(), "rel-column-width".to_string()))
+                        .get(NS_STYLE, "rel-column-width")
                         .and_then(|v| v.trim_end_matches('*').parse::<f64>().ok())
                         .filter(|v| *v > 0.0);
                     if columns.len() + repeat > MAX_COLUMNS {
-                        return Err("OpenDocument table exceeds the column limit".into());
+                        return Err(resource("table column"));
                     }
                     columns.extend(std::iter::repeat_n(
                         Column {
@@ -652,14 +611,15 @@ impl<'a> Reader<'a> {
                     self.collect_table(child, columns, rows, row_count, header)?
                 }
                 (Some(NS_TABLE), "table-row") => {
-                    let repeat = child
-                        .attribute((NS_TABLE, "number-rows-repeated"))
-                        .and_then(|v| v.parse::<usize>().ok())
-                        .unwrap_or(1)
-                        .clamp(1, MAX_ROWS);
+                    let repeat = xml::bounded_count(
+                        child.attribute((NS_TABLE, "number-rows-repeated")),
+                        MAX_ROWS as u64,
+                        "table row",
+                    )?
+                    .map_or(1, |repeat| (repeat as usize).max(1));
                     *row_count += repeat;
                     if *row_count > MAX_ROWS {
-                        return Err("OpenDocument table exceeds the row limit".into());
+                        return Err(resource("table row"));
                     }
                     rows.push(RowRun {
                         node: child,
@@ -681,14 +641,20 @@ impl<'a> Reader<'a> {
         width: f64,
         row_background: Option<&str>,
     ) -> Result<DocTableCell, String> {
-        self.charge_construction(CELL_BYTES)?;
-        let properties =
-            self.table_group_search(Family::TableCell, styles, "table-cell-properties")?;
-        let get = |ns: &str, name: &str| {
-            properties
-                .get(&(ns.to_string(), name.to_string()))
-                .map(String::as_str)
-        };
+        // §16.2 for a cell: its own style, the row's default cell style,
+        // the column's, then the family's default style. The cell's
+        // paragraphs continue their own search in the first three.
+        // (LibreOffice 26.8, measured: it applies the cell's own style to
+        // its paragraphs, colour, size and alignment, but not the row's or
+        // the column's default cell style; the specification's search is
+        // followed.)
+        let container = self.table_chain(Family::TableCell, styles)?;
+        let mut chain = container.clone();
+        if let Some(default) = self.sheet.default_style(Family::TableCell) {
+            chain.push(default);
+        }
+        let properties = Cascade::build(chain, "table-cell-properties")?;
+        let get = |ns: &str, name: &str| properties.get(ns, name);
         let padding_all = get(NS_FO, "padding").and_then(|v| length_pt(v).ok());
         let padding = |side: &str| {
             get(NS_FO, &format!("padding-{side}"))
@@ -735,7 +701,7 @@ impl<'a> Reader<'a> {
         };
         // The cell's content in its own story.
         let inner = (width - margins[1] - margins[3]).max(1.0);
-        let elements = self.contained_story(node, inner)?;
+        let elements = self.contained_story_in(node, inner, container.into())?;
         let mut content = self.finish_cell(elements);
         for element in &mut content {
             if let CellElement::Paragraph(paragraph) = element {
@@ -747,7 +713,6 @@ impl<'a> Reader<'a> {
         }
         if content.is_empty() {
             self.count_paragraph()?;
-            self.charge_construction(EMPTY_PARAGRAPH_BYTES)?;
             content.push(CellElement::Paragraph(Box::default()));
         }
         let margin_wire = TableMarginAcquisitionWire {
@@ -783,6 +748,22 @@ impl<'a> Reader<'a> {
             ..DocTableCell::default()
         })
     }
+}
+
+/// A table cell element, covered or not.
+fn is_cell(node: roxmltree::Node<'_, '_>) -> bool {
+    xml::is(node, NS_TABLE, "table-cell") || xml::is(node, NS_TABLE, "covered-table-cell")
+}
+
+/// `table:number-columns-repeated` of a cell or column (§19.675; default
+/// 1): a count over the column bound rejects.
+fn cell_repeat(node: roxmltree::Node<'_, '_>) -> Result<usize, String> {
+    Ok(xml::bounded_count(
+        node.attribute((NS_TABLE, "number-columns-repeated")),
+        MAX_COLUMNS as u64,
+        "table column",
+    )?
+    .map_or(1, |repeat| (repeat as usize).max(1)))
 }
 
 /// Column widths (pt) for a table `width` wide (LibreOffice's column import,

@@ -241,9 +241,62 @@ pub fn is(node: roxmltree::Node<'_, '_>, namespace: &str, name: &str) -> bool {
         && node.tag_name().name() == name
 }
 
+/// A non-negative integer written in a file (a count, a number of digits):
+/// `None` when absent or not an unsigned integer, the value when it is at
+/// most `max`, and the resource-limit rejection `what` beyond `max`,
+/// however long its digits are. A count is never clipped, wrapped or
+/// replaced by a default because it is large.
+pub fn bounded_count(value: Option<&str>, max: u64, what: &str) -> Result<Option<u64>, String> {
+    let Some(value) = value.map(str::trim) else {
+        return Ok(None);
+    };
+    let digits = value.strip_prefix('+').unwrap_or(value);
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return Ok(None);
+    }
+    match digits.parse::<u64>() {
+        Ok(count) if count <= max => Ok(Some(count)),
+        _ => Err(crate::error::resource(what)),
+    }
+}
+
+/// A positive-integer count attribute (`xsd:positiveInteger`: table
+/// repeats and spans §19.675 / §19.676 / §19.680 / §19.681, chart point
+/// repeats §19.21). Absent or not a positive integer is the default 1. A
+/// positive integer beyond the `u32` implementation bound rejects as a
+/// resource limit: it never wraps or falls back to 1, which would shift the
+/// data that follows.
+pub fn count_attribute(
+    node: roxmltree::Node<'_, '_>,
+    namespace: &str,
+    name: &str,
+) -> Result<u32, String> {
+    let count = bounded_count(
+        node.attribute((namespace, name)),
+        u64::from(u32::MAX),
+        "repeat count",
+    )?;
+    Ok(count.map_or(1, |count| (count as u32).max(1)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn count_attributes_reject_values_beyond_the_bound() {
+        let doc = roxmltree::Document::parse(
+            r#"<r xmlns:t="urn:t" t:a="4294967296" t:b="+7" t:c="0" t:d="x" t:e="4294967295"/>"#,
+        )
+        .unwrap();
+        let root = doc.root_element();
+        assert!(count_attribute(root, "urn:t", "a").is_err());
+        assert_eq!(count_attribute(root, "urn:t", "b"), Ok(7));
+        assert_eq!(count_attribute(root, "urn:t", "c"), Ok(1));
+        assert_eq!(count_attribute(root, "urn:t", "d"), Ok(1));
+        assert_eq!(count_attribute(root, "urn:t", "e"), Ok(u32::MAX));
+        assert_eq!(count_attribute(root, "urn:t", "missing"), Ok(1));
+    }
 
     #[test]
     fn preflight_bounds_attributes_namespaces_and_depth() {

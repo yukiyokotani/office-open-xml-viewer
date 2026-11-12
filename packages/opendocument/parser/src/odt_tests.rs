@@ -36,6 +36,17 @@ fn read_fixture_resources(fixture: Fixture<'_>) -> (Document, Vec<OwnedDocumentR
 fn try_read_fixture(
     fixture: Fixture<'_>,
 ) -> Result<(Document, Vec<OwnedDocumentResource>), String> {
+    read(&fixture_package(fixture))
+}
+
+fn try_read_fixture_within(
+    fixture: Fixture<'_>,
+    limit: usize,
+) -> Result<(Document, Vec<OwnedDocumentResource>), String> {
+    read_within(&fixture_package(fixture), limit)
+}
+
+fn fixture_package(fixture: Fixture<'_>) -> OdfPackage {
     let styles = format!(
         r##"<office:document-styles {NS} office:version="1.3">{FACES}<office:styles><style:default-style style:family="paragraph"><style:paragraph-properties style:tab-stop-distance="1.25cm"/><style:text-properties style:font-name="Serif" fo:font-size="12pt" style:font-name-asian="Mincho" style:font-size-asian="10.5pt" style:font-name-complex="Serif" style:font-size-complex="12pt"/></style:default-style>{}</office:styles><office:automatic-styles><style:page-layout style:name="pm1"><style:page-layout-properties fo:page-width="210mm" fo:page-height="297mm" fo:margin-top="20mm" fo:margin-bottom="20mm" fo:margin-left="25mm" fo:margin-right="25mm"{}/>{}</style:page-layout>{}</office:automatic-styles><office:master-styles><style:master-page style:name="Standard" style:page-layout-name="pm1">{}</style:master-page>{}</office:master-styles></office:document-styles>"##,
         fixture.styles,
@@ -60,14 +71,13 @@ fn try_read_fixture(
         .collect();
     files.extend(fixture.files.iter().copied());
     let bytes = package_bytes(ODT, &files);
-    let package = OdfPackage::open(
+    OdfPackage::open(
         bytes,
         OoxmlFormat::Docx,
         PackageLimits::default(),
         &MEDIA_TYPES,
     )
-    .unwrap();
-    read(&package)
+    .unwrap()
 }
 
 fn paragraphs(elements: &[BodyElement]) -> Vec<&DocParagraph> {
@@ -490,7 +500,7 @@ fn deeply_nested_content_stays_bounded() {
             &MEDIA_TYPES,
         )
         .unwrap();
-        assert!(read(&package).err().unwrap().contains("nests beyond"));
+        assert!(read(&package).err().unwrap().contains("content nesting"));
     }
 }
 
@@ -564,6 +574,34 @@ fn column_counts_beyond_the_limit_are_refused() {
 }
 
 #[test]
+fn page_columns_are_validated_before_any_is_read() {
+    // Far more `style:column` children than the declared count: none is
+    // collected past the count, and the layout falls back to equal columns.
+    let children = r#"<style:column style:rel-width="1*"/>"#.repeat(50_000);
+    let page = format!(
+        r##"><style:columns fo:column-count="2" fo:column-gap="12pt">{children}</style:columns></style:page-layout-properties><style:header-style"##
+    );
+    let document = read_fixture(Fixture {
+        page: &page,
+        body: "<text:p>a</text:p>",
+        ..Fixture::default()
+    });
+    let columns = document.section.columns.as_ref().unwrap();
+    assert_eq!((columns.count, columns.cols.len()), (2, 2));
+    assert!(columns.equal_width);
+    // A count beyond the bound is refused on a page layout too.
+    let page = r##"><style:columns fo:column-count="1025"/></style:page-layout-properties><style:header-style"##;
+    let error = try_read_fixture(Fixture {
+        page,
+        body: "<text:p>a</text:p>",
+        ..Fixture::default()
+    })
+    .err()
+    .expect("refused");
+    assert!(error.contains("column limit"), "{error}");
+}
+
+#[test]
 fn the_initial_page_style_keeps_its_columns() {
     // §17.12 on the initial page style, with no master page named by the
     // body: its first section is laid out in the layout's columns.
@@ -577,20 +615,113 @@ fn the_initial_page_style_keeps_its_columns() {
 }
 
 #[test]
-fn repeated_cells_stream_up_to_the_last_column() {
-    let body = r##"<table:table><table:table-column table:number-columns-repeated="2"/><table:table-row table:number-rows-repeated="3"><table:table-cell table:number-columns-repeated="1000000"><text:p>x</text:p></table:table-cell><table:table-cell table:number-columns-repeated="1000000"/></table:table-row></table:table>"##;
+fn repeated_cells_stream_and_counts_beyond_the_grid_bound_are_refused() {
+    let table = |cells: &str, rows: &str| {
+        format!(
+            r##"<table:table><table:table-column table:number-columns-repeated="2"/><table:table-row table:number-rows-repeated="{rows}"><table:table-cell table:number-columns-repeated="{cells}"><text:p>x</text:p></table:table-cell><table:table-cell table:number-columns-repeated="{cells}"/></table:table-row></table:table>"##
+        )
+    };
+    let body = table("4", "3");
     let document = read_fixture(Fixture {
+        body: &body,
+        ..Fixture::default()
+    });
+    let BodyElement::Table(table_model) = &document.body[0] else {
+        panic!("a table")
+    };
+    assert_eq!(table_model.rows.len(), 3);
+    // The row is wider than the declared columns: the grid grows to it.
+    assert_eq!(table_model.col_widths.len(), 8);
+    assert!(table_model.rows.iter().all(|row| row.cells.len() == 8));
+    // A row wider than the column bound, a repeat count past it and a row
+    // count past the row bound are refused: no count is clipped.
+    for (cells, rows, limit) in [
+        ("600", "1", "table column limit"),
+        ("1000000", "1", "table column limit"),
+        ("99999999999999999999999999", "1", "table column limit"),
+        ("1", "100001", "table row limit"),
+        ("1", "99999999999999999999999999", "table row limit"),
+    ] {
+        let body = table(cells, rows);
+        let error = try_read_fixture(Fixture {
+            body: &body,
+            ..Fixture::default()
+        })
+        .err()
+        .expect("refused");
+        assert!(error.contains(limit), "{error}");
+    }
+}
+
+#[test]
+fn cell_styles_continue_the_search_of_their_paragraphs() {
+    // §16.2: a paragraph in a table cell continues its property search in
+    // the cell's style, then the row's and the column's default cell
+    // styles, before the paragraph default style; the paragraph's own style
+    // stays first.
+    let automatic = r##"<style:style style:name="Own" style:family="table-cell"><style:text-properties fo:color="#ff0000"/></style:style><style:style style:name="RowCell" style:family="table-cell"><style:paragraph-properties fo:text-align="center"/><style:text-properties fo:color="#00ff00" fo:font-size="20pt"/></style:style><style:style style:name="ColCell" style:family="table-cell"><style:paragraph-properties fo:text-align="end" fo:margin-left="10pt"/><style:text-properties fo:font-weight="bold"/></style:style><style:style style:name="P1" style:family="paragraph"><style:text-properties fo:font-size="8pt"/></style:style>"##;
+    let body = r##"<table:table><table:table-column table:default-cell-style-name="ColCell"/><table:table-row table:default-cell-style-name="RowCell"><table:table-cell table:style-name="Own"><text:p>a</text:p><text:p text:style-name="P1">b</text:p></table:table-cell></table:table-row><table:table-row><table:table-cell><text:p>c</text:p></table:table-cell></table:table-row></table:table><text:p>after</text:p>"##;
+    let document = read_fixture(Fixture {
+        automatic,
         body,
         ..Fixture::default()
     });
     let BodyElement::Table(table) = &document.body[0] else {
         panic!("a table")
     };
-    assert_eq!(table.rows.len(), 3);
-    // The row is wider than the declared columns: the grid grows to the
-    // column bound and the repetitions stop there.
-    assert_eq!(table.col_widths.len(), 1024);
-    assert!(table.rows.iter().all(|row| row.cells.len() == 1024));
+    let paragraph = |row: usize, index: usize| match &table.rows[row].cells[0].content[index] {
+        CellElement::Paragraph(p) => p,
+        _ => panic!("a paragraph"),
+    };
+    let a = paragraph(0, 0);
+    let run = text_runs(a)[0];
+    assert_eq!(run.color.as_deref(), Some("ff0000"));
+    assert_eq!(run.font_size, 20.0);
+    assert!(run.bold);
+    assert_eq!(a.alignment, "center");
+    assert_eq!(a.indent_left, 10.0);
+    // The paragraph's own style wins over the cell's.
+    assert_eq!(text_runs(paragraph(0, 1))[0].font_size, 8.0);
+    // Without a row default: the column default.
+    let c = paragraph(1, 0);
+    assert_eq!(c.alignment, "right");
+    assert!(text_runs(c)[0].bold);
+    assert_eq!(text_runs(c)[0].color, None);
+    // Outside the table nothing of the cell styles applies.
+    let BodyElement::Paragraph(after) = &document.body[1] else {
+        panic!("a paragraph")
+    };
+    assert_eq!((after.alignment.as_str(), after.indent_left), ("left", 0.0));
+    assert!(!text_runs(after)[0].bold);
+}
+
+#[test]
+fn shape_paragraphs_continue_their_search_in_the_graphic_style() {
+    // §16.2: a paragraph in a drawing shape continues its search in the
+    // shape's graphic style; a text box (a frame) is not a drawing shape.
+    let automatic = r##"<style:style style:name="gr1" style:family="graphic"><style:graphic-properties draw:fill="none"/><style:paragraph-properties fo:text-align="center"/><style:text-properties fo:font-size="30pt"/></style:style>"##;
+    let body = r##"<text:p><draw:rect draw:style-name="gr1" text:anchor-type="paragraph" svg:width="80pt" svg:height="40pt"><text:p>in</text:p></draw:rect><draw:frame draw:style-name="gr1" text:anchor-type="paragraph" svg:width="80pt" svg:height="40pt"><draw:text-box><text:p>box</text:p></draw:text-box></draw:frame>x</text:p>"##;
+    let document = read_fixture(Fixture {
+        automatic,
+        body,
+        ..Fixture::default()
+    });
+    let shapes: Vec<&docx_model::ShapeRun> = paragraphs(&document.body)[0]
+        .runs
+        .iter()
+        .filter_map(|run| match run {
+            DocRun::Shape(shape) => Some(shape.as_ref()),
+            _ => None,
+        })
+        .collect();
+    let first = |shape: &docx_model::ShapeRun| match &shape.text_box_content[0] {
+        TextBoxBlockWire::Body(BodyElement::Paragraph(p)) => {
+            (p.alignment.clone(), text_runs(p)[0].font_size)
+        }
+        _ => panic!("a paragraph"),
+    };
+    assert_eq!(first(shapes[0]), ("center".to_string(), 30.0));
+    assert_eq!(first(shapes[1]), ("left".to_string(), 12.0));
 }
 
 #[test]
@@ -635,6 +766,18 @@ fn hidden_paragraph_fields_hide_their_paragraph() {
         .map(|p| texts(p))
         .collect();
     assert_eq!(shown, [vec!["shown".to_string()], vec!["kept".to_string()]]);
+    // §7.7.11: a field whose condition is true hides the paragraph unless
+    // the paragraph holds another whose condition is false.
+    let body = r##"<text:p><text:hidden-paragraph text:condition="ooow:1" text:is-hidden="true"/>both<text:span><text:hidden-paragraph text:condition="ooow:0" text:is-hidden="false"/></text:span></text:p><text:p><text:hidden-paragraph text:is-hidden="true"/><text:hidden-paragraph text:is-hidden="true"/>gone</text:p>"##;
+    let document = read_fixture(Fixture {
+        body,
+        ..Fixture::default()
+    });
+    let shown: Vec<Vec<String>> = paragraphs(&document.body)
+        .iter()
+        .map(|p| texts(p))
+        .collect();
+    assert_eq!(shown, [vec!["both".to_string()]]);
 }
 
 #[test]
@@ -652,10 +795,10 @@ fn phantom_list_ancestors_keep_the_counter_bound() {
 }
 
 #[test]
-fn hyperlink_targets_are_charged_per_split_run() {
+fn copies_are_measured_whatever_makes_them() {
     // One 4 MiB target around alternating Latin and Asian characters: each
-    // emitted run owns a copy of the target, so the copies reach the
-    // construction limit instead of retaining gigabytes.
+    // emitted run owns a copy of the target, so the copies reach the model
+    // limit instead of retaining gigabytes.
     let href = "x".repeat(4 << 20);
     let text = "aあ".repeat(200);
     let body =
@@ -666,17 +809,58 @@ fn hyperlink_targets_are_charged_per_split_run() {
     })
     .err()
     .expect("refused");
-    assert!(error.contains("construction limit"), "{error}");
+    assert!(error.contains("model size limit"), "{error}");
+    // A header story is copied into every section: the copies are measured
+    // like everything else (20 sections of a 64 KiB header pass 1 MiB).
+    let master = format!(
+        "<style:header><text:p>{}</text:p></style:header>",
+        "h".repeat(64 << 10)
+    );
+    let automatic = r##"<style:style style:name="S" style:family="section"><style:section-properties><style:columns fo:column-count="2"/></style:section-properties></style:style>"##;
+    let body = r##"<text:section text:name="s" text:style-name="S"><text:p>a</text:p></text:section><text:p>b</text:p>"##.repeat(10);
+    let error = try_read_fixture_within(
+        Fixture {
+            master: &master,
+            automatic,
+            body: &body,
+            ..Fixture::default()
+        },
+        1 << 20,
+    )
+    .err()
+    .expect("refused");
+    assert!(error.contains("model size limit"), "{error}");
 }
 
 #[test]
-fn repeated_rows_are_bounded_by_the_source_they_reread() {
-    // A row whose cell holds about 100 KB of ignored markup, repeated 10,000
-    // times: each pass rereads the markup, so the repetitions reach the
-    // repetition bound instead of a billion node visits.
+fn a_read_reports_what_it_held_and_the_limit_rejects() {
+    let body = "<text:p>some text</text:p>".repeat(1000);
+    let fixture = || Fixture {
+        body: &body,
+        ..Fixture::default()
+    };
+    let package = fixture_package(fixture());
+    let (document, peak, work) = read_measured(&package, MAX_MODEL_BYTES);
+    let (document, _) = document.unwrap();
+    assert_eq!(document.body.len(), 1000);
+    // The measured peak covers what the returned model holds: at least a
+    // paragraph record and a run record per paragraph.
+    let floor = 1000 * (std::mem::size_of::<DocParagraph>() + std::mem::size_of::<TextRun>());
+    assert!(peak >= floor, "{peak} < {floor}");
+    assert!(work >= 1000);
+    // The same document under a limit below what it holds is refused.
+    let error = read_within(&package, floor / 2).err().expect("refused");
+    assert!(error.contains("model size limit"), "{error}");
+}
+
+#[test]
+fn repeated_rows_take_steps_for_the_source_they_reread() {
+    // A row whose cell holds about 100 KB of ignored markup, repeated to the
+    // row bound: each pass walks the markup again, so the repetitions reach
+    // the work bound instead of walking 400 million nodes.
     let filler = "<text:soft-page-break/>".repeat(4_000);
     let body = format!(
-        r##"<table:table><table:table-column/><table:table-row table:number-rows-repeated="10000"><table:table-cell>{filler}</table:table-cell></table:table-row></table:table>"##
+        r##"<table:table><table:table-column/><table:table-row table:number-rows-repeated="100000"><table:table-cell>{filler}</table:table-cell></table:table-row></table:table>"##
     );
     let error = try_read_fixture(Fixture {
         body: &body,
@@ -684,7 +868,151 @@ fn repeated_rows_are_bounded_by_the_source_they_reread() {
     })
     .err()
     .expect("refused");
-    assert!(error.contains("repetition limit"), "{error}");
+    assert!(error.contains("reading work limit"), "{error}");
+}
+
+#[test]
+fn counts_beyond_their_bounds_are_refused_not_clipped() {
+    // `text:c` within the paragraph bound is exact; beyond it, refused.
+    let document = read_fixture(Fixture {
+        body: r#"<text:p>a<text:s text:c="5000"/>b</text:p>"#,
+        ..Fixture::default()
+    });
+    assert_eq!(texts(paragraphs(&document.body)[0])[0].len(), 5002);
+    for count in ["1000001", "99999999999999999999999999"] {
+        let body = format!(r#"<text:p>a<text:s text:c="{count}"/>b</text:p>"#);
+        let error = try_read_fixture(Fixture {
+            body: &body,
+            ..Fixture::default()
+        })
+        .err()
+        .expect("refused");
+        assert!(error.contains("paragraph character limit"), "{error}");
+    }
+}
+
+#[test]
+fn shape_equations_and_modifiers_are_bounded() {
+    let shape = |equations: usize, modifiers: usize| {
+        format!(
+            r##"<text:p><draw:custom-shape text:anchor-type="paragraph" svg:width="50pt" svg:height="50pt"><draw:enhanced-geometry svg:viewBox="0 0 21600 21600" draw:modifiers="{}" draw:enhanced-path="M $1 0 L 21600 21600 0 ?f1 Z N">{}</draw:enhanced-geometry></draw:custom-shape>x</text:p>"##,
+            "5400 ".repeat(modifiers),
+            (0..equations)
+                .map(|i| format!(r#"<draw:equation draw:name="f{i}" draw:formula="{i}"/>"#))
+                .collect::<String>()
+        )
+    };
+    // Unreferenced definitions count: the bound is on what a shape defines.
+    let body = shape(4096, 3);
+    assert!(try_read_fixture(Fixture {
+        body: &body,
+        ..Fixture::default()
+    })
+    .is_ok());
+    let body = shape(4097, 3);
+    let error = try_read_fixture(Fixture {
+        body: &body,
+        ..Fixture::default()
+    })
+    .err()
+    .expect("refused");
+    assert!(error.contains("shape equation limit"), "{error}");
+    // Modifiers are held as numbers, measured like everything else: two
+    // million of them (16 MiB) do not fit a 4 MiB read.
+    let body = shape(2, 2_000_000);
+    let error = try_read_fixture_within(
+        Fixture {
+            body: &body,
+            ..Fixture::default()
+        },
+        4 << 20,
+    )
+    .err()
+    .expect("refused");
+    assert!(error.contains("model size limit"), "{error}");
+}
+
+#[test]
+fn an_explicit_transparent_page_background_overrides_the_default() {
+    // §16.8: the default page layout supplies what a page layout leaves
+    // unspecified; an explicit `transparent` is specified.
+    let styles = r##"<style:default-page-layout><style:page-layout-properties fo:background-color="#ff0000"/></style:default-page-layout>"##;
+    let background = |page: &str| {
+        let document = read_fixture(Fixture {
+            styles,
+            page,
+            body: "<text:p>x</text:p>",
+            ..Fixture::default()
+        });
+        let header = document.headers.default.as_ref().unwrap();
+        paragraphs(&header.body).iter().find_map(|p| {
+            p.runs.iter().find_map(|run| match run {
+                DocRun::Shape(shape) => shape.fill.clone(),
+                _ => None,
+            })
+        })
+    };
+    assert!(
+        matches!(background(""), Some(docx_model::ShapeFill::Solid { color }) if color == "ff0000")
+    );
+    assert!(background(r#" fo:background-color="transparent""#).is_none());
+    assert!(matches!(
+        background(r##" fo:background-color="#00ff00""##),
+        Some(docx_model::ShapeFill::Solid { color }) if color == "00ff00"
+    ));
+}
+
+#[test]
+fn anchored_formulas_keep_their_frame() {
+    let math: &[u8] = br#"<math xmlns="http://www.w3.org/1998/Math/MathML"><mtable><mtr><mtd><mi>a</mi></mtd><mtd/></mtr><mtr/></mtable></math>"#;
+    let frame = |anchor: &str| {
+        format!(
+            r##"<draw:frame text:anchor-type="{anchor}" svg:x="30pt" svg:y="40pt" svg:width="60pt" svg:height="20pt"><draw:object xlink:href="./Object 1"/></draw:frame>"##
+        )
+    };
+    let body = format!(
+        "<text:p>{}{}x</text:p>",
+        frame("as-char"),
+        frame(r#"page" text:anchor-page-number="2"#)
+    );
+    let document = read_fixture(Fixture {
+        automatic: r##"<style:style style:name="fr1" style:family="graphic"><style:graphic-properties style:wrap="parallel"/></style:style>"##,
+        body: &body.replace("<draw:frame ", r#"<draw:frame draw:style-name="fr1" "#),
+        files: &[("Object 1/content.xml", math)],
+        ..Fixture::default()
+    });
+    // In the line: math, with its matrix rows and cells (empty ones too).
+    let inline = paragraphs(&document.body)[0]
+        .runs
+        .iter()
+        .find_map(|run| match run {
+            DocRun::Math { nodes, .. } => Some(nodes),
+            _ => None,
+        })
+        .expect("inline math");
+    let ooxml_common::math::MathNode::Array { rows, .. } = &inline[0] else {
+        panic!("a matrix")
+    };
+    assert_eq!(rows.iter().map(Vec::len).collect::<Vec<_>>(), [2, 0]);
+    // Anchored to a page: a positioned, wrapping frame holding the math.
+    let story = &document.page_objects[0];
+    assert_eq!(story.page, 2);
+    let shape = paragraphs(&story.body)[0]
+        .runs
+        .iter()
+        .find_map(|run| match run {
+            DocRun::Shape(shape) => Some(shape),
+            _ => None,
+        })
+        .expect("an anchored frame");
+    assert_eq!((shape.anchor_x_pt, shape.anchor_y_pt), (30.0, 40.0));
+    assert_eq!((shape.width_pt, shape.height_pt), (60.0, 20.0));
+    assert_eq!(shape.wrap_mode.as_deref(), Some("square"));
+    assert!(matches!(
+        &shape.text_box_content[0],
+        TextBoxBlockWire::Body(BodyElement::Paragraph(p))
+            if matches!(p.runs[0], DocRun::Math { .. })
+    ));
 }
 
 #[test]
@@ -812,7 +1140,7 @@ fn page_anchors_past_the_page_bound_are_refused() {
     })
     .err()
     .expect("refused");
-    assert!(error.contains("page limit"), "{error}");
+    assert!(error.contains("page anchor limit"), "{error}");
 }
 
 #[test]

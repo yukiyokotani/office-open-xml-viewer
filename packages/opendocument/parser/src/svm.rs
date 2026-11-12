@@ -283,6 +283,10 @@ pub fn to_svg(bytes: &[u8], max_svg_bytes: usize) -> Option<Converted> {
     let width = pw.abs().max(1.0);
     let height = ph.abs().max(1.0);
     for _ in 0..count {
+        // A step per action; a failed step is kept by the caller's scope.
+        if crate::budget::tick(1).is_err() {
+            return None;
+        }
         let Some(kind) = r.u16() else { break };
         let Some((version, end)) = r.compat() else {
             break;

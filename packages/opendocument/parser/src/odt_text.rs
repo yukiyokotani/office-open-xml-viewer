@@ -38,13 +38,11 @@ pub(super) struct LayoutFlags {
     pub shrink: bool,
 }
 
-pub(super) fn read_settings(text: &str) -> Result<LayoutFlags, String> {
-    let document = xml::parse(text)?;
+pub(super) fn read_settings(root: roxmltree::Node<'_, '_>) -> Result<LayoutFlags, String> {
     let mut flags = LayoutFlags::default();
     // LibreOffice reads its layout items from the top-level
     // "ooo:configuration-settings" set only.
-    let Some(set) = document
-        .root_element()
+    let Some(set) = root
         .children()
         .filter(|n| xml::is(*n, NS_OFFICE, "settings"))
         .flat_map(|settings| settings.children())
@@ -59,6 +57,7 @@ pub(super) fn read_settings(text: &str) -> Result<LayoutFlags, String> {
         .children()
         .filter(|n| xml::is(*n, xml::NS_CONFIG, "config-item"))
     {
+        budget::tick(1)?;
         let value = item.text().unwrap_or("").trim() == "true";
         match item.attribute((xml::NS_CONFIG, "name")) {
             Some("DoNotJustifyLinesWithManualBreak") => flags.no_justify_breaks = value,
@@ -141,6 +140,7 @@ impl FontFaces {
             .children()
             .filter(|n| xml::is(*n, NS_STYLE, "font-face"))
         {
+            budget::tick(1)?;
             let Some(name) = face.attribute((NS_STYLE, "name")) else {
                 continue;
             };
@@ -159,6 +159,7 @@ impl FontFaces {
                 .descendants()
                 .filter(|n| xml::is(*n, NS_SVG, "font-face-uri"))
             {
+                budget::tick(1)?;
                 let Some(href) = uri.attribute((NS_XLINK, "href")) else {
                     continue;
                 };
@@ -261,23 +262,17 @@ impl Reader<'_> {
     /// package paths (DOCX reads a non-`.odttf` part as a plain font).
     pub(super) fn embedded_fonts(&mut self) -> Result<Vec<EmbeddedFont>, String> {
         let mut fonts = Vec::new();
-        // Iterated by reference; every owned copy is charged before it is
-        // made, and each package path is retained once.
+        // Each package path is retained once.
         let faces = self.fonts;
-        // Keys already retained (pictures), copied once so the loop can charge.
-        let pictures: HashSet<String> = self.images.iter().map(|r| r.key.clone()).collect();
         let mut retained: HashSet<&str> = HashSet::new();
         let mut added = Vec::new();
         for (family, path, style) in &faces.embedded {
-            self.charge_construction(
-                std::mem::size_of::<EmbeddedFont>() + 2 * path.len() + family.len() + 64,
-            )?;
-            if !pictures.contains(path) && retained.insert(path.as_str()) {
+            budget::tick(1)?;
+            if !self.image_types.contains_key(path) && retained.insert(path.as_str()) {
                 let bytes = self
                     .package
                     .session()
                     .run_operation("odf-font", |operation| operation.read_bytes(path))?;
-                self.charge_resource(bytes.len() + 64)?;
                 added.push(OwnedDocumentResource {
                     key: path.clone(),
                     mime_type: "font/ttf".to_string(),
@@ -310,7 +305,7 @@ pub(super) struct TrackedChanges<'a, 'i> {
 }
 
 impl<'a, 'i> TrackedChanges<'a, 'i> {
-    pub fn read(body: roxmltree::Node<'a, 'i>) -> Self {
+    pub fn read(body: roxmltree::Node<'a, 'i>) -> Result<Self, String> {
         let mut deletions = HashSet::new();
         for log in body
             .children()
@@ -320,6 +315,7 @@ impl<'a, 'i> TrackedChanges<'a, 'i> {
                 .children()
                 .filter(|n| xml::is(*n, NS_TEXT, "changed-region"))
             {
+                budget::tick(1)?;
                 let id = region
                     .attribute((NS_TEXT, "id"))
                     .or_else(|| region.attribute((NS_XML, "id")));
@@ -330,10 +326,10 @@ impl<'a, 'i> TrackedChanges<'a, 'i> {
                 }
             }
         }
-        Self {
+        Ok(Self {
             deletions,
             _marker: std::marker::PhantomData,
-        }
+        })
     }
 
     fn is_deletion(&self, id: &str) -> bool {
@@ -437,15 +433,16 @@ impl<'a> Reader<'a> {
             return Ok(());
         }
         for child in node.children() {
+            budget::tick(1)?;
             if child.is_text() {
                 if inline.in_deletion || inline.in_field_code > 0 {
                     continue;
                 }
                 let text = child.text().unwrap_or("");
-                self.charge_text(text.len(), text.chars().count(), inline)?;
                 inline
                     .tokens
                     .extend(text.chars().map(|c| Token::Char(c, context)));
+                self.admit_chars(0, inline)?;
                 continue;
             }
             if !child.is_element() {
@@ -489,37 +486,46 @@ impl<'a> Reader<'a> {
                     let before = inline.tokens.len();
                     self.inline(child, nested, inline, depth + 1)?;
                     if self.settings.balance && inline.tokens.len() == before && nested != context {
-                        self.charge_text(1, 1, inline)?;
+                        self.admit_chars(1, inline)?;
                         inline.tokens.push(Token::Boundary(false));
                     }
                 }
                 // §6.1.3 text:s.
                 (Some(NS_TEXT), "s") => {
-                    let count = child
-                        .attribute((NS_TEXT, "c"))
-                        .and_then(|v| v.parse::<usize>().ok())
-                        .unwrap_or(1)
-                        .clamp(1, MAX_PARAGRAPH_CHARS);
-                    self.charge_text(count, count, inline)?;
-                    inline
-                        .tokens
-                        .extend((0..count).map(|_| Token::Space(context)));
+                    // `text:c` (§19.763) defaults to 1; a count over the
+                    // paragraph bound rejects. The run is written in
+                    // pieces, a step each, never allocated at once.
+                    let count = xml::bounded_count(
+                        child.attribute((NS_TEXT, "c")),
+                        MAX_PARAGRAPH_CHARS as u64,
+                        "paragraph character",
+                    )?
+                    .map_or(1, |count| count as usize);
+                    self.admit_chars(count, inline)?;
+                    let mut left = count;
+                    while left > 0 {
+                        let piece = left.min(4096);
+                        budget::tick(1)?;
+                        inline
+                            .tokens
+                            .extend(std::iter::repeat_n(Token::Space(context), piece));
+                        left -= piece;
+                    }
                 }
                 (Some(NS_TEXT), "tab") => {
-                    self.charge_text(1, 1, inline)?;
+                    self.admit_chars(1, inline)?;
                     inline.tokens.push(Token::Tab(context));
                 }
                 (Some(NS_TEXT), "line-break") => {
-                    self.charge_text(1, 1, inline)?;
+                    self.admit_chars(1, inline)?;
                     inline.tokens.push(Token::LineBreak);
                 }
                 (Some(NS_TEXT), "soft-page-break") => {}
                 (Some(NS_TEXT), "bookmark" | "bookmark-start") => {
                     if let Some(name) = child.attribute((NS_TEXT, "name")) {
-                        self.charge_construction(name.len())?;
                         inline.bookmarks.push(name.to_string());
                     }
-                    self.charge_text(1, 1, inline)?;
+                    self.admit_chars(1, inline)?;
                     inline.tokens.push(Token::Boundary(true));
                 }
                 (
@@ -529,7 +535,7 @@ impl<'a> Reader<'a> {
                     | "reference-mark-start"
                     | "reference-mark-end",
                 ) => {
-                    self.charge_text(1, 1, inline)?;
+                    self.admit_chars(1, inline)?;
                     inline.tokens.push(Token::Boundary(true));
                 }
                 // §6.6 hyperlinks: the link's own text style (if any)
@@ -593,7 +599,7 @@ impl<'a> Reader<'a> {
                     if let Some(run) = self.drawing(child, Some((context, &*inline)))? {
                         let index = inline.items.len() as u32;
                         inline.items.push(Item::Run(run));
-                        self.charge_text(1, 1, inline)?;
+                        self.admit_chars(1, inline)?;
                         inline.tokens.push(Token::Item(index, context));
                     }
                 }
@@ -618,7 +624,7 @@ impl<'a> Reader<'a> {
                     == Some("vnd.oasis.opendocument.field.checked")
                     && param.attribute((xml::NS_FIELD, "value")) == Some("true")
             });
-        self.charge_text(4, 1, inline)?;
+        self.admit_chars(1, inline)?;
         inline
             .tokens
             .push(Token::Char(if checked { '☒' } else { '☐' }, context));
@@ -643,7 +649,7 @@ impl<'a> Reader<'a> {
         if inline.contexts.len() >= MAX_PARAGRAPH_CONTEXTS {
             return Ok(context);
         }
-        let styles = self.style_chain(style);
+        let styles = self.style_chain(style)?;
         let link = inline.contexts[context as usize].link.clone();
         inline.contexts.push(TextContext {
             styles,
@@ -665,7 +671,6 @@ impl<'a> Reader<'a> {
             return Ok(context);
         }
         let href = node.attribute((NS_XLINK, "href")).unwrap_or("");
-        self.charge_construction(href.len())?;
         let target = match href.strip_prefix('#') {
             Some(anchor) => (None, Some(anchor.to_string())),
             None if !href.is_empty() => (Some(href.to_string()), None),
@@ -675,7 +680,7 @@ impl<'a> Reader<'a> {
             .attribute((NS_TEXT, "style-name"))
             .and_then(|name| self.find_style(Family::Text, name))
         {
-            Some(style) => self.style_chain(style),
+            Some(style) => self.style_chain(style)?,
             None => Rc::from(Vec::new()),
         };
         inline.contexts.push(TextContext {
@@ -699,7 +704,7 @@ impl<'a> Reader<'a> {
             .filter(|n| n.is_text())
             .filter_map(|n| n.text())
             .collect();
-        self.charge_text(fallback.len() + 16, 1, inline)?;
+        self.admit_chars(1, inline)?;
         let index = inline.items.len() as u32;
         inline.items.push(Item::Field {
             kind,
@@ -741,8 +746,6 @@ impl<'a> Reader<'a> {
             .and_then(|n| n.attribute((NS_TEXT, "style-name")))
             .and_then(|name| self.find_style(Family::Text, name))
             .and_then(|style| {
-                // Reading the style's text group is style work per use.
-                self.charge_cascade(&[style], TEXT).ok()?;
                 style
                     .group(TEXT)
                     .and_then(|g| {
@@ -751,7 +754,7 @@ impl<'a> Reader<'a> {
                     })
                     .and_then(|v| length_pt(v).ok())
             });
-        self.charge_text(base.len() + text.len(), base.chars().count(), inline)?;
+        self.admit_chars(base.chars().count(), inline)?;
         let index = inline.items.len() as u32;
         inline.items.push(Item::Ruby {
             base,
@@ -798,8 +801,6 @@ impl<'a> Reader<'a> {
         // indent where the paragraph has one (LibreOffice places the body
         // text at the indent).
         let style_name = self.notes_config.citation_style(kind);
-        self.charge_lookup(style_name)?;
-        self.charge_construction(style_name.len())?;
         let style = Some(style_name.to_string());
         if let Some(BodyElement::Paragraph(first)) = content.first_mut() {
             let mut runs = Vec::new();
@@ -807,10 +808,7 @@ impl<'a> Reader<'a> {
             runs.extend(mark);
             if first.indent_first < 0.0 {
                 let mut tab = match runs.last() {
-                    Some(DocRun::Text(run)) => {
-                        self.charge_construction(run_copy_bytes(run) + run.text.len())?;
-                        run.as_ref().clone()
-                    }
+                    Some(DocRun::Text(run)) => run.as_ref().clone(),
                     _ => TextRun::default(),
                 };
                 tab.text = "\t".into();
@@ -833,10 +831,9 @@ impl<'a> Reader<'a> {
         // The citation in the text flow takes the configuration's body
         // citation style (§19.773) over the enclosing formatting.
         let body_style = self.notes_config.body_citation_style(kind);
-        self.charge_lookup(body_style)?;
         let citation_context = match self.find_common_style(Family::Text, body_style) {
             Some(style) if inline.contexts.len() < MAX_PARAGRAPH_CONTEXTS => {
-                let styles = self.style_chain(style);
+                let styles = self.style_chain(style)?;
                 let link = inline.contexts[context as usize].link.clone();
                 inline.contexts.push(TextContext {
                     styles,
@@ -849,7 +846,7 @@ impl<'a> Reader<'a> {
         };
         let index = inline.items.len() as u32;
         inline.items.push(Item::NoteReference { kind, id, label });
-        self.charge_text(8, 1, inline)?;
+        self.admit_chars(1, inline)?;
         inline.tokens.push(Token::Item(index, citation_context));
         Ok(())
     }
@@ -871,7 +868,7 @@ impl<'a> Reader<'a> {
             ..TextRun::default()
         };
         if let Some(style) = style.and_then(|name| self.find_common_style(Family::Text, name)) {
-            let mut chain = self.style_chain(style).to_vec();
+            let mut chain = self.style_chain(style)?.to_vec();
             if let Some(default) = self.sheet.default_style(Family::Paragraph) {
                 chain.push(default);
             }
@@ -887,9 +884,7 @@ impl<'a> Reader<'a> {
             base = properties.text_run();
         }
         // The mark run, and the custom label run when there is one, each own
-        // a copy of the base properties: charged before they are made.
-        let copies = 1 + usize::from(label.is_some());
-        self.charge_construction(copies * run_copy_bytes(&base) + label.map_or(0, str::len))?;
+        // a copy of the base properties.
         let mut runs = Vec::new();
         let mut mark = base.clone();
         mark.text = String::new();
@@ -914,8 +909,7 @@ impl<'a> Reader<'a> {
         class: ScriptClass,
     ) -> Result<RunProperties, String> {
         let styles = self.search_order(contexts, context)?;
-        self.charge_cascade(&styles, TEXT)?;
-        let cascade = Cascade::new(styles, TEXT);
+        let cascade = Cascade::build(styles, TEXT)?;
         let (properties, face) = RunProperties::resolve(&cascade, class, self.fonts);
         self.used_faces.borrow_mut().insert(face);
         Ok(properties)
@@ -934,9 +928,7 @@ impl<'a> Reader<'a> {
             let entry = &contexts[index as usize];
             styles.extend(entry.styles.iter().copied());
             if styles.len() > MAX_SEARCH_ORDER {
-                return Err(
-                    "OpenDocument span nesting exceeds the style search order limit".into(),
-                );
+                return Err(resource("style search order"));
             }
             current = entry.parent;
         }
@@ -971,7 +963,6 @@ impl<'a> Reader<'a> {
         for (index, &token) in tokens.iter().enumerate() {
             let (c, context) = match token {
                 Token::LineBreak => {
-                    self.charge_construction(std::mem::size_of::<DocRun>())?;
                     paragraph.runs.push(DocRun::Break {
                         break_type: BreakType::Line,
                     });
@@ -1018,15 +1009,20 @@ impl<'a> Reader<'a> {
             }
             // Text transformations the DOCX run cannot carry (§20.227):
             // lower case and title case are applied to the characters.
-            let mut chars: Vec<char> = match properties.transform {
-                Transform::Lowercase => c.to_lowercase().collect(),
-                Transform::Capitalize if word_start => c.to_uppercase().collect(),
-                _ => vec![c],
+            let transform = match properties.transform {
+                Transform::Lowercase => Transform::Lowercase,
+                Transform::Capitalize if word_start => Transform::Capitalize,
+                _ => Transform::None,
+            };
+            let push = |text: &mut String| match transform {
+                Transform::Lowercase => text.extend(c.to_lowercase()),
+                Transform::Capitalize => text.extend(c.to_uppercase()),
+                Transform::None => text.push(c),
             };
             word_start = c.is_whitespace() || c == '\t';
             if c == '\u{ad}' {
                 // §6.1.6 soft hyphen: an optional hyphen run.
-                self.charge_construction(properties.retained_estimate())?;
+                budget::tick(1)?;
                 let mut run = properties.text_run();
                 run.optional_hyphen = true;
                 self.apply_context(&mut run, contexts, context)?;
@@ -1039,15 +1035,15 @@ impl<'a> Reader<'a> {
                 (Some(last), Some(DocRun::Text(run)))
                     if last == (context, class, rtl) && run.space_advance_pt == advance =>
                 {
-                    run.text.extend(chars.drain(..));
+                    push(&mut run.text);
                     true
                 }
                 _ => false,
             };
             if !continues {
-                self.charge_construction(properties.retained_estimate())?;
+                budget::tick(1)?;
                 let mut run = properties.text_run();
-                run.text.extend(chars);
+                push(&mut run.text);
                 run.space_advance_pt = advance;
                 if rtl {
                     run.rtl = Some(true);
@@ -1063,8 +1059,8 @@ impl<'a> Reader<'a> {
         Ok(())
     }
 
-    /// The hyperlink of a context, on a run. Each run owns its copy of the
-    /// target, so every copy is charged before it is made.
+    /// The hyperlink of a context, on a run (each run owns its copy of the
+    /// target).
     fn apply_context(
         &mut self,
         run: &mut TextRun,
@@ -1072,8 +1068,6 @@ impl<'a> Reader<'a> {
         context: u32,
     ) -> Result<(), String> {
         if let Some(link) = &contexts[context as usize].link {
-            let len = |value: &Option<String>| value.as_ref().map_or(0, String::len);
-            self.charge_construction(len(&link.0) + len(&link.1))?;
             run.is_link = true;
             run.hyperlink = link.0.clone();
             run.hyperlink_anchor = link.1.clone();
@@ -1082,8 +1076,7 @@ impl<'a> Reader<'a> {
     }
 
     /// The runs of one item. Each item is emitted once, so its prebuilt run
-    /// moves out of the item (no second copy); every string copied into the
-    /// emitted runs is charged first.
+    /// moves out of the item (no second copy).
     fn item_run(
         &mut self,
         item: &mut Item,
@@ -1091,17 +1084,7 @@ impl<'a> Reader<'a> {
         contexts: &[TextContext<'a>],
         context: u32,
     ) -> Result<Vec<DocRun>, String> {
-        let estimate = properties.retained_estimate();
-        let copies = match &*item {
-            // The object's font facts and its anchor host copy the faces.
-            Item::Run(_) => 2 * estimate,
-            Item::Field { fallback, .. } => estimate + fallback.len(),
-            Item::NoteReference { id, label, .. } => {
-                2 * estimate + 2 * (id.len() + label.as_ref().map_or(0, String::len))
-            }
-            Item::Ruby { base, text, .. } => estimate + base.len() + text.len(),
-        };
-        self.charge_construction(copies)?;
+        budget::tick(1)?;
         Ok(match item {
             Item::Run(run) => {
                 let mut run = std::mem::replace(
@@ -1259,59 +1242,41 @@ impl<'a> Reader<'a> {
 /// A floating drawing preceded by the zero-advance metrics of the character
 /// that carries its anchor (the DOCX anchor host), whose occurrence id ties
 /// the two together.
-/// The native size of a copy of `run` without its text: the run shells and
-/// every string the copy owns (faces, link, colours, languages).
-pub(super) fn run_copy_bytes(run: &TextRun) -> usize {
-    [
-        &run.underline_style,
-        &run.underline_color,
-        &run.color,
-        &run.font_family,
-        &run.font_family_high_ansi,
-        &run.font_family_east_asia,
-        &run.font_family_cs,
-        &run.font_hint,
-        &run.background,
-        &run.vert_align,
-        &run.hyperlink,
-        &run.hyperlink_anchor,
-        &run.highlight,
-        &run.emphasis_mark,
-        &run.lang_bidi,
-        &run.lang_east_asia,
-        &run.fit_text_id,
-        &run.east_asian_combine_brackets,
-    ]
-    .iter()
-    .map(|value| value.as_ref().map_or(0, String::len))
-    .sum::<usize>()
-        + std::mem::size_of::<DocRun>()
-        + std::mem::size_of::<TextRun>()
-        + 8 * run.no_break_hyphen_offsets.len()
-        + 64
-}
-
-/// Whether a `text:hidden-paragraph` field (§7.7.11) of this paragraph holds
-/// `text:is-hidden="true"` (§19.821: its condition last evaluated true, so
-/// the paragraph is not visible). The field sits in the paragraph's inline
-/// content (spans, links, meta), not in notes or drawings it carries.
-pub(super) fn hidden_by_field(paragraph: roxmltree::Node<'_, '_>) -> bool {
-    fn walk(node: roxmltree::Node<'_, '_>, depth: usize) -> bool {
+/// Whether `text:hidden-paragraph` fields (§7.7.11) hide this paragraph:
+/// one whose condition last evaluated true (`text:is-hidden="true"`,
+/// §19.821) hides it, unless the paragraph holds another whose condition
+/// evaluated false. The fields sit in the paragraph's inline content (spans,
+/// links, meta), not in notes or drawings it carries.
+pub(super) fn hidden_by_field(paragraph: roxmltree::Node<'_, '_>) -> Result<bool, String> {
+    /// (a field hides, a field shows) among `node`'s inline content.
+    fn walk(
+        node: roxmltree::Node<'_, '_>,
+        depth: usize,
+        found: &mut (bool, bool),
+    ) -> Result<(), String> {
         if depth > MAX_INLINE_DEPTH {
-            return false;
+            return Ok(());
         }
-        node.children().filter(|n| n.is_element()).any(|child| {
+        for child in node.children().filter(|n| n.is_element()) {
+            budget::tick(1)?;
             match (child.tag_name().namespace(), child.tag_name().name()) {
                 (Some(NS_TEXT), "hidden-paragraph") => {
-                    child.attribute((NS_TEXT, "is-hidden")) == Some("true")
+                    match child.attribute((NS_TEXT, "is-hidden")) {
+                        Some("true") => found.0 = true,
+                        Some("false") => found.1 = true,
+                        _ => {}
+                    }
                 }
-                (Some(NS_TEXT), "note") => false,
-                (Some(NS_TEXT), _) | (Some(NS_LOEXT), _) => walk(child, depth + 1),
-                _ => false,
+                (Some(NS_TEXT), "note") => {}
+                (Some(NS_TEXT), _) | (Some(NS_LOEXT), _) => walk(child, depth + 1, found)?,
+                _ => {}
             }
-        })
+        }
+        Ok(())
     }
-    walk(paragraph, 0)
+    let mut found = (false, false);
+    walk(paragraph, 0, &mut found)?;
+    Ok(found.0 && !found.1)
 }
 
 pub(super) fn with_anchor_host(run: DocRun, host: &TextRun) -> Vec<DocRun> {
@@ -1683,22 +1648,6 @@ impl RunProperties {
 
     /// Native size of one emitted run, excluding its text and link: the run
     /// shells and every string `text_run` copies out of the properties.
-    pub fn retained_estimate(&self) -> usize {
-        let len = |value: &Option<String>| value.as_ref().map_or(0, String::len);
-        std::mem::size_of::<DocRun>()
-            + std::mem::size_of::<TextRun>()
-            + 4 * self.family.len()
-            + len(&self.underline_color)
-            + len(&self.color)
-            + len(&self.background)
-            + self.border.as_ref().map_or(0, |(style, color, _)| {
-                style.len() + color.as_ref().map_or(0, String::len)
-            })
-            + self.lang_east_asia.as_ref().map_or(0, |lang| lang.len())
-            + self.lang_bidi.as_ref().map_or(0, |lang| lang.len())
-            + 64
-    }
-
     pub fn text_run(&self) -> TextRun {
         let family = Some(self.family.to_string());
         TextRun {
@@ -1811,8 +1760,9 @@ fn resolve_size(cascade: &Cascade<'_>, suffix: &str) -> (f64, Option<f64>) {
 }
 
 /// The font size of a paragraph's text properties, western class.
-pub(super) fn paragraph_font_size(cascade: Cascade<'_>) -> Option<f64> {
-    Some(resolve_size(&cascade, "").0)
+/// The western font size of a text-properties cascade.
+pub(super) fn paragraph_font_size(cascade: &Cascade<'_>) -> f64 {
+    resolve_size(cascade, "").0
 }
 
 /// §20.389-§20.394 underline: style, type, width and colour mapped to the

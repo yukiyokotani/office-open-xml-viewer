@@ -55,8 +55,6 @@ struct Region {
 
 /// Implementation bound on the columns of one page or section style.
 const MAX_STYLE_COLUMNS: usize = 1024;
-/// Implementation bound on the retained page layouts, all together.
-const MAX_PAGE_LAYOUT_BYTES: usize = 64 * 1024 * 1024;
 
 /// One page layout. Every field that owns data of the document's size
 /// (fills, image link, column list) is shared, so a layout inherited from
@@ -74,11 +72,15 @@ struct Layout {
     borders: Option<PageBorders>,
     grid: Option<(&'static str, f64, Option<f64>)>,
     footnote_separator: Option<NoteSeparatorMark>,
-    /// The page's area fill (§20.175 fo:background-color, §20.120 draw:fill
-    /// and companions on the page layout or its drawing page, or a
-    /// `style:background-image`), held as a graphic style for the shared
-    /// fill reader.
+    /// The page's area fill properties (§20.175 fo:background-color,
+    /// §20.120 draw:fill and companions), held as a graphic style for the
+    /// shared fill reader: the default page layout's (§16.8) with the
+    /// layout's own specified over them, property by property. An explicit
+    /// `transparent` or `none` is a specified value like any other.
     background: Option<Rc<crate::style::Style>>,
+    /// `style:background-image` (§17.3): its link and whether it tiles. A
+    /// layout's own element replaces the default's, also when it links
+    /// nothing.
     background_image: Option<Rc<(String, bool)>>,
 }
 
@@ -107,26 +109,6 @@ pub(super) struct MasterStories {
     pub has_left: bool,
     /// Whether the page style shows a header / footer region.
     pub shown: [bool; 2],
-    /// The construction bytes each story's tree was charged when it was
-    /// built (headers, footers × default, first, even): every copy of a
-    /// story is charged the same again before it is made.
-    pub costs: [[usize; 3]; 2],
-}
-
-/// The fixed native size of one section start and of the copies its DOCX
-/// section makes of it: the start itself (recorded and merged), the section
-/// properties, geometry, placement and break, and the column list in each.
-pub(super) fn section_bytes(start: &SectionStart) -> usize {
-    let columns = start.columns.as_ref().map_or(0, |columns| {
-        std::mem::size_of::<ColumnsSpec>() + columns.cols.len() * std::mem::size_of::<ColSpec>()
-    });
-    3 * (std::mem::size_of::<SectionStart>() + start.master.len())
-        + 5 * columns
-        + 2 * std::mem::size_of::<SectionProps>()
-        + std::mem::size_of::<SectionPlacementWire>()
-        + std::mem::size_of::<SectionGeom>()
-        + std::mem::size_of::<BodyElement>()
-        + 1024
 }
 
 fn default_section() -> SectionProps {
@@ -174,7 +156,6 @@ impl<'a, 'i> Pages<'a, 'i> {
         }
         let mut layout_index: HashMap<String, usize> = HashMap::new();
         let mut layouts: Vec<Layout> = Vec::new();
-        let mut layout_bytes = 0usize;
         for automatic in styles_root
             .children()
             .filter(|n| xml::is(*n, NS_OFFICE, "automatic-styles"))
@@ -183,25 +164,12 @@ impl<'a, 'i> Pages<'a, 'i> {
                 .children()
                 .filter(|n| xml::is(*n, NS_STYLE, "page-layout"))
             {
+                budget::tick(1)?;
                 let Some(name) = node.attribute((NS_STYLE, "name")) else {
                     continue;
                 };
                 let mut layout = default_layout.clone();
                 read_layout(node, &mut layout)?;
-                // Every page layout is retained, used or not: their total
-                // size is bounded (one layout's own columns are bounded by
-                // MAX_STYLE_COLUMNS before they are built).
-                layout_bytes = layout_bytes
-                    .saturating_add(std::mem::size_of::<Layout>() + 2 * name.len() + 64)
-                    .saturating_add(
-                        layout
-                            .columns
-                            .as_ref()
-                            .map_or(0, |c| c.cols.len() * std::mem::size_of::<ColSpec>()),
-                    );
-                if layout_bytes > MAX_PAGE_LAYOUT_BYTES {
-                    return Err("OpenDocument page layouts exceed the construction limit".into());
-                }
                 // A later declaration of one name replaces the earlier.
                 match layout_index.get(name) {
                     Some(&index) => layouts[index] = layout,
@@ -223,6 +191,7 @@ impl<'a, 'i> Pages<'a, 'i> {
                 .children()
                 .filter(|n| xml::is(*n, NS_STYLE, "master-page"))
             {
+                budget::tick(1)?;
                 let Some(name) = node.attribute((NS_STYLE, "name")) else {
                     continue;
                 };
@@ -356,6 +325,7 @@ fn read_layout(node: roxmltree::Node<'_, '_>, layout: &mut Layout) -> Result<(),
         };
     }
     for child in node.children().filter(|n| n.is_element()) {
+        budget::tick(1)?;
         match (child.tag_name().namespace(), child.tag_name().name()) {
             (Some(NS_STYLE), "page-layout-properties") => read_page_properties(child, layout)?,
             (Some(NS_STYLE), "header-style") => {
@@ -398,7 +368,7 @@ fn region(node: roxmltree::Node<'_, '_>, spacing: &str) -> Option<Region> {
 }
 
 fn read_page_properties(node: roxmltree::Node<'_, '_>, layout: &mut Layout) -> Result<(), String> {
-    read_background(node, layout);
+    read_background(node, layout)?;
     let section = &mut layout.section;
     let get = |ns: &str, name: &str| node.attribute((ns, name)).and_then(|v| length_pt(v).ok());
     if let Some(width) = get(NS_FO, "page-width").filter(|v| *v > 0.0) {
@@ -499,26 +469,12 @@ fn read_page_properties(node: roxmltree::Node<'_, '_>, layout: &mut Layout) -> R
         _ => {}
     }
     for child in node.children().filter(|n| n.is_element()) {
+        budget::tick(1)?;
         match (child.tag_name().namespace(), child.tag_name().name()) {
             (Some(NS_STYLE), "columns") => {
                 let width =
                     (section.page_width - section.margin_left - section.margin_right).max(1.0);
-                let captured = crate::style::Element {
-                    namespace: NS_STYLE.into(),
-                    name: "columns".into(),
-                    attributes: crate::style::attributes(child),
-                    children: child
-                        .children()
-                        .filter(|n| n.is_element())
-                        .map(|c| crate::style::Element {
-                            namespace: c.tag_name().namespace().unwrap_or("").into(),
-                            name: c.tag_name().name().into(),
-                            attributes: crate::style::attributes(c),
-                            children: Vec::new(),
-                        })
-                        .collect(),
-                };
-                layout.columns = columns(&captured, width)?.map(Rc::new);
+                layout.columns = columns(child, width)?.map(Rc::new);
             }
             (Some(NS_STYLE), "footnote-sep") => {
                 let rel = child
@@ -546,23 +502,36 @@ fn read_page_properties(node: roxmltree::Node<'_, '_>, layout: &mut Layout) -> R
 }
 
 /// A page's area fill: fo:background-color, the draw:fill attributes and a
-/// background image, from page layout or drawing page properties.
-fn read_background(node: roxmltree::Node<'_, '_>, layout: &mut Layout) {
-    let attributes: HashMap<(String, String), String> = crate::style::attributes(node)
-        .into_iter()
-        .filter(|((ns, name), _)| {
-            (ns == NS_FO && name == "background-color")
-                || (ns == NS_DRAW && (name.starts_with("fill") || name == "opacity"))
-                || (ns == NS_STYLE && name == "repeat")
-        })
-        .collect();
-    let visible = attributes
-        .get(&(NS_FO.to_string(), "background-color".to_string()))
-        .is_some_and(|v| v != "transparent")
-        || attributes
-            .get(&(NS_DRAW.to_string(), "fill".to_string()))
-            .is_some_and(|v| v != "none");
-    if visible {
+/// background image, from page layout properties. `layout` holds the
+/// default page layout's (§16.8); what this element specifies replaces it,
+/// property by property. (LibreOffice 26.8, measured, draws no background
+/// from the default page layout at all; the specification is followed.)
+fn read_background(node: roxmltree::Node<'_, '_>, layout: &mut Layout) -> Result<(), String> {
+    let own = |ns: &str, name: &str| {
+        (ns == NS_FO && name == "background-color")
+            || (ns == NS_DRAW && (name.starts_with("fill") || name == "opacity"))
+            || (ns == NS_STYLE && name == "repeat")
+    };
+    if node
+        .attributes()
+        .any(|a| own(a.namespace().unwrap_or(""), a.name()))
+    {
+        // (An element holds at most 256 attributes, each value bounded.)
+        let mut attributes: HashMap<(String, String), String> = layout
+            .background
+            .as_ref()
+            .and_then(|style| style.groups.get("graphic-properties"))
+            .map(|properties| properties.attributes.clone())
+            .unwrap_or_default();
+        for attribute in node.attributes() {
+            let namespace = attribute.namespace().unwrap_or("");
+            if own(namespace, attribute.name()) {
+                attributes.insert(
+                    (namespace.to_string(), attribute.name().to_string()),
+                    attribute.value().to_string(),
+                );
+            }
+        }
         layout.background = Some(Rc::new(crate::style::Style {
             name: String::new(),
             family: "graphic".into(),
@@ -578,19 +547,20 @@ fn read_background(node: roxmltree::Node<'_, '_>, layout: &mut Layout) {
             )]),
         }));
     }
-    if let Some(image) = node
-        .children()
-        .find(|n| xml::is(*n, NS_STYLE, "background-image"))
-        .filter(|n| n.attribute((NS_XLINK, "href")).is_some())
-    {
-        layout.background_image = Some(Rc::new((
-            image
-                .attribute((NS_XLINK, "href"))
-                .unwrap_or("")
-                .to_string(),
-            image.attribute((NS_STYLE, "repeat")) != Some("stretch"),
-        )));
+    for child in node.children() {
+        budget::tick(1)?;
+        if xml::is(child, NS_STYLE, "background-image") {
+            // The first such element is the property (§17.3).
+            layout.background_image = child.attribute((NS_XLINK, "href")).map(|href| {
+                Rc::new((
+                    href.to_string(),
+                    child.attribute((NS_STYLE, "repeat")) != Some("stretch"),
+                ))
+            });
+            break;
+        }
     }
+    Ok(())
 }
 
 /// `style:num-format` (§19.500) as an ST_NumberFormat value.
@@ -605,81 +575,107 @@ fn page_number_format(format: &str) -> Option<&'static str> {
     }
 }
 
+/// A `style:columns` element or one of its children as the reader meets
+/// it: a parsed node (page layouts) or a captured style element (section
+/// styles).
+pub(super) trait ColumnsSource<'e>: Copy {
+    fn value(self, namespace: &str, name: &str) -> Option<&'e str>;
+    /// Whether this is the `style:` element `name`.
+    fn is_style(self, name: &str) -> bool;
+    /// Visits the child elements in order.
+    fn each(self, visit: &mut dyn FnMut(Self) -> Result<(), String>) -> Result<(), String>;
+}
+
+impl<'a> ColumnsSource<'a> for roxmltree::Node<'a, '_> {
+    fn value(self, namespace: &str, name: &str) -> Option<&'a str> {
+        self.attribute((namespace, name))
+    }
+    fn is_style(self, name: &str) -> bool {
+        xml::is(self, NS_STYLE, name)
+    }
+    fn each(self, visit: &mut dyn FnMut(Self) -> Result<(), String>) -> Result<(), String> {
+        self.children()
+            .filter(|n| n.is_element())
+            .try_for_each(visit)
+    }
+}
+
+impl<'e> ColumnsSource<'e> for &'e crate::style::Element {
+    fn value(self, namespace: &str, name: &str) -> Option<&'e str> {
+        self.attributes
+            .get(&(namespace.to_string(), name.to_string()))
+            .map(String::as_str)
+    }
+    fn is_style(self, name: &str) -> bool {
+        self.namespace == NS_STYLE && self.name == name
+    }
+    fn each(self, visit: &mut dyn FnMut(Self) -> Result<(), String>) -> Result<(), String> {
+        self.children.iter().try_for_each(visit)
+    }
+}
+
 /// `style:columns` (§17.12): equal columns from `fo:column-count` and
 /// `fo:column-gap`, or the `style:column` children's relative widths and
 /// indents within `width`; a separator line (`style:column-sep`) maps to the
-/// DOCX separator.
-/// More than `MAX_STYLE_COLUMNS` columns is beyond the reader's limits.
-pub(super) fn columns(
-    element: &crate::style::Element,
+/// DOCX separator. More than `MAX_STYLE_COLUMNS` columns is beyond the
+/// reader's limits; the count is validated before any column is read, and
+/// no more than it are ever held.
+pub(super) fn columns<'e, S: ColumnsSource<'e>>(
+    element: S,
     width: f64,
 ) -> Result<Option<ColumnsSpec>, String> {
-    let attribute = |ns: &str, name: &str| {
-        element
-            .attributes
-            .get(&(ns.to_string(), name.to_string()))
-            .map(String::as_str)
-    };
-    let count = attribute(NS_FO, "column-count")
-        .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(1);
+    let count = xml::bounded_count(
+        element.value(NS_FO, "column-count"),
+        MAX_STYLE_COLUMNS as u64,
+        "column",
+    )?
+    .map_or(1, |count| count as usize);
     if count <= 1 {
         return Ok(None);
     }
-    if count > MAX_STYLE_COLUMNS {
-        return Err("OpenDocument columns exceed the column limit".into());
-    }
-    let gap = attribute(NS_FO, "column-gap")
+    let gap = element
+        .value(NS_FO, "column-gap")
         .and_then(|v| length_pt(v).ok())
         .unwrap_or(0.0);
-    let sep = element.children.iter().any(|child| {
-        child.name == "column-sep"
-            && child
-                .attributes
-                .get(&(NS_STYLE.to_string(), "style".to_string()))
-                .is_none_or(|style| style != "none")
-    });
-    // The authored columns are collected only when they match the count
-    // (at most MAX_STYLE_COLUMNS of them).
-    let authored = element
-        .children
-        .iter()
-        .filter(|child| child.name == "column")
-        .count();
-    let columns: Vec<&crate::style::Element> = if authored == count {
-        element
-            .children
-            .iter()
-            .filter(|child| child.name == "column")
-            .collect()
-    } else {
-        Vec::new()
-    };
-    if columns.len() == count {
-        fn get<'e>(column: &'e crate::style::Element, ns: &str, name: &str) -> Option<&'e str> {
-            column
-                .attributes
-                .get(&(ns.to_string(), name.to_string()))
-                .map(String::as_str)
+    // One pass over the children: the separator, and the authored columns,
+    // which are used only when there are exactly `count` of them (so at
+    // most `count` are held: one more ends the collection).
+    let mut sep = false;
+    let mut authored: Vec<S> = Vec::new();
+    let mut matching = true;
+    element.each(&mut |child| {
+        budget::tick(1)?;
+        if child.is_style("column-sep") {
+            sep |= child.value(NS_STYLE, "style") != Some("none");
+        } else if child.is_style("column") && matching {
+            if authored.len() == count {
+                matching = false;
+                authored.clear();
+            } else {
+                authored.push(child);
+            }
         }
-        let weights: Vec<f64> = columns
+        Ok(())
+    })?;
+    if matching && authored.len() == count {
+        let weights: Vec<f64> = authored
             .iter()
             .map(|c| {
-                get(c, NS_STYLE, "rel-width")
+                c.value(NS_STYLE, "rel-width")
                     .map(|v| v.trim_end_matches('*'))
                     .and_then(|v| v.parse::<f64>().ok())
                     .unwrap_or(1.0)
             })
             .collect();
         let total: f64 = weights.iter().sum();
-        let indents: Vec<(f64, f64)> = columns
+        let indents: Vec<(f64, f64)> = authored
             .iter()
             .map(|c| {
                 (
-                    get(c, NS_FO, "start-indent")
+                    c.value(NS_FO, "start-indent")
                         .and_then(|v| length_pt(v).ok())
                         .unwrap_or(0.0),
-                    get(c, NS_FO, "end-indent")
+                    c.value(NS_FO, "end-indent")
                         .and_then(|v| length_pt(v).ok())
                         .unwrap_or(0.0),
                 )
@@ -774,15 +770,16 @@ struct NoteConfig {
 }
 
 impl NotesConfiguration {
-    pub fn read(styles: Option<roxmltree::Node<'_, '_>>) -> Self {
+    pub fn read(styles: Option<roxmltree::Node<'_, '_>>) -> Result<Self, String> {
         let mut out = Self::default();
         let Some(styles) = styles else {
-            return out;
+            return Ok(out);
         };
         for node in styles
             .children()
             .filter(|n| xml::is(*n, NS_TEXT, "notes-configuration"))
         {
+            budget::tick(1)?;
             let config = NoteConfig {
                 format: node
                     .attribute((NS_STYLE, "num-format"))
@@ -806,7 +803,7 @@ impl NotesConfiguration {
                 _ => out.footnote = Some(config),
             }
         }
-        out
+        Ok(out)
     }
 
     fn config(&self, kind: &str) -> Option<&NoteConfig> {
@@ -880,21 +877,14 @@ impl<'a> Reader<'a> {
             return Ok(base);
         }
         // A first-page style shares its body style's stories: they are
-        // built once (cached by that master) and copied here, each copy
-        // charged its build cost.
-        let total = base
-            .costs
-            .iter()
-            .flatten()
-            .fold(0usize, |sum, cost| sum.saturating_add(*cost));
-        self.charge_construction(total)?;
+        // built once (cached by that master) and copied here.
+        budget::tick(1)?;
         let mut stories = MasterStories {
             headers: base.headers.clone(),
             footers: base.footers.clone(),
             title_page: base.title_page,
             has_left: base.has_left,
             shown: base.shown,
-            costs: base.costs,
         };
         {
             // A first-page style followed by the body style: its own
@@ -911,8 +901,6 @@ impl<'a> Reader<'a> {
                 .default
                 .take()
                 .or(Some(HeaderFooter::default()));
-            stories.costs[0][1] = first.costs[0][0];
-            stories.costs[1][1] = first.costs[1][0];
             stories.title_page = true;
         }
         let stories = Rc::new(stories);
@@ -940,7 +928,6 @@ impl<'a> Reader<'a> {
                 title_page: false,
                 has_left: false,
                 shown: [false; 2],
-                costs: [[0; 3]; 2],
             });
         };
         let node = master_page.node;
@@ -952,7 +939,6 @@ impl<'a> Reader<'a> {
             title_page: false,
             has_left: false,
             shown: [false; 2],
-            costs: [[0; 3]; 2],
         };
         for (kind, region) in [("header", layout.header), ("footer", layout.footer)] {
             let shown = |name: &str| {
@@ -980,11 +966,9 @@ impl<'a> Reader<'a> {
             out.shown[which] = true;
             let region = region.unwrap_or_default();
             let width = geometry.text_width - region.margin_left - region.margin_right;
-            // A story and the construction bytes its tree was charged.
             let build = |reader: &mut Self,
                          node: roxmltree::Node<'a, 'a>|
-             -> Result<(HeaderFooter, usize), String> {
-                let before = reader.copyable_bytes();
+             -> Result<HeaderFooter, String> {
                 let saved_scope = std::mem::replace(&mut reader.scope, Scope::Styles);
                 let story = reader.contained_story(node, width);
                 reader.scope = saved_scope;
@@ -1018,32 +1002,24 @@ impl<'a> Reader<'a> {
                         paragraph.space_before += region.spacing;
                     }
                 }
-                Ok((
-                    HeaderFooter { body },
-                    reader.copyable_bytes().saturating_sub(before),
-                ))
+                Ok(HeaderFooter { body })
             };
             // Lifetimes: master nodes live as long as the styles document.
             let default_node: roxmltree::Node<'a, 'a> = unsafe_node(default);
-            let (story, cost) = build(self, default_node)?;
-            out.costs[which][0] = cost;
+            let story = build(self, default_node)?;
             let left = shown(&format!("{kind}-left")).map(unsafe_node);
             let first = shown(&format!("{kind}-first")).map(unsafe_node);
             let even = match left {
                 Some(left) => {
                     out.has_left = true;
-                    let (story, cost) = build(self, left)?;
-                    out.costs[which][2] = cost;
-                    Some(story)
+                    Some(build(self, left)?)
                 }
                 None => None,
             };
             let first_story = match first {
                 Some(first) => {
                     out.title_page = true;
-                    let (story, cost) = build(self, first)?;
-                    out.costs[which][1] = cost;
-                    Some(story)
+                    Some(build(self, first)?)
                 }
                 None => None,
             };
@@ -1060,37 +1036,29 @@ impl<'a> Reader<'a> {
         }
         // The page background, drawn behind the text on every page by an
         // anchored, page-sized shape in each header story.
-        let before = self.copyable_bytes();
         if let Some(background) = self.page_background(layout)? {
             // Each header story owns a copy of the background shape and its
-            // paragraph: every copy is charged before it is made.
-            let copy = self.copyable_bytes().saturating_sub(before)
-                + std::mem::size_of::<DocParagraph>()
-                + std::mem::size_of::<BodyElement>();
+            // paragraph.
             let paragraph =
                 || BodyElement::Paragraph(Box::new(anchor_paragraph(vec![background.clone()])));
-            self.charge_construction(copy)?;
-            out.costs[0][0] += copy;
             out.headers
                 .default
                 .get_or_insert_with(HeaderFooter::default)
                 .body
                 .insert(0, paragraph());
-            for (slot, story) in [(1, &mut out.headers.first), (2, &mut out.headers.even)] {
-                if let Some(story) = story {
-                    self.charge_construction(copy)?;
-                    out.costs[0][slot] += copy;
-                    story.body.insert(0, paragraph());
-                }
+            for story in [&mut out.headers.first, &mut out.headers.even]
+                .into_iter()
+                .flatten()
+            {
+                story.body.insert(0, paragraph());
             }
         }
         // A first page with only one region's first variant uses the other
         // region's ordinary story.
         if out.title_page {
-            for (which, set) in [(0, &mut out.headers), (1, &mut out.footers)] {
+            for set in [&mut out.headers, &mut out.footers] {
                 if set.first.is_none() {
-                    self.charge_construction(out.costs[which][0])?;
-                    out.costs[which][1] = out.costs[which][0];
+                    budget::tick(1)?;
                     set.first = set.default.clone();
                 }
             }
@@ -1154,18 +1122,17 @@ impl<'a> Reader<'a> {
             });
         }
         // Every section owns its copies of the master's stories (DOCX
-        // sections resolve their header/footer references independently):
-        // each copy is charged its story's construction cost first.
-        let set_cost = |costs: &[usize; 3]| costs.iter().fold(0usize, |a, c| a.saturating_add(*c));
-        self.charge_construction(
-            set_cost(&stories.costs[0]).saturating_add(set_cost(&stories.costs[1])),
-        )?;
+        // sections resolve their header/footer references independently).
+        // The limits are checked before each copy, so none is made past
+        // them.
+        budget::tick(1)?;
         let mut headers = stories.headers.clone();
+        budget::tick(1)?;
         let mut footers = stories.footers.clone();
         if even_and_odd {
-            for (which, set) in [(0, &mut headers), (1, &mut footers)] {
+            for set in [&mut headers, &mut footers] {
                 if set.even.is_none() {
-                    self.charge_construction(stories.costs[which][0])?;
+                    budget::tick(1)?;
                     set.even = set.default.clone();
                 }
             }
@@ -1196,13 +1163,7 @@ impl<'a> Reader<'a> {
         };
         if fill.is_none() {
             if let Some((href, tile)) = layout.background_image.as_deref() {
-                // Resolving the shared link is work per page style.
-                self.charge_work(href.len().saturating_add(1))?;
                 if let Some((path, mime)) = self.package_image(href)? {
-                    // The fill owns its link (each header story copy too).
-                    self.charge_construction(
-                        std::mem::size_of::<docx_model::ShapeFill>() + path.len() + mime.len() + 64,
-                    )?;
                     fill = Some(docx_model::ShapeFill::Image {
                         image_path: path,
                         mime_type: mime.into(),
@@ -1230,7 +1191,6 @@ impl<'a> Reader<'a> {
         let Some(fill) = fill else {
             return Ok(None);
         };
-        self.charge_construction(std::mem::size_of::<docx_model::ShapeRun>() + 512)?;
         Ok(Some(self.page_background_shape(
             fill,
             layout.section.page_width,
@@ -1250,6 +1210,7 @@ impl<'a> Reader<'a> {
         // the last (a page start among them wins).
         let mut starts: Vec<(usize, SectionStart)> = vec![(0, self.sections[0].clone())];
         for (position, index) in marks {
+            budget::tick(1)?;
             let mut start = self.sections[index].clone();
             if let Some(last) = starts.last_mut() {
                 if last.0 == position {
@@ -1268,6 +1229,7 @@ impl<'a> Reader<'a> {
         // Even/odd headers are document-wide in DOCX.
         let mut even_and_odd = false;
         for (_, start) in &starts {
+            budget::tick(1)?;
             let master = start.master.clone();
             if self.master_stories(&master)?.has_left {
                 even_and_odd = true;

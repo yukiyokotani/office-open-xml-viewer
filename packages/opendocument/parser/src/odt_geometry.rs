@@ -3,11 +3,15 @@
 //! path (§19.145, Table 10), evaluated into normalized [0, 1] DOCX path
 //! commands. Arcs become cubic Béziers of at most 90°.
 
+use crate::budget;
+use crate::error::resource;
 use docx_model::{PathCmd, PathPaint};
 use std::collections::HashMap;
 
-/// Implementation bounds: equations, path parameters and formula depth.
-const MAX_EQUATIONS: usize = 4096;
+/// Implementation bounds: equation definitions of one shape (enforced where
+/// they are collected), path parameters and formula depth. A shape beyond
+/// the first two is rejected.
+pub(super) const MAX_EQUATIONS: usize = 4096;
 const MAX_PATH_TOKENS: usize = 1 << 20;
 const MAX_DEPTH: usize = 64;
 /// Implementation bound on the recursion of one evaluation: referenced
@@ -71,7 +75,7 @@ impl<'g> Evaluator<'g> {
         if let Some(value) = self.cache.get(name) {
             return *value;
         }
-        if self.depth > MAX_DEPTH || self.cache.len() > MAX_EQUATIONS {
+        if self.depth > MAX_DEPTH {
             return 0.0;
         }
         // The formula is borrowed from the geometry (never copied per
@@ -304,7 +308,7 @@ impl Parser<'_> {
 }
 
 /// Tokens of an enhanced path: command letters and parameters.
-fn tokens(path: &str) -> Vec<String> {
+fn tokens(path: &str) -> Result<Vec<String>, String> {
     let mut out = Vec::new();
     let mut current = String::new();
     let flush = |current: &mut String, out: &mut Vec<String>| {
@@ -314,7 +318,7 @@ fn tokens(path: &str) -> Vec<String> {
     };
     for c in path.chars() {
         if out.len() > MAX_PATH_TOKENS {
-            break;
+            return Err(resource("shape path"));
         }
         match c {
             ' ' | ',' | '\t' | '\n' | '\r' => flush(&mut current, &mut out),
@@ -337,7 +341,7 @@ fn tokens(path: &str) -> Vec<String> {
         }
     }
     flush(&mut current, &mut out);
-    out
+    Ok(out)
 }
 
 /// The evaluated path: normalized sub-paths and their paint.
@@ -357,9 +361,6 @@ struct Builder {
     stroke: bool,
     /// Sub-paths of the current set (one N-terminated group).
     group_start: usize,
-    /// Commands still admitted, and whether one was refused.
-    budget: usize,
-    over: bool,
 }
 
 impl Builder {
@@ -371,22 +372,8 @@ impl Builder {
         )
     }
 
-    /// One more command or paint entry within the evaluation's bound.
-    fn admit(&mut self) -> bool {
-        if self.budget == 0 {
-            self.over = true;
-            return false;
-        }
-        self.budget -= 1;
-        true
-    }
-
     fn finish_subpath(&mut self) {
         if self.current.len() > 1 {
-            if !self.admit() {
-                self.current.clear();
-                return;
-            }
             self.subpaths.push(std::mem::take(&mut self.current));
             self.paint.push(PathPaint {
                 fill_rule: None,
@@ -401,9 +388,7 @@ impl Builder {
     fn move_to(&mut self, p: (f64, f64)) {
         self.finish_subpath();
         let (x, y) = self.norm(p);
-        if self.admit() {
-            self.current.push(PathCmd::MoveTo { x, y });
-        }
+        self.current.push(PathCmd::MoveTo { x, y });
         self.point = p;
         self.start = p;
     }
@@ -413,9 +398,7 @@ impl Builder {
             self.move_to(self.point);
         }
         let (x, y) = self.norm(p);
-        if self.admit() {
-            self.current.push(PathCmd::LineTo { x, y });
-        }
+        self.current.push(PathCmd::LineTo { x, y });
         self.point = p;
     }
 
@@ -426,24 +409,20 @@ impl Builder {
         let (x1, y1) = self.norm(c1);
         let (x2, y2) = self.norm(c2);
         let (x, y) = self.norm(p);
-        if self.admit() {
-            self.current.push(PathCmd::CubicBezTo {
-                x1,
-                y1,
-                x2,
-                y2,
-                x,
-                y,
-            });
-        }
+        self.current.push(PathCmd::CubicBezTo {
+            x1,
+            y1,
+            x2,
+            y2,
+            x,
+            y,
+        });
         self.point = p;
     }
 
     fn close(&mut self) {
         if !self.current.is_empty() {
-            if self.admit() {
-                self.current.push(PathCmd::Close);
-            }
+            self.current.push(PathCmd::Close);
             self.point = self.start;
         }
     }
@@ -489,14 +468,13 @@ impl Builder {
     }
 }
 
-/// Evaluate an enhanced path (Table 10) into normalized commands, at most
-/// `max_commands` of them (commands and paint entries); `None` past that.
-pub(super) fn evaluate(path: &str, geometry: &Geometry, max_commands: usize) -> Option<Path> {
+/// Evaluate an enhanced path (Table 10) into normalized commands. Each
+/// token takes a step and adds a bounded number of commands (an arc is at
+/// most 64 curves).
+pub(super) fn evaluate(path: &str, geometry: &Geometry) -> Result<Path, String> {
     let mut eval = Evaluator::new(geometry);
-    let tokens = tokens(path);
+    let tokens = tokens(path)?;
     let mut builder = Builder {
-        budget: max_commands,
-        over: false,
         view_box: geometry.view_box,
         subpaths: Vec::new(),
         paint: Vec::new(),
@@ -512,6 +490,7 @@ pub(super) fn evaluate(path: &str, geometry: &Geometry, max_commands: usize) -> 
     // X/Y alternate their tangent axis per quarter.
     let mut quadrant_x = true;
     while index < tokens.len() {
+        budget::tick(1)?;
         let token = &tokens[index];
         if token.len() == 1 && token.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
             command = token.chars().next().unwrap_or('M');
@@ -675,10 +654,7 @@ pub(super) fn evaluate(path: &str, geometry: &Geometry, max_commands: usize) -> 
         }
     }
     builder.end_set();
-    if builder.over {
-        return None;
-    }
-    Some(Path {
+    Ok(Path {
         subpaths: builder.subpaths,
         paint: builder.paint,
     })
@@ -705,9 +681,6 @@ mod tests {
         // self-doubling reference stays linear.
         let cyclic = geometry(&[("f", "?f+?f+1")], &[]);
         assert_eq!(Evaluator::new(&cyclic).parameter("?f"), 1.0);
-        // The command bound refuses a path instead of building past it.
-        let empty = geometry(&[], &[]);
-        assert!(evaluate("M 0 0 L 1 1 2 2 3 3 Z N", &empty, 2).is_none());
         let geometry = geometry(&[("f0", "((1+2))*abs(-3)")], &[]);
         assert_eq!(Evaluator::new(&geometry).parameter("?f0"), 9.0);
     }
@@ -746,13 +719,13 @@ mod tests {
     #[test]
     fn evaluates_paths_into_normalized_commands() {
         let g = geometry(&[("f0", "21600")], &[]);
-        let path = evaluate("M 0 0 L ?f0 0 ?f0 21600 Z N", &g, usize::MAX).unwrap();
+        let path = evaluate("M 0 0 L ?f0 0 ?f0 21600 Z N", &g).unwrap();
         assert_eq!(path.subpaths.len(), 1);
         match path.subpaths[0][2] {
             PathCmd::LineTo { x, y } => assert_eq!((x, y), (1.0, 1.0)),
             _ => panic!(),
         }
-        let ellipse = evaluate("U 10800 10800 10800 10800 0 360 Z N", &g, usize::MAX).unwrap();
+        let ellipse = evaluate("U 10800 10800 10800 10800 0 360 Z N", &g).unwrap();
         assert_eq!(ellipse.subpaths.len(), 1);
         assert!(ellipse.subpaths[0].len() >= 5);
     }

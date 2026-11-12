@@ -5,6 +5,7 @@
 //! except element-valued properties such as `style:tab-stops`, which inherit
 //! as a whole element (§17.7) and are stored with their parent group.
 
+use crate::budget;
 use crate::error::invalid;
 use crate::xml::{self, NS_STYLE, NS_TEXT};
 use std::collections::{HashMap, HashSet};
@@ -12,12 +13,42 @@ use std::collections::{HashMap, HashSet};
 /// Implementation bound on a parent chain; ODF requires none, a cycle is a
 /// container error.
 const MAX_PARENT_DEPTH: usize = 64;
-/// Implementation bound on stored style data: every owned string (expanded
-/// attribute and element names included) plus a fixed per-entry overhead,
-/// charged before the style is read. Expanded names repeat a namespace URI
-/// declared once, so storage is not linear in the XML size without it.
-const MAX_STYLE_BYTES: usize = 64 * 1024 * 1024;
-const STORED_ENTRY_OVERHEAD: usize = 64;
+/// Implementation bound on one style value (a name, a family, a length, a
+/// colour): [`check_values`] rejects a part holding a longer one before any
+/// style is stored, so a reader may treat a style value as a small constant
+/// however often it resolves it.
+pub const MAX_STYLE_VALUE_BYTES: usize = 1024;
+/// Implementation bound on a style condition (§19.468 `style:condition`).
+pub const MAX_STYLE_CONDITION_BYTES: usize = 4096;
+const NS_DATASTYLE: &str = "urn:oasis:names:tc:opendocument:xmlns:datastyle:1.0";
+
+/// Reject a part with a style value over [`MAX_STYLE_VALUE_BYTES`] (a
+/// condition: [`MAX_STYLE_CONDITION_BYTES`]): the attributes of style,
+/// data-style and property elements (whatever the namespace of an extension
+/// property set) and every `*style-name` reference.
+pub fn check_values(root: roxmltree::Node<'_, '_>) -> Result<(), String> {
+    for node in root.descendants().filter(|n| n.is_element()) {
+        budget::tick(1)?;
+        let namespace = node.tag_name().namespace();
+        let style_element = namespace == Some(NS_STYLE)
+            || namespace == Some(NS_DATASTYLE)
+            || node.tag_name().name().ends_with("-properties");
+        for attribute in node.attributes() {
+            let name = attribute.name();
+            let bound = if style_element && name == "condition" {
+                MAX_STYLE_CONDITION_BYTES
+            } else if style_element || name.ends_with("style-name") {
+                MAX_STYLE_VALUE_BYTES
+            } else {
+                continue;
+            };
+            if attribute.value().len() > bound {
+                return Err(crate::error::resource("style value"));
+            }
+        }
+    }
+    Ok(())
+}
 
 /// The style families readers look up (§19.480 `style:family`). Styles of
 /// every family are stored under their declared family name.
@@ -81,16 +112,10 @@ pub struct Element {
 }
 
 impl Element {
-    /// The cost of reading the element: one unit per node and attribute
-    /// plus every attribute's bytes, descendants included (a reader parses
-    /// the values each time it resolves the group).
+    /// The steps of reading the element: one per node and attribute,
+    /// descendants included (values are bounded by [`check_values`]).
     pub fn nodes(&self) -> usize {
-        let own = self
-            .attributes
-            .iter()
-            .map(|((namespace, name), value)| 1 + namespace.len() + name.len() + value.len())
-            .sum::<usize>();
-        1 + own + self.children.iter().map(Element::nodes).sum::<usize>()
+        1 + self.attributes.len() + self.children.iter().map(Element::nodes).sum::<usize>()
     }
 }
 
@@ -117,7 +142,6 @@ pub enum Scope {
 
 #[derive(Debug, Default)]
 pub struct StyleSheet {
-    stored_bytes: usize,
     common: HashMap<(String, String), Style>,
     defaults: HashMap<String, Style>,
     automatic: HashMap<(Scope, String, String), Style>,
@@ -150,14 +174,14 @@ impl StyleSheet {
             .children()
             .filter(|n| xml::is(*n, NS_TEXT, "list-style"))
         {
-            self.charge(node)?;
+            budget::tick(1)?;
             let list = read_list_style(node)?;
             if self.list_common.insert(list.name.clone(), list).is_some() {
                 return Err(invalid("two list styles share a name"));
             }
         }
         for node in parent.children().filter(|n| xml::is(*n, NS_STYLE, "style")) {
-            self.charge(node)?;
+            budget::tick(1)?;
             let style = read_style(node)?;
             let key = (style.family.clone(), style.name.clone());
             if self.common.insert(key, style).is_some() {
@@ -168,7 +192,7 @@ impl StyleSheet {
             .children()
             .filter(|n| xml::is(*n, NS_STYLE, "default-style"))
         {
-            self.charge(node)?;
+            budget::tick(1)?;
             let mut style = read_style_body(node, String::new())?;
             style.parent = None;
             if self.defaults.insert(style.family.clone(), style).is_some() {
@@ -184,7 +208,7 @@ impl StyleSheet {
             .children()
             .filter(|n| xml::is(*n, NS_TEXT, "outline-style"))
         {
-            self.charge(node)?;
+            budget::tick(1)?;
             let mut list = read_list_style_named(node, String::new())?;
             list.name = node.attribute((NS_STYLE, "name")).unwrap_or("").to_string();
             self.outline = Some(list);
@@ -206,7 +230,7 @@ impl StyleSheet {
             .children()
             .filter(|n| xml::is(*n, NS_TEXT, "list-style"))
         {
-            self.charge(node)?;
+            budget::tick(1)?;
             let list = read_list_style(node)?;
             if self
                 .list_automatic
@@ -217,7 +241,7 @@ impl StyleSheet {
             }
         }
         for node in parent.children().filter(|n| xml::is(*n, NS_STYLE, "style")) {
-            self.charge(node)?;
+            budget::tick(1)?;
             let mut style = read_style(node)?;
             style.automatic = true;
             let key = (scope, style.family.clone(), style.name.clone());
@@ -225,35 +249,6 @@ impl StyleSheet {
                 return Err(invalid("two automatic styles share a name and family"));
             }
         }
-        Ok(())
-    }
-
-    /// Charge the storage a style element's subtree will take before it is
-    /// read (borrowed XML only; nothing is allocated here).
-    fn charge(&mut self, node: roxmltree::Node<'_, '_>) -> Result<(), String> {
-        let bytes = node
-            .descendants()
-            .filter(|n| n.is_element())
-            .fold(0usize, |bytes, element| {
-                let name = element.tag_name();
-                let attributes = element.attributes().fold(0usize, |sum, attribute| {
-                    sum.saturating_add(
-                        attribute.namespace().map_or(0, str::len)
-                            + attribute.name().len()
-                            + attribute.value().len()
-                            + STORED_ENTRY_OVERHEAD,
-                    )
-                });
-                bytes
-                    .saturating_add(name.namespace().map_or(0, str::len) + name.name().len())
-                    .saturating_add(STORED_ENTRY_OVERHEAD)
-                    .saturating_add(attributes)
-            });
-        self.stored_bytes = self
-            .stored_bytes
-            .checked_add(bytes)
-            .filter(|total| *total <= MAX_STYLE_BYTES)
-            .ok_or_else(|| "OpenDocument styles exceed the style storage limit".to_string())?;
         Ok(())
     }
 
@@ -297,20 +292,14 @@ impl StyleSheet {
     }
 
     /// The style and its parent chain (common styles), nearest first.
-    /// `charge` is called with each lookup's identifier bytes before the
-    /// lookup.
-    pub fn chain<'s>(
-        &'s self,
-        start: StyleRef<'s>,
-        mut charge: impl FnMut(usize) -> Result<(), String>,
-    ) -> Result<Vec<StyleRef<'s>>, String> {
+    pub fn chain<'s>(&'s self, start: StyleRef<'s>) -> Result<Vec<StyleRef<'s>>, String> {
         let mut chain = vec![start];
         let mut current = start.style;
         while let Some(parent) = current.parent.as_deref() {
             if chain.len() > MAX_PARENT_DEPTH {
                 return Err(invalid("a style parent chain is cyclic or too deep"));
             }
-            charge(1 + current.family.len() + parent.len())?;
+            budget::tick(1)?;
             // A missing parent ends the chain (LibreOffice ignores it).
             let Some(next) = self
                 .common
@@ -346,38 +335,55 @@ impl<'a> StyleRef<'a> {
 pub struct Cascade<'a> {
     pub styles: Vec<StyleRef<'a>>,
     pub group: Group,
-    /// Nearest value of every attribute set in the search order.
-    values: HashMap<&'a Key, &'a str>,
-    /// The same keys in first-seen order (nearest style first).
-    order: Vec<&'a Key>,
+    /// Nearest value of every attribute set in the search order, by
+    /// (namespace, name): the index of its key and value in `order`. The
+    /// keys borrow the stored names, so a lookup allocates nothing.
+    values: HashMap<(&'a str, &'a str), usize>,
+    /// The keys and values in first-seen order (nearest style first).
+    order: Vec<(&'a Key, &'a str)>,
 }
 
 impl<'a> Cascade<'a> {
-    pub fn new(styles: Vec<StyleRef<'a>>, group: Group) -> Self {
-        let mut values: HashMap<&'a Key, &'a str> = HashMap::new();
+    /// The cascade of `group` over `styles`. Building one is the only way
+    /// to resolve properties, and it counts its own steps: one per style
+    /// of the search order, per attribute and per captured element node.
+    pub fn build(styles: Vec<StyleRef<'a>>, group: Group) -> Result<Self, String> {
+        budget::tick(styles.iter().fold(0usize, |steps, style| {
+            steps.saturating_add(1).saturating_add(
+                style
+                    .group(group)
+                    .map_or(0, |p| p.attributes.len() + p.element_nodes),
+            )
+        }))?;
+        let mut values: HashMap<(&'a str, &'a str), usize> = HashMap::new();
         let mut order = Vec::new();
         for style in &styles {
             if let Some(properties) = style.group(group) {
                 for (key, value) in &properties.attributes {
-                    if let std::collections::hash_map::Entry::Vacant(entry) = values.entry(key) {
-                        entry.insert(value.as_str());
-                        order.push(key);
+                    if let std::collections::hash_map::Entry::Vacant(entry) =
+                        values.entry((key.0.as_str(), key.1.as_str()))
+                    {
+                        entry.insert(order.len());
+                        order.push((key, value.as_str()));
                     }
                 }
             }
         }
-        Self {
+        Ok(Self {
             styles,
             group,
             values,
             order,
-        }
+        })
     }
 
     pub fn get(&self, namespace: &str, name: &str) -> Option<&'a str> {
-        self.values
-            .get(&(namespace.to_string(), name.to_string()))
-            .copied()
+        // The map's key lifetime shortens to the arguments' (it is
+        // covariant); the value comes from `order`, at its full lifetime.
+        let values: &HashMap<(&str, &str), usize> = &self.values;
+        values
+            .get(&(namespace, name))
+            .map(|index| self.order[*index].1)
     }
 
     pub fn element(&self, name: &str) -> Option<&'a [Element]> {
@@ -391,7 +397,7 @@ impl<'a> Cascade<'a> {
 
     /// Every attribute key set anywhere in the cascade (for admission).
     pub fn keys(&self) -> Vec<Key> {
-        self.order.iter().map(|key| (*key).clone()).collect()
+        self.order.iter().map(|(key, _)| (*key).clone()).collect()
     }
 
     /// Every element-valued property name set anywhere in the cascade.

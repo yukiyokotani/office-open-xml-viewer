@@ -25,7 +25,7 @@
 
 use super::*;
 use crate::style::ListStyle;
-use docx_model::{AnchorHostMetrics, ImageRun, TabStop};
+use docx_model::{AnchorHostMetrics, TabStop};
 
 /// Levels a list style defines (§19.840 `text:level`).
 const MAX_LEVELS: u32 = 10;
@@ -322,12 +322,11 @@ impl<'a> Reader<'a> {
                 let chain = match continued {
                     Some(chain) => chain,
                     None => {
-                        self.charge_construction(std::mem::size_of::<Chain>())?;
+                        budget::tick(1)?;
                         self.lists.chains.push(Chain::default());
                         self.lists.chains.len() - 1
                     }
                 };
-                self.charge_construction(style.len())?;
                 self.lists.previous = Some((style.clone(), chain));
                 Frame {
                     chain,
@@ -337,11 +336,11 @@ impl<'a> Reader<'a> {
             }
         };
         if let Some(id) = id {
-            self.charge_construction(id.len())?;
             self.lists.ids.insert(id.to_string(), frame.chain);
         }
         let level = self.list_level(&frame.style, frame.level)?;
         for child in node.children().filter(|n| n.is_element()) {
+            budget::tick(1)?;
             match (child.tag_name().namespace(), child.tag_name().name()) {
                 (Some(NS_TEXT), "list-item") => self.list_item(child, &frame, &level, false)?,
                 (Some(NS_TEXT), "list-header") => self.list_item(child, &frame, &level, true)?,
@@ -364,6 +363,7 @@ impl<'a> Reader<'a> {
             .and_then(|v| v.parse::<u32>().ok());
         let mut first = !header;
         for child in node.children().filter(|n| n.is_element()) {
+            budget::tick(1)?;
             match (child.tag_name().namespace(), child.tag_name().name()) {
                 (Some(NS_TEXT), "p" | "h") if first => {
                     first = false;
@@ -649,16 +649,12 @@ impl<'a> Reader<'a> {
                 format!("{prefix}{}{suffix}", components.join("."))
             }
         };
-        self.charge_construction(text.len())?;
         let image = match &level.kind {
             Kind::Image {
                 href,
                 width,
                 height,
-            } => {
-                self.charge_construction(href.len())?;
-                Some((href.to_string(), *width, *height))
-            }
+            } => Some((href.to_string(), *width, *height)),
             _ => None,
         };
         Ok(Label {
@@ -732,13 +728,12 @@ impl<'a> Reader<'a> {
     /// A list style's level definition (§16.31-§16.34), resolved once per
     /// scope, style and level; later uses copy the bounded definition.
     fn list_level(&mut self, style: &str, level: u32) -> Result<Level<'a>, String> {
-        self.charge_work(16 + style.len())?;
+        budget::tick(1)?;
         let key = (self.scope, style.to_string(), level);
         if let Some(cached) = self.level_cache.get(&key) {
             return Ok(cached.clone());
         }
         let resolved = self.resolve_list_level(style, level)?;
-        self.charge_construction(std::mem::size_of::<Level<'a>>() + 2 * style.len() + 2048)?;
         self.level_cache.insert(key, resolved.clone());
         Ok(resolved)
     }
@@ -765,8 +760,8 @@ impl<'a> Reader<'a> {
             return Ok(fallback);
         };
         // The level search and its format templates read the whole
-        // captured definition, attribute bytes included.
-        self.charge_work(list.element.nodes())?;
+        // captured definition.
+        budget::tick(list.element.nodes())?;
         // The definition of this level, else the nearest lower one (a list
         // nested deeper than its style defines).
         let level_of = |child: &crate::style::Element| {
@@ -943,7 +938,7 @@ impl<'a> Reader<'a> {
                 .find(self.scope, Family::Text, name)
                 .or_else(|| sheet.find_common(Family::Text, name))
             {
-                styles.extend(self.style_chain(style).iter().copied());
+                styles.extend(self.style_chain(style)?.iter().copied());
             }
         }
         Ok(Level {
@@ -1011,18 +1006,10 @@ impl<'a> Reader<'a> {
             return Ok(());
         };
         if label.follow == Follow::Tab {
+            // (The cascade ends in the paragraph default style.)
             let interval = properties
                 .get(NS_STYLE, "tab-stop-distance")
                 .and_then(|v| length_pt(v).ok())
-                .or_else(|| {
-                    self.sheet
-                        .default_style(Family::Paragraph)
-                        .and_then(|style| {
-                            Cascade::new(vec![style], PARAGRAPH)
-                                .get(NS_STYLE, "tab-stop-distance")
-                                .and_then(|v| length_pt(v).ok())
-                        })
-                })
                 .unwrap_or(36.0);
             let width = self.text_width - paragraph.indent_right;
             let mut stops = self.list_tab_stops(list, margin, interval, width)?;
@@ -1078,7 +1065,7 @@ impl<'a> Reader<'a> {
         };
         let mut runs = Vec::with_capacity(2);
         for text in std::iter::once(label.text.as_str()).chain(separator) {
-            self.charge_construction(properties.retained_estimate() + text.len())?;
+            budget::tick(1)?;
             let mut run = properties.text_run();
             run.text = text.to_string();
             run.list_label = Some(label.align.wire());
@@ -1107,7 +1094,6 @@ impl<'a> Reader<'a> {
             _ => None,
         }) {
             Some(text) => {
-                self.charge_construction(text::run_copy_bytes(text))?;
                 let kept = std::mem::take(&mut text.text);
                 let first = text.as_ref().clone();
                 text.text = kept;
@@ -1124,13 +1110,6 @@ impl<'a> Reader<'a> {
         let height = height.unwrap_or(first.font_size * 0.8);
         let align = label.align.wire();
         let family = first.font_family.clone();
-        self.charge_construction(
-            std::mem::size_of::<DocRun>() * 3
-                + std::mem::size_of::<ImageRun>()
-                + family.as_ref().map_or(0, String::len)
-                + path.len()
-                + mime_type.len(),
-        )?;
         let _ = IMAGE_LABEL_INSET_PT;
         let mut runs = vec![
             DocRun::AnchorHost(AnchorHostMetrics {
@@ -1194,8 +1173,9 @@ impl<'a> Reader<'a> {
         }
         let mut k = ((first.max(origin) - origin) / interval).floor().max(0.0);
         loop {
+            budget::tick(1)?;
             let pos = origin + k * interval;
-            if pos > width + interval || stops.len() >= MAX_TAB_STOPS {
+            if pos.is_nan() || pos > width + interval || stops.len() >= MAX_TAB_STOPS {
                 break;
             }
             if pos > first {
@@ -1207,7 +1187,6 @@ impl<'a> Reader<'a> {
             }
             k += 1.0;
         }
-        self.charge_construction(stops.len() * (std::mem::size_of::<TabStop>() + 12))?;
         Ok(stops)
     }
 }
