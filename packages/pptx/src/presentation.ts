@@ -16,6 +16,7 @@ import {
 import { acquireOfficeRoutes, distinctOfficeRouteLoads, type AcquiredOfficeRoutes } from './office-route-acquisition.js';
 import {
   type FontPreloadDemand,
+  loadNativeRouteSentinels,
   loadOfficeFontFallbacks,
   unloadOfficeFontFallbacks,
   releaseOwnedBitmap,
@@ -314,6 +315,10 @@ export class PptxPresentation {
   /** Presence of the authored families demanded so far (main mode). */
   private _installedFamilies: import('./font-source-load.js').PptxInstalledFamilies | null = null;
   private readonly _officeFontLoads = new Map<FontFaceSet, Map<string, Promise<LoadedOfficeFontFallbacks>>>();
+  /** Route sentinels per FontFaceSet (core native-route-line-metrics.ts):
+   *  the symbol-font oracle of each render asks its painting context through
+   *  them (core symbol-face.ts). Released in {@link destroy}. */
+  private readonly _symbolSentinels = new Map<FontFaceSet, Promise<FontFace[] | null>>();
   /** Embedded Font parts registered into the main-thread FontFaceSet. */
   private _embeddedFontFaces: FontFace[] = [];
   private _embeddedFontAliases: ReadonlyMap<string, string> = new Map();
@@ -1189,6 +1194,13 @@ export class PptxPresentation {
   ): Promise<AcquiredOfficeRoutes> {
     if (this._destroyed) throw new Error('Presentation destroyed');
     if (!fontSet) return { routes: {}, installed: [] };
+    let sentinels = this._symbolSentinels.get(fontSet);
+    if (!sentinels) {
+      sentinels = loadNativeRouteSentinels(fontSet).catch(() => null);
+      this._symbolSentinels.set(fontSet, sentinels);
+    }
+    await sentinels;
+    if (this._destroyed) throw new Error('Presentation destroyed');
     const uncovered = uncoveredOfficeFontRequests(requests, this._embeddedFontTuples);
     let loads = this._officeFontLoads.get(fontSet);
     if (!loads) {
@@ -1669,6 +1681,10 @@ export class PptxPresentation {
       }
     }
     this._officeFontLoads.clear();
+    for (const sentinels of this._symbolSentinels.values()) {
+      void sentinels.then((faces) => { if (faces) unloadOfficeFontFallbacks(faces); });
+    }
+    this._symbolSentinels.clear();
     if (this._embeddedFontFaces.length > 0) {
       unregisterEmbeddedFonts(this._embeddedFontFaces);
       this._embeddedFontFaces = [];

@@ -1493,13 +1493,11 @@ function selectOfficeFace(normalized: string, bold: boolean, italic: boolean, rc
 /**
  * Symbol-encoded text (core symbol-font.ts; ECMA-376 §21.1.2.3.10 `a:sym`,
  * §21.1.2.3.7 `a:latin`, §21.1.2.4.3 `a:buFont`) as this render paints it
- * when kept: `keptFont` is the Canvas font the kept text is drawn with, so
- * the oracle walks the very stack font matching paints (the selected face, a
- * loaded substitute, the fallback tail), from held cmaps where the library
- * holds the bytes and by measurement in this render's painting context
- * otherwise. `bare`: whether bare codes 0x20..0xFF are symbol codes here (a
- * Latin symbol face); they are left alone when the face could not be
- * judged, as in 0.89.
+ * when kept: `keptFont` is the Canvas font the kept text is drawn with, and
+ * the core oracle asks this render's painting context which codes that very
+ * font draws itself (core symbol-face.ts). `bare`: `text` is one bare code
+ * 0x20..0xFF of a Latin symbol face; it is left alone when the font could
+ * not be judged, as in 0.89.
  */
 function symbolFaceSegments(
   text: string,
@@ -1512,11 +1510,10 @@ function symbolFaceSegments(
 ): SymbolTextSegment[] {
   const { authoredFamily } = selectOfficeFace(family, bold, italic, rc);
   if (!rc.symbolFaces) return bare ? [{ text, mapped: false }] : symbolTextToUnicodeSegments(text, authoredFamily);
-  const selection = { font: keptFont };
-  if (bare && rc.symbolFaces.encoding(selection).kind === 'unknown') return [{ text, mapped: false }];
+  if (bare && rc.symbolFaces.draws(text, keptFont) === undefined) return [{ text, mapped: false }];
   // Converted text paints in the generic sans-serif stack (paragraphInputRuns,
   // paragraphBullet); its colour proof is made in that stack.
-  return rc.symbolFaces.segments(text, authoredFamily, selection,
+  return rc.symbolFaces.segments(text, authoredFamily, keptFont,
     (converted) => buildFont(bold, italic, 32, 'sans-serif', rc, converted));
 }
 
@@ -4861,11 +4858,16 @@ function paragraphBullet(body: TextBody, para: Paragraph, paraDefaultColor: stri
     // it lacks converts to Unicode, drawn in sans-serif: the symbol face's
     // cmap would re-read the converted character as its own code.
     const markerFamily = normalizeFontFamily(b.fontFamily ?? null, rc);
+    // The marker is one run in one font: where the face draws one of its
+    // codes and lacks another (a face with part of its encoding), it stays
+    // as authored.
+    const keptFont = buildFont(false, false, bSizePx, markerFamily, rc, bulletLabel, hasNamedFontFamily(b.fontFamily));
     const segments = bulletLabel && isSymbolFontFamily(authoredFamilyOf(markerFamily, rc))
-      ? symbolFaceSegments(bulletLabel, markerFamily, false, false, rc,
-        buildFont(false, false, bSizePx, markerFamily, rc, bulletLabel, hasNamedFontFamily(b.fontFamily))) : null;
-    if (segments) bulletLabel = segments.map((part) => part.text).join('');
-    const convertedFamily = segments?.some((part) => part.mapped) ? 'sans-serif' : markerFamily;
+      ? symbolFaceSegments(bulletLabel, markerFamily, false, false, rc, keptFont) : null;
+    const converted = segments?.some((part) => part.mapped) === true
+      && ![...bulletLabel].some((code) => rc.symbolFaces?.draws(code, keptFont) === true);
+    if (segments && converted) bulletLabel = segments.map((part) => part.text).join('');
+    const convertedFamily = converted ? 'sans-serif' : markerFamily;
     bulletSizePx = bSizePx;
     bulletFamily = convertedFamily;
     bulletFont  = buildFont(false, false, bSizePx, convertedFamily, rc, bulletLabel,
@@ -8588,13 +8590,11 @@ async function renderSlideLeased(
     officeFontRoutes: opts.officeFontRoutes,
     officeInstalledFamilies: opts.officeInstalledFamilies,
     fontSubstitutions: opts.fontSubstitutions,
-    // Symbol-font faces are judged in this render's painting context, once per
-    // render: a render sees one set of font resources (core symbol-face.ts).
-    // Measurements are shared across renders of the same font state (the
-    // realm's FontFaceSet and the registered faces of the measured families).
+    // Symbol-font codes are judged in this render's painting context, by an
+    // oracle of this render alone: a render sees one set of font resources
+    // (core symbol-face.ts).
     symbolFaces: createSymbolFaceOracle(
       canvas.getContext('2d') as CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D | null,
-      { shared: true },
     ),
     // The backing store may have been clamped below `canvasSize × dpr`; downstream
     // crisp-offset math must use the SAME effective dpr the ctx was scaled by.

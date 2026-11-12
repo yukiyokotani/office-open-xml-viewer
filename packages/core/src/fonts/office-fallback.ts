@@ -104,8 +104,18 @@ function routeKey(tuple: Tuple): string {
     ? family : `${family}:${tuple.weight}:${tuple.style}`;
 }
 
-export { fontFaceWeightCovers } from './font-face-descriptors.js';
-import { fontFaceWeightCovers } from './font-face-descriptors.js';
+/** Whether a loaded CSS face advertises the requested numeric weight. A
+ * variable face may cover several WML tuples, while a scalar face covers one. */
+export function fontFaceWeightCovers(descriptor: string, weight: number): boolean {
+  const normalized = descriptor.trim().toLowerCase();
+  if (normalized === 'normal') return weight === 400;
+  if (normalized === 'bold') return weight === 700;
+  const range = /^(\d+)(?:\s+(\d+))?$/u.exec(normalized);
+  if (!range) return false;
+  const lower = Number(range[1]);
+  const upper = Number(range[2] ?? range[1]);
+  return lower <= weight && weight <= upper;
+}
 
 function loadedFaceCoversTuple(face: FontFace, tuple: Tuple): boolean {
   if (face.status !== 'loaded'

@@ -1,195 +1,45 @@
 /**
- * Which symbol codes one selected face draws itself (symbol-font.ts).
+ * Which authored symbol codes the painting font draws itself (symbol-font.ts).
  *
- * Where the library holds the face's bytes (a document-embedded face, a
- * served `fonts` face whose tables were read), the cmaps answer exactly
- * ({@link symbolCmapEncoding}). Otherwise (a host-installed face, an
- * application FontFace) the face is measured in the very Canvas context that
- * measures and paints the text ({@link measureSymbolFaceEncoding}).
- */
-import {
-  SYMBOL_FACE_UNICODE,
-  SYMBOL_FACE_UNKNOWN,
-  symbolCodeSet,
-  symbolCodeSetHas,
-  type SymbolFaceEncoding,
-  type SymbolTextSegment,
-  symbolTextToUnicodeSegments,
-} from './symbol-font.js';
-import { parseUnicodeRange } from './font-face-descriptors.js';
-import { parseFamilyList, type FamilyEntry } from './css-font-shorthand.js';
-import { parseCanvasFont, selectMatchingFontFaces, type CanvasFontParts } from './font-face-matching.js';
-
-const tag = (value: string): number => (
-  ((value.charCodeAt(0) << 24) >>> 0) | (value.charCodeAt(1) << 16)
-  | (value.charCodeAt(2) << 8) | value.charCodeAt(3)
-) >>> 0;
-
-/** Codes 0x00..0xFF mapped to a non-zero glyph by one cmap subtable, split by
- * form: at U+F000+code and at the bare code. Formats 0, 4, 6, 12 and 13 —
- * every format a BMP subtable may use. Null: malformed. */
-function subtableCodes(
-  view: DataView, offset: number, available: number,
-): { pua: Set<number>; bare: Set<number> } | null {
-  const pua = new Set<number>();
-  const bare = new Set<number>();
-  const add = (cp: number) => {
-    if (cp >= 0xf000 && cp <= 0xf0ff) pua.add(cp - 0xf000);
-    else if (cp <= 0xff) bare.add(cp);
-  };
-  if (available < 6) return null;
-  const format = view.getUint16(offset);
-  if (format === 0) {
-    if (available < 262) return null;
-    for (let code = 0; code < 256; code++) if (view.getUint8(offset + 6 + code) !== 0) add(code);
-    return { pua, bare };
-  }
-  if (format === 6) {
-    if (available < 10) return null;
-    const first = view.getUint16(offset + 6);
-    const count = view.getUint16(offset + 8);
-    if (10 + count * 2 > available) return null;
-    for (let index = 0; index < count; index++) {
-      if (view.getUint16(offset + 10 + index * 2) !== 0) add(first + index);
-    }
-    return { pua, bare };
-  }
-  if (format === 4) {
-    if (available < 16) return null;
-    const length = view.getUint16(offset + 2);
-    const segX2 = view.getUint16(offset + 6);
-    if (length < 16 || length > available || segX2 === 0 || segX2 % 2) return null;
-    const segments = segX2 / 2;
-    const ends = offset + 14;
-    const starts = ends + segX2 + 2;
-    const deltas = starts + segX2;
-    const ranges = deltas + segX2;
-    if (ranges + segX2 > offset + length) return null;
-    for (let index = 0; index < segments; index++) {
-      const start = view.getUint16(starts + index * 2);
-      const end = view.getUint16(ends + index * 2);
-      if (start > end) return null;
-      const delta = view.getInt16(deltas + index * 2);
-      const rangeAt = ranges + index * 2;
-      const rangeOffset = view.getUint16(rangeAt);
-      // Only codes 0x00..0xFF and U+F000..U+F0FF matter here.
-      for (const [lo, hi] of [[0, 0xff], [0xf000, 0xf0ff]] as const) {
-        for (let cp = Math.max(start, lo); cp <= Math.min(end, hi); cp++) {
-          let glyph: number;
-          if (rangeOffset === 0) glyph = (cp + delta) & 0xffff;
-          else {
-            const at = rangeAt + rangeOffset + (cp - start) * 2;
-            if (at + 2 > offset + length) { glyph = 0; } else {
-              const raw = view.getUint16(at);
-              glyph = raw === 0 ? 0 : (raw + delta) & 0xffff;
-            }
-          }
-          if (glyph !== 0) add(cp);
-        }
-      }
-    }
-    return { pua, bare };
-  }
-  if (format === 12 || format === 13) {
-    if (available < 16) return null;
-    const length = view.getUint32(offset + 4);
-    const groups = view.getUint32(offset + 12);
-    if (length > available || groups > (length - 16) / 12) return null;
-    for (let index = 0; index < groups; index++) {
-      const group = offset + 16 + index * 12;
-      const start = view.getUint32(group);
-      const end = view.getUint32(group + 4);
-      const startGlyph = view.getUint32(group + 8);
-      for (const [lo, hi] of [[0, 0xff], [0xf000, 0xf0ff]] as const) {
-        for (let cp = Math.max(start, lo); cp <= Math.min(end, hi); cp++) {
-          const glyph = format === 13 ? startGlyph : startGlyph + (cp - start);
-          if (glyph !== 0) add(cp);
-        }
-      }
-    }
-    return { pua, bare };
-  }
-  return null;
-}
-
-/**
- * Exact encoding of one face from its sfnt bytes (TrueType/OpenType, or one
- * face of a collection by `faceIndex`). Null when the bytes cannot be read.
+ * Nothing here models font matching. The engine that paints is asked, in the
+ * measuring/painting context and with the Canvas font the kept text paints
+ * with, so `unicode-range`, weight/style matching and synthesis, family-name
+ * syntax, local() aliases and installed faces are all the engine's own.
  *
- * OpenType cmap: a font whose only subtables are Unicode ones (platform 0, or
- * 3/1, 3/10) that agree on the PUA draws a U+F0xx code only where they map it
- * and never draws a bare code as a symbol glyph. A font whose only subtable
- * of those is the symbol one (3/0) is read through it: shapers resolve a PUA
- * code through it, and a bare code 0x20..0xFF through either its own entry
- * or the F0-shifted one (HarfBuzz, DirectWrite, Core Text and Firefox all
- * apply that symbol remapping). Any other combination returns null.
+ * Sentinel mode (the route sentinels of native-route-line-metrics.ts are
+ * loaded in the context's realm). A sentinel maps every scalar, so appending
+ * one to the font's named families ends font fallback there: a character the
+ * named families do not draw is drawn by the sentinel, never by a generic or
+ * system fallback face. The two sentinels differ in advance and ink, hence
+ *
+ *   drawn(x)  :=  `named, A` and `named, B` measure x identically
+ *
+ * (after a control showing that a sentinel alone draws x at all). Then
+ *
+ *   U+F000+c is native  :=  drawn(U+F000+c)
+ *   bare c is native    :=  drawn(c), drawn(U+F000+c), and both measure
+ *                           identically in `named, A`
+ *
+ * A named family that maps U+F0xx is taken to draw the symbol glyph there. A
+ * bare code is a symbol glyph only through the symbol-cmap remapping of the
+ * shaper, which resolves it to the very glyph of U+F000+c; a Unicode face
+ * draws a Latin character for it, or nothing. Kept text is painted with the
+ * same named families in the same order, so the face judged is the face that
+ * paints.
+ *
+ * Plain mode (a realm without any FontFaceSet: a Node canvas, whose fonts are
+ * host fonts only). No sentinel can be registered, and an absent family's
+ * fallback is no evidence (system fallback depends on the primary face), so
+ * a code is native only on positive proof: the bare code and U+F000+c measure
+ * identically in the painting font, and each differs from its measurement in
+ * an absent family. A face that maps only the PUA form converts there.
+ *
+ * Otherwise (a FontFaceSet without working sentinels, a context that does
+ * not measure) nothing is judged and the 0.89 subset converts.
  */
-export function symbolCmapEncoding(bytes: Uint8Array, faceIndex?: number): SymbolFaceEncoding | null {
-  try {
-    if (bytes.byteLength < 12) return null;
-    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-    let sfnt = 0;
-    if (view.getUint32(0) === tag('ttcf')) {
-      if (faceIndex === undefined || faceIndex < 0 || faceIndex >= view.getUint32(8)) return null;
-      sfnt = view.getUint32(12 + faceIndex * 4);
-    } else if (faceIndex !== undefined && faceIndex !== 0) return null;
-    const tables = view.getUint16(sfnt + 4);
-    let cmap = -1;
-    let cmapLength = 0;
-    for (let index = 0; index < tables; index++) {
-      const record = sfnt + 12 + index * 16;
-      if (view.getUint32(record) === tag('cmap')) {
-        cmap = view.getUint32(record + 8);
-        cmapLength = view.getUint32(record + 12);
-      }
-    }
-    if (cmap < 0 || cmap + cmapLength > bytes.byteLength || cmapLength < 4) return null;
-    const records = view.getUint16(cmap + 2);
-    if (4 + records * 8 > cmapLength) return null;
-    // Per Unicode subtable: its PUA codes, and the bare codes it draws as the
-    // Unicode characters (Latin) they are (`latin`, used when several served
-    // faces share a family: such a face, not a later one, draws that code).
-    const unicode: { pua: string; latin: string }[] = [];
-    let symbol: { pua: Set<number>; bare: Set<number> } | null = null;
-    for (let index = 0; index < records; index++) {
-      const record = cmap + 4 + index * 8;
-      const platform = view.getUint16(record);
-      const encoding = view.getUint16(record + 2);
-      const relative = view.getUint32(record + 4);
-      if (relative >= cmapLength) return null;
-      const isUnicode = platform === 0 ? encoding !== 5 : platform === 3 && (encoding === 1 || encoding === 10);
-      const isSymbol = platform === 3 && encoding === 0;
-      if (!isUnicode && !isSymbol) continue;
-      const codes = subtableCodes(view, cmap + relative, cmapLength - relative);
-      if (!codes) return null;
-      if (isUnicode) {
-        unicode.push({ pua: symbolCodeSet(codes.pua), latin: symbolCodeSet(codes.bare) });
-        continue;
-      }
-      symbol ??= { pua: new Set(), bare: new Set() };
-      codes.pua.forEach((code) => symbol!.pua.add(code));
-      codes.bare.forEach((code) => symbol!.bare.add(code));
-    }
-    // Which subtable an engine reads is its choice (HarfBuzz, FreeType and
-    // Core Text rank Unicode and symbol subtables differently), so a face
-    // whose subtables disagree is not judged from its bytes: null, and the
-    // caller measures it in its painting context instead.
-    if (unicode.length > 0) {
-      if (symbol || unicode.some((set) => set.pua !== unicode[0]!.pua || set.latin !== unicode[0]!.latin)) return null;
-      return Object.freeze({ kind: 'known', pua: unicode[0]!.pua, bare: symbolCodeSet([]), latin: unicode[0]!.latin });
-    }
-    if (!symbol) return SYMBOL_FACE_UNICODE;
-    return Object.freeze({
-      kind: 'known',
-      pua: symbolCodeSet(symbol.pua),
-      // DEL and SOFT HYPHEN are default-ignorable as bare characters: shapers
-      // draw nothing for them even through a symbol cmap (see identityProbe).
-      bare: symbolCodeSet([...symbol.bare, ...symbol.pua].filter((code) => code >= 0x20 && !BARE_IGNORED.has(code))),
-    });
-  } catch {
-    return null;
-  }
-}
+import { quoteCssFontFamily } from '../internal/css-font-family.js';
+import { SENTINEL_FAMILIES, parseFamilyList, sentinelsWork } from './native-route-line-metrics.js';
+import { symbolTextToUnicodeSegments, type SymbolTextSegment } from './symbol-font.js';
 
 /** The part of a 2D context the measurement needs. */
 export interface SymbolProbeContext {
@@ -200,104 +50,16 @@ export interface SymbolProbeContext {
     'actualBoundingBoxLeft' | 'actualBoundingBoxRight' | 'actualBoundingBoxAscent' | 'actualBoundingBoxDescent'>>;
 }
 
-/** No host installs this family; listing it last ends the probe font. */
-const ABSENT_FAMILY = '__ooxml_symbol_probe_absent_7c41__';
 const PROBE_PX = 64;
-
-function geometry(context: SymbolProbeContext, text: string): number[] {
-  const m = context.measureText(text);
-  return [m.width, m.actualBoundingBoxLeft ?? 0, m.actualBoundingBoxRight ?? 0,
-    m.actualBoundingBoxAscent ?? 0, m.actualBoundingBoxDescent ?? 0];
-}
-const same = (a: readonly number[], b: readonly number[]) => a.every((value, index) => Object.is(value, b[index]));
-
-/** DELETE (U+007F) and SOFT HYPHEN (U+00AD) are default-ignorable as bare
- * characters: engines draw nothing for them even in a symbol-encoded face, so
- * they cannot show the bare/PUA identity (in Chromium every other code
- * 0x21..0xFF does, C1 controls and NO-BREAK SPACE included). Their ownership
- * is therefore inconclusive, and inconclusive keeps the authored code: in a
- * face proven symbol-encoded by the other codes, their PUA forms stay in the
- * face (as in 0.89, where no table but Symbol's 0xAD converted them); their
- * bare forms are never owned. A face whose bytes the library holds is read
- * exactly instead. The space 0x20 needs no judgement: no table converts it. */
+/** No host installs this family. */
+const ABSENT = '"__ooxml_symbol_probe_absent_7c41__"';
+const [SENTINEL_A, SENTINEL_B] = SENTINEL_FAMILIES.map(quoteCssFontFamily) as [string, string];
+/** DELETE and SOFT HYPHEN are default-ignorable as bare characters: no bare
+ * measurement can show the identity of plain mode for them. */
 const BARE_IGNORED: ReadonlySet<number> = new Set([0x7f, 0xad]);
-const identityProbe = (code: number) => !BARE_IGNORED.has(code);
 
-const STRETCH_KEYWORD: Readonly<Record<number, string>> = {
-  50: 'ultra-condensed', 62.5: 'extra-condensed', 75: 'condensed', 87.5: 'semi-condensed',
-  112.5: 'semi-expanded', 125: 'expanded', 150: 'extra-expanded', 200: 'ultra-expanded',
-};
-
-/**
- * Measure which codes the family list `familyText` (CSS family syntax, as
- * font matching walks it) draws, in the context that measures and paints
- * the text.
- *
- * A face draws code c as a symbol glyph exactly when the shaper resolves both
- * the bare code and U+F000+c to the same glyph of that face: that identity is
- * the symbol-cmap remapping noted at {@link symbolCmapEncoding}, and a
- * Unicode-encoded or missing face draws a Latin character for the bare code
- * and a fallback (or nothing) for the PUA code. Both are measured with
- * the face followed by an absent family, and the PUA geometry must also
- * differ from the absent family's alone, so a face missing both is not
- * mistaken for one that owns both. Geometry is advance plus ink box.
- * Comparing against an absent family's fallback alone is not evidence: font
- * fallback depends on the primary face (Core Text cascades), so two fallback
- * draws can differ although neither is the face's.
- *
- * A context whose text geometry does not vary with the text (a stub context,
- * a canvas without fonts) is inconclusive: `unknown`.
- */
-export function measureSymbolFaceEncoding(
-  context: SymbolProbeContext | null | undefined,
-  familyText: string,
-  weight = 400,
-  style: 'normal' | 'italic' = 'normal',
-  stretch = 100,
-): SymbolFaceEncoding {
-  if (!context) return SYMBOL_FACE_UNKNOWN;
-  const previous = context.font;
-  const previousDirection = context.direction;
-  const previousSpacing = context.letterSpacing;
-  try {
-    // A bare code such as "(" is mirrored in a right-to-left context while
-    // its PUA form is not; spacing is no glyph property. Measure each alone,
-    // left to right, without spacing.
-    if (previousDirection !== undefined) context.direction = 'ltr';
-    if (previousSpacing !== undefined) context.letterSpacing = '0px';
-    // The font shorthand takes width keywords only (CSS Fonts 4 §2.8).
-    const width = STRETCH_KEYWORD[stretch];
-    const prefix = `${style === 'italic' ? 'italic ' : ''}${weight} ${width ? `${width} ` : ''}${PROBE_PX}px `;
-    const absent = `${prefix}"${ABSENT_FAMILY}"`;
-    context.font = absent;
-    const control = [geometry(context, 'i'), geometry(context, 'W')];
-    if (!control.every((g) => g.every(Number.isFinite)) || same(control[0]!, control[1]!)) return SYMBOL_FACE_UNKNOWN;
-    const absentPua: number[][] = [];
-    for (let code = 0; code < 256; code++) absentPua.push(geometry(context, String.fromCharCode(0xf000 + code)));
-    context.font = `${prefix}${familyText}, "${ABSENT_FAMILY}"`;
-    const owned: number[] = [];
-    for (let code = 0x21; code < 256; code++) {
-      if (!identityProbe(code)) continue;
-      const shifted = geometry(context, String.fromCharCode(0xf000 + code));
-      if (!shifted.every(Number.isFinite)) return SYMBOL_FACE_UNKNOWN;
-      if (!same(shifted, absentPua[code]!) && same(shifted, geometry(context, String.fromCharCode(code)))) {
-        owned.push(code);
-      }
-    }
-    if (owned.length === 0) return SYMBOL_FACE_UNICODE;
-    return Object.freeze({
-      kind: 'known', pua: symbolCodeSet([...owned, 0x7f, 0xad]), bare: symbolCodeSet(owned),
-    });
-  } catch {
-    return SYMBOL_FACE_UNKNOWN;
-  } finally {
-    try {
-      context.font = previous;
-      if (previousDirection !== undefined) context.direction = previousDirection;
-      if (previousSpacing !== undefined) context.letterSpacing = previousSpacing;
-    } catch { /* restored best-effort */ }
-  }
-}
+const same = (a: readonly number[], b: readonly number[]) =>
+  a.every((value, index) => Number.isFinite(value) && value === b[index]);
 
 interface ProbeCanvas {
   getContext(type: '2d', options?: CanvasRenderingContext2DSettings): unknown;
@@ -334,7 +96,7 @@ function scratchCanvas(owner: unknown): ProbeCanvas | null {
  * 2D context): drawn in opaque black, a monochrome glyph leaves only black
  * pixels, while a colour emoji face paints its own colours. Undefined
  * (inconclusive) when no scratch canvas exists, it cannot be read back, or
- * the drawing left no ink to judge. Results are cached per font and text.
+ * the drawing left no ink to judge. Results live as long as the probe.
  */
 export function createSymbolMonochromeProbe(
   owner: unknown,
@@ -375,112 +137,13 @@ export function createSymbolMonochromeProbe(
         monochrome = undefined;
       }
     }
-    if (results.size >= 1024) results.delete(results.keys().next().value!);
+    if (results.size >= 1024) results.clear();
     results.set(key, monochrome);
     return monochrome;
   };
 }
 
-// ---- Held bytes ---------------------------------------------------------------------
-
-/** The symbol codes the exact bytes of each registered face draw (null: not
- * read). Recorded where the library registers bytes it holds: document-
- * embedded faces (embedded.ts) and served faces (source-session.ts). */
-const heldEncodings = new WeakMap<FontFace, SymbolFaceEncoding | null>();
-
-/** Record the cmap reading of the bytes `face` was registered from. */
-export function recordHeldSymbolEncoding(face: FontFace, encoding: SymbolFaceEncoding | null): void {
-  heldEncodings.set(face, encoding);
-}
-
-type KnownEncoding = Extract<SymbolFaceEncoding, { kind: 'known' }>;
-
-/** A registered face as the oracle reads it (FontFace descriptors). */
-export type SymbolFaceRecord = Readonly<{
-  weight: string; style: string; stretch?: string; unicodeRange: string;
-  status?: string; symbolEncoding?: SymbolFaceEncoding | null;
-}>;
-
-/**
- * What one registered family paints for a desired style, weight and width,
- * from held bytes. The faces are those CSS font matching selects
- * (selectMatchingFontFaces, CSS Fonts 4 §5.2; synthesis paints them in any
- * tuple), forming one composite by unicode-range: for each scalar the faces
- * covering it are tried, the last-declared first, until one has a glyph for
- * it (§4.5). A PUA code is owned when a covering face draws it; a bare code
- * is decided by the first covering face that has a glyph for it (as a
- * symbol code: owned; as the Unicode character, `latin`: not owned).
- * Undefined unless every selected face is loaded and its bytes were read:
- * the family is then measured.
- */
-export function symbolEncodingOfFaces(
-  faces: readonly SymbolFaceRecord[],
-  desired: Readonly<{ weight: number; style: 'normal' | 'italic'; stretch?: number }>,
-): KnownEncoding | undefined {
-  const selected = selectMatchingFontFaces(faces, desired);
-  if (!selected) return undefined;
-  const ranges: (readonly (readonly [number, number])[])[] = [];
-  const encodings: KnownEncoding[] = [];
-  for (const face of selected) {
-    const parsed = parseUnicodeRange(face.unicodeRange);
-    if (face.symbolEncoding?.kind !== 'known' || !parsed || (face.status ?? 'loaded') !== 'loaded') return undefined;
-    ranges.push(parsed);
-    encodings.push(face.symbolEncoding);
-  }
-  const covering = (scalar: number) => encodings.filter((_, index) =>
-    ranges[index]!.some(([lo, hi]) => lo <= scalar && scalar <= hi)).reverse();
-  const pua: number[] = [];
-  const bare: number[] = [];
-  const latin: number[] = [];
-  for (let code = 0; code < 256; code++) {
-    if (covering(0xf000 + code).some((encoding) => symbolCodeSetHas(encoding.pua, code))) pua.push(code);
-    for (const encoding of covering(code)) {
-      if (symbolCodeSetHas(encoding.bare, code)) { bare.push(code); break; }
-      if (symbolCodeSetHas(encoding.latin, code)) { latin.push(code); break; }
-    }
-  }
-  return Object.freeze({ kind: 'known', pua: symbolCodeSet(pua), bare: symbolCodeSet(bare), latin: symbolCodeSet(latin) });
-}
-
-// ---- The oracle -----------------------------------------------------------------------
-
-/** The Canvas `font` value the symbol text paints with when it is kept
- * (style, weight, size and the complete family list): the oracle reads the
- * same stack, in the same order, that font matching paints. */
-export interface SymbolFaceSelection {
-  readonly font: string;
-}
-
-export interface SymbolFaceOracleOptions {
-  /** The real 2D context when `context` wraps it: colour probes draw on a
-   * scratch canvas of its realm. Defaults to `context`. */
-  readonly probeOwner?: unknown;
-  /** Answers shared across oracles of this realm (PPTX renders the same
-   * font state on every render). Every answer is keyed by the font state it
-   * was derived from either way (see {@link createSymbolFaceOracle}). */
-  readonly shared?: boolean;
-}
-
-/** The CSS font converted text paints with, at a probe size, for one
- * converted string (its slot route, weight and style). */
-export type SymbolFallbackFont = (text: string) => string;
-
-export interface SymbolFaceOracle {
-  encoding(selection: SymbolFaceSelection): SymbolFaceEncoding;
-  segments(
-    text: string,
-    fontFamily: string | null | undefined,
-    selection: SymbolFaceSelection,
-    fallbackFont?: SymbolFallbackFont,
-  ): SymbolTextSegment[];
-}
-
-const sharedEncodings = new WeakMap<object, Map<string, SymbolFaceEncoding>>();
-/** Identity of each registered FontFace in cache keys: a replacement face
- * with the same descriptors but other bytes is another face. */
-const faceIds = new WeakMap<FontFace, number>();
-let nextFaceId = 1;
-
+/** The FontFaceSet of the realm `owner` (a 2D context) measures in. */
 function realmFontSet(owner: unknown): FontFaceSet | null {
   const element = (owner as { canvas?: { ownerDocument?: Document } } | null)?.canvas;
   if (element?.ownerDocument?.fonts) return element.ownerDocument.fonts;
@@ -488,153 +151,155 @@ function realmFontSet(owner: unknown): FontFaceSet | null {
   return scope.document?.fonts ?? scope.fonts ?? null;
 }
 
-/** Family names match caselessly (CSS Fonts 4 §5.1). */
-const familyKey = (family: string) => family.toLowerCase();
+export interface SymbolFaceOracleOptions {
+  /** The real 2D context when `context` wraps it: its realm is the one whose
+   * fonts are judged, and colour probes draw on a scratch canvas of it.
+   * Defaults to `context`. */
+  readonly probeOwner?: unknown;
+}
 
-/**
- * The registered faces (any status) of each named family, and a cache-key
- * token over their identity, family, (mutable, CSS Font Loading 3 §2.1)
- * descriptors, status and whether their bytes were read (a reading may land
- * after the face loads). A face's family is its literal `FontFace.family`
- * (a programmatic face is named by that string exactly). Engines may report
- * a face from an @font-face rule in CSS syntax (quoted), so a face whose
- * family only parses to a selected name enters the token too, and makes
- * that family one the bytes cannot answer for (`unsure`).
- */
-function registeredFaces(fontSet: FontFaceSet | null, families: readonly string[]) {
-  const wanted = new Set(families.map(familyKey));
-  const byFamily = new Map<string, FontFace[]>();
-  const unsure = new Set<string>();
-  const parts: string[] = [];
-  if (fontSet && typeof fontSet[Symbol.iterator] === 'function') {
-    for (const face of fontSet) {
-      const literal = familyKey(face.family);
-      const parsed = (parseFamilyList(face.family) ?? []).map((entry) => familyKey(entry.name))
-        .filter((name) => name !== literal && wanted.has(name));
-      if (!wanted.has(literal) && parsed.length === 0) continue;
-      let id = faceIds.get(face);
-      if (id === undefined) { id = nextFaceId++; faceIds.set(face, id); }
-      parts.push(JSON.stringify([id, face.family, face.status, face.weight, face.style, face.stretch,
-        face.unicodeRange, heldEncodings.has(face)]));
-      if (wanted.has(literal)) byFamily.set(literal, [...(byFamily.get(literal) ?? []), face]);
-      for (const name of parsed) unsure.add(name);
-    }
-  }
-  return { byFamily, unsure, token: parts.join(';') };
+/** The CSS font converted text paints with, at a probe size, for one
+ * converted string. */
+export type SymbolFallbackFont = (text: string) => string;
+
+export interface SymbolFaceOracle {
+  /**
+   * Whether `font` draws the authored symbol code `code` (one character: a
+   * bare code 0x20..0xFF or U+F020..U+F0FF) as its own symbol glyph. `font`
+   * is the Canvas font the kept text paints with, as the library builds it:
+   * `[style] [weight] <size>px <family list>`. Undefined: not judged.
+   */
+  draws(code: string, font: string): boolean | undefined;
+  /** {@link symbolTextToUnicodeSegments} of `text` in the symbol family
+   * `fontFamily`, each code judged by {@link draws} in `font`. */
+  segments(
+    text: string,
+    fontFamily: string | null | undefined,
+    font: string,
+    fallbackFont?: SymbolFallbackFont,
+  ): SymbolTextSegment[];
 }
 
 /**
- * Per-owner symbol decisions in one measuring/painting context: "which face
- * wins this code, and does it draw it as a symbol glyph", for the Canvas
- * font the kept text paints with.
- *
- * The family list is walked as font matching walks it. A named family with
- * registered faces whose selected faces (CSS Fonts 4 §5.2, synthesis
- * included) all carry held bytes is read from their cmaps
- * (symbolEncodingOfFaces). A PUA code is owned when a family draws it
- * (later families draw what earlier ones lack); a bare code is decided by
- * the first family that has a glyph for it. From the first entry the bytes
- * cannot answer for (host-installed, an application face without held
- * bytes, a face still loading, a generic family), the rest of the list is
- * measured as it paints ({@link measureSymbolFaceEncoding}) and decides
- * every open bare code: measurement cannot tell a missing face from a
- * Unicode one, so its unowned bare codes convert. Every answer is cached
- * under the registered faces of the list's families, so a face added,
- * replaced, changed or moved for them re-derives it, held or measured alike.
- * Host-installed fonts do not change during a session. A font that is not a
- * Canvas font shorthand is inconclusive.
+ * Symbol decisions in one measuring/painting context (see the module notes).
+ * Verdicts are kept for the oracle's lifetime, which callers bound by the
+ * font resources they lay out or render with (a DOCX text service, a PPTX
+ * render), exactly like the advances measured in the same context; whether
+ * the sentinels work is re-read with every {@link SymbolFaceOracle.segments}
+ * and {@link SymbolFaceOracle.draws} call.
  */
 export function createSymbolFaceOracle(
   context: SymbolProbeContext | null | undefined,
   options: SymbolFaceOracleOptions = {},
 ): SymbolFaceOracle {
   const probeOwner = options.probeOwner ?? context;
-  const fontSet = realmFontSet(probeOwner);
-  const shared = options.shared === true && fontSet !== null;
-  const encodings = !shared ? new Map<string, SymbolFaceEncoding>()
-    : sharedEncodings.get(fontSet!) ?? (() => {
-      const map = new Map<string, SymbolFaceEncoding>();
-      sharedEncodings.set(fontSet!, map);
-      return map;
-    })();
-  const probe = createSymbolMonochromeProbe(probeOwner);
-  const derive = (font: CanvasFontParts, byFamily: Map<string, FontFace[]>, unsure: Set<string>): SymbolFaceEncoding => {
-    const pua = new Set<number>();
-    const bare = new Set<number>();
-    const decided = new Set<number>();
-    const heldOf = (entry: FamilyEntry) => {
-      const faces = entry.generic || unsure.has(familyKey(entry.name)) ? [] : byFamily.get(familyKey(entry.name)) ?? [];
-      return faces.length === 0 ? undefined : symbolEncodingOfFaces(faces.map((face) => ({
-        weight: face.weight, style: face.style, stretch: face.stretch, unicodeRange: face.unicodeRange,
-        status: face.status, symbolEncoding: heldEncodings.get(face),
-      })), font);
-    };
-    const { families } = font;
-    for (let index = 0; index < families.length; index++) {
-      const held = heldOf(families[index]!);
-      if (held) {
-        for (let code = 0; code < 256; code++) {
-          if (symbolCodeSetHas(held.pua, code)) pua.add(code);
-          if (decided.has(code)) continue;
-          if (symbolCodeSetHas(held.bare, code)) { bare.add(code); decided.add(code); }
-          else if (symbolCodeSetHas(held.latin, code)) decided.add(code);
-        }
-        continue;
-      }
-      // An entry the bytes cannot answer for: the rest of the list is
-      // measured as it paints (falling through to later faces) and decides
-      // every bare code still open. The identity test owns a PUA code only
-      // when its bare form draws the same glyph, so the PUA codes of later
-      // held faces (a unicode-range limited to U+F000-F0FF) are added.
-      const measured = measureSymbolFaceEncoding(context,
-        families.slice(index).map((entry) => entry.text).join(', '), font.weight, font.style, font.stretch);
-      if (measured.kind === 'unknown') return SYMBOL_FACE_UNKNOWN;
-      for (let code = 0; code < 256; code++) {
-        if (symbolCodeSetHas(measured.pua, code)) pua.add(code);
-        if (!decided.has(code) && symbolCodeSetHas(measured.bare, code)) bare.add(code);
-      }
-      for (const later of families.slice(index + 1)) {
-        const laterHeld = heldOf(later);
-        for (let code = 0; laterHeld && code < 256; code++) if (symbolCodeSetHas(laterHeld.pua, code)) pua.add(code);
-      }
-      break;
+  const monochrome = createSymbolMonochromeProbe(probeOwner);
+  const verdicts = new Map<string, boolean | undefined>();
+  let font = '';
+  const measure = (probeFont: string, text: string): number[] => {
+    if (font !== probeFont) {
+      context!.font = probeFont;
+      font = probeFont;
     }
-    return Object.freeze({ kind: 'known', pua: symbolCodeSet(pua), bare: symbolCodeSet(bare) });
+    const m = context!.measureText(text);
+    return [m.width, m.actualBoundingBoxLeft ?? 0, m.actualBoundingBoxRight ?? 0,
+      m.actualBoundingBoxAscent ?? 0, m.actualBoundingBoxDescent ?? 0];
   };
-  const encoding = (selection: SymbolFaceSelection): SymbolFaceEncoding => {
-    const font = parseCanvasFont(selection.font);
-    if (!font) return SYMBOL_FACE_UNKNOWN;
-    const named = font.families.filter((entry) => !entry.generic).map((entry) => entry.name);
-    const { byFamily, unsure, token } = registeredFaces(fontSet, named);
-    const key = JSON.stringify([font.familyList, font.weight, font.style, font.stretch, token]);
-    let result = encodings.get(key);
-    if (!result) {
-      result = derive(font, byFamily, unsure);
-      if (encodings.size >= 512) encodings.delete(encodings.keys().next().value!);
-      encodings.set(key, result);
+  /** Run `probe` left to right and without spacing (a bare "(" is mirrored
+   * in a right-to-left context, its PUA form is not), restoring the context. */
+  const probing = <T>(probe: () => T): T | undefined => {
+    if (!context) return undefined;
+    const previous = context.font;
+    const direction = context.direction;
+    const spacing = context.letterSpacing;
+    try {
+      if (direction !== undefined) context.direction = 'ltr';
+      if (spacing !== undefined) context.letterSpacing = '0px';
+      font = '';
+      return probe();
+    } catch {
+      return undefined;
+    } finally {
+      try {
+        context.font = previous;
+        if (direction !== undefined) context.direction = direction;
+        if (spacing !== undefined) context.letterSpacing = spacing;
+      } catch { /* restored best-effort */ }
     }
-    return result;
+  };
+  const judge = (mode: 'sentinel' | 'plain', pua: boolean, code: number, prefix: string, familyList: string): boolean | undefined => {
+    const shifted = String.fromCharCode(0xf000 + code);
+    const bare = String.fromCharCode(code);
+    const size = `${prefix}${PROBE_PX}px `;
+    if (mode === 'sentinel') {
+      const families = parseFamilyList(familyList);
+      if (!families) return undefined;
+      const generic = families.findIndex((entry) => entry.generic);
+      const named = (generic < 0 ? families : families.slice(0, generic)).map((entry) => `${entry.text}, `).join('');
+      const drawn = (text: string) =>
+        !same(measure(`${size}${SENTINEL_A}`, text), measure(`${size}${SENTINEL_B}`, text))
+        && same(measure(`${size}${named}${SENTINEL_A}`, text), measure(`${size}${named}${SENTINEL_B}`, text));
+      if (!drawn(shifted)) return false;
+      return pua || (drawn(bare)
+        && same(measure(`${size}${named}${SENTINEL_A}`, bare), measure(`${size}${named}${SENTINEL_A}`, shifted)));
+    }
+    const painted = `${size}${familyList}`;
+    const absent = `${size}${ABSENT}`;
+    // A context whose text geometry does not vary with the text (a stub, a
+    // canvas without fonts) cannot judge.
+    if (same(measure(absent, 'i'), measure(absent, 'W'))) return undefined;
+    const differs = (text: string) => !same(measure(painted, text), measure(absent, text));
+    const identity = (probe: number) => {
+      const b = String.fromCharCode(probe);
+      const s = String.fromCharCode(0xf000 + probe);
+      return same(measure(painted, s), measure(painted, b)) && differs(s) && differs(b);
+    };
+    // The PUA form of a default-ignorable code stays in a face that another
+    // code ("A") proves symbol-encoded; its bare form is never native.
+    if (BARE_IGNORED.has(code)) return pua && identity(0x41) && differs(shifted);
+    return identity(code);
+  };
+  type Mode = 'sentinel' | 'plain' | null;
+  const readMode = (): Mode =>
+    sentinelsWork(context as never) ? 'sentinel' : realmFontSet(probeOwner) ? null : 'plain';
+  /** `state.mode` is read once per public call, before its first verdict. */
+  const decide = (character: string, paintFont: string, state: { mode?: Mode }): boolean | undefined => {
+    const cp = character.codePointAt(0) ?? 0;
+    const pua = cp >= 0xf020 && cp <= 0xf0ff;
+    if (character.length !== 1 || (!pua && (cp < 0x20 || cp > 0xff))) return false;
+    // The size is the first `<number>px` token: style, weight and width
+    // keywords before it never contain one, and the library writes no
+    // line-height.
+    const split = /^(.*?)\d*\.?\d+px\s+(.+)$/su.exec(paintFont);
+    if (!split) return undefined;
+    return probing(() => {
+      if (state.mode === undefined) state.mode = readMode();
+      const mode = state.mode;
+      if (!mode) return undefined;
+      const key = `${mode}\u0000${split[1]}\u0000${split[2]}\u0000${character}`;
+      if (verdicts.has(key)) return verdicts.get(key);
+      font = '';
+      const verdict = judge(mode, pua, pua ? cp - 0xf000 : cp, split[1]!, split[2]!);
+      if (verdicts.size >= 4096) verdicts.clear();
+      verdicts.set(key, verdict);
+      return verdict;
+    });
   };
   return Object.freeze({
-    encoding,
-    segments(text: string, fontFamily: string | null | undefined, selection: SymbolFaceSelection,
-      fallbackFont?: SymbolFallbackFont) {
-      const judged = encoding(selection);
-      const segments = symbolTextToUnicodeSegments(text, fontFamily, {
-        encoding: judged,
+    draws: (code: string, paintFont: string) => decide(code, paintFont, {}),
+    segments(text: string, fontFamily: string | null | undefined, paintFont: string, fallbackFont?: SymbolFallbackFont) {
+      const state = {};
+      return symbolTextToUnicodeSegments(text, fontFamily, {
+        native: (code) => decide(code, paintFont, state),
         // A shaper may paint the VS15 apart from its base (another script
         // slot), so the base alone must be monochrome in its route too.
         monochrome: (converted) => {
-          const base = converted.replace(/\uFE0E/gu, '');
-          const withSelector = probe(converted, fallbackFont?.(converted));
+          const base = converted.replace(/︎/gu, '');
+          const withSelector = monochrome(converted, fallbackFont?.(converted));
           if (withSelector !== true || base === converted) return withSelector;
-          return probe(base, fallbackFont?.(base));
+          return monochrome(base, fallbackFont?.(base));
         },
       });
-      const drawsNone = judged.kind === 'known' && !/[^0]/u.test(judged.pua) && !/[^0]/u.test(judged.bare);
-      return drawsNone
-        ? segments.map((part) => (part.mapped ? { ...part, unicodeFace: true as const } : part))
-        : segments;
     },
   });
 }

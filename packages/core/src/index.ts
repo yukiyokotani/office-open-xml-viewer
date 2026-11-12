@@ -222,11 +222,6 @@ export {
   isSymbolFontFamily,
   symbolTextToUnicodeSegments,
   symbolFontKey,
-  symbolCodeSet,
-  symbolCodeSetHas,
-  SYMBOL_FACE_UNICODE,
-  SYMBOL_FACE_UNKNOWN,
-  type SymbolFaceEncoding,
   type SymbolFontKey,
   type SymbolTextOptions,
   type SymbolTextSegment,
@@ -234,12 +229,9 @@ export {
 export {
   createSymbolFaceOracle,
   createSymbolMonochromeProbe,
-  measureSymbolFaceEncoding,
-  symbolCmapEncoding,
   type SymbolFaceOracle,
   type SymbolFaceOracleOptions,
   type SymbolFallbackFont,
-  type SymbolFaceSelection,
   type SymbolProbeContext,
 } from './fonts/symbol-face';
 export { renderChart, collectChartFillRenderedSizes, assertChartFillRenderedSizeCount } from './chart/renderer';

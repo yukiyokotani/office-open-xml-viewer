@@ -72,7 +72,6 @@ import {
 import { resolveFontFiles } from './files-source.js';
 import { parseOpenTypeResourceMetrics, type OpenTypeLineMetrics } from './open-type-metrics.js';
 import { metricSfnt } from './web-font-sfnt.js';
-import { recordHeldSymbolEncoding, symbolCmapEncoding } from './symbol-face.js';
 import { DecodeQueue } from './decode-queue.js';
 import { concludeFamilies } from './resolver-failures.js';
 import {
@@ -212,11 +211,7 @@ async function decodeResourceMetrics(face: FontFace, data: ArrayBuffer): Promise
   let metrics: OpenTypeLineMetrics | null = null;
   try {
     const sfnt = await metricSfnt(data);
-    if (sfnt instanceof Uint8Array) {
-      metrics = parseOpenTypeResourceMetrics(sfnt, undefined, { variations: true });
-      // The symbol codes these exact bytes draw (symbol-face.ts oracle).
-      recordHeldSymbolEncoding(face, symbolCmapEncoding(sfnt));
-    }
+    if (sfnt instanceof Uint8Array) metrics = parseOpenTypeResourceMetrics(sfnt, undefined, { variations: true });
   } catch { metrics = null; }
   faceResourceMetrics.set(face, metrics);
 }

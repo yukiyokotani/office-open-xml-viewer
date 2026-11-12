@@ -1,7 +1,6 @@
 import { retainFace, releaseFaces } from './font-registry.js';
 import { withFontCeiling } from './font-registry.js';
 import type { CanvasFontBoxProbeContext } from './canvas-font-box.js';
-import { parseFamilyList, type FamilyEntry } from './css-font-shorthand.js';
 import { quoteCssFontFamily } from '../internal/css-font-family.js';
 
 /** One CSS family list exactly as a format's resolver hands it to Canvas, with
@@ -84,7 +83,7 @@ const SENTINELS = [
 ] as const;
 /** Equal to the probe size, so every sentinel metric is a whole pixel. */
 const SENTINEL_UPM = 1024;
-const SENTINEL_FAMILIES = SENTINELS.map((sentinel) => sentinel.family);
+export const SENTINEL_FAMILIES = SENTINELS.map((sentinel) => sentinel.family);
 /** One size for every probe, which is also the half-size strut: engines cache
  * font lookups per size, so the listed families are resolved at two sizes in
  * all. The strut starts at twice this size, where engines round the normal
@@ -194,7 +193,7 @@ function newProbeContext(owner?: Document | null): CanvasFontBoxProbeContext | n
 
 /** The sentinel geometry is a design contract: verify that this realm loaded
  * and applies both registrations before any result depends on them. */
-function sentinelsWork(context: CanvasFontBoxProbeContext): boolean {
+export function sentinelsWork(context: CanvasFontBoxProbeContext): boolean {
   try {
     return SENTINELS.every((sentinel) => {
       context.font = `${PROBE_EM}px ${quoteCssFontFamily(sentinel.family)}`;
@@ -238,6 +237,66 @@ export async function loadNativeRouteSentinels(fontSet: FontFaceSet | null): Pro
 }
 
 // ── Family lists ────────────────────────────────────────────────────────────
+
+const GENERIC_FAMILIES = new Set([
+  'serif', 'sans-serif', 'monospace', 'cursive', 'fantasy', 'system-ui',
+  'ui-serif', 'ui-sans-serif', 'ui-monospace', 'ui-rounded', 'math', 'emoji', 'fangsong',
+]);
+
+interface FamilyEntry {
+  /** Source text of the entry, as written in the list. */
+  readonly text: string;
+  /** Family name (quotes and escapes removed). */
+  readonly name: string;
+  readonly generic: boolean;
+}
+
+/** Split a CSS font-family list into entries, honouring quoted strings and
+ * escapes (CSS Syntax 3 §4.3.5). Unquoted multi-word names collapse their
+ * whitespace (CSS Fonts 4 §2.1). Returns null for malformed lists. */
+export function parseFamilyList(list: string): FamilyEntry[] | null {
+  const entries: FamilyEntry[] = [];
+  let index = 0;
+  while (index < list.length) {
+    while (index < list.length && /\s/.test(list[index]!)) index += 1;
+    const start = index;
+    let name = '';
+    let quoted = false;
+    if (list[index] === '"' || list[index] === "'") {
+      quoted = true;
+      const quote = list[index]!;
+      index += 1;
+      let closed = false;
+      while (index < list.length) {
+        const character = list[index]!;
+        if (character === '\\') {
+          const hex = /^[0-9a-fA-F]{1,6}\s?/.exec(list.slice(index + 1));
+          if (hex) {
+            name += String.fromCodePoint(Math.min(parseInt(hex[0].trim(), 16) || 0xfffd, 0x10ffff));
+            index += 1 + hex[0].length;
+          } else {
+            name += list[index + 1] ?? '';
+            index += 2;
+          }
+          continue;
+        }
+        if (character === quote) { closed = true; index += 1; break; }
+        name += character;
+        index += 1;
+      }
+      if (!closed) return null;
+      while (index < list.length && /\s/.test(list[index]!)) index += 1;
+    } else {
+      while (index < list.length && list[index] !== ',') index += 1;
+      name = list.slice(start, index).trim().replace(/\s+/g, ' ');
+    }
+    const text = list.slice(start, index).trim();
+    if (!name || (index < list.length && list[index] !== ',')) return null;
+    entries.push({ text, name, generic: !quoted && GENERIC_FAMILIES.has(name.toLowerCase()) });
+    index += 1;
+  }
+  return entries.length > 0 ? entries : null;
+}
 
 function sameFamilyList(a: readonly FamilyEntry[], b: readonly FamilyEntry[]): boolean {
   return a.length === b.length && a.every((entry, index) =>

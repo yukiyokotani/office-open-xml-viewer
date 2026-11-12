@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { SYMBOL_FACE_UNICODE, symbolCodeSet, symbolTextToUnicodeSegments } from '@silurus/ooxml-core';
+import { symbolTextToUnicodeSegments } from '@silurus/ooxml-core';
 import type { TextLayoutService } from './text.js';
 import { resolveNumberingMarkerGeometry } from './numbering-marker.js';
 import { createTextLayoutService } from './text.js';
@@ -76,198 +76,85 @@ describe('resolveNumberingMarkerGeometry', () => {
     } },
   });
 
-  // #2177 review: a converted marker is Unicode text. Shaping it with the
-  // marker's Symbol family would let a symbol-encoded Symbol re-read U+00A9
-  // as its own code 0xA9 (a heart), so its slots are cleared. A code the face
-  // draws keeps the Symbol slots.
-  it.each([
-    ['lacks', [] as number[], '©\uFE0E', null],
-    ['draws', [0xd3], '\uF0D3', 'Symbol'],
-  ])('shapes a Symbol marker the face %s with the matching slots', (_case, owned, text, ascii) => {
-    const requests: { text: string; ascii: string | null | undefined }[] = [];
+  // #2177: a symbol marker is judged like run text and shaped as one run.
+  // `native` lists the authored codes (bare or U+F0xx) the marker font draws
+  // as its own symbol glyphs.
+  const symbolMarker = (text: string, native: readonly string[], options: Readonly<{
+    complexScriptFace?: string; baseRtl?: boolean;
+  }> = {}) => {
+    const requests: { text: string; ascii: string | null | undefined; cs: string | null | undefined }[] = [];
     const base = createTextLayoutService({
       fonts: createFontResolver([]),
       measurer: { fingerprint: 'marker-symbol', measure: (request) => ({
         advancePt: request.text.length * 6, ascentPt: 8, descentPt: 2,
       }) },
       symbolText: (markerText, family) => symbolTextToUnicodeSegments(markerText, family, {
-        encoding: { kind: 'known', pua: symbolCodeSet(owned), bare: symbolCodeSet(owned) },
+        native: (code) => native.includes(code),
         monochrome: () => true,
       }),
+      symbolDraws: (code) => native.includes(code),
     });
     const service: TextLayoutService = { ...base, shape(request) {
-      requests.push({ text: request.text, ascii: request.fonts.ascii });
+      requests.push({ text: request.text, ascii: request.fonts.ascii, cs: request.fonts.complexScript });
       return base.shape(request);
     } };
     const geometry = resolveNumberingMarkerGeometry(
-      { numId: 1, level: 0, format: 'bullet', text: '\uF0D3', suff: 'tab', indentLeft: 0, tab: 36, fontFamily: 'Symbol' },
-      { fontSizePt: 12, fonts: { ascii: 'Symbol', highAnsi: 'Symbol', eastAsia: 'Symbol', complexScript: 'Symbol' },
-        weight: 400, style: 'normal', complexScript: false },
-      { authoredFirstIndentPt: 0, physicalIndentLeftPt: 0, tabStops: [], defaultTabPt: 36 }, service,
+      { numId: 1, level: 0, format: 'bullet', text, suff: 'tab', indentLeft: 0, tab: 36, fontFamily: 'Symbol' },
+      { fontSizePt: 12, fonts: { ascii: 'Symbol', highAnsi: 'Symbol', eastAsia: 'Symbol',
+        complexScript: options.complexScriptFace ?? 'Symbol' },
+        weight: 400, style: 'normal', complexScript: options.complexScriptFace !== undefined },
+      { authoredFirstIndentPt: 0, physicalIndentLeftPt: 0, tabStops: [], defaultTabPt: 36, baseRtl: options.baseRtl ?? false },
+      service,
     );
-    expect(geometry.markerText).toBe(text);
-    expect(requests.find((request) => request.text === text)?.ascii).toBe(ascii);
+    return { geometry, requests };
+  };
+
+  it('keeps a marker code its font draws, in the symbol slots', () => {
+    const { geometry, requests } = symbolMarker('', ['']);
+    expect(geometry.markerText).toBe('');
+    expect(requests).toEqual([{ text: '', ascii: 'Symbol', cs: 'Symbol' }]);
   });
 
-  it('shapes a partly native Symbol marker piece by piece, in order', () => {
-    const requests: { text: string; ascii: string | null | undefined }[] = [];
-    const base = createTextLayoutService({
-      fonts: createFontResolver([]),
-      measurer: { fingerprint: 'marker-symbol-mixed', measure: (request) => ({
-        advancePt: request.text.length * 6, ascentPt: 8, descentPt: 2,
-      }) },
-      symbolText: (markerText, family) => symbolTextToUnicodeSegments(markerText, family, {
-        encoding: { kind: 'known', pua: symbolCodeSet([0x61]), bare: symbolCodeSet([0x61]) },
-      }),
-    });
-    const service: TextLayoutService = { ...base, shape(request) {
-      requests.push({ text: request.text, ascii: request.fonts.ascii });
-      return base.shape(request);
-    } };
-    const geometry = resolveNumberingMarkerGeometry(
-      { numId: 1, level: 0, format: 'bullet', text: '\uF061\uF062', suff: 'tab', indentLeft: 0, tab: 36, fontFamily: 'Symbol' },
-      { fontSizePt: 12, fonts: { ascii: 'Symbol', highAnsi: 'Symbol', eastAsia: 'Symbol', complexScript: 'Symbol' },
-        weight: 400, style: 'normal', complexScript: false },
-      { authoredFirstIndentPt: 0, physicalIndentLeftPt: 0, tabStops: [], defaultTabPt: 36, baseRtl: false }, service,
-    );
-    expect(geometry.markerText).toBe('\uF061\u03b2');
-    expect(requests.slice(0, 2)).toEqual([{ text: '\uF061', ascii: 'Symbol' }, { text: '\u03b2', ascii: null }]);
-    expect(geometry.shape?.spans.map((span) => [span.text, span.start, span.end])).toEqual([['\uF061', 0, 1], ['\u03b2', 1, 2]]);
+  it('keeps the marker slots for text converted from a font that draws no symbol code', () => {
+    // Apple's Symbol is Unicode-encoded: U+F0B7 becomes "•", which that same
+    // face draws, as in 0.89.
+    const { geometry, requests } = symbolMarker('', []);
+    expect(geometry.markerText).toBe('•');
+    expect(requests).toEqual([{ text: '•', ascii: 'Symbol', cs: 'Symbol' }]);
+  });
+
+  it('clears the slots when the symbol font would draw the converted text as its own codes', () => {
+    // Symbol 0xB8 is "÷" (U+00F7); a face lacking U+F0B8 but drawing a bare
+    // 0xF7 as its symbol glyph would re-read the converted character.
+    const { geometry, requests } = symbolMarker('', ['÷']);
+    expect(geometry.markerText).toBe('÷');
+    expect(requests).toEqual([{ text: '÷', ascii: null, cs: null }]);
+    expect(symbolMarker('', []).requests).toEqual([{ text: '÷', ascii: 'Symbol', cs: 'Symbol' }]);
+  });
+
+  it('shapes an emoji-capable target in the cleared route its monochrome proof was made in', () => {
+    const { geometry, requests } = symbolMarker('', []);
+    expect(geometry.markerText).toBe('©︎');
+    expect(requests[0]).toEqual({ text: '©︎', ascii: null, cs: null });
+  });
+
+  it.each([false, true])('keeps a marker as authored when its font draws only some of its codes (rtl: %s)', (baseRtl) => {
+    const { geometry, requests } = symbolMarker('', [''], { baseRtl });
+    expect(geometry.markerText).toBe('');
+    expect(requests).toEqual([{ text: '', ascii: 'Symbol', cs: 'Symbol' }]);
     expect(geometry.markerWidthPt).toBe(geometry.shape?.advancePt);
   });
 
-  it('keeps the marker slots for text converted from a face that draws no symbol code', () => {
-    // Apple's Symbol is Unicode-encoded: U+F0B7 becomes "•", which that same
-    // face draws, as in 0.89. A symbol-encoded face elsewhere would clear them.
-    const requests: { text: string; ascii: string | null | undefined }[] = [];
-    const base = createTextLayoutService({
-      fonts: createFontResolver([]),
-      measurer: { fingerprint: 'marker-symbol-unicode-face', measure: (request) => ({
-        advancePt: request.text.length * 6, ascentPt: 8, descentPt: 2,
-      }) },
-      symbolText: (markerText, family) => symbolTextToUnicodeSegments(markerText, family, { encoding: SYMBOL_FACE_UNICODE })
-        .map((part) => (part.mapped ? { ...part, unicodeFace: true as const } : part)),
-    });
-    const service: TextLayoutService = { ...base, shape(request) {
-      requests.push({ text: request.text, ascii: request.fonts.ascii });
-      return base.shape(request);
-    } };
-    const geometry = resolveNumberingMarkerGeometry(
-      { numId: 1, level: 0, format: 'bullet', text: '\uF0B7', suff: 'tab', indentLeft: 0, tab: 36, fontFamily: 'Symbol' },
-      { fontSizePt: 12, fonts: { ascii: 'Symbol', highAnsi: 'Symbol', eastAsia: 'Symbol', complexScript: 'Symbol' },
-        weight: 400, style: 'normal', complexScript: false },
-      { authoredFirstIndentPt: 0, physicalIndentLeftPt: 0, tabStops: [], defaultTabPt: 36, baseRtl: false }, service,
-    );
-    expect(geometry.markerText).toBe('\u2022');
-    expect(requests[0]).toEqual({ text: '\u2022', ascii: 'Symbol' });
-  });
-
   it('judges a complex-script symbol marker in its symbol family, not its cs text face', () => {
-    // The cs slot names a text face; Word still draws the lvlText code in Symbol.
-    const requests: { text: string; cs: string | null | undefined }[] = [];
-    const base = createTextLayoutService({
-      fonts: createFontResolver([]),
-      measurer: { fingerprint: 'marker-symbol-cs', measure: (request) => ({
-        advancePt: request.text.length * 6, ascentPt: 8, descentPt: 2,
-      }) },
-      symbolText: (markerText, family) => symbolTextToUnicodeSegments(markerText, family, { encoding: SYMBOL_FACE_UNICODE }),
-    });
-    const service: TextLayoutService = { ...base, shape(request) {
-      requests.push({ text: request.text, cs: request.fonts.complexScript });
-      return base.shape(request);
-    } };
-    const geometry = resolveNumberingMarkerGeometry(
-      { numId: 1, level: 0, format: 'bullet', text: '\uF0B7', suff: 'tab', indentLeft: 0, tab: 36, fontFamily: 'Symbol' },
-      { fontSizePt: 12, fonts: { ascii: 'Symbol', highAnsi: 'Symbol', eastAsia: 'Symbol', complexScript: 'Times New Roman' },
-        weight: 400, style: 'normal', complexScript: true },
-      { authoredFirstIndentPt: 0, physicalIndentLeftPt: 0, tabStops: [], defaultTabPt: 36, baseRtl: true }, service,
-    );
-    expect(geometry.markerText).toBe('\u2022');
-    expect(requests[0]).toEqual({ text: '\u2022', cs: null });
-  });
-
-  it('converts a partly native marker per code and places its pieces in bidi order (RTL)', () => {
-    const requests: { text: string; ascii: string | null | undefined }[] = [];
-    const base = createTextLayoutService({
-      fonts: createFontResolver([]),
-      measurer: { fingerprint: 'marker-symbol-rtl', measure: (request) => ({
-        advancePt: request.text.length * 6, ascentPt: 8, descentPt: 2,
-      }) },
-      symbolText: (markerText, family) => symbolTextToUnicodeSegments(markerText, family, {
-        encoding: { kind: 'known', pua: symbolCodeSet([0x61]), bare: symbolCodeSet([0x61]) },
-      }),
-    });
-    const service: TextLayoutService = { ...base, shape(request) {
-      requests.push({ text: request.text, ascii: request.fonts.ascii });
-      return base.shape(request);
-    } };
-    const geometry = resolveNumberingMarkerGeometry(
-      { numId: 1, level: 0, format: 'bullet', text: 'a\uF0AE', suff: 'tab', indentLeft: 0, tab: 36, fontFamily: 'Symbol' },
-      { fontSizePt: 12, fonts: { ascii: 'Symbol', highAnsi: 'Symbol', eastAsia: 'Symbol', complexScript: 'Symbol' },
-        weight: 400, style: 'normal', complexScript: false },
-      { authoredFirstIndentPt: 0, physicalIndentLeftPt: 0, tabStops: [], defaultTabPt: 36, baseRtl: true }, service,
-    );
-    expect(geometry.markerText).toBe('a\u2192');
-    // "a" (L) and "→" (neutral, resolved R at the paragraph end) appear as [→, a].
-    expect(geometry.shape?.spans.map((span) => [span.text, span.start])).toEqual([['\u2192', 1], ['a', 0]]);
-    expect(requests).toEqual(expect.arrayContaining([{ text: 'a', ascii: 'Symbol' }, { text: '\u2192', ascii: null }]));
-  });
-
-  it('paints a converted neutral between native letters in its resolved direction (RTL)', () => {
-    const base = createTextLayoutService({
-      fonts: createFontResolver([]),
-      measurer: { fingerprint: 'marker-symbol-rtl-dir', measure: (request) => ({
-        advancePt: request.text.length * 6, ascentPt: 8, descentPt: 2,
-      }) },
-      symbolText: (markerText, family) => symbolTextToUnicodeSegments(markerText, family, {
-        encoding: { kind: 'known', pua: symbolCodeSet([0x61, 0x62]), bare: symbolCodeSet([0x61, 0x62]) },
-      }),
-    });
-    const geometry = resolveNumberingMarkerGeometry(
-      { numId: 1, level: 0, format: 'bullet', text: 'a\uF028b', suff: 'tab', indentLeft: 0, tab: 36, fontFamily: 'Symbol' },
-      { fontSizePt: 12, fonts: { ascii: 'Symbol', highAnsi: 'Symbol', eastAsia: 'Symbol', complexScript: 'Symbol' },
-        weight: 400, style: 'normal', complexScript: false },
-      { authoredFirstIndentPt: 0, physicalIndentLeftPt: 0, tabStops: [], defaultTabPt: 36, baseRtl: true }, base,
-    );
-    // "(" between two L letters resolves L: [a, (, b] left to right, all LTR.
-    expect(geometry.shape?.spans.map((span) => span.text)).toEqual(['a', '(', 'b']);
-    expect(geometry.spanDirections).toEqual(['ltr', 'ltr', 'ltr']);
-  });
-
-  it.each([
-    // "(" after a letter at the paragraph end resolves R (mirrored); VS15 stays with its base.
-    ['a\uF028', [['(', 'rtl'], ['a', 'ltr']]],
-    ['a\uF0D3', [['\u00A9\uFE0E', 'rtl'], ['a', 'ltr']]],
-    // Other text stays whole, so Arabic keeps its joining.
-    ['\u0633\u0644\u0627\u0645\uF028', [['(', 'rtl'], ['\u0633\u0644\u0627\u0645', 'rtl']]],
-    ['\uF061\u0633\u0644\u0627\u0645\uF028', [['(', 'rtl'], ['\u0633\u0644\u0627\u0645', 'rtl'], ['\uF061', 'ltr']]],
-    ['\uF061\u0633\u0644\u0627\u0645\u4E2D\uF028', [['(', 'rtl'], ['\u4E2D', 'ltr'], ['\u0633\u0644\u0627\u0645', 'rtl'], ['\uF061', 'ltr']]],
-    ['\uF061\uFE0E\u0633\u0644\u0627\u0645\uF028', [['(', 'rtl'], ['\u0633\u0644\u0627\u0645', 'rtl'], ['\uF061\uFE0E', 'ltr']]],
-    // Converted pieces paint their spans right to left; an authored VS15 joins its base.
-    ['a\uF028\uF0B7', [['\u2022', 'rtl'], ['(', 'rtl'], ['a', 'ltr']]],
-    // The VS15 shares its base's piece; the shaper gives it its own (highAnsi) span, as in body text.
-    ['a\uF028\uFE0E', [['\uFE0E', 'rtl'], ['(', 'rtl'], ['a', 'ltr']]],
-    // A fully converted marker is ordered too: "(β)" paints [")", "β", "("]
-    // left to right, "β" (L) between neutrals that resolve R at both ends.
-    ['\uF028\uF062\uF029', [[')', 'rtl'], ['\u03B2', 'ltr'], ['(', 'rtl']]],
-  ])('orders and directs RTL marker pieces of %j by their resolved levels', (text, expected) => {
-    const base = createTextLayoutService({
-      fonts: createFontResolver([]),
-      measurer: { fingerprint: 'marker-symbol-rtl-levels', measure: (request) => ({
-        advancePt: request.text.length * 6, ascentPt: 8, descentPt: 2,
-      }) },
-      symbolText: (markerText, family) => symbolTextToUnicodeSegments(markerText, family, {
-        encoding: { kind: 'known', pua: symbolCodeSet([0x61]), bare: symbolCodeSet([0x61]) },
-        monochrome: () => true,
-      }),
-    });
-    const geometry = resolveNumberingMarkerGeometry(
-      { numId: 1, level: 0, format: 'bullet', text, suff: 'tab', indentLeft: 0, tab: 36, fontFamily: 'Symbol' },
-      { fontSizePt: 12, fonts: { ascii: 'Symbol', highAnsi: 'Symbol', eastAsia: 'Symbol', complexScript: 'Symbol' },
-        weight: 400, style: 'normal', complexScript: false },
-      { authoredFirstIndentPt: 0, physicalIndentLeftPt: 0, tabStops: [], defaultTabPt: 36, baseRtl: true }, base,
-    );
-    expect(geometry.shape?.spans.map((span, index) => [span.text, geometry.spanDirections?.[index]])).toEqual(expected);
+    // The cs slot names a text face; Word still draws the lvlText code in
+    // Symbol. A kept code is shaped in that family alone; converted text is
+    // ordinary Unicode in the authored slots.
+    const kept = symbolMarker('', [''], { complexScriptFace: 'Times New Roman', baseRtl: true });
+    expect(kept.geometry.markerText).toBe('');
+    expect(kept.requests).toEqual([{ text: '', ascii: 'Symbol', cs: 'Symbol' }]);
+    const converted = symbolMarker('', [], { complexScriptFace: 'Times New Roman', baseRtl: true });
+    expect(converted.geometry.markerText).toBe('•');
+    expect(converted.requests).toEqual([{ text: '•', ascii: 'Symbol', cs: 'Times New Roman' }]);
   });
 
   it.each([

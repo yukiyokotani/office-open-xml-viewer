@@ -1,31 +1,17 @@
 import { describe, expect, it } from 'vitest';
 import {
-  SYMBOL_FACE_UNICODE,
-  SYMBOL_FACE_UNKNOWN,
   isSymbolFontFamily,
-  symbolCodeSet,
   symbolFontToUnicode,
   symbolTextToUnicodeSegments,
-  type SymbolFaceEncoding,
 } from './symbol-font';
-import {
-  createSymbolFaceOracle,
-  createSymbolMonochromeProbe,
-  measureSymbolFaceEncoding,
-  recordHeldSymbolEncoding,
-  symbolCmapEncoding,
-  symbolEncodingOfFaces,
-} from './symbol-face';
+import { createSymbolFaceOracle, createSymbolMonochromeProbe } from './symbol-face';
+import { SENTINEL_FAMILIES } from './native-route-line-metrics';
 import { ADOBE_SYMBOL_UNICODE } from './symbol-encoding';
-import { symbolFixtureFontBytes } from '../testing/symbol-font-fixture';
 
 const ch = (code: number): string => String.fromCodePoint(code);
 const VS15 = '\uFE0E';
-const missing = { encoding: SYMBOL_FACE_UNICODE };
-const mono = { encoding: SYMBOL_FACE_UNICODE, monochrome: () => true };
-const owning = (codes: number[]): SymbolFaceEncoding => ({
-  kind: 'known', pua: symbolCodeSet(codes), bare: symbolCodeSet(codes),
-});
+const missing = { native: () => false };
+const mono = { native: () => false, monochrome: () => true };
 
 describe('symbol text conversion for a face that lacks the codes', () => {
   const both = (family: string, code: number, expected: string) => {
@@ -106,116 +92,30 @@ describe('symbol text conversion for a face that lacks the codes', () => {
   });
 });
 
-describe('symbol text conversion for a face that draws the codes', () => {
-  it('keeps every code the selected face owns, per form', () => {
-    const encoding = owning([0x61, 0x62]);
-    expect(symbolTextToUnicodeSegments(ch(0xf061) + 'b' + ch(0xf063), 'Symbol', { encoding })).toEqual([
+
+describe('symbol text conversion for a font that draws the codes', () => {
+  it('keeps every code the painted font draws, per form', () => {
+    const native = (code: string) => code === ch(0xf061) || code === 'b';
+    expect(symbolTextToUnicodeSegments(ch(0xf061) + 'b' + ch(0xf063), 'Symbol', { native })).toEqual([
       { text: ch(0xf061) + 'b', mapped: false }, { text: ch(0x3c7), mapped: true },
     ]);
-    // A face that maps only the PUA form still converts the bare form.
-    const puaOnly: SymbolFaceEncoding = { kind: 'known', pua: symbolCodeSet([0x61]), bare: symbolCodeSet([]) };
-    expect(symbolFontToUnicode(ch(0xf061) + 'a', 'Symbol', { encoding: puaOnly })).toBe(ch(0xf061) + ch(0x3b1));
+    // A font that draws only the PUA form still converts the bare form.
+    expect(symbolFontToUnicode(ch(0xf061) + 'a', 'Symbol', { native: (code) => code === ch(0xf061) }))
+      .toBe(ch(0xf061) + ch(0x3b1));
   });
 
-  it('keeps the 0.89 subset when the face could not be judged', () => {
-    expect(symbolFontToUnicode(ch(0xf0b7) + ch(0xf061), 'Symbol', { encoding: SYMBOL_FACE_UNKNOWN }))
+  it('asks only about codes that have a conversion', () => {
+    const asked: string[] = [];
+    // Digits are themselves in Symbol; 0xF0 has no target; "α" is no code.
+    symbolFontToUnicode('1' + ch(0xf0f0) + ch(0x3b1) + 'a', 'Symbol', { native: (code) => { asked.push(code); return false; } });
+    expect(asked).toEqual(['a']);
+  });
+
+  it('keeps the 0.89 subset when the font could not be judged', () => {
+    expect(symbolFontToUnicode(ch(0xf0b7) + ch(0xf061), 'Symbol', { native: () => undefined }))
       .toBe(ch(0x2022) + ch(0xf061));
     expect(symbolFontToUnicode(ch(0xf0e0), 'Wingdings')).toBe(ch(0x2192));
     expect(symbolFontToUnicode(ch(0xf0a7), 'Webdings')).toBe(ch(0xf0a7));
-  });
-});
-
-describe('symbolCmapEncoding', () => {
-  it('reads a symbol cmap exactly: PUA entries, and bare codes through the remap', () => {
-    const encoding = symbolCmapEncoding(symbolFixtureFontBytes({ cmap: 'symbol', first: 0x40, last: 0x7a }));
-    expect(encoding).toEqual(owning(Array.from({ length: 0x7a - 0x40 + 1 }, (_, i) => 0x40 + i)));
-    expect(symbolFontToUnicode(ch(0xf061) + ch(0xf07b), 'Symbol', { encoding: encoding! })).toBe(ch(0xf061) + '{');
-  });
-
-  it('treats a Unicode cmap as drawing no symbol code', () => {
-    const latin = Array.from({ length: 0x7e - 0x20 + 1 }, (_, i) => 0x20 + i);
-    expect(symbolCmapEncoding(symbolFixtureFontBytes({ cmap: 'unicode', first: 0x20, last: 0x7e })))
-      .toEqual({ ...SYMBOL_FACE_UNICODE, latin: symbolCodeSet(latin) });
-    expect(symbolCmapEncoding(new Uint8Array(8))).toBeNull();
-  });
-
-  it('never owns a default-ignorable bare code, though its PUA form is mapped', () => {
-    // Shapers draw nothing for a bare SOFT HYPHEN, even through a symbol cmap.
-    const encoding = symbolCmapEncoding(symbolFixtureFontBytes({ cmap: 'symbol', first: 0xa0, last: 0xb0 }))!;
-    expect(symbolFontToUnicode('\u00AD\uF0AD', 'Symbol', { encoding })).toBe('\u2191\uF0AD');
-  });
-
-  it('leaves a face with both a symbol and a Unicode subtable to measurement', () => {
-    // Engines disagree on which subtable they read, so the bytes cannot decide.
-    expect(symbolCmapEncoding(symbolFixtureFontBytes({ cmap: 'both', first: 0x40, last: 0x7a }))).toBeNull();
-  });
-});
-
-describe('symbolEncodingOfFaces', () => {
-  const symbolFace = (unicodeRange: string, weight = 'normal', style = 'normal') => ({
-    weight, style, unicodeRange, symbolEncoding: owning([0x61, 0x62]),
-  });
-
-  it('owns a scalar only through the last matching face whose unicode-range covers it', () => {
-    const encoding = symbolEncodingOfFaces([symbolFace('U+F000-F0FF')], { weight: 400, style: 'normal' })!;
-    // PUA-only range: the PUA form is drawn, the bare form falls back. A later
-    // Unicode face covering U+F062 lacks it, so the earlier face still draws it.
-    expect(symbolFontToUnicode(ch(0xf061) + 'a', 'Symbol', { encoding })).toBe(ch(0xf061) + ch(0x3b1));
-    const later = symbolEncodingOfFaces([
-      symbolFace('U+0-10FFFF'), { weight: 'normal', style: 'normal', unicodeRange: 'U+F062', symbolEncoding: SYMBOL_FACE_UNICODE },
-    ], { weight: 400, style: 'normal' })!;
-    expect(symbolFontToUnicode(ch(0xf061) + ch(0xf062), 'Symbol', { encoding: later })).toBe(ch(0xf061) + ch(0xf062));
-  });
-
-  it('selects faces by CSS font matching, synthesis included (CSS Fonts 4 §5.2)', () => {
-    // A regular-only face paints bold and italic text (synthesized), as does
-    // a condensed-only face normal-width text.
-    for (const desired of [{ weight: 700, style: 'normal' as const }, { weight: 400, style: 'italic' as const }]) {
-      expect(symbolEncodingOfFaces([symbolFace('U+0-10FFFF')], desired)?.bare).toBe(symbolCodeSet([0x61, 0x62]));
-    }
-    expect(symbolEncodingOfFaces([{ ...symbolFace('U+0-10FFFF'), stretch: 'condensed' }], { weight: 400, style: 'normal' }))
-      .toBeDefined();
-    // The nearest face wins: bold text takes the bold Unicode face, not the
-    // regular symbol face; weight 400 looks up to 500 before going lighter.
-    const unicode = (weight: string) => ({ weight, style: 'normal', unicodeRange: 'U+0-10FFFF',
-      symbolEncoding: { kind: 'known', pua: symbolCodeSet([]), bare: symbolCodeSet([]), latin: symbolCodeSet([0x61]) } as const });
-    expect(symbolEncodingOfFaces([symbolFace('U+0-10FFFF'), unicode('700')], { weight: 700, style: 'normal' })?.bare)
-      .toBe(symbolCodeSet([]));
-    expect(symbolEncodingOfFaces([symbolFace('U+0-10FFFF', '300'), unicode('500')], { weight: 400, style: 'normal' })?.bare)
-      .toBe(symbolCodeSet([]));
-    // Italic text prefers an italic face over a regular one.
-    expect(symbolEncodingOfFaces([symbolFace('U+0-10FFFF'), { ...unicode('400'), style: 'italic' }],
-      { weight: 400, style: 'italic' })?.bare).toBe(symbolCodeSet([]));
-  });
-
-  it('matches oblique angles as slopes and declines ties between different descriptors', () => {
-    const unicodeA = { kind: 'known', pua: symbolCodeSet([]), bare: symbolCodeSet([]), latin: symbolCodeSet([0x61]) } as const;
-    // Italic text takes the steeper oblique face (slope 20 before 5).
-    const steep = { ...symbolFace('U+0-10FFFF'), style: 'oblique 20deg' };
-    const shallow = { weight: 'normal', style: 'oblique 5deg', unicodeRange: 'U+0-10FFFF', symbolEncoding: unicodeA };
-    expect(symbolEncodingOfFaces([steep, shallow], { weight: 400, style: 'italic' })?.bare).toBe(symbolCodeSet([0x61, 0x62]));
-    // Two weight ranges that both contain 700: engines break the tie their own way.
-    expect(symbolEncodingOfFaces([symbolFace('U+0-10FFFF', '400 900'), { ...shallow, style: 'normal', weight: '400 700' }],
-      { weight: 700, style: 'normal' })).toBeUndefined();
-  });
-
-  it('declines a selected face without read bytes, or one not loaded', () => {
-    expect(symbolEncodingOfFaces([{ weight: 'normal', style: 'normal', unicodeRange: 'U+0-10FFFF' }], { weight: 400, style: 'normal' }))
-      .toBeUndefined();
-    expect(symbolEncodingOfFaces([{ ...symbolFace('U+0-10FFFF'), status: 'loading' }], { weight: 400, style: 'normal' }))
-      .toBeUndefined();
-  });
-
-  it('looks past a later face that has no glyph for a bare code', () => {
-    // The later Unicode face maps only "B": "a" falls through to the symbol face.
-    const later = { weight: 'normal', style: 'normal', unicodeRange: 'U+0-10FFFF',
-      symbolEncoding: { ...SYMBOL_FACE_UNICODE, latin: symbolCodeSet([0x42]) } };
-    const encoding = symbolEncodingOfFaces([symbolFace('U+0-10FFFF'), later], { weight: 400, style: 'normal' })!;
-    expect(symbolFontToUnicode('ab', 'Symbol', { encoding })).toBe('ab');
-    const shadowing = { ...later, symbolEncoding: { ...SYMBOL_FACE_UNICODE, latin: symbolCodeSet([0x61]) } };
-    expect(symbolFontToUnicode('a', 'Symbol', {
-      encoding: symbolEncodingOfFaces([symbolFace('U+0-10FFFF'), shadowing], { weight: 400, style: 'normal' })!,
-    })).toBe(ch(0x3b1));
   });
 });
 
@@ -233,7 +133,7 @@ describe('createSymbolMonochromeProbe', () => {
       }
     }
     const owner = { canvas: new NodeCanvas(1, 1) };
-    expect(createSymbolMonochromeProbe(owner, '32px sans-serif')('\u2665\uFE0E')).toBe(true);
+    expect(createSymbolMonochromeProbe(owner, '32px sans-serif')('♥︎')).toBe(true);
     expect(created).toBe(2);
   });
 });
@@ -248,198 +148,161 @@ describe('oracle colour proof', () => {
           clearRect() {}, font: '', fillStyle: '', textBaseline: '', globalAlpha: 1, globalCompositeOperation: '',
           fillText(text: string) { last = text; },
           // Colour unless the text carries VS15.
-          getImageData: () => ({ data: new Uint8ClampedArray(last.includes('\uFE0E') ? [0, 0, 0, 255] : [200, 30, 30, 255]) }),
+          getImageData: () => ({ data: new Uint8ClampedArray(last.includes('︎') ? [0, 0, 0, 255] : [200, 30, 30, 255]) }),
         };
       }
     }
     const ctx = { font: '', canvas: new Canvas(1, 1), measureText: (text: string) => ({ width: text === 'i' ? 3 : 7 }) };
     const oracle = createSymbolFaceOracle(ctx);
-    const parts = oracle.segments('\uF0A9', 'Symbol', { font: '400 32px "Absent"' });
-    expect(parts).toEqual([{ text: '\uF0A9', mapped: false }]);
+    const parts = oracle.segments('', 'Symbol', '400 32px "Absent"');
+    expect(parts).toEqual([{ text: '', mapped: false }]);
   });
 });
 
-/** A registered FontFace stand-in (CSS Font Loading 3 descriptors). */
-const registered = (family: string, unicodeRange: string, held?: SymbolFaceEncoding | null) => {
-  const face = { family, status: 'loaded', weight: 'normal', style: 'normal', stretch: 'normal', unicodeRange };
-  if (held !== undefined) recordHeldSymbolEncoding(face as unknown as FontFace, held);
-  return face;
+// A context that draws the "Sym" face's codes 0x41..0x5A at width 2+code
+// (both forms), the "Pua" face's codes only as U+F000+code, and every other
+// text in a fallback at one width per character class. In a right-to-left
+// direction a bare code is mirrored (another width), as "(" is, so an
+// identity holds only when measured left to right.
+const letters = (code: number) => code >= 0x41 && code <= 0x5a;
+const fallbackWidth = (text: string) => {
+  const code = text.codePointAt(0)!;
+  return code >= 0xf000 ? 1 : text === 'i' ? 3 : 5 + (code % 7);
+};
+const namedWidth = function (this: { font: string; direction?: CanvasDirection }, text: string): number | undefined {
+  const code = text.codePointAt(0)!;
+  const pua = code >= 0xf000;
+  const base = pua ? code - 0xf000 : code;
+  if (this.font.includes('"Sym"') && letters(base)) return 2 + base + (this.direction === 'rtl' && !pua ? 1 : 0);
+  if (this.font.includes('"Pua"') && pua && letters(base)) return 2 + base;
+  // A named Latin face: bare codes only.
+  if (this.font.includes('"Latin"') && !pua) return 40 + (code % 5);
+  return undefined;
 };
 
-describe('which face wins a symbol code (held cmaps and measurement, one oracle)', () => {
-  // A context in which no face draws anything of its own: every measured
-  // family owns no code (a missing face, or a Unicode one).
-  const realm = (faces: object[]) => {
-    const fonts = { *[Symbol.iterator]() { yield* faces; } };
-    return {
-      font: '', canvas: { ownerDocument: { fonts } },
-      measureText: (text: string) => ({ width: text.length + (text === 'i' ? 1 : 2) }),
-    };
-  };
-  const joined = (parts: { text: string }[]) => parts.map((part) => part.text).join('');
-
-  it('reads a held substitute through its unicode-range, deciding bare and PUA codes apart', () => {
-    // The selected face is missing (measured); the loaded substitute's bytes
-    // are symbol-encoded but declared for U+F000-F0FF only: it draws U+F061,
-    // while a bare "a" never reaches it and converts.
-    const ctx = realm([registered('Held PUA Substitute', 'U+F000-F0FF', owning([0x61]))]);
-    const oracle = createSymbolFaceOracle(ctx);
-    const selection = { font: '400 32px "Absent Primary", "Held PUA Substitute"' };
-    expect(joined(oracle.segments(ch(0xf061) + 'a', 'Symbol', selection))).toBe(ch(0xf061) + ch(0x3b1));
-  });
-
-  it('measures the rest of the stack as it paints after a family the bytes cannot answer for', () => {
-    // The missing primary is measured together with the substitute it falls
-    // through to: a substitute painting both forms of 0x61 keeps a bare "a".
-    const ctx = {
-      font: '', canvas: { ownerDocument: { fonts: { *[Symbol.iterator]() {} } } },
-      measureText(text: string) {
-        const code = text.codePointAt(0)!;
-        const owned = this.font.includes('"Full Range Substitute"') && (code === 0x61 || code === 0xf061);
-        return { width: owned ? 100 : code >= 0xf000 ? 1 : text === 'i' ? 3 : 5 + (code % 7) };
-      },
-    };
-    const oracle = createSymbolFaceOracle(ctx);
-    const selection = { font: '400 32px "Absent Primary", "Full Range Substitute"' };
-    expect(joined(oracle.segments(ch(0xf061) + 'ab', 'Symbol', selection))).toBe(ch(0xf061) + 'a' + ch(0x3b2));
-  });
-
-  it('re-derives when a registered face moves to another selected family', () => {
-    const later = registered('Moved B', 'U+0-10FFFF', owning([0x61]));
-    const ctx = realm([registered('Moved A', 'U+0-10FFFF', { kind: 'known', pua: symbolCodeSet([]),
-      bare: symbolCodeSet([]), latin: symbolCodeSet([0x61]) }), later]);
-    const oracle = createSymbolFaceOracle(ctx);
-    const selection = { font: '400 32px "Moved A", "Moved B"' };
-    // A's Unicode face draws "a" as the letter: it converts.
-    expect(joined(oracle.segments('a', 'Symbol', selection))).toBe(ch(0x3b1));
-    // The symbol face, now declared later under A, wins "a" there.
-    later.family = 'Moved A';
-    expect(joined(oracle.segments('a', 'Symbol', selection))).toBe('a');
-  });
-
-  it('walks the whole painted family list, as font matching does', () => {
-    // The selected face is missing; a named fallback later in the list (an
-    // embedded alias) holds symbol bytes and paints the code.
-    const ctx = realm([registered('Embedded Symbol Alias', 'U+0-10FFFF', owning([0x61]))]);
-    const oracle = createSymbolFaceOracle(ctx);
-    const font = { font: 'normal 400 32px "Absent Primary", "Embedded Symbol Alias", sans-serif' };
-    expect(joined(oracle.segments(ch(0xf061), 'Symbol', font))).toBe(ch(0xf061));
-    expect(joined(oracle.segments(ch(0xf061), 'Symbol', { font: '400 32px "Absent Primary", sans-serif' }))).toBe(ch(0x3b1));
-  });
-
-  it('reads a regular-only held face for bold and italic text (synthesis)', () => {
-    const ctx = realm([registered('Regular Only Symbol', 'U+0-10FFFF', owning([0x61]))]);
-    const oracle = createSymbolFaceOracle(ctx);
-    for (const font of ['bold 32px "Regular Only Symbol"', 'italic 700 32px "Regular Only Symbol"']) {
-      expect(joined(oracle.segments('a' + ch(0xf061), 'Symbol', { font }))).toBe('a' + ch(0xf061));
-    }
-  });
-
-  it('names a registered face by its literal family, matched caselessly', () => {
-    const faces: object[] = [];
-    const ctx = realm(faces);
-    const oracle = createSymbolFaceOracle(ctx);
-    const caseless = { font: '32px "s\u00FDmbol caseless"' };
-    expect(joined(oracle.segments('a', 'Symbol', caseless))).toBe(ch(0x3b1));
-    faces.push(registered('S\u00DDMBOL CASELESS', 'U+0-10FFFF', owning([0x61])));
-    expect(joined(oracle.segments('a', 'Symbol', caseless))).toBe('a');
-    // A programmatic face named with literal quotes is not the family "Quoted Only".
-    faces.push(registered('"Quoted Only"', 'U+0-10FFFF', owning([0x61])));
-    expect(joined(oracle.segments('a', 'Symbol', { font: '32px "Quoted Only"' }))).toBe(ch(0x3b1));
-    // An unquoted name decodes its escapes.
-    faces.push(registered('Real Escaped', 'U+0-10FFFF', owning([0x61])));
-    expect(joined(oracle.segments('a', 'Symbol', { font: '32px Real\\20 Escaped' }))).toBe('a');
-  });
-
-  it('measures at the width the font asks for', () => {
-    const fonts: string[] = [];
-    const ctx = { get font() { return fonts.at(-1) ?? ''; }, set font(value: string) { fonts.push(value); },
-      measureText: (text: string) => ({ width: text.length + (text === 'i' ? 1 : 2) }) };
-    createSymbolFaceOracle(ctx).encoding({ font: 'condensed 32px "Width Probe"' });
-    expect(fonts.some((font) => font.includes('condensed') && font.includes('"Width Probe"'))).toBe(true);
-  });
-
-  it('re-derives a held answer when a face registered later under the family wins the codes', () => {
-    const faces: object[] = [registered('Held Symbol Face', 'U+0-10FFFF', owning([0x61]))];
-    const ctx = realm(faces);
-    const selection = { font: '400 32px "Held Symbol Face"' };
-    const text = () => joined(createSymbolFaceOracle(ctx, { shared: true }).segments('a', 'Symbol', selection));
-    expect(text()).toBe('a');
-    // A later application face whose bytes the library did not read: measured.
-    faces.push(registered('Held Symbol Face', 'U+0-10FFFF'));
-    expect(text()).toBe(ch(0x3b1));
-    // A later held Unicode face that maps "a" draws it as the letter.
-    faces[1] = registered('Held Symbol Face', 'U+0-10FFFF', { kind: 'known', pua: symbolCodeSet([]), bare: symbolCodeSet([]), latin: symbolCodeSet([0x61]) });
-    expect(text()).toBe(ch(0x3b1));
-    // Without it the held symbol face wins again.
-    faces.pop();
-    expect(text()).toBe('a');
-  });
-});
-
-describe('measureSymbolFaceEncoding', () => {
-  // A context that draws the "Sym" face's codes 0x41..0x5A at width 2+code
-  // (both forms) and every other text at one width per character class. In
-  // a right-to-left direction a bare code is mirrored (another width), as
-  // "(" is, so the identity holds only when measured left to right.
-  const context = (owned: (code: number) => boolean) => ({
+describe('symbol face oracle without a FontFaceSet (plain mode: a Node canvas)', () => {
+  const context = () => ({
     font: '10px sans-serif',
     direction: 'rtl' as CanvasDirection,
-    measureText(text: string) {
-      const code = text.codePointAt(0)!;
-      const symbolFace = this.font.includes('"Sym"');
-      const base = code >= 0xf000 ? code - 0xf000 : code;
-      if (symbolFace && owned(base)) return { width: 2 + base + (this.direction === 'rtl' && code < 0xf000 ? 1 : 0) };
-      return { width: code >= 0xf000 ? 1 : text === 'i' ? 3 : 5 + (code % 7) };
-    },
+    measureText(text: string) { return { width: namedWidth.call(this, text) ?? fallbackWidth(text) }; },
   });
 
-  it('owns exactly the codes whose bare and PUA forms draw identically in the face', () => {
-    const ctx = context((code) => code >= 0x41 && code <= 0x5a);
-    const letters = Array.from({ length: 26 }, (_, i) => 0x41 + i);
-    expect(measureSymbolFaceEncoding(ctx, '"Sym"')).toEqual({
-      kind: 'known', pua: symbolCodeSet([...letters, 0x7f, 0xad]), bare: symbolCodeSet(letters),
-    });
-    expect(measureSymbolFaceEncoding(ctx, '"Other"')).toEqual(SYMBOL_FACE_UNICODE);
+  it('keeps exactly the codes whose bare and PUA forms draw identically in the painted font', () => {
+    const ctx = context();
+    const oracle = createSymbolFaceOracle(ctx);
+    const font = 'italic 700 20px "Sym", "Latin", serif';
+    expect([oracle.draws('A', font), oracle.draws(ch(0xf041), font)]).toEqual([true, true]);
+    expect([oracle.draws('a', font), oracle.draws(ch(0xf061), font)]).toEqual([false, false]);
+    expect(oracle.draws('A', '20px "Other", serif')).toBe(false);
+    // A font that maps only the PUA form is not proven here: it converts.
+    expect([oracle.draws('A', '20px "Pua"'), oracle.draws(ch(0xf041), '20px "Pua"')]).toEqual([false, false]);
+    expect(oracle.segments(ch(0xf041) + 'A' + ch(0xf061) + 'a', 'Symbol', font)).toEqual([
+      { text: ch(0xf041) + 'A', mapped: false }, { text: ch(0x3b1) + ch(0x3b1), mapped: true },
+    ]);
     expect([ctx.font, ctx.direction]).toEqual(['10px sans-serif', 'rtl']);
   });
 
-  it('is inconclusive without a context or with one that measures nothing', () => {
-    expect(measureSymbolFaceEncoding(null, '"Sym"')).toBe(SYMBOL_FACE_UNKNOWN);
-    expect(measureSymbolFaceEncoding({ font: '', measureText: () => ({ width: 0 }) }, '"Sym"')).toBe(SYMBOL_FACE_UNKNOWN);
-  });
-
-  it('shares measurements across oracles of one realm until the measured families change', () => {
-    let calls = 0;
-    const faces: object[] = [];
-    const fonts = { *[Symbol.iterator]() { yield* faces; } };
+  it('keeps the PUA form of a default-ignorable code in a font proven symbol-encoded', () => {
     const ctx = {
-      font: '', canvas: { ownerDocument: { fonts } },
-      measureText: (text: string) => { calls++; return { width: text.length + (text === 'i' ? 1 : 2) }; },
+      font: '',
+      measureText(text: string) {
+        const code = text.codePointAt(0)!;
+        if (code === 0xad) return { width: 0 };
+        if (this.font.includes('"Sym"') && code === 0xf0ad) return { width: 77 };
+        return { width: namedWidth.call(this, text) ?? fallbackWidth(text) };
+      },
     };
-    const selection = { font: '400 32px "Shared Probe Face"' };
-    createSymbolFaceOracle(ctx, { shared: true }).encoding(selection);
-    const first = calls;
-    createSymbolFaceOracle(ctx, { shared: true }).encoding(selection);
-    expect(calls).toBe(first);
-    // A face registered (or replaced) for the measured family re-measures.
-    faces.push(registered('Shared Probe Face', 'U+0-10FFFF'));
-    createSymbolFaceOracle(ctx, { shared: true }).encoding(selection);
-    expect(calls).toBe(first * 2);
-    faces[0] = registered('Shared Probe Face', 'U+0-10FFFF');
-    createSymbolFaceOracle(ctx, { shared: true }).encoding(selection);
-    expect(calls).toBe(first * 3);
+    const oracle = createSymbolFaceOracle(ctx);
+    expect([oracle.draws(ch(0xf0ad), '20px "Sym"'), oracle.draws(ch(0xad), '20px "Sym"')]).toEqual([true, false]);
+    expect(oracle.draws(ch(0xf0ad), '20px "Other"')).toBe(false);
   });
 
-  it('caches measurements per selection', () => {
+  it('judges nothing without a context, with one that measures nothing, or for a font it cannot split', () => {
+    expect(createSymbolFaceOracle(null).draws('A', '20px "Sym"')).toBeUndefined();
+    expect(createSymbolFaceOracle({ font: '', measureText: () => ({ width: 0 }) }).draws('A', '20px "Sym"')).toBeUndefined();
+    expect(createSymbolFaceOracle(context()).draws('A', '"Sym"')).toBeUndefined();
+    // Not a symbol code at all.
+    expect(createSymbolFaceOracle(context()).draws(ch(0x3b1), '20px "Sym"')).toBe(false);
+  });
+
+  it('keeps a verdict for the oracle lifetime only', () => {
     let calls = 0;
-    const ctx = { font: '', measureText: (text: string) => { calls++; return { width: text.length + (text === 'i' ? 1 : 2) }; } };
+    const ctx = { font: '', measureText: (text: string) => { calls++; return { width: fallbackWidth(text) }; } };
     const oracle = createSymbolFaceOracle(ctx);
-    oracle.encoding({ font: '400 32px "A"' });
+    oracle.draws('A', '400 32px "A"');
     const measured = calls;
     expect(measured).toBeGreaterThan(0);
-    oracle.encoding({ font: '400 32px "A"' });
-    expect(calls).toBe(measured);
+    // Only the sentinel check is repeated.
+    oracle.draws('A', '400 32px "A"');
+    expect(calls).toBe(measured + 1);
+    createSymbolFaceOracle(ctx).draws('A', '400 32px "A"');
+    expect(calls).toBe(measured * 2 + 1);
+  });
+});
+
+describe('symbol face oracle with route sentinels (a font realm)', () => {
+  // The sentinels as native-route-line-metrics.ts registers them: each draws
+  // every character, at its own advance, wherever no named family before it
+  // does. Generic families and system fallback draw everything else.
+  const SENTINEL = [
+    { width: 512, actualBoundingBoxAscent: 8192, fontBoundingBoxAscent: 716, fontBoundingBoxDescent: 204 },
+    { width: 768, actualBoundingBoxAscent: 9216, fontBoundingBoxAscent: 614, fontBoundingBoxDescent: 307 },
+  ];
+  const context = (loaded = true) => ({
+    font: '10px sans-serif',
+    canvas: { ownerDocument: { fonts: {} } },
+    measureText(text: string) {
+      const named = namedWidth.call(this, text);
+      if (named !== undefined) return { width: named };
+      const families = this.font.slice(this.font.indexOf('px ') + 3).split(', ');
+      for (const family of families) {
+        const sentinel = loaded ? SENTINEL_FAMILIES.findIndex((name) => family === `"${name}"`) : -1;
+        if (sentinel >= 0) {
+          const scale = Number.parseFloat(/([\d.]+)px/.exec(this.font)![1]!) / 1024;
+          const metric = SENTINEL[sentinel]!;
+          // A default-ignorable character is drawn by no face.
+          if (text === '­') return { width: 0 };
+          return Object.fromEntries(Object.entries(metric).map(([key, value]) => [key, value * scale])) as { width: number };
+        }
+        if (family === 'serif') break;
+      }
+      return { width: fallbackWidth(text) };
+    },
   });
 
+  it('keeps a code the named families draw: the PUA form by itself, the bare form through its identity', () => {
+    const oracle = createSymbolFaceOracle(context());
+    const font = '700 20px "Sym", "Latin", serif';
+    expect([oracle.draws('A', font), oracle.draws(ch(0xf041), font)]).toEqual([true, true]);
+    // "a": the Latin face draws it, as a Latin letter; U+F061: no named family.
+    expect([oracle.draws('a', font), oracle.draws(ch(0xf061), font)]).toEqual([false, false]);
+    // A face that maps only the PUA form keeps it; its bare form converts.
+    expect([oracle.draws('A', '20px "Pua", "Latin", serif'), oracle.draws(ch(0xf041), '20px "Pua", "Latin", serif')])
+      .toEqual([false, true]);
+    // A later named family draws what the first lacks.
+    expect(oracle.draws(ch(0xf041), '20px "Other", "Pua", serif')).toBe(true);
+    // Nothing after the first generic family is a named face of the route.
+    expect(oracle.draws(ch(0xf041), '20px "Other", serif, "Sym"')).toBe(false);
+    expect(oracle.draws(ch(0xf041), '20px serif')).toBe(false);
+    expect(oracle.draws(ch(0xad), font)).toBe(false);
+  });
+
+  it('judges nothing in a font realm whose sentinels are not loaded', () => {
+    const oracle = createSymbolFaceOracle(context(false));
+    expect(oracle.draws('A', '20px "Sym"')).toBeUndefined();
+    expect(oracle.segments(ch(0xf0b7) + ch(0xf061), 'Symbol', '20px "Other"'))
+      .toEqual([{ text: ch(0x2022), mapped: true }, { text: ch(0xf061), mapped: false }]);
+  });
+
+  it('reads whether the sentinels work with every call', () => {
+    let loaded = false;
+    const ctx = context(true);
+    const measure = ctx.measureText;
+    const off = context(false).measureText;
+    ctx.measureText = function (text: string) { return (loaded ? measure : off).call(this, text); };
+    const oracle = createSymbolFaceOracle(ctx);
+    expect(oracle.draws(ch(0xf041), '20px "Sym"')).toBeUndefined();
+    loaded = true;
+    expect(oracle.draws(ch(0xf041), '20px "Sym"')).toBe(true);
+  });
 });

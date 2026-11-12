@@ -27,7 +27,6 @@
  */
 import { activeFontSet, retainFace, releaseFaces, withFontCeiling } from './font-registry.js';
 import { HARD_MAX_EMBEDDED_FONT_BYTES } from '../worker/resource-policy.generated.js';
-import { recordHeldSymbolEncoding, symbolCmapEncoding } from './symbol-face.js';
 
 /** Shared admission check for work that must inspect an embedded font before
  * registration. Keeping the generated ceiling private prevents format loaders
@@ -196,8 +195,6 @@ export async function registerEmbeddedFonts(
           style: face.style,
         });
         set.add(created);
-        // The symbol codes these exact bytes draw (symbol-face.ts oracle).
-        recordHeldSymbolEncoding(created, symbolCmapEncoding(data));
         return created;
       });
       held.push(ff);

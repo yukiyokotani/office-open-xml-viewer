@@ -1,27 +1,24 @@
 import { describe, expect, it } from 'vitest';
-import { createSymbolFaceOracle, symbolCodeSet, type SymbolFaceEncoding, type TextRunData } from '@silurus/ooxml-core';
-import { recordHeldSymbolEncoding } from '@silurus/ooxml-core/testing';
+import { createSymbolFaceOracle, type TextRunData } from '@silurus/ooxml-core';
 import { renderTextBody, type RenderContext } from './renderer.js';
 import type { Paragraph, TextBody } from './types';
 
 // Issue #2177: text in a symbol font is stored as the font's own codes,
 // F0-shifted (U+F061) or bare ("a") in a run whose Latin face is the symbol
-// font. Each code is judged against the face the render selects: one the
-// face draws stays in it; any other code converts to Unicode (α) and is drawn
+// font. Each code is judged against the font the render paints with: one it
+// draws stays in it; any other code converts to Unicode (α) and is drawn
 // in a Unicode face. a:sym (§21.1.2.3.10) owns only the F0-shifted codes.
 
 interface Fill { text: string; font: string }
 
 /** A painting context whose "Symbol" face, when installed, is symbol-encoded
  *  (codes 0x21..0xFE, bare and F0-shifted, one glyph each). */
-function context(installed: boolean | string, fills: Fill[], faces?: readonly object[]): CanvasRenderingContext2D {
+function context(installed: boolean | string, fills: Fill[]): CanvasRenderingContext2D {
   const face = `"${typeof installed === 'string' ? installed : 'Symbol'}"`;
   let font = '20px serif';
   return {
     get font() { return font; }, set font(v: string) { font = v; },
     fillStyle: '', direction: 'ltr', letterSpacing: '0px',
-    // The realm's registered faces (CSS Font Loading 3 FontFaceSet).
-    ...(faces ? { canvas: { ownerDocument: { fonts: { *[Symbol.iterator]() { yield* faces; } } } } } : {}),
     measureText: (s: string) => {
       const cp = s.codePointAt(0) ?? 0;
       const code = cp >= 0xf000 ? cp - 0xf000 : cp;
@@ -42,11 +39,11 @@ function context(installed: boolean | string, fills: Fill[], faces?: readonly ob
 }
 
 function render(runs: TextRunData[], options: Readonly<{
-  installed?: boolean | string; faces?: readonly object[]; bullet?: Paragraph['bullet'];
+  installed?: boolean | string; bullet?: Paragraph['bullet'];
   substitute?: string;
 }> = {}): Fill[] {
   const fills: Fill[] = [];
-  const ctx = context(options.installed ?? false, fills, options.faces);
+  const ctx = context(options.installed ?? false, fills);
   const para = {
     alignment: 'l', marL: 0, marR: 0, indent: 0,
     spaceBefore: null, spaceAfter: null, spaceLine: null, lvl: 0,
@@ -76,16 +73,9 @@ function run(text: string, fontFamily: string, fontFamilySym?: string): TextRunD
 }
 
 const painted = (fills: Fill[]) => fills.map((fill) => fill.text).join('');
-const owning = (codes: number[]): SymbolFaceEncoding => ({ kind: 'known', pua: symbolCodeSet(codes), bare: symbolCodeSet(codes) });
-/** A registered FontFace stand-in whose bytes the library read. */
-const registered = (family: string, unicodeRange: string, held: SymbolFaceEncoding) => {
-  const face = { family, status: 'loaded', weight: 'normal', style: 'normal', stretch: 'normal', unicodeRange };
-  recordHeldSymbolEncoding(face as unknown as FontFace, held);
-  return face;
-};
 
 describe('symbol-encoded PPTX runs (#2177)', () => {
-  it('converts F0-shifted and bare codes the selected face lacks, in a Unicode face', () => {
+  it('converts F0-shifted and bare codes the painted font lacks, in a Unicode face', () => {
     const fills = render([run('\uF061\uF062\uF063\uF070\uF0E5\uF0AE', 'Symbol'), run('abcp 1', 'Symbol')]);
     expect(painted(fills)).toBe('αβχπ∑→αβχπ 1');
     expect(fills.filter((fill) => fill.text.includes('α')).every((fill) => !fill.font.includes('Symbol'))).toBe(true);
@@ -95,21 +85,6 @@ describe('symbol-encoded PPTX runs (#2177)', () => {
     const fills = render([run('a\uF062', 'Symbol')], { installed: true });
     expect(painted(fills)).toBe('a\uF062');
     expect(fills.every((fill) => fill.font.includes('Symbol'))).toBe(true);
-  });
-
-  it('prefers the cmap of held bytes over measurement', () => {
-    // The measured host face owns everything, but the held bytes of the
-    // registered face that paints map only 0x61: 0x62 converts.
-    const faces = [registered('Symbol', 'U+0-10FFFF', owning([0x61]))];
-    expect(painted(render([run('\uF061\uF062', 'Symbol')], { installed: true, faces }))).toBe('\uF061β');
-  });
-
-  it('reads a held substitute through its unicode-range, bare and PUA codes apart', () => {
-    // Symbol is missing; the substitute's held bytes are symbol-encoded but
-    // declared for U+F000-F0FF only: U+F061 stays, a bare "a" converts.
-    const faces = [registered('Held Range Sub', 'U+F000-F0FF', owning([0x61]))];
-    const fills = render([run('\uF061a', 'Symbol')], { substitute: 'Held Range Sub', faces });
-    expect(painted(fills)).toBe('\uF061α');
   });
 
   it('judges the face that paints: a loaded substitute of the authored family', () => {
@@ -128,5 +103,11 @@ describe('symbol-encoded PPTX runs (#2177)', () => {
     expect(missing.some((fill) => fill.text === '•' && !fill.font.includes('Symbol'))).toBe(true);
     const installed = render([run('x', 'Arial')], { bullet, installed: true });
     expect(installed.some((fill) => fill.text === '\uF0B7' && fill.font.includes('Symbol'))).toBe(true);
+  });
+
+  it('keeps a bullet as authored when its font draws only some of its codes', () => {
+    const bullet = { type: 'char', char: '\uF0B7\uF0FF', fontFamily: 'Symbol' } as unknown as Paragraph['bullet'];
+    const fills = render([run('x', 'Arial')], { bullet, installed: true });
+    expect(fills.some((fill) => fill.text === '\uF0B7\uF0FF' && fill.font.includes('Symbol'))).toBe(true);
   });
 });

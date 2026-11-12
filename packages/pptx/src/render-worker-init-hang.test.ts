@@ -443,6 +443,8 @@ describe('font-source subset readiness in progressive render owners', SUITE_OPTI
     // collectRuns awaits the worker's settled font-source preload.
     send({ kind: 'collectRuns', id: 91, slideIndex: 0, width: 100 });
     await settle(() => expect(fake.posted).toContainEqual(expect.objectContaining({ kind: 'runsCollected', id: 91 })));
-    expect(faces.filter((f) => f.status === 'loaded').map((f) => f.source)).toEqual([expect.stringContaining('/a.woff2')]);
+    // The worker's own route sentinels are not source faces.
+    expect(faces.filter((f) => f.status === 'loaded' && !/^__ooxml_route_sentinel_/.test((f as unknown as { family: string }).family)).map((f) => f.source))
+      .toEqual([expect.stringContaining('/a.woff2')]);
   });
 });

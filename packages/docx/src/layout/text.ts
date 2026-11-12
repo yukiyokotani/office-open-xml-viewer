@@ -729,6 +729,10 @@ export interface TextLayoutService {
    * {@link shape} does, and only a symbol-font slot family is judged (see
    * {@link TextLayoutServiceInput.symbolText}). */
   symbolText?(request: Readonly<SymbolTextRequest>): readonly SymbolTextSegment[];
+  /** Whether the font {@link shape} selects for `character` under
+   * `request`'s slots is a symbol font whose face draws it as a symbol code
+   * (core symbol-face.ts). Undefined: not judged. */
+  symbolDraws?(request: Readonly<Omit<SymbolTextRequest, 'text'>>, character: string): boolean | undefined;
   /** The authored family of the §17.3.2.26 slot that {@link shape} selects
    * for `character` under `request`'s slots. */
   scalarFamily?(request: Readonly<Omit<SymbolTextRequest, 'text'>>, character: string): string | null | undefined;
@@ -757,8 +761,8 @@ export interface TextLayoutServiceInput {
   readonly localMetrics?: Readonly<Record<string, Readonly<ResolvedFontMetric>>>;
   readonly eastAsiaFontCharsets?: Readonly<Record<string, string>>;
   readonly genericFamilies?: Readonly<Record<string, 'serif' | 'sans-serif' | 'monospace'>>;
-  /** Judge symbol-encoded text against the resolved face (production: held
-   * cmap bytes, else measurement in the measuring context). Absent: the face
+  /** Judge symbol-encoded text against the resolved font (production: the
+   * core oracle, asked in the measuring context). Absent: the face
    * cannot be judged and the 0.89 subset converts. Its decisions depend only
    * on this service's resources and context, like measured advances. */
   readonly symbolText?: (
@@ -767,6 +771,9 @@ export interface TextLayoutServiceInput {
      * the scalar's own slot and the run's weight/style (segment-builder). */
     convertedRoute: (converted: string) => FontResolution,
   ) => readonly SymbolTextSegment[];
+  /** Whether the resolved font draws one authored symbol code as its own
+   * symbol glyph; undefined when it cannot be judged. */
+  readonly symbolDraws?: (code: string, resolution: FontResolution) => boolean | undefined;
 }
 
 /** Generic tail for an authored DOCX face. fontTable family/pitch metadata is
@@ -1380,11 +1387,16 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
     scalarFamily(request: Readonly<Omit<SymbolTextRequest, 'text'>>, character: string) {
       return requestedFamily(request, scalarSlot(request, character));
     },
+    symbolDraws(request: Readonly<Omit<SymbolTextRequest, 'text'>>, character: string) {
+      const slot = scalarSlot(request, character);
+      if (!isSymbolFontFamily(requestedFamily(request, slot))) return false;
+      return input.symbolDraws?.(character, resolve({ ...request, text: character, slot }));
+    },
     symbolText(request: Readonly<SymbolTextRequest>) {
       const out: SymbolTextSegment[] = [];
       const push = (part: SymbolTextSegment) => {
         const last = out.at(-1);
-        if (last && last.mapped === part.mapped && last.unicodeFace === part.unicodeFace) {
+        if (last && last.mapped === part.mapped) {
           out[out.length - 1] = { ...part, text: last.text + part.text };
         }
         else if (part.text) out.push(part);

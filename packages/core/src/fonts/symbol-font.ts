@@ -14,17 +14,18 @@
  * §17.3.3.30 (`w:sym`), §17.9.x (`w:lvlText`) and §21.1.2.3.10 (`a:sym`) name
  * a font and a code; the glyph belongs to the font.
  *
- * Whether to convert is decided per SELECTED FACE (symbol-face.ts):
- *   - a face that draws a code itself (a symbol-encoded face that maps it)
- *     keeps the authored code, so an installed Windows/macOS Wingdings or
- *     Windows Symbol keeps its own glyph, advance and colour;
- *   - a code the selected face does not draw (the font is missing, or the face
- *     is Unicode-encoded, as Apple's Symbol is) converts to the Unicode
+ * Whether to convert is decided per CODE, by asking the context that paints
+ * whether the font the kept text paints with draws it (symbol-face.ts):
+ *   - a code that font draws itself (a symbol-encoded face that maps it) is
+ *     kept, so an installed Windows/macOS Wingdings or Windows Symbol keeps
+ *     its own glyph, advance and colour;
+ *   - a code it does not draw (the font is missing, or the face is
+ *     Unicode-encoded, as Apple's Symbol is) converts to the Unicode
  *     character of the font's glyph, drawn in a Unicode fallback face;
- *   - when the face could not be judged, the conversion is today's: only the
+ *   - when the font could not be judged, the conversion is today's: only the
  *     long-standing bullet/arrow subset ({@link LEGACY_LOOKUPS}).
  * The PUA and bare forms are judged separately (a Unicode face never draws a
- * bare code as the symbol glyph; a symbol cmap may map only one form).
+ * bare code as the symbol glyph; a face may draw only one form).
  *
  * A converted pictograph is written with U+FE0E VARIATION SELECTOR-15 (text
  * presentation) and is converted only when the caller proves that this realm
@@ -120,40 +121,6 @@ const LEGACY_LOOKUPS: ReadonlyMap<SymbolFontKey, Readonly<Record<number, string>
   }],
 ]);
 
-/**
- * What one selected face draws of its symbol encoding. Plain data (it may
- * cross a worker boundary or key a cache).
- *   - `known`: `pua` / `bare` are 256-bit sets (64 hex digits, code 0x00 in
- *     the first byte's high bit) of the codes the face itself draws as
- *     U+F000+code / as the bare code. Both empty: the face is missing or is
- *     not symbol-encoded.
- *   - `unknown`: the face could not be judged; today's subset converts.
- */
-export type SymbolFaceEncoding =
-  | Readonly<{ kind: 'known'; pua: string; bare: string; latin?: string }>
-  | Readonly<{ kind: 'unknown' }>;
-
-export const SYMBOL_FACE_UNKNOWN: SymbolFaceEncoding = Object.freeze({ kind: 'unknown' });
-const EMPTY_CODES = '0'.repeat(64);
-/** A face that draws no symbol code (missing, or Unicode-encoded). */
-export const SYMBOL_FACE_UNICODE: SymbolFaceEncoding = Object.freeze({ kind: 'known', pua: EMPTY_CODES, bare: EMPTY_CODES });
-
-/** Encode a set of codes 0x00..0xFF as a {@link SymbolFaceEncoding} bit set. */
-export function symbolCodeSet(codes: Iterable<number>): string {
-  const bytes = new Uint8Array(32);
-  for (const code of codes) {
-    if (Number.isInteger(code) && code >= 0 && code <= 0xff) bytes[code >> 3]! |= 0x80 >> (code & 7);
-  }
-  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
-}
-
-/** Whether a {@link symbolCodeSet} contains `code` (false for no set). */
-export function symbolCodeSetHas(set: string | undefined, code: number): boolean {
-  if (!set) return false;
-  const byte = Number.parseInt(set.slice((code >> 3) * 2, (code >> 3) * 2 + 2), 16);
-  return Number.isFinite(byte) && (byte & (0x80 >> (code & 7))) !== 0;
-}
-
 /** Targets with the Unicode Emoji property (UTS #51; ASCII keycap bases
  * excluded, which no table converts to) may be drawn from a colour emoji face
  * even with VS15 when no text face has them (CSS Fonts 4 §5.4 leaves the face
@@ -165,8 +132,11 @@ const EMOJI_PRESENTATION = /\p{Emoji_Presentation}/u;
 const TEXT_PRESENTATION = String.fromCharCode(0xfe0e);
 
 export interface SymbolTextOptions {
-  /** The selected face's encoding (default: unknown, today's subset). */
-  readonly encoding?: SymbolFaceEncoding;
+  /** Whether the font that paints the kept text draws this authored code (one
+   * character: a bare code 0x20..0xFF or U+F020..U+F0FF) as its own symbol
+   * glyph (symbol-face.ts). Undefined, or absent: it cannot be judged, and
+   * only the 0.89 subset converts. Asked only for codes with a conversion. */
+  readonly native?: (code: string) => boolean | undefined;
   /** Whether this realm paints `text` (an emoji-capable character followed
    * by VS15) in a monochrome face in the fallback route. Absent (no probe):
    * only the 0.89 subset's text-default symbols convert. */
@@ -184,13 +154,6 @@ export interface SymbolTextSegment {
    * heart in Symbol). An unconverted segment keeps the symbol family.
    */
   readonly mapped: boolean;
-  /**
-   * Set on a converted segment when the selected face is known to draw no
-   * symbol code (missing, or Unicode-encoded such as Apple's Symbol): it has
-   * no symbol cmap to re-read the Unicode text, so a caller may keep that
-   * face's route for it instead of a generic one.
-   */
-  readonly unicodeFace?: true;
 }
 
 function convertCodePoint(
@@ -202,14 +165,12 @@ function convertCodePoint(
   const pua = cp >= 0xf020 && cp <= 0xf0ff;
   const code = pua ? cp - 0xf000 : cp;
   if (!pua && (cp < 0x20 || cp > 0xff)) return undefined;
-  const encoding = options.encoding ?? SYMBOL_FACE_UNKNOWN;
-  let target: string | undefined;
-  if (encoding.kind === 'unknown') {
-    target = LEGACY_LOOKUPS.get(key)?.[code];
-  } else {
-    if (symbolCodeSetHas(pua ? encoding.pua : encoding.bare, code)) return undefined;
-    target = FULL_LOOKUPS.get(key)?.[code];
-  }
+  const full = FULL_LOOKUPS.get(key)?.[code];
+  const legacy = LEGACY_LOOKUPS.get(key)?.[code];
+  if ((full ?? ch) === ch && (legacy ?? ch) === ch) return undefined;
+  const native = options.native?.(ch);
+  if (native) return undefined;
+  const target = native === undefined ? legacy : full;
   if (target === undefined || target === ch) return undefined;
   if (EMOJI_CAPABLE.test(target)) {
     const text = target + TEXT_PRESENTATION;
@@ -218,7 +179,7 @@ function convertCodePoint(
     // Inconclusive (no readable canvas in this realm): the 0.89 subset keeps
     // its text-default symbols (▪, ✓, ☺), now with VS15; a character whose
     // default presentation is emoji is kept as authored.
-    return encoding.kind === 'unknown' && !EMOJI_PRESENTATION.test(target) ? text : undefined;
+    return native === undefined && !EMOJI_PRESENTATION.test(target) ? text : undefined;
   }
   return target;
 }
