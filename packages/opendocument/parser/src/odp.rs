@@ -2117,27 +2117,67 @@ mod tests {
         assert_eq!(text, ["A B", "lead  x", "a\t <br> b"]);
     }
 
+    /// One paragraph's inline content, read as slide text and as speaker
+    /// notes, by element class (ODF 1.3 Part 3 §6, §7).
     #[test]
-    fn field_text_is_kept_verbatim() {
-        let body = r#"<draw:frame svg:width="10cm" svg:height="5cm"><draw:text-box><text:p>File: <text:file-name>draft  final.odp</text:file-name></text:p></draw:text-box></draw:frame>"#;
-        let deck = deck("", "", "", &page(body)).unwrap();
-        let slide0 = model(&deck, 0);
-        let text: String = shapes(&slide0)[0].text_body.as_ref().unwrap().paragraphs[0]
-            .runs
-            .iter()
-            .map(|r| match r {
-                pptx_model::TextRun::Text(d) => d.text.clone(),
-                _ => String::new(),
-            })
-            .collect();
-        assert_eq!(text, "File: draft  final.odp");
-    }
-
-    #[test]
-    fn speaker_notes_collapse_white_space_per_paragraph() {
-        let body = r#"<presentation:notes><draw:frame presentation:class="notes"><draw:text-box><text:p>  A <text:span> B </text:span></text:p></draw:text-box></draw:frame></presentation:notes>"#;
-        let deck = deck("", "", "", &page(body)).unwrap();
-        assert_eq!(model(&deck, 0).notes.as_deref(), Some("A B"));
+    fn inline_classes_read_alike_in_slides_and_notes() {
+        let cases: &[(&str, &str, &str)] = &[
+            // Containers: their text collapses with the paragraph's.
+            ("span", "  A <text:span> B </text:span> ", "A B"),
+            ("a", r##"x <text:a xlink:href="https://e.test/"> y  z</text:a>"##, "x y z"),
+            ("meta", "a <text:meta> b  c </text:meta> d", "a b c d"),
+            ("meta-field", "a <text:meta-field>  b  </text:meta-field> c", "a b c"),
+            (
+                "ruby-base",
+                "<text:ruby><text:ruby-base> X  Y </text:ruby-base> <text:ruby-text>r</text:ruby-text></text:ruby>",
+                "X Y",
+            ),
+            ("unknown", "a <draw:unknown> b  c </draw:unknown> d", "a b c d"),
+            // Fields: stored text verbatim; a carried space before is kept.
+            ("file-name", "File: <text:file-name>draft  final.odp</text:file-name>", "File: draft  final.odp"),
+            ("date", "on<text:date> 1  2 </text:date>x", "on 1  2 x"),
+            ("title", "<text:title>  T  </text:title>", "  T  "),
+            ("field span", "<text:author-name>a <text:span> b</text:span></text:author-name>", "a  b"),
+            // Preserved white space.
+            ("s", r#"a <text:s text:c="2"/> b"#, "a    b"),
+            ("tab", "a <text:tab/> b", "a \t b"),
+            ("line-break", "a<text:line-break/>b", "a\nb"),
+            // Not shown.
+            (
+                "note",
+                "a <text:note><text:note-citation>1</text:note-citation><text:note-body><text:p>n</text:p></text:note-body></text:note> b",
+                "a b",
+            ),
+            ("bookmark", r#"a <text:bookmark text:name="m"/> b"#, "a b"),
+            ("annotation", "a <office:annotation><text:p>c</text:p></office:annotation> b", "a b"),
+            ("script", "a <text:script>run()</text:script> b", "a b"),
+        ];
+        for (class, inline, expected) in cases {
+            let slide_body = format!(
+                r#"<draw:frame svg:width="10cm" svg:height="5cm"><draw:text-box><text:p>{inline}</text:p></draw:text-box></draw:frame>"#
+            );
+            let slides = deck("", "", "", &page(&slide_body)).unwrap();
+            let slide0 = model(&slides, 0);
+            let text: String = shapes(&slide0)[0].text_body.as_ref().unwrap().paragraphs[0]
+                .runs
+                .iter()
+                .map(|r| match r {
+                    pptx_model::TextRun::Text(d) => d.text.clone(),
+                    pptx_model::TextRun::Break { .. } => "\n".to_string(),
+                    _ => String::new(),
+                })
+                .collect();
+            assert_eq!(text, *expected, "slide text, {class}");
+            let notes_body = format!(
+                r#"<presentation:notes><draw:frame presentation:class="notes"><draw:text-box><text:p>{inline}</text:p></draw:text-box></draw:frame></presentation:notes>"#
+            );
+            let notes = deck("", "", "", &page(&notes_body)).unwrap();
+            assert_eq!(
+                model(&notes, 0).notes.as_deref(),
+                Some(*expected),
+                "notes, {class}"
+            );
+        }
     }
 
     #[test]

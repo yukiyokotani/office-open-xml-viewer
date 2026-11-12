@@ -947,17 +947,15 @@ fn paragraph<'a>(
     env.payload
         .charge(record_bytes(&base_run)?.saturating_mul(2))?;
     let mut runs = Vec::new();
-    let mut stack: Vec<Nd<'a>> = Vec::new();
-    walk_inline(
-        node,
-        &mut stack,
-        &styles,
+    let mut sink = SlideSink {
+        stack: Vec::new(),
+        links: vec![None],
+        levels: vec![None],
+        paragraph_styles: &styles,
         env,
-        &mut runs,
-        None,
-        0,
-        &mut Collapse::default(),
-    )?;
+        runs: &mut runs,
+    };
+    walk_paragraph(node, &mut sink, &mut Collapse::default(), 0)?;
     let end_run = base_run.clone();
     // A label's colour/size follow the first run when the list does not set them.
     let paragraph = Paragraph {
@@ -1759,24 +1757,318 @@ fn run_properties(props: &Props<'_>, env: &TextEnv<'_, '_>) -> TextRunData {
     run_style(props, env).data
 }
 
-#[allow(clippy::too_many_arguments)]
-fn walk_inline<'a>(
+/// How an element inside a paragraph is read (ODF 1.3 Part 3 §6, §7).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Inline {
+    /// A text container (`text:span`, `text:a`, `text:meta`,
+    /// `text:meta-field`, an unknown element, …): its character data
+    /// collapses with the paragraph's (§6.1.2).
+    Container,
+    /// `text:ruby` (§6.4): its `text:ruby-base` is a container; the ruby
+    /// text is not shown.
+    Ruby,
+    /// A §7 field: its stored representation is shown as written.
+    Field,
+    /// `text:s` (§6.1.3): this many significant spaces.
+    Space(usize),
+    /// `text:tab` (§6.1.4).
+    Tab,
+    /// `text:line-break` (§6.1.5).
+    LineBreak,
+    /// Not shown: notes, marks, change tracking, annotations, scripts.
+    Ignored,
+}
+
+/// §7 field elements (text namespace), whose stored text is kept verbatim.
+const TEXT_FIELDS: &[&str] = &[
+    // §7.3 document fields
+    "date",
+    "time",
+    "page-number",
+    "page-continuation",
+    "sender-firstname",
+    "sender-lastname",
+    "sender-initials",
+    "sender-title",
+    "sender-position",
+    "sender-email",
+    "sender-phone-private",
+    "sender-fax",
+    "sender-company",
+    "sender-phone-work",
+    "sender-street",
+    "sender-city",
+    "sender-postal-code",
+    "sender-country",
+    "sender-state-or-province",
+    "author-name",
+    "author-initials",
+    "chapter",
+    "file-name",
+    "template-name",
+    "sheet-name",
+    // §7.4 variable fields
+    "variable-set",
+    "variable-get",
+    "variable-input",
+    "user-field-get",
+    "user-field-input",
+    "sequence",
+    "expression",
+    "text-input",
+    // §7.5 metadata fields
+    "initial-creator",
+    "creation-date",
+    "creation-time",
+    "description",
+    "user-defined",
+    "print-time",
+    "print-date",
+    "printed-by",
+    "title",
+    "subject",
+    "keywords",
+    "editing-cycles",
+    "editing-duration",
+    "modification-time",
+    "modification-date",
+    "creator",
+    "page-count",
+    "paragraph-count",
+    "word-count",
+    "character-count",
+    "table-count",
+    "image-count",
+    "object-count",
+    // §7.6 database fields
+    "database-display",
+    "database-next",
+    "database-row-select",
+    "database-row-number",
+    "database-name",
+    // §7.7 other fields
+    "page-variable-set",
+    "page-variable-get",
+    "placeholder",
+    "conditional-text",
+    "hidden-text",
+    "reference-ref",
+    "sequence-ref",
+    "bookmark-ref",
+    "note-ref",
+    "execute-macro",
+    "hidden-paragraph",
+    "dde-connection",
+    "measure",
+    "table-formula",
+];
+
+/// Inline elements that are not shown (text namespace).
+const TEXT_IGNORED: &[&str] = &[
+    "note",
+    "bookmark",
+    "bookmark-start",
+    "bookmark-end",
+    "soft-page-break",
+    "reference-mark",
+    "reference-mark-start",
+    "reference-mark-end",
+    "change-start",
+    "change-end",
+    "change",
+    "toc-mark",
+    "toc-mark-start",
+    "toc-mark-end",
+    "alphabetical-index-mark",
+    "alphabetical-index-mark-start",
+    "alphabetical-index-mark-end",
+    "user-index-mark",
+    "user-index-mark-start",
+    "user-index-mark-end",
+    // Script source, not displayed text (§7.7.13).
+    "script",
+];
+
+/// The class of an inline element (§6, §7).
+pub(crate) fn classify(node: Nd<'_>) -> Inline {
+    let name = node.tag_name().name();
+    match node.tag_name().namespace() {
+        Some(NS_TEXT) => match name {
+            "span" | "a" | "meta" | "meta-field" | "ruby-base" => Inline::Container,
+            "ruby" => Inline::Ruby,
+            "s" => Inline::Space(
+                node.attribute((NS_TEXT, "c"))
+                    .and_then(|c| c.parse::<usize>().ok())
+                    .unwrap_or(1)
+                    .clamp(1, 1024),
+            ),
+            "tab" => Inline::Tab,
+            "line-break" => Inline::LineBreak,
+            _ if TEXT_FIELDS.contains(&name) => Inline::Field,
+            _ if TEXT_IGNORED.contains(&name) => Inline::Ignored,
+            _ => Inline::Container,
+        },
+        Some(NS_PRESENTATION) if matches!(name, "footer" | "header" | "date-time") => Inline::Field,
+        Some(crate::xml::NS_OFFICE) if matches!(name, "annotation" | "annotation-end") => {
+            Inline::Ignored
+        }
+        _ => Inline::Container,
+    }
+}
+
+/// Receives the content of one paragraph, read by [`walk_paragraph`]: the
+/// styled runs of slide text, or the plain text of speaker notes.
+trait InlineSink<'a> {
+    /// A held space: what it needs to be emitted later.
+    type Space;
+    /// Charge one visited node.
+    fn visit(&mut self) -> Result<(), String>;
+    /// Charge `units` of work.
+    fn step(&mut self, units: usize) -> Result<(), String>;
+    /// A container opens / closes.
+    fn enter(&mut self, element: Nd<'a>);
+    fn leave(&mut self);
+    /// Text of the current container (already collapsed, or verbatim).
+    fn text(&mut self, piece: &str) -> Result<(), String>;
+    /// Hold a collapsed space here; `after_text`: right after this
+    /// container's own text.
+    fn hold_space(&mut self, after_text: bool) -> Result<Self::Space, String>;
+    fn put_space(&mut self, space: Self::Space) -> Result<(), String>;
+    /// `text:s`, `text:tab` or `text:line-break`.
+    fn preserved(&mut self, class: Inline) -> Result<(), String>;
+    /// A field the sink generates itself; `false` shows its stored text.
+    fn generated(&mut self, field: Nd<'a>) -> Result<bool, String>;
+}
+
+/// White-space collapsing state of one paragraph (§6.1.2): whether content
+/// has started, a space waiting for following content, and whether the
+/// text is inside a field (kept verbatim).
+struct Collapse<S> {
+    started: bool,
+    pending: Option<S>,
+    verbatim: bool,
+}
+
+impl<S> Default for Collapse<S> {
+    fn default() -> Self {
+        Collapse {
+            started: false,
+            pending: None,
+            verbatim: false,
+        }
+    }
+}
+
+/// Read the inline content of a paragraph for both slide text and notes:
+/// §6.1.2 white space collapses over the whole paragraph (a space carried
+/// from an earlier node is emitted only when content follows; leading and
+/// trailing spaces are dropped), preserved white space and fields are
+/// content, and field text is kept as stored.
+fn walk_paragraph<'a, K: InlineSink<'a>>(
     node: Nd<'a>,
-    stack: &mut Vec<Nd<'a>>,
-    paragraph_styles: &[Nd<'a>],
-    env: &TextEnv<'a, '_>,
-    runs: &mut Vec<TextRun>,
-    link: Option<&str>,
+    sink: &mut K,
+    ws: &mut Collapse<K::Space>,
     depth: usize,
-    ws: &mut Collapse,
 ) -> Result<(), String> {
     if depth > MAX_SPAN_DEPTH {
         return Err(crate::error::invalid("text spans are nested too deeply"));
     }
-    // The run style of this span level, resolved once (on first use) for
-    // all of its direct children; resolving charges the style records it
-    // reads (each chain node and the attributes of its text properties).
-    let resolve = |stack: &Vec<Nd<'a>>| -> Result<RunStyle, String> {
+    for child in node.children() {
+        sink.visit()?;
+        if child.is_text() {
+            let text = child.text().unwrap_or("");
+            sink.step(text.len() / 64)?;
+            if ws.verbatim {
+                sink.text(text)?;
+                continue;
+            }
+            let mut carried = ws.pending.take();
+            let mut pending_here = false;
+            let mut piece = String::new();
+            for c in text.chars() {
+                if matches!(c, ' ' | '\t' | '\n' | '\r') {
+                    if ws.started {
+                        pending_here = true;
+                    }
+                    continue;
+                }
+                if let Some(space) = carried.take() {
+                    sink.put_space(space)?;
+                    pending_here = false;
+                } else if pending_here {
+                    piece.push(' ');
+                    pending_here = false;
+                }
+                piece.push(c);
+                ws.started = true;
+            }
+            let after_text = !piece.is_empty();
+            sink.text(&piece)?;
+            ws.pending = match carried {
+                Some(space) => Some(space),
+                None if pending_here => Some(sink.hold_space(after_text)?),
+                None => None,
+            };
+            continue;
+        }
+        if !child.is_element() {
+            continue;
+        }
+        match classify(child) {
+            Inline::Container => {
+                sink.enter(child);
+                walk_paragraph(child, sink, ws, depth + 1)?;
+                sink.leave();
+            }
+            Inline::Ruby => {
+                if let Some(base) = child.children().find(|c| xml::is(*c, NS_TEXT, "ruby-base")) {
+                    walk_paragraph(base, sink, ws, depth + 1)?;
+                }
+            }
+            Inline::Ignored => {}
+            class => {
+                // Preserved white space and fields are content: a carried
+                // space before them is kept.
+                if let Some(space) = ws.pending.take() {
+                    sink.put_space(space)?;
+                }
+                ws.started = true;
+                if class != Inline::Field {
+                    sink.preserved(class)?;
+                } else if !sink.generated(child)? {
+                    let outer = ws.verbatim;
+                    ws.verbatim = true;
+                    walk_paragraph(child, sink, ws, depth + 1)?;
+                    ws.verbatim = outer;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Slide text: styled runs, each container level resolving its run style
+/// once (on first use) through the open containers and paragraph styles.
+struct SlideSink<'a, 'e, 'x> {
+    stack: Vec<Nd<'a>>,
+    links: Vec<Option<&'a str>>,
+    levels: Vec<Option<RunStyle>>,
+    paragraph_styles: &'x [Nd<'a>],
+    env: &'x TextEnv<'a, 'e>,
+    runs: &'x mut Vec<TextRun>,
+}
+
+/// The run style of the innermost level, resolved once; resolving charges
+/// the style records it reads (each chain node and the attributes of its
+/// text properties).
+fn level_style<'s, 'a>(
+    levels: &'s mut [Option<RunStyle>],
+    stack: &[Nd<'a>],
+    paragraph_styles: &[Nd<'a>],
+    env: &TextEnv<'a, '_>,
+) -> Result<&'s RunStyle, String> {
+    let level = levels.last_mut().expect("the paragraph level");
+    if level.is_none() {
         let mut nodes: Vec<Nd<'a>> = Vec::new();
         for span in stack.iter().rev() {
             if let Some(name) = span.attribute((NS_TEXT, "style-name")) {
@@ -1795,125 +2087,96 @@ fn walk_inline<'a>(
                 .len()
                 .saturating_add(crate::odp_style::props_cost(&props)),
         )?;
-        Ok(run_style(&props, env))
-    };
-    let mut level: Option<RunStyle> = None;
-    macro_rules! style_for {
-        ($stack:expr) => {{
-            if level.is_none() {
-                level = Some(resolve($stack)?);
-            }
-            level.as_ref().expect("resolved above")
-        }};
+        *level = Some(run_style(&props, env));
     }
-    for child in node.children() {
+    Ok(level.as_ref().expect("resolved above"))
+}
+
+impl<'a> SlideSink<'a, '_, '_> {
+    fn link(&self) -> Option<&'a str> {
+        self.links.last().copied().flatten()
+    }
+
+    fn style(&mut self) -> Result<&RunStyle, String> {
+        level_style(
+            &mut self.levels,
+            &self.stack,
+            self.paragraph_styles,
+            self.env,
+        )
+    }
+
+    fn push(&mut self, piece: &str) -> Result<(), String> {
+        let link = self.link();
+        let style = level_style(
+            &mut self.levels,
+            &self.stack,
+            self.paragraph_styles,
+            self.env,
+        )?;
+        push_text(self.runs, style, piece, link, self.env)
+    }
+}
+
+impl<'a> InlineSink<'a> for SlideSink<'a, '_, '_> {
+    /// The space's style and link, and whether it directly follows the last
+    /// run (of its style).
+    type Space = (RunStyle, Option<String>, bool);
+
+    fn visit(&mut self) -> Result<(), String> {
         // Each node costs its style resolution through the open spans.
-        env.payload.step(1 + stack.len())?;
-        if child.is_text() {
-            let text = child.text().unwrap_or("");
-            env.payload.step(text.len() / 64)?;
-            if ws.verbatim {
-                push_text(runs, style_for!(stack), text, link, env)?;
-                continue;
+        self.env.payload.step(1 + self.stack.len())
+    }
+
+    fn step(&mut self, units: usize) -> Result<(), String> {
+        self.env.payload.step(units)
+    }
+
+    fn enter(&mut self, element: Nd<'a>) {
+        let link = if xml::is(element, NS_TEXT, "a") {
+            element.attribute((NS_XLINK, "href")).or(self.link())
+        } else {
+            self.link()
+        };
+        self.stack.push(element);
+        self.links.push(link);
+        self.levels.push(None);
+    }
+
+    fn leave(&mut self) {
+        self.stack.pop();
+        self.links.pop();
+        self.levels.pop();
+    }
+
+    fn text(&mut self, piece: &str) -> Result<(), String> {
+        self.push(piece)
+    }
+
+    fn hold_space(&mut self, after_text: bool) -> Result<Self::Space, String> {
+        let link = self.link().map(str::to_string);
+        Ok((self.style()?.clone(), link, after_text))
+    }
+
+    /// Appended to the run it follows when that run has its style, else a
+    /// run of its own.
+    fn put_space(&mut self, (style, link, append): Self::Space) -> Result<(), String> {
+        if append {
+            if let Some(TextRun::Text(data)) = self.runs.last_mut() {
+                self.env.payload.charge(1)?;
+                data.text.push(' ');
+                return Ok(());
             }
-            // §6.1.2: white space collapses over the whole paragraph. A space
-            // carried from an earlier node is emitted (in its own style) only
-            // when content follows; leading and trailing spaces are dropped.
-            let mut carried = ws.pending.take();
-            let mut pending_here = false;
-            let mut piece = String::new();
-            for c in text.chars() {
-                if matches!(c, ' ' | '\t' | '\n' | '\r') {
-                    if ws.started {
-                        pending_here = true;
-                    }
-                    continue;
-                }
-                if let Some(space) = carried.take() {
-                    emit_space(runs, space, ws.append, env)?;
-                    pending_here = false;
-                } else if pending_here {
-                    piece.push(' ');
-                    pending_here = false;
-                }
-                piece.push(c);
-                ws.started = true;
-            }
-            let appended_piece = !piece.is_empty();
-            push_text(runs, style_for!(stack), &piece, link, env)?;
-            ws.pending = match carried {
-                Some(space) => Some(space),
-                None if pending_here => {
-                    // Right after this node's own text: it joins that run.
-                    ws.append = appended_piece;
-                    Some((style_for!(stack).clone(), link.map(str::to_string)))
-                }
-                None => None,
-            };
-            continue;
         }
-        if !child.is_element() {
-            continue;
-        }
-        let ns = child.tag_name().namespace();
-        let name = child.tag_name().name();
-        // Spaces, tabs, breaks and fields are content: a carried space
-        // before them is kept.
-        if matches!(
-            (ns, name),
-            (
-                Some(NS_TEXT),
-                "s" | "tab" | "line-break" | "page-number" | "page-count"
-            ) | (Some(NS_PRESENTATION), "footer" | "header" | "date-time")
-        ) {
-            if let Some(space) = ws.pending.take() {
-                emit_space(runs, space, ws.append, env)?;
-            }
-            ws.started = true;
-        }
-        match (ns, name) {
-            (Some(NS_TEXT), "span") => {
-                stack.push(child);
-                walk_inline(
-                    child,
-                    stack,
-                    paragraph_styles,
-                    env,
-                    runs,
-                    link,
-                    depth + 1,
-                    ws,
-                )?;
-                stack.pop();
-            }
-            (Some(NS_TEXT), "a") => {
-                let href = child.attribute((NS_XLINK, "href"));
-                stack.push(child);
-                walk_inline(
-                    child,
-                    stack,
-                    paragraph_styles,
-                    env,
-                    runs,
-                    href.or(link),
-                    depth + 1,
-                    ws,
-                )?;
-                stack.pop();
-            }
-            (Some(NS_TEXT), "s") => {
-                let count = child
-                    .attribute((NS_TEXT, "c"))
-                    .and_then(|c| c.parse::<usize>().ok())
-                    .unwrap_or(1)
-                    .clamp(1, 1024);
-                push_text(runs, style_for!(stack), &" ".repeat(count), link, env)?;
-            }
-            (Some(NS_TEXT), "tab") => {
-                push_text(runs, style_for!(stack), "\t", link, env)?;
-            }
-            (Some(NS_TEXT), "line-break") => {
-                let s = style_for!(stack);
+        push_text(self.runs, &style, " ", link.as_deref(), self.env)
+    }
+
+    fn preserved(&mut self, class: Inline) -> Result<(), String> {
+        match class {
+            Inline::Space(count) => self.push(&" ".repeat(count)),
+            Inline::Tab => self.push("\t"),
+            _ => {
+                let s = self.style()?;
                 let run = TextRun::Break {
                     font_size: s.data.font_size,
                     font_family: s.data.font_family.clone(),
@@ -1922,121 +2185,95 @@ fn walk_inline<'a>(
                     character_attributes: BTreeMap::new(),
                     character_child_attributes: BTreeMap::new(),
                 };
-                env.payload.charge(record_bytes(&run)?)?;
-                runs.push(run);
+                self.env.payload.charge(record_bytes(&run)?)?;
+                self.runs.push(run);
+                Ok(())
             }
+        }
+    }
+
+    fn generated(&mut self, field: Nd<'a>) -> Result<bool, String> {
+        let env = self.env;
+        let name = field.tag_name().name();
+        match (field.tag_name().namespace(), name) {
             (Some(NS_TEXT), "page-number") => {
-                let format = child.attribute((NS_STYLE, "num-format")).unwrap_or("1");
-                let mut s = style_for!(stack).clone();
+                let format = field.attribute((NS_STYLE, "num-format")).unwrap_or("1");
+                let mut s = self.style()?.clone();
                 s.data.field_type = Some("slidenum".into());
                 let text = format_number(env.slide_number as u32, format);
-                push_text(runs, &s, &text, link, env)?;
+                push_text(self.runs, &s, &text, self.link(), env)?;
             }
-            (Some(NS_TEXT), "page-count") => {
-                let text = env.slide_count.to_string();
-                push_text(runs, style_for!(stack), &text, link, env)?;
-            }
-            (Some(NS_PRESENTATION), "footer")
-            | (Some(NS_PRESENTATION), "header")
-            | (Some(NS_PRESENTATION), "date-time") => {
+            (Some(NS_TEXT), "page-count") => self.push(&env.slide_count.to_string())?,
+            (Some(NS_PRESENTATION), _) => {
                 let value = match name {
                     "footer" => env.footer.clone(),
                     "header" => env.header.clone(),
                     _ => env.date_time.clone(),
                 };
                 if let Some(text) = value {
-                    push_text(runs, style_for!(stack), &text, link, env)?;
+                    self.push(&text)?;
                 }
             }
-            (Some(NS_TEXT), "note")
-            | (Some(NS_TEXT), "bookmark")
-            | (Some(NS_TEXT), "bookmark-start")
-            | (Some(NS_TEXT), "bookmark-end")
-            | (Some(NS_TEXT), "soft-page-break")
-            | (Some(NS_TEXT), "reference-mark")
-            | (Some(NS_TEXT), "reference-mark-start")
-            | (Some(NS_TEXT), "reference-mark-end")
-            | (Some(NS_TEXT), "change-start")
-            | (Some(NS_TEXT), "change-end")
-            | (Some(NS_TEXT), "change")
-            | (Some(NS_TEXT), "toc-mark")
-            | (Some(NS_TEXT), "alphabetical-index-mark") => {}
-            (Some(crate::xml::NS_OFFICE), "annotation")
-            | (Some(crate::xml::NS_OFFICE), "annotation-end") => {}
-            (Some(NS_TEXT), "ruby") => {
-                if let Some(base) = child.children().find(|c| xml::is(*c, NS_TEXT, "ruby-base")) {
-                    walk_inline(
-                        base,
-                        stack,
-                        paragraph_styles,
-                        env,
-                        runs,
-                        link,
-                        depth + 1,
-                        ws,
-                    )?;
-                }
-            }
-            _ => {
-                // Other fields (dates, titles, file names, …) show their
-                // stored representation verbatim: §6.1.2 collapses only the
-                // paragraph's own character data. A carried space before a
-                // field is kept.
-                let field = ns == Some(NS_TEXT);
-                if field {
-                    if let Some(space) = ws.pending.take() {
-                        emit_space(runs, space, ws.append, env)?;
-                    }
-                    ws.started = true;
-                }
-                let outer = ws.verbatim;
-                ws.verbatim |= field;
-                walk_inline(
-                    child,
-                    stack,
-                    paragraph_styles,
-                    env,
-                    runs,
-                    link,
-                    depth + 1,
-                    ws,
-                )?;
-                ws.verbatim = outer;
-            }
+            _ => return Ok(false),
         }
+        Ok(true)
     }
-    Ok(())
 }
 
-/// White-space collapsing state of one paragraph (§6.1.2): whether content
-/// has started, and a space waiting for following content (its style and
-/// link).
-#[derive(Default)]
-struct Collapse {
-    started: bool,
-    pending: Option<(RunStyle, Option<String>)>,
-    /// The pending space directly follows the last run, of its style.
-    append: bool,
-    /// Inside a field: its stored text is kept as written.
-    verbatim: bool,
+/// Speaker notes: plain text within [`MAX_NOTES_BYTES`] (checked before
+/// each piece is added).
+struct NotesSink<'t> {
+    text: &'t mut String,
 }
 
-/// Emit a carried space: appended to the run it follows when that run has
-/// its style, else a run of its own.
-fn emit_space(
-    runs: &mut Vec<TextRun>,
-    (style, link): (RunStyle, Option<String>),
-    append: bool,
-    env: &TextEnv<'_, '_>,
-) -> Result<(), String> {
-    if append {
-        if let Some(TextRun::Text(data)) = runs.last_mut() {
-            env.payload.charge(1)?;
-            data.text.push(' ');
-            return Ok(());
+impl NotesSink<'_> {
+    fn push(&mut self, piece: &str) -> Result<(), String> {
+        if self.text.len().saturating_add(piece.len()) > MAX_NOTES_BYTES {
+            return Err("OpenDocument speaker notes exceed the text limit".to_string());
+        }
+        self.text.push_str(piece);
+        Ok(())
+    }
+}
+
+impl<'a> InlineSink<'a> for NotesSink<'_> {
+    type Space = ();
+
+    fn visit(&mut self) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn step(&mut self, _units: usize) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn enter(&mut self, _element: Nd<'a>) {}
+
+    fn leave(&mut self) {}
+
+    fn text(&mut self, piece: &str) -> Result<(), String> {
+        self.push(piece)
+    }
+
+    fn hold_space(&mut self, _after_text: bool) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn put_space(&mut self, _space: ()) -> Result<(), String> {
+        self.push(" ")
+    }
+
+    fn preserved(&mut self, class: Inline) -> Result<(), String> {
+        match class {
+            Inline::Space(count) => self.push(&" ".repeat(count)),
+            Inline::Tab => self.push("\t"),
+            _ => self.push("\n"),
         }
     }
-    push_text(runs, &style, " ", link.as_deref(), env)
+
+    fn generated(&mut self, _field: Nd<'a>) -> Result<bool, String> {
+        Ok(false)
+    }
 }
 
 /// §6.1.2 white-space processing: runs of spaces, tabs and newlines in text
@@ -2176,77 +2413,23 @@ pub fn slide_part_name(index: usize) -> String {
 pub fn notes_text<'a>(containers: impl Iterator<Item = Nd<'a>>) -> Result<String, String> {
     let mut text = String::new();
     let mut first = true;
-    let push = |text: &mut String, piece: &str| -> Result<(), String> {
-        if text.len().saturating_add(piece.len()) > MAX_NOTES_BYTES {
-            return Err("OpenDocument speaker notes exceed the text limit".to_string());
-        }
-        text.push_str(piece);
-        Ok(())
-    };
-    let paragraph = |n: Nd<'a>| xml::is(n, NS_TEXT, "p") || xml::is(n, NS_TEXT, "h");
     for container in containers {
-        // One traversal in document order that tracks whether it is inside
-        // a paragraph: each outermost paragraph is one line (a paragraph
-        // nested in another, not valid ODF, is read as part of it), and
-        // every node is visited once.
-        let mut stack: Vec<(Nd<'a>, bool)> = vec![(container, false)];
-        let (mut started, mut pending) = (false, false);
-        while let Some((node, inside)) = stack.pop() {
-            let starts = !inside && node != container && paragraph(node);
-            if starts {
+        // Each outermost paragraph, in document order, is one line read as
+        // slide paragraphs are (a paragraph nested in another, not valid
+        // ODF, is read as part of it).
+        let mut stack: Vec<Nd<'a>> = container.children().collect();
+        stack.reverse();
+        while let Some(node) = stack.pop() {
+            if xml::is(node, NS_TEXT, "p") || xml::is(node, NS_TEXT, "h") {
                 if !first {
-                    push(&mut text, "\n")?;
+                    NotesSink { text: &mut text }.push("\n")?;
                 }
                 first = false;
-                // §6.1.2 over the whole paragraph, as for slide text.
-                started = false;
-                pending = false;
+                let mut sink = NotesSink { text: &mut text };
+                walk_paragraph(node, &mut sink, &mut Collapse::default(), 0)?;
+                continue;
             }
-            let inside = inside || starts;
-            if inside {
-                let content = xml::is(node, NS_TEXT, "s")
-                    || xml::is(node, NS_TEXT, "tab")
-                    || xml::is(node, NS_TEXT, "line-break");
-                if content && pending {
-                    push(&mut text, " ")?;
-                    pending = false;
-                }
-                if content {
-                    started = true;
-                }
-                if node.is_text() {
-                    for c in node.text().unwrap_or("").chars() {
-                        if matches!(c, ' ' | '\t' | '\n' | '\r') {
-                            pending |= started;
-                            continue;
-                        }
-                        if pending {
-                            push(&mut text, " ")?;
-                            pending = false;
-                        }
-                        let mut buffer = [0u8; 4];
-                        push(&mut text, c.encode_utf8(&mut buffer))?;
-                        started = true;
-                    }
-                    continue;
-                } else if xml::is(node, NS_TEXT, "s") {
-                    let n = node
-                        .attribute((NS_TEXT, "c"))
-                        .and_then(|c| c.parse::<usize>().ok())
-                        .unwrap_or(1)
-                        .min(1024);
-                    for _ in 0..n {
-                        push(&mut text, " ")?;
-                    }
-                } else if xml::is(node, NS_TEXT, "tab") {
-                    push(&mut text, "\t")?;
-                } else if xml::is(node, NS_TEXT, "line-break") {
-                    push(&mut text, "\n")?;
-                }
-            }
-            for child in node.children().collect::<Vec<_>>().into_iter().rev() {
-                stack.push((child, inside));
-            }
+            stack.extend(node.children().collect::<Vec<_>>().into_iter().rev());
         }
     }
     Ok(text)
