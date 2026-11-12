@@ -1283,6 +1283,7 @@ export interface DocSettings {
     ulTrailSpace?: boolean;
     doNotExpandShiftReturn?: boolean;
     compatibilityMode?: number;
+    __footnoteColumnBands?: boolean;
 }
 export interface DocTable {
     colWidths: number[];

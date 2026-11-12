@@ -2139,7 +2139,7 @@ export type ShapeFill = Exclude<Fill, {
     fillType: 'image';
 } | {
     fillType: 'none';
-}>;
+}> | ShapeHatchFill | ShapeImageFill;
 export type ShapeGeom = {
     type: 'preset';
     name: string;
@@ -2162,6 +2162,22 @@ export type ShapeGeom = {
     duotone?: Duotone;
     blipEffects?: BlipEffect[];
 };
+export interface ShapeHatchFill {
+    fillType: 'hatch';
+    color: string;
+    background?: string;
+    angle: number;
+    distancePt: number;
+    lines: number;
+}
+export interface ShapeImageFill {
+    fillType: 'image';
+    imagePath: string;
+    mimeType: string;
+    tile?: boolean;
+    tileWidthPt?: number;
+    tileHeightPt?: number;
+}
 export interface ShapeInfo {
     zOrder?: number;
     x: number;

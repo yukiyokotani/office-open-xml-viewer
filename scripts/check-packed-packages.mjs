@@ -28,7 +28,10 @@ try {
       // each): never the local private corpus, never a format without its WASM.
       const manifest = JSON.parse(readFileSync(join(directory, 'package.json'), 'utf8'));
       const formats = Object.keys(manifest.exports).map(entry => entry.replace(/^\.\//, ''));
-      assert.deepEqual(files, [
+      // Code the format entries share is bundled once, as hashed JS chunks.
+      const shared = formats.length > 1 ? files.filter(path => /^dist\/[\w-]+-[\w-]{8}\.js$/.test(path)) : [];
+      assert.ok(shared.length <= 1, `unexpected shared chunks: ${shared.join(', ')}`);
+      assert.deepEqual(files.filter(path => !shared.includes(path)), [
         'LICENSE', 'README.md', 'THIRD_PARTY_NOTICES.md', 'package.json',
         ...formats.flatMap(f => [`dist/${f}-source-module.mjs`, `dist/${f}.mjs`, `dist/opendocument_${f}_bg.wasm`, `dist/types/${f}.d.ts`]),
       ].sort());

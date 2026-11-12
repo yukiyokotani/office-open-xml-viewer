@@ -2243,6 +2243,7 @@ export interface ShapeElement {
     custGeomPaint?: {
         fill: string | null;
         stroke: boolean;
+        fillRule?: 'nonzero' | 'evenodd';
     }[];
     adj: number | null;
     adj2: number | null;
@@ -2411,6 +2412,7 @@ interface TextBody__emitterCollision1 {
     autoFit: string;
     fontScale?: number | null;
     lnSpcReduction?: number | null;
+    shrinkOnOverflow?: boolean;
     numCol?: number;
     spcCol?: number;
 }
