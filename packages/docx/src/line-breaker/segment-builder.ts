@@ -1724,9 +1724,19 @@ function appendRunsToSegments(
         for (let index = emittedStart; index < segs.length; index += 1) {
           const glyph = segs[index];
           if (!('text' in glyph)) throw new Error('An optional hyphen lost its text authority');
+          // The glyph's '-' acquisition belongs to the frozen conditional
+          // glyph only. The empty source marker keeps an empty request of
+          // the same run (as the metric probes below do), so any joined-unit
+          // measurement of the unselected marker acquires zero advance
+          // instead of a request that contradicts its retained text (#2193).
           segs[index] = { ...glyph, text: '', metricOnly: true,
             optionalHyphen: Object.freeze({ ...glyph }), measuredWidth: 0,
-            sourceRunIndex: runIndex };
+            sourceRunIndex: runIndex,
+            ...(glyph.textShapeRequest ? {
+              nativeLevelUnit: undefined,
+              nativeVisiblePrefix: undefined,
+              textShapeRequest: Object.freeze(independentTextShapeRequest(glyph.textShapeRequest, '')),
+            } : {}) };
         }
         continue;
       }
