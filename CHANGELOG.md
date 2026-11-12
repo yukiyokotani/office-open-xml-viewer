@@ -5,6 +5,16 @@ semantic versioning. While the major version is zero, minor releases may contain
 explicitly documented breaking changes; patch releases remain compatible with
 the corresponding minor release.
 
+## 0.89.10 — Unreleased
+
+Compatible patch release. No migration is required.
+
+- **Word: soft hyphen after a non-breaking-hyphen word:** a paragraph where a
+  `<w:softHyphen/>` follows a word joined with `<w:noBreakHyphen/>` (for
+  example "out-of-pocket" as Word stores it) no longer fails layout with
+  "Segment measurement does not match its retained text range context". The
+  error was a regression in 0.89.0 (#2193).
+
 ## 0.89.9 — 2026-11-10
 
 Compatible patch release. No migration is required for ordinary use. Two
