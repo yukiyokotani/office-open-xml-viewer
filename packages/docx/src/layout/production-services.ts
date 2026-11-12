@@ -470,9 +470,10 @@ export function createProductionTextLayoutService(
         canvasFontString(resolution.route, 32, resolution.weight, resolution.style);
       return {
         symbolText: (text: string, family: string, resolution: import('./font-service.js').FontResolution,
-          convertedRoute: (converted: string) => import('./font-service.js').FontResolution) =>
+          convertedRoute: (converted: string) => import('./font-service.js').FontResolution,
+          keepsShifted?: (shifted: string) => boolean) =>
           // The colour proof is for the route the converted text paints with.
-          oracle.segments(text, family, fontOf(resolution), (converted) => fontOf(convertedRoute(converted))),
+          oracle.segments(text, family, fontOf(resolution), (converted) => fontOf(convertedRoute(converted)), keepsShifted),
         symbolDraws: (code: string, resolution: import('./font-service.js').FontResolution) =>
           oracle.draws(code, fontOf(resolution)),
         symbolMonochrome: (text: string, resolution: import('./font-service.js').FontResolution) =>

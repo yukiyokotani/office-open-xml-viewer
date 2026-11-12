@@ -142,6 +142,11 @@ export interface SymbolTextOptions {
    * emoji-capable target converts only when this is true; any other target
    * unless it is false. */
   readonly monochrome?: (text: string) => boolean | undefined;
+  /** Whether a native bare code that bidi mirroring would replace may be
+   * kept as `shifted`, its F0-shifted form (default: yes). False where the
+   * caller would paint that form in another font than the judged one: the
+   * code then converts, as one the font does not draw. */
+  readonly keepsShifted?: (shifted: string) => boolean;
 }
 
 /** A maximal run of characters sharing a single rendering disposition. */
@@ -182,7 +187,9 @@ function convertCodePoint(
   // A native bare code that bidi mirroring would replace is kept as its
   // F0-shifted form: the very glyph (that identity is what makes a bare code
   // native, symbol-face.ts), which no direction mirrors.
-  if (native) return !pua && BIDI_MIRRORED.test(ch) ? { text: String.fromCharCode(0xf000 + code), mapped: false } : undefined;
+  const shifted = native && !pua && BIDI_MIRRORED.test(ch) ? String.fromCharCode(0xf000 + code) : undefined;
+  const unkept = shifted !== undefined && options.keepsShifted?.(shifted) === false;
+  if (native && !unkept) return shifted === undefined ? undefined : { text: shifted, mapped: false };
   const target = native === undefined ? legacy : full;
   if (target === undefined || target === ch) return undefined;
   if (EMOJI_CAPABLE.test(target)) {

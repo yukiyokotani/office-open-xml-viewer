@@ -774,6 +774,9 @@ export interface TextLayoutServiceInput {
     /** The route converted text paints with: every authored slot cleared,
      * the scalar's own slot and the run's weight/style (segment-builder). */
     convertedRoute: (converted: string) => FontResolution,
+    /** Whether the F0-shifted form of a kept bare code would be shaped in
+     * the font the code was judged in (core SymbolTextOptions.keepsShifted). */
+    keepsShifted?: (shifted: string) => boolean,
   ) => readonly SymbolTextSegment[];
   /** Whether the resolved font draws one authored symbol code as its own
    * symbol glyph; undefined when it cannot be judged. */
@@ -1427,14 +1430,14 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
             const cleared = { ...request, fonts: { ascii: null, highAnsi: null, eastAsia: null, complexScript: null },
               themeFonts: undefined, themeFontPresence: undefined };
             return resolve({ ...cleared, text: converted, slot: scalarSlot(cleared, converted) });
-          })
+          },
+          // A kept bare code that bidi mirroring would replace is written
+          // F0-shifted (core symbol-font.ts): the same glyph only in the
+          // font it was judged in. Where shaping would give the shifted
+          // form another slot family, the code converts instead.
+          (shifted) => requestedFamily(request, scalarSlot(request, shifted))?.trim().toLowerCase() === family.trim().toLowerCase())
           : symbolTextToUnicodeSegments(character, family);
-        // A kept bare code may come back F0-shifted (core symbol-font.ts): it
-        // is the same glyph only in the font it was judged in, so it stays
-        // bare when shaping would give the shifted form another slot family.
-        const shiftedElsewhere = parts.length === 1 && !parts[0]!.mapped && parts[0]!.text !== character
-          && requestedFamily(request, scalarSlot(request, parts[0]!.text))?.trim().toLowerCase() !== family.trim().toLowerCase();
-        for (const part of shiftedElsewhere ? [{ text: character, mapped: false }] : parts) push(part);
+        for (const part of parts) push(part);
       }
       return out;
     },

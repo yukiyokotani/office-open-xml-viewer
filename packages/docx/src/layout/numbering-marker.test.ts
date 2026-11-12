@@ -124,6 +124,25 @@ describe('resolveNumberingMarkerGeometry', () => {
     expect(requests).toEqual([{ text: '\uF0AB', ascii: 'Symbol', cs: 'Symbol' }]);
   });
 
+  it('converts a kept mirrored code whose F0-shifted form shaping would give another slot family', () => {
+    // U+00AB takes highAnsi (Symbol) and is native there; U+F0AB would take
+    // eastAsia under the hint, another font: it converts instead of staying
+    // bare, where right-to-left shaping would mirror it to another glyph.
+    const service = createTextLayoutService({
+      fonts: createFontResolver([]),
+      measurer: { fingerprint: 'symbol-shift', measure: (request) => ({ advancePt: request.text.length * 6, ascentPt: 8, descentPt: 2 }) },
+      symbolText: (text, family, _resolution, _route, keepsShifted) => symbolTextToUnicodeSegments(text, family, {
+        native: () => true, monochrome: () => true, ...(keepsShifted ? { keepsShifted } : {}),
+      }),
+    });
+    const slots = (eastAsia: string) => ({
+      text: '«', fonts: { ascii: 'Symbol', highAnsi: 'Symbol', eastAsia, complexScript: 'Symbol' },
+      weight: 400, style: 'normal' as const, fontHint: 'eastAsia' as const,
+    });
+    expect(service.symbolText!(slots('MS Mincho'))).toEqual([{ text: '↔︎', mapped: true }]);
+    expect(service.symbolText!(slots('Symbol'))).toEqual([{ text: '', mapped: false }]);
+  });
+
   it('keeps the marker slots for text converted from a font that draws no symbol code', () => {
     // Apple's Symbol is Unicode-encoded: U+F0B7 becomes "•", which that same
     // face draws, as in 0.89.

@@ -114,6 +114,9 @@ describe('symbol text conversion for a font that draws the codes', () => {
     expect(symbolFontToUnicode('(x)', 'Wingdings', { native })).toBe('\uF028x\uF029');
     // Symbol's own parentheses are parentheses: mirroring them is right.
     expect(symbolFontToUnicode('(', 'Symbol', { native })).toBe('(');
+    // Where the caller would paint the shifted form in another font, the code converts.
+    expect(symbolFontToUnicode('\u00AB', 'Symbol', { native, keepsShifted: () => false, monochrome: () => true }))
+      .toBe('\u2194' + VS15);
     // Not native, or not judged: converted as any other code.
     expect(symbolFontToUnicode('\u00AB', 'Symbol', mono)).toBe('\u2194' + VS15);
     expect(symbolFontToUnicode('\u00AB', 'Symbol')).toBe('\u2194' + VS15);

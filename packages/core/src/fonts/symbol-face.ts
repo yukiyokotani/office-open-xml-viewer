@@ -190,6 +190,7 @@ export interface SymbolFaceOracle {
     fontFamily: string | null | undefined,
     font: string,
     fallbackFont?: SymbolFallbackFont,
+    keepsShifted?: (shifted: string) => boolean,
   ): SymbolTextSegment[];
 }
 
@@ -301,8 +302,10 @@ export function createSymbolFaceOracle(
   return Object.freeze({
     draws: decide,
     monochrome: (text: string, paintFont: string) => monochrome(text, paintFont),
-    segments(text: string, fontFamily: string | null | undefined, paintFont: string, fallbackFont?: SymbolFallbackFont) {
+    segments(text: string, fontFamily: string | null | undefined, paintFont: string, fallbackFont?: SymbolFallbackFont,
+      keepsShifted?: (shifted: string) => boolean) {
       return symbolTextToUnicodeSegments(text, fontFamily, {
+        ...(keepsShifted ? { keepsShifted } : {}),
         native: (code) => decide(code, paintFont),
         // A shaper may paint the VS15 apart from its base (another script
         // slot), so the base alone must be monochrome in its route too.
