@@ -15,11 +15,6 @@ use std::collections::HashMap;
 /// longer chain rejects the document and a cycle is a structural error
 /// (`StyleStore::check_chains`).
 const MAX_PARENT_DEPTH: usize = 64;
-/// Implementation bound on stored style data (owned strings plus a fixed
-/// per-entry overhead), charged before a style is stored.
-const MAX_STYLE_BYTES: usize = 64 * 1024 * 1024;
-const STORED_ENTRY_OVERHEAD: usize = 48;
-
 /// The canonical prefix of a namespace, for property keys.
 pub fn prefix(namespace: Option<&str>) -> &'static str {
     match namespace {
@@ -89,12 +84,22 @@ pub struct Style {
     pub maps: Vec<StyleMap>,
 }
 
+/// A style of the store, by position: a cheap identity that a reader
+/// resolves once from a `*:style-name` and keeps (a column's or row's
+/// default cell style), so nothing hashes a style name per cell.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct StyleId(u32);
+
+/// Styles of one family by name.
+type ByName = HashMap<String, StyleId>;
+
 #[derive(Default)]
 pub struct StyleStore {
-    stored_bytes: usize,
-    styles: HashMap<(String, String), Style>,
-    automatic: HashMap<(String, String), Style>,
-    defaults: HashMap<String, Style>,
+    all: Vec<Style>,
+    /// Family → name → style; lookups borrow both keys.
+    common: HashMap<String, ByName>,
+    automatic: HashMap<String, ByName>,
+    defaults: HashMap<String, StyleId>,
 }
 
 impl StyleStore {
@@ -106,37 +111,43 @@ impl StyleStore {
             if !default && !xml::is(node, NS_STYLE, "style") {
                 continue;
             }
-            self.charge(node)?;
-            let style = read_style(node);
+            crate::budget::tick(1)?;
+            let style = read_style(node)?;
+            let id = StyleId(
+                u32::try_from(self.all.len()).map_err(|_| crate::error::resource("style count"))?,
+            );
             if default {
-                self.defaults.insert(style.family.clone(), style);
-            } else if automatic {
-                self.automatic
-                    .insert((style.family.clone(), style.name.clone()), style);
+                self.defaults.insert(style.family.clone(), id);
             } else {
-                self.styles
-                    .insert((style.family.clone(), style.name.clone()), style);
+                let families = if automatic {
+                    &mut self.automatic
+                } else {
+                    &mut self.common
+                };
+                match families.get_mut(style.family.as_str()) {
+                    Some(names) => {
+                        names.insert(style.name.clone(), id);
+                    }
+                    None => {
+                        families.insert(
+                            style.family.clone(),
+                            HashMap::from([(style.name.clone(), id)]),
+                        );
+                    }
+                }
             }
+            self.all.push(style);
         }
         Ok(())
     }
 
-    fn charge(&mut self, node: roxmltree::Node<'_, '_>) -> Result<(), String> {
-        let bytes = node
-            .descendants()
-            .filter(|n| n.is_element())
-            .fold(0usize, |sum, e| {
-                e.attributes()
-                    .fold(sum.saturating_add(STORED_ENTRY_OVERHEAD), |sum, a| {
-                        sum.saturating_add(a.name().len() + a.value().len() + STORED_ENTRY_OVERHEAD)
-                    })
-            });
-        self.stored_bytes = self
-            .stored_bytes
-            .checked_add(bytes)
-            .filter(|total| *total <= MAX_STYLE_BYTES)
-            .ok_or_else(|| "OpenDocument styles exceed the style storage limit".to_string())?;
-        Ok(())
+    fn common(&self, family: &str, name: &str) -> Option<&Style> {
+        let id = self.common.get(family)?.get(name)?;
+        self.all.get(id.0 as usize)
+    }
+
+    fn parent_of(&self, style: &Style) -> Option<&Style> {
+        self.common(&style.family, style.parent.as_deref()?)
     }
 
     /// Check every parent chain once all styles are read: a chain longer
@@ -144,20 +155,15 @@ impl StyleStore {
     /// cycle is a structural error. [`chain`](Self::chain) then never stops
     /// early on a valid document.
     pub fn check_chains(&self) -> Result<(), String> {
-        let parent_of = |style: &Style| {
-            style
-                .parent
-                .as_deref()
-                .and_then(|parent| self.styles.get(&(style.family.clone(), parent.to_string())))
-        };
         // Chain length (the style itself included) of each common ancestor.
-        let mut depth_of: HashMap<(&str, &str), usize> = HashMap::new();
-        for start in self.automatic.values().chain(self.styles.values()) {
+        let mut depth_of: HashMap<*const Style, usize> = HashMap::new();
+        for start in &self.all {
+            crate::budget::tick(1)?;
             let mut path: Vec<&Style> = Vec::new();
             let mut base = 0usize;
-            let mut next = parent_of(start);
+            let mut next = self.parent_of(start);
             while let Some(parent) = next {
-                if let Some(depth) = depth_of.get(&(parent.family.as_str(), parent.name.as_str())) {
+                if let Some(depth) = depth_of.get(&(parent as *const Style)) {
                     base = *depth;
                     break;
                 }
@@ -168,53 +174,54 @@ impl StyleStore {
                 if path.len() + 1 > MAX_PARENT_DEPTH {
                     return Err(crate::error::resource("style inheritance depth"));
                 }
-                next = parent_of(parent);
+                next = self.parent_of(parent);
             }
             if base + path.len() + 1 > MAX_PARENT_DEPTH {
                 return Err(crate::error::resource("style inheritance depth"));
             }
             for (index, member) in path.iter().enumerate() {
-                depth_of.insert(
-                    (member.family.as_str(), member.name.as_str()),
-                    base + path.len() - index,
-                );
+                depth_of.insert(*member as *const Style, base + path.len() - index);
             }
         }
         Ok(())
     }
 
+    /// The identity of the style a `*:style-name` names: automatic first,
+    /// then common.
+    pub fn id(&self, family: &str, name: &str) -> Option<StyleId> {
+        self.automatic
+            .get(family)
+            .and_then(|names| names.get(name))
+            .or_else(|| self.common.get(family).and_then(|names| names.get(name)))
+            .copied()
+    }
+
+    pub fn style(&self, id: StyleId) -> &Style {
+        &self.all[id.0 as usize]
+    }
+
     /// The style a `*:style-name` names: automatic first, then common.
     pub fn find(&self, family: &str, name: &str) -> Option<&Style> {
-        let key = (family.to_string(), name.to_string());
-        self.automatic.get(&key).or_else(|| self.styles.get(&key))
+        self.id(family, name).map(|id| self.style(id))
     }
 
     pub fn default_style(&self, family: &str) -> Option<&Style> {
-        self.defaults.get(family)
+        self.defaults.get(family).map(|id| self.style(*id))
     }
 
-    /// The search of a property through several styles in turn (§16.2: a
-    /// table cell's own style, then its row's and its column's default cell
-    /// styles): each style with its parents, nearest first, then the
-    /// family's default style.
-    pub fn chain_through<'s>(&'s self, family: &str, styles: &[&'s Style]) -> Vec<&'s Style> {
+    /// `style` with its parents (common styles), nearest first, then the
+    /// family's default style: the search order of a property (§16.2).
+    pub fn chain_of<'s>(&'s self, family: &str, style: Option<&'s Style>) -> Vec<&'s Style> {
         let mut chain: Vec<&Style> = Vec::new();
-        for style in styles {
-            let mut current = Some(*style);
-            let mut depth = 0;
-            while let Some(style) = current {
-                if depth >= MAX_PARENT_DEPTH || chain.iter().any(|s| std::ptr::eq(*s, style)) {
-                    break;
-                }
-                depth += 1;
-                chain.push(style);
-                current = style
-                    .parent
-                    .as_deref()
-                    .and_then(|parent| self.styles.get(&(family.to_string(), parent.to_string())));
+        let mut current = style;
+        while let Some(style) = current {
+            if chain.len() >= MAX_PARENT_DEPTH || chain.iter().any(|s| std::ptr::eq(*s, style)) {
+                break;
             }
+            chain.push(style);
+            current = self.parent_of(style);
         }
-        if let Some(default) = self.defaults.get(family) {
+        if let Some(default) = self.default_style(family) {
             chain.push(default);
         }
         chain
@@ -224,11 +231,14 @@ impl StyleStore {
     /// the family's default style: a context nested in another (a span in a
     /// paragraph in a cell) inherits what its own chain leaves unset.
     pub fn chain_own<'s>(&'s self, family: &str, name: &str) -> Vec<&'s Style> {
-        let mut chain = self.chain(family, Some(name));
-        if let (Some(last), Some(default)) = (chain.last(), self.defaults.get(family)) {
-            if std::ptr::eq(*last, default) {
-                chain.pop();
-            }
+        self.chain_own_of(family, self.find(family, name))
+    }
+
+    /// [`chain_own`](Self::chain_own) of a resolved style.
+    pub fn chain_own_of<'s>(&'s self, family: &str, style: Option<&'s Style>) -> Vec<&'s Style> {
+        let mut chain = self.chain_of(family, style);
+        if self.default_style(family).is_some() {
+            chain.pop();
         }
         chain
     }
@@ -236,22 +246,7 @@ impl StyleStore {
     /// The style and its parents (common styles), nearest first, then the
     /// family's default style.
     pub fn chain<'s>(&'s self, family: &str, name: Option<&str>) -> Vec<&'s Style> {
-        let mut chain: Vec<&Style> = Vec::new();
-        let mut current = name.and_then(|n| self.find(family, n));
-        while let Some(style) = current {
-            if chain.len() >= MAX_PARENT_DEPTH || chain.iter().any(|s| std::ptr::eq(*s, style)) {
-                break;
-            }
-            chain.push(style);
-            current = style
-                .parent
-                .as_deref()
-                .and_then(|parent| self.styles.get(&(family.to_string(), parent.to_string())));
-        }
-        if let Some(default) = self.defaults.get(family) {
-            chain.push(default);
-        }
-        chain
+        self.chain_of(family, name.and_then(|n| self.find(family, n)))
     }
 }
 
@@ -270,7 +265,7 @@ fn qualified(node: &roxmltree::Attribute<'_, '_>) -> String {
     format!("{}:{}", prefix(node.namespace()), node.name())
 }
 
-fn read_style(node: roxmltree::Node<'_, '_>) -> Style {
+fn read_style(node: roxmltree::Node<'_, '_>) -> Result<Style, String> {
     let mut style = Style {
         name: node.attribute((NS_STYLE, "name")).unwrap_or("").to_string(),
         family: node
@@ -294,6 +289,7 @@ fn read_style(node: roxmltree::Node<'_, '_>) -> Style {
             .insert(qualified(&attribute), attribute.value().to_string());
     }
     for child in node.children().filter(|n| n.is_element()) {
+        crate::budget::tick(1)?;
         if xml::is(child, NS_STYLE, "map") {
             if let (Some(condition), Some(apply)) = (
                 child
@@ -321,6 +317,7 @@ fn read_style(node: roxmltree::Node<'_, '_>) -> Style {
             );
         }
         for element in child.children().filter(|n| n.is_element()) {
+            crate::budget::tick(1)?;
             let mut attributes: HashMap<String, String> = element
                 .attributes()
                 .map(|a| (qualified(&a), a.value().to_string()))
@@ -343,7 +340,7 @@ fn read_style(node: roxmltree::Node<'_, '_>) -> Style {
             );
         }
     }
-    style
+    Ok(style)
 }
 
 /// A length in points (§18.3.18): `cm`, `mm`, `in`, `pt`, `pc`, `px`.
@@ -405,7 +402,10 @@ pub fn unquote_family(value: &str) -> String {
 }
 
 /// `style:font-face` names → family (§16.23).
-pub fn font_faces(root: roxmltree::Node<'_, '_>, faces: &mut HashMap<String, String>) {
+pub fn font_faces(
+    root: roxmltree::Node<'_, '_>,
+    faces: &mut HashMap<String, String>,
+) -> Result<(), String> {
     for decls in root
         .children()
         .filter(|n| xml::is(*n, crate::xml::NS_OFFICE, "font-face-decls"))
@@ -414,6 +414,7 @@ pub fn font_faces(root: roxmltree::Node<'_, '_>, faces: &mut HashMap<String, Str
             .children()
             .filter(|n| xml::is(*n, NS_STYLE, "font-face"))
         {
+            crate::budget::tick(1)?;
             if let Some(name) = face.attribute((NS_STYLE, "name")) {
                 let family = face
                     .attribute((crate::xml::NS_SVG, "font-family"))
@@ -423,6 +424,7 @@ pub fn font_faces(root: roxmltree::Node<'_, '_>, faces: &mut HashMap<String, Str
             }
         }
     }
+    Ok(())
 }
 
 /// A `style:map` condition (§19.472) in the OpenFormula namespace, without
@@ -475,6 +477,7 @@ mod tests {
         let document = roxmltree::Document::parse(&xml).unwrap();
         let mut store = StyleStore::default();
         store.add(document.root_element(), false).unwrap();
+        store.check_chains().unwrap();
         let chain = store.chain("table-cell", Some("ce1"));
         assert_eq!(get(&chain, "text:fo:font-weight"), Some("bold"));
         assert_eq!(get(&chain, "text:fo:font-size"), Some("11pt"));

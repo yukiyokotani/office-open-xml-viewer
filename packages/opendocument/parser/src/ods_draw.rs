@@ -9,6 +9,7 @@
 use super::cells::PartialFont;
 use super::table::Anchored;
 use super::{parse_cell, Context, OdsSheet, MAX_COLS, MAX_DRAWINGS, MAX_ROWS};
+use crate::budget;
 use crate::odf_props::{get, hex_color, length_pt, percent, Style};
 use crate::package::OdfPackage;
 use crate::xml::{self, NS_DRAW, NS_SVG, NS_TEXT, NS_XLINK};
@@ -382,21 +383,40 @@ pub(crate) fn read_drawings(
 ) -> Result<Vec<PendingChart>, String> {
     let mut charts = Vec::new();
     for (order, item) in anchored.iter().enumerate() {
-        read_drawing(
-            ctx,
-            package,
-            item.node,
-            item.cell,
-            grid,
-            worksheet,
-            sheet,
-            order,
-            &mut charts,
-        )?;
+        // Links (`draw:a`) and groups (`draw:g`, whose members carry their
+        // own absolute geometry) are walked with an explicit stack, in
+        // document order: nesting depth costs no call stack.
+        let mut pending = vec![item.node];
+        while let Some(node) = pending.pop() {
+            budget::tick(1)?;
+            if node.tag_name().namespace() != Some(NS_DRAW) {
+                continue;
+            }
+            ctx.drawing_count += 1;
+            if ctx.drawing_count > MAX_DRAWINGS {
+                return Err(super::resource("drawing count"));
+            }
+            if matches!(node.tag_name().name(), "a" | "g") {
+                pending.extend(node.children().rev().filter(|n| n.is_element()));
+                continue;
+            }
+            read_drawing(
+                ctx,
+                package,
+                node,
+                item.cell,
+                grid,
+                worksheet,
+                sheet,
+                order,
+                &mut charts,
+            )?;
+        }
     }
     Ok(charts)
 }
 
+/// One drawing that is not a link or a group.
 #[allow(clippy::too_many_arguments)]
 fn read_drawing(
     ctx: &mut Context,
@@ -409,31 +429,7 @@ fn read_drawing(
     order: usize,
     charts: &mut Vec<PendingChart>,
 ) -> Result<(), String> {
-    if node.tag_name().namespace() != Some(NS_DRAW) {
-        return Ok(());
-    }
-    ctx.drawing_count += 1;
-    if ctx.drawing_count > MAX_DRAWINGS {
-        return Err(super::resource("drawing count"));
-    }
     let name = node.tag_name().name();
-    if name == "a" {
-        for child in node.children().filter(|n| n.is_element()) {
-            read_drawing(
-                ctx, package, child, cell, grid, worksheet, sheet, order, charts,
-            )?;
-        }
-        return Ok(());
-    }
-    if name == "g" {
-        // A group's members carry their own absolute geometry.
-        for child in node.children().filter(|n| n.is_element()) {
-            read_drawing(
-                ctx, package, child, cell, grid, worksheet, sheet, order, charts,
-            )?;
-        }
-        return Ok(());
-    }
     let Some((rect, rotation)) = place(node, cell, grid, &ctx.sheet_names) else {
         return Ok(());
     };
@@ -455,11 +451,6 @@ fn read_drawing(
             .collect();
         if let Some(object) = object {
             let replacement = images.first().cloned();
-            ctx.budget.bytes(
-                (2 * std::mem::size_of::<PendingChart>())
-                    .saturating_add(object.capacity())
-                    .saturating_add(replacement.as_ref().map_or(0, String::capacity)),
-            )?;
             charts.push(PendingChart {
                 sheet,
                 rect,
@@ -475,7 +466,6 @@ fn read_drawing(
             || !images.is_empty()
         {
             push_image(
-                &ctx.budget,
                 &mut ctx.images,
                 &mut ctx.image_facts,
                 package,
@@ -797,6 +787,7 @@ fn polygon_geometry(
     };
     let mut commands = Vec::new();
     for (i, pair) in points.split_whitespace().enumerate() {
+        budget::tick(1)?;
         if i >= MAX_POLYGON_POINTS {
             return Err(crate::error::resource("shape geometry"));
         }
@@ -930,6 +921,7 @@ fn shape_text(
     let graphic = PartialFont::of(chain, &ctx.faces).with_size_base(10.0);
     let mut out = Vec::new();
     for p in paragraphs {
+        budget::tick(1)?;
         let p_chain = ctx
             .store
             .chain("paragraph", p.attribute((NS_TEXT, "style-name")));
@@ -949,9 +941,6 @@ fn shape_text(
         let p_font = context_font(ctx, &p_set, "paragraph");
         let mut runs = Vec::new();
         collect_shape_runs(ctx, p, &p_set, &p_font, &mut runs)?;
-        // The paragraph record (its alignment token is at most 4 bytes).
-        ctx.budget.bytes(4)?;
-        ctx.budget.grow(&out)?;
         out.push(xlsx_model::ShapeParagraph {
             align: align.into(),
             rtl: false,
@@ -973,9 +962,6 @@ fn shape_text(
             .map(|pt| (pt * EMU_PER_PT).round() as i64)
             .unwrap_or(91_440)
     };
-    // The text body's fixed tokens.
-    ctx.budget
-        .bytes(std::mem::size_of::<xlsx_model::ShapeText>() + 32)?;
     Ok(Some(xlsx_model::ShapeText {
         vert: "horz".into(),
         anchor_ctr: get(chain, "graphic:draw:textarea-horizontal-align") == Some("center"),
@@ -1021,8 +1007,10 @@ fn collect_shape_runs(
     runs: &mut Vec<xlsx_model::ShapeTextRun>,
 ) -> Result<(), String> {
     for child in node.children() {
+        // One step per node: each may add a run or resolve a span style.
+        budget::tick(1)?;
         if child.is_text() {
-            push_text_run(ctx, runs, child.text().unwrap_or(""), font)?;
+            push_text_run(runs, child.text().unwrap_or(""), font);
             continue;
         }
         if child.tag_name().namespace() != Some(NS_TEXT) {
@@ -1040,39 +1028,24 @@ fn collect_shape_runs(
                 }
                 None => collect_shape_runs(ctx, child, set, font, runs)?,
             },
-            // `content.xml` is bounded by `check_space_runs` before reading.
-            "s" => push_text_run(
-                ctx,
-                runs,
-                &" ".repeat(crate::odf_text::space_count(child)),
-                font,
-            )?,
-            "tab" => push_text_run(ctx, runs, "\t", font)?,
-            "line-break" => ctx.budget.push(runs, xlsx_model::ShapeTextRun::Break)?,
+            "s" => {
+                let mut spaces = String::new();
+                budget::push_spaces(&mut spaces, crate::odf_text::space_count(child))?;
+                push_text_run(runs, &spaces, font);
+            }
+            "tab" => push_text_run(runs, "\t", font),
+            "line-break" => runs.push(xlsx_model::ShapeTextRun::Break),
             _ => collect_shape_runs(ctx, child, set, font, runs)?,
         }
     }
     Ok(())
 }
 
-/// One text run of a shape. Each run holds its own copy of the font
-/// family, so the run is admitted (text, family, colour, slot) before any
-/// of it is copied.
-fn push_text_run(
-    ctx: &Context,
-    runs: &mut Vec<xlsx_model::ShapeTextRun>,
-    text: &str,
-    font: &xlsx_model::Font,
-) -> Result<(), String> {
+/// One text run of a shape, with its own copy of the font family.
+fn push_text_run(runs: &mut Vec<xlsx_model::ShapeTextRun>, text: &str, font: &xlsx_model::Font) {
     if text.is_empty() {
-        return Ok(());
+        return;
     }
-    ctx.budget.grow(runs)?;
-    ctx.budget.bytes(
-        text.len()
-            .saturating_add(font.name.as_ref().map_or(0, String::len))
-            .saturating_add(font.color.as_ref().map_or(0, |c| c.len() + 1)),
-    )?;
     runs.push(xlsx_model::ShapeTextRun::Text {
         text: text.to_string(),
         bold: font.bold,
@@ -1084,7 +1057,6 @@ fn push_text_run(
         font_face_ea: None,
         font_face_cs: None,
     });
-    Ok(())
 }
 
 fn push_shape_checked(
@@ -1094,25 +1066,8 @@ fn push_shape_checked(
     rect: Rect,
     mut shape: ShapeInfo,
 ) -> Result<(), String> {
-    admit_fill_image(
-        &ctx.budget,
-        package,
-        &mut ctx.images,
-        &mut ctx.image_facts,
-        &mut shape,
-    )?;
-    push_shape(&ctx.budget, worksheet, rect, shape)
-}
-
-fn push_shape(
-    budget: &super::Budget,
-    worksheet: &mut Worksheet,
-    rect: Rect,
-    shape: ShapeInfo,
-) -> Result<(), String> {
-    // The anchor at its retained size (the shape's text, admitted run by
-    // run as it was read, is counted again here).
-    let anchor = ShapeAnchor {
+    admit_fill_image(package, &mut ctx.images, &mut ctx.image_facts, &mut shape)?;
+    worksheet.shape_groups.push(ShapeAnchor {
         from_col: rect.from_col,
         from_col_off: rect.from_col_off,
         from_row: rect.from_row,
@@ -1128,8 +1083,8 @@ fn push_shape(
         anchor_ext_cx: None,
         anchor_ext_cy: None,
         shapes: vec![shape],
-    };
-    budget.push(&mut worksheet.shape_groups, anchor)
+    });
+    Ok(())
 }
 
 /// What the reader needs of a package image: its decodable MIME type and
@@ -1139,7 +1094,6 @@ pub(crate) type ImageFact = Option<(&'static str, Option<(f64, f64)>)>;
 /// The facts of package image `path`, read once per workbook however many
 /// drawings and fills reference it.
 fn image_fact(
-    budget: &super::Budget,
     facts: &mut HashMap<String, ImageFact>,
     package: &OdfPackage,
     path: &str,
@@ -1153,14 +1107,13 @@ fn image_fact(
     } else {
         None
     };
-    budget.bytes(super::hash_entry_bytes::<String, ImageFact>(path.len()))?;
+    budget::tick(1)?;
     facts.insert(path.to_string(), fact);
     Ok(fact)
 }
 
 #[allow(clippy::too_many_arguments)]
 fn push_image(
-    budget: &super::Budget,
     admitted: &mut std::collections::BTreeSet<String>,
     facts: &mut HashMap<String, ImageFact>,
     package: &OdfPackage,
@@ -1175,7 +1128,7 @@ fn push_image(
     let mut raster = None;
     let mut svg = None;
     for path in images {
-        match image_fact(budget, facts, package, path)? {
+        match image_fact(facts, package, path)? {
             Some(("image/svg+xml", size)) => {
                 svg.get_or_insert((path.clone(), size));
             }
@@ -1196,9 +1149,9 @@ fn push_image(
     let alpha = get(chain, "graphic:draw:image-opacity")
         .and_then(percent)
         .filter(|a| *a < 1.0);
-    admit_image_path(budget, admitted, &image_path)?;
+    admit_image_path(admitted, &image_path);
     if let Some((path, _)) = &svg {
-        admit_image_path(budget, admitted, path)?;
+        admit_image_path(admitted, path);
     }
     let mirror = get(chain, "graphic:style:mirror").unwrap_or("none");
     let anchor = ImageAnchor {
@@ -1231,23 +1184,15 @@ fn push_image(
         duotone: None,
         blip_effects: Vec::new(),
     };
-    budget.push(&mut worksheet.images, anchor)
+    worksheet.images.push(anchor);
+    Ok(())
 }
 
 /// Record a package image the workbook draws (its path kept once).
-fn admit_image_path(
-    budget: &super::Budget,
-    admitted: &mut std::collections::BTreeSet<String>,
-    path: &str,
-) -> Result<(), String> {
+fn admit_image_path(admitted: &mut std::collections::BTreeSet<String>, path: &str) {
     if !admitted.contains(path) {
-        budget.bytes(
-            path.len()
-                .saturating_add(super::map_entry_bytes::<String, ()>()),
-        )?;
         admitted.insert(path.to_string());
     }
-    Ok(())
 }
 
 /// `fo:clip` `rect(top, right, bottom, left)` (§20.179), lengths measured on
@@ -1283,40 +1228,32 @@ pub(crate) fn resolve_charts(
     warnings: &mut Vec<String>,
 ) -> Result<(), String> {
     for chart in pending {
+        budget::tick(1)?;
         // Each object is read once; every further frame that shows it
-        // takes a copy admitted at its retained size. The key is the
-        // object directory the loader reads (`./` and trailing `/` removed).
+        // takes a copy. The key is the object directory the loader reads
+        // (`./` and trailing `/` removed).
         let key = crate::odf_chart::object_dir(&chart.object).to_string();
         let model = match ctx.chart_objects.get(&key) {
-            Some(model) => match model {
-                Some(model) => Some(ctx.budget.copy(model)?),
-                None => None,
-            },
+            Some(model) => model.clone(),
             None => {
                 let resolver = SheetResolver { sheets, ctx };
-                // A chart in flight holds at most what the workbook has left.
-                let model = crate::odf_chart::read_chart_object_within(
-                    package,
-                    &chart.object,
-                    Some(&resolver),
-                    ctx.budget.remaining(),
-                );
+                // The chart is read inside the workbook's governed scope.
+                let model =
+                    crate::odf_chart::read_chart_object(package, &chart.object, Some(&resolver));
                 // A structurally invalid object is drawn from its
                 // replacement; a resource limit or package failure rejects
                 // the workbook.
-                let model = match model {
+                let mut model = match model {
                     Ok(model) => model,
                     Err(error) if crate::error::is_invalid(&error) => None,
                     Err(error) => return Err(error),
                 };
-                // The cache keeps its own copy (and the path).
-                ctx.budget.bytes(
-                    model
-                        .as_ref()
-                        .map_or(0, crate::retained_size)
-                        .saturating_add(super::hash_entry_bytes::<String, Option<()>>(key.len())),
-                )?;
-                ctx.chart_objects.insert(key, model.as_ref().cloned());
+                // Chart values read from the tables are serials of the
+                // workbook's date system (§19.636 `table:null-date`).
+                if let Some(model) = model.as_mut() {
+                    model.date1904 = ctx.date1904;
+                }
+                ctx.chart_objects.insert(key, model.clone());
                 model
             }
         };
@@ -1335,22 +1272,19 @@ pub(crate) fn resolve_charts(
                     to_row_off: rect.to_row_off,
                     chart: model,
                 };
-                ctx.budget
-                    .push(&mut sheets[chart.sheet].worksheet.charts, anchor)?;
+                sheets[chart.sheet].worksheet.charts.push(anchor);
             }
             None => {
                 // An embedded object that is not a chart (a formula or a
                 // nested document) is drawn from its replacement image when
                 // the package holds one in a browser-decodable format.
-                ctx.budget
-                    .push(warnings, "ods:object-replacement".to_string())?;
+                warnings.push("ods:object-replacement".to_string());
                 let images: Vec<String> = chart.replacement.into_iter().collect();
                 let mut worksheet = std::mem::replace(
                     &mut sheets[chart.sheet].worksheet,
                     Worksheet::placeholder("", String::new()),
                 );
                 let result = push_image(
-                    &ctx.budget,
                     &mut ctx.images,
                     &mut ctx.image_facts,
                     package,
@@ -1376,11 +1310,7 @@ struct SheetResolver<'a> {
 }
 
 impl crate::odf_chart::RangeResolver for SheetResolver<'_> {
-    fn cells(
-        &self,
-        address: &str,
-        budget: &crate::odf_chart::ChartBudget,
-    ) -> Result<Option<Vec<crate::odf_chart::CellData>>, String> {
+    fn cells(&self, address: &str) -> Result<Option<Vec<crate::odf_chart::CellData>>, String> {
         let Some((sheet, (r1, c1), (r2, c2))) = super::parse_range(address) else {
             return Ok(None);
         };
@@ -1388,20 +1318,17 @@ impl crate::odf_chart::RangeResolver for SheetResolver<'_> {
         else {
             return Ok(None);
         };
-        let count = (u64::from(r2 - r1) + 1) * (u64::from(c2 - c1) + 1);
-        // Points and their text are admitted before they are copied.
-        budget.points(usize::try_from(count).unwrap_or(usize::MAX))?;
-        let _ = &self.ctx;
-        let mut out = Vec::with_capacity(count as usize);
-        for row in r1..=r2 {
-            for col in c1..=c2 {
-                let cell = super::find_cell(&sheet.rows, row, col);
+        crate::odf_chart::check_points((u64::from(r2 - r1) + 1) * (u64::from(c2 - c1) + 1))?;
+        let mut out = Vec::new();
+        for row in budget::each(r1, r2) {
+            let row = row?;
+            for col in budget::each(c1, c2) {
+                let cell = super::find_cell(&sheet.rows, row, col?);
                 out.push(match cell.map(|c| &c.value) {
                     Some(xlsx_model::CellValue::Number { number }) => {
                         crate::odf_chart::CellData::Number(*number)
                     }
                     Some(xlsx_model::CellValue::Text { text, .. }) => {
-                        budget.bytes(text.len())?;
                         crate::odf_chart::CellData::Text(text.clone())
                     }
                     Some(xlsx_model::CellValue::Bool { bool }) => {
@@ -1457,17 +1384,33 @@ fn shape_fill(fill: crate::odf_fill::Fill) -> Option<xlsx_model::ShapeFill> {
         Fill::Picture(picture) => xlsx_model::ShapeFill::Image {
             image_path: picture.path,
             mime_type: String::new(),
-            tile: picture.tile.is_some(),
-            tile_width_pt: picture.tile.and_then(|t| t.0),
-            tile_height_pt: picture.tile.and_then(|t| t.1),
+            layout: match picture.layout {
+                crate::odf_fill::PictureLayout::Stretch => xlsx_model::ShapeImageLayout::Stretch,
+                crate::odf_fill::PictureLayout::Tile => xlsx_model::ShapeImageLayout::Tile,
+                crate::odf_fill::PictureLayout::Once => xlsx_model::ShapeImageLayout::Once,
+            },
+            width: picture.size.0.map(image_size_edge),
+            height: picture.size.1.map(image_size_edge),
+            align: [picture.align.0, picture.align.1],
+            offset: [picture.offset.0, picture.offset.1],
+            shift: picture.shift.map(|shift| match shift {
+                crate::odf_fill::TileShift::Rows(v) => xlsx_model::ShapeImageShift::Rows(v),
+                crate::odf_fill::TileShift::Columns(v) => xlsx_model::ShapeImageShift::Columns(v),
+            }),
         },
     })
+}
+
+fn image_size_edge(size: crate::odf_fill::PictureSize) -> xlsx_model::ShapeImageSize {
+    match size {
+        crate::odf_fill::PictureSize::Pt(v) => xlsx_model::ShapeImageSize::Pt(v),
+        crate::odf_fill::PictureSize::Fraction(v) => xlsx_model::ShapeImageSize::Fraction(v),
+    }
 }
 
 /// Admit a picture fill's image (its MIME type from the bytes); a fill
 /// whose image is missing or not browser-decodable paints nothing.
 fn admit_fill_image(
-    budget: &super::Budget,
     package: &OdfPackage,
     admitted: &mut std::collections::BTreeSet<String>,
     facts: &mut HashMap<String, ImageFact>,
@@ -1481,11 +1424,11 @@ fn admit_fill_image(
     else {
         return Ok(());
     };
-    let mime = image_fact(budget, facts, package, image_path)?.map(|(mime, _)| mime);
+    let mime = image_fact(facts, package, image_path)?.map(|(mime, _)| mime);
     match mime {
         Some(mime) => {
             *mime_type = mime.to_string();
-            admit_image_path(budget, admitted, image_path)?;
+            admit_image_path(admitted, image_path);
         }
         None => shape.fill = None,
     }

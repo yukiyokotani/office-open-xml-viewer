@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { renderViewport } from './renderer.js';
-import type { ShapeHatchFill, Styles, Worksheet } from './types.js';
+import type { ShapeFill, ShapeHatchFill, Styles, Worksheet } from './types.js';
 
 // An OpenDocument hatch (ODF 1.3 Part 3 §16.42) is stroked directly inside
 // the shape's clip: no pattern bitmap is built, and the number of lines is
@@ -32,8 +32,14 @@ type Matrix = ReturnType<typeof matrix>;
 const HATCH = '#123456';
 
 /** Paint one `size` × `size` px rectangle with `fill` on a 400 × 300 canvas. */
-function paint(fill: ShapeHatchFill, size = 100) {
+function paint(fill: ShapeFill, size = 100, images?: Map<string, CanvasImageSource | null>) {
   const calls: string[] = [];
+  /** Rotations applied while the hatch colour is set, in degrees. */
+  const rotations: number[] = [];
+  /** The transform each created pattern was given. */
+  const patterns: { repetition: string; transform?: DOMMatrix2DInit }[] = [];
+  /** Rectangles filled with a pattern: its offset then, and the rectangle. */
+  const bands: { e?: number; f?: number; rect: number[] }[] = [];
   let lines = 0;
   const stack: Matrix[] = [];
   let current = matrix(1, 0, 0, 1, 0, 0);
@@ -52,10 +58,30 @@ function paint(fill: ShapeHatchFill, size = 100) {
       }
       if (prop === 'resetTransform') return () => { current = matrix(1, 0, 0, 1, 0, 0); };
       if (prop === 'createLinearGradient' || prop === 'createRadialGradient') return () => ({ addColorStop() {} });
-      if (prop === 'rotate') return (r: number) => { current = current.multiply(matrix(Math.cos(r), Math.sin(r), -Math.sin(r), Math.cos(r), 0, 0)); };
+      if (prop === 'rotate') {
+        return (r: number) => {
+          if (String(target.fillStyle).toLowerCase() === HATCH) rotations.push(Math.round((r * 180) / Math.PI) || 0);
+          current = current.multiply(matrix(Math.cos(r), Math.sin(r), -Math.sin(r), Math.cos(r), 0, 0));
+        };
+      }
+      if (prop === 'createPattern') {
+        return (_image: unknown, repetition: string) => {
+          const pattern: { repetition: string; transform?: DOMMatrix2DInit; setTransform(t: DOMMatrix2DInit): void } = {
+            repetition,
+            setTransform(t) { pattern.transform = t; },
+          };
+          patterns.push(pattern);
+          calls.push('createPattern');
+          return pattern;
+        };
+      }
       if (prop === 'fillRect') {
-        return () => {
+        return (...rect: number[]) => {
           if (String(target.fillStyle).toLowerCase() === HATCH) lines++;
+          const style = target.fillStyle as { transform?: DOMMatrix2DInit } | undefined;
+          if (style && typeof style === 'object' && 'repetition' in style) {
+            bands.push({ e: style.transform?.e, f: style.transform?.f, rect });
+          }
           calls.push('fillRect');
         };
       }
@@ -79,8 +105,8 @@ function paint(fill: ShapeHatchFill, size = 100) {
     }],
   } as unknown as Worksheet;
   renderViewport(ctx, ws, { fonts: [], fills: [], borders: [], cellXfs: [] } as unknown as Styles,
-    { row: 1, col: 1, rows: 10, cols: 10 });
-  return { calls, lines };
+    { row: 1, col: 1, rows: 10, cols: 10 }, images ? { loadedImages: images } : {});
+  return { calls, lines, rotations, patterns, bands };
 }
 
 const hatch = (distancePt: number, lines = 1, angle = 0): ShapeHatchFill => ({
@@ -93,6 +119,14 @@ describe('OpenDocument hatch fills', () => {
     expect(paint(hatch(7.5)).lines).toBe(11);
     expect(paint(hatch(7.5, 2)).lines).toBe(22);
     expect(paint(hatch(7.5, 3)).lines).toBeGreaterThan(22);
+  });
+
+  it('turns the families counter-clockwise from the horizontal, as LibreOffice draws them', () => {
+    // Canvas rotations are clockwise (y down): a 30° hatch has its lines at
+    // -30°, the perpendicular family at 60° and the third 45° further
+    // counter-clockwise, at -75° (LibreOffice 26.8: 30°, 120° and 75°).
+    expect(paint(hatch(7.5, 1, 0)).rotations).toEqual([0]);
+    expect(paint(hatch(7.5, 3, 30)).rotations).toEqual([-30, 60, -75]);
   });
 
   it('never builds a bitmap, however wide the authored spacing', () => {
@@ -115,5 +149,62 @@ describe('OpenDocument hatch fills', () => {
     const huge = paint(hatch(0.01, 2), 10_000_000).lines;
     expect(huge).toBeGreaterThan(100);
     expect(huge).toBeLessThanOrEqual(bound);
+  });
+});
+
+describe('OpenDocument picture fills', () => {
+  // A 20 × 10 px picture in the 100 px box.
+  const images = new Map<string, CanvasImageSource | null>([
+    ['Pictures/p.png', { width: 20, height: 10 } as unknown as CanvasImageSource],
+  ]);
+  const picture = (
+    layout: 'stretch' | 'tile' | 'once', align: [number, number] = [0.5, 0.5],
+    more: Partial<Extract<ShapeFill, { fillType: 'image' }>> = {},
+  ): ShapeFill => ({
+    fillType: 'image', imagePath: 'Pictures/p.png', mimeType: 'image/png', layout, align, offset: [0, 0], ...more,
+  });
+
+  it('stretches over the shape', () => {
+    expect(paint(picture('stretch'), 100, images).patterns).toEqual([
+      { repetition: 'no-repeat', setTransform: expect.any(Function), transform: { a: 5, b: 0, c: 0, d: 10, e: 0, f: 0 } },
+    ]);
+  });
+
+  it('draws a single picture once at its own size, where it is aligned', () => {
+    // style:repeat="no-repeat": not stretched; centred unless aligned.
+    const [centred] = paint(picture('once'), 100, images).patterns;
+    expect(centred.repetition).toBe('no-repeat');
+    expect(centred.transform).toEqual({ a: 1, b: 0, c: 0, d: 1, e: 40, f: 45 });
+    // 30 pt = 40 px wide and half the box high: flush right, at the top.
+    // The offset moves repeated tiles only.
+    const [corner] = paint(
+      picture('once', [1, 0], { width: { pt: 30 }, height: { fraction: 0.5 }, offset: [0.25, 0.25] }), 100, images,
+    ).patterns;
+    expect(corner.transform).toEqual({ a: 2, b: 0, c: 0, d: 5, e: 60, f: 0 });
+  });
+
+  it('repeats tiles from the aligned one, moved by the offset', () => {
+    const [tiled] = paint(picture('tile'), 100, images).patterns;
+    expect(tiled.repetition).toBe('repeat');
+    expect(tiled.transform).toEqual({ a: 1, b: 0, c: 0, d: 1, e: 40, f: 45 });
+    // A quarter of the 20 × 10 px tile right and down from the top-left.
+    const [moved] = paint(picture('tile', [0, 0], { offset: [0.25, 0.5] }), 100, images).patterns;
+    expect(moved.transform).toEqual({ a: 1, b: 0, c: 0, d: 1, e: 5, f: 5 });
+  });
+
+  it('moves every second row of staggered tiles', () => {
+    // 25 px tiles over the 100 px box: four row bands, the second and
+    // fourth moved half a tile to the right.
+    const staggered = picture('tile', [0, 0], {
+      width: { fraction: 0.25 }, height: { fraction: 0.25 }, shift: { rows: 0.5 },
+    });
+    const { patterns, bands } = paint(staggered, 100, images);
+    expect(patterns).toHaveLength(1);
+    expect(bands).toEqual([
+      { e: 0, f: 0, rect: [0, 0, 100, 25] },
+      { e: 12.5, f: 0, rect: [0, 25, 100, 25] },
+      { e: 0, f: 0, rect: [0, 50, 100, 25] },
+      { e: 12.5, f: 0, rect: [0, 75, 100, 25] },
+    ]);
   });
 });

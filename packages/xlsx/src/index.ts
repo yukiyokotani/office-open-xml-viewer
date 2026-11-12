@@ -266,6 +266,7 @@ export type {
   ShapeFill,
   ShapeHatchFill,
   ShapeImageFill,
+  ShapeImageSize,
   ShapeGeom,
   ShapeText,
   ShapeParagraph,

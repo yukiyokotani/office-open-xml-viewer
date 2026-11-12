@@ -189,7 +189,8 @@ What is read:
   shrink to fit, rotation, stacked text and indents;
 - data styles (number, currency, percentage, scientific, fraction, date,
   time, boolean and text styles, with `style:map` conditions), converted to
-  the format codes the workbook renderer evaluates;
+  the format codes the workbook renderer evaluates, including the quarter
+  and week-of-year date fields;
 - named ranges and expressions, print ranges, database ranges with filter
   buttons, content validations, conditional formats (cell conditions, colour
   scales, data bars, icon sets) and sparklines;
@@ -203,13 +204,41 @@ Column widths are authored lengths; the reader asks the renderer for the
 default cell font's digit width and encodes each width so that the grid is
 painted at the authored size.
 
+Where the specification and LibreOffice differ, or the workbook model
+cannot hold what LibreOffice shows, the reader does the following:
+
+- Names in dates (months, weekdays, the long quarter `1st quarter`) are
+  English, or Japanese in a Japanese-calendar format, as everywhere in the
+  workbook renderer; LibreOffice uses the format's language.
+- Weeks of the year are numbered as LibreOffice numbers them for the
+  format's language and country (for example from Monday with at least four
+  days in the first week for `de-DE`, from Sunday with 1 January in week 1
+  for `en-US`). A format without a language uses the `en-US` numbering;
+  LibreOffice would use the locale it runs in.
+- A date before 1 March 1900 is shown as the same calendar date. The
+  workbook date system has no date before 31 December 1899: an earlier date
+  shows its time of day only, or the invalid-date marker.
+- A formula result that LibreOffice shows as nothing (an empty-cell or
+  empty-string result saved as the number 0) is shown as nothing and stays
+  the number 0.
+- Hatch lines turn counter-clockwise from the horizontal by the hatch's
+  rotation, as LibreOffice draws them (ODF 1.3 Part 3 §19.209 words the
+  rotation as clockwise from the vertical axis).
+
 Not representable in the workbook model, and therefore not shown: page
 layout, headers and footers (the workbook viewer shows the grid, not printed
 pages; print ranges become `_xlnm.Print_Area` names). Data pilot tables are
 shown as the cells LibreOffice saved for them. Shape area fills are solid
 colours, gradients (linear, axial, radial, ellipsoid, square, rectangular,
 with border and centre; the rotation of a non-linear gradient is not
-applied), hatches and stretched or tiled pictures. Custom shapes are drawn from
+applied), hatches, and pictures that are stretched, repeated (at their
+size, from their reference point, with its offsets and the tile stagger) or
+drawn once.
+
+Resource limits: while it builds the workbook, the reader may hold at most
+512 MiB beyond the package's parsed XML, materialize at most 8 million cells
+and take a bounded number of steps. A spreadsheet over a limit rejects with
+the resource-limit error; nothing is shortened. Custom shapes are drawn from
 their preset or their enhanced-geometry path (equations are evaluated; arcs
 are flattened to short segments). Embedded objects that are not charts are
 drawn from their replacement image

@@ -16,8 +16,9 @@ export type ShapeFill = Exclude<Fill, { fillType: 'image' } | { fillType: 'none'
 
 /** Parallel hatch lines over an optional background (an OpenDocument
  *  `draw:hatch`, ODF 1.3 Part 3 §16.42). Colours are `#RRGGBB`; `angle` is
- *  degrees counter-clockwise of the first line family; `lines` 2 adds the
- *  perpendicular family, 3 also the diagonal. */
+ *  degrees counter-clockwise from the horizontal of the first line family;
+ *  `lines` 2 adds the perpendicular family, 3 also the family 45° further
+ *  counter-clockwise. */
 export interface ShapeHatchFill {
   fillType: 'hatch';
   color: string;
@@ -27,16 +28,29 @@ export interface ShapeHatchFill {
   lines: number;
 }
 
+/** One edge of a picture fill's size: points, or a fraction of the shape's
+ *  edge. */
+export type ShapeImageSize = { pt: number } | { fraction: number };
+
 /** A picture filling the shape outline (an OpenDocument `draw:fill-image`,
- *  §16.41): stretched over the shape, or tiled from its top-left at the tile
- *  size in points (an absent edge keeps the natural size at 96 DPI). */
+ *  §16.41): stretched over the shape, repeated (`tile`) or drawn once
+ *  (`once`; ODF §20.341 `style:repeat`). A repeated or single picture has
+ *  the size `width` × `height` (an absent edge keeps the natural size at
+ *  96 DPI) and is placed by `align`: the fractions of the free width and
+ *  height left of and above the picture (one tile of a repeated picture).
+ *  Repeated tiles are then moved by `offset` (fractions of the tile's width
+ *  and height), and every second row (`rows`) or column (`columns`) of them
+ *  by `shift`, a fraction of the tile along that row or column. */
 export interface ShapeImageFill {
   fillType: 'image';
   imagePath: string;
   mimeType: string;
-  tile?: boolean;
-  tileWidthPt?: number;
-  tileHeightPt?: number;
+  layout: 'stretch' | 'tile' | 'once';
+  width?: ShapeImageSize;
+  height?: ShapeImageSize;
+  align: [number, number];
+  offset: [number, number];
+  shift?: { rows: number } | { columns: number };
 }
 import type {
   NormalizedOoxmlResourcePolicy,

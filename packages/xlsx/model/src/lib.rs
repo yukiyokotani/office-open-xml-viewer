@@ -988,8 +988,10 @@ pub enum ShapeFill {
     },
     /// Parallel hatch lines over an optional background (an OpenDocument
     /// `draw:hatch`, ODF 1.3 Part 3 §16.42; DrawingML has no equivalent).
-    /// Colours are `#RRGGBB`; `angle` is degrees counter-clockwise of the
-    /// first line family; `lines` is 1, 2 (crossed) or 3 (with a diagonal).
+    /// Colours are `#RRGGBB`; `angle` is degrees counter-clockwise from the
+    /// horizontal of the first line family; `lines` is 1, 2 (with the
+    /// perpendicular family) or 3 (also the family 45° further
+    /// counter-clockwise).
     #[serde(rename_all = "camelCase")]
     Hatch {
         color: String,
@@ -1000,20 +1002,57 @@ pub enum ShapeFill {
         lines: u8,
     },
     /// A picture filling the shape outline (an OpenDocument
-    /// `draw:fill-image`, §16.41, or a DrawingML `a:blipFill` §20.1.8.14):
-    /// stretched over the shape, or tiled from its top-left at the tile size
-    /// (points; an absent edge keeps the image's natural size at 96 DPI).
+    /// `draw:fill-image`, §16.41): stretched over the shape, repeated, or
+    /// drawn once (`layout`). A repeated or single picture has the size
+    /// `width` × `height` (an absent edge keeps the image's natural size at
+    /// 96 DPI) and is placed by `align`: the fractions of the free width
+    /// and height left of and above the picture (one tile of a repeated
+    /// picture), `[0.5, 0.5]` being the centre. Repeated tiles are then
+    /// moved by `offset` (fractions of the tile's width and height), and
+    /// every second row or column of them by `shift`.
     #[serde(rename_all = "camelCase")]
     Image {
         image_path: String,
         mime_type: String,
-        #[serde(skip_serializing_if = "std::ops::Not::not", default)]
-        tile: bool,
+        layout: ShapeImageLayout,
         #[serde(skip_serializing_if = "Option::is_none")]
-        tile_width_pt: Option<f64>,
+        width: Option<ShapeImageSize>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        tile_height_pt: Option<f64>,
+        height: Option<ShapeImageSize>,
+        align: [f64; 2],
+        offset: [f64; 2],
+        #[serde(skip_serializing_if = "Option::is_none")]
+        shift: Option<ShapeImageShift>,
     },
+}
+
+/// How a picture fill covers its shape (ODF 1.3 Part 3 §20.341
+/// `style:repeat`).
+#[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum ShapeImageLayout {
+    Stretch,
+    Tile,
+    Once,
+}
+
+/// One edge of a picture fill's size: points, or a fraction of the shape's
+/// edge.
+#[derive(Debug, Serialize, Clone, Copy, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub enum ShapeImageSize {
+    Pt(f64),
+    Fraction(f64),
+}
+
+/// The stagger of a repeated picture fill: every second row moved along
+/// the row, or every second column along the column, by a fraction of the
+/// tile.
+#[derive(Debug, Serialize, Clone, Copy, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub enum ShapeImageShift {
+    Rows(f64),
+    Columns(f64),
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -2135,13 +2174,16 @@ mod tests {
         let image = ShapeFill::Image {
             image_path: "Pictures/a.png".into(),
             mime_type: "image/png".into(),
-            tile: true,
-            tile_width_pt: Some(10.0),
-            tile_height_pt: None,
+            layout: ShapeImageLayout::Tile,
+            width: Some(ShapeImageSize::Pt(10.0)),
+            height: Some(ShapeImageSize::Fraction(0.25)),
+            align: [0.0, 0.5],
+            offset: [0.25, 0.0],
+            shift: Some(ShapeImageShift::Rows(0.5)),
         };
         assert_eq!(
             serde_json::to_value(&image).unwrap(),
-            serde_json::json!({"fillType": "image", "imagePath": "Pictures/a.png", "mimeType": "image/png", "tile": true, "tileWidthPt": 10.0})
+            serde_json::json!({"fillType": "image", "imagePath": "Pictures/a.png", "mimeType": "image/png", "layout": "tile", "width": {"pt": 10.0}, "height": {"fraction": 0.25}, "align": [0.0, 0.5], "offset": [0.25, 0.0], "shift": {"rows": 0.5}})
         );
     }
 

@@ -47,7 +47,15 @@ pub struct Hatch {
     pub color: String,
     /// The area colour under the lines (`draw:fill-hatch-solid`).
     pub background: Option<String>,
-    /// Degrees counter-clockwise of the first line family.
+    /// `draw:rotation` of the first line family, as LibreOffice draws it:
+    /// degrees counter-clockwise from the horizontal. §19.209 words the
+    /// attribute as clockwise from the vertical axis, but LibreOffice, whose
+    /// files these are, draws rotation 0 as horizontal lines, 30° as lines
+    /// rising to the right and 90° as vertical lines (measured with
+    /// LibreOffice 26.8 on `draw:rotation` 0, 300, `30deg` and 900); the
+    /// reader follows it. A `double` hatch adds the perpendicular family
+    /// and a `triple` hatch the family 45° further counter-clockwise
+    /// (measured at 30°: families at 30°, 120° and 75°).
     pub angle: f64,
     /// Distance between lines, in points.
     pub distance_pt: f64,
@@ -55,13 +63,57 @@ pub struct Hatch {
     pub lines: u8,
 }
 
-/// §16.41 `draw:fill-image` with the §20.240 `style:repeat` mode.
+/// How a picture covers its area (§20.341 `style:repeat`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PictureLayout {
+    /// `stretch`: scaled to the area.
+    Stretch,
+    /// `repeat` (the default LibreOffice applies): repeated at its size.
+    Tile,
+    /// `no-repeat`: drawn once at its size.
+    Once,
+}
+
+/// One edge of a picture's size (§20.128 `draw:fill-image-width`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PictureSize {
+    Pt(f64),
+    /// A percentage, of the filled area's edge.
+    Fraction(f64),
+}
+
+/// §20.175 `draw:tile-repeat-offset`: every second row (`horizontal`) or
+/// column (`vertical`) of tiles moved by a fraction of the tile.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum TileShift {
+    Rows(f64),
+    Columns(f64),
+}
+
+/// §16.41 `draw:fill-image` as an area fill. Its geometry is what
+/// LibreOffice 26.8 draws (measured on tiled, single and stretched fills):
+/// a picture that is not stretched has its own size, sits where its
+/// reference point puts it (the centre by default), and, when repeated, is
+/// moved by the reference-point offsets and staggered by the tile offset.
+/// LibreOffice honours the reference point of a single picture too, where
+/// §20.125 limits it to repeated ones; its offsets and stagger apply to
+/// repeated pictures only, as §20.126 and §20.175 say.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Picture {
     /// Package path of the image.
     pub path: String,
-    /// `style:repeat="repeat"`: the tile size in points, if authored.
-    pub tile: Option<(Option<f64>, Option<f64>)>,
+    pub layout: PictureLayout,
+    /// The size of the picture when it is not stretched
+    /// (`draw:fill-image-width` / `-height`); `None`: its natural size.
+    pub size: (Option<PictureSize>, Option<PictureSize>),
+    /// §20.125 `draw:fill-image-ref-point`: where a single picture, or one
+    /// tile of a repeated one, sits in the area, as fractions of the free
+    /// width and height (0, 0.5 or 1).
+    pub align: (f64, f64),
+    /// §20.126 / §20.127 `draw:fill-image-ref-point-x` / `-y`: repeated
+    /// tiles moved right and down by these fractions of the tile.
+    pub offset: (f64, f64),
+    pub shift: Option<TileShift>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -138,6 +190,7 @@ impl FillDefs {
     /// resolve (ODF Part 2 §3.7).
     pub fn add(&mut self, styles: roxmltree::Node<'_, '_>, file_entry: &str) -> Result<(), String> {
         for node in styles.children().filter(|n| n.is_element()) {
+            crate::budget::tick(1)?;
             let Some(name) = node.attribute((NS_DRAW, "name")) else {
                 continue;
             };
@@ -255,19 +308,70 @@ impl FillDefs {
             Some("bitmap") => property("fill-image-name")
                 .and_then(|name| self.images.get(name))
                 .map(|path| {
-                    let repeat = get(chain, "graphic:style:repeat").unwrap_or("repeat");
+                    let size = |key: &str| {
+                        let value = property(key)?;
+                        length_pt(value)
+                            .map(PictureSize::Pt)
+                            .or_else(|| percent(value).map(PictureSize::Fraction))
+                            .filter(|size| match size {
+                                PictureSize::Pt(v) | PictureSize::Fraction(v) => {
+                                    v.is_finite() && *v > 0.0
+                                }
+                            })
+                    };
+                    let fraction = |key: &str| {
+                        property(key)
+                            .and_then(percent)
+                            .filter(|v| v.is_finite())
+                            .unwrap_or(0.0)
+                    };
+                    let layout = match get(chain, "graphic:style:repeat") {
+                        Some("stretch") => PictureLayout::Stretch,
+                        Some("no-repeat") => PictureLayout::Once,
+                        _ => PictureLayout::Tile,
+                    };
+                    let tiled = layout == PictureLayout::Tile;
+                    let reference = property("fill-image-ref-point").unwrap_or("center");
                     Fill::Picture(Picture {
                         path: path.clone(),
-                        tile: (repeat == "repeat").then(|| {
+                        layout,
+                        size: (size("fill-image-width"), size("fill-image-height")),
+                        align: (
+                            if reference.ends_with("left") {
+                                0.0
+                            } else if reference.ends_with("right") {
+                                1.0
+                            } else {
+                                0.5
+                            },
+                            if reference.starts_with("top") {
+                                0.0
+                            } else if reference.starts_with("bottom") {
+                                1.0
+                            } else {
+                                0.5
+                            },
+                        ),
+                        offset: if tiled {
                             (
-                                property("fill-image-width")
-                                    .and_then(length_pt)
-                                    .filter(|v| *v > 0.0),
-                                property("fill-image-height")
-                                    .and_then(length_pt)
-                                    .filter(|v| *v > 0.0),
+                                fraction("fill-image-ref-point-x"),
+                                fraction("fill-image-ref-point-y"),
                             )
-                        }),
+                        } else {
+                            (0.0, 0.0)
+                        },
+                        shift: property("tile-repeat-offset")
+                            .filter(|_| tiled)
+                            .and_then(|value| {
+                                let mut parts = value.split_whitespace();
+                                let amount = percent(parts.next()?)
+                                    .filter(|v| v.is_finite() && *v != 0.0)?;
+                                match parts.next()? {
+                                    "horizontal" => Some(TileShift::Rows(amount)),
+                                    "vertical" => Some(TileShift::Columns(amount)),
+                                    _ => None,
+                                }
+                            }),
                     })
                 })
                 .unwrap_or_else(|| solid().map_or(Fill::None, Fill::Solid)),
@@ -471,24 +575,48 @@ mod tests {
             r#"<draw:fill-image draw:name="P" xlink:href="Pictures/p.png"/>"#,
             r#"draw:fill="bitmap" draw:fill-image-name="P" style:repeat="stretch""#,
         );
-        assert_eq!(
-            picture,
-            Fill::Picture(Picture {
-                path: "Pictures/p.png".into(),
-                tile: None
-            })
-        );
+        let stretched = Picture {
+            path: "Pictures/p.png".into(),
+            layout: PictureLayout::Stretch,
+            size: (None, None),
+            align: (0.5, 0.5),
+            offset: (0.0, 0.0),
+            shift: None,
+        };
+        assert_eq!(picture, Fill::Picture(stretched.clone()));
+        // §20.341: without `style:repeat` the picture repeats (LibreOffice's
+        // default), and `no-repeat` draws it once, not stretched.
         let tiled = resolve(
             r#"<draw:fill-image draw:name="P" xlink:href="Pictures/p.png"/>"#,
-            r#"draw:fill="bitmap" draw:fill-image-name="P" draw:fill-image-width="1cm""#,
+            r#"draw:fill="bitmap" draw:fill-image-name="P" draw:fill-image-width="1cm" draw:fill-image-height="25%" draw:fill-image-ref-point-x="25%" draw:tile-repeat-offset="50% horizontal""#,
         );
-        assert!(matches!(
+        assert_eq!(
             tiled,
             Fill::Picture(Picture {
-                tile: Some((Some(_), None)),
-                ..
+                layout: PictureLayout::Tile,
+                size: (
+                    length_pt("1cm").map(PictureSize::Pt),
+                    Some(PictureSize::Fraction(0.25))
+                ),
+                offset: (0.25, 0.0),
+                shift: Some(TileShift::Rows(0.5)),
+                ..stretched.clone()
             })
-        ));
+        );
+        // A single picture keeps its reference point (as LibreOffice
+        // places it) but is neither moved nor staggered.
+        let once = resolve(
+            r#"<draw:fill-image draw:name="P" xlink:href="Pictures/p.png"/>"#,
+            r#"draw:fill="bitmap" draw:fill-image-name="P" style:repeat="no-repeat" draw:fill-image-ref-point="top-right" draw:fill-image-ref-point-x="25%" draw:tile-repeat-offset="50% vertical""#,
+        );
+        assert_eq!(
+            once,
+            Fill::Picture(Picture {
+                layout: PictureLayout::Once,
+                align: (1.0, 0.0),
+                ..stretched
+            })
+        );
     }
 
     #[test]
@@ -497,13 +625,10 @@ mod tests {
             r#"<draw:fill-image draw:name="P" xlink:href="./Pictures/a%20b.png"/>"#,
             r#"draw:fill="bitmap" draw:fill-image-name="P" style:repeat="stretch""#,
         );
-        assert_eq!(
+        assert!(matches!(
             encoded,
-            Fill::Picture(Picture {
-                path: "Pictures/a b.png".into(),
-                tile: None
-            })
-        );
+            Fill::Picture(Picture { path, .. }) if path == "Pictures/a b.png"
+        ));
         // Outside the package: no picture, the solid colour applies.
         let external = resolve(
             r#"<draw:fill-image draw:name="P" xlink:href="../p.png"/>"#,

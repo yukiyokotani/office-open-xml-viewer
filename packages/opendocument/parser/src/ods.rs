@@ -14,11 +14,12 @@
 //! own decoding yields the authored pixel width (96 DPI). Drawing anchors are
 //! resolved from the same pixel grid.
 
+use crate::budget::{self, Scope};
 use crate::error::invalid;
+pub(crate) use crate::error::resource;
 use crate::odf_props::{self, StyleStore};
 use crate::ods_number::DataStyles;
 use crate::package::OdfPackage;
-pub(crate) use crate::retained_size;
 use crate::xml::{self, NS_OFFICE};
 use std::collections::{BTreeSet, HashMap};
 
@@ -55,148 +56,19 @@ pub const NS_CONFIG: &str = crate::xml::NS_CONFIG;
 pub const MAX_ROWS: u32 = 1_048_576;
 pub const MAX_COLS: u32 = 16_384;
 
-/// Implementation bound on the cells (values and styled blanks) a workbook
-/// materializes. Repeated empty cells with the column's default style are
-/// never materialized, so this bounds authored content, not grid size.
+/// Implementation bound on the cells (values and styled blanks) and row
+/// records a workbook materializes. Repeated empty cells with the column's
+/// default style are never materialized, so this bounds authored content,
+/// not grid size.
 pub const MAX_CELLS: usize = 8_000_000;
-/// Implementation bound on the retained model of one workbook (strings and
-/// fixed per-entry overheads), charged as content is materialized.
-pub const MAX_MODEL_BYTES: usize = 512 * 1024 * 1024;
-/// Implementation bound on the grid-walk steps of one workbook (each column
-/// segment of an authored cell, each per-column slot of the formatted-column
-/// scan).
-pub const MAX_WALK_STEPS: usize = 64 * 1024 * 1024;
+/// The reader's memory and work bounds are the shared governor's
+/// ([`crate::budget`]): measured by the allocator, checked at every step.
+pub use crate::budget::MAX_MODEL_BYTES;
 /// Implementation bound on charts and drawings per workbook.
 pub const MAX_DRAWINGS: usize = 65_536;
 
 /// ECMA-376 §18.3.1.13 fallback digit width when the host does not measure.
 pub const MDW_FALLBACK: f64 = 8.0;
-
-/// Resource accounting of one workbook. Every structure the reader keeps,
-/// and every copy it makes by repetition or by resolving a shared style, is
-/// charged here before it is stored. The table, style, drawing and chart
-/// readers share it through [`BudgetRef`], so none holds retained data
-/// outside it.
-pub(crate) struct Budget {
-    cells: std::cell::Cell<usize>,
-    steps: std::cell::Cell<usize>,
-    bytes: std::cell::Cell<usize>,
-    limit: usize,
-}
-
-/// The workbook budget, shared by every reader that retains data.
-pub(crate) type BudgetRef = std::rc::Rc<Budget>;
-
-/// Accounted size of one ordered-map entry: `BTreeMap` nodes are at least
-/// half full, so twice the entry plus the node's share of its links.
-pub(crate) fn map_entry_bytes<K, V>() -> usize {
-    2 * (std::mem::size_of::<K>() + std::mem::size_of::<V>()) + 16
-}
-
-/// Accounted size of one hash-map entry with its key's text: a table at
-/// most half full plus control bytes.
-pub(crate) fn hash_entry_bytes<K, V>(key_text: usize) -> usize {
-    2 * (std::mem::size_of::<K>() + std::mem::size_of::<V>() + 1) + key_text
-}
-
-impl Budget {
-    pub(crate) fn new() -> BudgetRef {
-        Self::with_limit(MAX_MODEL_BYTES)
-    }
-    pub(crate) fn with_limit(limit: usize) -> BudgetRef {
-        std::rc::Rc::new(Self {
-            cells: std::cell::Cell::new(0),
-            steps: std::cell::Cell::new(0),
-            bytes: std::cell::Cell::new(0),
-            limit: limit.min(MAX_MODEL_BYTES),
-        })
-    }
-    /// Admit one materialized cell retaining `bytes` (its
-    /// [`retained_size`]).
-    pub(crate) fn cell(&self, bytes: usize) -> Result<(), String> {
-        let cells = self.cells.get().saturating_add(1);
-        self.cells.set(cells);
-        if cells > MAX_CELLS {
-            return Err(resource("cell count"));
-        }
-        self.bytes(bytes)
-    }
-    pub(crate) fn bytes(&self, bytes: usize) -> Result<(), String> {
-        let total = self.bytes.get().saturating_add(bytes);
-        self.bytes.set(total);
-        if total > self.limit {
-            Err(resource("model size"))
-        } else {
-            Ok(())
-        }
-    }
-    /// Admit the slots `vec` allocates when one more element is pushed: the
-    /// exact growth of the standard library's amortized policy (double, at
-    /// least 8 / 4 / 1 slots by element size), so a vector's capacity is
-    /// always charged.
-    pub(crate) fn grow<T>(&self, vec: &Vec<T>) -> Result<(), String> {
-        if vec.len() < vec.capacity() || std::mem::size_of::<T>() == 0 {
-            return Ok(());
-        }
-        let size = std::mem::size_of::<T>();
-        let min = if size == 1 {
-            8
-        } else if size <= 1024 {
-            4
-        } else {
-            1
-        };
-        let capacity = vec.capacity().saturating_mul(2).max(min);
-        self.bytes((capacity - vec.capacity()).saturating_mul(size))
-    }
-    /// Admit `value`'s owned heap and its slot in `vec`, then store it.
-    pub(crate) fn push<T: ooxml_common::chart::RetainedBytes>(
-        &self,
-        vec: &mut Vec<T>,
-        value: T,
-    ) -> Result<(), String> {
-        self.bytes(usize::try_from(value.heap_bytes()).unwrap_or(usize::MAX))?;
-        self.grow(vec)?;
-        vec.push(value);
-        Ok(())
-    }
-    /// A copy of `value`, admitted at its retained size before it is made.
-    pub(crate) fn copy<T: Clone + ooxml_common::chart::RetainedBytes>(
-        &self,
-        value: &T,
-    ) -> Result<T, String> {
-        self.bytes(retained_size(value))?;
-        Ok(value.clone())
-    }
-    /// Admit `count` steps of walking the grid (column segments and
-    /// per-column slots a row visits). Bounds the work repeated cells over
-    /// many column runs can cause where they materialize nothing.
-    pub(crate) fn steps(&self, count: usize) -> Result<(), String> {
-        let steps = self.steps.get().saturating_add(count);
-        self.steps.set(steps);
-        if steps > MAX_WALK_STEPS {
-            return Err(resource("table walk"));
-        }
-        Ok(())
-    }
-    #[cfg(test)]
-    pub(crate) fn steps_used(&self) -> usize {
-        self.steps.get()
-    }
-    /// Model bytes charged so far (transient copies included).
-    pub(crate) fn used(&self) -> usize {
-        self.bytes.get()
-    }
-    /// Model bytes still available.
-    pub(crate) fn remaining(&self) -> usize {
-        self.limit.saturating_sub(self.bytes.get())
-    }
-}
-
-/// A resource-limit rejection (content-free).
-pub(crate) fn resource(what: &str) -> String {
-    format!("OpenDocument spreadsheet exceeds the {what} limit")
-}
 
 /// The workbook-wide reading context shared by the sheet readers.
 pub(crate) struct Context {
@@ -206,10 +78,7 @@ pub(crate) struct Context {
     /// Named gradients, hatches and fill images (`office:styles`).
     pub fills: crate::odf_fill::FillDefs,
     pub xfs: XfBuilder,
-    /// Days from the null date (§19.636 `table:null-date`) to 1899-12-30.
-    pub null_date_shift: i64,
     pub date1904: bool,
-    pub budget: BudgetRef,
     /// Package images referenced by drawings (paths).
     pub images: BTreeSet<String>,
     /// Each referenced package image's facts, read once.
@@ -236,9 +105,8 @@ pub struct OdsSheet {
     pub default_col_px: u32,
     /// Cells naming a content validation (§19.616), by validation name.
     pub validation_refs: Vec<(String, xlsx_model::CellRange)>,
-    /// Cell ranges whose cell style carries §16.3 `style:map` conditions,
-    /// by style name.
-    pub style_map_refs: Vec<(String, xlsx_model::CellRange)>,
+    /// Cell ranges whose cell style carries §16.3 `style:map` conditions.
+    pub(crate) style_map_refs: Vec<(cells::CellStyle, xlsx_model::CellRange)>,
 }
 
 pub struct OdsWorkbook {
@@ -254,29 +122,38 @@ pub struct OdsWorkbook {
 }
 
 pub fn read(package: &OdfPackage) -> Result<OdsWorkbook, String> {
-    read_within(package, Budget::new())
+    read_within(package, MAX_MODEL_BYTES)
 }
 
-/// [`read`] charging `budget`. Every structure of the returned workbook is
-/// admitted to it before it is stored (debug builds check the charged total
-/// against the workbook's exhaustive retained size).
-pub(crate) fn read_within(package: &OdfPackage, budget: BudgetRef) -> Result<OdsWorkbook, String> {
-    let workbook = read_charged(package, &budget)?;
-    // A charge over the limit always rejects where it is made; this keeps
-    // the outcome fail-closed should any caller ever discard one.
-    if budget.remaining() == 0 && budget.used() > budget.limit {
-        return Err(resource("model size"));
+/// [`read`] holding at most `limit` bytes beyond the parsed package
+/// documents. The documents are parsed first; everything after runs inside
+/// one governed [`Scope`], so the returned workbook, and whatever was held
+/// while it was built, was measured against `limit`.
+pub(crate) fn read_within(package: &OdfPackage, limit: usize) -> Result<OdsWorkbook, String> {
+    read_measured(package, limit).0
+}
+
+/// [`read`] under `limit`, with what the read held at its peak (bytes) and
+/// the steps it took (allocations and ticks): the two quantities the
+/// governor bounds, for tests and local inspection.
+pub fn read_measured(
+    package: &OdfPackage,
+    limit: usize,
+) -> (Result<OdsWorkbook, String>, usize, u64) {
+    match parse_documents(package) {
+        Ok(documents) => documents.read(package, limit),
+        Err(error) => (Err(error), 0, 0),
     }
-    debug_assert!(
-        retained_size(&workbook) <= budget.used(),
-        "retained {} > charged {}",
-        retained_size(&workbook),
-        budget.used()
-    );
-    Ok(workbook)
 }
 
-fn read_charged(package: &OdfPackage, budget: &BudgetRef) -> Result<OdsWorkbook, String> {
+/// The package's XML parts, read and held while the workbook is built.
+struct Documents {
+    styles: Option<String>,
+    content: String,
+    settings: Option<String>,
+}
+
+fn parse_documents(package: &OdfPackage) -> Result<Documents, String> {
     // ODF Part 3 §2.2.1: `styles.xml` is optional; a package may carry its
     // spreadsheet and automatic styles in `content.xml` alone.
     let styles_text = if package.contains("styles.xml") {
@@ -285,17 +162,62 @@ fn read_charged(package: &OdfPackage, budget: &BudgetRef) -> Result<OdsWorkbook,
         None
     };
     let content_text = package.read_text("content.xml")?;
-    let styles_doc = match &styles_text {
-        Some(text) => Some(xml::parse(text)?),
-        None => None,
+    let settings_text = if package.contains("settings.xml") {
+        Some(package.read_text("settings.xml")?)
+    } else {
+        None
     };
-    let content_doc = xml::parse(&content_text)?;
-    let styles_root = styles_doc.as_ref().map(|doc| doc.root_element());
-    let content_root = content_doc.root_element();
-    crate::odf_text::check_space_runs(content_root)?;
-    // Style values (names, families, lengths) are resolved per cell, row and
-    // run and families copied into fonts: bounded before any style
-    // resolves.
+    Ok(Documents {
+        styles: styles_text,
+        content: content_text,
+        settings: settings_text,
+    })
+}
+
+impl Documents {
+    fn read(
+        &self,
+        package: &OdfPackage,
+        limit: usize,
+    ) -> (Result<OdsWorkbook, String>, usize, u64) {
+        let parsed = (|| {
+            Ok::<_, String>((
+                match &self.styles {
+                    Some(text) => Some(xml::parse(text)?),
+                    None => None,
+                },
+                xml::parse(&self.content)?,
+                match &self.settings {
+                    Some(text) => Some(xml::parse(text)?),
+                    None => None,
+                },
+            ))
+        })();
+        let (styles_doc, content_doc, settings_doc) = match parsed {
+            Ok(parsed) => parsed,
+            Err(error) => return (Err(error), 0, 0),
+        };
+        let scope = Scope::enter(limit).with_cell_limit(MAX_CELLS);
+        let workbook = read_documents(
+            package,
+            styles_doc.as_ref().map(|doc| doc.root_element()),
+            content_doc.root_element(),
+            settings_doc.as_ref().map(|doc| doc.root_element()),
+        );
+        let (peak, work) = (budget::peak_bytes(), budget::work());
+        let workbook = workbook.and_then(|workbook| scope.finish().map(|()| workbook));
+        (workbook, peak, work)
+    }
+}
+
+fn read_documents(
+    package: &OdfPackage,
+    styles_root: Option<roxmltree::Node<'_, '_>>,
+    content_root: roxmltree::Node<'_, '_>,
+    settings_root: Option<roxmltree::Node<'_, '_>>,
+) -> Result<OdsWorkbook, String> {
+    // Style values (names, families, lengths) are bounded before any style
+    // resolves: a reader may then treat one as a small constant.
     crate::odf_text::check_style_values(content_root)?;
     if let Some(root) = styles_root {
         crate::odf_text::check_style_values(root)?;
@@ -310,9 +232,9 @@ fn read_charged(package: &OdfPackage, budget: &BudgetRef) -> Result<OdsWorkbook,
     let mut faces = HashMap::new();
     let mut fills = crate::odf_fill::FillDefs::default();
     if let Some(styles_root) = styles_root {
-        odf_props::font_faces(styles_root, &mut faces);
+        odf_props::font_faces(styles_root, &mut faces)?;
     }
-    odf_props::font_faces(content_root, &mut faces);
+    odf_props::font_faces(content_root, &mut faces)?;
     for child in styles_root
         .iter()
         .flat_map(|root| root.children())
@@ -321,15 +243,15 @@ fn read_charged(package: &OdfPackage, budget: &BudgetRef) -> Result<OdsWorkbook,
         if xml::is(child, NS_OFFICE, "styles") {
             store.add(child, false)?;
             fills.add(child, "styles.xml")?;
-            data.add(child);
+            data.add(child)?;
         } else if xml::is(child, NS_OFFICE, "automatic-styles") {
-            data.add(child);
+            data.add(child)?;
         }
     }
     for child in content_root.children().filter(|n| n.is_element()) {
         if xml::is(child, NS_OFFICE, "automatic-styles") {
             store.add(child, true)?;
-            data.add(child);
+            data.add(child)?;
         }
     }
     store.check_chains()?;
@@ -342,31 +264,17 @@ fn read_charged(package: &OdfPackage, budget: &BudgetRef) -> Result<OdsWorkbook,
                 .find(|n| xml::is(*n, NS_OFFICE, "spreadsheet"))
         })
         .ok_or_else(|| invalid("content.xml has no office:spreadsheet body"))?;
-    let (null_date_shift, date1904) = null_date(spreadsheet);
-    let xfs = XfBuilder::new(&store, &mut data, &faces, budget.clone())?;
+    let date1904 = uses_1904_dates(spreadsheet);
+    let xfs = XfBuilder::new(&store, &mut data, &faces)?;
     let default_font = xfs.default_font();
-    budget.bytes(default_font.0.capacity())?;
-    let views = if package.contains("settings.xml") {
-        let text = package.read_text("settings.xml")?;
-        let document = xml::parse(&text)?;
-        table::read_view_settings(document.root_element())
-    } else {
-        HashMap::new()
+    let views = match settings_root {
+        Some(root) => table::read_view_settings(root)?,
+        None => HashMap::new(),
     };
     let tables: Vec<_> = spreadsheet
         .children()
         .filter(|n| xml::is(*n, NS_TABLE, "table"))
         .collect();
-    // Each table: its sheet record (whatever it holds is charged as it is
-    // read) and its name, kept here, in the context and in the sheet.
-    for table in &tables {
-        let name = table.attribute((NS_TABLE, "name")).unwrap_or("").len();
-        budget.bytes(
-            std::mem::size_of::<OdsSheet>()
-                .saturating_add(3 * std::mem::size_of::<String>())
-                .saturating_add(name.saturating_mul(3)),
-        )?;
-    }
     let sheet_names: Vec<String> = tables
         .iter()
         .map(|t| t.attribute((NS_TABLE, "name")).unwrap_or("").to_string())
@@ -375,8 +283,8 @@ fn read_charged(package: &OdfPackage, budget: &BudgetRef) -> Result<OdsWorkbook,
     // never scan every sheet.
     let mut sheet_index: HashMap<String, usize> = HashMap::new();
     for (index, name) in sheet_names.iter().enumerate() {
+        budget::tick(1)?;
         if !sheet_index.contains_key(name) {
-            budget.bytes(hash_entry_bytes::<String, usize>(name.len()))?;
             sheet_index.insert(name.clone(), index);
         }
     }
@@ -386,9 +294,7 @@ fn read_charged(package: &OdfPackage, budget: &BudgetRef) -> Result<OdsWorkbook,
         faces,
         fills,
         xfs,
-        null_date_shift,
         date1904,
-        budget: budget.clone(),
         images: BTreeSet::new(),
         image_facts: HashMap::new(),
         drawing_count: 0,
@@ -415,68 +321,43 @@ fn read_charged(package: &OdfPackage, budget: &BudgetRef) -> Result<OdsWorkbook,
         &mut context,
         &mut warnings,
     )?;
-    let mut defined_names = extras::named_expressions(budget, spreadsheet, &context.sheet_index)?;
+    let mut defined_names = extras::named_expressions(spreadsheet, &context.sheet_index)?;
     for (index, node) in tables.iter().enumerate() {
         if let Some(ranges) = node.attribute((NS_TABLE, "print-ranges")) {
             if let Some(formula) = extras::convert_range_list(ranges) {
-                budget.push(
-                    &mut defined_names,
-                    ("_xlnm.Print_Area".into(), Some(index), formula),
-                )?;
+                defined_names.push(("_xlnm.Print_Area".into(), Some(index), formula));
             }
         }
     }
     extras::database_ranges(
-        budget,
         spreadsheet,
         &mut sheets,
         &context.sheet_index,
         &mut defined_names,
     )?;
-    extras::content_validations(budget, spreadsheet, &mut sheets)?;
+    extras::content_validations(spreadsheet, &mut sheets)?;
     extras::conditional_formats(&mut context, tables.as_slice(), &mut sheets)?;
-    // Defined names in scope for each sheet (workbook-global, then local).
-    // Every sheet holds its own copy of each global name: each copy is
-    // admitted before it is made.
-    // Names grouped by scope once (workbook-global, then each sheet's).
+    // Defined names in scope for each sheet (workbook-global, then local),
+    // grouped by scope once. Every sheet holds its own copy of each global
+    // name: one step per copy.
     let global: Vec<usize> = (0..defined_names.len())
         .filter(|at| defined_names[*at].1.is_none())
         .collect();
-    let mut local: Vec<Vec<usize>> = vec![Vec::new(); sheets.len()];
-    budget.bytes(
-        defined_names
-            .len()
-            .saturating_mul(2 * std::mem::size_of::<usize>())
-            .saturating_add(
-                sheets
-                    .len()
-                    .saturating_mul(std::mem::size_of::<Vec<usize>>()),
-            ),
-    )?;
+    let mut local: Vec<Vec<usize>> = Vec::new();
+    for _ in 0..sheets.len() {
+        budget::tick(1)?;
+        local.push(Vec::new());
+    }
     for (at, (_, scope, _)) in defined_names.iter().enumerate() {
         if let Some(list) = scope.and_then(|index| local.get_mut(index)) {
             list.push(at);
         }
     }
     for (index, sheet) in sheets.iter_mut().enumerate() {
-        let in_scope = || {
-            global
-                .iter()
-                .chain(local[index].iter())
-                .map(|at| &defined_names[*at])
-        };
-        let mut cost = 0usize;
-        let mut count = 0usize;
-        for (name, _, formula) in in_scope() {
-            count += 1;
-            cost = cost
-                .saturating_add(std::mem::size_of::<xlsx_model::DefinedName>())
-                .saturating_add(name.len())
-                .saturating_add(formula.len());
-        }
-        budget.bytes(cost)?;
-        let mut names = Vec::with_capacity(count);
-        for (name, _, formula) in in_scope() {
+        let mut names = Vec::new();
+        for at in global.iter().chain(local[index].iter()) {
+            budget::tick(1)?;
+            let (name, _, formula) = &defined_names[*at];
             names.push(xlsx_model::DefinedName {
                 name: name.clone(),
                 formula: formula.clone(),
@@ -495,59 +376,6 @@ fn read_charged(package: &OdfPackage, budget: &BudgetRef) -> Result<OdsWorkbook,
         images: context.images,
         warnings,
     })
-}
-
-/// Exhaustive retained storage of a read workbook (debug check of the
-/// budget; a new field fails to compile until it is counted).
-impl ooxml_common::chart::RetainedBytes for OdsSheet {
-    fn heap_bytes(&self) -> u64 {
-        let Self {
-            name,
-            visibility: _,
-            tab_color,
-            worksheet,
-            rows,
-            column_px,
-            default_col_px: _,
-            validation_refs,
-            style_map_refs,
-        } = self;
-        name.heap_bytes()
-            .saturating_add(tab_color.heap_bytes())
-            .saturating_add(worksheet.heap_bytes())
-            .saturating_add(rows.heap_bytes())
-            .saturating_add(column_px.heap_bytes())
-            .saturating_add(validation_refs.heap_bytes())
-            .saturating_add(style_map_refs.heap_bytes())
-    }
-}
-
-impl ooxml_common::chart::RetainedBytes for OdsWorkbook {
-    fn heap_bytes(&self) -> u64 {
-        let Self {
-            sheets,
-            styles,
-            xf_indent_pt,
-            date1904: _,
-            defined_names,
-            default_font,
-            images,
-            warnings,
-        } = self;
-        let images = images.iter().fold(0u64, |total, path| {
-            total
-                .saturating_add(path.heap_bytes())
-                .saturating_add(map_entry_bytes::<String, ()>() as u64)
-        });
-        sheets
-            .heap_bytes()
-            .saturating_add(styles.heap_bytes())
-            .saturating_add(xf_indent_pt.heap_bytes())
-            .saturating_add(defined_names.heap_bytes())
-            .saturating_add(default_font.0.heap_bytes())
-            .saturating_add(images)
-            .saturating_add(warnings.heap_bytes())
-    }
 }
 
 impl OdsWorkbook {
@@ -601,11 +429,11 @@ pub fn pt_to_px(pt: f64) -> u32 {
     (pt * 96.0 / 72.0).round().max(0.0) as u32
 }
 
-/// §19.636 `table:null-date`: the day value 0. Its shift to the
-/// SpreadsheetML 1900 epoch (1899-12-30, the LibreOffice default), or the
-/// 1904 date system when the null date is 1904-01-01.
-fn null_date(spreadsheet: roxmltree::Node<'_, '_>) -> (i64, bool) {
-    let value = spreadsheet
+/// §19.636 `table:null-date`: whether the day value 0 is 1904-01-01, the
+/// SpreadsheetML 1904 date system. Dates are read from their calendar
+/// `office:date-value`, so any other null date needs no shift.
+fn uses_1904_dates(spreadsheet: roxmltree::Node<'_, '_>) -> bool {
+    spreadsheet
         .children()
         .find(|n| xml::is(*n, NS_TABLE, "calculation-settings"))
         .and_then(|settings| {
@@ -613,15 +441,9 @@ fn null_date(spreadsheet: roxmltree::Node<'_, '_>) -> (i64, bool) {
                 .children()
                 .find(|n| xml::is(*n, NS_TABLE, "null-date"))
         })
-        .and_then(|node| node.attribute((NS_TABLE, "date-value")));
-    let Some(days) = value.and_then(days_from_civil_text) else {
-        return (0, false);
-    };
-    let epoch_1904 = days_from_civil(1904, 1, 1);
-    if days == epoch_1904 {
-        return (0, true);
-    }
-    (days - days_from_civil(1899, 12, 30), false)
+        .and_then(|node| node.attribute((NS_TABLE, "date-value")))
+        .and_then(days_from_civil_text)
+        == Some(days_from_civil(1904, 1, 1))
 }
 
 /// Days since 1970-01-01 of a proleptic Gregorian date.
@@ -647,9 +469,19 @@ fn days_from_civil_text(value: &str) -> Option<i64> {
     Some(days_from_civil(year, month, day))
 }
 
-/// `office:date-value` (§19.372, an xsd:date or xsd:dateTime) as a
-/// SpreadsheetML serial date.
-pub(crate) fn date_serial(value: &str, null_shift: i64, date1904: bool) -> Option<f64> {
+/// `office:date-value` (§19.372, an xsd:date or xsd:dateTime) as the serial
+/// the workbook renderer displays as that date.
+///
+/// In the 1904 system that is the day count from 1904-01-01. In the 1900
+/// system it is the day count from 1899-12-30 from 1900-03-01 on
+/// (§18.17.4.1). Before that the renderer, like Excel, counts the
+/// nonexistent 1900-02-29 and shows serial `n` as the day `n + 1` after
+/// 1899-12-30 (`core/src/excel-date.ts`), so an earlier date is one less:
+/// 1900-01-01 is serial 1. The 1900 system has no serial for 1899-12-30 or
+/// before (Excel shows serial 0 as "1900-01-00"); such a value keeps its
+/// plain day count, which shows its time of day and, for a negative count,
+/// the renderer's invalid-date marker.
+pub(crate) fn date_serial(value: &str, date1904: bool) -> Option<f64> {
     let days = days_from_civil_text(value)?;
     let mut fraction = 0.0;
     if let Some(time) = value.split('T').nth(1) {
@@ -663,17 +495,17 @@ pub(crate) fn date_serial(value: &str, null_shift: i64, date1904: bool) -> Optio
         let s: f64 = parts.next().unwrap_or("0").parse().ok()?;
         fraction = (h * 3600.0 + m * 60.0 + s) / 86_400.0;
     }
-    let _ = null_shift;
-    // Days from the 1900 system's day 0 (1899-12-30). From 1900-03-01 this
-    // is the SpreadsheetML serial (§18.17.4.1); earlier dates keep the same
-    // count, as LibreOffice writes them when it saves SpreadsheetML (the
-    // 1900 system's nonexistent 1900-02-29 has no ODF date).
     let serial = if date1904 {
-        (days - days_from_civil(1904, 1, 1)) as f64
+        days - days_from_civil(1904, 1, 1)
     } else {
-        (days - days_from_civil(1899, 12, 30)) as f64
+        let days = days - days_from_civil(1899, 12, 30);
+        if (1..=60).contains(&days) {
+            days - 1
+        } else {
+            days
+        }
     };
-    Some(serial + fraction)
+    Some(serial as f64 + fraction)
 }
 
 /// `office:time-value` (§19.382, an xsd:duration such as `PT12H30M05S`) as a
@@ -769,19 +601,24 @@ mod tests {
 
     #[test]
     fn dates_times_and_addresses() {
-        assert_eq!(date_serial("1900-03-01", 0, false), Some(61.0));
-        assert_eq!(date_serial("1899-12-31", 0, false), Some(1.0));
-        assert_eq!(date_serial("2024-01-05T12:00:00", 0, false), Some(45296.5));
+        assert_eq!(date_serial("1900-03-01", false), Some(61.0));
+        // Before 1900-03-01 the renderer shows serial n as day n + 1.
+        assert_eq!(date_serial("1900-02-28", false), Some(59.0));
+        assert_eq!(date_serial("1900-01-01", false), Some(1.0));
+        assert_eq!(date_serial("1899-12-31T06:00:00", false), Some(0.25));
+        assert_eq!(date_serial("1899-12-30T06:00:00", false), Some(0.25));
+        assert_eq!(date_serial("1899-12-29", false), Some(-1.0));
+        assert_eq!(date_serial("2024-01-05T12:00:00", false), Some(45296.5));
         // A zone offset of either sign keeps the authored local time.
         assert_eq!(
-            date_serial("2024-01-05T12:00:00-05:00", 0, false),
+            date_serial("2024-01-05T12:00:00-05:00", false),
             Some(45296.5)
         );
         assert_eq!(
-            date_serial("2024-01-05T12:00:00+05:00", 0, false),
+            date_serial("2024-01-05T12:00:00+05:00", false),
             Some(45296.5)
         );
-        assert_eq!(date_serial("1904-01-02", 0, true), Some(1.0));
+        assert_eq!(date_serial("1904-01-02", true), Some(1.0));
         assert_eq!(duration_days("PT12H"), Some(0.5));
         assert_eq!(duration_days("-PT36H00M00S"), Some(-1.5));
         assert_eq!(parse_cell("$AB$12"), Some((12, 28)));

@@ -45,9 +45,13 @@ fn read_files(files: &[(&str, &[u8])]) -> Result<OdsWorkbook, String> {
     read(&package)
 }
 
-/// Read `content` and `styles`; the workbook (or its rejection) and the
-/// bytes charged to its budget.
-fn read_charging(content: &str, styles: &str) -> (Result<OdsWorkbook, String>, usize) {
+/// Read `content` and `styles` holding at most `limit` bytes: the workbook
+/// (or its rejection), the bytes held at the peak and the steps taken.
+fn read_measured_text(
+    content: &str,
+    styles: &str,
+    limit: usize,
+) -> (Result<OdsWorkbook, String>, usize, u64) {
     let manifest = manifest(ODS, "");
     let files: Vec<(&str, &[u8])> = vec![
         ("META-INF/manifest.xml", manifest.as_bytes()),
@@ -61,16 +65,7 @@ fn read_charging(content: &str, styles: &str) -> (Result<OdsWorkbook, String>, u
         &MEDIA_TYPES,
     )
     .unwrap();
-    let budget = Budget::new();
-    let workbook = read_within(&package, budget.clone());
-    (workbook, budget.used())
-}
-
-/// Bytes charged reading `content` and `styles` (which must read).
-fn charged(content: &str, styles: &str) -> usize {
-    let (workbook, used) = read_charging(content, styles);
-    workbook.unwrap();
-    used
+    read_measured(&package, limit)
 }
 
 /// A styles part whose `Default` cell style uses font face `F`, declared
@@ -130,7 +125,7 @@ fn xf_zero_is_the_default_cell_style() {
 }
 
 #[test]
-fn repeated_links_cover_every_cell_and_are_budgeted() {
+fn repeated_links_cover_every_cell_and_are_bounded() {
     let linked = |url: &str, cols: u32, rows: u32| {
         content(
             "",
@@ -265,18 +260,23 @@ fn draw_path_reads_its_svg_path_data() {
 
 #[test]
 fn unbounded_inputs_reject() {
-    // Spaces past the part bound.
-    let spaces = content(
-        "",
-        &table(&format!(
-            r#"<table:table-row><table:table-cell office:value-type="string"><text:p><text:s text:c="{}"/></text:p></table:table-cell></table:table-row>"#,
-            crate::odf_text::MAX_PART_SPACES + 1
-        )),
-    );
-    assert_eq!(
-        read_text(&spaces, Some(&styles(""))).err(),
-        Some(crate::error::resource("text space"))
-    );
+    // A `text:s` run larger than the model: rejected while it is written,
+    // in a cell, a note and a text box alike.
+    for holder in [
+        r#"<table:table-cell office:value-type="string"><text:p><text:s text:c="18446744073709551615"/></text:p></table:table-cell>"#,
+        r#"<table:table-cell><office:annotation><text:p><text:s text:c="4000000000"/></text:p></office:annotation></table:table-cell>"#,
+        r#"<table:table-cell><draw:frame svg:width="2cm" svg:height="1cm"><draw:text-box><text:p><text:s text:c="4000000000"/></text:p></draw:text-box></draw:frame></table:table-cell>"#,
+    ] {
+        let spaces = content(
+            "",
+            &table(&format!("<table:table-row>{holder}</table:table-row>")),
+        );
+        assert_eq!(
+            read_measured_text(&spaces, &styles(""), 8 << 20).0.err(),
+            Some(resource("model size")),
+            "{holder}"
+        );
+    }
     // A parent chain past the style bound, and a cycle.
     let chain: String = (0..80)
         .map(|i| {
@@ -308,9 +308,9 @@ fn unbounded_inputs_reject() {
 }
 
 #[test]
-fn repeated_notes_are_charged_their_expanded_text() {
+fn repeated_notes_hold_their_expanded_text() {
     // A note of 1 MiB of `text:s` spaces repeated across 1024 columns holds
-    // 1 GiB of text: each copy is admitted at its expanded size.
+    // 1 GiB of text: the copies are counted as they are made.
     let note = |cols: u32| {
         content(
             "",
@@ -331,7 +331,7 @@ fn repeated_notes_are_charged_their_expanded_text() {
 }
 
 #[test]
-fn repeated_rich_text_is_charged_its_run_fonts() {
+fn repeated_rich_text_holds_its_run_fonts() {
     // A one-character span whose font family is 1 KiB (the bound), repeated
     // over 16 × 16 cells: every copy holds the family name.
     let rich_with = |family: &str, rows: u32, cols: u32| {
@@ -369,32 +369,16 @@ fn repeated_rich_text_is_charged_its_run_fonts() {
         }
         other => panic!("{other:?}"),
     }
-    let long = charged(&rich_with(&family, 16, 16), &styles(""));
-    let short = charged(&rich_with("F", 16, 16), &styles(""));
-    assert!(long - short >= 256 * (FAMILY - 1), "{long} - {short}");
-}
-
-#[test]
-fn global_names_are_charged_per_sheet() {
-    // One 1 MiB global expression copied into each of 1024 sheets.
-    let expression = format!("of:=&quot;{}&quot;", "e".repeat(1024 * 1024));
-    let names = |sheets: usize| {
-        let tables: String = (0..sheets)
-            .map(|i| format!(r#"<table:table table:name="S{i}"><table:table-row><table:table-cell/></table:table-row></table:table>"#))
-            .collect();
-        content(
-            "",
-            &format!(
-                r#"{tables}<table:named-expressions><table:named-expression table:name="Big" table:expression="{expression}"/></table:named-expressions>"#
-            ),
-        )
+    // Nothing estimates sizes: the allocator sees every copy of the family
+    // the 4096 cells hold.
+    let held = |family: &str| {
+        let (workbook, peak, _) =
+            read_measured_text(&rich_with(family, 64, 64), &styles(""), MAX_MODEL_BYTES);
+        workbook.unwrap();
+        peak
     };
-    let workbook = read_text(&names(2), Some(&styles(""))).unwrap();
-    assert_eq!(workbook.sheets[1].worksheet.defined_names.len(), 1);
-    assert_eq!(
-        read_text(&names(1024), Some(&styles(""))).err(),
-        Some(resource("model size"))
-    );
+    let (long, short) = (held(&family), held("F"));
+    assert!(long - short >= 4096 * (FAMILY - 1), "{long} - {short}");
 }
 
 #[test]
@@ -444,34 +428,6 @@ fn style_map_conditions_resolve_their_namespace_prefix() {
     );
 }
 
-#[test]
-fn validations_are_charged_per_sheet() {
-    // One validation with a 1 MiB message, used on each of 1024 sheets.
-    let message = "m".repeat(1024 * 1024);
-    let validations = |sheets: usize| {
-        let tables: String = (0..sheets)
-            .map(|i| format!(r#"<table:table table:name="S{i}"><table:table-row><table:table-cell table:content-validation-name="V"/></table:table-row></table:table>"#))
-            .collect();
-        content(
-            "",
-            &format!(
-                r#"<table:content-validations><table:content-validation table:name="V" table:condition="of:cell-content-is-whole-number()"><table:error-message table:title="t"><text:p>{message}</text:p></table:error-message></table:content-validation></table:content-validations>{tables}"#
-            ),
-        )
-    };
-    let workbook = read_text(&validations(2), Some(&styles(""))).unwrap();
-    let validation = &workbook.sheets[1].worksheet.data_validations[0];
-    assert_eq!(validation.sqref, "A1");
-    assert_eq!(
-        validation.error_message.as_deref().map(str::len),
-        Some(1024 * 1024)
-    );
-    assert_eq!(
-        read_text(&validations(1024), Some(&styles(""))).err(),
-        Some(resource("model size"))
-    );
-}
-
 fn empty_tables(sheets: usize, columns: &str) -> String {
     (0..sheets)
         .map(|i| format!(r#"<table:table table:name="S{i}">{columns}<table:table-row><table:table-cell/></table:table-row></table:table>"#))
@@ -481,79 +437,9 @@ fn empty_tables(sheets: usize, columns: &str) -> String {
 const FAMILY: usize = crate::odf_text::MAX_STYLE_VALUE_BYTES;
 
 #[test]
-fn the_default_family_is_charged_per_sheet() {
-    // Every worksheet keeps its own copy of the default family.
-    let body = content("", &empty_tables(64, ""));
-    let long = charged(&body, &styles_with_default_family(FAMILY, ""));
-    let short = charged(&body, &styles_with_default_family(1, ""));
-    assert!(long - short >= 64 * (FAMILY - 1), "{long} - {short}");
-}
-
-#[test]
-fn interned_fonts_are_charged_with_their_keys() {
-    // Styles that differ only in size each intern a font holding the
-    // family, and a key that spells it.
-    let sized: String = (0..32)
-        .map(|i| format!(r#"<style:style style:name="s{i}" style:family="table-cell" style:parent-style-name="Default"><style:text-properties fo:font-size="{}pt"/></style:style>"#, i + 1))
-        .collect();
-    let cells: String = (0..32)
-        .map(|i| format!(r#"<table:table-cell table:style-name="s{i}" office:value-type="float" office:value="1"><text:p>1</text:p></table:table-cell>"#))
-        .collect();
-    let body = content(
-        "",
-        &table(&format!("<table:table-row>{cells}</table:table-row>")),
-    );
-    let (workbook, long) = read_charging(&body, &styles_with_default_family(FAMILY, &sized));
-    // 32 sizes, one of them the default's 10 pt.
-    assert_eq!(workbook.unwrap().styles.unwrap().fonts.len(), 32);
-    let short = charged(&body, &styles_with_default_family(1, &sized));
-    assert!(long - short >= 2 * 32 * (FAMILY - 1), "{long} - {short}");
-}
-
-#[test]
-fn repeated_column_metadata_is_charged_per_sheet() {
-    // A hidden, outlined column repeated across the whole grid: one map
-    // entry per column and map on every sheet.
-    let columns = r#"<table:table-column-group><table:table-column table:visibility="collapse" table:number-columns-repeated="16384"/></table:table-column-group>"#;
-    let (workbook, hidden) = read_charging(&content("", &empty_tables(16, columns)), &styles(""));
-    let workbook = workbook.unwrap();
-    assert_eq!(workbook.sheets[15].worksheet.col_hidden.len(), 16_384);
-    assert_eq!(
-        workbook.sheets[15].worksheet.col_outline_levels.len(),
-        16_384
-    );
-    let plain = charged(&content("", &empty_tables(16, "")), &styles(""));
-    assert!(hidden - plain >= 16 * 16_384 * 2 * 10, "{hidden} - {plain}");
-}
-
-#[test]
-fn shape_text_runs_are_charged_their_font_copies() {
-    // Short spans in one text box; every run holds its own copy of the
-    // graphic style's family, admitted before it is made.
-    let spans: String = (0..2048).map(|_| r#"<text:span>x</text:span>y"#).collect();
-    let body = content(
-        r#"<style:style style:name="gr1" style:family="graphic"><style:text-properties style:font-name="F"/></style:style>"#,
-        &table(&format!(
-            r#"<table:table-row><table:table-cell><draw:frame draw:style-name="gr1" svg:width="2cm" svg:height="1cm"><draw:text-box><text:p>{spans}</text:p></draw:text-box></draw:frame></table:table-cell></table:table-row>"#
-        )),
-    );
-    let (workbook, long) = read_charging(&body, &styles_with_default_family(FAMILY, ""));
-    let workbook = workbook.unwrap();
-    let shape = &workbook.sheets[0].worksheet.shape_groups[0].shapes[0];
-    let runs = &shape.text.as_ref().unwrap().paragraphs[0].runs;
-    assert_eq!(runs.len(), 4096);
-    assert!(matches!(
-        &runs[0],
-        xlsx_model::ShapeTextRun::Text { font_face: Some(face), .. } if face.len() == FAMILY
-    ));
-    let short = charged(&body, &styles_with_default_family(1, ""));
-    assert!(long - short >= 4096 * (FAMILY - 1), "{long} - {short}");
-}
-
-#[test]
 fn style_values_past_the_bound_reject() {
     let body = content("", &empty_tables(1, ""));
-    let (workbook, _) = read_charging(&body, &styles_with_default_family(FAMILY + 1, ""));
+    let workbook = read_text(&body, Some(&styles_with_default_family(FAMILY + 1, "")));
     assert_eq!(workbook.err(), Some(crate::error::resource("style value")));
     // A shared picture-fill path, a style reference and an extension
     // property set are bounded alike.
@@ -564,7 +450,7 @@ fn style_values_past_the_bound_reject() {
             r#"<style:style style:name="g" style:family="graphic"><loext:graphic-properties xmlns:loext="urn:org:documentfoundation:names:experimental:office:xmlns:loext:1.0" svg:stroke-width="{long}"/></style:style>"#
         ),
     ] {
-        let (workbook, _) = read_charging(&body, &styles_with_default_family(1, &common));
+        let workbook = read_text(&body, Some(&styles_with_default_family(1, &common)));
         assert_eq!(workbook.err(), Some(crate::error::resource("style value")));
     }
     let reference = content(
@@ -573,41 +459,8 @@ fn style_values_past_the_bound_reject() {
             r#"<table:table-row><table:table-cell table:style-name="{long}"/></table:table-row>"#
         )),
     );
-    let (workbook, _) = read_charging(&reference, &styles(""));
+    let workbook = read_text(&reference, Some(&styles("")));
     assert_eq!(workbook.err(), Some(crate::error::resource("style value")));
-}
-
-#[test]
-fn blank_cells_over_many_column_runs_walk_nothing() {
-    // 16,384 single-column runs and 4,096 rows of one blank cell repeated
-    // over all of them: no cell is materialized and no run is walked.
-    let columns: String = (0..16_384).map(|_| "<table:table-column/>").collect();
-    let rows: String = (0..4_096)
-        .map(|_| r#"<table:table-row><table:table-cell table:number-columns-repeated="16384"/></table:table-row>"#)
-        .collect();
-    let body = content(
-        "",
-        &format!(r#"<table:table table:name="S">{columns}{rows}</table:table>"#),
-    );
-    let manifest = manifest(ODS, "");
-    let styles = styles("");
-    let files: Vec<(&str, &[u8])> = vec![
-        ("META-INF/manifest.xml", manifest.as_bytes()),
-        ("content.xml", body.as_bytes()),
-        ("styles.xml", styles.as_bytes()),
-    ];
-    let package = OdfPackage::open(
-        package_bytes(ODS, &files),
-        OoxmlFormat::Xlsx,
-        PackageLimits::default(),
-        &MEDIA_TYPES,
-    )
-    .unwrap();
-    let budget = Budget::new();
-    let workbook = read_within(&package, budget.clone()).unwrap();
-    assert!(workbook.sheets[0].rows.is_empty());
-    // Only the formatted-column scan's first pass; no row walks a run.
-    assert!(budget.steps_used() < 4_096, "{}", budget.steps_used());
 }
 
 #[test]
@@ -886,4 +739,170 @@ fn window_colour_off_inherits_the_parent_colour() {
         styles.fonts[xf.font_id as usize].color.as_deref(),
         Some("FF0000")
     );
+}
+
+/// The format code of a cell's xf (`General` for the built-in id 0).
+fn format_code(workbook: &OdsWorkbook, cell: &xlsx_model::Cell) -> String {
+    let styles = workbook.styles.as_ref().unwrap();
+    let id = styles.cell_xfs[cell.style_index.unwrap() as usize].num_fmt_id;
+    styles
+        .num_fmts
+        .iter()
+        .find(|f| f.num_fmt_id == id)
+        .map_or_else(|| "General".to_string(), |f| f.format_code.clone())
+}
+
+#[test]
+fn blank_repeats_walk_their_xml_not_their_grid() {
+    // 16,384 single-column runs and 4,096 rows of one blank cell repeated
+    // over all of them (67 million grid cells): nothing is materialized and
+    // the work follows the XML, whether or not the cell could span.
+    let columns: String = (0..16_384).map(|_| "<table:table-column/>").collect();
+    let rows: String = (0..4_096)
+        .map(|_| r#"<table:table-row><table:table-cell table:number-columns-repeated="16384"/></table:table-row>"#)
+        .collect();
+    let body = content(
+        "",
+        &format!(r#"<table:table table:name="S">{columns}{rows}</table:table>"#),
+    );
+    let (workbook, _, work) = read_measured_text(&body, &styles(""), MAX_MODEL_BYTES);
+    assert!(workbook.unwrap().sheets[0].rows.is_empty());
+    assert!(work < 400_000, "{work}");
+}
+
+#[test]
+fn repeated_spanned_cells_merge_once_per_cell() {
+    let body = content(
+        "",
+        &table(
+            r#"<table:table-row table:number-rows-repeated="2"><table:table-cell table:number-columns-repeated="3" table:number-columns-spanned="2" office:value-type="float" office:value="1"><text:p>1</text:p></table:table-cell></table:table-row>"#,
+        ),
+    );
+    let workbook = read_text(&body, Some(&styles(""))).unwrap();
+    let merges = &workbook.sheets[0].worksheet.merge_cells;
+    assert_eq!(merges.len(), 6);
+    assert_eq!(
+        (
+            merges[5].top,
+            merges[5].left,
+            merges[5].bottom,
+            merges[5].right
+        ),
+        (2, 3, 2, 4)
+    );
+}
+
+#[test]
+fn rich_text_is_bounded_while_its_spans_are_read() {
+    // Sibling spans that each resolve a 1 KiB family: the read stops at
+    // its limit while it walks them, not after collecting them all.
+    let family = "F".repeat(FAMILY);
+    let spans: String = (0..40_000)
+        .map(|_| r#"<text:span text:style-name="T1">x</text:span>y"#)
+        .collect();
+    let body = content(
+        &format!(
+            r#"<style:style style:name="T1" style:family="text"><style:text-properties fo:font-family="{family}"/></style:style>"#
+        ),
+        &table(&format!(
+            r#"<table:table-row><table:table-cell office:value-type="string"><text:p>{spans}</text:p></table:table-cell></table:table-row>"#
+        )),
+    );
+    let (workbook, peak, _) = read_measured_text(&body, &styles(""), 4 << 20);
+    assert_eq!(workbook.err(), Some(resource("model size")));
+    // 40,000 contexts would hold 40 MiB of family copies.
+    assert!(peak < 6 << 20, "{peak}");
+}
+
+#[test]
+fn a_grid_of_repeated_content_rejects() {
+    // One value repeated over the whole grid: 17 billion cells.
+    let body = content(
+        "",
+        &table(
+            r#"<table:table-row table:number-rows-repeated="1048576"><table:table-cell table:number-columns-repeated="16384" office:value-type="float" office:value="1"><text:p>1</text:p></table:table-cell></table:table-row>"#,
+        ),
+    );
+    let (workbook, peak, _) = read_measured_text(&body, &styles(""), 16 << 20);
+    assert_eq!(workbook.err(), Some(resource("model size")));
+    assert!(peak < 24 << 20, "{peak}");
+}
+
+#[test]
+fn early_dates_use_the_serials_the_renderer_displays() {
+    let body = content(
+        "",
+        &table(concat!(
+            r#"<table:table-row>"#,
+            r#"<table:table-cell office:value-type="date" office:date-value="1900-01-01"><text:p>x</text:p></table:table-cell>"#,
+            r#"<table:table-cell office:value-type="date" office:date-value="1900-02-28"><text:p>x</text:p></table:table-cell>"#,
+            r#"<table:table-cell office:value-type="date" office:date-value="1900-03-01"><text:p>x</text:p></table:table-cell>"#,
+            r#"</table:table-row>"#
+        )),
+    );
+    let workbook = read_text(&body, Some(&styles(""))).unwrap();
+    let serials: Vec<f64> = workbook.sheets[0].rows[0]
+        .cells
+        .iter()
+        .map(|cell| match cell.value {
+            xlsx_model::CellValue::Number { number } => number,
+            _ => f64::NAN,
+        })
+        .collect();
+    // The renderer shows serial 1 as 1900-01-01 and 59 as 1900-02-28.
+    assert_eq!(serials, [1.0, 59.0, 61.0]);
+}
+
+#[test]
+fn a_formula_zero_shown_as_nothing_stays_a_number() {
+    let body = content(
+        "",
+        &table(concat!(
+            r#"<table:table-row>"#,
+            // An empty-cell result: LibreOffice displays nothing.
+            r#"<table:table-cell table:formula="of:=VLOOKUP(1;[.X1:.Y2];2)" office:value-type="float" office:value="0"><text:p/></table:table-cell>"#,
+            // A zero LibreOffice displays.
+            r#"<table:table-cell table:formula="of:=1-1" office:value-type="float" office:value="0"><text:p>0</text:p></table:table-cell>"#,
+            // A constant zero keeps its own format.
+            r#"<table:table-cell office:value-type="float" office:value="0"><text:p/></table:table-cell>"#,
+            r#"</table:table-row>"#
+        )),
+    );
+    let workbook = read_text(&body, Some(&styles(""))).unwrap();
+    let cells = &workbook.sheets[0].rows[0].cells;
+    for cell in cells {
+        assert!(
+            matches!(cell.value, xlsx_model::CellValue::Number { number } if number == 0.0),
+            "{:?}",
+            cell.value
+        );
+    }
+    assert_eq!(format_code(&workbook, &cells[0]), "0;-0;;@");
+    assert_eq!(format_code(&workbook, &cells[1]), "General");
+    assert_eq!(format_code(&workbook, &cells[2]), "General");
+}
+
+#[test]
+fn charts_take_the_workbook_date_system() {
+    let chart_content = format!(
+        r#"<office:document-content {NS} office:version="1.3"><office:body><office:chart><chart:chart chart:class="chart:line"/></office:chart></office:body></office:document-content>"#
+    );
+    let body = content(
+        "",
+        &format!(
+            r#"<table:calculation-settings><table:null-date table:date-value="1904-01-01"/></table:calculation-settings>{}"#,
+            table(
+                r#"<table:table-row><table:table-cell><draw:frame svg:width="4cm" svg:height="3cm"><draw:object xlink:href="./Object 1"/></draw:frame></table:table-cell></table:table-row>"#
+            )
+        ),
+    );
+    let styles = styles("");
+    let workbook = read_files(&[
+        ("content.xml", body.as_bytes()),
+        ("styles.xml", styles.as_bytes()),
+        ("Object 1/content.xml", chart_content.as_bytes()),
+    ])
+    .unwrap();
+    assert!(workbook.date1904);
+    assert!(workbook.sheets[0].worksheet.charts[0].chart.date1904);
 }

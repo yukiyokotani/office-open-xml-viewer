@@ -26,6 +26,12 @@ describe('section divisors', () => {
     expect(formatCellValue(number(1234567), styles('#,##0', [1000]))).toBe('1,235');
   });
 
+  it('shows nothing for a zero whose zero section is empty', () => {
+    // The ODS reader's format for a formula result LibreOffice shows as
+    // nothing: the numeric zero with an empty zero section.
+    expect(formatCellValue(number(0), styles('0;-0;;@', []))).toBe('');
+  });
+
   it('divides a General code', () => {
     expect(formatCellValue(number(250), styles('General', [100]))).toBe('2.5');
   });

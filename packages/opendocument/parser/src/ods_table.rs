@@ -8,10 +8,11 @@
 //! one run.
 
 use super::{
-    cells::{CellStyles, PartialFont, XfBuilder},
-    column_letters, date_serial, draw, duration_days, hash_entry_bytes, map_entry_bytes, pt_to_px,
-    Context, OdsSheet, MAX_COLS, MAX_ROWS, NS_TABLE,
+    cells::{CellStyle, PartialFont, XfBuilder},
+    column_letters, date_serial, draw, duration_days, pt_to_px, Context, OdsSheet, MAX_COLS,
+    MAX_ROWS, NS_TABLE,
 };
+use crate::budget;
 use crate::odf_props::{get, hex_color, length_pt};
 use crate::ods_number::DataKind;
 use crate::package::OdfPackage;
@@ -28,8 +29,6 @@ const NS_DC: &str = "http://purl.org/dc/elements/1.1/";
 /// used when a table declares no row or column style.
 const DEFAULT_ROW_PT: f64 = 12.8;
 const DEFAULT_COL_PT: f64 = 64.0;
-/// The longest A1 cell reference (`XFD1048576`).
-const MAX_CELL_REF_BYTES: usize = 10;
 
 #[derive(Clone, Debug, Default)]
 pub struct ViewSettings {
@@ -42,7 +41,9 @@ pub struct ViewSettings {
 
 /// `settings.xml` view settings (LibreOffice's `ooo:view-settings`): frozen
 /// panes (split mode 2), grid and zero display, per table.
-pub fn read_view_settings(root: roxmltree::Node<'_, '_>) -> HashMap<String, ViewSettings> {
+pub fn read_view_settings(
+    root: roxmltree::Node<'_, '_>,
+) -> Result<HashMap<String, ViewSettings>, String> {
     let mut tables = HashMap::new();
     let item = |node: roxmltree::Node<'_, '_>, name: &str| -> Option<String> {
         node.children()
@@ -65,7 +66,7 @@ pub fn read_view_settings(root: roxmltree::Node<'_, '_>) -> HashMap<String, View
                 .find(|n| xml::is(*n, NS_CONFIG, "config-item-map-entry"))
         })
     else {
-        return tables;
+        return Ok(tables);
     };
     // View settings first, then the document configuration
     // (`ooo:configuration-settings`), where LibreOffice keeps them too.
@@ -88,6 +89,7 @@ pub fn read_view_settings(root: roxmltree::Node<'_, '_>) -> HashMap<String, View
             .children()
             .filter(|n| xml::is(*n, NS_CONFIG, "config-item-map-entry"))
         {
+            budget::tick(1)?;
             let Some(name) = entry.attribute((NS_CONFIG, "name")) else {
                 continue;
             };
@@ -112,26 +114,7 @@ pub fn read_view_settings(root: roxmltree::Node<'_, '_>) -> HashMap<String, View
             tables.insert(name.to_string(), settings);
         }
     }
-    tables
-}
-
-/// One authored cell, copied to every cell its row and column repeats
-/// cover. `cost` is what one copy retains (inline plus owned heap, from the
-/// exhaustive `RetainedBytes` accounting), admitted before each copy.
-#[derive(Clone)]
-struct Template {
-    cell: Rc<Cell>,
-    cost: usize,
-}
-
-impl Template {
-    fn new(cell: Cell) -> Self {
-        let cost = super::retained_size(&cell);
-        Self {
-            cell: Rc::new(cell),
-            cost,
-        }
-    }
+    Ok(tables)
 }
 
 /// The column run holding 1-based column `col` (runs are contiguous and in
@@ -141,12 +124,7 @@ fn column_at(columns: &[Column], col: u32) -> Option<&Column> {
     columns.get(at).filter(|c| c.first <= col)
 }
 
-/// The owned heap of `value` (its inline size is its vector slot's).
-fn heap_size<T: ooxml_common::chart::RetainedBytes>(value: &T) -> usize {
-    usize::try_from(value.heap_bytes()).unwrap_or(usize::MAX)
-}
-
-/// A copy of `cell` at (`row`, `col`). The caller admitted its cost.
+/// A copy of `cell` at (`row`, `col`).
 fn copy_cell(cell: &Cell, row: u32, col: u32) -> Cell {
     Cell {
         col,
@@ -190,9 +168,6 @@ fn copy_value(value: &CellValue) -> CellValue {
 
 /// A run of rows: (first, last, height px, custom height, (hidden, outline level)).
 type RowBlock = (u32, u32, u32, bool, (bool, u8));
-/// The default (xf, style name) of a column.
-type ColumnDefault = dyn Fn(u32, &[Column]) -> (u32, Option<Rc<str>>);
-
 struct Column {
     first: u32,
     last: u32,
@@ -200,8 +175,15 @@ struct Column {
     hidden: bool,
     level: u8,
     default_xf: u32,
-    /// Shared with every run split from this column: never copied.
-    default_style: Option<Rc<str>>,
+    /// The column's `table:default-cell-style-name`, resolved once.
+    default_style: Option<CellStyle>,
+}
+
+impl Column {
+    /// The style of a cell of this column that names none, nor its row.
+    fn cell_style(&self) -> CellStyle {
+        self.default_style.unwrap_or(CellStyle::Default)
+    }
 }
 
 /// Drawings found in cells or `table:shapes`, resolved after the grid.
@@ -248,24 +230,12 @@ pub(crate) fn read_table<'a, 'input>(
         });
     }
     promote_column_formats(ctx, table, &mut columns)?;
-    let default_xf_for_col = |col: u32, columns: &[Column]| -> (u32, Option<Rc<str>>) {
-        column_at(columns, col)
-            .map(|c| (c.default_xf, c.default_style.clone()))
-            .unwrap_or((0, None))
-    };
     // Column runs whose default cell style carries §16.3 conditions: the
     // only runs an unstyled blank cell must visit.
     let mapped_runs: Vec<usize> = columns
         .iter()
         .enumerate()
-        .filter(|(_, c)| {
-            ctx.store
-                .find(
-                    "table-cell",
-                    c.default_style.as_deref().unwrap_or("Default"),
-                )
-                .is_some_and(|s| !s.maps.is_empty())
-        })
+        .filter(|(_, c)| c.cell_style().has_maps(&ctx.store))
         .map(|(index, _)| index)
         .collect();
 
@@ -282,19 +252,11 @@ pub(crate) fn read_table<'a, 'input>(
         style_map_last: HashMap::new(),
         mapped_runs,
         next_row: 1,
-        sheet_index: index,
     };
-    walk_rows(
-        ctx,
-        table,
-        0,
-        false,
-        &columns,
-        &default_xf_for_col,
-        &mut walker,
-    )?;
+    walk_rows(ctx, table, 0, false, &columns, &mut walker)?;
     for shapes in table.children().filter(|n| xml::is(*n, NS_TABLE, "shapes")) {
         for node in shapes.children().filter(|n| n.is_element()) {
+            budget::tick(1)?;
             walker.anchored.push(Anchored { node, cell: None });
         }
     }
@@ -322,11 +284,9 @@ pub(crate) fn read_table<'a, 'input>(
     let mut row_heights = BTreeMap::new();
     for (first, last, px, _, _) in &walker.heights {
         if *px != default_row_px {
-            ctx.budget.bytes(
-                ((*last - *first + 1) as usize).saturating_mul(map_entry_bytes::<u32, f64>()),
-            )?;
-            for row in *first..=*last {
-                row_heights.insert(row, px_to_pt(*px));
+            // The model keeps one height per row: one step each.
+            for row in budget::each(*first, *last) {
+                row_heights.insert(row?, px_to_pt(*px));
             }
         }
     }
@@ -340,14 +300,10 @@ pub(crate) fn read_table<'a, 'input>(
             if *level == 0 {
                 continue;
             }
-            // Each row's entry in `existing`, and its record when new.
-            ctx.budget.bytes(
-                ((*last - *first + 1) as usize).saturating_mul(map_entry_bytes::<u32, ()>()),
-            )?;
-            for row in *first..=*last {
+            for row in budget::each(*first, *last) {
+                let row = row?;
                 if existing.insert(row) {
-                    ctx.budget.cell(0)?;
-                    ctx.budget.grow(&rows)?;
+                    budget::cell()?;
                     rows.push(Row {
                         index: row,
                         height: None,
@@ -390,36 +346,18 @@ pub(crate) fn read_table<'a, 'input>(
     let mut worksheet = Worksheet::placeholder(&name, String::new());
     worksheet.parse_error = None;
     // Column metadata: the per-column maps the model keeps (one entry per
-    // hidden or outlined column, at most 16,384 per sheet), the style runs
-    // and the width runs, all admitted before they are stored.
-    let mut hidden_cols = 0usize;
-    let mut outlined_cols = 0usize;
+    // hidden or outlined column), and the style runs.
     for c in &columns {
-        let width = (c.last - c.first + 1) as usize;
-        if c.hidden {
-            hidden_cols += width;
-        }
-        if c.level > 0 {
-            outlined_cols += width;
-        }
-    }
-    ctx.budget.bytes(
-        hidden_cols
-            .saturating_mul(map_entry_bytes::<u32, bool>())
-            .saturating_add(outlined_cols.saturating_mul(map_entry_bytes::<u32, u8>()))
-            .saturating_add(columns.len().saturating_mul(
-                2 * std::mem::size_of::<xlsx_model::ColumnStyleRange>()
-                    + 2 * std::mem::size_of::<xlsx_model::ColumnWidthRange>()
-                    + std::mem::size_of::<(u32, u32, u32)>(),
-            )),
-    )?;
-    for c in &columns {
-        for col in c.first..=c.last {
-            if c.hidden {
-                worksheet.col_hidden.insert(col, true);
-            }
-            if c.level > 0 {
-                worksheet.col_outline_levels.insert(col, c.level);
+        budget::tick(1)?;
+        if c.hidden || c.level > 0 {
+            for col in budget::each(c.first, c.last) {
+                let col = col?;
+                if c.hidden {
+                    worksheet.col_hidden.insert(col, true);
+                }
+                if c.level > 0 {
+                    worksheet.col_outline_levels.insert(col, c.level);
+                }
             }
         }
         if c.default_xf != 0 {
@@ -439,10 +377,7 @@ pub(crate) fn read_table<'a, 'input>(
         .collect();
     // The sheet's copy of the workbook default font family.
     let font = ctx.xfs.default_font_model();
-    worksheet.default_font_family = match &font.name {
-        Some(name) => Some(ctx.budget.copy(name)?),
-        None => None,
-    };
+    worksheet.default_font_family = font.name.clone();
     worksheet.default_font_size = Some(if font.size > 0.0 { font.size } else { 10.0 });
     worksheet.default_font_bold = font.bold.then_some(true);
     worksheet.default_font_italic = font.italic.then_some(true);
@@ -456,9 +391,6 @@ pub(crate) fn read_table<'a, 'input>(
     worksheet.comments = walker.comments;
     worksheet.date1904 = ctx.date1904;
     worksheet.right_to_left = right_to_left;
-    // The tab colour (`#RRGGBB` hex) is kept by the sheet and its model.
-    ctx.budget
-        .bytes(2 * tab_color.as_ref().map_or(0, String::capacity))?;
     worksheet.tab_color = tab_color.clone();
     if let Some(view) = view {
         worksheet.freeze_rows = view.freeze_rows;
@@ -475,18 +407,6 @@ pub(crate) fn read_table<'a, 'input>(
     {
         worksheet.outline_pr = Some(xlsx_model::OutlinePr::default());
     }
-    // The drawing grid's copy of the column runs with their left edges, and
-    // its row-height prefix sums.
-    ctx.budget.bytes(
-        (column_px.len() + 1)
-            .saturating_mul(std::mem::size_of::<(u32, u32, u32)>() + std::mem::size_of::<i64>())
-            .saturating_add(
-                worksheet
-                    .row_heights
-                    .len()
-                    .saturating_mul(std::mem::size_of::<(u32, i64)>()),
-            ),
-    )?;
     let geometry = draw::Grid::new(&column_px, default_col_px, &worksheet, default_row_px);
     let charts = draw::read_drawings(
         ctx,
@@ -530,15 +450,14 @@ fn promote_column_formats(
     if width == 0 {
         return Ok(());
     }
-    // Per column: the blank xf seen so far (None: conflicting), and rows.
-    let mut seen: Vec<(Option<u32>, u32, bool)> = vec![(None, 0, true); width + 1];
     let mut rows: Vec<roxmltree::Node<'_, '_>> = Vec::new();
-    collect_row_nodes(table, &mut rows);
+    collect_row_nodes(table, &mut rows)?;
     // Only a table that reaches the last row can format whole columns, and
     // only columns whose last row paints differently from the column
     // default are candidates; the scan below visits those columns only.
     let mut total = 0u64;
     for row in &rows {
+        budget::tick(1)?;
         total = total.saturating_add(u64::from(repeat(*row, "number-rows-repeated")?));
     }
     if total < u64::from(MAX_ROWS) {
@@ -546,7 +465,9 @@ fn promote_column_formats(
     }
     let mut candidates: Vec<(usize, usize)> = Vec::new();
     if let Some(last_row) = rows.last() {
-        let row_default = last_row.attribute((NS_TABLE, "default-cell-style-name"));
+        let row_default = last_row
+            .attribute((NS_TABLE, "default-cell-style-name"))
+            .map(|name| CellStyle::named(&ctx.store, name));
         let mut col = 1usize;
         for cell in last_row.children().filter(|n| {
             xml::is(*n, NS_TABLE, "table-cell") || xml::is(*n, NS_TABLE, "covered-table-cell")
@@ -557,20 +478,20 @@ fn promote_column_formats(
             let last = col
                 .saturating_add(repeat(cell, "number-columns-repeated")? as usize - 1)
                 .min(width);
-            let own = cell.attribute((NS_TABLE, "style-name"));
+            let own = cell
+                .attribute((NS_TABLE, "style-name"))
+                .map(|name| CellStyle::named(&ctx.store, name));
             let mut c = col;
             while c <= last {
-                ctx.budget.steps(1)?;
+                budget::tick(1)?;
                 let column = column_at(columns, c as u32);
                 let segment_last = column.map_or(last, |k| (k.last as usize).min(last));
-                let styles = CellStyles {
-                    cell: own,
-                    row: row_default,
-                    column: column.and_then(|k| k.default_style.as_deref()),
-                };
+                let style = own
+                    .or(row_default)
+                    .unwrap_or_else(|| column.map_or(CellStyle::Default, Column::cell_style));
                 let xf = ctx
                     .xfs
-                    .xf_for(&ctx.store, &mut ctx.data, &ctx.faces, styles)?;
+                    .xf_for(&ctx.store, &mut ctx.data, &ctx.faces, style)?;
                 let default = column.map_or(0, |k| k.default_xf);
                 if ctx.xfs.blank_signature(xf) != ctx.xfs.blank_signature(default) {
                     candidates.push((c, segment_last));
@@ -583,6 +504,9 @@ fn promote_column_formats(
     if candidates.is_empty() {
         return Ok(());
     }
+    // Per column (at most 16,384): the blank xf seen so far (None:
+    // conflicting), and rows.
+    let mut seen: Vec<(Option<u32>, u32, bool)> = vec![(None, 0, true); width + 1];
     let mut next_row = 1u32;
     for row in rows {
         if next_row > MAX_ROWS {
@@ -590,7 +514,10 @@ fn promote_column_formats(
         }
         let count = repeat(row, "number-rows-repeated")?.min(MAX_ROWS - next_row + 1);
         next_row += count;
-        let row_default = row.attribute((NS_TABLE, "default-cell-style-name"));
+        budget::tick(1)?;
+        let row_default = row
+            .attribute((NS_TABLE, "default-cell-style-name"))
+            .map(|name| CellStyle::named(&ctx.store, name));
         let mut col = 1usize;
         for cell in row.children().filter(|n| {
             xml::is(*n, NS_TABLE, "table-cell") || xml::is(*n, NS_TABLE, "covered-table-cell")
@@ -602,20 +529,20 @@ fn promote_column_formats(
             let last = col.saturating_add(span - 1).min(width);
             let has_content = cell.attribute((NS_OFFICE, "value-type")).is_some()
                 || cell.children().any(|n| n.is_element());
-            let own = cell.attribute((NS_TABLE, "style-name"));
+            let own = cell
+                .attribute((NS_TABLE, "style-name"))
+                .map(|name| CellStyle::named(&ctx.store, name));
             let mut c = col;
             while c <= last {
-                ctx.budget.steps(1)?;
+                budget::tick(1)?;
                 let column = column_at(columns, c as u32);
                 let segment_last = column.map_or(last, |k| (k.last as usize).min(last));
-                let styles = CellStyles {
-                    cell: own,
-                    row: row_default,
-                    column: column.and_then(|k| k.default_style.as_deref()),
-                };
+                let style = own
+                    .or(row_default)
+                    .unwrap_or_else(|| column.map_or(CellStyle::Default, Column::cell_style));
                 let xf = ctx
                     .xfs
-                    .xf_for(&ctx.store, &mut ctx.data, &ctx.faces, styles)?;
+                    .xf_for(&ctx.store, &mut ctx.data, &ctx.faces, style)?;
                 // Candidates are disjoint and in column order: only those
                 // overlapping the segment are visited, each column once.
                 let from = candidates.partition_point(|(_, b)| *b < c);
@@ -625,7 +552,7 @@ fn promote_column_formats(
                     .map(|(a, b)| ((*a).max(c), (*b).min(segment_last)))
                     .collect();
                 for (a, b) in &overlapping {
-                    ctx.budget.steps(b - a + 1)?;
+                    budget::tick(b - a + 1)?;
                 }
                 let slots = overlapping.into_iter().flat_map(|(a, b)| a..=b);
                 for index in slots {
@@ -662,7 +589,8 @@ fn promote_column_formats(
             (slot.2 && slot.1 >= MAX_ROWS).then_some(slot.0).flatten()
         };
         let mut current = format_of(start);
-        for c in column.first..=column.last + 1 {
+        for c in budget::each(column.first, column.last + 1) {
+            let c = c?;
             let next = if c <= column.last { format_of(c) } else { None };
             if c > column.last || next != current {
                 let xf = current.filter(|xf| {
@@ -677,7 +605,7 @@ fn promote_column_formats(
                     default_xf: xf.unwrap_or(column.default_xf),
                     // Unstyled cells still resolve through the authored
                     // default; every blank one paints like `xf`.
-                    default_style: column.default_style.clone(),
+                    default_style: column.default_style,
                 });
                 start = c;
                 current = next;
@@ -691,17 +619,19 @@ fn promote_column_formats(
 fn collect_row_nodes<'a, 'input>(
     parent: roxmltree::Node<'a, 'input>,
     out: &mut Vec<roxmltree::Node<'a, 'input>>,
-) {
+) -> Result<(), String> {
     for node in parent.children().filter(|n| n.is_element()) {
+        budget::tick(1)?;
         if node.tag_name().namespace() != Some(NS_TABLE) {
             continue;
         }
         match node.tag_name().name() {
-            "table-row-group" | "table-header-rows" | "table-rows" => collect_row_nodes(node, out),
+            "table-row-group" | "table-header-rows" | "table-rows" => collect_row_nodes(node, out)?,
             "table-row" => out.push(node),
             _ => {}
         }
     }
+    Ok(())
 }
 
 fn px_to_pt(px: u32) -> f64 {
@@ -754,17 +684,15 @@ fn collect_columns(
                     .and_then(length_pt)
                     .unwrap_or(DEFAULT_COL_PT);
                 let visibility = node.attribute((NS_TABLE, "visibility"));
-                let default_style: Option<Rc<str>> = node
+                budget::tick(1)?;
+                let default_style = node
                     .attribute((NS_TABLE, "default-cell-style-name"))
-                    .map(Rc::from);
+                    .map(|name| CellStyle::named(&ctx.store, name));
                 let default_xf = ctx.xfs.xf_for(
                     &ctx.store,
                     &mut ctx.data,
                     &ctx.faces,
-                    CellStyles {
-                        column: default_style.as_deref(),
-                        ..CellStyles::default()
-                    },
+                    default_style.unwrap_or(CellStyle::Default),
                 )?;
                 columns.push(Column {
                     first: *next,
@@ -794,28 +722,25 @@ struct RowWalker<'a, 'input> {
     anchored: Vec<Anchored<'a, 'input>>,
     validations: Vec<(String, xlsx_model::CellRange)>,
     /// Ranges of cells whose style has `style:map` conditions.
-    style_maps: Vec<(String, xlsx_model::CellRange)>,
+    style_maps: Vec<(CellStyle, xlsx_model::CellRange)>,
     /// (style, first column, last column) → its last range, to extend it
     /// down over the next rows.
-    style_map_last: HashMap<(String, u32, u32), usize>,
+    style_map_last: HashMap<(CellStyle, u32, u32), usize>,
     /// Indices of the column runs whose default style has conditions.
     mapped_runs: Vec<usize>,
     next_row: u32,
-    #[allow(dead_code)]
-    sheet_index: usize,
 }
 
-#[allow(clippy::too_many_arguments)]
 fn walk_rows<'a, 'input>(
     ctx: &mut Context,
     parent: roxmltree::Node<'a, 'input>,
     level: u8,
     group_hidden: bool,
     columns: &[Column],
-    column_default: &ColumnDefault,
     walker: &mut RowWalker<'a, 'input>,
 ) -> Result<(), String> {
     for node in parent.children().filter(|n| n.is_element()) {
+        budget::tick(1)?;
         if node.tag_name().namespace() != Some(NS_TABLE) {
             continue;
         }
@@ -828,42 +753,25 @@ fn walk_rows<'a, 'input>(
                     level.saturating_add(1).min(7),
                     group_hidden || collapsed,
                     columns,
-                    column_default,
                     walker,
                 )?;
             }
-            "table-header-rows" | "table-rows" => walk_rows(
-                ctx,
-                node,
-                level,
-                group_hidden,
-                columns,
-                column_default,
-                walker,
-            )?,
-            "table-row" => read_row(
-                ctx,
-                node,
-                level,
-                group_hidden,
-                columns,
-                column_default,
-                walker,
-            )?,
+            "table-header-rows" | "table-rows" => {
+                walk_rows(ctx, node, level, group_hidden, columns, walker)?
+            }
+            "table-row" => read_row(ctx, node, level, group_hidden, columns, walker)?,
             _ => {}
         }
     }
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 fn read_row<'a, 'input>(
     ctx: &mut Context,
     node: roxmltree::Node<'a, 'input>,
     level: u8,
     group_hidden: bool,
     columns: &[Column],
-    column_default: &ColumnDefault,
     walker: &mut RowWalker<'a, 'input>,
 ) -> Result<(), String> {
     let first = walker.next_row;
@@ -887,12 +795,15 @@ fn read_row<'a, 'input>(
     walker
         .heights
         .push((first, last, pt_to_px(height), !optimal, (hidden, level)));
-    let row_default = node.attribute((NS_TABLE, "default-cell-style-name"));
+    let row_default = node
+        .attribute((NS_TABLE, "default-cell-style-name"))
+        .map(|name| CellStyle::named(&ctx.store, name));
 
-    // The cells of one occurrence of this row.
-    let mut templates: Vec<(u32, Template)> = Vec::new();
+    // The cells of one occurrence of this row: (column, the cell to copy).
+    let mut templates: Vec<(u32, Rc<Cell>)> = Vec::new();
     let mut col = 1u32;
     for cell in node.children().filter(|n| n.is_element()) {
+        budget::tick(1)?;
         let covered = xml::is(cell, NS_TABLE, "covered-table-cell");
         if !covered && !xml::is(cell, NS_TABLE, "table-cell") {
             continue;
@@ -902,102 +813,79 @@ fn read_row<'a, 'input>(
         }
         let repeat_count = repeat(cell, "number-columns-repeated")?;
         let cell_last = col.saturating_add(repeat_count - 1).min(MAX_COLS);
-        let own_style = cell.attribute((NS_TABLE, "style-name"));
-        let (value, formula) = cell_value(
-            ctx,
-            cell,
-            own_style,
-            row_default,
-            col,
-            columns,
-            column_default,
-        )?;
+        // The style the cell or its row names; a cell that names none takes
+        // each column's default.
+        let explicit = cell
+            .attribute((NS_TABLE, "style-name"))
+            .map(|name| CellStyle::named(&ctx.store, name))
+            .or(row_default);
+        let CellRead {
+            value,
+            formula,
+            shown_empty_zero,
+        } = cell_value(ctx, cell, explicit, col, columns)?;
         let has_value = !matches!(value, CellValue::Empty);
         // A blank cell (no value type, no content, no own or row style)
         // takes its column's default everywhere: it paints nothing of its
         // own, so only runs whose default style has conditions are visited.
         let unstyled_blank = !has_value
             && formula.is_none()
-            && own_style.or(row_default).is_none()
+            && explicit.is_none()
             && cell.attribute((NS_OFFICE, "value-type")).is_none()
             && !cell.children().any(|n| n.is_element());
         if unstyled_blank {
-            let from = walker
+            let mut at = walker
                 .mapped_runs
                 .partition_point(|run| columns[*run].last < col);
-            let runs: Vec<usize> = walker.mapped_runs[from..]
-                .iter()
+            while let Some(run) = walker
+                .mapped_runs
+                .get(at)
                 .copied()
-                .take_while(|run| columns[*run].first <= cell_last)
-                .collect();
-            for run in runs {
-                ctx.budget.steps(1)?;
+                .filter(|run| columns[*run].first <= cell_last)
+            {
+                budget::tick(1)?;
                 let column = &columns[run];
-                let style = column
-                    .default_style
-                    .clone()
-                    .unwrap_or_else(|| Rc::from("Default"));
                 record_style_map(
-                    ctx,
                     walker,
-                    &style,
+                    column.cell_style(),
                     (first, column.first.max(col)),
                     (last, column.last.min(cell_last)),
                 )?;
+                at += 1;
             }
             // Columns past the declared runs take the `Default` style.
             let declared = columns.last().map_or(0, |c| c.last);
-            if cell_last > declared
-                && ctx
-                    .store
-                    .find("table-cell", "Default")
-                    .is_some_and(|s| !s.maps.is_empty())
-            {
-                ctx.budget.steps(1)?;
+            if cell_last > declared && CellStyle::Default.has_maps(&ctx.store) {
                 record_style_map(
-                    ctx,
                     walker,
-                    "Default",
+                    CellStyle::Default,
                     (first, col.max(declared + 1)),
                     (last, cell_last),
                 )?;
             }
         }
-        // The prototype of the last format seen in this authored cell; its
-        // copies are made from it.
-        let mut prototype: Option<Template> = None;
+        // The cell of the last format seen in this authored cell; the
+        // columns it repeats over share it.
+        let mut prototype: Option<Rc<Cell>> = None;
         // The column style the prototype's rich-text runs were read over.
-        let mut prototype_column: Option<Rc<str>> = None;
-        let rich = matches!(&value, CellValue::Text { runs: Some(_), .. })
-            && own_style.or(row_default).is_none();
-        // Drawings, annotations, links and spans belong to the first row of
-        // a repeated block only when it is not repeated (LibreOffice never
-        // repeats rows that carry them).
+        let mut prototype_column: Option<CellStyle> = None;
+        let rich = matches!(&value, CellValue::Text { runs: Some(_), .. }) && explicit.is_none();
         // Walk the repeated cells as segments of constant column default.
         let mut c = if unstyled_blank { cell_last + 1 } else { col };
         while c <= cell_last {
-            ctx.budget.steps(1)?;
-            let segment_last =
-                column_at(columns, c).map_or(cell_last, |column| column.last.min(cell_last));
-            let (column_xf, column_style) = column_default(c, columns);
-            let style = own_style.or(row_default).or(column_style.as_deref());
-            let style_name = style.unwrap_or("Default");
-            if ctx
-                .store
-                .find("table-cell", style_name)
-                .is_some_and(|s| !s.maps.is_empty())
-            {
-                record_style_map(ctx, walker, style_name, (first, c), (last, segment_last))?;
+            budget::tick(1)?;
+            let column = column_at(columns, c);
+            let segment_last = column.map_or(cell_last, |k| k.last.min(cell_last));
+            let column_xf = column.map_or(0, |k| k.default_xf);
+            let column_style = column.map_or(CellStyle::Default, Column::cell_style);
+            let style = explicit.unwrap_or(column_style);
+            if style.has_maps(&ctx.store) {
+                record_style_map(walker, style, (first, c), (last, segment_last))?;
             }
-            let styles = CellStyles {
-                cell: own_style,
-                row: row_default,
-                column: column_style.as_deref(),
-            };
             let xf = ctx
                 .xfs
-                .xf_for(&ctx.store, &mut ctx.data, &ctx.faces, styles)?;
-            let xf = adjust_xf_for_value(&mut ctx.xfs, xf, cell)?;
+                .xf_for(&ctx.store, &mut ctx.data, &ctx.faces, style)?;
+            let xf = adjust_xf_for_value(&mut ctx.xfs, xf, cell, shown_empty_zero)?;
             // An empty cell is materialized only when it paints differently
             // from its column's default (fill or borders); its font, number
             // format and alignment have nothing to show.
@@ -1006,8 +894,8 @@ fn read_row<'a, 'input>(
                 let template = match prototype.take() {
                     // Runs read over a column style serve only that style.
                     Some(t)
-                        if t.cell.style_index == Some(xf)
-                            && (!rich || prototype_column == column_style) =>
+                        if t.style_index == Some(xf)
+                            && (!rich || prototype_column == Some(column_style)) =>
                     {
                         t
                     }
@@ -1015,22 +903,13 @@ fn read_row<'a, 'input>(
                         // Rich text of a cell without its own or a row
                         // style resolves its runs over each column's
                         // default style: a later column with another
-                        // style reads them again (charged as they are).
+                        // style reads them again.
                         let value = if rich && c != col {
-                            cell_value(
-                                ctx,
-                                cell,
-                                own_style,
-                                row_default,
-                                c,
-                                columns,
-                                column_default,
-                            )?
-                            .0
+                            cell_value(ctx, cell, explicit, c, columns)?.value
                         } else {
                             copy_value(&value)
                         };
-                        Template::new(Cell {
+                        Rc::new(Cell {
                             col,
                             row: first,
                             value,
@@ -1040,37 +919,36 @@ fn read_row<'a, 'input>(
                         })
                     }
                 };
-                for c in c..=segment_last {
-                    // Admitted before the copy is made.
-                    ctx.budget.cell(template.cost)?;
-                    templates.push((c, template.clone()));
+                for c in budget::each(c, segment_last) {
+                    budget::cell()?;
+                    templates.push((c?, template.clone()));
                 }
                 prototype = Some(template);
-                prototype_column = column_style.clone();
+                prototype_column = Some(column_style);
             }
             c = segment_last + 1;
         }
-        for c in col..=cell_last {
-            if covered {
-                break;
-            }
+        // §19.676 / §19.678 spans: a merge from each cell of the block. The
+        // span is read once; a cell without one costs nothing here.
+        if !covered {
             let span_cols = repeat(cell, "number-columns-spanned")?;
             let span_rows = repeat(cell, "number-rows-spanned")?;
             if span_cols > 1 || span_rows > 1 {
-                for row in first..=last {
-                    ctx.budget.grow(&walker.merges)?;
-                    walker.merges.push(MergeCell {
-                        top: row,
-                        left: c,
-                        bottom: row.saturating_add(span_rows - 1).min(MAX_ROWS),
-                        right: c.saturating_add(span_cols - 1).min(MAX_COLS),
-                    });
+                for row in budget::each(first, last) {
+                    let row = row?;
+                    for c in budget::each(col, cell_last) {
+                        let c = c?;
+                        walker.merges.push(MergeCell {
+                            top: row,
+                            left: c,
+                            bottom: row.saturating_add(span_rows - 1).min(MAX_ROWS),
+                            right: c.saturating_add(span_cols - 1).min(MAX_COLS),
+                        });
+                    }
                 }
             }
         }
         if let Some(name) = cell.attribute((NS_TABLE, "content-validation-name")) {
-            ctx.budget.bytes(name.len())?;
-            ctx.budget.grow(&walker.validations)?;
             walker.validations.push((
                 name.to_string(),
                 xlsx_model::CellRange {
@@ -1082,38 +960,28 @@ fn read_row<'a, 'input>(
             ));
         }
         // Links and annotations are cell content: every repeated cell of
-        // the block carries them (§19.675 / §19.680), each admitted to the
-        // budget before it is stored. Drawings are anchored once, at the
-        // block's first cell, as LibreOffice anchors them.
+        // the block carries its own copy (§19.675 / §19.680), one step
+        // each. Drawings are anchored once, at the block's first cell, as
+        // LibreOffice anchors them.
         if !covered || cell.children().any(|n| n.is_element()) {
             let link = cell
                 .descendants()
                 .find(|n| xml::is(*n, NS_TEXT, "a"))
-                .and_then(|a| a.attribute((NS_XLINK, "href")));
-            let annotation = cell
+                .and_then(|a| a.attribute((NS_XLINK, "href")))
+                .map(|href| hyperlink(col, first, href));
+            let note = match cell
                 .children()
-                .find(|n| xml::is(*n, NS_OFFICE, "annotation"));
-            if link.is_some() || annotation.is_some() {
-                // One prototype each, built once (a note's text with its
-                // `text:s` spaces expanded); every copy is admitted at the
-                // prototype's exact retained size before it is made. A
-                // note's cell reference is also kept in `comment_refs`.
-                let link = link.map(|href| hyperlink(col, first, href));
-                // Each copy's owned heap (its slot is admitted as it is
-                // pushed); a note's reference is kept twice (the note and
-                // `comment_refs`, one `String` each).
-                let link_cost = link.as_ref().map_or(0, heap_size);
-                let note = annotation.map(|a| comment(a, super::paragraph_text(a), first, col));
-                let note_cost = note.as_ref().map_or(0, |n| {
-                    heap_size(n)
-                        .saturating_add(std::mem::size_of::<String>())
-                        .saturating_add(2 * MAX_CELL_REF_BYTES)
-                });
-                for row in first..=last {
-                    for c in col..=cell_last {
+                .find(|n| xml::is(*n, NS_OFFICE, "annotation"))
+            {
+                Some(a) => Some(comment(a, super::paragraph_text(a)?, first, col)),
+                None => None,
+            };
+            if link.is_some() || note.is_some() {
+                for row in budget::each(first, last) {
+                    let row = row?;
+                    for c in budget::each(col, cell_last) {
+                        let c = c?;
                         if let Some(link) = &link {
-                            ctx.budget.bytes(link_cost)?;
-                            ctx.budget.grow(&walker.hyperlinks)?;
                             walker.hyperlinks.push(Hyperlink {
                                 col: c,
                                 row,
@@ -1121,8 +989,6 @@ fn read_row<'a, 'input>(
                             });
                         }
                         if let Some(note) = &note {
-                            ctx.budget.bytes(note_cost)?;
-                            ctx.budget.grow(&walker.comments)?;
                             walker.comments.push(xlsx_model::XlsxComment {
                                 cell_ref: format!("{}{}", column_letters(c), row),
                                 ..note.clone()
@@ -1132,6 +998,7 @@ fn read_row<'a, 'input>(
                 }
             }
             for child in cell.children().filter(|n| is_drawing(*n)) {
+                budget::tick(1)?;
                 walker.anchored.push(Anchored {
                     node: child,
                     cell: Some((first - 1, col - 1)),
@@ -1141,20 +1008,16 @@ fn read_row<'a, 'input>(
         col = cell_last + 1;
     }
     if !templates.is_empty() {
-        for row in first..=last {
-            // The first occurrence was admitted with its templates; each
-            // repeat is admitted before it is copied.
-            if row != first {
-                for (_, t) in &templates {
-                    ctx.budget.cell(t.cost)?;
+        for row in budget::each(first, last) {
+            let row = row?;
+            let mut cells: Vec<Cell> = Vec::with_capacity(templates.len());
+            for (c, template) in &templates {
+                // The first occurrence was counted with its templates.
+                if row != first {
+                    budget::cell()?;
                 }
+                cells.push(copy_cell(template, row, *c));
             }
-            // The row record and its growth slot.
-            ctx.budget.grow(&walker.rows)?;
-            let cells: Vec<Cell> = templates
-                .iter()
-                .map(|(c, t)| copy_cell(&t.cell, row, *c))
-                .collect();
             walker.rows.push(Row {
                 index: row,
                 height: None,
@@ -1172,13 +1035,12 @@ fn read_row<'a, 'input>(
 /// Note the cells (rows × columns) whose style carries `style:map`
 /// conditions, extending the style's range from the rows above.
 fn record_style_map(
-    ctx: &mut Context,
     walker: &mut RowWalker<'_, '_>,
-    style: &str,
+    style: CellStyle,
     (top, left): (u32, u32),
     (bottom, right): (u32, u32),
 ) -> Result<(), String> {
-    let key = (style.to_string(), left, right);
+    let key = (style, left, right);
     if let Some(index) = walker.style_map_last.get(&key) {
         let range = &mut walker.style_maps[*index].1;
         if range.bottom.saturating_add(1) == top {
@@ -1186,16 +1048,10 @@ fn record_style_map(
             return Ok(());
         }
     }
-    // The range and its index key each hold the style name.
-    ctx.budget.bytes(
-        (2 * style.len())
-            .saturating_add(hash_entry_bytes::<(String, u32, u32), usize>(style.len()))
-            .saturating_add(style.len()),
-    )?;
-    ctx.budget.grow(&walker.style_maps)?;
+    budget::tick(1)?;
     walker.style_map_last.insert(key, walker.style_maps.len());
     walker.style_maps.push((
-        style.to_string(),
+        style,
         xlsx_model::CellRange {
             top,
             left,
@@ -1206,14 +1062,31 @@ fn record_style_map(
     Ok(())
 }
 
+/// The format of a formula result LibreOffice displays as nothing: the
+/// numeric zero stays a number and its zero section is empty (§18.8.30).
+const HIDDEN_ZERO_CODE: &str = "0;-0;;@";
+
 /// A cell whose value type has no matching data style is shown as
 /// LibreOffice shows that type (§19.385): dates and times with the default
 /// ISO-like date / time formats, percentages with `0%` decimals of the value.
+///
+/// A formula whose cached result is the number 0 with an empty displayed
+/// paragraph is a result LibreOffice shows as nothing: an empty-cell or
+/// empty-string result (a lookup that lands on an empty cell,
+/// `IFERROR(…;"")` kept from a SpreadsheetML import), or a zero its format
+/// hides. Measured with LibreOffice 26.8: all three are written as
+/// `office:value="0"` with `<text:p/>`, while a displayed zero is written
+/// with `<text:p>0</text:p>`. The value stays the number LibreOffice
+/// calculates with; only its zero section is emptied.
 fn adjust_xf_for_value(
     xfs: &mut XfBuilder,
     xf: u32,
     cell: roxmltree::Node<'_, '_>,
+    shown_empty_zero: bool,
 ) -> Result<u32, String> {
+    if shown_empty_zero {
+        return xfs.with_num_fmt(xf, HIDDEN_ZERO_CODE, DataKind::Number);
+    }
     let kind = xfs.kind(xf);
     match cell.attribute((NS_OFFICE, "value-type")) {
         Some("date") if !matches!(kind, Some(DataKind::Date) | Some(DataKind::Time)) => {
@@ -1233,6 +1106,22 @@ fn adjust_xf_for_value(
         Some("percentage") if kind.is_none() => xfs.with_num_fmt(xf, "0%", DataKind::Percentage),
         _ => Ok(xf),
     }
+}
+
+/// Whether the cell has displayed paragraphs and they hold nothing.
+fn paragraphs_show_nothing(cell: roxmltree::Node<'_, '_>) -> bool {
+    let mut paragraphs = cell
+        .children()
+        .filter(|n| xml::is(*n, NS_TEXT, "p") || xml::is(*n, NS_TEXT, "h"))
+        .peekable();
+    paragraphs.peek().is_some()
+        && paragraphs.all(|p| {
+            !p.descendants().any(|n| {
+                n.is_text() && n.text().is_some_and(|t| !t.is_empty())
+                    || n.tag_name().namespace() == Some(NS_TEXT)
+                        && matches!(n.tag_name().name(), "s" | "tab" | "line-break")
+            })
+        })
 }
 
 fn is_drawing(node: roxmltree::Node<'_, '_>) -> bool {
@@ -1294,16 +1183,25 @@ fn comment(
     }
 }
 
-/// The value of a cell (§19.385 value types) and its formula.
+/// What one authored cell holds.
+struct CellRead {
+    value: CellValue,
+    formula: Option<String>,
+    /// A formula's numeric zero that LibreOffice displays as nothing (see
+    /// [`adjust_xf_for_value`]).
+    shown_empty_zero: bool,
+}
+
+/// The value of a cell (§19.385 value types) and its formula. `explicit`
+/// is the style the cell or its row names; without one the cell at `col`
+/// takes its column's default.
 fn cell_value(
     ctx: &mut Context,
     cell: roxmltree::Node<'_, '_>,
-    own_style: Option<&str>,
-    row_default: Option<&str>,
+    explicit: Option<CellStyle>,
     col: u32,
     columns: &[Column],
-    column_default: &ColumnDefault,
-) -> Result<(CellValue, Option<String>), String> {
+) -> Result<CellRead, String> {
     let formula = cell
         .attribute((NS_TABLE, "formula"))
         .map(super::extras::convert_formula);
@@ -1313,18 +1211,31 @@ fn cell_value(
         cell.attribute((NS_OFFICE, name))
             .and_then(|v| v.trim().parse::<f64>().ok())
     };
+    let read = |value: CellValue, formula: Option<String>| CellRead {
+        value,
+        formula,
+        shown_empty_zero: false,
+    };
     if calc_type == Some("error") {
-        let error = super::paragraph_text(cell);
-        return Ok((CellValue::Error { error }, formula));
+        let error = super::paragraph_text(cell)?;
+        return Ok(read(CellValue::Error { error }, formula));
     }
     let value = match value_type {
         Some("float") | Some("percentage") | Some("currency") => match number("value") {
-            Some(n) => CellValue::Number { number: n },
+            Some(n) => {
+                let shown_empty_zero =
+                    n == 0.0 && formula.is_some() && paragraphs_show_nothing(cell);
+                return Ok(CellRead {
+                    value: CellValue::Number { number: n },
+                    formula,
+                    shown_empty_zero,
+                });
+            }
             None => CellValue::Empty,
         },
         Some("date") => match cell
             .attribute((NS_OFFICE, "date-value"))
-            .and_then(|v| date_serial(v, ctx.null_date_shift, ctx.date1904))
+            .and_then(|v| date_serial(v, ctx.date1904))
         {
             Some(n) => CellValue::Number { number: n },
             None => CellValue::Empty,
@@ -1348,17 +1259,13 @@ fn cell_value(
             if let Some(text) = cell.attribute((NS_OFFICE, "string-value")) {
                 text_value(text.to_string(), None)
             } else if has_paragraphs {
-                let (column_xf, column_style) = column_default(col, columns);
-                let _ = column_xf;
-                let styles = CellStyles {
-                    cell: own_style,
-                    row: row_default,
-                    column: column_style.as_deref(),
-                };
+                let style = explicit.unwrap_or_else(|| {
+                    column_at(columns, col).map_or(CellStyle::Default, Column::cell_style)
+                });
                 let xf = ctx
                     .xfs
-                    .xf_for(&ctx.store, &mut ctx.data, &ctx.faces, styles)?;
-                let (text, runs) = rich_text(ctx, cell, xf, styles)?;
+                    .xf_for(&ctx.store, &mut ctx.data, &ctx.faces, style)?;
+                let (text, runs) = rich_text(ctx, cell, xf, style)?;
                 if value_type.is_none() && text.is_empty() {
                     CellValue::Empty
                 } else {
@@ -1372,20 +1279,7 @@ fn cell_value(
         }
         Some(_) => CellValue::Empty,
     };
-    // LibreOffice stores a formula's empty-string result as the number 0
-    // with an empty displayed paragraph; it shows nothing.
-    let value = match value {
-        CellValue::Number { number }
-            if number == 0.0
-                && formula.is_some()
-                && cell.children().any(|p| xml::is(p, NS_TEXT, "p"))
-                && super::paragraph_text(cell).is_empty() =>
-        {
-            text_value(String::new(), None)
-        }
-        other => other,
-    };
-    Ok((value, formula))
+    Ok(read(value, formula))
 }
 
 fn text_value(text: String, runs: Option<Vec<Run>>) -> CellValue {
@@ -1404,27 +1298,26 @@ fn text_value(text: String, runs: Option<Vec<Run>>) -> CellValue {
 /// per span. A run's font is that, then the default style of the
 /// innermost context's family (the initial family), then the table-cell
 /// default where LibreOffice keeps the document font. Each run's font is a
-/// copy (its family name included), admitted as it is made.
+/// copy (its family name included).
 fn rich_text(
     ctx: &mut Context,
     cell: roxmltree::Node<'_, '_>,
     xf: u32,
-    styles: CellStyles<'_>,
+    style: CellStyle,
 ) -> Result<(String, Option<Vec<Run>>), String> {
     let cell_font = ctx.xfs.font_of_xf(xf);
-    let name = styles
-        .cell
-        .or(styles.row)
-        .or(styles.column)
-        .unwrap_or("Default");
     let cell_default: Vec<&crate::odf_props::Style> =
         ctx.store.default_style("table-cell").into_iter().collect();
     let document_font = super::cells::font_of(&cell_default, &ctx.faces, None);
     // A percentage of the cell's style scales the table-cell default, as
     // the cell's own font does, whatever context its text sits in.
     let cell_partial = Rc::new(TextContext {
-        set: PartialFont::of(&ctx.store.chain_own("table-cell", name), &ctx.faces)
-            .with_size_base(document_font.size),
+        set: PartialFont::of(
+            &ctx.store
+                .chain_own_of("table-cell", style.style(&ctx.store)),
+            &ctx.faces,
+        )
+        .with_size_base(document_font.size),
         family: "table-cell",
     });
     // A paragraph without a style of its own keeps the cell's formatting:
@@ -1437,6 +1330,7 @@ fn rich_text(
         .children()
         .filter(|n| xml::is(*n, NS_TEXT, "p") || xml::is(*n, NS_TEXT, "h"))
     {
+        budget::tick(1)?;
         if !first {
             push_run(&mut runs, "\n", &None);
         }
@@ -1444,7 +1338,7 @@ fn rich_text(
         let paragraph = p
             .attribute((NS_TEXT, "style-name"))
             .and_then(|name| text_context(ctx, "paragraph", name, &cell_partial));
-        collect_runs(ctx, p, &paragraph, &cell_partial, &mut runs);
+        collect_runs(ctx, p, &paragraph, &cell_partial, &mut runs)?;
     }
     let text: String = runs.iter().map(|(t, _)| t.as_str()).collect();
     if runs.iter().all(|(_, context)| context.is_none()) {
@@ -1461,6 +1355,7 @@ fn rich_text(
     ];
     let mut out = Vec::with_capacity(runs.len());
     for (text, context) in runs {
+        budget::tick(1)?;
         let font = match &context {
             Some(context) => {
                 let default = defaults
@@ -1472,12 +1367,10 @@ fn rich_text(
             }
             None => super::cells::run_font_of(&cell_font),
         };
-        let run = Run {
+        out.push(Run {
             text,
             font: Some(font),
-        };
-        ctx.budget.bytes(super::retained_size(&run))?;
-        out.push(run);
+        });
     }
     Ok((text, Some(out)))
 }
@@ -1530,8 +1423,10 @@ fn collect_runs(
     context: &Option<Rc<TextContext>>,
     cell: &Rc<TextContext>,
     runs: &mut Vec<(String, Option<Rc<TextContext>>)>,
-) {
+) -> Result<(), String> {
     for child in node.children() {
+        // One step per node: each may add a run or a formatting context.
+        budget::tick(1)?;
         if child.is_text() {
             push_run(runs, child.text().unwrap_or(""), context);
             continue;
@@ -1540,12 +1435,11 @@ fn collect_runs(
             continue;
         }
         match child.tag_name().name() {
-            // `content.xml` is bounded by `check_space_runs` before reading.
-            "s" => push_run(
-                runs,
-                &" ".repeat(crate::odf_text::space_count(child)),
-                context,
-            ),
+            "s" => {
+                let mut spaces = String::new();
+                budget::push_spaces(&mut spaces, crate::odf_text::space_count(child))?;
+                push_run(runs, &spaces, context);
+            }
             "tab" => push_run(runs, "\t", context),
             "line-break" => push_run(runs, "\n", context),
             "span" => {
@@ -1554,12 +1448,13 @@ fn collect_runs(
                     .attribute((NS_TEXT, "style-name"))
                     .and_then(|name| text_context(ctx, "text", name, outer));
                 match inner {
-                    Some(inner) => collect_runs(ctx, child, &Some(inner), cell, runs),
-                    None => collect_runs(ctx, child, context, cell, runs),
+                    Some(inner) => collect_runs(ctx, child, &Some(inner), cell, runs)?,
+                    None => collect_runs(ctx, child, context, cell, runs)?,
                 }
             }
             "note" | "ruby-text" => {}
-            _ => collect_runs(ctx, child, context, cell, runs),
+            _ => collect_runs(ctx, child, context, cell, runs)?,
         }
     }
+    Ok(())
 }

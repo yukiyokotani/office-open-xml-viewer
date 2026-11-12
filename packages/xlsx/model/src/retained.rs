@@ -478,14 +478,27 @@ impl RetainedBytes for ShapeFill {
                 .saturating_add(bg.heap_bytes())
                 .saturating_add(preset.heap_bytes()),
             Self::Hatch {
-                color, background, ..
+                color,
+                background,
+                angle,
+                distance_pt,
+                lines,
             } => 0u64
                 .saturating_add(color.heap_bytes())
-                .saturating_add(background.heap_bytes()),
+                .saturating_add(background.heap_bytes())
+                .saturating_add(angle.heap_bytes())
+                .saturating_add(distance_pt.heap_bytes())
+                .saturating_add(lines.heap_bytes()),
+            // The layout, sizes and placement are inline values.
             Self::Image {
                 image_path,
                 mime_type,
-                ..
+                layout: _,
+                width: _,
+                height: _,
+                align: _,
+                offset: _,
+                shift: _,
             } => 0u64
                 .saturating_add(image_path.heap_bytes())
                 .saturating_add(mime_type.heap_bytes()),
@@ -659,100 +672,6 @@ impl RetainedBytes for ShapeTextRun {
     }
 }
 
-// Cell content and notes, as readers that copy repeated cells admit them.
-retained_struct!(Cell {
-    col,
-    row,
-    value,
-    style_index,
-    formula,
-    show_phonetic
-});
-
-impl RetainedBytes for CellValue {
-    fn heap_bytes(&self) -> u64 {
-        match self {
-            Self::Empty => 0,
-            Self::Text {
-                text,
-                runs,
-                phonetic_runs,
-                phonetic_pr,
-            } => 0u64
-                .saturating_add(text.heap_bytes())
-                .saturating_add(runs.heap_bytes())
-                .saturating_add(phonetic_runs.heap_bytes())
-                .saturating_add(phonetic_pr.heap_bytes()),
-            Self::Number { number } => number.heap_bytes(),
-            Self::Bool { bool } => bool.heap_bytes(),
-            Self::Error { error } => error.heap_bytes(),
-            Self::Shared { si } => si.heap_bytes(),
-        }
-    }
-}
-
-retained_struct!(Run { text, font });
-
-retained_struct!(RunFont {
-    bold,
-    italic,
-    underline,
-    strike,
-    size,
-    color,
-    name,
-    underline_style,
-    vert_align,
-    normal_color,
-    authored_color
-});
-
-retained_struct!(PhoneticRun { sb, eb, text });
-
-retained_struct!(PhoneticProperties {
-    font_id,
-    r#type,
-    alignment
-});
-
-retained_struct!(MergeCell {
-    top,
-    left,
-    bottom,
-    right
-});
-
-retained_struct!(XlsxComment {
-    kind,
-    cell_ref,
-    id,
-    person_id,
-    author,
-    date,
-    root_text,
-    text,
-    resolved,
-    replies
-});
-
-impl RetainedBytes for XlsxCommentKind {
-    fn heap_bytes(&self) -> u64 {
-        match self {
-            Self::Note | Self::Thread => 0,
-        }
-    }
-}
-
-retained_struct!(XlsxCommentReply {
-    id,
-    parent_id,
-    person_id,
-    author,
-    date,
-    text,
-    resolved
-});
-
 retained_struct!(TableColumnInfo {
     data_dxf_id,
     header_row_dxf_id,
@@ -780,182 +699,6 @@ retained_struct!(TableInfo {
     style_elements,
     style_error,
     columns
-});
-
-// A whole worksheet and the workbook styles, for readers that bound the
-// model they build (exhaustive: a new field fails to compile).
-retained_struct!(Worksheet {
-    name,
-    is_chart_sheet,
-    is_dialog_sheet,
-    rows,
-    col_widths,
-    col_width_ranges,
-    col_style_ranges,
-    row_heights,
-    col_outline_levels,
-    col_collapsed,
-    col_hidden,
-    default_col_width,
-    base_col_width,
-    default_col_width_is_ui,
-    default_row_height,
-    default_row_height_custom,
-    merge_cells,
-    freeze_rows,
-    freeze_cols,
-    conditional_formats,
-    images,
-    charts,
-    shape_groups,
-    show_zeros,
-    show_gridlines,
-    right_to_left,
-    outline_pr,
-    tab_color,
-    auto_filter,
-    hyperlinks,
-    comment_refs,
-    comments,
-    data_validations,
-    defined_names,
-    tables,
-    slicers,
-    pivot_tables,
-    pivot_diagnostics,
-    sparkline_groups,
-    default_font_family,
-    default_font_size,
-    default_font_bold,
-    default_font_italic,
-    normal_font_size,
-    theme_japanese_major_font,
-    theme_japanese_minor_font,
-    date1904,
-    parse_error
-});
-
-retained_struct!(Row {
-    index,
-    height,
-    custom_height,
-    cells,
-    outline_level,
-    collapsed,
-    hidden
-});
-
-retained_struct!(ColumnWidthRange { min, max, width });
-
-retained_struct!(ColumnStyleRange {
-    min,
-    max,
-    style_index
-});
-
-retained_struct!(OutlinePr {
-    summary_below,
-    summary_right
-});
-
-retained_struct!(SlicerAnchor {
-    from_col,
-    from_col_off,
-    from_row,
-    from_row_off,
-    to_col,
-    to_col_off,
-    to_row,
-    to_row_off,
-    caption,
-    items,
-    style
-});
-
-retained_struct!(SlicerItem { name, selected });
-
-retained_struct!(SlicerStyle {
-    whole,
-    header,
-    selected_item_with_data,
-    unselected_item_with_data
-});
-
-retained_struct!(SlicerElementStyle {
-    font_color,
-    font_size,
-    font_bold,
-    font_family,
-    fill_color,
-    border_color
-});
-
-retained_struct!(PivotDiagnostic { part, reason });
-
-impl RetainedBytes for PivotDiagnosticReason {
-    fn heap_bytes(&self) -> u64 {
-        0
-    }
-}
-
-retained_struct!(SparklineGroup {
-    kind,
-    markers,
-    high,
-    low,
-    first,
-    last,
-    negative,
-    display_x_axis,
-    display_empty_cells_as,
-    min_axis_type,
-    max_axis_type,
-    manual_min,
-    manual_max,
-    line_weight,
-    color_series,
-    color_negative,
-    color_axis,
-    color_markers,
-    color_first,
-    color_last,
-    color_high,
-    color_low,
-    sparklines
-});
-
-impl RetainedBytes for SparklineType {
-    fn heap_bytes(&self) -> u64 {
-        match self {
-            Self::Line | Self::Column | Self::Stem => 0,
-        }
-    }
-}
-
-retained_struct!(Sparkline { row, col, values });
-
-retained_struct!(Styles {
-    fonts,
-    fills,
-    borders,
-    cell_xfs,
-    num_fmts,
-    dxfs
-});
-
-retained_struct!(CellXf {
-    font_id,
-    fill_id,
-    border_id,
-    num_fmt_id,
-    align_h,
-    align_v,
-    wrap_text,
-    indent,
-    text_rotation,
-    shrink_to_fit,
-    reading_order,
-    own_font_color
 });
 
 #[cfg(test)]

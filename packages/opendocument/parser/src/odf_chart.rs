@@ -17,6 +17,7 @@
 //! let chart = odf_chart::read_chart_object(&package, "Object 1", None)?;
 //! ```
 
+use crate::budget::{self, Scope};
 use crate::odf_props::{
     self, get, get_element, hex_color, length_pt, percent, Style, StyleStore, NS_CHART,
 };
@@ -29,62 +30,23 @@ use ooxml_common::chart::{
 use std::collections::HashMap;
 
 /// Implementation bounds on one chart: series, points per range or series.
-/// A chart over any bound rejects the document.
+/// A chart over either rejects the document. Memory and work are bounded
+/// by the governor ([`crate::budget`]) the chart is read under.
 const MAX_SERIES: usize = 4096;
 const MAX_POINTS: usize = 1_048_576;
-/// Implementation bound on the local table's cells.
-const MAX_LOCAL_CELLS: usize = 4_000_000;
-/// Implementation bound on the data one chart holds while it is read and
-/// in its model: range cells, their text and the per-series copies.
-const MAX_CHART_BYTES: usize = 256 * 1024 * 1024;
-/// Accounted size of one held point (a cell value and its display text).
-const POINT_BYTES: usize = 48;
 
 /// The rejection of a chart over a bound.
 fn chart_limit(what: &str) -> String {
     crate::error::resource(what)
 }
 
-/// Resource accounting of one chart, charged before data is copied.
-pub struct ChartBudget {
-    bytes: std::cell::Cell<usize>,
-    limit: usize,
-}
-
-impl Default for ChartBudget {
-    fn default() -> Self {
-        Self::with_limit(MAX_CHART_BYTES)
+/// Reject a range of `count` points when it is over the bound on the points
+/// of one range; resolvers call it before they walk a range.
+pub fn check_points(count: u64) -> Result<(), String> {
+    if count > MAX_POINTS as u64 {
+        return Err(chart_limit("chart point"));
     }
-}
-
-impl ChartBudget {
-    /// A budget of at most `limit` bytes (never above the per-chart bound):
-    /// a reader that keeps several charts passes what it has left.
-    pub fn with_limit(limit: usize) -> Self {
-        Self {
-            bytes: std::cell::Cell::new(0),
-            limit: limit.min(MAX_CHART_BYTES),
-        }
-    }
-
-    /// Admit `count` points of one range (each also charged
-    /// [`POINT_BYTES`]).
-    pub fn points(&self, count: usize) -> Result<(), String> {
-        if count > MAX_POINTS {
-            return Err(chart_limit("chart point"));
-        }
-        self.bytes(count.saturating_mul(POINT_BYTES))
-    }
-
-    /// Admit `bytes` of chart data.
-    pub fn bytes(&self, bytes: usize) -> Result<(), String> {
-        let total = self.bytes.get().saturating_add(bytes);
-        self.bytes.set(total);
-        if total > self.limit {
-            return Err(chart_limit("chart data"));
-        }
-        Ok(())
-    }
+    Ok(())
 }
 
 /// LibreOffice's default series palette (used for series without a fill).
@@ -105,9 +67,9 @@ pub enum CellData {
 pub trait RangeResolver {
     /// The cells of an ODF range address (`Sheet1.A1:Sheet1.A9`) in row-major
     /// order, or `None` when the address names no readable range. The
-    /// resolver admits the range's points and text through `budget` before
-    /// it copies them, and passes a rejection on.
-    fn cells(&self, address: &str, budget: &ChartBudget) -> Result<Option<Vec<CellData>>, String>;
+    /// resolver rejects a range over the point bound ([`check_points`])
+    /// and walks its cells through [`crate::budget::each`].
+    fn cells(&self, address: &str) -> Result<Option<Vec<CellData>>, String>;
     /// Hidden flags of the same cells, when known.
     fn hidden(&self, address: &str) -> Option<Vec<bool>>;
 }
@@ -119,22 +81,13 @@ pub fn object_dir(reference: &str) -> &str {
 }
 
 /// Read the chart object stored under `object_dir` (`Object 1`). `Ok(None)`
-/// when the object is not a chart (another embedded document type).
+/// when the object is not a chart (another embedded document type). Inside
+/// a reader's governed scope the chart is part of that read; on its own it
+/// is governed by a scope of its own.
 pub fn read_chart_object(
     package: &OdfPackage,
     object_dir: &str,
     resolver: Option<&dyn RangeResolver>,
-) -> Result<Option<ChartModel>, String> {
-    read_chart_object_within(package, object_dir, resolver, MAX_CHART_BYTES)
-}
-
-/// [`read_chart_object`] holding at most `limit` bytes of chart data while
-/// it reads (and never more than the per-chart bound).
-pub fn read_chart_object_within(
-    package: &OdfPackage,
-    object_dir: &str,
-    resolver: Option<&dyn RangeResolver>,
-    limit: usize,
 ) -> Result<Option<ChartModel>, String> {
     let dir = self::object_dir(object_dir);
     let content_path = format!("{dir}/content.xml");
@@ -148,7 +101,7 @@ pub fn read_chart_object_within(
     } else {
         None
     };
-    read_chart_document_within(&content, styles.as_deref(), resolver, limit)
+    read_chart_document(&content, styles.as_deref(), resolver)
 }
 
 /// Read a chart from the object's `content.xml` (and `styles.xml`) text.
@@ -157,48 +110,52 @@ pub fn read_chart_document(
     styles: Option<&str>,
     resolver: Option<&dyn RangeResolver>,
 ) -> Result<Option<ChartModel>, String> {
-    read_chart_document_within(content, styles, resolver, MAX_CHART_BYTES)
-}
-
-fn read_chart_document_within(
-    content: &str,
-    styles: Option<&str>,
-    resolver: Option<&dyn RangeResolver>,
-    limit: usize,
-) -> Result<Option<ChartModel>, String> {
     let content_doc = xml::parse(content)?;
     let styles_doc = match styles {
         Some(text) => Some(xml::parse(text)?),
         None => None,
     };
-    crate::odf_text::check_style_values(content_doc.root_element())?;
-    if let Some(doc) = &styles_doc {
-        crate::odf_text::check_style_values(doc.root_element())?;
+    let scope = Scope::enter(budget::MAX_MODEL_BYTES);
+    let chart = read_chart(
+        content_doc.root_element(),
+        styles_doc.as_ref().map(|doc| doc.root_element()),
+        resolver,
+    )?;
+    scope.finish()?;
+    Ok(chart)
+}
+
+fn read_chart(
+    root: roxmltree::Node<'_, '_>,
+    styles_root: Option<roxmltree::Node<'_, '_>>,
+    resolver: Option<&dyn RangeResolver>,
+) -> Result<Option<ChartModel>, String> {
+    crate::odf_text::check_style_values(root)?;
+    if let Some(styles_root) = styles_root {
+        crate::odf_text::check_style_values(styles_root)?;
     }
     let mut store = StyleStore::default();
     let mut data = DataStyles::default();
     let mut faces = HashMap::new();
-    if let Some(doc) = &styles_doc {
-        odf_props::font_faces(doc.root_element(), &mut faces);
-        for child in doc.root_element().children().filter(|n| n.is_element()) {
+    if let Some(styles_root) = styles_root {
+        odf_props::font_faces(styles_root, &mut faces)?;
+        for child in styles_root.children().filter(|n| n.is_element()) {
             if xml::is(child, NS_OFFICE, "styles") {
                 store.add(child, false)?;
-                data.add(child);
+                data.add(child)?;
             }
         }
     }
-    let root = content_doc.root_element();
-    odf_props::font_faces(root, &mut faces);
+    odf_props::font_faces(root, &mut faces)?;
     for child in root
         .children()
         .filter(|n| xml::is(*n, NS_OFFICE, "automatic-styles"))
     {
         store.add(child, true)?;
-        data.add(child);
+        data.add(child)?;
     }
     store.check_chains()?;
     data.check()?;
-    crate::odf_text::check_space_runs(root)?;
     let Some(chart) = root
         .children()
         .find(|n| xml::is(*n, NS_OFFICE, "body"))
@@ -207,18 +164,13 @@ fn read_chart_document_within(
     else {
         return Ok(None);
     };
-    let budget = ChartBudget::with_limit(limit);
-    let local = LocalTable::read(chart, &budget)?;
+    let local = LocalTable::read(chart)?;
     let reader = Reader {
         store: &store,
         faces: &faces,
         local,
-        budget,
         resolver,
-        dashes: styles_doc
-            .as_ref()
-            .map(|doc| stroke_dashes(doc.root_element()))
-            .unwrap_or_default(),
+        dashes: styles_root.map(stroke_dashes).unwrap_or_default(),
     };
     reader.chart(chart, &mut data).map(Some)
 }
@@ -227,19 +179,33 @@ struct Reader<'a> {
     store: &'a StyleStore,
     faces: &'a HashMap<String, String>,
     local: LocalTable,
-    budget: ChartBudget,
     resolver: Option<&'a dyn RangeResolver>,
     /// `draw:stroke-dash` definitions (§16.41) as DrawingML presets.
     dashes: HashMap<String, &'static str>,
 }
 
 /// The chart's `local-table` (§11.1 data table): a grid with the header
-/// row and column included, plus each cell's `svg:desc` source range.
+/// row and column included, plus each cell's `svg:desc` source range. Row
+/// and column repeats (§19.675 / §19.680) are kept as runs, never expanded:
+/// the table costs what its XML holds, whatever its repeat counts.
 #[derive(Default)]
 struct LocalTable {
-    cells: Vec<Vec<(CellData, String)>>,
+    rows: Vec<RowRun>,
     /// Source range address → (column, first data row).
     sources: HashMap<String, (usize, usize)>,
+}
+
+/// Grid rows up to `end` (exclusive) that repeat one authored row.
+struct RowRun {
+    end: usize,
+    cells: Vec<CellRun>,
+}
+
+/// Grid columns up to `end` (exclusive) that repeat one authored cell.
+struct CellRun {
+    end: usize,
+    value: CellData,
+    text: String,
 }
 
 /// A table repeat count (§19.675 / §19.680, a positive integer; absent or
@@ -249,35 +215,31 @@ fn repeat_count(node: roxmltree::Node<'_, '_>, name: &str) -> Result<usize, Stri
 }
 
 impl LocalTable {
-    /// Read the grid with its row and column repeats (§19.675 / §19.680)
-    /// expanded; covered cells keep their grid positions (empty). A table
-    /// over [`MAX_LOCAL_CELLS`] or the chart's byte budget rejects the
-    /// document before its cells are copied.
-    fn read(chart: roxmltree::Node<'_, '_>, budget: &ChartBudget) -> Result<Self, String> {
+    /// Read the grid; covered cells keep their grid positions (empty).
+    fn read(chart: roxmltree::Node<'_, '_>) -> Result<Self, String> {
         let mut table = Self::default();
         let Some(node) = chart.children().find(|n| xml::is(*n, NS_TABLE, "table")) else {
             return Ok(table);
         };
-        let mut count = 0usize;
+        let mut next_row = 0usize;
         for row in node
             .descendants()
             .filter(|n| xml::is(*n, NS_TABLE, "table-row"))
         {
+            budget::tick(1)?;
             let row_repeat = repeat_count(row, "number-rows-repeated")?;
-            let mut cells: Vec<(CellData, String)> = Vec::new();
+            let mut cells: Vec<CellRun> = Vec::new();
+            let mut next_col = 0usize;
             for cell in row.children().filter(|n| {
                 xml::is(*n, NS_TABLE, "table-cell") || xml::is(*n, NS_TABLE, "covered-table-cell")
             }) {
+                budget::tick(1)?;
                 let repeat = repeat_count(cell, "number-columns-repeated")?;
-                let row_cells = cells.len().saturating_add(repeat);
-                if count.saturating_add(row_cells.saturating_mul(row_repeat)) > MAX_LOCAL_CELLS {
-                    return Err(chart_limit("chart data table"));
-                }
                 let covered = xml::is(cell, NS_TABLE, "covered-table-cell");
                 let text = if covered {
                     String::new()
                 } else {
-                    crate::odf_text::paragraph_text(cell)
+                    crate::odf_text::paragraph_text(cell)?
                 };
                 let value = match cell.attribute((NS_OFFICE, "value-type")) {
                     _ if covered => CellData::Empty,
@@ -289,86 +251,65 @@ impl LocalTable {
                     _ if !text.is_empty() => CellData::Text(text.clone()),
                     _ => CellData::Empty,
                 };
-                // Every copy holds the display text, and a text value too.
-                let copies = repeat.saturating_mul(row_repeat);
-                let text_bytes = if matches!(value, CellData::Text(_)) {
-                    text.len().saturating_mul(2)
-                } else {
-                    text.len()
-                };
-                budget.bytes(copies.saturating_mul(POINT_BYTES.saturating_add(text_bytes)))?;
                 let desc = cell
                     .descendants()
                     .find(|n| xml::is(*n, crate::xml::NS_SVG, "desc"))
                     .and_then(|n| n.text());
                 if let Some(desc) = desc {
                     for range in crate::odf_text::split_addresses(desc) {
+                        budget::tick(1)?;
                         table
                             .sources
-                            .insert(range.to_string(), (cells.len(), table.cells.len()));
+                            .insert(range.to_string(), (next_col, next_row));
                     }
                 }
-                for _ in 0..repeat {
-                    cells.push((value.clone(), text.clone()));
-                }
+                next_col = next_col.saturating_add(repeat);
+                cells.push(CellRun {
+                    end: next_col,
+                    value,
+                    text,
+                });
             }
-            // An empty row still occupies a grid row.
-            count = count.saturating_add(cells.len().max(1).saturating_mul(row_repeat));
-            if count > MAX_LOCAL_CELLS {
-                return Err(chart_limit("chart data table"));
-            }
-            budget
-                .bytes(row_repeat.saturating_mul(std::mem::size_of::<Vec<(CellData, String)>>()))?;
-            for _ in 1..row_repeat {
-                table.cells.push(cells.clone());
-            }
-            table.cells.push(cells);
+            // An empty row still occupies its grid rows.
+            next_row = next_row.saturating_add(row_repeat);
+            table.rows.push(RowRun {
+                end: next_row,
+                cells,
+            });
         }
         Ok(table)
     }
 
-    fn get(&self, row: usize, col: usize) -> Option<&(CellData, String)> {
-        self.cells.get(row)?.get(col)
+    fn get(&self, row: usize, col: usize) -> Option<&CellRun> {
+        let row = self
+            .rows
+            .get(self.rows.partition_point(|run| run.end <= row))?;
+        row.cells
+            .get(row.cells.partition_point(|run| run.end <= col))
     }
 
-    /// A cell copied out of the table, its text charged to `budget`.
-    fn copy(
-        &self,
-        row: usize,
-        col: usize,
-        budget: &ChartBudget,
-    ) -> Result<(CellData, String), String> {
+    /// A cell copied out of the table (empty outside it).
+    fn copy(&self, row: usize, col: usize) -> (CellData, String) {
         match self.get(row, col) {
-            Some(cell) => {
-                let text = match &cell.0 {
-                    CellData::Text(value) => value.len(),
-                    _ => 0,
-                };
-                budget.bytes(text.saturating_add(cell.1.len()))?;
-                Ok(cell.clone())
-            }
-            None => Ok((CellData::Empty, String::new())),
+            Some(cell) => (cell.value.clone(), cell.text.clone()),
+            None => (CellData::Empty, String::new()),
         }
     }
 
     /// The local-table cells of a range on `local-table` (A1 = top-left).
-    fn range(
-        &self,
-        address: &str,
-        budget: &ChartBudget,
-    ) -> Result<Option<Vec<(CellData, String)>>, String> {
+    fn range(&self, address: &str) -> Result<Option<Vec<(CellData, String)>>, String> {
         let Some((sheet, (r1, c1), (r2, c2))) = crate::odf_text::parse_range(address) else {
             return Ok(None);
         };
         if sheet.as_deref().is_some_and(|s| s != "local-table") {
             return Ok(None);
         }
-        let count = (u64::from(r2 - r1) + 1).saturating_mul(u64::from(c2 - c1) + 1);
-        budget.points(usize::try_from(count).unwrap_or(usize::MAX))?;
-        let mut out = Vec::with_capacity(count as usize);
-        for row in r1..=r2 {
-            for col in c1..=c2 {
-                out.push(self.copy(row as usize - 1, col as usize - 1, budget)?);
+        check_points((u64::from(r2 - r1) + 1).saturating_mul(u64::from(c2 - c1) + 1))?;
+        let mut out = Vec::new();
+        for row in budget::each(r1, r2) {
+            let row = row?;
+            for col in budget::each(c1, c2) {
+                out.push(self.copy(row as usize - 1, col? as usize - 1));
             }
         }
         Ok(Some(out))
@@ -376,30 +317,25 @@ impl LocalTable {
 
     /// Cached cells of an external source range, via the `svg:desc`
     /// annotations LibreOffice writes on the first cell of each column.
-    fn cached(
-        &self,
-        address: &str,
-        budget: &ChartBudget,
-    ) -> Result<Option<Vec<(CellData, String)>>, String> {
+    fn cached(&self, address: &str) -> Result<Option<Vec<(CellData, String)>>, String> {
         let Some(&(col, row)) = self.sources.get(address) else {
             return Ok(None);
         };
         let Some((_, (r1, c1), (r2, c2))) = crate::odf_text::parse_range(address) else {
             return Ok(None);
         };
-        let count = (u64::from(r2 - r1) + 1).max(u64::from(c2 - c1) + 1);
-        let count = usize::try_from(count).unwrap_or(usize::MAX);
-        // Admitted before the cells are collected.
-        budget.points(count)?;
+        let count = (r2 - r1).max(c2 - c1);
+        check_points(u64::from(count) + 1)?;
         let horizontal = r1 == r2 && c2 > c1;
-        let mut out = Vec::with_capacity(count);
-        for i in 0..count {
+        let mut out = Vec::new();
+        for i in budget::each(0, count) {
+            let i = i? as usize;
             let (r, c) = if horizontal {
-                (row, col + i)
+                (row, col.saturating_add(i))
             } else {
-                (row + i, col)
+                (row.saturating_add(i), col)
             };
-            out.push(self.copy(r, c, budget)?);
+            out.push(self.copy(r, c));
         }
         Ok(Some(out))
     }
@@ -493,30 +429,32 @@ impl Reader<'_> {
     }
 
     /// The text of a title-like element (`text:p` children).
-    fn text(node: roxmltree::Node<'_, '_>) -> String {
+    fn text(node: roxmltree::Node<'_, '_>) -> Result<String, String> {
         crate::odf_text::paragraph_text(node)
     }
 
     /// Resolve a range: the resolver, else the local table. A range over
-    /// [`MAX_POINTS`] or the chart's byte budget rejects the document.
+    /// [`MAX_POINTS`] rejects the document.
     fn range(&self, address: &str) -> Result<Vec<(CellData, String)>, String> {
         // Several space-separated ranges are concatenated (§18.3.5).
         let mut out = Vec::new();
         for part in crate::odf_text::split_addresses(address) {
+            budget::tick(1)?;
             let local_first =
                 part.starts_with("local-table.") || part.starts_with("'local-table'.");
             let resolved = if local_first {
-                self.local.range(part, &self.budget)?
+                self.local.range(part)?
             } else {
                 let cells = match self.resolver {
-                    Some(resolver) => resolver.cells(part, &self.budget)?,
+                    Some(resolver) => resolver.cells(part)?,
                     None => None,
                 };
                 match cells {
                     Some(cells) => {
-                        let cached = self.local.cached(part, &self.budget)?;
-                        let mut resolved = Vec::with_capacity(cells.len());
+                        let cached = self.local.cached(part)?;
+                        let mut resolved = Vec::new();
                         for (i, cell) in cells.into_iter().enumerate() {
+                            budget::tick(1)?;
                             // Display text from the cache when the source
                             // value is a number (formatted categories).
                             let text = match &cell {
@@ -529,14 +467,13 @@ impl Reader<'_> {
                                     .unwrap_or_else(|| number_text(*n)),
                                 CellData::Empty => String::new(),
                             };
-                            self.budget.bytes(text.len())?;
                             resolved.push((cell, text));
                         }
                         Some(resolved)
                     }
-                    None => match self.local.cached(part, &self.budget)? {
+                    None => match self.local.cached(part)? {
                         Some(cached) => Some(cached),
-                        None => self.local.range(part, &self.budget)?,
+                        None => self.local.range(part)?,
                     },
                 }
             };
@@ -667,7 +604,7 @@ impl Reader<'_> {
         model.chart_border_hidden = area.line_hidden.then_some(true);
         // Title.
         if let Some(title) = chart.children().find(|n| xml::is(*n, NS_CHART, "title")) {
-            let text = Self::text(title);
+            let text = Self::text(title)?;
             let font = self.font(&self.chain(title));
             let span_font = title
                 .descendants()
@@ -740,13 +677,19 @@ impl Reader<'_> {
                     .or(Some(50));
             }
         }
-        self.axes(plot, &mut model, data);
+        self.axes(plot, &mut model, data)?;
         self.series(plot, &plot_chain, class, primary, &mut model, data)?;
         Ok(model)
     }
 
-    fn axes(&self, plot: roxmltree::Node<'_, '_>, model: &mut ChartModel, data: &mut DataStyles) {
+    fn axes(
+        &self,
+        plot: roxmltree::Node<'_, '_>,
+        model: &mut ChartModel,
+        data: &mut DataStyles,
+    ) -> Result<(), String> {
         for axis in plot.children().filter(|n| xml::is(*n, NS_CHART, "axis")) {
+            budget::tick(1)?;
             let dimension = axis.attribute((NS_CHART, "dimension")).unwrap_or("");
             let name = axis.attribute((NS_CHART, "name")).unwrap_or("");
             let chain = self.chain(axis);
@@ -767,10 +710,10 @@ impl Reader<'_> {
             };
             let major_tick = tick("tick-marks-major-inner", "tick-marks-major-outer");
             let minor_tick = tick("tick-marks-minor-inner", "tick-marks-minor-outer");
-            let title = axis
-                .children()
-                .find(|n| xml::is(*n, NS_CHART, "title"))
-                .map(|t| (Self::text(t), self.font(&self.chain(t))));
+            let title = match axis.children().find(|n| xml::is(*n, NS_CHART, "title")) {
+                Some(t) => Some((Self::text(t)?, self.font(&self.chain(t)))),
+                None => None,
+            };
             let grid = |class: &str| {
                 axis.children()
                     .find(|n| {
@@ -913,6 +856,7 @@ impl Reader<'_> {
                 _ => {}
             }
         }
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -937,10 +881,6 @@ impl Reader<'_> {
                 .collect(),
             None => Vec::new(),
         };
-        let categories_bytes = categories
-            .iter()
-            .map(|c| c.len().saturating_add(std::mem::size_of::<String>()))
-            .fold(0usize, usize::saturating_add);
         let nodes: Vec<_> = plot
             .children()
             .filter(|n| xml::is(*n, NS_CHART, "series"))
@@ -949,7 +889,12 @@ impl Reader<'_> {
             return Err(chart_limit("chart series"));
         }
         let mut series_models = Vec::new();
+        // §11.13: a series without the domains its class needs uses the
+        // ones the previous series of the same class defined. Kept per
+        // class as (y values, x values); shared, never copied.
+        let mut domains_of: HashMap<&str, (Option<Domain>, Option<Domain>)> = HashMap::new();
         for (index, node) in nodes.iter().enumerate() {
+            budget::tick(1)?;
             let node = *node;
             let series_class = node
                 .attribute((NS_CHART, "class"))
@@ -988,12 +933,33 @@ impl Reader<'_> {
                     .join(" "),
                 None => format!("Series{}", index + 1),
             };
-            let domains: Vec<Vec<(CellData, String)>> = node
+            let mut own_domains = Vec::new();
+            for address in node
                 .children()
                 .filter(|n| xml::is(*n, NS_CHART, "domain"))
                 .filter_map(|d| d.attribute((NS_TABLE, "cell-range-address")))
-                .map(|address| self.range(address))
-                .collect::<Result<_, _>>()?;
+            {
+                budget::tick(1)?;
+                own_domains.push(Domain::new(self.range(address)?));
+            }
+            // §11.13: a scatter series has one domain, its x values; a
+            // bubble series two, its y values then its x values.
+            let (y_domain, x_domain) = match kind {
+                "scatter" | "bubble" => {
+                    let mut own = own_domains.into_iter();
+                    let known = domains_of.entry(kind).or_default();
+                    if kind == "bubble" {
+                        if let Some(y) = own.next() {
+                            known.0 = Some(y);
+                        }
+                    }
+                    if let Some(x) = own.next() {
+                        known.1 = Some(x);
+                    }
+                    known.clone()
+                }
+                _ => (None, None),
+            };
             let chain = self.chain(node);
             let paint = self.paint(&chain);
             let line_drawn = matches!(kind, "line" | "scatter")
@@ -1049,44 +1015,37 @@ impl Reader<'_> {
             if paint.line_hidden {
                 series.line_hidden = Some(true);
             }
-            // Scatter and bubble: domains are x (and for bubble y, x) values.
-            let mut categories_charged = 0usize;
+            // Scatter and bubble coordinates are the domains' numbers. The
+            // model carries x values as text the renderer parses, so each is
+            // written from the cell's value, never from its formatted text
+            // (`1,000`, `50%`).
             match kind {
                 "scatter" => {
-                    if let Some(x) = domains.first() {
-                        series.categories = Some(x.iter().map(|(_, t)| t.clone()).collect());
+                    if let Some(x) = &x_domain {
+                        series.categories = Some(x.coordinates()?);
                     }
                     series.values = values;
                 }
                 "bubble" => {
-                    // §19.12: values are the bubble sizes; the first domain
-                    // the y values, the second the x values.
+                    // §19.12: values are the bubble sizes.
                     series.bubble_sizes = Some(values);
-                    series.values = domains
-                        .first()
-                        .map(|d| {
-                            d.iter()
-                                .map(|(c, _)| {
-                                    if let CellData::Number(n) = c {
-                                        Some(*n)
-                                    } else {
-                                        None
-                                    }
-                                })
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    if let Some(x) = domains.get(1) {
-                        series.categories = Some(x.iter().map(|(_, t)| t.clone()).collect());
+                    if let Some(y) = &y_domain {
+                        series.values = y.numbers()?;
+                    }
+                    if let Some(x) = &x_domain {
+                        series.categories = Some(x.coordinates()?);
                     }
                 }
                 _ => {
                     series.values = values;
                     if !categories.is_empty() {
                         // Each series holds its own copy of the categories.
-                        self.budget.bytes(categories_bytes)?;
-                        categories_charged = categories_bytes;
-                        series.categories = Some(categories.clone());
+                        let mut copy = Vec::new();
+                        for category in &categories {
+                            budget::tick(1)?;
+                            copy.push(category.clone());
+                        }
+                        series.categories = Some(copy);
                     }
                 }
             }
@@ -1129,6 +1088,7 @@ impl Reader<'_> {
                     series.explosion = Some(offset.round() as u32);
                 }
             }
+            budget::tick(1)?;
             if let Some(labels) = self.data_labels(&chain, data) {
                 series.series_data_labels = Some(labels);
             }
@@ -1141,11 +1101,11 @@ impl Reader<'_> {
             {
                 // §19.21 chart:repeated: the point style covers that many
                 // points; more points than a series holds reject.
-                let repeat = xml::count_attribute(point, NS_CHART, "repeated")? as usize;
-                if point_colors.len().saturating_add(repeat) > MAX_POINTS {
+                budget::tick(1)?;
+                let repeat = xml::count_attribute(point, NS_CHART, "repeated")?;
+                if point_colors.len().saturating_add(repeat as usize) > MAX_POINTS {
                     return Err(chart_limit("chart point"));
                 }
-                self.budget.points(repeat)?;
                 let color = point.attribute((NS_CHART, "style-name")).and_then(|_| {
                     let chain = self.chain(point);
                     let p = self.paint(&chain);
@@ -1156,7 +1116,8 @@ impl Reader<'_> {
                     }
                 });
                 any_point |= color.is_some();
-                for _ in 0..repeat {
+                for item in budget::each(1, repeat) {
+                    item?;
                     point_colors.push(color.clone());
                 }
             }
@@ -1202,14 +1163,6 @@ impl Reader<'_> {
             if !trendlines.is_empty() {
                 series.trend_lines = Some(trendlines);
             }
-            // Each series holds its own copies of the strings its (possibly
-            // shared) styles define: label separator and font, number
-            // format, paint, markers, trendlines. The series' whole retained
-            // size is admitted before it is kept (the categories copy was
-            // admitted before it was made), so a style shared by every
-            // series is charged once per series.
-            self.budget
-                .bytes(crate::retained_size(&series).saturating_sub(categories_charged))?;
             series_models.push(series);
         }
         if series_models.is_empty() {
@@ -1222,6 +1175,7 @@ impl Reader<'_> {
                 .first()
                 .and_then(|s| s.categories.clone())
                 .unwrap_or_else(|| {
+                    // At most `MAX_POINTS` values per series.
                     let count = series_models
                         .iter()
                         .map(|s| s.values.len())
@@ -1307,6 +1261,45 @@ impl Reader<'_> {
     }
 }
 
+/// The cells of one `chart:domain` range, shared by the series that use it.
+#[derive(Clone)]
+struct Domain(std::rc::Rc<Vec<(CellData, String)>>);
+
+impl Domain {
+    fn new(cells: Vec<(CellData, String)>) -> Self {
+        Self(std::rc::Rc::new(cells))
+    }
+
+    /// The domain as values (a cell without a number is no value).
+    fn numbers(&self) -> Result<Vec<Option<f64>>, String> {
+        let mut out = Vec::new();
+        for (cell, _) in self.0.iter() {
+            budget::tick(1)?;
+            out.push(match cell {
+                CellData::Number(n) => Some(*n),
+                _ => None,
+            });
+        }
+        Ok(out)
+    }
+
+    /// The domain as the coordinate texts the chart model carries: a number
+    /// in the shortest form that parses back to it, a text cell as written
+    /// (the renderer plots text-backed x values by position).
+    fn coordinates(&self) -> Result<Vec<String>, String> {
+        let mut out = Vec::new();
+        for (cell, _) in self.0.iter() {
+            budget::tick(1)?;
+            out.push(match cell {
+                CellData::Number(n) => number_text(*n),
+                CellData::Text(text) => text.clone(),
+                CellData::Empty => String::new(),
+            });
+        }
+        Ok(out)
+    }
+}
+
 fn merge_font(base: TextFont, over: Option<TextFont>) -> TextFont {
     match over {
         None => base,
@@ -1325,6 +1318,7 @@ fn merge_font(base: TextFont, over: Option<TextFont>) -> TextFont {
 fn stroke_dashes(root: roxmltree::Node<'_, '_>) -> HashMap<String, &'static str> {
     let draw = crate::xml::NS_DRAW;
     let mut out = HashMap::new();
+    // One pass over the styles document the scope already walked.
     for node in root
         .descendants()
         .filter(|n| xml::is(*n, draw, "stroke-dash"))
@@ -1455,7 +1449,7 @@ mod tests {
     }
 
     #[test]
-    fn local_tables_expand_row_and_column_repeats() {
+    fn local_tables_keep_row_and_column_repeats_as_runs() {
         let local = concat!(
             r##"<table:table table:name="local-table"><table:table-rows>"##,
             r##"<table:table-row table:number-rows-repeated="2"><table:table-cell table:number-columns-repeated="2" office:value-type="float" office:value="1"/></table:table-row>"##,
@@ -1479,16 +1473,20 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(model.series[0].values, [Some(2.0)]);
-        // Over the data-table bound: rejected, not shortened.
-        let wide = r##"<table:table table:name="local-table"><table:table-rows><table:table-row table:number-rows-repeated="3000"><table:table-cell table:number-columns-repeated="3000"/></table:table-row></table:table-rows></table:table>"##;
-        assert_eq!(
-            read_chart_document(&chart(&line_series("local-table.A1", wide), ""), None, None).err(),
-            Some(chart_limit("chart data table"))
-        );
+        // Repeats are runs: a table of 2^64 cells costs its two elements.
+        let wide = r##"<table:table table:name="local-table"><table:table-rows><table:table-row table:number-rows-repeated="4294967295"><table:table-cell table:number-columns-repeated="4294967295" office:value-type="float" office:value="7"/></table:table-row></table:table-rows></table:table>"##;
+        let model = read_chart_document(
+            &chart(&line_series("local-table.XFD1048575:.XFD1048576", wide), ""),
+            None,
+            None,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(model.series[0].values, [Some(7.0), Some(7.0)]);
     }
 
     #[test]
-    fn cached_and_repeated_data_are_admitted_before_they_are_copied() {
+    fn cached_and_repeated_data_are_bounded() {
         // A cached source range far past the point bound.
         let cached = r##"<table:table table:name="local-table"><table:table-rows><table:table-row><table:table-cell office:value-type="float" office:value="1"><draw:g><svg:desc>Missing.A1:Missing.A1000000000</svg:desc></draw:g></table:table-cell></table:table-row></table:table-rows></table:table>"##;
         assert_eq!(
@@ -1500,20 +1498,24 @@ mod tests {
             .err(),
             Some(chart_limit("chart point"))
         );
-        // A 1 MiB string repeated 1024 times exceeds the chart's bytes.
-        let text = "x".repeat(1024 * 1024);
+        // A 64 KiB string repeated over 1024 columns: reading the range
+        // copies 64 MiB, past the limit of the read it is part of.
+        let text = "x".repeat(64 * 1024);
         let strings = format!(
             r##"<table:table table:name="local-table"><table:table-rows><table:table-row><table:table-cell table:number-columns-repeated="1024" office:value-type="string"><text:p>{text}</text:p></table:table-cell></table:table-row></table:table-rows></table:table>"##
         );
-        assert_eq!(
-            read_chart_document(
-                &chart(&line_series("local-table.A1", &strings), ""),
-                None,
-                None
-            )
-            .err(),
-            Some(chart_limit("chart data"))
-        );
+        {
+            let _scope = Scope::enter(16 << 20);
+            assert_eq!(
+                read_chart_document(
+                    &chart(&line_series("local-table.A1:.AMJ1", &strings), ""),
+                    None,
+                    None
+                )
+                .err(),
+                Some(chart_limit("model size"))
+            );
+        }
         // Too many points in a series' styles.
         let points = format!(
             r##"<chart:chart chart:class="chart:bar"><chart:plot-area><chart:series><chart:data-point chart:repeated="{}"/></chart:series></chart:plot-area></chart:chart>"##,
@@ -1541,13 +1543,17 @@ mod tests {
 
     struct Fixed;
     impl RangeResolver for Fixed {
-        fn cells(&self, address: &str, _: &ChartBudget) -> Result<Option<Vec<CellData>>, String> {
+        fn cells(&self, address: &str) -> Result<Option<Vec<CellData>>, String> {
             Ok(match address {
                 "Sheet1.A2:Sheet1.A3" => {
                     Some(vec![CellData::Number(45292.0), CellData::Number(45323.0)])
                 }
                 "Sheet1.B2:Sheet1.B3" => Some(vec![CellData::Number(1.0), CellData::Number(2.0)]),
                 "Sheet1.B1" => Some(vec![CellData::Text("Units".into())]),
+                "Sheet1.X2:Sheet1.X3" => {
+                    Some(vec![CellData::Number(1000.0), CellData::Number(0.5)])
+                }
+                "Sheet1.Y2:Sheet1.Y3" => Some(vec![CellData::Number(3.0), CellData::Number(4.0)]),
                 _ => None,
             })
         }
@@ -1586,10 +1592,10 @@ mod tests {
     }
 
     #[test]
-    fn per_series_label_styles_are_charged_per_series() {
-        // One shared style with a 1 MiB label separator, used by 300 series:
-        // every series holds its own copy.
-        let separator = "s".repeat(1024 * 1024);
+    fn per_series_label_styles_are_held_per_series() {
+        // One shared style with a 64 KiB label separator, used by 300
+        // series: every series holds its own copy.
+        let separator = "s".repeat(64 * 1024);
         let styles = format!(
             r##"<style:style style:name="S" style:family="chart"><style:chart-properties chart:data-label-number="value"><chart:label-separator><text:p>{separator}</text:p></chart:label-separator></style:chart-properties></style:style>"##
         );
@@ -1613,12 +1619,53 @@ mod tests {
                 .as_ref()
                 .and_then(|l| l.separator.as_deref())
                 .map(str::len),
-            Some(1024 * 1024)
+            Some(64 * 1024)
         );
+        let _scope = Scope::enter(8 << 20);
         assert_eq!(
             read_chart_document(&series(300), None, None).err(),
-            Some(chart_limit("chart data"))
+            Some(chart_limit("model size"))
         );
+    }
+
+    #[test]
+    fn scatter_and_bubble_coordinates_are_numbers_and_domains_are_inherited() {
+        // The x cells display as "1,000" and "50%"; the chart's cache holds
+        // those texts for the source range.
+        let local = concat!(
+            r##"<table:table table:name="local-table"><table:table-rows>"##,
+            r##"<table:table-row><table:table-cell office:value-type="string"><text:p>1,000</text:p><draw:g><svg:desc>Sheet1.X2:Sheet1.X3</svg:desc></draw:g></table:table-cell></table:table-row>"##,
+            r##"<table:table-row><table:table-cell office:value-type="string"><text:p>50%</text:p></table:table-cell></table:table-row>"##,
+            r##"</table:table-rows></table:table>"##
+        );
+        let scatter = format!(
+            r##"<chart:chart chart:class="chart:scatter"><chart:plot-area><chart:series chart:values-cell-range-address="Sheet1.B2:Sheet1.B3"><chart:domain table:cell-range-address="Sheet1.X2:Sheet1.X3"/></chart:series><chart:series chart:values-cell-range-address="Sheet1.Y2:Sheet1.Y3"/></chart:plot-area>{local}</chart:chart>"##
+        );
+        let model = read_chart_document(&chart(&scatter, ""), None, Some(&Fixed))
+            .unwrap()
+            .unwrap();
+        let x = Some(vec!["1000".to_string(), "0.5".to_string()]);
+        assert_eq!(model.series[0].categories, x);
+        // §11.13: the second series uses the first one's x values.
+        assert_eq!(model.series[1].categories, x);
+        assert_eq!(model.series[1].values, [Some(3.0), Some(4.0)]);
+        // A bubble series' first domain is y, its second x; a later series
+        // with only its y domain keeps the x values.
+        let bubble = format!(
+            r##"<chart:chart chart:class="chart:bubble"><chart:plot-area><chart:series chart:values-cell-range-address="Sheet1.B2:Sheet1.B3"><chart:domain table:cell-range-address="Sheet1.Y2:Sheet1.Y3"/><chart:domain table:cell-range-address="Sheet1.X2:Sheet1.X3"/></chart:series><chart:series chart:values-cell-range-address="Sheet1.Y2:Sheet1.Y3"><chart:domain table:cell-range-address="Sheet1.B2:Sheet1.B3"/></chart:series><chart:series chart:values-cell-range-address="Sheet1.B2:Sheet1.B3"/></chart:plot-area>{local}</chart:chart>"##
+        );
+        let model = read_chart_document(&chart(&bubble, ""), None, Some(&Fixed))
+            .unwrap()
+            .unwrap();
+        assert_eq!(model.series[0].values, [Some(3.0), Some(4.0)]);
+        assert_eq!(
+            model.series[0].bubble_sizes,
+            Some(vec![Some(1.0), Some(2.0)])
+        );
+        assert_eq!(model.series[1].values, [Some(1.0), Some(2.0)]);
+        assert_eq!(model.series[1].categories, x);
+        assert_eq!(model.series[2].values, [Some(1.0), Some(2.0)]);
+        assert_eq!(model.series[2].categories, x);
     }
 
     #[test]

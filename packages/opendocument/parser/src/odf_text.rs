@@ -105,7 +105,7 @@ pub fn sheet_prefix(name: &str) -> String {
 
 /// Collected text of `text:p` / `text:h` children (§6.1), joined by line
 /// feeds, honouring `text:s`, `text:tab` and `text:line-break`.
-pub fn paragraph_text(node: roxmltree::Node<'_, '_>) -> String {
+pub fn paragraph_text(node: roxmltree::Node<'_, '_>) -> Result<String, String> {
     let mut out = String::new();
     let mut first = true;
     for p in node
@@ -116,9 +116,9 @@ pub fn paragraph_text(node: roxmltree::Node<'_, '_>) -> String {
             out.push('\n');
         }
         first = false;
-        inline_text(p, &mut out);
+        inline_text(p, &mut out)?;
     }
-    out
+    Ok(out)
 }
 
 /// Split a space-separated list of cell range addresses (§18.3.6), leaving
@@ -164,41 +164,23 @@ pub fn without_bound_prefix<'a>(node: roxmltree::Node<'_, '_>, value: &'a str) -
     }
 }
 
-/// Implementation bound on the spaces all `text:s` elements of one part
-/// expand to (§6.1.3 `text:c`); a part over it rejects the document, so a
-/// reader never allocates an unbounded run of spaces.
-pub const MAX_PART_SPACES: usize = 16 * 1024 * 1024;
-
-/// The spaces one `text:s` stands for (§19.763 `text:c`, default 1).
+/// The spaces one `text:s` stands for (§19.763 `text:c`, default 1). The
+/// count is the file's: spaces are written through
+/// [`crate::budget::push_spaces`], never allocated at once.
 pub fn space_count(node: roxmltree::Node<'_, '_>) -> usize {
     node.attribute((crate::xml::NS_TEXT, "c"))
         .and_then(|c| c.trim().parse::<usize>().ok())
         .unwrap_or(1)
 }
 
-/// Reject a part whose `text:s` elements expand past [`MAX_PART_SPACES`].
-pub fn check_space_runs(root: roxmltree::Node<'_, '_>) -> Result<(), String> {
-    let mut total = 0usize;
-    for node in root
-        .descendants()
-        .filter(|n| xml::is(*n, crate::xml::NS_TEXT, "s"))
-    {
-        total = total.saturating_add(space_count(node));
-        if total > MAX_PART_SPACES {
-            return Err(crate::error::resource("text space"));
-        }
-    }
-    Ok(())
-}
-
 /// Implementation bound on one style value: any attribute of a style,
 /// font-face, property, data-style or picture-fill definition (`style:` /
 /// `number:` namespaces, `*-properties`, `draw:fill-image`: names, font
 /// families, lengths, colours, fill paths), and any style reference
-/// (`*style-name`) anywhere. Readers resolve a style value once
-/// per cell, row, run or axis that inherits it, and copy families into each
-/// font, so the bound keeps that repeated work and each copy small; a longer
-/// value rejects the part. (LibreOffice's values are a few dozen bytes.)
+/// (`*style-name`) anywhere. Readers compare, hash and copy style values
+/// wherever a style is used (a family into each font that inherits it), so
+/// the bound makes each such use a small constant of work; a longer value
+/// rejects the part. (LibreOffice's values are a few dozen bytes.)
 pub const MAX_STYLE_VALUE_BYTES: usize = 1024;
 /// The bound on a `style:map` condition (§19.472), a formula.
 pub const MAX_STYLE_CONDITION_BYTES: usize = 4096;
@@ -209,6 +191,7 @@ const NS_DATASTYLE: &str = "urn:oasis:names:tc:opendocument:xmlns:datastyle:1.0"
 /// condition over [`MAX_STYLE_CONDITION_BYTES`]).
 pub fn check_style_values(root: roxmltree::Node<'_, '_>) -> Result<(), String> {
     for node in root.descendants().filter(|n| n.is_element()) {
+        crate::budget::tick(1)?;
         // Style, data-style and property elements, whatever the namespace
         // of an extension property set (`loext:graphic-properties`), and
         // picture-fill definitions, whose package path every shape that
@@ -235,8 +218,9 @@ pub fn check_style_values(root: roxmltree::Node<'_, '_>) -> Result<(), String> {
     Ok(())
 }
 
-pub fn inline_text(node: roxmltree::Node<'_, '_>, out: &mut String) {
+pub fn inline_text(node: roxmltree::Node<'_, '_>, out: &mut String) -> Result<(), String> {
     for child in node.children() {
+        crate::budget::tick(1)?;
         if child.is_text() {
             out.push_str(child.text().unwrap_or(""));
             continue;
@@ -245,12 +229,12 @@ pub fn inline_text(node: roxmltree::Node<'_, '_>, out: &mut String) {
             continue;
         }
         match child.tag_name().name() {
-            // Readers bound every part with `check_space_runs` first.
-            "s" => out.extend(std::iter::repeat_n(' ', space_count(child))),
+            "s" => crate::budget::push_spaces(out, space_count(child))?,
             "tab" => out.push('\t'),
             "line-break" => out.push('\n'),
             "note" | "ruby-text" => {}
-            _ => inline_text(child, out),
+            _ => inline_text(child, out)?,
         }
     }
+    Ok(())
 }

@@ -3,7 +3,7 @@
 //! (ECMA-376 Part 1 §18.8.45 `xf`), with interned fonts, fills, borders and
 //! number formats.
 
-use crate::odf_props::{self, get, hex_color, length_pt, Style, StyleStore};
+use crate::odf_props::{self, get, hex_color, length_pt, Style, StyleId, StyleStore};
 use crate::ods_number::{DataKind, DataStyles, FormatCode};
 use std::collections::HashMap;
 use xlsx_model::{Border, BorderEdge, CellXf, Dxf, Fill, Font, NumFmt, RunFont, Styles};
@@ -12,18 +12,16 @@ use xlsx_model::{Border, BorderEdge, CellXf, Dxf, Fill, Font, NumFmt, RunFont, S
 const FIRST_CUSTOM_NUMFMT: u32 = 164;
 
 pub struct XfBuilder {
-    /// Every interned entry (and its key) is charged here before it is
-    /// stored: the interner is the one place styles enter the model.
-    budget: crate::ods::BudgetRef,
     styles: Styles,
     fonts: HashMap<String, u32>,
     fills: HashMap<String, u32>,
     borders: HashMap<String, u32>,
     num_fmts: HashMap<String, u32>,
     xfs: HashMap<String, u32>,
-    /// xf of each (cell, row default, column default) style triple, keyed
-    /// by the styles' identities (0: none), so lookups never allocate.
-    by_style: HashMap<(usize, usize, usize), u32>,
+    /// xf of each cell style, so a style resolves once.
+    by_style: HashMap<CellStyle, u32>,
+    /// xf of an xf with its number format replaced (`with_num_fmt`).
+    by_num_fmt: HashMap<(u32, &'static str), u32>,
     dxfs: HashMap<String, u32>,
     indent_pt: Vec<f64>,
     /// Data kind of each xf's number format (`None`: General).
@@ -31,14 +29,48 @@ pub struct XfBuilder {
     default_font: Font,
 }
 
-/// The styles that may give a table cell its format: its own
-/// `table:style-name`, its row's and its column's
-/// `table:default-cell-style-name` (the first present applies).
-#[derive(Clone, Copy, Default)]
-pub struct CellStyles<'a> {
-    pub cell: Option<&'a str>,
-    pub row: Option<&'a str>,
-    pub column: Option<&'a str>,
+/// The style that gives a table cell its format: its own
+/// `table:style-name`, else its row's, else its column's
+/// `table:default-cell-style-name` (the first present applies; §19.615 /
+/// §19.619), resolved once where the name is written.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum CellStyle {
+    /// No style is named: the `Default` cell style (§16.2).
+    Default,
+    /// A name the document does not define: the family default alone.
+    Unknown,
+    Style(StyleId),
+}
+
+impl CellStyle {
+    /// The cell style `name` names.
+    pub fn named(store: &StyleStore, name: &str) -> Self {
+        store
+            .id("table-cell", name)
+            .map_or(Self::Unknown, Self::Style)
+    }
+
+    pub fn style(self, store: &StyleStore) -> Option<&Style> {
+        match self {
+            Self::Default => store.find("table-cell", "Default"),
+            Self::Unknown => None,
+            Self::Style(id) => Some(store.style(id)),
+        }
+    }
+
+    /// The name of the style in the document (`Default` when none).
+    pub fn name(self, store: &StyleStore) -> &str {
+        match self {
+            Self::Style(id) => store.style(id).name.as_str(),
+            _ => "Default",
+        }
+    }
+
+    /// Whether the style carries §16.3 `style:map` conditions.
+    pub fn has_maps(self, store: &StyleStore) -> bool {
+        self.style(store)
+            .is_some_and(|style| !style.maps.is_empty())
+    }
 }
 
 /// The resolved properties of one cell style (or the default).
@@ -59,14 +91,10 @@ impl XfBuilder {
         store: &StyleStore,
         data: &mut DataStyles,
         faces: &HashMap<String, String>,
-        budget: crate::ods::BudgetRef,
     ) -> Result<Self, String> {
         let chain = store.chain("table-cell", Some("Default"));
         let default_font = font_of(&chain, faces, None);
-        // The builder's own copy of the default font.
-        budget.bytes(crate::retained_size(&default_font))?;
         let mut builder = Self {
-            budget,
             styles: Styles::default(),
             fonts: HashMap::new(),
             fills: HashMap::new(),
@@ -74,6 +102,7 @@ impl XfBuilder {
             num_fmts: HashMap::new(),
             xfs: HashMap::new(),
             by_style: HashMap::new(),
+            by_num_fmt: HashMap::new(),
             dxfs: HashMap::new(),
             indent_pt: Vec::new(),
             kinds: Vec::new(),
@@ -90,23 +119,9 @@ impl XfBuilder {
             ..Fill::default()
         })?;
         builder.intern_border(Border::default())?;
-        let default_xf = builder.xf_for(store, data, faces, CellStyles::default())?;
+        let default_xf = builder.xf_for(store, data, faces, CellStyle::Default)?;
         debug_assert_eq!(default_xf, 0);
         Ok(builder)
-    }
-
-    /// Admit one new interned entry's owned heap and its map key (callers
-    /// admit its vector slot with [`crate::ods::Budget::grow`]).
-    fn admit<T: ooxml_common::chart::RetainedBytes>(
-        &self,
-        value: &T,
-        key_text: usize,
-    ) -> Result<(), String> {
-        self.budget.bytes(
-            usize::try_from(value.heap_bytes())
-                .unwrap_or(usize::MAX)
-                .saturating_add(crate::ods::hash_entry_bytes::<String, u32>(key_text)),
-        )
     }
 
     /// (family, size pt, bold, italic) of the default cell font: the host
@@ -131,41 +146,28 @@ impl XfBuilder {
         &self.default_font
     }
 
-    /// The xf of a table cell, memoized by its style's identity. The cell's
-    /// style is its own, else its row's default cell style, else its
-    /// column's (§19.615 / §19.619), else `Default`; its properties are that
-    /// style's chain. LibreOffice reads a cell this way: it does not search
-    /// a styled cell's missing properties (its number format above all) in
-    /// the row and column defaults, and the files it writes rely on that
-    /// (measured over the private corpus, where searching them changes 81
-    /// displayed cells away from the original workbooks' text).
+    /// The xf of a table cell's style, resolved once per style. The cell's
+    /// properties are that style's chain. LibreOffice reads a cell this
+    /// way: it does not search a styled cell's missing properties (its
+    /// number format above all) in the row and column defaults, and the
+    /// files it writes rely on that (measured over the private corpus,
+    /// where searching them changes 81 displayed cells away from the
+    /// original workbooks' text).
     pub fn xf_for(
         &mut self,
         store: &StyleStore,
         data: &mut DataStyles,
         faces: &HashMap<String, String>,
-        styles: CellStyles<'_>,
+        style: CellStyle,
     ) -> Result<u32, String> {
-        let name = styles.cell.or(styles.row).or(styles.column);
-        // An unknown name resolves to the family default alone.
-        let style = store.find("table-cell", name.unwrap_or("Default"));
-        let key = (
-            style.map_or(0, |s| s as *const Style as usize),
-            usize::from(name.is_some()),
-            0,
-        );
-        if let Some(index) = self.by_style.get(&key) {
+        if let Some(index) = self.by_style.get(&style) {
             return Ok(*index);
         }
-        let found: Vec<&Style> = style.into_iter().collect();
-        let chain = store.chain_through("table-cell", &found);
+        crate::budget::tick(1)?;
+        let chain = store.chain_of("table-cell", style.style(store));
         let format = resolve(&chain, data, faces);
         let index = self.intern_format(format)?;
-        self.budget
-            .bytes(crate::ods::hash_entry_bytes::<(usize, usize, usize), u32>(
-                0,
-            ))?;
-        self.by_style.insert(key, index);
+        self.by_style.insert(style, index);
         Ok(index)
     }
 
@@ -185,14 +187,24 @@ impl XfBuilder {
 
     /// Intern `xf` with its number format replaced by `code` (a cell whose
     /// value type has no matching data style).
-    pub fn with_num_fmt(&mut self, xf: u32, code: &str, kind: DataKind) -> Result<u32, String> {
+    pub fn with_num_fmt(
+        &mut self,
+        xf: u32,
+        code: &'static str,
+        kind: DataKind,
+    ) -> Result<u32, String> {
+        if let Some(found) = self.by_num_fmt.get(&(xf, code)) {
+            return Ok(*found);
+        }
         let Some(base) = self.styles.cell_xfs.get(xf as usize) else {
             return Ok(xf);
         };
         let mut copy = clone_xf(base);
         copy.num_fmt_id = self.intern_num_fmt(&FormatCode::plain(code))?;
         let indent = self.indent_pt.get(xf as usize).copied().unwrap_or(0.0);
-        self.intern_xf(copy, indent, Some(kind))
+        let index = self.intern_xf(copy, indent, Some(kind))?;
+        self.by_num_fmt.insert((xf, code), index);
+        Ok(index)
     }
 
     fn intern_format(&mut self, format: CellFormat) -> Result<u32, String> {
@@ -222,11 +234,6 @@ impl XfBuilder {
         if let Some(found) = self.xfs.get(&key) {
             return Ok(*found);
         }
-        // The xf, its key, and its indent and kind slots.
-        self.admit(&xf, key.len())?;
-        self.budget.grow(&self.styles.cell_xfs)?;
-        self.budget.grow(&self.indent_pt)?;
-        self.budget.grow(&self.kinds)?;
         let index = self.styles.cell_xfs.len() as u32;
         self.styles.cell_xfs.push(xf);
         self.indent_pt.push(indent_pt);
@@ -240,8 +247,6 @@ impl XfBuilder {
         if let Some(found) = self.fonts.get(&key) {
             return Ok(*found);
         }
-        self.admit(&font, key.len())?;
-        self.budget.grow(&self.styles.fonts)?;
         self.styles.fonts.push(font);
         let index = self.styles.fonts.len() as u32 - 1;
         self.fonts.insert(key, index);
@@ -253,8 +258,6 @@ impl XfBuilder {
         if let Some(found) = self.fills.get(&key) {
             return Ok(*found);
         }
-        self.admit(&fill, key.len())?;
-        self.budget.grow(&self.styles.fills)?;
         self.styles.fills.push(fill);
         let index = self.styles.fills.len() as u32 - 1;
         self.fills.insert(key, index);
@@ -266,8 +269,6 @@ impl XfBuilder {
         if let Some(found) = self.borders.get(&key) {
             return Ok(*found);
         }
-        self.admit(&border, key.len())?;
-        self.budget.grow(&self.styles.borders)?;
         self.styles.borders.push(border);
         let index = self.styles.borders.len() as u32 - 1;
         self.borders.insert(key, index);
@@ -301,8 +302,6 @@ impl XfBuilder {
             format_code: crate::ods_number::literal_code(&format.code),
             section_divisors: format.divisors.clone(),
         };
-        self.admit(&num_fmt, key.len())?;
-        self.budget.grow(&self.styles.num_fmts)?;
         self.styles.num_fmts.push(num_fmt);
         self.num_fmts.insert(key, id);
         Ok(id)
@@ -372,8 +371,6 @@ impl XfBuilder {
                 automatic_color: None,
             }),
         };
-        self.admit(&dxf, style.len())?;
-        self.budget.grow(&self.styles.dxfs)?;
         let index = self.styles.dxfs.len() as u32;
         self.styles.dxfs.push(dxf);
         self.dxfs.insert(style.to_string(), index);

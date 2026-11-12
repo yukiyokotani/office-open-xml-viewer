@@ -12,10 +12,9 @@
 //! conditions. A text style mapped from a number style (`value-type` text)
 //! is the fourth (text) section.
 //!
-//! A field with no SpreadsheetML token is written as the literal text
-//! LibreOffice displays for it where that text is fixed (`number:quarter`,
-//! `number:week-of-year` have none: they are written as their field names'
-//! closest token, see `date_field`).
+//! `number:quarter` and `number:week-of-year` have no SpreadsheetML token:
+//! they are written as the calendar-field brackets the workbook formatter
+//! defines for them (`[Q]`, `[QQ]`, `[WW]`; `core/src/excel-number-format.ts`).
 
 use crate::xml::{self, NS_STYLE};
 use std::collections::HashMap;
@@ -39,6 +38,70 @@ pub fn literal_code(code: &str) -> String {
     } else {
         code.to_string()
     }
+}
+
+/// The week numbering LibreOffice applies to `number:week-of-year` (ODF
+/// leaves it to the application, §16.29.17): the first day of the week (0
+/// Sunday … 6 Saturday) and the days of the year the first week must hold,
+/// by the format's locale (`number:language` / `number:country`).
+///
+/// Measured with LibreOffice 26.8 over every locale of its locale data
+/// (285), each language with an unknown country, and each language alone,
+/// on the first and last days of 2015-2026. Each entry is a locale
+/// `language-COUNTRY`, `language-*` (the language with any other country)
+/// or `language` (the language without a country). Anything not listed
+/// numbers weeks from Sunday with 1 January in week 1, which is also what
+/// LibreOffice does for a locale it does not know.
+const WEEK_RULES: &[((u8, u8), &str)] = &[
+    ((0, 1), "bn-IN"),
+    ((0, 4), "en-CA fr-CA la la-*"),
+    ((0, 7), "zh-HK zh-MO zh-TW"),
+    (
+        (1, 1),
+        "ak-* an-* ast-* az-* be-* bg-* bm-* br-* bs bs-* ca-* cv-* cy-* ee-* \
+         el-* en-BZ en-IN eo eo-* es-* eu eu-* ext-* fur-* fy-* gd-* gl-* \
+         ha-* haw-* hu-* hy-* id-* jbo jbo-* ka-* kk-* km-* kmr-* ky-* lg-* \
+         ltg-* lv-* mfe-* mk-* mos-* ms-* my-* myv-* oc-ES om-* pa-* pap-BQ \
+         pap-CW pl-* plt-* pt-AO ro-* ru-* rue-SK rw-* sc-* sk-* sl-* sq-* sr \
+         sr-* sun-ID sw-TZ szl-* tg tg-* tr-* tt-* uz uz-* vec-* vi-*",
+    ),
+    (
+        (1, 4),
+        "cs-* da-* de-* dsb dsb-* en-BW en-DK en-GB en-GM en-GY en-KE en-LK \
+         en-MU en-MW en-MY en-NG en-ZM et-* fi-* fo-* fr-* gos-* hr-* hsb-* \
+         ia ia-* it-* kl-* lb-* lij-* ln-* lt-* mn-MN mt-* nb nb-* nds-* nl-* \
+         nn nn-* no-* pt-* sv-* vro-* wa-* zh zh-*",
+    ),
+    (
+        (1, 7),
+        "axk-CG beq-* bkw-* bvx-* dde-* ebo-* gsc-FR iyx-* kkw-* kng-CG ldi-* \
+         mdw-* mkw-* ngz-* njx-* njy-CG oc-* puu-CG sdj-* sg-* tek-* tk-* \
+         tsa-* tyx-* vif-* xku-* yom-CG",
+    ),
+    ((6, 1), "ar ar-* bn-* bo-* dz dz-* fa-* so-*"),
+];
+
+/// The [`WEEK_RULES`] entry of a format's locale. A data style without
+/// `number:language` takes the locale LibreOffice itself runs in (measured:
+/// not the document's default language), which a file does not record; it
+/// gets the unlisted rule.
+fn week_rule(language: Option<&str>, country: Option<&str>) -> (u8, u8) {
+    let Some(language) = language else {
+        return (0, 1);
+    };
+    let find = |key: &str| {
+        WEEK_RULES
+            .iter()
+            .find(|(_, tags)| tags.split_whitespace().any(|tag| tag == key))
+            .map(|(rule, _)| *rule)
+    };
+    let language = language.to_ascii_lowercase();
+    match country {
+        Some(country) => find(&format!("{language}-{}", country.to_ascii_uppercase()))
+            .or_else(|| find(&format!("{language}-*"))),
+        None => find(&language),
+    }
+    .unwrap_or((0, 1))
 }
 
 /// Implementation bound on one generated format code (SpreadsheetML limits
@@ -120,8 +183,9 @@ pub struct DataStyles {
 
 impl DataStyles {
     /// Read the data styles below `office:styles` or `office:automatic-styles`.
-    pub fn add(&mut self, parent: roxmltree::Node<'_, '_>) {
+    pub fn add(&mut self, parent: roxmltree::Node<'_, '_>) -> Result<(), String> {
         for node in parent.children().filter(|n| n.is_element()) {
+            crate::budget::tick(1)?;
             if node.tag_name().namespace() != Some(NS_NUMBER) {
                 continue;
             }
@@ -161,6 +225,7 @@ impl DataStyles {
                 },
             );
         }
+        Ok(())
     }
 
     /// Resolve every data style once, rejecting the document when one needs
@@ -172,6 +237,7 @@ impl DataStyles {
         let mut names: Vec<String> = self.sections.keys().cloned().collect();
         names.sort_unstable();
         for name in names {
+            crate::budget::tick(1)?;
             self.resolve(&name)?;
         }
         Ok(())
@@ -649,11 +715,16 @@ fn section_code(style: roxmltree::Node<'_, '_>, kind: DataKind) -> (String, bool
             // SpreadsheetML spells `gg`; its long era `ggg` (明治).
             "era" => code.push_str(if long(child) { "ggg" } else { "gg" }),
             "day-of-week" => code.push_str(if long(child) { "dddd" } else { "ddd" }),
-            // No SpreadsheetML token: LibreOffice shows "Q1" / "1st quarter"
-            // and the ISO week number; the closest fixed reading is kept as
-            // literal field text so the cell is never blank.
-            "quarter" => code.push_str(&literal("Q")),
-            "week-of-year" => code.push_str(&literal("W")),
+            // §16.29.18 / §16.29.17: the formatter's calendar-field brackets.
+            // LibreOffice shows the short quarter as `Q1` and the long one
+            // as the locale's name (`1st quarter`).
+            "quarter" => code.push_str(if long(child) { "[QQ]" } else { "[Q]" }),
+            "week-of-year" => match week_rule(attr(style, "language"), attr(style, "country")) {
+                (0, 1) => code.push_str("[WW]"),
+                (first_day, min_days) => {
+                    code.push_str(&format!("[WW:{first_day},{min_days}]"));
+                }
+            },
             "hours" => {
                 let token = if long(child) { "hh" } else { "h" };
                 if duration && first_time_field {
@@ -735,8 +806,35 @@ mod tests {
         );
         let document = roxmltree::Document::parse(&xml).unwrap();
         let mut data = DataStyles::default();
-        data.add(document.root_element());
+        data.add(document.root_element()).unwrap();
         data
+    }
+
+    #[test]
+    fn quarters_and_weeks_are_calendar_fields() {
+        let mut data = codes(concat!(
+            r##"<number:date-style style:name="Q"><number:text>Q</number:text><number:quarter/><number:text> </number:text><number:quarter number:style="long"/></number:date-style>"##,
+            r##"<number:date-style style:name="W"><number:week-of-year/></number:date-style>"##,
+            r##"<number:date-style style:name="WDE" number:language="de" number:country="DE"><number:week-of-year/></number:date-style>"##,
+            r##"<number:date-style style:name="WCH" number:language="de" number:country="XX"><number:week-of-year/></number:date-style>"##,
+            r##"<number:date-style style:name="WIN" number:language="bn" number:country="IN"><number:week-of-year/></number:date-style>"##,
+            r##"<number:date-style style:name="WBD" number:language="bn" number:country="BD"><number:week-of-year/></number:date-style>"##,
+            r##"<number:date-style style:name="WDEX" number:language="de"><number:week-of-year/></number:date-style>"##,
+            r##"<number:date-style style:name="WZH" number:language="zh"><number:week-of-year/></number:date-style>"##,
+        ));
+        assert_eq!(data.code("Q").unwrap().0.code, "\"Q\"[Q] [QQ]");
+        let mut week = |name: &str| data.code(name).unwrap().0.code;
+        assert_eq!(week("W"), "[WW]");
+        assert_eq!(week("WDE"), "[WW:1,4]");
+        // An unknown country falls back within the language.
+        assert_eq!(week("WCH"), "[WW:1,4]");
+        // A listed locale overrides its language's fallback.
+        assert_eq!(week("WIN"), "[WW]");
+        assert_eq!(week("WBD"), "[WW:6,1]");
+        // A language without a country is LibreOffice's default unless
+        // listed alone.
+        assert_eq!(week("WDEX"), "[WW]");
+        assert_eq!(week("WZH"), "[WW:1,4]");
     }
 
     #[test]

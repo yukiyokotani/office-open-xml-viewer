@@ -5497,9 +5497,10 @@ function visibleLocalBox(
  * Paint an OpenDocument hatch (ODF 1.3 Part 3 §16.42 `draw:hatch`) into
  * the current path: the optional background, then line families
  * `distancePt` apart, the first rotated `angle` degrees counter-clockwise
- * (§19.226 `draw:rotation`), a `double` hatch adding the perpendicular
- * family and a `triple` hatch also the family 45° clockwise to the axis
- * (§19.218.3). The lines are stroked directly inside the path's clip, over
+ * from the horizontal, a `double` hatch adding the perpendicular family
+ * and a `triple` hatch also the family 45° further counter-clockwise: the
+ * geometry LibreOffice draws (the reader records how it differs from the
+ * wording of §19.209 / §19.218.3). The lines are stroked directly inside the path's clip, over
  * the visible part of the shape only, and never closer than
  * {@link HATCH_MIN_DEVICE_SPACING} device pixels: the work and memory are
  * bounded by the canvas size, whatever the authored spacing and zoom. The
@@ -5528,7 +5529,7 @@ function paintHatchFill(
   const axis = (-fill.angle * Math.PI) / 180;
   const families = [axis];
   if (fill.lines >= 2) families.push(axis + Math.PI / 2);
-  if (fill.lines >= 3) families.push(axis + Math.PI / 4);
+  if (fill.lines >= 3) families.push(axis - Math.PI / 4);
   const corners = [[x0, y0], [x1, y0], [x0, y1], [x1, y1]];
   const lineWidth = Math.max(1, cs);
   ctx.save();
@@ -5557,11 +5558,36 @@ function paintHatchFill(
   return true;
 }
 
+/** The natural size of the image behind each picture-fill pattern, for the
+ *  staggered painter (a pattern does not expose its image). */
+const imageFillNaturalSize = new WeakMap<CanvasPattern, { iw: number; ih: number }>();
+
+/** The placement of a picture fill in a `width` × `height` box: the size
+ *  of the picture (one tile) and the origin of the tile `align` and
+ *  `offset` place. */
+function imageFillGeometry(
+  fill: ShapeImageFill, iw: number, ih: number, width: number, height: number, cs: number,
+): { tileW: number; tileH: number; x: number; y: number } {
+  if (fill.layout === 'stretch') return { tileW: width, tileH: height, x: 0, y: 0 };
+  const edge = (size: ShapeImageFill['width'], natural: number, box: number): number =>
+    size === undefined ? natural * cs : 'pt' in size ? size.pt * PT_TO_PX * cs : size.fraction * box;
+  const tileW = edge(fill.width, iw, width);
+  const tileH = edge(fill.height, ih, height);
+  const tiled = fill.layout === 'tile';
+  return {
+    tileW, tileH,
+    x: (width - tileW) * fill.align[0] + (tiled ? fill.offset[0] * tileW : 0),
+    y: (height - tileH) * fill.align[1] + (tiled ? fill.offset[1] * tileH : 0),
+  };
+}
+
 /**
  * A picture fill (OpenDocument `draw:fill-image`, §16.41): stretched over
- * the shape box, or repeated from its top-left at the tile size (the
- * image's natural size at 96 DPI where an edge is not authored). The image
- * is pre-decoded by the render orchestrator under its package path.
+ * the shape box, or at its own size (the image's natural size at 96 DPI
+ * where an edge is not authored) repeated or drawn once, placed in the box
+ * by `align` and, when repeated, moved by `offset`. The image is
+ * pre-decoded by the render orchestrator under its package path. A
+ * staggered repetition is painted by {@link paintStaggeredImageFill}.
  */
 function resolveImageShapeFill(
   ctx: CanvasRenderingContext2D,
@@ -5577,18 +5603,62 @@ function resolveImageShapeFill(
   const iw = Number(natural.width) || 0;
   const ih = Number(natural.height) || 0;
   if (iw <= 0 || ih <= 0) return null;
-  const pattern = ctx.createPattern(image, fill.tile ? 'repeat' : 'no-repeat');
+  const pattern = ctx.createPattern(image, fill.layout === 'tile' ? 'repeat' : 'no-repeat');
   if (!pattern) return null;
-  const targetW = fill.tile
-    ? (fill.tileWidthPt !== undefined ? fill.tileWidthPt * PT_TO_PX : iw) * cs
-    : width;
-  const targetH = fill.tile
-    ? (fill.tileHeightPt !== undefined ? fill.tileHeightPt * PT_TO_PX : ih) * cs
-    : height;
+  const { tileW, tileH, x, y } = imageFillGeometry(fill, iw, ih, width, height, cs);
   if (typeof pattern.setTransform === 'function') {
-    pattern.setTransform({ a: targetW / iw, b: 0, c: 0, d: targetH / ih, e: 0, f: 0 });
+    pattern.setTransform({ a: tileW / iw, b: 0, c: 0, d: tileH / ih, e: x, f: y });
   }
+  imageFillNaturalSize.set(pattern, { iw, ih });
   return pattern;
+}
+
+/**
+ * Paint a repeated picture whose every second row or column of tiles is
+ * moved (`shift`, ODF §20.175 `draw:tile-repeat-offset`) into the current
+ * path: one band per visible row (or column) of tiles, each filled with the
+ * pattern at that band's position. A canvas pattern cannot stagger itself.
+ * The bands cover the visible part of the shape only, and tiles under one
+ * device pixel are not staggered (the stagger could not be seen), so the
+ * work is bounded by the canvas size. Returns false when there is nothing
+ * to stagger; the current path is left intact.
+ */
+function paintStaggeredImageFill(
+  ctx: CanvasRenderingContext2D,
+  fill: ShapeImageFill,
+  pattern: CanvasPattern,
+  width: number,
+  height: number,
+  cs: number,
+): boolean {
+  const shift = fill.shift;
+  const natural = imageFillNaturalSize.get(pattern);
+  if (!shift || fill.layout !== 'tile' || !natural || typeof pattern.setTransform !== 'function') return false;
+  const { iw, ih } = natural;
+  const { tileW, tileH, x, y } = imageFillGeometry(fill, iw, ih, width, height, cs);
+  const { box: [x0, y0, x1, y1], unit } = visibleLocalBox(ctx, width, height);
+  if (!(x1 > x0 && y1 > y0)) return true;
+  const rows = 'rows' in shift;
+  const across = rows ? tileH : tileW;
+  if (!(across * unit >= 1) || !Number.isFinite(tileW) || !Number.isFinite(tileH)) return false;
+  const start = rows ? y : x;
+  const [from, to] = rows ? [y0, y1] : [x0, x1];
+  const amount = (rows ? shift.rows * tileW : shift.columns * tileH);
+  ctx.save();
+  ctx.clip();
+  ctx.fillStyle = pattern;
+  for (let band = Math.floor((from - start) / across); start + band * across < to; band++) {
+    const moved = band % 2 === 0 ? 0 : amount;
+    pattern.setTransform({
+      a: tileW / iw, b: 0, c: 0, d: tileH / ih,
+      e: x + (rows ? moved : 0), f: y + (rows ? 0 : moved),
+    });
+    // `fillRect` leaves the current path intact for the stroke after.
+    if (rows) ctx.fillRect(x0, start + band * across, x1 - x0, across);
+    else ctx.fillRect(start + band * across, y0, across, y1 - y0);
+  }
+  ctx.restore();
+  return true;
 }
 
 /** Fill the current path; reuse one raster across a custom shape's subpaths. */
@@ -5599,6 +5669,8 @@ function fillShape(
 ): boolean {
   if (shape.fill?.fillType === 'hatch') return paintHatchFill(ctx, shape.fill, width, height, cs);
   if (!paint) return false;
+  if (shape.fill?.fillType === 'image' && shape.fill.shift && typeof paint === 'object' && 'setTransform' in paint
+      && paintStaggeredImageFill(ctx, shape.fill, paint, width, height, cs)) return true;
   ctx.fillStyle = paint;
   ctx.fill();
   return true;

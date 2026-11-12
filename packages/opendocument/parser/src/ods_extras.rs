@@ -4,7 +4,9 @@
 //! (`calcext`, an extension namespace of ODF 1.3 producers), and the
 //! conversion of OpenFormula text (ODF Part 4) to SpreadsheetML formula text.
 
+use super::cells::CellStyle;
 use super::{parse_range, sheet_prefix, split_sheet, Context, OdsSheet, NS_TABLE};
+use crate::budget;
 use crate::odf_props::NS_CALCEXT;
 use crate::xml;
 use std::collections::HashMap;
@@ -183,7 +185,6 @@ fn range_of(address: &str) -> Option<(Option<String>, CellRange)> {
 /// `table:named-expressions` (§9.4.11): global ones under the spreadsheet,
 /// sheet-local ones under a table.
 pub(crate) fn named_expressions(
-    budget: &super::Budget,
     spreadsheet: roxmltree::Node<'_, '_>,
     sheet_index: &HashMap<String, usize>,
 ) -> Result<Vec<(String, Option<usize>, String)>, String> {
@@ -191,6 +192,7 @@ pub(crate) fn named_expressions(
     let mut read =
         |container: roxmltree::Node<'_, '_>, scope: Option<usize>| -> Result<(), String> {
             for node in container.children().filter(|n| n.is_element()) {
+                budget::tick(1)?;
                 let Some(name) = node.attribute((NS_TABLE, "name")) else {
                     continue;
                 };
@@ -204,12 +206,13 @@ pub(crate) fn named_expressions(
                     None
                 };
                 if let Some(formula) = formula {
-                    budget.push(&mut names, (name.to_string(), scope, formula))?;
+                    names.push((name.to_string(), scope, formula));
                 }
             }
             Ok(())
         };
     for child in spreadsheet.children().filter(|n| n.is_element()) {
+        budget::tick(1)?;
         if xml::is(child, NS_TABLE, "named-expressions") {
             read(child, None)?;
         } else if xml::is(child, NS_TABLE, "table") {
@@ -230,7 +233,6 @@ pub(crate) fn named_expressions(
 /// `table:database-range` (§9.4.1): named ranges, and the filter buttons of
 /// a range with `table:display-filter-buttons` as the sheet's auto filter.
 pub(crate) fn database_ranges(
-    budget: &super::Budget,
     spreadsheet: roxmltree::Node<'_, '_>,
     sheets: &mut [OdsSheet],
     sheet_index: &HashMap<String, usize>,
@@ -244,6 +246,7 @@ pub(crate) fn database_ranges(
             .children()
             .filter(|n| xml::is(*n, NS_TABLE, "database-range"))
         {
+            budget::tick(1)?;
             let Some(address) = range.attribute((NS_TABLE, "target-range-address")) else {
                 continue;
             };
@@ -256,7 +259,7 @@ pub(crate) fn database_ranges(
             if let Some(name) = range.attribute((NS_TABLE, "name")) {
                 if !name.starts_with("__Anonymous_Sheet_DB__") {
                     if let Some(formula) = convert_range_list(address) {
-                        budget.push(names, (name.to_string(), None, formula))?;
+                        names.push((name.to_string(), None, formula));
                     }
                 }
             }
@@ -273,10 +276,8 @@ pub(crate) fn database_ranges(
 /// `table:content-validation` (§19.595 table:condition) as SpreadsheetML
 /// data validations over the cells that name them.
 ///
-/// A definition is read once; every sheet that uses it holds its own copy,
-/// admitted to `budget` at its retained size before it is made.
+/// A definition is read once; every sheet that uses it holds its own copy.
 pub(crate) fn content_validations(
-    budget: &super::Budget,
     spreadsheet: roxmltree::Node<'_, '_>,
     sheets: &mut [OdsSheet],
 ) -> Result<(), String> {
@@ -292,6 +293,7 @@ pub(crate) fn content_validations(
     let mut refs: HashMap<String, Vec<(usize, Vec<CellRange>)>> = HashMap::new();
     for (index, sheet) in sheets.iter_mut().enumerate() {
         for (name, range) in std::mem::take(&mut sheet.validation_refs) {
+            budget::tick(1)?;
             let users = refs.entry(name).or_default();
             match users.last_mut() {
                 Some((last, ranges)) if *last == index => ranges.push(range),
@@ -306,6 +308,7 @@ pub(crate) fn content_validations(
         .children()
         .filter(|n| xml::is(*n, NS_TABLE, "content-validation"))
     {
+        budget::tick(1)?;
         let Some(name) = node.attribute((NS_TABLE, "name")) else {
             continue;
         };
@@ -337,21 +340,19 @@ pub(crate) fn content_validations(
             .find(|n| xml::is(*n, NS_TABLE, "help-message"))
         {
             validation.prompt_title = help.attribute((NS_TABLE, "title")).map(str::to_string);
-            validation.prompt = Some(super::paragraph_text(help));
+            validation.prompt = Some(super::paragraph_text(help)?);
         }
         if let Some(error) = node
             .children()
             .find(|n| xml::is(*n, NS_TABLE, "error-message"))
         {
             validation.error_title = error.attribute((NS_TABLE, "title")).map(str::to_string);
-            validation.error_message = Some(super::paragraph_text(error));
+            validation.error_message = Some(super::paragraph_text(error)?);
         }
-        let cost = super::retained_size(&validation);
         for (index, ranges) in users {
+            budget::tick(1)?;
             let sheet = &mut sheets[index];
             let sqref = ranges.iter().map(range_text).collect::<Vec<_>>().join(" ");
-            budget.bytes(cost.saturating_add(sqref.capacity()))?;
-            budget.grow(&sheet.worksheet.data_validations)?;
             sheet.worksheet.data_validations.push(DataValidation {
                 sqref,
                 ..validation.clone()
@@ -513,6 +514,7 @@ pub(crate) fn conditional_formats(
                 .children()
                 .filter(|n| xml::is(*n, NS_CALCEXT, "conditional-format"))
             {
+                budget::tick(1)?;
                 let Some(target) = format.attribute((NS_CALCEXT, "target-range-address")) else {
                     continue;
                 };
@@ -527,6 +529,7 @@ pub(crate) fn conditional_formats(
                 let anchor = format!("{}{}", super::column_letters(sqref[0].left), sqref[0].top);
                 let mut rules = Vec::new();
                 for rule in format.children().filter(|n| n.is_element()) {
+                    budget::tick(1)?;
                     let shift =
                         base_shift(rule.attribute((NS_CALCEXT, "base-cell-address")), &sqref[0]);
                     if let Some(rule) = cf_rule(ctx, rule, priority, &anchor, shift)? {
@@ -535,8 +538,7 @@ pub(crate) fn conditional_formats(
                     }
                 }
                 if !rules.is_empty() {
-                    ctx.budget
-                        .push(&mut formats, ConditionalFormat { sqref, rules })?;
+                    formats.push(ConditionalFormat { sqref, rules });
                 }
             }
         }
@@ -550,8 +552,7 @@ pub(crate) fn conditional_formats(
     }
     // Sparklines read cell values from every table.
     for (index, table) in tables.iter().enumerate() {
-        let groups =
-            sparkline_groups(*table, sheets as &[OdsSheet], &ctx.sheet_index, &ctx.budget)?;
+        let groups = sparkline_groups(*table, sheets as &[OdsSheet], &ctx.sheet_index)?;
         if let Some(sheet) = sheets.get_mut(index) {
             sheet.worksheet.sparkline_groups = groups;
         }
@@ -565,43 +566,32 @@ pub(crate) fn conditional_formats(
 /// base cell to the first range.
 fn style_map_formats(
     ctx: &mut Context,
-    refs: Vec<(String, CellRange)>,
+    refs: Vec<(CellStyle, CellRange)>,
     priority: &mut i32,
     formats: &mut Vec<ConditionalFormat>,
 ) -> Result<(), String> {
-    let mut by_style: Vec<(String, Vec<CellRange>)> = Vec::new();
-    let mut index: HashMap<String, usize> = HashMap::new();
+    let mut by_style: Vec<(CellStyle, Vec<CellRange>)> = Vec::new();
+    let mut index: HashMap<CellStyle, usize> = HashMap::new();
     for (style, range) in refs {
+        budget::tick(1)?;
         match index.get(&style) {
             Some(at) => by_style[*at].1.push(range),
             None => {
-                index.insert(style.clone(), by_style.len());
+                index.insert(style, by_style.len());
                 by_style.push((style, vec![range]));
             }
         }
     }
     for (style, sqref) in by_style {
-        // Each sheet works on its own copy of the style's conditions
-        // (restated from its own anchor): the copy is admitted before it is
-        // made, whether or not its conditions are recognized.
-        let Some(found) = ctx.store.find("table-cell", &style) else {
+        let Some(found) = style.style(&ctx.store) else {
             continue;
         };
-        let size: usize = found
-            .maps
-            .iter()
-            .map(|map| {
-                std::mem::size_of_val(map)
-                    + map.condition.len()
-                    + map.apply_style_name.len()
-                    + map.base_cell_address.as_ref().map_or(0, String::len)
-            })
-            .sum();
-        ctx.budget.bytes(size)?;
-        let maps = found.maps.clone();
         let anchor = format!("{}{}", super::column_letters(sqref[0].left), sqref[0].top);
         let mut rules = Vec::new();
-        for map in maps {
+        // Each sheet restates the style's conditions from its own anchor:
+        // one step per condition.
+        for map in &found.maps {
+            budget::tick(1)?;
             let shift = base_shift(map.base_cell_address.as_deref(), &sqref[0]);
             let dxf =
                 ctx.xfs
@@ -613,10 +603,7 @@ fn style_map_formats(
             }
         }
         if !rules.is_empty() {
-            // One format per style and sheet: each sheet's copy of the
-            // style's conditions is admitted at its retained size.
-            ctx.budget
-                .push(formats, ConditionalFormat { sqref, rules })?;
+            formats.push(ConditionalFormat { sqref, rules });
         }
     }
     Ok(())
@@ -692,8 +679,7 @@ fn cf_rule(
     anchor: &str,
     shift: (i64, i64),
 ) -> Result<Option<CfRule>, String> {
-    // The differential format a rule applies, interned (and admitted)
-    // first.
+    // The differential format a rule applies, interned first.
     let style = match node.tag_name().name() {
         "condition" => node.attribute((NS_CALCEXT, "apply-style-name")),
         "date-is" => node.attribute((NS_CALCEXT, "style")),
@@ -933,7 +919,6 @@ fn sparkline_groups(
     table: roxmltree::Node<'_, '_>,
     sheets: &[OdsSheet],
     sheet_index: &HashMap<String, usize>,
-    budget: &super::Budget,
 ) -> Result<Vec<xlsx_model::SparklineGroup>, String> {
     let mut groups = Vec::new();
     for container in table
@@ -952,6 +937,7 @@ fn sparkline_groups(
                 .descendants()
                 .filter(|n| xml::is(*n, NS_CALCEXT, "sparkline"))
             {
+                budget::tick(1)?;
                 let Some((_, (row, col), _)) = spark
                     .attribute((NS_CALCEXT, "cell-address"))
                     .and_then(parse_range)
@@ -959,12 +945,10 @@ fn sparkline_groups(
                     continue;
                 };
                 let values = match spark.attribute((NS_CALCEXT, "data-range")) {
-                    Some(range) => {
-                        range_values(sheets, sheet_index, range, budget)?.unwrap_or_default()
-                    }
+                    Some(range) => range_values(sheets, sheet_index, range)?.unwrap_or_default(),
                     None => Vec::new(),
                 };
-                budget.push(&mut sparklines, xlsx_model::Sparkline { row, col, values })?;
+                sparklines.push(xlsx_model::Sparkline { row, col, values });
             }
             let group = xlsx_model::SparklineGroup {
                 kind: match a("type") {
@@ -1002,8 +986,6 @@ fn sparkline_groups(
                 color_low: color("color-low"),
                 sparklines,
             };
-            // The group's own fields (its sparklines were admitted as read).
-            budget.bytes(std::mem::size_of::<xlsx_model::SparklineGroup>() * 2 + 256)?;
             groups.push(group);
         }
     }
@@ -1018,7 +1000,6 @@ fn range_values(
     sheets: &[OdsSheet],
     sheet_index: &HashMap<String, usize>,
     address: &str,
-    budget: &super::Budget,
 ) -> Result<Option<Vec<Option<f64>>>, String> {
     let Some((sheet, (r1, c1), (r2, c2))) = parse_range(address) else {
         return Ok(None);
@@ -1030,11 +1011,11 @@ fn range_values(
     if count > MAX_SPARKLINE_POINTS {
         return Err(super::resource("sparkline range"));
     }
-    // Admitted before the values are collected.
-    budget.bytes((count as usize).saturating_mul(16))?;
-    let mut out = Vec::with_capacity(count as usize);
-    for row in r1..=r2 {
-        for col in c1..=c2 {
+    let mut out = Vec::new();
+    for row in budget::each(r1, r2) {
+        let row = row?;
+        for col in budget::each(c1, c2) {
+            let col = col?;
             out.push(
                 match super::find_cell(&sheet.rows, row, col).map(|c| &c.value) {
                     Some(xlsx_model::CellValue::Number { number }) => Some(*number),
