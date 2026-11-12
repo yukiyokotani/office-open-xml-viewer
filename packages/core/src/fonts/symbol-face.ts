@@ -436,7 +436,8 @@ function registeredFacesToken(fontSet: FontFaceSet | null, families: readonly st
     if (!wanted.has(family)) continue;
     let id = faceIds.get(face);
     if (id === undefined) { id = nextFaceId++; faceIds.set(face, id); }
-    parts.push([id, face.status].join(','));
+    // Descriptors are mutable matching inputs (CSS Font Loading 3 §2.1).
+    parts.push([id, face.status, face.weight, face.style, face.stretch, face.unicodeRange].join(','));
   }
   return parts.join(';');
 }

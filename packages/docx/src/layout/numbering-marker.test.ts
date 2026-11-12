@@ -235,6 +235,30 @@ describe('resolveNumberingMarkerGeometry', () => {
   });
 
   it.each([
+    // "(" after a letter at the paragraph end resolves R (mirrored); VS15 stays with its base.
+    ['a\uF028', [['(', 'rtl'], ['a', 'ltr']]],
+    ['a\uF0D3', [['\u00A9\uFE0E', 'rtl'], ['a', 'ltr']]],
+  ])('orders and directs RTL marker pieces of %j by their resolved levels', (text, expected) => {
+    const base = createTextLayoutService({
+      fonts: createFontResolver([]),
+      measurer: { fingerprint: 'marker-symbol-rtl-levels', measure: (request) => ({
+        advancePt: request.text.length * 6, ascentPt: 8, descentPt: 2,
+      }) },
+      symbolText: (markerText, family) => symbolTextToUnicodeSegments(markerText, family, {
+        encoding: { kind: 'known', pua: symbolCodeSet([0x61]), bare: symbolCodeSet([0x61]) },
+        monochrome: () => true,
+      }),
+    });
+    const geometry = resolveNumberingMarkerGeometry(
+      { numId: 1, level: 0, format: 'bullet', text, suff: 'tab', indentLeft: 0, tab: 36, fontFamily: 'Symbol' },
+      { fontSizePt: 12, fonts: { ascii: 'Symbol', highAnsi: 'Symbol', eastAsia: 'Symbol', complexScript: 'Symbol' },
+        weight: 400, style: 'normal', complexScript: false },
+      { authoredFirstIndentPt: 0, physicalIndentLeftPt: 0, tabStops: [], defaultTabPt: 36, baseRtl: true }, base,
+    );
+    expect(geometry.shape?.spans.map((span, index) => [span.text, geometry.spanDirections?.[index]])).toEqual(expected);
+  });
+
+  it.each([
     [undefined, 3.75], [14, 3.75], [15, 3.75],
     [11, 7.5], [12, 7.5], [13, 7.5],
   ])('uses the suffix font advance at marker size in mode %s', (compatibilityMode, suffixPt) => {

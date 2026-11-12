@@ -179,8 +179,9 @@ function joinMarkerLayouts(
   const resolved = baseRtl
     ? computeSegmentLineVisualOrder(logicalParts.map((part) => ({ text: part.text })), true)
     : { order: logicalParts.map((_, index) => index), rtl: logicalParts.map(() => false) };
-  const parts = resolved.order.map((index, visual) => ({
-    ...logicalParts[index]!, start: logicalStarts[index]!, rtl: resolved.rtl[visual] === true,
+  // `rtl` is indexed by logical segment.
+  const parts = resolved.order.map((index) => ({
+    ...logicalParts[index]!, start: logicalStarts[index]!, rtl: resolved.rtl[index] === true,
   }));
   const spanDirections: ('ltr' | 'rtl')[] = [];
   const spans: TextShapeResult['spans'][number][] = [];
@@ -327,11 +328,12 @@ export function resolveNumberingMarkerGeometry(
     : service.symbolText?.(symbolRequest) ?? symbolTextToUnicodeSegments(numbering.text, markerFamily);
   // Each code is converted on its own, as in body runs; the pieces are
   // placed in visual order (joinMarkerLayouts). In a right-to-left paragraph
-  // a mixed marker is split into one piece per code point, so no piece spans
+  // a mixed marker is split into one piece per code point (a VS15 stays with
+  // its base, which it selects text presentation for), so no piece spans
   // a resolved embedding-level boundary, and each piece paints in its own
   // resolved direction (a converted "(" between native letters stays "(").
   const markerSegments = judged && judged.length > 1 && input.baseRtl === true
-    ? judged.flatMap((part) => [...part.text].map((character) => ({ ...part, text: character })))
+    ? judged.flatMap((part) => (part.text.match(/[^\uFE0E]\uFE0E?|\uFE0E/gsu) ?? []).map((character) => ({ ...part, text: character })))
     : judged;
   const markerText = numbering.picBulletImagePath
     ? ''
