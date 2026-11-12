@@ -1775,7 +1775,8 @@ pub(crate) enum Inline {
     Tab,
     /// `text:line-break` (§6.1.5).
     LineBreak,
-    /// Not shown: notes, marks, change tracking, annotations, scripts.
+    /// Not shown: notes, marks, change tracking, annotations, scripts,
+    /// drawings and object titles.
     Ignored,
 }
 
@@ -1816,6 +1817,7 @@ const TEXT_FIELDS: &[&str] = &[
     "sequence",
     "expression",
     "text-input",
+    "drop-down",
     // §7.5 metadata fields
     "initial-creator",
     "creation-date",
@@ -1885,9 +1887,14 @@ const TEXT_IGNORED: &[&str] = &[
     "user-index-mark",
     "user-index-mark-start",
     "user-index-mark-end",
-    // Script source, not displayed text (§7.7.13).
+    // Script source, not displayed text (§7.7.9).
     "script",
+    // The choices of a `text:drop-down` (§7.4.17); its text is the value.
+    "label",
 ];
+
+/// The 3D-scene namespace (§10.5): a drawing, as `draw:*` shapes are.
+const NS_DR3D: &str = "urn:oasis:names:tc:opendocument:xmlns:dr3d:1.0";
 
 /// The class of an inline element (§6, §7).
 pub(crate) fn classify(node: Nd<'_>) -> Inline {
@@ -1912,6 +1919,10 @@ pub(crate) fn classify(node: Nd<'_>) -> Inline {
         Some(crate::xml::NS_OFFICE) if matches!(name, "annotation" | "annotation-end") => {
             Inline::Ignored
         }
+        // Drawings anchored in the text (frames, shapes, 3D scenes) and the
+        // titles and descriptions of objects are not paragraph text.
+        Some(NS_DRAW) | Some(NS_DR3D) => Inline::Ignored,
+        Some(crate::xml::NS_SVG) if matches!(name, "title" | "desc") => Inline::Ignored,
         _ => Inline::Container,
     }
 }

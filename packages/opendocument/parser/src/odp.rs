@@ -2132,11 +2132,16 @@ mod tests {
                 "<text:ruby><text:ruby-base> X  Y </text:ruby-base> <text:ruby-text>r</text:ruby-text></text:ruby>",
                 "X Y",
             ),
-            ("unknown", "a <draw:unknown> b  c </draw:unknown> d", "a b c d"),
+            ("unknown", "a <loext:unknown> b  c </loext:unknown> d", "a b c d"),
             // Fields: stored text verbatim; a carried space before is kept.
             ("file-name", "File: <text:file-name>draft  final.odp</text:file-name>", "File: draft  final.odp"),
             ("date", "on<text:date> 1  2 </text:date>x", "on 1  2 x"),
             ("title", "<text:title>  T  </text:title>", "  T  "),
+            (
+                "drop-down",
+                r#"<text:drop-down text:name="d"><text:label text:value="one"/><text:label text:value="two  x" text:current-selected="true"/>two  x</text:drop-down>"#,
+                "two  x",
+            ),
             ("field span", "<text:author-name>a <text:span> b</text:span></text:author-name>", "a  b"),
             // Preserved white space.
             ("s", r#"a <text:s text:c="2"/> b"#, "a    b"),
@@ -2151,6 +2156,18 @@ mod tests {
             ("bookmark", r#"a <text:bookmark text:name="m"/> b"#, "a b"),
             ("annotation", "a <office:annotation><text:p>c</text:p></office:annotation> b", "a b"),
             ("script", "a <text:script>run()</text:script> b", "a b"),
+            (
+                "draw:frame",
+                r#"a <draw:frame svg:width="1cm" svg:height="1cm"><draw:text-box><text:p>inner</text:p></draw:text-box></draw:frame> b"#,
+                "a b",
+            ),
+            (
+                "draw:image",
+                r#"a <draw:frame svg:width="1cm" svg:height="1cm"><draw:image/><svg:title>T</svg:title><svg:desc>D</svg:desc></draw:frame> b"#,
+                "a b",
+            ),
+            ("draw:custom-shape", "a <draw:custom-shape><text:p>s</text:p></draw:custom-shape> b", "a b"),
+            ("svg:title", "a <svg:title>T</svg:title><svg:desc>D</svg:desc> b", "a b"),
         ];
         for (class, inline, expected) in cases {
             let slide_body = format!(
