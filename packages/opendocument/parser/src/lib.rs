@@ -16,8 +16,9 @@ mod odt_wasm;
 #[cfg(feature = "odt")]
 mod svm;
 
-/// Every allocation of the reader is metered ([`budget`]): its resource
-/// limits are measured by the allocator, not estimated by the reader.
-#[cfg(feature = "odt")]
+/// Every allocation of the readers is metered ([`budget`]): their resource
+/// limits are measured by the allocator, not estimated by the readers. The
+/// allocator is installed whatever features are built, like the shared
+/// modules that count steps through it.
 #[global_allocator]
 static METERED: budget::Metered = budget::Metered;
