@@ -541,7 +541,7 @@ impl<'a> Reader<'a> {
         if let Some(minimum) = text_box
             .and_then(|text_box| text_box.attribute((NS_FO, "min-height")))
             .and_then(|v| length_pt(v).ok())
-            .filter(|minimum| *minimum > 0.0)
+            .filter(|minimum| *minimum >= 0.0)
         {
             height = minimum;
         }

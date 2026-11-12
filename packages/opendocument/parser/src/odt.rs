@@ -983,30 +983,43 @@ impl<'a> Reader<'a> {
             .map(|style| self.style_chain(style))
             .transpose()?;
         // The cap style's properties over the paragraph's (§16.2), resolved
-        // once for every cap run.
-        let styled = match styled {
-            Some(chain) => {
-                let contexts = vec![
-                    TextContext {
-                        styles: paragraph_chain,
-                        parent: None,
-                        link: None,
-                    },
-                    TextContext {
-                        styles: chain,
-                        parent: Some(0),
-                        link: None,
-                    },
-                ];
-                Some(self.run_properties(&contexts, 1, ScriptClass::Latin)?)
-            }
-            None => None,
-        };
+        // once per script class of the cap runs (§20.358: a run holds
+        // characters of one class).
+        let contexts = styled.map(|chain| {
+            vec![
+                TextContext {
+                    styles: paragraph_chain,
+                    parent: None,
+                    link: None,
+                },
+                TextContext {
+                    styles: chain,
+                    parent: Some(0),
+                    link: None,
+                },
+            ]
+        });
+        let mut by_class: Vec<(ScriptClass, text::RunProperties)> = Vec::new();
         for run in &mut cap_runs {
             if let DocRun::Text(text) = run {
                 budget::tick(1)?;
-                if let Some(styled) = &styled {
-                    let mut replacement = styled.text_run();
+                if let Some(contexts) = &contexts {
+                    let class = if text.cs == Some(true) {
+                        ScriptClass::Complex
+                    } else {
+                        text.text
+                            .chars()
+                            .find_map(crate::script::table_22)
+                            .unwrap_or(ScriptClass::Latin)
+                    };
+                    let index = match by_class.iter().position(|(known, _)| *known == class) {
+                        Some(index) => index,
+                        None => {
+                            by_class.push((class, self.run_properties(contexts, 1, class)?));
+                            by_class.len() - 1
+                        }
+                    };
+                    let mut replacement = by_class[index].1.text_run();
                     replacement.text = std::mem::take(&mut text.text);
                     **text = replacement;
                 }
@@ -1245,6 +1258,7 @@ impl<'a> Reader<'a> {
         let mut bottom = length("margin-bottom");
         // Relative margins (percentages of the parent style's) are resolved
         // against the parent value in the chain.
+        let automatic_indent = cascade.get(NS_STYLE, "auto-text-indent") == Some("true");
         for (name, value) in [
             ("margin-left", &mut indent_left),
             ("margin-right", &mut indent_right),
@@ -1252,6 +1266,10 @@ impl<'a> Reader<'a> {
             ("margin-top", &mut top),
             ("margin-bottom", &mut bottom),
         ] {
+            // (§20.256: an automatic indent leaves fo:text-indent unused.)
+            if name == "text-indent" && automatic_indent {
+                continue;
+            }
             if let Some(relative) = cascade.get(NS_FO, name).filter(|v| v.ends_with('%')) {
                 *value = relative_length(chain, PARAGRAPH, NS_FO, name, relative);
             }

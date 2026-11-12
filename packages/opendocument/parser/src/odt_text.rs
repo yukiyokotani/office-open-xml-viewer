@@ -792,10 +792,23 @@ impl<'a> Reader<'a> {
         };
         // The search order of the note's first paragraph (a story of its
         // own: no cell or shape continues it), for the note's number.
-        let first_style = body
-            .and_then(|body| body.kids().find(|n| n.is_element()))
-            .filter(|first| xml::is(*first, NS_TEXT, "p") || xml::is(*first, NS_TEXT, "h"))
-            .and_then(|first| first.attribute((NS_TEXT, "style-name")));
+        // That is the first paragraph the story shows: hidden ones before it
+        // are skipped; when other content leads, the paragraph default
+        // stands in.
+        let mut first_style = None;
+        for first in body.into_iter().flat_map(|body| body.kids()) {
+            if !first.is_element() {
+                continue;
+            }
+            let paragraph = xml::is(first, NS_TEXT, "p") || xml::is(first, NS_TEXT, "h");
+            if paragraph && hidden_by_field(first)? {
+                continue;
+            }
+            if paragraph {
+                first_style = first.attribute((NS_TEXT, "style-name"));
+            }
+            break;
+        }
         let saved_container = std::mem::replace(&mut self.container, Rc::from(Vec::new()));
         let paragraph_chain = self.paragraph_chain(first_style);
         self.container = saved_container;
