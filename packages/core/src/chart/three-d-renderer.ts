@@ -4852,6 +4852,7 @@ function renderPie(
         formatCode: labelOverride?.formatCode
           ?? defaults?.formatCode ?? chart.dataLabelFormatCode ?? series.valFormatCode,
         formatDivisors: labelOverride?.formatCode != null ? null : defaults?.formatDivisors,
+        percentFormatCode: labelOverride?.formatCode ?? defaults?.percentFormatCode,
         separator: labelOverride?.separator ?? defaults?.separator,
         date1904: chart.date1904,
       });

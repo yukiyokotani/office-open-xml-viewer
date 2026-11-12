@@ -611,6 +611,7 @@ export function drawCategoryDataLabels(
       percentRatio: percentRatioAt?.(ci),
       formatCode: ovr?.formatCode ?? seriesDef?.formatCode ?? null,
       formatDivisors: ovr?.formatCode != null ? null : seriesDef?.formatDivisors,
+      percentFormatCode: ovr?.formatCode ?? seriesDef?.percentFormatCode,
       date1904,
       separator: ovr?.separator ?? seriesDef?.separator,
     });
