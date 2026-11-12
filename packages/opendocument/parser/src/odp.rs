@@ -321,6 +321,10 @@ struct ObjectContext<'a> {
     /// For a master's objects: the slide's display flags by placeholder
     /// class (§20.234), applied to every object however deeply grouped.
     shows: Option<[(&'static str, bool); 4]>,
+    /// The origin of a drawing anchored in a text box's text (§19.27
+    /// `text:anchor-type` "paragraph" / "char" / "as-char"): its host
+    /// object's top-left corner, in page EMU; zero for page objects.
+    offset: (f64, f64),
 }
 
 impl<'a, 'r, 'p> SlideReader<'a, 'r, 'p> {
@@ -424,6 +428,7 @@ impl<'a, 'r, 'p> SlideReader<'a, 'r, 'p> {
                     link: None,
                     master: None,
                     shows: Some(shows),
+                    offset: (0.0, 0.0),
                 };
                 let children: Vec<Nd<'a>> = master.children().filter(|n| n.is_element()).collect();
                 // Every master node examined (comments and text included),
@@ -470,6 +475,7 @@ impl<'a, 'r, 'p> SlideReader<'a, 'r, 'p> {
             link: None,
             master,
             shows: None,
+            offset: (0.0, 0.0),
         };
         let mut notes = None;
         let mut objects = Vec::new();
@@ -632,6 +638,12 @@ impl<'a, 'r, 'p> SlideReader<'a, 'r, 'p> {
                 let before = out.len();
                 self.frame(node, ctx, out)?;
                 self.retain(&out[before..])?;
+                let geometry_node = self.placement_node(node, ctx)?;
+                let (w, h) = Self::size(geometry_node);
+                let host = Self::placement(geometry_node, w, h);
+                if let Some(text_box) = node.children().find(|c| xml::is(*c, NS_DRAW, "text-box")) {
+                    self.anchored(text_box, &host, ctx, out, depth)?;
+                }
             }
             "custom-shape" | "rect" | "ellipse" | "circle" | "line" | "polyline" | "polygon"
             | "regular-polygon" | "path" | "connector" | "caption" | "measure" => {
@@ -639,8 +651,57 @@ impl<'a, 'r, 'p> SlideReader<'a, 'r, 'p> {
                 let before = out.len();
                 self.shape(node, ctx, out)?;
                 self.retain(&out[before..])?;
+                let (w, h) = Self::size(node);
+                let host = Self::placement(node, w, h);
+                self.anchored(node, &host, ctx, out, depth)?;
             }
             _ => {}
+        }
+        Ok(())
+    }
+
+    /// Drawings anchored in the text of an object (a frame's text box or a
+    /// shape's own paragraphs): not paragraph text, they are drawn after
+    /// their host, positioned from its top-left corner as LibreOffice
+    /// places them (`svg:x` / `svg:y` from the host; an as-char drawing
+    /// without them at the host's corner). Notes and annotations are not
+    /// looked into; each node looked at is a visit.
+    fn anchored(
+        &mut self,
+        text: Nd<'a>,
+        host: &Placed,
+        ctx: &ObjectContext<'a>,
+        out: &mut Vec<SlideElement>,
+        depth: usize,
+    ) -> Result<(), String> {
+        let mut drawings = Vec::new();
+        let mut stack: Vec<Nd<'a>> = text.children().filter(|c| c.is_element()).collect();
+        stack.reverse();
+        while let Some(node) = stack.pop() {
+            self.visit(1)?;
+            let ns = node.tag_name().namespace();
+            if ns == Some(NS_DRAW) {
+                drawings.push(node);
+                continue;
+            }
+            if ns != Some(crate::xml::NS_TEXT)
+                || matches!(node.tag_name().name(), "note" | "ruby-text")
+            {
+                continue;
+            }
+            let start = stack.len();
+            stack.extend(node.children().filter(|c| c.is_element()));
+            stack[start..].reverse();
+        }
+        if drawings.is_empty() {
+            return Ok(());
+        }
+        let inner = ObjectContext {
+            offset: (ctx.offset.0 + host.x, ctx.offset.1 + host.y),
+            ..clone_ctx(ctx)
+        };
+        for drawing in drawings {
+            self.object(drawing, &inner, out, depth + 1)?;
         }
         Ok(())
     }
@@ -913,7 +974,9 @@ impl<'a, 'r, 'p> SlideReader<'a, 'r, 'p> {
                 .unwrap_or(Affine::IDENTITY);
             placed = Some(place(w, h, &Affine::translate(x0, y0).then(&m)));
         }
-        let placed = placed.unwrap_or_else(|| Self::placement(node, w, h));
+        let mut placed = placed.unwrap_or_else(|| Self::placement(node, w, h));
+        placed.x += ctx.offset.0;
+        placed.y += ctx.offset.1;
         flip_v ^= placed.flip_v;
         // Line ends: markers drawn as filled shapes; the line is shortened
         // under them (LibreOffice's arrow docking).
@@ -1210,7 +1273,9 @@ impl<'a, 'r, 'p> SlideReader<'a, 'r, 'p> {
         let graphic = self.graphic_props(&styles)?;
         let geometry_node = self.placement_node(node, ctx)?;
         let (w, h) = Self::size(geometry_node);
-        let placed = Self::placement(geometry_node, w, h);
+        let mut placed = Self::placement(geometry_node, w, h);
+        placed.x += ctx.offset.0;
+        placed.y += ctx.offset.1;
         let children: Vec<Nd> = node.children().filter(|n| n.is_element()).collect();
         let has = |name: &str| children.iter().any(|c| c.tag_name().name() == name);
         if let Some(table) = children.iter().find(|c| xml::is(**c, NS_TABLE, "table")) {
@@ -1473,6 +1538,7 @@ fn clone_ctx<'a>(ctx: &ObjectContext<'a>) -> ObjectContext<'a> {
         link: ctx.link.clone(),
         master: ctx.master,
         shows: ctx.shows,
+        offset: ctx.offset,
     }
 }
 
@@ -2276,6 +2342,43 @@ mod tests {
             (body.l_ins, body.t_ins, body.r_ins),
             (108_000, 36_000, 36_000)
         );
+    }
+
+    /// Drawings anchored in a text box's paragraphs, or in a shape's text,
+    /// are drawn after their host, placed from its top-left corner; their
+    /// text is not the paragraph's.
+    #[test]
+    fn drawings_anchored_in_text_are_drawn_from_their_host() {
+        let body = r#"<draw:frame svg:x="2cm" svg:y="3cm" svg:width="10cm" svg:height="5cm"><draw:text-box><text:p>host <draw:frame text:anchor-type="paragraph" svg:x="1cm" svg:y="1cm" svg:width="2cm" svg:height="1cm"><draw:text-box><text:p>inner <draw:custom-shape text:anchor-type="as-char" svg:width="1cm" svg:height="1cm"><draw:enhanced-geometry draw:type="rectangle"/></draw:custom-shape></text:p></draw:text-box></draw:frame>text</text:p></draw:text-box></draw:frame><draw:custom-shape svg:x="1cm" svg:y="1cm" svg:width="4cm" svg:height="4cm"><text:p>s<draw:frame text:anchor-type="char" svg:x="2cm" svg:width="1cm" svg:height="1cm"><draw:text-box><text:p>c</text:p></draw:text-box></draw:frame></text:p><draw:enhanced-geometry draw:type="rectangle"/></draw:custom-shape>"#;
+        let deck = deck("", "", "", &page(body)).unwrap();
+        let slide0 = model(&deck, 0);
+        let s = shapes(&slide0);
+        let text = |i: usize| -> String {
+            s[i].text_body.as_ref().unwrap().paragraphs[0]
+                .runs
+                .iter()
+                .map(|r| match r {
+                    pptx_model::TextRun::Text(d) => d.text.clone(),
+                    _ => String::new(),
+                })
+                .collect()
+        };
+        let cm = 360_000;
+        let boxes: Vec<_> = s.iter().map(|e| (e.x, e.y, e.width, e.height)).collect();
+        assert_eq!(
+            boxes,
+            [
+                (2 * cm, 3 * cm, 10 * cm, 5 * cm),
+                (3 * cm, 4 * cm, 2 * cm, cm),
+                (3 * cm, 4 * cm, cm, cm),
+                (cm, cm, 4 * cm, 4 * cm),
+                (3 * cm, cm, cm, cm),
+            ]
+        );
+        assert_eq!(text(0), "host text");
+        assert_eq!(text(1), "inner");
+        assert_eq!(text(3), "s");
+        assert_eq!(text(4), "c");
     }
 
     #[test]
