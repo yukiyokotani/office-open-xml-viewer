@@ -5657,10 +5657,26 @@ export function renderTextBody(
   // at 80/90/150 % and 100/140 pt, ctr and b, Arial and Meiryo; normAutofit
   // lnSpcReduction likewise).
   const lastMetric = allLines[allLines.length - 1];
-  const anchorHeight = lastMetric?.metricAscent !== undefined
+  // Model sources with shrink-to-fit fitted the text per column: when the
+  // lines are distributed over columns (below), the block anchored is the
+  // tallest column, not all lines stacked.
+  const columnedHeight = (() => {
+    if (!body.shrinkOnOverflow || numCol <= 1 || bh === 0 || allLines.length === 0) return null;
+    const trailing = Math.max(0, lastMetric.linePx - lastMetric.lineHeight);
+    if (requiredHeight - trailing <= Math.max(0, bh - tPad - bPad) + 0.5) return null;
+    const perColumn = Math.ceil(allLines.length / numCol);
+    let tallest = 0;
+    for (let start = 0; start < allLines.length; start += perColumn) {
+      let height = 0;
+      for (const entry of allLines.slice(start, start + perColumn)) height += entry.topGapPx + entry.linePx;
+      tallest = Math.max(tallest, height);
+    }
+    return tallest;
+  })();
+  const anchorHeight = columnedHeight ?? (lastMetric?.metricAscent !== undefined
     && lastMetric.metricNaturalDescent !== undefined
     ? requiredHeight - (lastMetric.lineHeight - lastMetric.metricAscent) + lastMetric.metricNaturalDescent
-    : requiredHeight;
+    : requiredHeight);
   let cursorY: number;
   const contentH = Math.max(0, effectiveBh - tPad - bPad);
   if (anchor === 'ctr') {

@@ -89,6 +89,20 @@ describe('normAutofit without stored fontScale (PowerPoint PDF controls)', () =>
     expect(paintedSizes(text, 60)).toEqual([24, 24, 24]);
   });
 
+  it('anchors a columned shrink-to-fit body by its tallest column', () => {
+    // Two columns of 57.6 pt (two lines) and 28.8 pt in a 60 pt frame,
+    // bottom-anchored: the first baseline sits in the frame, not above it.
+    const text = body({ shrinkOnOverflow: true, numCol: 2, spcCol: 0, verticalAnchor: 'b' });
+    const { ctx } = context();
+    const baselines: number[] = [];
+    (ctx as unknown as { fillText: (t: string, x: number, y: number) => void }).fillText =
+      (_t, _x, y) => baselines.push(y);
+    renderTextBody(ctx, text, 0, 0, 400, 60, SCALE);
+    expect(baselines.length).toBe(3);
+    expect(Math.min(...baselines)).toBeGreaterThan(0);
+    expect(Math.max(...baselines)).toBeLessThanOrEqual(60);
+  });
+
   it('shrink-to-fit shrinks wrapped text wider than its box', () => {
     // A 9.6 pt wide box: no single 24 pt glyph (13.2 pt) fits, however the
     // line breaks; at the 0.7 level (16.8 pt, 9.24 pt) it does.

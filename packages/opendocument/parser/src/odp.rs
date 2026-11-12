@@ -2236,7 +2236,9 @@ mod tests {
         // it can never stand in for (or be replaced by) a generated one.
         let svg: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"/>"#;
         let styles = r##"<draw:hatch draw:name="h1" draw:style="single" draw:color="#000000" draw:distance="0.1cm" draw:rotation="0"/><style:style style:name="gr1" style:family="graphic"><style:graphic-properties draw:fill="hatch" draw:fill-hatch-name="h1"/></style:style>"##;
-        let body = r#"<draw:frame svg:width="2cm" svg:height="2cm"><draw:image xlink:href="odp-generated/hatch-0.svg"/></draw:frame><draw:rect draw:style-name="gr1" svg:width="5cm" svg:height="5cm"/>"#;
+        // The hatch is drawn first, so its generated picture is admitted
+        // before the image reference is seen.
+        let body = r#"<draw:rect draw:style-name="gr1" svg:width="5cm" svg:height="5cm"/><draw:frame svg:width="2cm" svg:height="2cm"><draw:image xlink:href="odp-generated/hatch-0.svg"/></draw:frame>"#;
         let deck = deck_with(
             styles,
             "",

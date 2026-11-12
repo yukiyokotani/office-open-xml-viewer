@@ -104,15 +104,16 @@ impl<'p> Media<'p> {
         let Target::Package { path, .. } = iri::resolve(base, href)? else {
             return None;
         };
+        // The generated-resource namespace is reserved: a reference into it
+        // is never a package item (checked before the admitted map, which
+        // also holds the generated pictures).
+        if path.starts_with(GENERATED_PREFIX) {
+            return None;
+        }
         if let Some(resource) = self.admitted.get(&path) {
             return Some((path, resource.clone()));
         }
-        // The generated-resource namespace is reserved: a package item named
-        // into it is never admitted, so it cannot be confused with one.
-        if path.starts_with(GENERATED_PREFIX)
-            || self.failed.contains(&path)
-            || !self.package.contains(&path)
-        {
+        if self.failed.contains(&path) || !self.package.contains(&path) {
             return None;
         }
         match self.read_resource(&path) {
