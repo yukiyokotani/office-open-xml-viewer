@@ -1554,7 +1554,7 @@ fn collect_runs(
         match child.tag_name().name() {
             "s" => {
                 let mut spaces = String::new();
-                budget::push_spaces(&mut spaces, crate::odf_text::space_count(child))?;
+                budget::push_spaces(&mut spaces, crate::odf_text::space_count(child)?)?;
                 push_run(runs, &spaces, context);
             }
             "tab" => push_run(runs, "\t", context),

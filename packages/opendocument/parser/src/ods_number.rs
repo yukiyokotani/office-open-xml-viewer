@@ -202,7 +202,7 @@ impl DataStyles {
             let Some(name) = node.attribute((NS_STYLE, "name")) else {
                 continue;
             };
-            let (code, general, divisor) = section_code(node, kind);
+            let (code, general, divisor) = section_code(node, kind)?;
             let maps = node
                 .children()
                 .filter(|n| xml::is(*n, NS_STYLE, "map"))
@@ -258,7 +258,18 @@ impl DataStyles {
         };
         let mut format = if section.maps.is_empty() {
             FormatCode {
-                code: section.code.clone(),
+                // A text style without `number:text-content` shows its
+                // literal text for any string (§16.29.26): the code's text
+                // section, which the formatter knows by its place when it
+                // has no `@`.
+                code: if section.kind == DataKind::Text
+                    && !section.code.is_empty()
+                    && !has_text_placeholder(&section.code)
+                {
+                    format!("General;General;General;{}", section.code)
+                } else {
+                    section.code.clone()
+                },
                 divisors: if section.kind != DataKind::Text && section.divisor != 1.0 {
                     vec![section.divisor]
                 } else {
@@ -318,14 +329,16 @@ impl DataStyles {
             let Some(condition) = condition_code(condition) else {
                 continue;
             };
-            numeric.push((condition, section.code.clone(), section.divisor));
+            // A section is spelled out: the built-in markers stand for a
+            // whole code only.
+            numeric.push((condition, literal_code(&section.code), section.divisor));
         }
         let base_code = if base.kind == DataKind::Text {
             text.get_or_insert(base.code.as_str());
             // Numbers no map matches show in the standard format.
             ("General".to_string(), 1.0)
         } else {
-            (base.code.clone(), base.divisor)
+            (literal_code(&base.code), base.divisor)
         };
         let conditions: Vec<&str> = numeric.iter().map(|(c, _, _)| c.as_str()).collect();
         let mut sections: Vec<(String, f64)> = Vec::new();
@@ -382,6 +395,24 @@ impl DataStyles {
     }
 }
 
+/// Whether a text code holds the `@` placeholder outside quoted literals.
+fn has_text_placeholder(code: &str) -> bool {
+    let mut quoted = false;
+    let mut escaped = false;
+    for c in code.chars() {
+        if escaped {
+            escaped = false;
+        } else if c == '\\' && !quoted {
+            escaped = true;
+        } else if c == '"' {
+            quoted = !quoted;
+        } else if c == '@' && !quoted {
+            return true;
+        }
+    }
+    false
+}
+
 /// `value()>=0` → `[>=0]` (§16.3: `value()` compared with a number);
 /// `None` for any other condition.
 fn condition_code(condition: &str) -> Option<String> {
@@ -423,11 +454,20 @@ fn attr<'a>(node: roxmltree::Node<'a, '_>, name: &str) -> Option<&'a str> {
     node.attribute((NS_NUMBER, name))
 }
 
-fn attr_u32(node: roxmltree::Node<'_, '_>, name: &str) -> Option<u32> {
-    attr(node, name)
+/// A digit count of a data-style element (`number:decimal-places`,
+/// `number:min-integer-digits`, …). A count no code of
+/// [`MAX_CODE_CHARS`] could spell rejects the document; nothing is clipped.
+fn attr_u32(node: roxmltree::Node<'_, '_>, name: &str) -> Result<Option<u32>, String> {
+    let Some(count) = attr(node, name)
         .or_else(|| node.attribute((NS_LOEXT, name)))
-        .and_then(|v| v.parse().ok())
-        .map(|v: u32| v.min(30))
+        .and_then(|v| v.trim().parse::<u64>().ok())
+    else {
+        return Ok(None);
+    };
+    if count > MAX_CODE_CHARS as u64 {
+        return Err(crate::error::resource("number format code"));
+    }
+    Ok(Some(count as u32))
 }
 
 fn long(node: roxmltree::Node<'_, '_>) -> bool {
@@ -458,16 +498,25 @@ fn color_token(node: roxmltree::Node<'_, '_>) -> Option<&'static str> {
 /// (§19.355 min-integer-digits, §19.350 grouping), with embedded text
 /// (§16.29.4 `number:embedded-text`, position counted leftward from the
 /// decimal separator).
-fn integer_digits(node: roxmltree::Node<'_, '_>, min: u32, grouping: bool) -> String {
-    let embedded: Vec<(u32, String)> = node
+fn integer_digits(
+    node: roxmltree::Node<'_, '_>,
+    min: u32,
+    grouping: bool,
+) -> Result<String, String> {
+    let mut embedded: Vec<(u32, String)> = Vec::new();
+    for n in node
         .children()
         .filter(|n| xml::is(*n, NS_NUMBER, "embedded-text"))
-        .filter_map(|n| {
-            let position = attr(n, "position")?.parse::<i64>().ok()?;
-            let text: String = n.text().unwrap_or("").to_string();
-            Some((position.clamp(0, 30) as u32, text))
-        })
-        .collect();
+    {
+        crate::budget::tick(1)?;
+        let Some(position) = attr(n, "position").and_then(|p| p.trim().parse::<i64>().ok()) else {
+            continue;
+        };
+        if position > MAX_CODE_CHARS as i64 {
+            return Err(crate::error::resource("number format code"));
+        }
+        embedded.push((position.max(0) as u32, n.text().unwrap_or("").to_string()));
+    }
     let widest = embedded.iter().map(|(p, _)| *p).max().unwrap_or(0);
     // Text at position p needs a digit slot on its left to hold the higher
     // digits (`#-#0` for a hyphen at position 2, as LibreOffice writes it).
@@ -515,32 +564,36 @@ fn integer_digits(node: roxmltree::Node<'_, '_>, min: u32, grouping: bool) -> St
         }
     }
     if min == 0 && !grouping && embedded.is_empty() {
-        return "#".into();
+        return Ok("#".into());
     }
-    out
+    Ok(out)
 }
 
-fn decimals(node: roxmltree::Node<'_, '_>) -> String {
-    let places = attr_u32(node, "decimal-places").unwrap_or(0);
+fn decimals(node: roxmltree::Node<'_, '_>) -> Result<String, String> {
+    let places = attr_u32(node, "decimal-places")?.unwrap_or(0);
     // §19.344 `number:decimal-replacement=""`: an integer shows no decimal
     // places, which LibreOffice reads as optional decimals (`0.##`).
     let optional = attr(node, "decimal-replacement") == Some("");
-    let min = attr_u32(node, "min-decimal-places")
+    let min = attr_u32(node, "min-decimal-places")?
         .unwrap_or(if optional { 0 } else { places })
         .min(places);
     if places == 0 {
-        return String::new();
+        return Ok(String::new());
     }
+    // At most `MAX_CODE_CHARS` places (`attr_u32`).
     let mut out = String::from(".");
     for i in 0..places {
         out.push(if i < min { '0' } else { '#' });
     }
-    out
+    Ok(out)
 }
 
 /// The code of one data-style element's children, whether it is the plain
 /// "General" number, and its `number:display-factor` (1: none).
-fn section_code(style: roxmltree::Node<'_, '_>, kind: DataKind) -> (String, bool, f64) {
+fn section_code(
+    style: roxmltree::Node<'_, '_>,
+    kind: DataKind,
+) -> Result<(String, bool, f64), String> {
     let mut code = String::new();
     let mut divisor = 1.0f64;
     if let Some(token) = color_token(style) {
@@ -579,22 +632,22 @@ fn section_code(style: roxmltree::Node<'_, '_>, kind: DataKind) -> (String, bool
         let mut sorted = fields.clone();
         sorted.sort_unstable();
         if numeric && sorted == ["day", "month", "year"] {
-            return (BUILTIN_SHORT_DATE.into(), false, 1.0);
+            return Ok((BUILTIN_SHORT_DATE.into(), false, 1.0));
         }
         // With hours and minutes it is the short date-time, built-in 22.
         if numeric && sorted == ["day", "hours", "minutes", "month", "year"] {
-            return (BUILTIN_SHORT_DATE_TIME.into(), false, 1.0);
+            return Ok((BUILTIN_SHORT_DATE_TIME.into(), false, 1.0));
         }
     }
     let mut general = false;
     let mut first_time_field = true;
-    for (index, child) in children.iter().enumerate() {
+    for child in children.iter() {
         let child = *child;
         match child.tag_name().name() {
             "number" => {
                 let grouping = attr(child, "grouping") == Some("true");
-                let places = attr_u32(child, "decimal-places");
-                let min_int = attr_u32(child, "min-integer-digits").unwrap_or(0);
+                let places = attr_u32(child, "decimal-places")?;
+                let min_int = attr_u32(child, "min-integer-digits")?.unwrap_or(0);
                 if places.is_none() {
                     // §19.343.2: without `number:decimal-places` the number
                     // takes the default precision. LibreOffice shows such a
@@ -606,8 +659,8 @@ fn section_code(style: roxmltree::Node<'_, '_>, kind: DataKind) -> (String, bool
                     code.push_str("General");
                     general = children.len() == 1;
                 } else {
-                    code.push_str(&integer_digits(child, min_int, grouping));
-                    code.push_str(&decimals(child));
+                    code.push_str(&integer_digits(child, min_int, grouping)?);
+                    code.push_str(&decimals(child)?);
                 }
                 // §19.346: the displayed number is the value divided by the
                 // factor (an xsd:double, sign unrestricted). Only a finite
@@ -624,26 +677,26 @@ fn section_code(style: roxmltree::Node<'_, '_>, kind: DataKind) -> (String, bool
             }
             "scientific-number" => {
                 let grouping = attr(child, "grouping") == Some("true");
-                let min_int = attr_u32(child, "min-integer-digits").unwrap_or(1);
+                let min_int = attr_u32(child, "min-integer-digits")?.unwrap_or(1);
                 // §19.351 `number:exponent-interval`: the exponent is a
                 // multiple of the interval, which SpreadsheetML expresses
                 // by that many integer digit slots (`##0.00E+0`).
-                let interval = attr_u32(child, "exponent-interval").unwrap_or(1);
+                let interval = attr_u32(child, "exponent-interval")?.unwrap_or(1);
                 if interval > min_int && !grouping {
                     for slot in 0..interval {
                         code.push(if slot < interval - min_int { '#' } else { '0' });
                     }
                 } else {
-                    code.push_str(&integer_digits(child, min_int, grouping));
+                    code.push_str(&integer_digits(child, min_int, grouping)?);
                 }
-                code.push_str(&decimals(child));
+                code.push_str(&decimals(child)?);
                 let sign = match attr(child, "forced-exponent-sign")
                     .or_else(|| child.attribute((NS_LOEXT, "forced-exponent-sign")))
                 {
                     Some("false") => "-",
                     _ => "+",
                 };
-                let exponent = attr_u32(child, "min-exponent-digits").unwrap_or(2).max(1);
+                let exponent = attr_u32(child, "min-exponent-digits")?.unwrap_or(2).max(1);
                 code.push('E');
                 code.push_str(sign);
                 code.push_str(&"0".repeat(exponent as usize));
@@ -656,7 +709,7 @@ fn section_code(style: roxmltree::Node<'_, '_>, kind: DataKind) -> (String, bool
                 // for a maximum of 999 with one minimum digit; without a
                 // maximum the minimum digits are the slots.
                 let fixed = attr(child, "denominator-value").filter(|v| v.parse::<u64>().is_ok());
-                let min_digits = attr_u32(child, "min-denominator-digits").unwrap_or(0);
+                let min_digits = attr_u32(child, "min-denominator-digits")?.unwrap_or(0);
                 let slots = attr(child, "max-denominator-value")
                     .or_else(|| child.attribute((NS_LOEXT, "max-denominator-value")))
                     .and_then(|v| v.trim().parse::<u64>().ok())
@@ -666,15 +719,15 @@ fn section_code(style: roxmltree::Node<'_, '_>, kind: DataKind) -> (String, bool
                 // LibreOffice shows a fraction that names no numerator
                 // digits, or no denominator at all, in its standard format
                 // (measured over the combinations of the four attributes).
-                let numerator = attr_u32(child, "min-numerator-digits");
+                let numerator = attr_u32(child, "min-numerator-digits")?;
                 let (Some(numerator), true) = (numerator, fixed.is_some() || slots > 0) else {
                     code.push_str("General");
                     general = children.len() == 1;
                     continue;
                 };
-                if let Some(min_int) = attr_u32(child, "min-integer-digits") {
+                if let Some(min_int) = attr_u32(child, "min-integer-digits")? {
                     let grouping = attr(child, "grouping") == Some("true");
-                    code.push_str(&integer_digits(child, min_int, grouping));
+                    code.push_str(&integer_digits(child, min_int, grouping)?);
                     code.push(' ');
                 }
                 code.push_str(&"?".repeat(numerator.max(1) as usize));
@@ -772,27 +825,20 @@ fn section_code(style: roxmltree::Node<'_, '_>, kind: DataKind) -> (String, bool
             }
             "minutes" => {
                 let token = if long(child) { "mm" } else { "m" };
-                // `m` reads as minutes only next to an hour or second field.
-                let next_to_time = index > 0
-                    && children[..index]
-                        .iter()
-                        .rev()
-                        .find(|n| n.tag_name().name() != "text")
-                        .is_some_and(|n| n.tag_name().name() == "hours")
-                    || children[index + 1..]
-                        .iter()
-                        .find(|n| n.tag_name().name() != "text")
-                        .is_some_and(|n| n.tag_name().name() == "seconds");
+                // A minutes field that is the style's largest component and
+                // does not truncate (§19.369) counts all minutes: `[mm]`.
+                // Any other is written `m` / `mm`, which reads as minutes
+                // beside hours or seconds and as the month elsewhere. That
+                // is how LibreOffice shows a minutes field standing alone:
+                // its format code for it is `MM`, and PT1H30M displays as
+                // 12, the month of the null date (measured with
+                // LibreOffice 26.8; §16.29.21 would give 30).
                 if duration && first_time_field {
                     code.push('[');
                     code.push_str(token);
                     code.push(']');
-                } else if next_to_time {
-                    code.push_str(token);
                 } else {
-                    code.push('[');
                     code.push_str(token);
-                    code.push(']');
                 }
                 first_time_field = false;
             }
@@ -805,7 +851,9 @@ fn section_code(style: roxmltree::Node<'_, '_>, kind: DataKind) -> (String, bool
                 } else {
                     code.push_str(token);
                 }
-                if let Some(places) = attr_u32(child, "decimal-places").filter(|p| *p > 0) {
+                // The workbook formatter shows seconds to the millisecond
+                // (three places); further places have no token.
+                if let Some(places) = attr_u32(child, "decimal-places")?.filter(|p| *p > 0) {
                     code.push('.');
                     code.push_str(&"0".repeat(places.min(3) as usize));
                 }
@@ -818,16 +866,16 @@ fn section_code(style: roxmltree::Node<'_, '_>, kind: DataKind) -> (String, bool
     // A style whose only fields are empty texts shows nothing (the `;;;`
     // idiom); a style without any field is the standard format.
     if children.is_empty() && (code.is_empty() || code == "[$-411]") {
-        return (
+        return Ok((
             match kind {
                 DataKind::Text => "@".into(),
                 _ => "General".into(),
             },
             true,
             1.0,
-        );
+        ));
     }
-    (code, general, divisor)
+    Ok((code, general, divisor))
 }
 
 #[cfg(test)]
@@ -875,6 +923,40 @@ mod tests {
         assert_eq!(code("F5"), "General");
         assert_eq!(code("F6"), "General");
         assert!(data.is_general("G") && data.is_general("F5"));
+    }
+
+    #[test]
+    fn counts_literal_text_styles_and_composed_markers() {
+        let mut data = codes(concat!(
+            // 31 integer digits are 31 digits, not 30.
+            r##"<number:number-style style:name="N31"><number:number number:decimal-places="0" number:min-integer-digits="31"/></number:number-style>"##,
+            // A text style of literal text only.
+            r##"<number:text-style style:name="LIT"><number:text>MASKED</number:text></number:text-style>"##,
+            r##"<number:text-style style:name="AT"><number:text>a@b </number:text><number:text-content/></number:text-style>"##,
+            // A minutes field alone: the month, as LibreOffice shows it;
+            // all minutes when the style does not truncate.
+            r##"<number:time-style style:name="MIN"><number:minutes number:style="long"/></number:time-style>"##,
+            r##"<number:time-style style:name="MINX" number:truncate-on-overflow="false"><number:minutes number:style="long"/></number:time-style>"##,
+            // A locale-ordered short date as the target of a condition.
+            r##"<number:date-style style:name="SHORT" number:automatic-order="true"><number:month/><number:text>/</number:text><number:day/><number:text>/</number:text><number:year/></number:date-style>"##,
+            r##"<number:date-style style:name="COND"><number:year number:style="long"/><style:map style:condition="value()&gt;=0" style:apply-style-name="SHORT"/></number:date-style>"##,
+        ));
+        let mut code = |name: &str| data.code(name).unwrap().0.code;
+        assert_eq!(code("N31"), "0".repeat(31));
+        assert_eq!(code("LIT"), "General;General;General;\"MASKED\"");
+        assert_eq!(code("AT"), "\"a@b \"@");
+        assert_eq!(code("MIN"), "mm");
+        assert_eq!(code("MINX"), "[mm]");
+        assert_eq!(code("COND"), "mm-dd-yy;yyyy");
+        // A count no code could spell rejects the document.
+        let xml = format!(
+            r##"<office:automatic-styles xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:style="{NS_STYLE}" xmlns:number="{NS_NUMBER}"><number:number-style style:name="BIG"><number:number number:decimal-places="4000000000" number:min-integer-digits="1"/></number:number-style></office:automatic-styles>"##
+        );
+        let document = roxmltree::Document::parse(&xml).unwrap();
+        assert_eq!(
+            DataStyles::default().add(document.root_element()),
+            Err(crate::error::resource("number format code"))
+        );
     }
 
     #[test]

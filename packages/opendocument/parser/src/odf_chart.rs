@@ -107,6 +107,13 @@ impl Point {
     }
 }
 
+/// A chart's tabular data (the deprecated whole-range form, §19.597.6 /
+/// §20.54): its category labels and, per series, a label and its points.
+struct Tabular {
+    categories: Vec<Point>,
+    series: Vec<(Option<String>, Vec<Point>)>,
+}
+
 /// The hidden flags of `points` when any is hidden (the chart model keeps
 /// none otherwise).
 fn hidden_flags(points: &[Point]) -> Option<Vec<bool>> {
@@ -235,6 +242,10 @@ struct LocalTable {
     rows: Vec<RowRun>,
     /// Source range address → (column, first data row).
     sources: HashMap<String, (usize, usize)>,
+    /// Whether the table marks its first row / column as labels
+    /// (`table:table-header-rows` / `table:table-header-columns`).
+    header_row: bool,
+    header_column: bool,
 }
 
 /// Grid rows up to `end` (exclusive) that repeat one authored row.
@@ -263,6 +274,12 @@ impl LocalTable {
         let Some(node) = chart.children().find(|n| xml::is(*n, NS_TABLE, "table")) else {
             return Ok(table);
         };
+        table.header_row = node
+            .children()
+            .any(|n| xml::is(n, NS_TABLE, "table-header-rows"));
+        table.header_column = node
+            .children()
+            .any(|n| xml::is(n, NS_TABLE, "table-header-columns"));
         let mut next_row = 0usize;
         for row in node
             .descendants()
@@ -343,6 +360,19 @@ impl LocalTable {
             Some(cell) => (cell.value.clone(), cell.text.clone()),
             None => (CellData::Empty, String::new()),
         }
+    }
+
+    /// The grid's size (rows, columns).
+    fn size(&self) -> (usize, usize) {
+        (
+            self.rows.last().map_or(0, |run| run.end),
+            self.rows
+                .iter()
+                .filter_map(|run| run.cells.last())
+                .map(|cell| cell.end)
+                .max()
+                .unwrap_or(0),
+        )
     }
 
     /// The local-table cells of a range on `local-table` (A1 = top-left).
@@ -539,6 +569,105 @@ impl Reader<'_> {
             }
         }
         Ok(out)
+    }
+
+    /// The chart's tabular data, for series that name no range of their own:
+    /// the plot area's `table:cell-range-address` (§19.597.6, deprecated)
+    /// with its `chart:data-source-has-labels` (§19.17), else the chart's
+    /// own table with its header row and column. Series are its columns,
+    /// or its rows for `chart:series-source="rows"` (§20.54).
+    fn tabular(
+        &self,
+        plot: roxmltree::Node<'_, '_>,
+        plot_chain: &[&Style],
+    ) -> Result<Option<Tabular>, String> {
+        let (grid, rows, columns, label_row, label_column) =
+            match plot.attribute((NS_TABLE, "cell-range-address")) {
+                Some(address) => {
+                    // One rectangle: a list of ranges has no single grid.
+                    let parts = crate::odf_text::split_addresses(address);
+                    let [part] = parts.as_slice() else {
+                        return Ok(None);
+                    };
+                    let Some((_, (r1, c1), (r2, c2))) = crate::odf_text::parse_range(part) else {
+                        return Ok(None);
+                    };
+                    let (rows, columns) = ((r2 - r1) as usize + 1, (c2 - c1) as usize + 1);
+                    let grid = self.range(part)?;
+                    if grid.len() != rows.saturating_mul(columns) {
+                        return Ok(None);
+                    }
+                    let labels = plot
+                        .attribute((NS_CHART, "data-source-has-labels"))
+                        .unwrap_or("none");
+                    (
+                        grid,
+                        rows,
+                        columns,
+                        matches!(labels, "row" | "both"),
+                        matches!(labels, "column" | "both"),
+                    )
+                }
+                None => {
+                    let (rows, columns) = self.local.size();
+                    check_points((rows as u64).saturating_mul(columns as u64))?;
+                    let mut grid = Vec::new();
+                    for row in budget::each(0, rows.saturating_sub(1) as u32) {
+                        let row = row? as usize;
+                        for column in budget::each(0, columns.saturating_sub(1) as u32) {
+                            grid.push(Point::local(self.local.copy(row, column? as usize)));
+                        }
+                    }
+                    if rows == 0 || columns == 0 {
+                        return Ok(None);
+                    }
+                    (
+                        grid,
+                        rows,
+                        columns,
+                        self.local.header_row,
+                        self.local.header_column,
+                    )
+                }
+            };
+        // Read as series in columns: for series in rows the grid is
+        // transposed, and so are its label row and column.
+        let by_rows = get(plot_chain, "chart:chart:series-source") == Some("rows");
+        let (points, count, label_points, label_series) = if by_rows {
+            (columns, rows, label_row, label_column)
+        } else {
+            (rows, columns, label_column, label_row)
+        };
+        let at = |point: usize, series: usize| -> &Point {
+            if by_rows {
+                &grid[series * columns + point]
+            } else {
+                &grid[point * columns + series]
+            }
+        };
+        let first_point = usize::from(label_series);
+        let first_series = usize::from(label_points);
+        let mut tabular = Tabular {
+            categories: Vec::new(),
+            series: Vec::new(),
+        };
+        if label_points {
+            for point in first_point..points {
+                budget::tick(1)?;
+                tabular.categories.push(at(point, 0).clone());
+            }
+        }
+        for series in first_series..count {
+            let mut values = Vec::new();
+            for point in first_point..points {
+                budget::tick(1)?;
+                values.push(at(point, series).clone());
+            }
+            tabular
+                .series
+                .push((label_series.then(|| at(0, series).text.clone()), values));
+        }
+        Ok(Some(tabular))
     }
 
     /// The local name of a namespace-qualified chart class token
@@ -949,16 +1078,6 @@ impl Reader<'_> {
         model: &mut ChartModel,
         data: &mut DataStyles,
     ) -> Result<(), String> {
-        let category_points = match plot
-            .descendants()
-            .find(|n| xml::is(*n, NS_CHART, "categories"))
-            .and_then(|c| c.attribute((NS_TABLE, "cell-range-address")))
-        {
-            Some(address) => self.range(address)?,
-            None => Vec::new(),
-        };
-        model.category_source_hidden = hidden_flags(&category_points);
-        let categories: Vec<String> = category_points.into_iter().map(|p| p.text).collect();
         let nodes: Vec<_> = plot
             .children()
             .filter(|n| xml::is(*n, NS_CHART, "series"))
@@ -966,6 +1085,36 @@ impl Reader<'_> {
         if nodes.len() > MAX_SERIES {
             return Err(chart_limit("chart series"));
         }
+        // Series that name no values range take the chart's tabular data in
+        // order (§19.597.6: the range of a series has priority).
+        let mut tabular = if nodes.iter().all(|n| {
+            n.attribute((NS_CHART, "values-cell-range-address"))
+                .is_some()
+        }) && !nodes.is_empty()
+        {
+            None
+        } else {
+            self.tabular(plot, plot_chain)?
+        };
+        if tabular
+            .as_ref()
+            .is_some_and(|t| t.series.len() > MAX_SERIES)
+        {
+            return Err(chart_limit("chart series"));
+        }
+        let category_points = match plot
+            .descendants()
+            .find(|n| xml::is(*n, NS_CHART, "categories"))
+            .and_then(|c| c.attribute((NS_TABLE, "cell-range-address")))
+        {
+            Some(address) => self.range(address)?,
+            None => tabular
+                .as_mut()
+                .map(|t| std::mem::take(&mut t.categories))
+                .unwrap_or_default(),
+        };
+        model.category_source_hidden = hidden_flags(&category_points);
+        let categories: Vec<String> = category_points.into_iter().map(|p| p.text).collect();
         let mut series_models = Vec::new();
         // §11.13: a series without the domains its class needs uses the
         // ones the previous series of the same class defined. Kept per
@@ -990,9 +1139,18 @@ impl Reader<'_> {
                 "stock" => "stock",
                 _ => primary,
             };
-            let value_points = match node.attribute((NS_CHART, "values-cell-range-address")) {
+            let own_values = node.attribute((NS_CHART, "values-cell-range-address"));
+            // Only a series without a range of its own is a column of the
+            // tabular data (and takes that column's label).
+            let from_table = tabular
+                .as_mut()
+                .filter(|_| own_values.is_none())
+                .and_then(|t| t.series.get_mut(index))
+                .map(std::mem::take);
+            let (table_label, table_points) = from_table.unwrap_or_default();
+            let value_points = match own_values {
                 Some(address) => self.range(address)?,
-                None => Vec::new(),
+                None => table_points,
             };
             let values: Vec<Option<f64>> = value_points.iter().map(Point::number).collect();
             let name = match node.attribute((NS_CHART, "label-cell-address")) {
@@ -1002,7 +1160,7 @@ impl Reader<'_> {
                     .map(|p| p.text)
                     .collect::<Vec<_>>()
                     .join(" "),
-                None => format!("Series{}", index + 1),
+                None => table_label.unwrap_or_else(|| format!("Series{}", index + 1)),
             };
             let mut own_domains = Vec::new();
             for address in node
@@ -1253,6 +1411,32 @@ impl Reader<'_> {
                 series.trend_lines = Some(trendlines);
             }
             series_models.push(series);
+        }
+        // A chart without `chart:series` elements plots every series of its
+        // tabular data, in the chart's class and the default colours.
+        if nodes.is_empty() {
+            for (index, (label, points)) in tabular
+                .map(|t| t.series)
+                .unwrap_or_default()
+                .into_iter()
+                .enumerate()
+            {
+                budget::tick(1)?;
+                let mut copy = Vec::new();
+                for category in &categories {
+                    budget::tick(1)?;
+                    copy.push(category.clone());
+                }
+                series_models.push(ChartSeries {
+                    name: label.unwrap_or_else(|| format!("Series{}", index + 1)),
+                    series_type: Some(primary.to_string()),
+                    color: Some(DEFAULT_COLORS[index % DEFAULT_COLORS.len()].to_string()),
+                    values: points.iter().map(Point::number).collect(),
+                    source_hidden: hidden_flags(&points),
+                    categories: (!copy.is_empty()).then_some(copy),
+                    ..ChartSeries::default()
+                });
+            }
         }
         if series_models.is_empty() {
             model.authored_without_series = true;
@@ -1671,6 +1855,70 @@ mod tests {
                 _ => None,
             })
         }
+    }
+
+    #[test]
+    fn a_chart_without_series_ranges_plots_its_tabular_data() {
+        // The deprecated source-range form: a plot-area range with labels
+        // in its first row and column, and no `chart:series`.
+        let body = |source: &str| {
+            format!(
+                r##"<chart:chart chart:class="chart:bar"><chart:plot-area table:cell-range-address="local-table.A1:.C3" chart:data-source-has-labels="both" {source}/>{LOCAL}</chart:chart>"##
+            )
+        };
+        let model = read_chart_document(&chart(&body(""), ""), None, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(model.categories, ["Q1", "Q2"]);
+        let read = |model: &ChartModel| {
+            model
+                .series
+                .iter()
+                .map(|s| (s.name.clone(), s.values.clone()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            read(&model),
+            [
+                ("Sales".to_string(), vec![Some(10.0), Some(12.0)]),
+                ("Cost".to_string(), vec![Some(4.0), Some(5.0)]),
+            ]
+        );
+        assert!(!model.authored_without_series);
+        // Series in rows (§20.54).
+        let rows = r##"<style:style style:name="pa" style:family="chart"><style:chart-properties chart:series-source="rows"/></style:style>"##;
+        let model =
+            read_chart_document(&chart(&body(r#"chart:style-name="pa""#), rows), None, None)
+                .unwrap()
+                .unwrap();
+        assert_eq!(model.categories, ["Sales", "Cost"]);
+        assert_eq!(
+            read(&model),
+            [
+                ("Q1".to_string(), vec![Some(10.0), Some(4.0)]),
+                ("Q2".to_string(), vec![Some(12.0), Some(5.0)]),
+            ]
+        );
+        // Series elements without ranges take the chart table's columns
+        // (its header row and column are its labels).
+        let local = LOCAL.replace(
+            r##"<table:table table:name="local-table">"##,
+            r##"<table:table table:name="local-table"><table:table-header-columns><table:table-column/></table:table-header-columns>"##,
+        );
+        let old = format!(
+            r##"<chart:chart chart:class="chart:line"><chart:plot-area><chart:series/><chart:series chart:values-cell-range-address="local-table.B2:.B3"/></chart:plot-area>{local}</chart:chart>"##
+        );
+        let model = read_chart_document(&chart(&old, ""), None, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(model.categories, ["Q1", "Q2"]);
+        assert_eq!(
+            read(&model),
+            [
+                ("Sales".to_string(), vec![Some(10.0), Some(12.0)]),
+                ("Series2".to_string(), vec![Some(10.0), Some(12.0)]),
+            ]
+        );
     }
 
     #[test]

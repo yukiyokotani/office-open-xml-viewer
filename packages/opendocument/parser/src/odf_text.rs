@@ -164,13 +164,23 @@ pub fn without_bound_prefix<'a>(node: roxmltree::Node<'_, '_>, value: &'a str) -
     }
 }
 
-/// The spaces one `text:s` stands for (§19.763 `text:c`, default 1). The
-/// count is the file's: spaces are written through
-/// [`crate::budget::push_spaces`], never allocated at once.
-pub fn space_count(node: roxmltree::Node<'_, '_>) -> usize {
-    node.attribute((crate::xml::NS_TEXT, "c"))
-        .and_then(|c| c.trim().parse::<usize>().ok())
-        .unwrap_or(1)
+/// The spaces one `text:s` stands for (§19.768 `text:c`, a
+/// nonNegativeInteger; one when absent or not a number). The count is the
+/// file's: spaces are written through [`crate::budget::push_spaces`], never
+/// allocated at once, and a count beyond the platform's integers rejects
+/// instead of becoming one space.
+pub fn space_count(node: roxmltree::Node<'_, '_>) -> Result<usize, String> {
+    let Some(value) = node.attribute((crate::xml::NS_TEXT, "c")) else {
+        return Ok(1);
+    };
+    let value = value.trim();
+    let digits = value.strip_prefix('+').unwrap_or(value);
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return Ok(1);
+    }
+    digits
+        .parse::<usize>()
+        .map_err(|_| crate::error::resource("text space"))
 }
 
 /// Implementation bound on one style value: any attribute of a style,
@@ -229,7 +239,7 @@ pub fn inline_text(node: roxmltree::Node<'_, '_>, out: &mut String) -> Result<()
             continue;
         }
         match child.tag_name().name() {
-            "s" => crate::budget::push_spaces(out, space_count(child))?,
+            "s" => crate::budget::push_spaces(out, space_count(child)?)?,
             "tab" => out.push('\t'),
             "line-break" => out.push('\n'),
             "note" | "ruby-text" => {}

@@ -226,6 +226,9 @@ cannot hold what LibreOffice shows, the reader does the following:
   search for unset properties there).
 - A number style without `number:decimal-places` is shown in the General
   format, as LibreOffice shows it.
+- A minutes field that stands next to neither hours nor seconds is shown as
+  LibreOffice shows it: the month, or all the minutes of a duration when the
+  style does not truncate.
 - Numbers are formatted by the workbook renderer's formatter, which follows
   Excel where the two differ: a negative number that rounds to zero keeps
   its minus sign (`-0` where LibreOffice shows `0`), and General shows at

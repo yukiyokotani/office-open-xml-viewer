@@ -1030,7 +1030,7 @@ fn collect_shape_runs(
             },
             "s" => {
                 let mut spaces = String::new();
-                budget::push_spaces(&mut spaces, crate::odf_text::space_count(child))?;
+                budget::push_spaces(&mut spaces, crate::odf_text::space_count(child)?)?;
                 push_text_run(runs, &spaces, font);
             }
             "tab" => push_text_run(runs, "\t", font),

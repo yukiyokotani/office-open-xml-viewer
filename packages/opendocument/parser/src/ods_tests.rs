@@ -277,6 +277,17 @@ fn unbounded_inputs_reject() {
             "{holder}"
         );
     }
+    // A count beyond the platform's integers rejects; it is not one space.
+    let huge = content(
+        "",
+        &table(
+            r#"<table:table-row><table:table-cell office:value-type="string"><text:p>a<text:s text:c="99999999999999999999999"/>b</text:p></table:table-cell></table:table-row>"#,
+        ),
+    );
+    assert_eq!(
+        read_text(&huge, Some(&styles(""))).err(),
+        Some(resource("text space"))
+    );
     // A parent chain past the style bound, and a cycle.
     let chain: String = (0..80)
         .map(|i| {
