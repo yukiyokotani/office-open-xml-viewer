@@ -258,8 +258,18 @@ describe('producer page objects', () => {
   it('resolve page-relative alignment against the physical page', () => {
     const result = layout(model(10, 2, { x: 72, y: 0, w: 200, h: 120, id: 1, alignBottom: true }));
     const page = result.pages[1]!;
-    const drawing = page.layers.header.flatMap((node) => node.kind === 'paragraph' ? node.drawings : [])[0]!;
+    const drawing = page.layers.body.flatMap((node) => node.kind === 'paragraph' ? node.drawings : [])[0]!;
     expect(Math.round(drawing.flowBounds.yPt)).toBe(792 - 120);
+  });
+
+  it('paint in the body stacking context: in front of the page text', () => {
+    const result = layout(model(60, 2));
+    const order = result.pages[1]!.layers.paintOrder;
+    const drawing = order.findIndex((entry) => entry.kind === 'drawing');
+    const lastText = order.map((entry) => entry.kind === 'node' && entry.layer === 'body'
+      && entry.node.kind === 'paragraph' && entry.node.lines.length > 0).lastIndexOf(true);
+    expect(order[drawing]).toMatchObject({ layer: 'front', sourceLayer: 'body' });
+    expect(drawing).toBeGreaterThan(lastText);
   });
 
   it('leave a document without page objects as it was', () => {

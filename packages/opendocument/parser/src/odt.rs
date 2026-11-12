@@ -403,7 +403,7 @@ struct Reader<'a> {
     /// Each master page's own region stories, built once.
     region_cache: HashMap<String, Rc<page::MasterStories>>,
     /// The anchor type of the enclosing drawing group (its members take it).
-    group_anchor: Option<String>,
+    group_anchor: Option<&'static str>,
     /// Drawings anchored to an explicit physical page, by page (1-based).
     page_objects: BTreeMap<u32, Vec<DocRun>>,
     /// Each retained picture's intrinsic size by key (scanned once).
@@ -642,6 +642,8 @@ impl<'a> Reader<'a> {
         let saved_width = std::mem::replace(&mut self.text_width, width.max(1.0));
         let saved_indent = std::mem::replace(&mut self.section_indent, (0.0, 0.0));
         let saved_anchors = std::mem::take(&mut self.pending_anchors);
+        // A contained story (a text box in a group) anchors on its own.
+        let saved_group_anchor = self.group_anchor.take();
         let saved_list = self.list_paragraph.take();
         let enclosing_area = self.area;
         self.next_area += 1;
@@ -651,6 +653,7 @@ impl<'a> Reader<'a> {
         let blocks = std::mem::replace(&mut self.blocks, saved_blocks);
         self.section_markers = saved_markers;
         self.story = saved_story;
+        self.group_anchor = saved_group_anchor;
         self.text_width = saved_width;
         self.section_indent = saved_indent;
         // Frames anchored inside the story without a following paragraph.

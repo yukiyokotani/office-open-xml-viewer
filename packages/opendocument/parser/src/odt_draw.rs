@@ -295,10 +295,9 @@ impl<'a> Reader<'a> {
         }
         // A group member has no anchor of its own: it takes its group's
         // (§10.3.15; the group is the anchored object).
-        let inherited = self.group_anchor.clone();
         let anchor = node
             .attribute((NS_TEXT, "anchor-type"))
-            .or(inherited.as_deref())
+            .or(self.group_anchor)
             .or_else(|| graphic.get(NS_TEXT, "anchor-type"))
             .unwrap_or("paragraph");
         let x = node
@@ -1403,14 +1402,19 @@ impl<'a> Reader<'a> {
     /// anchor (DOCX anchors hold one object each).
     fn group(&mut self, node: roxmltree::Node<'a, 'a>) -> Result<Option<DocRun>, String> {
         let graphic = self.graphic(node)?;
-        let anchor = node
+        // §19.759 values only (a validated, fixed-size anchor). An
+        // as-character group cannot stay one inline object in the DOCX
+        // model; its members keep their paragraph anchoring.
+        let anchor = match node
             .attribute((NS_TEXT, "anchor-type"))
             .or_else(|| graphic.get(NS_TEXT, "anchor-type"))
-            // An as-character group cannot stay one inline object in the
-            // DOCX model; its members keep their paragraph anchoring.
-            .filter(|anchor| *anchor != "as-char")
-            .map(str::to_string)
-            .or_else(|| self.group_anchor.clone());
+        {
+            Some("page") => Some("page"),
+            Some("paragraph") => Some("paragraph"),
+            Some("char") => Some("char"),
+            Some("frame") => Some("frame"),
+            _ => self.group_anchor,
+        };
         let saved = std::mem::replace(&mut self.group_anchor, anchor);
         let result = self.group_members(node);
         self.group_anchor = saved;

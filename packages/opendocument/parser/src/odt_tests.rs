@@ -808,3 +808,35 @@ fn page_anchors_past_the_page_bound_are_refused() {
     .expect("refused");
     assert!(error.contains("page limit"), "{error}");
 }
+
+#[test]
+fn group_anchors_stop_at_contained_stories() {
+    // A text box in a paragraph-anchored group anchors its own content: an
+    // as-character frame inside stays inline. An unknown group anchor value
+    // is not inherited.
+    let body = r##"<text:p><draw:g text:anchor-type="paragraph"><draw:frame svg:x="0cm" svg:y="0cm" svg:width="4cm" svg:height="2cm"><draw:text-box><text:p><draw:frame text:anchor-type="as-char" svg:width="1cm" svg:height="1cm"><draw:text-box><text:p>in</text:p></draw:text-box></draw:frame></text:p></draw:text-box></draw:frame></draw:g><draw:g text:anchor-type="not-an-anchor"><draw:rect svg:width="1cm" svg:height="1cm"/></draw:g>x</text:p>"##;
+    let document = read_fixture(Fixture {
+        body,
+        ..Fixture::default()
+    });
+    let outer = paragraphs(&document.body)[0]
+        .runs
+        .iter()
+        .find_map(|run| match run {
+            DocRun::Shape(shape) if !shape.text_box_content.is_empty() => Some(shape),
+            _ => None,
+        })
+        .unwrap();
+    let TextBoxBlockWire::Body(BodyElement::Paragraph(inner)) = &outer.text_box_content[0] else {
+        panic!()
+    };
+    let inner_shape = inner
+        .runs
+        .iter()
+        .find_map(|run| match run {
+            DocRun::Shape(shape) => Some(shape),
+            _ => None,
+        })
+        .unwrap();
+    assert!(inner_shape.inline);
+}

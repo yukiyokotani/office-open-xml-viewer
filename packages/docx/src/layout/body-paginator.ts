@@ -4092,15 +4092,19 @@ function composePageStories(
     const footer = page.parityBlank ? null : acquire('footer');
     // The page's producer page objects: a header-class page story whose
     // drawings are positioned on the page (their wrap was registered on the
-    // body at the page's start).
+    // body at the page's start). It is laid out in the body's own section
+    // frame (as the prescan resolved its exclusions, vertical pages too) and
+    // painted in the body stacking context, so its drawings order with body
+    // text and body anchors as body page anchors do.
     const pageObjectSource = pageObjectSources.get(page.pageIndex);
+    const bodyGeometry = page.section.geometry;
     const pageObject = pageObjectSource ? (() => {
       const { story, translation } = layoutBandStory((band) => session.layoutStory!({
         source: pageObjectSource,
         pageStoryOwner: owner.sectionOccurrenceId,
         pageIndex: page.pageIndex,
         pageNumber: { displayNumber: page.pageNumber.displayNumber, format: page.pageNumber.format },
-        section: pageStorySection,
+        section: page.section,
         container: {
           id: `story:page-objects:page:${page.pageIndex}`,
           kind: 'header',
@@ -4108,14 +4112,15 @@ function composePageStories(
           // large as the page must not exhaust a band.
           capacity: 'unbounded',
           bounds: {
-            xPt: inlineStartPt,
+            xPt: Math.abs(bodyGeometry.marginLeft),
             yPt: 0,
-            widthPt: inlineExtentPt,
-            heightPt: geometry.pageHeight,
+            widthPt: Math.max(0, bodyGeometry.pageWidth
+              - Math.abs(bodyGeometry.marginLeft) - Math.abs(bodyGeometry.marginRight)),
+            heightPt: bodyGeometry.pageHeight,
           },
         },
         ...(band ? { bandTranslationPt: band } : {}),
-      }), 'header', geometry);
+      }), 'header', bodyGeometry);
       return translateStoryLayout(story, translation);
     })() : null;
     const retainedNotes = footnotesByPage.get(page.pageIndex) ?? [];
@@ -4236,9 +4241,6 @@ function composePageStories(
       ...(header?.blocks.map((node): PageLayerNode => ({
         layer: 'header', node, coordinateSpace,
       })) ?? []),
-      ...(pageObject?.blocks.map((node): PageLayerNode => ({
-        layer: 'header', node, coordinateSpace,
-      })) ?? []),
       ...existing.slice(headerIndex),
     ];
     let lastBodyIndex = -1;
@@ -4248,6 +4250,9 @@ function composePageStories(
     const noteIndex = lastBodyIndex < 0 ? withHeader.length : lastBodyIndex + 1;
     const entries: PageLayerNode[] = [
       ...withHeader.slice(0, noteIndex),
+      ...(pageObject?.blocks.map((node): PageLayerNode => ({
+        layer: 'body', node, coordinateSpace: 'section-logical',
+      })) ?? []),
       ...notes.map((node): PageLayerNode => ({
         layer: 'notes', node, coordinateSpace: 'section-logical',
       })),
