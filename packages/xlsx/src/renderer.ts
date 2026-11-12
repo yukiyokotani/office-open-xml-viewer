@@ -5678,6 +5678,25 @@ function fillShape(
   width: number, height: number, cs: number,
   paint = resolveSpreadsheetShapeFill(ctx, shape, width, height, cs),
 ): boolean {
+  // The opacity of a hatch or picture fill (colours carry their own alpha).
+  const fill = shape.fill;
+  const alpha = (fill?.fillType === 'hatch' || fill?.fillType === 'image') && fill.alpha !== undefined
+    && Number.isFinite(fill.alpha) ? Math.min(1, Math.max(0, fill.alpha)) : 1;
+  if (alpha >= 1) return fillShapeOpaque(ctx, shape, width, height, cs, paint);
+  const previous = ctx.globalAlpha;
+  ctx.globalAlpha = previous * alpha;
+  try {
+    return fillShapeOpaque(ctx, shape, width, height, cs, paint);
+  } finally {
+    ctx.globalAlpha = previous;
+  }
+}
+
+function fillShapeOpaque(
+  ctx: CanvasRenderingContext2D, shape: ShapeInfo,
+  width: number, height: number, cs: number,
+  paint: ReturnType<typeof resolveSpreadsheetShapeFill>,
+): boolean {
   if (shape.fill?.fillType === 'hatch') return paintHatchFill(ctx, shape.fill, width, height, cs);
   if (!paint) return false;
   if (shape.fill?.fillType === 'image' && shape.fill.shift && typeof paint === 'object' && 'setTransform' in paint

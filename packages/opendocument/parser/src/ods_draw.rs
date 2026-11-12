@@ -935,9 +935,19 @@ fn shape_info(
     let stroke_color = if stroke == Some("none") {
         None
     } else {
+        // §20.165 `svg:stroke-opacity`: the alpha of the line colour.
+        let opacity = get(chain, "graphic:svg:stroke-opacity")
+            .and_then(percent)
+            .filter(|v| v.is_finite())
+            .map_or(1.0, |v| v.clamp(0.0, 1.0));
+        let alpha = (opacity * 255.0).round() as u8;
         get(chain, "graphic:svg:stroke-color")
             .and_then(shape_color)
             .or_else(|| Some("#000000".into()))
+            .map(|colour| match alpha {
+                255 => colour,
+                alpha => format!("{colour}{alpha:02X}"),
+            })
     };
     let stroke_width = get(chain, "graphic:svg:stroke-width")
         .and_then(length_pt)
@@ -1498,6 +1508,7 @@ fn shape_fill(fill: crate::odf_fill::Fill) -> Option<xlsx_model::ShapeFill> {
             angle: hatch.angle,
             distance_pt: hatch.distance_pt,
             lines: hatch.lines,
+            alpha: (hatch.opacity < 1.0).then_some(hatch.opacity),
         },
         Fill::Picture(picture) => xlsx_model::ShapeFill::Image {
             image_path: picture.path,
@@ -1515,6 +1526,7 @@ fn shape_fill(fill: crate::odf_fill::Fill) -> Option<xlsx_model::ShapeFill> {
                 crate::odf_fill::TileShift::Rows(v) => xlsx_model::ShapeImageShift::Rows(v),
                 crate::odf_fill::TileShift::Columns(v) => xlsx_model::ShapeImageShift::Columns(v),
             }),
+            alpha: (picture.opacity < 1.0).then_some(picture.opacity),
         },
     })
 }

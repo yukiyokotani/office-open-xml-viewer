@@ -483,6 +483,7 @@ impl RetainedBytes for ShapeFill {
                 angle,
                 distance_pt,
                 lines,
+                alpha: _,
             } => 0u64
                 .saturating_add(color.heap_bytes())
                 .saturating_add(background.heap_bytes())
@@ -499,6 +500,7 @@ impl RetainedBytes for ShapeFill {
                 align: _,
                 offset: _,
                 shift: _,
+                alpha: _,
             } => 0u64
                 .saturating_add(image_path.heap_bytes())
                 .saturating_add(mime_type.heap_bytes()),

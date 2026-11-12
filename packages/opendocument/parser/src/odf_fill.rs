@@ -5,6 +5,15 @@
 //! reader maps it to the workbook drawing model; the presentation reader can
 //! map it to its own.
 //!
+//! The opacity of the area (§20.152 `draw:opacity`, or the opacity gradient
+//! §20.153 `draw:opacity-name` names, which LibreOffice applies instead of
+//! it) is part of the description: colours of a translucent fill are
+//! `RRGGBBAA`, and hatches and pictures carry their opacity. A solid colour
+//! under an opacity gradient is a gradient of that colour; a colour gradient
+//! under an opacity gradient of the same geometry has both in its stops.
+//! Two gradients of different geometry are not one gradient: the area then
+//! takes the mean opacity, as do hatches and pictures.
+//!
 //! Gradients are expressed as DrawingML gradients (ECMA-376 §20.1.8.33
 //! `a:gradFill`): stop lists (`ooxml_common::fill::GradStop`), a linear angle
 //! (§20.1.8.41, degrees clockwise from left-to-right) or a path shade
@@ -32,7 +41,7 @@ pub enum GradientShape {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Gradient {
     /// Stops along the axis (linear) or from the focus outwards (path),
-    /// colours `RRGGBB`.
+    /// colours `RRGGBB`, or `RRGGBBAA` where translucent.
     pub stops: Vec<GradStop>,
     pub shape: GradientShape,
     /// `draw:angle` of a path gradient, degrees counter-clockwise; DrawingML
@@ -61,6 +70,8 @@ pub struct Hatch {
     pub distance_pt: f64,
     /// 1 (single), 2 (double), 3 (triple).
     pub lines: u8,
+    /// Opacity of the lines and the background, 0 to 1.
+    pub opacity: f64,
 }
 
 /// How a picture covers its area (§20.341 `style:repeat`).
@@ -114,11 +125,14 @@ pub struct Picture {
     /// tiles moved right and down by these fractions of the tile.
     pub offset: (f64, f64),
     pub shift: Option<TileShift>,
+    /// Opacity of the picture, 0 to 1.
+    pub opacity: f64,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Fill {
     None,
+    /// `RRGGBB`, or `RRGGBBAA` where translucent.
     Solid(String),
     Gradient(Gradient),
     Hatch(Hatch),
@@ -139,6 +153,33 @@ struct GradientDef {
     stops: Vec<(f64, String)>,
 }
 
+/// §16.40.? `draw:opacity`: a gradient of opacities, with the geometry
+/// attributes of a colour gradient.
+#[derive(Clone, Debug)]
+struct OpacityDef {
+    style: String,
+    angle: f64,
+    border: f64,
+    cx: f64,
+    cy: f64,
+    /// Offsets from the start side and their opacities, 0 to 1.
+    stops: Vec<(f64, f64)>,
+}
+
+/// Values laid out along a gradient's axis (linear) or from its focus
+/// outwards (path), positions ascending.
+struct Axis<T> {
+    stops: Vec<(f64, T)>,
+    shape: GradientShape,
+    rotation: f64,
+}
+
+/// The opacity of an area.
+enum Opacity {
+    Uniform(f64),
+    Graded(Axis<f64>),
+}
+
 #[derive(Clone, Debug)]
 struct HatchDef {
     style: String,
@@ -153,6 +194,7 @@ pub struct FillDefs {
     gradients: HashMap<String, GradientDef>,
     hatches: HashMap<String, HatchDef>,
     images: HashMap<String, String>,
+    opacities: HashMap<String, OpacityDef>,
 }
 
 /// `draw:angle` (§19.218): an angle with a unit, or a bare number in tenths
@@ -242,6 +284,51 @@ impl FillDefs {
                         stops,
                     },
                 );
+            } else if xml::is(node, NS_DRAW, "opacity") {
+                // LibreOffice 7.6 multi-step opacity: `loext:opacity-stop`
+                // with `svg:offset` and `loext:stop-opacity` (0 to 1).
+                let stop_nodes: Vec<_> = node
+                    .children()
+                    .filter(|n| xml::is(*n, NS_LOEXT, "opacity-stop"))
+                    .collect();
+                if stop_nodes.len() > MAX_GRADIENT_STOPS {
+                    return Err(crate::error::resource("gradient stop"));
+                }
+                let unit = |v: f64| v.is_finite().then(|| v.clamp(0.0, 1.0));
+                let mut stops: Vec<(f64, f64)> = stop_nodes
+                    .into_iter()
+                    .filter_map(|stop| {
+                        let number = |name: (&str, &str)| {
+                            stop.attribute(name)?
+                                .trim()
+                                .parse::<f64>()
+                                .ok()
+                                .and_then(unit)
+                        };
+                        Some((
+                            number((NS_SVG, "offset"))?,
+                            number((NS_LOEXT, "stop-opacity"))?,
+                        ))
+                    })
+                    .collect();
+                if stops.len() < 2 {
+                    let end = |key: &str| attr(key).and_then(percent).and_then(unit).unwrap_or(1.0);
+                    stops = vec![(0.0, end("start")), (1.0, end("end"))];
+                }
+                self.opacities.insert(
+                    name.to_string(),
+                    OpacityDef {
+                        style: attr("style").unwrap_or("linear").to_string(),
+                        angle: angle(attr("angle")),
+                        border: attr("border")
+                            .and_then(percent)
+                            .unwrap_or(0.0)
+                            .clamp(0.0, 1.0),
+                        cx: attr("cx").and_then(percent).unwrap_or(0.5).clamp(0.0, 1.0),
+                        cy: attr("cy").and_then(percent).unwrap_or(0.5).clamp(0.0, 1.0),
+                        stops,
+                    },
+                );
             } else if xml::is(node, NS_DRAW, "hatch") {
                 self.hatches.insert(
                     name.to_string(),
@@ -273,8 +360,27 @@ impl FillDefs {
         Ok(())
     }
 
-    /// The fill of a graphic style chain (`graphic:` properties).
+    /// The fill of a graphic style chain (`graphic:` properties), with its
+    /// opacity.
     pub fn resolve(&self, chain: &[&Style]) -> Fill {
+        let property = |key: &str| get(chain, &format!("graphic:draw:{key}"));
+        let opacity = match property("opacity-name").and_then(|name| self.opacities.get(name)) {
+            Some(def) => Opacity::Graded(lay_out(
+                &def.style,
+                (def.angle, def.border, def.cx, def.cy),
+                def.stops.clone(),
+            )),
+            None => Opacity::Uniform(
+                property("opacity")
+                    .and_then(percent)
+                    .filter(|v| v.is_finite())
+                    .map_or(1.0, |v| v.clamp(0.0, 1.0)),
+            ),
+        };
+        translucent(self.opaque(chain), opacity)
+    }
+
+    fn opaque(&self, chain: &[&Style]) -> Fill {
         let property = |key: &str| get(chain, &format!("graphic:draw:{key}"));
         let solid = || property("fill-color").and_then(hex_color);
         match property("fill") {
@@ -302,6 +408,7 @@ impl FillDefs {
                                 "triple" => 3,
                                 _ => 1,
                             },
+                            opacity: 1.0,
                         })
                     },
                 ),
@@ -377,11 +484,134 @@ impl FillDefs {
                                     _ => None,
                                 }
                             }),
+                        opacity: 1.0,
                     })
                 })
                 .unwrap_or_else(|| solid().map_or(Fill::None, Fill::Solid)),
             _ => solid().map_or(Fill::None, Fill::Solid),
         }
+    }
+}
+
+/// `hex` with the alpha of `opacity`, when it is not opaque.
+fn with_alpha(hex: &str, opacity: f64) -> String {
+    let alpha = (opacity.clamp(0.0, 1.0) * 255.0).round() as u8;
+    match hex.get(..6) {
+        Some(rgb) if alpha < 255 => format!("{rgb}{alpha:02X}"),
+        _ => hex.to_string(),
+    }
+}
+
+/// The value of ascending `stops` at `position`, by `mix(a, b, t)` between
+/// the stops around it.
+fn sample<T: Clone>(stops: &[(f64, T)], position: f64, mix: impl Fn(&T, &T, f64) -> T) -> T {
+    let after = stops.partition_point(|(at, _)| *at <= position);
+    match (after.checked_sub(1).map(|i| &stops[i]), stops.get(after)) {
+        (Some((from, a)), Some((to, b))) if to > from => mix(a, b, (position - from) / (to - from)),
+        (Some((_, a)), _) => a.clone(),
+        (None, Some((_, b))) => b.clone(),
+        (None, None) => unreachable!("a gradient has stops"),
+    }
+}
+
+fn mix_number(a: &f64, b: &f64, t: f64) -> f64 {
+    a + (b - a) * t
+}
+
+fn mix_colour(a: &str, b: &str, t: f64) -> String {
+    let channel = |at: usize| {
+        let of = |hex: &str| {
+            hex.get(at..at + 2)
+                .and_then(|v| u8::from_str_radix(v, 16).ok())
+                .unwrap_or(0) as f64
+        };
+        mix_number(&of(a), &of(b), t).round().clamp(0.0, 255.0) as u8
+    };
+    format!("{:02X}{:02X}{:02X}", channel(0), channel(2), channel(4))
+}
+
+/// The mean of an opacity gradient along its axis.
+fn mean(stops: &[(f64, f64)]) -> f64 {
+    let mut total = 0.0;
+    let mut previous = (0.0, stops.first().map_or(1.0, |s| s.1));
+    for &(at, value) in stops
+        .iter()
+        .chain([&(1.0, stops.last().map_or(1.0, |s| s.1))])
+    {
+        total += (at - previous.0).max(0.0) * (value + previous.1) / 2.0;
+        previous = (at, value);
+    }
+    total.clamp(0.0, 1.0)
+}
+
+/// `fill` seen through `opacity`.
+fn translucent(fill: Fill, opacity: Opacity) -> Fill {
+    let uniform = |opacity: &Opacity| match opacity {
+        Opacity::Uniform(value) => *value,
+        Opacity::Graded(axis) => mean(&axis.stops),
+    };
+    match (fill, opacity) {
+        (Fill::None, _) => Fill::None,
+        (Fill::Solid(colour), Opacity::Graded(axis)) => Fill::Gradient(Gradient {
+            stops: axis
+                .stops
+                .iter()
+                .map(|(at, value)| stop(*at, &with_alpha(&colour, *value)))
+                .collect(),
+            shape: axis.shape,
+            rotation: axis.rotation,
+        }),
+        (Fill::Solid(colour), opacity) => Fill::Solid(with_alpha(&colour, uniform(&opacity))),
+        (Fill::Gradient(mut gradient), opacity) => {
+            match opacity {
+                // Both gradients along one axis: every stop of either, with
+                // the other's value there.
+                Opacity::Graded(axis)
+                    if axis.shape == gradient.shape && axis.rotation == gradient.rotation =>
+                {
+                    let colours: Vec<(f64, String)> = gradient
+                        .stops
+                        .iter()
+                        .map(|s| (s.position, s.color.clone()))
+                        .collect();
+                    let mut stops: Vec<GradStop> = colours
+                        .iter()
+                        .map(|(at, colour)| {
+                            stop(
+                                *at,
+                                &with_alpha(colour, sample(&axis.stops, *at, mix_number)),
+                            )
+                        })
+                        .chain(axis.stops.iter().map(|(at, value)| {
+                            stop(
+                                *at,
+                                &with_alpha(
+                                    &sample(&colours, *at, |a, b, t| mix_colour(a, b, t)),
+                                    *value,
+                                ),
+                            )
+                        }))
+                        .collect();
+                    stops.sort_by(|a, b| a.position.total_cmp(&b.position));
+                    gradient.stops = stops;
+                }
+                opacity => {
+                    let value = uniform(&opacity);
+                    for stop in &mut gradient.stops {
+                        stop.color = with_alpha(&stop.color, value);
+                    }
+                }
+            }
+            Fill::Gradient(gradient)
+        }
+        (Fill::Hatch(hatch), opacity) => Fill::Hatch(Hatch {
+            opacity: uniform(&opacity),
+            ..hatch
+        }),
+        (Fill::Picture(picture), opacity) => Fill::Picture(Picture {
+            opacity: uniform(&opacity),
+            ..picture
+        }),
     }
 }
 
@@ -404,27 +634,42 @@ fn gradient(def: &GradientDef) -> Gradient {
     let end = scaled(&def.end, def.end_intensity);
     // Multi-colour stops (LibreOffice 7.6 `loext:gradient-stop`) run from
     // the start side; otherwise the two colours.
-    let mut colours: Vec<(f64, String)> = if def.stops.len() >= 2 {
+    let colours: Vec<(f64, String)> = if def.stops.len() >= 2 {
         def.stops.clone()
     } else {
         vec![(0.0, start), (1.0, end)]
     };
-    colours.sort_by(|a, b| a.0.total_cmp(&b.0));
-    let border = def.border;
+    let axis = lay_out(&def.style, (def.angle, def.border, def.cx, def.cy), colours);
+    Gradient {
+        stops: axis.stops.iter().map(|(at, c)| stop(*at, c)).collect(),
+        shape: axis.shape,
+        rotation: axis.rotation,
+    }
+}
+
+/// Lay values given from the start side of a `style` gradient (colours, or
+/// the opacities of a `draw:opacity`) out in DrawingML terms.
+fn lay_out<T: Clone>(
+    style: &str,
+    (angle, border, cx, cy): (f64, f64, f64, f64),
+    mut values: Vec<(f64, T)>,
+) -> Axis<T> {
+    values.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let at = |position: f64, value: &T| (position.clamp(0.0, 1.0), value.clone());
     // Map an offset in [0, 1] from the start side, after the border.
     let along = |t: f64| border + (1.0 - border) * t;
-    match def.style.as_str() {
+    match style {
         "linear" => {
             let mut stops = Vec::new();
             if border > 0.0 {
-                stops.push(stop(0.0, &colours[0].1));
+                stops.push(at(0.0, &values[0].1));
             }
-            stops.extend(colours.iter().map(|(t, c)| stop(along(*t), c)));
-            Gradient {
+            stops.extend(values.iter().map(|(t, c)| at(along(*t), c)));
+            Axis {
                 stops,
                 // Start at the top (DrawingML 90°), rotated counter-clockwise.
                 shape: GradientShape::Linear {
-                    angle: (90.0 - def.angle).rem_euclid(360.0),
+                    angle: (90.0 - angle).rem_euclid(360.0),
                 },
                 rotation: 0.0,
             }
@@ -433,34 +678,34 @@ fn gradient(def: &GradientDef) -> Gradient {
             let half = |t: f64| along(t) / 2.0;
             let mut stops = Vec::new();
             if border > 0.0 {
-                stops.push(stop(0.0, &colours[0].1));
+                stops.push(at(0.0, &values[0].1));
             }
-            stops.extend(colours.iter().map(|(t, c)| stop(half(*t), c)));
-            stops.extend(colours.iter().rev().map(|(t, c)| stop(1.0 - half(*t), c)));
+            stops.extend(values.iter().map(|(t, c)| at(half(*t), c)));
+            stops.extend(values.iter().rev().map(|(t, c)| at(1.0 - half(*t), c)));
             if border > 0.0 {
-                stops.push(stop(1.0, &colours[0].1));
+                stops.push(at(1.0, &values[0].1));
             }
-            Gradient {
+            Axis {
                 stops,
                 shape: GradientShape::Linear {
-                    angle: (90.0 - def.angle).rem_euclid(360.0),
+                    angle: (90.0 - angle).rem_euclid(360.0),
                 },
                 rotation: 0.0,
             }
         }
         style => {
             // Path shades run from the focus (position 0) outwards; ODF's
-            // start colour is outside, so the stops are reversed.
-            let mut stops: Vec<GradStop> = colours
+            // start value is outside, so the stops are reversed.
+            let mut stops: Vec<(f64, T)> = values
                 .iter()
                 .rev()
-                .map(|(t, c)| stop((1.0 - along(*t)).max(0.0), c))
+                .map(|(t, c)| at((1.0 - along(*t)).max(0.0), c))
                 .collect();
             if border > 0.0 {
-                stops.push(stop(1.0, &colours[0].1));
+                stops.push(at(1.0, &values[0].1));
             }
-            stops.sort_by(|a, b| a.position.total_cmp(&b.position));
-            Gradient {
+            stops.sort_by(|a, b| a.0.total_cmp(&b.0));
+            Axis {
                 stops,
                 shape: GradientShape::Path {
                     // §19.218.2 spells the rectangular blend `rectangle` in
@@ -472,13 +717,13 @@ fn gradient(def: &GradientDef) -> Gradient {
                         "circle"
                     },
                     focus: FillRect {
-                        l: def.cx,
-                        t: def.cy,
-                        r: 1.0 - def.cx,
-                        b: 1.0 - def.cy,
+                        l: cx,
+                        t: cy,
+                        r: 1.0 - cx,
+                        b: 1.0 - cy,
                     },
                 },
-                rotation: def.angle,
+                rotation: angle,
             }
         }
     }
@@ -573,7 +818,8 @@ mod tests {
                 background: Some("FFFFFF".into()),
                 angle: 45.0,
                 distance_pt: length_pt("0.1cm").unwrap(),
-                lines: 2
+                lines: 2,
+                opacity: 1.0,
             })
         );
         let picture = resolve(
@@ -587,6 +833,7 @@ mod tests {
             align: (0.5, 0.5),
             offset: (0.0, 0.0),
             shift: None,
+            opacity: 1.0,
         };
         assert_eq!(picture, Fill::Picture(stretched.clone()));
         // §20.341: without `style:repeat` the picture repeats (LibreOffice's
@@ -622,6 +869,83 @@ mod tests {
                 ..stretched
             })
         );
+    }
+
+    #[test]
+    fn opacity_is_part_of_the_fill() {
+        let stops = |fill: Fill| match fill {
+            Fill::Gradient(g) => g
+                .stops
+                .iter()
+                .map(|s| (s.position, s.color.clone()))
+                .collect::<Vec<_>>(),
+            other => panic!("{other:?}"),
+        };
+        // §20.152: a uniform opacity is the alpha of every colour.
+        assert_eq!(
+            resolve(
+                "",
+                r##"draw:fill="solid" draw:fill-color="#ff0000" draw:opacity="50%""##
+            ),
+            Fill::Solid("FF000080".into())
+        );
+        assert_eq!(
+            resolve(
+                "",
+                r##"draw:fill="solid" draw:fill-color="#ff0000" draw:opacity="100%""##
+            ),
+            Fill::Solid("FF0000".into())
+        );
+        let gradient = r##"<draw:gradient draw:name="G" draw:style="linear" draw:start-color="#ff0000" draw:end-color="#0000ff"/>"##;
+        assert_eq!(
+            stops(resolve(
+                gradient,
+                r#"draw:fill="gradient" draw:fill-gradient-name="G" draw:opacity="20%""#
+            )),
+            [(0.0, "FF000033".into()), (1.0, "0000FF33".into())]
+        );
+        // §20.153: an opacity gradient replaces the uniform opacity. Over a
+        // solid colour it is a gradient of that colour.
+        let fade = r##"<draw:opacity draw:name="T" draw:style="linear" draw:start="100%" draw:end="0%" draw:border="50%"/>"##;
+        assert_eq!(
+            stops(resolve(
+                fade,
+                r##"draw:fill="solid" draw:fill-color="#00ff00" draw:opacity="30%" draw:opacity-name="T""##
+            )),
+            [
+                (0.0, "00FF00".into()),
+                (0.5, "00FF00".into()),
+                (1.0, "00FF0000".into())
+            ]
+        );
+        // Along the same axis as a colour gradient, both are in the stops.
+        assert_eq!(
+            stops(resolve(
+                &format!("{gradient}{fade}"),
+                r#"draw:fill="gradient" draw:fill-gradient-name="G" draw:opacity-name="T""#
+            )),
+            [
+                (0.0, "FF0000".into()),
+                (0.0, "FF0000".into()),
+                (0.5, "800080".into()),
+                (1.0, "0000FF00".into()),
+                (1.0, "0000FF00".into())
+            ]
+        );
+        // Across it, the area takes the mean opacity (here 75%).
+        let across = r##"<draw:opacity draw:name="T" draw:style="linear" draw:start="100%" draw:end="0%" draw:border="50%" draw:angle="90deg"/>"##;
+        assert_eq!(
+            stops(resolve(
+                &format!("{gradient}{across}"),
+                r#"draw:fill="gradient" draw:fill-gradient-name="G" draw:opacity-name="T""#
+            )),
+            [(0.0, "FF0000BF".into()), (1.0, "0000FFBF".into())]
+        );
+        let hatch = resolve(
+            r##"<draw:hatch draw:name="H" draw:color="#000000" draw:distance="0.1cm"/>"##,
+            r#"draw:fill="hatch" draw:fill-hatch-name="H" draw:opacity="40%""#,
+        );
+        assert!(matches!(hatch, Fill::Hatch(Hatch { opacity, .. }) if opacity == 0.4));
     }
 
     #[test]

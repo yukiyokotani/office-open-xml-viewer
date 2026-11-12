@@ -206,3 +206,28 @@ describe('section divisors (OpenDocument display factor)', () => {
     expect(formatChartValWithCode(42, '0', false, [Number.NaN])).toBe('42');
   });
 });
+
+describe('scientific and fraction sections', () => {
+  it('writes the exponent of a scientific code (ECMA-376 §18.8.30)', () => {
+    expect(formatChartValWithCode(1000, '0.00E+00')).toBe('1.00E+03');
+    expect(formatChartValWithCode(-0.00123, '0.00E+00')).toBe('-1.23E-03');
+    expect(formatChartValWithCode(0, '0.00E+00')).toBe('0.00E+00');
+    // A mantissa that rounds up to ten takes the next exponent.
+    expect(formatChartValWithCode(9999, '0.0E+0')).toBe('1.0E+4');
+    expect(formatChartValWithCode(12345, '0.0E-0')).toBe('1.2E4');
+    // The exponent is a multiple of the integer placeholders.
+    expect(formatChartValWithCode(12345, '##0.0E+0')).toBe('12.3E+3');
+  });
+
+  it('writes fractions', () => {
+    expect(formatChartValWithCode(1.5, '# ?/?')).toBe('1 1/2');
+    expect(formatChartValWithCode(0.25, '# ?/?')).toBe('1/4');
+    expect(formatChartValWithCode(3, '# ?/?')).toBe('3');
+    expect(formatChartValWithCode(0, '# ?/?')).toBe('0');
+    expect(formatChartValWithCode(2.999, '# ?/?')).toBe('3');
+    expect(formatChartValWithCode(0.3125, '# ??/??')).toBe('5/16');
+    expect(formatChartValWithCode(0.3, '# ?/8')).toBe('2/8');
+    expect(formatChartValWithCode(1.5, '?/?')).toBe('3/2');
+    expect(formatChartValWithCode(-1.5, '# ?/?')).toBe('-1 1/2');
+  });
+});

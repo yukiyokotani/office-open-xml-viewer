@@ -245,7 +245,10 @@ colours, gradients (linear, axial, radial, ellipsoid, square, rectangular,
 with border and centre; the rotation of a non-linear gradient is not
 applied), hatches, and pictures that are stretched, repeated (at their
 size, from their reference point, with its offsets and the tile stagger) or
-drawn once.
+drawn once. Fills and lines keep their opacity; an opacity gradient is shown
+over a solid colour and over a colour gradient of the same geometry, and as
+its mean opacity over other fills. Chart axis and label number formats
+include scientific and fraction formats.
 
 The workbook grid has 1,048,576 rows and 16,384 columns: rows and columns
 of a table beyond it are not shown, as when LibreOffice saves such a table

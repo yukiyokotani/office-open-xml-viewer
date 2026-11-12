@@ -991,7 +991,8 @@ pub enum ShapeFill {
     /// Colours are `#RRGGBB`; `angle` is degrees counter-clockwise from the
     /// horizontal of the first line family; `lines` is 1, 2 (with the
     /// perpendicular family) or 3 (also the family 45° further
-    /// counter-clockwise).
+    /// counter-clockwise). `alpha` is the opacity of the whole fill (absent:
+    /// opaque).
     #[serde(rename_all = "camelCase")]
     Hatch {
         color: String,
@@ -1000,6 +1001,8 @@ pub enum ShapeFill {
         angle: f64,
         distance_pt: f64,
         lines: u8,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        alpha: Option<f64>,
     },
     /// A picture filling the shape outline (an OpenDocument
     /// `draw:fill-image`, §16.41): stretched over the shape, repeated, or
@@ -1009,7 +1012,8 @@ pub enum ShapeFill {
     /// and height left of and above the picture (one tile of a repeated
     /// picture), `[0.5, 0.5]` being the centre. Repeated tiles are then
     /// moved by `offset` (fractions of the tile's width and height), and
-    /// every second row or column of them by `shift`.
+    /// every second row or column of them by `shift`. `alpha` is the
+    /// opacity of the picture (absent: opaque).
     #[serde(rename_all = "camelCase")]
     Image {
         image_path: String,
@@ -1023,6 +1027,8 @@ pub enum ShapeFill {
         offset: [f64; 2],
         #[serde(skip_serializing_if = "Option::is_none")]
         shift: Option<ShapeImageShift>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        alpha: Option<f64>,
     },
 }
 
@@ -2166,6 +2172,7 @@ mod tests {
             angle: 45.0,
             distance_pt: 2.0,
             lines: 2,
+            alpha: None,
         };
         assert_eq!(
             serde_json::to_value(&hatch).unwrap(),
@@ -2180,10 +2187,11 @@ mod tests {
             align: [0.0, 0.5],
             offset: [0.25, 0.0],
             shift: Some(ShapeImageShift::Rows(0.5)),
+            alpha: Some(0.5),
         };
         assert_eq!(
             serde_json::to_value(&image).unwrap(),
-            serde_json::json!({"fillType": "image", "imagePath": "Pictures/a.png", "mimeType": "image/png", "layout": "tile", "width": {"pt": 10.0}, "height": {"fraction": 0.25}, "align": [0.0, 0.5], "offset": [0.25, 0.0], "shift": {"rows": 0.5}})
+            serde_json::json!({"fillType": "image", "imagePath": "Pictures/a.png", "mimeType": "image/png", "layout": "tile", "width": {"pt": 10.0}, "height": {"fraction": 0.25}, "align": [0.0, 0.5], "offset": [0.25, 0.0], "shift": {"rows": 0.5}, "alpha": 0.5})
         );
     }
 

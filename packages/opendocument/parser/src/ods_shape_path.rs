@@ -42,8 +42,9 @@ struct Env<'a> {
     modifiers: Vec<f64>,
     view: (f64, f64, f64, f64),
     log: (f64, f64),
-    /// Set when an evaluation exceeded [`MAX_DEPTH`].
-    overflow: bool,
+    /// Why evaluation stopped: an evaluation deeper than [`MAX_DEPTH`], or
+    /// the read's step budget (every operand is a step).
+    failure: Option<String>,
 }
 
 impl Env<'_> {
@@ -54,8 +55,7 @@ impl Env<'_> {
             Some(Slot::Evaluating) | None => return 0.0,
             Some(Slot::Pending) => {}
         }
-        if depth > MAX_DEPTH {
-            self.overflow = true;
+        if !self.enter(depth) {
             return 0.0;
         }
         self.cache[index] = Slot::Evaluating;
@@ -78,13 +78,25 @@ impl Env<'_> {
         }
     }
 
-    /// Whether an evaluation at `depth` is within the bound (and records
-    /// the overflow otherwise).
+    /// Whether an evaluation at `depth` may go on: one step of the read's
+    /// work, within the depth bound. The first refusal is kept and ends
+    /// every evaluation after it.
     fn enter(&mut self, depth: usize) -> bool {
-        if depth > MAX_DEPTH {
-            self.overflow = true;
+        if self.failure.is_none() {
+            if depth > MAX_DEPTH {
+                self.failure = Some(over_limit());
+            } else if let Err(error) = crate::budget::tick(1) {
+                self.failure = Some(error);
+            }
         }
-        !self.overflow
+        self.failure.is_none()
+    }
+
+    fn check(&mut self) -> Result<(), String> {
+        match self.failure.take() {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
     }
 
     fn keyword(&self, name: &str) -> Option<f64> {
@@ -310,9 +322,7 @@ fn tokens(path: &str, env: &mut Env<'_>) -> Result<Vec<Token>, String> {
         };
         out.push(Token::Value(value));
     }
-    if env.overflow {
-        return Err(over_limit());
-    }
+    env.check()?;
     Ok(out)
 }
 
@@ -376,9 +386,19 @@ pub fn custom_geometry(
         })
         .unwrap_or_default();
     if view.2 <= 0.0 || view.3 <= 0.0 {
-        if let Some((w, h)) = sub_views.first() {
-            view = (0.0, 0.0, *w, *h);
-        }
+        // An empty view box (LibreOffice writes `0 0 0 0` for shapes it
+        // imported from OOXML) leaves the path in the shape's own size:
+        // the first sub-view when there is one, else the logical size its
+        // equations call `logwidth` / `logheight` (1/100 mm).
+        view = match sub_views.first() {
+            Some((w, h)) => (0.0, 0.0, *w, *h),
+            None => (
+                0.0,
+                0.0,
+                size_pt.0 * 2540.0 / 72.0,
+                size_pt.1 * 2540.0 / 72.0,
+            ),
+        };
     }
     let equation_nodes: Vec<_> = geometry
         .children()
@@ -415,15 +435,13 @@ pub fn custom_geometry(
         modifiers,
         view,
         log: (size_pt.0 * 2540.0 / 72.0, size_pt.1 * 2540.0 / 72.0),
-        overflow: false,
+        failure: None,
     };
     // Equations mostly reference earlier ones: evaluating them in order
     // keeps each evaluation's reference chain short.
     for index in 0..env.equations.len() {
         env.equation(index, 0);
-        if env.overflow {
-            return Err(over_limit());
-        }
+        env.check()?;
     }
     let tokens = tokens(path, &mut env)?;
     let mut paths: Vec<PathInfo> = Vec::new();
@@ -1111,6 +1129,21 @@ mod tests {
         assert!(
             matches!(paths[0].commands[1], PathCmd::LineTo { x, y } if x == 2000.0 && y == 50.0)
         );
+    }
+
+    #[test]
+    fn every_operand_of_an_equation_is_a_step_of_the_read() {
+        let sum = vec!["1"; 1000].join("+");
+        let xml = shape(
+            &format!(r#"<draw:equation draw:name="f0" draw:formula="{sum}"/>"#),
+            "M ?f0 0 L 1 1",
+        );
+        let scope = crate::budget::Scope::enter(1 << 20);
+        let before = crate::budget::work();
+        let paths = geometry(&xml).unwrap().unwrap();
+        assert!(matches!(paths[0].commands[0], PathCmd::MoveTo { x, .. } if x == 1000.0));
+        assert!(crate::budget::work() - before >= 1000);
+        scope.finish().unwrap();
     }
 
     #[test]

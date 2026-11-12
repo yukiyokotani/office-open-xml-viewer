@@ -26,6 +26,8 @@ export interface ShapeHatchFill {
   angle: number;
   distancePt: number;
   lines: number;
+  /** Opacity of the whole fill, 0 to 1 (absent: opaque). */
+  alpha?: number;
 }
 
 /** One edge of a picture fill's size: points, or a fraction of the shape's
@@ -51,6 +53,8 @@ export interface ShapeImageFill {
   align: [number, number];
   offset: [number, number];
   shift?: { rows: number } | { columns: number };
+  /** Opacity of the picture, 0 to 1 (absent: opaque). */
+  alpha?: number;
 }
 import type {
   NormalizedOoxmlResourcePolicy,

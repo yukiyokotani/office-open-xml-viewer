@@ -1114,3 +1114,48 @@ fn a_custom_shape_draws_its_enhanced_path_and_mirror() {
         xlsx_model::ShapeGeom::Preset { name, .. } if name == "rightArrow"
     ));
 }
+
+#[test]
+fn an_empty_view_box_leaves_the_path_in_the_shape_size() {
+    // LibreOffice writes `svg:viewBox="0 0 0 0"` for shapes imported from
+    // OOXML; their paths are in 1/100 mm of the shape (`logwidth`).
+    let body = content(
+        "",
+        &table(concat!(
+            r#"<table:table-row><table:table-cell>"#,
+            r#"<draw:custom-shape svg:width="2cm" svg:height="1cm"><draw:enhanced-geometry svg:viewBox="0 0 0 0" draw:type="ooxml-rect" draw:enhanced-path="M 0 0 L ?f0 0 ?f0 ?f1 0 ?f1 Z N">"#,
+            r#"<draw:equation draw:name="f0" draw:formula="logwidth"/><draw:equation draw:name="f1" draw:formula="logheight"/>"#,
+            r#"</draw:enhanced-geometry></draw:custom-shape>"#,
+            r#"</table:table-cell></table:table-row>"#
+        )),
+    );
+    let workbook = read_text(&body, Some(&styles(""))).unwrap();
+    match &workbook.sheets[0].worksheet.shape_groups[0].shapes[0].geom {
+        xlsx_model::ShapeGeom::Custom { paths } => {
+            assert!((paths[0].w - 2000.0).abs() < 1.0 && (paths[0].h - 1000.0).abs() < 1.0);
+            assert!(paths[0].commands.iter().any(|c| matches!(
+                c,
+                xlsx_model::PathCmd::LineTo { x, y } if (*x - 2000.0).abs() < 1.0 && (*y - 1000.0).abs() < 1.0
+            )));
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn fills_and_lines_keep_their_opacity() {
+    let automatic = r##"<style:style style:name="gr1" style:family="graphic"><style:graphic-properties draw:fill="solid" draw:fill-color="#ff0000" draw:opacity="50%" draw:stroke="solid" svg:stroke-color="#0000ff" svg:stroke-opacity="25%"/></style:style>"##;
+    let body = content(
+        automatic,
+        &table(concat!(
+            r#"<table:table-row><table:table-cell>"#,
+            r#"<draw:rect draw:style-name="gr1" svg:width="2cm" svg:height="1cm"/>"#,
+            r#"</table:table-cell></table:table-row>"#
+        )),
+    );
+    let workbook = read_text(&body, Some(&styles(""))).unwrap();
+    let shape = &workbook.sheets[0].worksheet.shape_groups[0].shapes[0];
+    // §20.152 / §20.165: the alpha of the colours (`#RRGGBBAA`).
+    assert_eq!(shape.fill_color.as_deref(), Some("#FF000080"));
+    assert_eq!(shape.stroke_color.as_deref(), Some("#0000FF40"));
+}

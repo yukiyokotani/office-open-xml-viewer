@@ -903,7 +903,7 @@ impl Reader<'_> {
                     .or(Some(50));
             }
         }
-        let secondary_y = self.axes(plot, &mut model, data)?;
+        let secondary_y = self.axes(plot, primary, &mut model, data)?;
         self.series(
             plot,
             &plot_chain,
@@ -915,6 +915,62 @@ impl Reader<'_> {
         Ok(model)
     }
 
+    /// The range whose cells `axis` plots. An x axis plots its categories,
+    /// or the x values of a scatter or bubble chart; a y axis the values of
+    /// the first series drawn against it, or the y values of a bubble chart.
+    /// §11.13: the one domain of a scatter series is its x values; a bubble
+    /// series has its y values then its x values, and its values range is
+    /// the bubble sizes.
+    fn axis_source<'n>(
+        plot: roxmltree::Node<'n, '_>,
+        axis: roxmltree::Node<'n, '_>,
+        primary: &str,
+    ) -> Result<Option<&'n str>, String> {
+        let x = axis.attribute((NS_CHART, "dimension")) == Some("x");
+        let name = axis.attribute((NS_CHART, "name")).unwrap_or("");
+        if x {
+            if let Some(categories) = axis
+                .children()
+                .find(|n| xml::is(*n, NS_CHART, "categories"))
+                .and_then(|c| c.attribute((NS_TABLE, "cell-range-address")))
+            {
+                return Ok(Some(categories));
+            }
+        }
+        // Which domain of a series the axis plots; `None` for its values.
+        let domain = match (primary, x) {
+            ("bubble", true) => Some(1),
+            ("bubble", false) | (_, true) => Some(0),
+            (_, false) => None,
+        };
+        for series in plot.children() {
+            budget::tick(1)?;
+            if !xml::is(series, NS_CHART, "series") {
+                continue;
+            }
+            let attached = x
+                || series
+                    .attribute((NS_CHART, "attached-axis"))
+                    .is_none_or(|attached| attached == name);
+            if !attached {
+                continue;
+            }
+            let Some(index) = domain else {
+                return Ok(series.attribute((NS_CHART, "values-cell-range-address")));
+            };
+            let mut domains = series
+                .children()
+                .filter(|n| xml::is(*n, NS_CHART, "domain"))
+                .filter_map(|d| d.attribute((NS_TABLE, "cell-range-address")));
+            // Later series may leave their domains to the first that has
+            // them, so a series without this one does not decide.
+            if let Some(address) = domains.nth(index) {
+                return Ok(Some(address));
+            }
+        }
+        Ok(None)
+    }
+
     /// Read the axes. The first axis of a dimension is its primary axis and
     /// the next y axis the secondary one, whatever they are named (§19.24
     /// `chart:name` is a free name; LibreOffice's `primary-y` /
@@ -923,6 +979,7 @@ impl Reader<'_> {
     fn axes<'n>(
         &self,
         plot: roxmltree::Node<'n, '_>,
+        primary: &str,
         model: &mut ChartModel,
         data: &mut DataStyles,
     ) -> Result<Option<&'n str>, String> {
@@ -963,32 +1020,9 @@ impl Reader<'_> {
                     .map(|g| self.paint(&self.chain(g)))
             };
             // §20.35: an axis linked to its source shows the number format
-            // of the cells it plots: the values of the first series drawn
-            // against it, or its categories (the x values of a scatter
-            // chart).
+            // of the cells it plots.
             let format_code = if prop("link-data-style-to-source") == Some("true") {
-                let source = match dimension {
-                    "x" => axis
-                        .children()
-                        .find(|n| xml::is(*n, NS_CHART, "categories"))
-                        .and_then(|c| c.attribute((NS_TABLE, "cell-range-address")))
-                        .or_else(|| {
-                            plot.descendants()
-                                .find(|n| xml::is(*n, NS_CHART, "domain"))
-                                .and_then(|d| d.attribute((NS_TABLE, "cell-range-address")))
-                        }),
-                    _ => plot
-                        .children()
-                        .filter(|n| xml::is(*n, NS_CHART, "series"))
-                        .find(|series| {
-                            series
-                                .attribute((NS_CHART, "attached-axis"))
-                                .is_none_or(|attached| attached == name)
-                        })
-                        .and_then(|series| {
-                            series.attribute((NS_CHART, "values-cell-range-address"))
-                        }),
-                };
+                let source = Self::axis_source(plot, axis, primary)?;
                 self.source_format(source)
             } else {
                 chain
@@ -2029,6 +2063,49 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(model.val_axis_format_code.as_deref(), Some("0.00"));
+    }
+
+    #[test]
+    fn linked_axes_take_the_formats_of_the_ranges_they_plot() {
+        // The format of a range is its address, so the test reads which
+        // range each axis took.
+        struct Named;
+        impl RangeResolver for Named {
+            fn cells(&self, address: &str) -> Result<Option<Vec<SourceCell>>, String> {
+                Fixed.cells(address)
+            }
+            fn format(&self, address: &str) -> Option<(String, Option<Vec<f64>>)> {
+                Some((address.to_string(), None))
+            }
+        }
+        let styles = r##"<style:style style:name="linked" style:family="chart"><style:chart-properties chart:link-data-style-to-source="true"/></style:style>"##;
+        let body = |class: &str| {
+            format!(
+                concat!(
+                    r##"<chart:chart chart:class="chart:{class}"><chart:plot-area>"##,
+                    r##"<chart:axis chart:dimension="x" chart:name="primary-x" chart:style-name="linked"/>"##,
+                    r##"<chart:axis chart:dimension="y" chart:name="primary-y" chart:style-name="linked"/>"##,
+                    r##"<chart:series chart:values-cell-range-address="S.C1:S.C2">"##,
+                    r##"<chart:domain table:cell-range-address="S.A1:S.A2"/><chart:domain table:cell-range-address="S.B1:S.B2"/>"##,
+                    r##"</chart:series></chart:plot-area></chart:chart>"##
+                ),
+                class = class
+            )
+        };
+        let axes = |class: &str| {
+            let model = read_chart_document(&chart(&body(class), styles), None, Some(&Named))
+                .unwrap()
+                .unwrap();
+            (
+                model.cat_axis_format_code.unwrap_or_default(),
+                model.val_axis_format_code.unwrap_or_default(),
+            )
+        };
+        // §11.13: a scatter series' domain is its x values, and its values
+        // its y values; a bubble series has its y values then its x values
+        // as domains, and its values are the sizes.
+        assert_eq!(axes("scatter"), ("S.A1:S.A2".into(), "S.C1:S.C2".into()));
+        assert_eq!(axes("bubble"), ("S.B1:S.B2".into(), "S.A1:S.A2".into()));
     }
 
     #[test]

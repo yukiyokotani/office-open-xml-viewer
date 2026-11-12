@@ -204,11 +204,17 @@ function isGeneralSection(section: string): boolean {
 function applyChartNumberSection(abs: number, section: string): string {
   // Tokenize the section, separating numeric-pattern runs (`#`, `0`, `.`,
   // `,`, `?`) from literal runs so percent / decimal handling runs once.
-  type Tok = { kind: 'lit' | 'num'; text: string };
+  // A scientific section (§18.8.30 `E+` / `E-` after the digit pattern) has
+  // one `exp` token where its exponent goes; a fraction section (`# ?/?`,
+  // `?/8`) one `den` token, the digit run before its `/` being the numerator.
+  type Tok = { kind: 'lit' | 'num' | 'exp' | 'den' | 'slash'; text: string };
   const toks: Tok[] = [];
   let i = 0;
   let pushedNum = false;
   let percent = false;
+  let exponent: { plus: boolean; digits: number } | null = null;
+  let fraction = false;
+  const isPlaceholder = (ch: string | undefined): boolean => ch === '0' || ch === '#' || ch === '?';
   while (i < section.length) {
     const c = section[i];
     if (c === '"') {
@@ -255,6 +261,25 @@ function applyChartNumberSection(abs: number, section: string): string {
       pushedNum = true;
       continue;
     }
+    if ((c === 'E' || c === 'e') && pushedNum && !exponent && !fraction
+        && (section[i + 1] === '+' || section[i + 1] === '-') && isPlaceholder(section[i + 2])) {
+      let j = i + 2;
+      let digits = 0;
+      while (isPlaceholder(section[j])) { if (section[j] === '0') digits++; j++; }
+      exponent = { plus: section[i + 1] === '+', digits };
+      toks.push({ kind: 'exp', text: '' });
+      i = j;
+      continue;
+    }
+    if (c === '/' && !fraction && !exponent && toks[toks.length - 1]?.kind === 'num'
+        && (isPlaceholder(section[i + 1]) || /[1-9]/.test(section[i + 1] ?? ''))) {
+      let j = i + 1;
+      while (isPlaceholder(section[j]) || /[0-9]/.test(section[j] ?? '')) j++;
+      fraction = true;
+      toks.push({ kind: 'slash', text: '/' }, { kind: 'den', text: section.slice(i + 1, j) });
+      i = j;
+      continue;
+    }
     // Everything else (currency symbols like ¥, $, parens, spaces) is literal.
     toks.push({ kind: 'lit', text: c });
     i++;
@@ -264,6 +289,32 @@ function applyChartNumberSection(abs: number, section: string): string {
     return toks.map(t => t.text).join('');
   }
   const value = percent ? abs * 100 : abs;
+  if (fraction) return formatFractionSection(value, toks);
+  if (exponent) {
+    let pattern = '';
+    for (const t of toks) if (t.kind === 'num') pattern += t.text;
+    // The exponent is a multiple of the integer placeholders (`##0.0E+0`
+    // is engineering notation); a mantissa that rounds up to the next
+    // power takes the next exponent.
+    const places = Math.max(1, (pattern.split('.')[0].match(/[#0?]/g) ?? []).length);
+    const [digits, power] = value === 0 ? ['0', '0'] : value.toExponential().split('e');
+    let exp = Math.floor(Number(power) / places) * places;
+    let mantissa = formatNumericPattern(Number(`${digits}e${Number(power) - exp}`), pattern);
+    if (Number(mantissa.replace(/,/g, '')) >= 10 ** places) {
+      exp += places;
+      mantissa = formatNumericPattern(Number(`${digits}e${Number(power) - exp}`), pattern);
+    }
+    const sign = exp < 0 ? '-' : exponent.plus ? '+' : '';
+    const exponentText = `E${sign}${String(Math.abs(exp)).padStart(exponent.digits, '0')}`;
+    let seen = false;
+    return toks.map(t => {
+      if (t.kind === 'lit') return t.text;
+      if (t.kind === 'exp') return exponentText;
+      if (seen) return '';
+      seen = true;
+      return mantissa;
+    }).join('');
+  }
   // Merge numeric tokens into one pattern — Excel treats `#,##0.00` as a
   // single pattern even when flanked by literals. We keep the literal tokens
   // where they are and replace the first num token with the formatted number,
@@ -277,6 +328,63 @@ function applyChartNumberSection(abs: number, section: string): string {
     if (seenNum) return '';
     seenNum = true;
     return formatted;
+  }).join('');
+}
+
+/** The fraction `numerator / denominator` nearest to `value` (0 ≤ value < 1
+ *  or an improper value) with a denominator of at most `maxDenominator`,
+ *  by the Stern–Brocot mediants between its floor and ceiling. */
+function nearestFraction(value: number, maxDenominator: number): [number, number] {
+  const whole = Math.floor(value);
+  const rest = value - whole;
+  let [ln, ld, hn, hd] = [0, 1, 1, 1];
+  let best: [number, number] = rest < 0.5 ? [0, 1] : [1, 1];
+  for (;;) {
+    const n = ln + hn;
+    const d = ld + hd;
+    if (d > maxDenominator) break;
+    if (Math.abs(n / d - rest) < Math.abs(best[0] / best[1] - rest)) best = [n, d];
+    if (n / d === rest) break;
+    if (n / d < rest) { ln = n; ld = d; } else { hn = n; hd = d; }
+  }
+  return [whole * best[1] + best[0], best[1]];
+}
+
+/** A fraction section: the digit run before `/` is the numerator, the runs
+ *  before that the whole part (none: an improper fraction), and the
+ *  denominator is fixed (`?/8`) or has at most as many digits as its
+ *  placeholders. A value without a fractional part shows its whole part
+ *  alone, and one below 1 its fraction alone. */
+function formatFractionSection(
+  value: number,
+  toks: { kind: 'lit' | 'num' | 'exp' | 'den' | 'slash'; text: string }[],
+): string {
+  const slash = toks.findIndex(t => t.kind === 'slash');
+  const numerator = slash - 1;
+  const denominatorSpec = toks[slash + 1].text;
+  const wholeToks = toks.slice(0, numerator).filter(t => t.kind === 'num');
+  const mixed = wholeToks.length > 0;
+  const fixed = /^[0-9]+$/.test(denominatorSpec) && Number(denominatorSpec) > 0 ? Number(denominatorSpec) : null;
+  const whole = mixed ? Math.floor(value) : 0;
+  const rest = value - whole;
+  let [n, d] = fixed !== null
+    ? [Math.round(rest * fixed), fixed]
+    : nearestFraction(rest, 10 ** Math.min(denominatorSpec.length, 7) - 1);
+  let shownWhole = whole;
+  if (mixed && n >= d) { shownWhole += 1; n -= d; }
+  const wholeText = mixed ? formatNumericPattern(shownWhole, wholeToks.map(t => t.text).join('')) : '';
+  const first = toks.findIndex(t => t.kind === 'num');
+  const showWhole = mixed && (shownWhole !== 0 || n === 0);
+  const showFraction = !mixed || n !== 0;
+  return toks.map((t, index) => {
+    // Literals between the whole part and the fraction (the space of
+    // `# ?/?`) belong to showing both.
+    if (mixed && index > first && index < numerator) return showWhole && showFraction && t.kind === 'lit' ? t.text : '';
+    if (index === first && mixed) return showWhole ? (wholeText || '0') : '';
+    if (index === numerator) return showFraction ? String(n) : '';
+    if (t.kind === 'slash') return showFraction ? '/' : '';
+    if (t.kind === 'den') return showFraction ? String(d) : '';
+    return t.kind === 'lit' ? t.text : '';
   }).join('');
 }
 
