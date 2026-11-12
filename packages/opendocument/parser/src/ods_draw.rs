@@ -1399,11 +1399,10 @@ fn collect_shape_runs(
     for child in node.children() {
         // One step per node: each may add a run or resolve a span style.
         budget::tick(1)?;
-        // §6.1.2: character data is collapsed across the paragraph; the
-        // space owed before this node's characters is written with them.
-        let mut piece = String::new();
         if child.is_text() {
-            collapse.text(child.text().unwrap_or(""), &mut piece);
+            // §6.1.2: character data is collapsed across the paragraph.
+            let mut piece = String::new();
+            collapse.text(child.text().unwrap_or(""), &mut piece)?;
             push_text_run(runs, &piece, font);
             continue;
         }
@@ -1423,19 +1422,18 @@ fn collect_shape_runs(
                 None => collect_shape_runs(ctx, child, set, font, collapse, runs)?,
             },
             "s" => {
-                collapse.element(&mut piece);
-                budget::push_spaces(&mut piece, crate::odf_text::space_count(child)?)?;
-                push_text_run(runs, &piece, font);
+                let mut spaces = String::new();
+                budget::push_spaces(&mut spaces, crate::odf_text::space_count(child)?)?;
+                push_text_run(runs, &spaces, font);
+                collapse.element();
             }
             "tab" => {
-                collapse.element(&mut piece);
-                piece.push('\t');
-                push_text_run(runs, &piece, font);
+                push_text_run(runs, "\t", font);
+                collapse.element();
             }
             "line-break" => {
-                collapse.element(&mut piece);
-                push_text_run(runs, &piece, font);
                 runs.push(xlsx_model::ShapeTextRun::Break);
+                collapse.element();
             }
             _ => collect_shape_runs(ctx, child, set, font, collapse, runs)?,
         }

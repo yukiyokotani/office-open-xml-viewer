@@ -1284,19 +1284,19 @@ fn dashes_markers_and_validation_bases() {
 }
 
 #[test]
-fn white_space_collapses_across_a_paragraph() {
+fn white_space_is_read_as_libreoffice_reads_it() {
     let automatic = r#"<style:style style:name="T1" style:family="text"><style:text-properties fo:font-weight="bold"/></style:style>"#;
     let body = content(
         automatic,
         &table(concat!(
             "<table:table-row>",
-            // Leading, trailing and repeated spaces of character data go,
-            // across the span; `text:s` and the space beside it stay.
+            // Calc keeps a cell's character data as written.
             "<table:table-cell office:value-type=\"string\"><text:p>  a \n\t b <text:span text:style-name=\"T1\"> c </text:span> <text:s text:c=\"2\"/> d  </text:p></table:table-cell>",
-            "<table:table-cell office:value-type=\"string\"><text:p> x <text:line-break/> y </text:p><text:p>\n  z\n</text:p></table:table-cell>",
             "<table:table-cell office:value-type=\"string\"><text:p>   </text:p>",
-            "<draw:rect svg:width=\"2cm\" svg:height=\"1cm\"><text:p>\n  in   shape\n</text:p></draw:rect>",
-            "<office:annotation><text:p>  a   note </text:p></office:annotation>",
+            // Shape text and comments collapse: leading spaces go, runs
+            // are one space, and the space that ends the paragraph stays.
+            "<draw:rect svg:width=\"2cm\" svg:height=\"1cm\"><text:p>\n  in   <text:span text:style-name=\"T1\"> a </text:span> shape <text:s/> x \n</text:p></draw:rect>",
+            "<office:annotation><text:p>  a   note </text:p><text:p> more</text:p></office:annotation>",
             "</table:table-cell>",
             "</table:table-row>"
         )),
@@ -1310,14 +1310,32 @@ fn white_space_collapses_across_a_paragraph() {
             other => panic!("{other:?}"),
         }
     };
-    assert_eq!(text(0), "a b c    d");
-    assert_eq!(text(1), "x \n y\nz");
-    assert_eq!(text(2), "");
+    assert_eq!(text(0), "  a \n\t b  c     d  ");
+    assert_eq!(text(1), "   ");
     let shape = sheet.shape_groups[0].shapes[0].text.as_ref().unwrap();
-    assert!(
-        matches!(&shape.paragraphs[0].runs[0], xlsx_model::ShapeTextRun::Text { text, .. } if text == "in shape")
-    );
-    assert_eq!(sheet.comments[0].text, "a note");
+    let shown: String = shape.paragraphs[0]
+        .runs
+        .iter()
+        .map(|run| match run {
+            xlsx_model::ShapeTextRun::Text { text, .. } => text.as_str(),
+            _ => "|",
+        })
+        .collect();
+    assert_eq!(shown, "in a shape   x ");
+    assert_eq!(sheet.comments[0].text, "a note \nmore");
+}
+
+#[test]
+fn scanning_text_is_work_even_when_it_collapses_to_nothing() {
+    let scope = crate::budget::Scope::enter(1 << 20);
+    let before = crate::budget::work();
+    let mut out = String::new();
+    crate::odf_text::Collapse::default()
+        .text(&" ".repeat(64_000), &mut out)
+        .unwrap();
+    assert!(out.is_empty());
+    assert!(crate::budget::work() - before >= 1000);
+    scope.finish().unwrap();
 }
 
 #[test]

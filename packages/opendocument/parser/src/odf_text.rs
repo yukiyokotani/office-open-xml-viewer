@@ -104,8 +104,20 @@ pub fn sheet_prefix(name: &str) -> String {
 }
 
 /// Collected text of `text:p` / `text:h` children (§6.1), joined by line
-/// feeds, honouring `text:s`, `text:tab` and `text:line-break`.
+/// feeds, honouring `text:s`, `text:tab` and `text:line-break`, with its
+/// character data as written (the text of cells and of what Calc reads
+/// like them; see [`Collapse`]).
 pub fn paragraph_text(node: roxmltree::Node<'_, '_>) -> Result<String, String> {
+    paragraphs(node, false)
+}
+
+/// [`paragraph_text`] with the white space of each paragraph collapsed
+/// ([`Collapse`]): the text of comments and titles.
+pub fn collapsed_paragraph_text(node: roxmltree::Node<'_, '_>) -> Result<String, String> {
+    paragraphs(node, true)
+}
+
+fn paragraphs(node: roxmltree::Node<'_, '_>, collapse: bool) -> Result<String, String> {
     let mut out = String::new();
     let mut first = true;
     for p in node
@@ -116,50 +128,59 @@ pub fn paragraph_text(node: roxmltree::Node<'_, '_>) -> Result<String, String> {
             out.push('\n');
         }
         first = false;
-        inline_text(p, &mut Collapse::default(), &mut out)?;
+        let mut state = collapse.then(Collapse::default);
+        inline_text(p, state.as_mut(), &mut out)?;
     }
     Ok(out)
 }
 
-/// §6.1.2 white-space collapsing over the character data of one paragraph,
-/// across its spans: tab, carriage return and line feed are spaces, a run
-/// of spaces is one space, and the spaces that begin or end the paragraph
-/// are removed. `text:s`, `text:tab` and `text:line-break` stand for the
-/// characters they name and are not character data: a space beside one is
-/// kept, and only consecutive character-data spaces merge.
+/// White-space collapsing over the character data of one paragraph, across
+/// its spans, as LibreOffice reads the text of comments, shapes and titles
+/// (§6.1.2): tab, carriage return and line feed are spaces, a run of
+/// spaces is one space, and the spaces that begin the paragraph are
+/// removed. `text:s`, `text:tab` and `text:line-break` stand for the
+/// characters they name and are not character data: a space after one is
+/// kept.
 ///
-/// The state is fed in document order: [`Collapse::text`] for character
-/// data, [`Collapse::element`] before the characters of an element. A space
-/// is written with the text that follows it, so the space that ends a
-/// paragraph is never written.
-#[derive(Default)]
+/// §6.1.2 also removes the space that ends a paragraph. LibreOffice 26.8
+/// keeps it (a comment `  a   note ` and a shape text `  in   shape ` are
+/// read as `a note ` and `in shape `), and the reader follows it.
+///
+/// LibreOffice does not collapse the text of a cell at all (the cell
+/// reader records the measurement), so cells are read without this.
 pub struct Collapse {
-    /// Something of the paragraph has been written.
-    started: bool,
-    /// A space is owed before the next character.
-    pending: bool,
+    /// The next space of character data is not written: the paragraph has
+    /// not begun, or a space was just written.
+    skip_space: bool,
+}
+
+impl Default for Collapse {
+    fn default() -> Self {
+        Self { skip_space: true }
+    }
 }
 
 impl Collapse {
-    /// Append the collapsed form of character data to `out`.
-    pub fn text(&mut self, text: &str, out: &mut String) {
+    /// Append the collapsed form of character data to `out`. The scan is
+    /// work of the read whatever it writes: a step per 64 bytes.
+    pub fn text(&mut self, text: &str, out: &mut String) -> Result<(), String> {
+        crate::budget::tick(text.len() / 64)?;
         for c in text.chars() {
             if matches!(c, ' ' | '\t' | '\r' | '\n') {
-                self.pending = self.started;
+                if !std::mem::replace(&mut self.skip_space, true) {
+                    out.push(' ');
+                }
             } else {
-                self.element(out);
+                self.skip_space = false;
                 out.push(c);
             }
         }
+        Ok(())
     }
 
-    /// An element that stands for characters follows: write the space owed
-    /// before it.
-    pub fn element(&mut self, out: &mut String) {
-        if std::mem::take(&mut self.pending) {
-            out.push(' ');
-        }
-        self.started = true;
+    /// An element that stands for characters was written.
+    pub fn element(&mut self) {
+        self.skip_space = false;
     }
 }
 
@@ -371,33 +392,34 @@ pub fn check_style_values(root: roxmltree::Node<'_, '_>) -> Result<(), String> {
 
 pub fn inline_text(
     node: roxmltree::Node<'_, '_>,
-    collapse: &mut Collapse,
+    mut collapse: Option<&mut Collapse>,
     out: &mut String,
 ) -> Result<(), String> {
     for child in node.children() {
         crate::budget::tick(1)?;
         if child.is_text() {
-            collapse.text(child.text().unwrap_or(""), out);
+            let text = child.text().unwrap_or("");
+            match collapse.as_deref_mut() {
+                Some(collapse) => collapse.text(text, out)?,
+                None => out.push_str(text),
+            }
             continue;
         }
         if child.tag_name().namespace() != Some(crate::xml::NS_TEXT) {
             continue;
         }
         match child.tag_name().name() {
-            "s" => {
-                collapse.element(out);
-                crate::budget::push_spaces(out, space_count(child)?)?
+            "s" => crate::budget::push_spaces(out, space_count(child)?)?,
+            "tab" => out.push('\t'),
+            "line-break" => out.push('\n'),
+            "note" | "ruby-text" => continue,
+            _ => {
+                inline_text(child, collapse.as_deref_mut(), out)?;
+                continue;
             }
-            "tab" => {
-                collapse.element(out);
-                out.push('\t')
-            }
-            "line-break" => {
-                collapse.element(out);
-                out.push('\n')
-            }
-            "note" | "ruby-text" => {}
-            _ => inline_text(child, collapse, out)?,
+        }
+        if let Some(collapse) = collapse.as_deref_mut() {
+            collapse.element();
         }
     }
     Ok(())

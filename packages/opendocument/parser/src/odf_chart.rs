@@ -543,7 +543,7 @@ impl Reader<'_> {
 
     /// The text of a title-like element (`text:p` children).
     fn text(node: roxmltree::Node<'_, '_>) -> Result<String, String> {
-        crate::odf_text::paragraph_text(node)
+        crate::odf_text::collapsed_paragraph_text(node)
     }
 
     /// Resolve a range: the resolver, else the local table. A range over

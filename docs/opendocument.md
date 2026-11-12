@@ -261,7 +261,10 @@ Resource limits: while it builds the workbook, the reader may grow its heap
 by at most 512 MiB beyond the package's parsed XML, materialize at most 8
 million cells and take a bounded number of steps. A spreadsheet over a
 limit is rejected with an error that names the limit, instead of being shown
-in part. Connectors are drawn along their path (bent and curved ones too),
+in part. White space is read as LibreOffice reads it: the text of a cell is
+kept as written (Calc does not collapse it), and comments, shape text and
+chart titles collapse runs of white space, keeping the space that ends a
+paragraph. Connectors are drawn along their path (bent and curved ones too),
 and horizontal and vertical lines as lines; callouts (`draw:caption`) are
 their text box and the line to their point; ellipse arcs, sections and cuts
 are drawn as such. Dimension lines (`draw:measure`), regular polygons

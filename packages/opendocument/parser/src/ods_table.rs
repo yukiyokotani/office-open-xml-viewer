@@ -1044,7 +1044,12 @@ fn read_row<'a, 'input>(
                 .children()
                 .find(|n| xml::is(*n, NS_OFFICE, "annotation"))
             {
-                Some(a) => Some(comment(a, super::paragraph_text(a)?, first, col)),
+                Some(a) => Some(comment(
+                    a,
+                    crate::odf_text::collapsed_paragraph_text(a)?,
+                    first,
+                    col,
+                )),
                 None => None,
             };
             if link.is_some() || note.is_some() {
@@ -1231,10 +1236,7 @@ fn paragraphs_show_nothing(cell: roxmltree::Node<'_, '_>) -> bool {
     paragraphs.peek().is_some()
         && paragraphs.all(|p| {
             !p.descendants().any(|n| {
-                // White space alone collapses to nothing (§6.1.2).
-                n.is_text()
-                    && n.text()
-                        .is_some_and(|t| !t.trim_matches([' ', '\t', '\r', '\n']).is_empty())
+                n.is_text() && n.text().is_some_and(|t| !t.is_empty())
                     || n.tag_name().namespace() == Some(NS_TEXT)
                         && matches!(n.tag_name().name(), "s" | "tab" | "line-break")
             })
@@ -1458,8 +1460,7 @@ fn rich_text(
         let paragraph = p
             .attribute((NS_TEXT, "style-name"))
             .and_then(|name| text_context(ctx, "paragraph", name, &cell_partial));
-        let mut collapse = crate::odf_text::Collapse::default();
-        collect_runs(ctx, p, &paragraph, &cell_partial, &mut collapse, &mut runs)?;
+        collect_runs(ctx, p, &paragraph, &cell_partial, &mut runs)?;
     }
     let text: String = runs.iter().map(|(t, _)| t.as_str()).collect();
     if runs.iter().all(|(_, context)| context.is_none()) {
@@ -1538,25 +1539,25 @@ fn push_run(
     runs.push((text.to_string(), context.clone()));
 }
 
+/// The runs of a cell paragraph. Calc keeps the character data of a cell as
+/// it is written: LibreOffice 26.8 shows leading, trailing and repeated
+/// spaces, tabs and line feeds of a cell's `text:p` unchanged (measured on
+/// literal spaces inside and between spans and beside `text:s` and
+/// `text:line-break`), and writes a cell's single spaces as character data
+/// itself, where §6.1.2 would collapse them. Cell text is therefore not
+/// collapsed; comments and shape text are ([`crate::odf_text::Collapse`]).
 fn collect_runs(
     ctx: &Context,
     node: roxmltree::Node<'_, '_>,
     context: &Option<Rc<TextContext>>,
     cell: &Rc<TextContext>,
-    collapse: &mut crate::odf_text::Collapse,
     runs: &mut Vec<(String, Option<Rc<TextContext>>)>,
 ) -> Result<(), String> {
     for child in node.children() {
         // One step per node: each may add a run or a formatting context.
         budget::tick(1)?;
-        // §6.1.2: character data is collapsed across the paragraph; the
-        // space owed before this node's characters is written with them.
-        let mut piece = String::new();
         if child.is_text() {
-            collapse.text(child.text().unwrap_or(""), &mut piece);
-            if !piece.is_empty() {
-                push_run(runs, &piece, context);
-            }
+            push_run(runs, child.text().unwrap_or(""), context);
             continue;
         }
         if child.tag_name().namespace() != Some(NS_TEXT) {
@@ -1564,31 +1565,24 @@ fn collect_runs(
         }
         match child.tag_name().name() {
             "s" => {
-                collapse.element(&mut piece);
-                budget::push_spaces(&mut piece, crate::odf_text::space_count(child)?)?;
-                push_run(runs, &piece, context);
+                let mut spaces = String::new();
+                budget::push_spaces(&mut spaces, crate::odf_text::space_count(child)?)?;
+                push_run(runs, &spaces, context);
             }
-            "tab" | "line-break" => {
-                collapse.element(&mut piece);
-                piece.push(if child.tag_name().name() == "tab" {
-                    '\t'
-                } else {
-                    '\n'
-                });
-                push_run(runs, &piece, context);
-            }
+            "tab" => push_run(runs, "\t", context),
+            "line-break" => push_run(runs, "\n", context),
             "span" => {
                 let outer = context.as_ref().unwrap_or(cell);
                 let inner = child
                     .attribute((NS_TEXT, "style-name"))
                     .and_then(|name| text_context(ctx, "text", name, outer));
                 match inner {
-                    Some(inner) => collect_runs(ctx, child, &Some(inner), cell, collapse, runs)?,
-                    None => collect_runs(ctx, child, context, cell, collapse, runs)?,
+                    Some(inner) => collect_runs(ctx, child, &Some(inner), cell, runs)?,
+                    None => collect_runs(ctx, child, context, cell, runs)?,
                 }
             }
             "note" | "ruby-text" => {}
-            _ => collect_runs(ctx, child, context, cell, collapse, runs)?,
+            _ => collect_runs(ctx, child, context, cell, runs)?,
         }
     }
     Ok(())
