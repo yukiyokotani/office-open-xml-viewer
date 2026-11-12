@@ -713,6 +713,7 @@ export interface ChartModel {
     subtotalIndices: number[];
     legendManualLayout?: LegendManualLayout | null;
     valAxisFormatCode?: string | null;
+    valAxisFormatDivisors?: number[] | null;
     valAxisNumberFormat?: ChartAxisNumberFormat | null;
     valAxisDisplayUnits?: ChartDisplayUnits | null;
     catAxisDisplayUnits?: ChartDisplayUnits | null;
@@ -803,6 +804,7 @@ export interface ChartModel {
     valAxisLineDash?: string | null;
     valAxisLinePaintAuthored?: boolean | null;
     catAxisFormatCode?: string | null;
+    catAxisFormatDivisors?: number[] | null;
     catAxisNumberFormat?: ChartAxisNumberFormat | null;
     catAxisMin?: number | null;
     catAxisMax?: number | null;
@@ -1033,6 +1035,9 @@ export interface ChartSeriesDataLabels {
     fontPaintAuthored?: boolean;
     fontHidden?: boolean;
     formatCode?: string;
+    formatDivisors?: number[] | null;
+    percentFormatCode?: string | null;
+    percentFormatDivisors?: number[] | null;
     separator?: string;
     fontBold?: boolean;
     fontItalic?: boolean;
@@ -1246,6 +1251,7 @@ type CjkLang = 'kr' | 'sc' | 'tc' | 'hk' | 'jp';
 export interface ConditionalFormat {
     sqref: WorksheetCellRange[];
     rules: CfRule[];
+    firstMatch?: boolean;
 }
 export interface DataValidation {
     sqref: string;
@@ -1706,6 +1712,7 @@ export interface NoFill {
 export interface NumFmt {
     numFmtId: number;
     formatCode: string;
+    sectionDivisors?: number[];
 }
 export const officeFontSubstitutions: readonly FontSubstitution[];
 export class OoxmlDecodedImageLimitError extends RangeError {
@@ -2056,6 +2063,7 @@ export interface SecondaryValueAxis {
     title: string | null;
     hidden: boolean;
     formatCode?: string | null;
+    formatDivisors?: number[] | null;
     numberFormat?: ChartAxisNumberFormat | null;
     displayUnits?: ChartDisplayUnits | null;
     fontColor?: string | null;
@@ -2139,7 +2147,7 @@ export type ShapeFill = Exclude<Fill, {
     fillType: 'image';
 } | {
     fillType: 'none';
-}>;
+}> | ShapeHatchFill | ShapeImageFill;
 export type ShapeGeom = {
     type: 'preset';
     name: string;
@@ -2161,6 +2169,42 @@ export type ShapeGeom = {
     alpha?: number;
     duotone?: Duotone;
     blipEffects?: BlipEffect[];
+};
+export interface ShapeHatchFill {
+    fillType: 'hatch';
+    color: string;
+    background?: string;
+    angle: number;
+    distancePt: number;
+    lines: number;
+    alpha?: number;
+}
+export interface ShapeImageFill {
+    fillType: 'image';
+    imagePath: string;
+    mimeType: string;
+    layout: 'stretch' | 'tile' | 'once';
+    width?: ShapeImageSize;
+    height?: ShapeImageSize;
+    align: [
+        number,
+        number
+    ];
+    offset: [
+        number,
+        number
+    ];
+    shift?: {
+        rows: number;
+    } | {
+        columns: number;
+    };
+    alpha?: number;
+}
+export type ShapeImageSize = {
+    pt: number;
+} | {
+    fraction: number;
 };
 export interface ShapeInfo {
     zOrder?: number;
