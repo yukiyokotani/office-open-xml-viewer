@@ -1812,6 +1812,10 @@ fn walk_inline<'a>(
         if child.is_text() {
             let text = child.text().unwrap_or("");
             env.payload.step(text.len() / 64)?;
+            if ws.verbatim {
+                push_text(runs, style_for!(stack), text, link, env)?;
+                continue;
+            }
             // §6.1.2: white space collapses over the whole paragraph. A space
             // carried from an earlier node is emitted (in its own style) only
             // when content follows; leading and trailing spaces are dropped.
@@ -1975,7 +1979,18 @@ fn walk_inline<'a>(
             }
             _ => {
                 // Other fields (dates, titles, file names, …) show their
-                // stored representation.
+                // stored representation verbatim: §6.1.2 collapses only the
+                // paragraph's own character data. A carried space before a
+                // field is kept.
+                let field = ns == Some(NS_TEXT);
+                if field {
+                    if let Some(space) = ws.pending.take() {
+                        emit_space(runs, space, ws.append, env)?;
+                    }
+                    ws.started = true;
+                }
+                let outer = ws.verbatim;
+                ws.verbatim |= field;
                 walk_inline(
                     child,
                     stack,
@@ -1986,6 +2001,7 @@ fn walk_inline<'a>(
                     depth + 1,
                     ws,
                 )?;
+                ws.verbatim = outer;
             }
         }
     }
@@ -2001,6 +2017,8 @@ struct Collapse {
     pending: Option<(RunStyle, Option<String>)>,
     /// The pending space directly follows the last run, of its style.
     append: bool,
+    /// Inside a field: its stored text is kept as written.
+    verbatim: bool,
 }
 
 /// Emit a carried space: appended to the run it follows when that run has
@@ -2172,6 +2190,7 @@ pub fn notes_text<'a>(containers: impl Iterator<Item = Nd<'a>>) -> Result<String
         // nested in another, not valid ODF, is read as part of it), and
         // every node is visited once.
         let mut stack: Vec<(Nd<'a>, bool)> = vec![(container, false)];
+        let (mut started, mut pending) = (false, false);
         while let Some((node, inside)) = stack.pop() {
             let starts = !inside && node != container && paragraph(node);
             if starts {
@@ -2179,11 +2198,36 @@ pub fn notes_text<'a>(containers: impl Iterator<Item = Nd<'a>>) -> Result<String
                     push(&mut text, "\n")?;
                 }
                 first = false;
+                // §6.1.2 over the whole paragraph, as for slide text.
+                started = false;
+                pending = false;
             }
             let inside = inside || starts;
             if inside {
+                let content = xml::is(node, NS_TEXT, "s")
+                    || xml::is(node, NS_TEXT, "tab")
+                    || xml::is(node, NS_TEXT, "line-break");
+                if content && pending {
+                    push(&mut text, " ")?;
+                    pending = false;
+                }
+                if content {
+                    started = true;
+                }
                 if node.is_text() {
-                    push(&mut text, &collapse_whitespace(node.text().unwrap_or("")))?;
+                    for c in node.text().unwrap_or("").chars() {
+                        if matches!(c, ' ' | '\t' | '\n' | '\r') {
+                            pending |= started;
+                            continue;
+                        }
+                        if pending {
+                            push(&mut text, " ")?;
+                            pending = false;
+                        }
+                        let mut buffer = [0u8; 4];
+                        push(&mut text, c.encode_utf8(&mut buffer))?;
+                        started = true;
+                    }
                     continue;
                 } else if xml::is(node, NS_TEXT, "s") {
                     let n = node

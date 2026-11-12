@@ -2118,6 +2118,29 @@ mod tests {
     }
 
     #[test]
+    fn field_text_is_kept_verbatim() {
+        let body = r#"<draw:frame svg:width="10cm" svg:height="5cm"><draw:text-box><text:p>File: <text:file-name>draft  final.odp</text:file-name></text:p></draw:text-box></draw:frame>"#;
+        let deck = deck("", "", "", &page(body)).unwrap();
+        let slide0 = model(&deck, 0);
+        let text: String = shapes(&slide0)[0].text_body.as_ref().unwrap().paragraphs[0]
+            .runs
+            .iter()
+            .map(|r| match r {
+                pptx_model::TextRun::Text(d) => d.text.clone(),
+                _ => String::new(),
+            })
+            .collect();
+        assert_eq!(text, "File: draft  final.odp");
+    }
+
+    #[test]
+    fn speaker_notes_collapse_white_space_per_paragraph() {
+        let body = r#"<presentation:notes><draw:frame presentation:class="notes"><draw:text-box><text:p>  A <text:span> B </text:span></text:p></draw:text-box></draw:frame></presentation:notes>"#;
+        let deck = deck("", "", "", &page(body)).unwrap();
+        assert_eq!(model(&deck, 0).notes.as_deref(), Some("A B"));
+    }
+
+    #[test]
     fn speaker_notes_read_each_paragraph_once() {
         let body = r#"<presentation:notes><draw:frame presentation:class="notes"><draw:text-box><text:p>One<text:s text:c="2"/>two</text:p><text:p>Three<text:p>nested</text:p></text:p></draw:text-box></draw:frame></presentation:notes>"#;
         let deck = deck("", "", "", &page(body)).unwrap();
