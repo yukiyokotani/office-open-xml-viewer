@@ -262,7 +262,7 @@ by at most 512 MiB beyond the package's parsed XML, materialize at most 8
 million cells and take a bounded number of steps. A spreadsheet over a
 limit is rejected with an error that names the limit, instead of being shown
 in part. That measured limit covers building the workbook. Before it, the
-copy of the file, the package directory and the text and parsed form of
+package directory and the text and parsed form of
 `styles.xml`, `content.xml` and `settings.xml` are bounded by the package
 limits (entries, bytes per entry, total inflated bytes) and the XML parsing
 limits; after it, the workbook is handed to the viewer through the bounded

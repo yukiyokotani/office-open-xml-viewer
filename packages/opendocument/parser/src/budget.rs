@@ -48,8 +48,8 @@
 //! entry and 256 MiB inflated in total, the hard ceilings 20,000 entries,
 //! 512 MiB and 1 GiB):
 //!
-//! * the input: the host's copy of the file into the reader, the size of
-//!   the file the caller passed, held as the package for the session;
+//! * the input: the file's bytes as the host hands them over, which the
+//!   package owns for the session (the reader makes no copy of them);
 //! * opening the package: the central directory, one record per entry, at
 //!   most the entry limit;
 //! * loading the XML parts (`styles.xml`, `content.xml`, `settings.xml`):
