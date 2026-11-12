@@ -448,7 +448,7 @@ fn collect_blocks<'a>(
             continue;
         }
         if xml::is(child, NS_TEXT, "p") || xml::is(child, NS_TEXT, "h") {
-            push_block(out, (child, list.clone()))?;
+            push_block(out, (child, list.clone()), instances.payload)?;
         } else if xml::is(child, NS_TEXT, "list") {
             collect_list(child, &list, out, instances, depth + 1)?;
         } else if xml::is(child, NS_TEXT, "section") || xml::is(child, NS_TEXT, "soft-page-break") {
@@ -458,13 +458,17 @@ fn collect_blocks<'a>(
     Ok(())
 }
 
+/// Keep one collected block, charged to the object's text payload (shared
+/// by every resolution in progress) before it is kept.
 fn push_block<'a>(
     out: &mut Vec<(Nd<'a>, ListContext<'a>)>,
     item: (Nd<'a>, ListContext<'a>),
+    payload: &TextPayload<'_>,
 ) -> Result<(), String> {
     if out.len() >= MAX_PARAGRAPHS {
         return Err("OpenDocument text exceeds the paragraph limit".to_string());
     }
+    payload.charge(std::mem::size_of::<(Nd<'a>, ListContext<'a>)>())?;
     out.push(item);
     Ok(())
 }
@@ -559,6 +563,7 @@ fn collect_list<'a>(
                             ..inner.clone()
                         },
                     ),
+                    instances.payload,
                 )?;
                 if first {
                     first_labelled = false;
@@ -1682,6 +1687,8 @@ fn walk_inline<'a>(
         let mut nodes: Vec<Nd<'a>> = Vec::new();
         for span in stack.iter().rev() {
             if let Some(name) = span.attribute((NS_TEXT, "style-name")) {
+                // The reference is hashed for the lookup, found or not.
+                env.payload.step(1 + name.len() / 64)?;
                 if let Ok(chain) = env.sheet.chain(env.scope, "text", name) {
                     nodes.extend(chain);
                 }
@@ -1852,6 +1859,8 @@ fn push_text(
     if text.is_empty() {
         return Ok(());
     }
+    // Resolving the run's link reads (hashes) its whole target.
+    env.payload.step(link.map_or(0, |l| l.len() / 64))?;
     // The text (a case transform may grow it; it is charged again with
     // each run record below) before any copy is made.
     env.payload.charge(text.len())?;
