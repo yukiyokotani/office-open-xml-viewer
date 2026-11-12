@@ -287,6 +287,55 @@ pub fn table<'a>(
     Ok(())
 }
 
+/// The table template's region style of `cell` as [`table`] resolves it
+/// (row and column positions with repeats expanded), for list continuation
+/// outside rendering. Bounded by the table's grid limits.
+pub fn cell_template_style<'a>(sheet: &'a Sheet<'a>, scope: Scope, cell: Nd<'a>) -> Option<Nd<'a>> {
+    let row = cell.parent_element()?;
+    let table = row.ancestors().find(|a| xml::is(*a, NS_TABLE, "table"))?;
+    let template = template(sheet, table.attribute((NS_TABLE, "template-name"))?)?;
+    let flag = |name: &str| table.attribute((NS_TABLE, name)) == Some("true");
+    let repeat = |n: Nd<'_>, name: &str, max: usize| {
+        n.attribute((NS_TABLE, name))
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(1)
+            .clamp(1, max)
+    };
+    let (mut rows, mut cols, mut row_index) = (0usize, 0usize, None);
+    let mut visit = |n: Nd<'a>| match n.tag_name().name() {
+        "table-column" => {
+            cols = (cols + repeat(n, "number-columns-repeated", MAX_COLUMNS)).min(MAX_COLUMNS)
+        }
+        "table-row" => {
+            if n == row && row_index.is_none() {
+                row_index = Some(rows);
+            }
+            rows = (rows + repeat(n, "number-rows-repeated", MAX_ROWS)).min(MAX_ROWS);
+        }
+        _ => {}
+    };
+    for child in table.children().filter(|n| n.is_element()) {
+        match child.tag_name().name() {
+            "table-columns" | "table-header-columns" | "table-rows" | "table-header-rows" => child
+                .children()
+                .filter(|n| n.is_element())
+                .for_each(&mut visit),
+            _ => visit(child),
+        }
+    }
+    let mut column = 0usize;
+    for c in row.children().filter(|n| {
+        xml::is(*n, NS_TABLE, "table-cell") || xml::is(*n, NS_TABLE, "covered-table-cell")
+    }) {
+        if c == cell {
+            break;
+        }
+        column = (column + repeat(c, "number-columns-repeated", MAX_COLUMNS)).min(MAX_COLUMNS);
+    }
+    let name = template.style_for(row_index?, column, rows, cols, &flag)?;
+    sheet.find(scope, "table-cell", name)
+}
+
 /// A file span clamped to the `available` cells from its origin (at least 1).
 fn clamp_span(span: u32, available: usize) -> u32 {
     let available = u32::try_from(available.max(1)).unwrap_or(u32::MAX);

@@ -271,10 +271,11 @@ impl LocalTable {
             return Ok(table);
         };
         let mut count = 0usize;
-        for row in node
-            .descendants()
-            .filter(|n| xml::is(*n, NS_TABLE, "table-row"))
-        {
+        // Rows of the table and of its row groups (not inside cells), in
+        // document order, each node examined charged.
+        let mut rows = Vec::new();
+        chart_rows(node, 0, &mut rows, budget)?;
+        for row in rows {
             let mut cells = Vec::new();
             for cell in row
                 .children()
@@ -295,8 +296,11 @@ impl LocalTable {
                     _ if !text.is_empty() => CellData::Text(text.clone()),
                     _ => CellData::Empty,
                 };
+                // LibreOffice writes the source range as `draw:g/svg:desc`
+                // (or `svg:desc`) in the cell: its children and theirs.
                 let desc = cell
-                    .descendants()
+                    .children()
+                    .flat_map(|c| std::iter::once(c).chain(c.children()))
                     .find(|n| xml::is(*n, crate::xml::NS_SVG, "desc"))
                     .and_then(|n| n.text());
                 if let Some(desc) = desc {
@@ -453,6 +457,30 @@ fn push_chart_text(
     }
     for _ in 0..times {
         out.push_str(piece);
+    }
+    Ok(())
+}
+
+/// The `table:table-row`s of a chart table and its row groups.
+fn chart_rows<'a>(
+    group: roxmltree::Node<'a, 'a>,
+    depth: usize,
+    rows: &mut Vec<roxmltree::Node<'a, 'a>>,
+    budget: &ChartBudget,
+) -> Result<(), String> {
+    for child in group.children() {
+        if !budget.charge(16) {
+            return Err("OpenDocument chart exceeds the data limit".into());
+        }
+        if xml::is(child, NS_TABLE, "table-row") {
+            rows.push(child);
+        } else if depth < 8
+            && ["table-header-rows", "table-rows", "table-row-group"]
+                .iter()
+                .any(|name| xml::is(child, NS_TABLE, name))
+        {
+            chart_rows(child, depth + 1, rows, budget)?;
+        }
     }
     Ok(())
 }

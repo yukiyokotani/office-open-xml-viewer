@@ -707,21 +707,30 @@ fn resolve_list_style<'a>(
 }
 
 /// The level style of `level`, each record inspected charged as work.
+/// §16.32: a level the list style does not define uses the next lower
+/// defined level.
 fn list_level<'a>(
     list_style: Nd<'a>,
     level: usize,
     payload: &TextPayload<'_>,
 ) -> Result<Option<Nd<'a>>, String> {
-    for n in list_style.children().filter(|n| n.is_element()) {
+    let mut lower: Option<(usize, Nd<'a>)> = None;
+    for n in list_style.children() {
         payload.step(1)?;
-        if n.attribute((NS_TEXT, "level"))
+        let Some(defined) = n
+            .attribute((NS_TEXT, "level"))
             .and_then(|v| v.parse::<usize>().ok())
-            == Some(level)
-        {
+        else {
+            continue;
+        };
+        if defined == level {
             return Ok(Some(n));
         }
+        if defined < level && lower.is_none_or(|(best, _)| defined > best) {
+            lower = Some((defined, n));
+        }
     }
-    Ok(None)
+    Ok(lower.map(|(_, n)| n))
 }
 
 fn paragraph_chain<'a>(sheet: &Sheet<'a>, scope: Scope, node: Nd<'a>) -> Vec<Nd<'a>> {
@@ -1096,6 +1105,9 @@ fn container_object_styles<'a>(
             .map(|n| sheet.chain(scope, "table-cell", n))
             .transpose()?
             .unwrap_or_default();
+        chain.extend(crate::odp_table::cell_template_style(
+            sheet, scope, container,
+        ));
         chain.extend(sheet.default_style("table-cell"));
         chain.extend(styles.chain.iter().copied());
         styles.chain = chain;
