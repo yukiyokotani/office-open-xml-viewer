@@ -635,9 +635,9 @@ impl Row {
             let cells = range(&bytes[1..], self.cells.len())?;
             let value = PreparedBorder::read_cell_assignment(&bytes[4..], old)?;
             for cell in &mut self.cells[cells] {
-                for side in 0..6 {
+                for (side, slot) in cell.prepared_borders.iter_mut().enumerate().take(6) {
                     if sides & (1 << side) != 0 {
-                        cell.prepared_borders[side] = Some(value);
+                        *slot = Some(value);
                     }
                 }
             }
@@ -1115,9 +1115,9 @@ impl Row {
                 let r = range(&b[1..], self.cells.len())?;
                 let border = Border::read(&b[4..], old)?;
                 for c in &mut self.cells[r] {
-                    for s in 0..6 {
+                    for (s, slot) in c.borders.iter_mut().enumerate().take(6) {
                         if b[3] & (1 << s) != 0 {
-                            c.borders[s] = Some(border.clone());
+                            *slot = Some(border.clone());
                         }
                     }
                 }
@@ -1216,17 +1216,17 @@ impl Row {
                     if b[1..3] != [0, 1] {
                         return Err(unsupported("invalid Word default margin range"));
                     }
-                    for i in 0..4 {
+                    for (i, slot) in self.margins.iter_mut().enumerate().take(4) {
                         if b[3] & (1 << i) != 0 {
-                            self.margins[i] = width;
+                            *slot = width;
                         }
                     }
                 } else {
                     let r = range(&b[1..], self.cells.len())?;
                     for c in &mut self.cells[r] {
-                        for i in 0..4 {
+                        for (i, slot) in c.margins.iter_mut().enumerate().take(4) {
                             if b[3] & (1 << i) != 0 {
-                                c.margins[i] = Some(width);
+                                *slot = Some(width);
                             }
                         }
                     }
