@@ -36,6 +36,7 @@ import type {
   VmlTextPathAcquisitionInput,
 } from './layout/types.js';
 import type { MathOccurrence } from './layout/resources.js';
+import { documentPageObjects, type PageObjectStoryWire } from './page-object-wire.js';
 import { anchorOccurrenceKey, chartResourceKey, mathResourceKey, sourceKey } from './layout/source-key.js';
 import { mathFallbackText } from './layout/math-fallback-text.js';
 import type {
@@ -257,19 +258,7 @@ export type InternalMathRun = Extract<DocRun, { type: 'math' }> & {
   readonly resourceKey: string;
 };
 
-/** Private producer wire (never authored by WordprocessingML): the drawings
- * anchored to one explicit physical page (ODF `text:anchor-page-number`),
- * as a page-local story. See `pageObjectStorySource`. */
-export interface PageObjectStoryWire {
-  /** The physical page, 1-based. */
-  readonly page: number;
-  body: BodyElement[];
-}
-
-/** The page objects of a model; empty for every DOCX document. */
-export function documentPageObjects(doc: DocxDocumentModel): readonly PageObjectStoryWire[] {
-  return (doc as InternalDocxDocumentModel).__pageObjects ?? [];
-}
+export { documentPageObjects, type PageObjectStoryWire };
 
 export interface InternalDocxDocumentModel extends DocxDocumentModel {
   fontFamilyCharsets?: Record<string, string>;

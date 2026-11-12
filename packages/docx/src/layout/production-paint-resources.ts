@@ -11,7 +11,7 @@ import type {
 import type { ImageMetadataRecord, MathOccurrence, PictureBulletSizeResolver } from './resources.js';
 import type { BodyAcquisitionInputProjections } from './acquisition-input-projections.js';
 import { chartResourceKey, imageResourceKey, vmlPictureResourceKey, vmlStrokeResourceKey, vmlEdgeResourceKey } from './source-key.js';
-import { documentPageObjects } from '../parser-model.js';
+import { documentPageObjects } from '../page-object-wire.js';
 import { pageObjectStorySource } from './body-layout-input.js';
 import {
   createPaintResourceRegistry,
