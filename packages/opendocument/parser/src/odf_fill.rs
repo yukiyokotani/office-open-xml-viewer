@@ -373,9 +373,12 @@ impl FillDefs {
         self.dashes.get(name).copied()
     }
 
-    /// The path data of the line end `name` (§16.42.8 `draw:marker`).
-    pub fn marker(&self, name: &str) -> Option<&str> {
-        self.markers.get(name).map(String::as_str)
+    /// The line ends (§16.42.8 `draw:marker`): each name with its path
+    /// data. A reader reads each path once, not once per line that uses it.
+    pub fn markers(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.markers
+            .iter()
+            .map(|(name, d)| (name.as_str(), d.as_str()))
     }
 
     /// The fill of a graphic style chain (`graphic:` properties), with its
