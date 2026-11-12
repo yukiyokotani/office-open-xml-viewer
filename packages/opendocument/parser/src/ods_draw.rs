@@ -1050,11 +1050,14 @@ fn caption_line(
     chain: &[&Style],
 ) -> Option<(super::shape_path::Bounds, Option<xlsx_model::PathInfo>)> {
     use xlsx_model::PathCmd;
+    // A box with a negative size has no edge for the line to leave
+    // (lengths are finite: `length_pt`).
+    let size = |name: &str| pt_attr(node, NS_SVG, name).filter(|v| *v >= 0.0);
     let (x, y, w, h) = (
         pt_attr(node, NS_SVG, "x").unwrap_or(0.0),
         pt_attr(node, NS_SVG, "y").unwrap_or(0.0),
-        pt_attr(node, NS_SVG, "width")?,
-        pt_attr(node, NS_SVG, "height")?,
+        size("width")?,
+        size("height")?,
     );
     let tail = (
         pt_attr(node, NS_DRAW, "caption-point-x")?,

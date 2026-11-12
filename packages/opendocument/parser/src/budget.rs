@@ -39,6 +39,34 @@
 //! its inputs are loaded and only borrows them from then on (the package,
 //! its XML text and parsed documents), so that the growth is the memory of
 //! the read itself.
+//!
+//! # What the scope does not cover
+//!
+//! The scope governs building the model. The phases around it have bounds
+//! of their own, each a function of the package limits the caller sets
+//! (`PackageLimits`; the standard limits are 4,096 entries, 128 MiB per
+//! entry and 256 MiB inflated in total, the hard ceilings 20,000 entries,
+//! 512 MiB and 1 GiB):
+//!
+//! * the input: the host's copy of the file into the reader, the size of
+//!   the file the caller passed, held as the package for the session;
+//! * opening the package: the central directory, one record per entry, at
+//!   most the entry limit;
+//! * loading the XML parts (`styles.xml`, `content.xml`, `settings.xml`):
+//!   their inflated text, each at most the entry limit and together at most
+//!   the total inflated limit;
+//! * parsing them: `xml::preflight` bounds each part before the parser
+//!   runs, to [`crate::xml::MAX_NODES_PER_PART`] nodes,
+//!   [`crate::xml::MAX_XML_RESERVATION_BYTES`] of parser records and
+//!   [`crate::xml::MAX_XML_WORK`] units of parsing work;
+//! * handing the model to the host (the spreadsheet session): the workbook
+//!   bootstrap and each worksheet chunk are written through bounded
+//!   writers (the workbook and worksheet JSON limits of the shared
+//!   resource policy), rows are lent at most 128 at a time, and an image
+//!   is one package entry, at most the standard entry limit.
+//!
+//! Chart objects and images read while the model is built are read inside
+//! the scope.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;

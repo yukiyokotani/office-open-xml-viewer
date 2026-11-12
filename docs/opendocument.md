@@ -261,7 +261,12 @@ Resource limits: while it builds the workbook, the reader may grow its heap
 by at most 512 MiB beyond the package's parsed XML, materialize at most 8
 million cells and take a bounded number of steps. A spreadsheet over a
 limit is rejected with an error that names the limit, instead of being shown
-in part. White space is read as LibreOffice reads it: the text of a cell is
+in part. That measured limit covers building the workbook. Before it, the
+copy of the file, the package directory and the text and parsed form of
+`styles.xml`, `content.xml` and `settings.xml` are bounded by the package
+limits (entries, bytes per entry, total inflated bytes) and the XML parsing
+limits; after it, the workbook is handed to the viewer through the bounded
+workbook and worksheet writers, a few rows at a time. White space is read as LibreOffice reads it: the text of a cell is
 kept as written (Calc does not collapse it), and comments, shape text and
 chart titles collapse runs of white space, keeping the space that ends a
 paragraph. Connectors are drawn along their path (bent and curved ones too),

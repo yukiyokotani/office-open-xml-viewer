@@ -1339,6 +1339,22 @@ fn scanning_text_is_work_even_when_it_collapses_to_nothing() {
 }
 
 #[test]
+fn a_callout_with_a_negative_size_has_no_line() {
+    let body = content(
+        "",
+        &table(concat!(
+            r#"<table:table-row><table:table-cell>"#,
+            r#"<draw:caption svg:width="3cm" svg:height="-1pt" draw:caption-point-x="-2cm" draw:caption-point-y="2cm"><text:p>Note</text:p></draw:caption>"#,
+            r#"<draw:caption svg:width="-3cm" svg:height="1cm" draw:caption-point-x="-2cm" draw:caption-point-y="2cm"><text:p>Note</text:p></draw:caption>"#,
+            r#"</table:table-cell></table:table-row>"#
+        )),
+    );
+    let workbook = read_text(&body, Some(&styles(""))).unwrap();
+    // Only the two text boxes.
+    assert_eq!(workbook.sheets[0].worksheet.shape_groups.len(), 2);
+}
+
+#[test]
 fn fills_and_lines_keep_their_opacity() {
     let automatic = r##"<style:style style:name="gr1" style:family="graphic"><style:graphic-properties draw:fill="solid" draw:fill-color="#ff0000" draw:opacity="50%" draw:stroke="solid" svg:stroke-color="#0000ff" svg:stroke-opacity="25%"/></style:style>"##;
     let body = content(
