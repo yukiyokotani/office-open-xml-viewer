@@ -2846,6 +2846,7 @@ interface RetainedNumberingPlan {
   readonly markerShiftPt: number;
   readonly shape: NonNullable<ReturnType<typeof shapeNumberingMarkerText>>['shape'] | null;
   readonly lineBox?: import('./numbering-marker.js').NumberingMarkerLineBox;
+  readonly spanDirections?: readonly ('ltr' | 'rtl')[];
 }
 
 function retainedNumberingPlan(
@@ -3013,7 +3014,8 @@ function numberingMarkerPlacements(
         ? { kind: 'explicit', color: `#${paragraph.paragraphMarkColor}` }
         : { kind: 'default' };
   let spanOffsetPt = 0;
-  return shape.spans.map((span) => {
+  return shape.spans.map((span, spanIndex) => {
+    const direction = plan.spanDirections?.[spanIndex] ?? (context.baseRtl ? 'rtl' : 'ltr');
     const offsetPt = spanOffsetPt;
     spanOffsetPt += span.advancePt;
     const clusters = shape.clusters
@@ -3042,7 +3044,7 @@ function numberingMarkerPlacements(
         text: span.text,
         range: { start: rangeBase + span.start, end: rangeBase + span.end },
         offset: { xPt: 0, yPt: 0 }, letterSpacingPt: 0, scaleX: 1,
-        direction: context.baseRtl ? 'rtl' : 'ltr',
+        direction,
         kerning: paragraph.numberingMarkerShapeInput?.kerning || wordArabicTextKerned(span.text)
           ? 'normal' : 'none',
         writingMode: 'horizontal-tb',
@@ -3050,7 +3052,7 @@ function numberingMarkerPlacements(
       color, fontRoute: span.fontRoute,
       fontSizePt: paragraph.numberingMarkerShapeInput?.fontSizePt ?? span.ascentPt + span.descentPt,
       fontWeight: span.font.weight, fontStyle: span.font.style,
-      direction: context.baseRtl ? 'rtl' : 'ltr', decorations: [],
+      direction, decorations: [],
     } satisfies TextPlacement;
   });
 }

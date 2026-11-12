@@ -233,16 +233,26 @@ describe('measureSymbolFaceEncoding', () => {
     expect(measureSymbolFaceEncoding({ font: '', measureText: () => ({ width: 0 }) }, '"Sym"')).toBe(SYMBOL_FACE_UNKNOWN);
   });
 
-  it('shares measurements across oracles of one realm when asked to', () => {
+  it('shares measurements across oracles of one realm until the measured families change', () => {
     let calls = 0;
-    const ctx = { font: '', measureText: (text: string) => { calls++; return { width: text.length + (text === 'i' ? 1 : 2) }; } };
+    const faces: { family: string; status: string }[] = [];
+    const fonts = { *[Symbol.iterator]() { yield* faces; } };
+    const ctx = {
+      font: '', canvas: { ownerDocument: { fonts } },
+      measureText: (text: string) => { calls++; return { width: text.length + (text === 'i' ? 1 : 2) }; },
+    };
     const selection = { familyText: '"Shared Probe Face"', weight: 400, style: 'normal' as const, families: ['Shared Probe Face'] };
     createSymbolFaceOracle(ctx, { shared: true }).encoding(selection);
     const first = calls;
     createSymbolFaceOracle(ctx, { shared: true }).encoding(selection);
     expect(calls).toBe(first);
-    createSymbolFaceOracle(ctx).encoding(selection);
-    expect(calls).toBeGreaterThan(first);
+    // A face registered (or replaced) for the measured family re-measures.
+    faces.push({ family: 'Shared Probe Face', status: 'loaded' });
+    createSymbolFaceOracle(ctx, { shared: true }).encoding(selection);
+    expect(calls).toBe(first * 2);
+    faces[0] = { family: 'Shared Probe Face', status: 'loaded' };
+    createSymbolFaceOracle(ctx, { shared: true }).encoding(selection);
+    expect(calls).toBe(first * 3);
   });
 
   it('prefers held bytes over measurement and caches per selection', () => {

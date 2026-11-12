@@ -213,6 +213,27 @@ describe('resolveNumberingMarkerGeometry', () => {
     expect(requests.slice(0, 2)).toEqual([{ text: 'a', ascii: 'Symbol' }, { text: '\u2192', ascii: null }]);
   });
 
+  it('paints a converted neutral between native letters in its resolved direction (RTL)', () => {
+    const base = createTextLayoutService({
+      fonts: createFontResolver([]),
+      measurer: { fingerprint: 'marker-symbol-rtl-dir', measure: (request) => ({
+        advancePt: request.text.length * 6, ascentPt: 8, descentPt: 2,
+      }) },
+      symbolText: (markerText, family) => symbolTextToUnicodeSegments(markerText, family, {
+        encoding: { kind: 'known', pua: symbolCodeSet([0x61, 0x62]), bare: symbolCodeSet([0x61, 0x62]) },
+      }),
+    });
+    const geometry = resolveNumberingMarkerGeometry(
+      { numId: 1, level: 0, format: 'bullet', text: 'a\uF028b', suff: 'tab', indentLeft: 0, tab: 36, fontFamily: 'Symbol' },
+      { fontSizePt: 12, fonts: { ascii: 'Symbol', highAnsi: 'Symbol', eastAsia: 'Symbol', complexScript: 'Symbol' },
+        weight: 400, style: 'normal', complexScript: false },
+      { authoredFirstIndentPt: 0, physicalIndentLeftPt: 0, tabStops: [], defaultTabPt: 36, baseRtl: true }, base,
+    );
+    // "(" between two L letters resolves L: [a, (, b] left to right, all LTR.
+    expect(geometry.shape?.spans.map((span) => span.text)).toEqual(['a', '(', 'b']);
+    expect(geometry.spanDirections).toEqual(['ltr', 'ltr', 'ltr']);
+  });
+
   it.each([
     [undefined, 3.75], [14, 3.75], [15, 3.75],
     [11, 7.5], [12, 7.5], [13, 7.5],

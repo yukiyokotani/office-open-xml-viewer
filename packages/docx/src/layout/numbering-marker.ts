@@ -25,6 +25,10 @@ export interface NumberingMarkerGeometry {
   readonly markerShiftPt: number;
   readonly shape: TextShapeResult | null;
   readonly lineBox?: NumberingMarkerLineBox;
+  /** Paint direction of each `shape.spans` entry when a symbol marker was
+   * joined from pieces in a right-to-left paragraph (UAX #9 resolved levels);
+   * absent: every span paints in the paragraph direction. */
+  readonly spanDirections?: readonly ('ltr' | 'rtl')[];
 }
 
 /** Marker interval in the paragraph's logical-leading coordinate system. */
@@ -165,17 +169,20 @@ export function shapeNumberingMarkerText(
 function joinMarkerLayouts(
   logicalParts: readonly Readonly<{ text: string; layout: NumberingMarkerTextLayout }>[],
   baseRtl: boolean,
-): NumberingMarkerTextLayout {
+): NumberingMarkerTextLayout & { readonly spanDirections?: readonly ('ltr' | 'rtl')[] } {
   const logicalStarts: number[] = [];
   let logicalOffset = 0;
   for (const part of logicalParts) {
     logicalStarts.push(logicalOffset);
     logicalOffset += part.text.length;
   }
-  const order = baseRtl
-    ? computeSegmentLineVisualOrder(logicalParts.map((part) => ({ text: part.text })), true).order
-    : logicalParts.map((_, index) => index);
-  const parts = order.map((index) => ({ ...logicalParts[index]!, start: logicalStarts[index]! }));
+  const resolved = baseRtl
+    ? computeSegmentLineVisualOrder(logicalParts.map((part) => ({ text: part.text })), true)
+    : { order: logicalParts.map((_, index) => index), rtl: logicalParts.map(() => false) };
+  const parts = resolved.order.map((index, visual) => ({
+    ...logicalParts[index]!, start: logicalStarts[index]!, rtl: resolved.rtl[visual] === true,
+  }));
+  const spanDirections: ('ltr' | 'rtl')[] = [];
   const spans: TextShapeResult['spans'][number][] = [];
   const clusters: NonNullable<TextShapeResult['clusters']>[number][] = [];
   const boundaries = new Set<number>([0]);
@@ -184,8 +191,9 @@ function joinMarkerLayouts(
   let withClusters = true;
   let ink: { xMinPt: number; xMaxPt: number; ascentPt: number; descentPt: number } | undefined;
   let withInk = true;
-  for (const { start: offset, layout: { shape } } of parts) {
+  for (const { start: offset, rtl, layout: { shape } } of parts) {
     for (const span of shape.spans) {
+      spanDirections.push(rtl ? 'rtl' : 'ltr');
       spans.push({
         ...span,
         start: span.start + offset,
@@ -229,6 +237,7 @@ function joinMarkerLayouts(
   };
   return {
     shape,
+    ...(baseRtl ? { spanDirections } : {}),
     fontSizePx: shapes[0]!.fontSizePx,
     lineBox: {
       ascentPt: Math.max(...shapes.map((layout) => layout.lineBox.ascentPt)),
@@ -317,8 +326,13 @@ export function resolveNumberingMarkerGeometry(
     ? null
     : service.symbolText?.(symbolRequest) ?? symbolTextToUnicodeSegments(numbering.text, markerFamily);
   // Each code is converted on its own, as in body runs; the pieces are
-  // placed in visual order (joinMarkerLayouts).
-  const markerSegments = judged;
+  // placed in visual order (joinMarkerLayouts). In a right-to-left paragraph
+  // a mixed marker is split into one piece per code point, so no piece spans
+  // a resolved embedding-level boundary, and each piece paints in its own
+  // resolved direction (a converted "(" between native letters stays "(").
+  const markerSegments = judged && judged.length > 1 && input.baseRtl === true
+    ? judged.flatMap((part) => [...part.text].map((character) => ({ ...part, text: character })))
+    : judged;
   const markerText = numbering.picBulletImagePath
     ? ''
     : markerSegments ? markerSegments.map((part) => part.text).join('') : numbering.text;
@@ -350,7 +364,7 @@ export function resolveNumberingMarkerGeometry(
         part.text, 1, service, clusterGeometry,
       ))
     : [];
-  const markerLayout = partLayouts.length === 0 || partLayouts.some((layout) => !layout)
+  const markerLayout: (NumberingMarkerTextLayout & { readonly spanDirections?: readonly ('ltr' | 'rtl')[] }) | null = partLayouts.length === 0 || partLayouts.some((layout) => !layout)
     ? null
     : partLayouts.length === 1
       ? partLayouts[0]!
@@ -420,5 +434,6 @@ export function resolveNumberingMarkerGeometry(
     markerShiftPt,
     shape: markerShape,
     ...(markerLayout ? { lineBox: markerLayout.lineBox } : {}),
+    ...(markerLayout?.spanDirections ? { spanDirections: markerLayout.spanDirections } : {}),
   };
 }

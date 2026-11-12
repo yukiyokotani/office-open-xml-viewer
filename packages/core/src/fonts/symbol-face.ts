@@ -388,8 +388,9 @@ export interface SymbolFaceOracleOptions {
   /** Measurements shared across oracles of this realm (PPTX renders the
    * same font state on every render): keyed by the measuring realm's
    * FontFaceSet, the selection, and the registered faces of the selection's
-   * families, so a face added or removed for those families re-measures.
-   * Host-installed fonts do not change during a session. */
+   * families (by FontFace identity), so a face added, replaced or removed for
+   * those families re-measures. Host-installed fonts do not change during a
+   * session. A realm without a FontFaceSet (Node canvases) shares nothing. */
   readonly shared?: boolean;
 }
 
@@ -413,7 +414,10 @@ export interface SymbolFaceOracle {
 }
 
 const sharedEncodings = new WeakMap<object, Map<string, SymbolFaceEncoding>>();
-const sharedWithoutFontSet = new Map<string, SymbolFaceEncoding>();
+/** Identity of each registered FontFace in cache keys: a replacement face
+ * with the same descriptors but other bytes is another face. */
+const faceIds = new WeakMap<FontFace, number>();
+let nextFaceId = 1;
 
 function realmFontSet(owner: unknown): FontFaceSet | null {
   const element = (owner as { canvas?: { ownerDocument?: Document } } | null)?.canvas;
@@ -429,7 +433,10 @@ function registeredFacesToken(fontSet: FontFaceSet | null, families: readonly st
   const parts: string[] = [];
   for (const face of fontSet) {
     const family = face.family.replace(/^(['"])(.*)\1$/u, '$2').trim().toLowerCase();
-    if (wanted.has(family)) parts.push([family, face.weight, face.style, face.stretch, face.unicodeRange, face.status].join(','));
+    if (!wanted.has(family)) continue;
+    let id = faceIds.get(face);
+    if (id === undefined) { id = nextFaceId++; faceIds.set(face, id); }
+    parts.push([id, face.status].join(','));
   }
   return parts.join(';');
 }
@@ -440,17 +447,20 @@ export function createSymbolFaceOracle(
 ): SymbolFaceOracle {
   const probeOwner = options.probeOwner ?? context;
   const fontSet = options.shared ? realmFontSet(probeOwner) : null;
-  const encodings = !options.shared ? new Map<string, SymbolFaceEncoding>()
-    : fontSet ? sharedEncodings.get(fontSet) ?? (() => {
+  // Without a FontFaceSet (Node canvases register fonts through their own
+  // libraries, invisibly here) nothing is shared: each oracle measures.
+  const shared = options.shared === true && fontSet !== null;
+  const encodings = !shared ? new Map<string, SymbolFaceEncoding>()
+    : sharedEncodings.get(fontSet!) ?? (() => {
       const map = new Map<string, SymbolFaceEncoding>();
-      sharedEncodings.set(fontSet, map);
+      sharedEncodings.set(fontSet!, map);
       return map;
-    })() : sharedWithoutFontSet;
+    })();
   const probe = createSymbolMonochromeProbe(probeOwner);
   const encoding = (selection: SymbolFaceSelection): SymbolFaceEncoding => {
     if (selection.encoding) return selection.encoding;
     const key = JSON.stringify([selection.familyText, selection.weight, selection.style,
-      options.shared ? registeredFacesToken(fontSet, selection.families) : '']);
+      shared ? registeredFacesToken(fontSet, selection.families) : '']);
     let result = encodings.get(key);
     if (!result) {
       result = measureSymbolFaceEncoding(context, selection.familyText, selection.weight, selection.style);
