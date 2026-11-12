@@ -8,8 +8,14 @@ import {
   symbolTextToUnicodeSegments,
   type SymbolFaceEncoding,
 } from './symbol-font';
-import { createSymbolFaceOracle, createSymbolMonochromeProbe, measureSymbolFaceEncoding, symbolCmapEncoding } from './symbol-face';
-import { symbolEncodingOfFaces } from './symbol-face-sources';
+import {
+  createSymbolFaceOracle,
+  createSymbolMonochromeProbe,
+  measureSymbolFaceEncoding,
+  recordHeldSymbolEncoding,
+  symbolCmapEncoding,
+  symbolEncodingOfFaces,
+} from './symbol-face';
 import { ADOBE_SYMBOL_UNICODE } from './symbol-encoding';
 import { symbolFixtureFontBytes } from '../testing/symbol-font-fixture';
 
@@ -217,8 +223,84 @@ describe('oracle colour proof', () => {
     }
     const ctx = { font: '', canvas: new Canvas(1, 1), measureText: (text: string) => ({ width: text === 'i' ? 3 : 7 }) };
     const oracle = createSymbolFaceOracle(ctx);
-    const parts = oracle.segments('\uF0A9', 'Symbol', { familyText: '"Absent"', weight: 400, style: 'normal', encoding: SYMBOL_FACE_UNICODE });
+    const parts = oracle.segments('\uF0A9', 'Symbol', { families: ['Absent'], weight: 400, style: 'normal' });
     expect(parts).toEqual([{ text: '\uF0A9', mapped: false }]);
+  });
+});
+
+/** A registered FontFace stand-in (CSS Font Loading 3 descriptors). */
+const registered = (family: string, unicodeRange: string, held?: SymbolFaceEncoding | null) => {
+  const face = { family, status: 'loaded', weight: 'normal', style: 'normal', stretch: 'normal', unicodeRange };
+  if (held !== undefined) recordHeldSymbolEncoding(face as unknown as FontFace, held);
+  return face;
+};
+
+describe('which face wins a symbol code (held cmaps and measurement, one oracle)', () => {
+  // A context in which no face draws anything of its own: every measured
+  // family owns no code (a missing face, or a Unicode one).
+  const realm = (faces: object[]) => {
+    const fonts = { *[Symbol.iterator]() { yield* faces; } };
+    return {
+      font: '', canvas: { ownerDocument: { fonts } },
+      measureText: (text: string) => ({ width: text.length + (text === 'i' ? 1 : 2) }),
+    };
+  };
+  const joined = (parts: { text: string }[]) => parts.map((part) => part.text).join('');
+
+  it('reads a held substitute through its unicode-range, deciding bare and PUA codes apart', () => {
+    // The selected face is missing (measured); the loaded substitute's bytes
+    // are symbol-encoded but declared for U+F000-F0FF only: it draws U+F061,
+    // while a bare "a" never reaches it and converts.
+    const ctx = realm([registered('Held PUA Substitute', 'U+F000-F0FF', owning([0x61]))]);
+    const oracle = createSymbolFaceOracle(ctx);
+    const selection = { families: ['Absent Primary', 'Held PUA Substitute'], weight: 400, style: 'normal' as const };
+    expect(joined(oracle.segments(ch(0xf061) + 'a', 'Symbol', selection))).toBe(ch(0xf061) + ch(0x3b1));
+  });
+
+  it('measures the rest of the stack as it paints after a family the bytes cannot answer for', () => {
+    // The missing primary is measured together with the substitute it falls
+    // through to: a substitute painting both forms of 0x61 keeps a bare "a".
+    const ctx = {
+      font: '', canvas: { ownerDocument: { fonts: { *[Symbol.iterator]() {} } } },
+      measureText(text: string) {
+        const code = text.codePointAt(0)!;
+        const owned = this.font.includes('"Full Range Substitute"') && (code === 0x61 || code === 0xf061);
+        return { width: owned ? 100 : code >= 0xf000 ? 1 : text === 'i' ? 3 : 5 + (code % 7) };
+      },
+    };
+    const oracle = createSymbolFaceOracle(ctx);
+    const selection = { families: ['Absent Primary', 'Full Range Substitute'], weight: 400, style: 'normal' as const };
+    expect(joined(oracle.segments(ch(0xf061) + 'ab', 'Symbol', selection))).toBe(ch(0xf061) + 'a' + ch(0x3b2));
+  });
+
+  it('re-derives when a registered face moves to another selected family', () => {
+    const later = registered('Moved B', 'U+0-10FFFF', owning([0x61]));
+    const ctx = realm([registered('Moved A', 'U+0-10FFFF', { kind: 'known', pua: symbolCodeSet([]),
+      bare: symbolCodeSet([]), latin: symbolCodeSet([0x61]) }), later]);
+    const oracle = createSymbolFaceOracle(ctx);
+    const selection = { families: ['Moved A', 'Moved B'], weight: 400, style: 'normal' as const };
+    // A's Unicode face draws "a" as the letter: it converts.
+    expect(joined(oracle.segments('a', 'Symbol', selection))).toBe(ch(0x3b1));
+    // The symbol face, now declared later under A, wins "a" there.
+    later.family = 'Moved A';
+    expect(joined(oracle.segments('a', 'Symbol', selection))).toBe('a');
+  });
+
+  it('re-derives a held answer when a face registered later under the family wins the codes', () => {
+    const faces: object[] = [registered('Held Symbol Face', 'U+0-10FFFF', owning([0x61]))];
+    const ctx = realm(faces);
+    const selection = { families: ['Held Symbol Face'], weight: 400, style: 'normal' as const };
+    const text = () => joined(createSymbolFaceOracle(ctx, { shared: true }).segments('a', 'Symbol', selection));
+    expect(text()).toBe('a');
+    // A later application face whose bytes the library did not read: measured.
+    faces.push(registered('Held Symbol Face', 'U+0-10FFFF'));
+    expect(text()).toBe(ch(0x3b1));
+    // A later held Unicode face that maps "a" draws it as the letter.
+    faces[1] = registered('Held Symbol Face', 'U+0-10FFFF', { kind: 'known', pua: symbolCodeSet([]), bare: symbolCodeSet([]), latin: symbolCodeSet([0x61]) });
+    expect(text()).toBe(ch(0x3b1));
+    // Without it the held symbol face wins again.
+    faces.pop();
+    expect(text()).toBe('a');
   });
 });
 
@@ -256,36 +338,35 @@ describe('measureSymbolFaceEncoding', () => {
 
   it('shares measurements across oracles of one realm until the measured families change', () => {
     let calls = 0;
-    const faces: { family: string; status: string }[] = [];
+    const faces: object[] = [];
     const fonts = { *[Symbol.iterator]() { yield* faces; } };
     const ctx = {
       font: '', canvas: { ownerDocument: { fonts } },
       measureText: (text: string) => { calls++; return { width: text.length + (text === 'i' ? 1 : 2) }; },
     };
-    const selection = { familyText: '"Shared Probe Face"', weight: 400, style: 'normal' as const, families: ['Shared Probe Face'] };
+    const selection = { weight: 400, style: 'normal' as const, families: ['Shared Probe Face'] };
     createSymbolFaceOracle(ctx, { shared: true }).encoding(selection);
     const first = calls;
     createSymbolFaceOracle(ctx, { shared: true }).encoding(selection);
     expect(calls).toBe(first);
     // A face registered (or replaced) for the measured family re-measures.
-    faces.push({ family: 'Shared Probe Face', status: 'loaded' });
+    faces.push(registered('Shared Probe Face', 'U+0-10FFFF'));
     createSymbolFaceOracle(ctx, { shared: true }).encoding(selection);
     expect(calls).toBe(first * 2);
-    faces[0] = { family: 'Shared Probe Face', status: 'loaded' };
+    faces[0] = registered('Shared Probe Face', 'U+0-10FFFF');
     createSymbolFaceOracle(ctx, { shared: true }).encoding(selection);
     expect(calls).toBe(first * 3);
   });
 
-  it('prefers held bytes over measurement and caches per selection', () => {
+  it('caches measurements per selection', () => {
     let calls = 0;
     const ctx = { font: '', measureText: (text: string) => { calls++; return { width: text.length + (text === 'i' ? 1 : 2) }; } };
     const oracle = createSymbolFaceOracle(ctx);
-    const exact = owning([0x61]);
-    expect(oracle.encoding({ familyText: '"A"', weight: 400, style: 'normal', encoding: exact })).toBe(exact);
-    expect(calls).toBe(0);
-    oracle.encoding({ familyText: '"A"', weight: 400, style: 'normal' });
+    oracle.encoding({ families: ['A'], weight: 400, style: 'normal' });
     const measured = calls;
-    oracle.encoding({ familyText: '"A"', weight: 400, style: 'normal' });
+    expect(measured).toBeGreaterThan(0);
+    oracle.encoding({ families: ['A'], weight: 400, style: 'normal' });
     expect(calls).toBe(measured);
   });
+
 });

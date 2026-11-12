@@ -5,9 +5,6 @@ import {
   embeddedFontBytesAreWithinLimit,
   normalizeFontMetricFamily,
   parseOpenTypeResourceMetrics,
-  isSymbolFontFamily,
-  symbolCmapEncoding,
-  type SymbolFaceEncoding,
   registerEmbeddedFonts,
   unregisterEmbeddedFonts,
   type EmbeddedFontFace,
@@ -46,9 +43,6 @@ export interface LoadedEmbeddedFontRoute {
   readonly weight: number;
   readonly style: 'normal' | 'italic';
   readonly resourceIdentity: string;
-  /** For a symbol-font family: the codes these exact bytes draw, read from
-   * their cmap (core symbol-face.ts `symbolCmapEncoding`). */
-  readonly symbolEncoding?: SymbolFaceEncoding;
 }
 
 // SHA-256 of the de-obfuscated resource, independent of archive path and load
@@ -213,9 +207,6 @@ export async function loadEmbeddedFonts(
           // Registration owns the malformed-font diagnostic. Metrics are an
           // optional derivative and must never make a loadable face fatal.
         }
-        // Symbol-font families: the codes these exact bytes draw (core
-        // symbol-face.ts), so layout need not measure this face.
-        const symbolEncoding = isSymbolFontFamily(ref.fontName) ? symbolCmapEncoding(data) : null;
         faces.push({
           face, metric,
           route: {
@@ -224,7 +215,6 @@ export async function loadEmbeddedFonts(
             weight: face.weight === 'bold' ? 700 : 400,
             style: face.style,
             resourceIdentity: `embedded:${face.family}`,
-            ...(symbolEncoding ? { symbolEncoding } : {}),
           },
         });
         retainedBytes += bytes.byteLength;

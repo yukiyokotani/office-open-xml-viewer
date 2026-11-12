@@ -370,14 +370,15 @@ export function resolveNumberingMarkerGeometry(
   const judged = !symbolMarker
     ? null
     : service.symbolText?.(symbolRequest) ?? symbolTextToUnicodeSegments(numbering.text, markerFamily);
-  // Each code is converted on its own, as in body runs. A marker of one
-  // disposition is one run (Canvas orders it, bidi included). A mixed one is
-  // shaped piece by piece: in logical order in a left-to-right paragraph, and
-  // as UAX #9 level runs in visual order in a right-to-left one
-  // (rtlMarkerPieces).
-  const mixed = judged !== null && judged.length > 1;
+  // Each code is converted on its own, as in body runs. In a left-to-right
+  // paragraph the marker is shaped piece by piece in logical order (one run
+  // when it has one disposition). In a right-to-left one, a marker with any
+  // converted code is shaped as UAX #9 level runs in visual order
+  // (rtlMarkerPieces), even when every code converted, as "(α)" is; an
+  // unconverted one stays one run that Canvas orders.
+  const rtlOrdered = judged !== null && input.baseRtl === true && judged.some((part) => part.mapped);
   const pieces: MarkerPiece[] | null = !judged ? null
-    : mixed && input.baseRtl === true ? rtlMarkerPieces(judged)
+    : rtlOrdered ? rtlMarkerPieces(judged)
       : (() => {
         let start = 0;
         return judged.map((part) => {
@@ -420,7 +421,7 @@ export function resolveNumberingMarkerGeometry(
     : [];
   const markerLayout: (NumberingMarkerTextLayout & { readonly spanDirections?: readonly ('ltr' | 'rtl')[] }) | null = partLayouts.length === 0 || partLayouts.some((layout) => !layout)
     ? null
-    : partLayouts.length === 1
+    : partLayouts.length === 1 && !rtlOrdered
       ? partLayouts[0]!
       : joinMarkerLayouts(markerParts.map((part, index) => ({ ...part, layout: partLayouts[index]! })),
         input.baseRtl === true);

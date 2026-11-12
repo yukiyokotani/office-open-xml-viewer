@@ -160,8 +160,6 @@ import {
   symbolTextToUnicodeSegments,
   isSymbolFontFamily,
   createSymbolFaceOracle,
-  symbolFaceKey,
-  type SymbolFaceEncoding,
   type SymbolFaceOracle,
   type SymbolTextSegment,
   drawUnderline,
@@ -254,9 +252,6 @@ export interface RenderContext {
   /** Symbol-font faces of this render (core symbol-face.ts), judged in the
    *  painting context. Absent: the 0.89 conversion subset. */
   symbolFaces?: SymbolFaceOracle;
-  /** core symbolFaceKey → the symbol codes the held bytes of
-   *  that face draw (embedded and served faces whose cmap was read). */
-  symbolFaceEncodings?: ReadonlyMap<string, SymbolFaceEncoding>;
   /** Theme hyperlink colour as a 6-char hex (no leading #), or null. */
   themeHlinkColor?: string | null;
   /**
@@ -1500,8 +1495,9 @@ function selectOfficeFace(normalized: string, bold: boolean, italic: boolean, rc
  * §21.1.2.3.7 `a:latin`, §21.1.2.4.3 `a:buFont`) as the face this render
  * selects for `family` (normalized) draws it: the face that leads its stack
  * (the presentation's embedded face, an exact Office route, else the authored
- * family). Its held cmap answers when the bytes were read; otherwise the
- * face is measured in this render's painting context. `bare`: whether bare
+ * family), then a loaded substitute: held cmaps answer where the library
+ * holds the bytes, otherwise the faces are measured in this render's
+ * painting context. `bare`: whether bare
  * codes 0x20..0xFF are symbol codes here (a Latin symbol face); they are
  * left alone when the face could not be judged, as in 0.89.
  */
@@ -1517,20 +1513,13 @@ function symbolFaceSegments(
   if (!rc.symbolFaces) return bare ? [{ text, mapped: false }] : symbolTextToUnicodeSegments(text, authoredFamily);
   // The faces that paint the code are those the run's stack names before its
   // generic tail (cssFontStack): the selected face, then a loaded substitute
-  // of the authored family. Held bytes decide only for the selected face
-  // alone; with a substitute the pair is measured.
+  // of the authored family; the oracle decides which of them wins each code.
   const primary = officeRoute?.family ?? family;
   const substitute = loadedSubstitute(authoredFamily, text, rc.fontSubstitutions);
   const families = substitute ? [primary, substitute] : [primary];
   const weight = bold ? 700 : 400;
   const style = italic ? 'italic' as const : 'normal' as const;
-  const selection = {
-    familyText: families.map(quoteCssFontFamily).join(', '),
-    families,
-    weight,
-    style,
-    encoding: substitute ? undefined : rc.symbolFaceEncodings?.get(symbolFaceKey(primary, weight, style)),
-  };
+  const selection = { families, weight, style };
   if (bare && rc.symbolFaces.encoding(selection).kind === 'unknown') return [{ text, mapped: false }];
   // Converted text paints in the generic sans-serif stack (paragraphInputRuns,
   // paragraphBullet); its colour proof is made in that stack.
@@ -8242,8 +8231,6 @@ type InternalSlideRenderOptions = SlideRenderOptions & {
   embeddedFontAliases?: ReadonlyMap<string, string>;
   embeddedFontAuthoredFamilies?: ReadonlyMap<string, string>;
   embeddedFontTuples?: ReadonlySet<string>;
-  /** See {@link RenderContext.symbolFaceEncodings}. */
-  symbolFaceEncodings?: ReadonlyMap<string, SymbolFaceEncoding>;
   svgDecoder?: SvgBlobDecoder;
   /** Placeholder text already resolved on the main thread. Takes precedence
    * over {@link SlideRenderOptions.errorPlaceholder}. */
@@ -8612,7 +8599,6 @@ async function renderSlideLeased(
       canvas.getContext('2d') as CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D | null,
       { shared: true },
     ),
-    symbolFaceEncodings: opts.symbolFaceEncodings,
     // The backing store may have been clamped below `canvasSize × dpr`; downstream
     // crisp-offset math must use the SAME effective dpr the ctx was scaled by.
     dpr: effectiveDpr,

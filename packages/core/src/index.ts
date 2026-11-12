@@ -236,7 +236,6 @@ export {
   createSymbolMonochromeProbe,
   measureSymbolFaceEncoding,
   symbolCmapEncoding,
-  symbolFaceKey,
   type SymbolFaceOracle,
   type SymbolFaceOracleOptions,
   type SymbolFallbackFont,

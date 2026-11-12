@@ -2,7 +2,7 @@
  * Which symbol codes one selected face draws itself (symbol-font.ts).
  *
  * Where the library holds the face's bytes (a document-embedded face, a
- * served `fonts` face whose tables were read), the cmap answers exactly
+ * served `fonts` face whose tables were read), the cmaps answer exactly
  * ({@link symbolCmapEncoding}). Otherwise (a host-installed face, an
  * application FontFace) the face is measured in the very Canvas context that
  * measures and paints the text ({@link measureSymbolFaceEncoding}).
@@ -11,10 +11,12 @@ import {
   SYMBOL_FACE_UNICODE,
   SYMBOL_FACE_UNKNOWN,
   symbolCodeSet,
+  symbolCodeSetHas,
   type SymbolFaceEncoding,
   type SymbolTextSegment,
   symbolTextToUnicodeSegments,
 } from './symbol-font.js';
+import { fontFaceWeightCovers, parseUnicodeRange } from './font-face-descriptors.js';
 
 const tag = (value: string): number => (
   ((value.charCodeAt(0) << 24) >>> 0) | (value.charCodeAt(1) << 16)
@@ -368,29 +370,83 @@ export function createSymbolMonochromeProbe(
   };
 }
 
-/** One face selection a format asks about: the CSS family that paints (the
- * selected face, first in its family list) and, when the library holds that
- * face's bytes, their exact encoding. */
+// ---- Held bytes ---------------------------------------------------------------------
+
+/** The symbol codes the exact bytes of each registered face draw (null: not
+ * read). Recorded where the library registers bytes it holds: document-
+ * embedded faces (embedded.ts) and served faces (source-session.ts). */
+const heldEncodings = new WeakMap<FontFace, SymbolFaceEncoding | null>();
+
+/** Record the cmap reading of the bytes `face` was registered from. */
+export function recordHeldSymbolEncoding(face: FontFace, encoding: SymbolFaceEncoding | null): void {
+  heldEncodings.set(face, encoding);
+}
+
+type KnownEncoding = Extract<SymbolFaceEncoding, { kind: 'known' }>;
+
+/**
+ * What a registered family draws for one weight/style from its held bytes,
+ * when every face CSS matching can pick for that tuple has a read cmap: for
+ * each scalar, faces whose `unicode-range` covers it are tried, the
+ * last-declared first, until one has a glyph for it (CSS Fonts 4 §4.5, §5.3).
+ * A PUA code is owned when a covering face draws it; a bare code is decided
+ * by the first covering face that has a glyph for it (as a symbol code:
+ * owned; as the Unicode character, `latin`: not owned). Undefined when no
+ * face matches the tuple at normal width (matching then picks a nearer face
+ * or synthesizes) or a matching face's bytes were not read: measure instead.
+ */
+export function symbolEncodingOfFaces(
+  faces: readonly Readonly<{
+    weight: string; style: string; stretch?: string; unicodeRange: string; symbolEncoding?: SymbolFaceEncoding | null;
+  }>[],
+  weight: number,
+  style: 'normal' | 'italic',
+): KnownEncoding | undefined {
+  const normalWidth = (stretch: string | undefined) => !stretch || /^(?:normal|100%)$/iu.test(stretch.trim());
+  const matching = faces.filter((face) => fontFaceWeightCovers(face.weight, weight)
+    && face.style.trim().toLowerCase() === style && normalWidth(face.stretch));
+  if (matching.length === 0) return undefined;
+  const ranges: (readonly (readonly [number, number])[])[] = [];
+  const encodings: KnownEncoding[] = [];
+  for (const face of matching) {
+    const parsed = parseUnicodeRange(face.unicodeRange);
+    if (face.symbolEncoding?.kind !== 'known' || !parsed) return undefined;
+    ranges.push(parsed);
+    encodings.push(face.symbolEncoding);
+  }
+  const covering = (scalar: number) => encodings.filter((_, index) =>
+    ranges[index]!.some(([lo, hi]) => lo <= scalar && scalar <= hi)).reverse();
+  const pua: number[] = [];
+  const bare: number[] = [];
+  const latin: number[] = [];
+  for (let code = 0; code < 256; code++) {
+    if (covering(0xf000 + code).some((encoding) => symbolCodeSetHas(encoding.pua, code))) pua.push(code);
+    for (const encoding of covering(code)) {
+      if (symbolCodeSetHas(encoding.bare, code)) { bare.push(code); break; }
+      if (symbolCodeSetHas(encoding.latin, code)) { latin.push(code); break; }
+    }
+  }
+  return Object.freeze({ kind: 'known', pua: symbolCodeSet(pua), bare: symbolCodeSet(bare), latin: symbolCodeSet(latin) });
+}
+
+// ---- The oracle -----------------------------------------------------------------------
+
+/** One face selection a format asks about: the CSS families, in stack order,
+ * whose faces may paint a symbol code before the generic tail (the selected
+ * face, then a loaded substitute), for one weight and style. */
 export interface SymbolFaceSelection {
-  readonly familyText: string;
+  readonly families: readonly string[];
   readonly weight: number;
   readonly style: 'normal' | 'italic';
-  readonly encoding?: SymbolFaceEncoding | null;
-  /** The families of `familyText` (unquoted); with a shared cache, the
-   * registered faces of these families are part of the cache key. */
-  readonly families?: readonly string[];
 }
 
 export interface SymbolFaceOracleOptions {
   /** The real 2D context when `context` wraps it: colour probes draw on a
    * scratch canvas of its realm. Defaults to `context`. */
   readonly probeOwner?: unknown;
-  /** Measurements shared across oracles of this realm (PPTX renders the
-   * same font state on every render): keyed by the measuring realm's
-   * FontFaceSet, the selection, and the registered faces of the selection's
-   * families (by FontFace identity), so a face added, replaced or removed for
-   * those families re-measures. Host-installed fonts do not change during a
-   * session. A realm without a FontFaceSet (Node canvases) shares nothing. */
+  /** Answers shared across oracles of this realm (PPTX renders the same
+   * font state on every render). Every answer is keyed by the font state it
+   * was derived from either way (see {@link createSymbolFaceOracle}). */
   readonly shared?: boolean;
 }
 
@@ -398,11 +454,6 @@ export interface SymbolFaceOracleOptions {
  * converted string (its slot route, weight and style). */
 export type SymbolFallbackFont = (text: string) => string;
 
-/**
- * Per-owner decisions for one set of font resources in one context. A format
- * creates a new oracle whenever its font resources change (and per render
- * context), which is its invalidation: measurements are cached only here.
- */
 export interface SymbolFaceOracle {
   encoding(selection: SymbolFaceSelection): SymbolFaceEncoding;
   segments(
@@ -426,30 +477,53 @@ function realmFontSet(owner: unknown): FontFaceSet | null {
   return scope.document?.fonts ?? scope.fonts ?? null;
 }
 
-/** The registered faces of `families` in `fontSet`, as a cache-key part. */
-function registeredFacesToken(fontSet: FontFaceSet | null, families: readonly string[] | undefined): string {
-  if (!fontSet || !families?.length || typeof fontSet[Symbol.iterator] !== 'function') return '';
-  const wanted = new Set(families.map((family) => family.trim().toLowerCase()));
+const familyKey = (family: string) => family.replace(/^(['"])(.*)\1$/u, '$2').trim().toLowerCase();
+
+/** The loaded registered faces of each family, and a cache-key token over
+ * their identity, (mutable, CSS Font Loading 3 §2.1) descriptors and whether
+ * their bytes were read (a reading may land after the face loads). */
+function registeredFaces(fontSet: FontFaceSet | null, families: readonly string[]) {
+  const wanted = new Set(families.map(familyKey));
+  const byFamily = new Map<string, FontFace[]>();
   const parts: string[] = [];
-  for (const face of fontSet) {
-    const family = face.family.replace(/^(['"])(.*)\1$/u, '$2').trim().toLowerCase();
-    if (!wanted.has(family)) continue;
-    let id = faceIds.get(face);
-    if (id === undefined) { id = nextFaceId++; faceIds.set(face, id); }
-    // Descriptors are mutable matching inputs (CSS Font Loading 3 §2.1).
-    parts.push([id, face.status, face.weight, face.style, face.stretch, face.unicodeRange].join(','));
+  if (fontSet && typeof fontSet[Symbol.iterator] === 'function') {
+    for (const face of fontSet) {
+      const family = familyKey(face.family);
+      if (!wanted.has(family)) continue;
+      let id = faceIds.get(face);
+      if (id === undefined) { id = nextFaceId++; faceIds.set(face, id); }
+      parts.push([id, family, face.status, face.weight, face.style, face.stretch, face.unicodeRange, heldEncodings.has(face)].join(','));
+      if (face.status === 'loaded') byFamily.set(family, [...(byFamily.get(family) ?? []), face]);
+    }
   }
-  return parts.join(';');
+  return { byFamily, token: parts.join(';') };
 }
 
+/**
+ * Per-owner symbol decisions in one measuring/painting context: "which face
+ * wins this code, and does it draw it as a symbol glyph".
+ *
+ * For each family of the selection, in stack order: a family whose loaded
+ * registered faces for the tuple all carry held bytes is read from their
+ * cmaps (symbolEncodingOfFaces: unicode-range and coverage per face). A PUA
+ * code is owned when a family draws it (later families draw what earlier
+ * ones lack); a bare code is decided by the first family that has a glyph
+ * for it. From the first family the bytes cannot answer for (host-installed,
+ * an application face without held bytes, a tuple CSS synthesizes), the rest
+ * of the stack is measured as it paints ({@link measureSymbolFaceEncoding})
+ * and decides every open bare code: measurement cannot tell a missing face
+ * from a Unicode one, so its unowned bare codes convert. Every answer is
+ * cached under the registered faces of the selection's families (identity,
+ * family, descriptors, whether their bytes were read), so a face added,
+ * replaced or changed for them re-derives it, held or measured alike.
+ * Host-installed fonts do not change during a session.
+ */
 export function createSymbolFaceOracle(
   context: SymbolProbeContext | null | undefined,
   options: SymbolFaceOracleOptions = {},
 ): SymbolFaceOracle {
   const probeOwner = options.probeOwner ?? context;
-  const fontSet = options.shared ? realmFontSet(probeOwner) : null;
-  // Without a FontFaceSet (Node canvases register fonts through their own
-  // libraries, invisibly here) nothing is shared: each oracle measures.
+  const fontSet = realmFontSet(probeOwner);
   const shared = options.shared === true && fontSet !== null;
   const encodings = !shared ? new Map<string, SymbolFaceEncoding>()
     : sharedEncodings.get(fontSet!) ?? (() => {
@@ -458,13 +532,55 @@ export function createSymbolFaceOracle(
       return map;
     })();
   const probe = createSymbolMonochromeProbe(probeOwner);
+  const derive = (selection: SymbolFaceSelection, byFamily: Map<string, FontFace[]>): SymbolFaceEncoding => {
+    const pua = new Set<number>();
+    const bare = new Set<number>();
+    const decided = new Set<number>();
+    const heldOf = (family: string) => {
+      const faces = byFamily.get(familyKey(family)) ?? [];
+      return faces.length === 0 ? undefined : symbolEncodingOfFaces(faces.map((face) => ({
+        weight: face.weight, style: face.style, stretch: face.stretch, unicodeRange: face.unicodeRange,
+        symbolEncoding: heldEncodings.get(face),
+      })), selection.weight, selection.style);
+    };
+    const { families } = selection;
+    for (let index = 0; index < families.length; index++) {
+      const held = heldOf(families[index]!);
+      if (held) {
+        for (let code = 0; code < 256; code++) {
+          if (symbolCodeSetHas(held.pua, code)) pua.add(code);
+          if (decided.has(code)) continue;
+          if (symbolCodeSetHas(held.bare, code)) { bare.add(code); decided.add(code); }
+          else if (symbolCodeSetHas(held.latin, code)) decided.add(code);
+        }
+        continue;
+      }
+      // A family the bytes cannot answer for: the rest of the stack is
+      // measured as CSS paints it (falling through to later faces), and
+      // decides every bare code still open. The identity test owns a PUA code
+      // only when its bare form draws the same glyph, so the PUA codes of
+      // later held faces (a unicode-range limited to U+F000-F0FF) are added.
+      const measured = measureSymbolFaceEncoding(context,
+        families.slice(index).map(quoteCssFamily).join(', '), selection.weight, selection.style);
+      if (measured.kind === 'unknown') return SYMBOL_FACE_UNKNOWN;
+      for (let code = 0; code < 256; code++) {
+        if (symbolCodeSetHas(measured.pua, code)) pua.add(code);
+        if (!decided.has(code) && symbolCodeSetHas(measured.bare, code)) bare.add(code);
+      }
+      for (const later of families.slice(index + 1)) {
+        const laterHeld = heldOf(later);
+        for (let code = 0; laterHeld && code < 256; code++) if (symbolCodeSetHas(laterHeld.pua, code)) pua.add(code);
+      }
+      break;
+    }
+    return Object.freeze({ kind: 'known', pua: symbolCodeSet(pua), bare: symbolCodeSet(bare) });
+  };
   const encoding = (selection: SymbolFaceSelection): SymbolFaceEncoding => {
-    if (selection.encoding) return selection.encoding;
-    const key = JSON.stringify([selection.familyText, selection.weight, selection.style,
-      shared ? registeredFacesToken(fontSet, selection.families) : '']);
+    const { byFamily, token } = registeredFaces(fontSet, selection.families);
+    const key = JSON.stringify([selection.families.map(familyKey), selection.weight, selection.style, token]);
     let result = encodings.get(key);
     if (!result) {
-      result = measureSymbolFaceEncoding(context, selection.familyText, selection.weight, selection.style);
+      result = derive(selection, byFamily);
       if (encodings.size >= 512) encodings.delete(encodings.keys().next().value!);
       encodings.set(key, result);
     }
@@ -494,7 +610,7 @@ export function createSymbolFaceOracle(
   });
 }
 
-/** A map key for one face tuple's held encoding (CSS family, weight, style). */
-export function symbolFaceKey(family: string, weight: number, style: 'normal' | 'italic'): string {
-  return `${family.trim().toLowerCase()}|${weight}|${style}`;
+/** A family name in CSS family syntax (quoted, with escapes). */
+function quoteCssFamily(family: string): string {
+  return `"${family.replace(/\\/gu, '\\\\').replace(/"/gu, '\\"')}"`;
 }

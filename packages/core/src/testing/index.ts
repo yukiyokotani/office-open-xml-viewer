@@ -6,3 +6,4 @@ export { buildCfbFixture, buildCfbWithStreams, type CfbStream } from './cfb-fixt
 export { ENCRYPTED_DOCX_SPIN0_BASE64, encryptedDocxSpin0 } from './encrypted-fixture';
 export { nonOoxmlInputs, storedZip, type NonOoxmlFormat } from './non-ooxml-fixture';
 export { symbolFixtureFontBytes } from './symbol-font-fixture';
+export { recordHeldSymbolEncoding } from '../fonts/symbol-face';

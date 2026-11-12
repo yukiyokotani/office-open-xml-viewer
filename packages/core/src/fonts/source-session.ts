@@ -72,9 +72,7 @@ import {
 import { resolveFontFiles } from './files-source.js';
 import { parseOpenTypeResourceMetrics, type OpenTypeLineMetrics } from './open-type-metrics.js';
 import { metricSfnt } from './web-font-sfnt.js';
-import { symbolCmapEncoding, symbolFaceKey } from './symbol-face.js';
-import { symbolEncodingOfFaces } from './symbol-face-sources.js';
-import type { SymbolFaceEncoding } from './symbol-font.js';
+import { recordHeldSymbolEncoding, symbolCmapEncoding } from './symbol-face.js';
 import { DecodeQueue } from './decode-queue.js';
 import { concludeFamilies } from './resolver-failures.js';
 import {
@@ -128,9 +126,6 @@ export interface LoadedSourceFace {
    * for {@link instanceOpenTypeLineMetrics}. Formats project these tables
    * with their own line rules, exactly as for a document-embedded face. */
   readonly resourceMetrics?: OpenTypeLineMetrics;
-  /** The symbol codes the exact bytes of this face draw (symbol-face.ts
-   * `symbolCmapEncoding`), when the session holds them and their cmap reads. */
-  readonly symbolEncoding?: SymbolFaceEncoding;
   /** When `resourceMetrics` is absent: the source this face was registered
    * from (the owned bytes, or the `url()` of an inline data: URL), so a
    * format can register it again alone under a private family and measure
@@ -148,11 +143,6 @@ export interface LoadedFontSources {
   readonly substitutions: ReadonlyMap<string, { readonly family: string; readonly script?: FontSubstituteScript }>;
   /** `loadedRegularAliases` over the loaded faces ('lato regular' → 'Lato'). */
   readonly regularAliases: ReadonlyMap<string, string>;
-  /** symbol-face.ts `symbolFaceKey` (family, weight, style) → the symbol
-   * codes the loaded faces CSS matching picks for that tuple draw, when all
-   * of their tables were read (symbol-face-sources.ts). Only families with a
-   * face whose cmap was read appear. */
-  readonly symbolEncodings?: ReadonlyMap<string, SymbolFaceEncoding>;
 }
 
 export type { FontResolverFailures, FontResolverRunner, ResolverFaceAcquirer, ResolverFaceRequest };
@@ -188,8 +178,6 @@ export interface FontSourceSessionOptions {
  * so its bytes, and hence its tables, are the same for every holder. Decoding
  * is bounded through {@link metricDecodes}. */
 const faceResourceMetrics = new WeakMap<FontFace, OpenTypeLineMetrics | null>();
-/** Symbol cmap reading of the same bytes (null: unreadable). */
-const faceSymbolEncodings = new WeakMap<FontFace, SymbolFaceEncoding | null>();
 
 /** Source identity (`SourceCache.id`) of every face a session registered,
  * so a format can tell the faces of one source, registered by any session of
@@ -226,7 +214,8 @@ async function decodeResourceMetrics(face: FontFace, data: ArrayBuffer): Promise
     const sfnt = await metricSfnt(data);
     if (sfnt instanceof Uint8Array) {
       metrics = parseOpenTypeResourceMetrics(sfnt, undefined, { variations: true });
-      faceSymbolEncodings.set(face, symbolCmapEncoding(sfnt));
+      // The symbol codes these exact bytes draw (symbol-face.ts oracle).
+      recordHeldSymbolEncoding(face, symbolCmapEncoding(sfnt));
     }
   } catch { metrics = null; }
   faceResourceMetrics.set(face, metrics);
@@ -1123,7 +1112,6 @@ export class FontSourceSession {
       if (entry.face.status !== 'loaded') continue;
       const { declaration } = entry;
       const resourceMetrics = faceResourceMetrics.get(entry.face) ?? undefined;
-      const symbolEncoding = faceSymbolEncodings.get(entry.face) ?? undefined;
       const probeSource = resourceMetrics ? undefined
         : declaration.data ?? (declaration.url === undefined ? undefined : cssUrl(declaration.url));
       faces.push(Object.freeze({
@@ -1135,7 +1123,6 @@ export class FontSourceSession {
         sourceIndex: entry.sourceIndex,
         face: entry.face,
         ...(resourceMetrics ? { resourceMetrics } : {}),
-        ...(symbolEncoding ? { symbolEncoding } : {}),
         ...(probeSource === undefined ? {} : { probeSource }),
       }));
     }
@@ -1146,22 +1133,10 @@ export class FontSourceSession {
       const script = state.substitution.script;
       substitutions.set(key, Object.freeze({ family: state.served, ...(script ? { script } : {}) }));
     }
-    const symbolEncodings = new Map<string, SymbolFaceEncoding>();
-    const symbolFamilies = new Set(faces.filter((face) => face.symbolEncoding).map((face) => face.family.trim().toLowerCase()));
-    for (const family of symbolFamilies) {
-      const familyFaces = faces.filter((face) => face.family.trim().toLowerCase() === family);
-      for (const weight of [400, 700]) {
-        for (const style of ['normal', 'italic'] as const) {
-          const encoding = symbolEncodingOfFaces(familyFaces, weight, style);
-          if (encoding) symbolEncodings.set(symbolFaceKey(family, weight, style), encoding);
-        }
-      }
-    }
     return Object.freeze({
       faces: Object.freeze(faces),
       substitutions,
       regularAliases: loadedRegularAliases(faces.map((face) => ({ ...face, status: 'loaded' as const }))),
-      ...(symbolEncodings.size > 0 ? { symbolEncodings } : {}),
     });
   }
 }

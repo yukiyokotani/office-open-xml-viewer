@@ -77,8 +77,7 @@ import {
   type PresentationPreflight,
 } from './presentation-preflight';
 import { PptxSlideRepository } from './slide-repository';
-import { loadEmbeddedFonts, pptxSymbolFaceEncodings, uncoveredOfficeFontRequests } from './embedded-fonts';
-import type { SymbolFaceEncoding } from '@silurus/ooxml-core';
+import { loadEmbeddedFonts, uncoveredOfficeFontRequests } from './embedded-fonts';
 import {
   isPptxSlidePullResponse,
   PptxSlidePullClient,
@@ -318,7 +317,6 @@ export class PptxPresentation {
   /** Embedded Font parts registered into the main-thread FontFaceSet. */
   private _embeddedFontFaces: FontFace[] = [];
   private _embeddedFontAliases: ReadonlyMap<string, string> = new Map();
-  private _embeddedSymbolEncodings: ReadonlyMap<string, SymbolFaceEncoding> = new Map();
   private _embeddedFontAuthoredFamilies: ReadonlyMap<string, string> = new Map();
   private _embeddedFontTuples: ReadonlySet<string> = new Set();
   private _destroyed = false;
@@ -610,7 +608,6 @@ export class PptxPresentation {
         this._embeddedFontAliases = loaded.aliases;
         this._embeddedFontAuthoredFamilies = loaded.authoredFamilies;
         this._embeddedFontTuples = loaded.tuples;
-        this._embeddedSymbolEncodings = loaded.symbolEncodings;
       }
     });
     // Preflight can outlast a font failure. Observe it immediately while keeping
@@ -703,7 +700,6 @@ export class PptxPresentation {
         this._embeddedFontAliases = loaded.aliases;
         this._embeddedFontAuthoredFamilies = loaded.authoredFamilies;
         this._embeddedFontTuples = loaded.tuples;
-        this._embeddedSymbolEncodings = loaded.symbolEncodings;
       }
     });
     // Preflight can outlast a font failure. Observe it immediately while keeping
@@ -1260,7 +1256,6 @@ export class PptxPresentation {
             officeFontRoutes,
             officeInstalledFamilies,
             fontSubstitutions: this._fontSources?.loaded.substitutions,
-            symbolFaceEncodings: pptxSymbolFaceEncodings(this._embeddedSymbolEncodings, this._fontSources?.loaded),
             fetchMedia: this._fetchMedia,
             fetchImage: this._fetchImage,
             skipMediaControls: opts.skipMediaControls,
@@ -1679,7 +1674,6 @@ export class PptxPresentation {
       this._embeddedFontFaces = [];
     }
     this._embeddedFontAliases = new Map();
-    this._embeddedSymbolEncodings = new Map();
     this._embeddedFontAuthoredFamilies = new Map();
     this._embeddedFontTuples = new Set();
     // Release this deck's decoded raster bitmaps (GPU-backed), duotone-recoloured

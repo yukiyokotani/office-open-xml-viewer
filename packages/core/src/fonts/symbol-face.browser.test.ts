@@ -85,16 +85,16 @@ describe.skipIf(!existsSync(chromium.executablePath()))('symbol face measurement
       const api = (globalThis as unknown as { symbolFaceTest: Api }).symbolFaceTest;
       const ctx = document.querySelector('canvas')!.getContext('2d')!;
       const oracle = api.createSymbolFaceOracle(ctx);
-      const sel = (familyText: string) => ({ familyText, weight: 400, style: 'normal' as const });
+      const sel = (family: string) => ({ families: [family], weight: 400, style: 'normal' as const });
       const mono = api.createSymbolMonochromeProbe(ctx, '32px sans-serif');
       return {
-        installed: oracle.segments('\uF061a', 'Symbol', sel('"Fixture Symbol Face"')),
-        missing: oracle.segments('\uF061a', 'Symbol', sel('"Ooxml Absent Symbol Face 7"')),
-        missingHeart: oracle.segments('\uF0A9', 'Symbol', sel('"Ooxml Absent Symbol Face 7"')),
+        installed: oracle.segments('\uF061a', 'Symbol', sel('Fixture Symbol Face')),
+        missing: oracle.segments('\uF061a', 'Symbol', sel('Ooxml Absent Symbol Face 7')),
+        missingHeart: oracle.segments('\uF0A9', 'Symbol', sel('Ooxml Absent Symbol Face 7')),
         heartMonochrome: mono('♥\uFE0E'),
         // Wingdings 0x43 is THUMBS UP SIGN (U+1F44D): monochrome only where a
         // text face has it; otherwise the authored code is kept.
-        thumbs: oracle.segments('\uF043', 'Wingdings', sel('"Ooxml Absent Symbol Face 7"')),
+        thumbs: oracle.segments('\uF043', 'Wingdings', sel('Ooxml Absent Symbol Face 7')),
         thumbsMonochrome: mono('\u{1F44D}\uFE0E'),
       };
     });

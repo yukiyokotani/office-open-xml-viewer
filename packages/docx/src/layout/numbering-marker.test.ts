@@ -247,6 +247,9 @@ describe('resolveNumberingMarkerGeometry', () => {
     ['a\uF028\uF0B7', [['\u2022', 'rtl'], ['(', 'rtl'], ['a', 'ltr']]],
     // The VS15 shares its base's piece; the shaper gives it its own (highAnsi) span, as in body text.
     ['a\uF028\uFE0E', [['\uFE0E', 'rtl'], ['(', 'rtl'], ['a', 'ltr']]],
+    // A fully converted marker is ordered too: "(β)" paints [")", "β", "("]
+    // left to right, "β" (L) between neutrals that resolve R at both ends.
+    ['\uF028\uF062\uF029', [[')', 'rtl'], ['\u03B2', 'ltr'], ['(', 'rtl']]],
   ])('orders and directs RTL marker pieces of %j by their resolved levels', (text, expected) => {
     const base = createTextLayoutService({
       fonts: createFontResolver([]),
