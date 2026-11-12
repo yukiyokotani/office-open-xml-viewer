@@ -411,9 +411,9 @@ pub(super) enum Item {
     Ruby {
         base: String,
         text: String,
-        /// The ruby text's size: in points, or as a share of the base
-        /// text's size.
-        ruby_size: Option<(f64, bool)>,
+        /// The ruby text's size as its style sets it (`size_terms`); a
+        /// missing base is the base text's size.
+        ruby_size: Option<(Option<f64>, f64, f64)>,
     },
 }
 
@@ -742,12 +742,7 @@ impl<'a> Reader<'a> {
                 // A percentage refers to the parent style's size (§20.190);
                 // past the style's own parents the search continues in the
                 // text the ruby annotates (§16.2), so to the base text's.
-                cascade
-                    .get(NS_FO, "font-size")
-                    .map(|_| match resolve_size(&cascade, "") {
-                        (_, Some(share)) => (share, true),
-                        (size, None) => (size, false),
-                    })
+                Some(size_terms(&cascade, "")).filter(|terms| *terms != (None, 1.0, 0.0))
             }
             None => None,
         };
@@ -1159,8 +1154,9 @@ impl<'a> Reader<'a> {
                 run.ruby = Some(RubyAnnotation {
                     text: text.clone(),
                     font_size_pt: match *ruby_size {
-                        Some((share, true)) => share * properties.size,
-                        Some((size, false)) => size,
+                        Some((base, factor, add)) => {
+                            (base.unwrap_or(properties.size) * factor + add).max(0.5)
+                        }
                         None => properties.size / 2.0,
                     },
                     hps_raise_pt: None,
@@ -1712,11 +1708,12 @@ impl RunProperties {
     }
 }
 
-/// The font size of a script class (§20.190 fo:font-size, §20.191
-/// style:font-size-rel): the nearest absolute size scaled by the
-/// percentages and offset by the relative sizes set nearer. Returns the size
-/// and, when no absolute size exists, the relative factor.
-fn resolve_size(cascade: &Cascade<'_>, suffix: &str) -> (f64, Option<f64>) {
+/// The font size a cascade sets for a script class (§20.190 fo:font-size,
+/// §20.286 style:font-size-rel), as `base * factor + add`: the nearest
+/// absolute size (`None` when the search order has none), the product of
+/// the percentages set nearer, and the relative sizes set nearer, each
+/// scaled by the percentages nearer still.
+fn size_terms(cascade: &Cascade<'_>, suffix: &str) -> (Option<f64>, f64, f64) {
     let (size_key, rel_key) = if suffix.is_empty() {
         (
             (NS_FO.to_string(), "font-size".to_string()),
@@ -1740,26 +1737,28 @@ fn resolve_size(cascade: &Cascade<'_>, suffix: &str) -> (f64, Option<f64>) {
                 continue;
             }
             if let Ok(size) = length_pt(value) {
-                return ((size * factor + add).max(0.5), None);
+                return (Some(size), factor, add);
             }
         } else if let Some(value) = group.attributes.get(&rel_key) {
-            // (§20.286: added to the parent's size, so the percentages of
-            // the nearer styles scale it too.)
             add += length_pt(value).unwrap_or(0.0) * factor;
         }
     }
-    if !suffix.is_empty() {
-        // A script without its own size takes the western one.
-        let (western, relative) = resolve_size(cascade, "");
-        return (western, relative);
-    }
-    // ODF defines no initial font size; LibreOffice's is 12 pt.
-    // The factor is returned for a caller that knows what the size is
-    // relative to (a note mark, a ruby text).
-    ((12.0 * factor + add).max(0.5), Some(factor))
+    (None, factor, add)
 }
 
-/// The font size of a paragraph's text properties, western class.
+/// The font size of a script class. Returns the size and, when no absolute
+/// size exists, the relative factor (for a caller that knows what the size
+/// is relative to).
+fn resolve_size(cascade: &Cascade<'_>, suffix: &str) -> (f64, Option<f64>) {
+    match size_terms(cascade, suffix) {
+        (Some(size), factor, add) => ((size * factor + add).max(0.5), None),
+        // A script without its own size takes the western one.
+        (None, ..) if !suffix.is_empty() => resolve_size(cascade, ""),
+        // ODF defines no initial font size; LibreOffice's is 12 pt.
+        (None, factor, add) => ((12.0 * factor + add).max(0.5), Some(factor)),
+    }
+}
+
 /// The western font size of a text-properties cascade.
 pub(super) fn paragraph_font_size(cascade: &Cascade<'_>) -> f64 {
     resolve_size(cascade, "").0

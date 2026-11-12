@@ -388,6 +388,12 @@ impl<'a, 'i> Pages<'a, 'i> {
         }
     }
 
+    /// The size of the page style's body pages.
+    pub fn page_size(&self, master: &str) -> (f64, f64) {
+        let section = &self.body_layout(master).section;
+        (section.page_width, section.page_height)
+    }
+
     fn mirrored(&self) -> bool {
         self.layouts.iter().any(|layout| layout.usage == "mirrored")
     }

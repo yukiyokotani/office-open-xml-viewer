@@ -486,23 +486,45 @@ impl<'a> Reader<'a> {
         }
     }
 
-    /// A frame's size (§19.540 svg:width/height, §20.188 fo:min-height,
-    /// relative widths §20.341).
+    /// A frame's size (§19.575 svg:width, §19.543 svg:height, §20.188
+    /// fo:min-height). A percentage (§19.514 style:rel-width, §19.513
+    /// style:rel-height) is the size; the lengths written beside it are the
+    /// producer's value for consumers without relative sizes. LibreOffice
+    /// takes the percentage of the text area holding the frame, or of the
+    /// whole page with `loext:rel-width-rel="page"` (its reading of the
+    /// basis is followed).
     fn frame_size(&self, node: roxmltree::Node<'a, 'a>, graphic: &Graphic<'a>) -> (f64, f64) {
         let get = |ns: &str, name: &str| node.attribute((ns, name)).and_then(|v| length_pt(v).ok());
         let rel = |name: &str| {
             node.attribute((NS_STYLE, name))
                 .filter(|v| v.ends_with('%'))
                 .and_then(|v| percent(v).ok())
+                .filter(|share| *share > 0.0)
         };
-        let width = get(NS_SVG, "width")
+        let page = |name: &str| node.attribute((NS_LOEXT, name)) == Some("page");
+        let section = self.pages.page_size(&self.current_master);
+        let width = rel("rel-width")
+            .map(|r| {
+                r * if page("rel-width-rel") {
+                    section.0
+                } else {
+                    self.text_width
+                }
+            })
+            .or_else(|| get(NS_SVG, "width"))
             .or_else(|| get(NS_FO, "min-width"))
-            .or_else(|| rel("rel-width").map(|r| r * self.text_width))
             .or_else(|| graphic.length(NS_FO, "min-width"))
             .unwrap_or(0.0);
-        let height = get(NS_SVG, "height")
+        let height = rel("rel-height")
+            .map(|r| {
+                r * if page("rel-height-rel") {
+                    section.1
+                } else {
+                    self.text_height
+                }
+            })
+            .or_else(|| get(NS_SVG, "height"))
             .or_else(|| get(NS_FO, "min-height"))
-            .or_else(|| rel("rel-height").map(|r| r * self.text_height))
             .or_else(|| graphic.length(NS_FO, "min-height"))
             .unwrap_or(0.0);
         (width.max(0.0), height.max(0.0))
