@@ -1057,3 +1057,60 @@ fn a_scaled_shape_takes_its_scaled_size() {
     // A rotation without a translation is still a rotation.
     assert!((groups[1].shapes[0].rot + 0.5f64.to_degrees()).abs() < 1e-9);
 }
+
+#[test]
+fn a_child_border_shorthand_overrides_its_parent_sides() {
+    let common = concat!(
+        r##"<style:style style:name="Boxed" style:family="table-cell" style:parent-style-name="Default"><style:table-cell-properties fo:border-left="0.75pt solid #ff0000" fo:border="0.75pt solid #000000"/></style:style>"##,
+        r##"<style:style style:name="Cleared" style:family="table-cell" style:parent-style-name="Boxed"><style:table-cell-properties fo:border="none" fo:border-top="0.75pt solid #0000ff"/></style:style>"##,
+    );
+    let body = content(
+        "",
+        &table(
+            r#"<table:table-row><table:table-cell table:style-name="Boxed" office:value-type="float" office:value="1"><text:p>1</text:p></table:table-cell><table:table-cell table:style-name="Cleared" office:value-type="float" office:value="1"><text:p>1</text:p></table:table-cell></table:table-row>"#,
+        ),
+    );
+    let workbook = read_text(&body, Some(&styles(common))).unwrap();
+    let styles = workbook.styles.as_ref().unwrap();
+    let border = |cell: usize| {
+        let xf = workbook.sheets[0].rows[0].cells[cell].style_index.unwrap();
+        &styles.borders[styles.cell_xfs[xf as usize].border_id as usize]
+    };
+    let color = |edge: &Option<xlsx_model::BorderEdge>| edge.as_ref().and_then(|e| e.color.clone());
+    assert_eq!(color(&border(0).left).as_deref(), Some("FF0000"));
+    assert_eq!(color(&border(0).right).as_deref(), Some("000000"));
+    // The child clears every side its shorthand covers and sets its top.
+    assert!(border(1).left.is_none() && border(1).right.is_none());
+    assert_eq!(color(&border(1).top).as_deref(), Some("0000FF"));
+}
+
+#[test]
+fn a_custom_shape_draws_its_enhanced_path_and_mirror() {
+    // A recognized type whose path was changed (as when a handle is moved)
+    // is drawn from its path, mirrored as its geometry says.
+    let shape = |geometry: &str| {
+        format!(
+            r#"<draw:custom-shape svg:width="2cm" svg:height="1cm"><draw:enhanced-geometry svg:viewBox="0 0 100 100" draw:type="right-arrow" {geometry}/></draw:custom-shape>"#
+        )
+    };
+    let body = content(
+        "",
+        &table(&format!(
+            "<table:table-row><table:table-cell>{}{}</table:table-cell></table:table-row>",
+            shape(r#"draw:mirror-horizontal="true" draw:enhanced-path="M 0 0 L 100 50 0 100 Z N""#),
+            shape("")
+        )),
+    );
+    let workbook = read_text(&body, Some(&styles(""))).unwrap();
+    let groups = &workbook.sheets[0].worksheet.shape_groups;
+    assert!(matches!(
+        &groups[0].shapes[0].geom,
+        xlsx_model::ShapeGeom::Custom { paths } if !paths.is_empty()
+    ));
+    assert!(groups[0].shapes[0].flip_h && !groups[0].shapes[0].flip_v);
+    // Without a path the type's preset is what can be drawn.
+    assert!(matches!(
+        &groups[1].shapes[0].geom,
+        xlsx_model::ShapeGeom::Preset { name, .. } if name == "rightArrow"
+    ));
+}

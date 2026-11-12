@@ -187,6 +187,26 @@ impl XfBuilder {
             .map_or((0, 0), |xf| (xf.fill_id, xf.border_id))
     }
 
+    /// The number format of an xf as a chart takes it from its source cells
+    /// (a code and its section divisors); `None` for General.
+    pub fn chart_format_of(&self, xf: u32) -> Option<(String, Option<Vec<f64>>)> {
+        let id = self.styles.cell_xfs.get(xf as usize)?.num_fmt_id;
+        if let Some(format) = self.styles.num_fmts.iter().find(|f| f.num_fmt_id == id) {
+            let divisors = format
+                .section_divisors
+                .iter()
+                .any(|d| *d != 1.0)
+                .then(|| format.section_divisors.clone());
+            return Some((format.format_code.clone(), divisors));
+        }
+        // The built-in short date and date-time (§18.8.30).
+        match id {
+            14 => Some(("mm-dd-yy".into(), None)),
+            22 => Some(("m/d/yy h:mm".into(), None)),
+            _ => None,
+        }
+    }
+
     /// The number-format kind of an xf (for value-type defaults).
     pub fn kind(&self, xf: u32) -> Option<DataKind> {
         self.kinds.get(xf as usize).copied().flatten()
@@ -457,9 +477,18 @@ pub fn resolve(
             ..Fill::default()
         },
     };
+    // §20.183: a style sets a side with `fo:border-<side>` or with the
+    // `fo:border` shorthand. The nearest style that sets either decides
+    // (§16.2), so a child's `fo:border="none"` clears a side its parent
+    // set.
     let edge = |side: &str| -> Option<BorderEdge> {
-        let value = get(chain, &format!("cell:fo:border-{side}"))
-            .or_else(|| get(chain, "cell:fo:border"))?;
+        let key = format!("cell:fo:border-{side}");
+        let value = chain.iter().find_map(|style| {
+            style
+                .properties
+                .get(&key)
+                .or_else(|| style.properties.get("cell:fo:border"))
+        })?;
         border_edge(value)
     };
     let border = Border {

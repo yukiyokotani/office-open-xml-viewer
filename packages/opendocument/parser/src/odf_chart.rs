@@ -83,6 +83,11 @@ pub trait RangeResolver {
     fn date1904(&self) -> bool {
         false
     }
+    /// The number format of the first cell of a range, as a format code and
+    /// its section divisors; `None` for General or an unreadable range.
+    fn format(&self, _address: &str) -> Option<(String, Option<Vec<f64>>)> {
+        None
+    }
 }
 
 /// One point of a resolved range: its value, its display text, and whether
@@ -693,6 +698,16 @@ impl Reader<'_> {
         Ok(Some(tabular))
     }
 
+    /// The number format of the cells a range names (its first cell): what
+    /// `chart:link-data-style-to-source` links an axis or a label to
+    /// (§20.35).
+    fn source_format(&self, address: Option<&str>) -> Option<(String, Option<Vec<f64>>)> {
+        let first = crate::odf_text::split_addresses(address?)
+            .into_iter()
+            .next()?;
+        self.resolver?.format(first)
+    }
+
     /// The local name of a namespace-qualified chart class token
     /// (§19.15.1 `chart:class`, §19.12 series class): its prefix is
     /// resolved through the element's namespace bindings, and only a token
@@ -947,13 +962,42 @@ impl Reader<'_> {
                     })
                     .map(|g| self.paint(&self.chain(g)))
             };
-            let format_code = chain
-                .iter()
-                .find_map(|s| s.data_style.as_deref())
-                .filter(|_| prop("link-data-style-to-source") != Some("true"))
-                .and_then(|name| data.code(name))
-                .filter(|(format, _)| !format.is_general())
-                .map(|(format, _)| format.chart_format());
+            // §20.35: an axis linked to its source shows the number format
+            // of the cells it plots: the values of the first series drawn
+            // against it, or its categories (the x values of a scatter
+            // chart).
+            let format_code = if prop("link-data-style-to-source") == Some("true") {
+                let source = match dimension {
+                    "x" => axis
+                        .children()
+                        .find(|n| xml::is(*n, NS_CHART, "categories"))
+                        .and_then(|c| c.attribute((NS_TABLE, "cell-range-address")))
+                        .or_else(|| {
+                            plot.descendants()
+                                .find(|n| xml::is(*n, NS_CHART, "domain"))
+                                .and_then(|d| d.attribute((NS_TABLE, "cell-range-address")))
+                        }),
+                    _ => plot
+                        .children()
+                        .filter(|n| xml::is(*n, NS_CHART, "series"))
+                        .find(|series| {
+                            series
+                                .attribute((NS_CHART, "attached-axis"))
+                                .is_none_or(|attached| attached == name)
+                        })
+                        .and_then(|series| {
+                            series.attribute((NS_CHART, "values-cell-range-address"))
+                        }),
+                };
+                self.source_format(source)
+            } else {
+                chain
+                    .iter()
+                    .find_map(|s| s.data_style.as_deref())
+                    .and_then(|name| data.code(name))
+                    .filter(|(format, _)| !format.is_general())
+                    .map(|(format, _)| format.chart_format())
+            };
             let (format_code, format_divisors) = match format_code {
                 Some((code, divisors)) => (Some(code), divisors),
                 None => (None, None),
@@ -1360,7 +1404,7 @@ impl Reader<'_> {
                 }
             }
             budget::tick(1)?;
-            if let Some(labels) = self.data_labels(&chain, data) {
+            if let Some(labels) = self.data_labels(&chain, data, own_values) {
                 series.series_data_labels = Some(labels);
             }
             // Data points (§11.13): per-point styles and repeats.
@@ -1502,6 +1546,7 @@ impl Reader<'_> {
         &self,
         chain: &[&Style],
         data: &mut DataStyles,
+        values_address: Option<&str>,
     ) -> Option<ChartSeriesDataLabels> {
         let number = get(chain, "chart:chart:data-label-number");
         let show_val = matches!(number, Some("value") | Some("value-and-percentage"));
@@ -1515,13 +1560,16 @@ impl Reader<'_> {
         let separator = get_element(chain, "chart:chart:label-separator")
             .and_then(|e| e.get("#text"))
             .cloned();
-        let format_code = chain
-            .iter()
-            .find_map(|s| s.data_style.as_deref())
-            .filter(|_| get(chain, "chart:chart:link-data-style-to-source") != Some("true"))
-            .and_then(|name| data.code(name))
-            .filter(|(format, _)| !format.is_general())
-            .map(|(format, _)| format.chart_format());
+        let format_code = if get(chain, "chart:chart:link-data-style-to-source") == Some("true") {
+            self.source_format(values_address)
+        } else {
+            chain
+                .iter()
+                .find_map(|s| s.data_style.as_deref())
+                .and_then(|name| data.code(name))
+                .filter(|(format, _)| !format.is_general())
+                .map(|(format, _)| format.chart_format())
+        };
         let (format_code, format_divisors) = match format_code {
             Some((code, divisors)) => (Some(code), divisors),
             None => (None, None),
@@ -1870,6 +1918,9 @@ mod tests {
                     visible(vec![CellData::Number(1.0), CellData::Number(2.0)])
                 }
                 "Sheet1.B1" => visible(vec![CellData::Text("Units".into())]),
+                "Sheet1.P2:Sheet1.P3" => {
+                    visible(vec![CellData::Number(0.5), CellData::Number(0.25)])
+                }
                 "Sheet1.X2:Sheet1.X3" => {
                     visible(vec![CellData::Number(1000.0), CellData::Number(0.5)])
                 }
@@ -1943,6 +1994,41 @@ mod tests {
                 ("Series2".to_string(), vec![Some(10.0), Some(12.0)]),
             ]
         );
+    }
+
+    #[test]
+    fn linked_formats_come_from_the_source_cells() {
+        struct Percent;
+        impl RangeResolver for Percent {
+            fn cells(&self, address: &str) -> Result<Option<Vec<SourceCell>>, String> {
+                Fixed.cells(address)
+            }
+            fn format(&self, address: &str) -> Option<(String, Option<Vec<f64>>)> {
+                (address == "Sheet1.P2:Sheet1.P3").then(|| ("0%".to_string(), None))
+            }
+        }
+        let styles = concat!(
+            r##"<number:number-style xmlns:number="urn:oasis:names:tc:opendocument:xmlns:datastyle:1.0" style:name="N2"><number:number number:decimal-places="2" number:min-integer-digits="1"/></number:number-style>"##,
+            r##"<style:style style:name="linked" style:family="chart" style:data-style-name="N2"><style:chart-properties chart:link-data-style-to-source="true" chart:data-label-number="value"/></style:style>"##,
+            r##"<style:style style:name="own" style:family="chart" style:data-style-name="N2"><style:chart-properties chart:link-data-style-to-source="false"/></style:style>"##,
+        );
+        let body = |axis: &str| {
+            format!(
+                r##"<chart:chart chart:class="chart:bar"><chart:plot-area><chart:axis chart:dimension="y" chart:name="primary-y" chart:style-name="{axis}"/><chart:series chart:style-name="linked" chart:values-cell-range-address="Sheet1.P2:Sheet1.P3"/></chart:plot-area></chart:chart>"##
+            )
+        };
+        let model = read_chart_document(&chart(&body("linked"), styles), None, Some(&Percent))
+            .unwrap()
+            .unwrap();
+        // §20.35: the axis and the labels show the cells' percentage format,
+        // not the style's own.
+        assert_eq!(model.val_axis_format_code.as_deref(), Some("0%"));
+        let labels = model.series[0].series_data_labels.as_ref().unwrap();
+        assert_eq!(labels.format_code.as_deref(), Some("0%"));
+        let model = read_chart_document(&chart(&body("own"), styles), None, Some(&Percent))
+            .unwrap()
+            .unwrap();
+        assert_eq!(model.val_axis_format_code.as_deref(), Some("0.00"));
     }
 
     #[test]

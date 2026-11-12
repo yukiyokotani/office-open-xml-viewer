@@ -583,15 +583,12 @@ fn read_drawing(
         }
         "ellipse" | "circle" => "ellipse",
         "line" | "connector" => "line",
-        "custom-shape" => {
-            let geometry = node
-                .children()
-                .find(|n| xml::is(*n, NS_DRAW, "enhanced-geometry"));
-            match geometry.and_then(|g| g.attribute((NS_DRAW, "type"))) {
-                Some(kind) => preset_name(kind).unwrap_or("custom"),
-                None => "custom",
-            }
-        }
+        // The preset a `draw:type` names is only the fallback of a shape
+        // whose enhanced path cannot be drawn (below).
+        "custom-shape" => enhanced_geometry(node)
+            .and_then(|g| g.attribute((NS_DRAW, "type")))
+            .and_then(preset_name)
+            .unwrap_or("rect"),
         "polygon" | "polyline" | "path" => "rect",
         _ => return Ok(()),
     };
@@ -608,19 +605,24 @@ fn read_drawing(
         shape.fill = None;
         shape.fill_color = None;
     }
-    if preset == "custom" {
-        // §19.145: the enhanced path itself is the geometry.
+    if name == "custom-shape" {
+        // §19.229.3: `draw:type` names the shape for an editor and does
+        // not influence its geometry, which is the enhanced path with its
+        // equations and modifiers (a shape whose handles were moved keeps
+        // its type). The path is drawn whenever it can be.
         let size = (
             pt_attr(node, NS_SVG, "width").unwrap_or(0.0),
             pt_attr(node, NS_SVG, "height").unwrap_or(0.0),
         );
-        shape.geom = match super::shape_path::custom_geometry(node, size)? {
-            Some(paths) => xlsx_model::ShapeGeom::Custom { paths },
-            None => xlsx_model::ShapeGeom::Preset {
-                name: "rect".into(),
-                adj: Vec::new(),
-            },
-        };
+        if let Some(paths) = super::shape_path::custom_geometry(node, size)? {
+            shape.geom = xlsx_model::ShapeGeom::Custom { paths };
+        }
+        // §19.192 / §19.193: the geometry is mirrored in its box.
+        if let Some(geometry) = enhanced_geometry(node) {
+            let mirrored = |axis: &str| geometry.attribute((NS_DRAW, axis)) == Some("true");
+            shape.flip_h = mirrored("mirror-horizontal");
+            shape.flip_v = mirrored("mirror-vertical");
+        }
     }
     if matches!(name, "polygon" | "polyline") {
         if let Some(geom) = polygon_geometry(node, name)? {
@@ -647,6 +649,13 @@ fn read_drawing(
         }
     }
     push_shape_checked(ctx, package, worksheet, rect, shape)
+}
+
+fn enhanced_geometry<'a, 'input>(
+    node: roxmltree::Node<'a, 'input>,
+) -> Option<roxmltree::Node<'a, 'input>> {
+    node.children()
+        .find(|n| xml::is(*n, NS_DRAW, "enhanced-geometry"))
 }
 
 /// `svg:viewBox` (§19.570): x, y, width, height.
@@ -1412,6 +1421,13 @@ struct SheetResolver<'a> {
 impl crate::odf_chart::RangeResolver for SheetResolver<'_> {
     fn date1904(&self) -> bool {
         self.ctx.date1904
+    }
+
+    fn format(&self, address: &str) -> Option<(String, Option<Vec<f64>>)> {
+        let (sheet, (row, col), _) = super::parse_range(address)?;
+        let sheet = super::sheet_named(self.sheets, &self.ctx.sheet_index, sheet.as_deref())?;
+        let cell = super::find_cell(&sheet.rows, row, col)?;
+        self.ctx.xfs.chart_format_of(cell.style_index?)
     }
 
     fn cells(&self, address: &str) -> Result<Option<Vec<crate::odf_chart::SourceCell>>, String> {
