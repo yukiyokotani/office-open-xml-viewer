@@ -1252,6 +1252,38 @@ fn callouts_and_ellipse_parts_are_drawn() {
 }
 
 #[test]
+fn dashes_markers_and_validation_bases() {
+    let named = concat!(
+        r##"<draw:stroke-dash draw:name="Dots" draw:style="round" draw:dots1="1" draw:dots1-length="100%" draw:distance="100%"/>"##,
+        r##"<draw:marker draw:name="m1" svg:viewBox="0 0 10 10" svg:d="M5 0c3 0 5 2 5 5s-2 5-5 5-5-2-5-5 2-5 5-5z"/>"##,
+        r##"<draw:marker draw:name="m2" svg:viewBox="0 0 20 30" svg:d="M10 0l10 30-10-8-10 8z"/>"##,
+    );
+    let automatic = r##"<style:style style:name="gr1" style:family="graphic"><style:graphic-properties draw:stroke="dash" draw:stroke-dash="Dots" draw:marker-start="m1" draw:marker-end="m2"/></style:style>"##;
+    let body = content(
+        automatic,
+        concat!(
+            r#"<table:content-validations><table:content-validation table:name="val1" table:condition="of:cell-content-is-in-list([.A1:.A2])" table:base-cell-address="Sheet1.B1"/></table:content-validations>"#,
+            r#"<table:table table:name="Sheet1"><table:table-row><table:table-cell/><table:table-cell/>"#,
+            r#"<table:table-cell table:content-validation-name="val1"><draw:line draw:style-name="gr1" svg:x1="0cm" svg:y1="0cm" svg:x2="2cm" svg:y2="1cm"/></table:table-cell>"#,
+            r#"</table:table-row></table:table>"#
+        ),
+    );
+    let workbook = read_text(&body, Some(&styles(named))).unwrap();
+    let sheet = &workbook.sheets[0].worksheet;
+    let shape = &sheet.shape_groups[0].shapes[0];
+    // §20.168: the named dash; a line end by its marker's geometry, not
+    // its name.
+    assert_eq!(shape.stroke_dash_style.as_deref(), Some("sysDot"));
+    assert_eq!(shape.stroke_head_end.as_ref().unwrap().r#type, "oval");
+    assert_eq!(shape.stroke_tail_end.as_ref().unwrap().r#type, "stealth");
+    // §19.590: `[.A1:.A2]` written from B1 is B1:B2 from C1, where the
+    // validation applies.
+    let validation = &sheet.data_validations[0];
+    assert_eq!(validation.sqref, "C1");
+    assert_eq!(validation.formula1.as_deref(), Some("B1:B2"));
+}
+
+#[test]
 fn fills_and_lines_keep_their_opacity() {
     let automatic = r##"<style:style style:name="gr1" style:family="graphic"><style:graphic-properties draw:fill="solid" draw:fill-color="#ff0000" draw:opacity="50%" draw:stroke="solid" svg:stroke-color="#0000ff" svg:stroke-opacity="25%"/></style:style>"##;
     let body = content(

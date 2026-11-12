@@ -1188,15 +1188,21 @@ fn shape_info(
         stroke_color,
         stroke_width,
         stroke_fill: None,
-        stroke_dash_style: (stroke == Some("dash")).then(|| "dash".to_string()),
+        // §20.168: the named dash definition, as its DrawingML preset.
+        stroke_dash_style: (stroke == Some("dash")).then(|| {
+            get(chain, "graphic:draw:stroke-dash")
+                .and_then(|name| ctx.fills.dash(name))
+                .unwrap_or("dash")
+                .to_string()
+        }),
         stroke_custom_dash: Vec::new(),
         stroke_line_cap: None,
         stroke_line_join: None,
         stroke_miter_limit: None,
         stroke_alignment: None,
         stroke_cmpd: None,
-        stroke_head_end: marker(chain, "start"),
-        stroke_tail_end: marker(chain, "end"),
+        stroke_head_end: marker(ctx, chain, "start")?,
+        stroke_tail_end: marker(ctx, chain, "end")?,
         geom: xlsx_model::ShapeGeom::Preset {
             name: preset.to_string(),
             adj: Vec::new(),
@@ -1205,28 +1211,75 @@ fn shape_info(
     })
 }
 
-fn marker(chain: &[&Style], end: &str) -> Option<xlsx_model::ShapeLineEnd> {
-    let name = get(chain, &format!("graphic:draw:marker-{end}"))?;
-    if name.is_empty() {
-        return None;
-    }
-    let lower = name.to_ascii_lowercase();
-    let kind = if lower.contains("oval") || lower.contains("circle") {
-        "oval"
-    } else if lower.contains("diamond") || lower.contains("square") {
-        "diamond"
-    } else if lower.contains("stealth") {
-        "stealth"
-    } else if lower.contains("line") {
-        "arrow"
-    } else {
-        "triangle"
+/// A line end (§20.158 / §20.160 `draw:marker-start` / `-end`) as the
+/// DrawingML line end its marker's geometry (§16.42.8 `svg:d`) is nearest
+/// to, whatever the marker is named: a curved outline is an oval; a closed
+/// outline of three corners a triangle; of four corners a stealth arrow
+/// when one corner lies inside the outline's box (the notch), else a
+/// diamond; an open path an open arrow. A marker that names no definition
+/// with a path is a triangle, LibreOffice's plain arrow.
+fn marker(
+    ctx: &Context,
+    chain: &[&Style],
+    end: &str,
+) -> Result<Option<xlsx_model::ShapeLineEnd>, String> {
+    use xlsx_model::PathCmd;
+    let Some(name) = get(chain, &format!("graphic:draw:marker-{end}")).filter(|n| !n.is_empty())
+    else {
+        return Ok(None);
     };
-    Some(xlsx_model::ShapeLineEnd {
+    let path = match ctx.fills.marker(name) {
+        Some(d) => super::shape_path::svg_path(d, (0.0, 0.0, 1.0, 1.0))?,
+        None => None,
+    };
+    let kind = match path {
+        None => "triangle",
+        Some(path) => {
+            let curved = path
+                .commands
+                .iter()
+                .any(|c| matches!(c, PathCmd::CubicBezTo { .. } | PathCmd::QuadBezTo { .. }));
+            let closed = path.commands.iter().any(|c| matches!(c, PathCmd::Close));
+            let mut corners: Vec<(f64, f64)> = Vec::new();
+            for command in &path.commands {
+                if let PathCmd::MoveTo { x, y } | PathCmd::LineTo { x, y } = *command {
+                    // A path that returns to its start names it twice.
+                    if corners.first() != Some(&(x, y)) && corners.last() != Some(&(x, y)) {
+                        corners.push((x, y));
+                    }
+                }
+            }
+            let bounds = |pick: fn(&(f64, f64)) -> f64| {
+                corners
+                    .iter()
+                    .map(pick)
+                    .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), v| {
+                        (lo.min(v), hi.max(v))
+                    })
+            };
+            let ((left, right), (top, bottom)) = (bounds(|p| p.0), bounds(|p| p.1));
+            let notched = corners
+                .iter()
+                .any(|&(x, y)| x > left && x < right && y > top && y < bottom);
+            // Arcs are flattened to many corners.
+            if curved || corners.len() > 8 {
+                "oval"
+            } else if !closed {
+                "arrow"
+            } else {
+                match corners.len() {
+                    4 if notched => "stealth",
+                    4 => "diamond",
+                    _ => "triangle",
+                }
+            }
+        }
+    };
+    Ok(Some(xlsx_model::ShapeLineEnd {
         r#type: kind.into(),
         w: "med".into(),
         len: "med".into(),
-    })
+    }))
 }
 
 fn shape_text(

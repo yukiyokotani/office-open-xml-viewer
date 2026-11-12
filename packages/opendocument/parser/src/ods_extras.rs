@@ -345,14 +345,12 @@ pub(crate) fn content_validations(
             error_title: None,
             error_message: None,
         };
-        if let Some(condition) = node.attribute((NS_TABLE, "condition")) {
-            // §19.595: the condition's namespace prefix is resolved
-            // through the bindings in scope, not by its spelling.
-            read_validation_condition(
-                crate::odf_text::without_bound_prefix(node, condition),
-                &mut validation,
-            );
-        }
+        // §19.595: the condition's namespace prefix is resolved through
+        // the bindings in scope, not by its spelling.
+        let condition = node
+            .attribute((NS_TABLE, "condition"))
+            .map(|condition| crate::odf_text::without_bound_prefix(node, condition));
+        let base = node.attribute((NS_TABLE, "base-cell-address"));
         if let Some(help) = node
             .children()
             .find(|n| xml::is(*n, NS_TABLE, "help-message"))
@@ -371,9 +369,16 @@ pub(crate) fn content_validations(
             budget::tick(1)?;
             let sheet = &mut sheets[index];
             let sqref = ranges.iter().map(range_text).collect::<Vec<_>>().join(" ");
+            // §19.590: the condition's relative references are written
+            // from the base cell; a SpreadsheetML validation's are relative
+            // to the first cell of its ranges.
+            let mut validation = validation.clone();
+            if let (Some(condition), Some(first)) = (condition, ranges.first()) {
+                read_validation_condition(condition, &mut validation, base_shift(base, first));
+            }
             sheet.worksheet.data_validations.push(DataValidation {
                 sqref,
-                ..validation.clone()
+                ..validation
             });
         }
     }
@@ -418,7 +423,8 @@ fn call_args<'a>(text: &'a str, name: &str) -> Option<Vec<&'a str>> {
     None
 }
 
-fn read_validation_condition(condition: &str, validation: &mut DataValidation) {
+fn read_validation_condition(condition: &str, validation: &mut DataValidation, shift: (i64, i64)) {
+    let convert_formula = |formula: &str| convert_formula_shifted(formula, shift);
     if let Some(args) = call_args(condition, "cell-content-is-in-list") {
         validation.validation_type = Some("list".into());
         let joined = args.join(";");
@@ -1106,12 +1112,13 @@ mod tests {
             error_title: None,
             error_message: None,
         };
-        read_validation_condition("cell-content-is-in-list(\"a\";\"b\")", &mut v);
+        read_validation_condition("cell-content-is-in-list(\"a\";\"b\")", &mut v, (0, 0));
         assert_eq!(v.validation_type.as_deref(), Some("list"));
         assert_eq!(v.formula1.as_deref(), Some("\"a,b\""));
         read_validation_condition(
             "cell-content-is-whole-number() and cell-content-is-between(1;10)",
             &mut v,
+            (0, 0),
         );
         assert_eq!(
             (v.validation_type.as_deref(), v.operator.as_deref()),

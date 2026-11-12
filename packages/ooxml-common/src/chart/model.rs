@@ -2076,6 +2076,10 @@ pub struct ChartSeriesDataLabels {
     /// parsers): the percentage takes `format_code`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub percent_format_code: Option<String>,
+    /// The section divisors of `percent_format_code`, as `format_divisors`
+    /// are of `format_code`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub percent_format_divisors: Option<Vec<f64>>,
     /// `<c:dLbls><c:separator>` (§21.2.2.170) inserted between enabled label
     /// components. Office commonly stores a line break here for pie labels.
     #[serde(default, skip_serializing_if = "Option::is_none")]

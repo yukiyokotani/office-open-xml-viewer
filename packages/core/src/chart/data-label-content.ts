@@ -21,6 +21,8 @@ export interface EffectiveDataLabelTextOptions {
    *  the value and bubble-size text; the percentage has its own format. */
   formatDivisors?: readonly number[] | null;
   percentFormatCode?: string | null;
+  /** Section divisors of `percentFormatCode`. */
+  percentFormatDivisors?: readonly number[] | null;
   date1904?: boolean;
   separator?: string | null;
   defaultSeparator?: string;
@@ -48,6 +50,7 @@ export function effectiveDataLabelText(options: EffectiveDataLabelTextOptions): 
       options.percentRatio,
       options.percentFormatCode ?? options.formatCode ?? '0%',
       options.date1904,
+      options.percentFormatCode != null ? options.percentFormatDivisors : null,
     ));
   }
   if (options.showBubbleSize && options.bubbleSize != null) {

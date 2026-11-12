@@ -1619,14 +1619,20 @@ impl Reader<'_> {
         };
         // §19.511: the percentage of a label has its own data style, never
         // the value's; without one LibreOffice shows whole percents.
-        let percent_format_code = show_percent.then(|| {
+        let (percent_format_code, percent_format_divisors) = match show_percent.then(|| {
             chain
                 .iter()
                 .find_map(|s| s.percentage_data_style.as_deref())
                 .and_then(|name| data.code(name))
                 .filter(|(format, _)| !format.is_general())
-                .map_or_else(|| "0%".to_string(), |(format, _)| format.chart_format().0)
-        });
+                .map_or_else(
+                    || ("0%".to_string(), None),
+                    |(format, _)| format.chart_format(),
+                )
+        }) {
+            Some((code, divisors)) => (Some(code), divisors),
+            None => (None, None),
+        };
         Some(ChartSeriesDataLabels {
             show_val,
             show_percent,
@@ -1655,6 +1661,7 @@ impl Reader<'_> {
             format_code,
             format_divisors,
             percent_format_code,
+            percent_format_divisors,
             ..ChartSeriesDataLabels::default()
         })
     }
@@ -1730,52 +1737,7 @@ fn stroke_dashes(root: roxmltree::Node<'_, '_>) -> HashMap<String, &'static str>
         let Some(name) = node.attribute((draw, "name")) else {
             continue;
         };
-        let length = |key: &str| -> f64 {
-            node.attribute((draw, key))
-                .and_then(|v| percent(v).or_else(|| length_pt(v).map(|pt| pt / 0.75)))
-                .unwrap_or(1.0)
-        };
-        let count = |key: &str| -> u32 {
-            node.attribute((draw, key))
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(0)
-        };
-        let (d1, l1, d2, l2) = (
-            count("dots1"),
-            length("dots1-length"),
-            count("dots2"),
-            length("dots2-length"),
-        );
-        let gap = length("distance");
-        let preset = match (d1, d2) {
-            (_, 0) | (0, _) => {
-                let dash = if d1 > 0 { l1 } else { l2 };
-                if dash <= 1.5 {
-                    "sysDot"
-                } else if dash >= 6.0 {
-                    "lgDash"
-                } else if gap <= 1.5 {
-                    "sysDash"
-                } else {
-                    "dash"
-                }
-            }
-            (_, n) => {
-                let long = l1.max(l2);
-                match (long >= 6.0, n >= 2 || d1 >= 2) {
-                    (true, true) => "lgDashDotDot",
-                    (true, false) => "lgDashDot",
-                    (false, true) => "sysDashDotDot",
-                    (false, false) => {
-                        if gap <= 1.5 {
-                            "sysDashDot"
-                        } else {
-                            "dashDot"
-                        }
-                    }
-                }
-            }
-        };
+        let preset = crate::odf_fill::dash_preset(node);
         out.insert(name.to_string(), preset);
     }
     out

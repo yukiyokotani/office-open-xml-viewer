@@ -23,6 +23,7 @@ describe('resolveChartExLabel formats', () => {
   it('formats the percentage by its own format, else by the value format', () => {
     const both = { showPercent: true, formatCode: '0.0' };
     expect(label({ ...both, percentFormatCode: '0.0%' }, 1, 0.25)).toBe('1.0 25.0%');
+    expect(label({ ...both, percentFormatCode: '0.00%', percentFormatDivisors: [1000] }, 1, 0.25)).toBe('1.0 0.03%');
     expect(label(both, 1, 0.25)).toBe('1.0 0.3');
     expect(label({ showPercent: true }, 1, 0.25)).toBe('1 25%');
   });

@@ -291,6 +291,8 @@ fn tokens(path: &str, env: &mut Env<'_>) -> Result<Vec<Token>, String> {
         .split(|c: char| c.is_whitespace() || c == ',')
         .filter(|w| !w.is_empty())
     {
+        // A word that emits nothing is still a step of the read.
+        crate::budget::tick(1)?;
         if out.len() > MAX_COMMANDS * 8 {
             return Err(over_limit());
         }
@@ -783,6 +785,7 @@ pub fn svg_path(d: &str, view: (f64, f64, f64, f64)) -> Result<Option<PathInfo>,
         let Some(letter) = command else {
             break;
         };
+        crate::budget::tick(1)?;
         let relative = letter.is_ascii_lowercase();
         let (bx, by) = if relative { (cx, cy) } else { (0.0, 0.0) };
         let p = |x: f64, y: f64| (x - ox, y - oy);
@@ -1230,6 +1233,11 @@ mod tests {
         let paths = geometry(&xml).unwrap().unwrap();
         assert!(matches!(paths[0].commands[0], PathCmd::MoveTo { x, .. } if x == 1000.0));
         assert!(crate::budget::work() - before >= 1000);
+        // Path words that draw nothing are steps too.
+        let before = crate::budget::work();
+        let noise = "! ".repeat(500);
+        geometry(&shape("", &format!("M 0 0 {noise} L 1 1"))).unwrap();
+        assert!(crate::budget::work() - before >= 500);
         scope.finish().unwrap();
     }
 

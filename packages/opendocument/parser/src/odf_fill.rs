@@ -195,6 +195,8 @@ pub struct FillDefs {
     hatches: HashMap<String, HatchDef>,
     images: HashMap<String, String>,
     opacities: HashMap<String, OpacityDef>,
+    dashes: HashMap<String, &'static str>,
+    markers: HashMap<String, String>,
 }
 
 /// `draw:angle` (§19.218): an angle with a unit, or a bare number in tenths
@@ -284,6 +286,12 @@ impl FillDefs {
                         stops,
                     },
                 );
+            } else if xml::is(node, NS_DRAW, "stroke-dash") {
+                self.dashes.insert(name.to_string(), dash_preset(node));
+            } else if xml::is(node, NS_DRAW, "marker") {
+                if let Some(d) = node.attribute((NS_SVG, "d")) {
+                    self.markers.insert(name.to_string(), d.to_string());
+                }
             } else if xml::is(node, NS_DRAW, "opacity") {
                 // LibreOffice 7.6 multi-step opacity: `loext:opacity-stop`
                 // with `svg:offset` and `loext:stop-opacity` (0 to 1).
@@ -358,6 +366,16 @@ impl FillDefs {
             }
         }
         Ok(())
+    }
+
+    /// The DrawingML preset of the dash style `name` (`draw:stroke-dash`).
+    pub fn dash(&self, name: &str) -> Option<&'static str> {
+        self.dashes.get(name).copied()
+    }
+
+    /// The path data of the line end `name` (§16.42.8 `draw:marker`).
+    pub fn marker(&self, name: &str) -> Option<&str> {
+        self.markers.get(name).map(String::as_str)
     }
 
     /// The fill of a graphic style chain (`graphic:` properties), with its
@@ -612,6 +630,58 @@ fn translucent(fill: Fill, opacity: Opacity) -> Fill {
             opacity: uniform(&opacity),
             ..picture
         }),
+    }
+}
+
+/// A `draw:stroke-dash` (§16.41): dot runs and distance relative to the
+/// line width, matched to the DrawingML preset with the same pattern
+/// (ECMA-376 §20.1.10.48).
+pub(crate) fn dash_preset(node: roxmltree::Node<'_, '_>) -> &'static str {
+    let length = |key: &str| -> f64 {
+        node.attribute((NS_DRAW, key))
+            .and_then(|v| percent(v).or_else(|| length_pt(v).map(|pt| pt / 0.75)))
+            .unwrap_or(1.0)
+    };
+    let count = |key: &str| -> u32 {
+        node.attribute((NS_DRAW, key))
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0)
+    };
+    let (d1, l1, d2, l2) = (
+        count("dots1"),
+        length("dots1-length"),
+        count("dots2"),
+        length("dots2-length"),
+    );
+    let gap = length("distance");
+    match (d1, d2) {
+        (_, 0) | (0, _) => {
+            let dash = if d1 > 0 { l1 } else { l2 };
+            if dash <= 1.5 {
+                "sysDot"
+            } else if dash >= 6.0 {
+                "lgDash"
+            } else if gap <= 1.5 {
+                "sysDash"
+            } else {
+                "dash"
+            }
+        }
+        (_, n) => {
+            let long = l1.max(l2);
+            match (long >= 6.0, n >= 2 || d1 >= 2) {
+                (true, true) => "lgDashDotDot",
+                (true, false) => "lgDashDot",
+                (false, true) => "sysDashDotDot",
+                (false, false) => {
+                    if gap <= 1.5 {
+                        "sysDashDot"
+                    } else {
+                        "dashDot"
+                    }
+                }
+            }
+        }
     }
 }
 

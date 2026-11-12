@@ -1510,6 +1510,7 @@ function drawThreeDDataLabel(
     formatDivisors: override?.formatCode != null ? null : defaults?.formatDivisors,
     percentFormatCode: override?.formatCode
       ?? defaults?.percentFormatCode ?? defaults?.formatCode ?? chart.dataLabelFormatCode ?? '0%',
+    percentFormatDivisors: override?.formatCode != null ? null : defaults?.percentFormatDivisors,
     date1904: chart.date1904,
     separator: override?.separator ?? defaults?.separator,
   });
@@ -4853,6 +4854,7 @@ function renderPie(
           ?? defaults?.formatCode ?? chart.dataLabelFormatCode ?? series.valFormatCode,
         formatDivisors: labelOverride?.formatCode != null ? null : defaults?.formatDivisors,
         percentFormatCode: labelOverride?.formatCode ?? defaults?.percentFormatCode,
+        percentFormatDivisors: labelOverride?.formatCode != null ? null : defaults?.percentFormatDivisors,
         separator: labelOverride?.separator ?? defaults?.separator,
         date1904: chart.date1904,
       });

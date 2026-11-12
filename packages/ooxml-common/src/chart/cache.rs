@@ -1450,6 +1450,7 @@ pub(super) fn parse_data_labels_node_with_paint_policy(
         format_code,
         format_divisors: None,
         percent_format_code: None,
+        percent_format_divisors: None,
         separator,
         font_bold: font_bold_default,
         font_italic: font_italic_default,

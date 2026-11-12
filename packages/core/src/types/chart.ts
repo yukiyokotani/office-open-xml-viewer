@@ -525,6 +525,8 @@ export interface ChartSeriesDataLabels {
   /** The format of the percentage in a label where it is not `formatCode`
    *  (an OpenDocument `style:percentage-data-style-name`). */
   percentFormatCode?: string | null;
+  /** Section divisors of `percentFormatCode`. */
+  percentFormatDivisors?: number[] | null;
   /** `<c:dLbls><c:separator>` (§21.2.2.170), including authored line breaks. */
   separator?: string;
   /** Series-level bold default for data labels. */
