@@ -1837,7 +1837,8 @@ pub(crate) fn parse_border(value: &str, line_width: Option<&str>) -> Option<Bord
         }
     }
     let mut width = width.unwrap_or(0.75);
-    if let Some(parts) = line_width {
+    // §20.185: the component widths describe a double line only.
+    if let Some(parts) = line_width.filter(|_| matches!(style, Some("double" | "double-thin"))) {
         let sum: f64 = parts
             .split_whitespace()
             .filter_map(|p| length_pt(p).ok())

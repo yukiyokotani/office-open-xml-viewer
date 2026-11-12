@@ -955,6 +955,7 @@ impl<'a> Reader<'a> {
     ) -> Result<(), String> {
         let mut margin = list.margin;
         let mut indent = list.indent;
+        let automatic_indent = properties.get(NS_STYLE, "auto-text-indent") == Some("true");
         for (name, value) in [("margin-left", &mut margin), ("text-indent", &mut indent)] {
             let key = (NS_FO.to_string(), name.to_string());
             let Some(index) = chain.iter().position(|style| {
@@ -983,9 +984,7 @@ impl<'a> Reader<'a> {
                 }
                 // (§20.256: an automatic indent leaves fo:text-indent
                 // unused.)
-                if name == "text-indent"
-                    && properties.get(NS_STYLE, "auto-text-indent") == Some("true")
-                {
+                if name == "text-indent" && automatic_indent {
                     continue;
                 }
                 let raw = &setter.groups[PARAGRAPH].attributes[&key];
@@ -999,7 +998,11 @@ impl<'a> Reader<'a> {
             }
         }
         paragraph.indent_left = margin + self.section_indent.0;
-        paragraph.indent_first = if list.label.is_some() { indent } else { 0.0 };
+        // (An automatic indent, already resolved from the font size,
+        // stays.)
+        if !automatic_indent {
+            paragraph.indent_first = if list.label.is_some() { indent } else { 0.0 };
+        }
         paragraph.no_hanging_indent_tab = true;
         let Some(label) = &list.label else {
             return Ok(());
