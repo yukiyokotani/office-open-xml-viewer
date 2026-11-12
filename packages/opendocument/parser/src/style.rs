@@ -7,7 +7,7 @@
 
 use crate::budget;
 use crate::error::invalid;
-use crate::xml::{self, NS_STYLE, NS_TEXT};
+use crate::xml::{self, Stepped, NS_STYLE, NS_TEXT};
 use std::collections::{HashMap, HashSet};
 
 /// Implementation bound on a parent chain; ODF requires none, a cycle is a
@@ -28,7 +28,7 @@ const NS_DATASTYLE: &str = "urn:oasis:names:tc:opendocument:xmlns:datastyle:1.0"
 /// property set), of list and outline level styles and the notes and line
 /// numbering configurations, and every `*style-name` reference.
 pub fn check_values(root: roxmltree::Node<'_, '_>) -> Result<(), String> {
-    for node in root.descendants().filter(|n| n.is_element()) {
+    for node in root.subtree().filter(|n| n.is_element()) {
         budget::tick(1)?;
         let namespace = node.tag_name().namespace();
         let name = node.tag_name().name();
@@ -182,17 +182,14 @@ pub struct StyleRef<'a> {
 
 impl StyleSheet {
     pub fn add_common(&mut self, parent: roxmltree::Node<'_, '_>) -> Result<(), String> {
-        for node in parent
-            .children()
-            .filter(|n| xml::is(*n, NS_TEXT, "list-style"))
-        {
+        for node in parent.kids().filter(|n| xml::is(*n, NS_TEXT, "list-style")) {
             budget::tick(1)?;
             let list = read_list_style(node)?;
             if self.list_common.insert(list.name.clone(), list).is_some() {
                 return Err(invalid("two list styles share a name"));
             }
         }
-        for node in parent.children().filter(|n| xml::is(*n, NS_STYLE, "style")) {
+        for node in parent.kids().filter(|n| xml::is(*n, NS_STYLE, "style")) {
             budget::tick(1)?;
             let style = read_style(node)?;
             let key = (style.family.clone(), style.name.clone());
@@ -201,7 +198,7 @@ impl StyleSheet {
             }
         }
         for node in parent
-            .children()
+            .kids()
             .filter(|n| xml::is(*n, NS_STYLE, "default-style"))
         {
             budget::tick(1)?;
@@ -217,7 +214,7 @@ impl StyleSheet {
     /// Capture `text:outline-style` children of `office:styles` (§16.36).
     pub fn add_outline(&mut self, parent: roxmltree::Node<'_, '_>) -> Result<(), String> {
         for node in parent
-            .children()
+            .kids()
             .filter(|n| xml::is(*n, NS_TEXT, "outline-style"))
         {
             budget::tick(1)?;
@@ -238,10 +235,7 @@ impl StyleSheet {
         scope: Scope,
         parent: roxmltree::Node<'_, '_>,
     ) -> Result<(), String> {
-        for node in parent
-            .children()
-            .filter(|n| xml::is(*n, NS_TEXT, "list-style"))
-        {
+        for node in parent.kids().filter(|n| xml::is(*n, NS_TEXT, "list-style")) {
             budget::tick(1)?;
             let list = read_list_style(node)?;
             if self
@@ -252,7 +246,7 @@ impl StyleSheet {
                 return Err(invalid("two automatic list styles share a name"));
             }
         }
-        for node in parent.children().filter(|n| xml::is(*n, NS_STYLE, "style")) {
+        for node in parent.kids().filter(|n| xml::is(*n, NS_STYLE, "style")) {
             budget::tick(1)?;
             let mut style = read_style(node)?;
             style.automatic = true;
@@ -443,9 +437,9 @@ fn read_list_style_named(node: roxmltree::Node<'_, '_>, name: String) -> Result<
     // does the map below (readers look levels up through `level_text` and the
     // captured element, last match first).
     let mut level_text = HashMap::new();
-    for level in node.children().filter(|n| n.is_element()) {
+    for level in node.kids().filter(|n| n.is_element()) {
         let Some(text) = level
-            .children()
+            .kids()
             .rfind(|n| xml::is(*n, NS_STYLE, "text-properties"))
         else {
             continue;
@@ -504,7 +498,7 @@ fn read_style_body(node: roxmltree::Node<'_, '_>, name: String) -> Result<Style,
         .attribute((NS_STYLE, "parent-style-name"))
         .map(str::to_string);
     let mut groups = HashMap::new();
-    for child in node.children().filter(|n| n.is_element()) {
+    for child in node.kids().filter(|n| n.is_element()) {
         // LibreOffice also writes `loext:graphic-properties` (its area fill
         // model) beside the paragraph properties; it is kept as its own group
         // and checked by the reader.
@@ -518,7 +512,7 @@ fn read_style_body(node: roxmltree::Node<'_, '_>, name: String) -> Result<Style,
             attributes: attributes(child),
             ..Properties::default()
         };
-        for element in child.children().filter(|n| n.is_element()) {
+        for element in child.kids().filter(|n| n.is_element()) {
             // Each element-valued property occurs at most once per group.
             let captured = capture(element, 0)?;
             properties.element_nodes += captured.nodes();
@@ -565,7 +559,7 @@ fn capture(node: roxmltree::Node<'_, '_>, depth: usize) -> Result<Element, Strin
     let children = if depth >= MAX_CAPTURE_DEPTH {
         Vec::new()
     } else {
-        node.children()
+        node.kids()
             .filter(|n| n.is_element())
             .map(|child| capture(child, depth + 1))
             .collect::<Result<_, _>>()?

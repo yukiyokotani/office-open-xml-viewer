@@ -4,6 +4,7 @@
 //! renderer draws.
 
 use crate::budget;
+use crate::xml::Stepped;
 use ooxml_common::math::MathNode;
 
 const NS_MATH: &str = "http://www.w3.org/1998/Math/MathML";
@@ -25,8 +26,11 @@ fn children(node: roxmltree::Node<'_, '_>, depth: usize) -> Result<Vec<MathNode>
     if depth > MAX_DEPTH {
         return Ok(out);
     }
-    for child in node.children().filter(is_math) {
-        out.extend(element(child, depth + 1)?);
+    for child in node.kids() {
+        budget::tick(1)?;
+        if is_math(&child) {
+            out.extend(element(child, depth + 1)?);
+        }
     }
     Ok(out)
 }
@@ -37,7 +41,7 @@ fn argument(
     n: usize,
     depth: usize,
 ) -> Result<Vec<MathNode>, String> {
-    match node.children().filter(is_math).nth(n) {
+    match node.kids().filter(is_math).nth(n) {
         Some(child) => element(child, depth + 1),
         None => Ok(Vec::new()),
     }
@@ -45,7 +49,7 @@ fn argument(
 
 fn text(node: roxmltree::Node<'_, '_>) -> Result<String, String> {
     let mut out = String::new();
-    for descendant in node.descendants() {
+    for descendant in node.subtree() {
         budget::tick(1)?;
         if descendant.is_text() {
             out.push_str(descendant.text().unwrap_or(""));
@@ -146,7 +150,7 @@ fn element(node: roxmltree::Node<'_, '_>, depth: usize) -> Result<Vec<MathNode>,
             let first = argument(node, 1, depth)?;
             let second = argument(node, 2, depth)?;
             let base_operator = node
-                .children()
+                .kids()
                 .find(is_math)
                 .filter(|b| b.tag_name().name() == "mo")
                 .map(text)
@@ -216,7 +220,7 @@ fn element(node: roxmltree::Node<'_, '_>, depth: usize) -> Result<Vec<MathNode>,
             let mut pre: Option<usize> = None;
             let mut base = Vec::new();
             let (mut post, mut prescripts) = ([Vec::new(), Vec::new()], [Vec::new(), Vec::new()]);
-            for (index, child) in node.children().filter(is_math).enumerate() {
+            for (index, child) in node.kids().filter(is_math).enumerate() {
                 budget::tick(1)?;
                 if child.tag_name().name() == "mprescripts" && pre.is_none() {
                     pre = Some(index);
@@ -250,7 +254,7 @@ fn element(node: roxmltree::Node<'_, '_>, depth: usize) -> Result<Vec<MathNode>,
             end_char: node.attribute("close").unwrap_or(")").to_string(),
             items: {
                 let mut items = Vec::new();
-                for child in node.children().filter(is_math) {
+                for child in node.kids().filter(is_math) {
                     items.push(element(child, depth + 1)?);
                 }
                 items
@@ -270,13 +274,13 @@ fn element(node: roxmltree::Node<'_, '_>, depth: usize) -> Result<Vec<MathNode>,
         "mtable" => {
             let mut rows = Vec::new();
             for row in node
-                .children()
+                .kids()
                 .filter(|row| is_math(row) && matches!(row.tag_name().name(), "mtr" | "mlabeledtr"))
             {
                 budget::tick(1)?;
                 let mut cells = Vec::new();
                 for cell in row
-                    .children()
+                    .kids()
                     .filter(|cell| is_math(cell) && cell.tag_name().name() == "mtd")
                 {
                     budget::tick(1)?;

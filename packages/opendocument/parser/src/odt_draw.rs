@@ -31,7 +31,7 @@ impl<'a> Definitions<'a> {
     pub fn read(styles: Option<roxmltree::Node<'a, 'a>>) -> Result<Self, String> {
         let mut by_name = HashMap::new();
         if let Some(styles) = styles {
-            for node in styles.children().filter(|n| n.is_element()) {
+            for node in styles.kids().filter(|n| n.is_element()) {
                 budget::tick(1)?;
                 if node.tag_name().namespace() != Some(NS_DRAW) {
                     continue;
@@ -50,7 +50,7 @@ impl<'a> Definitions<'a> {
                 if let Some(name) = node.attribute((NS_DRAW, "name")) {
                     by_name
                         .entry((kind, name.to_string()))
-                        .or_insert((node, source_bytes(node)));
+                        .or_insert((node, source_bytes(node)?));
                 }
             }
         }
@@ -69,8 +69,10 @@ impl<'a> Definitions<'a> {
 /// A resolved graphic style (§16.2 over `style:graphic-properties`).
 struct Graphic<'a> {
     cascade: Cascade<'a>,
-    /// The style and its parents, without the family's default style: where
-    /// the paragraphs of a drawing shape continue their search (§16.2).
+    /// Where the paragraphs of the drawing shape or frame continue their
+    /// property search: the paragraph style its `draw:text-style-name`
+    /// names (§19.227) and that style's parents, then the graphic style and
+    /// its parents (§16.2), without the families' default styles.
     chain: Rc<[StyleRef<'a>]>,
 }
 
@@ -190,9 +192,20 @@ impl<'a> Reader<'a> {
         if let Some(default) = self.sheet.default_style(Family::Graphic) {
             chain.push(default);
         }
+        let text_chain = match node
+            .attribute((NS_DRAW, "text-style-name"))
+            .and_then(|name| self.find_style(Family::Paragraph, name))
+        {
+            Some(style) => {
+                let mut text_chain = self.style_chain(style)?.to_vec();
+                text_chain.extend(own.iter().copied());
+                text_chain.into()
+            }
+            None => own,
+        };
         Ok(Graphic {
             cascade: Cascade::build(chain, "graphic-properties")?,
-            chain: own,
+            chain: text_chain,
         })
     }
 
@@ -271,7 +284,7 @@ impl<'a> Reader<'a> {
         let result = match node.tag_name().name() {
             "frame" => self.frame(node),
             // A hyperlinked drawing (§9.7.1): its frame.
-            "a" => match node.children().find(|n| n.is_element()) {
+            "a" => match node.kids().find(|n| n.is_element()) {
                 Some(child) => self.drawing(child, None),
                 None => Ok(None),
             },
@@ -513,7 +526,7 @@ impl<'a> Reader<'a> {
                 *value_pt = y;
             }
         }
-        if let Some(text_box) = node.children().find(|n| xml::is(*n, NS_DRAW, "text-box")) {
+        if let Some(text_box) = node.kids().find(|n| xml::is(*n, NS_DRAW, "text-box")) {
             return self.text_box(node, text_box, &graphic, placement, width, height, rotation);
         }
         // A formula object (MathML) draws as math: in the line when the
@@ -551,21 +564,15 @@ impl<'a> Reader<'a> {
         // original kept beside its raster replacement.
         let mut raster: Option<(String, &'static str)> = None;
         let mut svg: Option<String> = None;
-        for image in node
-            .children()
-            .filter(|n| xml::is(*n, NS_DRAW, "image"))
-            .chain(
-                node.children()
-                    .filter(|n| {
-                        xml::is(*n, NS_DRAW, "object") || xml::is(*n, NS_DRAW, "object-ole")
-                    })
-                    .flat_map(|object| object.children().filter(|n| xml::is(*n, NS_DRAW, "image"))),
-            )
-        {
+        for image in node.kids().filter(|n| xml::is(*n, NS_DRAW, "image")).chain(
+            node.kids()
+                .filter(|n| xml::is(*n, NS_DRAW, "object") || xml::is(*n, NS_DRAW, "object-ole"))
+                .flat_map(|object| object.kids().filter(|n| xml::is(*n, NS_DRAW, "image"))),
+        ) {
             let resolved = match image.attribute((NS_XLINK, "href")) {
                 Some(href) => self.package_image(href)?,
                 None => match image
-                    .children()
+                    .kids()
                     .find(|n| xml::is(*n, NS_OFFICE, "binary-data"))
                     .and_then(|n| n.text())
                 {
@@ -653,7 +660,7 @@ impl<'a> Reader<'a> {
     /// MathML content as DOCX math.
     fn formula_object(&mut self, frame: roxmltree::Node<'a, 'a>) -> Result<Option<DocRun>, String> {
         let Some(href) = frame
-            .children()
+            .kids()
             .find(|n| xml::is(*n, NS_DRAW, "object"))
             .and_then(|object| object.attribute((NS_XLINK, "href")))
         else {
@@ -667,9 +674,9 @@ impl<'a> Reader<'a> {
             return Ok(None);
         }
         // Each referencing frame owns its tree: the sub-document is read
-        // and converted per frame.
-        budget::tick(1)?;
+        // and converted per frame, with steps for its size.
         let text = self.package.read_text(&content)?;
+        rescan(text.len())?;
         let document = xml::parse(&text)?;
         let root = document.root_element();
         if root.tag_name().name() != "math" {
@@ -1131,7 +1138,7 @@ impl<'a> Reader<'a> {
             }
             "custom-shape" => {
                 if let Some(geometry) = node
-                    .children()
+                    .kids()
                     .find(|n| xml::is(*n, NS_DRAW, "enhanced-geometry"))
                 {
                     self.enhanced_geometry(geometry, &graphic, &mut shape, width, height)?;
@@ -1155,7 +1162,7 @@ impl<'a> Reader<'a> {
         self.line(&graphic, &mut shape)?;
         // Text in the shape (§10.6.1: paragraphs and lists).
         if node
-            .children()
+            .kids()
             .any(|n| xml::is(n, NS_TEXT, "p") || xml::is(n, NS_TEXT, "list"))
         {
             let padding = |side: &str| {
@@ -1233,7 +1240,7 @@ impl<'a> Reader<'a> {
             // `draw:equation` (§10.6.3) definitions, within the reader's
             // bound: a shape with more is rejected, not cut short.
             let mut equations = HashMap::new();
-            for equation in node.children().filter(|n| xml::is(*n, NS_DRAW, "equation")) {
+            for equation in node.kids().filter(|n| xml::is(*n, NS_DRAW, "equation")) {
                 budget::tick(1)?;
                 if equations.len() >= geometry::MAX_EQUATIONS {
                     return Err(resource("shape equation"));
@@ -1400,7 +1407,7 @@ impl<'a> Reader<'a> {
 
     fn group_members(&mut self, node: roxmltree::Node<'a, 'a>) -> Result<Option<DocRun>, String> {
         let mut runs = Vec::new();
-        for child in node.children().filter(|n| n.is_element()) {
+        for child in node.kids().filter(|n| n.is_element()) {
             budget::tick(1)?;
             // Through `drawing`, which bounds the nesting depth.
             let run = self.drawing(child, None)?;
@@ -1423,7 +1430,7 @@ fn contour_polygon(
     frame: roxmltree::Node<'_, '_>,
 ) -> Result<Option<docx_model::AnchorPolygonWire>, String> {
     let Some(contour) = frame
-        .children()
+        .kids()
         .find(|n| xml::is(*n, NS_DRAW, "contour-polygon"))
     else {
         return Ok(None);
@@ -1481,46 +1488,86 @@ fn view_box(node: roxmltree::Node<'_, '_>) -> Option<(f64, f64, f64, f64)> {
         .then(|| (values[0], values[1], values[2], values[3]))
 }
 
-/// `draw:transform` (§19.229): the rotation of `rotate(a) translate(x y)`
-/// (radians, counter-clockwise) as DOCX clockwise degrees, and the unrotated
-/// box's top-left corner where the transform positions the shape.
+/// `draw:transform` (§19.228): the list of transforms composed in order
+/// into one affine map of the unrotated box at the origin, read as the
+/// box's rotation (DOCX clockwise degrees) and, where the list translates,
+/// the box's top-left corner (the map of its centre, less half its size).
+/// Scale and skew move the centre; the box keeps its size.
+///
+/// Angles are radians, counter-clockwise on the page: what LibreOffice
+/// writes and reads (every rotated object of the corpus, for example
+/// `rotate (-1.5707963267949)` for a quarter turn). The specification's
+/// text says degrees; reading them so would turn every LibreOffice file.
 fn transform_rotation(value: Option<&str>, width: f64, height: f64) -> (f64, Option<(f64, f64)>) {
     let Some(value) = value else {
         return (0.0, None);
     };
-    let mut angle = 0.0;
-    let mut translate = None;
+    // x' = a x + c y + e, y' = b x + d y + f.
+    let mut map = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+    let mut positioned = false;
     let mut rest = value;
     while let Some(open) = rest.find('(') {
-        let name = rest[..open].trim();
+        let name = rest[..open].trim_matches(|c: char| c.is_whitespace() || c == ',');
         let Some(close) = rest[open..].find(')') else {
             break;
         };
-        let arguments: Vec<f64> = rest[open + 1..open + close]
+        let mut arguments = rest[open + 1..open + close]
             .split([' ', ','])
             .filter(|v| !v.is_empty())
-            .filter_map(|v| length_pt(v).ok().or_else(|| v.parse::<f64>().ok()))
-            .collect();
-        match name {
-            "rotate" => angle += arguments.first().copied().unwrap_or(0.0),
-            "translate" => {
-                translate = Some((
-                    arguments.first().copied().unwrap_or(0.0),
-                    arguments.get(1).copied().unwrap_or(0.0),
-                ))
+            .filter_map(|v| length_pt(v).ok().or_else(|| v.parse::<f64>().ok()));
+        let mut next = |default: f64| arguments.next().unwrap_or(default);
+        let step = match name {
+            "rotate" => {
+                let (s, c) = next(0.0).sin_cos();
+                Some([c, -s, s, c, 0.0, 0.0])
             }
-            _ => {}
+            "translate" => {
+                positioned = true;
+                Some([1.0, 0.0, 0.0, 1.0, next(0.0), next(0.0)])
+            }
+            "scale" => {
+                let sx = next(1.0);
+                Some([sx, 0.0, 0.0, next(sx), 0.0, 0.0])
+            }
+            "skewX" => Some([1.0, 0.0, next(0.0).tan(), 1.0, 0.0, 0.0]),
+            "skewY" => Some([1.0, next(0.0).tan(), 0.0, 1.0, 0.0, 0.0]),
+            "matrix" => {
+                positioned = true;
+                Some([
+                    next(1.0),
+                    next(0.0),
+                    next(0.0),
+                    next(1.0),
+                    next(0.0),
+                    next(0.0),
+                ])
+            }
+            _ => None,
+        };
+        if let Some([a, b, c, d, e, f]) = step {
+            // This transform after the ones before it.
+            let [pa, pb, pc, pd, pe, pf] = map;
+            map = [
+                a * pa + c * pb,
+                b * pa + d * pb,
+                a * pc + c * pd,
+                b * pc + d * pd,
+                a * pe + c * pf + e,
+                b * pe + d * pf + f,
+            ];
         }
         rest = &rest[open + close + 1..];
     }
+    if map.iter().any(|v| !v.is_finite()) {
+        return (0.0, None);
+    }
+    let [a, b, c, d, e, f] = map;
+    // The angle of the box's x axis (`rotate(t)` maps it to (cos t, -sin t)).
+    let angle = (-b).atan2(a);
     let degrees = (-angle.to_degrees()).rem_euclid(360.0);
-    let corner = translate.map(|(tx, ty)| {
-        // The centre (w/2, h/2) rotated counter-clockwise by `angle` on the
-        // y-down page, then translated.
+    let corner = positioned.then(|| {
         let (cx, cy) = (width / 2.0, height / 2.0);
-        let (s, c) = angle.sin_cos();
-        let center = (cx * c + cy * s + tx, -cx * s + cy * c + ty);
-        (center.0 - width / 2.0, center.1 - height / 2.0)
+        (a * cx + c * cy + e - cx, b * cx + d * cy + f - cy)
     });
     (degrees, corner)
 }
@@ -1550,7 +1597,7 @@ fn gradient(node: roxmltree::Node<'_, '_>) -> ShapeFill {
         .unwrap_or(0.0);
     let style = node.attribute((NS_DRAW, "style")).unwrap_or("linear");
     let mut stops: Vec<GradientStop> = node
-        .children()
+        .kids()
         .filter(|n| xml::is(*n, NS_LOEXT, "gradient-stop"))
         .filter_map(|stop| {
             Some(GradientStop {

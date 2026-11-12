@@ -56,10 +56,86 @@ struct Region {
 /// Implementation bound on the columns of one page or section style.
 const MAX_STYLE_COLUMNS: usize = 1024;
 
-/// One page layout. Every field that owns data of the document's size
-/// (fills, image link, column list) is shared, so a layout inherited from
-/// the default page layout (§16.8) copies a fixed-size record, never the
-/// default's data.
+/// A page layout as written (§16.5), over the default page layout (§16.8):
+/// every property the layout specifies replaces the default's, property by
+/// property, and an element-valued property (columns, the footnote
+/// separator, a background image) as a whole. A layout is resolved from
+/// this merged record only, so nothing derived from the default's values
+/// (a text width, a border inset) is ever inherited in its place.
+#[derive(Clone, Default)]
+struct Authored<'a, 'i> {
+    usage: Option<&'a str>,
+    properties: Attributes<'a>,
+    /// `style:header-footer-properties` of the header and footer styles.
+    regions: [Option<Attributes<'a>>; 2],
+    columns: Option<roxmltree::Node<'a, 'i>>,
+    footnote_sep: Option<roxmltree::Node<'a, 'i>>,
+    background_image: Option<roxmltree::Node<'a, 'i>>,
+}
+
+/// Attribute values by (namespace, local name), borrowed from the XML.
+type Attributes<'a> = HashMap<(&'a str, &'a str), &'a str>;
+
+fn overlay<'a>(attributes: &mut Attributes<'a>, node: roxmltree::Node<'a, '_>) {
+    // (An element holds at most 256 attributes.)
+    for attribute in node.attributes() {
+        attributes.insert(
+            (attribute.namespace().unwrap_or(""), attribute.name()),
+            attribute.value(),
+        );
+    }
+}
+
+impl<'a, 'i> Authored<'a, 'i> {
+    /// Lays a `style:page-layout` or `style:default-page-layout` element
+    /// over what is already known.
+    fn overlay(&mut self, node: roxmltree::Node<'a, 'i>) -> Result<(), String> {
+        if let Some(usage) = node.attribute((NS_STYLE, "page-usage")) {
+            self.usage = Some(usage);
+        }
+        for child in node.kids().filter(|n| n.is_element()) {
+            budget::tick(1)?;
+            match (child.tag_name().namespace(), child.tag_name().name()) {
+                (Some(NS_STYLE), "page-layout-properties") => {
+                    overlay(&mut self.properties, child);
+                    // The element-valued properties this element holds
+                    // (the first of each).
+                    let mut seen = [false; 3];
+                    for element in child.kids().filter(|n| n.is_element()) {
+                        budget::tick(1)?;
+                        let slot = match (element.tag_name().namespace(), element.tag_name().name())
+                        {
+                            (Some(NS_STYLE), "columns") => 0,
+                            (Some(NS_STYLE), "footnote-sep") => 1,
+                            (Some(NS_STYLE), "background-image") => 2,
+                            _ => continue,
+                        };
+                        if !std::mem::replace(&mut seen[slot], true) {
+                            *[
+                                &mut self.columns,
+                                &mut self.footnote_sep,
+                                &mut self.background_image,
+                            ][slot] = Some(element);
+                        }
+                    }
+                }
+                (Some(NS_STYLE), kind @ ("header-style" | "footer-style")) => {
+                    if let Some(properties) = child
+                        .kids()
+                        .find(|n| xml::is(*n, NS_STYLE, "header-footer-properties"))
+                    {
+                        let region = &mut self.regions[usize::from(kind == "footer-style")];
+                        overlay(region.get_or_insert_with(HashMap::new), properties);
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+}
+
+/// One resolved page layout.
 #[derive(Clone)]
 struct Layout {
     section: SectionProps,
@@ -74,13 +150,12 @@ struct Layout {
     footnote_separator: Option<NoteSeparatorMark>,
     /// The page's area fill properties (§20.175 fo:background-color,
     /// §20.120 draw:fill and companions), held as a graphic style for the
-    /// shared fill reader: the default page layout's (§16.8) with the
-    /// layout's own specified over them, property by property. An explicit
-    /// `transparent` or `none` is a specified value like any other.
+    /// shared fill reader. An explicit `transparent` or `none` is a
+    /// specified value like any other. (LibreOffice 26.8, measured, draws
+    /// no background from the default page layout at all; the specification
+    /// is followed.)
     background: Option<Rc<crate::style::Style>>,
-    /// `style:background-image` (§17.3): its link and whether it tiles. A
-    /// layout's own element replaces the default's, also when it links
-    /// nothing.
+    /// `style:background-image` (§17.3): its link and whether it tiles.
     background_image: Option<Rc<(String, bool)>>,
 }
 
@@ -128,48 +203,37 @@ fn default_section() -> SectionProps {
 
 impl<'a, 'i> Pages<'a, 'i> {
     pub fn read(styles_root: roxmltree::Node<'a, 'i>) -> Result<Self, String> {
-        let mut default_layout = Layout {
-            section: default_section(),
-            columns: None,
-            num_format: None,
-            usage: "all",
-            header: None,
-            footer: None,
-            text_direction: None,
-            borders: None,
-            grid: None,
-            footnote_separator: None,
-            background: None,
-            background_image: None,
-        };
         // §16.8: properties a page layout leaves unspecified come from the
         // default page layout.
+        let mut default_authored = Authored::default();
         if let Some(default) = styles_root
-            .children()
+            .kids()
             .find(|n| xml::is(*n, NS_OFFICE, "styles"))
             .and_then(|s| {
-                s.children()
+                s.kids()
                     .find(|n| xml::is(*n, NS_STYLE, "default-page-layout"))
             })
         {
-            read_layout(default, &mut default_layout)?;
+            default_authored.overlay(default)?;
         }
+        let default_layout = resolve_layout(&default_authored)?;
         let mut layout_index: HashMap<String, usize> = HashMap::new();
         let mut layouts: Vec<Layout> = Vec::new();
         for automatic in styles_root
-            .children()
+            .kids()
             .filter(|n| xml::is(*n, NS_OFFICE, "automatic-styles"))
         {
             for node in automatic
-                .children()
+                .kids()
                 .filter(|n| xml::is(*n, NS_STYLE, "page-layout"))
             {
                 budget::tick(1)?;
                 let Some(name) = node.attribute((NS_STYLE, "name")) else {
                     continue;
                 };
-                let mut layout = default_layout.clone();
-                read_layout(node, &mut layout)?;
+                let mut authored = default_authored.clone();
+                authored.overlay(node)?;
+                let layout = resolve_layout(&authored)?;
                 // A later declaration of one name replaces the earlier.
                 match layout_index.get(name) {
                     Some(&index) => layouts[index] = layout,
@@ -184,11 +248,11 @@ impl<'a, 'i> Pages<'a, 'i> {
         let mut by_name = HashMap::new();
         let mut next_names: Vec<Option<&str>> = Vec::new();
         if let Some(styles) = styles_root
-            .children()
+            .kids()
             .find(|n| xml::is(*n, NS_OFFICE, "master-styles"))
         {
             for node in styles
-                .children()
+                .kids()
                 .filter(|n| xml::is(*n, NS_STYLE, "master-page"))
             {
                 budget::tick(1)?;
@@ -313,43 +377,10 @@ impl<'a, 'i> Pages<'a, 'i> {
     }
 }
 
-/// One page layout's properties.
-fn read_layout(node: roxmltree::Node<'_, '_>, layout: &mut Layout) -> Result<(), String> {
-    // §19.493 style:page-usage; other values read as "all".
-    if let Some(usage) = node.attribute((NS_STYLE, "page-usage")) {
-        layout.usage = match usage {
-            "left" => "left",
-            "right" => "right",
-            "mirrored" => "mirrored",
-            _ => "all",
-        };
-    }
-    for child in node.children().filter(|n| n.is_element()) {
-        budget::tick(1)?;
-        match (child.tag_name().namespace(), child.tag_name().name()) {
-            (Some(NS_STYLE), "page-layout-properties") => read_page_properties(child, layout)?,
-            (Some(NS_STYLE), "header-style") => {
-                layout.header = region(child, "margin-bottom");
-            }
-            (Some(NS_STYLE), "footer-style") => {
-                layout.footer = region(child, "margin-top");
-            }
-            _ => {}
-        }
-    }
-    Ok(())
-}
-
-fn region(node: roxmltree::Node<'_, '_>, spacing: &str) -> Option<Region> {
-    let properties = node
-        .children()
-        .find(|n| xml::is(*n, NS_STYLE, "header-footer-properties"))?;
-    let get = |ns: &str, name: &str| {
-        properties
-            .attribute((ns, name))
-            .and_then(|v| length_pt(v).ok())
-    };
-    Some(Region {
+fn region(properties: &Attributes<'_>, spacing: &str) -> Region {
+    let value = |ns: &str, name: &str| properties.get(&(ns, name)).copied();
+    let get = |ns: &str, name: &str| value(ns, name).and_then(|v| length_pt(v).ok());
+    Region {
         height: get(NS_SVG, "height")
             .or_else(|| get(NS_FO, "min-height"))
             .unwrap_or(0.0)
@@ -357,20 +388,21 @@ fn region(node: roxmltree::Node<'_, '_>, spacing: &str) -> Option<Region> {
         // With dynamic spacing (§20.354, the Word-compatible mode) a grown
         // region eats into its spacing, which DOCX already does; otherwise
         // LibreOffice keeps the spacing below the grown content.
-        spacing: if properties.attribute((NS_STYLE, "dynamic-spacing")) == Some("true") {
+        spacing: if value(NS_STYLE, "dynamic-spacing") == Some("true") {
             0.0
         } else {
             get(NS_FO, spacing).unwrap_or(0.0).max(0.0)
         },
         margin_left: get(NS_FO, "margin-left").unwrap_or(0.0),
         margin_right: get(NS_FO, "margin-right").unwrap_or(0.0),
-    })
+    }
 }
 
-fn read_page_properties(node: roxmltree::Node<'_, '_>, layout: &mut Layout) -> Result<(), String> {
-    read_background(node, layout)?;
-    let section = &mut layout.section;
-    let get = |ns: &str, name: &str| node.attribute((ns, name)).and_then(|v| length_pt(v).ok());
+/// The layout a merged record describes.
+fn resolve_layout(authored: &Authored<'_, '_>) -> Result<Layout, String> {
+    let attribute = |ns: &str, name: &str| authored.properties.get(&(ns, name)).copied();
+    let get = |ns: &str, name: &str| attribute(ns, name).and_then(|v| length_pt(v).ok());
+    let mut section = default_section();
     if let Some(width) = get(NS_FO, "page-width").filter(|v| *v > 0.0) {
         section.page_width = width;
     }
@@ -392,22 +424,15 @@ fn read_page_properties(node: roxmltree::Node<'_, '_>, layout: &mut Layout) -> R
     if let Some(gutter) = get(NS_LOEXT, "margin-gutter").filter(|g| *g > 0.0) {
         section.margin_left += gutter;
     }
-    if let Some(format) = node.attribute((NS_STYLE, "num-format")) {
-        layout.num_format = page_number_format(format);
-    }
-    layout.text_direction = match node.attribute((NS_STYLE, "writing-mode")) {
-        Some("tb-rl" | "tb") => Some("tbRl"),
-        _ => layout.text_direction.take(),
-    };
     // §20.183 page border and §20.217 padding: the text sits inside both.
     let border = |side: &str| {
-        node.attribute((NS_FO, &*format!("border-{side}")))
-            .or_else(|| node.attribute((NS_FO, "border")))
+        attribute(NS_FO, &format!("border-{side}"))
+            .or_else(|| attribute(NS_FO, "border"))
             .and_then(|value| {
                 parse_border(
                     value,
-                    node.attribute((NS_STYLE, &*format!("border-line-width-{side}")))
-                        .or_else(|| node.attribute((NS_STYLE, "border-line-width"))),
+                    attribute(NS_STYLE, &format!("border-line-width-{side}"))
+                        .or_else(|| attribute(NS_STYLE, "border-line-width")),
                 )
             })
     };
@@ -417,8 +442,7 @@ fn read_page_properties(node: roxmltree::Node<'_, '_>, layout: &mut Layout) -> R
             .unwrap_or(0.0)
             .max(0.0)
     };
-    let mut edges = Vec::new();
-    for side in ["top", "left", "bottom", "right"] {
+    let mut edges = ["top", "left", "bottom", "right"].map(|side| {
         let edge = border(side).map(|spec| PageBorderEdge {
             style: spec.style.to_string(),
             color: spec.color,
@@ -432,22 +456,19 @@ fn read_page_properties(node: roxmltree::Node<'_, '_>, layout: &mut Layout) -> R
             "bottom" => section.margin_bottom += inset,
             _ => section.margin_right += inset,
         }
-        edges.push(edge);
-    }
-    if edges.iter().any(Option::is_some) {
-        let mut edges = edges.into_iter();
-        layout.borders = Some(PageBorders {
-            offset_from: "text".into(),
-            display: "allPages".into(),
-            z_order: "front".into(),
-            top: edges.next().flatten(),
-            left: edges.next().flatten(),
-            bottom: edges.next().flatten(),
-            right: edges.next().flatten(),
-        });
-    }
+        edge
+    });
+    let borders = edges.iter().any(Option::is_some).then(|| PageBorders {
+        offset_from: "text".into(),
+        display: "allPages".into(),
+        z_order: "front".into(),
+        top: edges[0].take(),
+        left: edges[1].take(),
+        bottom: edges[2].take(),
+        right: edges[3].take(),
+    });
     // §20.309 layout grid.
-    match node.attribute((NS_STYLE, "layout-grid-mode")) {
+    let grid = match attribute(NS_STYLE, "layout-grid-mode") {
         Some(mode @ ("line" | "both")) => {
             let base = get(NS_STYLE, "layout-grid-base-height").unwrap_or(0.0);
             // §20.307: each grid line holds the base text and its ruby.
@@ -455,84 +476,55 @@ fn read_page_properties(node: roxmltree::Node<'_, '_>, layout: &mut Layout) -> R
             let char_width = get(NS_STYLE, "layout-grid-base-width");
             // §20.313 style:layout-grid-snap-to: text snaps to the
             // character grid only when true (the default).
-            let chars = mode == "both"
-                && node.attribute((NS_STYLE, "layout-grid-snap-to")) != Some("false");
-            if base + ruby > 0.0 {
-                layout.grid = Some((
-                    if chars { "linesAndChars" } else { "lines" },
-                    base + ruby,
-                    if chars { char_width } else { None },
-                ));
-            }
+            let chars =
+                mode == "both" && attribute(NS_STYLE, "layout-grid-snap-to") != Some("false");
+            (base + ruby > 0.0).then_some((
+                if chars { "linesAndChars" } else { "lines" },
+                base + ruby,
+                if chars { char_width } else { None },
+            ))
         }
-        Some("none") => layout.grid = None,
-        _ => {}
-    }
-    for child in node.children().filter(|n| n.is_element()) {
-        budget::tick(1)?;
-        match (child.tag_name().namespace(), child.tag_name().name()) {
-            (Some(NS_STYLE), "columns") => {
-                let width =
-                    (section.page_width - section.margin_left - section.margin_right).max(1.0);
-                layout.columns = columns(child, width)?.map(Rc::new);
-            }
-            (Some(NS_STYLE), "footnote-sep") => {
-                let rel = child
-                    .attribute((NS_STYLE, "rel-width"))
-                    .and_then(|v| percent(v).ok())
-                    .unwrap_or(0.25);
-                let width = child
-                    .attribute((NS_STYLE, "width"))
-                    .and_then(|v| length_pt(v).ok())
-                    .unwrap_or(0.5);
-                layout.footnote_separator = Some(
-                    if child.attribute((NS_STYLE, "line-style")) == Some("none") || width <= 0.0 {
-                        NoteSeparatorMark::None
-                    } else if rel >= 0.99 {
-                        NoteSeparatorMark::Full
-                    } else {
-                        NoteSeparatorMark::Short
-                    },
-                );
-            }
-            _ => {}
-        }
-    }
-    Ok(())
-}
-
-/// A page's area fill: fo:background-color, the draw:fill attributes and a
-/// background image, from page layout properties. `layout` holds the
-/// default page layout's (§16.8); what this element specifies replaces it,
-/// property by property. (LibreOffice 26.8, measured, draws no background
-/// from the default page layout at all; the specification is followed.)
-fn read_background(node: roxmltree::Node<'_, '_>, layout: &mut Layout) -> Result<(), String> {
-    let own = |ns: &str, name: &str| {
-        (ns == NS_FO && name == "background-color")
-            || (ns == NS_DRAW && (name.starts_with("fill") || name == "opacity"))
-            || (ns == NS_STYLE && name == "repeat")
+        _ => None,
     };
-    if node
-        .attributes()
-        .any(|a| own(a.namespace().unwrap_or(""), a.name()))
-    {
-        // (An element holds at most 256 attributes, each value bounded.)
-        let mut attributes: HashMap<(String, String), String> = layout
-            .background
-            .as_ref()
-            .and_then(|style| style.groups.get("graphic-properties"))
-            .map(|properties| properties.attributes.clone())
-            .unwrap_or_default();
-        for attribute in node.attributes() {
-            let namespace = attribute.namespace().unwrap_or("");
-            if own(namespace, attribute.name()) {
-                attributes.insert(
-                    (namespace.to_string(), attribute.name().to_string()),
-                    attribute.value().to_string(),
-                );
-            }
+    // §17.12: the columns divide this layout's own text width.
+    let columns = match authored.columns {
+        Some(element) => {
+            let width = (section.page_width - section.margin_left - section.margin_right).max(1.0);
+            columns(element, width)?.map(Rc::new)
         }
-        layout.background = Some(Rc::new(crate::style::Style {
+        None => None,
+    };
+    let footnote_separator = authored.footnote_sep.map(|element| {
+        let rel = element
+            .attribute((NS_STYLE, "rel-width"))
+            .and_then(|v| percent(v).ok())
+            .unwrap_or(0.25);
+        let width = element
+            .attribute((NS_STYLE, "width"))
+            .and_then(|v| length_pt(v).ok())
+            .unwrap_or(0.5);
+        if element.attribute((NS_STYLE, "line-style")) == Some("none") || width <= 0.0 {
+            NoteSeparatorMark::None
+        } else if rel >= 0.99 {
+            NoteSeparatorMark::Full
+        } else {
+            NoteSeparatorMark::Short
+        }
+    });
+    // The page's area fill: fo:background-color and the draw:fill
+    // attributes, as a graphic style for the shared fill reader.
+    let fill: HashMap<(String, String), String> = authored
+        .properties
+        .iter()
+        .filter(|((ns, name), _)| {
+            (*ns == NS_FO && *name == "background-color")
+                || (*ns == NS_DRAW && (name.starts_with("fill") || *name == "opacity"))
+                || (*ns == NS_STYLE && *name == "repeat")
+        })
+        .map(|((ns, name), value)| ((ns.to_string(), name.to_string()), value.to_string()))
+        .collect();
+    let background = (!fill.is_empty()).then(|| {
+        Rc::new(crate::style::Style {
             name: String::new(),
             family: "graphic".into(),
             parent: None,
@@ -541,26 +533,47 @@ fn read_background(node: roxmltree::Node<'_, '_>, layout: &mut Layout) -> Result
             groups: HashMap::from([(
                 "graphic-properties".to_string(),
                 crate::style::Properties {
-                    attributes,
+                    attributes: fill,
                     ..crate::style::Properties::default()
                 },
             )]),
-        }));
-    }
-    for child in node.children() {
-        budget::tick(1)?;
-        if xml::is(child, NS_STYLE, "background-image") {
-            // The first such element is the property (§17.3).
-            layout.background_image = child.attribute((NS_XLINK, "href")).map(|href| {
-                Rc::new((
-                    href.to_string(),
-                    child.attribute((NS_STYLE, "repeat")) != Some("stretch"),
-                ))
-            });
-            break;
-        }
-    }
-    Ok(())
+        })
+    });
+    let background_image = authored.background_image.and_then(|image| {
+        image.attribute((NS_XLINK, "href")).map(|href| {
+            Rc::new((
+                href.to_string(),
+                image.attribute((NS_STYLE, "repeat")) != Some("stretch"),
+            ))
+        })
+    });
+    Ok(Layout {
+        section,
+        columns,
+        num_format: attribute(NS_STYLE, "num-format").and_then(page_number_format),
+        // §19.493 style:page-usage; other values read as "all".
+        usage: match authored.usage {
+            Some("left") => "left",
+            Some("right") => "right",
+            Some("mirrored") => "mirrored",
+            _ => "all",
+        },
+        header: authored.regions[0]
+            .as_ref()
+            .map(|properties| region(properties, "margin-bottom")),
+        footer: authored.regions[1]
+            .as_ref()
+            .map(|properties| region(properties, "margin-top")),
+        text_direction: match attribute(NS_STYLE, "writing-mode") {
+            Some("tb-rl" | "tb") => Some("tbRl"),
+            _ => None,
+        },
+        borders,
+        grid,
+        footnote_separator,
+        background,
+        background_image,
+    })
 }
 
 /// `style:num-format` (§19.500) as an ST_NumberFormat value.
@@ -594,9 +607,7 @@ impl<'a> ColumnsSource<'a> for roxmltree::Node<'a, '_> {
         xml::is(self, NS_STYLE, name)
     }
     fn each(self, visit: &mut dyn FnMut(Self) -> Result<(), String>) -> Result<(), String> {
-        self.children()
-            .filter(|n| n.is_element())
-            .try_for_each(visit)
+        self.kids().filter(|n| n.is_element()).try_for_each(visit)
     }
 }
 
@@ -734,7 +745,7 @@ pub(super) fn columns<'e, S: ColumnsSource<'e>>(
 /// `text:linenumbering-configuration` (§16.30) as DOCX line numbering.
 pub(super) fn line_numbering(styles: Option<roxmltree::Node<'_, '_>>) -> Option<LineNumbering> {
     let node = styles?
-        .children()
+        .kids()
         .find(|n| xml::is(*n, NS_TEXT, "linenumbering-configuration"))?;
     if node.attribute((NS_TEXT, "number-lines")) == Some("false") {
         return None;
@@ -781,7 +792,7 @@ impl NotesConfiguration {
             return Ok(out);
         };
         for node in styles
-            .children()
+            .kids()
             .filter(|n| xml::is(*n, NS_TEXT, "notes-configuration"))
         {
             budget::tick(1)?;
@@ -949,7 +960,7 @@ impl<'a> Reader<'a> {
         };
         for (kind, region) in [("header", layout.header), ("footer", layout.footer)] {
             let shown = |name: &str| {
-                node.children().find(|n| {
+                node.kids().find(|n| {
                     xml::is(*n, NS_STYLE, name)
                         && n.attribute((NS_STYLE, "display")) != Some("false")
                 })

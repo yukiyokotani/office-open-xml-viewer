@@ -35,7 +35,8 @@ use crate::style::{
     Cascade, Family, Group, Scope, Style, StyleRef, StyleSheet, LOEXT_GRAPHIC, PARAGRAPH, TEXT,
 };
 use crate::xml::{
-    self, NS_DRAW, NS_FO, NS_LOEXT, NS_OFFICE, NS_STYLE, NS_SVG, NS_TABLE, NS_TEXT, NS_XLINK,
+    self, Stepped, NS_DRAW, NS_FO, NS_LOEXT, NS_OFFICE, NS_STYLE, NS_SVG, NS_TABLE, NS_TEXT,
+    NS_XLINK,
 };
 use docx_model::owned_cursor::OwnedDocumentResource;
 use docx_model::{
@@ -188,7 +189,7 @@ fn read_documents<'a>(
     let mut sheet = StyleSheet::default();
     let mut fonts = FontFaces::default();
     for (root, scope) in [(styles_root, Scope::Styles), (content_root, Scope::Content)] {
-        for child in root.children().filter(|n| n.is_element()) {
+        for child in root.kids().filter(|n| n.is_element()) {
             match (child.tag_name().namespace(), child.tag_name().name()) {
                 (Some(NS_OFFICE), "font-face-decls") => fonts.add(child, package)?,
                 (Some(NS_OFFICE), "styles") => {
@@ -205,13 +206,13 @@ fn read_documents<'a>(
         None => text::LayoutFlags::default(),
     };
     let common_styles = styles_root
-        .children()
+        .kids()
         .find(|n| xml::is(*n, NS_OFFICE, "styles"));
     let pages = page::Pages::read(styles_root)?;
     let body = content_root
-        .children()
+        .kids()
         .find(|n| xml::is(*n, NS_OFFICE, "body"))
-        .and_then(|b| b.children().find(|n| xml::is(*n, NS_OFFICE, "text")))
+        .and_then(|b| b.kids().find(|n| xml::is(*n, NS_OFFICE, "text")))
         .ok_or_else(|| invalid("content.xml has no office:text body"))?;
 
     let default_tab_stop = sheet
@@ -480,7 +481,7 @@ impl<'a> Reader<'a> {
     /// indexes and frames anchored to the page.
     fn walk_blocks(&mut self, parent: roxmltree::Node<'a, 'a>) -> Result<(), String> {
         self.enter()?;
-        for node in parent.children().filter(|n| n.is_element()) {
+        for node in parent.kids().filter(|n| n.is_element()) {
             budget::tick(1)?;
             self.block(node)?;
         }
@@ -503,9 +504,7 @@ impl<'a> Reader<'a> {
                 "table-of-content" | "illustration-index" | "table-index" | "object-index"
                 | "user-index" | "alphabetical-index" | "bibliography",
             ) => {
-                if let Some(index_body) =
-                    node.children().find(|n| xml::is(*n, NS_TEXT, "index-body"))
-                {
+                if let Some(index_body) = node.kids().find(|n| xml::is(*n, NS_TEXT, "index-body")) {
                     self.index_body(index_body)?;
                 }
             }
@@ -534,7 +533,7 @@ impl<'a> Reader<'a> {
     /// list element, numbered as a list item of its list at its level.
     fn numbered_paragraph(&mut self, node: roxmltree::Node<'a, 'a>) -> Result<(), String> {
         let Some(child) = node
-            .children()
+            .kids()
             .find(|n| xml::is(*n, NS_TEXT, "p") || xml::is(*n, NS_TEXT, "h"))
         else {
             return Ok(());
@@ -1901,16 +1900,19 @@ mod tests;
 
 /// The source size of a subtree: one unit per node plus its name, attribute
 /// and text bytes (what processing it again reads).
-fn source_bytes(node: roxmltree::Node<'_, '_>) -> usize {
-    node.descendants().fold(0usize, |sum, n| {
+fn source_bytes(node: roxmltree::Node<'_, '_>) -> Result<usize, String> {
+    let mut sum = 0usize;
+    for n in node.subtree() {
+        budget::tick(1)?;
         let own = 1
             + n.tag_name().name().len()
             + n.text().map_or(0, str::len)
             + n.attributes()
                 .map(|a| a.name().len() + a.value().len() + 1)
                 .sum::<usize>();
-        sum.saturating_add(own)
-    })
+        sum = sum.saturating_add(own);
+    }
+    Ok(sum)
 }
 
 /// A non-negative integer of any length, saturating: for values that are
@@ -1937,7 +1939,7 @@ fn outline_level(node: roxmltree::Node<'_, '_>) -> u32 {
 /// The character data of a subtree, a step per node.
 fn text_content(node: roxmltree::Node<'_, '_>) -> Result<String, String> {
     let mut out = String::new();
-    for descendant in node.descendants() {
+    for descendant in node.subtree() {
         budget::tick(1)?;
         if descendant.is_text() {
             out.push_str(descendant.text().unwrap_or(""));

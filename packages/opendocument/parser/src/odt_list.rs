@@ -346,7 +346,7 @@ impl<'a> Reader<'a> {
             self.lists.ids.insert(id.to_string(), frame.chain);
         }
         let level = self.list_level(&frame.style, frame.level)?;
-        for child in node.children().filter(|n| n.is_element()) {
+        for child in node.kids().filter(|n| n.is_element()) {
             budget::tick(1)?;
             match (child.tag_name().namespace(), child.tag_name().name()) {
                 (Some(NS_TEXT), "list-item") => self.list_item(child, &frame, &level, false)?,
@@ -367,7 +367,7 @@ impl<'a> Reader<'a> {
     ) -> Result<(), String> {
         let start = list_number(node.attribute((NS_TEXT, "start-value")))?;
         let mut first = !header;
-        for child in node.children().filter(|n| n.is_element()) {
+        for child in node.kids().filter(|n| n.is_element()) {
             budget::tick(1)?;
             match (child.tag_name().namespace(), child.tag_name().name()) {
                 (Some(NS_TEXT), "p" | "h") if first => {

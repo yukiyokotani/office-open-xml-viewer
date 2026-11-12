@@ -279,6 +279,32 @@ pub fn count_attribute(
     Ok(count.map_or(1, |count| (count as u32).max(1)))
 }
 
+/// Stepped walks: the only way the text reader visits XML nodes. Each node
+/// an iterator yields takes one step of the running [`crate::budget`]
+/// scope, so no search or scan over nodes is free, however it is written.
+/// The step is counted here and checked at the walker's next
+/// `budget::tick(..)?` and at the end of the read: an iterator cannot
+/// return the rejection itself.
+pub trait Stepped<'a, 'i: 'a>: Sized {
+    /// The child nodes, a step each.
+    fn kids(self) -> impl DoubleEndedIterator<Item = roxmltree::Node<'a, 'i>>;
+    /// The node and its descendants, a step each.
+    fn subtree(self) -> impl Iterator<Item = roxmltree::Node<'a, 'i>>;
+}
+
+impl<'a, 'i: 'a> Stepped<'a, 'i> for roxmltree::Node<'a, 'i> {
+    fn kids(self) -> impl DoubleEndedIterator<Item = roxmltree::Node<'a, 'i>> {
+        self.children().inspect(|_| {
+            let _ = crate::budget::tick(1);
+        })
+    }
+    fn subtree(self) -> impl Iterator<Item = roxmltree::Node<'a, 'i>> {
+        self.descendants().inspect(|_| {
+            let _ = crate::budget::tick(1);
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

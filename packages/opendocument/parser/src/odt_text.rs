@@ -43,9 +43,9 @@ pub(super) fn read_settings(root: roxmltree::Node<'_, '_>) -> Result<LayoutFlags
     // LibreOffice reads its layout items from the top-level
     // "ooo:configuration-settings" set only.
     let Some(set) = root
-        .children()
+        .kids()
         .filter(|n| xml::is(*n, NS_OFFICE, "settings"))
-        .flat_map(|settings| settings.children())
+        .flat_map(|settings| settings.kids())
         .find(|n| {
             xml::is(*n, xml::NS_CONFIG, "config-item-set")
                 && n.attribute((xml::NS_CONFIG, "name")) == Some("ooo:configuration-settings")
@@ -54,7 +54,7 @@ pub(super) fn read_settings(root: roxmltree::Node<'_, '_>) -> Result<LayoutFlags
         return Ok(flags);
     };
     for item in set
-        .children()
+        .kids()
         .filter(|n| xml::is(*n, xml::NS_CONFIG, "config-item"))
     {
         budget::tick(1)?;
@@ -136,10 +136,7 @@ impl FontFaces {
         decls: roxmltree::Node<'_, '_>,
         package: &OdfPackage,
     ) -> Result<(), String> {
-        for face in decls
-            .children()
-            .filter(|n| xml::is(*n, NS_STYLE, "font-face"))
-        {
+        for face in decls.kids().filter(|n| xml::is(*n, NS_STYLE, "font-face")) {
             budget::tick(1)?;
             let Some(name) = face.attribute((NS_STYLE, "name")) else {
                 continue;
@@ -156,7 +153,7 @@ impl FontFaces {
             };
             // Embedded font files (§16.23, svg:font-face-uri in the package).
             for uri in face
-                .descendants()
+                .subtree()
                 .filter(|n| xml::is(*n, NS_SVG, "font-face-uri"))
             {
                 budget::tick(1)?;
@@ -308,11 +305,11 @@ impl<'a, 'i> TrackedChanges<'a, 'i> {
     pub fn read(body: roxmltree::Node<'a, 'i>) -> Result<Self, String> {
         let mut deletions = HashSet::new();
         for log in body
-            .children()
+            .kids()
             .filter(|n| xml::is(*n, NS_TEXT, "tracked-changes"))
         {
             for region in log
-                .children()
+                .kids()
                 .filter(|n| xml::is(*n, NS_TEXT, "changed-region"))
             {
                 budget::tick(1)?;
@@ -320,7 +317,7 @@ impl<'a, 'i> TrackedChanges<'a, 'i> {
                     .attribute((NS_TEXT, "id"))
                     .or_else(|| region.attribute((NS_XML, "id")));
                 if let Some(id) = id {
-                    if region.children().any(|n| xml::is(n, NS_TEXT, "deletion")) {
+                    if region.kids().any(|n| xml::is(n, NS_TEXT, "deletion")) {
                         deletions.insert(id);
                     }
                 }
@@ -432,7 +429,7 @@ impl<'a> Reader<'a> {
         if depth > MAX_INLINE_DEPTH {
             return Ok(());
         }
-        for child in node.children() {
+        for child in node.kids() {
             budget::tick(1)?;
             if child.is_text() {
                 if inline.in_deletion || inline.in_field_code > 0 {
@@ -616,14 +613,14 @@ impl<'a> Reader<'a> {
         context: u32,
         inline: &mut Inline<'a>,
     ) -> Result<(), String> {
-        let checked = node
-            .children()
-            .filter(|n| xml::is(*n, xml::NS_FIELD, "param"))
-            .any(|param| {
-                param.attribute((xml::NS_FIELD, "name"))
+        let mut checked = false;
+        for param in node.kids() {
+            budget::tick(1)?;
+            checked |= xml::is(param, xml::NS_FIELD, "param")
+                && param.attribute((xml::NS_FIELD, "name"))
                     == Some("vnd.oasis.opendocument.field.checked")
-                    && param.attribute((xml::NS_FIELD, "value")) == Some("true")
-            });
+                && param.attribute((xml::NS_FIELD, "value")) == Some("true");
+        }
         self.admit_chars(1, inline)?;
         inline
             .tokens
@@ -719,7 +716,7 @@ impl<'a> Reader<'a> {
         inline: &mut Inline<'a>,
     ) -> Result<(), String> {
         let text_of = |name: &str| -> Result<String, String> {
-            match node.children().find(|n| xml::is(*n, NS_TEXT, name)) {
+            match node.kids().find(|n| xml::is(*n, NS_TEXT, name)) {
                 Some(child) => text_content(child),
                 None => Ok(String::new()),
             }
@@ -732,7 +729,7 @@ impl<'a> Reader<'a> {
         // The ruby text's own style sets its size; LibreOffice's default
         // ruby text is half the base size.
         let ruby_size = node
-            .children()
+            .kids()
             .find(|n| xml::is(*n, NS_TEXT, "ruby-text"))
             .and_then(|n| n.attribute((NS_TEXT, "style-name")))
             .and_then(|name| self.find_style(Family::Text, name))
@@ -768,16 +765,14 @@ impl<'a> Reader<'a> {
             Some("endnote") => "endnote",
             _ => "footnote",
         };
-        let citation = node
-            .children()
-            .find(|n| xml::is(*n, NS_TEXT, "note-citation"));
+        let citation = node.kids().find(|n| xml::is(*n, NS_TEXT, "note-citation"));
         let label = citation
             .and_then(|c| c.attribute((NS_TEXT, "label")))
             .map(str::to_string);
         self.next_note += 1;
         let id = self.next_note.to_string();
         let width = self.text_width;
-        let mut content = match node.children().find(|n| xml::is(*n, NS_TEXT, "note-body")) {
+        let mut content = match node.kids().find(|n| xml::is(*n, NS_TEXT, "note-body")) {
             Some(body) => {
                 let saved_scope = self.scope;
                 let result = self.contained_story(body, width);
@@ -1248,7 +1243,7 @@ pub(super) fn hidden_by_field(paragraph: roxmltree::Node<'_, '_>) -> Result<bool
         if depth > MAX_INLINE_DEPTH {
             return Ok(());
         }
-        for child in node.children().filter(|n| n.is_element()) {
+        for child in node.kids().filter(|n| n.is_element()) {
             budget::tick(1)?;
             match (child.tag_name().namespace(), child.tag_name().name()) {
                 (Some(NS_TEXT), "hidden-paragraph") => {

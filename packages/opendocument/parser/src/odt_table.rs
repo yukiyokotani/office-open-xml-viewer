@@ -197,7 +197,7 @@ impl<'a> Reader<'a> {
         for run in &rows {
             let mut width = 0usize;
             let mut extent = 0usize;
-            for cell in run.node.children().filter(|n| is_cell(*n)) {
+            for cell in run.node.kids().filter(|n| is_cell(*n)) {
                 budget::tick(1)?;
                 width += cell_repeat(cell)?;
                 if xml::is(cell, NS_TABLE, "table-cell") {
@@ -210,6 +210,7 @@ impl<'a> Reader<'a> {
             needed = needed.max(width).max(extent);
         }
         while columns.len() < needed {
+            budget::tick(1)?;
             columns.push(Column::default());
         }
         if columns.is_empty() {
@@ -228,12 +229,12 @@ impl<'a> Reader<'a> {
             // The row's cell elements, found once for all its repetitions
             // (other children are never visited again).
             let mut cells: Vec<roxmltree::Node<'a, 'a>> = Vec::new();
-            for cell in run.node.children().filter(|n| is_cell(*n)) {
+            for cell in run.node.kids().filter(|n| is_cell(*n)) {
                 budget::tick(1)?;
                 cells.push(cell);
             }
             let row_bytes = if run.repeat > 1 {
-                source_bytes(run.node)
+                source_bytes(run.node)?
             } else {
                 0
             };
@@ -310,7 +311,7 @@ impl<'a> Reader<'a> {
                 let covered = xml::is(cell, NS_TABLE, "covered-table-cell");
                 let repeat = cell_repeat(cell)?;
                 let cell_bytes = if repeat > 1 && !covered {
-                    source_bytes(cell)
+                    source_bytes(cell)?
                 } else {
                     0
                 };
@@ -399,6 +400,7 @@ impl<'a> Reader<'a> {
             }
             // Missing cells at the row's end.
             while column < col_widths.len() {
+                budget::tick(1)?;
                 if skip > 0 {
                     skip -= 1;
                     column += 1;
@@ -571,7 +573,7 @@ impl<'a> Reader<'a> {
         row_count: &mut usize,
         header: bool,
     ) -> Result<(), String> {
-        for child in node.children().filter(|n| n.is_element()) {
+        for child in node.kids().filter(|n| n.is_element()) {
             budget::tick(1)?;
             match (child.tag_name().namespace(), child.tag_name().name()) {
                 (Some(NS_TABLE), "table-column") => {

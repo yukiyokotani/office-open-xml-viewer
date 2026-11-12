@@ -1005,6 +1005,122 @@ fn an_explicit_transparent_page_background_overrides_the_default() {
 }
 
 #[test]
+fn page_layouts_resolve_over_the_default_property_by_property() {
+    // §16.8: the default supplies what the layout leaves unspecified, and
+    // the layout is resolved from the merged properties: an explicit
+    // horizontal writing mode and `border="none"` replace the default's,
+    // and inherited relative columns divide the layout's own text width.
+    let styles = r##"<style:default-page-layout><style:page-layout-properties fo:page-width="500pt" fo:margin="50pt" style:writing-mode="tb-rl" fo:border="2pt solid #000000" style:num-format="i"><style:columns fo:column-count="2"><style:column style:rel-width="3*"/><style:column style:rel-width="1*"/></style:columns></style:page-layout-properties></style:default-page-layout>"##;
+    let read = |page: &str| {
+        read_fixture(Fixture {
+            styles,
+            page,
+            body: "<text:p>x</text:p>",
+            ..Fixture::default()
+        })
+    };
+    let inherited = read("");
+    assert_eq!(inherited.section.text_direction.as_deref(), Some("tbRl"));
+    assert!(inherited.section.page_borders.is_some());
+    // The fixture's page is 210 mm wide with 25 mm margins; the border adds
+    // 2 pt on each side.
+    let width = 160.0 * 72.0 / 25.4 - 4.0;
+    let columns = inherited.section.columns.as_ref().unwrap();
+    assert!((columns.cols[0].width_pt - width * 0.75).abs() < 1e-6);
+    assert!((columns.cols[1].width_pt - width * 0.25).abs() < 1e-6);
+    assert_eq!(
+        inherited
+            .section
+            .page_num_type
+            .as_ref()
+            .unwrap()
+            .fmt
+            .as_deref(),
+        Some("lowerRoman")
+    );
+    let own = read(r#" style:writing-mode="lr-tb" fo:border="none""#);
+    assert_eq!(own.section.text_direction, None);
+    assert!(own.section.page_borders.is_none());
+    assert!((own.section.margin_left - 25.0 * 72.0 / 25.4).abs() < 1e-6);
+    // One side specified: the other sides keep the default's border.
+    let side = read(r#" fo:border-top="none""#);
+    let borders = side.section.page_borders.as_ref().unwrap();
+    assert!(borders.top.is_none() && borders.left.is_some());
+}
+
+#[test]
+fn transforms_compose_in_order() {
+    let corner = |transform: &str| {
+        let body = format!(
+            r##"<text:p><draw:frame text:anchor-type="paragraph" svg:width="60pt" svg:height="20pt" draw:transform="{transform}"><draw:text-box><text:p>t</text:p></draw:text-box></draw:frame>x</text:p>"##
+        );
+        let document = read_fixture(Fixture {
+            body: &body,
+            ..Fixture::default()
+        });
+        let shape = paragraphs(&document.body)[0]
+            .runs
+            .iter()
+            .find_map(|run| match run {
+                DocRun::Shape(shape) => {
+                    Some((shape.anchor_x_pt, shape.anchor_y_pt, shape.rotation))
+                }
+                _ => None,
+            })
+            .unwrap();
+        shape
+    };
+    let close = |a: (f64, f64, f64), b: (f64, f64, f64)| {
+        (a.0 - b.0).abs() < 1e-6 && (a.1 - b.1).abs() < 1e-6 && (a.2 - b.2).abs() < 1e-6
+    };
+    assert!(close(
+        corner("translate(10pt 20pt) translate(5pt 6pt)"),
+        (15.0, 26.0, 0.0)
+    ));
+    assert!(close(corner("matrix(1 0 0 1 7pt 8pt)"), (7.0, 8.0, 0.0)));
+    // LibreOffice's quarter turn (radians, counter-clockwise): the 60 x 20
+    // box's centre goes to (10, -30), then the translation.
+    assert!(close(
+        corner("rotate (1.5707963267949) translate (100pt 200pt)"),
+        (80.0, 160.0, 270.0)
+    ));
+    // The same turn after the translation turns the translation too.
+    assert!(close(
+        corner("translate (100pt 200pt) rotate (1.5707963267949)"),
+        (180.0, -140.0, 270.0)
+    ));
+}
+
+#[test]
+fn shape_text_takes_its_text_style() {
+    // §19.227: `draw:text-style-name` names a paragraph style for the
+    // object's text, under each paragraph's own style and over the graphic
+    // style.
+    let automatic = r##"<style:style style:name="gr1" style:family="graphic"><style:paragraph-properties fo:text-align="center"/><style:text-properties fo:font-size="30pt"/></style:style><style:style style:name="PT" style:family="paragraph"><style:text-properties fo:font-size="20pt"/></style:style><style:style style:name="P9" style:family="paragraph"><style:text-properties fo:font-size="9pt"/></style:style>"##;
+    let body = r##"<text:p><draw:rect draw:style-name="gr1" draw:text-style-name="PT" text:anchor-type="paragraph" svg:width="80pt" svg:height="40pt"><text:p>a</text:p><text:p text:style-name="P9">b</text:p></draw:rect>x</text:p>"##;
+    let document = read_fixture(Fixture {
+        automatic,
+        body,
+        ..Fixture::default()
+    });
+    let shape = paragraphs(&document.body)[0]
+        .runs
+        .iter()
+        .find_map(|run| match run {
+            DocRun::Shape(shape) => Some(shape),
+            _ => None,
+        })
+        .unwrap();
+    let paragraph = |index: usize| match &shape.text_box_content[index] {
+        TextBoxBlockWire::Body(BodyElement::Paragraph(p)) => p,
+        _ => panic!("a paragraph"),
+    };
+    assert_eq!(text_runs(paragraph(0))[0].font_size, 20.0);
+    assert_eq!(paragraph(0).alignment, "center");
+    assert_eq!(text_runs(paragraph(1))[0].font_size, 9.0);
+}
+
+#[test]
 fn anchored_formulas_keep_their_frame() {
     let math: &[u8] = br#"<math xmlns="http://www.w3.org/1998/Math/MathML"><mtable><mtr><mtd><mi>a</mi></mtd><mtd/></mtr><mtr/></mtable></math>"#;
     let frame = |anchor: &str| {
