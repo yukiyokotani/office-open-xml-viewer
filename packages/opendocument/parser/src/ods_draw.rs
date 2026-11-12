@@ -291,7 +291,7 @@ fn place(
     cell: Option<(u32, u32)>,
     grid: &Grid,
     sheet_names: &[String],
-    connector: Option<(f64, f64, f64, f64)>,
+    bounds: Option<(f64, f64, f64, f64)>,
 ) -> Option<(Rect, f64)> {
     let width = pt_attr(node, NS_SVG, "width");
     let height = pt_attr(node, NS_SVG, "height");
@@ -302,7 +302,11 @@ fn place(
         height.unwrap_or(0.0),
         0.0,
     );
-    if width.is_none() || height.is_none() {
+    if let Some(bounds) = bounds {
+        // A part drawn in a box of its own (a connector's path, a
+        // callout's line): points, in the drawing's frame.
+        (x, y, w, h) = bounds;
+    } else if width.is_none() || height.is_none() {
         // Lines and connectors: svg:x1/y1/x2/y2 (§19.570-§19.575).
         let (x1, y1, x2, y2) = (
             pt_attr(node, NS_SVG, "x1")?,
@@ -314,15 +318,6 @@ fn place(
         y = y1.min(y2);
         w = (x2 - x1).abs();
         h = (y2 - y1).abs();
-        // A connector drawn from its path has the path's bounds, given
-        // from its start in hundredths of a millimetre.
-        if let Some((left, top, width, height)) = connector {
-            const PT_PER_UNIT: f64 = 72.0 / 2540.0;
-            x = x1 + left * PT_PER_UNIT;
-            y = y1 + top * PT_PER_UNIT;
-            w = width * PT_PER_UNIT;
-            h = height * PT_PER_UNIT;
-        }
     }
     if let Some(map) = node.attribute((NS_DRAW, "transform")).and_then(transform) {
         // The drawing model holds a box, its rotation and its flips: the
@@ -360,7 +355,7 @@ fn place(
             let _ = (sheet, sheet_names);
             parse_cell(reference)
         })
-        .filter(|_| rotation == 0.0);
+        .filter(|_| rotation == 0.0 && bounds.is_none());
     let (to_col, to_col_off, to_row, to_row_off) = match end {
         Some((row, col)) => (
             col - 1,
@@ -535,13 +530,20 @@ fn read_drawing(
         Some(d) if name == "connector" => super::shape_path::connector_path(d)?,
         _ => None,
     };
-    let Some((rect, rotation)) = place(
-        node,
-        cell,
-        grid,
-        &ctx.sheet_names,
-        connector.as_ref().map(|(_, bounds)| *bounds),
-    ) else {
+    // The path's bounds are given from the connector's start, in
+    // hundredths of a millimetre.
+    let connector_bounds = connector
+        .as_ref()
+        .and_then(|(_, (left, top, width, height))| {
+            const PT_PER_UNIT: f64 = 72.0 / 2540.0;
+            Some((
+                pt_attr(node, NS_SVG, "x1")? + left * PT_PER_UNIT,
+                pt_attr(node, NS_SVG, "y1")? + top * PT_PER_UNIT,
+                width * PT_PER_UNIT,
+                height * PT_PER_UNIT,
+            ))
+        });
+    let Some((rect, rotation)) = place(node, cell, grid, &ctx.sheet_names, connector_bounds) else {
         return Ok(());
     };
     let z = z_index(node, order);
@@ -605,6 +607,9 @@ fn read_drawing(
         }
         "ellipse" | "circle" => "ellipse",
         "line" | "connector" => "line",
+        // §10.3.11: a callout is a text box with a line to the point it
+        // annotates (below).
+        "caption" => "rect",
         // The preset a `draw:type` names is only the fallback of a shape
         // whose enhanced path cannot be drawn (below).
         "custom-shape" => enhanced_geometry(node)
@@ -631,6 +636,29 @@ fn read_drawing(
             shape.flip_h = false;
             shape.flip_v = false;
             shape.geom = xlsx_model::ShapeGeom::Custom { paths: vec![path] };
+        }
+    }
+    if matches!(name, "ellipse" | "circle") {
+        if let Some(path) = ellipse_part(node) {
+            if path.fill.is_some() {
+                shape.fill = None;
+                shape.fill_color = None;
+            }
+            shape.geom = xlsx_model::ShapeGeom::Custom { paths: vec![path] };
+        }
+    }
+    if name == "caption" {
+        if let Some((bounds, path)) = caption_line(node, &style_chain) {
+            if let Some((line_rect, _)) = place(node, cell, grid, &ctx.sheet_names, Some(bounds)) {
+                let mut line = shape_info(ctx, node, &style_chain, "line", z, 0.0, line_rect)?;
+                line.text = None;
+                line.fill = None;
+                line.fill_color = None;
+                if let Some(path) = path {
+                    line.geom = xlsx_model::ShapeGeom::Custom { paths: vec![path] };
+                }
+                push_shape_checked(ctx, package, worksheet, line_rect, line)?;
+            }
         }
     }
     if name == "custom-shape" {
@@ -941,6 +969,170 @@ fn polygon_geometry(
             commands,
         }],
     }))
+}
+
+/// The part of an ellipse `draw:kind` selects (§19.188): an `arc` from
+/// `draw:start-angle` counter-clockwise to `draw:end-angle` (degrees from
+/// the positive x axis, as LibreOffice 26.8 draws them), a `section` closed
+/// through the centre, or a `cut` closed by its chord, flattened to
+/// segments of at most 5 degrees. `None` for a full ellipse. An arc is a
+/// line: its path has no fill.
+fn ellipse_part(node: roxmltree::Node<'_, '_>) -> Option<xlsx_model::PathInfo> {
+    use xlsx_model::PathCmd;
+    let kind = node.attribute((NS_DRAW, "kind"))?;
+    if !matches!(kind, "arc" | "section" | "cut") {
+        return None;
+    }
+    let degrees = |name: &str| -> Option<f64> {
+        let value = node.attribute((NS_DRAW, name))?.trim();
+        value
+            .strip_suffix("deg")
+            .unwrap_or(value)
+            .trim()
+            .parse::<f64>()
+            .ok()
+            .filter(|v| v.is_finite())
+    };
+    let (w, h) = (
+        pt_attr(node, NS_SVG, "width").filter(|v| *v > 0.0)?,
+        pt_attr(node, NS_SVG, "height").filter(|v| *v > 0.0)?,
+    );
+    let start = degrees("start-angle").unwrap_or(0.0);
+    let mut sweep = (degrees("end-angle").unwrap_or(360.0) - start).rem_euclid(360.0);
+    if sweep == 0.0 {
+        sweep = 360.0;
+    }
+    // At most 72 segments.
+    let steps = (sweep / 5.0).ceil().max(1.0) as usize;
+    let point = |i: usize| {
+        let angle = (start + sweep * i as f64 / steps as f64).to_radians();
+        (w / 2.0 * (1.0 + angle.cos()), h / 2.0 * (1.0 - angle.sin()))
+    };
+    let mut commands = Vec::with_capacity(steps + 3);
+    if kind == "section" {
+        commands.push(PathCmd::MoveTo {
+            x: w / 2.0,
+            y: h / 2.0,
+        });
+    }
+    for i in 0..=steps {
+        let (x, y) = point(i);
+        commands.push(if commands.is_empty() {
+            PathCmd::MoveTo { x, y }
+        } else {
+            PathCmd::LineTo { x, y }
+        });
+    }
+    if kind != "arc" {
+        commands.push(PathCmd::Close);
+    }
+    Some(xlsx_model::PathInfo {
+        w,
+        h,
+        fill: (kind == "arc").then(|| "none".to_string()),
+        stroke: true,
+        commands,
+    })
+}
+
+/// The line of a callout (§10.3.11 `draw:caption`): its box
+/// `(x, y, width, height)` in the drawing's frame, and its path when it is
+/// not a straight horizontal or vertical line. As LibreOffice 26.8 draws
+/// it: the line leaves the text box sideways (`draw:caption-escape-direction`
+/// `horizontal`, the default) or up or down (`vertical`; `auto` is
+/// sideways for a point beside the box). A `straight-line` leaves the edge
+/// where the point projects onto it; the angled types leave it at
+/// `draw:caption-escape` (half the edge by default), run straight for
+/// `draw:caption-line-length`, or half the way to the point when the
+/// length is fitted (the default), and turn to the point.
+fn caption_line(
+    node: roxmltree::Node<'_, '_>,
+    chain: &[&Style],
+) -> Option<(super::shape_path::Bounds, Option<xlsx_model::PathInfo>)> {
+    use xlsx_model::PathCmd;
+    let (x, y, w, h) = (
+        pt_attr(node, NS_SVG, "x").unwrap_or(0.0),
+        pt_attr(node, NS_SVG, "y").unwrap_or(0.0),
+        pt_attr(node, NS_SVG, "width")?,
+        pt_attr(node, NS_SVG, "height")?,
+    );
+    let tail = (
+        pt_attr(node, NS_DRAW, "caption-point-x")?,
+        pt_attr(node, NS_DRAW, "caption-point-y")?,
+    );
+    let property = |key: &str| get(chain, &format!("graphic:draw:{key}"));
+    let sideways = match property("caption-escape-direction") {
+        Some("vertical") => false,
+        Some("auto") => tail.0 < 0.0 || tail.0 > w,
+        _ => true,
+    };
+    // Along the edge the line leaves (`u`) and away from the box (`v`).
+    let (edge_length, tail_u, tail_v, far) = if sideways {
+        (h, tail.1, tail.0, w)
+    } else {
+        (w, tail.0, tail.1, h)
+    };
+    let edge_v = if tail_v < far / 2.0 { 0.0 } else { far };
+    let straight = property("caption-type") == Some("straight-line");
+    let escape_u = if straight {
+        tail_u.clamp(0.0, edge_length)
+    } else {
+        match property("caption-escape") {
+            Some(value) => percent(value)
+                .map(|share| share * edge_length)
+                .or_else(|| length_pt(value))
+                .filter(|v| v.is_finite())
+                .unwrap_or(edge_length / 2.0)
+                .clamp(0.0, edge_length),
+            None => edge_length / 2.0,
+        }
+    };
+    let mut points_uv = vec![(escape_u, edge_v)];
+    if !straight {
+        let fitted = property("caption-fit-line-length") != Some("false");
+        let run = match property("caption-line-length").and_then(length_pt) {
+            Some(length) if !fitted => length.max(0.0),
+            _ => (tail_v - edge_v).abs() / 2.0,
+        };
+        points_uv.push((escape_u, edge_v + run * (tail_v - edge_v).signum()));
+    }
+    points_uv.push((tail_u, tail_v));
+    let points: Vec<(f64, f64)> = points_uv
+        .into_iter()
+        .map(|(u, v)| if sideways { (v, u) } else { (u, v) })
+        .collect();
+    if !points.iter().all(|p| p.0.is_finite() && p.1.is_finite()) {
+        return None;
+    }
+    let (left, top, right, bottom) = points.iter().fold(
+        (
+            f64::INFINITY,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NEG_INFINITY,
+        ),
+        |(l, t, r, b), p| (l.min(p.0), t.min(p.1), r.max(p.0), b.max(p.1)),
+    );
+    let (width, height) = (right - left, bottom - top);
+    let path = (width > 0.0 && height > 0.0).then(|| xlsx_model::PathInfo {
+        w: width,
+        h: height,
+        fill: Some("none".to_string()),
+        stroke: true,
+        commands: points
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                let (x, y) = (p.0 - left, p.1 - top);
+                if i == 0 {
+                    PathCmd::MoveTo { x, y }
+                } else {
+                    PathCmd::LineTo { x, y }
+                }
+            })
+            .collect(),
+    });
+    Some(((x + left, y + top, width, height), path))
 }
 
 /// Fill and stroke of a graphic style chain (§20.130 draw:fill, §20.164

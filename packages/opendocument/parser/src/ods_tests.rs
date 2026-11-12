@@ -1183,6 +1183,75 @@ fn connectors_follow_their_path_and_straight_lines_keep_their_ends() {
 }
 
 #[test]
+fn callouts_and_ellipse_parts_are_drawn() {
+    let automatic = concat!(
+        r#"<style:style style:name="c0" style:family="graphic"><style:graphic-properties draw:stroke="solid"/></style:style>"#,
+        r#"<style:style style:name="c1" style:family="graphic"><style:graphic-properties draw:stroke="solid" draw:caption-type="straight-line"/></style:style>"#,
+    );
+    let body = content(
+        automatic,
+        &table(concat!(
+            r#"<table:table-row><table:table-cell>"#,
+            r#"<draw:caption draw:style-name="c0" svg:x="3cm" svg:y="3cm" svg:width="3cm" svg:height="1cm" draw:caption-point-x="-2cm" draw:caption-point-y="2cm"><text:p>Note</text:p></draw:caption>"#,
+            r#"<draw:caption draw:style-name="c1" svg:x="10cm" svg:y="3cm" svg:width="3cm" svg:height="1cm" draw:caption-point-x="4.5cm" draw:caption-point-y="1cm"><text:p>Side</text:p></draw:caption>"#,
+            r#"<draw:ellipse draw:style-name="c0" draw:kind="section" draw:start-angle="0" draw:end-angle="90" svg:x="1cm" svg:y="8cm" svg:width="4cm" svg:height="2cm"/>"#,
+            r#"<draw:ellipse draw:style-name="c0" draw:kind="arc" draw:start-angle="0" draw:end-angle="90" svg:x="1cm" svg:y="12cm" svg:width="4cm" svg:height="2cm"/>"#,
+            r#"</table:table-cell></table:table-row>"#
+        )),
+    );
+    let workbook = read_text(&body, Some(&styles(""))).unwrap();
+    let groups = &workbook.sheets[0].worksheet.shape_groups;
+    let close = |a: f64, b: f64| (a - b).abs() < 1e-6;
+    let cm = 72.0 / 2.54;
+    // The angled line: from the middle of the left edge, half the way out,
+    // then to the point (2 cm left, 2 cm below the box's top).
+    let xlsx_model::ShapeGeom::Custom { paths } = &groups[0].shapes[0].geom else {
+        panic!("{:?}", groups[0].shapes[0].geom)
+    };
+    assert!(close(paths[0].w, 2.0 * cm) && close(paths[0].h, 1.5 * cm));
+    let at = |i: usize| match paths[0].commands[i] {
+        xlsx_model::PathCmd::MoveTo { x, y } | xlsx_model::PathCmd::LineTo { x, y } => (x, y),
+        ref other => panic!("{other:?}"),
+    };
+    assert!(close(at(0).0, 2.0 * cm) && close(at(0).1, 0.0));
+    assert!(close(at(1).0, 1.0 * cm) && close(at(1).1, 0.0));
+    assert!(close(at(2).0, 0.0) && close(at(2).1, 1.5 * cm));
+    assert!(groups[0].shapes[0].text.is_none());
+    // The box follows its line, with the text.
+    assert!(groups[1].shapes[0].text.is_some());
+    // A straight line beside the box: a horizontal line 1.5 cm long.
+    assert!(
+        matches!(&groups[2].shapes[0].geom, xlsx_model::ShapeGeom::Preset { name, .. } if name == "line")
+    );
+    assert_eq!(
+        (groups[2].native_ext_cx, groups[2].native_ext_cy),
+        (540_000, 0)
+    );
+    // §19.188: a quarter section is closed through the centre; an arc is
+    // an open line without a fill.
+    let part = |group: usize| match &groups[group].shapes[0].geom {
+        xlsx_model::ShapeGeom::Custom { paths } => paths[0].clone(),
+        other => panic!("{other:?}"),
+    };
+    let section = part(4);
+    assert!(
+        matches!(section.commands[0], xlsx_model::PathCmd::MoveTo { x, y } if close(x, 2.0 * cm) && close(y, cm))
+    );
+    assert!(
+        matches!(section.commands[1], xlsx_model::PathCmd::LineTo { x, y } if close(x, 4.0 * cm) && close(y, cm))
+    );
+    assert!(matches!(
+        section.commands.last(),
+        Some(xlsx_model::PathCmd::Close)
+    ));
+    let arc = part(5);
+    assert_eq!(arc.fill.as_deref(), Some("none"));
+    assert!(
+        matches!(arc.commands.last(), Some(xlsx_model::PathCmd::LineTo { x, y }) if close(*x, 2.0 * cm) && close(*y, 0.0))
+    );
+}
+
+#[test]
 fn fills_and_lines_keep_their_opacity() {
     let automatic = r##"<style:style style:name="gr1" style:family="graphic"><style:graphic-properties draw:fill="solid" draw:fill-color="#ff0000" draw:opacity="50%" draw:stroke="solid" svg:stroke-color="#0000ff" svg:stroke-opacity="25%"/></style:style>"##;
     let body = content(

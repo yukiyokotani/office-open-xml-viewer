@@ -262,7 +262,11 @@ by at most 512 MiB beyond the package's parsed XML, materialize at most 8
 million cells and take a bounded number of steps. A spreadsheet over a
 limit is rejected with an error that names the limit, instead of being shown
 in part. Connectors are drawn along their path (bent and curved ones too),
-and horizontal and vertical lines as lines. Custom shapes are drawn from
+and horizontal and vertical lines as lines; callouts (`draw:caption`) are
+their text box and the line to their point; ellipse arcs, sections and cuts
+are drawn as such. Dimension lines (`draw:measure`), regular polygons
+(`draw:regular-polygon`, which LibreOffice writes as polygons) and form
+controls are not drawn. Custom shapes are drawn from
 their preset or their enhanced-geometry path (equations are evaluated; arcs
 are flattened to short segments). Embedded objects that are not charts are
 drawn from their replacement image
