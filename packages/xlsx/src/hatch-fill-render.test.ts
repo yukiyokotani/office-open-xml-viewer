@@ -32,7 +32,7 @@ type Matrix = ReturnType<typeof matrix>;
 const HATCH = '#123456';
 
 /** Paint one `size` × `size` px rectangle with `fill` on a 400 × 300 canvas. */
-function paint(fill: ShapeFill, size = 100, images?: Map<string, CanvasImageSource | null>) {
+function paint(fill: ShapeFill, size = 100, images?: Map<string, CanvasImageSource | null>, preset = 'rect') {
   const calls: string[] = [];
   /** Rotations applied while the hatch colour is set, in degrees. */
   const rotations: number[] = [];
@@ -100,7 +100,7 @@ function paint(fill: ShapeFill, size = 100, images?: Map<string, CanvasImageSour
       shapes: [{
         x: 0, y: 0, w: 1, h: 1, rot: 0, strokeWidth: 0,
         fill,
-        geom: { type: 'preset', name: 'rect' },
+        geom: { type: 'preset', name: preset },
       }],
     }],
   } as unknown as Worksheet;
@@ -206,5 +206,17 @@ describe('OpenDocument picture fills', () => {
       { e: 0, f: 0, rect: [0, 50, 100, 25] },
       { e: 12.5, f: 0, rect: [0, 75, 100, 25] },
     ]);
+    // A preset shape (an ellipse) staggers through the same painter.
+    expect(paint(staggered, 100, images, 'ellipse').bands).toHaveLength(4);
+  });
+
+  it('paints nothing it cannot place, and never loops on a far-away origin', () => {
+    // Tiles 2^54 tile heights away: band numbers have no parity there.
+    const far = picture('tile', [0, 0], {
+      width: { fraction: 0.25 }, height: { fraction: 0.25 }, offset: [0, 2 ** 54], shift: { rows: 0.5 },
+    });
+    expect(paint(far, 100, images).bands).toEqual([]);
+    const unplaced = picture('tile', [0, 0], { width: { pt: Number.POSITIVE_INFINITY } });
+    expect(paint(unplaced, 100, images).patterns).toEqual([]);
   });
 });

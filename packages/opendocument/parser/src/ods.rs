@@ -107,6 +107,19 @@ pub struct OdsSheet {
     pub validation_refs: Vec<(String, xlsx_model::CellRange)>,
     /// Cell ranges whose cell style carries §16.3 `style:map` conditions.
     pub(crate) style_map_refs: Vec<(cells::CellStyle, xlsx_model::CellRange)>,
+    /// Blocks of hidden rows (first, last), in row order: charts leave
+    /// their cells out when the plot area asks (§20.26).
+    pub(crate) hidden_rows: Vec<(u32, u32)>,
+}
+
+impl OdsSheet {
+    /// Whether 1-based `row` is hidden.
+    pub(crate) fn row_hidden(&self, row: u32) -> bool {
+        let at = self.hidden_rows.partition_point(|(_, last)| *last < row);
+        self.hidden_rows
+            .get(at)
+            .is_some_and(|(first, _)| *first <= row)
+    }
 }
 
 pub struct OdsWorkbook {

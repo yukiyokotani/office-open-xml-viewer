@@ -319,11 +319,14 @@ impl FillDefs {
                                 }
                             })
                     };
+                    // A move by whole tiles changes nothing: offsets and
+                    // stagger are kept as positions within one tile.
+                    let within_tile = |v: f64| v.rem_euclid(1.0);
                     let fraction = |key: &str| {
                         property(key)
                             .and_then(percent)
                             .filter(|v| v.is_finite())
-                            .unwrap_or(0.0)
+                            .map_or(0.0, within_tile)
                     };
                     let layout = match get(chain, "graphic:style:repeat") {
                         Some("stretch") => PictureLayout::Stretch,
@@ -365,7 +368,9 @@ impl FillDefs {
                             .and_then(|value| {
                                 let mut parts = value.split_whitespace();
                                 let amount = percent(parts.next()?)
-                                    .filter(|v| v.is_finite() && *v != 0.0)?;
+                                    .filter(|v| v.is_finite())
+                                    .map(within_tile)
+                                    .filter(|v| *v != 0.0)?;
                                 match parts.next()? {
                                     "horizontal" => Some(TileShift::Rows(amount)),
                                     "vertical" => Some(TileShift::Columns(amount)),

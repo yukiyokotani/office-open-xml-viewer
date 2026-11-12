@@ -32,6 +32,20 @@ describe('section divisors', () => {
     expect(formatCellValue(number(0), styles('0;-0;;@', []))).toBe('');
   });
 
+  it("formats General between a section's literals", () => {
+    expect(formatCellValue(number(1234.5), styles('"$"General', []))).toBe('$1234.5');
+    expect(formatCellValue(number(-1234.5), styles('"$"General', []))).toBe('-$1234.5');
+    expect(formatCellValue(number(-2), styles('General" kg";(General)', []))).toBe('(2)');
+    expect(formatCellValue(number(0.25), styles('General%', []))).toBe('25%');
+  });
+
+  it('carries a fraction that rounds to a whole', () => {
+    // 2.999 with one-digit denominators is 3, not 2 8/9 or 26/9.
+    expect(formatCellValue(number(2.999), styles('# ?/?', [])).trim()).toBe('3');
+    expect(formatCellValue(number(2.999), styles('?/?', []))).toBe('3/1');
+    expect(formatCellValue(number(0.0625), styles('# ?/##?', [])).trim()).toBe('1/16');
+  });
+
   it('divides a General code', () => {
     expect(formatCellValue(number(250), styles('General', [100]))).toBe('2.5');
   });

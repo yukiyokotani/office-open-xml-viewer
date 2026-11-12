@@ -63,15 +63,57 @@ pub enum CellData {
     Text(String),
 }
 
+/// One cell of a range outside the chart, with whether its row or column is
+/// hidden (§20.26 `chart:include-hidden-cells`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct SourceCell {
+    pub data: CellData,
+    pub hidden: bool,
+}
+
 /// Cell ranges outside the chart (a spreadsheet's tables).
 pub trait RangeResolver {
     /// The cells of an ODF range address (`Sheet1.A1:Sheet1.A9`) in row-major
     /// order, or `None` when the address names no readable range. The
     /// resolver rejects a range over the point bound ([`check_points`])
     /// and walks its cells through [`crate::budget::each`].
-    fn cells(&self, address: &str) -> Result<Option<Vec<CellData>>, String>;
-    /// Hidden flags of the same cells, when known.
-    fn hidden(&self, address: &str) -> Option<Vec<bool>>;
+    fn cells(&self, address: &str) -> Result<Option<Vec<SourceCell>>, String>;
+}
+
+/// One point of a resolved range: its value, its display text, and whether
+/// its source cell is hidden.
+#[derive(Clone)]
+struct Point {
+    cell: CellData,
+    text: String,
+    hidden: bool,
+}
+
+impl Point {
+    /// A cell of the chart's own table (never hidden).
+    fn local((cell, text): (CellData, String)) -> Self {
+        Self {
+            cell,
+            text,
+            hidden: false,
+        }
+    }
+
+    fn number(&self) -> Option<f64> {
+        match self.cell {
+            CellData::Number(n) => Some(n),
+            _ => None,
+        }
+    }
+}
+
+/// The hidden flags of `points` when any is hidden (the chart model keeps
+/// none otherwise).
+fn hidden_flags(points: &[Point]) -> Option<Vec<bool>> {
+    points
+        .iter()
+        .any(|p| p.hidden)
+        .then(|| points.iter().map(|p| p.hidden).collect())
 }
 
 /// The package directory of a chart object reference (`./Object 1/` →
@@ -236,8 +278,15 @@ impl LocalTable {
                 budget::tick(1)?;
                 let repeat = repeat_count(cell, "number-columns-repeated")?;
                 let covered = xml::is(cell, NS_TABLE, "covered-table-cell");
+                // §19.383 `office:string-value` holds a string cell's value
+                // when it differs from (or stands in for) its paragraphs.
                 let text = if covered {
                     String::new()
+                } else if let Some(value) = cell
+                    .attribute((NS_OFFICE, "string-value"))
+                    .filter(|_| cell.attribute((NS_OFFICE, "value-type")) == Some("string"))
+                {
+                    value.to_string()
                 } else {
                     crate::odf_text::paragraph_text(cell)?
                 };
@@ -435,15 +484,18 @@ impl Reader<'_> {
 
     /// Resolve a range: the resolver, else the local table. A range over
     /// [`MAX_POINTS`] rejects the document.
-    fn range(&self, address: &str) -> Result<Vec<(CellData, String)>, String> {
+    fn range(&self, address: &str) -> Result<Vec<Point>, String> {
         // Several space-separated ranges are concatenated (§18.3.5).
-        let mut out = Vec::new();
+        let mut out: Vec<Point> = Vec::new();
+        let local = |cells: Option<Vec<(CellData, String)>>| {
+            cells.map(|cells| cells.into_iter().map(Point::local).collect::<Vec<_>>())
+        };
         for part in crate::odf_text::split_addresses(address) {
             budget::tick(1)?;
             let local_first =
                 part.starts_with("local-table.") || part.starts_with("'local-table'.");
             let resolved = if local_first {
-                self.local.range(part)?
+                local(self.local.range(part)?)
             } else {
                 let cells = match self.resolver {
                     Some(resolver) => resolver.cells(part)?,
@@ -453,11 +505,11 @@ impl Reader<'_> {
                     Some(cells) => {
                         let cached = self.local.cached(part)?;
                         let mut resolved = Vec::new();
-                        for (i, cell) in cells.into_iter().enumerate() {
+                        for (i, source) in cells.into_iter().enumerate() {
                             budget::tick(1)?;
                             // Display text from the cache when the source
                             // value is a number (formatted categories).
-                            let text = match &cell {
+                            let text = match &source.data {
                                 CellData::Text(t) => t.clone(),
                                 CellData::Number(n) => cached
                                     .as_ref()
@@ -467,13 +519,17 @@ impl Reader<'_> {
                                     .unwrap_or_else(|| number_text(*n)),
                                 CellData::Empty => String::new(),
                             };
-                            resolved.push((cell, text));
+                            resolved.push(Point {
+                                cell: source.data,
+                                text,
+                                hidden: source.hidden,
+                            });
                         }
                         Some(resolved)
                     }
                     None => match self.local.cached(part)? {
-                        Some(cached) => Some(cached),
-                        None => self.local.range(part)?,
+                        Some(cached) => local(Some(cached)),
+                        None => local(self.local.range(part)?),
                     },
                 }
             };
@@ -555,8 +611,10 @@ impl Reader<'_> {
             },
             val_axis_major_tick_mark: "out".into(),
             cat_axis_major_tick_mark: "out".into(),
+            // §20.26 `chart:include-hidden-cells`: hidden cells are plotted
+            // unless the plot area says otherwise.
             plot_visible_only: Some(
-                get(&plot_chain, "chart:chart:include-hidden-cells") != Some("true"),
+                get(&plot_chain, "chart:chart:include-hidden-cells") == Some("false"),
             ),
             ..ChartModel::default()
         };
@@ -677,17 +735,31 @@ impl Reader<'_> {
                     .or(Some(50));
             }
         }
-        self.axes(plot, &mut model, data)?;
-        self.series(plot, &plot_chain, class, primary, &mut model, data)?;
+        let secondary_y = self.axes(plot, &mut model, data)?;
+        self.series(
+            plot,
+            &plot_chain,
+            (class, primary),
+            secondary_y,
+            &mut model,
+            data,
+        )?;
         Ok(model)
     }
 
-    fn axes(
+    /// Read the axes. The first axis of a dimension is its primary axis and
+    /// the next y axis the secondary one, whatever they are named (§19.24
+    /// `chart:name` is a free name; LibreOffice's `primary-y` /
+    /// `secondary-y` are one choice). Returns the secondary y axis' name,
+    /// which series attach to (§19.13).
+    fn axes<'n>(
         &self,
-        plot: roxmltree::Node<'_, '_>,
+        plot: roxmltree::Node<'n, '_>,
         model: &mut ChartModel,
         data: &mut DataStyles,
-    ) -> Result<(), String> {
+    ) -> Result<Option<&'n str>, String> {
+        let mut seen: Vec<&str> = Vec::new();
+        let mut secondary_y = None;
         for axis in plot.children().filter(|n| xml::is(*n, NS_CHART, "axis")) {
             budget::tick(1)?;
             let dimension = axis.attribute((NS_CHART, "dimension")).unwrap_or("");
@@ -733,8 +805,17 @@ impl Reader<'_> {
                 Some((code, divisors)) => (Some(code), divisors),
                 None => (None, None),
             };
-            let secondary = name.starts_with("secondary");
-            match (dimension, secondary) {
+            // 0 for the dimension's first axis, 1 for its second.
+            let order = seen.iter().filter(|d| **d == dimension).count();
+            if seen.len() < 16 {
+                seen.push(dimension);
+            }
+            if dimension == "y" && order == 1 {
+                secondary_y = Some(name);
+            }
+            match (dimension, order == 1) {
+                // Further axes of a dimension have no place in the model.
+                _ if order > 1 => {}
                 ("x", false) => {
                     model.cat_axis_hidden = !visible;
                     model.cat_axis_line_hidden = paint.line_hidden;
@@ -856,31 +937,28 @@ impl Reader<'_> {
                 _ => {}
             }
         }
-        Ok(())
+        Ok(secondary_y)
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn series(
         &self,
         plot: roxmltree::Node<'_, '_>,
         plot_chain: &[&Style],
-        class: &str,
-        primary: &str,
+        (class, primary): (&str, &str),
+        secondary_y: Option<&str>,
         model: &mut ChartModel,
         data: &mut DataStyles,
     ) -> Result<(), String> {
-        let categories: Vec<String> = match plot
+        let category_points = match plot
             .descendants()
             .find(|n| xml::is(*n, NS_CHART, "categories"))
             .and_then(|c| c.attribute((NS_TABLE, "cell-range-address")))
         {
-            Some(address) => self
-                .range(address)?
-                .into_iter()
-                .map(|(_, text)| text)
-                .collect(),
+            Some(address) => self.range(address)?,
             None => Vec::new(),
         };
+        model.category_source_hidden = hidden_flags(&category_points);
+        let categories: Vec<String> = category_points.into_iter().map(|p| p.text).collect();
         let nodes: Vec<_> = plot
             .children()
             .filter(|n| xml::is(*n, NS_CHART, "series"))
@@ -912,23 +990,16 @@ impl Reader<'_> {
                 "stock" => "stock",
                 _ => primary,
             };
-            let values: Vec<Option<f64>> =
-                match node.attribute((NS_CHART, "values-cell-range-address")) {
-                    Some(address) => self
-                        .range(address)?
-                        .into_iter()
-                        .map(|(cell, _)| match cell {
-                            CellData::Number(n) => Some(n),
-                            _ => None,
-                        })
-                        .collect(),
-                    None => Vec::new(),
-                };
+            let value_points = match node.attribute((NS_CHART, "values-cell-range-address")) {
+                Some(address) => self.range(address)?,
+                None => Vec::new(),
+            };
+            let values: Vec<Option<f64>> = value_points.iter().map(Point::number).collect();
             let name = match node.attribute((NS_CHART, "label-cell-address")) {
                 Some(address) => self
                     .range(address)?
                     .into_iter()
-                    .map(|(_, text)| text)
+                    .map(|p| p.text)
                     .collect::<Vec<_>>()
                     .join(" "),
                 None => format!("Series{}", index + 1),
@@ -974,9 +1045,11 @@ impl Reader<'_> {
                     }
                     .to_string(),
                 ),
-                use_secondary_axis: (node.attribute((NS_CHART, "attached-axis"))
-                    == Some("secondary-y"))
-                .then_some(true),
+                // §19.13: the series is drawn against the axis it names.
+                use_secondary_axis: node
+                    .attribute((NS_CHART, "attached-axis"))
+                    .is_some_and(|axis| Some(axis) == secondary_y)
+                    .then_some(true),
                 ..ChartSeries::default()
             };
             series.color = if line_drawn {
@@ -1019,10 +1092,21 @@ impl Reader<'_> {
             // model carries x values as text the renderer parses, so each is
             // written from the cell's value, never from its formatted text
             // (`1,000`, `50%`).
+            // A point is hidden when any cell it is drawn from is (§20.26).
+            let mut hidden: Vec<bool> = value_points.iter().map(|p| p.hidden).collect();
+            let mut hide_with = |domain: &Domain| {
+                for (at, point) in domain.0.iter().enumerate() {
+                    match hidden.get_mut(at) {
+                        Some(flag) => *flag |= point.hidden,
+                        None => hidden.push(point.hidden),
+                    }
+                }
+            };
             match kind {
                 "scatter" => {
                     if let Some(x) = &x_domain {
                         series.categories = Some(x.coordinates()?);
+                        hide_with(x);
                     }
                     series.values = values;
                 }
@@ -1031,9 +1115,11 @@ impl Reader<'_> {
                     series.bubble_sizes = Some(values);
                     if let Some(y) = &y_domain {
                         series.values = y.numbers()?;
+                        hide_with(y);
                     }
                     if let Some(x) = &x_domain {
                         series.categories = Some(x.coordinates()?);
+                        hide_with(x);
                     }
                 }
                 _ => {
@@ -1048,6 +1134,9 @@ impl Reader<'_> {
                         series.categories = Some(copy);
                     }
                 }
+            }
+            if hidden.iter().any(|flag| *flag) {
+                series.source_hidden = Some(hidden);
             }
             // Markers (§20.53 chart:symbol-type).
             match get(&chain, "chart:chart:symbol-type") {
@@ -1261,24 +1350,21 @@ impl Reader<'_> {
     }
 }
 
-/// The cells of one `chart:domain` range, shared by the series that use it.
+/// The points of one `chart:domain` range, shared by the series that use it.
 #[derive(Clone)]
-struct Domain(std::rc::Rc<Vec<(CellData, String)>>);
+struct Domain(std::rc::Rc<Vec<Point>>);
 
 impl Domain {
-    fn new(cells: Vec<(CellData, String)>) -> Self {
-        Self(std::rc::Rc::new(cells))
+    fn new(points: Vec<Point>) -> Self {
+        Self(std::rc::Rc::new(points))
     }
 
     /// The domain as values (a cell without a number is no value).
     fn numbers(&self) -> Result<Vec<Option<f64>>, String> {
         let mut out = Vec::new();
-        for (cell, _) in self.0.iter() {
+        for point in self.0.iter() {
             budget::tick(1)?;
-            out.push(match cell {
-                CellData::Number(n) => Some(*n),
-                _ => None,
-            });
+            out.push(point.number());
         }
         Ok(out)
     }
@@ -1288,9 +1374,9 @@ impl Domain {
     /// (the renderer plots text-backed x values by position).
     fn coordinates(&self) -> Result<Vec<String>, String> {
         let mut out = Vec::new();
-        for (cell, _) in self.0.iter() {
+        for point in self.0.iter() {
             budget::tick(1)?;
-            out.push(match cell {
+            out.push(match &point.cell {
                 CellData::Number(n) => number_text(*n),
                 CellData::Text(text) => text.clone(),
                 CellData::Empty => String::new(),
@@ -1543,23 +1629,94 @@ mod tests {
 
     struct Fixed;
     impl RangeResolver for Fixed {
-        fn cells(&self, address: &str) -> Result<Option<Vec<CellData>>, String> {
+        fn cells(&self, address: &str) -> Result<Option<Vec<SourceCell>>, String> {
+            let visible = |cells: Vec<CellData>| {
+                Some(
+                    cells
+                        .into_iter()
+                        .map(|data| SourceCell {
+                            data,
+                            hidden: false,
+                        })
+                        .collect::<Vec<_>>(),
+                )
+            };
+            // `H` holds two rows, the second hidden.
+            if address == "Sheet1.H2:Sheet1.H3" {
+                return Ok(Some(vec![
+                    SourceCell {
+                        data: CellData::Number(5.0),
+                        hidden: false,
+                    },
+                    SourceCell {
+                        data: CellData::Number(6.0),
+                        hidden: true,
+                    },
+                ]));
+            }
             Ok(match address {
                 "Sheet1.A2:Sheet1.A3" => {
-                    Some(vec![CellData::Number(45292.0), CellData::Number(45323.0)])
+                    visible(vec![CellData::Number(45292.0), CellData::Number(45323.0)])
                 }
-                "Sheet1.B2:Sheet1.B3" => Some(vec![CellData::Number(1.0), CellData::Number(2.0)]),
-                "Sheet1.B1" => Some(vec![CellData::Text("Units".into())]),
+                "Sheet1.B2:Sheet1.B3" => {
+                    visible(vec![CellData::Number(1.0), CellData::Number(2.0)])
+                }
+                "Sheet1.B1" => visible(vec![CellData::Text("Units".into())]),
                 "Sheet1.X2:Sheet1.X3" => {
-                    Some(vec![CellData::Number(1000.0), CellData::Number(0.5)])
+                    visible(vec![CellData::Number(1000.0), CellData::Number(0.5)])
                 }
-                "Sheet1.Y2:Sheet1.Y3" => Some(vec![CellData::Number(3.0), CellData::Number(4.0)]),
+                "Sheet1.Y2:Sheet1.Y3" => {
+                    visible(vec![CellData::Number(3.0), CellData::Number(4.0)])
+                }
                 _ => None,
             })
         }
-        fn hidden(&self, _: &str) -> Option<Vec<bool>> {
-            None
-        }
+    }
+
+    #[test]
+    fn hidden_cells_axis_names_and_attribute_strings() {
+        // Two y axes with free names: the second is the secondary axis and
+        // the series attached to it uses it. The local label cell holds its
+        // text in `office:string-value`.
+        let local = concat!(
+            r##"<table:table table:name="local-table"><table:table-rows>"##,
+            r##"<table:table-row><table:table-cell office:value-type="string" office:string-value="North"/></table:table-row>"##,
+            r##"</table:table-rows></table:table>"##
+        );
+        let body = |plot_style: &str| {
+            format!(
+                r##"<chart:chart chart:class="chart:bar"><chart:plot-area {plot_style}><chart:axis chart:dimension="x" chart:name="bottom"/><chart:axis chart:dimension="y" chart:name="left" chart:style-name="left"/><chart:axis chart:dimension="y" chart:name="right" chart:style-name="right"/><chart:series chart:values-cell-range-address="Sheet1.B2:Sheet1.B3" chart:label-cell-address="local-table.A1"/><chart:series chart:attached-axis="right" chart:values-cell-range-address="Sheet1.H2:Sheet1.H3"/></chart:plot-area>{local}</chart:chart>"##
+            )
+        };
+        let styles = concat!(
+            r##"<style:style style:name="left" style:family="chart"><style:chart-properties chart:minimum="1"/></style:style>"##,
+            r##"<style:style style:name="right" style:family="chart"><style:chart-properties chart:minimum="2"/></style:style>"##,
+            r##"<style:style style:name="hide" style:family="chart"><style:chart-properties chart:include-hidden-cells="false"/></style:style>"##,
+        );
+        let model = read_chart_document(&chart(&body(""), styles), None, Some(&Fixed))
+            .unwrap()
+            .unwrap();
+        assert_eq!(model.val_min, Some(1.0));
+        assert_eq!(
+            model.secondary_val_axis.as_ref().and_then(|axis| axis.min),
+            Some(2.0)
+        );
+        assert_eq!(model.series[0].name, "North");
+        assert_eq!(model.series[0].use_secondary_axis, None);
+        assert_eq!(model.series[1].use_secondary_axis, Some(true));
+        // §20.26: hidden cells are plotted by default; the model still
+        // says which points they are.
+        assert_eq!(model.plot_visible_only, Some(false));
+        assert_eq!(model.series[0].source_hidden, None);
+        assert_eq!(model.series[1].source_hidden, Some(vec![false, true]));
+        let model = read_chart_document(
+            &chart(&body(r#"chart:style-name="hide""#), styles),
+            None,
+            Some(&Fixed),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(model.plot_visible_only, Some(true));
     }
 
     #[test]

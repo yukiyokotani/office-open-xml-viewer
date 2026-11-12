@@ -147,12 +147,19 @@ impl XfBuilder {
     }
 
     /// The xf of a table cell's style, resolved once per style. The cell's
-    /// properties are that style's chain. LibreOffice reads a cell this
-    /// way: it does not search a styled cell's missing properties (its
-    /// number format above all) in the row and column defaults, and the
-    /// files it writes rely on that (measured over the private corpus,
-    /// where searching them changes 81 displayed cells away from the
-    /// original workbooks' text).
+    /// properties are that style's chain.
+    ///
+    /// §16.2 continues the search for a property a table-cell style leaves
+    /// unset in the row's and then the column's default cell style.
+    /// LibreOffice does not: a cell with a style of its own takes nothing
+    /// from the defaults (§19.619 applies a default cell style to cells
+    /// without `table:style-name`), and the files it writes rely on that.
+    /// Measured with LibreOffice 26.8: a cell whose style only sets bold,
+    /// in a column whose default cell style has a red font and a
+    /// two-decimal number format, shows 1.5 unformatted and is re-saved
+    /// bold only. Over the private corpus, searching the defaults changes
+    /// 81 displayed cells away from the original workbooks' text. The
+    /// reader follows LibreOffice.
     pub fn xf_for(
         &mut self,
         store: &StyleStore,

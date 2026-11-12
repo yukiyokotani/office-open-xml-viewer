@@ -157,9 +157,68 @@ export function selectFormatSection(
   return { section: parsed[index], index, useMagnitude: false };
 }
 
-/** Whether a section body is the reserved General keyword (§18.8.30). */
-export function isGeneralSectionBody(body: string): boolean {
-  return body.trim().toLowerCase() === 'general';
+/** The literal text around the General keyword of a section. */
+export interface GeneralSectionAffixes {
+  prefix: string;
+  suffix: string;
+  /** An unquoted `%` scales the value by 100 (§18.8.30). */
+  percent: boolean;
+}
+
+/**
+ * A section whose only number token is the General keyword, with literal
+ * text around it (`"$"General`, `General" kg"`, `[$€-407] General`;
+ * §18.8.30 lets literals accompany any number format): the literals, or
+ * `null` when the section holds anything else (digit placeholders, date or
+ * text tokens, no General). Quoted and escaped text, pad (`_x`, a space) and
+ * fill (`*x`, nothing) pairs, a currency bracket's symbol and plain
+ * punctuation are literal; other brackets are metadata.
+ */
+export function generalSectionAffixes(body: string): GeneralSectionAffixes | null {
+  let prefix = '';
+  let suffix = '';
+  let seen = false;
+  let percent = false;
+  const add = (text: string): void => {
+    if (seen) suffix += text; else prefix += text;
+  };
+  let i = 0;
+  while (i < body.length) {
+    const ch = body[i];
+    if (ch === '"') {
+      const end = body.indexOf('"', i + 1);
+      add(body.slice(i + 1, end < 0 ? body.length : end));
+      i = end < 0 ? body.length : end + 1;
+    } else if (ch === '\\') {
+      add(body[i + 1] ?? '');
+      i += 2;
+    } else if (ch === '_') {
+      add(' ');
+      i += 2;
+    } else if (ch === '*') {
+      i += 2;
+    } else if (ch === '[') {
+      const end = body.indexOf(']', i);
+      if (end < 0) return null;
+      const currency = /^\$([^-\]]*)/.exec(body.slice(i + 1, end));
+      if (currency) add(currency[1]);
+      i = end + 1;
+    } else if (/^general/i.test(body.slice(i, i + 7))) {
+      if (seen) return null;
+      seen = true;
+      i += 7;
+    } else if (ch === '%') {
+      percent = true;
+      add(ch);
+      i++;
+    } else if (/[\s$+\-()/:!^&'~{}<>=]/.test(ch)) {
+      add(ch);
+      i++;
+    } else {
+      return null;
+    }
+  }
+  return seen ? { prefix, suffix, percent } : null;
 }
 
 /** Index of the text section (§18.8.30), or -1: the fourth section when

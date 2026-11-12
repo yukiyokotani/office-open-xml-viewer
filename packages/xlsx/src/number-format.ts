@@ -1,6 +1,7 @@
 import {
   excelDateTimeSectionNameTexts,
   formatExcelDateTime,
+  generalSectionAffixes,
   formatLocalizedExcelShortDate,
   localizedExcelShortDateTexts,
   isDateFormatSection,
@@ -800,7 +801,10 @@ function fillFractionText(fracDigits: string, fracSpec: string): string {
 function approximateFraction(frac: number, maxDenDigits: number, fixedDen: number | null): [number, number] {
   if (fixedDen !== null) return [Math.round(frac * fixedDen), fixedDen];
   const maxDen = Math.pow(10, Math.max(maxDenDigits, 1)) - 1;
+  // The ends of the search, 0/1 and 1/1, are candidates too: 0.999 with
+  // one-digit denominators is 1/1 (the caller carries it), not 8/9.
   let bestN = 0, bestD = 1, bestErr = Math.abs(frac);
+  if (Math.abs(1 - frac) < bestErr) { bestN = 1; bestD = 1; bestErr = Math.abs(1 - frac); }
   let lo: [number, number] = [0, 1];
   let hi: [number, number] = [1, 1];
   for (let iter = 0; iter < 100; iter++) {
@@ -834,11 +838,13 @@ function renderNumericSection(num: number, body: string, useMagnitude: boolean):
 
   // ── Fraction section (`# ?/?`, `?/8`, …) ──────────────────────────────────
   if (lex.fraction) {
-    const whole = Math.floor(abs);
+    let whole = Math.floor(abs);
     const frac = abs - whole;
     const { wholeSpec, numSpec, denSpec, fixedDen } = lex.fraction;
     const hasWholePart = wholeSpec.length > 0; // e.g. `# ?/?` has a `#` whole part
-    const [numr, den] = approximateFraction(frac, denSpec.length, fixedDen);
+    let [numr, den] = approximateFraction(frac, denSpec.length, fixedDen);
+    // A fraction that rounds to a whole carries into the whole part.
+    if (hasWholePart && numr === den) { whole += 1; numr = 0; }
 
     // §18.8.30: `?` pads insignificant positions with spaces so fractions align
     // on the slash — the numerator right-aligns (pad left), the denominator
@@ -1003,10 +1009,14 @@ function applyFormatCode(
   // Date/time is a property of the selected section (§18.8.30): `0.00;h:mm`
   // formats a positive value as a number and only a negative one as a time.
   const serial = useMagnitude ? Math.abs(num) : num;
-  // A section whose whole body is the General keyword (`[Red]General`,
-  // `General;General`) formats its (magnitude) value as General (§18.8.30).
-  if (chosen.body.trim().toLowerCase() === 'general') {
-    const text = formatGeneralText(serial);
+  // A section whose number token is the General keyword (`[Red]General`,
+  // `General;General`, `"$"General`) formats its (magnitude) value as
+  // General between the section's literals (§18.8.30).
+  const general = generalSectionAffixes(chosen.body);
+  if (general) {
+    const scaled = general.percent ? serial * 100 : serial;
+    // A lone section carries no sign of its own: the minus leads it.
+    const text = (scaled < 0 ? '-' : '') + general.prefix + formatGeneralText(Math.abs(scaled)) + general.suffix;
     return chosen.color ? { text, color: chosen.color } : { text };
   }
   const formatted = isDateFormatSection(chosen.body)

@@ -31,6 +31,14 @@
 //! A missed tick cannot leak memory past the hard ceiling and cannot hide an
 //! over-limit document from [`Scope::finish`]; it can only delay the
 //! rejection.
+//!
+//! What is bounded is the growth of the reading thread's heap since the
+//! scope began: the quantity a host has to provide. Memory that existed
+//! before the scope and is freed inside it is credited, since the heap did
+//! not grow by what replaced it. A reader therefore enters its scope once
+//! its inputs are loaded and only borrows them from then on (the package,
+//! its XML text and parsed documents), so that the growth is the memory of
+//! the read itself.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;

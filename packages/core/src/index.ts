@@ -699,6 +699,7 @@ export { excelSerialToUtcDate, utcDateToExcelSerial, isExcelDisplayDateSerial } 
 export {
   excelDateTimeSectionNameTexts,
   formatExcelDateTime,
+  generalSectionAffixes,
   isDateFormatSection,
   parseFormatSection,
   selectFormatSection,

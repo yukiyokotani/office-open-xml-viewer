@@ -906,3 +906,31 @@ fn charts_take_the_workbook_date_system() {
     assert!(workbook.date1904);
     assert!(workbook.sheets[0].worksheet.charts[0].chart.date1904);
 }
+
+#[test]
+fn attribute_strings_keep_the_formatting_of_matching_paragraphs() {
+    let body = content(
+        r#"<style:style style:name="B" style:family="text"><style:text-properties fo:font-weight="bold"/></style:style>"#,
+        &table(concat!(
+            r#"<table:table-row>"#,
+            r#"<table:table-cell office:value-type="string" office:string-value="North"><text:p><text:span text:style-name="B">North</text:span></text:p></table:table-cell>"#,
+            r#"<table:table-cell office:value-type="string" office:string-value="North"><text:p><text:span text:style-name="B">shown</text:span></text:p></table:table-cell>"#,
+            r#"<table:table-cell office:value-type="string" office:string-value="North"/>"#,
+            r#"</table:table-row>"#
+        )),
+    );
+    let workbook = read_text(&body, Some(&styles(""))).unwrap();
+    let cells = &workbook.sheets[0].rows[0].cells;
+    let read = |cell: &xlsx_model::Cell| match &cell.value {
+        xlsx_model::CellValue::Text { text, runs, .. } => (
+            text.clone(),
+            runs.as_ref()
+                .map(|runs| runs.iter().any(|r| r.font.as_ref().is_some_and(|f| f.bold))),
+        ),
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(read(&cells[0]), ("North".to_string(), Some(true)));
+    // The attribute is the value where the paragraphs spell something else.
+    assert_eq!(read(&cells[1]), ("North".to_string(), None));
+    assert_eq!(read(&cells[2]), ("North".to_string(), None));
+}

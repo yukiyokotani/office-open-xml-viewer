@@ -4796,8 +4796,10 @@ function drawShape(
       // xlsx shapes carry no drop shadow on the body, so there's nothing to
       // clear between the engine's fill and stroke passes.
       () => {},
-      shape.fill?.fillType === 'hatch'
-        ? { paintFill: target => fillShape(target, shape, sw, sh, cs, null) }
+      // Hatches and staggered picture tiles are painted, not set as a fill
+      // style: the preset engine hands its path to the same painter.
+      shape.fill?.fillType === 'hatch' || (shape.fill?.fillType === 'image' && shape.fill.shift)
+        ? { paintFill: target => fillShape(target, shape, sw, sh, cs, baseFill) }
         : undefined,
     );
     if (!drawn) {
@@ -5603,9 +5605,11 @@ function resolveImageShapeFill(
   const iw = Number(natural.width) || 0;
   const ih = Number(natural.height) || 0;
   if (iw <= 0 || ih <= 0) return null;
+  const { tileW, tileH, x, y } = imageFillGeometry(fill, iw, ih, width, height, cs);
+  // A picture without a finite, positive size or place paints nothing.
+  if (!(tileW > 0 && tileH > 0) || ![tileW, tileH, x, y].every(Number.isFinite)) return null;
   const pattern = ctx.createPattern(image, fill.layout === 'tile' ? 'repeat' : 'no-repeat');
   if (!pattern) return null;
-  const { tileW, tileH, x, y } = imageFillGeometry(fill, iw, ih, width, height, cs);
   if (typeof pattern.setTransform === 'function') {
     pattern.setTransform({ a: tileW / iw, b: 0, c: 0, d: tileH / ih, e: x, f: y });
   }
@@ -5644,10 +5648,17 @@ function paintStaggeredImageFill(
   const start = rows ? y : x;
   const [from, to] = rows ? [y0, y1] : [x0, x1];
   const amount = (rows ? shift.rows * tileW : shift.columns * tileH);
+  // The bands over the visible extent, counted: an origin so far away that
+  // band numbers lose integer precision has no parity to stagger by, and
+  // the count (the visible extent in tiles) bounds the loop by itself.
+  const first = Math.floor((from - start) / across);
+  const count = Math.ceil((to - start) / across) - first;
+  if (!Number.isSafeInteger(first) || !Number.isSafeInteger(count) || !Number.isFinite(amount)) return false;
   ctx.save();
   ctx.clip();
   ctx.fillStyle = pattern;
-  for (let band = Math.floor((from - start) / across); start + band * across < to; band++) {
+  for (let k = 0; k < count; k++) {
+    const band = first + k;
     const moved = band % 2 === 0 ? 0 : amount;
     pattern.setTransform({
       a: tileW / iw, b: 0, c: 0, d: tileH / ih,

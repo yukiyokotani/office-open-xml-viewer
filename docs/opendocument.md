@@ -221,6 +221,15 @@ cannot hold what LibreOffice shows, the reader does the following:
 - A formula result that LibreOffice shows as nothing (an empty-cell or
   empty-string result saved as the number 0) is shown as nothing and stays
   the number 0.
+- A cell with a style of its own takes nothing from its row's or column's
+  default cell style, as in LibreOffice (ODF 1.3 Part 3 §16.2 continues the
+  search for unset properties there).
+- A number style without `number:decimal-places` is shown in the General
+  format, as LibreOffice shows it.
+- Numbers are formatted by the workbook renderer's formatter, which follows
+  Excel where the two differ: a negative number that rounds to zero keeps
+  its minus sign (`-0` where LibreOffice shows `0`), and General shows at
+  most eleven characters.
 - Hatch lines turn counter-clockwise from the horizontal by the hatch's
   rotation, as LibreOffice draws them (ODF 1.3 Part 3 §19.209 words the
   rotation as clockwise from the vertical axis).
@@ -235,10 +244,14 @@ applied), hatches, and pictures that are stretched, repeated (at their
 size, from their reference point, with its offsets and the tile stagger) or
 drawn once.
 
-Resource limits: while it builds the workbook, the reader may hold at most
-512 MiB beyond the package's parsed XML, materialize at most 8 million cells
-and take a bounded number of steps. A spreadsheet over a limit rejects with
-the resource-limit error; nothing is shortened. Custom shapes are drawn from
+The workbook grid has 1,048,576 rows and 16,384 columns: rows and columns
+of a table beyond it are not shown, as when LibreOffice saves such a table
+as a workbook.
+
+Resource limits: while it builds the workbook, the reader may grow its heap
+by at most 512 MiB beyond the package's parsed XML, materialize at most 8
+million cells and take a bounded number of steps. A spreadsheet over a
+limit rejects with the resource-limit error instead of being shown in part. Custom shapes are drawn from
 their preset or their enhanced-geometry path (equations are evaluated; arcs
 are flattened to short segments). Embedded objects that are not charts are
 drawn from their replacement image

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { utcDateToExcelSerial } from './excel-date.js';
 import {
-  excelDateTimeSectionNameTexts, formatExcelDateTime, isDateFormatSection,
+  excelDateTimeSectionNameTexts, formatExcelDateTime, generalSectionAffixes, isDateFormatSection,
 } from './excel-number-format.js';
 
 // The quarter and week-of-year fields of an OpenDocument date style (ODF 1.3
@@ -55,5 +55,21 @@ describe('calendar-field brackets', () => {
   it('shows the invalid-date marker for a serial without a calendar date', () => {
     expect(formatExcelDateTime(-1, '[Q]')).toBe('#');
     expect(formatExcelDateTime(-1, '[WW]')).toBe('#');
+  });
+});
+
+describe('the General keyword beside literal text', () => {
+  it('reads the literals around General', () => {
+    expect(generalSectionAffixes('General')).toEqual({ prefix: '', suffix: '', percent: false });
+    expect(generalSectionAffixes('"$"General')).toEqual({ prefix: '$', suffix: '', percent: false });
+    expect(generalSectionAffixes('[$€-407] General" kg"_)')).toEqual({ prefix: '€ ', suffix: ' kg ', percent: false });
+    expect(generalSectionAffixes('General%')).toEqual({ prefix: '', suffix: '%', percent: true });
+    expect(generalSectionAffixes('\\(General\\)')).toEqual({ prefix: '(', suffix: ')', percent: false });
+  });
+
+  it('is not a General section with any other token', () => {
+    for (const body of ['0.00', '"General"', 'General0', 'yyyy General', 'General General', '@General', '']) {
+      expect(generalSectionAffixes(body), body).toBeNull();
+    }
   });
 });

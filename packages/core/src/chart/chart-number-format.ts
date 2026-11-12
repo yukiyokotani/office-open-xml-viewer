@@ -9,7 +9,7 @@ import { excelSerialToUtcDate, isExcelDisplayDateSerial } from '../excel-date';
 import {
   formatExcelDateTime,
   isDateFormatSection,
-  isGeneralSectionBody,
+  generalSectionAffixes,
   selectFormatSection,
   splitFormatSections,
   textSectionIndex,
@@ -144,8 +144,11 @@ export function formatChartValWithCode(
   // A section whose body is the General keyword (`General;General`,
   // `[Red]General`) formats its value as General: the magnitude in a section
   // that carries the sign itself.
-  if (isGeneralSectionBody(selected.section.body)) {
-    return formatChartVal(explicitNegative ? -v : v);
+  const general = generalSectionAffixes(selected.section.body);
+  if (general) {
+    const scaled = general.percent ? v * 100 : v;
+    const shown = explicitNegative ? Math.abs(scaled) : scaled;
+    return (shown < 0 ? '-' : '') + general.prefix + formatChartVal(Math.abs(shown)) + general.suffix;
   }
   // Date/time is a property of the selected section: the value is a serial
   // date (scatter / time-series axes), rendered by the same formatter as

@@ -1310,7 +1310,8 @@ struct SheetResolver<'a> {
 }
 
 impl crate::odf_chart::RangeResolver for SheetResolver<'_> {
-    fn cells(&self, address: &str) -> Result<Option<Vec<crate::odf_chart::CellData>>, String> {
+    fn cells(&self, address: &str) -> Result<Option<Vec<crate::odf_chart::SourceCell>>, String> {
+        use crate::odf_chart::{CellData, SourceCell};
         let Some((sheet, (r1, c1), (r2, c2))) = super::parse_range(address) else {
             return Ok(None);
         };
@@ -1322,27 +1323,24 @@ impl crate::odf_chart::RangeResolver for SheetResolver<'_> {
         let mut out = Vec::new();
         for row in budget::each(r1, r2) {
             let row = row?;
+            let row_hidden = sheet.row_hidden(row);
             for col in budget::each(c1, c2) {
-                let cell = super::find_cell(&sheet.rows, row, col?);
-                out.push(match cell.map(|c| &c.value) {
-                    Some(xlsx_model::CellValue::Number { number }) => {
-                        crate::odf_chart::CellData::Number(*number)
-                    }
-                    Some(xlsx_model::CellValue::Text { text, .. }) => {
-                        crate::odf_chart::CellData::Text(text.clone())
-                    }
+                let col = col?;
+                let data = match super::find_cell(&sheet.rows, row, col).map(|c| &c.value) {
+                    Some(xlsx_model::CellValue::Number { number }) => CellData::Number(*number),
+                    Some(xlsx_model::CellValue::Text { text, .. }) => CellData::Text(text.clone()),
                     Some(xlsx_model::CellValue::Bool { bool }) => {
-                        crate::odf_chart::CellData::Number(if *bool { 1.0 } else { 0.0 })
+                        CellData::Number(if *bool { 1.0 } else { 0.0 })
                     }
-                    _ => crate::odf_chart::CellData::Empty,
+                    _ => CellData::Empty,
+                };
+                out.push(SourceCell {
+                    data,
+                    hidden: row_hidden || sheet.worksheet.col_hidden.contains_key(&col),
                 });
             }
         }
         Ok(Some(out))
-    }
-
-    fn hidden(&self, _address: &str) -> Option<Vec<bool>> {
-        None
     }
 }
 

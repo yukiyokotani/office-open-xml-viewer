@@ -174,9 +174,16 @@ struct Column {
     px: u32,
     hidden: bool,
     level: u8,
+    /// The format blank cells of the column paint with: its default
+    /// style's, or the format every row gives it
+    /// ([`promote_column_formats`]).
     default_xf: u32,
-    /// The column's `table:default-cell-style-name`, resolved once.
+    /// The column's `table:default-cell-style-name`, resolved once, with
+    /// its xf and whether it carries §16.3 conditions: a cell walks its
+    /// column runs without looking a style up.
     default_style: Option<CellStyle>,
+    style_xf: u32,
+    style_maps: bool,
 }
 
 impl Column {
@@ -227,6 +234,8 @@ pub(crate) fn read_table<'a, 'input>(
             level: 0,
             default_xf: 0,
             default_style: None,
+            style_xf: 0,
+            style_maps: CellStyle::Default.has_maps(&ctx.store),
         });
     }
     promote_column_formats(ctx, table, &mut columns)?;
@@ -235,7 +244,7 @@ pub(crate) fn read_table<'a, 'input>(
     let mapped_runs: Vec<usize> = columns
         .iter()
         .enumerate()
-        .filter(|(_, c)| c.cell_style().has_maps(&ctx.store))
+        .filter(|(_, c)| c.style_maps)
         .map(|(index, _)| index)
         .collect();
 
@@ -249,7 +258,11 @@ pub(crate) fn read_table<'a, 'input>(
         anchored: Vec::new(),
         validations: Vec::new(),
         style_maps: Vec::new(),
-        style_map_last: HashMap::new(),
+        map_previous: Vec::new(),
+        map_previous_bottom: 0,
+        map_current: Vec::new(),
+        map_cursor: 0,
+        default_maps: CellStyle::Default.has_maps(&ctx.store),
         mapped_runs,
         next_row: 1,
     };
@@ -271,6 +284,12 @@ pub(crate) fn read_table<'a, 'input>(
             entry.2 = 0;
         }
     }
+    let hidden_rows: Vec<(u32, u32)> = walker
+        .heights
+        .iter()
+        .filter(|block| block.4 .0)
+        .map(|block| (block.0, block.1))
+        .collect();
     let mut weight: HashMap<u32, u64> = HashMap::new();
     for (first, last, px, _, _) in &walker.heights {
         *weight.entry(*px).or_default() += u64::from(last - first + 1);
@@ -431,6 +450,7 @@ pub(crate) fn read_table<'a, 'input>(
             default_col_px,
             validation_refs: walker.validations,
             style_map_refs: walker.style_maps,
+            hidden_rows,
         },
         charts,
     ))
@@ -478,20 +498,29 @@ fn promote_column_formats(
             let last = col
                 .saturating_add(repeat(cell, "number-columns-repeated")? as usize - 1)
                 .min(width);
-            let own = cell
+            // The xf of the style the cell or its row names, resolved once;
+            // without one each column run supplies its default style's.
+            let explicit_xf = match cell
                 .attribute((NS_TABLE, "style-name"))
-                .map(|name| CellStyle::named(&ctx.store, name));
+                .map(|name| CellStyle::named(&ctx.store, name))
+                .or(row_default)
+            {
+                Some(style) => {
+                    Some(
+                        ctx.xfs
+                            .xf_for(&ctx.store, &mut ctx.data, &ctx.faces, style)?,
+                    )
+                }
+                None => None,
+            };
             let mut c = col;
+            let mut run = columns.partition_point(|k| (k.last as usize) < c);
             while c <= last {
                 budget::tick(1)?;
-                let column = column_at(columns, c as u32);
+                let column = columns.get(run).filter(|k| k.first as usize <= c);
                 let segment_last = column.map_or(last, |k| (k.last as usize).min(last));
-                let style = own
-                    .or(row_default)
-                    .unwrap_or_else(|| column.map_or(CellStyle::Default, Column::cell_style));
-                let xf = ctx
-                    .xfs
-                    .xf_for(&ctx.store, &mut ctx.data, &ctx.faces, style)?;
+                let xf = explicit_xf.unwrap_or_else(|| column.map_or(0, |k| k.style_xf));
+                run += usize::from(column.is_some());
                 let default = column.map_or(0, |k| k.default_xf);
                 if ctx.xfs.blank_signature(xf) != ctx.xfs.blank_signature(default) {
                     candidates.push((c, segment_last));
@@ -529,20 +558,29 @@ fn promote_column_formats(
             let last = col.saturating_add(span - 1).min(width);
             let has_content = cell.attribute((NS_OFFICE, "value-type")).is_some()
                 || cell.children().any(|n| n.is_element());
-            let own = cell
+            // The xf of the style the cell or its row names, resolved once;
+            // without one each column run supplies its default style's.
+            let explicit_xf = match cell
                 .attribute((NS_TABLE, "style-name"))
-                .map(|name| CellStyle::named(&ctx.store, name));
+                .map(|name| CellStyle::named(&ctx.store, name))
+                .or(row_default)
+            {
+                Some(style) => {
+                    Some(
+                        ctx.xfs
+                            .xf_for(&ctx.store, &mut ctx.data, &ctx.faces, style)?,
+                    )
+                }
+                None => None,
+            };
             let mut c = col;
+            let mut run = columns.partition_point(|k| (k.last as usize) < c);
             while c <= last {
                 budget::tick(1)?;
-                let column = column_at(columns, c as u32);
+                let column = columns.get(run).filter(|k| k.first as usize <= c);
                 let segment_last = column.map_or(last, |k| (k.last as usize).min(last));
-                let style = own
-                    .or(row_default)
-                    .unwrap_or_else(|| column.map_or(CellStyle::Default, Column::cell_style));
-                let xf = ctx
-                    .xfs
-                    .xf_for(&ctx.store, &mut ctx.data, &ctx.faces, style)?;
+                let xf = explicit_xf.unwrap_or_else(|| column.map_or(0, |k| k.style_xf));
+                run += usize::from(column.is_some());
                 // Candidates are disjoint and in column order: only those
                 // overlapping the segment are visited, each column once.
                 let from = candidates.partition_point(|(_, b)| *b < c);
@@ -606,6 +644,8 @@ fn promote_column_formats(
                     // Unstyled cells still resolve through the authored
                     // default; every blank one paints like `xf`.
                     default_style: column.default_style,
+                    style_xf: column.style_xf,
+                    style_maps: column.style_maps,
                 });
                 start = c;
                 current = next;
@@ -703,6 +743,10 @@ fn collect_columns(
                     level,
                     default_xf,
                     default_style,
+                    style_xf: default_xf,
+                    style_maps: default_style
+                        .unwrap_or(CellStyle::Default)
+                        .has_maps(&ctx.store),
                 });
                 *next = last + 1;
             }
@@ -723,9 +767,17 @@ struct RowWalker<'a, 'input> {
     validations: Vec<(String, xlsx_model::CellRange)>,
     /// Ranges of cells whose style has `style:map` conditions.
     style_maps: Vec<(CellStyle, xlsx_model::CellRange)>,
-    /// (style, first column, last column) → its last range, to extend it
-    /// down over the next rows.
-    style_map_last: HashMap<(CellStyle, u32, u32), usize>,
+    /// The ranges the previous row block recorded, in column order (style,
+    /// first column, last column, index in `style_maps`), and that block's
+    /// last row: the next block extends a range it repeats.
+    map_previous: Vec<(CellStyle, u32, u32, usize)>,
+    map_previous_bottom: u32,
+    /// The ranges of the row block being read, and how far it has matched
+    /// into `map_previous`.
+    map_current: Vec<(CellStyle, u32, u32, usize)>,
+    map_cursor: usize,
+    /// Whether the `Default` cell style carries conditions.
+    default_maps: bool,
     /// Indices of the column runs whose default style has conditions.
     mapped_runs: Vec<usize>,
     next_row: u32,
@@ -781,6 +833,11 @@ fn read_row<'a, 'input>(
     let count = repeat(node, "number-rows-repeated")?;
     let last = first.saturating_add(count - 1).min(MAX_ROWS);
     walker.next_row = last.saturating_add(1);
+    // Condition ranges continue only from the block directly above.
+    if walker.map_previous_bottom.checked_add(1) != Some(first) {
+        walker.map_previous.clear();
+    }
+    walker.map_cursor = 0;
     let chain = ctx
         .store
         .chain("table-row", node.attribute((NS_TABLE, "style-name")));
@@ -855,7 +912,7 @@ fn read_row<'a, 'input>(
             }
             // Columns past the declared runs take the `Default` style.
             let declared = columns.last().map_or(0, |c| c.last);
-            if cell_last > declared && CellStyle::Default.has_maps(&ctx.store) {
+            if cell_last > declared && walker.default_maps {
                 record_style_map(
                     walker,
                     CellStyle::Default,
@@ -870,22 +927,36 @@ fn read_row<'a, 'input>(
         // The column style the prototype's rich-text runs were read over.
         let mut prototype_column: Option<CellStyle> = None;
         let rich = matches!(&value, CellValue::Text { runs: Some(_), .. }) && explicit.is_none();
+        // The cell's own or row style resolves once; a cell without one
+        // takes each column run's default style, which the run carries
+        // resolved. Nothing is looked up per segment.
+        let explicit_format = match explicit {
+            Some(style) => Some((
+                ctx.xfs
+                    .xf_for(&ctx.store, &mut ctx.data, &ctx.faces, style)?,
+                style.has_maps(&ctx.store),
+            )),
+            None => None,
+        };
+        let value_format = ValueFormat::of(cell, shown_empty_zero);
         // Walk the repeated cells as segments of constant column default.
         let mut c = if unstyled_blank { cell_last + 1 } else { col };
+        let mut run = columns.partition_point(|k| k.last < c);
         while c <= cell_last {
             budget::tick(1)?;
-            let column = column_at(columns, c);
+            let column = columns.get(run).filter(|k| k.first <= c);
+            run += usize::from(column.is_some());
             let segment_last = column.map_or(cell_last, |k| k.last.min(cell_last));
             let column_xf = column.map_or(0, |k| k.default_xf);
             let column_style = column.map_or(CellStyle::Default, Column::cell_style);
             let style = explicit.unwrap_or(column_style);
-            if style.has_maps(&ctx.store) {
+            let (style_xf, maps) = explicit_format.unwrap_or_else(|| {
+                column.map_or((0, walker.default_maps), |k| (k.style_xf, k.style_maps))
+            });
+            if maps {
                 record_style_map(walker, style, (first, c), (last, segment_last))?;
             }
-            let xf = ctx
-                .xfs
-                .xf_for(&ctx.store, &mut ctx.data, &ctx.faces, style)?;
-            let xf = adjust_xf_for_value(&mut ctx.xfs, xf, cell, shown_empty_zero)?;
+            let xf = value_format.apply(&mut ctx.xfs, style_xf)?;
             // An empty cell is materialized only when it paints differently
             // from its column's default (fill or borders); its font, number
             // format and alignment have nothing to show.
@@ -1029,36 +1100,54 @@ fn read_row<'a, 'input>(
             });
         }
     }
+    // The two lists trade places and keep their storage: a row allocates
+    // nothing for its condition ranges once the lists have grown.
+    std::mem::swap(&mut walker.map_previous, &mut walker.map_current);
+    walker.map_current.clear();
+    walker.map_previous_bottom = last;
     Ok(())
 }
 
 /// Note the cells (rows × columns) whose style carries `style:map`
-/// conditions, extending the style's range from the rows above.
+/// conditions, extending the range the row block directly above recorded
+/// for the same style and columns. A row records its ranges in column
+/// order, so matching the block above is one forward pass: no lookup per
+/// range.
 fn record_style_map(
     walker: &mut RowWalker<'_, '_>,
     style: CellStyle,
     (top, left): (u32, u32),
     (bottom, right): (u32, u32),
 ) -> Result<(), String> {
-    let key = (style, left, right);
-    if let Some(index) = walker.style_map_last.get(&key) {
-        let range = &mut walker.style_maps[*index].1;
-        if range.bottom.saturating_add(1) == top {
-            range.bottom = bottom;
-            return Ok(());
-        }
+    while walker
+        .map_previous
+        .get(walker.map_cursor)
+        .is_some_and(|(_, previous_left, _, _)| *previous_left < left)
+    {
+        walker.map_cursor += 1;
     }
-    budget::tick(1)?;
-    walker.style_map_last.insert(key, walker.style_maps.len());
-    walker.style_maps.push((
-        style,
-        xlsx_model::CellRange {
-            top,
-            left,
-            bottom,
-            right,
-        },
-    ));
+    let index = match walker.map_previous.get(walker.map_cursor) {
+        Some((previous, previous_left, previous_right, index))
+            if (*previous, *previous_left, *previous_right) == (style, left, right) =>
+        {
+            walker.style_maps[*index].1.bottom = bottom;
+            *index
+        }
+        _ => {
+            budget::tick(1)?;
+            walker.style_maps.push((
+                style,
+                xlsx_model::CellRange {
+                    top,
+                    left,
+                    bottom,
+                    right,
+                },
+            ));
+            walker.style_maps.len() - 1
+        }
+    };
+    walker.map_current.push((style, left, right, index));
     Ok(())
 }
 
@@ -1078,33 +1167,58 @@ const HIDDEN_ZERO_CODE: &str = "0;-0;;@";
 /// `office:value="0"` with `<text:p/>`, while a displayed zero is written
 /// with `<text:p>0</text:p>`. The value stays the number LibreOffice
 /// calculates with; only its zero section is emptied.
-fn adjust_xf_for_value(
-    xfs: &mut XfBuilder,
-    xf: u32,
-    cell: roxmltree::Node<'_, '_>,
-    shown_empty_zero: bool,
-) -> Result<u32, String> {
-    if shown_empty_zero {
-        return xfs.with_num_fmt(xf, HIDDEN_ZERO_CODE, DataKind::Number);
+#[derive(Clone, Copy)]
+enum ValueFormat {
+    /// The style's own number format.
+    Own,
+    HiddenZero,
+    Date {
+        time: bool,
+    },
+    Time,
+    Percentage,
+}
+
+impl ValueFormat {
+    /// What the cell's value asks of its format, read once per cell.
+    fn of(cell: roxmltree::Node<'_, '_>, shown_empty_zero: bool) -> Self {
+        if shown_empty_zero {
+            return Self::HiddenZero;
+        }
+        match cell.attribute((NS_OFFICE, "value-type")) {
+            Some("date") => Self::Date {
+                time: cell
+                    .attribute((NS_OFFICE, "date-value"))
+                    .is_some_and(|v| v.contains('T')),
+            },
+            Some("time") => Self::Time,
+            Some("percentage") => Self::Percentage,
+            _ => Self::Own,
+        }
     }
-    let kind = xfs.kind(xf);
-    match cell.attribute((NS_OFFICE, "value-type")) {
-        Some("date") if !matches!(kind, Some(DataKind::Date) | Some(DataKind::Time)) => {
-            let has_time = cell
-                .attribute((NS_OFFICE, "date-value"))
-                .is_some_and(|v| v.contains('T'));
-            let code = if has_time {
-                "yyyy-mm-dd hh:mm:ss"
-            } else {
-                "yyyy-mm-dd"
-            };
-            xfs.with_num_fmt(xf, code, DataKind::Date)
+
+    /// The xf the cell uses when its style resolves to `xf`.
+    fn apply(self, xfs: &mut XfBuilder, xf: u32) -> Result<u32, String> {
+        let dated =
+            |xfs: &XfBuilder| matches!(xfs.kind(xf), Some(DataKind::Date) | Some(DataKind::Time));
+        match self {
+            Self::Own => Ok(xf),
+            Self::HiddenZero => xfs.with_num_fmt(xf, HIDDEN_ZERO_CODE, DataKind::Number),
+            Self::Date { time } if !dated(xfs) => xfs.with_num_fmt(
+                xf,
+                if time {
+                    "yyyy-mm-dd hh:mm:ss"
+                } else {
+                    "yyyy-mm-dd"
+                },
+                DataKind::Date,
+            ),
+            Self::Time if !dated(xfs) => xfs.with_num_fmt(xf, "[hh]:mm:ss", DataKind::Time),
+            Self::Percentage if xfs.kind(xf).is_none() => {
+                xfs.with_num_fmt(xf, "0%", DataKind::Percentage)
+            }
+            _ => Ok(xf),
         }
-        Some("time") if !matches!(kind, Some(DataKind::Date) | Some(DataKind::Time)) => {
-            xfs.with_num_fmt(xf, "[hh]:mm:ss", DataKind::Time)
-        }
-        Some("percentage") if kind.is_none() => xfs.with_num_fmt(xf, "0%", DataKind::Percentage),
-        _ => Ok(xf),
     }
 }
 
@@ -1256,7 +1370,10 @@ fn cell_value(
             let has_paragraphs = cell
                 .children()
                 .any(|n| xml::is(n, NS_TEXT, "p") || xml::is(n, NS_TEXT, "h"));
-            if let Some(text) = cell.attribute((NS_OFFICE, "string-value")) {
+            // §19.383 `office:string-value` is the value; paragraphs that
+            // spell the same text also carry its formatting.
+            let string_value = cell.attribute((NS_OFFICE, "string-value"));
+            if let (Some(text), false) = (string_value, has_paragraphs) {
                 text_value(text.to_string(), None)
             } else if has_paragraphs {
                 let style = explicit.unwrap_or_else(|| {
@@ -1266,10 +1383,10 @@ fn cell_value(
                     .xfs
                     .xf_for(&ctx.store, &mut ctx.data, &ctx.faces, style)?;
                 let (text, runs) = rich_text(ctx, cell, xf, style)?;
-                if value_type.is_none() && text.is_empty() {
-                    CellValue::Empty
-                } else {
-                    text_value(text, runs)
+                match string_value {
+                    Some(value) if value != text => text_value(value.to_string(), None),
+                    _ if value_type.is_none() && text.is_empty() => CellValue::Empty,
+                    _ => text_value(text, runs),
                 }
             } else if value_type == Some("string") {
                 text_value(String::new(), None)

@@ -469,9 +469,11 @@ fn integer_digits(node: roxmltree::Node<'_, '_>, min: u32, grouping: bool) -> St
         })
         .collect();
     let widest = embedded.iter().map(|(p, _)| *p).max().unwrap_or(0);
+    // Text at position p needs a digit slot on its left to hold the higher
+    // digits (`#-#0` for a hyphen at position 2, as LibreOffice writes it).
     let count = (min as usize)
         .max(if grouping { 4 } else { 1 })
-        .max(widest as usize);
+        .max(if widest > 0 { widest as usize + 1 } else { 0 });
     // LibreOffice's `loext:max-blank-integer-digits`: that many of the
     // mandatory digits show a blank instead of a zero (SpreadsheetML `?`).
     let blank = node
@@ -520,8 +522,11 @@ fn integer_digits(node: roxmltree::Node<'_, '_>, min: u32, grouping: bool) -> St
 
 fn decimals(node: roxmltree::Node<'_, '_>) -> String {
     let places = attr_u32(node, "decimal-places").unwrap_or(0);
+    // §19.344 `number:decimal-replacement=""`: an integer shows no decimal
+    // places, which LibreOffice reads as optional decimals (`0.##`).
+    let optional = attr(node, "decimal-replacement") == Some("");
     let min = attr_u32(node, "min-decimal-places")
-        .unwrap_or(places)
+        .unwrap_or(if optional { 0 } else { places })
         .min(places);
     if places == 0 {
         return String::new();
@@ -590,12 +595,14 @@ fn section_code(style: roxmltree::Node<'_, '_>, kind: DataKind) -> (String, bool
                 let grouping = attr(child, "grouping") == Some("true");
                 let places = attr_u32(child, "decimal-places");
                 let min_int = attr_u32(child, "min-integer-digits").unwrap_or(0);
-                let has_embedded = child
-                    .children()
-                    .any(|n| xml::is(n, NS_NUMBER, "embedded-text"));
-                if places.is_none() && !grouping && !has_embedded && min_int <= 1 {
-                    // §19.343: without decimal-places the number has the
-                    // application's standard (General) precision.
+                if places.is_none() {
+                    // §19.343.2: without `number:decimal-places` the number
+                    // takes the default precision. LibreOffice shows such a
+                    // number in its standard format, whatever its grouping
+                    // and minimum integer digits (measured: `General` for
+                    // each of them): the General keyword, which the
+                    // formatter also reads beside literal text
+                    // (`"$"General`).
                     code.push_str("General");
                     general = children.len() == 1;
                 } else {
@@ -618,7 +625,17 @@ fn section_code(style: roxmltree::Node<'_, '_>, kind: DataKind) -> (String, bool
             "scientific-number" => {
                 let grouping = attr(child, "grouping") == Some("true");
                 let min_int = attr_u32(child, "min-integer-digits").unwrap_or(1);
-                code.push_str(&integer_digits(child, min_int, grouping));
+                // §19.351 `number:exponent-interval`: the exponent is a
+                // multiple of the interval, which SpreadsheetML expresses
+                // by that many integer digit slots (`##0.00E+0`).
+                let interval = attr_u32(child, "exponent-interval").unwrap_or(1);
+                if interval > min_int && !grouping {
+                    for slot in 0..interval {
+                        code.push(if slot < interval - min_int { '#' } else { '0' });
+                    }
+                } else {
+                    code.push_str(&integer_digits(child, min_int, grouping));
+                }
                 code.push_str(&decimals(child));
                 let sign = match attr(child, "forced-exponent-sign")
                     .or_else(|| child.attribute((NS_LOEXT, "forced-exponent-sign")))
@@ -632,25 +649,42 @@ fn section_code(style: roxmltree::Node<'_, '_>, kind: DataKind) -> (String, bool
                 code.push_str(&"0".repeat(exponent as usize));
             }
             "fraction" => {
+                // §19.352 / §19.353: the denominator has as many digit
+                // slots as the largest permitted denominator
+                // (`number:max-denominator-value`), of which the minimum
+                // digits are always shown. As LibreOffice writes it: `##?`
+                // for a maximum of 999 with one minimum digit; without a
+                // maximum the minimum digits are the slots.
+                let fixed = attr(child, "denominator-value").filter(|v| v.parse::<u64>().is_ok());
+                let min_digits = attr_u32(child, "min-denominator-digits").unwrap_or(0);
+                let slots = attr(child, "max-denominator-value")
+                    .or_else(|| child.attribute((NS_LOEXT, "max-denominator-value")))
+                    .and_then(|v| v.trim().parse::<u64>().ok())
+                    .filter(|max| *max > 0)
+                    .map_or(min_digits, |max| max.to_string().len() as u32)
+                    .min(30);
+                // LibreOffice shows a fraction that names no numerator
+                // digits, or no denominator at all, in its standard format
+                // (measured over the combinations of the four attributes).
+                let numerator = attr_u32(child, "min-numerator-digits");
+                let (Some(numerator), true) = (numerator, fixed.is_some() || slots > 0) else {
+                    code.push_str("General");
+                    general = children.len() == 1;
+                    continue;
+                };
                 if let Some(min_int) = attr_u32(child, "min-integer-digits") {
                     let grouping = attr(child, "grouping") == Some("true");
                     code.push_str(&integer_digits(child, min_int, grouping));
                     code.push(' ');
                 }
-                let numerator = attr_u32(child, "min-numerator-digits").unwrap_or(1).max(1);
-                code.push_str(&"?".repeat(numerator as usize));
+                code.push_str(&"?".repeat(numerator.max(1) as usize));
                 code.push('/');
-                match attr(child, "denominator-value") {
-                    Some(value) if value.parse::<u64>().is_ok() => code.push_str(value),
-                    _ => {
-                        let digits = attr_u32(child, "min-denominator-digits")
-                            .or_else(|| {
-                                attr_u32(child, "max-denominator-value")
-                                    .map(|v| v.to_string().len() as u32)
-                            })
-                            .unwrap_or(1)
-                            .max(1);
-                        code.push_str(&"?".repeat(digits as usize));
+                match fixed {
+                    Some(value) => code.push_str(value),
+                    None => {
+                        let shown = min_digits.min(slots);
+                        code.push_str(&"#".repeat((slots - shown) as usize));
+                        code.push_str(&"?".repeat(shown as usize));
                     }
                 }
             }
@@ -808,6 +842,39 @@ mod tests {
         let mut data = DataStyles::default();
         data.add(document.root_element()).unwrap();
         data
+    }
+
+    #[test]
+    fn numbers_without_places_fractions_and_engineering_follow_libreoffice() {
+        let mut data = codes(concat!(
+            // No decimal places: the standard format, whatever else is set.
+            r##"<number:number-style style:name="G"><number:number number:min-integer-digits="3" number:grouping="true"/></number:number-style>"##,
+            r##"<number:currency-style style:name="CG"><number:currency-symbol>$</number:currency-symbol><number:number number:min-integer-digits="1"/></number:currency-style>"##,
+            // `decimal-replacement=""`: optional decimals.
+            r##"<number:number-style style:name="R"><number:number number:decimal-places="2" number:min-integer-digits="1" number:decimal-replacement=""/></number:number-style>"##,
+            // Embedded text keeps a digit slot on its left.
+            r##"<number:number-style style:name="E"><number:number number:decimal-places="2" number:min-integer-digits="1"><number:embedded-text number:position="2">-</number:embedded-text></number:number></number:number-style>"##,
+            r##"<number:number-style style:name="X"><number:scientific-number number:decimal-places="2" number:min-decimal-places="0" number:min-integer-digits="1" number:min-exponent-digits="1" number:exponent-interval="3"/></number:number-style>"##,
+            r##"<number:number-style style:name="F1"><number:fraction number:min-integer-digits="0" number:min-numerator-digits="1" number:min-denominator-digits="1" number:max-denominator-value="999"/></number:number-style>"##,
+            r##"<number:number-style style:name="F2"><number:fraction number:min-numerator-digits="2" number:min-denominator-digits="3" number:max-denominator-value="9"/></number:number-style>"##,
+            r##"<number:number-style style:name="F3"><number:fraction number:min-integer-digits="1" number:min-numerator-digits="1" number:max-denominator-value="99"/></number:number-style>"##,
+            r##"<number:number-style style:name="F4"><number:fraction number:min-integer-digits="0" number:min-numerator-digits="1" number:denominator-value="16"/></number:number-style>"##,
+            r##"<number:number-style style:name="F5"><number:fraction number:min-integer-digits="0" number:min-numerator-digits="1"/></number:number-style>"##,
+            r##"<number:number-style style:name="F6"><number:fraction number:min-integer-digits="0" number:min-denominator-digits="2"/></number:number-style>"##,
+        ));
+        let mut code = |name: &str| data.code(name).unwrap().0.code;
+        assert_eq!(code("G"), "General");
+        assert_eq!(code("CG"), "$General");
+        assert_eq!(code("R"), "0.##");
+        assert_eq!(code("E"), "#-#0.00");
+        assert_eq!(code("X"), "##0.##E+0");
+        assert_eq!(code("F1"), "# ?/##?");
+        assert_eq!(code("F2"), "??/?");
+        assert_eq!(code("F3"), "0 ?/##");
+        assert_eq!(code("F4"), "# ?/16");
+        assert_eq!(code("F5"), "General");
+        assert_eq!(code("F6"), "General");
+        assert!(data.is_general("G") && data.is_general("F5"));
     }
 
     #[test]
