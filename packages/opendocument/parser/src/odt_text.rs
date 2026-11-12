@@ -739,8 +739,9 @@ impl<'a> Reader<'a> {
         {
             Some(style) => {
                 let cascade = Cascade::build(self.style_chain(style)?.to_vec(), TEXT)?;
-                // A percentage refers to the parent style's size (§20.190),
-                // at the end of the chain to the base text's.
+                // A percentage refers to the parent style's size (§20.190);
+                // past the style's own parents the search continues in the
+                // text the ruby annotates (§16.2), so to the base text's.
                 cascade
                     .get(NS_FO, "font-size")
                     .map(|_| match resolve_size(&cascade, "") {
@@ -1742,7 +1743,9 @@ fn resolve_size(cascade: &Cascade<'_>, suffix: &str) -> (f64, Option<f64>) {
                 return ((size * factor + add).max(0.5), None);
             }
         } else if let Some(value) = group.attributes.get(&rel_key) {
-            add += length_pt(value).unwrap_or(0.0);
+            // (§20.286: added to the parent's size, so the percentages of
+            // the nearer styles scale it too.)
+            add += length_pt(value).unwrap_or(0.0) * factor;
         }
     }
     if !suffix.is_empty() {
@@ -1751,10 +1754,9 @@ fn resolve_size(cascade: &Cascade<'_>, suffix: &str) -> (f64, Option<f64>) {
         return (western, relative);
     }
     // ODF defines no initial font size; LibreOffice's is 12 pt.
-    (
-        (12.0 * factor + add).max(0.5),
-        (factor != 1.0).then_some(factor),
-    )
+    // The factor is returned for a caller that knows what the size is
+    // relative to (a note mark, a ruby text).
+    ((12.0 * factor + add).max(0.5), Some(factor))
 }
 
 /// The font size of a paragraph's text properties, western class.

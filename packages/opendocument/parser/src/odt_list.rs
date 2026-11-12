@@ -981,7 +981,12 @@ impl<'a> Reader<'a> {
                 if list.label.is_none() && name == "text-indent" {
                     continue;
                 }
-                if let Ok(length) = length_pt(&setter.groups[PARAGRAPH].attributes[&key]) {
+                let raw = &setter.groups[PARAGRAPH].attributes[&key];
+                if raw.ends_with('%') {
+                    // A percentage of the parent style's value (§20.207,
+                    // §20.225).
+                    *value = relative_length(&chain[index..], PARAGRAPH, NS_FO, name, raw);
+                } else if let Ok(length) = length_pt(raw) {
                     *value = length;
                 }
             }
