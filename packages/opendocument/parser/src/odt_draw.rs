@@ -827,14 +827,13 @@ impl<'a> Reader<'a> {
         let grows = frame.attribute((NS_FO, "min-height")).is_some()
             || text_box.attribute((NS_FO, "min-height")).is_some()
             || graphic.get(NS_DRAW, "auto-grow-height") == Some("true");
-        let height = if height <= 0.0 {
-            text_box
-                .attribute((NS_FO, "min-height"))
-                .and_then(|v| length_pt(v).ok())
-                .unwrap_or(12.0)
-        } else {
-            height
-        };
+        // §19.240: the text box's `fo:min-height` replaces the frame's
+        // height.
+        let height = text_box
+            .attribute((NS_FO, "min-height"))
+            .and_then(|v| length_pt(v).ok())
+            .filter(|minimum| *minimum > 0.0)
+            .unwrap_or(if height <= 0.0 { 12.0 } else { height });
         let fill = self.fill(graphic, true)?;
         let mut shape = ShapeRun {
             inline: placement.inline,

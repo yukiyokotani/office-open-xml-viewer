@@ -742,7 +742,11 @@ impl<'a> Reader<'a> {
                 // A percentage refers to the parent style's size (§20.190);
                 // past the style's own parents the search continues in the
                 // text the ruby annotates (§16.2), so to the base text's.
-                Some(size_terms(&cascade, "")).filter(|terms| *terms != (None, 1.0, 0.0))
+                // (Only where the chain sets a size at all: an unstyled
+                // ruby text is LibreOffice's half size.)
+                (cascade.get(NS_FO, "font-size").is_some()
+                    || cascade.get(NS_STYLE, "font-size-rel").is_some())
+                .then(|| size_terms(&cascade, ""))
             }
             None => None,
         };
@@ -858,11 +862,15 @@ impl<'a> Reader<'a> {
             ..TextRun::default()
         };
         if let Some(style) = style.and_then(|name| self.find_common_style(Family::Text, name)) {
-            let mut chain = self.style_chain(style)?.to_vec();
-            if let Some(default) = self.sheet.default_style(Family::Paragraph) {
-                chain.push(default);
-            }
-            let inline = Inline::new(chain.into());
+            // The citation style's search continues in the note paragraph
+            // (§16.2), which is already built: what the style and its
+            // parents leave unset, size and face, is the paragraph's.
+            let chain = self.style_chain(style)?;
+            let sets_face = Cascade::build(chain.to_vec(), TEXT)?
+                .keys()
+                .iter()
+                .any(|(_, name)| name.starts_with("font-name") || name.starts_with("font-family"));
+            let inline = Inline::new(chain);
             let mut properties = self.run_properties(&inline.contexts, 0, ScriptClass::Latin)?;
             // A relative size (the citation style's 58% superscript) refers
             // to the note paragraph's own size.
@@ -871,7 +879,18 @@ impl<'a> Reader<'a> {
                     .size_relative
                     .map_or(properties.size, |f| f * size);
             }
-            base = properties.text_run();
+            let styled = properties.text_run();
+            base = if sets_face {
+                styled
+            } else {
+                TextRun {
+                    font_family: base.font_family,
+                    font_family_high_ansi: base.font_family_high_ansi,
+                    font_family_east_asia: base.font_family_east_asia,
+                    font_family_cs: base.font_family_cs,
+                    ..styled
+                }
+            };
         }
         // The mark run, and the custom label run when there is one, each own
         // a copy of the base properties.
