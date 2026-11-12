@@ -780,7 +780,8 @@ impl<'a> Reader<'a> {
         self.next_note += 1;
         let id = self.next_note.to_string();
         let width = self.text_width;
-        let mut content = match node.kids().find(|n| xml::is(*n, NS_TEXT, "note-body")) {
+        let body = node.kids().find(|n| xml::is(*n, NS_TEXT, "note-body"));
+        let mut content = match body {
             Some(body) => {
                 let saved_scope = self.scope;
                 let result = self.contained_story(body, width);
@@ -789,6 +790,16 @@ impl<'a> Reader<'a> {
             }
             None => Vec::new(),
         };
+        // The search order of the note's first paragraph (a story of its
+        // own: no cell or shape continues it), for the note's number.
+        let first_style = body
+            .and_then(|body| body.kids().find(|n| n.is_element()))
+            .filter(|first| xml::is(*first, NS_TEXT, "p") || xml::is(*first, NS_TEXT, "h"))
+            .and_then(|first| first.attribute((NS_TEXT, "style-name")));
+        let saved_container = std::mem::replace(&mut self.container, Rc::from(Vec::new()));
+        let paragraph_chain = self.paragraph_chain(first_style);
+        self.container = saved_container;
+        let paragraph_chain = paragraph_chain?.0;
         // The note's number before its first paragraph's text, formatted by
         // the configuration's citation style (§16.29.3
         // `text:citation-style-name`), followed by a tab to the hanging
@@ -798,7 +809,8 @@ impl<'a> Reader<'a> {
         let style = Some(style_name.to_string());
         if let Some(BodyElement::Paragraph(first)) = content.first_mut() {
             let mut runs = Vec::new();
-            let mark = self.note_mark_run(kind, style.as_deref(), first, label.as_deref())?;
+            let mark =
+                self.note_mark_run(kind, style.as_deref(), paragraph_chain, label.as_deref())?;
             runs.extend(mark);
             if first.indent_first < 0.0 {
                 let mut tab = match runs.last() {
@@ -850,48 +862,26 @@ impl<'a> Reader<'a> {
         &mut self,
         kind: &'static str,
         style: Option<&str>,
-        paragraph: &DocParagraph,
+        paragraph_chain: Vec<StyleRef<'a>>,
         label: Option<&str>,
     ) -> Result<Vec<DocRun>, String> {
-        let mut base = TextRun {
-            font_size: paragraph.default_font_size.unwrap_or(10.0),
-            font_family: paragraph.default_font_family.clone(),
-            font_family_high_ansi: paragraph.default_font_family.clone(),
-            font_family_east_asia: paragraph.default_font_family_east_asia.clone(),
-            font_family_cs: paragraph.default_font_family.clone(),
-            ..TextRun::default()
-        };
+        // The citation style's search continues in the note paragraph's
+        // styles (§16.2), like a span's.
+        let mut contexts = vec![TextContext {
+            styles: paragraph_chain.into(),
+            parent: None,
+            link: None,
+        }];
         if let Some(style) = style.and_then(|name| self.find_common_style(Family::Text, name)) {
-            // The citation style's search continues in the note paragraph
-            // (§16.2), which is already built: what the style and its
-            // parents leave unset, size and face, is the paragraph's.
-            let chain = self.style_chain(style)?;
-            let sets_face = Cascade::build(chain.to_vec(), TEXT)?
-                .keys()
-                .iter()
-                .any(|(_, name)| name.starts_with("font-name") || name.starts_with("font-family"));
-            let inline = Inline::new(chain);
-            let mut properties = self.run_properties(&inline.contexts, 0, ScriptClass::Latin)?;
-            // A relative size (the citation style's 58% superscript) refers
-            // to the note paragraph's own size.
-            if let Some(size) = paragraph.default_font_size {
-                properties.size = properties
-                    .size_relative
-                    .map_or(properties.size, |f| f * size);
-            }
-            let styled = properties.text_run();
-            base = if sets_face {
-                styled
-            } else {
-                TextRun {
-                    font_family: base.font_family,
-                    font_family_high_ansi: base.font_family_high_ansi,
-                    font_family_east_asia: base.font_family_east_asia,
-                    font_family_cs: base.font_family_cs,
-                    ..styled
-                }
-            };
+            contexts.push(TextContext {
+                styles: self.style_chain(style)?,
+                parent: Some(0),
+                link: None,
+            });
         }
+        let base = self
+            .run_properties(&contexts, (contexts.len() - 1) as u32, ScriptClass::Latin)?
+            .text_run();
         // The mark run, and the custom label run when there is one, each own
         // a copy of the base properties.
         let mut runs = Vec::new();
@@ -1493,7 +1483,10 @@ impl RunProperties {
         let italic = matches!(scripted("font-style"), Some("italic" | "oblique"));
         let (underline, underline_color) = underline(cascade);
         let strike = match cascade.get(NS_STYLE, "text-line-through-style") {
-            None | Some("none") => {
+            // §20.374: a line-through text has no effect under an explicit
+            // `none` style.
+            Some("none") => None,
+            None => {
                 // A line-through text (§20.367) also strikes the characters.
                 if cascade
                     .get(NS_STYLE, "text-line-through-text")

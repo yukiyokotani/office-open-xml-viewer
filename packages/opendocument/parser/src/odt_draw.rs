@@ -534,7 +534,17 @@ impl<'a> Reader<'a> {
     /// replacement picture.
     fn frame(&mut self, node: roxmltree::Node<'a, 'a>) -> Result<Option<DocRun>, String> {
         let graphic = self.graphic(node)?;
-        let (width, height) = self.frame_size(node, &graphic);
+        let (width, mut height) = self.frame_size(node, &graphic);
+        let text_box = node.kids().find(|n| xml::is(*n, NS_DRAW, "text-box"));
+        // §19.240: a text box's `fo:min-height` replaces the frame's height
+        // (before the frame is positioned by its transform).
+        if let Some(minimum) = text_box
+            .and_then(|text_box| text_box.attribute((NS_FO, "min-height")))
+            .and_then(|v| length_pt(v).ok())
+            .filter(|minimum| *minimum > 0.0)
+        {
+            height = minimum;
+        }
         let mut placement = self.placement(node, &graphic, (0.0, 0.0))?;
         // `draw:transform` (§19.228) positions the frame like a shape: the
         // transformed box's corner replaces the offsets of `svg:x` and
@@ -558,7 +568,7 @@ impl<'a> Reader<'a> {
                 *value_pt = y;
             }
         }
-        if let Some(text_box) = node.kids().find(|n| xml::is(*n, NS_DRAW, "text-box")) {
+        if let Some(text_box) = text_box {
             return self.text_box(node, text_box, &graphic, placement, width, height, rotation);
         }
         // A formula object (MathML) draws as math: in the line when the
@@ -827,13 +837,7 @@ impl<'a> Reader<'a> {
         let grows = frame.attribute((NS_FO, "min-height")).is_some()
             || text_box.attribute((NS_FO, "min-height")).is_some()
             || graphic.get(NS_DRAW, "auto-grow-height") == Some("true");
-        // §19.240: the text box's `fo:min-height` replaces the frame's
-        // height.
-        let height = text_box
-            .attribute((NS_FO, "min-height"))
-            .and_then(|v| length_pt(v).ok())
-            .filter(|minimum| *minimum > 0.0)
-            .unwrap_or(if height <= 0.0 { 12.0 } else { height });
+        let height = if height <= 0.0 { 12.0 } else { height };
         let fill = self.fill(graphic, true)?;
         let mut shape = ShapeRun {
             inline: placement.inline,

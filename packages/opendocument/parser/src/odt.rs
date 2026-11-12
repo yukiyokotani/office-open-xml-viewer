@@ -834,7 +834,11 @@ impl<'a> Reader<'a> {
 
         self.inline(node, 0, &mut inline, 0)?;
         self.emit_runs(&mut inline, &mut collected.paragraph)?;
-        let drop_cap = self.drop_cap(&properties, &mut collected.paragraph)?;
+        let drop_cap = self.drop_cap(
+            &properties,
+            inline.contexts[0].styles.clone(),
+            &mut collected.paragraph,
+        )?;
         if let Some(label) = list.and_then(|list| list.label) {
             self.list_label(label, &mut inline.contexts, &mut collected.paragraph)?;
         }
@@ -893,6 +897,7 @@ impl<'a> Reader<'a> {
     fn drop_cap(
         &mut self,
         properties: &Cascade<'a>,
+        paragraph_chain: Rc<[StyleRef<'a>]>,
         paragraph: &mut DocParagraph,
     ) -> Result<Option<DocParagraph>, String> {
         let Some(cap) = properties.element("drop-cap").and_then(|e| e.first()) else {
@@ -977,15 +982,23 @@ impl<'a> Reader<'a> {
             .and_then(|name| self.find_style(Family::Text, name))
             .map(|style| self.style_chain(style))
             .transpose()?;
-        // The cap style's properties, resolved once for every cap run.
+        // The cap style's properties over the paragraph's (§16.2), resolved
+        // once for every cap run.
         let styled = match styled {
             Some(chain) => {
-                let contexts = vec![TextContext {
-                    styles: chain,
-                    parent: None,
-                    link: None,
-                }];
-                Some(self.run_properties(&contexts, 0, ScriptClass::Latin)?)
+                let contexts = vec![
+                    TextContext {
+                        styles: paragraph_chain,
+                        parent: None,
+                        link: None,
+                    },
+                    TextContext {
+                        styles: chain,
+                        parent: Some(0),
+                        link: None,
+                    },
+                ];
+                Some(self.run_properties(&contexts, 1, ScriptClass::Latin)?)
             }
             None => None,
         };
