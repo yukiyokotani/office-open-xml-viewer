@@ -18,9 +18,15 @@ impl OdpPresentation {
     /// Limits are the caller's normalized ZIP policy in the shared
     /// governor's encoding (`undefined`: the standard limit; `0`: removed,
     /// hard ceilings still apply).
+    ///
+    /// `data` is taken by value, as the OOXML archives take it: wasm-bindgen
+    /// copies the JS `Uint8Array` once into a WASM-owned buffer and hands
+    /// that allocation to Rust, and the package takes it over. The reader
+    /// makes no copy of the input of its own; what it inflates from it is
+    /// bounded by the package limits, and what it builds by the deck budget.
     #[wasm_bindgen(constructor)]
     pub fn new(
-        data: js_sys::Uint8Array,
+        data: Vec<u8>,
         max_archive_entry_bytes: Option<f64>,
         max_total_inflated_bytes: Option<f64>,
         max_archive_entries: Option<f64>,
@@ -31,7 +37,7 @@ impl OdpPresentation {
             max_total_inflated_bytes: limit(max_total_inflated_bytes)?,
             max_archive_entries: limit(max_archive_entries)?,
         };
-        let package = OdfPackage::open(data.to_vec(), OoxmlFormat::Pptx, limits, &odp::MEDIA_TYPES)
+        let package = OdfPackage::open(data, OoxmlFormat::Pptx, limits, &odp::MEDIA_TYPES)
             .map_err(|e| JsValue::from_str(&e))?;
         let deck = odp::read(&package).map_err(|e| JsValue::from_str(&e))?;
         Ok(Self {
