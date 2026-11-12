@@ -66,9 +66,21 @@ interface ProbeCanvas {
   getContext(type: '2d', options?: CanvasRenderingContext2DSettings): unknown;
 }
 
-/** A scratch canvas in the realm (and so the FontFaceSet) of `owner`. */
-function scratchCanvas(owner: unknown): ProbeCanvas | null {
+/** Allocates a canvas of the backend that measures and paints the text. */
+export type SymbolProbeCanvasFactory = (width: number, height: number) => ProbeCanvas | null | undefined;
+
+/**
+ * A scratch canvas of the backend (and so the fonts) that paints for `owner`.
+ * `factory` is the owner's own canvas factory: the caller that created the
+ * measuring/painting canvas allocates the probe's the same way (a Node
+ * session through its canvas factory). Only without one is the backend
+ * inferred: the owner canvas's document, then the realm's global helpers
+ * (OffscreenCanvas, `document`, the owner's class), which in a realm with
+ * several canvas backends need not be the one that paints.
+ */
+function scratchCanvas(owner: unknown, factory?: SymbolProbeCanvasFactory): ProbeCanvas | null {
   try {
+    if (factory) return factory(48, 48) ?? null;
     const element = (owner as { canvas?: { ownerDocument?: Document } } | null)?.canvas;
     const doc = element?.ownerDocument;
     if (doc && typeof doc.createElement === 'function') {
@@ -77,9 +89,6 @@ function scratchCanvas(owner: unknown): ProbeCanvas | null {
       canvas.height = 48;
       return canvas;
     }
-    // A detached canvas: an OffscreenCanvas, else (a Node canvas
-    // implementation such as @napi-rs/canvas or skia-canvas) another canvas
-    // of the owner's own class.
     return createAuxCanvasForContext(owner as CanvasRenderingContext2D, 48, 48);
   } catch { /* no scratch canvas */ }
   return null;
@@ -97,6 +106,7 @@ function scratchCanvas(owner: unknown): ProbeCanvas | null {
 export function createSymbolMonochromeProbe(
   owner: unknown,
   defaultFont = '32px sans-serif',
+  factory?: SymbolProbeCanvasFactory,
 ): (text: string, font?: string) => boolean | undefined {
   let ctx: CanvasRenderingContext2D | null | undefined;
   let created = false;
@@ -107,7 +117,7 @@ export function createSymbolMonochromeProbe(
     if (!created) {
       created = true;
       try {
-        ctx = scratchCanvas(owner)?.getContext('2d', { willReadFrequently: true }) as CanvasRenderingContext2D | null | undefined;
+        ctx = scratchCanvas(owner, factory)?.getContext('2d', { willReadFrequently: true }) as CanvasRenderingContext2D | null | undefined;
       } catch { ctx = null; }
     }
     let monochrome: boolean | undefined;
@@ -161,6 +171,10 @@ export interface SymbolFaceOracleOptions {
    * fonts are judged, and colour probes draw on a scratch canvas of it.
    * Defaults to `context`. */
   readonly probeOwner?: unknown;
+  /** The canvas factory of the backend that measures and paints: colour
+   * probes draw on a canvas it allocates. Absent: inferred from the owner
+   * (see {@link SymbolProbeCanvasFactory}). */
+  readonly createCanvas?: SymbolProbeCanvasFactory;
 }
 
 /** The CSS font converted text paints with, at a probe size, for one
@@ -202,7 +216,7 @@ export function createSymbolFaceOracle(
   options: SymbolFaceOracleOptions = {},
 ): SymbolFaceOracle {
   const probeOwner = options.probeOwner ?? context;
-  const monochrome = createSymbolMonochromeProbe(probeOwner);
+  const monochrome = createSymbolMonochromeProbe(probeOwner, undefined, options.createCanvas);
   const verdicts = new Map<string, boolean>();
   let font = '';
   const measure = (probeFont: string, text: string): number[] => {

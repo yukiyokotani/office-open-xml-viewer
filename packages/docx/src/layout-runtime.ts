@@ -105,6 +105,10 @@ export function createLayoutServices(
     readonly mathResources?: readonly MathLayoutResource[];
     readonly mathDrawables?: ReadonlyMap<string, CanvasImageSource>;
     readonly measureContext?: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D | null;
+    /** The factory that made {@link measureContext}'s canvas, when the caller
+     * owns one (a Node session): symbol colour probes allocate their scratch
+     * canvas through it, on the backend that measures and paints. */
+    readonly createCanvas?: import('@silurus/ooxml-core').SymbolProbeCanvasFactory;
     readonly embeddedRoutes?: readonly LoadedEmbeddedFontRoute[];
     readonly officeRoutes?: readonly OfficeFontFallbackRoute[];
     readonly sourceFonts?: Readonly<{ names: readonly string[]; loaded: LoadedFontSources }>;
@@ -217,6 +221,7 @@ export function createLayoutServices(
     fontMetrics: inputFontMetrics,
     measureContext: context,
     symbolProbeOwner: canvasContext,
+    ...(options.createCanvas ? { symbolProbeCanvas: options.createCanvas } : {}),
     // A caller canvas may belong to a popup/iframe. CSS face admission must
     // inspect the FontFaceSet that also shapes this context's glyphs.
     fontSet: (isHTMLCanvas(canvasElement) ? canvasElement.ownerDocument?.fonts : undefined)

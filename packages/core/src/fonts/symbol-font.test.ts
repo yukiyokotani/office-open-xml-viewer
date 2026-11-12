@@ -160,6 +160,27 @@ describe('createSymbolMonochromeProbe', () => {
     expect(created).toBe(2);
   });
 
+  it('allocates through the canvas factory of the owner, not the global helpers of the realm', () => {
+    // The owner canvas's class and document paint in colour; the factory's
+    // backend, the one that paints, follows the fill.
+    const Other = inkCanvas(() => [200, 30, 30, 255]);
+    const Painting = inkCanvas(filled);
+    const sizes: number[][] = [];
+    const factory = (width: number, height: number) => { sizes.push([width, height]); return new Painting(width, height); };
+    const owner = { canvas: Object.assign(new Other(1, 1), { ownerDocument: { createElement: () => new Other(1, 1) } }) };
+    expect(createSymbolMonochromeProbe(owner, '32px sans-serif', factory)('\u2665\uFE0E')).toBe(true);
+    expect(createSymbolMonochromeProbe(owner, '32px sans-serif')('\u2665\uFE0E')).toBe(false);
+    expect(sizes).toEqual([[48, 48]]);
+    // Through the oracle too; a factory that yields nothing leaves it inconclusive.
+    const measureText = (text: string) => ({ width: text === 'i' ? 3 : 7 });
+    const judged = (createCanvas: Parameters<typeof createSymbolFaceOracle>[1]) =>
+      createSymbolFaceOracle(Object.assign({ font: '', measureText }, owner), createCanvas)
+        .segments('\uF0A9', 'Symbol', '400 32px "Absent"').map((part) => part.mapped);
+    expect(judged({ createCanvas: factory })).toEqual([true]);
+    expect(judged({})).toEqual([false]);
+    expect(judged({ createCanvas: () => null })).toEqual([false]);
+  });
+
   it.each([
     ['a fixed black palette', () => [0, 0, 0, 255]],
     ['its own colours', () => [200, 30, 30, 255]],

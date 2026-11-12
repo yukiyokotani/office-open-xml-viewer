@@ -231,6 +231,7 @@ export {
   createSymbolMonochromeProbe,
   type SymbolFaceOracle,
   type SymbolFaceOracleOptions,
+  type SymbolProbeCanvasFactory,
   type SymbolFallbackFont,
   type SymbolProbeContext,
 } from './fonts/symbol-face';

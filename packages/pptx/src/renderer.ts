@@ -8235,6 +8235,10 @@ export type SlideRenderOptions = RenderOptions & {
  * render options. They are an implementation detail of embedded-font lifetime
  * isolation, not a caller-configurable rendering policy. */
 type InternalSlideRenderOptions = SlideRenderOptions & {
+  /** The factory that made the render canvas, when the caller owns one (a
+   * Node session): symbol colour probes allocate their scratch canvas
+   * through it, on the backend that paints (core symbol-face.ts). */
+  createCanvas?: import('@silurus/ooxml-core').SymbolProbeCanvasFactory;
   cjkFallback?: CjkLang;
   officeFontRoutes?: Readonly<Record<string, import('@silurus/ooxml-core').OfficeFontFallbackRoute>>;
   /** Normalized authored families with any installed face (presence probes). */
@@ -8609,6 +8613,7 @@ async function renderSlideLeased(
     // (core symbol-face.ts).
     symbolFaces: createSymbolFaceOracle(
       canvas.getContext('2d') as CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D | null,
+      opts.createCanvas ? { createCanvas: opts.createCanvas } : {},
     ),
     // The backing store may have been clamped below `canvasSize × dpr`; downstream
     // crisp-offset math must use the SAME effective dpr the ctx was scaled by.

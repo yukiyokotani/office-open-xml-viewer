@@ -70,6 +70,9 @@ export interface ProductionLayoutServiceOptions {
   /** The 2D context behind {@link measureContext}: symbol-face colour probes
    * draw on a scratch canvas of its realm (core symbol-face.ts). */
   readonly symbolProbeOwner?: unknown;
+  /** The canvas factory of the measuring/painting backend, for those
+   * probes (a Node session's canvas factory). */
+  readonly symbolProbeCanvas?: import('@silurus/ooxml-core').SymbolProbeCanvasFactory;
   /** FontFaceSet of the measuring canvas, including foreign DOM realms. */
   readonly fontSet?: FontFaceSet | null;
   readonly verticalGlyphMeasurement: VerticalGlyphMeasurementService;
@@ -465,7 +468,10 @@ export function createProductionTextLayoutService(
       // Symbol-encoded text (core symbol-font.ts) is judged by the core oracle
       // in this very measuring context, with the Canvas font each resolution
       // paints with (its complete family list, weight and style).
-      const oracle = createSymbolFaceOracle(context, { probeOwner: options.symbolProbeOwner });
+      const oracle = createSymbolFaceOracle(context, {
+        probeOwner: options.symbolProbeOwner,
+        ...(options.symbolProbeCanvas ? { createCanvas: options.symbolProbeCanvas } : {}),
+      });
       const fontOf = (resolution: import('./font-service.js').FontResolution) =>
         canvasFontString(resolution.route, 32, resolution.weight, resolution.style);
       return {
