@@ -943,6 +943,9 @@ impl Reader<'_> {
             ("bubble", false) | (_, true) => Some(0),
             (_, false) => None,
         };
+        // A series without a domain takes it from the series before it
+        // (§11.13), whichever axis that one is drawn against.
+        let mut inherited = None;
         for series in plot.children() {
             budget::tick(1)?;
             if !xml::is(series, NS_CHART, "series") {
@@ -952,20 +955,20 @@ impl Reader<'_> {
                 || series
                     .attribute((NS_CHART, "attached-axis"))
                     .is_none_or(|attached| attached == name);
-            if !attached {
-                continue;
-            }
             let Some(index) = domain else {
-                return Ok(series.attribute((NS_CHART, "values-cell-range-address")));
+                if attached {
+                    return Ok(series.attribute((NS_CHART, "values-cell-range-address")));
+                }
+                continue;
             };
-            let mut domains = series
+            let own = series
                 .children()
                 .filter(|n| xml::is(*n, NS_CHART, "domain"))
-                .filter_map(|d| d.attribute((NS_TABLE, "cell-range-address")));
-            // Later series may leave their domains to the first that has
-            // them, so a series without this one does not decide.
-            if let Some(address) = domains.nth(index) {
-                return Ok(Some(address));
+                .filter_map(|d| d.attribute((NS_TABLE, "cell-range-address")))
+                .nth(index);
+            inherited = own.or(inherited);
+            if attached && inherited.is_some() {
+                return Ok(inherited);
             }
         }
         Ok(None)
@@ -2106,6 +2109,28 @@ mod tests {
         // as domains, and its values are the sizes.
         assert_eq!(axes("scatter"), ("S.A1:S.A2".into(), "S.C1:S.C2".into()));
         assert_eq!(axes("bubble"), ("S.B1:S.B2".into(), "S.A1:S.A2".into()));
+        // A series drawn against the secondary axis without domains of its
+        // own plots the domains of the series before it.
+        let two = concat!(
+            r##"<chart:chart chart:class="chart:bubble"><chart:plot-area>"##,
+            r##"<chart:axis chart:dimension="y" chart:name="primary-y"/>"##,
+            r##"<chart:axis chart:dimension="y" chart:name="secondary-y" chart:style-name="linked"/>"##,
+            r##"<chart:series chart:attached-axis="primary-y" chart:values-cell-range-address="S.C1:S.C2">"##,
+            r##"<chart:domain table:cell-range-address="S.A1:S.A2"/><chart:domain table:cell-range-address="S.B1:S.B2"/>"##,
+            r##"</chart:series>"##,
+            r##"<chart:series chart:attached-axis="secondary-y" chart:values-cell-range-address="S.D1:S.D2"/>"##,
+            r##"</chart:plot-area></chart:chart>"##
+        );
+        let model = read_chart_document(&chart(two, styles), None, Some(&Named))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            model
+                .secondary_val_axis
+                .and_then(|axis| axis.format_code)
+                .as_deref(),
+            Some("S.A1:S.A2")
+        );
     }
 
     #[test]

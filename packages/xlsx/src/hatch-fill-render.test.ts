@@ -40,6 +40,8 @@ function paint(fill: ShapeFill, size = 100, images?: Map<string, CanvasImageSour
   const patterns: { repetition: string; transform?: DOMMatrix2DInit }[] = [];
   /** Rectangles filled with a pattern: its offset then, and the rectangle. */
   const bands: { e?: number; f?: number; rect: number[] }[] = [];
+  /** The opacity of each fill with a pattern. */
+  const alphas: number[] = [];
   let lines = 0;
   const stack: Matrix[] = [];
   let current = matrix(1, 0, 0, 1, 0, 0);
@@ -47,6 +49,14 @@ function paint(fill: ShapeFill, size = 100, images?: Map<string, CanvasImageSour
   const ctx = new Proxy(state, {
     get(target, prop) {
       if (prop === 'canvas') return { width: 400, height: 300 };
+      if (prop === 'globalAlpha') return target.globalAlpha;
+      if (prop === 'fill') {
+        return () => {
+          const style = target.fillStyle;
+          if (style && typeof style === 'object' && 'repetition' in style) alphas.push(Number(target.globalAlpha));
+          calls.push('fill');
+        };
+      }
       if (prop === 'measureText') return () => ({ width: 7 });
       if (prop === 'getTransform') return () => current;
       if (prop === 'save') return () => { stack.push(current); };
@@ -106,7 +116,7 @@ function paint(fill: ShapeFill, size = 100, images?: Map<string, CanvasImageSour
   } as unknown as Worksheet;
   renderViewport(ctx, ws, { fonts: [], fills: [], borders: [], cellXfs: [] } as unknown as Styles,
     { row: 1, col: 1, rows: 10, cols: 10 }, images ? { loadedImages: images } : {});
-  return { calls, lines, rotations, patterns, bands };
+  return { calls, lines, rotations, patterns, bands, alphas };
 }
 
 const hatch = (distancePt: number, lines = 1, angle = 0): ShapeHatchFill => ({
@@ -168,6 +178,12 @@ describe('OpenDocument picture fills', () => {
     expect(paint(picture('stretch'), 100, images).patterns).toEqual([
       { repetition: 'no-repeat', setTransform: expect.any(Function), transform: { a: 5, b: 0, c: 0, d: 10, e: 0, f: 0 } },
     ]);
+  });
+
+  it('paints a translucent picture at its opacity, in presets too', () => {
+    expect(paint(picture('stretch'), 100, images).alphas).toEqual([1]);
+    expect(paint(picture('stretch', [0.5, 0.5], { alpha: 0.5 }), 100, images).alphas).toEqual([0.5]);
+    expect(paint(picture('stretch', [0.5, 0.5], { alpha: 0.5 }), 100, images, 'ellipse').alphas).toEqual([0.5]);
   });
 
   it('draws a single picture once at its own size, where it is aligned', () => {

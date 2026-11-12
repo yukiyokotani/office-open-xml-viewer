@@ -4796,9 +4796,11 @@ function drawShape(
       // xlsx shapes carry no drop shadow on the body, so there's nothing to
       // clear between the engine's fill and stroke passes.
       () => {},
-      // Hatches and staggered picture tiles are painted, not set as a fill
-      // style: the preset engine hands its path to the same painter.
-      shape.fill?.fillType === 'hatch' || (shape.fill?.fillType === 'image' && shape.fill.shift)
+      // Hatches, staggered picture tiles and translucent pictures are
+      // painted, not set as a fill style: the preset engine hands its path
+      // to the same painter.
+      shape.fill?.fillType === 'hatch'
+        || (shape.fill?.fillType === 'image' && (shape.fill.shift || shape.fill.alpha !== undefined))
         ? { paintFill: target => fillShape(target, shape, sw, sh, cs, baseFill) }
         : undefined,
     );
