@@ -37,6 +37,7 @@
  * Otherwise (a FontFaceSet without working sentinels, a context that does
  * not measure) nothing is judged and the 0.89 subset converts.
  */
+import { createAuxCanvasForContext } from '../canvas/aux-canvas.js';
 import { quoteCssFontFamily } from '../internal/css-font-family.js';
 import { SENTINEL_FAMILIES, parseFamilyList, sentinelsWork } from './route-sentinels.js';
 import { symbolTextToUnicodeSegments, type SymbolTextSegment } from './symbol-font.js';
@@ -76,16 +77,10 @@ function scratchCanvas(owner: unknown): ProbeCanvas | null {
       canvas.height = 48;
       return canvas;
     }
-    // A detached canvas (OffscreenCanvas, or a Node canvas implementation such
-    // as @napi-rs/canvas or skia-canvas): another canvas of its own class.
-    const Ctor = (element as { constructor?: unknown } | undefined)?.constructor;
-    if (typeof Ctor === 'function' && Ctor !== Object) {
-      try {
-        const canvas = new (Ctor as new (width: number, height: number) => ProbeCanvas)(48, 48);
-        if (typeof canvas.getContext === 'function') return canvas;
-      } catch { /* not constructible this way */ }
-    }
-    if (typeof OffscreenCanvas !== 'undefined') return new OffscreenCanvas(48, 48);
+    // A detached canvas: an OffscreenCanvas, else (a Node canvas
+    // implementation such as @napi-rs/canvas or skia-canvas) another canvas
+    // of the owner's own class.
+    return createAuxCanvasForContext(owner as CanvasRenderingContext2D, 48, 48);
   } catch { /* no scratch canvas */ }
   return null;
 }
