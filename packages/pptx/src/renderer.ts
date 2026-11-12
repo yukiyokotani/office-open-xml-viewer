@@ -1492,14 +1492,14 @@ function selectOfficeFace(normalized: string, bold: boolean, italic: boolean, rc
 
 /**
  * Symbol-encoded text (core symbol-font.ts; ECMA-376 §21.1.2.3.10 `a:sym`,
- * §21.1.2.3.7 `a:latin`, §21.1.2.4.3 `a:buFont`) as the face this render
- * selects for `family` (normalized) draws it: the face that leads its stack
- * (the presentation's embedded face, an exact Office route, else the authored
- * family), then a loaded substitute: held cmaps answer where the library
- * holds the bytes, otherwise the faces are measured in this render's
- * painting context. `bare`: whether bare
- * codes 0x20..0xFF are symbol codes here (a Latin symbol face); they are
- * left alone when the face could not be judged, as in 0.89.
+ * §21.1.2.3.7 `a:latin`, §21.1.2.4.3 `a:buFont`) as this render paints it
+ * when kept: `keptFont` is the Canvas font the kept text is drawn with, so
+ * the oracle walks the very stack font matching paints (the selected face, a
+ * loaded substitute, the fallback tail), from held cmaps where the library
+ * holds the bytes and by measurement in this render's painting context
+ * otherwise. `bare`: whether bare codes 0x20..0xFF are symbol codes here (a
+ * Latin symbol face); they are left alone when the face could not be
+ * judged, as in 0.89.
  */
 function symbolFaceSegments(
   text: string,
@@ -1507,19 +1507,12 @@ function symbolFaceSegments(
   bold: boolean,
   italic: boolean,
   rc: RenderContext,
+  keptFont: string,
   bare = false,
 ): SymbolTextSegment[] {
-  const { authoredFamily, officeRoute } = selectOfficeFace(family, bold, italic, rc);
+  const { authoredFamily } = selectOfficeFace(family, bold, italic, rc);
   if (!rc.symbolFaces) return bare ? [{ text, mapped: false }] : symbolTextToUnicodeSegments(text, authoredFamily);
-  // The faces that paint the code are those the run's stack names before its
-  // generic tail (cssFontStack): the selected face, then a loaded substitute
-  // of the authored family; the oracle decides which of them wins each code.
-  const primary = officeRoute?.family ?? family;
-  const substitute = loadedSubstitute(authoredFamily, text, rc.fontSubstitutions);
-  const families = substitute ? [primary, substitute] : [primary];
-  const weight = bold ? 700 : 400;
-  const style = italic ? 'italic' as const : 'normal' as const;
-  const selection = { families, weight, style };
+  const selection = { font: keptFont };
   if (bare && rc.symbolFaces.encoding(selection).kind === 'unknown') return [{ text, mapped: false }];
   // Converted text paints in the generic sans-serif stack (paragraphInputRuns,
   // paragraphBullet); its colour proof is made in that stack.
@@ -2024,7 +2017,10 @@ export function paragraphInputRuns(
       const symbolFamily = puaCode ? familySym ?? (latinSymbol ? family : null)
         : latinSymbol && cp > 0x20 && cp <= 0xff ? family : null;
       if (symbolFamily) {
-        const segments = symbolFaceSegments(ch, symbolFamily, bold, italic, rc, !puaCode);
+        // Kept, a PUA code paints in the symbol family's own stack and a bare
+        // code in the run's.
+        const keptFont = puaCode ? buildFont(bold, italic, drawSizePx, symbolFamily, rc, ch) : font;
+        const segments = symbolFaceSegments(ch, symbolFamily, bold, italic, rc, keptFont, !puaCode);
         const converted = segments.some((part) => part.mapped);
         if (converted || puaCode) {
           glyph = segments.map((part) => part.text).join('') + cluster.slice(ch.length);
@@ -4866,7 +4862,8 @@ function paragraphBullet(body: TextBody, para: Paragraph, paraDefaultColor: stri
     // cmap would re-read the converted character as its own code.
     const markerFamily = normalizeFontFamily(b.fontFamily ?? null, rc);
     const segments = bulletLabel && isSymbolFontFamily(authoredFamilyOf(markerFamily, rc))
-      ? symbolFaceSegments(bulletLabel, markerFamily, false, false, rc) : null;
+      ? symbolFaceSegments(bulletLabel, markerFamily, false, false, rc,
+        buildFont(false, false, bSizePx, markerFamily, rc, bulletLabel, hasNamedFontFamily(b.fontFamily))) : null;
     if (segments) bulletLabel = segments.map((part) => part.text).join('');
     const convertedFamily = segments?.some((part) => part.mapped) ? 'sans-serif' : markerFamily;
     bulletSizePx = bSizePx;

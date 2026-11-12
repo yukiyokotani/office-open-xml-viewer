@@ -155,6 +155,21 @@ describe('production layout service integration', () => {
     expect(text.map((segment) => segment.text).join('')).toBe('\uF0B7\uF0A7');
   });
 
+  it('judges symbol text against the complete route it paints with, named fallbacks included', () => {
+    // An embedded Symbol (listed in the font table) resolves to its private
+    // alias, whose route continues with the authored "Symbol": a code the
+    // alias lacks paints in the installed, symbol-encoded host Symbol, so it
+    // is kept.
+    const services = createLayoutServices(model({ fontFamilyClasses: { Symbol: 'roman' } }), {
+      measureContext: symbolHostContext(true),
+      embeddedRoutes: [{ requestedFamily: 'Symbol', resolvedFamily: 'Embedded Symbol Alias 2177',
+        weight: 400, style: 'normal', resourceIdentity: 'embedded-symbol-2177' }],
+    });
+    const text = buildSegments([textRun('\uF062', symbol)], { pageIndex: 0, totalPages: 1, layoutServices: services })
+      .filter((segment) => 'text' in segment) as { text: string }[];
+    expect(text.map((segment) => segment.text).join('')).toBe('\uF062');
+  });
+
   it('keeps the codes a symbol-encoded host face draws in that face', () => {
     const text = symbolText(true, [textRun('a\uF062', symbol)]);
     expect(text.map((segment) => segment.text).join('')).toBe('a\uF062');

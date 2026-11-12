@@ -462,18 +462,17 @@ export function createProductionTextLayoutService(
     fontMetrics,
     eastAsiaFontCharsets: fontFamilyCharsets,
     ...(() => {
-      // Symbol-encoded text (core symbol-font.ts) is judged against the face
-      // each resolution selects, by the core oracle: the cmaps of the bytes
-      // its registered faces were made from when the library holds them,
-      // else a measurement of that face in this very measuring context.
+      // Symbol-encoded text (core symbol-font.ts) is judged by the core oracle
+      // against the route each resolution paints with (its complete family
+      // list, weight and style): the cmaps of the bytes its registered faces
+      // were made from when the library holds them, else a measurement of
+      // that route in this very measuring context.
       const oracle = createSymbolFaceOracle(context, { probeOwner: options.symbolProbeOwner });
       return {
         symbolText: (text: string, family: string, resolution: import('./font-service.js').FontResolution,
           convertedRoute: (converted: string) => import('./font-service.js').FontResolution) =>
           oracle.segments(text, family, {
-            families: [resolution.resolvedFamily],
-            weight: resolution.weight,
-            style: resolution.style,
+            font: canvasFontString(resolution.route, 32, resolution.weight, resolution.style),
           }, (converted) => {
             // The colour proof is for the route the converted text paints with.
             const route = convertedRoute(converted);

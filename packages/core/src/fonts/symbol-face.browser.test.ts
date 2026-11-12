@@ -85,7 +85,7 @@ describe.skipIf(!existsSync(chromium.executablePath()))('symbol face measurement
       const api = (globalThis as unknown as { symbolFaceTest: Api }).symbolFaceTest;
       const ctx = document.querySelector('canvas')!.getContext('2d')!;
       const oracle = api.createSymbolFaceOracle(ctx);
-      const sel = (family: string) => ({ families: [family], weight: 400, style: 'normal' as const });
+      const sel = (family: string) => ({ font: `400 32px "${family}"` });
       const mono = api.createSymbolMonochromeProbe(ctx, '32px sans-serif');
       return {
         installed: oracle.segments('\uF061a', 'Symbol', sel('Fixture Symbol Face')),
