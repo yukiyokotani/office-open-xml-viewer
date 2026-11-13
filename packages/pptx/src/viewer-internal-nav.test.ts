@@ -34,16 +34,22 @@ async function mountLoaded(opts: Record<string, unknown> = {}) {
   return { v, engine, dispatch };
 }
 
+/** The viewer's navigation entry shared by goToSlide() and link clicks. */
+function spyNavigation(v: PptxViewer) {
+  return vi.spyOn(v as unknown as { _goToSlide(index: number, generation: number, backward?: boolean): Promise<void> }, '_goToSlide');
+}
+
 describe('PptxViewer — internal-hyperlink click default (IX-nav)', () => {
   it('resolves an internal ref via the engine and navigates to that slide', async () => {
     const { v, engine, dispatch } = await mountLoaded();
     engine.internalTargets.set('../slides/slide5.xml', 4);
-    const goTo = vi.spyOn(v, 'goToSlide');
+    const goTo = spyNavigation(v);
 
     dispatch({ kind: 'internal', ref: '../slides/slide5.xml' });
 
     expect(engine.resolveCalls.at(-1)).toEqual({ ref: '../slides/slide5.xml', current: 0 });
-    expect(goTo).toHaveBeenCalledWith(4);
+    expect(goTo.mock.calls.at(-1)?.[0]).toBe(4);
+    await vi.waitFor(() => expect(v.slideIndex).toBe(4));
     v.destroy();
   });
 
@@ -51,18 +57,18 @@ describe('PptxViewer — internal-hyperlink click default (IX-nav)', () => {
     const { v, engine, dispatch } = await mountLoaded();
     engine.resolveFn = (_ref, current) => Math.min(current + 1, 5);
     await v.goToSlide(2); // current becomes 2
-    const goTo = vi.spyOn(v, 'goToSlide');
+    const goTo = spyNavigation(v);
 
     dispatch({ kind: 'internal', ref: 'ppaction://hlinkshowjump?jump=nextslide' });
 
     expect(engine.resolveCalls.at(-1)?.current).toBe(2); // relative to the current slide
-    expect(goTo).toHaveBeenCalledWith(3); // nextslide(2) ⇒ 3
+    expect(goTo.mock.calls.at(-1)?.[0]).toBe(3); // nextslide(2) ⇒ 3
     v.destroy();
   });
 
   it('is a safe no-op when the ref resolves to no reachable slide', async () => {
     const { v, engine, dispatch } = await mountLoaded();
-    const goTo = vi.spyOn(v, 'goToSlide');
+    const goTo = spyNavigation(v);
     dispatch({ kind: 'internal', ref: '../slides/nope.xml' });
     expect(engine.resolveCalls.length).toBeGreaterThan(0); // tried
     expect(goTo).not.toHaveBeenCalled(); // but did not navigate
@@ -73,7 +79,7 @@ describe('PptxViewer — internal-hyperlink click default (IX-nav)', () => {
     const onHyperlinkClick = vi.fn<(t: HyperlinkTarget) => void>();
     const { v, engine, dispatch } = await mountLoaded({ onHyperlinkClick });
     engine.internalTargets.set('../slides/slide3.xml', 2);
-    const goTo = vi.spyOn(v, 'goToSlide');
+    const goTo = spyNavigation(v);
 
     dispatch({ kind: 'internal', ref: '../slides/slide3.xml' });
 

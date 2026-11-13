@@ -4120,6 +4120,8 @@ pub struct XlsxArchive {
     last_cursor_pull_terminal: bool,
     terminal_awaiting_ack: bool,
     last_cursor_usage: Option<ResourceUsage>,
+    /// `[Content_Types].xml`, read once on the first `is_picture_part` call.
+    content_types: Option<ooxml_common::content_types::ImagePartTypes>,
 }
 
 struct ActiveWorksheetCursor {
@@ -4314,6 +4316,7 @@ impl XlsxArchive {
             last_cursor_pull_terminal: false,
             terminal_awaiting_ack: false,
             last_cursor_usage: None,
+            content_types: None,
         })
     }
 
@@ -4855,6 +4858,47 @@ impl XlsxArchive {
                 .run_operation("extract-image", |zip| read_zip_bytes(zip, path))
         };
         result.map_err(|error| JsValue::from_str(&error))
+    }
+
+    /// Whether `path` names a picture part: a part whose OPC content type
+    /// (ECMA-376 Part 2 §10.1.2.2, Override before Default) is an `image/*`
+    /// media type. Node `getImage()` serves only these, so a caller cannot
+    /// read XML or other non-picture parts through it. The Media Types stream
+    /// is read and charged to the session once.
+    pub fn is_picture_part(&mut self, path: &str) -> Result<bool, JsValue> {
+        self.picture_part(path)
+            .map_err(|error| JsValue::from_str(&error))
+    }
+
+    fn picture_part(&mut self, path: &str) -> Result<bool, String> {
+        if self.content_types.is_none() {
+            // Parse inside the operation's resource scope so a depth/node
+            // crossing latches and fails the session instead of reading as an
+            // empty table; malformed XML alone serves no picture.
+            let load = |archive: &mut XlsxZip| -> Result<_, String> {
+                let _resource_scope = archive.operation()?.resource_scope()?;
+                let bytes = read_zip_bytes(archive, ooxml_common::opc::CONTENT_TYPES_ITEM)?;
+                let types = ooxml_common::content_types::ImagePartTypes::new(
+                    ooxml_common::content_types::PackageContentTypes::parse(
+                        &String::from_utf8_lossy(&bytes),
+                    )
+                    .unwrap_or_default(),
+                );
+                archive.assert_healthy()?;
+                Ok(types)
+            };
+            let types = if self.active_worksheet.is_some() {
+                // As in `extract_image`: charge the active cursor's operation.
+                load(&mut self.archive)
+            } else {
+                self.archive.run_operation("content-types", load)
+            }?;
+            self.content_types = Some(types);
+        }
+        Ok(self
+            .content_types
+            .as_ref()
+            .is_some_and(|types| types.is_image_part(path)))
     }
 
     /// GitHub-flavoured markdown projection of the retained archive. Mirrors the
@@ -10557,5 +10601,55 @@ mod column_style_resolution_tests {
             assert_eq!(resolved[column as usize], oracle, "column {column}");
         }
         assert!(last_column_style_by_column(&[]).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod picture_part_tests {
+    use super::*;
+    use std::io::{Cursor, Write};
+
+    fn workbook_with_content_types(types: &str) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        {
+            let mut zip = zip::ZipWriter::new(Cursor::new(&mut bytes));
+            let options = zip::write::SimpleFileOptions::default();
+            for (path, body) in [
+                ("[Content_Types].xml", types.as_bytes()),
+                (
+                    "xl/workbook.xml",
+                    br#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheets/></workbook>"#.as_slice(),
+                ),
+                ("xl/media/image1.png", b"png".as_slice()),
+            ] {
+                zip.start_file(path, options).unwrap();
+                zip.write_all(body).unwrap();
+            }
+            zip.finish().unwrap();
+        }
+        bytes
+    }
+
+    #[test]
+    fn picture_parts_follow_declared_image_content_types() {
+        let types = r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="png" ContentType="image/png"/><Default Extension="xml" ContentType="application/xml"/></Types>"#;
+        let mut archive =
+            XlsxArchive::new(workbook_with_content_types(types), None, None, None).unwrap();
+        assert_eq!(archive.picture_part("xl/media/image1.png"), Ok(true));
+        assert_eq!(archive.picture_part("xl/workbook.xml"), Ok(false));
+        assert!(archive.archive.assert_healthy().is_ok());
+    }
+
+    #[test]
+    fn over_deep_content_types_fail_the_session_instead_of_serving_nothing() {
+        let types = format!(
+            r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">{}{}</Types>"#,
+            "<x>".repeat(4096),
+            "</x>".repeat(4096),
+        );
+        let mut archive =
+            XlsxArchive::new(workbook_with_content_types(&types), None, None, None).unwrap();
+        assert!(archive.picture_part("xl/media/image1.png").is_err());
+        assert!(archive.archive.assert_healthy().is_err());
     }
 }

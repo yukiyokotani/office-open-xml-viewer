@@ -1,4 +1,5 @@
 import { EMU_PER_PX, type FindMatch, type FindMatchesOptions, type HyperlinkTarget, type OoxmlResourceMetrics, type ZoomableViewer, openExternalHyperlink } from '@silurus/ooxml-core';
+import { isBackwardSlideJump } from './slide-nav';
 import {
   computeUniformVisibleWindow,
   type VisibleWindow,
@@ -825,8 +826,12 @@ export class PptxScrollViewer implements ZoomableViewer {
    *  shown, else the next shown slide after it, else the nearest one before it
    *  (the `PptxViewer.goToSlide` rule). The shown slides before `slide` are
    *  exactly the position of the next shown slide at or after it. */
-  private _shownPositionFor(slide: number): number {
-    return Math.min(slide - this._hiddenBelow(slide), this._layoutCount() - 1);
+  private _shownPositionFor(slide: number, backward = false): number {
+    const shownBefore = slide - this._hiddenBelow(slide);
+    // A `previousslide` jump to a hidden slide lands on the nearest shown
+    // slide before it (as `PptxViewer.prevSlide()` does), else the next one.
+    if (backward && this._positionOf(slide) === -1 && shownBefore > 0) return shownBefore - 1;
+    return Math.min(shownBefore, this._layoutCount() - 1);
   }
 
   /** Bring the `'skip'` layout up to date with the published slide metadata;
@@ -1210,12 +1215,16 @@ export class PptxScrollViewer implements ZoomableViewer {
    * {@link PptxScrollViewerOptions.hiddenSlideMode}).
    */
   scrollToSlide(index: number, opts?: { behavior?: 'auto' | 'smooth' }): void {
+    this._scrollToSlide(index, opts, false);
+  }
+
+  private _scrollToSlide(index: number, opts: { behavior?: 'auto' | 'smooth' } | undefined, backward: boolean): void {
     if (!this._skipActive) {
       this._navigation.scrollToUnit(index, opts);
       return;
     }
     const slide = Math.max(0, Math.min(index, this.slideCount - 1));
-    this._navigation.scrollToUnit(this._shownPositionFor(slide), opts);
+    this._navigation.scrollToUnit(this._shownPositionFor(slide, backward), opts);
   }
 
   /**
@@ -1456,7 +1465,9 @@ export class PptxScrollViewer implements ZoomableViewer {
       openExternalHyperlink(enriched.url);
       return;
     }
-    if (enriched.slideIndex !== undefined) this.scrollToSlide(enriched.slideIndex);
+    if (enriched.slideIndex !== undefined) {
+      this._scrollToSlide(enriched.slideIndex, undefined, isBackwardSlideJump(enriched.ref));
+    }
   }
 
   /** Populate an internal {@link HyperlinkTarget}'s `slideIndex` from its `ref`

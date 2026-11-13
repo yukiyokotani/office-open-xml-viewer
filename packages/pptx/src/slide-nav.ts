@@ -100,3 +100,13 @@ export function resolveInternalSlideTarget(
   // Otherwise treat `ref` as a slide-part target.
   return resolveSlidePartTarget(ref, partIndex);
 }
+
+/**
+ * Whether an internal hyperlink `ref` is the relative `previousslide` show
+ * jump. In `hiddenSlideMode: 'skip'` its hidden target gives way to the nearest
+ * shown slide before it (as `prevSlide()` does), not the next one after it,
+ * which could be the slide the jump started from.
+ */
+export function isBackwardSlideJump(ref: string): boolean {
+  return parseRelativeSlideJump(ref) === 'previousslide';
+}

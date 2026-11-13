@@ -104,10 +104,11 @@ export interface DocxDocumentSession extends AsyncIterable<DocxRenderedPage> {
   /**
    * Raw bytes of one picture the document model names (an image run's
    * `imagePath`), as a Blob of `mimeType` (default
-   * `application/octet-stream`). Paths are the package part paths of a
-   * `.docx` (`word/media/image1.png`) or the picture keys an application
-   * model source assigns in the model it produces. Same contract as
-   * `PptxPresentationSession.getImage`: reads charge the session's archive
+   * `application/octet-stream`). For a `.docx` any picture part is served (a
+   * part whose content type is `image/*`, such as `word/media/image1.png`);
+   * for an application model source, the picture keys its model assigns.
+   * Another path rejects with a `TypeError` (or the archive's not-found
+   * error) and leaves the session usable. Reads charge the session's archive
    * budgets, results share the session's bounded raw-part cache with page
    * rendering, a resource-limit failure fails the session, and the call
    * rejects after `close()`.
@@ -317,7 +318,20 @@ export class DocxDocumentSessionImpl implements DocxDocumentSession {
 
   async getImage(path: string, mimeType = 'application/octet-stream'): Promise<Blob> {
     this.assertOpen();
-    return this.fetchImage(path, mimeType).catch((error: unknown) => this.failOperation(error));
+    try {
+      const picture = this.archive.is_picture_part?.(path);
+      // The first check reads [Content_Types].xml: account for it even when
+      // the path is then refused.
+      if (picture !== undefined) this.refreshResourceUsage();
+      if (picture === false) throw new TypeError(NOT_A_PICTURE);
+      return await this.fetchImage(path, mimeType);
+    } catch (error) {
+      // Only a resource-limit overrun fails the session; a non-picture or
+      // missing path rejects this call alone.
+      const normalized = parseResourceLimitError(error) ?? error;
+      if (normalized instanceof OoxmlResourceLimitError) this.failOperation(normalized);
+      throw normalized;
+    }
   }
 
   renderPage(pageIndex: number, options: DocxPageRenderOptions = {}): Promise<NodeCanvasLike> {
@@ -421,6 +435,8 @@ export class DocxDocumentSessionImpl implements DocxDocumentSession {
     return this.state;
   }
 }
+
+const NOT_A_PICTURE = 'DOCX getImage(): the path does not name a picture part (a part whose content type is image/*)';
 
 function normalizeCurrentDate(value: Date | number | undefined): number {
   const current = value instanceof Date ? value.getTime() : (value ?? Date.now());

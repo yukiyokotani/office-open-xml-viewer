@@ -1360,9 +1360,16 @@ pub fn parse(zip: &mut Zip) -> Result<Document, String> {
     validate_paragraph_ilvls(xml_doc.root_element())?;
     // ECMA-376 Part 3 §9.1 requires a MustUnderstand mismatch to be signaled
     // but does not mandate the mechanism. Library policy, not an Office
-    // observation: like the streamed facade, report it as this required part's
-    // degraded document rather than substituting a picture or dropping the run.
-    // `run_operation` still lets a poisoned resource session win.
+    // observation: a mismatch on the processed MCE path means the part cannot
+    // be read as authored, so it is a parse failure of that part, listed in
+    // `partFailures`. This is the one rule for every such mismatch: the
+    // streamed body projector (the production path) fails `word/document.xml`
+    // for any namespace, and the XLSX worksheet projector fails its sheet the
+    // same way. It is not an omission warning: the renderable ChartEx set comes
+    // from the package, never from a caller's chart-module opt-out. Native and
+    // streamed parsing agree here rather than substituting a picture or
+    // dropping the run. `run_operation` still lets a poisoned resource session
+    // win.
     if let Err(error) = chartex_choice::validate_selected_chartex_must_understand(
         xml_doc.root_element(),
         &chart_map.renderable_chartex_rids,

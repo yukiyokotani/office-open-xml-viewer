@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   clampPartFailureMessage,
+  errorPlaceholderCanvasLines,
   errorPlaceholderDetail,
   errorPlaceholderTitle,
   normalizeErrorPlaceholderText,
@@ -11,6 +12,7 @@ import {
   resolveErrorPlaceholderFor,
   resolvedFromWire,
   wireErrorPlaceholder,
+  wrapErrorPlaceholderText,
 } from './part-failures';
 
 interface Failure { readonly kind: 'slide'; readonly slideIndex: number; readonly message: string }
@@ -218,3 +220,41 @@ describe('PartFailureDelivery', () => {
   });
 });
 
+
+describe('placeholder text bounds', () => {
+  const width = (value: string) => [...value].length * 10;
+
+  it('caps caller and parser text before it is painted', () => {
+    const huge = 'word '.repeat(200_000);
+    const title = errorPlaceholderTitle({ title: huge, detail: undefined }, 'Built-in');
+    const detail = errorPlaceholderDetail(null, huge)!;
+    for (const text of [title, detail]) {
+      expect(new TextEncoder().encode(text).length).toBeLessThanOrEqual(1024);
+      expect(text.endsWith('…')).toBe(true);
+    }
+    expect(errorPlaceholderDetail({ title: null, detail: null }, huge)).toBeNull();
+  });
+
+  it('fits every line to the width, breaking long words and marking cut text', () => {
+    const title = wrapErrorPlaceholderText('Sheet could not be displayed at all', 120, 1, width);
+    expect(title).toHaveLength(1);
+    expect(title[0].endsWith('…')).toBe(true);
+    const detail = wrapErrorPlaceholderText(`${'x'.repeat(30)} tail`, 100, 4, width);
+    expect(detail).toEqual(['x'.repeat(10), 'x'.repeat(10), 'x'.repeat(10), 'tail']);
+    for (const line of [...title, ...wrapErrorPlaceholderText('y'.repeat(100), 100, 4, width)]) {
+      expect(width(line)).toBeLessThanOrEqual(120);
+    }
+  });
+
+  it('reuses the wrapped lines while the text, font and width are unchanged', () => {
+    const measureText = vi.fn((value: string) => ({ width: width(value) }));
+    const ctx = { font: '10px sans-serif', measureText };
+    const first = errorPlaceholderCanvasLines(ctx, 'a b c d e f', 30, 4);
+    const calls = measureText.mock.calls.length;
+    expect(errorPlaceholderCanvasLines(ctx, 'a b c d e f', 30, 4)).toBe(first);
+    expect(measureText).toHaveBeenCalledTimes(calls);
+    ctx.font = '20px sans-serif';
+    errorPlaceholderCanvasLines(ctx, 'a b c d e f', 30, 4);
+    expect(measureText.mock.calls.length).toBeGreaterThan(calls);
+  });
+});
