@@ -107,8 +107,27 @@ describe('PPTX symbol oracle across slide renders', () => {
     faces.push({ status: 'loaded' });
     expect(await again()).toBe(2 * once);
     expect(await again()).toBe(2 * once);
-    // A rewritten matching descriptor too.
+    // A rewritten descriptor too (matching, or shaping).
     (faces[1] as { unicodeRange?: string }).unicodeRange = 'U+0-7F';
     expect(await again()).toBe(3 * once);
+    (faces[1] as { featureSettings?: string }).featureSettings = '"ss01"';
+    expect(await again()).toBe(4 * once);
+  });
+
+  it('never keeps a verdict across an await of the render that took the oracle', async () => {
+    const faces: { status: string }[] = [];
+    const { canvas, probes } = realm(faces);
+    const oracle = createSymbolFaceOracleCache().oracleFor(
+      (canvas() as HTMLCanvasElement).getContext('2d') as CanvasRenderingContext2D);
+    const font = '400 20px "Symbol"';
+    expect(oracle.draws('\uf0b7', font)).toBe(false);
+    const judged = probes.length;
+    expect(judged).toBeGreaterThan(0);
+    // A face loads while the render awaits (an image decode): its next step
+    // judges against the new faces, not the verdicts taken before.
+    faces.push({ status: 'loaded' });
+    await Promise.resolve();
+    oracle.draws('\uf0b7', font);
+    expect(probes.length).toBe(2 * judged);
   });
 });

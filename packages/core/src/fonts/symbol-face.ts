@@ -351,7 +351,7 @@ export interface SymbolFaceOracleCache {
  * FontFaceSet, so the oracle is replaced whenever that set changes: a face
  * added or deleted (a delta of a font source, an Office fallback route, an
  * embedded face), a face whose status changed (a subset that finished
- * loading) or one whose matching descriptors were rewritten. It measures on a 1x1 scratch canvas of the painting context's
+ * loading) or one whose descriptors were rewritten. It measures on a 1x1 scratch canvas of the painting context's
  * realm, so it retains no painting canvas; without one each render gets its
  * own oracle, as before. A realm without a FontFaceSet (a Node canvas) has
  * fixed host fonts: its oracle is kept for good.
@@ -361,10 +361,10 @@ export function createSymbolFaceOracleCache(factory?: SymbolProbeCanvasFactory):
   let fontSet: FontFaceSet | null = null;
   let faces: FontFace[] = [];
   let states: string[] = [];
-  // What font matching reads of a face (CSS Fonts 4 §5): its status and its
-  // matching descriptors, which a page may mutate on a registered face.
-  const state = (face: FontFace) =>
-    `${face.status}\u0000${face.family}\u0000${face.style}\u0000${face.weight}\u0000${face.stretch}\u0000${face.unicodeRange}`;
+  // What font matching and shaping read of a face (CSS Fonts 4 §4.5, §5):
+  // its status and descriptors, which a page may rewrite on a registered face.
+  const state = (face: FontFace) => [face.status, face.family, face.style, face.weight, face.stretch,
+    face.unicodeRange, face.featureSettings, (face as { variationSettings?: string }).variationSettings].join('\u0000');
   const unchanged = (set: FontFaceSet | null): boolean => {
     if (set !== fontSet) return false;
     if (!set) return true;
@@ -386,29 +386,46 @@ export function createSymbolFaceOracleCache(factory?: SymbolProbeCanvasFactory):
       }
     }
   };
-  return {
-    oracleFor(context) {
-      const options = factory ? { createCanvas: factory } : {};
-      if (!context) return createSymbolFaceOracle(context, options);
-      let set: FontFaceSet | null;
-      try {
-        set = realmFontSet(context);
-        if (oracle && unchanged(set)) return oracle;
-      } catch {
-        return createSymbolFaceOracle(context, options);
-      }
-      const scratch = scratchCanvas(context, factory, 1);
-      let probe: SymbolProbeContext | null = null;
-      try {
-        probe = scratch?.getContext('2d') as SymbolProbeContext | null ?? null;
-      } catch { probe = null; }
-      if (!probe) {
-        oracle = undefined;
-        return createSymbolFaceOracle(context, options);
-      }
+  const options = factory ? { createCanvas: factory } : {};
+  /** The kept oracle when the realm's faces are those it was made with, a
+   * new one otherwise; undefined when the realm cannot be keyed or has no
+   * scratch canvas. */
+  const current = (context: SymbolProbeContext): SymbolFaceOracle | undefined => {
+    try {
+      const set = realmFontSet(context);
+      if (oracle && unchanged(set)) return oracle;
+      const probe = scratchCanvas(context, factory, 1)?.getContext('2d') as SymbolProbeContext | null | undefined;
+      oracle = undefined;
+      if (!probe) return undefined;
       record(set);
       oracle = createSymbolFaceOracle(probe, options);
       return oracle;
+    } catch {
+      oracle = undefined;
+      return undefined;
+    }
+  };
+  return {
+    oracleFor(context) {
+      if (!context) return createSymbolFaceOracle(context, options);
+      // A render awaits (images, fonts) between its layout and paint steps,
+      // and the faces may change meanwhile: the oracle is looked up again in
+      // each synchronous step that consults it (once per step, as faces
+      // change only between tasks), never kept across an await.
+      let step: SymbolFaceOracle | undefined;
+      let own: SymbolFaceOracle | undefined;
+      const now = (): SymbolFaceOracle => {
+        if (!step) {
+          step = current(context) ?? (own ??= createSymbolFaceOracle(context, options));
+          queueMicrotask(() => { step = undefined; });
+        }
+        return step;
+      };
+      return Object.freeze({
+        draws: (code: string, font: string) => now().draws(code, font),
+        monochrome: (text: string, font: string) => now().monochrome(text, font),
+        segments: (...args: Parameters<SymbolFaceOracle['segments']>) => now().segments(...args),
+      });
     },
   };
 }

@@ -83,10 +83,14 @@ describe('docxFontDemandScalars (design §6)', () => {
     expect(scalars).not.toBe('all');
     const set = new Set(scalars as number[]);
     for (const cp of [0xf0b7, 0x2022, 0x6c, 0xf06c, 0x25cf, 0xfe0e]) expect(set.has(cp), cp.toString(16)).toBe(true);
-    // Bounded by the tables: the synthesized layout scalars plus a handful.
-    expect(set.size).toBeLessThan(LAYOUT_SYNTHESIZED_SCALARS.length + 16);
+    // Bounded by the tables (layout-generated text counts as painted in each
+    // symbol family too): a few hundred scalars, not every subset.
+    expect(set.size).toBeLessThan(1024);
     // §17.3.2.5 caps paints the upper case, converted in the run's symbol face (Α).
     expect(new Set(scalarsOf(docWith([text('a', { fontFamily: 'Symbol', allCaps: true })])) as number[]).has(0x391)).toBe(true);
+    // A generated field result (PAGE \* ROMAN may paint V) is converted too (ς).
+    expect(new Set(scalarsOf(docWith([{ type: 'field', fieldType: 'page', instruction: 'PAGE \\* ROMAN',
+      fallbackText: 'I', fontFamily: 'Symbol' }])) as number[]).has(0x3c2)).toBe(true);
     // A PUA code outside a symbol family still proves nothing.
     expect(scalarsOf(docWith([text('\uF0B7', { fontFamily: 'Arial' })]))).toBe('all');
   });
