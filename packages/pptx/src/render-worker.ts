@@ -110,6 +110,9 @@ let symbolSentinels: Promise<FontFace[] | null> | null = null;
 let symbolFaces = createSymbolFaceOracleCache();
 
 function releaseOfficeFonts(): void {
+  // The released faces must not stay reachable through an oracle kept for a
+  // render context (core symbol-face-cache.ts).
+  symbolFaces.dispose();
   symbolFaces = createSymbolFaceOracleCache();
   void symbolSentinels?.then((faces) => { if (faces) unloadOfficeFontFallbacks(faces); });
   symbolSentinels = null;
