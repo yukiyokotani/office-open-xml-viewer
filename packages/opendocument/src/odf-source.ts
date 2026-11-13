@@ -145,11 +145,14 @@ function centralMimetypeEntry(bytes: Uint8Array): MimetypeEntry | undefined {
   // locator (no extensible data); only otherwise is the input searched, a
   // search charged to the budget (one step per 16 bytes).
   const records = new Map<number, number[]>();
+  const kept = new Set<number>();
   const keep = (at: number) => {
     const size = u64(at + 4);
     if (u32(at) !== 0x06064b50 || size < 44 || !locators.has(at + 12 + size) || u32(at + 16) !== 0 || u32(at + 20) !== 0) return false;
+    if (kept.has(at)) return true;
+    kept.add(at);
     const list = records.get(at + 12 + size);
-    if (list === undefined) records.set(at + 12 + size, [at]); else if (!list.includes(at)) list.push(at);
+    if (list === undefined) records.set(at + 12 + size, [at]); else list.push(at);
     return true;
   };
   let search = false;
