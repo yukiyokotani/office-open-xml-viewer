@@ -1,4 +1,5 @@
 import { loadFontDemandCollector } from './font-demand-collector.js';
+import { officeFaceWeight } from './powerpoint-line-metrics.js';
 import type { CjkLang } from '@silurus/ooxml-core';
 import init, { PptxArchive, reinit } from './wasm/pptx_parser.js';
 import type { PptxTextRunInfo } from './renderer';
@@ -248,7 +249,7 @@ async function openPresentation(request: Extract<RenderWorkerRequest, { kind: 'p
   // alone, as in main mode. Registering an optional renderer does not widen it:
   // the text those renderers draw (math runs, charts) already yields 'all', and
   // TIFF decoding draws no text.
-  preflightBuilder = new PresentationPreflightBuilder(bootstrap, { cjkFallback, collectFontDemand: await loadFontDemandCollector(sources.length > 0) });
+  preflightBuilder = new PresentationPreflightBuilder(bootstrap, { cjkFallback, collectFontDemand: await loadFontDemandCollector(sources.length > 0), officeFaceWeight });
   slides = new PptxSlideRepository({
     slideCount: bootstrap.slideCount,
     maxCachedSlides: HARD_MAX_PPTX_CACHED_SLIDES,
