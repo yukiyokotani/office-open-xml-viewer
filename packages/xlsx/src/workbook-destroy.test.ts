@@ -278,9 +278,10 @@ describe('XlsxWorkbook.destroy() — rejects in-flight worker requests', () => {
     expect(added).toHaveLength(0);
   });
 
-  it('releases the Office faces it loaded when the parallel font-source load rejects', async () => {
+  it('keeps the Office faces of a load whose font-source demand breaches a ceiling, and releases them', async () => {
     // Local Calibri is installed; 257 other authored families are not, which
-    // breaches the 256-family font-source ceiling.
+    // breaches the 256-family font-source ceiling: the families beyond it
+    // fail with a warning, and the load itself resolves.
     const { added } = installFontFaceSet(Promise.resolve(), (source) => !/calibri/i.test(source));
     const { wb } = makeWorkbook();
     const workbook = wb as unknown as XlsxWorkbook;
@@ -297,7 +298,10 @@ describe('XlsxWorkbook.destroy() — rejects in-flight worker requests', () => {
     };
     internals.officeFontRequests = [{ family: 'Calibri', weight: 400, style: 'normal' }];
     await internals.prepareFontSources(parsed, FONTS);
-    await expect(internals.retainFontsInSet((G.document as Document).fonts)).rejects.toMatchObject({ code: 'font-source-limit' });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const release = await internals.retainFontsInSet((G.document as Document).fonts);
+    expect(String(warn.mock.calls.at(-1)?.[0])).toContain('Absent 256 (Font source limit exceeded (families)');
+    release();
     wb.destroy();
     expect(added).toHaveLength(0);
   });

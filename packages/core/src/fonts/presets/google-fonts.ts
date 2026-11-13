@@ -19,8 +19,8 @@
  * `substitutes` replaces that list, exactly as it is every other source's
  * whole list.
  */
-import { fontCssApi, type FontCssApiSource } from '../source.js';
-import { OFFICE_FONT_SUBSTITUTIONS, type FontSubstitution } from '../substitutions.js';
+import { fontCssApi, type FontSource } from '../source.js';
+import { fontFamilyKey, OFFICE_FONT_SUBSTITUTIONS, type FontSubstitution } from '../substitutions.js';
 
 export const GOOGLE_FONTS_DEFAULT_CSS_ORIGIN = 'https://fonts.googleapis.com';
 
@@ -101,9 +101,17 @@ export interface GoogleFontsOptions {
    * Family substitutions, as for every other source. When given, it replaces
    * the default {@link GOOGLE_FONTS_SUBSTITUTIONS} (Office stand-ins and the
    * Noto CJK naming) entirely; spread that list to extend it. Only families
-   * in the Google Fonts catalog the preset requests can be served.
+   * the preset requests (its catalog and `families`) can be served.
    */
   readonly substitutes?: readonly FontSubstitution[];
+  /**
+   * Further Google Fonts families to request, added to the preset's catalog:
+   * family name (Google's spelling) → CSS2 API axis query, for example
+   * `{ Inter: 'wght@400;700', 'Source Serif 4': 'ital,wght@0,400;0,700;1,400;1,700' }`.
+   * An entry naming a catalog family (case-insensitively) replaces that
+   * family's query. The query is sent verbatim after `family=<name>:`.
+   */
+  readonly families?: Readonly<Record<string, string>>;
 }
 
 function validatedOrigin(value: unknown): string {
@@ -121,20 +129,43 @@ function validatedOrigin(value: unknown): string {
   return origin;
 }
 
+/** The catalog with the caller's `families` added; a caller entry replaces
+ * the catalog entry of the same family (case-insensitively). Names and
+ * queries are validated by `fontCssApi()`. */
+function requestedFamilies(extra: unknown): Readonly<Record<string, string>> {
+  if (extra === undefined) return GOOGLE_FONTS_CATALOG;
+  if (!extra || typeof extra !== 'object' || Array.isArray(extra)) {
+    throw new TypeError('googleFonts() families must be an object');
+  }
+  const added = Object.entries(extra);
+  for (const [family, query] of added) {
+    if (typeof query !== 'string') throw new TypeError(`googleFonts() families[${JSON.stringify(family)}] must be a query string`);
+  }
+  const replaced = new Set(added.map(([family]) => fontFamilyKey(family)));
+  // Object.fromEntries defines own properties, so a `__proto__` family stays
+  // an entry (fontCssApi() copies into a null-prototype record).
+  return Object.fromEntries([
+    ...Object.entries(GOOGLE_FONTS_CATALOG).filter(([family]) => !replaced.has(fontFamilyKey(family))),
+    ...added,
+  ]);
+}
+
 /** Google Fonts (or a Google-compatible mirror) as a font source. */
-export function googleFonts(options: GoogleFontsOptions = {}): FontCssApiSource {
+export function googleFonts(options: GoogleFontsOptions = {}): FontSource {
   if (!options || typeof options !== 'object' || Array.isArray(options)) {
     throw new TypeError('googleFonts() options must be an object');
   }
   for (const key of Object.keys(options)) {
-    if (key !== 'cssOrigin' && key !== 'substitutes') throw new TypeError(`googleFonts() options has unknown property "${key}"`);
+    if (key !== 'cssOrigin' && key !== 'substitutes' && key !== 'families') {
+      throw new TypeError(`googleFonts() options has unknown property "${key}"`);
+    }
   }
   const origin = options.cssOrigin === undefined
     ? GOOGLE_FONTS_DEFAULT_CSS_ORIGIN
     : validatedOrigin(options.cssOrigin);
   return fontCssApi({
     urlTemplate: `${origin}/css2?family={family}:{query}&display=swap`,
-    families: GOOGLE_FONTS_CATALOG,
+    families: requestedFamilies(options.families),
     substitutes: options.substitutes === undefined ? GOOGLE_FONTS_SUBSTITUTIONS : options.substitutes,
   });
 }

@@ -6,8 +6,9 @@ ordered list of font sources. Migration is required only if you pass
 requests no fonts from any network host and the canvas uses the fonts installed
 on the viewer's machine.
 
-`useGoogleFonts` still works in 0.90, with a deprecation warning. It is removed
-in 0.91.0.
+`useGoogleFonts` still works in 0.90, with a deprecation warning. From 0.91.0
+it is ignored, with the same warning: no web fonts are loaded until you
+migrate, but passing it never throws.
 
 ## Replace `useGoogleFonts`
 
@@ -28,6 +29,13 @@ They are the same objects in every entry. `fonts` works the same way for DOCX,
 XLSX and PPTX, on every engine `load()` and every Viewer, in `mode: 'main'` and
 `mode: 'worker'`.
 
+A `FontSource` is opaque. Create every entry with one of the factories
+(`googleFonts()`, `fontCssApi()`, `fontCss()`, `fontFiles()`,
+`fontResolver()`) in the page that loads the document. Its contents are not
+part of the API, and `fonts` accepts only values those factories returned:
+a copy (spread, `structuredClone`, JSON) or a hand-written object throws a
+`TypeError`.
+
 `fonts: [googleFonts()]` sends the same stylesheet requests as
 `useGoogleFonts: true`. In 0.90, DOCX and XLSX also load only the
 `unicode-range` subsets that intersect the characters the document paints, as
@@ -43,7 +51,7 @@ While the alias exists:
 - The warning is printed once per JavaScript realm (page, popup or worker):
 
   ```text
-  [ooxml] useGoogleFonts is deprecated and will be removed in 0.91.0. Replace it with fonts: [googleFonts()] — import { googleFonts } from '@silurus/ooxml' (also exported from the docx/xlsx/pptx entries). A custom CSS origin is googleFonts({ cssOrigin }); other sources are fontCssApi(), fontCss(), fontFiles() and fontResolver(). See docs/migration-0.90.md.
+  [ooxml] useGoogleFonts is deprecated: from 0.91.0 it is ignored (no web fonts are loaded). Replace it with fonts: [googleFonts()] — import { googleFonts } from '@silurus/ooxml' (also exported from the docx/xlsx/pptx entries). A custom CSS origin is googleFonts({ cssOrigin }); other sources are fontCssApi(), fontCss(), fontFiles() and fontResolver(). See docs/migration-0.90.md.
   ```
 
 The VS Code extension keeps its `ooxmlViewer.useGoogleFonts` setting. It now
@@ -114,9 +122,23 @@ fonts: [googleFonts({
 ```
 
 `googleFonts()` requests only the families in its catalog (the Office
-stand-ins, the Noto script families and a few popular web fonts), so a
-substitute's `use` must be one of them. For other Google families, use
-`fontCssApi()` with your own `families` list.
+stand-ins, the Noto script families and a few popular web fonts) plus the
+families you add with `families`, so a substitute's `use` must be one of them.
+
+### More Google families: `googleFonts({ families })`
+
+```ts
+fonts: [googleFonts({
+  families: { Inter: 'wght@400;700', 'Source Serif 4': 'ital,wght@0,400;0,700;1,400;1,700' },
+  substitutes: [...googleFontsSubstitutions, { for: 'Corporate Sans', use: 'Inter' }],
+})]
+```
+
+Each key is a Google Fonts family (Google's spelling), and each value is its
+CSS2 axis query, sent after `family=<name>:`. Request only axes the family
+has: CSS2 answers an unknown axis with an HTTP 400, which fails the family. A
+key that names a catalog family (case-insensitively) replaces that family's
+query. The catalog and the default substitutes are otherwise unchanged.
 
 ### Another CSS API: `fontCssApi()`
 
@@ -172,8 +194,10 @@ covers rendering in a document viewer) are your application's responsibility.
 Services that subset fonts per page text at run time (for example
 TypeSquare, FONTPLUS or Adobe Fonts dynamic CJK kits) are not supported. Such
 services generate faces for the text their script sees in the page, which a
-canvas viewer does not expose to them. Serve static faces for those families,
-for example with `unicode-range` subsets, or answer with `fontResolver()`.
+canvas viewer does not expose to them, and `fontResolver()` does not see the
+text either. Serve static faces for those families with `unicode-range`
+subsets, from a stylesheet, `fontFiles()` or a resolver. The library then
+fetches only the subsets the document paints.
 
 ### Bundled files: `fontFiles()`
 
@@ -224,28 +248,36 @@ fonts: [privateFonts, googleFonts({ cssOrigin: 'https://fonts.internal.example' 
 
 The function runs in the page that created it. In worker mode, the worker
 asks the page to run it, so tokens and network clients stay in your
-application. The worker never fetches the URLs the function returns: once a
-family is claimed, the page fetches its `http(s)` and `blob:` faces and sends
-the worker the bytes, so cookies, HTTP authentication and Referer checks see
-the page in both modes. The page fetches only URLs the function returned for
-that document. In main mode the library fetches the same URLs itself, with
-the same credentials, so both modes send the same requests.
+application. The worker never fetches the URLs the function returns: the page
+fetches them and sends the worker the bytes, so cookies, HTTP authentication
+and Referer checks see the page in both modes. The page fetches only URLs the
+function returned for that document. In main mode the library fetches the
+same URLs itself, with the same credentials, so both modes send the same
+requests.
 
-The `demand` argument contains:
+#### The resolver contract
 
-- `families`: the authored families the host does not have and that no
-  earlier call already answered.
-- `fallbackFamilies`: the library's script fallback families for the text,
-  such as Noto families for CJK.
+This contract is settled for 0.90. Later versions may add fields to `demand`
+and `context`; they will not remove or change these.
 
-Return every face you have for each family you answer: all weights, styles
-and `unicode-range` subsets. A family is resolved once per document, so a face
-you leave out is not asked for again. The renderer picks the weight and style
-of each run. In both modes the library fetches every `http(s)` and `blob:`
-face of a claimed family when the family is claimed, as for
-`credentials: 'omit'` sources, so a resolver that serves many
-`unicode-range` subsets per family costs one request per subset. A resolver may answer only some families. With `substitutes`, a
-family may also be answered with faces of its substitute's `use` family.
+- `demand.families` holds the authored families the host does not have and
+  that no earlier call answered. `demand.fallbackFamilies` holds the library's
+  script fallback families for the text, such as Noto families for CJK.
+- `demand` carries family names only, never document text.
+- Answer each family the way an `@font-face` stylesheet declares it: return
+  every face you have for it (all weights, styles and `unicode-range`
+  subsets), or nothing for it. With `substitutes`, a family may also be
+  answered with faces of its substitute's `use` family. A family you do not
+  answer goes to the next source.
+- A family is resolved once per document, so a face you leave out is not asked
+  for again. The renderer picks the weight and style of each run.
+- `http(s)` and `blob:` faces are fetched by the library when the text first
+  needs them: only the `unicode-range` subsets the document paints, in the
+  page, with `credentials: 'same-origin'`, in both modes. A family served as
+  many subsets therefore costs only the subsets it paints, as with
+  `fontCss()`. `data` faces and `data:` URLs are used as returned.
+- Because the resolver does not see the text, a per-text subsetting service
+  cannot be driven through it. Declare static `unicode-range` subsets instead.
 
 The function returns `FontFaceDeclaration` objects with the same fields as
 `fontFiles()` faces. URLs must be absolute.
@@ -259,8 +291,9 @@ Destroying one of several documents that share a call does not abort it.
 If the answer is not an array or contains a malformed declaration, every family
 of that call keeps its host fallback, and a `console.warn` reports the problem.
 If the function throws, the same happens and the warning includes the error
-message. More than 2,048 declarations or a face over 30 MiB is a
-[limit](#resource-limits) breach instead, which rejects the load.
+message. More than 2,048 declarations or a face over 30 MiB fails the call's
+families the same way (see [Resource limits](#resource-limits)); it does not
+reject the load.
 
 ## Chaining
 
@@ -357,8 +390,8 @@ for the Noto CJK families.
     count like `data` faces (see [Resource limits](#resource-limits)).
   - `'omit'`: no cookies or HTTP authentication are sent at all. The library
     fetches the stylesheet and the font files itself, with
-    `credentials: 'omit'`. It fetches every face of a claimed family when the
-    family is claimed, not only the `unicode-range` subsets the text needs.
+    `credentials: 'omit'`, exactly as for the default: only the
+    `unicode-range` subsets the text needs, when it first needs them.
     Documents in the same realm share each fetched file while any of them is
     open, and the bytes count like `data` faces (see
     [Resource limits](#resource-limits)).
@@ -367,8 +400,9 @@ for the Noto CJK families.
   which receives no cookies with the default. Its font files are fetched by
   the library like those of `fontCssApi()`.
 - `fontResolver()` URLs are fetched by the library with the CSS
-  font-loading rules (`credentials: 'same-origin'`, CORS): in the page in
-  main mode, and by the page for the worker in worker mode.
+  font-loading rules (`credentials: 'same-origin'`, CORS), only the
+  `unicode-range` subsets the text needs: in the page in main mode, and by
+  the page for the worker in worker mode.
 - Cookies are never sent to another origin. For an authenticated service on
   another origin, use `fontResolver` and return `data` bytes or a signed URL.
 - A hosted source receives the end user's IP address and User-Agent.
@@ -454,20 +488,27 @@ limits are not part of `resourceLimits`.
 | Retained `data` bytes | 256 MiB per realm, across open documents |
 | URL length (non-`data:` URLs and composed `fontCssApi` requests) | 8 KiB |
 
-Exceeding a limit fails closed. The error is an `OoxmlError` with
-`code === 'font-source-limit'`, and `error.violation` holds `{ resource:
-'font-source', quota, metric, limit, observed }`. Limits that can be checked
-up front make the factory throw immediately. Otherwise the error rejects
-`load()`, or the slide or sheet operation that needed the fonts, and that
-document's later font loads reject too. A limit breach means a misconfigured
-or hostile source, not a network problem.
+Limits that can be checked up front make the factory throw immediately, with
+an `OoxmlError` whose `code === 'font-source-limit'` and whose
+`error.violation` holds `{ resource: 'font-source', quota, metric, limit,
+observed }`: a misconfigured source fails fast.
+
+A limit reached while a document loads (a stylesheet, resolver answer or font
+file over its limit, a document that asks for more families or declarations
+than allowed, the realm's retained bytes, or a request URL built from a long
+family name) never rejects `load()` or a later slide or sheet. Only the
+families concerned fail, exactly like a network failure: they keep their host
+fallback, the `console.warn` names each with the limit it exceeded, and the
+rest of the document loads normally. For example, a stylesheet over 1 MiB
+fails the families asked of it, and the 257th distinct family a document
+needs fails while the first 256 load.
 
 The library does not count the bytes of `url` faces the browser downloads
 (only inline `data:` URLs are left to the browser, and those count by their
 decoded size). Font files the library downloads itself (see
 [Network, CORS and cookies](#network-cors-and-cookies)) count like `data`
-faces, so a library-fetched face file over 30 MiB fails with
-`font-source-limit`. Reading a WOFF or WOFF2 file's metric tables inflates
+faces, so a library-fetched face file over 30 MiB fails that face, with a
+warning. Reading a WOFF or WOFF2 file's metric tables inflates
 only those tables (for WOFF2, the compressed stream up to the last of them).
 Everything one file's decode inflates and allocates is held to 120 MiB in
 total, checked against the declared sizes before any buffer is allocated,
@@ -485,7 +526,9 @@ other terms a font provider requires (see
 [Hosted font services](#hosted-font-services)). Google Fonts' Carlito, Caladea, Libre Franklin
 and Noto families are licensed under the SIL Open Font License.
 
-## Removal in 0.91
+## `useGoogleFonts` in 0.91
 
-0.91.0 removes `useGoogleFonts` from `LoadOptions`. Passing it then throws a
-`TypeError`. Replace it with `fonts` before upgrading.
+0.91.0 removes `useGoogleFonts` from the `LoadOptions` type. At run time a
+passed value is ignored with the deprecation warning: it loads no web fonts,
+and it never throws. Replace it with `fonts` before upgrading to keep loading
+Google Fonts.

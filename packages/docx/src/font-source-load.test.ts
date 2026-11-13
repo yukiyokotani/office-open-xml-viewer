@@ -1,5 +1,19 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { fontCssApi, fontFiles, fontResolver, OFFICE_FONT_SUBSTITUTIONS } from '@silurus/ooxml-core/internal/font-sources';
+import {
+  fontCssApi as publicFontCssApi,
+  fontFiles as publicFontFiles,
+  fontResolver as publicFontResolver,
+  fontSourceDescriptors,
+  OFFICE_FONT_SUBSTITUTIONS,
+  type FontSource,
+} from '@silurus/ooxml-core/internal/font-sources';
+
+// The descriptors behind the opaque factory results (what a load hands the
+// internal font-source pipeline).
+const descriptor = (source: FontSource) => fontSourceDescriptors([source])[0]!;
+const fontCssApi = (...args: Parameters<typeof publicFontCssApi>) => descriptor(publicFontCssApi(...args));
+const fontFiles = (...args: Parameters<typeof publicFontFiles>) => descriptor(publicFontFiles(...args));
+const fontResolver = (...args: Parameters<typeof publicFontResolver>) => descriptor(publicFontResolver(...args));
 import { docxFontFamilyPlan } from './font-plan.js';
 import { formatOrdinalNumber } from '@silurus/ooxml-core';
 import { ASCII_NUMBER_FORMATS, docxFontDemandScalars, loadDocxFontSources } from './font-source-load.js';

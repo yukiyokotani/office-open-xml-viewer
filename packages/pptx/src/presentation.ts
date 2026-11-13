@@ -66,7 +66,8 @@ import { pptxSlideOfficeFontRequests, type PptxFontDemandFacts } from './font-re
 import {
   FontResolverBridgeHost,
   normalizeFontOptions,
-  type FontSource,
+  optionFontSources,
+  type FontSourceDescriptor,
   type FontSourceSession,
 } from '@silurus/ooxml-core/internal/font-sources';
 import {
@@ -264,7 +265,7 @@ export class PptxPresentation {
   private _cjkFallback: CjkLang = 'jp';
   /** Validated `LoadOptions.fonts` (normalised from the deprecated
    *  `useGoogleFonts`); undefined without sources. */
-  private _fonts: readonly FontSource[] | undefined;
+  private _fonts: readonly FontSourceDescriptor[] | undefined;
   /** Slides come from this package's own parser, so their text colour chains
    * are fully resolved (issue #1989). A caller-supplied model source sets this
    * false and keeps the 0.89.7 theme or `defaultTextColor` fallback. */
@@ -482,11 +483,11 @@ export class PptxPresentation {
             settled: false,
           } satisfies ProgressiveLoad
         : undefined;
-      pres._fonts = opts.fonts;
+      pres._fonts = optionFontSources(opts.fonts);
       await pres._parse(
         buffer,
         resourceOptions.policy,
-        opts.fonts,
+        optionFontSources(opts.fonts),
         opts.workerTimeoutMs,
         (usage) => metrics.observeUsage(usage),
         rendererDescriptors,
@@ -519,8 +520,8 @@ export class PptxPresentation {
    * covers are published. One owner covers ordinary, progressive and
    * selected-source Window load; the worker runs the same demand and session
    * in its own realm. The session and its CSS adapters load only when sources
-   * are configured. A ceiling breach rejects (`font-source-limit`); a failed
-   * face only warns and keeps its host fallback.
+   * are configured. A failed family or face (including a run-time limit
+   * breach) only warns and keeps its host fallback.
    */
   private async _ensureFontSources(
     names: readonly (string | null)[],
@@ -543,7 +544,7 @@ export class PptxPresentation {
   /** Worker mode: answer the render worker's `fontResolver` calls for the
    *  document about to be parsed (core `resolver-bridge-host.ts`): resolved
    *  through this realm's resolution cache and held until destroy. */
-  private _attachFontResolverBridge(fonts: readonly FontSource[] | undefined): void {
+  private _attachFontResolverBridge(fonts: readonly FontSourceDescriptor[] | undefined): void {
     this._fontResolverBridge?.dispose();
     this._fontResolverBridge = new FontResolverBridgeHost({
       post: (message, transfer) => (this._worker.postMessage as (value: unknown, transfer?: Transferable[]) => void)(message, transfer),
@@ -554,7 +555,7 @@ export class PptxPresentation {
   private async _parse(
     buffer: ArrayBuffer,
     resourcePolicy: NormalizedOoxmlResourcePolicy,
-    fonts: readonly FontSource[] | undefined = undefined,
+    fonts: readonly FontSourceDescriptor[] | undefined = undefined,
     timeoutMs?: number,
     onUsage?: (usage: import('@silurus/ooxml-core').OoxmlResourceUsageSnapshot) => void,
     renderers?: WorkerRendererDescriptors,
@@ -674,7 +675,7 @@ export class PptxPresentation {
   private async _parseMainProgressively(
     buffer: ArrayBuffer,
     resourcePolicy: NormalizedOoxmlResourcePolicy,
-    fonts: readonly FontSource[] | undefined,
+    fonts: readonly FontSourceDescriptor[] | undefined,
     timeoutMs: number | undefined,
     onUsage: ((usage: import('@silurus/ooxml-core').OoxmlResourceUsageSnapshot) => void) | undefined,
     progressive: ProgressiveLoad,
@@ -760,7 +761,7 @@ export class PptxPresentation {
   private async _parseWorkerProgressively(
     buffer: ArrayBuffer,
     resourcePolicy: NormalizedOoxmlResourcePolicy,
-    fonts: readonly FontSource[] | undefined,
+    fonts: readonly FontSourceDescriptor[] | undefined,
     timeoutMs: number | undefined,
     onUsage: ((usage: import('@silurus/ooxml-core').OoxmlResourceUsageSnapshot) => void) | undefined,
     renderers: WorkerRendererDescriptors | undefined,

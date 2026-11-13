@@ -135,7 +135,7 @@ export type RenderWorkerRequest =
        * safe data; `fontFiles` bytes are copied, never transferred). The worker
        * re-validates them and runs the same font-source session as main mode
        * against its own FontFaceSet. Never the deprecated `useGoogleFonts`. */
-      fonts?: readonly import('@silurus/ooxml-core/internal/font-sources').FontSource[];
+      fonts?: readonly import('@silurus/ooxml-core/internal/font-sources').FontSourceDescriptor[];
       allowFootnoteContinuation?: boolean;
       cjkFallback?: import('@silurus/ooxml-core').CjkLang;
       defaultCurrentDateMs: number;

@@ -4,7 +4,7 @@ import init, { PptxArchive, reinit } from './wasm/pptx_parser.js';
 import type { PptxTextRunInfo } from './renderer';
 import { pptxSlideOfficeFontRequests } from './font-requests';
 import { FontSourceSession, PptxInstalledFamilies, pptxFontDemand } from './font-source-load.js';
-import { assertFontSourceDescriptors, WorkerFontResolverClient, type FontSource } from '@silurus/ooxml-core/internal/font-sources';
+import { assertFontSourceDescriptors, WorkerFontResolverClient, type FontSourceDescriptor } from '@silurus/ooxml-core/internal/font-sources';
 import { acquireOfficeRoutes, distinctOfficeRouteLoads, type AcquiredOfficeRoutes } from './office-route-acquisition.js';
 import {
   findPreflightMimeType,
@@ -223,7 +223,7 @@ async function openPresentation(request: Extract<RenderWorkerRequest, { kind: 'p
   resourceUsage = undefined;
   // Descriptors crossed the realm boundary: validate them as strictly as the
   // factories did (TypeError / font-source-limit reject the parse).
-  const sources: readonly FontSource[] = request.fonts === undefined ? [] : assertFontSourceDescriptors(request.fonts);
+  const sources: readonly FontSourceDescriptor[] = request.fonts === undefined ? [] : assertFontSourceDescriptors(request.fonts);
   renderers = await loadWorkerRenderers(request.renderers);
 
   const bootstrap = await slidePull.run(() => executeArchiveFromNew(

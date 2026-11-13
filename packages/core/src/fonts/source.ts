@@ -12,15 +12,21 @@
  * CSS API such as Google Fonts is a {@link fontCssApi} descriptor filled with that
  * provider's data (`presets/google-fonts.ts`).
  *
- * Descriptors are plain frozen data so a load request can carry them to a
- * render worker unchanged. The one exception is {@link fontResolver}: its
- * application function never crosses a realm. The descriptor carries only an
- * id, and the function stays in a main-realm `WeakMap`.
+ * The public type {@link FontSource} is opaque: the factories are the only
+ * supported construction, and the `fonts` option accepts only values this
+ * realm's factories returned ({@link fontSourceDescriptors}), so the
+ * descriptor shape below stays library-internal and can change without a
+ * breaking change. Descriptors are plain frozen data so a load request can
+ * carry them to a render worker unchanged. The one exception is
+ * {@link fontResolver}: its application function never crosses a realm. The
+ * descriptor carries only an id, and the function stays in a main-realm
+ * `WeakMap`.
  *
  * Every factory validates its input before any load, throwing `TypeError` for
  * a malformed descriptor and `OoxmlError('font-source-limit')` for a value
  * beyond a generated hard ceiling. {@link assertFontSourceDescriptors} applies
- * the same validation to descriptors that crossed a realm. Relative URLs are
+ * the same validation to descriptors that crossed a realm (a render worker's
+ * copy). Relative URLs are
  * resolved against the calling realm's base URL at factory time, so a
  * descriptor only ever holds absolute URLs and a worker never resolves an
  * application URL against its own script URL.
@@ -49,13 +55,24 @@ export const FONT_SOURCE_PROTOCOL = 'ooxml-font-source/v1';
  *   it (the library fetches faces itself so their tables can be read; see
  *   `face-download.ts`), with credentials to the same origin only.
  * - `'omit'` sends no cookies or HTTP authentication at all: the stylesheet
- *   and every `url` face of a claimed family are fetched by the library with
- *   `credentials: 'omit'` (face bytes then count like `data` faces). The
- *   faces are fetched when the family is claimed (within the face-loading
- *   ceiling, shared across the realm's documents), not per `unicode-range`
- *   subset as the browser would.
+ *   and each `url` face are fetched by the library with `credentials: 'omit'`,
+ *   on the same demand-driven path as the default (only the `unicode-range`
+ *   subsets the painted text needs).
  */
 export type FontSourceCredentials = 'omit' | 'same-origin';
+
+declare const FONT_SOURCE_BRAND: unique symbol;
+
+/**
+ * A font source for `LoadOptions.fonts`. Opaque: create it with
+ * `googleFonts()`, {@link fontCssApi}, {@link fontCss}, {@link fontFiles} or
+ * {@link fontResolver}. Its contents are not part of the API, and the `fonts`
+ * option accepts only values those factories returned (in the same
+ * JavaScript realm); anything else is rejected with a `TypeError`.
+ */
+export interface FontSource {
+  readonly [FONT_SOURCE_BRAND]: true;
+}
 
 interface FontSourceBase {
   readonly protocol: typeof FONT_SOURCE_PROTOCOL;
@@ -63,7 +80,7 @@ interface FontSourceBase {
   readonly substitutes?: readonly FontSubstitution[];
 }
 
-/** A CSS API answering one request per served family. */
+/** Library-internal descriptor of a CSS API answering one request per served family. */
 export interface FontCssApiSource extends FontSourceBase {
   readonly kind: 'font-css-api';
   /** Absolute http(s) URL template with `{family}` (required) and `{query}`. */
@@ -98,16 +115,19 @@ export interface FontResolverSource extends FontSourceBase {
   readonly id: string;
 }
 
-export type FontSource = FontCssApiSource | FontCssSource | FontFilesSource | FontResolverSource;
+/** Library-internal descriptor behind an opaque {@link FontSource}. */
+export type FontSourceDescriptor = FontCssApiSource | FontCssSource | FontFilesSource | FontResolverSource;
 
 /** One `@font-face` a source answers with. Exactly one of `url` / `data`. */
 export interface FontFaceDeclaration {
   /** CSS family it registers under. */
   readonly family: string;
   /** Absolute http(s), blob: or data: URL. An http(s) or blob: URL is
-   * downloaded by the library itself in the painting realm (see
-   * {@link FontSourceCredentials}) or, in worker mode, in the page for a
-   * {@link fontResolver} answer; a data: URL is left to `FontFace`. */
+   * downloaded by the library itself when the painted text first needs it
+   * (its `unicode-range` subset): in the painting realm with the source's
+   * credentials (see {@link FontSourceCredentials}), or in the page, with
+   * `'same-origin'`, for a {@link fontResolver} answer in either mode; a
+   * data: URL is left to `FontFace`. */
   readonly url?: string;
   /** Owned font bytes; transferred once to a worker. */
   readonly data?: ArrayBuffer;
@@ -122,12 +142,21 @@ export interface FontFaceDeclaration {
  * What a {@link fontResolver} is asked for: the families one document (or one
  * progressive delta) needs that no earlier call answered.
  *
- * Contract: answer each family with every face you have for it (all weights,
- * styles and `unicode-range` subsets), or with nothing. A family is resolved
- * once per document, so faces left out are never asked for again; the
- * renderer picks the weight and style per run. URL faces load per painted
- * `unicode-range` subset in the painting realm, except in worker mode, where
- * the page fetches every http(s) / blob: face of a claimed family.
+ * Contract (settled for 0.90; later versions may add fields, never remove or
+ * change these):
+ * - answer each family with every face you have for it (all weights, styles
+ *   and `unicode-range` subsets), the way an `@font-face` stylesheet declares
+ *   a family, or with nothing (the next source is consulted). Faces of a
+ *   declared substitute's `use` family also answer it;
+ * - a family is resolved once per document (shared by concurrent documents
+ *   using the same function), so faces left out are never asked for again;
+ *   the renderer picks the weight and style per run;
+ * - the demand carries family names only, never document text: the answer
+ *   cannot depend on the characters painted. Per-text dynamic subsetting is
+ *   therefore not part of the contract; declare static `unicode-range`
+ *   subsets instead, and the library fetches only the ones the painted text
+ *   needs, in both modes, in the page (`credentials: 'same-origin'`);
+ * - `data` faces are used as returned.
  */
 export interface FontDemand {
   /** Authored family names not proven installed on the host (trimmed, original case). */
@@ -576,7 +605,7 @@ function normalizeFontResolver(fields: Fields, location: string): FontResolverSo
   });
 }
 
-function normalizeFontSource(value: unknown, location: string, base: string | undefined): FontSource {
+function normalizeFontSource(value: unknown, location: string, base: string | undefined): FontSourceDescriptor {
   const fields = requireRecord(value, location);
   if (fields.protocol !== FONT_SOURCE_PROTOCOL) {
     throw new TypeError(`${location} has unsupported protocol ${String(fields.protocol)}`);
@@ -593,11 +622,11 @@ function normalizeFontSource(value: unknown, location: string, base: string | un
 // ---- factories ----------------------------------------------------------------
 
 /** Descriptors this realm's factories produced (already validated, frozen). */
-const factoryDescriptors = new WeakSet<FontSource>();
+const factoryDescriptors = new WeakSet<object>();
 
-function issued<T extends FontSource>(source: T): T {
+function issued(source: FontSourceDescriptor): FontSource {
   factoryDescriptors.add(source);
-  return source;
+  return source as unknown as FontSource;
 }
 
 function factoryOptions(value: unknown, name: string, allowed: readonly string[]): Fields {
@@ -609,20 +638,20 @@ function factoryOptions(value: unknown, name: string, allowed: readonly string[]
 /** Any CSS API that answers one stylesheet per family through a URL template
  * (`{family}` is percent-encoded with `+` for spaces; `{query}` is inserted
  * verbatim from descriptor data, never from document content). */
-export function fontCssApi(options: FontCssApiOptions): FontCssApiSource {
+export function fontCssApi(options: FontCssApiOptions): FontSource {
   const fields = factoryOptions(options, 'fontCssApi', ['urlTemplate', 'query', 'families', 'substitutes', 'credentials']);
   return issued(normalizeCssApi({ ...fields, protocol: FONT_SOURCE_PROTOCOL, kind: 'font-css-api' }, 'fontCssApi()'));
 }
 
 /** One static stylesheet (self-hosted or kit CSS) describing many families. */
-export function fontCss(options: FontCssOptions): FontCssSource {
+export function fontCss(options: FontCssOptions): FontSource {
   const fields = factoryOptions(options, 'fontCss', ['url', 'substitutes', 'credentials']);
   return issued(normalizeFontFaceCss({ ...fields, protocol: FONT_SOURCE_PROTOCOL, kind: 'font-css' },
     'fontCss()', realmBaseUrl()));
 }
 
 /** Faces declared up front by the application (URLs or owned bytes). */
-export function fontFiles(options: FontFilesOptions): FontFilesSource {
+export function fontFiles(options: FontFilesOptions): FontSource {
   const fields = factoryOptions(options, 'fontFiles', ['faces', 'substitutes', 'credentials']);
   return issued(normalizeFontFiles({ ...fields, protocol: FONT_SOURCE_PROTOCOL, kind: 'font-files' },
     'fontFiles()', realmBaseUrl()));
@@ -636,17 +665,17 @@ let nextResolverId = 1;
  * Application resolution for authenticated, dynamic or in-memory fonts. The
  * function runs on the main thread only; in worker mode the worker asks main
  * to run it (`resolver-bridge.ts`), so credentials and network clients stay in
- * the application, and main also fetches the claimed http(s) / blob: `url`
- * faces the function returned and sends the bytes, so cookies, HTTP
- * authentication and Referer checks see the page in both modes. The same
- * function always yields the same id, so documents sharing it share
- * resolutions. See {@link FontDemand} for what to answer.
+ * the application, and main also fetches the http(s) / blob: `url` faces
+ * the function returned, as the worker's painted text needs them, and sends
+ * the bytes, so cookies, HTTP authentication and Referer checks see the page
+ * in both modes. The same function always yields the same id, so documents
+ * sharing it share resolutions. See {@link FontDemand} for the contract.
  *
  * Returned `data` buffers are owned by the library from then on (cached and
  * shared across documents of this realm); the application must not modify
  * them. In worker mode the worker receives a copy; nothing is detached.
  */
-export function fontResolver(resolve: FontResolveFn, options: FontResolverOptions = {}): FontResolverSource {
+export function fontResolver(resolve: FontResolveFn, options: FontResolverOptions = {}): FontSource {
   if (typeof resolve !== 'function') throw new TypeError('fontResolver() requires a function');
   const fields = factoryOptions(options, 'fontResolver', ['substitutes']);
   let id = resolverIds.get(resolve);
@@ -667,17 +696,37 @@ export function fontResolverFunction(source: FontResolverSource): FontResolveFn 
 }
 
 /**
- * Validate a `fonts` option value, in the realm that received it. Descriptors
- * issued by this realm's factories are returned as they are; anything else
- * (descriptors that crossed a realm, or hand-written objects) is validated as
- * strictly as the factories validate and returned as frozen copies. URLs must
- * already be absolute here.
+ * The descriptors of a public `fonts` option value. Only values this realm's
+ * factories returned are accepted (the factories are the only supported
+ * construction); anything else throws a `TypeError`.
  */
-export function assertFontSourceDescriptors(value: unknown): readonly FontSource[] {
+export function fontSourceDescriptors(value: unknown): readonly FontSourceDescriptor[] {
+  if (!Array.isArray(value)) throw new TypeError('fonts must be an array of font sources');
+  return Object.freeze(value.map((entry: unknown, index) => {
+    if (typeof entry !== 'object' || entry === null || !factoryDescriptors.has(entry)) {
+      throw new TypeError(`fonts[${index}] must be created by googleFonts(), fontCssApi(), fontCss(), fontFiles() or fontResolver()`);
+    }
+    return entry as FontSourceDescriptor;
+  }));
+}
+
+/** The descriptors behind a `fonts` value that `normalizeFontOptions` already
+ * accepted (undefined stays undefined); see {@link fontSourceDescriptors}. */
+export function optionFontSources(fonts: readonly FontSource[] | undefined): readonly FontSourceDescriptor[] | undefined {
+  return fonts === undefined ? undefined : fontSourceDescriptors(fonts);
+}
+
+/**
+ * Validate descriptors that crossed a realm (a render worker's structured
+ * clone of {@link fontSourceDescriptors}' result) as strictly as the factories
+ * validate, returning frozen copies; descriptors issued by this realm's
+ * factories are returned as they are. URLs must already be absolute here.
+ */
+export function assertFontSourceDescriptors(value: unknown): readonly FontSourceDescriptor[] {
   if (!Array.isArray(value)) throw new TypeError('fonts must be an array of font sources');
   return Object.freeze(value.map((entry: unknown, index) =>
-    factoryDescriptors.has(entry as FontSource)
-      ? entry as FontSource
+    factoryDescriptors.has(entry as object)
+      ? entry as FontSourceDescriptor
       : normalizeFontSource(entry, `fonts[${index}]`, undefined)));
 }
 

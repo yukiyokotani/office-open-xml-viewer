@@ -8,17 +8,31 @@ import {
 import {
   FONT_SOURCE_PROTOCOL,
   assertFontSourceDescriptors,
-  fontCssApi,
+  fontCssApi as publicFontCssApi,
   fontCssApiRequests,
-  fontCss,
-  fontFiles,
-  fontResolver,
+  fontCss as publicFontCss,
+  fontFiles as publicFontFiles,
+  fontResolver as publicFontResolver,
+  fontSourceDescriptors,
   dataUrlDecodedByteLength,
   fontResolverFunction,
   validateFontFaceDeclaration,
+  type FontCssApiSource,
+  type FontCssSource,
+  type FontFilesSource,
   type FontResolveFn,
+  type FontResolverSource,
+  type FontSource,
 } from './source.js';
 import { OFFICE_FONT_SUBSTITUTIONS } from './substitutions.js';
+
+// The descriptors behind the opaque factory results: these tests pin the
+// library-internal shape the worker re-validates.
+const descriptor = <T>(source: FontSource) => fontSourceDescriptors([source])[0] as T;
+const fontCssApi = (...args: Parameters<typeof publicFontCssApi>) => descriptor<FontCssApiSource>(publicFontCssApi(...args));
+const fontCss = (...args: Parameters<typeof publicFontCss>) => descriptor<FontCssSource>(publicFontCss(...args));
+const fontFiles = (...args: Parameters<typeof publicFontFiles>) => descriptor<FontFilesSource>(publicFontFiles(...args));
+const fontResolver = (...args: Parameters<typeof publicFontResolver>) => descriptor<FontResolverSource>(publicFontResolver(...args));
 
 function limitOf(run: () => unknown): unknown {
   try {
@@ -59,6 +73,17 @@ describe('font source descriptors', () => {
     expect(crossed[3]).toEqual({ protocol: FONT_SOURCE_PROTOCOL, kind: 'font-resolver', id: resolver.id });
     // Factory descriptors pass through without copying their face bytes.
     expect(assertFontSourceDescriptors(sources)[2]).toBe(sources[2]);
+  });
+
+  it('accepts only factory results at the public fonts boundary', () => {
+    const source = publicFontCss({ url: 'https://cdn.example/office.css' });
+    expect(fontSourceDescriptors([source])[0]).toBe(source);
+    // A copy, a spread or a hand-written descriptor is not a factory result,
+    // even when it is shaped exactly like one.
+    for (const forged of [structuredClone(source), { ...source }, { protocol: FONT_SOURCE_PROTOCOL, kind: 'font-css', url: 'https://cdn.example/office.css' }]) {
+      expect(() => fontSourceDescriptors([forged])).toThrow(/must be created by googleFonts\(\)/);
+    }
+    expect(() => fontSourceDescriptors('fonts')).toThrow(TypeError);
   });
 
   it('resolves relative application URLs against the calling realm, never in the receiving realm', () => {

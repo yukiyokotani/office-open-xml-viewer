@@ -47,9 +47,11 @@
  * - an `@font-face` block left unterminated at end of input is dropped rather
  *   than closed (a truncated stylesheet must not register a partial rule);
  * - the stylesheet is bounded by `HARD_MAX_FONT_SOURCE_STYLESHEET_BYTES` while
- *   it is read and its rules by `HARD_MAX_FONT_SOURCE_DECLARATIONS`; both
- *   reject with `OoxmlError('font-source-limit')`. The body is decoded as
- *   UTF-8 (`@charset` and `Content-Type` charset are not interpreted).
+ *   it is read and its rules by `HARD_MAX_FONT_SOURCE_DECLARATIONS`; a breach
+ *   (or a rule's oversized URL or data: face) fails the stylesheet like an
+ *   unreachable one, so the families asked of it keep their host fallback
+ *   with a warning. The body is decoded as UTF-8 (`@charset` and
+ *   `Content-Type` charset are not interpreted).
  */
 import { fontSourceLimitError } from '../errors/font-source-limit.js';
 import { OoxmlError } from '../errors/ooxml-error.js';
@@ -808,8 +810,8 @@ function parseFontFaceBody(
   try {
     return validateFontFaceDeclaration({ family, url: resolved, ...descriptors }, location);
   } catch (error) {
-    // A limit breach (oversized URL or data: face) fails closed; any other
-    // invalid rule is dropped like an invalid CSS declaration.
+    // A limit breach (oversized URL or data: face) fails the stylesheet; any
+    // other invalid rule is dropped like an invalid CSS declaration.
     if (error instanceof OoxmlError) throw error;
     return null;
   }
@@ -938,8 +940,8 @@ async function readBoundedText(response: StylesheetResponse): Promise<string> {
  * Fetch and parse one stylesheet in the painting realm. Credentials are
  * `'same-origin'` unless the source opted into `'omit'`; never `'include'`,
  * never custom headers. A network error, a non-OK status, a final URL that is
- * not http(s) or a stylesheet without any usable rule is a failure (host
- * fallback); a limit breach rejects.
+ * not http(s), a limit breach or a stylesheet without any usable rule is a
+ * failure (host fallback).
  */
 export async function fetchFontStylesheet(
   url: string,
@@ -965,8 +967,7 @@ export async function fetchFontStylesheet(
     text = await readBoundedText(response);
     complete = true;
   } catch (error) {
-    if (error instanceof OoxmlError) throw error;
-    if (signal.aborted) throw error;
+    if (signal.aborted && !(error instanceof OoxmlError)) throw error;
     return { ok: false, reason: error instanceof Error ? error.message : String(error) };
   } finally {
     signal.removeEventListener('abort', onAbort);
@@ -974,7 +975,13 @@ export async function fetchFontStylesheet(
   }
   const finalUrl = response.url || url;
   if (!/^https?:/i.test(finalUrl)) return { ok: false, reason: 'stylesheet redirected off http(s)' };
-  const declarations = parseFontFaceCss(text, finalUrl);
+  let declarations: FontFaceDeclaration[];
+  try {
+    declarations = parseFontFaceCss(text, finalUrl);
+  } catch (error) {
+    if (!(error instanceof OoxmlError)) throw error;
+    return { ok: false, reason: error.message };
+  }
   if (declarations.length === 0) return { ok: false, reason: 'no usable @font-face rule' };
   return { ok: true, declarations, finalUrl };
 }
@@ -1010,7 +1017,15 @@ async function resolveCssApiFamily(
   holder: object,
   scripts: FontSubstituteScripts,
 ): Promise<FamilyResolution> {
-  const requests = fontCssApiRequests(source, family, scripts);
+  let requests: ReturnType<typeof fontCssApiRequests>;
+  try {
+    requests = fontCssApiRequests(source, family, scripts);
+  } catch (error) {
+    // A document-supplied family whose request URL would exceed the URL
+    // ceiling fails alone.
+    if (!(error instanceof OoxmlError)) throw error;
+    return { kind: 'failed', reason: error.message };
+  }
   if (requests.length === 0) return { kind: 'absent' };
   const sheets = await Promise.all(requests.map((request) =>
     joinStylesheet(cache, request.url, source.credentials, signal, holder)));

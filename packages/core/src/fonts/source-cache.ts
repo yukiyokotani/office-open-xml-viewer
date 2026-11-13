@@ -28,7 +28,7 @@
 import { fontSourceLimitError } from '../errors/font-source-limit.js';
 import { createAbortError } from '../internal/abort.js';
 import { HARD_MAX_FONT_SOURCE_RETAINED_BYTES } from '../worker/resource-policy.generated.js';
-import { dataUrlDecodedByteLength, type FontFaceDeclaration, type FontSource } from './source.js';
+import { dataUrlDecodedByteLength, type FontFaceDeclaration, type FontSourceDescriptor } from './source.js';
 import type { FontSubstitution } from './substitutions.js';
 
 // ---- identity -------------------------------------------------------------------
@@ -87,7 +87,7 @@ function hashDeclaration(hash: IdentityHash, face: FontFaceDeclaration): void {
   else hash.text(face.url);
 }
 
-const sourceIds = new WeakMap<FontSource, string>();
+const sourceIds = new WeakMap<FontSourceDescriptor, string>();
 
 /**
  * Stable identity of a validated source descriptor in this realm. Descriptors
@@ -96,7 +96,7 @@ const sourceIds = new WeakMap<FontSource, string>();
  * `font-resolver` is identified by its function's id, so documents sharing one
  * resolver function share its resolutions.
  */
-export function fontSourceId(source: FontSource): string {
+export function fontSourceId(source: FontSourceDescriptor): string {
   const cached = sourceIds.get(source);
   if (cached) return cached;
   const hash = new IdentityHash().text(source.protocol).text(source.kind);
@@ -253,7 +253,8 @@ export function declarationBytes(declarations: readonly FontFaceDeclaration[]): 
  * A keyed map of shared tasks. Rejections and results `evict` accepts are
  * removed once settled, so failures are never cached. A kept result is charged
  * `weigh(result)` retained bytes for as long as the map keeps it; a charge
- * beyond the realm ceiling rejects every joiner and keeps nothing.
+ * beyond the realm ceiling keeps nothing and answers every joiner with
+ * `failed(reason)` (a failure of that entry alone, never of the document).
  */
 export class SharedTaskMap<T> {
   private readonly tasks = new Map<string, SharedTask<T>>();
@@ -274,6 +275,7 @@ export class SharedTaskMap<T> {
     /** Called once a task leaves the map (and again if its producer finishes
      * afterwards), so work it held elsewhere is released too. */
     private readonly onDrop: (task: object) => void = () => undefined,
+    private readonly failed?: (reason: string) => T,
   ) {}
 
   /** Forget `task` (if it is still the entry for `key`) and refund its
@@ -322,7 +324,13 @@ export class SharedTaskMap<T> {
           if (this.tasks.get(key) !== created) { this.onDrop(created); return value; }
           if (this.evict(value)) { this.drop(key, created); return value; }
           const bytes = this.weigh(value);
-          chargeRetainedBytes(bytes);
+          try {
+            chargeRetainedBytes(bytes);
+          } catch (error) {
+            if (!this.failed || !(error instanceof Error)) throw error;
+            this.drop(key, created);
+            return this.failed(error.message);
+          }
           if (bytes > 0) this.charged.set(created, bytes);
           this.values.set(created, value);
           return value;
@@ -437,7 +445,7 @@ interface CacheEntry {
 const caches = new Map<string, CacheEntry>();
 
 /** Hold the shared cache of one source identity until `release()`. */
-export function acquireSourceCache(source: FontSource): SourceCache {
+export function acquireSourceCache(source: FontSourceDescriptor): SourceCache {
   const id = fontSourceId(source);
   const existing = caches.get(id);
   if (existing) {
@@ -451,11 +459,11 @@ export function acquireSourceCache(source: FontSource): SourceCache {
   // requested it is open (at most HARD_MAX_FONT_SOURCE_FAMILIES per session),
   // a stylesheet while a family resolution that used it lives.
   const stylesheets = new SharedTaskMap<FontStylesheet | FontSourceFailure>((value) => !value.ok,
-    (value) => (value.ok ? declarationBytes(value.declarations) : 0));
+    (value) => (value.ok ? declarationBytes(value.declarations) : 0), undefined, (reason) => ({ ok: false, reason }));
   const families = new SharedTaskMap<FamilyResolution>((value) => value.kind === 'failed',
     (value) => (source.kind === 'font-resolver' && value.kind === 'claimed'
       ? declarationBytes(value.declarations) : 0),
-    (task) => stylesheets.release(task));
+    (task) => stylesheets.release(task), (reason) => ({ kind: 'failed', reason }));
   const entry: CacheEntry = {
     refs: 1,
     cache: { id, stylesheets, families, release: () => undefined },

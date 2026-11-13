@@ -30,7 +30,7 @@ import {
   chartFontFamilies,
   fontFamilyKey,
   type FontSessionDemand,
-  type FontSource,
+  type FontSourceDescriptor,
   type FontSubstitution,
 } from '@silurus/ooxml-core/internal/font-sources';
 import { usesJapaneseCellFonts } from './internal/cell-font-language.js';
@@ -45,7 +45,7 @@ export {
 } from '@silurus/ooxml-core/internal/font-sources';
 
 /** The substitutions every configured source declares, in option order. */
-export function declaredFontSubstitutions(sources: readonly FontSource[]): readonly FontSubstitution[] {
+export function declaredFontSubstitutions(sources: readonly FontSourceDescriptor[]): readonly FontSubstitution[] {
   return Object.freeze(sources.flatMap((source) => source.substitutes ?? []));
 }
 

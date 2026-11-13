@@ -13,7 +13,7 @@ import {
   probeFontFamilyPresence,
   substitutionsFor,
   type FontFamilyPresence,
-  type FontSource,
+  type FontSourceDescriptor,
   type FontSubstitution,
 } from '@silurus/ooxml-core/internal/font-sources';
 import { declaredFontSubstitutions } from './font-substitution-scope.js';
@@ -185,7 +185,7 @@ export interface DocxFontFamilyPlan {
  */
 export function docxFontFamilyPlan(
   doc: DocxDocumentModel,
-  sources: readonly FontSource[],
+  sources: readonly FontSourceDescriptor[],
   cjkFallback: CjkLang | undefined,
   officeFonts: DocxOfficeFontPresence,
 ): DocxFontFamilyPlan {
@@ -245,7 +245,7 @@ export type DocxOfficeFontPresence = Readonly<{
  */
 export async function completeDocxFontPresence<T extends DocxOfficeFontPresence>(
   doc: DocxDocumentModel,
-  sources: readonly FontSource[],
+  sources: readonly FontSourceDescriptor[],
   cjkFallback: CjkLang | undefined,
   officeFonts: T,
   probe: (families: readonly string[]) => Promise<FontFamilyPresence> = (families) => probeFontFamilyPresence(families),

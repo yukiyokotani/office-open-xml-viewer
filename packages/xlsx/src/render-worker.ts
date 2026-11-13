@@ -53,7 +53,7 @@ import {
   XlsxFontDemand,
   declaredFontSubstitutions,
 } from './font-source-load.js';
-import { assertFontSourceDescriptors, WorkerFontResolverClient, type FontSource } from '@silurus/ooxml-core/internal/font-sources';
+import { assertFontSourceDescriptors, WorkerFontResolverClient, type FontSourceDescriptor } from '@silurus/ooxml-core/internal/font-sources';
 import { officeRequestKey } from './shape-office-line.js';
 import { resolveSharedStringRows } from './shared-strings.js';
 import {
@@ -121,7 +121,7 @@ let checkedOfficeTupleSet = new Set<string>();
 let officeSheetLoads = new WeakMap<Worksheet, Promise<void>>();
 let officeSheetLoadQueue: Promise<void> = Promise.resolve();
 
-function startFontLoad(parsed: ParsedWorkbook, sources: readonly FontSource[]): void {
+function startFontLoad(parsed: ParsedWorkbook, sources: readonly FontSourceDescriptor[]): void {
   // Each load-time resource is owned and awaited by parse. Sequential adoption
   // also lets parse cleanup release earlier faces if the next loader rejects.
   fontsLoaded = (async () => {
@@ -321,7 +321,7 @@ self.onmessage = async (e: MessageEvent<
       japaneseCellFonts = req.japaneseCellFonts === true;
       // Descriptors crossed the realm boundary: validate them as strictly as
       // the factories did (TypeError / font-source-limit reject the parse).
-      const sources: readonly FontSource[] = req.fonts === undefined ? [] : assertFontSourceDescriptors(req.fonts);
+      const sources: readonly FontSourceDescriptor[] = req.fonts === undefined ? [] : assertFontSourceDescriptors(req.fonts);
       await fontsLoaded;
       await officeSheetLoadQueue;
       ownsParseResources = true;

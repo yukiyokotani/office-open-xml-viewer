@@ -6,7 +6,6 @@
  * Library resource policy, not OOXML behaviour.
  */
 import { fontSourceLimitError } from '../errors/font-source-limit.js';
-import type { OoxmlFontSourceViolation } from '../errors/ooxml-error.js';
 import { HARD_MAX_FONT_SOURCE_DECLARATIONS } from '../worker/resource-policy.generated.js';
 import { validateFontFaceDeclaration, type FontFaceDeclaration } from './source.js';
 
@@ -17,17 +16,16 @@ export type AdmittedFontResolverResult =
   | { readonly ok: false; readonly reason: string };
 
 /**
- * Validate what a resolver function returned. A non-array or a malformed
- * declaration is a failure (`ok: false`, the families keep their host
- * fallback); more than `HARD_MAX_FONT_SOURCE_DECLARATIONS` entries or a `data`
- * buffer beyond the face ceiling throws `OoxmlError('font-source-limit')`,
- * which rejects the load. Declarations are validated in order, so the first
- * offending entry decides between the two.
+ * Validate what a resolver function returned. A non-array, a malformed
+ * declaration, more than `HARD_MAX_FONT_SOURCE_DECLARATIONS` entries or a
+ * face beyond the face ceiling is a failure of the call's families (`ok:
+ * false`: they keep their host fallback with a warning). A run-time answer
+ * never rejects the load: only factory input is rejected outright.
  */
 export function admitFontResolverResult(raw: unknown): AdmittedFontResolverResult {
   if (!Array.isArray(raw)) return { ok: false, reason: 'resolver did not return an array' };
   if (raw.length > HARD_MAX_FONT_SOURCE_DECLARATIONS) {
-    throw fontSourceLimitError('declarations', HARD_MAX_FONT_SOURCE_DECLARATIONS, raw.length);
+    return { ok: false, reason: fontSourceLimitError('declarations', HARD_MAX_FONT_SOURCE_DECLARATIONS, raw.length).message };
   }
   try {
     return {
@@ -36,25 +34,6 @@ export function admitFontResolverResult(raw: unknown): AdmittedFontResolverResul
         validateFontFaceDeclaration(entry, `font resolver declaration ${index}`))),
     };
   } catch (error) {
-    if (!(error instanceof TypeError)) throw error;
-    return { ok: false, reason: error.message };
+    return { ok: false, reason: error instanceof Error ? error.message : String(error) };
   }
-}
-
-/** Limit errors a bridged resolver call reports for the main-side admission:
- * the painting realm rethrows them as its own admission would have. */
-const bridgedLimitErrors = new WeakSet<object>();
-
-/** The `font-source-limit` rejection the main-side admission of a bridged
- * resolver call raised, re-created in the painting realm. */
-export function bridgedFontSourceLimitError(violation: OoxmlFontSourceViolation): Error {
-  const error = fontSourceLimitError(violation.quota, violation.limit, violation.observed);
-  bridgedLimitErrors.add(error);
-  return error;
-}
-
-/** Whether `error` is a {@link bridgedFontSourceLimitError}. An application
- * resolver that throws an `OoxmlError` itself only fails its families. */
-export function isBridgedFontSourceLimitError(error: unknown): boolean {
-  return typeof error === 'object' && error !== null && bridgedLimitErrors.has(error);
 }
