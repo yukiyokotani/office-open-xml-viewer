@@ -1312,6 +1312,34 @@ function* paginateBodyPassSteps(
     // interval, not by that reduced current-page section band.
     return interval.blockEndPt - interval.blockStartPt;
   };
+  // Producer page objects (never DOCX): their wrapping drawings register at
+  // the opening prescan of their own page, whatever the flow. They depend on
+  // the page index alone, so every pass registers them identically; they are
+  // therefore not convergence reads (the recorded prescan holds only the
+  // flow's anchors, which the destination plan reproduces).
+  const pageObjectAnchors = new Map<number, PageStartAnchors[number][]>();
+  for (const object of input.pageObjects ?? []) {
+    const anchors = pageObjectAnchors.get(object.pageIndex) ?? [];
+    for (const anchor of object.wrapAnchors) {
+      anchors.push(Object.freeze({
+        kind: 'drawing' as const,
+        occurrenceId: anchor.occurrenceId,
+        paragraphSource: anchor.paragraphSource,
+      }));
+    }
+    pageObjectAnchors.set(object.pageIndex, anchors);
+  }
+  const pageOpeningDomains = new Map<number, string>();
+  const pageObjectsAt = (target: BodyPaginationState): PageStartAnchors => {
+    if (pageObjectAnchors.size === 0) return Object.freeze([]);
+    const location = acquisitionLocation(target);
+    if (!pageOpeningDomains.has(location.pageIndex)) {
+      pageOpeningDomains.set(location.pageIndex, location.flowDomainId);
+    }
+    return Object.freeze(pageOpeningDomains.get(location.pageIndex) === location.flowDomainId
+      ? pageObjectAnchors.get(location.pageIndex) ?? []
+      : []);
+  };
   const pageStartAnchors = (target: BodyPaginationState, startIndex: number): PageStartAnchors => {
     if (anchorDestinations !== null) {
       const location = acquisitionLocation(target);
@@ -1390,13 +1418,14 @@ function* paginateBodyPassSteps(
       registeredAnchorKeys.clear();
     }
     anchors.forEach((anchor) => registeredAnchorKeys.add(anchor.occurrenceId));
-    if (anchors.length === 0) return;
+    const pageObjects = pageObjectsAt(target);
+    if (anchors.length === 0 && pageObjects.length === 0) return;
     if (!session.prescanPageAnchors) {
       throw new Error('Page-owned anchors require canonical prescan acquisition');
     }
     const location = acquisitionLocation(target);
     const delta = session.prescanPageAnchors({
-      anchors,
+      anchors: pageObjects.length === 0 ? anchors : Object.freeze([...anchors, ...pageObjects]),
       location,
       availableInlineExtentPt: location.availableBounds.widthPt,
     });
@@ -1598,6 +1627,7 @@ function* paginateBodyPassSteps(
   const perColumnFootnoteBands = (): boolean => wordPerColumnFootnoteBandsApply(
     input.compatibilityMode,
     activeRegion(state).columns.length,
+    input.producerFootnoteColumnBands === true,
   );
   const activeFootnoteBandId = (): string => {
     const pageBand = pageFootnoteBandId(state.flow.pageIndex);
@@ -3664,6 +3694,17 @@ function* paginateBodyPassSteps(
     observer?.onPageDrafts?.(state.pages);
     yield state.pages.length;
   }
+  // A page object on a page past the content: the document runs to its page
+  // with empty pages, as LibreOffice extends it (ODF §19.758).
+  const lastPageObjectIndex = Math.max(-1, ...(input.pageObjects ?? []).map((object) => object.pageIndex));
+  while (state.flow.pageIndex < lastPageObjectIndex) {
+    yield* commitTransition(
+      advanceToPage(state.flow, state.flow.section, 'overflow'),
+      input.sequence.length,
+    );
+    observer?.onPageDrafts?.(state.pages);
+    yield state.pages.length;
+  }
   noteProgress.assertProgress();
   const reservedPages = new Set([
     ...footnoteReserveByPage.keys(),
@@ -3971,11 +4012,20 @@ function composePageStories(
   owners: ReadonlyMap<string, BodySectionLayoutInput>,
   footnotesByPage: ReadonlyMap<number, readonly NoteLayout[]>,
   endnotesByPage: ReadonlyMap<number, readonly NoteLayout[]>,
+  pageObjects: BodyLayoutInput['pageObjects'] = undefined,
 ): DocumentLayout {
   const storyDiagnostics: LayoutDiagnostic[] = [];
+  const pageObjectSources = new Map<number, SourceRef[]>();
+  for (const object of pageObjects ?? []) {
+    const sources = pageObjectSources.get(object.pageIndex) ?? [];
+    sources.push(object.source);
+    pageObjectSources.set(object.pageIndex, sources);
+  }
   const visited = new WeakSet<object>();
   const pages = layout.pages.map((page, pageIndex) => {
-    if (page.parityBlank) return page;
+    // A parity blank page carries no stories, except a page object anchored
+    // to it (LibreOffice draws it there).
+    if (page.parityBlank && !pageObjectSources.has(page.pageIndex)) return page;
     const owner = owners.get(page.sectionOccurrenceId);
     if (!owner) throw new Error(`Unknown body section ${page.sectionOccurrenceId}`);
     if (!session.layoutStory) {
@@ -3983,7 +4033,7 @@ function composePageStories(
         || Object.values(owner.footers).some((source) => source !== null)
         || (footnotesByPage.get(page.pageIndex)?.length ?? 0) > 0
         || (endnotesByPage.get(page.pageIndex)?.length ?? 0) > 0;
-      if (!hasPageStories) return page;
+      if (!hasPageStories && !pageObjectSources.has(page.pageIndex)) return page;
       throw new Error('Page-story composition requires a story-capable layout session');
     }
     const vertical = sectionWritingMode(page.section) !== 'horizontal-tb';
@@ -4043,8 +4093,75 @@ function composePageStories(
       }), kind, geometry);
       return translateStoryLayout(story, translation);
     };
-    const header = acquire('header');
-    const footer = acquire('footer');
+    const header = page.parityBlank ? null : acquire('header');
+    const footer = page.parityBlank ? null : acquire('footer');
+    // The page's producer page objects: a header-class page story whose
+    // drawings are positioned on the page (their wrap was registered on the
+    // body at the page's start). It is laid out in the body's own section
+    // frame (as the prescan resolved its exclusions, vertical pages too) and
+    // painted in the body stacking context, so its drawings order with body
+    // text and body anchors as body page anchors do.
+    // A parity blank page has no body region: its page objects (nothing to
+    // wrap there) are laid out like the page's other stories, in the
+    // upright page frame.
+    const blankPageObjects = page.parityBlank;
+    const bodyGeometry = blankPageObjects ? geometry : page.section.geometry;
+    // The inline frame the prescan resolved the objects' exclusions in: the
+    // page's opening body flow domain (its first column), so column- and
+    // paragraph-relative positions paint where they wrap.
+    const openingDomainId = page.sectionRegions[0]?.flowDomainIds[0];
+    const openingDomain = blankPageObjects || openingDomainId === undefined
+      ? undefined
+      : page.flowDomains.find((domain) => domain.id === openingDomainId);
+    const pageObjectBounds = Object.freeze({
+      xPt: openingDomain ? openingDomain.logicalBounds.xPt : Math.abs(bodyGeometry.marginLeft),
+      yPt: 0,
+      widthPt: openingDomain
+        ? openingDomain.logicalBounds.widthPt
+        : Math.max(0, bodyGeometry.pageWidth
+          - Math.abs(bodyGeometry.marginLeft) - Math.abs(bodyGeometry.marginRight)),
+      heightPt: bodyGeometry.pageHeight,
+    });
+    const pageObjectLayouts = (pageObjectSources.get(page.pageIndex) ?? []).map((source) => {
+      const { story, translation } = layoutBandStory((band) => session.layoutStory!({
+        source,
+        pageStoryOwner: owner.sectionOccurrenceId,
+        pageIndex: page.pageIndex,
+        pageNumber: { displayNumber: page.pageNumber.displayNumber, format: page.pageNumber.format },
+        section: blankPageObjects ? pageStorySection : page.section,
+        container: {
+          id: `story:${source.storyInstance}`,
+          kind: 'header',
+          // The story only carries page-positioned drawings; a drawing as
+          // large as the page must not exhaust a band.
+          capacity: 'unbounded',
+          bounds: pageObjectBounds,
+        },
+        ...(band ? { bandTranslationPt: band } : {}),
+      }), 'header', bodyGeometry);
+      return Object.freeze({ id: `story:${source.storyInstance}`, story: translateStoryLayout(story, translation) });
+    });
+    const pageObjectNodes = pageObjectLayouts.flatMap(({ story }) => story.blocks);
+    // The page objects' domains are in the body's section frame, as their
+    // contents are; physical bounds through the page's own transform.
+    const bodyRegion = blankPageObjects ? undefined : page.sectionRegions[0];
+    const pageObjectDomains = pageObjectLayouts.map(({ id, story }) => {
+      const logicalBounds = Object.freeze({
+        xPt: pageObjectBounds.xPt,
+        yPt: story.flowBounds.yPt,
+        widthPt: pageObjectBounds.widthPt,
+        heightPt: story.advancePt,
+      });
+      return Object.freeze({
+        id,
+        kind: 'header' as const,
+        ...(bodyRegion ? { sectionRegionId: bodyRegion.id } : {}),
+        logicalBounds,
+        physicalBounds: bodyRegion
+          ? Object.freeze(transformRect(bodyRegion.coordinateSpace.logicalToPhysical, logicalBounds))
+          : logicalBounds,
+      });
+    });
     const retainedNotes = footnotesByPage.get(page.pageIndex) ?? [];
     const noteRegion = page.sectionRegions.at(-1);
     const noteStack = footnoteStack(page, retainedNotes, sessionNotePolicies.get(session));
@@ -4121,6 +4238,7 @@ function composePageStories(
               : logicalBounds,
           });
         })),
+      ...pageObjectDomains,
       ...(footer ? [Object.freeze({
         id: `story:footer:page:${page.pageIndex}`,
         kind: 'footer' as const,
@@ -4156,6 +4274,9 @@ function composePageStories(
     const noteIndex = lastBodyIndex < 0 ? withHeader.length : lastBodyIndex + 1;
     const entries: PageLayerNode[] = [
       ...withHeader.slice(0, noteIndex),
+      ...pageObjectNodes.map((node): PageLayerNode => ({
+        layer: 'body', node, coordinateSpace: blankPageObjects ? coordinateSpace : 'section-logical',
+      })),
       ...notes.map((node): PageLayerNode => ({
         layer: 'notes', node, coordinateSpace: 'section-logical',
       })),
@@ -4166,14 +4287,19 @@ function composePageStories(
     ];
     // The body pass collected only body diagnostics; these stories are
     // composed here, so their own diagnostics are collected here.
-    storyDiagnostics.push(...[...(header?.blocks ?? []), ...notes, ...(footer?.blocks ?? [])]
+    storyDiagnostics.push(...[...(header?.blocks ?? []), ...pageObjectNodes, ...notes,
+      ...(footer?.blocks ?? [])]
       .flatMap((node) => nestedStoryDiagnostics(node, visited)));
     return Object.freeze({
       ...page,
+      // A parity blank page holding a page object is no longer blank: it
+      // carries that drawing (LibreOffice draws it on the inserted page).
+      ...(page.parityBlank ? { parityBlank: false } : {}),
       flowDomains: Object.freeze([...page.flowDomains, ...storyDomains]),
       layers: createPageLayers(entries),
       readingOrder: Object.freeze([
         ...(header?.blocks.map((node) => node.id) ?? []),
+        ...pageObjectNodes.map((node) => node.id),
         ...page.readingOrder,
         ...notes.map((note) => note.id),
         ...(footer?.blocks.map((node) => node.id) ?? []),
@@ -5613,6 +5739,7 @@ function composeBodyPaginationResult(
     owners,
     pass.footnoteLayoutsByPage,
     pass.endnoteLayoutsByPage,
+    input.pageObjects,
   );
   const hasRetainedFootnotes = pageStories.pages.some((page) =>
     page.layers.notes.some((note) => note.source.story === 'footnote'));

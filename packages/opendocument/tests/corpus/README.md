@@ -35,26 +35,33 @@ node packages/opendocument/tests/corpus/run.mjs
 
 Options:
 
-- `--rules on`: a dry run with the pending LibreOffice compatibility rules
-  (`CompatRules`) enabled.
-- `--unmask-settings`: a diagnostic render with the settings.xml
-  layout-flag check disabled.
 - `--build`: rebuild the DOCX and ODT WASM first.
-- `--filter <substring>` and `--limit N`: run a subset.
+- `--filter <substring>`, `--list <file of corpus-relative paths>` and
+  `--limit N`: run a subset.
 - `--jobs N`: the number of Chrome workers.
 - `--fresh`: discard the previous results under the same label.
 
-Results go to `packages/opendocument/public/private/harness/<sha>-rules-<off|on>[-settings-unmasked]/`:
+Results go to `packages/opendocument/public/private/harness/<sha>[-dirty]/ (or `--label`)`:
 
-- `report.md` and `summary.json`: the acceptance rate, rejection codes ranked
-  by file count, the codes behind `compatibility-setting`, the page-diff
-  distribution and the worst pages.
+- `report.md` and `summary.json`: the share of files opened, page-count
+  matches, any rejection codes, the page-diff distribution and the worst
+  pages.
 - `worst/`: side-by-side PNGs of the worst pages (LibreOffice | ours | diff).
 - `results/`: one JSON per file. A rerun with the same label resumes.
 
-Rejection codes come from the reader's native `inspect_odt` example, run on
-the same files. The browser path reports only `source-subset`. The report
-lists any file where the browser result and the native result disagree.
+The reader rejects only corrupt, encrypted or oversized input; the native
+`inspect_odt` example, run on the same files, records the reason for any
+rejection, and the report lists files where the browser result and the
+native result disagree. Set `ODF_HARNESS_MAX_PAGES=N` to compare only the
+first N pages of each document for a quick sample.
+
+The renderer loads the opt-in equation and TIFF renderers, as the DOCX visual
+fixture does. `ODF_HARNESS_LO_FACES=1` also serves, through the `fonts` load
+option, the faces LibreOffice drew each PDF with (`fonts.mjs`: read with
+`pdffonts`/`pdftohtml`; LibreOffice's Carlito/Caladea replacements, its
+fallback faces for families this machine lacks, and its bundled fonts). It
+is off by default: the DOCX layout measures a served face's line box without
+the face's hhea line gap, so served faces skew line pitch.
 
 Page scores:
 

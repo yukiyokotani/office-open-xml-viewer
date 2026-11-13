@@ -15,6 +15,8 @@ pub const NS_XML: &str = "http://www.w3.org/XML/1998/namespace";
 pub const NS_LOEXT: &str = "urn:org:documentfoundation:names:experimental:office:xmlns:loext:1.0";
 pub const NS_OFFICEOOO: &str = "http://openoffice.org/2009/office";
 pub const NS_CONFIG: &str = "urn:oasis:names:tc:opendocument:xmlns:config:1.0";
+/// LibreOffice's Word-interop fieldmarks (`field:fieldmark-start` et al.).
+pub const NS_FIELD: &str = "urn:openoffice:names:experimental:ooo-ms-interop:xmlns:field:1.0";
 
 /// Implementation bound on the nodes of one parsed part; the part's inflated
 /// size is already bounded by the package governors.
@@ -275,6 +277,32 @@ pub fn count_attribute(
         "repeat count",
     )?;
     Ok(count.map_or(1, |count| (count as u32).max(1)))
+}
+
+/// Stepped walks: the only way the text reader visits XML nodes. Each node
+/// an iterator yields takes one step of the running [`crate::budget`]
+/// scope, so no search or scan over nodes is free, however it is written.
+/// The step is counted here and checked at the walker's next
+/// `budget::tick(..)?` and at the end of the read: an iterator cannot
+/// return the rejection itself.
+pub trait Stepped<'a, 'i: 'a>: Sized {
+    /// The child nodes, a step each.
+    fn kids(self) -> impl DoubleEndedIterator<Item = roxmltree::Node<'a, 'i>>;
+    /// The node and its descendants, a step each.
+    fn subtree(self) -> impl Iterator<Item = roxmltree::Node<'a, 'i>>;
+}
+
+impl<'a, 'i: 'a> Stepped<'a, 'i> for roxmltree::Node<'a, 'i> {
+    fn kids(self) -> impl DoubleEndedIterator<Item = roxmltree::Node<'a, 'i>> {
+        self.children().inspect(|_| {
+            let _ = crate::budget::tick(1);
+        })
+    }
+    fn subtree(self) -> impl Iterator<Item = roxmltree::Node<'a, 'i>> {
+        self.descendants().inspect(|_| {
+            let _ = crate::budget::tick(1);
+        })
+    }
 }
 
 #[cfg(test)]

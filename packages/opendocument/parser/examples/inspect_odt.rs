@@ -1,5 +1,6 @@
 //! Local inspection: admit or reject ODT files and print the reason or the
-//! paragraph count. `cargo run --example inspect_odt --features odt -- <files>`
+//! paragraph count, with what the read held at its peak and the steps it
+//! took (ODT_DUMP=1 prints the DOCX model as JSON). `cargo run --example inspect_odt --features odt -- <files>`
 use opendocument_parser::{
     odt,
     package::{OdfPackage, PackageLimits},
@@ -7,16 +8,23 @@ use opendocument_parser::{
 fn main() {
     for path in std::env::args().skip(1) {
         let bytes = std::fs::read(&path).expect("read");
-        let result = OdfPackage::open(
+        let package = OdfPackage::open(
             bytes,
             ooxml_common::resource::OoxmlFormat::Docx,
             PackageLimits::default(),
             &odt::MEDIA_TYPES,
-        )
-        .and_then(|package| odt::read(&package));
+        );
+        let (result, peak, work) = match &package {
+            Ok(package) => odt::read_measured(package, odt::MAX_MODEL_BYTES),
+            Err(error) => (Err(error.clone()), 0, 0),
+        };
         match result {
+            Ok((document, _)) if std::env::var("ODT_DUMP").is_ok() => {
+                // ODT_DUMP=1: the DOCX model as JSON (local debugging).
+                println!("{}", serde_json::to_string_pretty(&document).expect("json"));
+            }
             Ok((document, images)) => println!(
-                "{path}: admitted, {} body elements, {} images",
+                "{path}: admitted, {} body elements, {} images, peak {peak} bytes, {work} steps",
                 document.body.len(),
                 images.len()
             ),

@@ -59,9 +59,9 @@
 //!   runs, to [`crate::xml::MAX_NODES_PER_PART`] nodes,
 //!   [`crate::xml::MAX_XML_RESERVATION_BYTES`] of parser records and
 //!   [`crate::xml::MAX_XML_WORK`] units of parsing work;
-//! * handing the model to the host (the spreadsheet session): the workbook
-//!   bootstrap and each worksheet chunk are written through bounded
-//!   writers (the workbook and worksheet JSON limits of the shared
+//! * handing the model to the host: for the spreadsheet session, the
+//!   workbook bootstrap and each worksheet chunk are written through
+//!   bounded writers (the workbook and worksheet JSON limits of the shared
 //!   resource policy), rows are lent at most 128 at a time, and an image
 //!   is one package entry, at most the standard entry limit.
 //!

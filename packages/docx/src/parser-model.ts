@@ -36,6 +36,7 @@ import type {
   VmlTextPathAcquisitionInput,
 } from './layout/types.js';
 import type { MathOccurrence } from './layout/resources.js';
+import { documentPageObjects, type PageObjectStoryWire } from './page-object-wire.js';
 import { anchorOccurrenceKey, chartResourceKey, mathResourceKey, sourceKey } from './layout/source-key.js';
 import { mathFallbackText } from './layout/math-fallback-text.js';
 import type {
@@ -89,7 +90,7 @@ import type {
   BodyLayoutInput,
   BodyLayoutSequenceEntryFor,
 } from './layout/body-layout-input.js';
-import { projectBodyLayoutInput } from './layout/body-layout-input.js';
+import { pageObjectStorySource, projectBodyLayoutInput } from './layout/body-layout-input.js';
 import type { BodyAcquisitionInputProjections } from './layout/acquisition-input-projections.js';
 import type { DocumentTypographySettingsInput } from './layout-context.js';
 import { isInklessParagraph } from './layout/paragraph-visibility.js';
@@ -257,8 +258,30 @@ export type InternalMathRun = Extract<DocRun, { type: 'math' }> & {
   readonly resourceKey: string;
 };
 
+export { documentPageObjects, type PageObjectStoryWire };
+
+/** Private producer settings (never authored by OOXML, and not part of the
+ * public `DocumentSettings`): a model source sets them on the settings it
+ * hands over. */
+export interface ProducerDocumentSettings {
+  /** Every column of a multi-column section owns its footnote band, as
+   *  LibreOffice lays out footnotes. */
+  readonly __footnoteColumnBands?: boolean;
+  /** Lines snapped to an active line grid count cells from each face's own
+   *  line box, without Word's Far East 1.3 x usWin rule, as LibreOffice
+   *  does, and take their whole cells at the page edge (no grid-leading
+   *  overhang). */
+  readonly __plainFontLineBoxes?: boolean;
+}
+
+/** The producer settings of a model; none is set for a DOCX document. */
+export function producerDocumentSettings(doc: DocxDocumentModel): ProducerDocumentSettings {
+  return (doc.settings ?? {}) as ProducerDocumentSettings;
+}
+
 export interface InternalDocxDocumentModel extends DocxDocumentModel {
   fontFamilyCharsets?: Record<string, string>;
+  __pageObjects?: PageObjectStoryWire[];
   readonly diagnostics?: readonly ParseDiagnosticWire[];
   readonly __pageLayoutSettings?: Readonly<{
     mirrorMargins?: boolean;
@@ -916,6 +939,8 @@ export function tableFormatInput(table: TableLayoutSource): TableFormatInput {
     return {
       height: rowWire?.height ? privateTableRowHeight(rowWire.height) : publicTableRowHeight(row),
       cantSplit: row.cantSplit === true,
+      ...((row as { __cutsInPlace?: boolean }).__cutsInPlace === true
+        ? { cutsInPlace: true as const } : {}),
       repeatedHeader: row.isHeader === true,
       cellSpacingPt: wordTableCellSpacingPt(
         rowWire?.cellSpacing,
@@ -1456,10 +1481,24 @@ export function bodyLayoutAcquisitionInput(doc: DocxDocumentModel): BodyLayoutAc
       startType: occurrence.startType,
     });
   });
+  // Producer page objects: each page's story and its wrapping drawings
+  // (page-owned on both axes, as `acquiredBodyParagraph` selects them).
+  const pageObjects = documentPageObjects(doc).map((object, ordinal) => {
+    const source = pageObjectStorySource(ordinal);
+    const wrapAnchors = object.body.flatMap((element, index) => {
+      if (element.type !== 'paragraph') return [];
+      const paragraphSource: SourceRef = Object.freeze({ ...source, path: Object.freeze([index]) as unknown as number[] });
+      return (acquiredBodyParagraph(element, paragraphSource).pageOwnedAnchorOccurrenceIds ?? [])
+        .map((occurrenceId) => Object.freeze({ occurrenceId, paragraphSource }));
+    });
+    return Object.freeze({ pageIndex: object.page - 1, source, wrapAnchors: Object.freeze(wrapAnchors) });
+  });
   return {
+    ...(pageObjects.length > 0 ? { pageObjects: Object.freeze(pageObjects) } : {}),
     sectionIndex,
     compatibilityMode: doc.settings?.compatibilityMode,
     footnoteLayoutLikeWW8: doc.settings?.footnoteLayoutLikeWW8,
+    ...(producerDocumentSettings(doc).__footnoteColumnBands === true ? { producerFootnoteColumnBands: true } : {}),
     evenAndOddHeaders: doc.section.evenAndOddHeaders,
     endnoteIds: (doc.endnotes ?? []).map((note) => note.id),
     repeatedFootnoteLastEntries: repeatedFootnoteLastEntries(doc.body, sequence),
@@ -2236,10 +2275,23 @@ function normalizeInternalDocumentModelWithOwnership(
   };
   const footnotes = normalizeNotes(doc.footnotes, 'footnote');
   const endnotes = normalizeNotes(doc.endnotes, 'endnote');
+  const sourcePageObjects = (doc as InternalDocxDocumentModel).__pageObjects;
+  let pageObjects = sourcePageObjects;
+  if (sourcePageObjects) {
+    let pageObjectsChanged = false;
+    const normalized = sourcePageObjects.map((object, ordinal) => {
+      const objectBody = normalizeBody(object.body, 'header', pageObjectStorySource(ordinal).storyInstance);
+      if (objectBody === object.body) return object;
+      pageObjectsChanged = true;
+      return { ...object, body: objectBody };
+    });
+    if (pageObjectsChanged) pageObjects = normalized;
+  }
   const changed = body !== doc.body || headers !== doc.headers || footers !== doc.footers
-    || footnotes !== doc.footnotes || endnotes !== doc.endnotes;
+    || footnotes !== doc.footnotes || endnotes !== doc.endnotes || pageObjects !== sourcePageObjects;
   const document = (changed
-    ? { ...doc, body, headers, footers, footnotes, endnotes }
+    ? { ...doc, body, headers, footers, footnotes, endnotes,
+        ...(pageObjects ? { __pageObjects: pageObjects } : {}) }
     : doc) as InternalDocxDocumentModel;
   const sectionPlacementInputs = projectSectionPlacementInputs(document);
   sectionPlacementInputsByDocument.set(document, sectionPlacementInputs);

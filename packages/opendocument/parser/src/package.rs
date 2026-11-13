@@ -6,7 +6,7 @@
 //! (Part 2 §3.7), hence [`ItemNamePolicy::ExactUtf8`]: no OPC case folding or
 //! part-name equivalence.
 
-use crate::error::{invalid, unsupported, UNSUPPORTED_ENCRYPTION};
+use crate::error::{invalid, UNSUPPORTED_ENCRYPTION};
 use crate::xml::{self, NS_MANIFEST};
 use ooxml_common::package_session::PackageSessionHandle;
 use ooxml_common::resource::OoxmlFormat;
@@ -126,10 +126,8 @@ impl OdfPackage {
                 "the manifest root element is not manifest:manifest",
             ));
         }
-        let version = root.attribute((NS_MANIFEST, "version"));
-        if !version.is_some_and(|value| SUPPORTED_VERSIONS.contains(&value)) {
-            return Err(unsupported("odf-version"));
-        }
+        // The declared version is not checked: readers interpret older
+        // documents by the current specification's rules (best effort).
         let mut root_media_type = None;
         for node in root.descendants() {
             if xml::is(node, NS_MANIFEST, "encryption-data") {
@@ -309,7 +307,7 @@ pub(crate) mod tests {
                 &manifest(ODT, "").replace("manifest:version=\"1.3\"", "manifest:version=\"1.1\""),
             )],
         );
-        assert_eq!(open(old).err().unwrap(), unsupported("odf-version"));
+        assert!(open(old).is_ok());
         assert!(open(package(ODT, &[])).is_err());
     }
 

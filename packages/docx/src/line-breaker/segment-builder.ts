@@ -1453,12 +1453,14 @@ function emitResolvedTextSegment(
       allowsReferenceFontMetric(indexedFontMetrics(environment.layoutServices?.text.fontMetrics
         ?? environment.layoutServices?.text.localMetrics ?? {}), resolvedSpan?.font),
       environment.layoutServices ? { text: environment.layoutServices.text, probe: text,
-        ...(textShapeRequest.baseDirection !== undefined ? { baseDirection: textShapeRequest.baseDirection } : {}) } : undefined);
+        ...(textShapeRequest.baseDirection !== undefined ? { baseDirection: textShapeRequest.baseDirection } : {}) } : undefined,
+      environment.layoutServices?.text.plainLineBoxes === true && environment.lineGridActive === true);
   // LIBRARY_SYNTHESIZED_FACE_LINE_GEOMETRY does not extend to the East Asian
   // floor of a run painted in another slot (see that rule's scope).
   const { lineMetric: eaLineMetric } = selectedFontLineMetric(eaResolution, localEaFloor, naturalMetricAllowed,
       allowsReferenceFontMetric(indexedFontMetrics(environment.layoutServices?.text.fontMetrics
-        ?? environment.layoutServices?.text.localMetrics ?? {}), eaResolution));
+        ?? environment.layoutServices?.text.localMetrics ?? {}), eaResolution), undefined,
+      environment.layoutServices?.text.plainLineBoxes === true && environment.lineGridActive === true);
   const resolvedEaFloorFamily =
     eaResolution?.resolvedFamily ?? localEaFloor?.family ?? eaFontFamily;
   // WORD_USE_FE_LAYOUT_INHERITED_GRID_MINIMUM was observed for an active
@@ -1747,9 +1749,19 @@ function appendRunsToSegments(
         for (let index = emittedStart; index < segs.length; index += 1) {
           const glyph = segs[index];
           if (!('text' in glyph)) throw new Error('An optional hyphen lost its text authority');
+          // The glyph's '-' acquisition belongs to the frozen conditional
+          // glyph only. The empty source marker keeps an empty request of
+          // the same run (as the metric probes below do), so any joined-unit
+          // measurement of the unselected marker acquires zero advance
+          // instead of a request that contradicts its retained text (#2193).
           segs[index] = { ...glyph, text: '', metricOnly: true,
             optionalHyphen: Object.freeze({ ...glyph }), measuredWidth: 0,
-            sourceRunIndex: runIndex };
+            sourceRunIndex: runIndex,
+            ...(glyph.textShapeRequest ? {
+              nativeLevelUnit: undefined,
+              nativeVisiblePrefix: undefined,
+              textShapeRequest: Object.freeze(independentTextShapeRequest(glyph.textShapeRequest, '')),
+            } : {}) };
         }
         continue;
       }
@@ -2078,7 +2090,8 @@ function appendRunsToSegments(
           // LIBRARY_SYNTHESIZED_FACE_LINE_GEOMETRY covers measured text
           // spans and paragraph marks only; an anchor host is outside its
           // evidence, so only an exact catalogued tuple lends its geometry.
-          ? referenceFontLineMetrics(selected.requestedFamily, weight, style)
+          ? referenceFontLineMetrics(selected.requestedFamily, weight, style,
+            environment.layoutServices?.text.plainLineBoxes === true && environment.lineGridActive === true)
           : undefined;
       const familyLineMetric = resourceMetric ?? referenceMetric;
       segs.push({

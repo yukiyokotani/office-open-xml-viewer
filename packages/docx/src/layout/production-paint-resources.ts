@@ -11,6 +11,8 @@ import type {
 import type { ImageMetadataRecord, MathOccurrence, PictureBulletSizeResolver } from './resources.js';
 import type { BodyAcquisitionInputProjections } from './acquisition-input-projections.js';
 import { chartResourceKey, imageResourceKey, vmlPictureResourceKey, vmlStrokeResourceKey, vmlEdgeResourceKey } from './source-key.js';
+import { documentPageObjects } from '../page-object-wire.js';
+import { pageObjectStorySource } from './body-layout-input.js';
 import {
   createPaintResourceRegistry,
 } from './paint-resources.js';
@@ -246,6 +248,9 @@ function collectDescriptorCandidates(
   visitBody(doc.body, 'body', 'body');
   visitParts(doc.headers, 'header');
   visitParts(doc.footers, 'footer');
+  documentPageObjects(doc).forEach((object, ordinal) => {
+    visitBody(object.body, 'header', pageObjectStorySource(ordinal).storyInstance);
+  });
   for (const note of doc.footnotes ?? []) visitBody(note.content, 'footnote', note.id);
   for (const note of doc.endnotes ?? []) visitBody(note.content, 'endnote', note.id);
 

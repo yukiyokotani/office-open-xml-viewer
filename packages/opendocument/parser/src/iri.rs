@@ -44,7 +44,8 @@ pub fn resolve(file_entry_path: &str, reference: &str) -> Option<Target> {
         return Some(Target::SameDocument { fragment });
     }
     // Step 5/6: the IRI buffer and the file-entry directory prefix.
-    // A view into the reference: each step drops a prefix without copying.
+    // A borrowed window over the IRI: each step moves its start, so the
+    // walk is linear in the IRI's length.
     let mut buffer: &str = without_fragment;
     let mut prefix: Vec<String> = match file_entry_path.rfind('/') {
         Some(index) => file_entry_path[..index]
