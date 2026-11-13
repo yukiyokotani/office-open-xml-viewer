@@ -139,7 +139,7 @@ function bridge(
     loadResponder?: () => Promise<typeof import('./resolver-bridge-responder.js')>;
     /** Attach through the production gate (resolver-bridge-gate.ts), the
      * host loading through `loadHost` (default: at once). */
-    gate?: { loadHost?: () => Promise<typeof import('./resolver-bridge-host.js')>; readyCeilingMs?: number };
+    gate?: { loadHost?: () => Promise<typeof import('./resolver-bridge-host.js')> };
   } = {},
 ) {
   const realm = options.realm ?? worker1;
@@ -161,7 +161,6 @@ function bridge(
     ? new main.FontResolverBridge({
       post: mainPost, sources, ...(options.failures ? { resolverFailures: options.failures } : {}),
       loadHost: options.gate.loadHost ?? (() => Promise.resolve(main.hostModule)),
-      ...(options.gate.readyCeilingMs !== undefined ? { readyCeilingMs: options.gate.readyCeilingMs } : {}),
     })
     : new main.FontResolverBridgeHost({
       post: mainPost, sources, ...(options.failures ? { resolverFailures: options.failures } : {}),
@@ -190,8 +189,13 @@ function bridge(
 }
 
 /** A main-realm (viewer or main-mode) session. */
-function mainSession(sources: readonly FontSourceDescriptor[], failures?: Map<string, string>, set = fakeSet()) {
-  const session = new main.FontSourceSession({ sources, fontSet: asSet(set), ...(failures ? { resolverFailures: failures } : {}) });
+function mainSession(
+  sources: readonly FontSourceDescriptor[], failures?: Map<string, string>, set = fakeSet(),
+  resolverBridge?: import('./source-session.js').ResolverBridgeState,
+) {
+  const session = new main.FontSourceSession({
+    sources, fontSet: asSet(set), ...(failures ? { resolverFailures: failures } : {}), ...(resolverBridge ? { resolverBridge } : {}),
+  });
   sessions.push(session);
   return { session, set };
 }
@@ -1768,6 +1772,54 @@ describe('fontResolver bridge: the lazily loaded host', () => {
     expect((await xPending).faces).toEqual([]);
     expect(calls).toBe(1);
     expect(yWorker.set.faces.map((face) => face.bytes)).toEqual([12]);
+  });
+
+  it('starts the source walk, and its ceiling, once the host is ready', async () => {
+    vi.useFakeTimers();
+    // A answers "absent" after 6 s, B its face after 8 s: with the walk's
+    // 15 s ceiling running from ready, B still has 9 s although the host took
+    // 10 s to load.
+    const seen: number[] = [];
+    const sourceA = fontResolver(() => new Promise((resolve) => setTimeout(() => resolve([]), 6_000)));
+    const sourceB = fontResolver(() => new Promise((resolve) => setTimeout(() => resolve([FACE(12)]), 8_000)));
+    const link = bridge([sourceA, sourceB], {
+      gate: { loadHost: () => new Promise((resolve) => setTimeout(() => resolve(main.hostModule), 10_000)) },
+    });
+    await attached();
+    const worker = link.session();
+    const pending = worker.session.ensure(demand(['Private Face']));
+    await vi.advanceTimersByTimeAsync(10_000);
+    await vi.advanceTimersByTimeAsync(14_000);
+    expect((await pending).faces).toHaveLength(1);
+    for (const message of link.toMain) {
+      if ((message as { kind: string }).kind === 'ooxmlResolveFonts') seen.push((message as { remainingMs: number }).remainingMs);
+    }
+    expect(seen[0]).toBe(15_000);
+    expect(seen[1]).toBeGreaterThan(8_000);
+  });
+
+  it('keeps a workbook\'s viewer realm on the worker\'s outcome while the host loads or fails', async () => {
+    let calls = 0;
+    const source = fontResolver(() => { calls++; return [FACE(12)]; });
+    // Another document of the page resolved the family: the realm cache holds it.
+    const other = mainSession([source]);
+    expect((await other.session.ensure(demand(['Private Face']))).faces).toHaveLength(1);
+    const failures = new Map<string, string>();
+    const host = deferredHost();
+    const link = bridge([source], { failures, gate: { loadHost: host.load } });
+    await attached();
+    const gate = link.host as InstanceType<typeof main.FontResolverBridge>;
+    let viewerSettled = false;
+    const viewer = mainSession([source], failures, fakeSet(), gate.sessionState).session.ensure(demand(['Private Face']))
+      .finally(() => { viewerSettled = true; });
+    const worker = link.session().session.ensure(demand(['Private Face']));
+    await tick();
+    expect(viewerSettled).toBe(false);
+    host.reject(new Error('Failed to fetch dynamically imported module'));
+    // Both realms fail the family, the cached answer notwithstanding.
+    expect((await viewer).faces).toEqual([]);
+    expect((await worker).faces).toEqual([]);
+    expect(calls).toBe(1);
   });
 
   it('loads nothing for a document without a resolver and still answers a stray call', async () => {

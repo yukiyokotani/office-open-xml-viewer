@@ -59,6 +59,7 @@ import {
 } from '../worker/resource-policy.generated.js';
 import type { FaceAcquisition, ResolverFaceAcquireContext, ResolverFaceRequest } from './face-download.js';
 import { BridgedFamilyResolutions, type ResolverCallInfo } from './resolver-resolution.js';
+import type { ResolverBridgeState } from './source-session.js';
 import {
   validateFontFaceDeclaration,
   type FontDemand,
@@ -187,6 +188,17 @@ export class WorkerFontResolverClient {
   private hostState: 'ready' | 'pending' | { readonly reason: string } = 'ready';
   /** Messages posted while the host is pending, in order. */
   private held: HeldMessage[] = [];
+  /** Sessions waiting for the host to be ready or unavailable. */
+  private hostWaiters: (() => void)[] = [];
+
+  /** Main's host as this worker's sessions see it (`ResolverBridgeState`):
+   * they start resolving only once it is ready, and fail the resolver's
+   * families once it is unavailable. */
+  readonly hostBridgeState: ResolverBridgeState = {
+    ready: () => (this.hostState === 'pending'
+      ? new Promise<void>((resolve) => { this.hostWaiters.push(resolve); }) : undefined),
+    unavailable: () => (typeof this.hostState === 'object' ? this.hostState.reason : undefined),
+  };
 
   constructor(private readonly post: Post) {}
 
@@ -199,10 +211,12 @@ export class WorkerFontResolverClient {
     readonly resolverCeilingOwnedByRunner: true;
     readonly acquireResolverFaces: WorkerFontResolverClient['acquire'];
     readonly acquiredFacesOwnedBySession: true;
+    readonly resolverBridge: ResolverBridgeState;
   } {
     return {
       runResolver: this.run, resolverCeilingOwnedByRunner: true,
       acquireResolverFaces: this.acquire, acquiredFacesOwnedBySession: true,
+      resolverBridge: this.hostBridgeState,
     };
   }
 
@@ -357,6 +371,7 @@ export class WorkerFontResolverClient {
     } else if (state === 'ready') {
       if (this.hostState !== 'pending') return;
       this.hostState = 'ready';
+      for (const resolve of this.hostWaiters.splice(0)) resolve();
       for (const { message, requestId } of this.held.splice(0)) {
         try {
           this.post(message);
@@ -369,6 +384,7 @@ export class WorkerFontResolverClient {
       if (this.hostState !== 'pending') return;
       const failure = typeof reason === 'string' ? reason.slice(0, MAX_REASON_LENGTH) : 'font resolver bridge unavailable';
       this.hostState = { reason: failure };
+      for (const resolve of this.hostWaiters.splice(0)) resolve();
       for (const { requestId } of this.held.splice(0)) {
         const call = requestId === undefined ? undefined : this.pending.get(requestId);
         if (!call || !this.settle(requestId as number)) continue;

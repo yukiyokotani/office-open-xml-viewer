@@ -18,29 +18,31 @@
  *   receives every request, acquisition and cancellation in the worker's
  *   order. Messages that reach this gate before the host (the worker posted
  *   them before it saw `'pending'`) are handed to it in arrival order too.
- * - Deadlines: a bridged call's deadline starts when the host receives it
- *   (`resolver-bridge-host.ts`), that is after `'ready'`; the `remainingMs`
- *   the worker sends is the time its session had left when it made the call.
- *   The wait for the host is bounded separately, by the ready ceiling below.
- * - The host chunk fails to load, or (DOCX, PPTX) has not loaded within
- *   {@link FONT_LOAD_CEILING_MS} of attaching: the bridge is unavailable for
- *   this document. One warning here; `'unavailable'` tells the worker, which
- *   fails every held and later call: each resolver family fails and falls
- *   back to the next source or the host font, as any run-time font-source
- *   failure does (one family's failure never rejects `load()`). A host that
- *   loads after that is not constructed, so the outcome stays one for the
- *   whole document. Messages that reach this gate meanwhile are answered as
- *   failed, so nothing waits on them.
+ * - Deadlines: no clock of the document's resolver calls runs before
+ *   `'ready'`. A font-source session with a resolver starts each source walk,
+ *   and with it the font ceiling whose remainder each bridged call carries
+ *   (`remainingMs`), only once the host is ready (`ResolverBridgeState`), and
+ *   the host starts a call's deadline when it receives it. So once ready,
+ *   every deadline behaves as with a static host. The wait for the host is
+ *   bounded separately, by the ready ceiling: {@link FONT_LOAD_CEILING_MS}
+ *   from attaching.
+ * - The host chunk fails to load, or has not loaded within the ready
+ *   ceiling: the bridge is unavailable for this document. One warning here;
+ *   `'unavailable'` tells the worker, which fails every held and later call.
+ *   Every family of the document's resolver sources then fails with
+ *   {@link FONT_RESOLVER_BRIDGE_UNAVAILABLE} and paints with the host font,
+ *   warned, as a run-time font-source failure does (#2203: it never rejects
+ *   `load()`), whatever the realm cache holds, in the worker and (XLSX) the
+ *   viewer realm alike, which follows the same state through
+ *   {@link FontResolverBridge.sessionState}. A host that loads after that is
+ *   not constructed, so the outcome stays one for the whole document.
+ *   Messages that reach this gate meanwhile are answered as failed, so
+ *   nothing waits on them.
  * - A disposed gate (the document was destroyed or replaced, also before
  *   `'ready'`) posts nothing more and never constructs a host; its worker is
  *   terminated, or reset by the next document's parse, which abandons the
- *   held calls (the next attachment's `'pending'` drops the held messages).
- *
- * XLSX passes its own loader and no ready ceiling: its viewer-realm sessions
- * share the failure record with the worker, so the host comes with the
- * workbook's font-source module (one load for both realms, see `workbook.ts`),
- * and `load()` already waits for that module, so a stalled chunk cannot leave
- * the worker waiting where the load would not.
+ *   held calls (the next attachment's `'pending'` drops the held messages),
+ *   and its sessions are released with the document.
  */
 import { FONT_LOAD_CEILING_MS } from './font-registry.js';
 import { isWorkerFontResolveMessage } from './resolver-bridge-messages.js';
@@ -53,6 +55,7 @@ import type {
 } from './resolver-bridge.js';
 import type { FontSourceDescriptor } from './source.js';
 import type { FontResolverFailures } from './resolver-failures.js';
+import type { ResolverBridgeState } from './source-session.js';
 
 type Post = (message: unknown, transfer?: Transferable[]) => void;
 
@@ -71,11 +74,9 @@ export interface FontResolverBridgeOptions {
   /** The document's resolver failure record shared with its viewer-realm
    * sessions (XLSX); see `resolver-failures.ts`. */
   readonly resolverFailures?: FontResolverFailures;
-  /** Loads the host; defaults to the lazy import of `resolver-bridge-host.ts`. */
+  /** Loads the host; defaults to the lazy import of `resolver-bridge-host.ts`
+   * (replaced only by tests of a slow or failing chunk). */
   readonly loadHost?: () => Promise<FontResolverBridgeHostModule>;
-  /** How long the host may take to load before the bridge is unavailable;
-   * `Infinity` waits for the load to settle (see the module comment). */
-  readonly readyCeilingMs?: number;
 }
 
 const isNonNegativeSafeInteger = (value: unknown): value is number =>
@@ -90,6 +91,15 @@ export class FontResolverBridge {
   private early: unknown[] = [];
   private timer: ReturnType<typeof setTimeout> | undefined;
   private disposed = false;
+  private waiters: (() => void)[] = [];
+
+  /** The host as this document's viewer-realm sessions see it (XLSX): the
+   * same state the worker's sessions follow (`ResolverBridgeState`). */
+  readonly sessionState: ResolverBridgeState = {
+    ready: () => (this.state === 'pending' && !this.disposed
+      ? new Promise<void>((resolve) => { this.waiters.push(resolve); }) : undefined),
+    unavailable: () => (this.state === 'unavailable' ? FONT_RESOLVER_BRIDGE_UNAVAILABLE : undefined),
+  };
 
   constructor(options: FontResolverBridgeOptions) {
     this.postToWorker = options.post;
@@ -100,10 +110,7 @@ export class FontResolverBridge {
     }
     this.state = 'pending';
     this.signal({ kind: 'ooxmlFontBridgeState', state: 'pending' });
-    const ceiling = options.readyCeilingMs ?? FONT_LOAD_CEILING_MS;
-    if (Number.isFinite(ceiling)) {
-      this.timer = setTimeout(() => this.unavailable(`it did not load within ${ceiling} ms`), ceiling);
-    }
+    this.timer = setTimeout(() => this.unavailable(`it did not load within ${FONT_LOAD_CEILING_MS} ms`), FONT_LOAD_CEILING_MS);
     let loading: Promise<FontResolverBridgeHostModule>;
     try {
       loading = (options.loadHost ?? (() => import('./resolver-bridge-host.js')))();
@@ -122,6 +129,7 @@ export class FontResolverBridge {
       this.state = 'ready';
       this.signal({ kind: 'ooxmlFontBridgeState', state: 'ready' });
       for (const message of this.early.splice(0)) host.accept(message);
+      for (const resolve of this.waiters.splice(0)) resolve();
     }).catch((error: unknown) => {
       this.unavailable(error instanceof Error ? error.message : String(error));
     });
@@ -147,6 +155,7 @@ export class FontResolverBridge {
     console.warn(`[ooxml] font resolver bridge failed to load: ${detail}; fontResolver families fall back`);
     this.signal({ kind: 'ooxmlFontBridgeState', state: 'unavailable', reason: FONT_RESOLVER_BRIDGE_UNAVAILABLE });
     for (const message of this.early.splice(0)) this.refuse(message, FONT_RESOLVER_BRIDGE_UNAVAILABLE, true);
+    for (const resolve of this.waiters.splice(0)) resolve();
   }
 
   /** Answer a call no host will run, so the worker never waits for it. */
@@ -175,6 +184,8 @@ export class FontResolverBridge {
     this.disposed = true;
     clearTimeout(this.timer);
     this.early = [];
+    // Waiting sessions belong to the destroyed document: their release ends them.
+    for (const resolve of this.waiters.splice(0)) resolve();
     this.host?.dispose();
     this.host = null;
   }

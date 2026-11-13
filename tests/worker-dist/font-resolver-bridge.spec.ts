@@ -271,8 +271,7 @@ for (const format of ['docx', 'pptx', 'xlsx'] as const) {
 }
 
 // The bridge host loads through import() (core resolver-bridge-gate.ts), only
-// for a worker-mode document with a fontResolver (XLSX: in the same import()
-// as its font-source module, which its viewer realm loads anyway).
+// for a worker-mode document with a fontResolver.
 for (const format of ['docx', 'pptx', 'xlsx'] as const) {
   test(`${format}: loads the resolver bridge host only for a worker-mode document with a resolver`, async ({ browser }) => {
     test.setTimeout(180_000);
@@ -293,7 +292,8 @@ for (const format of ['docx', 'pptx', 'xlsx'] as const) {
 
 // A deploy that lost the host chunk: the resolver's families fall back (the
 // per-family failure policy of run-time font-source failures), load() resolves.
-for (const format of ['docx', 'pptx'] as const) {
+// XLSX: in the viewer realm too, so hit geometry measures what the worker paints.
+for (const format of ['docx', 'pptx', 'xlsx'] as const) {
   test(`${format}: a host chunk that fails to load makes the resolver families fall back`, async ({ browser }) => {
     test.setTimeout(120_000);
     const none = await render(browser, format, 'main', 'none');

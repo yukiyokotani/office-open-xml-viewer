@@ -261,10 +261,6 @@ export class XlsxWorkbook {
    *  worker's font-source session (core `resolver-bridge-gate.ts`); disposed
    *  in {@link destroy}, which aborts every in-flight resolver call. */
   private fontResolverBridge: FontResolverBridge | null = null;
-  /** Worker mode with a resolver: the font-source module, loaded from the
-   *  bridge's attachment for both the bridge host and this load's
-   *  {@link prepareFontSources}, so both realms get it from one load. */
-  private fontSourceModule: Promise<typeof import('./font-source-load.js')> | null = null;
   /** Resolver failures of this workbook, shared by its viewer-realm sessions
    * and its worker bridge (core `resolver-resolution.ts`). */
   private fontResolverFailures: FontResolverFailures = new Map();
@@ -704,18 +700,6 @@ export class XlsxWorkbook {
   private attachFontResolverBridge(bridge: WorkbookBridge, fonts: readonly FontSourceDescriptor[] | undefined): void {
     this.fontResolverBridge?.dispose();
     this.fontResolverFailures = new Map();
-    this.fontSourceModule = null;
-    const resolver = this._mode === 'worker' && Array.isArray(fonts) && fonts.some((source) => source.kind === 'font-resolver');
-    // With a resolver, the host comes in the same import() as the
-    // font-source module this load's prepareFontSources awaits
-    // (font-source-bridge-load.ts): both realms get it from one load, so the
-    // worker's bridge and the viewer-realm sessions that share its failure
-    // record never disagree on whether the resolver can run (a failed import
-    // fails the families in the worker and rejects load() as before), and a
-    // stalled chunk stalls load() as before, hence no ready ceiling (core
-    // resolver-bridge-gate.ts).
-    const fontSourceModule = resolver ? import('./font-source-bridge-load.js') : null;
-    this.fontSourceModule = fontSourceModule;
     this.fontResolverBridge = this._mode === 'worker'
       ? new FontResolverBridge({
         post: (message, transfer) => bridge.post(message, transfer),
@@ -724,7 +708,6 @@ export class XlsxWorkbook {
         // sessions and the worker share this failure record (and main's
         // resolution cache), so paint and hit geometry use the same faces.
         resolverFailures: this.fontResolverFailures,
-        ...(fontSourceModule ? { loadHost: () => fontSourceModule, readyCeilingMs: Infinity } : {}),
       })
       : null;
   }
@@ -738,7 +721,7 @@ export class XlsxWorkbook {
   private async prepareFontSources(workbook: ParsedWorkbook, fonts: readonly FontSourceDescriptor[] | undefined): Promise<void> {
     this.fonts = fonts;
     if (!fonts?.length) return;
-    const fontSourceLoad = await (this.fontSourceModule ?? import('./font-source-load.js'));
+    const fontSourceLoad = await import('./font-source-load.js');
     this.fontSessionType = fontSourceLoad.FontSourceSession;
     this.fontAcquirerFor = fontSourceLoad.inRealmResolverFaceAcquirer;
     this.fontDemand = new fontSourceLoad.XlsxFontDemand(workbook, this.cjkFallback, fontSourceLoad.declaredFontSubstitutions(fonts));
@@ -796,6 +779,11 @@ export class XlsxWorkbook {
           // same cache and failure record, so both realms paint the same bytes.
           ...(this._mode === 'worker' && this.fontAcquirerFor
             ? { acquireResolverFaces: this.fontAcquirerFor(this.fontResolverFailures) } : {}),
+          // Worker mode: resolve only once the bridge host is ready, and fail
+          // the resolver's families if it never will be, as the worker does
+          // (core resolver-bridge-gate.ts), so both realms reach one outcome.
+          ...(this._mode === 'worker' && this.fontResolverBridge
+            ? { resolverBridge: this.fontResolverBridge.sessionState } : {}),
         })
         : null;
       const record = {
@@ -1831,7 +1819,6 @@ export class XlsxWorkbook {
     this.fontsDestroyed = true;
     this.fontResolverBridge?.dispose();
     this.fontResolverBridge = null;
-    this.fontSourceModule = null;
     this.fontResolverFailures = new Map();
     for (const retained of this.retainedFontSets.values()) {
       // Releasing settles an in-flight ensure (it resolves empty).
