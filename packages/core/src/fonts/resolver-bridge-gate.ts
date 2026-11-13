@@ -40,9 +40,12 @@
  *   nothing waits on them.
  * - A disposed gate (the document was destroyed or replaced, also before
  *   `'ready'`) posts nothing more and never constructs a host; its worker is
- *   terminated, or reset by the next document's parse, which abandons the
- *   held calls (the next attachment's `'pending'` drops the held messages),
- *   and its sessions are released with the document.
+ *   terminated, or reused by the next document. Every attachment posts its
+ *   state (`'ready'` at once for a document without a resolver, whose gate
+ *   answers stray calls as failed), so nothing waits on a host that is gone:
+ *   the next attachment's state supersedes the held messages, and the next
+ *   parse's reset abandons their calls and lets the abandoned document's
+ *   sessions waiting for the host go on, as it rejects the calls they made.
  */
 import { FONT_LOAD_CEILING_MS } from './font-registry.js';
 import { isWorkerFontResolveMessage } from './resolver-bridge-messages.js';
@@ -106,6 +109,9 @@ export class FontResolverBridge {
     const { sources } = options;
     if (!Array.isArray(sources) || !sources.some((source) => source.kind === 'font-resolver')) {
       this.state = 'none';
+      // Every attachment states its host, so a worker reused from a document
+      // whose host never became ready holds nothing for this one.
+      this.signal({ kind: 'ooxmlFontBridgeState', state: 'ready' });
       return;
     }
     this.state = 'pending';

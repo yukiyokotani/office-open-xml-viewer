@@ -350,6 +350,10 @@ export class WorkerFontResolverClient {
    * generation. */
   reset(): void {
     this.generation++;
+    // Sessions of the abandoned document waiting for its host go on, as
+    // those whose calls this reset rejects do; their calls follow the host
+    // state of the next document.
+    for (const resolve of this.hostWaiters.splice(0)) resolve();
     const calls = [...this.pending];
     this.pending.clear();
     for (const [requestId, call] of calls) {
@@ -369,7 +373,8 @@ export class WorkerFontResolverClient {
       this.hostState = 'pending';
       this.held = [];
     } else if (state === 'ready') {
-      if (this.hostState !== 'pending') return;
+      // From any state: this attachment's host (or a document without a
+      // resolver, whose gate answers every call) takes messages now.
       this.hostState = 'ready';
       for (const resolve of this.hostWaiters.splice(0)) resolve();
       for (const { message, requestId } of this.held.splice(0)) {

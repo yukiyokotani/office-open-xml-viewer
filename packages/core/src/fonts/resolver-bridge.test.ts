@@ -1563,14 +1563,13 @@ describe('fontResolver bridge: demand copy', () => {
 // when the host receives it.
 describe('fontResolver bridge: the lazily loaded host', () => {
   const deferredHost = () => {
-    let settle!: (outcome: { module?: typeof main.hostModule; error?: Error }) => void;
-    const promise = new Promise<typeof main.hostModule>((resolve, reject) => {
-      settle = ({ module, error }) => (error ? reject(error) : resolve(module as typeof main.hostModule));
-    });
+    let resolveHost!: (loaded: typeof main.hostModule) => void;
+    let rejectHost!: (error: Error) => void;
+    const promise = new Promise<typeof main.hostModule>((resolve, reject) => { resolveHost = resolve; rejectHost = reject; });
     return {
       load: vi.fn(() => promise),
-      resolve: () => settle({ module: main.hostModule }),
-      reject: (error: Error) => settle({ error }),
+      resolve: () => resolveHost(main.hostModule),
+      reject: (error: Error) => rejectHost(error),
     };
   };
   const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
@@ -1757,6 +1756,50 @@ describe('fontResolver bridge: the lazily loaded host', () => {
     expect(kinds(toWorker)).toEqual(['pending', 'ready', 'ooxmlFontsResolved', 'pending', 'ready', 'ooxmlFontsResolved']);
   });
 
+  it('lets a replaced document\'s session waiting for its host finish when the next document has no resolver', async () => {
+    let calls = 0;
+    const source = fontResolver(() => { calls++; return [FACE(12)]; });
+    const toMain: unknown[] = [];
+    let gate!: InstanceType<typeof main.FontResolverBridge>;
+    const client = new worker1.WorkerFontResolverClient((message, transfer) => {
+      const copy = structuredClone(message, { transfer: transfer as Transferable[] });
+      toMain.push(copy);
+      void Promise.resolve().then(() => gate.accept(copy));
+    });
+    const attach = (sources: readonly FontSourceDescriptor[], loadHost: () => Promise<typeof main.hostModule>) => {
+      gate = new main.FontResolverBridge({
+        post: (message, transfer) => {
+          const copy = structuredClone(message, { transfer: transfer as Transferable[] });
+          void Promise.resolve().then(() => client.accept(copy));
+        },
+        sources, loadHost,
+      });
+      hosts.push(gate);
+    };
+    const hostA = deferredHost();
+    attach([source], hostA.load);
+    await attached();
+    // Document A's session waits for A's host, which never arrives.
+    const session = new worker1.FontSourceSession({
+      sources: [workerSource(source)], fontSet: asSet(fakeSet()), ...client.sessionOptions,
+    });
+    sessions.push(session);
+    let settled = false;
+    const pending = session.ensure(demand(['Private Face'])).finally(() => { settled = true; });
+    await tick();
+    expect(settled).toBe(false);
+    // Document B, without a resolver, replaces A; its parse resets the client.
+    gate.dispose();
+    attach([], hostA.load);
+    await attached();
+    client.reset();
+    expect((await pending).faces).toEqual([]);
+    expect(String(warn.mock.calls.at(-1)?.[0])).toContain('Private Face (font resolver function is not available in this realm)');
+    expect(calls).toBe(0);
+    expect(client.pendingCount).toBe(0);
+    expect(hostA.load).toHaveBeenCalledTimes(1);
+  });
+
   it('loads and fails the hosts of concurrent documents independently', async () => {
     let calls = 0;
     const source = fontResolver(() => { calls++; return [FACE(12)]; });
@@ -1831,7 +1874,7 @@ describe('fontResolver bridge: the lazily loaded host', () => {
     expect(gate.accept({ kind: 'other' })).toBe(false);
     await tick();
     expect(loadHost).not.toHaveBeenCalled();
-    expect(posts).toEqual([{
+    expect(posts).toEqual([{ kind: 'ooxmlFontBridgeState', state: 'ready' }, {
       kind: 'ooxmlFontsResolved', generation: 0, requestId: 1,
       outcome: { status: 'failed', reason: 'font resolver function is not available in this realm' },
     }]);
