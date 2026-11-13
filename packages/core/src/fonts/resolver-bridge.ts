@@ -374,7 +374,7 @@ export class WorkerFontResolverClient {
       this.held = [];
     } else if (state === 'ready') {
       // From any state: this attachment's host (or a document without a
-      // resolver, whose gate answers every call) takes messages now.
+      // resolver, whose gate answers stray resolve requests) takes messages now.
       this.hostState = 'ready';
       for (const resolve of this.hostWaiters.splice(0)) resolve();
       for (const { message, requestId } of this.held.splice(0)) {

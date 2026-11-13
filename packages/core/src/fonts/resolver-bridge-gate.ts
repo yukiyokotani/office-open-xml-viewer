@@ -42,10 +42,11 @@
  *   `'ready'`) posts nothing more and never constructs a host; its worker is
  *   terminated, or reused by the next document. Every attachment posts its
  *   state (`'ready'` at once for a document without a resolver, whose gate
- *   answers stray calls as failed), so nothing waits on a host that is gone:
- *   the next attachment's state supersedes the held messages, and the next
- *   parse's reset abandons their calls and lets the abandoned document's
- *   sessions waiting for the host go on, as it rejects the calls they made.
+ *   answers stray resolve requests as failed), so nothing waits on a host
+ *   that is gone: the next attachment's state supersedes the held messages,
+ *   and the next parse's reset abandons their calls and lets the abandoned
+ *   document's sessions waiting for the host go on, as it rejects the calls
+ *   they made.
  */
 import { FONT_LOAD_CEILING_MS } from './font-registry.js';
 import { isWorkerFontResolveMessage } from './resolver-bridge-messages.js';
