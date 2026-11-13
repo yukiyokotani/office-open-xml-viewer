@@ -168,6 +168,17 @@ describe('ODT source claim', () => {
     // A comment ending in an end record of another disk (an empty directory).
     const otherDisk = String.fromCharCode(0x50, 0x4b, 5, 6, 1, 0, 1, 0, ...new Array<number>(14).fill(0));
     expect(odt.claim(zip([['content.xml', '<a/>'], ['mimetype', TEXT, { deflate: true }]], `x${otherDisk}`))).toBe(true);
+    // A comment holding a decoy directory whose entry has no local header.
+    const plain = zip([['content.xml', '<a/>'], ['mimetype', TEXT, { deflate: true }]]);
+    const entryAt = plain.length + 1;
+    const decoy = [
+      0x78,
+      0x50, 0x4b, 1, 2, ...new Array<number>(24).fill(0), 1, 0, ...new Array<number>(12).fill(0), 0xff, 0xff, 0, 0, 0x61,
+      0x50, 0x4b, 5, 6, 0, 0, 0, 0, 1, 0, 1, 0, 47, 0, 0, 0, entryAt & 0xff, (entryAt >>> 8) & 0xff, 0, 0, 0, 0,
+    ];
+    const commented = Uint8Array.from([...plain, ...decoy]);
+    new DataView(commented.buffer).setUint16(plain.length - 2, decoy.length, true);
+    expect(odt.claim(commented)).toBe(true);
     // A comment ending in an end record whose directory does not walk.
     const fake = String.fromCharCode(0x50, 0x4b, 5, 6, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0);
     expect(odt.claim(zip([['content.xml', '<a/>'], ['mimetype', TEXT, { deflate: true }]], `x${fake}`))).toBe(true);
@@ -175,6 +186,10 @@ describe('ODT source claim', () => {
     expect(odt.claim(withDirectorySignature(zip([['content.xml', '<a/>'], ['mimetype', TEXT, { deflate: true }]])))).toBe(true);
     // ZIP64: end records and a mimetype size in the extended information.
     expect(odt.claim(zip64([['content.xml', '<a/>'], ['mimetype', TEXT, { deflate: true }]], 8))).toBe(true);
+    // A classic per-disk count populated beside a ZIP64 total count.
+    const mixed = zip64([['content.xml', '<a/>'], ['mimetype', TEXT, { deflate: true }]]);
+    new DataView(mixed.buffer).setUint16(mixed.length - 22 + 8, 2, true);
+    expect(odt.claim(mixed)).toBe(true);
     expect(odt.claim(zip64([['content.xml', '<a/>'], ['mimetype', TEXT, { deflate: true }]]))).toBe(true);
     expect(odt.claim(zip64([['mimetype', `${TEXT}x`, { deflate: true }]]))).toBe(false);
     // A central directory that does not record this media type.

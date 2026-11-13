@@ -155,22 +155,26 @@ function centralMimetypeEntry(bytes: Uint8Array): MimetypeEntry | undefined {
   }
   try {
     for (const end of ends) {
+      const diskCount = view.getUint16(end + 8, true);
       const count = view.getUint16(end + 10, true);
-      if (view.getUint16(end + 8, true) !== count) continue;
       const size = view.getUint32(end + 12, true);
       const offset = view.getUint32(end + 16, true);
       const locator = end - 20;
       if (locators.has(locator)) {
         const relative = u64(locator + 8);
         for (const record of records.get(locator) ?? []) {
+          // Each count field may be a sentinel independently of the other.
+          const resolved = count === 0xffff ? u64(record + 32) : count;
+          if ((diskCount === 0xffff ? u64(record + 24) : diskCount) !== resolved) continue;
           const entry = directoryEntry(view, budget, record, record - relative,
-            count === 0xffff ? u64(record + 32) : count,
+            resolved,
             size === 0xffffffff ? u64(record + 40) : size,
             offset === 0xffffffff ? u64(record + 48) : offset);
           if (entry !== false) return entry;
         }
         if (count === 0xffff || size === 0xffffffff || offset === 0xffffffff) continue;
       }
+      if (diskCount !== count) continue;
       const entry = directoryEntry(view, budget, end, end - offset - size, count, size, offset);
       if (entry !== false) return entry;
     }
@@ -190,12 +194,12 @@ function directoryEntry(
   view: DataView, budget: { steps: number }, directoryEnd: number, base: number, count: number, size: number, offset: number,
 ): MimetypeEntry | undefined | false {
   if (base < 0 || count < 0 || size < 0 || offset < 0 || base + offset + size !== directoryEnd) return false;
-  return walkCentralDirectory(view, budget, base + offset, directoryEnd, count);
+  return walkCentralDirectory(view, budget, base, base + offset, directoryEnd, count);
 }
 
 /** The `mimetype` entry of a directory, or `false` when it does not walk. */
 function walkCentralDirectory(
-  view: DataView, budget: { steps: number }, start: number, limit: number, count: number,
+  view: DataView, budget: { steps: number }, base: number, start: number, limit: number, count: number,
 ): MimetypeEntry | undefined | false {
   const bytes = new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
   let at = start;
@@ -207,6 +211,12 @@ function walkCentralDirectory(
     const extraLength = view.getUint16(at + 30, true);
     const next = at + 46 + nameLength + extraLength + view.getUint16(at + 32, true);
     if (next > limit) return false;
+    // Each entry must point at a local header (a ZIP64 offset is resolved by
+    // the reader).
+    const local = view.getUint32(at + 42, true);
+    if (local !== 0xffffffff && (base + local + 30 > view.byteLength || view.getUint32(base + local, true) !== 0x04034b50)) {
+      return false;
+    }
     if (found === undefined && isMimetypeName(bytes, at + 46, nameLength)) {
       let size = view.getUint32(at + 24, true);
       if (size === 0xffffffff) {
@@ -214,6 +224,7 @@ function walkCentralDirectory(
         size = -1;
         const extraEnd = at + 46 + nameLength + extraLength;
         for (let field = at + 46 + nameLength; field + 4 <= extraEnd;) {
+          if (--budget.steps < 0) throw EXHAUSTED;
           const fieldSize = view.getUint16(field + 2, true);
           if (field + 4 + fieldSize > extraEnd) break;
           if (view.getUint16(field, true) === 0x0001 && fieldSize >= 8) {
