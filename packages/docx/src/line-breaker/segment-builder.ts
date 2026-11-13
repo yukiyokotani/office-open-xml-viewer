@@ -208,6 +208,19 @@ function transformedRunText(
     part.ea ? r.fontFamilyEastAsia ?? run.fontFamily : run.fontFamily)).join('');
 }
 
+/** The run context of a piece that is its own complete display run: a metric
+ * probe, an optional-hyphen glyph, a note label or a field result. The piece
+ * is emitted through the run's case and §17.3.3.30 symbol transforms, so its
+ * context must be that same transformed text, never the authored string: a
+ * symbol face that lacks a code (Symbol 'x', '-') converts it (#2192). */
+function ownRunContext(
+  text: string,
+  run: Extract<ParagraphLayoutSource['runs'][number], { type: 'text' | 'field' }>,
+  environment: LineLayoutEnvironment,
+): Readonly<{ text: string; offset: number }> {
+  return { text: transformedRunText(text, run, environment), offset: 0 };
+}
+
 export function appendTextPiece(
   state: SegmentBuildContext,
   text: string,
@@ -1796,7 +1809,7 @@ function appendRunsToSegments(
         // either neighbor. Its empty source marker contributes no geometry
         // unless the breaker chooses this authored boundary.
         appendTextPiece(segmentBuildContext, '-', t, t.vertAlign ?? null, runIndex,
-          { text: '-', offset: 0 });
+          ownRunContext('-', t, environment));
         for (let index = emittedStart; index < segs.length; index += 1) {
           const glyph = segs[index];
           if (!('text' in glyph)) throw new Error('An optional hyphen lost its text authority');
@@ -1826,9 +1839,9 @@ function appendRunsToSegments(
         // points are not East Asian, so an East Asian slot alone is not used.
         // The run context is the transformed display probe (caps/small caps
         // or symbol mapping), exactly as for any other text piece.
-        const probe = transformedRunText('x', t, environment);
-        appendTextPiece(segmentBuildContext, 'x', t, t.vertAlign ?? null, runIndex,
-          { text: probe, offset: 0 });
+        const probeContext = ownRunContext('x', t, environment);
+        const probe = probeContext.text;
+        appendTextPiece(segmentBuildContext, 'x', t, t.vertAlign ?? null, runIndex, probeContext);
         for (let index = emittedStart; index < segs.length; index += 1) {
           const segment = segs[index];
           if (!('text' in segment)) throw new Error('A separator metric probe lost its text authority');
@@ -1869,8 +1882,8 @@ function appendRunsToSegments(
           // As for an empty/anchor-only mark, a bounded Latin probe resolves
           // the four font slots and selected-face metrics through the ordinary
           // text service. Discard its ink/text, never its font authority.
-          appendTextPiece(segmentBuildContext, 'x', t, t.vertAlign ?? null, runIndex,
-            { text: 'x', offset: 0 });
+          const probeContext = ownRunContext('x', t, environment);
+          appendTextPiece(segmentBuildContext, 'x', t, t.vertAlign ?? null, runIndex, probeContext);
           for (let index = emittedStart; index < segs.length; index += 1) {
             const segment = segs[index];
             if (!('text' in segment)) throw new Error('A note metric probe lost its text authority');
@@ -1880,7 +1893,9 @@ function appendRunsToSegments(
             // metric, so the host's vertical box comes from its painting face.
             // Every present face (embedded, local, substitute, CSS, font source)
             // keeps its established metric-only behaviour.
-            if (segment.fontSource === 'native' && segment.fontInstalledFamily !== true) segment.metricProbeText = 'x';
+            if (segment.fontSource === 'native' && segment.fontInstalledFamily !== true) {
+              segment.metricProbeText = probeContext.text;
+            }
             segment.sourceRunIndex = runIndex;
             if (segment.textShapeRequest) {
               segment.nativeLevelUnit = undefined;
@@ -1908,7 +1923,7 @@ function appendRunsToSegments(
             t,
             t.vertAlign ?? null,
             runIndex,
-            { text: transformedRunText(label, t, environment), offset: 0 },
+            ownRunContext(label, t, environment),
             0,
             joinFromPreviousNoBreakHyphen,
           );
@@ -2065,7 +2080,7 @@ function appendRunsToSegments(
           f,
           f.vertAlign,
           runIndex,
-          { text: transformedRunText(text, f, environment), offset: 0 },
+          ownRunContext(text, f, environment),
           undefined,
           joinFromPreviousNoBreakHyphen,
         );
@@ -2209,7 +2224,7 @@ function appendRunsToSegments(
             const marker = sequence.optionalHyphens[markerIndex++]!;
             const glyphs: LayoutSeg[] = [];
             appendTextPiece({ ...segmentBuildContext, segs: glyphs }, '-', marker.run,
-              marker.run.vertAlign ?? null, marker.runIndex, { text: '-', offset: 0 });
+              marker.run.vertAlign ?? null, marker.runIndex, ownRunContext('-', marker.run, environment));
             if (glyphs.length !== 1 || !('text' in glyphs[0]!)) {
               throw new Error('An optional hyphen lost its single conditional glyph');
             }
