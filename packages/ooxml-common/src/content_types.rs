@@ -76,32 +76,60 @@ impl PackageContentTypes {
             })
             .map(String::as_str)
     }
+}
 
-    /// Whether the part's declared media type is in the `image` top-level type
-    /// (RFC 6838 §4.2.3), such as `image/png`, `image/x-emf` or
-    /// `image/svg+xml`. Media types are case-insensitive (RFC 6838 §4.2).
-    /// Part names are compared with the archive's own part-name equivalence
-    /// (Part 2 §6.2.2.3: ASCII case folding and percent-encoded unreserved
-    /// characters), so the Override found here is the one for the very part a
-    /// read of `part_path` returns; the Default applies only without one.
+fn is_image_media_type(content_type: &str) -> bool {
+    content_type
+        .trim_start()
+        .get(..6)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("image/"))
+}
+
+/// Which parts a package declares as pictures: those whose content type is in
+/// the `image` top-level type (RFC 6838 §4.2.3, case-insensitive per §4.2),
+/// such as `image/png`, `image/x-emf` or `image/svg+xml`.
+///
+/// Overrides are indexed once by the archive's own part-name equivalence
+/// (Part 2 §6.2.2.3: ASCII case folding and percent-encoded unreserved
+/// characters), so the Override found is the one for the very part a read of
+/// the same path returns, and each lookup is one key computation plus a hash
+/// probe. The Default applies only without an Override.
+#[derive(Debug, Clone, Default)]
+pub struct ImagePartTypes {
+    overrides: HashMap<String, bool>,
+    defaults: HashMap<String, bool>,
+}
+
+impl ImagePartTypes {
+    pub fn new(types: PackageContentTypes) -> Self {
+        Self {
+            overrides: types
+                .overrides
+                .into_iter()
+                .map(|(name, content_type)| {
+                    (
+                        crate::rels::part_name_equivalence_key(&name),
+                        is_image_media_type(&content_type),
+                    )
+                })
+                .collect(),
+            defaults: types
+                .defaults
+                .into_iter()
+                .map(|(extension, content_type)| (extension, is_image_media_type(&content_type)))
+                .collect(),
+        }
+    }
+
     pub fn is_image_part(&self, part_path: &str) -> bool {
         let key = crate::rels::part_name_equivalence_key(part_path.trim_start_matches('/'));
-        let content_type = self
-            .overrides
-            .iter()
-            .find(|(name, _)| crate::rels::part_name_equivalence_key(name) == key)
-            .map(|(_, content_type)| content_type)
-            .or_else(|| {
-                let extension = key.rsplit_once('.')?.1;
-                self.defaults.get(extension)
-            })
-            .map(String::as_str);
-        content_type.is_some_and(|content_type| {
-            content_type
-                .trim_start()
-                .get(..6)
-                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("image/"))
-        })
+        if let Some(image) = self.overrides.get(&key) {
+            return *image;
+        }
+        key.rsplit_once('.')
+            .and_then(|(_, extension)| self.defaults.get(extension))
+            .copied()
+            .unwrap_or(false)
     }
 }
 
@@ -140,6 +168,7 @@ mod tests {
             </Types>"#,
         )
         .unwrap();
+        let parsed = ImagePartTypes::new(parsed);
         assert!(parsed.is_image_part("word/media/image1.png"));
         assert!(parsed.is_image_part("/word/media/a.bin"));
         assert!(parsed.is_image_part("WORD/Media/A.BIN"));

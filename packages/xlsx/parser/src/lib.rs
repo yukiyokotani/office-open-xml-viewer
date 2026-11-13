@@ -4121,7 +4121,7 @@ pub struct XlsxArchive {
     terminal_awaiting_ack: bool,
     last_cursor_usage: Option<ResourceUsage>,
     /// `[Content_Types].xml`, read once on the first `is_picture_part` call.
-    content_types: Option<ooxml_common::content_types::PackageContentTypes>,
+    content_types: Option<ooxml_common::content_types::ImagePartTypes>,
 }
 
 struct ActiveWorksheetCursor {
@@ -4878,10 +4878,12 @@ impl XlsxArchive {
             let load = |archive: &mut XlsxZip| -> Result<_, String> {
                 let _resource_scope = archive.operation()?.resource_scope()?;
                 let bytes = read_zip_bytes(archive, ooxml_common::opc::CONTENT_TYPES_ITEM)?;
-                let types = ooxml_common::content_types::PackageContentTypes::parse(
-                    &String::from_utf8_lossy(&bytes),
-                )
-                .unwrap_or_default();
+                let types = ooxml_common::content_types::ImagePartTypes::new(
+                    ooxml_common::content_types::PackageContentTypes::parse(
+                        &String::from_utf8_lossy(&bytes),
+                    )
+                    .unwrap_or_default(),
+                );
                 archive.assert_healthy()?;
                 Ok(types)
             };

@@ -199,7 +199,7 @@ pub struct DocxArchive {
     prepared_document_chunk: Option<PreparedDocumentChunk>,
     last_document_usage: Option<ResourceUsage>,
     /// `[Content_Types].xml`, read once on the first `is_picture_part` call.
-    content_types: Option<ooxml_common::content_types::PackageContentTypes>,
+    content_types: Option<ooxml_common::content_types::ImagePartTypes>,
 }
 
 #[wasm_bindgen]
@@ -554,10 +554,12 @@ impl DocxArchive {
             // empty table; malformed XML alone serves no picture.
             let types = self.archive.run_operation("content-types", |zip| {
                 let bytes = parser::read_zip_bytes(zip, ooxml_common::opc::CONTENT_TYPES_ITEM)?;
-                Ok(ooxml_common::content_types::PackageContentTypes::parse(
-                    &String::from_utf8_lossy(&bytes),
-                )
-                .unwrap_or_default())
+                Ok(ooxml_common::content_types::ImagePartTypes::new(
+                    ooxml_common::content_types::PackageContentTypes::parse(
+                        &String::from_utf8_lossy(&bytes),
+                    )
+                    .unwrap_or_default(),
+                ))
             })?;
             self.content_types = Some(types);
         }
