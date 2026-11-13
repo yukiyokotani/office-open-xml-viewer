@@ -1,7 +1,7 @@
 {
   "name": "@silurus/ooxml-opendocument",
   "version": "0.89.4",
-  "description": "Optional OpenDocument (ODT, ODS) model sources for @silurus/ooxml",
+  "description": "Optional OpenDocument (ODT, ODP, ODS) model sources for @silurus/ooxml",
   "license": "MIT",
   "author": "Yuki Yokotani <silurus.dev@gmail.com>",
   "repository": {
@@ -18,6 +18,11 @@
       "import": "./dist/odt.mjs",
       "default": "./dist/odt.mjs"
     },
+    "./odp": {
+      "types": "./dist/types/odp.d.ts",
+      "import": "./dist/odp.mjs",
+      "default": "./dist/odp.mjs"
+    },
     "./ods": {
       "types": "./dist/types/ods.d.ts",
       "import": "./dist/ods.mjs",
@@ -26,12 +31,14 @@
   },
   "scripts": {
     "wasm:odt": "cd parser && wasm-pack build --target web --out-dir ../src/wasm-odt --out-name opendocument_odt --features odt && node ../../../scripts/append-wasm-reinit.mjs ../src/wasm-odt/opendocument_odt.js",
+    "wasm:odp": "cd parser && wasm-pack build --target web --out-dir ../src/wasm-odp --out-name opendocument_odp --features odp && node ../../../scripts/append-wasm-reinit.mjs ../src/wasm-odp/opendocument_odp.js",
     "wasm:ods": "cd parser && wasm-pack build --target web --out-dir ../src/wasm-ods --out-name opendocument_ods --features ods && node ../../../scripts/append-wasm-reinit.mjs ../src/wasm-ods/opendocument_ods.js",
     "typecheck": "tsc --noEmit",
-    "build": "vite build && node ../../scripts/bundle-declarations.mjs odt ods",
+    "build": "vite build && node ../../scripts/bundle-declarations.mjs odt odp ods",
     "test": "cd ../.. && vitest run packages/opendocument/src",
     "corpus:convert": "node tests/corpus/convert.mjs",
-    "corpus:odt": "node tests/corpus/run.mjs"
+    "corpus:odt": "node tests/corpus/run.mjs",
+    "corpus:odp": "node tests/corpus/run-odp.mjs"
   },
   "devDependencies": {
     "@playwright/test": "^1.64.1",
@@ -58,6 +65,7 @@
     "ooxml",
     "opendocument",
     "odt",
+    "odp",
     "ods",
     "viewer",
     "wasm"

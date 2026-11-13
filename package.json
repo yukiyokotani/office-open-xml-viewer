@@ -109,6 +109,7 @@
     "build:wasm:legacy-ppt": "pnpm --filter @silurus/ooxml-legacy-office wasm:direct-ppt",
     "build:wasm:legacy-xls": "pnpm --filter @silurus/ooxml-legacy-office wasm:direct-xls",
     "build:wasm:odt": "pnpm --filter @silurus/ooxml-opendocument wasm:odt",
+    "build:wasm:odp": "pnpm --filter @silurus/ooxml-opendocument wasm:odp",
     "build:wasm:ods": "pnpm --filter @silurus/ooxml-opendocument wasm:ods",
     "vrt": "pnpm -r --workspace-concurrency=1 --no-bail vrt",
     "vrt:snapshot": "pnpm -r --workspace-concurrency=1 --no-bail vrt:snapshot",

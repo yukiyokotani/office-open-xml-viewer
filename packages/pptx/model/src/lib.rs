@@ -909,6 +909,11 @@ pub struct PathPaint {
     pub fill: Option<String>,
     /// Whether the path is stroked.
     pub stroke: bool,
+    /// Canvas fill rule of the path's subpaths: `evenodd` for sources that
+    /// fill poly-polygons alternately (OpenDocument shapes, as LibreOffice
+    /// draws them); `None` is DrawingML's nonzero.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fill_rule: Option<String>,
 }
 
 /// A single path command inside a custGeom pathLst.
@@ -1052,6 +1057,13 @@ pub struct TextBody {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(default)]
     pub text_warp: Option<TextWarp>,
+    /// Shrink on overflow without a stored scale (ODF 1.3 Part 3 §20.358
+    /// `style:shrink-to-fit`): the renderer derives the largest font scale
+    /// at which the text fits the frame, as LibreOffice Impress does. DrawingML
+    /// sources never set it (PowerPoint applies only a stored `fontScale`).
+    #[serde(skip_serializing_if = "is_false")]
+    #[serde(default)]
+    pub shrink_on_overflow: bool,
 }
 
 pub fn one_u32() -> u32 {

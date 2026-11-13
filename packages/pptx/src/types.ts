@@ -375,7 +375,7 @@ export interface ShapeElement {
    * normally and stroked. `fill` is `none`, `lighten`, `lightenLess`,
    * `darken` or `darkenLess`; `null` means `norm`.
    */
-  custGeomPaint?: { fill: string | null; stroke: boolean }[];
+  custGeomPaint?: { fill: string | null; stroke: boolean; fillRule?: 'nonzero' | 'evenodd' }[];
   /** First adjustment value from prstGeom avLst (e.g. trapezoid inset). Range 0–100000. */
   adj: number | null;
   /** Second adjustment value from prstGeom avLst (e.g. arrow head width). Range 0–100000. */

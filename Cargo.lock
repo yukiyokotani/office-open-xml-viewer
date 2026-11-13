@@ -670,6 +670,7 @@ dependencies = [
  "js-sys",
  "ooxml-common",
  "png",
+ "pptx-model",
  "roxmltree",
  "serde",
  "serde_json",

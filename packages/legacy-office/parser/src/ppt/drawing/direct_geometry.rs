@@ -124,6 +124,7 @@ pub(super) fn project(
     let paint: Vec<PathPaint> = decoded
         .paths()
         .map(|path| PathPaint {
+            fill_rule: None,
             fill: (!path.fill()).then(|| "none".to_owned()),
             stroke: path.stroke(),
         })
@@ -231,10 +232,12 @@ mod tests {
             model.paint,
             Some(vec![
                 PathPaint {
+                    fill_rule: None,
                     fill: Some("none".into()),
                     stroke: true
                 },
                 PathPaint {
+                    fill_rule: None,
                     fill: None,
                     stroke: true
                 },
