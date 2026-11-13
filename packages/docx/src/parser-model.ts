@@ -1099,6 +1099,7 @@ function acquiredBodyParagraph(paragraph: DocParagraph, source: SourceRef) {
     widowControl: paragraph.widowControl !== false,
     ...(paragraph.framePr?.vAnchor === 'text' && paragraph.framePr.dropCap === 'none'
       ? { textFrameMember: true as const } : {}),
+    ...paragraphFrameFact(paragraph),
     spaceBeforePt: paragraph.spaceBefore ?? 0,
     spaceAfterPt: paragraph.spaceAfter ?? 0,
     contextualSpacing: paragraph.contextualSpacing === true,
@@ -1142,6 +1143,16 @@ function repeatedFootnoteLastEntries(
   })));
 }
 
+/** §17.3.1.11 frame presence as a parse fact; dropCap other than none
+ * (§17.18.20) marks a drop-cap frame. */
+function paragraphFrameFact(
+  paragraph: Pick<DocParagraph, 'framePr'>,
+): Readonly<{ framed?: 'frame' | 'drop-cap' }> {
+  if (!paragraph.framePr) return {};
+  const dropCap = paragraph.framePr.dropCap;
+  return { framed: dropCap === 'drop' || dropCap === 'margin' ? 'drop-cap' : 'frame' };
+}
+
 function bodyLayoutSequenceInput(
   body: readonly BodyElement[],
   sectionAtMarker: (bodyIndex: number) => AcquiredBodySectionReference,
@@ -1166,11 +1177,21 @@ function bodyLayoutSequenceInput(
     const source = bodySourceAt(entryBodyIndex);
     bodyIndex += 1;
     if (element.type === 'paragraph') {
-      return element.markVanish === true
-        && !paragraphHasUnavailableDrawing(element)
-        && isInklessParagraph(element)
-        ? Object.freeze({ kind: 'consume-source' as const, source, reason: 'hidden-paragraph' as const })
-        : Object.freeze({ kind: 'body-block' as const, block: acquiredBodyParagraph(element, source) });
+      if (element.markVanish !== true
+        || paragraphHasUnavailableDrawing(element)
+        || !isInklessParagraph(element)) {
+        return Object.freeze({ kind: 'body-block' as const, block: acquiredBodyParagraph(element, source) });
+      }
+      // Facts only: whether the hidden paragraph's pageBreakBefore
+      // (§17.3.1.23) still applies is decided by
+      // wordHiddenParagraphPageBreakEntries in projectBodyLayoutInput.
+      return Object.freeze({
+        kind: 'consume-source' as const,
+        source,
+        reason: 'hidden-paragraph' as const,
+        ...(element.pageBreakBefore === true ? { pageBreakBefore: true as const } : {}),
+        ...paragraphFrameFact(element),
+      });
     }
     if (element.type === 'table') {
       return Object.freeze({

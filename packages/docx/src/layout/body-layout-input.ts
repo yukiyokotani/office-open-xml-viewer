@@ -15,7 +15,10 @@ import {
 import type { SectionStartType, AuthoredBreak } from './paginator.js';
 import { snapshotPlainData } from './plain-data.js';
 import type { DeepReadonly, LayoutDiagnostic, SourceRef } from './types.js';
-import { wordContinuousSectionRole } from './body-pagination-compatibility.js';
+import {
+  wordContinuousSectionRole,
+  wordHiddenParagraphPageBreakEntries,
+} from './body-pagination-compatibility.js';
 
 /** ECMA-376 §17.11.1/.23 define the mark kind independently of the separator
  * story's ordinary/continuation role. Default is an absent producer fact, not
@@ -135,6 +138,8 @@ export interface BodyParagraphSourceInput {
   readonly widowControl: boolean;
   /** WORD_TEXT_FRAME_PRECEDING_TEXT_PUSH: detached from paragraph-gap flow. */
   readonly textFrameMember?: true;
+  /** §17.3.1.11 framePr presence; 'drop-cap' when dropCap is drop or margin. */
+  readonly framed?: 'frame' | 'drop-cap';
   readonly spaceBeforePt: number;
   readonly spaceAfterPt: number;
   readonly contextualSpacing: boolean;
@@ -199,7 +204,14 @@ export type BodyLayoutSequenceEntryFor<TSection> =
       sameSourceParagraphAsPrevious?: boolean;
     }>
   | Readonly<{ kind: 'begin-section'; source: SourceRef; section: TSection }>
-  | Readonly<{ kind: 'consume-source'; source: SourceRef; reason: 'hidden-paragraph' }>;
+  | Readonly<{
+      kind: 'consume-source';
+      source: SourceRef;
+      reason: 'hidden-paragraph';
+      /** Parse facts of the hidden paragraph (§17.3.1.23, §17.3.1.11). */
+      pageBreakBefore?: true;
+      framed?: 'frame' | 'drop-cap';
+    }>;
 
 export type BodyLayoutSequenceEntry = BodyLayoutSequenceEntryFor<BodySectionLayoutInput>;
 
@@ -421,6 +433,7 @@ export function projectBodyLayoutInput(acquired: BodyLayoutAcquisitionInput): Bo
   const initialOccurrence = acquired.sectionIndex.occurrences[0];
   if (!initialOccurrence) throw new Error('DOCX body requires a final section owner');
   const initialSection = sections.get(initialOccurrence.sectionOccurrenceId)!;
+  const hiddenPageBreaks = wordHiddenParagraphPageBreakEntries(acquired.sequence);
   // The spacing role depends only on the authored section start type, already
   // present in the acquisition sequence. Resolve section owners and roles in
   // one pass so no second body-sized sequence is retained transiently.
@@ -429,6 +442,11 @@ export function projectBodyLayoutInput(acquired: BodyLayoutAcquisitionInput): Bo
       const section = sections.get(entry.section.sectionOccurrenceId);
       if (!section) throw new Error(`Missing body section owner: ${entry.section.sectionOccurrenceId}`);
       return Object.freeze({ ...entry, section });
+    }
+    if (entry.kind === 'consume-source') {
+      return hiddenPageBreaks.has(index)
+        ? Object.freeze({ kind: 'authored-break' as const, source: entry.source, break: 'pageBreakBefore' as const })
+        : entry;
     }
     if (entry.kind !== 'body-block' || entry.block.kind !== 'paragraph') return entry;
     const continuousSectionRole = wordContinuousSectionRole(acquired.sequence, index);
