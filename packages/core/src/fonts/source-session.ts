@@ -85,8 +85,7 @@ import {
   type ResolverFaceRequest,
 } from './face-download.js';
 import { resolveFontFiles } from './files-source.js';
-import { parseOpenTypeResourceMetrics, type OpenTypeLineMetrics } from './open-type-metrics.js';
-import { metricSfnt } from './web-font-sfnt.js';
+import type { OpenTypeLineMetrics } from './open-type-metrics.js';
 import { DecodeQueue } from './decode-queue.js';
 import { concludeFamilies } from './resolver-failures.js';
 import {
@@ -137,7 +136,8 @@ export interface LoadedSourceFace {
   readonly face: FontFace;
   /** OpenType tables of the exact bytes this face was registered from, when
    * the session holds them (`data` faces and every library-acquired
-   * http(s) / blob: download) and the parser reads them: TrueType/OpenType, WOFF, and WOFF2 where the engine
+   * http(s) / blob: download), the session reads tables
+   * ({@link FontSourceSessionOptions.readMetricTables}) and the parser reads them: TrueType/OpenType, WOFF, and WOFF2 where the engine
    * inflates Brotli natively. A variable font carries its `variation` data
    * for {@link instanceOpenTypeLineMetrics}. Formats project these tables
    * with their own line rules, exactly as for a document-embedded face. */
@@ -194,6 +194,12 @@ export interface FontSourceSessionOptions {
    * against the realm ceiling while it keeps it. Otherwise the realm's
    * acquisition cache owns and charges them. */
   readonly acquiredFacesOwnedBySession?: boolean;
+  /** Reads the OpenType metric tables of each loaded face that has bytes
+   * (`source-metric-tables.ts` `readFontResourceMetrics`), before the
+   * snapshot: {@link LoadedSourceFace.resourceMetrics}. Only a format that
+   * lays out with those tables passes it (DOCX). Absent, no face is inflated
+   * or parsed, and every face carries its {@link LoadedSourceFace.probeSource}. */
+  readonly readMetricTables?: (data: ArrayBuffer) => Promise<OpenTypeLineMetrics | null>;
 }
 
 
@@ -213,11 +219,16 @@ let sessionSerial = 0;
  * queued decodes are dropped (`decode-queue.ts`). */
 const metricDecodes = new DecodeQueue(2);
 
-/** Read the metric tables of `data` once, on behalf of `holder`; rejects
- * with an `AbortError` once `signal` aborts. */
-function prepareResourceMetrics(data: ArrayBuffer, holder: object, signal: AbortSignal): Promise<void> {
+/** Read the metric tables of `data` once with `read`, on behalf of
+ * `holder`; rejects with an `AbortError` once `signal` aborts. */
+function prepareResourceMetrics(
+  data: ArrayBuffer,
+  read: (data: ArrayBuffer) => Promise<OpenTypeLineMetrics | null>,
+  holder: object,
+  signal: AbortSignal,
+): Promise<void> {
   if (faceResourceMetrics.has(data)) return Promise.resolve();
-  return metricDecodes.run(data, holder, () => decodeResourceMetrics(data), signal);
+  return metricDecodes.run(data, holder, () => decodeResourceMetrics(data, read), signal);
 }
 
 /** Decodes queued or running in this realm (tests, leak checks). */
@@ -225,13 +236,13 @@ export function pendingMetricDecodeCount(): number {
   return metricDecodes.size;
 }
 
-async function decodeResourceMetrics(data: ArrayBuffer): Promise<void> {
+async function decodeResourceMetrics(
+  data: ArrayBuffer,
+  read: (data: ArrayBuffer) => Promise<OpenTypeLineMetrics | null>,
+): Promise<void> {
   if (faceResourceMetrics.has(data)) return;
   let metrics: OpenTypeLineMetrics | null = null;
-  try {
-    const sfnt = await metricSfnt(data);
-    if (sfnt instanceof Uint8Array) metrics = parseOpenTypeResourceMetrics(sfnt, undefined, { variations: true });
-  } catch { metrics = null; }
+  try { metrics = await read(data); } catch { metrics = null; }
   faceResourceMetrics.set(data, metrics);
 }
 
@@ -523,6 +534,7 @@ export class FontSourceSession {
   private resolverFailures: FontResolverFailures | undefined;
   private acquireResolverFaces: ResolverFaceAcquirer | undefined;
   private readonly ownsAcquiredFaces: boolean;
+  private readonly readMetricTables: FontSourceSessionOptions['readMetricTables'];
   /** Resolver faces this session acquired, by `sourceIndex\0url`: a later
    * delta claiming the same face reuses the bytes instead of asking again. */
   private readonly acquiredFaces = new Map<string, ArrayBuffer>();
@@ -558,6 +570,7 @@ export class FontSourceSession {
     // otherwise, so both modes send the same requests and hold the bytes.
     this.acquireResolverFaces = options.acquireResolverFaces ?? inRealmResolverFaceAcquirer(options.resolverFailures);
     this.ownsAcquiredFaces = options.acquiredFacesOwnedBySession === true;
+    this.readMetricTables = options.readMetricTables;
     this.caches = this.sources.map(acquireSourceCache);
     const signal = options.signal;
     if (signal) {
@@ -738,9 +751,12 @@ export class FontSourceSession {
       loadCeiling?.dispose();
     }
     if (this.closed) return this.settledState();
-    await Promise.all([...this.owned.values()].flatMap((entry) =>
-      entry.face.status === 'loaded' && entry.declaration.data !== undefined
-        ? [prepareResourceMetrics(entry.declaration.data, this, this.controller.signal)] : []));
+    const read = this.readMetricTables;
+    if (read) {
+      await Promise.all([...this.owned.values()].flatMap((entry) =>
+        entry.face.status === 'loaded' && entry.declaration.data !== undefined
+          ? [prepareResourceMetrics(entry.declaration.data, read, this, this.controller.signal)] : []));
+    }
     if (this.closed) return this.settledState();
     this.warn(failures);
     this.snapshot = this.takeSnapshot();
@@ -1140,7 +1156,7 @@ export class FontSourceSession {
     for (const entry of this.owned.values()) {
       if (entry.face.status !== 'loaded') continue;
       const { declaration } = entry;
-      const resourceMetrics = (declaration.data && faceResourceMetrics.get(declaration.data)) ?? undefined;
+      const resourceMetrics = (this.readMetricTables && declaration.data && faceResourceMetrics.get(declaration.data)) || undefined;
       const probeSource = resourceMetrics ? undefined
         : declaration.data ?? (declaration.url === undefined ? undefined : cssUrl(declaration.url));
       faces.push(Object.freeze({

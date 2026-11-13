@@ -62,6 +62,10 @@ const TARGETED: Record<string, Uint8Array> = {
     '<w:tabs><w:tab w:val="right" w:leader="middleDot" w:pos="8000"/></w:tabs>')
     + p(run('Next') + '<w:r><w:tab/></w:r>' + run('9'),
       '<w:tabs><w:tab w:val="right" w:leader="underscore" w:pos="8000"/></w:tabs>')),
+  // §17.3.3.30 sym and §17.3.2.26 rFonts naming symbol-encoded faces.
+  'symbol fonts': docx(p('<w:r><w:sym w:font="Wingdings" w:char="F0E0"/></w:r>'
+    + run('lnþ(a', '<w:rFonts w:ascii="Symbol" w:hAnsi="Symbol"/>')
+    + run('\uF0B7\uF06C', '<w:rFonts w:ascii="Wingdings" w:hAnsi="Wingdings"/>'))),
   'east asian empty marks': docx(p('', '<w:rPr><w:rFonts w:eastAsia="MS Mincho" w:hint="eastAsia"/></w:rPr>')
     + p(run('日本語の文', '<w:rFonts w:eastAsia="MS Mincho"/><w:lang w:eastAsia="ja-JP"/>'))),
 };
@@ -94,7 +98,12 @@ function recordingCanvas() {
     get font() { return font; },
     set font(value: string) { font = value; },
     letterSpacing: '0px',
-    measureText: (text: string) => { texts.push(text); return metrics(text); },
+    // Symbol-face probes measure in families no source serves (the route
+    // sentinels alone, or a family no host installs): no subset to load.
+    measureText: (text: string) => {
+      if (!/^[^",]*"__ooxml_(?:route_sentinel_[ab]|symbol_probe_absent)_[0-9a-f]+__"$/u.test(font)) texts.push(text);
+      return metrics(text);
+    },
     fillText: (text: string) => { texts.push(text); },
     strokeText: (text: string) => { texts.push(text); },
     createLinearGradient: () => ({ addColorStop: noop }),

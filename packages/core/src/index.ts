@@ -228,8 +228,10 @@ export {
 } from './fonts/symbol-font';
 export {
   createSymbolFaceOracle,
+  createSymbolFaceOracleCache,
   createSymbolMonochromeProbe,
   type SymbolFaceOracle,
+  type SymbolFaceOracleCache,
   type SymbolFaceOracleOptions,
   type SymbolProbeCanvasFactory,
   type SymbolFallbackFont,
