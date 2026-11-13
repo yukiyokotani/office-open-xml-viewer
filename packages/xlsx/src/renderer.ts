@@ -44,7 +44,7 @@ import {
   type ShapeRunLineRatios,
 } from './shape-office-line.js';
 import { fitGeneralNumber, formatCellValueWithColor, type FormattedCell } from './number-format.js';
-import { AUTHORED_PAINT, symbolPaint, type SymbolPaint } from './symbol-paint.js';
+import { symbolPaint, type SymbolPaint } from './symbol-paint.js';
 import { createSymbolFaceOracle, isSymbolFontFamily, type SymbolFaceOracle, type SymbolFaceOracleCache } from '@silurus/ooxml-core';
 import { type CfContext, type CfResult, compileCf, evaluateCf } from './conditional-format.js';
 import { computeLineVisualOrder, cellBaseRtl, resolveCellBidi } from './bidi-line.js';
@@ -1209,13 +1209,17 @@ type SymbolRun = Run & { readonly symbolUnicode?: true };
  *  re-read a converted U+0020..U+00FF target as its own code). */
 const SYMBOL_UNICODE_FAMILIES = NAMED_SANS_TAIL;
 
-/** A cell value (or any text painted in one cell font) as it paints: the
- *  painted text, the font it paints with, and the painted form of any
- *  substring (symbol-paint.ts). */
+/** A cell value (or any text authored in one cell font) as it paints
+ *  (symbol-paint.ts). In one face: `text` in `font`, and `paint` gives the
+ *  painted form of any substring. In two faces (a partial symbol face):
+ *  `runs` are its stretches in painted form, each inheriting `font` and
+ *  flagged where it paints in the Unicode face; `text`/`font` then describe
+ *  the joined text only for logic that does not measure (hard breaks, bidi). */
 interface CellPaint {
   readonly text: string;
   readonly font: CellFont;
   readonly paint: SymbolPaint['paint'];
+  readonly runs?: Run[];
 }
 
 function cellSymbolPaint(
@@ -1224,20 +1228,30 @@ function cellSymbolPaint(
   // Only a symbol-encoded face (never an already converted font) is judged;
   // every other cell pays one family test.
   const family = cachedThemeCellFont(font, themeCellFontByContext.get(ctx)).family;
-  const painted = text && !(font as SymbolCellFont).symbolUnicode && isSymbolFontFamily(family)
-    ? symbolPaint(symbolOracle(ctx), text, family, buildFont(ctx, font, cs, cjkFallback, text),
-      () => buildFont(ctx, { ...font, size: 24, symbolUnicode: true } as SymbolCellFont, 1))
-    : AUTHORED_PAINT;
-  if (painted === AUTHORED_PAINT) return { text, font, paint: AUTHORED_PAINT.paint };
+  if (!text || (font as SymbolCellFont).symbolUnicode || !isSymbolFontFamily(family)) {
+    return { text, font, paint: (value) => value };
+  }
+  const painted = symbolPaint(symbolOracle(ctx), text, family, buildFont(ctx, font, cs, cjkFallback, text),
+    () => buildFont(ctx, { ...font, size: 24, symbolUnicode: true } as SymbolCellFont, 1));
+  const { segments, paint } = painted;
+  if (segments.length === 1) {
+    return {
+      text: paint(text),
+      font: segments[0]!.unicode ? { ...font, symbolUnicode: true } as SymbolCellFont : font,
+      paint,
+    };
+  }
   return {
-    text: painted.paint(text),
-    font: painted.unicode ? { ...font, symbolUnicode: true } as SymbolCellFont : font,
-    paint: painted.paint,
+    text: paint(text), font, paint,
+    runs: segments.map((segment): SymbolRun => segment.unicode
+      ? { text: paint(segment.authored), symbolUnicode: true }
+      : { text: paint(segment.authored) }),
   };
 }
 
 /** Rich runs in their painted form (cellSymbolPaint per run, in the run's
- *  resolved font); the input array itself when no run changes. */
+ *  resolved font; a run needing two faces splits); the input array itself
+ *  when no run changes. */
 function symbolPaintRuns(
   ctx: CanvasRenderingContext2D, runs: Run[], baseFont: CellFont, cs = 1, cjkFallback?: CjkLang,
 ): Run[] {
@@ -1245,11 +1259,17 @@ function symbolPaintRuns(
   runs.forEach((run, index) => {
     const font = applyRunFont(baseFont, run);
     const painted = cellSymbolPaint(ctx, font, run.text, cs, cjkFallback);
-    if (painted.text === run.text && painted.font === font) {
+    if (!painted.runs && painted.text === run.text && painted.font === font) {
       out?.push(run);
       return;
     }
     out ??= runs.slice(0, index);
+    if (painted.runs) {
+      for (const piece of painted.runs) {
+        out.push({ ...run, text: piece.text, ...((piece as SymbolRun).symbolUnicode ? { symbolUnicode: true } : {}) } as SymbolRun);
+      }
+      return;
+    }
     const next: SymbolRun = painted.font === font
       ? { ...run, text: painted.text }
       : { ...run, text: painted.text, symbolUnicode: true };
@@ -1259,18 +1279,21 @@ function symbolPaintRuns(
 }
 
 /**
- * Rich runs that name a symbol-encoded face, in their painted form; undefined
- * for any other value. Such a run's codes are judged against its own face
- * (symbol-paint.ts), so its painted text exists only run by run: overflow,
- * shrink-to-fit, rotated and stacked text, the automatic row height and the
- * virtualized overflow pre-pass measure and paint these cells per run. Other
- * rich values keep the established measurement of their joined text in the
- * cell font (library simplification), which their paint does not contradict.
+ * A cell value that paints in more than one face because of a symbol-encoded
+ * face, as painted runs; undefined for any other value. That is a rich value
+ * with a run in a symbol-encoded face (its codes are judged against its own
+ * face), or a plain value in a partial symbol face (`plain.runs`). Such a
+ * value is measured and painted run by run on every path: overflow,
+ * shrink-to-fit, fill and distributed alignment, rotated and stacked text,
+ * wrapping, the automatic row height, the virtualized overflow pre-pass and
+ * the phonetic band. Other rich values keep the established measurement of
+ * their joined text in the cell font (library simplification).
  */
 function symbolRichRuns(
   ctx: CanvasRenderingContext2D, runs: Run[] | undefined, baseFont: CellFont, cs = 1, cjkFallback?: CjkLang,
+  plain?: CellPaint,
 ): Run[] | undefined {
-  if (!runs?.length) return undefined;
+  if (!runs?.length) return plain?.runs;
   const state = themeCellFontByContext.get(ctx);
   const symbolic = runs.some((run) => isSymbolFontFamily(cachedThemeCellFont(applyRunFont(baseFont, run), state).family));
   return symbolic ? symbolPaintRuns(ctx, runs, baseFont, cs, cjkFallback) : undefined;
@@ -1291,12 +1314,58 @@ function richRunSegments(
   return segs;
 }
 
-/** Width of `text` painted in `font` (in its painted form), restoring the
- *  context font. */
+/** One stacked slot per authored code point of painted text: a converted
+ *  symbol's VS15 stays with its base (every conversion target of the core
+ *  tables is one code point, symbol-font.ts). */
+const PAINTED_SLOT = /[\s\S]\uFE0E?/gu;
+
+/** The painted slots of runs, one per authored code point, with their fonts. */
+function paintedSlots(runs: readonly Run[], baseFont: CellFont): { text: string; font: CellFont }[] {
+  return runs.flatMap((run) => {
+    const font = applyRunFont(baseFont, run);
+    return (run.text.match(PAINTED_SLOT) ?? []).map((text) => ({ text, font }));
+  });
+}
+
+/** Width of the authored code points `start .. start + [...text].length` of
+ *  a value painted as `runs`, each stretch in its own font. */
+function slotRangeWidth(
+  ctx: CanvasRenderingContext2D, slots: readonly { text: string; font: CellFont }[],
+  start: number, count: number, cs: number, cjkFallback?: CjkLang,
+): number {
+  const previous = ctx.font;
+  let width = 0;
+  let index = start;
+  const end = Math.min(slots.length, start + count);
+  while (index < end) {
+    const font = slots[index]!.font;
+    let text = '';
+    while (index < end && slots[index]!.font === font) text += slots[index++]!.text;
+    ctx.font = buildFont(ctx, vertAlignDrawFont(font), cs, cjkFallback, text);
+    width += ctx.measureText(text).width;
+  }
+  ctx.font = previous;
+  return width;
+}
+
+/** The phonetic base-span measure of a value painted as runs: a span of
+ *  authored code points measured slot by slot in their own fonts. */
+function phoneticSlotMeasure(
+  ctx: CanvasRenderingContext2D, runs: readonly Run[], baseFont: CellFont, cs: number, cjkFallback?: CjkLang,
+): (text: string, start: number) => number {
+  const slots = paintedSlots(runs, baseFont);
+  return (text, start) => slotRangeWidth(ctx, slots, start, [...text].length, cs, cjkFallback);
+}
+
+/** Width of `text` painted in `font` (in its painted form, in one or more
+ *  faces), restoring the context font. */
 function measureCellText(
   ctx: CanvasRenderingContext2D, font: CellFont, text: string, cs: number, cjkFallback?: CjkLang,
 ): number {
   const painted = cellSymbolPaint(ctx, font, text, cs, cjkFallback);
+  if (painted.runs) {
+    return richRunSegments(ctx, painted.runs, font, cs, cjkFallback).reduce((sum, seg) => sum + seg.width, 0);
+  }
   const previous = ctx.font;
   ctx.font = buildFont(ctx, painted.font, cs, cjkFallback, painted.text);
   const width = ctx.measureText(painted.text).width;
@@ -1333,9 +1402,9 @@ export function drawPhoneticBand(
   cs: number,
   color: string,
   cjkFallback?: CjkLang,
-  /** The painted form of base-text substrings (symbol-paint.ts): spans are
-   *  located in the authored base text and measured as they paint. */
-  basePaint: (text: string) => string = (text) => text,
+  /** Width of a base-text span (its code-point offset `start`) as it
+   *  paints (symbol-paint.ts); default: the span in `baseFontStr`. */
+  baseMeasure?: (text: string, start: number) => number,
 ): void {
   if (runs.length === 0) return;
   // §18.4.3: fontId selects the reading font; out of bounds → font 0.
@@ -1375,8 +1444,8 @@ export function drawPhoneticBand(
   // Per-word (left / center / distributed): position each hint over its base
   // span using BASE-font advances (so the band lines up with the glyphs it
   // annotates). `baseFontStr` is the font string the base text was drawn with.
-  const placed = placePhoneticRuns(runs, baseText, baseLeftX, alignment, (s) =>
-    measureInFont(ctx, basePaint(s), baseFontStr),
+  const placed = placePhoneticRuns(runs, baseText, baseLeftX, alignment, (s, start) =>
+    baseMeasure ? baseMeasure(s, start) : measureInFont(ctx, s, baseFontStr),
   );
 
   for (const p of placed) {
@@ -1963,41 +2032,45 @@ export function drawWrappedRichText(
   }
 }
 
-/** One stacked slot per authored code point of painted text: a converted
- *  symbol's VS15 stays with its base (symbol-paint.ts). */
-const STACKED_SLOT = /[\s\S]\uFE0E?/gu;
-
 /**
- * Stacked text (`textRotation="255"`, §18.8.1) of rich runs in their painted
- * form (symbolRichRuns): one slot per authored code point, each painted in
- * its run's font and colour with the same UAX #50 orientation as the plain
- * stacked path.
+ * Stacked text (`textRotation="255"`, §18.8.1) of a value painted as runs
+ * (symbolRichRuns): one slot per authored code point, each painted in its
+ * run's font and colour, its height the compact 1.1 em slot of that font
+ * (as the plain stacked path and stackedRunsHeight), with the same UAX #50
+ * orientation as the plain stacked path.
  */
 function drawStackedRichRuns(
   ctx: CanvasRenderingContext2D, runs: readonly Run[], baseFont: CellFont,
   centerX: number, cy: number, cellH: number, alignV: string, paddingY: number,
-  charH: number, cs: number, fontColor: string | null | undefined, cjkFallback?: CjkLang,
+  cs: number, fontColor: string | null | undefined, cjkFallback?: CjkLang,
 ): void {
-  const slots = runs.reduce((sum, run) => sum + (run.text.match(STACKED_SLOT)?.length ?? 0), 0);
-  const totalH = slots * charH;
+  const slots = paintedSlots(runs, baseFont);
+  const totalH = stackedRunsHeight(slots, cs);
   let charY = alignV === 'top' ? cy + paddingY
     : alignV === 'center' ? cy + (cellH - totalH) / 2
     : cy + cellH - totalH - paddingY;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'top';
-  for (const run of runs) {
-    const font = applyRunFont(baseFont, run);
-    ctx.font = buildFont(ctx, font, cs, cjkFallback, run.text);
-    const color = fontColor ?? font.color;
-    ctx.fillStyle = color ? hexToRgba(color) : '#000000';
-    const paint = (value: string, x: number, y: number) => paintCellText(ctx, value, x, y, font, cs);
-    for (const ch of run.text.match(STACKED_SLOT) ?? []) {
-      const cp = ch.codePointAt(0) ?? 0;
-      const vertCapable = verticalTrLongMark(cp) && verticalVertGlyphReachable(ctx, cp);
-      drawStackedVerticalChar(ctx, ch, centerX, charY, charH, vertCapable, paint);
-      charY += charH;
+  let current: CellFont | undefined;
+  for (const { text: ch, font } of slots) {
+    if (font !== current) {
+      current = font;
+      ctx.font = buildFont(ctx, font, cs, cjkFallback, ch);
+      const color = fontColor ?? font.color;
+      ctx.fillStyle = color ? hexToRgba(color) : '#000000';
     }
+    const charH = vMetricPx(font.size, cs, 1.1);
+    const cp = ch.codePointAt(0) ?? 0;
+    const vertCapable = verticalTrLongMark(cp) && verticalVertGlyphReachable(ctx, cp);
+    drawStackedVerticalChar(ctx, ch, centerX, charY, charH, vertCapable,
+      (value, x, y) => paintCellText(ctx, value, x, y, font, cs));
+    charY += charH;
   }
+}
+
+/** Total height of stacked slots, each the 1.1 em slot of its own font. */
+function stackedRunsHeight(slots: readonly { font: CellFont }[], cs: number): number {
+  return slots.reduce((sum, slot) => sum + vMetricPx(slot.font.size, cs, 1.1), 0);
 }
 
 function colToLetter(col: number): string {
@@ -2435,7 +2508,12 @@ function renderQuadrant(
     const rawRuns = cell.value.type === 'text' ? cell.value.runs : undefined;
     const richBaseFont = tableRunColor != null ? { ...fontForDraw, color: tableRunColor } : fontForDraw;
     const colouredRuns = rawRuns && richRunsWithTableColor(rawRuns, tableRunColor);
-    const runs = symbolRichRuns(ctx, colouredRuns, richBaseFont, cs, cjkFallback) ?? colouredRuns;
+    // A plain value in two faces paints as runs (symbolRichRuns), as in the
+    // main loop.
+    const symbolRuns = symbolRichRuns(ctx, colouredRuns, richBaseFont, cs, cjkFallback, painted);
+    const runBase = symbolRuns && !colouredRuns?.length
+      ? { ...fontForDraw, color: textColor, underline: fontForDraw.underline || !!hyperlinkUrl } : richBaseFont;
+    const runs = symbolRuns ?? colouredRuns;
     const hasRichText = runs && runs.length > 0;
 
     if (xf.wrapText && hasRichText) {
@@ -2444,7 +2522,7 @@ function renderQuadrant(
       // underline/strike, and bidi (previously this pre-pass drew only plain
       // per-segment fonts).
       drawWrappedRichText(
-        ctx, runs, richBaseFont,
+        ctx, runs, runBase,
         { alignH, alignV, cx: aCx, cy: aCy, cellW: cW, cellH: cH, leftPad, paddingX, paddingY },
         cs, dpr, { fontColor: cf.fontColor, readingOrder: xf.readingOrder }, cjkFallback
       );
@@ -2462,7 +2540,7 @@ function renderQuadrant(
       // off-screen-anchored merge renders identical per-run text (single line, or
       // multiple lines on a hard break) instead of joined base-font text.
       drawNonWrapRichText(
-        ctx, runs, richBaseFont,
+        ctx, runs, runBase,
         { alignH, alignV, cx: aCx, cy: aCy, cellW: cW, cellH: cH, leftPad, paddingX, paddingY },
         cs, dpr, { fontColor: cf.fontColor, readingOrder: xf.readingOrder }, cjkFallback
       );
@@ -2834,9 +2912,14 @@ function renderQuadrant(
       const rawRuns = cell.value.type === 'text' ? cell.value.runs : undefined;
       const richBaseFont = tableRunColor != null ? { ...fontForDraw, color: tableRunColor } : fontForDraw;
       const colouredRuns = rawRuns && richRunsWithTableColor(rawRuns, tableRunColor);
-      const symbolRuns = symbolRichRuns(ctx, colouredRuns, richBaseFont, cs, cjkFallback);
-      const runs = symbolRuns ?? colouredRuns;
-      const symbolSegments = symbolRuns && richRunSegments(ctx, symbolRuns, richBaseFont, cs, cjkFallback);
+      // A plain value in two faces paints as runs of the cell font, in the
+      // value's colour, a hyperlink underlined as the plain path draws it.
+      const plainRunBase: CellFont = { ...fontForDraw, color: textColor,
+        underline: fontForDraw.underline || !!hyperlinkUrl };
+      const symbolRuns = symbolRichRuns(ctx, colouredRuns, richBaseFont, cs, cjkFallback, painted);
+      const runBase = symbolRuns && !colouredRuns?.length ? plainRunBase : richBaseFont;
+      let runs = symbolRuns ?? colouredRuns;
+      const symbolSegments = symbolRuns && richRunSegments(ctx, symbolRuns, runBase, cs, cjkFallback);
       const valueWidth = () => symbolSegments
         ? symbolSegments.reduce((sum, seg) => sum + seg.width, 0)
         : ctx.measureText(paintText).width;
@@ -2933,15 +3016,16 @@ function renderQuadrant(
       let letterSpacingPx = 0;
       if (alignH === 'fill' && !isNumeric && text.length > 0) {
         const innerW = Math.max(1, cellW - paddingX * 2);
-        const oneW = ctx.measureText(paintText).width;
+        const oneW = valueWidth();
         if (oneW > 0 && oneW < innerW) {
           const reps = Math.max(1, Math.floor(innerW / oneW));
           drawText = text.repeat(reps);
+          if (symbolRuns) runs = Array.from({ length: reps }, () => symbolRuns).flat();
         }
       }
       if (alignH === 'distributed' || (alignH === 'justify' && !xf.wrapText && !hasHardBreak)) {
         const innerW = Math.max(1, cellW - paddingX * 2);
-        const naturalW = ctx.measureText(painted.paint(drawText)).width;
+        const naturalW = symbolSegments ? valueWidth() : ctx.measureText(painted.paint(drawText)).width;
         // One gap per authored character: a converted symbol may carry VS15.
         const gaps = Math.max(1, [...drawText].length - 1);
         if (naturalW < innerW) {
@@ -3004,8 +3088,8 @@ function renderQuadrant(
         // correct (issue #790 codex review, finding 3).
         const stackedCount = [...text].length;
         if (symbolRuns) {
-          drawStackedRichRuns(ctx, symbolRuns, richBaseFont, cx + cellW / 2, cy, cellH, alignV,
-            paddingY, vMetricPx(font.size, cs, 1.1), cs, cf.fontColor, cjkFallback);
+          drawStackedRichRuns(ctx, symbolRuns, runBase, cx + cellW / 2, cy, cellH, alignV,
+            paddingY, cs, cf.fontColor, cjkFallback);
           ctx.restore();
           return;
         }
@@ -3042,7 +3126,9 @@ function renderQuadrant(
         ctx.rotate(angleRad);
         if (symbolSegments) {
           const total = symbolSegments.reduce((sum, seg) => sum + seg.width, 0);
-          drawResolvedRichLine(ctx, symbolSegments, -total / 2, 0, 'middle', cs, dpr, { fontColor: cf.fontColor }, cjkFallback);
+          const { needBidi, baseRtl } = resolveCellBidi(xf.readingOrder, symbolSegments.map((seg) => seg.text).join(''));
+          drawResolvedRichLine(ctx, symbolSegments, -total / 2, 0, 'middle', cs, dpr,
+            { fontColor: cf.fontColor, needBidi, baseRtl }, cjkFallback);
           ctx.restore();
           return;
         }
@@ -3084,12 +3170,12 @@ function renderQuadrant(
       } catch { /* ignore */ }
 
       // Rich text: draw each run with its own font.
-      const hasRichText = runs && runs.length > 0;
+      const richRuns = runs?.length ? runs : undefined;
 
-      if (xf.wrapText && hasRichText) {
+      if (xf.wrapText && richRuns) {
         // Rich text with wrapping — shared with the off-screen pre-pass.
         drawWrappedRichText(
-          ctx, runs, richBaseFont,
+          ctx, richRuns, runBase,
           { alignH, alignV, cx, cy, cellW, cellH, leftPad, paddingX, paddingY },
           cs, dpr, { fontColor: cf.fontColor, readingOrder: xf.readingOrder }, cjkFallback
         );
@@ -3102,14 +3188,14 @@ function renderQuadrant(
           { alignH, alignV, cx, cy, cellW, cellH, leftPad, paddingX, paddingY },
           cs,
         );
-      } else if (hasRichText) {
+      } else if (richRuns) {
         // Non-wrap rich text: per-run fonts, honoring hard breaks (Alt+Enter LF;
         // ECMA-376 §18.8.1 — Excel renders breaks even with wrapText off). The
         // shared helper draws a break-free value as a single alignV-anchored line
         // and a value with breaks as multiple lines, keeping this in-viewport
         // path and the off-screen-anchor pre-pass identical.
         drawNonWrapRichText(
-          ctx, runs, richBaseFont,
+          ctx, richRuns, runBase,
           { alignH, alignV, cx, cy, cellW, cellH, leftPad, paddingX, paddingY },
           cs, dpr, { fontColor: cf.fontColor, readingOrder: xf.readingOrder }, cjkFallback
         );
@@ -3205,7 +3291,7 @@ function renderQuadrant(
       const phRuns = cell.value.type === 'text' ? cell.value.phoneticRuns : undefined;
       if (cell.showPhonetic && phRuns && phRuns.length > 0 && !text.includes('\n')) {
         const baseFontStr = buildFont(ctx, paintFont, cs, cjkFallback, paintText);
-        const baseTextW = measureInFont(ctx, paintText, baseFontStr);
+        const baseTextW = symbolSegments ? valueWidth() : measureInFont(ctx, paintText, baseFontStr);
         let baseLeftX: number;
         if (alignH === 'right') baseLeftX = cx + cellW - paddingX - baseTextW;
         else if (alignH === 'center') baseLeftX = cx + cellW / 2 - baseTextW / 2;
@@ -3221,7 +3307,9 @@ function renderQuadrant(
           baseLeftX,
           cy,
           cs,
-          phColor, cjkFallback, painted.paint,
+          phColor, cjkFallback,
+          symbolRuns ? phoneticSlotMeasure(ctx, symbolRuns, runBase, cs, cjkFallback)
+            : (value) => measureInFont(ctx, painted.paint(value), baseFontStr),
         );
       }
 
@@ -3549,23 +3637,30 @@ function requiredAutoCellHeightPx(
   const rotation = xf.textRotation ?? 0;
   // Measured exactly as paint measures: the painted form and font of the
   // value and of each rich run (symbol-paint.ts).
-  const symbolRuns = symbolRichRuns(ctx, rawRuns, font, 1, cjkFallback);
-  const runs = symbolRuns ?? rawRuns;
   const painted = cellSymbolPaint(ctx, font, text, 1, cjkFallback);
+  const symbolRuns = symbolRichRuns(ctx, rawRuns, font, 1, cjkFallback, painted);
+  const runs = symbolRuns ?? rawRuns;
 
   ctx.font = buildFont(ctx, painted.font, 1, cjkFallback, painted.text);
   if (rotation === 255) {
     // Paint deliberately uses the compact 1.1 slot without a document-family
-    // design-line floor for stacked glyphs; auto-fit must use the same metric.
+    // design-line floor for stacked glyphs; auto-fit must use the same metric
+    // (per run for a value painted as runs, drawStackedRichRuns).
+    if (symbolRuns) return stackedRunsHeight(paintedSlots(symbolRuns, font), 1) + paddingY * 2;
     return [...text].length * vMetricPx(font.size, 1, 1.1) + paddingY * 2;
   }
   if (rotation > 0) {
     const angle = rotation <= 90
       ? rotation * Math.PI / 180
       : (rotation - 90) * Math.PI / 180;
-    const lineHeight = vMetricPx(font.size, 1, 1.2);
-    const textWidth = symbolRuns
-      ? richRunSegments(ctx, symbolRuns, font, 1, cjkFallback).reduce((sum, seg) => sum + seg.width, 0)
+    // A value painted as runs is one line of its runs (the rotated rich
+    // paint), as tall as its largest run.
+    const segments = symbolRuns && richRunSegments(ctx, symbolRuns, font, 1, cjkFallback);
+    const lineHeight = segments
+      ? Math.max(...segments.map((seg) => vMetricPx(seg.font.size, 1, 1.2)))
+      : vMetricPx(font.size, 1, 1.2);
+    const textWidth = segments
+      ? segments.reduce((sum, seg) => sum + seg.width, 0)
       : ctx.measureText(painted.text.replace(/\n/g, ' ')).width;
     return Math.abs(Math.sin(angle)) * textWidth
       + Math.abs(Math.cos(angle)) * lineHeight
@@ -3997,7 +4092,7 @@ function virtualizedTextOverflowOverscan(
     const iconPad = iconSize > 0 ? iconSize + 4 : 0;
     const leftPad = paddingX + (alignH === 'left' || !xf.alignH ? indentPx : 0) + iconPad;
     const symbolRuns = symbolRichRuns(ctx, cell.value.type === 'text' ? cell.value.runs : undefined,
-      effectiveFont, cs, cjkFallback);
+      effectiveFont, cs, cjkFallback, painted);
     const textPx = (symbolRuns
       ? richRunSegments(ctx, symbolRuns, effectiveFont, cs, cjkFallback).reduce((sum, seg) => sum + seg.width, 0)
       : ctx.measureText(painted.text).width) + leftPad + paddingX;
@@ -5276,8 +5371,10 @@ function symbolShapeRunPieces(
     const piece: ShapeTextRunPiece = { ...run, text, fontFace: face, symbolSource: run };
     const painted = symbolPaint(symbolOracle(ctx), text, face, fontOf(piece),
       () => fontOf({ ...piece, size: 24, symbolUnicode: true }));
-    pieces.push(painted.unicode ? { ...piece, text: painted.paint(text), symbolUnicode: true }
-      : { ...piece, text: painted.paint(text) });
+    for (const segment of painted.segments) {
+      const value = painted.paint(segment.authored);
+      pieces.push(segment.unicode ? { ...piece, text: value, symbolUnicode: true } : { ...piece, text: value });
+    }
   };
   for (const ch of run.text) {
     const next = slotOf(ch);
@@ -6714,18 +6811,29 @@ function roundedRectPath(
 }
 
 /** A slicer label in an authored symbol-encoded face (§18.8.22 font names in
- *  the slicer style's dxfs) as it paints, judged in the context's current
- *  font (slicerFont); a converted label switches the context to the Unicode
- *  fallback face (symbol-paint.ts). */
+ *  the slicer style's dxfs) as it paints (symbol-paint.ts): its stretches,
+ *  each with the Canvas font it paints in (the context's current font, from
+ *  slicerFont, or the Unicode fallback face). */
+interface SlicerPaint {
+  readonly paint: SymbolPaint['paint'];
+  readonly segments: readonly { readonly authored: string; readonly font: string }[];
+}
+
 function slicerSymbolPaint(
   ctx: CanvasRenderingContext2D, style: SlicerElementStyle | undefined, cs: number, text: string,
-): SymbolPaint['paint'] {
-  if (!style?.fontFamily || !isSymbolFontFamily(style.fontFamily)) return AUTHORED_PAINT.paint;
+): SlicerPaint {
+  const kept = ctx.font;
+  if (!style?.fontFamily || !isSymbolFontFamily(style.fontFamily)) {
+    return { paint: (value) => value, segments: [{ authored: text, font: kept }] };
+  }
   const sources = fontSourcesByContext.get(ctx);
-  const painted = symbolPaint(symbolOracle(ctx), text, style.fontFamily, ctx.font,
+  const painted = symbolPaint(symbolOracle(ctx), text, style.fontFamily, kept,
     () => slicerFont({ ...style, fontSize: 24 }, '', 1, sources, '', true));
-  if (painted.unicode) ctx.font = slicerFont(style, '', cs, sources, text, true);
-  return painted.paint;
+  const unicode = slicerFont(style, '', cs, sources, text, true);
+  return {
+    paint: painted.paint,
+    segments: painted.segments.map((segment) => ({ authored: segment.authored, font: segment.unicode ? unicode : kept })),
+  };
 }
 
 function slicerFont(
@@ -6762,17 +6870,43 @@ function drawClippedText(
   x: number,
   y: number,
   maxWidth: number,
-  paint: (text: string) => string = (text) => text,
+  painted: SlicerPaint = { paint: (value) => value, segments: [{ authored: text, font: ctx.font }] },
 ): void {
   if (maxWidth <= 0) return;
-  // Clipped on the authored text, measured and painted in its painted form.
-  let s = text;
-  if (ctx.measureText(paint(s)).width > maxWidth) {
-    const ellipsis = '…';
-    while (s.length > 0 && ctx.measureText(paint(s) + ellipsis).width > maxWidth) {
-      s = s.slice(0, -1);
+  // Clipped on the authored text; measured and painted stretch by stretch
+  // in their painted form and font, the ellipsis in the last stretch's font.
+  const pieces = (value: string) => {
+    const out: { text: string; font: string }[] = [];
+    let rest = [...value];
+    for (const segment of painted.segments) {
+      if (rest.length === 0) break;
+      const count = [...segment.authored].length;
+      out.push({ text: painted.paint(rest.slice(0, count).join('')), font: segment.font });
+      rest = rest.slice(count);
     }
-    s = s.length > 0 ? s + ellipsis : '';
+    return out;
+  };
+  const width = (parts: { text: string; font: string }[]) => parts.reduce((sum, part) => {
+    ctx.font = part.font;
+    return sum + ctx.measureText(part.text).width;
+  }, 0);
+  const ellipsis = '…';
+  let parts = pieces(text);
+  if (width(parts) > maxWidth) {
+    let chars = [...text];
+    const withEllipsis = () => {
+      const clipped = pieces(chars.join(''));
+      const last = clipped[clipped.length - 1];
+      return last ? [...clipped.slice(0, -1), { ...last, text: last.text + ellipsis }]
+        : [{ text: ellipsis, font: painted.segments[0]?.font ?? ctx.font }];
+    };
+    while (chars.length > 0 && width(withEllipsis()) > maxWidth) chars = chars.slice(0, -1);
+    parts = chars.length > 0 ? withEllipsis() : [];
   }
-  ctx.fillText(paint(s), x, y);
+  let pen = x;
+  for (const part of parts) {
+    ctx.font = part.font;
+    ctx.fillText(part.text, pen, y);
+    pen += ctx.measureText(part.text).width;
+  }
 }

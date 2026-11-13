@@ -57,16 +57,24 @@ describe('XLSX symbol-font cell text', () => {
     expect(painted(installed, '✓')).toEqual([]);
   });
 
-  it('keeps a partial face for a text whose drawn code cannot convert', () => {
-    // The face draws J (the smiley) but not ü (the check): one face per text,
-    // so J converts too, unless its smiley only paints in colour.
-    const partial = { wingdings: (ch: string) => ch === 'J' || ch === '\uF04A' };
-    const converted = symbolRealm(partial);
-    render(converted, [{ font: font('Wingdings'), value: text('Jü') }]);
-    expect(painted(converted, `☺${VS15}✓`)[0]?.font).not.toMatch(/Wingdings/u);
-    const colour = symbolRealm(partial, undefined, (value) => value.includes('☺'));
-    render(colour, [{ font: font('Wingdings'), value: text('Jü') }]);
-    expect(painted(colour, 'Jü')[0]?.font).toMatch(/^15px "Wingdings"/u);
+  it('paints each code of a partial face in the face that draws it', () => {
+    // The face draws J (the smiley) and U+F0FF (no Unicode equivalent) but
+    // not ü / U+F0FC (the check): the drawn codes stay, the check converts,
+    // each stretch measured and painted in its own font.
+    const partial = { wingdings: (ch: string) => 'J\uF04A\uF0FF'.includes(ch) };
+    const realm = symbolRealm(partial);
+    render(realm, [
+      { font: font('Wingdings'), value: text('Jü') },
+      { font: font('Wingdings'), value: text('\uF0FF\uF0FC'), xf: { textRotation: 90 } },
+    ]);
+    expect(painted(realm, 'J')[0]?.font).toMatch(/^15px "Wingdings"/u);
+    expect(painted(realm, '\uF0FF')[0]?.font).toMatch(/^15px "Wingdings"/u);
+    const checks = painted(realm, '✓');
+    expect(checks).toHaveLength(2);
+    for (const check of checks) expect(check.font).not.toMatch(/Wingdings/u);
+    const j = painted(realm, 'J')[0]!;
+    expect(realm.measures.some((entry) => entry.text === 'J' && entry.font === j.font)).toBe(true);
+    expect(checks[0]!.x).toBeGreaterThan(j.x);
   });
 
   it('paints rotated and stacked rich runs in their own faces', () => {
@@ -86,6 +94,25 @@ describe('XLSX symbol-font cell text', () => {
       expect(painted(realm, 'β')).toHaveLength(1);
       expect(painted(realm, 'α')).toEqual([]);
     }
+  });
+
+  it('sizes stacked and filled rich symbol runs by their own fonts', () => {
+    const big = { text: 'l', font: { bold: false, italic: false, underline: false, strike: false, name: 'Wingdings', size: 40 } };
+    const small = { text: 'x', font: { bold: false, italic: false, underline: false, strike: false, name: 'Calibri' } };
+    const realm = symbolRealm();
+    const cells = [
+      { font: font('Calibri'), xf: { textRotation: 255 }, value: { type: 'text', text: 'xl', runs: [small, big] } as CellValue },
+      { font: font('Calibri'), xf: { alignH: 'fill' }, value: { type: 'text', text: 'xl', runs: [small, big] } as CellValue },
+    ];
+    const { worksheet, styles } = sheet(cells, 30);
+    applyAutoRowHeights(realm.ctx, worksheet, styles);
+    renderViewport(realm.ctx, worksheet, styles, { row: 1, col: 1, rows: 2, cols: 1 }, { dpr: 1 });
+    // Stacked: an 11 pt slot then a 40 pt slot (1.1 em each), plus insets.
+    const stacked = [painted(realm, 'x')[0]!, painted(realm, '⚫')[0]!];
+    expect(stacked[1].y - stacked[0].y).toBeLessThan(20);
+    expect(derivedAutoRowHeights(worksheet).get(1)).toBeGreaterThan(40 * 1.1);
+    // Fill repeats the runs, each copy in its own font.
+    expect(painted(realm, '⚫').length).toBeGreaterThan(2);
   });
 
   it('converts number-format output and the invalid-value hash fill in the cell face', () => {

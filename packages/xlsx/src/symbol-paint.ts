@@ -14,36 +14,40 @@
  * the realm cannot judge keeps the 0.89 behaviour: a bare code paints as
  * authored, an F0-shifted one converts through the 0.89 subset.
  *
- * Library policy (not Excel behaviour): one text paints in one face. A cell
- * value, a rich run, a shape run piece and a slicer label are each measured
- * and painted with a single Canvas font, which the plain cell paths (overflow,
- * fill, distributed, rotated, stacked, shrink-to-fit, wrap) rely on. A text
- * whose codes are all kept, or all converted, has one face by itself. A text
- * that mixes codes the symbol face draws with codes it lacks (a partial face)
- * converts every convertible code and paints in the Unicode fallback face:
- * converted text must never paint in the symbol family, whose cmap would
- * re-read a target such as U+00A9 as its own symbol code. If a drawn code of
- * such a text cannot convert (its target is proven to paint in colour), the
- * text stays in the symbol face instead, so no drawn glyph is lost; the codes
- * the face lacks then paint as authored, as in 0.89.
+ * A text can need two faces: a partial face draws some of its codes and
+ * lacks others. Each code keeps the face this decides for it (`segments`), so
+ * no drawn glyph moves to another face and no converted character paints in
+ * the symbol family, whose cmap would re-read a target such as U+00A9 as its
+ * own symbol code. A code that paints alike in either face (a space, a digit
+ * of Symbol, a code whose conversion is refused) joins the face of the code
+ * before it, else after it, so a wholly kept or wholly converted text stays
+ * one segment and paints with one Canvas font.
  */
-import { isSymbolFontFamily, symbolTextToUnicodeSegments, type SymbolFaceOracle } from '@silurus/ooxml-core';
+import { isSymbolFontFamily, type SymbolFaceOracle } from '@silurus/ooxml-core';
+
+/** One maximal stretch of a text that paints in one face. */
+export interface SymbolSegment {
+  /** The authored text of the stretch. */
+  readonly authored: string;
+  /** True: it paints in the Unicode fallback face; false: in the authored face. */
+  readonly unicode: boolean;
+}
 
 /** How one authored text paints. */
 export interface SymbolPaint {
-  /** True: the text paints in the Unicode fallback face (some code
-   * converted); false: in the authored face. */
-  readonly unicode: boolean;
-  /** The painted form of the text this was made for, or of any of its
-   * substrings (wrap pieces, clipped prefixes). */
+  /** The text's stretches in order; exactly one when it paints in one face. */
+  readonly segments: readonly SymbolSegment[];
+  /** The painted form of any text made of the authored text's characters
+   *  (per code point: its conversion, its F0-shifted form or itself). */
   paint(text: string): string;
 }
 
 const identity = (text: string) => text;
-/** Text without symbol-encoded codes: painted as authored. */
-export const AUTHORED_PAINT: SymbolPaint = Object.freeze({ unicode: false, paint: identity });
 
-const TEXT_PRESENTATION = /︎/gu;
+/** A text painted as authored, in its authored face. */
+export function authoredPaint(text: string): SymbolPaint {
+  return { segments: [{ authored: text, unicode: false }], paint: identity };
+}
 
 /**
  * How `text`, authored in `family`, paints when kept in `keptFont` (the
@@ -58,47 +62,41 @@ export function symbolPaint(
   keptFont: string,
   unicodeFont: (converted: string) => string,
 ): SymbolPaint {
-  if (!text || !isSymbolFontFamily(family)) return AUTHORED_PAINT;
+  if (!text || !isSymbolFontFamily(family)) return authoredPaint(text);
   const pieces = new Map<string, string>();
-  const native: string[] = [];
-  let unicode = false;
+  /** Codes with a face of their own: true converted, false drawn natively. */
+  const faces = new Map<string, boolean>();
   for (const ch of new Set(text)) {
     const cp = ch.codePointAt(0) ?? 0;
     const pua = cp >= 0xf020 && cp <= 0xf0ff;
     if (!pua && (cp < 0x20 || cp > 0xff)) continue;
-    // A code without a conversion paints alike in either face, and is not
-    // judged at all (spaces, digits of Symbol).
-    if (!symbolTextToUnicodeSegments(ch, family, { native: () => false, monochrome: () => true })[0]?.mapped) continue;
+    // A code the face draws keeps that face, whether or not it has a
+    // conversion (Wingdings U+F0FF has none).
+    const drawn = oracle.draws(ch, keptFont);
     // A bare code the realm cannot judge paints as authored, as in 0.89.
-    if (!pua && oracle.draws(ch, keptFont) === undefined) continue;
+    if (!pua && drawn === undefined) continue;
     const segment = oracle.segments(ch, family, keptFont, unicodeFont)[0];
-    if (!segment) continue;
-    if (segment.mapped) unicode = true;
-    else if (oracle.draws(ch, keptFont) === true) native.push(ch);
-    if (segment.text !== ch) pieces.set(ch, segment.text);
+    if (segment?.mapped) faces.set(ch, true);
+    else if (drawn === true) faces.set(ch, false);
+    if (segment && segment.text !== ch) pieces.set(ch, segment.text);
   }
-  if (unicode && native.length > 0) {
-    // A partial face: the codes it draws convert too (module notes), with the
-    // colour proof of symbol-face.ts in the Unicode face.
-    const monochrome = (converted: string) => {
-      const verdict = oracle.monochrome(converted, unicodeFont(converted));
-      const base = converted.replace(TEXT_PRESENTATION, '');
-      return verdict !== true || base === converted ? verdict : oracle.monochrome(base, unicodeFont(base));
-    };
-    const forced = native.map((ch) => symbolTextToUnicodeSegments(ch, family, { native: () => false, monochrome })[0]);
-    if (forced.every((segment) => segment?.mapped)) {
-      native.forEach((ch, index) => pieces.set(ch, forced[index]!.text));
-    } else {
-      // A drawn code whose conversion is refused (its target is proven to
-      // paint in colour) keeps its own face: the text stays in the symbol
-      // face, and the codes it lacks paint as authored there.
-      unicode = false;
-      for (const [ch, piece] of [...pieces]) if (!native.includes(ch) || piece === ch) pieces.delete(ch);
-    }
-  }
-  if (pieces.size === 0) return AUTHORED_PAINT;
+  if (pieces.size === 0 && ![...faces.values()].some(Boolean)) return authoredPaint(text);
+  // Every code in order with its face; a code without one joins its neighbour.
+  const chars = [...text];
+  const assigned = chars.map((ch) => faces.get(ch));
+  let last: boolean | undefined;
+  for (let i = 0; i < assigned.length; i++) last = assigned[i] ??= last;
+  let next: boolean | undefined;
+  for (let i = assigned.length - 1; i >= 0; i--) next = assigned[i] ??= next;
+  const segments: SymbolSegment[] = [];
+  chars.forEach((ch, index) => {
+    const unicode = assigned[index] ?? false;
+    const previous = segments[segments.length - 1];
+    if (previous && previous.unicode === unicode) segments[segments.length - 1] = { authored: previous.authored + ch, unicode };
+    else segments.push({ authored: ch, unicode });
+  });
   return Object.freeze({
-    unicode,
+    segments,
     paint: (value: string) => {
       let out = '';
       for (const ch of value) out += pieces.get(ch) ?? ch;
