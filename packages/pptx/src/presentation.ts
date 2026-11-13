@@ -67,7 +67,7 @@ import { ProgressiveLayoutLifecycle } from '@silurus/ooxml-core/internal/progres
 import { ProgressiveLayoutObserverNotifier } from '@silurus/ooxml-core/internal/progressive-layout-observers';
 import { pptxSlideOfficeFontRequests, type PptxFontDemandFacts } from './font-requests';
 import {
-  FontResolverBridgeHost,
+  FontResolverBridge,
   normalizeFontOptions,
   optionFontSources,
   type FontSourceDescriptor,
@@ -318,7 +318,7 @@ export class PptxPresentation {
   /** Worker mode: runs this deck's `fontResolver` functions for the worker's
    *  font-source session (core `resolver-bridge-host.ts`); disposed in
    *  {@link destroy}, which aborts every in-flight resolver call. */
-  private _fontResolverBridge: FontResolverBridgeHost | null = null;
+  private _fontResolverBridge: FontResolverBridge | null = null;
   /** Presence of the authored families demanded so far (main mode). */
   private _installedFamilies: import('./font-source-load.js').PptxInstalledFamilies | null = null;
   private readonly _officeFontLoads = new Map<FontFaceSet, Map<string, Promise<LoadedOfficeFontFallbacks>>>();
@@ -548,11 +548,12 @@ export class PptxPresentation {
   }
 
   /** Worker mode: answer the render worker's `fontResolver` calls for the
-   *  document about to be parsed (core `resolver-bridge-host.ts`): resolved
-   *  through this realm's resolution cache and held until destroy. */
+   *  document about to be parsed (core `resolver-bridge-gate.ts`, which loads
+   *  the host only for a document with a resolver): resolved through this
+   *  realm's resolution cache and held until destroy. */
   private _attachFontResolverBridge(fonts: readonly FontSourceDescriptor[] | undefined): void {
     this._fontResolverBridge?.dispose();
-    this._fontResolverBridge = new FontResolverBridgeHost({
+    this._fontResolverBridge = new FontResolverBridge({
       post: (message, transfer) => (this._worker.postMessage as (value: unknown, transfer?: Transferable[]) => void)(message, transfer),
       sources: fonts,
     });

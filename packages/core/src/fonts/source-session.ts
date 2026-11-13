@@ -171,6 +171,21 @@ export interface LoadedFontSources {
 
 export type { FontResolverFailures, FontResolverRunner, ResolverFaceAcquirer, ResolverFaceRequest };
 
+/**
+ * The state of the `fontResolver` worker bridge's main-side host for one
+ * document (`resolver-bridge-gate.ts`), as a session of that document sees it:
+ * the render worker's (`WorkerFontResolverClient`) and, for XLSX, the viewer
+ * realm's, which shares the document's resolver outcomes with the worker.
+ */
+export interface ResolverBridgeState {
+  /** While the host is loading: settles once it is ready or unavailable.
+   * Undefined otherwise. */
+  readonly ready: () => Promise<void> | undefined;
+  /** Once the host is unavailable: the reason every family of the
+   * document's resolver sources fails with. */
+  readonly unavailable: () => string | undefined;
+}
+
 export interface FontSourceSessionOptions {
   /** The `fonts` option value (factory results or a worker's copies); validated here. */
   readonly sources: readonly (FontSource | FontSourceDescriptor)[];
@@ -186,6 +201,13 @@ export interface FontSourceSessionOptions {
    * worker bridge, whose main side times calls out and records the outcome
    * for the whole document), so resolver waits ignore this realm's ceiling. */
   readonly resolverCeilingOwnedByRunner?: boolean;
+  /** The worker bridge's host state (see {@link ResolverBridgeState}). A
+   * session with a resolver source starts each source walk, and its font
+   * ceiling, only once the host is ready: no deadline of the document's
+   * resolver calls runs while the host loads. Once the host is unavailable,
+   * every family of a resolver source fails with its reason (host-font
+   * fallback), whatever the realm cache holds, in every realm alike. */
+  readonly resolverBridge?: ResolverBridgeState;
   /** Acquires the needed http(s) / blob: faces of resolver sources, as the
    * demand reaches them (see {@link ResolverFaceAcquirer}); defaults to this
    * realm's acquisition through `resolverFailures`. */
@@ -541,6 +563,7 @@ export class FontSourceSession {
   private readonly acquiredFaces = new Map<string, ArrayBuffer>();
   private acquiredFaceBytes = 0;
   private readonly runnerOwnsCeiling: boolean;
+  private resolverBridge: ResolverBridgeState | undefined;
   private readonly controller = new AbortController();
   private detachSignal: () => void = () => undefined;
   private closed = false;
@@ -566,6 +589,7 @@ export class FontSourceSession {
     this.runResolver = options.runResolver ?? runResolverInRealm;
     this.resolverFailures = options.resolverFailures;
     this.runnerOwnsCeiling = options.resolverCeilingOwnedByRunner === true;
+    this.resolverBridge = this.sources.some((source) => source.kind === 'font-resolver') ? options.resolverBridge : undefined;
     // A resolver's URL faces are always fetched by the library, per needed
     // subset: by the page for a worker (the bridge), and in this realm
     // otherwise, so both modes send the same requests and hold the bytes.
@@ -635,6 +659,7 @@ export class FontSourceSession {
     this.sources = [];
     this.fontSet = null;
     this.runResolver = releasedRunner;
+    this.resolverBridge = undefined;
     this.resolverFailures = undefined;
     this.acquireResolverFaces = undefined;
     this.warned.clear();
@@ -924,6 +949,12 @@ export class FontSourceSession {
   private async resolve(fresh: NormalizedDemand['names']): Promise<Map<string, FamilyState>> {
     const result = new Map<string, FamilyState>();
     let pending = fresh;
+    // The walk and its ceiling start once the bridge host can answer.
+    const hostReady = this.resolverBridge?.ready();
+    if (hostReady) {
+      await until(hostReady, this.controller.signal);
+      if (this.closed) throw createAbortError('Font source session released');
+    }
     const ceiling = ceilingSignal(this.controller.signal, FONT_LOAD_CEILING_MS);
     try {
       for (let sourceIndex = 0; sourceIndex < this.sources.length && pending.length; sourceIndex++) {
@@ -1013,9 +1044,14 @@ export class FontSourceSession {
         return resolveCssSource(source, cache, names, signal, scriptsOf);
       case 'font-files':
         return resolveFontFiles(source, cache, names, scriptsOf);
-      case 'font-resolver':
+      case 'font-resolver': {
+        const unavailable = this.resolverBridge?.unavailable();
+        if (unavailable !== undefined) {
+          return new Map(families.map(({ name }) => [fontFamilyKey(name), { kind: 'failed', reason: unavailable } satisfies FamilyResolution]));
+        }
         return this.claimFromCandidates(source, families,
           await this.resolveWithResolver(source, sourceIndex, cache, families, signal, remainingMs));
+      }
     }
   }
 

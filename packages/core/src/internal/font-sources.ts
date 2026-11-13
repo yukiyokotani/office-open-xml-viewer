@@ -72,7 +72,14 @@ export {
   type WorkerFontResolveMessage,
   type WorkerFontResolveRequest,
 } from '../fonts/resolver-bridge.js';
+// The host only through import(): the gate loads it (resolver-bridge-gate.ts).
 export { FontResolverBridgeHost, type FontResolverBridgeHostOptions } from '../fonts/resolver-bridge-host.js';
+export {
+  FONT_RESOLVER_BRIDGE_UNAVAILABLE,
+  FontResolverBridge,
+  type FontResolverBridgeHostModule,
+  type FontResolverBridgeOptions,
+} from '../fonts/resolver-bridge-gate.js';
 export {
   USE_GOOGLE_FONTS_DEPRECATION_MESSAGE,
   normalizeFontOptions,

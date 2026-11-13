@@ -9,7 +9,7 @@ import { xlsxCjkFallback } from './font-requests.js';
 import InlineWorker from './worker.ts?worker&inline';
 import wasmAssetUrl from './wasm/xlsx_parser_bg.wasm?url';
 import {
-  FontResolverBridgeHost,
+  FontResolverBridge,
   normalizeFontOptions,
   optionFontSources,
   type FontSessionDemand,
@@ -258,9 +258,9 @@ export class XlsxWorkbook {
   private officeFontRequests: OfficeFontFallbackRequest[] = [];
   private readonly retainedFontSets = new Map<FontFaceSet, RetainedFontSet>();
   /** Worker mode: runs this workbook's `fontResolver` functions for the
-   *  worker's font-source session (core `resolver-bridge-host.ts`); disposed
+   *  worker's font-source session (core `resolver-bridge-gate.ts`); disposed
    *  in {@link destroy}, which aborts every in-flight resolver call. */
-  private fontResolverBridge: FontResolverBridgeHost | null = null;
+  private fontResolverBridge: FontResolverBridge | null = null;
   /** Resolver failures of this workbook, shared by its viewer-realm sessions
    * and its worker bridge (core `resolver-resolution.ts`). */
   private fontResolverFailures: FontResolverFailures = new Map();
@@ -696,12 +696,12 @@ export class XlsxWorkbook {
   }
 
   /** Worker mode: answer the render worker's `fontResolver` calls for the
-   * document about to be parsed (core `resolver-bridge-host.ts`). */
+   * document about to be parsed (core `resolver-bridge-gate.ts`). */
   private attachFontResolverBridge(bridge: WorkbookBridge, fonts: readonly FontSourceDescriptor[] | undefined): void {
     this.fontResolverBridge?.dispose();
     this.fontResolverFailures = new Map();
     this.fontResolverBridge = this._mode === 'worker'
-      ? new FontResolverBridgeHost({
+      ? new FontResolverBridge({
         post: (message, transfer) => bridge.post(message, transfer),
         sources: fonts,
         // One outcome per family for the whole workbook: the viewer-realm
@@ -779,6 +779,11 @@ export class XlsxWorkbook {
           // same cache and failure record, so both realms paint the same bytes.
           ...(this._mode === 'worker' && this.fontAcquirerFor
             ? { acquireResolverFaces: this.fontAcquirerFor(this.fontResolverFailures) } : {}),
+          // Worker mode: resolve only once the bridge host is ready, and fail
+          // the resolver's families if it never will be, as the worker does
+          // (core resolver-bridge-gate.ts), so both realms reach one outcome.
+          ...(this._mode === 'worker' && this.fontResolverBridge
+            ? { resolverBridge: this.fontResolverBridge.sessionState } : {}),
         })
         : null;
       const record = {
