@@ -61,8 +61,6 @@ export const FONT_SOURCE_PROTOCOL = 'ooxml-font-source/v1';
  */
 export type FontSourceCredentials = 'omit' | 'same-origin';
 
-declare const FONT_SOURCE_BRAND: unique symbol;
-
 /**
  * A font source for `LoadOptions.fonts`. Opaque: create it with
  * `googleFonts()`, {@link fontCssApi}, {@link fontCss}, {@link fontFiles} or
@@ -71,7 +69,10 @@ declare const FONT_SOURCE_BRAND: unique symbol;
  * JavaScript realm); anything else is rejected with a `TypeError`.
  */
 export interface FontSource {
-  readonly [FONT_SOURCE_BRAND]: true;
+  /** Type-level marker only (no such property exists at run time). A string
+   * key, not a `unique symbol`, so the separately bundled declarations of
+   * the root and format entries name one type. */
+  readonly __ooxmlFontSource: 'opaque';
 }
 
 interface FontSourceBase {
@@ -621,12 +622,33 @@ function normalizeFontSource(value: unknown, location: string, base: string | un
 
 // ---- factories ----------------------------------------------------------------
 
-/** Descriptors this realm's factories produced (already validated, frozen). */
+/** Descriptors this module instance's factories produced (already
+ * validated, frozen). */
 const factoryDescriptors = new WeakSet<object>();
 
-function issued(source: FontSourceDescriptor): FontSource {
-  factoryDescriptors.add(source);
-  return source as unknown as FontSource;
+/**
+ * Issuance marker of every factory result: a non-enumerable own property
+ * under a registry symbol, so a result of another copy of the library loaded
+ * in the same realm (two bundles of one page) is recognised too, while a
+ * spread, a structured clone or a hand-written object (which cannot carry a
+ * non-enumerable symbol property by accident) is not. Its value is the
+ * resolver function for a {@link fontResolver} result, `true` otherwise. The
+ * marker never crosses a realm: structured clone copies enumerable string
+ * keys only.
+ */
+const ISSUED = Symbol.for('@silurus/ooxml/font-source');
+
+function issued(source: FontSourceDescriptor, resolve: FontResolveFn | true = true): FontSource {
+  const result = Object.freeze(Object.defineProperty({ ...source }, ISSUED, { value: resolve }));
+  factoryDescriptors.add(result);
+  return result as unknown as FontSource;
+}
+
+/** The issuance marker of a frozen factory result (of any library copy). */
+function issuance(value: object): FontResolveFn | true | undefined {
+  if (!Object.isFrozen(value)) return undefined;
+  const marker = Object.getOwnPropertyDescriptor(value, ISSUED)?.value as unknown;
+  return marker === true || typeof marker === 'function' ? marker as FontResolveFn | true : undefined;
 }
 
 function factoryOptions(value: unknown, name: string, allowed: readonly string[]): Fields {
@@ -658,8 +680,9 @@ export function fontFiles(options: FontFilesOptions): FontSource {
 }
 
 const resolverIds = new WeakMap<FontResolveFn, string>();
-const resolverFunctions = new WeakMap<FontResolverSource, FontResolveFn>();
-let nextResolverId = 1;
+// One id sequence per realm, shared by every copy of the library, so two
+// copies never give different functions the same id (ids key shared caches).
+const resolverIdSequence = ((globalThis as Record<symbol, unknown>)[Symbol.for('@silurus/ooxml/font-resolver-ids')] ??= { next: 1 }) as { next: number };
 
 /**
  * Application resolution for authenticated, dynamic or in-memory fonts. The
@@ -680,32 +703,34 @@ export function fontResolver(resolve: FontResolveFn, options: FontResolverOption
   const fields = factoryOptions(options, 'fontResolver', ['substitutes']);
   let id = resolverIds.get(resolve);
   if (id === undefined) {
-    id = `font-resolver:${nextResolverId++}`;
+    id = `font-resolver:${resolverIdSequence.next++}`;
     resolverIds.set(resolve, id);
   }
   const source = normalizeFontResolver({ ...fields, protocol: FONT_SOURCE_PROTOCOL, kind: 'font-resolver', id },
     'fontResolver()');
-  resolverFunctions.set(source, resolve);
-  return issued(source);
+  return issued(source, resolve);
 }
 
-/** The application function behind a {@link fontResolver} descriptor of this
+/** The application function behind a {@link fontResolver} result of this
  * realm, or undefined (a descriptor from another realm or not from the factory). */
 export function fontResolverFunction(source: FontResolverSource): FontResolveFn | undefined {
-  return resolverFunctions.get(source);
+  const marker = issuance(source);
+  return typeof marker === 'function' ? marker : undefined;
 }
 
 /**
- * The descriptors of a public `fonts` option value. Only values this realm's
- * factories returned are accepted (the factories are the only supported
- * construction); anything else throws a `TypeError`.
+ * The descriptors of a public `fonts` option value. Only factory results are
+ * accepted (the factories are the only supported construction): this
+ * instance's as they are, another library copy's after the same validation
+ * as a worker applies; anything else throws a `TypeError`.
  */
 export function fontSourceDescriptors(value: unknown): readonly FontSourceDescriptor[] {
   if (!Array.isArray(value)) throw new TypeError('fonts must be an array of font sources');
   return Object.freeze(value.map((entry: unknown, index) => {
-    if (typeof entry !== 'object' || entry === null || !factoryDescriptors.has(entry)) {
-      throw new TypeError(`fonts[${index}] must be created by googleFonts(), fontCssApi(), fontCss(), fontFiles() or fontResolver()`);
+    if (typeof entry !== 'object' || entry === null || !issuance(entry)) {
+      throw new TypeError(`fonts[${index}] is not a font source factory result`);
     }
+    if (!factoryDescriptors.has(entry)) normalizeFontSource(entry, `fonts[${index}]`, undefined);
     return entry as FontSourceDescriptor;
   }));
 }

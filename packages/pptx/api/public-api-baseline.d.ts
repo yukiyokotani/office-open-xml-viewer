@@ -1185,7 +1185,6 @@ export interface FindMatch<Loc = unknown> {
 export interface FindMatchesOptions {
     caseSensitive?: boolean;
 }
-const FONT_SOURCE_BRAND: unique symbol;
 export function fontCss(options: FontCssOptions): FontSource;
 export function fontCssApi(options: FontCssApiOptions): FontSource;
 export interface FontCssApiOptions {
@@ -1228,7 +1227,7 @@ export interface FontResolverOptions {
     readonly substitutes?: readonly FontSubstitution[];
 }
 export interface FontSource {
-    readonly [FONT_SOURCE_BRAND]: true;
+    readonly __ooxmlFontSource: 'opaque';
 }
 export type FontSourceCredentials = 'omit' | 'same-origin';
 export type FontSubstituteScript = 'arabic';

@@ -676,12 +676,29 @@ describe('FontSourceSession: run-time limits fail only their family', () => {
     const many = Array.from({ length: HARD_MAX_FONT_SOURCE_FAMILIES + 1 }, (_, index) => `F${index}`);
     const loaded = await session.ensure(demand(many));
     expect(loaded.faces.map((face) => face.family)).toEqual(['F0']);
-    expect(warned()).toContain(`F${HARD_MAX_FONT_SOURCE_FAMILIES} (Font source limit exceeded (families): entry-count ${HARD_MAX_FONT_SOURCE_FAMILIES + 1}`);
-    expect(warned()).not.toContain(`F${HARD_MAX_FONT_SOURCE_FAMILIES - 1} (`);
-    // Final, like any failed family: no new warning, and the session is live.
+    expect(warned()).toContain(`families over the limit: 1 [F${HARD_MAX_FONT_SOURCE_FAMILIES}]`
+      + ` (Font source limit exceeded (families): entry-count ${HARD_MAX_FONT_SOURCE_FAMILIES + 1}`);
+    // The session stays live; names beyond the ceiling are not kept, so a
+    // flood of them retains nothing and each delta naming them warns again.
     warn.mockClear();
-    expect((await session.ensure(demand([`F${HARD_MAX_FONT_SOURCE_FAMILIES}`]))).faces).toHaveLength(1);
-    expect(warn).not.toHaveBeenCalled();
+    const flood = Array.from({ length: 1000 }, (_, index) => `G${index}`);
+    expect((await session.ensure(demand(flood))).faces).toHaveLength(1);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warned()).toContain('families over the limit: 1000 [G0, G1, G2, G3, G4, G5, G6, G7, …]');
+  });
+
+  it('fetches no subset of another style for an unranged face', async () => {
+    const { calls } = installFetch({
+      'https://app.example/latin.woff2': { bytes: 4 },
+      'https://app.example/italic.woff2': { bytes: 5 },
+    });
+    const session = open([fontFiles({ faces: [
+      { family: 'Mixed', url: 'https://app.example/latin.woff2', unicodeRange: 'U+0-FF' },
+      { family: 'Mixed', url: 'https://app.example/cjk.woff2', unicodeRange: 'U+4E00-9FFF' },
+      { family: 'Mixed', url: 'https://app.example/italic.woff2', style: 'italic' },
+    ] })], fakeSet());
+    await session.ensure(demand(['Mixed'], [0x41]));
+    expect(calls.map((call) => call.url.split('/').pop()).sort()).toEqual(['italic.woff2', 'latin.woff2']);
   });
 
   it('fails the family whose declarations would cross the per-session ceiling', async () => {

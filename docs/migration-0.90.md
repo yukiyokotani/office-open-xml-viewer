@@ -32,8 +32,9 @@ XLSX and PPTX, on every engine `load()` and every Viewer, in `mode: 'main'` and
 A `FontSource` is opaque. Create every entry with one of the factories
 (`googleFonts()`, `fontCssApi()`, `fontCss()`, `fontFiles()`,
 `fontResolver()`) in the page that loads the document. Its contents are not
-part of the API, and `fonts` accepts only values those factories returned:
-a copy (spread, `structuredClone`, JSON) or a hand-written object throws a
+part of the API, and `fonts` accepts only values those factories returned
+(from any copy of the library loaded in the page): a copy of a source
+(spread, `structuredClone`, JSON) or a hand-written object throws a
 `TypeError`.
 
 `fonts: [googleFonts()]` sends the same stylesheet requests as
@@ -498,8 +499,9 @@ file over its limit, a document that asks for more families or declarations
 than allowed, the realm's retained bytes, or a request URL built from a long
 family name) never rejects `load()` or a later slide or sheet. Only the
 families concerned fail, exactly like a network failure: they keep their host
-fallback, the `console.warn` names each with the limit it exceeded, and the
-rest of the document loads normally. For example, a stylesheet over 1 MiB
+fallback, the `console.warn` names each with the limit it exceeded (for
+families beyond the family limit: their count and the first few names), and
+the rest of the document loads normally. For example, a stylesheet over 1 MiB
 fails the families asked of it, and the 257th distinct family a document
 needs fails while the first 256 load.
 

@@ -324,12 +324,18 @@ function rangeIntersects(ranges: readonly (readonly [number, number])[], sorted:
 }
 
 /**
- * Overlap components of a family's declarations: two declarations whose
- * `unicode-range`s overlap (a declaration without one overlaps every other)
- * share a component, transitively. CSS font matching orders only faces that
- * can serve the same scalar (CSS Fonts 4 §4.5, §5), so registering whole
- * components, each in declaration order, keeps every precedence the full
- * declaration order defines, whatever order components are needed in.
+ * Overlap components of a family's declarations: two declarations with the
+ * same `font-weight`, `font-style` and `font-stretch` descriptors whose
+ * `unicode-range`s overlap (a declaration without one overlaps every other of
+ * its descriptors) share a component, transitively. CSS font matching first
+ * narrows the family's faces by those descriptors, then orders the faces left
+ * that can serve the same scalar (CSS Fonts 4 §4.5, §5.2), so registering
+ * whole components, each in declaration order, keeps every precedence the
+ * full declaration order defines, whatever order components are needed in,
+ * and an unranged face of one style never pulls in the subsets of another.
+ * Descriptors are compared as written: two spellings of one value (or
+ * overlapping weight ranges) form separate groups, which only loses the
+ * relative order of such faces, never a face.
  */
 function overlapComponents(declarations: readonly FontFaceDeclaration[]): number[] {
   const parent = declarations.map((_, index) => index);
@@ -338,24 +344,31 @@ function overlapComponents(declarations: readonly FontFaceDeclaration[]): number
     return index;
   };
   const union = (a: number, b: number) => { const ra = find(a), rb = find(b); if (ra !== rb) parent[Math.max(ra, rb)] = Math.min(ra, rb); };
-  const intervals: [number, number, number][] = [];
-  let unbounded = -1;
-  declarations.forEach((declaration, index) => {
-    const ranges = parseUnicodeRange(declaration.unicodeRange);
-    if (ranges === null) {
-      if (unbounded < 0) unbounded = index;
-      else union(unbounded, index);
-      return;
-    }
-    for (const [lo, hi] of ranges) intervals.push([lo, hi, index]);
+  const groups = new Map<string, number[]>();
+  declarations.forEach(({ weight = '', style = '', stretch = '' }, index) => {
+    const key = `${weight}\u0000${style}\u0000${stretch}`;
+    groups.set(key, [...groups.get(key) ?? [], index]);
   });
-  if (unbounded >= 0) for (let index = 0; index < declarations.length; index++) union(unbounded, index);
-  intervals.sort((a, b) => a[0] - b[0]);
-  let reach = -1;
-  let owner = -1;
-  for (const [lo, hi, index] of intervals) {
-    if (lo <= reach) union(owner, index);
-    if (hi > reach) { reach = hi; owner = index; }
+  for (const members of groups.values()) {
+    const intervals: [number, number, number][] = [];
+    let unbounded = -1;
+    for (const index of members) {
+      const ranges = parseUnicodeRange(declarations[index]!.unicodeRange);
+      if (ranges === null) {
+        if (unbounded < 0) unbounded = index;
+        else union(unbounded, index);
+        continue;
+      }
+      for (const [lo, hi] of ranges) intervals.push([lo, hi, index]);
+    }
+    if (unbounded >= 0) for (const index of members) union(unbounded, index);
+    intervals.sort((a, b) => a[0] - b[0]);
+    let reach = -1;
+    let owner = -1;
+    for (const [lo, hi, index] of intervals) {
+      if (lo <= reach) union(owner, index);
+      if (hi > reach) { reach = hi; owner = index; }
+    }
   }
   return declarations.map((_, index) => find(index));
 }
@@ -525,9 +538,6 @@ export class FontSourceSession {
   private readonly owned = new Map<string, OwnedFace>();
   /** Every declaration this session claimed (by {@link declarationKey}). */
   private readonly claimedDeclarations = new Set<string>();
-  /** Families counted against the family ceiling (every family but those
-   * that failed for exceeding it). */
-  private trackedFamilies = 0;
   private all = false;
   private readonly points = new Set<number>();
   private readonly warned = new Set<string>();
@@ -589,7 +599,6 @@ export class FontSourceSession {
     this.owned.clear();
     this.claimedDeclarations.clear();
     this.families.clear();
-    this.trackedFamilies = 0;
     this.points.clear();
     for (const cache of this.caches) cache.release();
     releaseAcquiredFaces(this);
@@ -628,17 +637,20 @@ export class FontSourceSession {
       // both scopes. A claimed or failed family is final.
       const fresh: DemandedName[] = [];
       const failures = new Map<string, string>();
-      let tracked = this.trackedFamilies;
+      const overflow: string[] = [];
+      // Families beyond the ceiling are never recorded, so `families` holds
+      // exactly the ones counted against it.
+      let tracked = this.families.size;
       for (const entry of demand.names) {
         const key = fontFamilyKey(entry.name);
         const prior = this.families.get(key);
         if (!prior) {
           // The family ceiling is document demand, judged per family: the
           // families beyond it fail (final, warned), the rest load.
+          // Their names are not kept (that would grow with the document
+          // past the ceiling): each delta naming one warns again.
           if (tracked >= HARD_MAX_FONT_SOURCE_FAMILIES) {
-            const reason = limitReason('families', HARD_MAX_FONT_SOURCE_FAMILIES, tracked + 1);
-            this.families.set(key, { kind: 'failed', name: entry.name, reason });
-            failures.set(entry.name, reason);
+            overflow.push(entry.name);
             continue;
           }
           tracked++;
@@ -649,7 +661,11 @@ export class FontSourceSession {
           fresh.push({ ...entry, scripts: widenScope(prior.scripts, entry.scripts) });
         }
       }
-      this.trackedFamilies = tracked;
+      // One bounded entry for all of them (count and first names).
+      if (overflow.length) {
+        failures.set(`families over the limit: ${overflow.length} [${overflow.slice(0, 8).join(', ')}${overflow.length > 8 ? ', …' : ''}]`,
+          limitReason('families', HARD_MAX_FONT_SOURCE_FAMILIES, tracked + overflow.length));
+      }
       const delta = this.addScalars(demand.scalars);
       const resolved = fresh.length ? await this.resolve(fresh) : new Map<string, FamilyState>();
       if (this.closed) return this.settledState();

@@ -300,7 +300,7 @@ describe('XlsxWorkbook.destroy() — rejects in-flight worker requests', () => {
     await internals.prepareFontSources(parsed, FONTS);
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     const release = await internals.retainFontsInSet((G.document as Document).fonts);
-    expect(String(warn.mock.calls.at(-1)?.[0])).toContain('Absent 256 (Font source limit exceeded (families)');
+    expect(String(warn.mock.calls.at(-1)?.[0])).toContain('families over the limit: 1 [Absent 256] (Font source limit exceeded (families)');
     release();
     wb.destroy();
     expect(added).toHaveLength(0);

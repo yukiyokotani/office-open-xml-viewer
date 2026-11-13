@@ -81,9 +81,22 @@ describe('font source descriptors', () => {
     // A copy, a spread or a hand-written descriptor is not a factory result,
     // even when it is shaped exactly like one.
     for (const forged of [structuredClone(source), { ...source }, { protocol: FONT_SOURCE_PROTOCOL, kind: 'font-css', url: 'https://cdn.example/office.css' }]) {
-      expect(() => fontSourceDescriptors([forged])).toThrow(/must be created by googleFonts\(\)/);
+      expect(() => fontSourceDescriptors([forged])).toThrow(/is not a font source factory result/);
     }
     expect(() => fontSourceDescriptors('fonts')).toThrow(TypeError);
+  });
+
+  it('accepts the factory results of another copy of the library in the same realm', async () => {
+    vi.resetModules();
+    const other = await import('./source.js');
+    const css = other.fontCss({ url: 'https://cdn.example/office.css' });
+    const resolve: FontResolveFn = () => [];
+    const resolver = other.fontResolver(resolve);
+    const [cssDescriptor, resolverDescriptor] = fontSourceDescriptors([css, resolver]);
+    expect(cssDescriptor).toBe(css);
+    // The resolver function travels with its result, and ids never collide.
+    expect(fontResolverFunction(resolverDescriptor as FontResolverSource)).toBe(resolve);
+    expect((resolverDescriptor as FontResolverSource).id).not.toBe(fontResolver(() => []).id);
   });
 
   it('resolves relative application URLs against the calling realm, never in the receiving realm', () => {
