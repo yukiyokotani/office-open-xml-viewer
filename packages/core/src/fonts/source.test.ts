@@ -96,6 +96,10 @@ describe('font source descriptors', () => {
     expect(cssDescriptor).toBe(css);
     // The resolver function travels with its result, and ids never collide.
     expect(fontResolverFunction(resolverDescriptor as FontResolverSource)).toBe(resolve);
+    // A session's own validation keeps it too (the resolver stays callable).
+    const [validated] = assertFontSourceDescriptors([resolver]);
+    expect(validated).toBe(resolver);
+    expect(fontResolverFunction(validated as FontResolverSource)).toBe(resolve);
     expect((resolverDescriptor as FontResolverSource).id).not.toBe(fontResolver(() => []).id);
   });
 

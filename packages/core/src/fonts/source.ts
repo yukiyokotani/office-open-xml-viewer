@@ -749,10 +749,13 @@ export function optionFontSources(fonts: readonly FontSource[] | undefined): rea
  */
 export function assertFontSourceDescriptors(value: unknown): readonly FontSourceDescriptor[] {
   if (!Array.isArray(value)) throw new TypeError('fonts must be an array of font sources');
-  return Object.freeze(value.map((entry: unknown, index) =>
-    factoryDescriptors.has(entry as object)
-      ? entry as FontSourceDescriptor
-      : normalizeFontSource(entry, `fonts[${index}]`, undefined)));
+  return Object.freeze(value.map((entry: unknown, index) => {
+    if (factoryDescriptors.has(entry as object)) return entry as FontSourceDescriptor;
+    const copy = normalizeFontSource(entry, `fonts[${index}]`, undefined);
+    // Another library copy's factory result keeps its identity (and its
+    // resolver function) once it validates.
+    return issuance(entry as object) ? entry as FontSourceDescriptor : copy;
+  }));
 }
 
 // ---- font-css-api request composition -------------------------------------------

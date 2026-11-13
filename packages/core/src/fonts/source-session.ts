@@ -323,19 +323,35 @@ function rangeIntersects(ranges: readonly (readonly [number, number])[], sorted:
   return false;
 }
 
+/** A face descriptor as CSS matching compares it: omitted and `normal`
+ * spellings unified; a range (or any multi-token value) is `undefined`,
+ * which may match any value. */
+function descriptorValue(value: string | undefined, normal: string): string | undefined {
+  const text = (value ?? 'normal').trim().toLowerCase();
+  if (/\s/.test(text)) return undefined;
+  return text === 'normal' ? normal : text === 'bold' ? '700' : text;
+}
+
+/** Whether two faces can be candidates for one style request (CSS Fonts 4
+ * §5.2 narrows by stretch, style and weight before `unicode-range`). */
+function mayMatchTogether(a: FontFaceDeclaration, b: FontFaceDeclaration): boolean {
+  for (const [x, y, normal] of [[a.weight, b.weight, '400'], [a.style, b.style, 'normal'], [a.stretch, b.stretch, '100%']] as const) {
+    const left = descriptorValue(x, normal), right = descriptorValue(y, normal);
+    if (left !== undefined && right !== undefined && left !== right) return false;
+  }
+  return true;
+}
+
 /**
- * Overlap components of a family's declarations: two declarations with the
- * same `font-weight`, `font-style` and `font-stretch` descriptors whose
- * `unicode-range`s overlap (a declaration without one overlaps every other of
- * its descriptors) share a component, transitively. CSS font matching first
- * narrows the family's faces by those descriptors, then orders the faces left
- * that can serve the same scalar (CSS Fonts 4 §4.5, §5.2), so registering
- * whole components, each in declaration order, keeps every precedence the
- * full declaration order defines, whatever order components are needed in,
- * and an unranged face of one style never pulls in the subsets of another.
- * Descriptors are compared as written: two spellings of one value (or
- * overlapping weight ranges) form separate groups, which only loses the
- * relative order of such faces, never a face.
+ * Overlap components of a family's declarations: two declarations whose
+ * `unicode-range`s overlap share a component, transitively, and a
+ * declaration without a range shares one with every declaration that can be
+ * a candidate for the same style request ({@link mayMatchTogether}). CSS font
+ * matching orders only faces that can serve the same scalar for the same
+ * request (CSS Fonts 4 §4.5, §5), so registering whole components, each in
+ * declaration order, keeps every precedence the full declaration order
+ * defines, whatever order components are needed in, while an unranged face
+ * of one style never pulls in the subsets of another.
  */
 function overlapComponents(declarations: readonly FontFaceDeclaration[]): number[] {
   const parent = declarations.map((_, index) => index);
@@ -344,31 +360,21 @@ function overlapComponents(declarations: readonly FontFaceDeclaration[]): number
     return index;
   };
   const union = (a: number, b: number) => { const ra = find(a), rb = find(b); if (ra !== rb) parent[Math.max(ra, rb)] = Math.min(ra, rb); };
-  const groups = new Map<string, number[]>();
-  declarations.forEach(({ weight = '', style = '', stretch = '' }, index) => {
-    const key = `${weight}\u0000${style}\u0000${stretch}`;
-    groups.set(key, [...groups.get(key) ?? [], index]);
+  const intervals: [number, number, number][] = [];
+  declarations.forEach((declaration, index) => {
+    const ranges = parseUnicodeRange(declaration.unicodeRange);
+    if (ranges === null) {
+      declarations.forEach((other, at) => { if (at !== index && mayMatchTogether(declaration, other)) union(index, at); });
+      return;
+    }
+    for (const [lo, hi] of ranges) intervals.push([lo, hi, index]);
   });
-  for (const members of groups.values()) {
-    const intervals: [number, number, number][] = [];
-    let unbounded = -1;
-    for (const index of members) {
-      const ranges = parseUnicodeRange(declarations[index]!.unicodeRange);
-      if (ranges === null) {
-        if (unbounded < 0) unbounded = index;
-        else union(unbounded, index);
-        continue;
-      }
-      for (const [lo, hi] of ranges) intervals.push([lo, hi, index]);
-    }
-    if (unbounded >= 0) for (const index of members) union(unbounded, index);
-    intervals.sort((a, b) => a[0] - b[0]);
-    let reach = -1;
-    let owner = -1;
-    for (const [lo, hi, index] of intervals) {
-      if (lo <= reach) union(owner, index);
-      if (hi > reach) { reach = hi; owner = index; }
-    }
+  intervals.sort((a, b) => a[0] - b[0]);
+  let reach = -1;
+  let owner = -1;
+  for (const [lo, hi, index] of intervals) {
+    if (lo <= reach) union(owner, index);
+    if (hi > reach) { reach = hi; owner = index; }
   }
   return declarations.map((_, index) => find(index));
 }
@@ -387,6 +393,12 @@ function declarationKey(declaration: FontFaceDeclaration): string {
 function cssUrl(url: string): string {
   return `url("${url.replace(/[\\"\n\r\f]/g, (char) =>
     char === '\\' || char === '"' ? `\\${char}` : `\\${char.charCodeAt(0).toString(16)} `)}")`;
+}
+
+/** The one warning of an ensure: each failed family (or group) with its reason. */
+function warnFailures(failures: readonly (readonly [string, string])[]): void {
+  console.warn(`[ooxml] failed to preload web font(s): ${failures.map(([family, reason]) => `${family} (${reason})`)
+    .join(', ')}; falling back to system fonts (text may shift or differ).`);
 }
 
 /** The warning reason of a run-time ceiling breach: the family fails alone. */
@@ -661,10 +673,11 @@ export class FontSourceSession {
           fresh.push({ ...entry, scripts: widenScope(prior.scripts, entry.scripts) });
         }
       }
-      // One bounded entry for all of them (count and first names).
+      // One bounded warning for all of them (count and first names), not
+      // recorded in `warned`: nothing about them is retained.
       if (overflow.length) {
-        failures.set(`families over the limit: ${overflow.length} [${overflow.slice(0, 8).join(', ')}${overflow.length > 8 ? ', …' : ''}]`,
-          limitReason('families', HARD_MAX_FONT_SOURCE_FAMILIES, tracked + overflow.length));
+        warnFailures([[`families over the limit: ${overflow.length} [${overflow.slice(0, 8).join(', ')}${overflow.length > 8 ? ', …' : ''}]`,
+          limitReason('families', HARD_MAX_FONT_SOURCE_FAMILIES, tracked + overflow.length)]]);
       }
       const delta = this.addScalars(demand.scalars);
       const resolved = fresh.length ? await this.resolve(fresh) : new Map<string, FamilyState>();
@@ -1127,8 +1140,7 @@ export class FontSourceSession {
     const fresh = [...failures].filter(([family]) => !this.warned.has(fontFamilyKey(family)));
     if (!fresh.length) return;
     for (const [family] of fresh) this.warned.add(fontFamilyKey(family));
-    console.warn(`[ooxml] failed to preload web font(s): ${fresh.map(([family, reason]) => `${family} (${reason})`)
-      .join(', ')}; falling back to system fonts (text may shift or differ).`);
+    warnFailures(fresh);
   }
 
   private takeSnapshot(): LoadedFontSources {

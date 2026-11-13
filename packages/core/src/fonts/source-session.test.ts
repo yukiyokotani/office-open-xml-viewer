@@ -685,6 +685,9 @@ describe('FontSourceSession: run-time limits fail only their family', () => {
     expect((await session.ensure(demand(flood))).faces).toHaveLength(1);
     expect(warn).toHaveBeenCalledTimes(1);
     expect(warned()).toContain('families over the limit: 1000 [G0, G1, G2, G3, G4, G5, G6, G7, …]');
+    // Nothing is remembered about them: the same delta warns again.
+    await session.ensure(demand(flood));
+    expect(warn).toHaveBeenCalledTimes(2);
   });
 
   it('fetches no subset of another style for an unranged face', async () => {
@@ -699,6 +702,27 @@ describe('FontSourceSession: run-time limits fail only their family', () => {
     ] })], fakeSet());
     await session.ensure(demand(['Mixed'], [0x41]));
     expect(calls.map((call) => call.url.split('/').pop()).sort()).toEqual(['italic.woff2', 'latin.woff2']);
+  });
+
+  it('keeps an unranged face with every subset it may compete with, whatever the spelling', async () => {
+    const { calls } = installFetch({
+      'https://app.example/any.woff2': { bytes: 4 },
+      'https://app.example/cjk-400.woff2': { bytes: 5 },
+      'https://app.example/var.woff2': { bytes: 6 },
+    });
+    const set = fakeSet();
+    // The unranged face precedes the subsets it may compete with: omitted
+    // weight equals '400', and a weight range may match any weight; 'bold'
+    // never competes with it.
+    const session = open([fontFiles({ faces: [
+      { family: 'Mixed', url: 'https://app.example/any.woff2' },
+      { family: 'Mixed', url: 'https://app.example/cjk-400.woff2', weight: '400', unicodeRange: 'U+4E00-9FFF' },
+      { family: 'Mixed', url: 'https://app.example/var.woff2', weight: '100 900', unicodeRange: 'U+3000-30FF' },
+      { family: 'Mixed', url: 'https://app.example/hangul-700.woff2', weight: 'bold', unicodeRange: 'U+AC00-D7AF' },
+    ] })], set);
+    await session.ensure(demand(['Mixed'], [0x41]));
+    expect(calls.map((call) => call.url.split('/').pop())).toEqual(['any.woff2', 'cjk-400.woff2', 'var.woff2']);
+    expect(set.faces.map((face) => (face.source as ArrayBuffer).byteLength)).toEqual([4, 5, 6]);
   });
 
   it('fails the family whose declarations would cross the per-session ceiling', async () => {
