@@ -78,18 +78,18 @@ export type SymbolProbeCanvasFactory = (width: number, height: number) => ProbeC
  * (OffscreenCanvas, `document`, the owner's class), which in a realm with
  * several canvas backends need not be the one that paints.
  */
-function scratchCanvas(owner: unknown, factory?: SymbolProbeCanvasFactory): ProbeCanvas | null {
+export function scratchCanvas(owner: unknown, factory?: SymbolProbeCanvasFactory, size = 48): ProbeCanvas | null {
   try {
-    if (factory) return factory(48, 48) ?? null;
+    if (factory) return factory(size, size) ?? null;
     const element = (owner as { canvas?: { ownerDocument?: Document } } | null)?.canvas;
     const doc = element?.ownerDocument;
     if (doc && typeof doc.createElement === 'function') {
       const canvas = doc.createElement('canvas');
-      canvas.width = 48;
-      canvas.height = 48;
+      canvas.width = size;
+      canvas.height = size;
       return canvas;
     }
-    return createAuxCanvasForContext(owner as CanvasRenderingContext2D, 48, 48);
+    return createAuxCanvasForContext(owner as CanvasRenderingContext2D, size, size);
   } catch { /* no scratch canvas */ }
   return null;
 }
@@ -100,8 +100,9 @@ function scratchCanvas(owner: unknown, factory?: SymbolProbeCanvasFactory): Prob
  * measuring/painting 2D context): drawn in red and then in blue, a glyph
  * that takes the fill leaves only pixels of that colour, while a colour
  * glyph paints its own (a fixed black palette entry included). Undefined
- * (inconclusive) when no scratch canvas exists, it cannot be read back, or
- * the drawing left no ink to judge. Results live as long as the probe.
+ * (inconclusive) when no scratch canvas exists, it cannot be read back (or
+ * its readback is not the canvas drawn: a cleared canvas must read back all
+ * zero), or the drawing left no ink to judge. Results live as long as the probe.
  */
 export function createSymbolMonochromeProbe(
   owner: unknown,
@@ -129,6 +130,11 @@ export function createSymbolMonochromeProbe(
       // solid pixel (no ink, or a wholly translucent glyph) is inconclusive.
       const follows = (fill: string, channel: number): boolean | undefined => {
         context.clearRect(0, 0, 48, 48);
+        // A readback of the canvas just cleared that is not all zero (an
+        // anti-fingerprinting engine adds noise to getImageData or answers
+        // a constant image) proves nothing about the glyph: inconclusive,
+        // never "not monochrome".
+        if (context.getImageData(0, 0, 48, 48).data.some((value) => value !== 0)) return undefined;
         context.globalAlpha = 1;
         context.globalCompositeOperation = 'source-over';
         context.fillStyle = fill;
@@ -159,7 +165,7 @@ export function createSymbolMonochromeProbe(
 }
 
 /** The FontFaceSet of the realm `owner` (a 2D context) measures in. */
-function realmFontSet(owner: unknown): FontFaceSet | null {
+export function realmFontSet(owner: unknown): FontFaceSet | null {
   const element = (owner as { canvas?: { ownerDocument?: Document } } | null)?.canvas;
   if (element?.ownerDocument?.fonts) return element.ownerDocument.fonts;
   const scope = globalThis as { document?: Document; fonts?: FontFaceSet };
@@ -207,7 +213,8 @@ export interface SymbolFaceOracle {
  * Symbol decisions in one measuring/painting context (see the module notes).
  * Verdicts are kept for the oracle's lifetime, which callers bound by the
  * font resources they lay out or render with (a DOCX text service, a PPTX
- * render), exactly like the advances measured in the same context. A kept
+ * document while its realm's faces are unchanged:
+ * `createSymbolFaceOracleCache` of symbol-face-cache.ts), exactly like the advances measured in the same context. A kept
  * verdict is answered without touching the context; an unjudged code (the
  * sentinels do not work yet) is not kept, so it is judged once they do.
  */

@@ -10,6 +10,7 @@ import {
 import { googleFonts } from './presets/google-fonts.js';
 import { liveSourceCacheCount, sourceCacheEntryCount } from './source-cache.js';
 import { FontSourceSession, pendingMetricDecodeCount, retainedFontSourceBytes, type FontSessionDemand } from './source-session.js';
+import { readFontResourceMetrics } from './source-metric-tables.js';
 import {
   fontCssApi,
   fontCss,
@@ -140,8 +141,9 @@ function demand(families: string[], scalars: FontSessionDemand['scalars'] = 'all
 }
 
 const sessions: FontSourceSession[] = [];
-function open(sources: readonly FontSource[], set: FakeSet, signal?: AbortSignal): FontSourceSession {
-  const session = new FontSourceSession({ sources, fontSet: asSet(set), signal });
+function open(sources: readonly FontSource[], set: FakeSet, signal?: AbortSignal,
+  readMetricTables?: typeof readFontResourceMetrics): FontSourceSession {
+  const session = new FontSourceSession({ sources, fontSet: asSet(set), signal, readMetricTables });
   sessions.push(session);
   return session;
 }
@@ -1290,12 +1292,15 @@ describe('FontSourceSession: script-scoped substitution proof (FontSessionDemand
 });
 
 describe('FontSourceSession: served face tables', () => {
+  // A session of a format that lays out with the tables (DOCX).
+  const tables = (sources: readonly FontSource[], set: FakeSet) => open(sources, set, undefined, readFontResourceMetrics);
+
   it('fetches a resolver URL face once in this realm, as worker mode does, and registers its bytes', async () => {
     const url = 'https://fonts.app.example/private.ttf';
     const gap = new Uint8Array(await readFile(new URL('../../../../tests/fixtures/fonts/ooxml-fixture-gap.ttf', import.meta.url)));
     const { calls } = installFetch({ [url]: { body: gap.buffer.slice(gap.byteOffset, gap.byteOffset + gap.byteLength) as ArrayBuffer } });
     const set = fakeSet();
-    const loaded = await open([fontResolver((request) => request.families.map((family) => ({ family, url })))], set)
+    const loaded = await tables([fontResolver((request) => request.families.map((family) => ({ family, url })))], set)
       .ensure(demand(['Private']));
     // One request (no second load of the URL by FontFace, whatever the
     // cache headers), with the CSS font-loading credentials.
@@ -1312,7 +1317,7 @@ describe('FontSourceSession: served face tables', () => {
       'https://fonts.app.example/kana.woff2': { bytes: 5 },
     });
     let resolved = 0;
-    const session = open([fontResolver((request) => {
+    const session = tables([fontResolver((request) => {
       resolved++;
       return request.families.flatMap((family) => [
         { family, url: 'https://fonts.app.example/latin.woff2', unicodeRange: 'U+0-FF' },
@@ -1338,7 +1343,7 @@ describe('FontSourceSession: served face tables', () => {
   it.each(['ooxml-fixture-gap.ttf', 'ooxml-fixture-gap.woff', 'ooxml-fixture-gap.woff2'])(
     'snapshots the OpenType tables of a data face (%s)', async (name) => {
       const set = fakeSet();
-      const session = open([fontFiles({ faces: [{ family: 'Calibri', data: await fixture(name) }] })], set);
+      const session = tables([fontFiles({ faces: [{ family: 'Calibri', data: await fixture(name) }] })], set);
       const loaded = await session.ensure(demand(['Calibri']));
       expect(loaded.faces).toHaveLength(1);
       expect(loaded.faces[0]!.resourceMetrics).toMatchObject(GAP);
@@ -1348,7 +1353,7 @@ describe('FontSourceSession: served face tables', () => {
   it('snapshots the tables of a fontFiles URL face the library fetched, downloading it once', async () => {
     const { calls } = installFetch({ 'https://app.example/gap.woff2': { body: await fixture('ooxml-fixture-gap.woff2') } });
     const set = fakeSet();
-    const loaded = await open([fontFiles({ faces: [{ family: 'Calibri', url: 'https://app.example/gap.woff2' }] })], set)
+    const loaded = await tables([fontFiles({ faces: [{ family: 'Calibri', url: 'https://app.example/gap.woff2' }] })], set)
       .ensure(demand(['Calibri']));
     expect(loaded.faces[0]!.resourceMetrics).toMatchObject(GAP);
     expect(calls).toHaveLength(1);
@@ -1358,7 +1363,7 @@ describe('FontSourceSession: served face tables', () => {
 
   it('keeps a variable face\'s variation data for instancing', async () => {
     const set = fakeSet();
-    const loaded = await open([fontFiles({ faces: [{ family: 'Var', data: await fixture('ooxml-fixture-gap-var.ttf'), weight: '100 900' }] })], set)
+    const loaded = await tables([fontFiles({ faces: [{ family: 'Var', data: await fixture('ooxml-fixture-gap-var.ttf'), weight: '100 900' }] })], set)
       .ensure(demand(['Var']));
     expect(loaded.faces[0]!.resourceMetrics?.variation?.axes.map((axis) => axis.tag)).toEqual(['wght']);
   });
@@ -1370,7 +1375,7 @@ describe('FontSourceSession: served face tables', () => {
     const set = fakeSet();
     const opaque = new Uint8Array(64).fill(7).buffer;
     const inline = 'data:font/ttf;base64,AAAA';
-    const session = open([
+    const session = tables([
       fontFiles({ faces: [{ family: 'Opaque Face', data: opaque }, { family: 'Inline Face', url: inline }] }),
       fontCss({ url: 'https://fonts.example/v.css' }),
     ], set);
@@ -1385,5 +1390,15 @@ describe('FontSourceSession: served face tables', () => {
     const later = await session.ensure(demand([], [0x3042]));
     expect(later.faces.map((face) => face.probeSource).at(-1)).toEqual(fetchedFontBody('https://fonts.example/css-kana.woff2'));
     expect(fileCalls(calls)).toHaveLength(2);
+  });
+
+  it('reads no table for a format that does not lay out with them (PPTX, XLSX)', async () => {
+    const set = fakeSet();
+    const data = await fixture('ooxml-fixture-gap.woff2');
+    const loaded = await open([fontFiles({ faces: [{ family: 'Calibri', data }] })], set).ensure(demand(['Calibri']));
+    // The face loads; its bytes are neither inflated nor parsed.
+    expect(loaded.faces).toHaveLength(1);
+    expect(loaded.faces[0]!.resourceMetrics).toBeUndefined();
+    expect(loaded.faces[0]!.probeSource).toBe(data);
   });
 });

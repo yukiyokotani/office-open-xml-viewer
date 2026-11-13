@@ -67,12 +67,32 @@ describe('docxFontDemandScalars (design §6)', () => {
     ['a chart', docWith([{ type: 'chart', chart: {} }])],
     ['an equation', docWith([{ type: 'math', nodes: [], display: false, fontSize: 10 }])],
     ['a metafile picture', docWith([{ type: 'image', imagePath: 'word/media/image1.emf', mimeType: 'image/emf' }])],
-    ['a symbol font', docWith([text('l', { fontFamily: 'Wingdings' })])],
     ['a PUA symbol code', docWith([text('')])],
     ['a non-ASCII page number format', docWith([text('a')], { section: { pageNumType: { fmt: 'hebrew1' } } as never })],
     ['a non-ASCII field switch', docWith([{ type: 'field', fieldType: 'page', instruction: 'PAGE \\* HEBREW1', fallbackText: '1' }])],
   ])('answers all for %s', (_label, doc) => {
     expect(scalarsOf(doc)).toBe('all');
+  });
+
+  it('demands only what a symbol font may paint, never every subset', () => {
+    // A Symbol bullet (U+F0B7) and a Wingdings run: the authored codes, their
+    // F0-shifted forms, their conversion targets and VS15, nothing else.
+    const doc = docWith([text('l', { fontFamily: 'Wingdings' })]);
+    (doc.body[0] as { numbering?: object }).numbering = { text: '\uF0B7', fontFamily: 'Symbol' };
+    const scalars = scalarsOf(doc);
+    expect(scalars).not.toBe('all');
+    const set = new Set(scalars as number[]);
+    for (const cp of [0xf0b7, 0x2022, 0x6c, 0xf06c, 0x25cf, 0xfe0e]) expect(set.has(cp), cp.toString(16)).toBe(true);
+    // Bounded by the tables (layout-generated text counts as painted in each
+    // symbol family too): a few hundred scalars, not every subset.
+    expect(set.size).toBeLessThan(1024);
+    // §17.3.2.5 caps paints the upper case, converted in the run's symbol face (Α).
+    expect(new Set(scalarsOf(docWith([text('a', { fontFamily: 'Symbol', allCaps: true })])) as number[]).has(0x391)).toBe(true);
+    // A generated field result (PAGE \* ROMAN may paint V) is converted too (ς).
+    expect(new Set(scalarsOf(docWith([{ type: 'field', fieldType: 'page', instruction: 'PAGE \\* ROMAN',
+      fallbackText: 'I', fontFamily: 'Symbol' }])) as number[]).has(0x3c2)).toBe(true);
+    // A PUA code outside a symbol family still proves nothing.
+    expect(scalarsOf(docWith([text('\uF0B7', { fontFamily: 'Arial' })]))).toBe('all');
   });
 
   it('treats as ASCII only number formats whose every output is ASCII', () => {
@@ -185,6 +205,19 @@ describe('loadDocxFontSources', () => {
     const jp = second.loaded.families.get('noto sans jp');
     expect(faces.filter((face) => face.family === jp).every((face) => face.status === 'loaded')).toBe(true);
     second.session.release();
+  });
+
+  it('keeps a Symbol-bullet document lazy: only the subsets of its painted scalars load', async () => {
+    const { faces, set } = install();
+    const doc = docWith([text('Hello')]);
+    (doc.body[0] as { numbering?: object }).numbering = { text: '\uF0B7', fontFamily: 'Symbol' };
+    const plan = { ...docxFontFamilyPlan(doc, [SOURCE], undefined, { routes: {} }), fallbackFamilies: ['Noto Sans JP'] };
+    const loaded = await loadDocxFontSources(doc, plan, [SOURCE], { fontSet: set });
+    const jp = loaded.loaded.families.get('noto sans jp');
+    // The kanji subset holds no scalar the bullet or its conversion paints.
+    expect(faces.filter((face) => face.family === jp).map((face) => [face.unicodeRange, face.status]))
+      .toEqual([[SUBSETS.latin, 'loaded'], [SUBSETS.kana, 'loaded']]);
+    loaded.session.release();
   });
 
   it('forwards the worker bridge options: claimed resolver URL faces go through the acquirer', async () => {

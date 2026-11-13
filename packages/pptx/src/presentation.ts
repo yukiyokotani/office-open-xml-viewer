@@ -42,6 +42,7 @@ import {
   type OoxmlResourceMetrics,
   type LoadedOfficeFontFallbacks,
   workerRendererDescriptors,
+  createSymbolFaceOracleCache,
 } from '@silurus/ooxml-core';
 import {
   deserializeWorkerError,
@@ -310,6 +311,9 @@ export class PptxPresentation {
    *  the SPA (refcounted in core, so a face shared with another open deck
    *  survives until both go). */
   private _fontSources: FontSourceSession | null = null;
+  /** Symbol-code verdicts across this deck's main-mode renders, kept while
+   * the realm's faces are unchanged (core createSymbolFaceOracleCache). */
+  private _symbolFaces = createSymbolFaceOracleCache();
   /** Worker mode: runs this deck's `fontResolver` functions for the worker's
    *  font-source session (core `resolver-bridge-host.ts`); disposed in
    *  {@link destroy}, which aborts every in-flight resolver call. */
@@ -1272,6 +1276,7 @@ export class PptxPresentation {
             officeFontRoutes,
             officeInstalledFamilies,
             fontSources: this._fontSources?.loaded,
+            symbolFaces: this._symbolFaces,
             fetchMedia: this._fetchMedia,
             fetchImage: this._fetchImage,
             skipMediaControls: opts.skipMediaControls,
@@ -1679,6 +1684,7 @@ export class PptxPresentation {
     // reachable. In worker mode the worker's copy ends with the worker.
     this._fonts = undefined;
     this._installedFamilies = null;
+    this._symbolFaces = createSymbolFaceOracleCache();
     for (const loads of this._officeFontLoads.values()) {
       for (const pending of distinctOfficeRouteLoads(loads)) {
         void pending.then((loaded) => unloadOfficeFontFallbacks(loaded.faces));

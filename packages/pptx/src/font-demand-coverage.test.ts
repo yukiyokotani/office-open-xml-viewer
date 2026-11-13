@@ -12,8 +12,8 @@ import type { Presentation, Slide } from './types';
 // to a unicode-range subset that never loads, so its glyph would silently
 // fall back to a host font. Exercised over the public demo deck and targeted
 // synthetic slides; every paint path the collector cannot prove declines to
-// 'all' (charts, pictures, metafiles, groups, bullets, vertical text,
-// WordArt, RTL, symbol fonts, non-slidenum fields, equations).
+// 'all' (charts, pictures, metafiles, groups, autoNum and picture bullets,
+// vertical text, WordArt, RTL, non-slidenum fields, equations).
 
 const TARGETED: Record<string, Uint8Array> = {
   'caps and small caps': deck(textBox(para(run('straße αβγ', ' cap="all"') + run('mixed Case', ' cap="small"')))),
@@ -31,6 +31,12 @@ const TARGETED: Record<string, Uint8Array> = {
     + `<a:tc><a:txBody><a:bodyPr/><a:lstStyle/>${para(run('42%'))}</a:txBody><a:tcPr/></a:tc>`
     + '</a:tr></a:tbl></a:graphicData></a:graphic></p:graphicFrame>'),
   'east asian and latin mix': deck(textBox(para(run('漢字かなカナ ABC 123', ' altLang="ja-JP"')))),
+  // §21.1.2.4.3 buFont / §21.1.2.3.7 latin / §21.1.2.3.10 sym in symbol-encoded faces.
+  'symbol bullet and symbol faces': deck(textBox(
+    para(run('Item'), '<a:pPr marL="342900" indent="-342900"><a:buFont typeface="Symbol"/><a:buChar char="\uF0B7"/></a:pPr>')
+    + para(run('Next'), '<a:pPr marL="342900" indent="-342900"><a:buFont typeface="Wingdings"/><a:buChar char="§"/></a:pPr>')
+    + para('<a:r><a:rPr lang="en-US" sz="2400"><a:latin typeface="Wingdings"/></a:rPr><a:t>lnþ(\uF0E0</a:t></a:r>'
+      + '<a:r><a:rPr lang="en-US" sz="2400"><a:sym typeface="Symbol"/></a:rPr><a:t>a\uF061\uF0AE</a:t></a:r>'))),
 };
 
 /** Canvas stand-in recording every string measured or painted. */
@@ -52,7 +58,12 @@ function recordingCanvas() {
     get font() { return font; },
     set font(value: string) { font = value; },
     letterSpacing: '0px',
-    measureText: (text: string) => { texts.push(text); return metrics(text); },
+    // Symbol-face probes measure in families no source serves (the route
+    // sentinels alone, or a family no host installs): no subset to load.
+    measureText: (text: string) => {
+      if (!/^[^",]*"__ooxml_(?:route_sentinel_[ab]|symbol_probe_absent)_[0-9a-f]+__"$/u.test(font)) texts.push(text);
+      return metrics(text);
+    },
     fillText: (text: string) => { texts.push(text); },
     strokeText: (text: string) => { texts.push(text); },
     createLinearGradient: () => ({ addColorStop: noop }),

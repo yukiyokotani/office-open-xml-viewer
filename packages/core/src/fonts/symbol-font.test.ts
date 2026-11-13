@@ -141,11 +141,14 @@ describe('symbol text conversion for a font that draws the codes', () => {
 const inkCanvas = (pixel: (fill: string, text: string) => number[], onCreate = () => {}) => class {
   constructor(readonly width: number, readonly height: number) { onCreate(); }
   getContext() {
-    let last = '';
+    let last: string | null = null;
     return {
-      clearRect() {}, font: '', fillStyle: '', textBaseline: '', globalAlpha: 1, globalCompositeOperation: '',
+      font: '', fillStyle: '', textBaseline: '', globalAlpha: 1, globalCompositeOperation: '',
+      clearRect() { last = null; },
       fillText(text: string) { last = text; },
-      getImageData() { return { data: new Uint8ClampedArray(pixel(this.fillStyle, last)) }; },
+      getImageData() {
+        return { data: new Uint8ClampedArray(last === null ? [0, 0, 0, 0] : pixel(this.fillStyle, last)) };
+      },
     };
   }
 };
@@ -199,6 +202,21 @@ describe('createSymbolMonochromeProbe', () => {
     expect(createSymbolMonochromeProbe({ canvas: new Translucent(1, 1) })('\u{1F44D}\uFE0E')).toBeUndefined();
     const Empty = inkCanvas(() => [0, 0, 0, 0]);
     expect(createSymbolMonochromeProbe({ canvas: new Empty(1, 1) })(' ')).toBeUndefined();
+  });
+
+  it('leaves a spoofed readback inconclusive, never "not monochrome"', () => {
+    // An anti-fingerprinting canvas: every readback carries noise, even of
+    // the canvas just cleared, so the colour pixels prove nothing.
+    const Spoofed = class {
+      getContext() {
+        return {
+          font: '', fillStyle: '', textBaseline: '', globalAlpha: 1, globalCompositeOperation: '',
+          clearRect() {}, fillText() {},
+          getImageData() { return { data: new Uint8ClampedArray([3, 250, 7, 255]) }; },
+        };
+      }
+    };
+    expect(createSymbolMonochromeProbe({ canvas: new Spoofed() })('\u2665\uFE0E')).toBeUndefined();
   });
 });
 

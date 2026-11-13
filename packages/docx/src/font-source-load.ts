@@ -15,6 +15,7 @@ import {
 } from '@silurus/ooxml-core/internal/font-scalar-demand';
 import {
   FontSourceSession,
+  readFontResourceMetrics,
   type FontSessionDemand,
   type FontSourceSessionOptions,
   type FontSourceDescriptor,
@@ -136,10 +137,10 @@ function docxSynthesizedPaint(doc: DocxDocumentModel): 'all' | string[] {
  * {@link docxRenderedTextUsages} (body, tables, headers/footers, notes,
  * text-box stories, numbering markers, field results), plus
  * {@link LAYOUT_SYNTHESIZED_SCALARS} and the synthesised paint of
- * {@link docxSynthesizedPaint}. Any usage whose family is a symbol font
- * (Symbol / Wingdings, including `w:sym` runs and symbol bullets) is remapped
- * to other Unicode scalars by the painter (core `symbol-font.ts`), so it makes
- * demand `'all'`. The set is bounded by `HARD_MAX_FONT_DEMAND_SCALARS`; beyond
+ * {@link docxSynthesizedPaint}. A usage in a symbol font (Symbol /
+ * Wingdings, including `w:sym` runs and symbol bullets) may be remapped to
+ * other Unicode scalars by the painter (core `symbol-font.ts`), so it demands
+ * every scalar that remapping may paint (`addSymbolText`). The set is bounded by `HARD_MAX_FONT_DEMAND_SCALARS`; beyond
  * it the answer is `'all'`. `'all'` is the conservative answer, never an error.
  */
 export function docxFontDemandScalars(doc: DocxDocumentModel): FontDemandScalars {
@@ -149,11 +150,19 @@ export function docxFontDemandScalars(doc: DocxDocumentModel): FontDemandScalars
   // only bound is the scalar-count ceiling inside the collector.
   const collector = new FontDemandScalarCollector({ budget: Number.POSITIVE_INFINITY });
   if (!collector.add(String.fromCodePoint(...LAYOUT_SYNTHESIZED_SCALARS))) return 'all';
-  for (const text of synthesized) if (!collector.add(text)) return 'all';
+  // Every symbol-encoded family the document paints with. A synthesized text
+  // (a caps run's upper case, a field picture's literals, a field result) is painted in its
+  // run's fonts, which the synthesized list does not carry, so it is
+  // collected as if painted in each of them: a finite over-approximation.
+  const symbolFamilies = new Set<string>();
   for (const usage of docxRenderedTextUsages(doc, 'font-demand')) {
-    if (usage.fontFamilies.some((family) => isSymbolFontFamily(family?.trim()))) return 'all';
-    if (!collector.add(usage.text)) return 'all';
+    for (const family of usage.fontFamilies) if (isSymbolFontFamily(family)) symbolFamilies.add(family!);
+    if (!collector.addSymbolText(usage.text, usage.fontFamilies)) return 'all';
   }
+  // Layout-generated text (a field result such as a PAGE number) is painted
+  // in its field's fonts too.
+  if (!collector.addSymbolText(String.fromCodePoint(...LAYOUT_SYNTHESIZED_SCALARS), symbolFamilies)) return 'all';
+  for (const text of synthesized) if (!collector.addSymbolText(text, symbolFamilies)) return 'all';
   return collector.result();
 }
 
@@ -189,9 +198,11 @@ export async function loadDocxFontSources(
   // Worker mode passes the bridge's session options: `fontResolver`
   // functions run on main, and main fetches their claimed URL faces (core
   // resolver-bridge.ts).
-  options: Omit<FontSourceSessionOptions, 'sources' | 'resolverFailures'> = {},
+  options: Omit<FontSourceSessionOptions, 'sources' | 'resolverFailures' | 'readMetricTables'> = {},
 ): Promise<DocxLoadedFontSources> {
-  const session = new FontSourceSession({ ...options, sources });
+  // DOCX lays out with the served faces' own tables (source-font-metrics.ts):
+  // the session reads them before the snapshot. PPTX and XLSX do not.
+  const session = new FontSourceSession({ ...options, sources, readMetricTables: readFontResourceMetrics });
   try {
     const loaded = await session.ensure(docxFontDemand(doc, plan));
     return { session, names: Object.freeze([...plan.families, ...plan.fallbackFamilies]), loaded };
