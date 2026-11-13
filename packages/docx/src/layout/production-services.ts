@@ -2,7 +2,6 @@ import { acquireCanvasGlyphContours } from '../native-glyph-contours.js';
 import { type CjkLang } from '@silurus/ooxml-core';
 import {
   fontFamilyKey,
-  fontSourceFaceIdentity,
   type FontSubstitution,
   type LoadedFontSources,
 } from '@silurus/ooxml-core/internal/font-sources';
@@ -303,21 +302,12 @@ export function createProductionTextLayoutService(
   // 950...), even ones the exact-tuple inventory below cannot represent.
   const shadowedFamilies = new Set<string>();
   if (fontSet && typeof fontSet[Symbol.iterator] === 'function') {
-    // The session's own faces resolve through their `source` inventory
-    // above (with their resource identity), not as application faces.
-    // So do the same source's faces another document of this realm
-    // registered (other subsets of the same files).
-    const sessionFaces = new Set(options.sourceFonts?.loaded.faces.map((face) => face.face) ?? []);
-    const sessionSources = new Set(options.sourceFonts?.loaded.faces.flatMap((face) => {
-      const id = fontSourceFaceIdentity(face.face);
-      return id === undefined ? [] : [id];
-    }) ?? []);
+    // Font sources register under private families (core
+    // source-session.ts), so a face declaring an authored family is the
+    // application's own, never a served face of this or another document.
     for (const face of fontSet) {
       if (!requestedNames.has(normalizedFaceFamily(face.family))) continue;
       if (face.status === 'loaded') shadowedFamilies.add(normalizedFaceFamily(face.family));
-      if (sessionFaces.has(face)) continue;
-      const faceSource = fontSourceFaceIdentity(face);
-      if (faceSource !== undefined && sessionSources.has(faceSource)) continue;
       for (const loaded of loadedFaces([face])) {
         const appIdentity = appFontResourceIdentity(loaded.displayFamily);
         inventory.push({
@@ -452,6 +442,7 @@ export function createProductionTextLayoutService(
         ? docxScriptScopedFamilies(options.fontSubstitutes, options.installedSubstituteFamilies ?? [])
         : undefined,
       nativeRouteMetrics: options.nativeRouteMetrics,
+      ...(options.sourceFonts ? { servedFamilies: options.sourceFonts.loaded.families } : {}),
       nativeFamilyLists: Object.fromEntries(routedFontFamilies.map((family) => [
         family,
         normalizeFontFamilyUncached(

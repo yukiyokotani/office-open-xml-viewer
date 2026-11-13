@@ -703,7 +703,7 @@ export async function prefetchImages(
     for (const descriptor of chartDescriptors) {
       for (const { fill, occurrence } of collectChartFillRenderedSizes(
         // The same substituted model the paint pass draws (renderCharts).
-        withChartFontSubstitutions(descriptor.chart.chart, chartFontSubstitutions(opts?.fontSources?.substitutions)),
+        withChartFontSubstitutions(descriptor.chart.chart, chartFontSubstitutions(opts?.fontSources)),
         { x: 0, y: 0, w: descriptor.displayWidth / scale, h: descriptor.displayHeight / scale },
         PT_TO_PX, 0, opts?.threeD, opts?.regionMap, opts?.chartEx, resolved,
       )) {

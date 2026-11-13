@@ -7,7 +7,6 @@ import {
 import { quoteCssFontFamily } from '@silurus/ooxml-core/internal/css-font-family';
 import {
   fontFamilyKey,
-  fontSourceFaceIdentity,
   instanceOpenTypeLineMetrics,
   parseUnicodeRange,
   type LoadedFontSources,
@@ -153,9 +152,10 @@ function measuredMetric(
  * CSS Fonts 4 §5.2 matching; every face of the matched set contributes one
  * metric. A tuple is declined (its spans keep the Canvas box) when a face of
  * the matched set has neither; a family is declined when a face's descriptors
- * are outside this matching (oblique, non-normal stretch), or when another
- * loaded face in the painting FontFaceSet declares the family (one no
- * session registered from the same source).
+ * are outside this matching (oblique, non-normal stretch). The served faces
+ * are registered under the document's private families (core
+ * source-session.ts), so no face of another document or of the application
+ * can join a matched set: the metrics describe exactly the faces that paint.
  */
 export function sourceFontLineMetrics(
   loaded: LoadedFontSources | undefined,
@@ -171,28 +171,7 @@ export function sourceFontLineMetrics(
     if (group) group.faces.push({ face, index });
     else byFamily.set(key, { display: displayFamily(face.family), faces: [{ face, index }] });
   });
-  const sessionFaces = new Set(loaded?.faces.map((face) => face.face) ?? []);
-  // Source identities of each served family's own faces. Another document's
-  // registration of the same source (another subset of the same files) is
-  // that source's face, not a foreign one.
-  const familySources = new Map<string, Set<string>>();
-  for (const face of loaded?.faces ?? []) {
-    const id = fontSourceFaceIdentity(face.face);
-    if (id === undefined) continue;
-    const key = fontFamilyKey(face.family);
-    familySources.set(key, (familySources.get(key) ?? new Set()).add(id));
-  }
-  const foreignFamilies = new Set<string>();
-  if (fontSet && typeof fontSet[Symbol.iterator] === 'function') {
-    for (const face of fontSet) {
-      if (face.status !== 'loaded' || sessionFaces.has(face)) continue;
-      const key = fontFamilyKey(displayFamily(face.family));
-      const id = fontSourceFaceIdentity(face);
-      if (id === undefined || !familySources.get(key)?.has(id)) foreignFamilies.add(key);
-    }
-  }
-  for (const [key, { display, faces }] of byFamily) {
-    if (foreignFamilies.has(key)) continue;
+  for (const { display, faces } of byFamily.values()) {
     const described: { face: SourceFace; index: number; range: readonly [number, number]; style: Style }[] = [];
     let modelled = true;
     for (const { face, index } of faces) {

@@ -905,7 +905,7 @@ describe('production layout service integration', () => {
     for (const [weight, style] of [[700, 'normal'], [400, 'italic'], [700, 'italic']] as const) {
       const styled = loaded.text.shape({ text: 'x', fontSizePt: 10, fonts: { ascii: 'Calibri' }, weight, style });
       expect(styled.spans[0]?.font).toMatchObject({ source: 'substitute', resolvedFamily: 'Carlito', weight, style });
-      expect(styled.spans[0]?.font.route.familyList).toMatch(/^"Carlito"/);
+      expect(styled.spans[0]?.font.route.familyList).toMatch(/^"ooxml-font-source-test-\d+", "Carlito"/);
     }
   });
 
@@ -932,6 +932,7 @@ describe('production layout service integration', () => {
               faces: [face],
               substitutions: new Map(substitution ? [['review missing', substitution]] : []),
               regularAliases: new Map(),
+              families: new Map([['review served', 'ooxml-font-source-test-0']]),
             },
           },
         });
@@ -940,7 +941,8 @@ describe('production layout service integration', () => {
           expect(shaped.spans[0]?.font, `${descriptors.style} ${requested} ${weight} ${style}`).toMatchObject({
             source: substitution ? 'substitute' : 'source', resolvedFamily: 'Review Served',
           });
-          expect(shaped.spans[0]?.font.route.familyList).toMatch(/^"Review Served"/);
+          // The served family paints through this document's private family.
+          expect(shaped.spans[0]?.font.route.familyList).toMatch(/^"ooxml-font-source-test-0", "Review Served"/);
         }
       }
     }

@@ -5,5 +5,5 @@ export {
   chartFontFamilies,
   chartFontSubstitutions,
   withChartFontSubstitutions,
-  type LoadedChartFontSubstitutions,
+  type LoadedChartFontSources,
 } from '../fonts/chart-font-sources.js';

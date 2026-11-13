@@ -304,6 +304,7 @@ export {
   resolvedCachedBitmapVariantKey,
   peekCachedBitmapByPath,
   dropDecodedBitmapCache,
+  bindMetafileFontFamilies,
   releaseOwnedBitmap,
   dropBitmapCacheByPath,
   acquireBitmapCacheLease,

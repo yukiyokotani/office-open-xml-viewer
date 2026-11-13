@@ -38,6 +38,7 @@ const sources = {
   }],
   substitutions: new Map(),
   regularAliases: new Map(),
+  families: new Map([['unreadable', 'ooxml-font-source-test-0']]),
 } as unknown as LoadedFontSources;
 
 beforeEach(() => { G.FontFace = StalledFontFace; });

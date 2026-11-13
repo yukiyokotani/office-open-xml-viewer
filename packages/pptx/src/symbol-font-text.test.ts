@@ -58,7 +58,7 @@ function render(runs: TextRunData[], options: Readonly<{
   const rc: RenderContext = {
     themeMajorFont: null, themeMinorFont: null, dpr: 1,
     symbolFaces: createSymbolFaceOracle(ctx),
-    ...(options.substitute ? { fontSubstitutions: new Map([['symbol', { family: options.substitute }]]) } : {}),
+    ...(options.substitute ? { fontSources: { substitutions: new Map([['symbol', { family: options.substitute }]]), families: new Map() } } : {}),
   };
   renderTextBody(ctx, body, 0, 0, 2000, 400, 1 / 12700, null, 0, false, false, '#000000', undefined, rc, () => {});
   return fills;

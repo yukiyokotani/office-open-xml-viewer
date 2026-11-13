@@ -46,7 +46,7 @@ import {
 } from '../fonts/metafile-symbol-encoding.js';
 import { officeFaceWebAlias } from '../fonts/font-stack.js';
 import { classifyFontGeneric, cjkFallbackChain, type CjkLang } from '../fonts/scripts.js';
-import { quoteCssFontFamily } from '../internal/css-font-family.js';
+import { quoteCssFontFamily, scopeServedFontFamilies } from '../internal/css-font-family.js';
 // Direct bidi modules, not the bidi index: importing the index from this
 // eagerly loaded player made Rolldown treat single-entry IIFE builds of the
 // renderers as code-splitting builds.
@@ -466,13 +466,13 @@ const MISSING_CONTROL_FAMILY = '__ooxml_wmf_missing_face_control_5b2e__';
 /** Whether Canvas draws `text` from `face` itself on this host: compare its
  *  glyph geometry against a deliberately absent control family (CSS silently
  *  substitutes a missing family, so equal geometry means fallback). */
-function hostFaceCovers(ctx: AnyCtx, face: string, text: string): boolean {
+function hostFaceCovers(ctx: AnyCtx, face: string, text: string, families?: ReadonlyMap<string, string>): boolean {
   const geometry = (family: string) => {
     ctx.font = `${PROBE_EM}px ${family}${quoteCssFontFamily(MISSING_CONTROL_FAMILY)}, serif`;
     const m = ctx.measureText(text);
     return [m.width, m.actualBoundingBoxAscent, m.actualBoundingBoxDescent, m.actualBoundingBoxLeft, m.actualBoundingBoxRight];
   };
-  const selected = geometry(`${quoteCssFontFamily(face)}, `);
+  const selected = geometry(`${scopeServedFontFamilies(quoteCssFontFamily(face), families)}, `);
   const missing = geometry('');
   return !selected.every((value, index) => Object.is(value, missing[index]));
 }
@@ -495,6 +495,10 @@ export interface WmfTextState {
   currentX: number;
   currentY: number;
   currentPositionKnown: boolean;
+  /** The document's served families and their private registered families
+   *  (core `LoadedFontSources.families`): text paints with the faces the
+   *  document's font sources loaded, as the document's own text does. */
+  fontFamilies?: ReadonlyMap<string, string>;
 }
 
 export interface WmfTextOutput {
@@ -537,12 +541,12 @@ export function drawWmfText(s: WmfTextState, out: WmfTextOutput): { drew: boolea
   const weight = font.weight === 0 ? 400 : Math.min(1000, Math.max(1, font.weight));
   const style = font.italic ? 'italic ' : '';
   const generic = genericFamily(font);
-  const authored = authoredStack(font, generic);
+  const authored = scopeServedFontFamilies(authoredStack(font, generic), s.fontFamilies);
   const symbol = symbolStack(font);
-  const substitute = `${quoteCssFontFamily(SYMBOL_CHARSET_SUBSTITUTE_FACE)}, ${symbol}`;
+  const substitute = scopeServedFontFamilies(`${quoteCssFontFamily(SYMBOL_CHARSET_SUBSTITUTE_FACE)}, ${symbol}`, s.fontFamilies);
   const css = (stack: string) => (px: number) => `${style}${weight} ${px}px ${stack}`;
 
-  const decoded = decodeBytes(out.bytes, font.charset, font.face, (text) => hostFaceCovers(ctx, font.face, text));
+  const decoded = decodeBytes(out.bytes, font.charset, font.face, (text) => hostFaceCovers(ctx, font.face, text, s.fontFamilies));
   if ('problem' in decoded) return decoded;
   const { units } = decoded;
   const metrics = faceMetrics(ctx, font, css(authored), weight);

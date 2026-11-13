@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
+  bindMetafileFontFamilies,
   getCachedBitmapByPath,
   getCachedDerivedBitmap,
   peekCachedBitmapByPath,
@@ -565,6 +566,31 @@ describe('getCachedBitmapByPath', () => {
     await Promise.resolve();
     expect(closes).toHaveLength(2);
     expect(closes.every((close) => close.mock.calls.length === 1)).toBe(true);
+  });
+
+  it('plays a metafile again once its owner binds other served faces', async () => {
+    const { create } = stubMetafileSurfaceCreation();
+    const wmf = buildMinimalWmf();
+    const fetchImage = vi.fn(async () => new Blob([wmf as BlobPart], { type: 'image/wmf' }));
+    const path = 'word/media/served-text.wmf';
+    const draw = () => getCachedBitmapByPath(path, 'image/wmf', fetchImage, { widthPt: 50, heightPt: 25 });
+    const families = new Map([['brand', 'ooxml-font-source-1-0']]);
+    const first = await draw();
+    // Metafile text paints with the document's served faces: a raster played
+    // before they loaded never answers once they have, nor the reverse.
+    bindMetafileFontFamilies(fetchImage, { families, faces: [{}] });
+    const served = await draw();
+    expect(served).not.toBe(first);
+    // A later snapshot with the same faces keeps the raster; one more loaded
+    // face of an already mapped family (another subset) plays it again.
+    bindMetafileFontFamilies(fetchImage, { families: new Map(families), faces: [{}] });
+    await expect(draw()).resolves.toBe(served);
+    bindMetafileFontFamilies(fetchImage, { families, faces: [{}, {}] });
+    await expect(draw()).resolves.not.toBe(served);
+    bindMetafileFontFamilies(fetchImage, undefined);
+    await expect(draw()).resolves.toBe(first);
+    expect(create).toHaveBeenCalledTimes(3);
+    dropBitmapCacheByPath(fetchImage);
   });
 
   it('uses ordinary raster variants when PNG bytes are mislabeled as WMF', async () => {

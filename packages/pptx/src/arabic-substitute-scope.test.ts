@@ -13,7 +13,7 @@ const renderContext = {
   themeMajorFont: null,
   themeMinorFont: null,
   dpr: 1,
-  fontSubstitutions: LOADED_OFFICE_SUBSTITUTIONS,
+  fontSources: { substitutions: LOADED_OFFICE_SUBSTITUTIONS, families: new Map() },
 } as const;
 
 function paragraph(text: string): Paragraph {

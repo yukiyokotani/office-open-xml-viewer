@@ -28,13 +28,14 @@
  *    (`face-download.ts`) only then, one request per needed
  *    `unicode-range` subset, with the source's credentials (a resolver's
  *    through its acquirer: the worker bridge in a worker, this realm
- *    otherwise), and is registered from its bytes through the refcounted
- *    per-realm registry (`font-registry.ts`), once, whichever subsets are
- *    demanded first. A component holds every declaration whose
- *    `unicode-range` overlaps another's, so overlapping precedence is
- *    independent of the order demand arrives in. A face that cannot be
- *    fetched (network, status, deadline, size or retained-byte ceiling) is
- *    dropped and its family warned;
+ *    otherwise), and is registered from its bytes in the realm's FontFaceSet
+ *    under this session's private alias of the family
+ *    ({@link LoadedFontSources.families}), never under its real name, once,
+ *    whichever subsets are demanded first. A component holds every
+ *    declaration whose `unicode-range` overlaps another's, so overlapping
+ *    precedence is independent of the order demand arrives in. A face that
+ *    cannot be fetched (network, status, deadline, size or retained-byte
+ *    ceiling) is dropped and its family warned;
  * 4. **loads** (`FontFace.load()`) only faces whose `unicode-range`
  *    intersects the demanded scalars (every face for `'all'`, and faces
  *    without a range always). Canvas never triggers a load itself, so an
@@ -45,9 +46,23 @@
  * Failures are reported with one `console.warn` per newly failed family set;
  * nothing else is surfaced (no strict mode, no feedback API). Ensures are
  * serialised; stylesheets and resolutions are shared across sessions of the
- * same source identity (`source-cache.ts`), and faces across sessions of the
- * same realm (`font-registry.ts`). {@link FontSourceSession.release} returns
- * every reference the session took, exactly once.
+ * same source identity (`source-cache.ts`), and downloaded bytes across
+ * sessions of the same realm (`face-download.ts`). {@link
+ * FontSourceSession.release} returns every reference the session took,
+ * exactly once.
+ *
+ * Document scope (library policy). The FontFaceSet is shared by every
+ * document of a realm, and CSS font matching selects among all faces of a
+ * family name: a face registered under its real family would paint (and size)
+ * every other open document that names that family, including one whose own
+ * sources serve different faces under the same name. Each session therefore
+ * registers its faces under private family names of its own (one per served
+ * family), and the formats map a served family to that alias in every font
+ * stack they build from the snapshot (`scopeServedFontFamilies`). A document's
+ * painting and line metrics then depend only on its own session: no outcome,
+ * registration or release of another document can change them. The cost is
+ * one registration (and one browser decode) per open document of a face that
+ * several documents share; the downloaded bytes are still shared.
  */
 import { fontSourceLimitError } from '../errors/font-source-limit.js';
 import type { OoxmlFontSourceQuota } from '../errors/ooxml-error.js';
@@ -82,7 +97,7 @@ import {
   type FontResolverFailures,
   type FontResolverRunner,
 } from './resolver-resolution.js';
-import { activeFontSet, FONT_LOAD_CEILING_MS, releaseFaces, retainFace } from './font-registry.js';
+import { activeFontSet, FONT_LOAD_CEILING_MS } from './font-registry.js';
 import {
   acquireSourceCache,
   chargeRetainedBytes,
@@ -144,6 +159,13 @@ export interface LoadedFontSources {
   readonly substitutions: ReadonlyMap<string, { readonly family: string; readonly script?: FontSubstituteScript }>;
   /** `loadedRegularAliases` over the loaded faces ('lato regular' → 'Lato'). */
   readonly regularAliases: ReadonlyMap<string, string>;
+  /** Lower-cased served family (`LoadedSourceFace.family`) → the private CSS
+   * family this session registered its faces under, for every family with a
+   * registered face. A font stack names the alias immediately before the
+   * served family (`scopeServedFontFamilies`): the session's faces win
+   * exactly where a face registered under the real name would, and nothing
+   * another document registers can be selected for this one. */
+  readonly families: ReadonlyMap<string, string>;
 }
 
 export type { FontResolverFailures, FontResolverRunner, ResolverFaceAcquirer, ResolverFaceRequest };
@@ -175,33 +197,27 @@ export interface FontSourceSessionOptions {
 }
 
 
-/** Parsed tables per registered face (null: unreadable). A face shared by
- * sessions of one realm was created from one signature (content included),
- * so its bytes, and hence its tables, are the same for every holder. Decoding
+/** Parsed tables per face buffer (null: unreadable). Downloaded bytes are
+ * one buffer for every session of the realm that holds them
+ * (`face-download.ts`), so documents sharing a face decode it once. Decoding
  * is bounded through {@link metricDecodes}. */
-const faceResourceMetrics = new WeakMap<FontFace, OpenTypeLineMetrics | null>();
+const faceResourceMetrics = new WeakMap<ArrayBuffer, OpenTypeLineMetrics | null>();
 
-/** Source identity (`SourceCache.id`) of every face a session registered,
- * so a format can tell the faces of one source, registered by any session of
- * this realm, from a face the application registered itself. */
-const sourceFaceIdentities = new WeakMap<FontFace, string>();
-
-/** The source identity a font-source session registered `face` under, or
- * undefined for a face no session registered. */
-export function fontSourceFaceIdentity(face: FontFace): string | undefined {
-  return sourceFaceIdentities.get(face);
-}
+/** Serial of the sessions created in this realm: each session's private
+ * family names ({@link LoadedFontSources.families}) carry its own serial, so
+ * no two sessions of one realm ever share one. */
+let sessionSerial = 0;
 
 /** Metric-table decodes of this realm: a WOFF/WOFF2 decode inflates up to
  * `MAX_INFLATED_BYTES`, so at most two run at once; a released document's
  * queued decodes are dropped (`decode-queue.ts`). */
 const metricDecodes = new DecodeQueue(2);
 
-/** Read the metric tables of `data` once per face, on behalf of `holder`;
- * rejects with an `AbortError` once `signal` aborts. */
-function prepareResourceMetrics(face: FontFace, data: ArrayBuffer, holder: object, signal: AbortSignal): Promise<void> {
-  if (faceResourceMetrics.has(face)) return Promise.resolve();
-  return metricDecodes.run(face, holder, () => decodeResourceMetrics(face, data), signal);
+/** Read the metric tables of `data` once, on behalf of `holder`; rejects
+ * with an `AbortError` once `signal` aborts. */
+function prepareResourceMetrics(data: ArrayBuffer, holder: object, signal: AbortSignal): Promise<void> {
+  if (faceResourceMetrics.has(data)) return Promise.resolve();
+  return metricDecodes.run(data, holder, () => decodeResourceMetrics(data), signal);
 }
 
 /** Decodes queued or running in this realm (tests, leak checks). */
@@ -209,20 +225,21 @@ export function pendingMetricDecodeCount(): number {
   return metricDecodes.size;
 }
 
-async function decodeResourceMetrics(face: FontFace, data: ArrayBuffer): Promise<void> {
-  if (faceResourceMetrics.has(face)) return;
+async function decodeResourceMetrics(data: ArrayBuffer): Promise<void> {
+  if (faceResourceMetrics.has(data)) return;
   let metrics: OpenTypeLineMetrics | null = null;
   try {
     const sfnt = await metricSfnt(data);
     if (sfnt instanceof Uint8Array) metrics = parseOpenTypeResourceMetrics(sfnt, undefined, { variations: true });
   } catch { metrics = null; }
-  faceResourceMetrics.set(face, metrics);
+  faceResourceMetrics.set(data, metrics);
 }
 
 const EMPTY_SNAPSHOT: LoadedFontSources = Object.freeze({
   faces: Object.freeze([]),
   substitutions: new Map(),
   regularAliases: new Map(),
+  families: new Map(),
 });
 
 // ---- demand normalisation -----------------------------------------------------------
@@ -440,45 +457,18 @@ function until<T>(promise: Promise<T>, signal: AbortSignal): Promise<T | undefin
   });
 }
 
-// ---- registration byte accounting -----------------------------------------------
-
-/** Decoded bytes of `data` faces and `data:` URL faces registered in this
- * realm, per FontFaceSet and signature (a face shared by two documents is
- * charged once; each realm's set holds its own copy). The realm total is
- * shared with the source caches (`source-cache.ts`). */
-const registeredBytes = new WeakMap<FontFaceSet, Map<string, { bytes: number; refs: number }>>();
-
-function chargeBytes(set: FontFaceSet, signature: string, bytes: number): void {
-  if (bytes === 0) return;
-  let bySignature = registeredBytes.get(set);
-  const existing = bySignature?.get(signature);
-  if (existing) { existing.refs++; return; }
-  chargeRetainedBytes(bytes);
-  if (!bySignature) { bySignature = new Map(); registeredBytes.set(set, bySignature); }
-  bySignature.set(signature, { bytes, refs: 1 });
-}
-
-function refundBytes(set: FontFaceSet, signature: string): void {
-  const bySignature = registeredBytes.get(set);
-  const entry = bySignature?.get(signature);
-  if (!bySignature || !entry) return;
-  if (--entry.refs > 0) return;
-  bySignature.delete(signature);
-  refundRetainedBytes(entry.bytes);
-}
-
 export { retainedFontSourceBytes };
 
 // ---- session ------------------------------------------------------------------------
 
 interface OwnedFace {
-  readonly signature: string;
   readonly face: FontFace;
   readonly declaration: FontFaceDeclaration;
   readonly sourceIndex: number;
   /** null: no (or an unparseable) unicode-range, so the face covers all. */
   readonly ranges: readonly (readonly [number, number])[] | null;
-  readonly charged: boolean;
+  /** Decoded bytes charged to the realm ceiling while registered. */
+  readonly bytes: number;
   /** Demanded families this face serves (for warnings). */
   readonly families: Set<string>;
   readiness?: Promise<void>;
@@ -545,7 +535,11 @@ export class FontSourceSession {
   private failure: unknown = undefined;
   private queue: Promise<unknown> = Promise.resolve();
   private readonly families = new Map<string, FamilyState>();
+  /** Registered faces, by {@link register}'s signature. */
   private readonly owned = new Map<string, OwnedFace>();
+  /** Served family key → this session's private family for it. */
+  private readonly aliases = new Map<string, string>();
+  private readonly serial = ++sessionSerial;
   /** Every declaration this session claimed (by {@link declarationKey}). */
   private readonly claimedDeclarations = new Set<string>();
   private all = false;
@@ -604,9 +598,12 @@ export class FontSourceSession {
     this.closed = true;
     this.controller.abort();
     this.detachSignal();
-    releaseFaces([...this.owned.values()].map((entry) => entry.face));
-    if (this.fontSet) for (const entry of this.owned.values()) if (entry.charged) refundBytes(this.fontSet, entry.signature);
+    for (const entry of this.owned.values()) {
+      this.fontSet?.delete(entry.face);
+      refundRetainedBytes(entry.bytes);
+    }
     this.owned.clear();
+    this.aliases.clear();
     this.claimedDeclarations.clear();
     this.families.clear();
     this.points.clear();
@@ -743,7 +740,7 @@ export class FontSourceSession {
     if (this.closed) return this.settledState();
     await Promise.all([...this.owned.values()].flatMap((entry) =>
       entry.face.status === 'loaded' && entry.declaration.data !== undefined
-        ? [prepareResourceMetrics(entry.face, entry.declaration.data, this, this.controller.signal)] : []));
+        ? [prepareResourceMetrics(entry.declaration.data, this, this.controller.signal)] : []));
     if (this.closed) return this.settledState();
     this.warn(failures);
     this.snapshot = this.takeSnapshot();
@@ -1031,16 +1028,14 @@ export class FontSourceSession {
     indices: readonly number[],
   ): void {
     const set = this.fontSet as FontFaceSet;
-    const sourceId = this.caches[state.sourceIndex].id;
     const chosen = indices.map((index) => state.declarations[index]!);
-    // Registry signature (design §4.4): source identity × family × every
-    // descriptor × content, so two origins never share a face and two
-    // documents on one source share one face per FontFaceSet.
+    // Within this session: source × family × every descriptor × content, so
+    // a face two claimed families share is registered once.
     const signed = chosen.map((declaration) => {
       const { data, url = '' } = declaration;
       const dataUrl = data === undefined && /^\s*data:/i.test(url);
       const signature = [
-        `src:${sourceId}`,
+        state.sourceIndex,
         fontFamilyKey(declaration.family),
         declaration.weight ?? '',
         declaration.style ?? '',
@@ -1064,32 +1059,33 @@ export class FontSourceSession {
         continue;
       }
       const bytes = data !== undefined ? data.byteLength : dataUrl ? dataUrlDecodedByteLength(url) ?? 0 : 0;
+      const familyKey = fontFamilyKey(declaration.family);
+      const alias = this.aliases.get(familyKey) ?? `ooxml-font-source-${this.serial}-${this.aliases.size}`;
       let face: FontFace;
+      let charged = false;
       try {
         // Beyond the realm's retained-byte ceiling the face fails like a
         // face that cannot load (its family warned), nothing else.
-        chargeBytes(set, signature, bytes);
-        ({ face } = retainFace(signature, set, () => {
-          const descriptors: FontFaceDescriptors = {};
-          if (declaration.weight) descriptors.weight = declaration.weight;
-          if (declaration.style) descriptors.style = declaration.style;
-          if (declaration.stretch) descriptors.stretch = declaration.stretch;
-          if (declaration.unicodeRange) descriptors.unicodeRange = declaration.unicodeRange;
-          const created = new FontFace(declaration.family, data ?? cssUrl(url), descriptors);
-          try { set.add(created); }
-          catch (error) { set.delete(created); throw error; }
-          sourceFaceIdentities.set(created, sourceId);
-          return created;
-        }));
+        chargeRetainedBytes(bytes);
+        charged = true;
+        const descriptors: FontFaceDescriptors = {};
+        if (declaration.weight) descriptors.weight = declaration.weight;
+        if (declaration.style) descriptors.style = declaration.style;
+        if (declaration.stretch) descriptors.stretch = declaration.stretch;
+        if (declaration.unicodeRange) descriptors.unicodeRange = declaration.unicodeRange;
+        face = new FontFace(alias, data ?? cssUrl(url), descriptors);
+        try { set.add(face); }
+        catch (error) { set.delete(face); throw error; }
       } catch (error) {
-        refundBytes(set, signature);
+        if (charged) refundRetainedBytes(bytes);
         failures.set(state.name, error instanceof Error ? error.message : String(error));
         continue;
       }
+      this.aliases.set(familyKey, alias);
       const entry: OwnedFace = {
-        signature, face, declaration, sourceIndex: state.sourceIndex,
+        face, declaration, sourceIndex: state.sourceIndex,
         ranges: parseUnicodeRange(declaration.unicodeRange),
-        charged: bytes > 0,
+        bytes,
         families: new Set([state.name]),
       };
       this.owned.set(signature, entry);
@@ -1117,8 +1113,6 @@ export class FontSourceSession {
       const eligible = (this.all && (becameAll || isNew)) || entry.ranges === null
         || rangeIntersects(entry.ranges, isNew ? cumulative : deltaIndex);
       if (!eligible) continue;
-      // load() is idempotent and joins a shared face's in-flight load
-      // (CSS Font Loading §2.2), so a reused registration reports its own result.
       entry.readiness = Promise.resolve()
         .then(() => (this.closed ? undefined : entry.face.load()))
         .then(() => { entry.outcome = true; }, () => { entry.outcome = false; });
@@ -1146,7 +1140,7 @@ export class FontSourceSession {
     for (const entry of this.owned.values()) {
       if (entry.face.status !== 'loaded') continue;
       const { declaration } = entry;
-      const resourceMetrics = faceResourceMetrics.get(entry.face) ?? undefined;
+      const resourceMetrics = (declaration.data && faceResourceMetrics.get(declaration.data)) ?? undefined;
       const probeSource = resourceMetrics ? undefined
         : declaration.data ?? (declaration.url === undefined ? undefined : cssUrl(declaration.url));
       faces.push(Object.freeze({
@@ -1172,6 +1166,7 @@ export class FontSourceSession {
       faces: Object.freeze(faces),
       substitutions,
       regularAliases: loadedRegularAliases(faces.map((face) => ({ ...face, status: 'loaded' as const }))),
+      families: new Map(this.aliases),
     });
   }
 }

@@ -67,6 +67,8 @@ export function sourceFontLayoutOptions(
         })),
         substitutions,
         regularAliases: new Map(),
+        // As a session registers them: one private family per served family.
+        families: new Map([...loadedFamilies].map((key, index) => [key, `ooxml-font-source-test-${index}`])),
       },
     },
   };

@@ -746,6 +746,7 @@ export function playWmf(
   W: number,
   H: number,
   onUnsupported?: (records: readonly string[]) => void,
+  fontFamilies?: ReadonlyMap<string, string>,
 ): boolean {
   if (!isWmf(bytes)) return false;
 
@@ -778,6 +779,7 @@ export function playWmf(
     curPen: null,
     curBrush: null,
     curFont: null,
+    ...(fontFamilies ? { fontFamilies } : {}),
     textColor: '#000000',
     // Win32 DC defaults: white background, OPAQUE mode (SetBkColor/SetBkMode).
     bkColor: '#ffffff',
@@ -1262,6 +1264,7 @@ export async function renderWmfToBitmap(
   targetW: number,
   targetH: number,
   onUnsupported?: (records: readonly string[]) => void,
+  fontFamilies?: ReadonlyMap<string, string>,
 ): Promise<ImageBitmap | null> {
   if (!isWmf(bytes)) return null;
   if (targetW <= 0 || targetH <= 0) return null;
@@ -1275,7 +1278,7 @@ export async function renderWmfToBitmap(
   if (!ctx) return null;
   ctx.lineJoin = 'round';
   ctx.lineCap = 'round';
-  const drew = playWmf(bytes, ctx, targetW, targetH, onUnsupported);
+  const drew = playWmf(bytes, ctx, targetW, targetH, onUnsupported, fontFamilies);
   if (!drew) return null;
   return createImageBitmap(canvas);
 }

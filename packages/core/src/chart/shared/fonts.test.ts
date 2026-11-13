@@ -6,6 +6,9 @@ describe('chart font substitutions', () => {
     const chart = { fontSubstitutions: { calibri: 'Carlito', 'brand face': 'Brand Served' } };
     expect(chartFaceList('Brand Face', chart)).toBe('"Brand Face", "Brand Served"');
     expect(chartFallbackFontStack(chart)).toBe('Calibri, "Carlito", Arial, sans-serif');
+    // Every named fallback family takes the family loaded for it.
+    expect(chartFallbackFontStack({ fontSubstitutions: { arial: 'ooxml-font-source-1-0' } }))
+      .toBe('Calibri, Arial, "ooxml-font-source-1-0", sans-serif');
   });
 
   it('never resolves a document face through the object prototype', () => {

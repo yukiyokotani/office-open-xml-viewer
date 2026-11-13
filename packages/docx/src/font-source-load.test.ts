@@ -156,7 +156,7 @@ describe('loadDocxFontSources', () => {
     // the others are neither fetched nor registered.
     const sourceName = (source: unknown) => typeof source === 'string' ? source
       : `bytes:${new TextDecoder().decode(source as ArrayBuffer)}`;
-    const status = () => Object.fromEntries(faces.filter((face) => face.family === 'Noto Sans JP')
+    const status = () => Object.fromEntries(faces.filter((face) => face.family === loaded.loaded.families.get('noto sans jp'))
       .map((face) => [sourceName(face.source), face.status]));
     expect(status()).toEqual({
       'bytes:https://fonts.example/jp-latin.woff2': 'loaded',
@@ -182,7 +182,8 @@ describe('loadDocxFontSources', () => {
     const mixedPlan = docxFontFamilyPlan(mixed, [SOURCE], undefined, { routes: {} });
     expect(mixedPlan.fallbackFamilies).toContain('Noto Sans JP');
     const second = await loadDocxFontSources(mixed, mixedPlan, [SOURCE], { fontSet: set });
-    expect(faces.filter((face) => face.family === 'Noto Sans JP').every((face) => face.status === 'loaded')).toBe(true);
+    const jp = second.loaded.families.get('noto sans jp');
+    expect(faces.filter((face) => face.family === jp).every((face) => face.status === 'loaded')).toBe(true);
     second.session.release();
   });
 
@@ -199,7 +200,7 @@ describe('loadDocxFontSources', () => {
     });
     expect(acquireResolverFaces).toHaveBeenCalledTimes(1);
     expect(acquireResolverFaces.mock.calls[0][0]).toMatchObject({ sourceIndex: 0, families: [{ family: 'Brand', urls: [url] }] });
-    expect(faces.filter((face) => face.family === 'Brand').map((face) => face.source)).toEqual([bytes]);
+    expect(faces.filter((face) => face.family === loaded.loaded.families.get('brand')).map((face) => face.source)).toEqual([bytes]);
     expect(fetched).toEqual([]);
     loaded.session.release();
   });

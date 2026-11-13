@@ -75,6 +75,7 @@ import { decodeMetafileSymbolText } from '../fonts/metafile-symbol-encoding.js';
 import { decodeDib, blitDibToCtx, type DecodedDib } from './dib.js';
 import { colorRefToCss, isEmf } from './wmf.js';
 import { createAuxCanvas } from '../canvas/aux-canvas.js';
+import { scopeServedFontFamilies } from '../internal/css-font-family.js';
 import { EmfPlusPlayer, scanEmfPlus } from './emf-plus.js';
 
 // EMF record type codes ([MS-EMF] 2.1.1 EMR enumeration; the subset we act on,
@@ -400,6 +401,9 @@ interface PlayState {
   curPen: Pen | null;
   curBrush: Brush | null;
   curFont: Font | null;
+  /** The document's served families and their private registered families
+   *  (core `LoadedFontSources.families`); see wmf-text.ts. */
+  fontFamilies?: ReadonlyMap<string, string>;
   textColor: string;
   bkMode: number; // 1 = TRANSPARENT
   textAlign: number;
@@ -1799,7 +1803,8 @@ function drawText(s: PlayState, c: EmfCursor, dv: DataView, recStart: number): v
   ctx.fillStyle = s.textColor;
   const weight = font && font.weight >= 700 ? 'bold ' : '';
   const italic = font?.italic ? 'italic ' : '';
-  ctx.font = `${italic}${weight}${px}px ${symbolNormalized ? 'serif' : font?.face || 'sans-serif'}`;
+  ctx.font = `${italic}${weight}${px}px ${symbolNormalized ? 'serif'
+    : font?.face ? scopeServedFontFamilies(font.face, s.fontFamilies) : 'sans-serif'}`;
 
   // SETTEXTALIGN: low 2 bits horizontal. TA_LEFT(0), TA_RIGHT(2), TA_CENTER(6).
   const horiz = s.textAlign & 0x6;
@@ -1954,6 +1959,10 @@ export interface EmfPlaybackOptions {
    *  (each entry once). `renderEmfToBitmap` always collects it into its
    *  `EmfRasterResult`; direct `playEmf` callers opt in here. */
   readonly onUnsupported?: (records: readonly string[]) => void;
+  /** The document's served families and their private registered families
+   *  (core `LoadedFontSources.families`): text paints with the faces the
+   *  document's font sources loaded, as the document's own text does. */
+  readonly fontFamilies?: ReadonlyMap<string, string>;
 }
 
 export function playEmf(
@@ -2003,6 +2012,7 @@ export function playEmf(
     curPen: null,
     curBrush: null,
     curFont: null,
+    ...(options.fontFamilies ? { fontFamilies: options.fontFamilies } : {}),
     textColor: '#000000',
     bkMode: 1,
     textAlign: 0,
@@ -2721,6 +2731,7 @@ export async function renderEmfToBitmap(
   bytes: Uint8Array,
   targetW: number,
   targetH: number,
+  fontFamilies?: ReadonlyMap<string, string>,
 ): Promise<EmfRasterResult> {
   const none: EmfRasterResult = { bitmap: null, unsupported: [] };
   if (!isEmf(bytes)) return none;
@@ -2740,6 +2751,7 @@ export async function renderEmfToBitmap(
     onUnsupported: (records) => {
       unsupported = records;
     },
+    ...(fontFamilies ? { fontFamilies } : {}),
   });
   return { bitmap: drew ? await createImageBitmap(canvas) : null, unsupported };
 }

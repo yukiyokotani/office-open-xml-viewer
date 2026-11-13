@@ -62,16 +62,17 @@ describe('XLSX chart text and font sources', () => {
     expect(demand.take()?.families).toEqual(['Chart Face']);
   });
 
-  it('paints chart text through the loaded unscoped substitution map', () => {
+  it('paints chart text through the private family of the loaded unscoped substitute', () => {
     const title = (calls: ReturnType<typeof paintedFonts>) => calls.find((call) => call.text === 'Chart Title')?.font ?? '';
     const offline = title(paintedFonts());
     expect(offline).toContain('"Chart Face"');
-    expect(offline).not.toContain('Served Face');
+    expect(offline).not.toContain('ooxml-font-source');
     const loaded = (script?: 'arabic') => ({
       substitutions: new Map([['chart face', { family: 'Served Face', ...(script ? { script } : {}) }]]),
       regularAliases: new Map<string, string>(),
+      families: new Map([['served face', 'ooxml-font-source-1-0']]),
     });
-    expect(title(paintedFonts(loaded()))).toContain('"Chart Face", "Served Face"');
+    expect(title(paintedFonts(loaded()))).toContain('"Chart Face", "ooxml-font-source-1-0"');
     // A script-scoped substitute never reaches chart text.
     expect(title(paintedFonts(loaded('arabic')))).toBe(offline);
   });

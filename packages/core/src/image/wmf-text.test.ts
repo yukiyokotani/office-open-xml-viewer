@@ -124,10 +124,10 @@ function context(installed: readonly string[] = []) {
   return { ctx, ops, texts, counts, painted };
 }
 
-function play(file: Uint8Array, installed: readonly string[] = []) {
+function play(file: Uint8Array, installed: readonly string[] = [], families?: ReadonlyMap<string, string>) {
   const mock = context(installed);
   const report = vi.fn();
-  const drew = playWmf(file, mock.ctx, 100, 100, report);
+  const drew = playWmf(file, mock.ctx, 100, 100, report, families);
   return { ...mock, report, drew, unsupported: (report.mock.calls[0]?.[0] ?? []) as string[] };
 }
 
@@ -167,6 +167,10 @@ describe('WMF text: Font object and DC state records', () => {
     // Office faces with a different-family web substitute keep it as the next entry.
     const calibri = play(picture(font({ face: 'Calibri', pitchAndFamily: 0x20 }), extText(0, 50, ascii('A'))));
     expect(calibri.texts()[0].font).toBe('400 20px "Calibri", "Carlito", sans-serif');
+    // The document's served faces paint through its private families.
+    const served = play(picture(font({ face: 'Calibri', pitchAndFamily: 0x20 }), extText(0, 50, ascii('A'))),
+      [], new Map([['carlito', 'ooxml-font-source-1-0']]));
+    expect(served.texts()[0].font).toBe('400 20px "Calibri", "ooxml-font-source-1-0", "Carlito", sans-serif');
   });
 
   it('uses catalogued usWinAscent/usWinDescent for the authored face', () => {
