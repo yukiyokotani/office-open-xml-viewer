@@ -1414,15 +1414,32 @@ export function drawPhoneticBand(
   const alignment: PhoneticAlignment = pr?.alignment ?? 'left';
 
   ctx.save();
-  // The readings paint in their own font like any cell text: one painted
-  // form and font for the band (symbol-paint.ts).
-  const readings = runs.map((run) => run.text).join('');
-  const reading = cellSymbolPaint(ctx, phFont, readings, cs, cjkFallback);
-  const readingFont = reading.font;
-  ctx.font = buildFont(ctx, readingFont, cs, cjkFallback, reading.text);
   ctx.textBaseline = 'top';
   ctx.textAlign = 'left';
   ctx.fillStyle = color;
+  // Each reading paints in the reading font like any cell text, in its
+  // painted form and, in a partial symbol face, stretch by stretch
+  // (symbol-paint.ts): measured and painted piece by piece.
+  const pieces = (text: string): { text: string; font: CellFont }[] => {
+    const painted = cellSymbolPaint(ctx, phFont, text, cs, cjkFallback);
+    return painted.runs
+      ? painted.runs.map((run) => ({ text: run.text, font: applyRunFont(painted.font, run) }))
+      : [{ text: painted.text, font: painted.font }];
+  };
+  const widthOf = (parts: readonly { text: string; font: CellFont }[]) => parts.reduce((sum, part) => {
+    ctx.font = buildFont(ctx, part.font, cs, cjkFallback, part.text);
+    return sum + ctx.measureText(part.text).width;
+  }, 0);
+  /** Paints the pieces from `x`, returning the pen after them. */
+  const paintPieces = (parts: readonly { text: string; font: CellFont }[], x: number, yy: number): number => {
+    let pen = x;
+    for (const part of parts) {
+      ctx.font = buildFont(ctx, part.font, cs, cjkFallback, part.text);
+      paintCellText(ctx, part.text, pen, yy, part.font, cs);
+      pen += ctx.measureText(part.text).width;
+    }
+    return pen;
+  };
 
   // Sit the reading just below the cell's top padding.
   const y = cellTopY + Math.round(2 * cs);
@@ -1430,13 +1447,9 @@ export function drawPhoneticBand(
   if (alignment === 'noControl') {
     // §18.18.56 noControl: NOT per word — lay the readings out left-to-right
     // from the base text's left edge, each at its own natural (reading-font)
-    // width, in run order. Measured with the reading font already active.
+    // width, in run order.
     let cursor = baseLeftX;
-    for (const run of runs) {
-      const text = reading.paint(run.text);
-      paintCellText(ctx, text, cursor, y, readingFont, cs);
-      cursor += ctx.measureText(text).width;
-    }
+    for (const run of runs) cursor = paintPieces(pieces(run.text), cursor, y);
     ctx.restore();
     return;
   }
@@ -1451,21 +1464,21 @@ export function drawPhoneticBand(
   for (const p of placed) {
     // Gaps per authored reading character; widths of the painted form.
     const cps = [...p.text];
-    const text = reading.paint(p.text);
-    const naturalW = ctx.measureText(text).width;
+    const parts = pieces(p.text);
+    const naturalW = widthOf(parts);
     if (p.spread === 'distribute' && cps.length > 1 && naturalW < p.width) {
       // §18.18.56 distributed: spread the reading glyphs so the first hugs the
       // left edge and the last the right edge of the base span.
       const extra = (p.width - naturalW) / (cps.length - 1);
       try { (ctx as CanvasRenderingContext2D & { letterSpacing: string }).letterSpacing = `${extra}px`; } catch { /* ignore */ }
-      paintCellText(ctx, text, p.x, y, readingFont, cs);
+      paintPieces(parts, p.x, y);
       try { (ctx as CanvasRenderingContext2D & { letterSpacing: string }).letterSpacing = '0px'; } catch { /* ignore */ }
     } else if (p.spread === 'center') {
       // §18.18.56 center: centre the natural reading width over the base span.
-      paintCellText(ctx, text, p.x + (p.width - naturalW) / 2, y, readingFont, cs);
+      paintPieces(parts, p.x + (p.width - naturalW) / 2, y);
     } else {
       // §18.18.56 left: left-justified at the base span's left edge.
-      paintCellText(ctx, text, p.x, y, readingFont, cs);
+      paintPieces(parts, p.x, y);
     }
   }
   ctx.restore();

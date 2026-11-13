@@ -121,7 +121,10 @@ describe('XLSX symbol-font cell text', () => {
       { font: font('Symbol'), value: { type: 'number', number: 7 }, numFmt: '"a"0' },
       { font: font('Wingdings'), value: { type: 'number', number: -1 }, numFmt: 'yyyy' },
     ]);
-    expect(painted(realm, 'α7')).toHaveLength(1);
+    // α converts; the digit, which Symbol does not remap, keeps the face.
+    expect(painted(realm, 'α')[0]?.font).not.toMatch(/Symbol/u);
+    expect(painted(realm, '7')[0]?.font).toMatch(/"Symbol"/u);
+    expect(painted(realm, '7')[0]!.x).toBeGreaterThan(painted(realm, 'α')[0]!.x);
     // Wingdings '#' is the scissors, which takes the text colour here.
     expect(painted(realm, '✁✁').length).toBeGreaterThan(0);
     expect(realm.fills.some((fill) => fill.text.includes('#'))).toBe(false);
@@ -182,6 +185,21 @@ describe('XLSX symbol-font cell text', () => {
     // a render without the cache judges on the painting context itself.
     expect(second).toBeLessThan(fresh.measures.length);
     expect(painted(realm, 'ü')).toHaveLength(2);
+    // A disposed cache (its workbook destroyed) keeps no oracle: a later
+    // render through it judges afresh on its own painting context.
+    symbolFaces.dispose();
+    const before = probes();
+    renderViewport(realm.ctx, worksheet, styles, { row: 1, col: 1, rows: 1, cols: 1 }, { dpr: 1, symbolFaces });
+    expect(probes() - before).toBeGreaterThan(second);
+  });
+
+  it('keeps a code in its authored face when its conversion is refused', () => {
+    // A Unicode-encoded face named Wingdings draws Latin J but not the
+    // symbol form; the smiley conversion paints only in colour here.
+    const realm = symbolRealm({ wingdings: (ch: string) => ch === 'J' }, undefined, (value) => value.includes('☺'));
+    render(realm, [{ font: font('Wingdings'), value: text('Jü') }]);
+    expect(painted(realm, 'J')[0]?.font).toMatch(/^15px "Wingdings"/u);
+    expect(painted(realm, '✓')[0]?.font).not.toMatch(/Wingdings/u);
   });
 });
 

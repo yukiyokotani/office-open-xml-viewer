@@ -15,13 +15,14 @@
  * authored, an F0-shifted one converts through the 0.89 subset.
  *
  * A text can need two faces: a partial face draws some of its codes and
- * lacks others. Each code keeps the face this decides for it (`segments`), so
- * no drawn glyph moves to another face and no converted character paints in
- * the symbol family, whose cmap would re-read a target such as U+00A9 as its
- * own symbol code. A code that paints alike in either face (a space, a digit
- * of Symbol, a code whose conversion is refused) joins the face of the code
- * before it, else after it, so a wholly kept or wholly converted text stays
- * one segment and paints with one Canvas font.
+ * lacks others. Each converted code paints in the Unicode fallback face and
+ * every other character (a code the face draws, one it cannot judge, one
+ * whose conversion is refused, any character outside the symbol encoding)
+ * keeps the authored face, as the core leaves those unmapped (`segments`).
+ * So no glyph the authored face may draw moves to another face, and no
+ * converted character paints in the symbol family, whose cmap would re-read
+ * a target such as U+00A9 as its own symbol code. A text with both kinds
+ * paints as several stretches, each in its own Canvas font.
  */
 import { isSymbolFontFamily, type SymbolFaceOracle } from '@silurus/ooxml-core';
 
@@ -64,37 +65,26 @@ export function symbolPaint(
 ): SymbolPaint {
   if (!text || !isSymbolFontFamily(family)) return authoredPaint(text);
   const pieces = new Map<string, string>();
-  /** Codes with a face of their own: true converted, false drawn natively. */
-  const faces = new Map<string, boolean>();
+  /** Codes that convert: they paint in the Unicode fallback face. */
+  const converted = new Set<string>();
   for (const ch of new Set(text)) {
     const cp = ch.codePointAt(0) ?? 0;
     const pua = cp >= 0xf020 && cp <= 0xf0ff;
     if (!pua && (cp < 0x20 || cp > 0xff)) continue;
-    // A code the face draws keeps that face, whether or not it has a
-    // conversion (Wingdings U+F0FF has none).
-    const drawn = oracle.draws(ch, keptFont);
     // A bare code the realm cannot judge paints as authored, as in 0.89.
-    if (!pua && drawn === undefined) continue;
+    if (!pua && oracle.draws(ch, keptFont) === undefined) continue;
     const segment = oracle.segments(ch, family, keptFont, unicodeFont)[0];
-    if (segment?.mapped) faces.set(ch, true);
-    else if (drawn === true) faces.set(ch, false);
+    if (segment?.mapped) converted.add(ch);
     if (segment && segment.text !== ch) pieces.set(ch, segment.text);
   }
-  if (pieces.size === 0 && ![...faces.values()].some(Boolean)) return authoredPaint(text);
-  // Every code in order with its face; a code without one joins its neighbour.
-  const chars = [...text];
-  const assigned = chars.map((ch) => faces.get(ch));
-  let last: boolean | undefined;
-  for (let i = 0; i < assigned.length; i++) last = assigned[i] ??= last;
-  let next: boolean | undefined;
-  for (let i = assigned.length - 1; i >= 0; i--) next = assigned[i] ??= next;
+  if (pieces.size === 0) return authoredPaint(text);
   const segments: SymbolSegment[] = [];
-  chars.forEach((ch, index) => {
-    const unicode = assigned[index] ?? false;
+  for (const ch of text) {
+    const unicode = converted.has(ch);
     const previous = segments[segments.length - 1];
     if (previous && previous.unicode === unicode) segments[segments.length - 1] = { authored: previous.authored + ch, unicode };
     else segments.push({ authored: ch, unicode });
-  });
+  }
   return Object.freeze({
     segments,
     paint: (value: string) => {

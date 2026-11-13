@@ -350,6 +350,7 @@ self.onmessage = async (e: MessageEvent<
       checkedOfficeTupleSet = new Set();
       officeSheetLoads = new WeakMap();
       officeSheetLoadQueue = Promise.resolve();
+      symbolFaces.dispose();
       symbolFaces = createSymbolFaceOracleCache();
       sheetCache.clear();
       viewProjectionCache.clear();
@@ -585,6 +586,8 @@ self.onmessage = async (e: MessageEvent<
       try { source?.closeModelSource(); } catch {}
       try { host.run(() => host.disposeArchive()); } catch {}
       try { unloadOfficeFontFallbacks(officeFontFaces); } catch {}
+      symbolFaces.dispose();
+      symbolFaces = createSymbolFaceOracleCache();
       try { fontSources?.release(); } catch {}
       fontSources = null;
       fontResolverClient.reset();

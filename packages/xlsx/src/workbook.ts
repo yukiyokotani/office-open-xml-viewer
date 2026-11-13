@@ -1842,6 +1842,9 @@ export class XlsxWorkbook {
       // callback and releases exactly once when the faces become available.
     }
     this.retainedFontSets.clear();
+    // A caller canvas may outlive the workbook: its bound oracle must not
+    // keep the released faces reachable.
+    this.symbolFaces?.dispose();
     this.symbolFaces = createSymbolFaceOracleCache();
     // The descriptors may hold application font bytes (fontFiles data,
     // inline data: URLs): a destroyed workbook must not keep them reachable.
