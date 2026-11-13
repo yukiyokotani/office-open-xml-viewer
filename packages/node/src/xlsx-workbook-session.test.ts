@@ -150,9 +150,12 @@ describe('Node bounded XLSX workbook session', () => {
     const onResourceMetrics = vi.fn();
     const picture = new Uint8Array(65_536);
     const session = await openXlsxWorkbook(pictureWorkbook(picture), { onResourceMetrics });
-    await session.getImage('xl/media/image1.png', 'image/png');
-    // XML parts are not pictures, whatever their path spelling.
+    const opened = session.resourceUsage?.distinctInflatedBytes ?? 0;
+    // XML parts are not pictures, whatever their path spelling. The refused
+    // check still accounts for the [Content_Types].xml it read.
     await expect(session.getImage('xl/workbook.xml')).rejects.toThrow(TypeError);
+    expect(session.resourceUsage?.distinctInflatedBytes).toBeGreaterThan(opened);
+    await session.getImage('xl/media/image1.png', 'image/png');
     await expect(session.getImage('/XL/Workbook.xml')).rejects.toThrow(TypeError);
     await expect(session.getImage('xl/media/missing.png', 'image/png')).rejects.toBeDefined();
     expect(onResourceMetrics).not.toHaveBeenCalled();

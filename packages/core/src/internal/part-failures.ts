@@ -260,8 +260,8 @@ export function errorPlaceholderCanvasLines(
   return lines;
 }
 
-/** Bytes kept for one failure record's `message` (the painted default detail
- *  keeps the full parser string). */
+/** Bytes kept for one failure record's `message`, and painted for one
+ *  placeholder title or detail. */
 export const PART_FAILURE_MESSAGE_MAX_UTF8 = 1024;
 /** Aggregate `message` bytes kept per engine; later records get `''`. */
 export const PART_FAILURE_MESSAGES_MAX_UTF8 = 1024 * 1024;

@@ -319,7 +319,11 @@ export class DocxDocumentSessionImpl implements DocxDocumentSession {
   async getImage(path: string, mimeType = 'application/octet-stream'): Promise<Blob> {
     this.assertOpen();
     try {
-      if (this.archive.is_picture_part?.(path) === false) throw new TypeError(NOT_A_PICTURE);
+      const picture = this.archive.is_picture_part?.(path);
+      // The first check reads [Content_Types].xml: account for it even when
+      // the path is then refused.
+      if (picture !== undefined) this.refreshResourceUsage();
+      if (picture === false) throw new TypeError(NOT_A_PICTURE);
       return await this.fetchImage(path, mimeType);
     } catch (error) {
       // Only a resource-limit overrun fails the session; a non-picture or

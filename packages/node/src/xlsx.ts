@@ -317,6 +317,9 @@ export class XlsxWorkbookSessionImpl implements XlsxWorkbookSession {
     let picture: boolean | undefined;
     try {
       picture = this.archive.is_picture_part?.(path);
+      // The first check reads [Content_Types].xml: account for it even when
+      // the path is then refused.
+      if (picture !== undefined) this.refreshResourceUsage();
     } catch (error) {
       throw this.imageFailure(error);
     }
