@@ -15,6 +15,7 @@ import {
 } from './slide-nav';
 import { acquireOfficeRoutes, distinctOfficeRouteLoads, type AcquiredOfficeRoutes } from './office-route-acquisition.js';
 import {
+  bindMetafileFontFamilies,
   type FontPreloadDemand,
   loadNativeRouteSentinels,
   loadOfficeFontFallbacks,
@@ -1248,6 +1249,8 @@ export class PptxPresentation {
         // boundary before a cached Slide becomes observable.
         if (this._destroyed) throw new Error('Presentation destroyed');
         this._assertResourceHealthy();
+        // Metafile pictures paint their text with the served faces too.
+        bindMetafileFontFamilies(this._fetchImage, this._fontSources?.loaded.families);
         return renderSlideWithEmbeddedFonts(
           canvas,
           slide,

@@ -4228,7 +4228,7 @@ function renderHeaders(
     return selectedRowRange.strong ? HEADER_BORDER_STRONG : HEADER_BORDER;
   };
   const headerFontSize = Math.max(1, Math.round(11 * cs));
-  const HEADER_FONT = `${headerFontSize}px ${DEFAULT_FONT_FAMILY}`;
+  const HEADER_FONT = `${headerFontSize}px ${contextScoped(ctx, DEFAULT_FONT_FAMILY)}`;
   const scrollAreaX = hw + frozenW;
   const scrollAreaY = hh + frozenH;
   const hp = 0.5 / dpr;  // half device-pixel offset for 1dp crisp lines
@@ -6325,7 +6325,7 @@ export function drawSlicerFrame(
   const itemH = Math.min(preferredItemH, (listH - gap * (visible - 1)) / visible);
   if (itemH <= 0) return;
 
-  ctx.font = scaleFont(SLICER_ITEM_FONT, cs);
+  ctx.font = scaleFont(SLICER_ITEM_FONT, cs, fontSourcesByContext.get(ctx)?.families);
   const itemPad = 8 * cs;
   for (let i = 0; i < visible; i++) {
     const item = items[i];
@@ -6392,7 +6392,7 @@ function slicerFont(
   sources: XlsxLoadedFontSources | undefined,
   text: string,
 ): string {
-  if (!style) return scaleFont(fallback, cs);
+  if (!style) return scaleFont(fallback, cs, sources?.families);
   const size = Math.round((style.fontSize ?? 11) * cs);
   const weight = style.fontBold ? 'bold ' : '';
   // An authored slicer face takes the substitute a font source loaded for
@@ -6403,10 +6403,12 @@ function slicerFont(
   return `${weight}${size}px ${scopeServedFontFamilies(family, sources?.families)}`;
 }
 
-function scaleFont(css: string, cs: number): string {
-  // Re-scale the leading `<size>px` token by `cs`. Safe fallback: leave the
-  // string as-is so the slicer remains readable when parsing fails.
-  return css.replace(/(\d+(?:\.\d+)?)px/, (_, n) => `${Math.round(Number(n) * cs)}px`);
+function scaleFont(css: string, cs: number, families?: ReadonlyMap<string, string>): string {
+  // Re-scale the leading `<size>px` token by `cs`, and scope the family list
+  // after it to the served families. Safe fallback: leave the string as-is so
+  // the slicer remains readable when parsing fails.
+  return css.replace(/(\d+(?:\.\d+)?)px (.*)$/, (_, n, list: string) =>
+    `${Math.round(Number(n) * cs)}px ${scopeServedFontFamilies(list, families)}`);
 }
 
 function drawClippedText(

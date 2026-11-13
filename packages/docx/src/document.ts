@@ -7,6 +7,7 @@ import { resolveCjkFallback, type CjkLang } from '@silurus/ooxml-core';
 import InlineWorker from './worker.ts?worker&inline';
 import wasmAssetUrl from './wasm/docx_parser_bg.wasm?url';
 import {
+  bindMetafileFontFamilies,
   activeFontSet,
   unloadOfficeFontFallbacks,
   releaseOwnedBitmap,
@@ -1096,6 +1097,8 @@ export class DocxDocument {
     }
     this._fontSourceSession = loaded.session;
     this._chartFontSubstitutions = chartFontSubstitutions(loaded.loaded);
+    // Metafile pictures paint their text with the served faces too.
+    bindMetafileFontFamilies(this._fetchImage, loaded.loaded.families);
     return {
       installedSubstituteFamilies: plan.installedSubstituteFamilies,
       sourceFonts: { names: loaded.names, loaded: loaded.loaded },
@@ -1613,6 +1616,7 @@ export class DocxDocument {
     // owner. SVG object URLs are revoked immediately after decode; dropping its
     // lookup releases retained decoded elements and prevents stale reuse.
     dropDecodedBitmapCache(this._fetchImage);
+    bindMetafileFontFamilies(this._fetchImage, undefined);
     dropSvgImageCache(this._fetchImage);
   }
 

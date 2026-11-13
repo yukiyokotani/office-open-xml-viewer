@@ -21,6 +21,7 @@ import { xlsxCjkFallback } from './font-requests.js';
  */
 import init, { XlsxArchive, reinit } from './wasm/xlsx_parser.js';
 import {
+  bindMetafileFontFamilies,
   decodeDataUrl,
   loadOfficeFontFallbacks,
   unloadOfficeFontFallbacks,
@@ -504,6 +505,8 @@ self.onmessage = async (e: MessageEvent<
         post({ type: 'errorPlaceholderRequired', id, sheetIndex: req.sheetIndex });
         return;
       }
+      // Metafile pictures paint their text with the served faces too.
+      bindMetafileFontFamilies(getImage, fontSources?.loaded.families);
       await renderWorksheetViewport(
         { ...workerRenderDeps(renderWorksheet, workbook.styles, renderers), cjkFallback },
         canvas,

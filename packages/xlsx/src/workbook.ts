@@ -18,6 +18,7 @@ import {
   type InstalledFamilyExclusion,
 } from '@silurus/ooxml-core/internal/font-sources';
 import {
+  bindMetafileFontFamilies,
   loadOfficeFontFallbacks,
   unloadOfficeFontFallbacks,
   type LoadedOfficeFontFallbacks,
@@ -1540,6 +1541,10 @@ export class XlsxWorkbook {
     const targetFontSet = isHTMLCanvas(target)
       ? target.ownerDocument.fonts
       : (typeof document !== 'undefined' ? document.fonts : null);
+    // Metafile pictures are rasterized in this realm (its own FontFaceSet)
+    // and paint their text with the served faces of this realm's session.
+    bindMetafileFontFamilies(this._fetchImage,
+      this.loadedFontSources(typeof document !== 'undefined' ? document.fonts : null)?.families);
     const preview = this.sheetPreviews?.get(sheetIndex);
     if (preview?.worksheet && extracted.worksheet) {
       await preview.waitFor(Math.max(

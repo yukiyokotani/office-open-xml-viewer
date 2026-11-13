@@ -1,5 +1,6 @@
 import { prepareDocxHostFontMetrics, type HostFontLineMeasurement } from './host-font-line-metrics.js';
 import {
+  bindMetafileFontFamilies,
   activeFontSet,
   loadNativeRouteSentinels,
   loadOfficeFontFallbacks,
@@ -148,6 +149,7 @@ function releaseRetainedFonts(): void {
   officeFontFaces = [];
   fontSourceSession = null;
   chartFontSubstitutionsOfDoc = undefined;
+  bindMetafileFontFamilies(getImage, undefined);
   embeddedFontFaces = [];
   try { unloadOfficeFontFallbacks(office); } catch {}
   try { sources?.release(); } catch {}
@@ -490,6 +492,8 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest | WorkerSvgDecod
         officeFontFaces = officeFaces;
         fontSourceSession = loadedSources?.session ?? null;
         chartFontSubstitutionsOfDoc = chartFontSubstitutions(loadedSources?.loaded);
+        // Metafile pictures paint their text with the served faces too.
+        bindMetafileFontFamilies(getImage, loadedSources?.loaded.families);
         embeddedFontFaces = embeddedFonts.faces;
         fontDiagnostics = embeddedFonts.diagnostics ?? [];
         fontsTransferred = true;
