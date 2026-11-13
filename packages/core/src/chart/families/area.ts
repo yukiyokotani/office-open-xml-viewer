@@ -276,7 +276,7 @@ export function renderAreaChart(
     ctx.font = `${secFontPx}px ${chartFontFamily(chart, sec.fontFace, 'minor')}`;
     let wmax = 0;
     for (const value of secScale.majorLines) {
-      wmax = Math.max(wmax, measureAuthoredTextWidth(ctx, formatAxisTickWithUnits(value, sec.formatCode ?? null, chart.date1904, sec.displayUnits)));
+      wmax = Math.max(wmax, measureAuthoredTextWidth(ctx, formatAxisTickWithUnits(value, sec.formatCode ?? null, chart.date1904, sec.displayUnits, sec.formatDivisors)));
     }
     secLabelBandW = wmax + 18;
     ctx.font = prevFont;
@@ -399,7 +399,7 @@ export function renderAreaChart(
       ),
     sec && secScale && !sec.hidden && sec.tickLabelPos !== 'none'
       ? authoredExtraLinesHeight(
-        secScale.majorLines.map(value => formatAxisTickWithUnits(value, sec.formatCode ?? null, chart.date1904, sec.displayUnits)),
+        secScale.majorLines.map(value => formatAxisTickWithUnits(value, sec.formatCode ?? null, chart.date1904, sec.displayUnits, sec.formatDivisors)),
         axisLabelLineHeightPx(secFontPx),
       )
       : 0,
@@ -460,9 +460,9 @@ export function renderAreaChart(
   // ticks formatted by the axis numFmt).
   const categoryLabelTexts = (): string[] => dateAxisPlan
     ? dateAxisPlan.majorTicks.map(tick =>
-      formatCategoryLabel(String(tick.serial), chart.catAxisFormatCode, chart.date1904))
+      formatCategoryLabel(String(tick.serial), chart.catAxisFormatCode, chart.date1904, chart.catAxisFormatDivisors))
     : Array.from({ length: Math.ceil(n / categoryLabelSkip) }, (_, index) =>
-      formatCategoryLabel((cats[index * categoryLabelSkip] ?? '').toString(), chart.catAxisFormatCode, chart.date1904));
+      formatCategoryLabel((cats[index * categoryLabelSkip] ?? '').toString(), chart.catAxisFormatCode, chart.date1904, chart.catAxisFormatDivisors));
   // Authored breaks in a category label stack extra lines below the first;
   // an automatic/outer layout lifts the plot bottom by them (an authored inner
   // rectangle already leaves its own label band). Exactly 0 without breaks.
@@ -1000,14 +1000,14 @@ export function renderAreaChart(
     const authoredSkip = Math.max(1, Math.floor(chart.catAxisTickLabelSkip ?? 1));
     const labelEntries = dateAxisPlan
       ? dateAxisPlan.majorTicks.map(tick => ({
-        label: formatCategoryLabel(String(tick.serial), chart.catAxisFormatCode, chart.date1904),
+        label: formatCategoryLabel(String(tick.serial), chart.catAxisFormatCode, chart.date1904, chart.catAxisFormatDivisors),
         x: px0 + tick.fraction * pw,
         categoryIndex: -1,
       }))
       : Array.from({ length: Math.ceil(n / authoredSkip) }, (_, index) => {
         const ci = index * authoredSkip;
         return {
-          label: formatCategoryLabel((cats[ci] ?? '').toString(), chart.catAxisFormatCode, chart.date1904),
+          label: formatCategoryLabel((cats[ci] ?? '').toString(), chart.catAxisFormatCode, chart.date1904, chart.catAxisFormatDivisors),
           x: toX(ci),
           categoryIndex: ci,
         };

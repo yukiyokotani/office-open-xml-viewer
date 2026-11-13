@@ -517,6 +517,16 @@ export interface ChartSeriesDataLabels {
   fontPaintAuthored?: boolean;
   fontHidden?: boolean;
   formatCode?: string;
+  /** Per numeric section of `formatCode`, the divisor a value is divided by once
+   *  its section is chosen on the undivided value (an OpenDocument
+   *  `number:display-factor`, ODF 1.3 Part 3 §19.346). Absent: no section
+   *  divides (DrawingML never sets it). */
+  formatDivisors?: number[] | null;
+  /** The format of the percentage in a label where it is not `formatCode`
+   *  (an OpenDocument `style:percentage-data-style-name`). */
+  percentFormatCode?: string | null;
+  /** Section divisors of `percentFormatCode`. */
+  percentFormatDivisors?: number[] | null;
   /** `<c:dLbls><c:separator>` (§21.2.2.170), including authored line breaks. */
   separator?: string;
   /** Series-level bold default for data labels. */
@@ -993,6 +1003,11 @@ export interface ChartModel {
    * null = plain numeric formatting.
    */
   valAxisFormatCode?: string | null;
+  /** Per numeric section of `valAxisFormatCode`, the divisor a value is divided by once
+   *  its section is chosen on the undivided value (an OpenDocument
+   *  `number:display-factor`, ODF 1.3 Part 3 §19.346). Absent: no section
+   *  divides (DrawingML never sets it). */
+  valAxisFormatDivisors?: number[] | null;
   /** Authored axis code/linkage, retained apart from the effective tick code. */
   valAxisNumberFormat?: ChartAxisNumberFormat | null;
   /** `<c:valAx><c:dispUnits>` display-only divisor and optional label. Series
@@ -1213,6 +1228,11 @@ export interface ChartModel {
    * Effective category-axis tick format (or scatter X-axis valAx).
    */
   catAxisFormatCode?: string | null;
+  /** Per numeric section of `catAxisFormatCode`, the divisor a value is divided by once
+   *  its section is chosen on the undivided value (an OpenDocument
+   *  `number:display-factor`, ODF 1.3 Part 3 §19.346). Absent: no section
+   *  divides (DrawingML never sets it). */
+  catAxisFormatDivisors?: number[] | null;
   /** Authored axis code/linkage, retained apart from the effective tick code. */
   catAxisNumberFormat?: ChartAxisNumberFormat | null;
   /**
@@ -2004,6 +2024,11 @@ export interface SecondaryValueAxis {
   hidden: boolean;
   /** Effective tick format after source linking is resolved. */
   formatCode?: string | null;
+  /** Per numeric section of `formatCode`, the divisor a value is divided by once
+   *  its section is chosen on the undivided value (an OpenDocument
+   *  `number:display-factor`, ODF 1.3 Part 3 §19.346). Absent: no section
+   *  divides (DrawingML never sets it). */
+  formatDivisors?: number[] | null;
   /** Authored axis code/linkage, retained apart from the effective tick code. */
   numberFormat?: ChartAxisNumberFormat | null;
   /** `<c:dispUnits>` for this auxiliary value axis. */

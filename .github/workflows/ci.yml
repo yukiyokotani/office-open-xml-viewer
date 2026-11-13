@@ -80,6 +80,8 @@ jobs:
         run: |
           cargo clippy -p opendocument-parser --all-targets --features odt -- -D warnings
           cargo test -p opendocument-parser --features odt
+          cargo clippy -p opendocument-parser --all-targets --features ods -- -D warnings
+          cargo test -p opendocument-parser --features ods
 
   # RB8 — dependency vulnerability audit. Report-only for now
   # (continue-on-error). The workspace lockfile covers the wasm parsers and the

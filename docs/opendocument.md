@@ -172,3 +172,136 @@ The DOCX layout draws some features differently from LibreOffice:
   their replacement picture is a format the renderer draws;
 - widow and orphan counts above two are treated as two;
 - the text box chain (`draw:chain-next-name`) is not flowed across boxes.
+
+## Spreadsheets (ODS)
+
+OpenDocument spreadsheets open with the ordinary XLSX viewers and loaders:
+
+| Input | Entry | Reader / factory | Option | Loaders and viewers |
+| --- | --- | --- | --- | --- |
+| ODS, OTS | `@silurus/ooxml-opendocument/ods` | `ods` / `createOds()` | `ods` | `XlsxViewer`, `XlsxWorkbook.load`, `openXlsxWorkbook`, `materializeXlsxWorkbook` |
+
+```typescript
+import { XlsxViewer } from '@silurus/ooxml/xlsx';
+import { ods } from '@silurus/ooxml-opendocument/ods';
+
+const container = document.getElementById('viewer') as HTMLElement;
+const viewer = new XlsxViewer(container, { ods });
+await viewer.load(odsOrXlsxBytes);
+```
+
+The source claims a package by its leading `mimetype`
+(`application/vnd.oasis.opendocument.spreadsheet` or `-template`) and loads
+`ods-source-module.mjs` and `opendocument_ods_bg.wasm` the same way as the ODT
+reader. It follows the same rendering policy as the ODT reader: every
+spreadsheet feature is read from its ODF definition and mapped onto the
+workbook model, and only corrupt, encrypted or unsafe packages, or packages
+over the resource limits, reject. Where ODF leaves a choice to the application, LibreOffice Calc is the
+reference.
+
+What is read:
+
+- tables as sheets (hidden tables, tab colours, right-to-left tables),
+  columns and rows with their repeat counts (kept as runs, so LibreOffice's
+  million-row fillers cost nothing), widths, heights, hidden and grouped
+  (outlined) rows and columns, frozen panes, grid and zero-value display;
+- cell values of every `office:value-type` (float, percentage, currency,
+  date, time, boolean, string), error results, and the cached value of
+  formula cells (formulas are kept as text and never calculated);
+- merged cells (`table:number-columns-spanned` / `-rows-spanned`), rich text
+  spans, line breaks and spaces inside a cell, hyperlinks and annotations;
+- cell styles: fonts, colours, bold, italic, underline, strike-through,
+  super/subscript, fills, borders (including diagonals), alignment, wrap,
+  shrink to fit, rotation, stacked text and indents;
+- data styles (number, currency, percentage, scientific, fraction, date,
+  time, boolean and text styles, with `style:map` conditions), converted to
+  the format codes the workbook renderer evaluates, including the quarter
+  and week-of-year date fields;
+- named ranges and expressions, print ranges, database ranges with filter
+  buttons, content validations, conditional formats (cell conditions, colour
+  scales, data bars, icon sets) and sparklines;
+- pictures, text boxes and shapes anchored to cells or to the sheet, and
+  embedded charts (bar, column, line, area, pie, ring, scatter, bubble,
+  radar, filled radar and stock charts and their combinations, with titles,
+  legends, axes, gridlines, data labels, series and point colours) read from
+  the sheet's cells or the chart's own data table.
+
+Column widths are authored lengths; the reader asks the renderer for the
+default cell font's digit width and encodes each width so that the grid is
+painted at the authored size.
+
+Where the specification and LibreOffice differ, or the workbook model
+cannot hold what LibreOffice shows, the reader does the following:
+
+- Names in dates (months, weekdays, the long quarter `1st quarter`) are
+  English, or Japanese in a Japanese-calendar format, as everywhere in the
+  workbook renderer; LibreOffice uses the format's language.
+- Weeks of the year are numbered as LibreOffice numbers them for the
+  format's language and country (for example from Monday with at least four
+  days in the first week for `de-DE`, from Sunday with 1 January in week 1
+  for `en-US`). A format without a language uses the `en-US` numbering;
+  LibreOffice would use the locale it runs in.
+- A date before 1 March 1900 is shown as the same calendar date. The
+  workbook date system has no date before 31 December 1899: an earlier date
+  shows its time of day only, or the invalid-date marker.
+- A formula result that LibreOffice shows as nothing (an empty-cell or
+  empty-string result saved as the number 0) is shown as nothing and stays
+  the number 0.
+- A cell with a style of its own takes nothing from its row's or column's
+  default cell style, as in LibreOffice (ODF 1.3 Part 3 §16.2 continues the
+  search for unset properties there).
+- A number style without `number:decimal-places` is shown in the General
+  format, as LibreOffice shows it.
+- A minutes field that stands next to neither hours nor seconds is shown as
+  LibreOffice shows it: the month, or all the minutes of a duration when the
+  style does not truncate.
+- Numbers are formatted by the workbook renderer's formatter, which follows
+  Excel where the two differ: a negative number that rounds to zero keeps
+  its minus sign (`-0` where LibreOffice shows `0`), and General shows at
+  most eleven characters.
+- Hatch lines turn counter-clockwise from the horizontal by the hatch's
+  rotation, as LibreOffice draws them (ODF 1.3 Part 3 §19.209 words the
+  rotation as clockwise from the vertical axis).
+
+Not representable in the workbook model, and therefore not shown: page
+layout, headers and footers (the workbook viewer shows the grid, not printed
+pages; print ranges become `_xlnm.Print_Area` names). Data pilot tables are
+shown as the cells LibreOffice saved for them. Shape area fills are solid
+colours, gradients (linear, axial, radial, ellipsoid, square, rectangular,
+with border and centre; the rotation of a non-linear gradient is not
+applied), hatches, and pictures that are stretched, repeated (at their
+size, from their reference point, with its offsets and the tile stagger) or
+drawn once. Fills and lines keep their opacity; an opacity gradient is shown
+over a solid colour and over a colour gradient of the same geometry, and as
+its mean opacity over other fills. Chart axis and label number formats
+include scientific and fraction formats; a label's percentage has its own
+format, and chart colours keep their opacity. Of the conditions of one
+conditional format, the first that holds for a cell gives it its style, as in
+LibreOffice; overlapping conditional formats all apply.
+
+The workbook grid has 1,048,576 rows and 16,384 columns: rows and columns
+of a table beyond it are not shown, as when LibreOffice saves such a table
+as a workbook.
+
+Resource limits: while it builds the workbook, the reader may grow its heap
+by at most 512 MiB beyond the package's parsed XML, materialize at most 8
+million cells and take a bounded number of steps. A spreadsheet over a
+limit is rejected with an error that names the limit, instead of being shown
+in part. That measured limit covers building the workbook. Before it, the
+package directory and the text and parsed form of
+`styles.xml`, `content.xml` and `settings.xml` are bounded by the package
+limits (entries, bytes per entry, total inflated bytes) and the XML parsing
+limits; after it, the workbook is handed to the viewer through the bounded
+workbook and worksheet writers, a few rows at a time. White space is read as LibreOffice reads it: the text of a cell is
+kept as written (Calc does not collapse it), and comments, shape text and
+chart titles collapse runs of white space, keeping the space that ends a
+paragraph. Connectors are drawn along their path (bent and curved ones too),
+and horizontal and vertical lines as lines; callouts (`draw:caption`) are
+their text box and the line to their point; ellipse arcs, sections and cuts
+are drawn as such. Dimension lines (`draw:measure`), regular polygons
+(`draw:regular-polygon`, which LibreOffice writes as polygons) and form
+controls are not drawn. Custom shapes are drawn from
+their preset or their enhanced-geometry path (equations are evaluated; arcs
+are flattened to short segments). Embedded objects that are not charts are
+drawn from their replacement image
+when the package stores it in a browser-decodable format.

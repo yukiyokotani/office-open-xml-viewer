@@ -560,6 +560,13 @@ pub struct ChartModel {
     pub legend_entries: Option<Vec<ChartLegendEntryOverride>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub val_axis_format_code: Option<String>,
+    /// Per numeric section of `val_axis_format_code` (the text section excluded), the
+    /// divisor a value is divided by once its section is chosen on the
+    /// undivided value: an OpenDocument `number:display-factor` (ODF 1.3
+    /// Part 3 §19.346), as a cell's `NumFmt::section_divisors`. Absent (never
+    /// set by DrawingML parsers) or empty: no section divides.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub val_axis_format_divisors: Option<Vec<f64>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub val_axis_number_format: Option<ChartAxisNumberFormat>,
     /// `<c:valAx><c:dispUnits>` (§21.2.2.45) scales displayed axis-associated
@@ -700,6 +707,13 @@ pub struct ChartModel {
     pub val_axis_line_paint_authored: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cat_axis_format_code: Option<String>,
+    /// Per numeric section of `cat_axis_format_code` (the text section excluded), the
+    /// divisor a value is divided by once its section is chosen on the
+    /// undivided value: an OpenDocument `number:display-factor` (ODF 1.3
+    /// Part 3 §19.346), as a cell's `NumFmt::section_divisors`. Absent (never
+    /// set by DrawingML parsers) or empty: no section divides.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cat_axis_format_divisors: Option<Vec<f64>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cat_axis_number_format: Option<ChartAxisNumberFormat>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2048,6 +2062,24 @@ pub struct ChartSeriesDataLabels {
     pub font_hidden: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub format_code: Option<String>,
+    /// Per numeric section of `format_code` (the text section excluded), the
+    /// divisor a value is divided by once its section is chosen on the
+    /// undivided value: an OpenDocument `number:display-factor` (ODF 1.3
+    /// Part 3 §19.346), as a cell's `NumFmt::section_divisors`. Absent (never
+    /// set by DrawingML parsers) or empty: no section divides.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format_divisors: Option<Vec<f64>>,
+    /// The format of the percentage in a label, where it is not
+    /// `format_code`: an OpenDocument label formats its value and its
+    /// percentage by separate data styles (ODF 1.3 Part 3 §19.511
+    /// `style:percentage-data-style-name`). Absent (never set by DrawingML
+    /// parsers): the percentage takes `format_code`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub percent_format_code: Option<String>,
+    /// The section divisors of `percent_format_code`, as `format_divisors`
+    /// are of `format_code`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub percent_format_divisors: Option<Vec<f64>>,
     /// `<c:dLbls><c:separator>` (§21.2.2.170) inserted between enabled label
     /// components. Office commonly stores a line break here for pie labels.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2157,6 +2189,13 @@ pub struct SecondaryValueAxis {
     pub hidden: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub format_code: Option<String>,
+    /// Per numeric section of `format_code` (the text section excluded), the
+    /// divisor a value is divided by once its section is chosen on the
+    /// undivided value: an OpenDocument `number:display-factor` (ODF 1.3
+    /// Part 3 §19.346), as a cell's `NumFmt::section_divisors`. Absent (never
+    /// set by DrawingML parsers) or empty: no section divides.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format_divisors: Option<Vec<f64>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub number_format: Option<ChartAxisNumberFormat>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

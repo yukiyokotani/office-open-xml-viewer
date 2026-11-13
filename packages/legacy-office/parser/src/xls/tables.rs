@@ -735,6 +735,7 @@ fn xfprops(
             format_code: format_code
                 .or_else(|| context.styles.format_code(id))
                 .unwrap_or_default(),
+            section_divisors: Vec::new(),
         });
     }
     if let Some(fill) = fill.as_mut().filter(|fill| fill.gradient.is_none()) {

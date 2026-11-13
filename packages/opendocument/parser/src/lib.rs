@@ -16,6 +16,21 @@ mod odt_wasm;
 #[cfg(feature = "odt")]
 mod svm;
 
+#[cfg(feature = "odf-chart")]
+pub mod odf_chart;
+#[cfg(feature = "odf-chart")]
+pub mod odf_fill;
+#[cfg(feature = "odf-chart")]
+pub mod odf_props;
+#[cfg(feature = "odf-chart")]
+pub mod odf_text;
+#[cfg(feature = "ods")]
+pub mod ods;
+#[cfg(feature = "odf-chart")]
+pub mod ods_number;
+#[cfg(feature = "ods")]
+mod ods_wasm;
+
 /// Every allocation of the readers is metered ([`budget`]): their resource
 /// limits are measured by the allocator, not estimated by the readers. The
 /// allocator is installed whatever features are built, like the shared

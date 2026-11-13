@@ -164,3 +164,75 @@ describe('shared date formatting range (#1710)', () => {
     expect(formatChartValWithCode(2958466 - 0.4 / 86400000, 'yyyy-mm-dd h:mm:ss')).toBe('9999-12-31 23:59:59');
   });
 });
+
+describe('section divisors (OpenDocument display factor)', () => {
+  it('divides any factor once the section is chosen on the undivided value', () => {
+    expect(formatChartValWithCode(100, '0', false, [10])).toBe('10');
+    expect(formatChartValWithCode(5000, '0.0', false, [2000])).toBe('2.5');
+    expect(formatChartValWithCode(-50, '0;(0)', false, [1, 10])).toBe('(5)');
+    expect(formatCategoryLabel('100', '0', false, [10])).toBe('10');
+  });
+  it('divides General codes and General sections', () => {
+    expect(formatChartValWithCode(2500, 'General', false, [1000])).toBe('2.5');
+    expect(formatChartValWithCode(250, 'General;General', false, [100, 10])).toBe('2.5');
+    expect(formatChartValWithCode(-250, 'General;General', false, [100, 10])).toBe('25');
+    expect(formatChartValWithCode(-250, 'General;General')).toBe('250');
+  });
+  it('chooses explicitly conditioned sections as worksheet cells do', () => {
+    const code = '[>=1000]0.0" k";0';
+    expect(formatChartValWithCode(999, code, false, [1000, 1])).toBe('999');
+    expect(formatChartValWithCode(2500, code, false, [1000, 1])).toBe('2.5 k');
+    expect(formatChartValWithCode(-50, code, false, [1000, 1])).toBe('-50');
+    expect(formatChartValWithCode(-5, '[<0]\\-0.0;0', false)).toBe('-5.0');
+    expect(formatChartValWithCode(5, '[<0]0;[>10]0', false)).toBe('#');
+  });
+  it('reads a condition value with an explicit plus sign', () => {
+    expect(formatChartValWithCode(1, '[>=+2]0;0.00')).toBe('1.00');
+    expect(formatChartValWithCode(3, '[>=+2]0;0.00')).toBe('3');
+  });
+  it('reads an unclosed bracket run in linear time', () => {
+    const started = performance.now();
+    expect(typeof formatChartValWithCode(1, '['.repeat(200_000))).toBe('string');
+    expect(performance.now() - started).toBeLessThan(5_000);
+  });
+  it('formats decorated General sections as General', () => {
+    expect(formatChartValWithCode(250, '[Red]General', false, [100])).toBe('2.5');
+    expect(formatChartValWithCode(-250, '0;[Red]General', false, [1, 10])).toBe('25');
+    expect(formatChartValWithCode(7, '[Blue]General')).toBe('7');
+  });
+  it('ignores absent, non-positive or non-finite divisors', () => {
+    expect(formatChartValWithCode(42, '0', false, null)).toBe('42');
+    expect(formatChartValWithCode(42, '0', false, [0])).toBe('42');
+    expect(formatChartValWithCode(42, '0', false, [Number.NaN])).toBe('42');
+  });
+});
+
+describe('scientific and fraction sections', () => {
+  it('writes the exponent of a scientific code (ECMA-376 §18.8.30)', () => {
+    expect(formatChartValWithCode(1000, '0.00E+00')).toBe('1.00E+03');
+    expect(formatChartValWithCode(-0.00123, '0.00E+00')).toBe('-1.23E-03');
+    expect(formatChartValWithCode(0, '0.00E+00')).toBe('0.00E+00');
+    // A mantissa that rounds up to ten takes the next exponent.
+    expect(formatChartValWithCode(9999, '0.0E+0')).toBe('1.0E+4');
+    expect(formatChartValWithCode(12345, '0.0E-0')).toBe('1.2E4');
+    // The exponent is a multiple of the integer placeholders.
+    expect(formatChartValWithCode(12345, '##0.0E+0')).toBe('12.3E+3');
+  });
+
+  it('writes fractions', () => {
+    expect(formatChartValWithCode(1.5, '# ?/?')).toBe('1 1/2');
+    expect(formatChartValWithCode(0.25, '# ?/?')).toBe('1/4');
+    expect(formatChartValWithCode(3, '# ?/?')).toBe('3');
+    expect(formatChartValWithCode(0, '# ?/?')).toBe('0');
+    expect(formatChartValWithCode(2.999, '# ?/?')).toBe('3');
+    expect(formatChartValWithCode(0.3125, '# ??/??')).toBe('5/16');
+    expect(formatChartValWithCode(0.3, '# ?/8')).toBe('2/8');
+    expect(formatChartValWithCode(1.5, '?/?')).toBe('3/2');
+    expect(formatChartValWithCode(-1.5, '# ?/?')).toBe('-1 1/2');
+    expect(formatChartValWithCode(Math.PI, '# ???/???')).toBe('3 16/113');
+    expect(formatChartValWithCode(0.5, '?/?')).toBe('1/2');
+    // The search does not grow with the denominator's digits.
+    expect(formatChartValWithCode(1, '# ?/???????')).toBe('1');
+    expect(formatChartValWithCode(1 / 3, '# ?/???????')).toBe('1/3');
+  });
+});

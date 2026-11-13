@@ -253,9 +253,10 @@ for the full support boundaries.
 ### Experimental OpenDocument sources
 
 OpenDocument files are read directly into the same models through the
-experimental `@silurus/ooxml-opendocument` add-on, one opt-in entry per format
-(currently `@silurus/ooxml-opendocument/odt` for `.odt` / `.ott` with the DOCX
-viewers and loaders). Install matching versions of both packages:
+experimental `@silurus/ooxml-opendocument` add-on, one opt-in entry per format:
+`@silurus/ooxml-opendocument/odt` for `.odt` / `.ott` with the DOCX viewers and
+loaders, and `@silurus/ooxml-opendocument/ods` for `.ods` / `.ots` with the
+XLSX viewers and loaders. Install matching versions of both packages:
 
 ```sh
 npm i @silurus/ooxml @silurus/ooxml-opendocument
@@ -263,17 +264,24 @@ npm i @silurus/ooxml @silurus/ooxml-opendocument
 
 ```typescript
 import { DocxViewer } from '@silurus/ooxml/docx';
+import { XlsxViewer } from '@silurus/ooxml/xlsx';
 import { odt } from '@silurus/ooxml-opendocument/odt';
+import { ods } from '@silurus/ooxml-opendocument/ods';
 
 const canvas = document.querySelector('canvas') as HTMLCanvasElement;
 const viewer = new DocxViewer(canvas, { odt });
 await viewer.load(odtOrDocxBytes);
+
+const container = document.getElementById('viewer') as HTMLElement;
+const sheets = new XlsxViewer(container, { ods });
+await sheets.load(odsOrXlsxBytes);
 ```
 
-Like the legacy readers, importing the entry fetches nothing, custom asset URLs
-go through `createOdt({ wasmUrl, moduleUrl })`, and the package versions must
-match exactly. See [Experimental OpenDocument sources](docs/opendocument.md)
-for the supported content and deployment notes.
+Like the legacy readers, importing an entry fetches nothing, custom asset URLs
+go through `createOdt({ wasmUrl, moduleUrl })` / `createOds({ wasmUrl,
+moduleUrl })`, and the package versions must match exactly. See
+[Experimental OpenDocument sources](docs/opendocument.md) for the supported
+content and deployment notes.
 
 ### Optional rendering modules
 

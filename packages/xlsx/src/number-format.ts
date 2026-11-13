@@ -1,15 +1,16 @@
 import {
   excelDateTimeSectionNameTexts,
   formatExcelDateTime,
+  generalSectionAffixes,
   formatLocalizedExcelShortDate,
   localizedExcelShortDateTexts,
   isDateFormatSection,
   isExcelDisplayDateSerial,
   roundDecimalHalfUp,
+  selectFormatSection,
   splitFormatSections,
   textSectionIndex,
 } from '@silurus/ooxml-core';
-import { hasOwnKey } from '@silurus/ooxml-core/internal/own-key';
 import type { Cell, CellValue, Styles } from './types.js';
 
 function cellValueText(value: CellValue): string {
@@ -47,10 +48,14 @@ export interface FormattedCell {
  * (find, validation-list, workbook.cellText) are unaffected — the renderer,
  * which needs the colour, calls {@link formatCellValueWithColor} instead.
  */
+/** A conditional-format number format: a dxf's id and code, with the
+ *  section divisors of an OpenDocument display factor. */
+type CfNumFmt = { numFmtId: number; formatCode: string | null; sectionDivisors?: number[] };
+
 export function formatCellValue(
   cell: Cell,
   styles: Styles,
-  cfNumFmt?: { numFmtId: number; formatCode: string | null } | null,
+  cfNumFmt?: CfNumFmt | null,
   date1904 = false,
 ): string {
   return formatCellValueWithColor(cell, styles, cfNumFmt, date1904).text;
@@ -59,7 +64,7 @@ export function formatCellValue(
 export function formatCellValueWithColor(
   cell: Cell,
   styles: Styles,
-  cfNumFmt?: { numFmtId: number; formatCode: string | null } | null,
+  cfNumFmt?: CfNumFmt | null,
   /** Workbook date system (`<workbookPr date1904>`, §18.2.28). `true` resolves
    *  serial dates against the 1904 epoch (§18.17.4.1). Defaults to false (1900
    *  date system) so callers that don't thread the flag are unaffected. */
@@ -69,11 +74,13 @@ export function formatCellValueWithColor(
   // honour the same precedence: CF dxf numFmt > style numFmt (§18.8.15).
   const xf = styles.cellXfs[cell.styleIndex ?? 0];
   const styleNumFmtId = xf?.numFmtId ?? 0;
-  const styleFmt = styles.numFmts?.find(f => f.numFmtId === styleNumFmtId)?.formatCode ?? null;
+  const styleNumFmt = styles.numFmts?.find(f => f.numFmtId === styleNumFmtId);
+  const styleFmt = styleNumFmt?.formatCode ?? null;
   const effectiveFmtId = cfNumFmt?.numFmtId ?? styleNumFmtId;
   // A matched differential format replaces the id/code pair. An absent CF
   // code implies its built-in format, rather than inheriting the base code.
   const effectiveFmt = cfNumFmt ? cfNumFmt.formatCode : styleFmt;
+  const divisors = cfNumFmt ? cfNumFmt.sectionDivisors : styleNumFmt?.sectionDivisors;
 
   // Non-numeric cells still need to honour the 4th format section (text).
   // §18.8.30: format sections are positive;negative;zero;text. An empty text
@@ -93,7 +100,13 @@ export function formatCellValueWithColor(
   // cached values the producing application saved together are authoritative.
   // A formula cell without a cached value is rendered like any other empty
   // cell, regardless of which function it calls.
-  return applyFormat(cell.value.number, effectiveFmtId, effectiveFmt, date1904);
+  return applyFormat(cell.value.number, effectiveFmtId, effectiveFmt, date1904, divisors);
+}
+
+/** The divisor of numeric section `index`: a finite positive factor, else 1. */
+function sectionDivisor(divisors: readonly number[] | undefined, index: number): number {
+  const divisor = divisors?.[index];
+  return divisor !== undefined && Number.isFinite(divisor) && divisor > 0 ? divisor : 1;
 }
 
 /**
@@ -406,7 +419,13 @@ export function cellDisplayTexts(
   return forms.length > 0 ? forms : [formatted.text];
 }
 
-function applyFormat(num: number, numFmtId: number, formatCode: string | null, date1904 = false): FormattedCell {
+function applyFormat(
+  num: number,
+  numFmtId: number,
+  formatCode: string | null,
+  date1904 = false,
+  divisors?: readonly number[],
+): FormattedCell {
   // Built-in 14 is Excel's locale-sensitive short-date format rather than a
   // file-authored pattern. Use the host application's UI locale, while keeping
   // UTC fields so the Excel serial cannot cross a calendar-day boundary in a
@@ -418,11 +437,18 @@ function applyFormat(num: number, numFmtId: number, formatCode: string | null, d
   // of numFmtId. LibreOffice writes a custom numFmt (id ≥ 164) with
   // formatCode="General"; tokenizing it as a literal pattern would render the
   // word "General" instead of the value (issue #358).
-  if (formatCode && formatCode.trim().toLowerCase() === 'general') return { text: formatGeneralText(num), general: true };
+  if (formatCode && formatCode.trim().toLowerCase() === 'general') {
+    const divisor = sectionDivisor(divisors, 0);
+    // Width fitting re-derives the General forms from the cell's own value,
+    // so only an undivided General stays fittable.
+    return divisor === 1
+      ? { text: formatGeneralText(num), general: true }
+      : { text: formatGeneralText(num / divisor) };
+  }
   // §18.8.30 implies a built-in code when no numFmt is authored. An explicit
   // code (including a differential format layered by §18.8.15) takes precedence
   // over that fallback, even when its numFmtId also names a built-in format.
-  if (formatCode) return applyFormatCode(num, formatCode, date1904);
+  if (formatCode) return applyFormatCode(num, formatCode, date1904, divisors);
   const builtinFmt = BUILTIN_DATE_FMT[numFmtId];
   if (builtinFmt) return dateFormattedCell(formatExcelDateTime(num, builtinFmt, date1904), num, date1904);
   // Built-in numeric numFmtIds without an explicit formatCode. Route the ones
@@ -544,96 +570,8 @@ function dateFormattedCell(text: string, serial: number, date1904: boolean): For
 // conditional/coloured sections all follow the spec exactly.
 // ════════════════════════════════════════════════════════════════════════════
 
-/** §18.8.30 "Specify colors": the eight named section colours (p.1787). */
-const NAMED_COLORS: Record<string, string> = {
-  black: '#000000', blue: '#0000FF', cyan: '#00FFFF', green: '#008000',
-  magenta: '#FF00FF', red: '#FF0000', white: '#FFFFFF', yellow: '#FFFF00',
-};
-
-// Legacy indexed colour palette (§18.8.27, indices 0-63). `[ColorN]` maps N→
-// indexed=(N+7): the spec note says "[Color1] refers to indexed=8 ... [Color3]
-// for Red". Kept in sync with the Rust parser's INDEXED_COLORS.
-const INDEXED_COLORS: readonly string[] = [
-  '#000000', '#FFFFFF', '#FF0000', '#00FF00', '#0000FF', '#FFFF00', '#FF00FF', '#00FFFF', // 0-7
-  '#000000', '#FFFFFF', '#FF0000', '#00FF00', '#0000FF', '#FFFF00', '#FF00FF', '#00FFFF', // 8-15
-  '#800000', '#008000', '#000080', '#808000', '#800080', '#008080', '#C0C0C0', '#808080', // 16-23
-  '#9999FF', '#993366', '#FFFFCC', '#CCFFFF', '#660066', '#FF8080', '#0066CC', '#CCCCFF', // 24-31
-  '#000080', '#FF00FF', '#FFFF00', '#00FFFF', '#800080', '#800000', '#008080', '#0000FF', // 32-39
-  '#00CCFF', '#CCFFFF', '#CCFFCC', '#FFFF99', '#99CCFF', '#FF99CC', '#CC99FF', '#FFCC99', // 40-47
-  '#3366FF', '#33CCCC', '#99CC00', '#FFCC00', '#FF9900', '#FF6600', '#666699', '#969696', // 48-55
-  '#003366', '#339966', '#003300', '#333300', '#993300', '#993366', '#333399', '#333333', // 56-63
-];
-
-interface SectionCondition {
-  op: '<' | '<=' | '>' | '>=' | '=' | '<>';
-  value: number;
-}
-
-interface ParsedSection {
-  /** Raw section body with `[...]` modifiers stripped out. */
-  body: string;
-  color?: string;
-  condition?: SectionCondition;
-}
-
-/** Parse a section's leading `[...]` modifiers (colour, condition, currency).
- *  Currency `[$sym-LCID]` is left *in* the body (its `$sym` is emitted as a
- *  literal by the tokenizer); only colour and condition brackets are consumed
- *  here. */
-function parseSection(section: string): ParsedSection {
-  let body = '';
-  let color: string | undefined;
-  let condition: SectionCondition | undefined;
-  let i = 0;
-  while (i < section.length) {
-    const ch = section[i];
-    if (ch === '"') { // pass a quoted literal straight through
-      body += ch; i++;
-      while (i < section.length && section[i] !== '"') body += section[i++];
-      if (i < section.length) body += section[i++];
-    } else if (ch === '\\' || ch === '_' || ch === '*') {
-      // An escape or a pad / fill pair: its operand is never a delimiter.
-      body += ch;
-      if (i + 1 < section.length) body += section[i + 1];
-      i += 2;
-    } else if (ch === '[') {
-      const end = section.indexOf(']', i);
-      if (end < 0) { body += ch; i++; continue; }
-      const inner = section.slice(i + 1, end);
-      const lower = inner.toLowerCase();
-      const idxMatch = lower.match(/^color(\d{1,2})$/);
-      const condMatch = inner.match(/^(<=|>=|<>|<|>|=)\s*(-?[0-9.]+(?:[eE][-+]?\d+)?)$/);
-      if (hasOwnKey(NAMED_COLORS, lower)) {
-        color = NAMED_COLORS[lower];
-      } else if (idxMatch) {
-        const n = parseInt(idxMatch[1], 10);
-        // §18.8.30: [ColorN] → indexed=(N+7); valid N is 1..56.
-        if (n >= 1 && n <= 56) color = INDEXED_COLORS[n + 7] ?? color;
-      } else if (condMatch) {
-        condition = { op: condMatch[1] as SectionCondition['op'], value: Number(condMatch[2]) };
-      } else {
-        // Currency / locale / elapsed brackets stay in the body for the
-        // tokenizer to interpret (`[$sym-LCID]`), so re-emit them verbatim.
-        body += section.slice(i, end + 1);
-      }
-      i = end + 1;
-    } else {
-      body += ch; i++;
-    }
-  }
-  return { body, color, condition };
-}
-
-function testCondition(cond: SectionCondition, num: number): boolean {
-  switch (cond.op) {
-    case '<': return num < cond.value;
-    case '<=': return num <= cond.value;
-    case '>': return num > cond.value;
-    case '>=': return num >= cond.value;
-    case '=': return num === cond.value;
-    case '<>': return num !== cond.value;
-  }
-}
+// Section modifiers (colour, condition) and section selection are shared
+// with chart labels: `parseFormatSection` / `selectFormatSection` in core.
 
 /**
  * The lexed pieces of one numeric section. Literal text and placeholder runs
@@ -675,7 +613,7 @@ type SecPart =
 /**
  * Lex one numeric section body (already stripped of `[...]` colour/condition
  * modifiers) into a `LexedSection`. Currency `[$sym-LCID]` brackets that
- * survived `parseSection` are expanded here to their literal symbol.
+ * survived `parseFormatSection` are expanded here to their literal symbol.
  */
 function lexSection(body: string): LexedSection {
   const parts: SecPart[] = [];
@@ -863,7 +801,10 @@ function fillFractionText(fracDigits: string, fracSpec: string): string {
 function approximateFraction(frac: number, maxDenDigits: number, fixedDen: number | null): [number, number] {
   if (fixedDen !== null) return [Math.round(frac * fixedDen), fixedDen];
   const maxDen = Math.pow(10, Math.max(maxDenDigits, 1)) - 1;
+  // The ends of the search, 0/1 and 1/1, are candidates too: 0.999 with
+  // one-digit denominators is 1/1 (the caller carries it), not 8/9.
   let bestN = 0, bestD = 1, bestErr = Math.abs(frac);
+  if (Math.abs(1 - frac) < bestErr) { bestN = 1; bestD = 1; bestErr = Math.abs(1 - frac); }
   let lo: [number, number] = [0, 1];
   let hi: [number, number] = [1, 1];
   for (let iter = 0; iter < 100; iter++) {
@@ -897,11 +838,13 @@ function renderNumericSection(num: number, body: string, useMagnitude: boolean):
 
   // ── Fraction section (`# ?/?`, `?/8`, …) ──────────────────────────────────
   if (lex.fraction) {
-    const whole = Math.floor(abs);
+    let whole = Math.floor(abs);
     const frac = abs - whole;
     const { wholeSpec, numSpec, denSpec, fixedDen } = lex.fraction;
     const hasWholePart = wholeSpec.length > 0; // e.g. `# ?/?` has a `#` whole part
-    const [numr, den] = approximateFraction(frac, denSpec.length, fixedDen);
+    let [numr, den] = approximateFraction(frac, denSpec.length, fixedDen);
+    // A fraction that rounds to a whole carries into the whole part.
+    if (hasWholePart && numr === den) { whole += 1; numr = 0; }
 
     // §18.8.30: `?` pads insignificant positions with spaces so fractions align
     // on the slash — the numerator right-aligns (pad left), the denominator
@@ -1045,63 +988,37 @@ function assembleFixed(lex: LexedSection, intText: string, fracText: string, exp
  * per-section colour, and the numeric grammar. Returns the display string and
  * any section colour.
  */
-function applyFormatCode(num: number, formatCode: string, date1904 = false): FormattedCell {
-  const rawSections = splitFormatSections(formatCode);
-  // The text section never formats a number (§18.8.30): leave it out of the
-  // positional and conditional selection below.
-  const textIndex = textSectionIndex(rawSections);
-  const parsed = rawSections.filter((_, i) => i !== textIndex).map(parseSection);
-  if (parsed.length === 0) return { text: formatGeneralText(num), general: true };
+function applyFormatCode(
+  value: number,
+  formatCode: string,
+  date1904 = false,
+  divisors?: readonly number[],
+): FormattedCell {
+  let num = value;
+  // Positional (positive;negative;zero) or condition-driven selection, the
+  // text section left out (§18.8.30); shared with chart labels.
+  const selected = selectFormatSection(num, formatCode);
+  if (selected === null) return { text: formatGeneralText(num), general: true };
+  // No criterion met and no else → Excel shows "#" across the cell.
+  if (selected === 'none') return { text: '#' };
+  const { section: chosen, useMagnitude } = selected;
 
-  // Conditional sections (§18.8.30 "Specify conditions"): if any section
-  // carries a `[cond]`, section selection is condition-driven — the first
-  // section whose condition matches wins; a trailing section without a
-  // condition is the "else". This overrides the positional pos/neg/zero rule.
-  const hasConditions = parsed.some(s => s.condition);
-  let chosen: ParsedSection | undefined;
-  let useMagnitude = false;
-
-  if (hasConditions) {
-    let matchedByCondition = false;
-    for (const sec of parsed) {
-      if (sec.condition) {
-        if (testCondition(sec.condition, num)) { chosen = sec; matchedByCondition = true; break; }
-      } else {
-        // Unconditional section acts as the default/else clause.
-        chosen = chosen ?? sec;
-        if (chosen === sec) break;
-      }
-    }
-    if (!chosen) {
-      // No criterion met and no else → Excel shows "#" across the cell.
-      return { text: '#' };
-    }
-    // Sign semantics (§18.8.30 / §18.8.31): a section selected by its own
-    // matching condition formats the value's *magnitude* — the section's
-    // literals carry the sign presentation, exactly like the positional
-    // negative section (the spec's `$0.00" Surplus";$-0.00" Shortage"` example
-    // on p.1785 shows -125.74 as "$-125.74 Shortage": magnitude plus the
-    // section's own literal `-`; built-ins 37-40 use parentheses the same way).
-    // Prepending the sign on top would double it: `[<0]\-0.0` @ -5 would print
-    // "--5.0". The unconditional "else" section, by contrast, mirrors the
-    // positional fallback rule (a negative formatted by the only/positive
-    // section keeps its sign, e.g. `0.0` @ -5 → "-5.0"), so a value that no
-    // condition claimed keeps its sign there.
-    useMagnitude = matchedByCondition && num < 0;
-  } else {
-    // Positional selection: positive;negative;zero (§18.8.31 p.1783).
-    if (num > 0) chosen = parsed[0];
-    else if (num < 0) {
-      if (parsed.length > 1) { chosen = parsed[1]; useMagnitude = true; }
-      else chosen = parsed[0];
-    } else {
-      chosen = parsed.length > 2 ? parsed[2] : parsed[0];
-    }
-  }
-
+  // An OpenDocument display factor (ODF 1.3 Part 3 §19.346) divides the
+  // value once its section is chosen on the undivided value.
+  num /= sectionDivisor(divisors, selected.index);
   // Date/time is a property of the selected section (§18.8.30): `0.00;h:mm`
   // formats a positive value as a number and only a negative one as a time.
   const serial = useMagnitude ? Math.abs(num) : num;
+  // A section whose number token is the General keyword (`[Red]General`,
+  // `General;General`, `"$"General`) formats its (magnitude) value as
+  // General between the section's literals (§18.8.30).
+  const general = generalSectionAffixes(chosen.body);
+  if (general) {
+    const scaled = general.percent ? serial * 100 : serial;
+    // A lone section carries no sign of its own: the minus leads it.
+    const text = (scaled < 0 ? '-' : '') + general.prefix + formatGeneralText(Math.abs(scaled)) + general.suffix;
+    return chosen.color ? { text, color: chosen.color } : { text };
+  }
   const formatted = isDateFormatSection(chosen.body)
     ? dateFormattedCell(formatExcelDateTime(serial, chosen.body, date1904), serial, date1904)
     : { text: renderNumericSection(num, chosen.body, useMagnitude) };

@@ -557,6 +557,14 @@ export async function prefetchImages(
           : reach, NO_EFFECT_REACH),
       )) continue;
       for (const shape of grp.shapes) {
+        if (shape.fill?.fillType === 'image') {
+          // A picture fill (OpenDocument `draw:fill-image`): its natural
+          // bitmap, keyed by path; the painter scales it as a pattern.
+          setImageRef(refs, shape.fill.imagePath, {
+            imagePath: shape.fill.imagePath,
+            mimeType: shape.fill.mimeType,
+          });
+        }
         if (shape.geom.type === 'image') {
           const display = anchorDisplaySize(grp, ws, geometry, opts?.cellScale ?? 1);
           const effectFrame = groupLeafEffectFrame(grp, shape);
@@ -953,7 +961,7 @@ export async function renderWorksheetViewport(
   const hasDecodedImages = !deps.ws.isDialogSheet && (
     (deps.ws.images?.length ?? 0) > 0
     || (deps.ws.shapeGroups?.some(group => (
-      group.shapes.some(shape => shape.geom.type === 'image')
+      group.shapes.some(shape => shape.geom.type === 'image' || shape.fill?.fillType === 'image')
     )) ?? false)
     || collectChartImageFillUsagesForCharts(
       (deps.ws.charts ?? []).map(chart => chart.chart),

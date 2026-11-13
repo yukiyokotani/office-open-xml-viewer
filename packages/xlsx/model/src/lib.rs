@@ -932,6 +932,7 @@ pub struct ShapeInfo {
 #[derive(Debug, Serialize, Clone)]
 #[serde(tag = "fillType", rename_all = "camelCase")]
 pub enum ShapeStrokeFill {
+    #[serde(rename_all = "camelCase")]
     Gradient {
         stops: Vec<ooxml_common::fill::GradStop>,
         angle: f64,
@@ -962,6 +963,7 @@ pub enum ShapeFill {
     Solid {
         color: String,
     },
+    #[serde(rename_all = "camelCase")]
     Gradient {
         stops: Vec<ooxml_common::fill::GradStop>,
         angle: f64,
@@ -984,6 +986,79 @@ pub enum ShapeFill {
         bg: String,
         preset: String,
     },
+    /// Parallel hatch lines over an optional background (an OpenDocument
+    /// `draw:hatch`, ODF 1.3 Part 3 §16.42; DrawingML has no equivalent).
+    /// Colours are `#RRGGBB`; `angle` is degrees counter-clockwise from the
+    /// horizontal of the first line family; `lines` is 1, 2 (with the
+    /// perpendicular family) or 3 (also the family 45° further
+    /// counter-clockwise). `alpha` is the opacity of the whole fill (absent:
+    /// opaque).
+    #[serde(rename_all = "camelCase")]
+    Hatch {
+        color: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        background: Option<String>,
+        angle: f64,
+        distance_pt: f64,
+        lines: u8,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        alpha: Option<f64>,
+    },
+    /// A picture filling the shape outline (an OpenDocument
+    /// `draw:fill-image`, §16.41): stretched over the shape, repeated, or
+    /// drawn once (`layout`). A repeated or single picture has the size
+    /// `width` × `height` (an absent edge keeps the image's natural size at
+    /// 96 DPI) and is placed by `align`: the fractions of the free width
+    /// and height left of and above the picture (one tile of a repeated
+    /// picture), `[0.5, 0.5]` being the centre. Repeated tiles are then
+    /// moved by `offset` (fractions of the tile's width and height), and
+    /// every second row or column of them by `shift`. `alpha` is the
+    /// opacity of the picture (absent: opaque).
+    #[serde(rename_all = "camelCase")]
+    Image {
+        image_path: String,
+        mime_type: String,
+        layout: ShapeImageLayout,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        width: Option<ShapeImageSize>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        height: Option<ShapeImageSize>,
+        align: [f64; 2],
+        offset: [f64; 2],
+        #[serde(skip_serializing_if = "Option::is_none")]
+        shift: Option<ShapeImageShift>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        alpha: Option<f64>,
+    },
+}
+
+/// How a picture fill covers its shape (ODF 1.3 Part 3 §20.341
+/// `style:repeat`).
+#[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum ShapeImageLayout {
+    Stretch,
+    Tile,
+    Once,
+}
+
+/// One edge of a picture fill's size: points, or a fraction of the shape's
+/// edge.
+#[derive(Debug, Serialize, Clone, Copy, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub enum ShapeImageSize {
+    Pt(f64),
+    Fraction(f64),
+}
+
+/// The stagger of a repeated picture fill: every second row moved along
+/// the row, or every second column along the column, by a fraction of the
+/// tile.
+#[derive(Debug, Serialize, Clone, Copy, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub enum ShapeImageShift {
+    Rows(f64),
+    Columns(f64),
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -1470,6 +1545,14 @@ pub struct CellRange {
 pub struct ConditionalFormat {
     pub sqref: Vec<CellRange>,
     pub rules: Vec<CfRule>,
+    /// Of this block's rules that apply a differential format, only the
+    /// first that matches a cell applies to it: an OpenDocument conditional
+    /// format (LibreOffice takes the style of the first matching condition
+    /// of a `calcext:conditional-format`, and of the first matching
+    /// `style:map`, while overlapping blocks all apply). SpreadsheetML rules
+    /// are independent but for `stopIfTrue`.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub first_match: bool,
 }
 
 /// One `<cfRule>` (ECMA-376 §18.3.1.10).
@@ -2051,6 +2134,14 @@ pub struct CellXf {
 pub struct NumFmt {
     pub num_fmt_id: u32,
     pub format_code: String,
+    /// Per numeric section of `format_code` (the text section excluded), the
+    /// divisor the selected section applies to the value before formatting:
+    /// an OpenDocument `number:display-factor` (ODF 1.3 Part 3 §19.346),
+    /// which SpreadsheetML codes cannot spell except for powers of 1000.
+    /// Sections are still selected on the undivided value. Empty (never
+    /// emitted by the SpreadsheetML parser) means no section divides.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub section_divisors: Vec<f64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -2064,6 +2155,53 @@ pub struct ParsedWorkbook {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shape_fill_variants_serialize_camel_case_fields() {
+        let gradient = ShapeFill::Gradient {
+            stops: Vec::new(),
+            angle: 0.0,
+            grad_type: "path".into(),
+            scaled: None,
+            path: Some("circle".into()),
+            fill_to_rect: Some(ooxml_common::fill::FillRect::default()),
+            tile_rect: None,
+            flip: None,
+            rot_with_shape: Some(false),
+        };
+        let json = serde_json::to_value(&gradient).unwrap();
+        assert_eq!(json["fillType"], "gradient");
+        assert_eq!(json["gradType"], "path");
+        assert!(json.get("fillToRect").is_some());
+        assert_eq!(json["rotWithShape"], false);
+        let hatch = ShapeFill::Hatch {
+            color: "#000000".into(),
+            background: None,
+            angle: 45.0,
+            distance_pt: 2.0,
+            lines: 2,
+            alpha: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&hatch).unwrap(),
+            serde_json::json!({"fillType": "hatch", "color": "#000000", "angle": 45.0, "distancePt": 2.0, "lines": 2})
+        );
+        let image = ShapeFill::Image {
+            image_path: "Pictures/a.png".into(),
+            mime_type: "image/png".into(),
+            layout: ShapeImageLayout::Tile,
+            width: Some(ShapeImageSize::Pt(10.0)),
+            height: Some(ShapeImageSize::Fraction(0.25)),
+            align: [0.0, 0.5],
+            offset: [0.25, 0.0],
+            shift: Some(ShapeImageShift::Rows(0.5)),
+            alpha: Some(0.5),
+        };
+        assert_eq!(
+            serde_json::to_value(&image).unwrap(),
+            serde_json::json!({"fillType": "image", "imagePath": "Pictures/a.png", "mimeType": "image/png", "layout": "tile", "width": {"pt": 10.0}, "height": {"fraction": 0.25}, "align": [0.0, 0.5], "offset": [0.25, 0.0], "shift": {"rows": 0.5}, "alpha": 0.5})
+        );
+    }
 
     #[test]
     fn workbook_metadata_serialization_preserves_field_order_and_defaults() {

@@ -244,6 +244,7 @@ fn cond_fmt(data: &[u8]) -> Result<Group, String> {
         xlsx_model::ConditionalFormat {
             sqref,
             rules: Vec::new(),
+            first_match: false,
         },
         ccf,
         id,
@@ -270,6 +271,7 @@ fn cond_fmt12(data: &[u8]) -> Result<Group, String> {
         xlsx_model::ConditionalFormat {
             sqref,
             rules: Vec::new(),
+            first_match: false,
         },
         ccf,
         id,
