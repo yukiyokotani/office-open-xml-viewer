@@ -11,9 +11,10 @@ import wasmAssetUrl from './wasm/xlsx_parser_bg.wasm?url';
 import {
   FontResolverBridgeHost,
   normalizeFontOptions,
+  optionFontSources,
   type FontSessionDemand,
   type FontResolverFailures,
-  type FontSource,
+  type FontSourceDescriptor,
   type FontSourceSession,
   type InstalledFamilyExclusion,
 } from '@silurus/ooxml-core/internal/font-sources';
@@ -245,7 +246,7 @@ export class XlsxWorkbook {
    * their own set even when they share this workbook instance. */
   /** Validated `LoadOptions.fonts` (normalised from the deprecated
    *  `useGoogleFonts`); undefined without sources. */
-  private fonts: readonly FontSource[] | undefined;
+  private fonts: readonly FontSourceDescriptor[] | undefined;
   /** The workbook's incremental font-source demand (main realm), and the
    *  installed-family probe every delta passes before it registers. */
   private fontDemand: import('./font-source-load.js').XlsxFontDemand | null = null;
@@ -562,7 +563,7 @@ export class XlsxWorkbook {
     // the resolved ZIP is literally the caller's buffer. URL and decrypted
     // buffers are library-owned and can transfer directly without a peak copy.
     const workerData = preserveCallerBuffer ? data.slice(0) : data;
-    this.attachFontResolverBridge(bridge, opts.fonts);
+    this.attachFontResolverBridge(bridge, optionFontSources(opts.fonts));
     const parsed = await bridge.request(
       (id) =>
         this._mode === 'worker'
@@ -572,7 +573,7 @@ export class XlsxWorkbook {
               data: workerData,
               resourcePolicy,
               worksheetPolicy,
-              ...(opts.fonts ? { fonts: opts.fonts } : {}),
+              ...(opts.fonts ? { fonts: optionFontSources(opts.fonts) } : {}),
               cjkFallback: this.cjkFallback,
               renderers: rendererDescriptors,
               japaneseCellFonts: this.japaneseCellFonts,
@@ -621,7 +622,7 @@ export class XlsxWorkbook {
     // realm even when paint runs in a worker. Register the same font-source
     // faces in both realms before any worksheet geometry snapshot is made so
     // ECMA-376 MDW is identical across paint and interaction.
-    await this.prepareFontSources(parsedWorkbook, opts.fonts);
+    await this.prepareFontSources(parsedWorkbook, optionFontSources(opts.fonts));
     if (typeof document !== 'undefined' && document.fonts) {
       await this.retainFontsInSet(document.fonts);
     }
@@ -647,7 +648,7 @@ export class XlsxWorkbook {
     const rendererDescriptors = this._mode === 'worker'
       ? workerRendererDescriptors(opts)
       : undefined;
-    this.attachFontResolverBridge(bridge, opts.fonts);
+    this.attachFontResolverBridge(bridge, optionFontSources(opts.fonts));
     const response = await bridge.request(
       (id) => ({
         type: 'parseDelimitedText',
@@ -657,7 +658,7 @@ export class XlsxWorkbook {
         options,
         worksheetPolicy,
         // Only the render worker paints; the parse-only worker needs no fonts.
-        ...(this._mode === 'worker' && opts.fonts ? { fonts: opts.fonts } : {}),
+        ...(this._mode === 'worker' && opts.fonts ? { fonts: optionFontSources(opts.fonts) } : {}),
         cjkFallback: this.cjkFallback,
         renderers: rendererDescriptors,
       } satisfies DelimitedTextParseRequest),
@@ -684,7 +685,7 @@ export class XlsxWorkbook {
     this.retainedSheetUsage = measured;
 
     this.officeFontRequests = xlsxOfficeFontRequests(response.workbook);
-    await this.prepareFontSources(response.workbook, opts.fonts);
+    await this.prepareFontSources(response.workbook, optionFontSources(opts.fonts));
     if (typeof document !== 'undefined' && document.fonts) {
       await this.retainFontsInSet(document.fonts);
       await this.retainWorksheetOfficeFonts(worksheet);
@@ -696,7 +697,7 @@ export class XlsxWorkbook {
 
   /** Worker mode: answer the render worker's `fontResolver` calls for the
    * document about to be parsed (core `resolver-bridge-host.ts`). */
-  private attachFontResolverBridge(bridge: WorkbookBridge, fonts: readonly FontSource[] | undefined): void {
+  private attachFontResolverBridge(bridge: WorkbookBridge, fonts: readonly FontSourceDescriptor[] | undefined): void {
     this.fontResolverBridge?.dispose();
     this.fontResolverFailures = new Map();
     this.fontResolverBridge = this._mode === 'worker'
@@ -717,7 +718,7 @@ export class XlsxWorkbook {
    * demand collector load only when sources are configured; the workbook
    * delta is replayed into every set this workbook retains.
    */
-  private async prepareFontSources(workbook: ParsedWorkbook, fonts: readonly FontSource[] | undefined): Promise<void> {
+  private async prepareFontSources(workbook: ParsedWorkbook, fonts: readonly FontSourceDescriptor[] | undefined): Promise<void> {
     this.fonts = fonts;
     if (!fonts?.length) return;
     const fontSourceLoad = await import('./font-source-load.js');
@@ -740,8 +741,8 @@ export class XlsxWorkbook {
     return task;
   }
 
-  /** Record a demand delta and ensure it in every retained set. A ceiling
-   * breach (`font-source-limit`) rejects; a failed face only warns. */
+  /** Record a demand delta and ensure it in every retained set. A failed
+   * family or face (including a run-time limit breach) only warns. */
   private async pushFontDelta(delta: FontSessionDemand | null): Promise<void> {
     if (!delta || !this.installedFamilies || this.fontsDestroyed) return;
     const excluded = this.installedFamilies.exclude(delta);
@@ -785,7 +786,7 @@ export class XlsxWorkbook {
       } as Omit<RetainedFontSet, 'loading'> as RetainedFontSet;
       // Replay every delta so far, in order, into this set.
       const sourcesReady = Promise.all(this.fontDeltas.map((delta) => this.enqueueFontDelta(record, delta)));
-      // Settle both loads: a rejected source delta (font-source-limit) must
+      // Settle both loads: a rejected source delta (an abort) must
       // not drop the parallel Office-face result, whose faces would then never
       // be released. On any failure every face this set took is returned.
       const loading = Promise.allSettled([

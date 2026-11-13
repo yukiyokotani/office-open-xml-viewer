@@ -121,7 +121,7 @@ export type RenderWorkerRequest =
        * re-validates them and runs the same font-source demand and session as
        * main mode against its own FontFaceSet. Never the deprecated
        * `useGoogleFonts`. */
-      fonts?: readonly import('@silurus/ooxml-core/internal/font-sources').FontSource[];
+      fonts?: readonly import('@silurus/ooxml-core/internal/font-sources').FontSourceDescriptor[];
       cjkFallback?: import('@silurus/ooxml-core').CjkLang;
       renderers?: WorkerRendererDescriptors;
       progressiveLayout?: boolean;

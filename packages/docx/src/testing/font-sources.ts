@@ -1,5 +1,6 @@
 import {
   fontFamilyKey,
+  fontSourceDescriptors,
   googleFonts,
   substitutionsFor,
   type FontSource,
@@ -33,7 +34,7 @@ export function sourceFontLayoutOptions(
   sourceFonts: { names: readonly string[]; loaded: LoadedFontSources };
   installedSubstituteFamilies: readonly string[];
 } {
-  const sources = options.sources ?? [googleFonts()];
+  const sources = fontSourceDescriptors(options.sources ?? [googleFonts()]);
   const plan = docxFontFamilyPlan(model, sources, undefined, { routes: {}, installed: [...(options.installed ?? [])] });
   const substitutes = declaredFontSubstitutions(sources);
   const names = [...plan.families, ...plan.fallbackFamilies];

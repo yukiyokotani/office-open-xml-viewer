@@ -692,34 +692,36 @@ new DocxViewer(canvas, {
 });
 ```
 
-The factories are `googleFonts({ cssOrigin?, substitutes? })`,
+The factories are `googleFonts({ cssOrigin?, substitutes?, families? })`,
 `fontCssApi({ urlTemplate, … })`, `fontCss({ url })`, `fontFiles({ faces })`
 and, for authenticated or private services, `fontResolver(fn)`, which runs on
-the main thread (in worker mode the page also fetches the claimed URLs it
-returns).
+the main thread (in worker mode the page also fetches the URLs it returns).
 Every source takes `substitutes`; `fontCssApi`, `fontCss` and `fontFiles` also
 take `credentials`. They are exported from `@silurus/ooxml` and from
-each format entry.
+each format entry. A `FontSource` is opaque: `fonts` accepts only values the
+factories returned.
 
 - **Chaining:** sources are consulted per family, in option order. The first
   source that has a face for the family claims it. A failed stylesheet or face
   keeps the host fallback with a `console.warn`, and no other source is tried.
-- **Lazy subsets:** only the `unicode-range` subsets that intersect the painted
-  text are loaded, and installed faces with the authored name are never
-  replaced. The library fetches the font files itself (`fetch()`), so DOCX can
-  read each face's line metrics. `fontResolver` URLs and
-  sources with `credentials: 'omit'` are fetched for every face of a claimed
-  family.
+- **Lazy subsets:** for every source kind, only the `unicode-range` subsets
+  that intersect the painted text are fetched and loaded, and installed faces
+  with the authored name are never replaced. The library fetches the font
+  files itself (`fetch()`, with the source's `credentials`; `fontResolver`
+  URLs from the page, in both modes), so DOCX can read each face's line
+  metrics.
 - **Deployment:** cross-origin font URLs need CORS. Stylesheet origins need
   `connect-src` in your CSP, and font file origins need both `connect-src`
   and `font-src` (for Google Fonts: `connect-src https://fonts.googleapis.com
   https://fonts.gstatic.com` and `font-src https://fonts.gstatic.com`). Optionally
   add `<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>` for
-  Google Fonts. Source limits fail closed with
-  `OoxmlError('font-source-limit')`.
+  Google Fonts. A factory input beyond a fixed limit throws
+  `OoxmlError('font-source-limit')`; a limit reached while loading fails only
+  the families concerned, with a `console.warn`.
 
 `useGoogleFonts: true` is deprecated: it still works in 0.90 as
-`fonts: [googleFonts()]`, with a warning, and is removed in 0.91. See the
+`fonts: [googleFonts()]`, with a warning. From 0.91 it is ignored with the
+same warning (no web fonts, no error). See the
 [0.90 migration guide](docs/migration-0.90.md) for every source kind, the
 resolver contract, CSP and CORS requirements, and the limits.
 
@@ -1200,8 +1202,8 @@ Stable failures can be narrowed without parsing message strings:
   `invalid-password`, `unsupported-encryption`, `legacy-binary-format`,
   `not-ooxml`, `unsupported-image-effect` (a picture-effect chain that is
   malformed or cannot be drawn), `invalid-numbering` (DOCX numbering that Word
-  cannot open), `font-source-limit` (a configured font source exceeded a fixed
-  limit; `violation` names it), or `unsupported-content`. For `unsupported-content`, offer conversion: the configured
+  cannot open), `font-source-limit` (a font source factory received a value beyond a
+  fixed limit; `violation` names it), or `unsupported-content`. For `unsupported-content`, offer conversion: the configured
   source cannot represent this input. Frozen `details` contain only its
   `format` identifier and `reason: 'source-subset'`.
 - `OoxmlResourceLimitError` (`code === 'ooxml-resource-limit'`) — a measured

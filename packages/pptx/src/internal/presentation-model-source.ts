@@ -14,7 +14,7 @@ import {
   type WorkerRendererDescriptors,
 } from '@silurus/ooxml-core/worker';
 import { selectModelSource, beginModelSourceLoad, effectiveModelSources, modelSourceWorker } from '@silurus/ooxml-core/internal/model-source';
-import type { FontSource } from '@silurus/ooxml-core/internal/font-sources';
+import { optionFontSources, type FontSourceDescriptor } from '@silurus/ooxml-core/internal/font-sources';
 import type { PptxFontDemandFacts } from '../font-requests.js';
 import { PptxPresentation, type LoadOptions } from '../presentation.js';
 import { deferred } from '@silurus/ooxml-core/internal/deferred';
@@ -27,7 +27,7 @@ type MutablePresentation = {
   _regionMap: LoadOptions['regionMap'];
   _chartEx: LoadOptions['chartEx'];
   _tiff: LoadOptions['tiff'];
-  _fonts: readonly FontSource[] | undefined;
+  _fonts: readonly FontSourceDescriptor[] | undefined;
   _parsedTextChain: boolean;
   _preflight: {
     fontPreloadNames: readonly (string | null)[];
@@ -42,7 +42,7 @@ type MutablePresentation = {
   _parse: (
     buffer: ArrayBuffer,
     resourcePolicy: NormalizedOoxmlResourcePolicy,
-    fonts: readonly FontSource[] | undefined,
+    fonts: readonly FontSourceDescriptor[] | undefined,
     timeoutMs: number | undefined,
     onUsage: (usage: import('@silurus/ooxml-core').OoxmlResourceUsageSnapshot) => void,
     renderers: WorkerRendererDescriptors | undefined,
@@ -104,7 +104,7 @@ export async function loadPptxModelSource(
         state._regionMap = mode === 'worker' ? undefined : opts.regionMap;
         state._chartEx = mode === 'worker' ? undefined : opts.chartEx;
         state._tiff = mode === 'worker' ? undefined : opts.tiff;
-        state._fonts = opts.fonts;
+        state._fonts = optionFontSources(opts.fonts);
         // A model source's slides have no proven parsed colour chain.
         state._parsedTextChain = false;
         warnUnserializableRenderers(opts, mode, renderers);
@@ -116,7 +116,7 @@ export async function loadPptxModelSource(
           published: false, deferred: false, settled: false,
         } : undefined;
         await state._parse(
-          buffer, resourceOptions.policy, opts.fonts,
+          buffer, resourceOptions.policy, optionFontSources(opts.fonts),
           opts.workerTimeoutMs, (usage) => metrics.observeUsage(usage),
           renderers, progressive,
         );

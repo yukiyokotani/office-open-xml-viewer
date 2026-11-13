@@ -10,18 +10,17 @@
  * responder takes it is failed, recorded and answered here.
  *
  * The host also answers the worker's face acquisitions (`ooxmlAcquireFonts`):
- * after claiming a family, the worker session asks the page to fetch its
- * claimed http(s) / blob: faces. Only URLs this document's own resolution
- * returned for the named family are fetched (a request naming anything else
- * fails that URL), in this realm with `credentials: 'same-origin'` as CSS
- * font fetching uses, through the realm's shared acquisition cache
+ * when its painted text first needs a face of a claimed family, the worker
+ * session asks the page to fetch those http(s) / blob: faces (any subset of
+ * the family's faces). Only URLs this document's own resolution returned for
+ * the named family are fetched (a request naming anything else fails that
+ * URL), in this realm with `credentials: 'same-origin'` as CSS font fetching
+ * uses, through the realm's shared acquisition cache
  * (`face-download.ts`) and the document's failure record, so the XLSX viewer
  * realm and the worker paint the same faces from one request. The worker's
  * remaining face-loading ceiling is the deadline; the reply carries a copy of
  * each body, the cache keeping the original until the document is disposed.
  */
-import { fontSourceViolationFromWire } from '../errors/font-source-limit.js';
-import { OoxmlError } from '../errors/ooxml-error.js';
 import {
   FONT_DEADLINE_REASON,
   acquireResolverFacesInRealm,
@@ -50,7 +49,7 @@ import {
   type FontResolverFailures,
 } from './resolver-failures.js';
 import { acquireSourceCache, type SourceCache } from './source-cache.js';
-import type { FontSource } from './source.js';
+import type { FontSourceDescriptor } from './source.js';
 
 type Post = (message: unknown, transfer?: Transferable[]) => void;
 
@@ -60,7 +59,7 @@ const isNonNegativeSafeInteger = (value: unknown): value is number =>
 export interface FontResolverBridgeHostOptions {
   readonly post: Post;
   /** The document's validated `fonts` option. */
-  readonly sources: readonly FontSource[] | undefined;
+  readonly sources: readonly FontSourceDescriptor[] | undefined;
   /** The document's resolver failure record, when its viewer-realm sessions
    * share it (XLSX); see `resolver-resolution.ts`. */
   readonly resolverFailures?: FontResolverFailures;
@@ -203,7 +202,7 @@ export class FontResolverBridgeHost {
   }
 
   /** Answer one face acquisition (see the module comment). */
-  private acquire(key: string, request: WorkerFontAcquireRequest, sources: readonly FontSource[]): void {
+  private acquire(key: string, request: WorkerFontAcquireRequest, sources: readonly FontSourceDescriptor[]): void {
     if (request.generation < this.generation || this.acquisitions.has(key)) return;
     if (request.generation > this.generation) {
       this.generation = request.generation;
@@ -257,11 +256,8 @@ export class FontResolverBridgeHost {
         return { url, data };
       });
       return [{ status: 'faces', faces }, transfer];
-    }, (error: unknown): [FontAcquireOutcome, ArrayBuffer[]] => {
-      const violation = error instanceof OoxmlError ? fontSourceViolationFromWire(error.violation) : undefined;
-      return [violation ? { status: 'limit', violation }
-        : { status: 'failed', reason: error instanceof Error ? error.message : String(error) }, []];
-    }).then(([outcome, transfer]) => {
+    }, (error: unknown): [FontAcquireOutcome, ArrayBuffer[]] =>
+      [{ status: 'failed', reason: error instanceof Error ? error.message : String(error) }, []]).then(([outcome, transfer]) => {
       clearTimeout(timer);
       // Cancelled, superseded or disposed meanwhile: nothing waits for it.
       if (this.acquisitions.get(key) !== acquisition) return;

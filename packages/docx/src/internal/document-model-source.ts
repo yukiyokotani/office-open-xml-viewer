@@ -18,6 +18,7 @@ import { documentHasMath, prepareMathRuns } from '../renderer';
 import { createLayoutServices, prepareMainThreadNativeRouteMetrics } from '../layout-runtime.js';
 import { mainThreadFallbackWarning } from '../main-thread-fallback.js';
 import { declaredFontSubstitutions, docxOfficeFontFallbackRequests } from '../font-plan.js';
+import { optionFontSources } from '@silurus/ooxml-core/internal/font-sources';
 import { loadEmbeddedFonts } from '../embedded-fonts';
 import {
   documentLayoutRuntimeOf,
@@ -264,7 +265,7 @@ export async function loadDocxModelSource(
         const serviceOptions = {
           allowFootnoteContinuation: doc._allowFootnoteContinuation,
           fontMetrics: embeddedMetrics,
-          fontSubstitutes: declaredFontSubstitutions(opts.fonts),
+          fontSubstitutes: declaredFontSubstitutions(optionFontSources(opts.fonts)),
           cjkFallback,
           embeddedRoutes,
           officeRoutes: Object.values(officeFonts.routes),
@@ -276,7 +277,7 @@ export async function loadDocxModelSource(
         };
         // Absent authored faces: see native-route-line-metrics.ts.
         const nativeRoutes = await prepareMainThreadNativeRouteMetrics(
-          doc._source, doc._document, { fontSubstitutes: declaredFontSubstitutions(opts.fonts), cjkFallback },
+          doc._source, doc._document, { fontSubstitutes: declaredFontSubstitutions(optionFontSources(opts.fonts)), cjkFallback },
         );
         // destroy() may have drained this document's faces while the
         // sentinels loaded: release a late acquisition before aborting.

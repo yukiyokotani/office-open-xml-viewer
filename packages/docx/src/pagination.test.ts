@@ -2337,4 +2337,95 @@ describe('layoutPages — vanished (hidden) empty-paragraph mark collapse (§17.
     // first page.
     expect(withOrdinaryEmpties.length).toBeGreaterThan(1);
   });
+
+  // WORD_HIDDEN_PARAGRAPH_UNJOINABLE_PAGE_BREAK: a run of hidden paragraphs
+  // that cannot join its successor (a table or a framed paragraph) keeps one
+  // pageBreakBefore; every other hidden run drops it.
+  const hiddenWithPageBreak = (): BodyElement =>
+    ({ ...para({ markVanish: true }), pageBreakBefore: true } as BodyElement);
+  const framePr = (anchor: 'page' | 'margin' | 'text', dropCap = 'none') => ({
+    dropCap, lines: 1, wrap: 'none', hAnchor: anchor, vAnchor: anchor,
+    hRule: 'auto', hSpace: 0, vSpace: 0, w: 100, x: 20, y: 0,
+  });
+  const framed = (text: string, anchor: 'page' | 'margin' | 'text' = 'page'): BodyElement => ({
+    ...para({ text, fontSize: 20 }),
+    framePr: framePr(anchor),
+  } as BodyElement);
+  const pageOf = (pages: readonly LayoutPage[], text: string): number =>
+    pages.findIndex((page) => page.layers.body.some((el) => textOf(el) === text));
+
+  it('keeps the page break of a hidden paragraph followed by a framed paragraph', () => {
+    const pages = layoutPages(
+      [para({ text: 'a' }), hiddenWithPageBreak(), framed('framed'), para({ text: 'after' })],
+      section(),
+      makeCtx(),
+    );
+    expect(pages.length).toBe(2);
+    expect(pageOf(pages, 'a')).toBe(0);
+    expect(pageOf(pages, 'framed')).toBe(1);
+    expect(pageOf(pages, 'after')).toBe(1);
+  });
+
+  it.each(['margin', 'text'] as const)(
+    'keeps the page break of a hidden paragraph followed by a %s-anchored frame',
+    (anchor) => {
+      const pages = layoutPages(
+        [para({ text: 'a' }), hiddenWithPageBreak(), framed('framed', anchor), para({ text: 'after' })],
+        section(),
+        makeCtx(),
+      );
+      expect(pages.length).toBe(2);
+      expect(pageOf(pages, 'framed')).toBe(1);
+      expect(pageOf(pages, 'after')).toBe(1);
+    },
+  );
+
+  it('keeps the page break of any paragraph in a hidden run followed by a table', () => {
+    const pages = layoutPages(
+      [para({ text: 'a' }), para({ markVanish: true }), hiddenWithPageBreak(), fixedTable([20])],
+      section(),
+      makeCtx(),
+    );
+    expect(pages.length).toBe(2);
+    expect(retainedTableOn(pages[1]!)).toBeDefined();
+  });
+
+  it.each([
+    ['an ordinary paragraph', () => [hiddenWithPageBreak(), para({ text: 'b' })]],
+    ['another hidden paragraph, then an ordinary paragraph',
+      () => [hiddenWithPageBreak(), para({ markVanish: true }), para({ text: 'b' })]],
+    ['a drop-cap frame', () => [hiddenWithPageBreak(),
+      { ...para({ text: 'b' }), framePr: framePr('text', 'drop') } as BodyElement]],
+    ['a continuous section break, then a frame',
+      () => [hiddenWithPageBreak(), sectionBreak('continuous'), framed('framed')]],
+    ['the end of the body', () => [hiddenWithPageBreak()]],
+    // Untested in Word: a run with several breaks keeps the previous behaviour.
+    ['a second break in the same run, then a frame',
+      () => [hiddenWithPageBreak(), hiddenWithPageBreak(), framed('framed')]],
+  ])('control: drops the page break of a hidden run followed by %s', (_label, tail) => {
+    // The section after the continuous break starts on the same page
+    // (§17.6.22), so any retained break would show as a second page.
+    const pages = layoutPages(
+      [para({ text: 'a' }), ...tail()],
+      section({ sectionStart: 'continuous' }),
+      makeCtx(),
+    );
+    expect(pages.length).toBe(1);
+  });
+
+  it('control: drops the page break of a hidden framed paragraph inside its frame group', () => {
+    // §17.3.1.11: F1, the hidden H and F2 share framePr, so they form one
+    // frame; the hidden member must not split that frame across pages.
+    const hiddenFramed = {
+      ...para({ markVanish: true }), pageBreakBefore: true, framePr: framePr('page'),
+    } as BodyElement;
+    const pages = layoutPages(
+      [para({ text: 'a' }), framed('f1'), hiddenFramed, framed('f2'), para({ text: 'after' })],
+      section(),
+      makeCtx(),
+    );
+    expect(pages.length).toBe(1);
+    expect(pageOf(pages, 'f1')).toBe(0);
+    expect(pageOf(pages, 'f2')).toBe(0);
+  });
 });

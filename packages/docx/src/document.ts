@@ -53,7 +53,7 @@ import { mainThreadFallbackWarning } from './main-thread-fallback.js';
 import { admitDocxNativeRouteLines, measureDocxNativeRouteLines } from './native-route-line-metrics.js';
 import { buildBookmarkPageMap } from './bookmark-nav';
 import { completeDocxFontPresence, declaredFontSubstitutions, docxFontFamilyPlan, docxOfficeFontFallbackRequests, type DocxOfficeFontPresence } from './font-plan.js';
-import { chartFontSubstitutions, FontResolverBridgeHost, normalizeFontOptions, type FontSource } from '@silurus/ooxml-core/internal/font-sources';
+import { chartFontSubstitutions, FontResolverBridgeHost, normalizeFontOptions, optionFontSources, type FontSourceDescriptor } from '@silurus/ooxml-core/internal/font-sources';
 import { loadEmbeddedFonts } from './embedded-fonts';
 import {
   attachDocumentLayoutRuntime,
@@ -647,7 +647,7 @@ export class DocxDocument {
       await doc._parse(
         buffer,
         resourceOptions.policy,
-        mode === 'worker' ? opts.fonts : undefined,
+        mode === 'worker' ? optionFontSources(opts.fonts) : undefined,
         opts.workerTimeoutMs,
         (usage) => metrics.observeUsage(usage),
         rendererDescriptors,
@@ -712,7 +712,7 @@ export class DocxDocument {
       const measuringDocument = doc;
       const nativeRoutesPending = doc._mode === 'main' && doc._document && doc._source
         ? measureDocxNativeRouteLines(nativeRouteLineRequests(doc._source, doc._document, {
-            fontSubstitutes: declaredFontSubstitutions(opts.fonts), cjkFallback,
+            fontSubstitutes: declaredFontSubstitutions(optionFontSources(opts.fonts)), cjkFallback,
           }), true).then((measured) => {
             if (measuringDocument._nativeRouteFacesReleased) {
               unloadOfficeFontFallbacks(measured.faces);
@@ -749,7 +749,7 @@ export class DocxDocument {
         throw new PaginationAbortError();
       }
       doc._officeFontFaces = officeFonts.faces;
-      const { installedSubstituteFamilies, sourceFonts } = await doc._loadFontSources(opts.fonts, cjkFallback, officeFonts, signal);
+      const { installedSubstituteFamilies, sourceFonts } = await doc._loadFontSources(optionFontSources(opts.fonts), cjkFallback, officeFonts, signal);
       // Equations are converted + rasterized before pagination (which reads their
       // extents synchronously). Requires the opt-in `math` engine; without it,
       // equations are skipped (and the engine asset is never bundled). Worker
@@ -765,7 +765,7 @@ export class DocxDocument {
         const serviceOptions = {
           allowFootnoteContinuation: doc._allowFootnoteContinuation,
           fontMetrics: embeddedMetrics,
-          fontSubstitutes: declaredFontSubstitutions(opts.fonts),
+          fontSubstitutes: declaredFontSubstitutions(optionFontSources(opts.fonts)),
           cjkFallback,
           embeddedRoutes,
           officeRoutes: Object.values(officeFonts.routes),
@@ -1061,7 +1061,7 @@ export class DocxDocument {
    * adapters load only when sources are configured.
    */
   private async _loadFontSources(
-    fonts: readonly FontSource[] | undefined,
+    fonts: readonly FontSourceDescriptor[] | undefined,
     cjkFallback: CjkLang | undefined,
     officeFonts: DocxOfficeFontPresence,
     signal: AbortSignal | undefined,
@@ -1108,7 +1108,7 @@ export class DocxDocument {
   /** Worker mode: answer the render worker's `fontResolver` calls for the
    *  document about to be parsed (core `resolver-bridge-host.ts`): resolved
    *  through this realm's resolution cache and held until destroy. */
-  private _attachFontResolverBridge(fonts: readonly FontSource[] | undefined): void {
+  private _attachFontResolverBridge(fonts: readonly FontSourceDescriptor[] | undefined): void {
     this._fontResolverBridge?.dispose();
     this._fontResolverBridge = new FontResolverBridgeHost({
       post: (message, transfer) => (this._worker.postMessage as (value: unknown, transfer?: Transferable[]) => void)(message, transfer),
@@ -1119,7 +1119,7 @@ export class DocxDocument {
   private async _parse(
     buffer: ArrayBuffer,
     resourcePolicy: NormalizedOoxmlResourcePolicy,
-    fonts: readonly FontSource[] | undefined = undefined,
+    fonts: readonly FontSourceDescriptor[] | undefined = undefined,
     timeoutMs?: number,
     onUsage?: (usage: import('@silurus/ooxml-core').OoxmlResourceUsageSnapshot) => void,
     renderers?: WorkerRendererDescriptors,
@@ -1465,7 +1465,7 @@ export class DocxDocument {
   private async _parseProgressively(
     buffer: ArrayBuffer,
     resourcePolicy: NormalizedOoxmlResourcePolicy,
-    fonts: readonly FontSource[] | undefined,
+    fonts: readonly FontSourceDescriptor[] | undefined,
     timeoutMs: number | undefined,
     onUsage: ((usage: import('@silurus/ooxml-core').OoxmlResourceUsageSnapshot) => void) | undefined,
     renderers: WorkerRendererDescriptors | undefined,

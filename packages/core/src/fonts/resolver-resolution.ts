@@ -29,7 +29,7 @@ import {
   fontResolverFailureKey,
   type FontResolverFailures,
 } from './resolver-failures.js';
-import { admitFontResolverResult, isBridgedFontSourceLimitError } from './resolver-admission.js';
+import { admitFontResolverResult } from './resolver-admission.js';
 import { SharedTask, type FamilyResolution, type SourceCache } from './source-cache.js';
 import {
   fontResolverFunction,
@@ -197,7 +197,7 @@ export async function resolveFamiliesThroughCache(options: {
       batch.delete(key);
       return own;
     }, signal, holder);
-    // A rejection (abort, timeout, ceiling breach) concludes the whole batch
+    // A rejection (abort, timeout) concludes the whole batch
     // at the requester, which knows why (`concludeFamilies`, per family).
     // A failed answer, or a failure another requester of this document
     // recorded while this answer was in flight, concludes this family.
@@ -237,9 +237,7 @@ async function callResolver(
   try {
     raw = await runResolver(source, demand, Object.freeze({ signal }), info);
   } catch (error) {
-    // A bridged call reports the main-side admission's ceiling breach, which
-    // rejects the load exactly as this realm's own admission would.
-    if (signal.aborted || isBridgedFontSourceLimitError(error)) throw error;
+    if (signal.aborted) throw error;
     if (late()) return failAll('timed out');
     return failAll(error instanceof Error ? error.message : String(error));
   }

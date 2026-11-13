@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { googleFonts } from '@silurus/ooxml-core/internal/font-sources';
+import { fontSourceDescriptors, googleFonts } from '@silurus/ooxml-core/internal/font-sources';
 import type { BodyElement, DocParagraph, DocxDocumentModel, SectionProps } from './types.js';
 import {
   attachDocumentLayoutVariants,
@@ -778,7 +778,7 @@ describe('render worker canonical layout parity', () => {
 
   it('pins worker request and response protocol shapes including structured failures', () => {
     const parse = {
-      type: 'parse', id: 1, data: new ArrayBuffer(0), fonts: [googleFonts()],
+      type: 'parse', id: 1, data: new ArrayBuffer(0), fonts: fontSourceDescriptors([googleFonts()]),
       resourcePolicy: DEFAULT_OOXML_RESOURCE_LIMITS,
       defaultCurrentDateMs: 10,
     } satisfies RenderWorkerRequest;

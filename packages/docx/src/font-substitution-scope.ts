@@ -1,7 +1,7 @@
 import type { FontSubstituteScript } from '@silurus/ooxml-core';
 import {
   fontFamilyKey,
-  type FontSource,
+  type FontSourceDescriptor,
   type FontSubstitution,
 } from '@silurus/ooxml-core/internal/font-sources';
 
@@ -13,7 +13,7 @@ import {
  * script scopes are policy (core `substitute-script.ts`): they delimit where a
  * scoped substitute may paint whether or not its face loads. */
 export function declaredFontSubstitutions(
-  sources: readonly FontSource[] | undefined,
+  sources: readonly FontSourceDescriptor[] | undefined,
 ): readonly FontSubstitution[] {
   return Object.freeze((sources ?? []).flatMap((source) => source.substitutes ?? []));
 }

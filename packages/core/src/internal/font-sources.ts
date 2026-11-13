@@ -4,6 +4,8 @@
 export {
   FONT_SOURCE_PROTOCOL,
   assertFontSourceDescriptors,
+  fontSourceDescriptors,
+  optionFontSources,
   fontCssApi,
   fontCssApiRequests,
   fontCss,
@@ -26,6 +28,7 @@ export {
   type FontResolverSource,
   type FontSource,
   type FontSourceCredentials,
+  type FontSourceDescriptor,
 } from '../fonts/source.js';
 export {
   OFFICE_FONT_SUBSTITUTIONS,

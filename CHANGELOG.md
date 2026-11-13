@@ -9,19 +9,22 @@ the corresponding minor release.
 
 Minor release that lets applications choose where web fonts come from. Migration
 is required only if you pass `useGoogleFonts`: replace `useGoogleFonts: true`
-with `fonts: [googleFonts()]`. The alias still works in 0.90 with a warning and
-is removed in 0.91.0. See the [0.89 to 0.90 migration guide](docs/migration-0.90.md).
+with `fonts: [googleFonts()]`. The alias still works in 0.90 with a warning;
+from 0.91.0 it is ignored with the same warning, and never throws. See the
+[0.89 to 0.90 migration guide](docs/migration-0.90.md).
 
 - **Font sources:** the new `fonts` load option takes an ordered list of
-  sources, built with `googleFonts({ cssOrigin?, substitutes? })`,
+  sources, built with `googleFonts({ cssOrigin?, substitutes?, families? })`,
   `fontCssApi()`, `fontCss()`, `fontFiles()` (URLs, `data:` URLs or bytes)
   and `fontResolver()` for authenticated or private services. Every source
   takes `substitutes`; `fontCssApi()`, `fontCss()` and `fontFiles()` also take
-  `credentials`. The factories are exported from `@silurus/ooxml` and from
-  each format entry, along with `officeFontSubstitutions` and
+  `credentials`. `googleFonts({ families })` adds Google families outside the
+  preset's catalog. A `FontSource` is opaque, and `fonts` accepts only values
+  the factories returned. The factories are exported from `@silurus/ooxml`
+  and from each format entry, along with `officeFontSubstitutions` and
   `googleFontsSubstitutions`. DOCX, XLSX and PPTX behave the same in main and
   worker mode: in worker mode the page runs a resolver and also fetches the
-  claimed URLs it returns, so cookies and authentication behave as in main mode.
+  URLs it returns, so cookies and authentication behave as in main mode.
   Nothing is requested without a source (#1460, #1497).
 - **Custom Google Fonts origin:** `googleFonts({ cssOrigin })` sends the
   stylesheet requests to a regional mirror or an internal proxy instead of
@@ -39,12 +42,14 @@ is removed in 0.91.0. See the [0.89 to 0.90 migration guide](docs/migration-0.90
   tables, the library now fetches the font files of `googleFonts()`,
   `fontCssApi()`, `fontCss()`, `fontFiles()` and, in main mode too,
   `fontResolver()` itself with `fetch()` (one request per needed
-  `unicode-range` subset, or per face of a claimed `fontResolver()` family;
+  `unicode-range` subset, for every source and both `credentials` settings;
   the same requests in main and worker mode) and registers each face from those bytes. **CSP:** the font file
   host (for example `fonts.gstatic.com`) now needs `connect-src` as well as
   `font-src`.
-- **Resource safety:** font sources have fixed limits and fail closed with the
-  new `OoxmlError` code `font-source-limit`.
+- **Resource safety:** font sources have fixed limits. A factory input beyond
+  one throws the new `OoxmlError` code `font-source-limit`; a limit reached
+  while a document loads fails only the families concerned, with a warning,
+  like a network failure.
 - **Failed package parts:** a new `partFailures` getter on `DocxDocument`,
   `PptxPresentation`, `XlsxWorkbook` and every viewer lists the parts that
   failed to parse, and the new `onPartFailure` viewer option is called once for
@@ -109,6 +114,12 @@ Compatible patch release. No migration is required.
   example "out-of-pocket" as Word stores it) no longer fails layout with
   "Segment measurement does not match its retained text range context". The
   error was a regression in 0.89.0 (#2193).
+- **Word: page break on a hidden paragraph before a frame or table:** a
+  hidden paragraph with "page break before", followed by a text frame or a
+  table, now starts a new page as Word does. Reports that put each section's
+  heading in a frame after such a paragraph no longer draw several headings on
+  top of each other on one page. Thanks to @maurodaprotis for the contribution
+  (#2195).
 
 ## 0.89.9 — 2026-11-10
 
