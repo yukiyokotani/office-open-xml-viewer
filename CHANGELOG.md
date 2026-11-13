@@ -5,9 +5,11 @@ semantic versioning. While the major version is zero, minor releases may contain
 explicitly documented breaking changes; patch releases remain compatible with
 the corresponding minor release.
 
-## 0.89.11 — Unreleased
+## 0.89.11 — 2026-11-14
 
-Compatible patch release. No migration is required.
+Compatible patch release. No migration is required. One Word layout fix: a
+custom footnote or endnote mark formatted as all caps or small caps no longer
+stops the whole document from rendering. It is described below.
 
 - **Word: all-caps custom footnote and endnote marks:** a footnote or endnote
   reference with a custom mark (`w:customMarkFollows`) whose run is formatted
