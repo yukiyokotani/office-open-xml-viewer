@@ -277,19 +277,13 @@ pub fn sniff(bytes: &[u8]) -> Option<Resource> {
     }
     // EMF: EMR_HEADER record type 1 with the " EMF" signature at offset 40.
     if bytes.get(0..4) == Some(&[1, 0, 0, 0]) && bytes.get(40..44) == Some(b" EMF") {
-        let frame = (|| {
-            let v = |o: usize| -> Option<f64> {
-                Some(i32::from_le_bytes(bytes.get(o..o + 4)?.try_into().ok()?) as f64)
-            };
-            let (l, t, r, b) = (v(24)?, v(28)?, v(32)?, v(36)?);
-            let (w, h) = ((r - l) * 360.0, (b - t) * 360.0);
-            (w > 0.0 && h > 0.0).then_some((w, h))
-        })();
         return Some(Resource {
             mime: "image/emf",
             pixels: None,
             dpi: None,
-            frame,
+            // The header frame, as every reader reads it.
+            frame: crate::odf_props::metafile_size_pt(bytes)
+                .map(|(w, h)| (w * 12_700.0, h * 12_700.0)),
         });
     }
     // WMF: placeable header or a standard METAHEADER.
@@ -301,7 +295,9 @@ pub fn sniff(bytes: &[u8]) -> Option<Resource> {
             mime: "image/wmf",
             pixels: None,
             dpi: None,
-            frame: None,
+            // The placeable header's bounding box, as every reader reads it.
+            frame: crate::odf_props::metafile_size_pt(bytes)
+                .map(|(w, h)| (w * 12_700.0, h * 12_700.0)),
         });
     }
     if bytes.starts_with(b"VCLMTF") {

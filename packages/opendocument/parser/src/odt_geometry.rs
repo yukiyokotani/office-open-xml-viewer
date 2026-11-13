@@ -243,24 +243,11 @@ impl Parser<'_> {
                 if c == b'+' {
                     self.at += 1;
                 }
-                while self.at < self.text.len()
-                    && (self.text[self.at].is_ascii_digit() || self.text[self.at] == b'.')
-                {
-                    self.at += 1;
-                }
-                if self.at < self.text.len() && matches!(self.text[self.at], b'e' | b'E') {
-                    self.at += 1;
-                    if self.at < self.text.len() && matches!(self.text[self.at], b'+' | b'-') {
-                        self.at += 1;
-                    }
-                    while self.at < self.text.len() && self.text[self.at].is_ascii_digit() {
-                        self.at += 1;
-                    }
-                }
-                std::str::from_utf8(&self.text[start..self.at])
-                    .ok()
-                    .and_then(|v| v.parse::<f64>().ok())
-                    .unwrap_or(0.0)
+                crate::odf_props::scan_number(self.text, &mut self.at).unwrap_or_else(|| {
+                    // Not a number (a lone `.` or `+`): skip the byte.
+                    self.at = start + 1;
+                    0.0
+                })
             }
             Some(c) if c.is_ascii_alphabetic() => {
                 let start = self.at;
@@ -322,6 +309,13 @@ fn tokens(path: &str) -> Result<Vec<String>, String> {
         }
         match c {
             ' ' | ',' | '\t' | '\n' | '\r' => flush(&mut current, &mut out),
+            // An upper-case exponent continues a number (`4E-1`); `E` is no
+            // command (Table 10).
+            'E' if current
+                .starts_with(|c: char| c.is_ascii_digit() || c == '.' || c == '-' || c == '+') =>
+            {
+                current.push(c)
+            }
             'A'..='Z' if current.is_empty() || !current.starts_with('?') => {
                 flush(&mut current, &mut out);
                 out.push(c.to_string());
@@ -452,11 +446,13 @@ impl Builder {
         } else {
             self.move_to(first);
         }
-        let segments = (sweep.abs() / std::f64::consts::FRAC_PI_2).ceil().max(1.0) as usize;
+        // Quarter turns, at most the longest `G` arc's (`MAX_ARC_TURNS`).
+        let most = 4 * (crate::odf_props::MAX_ARC_TURNS as usize + 2);
+        let segments = ((sweep.abs() / std::f64::consts::FRAC_PI_2).ceil() as usize).clamp(1, most);
         let step = sweep / segments as f64;
         let k = 4.0 / 3.0 * (step / 4.0).tan();
         let mut a = start;
-        for _ in 0..segments.min(64) {
+        for _ in 0..segments {
             let b = a + step;
             let p0 = point(a);
             let p1 = point(b);
@@ -470,7 +466,7 @@ impl Builder {
 
 /// Evaluate an enhanced path (Table 10) into normalized commands. Each
 /// token takes a step and adds a bounded number of commands (an arc is at
-/// most 64 curves).
+/// most `4 · (MAX_ARC_TURNS + 2)` quarter-turn curves).
 pub(super) fn evaluate(path: &str, geometry: &Geometry) -> Result<Path, String> {
     let mut eval = Evaluator::new(geometry);
     let tokens = tokens(path)?;
@@ -610,26 +606,15 @@ pub(super) fn evaluate(path: &str, geometry: &Geometry) -> Result<Path, String> 
                 builder.arc(center, r, start, sweep, matches!(command, 'A' | 'W'));
             }
             'G' => {
-                // OOXML arcTo (LibreOffice extension): radii, start and
-                // swing angles in degrees, clockwise on screen.
+                // arcangleto (ODF 1.4 Table 10): radii, then the start and
+                // swing central angles in degrees, clockwise on the page.
                 let (rx, ry) = (values[0], values[1]);
-                let start = values[2].to_radians();
-                let sweep = values[3].to_radians();
-                // The parametric angle of the start point on the ellipse.
-                let parametric = (start.sin() * rx).atan2(start.cos() * ry);
+                let (start, sweep) = crate::odf_props::arc_angle_to(rx, ry, values[2], values[3]);
                 let center = (
-                    builder.point.0 - rx * parametric.cos(),
-                    builder.point.1 - ry * parametric.sin(),
+                    builder.point.0 - rx * start.cos(),
+                    builder.point.1 - ry * start.sin(),
                 );
-                let end = start + sweep;
-                let end_parametric = (end.sin() * rx).atan2(end.cos() * ry);
-                let mut parametric_sweep = end_parametric - parametric;
-                if sweep > 0.0 && parametric_sweep < 0.0 {
-                    parametric_sweep += std::f64::consts::TAU;
-                } else if sweep < 0.0 && parametric_sweep > 0.0 {
-                    parametric_sweep -= std::f64::consts::TAU;
-                }
-                builder.arc(center, (rx, ry), parametric, parametric_sweep, true);
+                builder.arc(center, (rx, ry), start, sweep, true);
             }
             'X' | 'Y' => {
                 let p0 = builder.point;
@@ -728,5 +713,28 @@ mod tests {
         let ellipse = evaluate("U 10800 10800 10800 10800 0 360 Z N", &g).unwrap();
         assert_eq!(ellipse.subpaths.len(), 1);
         assert!(ellipse.subpaths[0].len() >= 5);
+    }
+
+    #[test]
+    fn arc_angle_to_and_exponents_follow_the_shared_reading() {
+        // G from (1000, 5000) on a 2:1 ellipse, -45° swung 90° clockwise:
+        // the rays meet the ellipse at parameter ∓atan 2, so the arc ends
+        // 2·4000/√5 straight below its start (as LibreOffice draws it).
+        let g = geometry(&[("f0", "1E3"), ("f1", "5e+3")], &[]);
+        let k = 4000.0 / 5f64.sqrt();
+        for path in [
+            "M 1000 5000 G 4000 2000 -45 90",
+            "M ?f0 ?f1 G 4E3 2e3 -45 90",
+        ] {
+            let evaluated = evaluate(path, &g).unwrap();
+            let Some(PathCmd::CubicBezTo { x, y, .. }) = evaluated.subpaths[0].last() else {
+                panic!("{path}");
+            };
+            assert!((x * 21600.0 - 1000.0).abs() < 1e-6, "{path}: {x}");
+            assert!(
+                (y * 21600.0 - (5000.0 + 2.0 * k)).abs() < 1e-6,
+                "{path}: {y}"
+            );
+        }
     }
 }

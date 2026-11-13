@@ -451,6 +451,188 @@ fn is_ncname(text: &str) -> bool {
         && chars.all(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | '.'))
 }
 
+// ---------------------------------------------------------------------------
+// Values the text, spreadsheet and presentation readers read alike. Each was
+// settled once, against LibreOffice 26.8's PDF export of synthetic documents
+// that vary one parameter at a time (Writer, Calc, Impress and Draw), so the
+// three readers cannot drift apart again.
+// ---------------------------------------------------------------------------
+
+/// The width in points of a border-width keyword in `fo:border` (§20.183,
+/// XSL 1.1 §7.8.21 `border-*-width`), or `None` for a token that is not one.
+///
+/// XSL leaves the keyword widths to the implementation (only thin ≤ medium ≤
+/// thick). These are LibreOffice's named widths, measured in a Writer
+/// paragraph, a Calc cell and an Impress table cell alike: a keyword border
+/// exports the same stroke as the explicit width (`thin` as `0.05pt`, its
+/// hairline; `middle` as `1pt`; `thick` as `2.5pt`), and LibreOffice saves
+/// them back as `0.06pt`, `0.99pt` and `2.49pt` (its internal units,
+/// rounded). So `thin` is 0.05 pt (one twip), `middle` 1 pt and `thick`
+/// 2.5 pt. LibreOffice does not know XSL's `medium` (it spells the
+/// middle width `middle`) and drops a border that names it; `medium` is a valid
+/// XSL keyword, so it is read as LibreOffice's middle width rather than
+/// dropped. (An Impress table then strokes 1 pt and 2.5 pt borders at 1.75 pt
+/// and 4.4 pt, explicit widths and keywords alike: that is its table
+/// painter, not the keyword.)
+pub fn border_width_keyword(token: &str) -> Option<f64> {
+    match token {
+        "thin" => Some(0.05),
+        "medium" | "middle" => Some(1.0),
+        "thick" => Some(2.5),
+        _ => None,
+    }
+}
+
+/// The shear factor of `skewX (a)` / `skewY (a)` in `draw:transform`
+/// (§19.228): `skewX (a)` maps (x, y) to (x + k·y, y) and `skewY (a)` maps it
+/// to (x, y + k·x), in page coordinates (y down), with `a` in radians.
+///
+/// The specification only names the transforms. LibreOffice shears against
+/// the SVG sense: a 4 cm × 2 cm rectangle written `skewX (0.5)` keeps its top
+/// edge and moves its bottom edge 2 cm · tan 0.5 to the left, `skewX (-0.5)`
+/// to the right, and `skewY (0.5)` moves its right edge up (Draw and Calc,
+/// measured identically). So k = −tan a.
+pub fn skew_shear(angle: f64) -> f64 {
+    -angle.tan()
+}
+
+/// One unsigned number of the enhanced-geometry grammar (§19.171
+/// `draw:formula`: `integer`, `fractional-constant exponent?` or `integer
+/// exponent`, the exponent `('e' | 'E') sign? integer`), read from `at`;
+/// `None` (with `at` unmoved) when no number starts there. An `e` not followed
+/// by an exponent's digits is not consumed.
+///
+/// The same grammar is read in `draw:enhanced-path` parameters. LibreOffice
+/// reads exponents of either case in path parameters, and an upper-case `E`
+/// in formulas, but treats a formula spelling a lower-case `e` (`4e2`) as
+/// invalid (the formula evaluates to 0). The readers follow the grammar,
+/// which allows both.
+pub fn scan_number(bytes: &[u8], at: &mut usize) -> Option<f64> {
+    let digits = |from: usize| {
+        bytes[from.min(bytes.len())..]
+            .iter()
+            .take_while(|b| b.is_ascii_digit())
+            .count()
+    };
+    let start = *at;
+    let mut end = start + digits(start);
+    let mut any = end > start;
+    if bytes.get(end) == Some(&b'.') {
+        let fraction = digits(end + 1);
+        if any || fraction > 0 {
+            end += 1 + fraction;
+            any = true;
+        }
+    }
+    if !any {
+        return None;
+    }
+    if matches!(bytes.get(end), Some(b'e' | b'E')) {
+        let mut exponent = end + 1;
+        if matches!(bytes.get(exponent), Some(b'+' | b'-')) {
+            exponent += 1;
+        }
+        let count = digits(exponent);
+        if count > 0 {
+            end = exponent + count;
+        }
+    }
+    let value = std::str::from_utf8(&bytes[start..end])
+        .ok()?
+        .parse::<f64>()
+        .ok()
+        .filter(|v| v.is_finite())?;
+    *at = end;
+    Some(value)
+}
+
+/// The parametric start angle and sweep (radians, clockwise on the page,
+/// y down) of an enhanced-path `G` arc (ODF 1.4 Part 3 Table 10
+/// `arcangleto`: radii `wR` `hR`, start angle `st` and swing `sw` in degrees;
+/// the ellipse is placed so that the current point is the arc's start).
+///
+/// `st` and `sw` are angles at the ellipse's centre (`sw` is "the central
+/// angle"), not parameters: the start is where the ray at `st` meets the
+/// ellipse, parameter atan2(wR·sin st, hR·cos st). Measured in LibreOffice:
+/// `G 400 200 -45 90` from (100, 500) ends 357.8 units below its start, the
+/// ray intersections (the parameter reading gives 282.8); `sw = -90` turns
+/// counter-clockwise, and `sw = 450` draws the whole ellipse and then the
+/// arc of `sw = 90` again. A positive `sw` turns clockwise. The angles are
+/// central in the path's own units: `G 400 400 -45 90` in a square view box
+/// stretched over a 2:1 shape ends where the circle's arc ends, so `rx` and
+/// `ry` are the radii before the view box is scaled to the shape.
+///
+/// The parametric sweep is the one within half a turn of `sw`: the parameter
+/// and the central angle of a point differ by less than a quarter turn, so
+/// that choice is unique and keeps whole extra turns: every turn is drawn,
+/// so a dashed outline keeps its dash phase. Only past [`MAX_ARC_TURNS`]
+/// whole turns (an implementation bound on the curves one arc draws) are
+/// pairs of turns taken off; that keeps the outline and the even-odd fill
+/// (`N`) parity, but not the dash phase of such a stroke.
+pub fn arc_angle_to(rx: f64, ry: f64, start_deg: f64, swing_deg: f64) -> (f64, f64) {
+    // Whole turns past the bound come off in pairs (two turns, 720°, keep
+    // the parity), in degrees and before any trigonometry: the remainder of
+    // a float is exact, so the end angle survives any swing. The start is
+    // taken modulo a turn likewise.
+    let limit = (MAX_ARC_TURNS + 1.0) * 360.0;
+    let swing_deg = if swing_deg.abs() > limit {
+        let rest = swing_deg % 720.0;
+        rest + swing_deg.signum() * ((limit - rest.abs()) / 720.0).floor() * 720.0
+    } else {
+        swing_deg
+    };
+    let start_deg = start_deg % 360.0;
+    let parameter = |angle: f64| (rx * angle.sin()).atan2(ry * angle.cos());
+    let (start, swing) = (start_deg.to_radians(), swing_deg.to_radians());
+    let t0 = parameter(start);
+    let delta = parameter(start + swing) - t0;
+    let tau = std::f64::consts::TAU;
+    (t0, delta + ((swing - delta) / tau).round() * tau)
+}
+
+/// Implementation bound: the whole turns one `G` arc draws (its sweep stays
+/// within `MAX_ARC_TURNS + 1` turns and half a turn). The readers size their
+/// arc flattening for it.
+pub const MAX_ARC_TURNS: f64 = 16.0;
+
+/// The natural size in points of a Windows metafile, which `fo:clip`
+/// (§20.172) lengths are measured on: an EMF's header frame (`rclFrame`,
+/// hundredths of a millimetre; [MS-EMF] 2.2.9) or a placeable WMF's bounding
+/// box in its units per inch ([MS-WMF] 2.3.2.3 META_PLACEABLE). `None` for a
+/// WMF without the placeable header (it states no size) or anything else.
+///
+/// Measured in LibreOffice (Writer): a picture whose frame is 1 in × 0.5 in
+/// (EMF `rclFrame`, with device bounds of a different size) or whose
+/// placeable bounding box is 1440 × 720 at 1440 per inch, clipped by
+/// `rect(0in, 0.25in, 0in, 0in)` in a 2 in frame, shows its left three
+/// quarters: the clip is a quarter of a 1 in natural width.
+pub fn metafile_size_pt(bytes: &[u8]) -> Option<(f64, f64)> {
+    let i32_at = |at: usize| -> Option<f64> {
+        Some(f64::from(i32::from_le_bytes(
+            bytes.get(at..at + 4)?.try_into().ok()?,
+        )))
+    };
+    let i16_at = |at: usize| -> Option<f64> {
+        Some(f64::from(i16::from_le_bytes(
+            bytes.get(at..at + 2)?.try_into().ok()?,
+        )))
+    };
+    let size = if bytes.get(0..4) == Some(&[1, 0, 0, 0]) && bytes.get(40..44) == Some(b" EMF") {
+        let (l, t, r, b) = (i32_at(24)?, i32_at(28)?, i32_at(32)?, i32_at(36)?);
+        ((r - l) * 72.0 / 2540.0, (b - t) * 72.0 / 2540.0)
+    } else if bytes.starts_with(&[0xD7, 0xCD, 0xC6, 0x9A]) {
+        let (l, t, r, b) = (i16_at(6)?, i16_at(8)?, i16_at(10)?, i16_at(12)?);
+        let inch = f64::from(u16::from_le_bytes(bytes.get(14..16)?.try_into().ok()?));
+        if inch <= 0.0 {
+            return None;
+        }
+        ((r - l).abs() * 72.0 / inch, (b - t).abs() * 72.0 / inch)
+    } else {
+        return None;
+    };
+    (size.0 > 0.0 && size.1 > 0.0).then_some(size)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -483,5 +665,128 @@ mod tests {
         assert_eq!(get(&chain, "text:fo:font-weight"), Some("bold"));
         assert_eq!(get(&chain, "text:fo:font-size"), Some("11pt"));
         assert_eq!(get(&chain, "text:fo:color"), Some("#000000"));
+    }
+
+    #[test]
+    fn numbers_follow_the_formula_grammar() {
+        let read = |text: &str| {
+            let mut at = 0;
+            scan_number(text.as_bytes(), &mut at).map(|v| (v, at))
+        };
+        assert_eq!(read("4e2"), Some((400.0, 3)));
+        assert_eq!(read("4E-1*"), Some((0.4, 4)));
+        assert_eq!(read("1.5e+1"), Some((15.0, 6)));
+        assert_eq!(read(".5"), Some((0.5, 2)));
+        assert_eq!(read("3."), Some((3.0, 2)));
+        // An `e` without exponent digits ends the number.
+        assert_eq!(read("2e"), Some((2.0, 1)));
+        assert_eq!(read("2e-x"), Some((2.0, 1)));
+        assert_eq!(read("."), None);
+        assert_eq!(read("-1"), None);
+        assert_eq!(read("1e999"), None);
+    }
+
+    #[test]
+    fn arc_angle_to_reads_central_angles() {
+        let degrees = |(t0, sweep): (f64, f64)| (t0.to_degrees(), sweep.to_degrees());
+        let close = |(a, b): (f64, f64), (x, y): (f64, f64)| {
+            assert!(
+                (a - x).abs() < 1e-9 && (b - y).abs() < 1e-9,
+                "{a} {b} vs {x} {y}"
+            );
+        };
+        let t = 63.434_948_822_922_01; // atan(2): the ray at 45° on a 2:1 ellipse.
+        close(
+            degrees(arc_angle_to(400.0, 200.0, -45.0, 90.0)),
+            (-t, 2.0 * t),
+        );
+        close(
+            degrees(arc_angle_to(400.0, 200.0, -45.0, -90.0)),
+            (-t, -(180.0 - 2.0 * t)),
+        );
+        close(
+            degrees(arc_angle_to(400.0, 200.0, -45.0, 450.0)),
+            (-t, 360.0 + 2.0 * t),
+        );
+        close(
+            degrees(arc_angle_to(400.0, 200.0, -45.0, 360.0)),
+            (-t, 360.0),
+        );
+        // Whole turns are kept up to the bound; past it, pairs come off.
+        close(
+            degrees(arc_angle_to(400.0, 200.0, -45.0, 2610.0)),
+            (-t, 2520.0 + 2.0 * t),
+        );
+        close(
+            degrees(arc_angle_to(400.0, 200.0, -45.0, -1440.0)),
+            (-t, -1440.0),
+        );
+        close(
+            degrees(arc_angle_to(5.0, 5.0, 0.0, 16.0 * 360.0 + 90.0)),
+            (0.0, 16.0 * 360.0 + 90.0),
+        );
+        close(
+            degrees(arc_angle_to(5.0, 5.0, 0.0, 17.0 * 360.0 + 90.0)),
+            (0.0, 15.0 * 360.0 + 90.0),
+        );
+        close(
+            degrees(arc_angle_to(5.0, 5.0, 0.0, -(18.0 * 360.0 + 90.0))),
+            (0.0, -(16.0 * 360.0 + 90.0)),
+        );
+        // A huge swing keeps its end angle (1e20 ≡ 280° modulo 360°, and an
+        // odd number of turns modulo 720°) and its turn parity.
+        let (t0, sweep) = degrees(arc_angle_to(5.0, 5.0, 0.0, 1e20));
+        assert_eq!((t0, 1e20f64 % 720.0), (0.0, 640.0));
+        assert!((sweep - (15.0 * 360.0 + 280.0)).abs() < 1e-6, "{sweep}");
+        // A huge start is taken modulo a turn.
+        close(degrees(arc_angle_to(5.0, 5.0, 1e20, 90.0)), (-80.0, 90.0));
+        assert_eq!(arc_angle_to(400.0, 200.0, 30.0, 0.0).1, 0.0);
+        // Across the atan2 branch cut (170° + 800° = 970° ≡ -110°): two
+        // whole turns and 80° stay, in either direction.
+        for (start, swing, kept) in [
+            (170.0, 800.0, 800.0),
+            (-170.0, -800.0, -800.0),
+            (170.0, 1160.0, 1160.0),
+            (170.0, -1160.0, -1160.0),
+        ] {
+            close(
+                degrees(arc_angle_to(400.0, 400.0, start, swing)),
+                (start, kept),
+            );
+        }
+        // A circle's parameter is its central angle.
+        close(
+            degrees(arc_angle_to(5.0, 5.0, 10.0, -200.0)),
+            (10.0, -200.0),
+        );
+    }
+
+    #[test]
+    fn metafile_natural_sizes() {
+        let mut emf = vec![0u8; 88];
+        emf[0] = 1;
+        emf[40..44].copy_from_slice(b" EMF");
+        for (at, value) in [(24, 100i32), (28, 0), (32, 2640), (36, 1270)] {
+            emf[at..at + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        assert_eq!(metafile_size_pt(&emf), Some((72.0, 36.0)));
+        let mut wmf = vec![0xD7, 0xCD, 0xC6, 0x9A, 0, 0];
+        for value in [0i16, 0, 1440, 720] {
+            wmf.extend_from_slice(&value.to_le_bytes());
+        }
+        wmf.extend_from_slice(&1440u16.to_le_bytes());
+        assert_eq!(metafile_size_pt(&wmf), Some((72.0, 36.0)));
+        // A standard WMF header states no size.
+        assert_eq!(metafile_size_pt(&[1, 0, 9, 0, 0, 3]), None);
+    }
+
+    #[test]
+    fn shared_keyword_widths_and_skew() {
+        assert_eq!(border_width_keyword("thin"), Some(0.05));
+        assert_eq!(border_width_keyword("medium"), Some(1.0));
+        assert_eq!(border_width_keyword("middle"), Some(1.0));
+        assert_eq!(border_width_keyword("thick"), Some(2.5));
+        assert_eq!(border_width_keyword("solid"), None);
+        assert!((skew_shear(0.5) + 0.5f64.tan()).abs() < 1e-12);
     }
 }

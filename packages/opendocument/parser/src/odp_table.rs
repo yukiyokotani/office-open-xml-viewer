@@ -591,21 +591,10 @@ fn border(value: Option<&str>) -> Option<Stroke> {
         } else if let Some(w) = length_emu(part) {
             width = Some(w);
         } else {
-            style = match part {
-                "thin" => {
-                    width = Some(0.75 * 12_700.0);
-                    style
-                }
-                "medium" => {
-                    width = Some(12_700.0 * 1.5);
-                    style
-                }
-                "thick" => {
-                    width = Some(12_700.0 * 3.0);
-                    style
-                }
-                other => other,
-            };
+            match crate::odf_props::border_width_keyword(part) {
+                Some(points) => width = Some(points * 12_700.0),
+                None => style = part,
+            }
         }
     }
     if style == "none" || style == "hidden" {

@@ -24,15 +24,18 @@ pub(super) fn sniff(bytes: &[u8]) -> Option<&'static str> {
     if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
         return Some("image/webp");
     }
+    // The metafile types are the names the shared renderer keys metafile
+    // handling on (core `isMetafileMime`: crop frame, text font demand), as
+    // the presentation reader and the OOXML readers spell them.
     // EMF: an EMR_HEADER record (type 1) with the " EMF" signature at 40.
     if bytes.len() >= 44 && bytes[0..4] == [1, 0, 0, 0] && &bytes[40..44] == b" EMF" {
-        return Some("image/x-emf");
+        return Some("image/emf");
     }
     // WMF: the placeable header key, or a standard header.
     if bytes.starts_with(&[0xD7, 0xCD, 0xC6, 0x9A])
         || (bytes.len() >= 4 && matches!(bytes[0..4], [1, 0, 9, 0] | [2, 0, 9, 0]))
     {
-        return Some("image/x-wmf");
+        return Some("image/wmf");
     }
     // SVG (possibly after an XML declaration, comments or a BOM).
     let head = &bytes[..bytes.len().min(4096)];
@@ -47,8 +50,12 @@ pub(super) fn sniff(bytes: &[u8]) -> Option<&'static str> {
 }
 
 /// Intrinsic picture size in points (pixels at their resolution, 96 dpi by
-/// default), from the PNG, JPEG or GIF header.
+/// default), from the PNG, JPEG or GIF header, or a metafile's natural size
+/// (`odf_props::metafile_size_pt`).
 pub(super) fn intrinsic_size(bytes: &[u8]) -> Option<(f64, f64)> {
+    if let Some(size) = crate::odf_props::metafile_size_pt(bytes) {
+        return Some(size);
+    }
     let be16 = |at: usize| -> Option<u32> {
         Some(u32::from(*bytes.get(at)?) << 8 | u32::from(*bytes.get(at + 1)?))
     };
