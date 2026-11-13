@@ -5,9 +5,12 @@ semantic versioning. While the major version is zero, minor releases may contain
 explicitly documented breaking changes; patch releases remain compatible with
 the corresponding minor release.
 
-## 0.89.10 — Unreleased
+## 0.89.10 — 2026-11-13
 
-Compatible patch release. No migration is required.
+Compatible patch release. No migration is required. Two Word layout fixes: a
+soft hyphen after a word joined with a non-breaking hyphen no longer fails
+layout, and a hidden paragraph with "page break before" ahead of a text frame
+or table now starts a new page as Word does. Both are described below.
 
 - **Word: soft hyphen after a non-breaking-hyphen word:** a paragraph where a
   `<w:softHyphen/>` follows a word joined with `<w:noBreakHyphen/>` (for
