@@ -96,6 +96,9 @@ export class FontResolverBridge {
   /** Messages received before the host (see the module comment). */
   private early: unknown[] = [];
   private timer: ReturnType<typeof setTimeout> | undefined;
+  /** The ready ceiling by wall clock as well as by timer: a busy thread may
+   * run the import's continuation before an overdue timer. */
+  private readyDeadline = 0;
   private disposed = false;
   private waiters: (() => void)[] = [];
 
@@ -123,7 +126,9 @@ export class FontResolverBridge {
       ...(options.resolverFailures ? { resolverFailures: options.resolverFailures } : {}),
     };
     this.signal({ kind: 'ooxmlFontBridgeState', state: 'pending' });
-    this.timer = setTimeout(() => this.unavailable(`it did not load within ${FONT_LOAD_CEILING_MS} ms`), FONT_LOAD_CEILING_MS);
+    const late = `it did not load within ${FONT_LOAD_CEILING_MS} ms`;
+    this.readyDeadline = Date.now() + FONT_LOAD_CEILING_MS;
+    this.timer = setTimeout(() => this.unavailable(late), FONT_LOAD_CEILING_MS);
     let loading: Promise<FontResolverBridgeHostModule>;
     try {
       loading = (options.loadHost ?? (() => import('./resolver-bridge-host.js')))();
@@ -133,6 +138,7 @@ export class FontResolverBridge {
     loading.then(({ FontResolverBridgeHost: Host }) => {
       const construction = this.construction;
       if (this.disposed || this.state !== 'pending' || !construction) return;
+      if (Date.now() >= this.readyDeadline) { this.unavailable(late); return; }
       clearTimeout(this.timer);
       this.construction = null;
       const host = new Host(construction);

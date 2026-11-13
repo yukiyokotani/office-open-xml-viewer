@@ -1686,6 +1686,24 @@ describe('fontResolver bridge: the lazily loaded host', () => {
     expect(calls).toBe(0);
   });
 
+  it('applies the ready ceiling by wall clock when the import settles before the overdue timer', async () => {
+    vi.useFakeTimers();
+    let calls = 0;
+    const source = fontResolver(() => { calls++; return [FACE(12)]; });
+    const host = deferredHost();
+    const link = bridge([source], { gate: { loadHost: host.load } });
+    await attached();
+    const held = link.session().session.ensure(demand(['Private Face']));
+    await vi.advanceTimersByTimeAsync(0);
+    // A busy thread: the clock passes the ceiling, its timer has not run yet.
+    vi.setSystemTime(Date.now() + 15_000);
+    host.resolve();
+    expect((await held).faces).toEqual([]);
+    expect(warn.mock.calls.filter(([message]: unknown[]) => String(message).includes('did not load within 15000 ms'))).toHaveLength(1);
+    expect(kinds(link.toWorker)).toEqual(['pending', 'unavailable']);
+    expect(calls).toBe(0);
+  });
+
   it('never constructs a host or answers once disposed before ready; the next reset ends the held calls', async () => {
     let calls = 0;
     const source = fontResolver(() => { calls++; return [FACE(12)]; });
