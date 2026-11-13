@@ -109,6 +109,12 @@ Compatible patch release. No migration is required.
   example "out-of-pocket" as Word stores it) no longer fails layout with
   "Segment measurement does not match its retained text range context". The
   error was a regression in 0.89.0 (#2193).
+- **Word: page break on a hidden paragraph before a frame or table:** a
+  hidden paragraph with "page break before", followed by a text frame or a
+  table, now starts a new page as Word does. Reports that put each section's
+  heading in a frame after such a paragraph no longer draw several headings on
+  top of each other on one page. Thanks to @maurodaprotis for the contribution
+  (#2195).
 
 ## 0.89.9 — 2026-11-10
 
