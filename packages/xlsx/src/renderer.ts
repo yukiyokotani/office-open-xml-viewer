@@ -3184,12 +3184,17 @@ function renderQuadrant(
 
       // Rich text: draw each run with its own font.
       const richRuns = runs?.length ? runs : undefined;
+      // A value painted as runs because of a symbol face keeps the plain
+      // path's centerContinuous geometry: centred across its selection range.
+      const runGeom = symbolRuns && alignH === 'centerContinuous'
+        ? { alignH: 'center', alignV, cx: centerContinuousX, cy, cellW: centerContinuousW, cellH, leftPad, paddingX, paddingY }
+        : { alignH, alignV, cx, cy, cellW, cellH, leftPad, paddingX, paddingY };
 
       if (xf.wrapText && richRuns) {
         // Rich text with wrapping — shared with the off-screen pre-pass.
         drawWrappedRichText(
           ctx, richRuns, runBase,
-          { alignH, alignV, cx, cy, cellW, cellH, leftPad, paddingX, paddingY },
+          runGeom,
           cs, dpr, { fontColor: cf.fontColor, readingOrder: xf.readingOrder }, cjkFallback
         );
       } else if (xf.wrapText) {
@@ -3209,7 +3214,7 @@ function renderQuadrant(
         // path and the off-screen-anchor pre-pass identical.
         drawNonWrapRichText(
           ctx, richRuns, runBase,
-          { alignH, alignV, cx, cy, cellW, cellH, leftPad, paddingX, paddingY },
+          runGeom,
           cs, dpr, { fontColor: cf.fontColor, readingOrder: xf.readingOrder }, cjkFallback
         );
       } else {
@@ -6886,35 +6891,57 @@ function drawClippedText(
   painted: SlicerPaint = { paint: (value) => value, segments: [{ authored: text, font: ctx.font }] },
 ): void {
   if (maxWidth <= 0) return;
-  // Clipped on the authored text; measured and painted stretch by stretch
-  // in their painted form and font, the ellipsis in the last stretch's font.
-  const pieces = (value: string) => {
-    const out: { text: string; font: string }[] = [];
-    let rest = [...value];
-    for (const segment of painted.segments) {
-      if (rest.length === 0) break;
-      const count = [...segment.authored].length;
-      out.push({ text: painted.paint(rest.slice(0, count).join('')), font: segment.font });
-      rest = rest.slice(count);
-    }
-    return out;
+  // Clipped on the authored code points; measured and painted stretch by
+  // stretch in their painted form and font, the ellipsis in the font of the
+  // stretch it follows. Full stretches are painted and measured once, and a
+  // candidate prefix measures only its last, partial stretch.
+  const stretches = painted.segments.map((segment) => ({ chars: [...segment.authored], font: segment.font }));
+  const measure = (value: string, font: string) => {
+    ctx.font = font;
+    return ctx.measureText(value).width;
   };
-  const width = (parts: { text: string; font: string }[]) => parts.reduce((sum, part) => {
-    ctx.font = part.font;
-    return sum + ctx.measureText(part.text).width;
-  }, 0);
-  const ellipsis = '…';
-  let parts = pieces(text);
-  if (width(parts) > maxWidth) {
-    let chars = [...text];
-    const withEllipsis = () => {
-      const clipped = pieces(chars.join(''));
-      const last = clipped[clipped.length - 1];
-      return last ? [...clipped.slice(0, -1), { ...last, text: last.text + ellipsis }]
-        : [{ text: ellipsis, font: painted.segments[0]?.font ?? ctx.font }];
-    };
-    while (chars.length > 0 && width(withEllipsis()) > maxWidth) chars = chars.slice(0, -1);
-    parts = chars.length > 0 ? withEllipsis() : [];
+  const fullText = stretches.map((stretch) => painted.paint(stretch.chars.join('')));
+  /** Widths of the full stretches before each stretch, filled on demand. */
+  const before: number[] = [0];
+  const widthBefore = (index: number) => {
+    for (let i = before.length; i <= index; i++) before[i] = before[i - 1]! + measure(fullText[i - 1]!, stretches[i - 1]!.font);
+    return before[index]!;
+  };
+  /** The stretch holding authored code point `count - 1`, and how many of
+   *  its code points the first `count` take. */
+  const starts: number[] = [];
+  stretches.reduce((sum, stretch) => { starts.push(sum); return sum + stretch.chars.length; }, 0);
+  const locate = (count: number): { index: number; take: number } => {
+    // The last stretch starting before code point `count` (binary search).
+    let low = 0;
+    let high = stretches.length - 1;
+    while (low < high) {
+      const mid = (low + high + 1) >> 1;
+      if (starts[mid]! < count) low = mid;
+      else high = mid - 1;
+    }
+    return { index: low, take: count - starts[low]! };
+  };
+  const tailOf = (index: number, take: number, ellipsis: string) => (take === stretches[index]!.chars.length
+    ? fullText[index]! : painted.paint(stretches[index]!.chars.slice(0, take).join(''))) + ellipsis;
+  /** Width of the first `count` code points plus `ellipsis`: one partial
+   *  stretch measured, the full ones before it from the cache. */
+  const widthOf = (count: number, ellipsis: string) => {
+    const { index, take } = locate(count);
+    return widthBefore(index) + measure(tailOf(index, take, ellipsis), stretches[index]!.font);
+  };
+  const partsOf = (count: number, ellipsis: string) => {
+    const { index, take } = locate(count);
+    return [...stretches.slice(0, index).map((full, i) => ({ text: fullText[i]!, font: full.font })),
+      { text: tailOf(index, take, ellipsis), font: stretches[index]!.font }];
+  };
+  const chars = stretches.reduce((sum, stretch) => sum + stretch.chars.length, 0);
+  if (stretches.length === 0 || chars === 0) return;
+  let parts = partsOf(chars, '');
+  if (widthOf(chars, '') > maxWidth) {
+    let count = chars;
+    while (count > 0 && widthOf(count, '…') > maxWidth) count--;
+    parts = count > 0 ? partsOf(count, '…') : [];
   }
   let pen = x;
   for (const part of parts) {

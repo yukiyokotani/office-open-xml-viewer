@@ -44,6 +44,7 @@ export interface SymbolPaint {
 }
 
 const identity = (text: string) => text;
+const EXTENDER = /^[\p{M}\u200C\u200D]$/u;
 
 /** A text painted as authored, in its authored face. */
 export function authoredPaint(text: string): SymbolPaint {
@@ -80,7 +81,10 @@ export function symbolPaint(
   if (pieces.size === 0) return authoredPaint(text);
   const segments: SymbolSegment[] = [];
   for (const ch of text) {
-    const unicode = converted.has(ch);
+    // A combining mark, variation selector or joiner stays with its base
+    // (one grapheme cluster shapes in one face), as in PPTX.
+    const extender = segments.length > 0 && EXTENDER.test(ch);
+    const unicode = extender ? segments[segments.length - 1]!.unicode : converted.has(ch);
     const previous = segments[segments.length - 1];
     if (previous && previous.unicode === unicode) segments[segments.length - 1] = { authored: previous.authored + ch, unicode };
     else segments.push({ authored: ch, unicode });

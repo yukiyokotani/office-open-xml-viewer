@@ -115,6 +115,29 @@ describe('XLSX symbol-font cell text', () => {
     expect(painted(realm, '⚫').length).toBeGreaterThan(2);
   });
 
+  it('keeps a combining mark with its converted base', () => {
+    const realm = symbolRealm();
+    render(realm, [{ font: font('Symbol'), value: text('a\u0301b') }]);
+    expect(painted(realm, 'α\u0301β')).toHaveLength(1);
+  });
+
+  it('centres a value in two faces across its centerContinuous range', () => {
+    const realm = symbolRealm();
+    const { worksheet, styles } = sheet([{ font: font('Symbol'), value: text('a1'), xf: { alignH: 'centerContinuous' } }], 10);
+    worksheet.rows[0]!.cells.push(
+      { row: 1, col: 2, styleIndex: 0, value: { type: 'empty' } } as never,
+      { row: 1, col: 3, styleIndex: 0, value: { type: 'empty' } } as never,
+    );
+    renderViewport(realm.ctx, worksheet, styles, { row: 1, col: 1, rows: 1, cols: 4 }, { dpr: 1 });
+    const alpha = painted(realm, 'α')[0]!;
+    const one = painted(realm, '1').find((fill) => fill.font.startsWith('15px'))!;
+    // Centred across A:C (header 50 px, three equal columns), not at A's
+    // left inset; the retained digit follows the converted alpha.
+    const left = 50 + 3;
+    expect(alpha.x).toBeGreaterThan(left + 50);
+    expect(one.x).toBeGreaterThan(alpha.x);
+  });
+
   it('converts number-format output and the invalid-value hash fill in the cell face', () => {
     const realm = symbolRealm();
     render(realm, [
