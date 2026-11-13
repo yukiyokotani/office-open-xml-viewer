@@ -350,8 +350,8 @@ export interface SymbolFaceOracleCache {
  * Canvas font string (kept per verdict) and on the faces of the realm's
  * FontFaceSet, so the oracle is replaced whenever that set changes: a face
  * added or deleted (a delta of a font source, an Office fallback route, an
- * embedded face) or a face whose status changed (a subset that finished
- * loading). It measures on a 1x1 scratch canvas of the painting context's
+ * embedded face), a face whose status changed (a subset that finished
+ * loading) or one whose matching descriptors were rewritten. It measures on a 1x1 scratch canvas of the painting context's
  * realm, so it retains no painting canvas; without one each render gets its
  * own oracle, as before. A realm without a FontFaceSet (a Node canvas) has
  * fixed host fonts: its oracle is kept for good.
@@ -360,13 +360,17 @@ export function createSymbolFaceOracleCache(factory?: SymbolProbeCanvasFactory):
   let oracle: SymbolFaceOracle | undefined;
   let fontSet: FontFaceSet | null = null;
   let faces: FontFace[] = [];
-  let statuses: FontFaceLoadStatus[] = [];
+  let states: string[] = [];
+  // What font matching reads of a face (CSS Fonts 4 §5): its status and its
+  // matching descriptors, which a page may mutate on a registered face.
+  const state = (face: FontFace) =>
+    `${face.status}\u0000${face.family}\u0000${face.style}\u0000${face.weight}\u0000${face.stretch}\u0000${face.unicodeRange}`;
   const unchanged = (set: FontFaceSet | null): boolean => {
     if (set !== fontSet) return false;
     if (!set) return true;
     let index = 0;
     for (const face of set as unknown as Iterable<FontFace>) {
-      if (faces[index] !== face || statuses[index] !== face.status) return false;
+      if (faces[index] !== face || states[index] !== state(face)) return false;
       index++;
     }
     return index === faces.length;
@@ -374,11 +378,11 @@ export function createSymbolFaceOracleCache(factory?: SymbolProbeCanvasFactory):
   const record = (set: FontFaceSet | null) => {
     fontSet = set;
     faces = [];
-    statuses = [];
+    states = [];
     if (set) {
       for (const face of set as unknown as Iterable<FontFace>) {
         faces.push(face);
-        statuses.push(face.status);
+        states.push(state(face));
       }
     }
   };

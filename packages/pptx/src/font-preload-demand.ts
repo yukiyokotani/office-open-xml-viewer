@@ -16,6 +16,15 @@ export function collectSlideFontDemand(
   byteAllowance: number,
 ): FontPreloadDemand {
   const scalars = new FontDemandScalarCollector({ budget: byteAllowance, committed });
+  // The family the renderer paints a slot with (renderer normalizeFontFamily,
+  // before embedded aliases): a theme reference resolves to the slide theme's
+  // face, an absent face to its minor face, and a ",<generic>" hint is
+  // dropped. Only whether it names a symbol-encoded family matters here.
+  const painted = (family: string | null | undefined): string | null | undefined => {
+    if (!family) return slide.theme?.minorFont;
+    if (family.startsWith('+')) return family.startsWith('+mj-') ? slide.theme?.majorFont : slide.theme?.minorFont;
+    return family.split(',')[0];
+  };
   const body = (textBody: TextBody | null | undefined): boolean => {
     if (!textBody) return true;
     if (textBody.vert && textBody.vert !== 'horz' || 'textWarp' in textBody) return false;
@@ -27,7 +36,7 @@ export function collectSlideFontDemand(
       // that face is symbol-encoded. AutoNum and blip markers remain unmodelled.
       const bullet = para.bullet;
       if (bullet?.type === 'char') {
-        if (!scalars.addSymbolText(bullet.char, [bullet.fontFamily])) return false;
+        if (!scalars.addSymbolText(bullet.char, [painted(bullet.fontFamily)])) return false;
       } else if (bullet?.type !== 'none' && bullet?.type !== 'inherit') return false;
       for (const run of para.runs) {
         if (run.type === 'break') continue;
@@ -36,7 +45,7 @@ export function collectSlideFontDemand(
         // a:sym face (§21.1.2.3.10) may draw its codes as other characters
         // (renderer paragraphInputRuns): every scalar that conversion may
         // paint is demanded (core addSymbolText).
-        const families = [(run.fontFamily ?? para.defFontFamily)?.split(',')[0], run.fontFamilySym];
+        const families = [painted(run.fontFamily ?? para.defFontFamily), run.fontFamilySym && painted(run.fontFamilySym)];
         if (!scalars.addSymbolText(run.text, families)
           || !scalars.addSymbolText(preparedPowerPointText(run, slide.slideNumber), families)) return false;
       }

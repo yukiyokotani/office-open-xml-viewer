@@ -68,6 +68,10 @@ describe('complete conservative PPTX paint demand', () => {
       .toEqual(expect.arrayContaining([0x6c, 0xf06c, 0x25cf]));
     expect(collectSlideFontDemand(slide('\uf0e0', { fontFamilySym: 'Wingdings' }), new Set(), 10000))
       .toEqual(expect.arrayContaining([0xf0e0, 0x2192]));
+    // The family the renderer paints: a ",<generic>" hint dropped, a theme reference resolved.
+    expect(bulleted('l', 'Wingdings,Sans-Serif')).toEqual(expect.arrayContaining([0x25cf]));
+    const themed = { ...slide('l', { fontFamily: '+mn-lt' }), theme: { minorFont: 'Wingdings' } } as Slide;
+    expect(collectSlideFontDemand(themed, new Set(), 10000)).toEqual(expect.arrayContaining([0x25cf]));
     // The byte budget still applies to the symbol scalars.
     const tight = slide('A');
     (tight.elements[0] as { textBody: { paragraphs: Array<{ bullet: unknown }> } }).textBody.paragraphs[0].bullet =

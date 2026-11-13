@@ -107,5 +107,8 @@ describe('PPTX symbol oracle across slide renders', () => {
     faces.push({ status: 'loaded' });
     expect(await again()).toBe(2 * once);
     expect(await again()).toBe(2 * once);
+    // A rewritten matching descriptor too.
+    (faces[1] as { unicodeRange?: string }).unicodeRange = 'U+0-7F';
+    expect(await again()).toBe(3 * once);
   });
 });

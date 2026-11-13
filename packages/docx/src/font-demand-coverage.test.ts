@@ -65,7 +65,8 @@ const TARGETED: Record<string, Uint8Array> = {
   // §17.3.3.30 sym and §17.3.2.26 rFonts naming symbol-encoded faces.
   'symbol fonts': docx(p('<w:r><w:sym w:font="Wingdings" w:char="F0E0"/></w:r>'
     + run('lnþ(a', '<w:rFonts w:ascii="Symbol" w:hAnsi="Symbol"/>')
-    + run('\uF0B7\uF06C', '<w:rFonts w:ascii="Wingdings" w:hAnsi="Wingdings"/>'))),
+    + run('\uF0B7\uF06C', '<w:rFonts w:ascii="Wingdings" w:hAnsi="Wingdings"/>')
+    + run('ab', '<w:rFonts w:ascii="Symbol" w:hAnsi="Symbol"/><w:caps/>'))),
   'east asian empty marks': docx(p('', '<w:rPr><w:rFonts w:eastAsia="MS Mincho" w:hint="eastAsia"/></w:rPr>')
     + p(run('日本語の文', '<w:rFonts w:eastAsia="MS Mincho"/><w:lang w:eastAsia="ja-JP"/>'))),
 };

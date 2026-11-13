@@ -23,6 +23,7 @@ import {
 } from '@silurus/ooxml-core/internal/font-sources';
 import {
   isMetafileMime,
+  isSymbolFontFamily,
   parseDateTimePictureSwitch,
   parseFieldFormatSwitch,
 } from '@silurus/ooxml-core';
@@ -149,10 +150,16 @@ export function docxFontDemandScalars(doc: DocxDocumentModel): FontDemandScalars
   // only bound is the scalar-count ceiling inside the collector.
   const collector = new FontDemandScalarCollector({ budget: Number.POSITIVE_INFINITY });
   if (!collector.add(String.fromCodePoint(...LAYOUT_SYNTHESIZED_SCALARS))) return 'all';
-  for (const text of synthesized) if (!collector.add(text)) return 'all';
+  // Every symbol-encoded family the document paints with. A synthesized text
+  // (a caps run's upper case, a field picture's literals) is painted in its
+  // run's fonts, which the synthesized list does not carry, so it is
+  // collected as if painted in each of them: a finite over-approximation.
+  const symbolFamilies = new Set<string>();
   for (const usage of docxRenderedTextUsages(doc, 'font-demand')) {
+    for (const family of usage.fontFamilies) if (isSymbolFontFamily(family)) symbolFamilies.add(family!);
     if (!collector.addSymbolText(usage.text, usage.fontFamilies)) return 'all';
   }
+  for (const text of synthesized) if (!collector.addSymbolText(text, symbolFamilies)) return 'all';
   return collector.result();
 }
 
