@@ -228,15 +228,14 @@ export {
 } from './fonts/symbol-font';
 export {
   createSymbolFaceOracle,
-  createSymbolFaceOracleCache,
   createSymbolMonochromeProbe,
   type SymbolFaceOracle,
-  type SymbolFaceOracleCache,
   type SymbolFaceOracleOptions,
   type SymbolProbeCanvasFactory,
   type SymbolFallbackFont,
   type SymbolProbeContext,
 } from './fonts/symbol-face';
+export { createSymbolFaceOracleCache, type SymbolFaceOracleCache } from './fonts/symbol-face-cache';
 export { renderChart, collectChartFillRenderedSizes, assertChartFillRenderedSizeCount } from './chart/renderer';
 export { formatLocalizedExcelShortDate, localizedExcelShortDateTexts } from './chart/chart-number-format';
 export { autoResize, type AutoResizeOptions } from './autoResize';
