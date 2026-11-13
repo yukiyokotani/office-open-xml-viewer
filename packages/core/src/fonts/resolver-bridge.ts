@@ -39,6 +39,12 @@
  * gone) the client likewise posts `ooxmlCancelResolveFonts`, which aborts the
  * application function's signal on main; main never posts for it.
  *
+ * Main loads its host only for a document with a resolver, after the worker
+ * may already be running: main's gate (`resolver-bridge-gate.ts`) posts the
+ * host's state (`ooxmlFontBridgeState`) and the client holds every message
+ * while the host is pending, posts them in order once it is ready, and fails
+ * every call (each family falls back) when it is unavailable.
+ *
  * Replies are validated fail-closed: anything but per-family answers within
  * `HARD_MAX_FONT_SOURCE_FAMILIES` (claimed declarations within
  * `HARD_MAX_FONT_SOURCE_DECLARATIONS`, a failure reason, absence) or a
@@ -136,12 +142,29 @@ export interface MainFontResolveReply {
 
 export type WorkerFontResolveMessage = WorkerFontResolveRequest | WorkerFontAcquireRequest | WorkerFontResolveCancel;
 
+/** Main → worker: whether main's host for the current document can take
+ * bridge messages (`resolver-bridge-gate.ts`). `pending` (posted before the
+ * document's parse request): hold them; `ready`: post what was held, in
+ * order; `unavailable`: the host will never exist, fail every call. */
+export interface MainFontBridgeState {
+  readonly kind: 'ooxmlFontBridgeState';
+  readonly state: 'pending' | 'ready' | 'unavailable';
+  readonly reason?: string;
+}
+
 type Post = (message: unknown, transfer?: Transferable[]) => void;
 
 export { copiedForTransfer, isMainFontResolveReply, isWorkerFontResolveMessage } from './resolver-bridge-messages.js';
 
 /** Longest failure reason kept from a reply (it only reaches console.warn). */
 const MAX_REASON_LENGTH = 1024;
+
+/** A bridge message held until main's host is ready, with the call it
+ * belongs to (none for a cancellation). */
+interface HeldMessage {
+  readonly message: WorkerFontResolveMessage;
+  readonly requestId?: number;
+}
 
 interface PendingCall {
   readonly kind: 'ooxmlFontsResolved' | 'ooxmlFontsAcquired';
@@ -159,6 +182,11 @@ export class WorkerFontResolverClient {
   private generation = 0;
   private nextRequestId = 1;
   private readonly pending = new Map<number, PendingCall>();
+  /** Main's host state (`MainFontBridgeState`): `ready` until main says
+   * otherwise; a reason once the host is unavailable. */
+  private hostState: 'ready' | 'pending' | { readonly reason: string } = 'ready';
+  /** Messages posted while the host is pending, in order. */
+  private held: HeldMessage[] = [];
 
   constructor(private readonly post: Post) {}
 
@@ -192,6 +220,10 @@ export class WorkerFontResolverClient {
     const urls = [...new Set(request.families.flatMap(({ urls: list }) => list))];
     const timedOut = () => new Map<string, FaceAcquisition>(urls.map((url) => [url, { reason: 'timed out' }]));
     if (signal.aborted) return Promise.resolve(timedOut());
+    const state = this.hostState;
+    if (typeof state === 'object') {
+      return Promise.resolve(new Map<string, FaceAcquisition>(urls.map((url) => [url, { reason: state.reason }])));
+    }
     const generation = this.generation;
     const requestId = this.nextRequestId++;
     return new Promise<ReadonlyMap<string, FaceAcquisition>>((resolve) => {
@@ -218,11 +250,11 @@ export class WorkerFontResolverClient {
         detach: () => signal.removeEventListener('abort', onAbort),
       });
       try {
-        this.post({
+        this.send({
           kind: 'ooxmlAcquireFonts', generation, requestId, sourceIndex: request.sourceIndex,
           resolverId: request.source.id, remainingMs: Math.max(0, deadline - Date.now()),
           families: request.families,
-        } satisfies WorkerFontAcquireRequest);
+        } satisfies WorkerFontAcquireRequest, requestId);
       } catch {
         this.settle(requestId);
         resolve(timedOut());
@@ -239,6 +271,9 @@ export class WorkerFontResolverClient {
   ): Promise<BridgedFamilyResolutions> => {
     const { signal } = context;
     if (signal.aborted) return Promise.reject(createAbortError('Font resolver abandoned'));
+    // No host will answer: the call's families fail (the session falls back).
+    const state = this.hostState;
+    if (typeof state === 'object') return Promise.reject(new Error(state.reason));
     const generation = this.generation;
     const requestId = this.nextRequestId++;
     return new Promise<BridgedFamilyResolutions>((resolve, reject) => {
@@ -259,9 +294,11 @@ export class WorkerFontResolverClient {
         detach: () => signal.removeEventListener('abort', onAbort),
       });
       try {
-        this.post({
+        // `remainingMs` is the session's time left now; main's deadline for
+        // the call starts when its host receives it (after `ready`).
+        this.send({
           kind: 'ooxmlResolveFonts', generation, requestId, sourceIndex, resolverId: source.id, demand, remainingMs,
-        } satisfies WorkerFontResolveRequest);
+        } satisfies WorkerFontResolveRequest, requestId);
       } catch (error) {
         this.settle(requestId);
         reject(error);
@@ -273,6 +310,10 @@ export class WorkerFontResolverClient {
    * consumed even when stale, so its bytes are dropped here). */
   accept(message: unknown): boolean {
     if (!isMainFontResolveReply(message)) return false;
+    if (message.kind === 'ooxmlFontBridgeState') {
+      this.hostChanged(message);
+      return true;
+    }
     const { generation, requestId } = message as Partial<MainFontResolveReply>;
     if (generation !== this.generation || typeof requestId !== 'number') return true;
     const call = this.pending.get(requestId);
@@ -305,6 +346,50 @@ export class WorkerFontResolverClient {
     }
   }
 
+  /** Main's host for the current document changed state (see
+   * {@link MainFontBridgeState}). */
+  private hostChanged({ state, reason }: Partial<MainFontBridgeState>): void {
+    if (state === 'pending') {
+      // A new document's host: what is held was addressed to the previous
+      // one, which is gone (its calls end with the next reset).
+      this.hostState = 'pending';
+      this.held = [];
+    } else if (state === 'ready') {
+      if (this.hostState !== 'pending') return;
+      this.hostState = 'ready';
+      for (const { message, requestId } of this.held.splice(0)) {
+        try {
+          this.post(message);
+        } catch (error) {
+          const call = requestId === undefined ? undefined : this.pending.get(requestId);
+          if (call && this.settle(requestId as number)) call.reject(error);
+        }
+      }
+    } else if (state === 'unavailable') {
+      if (this.hostState !== 'pending') return;
+      const failure = typeof reason === 'string' ? reason.slice(0, MAX_REASON_LENGTH) : 'font resolver bridge unavailable';
+      this.hostState = { reason: failure };
+      for (const { requestId } of this.held.splice(0)) {
+        const call = requestId === undefined ? undefined : this.pending.get(requestId);
+        if (!call || !this.settle(requestId as number)) continue;
+        if (call.kind === 'ooxmlFontsAcquired') {
+          (call.resolve as (outcome: FontAcquireOutcome) => void)({ status: 'failed', reason: failure });
+        } else {
+          call.reject(new Error(failure));
+        }
+      }
+    }
+  }
+
+  /** Post `message` to main's host, or hold it while the host is pending. */
+  private send(message: WorkerFontResolveMessage, requestId?: number): void {
+    if (this.hostState === 'pending') {
+      this.held.push(requestId === undefined ? { message } : { message, requestId });
+      return;
+    }
+    this.post(message);
+  }
+
   /** Pending calls (tests and leak checks). */
   get pendingCount(): number { return this.pending.size; }
 
@@ -317,7 +402,9 @@ export class WorkerFontResolverClient {
   }
 
   private postQuietly(message: WorkerFontResolveCancel): void {
-    try { this.post(message); } catch { /* main is gone; nothing waits there */ }
+    // No host will ever see the call: nothing to cancel.
+    if (typeof this.hostState === 'object') return;
+    try { this.send(message); } catch { /* main is gone; nothing waits there */ }
   }
 }
 

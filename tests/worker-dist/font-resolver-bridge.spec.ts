@@ -84,21 +84,46 @@ interface Rendered {
     readonly fallbackFamilies: readonly string[];
   }[];
   readonly answeredBytes: readonly number[];
+  /** Lazily loaded font chunks the page fetched (name without hash). */
+  readonly fontChunks: readonly string[];
+  readonly warnings: readonly string[];
 }
+
+interface RenderOptions {
+  /** Load through an application model source (see {@link render}). */
+  readonly modelSource?: boolean;
+  /** Make the resolver bridge host chunk fail to load (a stale deploy). */
+  readonly failHostChunk?: boolean;
+  /** Load this many documents at once (each its own worker), rendering the first. */
+  readonly documents?: number;
+}
+
+const FONT_CHUNK = /\/dist\/(resolver-bridge-host|font-source-load)-[^/]+\.js$/;
 
 /** `modelSource`: load through an application model source (the repository's
  * test-only `fake-model-source.mjs`, which opens the OOXML package itself),
  * the path model-source loaders take instead of the ordinary loader. */
-async function render(browser: Browser, format: Format, mode: 'main' | 'worker', source: Source, modelSource = false): Promise<Rendered> {
+async function render(
+  browser: Browser, format: Format, mode: 'main' | 'worker', source: Source,
+  { modelSource = false, failHostChunk = false, documents = 1 }: RenderOptions = {},
+): Promise<Rendered> {
   // A fresh context per load: no shared FontFaceSet, worker or realm state.
   const context = await browser.newContext();
   try {
     const page = await context.newPage();
+    const fontChunks: string[] = [];
+    const warnings: string[] = [];
+    page.on('console', (message) => { if (message.type() === 'warning') warnings.push(message.text()); });
+    page.on('request', (request) => {
+      const chunk = FONT_CHUNK.exec(new URL(request.url()).pathname);
+      if (chunk) fontChunks.push(chunk[1] as string);
+    });
+    if (failHostChunk) await page.route('**/dist/resolver-bridge-host-*.js', (route) => route.abort('failed'));
     await page.route('**/font-resolver-bridge', (route) => route.fulfill({
       contentType: 'text/html', body: '<!doctype html><body></body>',
     }));
     await page.goto('/font-resolver-bridge');
-    const result = await page.evaluate(async ({ format, mode, source, modelSource, documentBytes, fontBytes, family }) => {
+    const result = await page.evaluate(async ({ format, mode, source, modelSource, documents, documentBytes, fontBytes, family }) => {
       const entry = `/dist/${format}.mjs`;
       const api = await import(entry);
       const font = new Uint8Array(fontBytes);
@@ -138,21 +163,22 @@ async function render(browser: Browser, format: Format, mode: 'main' | 'worker',
         },
       } : {};
       const options = { mode, ...(fonts ? { fonts } : {}), ...modelSourceOptions };
-      const bytes = new Uint8Array(documentBytes).buffer;
-      let bitmap: ImageBitmap;
-      if (format === 'docx') {
-        const loaded = await api.DocxDocument.load(bytes, options);
-        bitmap = await loaded.renderPageToBitmap(0, { width: 816, dpr: 1 });
-        loaded.destroy();
-      } else if (format === 'pptx') {
-        const loaded = await api.PptxPresentation.load(bytes, options);
-        bitmap = await loaded.renderSlideToBitmap(0, { width: 960, dpr: 1 });
-        loaded.destroy();
-      } else {
-        const loaded = await api.XlsxWorkbook.load(bytes, options);
-        bitmap = await loaded.renderViewportToBitmap(0, { row: 1, col: 1, rows: 4, cols: 4 }, { width: 640, height: 160, dpr: 1 });
-        loaded.destroy();
-      }
+      const load = () => {
+        const bytes = new Uint8Array(documentBytes).buffer;
+        return format === 'docx' ? api.DocxDocument.load(bytes, options)
+          : format === 'pptx' ? api.PptxPresentation.load(bytes, options)
+            : api.XlsxWorkbook.load(bytes, options);
+      };
+      // Concurrent documents: each renders, the first one's bitmap is kept.
+      const loaded = await Promise.all(Array.from({ length: documents }, load));
+      const bitmaps: ImageBitmap[] = await Promise.all(loaded.map((document) => format === 'docx'
+        ? document.renderPageToBitmap(0, { width: 816, dpr: 1 })
+        : format === 'pptx'
+          ? document.renderSlideToBitmap(0, { width: 960, dpr: 1 })
+          : document.renderViewportToBitmap(0, { row: 1, col: 1, rows: 4, cols: 4 }, { width: 640, height: 160, dpr: 1 })));
+      for (const document of loaded) document.destroy();
+      const bitmap = bitmaps[0] as ImageBitmap;
+      for (const other of bitmaps.slice(1)) other.close();
       const canvas = document.createElement('canvas');
       canvas.width = bitmap.width;
       canvas.height = bitmap.height;
@@ -171,12 +197,14 @@ async function render(browser: Browser, format: Format, mode: 'main' | 'worker',
         demands: calls,
         answeredBytes: answered.map((buffer) => buffer.byteLength),
       };
-    }, { format, mode, source, modelSource, documentBytes: [...FIXTURES[format]], fontBytes: [...FONT], family: FAMILY });
+    }, { format, mode, source, modelSource, documents, documentBytes: [...FIXTURES[format]], fontBytes: [...FONT], family: FAMILY });
     return {
       png: { width: result.width, height: result.height, data: Buffer.from(result.rgba, 'base64') },
       calls: result.calls,
       demands: result.demands,
       answeredBytes: result.answeredBytes,
+      fontChunks,
+      warnings,
     };
   } finally {
     await context.close();
@@ -235,9 +263,44 @@ for (const format of ['docx', 'pptx', 'xlsx'] as const) {
   test(`${format}: a model-source load in worker mode runs the fontResolver on main`, async ({ browser }) => {
     test.setTimeout(120_000);
     const main = await render(browser, format, 'main', 'resolver');
-    const worker = await render(browser, format, 'worker', 'resolver', true);
+    const worker = await render(browser, format, 'worker', 'resolver', { modelSource: true });
     expect(worker.calls).toBe(1);
     expect(worker.answeredBytes).toEqual([FONT.byteLength]);
     expect(diffPct(main.png, worker.png)).toBeLessThanOrEqual(0.2);
+  });
+}
+
+// The bridge host loads through import() (core resolver-bridge-gate.ts), only
+// for a worker-mode document with a fontResolver (XLSX: in the same import()
+// as its font-source module, which its viewer realm loads anyway).
+for (const format of ['docx', 'pptx', 'xlsx'] as const) {
+  test(`${format}: loads the resolver bridge host only for a worker-mode document with a resolver`, async ({ browser }) => {
+    test.setTimeout(180_000);
+    const host = ['resolver-bridge-host'];
+    const worker = await render(browser, format, 'worker', 'resolver');
+    expect(worker.fontChunks.filter((chunk) => chunk === 'resolver-bridge-host')).toEqual(host);
+    for (const [mode, source] of [['worker', 'none'], ['worker', 'data-url'], ['main', 'resolver']] as const) {
+      const other = await render(browser, format, mode, source);
+      expect(other.fontChunks, `${mode} ${source}`).not.toContain('resolver-bridge-host');
+    }
+    // Concurrent documents: each its own host, one chunk load, the same pixels.
+    const two = await render(browser, format, 'worker', 'resolver', { documents: 2 });
+    expect(two.fontChunks.filter((chunk) => chunk === 'resolver-bridge-host')).toEqual(host);
+    expect(two.calls).toBe(1);
+    expect(diffPct(two.png, worker.png)).toBeLessThanOrEqual(0.2);
+  });
+}
+
+// A deploy that lost the host chunk: the resolver's families fall back (the
+// per-family failure policy of run-time font-source failures), load() resolves.
+for (const format of ['docx', 'pptx'] as const) {
+  test(`${format}: a host chunk that fails to load makes the resolver families fall back`, async ({ browser }) => {
+    test.setTimeout(120_000);
+    const none = await render(browser, format, 'main', 'none');
+    const failed = await render(browser, format, 'worker', 'resolver', { failHostChunk: true });
+    expect(failed.calls).toBe(0);
+    expect(diffPct(failed.png, none.png)).toBeLessThanOrEqual(0.2);
+    expect(failed.warnings.filter((text) => text.includes('font resolver bridge failed to load'))).toHaveLength(1);
+    expect(failed.warnings.some((text) => text.includes('font resolver bridge unavailable'))).toBe(true);
   });
 }

@@ -9,7 +9,7 @@ import { xlsxCjkFallback } from './font-requests.js';
 import InlineWorker from './worker.ts?worker&inline';
 import wasmAssetUrl from './wasm/xlsx_parser_bg.wasm?url';
 import {
-  FontResolverBridgeHost,
+  FontResolverBridge,
   normalizeFontOptions,
   optionFontSources,
   type FontSessionDemand,
@@ -258,9 +258,13 @@ export class XlsxWorkbook {
   private officeFontRequests: OfficeFontFallbackRequest[] = [];
   private readonly retainedFontSets = new Map<FontFaceSet, RetainedFontSet>();
   /** Worker mode: runs this workbook's `fontResolver` functions for the
-   *  worker's font-source session (core `resolver-bridge-host.ts`); disposed
+   *  worker's font-source session (core `resolver-bridge-gate.ts`); disposed
    *  in {@link destroy}, which aborts every in-flight resolver call. */
-  private fontResolverBridge: FontResolverBridgeHost | null = null;
+  private fontResolverBridge: FontResolverBridge | null = null;
+  /** Worker mode with a resolver: the font-source module, loaded from the
+   *  bridge's attachment for both the bridge host and this load's
+   *  {@link prepareFontSources}, so both realms get it from one load. */
+  private fontSourceModule: Promise<typeof import('./font-source-load.js')> | null = null;
   /** Resolver failures of this workbook, shared by its viewer-realm sessions
    * and its worker bridge (core `resolver-resolution.ts`). */
   private fontResolverFailures: FontResolverFailures = new Map();
@@ -696,18 +700,31 @@ export class XlsxWorkbook {
   }
 
   /** Worker mode: answer the render worker's `fontResolver` calls for the
-   * document about to be parsed (core `resolver-bridge-host.ts`). */
+   * document about to be parsed (core `resolver-bridge-gate.ts`). */
   private attachFontResolverBridge(bridge: WorkbookBridge, fonts: readonly FontSourceDescriptor[] | undefined): void {
     this.fontResolverBridge?.dispose();
     this.fontResolverFailures = new Map();
+    this.fontSourceModule = null;
+    const resolver = this._mode === 'worker' && Array.isArray(fonts) && fonts.some((source) => source.kind === 'font-resolver');
+    // With a resolver, the host comes in the same import() as the
+    // font-source module this load's prepareFontSources awaits
+    // (font-source-bridge-load.ts): both realms get it from one load, so the
+    // worker's bridge and the viewer-realm sessions that share its failure
+    // record never disagree on whether the resolver can run (a failed import
+    // fails the families in the worker and rejects load() as before), and a
+    // stalled chunk stalls load() as before, hence no ready ceiling (core
+    // resolver-bridge-gate.ts).
+    const fontSourceModule = resolver ? import('./font-source-bridge-load.js') : null;
+    this.fontSourceModule = fontSourceModule;
     this.fontResolverBridge = this._mode === 'worker'
-      ? new FontResolverBridgeHost({
+      ? new FontResolverBridge({
         post: (message, transfer) => bridge.post(message, transfer),
         sources: fonts,
         // One outcome per family for the whole workbook: the viewer-realm
         // sessions and the worker share this failure record (and main's
         // resolution cache), so paint and hit geometry use the same faces.
         resolverFailures: this.fontResolverFailures,
+        ...(fontSourceModule ? { loadHost: () => fontSourceModule, readyCeilingMs: Infinity } : {}),
       })
       : null;
   }
@@ -721,7 +738,7 @@ export class XlsxWorkbook {
   private async prepareFontSources(workbook: ParsedWorkbook, fonts: readonly FontSourceDescriptor[] | undefined): Promise<void> {
     this.fonts = fonts;
     if (!fonts?.length) return;
-    const fontSourceLoad = await import('./font-source-load.js');
+    const fontSourceLoad = await (this.fontSourceModule ?? import('./font-source-load.js'));
     this.fontSessionType = fontSourceLoad.FontSourceSession;
     this.fontAcquirerFor = fontSourceLoad.inRealmResolverFaceAcquirer;
     this.fontDemand = new fontSourceLoad.XlsxFontDemand(workbook, this.cjkFallback, fontSourceLoad.declaredFontSubstitutions(fonts));
@@ -1814,6 +1831,7 @@ export class XlsxWorkbook {
     this.fontsDestroyed = true;
     this.fontResolverBridge?.dispose();
     this.fontResolverBridge = null;
+    this.fontSourceModule = null;
     this.fontResolverFailures = new Map();
     for (const retained of this.retainedFontSets.values()) {
       // Releasing settles an in-flight ensure (it resolves empty).
