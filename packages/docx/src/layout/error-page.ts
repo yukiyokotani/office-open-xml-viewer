@@ -37,13 +37,9 @@ function placeholderLines(
   maxLines: number,
   weight?: number,
 ): string[] {
-  return wrapErrorPlaceholderText(text, maxWidthPt, maxLines, (value) => service.shape({
-    text: value,
-    fontSizePt,
-    ...(weight === undefined ? {} : { weight }),
-    fonts: {},
-    genericFamily: 'sans-serif',
-  }).advancePt);
+  return wrapErrorPlaceholderText(text, maxWidthPt, maxLines, (value) => service.shape(weight === undefined
+    ? { text: value, fontSizePt, fonts: {}, genericFamily: 'sans-serif' }
+    : { text: value, fontSizePt, weight, fonts: {}, genericFamily: 'sans-serif' }).advancePt);
 }
 
 export const PARSE_ERROR_PAGE_TITLE = 'This document could not be displayed';
