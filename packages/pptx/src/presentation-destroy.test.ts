@@ -1,4 +1,3 @@
-import { fontFiles, googleFonts } from '@silurus/ooxml-core/internal/font-sources';
 import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
 import {
   WorkerBridge,
@@ -11,6 +10,9 @@ let { PptxPresentation } = await import('./presentation');
 let { registerEmbeddedFonts } = await import('@silurus/ooxml-core');
 import type { PptxPresentation as Presentation } from './presentation';
 let { loadEmbeddedFonts } = await import('./embedded-fonts');
+// Font sources must come from the module instance the presentation uses
+// (`fonts` accepts only that instance's factory results).
+let { fontFiles, googleFonts } = await import('@silurus/ooxml-core/internal/font-sources');
 import type { PptxEmbeddedFontRef } from './worker-protocol';
 
 /**
@@ -58,6 +60,7 @@ beforeEach(async () => {
   ({ PptxPresentation } = await import('./presentation'));
   ({ registerEmbeddedFonts } = await import('@silurus/ooxml-core'));
   ({ loadEmbeddedFonts } = await import('./embedded-fonts'));
+  ({ fontFiles, googleFonts } = await import('@silurus/ooxml-core/internal/font-sources'));
 });
 
 afterEach(() => {

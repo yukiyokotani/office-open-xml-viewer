@@ -26,11 +26,12 @@
  *     image-effect/fill geometry at render time.
  *   - `'invalid-numbering'`     — a DOCX numbering level that Word cannot open
  *     normally (invalid paragraph ilvl or an out-of-range level definition).
- *   - `'font-source-limit'`     — a configured font source exceeded a generated
- *     hard ceiling (stylesheet bytes, declaration/family count, face bytes,
- *     retained bytes or URL length); {@link OoxmlError.violation} names it.
- *     A breach is a misconfigured or hostile source, so it rejects the
- *     operation instead of degrading to host fonts.
+ *   - `'font-source-limit'`     — a font source factory received a value
+ *     beyond a generated hard ceiling (declaration count, face bytes or URL
+ *     length); {@link OoxmlError.violation} names it. Thrown by the factory
+ *     (a misconfigured source fails fast). A ceiling reached while a document
+ *     loads never throws: the families concerned keep their host fallback
+ *     with a warning, like a network failure.
  */
 export type OoxmlErrorCode =
   | 'encrypted'

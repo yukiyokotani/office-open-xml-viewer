@@ -21,7 +21,7 @@
  */
 import type { BridgedFamilyAnswer, FontResolveOutcome } from './resolver-bridge.js';
 import type { FamilyResolution, SourceCache } from './source-cache.js';
-import type { FontResolverSource, FontSource } from './source.js';
+import type { FontResolverSource, FontSourceDescriptor } from './source.js';
 import { fontFamilyKey } from './substitutions.js';
 
 /** Failure reason by {@link fontResolverFailureKey}. */
@@ -146,7 +146,7 @@ export type DocumentSourceCache = (sourceIndex: number, source: FontResolverSour
  */
 export function settledBridgedRequest(
   failures: FontResolverFailures,
-  sources: readonly FontSource[],
+  sources: readonly FontSourceDescriptor[],
   request: { readonly sourceIndex?: unknown; readonly resolverId?: unknown; readonly demand?: unknown },
   cacheFor: DocumentSourceCache,
 ): SettledBridgedRequest | undefined {
@@ -175,7 +175,7 @@ export function settledBridgedRequest(
  */
 export function concludeBridgedRequest(
   failures: FontResolverFailures,
-  sources: readonly FontSource[],
+  sources: readonly FontSourceDescriptor[],
   request: { readonly sourceIndex?: unknown; readonly resolverId?: unknown; readonly demand?: unknown },
   reason: string,
   cacheFor: DocumentSourceCache,

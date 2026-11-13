@@ -30,7 +30,7 @@ describe('normalizeFontOptions (useGoogleFonts alias, design §9.1)', () => {
     normalizeFontOptions({ useGoogleFonts: true });
     expect(warn.mock.calls).toEqual([[USE_GOOGLE_FONTS_DEPRECATION_MESSAGE]]);
     expect(USE_GOOGLE_FONTS_DEPRECATION_MESSAGE).toBe(
-      '[ooxml] useGoogleFonts is deprecated and will be removed in 0.91.0. Replace it with fonts: [googleFonts()] — import { googleFonts } from \'@silurus/ooxml\' (also exported from the docx/xlsx/pptx entries). A custom CSS origin is googleFonts({ cssOrigin }); other sources are fontCssApi(), fontCss(), fontFiles() and fontResolver(). See docs/migration-0.90.md.',
+      '[ooxml] useGoogleFonts is deprecated: from 0.91.0 it is ignored (no web fonts are loaded). Replace it with fonts: [googleFonts()] — import { googleFonts } from \'@silurus/ooxml\' (also exported from the docx/xlsx/pptx entries). A custom CSS origin is googleFonts({ cssOrigin }); other sources are fontCssApi(), fontCss(), fontFiles() and fontResolver(). See docs/migration-0.90.md.',
     );
     resetFontDeprecationWarningsForTests();
     normalizeFontOptions({ useGoogleFonts: false });
@@ -46,9 +46,12 @@ describe('normalizeFontOptions (useGoogleFonts alias, design §9.1)', () => {
     expect(normalizeFontOptions({ useGoogleFonts: false, fonts: [source] }).fonts).toEqual([source]);
   });
 
-  it('validates fonts and omits an empty list', () => {
+  it('accepts only factory results in fonts and omits an empty list', () => {
     expect(normalizeFontOptions({ fonts: [] })).toEqual({});
+    const source = googleFonts();
+    expect(normalizeFontOptions({ fonts: [source] }).fonts?.[0]).toBe(source);
     expect(() => normalizeFontOptions({ fonts: [{ kind: 'font-css-api' }] as never })).toThrow(TypeError);
+    expect(() => normalizeFontOptions({ fonts: [structuredClone(source)] })).toThrow(TypeError);
     expect(() => normalizeFontOptions({ fonts: 'google' as never })).toThrow(TypeError);
   });
 });

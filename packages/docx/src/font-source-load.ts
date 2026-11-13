@@ -17,7 +17,7 @@ import {
   FontSourceSession,
   type FontSessionDemand,
   type FontSourceSessionOptions,
-  type FontSource,
+  type FontSourceDescriptor,
   type LoadedFontSources,
 } from '@silurus/ooxml-core/internal/font-sources';
 import {
@@ -177,16 +177,15 @@ export interface DocxLoadedFontSources {
 
 /**
  * Resolve, register and load one document's faces into `fontSet` (the
- * painting realm's set) before pagination measures text. Rejects with
- * `OoxmlError('font-source-limit')` for a misconfigured or hostile source and
- * with an `AbortError` when `signal` aborts; a failed face only warns and
- * keeps its host fallback. The caller owns `session` and releases it with the
+ * painting realm's set) before pagination measures text. Rejects with an
+ * `AbortError` when `signal` aborts; a failed family or face (including a
+ * run-time limit breach) only warns and keeps its host fallback. The caller owns `session` and releases it with the
  * document.
  */
 export async function loadDocxFontSources(
   doc: DocxDocumentModel,
   plan: DocxFontFamilyPlan,
-  sources: readonly FontSource[],
+  sources: readonly FontSourceDescriptor[],
   // Worker mode passes the bridge's session options: `fontResolver`
   // functions run on main, and main fetches their claimed URL faces (core
   // resolver-bridge.ts).

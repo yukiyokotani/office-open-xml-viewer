@@ -15,9 +15,10 @@
  * `AbortSignal` that the worker's cancellation, document destroy and the 15 s
  * font ceiling abort (a shared call is aborted only when every requester left).
  * The reply carries each family's candidate declarations (the worker claims
- * from them under the scope its own text proves), failure or absence, or the
- * breached ceiling. The host downloads the candidates' URL faces in this
- * realm before posting (`resolver-bridge-host.ts`).
+ * from them under the scope its own text proves), failure or absence. A
+ * run-time ceiling breach (an oversized answer) is a failure of the call's
+ * families. The worker later asks the host for the URL faces its text needs
+ * (`resolver-bridge-host.ts`).
  *
  * Holding and bytes (design §4.3, §4.4): the bridge holds every entry it
  * joined through the document's cache handle until the document is destroyed,
@@ -36,7 +37,6 @@
  * cancelled (or abandoned with a newer generation), or produced after the
  * document was destroyed, is never posted.
  */
-import type { OoxmlError } from '../errors/ooxml-error.js';
 import { HARD_MAX_FONT_SOURCE_FAMILIES } from '../worker/resource-policy.generated.js';
 import { FONT_LOAD_CEILING_MS } from './font-registry.js';
 import {
@@ -57,7 +57,7 @@ import {
   fontResolverFunction,
   type FontDemand,
   type FontResolverSource,
-  type FontSource,
+  type FontSourceDescriptor,
 } from './source.js';
 
 type Post = (message: unknown, transfer?: Transferable[]) => void;
@@ -66,7 +66,7 @@ export interface FontResolverResponderOptions {
   /** Posts to the document's render worker. */
   readonly post: Post;
   /** The document's validated `fonts` option (main-realm descriptors). */
-  readonly sources: readonly FontSource[];
+  readonly sources: readonly FontSourceDescriptor[];
   /** The document's resolver failure record, shared with its viewer-realm
    * sessions (XLSX); a private one otherwise. */
   readonly resolverFailures?: FontResolverFailures;
@@ -98,15 +98,10 @@ export function copyBridgedFontDemand(value: unknown): FontDemand | undefined {
   return Object.freeze({ families, fallbackFamilies });
 }
 
-function isFontSourceLimit(error: unknown): error is OoxmlError & { violation: NonNullable<OoxmlError['violation']> } {
-  return error instanceof Error && (error as OoxmlError).code === 'font-source-limit'
-    && (error as OoxmlError).violation !== undefined;
-}
-
 /** One document's main-side bridge. */
 export class FontResolverResponder {
   private readonly post: Post;
-  private sources: readonly FontSource[];
+  private sources: readonly FontSourceDescriptor[];
   private readonly failures: FontResolverFailures;
   private disposed = false;
   /** Newest worker generation seen; older calls are abandoned. */
@@ -273,12 +268,6 @@ export class FontResolverResponder {
       };
     } catch (error) {
       if (expired()) return fail('timed out');
-      if (isFontSourceLimit(error)) {
-        // Concluded per family like any other batch end; the breach itself
-        // still rejects the worker's load.
-        fail(error.message);
-        return { status: 'limit', violation: error.violation };
-      }
       return fail(error instanceof Error ? error.message : String(error));
     }
   }

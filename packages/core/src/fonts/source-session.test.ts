@@ -2,8 +2,11 @@ import { readFile } from 'node:fs/promises';
 import { setFlagsFromString } from 'node:v8';
 import { runInNewContext } from 'node:vm';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { OoxmlError } from '../errors/ooxml-error.js';
-import { HARD_MAX_FONT_SOURCE_FACE_BYTES, HARD_MAX_FONT_SOURCE_FAMILIES } from '../worker/resource-policy.generated.js';
+import {
+  HARD_MAX_FONT_SOURCE_FACE_BYTES,
+  HARD_MAX_FONT_SOURCE_FAMILIES,
+  HARD_MAX_FONT_SOURCE_URL_LENGTH,
+} from '../worker/resource-policy.generated.js';
 import { googleFonts } from './presets/google-fonts.js';
 import { liveSourceCacheCount, sourceCacheEntryCount } from './source-cache.js';
 import { FontSourceSession, fontSourceFaceIdentity, pendingMetricDecodeCount, retainedFontSourceBytes, type FontSessionDemand } from './source-session.js';
@@ -408,10 +411,39 @@ describe('FontSourceSession: credentials omit', () => {
     expect(String(warn.mock.calls.at(-1)?.[0])).toContain('File (HTTP 404), Gone (HTTP 404)');
   });
 
-  it('rejects a downloaded face beyond the face ceiling', async () => {
-    installFetch({ 'https://app.example/huge.woff2': { bytes: HARD_MAX_FONT_SOURCE_FACE_BYTES + 1 } });
-    const session = open([fontFiles({ faces: [{ family: 'Huge', url: 'https://app.example/huge.woff2' }], credentials: 'omit' })], fakeSet());
-    await expect(session.ensure(demand(['Huge']))).rejects.toMatchObject({ code: 'font-source-limit', violation: { quota: 'face' } });
+  it('fetches only the demanded unicode-range subsets, delta by delta, without credentials', async () => {
+    const { calls } = installFetch({
+      'https://fonts.internal.example/kit.css': { css: [
+        rule('Kit', 'latin.woff2', 'unicode-range: U+0-FF;'),
+        rule('Kit', 'kana.woff2', 'unicode-range: U+3000-30FF;'),
+        rule('Kit', 'kanji.woff2', 'unicode-range: U+4E00-9FFF;'),
+      ].join('\n') },
+      'https://fonts.internal.example/latin.woff2': { bytes: 4 },
+      'https://fonts.internal.example/kana.woff2': { bytes: 5 },
+      'https://fonts.internal.example/kanji.woff2': { bytes: 6 },
+    });
+    const set = fakeSet();
+    const session = open([fontCss({ url: 'https://fonts.internal.example/kit.css', credentials: 'omit' })], set);
+    expect((await session.ensure(demand(['Kit'], [0x41]))).faces.map((face) => face.unicodeRange)).toEqual(['U+0-FF']);
+    expect((await session.ensure(demand([], [0x3042]))).faces.map((face) => face.unicodeRange))
+      .toEqual(['U+0-FF', 'U+3000-30FF']);
+    expect(calls.map((call) => call.url.split('/').pop())).toEqual(['kit.css', 'latin.woff2', 'kana.woff2']);
+    for (const call of calls) expect(call.init?.credentials).toBe('omit');
+  });
+
+  it('fails only a downloaded face beyond the face ceiling, with a warning', async () => {
+    installFetch({
+      'https://app.example/huge.woff2': { bytes: HARD_MAX_FONT_SOURCE_FACE_BYTES + 1 },
+      'https://app.example/bold.woff2': { bytes: 8 },
+    });
+    const session = open([fontFiles({ faces: [
+      { family: 'Huge', url: 'https://app.example/huge.woff2' },
+      { family: 'Huge', url: 'https://app.example/bold.woff2', weight: '700' },
+    ], credentials: 'omit' })], fakeSet());
+    const loaded = await session.ensure(demand(['Huge']));
+    expect(loaded.faces.map((face) => face.weight)).toEqual(['700']);
+    expect(String(warn.mock.calls.at(-1)?.[0])).toContain('Huge (Font source limit exceeded (face)');
+    expect(retainedFontSourceBytes()).toBe(2 * 8);
   });
 });
 
@@ -632,41 +664,109 @@ describe('FontSourceSession: claim-once chaining', () => {
   });
 });
 
-describe('FontSourceSession: limits fail closed', () => {
-  function expectLimit(error: unknown, quota: string) {
-    expect(error).toBeInstanceOf(OoxmlError);
-    expect(error).toMatchObject({ code: 'font-source-limit', violation: { quota } });
-  }
+describe('FontSourceSession: run-time limits fail only their family', () => {
+  const warned = () => String(warn.mock.calls.at(-1)?.[0]);
 
-  it('rejects more demanded families than the ceiling, then stays failed', async () => {
-    installFetch({});
+  it('fails the demanded families beyond the ceiling and keeps loading the rest', async () => {
+    installFetch({ 'https://app.example/f0.woff2': { bytes: 4 } });
     const set = fakeSet();
     const session = open([fontFiles({ faces: [{ family: 'F0', url: 'https://app.example/f0.woff2' }] })], set);
     await session.ensure(demand(['F0']));
     expect(set.faces).toHaveLength(1);
     const many = Array.from({ length: HARD_MAX_FONT_SOURCE_FAMILIES + 1 }, (_, index) => `F${index}`);
-    const error = await session.ensure(demand(many)).catch((caught: unknown) => caught);
-    expectLimit(error, 'families');
-    // The session released everything and rethrows the same breach.
-    expect(set.faces).toHaveLength(0);
-    await expect(session.ensure(demand(['F0']))).rejects.toBe(error);
+    const loaded = await session.ensure(demand(many));
+    expect(loaded.faces.map((face) => face.family)).toEqual(['F0']);
+    expect(warned()).toContain(`families over the limit: 1 [F${HARD_MAX_FONT_SOURCE_FAMILIES}]`
+      + ` (Font source limit exceeded (families): entry-count ${HARD_MAX_FONT_SOURCE_FAMILIES + 1}`);
+    // The session stays live; names beyond the ceiling are not kept, so a
+    // flood of them retains nothing and each delta naming them warns again.
+    warn.mockClear();
+    const flood = Array.from({ length: 1000 }, (_, index) => `G${index}`);
+    expect((await session.ensure(demand(flood))).faces).toHaveLength(1);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warned()).toContain('families over the limit: 1000 [G0, G1, G2, G3, G4, G5, G6, G7, …]');
+    // Nothing is remembered about them: the same delta warns again.
+    await session.ensure(demand(flood));
+    expect(warn).toHaveBeenCalledTimes(2);
   });
 
-  it('rejects more declarations per session than the ceiling', async () => {
+  it('fetches no subset of another style for an unranged face', async () => {
+    const { calls } = installFetch({
+      'https://app.example/latin.woff2': { bytes: 4 },
+      'https://app.example/italic.woff2': { bytes: 5 },
+    });
+    const session = open([fontFiles({ faces: [
+      { family: 'Mixed', url: 'https://app.example/latin.woff2', unicodeRange: 'U+0-FF' },
+      { family: 'Mixed', url: 'https://app.example/cjk.woff2', unicodeRange: 'U+4E00-9FFF' },
+      { family: 'Mixed', url: 'https://app.example/italic.woff2', style: 'italic' },
+    ] })], fakeSet());
+    await session.ensure(demand(['Mixed'], [0x41]));
+    expect(calls.map((call) => call.url.split('/').pop()).sort()).toEqual(['italic.woff2', 'latin.woff2']);
+  });
+
+  it.each([
+    [{ weight: '400.0' }, { weight: 'normal' }],
+    [{ weight: '100 900' }, { weight: 'bold', stretch: '75%' }],
+    [{ style: 'oblique' }, { style: 'oblique 10deg 20deg' }],
+  ])('registers a ranged face before an unranged one it may compete with (%o, %o)', async (ranged, unranged) => {
+    installFetch({ 'https://app.example/cjk.woff2': { bytes: 4 }, 'https://app.example/any.woff2': { bytes: 5 } });
+    const set = fakeSet();
+    const session = open([fontFiles({ faces: [
+      { family: 'Spelled', url: 'https://app.example/cjk.woff2', unicodeRange: 'U+4E00-9FFF', ...ranged },
+      { family: 'Spelled', url: 'https://app.example/any.woff2', ...unranged },
+    ] })], set);
+    await session.ensure(demand(['Spelled'], [0x41]));
+    await session.ensure(demand([], [0x4E00]));
+    // One component, in declaration order (the later unranged face wins).
+    expect(set.faces.map((face) => (face.source as ArrayBuffer).byteLength)).toEqual([4, 5]);
+  });
+
+  it('keeps an unranged face with every subset of the same style, whatever the weight spelling', async () => {
+    const { calls } = installFetch({
+      'https://app.example/any.woff2': { bytes: 4 },
+      'https://app.example/cjk-400.woff2': { bytes: 5 },
+      'https://app.example/hangul-700.woff2': { bytes: 6 },
+    });
+    const set = fakeSet();
+    const session = open([fontFiles({ faces: [
+      { family: 'Mixed', url: 'https://app.example/any.woff2' },
+      { family: 'Mixed', url: 'https://app.example/cjk-400.woff2', weight: '400', unicodeRange: 'U+4E00-9FFF' },
+      { family: 'Mixed', url: 'https://app.example/hangul-700.woff2', weight: 'bold', unicodeRange: 'U+AC00-D7AF' },
+      { family: 'Mixed', url: 'https://app.example/kana-italic.woff2', style: 'italic', unicodeRange: 'U+3000-30FF' },
+    ] })], set);
+    await session.ensure(demand(['Mixed'], [0x41]));
+    // Upright faces of any weight stay with the unranged upright face; the
+    // italic subset is apart.
+    expect(calls.map((call) => call.url.split('/').pop())).toEqual(['any.woff2', 'cjk-400.woff2', 'hangul-700.woff2']);
+    expect(set.faces.map((face) => (face.source as ArrayBuffer).byteLength)).toEqual([4, 5, 6]);
+  });
+
+  it('fails the family whose declarations would cross the per-session ceiling', async () => {
     const faces = (family: string) => Array.from({ length: 1100 }, (_, index) => ({
       family, url: `https://app.example/${family}-${index}.woff2`, unicodeRange: `U+${(index + 0x100).toString(16)}`,
     }));
+    installFetch({});
     const set = fakeSet();
     const session = open([fontFiles({ faces: faces('A') }), fontFiles({ faces: faces('B') })], set);
-    expectLimit(await session.ensure(demand(['A', 'B'], [])).catch((caught: unknown) => caught), 'declarations');
-    expect(set.faces).toHaveLength(0);
+    expect((await session.ensure(demand(['A', 'B'], []))).faces).toEqual([]);
+    expect(warned()).toContain('B (Font source limit exceeded (declarations): entry-count 2200');
+    expect(warned()).not.toContain('A (');
   });
 
-  it('rejects a stylesheet beyond the byte ceiling', async () => {
+  it('fails a document family whose CSS API request would exceed the URL ceiling', async () => {
+    installFetch({ 'https://fonts.example/css?family=Short': { css: rule('Short', 'short.woff2') }, 'https://fonts.example/short.woff2': { bytes: 4 } });
+    const long = 'L'.repeat(HARD_MAX_FONT_SOURCE_URL_LENGTH);
+    const loaded = await open([fontCssApi({ urlTemplate: 'https://fonts.example/css?family={family}' })], fakeSet())
+      .ensure(demand(['Short', long]));
+    expect(loaded.faces.map((face) => face.family)).toEqual(['Short']);
+    expect(warned()).toContain(`${long} (Font source limit exceeded (url)`);
+  });
+
+  it('fails the families of a stylesheet beyond the byte ceiling, like an unreachable one', async () => {
     installFetch({ 'https://fonts.example/huge.css': { css: `/*${'x'.repeat(1024 * 1024)}*/` } });
-    const error = await open([fontCss({ url: 'https://fonts.example/huge.css' })], fakeSet())
-      .ensure(demand(['Brand'])).catch((caught: unknown) => caught);
-    expectLimit(error, 'stylesheet');
+    const loaded = await open([fontCss({ url: 'https://fonts.example/huge.css' })], fakeSet()).ensure(demand(['Brand']));
+    expect(loaded.faces).toEqual([]);
+    expect(warned()).toContain('Brand (Font source limit exceeded (stylesheet)');
   });
 
   it('charges data bytes once per realm and rejects beyond the retained ceiling', async () => {
@@ -690,8 +790,11 @@ describe('FontSourceSession: limits fail closed', () => {
         sources: [sourceModule.fontFiles({ faces: [{ family: 'Big', url: `data:font/ttf;base64,${'AAAA'.repeat(14)}` }] })],
         fontSet: asSet(set),
       });
-      const error = await over.ensure(demand(['Big'])).catch((caught: unknown) => caught);
-      expect(error).toMatchObject({ code: 'font-source-limit', violation: { quota: 'retained', observed: 102 } });
+      // Beyond the realm ceiling the face fails alone (warned); nothing is charged.
+      expect((await over.ensure(demand(['Big']))).faces).toEqual([]);
+      expect(String(warn.mock.calls.at(-1)?.[0])).toContain('Big (Font source limit exceeded (retained): bytes 102 > 100)');
+      expect(fresh.retainedFontSourceBytes()).toBe(60);
+      over.release();
       a.release();
       b.release();
       expect(fresh.retainedFontSourceBytes()).toBe(0);
@@ -732,7 +835,13 @@ describe('FontSourceSession: retained bytes held by shared caches', () => {
       await open1.ensure(demand(['C']));
       expect(fresh.retainedFontSourceBytes()).toBe(60);
       const open2 = new fresh.FontSourceSession({ sources: [source], fontSet: asSet(set) });
-      await expect(open2.ensure(demand(['D']))).rejects.toMatchObject({ code: 'font-source-limit', violation: { quota: 'retained' } });
+      // D's cached answer fits (90), its registration would not (120): D
+      // fails alone, with a warning, and only the cached copy is charged.
+      expect((await open2.ensure(demand(['D']))).faces).toEqual([]);
+      expect(String(warn.mock.calls.at(-1)?.[0])).toContain('D (Font source limit exceeded (retained): bytes 120 > 100)');
+      expect(fresh.retainedFontSourceBytes()).toBe(90);
+      open2.release();
+      expect(fresh.retainedFontSourceBytes()).toBe(60);
       open1.release();
       idle.release();
       expect(fresh.retainedFontSourceBytes()).toBe(0);
@@ -1183,6 +1292,27 @@ describe('FontSourceSession: served face tables', () => {
     // Its own tables are read; nothing is left to measure again.
     expect(loaded.faces[0]?.resourceMetrics?.hheaLineGap).toBe(300);
     expect(loaded.faces[0]?.probeSource).toBeUndefined();
+  });
+
+  it('fetches a resolver\'s faces per painted unicode-range subset, as for every other source', async () => {
+    const { calls } = installFetch({
+      'https://fonts.app.example/latin.woff2': { bytes: 4 },
+      'https://fonts.app.example/kana.woff2': { bytes: 5 },
+    });
+    let resolved = 0;
+    const session = open([fontResolver((request) => {
+      resolved++;
+      return request.families.flatMap((family) => [
+        { family, url: 'https://fonts.app.example/latin.woff2', unicodeRange: 'U+0-FF' },
+        { family, url: 'https://fonts.app.example/kana.woff2', unicodeRange: 'U+3000-30FF' },
+      ]);
+    })], fakeSet());
+    expect((await session.ensure(demand(['Private'], [0x41]))).faces.map((face) => face.unicodeRange)).toEqual(['U+0-FF']);
+    expect(calls.map((call) => call.url.split('/').pop())).toEqual(['latin.woff2']);
+    expect((await session.ensure(demand([], [0x3042]))).faces).toHaveLength(2);
+    expect(calls.map((call) => call.url.split('/').pop())).toEqual(['latin.woff2', 'kana.woff2']);
+    // One resolution; the later subset came from the same answer.
+    expect(resolved).toBe(1);
   });
 
   // Synthetic fixtures (scripts/generate-fixture-font.py): hhea/typo lineGap

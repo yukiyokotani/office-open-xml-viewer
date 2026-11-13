@@ -1,7 +1,6 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { OoxmlError } from '../errors/ooxml-error.js';
 import { HARD_MAX_FONT_SOURCE_DECLARATIONS, HARD_MAX_FONT_SOURCE_FACE_BYTES } from '../worker/resource-policy.generated.js';
-import { WorkerFontResolverClient } from './resolver-bridge.js';
+import { WorkerFontResolverClient, type WorkerFontAcquireRequest } from './resolver-bridge.js';
 import { liveSourceCacheCount } from './source-cache.js';
 import { FontSourceSession, retainedFontSourceBytes, type FontSessionDemand } from './source-session.js';
 import {
@@ -11,7 +10,8 @@ import {
   type FontResolveContext,
   type FontResolveFn,
   type FontResolverOptions,
-  type FontSource,
+  type FontResolverSource,
+  type FontSourceDescriptor,
 } from './source.js';
 
 // The worker bridge of `fontResolver` (design §3.4, §4.3–§4.5). Each realm is
@@ -31,6 +31,7 @@ interface WorkerRealm {
 }
 interface MainRealm extends WorkerRealm {
   readonly fontResolver: typeof import('./source.js').fontResolver;
+  readonly fontSourceDescriptors: typeof import('./source.js').fontSourceDescriptors;
   readonly FontResolverBridgeHost: typeof import('./resolver-bridge-host.js').FontResolverBridgeHost;
   readonly FontResolverResponder: typeof import('./resolver-bridge-responder.js').FontResolverResponder;
   readonly copyBridgedFontDemand: typeof import('./resolver-bridge-responder.js').copyBridgedFontDemand;
@@ -65,6 +66,7 @@ async function loadRealm() {
     retainedFontSourceBytes: session.retainedFontSourceBytes,
     liveSourceCacheCount: cache.liveSourceCacheCount,
     fontResolver: source.fontResolver,
+    fontSourceDescriptors: source.fontSourceDescriptors,
     FontResolverBridgeHost: host.FontResolverBridgeHost,
     FontResolverResponder: responder.FontResolverResponder,
     copyBridgedFontDemand: responder.copyBridgedFontDemand,
@@ -83,7 +85,9 @@ beforeAll(async () => {
   // Main last: the host's lazy responder import resolves in this graph.
   main = await loadRealm();
 });
-const fontResolver = (resolve: FontResolveFn, options?: FontResolverOptions) => main.fontResolver(resolve, options);
+// The main realm's descriptor behind the opaque factory result.
+const fontResolver = (resolve: FontResolveFn, options?: FontResolverOptions) =>
+  main.fontSourceDescriptors([main.fontResolver(resolve, options)])[0] as FontResolverSource;
 
 const G = globalThis as Record<string, unknown>;
 const ORIGINAL_FONT_FACE = G.FontFace;
@@ -123,7 +127,7 @@ const hosts: { dispose(): void }[] = [];
 /** One worker-mode document: its main-side host and its worker realm,
  * joined by structured clone. `toMain` / `toWorker` record the traffic. */
 function bridge(
-  sources: readonly FontSource[],
+  sources: readonly FontSourceDescriptor[],
   options: {
     realm?: WorkerRealm;
     failures?: Map<string, string>;
@@ -172,7 +176,7 @@ function bridge(
 }
 
 /** A main-realm (viewer or main-mode) session. */
-function mainSession(sources: readonly FontSource[], failures?: Map<string, string>, set = fakeSet()) {
+function mainSession(sources: readonly FontSourceDescriptor[], failures?: Map<string, string>, set = fakeSet()) {
   const session = new main.FontSourceSession({ sources, fontSet: asSet(set), ...(failures ? { resolverFailures: failures } : {}) });
   sessions.push(session);
   return { session, set };
@@ -616,7 +620,7 @@ describe('fontResolver bridge: review findings', () => {
   });
 
   for (const failing of ['viewer', 'worker'] as const) {
-    it(`concludes a ${failing} batch that breaches a ceiling per family`, async () => {
+    it(`fails only the families of a ${failing} batch that breaches a ceiling, per family`, async () => {
       let calls = 0;
       const source = fontResolver((request) => {
         calls++;
@@ -631,8 +635,11 @@ describe('fontResolver bridge: review findings', () => {
       const decider = failing === 'viewer' ? worker : viewer;
       expect((await decider.session.ensure(demand(['Fast']))).faces).toHaveLength(1);
       const breaching = failing === 'viewer' ? viewer : worker;
-      const error = await breaching.session.ensure(demand(['Fast', 'Big'])).catch((caught: unknown) => caught);
-      expect((error as OoxmlError).violation).toMatchObject({ quota: 'declarations' });
+      // A run-time breach never rejects the load: the call's undecided
+      // family fails (warned, recorded for the document), Fast keeps its face.
+      const loaded = await breaching.session.ensure(demand(['Fast', 'Big']));
+      expect(loaded.faces.map(({ family }) => family)).toEqual(['Fast']);
+      expect(String(warn.mock.calls.at(-1)?.[0])).toMatch(/Big \(Font source limit exceeded \(declarations\)/);
       expect(recordedFamilies(failures)).toEqual(['big']);
       // The decided realm keeps Fast; a later requester of the document gets
       // Big's recorded failure with no further call.
@@ -825,12 +832,14 @@ describe('fontResolver bridge: abort and malformed replies', () => {
     expect(warn).toHaveBeenCalled();
   });
 
-  it('rejects the load for a ceiling breach found by the main-side admission', async () => {
+  it('fails the families of an answer the main-side admission finds beyond a ceiling, without rejecting the load', async () => {
     const source = fontResolver(() => Array.from({ length: HARD_MAX_FONT_SOURCE_DECLARATIONS + 1 }, () => FACE(1)));
     const { session } = bridge([source]).session();
-    const error = await session.ensure(demand(['Private Face'])).catch((caught: unknown) => caught);
-    expect(error).toBeInstanceOf(OoxmlError);
-    expect((error as OoxmlError).violation).toMatchObject({ quota: 'declarations', observed: HARD_MAX_FONT_SOURCE_DECLARATIONS + 1 });
+    expect((await session.ensure(demand(['Private Face']))).faces).toEqual([]);
+    expect(String(warn.mock.calls.at(-1)?.[0]))
+      .toContain(`Private Face (Font source limit exceeded (declarations): entry-count ${HARD_MAX_FONT_SOURCE_DECLARATIONS + 1}`);
+    // The session stays usable: a later delta loads normally.
+    expect((await session.ensure({ ...demand([]), scalars: [0x41] })).faces).toEqual([]);
   });
 
   it('keeps an application error a family failure, with the same reason as main mode', async () => {
@@ -1271,19 +1280,48 @@ describe('fontResolver bridge: the page fetches resolver URLs', () => {
     link.host.dispose();
   });
 
-  it('rejects the worker load for a body beyond the face ceiling and aborts the rest of the batch', async () => {
-    const calls = installFetch({
+  it('fails only a worker face whose body is beyond the face ceiling; its sibling still loads', async () => {
+    installFetch({
       'https://fonts.app.example/private-400.woff2': { bytes: HARD_MAX_FONT_SOURCE_FACE_BYTES + 1 },
-      'https://fonts.app.example/private-700.woff2': { hang: true },
+      'https://fonts.app.example/private-700.woff2': { bytes: 70 },
     });
     const source = fontResolver(() => URL_FACES());
     const link = bridge([source]);
-    const { session } = link.session();
-    await expect(session.ensure(demand(['Private Face'])))
-      .rejects.toMatchObject({ code: 'font-source-limit', violation: { quota: 'face' } });
-    const sibling = calls.find(({ url }) => url.endsWith('private-700.woff2'));
-    expect((sibling?.init?.signal as AbortSignal).aborted).toBe(true);
+    const { session, set } = link.session();
+    const loaded = await session.ensure(demand(['Private Face']));
+    expect(loaded.faces.map(({ weight }) => weight)).toEqual(['700']);
+    expect(set.faces.filter((face) => face.status === 'loaded')).toHaveLength(1);
+    expect(String(warn.mock.calls.at(-1)?.[0])).toContain('Private Face (Font source limit exceeded (face)');
+    session.release();
+    link.host.dispose();
     expect(main.retainedFontSourceBytes()).toBe(0);
+  });
+
+  it('asks the page for only the unicode-range subsets the worker paints, delta by delta', async () => {
+    const calls = installFetch({
+      'https://fonts.app.example/latin.woff2': { bytes: 10 },
+      'https://fonts.app.example/kana.woff2': { bytes: 20 },
+      'https://fonts.app.example/kanji.woff2': { bytes: 30 },
+    });
+    const source = fontResolver(() => [
+      { family: 'Private Face', url: 'https://fonts.app.example/latin.woff2', unicodeRange: 'U+0-FF' },
+      { family: 'Private Face', url: 'https://fonts.app.example/kana.woff2', unicodeRange: 'U+3000-30FF' },
+      { family: 'Private Face', url: 'https://fonts.app.example/kanji.woff2', unicodeRange: 'U+4E00-9FFF' },
+    ]);
+    const link = bridge([source]);
+    const { session } = link.session();
+    const asked = () => link.toMain.filter((message) => (message as { kind: string }).kind === 'ooxmlAcquireFonts')
+      .map((message) => (message as WorkerFontAcquireRequest).families.flatMap(({ urls }) => urls.map((url) => url.split('/').pop())));
+    const first = await session.ensure({ ...demand(['Private Face']), scalars: [0x41] });
+    expect(first.faces.map(({ unicodeRange }) => unicodeRange)).toEqual(['U+0-FF']);
+    expect(asked()).toEqual([['latin.woff2']]);
+    const second = await session.ensure({ ...demand([]), scalars: [0x3042] });
+    expect(second.faces.map(({ unicodeRange }) => unicodeRange)).toEqual(['U+0-FF', 'U+3000-30FF']);
+    expect(asked()).toEqual([['latin.woff2'], ['kana.woff2']]);
+    // The page fetched exactly the painted subsets, with page credentials.
+    expect(calls.map(({ url }) => url.split('/').pop())).toEqual(['latin.woff2', 'kana.woff2']);
+    expect(calls.every(({ init }) => init?.credentials === 'same-origin')).toBe(true);
+    session.release();
     link.host.dispose();
   });
 });

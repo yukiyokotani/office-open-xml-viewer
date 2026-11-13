@@ -52,7 +52,7 @@ import {
   servedFaceLineRequests,
   type ServedFaceLineMeasurement,
 } from './served-face-lines.js';
-import { assertFontSourceDescriptors, chartFontSubstitutions, WorkerFontResolverClient, type FontSource } from '@silurus/ooxml-core/internal/font-sources';
+import { assertFontSourceDescriptors, chartFontSubstitutions, WorkerFontResolverClient, type FontSourceDescriptor } from '@silurus/ooxml-core/internal/font-sources';
 import { loadEmbeddedFonts } from './embedded-fonts';
 import type {
   RenderWorkerResponse,
@@ -364,7 +364,7 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest | WorkerSvgDecod
       }
       let adapted: ReturnType<typeof layoutSourceModelAdapterFromOwnedModel>;
       let nativeRouteRequests: ReturnType<typeof nativeRouteLineRequests>;
-      let fontSources: readonly FontSource[];
+      let fontSources: readonly FontSourceDescriptor[];
       try {
         // Descriptors crossed the realm boundary: validate them as strictly as
         // the factories did (TypeError / font-source-limit reject the load).

@@ -107,23 +107,27 @@ export interface LoadOptions {
    * host and the canvas falls back to locally available fonts.
    *
    * Build the entries with the factories exported next to this type
-   * (`googleFonts()`, `fontCssApi()`, `fontCss()`, `fontFiles()`). The first
+   * (`googleFonts()`, `fontCssApi()`, `fontCss()`, `fontFiles()`,
+   * `fontResolver()`); a {@link FontSource} is opaque and only their results
+   * are accepted (anything else throws a `TypeError`). The first
    * source that declares a face for a family claims it; later sources are not
    * consulted for that family, and a claimed family never retries another
    * source if its faces fail to load (the family then keeps its host fallback
-   * with a `console.warn`). Faces register under their real CSS family in the
-   * painting realm, and only the `unicode-range` subsets that intersect the
-   * document's painted characters are loaded.
+   * with a `console.warn`; so does a family that reaches a run-time source
+   * limit). Faces register under their real CSS family in the painting
+   * realm, and only the `unicode-range` subsets that intersect the
+   * document's painted characters are fetched and loaded.
    *
    * A hosted source receives the end user's IP address and User-Agent, which
    * may have privacy / GDPR implications for your application.
    */
   fonts?: readonly FontSource[];
   /**
-   * @deprecated Since 0.90; removed in 0.91. Replace `useGoogleFonts: true`
-   * with `fonts: [googleFonts()]`. Every format normalises it to exactly that and
-   * warns once per JavaScript realm; passing it together with `fonts` throws
-   * a `TypeError`, and `false` is a no-op that still warns.
+   * @deprecated Since 0.90. From 0.91 it is ignored, with the same warning
+   * (no web fonts are loaded; it never throws). Replace `useGoogleFonts: true`
+   * with `fonts: [googleFonts()]`. In 0.90 every format normalises it to
+   * exactly that and warns once per JavaScript realm; passing it together
+   * with `fonts` throws a `TypeError`, and `false` is a no-op that still warns.
    *
    * Opt in to loading webfont substitutes from Google Fonts
    * (`fonts.googleapis.com`). Default `false` — the canvas falls back to

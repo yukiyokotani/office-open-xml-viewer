@@ -441,14 +441,15 @@ describe('fetchFontStylesheet', () => {
       expect.objectContaining({ credentials: 'same-origin' }));
   });
 
-  it('stops reading once the byte ceiling is exceeded', async () => {
+  it('stops reading once the byte ceiling is exceeded, failing the stylesheet', async () => {
     const chunk = new Uint8Array(256 * 1024).fill(0x20);
     const stream = streamed([chunk, chunk, chunk, chunk, chunk, chunk, chunk, chunk]);
     let requestSignal: AbortSignal | undefined;
     G.fetch = async (_url: string, init: RequestInit) => { requestSignal = init.signal ?? undefined; return stream.response; };
     const caller = new AbortController();
-    await expect(fetchFontStylesheet('https://fonts.example/a.css', 'omit', caller.signal))
-      .rejects.toMatchObject({ code: 'font-source-limit', violation: { quota: 'stylesheet' } });
+    expect(await fetchFontStylesheet('https://fonts.example/a.css', 'omit', caller.signal)).toEqual({
+      ok: false, reason: `Font source limit exceeded (stylesheet): bytes ${5 * 256 * 1024} > ${HARD_MAX_FONT_SOURCE_STYLESHEET_BYTES}`,
+    });
     expect(stream.reads()).toBe(5);
     expect(stream.cancelled()).toBe(true);
     // The request is aborted although the caller's signal stays live.
@@ -456,12 +457,12 @@ describe('fetchFontStylesheet', () => {
     expect(caller.signal.aborted).toBe(false);
   });
 
-  it('rejects a declared Content-Length beyond the ceiling before reading', async () => {
+  it('fails a declared Content-Length beyond the ceiling before reading', async () => {
     const stream = streamed([], { contentLength: HARD_MAX_FONT_SOURCE_STYLESHEET_BYTES + 1 });
     let requestSignal: AbortSignal | undefined;
     G.fetch = async (_url: string, init: RequestInit) => { requestSignal = init.signal ?? undefined; return stream.response; };
-    await expect(fetchFontStylesheet('https://fonts.example/a.css', undefined, new AbortController().signal))
-      .rejects.toMatchObject({ code: 'font-source-limit' });
+    expect(await fetchFontStylesheet('https://fonts.example/a.css', undefined, new AbortController().signal))
+      .toMatchObject({ ok: false, reason: expect.stringContaining('Font source limit exceeded (stylesheet)') });
     expect(stream.reads()).toBe(0);
     expect(stream.bodyCancelled()).toBe(true);
     expect(requestSignal?.aborted).toBe(true);

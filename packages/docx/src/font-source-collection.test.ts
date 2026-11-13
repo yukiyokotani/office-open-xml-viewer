@@ -6,7 +6,7 @@ import { storeZip } from './conformance/generate.js';
 import { createLayoutServices } from './layout-runtime.js';
 import { normalizeInternalDocumentModel, paragraphMarkShapeInput } from './parser-model.js';
 import { renderDocumentToCanvas } from './renderer.js';
-import { fontFiles, googleFonts } from '@silurus/ooxml-core/internal/font-sources';
+import { fontFiles, fontSourceDescriptors, googleFonts } from '@silurus/ooxml-core/internal/font-sources';
 import { declaredFontSubstitutions, docxFontDemandCandidates } from './font-plan.js';
 import { sourceFontLayoutOptions } from './testing/font-sources.js';
 import { LineMeasurementAdapter } from './line-breaker/measurement-adapter.js';
@@ -163,7 +163,7 @@ async function paintedFamily(model: DocxDocumentModel, text: string): Promise<st
   return (await paintedFamilies(model, [text]))[0];
 }
 
-const GOOGLE_SUBSTITUTES = declaredFontSubstitutions([googleFonts()]);
+const GOOGLE_SUBSTITUTES = declaredFontSubstitutions(fontSourceDescriptors([googleFonts()]));
 /** Demanded names before the installed check. */
 function docxFontPreloadNames(model: DocxDocumentModel): string[] {
   const candidates = docxFontDemandCandidates(model, GOOGLE_SUBSTITUTES);

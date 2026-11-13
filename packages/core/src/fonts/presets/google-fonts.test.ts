@@ -1,6 +1,15 @@
 import { describe, expect, it } from 'vitest';
-import { assertFontSourceDescriptors, fontCssApiRequests, type FontCssApiSource } from '../source.js';
-import { GOOGLE_FONTS_CATALOG, GOOGLE_FONTS_SUBSTITUTIONS, GOOGLE_NOTO_CJK_NAMING, googleFonts } from './google-fonts.js';
+import { assertFontSourceDescriptors, fontCssApiRequests, fontSourceDescriptors, type FontCssApiSource } from '../source.js';
+import {
+  GOOGLE_FONTS_CATALOG,
+  GOOGLE_FONTS_SUBSTITUTIONS,
+  GOOGLE_NOTO_CJK_NAMING,
+  googleFonts as publicGoogleFonts,
+} from './google-fonts.js';
+
+/** The descriptor behind the opaque preset result. */
+const googleFonts = (...args: Parameters<typeof publicGoogleFonts>) =>
+  fontSourceDescriptors([publicGoogleFonts(...args)])[0] as FontCssApiSource;
 import { OFFICE_FONT_SUBSTITUTIONS } from '../substitutions.js';
 import { cjkFallbackChain, NON_CJK_SANS_FALLBACKS, NON_CJK_SERIF_FALLBACKS } from '../scripts.js';
 import { arabicFallbackFamilies } from '../font-stack.js';
@@ -152,5 +161,20 @@ describe('googleFonts() preset', () => {
     expect(fontCssApiRequests(extended, 'Corporate Sans').map((request) => request.family)).toEqual(['Lato']);
     expect(googleFonts({ substitutes: [] }).substitutes).toEqual([]);
     expect(() => googleFonts({ substitutes: [{ for: 'A' }] } as never)).toThrow(TypeError);
+  });
+
+  it('adds families outside the catalog, and replaces a catalog family\'s query', () => {
+    const source = googleFonts({ families: { Inter: 'wght@400;700', roboto: 'wght@300' } });
+    expect(onlyRequest(source, 'Inter').url).toBe(legacyUrl('Inter:wght@400;700'));
+    // Case-insensitive replacement: one request, with the caller's spelling and query.
+    expect(onlyRequest(source, 'Roboto').url).toBe(legacyUrl('roboto:wght@300'));
+    // The rest of the catalog and the default substitutes are unchanged.
+    expect(onlyRequest(source, 'Calibri').url).toBe(legacyUrl('Carlito:ital,wght@0,400;0,700;1,400;1,700'));
+    // A substitute may now name an added family.
+    const corporate = googleFonts({ families: { Inter: 'wght@400' }, substitutes: [{ for: 'Corporate Sans', use: 'Inter' }] });
+    expect(fontCssApiRequests(corporate, 'Corporate Sans').map((request) => request.family)).toEqual(['Inter']);
+    for (const families of [{ Inter: true }, { Inter: '' }, { ' Inter': 'wght@400' }, { Inter: 'a', inter: 'b' }, ['Inter'], 'Inter']) {
+      expect(() => googleFonts({ families } as never), JSON.stringify(families)).toThrow(TypeError);
+    }
   });
 });
