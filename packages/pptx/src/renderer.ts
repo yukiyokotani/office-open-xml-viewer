@@ -1610,6 +1610,33 @@ function firstLineIndentPxFor(hasBullet: boolean, indentPx: number): number {
 // The core predicate covers the RTL cs axis. DrawingML also routes Indic and
 // Southeast Asian shaping scripts through a:cs when that font slot is present.
 const INDIC_CS_GLYPH_RE = /[\p{Script=Devanagari}\p{Script=Thai}\p{Script=Bengali}\p{Script=Tamil}\p{Script=Telugu}\p{Script=Kannada}\p{Script=Malayalam}\p{Script=Gujarati}\p{Script=Gurmukhi}\p{Script=Oriya}\p{Script=Sinhala}\p{Script=Khmer}\p{Script=Lao}\p{Script=Myanmar}\p{Script=Tibetan}]/u;
+/** LibreOffice editeng `constScaleLevels` (font scale, Y spacing scale). */
+const LIBREOFFICE_SHRINK_LEVELS: readonly (readonly [number, number])[] = [
+  [1.0, 0.9], [0.925, 0.9], [0.85, 0.9], [0.85, 0.8], [0.775, 0.8], [0.7, 0.8],
+  [0.625, 0.8], [0.55, 0.8], [0.475, 0.8], [0.4, 0.8], [0.325, 0.8], [0.25, 0.8],
+];
+
+/** Whether a laid-out line's advance exceeds its text width (a non-wrapping
+ * body's line; the first-line indent shift included). */
+function lineOverflowsWidth(
+  ctx: CanvasRenderingContext2D,
+  entry: { line: LayoutLine; textMaxW: number; textXOffset: number },
+): boolean {
+  let width = entry.textXOffset;
+  for (const seg of entry.line.segments) {
+    if (seg.isTab) {
+      width += seg.tabWidthPx ?? 0;
+    } else if (seg.math) {
+      width += seg.math.width;
+    } else if (seg.text) {
+      ctx.font = seg.font;
+      width += (seg.leadingLetterSpacingPx ?? 0)
+        + measureTextAdvance(ctx, seg.text, seg.letterSpacingPx ?? 0);
+    }
+  }
+  return width > entry.textMaxW + 0.5;
+}
+
 /** PowerPoint paints non-zero DrawingML baseline runs at about 65% of their
  * authored size. The authored size still owns line height and baseline offset;
  * this helper is only for the glyph font used by measure and paint. */
@@ -4323,14 +4350,16 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
         : null;
     const tClearShadow = () => clearShadow(target);
     const evenOddFill = geom === 'donut' || geom === 'smileyface' || geom === 'frame';
+    // `evenOdd`: a custom path's own fill rule (model sources), which the
+    // picture clip follows like a solid fill does.
     const paintImageFill = imageFill && !silhouette
-      ? (paintCtx: CanvasRenderingContext2D) => paintPreparedShapeImageFill(
+      ? (paintCtx: CanvasRenderingContext2D, evenOdd = evenOddFill) => paintPreparedShapeImageFill(
           paintCtx,
           imageFill,
           preparedImageFill,
           { x: bx, y: by, w: bw, h: bh },
           scale,
-          evenOddFill,
+          evenOdd,
           el,
         )
       : undefined;
@@ -4364,6 +4393,8 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
       el.custGeom.forEach((cmds, index) => {
         const paint = pathPaint[index];
         const filled = paint.fill !== 'none';
+        // Model sources may fill a path's subpaths even-odd (OpenDocument).
+        const fillRule: CanvasFillRule = paint.fillRule === 'evenodd' ? 'evenodd' : 'nonzero';
         if (silhouette && !filled) return;
         target.beginPath();
         buildCustomPath(target, [cmds], bx, by, bw, bh);
@@ -4371,17 +4402,19 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
           let painted = false;
           if (paintImageFill) {
             target.save();
-            try { painted = paintImageFill(target); } finally { target.restore(); }
+            try {
+              painted = paintImageFill(target, evenOddFill || fillRule === 'evenodd');
+            } finally { target.restore(); }
           } else if (tFill) {
             target.fillStyle = tFill;
-            target.fill();
+            target.fill(fillRule);
             painted = true;
           }
           const overlay = painted && !silhouette ? pathFillModeOverlay(paint.fill) : null;
           if (overlay) {
             target.save();
             target.fillStyle = overlay;
-            target.fill();
+            target.fill(fillRule);
             target.restore();
           }
           if (painted && !silhouette && !shadowCleared) {
@@ -5287,13 +5320,19 @@ export function renderTextBody(
   }
 
   // buildLayout runs Pass 1 at a given font scale (1.0 = normal; <1 = normAutoFit shrink)
-  const buildLayout = (fontScale: number, metric: boolean): {
+  // `spacingScale` (model sources with shrinkOnOverflow): LibreOffice's
+  // spacing factor, which scales proportional/single line heights and
+  // paragraph spacing instead of PowerPoint's lnSpcReduction/fontScale.
+  const buildLayout = (fontScale: number, metric: boolean, spacingScale?: number): {
     allLines: LineEntry[];
     totalHeight: number;
     requiredHeight: number;
     metricOk: boolean;
   } => {
   const bodyDefaultFontSizePx = (body.defaultFontSize ?? 18) * PT_TO_EMU * scale * fontScale;
+  const lineSpacingReduction = spacingScale != null
+    ? 1 - spacingScale
+    : body.autoFit === 'norm' && body.lnSpcReduction != null ? body.lnSpcReduction : null;
   const allLines: LineEntry[] = [];
   let totalHeight = 0;
   // Visual bounds may be taller than the baseline advance. This is especially
@@ -5360,8 +5399,9 @@ export function renderTextBody(
     // spaceBefore/After are in hundredths of a point → convert to canvas px.
     // Percentage forms (ECMA-376 §21.1.2.3.11 spcPct) are resolved per line
     // below, against the text size of the line the spacing is attached to.
-    const spaceBeforePx = para.spaceBefore != null ? (para.spaceBefore / 100) * PT_TO_EMU * scale * fontScale : 0;
-    const spaceAfterPx  = para.spaceAfter  != null ? (para.spaceAfter  / 100) * PT_TO_EMU * scale * fontScale : 0;
+    const paraSpacingScale = spacingScale ?? fontScale;
+    const spaceBeforePx = para.spaceBefore != null ? (para.spaceBefore / 100) * PT_TO_EMU * scale * paraSpacingScale : 0;
+    const spaceAfterPx  = para.spaceAfter  != null ? (para.spaceAfter  / 100) * PT_TO_EMU * scale * paraSpacingScale : 0;
 
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];
@@ -5487,8 +5527,11 @@ export function renderTextBody(
       // attribute applies only to paragraphs with percentage line spacing." pct
       // and the implicit single (= 100 % percentage) qualify; an absolute
       // spcPts height does not.
-      if (body.autoFit === 'norm' && body.lnSpcReduction != null && para.spaceLine?.type !== 'pts') {
-        lineHeight *= 1 - body.lnSpcReduction;
+      // LibreOffice's spacing factor (editeng CreateLines) scales single and
+      // proportional lines alike: its ODF import reads a 100% line height as
+      // single spacing (the Off rule), which the factor scales too.
+      if (lineSpacingReduction != null && para.spaceLine?.type !== 'pts') {
+        lineHeight *= 1 - lineSpacingReduction;
       }
       // PowerPoint's metric line (#1610, powerpoint-line-metrics.ts): the
       // same 1.2 × size box, split at the baseline by the runs' faces and
@@ -5544,7 +5587,7 @@ export function renderTextBody(
           ? { type: 'pts' as const, val: powerPointExactLinePoints(para.spaceLine.val) }
           : para.spaceLine;
         const box = drawingMlSpacedLineBox(natural, spacing, PT_TO_EMU * scale,
-          body.autoFit === 'norm' && body.lnSpcReduction != null ? body.lnSpcReduction : 0);
+          lineSpacingReduction ?? 0);
         lineHeight = box.ascent + box.descent;
         metricAscent = box.ascent;
         metricNaturalDescent = natural.descent;
@@ -5626,11 +5669,11 @@ export function renderTextBody(
   // Try PowerPoint's metric line model first; a body with any face outside
   // it is laid out again with the ordinary model.
   let useMetricLines = true;
-  const layoutAt = (fontScale: number) => {
-    let layout = buildLayout(fontScale, useMetricLines);
+  const layoutAt = (fontScale: number, spacingScale?: number) => {
+    let layout = buildLayout(fontScale, useMetricLines, spacingScale);
     if (useMetricLines && !layout.metricOk) {
       useMetricLines = false;
-      layout = buildLayout(fontScale, false);
+      layout = buildLayout(fontScale, false, spacingScale);
     }
     return layout;
   };
@@ -5649,6 +5692,38 @@ export function renderTextBody(
   if (body.autoFit === 'norm') {
     if (body.fontScale != null && body.fontScale > 0) {
       if (body.fontScale < 1.0) ({ allLines, requiredHeight } = layoutAt(body.fontScale));
+    } else if (body.shrinkOnOverflow && !measureOnly) {
+      // ODF style:shrink-to-fit (model sources): LibreOffice stores no scale
+      // and derives it while formatting (editeng ImpEditEngine::
+      // ScaleContentToFitWindow). When the text overflows the frame's
+      // content height it tries these (font, spacing) levels in order and
+      // keeps the first that fits, else the last. The spacing factor scales
+      // single/proportional line heights and paragraph spacing.
+      // The content must fit the frame both ways (ODF §20.360): a line may
+      // overflow the width (no-wrap text, or an unbreakable piece wider
+      // than the column), and with several text columns the height that
+      // must fit is each column's share as the lines are distributed below.
+      const available = Math.max(0, bh - tPad - bPad);
+      const heightOverflows = (lines: LineEntry[], height: number): boolean => {
+        if (numCol <= 1 || height <= available) return height > available;
+        const perColumn = Math.ceil(lines.length / numCol);
+        for (let start = 0; start < lines.length; start += perColumn) {
+          let columnHeight = 0;
+          for (const entry of lines.slice(start, start + perColumn)) {
+            columnHeight += entry.topGapPx + entry.linePx;
+          }
+          if (columnHeight > available + 0.5) return true;
+        }
+        return false;
+      };
+      const overflows = (lines: LineEntry[], height: number) =>
+        heightOverflows(lines, height) || lines.some((entry) => lineOverflowsWidth(ctx, entry));
+      if (overflows(allLines, requiredHeight)) {
+        for (const [font, spacing] of LIBREOFFICE_SHRINK_LEVELS) {
+          ({ allLines, requiredHeight } = layoutAt(font, spacing));
+          if (!overflows(allLines, requiredHeight)) break;
+        }
+      }
     }
   }
 
@@ -5686,10 +5761,26 @@ export function renderTextBody(
   // at 80/90/150 % and 100/140 pt, ctr and b, Arial and Meiryo; normAutofit
   // lnSpcReduction likewise).
   const lastMetric = allLines[allLines.length - 1];
-  const anchorHeight = lastMetric?.metricAscent !== undefined
+  // Model sources with shrink-to-fit fitted the text per column: when the
+  // lines are distributed over columns (below), the block anchored is the
+  // tallest column, not all lines stacked.
+  const columnedHeight = (() => {
+    if (!body.shrinkOnOverflow || numCol <= 1 || bh === 0 || allLines.length === 0) return null;
+    const trailing = Math.max(0, lastMetric.linePx - lastMetric.lineHeight);
+    if (requiredHeight - trailing <= Math.max(0, bh - tPad - bPad) + 0.5) return null;
+    const perColumn = Math.ceil(allLines.length / numCol);
+    let tallest = 0;
+    for (let start = 0; start < allLines.length; start += perColumn) {
+      let height = 0;
+      for (const entry of allLines.slice(start, start + perColumn)) height += entry.topGapPx + entry.linePx;
+      tallest = Math.max(tallest, height);
+    }
+    return tallest;
+  })();
+  const anchorHeight = columnedHeight ?? (lastMetric?.metricAscent !== undefined
     && lastMetric.metricNaturalDescent !== undefined
     ? requiredHeight - (lastMetric.lineHeight - lastMetric.metricAscent) + lastMetric.metricNaturalDescent
-    : requiredHeight;
+    : requiredHeight);
   let cursorY: number;
   const contentH = Math.max(0, effectiveBh - tPad - bPad);
   if (anchor === 'ctr') {
@@ -7754,6 +7845,9 @@ export function renderTable(
       if (cell.hMerge || cell.vMerge) continue;
       if ((cell.rowSpan || 1) > 1) continue;
       if (!cell.textBody) continue;
+      // Shrink-to-fit text (model sources, ODF §20.360) fits the cell as
+      // authored: it shrinks instead of growing the row.
+      if (cell.textBody.shrinkOnOverflow) continue;
       if (row.height > 0 && !hasAuthoredRowGrowthSignal) continue;
       const cellW = spannedWidth(ci, cell.gridSpan || 1);
       const needed = (renderTextBody(
@@ -7774,6 +7868,7 @@ export function renderTable(
       if (cell.hMerge || cell.vMerge) continue;
       const span = cell.rowSpan || 1;
       if (span <= 1 || !cell.textBody) continue;
+      if (cell.textBody.shrinkOnOverflow) continue;
       const cellW = spannedWidth(ci, cell.gridSpan || 1);
       const hasAutoHeightRow = el.rows
         .slice(ri, Math.min(el.rows.length, ri + span))

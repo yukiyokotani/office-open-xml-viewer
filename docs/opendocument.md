@@ -173,6 +173,78 @@ The DOCX layout draws some features differently from LibreOffice:
 - widow and orphan counts above two are treated as two;
 - the text box chain (`draw:chain-next-name`) is not flowed across boxes.
 
+## Presentations (ODP)
+
+OpenDocument presentations open with the ordinary PPTX viewers and loaders:
+
+| Input | Entry | Reader / factory | Option | Loaders and viewers |
+| --- | --- | --- | --- | --- |
+| ODP, OTP | `@silurus/ooxml-opendocument/odp` | `odp` / `createOdp()` | `odp` | `PptxViewer`, `PptxScrollViewer`, `PptxPresentation.load`, `openPptxPresentation`, `materializePptxPresentation` |
+
+```typescript
+import { PptxViewer } from '@silurus/ooxml/pptx';
+import { odp } from '@silurus/ooxml-opendocument/odp';
+
+const viewer = new PptxViewer(canvas, { odp });
+await viewer.load(odpOrPptxBytes);
+```
+
+The ODP reader maps a presentation directly into the PPTX slide model; the
+ordinary PPTX renderer draws it. Its assets are `odp-source-module.mjs` and
+`opendocument_odp_bg.wasm`; `createOdp({ moduleUrl, wasmUrl })` relocates
+them as for ODT. The source claims a package by its leading `mimetype`
+(`application/vnd.oasis.opendocument.presentation` and `-template`).
+
+It follows the same rendering policy as the ODT reader: every presentation
+feature is read from its ODF definition and mapped onto the slide model, and
+only corrupt, encrypted or unsafe packages, or packages over the resource
+limits, reject. Where ODF leaves a choice to the application, LibreOffice
+Impress is the reference. It reads:
+
+- slides and master pages: master background objects, the header, footer,
+  date/time and page-number frames with the slide's display settings and
+  declarations, slide and master backgrounds, hidden slides and speaker
+  notes;
+- the style cascade of graphic and presentation styles (with the per-level
+  outline styles of outline placeholders), paragraph and text styles, and
+  list styles with their indents, bullet characters and pictures, and
+  number labels;
+- custom shapes from their enhanced geometry (formulas, modifiers, every
+  path command, text areas, mirroring), rectangles, ellipses and arcs,
+  polygons, paths, lines, connectors, captions, groups, transforms and shape
+  hyperlinks;
+- area fills (solid, every gradient style with borders and multi-colour
+  stops, uniform and gradient transparency, hatches as the nearest pattern,
+  bitmaps stretched, tiled or placed once), lines with dashes, caps, joins
+  and markers, shadows, glow and soft edges;
+- text: fonts per script, sizes, weight, posture, colours (including
+  automatic colour), underline and strike-through, raised and lowered text,
+  capitals, letter spacing, highlighting, outline and shadowed text, tabs,
+  line breaks, fields and hyperlinks; paragraph alignment, indents,
+  spacing, line height, tab stops, columns, text anchoring, padding,
+  wrapping and shrink-on-overflow;
+- pictures (cropping, mirroring, colour modes, luminance/contrast,
+  transparency), StarView metafile pictures (converted to SVG), embedded
+  objects and OLE objects through their replacement pictures, and tables
+  (column widths, row heights, spans, cell fills, borders, templates).
+
+Charts (`draw:object` frames holding an `office:chart` document) are read
+with their own data table into the shared chart model; an object the chart
+reader finds structurally invalid is drawn from its replacement picture.
+Known gaps: 3D extrusion of custom shapes and fontwork text paths are drawn
+flat; animations and transitions are not played; text measurement follows
+the fonts available to the browser, so text set in fonts LibreOffice
+substitutes (for example metric-compatible replacements) can wrap
+differently.
+
+Resource limits: while it builds the deck, the reader may grow its heap by
+at most 512 MiB beyond the package's parsed XML and take a bounded number of
+steps, as measured by the same allocator as the other readers; the embedded
+charts of a deck may allocate at most 1 GiB together, and the deck's
+elements, slides (10,000), group nesting and retained pictures and slide
+data have bounds of their own. A presentation over a limit is rejected with
+an error that names the limit, instead of being shown in part.
+
 ## Spreadsheets (ODS)
 
 OpenDocument spreadsheets open with the ordinary XLSX viewers and loaders:

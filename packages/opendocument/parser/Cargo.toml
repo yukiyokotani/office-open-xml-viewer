@@ -15,6 +15,7 @@ odt = [
     "dep:js-sys",
     "dep:docx-model",
 ]
+odp = ["odf-chart", "dep:js-sys", "dep:pptx-model", "dep:serde"]
 # The ODF chart reader, shared by the spreadsheet and presentation readers.
 odf-chart = ["dep:serde_json"]
 ods = [
@@ -32,6 +33,7 @@ roxmltree = { workspace = true }
 ooxml-common = { workspace = true }
 crc32fast = { workspace = true, optional = true }
 docx-model = { workspace = true, optional = true, features = ["owned-source-cursor"] }
+pptx-model = { workspace = true, optional = true }
 xlsx-model = { workspace = true, optional = true }
 serde = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
@@ -56,5 +58,13 @@ name = "inspect_odt"
 required-features = ["odt"]
 
 [[example]]
+name = "inspect_odp"
+required-features = ["odp"]
+
+[[example]]
 name = "inspect_ods"
 required-features = ["ods"]
+
+[[example]]
+name = "inspect_odp_charts"
+required-features = ["odp"]

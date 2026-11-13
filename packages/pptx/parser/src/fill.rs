@@ -693,6 +693,7 @@ pub(crate) fn parse_cust_geom_with_paint(
         .paths
         .iter()
         .map(|path| PathPaint {
+            fill_rule: None,
             fill: path.fill.clone(),
             stroke: path.stroke,
         })

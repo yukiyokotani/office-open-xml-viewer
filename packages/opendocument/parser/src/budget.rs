@@ -318,6 +318,13 @@ pub fn peak_bytes() -> usize {
     })
 }
 
+/// Bytes this thread has allocated in total (retained or not): the
+/// difference of two readings is the allocation volume of the work between
+/// them, which a reader can bound more tightly than [`MAX_COPIED_BYTES`].
+pub fn allocated_bytes() -> u64 {
+    ALLOCATED.with(Cell::get)
+}
+
 /// Steps the running scope has taken (tests and diagnostics).
 pub fn work() -> u64 {
     CURRENT.with(|current| {

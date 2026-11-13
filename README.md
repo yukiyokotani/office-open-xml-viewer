@@ -33,7 +33,7 @@ A browser-based viewer for Office Open XML documents that renders to an HTML Can
 The parsers are written in Rust and compiled to WebAssembly; the renderers use the Canvas 2D API.
 Each format also exposes a headless engine (`DocxDocument` / `XlsxWorkbook` / `PptxPresentation`) that renders into any caller-supplied canvas, so you can compose your own UI — scroll views, thumbnail grids, master-detail panes — instead of being locked into the built-in viewer. See the [live framework examples](https://ooxml.silurus.dev/frameworks/) for runnable React, Vue, Svelte, and Solid projects.
 
-Optional, experimental [legacy Office add-on](https://ooxml.silurus.dev/legacy-office/) reads a supported subset of `.doc`, `.xls` and `.ppt` with the same viewers, and an optional, experimental [OpenDocument add-on](docs/opendocument.md) reads `.odt`.
+Optional, experimental [legacy Office add-on](https://ooxml.silurus.dev/legacy-office/) reads a supported subset of `.doc`, `.xls` and `.ppt` with the same viewers, and an optional, experimental [OpenDocument add-on](docs/opendocument.md) reads `.odt`, `.odp` and `.ods`.
 
 ## Project scope: read-only viewing
 
@@ -255,8 +255,9 @@ for the full support boundaries.
 OpenDocument files are read directly into the same models through the
 experimental `@silurus/ooxml-opendocument` add-on, one opt-in entry per format:
 `@silurus/ooxml-opendocument/odt` for `.odt` / `.ott` with the DOCX viewers and
-loaders, and `@silurus/ooxml-opendocument/ods` for `.ods` / `.ots` with the
-XLSX viewers and loaders. Install matching versions of both packages:
+loaders, `@silurus/ooxml-opendocument/odp` for `.odp` / `.otp` with the PPTX
+ones, and `@silurus/ooxml-opendocument/ods` for `.ods` / `.ots` with the XLSX
+viewers and loaders. Install matching versions of both packages:
 
 ```sh
 npm i @silurus/ooxml @silurus/ooxml-opendocument
@@ -277,9 +278,10 @@ const sheets = new XlsxViewer(container, { ods });
 await sheets.load(odsOrXlsxBytes);
 ```
 
+The `odp` entry is passed the same way (`new PptxViewer(canvas, { odp })`).
 Like the legacy readers, importing an entry fetches nothing, custom asset URLs
-go through `createOdt({ wasmUrl, moduleUrl })` / `createOds({ wasmUrl,
-moduleUrl })`, and the package versions must match exactly. See
+go through `createOdt` / `createOdp` / `createOds({ wasmUrl, moduleUrl })`,
+and the package versions must match exactly. See
 [Experimental OpenDocument sources](docs/opendocument.md) for the supported
 content and deployment notes.
 
