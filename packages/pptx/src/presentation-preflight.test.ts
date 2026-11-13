@@ -11,6 +11,7 @@ import {
 import { PptxFontPreloadAccumulator } from './font-requests';
 import type { Presentation, Slide } from './types';
 import type { PresentationBootstrap } from './worker-protocol';
+import { officeFaceWeight } from './powerpoint-line-metrics.js';
 
 /** Reference projection: one accumulator fed the whole parsed deck. */
 function wholeDeckPreloadNames(pres: Presentation): (string | null | undefined)[] {
@@ -369,7 +370,7 @@ describe('font-source demand facts (LoadOptions.fonts)', () => {
     const plain = ordinary.finish();
     expect(plain).not.toHaveProperty('fontPreloadFacts');
 
-    const builder = new PresentationPreflightBuilder(bootstrap, { collectFontDemand: () => 'all' });
+    const builder = new PresentationPreflightBuilder(bootstrap, { collectFontDemand: () => 'all', officeFaceWeight });
     builder.addSlide(arabicDeck(0, 'العربية', 'Sakkal Majalla'));
     // The progressive prefix exposes the committed facts.
     expect(builder.currentFontPreloadFacts?.familyCount).toBe(3);
@@ -388,7 +389,7 @@ describe('font-source demand facts (LoadOptions.fonts)', () => {
   });
 
   it('rejects malformed facts from a worker', () => {
-    const builder = new PresentationPreflightBuilder(bootstrap, { collectFontDemand: () => 'all' });
+    const builder = new PresentationPreflightBuilder(bootstrap, { collectFontDemand: () => 'all', officeFaceWeight });
     builder.addSlide(arabicDeck(0, 'A', 'Arial'));
     builder.addSlide(arabicDeck(1, 'B', 'Arial'));
     const full = builder.finish();
@@ -403,7 +404,7 @@ describe('font-source demand facts (LoadOptions.fonts)', () => {
   });
 
   it('keeps facts for families named like Object.prototype members', () => {
-    const builder = new PresentationPreflightBuilder(bootstrap, { collectFontDemand: () => 'all' });
+    const builder = new PresentationPreflightBuilder(bootstrap, { collectFontDemand: () => 'all', officeFaceWeight });
     builder.addSlide(arabicDeck(0, 'العربية', '__proto__'));
     builder.addSlide(arabicDeck(1, 'العربية', 'constructor'));
     const full = builder.finish();
@@ -425,7 +426,7 @@ describe('font-source demand facts (LoadOptions.fonts)', () => {
         endRunProperties: { fontFamily: 'EndFace' },
       }] } }] as Slide['elements'],
     };
-    const builder = new PresentationPreflightBuilder(bootstrap, { collectFontDemand: () => 'all' });
+    const builder = new PresentationPreflightBuilder(bootstrap, { collectFontDemand: () => 'all', officeFaceWeight });
     builder.addSlide(marked);
     builder.addSlide(slide(1, 'B', { elements: [] }));
     const full = builder.finish();
@@ -446,7 +447,7 @@ describe('font-source demand facts (LoadOptions.fonts)', () => {
       ] } }] as Slide['elements'],
     };
     const builder = new PresentationPreflightBuilder({ ...bootstrap, majorFont: null, minorFont: null },
-      { collectFontDemand: () => 'all' });
+      { collectFontDemand: () => 'all', officeFaceWeight });
     builder.addSlide(marked);
     builder.addSlide(slide(1, 'B', { elements: [] }));
     expect(builder.finish().fontPreloadFacts?.substituteScripts).toEqual({ 'bullet face': ['arabic'] });

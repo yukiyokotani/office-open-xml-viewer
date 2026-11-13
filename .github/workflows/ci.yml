@@ -175,6 +175,7 @@ jobs:
         run: |
           pnpm test:resource-policy
           pnpm check:resource-policy
+          pnpm check:pptx-face-weight-index
           pnpm lint
 
       - name: DOCX layout boundary tests

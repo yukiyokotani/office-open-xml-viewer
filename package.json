@@ -145,6 +145,8 @@
     "test:docx-public-api": "node --test scripts/check-public-api.test.mjs",
     "generate:resource-policy": "node scripts/generate-ooxml-resource-policy.mjs --write",
     "check:resource-policy": "node scripts/generate-ooxml-resource-policy.mjs",
+    "generate:pptx-face-weight-index": "node scripts/generate-pptx-face-weight-index.mjs",
+    "check:pptx-face-weight-index": "node scripts/generate-pptx-face-weight-index.mjs --check",
     "test:resource-policy": "node --test scripts/generate-ooxml-resource-policy.test.mjs",
     "measure:archive-entries": "node scripts/measure-ooxml-archive-entries.mjs",
     "check:public-api": "pnpm build && pnpm check:public-api:built",
