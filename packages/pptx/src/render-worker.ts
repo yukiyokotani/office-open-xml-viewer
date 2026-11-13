@@ -16,6 +16,7 @@ import { loadPptxSlideFromCursor } from './slide-cursor-operation';
 import { SlidePullWorker } from './slide-pull-worker';
 import {
   activeFontSet,
+  loadNativeRouteSentinels,
   loadOfficeFontFallbacks,
   unloadOfficeFontFallbacks,
   unregisterEmbeddedFonts,
@@ -94,10 +95,17 @@ async function officeRoutesForRequests(
 ): Promise<AcquiredOfficeRoutes> {
   const uncovered = uncoveredOfficeFontRequests(requests, embeddedFontTuples);
   const fontSet = activeFontSet();
+  // The symbol-font oracle of each render asks its painting context through
+  // the route sentinels (core symbol-face.ts).
+  if (fontSet) await (symbolSentinels ??= loadNativeRouteSentinels(fontSet).catch(() => null));
   return acquireOfficeRoutes(officeFontLoads, uncovered, (fresh) => loadOfficeFontFallbacks(fresh, fontSet), fontSet);
 }
 
+let symbolSentinels: Promise<FontFace[] | null> | null = null;
+
 function releaseOfficeFonts(): void {
+  void symbolSentinels?.then((faces) => { if (faces) unloadOfficeFontFallbacks(faces); });
+  symbolSentinels = null;
   for (const pending of distinctOfficeRouteLoads(officeFontLoads)) {
     void pending.then((loaded) => unloadOfficeFontFallbacks(loaded.faces), () => undefined);
   }

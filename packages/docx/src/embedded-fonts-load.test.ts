@@ -82,6 +82,7 @@ it.each([false, true])('rejects load when lazy font extraction crosses the entry
     'word/fonts/font1.ttf', 'word/fonts/font2.ttf', 'word/fonts/font3.ttf',
   ]);
   // DOCX prepares all resources before registration, so no partial set escapes.
-  expect(add).not.toHaveBeenCalled();
+  // (The document's own route sentinels are not embedded fonts.)
+  expect(add.mock.calls.filter(([face]) => !/^__ooxml_route_sentinel_/.test((face as { family: string }).family))).toEqual([]);
   expect(ArchiveWorker.latest.terminated).toBe(true);
 });

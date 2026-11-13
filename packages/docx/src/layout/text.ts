@@ -8,6 +8,9 @@ import {
   fontSubstituteScriptScope,
   graphemeClusterOffsets,
   normalizeFontMetricFamily,
+  isSymbolFontFamily,
+  symbolTextToUnicodeSegments,
+  type SymbolTextSegment,
   type CjkLang,
   type FontSubstituteScript,
   type ResolvedFontMetric,
@@ -723,7 +726,27 @@ export interface TextLayoutService {
   exactLocalFaces?(requestedFamily: string): readonly Readonly<{ resolvedFamily: string; weight: number; style: FontStyle; coverageProbeFamily?: string }>[];
   /** {@link GlyphMeasurer.ownsGlyphs} of this service's measurer. */
   ownsGlyphs?(request: Readonly<GlyphOwnershipRequest>): boolean;
+  /** Symbol-encoded text (core symbol-font.ts) as the faces this service
+   * selects draw it: each scalar takes its §17.3.2.26 slot, exactly as
+   * {@link shape} does, and only a symbol-font slot family is judged (see
+   * {@link TextLayoutServiceInput.symbolText}). */
+  symbolText?(request: Readonly<SymbolTextRequest>): readonly SymbolTextSegment[];
+  /** Whether the font {@link shape} selects for `character` under
+   * `request`'s slots is a symbol font whose face draws it as a symbol code
+   * (core symbol-face.ts). Undefined: not judged. */
+  symbolDraws?(request: Readonly<Omit<SymbolTextRequest, 'text'>>, character: string): boolean | undefined;
+  /** Whether the fonts {@link shape} selects for the characters of `text`
+   * under `request`'s slots paint them in the text colour: false when one
+   * is painted in its own colours, undefined when one is inconclusive. */
+  symbolMonochrome?(request: Readonly<Omit<SymbolTextRequest, 'text'>>, text: string): boolean | undefined;
+  /** The authored family of the §17.3.2.26 slot that {@link shape} selects
+   * for `character` under `request`'s slots. */
+  scalarFamily?(request: Readonly<Omit<SymbolTextRequest, 'text'>>, character: string): string | null | undefined;
 }
+
+export type SymbolTextRequest = Pick<TextShapeRequest,
+  'text' | 'fonts' | 'themeFonts' | 'themeFontPresence' | 'complexScript' | 'fontHint' | 'eastAsiaLanguage' | 'eastAsiaFontCharset'>
+  & { readonly weight: number; readonly style: FontStyle };
 
 export interface TextLayoutServiceInput {
   readonly fonts: FontResolver;
@@ -744,6 +767,25 @@ export interface TextLayoutServiceInput {
   readonly localMetrics?: Readonly<Record<string, Readonly<ResolvedFontMetric>>>;
   readonly eastAsiaFontCharsets?: Readonly<Record<string, string>>;
   readonly genericFamilies?: Readonly<Record<string, 'serif' | 'sans-serif' | 'monospace'>>;
+  /** Judge symbol-encoded text against the resolved font (production: the
+   * core oracle, asked in the measuring context). Absent: the face
+   * cannot be judged and the 0.89 subset converts. Its decisions depend only
+   * on this service's resources and context, like measured advances. */
+  readonly symbolText?: (
+    text: string, family: string, resolution: FontResolution,
+    /** The route converted text paints with: every authored slot cleared,
+     * the scalar's own slot and the run's weight/style (segment-builder). */
+    convertedRoute: (converted: string) => FontResolution,
+    /** Whether the F0-shifted form of a kept bare code would be shaped in
+     * the font the code was judged in (core SymbolTextOptions.keepsShifted). */
+    keepsShifted?: (shifted: string) => boolean,
+  ) => readonly SymbolTextSegment[];
+  /** Whether the resolved font draws one authored symbol code as its own
+   * symbol glyph; undefined when it cannot be judged. */
+  readonly symbolDraws?: (code: string, resolution: FontResolution) => boolean | undefined;
+  /** Whether the resolved font paints `text` in the text colour (never a
+   * colour glyph); undefined when inconclusive. */
+  readonly symbolMonochrome?: (text: string, resolution: FontResolution) => boolean | undefined;
   /** Producer line boxes (never OOXML): lines snapped to an active line
    * grid count grid cells from each catalogued face's own hhea box, without
    * Word's Far East 1.3 x usWin projection, as LibreOffice does. */
@@ -1099,6 +1141,15 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
     && (!input.glyphContours || input.glyphContoursSupportDirection === true)
     && (!(input.measurer.sameGlyphRaster || input.measurer.ownsGlyphs)
       || input.measurer.supportsDirectedAuxiliaries === true);
+  // The slot shape selects for one scalar (scriptSlot with this service's
+  // East Asian charset table), shared by symbolText and scalarFamily.
+  const scalarSlot = (request: Readonly<Omit<SymbolTextRequest, 'text'>>, character: string) =>
+    scriptSlot(character.codePointAt(0) ?? 0, request.complexScript ?? false,
+      request.fontHint, request.eastAsiaLanguage, request.eastAsiaFontCharset
+        ?? (() => {
+          const family = requestedFamily(request, 'eastAsia');
+          return family ? ownValue(eastAsiaFontCharsets, family.trim().toLowerCase()) : undefined;
+        })());
   const fingerprint = stableFingerprint('text', {
     contextualAdvanceBatch: true,
     glyphContours: input.glyphContourFingerprint ?? 'unavailable',
@@ -1350,6 +1401,53 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
       } } : {}),
     ...(input.fonts.exactLocalFaces
       ? { exactLocalFaces: (family: string) => input.fonts.exactLocalFaces!(family) } : {}),
+    scalarFamily(request: Readonly<Omit<SymbolTextRequest, 'text'>>, character: string) {
+      return requestedFamily(request, scalarSlot(request, character));
+    },
+    symbolDraws(request: Readonly<Omit<SymbolTextRequest, 'text'>>, character: string) {
+      const slot = scalarSlot(request, character);
+      if (!isSymbolFontFamily(requestedFamily(request, slot))) return false;
+      return input.symbolDraws?.(character, resolve({ ...request, text: character, slot }));
+    },
+    symbolMonochrome(request: Readonly<Omit<SymbolTextRequest, 'text'>>, text: string) {
+      let proven: boolean | undefined = true;
+      for (const character of text) {
+        const verdict = input.symbolMonochrome?.(character,
+          resolve({ ...request, text: character, slot: scalarSlot(request, character) }));
+        if (verdict === false) return false;
+        if (verdict === undefined) proven = undefined;
+      }
+      return proven;
+    },
+    symbolText(request: Readonly<SymbolTextRequest>) {
+      const out: SymbolTextSegment[] = [];
+      const push = (part: SymbolTextSegment) => {
+        const last = out.at(-1);
+        if (last && last.mapped === part.mapped) {
+          out[out.length - 1] = { ...part, text: last.text + part.text };
+        }
+        else if (part.text) out.push(part);
+      };
+      for (const character of request.text) {
+        const slot = scalarSlot(request, character);
+        const family = requestedFamily(request, slot);
+        if (!family || !isSymbolFontFamily(family)) { push({ text: character, mapped: false }); continue; }
+        const parts = input.symbolText
+          ? input.symbolText(character, family, resolve({ ...request, text: character, slot }), (converted) => {
+            const cleared = { ...request, fonts: { ascii: null, highAnsi: null, eastAsia: null, complexScript: null },
+              themeFonts: undefined, themeFontPresence: undefined };
+            return resolve({ ...cleared, text: converted, slot: scalarSlot(cleared, converted) });
+          },
+          // A kept bare code that bidi mirroring would replace is written
+          // F0-shifted (core symbol-font.ts): the same glyph only in the
+          // font it was judged in. Where shaping would give the shifted
+          // form another slot family, the code converts instead.
+          (shifted) => requestedFamily(request, scalarSlot(request, shifted))?.trim().toLowerCase() === family.trim().toLowerCase())
+          : symbolTextToUnicodeSegments(character, family);
+        for (const part of parts) push(part);
+      }
+      return out;
+    },
     fingerprint,
     fontMetrics,
     localMetrics: fontMetrics,

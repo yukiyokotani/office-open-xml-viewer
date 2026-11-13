@@ -105,6 +105,7 @@ describe('PptxPresentation.destroy() — rejects in-flight worker requests', () 
     instance._rawParts = new BoundedRawPartCache({ maxEntries: 2, maxBytes: 1024 });
     instance._googleFontFaces = [];
     instance._officeFontLoads = new Map();
+    instance._symbolSentinels = new Map();
     instance._embeddedFontFaces = [];
     instance._layoutWaiters = new Set();
     instance._layoutLifecycle = new ProgressiveLayoutLifecycle();

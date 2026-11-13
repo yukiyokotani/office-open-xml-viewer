@@ -221,8 +221,20 @@ export {
   symbolFontToUnicode,
   isSymbolFontFamily,
   symbolTextToUnicodeSegments,
+  symbolFontKey,
+  type SymbolFontKey,
+  type SymbolTextOptions,
   type SymbolTextSegment,
 } from './fonts/symbol-font';
+export {
+  createSymbolFaceOracle,
+  createSymbolMonochromeProbe,
+  type SymbolFaceOracle,
+  type SymbolFaceOracleOptions,
+  type SymbolProbeCanvasFactory,
+  type SymbolFallbackFont,
+  type SymbolProbeContext,
+} from './fonts/symbol-face';
 export { renderChart, collectChartFillRenderedSizes, assertChartFillRenderedSizeCount } from './chart/renderer';
 export { formatLocalizedExcelShortDate, localizedExcelShortDateTexts } from './chart/chart-number-format';
 export { autoResize, type AutoResizeOptions } from './autoResize';
@@ -806,8 +818,8 @@ export {
   measureLocalFontSourceNormalLine,
   type LocalFontNormalLine,
 } from './fonts/local-line-metrics';
+export { loadNativeRouteSentinels } from './fonts/route-sentinels';
 export {
-  loadNativeRouteSentinels,
   measureNativeRouteNormalLines,
   verifyNativeRouteNormalLines,
   type NativeRouteLineRequest,

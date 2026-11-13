@@ -14,7 +14,9 @@ import {
   graphemeClusterOffsets,
   isSymbolFontFamily,
   symbolTextToUnicodeSegments,
+  type SymbolTextSegment,
 } from '@silurus/ooxml-core';
+import type { SymbolTextRequest } from '../layout/text.js';
 import { groupFitTextRegions, type FitTextRun } from '../fit-text.js';
 import { mathFallbackText } from '../layout/math-fallback-text.js';
 import type { FontResolution } from '../layout/font-service.js';
@@ -137,6 +139,51 @@ export interface SegmentBuildContext {
   ) => number | undefined;
 }
 
+/** The §17.3.2.26 slots a run's text is shaped with (as pushSegmentPiece
+ * requests them), for judging its symbol-encoded text. */
+function runSymbolRequest(
+  run: ParagraphTextBearingRun & Readonly<{ fontFamily?: string | null }>,
+  cs: boolean,
+): Omit<SymbolTextRequest, 'text'> {
+  const ascii = run.fontFamily ?? null;
+  return {
+    fonts: run.fontSlots?.direct ?? {
+      ascii,
+      highAnsi: run.fontFamilyHighAnsi ?? ascii,
+      eastAsia: run.fontFamilyEastAsia ?? ascii,
+      complexScript: run.fontFamilyCs ?? ascii,
+    },
+    themeFonts: run.fontSlots?.theme,
+    themeFontPresence: run.fontSlots?.themePresent,
+    weight: (cs ? run.boldCs ?? false : run.bold) ? 700 : 400,
+    style: (cs ? run.italicCs ?? false : run.italic) ? 'italic' : 'normal',
+    complexScript: cs,
+    fontHint: run.fontHint,
+    eastAsiaLanguage: run.langEastAsia,
+  };
+}
+
+/** Whether any slot of the run names a symbol-encoded font. */
+function runHasSymbolSlot(request: Omit<SymbolTextRequest, 'text'>): boolean {
+  return [request.fonts, request.themeFonts].some((slots) => slots
+    && [slots.ascii, slots.highAnsi, slots.eastAsia, slots.complexScript].some(isSymbolFontFamily));
+}
+
+/** Symbol-encoded text (core symbol-font.ts) as the faces this layout's text
+ * service selects for each scalar's slot draw it, judged in its measuring
+ * context: codes a selected symbol face owns stay, the rest convert to
+ * Unicode. Without layout services no face can be judged: `family` converts
+ * through the 0.89 subset. */
+function symbolSegments(
+  environment: LineLayoutEnvironment,
+  text: string,
+  family: string | null | undefined,
+  request: Omit<SymbolTextRequest, 'text'>,
+): readonly SymbolTextSegment[] {
+  return environment.layoutServices?.text.symbolText?.({ ...request, text })
+    ?? symbolTextToUnicodeSegments(text, family);
+}
+
 /** ECMA-376 §17.3.2.5/§17.3.2.33 change displayed case, not run ownership.
  * §17.3.3.30 symbol normalization may also expand a scalar to a surrogate
  * pair. Scope and offsets use the complete display string after both changes;
@@ -150,9 +197,12 @@ function transformedRunText(
 ): string {
   const r: ParagraphTextBearingRun = run;
   const display = run.allCaps || run.smallCaps ? text.toUpperCase() : text;
-  const map = (text: string, family: string | null | undefined) => isSymbolFontFamily(family)
-    ? symbolTextToUnicodeSegments(text, family).map((part) => part.text).join('') : text;
-  if (r.rtl || r.cs) return map(display, r.fontFamilyCs ?? run.fontFamily);
+  const cs = r.rtl === true || r.cs === true;
+  const request = runSymbolRequest(r, cs);
+  const symbolic = environment.layoutServices?.text.symbolText ? runHasSymbolSlot(request) : undefined;
+  const map = (text: string, family: string | null | undefined) => (symbolic ?? isSymbolFontFamily(family))
+    ? symbolSegments(environment, text, family, request).map((part) => part.text).join('') : text;
+  if (cs) return map(display, r.fontFamilyCs ?? run.fontFamily);
   if (environment.layoutServices?.text) return map(display, run.fontFamily);
   return splitByEastAsia(display).map((part) => map(part.text,
     part.ea ? r.fontFamilyEastAsia ?? run.fontFamily : run.fontFamily)).join('');
@@ -347,24 +397,25 @@ export function appendTextPiece(
       compressCharacterWhitespace,
       mappedSymbolUnicode,
     );
+  // With a text service every slot is judged as the shaper selects it;
+  // without one, only the emitted family (the 0.89 rule).
+  const symbolicRun = (cs: boolean): boolean | undefined => environment.layoutServices?.text.symbolText
+    ? runHasSymbolSlot(runSymbolRequest(r, cs)) : undefined;
   const emit = (word: string, slot: 'cs' | 'ea' | 'latin') => {
     const cs = slot === 'cs';
     const fontFamily =
       slot === 'cs' ? csFontFamily : slot === 'ea' ? eaFontFamily : base.fontFamily;
-    // ECMA-376 §17.3.2.26 + §17.3.3.30: a run whose rFonts axis is Symbol or
-    // Wingdings stores glyphs as the FONT's own (private) code points — Word
-    // commonly in the PUA (U+F020–U+F0FF). Those render as tofu in any
-    // fallback face, so normalize each character to its Unicode equivalent
-    // (core `symbolTextToUnicodeSegments`, the same table the list marker uses
-    // via `symbolFontToUnicode`). The string is split at mapped/unmapped
-    // boundaries: a MAPPED run is drawn in a generic fallback (fontFamily=null
-    // → sans tail with the dingbat glyphs; keeping the symbol family would let
-    // an installed Symbol/Wingdings re-interpret the Unicode code point as the
-    // WRONG glyph), while an UNMAPPED run keeps the symbol family so a host
-    // that ships Symbol/Wingdings still draws its native glyph. Done once at
-    // build time so measure==draw (the seg.text is never transformed later).
-    if (isSymbolFontFamily(fontFamily)) {
-      for (const part of symbolTextToUnicodeSegments(word, fontFamily)) {
+    // ECMA-376 §17.3.2.26 + §17.3.3.30: a run whose rFonts axis is a symbol
+    // font (Symbol, Wingdings, Wingdings 2/3, Webdings) stores the FONT's own
+    // codes, bare or F0-shifted into the PUA. The text service judges the
+    // face that slot selects in this layout's measuring context (core
+    // symbol-face.ts): codes that face draws stay in it; the others become
+    // Unicode and are drawn in a generic fallback (fontFamily=null): keeping
+    // the symbol family would let its symbol cmap re-read the Unicode code
+    // point as the WRONG glyph. Done once at build time so measure==draw (the
+    // seg.text is never transformed later).
+    if (symbolicRun(cs) ?? isSymbolFontFamily(fontFamily)) {
+      for (const part of symbolSegments(environment, word, fontFamily, runSymbolRequest(r, cs))) {
         pushSeg(part.text, cs, part.mapped ? null : fontFamily, undefined, false, part.mapped);
       }
       return;
@@ -383,7 +434,7 @@ export function appendTextPiece(
       // front of the service-backed script splitter as well as the legacy
       // path; otherwise a PUA code point such as Symbol F0B0 reaches Canvas
       // unchanged and renders as tofu.
-      if (isSymbolFontFamily(base.fontFamily)) {
+      if (symbolicRun(false) ?? isSymbolFontFamily(base.fontFamily)) {
         emit(slice, 'latin');
         return;
       }

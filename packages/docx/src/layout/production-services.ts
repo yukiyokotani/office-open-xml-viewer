@@ -9,6 +9,7 @@ import {
 import {
   activeFontSet,
   canvasFontString,
+  createSymbolFaceOracle,
   fontFaceWeightCovers,
 } from '@silurus/ooxml-core';
 import type { ResolvedFontMetric } from '@silurus/ooxml-core';
@@ -66,6 +67,12 @@ export interface ProductionLayoutServiceOptions {
   readonly mathResources?: readonly MathLayoutResource[];
   readonly mathDrawables?: ReadonlyMap<string, CanvasImageSource>;
   readonly measureContext: MeasurementTextContext | null;
+  /** The 2D context behind {@link measureContext}: symbol-face colour probes
+   * draw on a scratch canvas of its realm (core symbol-face.ts). */
+  readonly symbolProbeOwner?: unknown;
+  /** The canvas factory of the measuring/painting backend, for those
+   * probes (a Node session's canvas factory). */
+  readonly symbolProbeCanvas?: import('@silurus/ooxml-core').SymbolProbeCanvasFactory;
   /** FontFaceSet of the measuring canvas, including foreign DOM realms. */
   readonly fontSet?: FontFaceSet | null;
   readonly verticalGlyphMeasurement: VerticalGlyphMeasurementService;
@@ -458,6 +465,28 @@ export function createProductionTextLayoutService(
     fontMetrics,
     ...(source.fonts.plainLineBoxes ? { plainLineBoxes: true } : {}),
     eastAsiaFontCharsets: fontFamilyCharsets,
+    ...(() => {
+      // Symbol-encoded text (core symbol-font.ts) is judged by the core oracle
+      // in this very measuring context, with the Canvas font each resolution
+      // paints with (its complete family list, weight and style).
+      const oracle = createSymbolFaceOracle(context, {
+        probeOwner: options.symbolProbeOwner,
+        ...(options.symbolProbeCanvas ? { createCanvas: options.symbolProbeCanvas } : {}),
+      });
+      const fontOf = (resolution: import('./font-service.js').FontResolution) =>
+        canvasFontString(resolution.route, 32, resolution.weight, resolution.style);
+      return {
+        symbolText: (text: string, family: string, resolution: import('./font-service.js').FontResolution,
+          convertedRoute: (converted: string) => import('./font-service.js').FontResolution,
+          keepsShifted?: (shifted: string) => boolean) =>
+          // The colour proof is for the route the converted text paints with.
+          oracle.segments(text, family, fontOf(resolution), (converted) => fontOf(convertedRoute(converted)), keepsShifted),
+        symbolDraws: (code: string, resolution: import('./font-service.js').FontResolution) =>
+          oracle.draws(code, fontOf(resolution)),
+        symbolMonochrome: (text: string, resolution: import('./font-service.js').FontResolution) =>
+          oracle.monochrome(text, fontOf(resolution)),
+      };
+    })(),
     genericFamilies: Object.fromEntries(routedFontFamilies.map((family) => [
       family,
       classifyDocxFontGeneric(family, source.fonts.familyClasses, source.fonts.familyPitches),
