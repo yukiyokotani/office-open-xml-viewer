@@ -9,6 +9,7 @@ import { OFFICE_FONT_SUBSTITUTIONS } from '@silurus/ooxml-core/internal/font-sou
 import { renderViewport } from './renderer.js';
 import { resolveSharedStringRows } from './shared-strings.js';
 import type { ParsedWorkbook, Row, Worksheet } from './types.js';
+import { SYMBOL_ENCODED, symbolRealm } from './test-support/symbol-realm.js';
 
 // Design §6 invariant: finite XLSX scalar demand is a superset of every scalar
 // the renderer measures or paints. A scalar outside the demand belongs to a
@@ -228,6 +229,58 @@ describe('XLSX font demand covers every measured or painted scalar', () => {
     // The invariant is vacuous for 'all' demand; record that some sheets are finite.
     expect(outcomes).toContain('finite');
   }, 120_000);
+});
+
+// Symbol-encoded faces (symbol-paint.ts): a code paints as authored where the
+// face draws it, as its Unicode conversion where it does not; the demand
+// covers both outcomes without declining to 'all'. (A precomposed authored
+// code such as Wingdings 0xFC is not normalization-inert, so its text still
+// demands 'all': core scalar-demand.ts.)
+const symbols = workbookBytes(
+  '<numFmts count="1"><numFmt numFmtId="164" formatCode="&quot;a&quot;0"/></numFmts>'
+    + '<fonts count="3"><font><sz val="11"/><name val="Calibri"/></font><font><sz val="11"/><name val="Wingdings"/></font>'
+    + '<font><sz val="11"/><name val="Symbol"/></font></fonts>' + base
+    + '<cellXfs count="4"><xf numFmtId="0" fontId="0"/><xf numFmtId="0" fontId="1"/><xf numFmtId="0" fontId="2"/>'
+    + '<xf numFmtId="164" fontId="2" applyNumberFormat="1"/></cellXfs>',
+  '<row r="1"><c r="A1" s="1" t="inlineStr"><is><t>JJ l</t></is></c><c r="B1" s="2" t="s"><v>0</v></c>'
+    + '<c r="C1" s="1" t="s"><v>1</v></c><c r="D1" s="3"><v>7</v></c><c r="E1" s="1" t="e"><v>#N/A</v></c></row>'
+    + '<row r="2"><c r="A2" t="inlineStr"><is><r><t>Done </t></r><r><rPr><rFont val="Wingdings"/></rPr><t>n</t></r></is></c>'
+    + '<c r="B2" s="1"><v>12</v></c></row>',
+  '<si><t>abg</t></si><si><t>\uF0FC\uF06C</t></si>',
+  '<xdr:twoCellAnchor><xdr:from><xdr:col>1</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>3</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>'
+    + '<xdr:to><xdr:col>6</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>8</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>'
+    + '<xdr:sp><xdr:nvSpPr><xdr:cNvPr id="2" name="Text 1"/><xdr:cNvSpPr txBox="1"/></xdr:nvSpPr>'
+    + '<xdr:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="3000000" cy="1200000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></xdr:spPr>'
+    + '<xdr:txBody><a:bodyPr wrap="square"/><a:p><a:r><a:rPr sz="1400"><a:sym typeface="Wingdings"/></a:rPr><a:t>\uF0FC done</a:t></a:r>'
+    + '<a:r><a:rPr sz="1400"><a:latin typeface="Webdings"/></a:rPr><a:t>a</a:t></a:r></a:p></xdr:txBody>'
+    + '</xdr:sp><xdr:clientData/></xdr:twoCellAnchor>',
+);
+
+describe('XLSX font demand covers symbol-encoded text in either face outcome', () => {
+  it('stays finite and covers the painted form, kept or converted', () => {
+    const { workbook, sheets } = parse(symbols);
+    const ws = sheets[0]!;
+    const demand = new XlsxFontDemand(workbook, 'jp', []);
+    const deltas = [demand.take()];
+    demand.worksheetParts(ws);
+    demand.newRowsOf(ws);
+    deltas.push(demand.take());
+    expect(deltas.some((delta) => delta?.scalars === 'all')).toBe(false);
+    const demanded = new Set(deltas.flatMap((delta) => delta?.scalars === 'all' ? [] : delta?.scalars ?? []));
+    expect(deltas.flatMap((delta) => delta?.families ?? [])).toEqual(expect.arrayContaining(['Wingdings', 'Symbol', 'Webdings']));
+    for (const realm of [symbolRealm(), symbolRealm({ wingdings: SYMBOL_ENCODED, symbol: SYMBOL_ENCODED, webdings: SYMBOL_ENCODED })]) {
+      renderViewport(realm.ctx, ws, workbook.styles, { row: 1, col: 1, rows: 40, cols: 16 }, { dpr: 1, loadedImages: new Map() }, 'jp');
+      const scalars = new Set<number>();
+      for (const record of [...realm.fills, ...realm.measures]) {
+        for (const ch of record.text) scalars.add(ch.codePointAt(0) as number);
+      }
+      const missing = [...scalars].filter((cp) => !demanded.has(cp))
+        .map((cp) => `U+${cp.toString(16).toUpperCase().padStart(4, '0')}`);
+      expect(missing).toEqual([]);
+      // The conversion did run where the faces are missing.
+      if (realm.fills.some((fill) => fill.text.includes('α'))) expect(scalars.has(0x2713)).toBe(true);
+    }
+  });
 });
 
 describe('cell text is charged to the face the renderer paints it with', () => {

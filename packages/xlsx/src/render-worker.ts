@@ -22,7 +22,10 @@ import { xlsxCjkFallback } from './font-requests.js';
 import init, { XlsxArchive, reinit } from './wasm/xlsx_parser.js';
 import {
   bindMetafileFontFamilies,
+  activeFontSet,
+  createSymbolFaceOracleCache,
   decodeDataUrl,
+  loadNativeRouteSentinels,
   loadOfficeFontFallbacks,
   unloadOfficeFontFallbacks,
   type OfficeFontFallbackRoute,
@@ -120,6 +123,10 @@ let fontSourceTail: Promise<void> = Promise.resolve();
 let officeFontRoutes: Record<string, OfficeFontFallbackRoute> = nullRecord();
 let checkedOfficeTupleSet = new Set<string>();
 let officeSheetLoads = new WeakMap<Worksheet, Promise<void>>();
+/** Symbol-code verdicts across this workbook's renders, kept while the worker
+ * realm's faces are unchanged (core createSymbolFaceOracleCache); replaced
+ * with every parse. */
+let symbolFaces = createSymbolFaceOracleCache();
 let officeSheetLoadQueue: Promise<void> = Promise.resolve();
 
 function startFontLoad(parsed: ParsedWorkbook, sources: readonly FontSourceDescriptor[]): void {
@@ -135,6 +142,11 @@ function startFontLoad(parsed: ParsedWorkbook, sources: readonly FontSourceDescr
       if (delta) await fontSources.ensure(await installedFamilies.exclude(delta));
     }
     const office = await loadOfficeFontFallbacks(xlsxOfficeFontRequests(parsed));
+    // The symbol-font oracle of each render asks the worker realm's painting
+    // context through the route sentinels (core symbol-face.ts); released
+    // with the Office faces.
+    const sentinels = await loadNativeRouteSentinels(activeFontSet()).catch(() => null);
+    if (sentinels) office.faces.push(...sentinels);
     officeFontFaces = office.faces;
     officeFontRoutes = office.routes;
     checkedOfficeTupleSet = new Set(office.checked);
@@ -338,6 +350,7 @@ self.onmessage = async (e: MessageEvent<
       checkedOfficeTupleSet = new Set();
       officeSheetLoads = new WeakMap();
       officeSheetLoadQueue = Promise.resolve();
+      symbolFaces = createSymbolFaceOracleCache();
       sheetCache.clear();
       viewProjectionCache.clear();
       sheetCacheUsage.clear();
@@ -518,7 +531,7 @@ self.onmessage = async (e: MessageEvent<
         // invalidate it on first use.
         { ...renderOpts, authoritativeMdw: req.layoutMetrics?.maximumDigitWidth
           ?? workbook?.layoutMetrics?.maximumDigitWidth,
-          officeFontRoutes, fontSources: fontSources?.loaded, fetchImage: getImage },
+          officeFontRoutes, fontSources: fontSources?.loaded, symbolFaces, fetchImage: getImage },
         svgDecodeClient.decode,
       );
       const bitmap = canvas.transferToImageBitmap();

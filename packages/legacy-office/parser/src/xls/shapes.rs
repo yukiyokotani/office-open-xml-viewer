@@ -1073,6 +1073,7 @@ fn text(
         font_face: Some(font.name.clone()),
         font_face_ea: Some(font.name.clone()),
         font_face_cs: None,
+        font_face_sym: None,
         spacing: None,
     };
     let mut paragraphs = Vec::new();
