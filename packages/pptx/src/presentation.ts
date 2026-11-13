@@ -1686,6 +1686,9 @@ export class PptxPresentation {
     // reachable. In worker mode the worker's copy ends with the worker.
     this._fonts = undefined;
     this._installedFamilies = null;
+    // A caller canvas may outlive the presentation: its bound oracle must not
+    // keep the released faces reachable (core symbol-face-cache.ts).
+    this._symbolFaces?.dispose();
     this._symbolFaces = createSymbolFaceOracleCache();
     for (const loads of this._officeFontLoads.values()) {
       for (const pending of distinctOfficeRouteLoads(loads)) {
