@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { PptxViewer, type HiddenSlideMode } from './viewer.js';
 import { FakePptxEngine, installDom, makeEl } from './scroll-viewer-test-dom.js';
 import type { PptxTextRunInfo } from './renderer';
+import { parseRelativeSlideJump, resolveRelativeSlideJump } from '@silurus/ooxml-core';
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -126,5 +127,31 @@ describe("PptxViewer hiddenSlideMode: 'skip' (#2181)", () => {
     await vi.waitFor(() => expect(viewer.slideIndex).toBe(2));
     expect(drawn()).not.toContain(1);
     viewer.destroy();
+  });
+
+  it('a previousslide jump to a hidden slide lands on the shown slide before it', async () => {
+    const PREVIOUS = 'ppaction://hlinkshowjump?jump=previousslide';
+    const click = (viewer: PptxViewer) => (viewer as unknown as {
+      _onHyperlinkClick(target: { kind: 'internal'; ref: string }): void;
+    })._onHyperlinkClick({ kind: 'internal', ref: PREVIOUS });
+    const { viewer, drawn } = viewerFor([1, 2], 5);
+    const engine = (viewer as unknown as { engine: { resolveFn?: (ref: string, current: number) => number | undefined } }).engine;
+    engine.resolveFn = (ref, current) => resolveRelativeSlideJump(parseRelativeSlideJump(ref)!, current, 5);
+    await viewer.goToSlide(3);
+    click(viewer);
+    await vi.waitFor(() => expect(viewer.slideIndex).toBe(0));
+    expect(drawn().some((slide) => [1, 2].includes(slide))).toBe(false);
+    viewer.destroy();
+
+    // No shown slide before the target: the jump stays on the first shown slide.
+    const first = viewerFor([0], 3);
+    (first.viewer as unknown as { engine: typeof engine }).engine.resolveFn =
+      (ref, current) => resolveRelativeSlideJump(parseRelativeSlideJump(ref)!, current, 3);
+    await first.viewer.goToSlide(1);
+    click(first.viewer);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(first.viewer.slideIndex).toBe(1);
+    expect(first.drawn()).not.toContain(0);
+    first.viewer.destroy();
   });
 });

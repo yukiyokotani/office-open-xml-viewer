@@ -114,11 +114,13 @@ export interface XlsxWorkbookSession {
   /**
    * Raw bytes of one picture a worksheet model names (an image's
    * `imagePath`), as a Blob of `mimeType` (default
-   * `application/octet-stream`). Paths are `.xlsx` package part paths or the
-   * paths a `legacyXls` / `ods` source gives its pictures. Same contract as
-   * `PptxPresentationSession.getImage`: reads charge the session's archive
-   * budgets, results are kept in a bounded raw-part cache, a resource-limit
-   * failure fails the session, and the call rejects after `close()`.
+   * `application/octet-stream`). For a `.xlsx` any picture part is served (a
+   * part whose content type is `image/*`); for a `legacyXls` / `ods` source,
+   * the paths its model gives its pictures. Another path rejects with a
+   * `TypeError` (or the archive's not-found error) and leaves the session
+   * usable. Reads charge the session's archive budgets, results are kept in a
+   * bounded raw-part cache, a resource-limit failure fails the session, and
+   * the call rejects after `close()`.
    */
   getImage(path: string, mimeType?: string): Promise<Blob>;
   close(): Promise<void>;
@@ -312,6 +314,15 @@ export class XlsxWorkbookSessionImpl implements XlsxWorkbookSession {
 
   async getImage(path: string, mimeType = 'application/octet-stream'): Promise<Blob> {
     this.assertOpen();
+    let picture: boolean | undefined;
+    try {
+      picture = this.archive.is_picture_part?.(path);
+    } catch (error) {
+      throw this.imageFailure(error);
+    }
+    if (picture === false) {
+      throw new TypeError('XLSX getImage(): the path does not name a picture part (a part whose content type is image/*)');
+    }
     return this.rawParts.get(path, mimeType, () => {
       // A load scheduled before close() never reaches the freed archive.
       if (this.released) throw new Error('XLSX workbook session is closed');
@@ -320,11 +331,19 @@ export class XlsxWorkbookSessionImpl implements XlsxWorkbookSession {
       this.refreshResourceUsage();
       return new Blob([bytes as BlobPart], { type: mimeType });
     }).catch((error: unknown) => {
-      const normalized = parseResourceLimitError(error) ?? error;
-      if (normalized instanceof OoxmlResourceLimitError) this.resourceFailure ??= normalized;
-      this.metrics.fail(normalized);
-      throw normalized;
+      throw this.imageFailure(error);
     });
+  }
+
+  /** Only a resource-limit overrun fails the session; a non-picture or
+   * missing path rejects that getImage() call alone. */
+  private imageFailure(error: unknown): unknown {
+    const normalized = parseResourceLimitError(error) ?? error;
+    if (normalized instanceof OoxmlResourceLimitError) {
+      this.resourceFailure ??= normalized;
+      this.metrics.fail(normalized);
+    }
+    return normalized;
   }
 
   close(): Promise<void> {

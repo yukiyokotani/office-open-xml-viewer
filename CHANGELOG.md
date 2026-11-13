@@ -7,10 +7,14 @@ the corresponding minor release.
 
 ## 0.90.0 — Unreleased
 
-Minor release that lets applications choose where web fonts come from. Migration
-is required only if you pass `useGoogleFonts`: replace `useGoogleFonts: true`
-with `fonts: [googleFonts()]`. The alias still works in 0.90 with a warning;
-from 0.91.0 it is ignored with the same warning, and never throws. See the
+Minor release that lets applications choose where web fonts come from. Two
+changes may need action. If you pass `useGoogleFonts`, replace
+`useGoogleFonts: true` with `fonts: [googleFonts()]`. The alias still works in
+0.90 with a warning; from 0.91.0 it is ignored with the same warning, and never
+throws. If your page has a Content Security Policy and loads web fonts, allow
+the font file host (for example `fonts.gstatic.com`) in `connect-src` as well
+as `font-src`: font files are now fetched, and a blocked fetch falls back to
+the host fonts (see **Served font line heights** below). See the
 [0.89 to 0.90 migration guide](docs/migration-0.90.md).
 
 - **Font sources:** the new `fonts` load option takes an ordered list of
@@ -66,12 +70,14 @@ from 0.91.0 it is ignored with the same warning, and never throws. See the
 - **Node picture bytes:** `DocxDocumentSession` and `XlsxWorkbookSession`
   (from `openDocxDocument` and `openXlsxWorkbook` in `@silurus/ooxml/node`)
   now have `getImage(path, mimeType?)`, as `PptxPresentationSession` already
-  had. It returns the bytes of a picture the model names as a `Blob`, for
-  `.docx`/`.xlsx` part paths and for the paths of the `legacyDoc`,
-  `legacyXls`, `odt` and `ods` sources (such as `legacy-doc/image/0`). Reads
-  count against the session's resource limits, a resource-limit failure
-  fails the session, and the call rejects after `close()`. This is additive,
-  so no migration is needed (#2180).
+  had. It returns the bytes of a picture as a `Blob`: for a `.docx`/`.xlsx`,
+  a picture part (a part whose content type is `image/*`, such as the paths
+  the model names), and for the `legacyDoc`, `legacyXls`, `odt` and `ods`
+  sources a picture path their model names (such as `legacy-doc/image/0`).
+  Any other path rejects that call only. Reads count against the session's
+  resource limits, a resource-limit failure fails the session, and the call
+  rejects after `close()`. This is additive, so no migration is needed
+  (#2180).
 - **Fixed:** a DOCX whose `word/document.xml` cannot be parsed now opens with
   the "This document could not be displayed" page. Before, `load()` rejected
   with a `RangeError` because the placeholder page had a 0×0 size. The page
@@ -90,13 +96,17 @@ from 0.91.0 it is ignored with the same warning, and never throws. See the
   hidden, both `PptxViewer` and `PptxScrollViewer` now behave fully as in
   `'show'`. This changes 0.89.9, where `PptxViewer` drew the requested slide
   but `findText()` returned no matches; it now matches every slide (#2181).
+- **Previous-slide links in `'skip'` mode:** in `PptxViewer` and
+  `PptxScrollViewer`, a "previous slide" action link whose previous slide is
+  hidden now goes to the shown slide before it, as `prevSlide()` does. It used
+  to land on the next shown slide, which is usually the slide it started from.
 - **Deprecated:** `useGoogleFonts` is an alias of `fonts: [googleFonts()]` and
   warns once per JavaScript realm. Combining `useGoogleFonts: true` with
   `fonts` throws a `TypeError`. The VS Code extension keeps its
   `ooxmlViewer.useGoogleFonts` setting.
-- **Fixed:** text, `w:sym`/`a:sym` symbols and list markers in Symbol,
-  Wingdings, Wingdings 2, Wingdings 3 and Webdings now render on every host
-  (#2177). Greek letters and the maths operators of Symbol, and the
+- **Fixed:** in DOCX and PPTX, text, `w:sym`/`a:sym` symbols and list
+  markers in Symbol, Wingdings, Wingdings 2, Wingdings 3 and Webdings now
+  render on every host (#2177). Greek letters and the maths operators of Symbol, and the
   pictographs of the Wingdings/Webdings fonts, used to draw as tofu or as
   Latin letters wherever the font is missing or, like Apple's Symbol, is not
   symbol-encoded. Each code is now checked against the face that actually

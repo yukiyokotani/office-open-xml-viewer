@@ -124,18 +124,140 @@ export function resolvedFromWire(wire: WireErrorPlaceholder | undefined): Resolv
   return Object.freeze({ title, detail: detail === '' ? null : detail });
 }
 
-/** The painted title for a failed part. */
+/** The painted title for a failed part, at most
+ *  {@link PART_FAILURE_MESSAGE_MAX_UTF8} bytes. */
 export function errorPlaceholderTitle(resolved: ResolvedErrorPlaceholder | null, builtin: string): string {
-  return resolved?.title ?? builtin;
+  return clampPartFailureMessage(resolved?.title ?? builtin);
 }
 
-/** The painted detail for a failed part; `null` paints no detail line. */
+/** The painted detail for a failed part; `null` paints no detail line.
+ *  Caller text and the file-derived parser message are both capped at
+ *  {@link PART_FAILURE_MESSAGE_MAX_UTF8} bytes: at most a few lines are
+ *  painted, so wrapping never has to scan an unbounded string. */
 export function errorPlaceholderDetail(
   resolved: ResolvedErrorPlaceholder | null,
   builtin: string,
 ): string | null {
-  if (resolved === null || resolved.detail === undefined) return builtin;
-  return resolved.detail;
+  const detail = resolved === null || resolved.detail === undefined ? builtin : resolved.detail;
+  return detail === null ? null : clampPartFailureMessage(detail);
+}
+
+/** Lines painted for a placeholder detail; the title is one line. */
+export const ERROR_PLACEHOLDER_DETAIL_LINES = 4;
+
+/**
+ * Word-wrap placeholder text to `maxWidth` in at most `maxLines` lines. A word
+ * wider than a line is broken at grapheme boundaries, and text that does not
+ * fit ends in `…`. Shared by the DOCX error page (shaped at layout) and the
+ * PPTX/XLSX canvas cards so every format truncates the same way.
+ */
+export function wrapErrorPlaceholderText(
+  text: string,
+  maxWidth: number,
+  maxLines: number,
+  widthOf: (value: string) => number,
+): string[] {
+  const words = text.trim().split(/\s+/).filter(Boolean);
+  const lines: string[] = [];
+  let line = '';
+  const ellipsize = (value: string): string => {
+    const ellipsis = ELLIPSIS;
+    const offsets = [0, ...graphemeClusterOffsets(value), value.length]
+      .filter((offset, index, values) => index === 0 || offset !== values[index - 1]);
+    let end = offsets.length - 1;
+    while (end > 0 && widthOf(`${value.slice(0, offsets[end])}${ellipsis}`) > maxWidth) end -= 1;
+    return `${value.slice(0, offsets[end] ?? 0)}${ellipsis}`;
+  };
+  const truncateLast = (): void => {
+    if (lines.length === 0) lines.push(ellipsize(''));
+    else lines[lines.length - 1] = ellipsize(lines[lines.length - 1]);
+  };
+  const pushOverlong = (word: string): boolean => {
+    const offsets = [0, ...graphemeClusterOffsets(word), word.length]
+      .filter((offset, index, values) => index === 0 || offset !== values[index - 1]);
+    let start = 0;
+    while (start < offsets.length - 1) {
+      if (lines.length >= maxLines) {
+        truncateLast();
+        return true;
+      }
+      let end = start + 1;
+      while (end < offsets.length && widthOf(word.slice(offsets[start], offsets[end])) <= maxWidth) end += 1;
+      const fittingEnd = Math.max(start + 1, end - 1);
+      const chunk = word.slice(offsets[start], offsets[fittingEnd]);
+      if (lines.length >= maxLines - 1 && fittingEnd < offsets.length - 1) {
+        lines.push(ellipsize(chunk));
+        return true;
+      }
+      lines.push(chunk);
+      start = fittingEnd;
+    }
+    return false;
+  };
+  for (let wordIndex = 0; wordIndex < words.length; wordIndex += 1) {
+    const word = words[wordIndex];
+    const candidate = line ? `${line} ${word}` : word;
+    const candidateWidth = widthOf(candidate);
+    if (line && candidateWidth > maxWidth) {
+      lines.push(line);
+      line = '';
+      if (lines.length >= maxLines) {
+        truncateLast();
+        break;
+      }
+      if (widthOf(word) > maxWidth) {
+        if (pushOverlong(word)) break;
+      }
+      else line = word;
+    } else if (!line && candidateWidth > maxWidth) {
+      if (pushOverlong(word)) break;
+    } else {
+      line = candidate;
+    }
+    if (wordIndex < words.length - 1 && lines.length >= maxLines && !line) {
+      truncateLast();
+      break;
+    }
+  }
+  if (line && lines.length < maxLines) lines.push(line);
+  return lines;
+}
+
+interface PlaceholderMeasureContext {
+  readonly font: string;
+  measureText(text: string): { readonly width: number };
+}
+
+const CANVAS_LINE_CACHE_ENTRIES = 8;
+const canvasLineCaches = new WeakMap<object, Map<string, readonly string[]>>();
+
+/**
+ * {@link wrapErrorPlaceholderText} measured with the context's current font.
+ * A failed part repaints with the same text, so each context keeps its last
+ * few results instead of re-measuring every word on every paint.
+ */
+export function errorPlaceholderCanvasLines(
+  ctx: PlaceholderMeasureContext,
+  text: string,
+  maxWidth: number,
+  maxLines: number,
+): readonly string[] {
+  let cache = canvasLineCaches.get(ctx);
+  if (cache === undefined) {
+    cache = new Map();
+    canvasLineCaches.set(ctx, cache);
+  }
+  const key = `${ctx.font}\u0000${maxWidth}\u0000${maxLines}\u0000${text}`;
+  const hit = cache.get(key);
+  if (hit !== undefined) {
+    cache.delete(key);
+    cache.set(key, hit);
+    return hit;
+  }
+  const lines = Object.freeze(wrapErrorPlaceholderText(text, maxWidth, maxLines, (value) => ctx.measureText(value).width));
+  cache.set(key, lines);
+  if (cache.size > CANVAS_LINE_CACHE_ENTRIES) cache.delete(cache.keys().next().value as string);
+  return lines;
 }
 
 /** Bytes kept for one failure record's `message` (the painted default detail

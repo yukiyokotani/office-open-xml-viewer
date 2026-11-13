@@ -36,6 +36,10 @@ export interface DocxNodeAcquisitionOptions {
 export interface DocxNodeArchive extends DocxDocumentCursorArchive {
   free(): void;
   extract_image(path: string): Uint8Array;
+  /** OOXML packages only: whether the part's content type is `image/*`. A
+   * model-source archive omits it because its picture keys are already the
+   * only readable entries. */
+  is_picture_part?(path: string): boolean;
   /** `undefined` when the package has no document-cursor checkpoint. */
   document_cursor_resource_usage(): Uint8Array | undefined;
   resource_usage(): Uint8Array;

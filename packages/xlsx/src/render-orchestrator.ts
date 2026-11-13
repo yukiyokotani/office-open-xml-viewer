@@ -3,6 +3,8 @@ import type { CjkLang } from '@silurus/ooxml-core';
 import {
   errorPlaceholderDetail,
   errorPlaceholderTitle,
+  errorPlaceholderCanvasLines,
+  ERROR_PLACEHOLDER_DETAIL_LINES,
   resolvedFromWire,
   type ResolvedErrorPlaceholder,
 } from '@silurus/ooxml-core/internal/part-failures';
@@ -1174,11 +1176,12 @@ function drawSheetParseErrorOverlay(
   const headSize = Math.max(13, base * 0.035);
   ctx.fillStyle = '#333333';
   ctx.font = `600 ${headSize}px sans-serif`;
-  ctx.fillText(
-    errorPlaceholderTitle(placeholder, `Sheet "${sheetName}" could not be displayed`),
-    cx,
-    heightPx * 0.46,
-  );
+  // The card is the whole viewport: the title only has to stay inside it,
+  // while the detail keeps a narrower reading measure.
+  const title = errorPlaceholderTitle(placeholder, `Sheet "${sheetName}" could not be displayed`);
+  for (const line of errorPlaceholderCanvasLines(ctx, title, widthPx * 0.9, 1)) {
+    ctx.fillText(line, cx, heightPx * 0.46);
+  }
   const detail = errorPlaceholderDetail(placeholder, message);
   if (detail === null) {
     ctx.restore();
@@ -1188,24 +1191,10 @@ function drawSheetParseErrorOverlay(
   const detailSize = Math.max(10, base * 0.022);
   ctx.fillStyle = '#666666';
   ctx.font = `${detailSize}px sans-serif`;
-  const maxLineWidth = Math.min(widthPx * 0.8, 640);
-  const words = detail.split(/\s+/);
-  const lines: string[] = [];
-  let line = '';
-  for (const word of words) {
-    const candidate = line ? `${line} ${word}` : word;
-    if (ctx.measureText(candidate).width > maxLineWidth && line) {
-      lines.push(line);
-      line = word;
-    } else {
-      line = candidate;
-    }
-    if (lines.length >= 4) break;
-  }
-  if (line && lines.length < 4) lines.push(line);
+  const lines = errorPlaceholderCanvasLines(ctx, detail, Math.min(widthPx * 0.8, 640), ERROR_PLACEHOLDER_DETAIL_LINES);
   const lineHeight = detailSize * 1.4;
   let y = heightPx * 0.52 + lineHeight;
-  for (const l of lines.slice(0, 4)) {
+  for (const l of lines) {
     ctx.fillText(l, cx, y);
     y += lineHeight;
   }

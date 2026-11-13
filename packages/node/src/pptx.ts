@@ -205,13 +205,13 @@ export class PptxPresentationSessionImpl implements PptxPresentationSession {
   async getImage(path: string, mimeType: string): Promise<Blob> {
     this.assertOpen();
     return this.getPartInternal(path, mimeType, (archive) => archive.extract_image(path))
-      .catch((error: unknown) => this.failOperation(error));
+      .catch((error: unknown) => this.failPartRead(error));
   }
 
   async getMedia(path: string, mimeType = 'application/octet-stream'): Promise<Blob> {
     this.assertOpen();
     return this.getPartInternal(path, mimeType, (archive) => archive.extract_media(path))
-      .catch((error: unknown) => this.failOperation(error));
+      .catch((error: unknown) => this.failPartRead(error));
   }
 
   async renderSlide(
@@ -343,6 +343,14 @@ export class PptxPresentationSessionImpl implements PptxPresentationSession {
   private assertOpen(): void {
     if (this.closed) throw new Error('PPTX presentation session is closed');
     if (this.resourceFailure) throw this.resourceFailure;
+  }
+
+  /** A missing part rejects that read alone; only a resource-limit overrun
+   * fails the session. */
+  private failPartRead(error: unknown): never {
+    const normalized = parseResourceLimitError(error) ?? error;
+    if (normalized instanceof OoxmlResourceLimitError) this.failOperation(normalized);
+    throw normalized;
   }
 
   private failOperation(error: unknown): never {

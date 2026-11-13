@@ -198,6 +198,8 @@ pub struct DocxArchive {
     document_cursor: Option<DocumentCursorState>,
     prepared_document_chunk: Option<PreparedDocumentChunk>,
     last_document_usage: Option<ResourceUsage>,
+    /// `[Content_Types].xml`, read once on the first `is_picture_part` call.
+    content_types: Option<ooxml_common::content_types::PackageContentTypes>,
 }
 
 #[wasm_bindgen]
@@ -232,6 +234,7 @@ impl DocxArchive {
             document_cursor: None,
             prepared_document_chunk: None,
             last_document_usage: None,
+            content_types: None,
         })
     }
 
@@ -535,6 +538,35 @@ impl DocxArchive {
             .map_err(|e| JsValue::from_str(&e))
     }
 
+    /// Whether `path` names a picture part: a part whose OPC content type
+    /// (ECMA-376 Part 2 §10.1.2.2, Override before Default) is an `image/*`
+    /// media type. Node `getImage()` serves only these, so a caller cannot
+    /// read XML or other non-picture parts through it. The Media Types stream
+    /// is read and charged to the session once.
+    pub fn is_picture_part(&mut self, path: &str) -> Result<bool, JsValue> {
+        self.picture_part(path).map_err(|e| JsValue::from_str(&e))
+    }
+
+    fn picture_part(&mut self, path: &str) -> Result<bool, String> {
+        if self.content_types.is_none() {
+            // Parse inside the operation's resource scope so a depth/node
+            // crossing latches and fails the session instead of reading as an
+            // empty table; malformed XML alone serves no picture.
+            let types = self.archive.run_operation("content-types", |zip| {
+                let bytes = parser::read_zip_bytes(zip, ooxml_common::opc::CONTENT_TYPES_ITEM)?;
+                Ok(ooxml_common::content_types::PackageContentTypes::parse(
+                    &String::from_utf8_lossy(&bytes),
+                )
+                .unwrap_or_default())
+            })?;
+            self.content_types = Some(types);
+        }
+        Ok(self
+            .content_types
+            .as_ref()
+            .is_some_and(|types| types.is_image_part(path)))
+    }
+
     /// GitHub-flavoured markdown projection of the retained archive. Mirrors the
     /// free `docx_to_markdown`.
     pub fn to_markdown(&mut self) -> Result<String, JsValue> {
@@ -752,7 +784,50 @@ mod tests {
             document_cursor: None,
             prepared_document_chunk: None,
             last_document_usage: None,
+            content_types: None,
         }
+    }
+
+    fn package_with_content_types(types: &str) -> Vec<u8> {
+        use std::io::{Cursor, Write};
+        let mut bytes = Vec::new();
+        {
+            let mut writer = zip::ZipWriter::new(Cursor::new(&mut bytes));
+            let options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            for (path, body) in [
+                ("[Content_Types].xml", types.as_bytes()),
+                ("word/document.xml", br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body/></w:document>"#.as_slice()),
+                ("word/media/image1.png", b"png".as_slice()),
+            ] {
+                writer.start_file(path, options).unwrap();
+                writer.write_all(body).unwrap();
+            }
+            writer.finish().unwrap();
+        }
+        bytes
+    }
+
+    #[test]
+    fn picture_parts_follow_declared_image_content_types() {
+        let types = r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="png" ContentType="image/png"/><Default Extension="xml" ContentType="application/xml"/></Types>"#;
+        let mut archive = cursor_archive(&package_with_content_types(types));
+        assert_eq!(archive.picture_part("word/media/image1.png"), Ok(true));
+        assert_eq!(archive.picture_part("word/document.xml"), Ok(false));
+        assert_eq!(archive.picture_part("[Content_Types].xml"), Ok(false));
+        assert!(archive.archive.assert_healthy().is_ok());
+    }
+
+    #[test]
+    fn over_deep_content_types_fail_the_session_instead_of_serving_nothing() {
+        let types = format!(
+            r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">{}{}</Types>"#,
+            "<x>".repeat(4096),
+            "</x>".repeat(4096),
+        );
+        let mut archive = cursor_archive(&package_with_content_types(&types));
+        assert!(archive.picture_part("word/media/image1.png").is_err());
+        assert!(archive.archive.assert_healthy().is_err());
     }
 
     #[test]

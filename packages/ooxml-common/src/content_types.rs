@@ -76,6 +76,33 @@ impl PackageContentTypes {
             })
             .map(String::as_str)
     }
+
+    /// Whether the part's declared media type is in the `image` top-level type
+    /// (RFC 6838 §4.2.3), such as `image/png`, `image/x-emf` or
+    /// `image/svg+xml`. Media types are case-insensitive (RFC 6838 §4.2).
+    /// Part names are compared with the archive's own part-name equivalence
+    /// (Part 2 §6.2.2.3: ASCII case folding and percent-encoded unreserved
+    /// characters), so the Override found here is the one for the very part a
+    /// read of `part_path` returns; the Default applies only without one.
+    pub fn is_image_part(&self, part_path: &str) -> bool {
+        let key = crate::rels::part_name_equivalence_key(part_path.trim_start_matches('/'));
+        let content_type = self
+            .overrides
+            .iter()
+            .find(|(name, _)| crate::rels::part_name_equivalence_key(name) == key)
+            .map(|(_, content_type)| content_type)
+            .or_else(|| {
+                let extension = key.rsplit_once('.')?.1;
+                self.defaults.get(extension)
+            })
+            .map(String::as_str);
+        content_type.is_some_and(|content_type| {
+            content_type
+                .trim_start()
+                .get(..6)
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("image/"))
+        })
+    }
 }
 
 #[cfg(test)]
@@ -99,6 +126,30 @@ mod tests {
             parsed.for_part("ppt/fonts/font2.fntdata"),
             Some("application/x-fontdata")
         );
+    }
+
+    #[test]
+    fn image_parts_are_recognised_by_media_type() {
+        let parsed = PackageContentTypes::parse(
+            r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+              <Default Extension="png" ContentType="IMAGE/PNG"/>
+              <Default Extension="xml" ContentType="application/xml"/>
+              <Override PartName="/word/media/a.bin" ContentType="image/x-emf"/>
+              <Override PartName="/word/media/b.png" ContentType="application/xml"/>
+              <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+            </Types>"#,
+        )
+        .unwrap();
+        assert!(parsed.is_image_part("word/media/image1.png"));
+        assert!(parsed.is_image_part("/word/media/a.bin"));
+        assert!(parsed.is_image_part("WORD/Media/A.BIN"));
+        assert!(parsed.is_image_part("word/media/%61.bin"));
+        assert!(!parsed.is_image_part("WORD/DOCUMENT.XML"));
+        assert!(!parsed.is_image_part("word/document.xml"));
+        assert!(!parsed.is_image_part("word/media/unknown.gif"));
+        // An encoded alias names the same part, so its Override still wins.
+        assert!(!parsed.is_image_part("word/media/%62.png"));
+        assert!(!parsed.is_image_part("WORD/MEDIA/B.PNG"));
     }
 
     #[test]
