@@ -138,6 +138,19 @@ describe('XLSX symbol-font cell text', () => {
     expect(one.x).toBeGreaterThan(alpha.x);
   });
 
+  it('places a phonetic span by authored code points, an authored VS15 included', () => {
+    const realm = symbolRealm();
+    const { worksheet, styles } = sheet([{ font: font('Symbol'),
+      value: { type: 'text', text: 'a\uFE0E1', phoneticRuns: [{ sb: 2, eb: 3, text: '1' }] } as CellValue }]);
+    worksheet.rows[0]!.height = 40;
+    (worksheet.rows[0]!.cells[0] as { showPhonetic?: boolean }).showPhonetic = true;
+    renderViewport(realm.ctx, worksheet, styles, { row: 1, col: 1, rows: 1, cols: 1 }, { dpr: 1 });
+    const ones = painted(realm, '1').filter((fill) => fill.font.startsWith('15px')).sort((a, b) => a.y - b.y);
+    const [reading, digit] = ones;
+    expect(painted(realm, 'α\uFE0E')).toHaveLength(1);
+    expect(reading!.x).toBeCloseTo(digit!.x, 5);
+  });
+
   it('converts number-format output and the invalid-value hash fill in the cell face', () => {
     const realm = symbolRealm();
     render(realm, [
@@ -242,6 +255,12 @@ describe('XLSX symbol-font shape and slicer text', () => {
     expect(painted(missing, 'x')[0]?.font).toMatch(/"Calibri"/u);
     expect(painted(missing, 'αβ')).toHaveLength(1);
     expect(missing.fills.some((fill) => /[-]/u.test(fill.text))).toBe(false);
+
+    const accent = symbolRealm();
+    drawShapeText(accent.ctx, { ...body, paragraphs: [{ align: 'l', runs: [
+      { type: 'text', text: '\uF061\u0301', bold: false, italic: false, size: 11, fontFace: 'Calibri', fontFaceSym: 'Symbol' },
+    ] }] } as ShapeText, 400, 100, 1);
+    expect(painted(accent, 'α\u0301')).toHaveLength(1);
 
     const installed = symbolRealm(WINGDINGS);
     drawShapeText(installed.ctx, body, 400, 100, 1);

@@ -1202,7 +1202,12 @@ function buildFont(ctx: CanvasRenderingContext2D, font: CellFont, cs = 1, cjkFal
 type SymbolCellFont = CellFont & { readonly symbolUnicode?: true };
 /** A rich run whose text is already in its painted form, flagged when that
  *  form paints in the Unicode fallback face. Renderer-internal. */
-type SymbolRun = Run & { readonly symbolUnicode?: true };
+type SymbolRun = Run & {
+  readonly symbolUnicode?: true;
+  /** The painted form of each authored code point of the run, in order (a
+   *  conversion may add VS15; an authored VS15 is its own code point). */
+  readonly slots?: readonly string[];
+};
 
 /** The Unicode fallback face of converted symbol text: the sans class tail
  *  without the authored symbol family or its substitute (a symbol cmap would
@@ -1243,9 +1248,10 @@ function cellSymbolPaint(
   }
   return {
     text: paint(text), font, paint,
-    runs: segments.map((segment): SymbolRun => segment.unicode
-      ? { text: paint(segment.authored), symbolUnicode: true }
-      : { text: paint(segment.authored) }),
+    runs: segments.map((segment): SymbolRun => {
+      const slots = [...segment.authored].map(paint);
+      return segment.unicode ? { text: slots.join(''), symbolUnicode: true, slots } : { text: slots.join(''), slots };
+    }),
   };
 }
 
@@ -1265,14 +1271,16 @@ function symbolPaintRuns(
     }
     out ??= runs.slice(0, index);
     if (painted.runs) {
-      for (const piece of painted.runs) {
-        out.push({ ...run, text: piece.text, ...((piece as SymbolRun).symbolUnicode ? { symbolUnicode: true } : {}) } as SymbolRun);
+      for (const piece of painted.runs as SymbolRun[]) {
+        out.push({ ...run, text: piece.text, slots: piece.slots,
+          ...(piece.symbolUnicode ? { symbolUnicode: true } : {}) } as SymbolRun);
       }
       return;
     }
+    const slots = [...run.text].map(painted.paint);
     const next: SymbolRun = painted.font === font
-      ? { ...run, text: painted.text }
-      : { ...run, text: painted.text, symbolUnicode: true };
+      ? { ...run, text: painted.text, slots }
+      : { ...run, text: painted.text, symbolUnicode: true, slots };
     out.push(next);
   });
   return out ?? runs;
@@ -1314,16 +1322,13 @@ function richRunSegments(
   return segs;
 }
 
-/** One stacked slot per authored code point of painted text: a converted
- *  symbol's VS15 stays with its base (every conversion target of the core
- *  tables is one code point, symbol-font.ts). */
-const PAINTED_SLOT = /[\s\S]\uFE0E?/gu;
-
-/** The painted slots of runs, one per authored code point, with their fonts. */
+/** The painted slots of runs, one per authored code point (as recorded
+ *  when the run was painted; an unchanged run is its own code points), with
+ *  their fonts. */
 function paintedSlots(runs: readonly Run[], baseFont: CellFont): { text: string; font: CellFont }[] {
   return runs.flatMap((run) => {
     const font = applyRunFont(baseFont, run);
-    return (run.text.match(PAINTED_SLOT) ?? []).map((text) => ({ text, font }));
+    return ((run as SymbolRun).slots ?? [...run.text]).map((text) => ({ text, font }));
   });
 }
 
@@ -5395,7 +5400,8 @@ function symbolShapeRunPieces(
     }
   };
   for (const ch of run.text) {
-    const next = slotOf(ch);
+    // A combining mark, variation selector or joiner keeps its base's face.
+    const next = text && /^[\p{M}\u200C\u200D]$/u.test(ch) ? face : slotOf(ch);
     if (text && next !== face) { flush(); text = ''; }
     face = next;
     text += ch;
