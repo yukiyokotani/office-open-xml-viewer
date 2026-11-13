@@ -37,7 +37,7 @@ describe('complete conservative PPTX paint demand', () => {
   });
 
   it('declines canonical changes and generated or unmodelled paint paths', () => {
-    for (const run of [{ text: 'e\u0301' }, { text: '\ud800' }, { text: '\u0378' }, { text: '\uf0a7' }, { text: 'A', fontFamilySym: 'Symbol' }, { text: 'A', fieldType: 'unknown' }]) {
+    for (const run of [{ text: 'e\u0301' }, { text: '\ud800' }, { text: '\u0378' }, { text: '\uf0a7' }, { text: 'A', fontFamilySym: 'Symbol' }, { text: 'a', fontFamily: 'Symbol' }, { text: 'A', fieldType: 'unknown' }]) {
       expect(collectSlideFontDemand(slide(run.text, run), new Set(), 10000)).toBe('all');
     }
     for (const patch of [{ parseError: 'broken' }, { elements: [{ type: 'chart' }] }, { elements: [{ type: 'picture' }] }]) {

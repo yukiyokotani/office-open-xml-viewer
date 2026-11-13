@@ -2015,6 +2015,8 @@ fn finish_document(
         diagnostics,
         // Healthy document: no degradation (RB7). Only `degraded_document` sets this.
         parse_error: None,
+        // WordprocessingML has no physical-page anchor (a producer-only wire).
+        page_objects: Vec::new(),
     })
 }
 
@@ -3618,6 +3620,7 @@ fn parse_document_settings(settings_xml: &str) -> Option<crate::types::DocumentS
         split_pg_break_and_para_mark,
         compatibility_mode,
         footnote_column_bands: false,
+        plain_font_line_boxes: false,
     })
 }
 

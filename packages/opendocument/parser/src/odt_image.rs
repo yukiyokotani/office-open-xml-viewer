@@ -74,7 +74,13 @@ pub(super) fn intrinsic_size(bytes: &[u8]) -> Option<(f64, f64)> {
             if kind == b"IDAT" {
                 break;
             }
-            at = at.checked_add(12 + length)?;
+            // Chunk = length, type, data, CRC: the next chunk starts past
+            // all of them; a length running past the data ends the scan
+            // (checked on every target so nothing wraps on 32-bit hosts).
+            match length.checked_add(12).and_then(|step| at.checked_add(step)) {
+                Some(next) if next <= bytes.len() => at = next,
+                _ => break,
+            }
         }
         return Some((pt(width, dpi.0), pt(height, dpi.1)));
     }
@@ -172,5 +178,14 @@ mod tests {
         assert_eq!(sniff(b"plain"), None);
         assert_eq!(base64("aGk=").unwrap(), b"hi");
         assert_eq!(base64("aG\nk=").unwrap(), b"hi");
+    }
+
+    #[test]
+    fn png_chunk_lengths_past_the_data_end_the_scan() {
+        // IHDR whose length field claims 0xfffffff4 bytes: on a 32-bit host
+        // `12 + length` wrapped to 0 and the scan never advanced.
+        let mut png = b"\x89PNG\r\n\x1a\n\xff\xff\xff\xf4IHDR".to_vec();
+        png.extend_from_slice(&[0, 0, 0, 96, 0, 0, 0, 48, 8, 2, 0, 0, 0]);
+        assert_eq!(intrinsic_size(&png), Some((72.0, 36.0)));
     }
 }

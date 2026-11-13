@@ -1,5 +1,6 @@
 //! Local inspection: read ODS files and print the sheet count, the cells,
-//! drawings and charts per sheet, or the rejection.
+//! drawings and charts per sheet, or the rejection, with the bytes the read
+//! held at its peak and the steps it took (what the governor bounds).
 //! `cargo run --example inspect_ods --features ods -- <files>`; with
 //! `--json <dir>` it also writes each workbook's bootstrap and worksheets.
 use opendocument_parser::{
@@ -15,13 +16,21 @@ fn main() {
     });
     for path in args {
         let bytes = std::fs::read(&path).expect("read");
-        let result = OdfPackage::open(
+        let started = std::time::Instant::now();
+        let (result, peak, work) = match OdfPackage::open(
             bytes,
             ooxml_common::resource::OoxmlFormat::Xlsx,
             PackageLimits::default(),
             &ods::MEDIA_TYPES,
-        )
-        .and_then(|package| ods::read(&package));
+        ) {
+            Ok(package) => ods::read_measured(&package, ods::MAX_MODEL_BYTES),
+            Err(error) => (Err(error), 0, 0),
+        };
+        let usage = format!(
+            "peak {} KiB, {work} steps, {} ms",
+            peak / 1024,
+            started.elapsed().as_millis()
+        );
         match result {
             Ok(mut workbook) => {
                 workbook.apply_layout(Some(7.0));
@@ -39,7 +48,7 @@ fn main() {
                         )
                     })
                     .collect();
-                println!("{path}: ok {}", summary.join(" "));
+                println!("{path}: ok {} [{usage}]", summary.join(" "));
                 if let Some(dir) = &json_dir {
                     let stem = std::path::Path::new(&path)
                         .file_stem()
@@ -56,7 +65,7 @@ fn main() {
                     std::fs::write(format!("{dir}/{stem}.json"), value.to_string()).unwrap();
                 }
             }
-            Err(error) => println!("{path}: {error}"),
+            Err(error) => println!("{path}: {error} [{usage}]"),
         }
     }
 }

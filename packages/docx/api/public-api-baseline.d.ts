@@ -592,6 +592,7 @@ export interface ChartModel {
     subtotalIndices: number[];
     legendManualLayout?: LegendManualLayout | null;
     valAxisFormatCode?: string | null;
+    valAxisFormatDivisors?: number[] | null;
     valAxisNumberFormat?: ChartAxisNumberFormat | null;
     valAxisDisplayUnits?: ChartDisplayUnits | null;
     catAxisDisplayUnits?: ChartDisplayUnits | null;
@@ -682,6 +683,7 @@ export interface ChartModel {
     valAxisLineDash?: string | null;
     valAxisLinePaintAuthored?: boolean | null;
     catAxisFormatCode?: string | null;
+    catAxisFormatDivisors?: number[] | null;
     catAxisNumberFormat?: ChartAxisNumberFormat | null;
     catAxisMin?: number | null;
     catAxisMax?: number | null;
@@ -839,7 +841,12 @@ export interface ChartRegionMapRenderer {
     render(ctx: CanvasRenderingContext2D, chart: ChartModel, rect: ChartRect, ptToPx: number, shapeRotationDeg?: number): boolean;
 }
 export interface ChartRun {
-    inlineEffectExtent?: [number, number, number, number];
+    inlineEffectExtent?: [
+        number,
+        number,
+        number,
+        number
+    ];
     chart: ChartModel;
     widthPt: number;
     heightPt: number;
@@ -934,6 +941,9 @@ export interface ChartSeriesDataLabels {
     fontPaintAuthored?: boolean;
     fontHidden?: boolean;
     formatCode?: string;
+    formatDivisors?: number[] | null;
+    percentFormatCode?: string | null;
+    percentFormatDivisors?: number[] | null;
     separator?: string;
     fontBold?: boolean;
     fontItalic?: boolean;
@@ -1898,7 +1908,12 @@ export interface ImageResourceOptions {
     resolution?: 'native-if-fit' | 'display';
 }
 export interface ImageRun {
-    inlineEffectExtent?: [number, number, number, number];
+    inlineEffectExtent?: [
+        number,
+        number,
+        number,
+        number
+    ];
     imagePath: string;
     mimeType: string;
     svgImagePath?: string;
@@ -2445,6 +2460,7 @@ export interface SecondaryValueAxis {
     title: string | null;
     hidden: boolean;
     formatCode?: string | null;
+    formatDivisors?: number[] | null;
     numberFormat?: ChartAxisNumberFormat | null;
     displayUnits?: ChartDisplayUnits | null;
     fontColor?: string | null;
@@ -2599,7 +2615,12 @@ export type ShapeFill = {
     blipEffects?: BlipEffect[];
 };
 export interface ShapeRun {
-    inlineEffectExtent?: [number, number, number, number];
+    inlineEffectExtent?: [
+        number,
+        number,
+        number,
+        number
+    ];
     inline?: boolean;
     inlineOffsetXPt?: number;
     inlineOffsetYPt?: number;

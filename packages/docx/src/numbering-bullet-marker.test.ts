@@ -134,7 +134,7 @@ const ONE_BY_ONE_GIF = new Uint8Array([
 describe('symbol/wingdings glyph bullet markers (§17.9.6 rPr + §17.3.2.26 rFonts)', () => {
   it('draws a Symbol bullet (U+F0B7) as "•", never the raw PUA char', async () => {
     const num: NumberingInfo = {
-      numId: 1, level: 0, format: 'bullet', text: '',
+      numId: 1, level: 0, format: 'bullet', text: '\uF0B7',
       indentLeft: 36, tab: 18, suff: 'tab', fontFamily: 'Symbol',
     };
     const { fillTextCalls } = await render(num);
@@ -142,18 +142,20 @@ describe('symbol/wingdings glyph bullet markers (§17.9.6 rPr + §17.3.2.26 rFon
     expect(bullet, 'Symbol U+F0B7 normalized to the Unicode bullet').toBeDefined();
     // The raw private-use code point must NOT reach the canvas (it renders as tofu
     // in any fallback face).
-    expect(fillTextCalls.some((c) => c.text === '')).toBe(false);
+    expect(fillTextCalls.some((c) => c.text === '\uF0B7')).toBe(false);
   });
 
-  it('draws a Wingdings bullet (U+F0A7) as "▪", never the raw PUA char', async () => {
+  // U+25AA is emoji-capable: converted with VS15 (text presentation), never
+  // as a colour emoji (core symbol-font.ts).
+  it('draws a Wingdings bullet (U+F0A7) as "▪" + VS15, never the raw PUA char', async () => {
     const num: NumberingInfo = {
-      numId: 2, level: 0, format: 'bullet', text: '',
+      numId: 2, level: 0, format: 'bullet', text: '\uF0A7',
       indentLeft: 36, tab: 18, suff: 'tab', fontFamily: 'Wingdings',
     };
     const { fillTextCalls } = await render(num);
-    const sq = fillTextCalls.find((c) => c.text === '▪');
+    const sq = fillTextCalls.find((c) => c.text === '▪\uFE0E');
     expect(sq, 'Wingdings U+F0A7 normalized to the Unicode square').toBeDefined();
-    expect(fillTextCalls.some((c) => c.text === '')).toBe(false);
+    expect(fillTextCalls.some((c) => c.text === '\uF0A7')).toBe(false);
   });
 });
 

@@ -1,6 +1,7 @@
 //! OpenDocument readers projecting packaged ODF documents directly into the
 //! OOXML renderer models. Each reader is a cargo feature and its own WASM.
 
+pub mod budget;
 pub mod error;
 pub mod iri;
 pub mod package;
@@ -51,3 +52,10 @@ pub mod ods_number;
 mod ods_wasm;
 #[cfg(any(feature = "odt", feature = "odp"))]
 mod svm;
+
+/// Every allocation of the readers is metered ([`budget`]): their resource
+/// limits are measured by the allocator, not estimated by the readers. The
+/// allocator is installed whatever features are built, like the shared
+/// modules that count steps through it.
+#[global_allocator]
+static METERED: budget::Metered = budget::Metered;

@@ -21,14 +21,17 @@ use std::fmt::Write as _;
 const MAX_ACTIONS: u32 = 2_000_000;
 const MAX_SVG_BYTES: usize = 64 * 1024 * 1024;
 const MAX_STACK: usize = 1024;
+/// Implementation bound on the polygon points one conversion reads (each
+/// retained as two `f64`s while its action is drawn).
+const MAX_POINTS: usize = 4 * 1024 * 1024;
+
+/// A polygon's points and its optional per-point flags (`tools::Polygon`).
+type FlaggedPolygon = (Vec<(f64, f64)>, Option<Vec<u8>>);
 
 struct Reader<'a> {
     b: &'a [u8],
     p: usize,
 }
-
-/// A polygon's points and optional point flags.
-type Polygon = (Vec<(f64, f64)>, Option<Vec<u8>>);
 
 impl<'a> Reader<'a> {
     fn u8(&mut self) -> Option<u8> {
@@ -58,18 +61,6 @@ impl<'a> Reader<'a> {
         let end = self.p.checked_add(len)?;
         (end <= self.b.len()).then_some((version, end))
     }
-    /// A nested compat record: a reader confined to its declared payload,
-    /// with this reader moved past it (never backwards, so a record cannot
-    /// be read twice).
-    fn nested(&mut self) -> Option<(u16, Reader<'a>)> {
-        let (version, end) = self.compat()?;
-        let inner = Reader {
-            b: &self.b[..end],
-            p: self.p,
-        };
-        self.p = end;
-        Some((version, inner))
-    }
     /// A colour: 0xTTRRGGBB (transparency in the high byte).
     fn color(&mut self) -> Option<u32> {
         self.u32()
@@ -96,23 +87,35 @@ impl<'a> Reader<'a> {
             .collect();
         Some(String::from_utf16_lossy(&units))
     }
-    fn polygon(&mut self) -> Option<Vec<(f64, f64)>> {
+    /// A point list, charged to the conversion's point budget before it is
+    /// allocated (and only when the stream holds all of its points).
+    fn polygon(&mut self, budget: &mut usize) -> Option<Vec<(f64, f64)>> {
         let n = self.u16()? as usize;
-        let mut out = Vec::with_capacity(n.min(65_536));
+        if self.b.len().saturating_sub(self.p) < n * 8 || n > *budget {
+            return None;
+        }
+        *budget -= n;
+        let mut out = Vec::with_capacity(n);
         for _ in 0..n {
             out.push(self.point()?);
         }
         Some(out)
     }
     /// `tools::Polygon::Read`: compat, points, and optional point flags.
-    fn polygon_with_flags(&mut self) -> Option<Polygon> {
-        let (_, mut r) = self.nested()?;
-        let points = r.polygon()?;
-        let flags = if r.u8()? != 0 {
-            Some(r.b.get(r.p..r.p.checked_add(points.len())?)?.to_vec())
+    fn polygon_with_flags(&mut self, budget: &mut usize) -> Option<FlaggedPolygon> {
+        let (_, end) = self.compat()?;
+        let points = self.polygon(budget)?;
+        let flags = if self.u8()? != 0 {
+            let f = self
+                .b
+                .get(self.p..self.p.checked_add(points.len())?)?
+                .to_vec();
+            self.p += points.len();
+            Some(f)
         } else {
             None
         };
+        self.p = end;
         Some((points, flags))
     }
 }
@@ -142,8 +145,7 @@ fn unit_hmm(unit: u16) -> f64 {
 }
 
 fn read_map_mode(r: &mut Reader<'_>, current: Option<&MapMode>) -> Option<MapMode> {
-    let (_, mut inner) = r.nested()?;
-    let r = &mut inner;
+    let (_, end) = r.compat()?;
     let unit = r.u16()?;
     let origin = r.point()?;
     let fraction = |r: &mut Reader<'_>| -> Option<f64> {
@@ -153,6 +155,7 @@ fn read_map_mode(r: &mut Reader<'_>, current: Option<&MapMode>) -> Option<MapMod
     };
     let sx = fraction(r)?;
     let sy = fraction(r)?;
+    r.p = end;
     // MapUnit::MapRelative (13) moves the origin and multiplies the scale of
     // the current map mode.
     if unit == 13 {
@@ -176,7 +179,7 @@ fn read_map_mode(r: &mut Reader<'_>, current: Option<&MapMode>) -> Option<MapMod
 
 #[derive(Clone)]
 struct Font {
-    /// Shared: pushed states copy it (`MAX_STACK` deep).
+    /// Shared between the state stack's snapshots (PUSH copies the state).
     family: std::rc::Rc<str>,
     height: f64,
     weight: u16,
@@ -223,10 +226,20 @@ pub struct Converted {
     pub size_emu: (f64, f64),
 }
 
-pub fn to_svg(bytes: &[u8]) -> Option<Converted> {
+/// The SVG drawing of a metafile, or `None` when it is not one, is corrupt,
+/// or its SVG would exceed `max_svg_bytes` (capped at the converter's own
+/// bound). Output is checked as it is written, so no allocation passes the
+/// bound by more than one segment.
+pub fn to_svg(bytes: &[u8], max_svg_bytes: usize) -> Option<Converted> {
     if !bytes.starts_with(b"VCLMTF") {
         return None;
     }
+    // The SVG wrapper adds at most this much around the body.
+    const WRAPPER_BYTES: usize = 512;
+    let limit = max_svg_bytes
+        .min(MAX_SVG_BYTES)
+        .checked_sub(WRAPPER_BYTES)?;
+    let mut points_budget = MAX_POINTS;
     let mut r = Reader { b: bytes, p: 6 };
     let (_, header_end) = r.compat()?;
     let _compression = r.u32()?;
@@ -270,6 +283,10 @@ pub fn to_svg(bytes: &[u8]) -> Option<Converted> {
     let width = pw.abs().max(1.0);
     let height = ph.abs().max(1.0);
     for _ in 0..count {
+        // A step per action; a failed step is kept by the caller's scope.
+        if crate::budget::tick(1).is_err() {
+            return None;
+        }
         let Some(kind) = r.u16() else { break };
         let Some((version, end)) = r.compat() else {
             break;
@@ -303,15 +320,19 @@ pub fn to_svg(bytes: &[u8]) -> Option<Converted> {
             }
             out
         };
-        // Path data written straight into the output, within its bound
-        // (checked as each command is written; `None` past it).
+        // Path data written straight into `d`, checked against the output
+        // bound before every segment (a segment adds at most 128 bytes).
         let path_data = |d: &mut String,
                          points: &[(f64, f64)],
                          flags: Option<&[u8]>,
                          close: bool|
          -> Option<()> {
             let mut i = 0;
+            let first = d.len();
             while i < points.len() {
+                if d.len() > limit {
+                    return None;
+                }
                 let (x, y) = pt(points[i]);
                 let control = |k: usize| flags.and_then(|f| f.get(k)).copied() == Some(2);
                 if i == 0 {
@@ -327,11 +348,8 @@ pub fn to_svg(bytes: &[u8]) -> Option<Converted> {
                     let _ = write!(d, "L{x:.2} {y:.2}");
                     i += 1;
                 }
-                if d.len() > MAX_SVG_BYTES {
-                    return None;
-                }
             }
-            if close && !points.is_empty() {
+            if close && d.len() > first {
                 d.push('Z');
             }
             Some(())
@@ -408,7 +426,7 @@ pub fn to_svg(bytes: &[u8]) -> Option<Converted> {
             }
             // POLYLINE
             109 => {
-                if let Some(mut points) = a.polygon() {
+                if let Some(mut points) = a.polygon(&mut points_budget) {
                     let w = if version >= 2 {
                         line_width(&mut a).map(len_scale).unwrap_or(0.0)
                     } else {
@@ -416,7 +434,7 @@ pub fn to_svg(bytes: &[u8]) -> Option<Converted> {
                     };
                     let mut flags = None;
                     if version >= 3 && a.u8() == Some(1) {
-                        if let Some((p, f)) = a.polygon_with_flags() {
+                        if let Some((p, f)) = a.polygon_with_flags(&mut points_budget) {
                             points = p;
                             flags = f;
                         }
@@ -428,10 +446,10 @@ pub fn to_svg(bytes: &[u8]) -> Option<Converted> {
             }
             // POLYGON
             110 => {
-                if let Some(mut points) = a.polygon() {
+                if let Some(mut points) = a.polygon(&mut points_budget) {
                     let mut flags = None;
                     if version >= 2 && a.u8() == Some(1) {
-                        if let Some((p, f)) = a.polygon_with_flags() {
+                        if let Some((p, f)) = a.polygon_with_flags(&mut points_budget) {
                             points = p;
                             flags = f;
                         }
@@ -451,9 +469,9 @@ pub fn to_svg(bytes: &[u8]) -> Option<Converted> {
                     r.p = end;
                     continue;
                 };
-                let mut polys: Vec<Polygon> = Vec::new();
+                let mut polys: Vec<FlaggedPolygon> = Vec::new();
                 for _ in 0..n {
-                    match a.polygon() {
+                    match a.polygon(&mut points_budget) {
                         Some(p) => polys.push((p, None)),
                         None => break,
                     }
@@ -465,7 +483,7 @@ pub fn to_svg(bytes: &[u8]) -> Option<Converted> {
                     if let Some(complex) = a.u16() {
                         for _ in 0..complex {
                             let Some(index) = a.u16() else { break };
-                            let Some(poly) = a.polygon_with_flags() else {
+                            let Some(poly) = a.polygon_with_flags(&mut points_budget) else {
                                 break;
                             };
                             if let Some(slot) = polys.get_mut(index as usize) {
@@ -474,15 +492,15 @@ pub fn to_svg(bytes: &[u8]) -> Option<Converted> {
                         }
                     }
                 }
+                body.push_str(r#"<path d=""#);
+                for (p, f) in &polys {
+                    path_data(&mut body, p, f.as_deref(), true)?;
+                }
                 let alpha = if opacity < 1.0 {
                     format!(r#" opacity="{opacity:.3}""#)
                 } else {
                     String::new()
                 };
-                body.push_str(r#"<path d=""#);
-                for (p, f) in &polys {
-                    path_data(&mut body, p, f.as_deref(), true)?;
-                }
                 let _ = write!(
                     body,
                     r#"" fill-rule="evenodd"{}{alpha}/>"#,
@@ -523,17 +541,22 @@ pub fn to_svg(bytes: &[u8]) -> Option<Converted> {
                         }
                     }
                 }
-                // The shown text, escaped (at most 6 bytes per input byte) with
-                // the family, must fit the output bound before it is copied.
-                let escaped_bound = text
+                // The element's size before it is built: escaped text and
+                // family (at most 6 bytes per byte), one position per
+                // character and the fixed attributes.
+                let estimate = text
                     .len()
-                    .min(len.saturating_mul(4))
                     .saturating_add(state.font.family.len())
-                    .saturating_mul(6);
-                if body.len().saturating_add(escaped_bound) > MAX_SVG_BYTES {
+                    .saturating_mul(6)
+                    .saturating_add(text.len().saturating_mul(16))
+                    .saturating_add(512);
+                if body.len().saturating_add(estimate) > limit {
                     return None;
                 }
-                let shown: Vec<char> = text.chars().skip(index).take(len).collect();
+                let chars: Vec<char> = text.chars().collect();
+                let start = index.min(chars.len());
+                let stop = start.saturating_add(len).min(chars.len());
+                let shown: Vec<char> = chars[start..stop].to_vec();
                 if shown.iter().all(|c| c.is_whitespace()) {
                     r.p = end;
                     continue;
@@ -657,7 +680,7 @@ pub fn to_svg(bytes: &[u8]) -> Option<Converted> {
             _ => {}
         }
         r.p = end;
-        if body.len() > MAX_SVG_BYTES {
+        if body.len() > limit {
             return None;
         }
     }
@@ -678,16 +701,16 @@ pub fn to_svg(bytes: &[u8]) -> Option<Converted> {
 
 /// `LineInfo` (compat; style; width), returning the width.
 fn line_width(r: &mut Reader<'_>) -> Option<f64> {
-    let (_, mut r) = r.nested()?;
+    let (_, end) = r.compat()?;
     let _style = r.u16()?;
     let width = r.i32()? as f64;
+    r.p = end;
     Some(width)
 }
 
 /// `vcl::Font` as SvmReader reads it.
 fn read_font(r: &mut Reader<'_>) -> Option<Font> {
-    let (version, mut inner) = r.nested()?;
-    let r = &mut inner;
+    let (version, end) = r.compat()?;
     // Names are byte strings in the font's own charset; the family is
     // written before the charset is known, so it is read as a byte string
     // (LibreOffice writes ASCII family names here) unless the length prefix
@@ -707,8 +730,9 @@ fn read_font(r: &mut Reader<'_>) -> Option<Font> {
     let _width_type = r.u16()?;
     let orientation = r.u16()? as i16 as f64 / 10.0;
     let _ = version;
+    r.p = end;
     Some(Font {
-        family: std::rc::Rc::from(family),
+        family: family.into(),
         height,
         weight,
         italic: italic != 0,
@@ -742,6 +766,38 @@ mod tests {
         let mut out = kind.to_le_bytes().to_vec();
         out.extend(compat(version, payload));
         out
+    }
+
+    #[test]
+    fn output_and_points_stay_within_the_budget() {
+        let mut header = 0u32.to_le_bytes().to_vec();
+        header.extend(map_mode());
+        header.extend_from_slice(&1000i32.to_le_bytes());
+        header.extend_from_slice(&500i32.to_le_bytes());
+        header.extend_from_slice(&1u32.to_le_bytes());
+        let mut file = b"VCLMTF".to_vec();
+        file.extend(compat(1, &header));
+        // One POLYPOLYGON of 16 polygons of 4096 points.
+        let mut payload = 16u16.to_le_bytes().to_vec();
+        for _ in 0..16 {
+            payload.extend_from_slice(&4096u16.to_le_bytes());
+            for i in 0..4096i32 {
+                payload.extend_from_slice(&i.to_le_bytes());
+                payload.extend_from_slice(&(-i).to_le_bytes());
+            }
+        }
+        file.extend(action(111, 1, &payload));
+        let whole = to_svg(&file, usize::MAX).unwrap().svg.len();
+        assert!(whole > 64 * 1024);
+        // A budget below the SVG refuses it instead of building it.
+        assert!(to_svg(&file, whole / 2).is_none());
+        assert!(to_svg(&file, whole + 1024).is_some());
+        // A polygon claiming more points than its action holds is not read.
+        let mut short = file[..file.len() - 8].to_vec();
+        let end = short.len();
+        short[end - 4..].copy_from_slice(&[0, 0, 0, 0]);
+        let svg = String::from_utf8(to_svg(&short, usize::MAX).unwrap().svg).unwrap();
+        assert!(svg.len() < whole, "{}", svg.len());
     }
 
     #[test]
@@ -779,7 +835,7 @@ mod tests {
         with_font.extend(action(112, 1, &text));
         file.extend(with_font);
         file.extend(action(133, 1, &[0, 0, 0, 0, 1]));
-        let svg = String::from_utf8(to_svg(&file).unwrap().svg).unwrap();
+        let svg = String::from_utf8(to_svg(&file, usize::MAX).unwrap().svg).unwrap();
         assert!(svg.contains(r##"<path d="M0.00 0.00L100.00 0.00L100.00 100.00Z" fill-rule="evenodd" fill="#4f81bd""##), "{svg}");
         assert!(
             svg.contains(r#"font-family="Sans" font-size="200.00" font-weight="700""#),

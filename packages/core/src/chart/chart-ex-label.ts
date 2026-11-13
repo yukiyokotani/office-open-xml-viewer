@@ -87,7 +87,9 @@ export function resolveChartExLabel(
     valueDivisor: displayUnitDivisor(valueDisplayUnits),
     percentRatio,
     formatCode: authoredFormatCode ?? series.valFormatCode ?? null,
-    percentFormatCode: authoredFormatCode ?? '0%',
+    formatDivisors: override?.formatCode != null ? null : definition?.formatDivisors,
+    percentFormatCode: override?.formatCode ?? definition?.percentFormatCode ?? authoredFormatCode ?? '0%',
+    percentFormatDivisors: override?.formatCode != null ? null : definition?.percentFormatDivisors,
     date1904: chart.date1904,
     separator: override?.separator ?? definition?.separator,
   });

@@ -96,18 +96,19 @@ export function docxNativeRouteRequests(
 
 /** Measure in the document realm. Sentinels are loaded for the measurement;
  * a main-thread layout keeps them (returned for its release list) because it
- * also judges glyph ownership in this realm. */
+ * also judges glyph ownership and symbol-font codes (core symbol-face.ts) in
+ * this realm, so it loads them even when no route is measured. */
 export async function measureDocxNativeRouteLines(
   requests: readonly NativeRouteLineRequest[],
   retainSentinels: boolean,
 ): Promise<{ lines: (NativeRouteNormalLine | null)[]; faces: FontFace[] }> {
   const owner = typeof document === 'undefined' ? null : document;
-  if (requests.length === 0 || !owner?.body) return { lines: requests.map(() => null), faces: [] };
+  if ((requests.length === 0 && !retainSentinels) || !owner?.fonts) return { lines: requests.map(() => null), faces: [] };
   const faces = await loadNativeRouteSentinels(owner.fonts);
   if (!faces) return { lines: requests.map(() => null), faces: [] };
   let lines: (NativeRouteNormalLine | null)[] = requests.map(() => null);
   try {
-    lines = measureNativeRouteNormalLines(requests, owner, docxNativeRoutePrimaryAdmitted);
+    if (requests.length > 0 && owner.body) lines = measureNativeRouteNormalLines(requests, owner, docxNativeRoutePrimaryAdmitted);
   } catch { /* Declined: Canvas boxes remain. */ }
   if (retainSentinels) return { lines, faces };
   unloadOfficeFontFallbacks(faces);

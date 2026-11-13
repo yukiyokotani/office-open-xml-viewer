@@ -3,14 +3,17 @@
 //! presentation markup mapped onto the shared OMML math nodes the DOCX
 //! renderer draws.
 
+use crate::budget;
+use crate::xml::Stepped;
 use ooxml_common::math::MathNode;
 
 const NS_MATH: &str = "http://www.w3.org/1998/Math/MathML";
 /// Implementation bound on MathML nesting.
 const MAX_DEPTH: usize = 64;
 
-/// The nodes of a MathML `math` element.
-pub(super) fn convert(math: roxmltree::Node<'_, '_>) -> Vec<MathNode> {
+/// The nodes of a MathML `math` element. Every element visited takes a
+/// step, the rows and cells of a table included.
+pub(super) fn convert(math: roxmltree::Node<'_, '_>) -> Result<Vec<MathNode>, String> {
     children(math, 0)
 }
 
@@ -18,32 +21,41 @@ fn is_math(node: &roxmltree::Node<'_, '_>) -> bool {
     node.is_element() && node.tag_name().namespace() == Some(NS_MATH)
 }
 
-fn children(node: roxmltree::Node<'_, '_>, depth: usize) -> Vec<MathNode> {
+fn children(node: roxmltree::Node<'_, '_>, depth: usize) -> Result<Vec<MathNode>, String> {
+    let mut out = Vec::new();
     if depth > MAX_DEPTH {
-        return Vec::new();
+        return Ok(out);
     }
-    node.children()
-        .filter(is_math)
-        .flat_map(|child| element(child, depth + 1))
-        .collect()
+    for child in node.kids() {
+        budget::tick(1)?;
+        if is_math(&child) {
+            out.extend(element(child, depth + 1)?);
+        }
+    }
+    Ok(out)
 }
 
 /// The `n`th element child as a node list.
-fn argument(node: roxmltree::Node<'_, '_>, n: usize, depth: usize) -> Vec<MathNode> {
-    node.children()
-        .filter(is_math)
-        .nth(n)
-        .map(|child| element(child, depth + 1))
-        .unwrap_or_default()
+fn argument(
+    node: roxmltree::Node<'_, '_>,
+    n: usize,
+    depth: usize,
+) -> Result<Vec<MathNode>, String> {
+    match node.kids().filter(is_math).nth(n) {
+        Some(child) => element(child, depth + 1),
+        None => Ok(Vec::new()),
+    }
 }
 
-fn text(node: roxmltree::Node<'_, '_>) -> String {
-    node.descendants()
-        .filter(|n| n.is_text())
-        .filter_map(|n| n.text())
-        .collect::<String>()
-        .trim()
-        .to_string()
+fn text(node: roxmltree::Node<'_, '_>) -> Result<String, String> {
+    let mut out = String::new();
+    for descendant in node.subtree() {
+        budget::tick(1)?;
+        if descendant.is_text() {
+            out.push_str(descendant.text().unwrap_or(""));
+        }
+    }
+    Ok(out.trim().to_string())
 }
 
 fn run(text: String, style: &str) -> MathNode {
@@ -75,18 +87,19 @@ fn nary(op: &str) -> bool {
     )
 }
 
-fn element(node: roxmltree::Node<'_, '_>, depth: usize) -> Vec<MathNode> {
+fn element(node: roxmltree::Node<'_, '_>, depth: usize) -> Result<Vec<MathNode>, String> {
+    budget::tick(1)?;
     if depth > MAX_DEPTH {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     let name = node.tag_name().name();
     let variant = node.attribute("mathvariant");
-    match name {
-        "semantics" => argument(node, 0, depth),
+    Ok(match name {
+        "semantics" => argument(node, 0, depth)?,
         "annotation" | "annotation-xml" | "none" | "mprescripts" => Vec::new(),
         "mrow" | "mstyle" | "mpadded" | "merror" | "math" | "maction" => {
             vec![MathNode::Group {
-                items: children(node, depth),
+                items: children(node, depth)?,
             }]
         }
         "mphantom" => vec![MathNode::Phant {
@@ -94,11 +107,11 @@ fn element(node: roxmltree::Node<'_, '_>, depth: usize) -> Vec<MathNode> {
             zero_wid: false,
             zero_asc: false,
             zero_desc: false,
-            base: children(node, depth),
+            base: children(node, depth)?,
         }],
         // §3.2.3 mi: a single-character identifier is italic by default.
         "mi" => {
-            let content = text(node);
+            let content = text(node)?;
             let style = match variant {
                 Some("normal") => "roman",
                 Some("bold") => "bold",
@@ -115,32 +128,33 @@ fn element(node: roxmltree::Node<'_, '_>, depth: usize) -> Vec<MathNode> {
                 Some("italic") => "italic",
                 _ => "roman",
             };
-            vec![run(text(node), style)]
+            vec![run(text(node)?, style)]
         }
-        "mtext" => vec![run(text(node), "roman")],
+        "mtext" => vec![run(text(node)?, "roman")],
         "mspace" => vec![run("\u{2009}".into(), "roman")],
         "mfrac" => vec![MathNode::Fraction {
-            num: argument(node, 0, depth),
-            den: argument(node, 1, depth),
+            num: argument(node, 0, depth)?,
+            den: argument(node, 1, depth)?,
             bar: (node.attribute("linethickness") == Some("0")).then_some(false),
         }],
         "msqrt" => vec![MathNode::Radical {
             index: Vec::new(),
-            radicand: children(node, depth),
+            radicand: children(node, depth)?,
         }],
         "mroot" => vec![MathNode::Radical {
-            index: argument(node, 1, depth),
-            radicand: argument(node, 0, depth),
+            index: argument(node, 1, depth)?,
+            radicand: argument(node, 0, depth)?,
         }],
         "msub" | "msup" | "msubsup" | "munder" | "mover" | "munderover" => {
-            let base = argument(node, 0, depth);
-            let first = argument(node, 1, depth);
-            let second = argument(node, 2, depth);
+            let base = argument(node, 0, depth)?;
+            let first = argument(node, 1, depth)?;
+            let second = argument(node, 2, depth)?;
             let base_operator = node
-                .children()
+                .kids()
                 .find(is_math)
                 .filter(|b| b.tag_name().name() == "mo")
                 .map(text)
+                .transpose()?
                 .filter(|op| nary(op));
             if let Some(op) = base_operator {
                 let (sub, sup) = match name {
@@ -148,7 +162,7 @@ fn element(node: roxmltree::Node<'_, '_>, depth: usize) -> Vec<MathNode> {
                     "msup" | "mover" => (Vec::new(), first),
                     _ => (first, second),
                 };
-                return vec![MathNode::Nary {
+                return Ok(vec![MathNode::Nary {
                     op,
                     lim_loc: if name.starts_with("mu") {
                         "undOvr".into()
@@ -158,7 +172,7 @@ fn element(node: roxmltree::Node<'_, '_>, depth: usize) -> Vec<MathNode> {
                     sub,
                     sup,
                     body: Vec::new(),
-                }];
+                }]);
             }
             match name {
                 "msub" => vec![MathNode::Sub { base, sub: first }],
@@ -200,47 +214,51 @@ fn element(node: roxmltree::Node<'_, '_>, depth: usize) -> Vec<MathNode> {
             }
         }
         "mmultiscripts" => {
-            let items: Vec<roxmltree::Node<'_, '_>> = node.children().filter(is_math).collect();
-            let base = items
-                .first()
-                .map(|b| element(*b, depth + 1))
-                .unwrap_or_default();
-            let pre = items
-                .iter()
-                .position(|n| n.tag_name().name() == "mprescripts");
+            // The base and the first scripts after it, or after
+            // `mprescripts`: found in one pass (a step per child), without
+            // collecting the children.
+            let mut pre: Option<usize> = None;
+            let mut base = Vec::new();
+            let (mut post, mut prescripts) = ([Vec::new(), Vec::new()], [Vec::new(), Vec::new()]);
+            for (index, child) in node.kids().filter(is_math).enumerate() {
+                budget::tick(1)?;
+                if child.tag_name().name() == "mprescripts" && pre.is_none() {
+                    pre = Some(index);
+                } else if index == 0 {
+                    base = element(child, depth + 1)?;
+                } else if let Some(slot) = pre.and_then(|pre| index.checked_sub(pre + 1)) {
+                    if slot < 2 {
+                        prescripts[slot] = element(child, depth + 1)?;
+                    }
+                } else if pre.is_none() && index <= 2 {
+                    post[index - 1] = element(child, depth + 1)?;
+                }
+            }
+            let [post_sub, post_sup] = post;
+            let [pre_sub, pre_sup] = prescripts;
             match pre {
-                Some(at) => vec![MathNode::SPre {
-                    sub: items
-                        .get(at + 1)
-                        .map(|n| element(*n, depth + 1))
-                        .unwrap_or_default(),
-                    sup: items
-                        .get(at + 2)
-                        .map(|n| element(*n, depth + 1))
-                        .unwrap_or_default(),
+                Some(_) => vec![MathNode::SPre {
+                    sub: pre_sub,
+                    sup: pre_sup,
                     base,
                 }],
                 None => vec![MathNode::SubSup {
                     base,
-                    sub: items
-                        .get(1)
-                        .map(|n| element(*n, depth + 1))
-                        .unwrap_or_default(),
-                    sup: items
-                        .get(2)
-                        .map(|n| element(*n, depth + 1))
-                        .unwrap_or_default(),
+                    sub: post_sub,
+                    sup: post_sup,
                 }],
             }
         }
         "mfenced" => vec![MathNode::Delimiter {
             beg_char: node.attribute("open").unwrap_or("(").to_string(),
             end_char: node.attribute("close").unwrap_or(")").to_string(),
-            items: node
-                .children()
-                .filter(is_math)
-                .map(|child| element(child, depth + 1))
-                .collect(),
+            items: {
+                let mut items = Vec::new();
+                for child in node.kids().filter(is_math) {
+                    items.push(element(child, depth + 1)?);
+                }
+                items
+            },
         }],
         "menclose" => vec![MathNode::BorderBox {
             hide_top: false,
@@ -251,23 +269,32 @@ fn element(node: roxmltree::Node<'_, '_>, depth: usize) -> Vec<MathNode> {
             strike_v: false,
             strike_bltr: false,
             strike_tlbr: false,
-            base: children(node, depth),
+            base: children(node, depth)?,
         }],
-        "mtable" => vec![MathNode::Array {
-            rows: node
-                .children()
+        "mtable" => {
+            let mut rows = Vec::new();
+            for row in node
+                .kids()
                 .filter(|row| is_math(row) && matches!(row.tag_name().name(), "mtr" | "mlabeledtr"))
-                .map(|row| {
-                    row.children()
-                        .filter(|cell| is_math(cell) && cell.tag_name().name() == "mtd")
-                        .map(|cell| children(cell, depth + 2))
-                        .collect()
-                })
-                .collect(),
-            align: "center".into(),
-        }],
-        _ => children(node, depth),
-    }
+            {
+                budget::tick(1)?;
+                let mut cells = Vec::new();
+                for cell in row
+                    .kids()
+                    .filter(|cell| is_math(cell) && cell.tag_name().name() == "mtd")
+                {
+                    budget::tick(1)?;
+                    cells.push(children(cell, depth + 2)?);
+                }
+                rows.push(cells);
+            }
+            vec![MathNode::Array {
+                rows,
+                align: "center".into(),
+            }]
+        }
+        _ => children(node, depth)?,
+    })
 }
 
 #[cfg(test)]
@@ -278,7 +305,7 @@ mod tests {
     fn converts_presentation_mathml() {
         let xml = r#"<math xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msup><mi>x</mi><mn>2</mn></msup><mo>+</mo><mfrac><mi>a</mi><mi>b</mi></mfrac><msqrt><mi>y</mi></msqrt></mrow><annotation>x^2</annotation></semantics></math>"#;
         let doc = roxmltree::Document::parse(xml).unwrap();
-        let nodes = convert(doc.root_element());
+        let nodes = convert(doc.root_element()).unwrap();
         let MathNode::Group { items } = &nodes[0] else {
             panic!()
         };

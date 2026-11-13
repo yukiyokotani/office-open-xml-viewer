@@ -78,6 +78,8 @@ export interface LayoutSourceFontFacts {
   readonly renderedFamilies: readonly string[];
   readonly scriptCjkLanguage?: import('@silurus/ooxml-core').CjkLang | null;
   readonly defaultBodyFontSizePt: number;
+  /** Producer line boxes (DocumentSettings.__plainFontLineBoxes). */
+  readonly plainLineBoxes?: boolean;
 }
 
 export interface LayoutBlockRepository {

@@ -146,6 +146,8 @@ export async function openDocxDocument(
     const services = createLayoutServices(acquired.result, {
       cjkFallback,
       measureContext: measurementCanvas.getContext('2d') as CanvasRenderingContext2D,
+      // Symbol colour probes draw on this session's own canvas backend.
+      createCanvas: (width: number, height: number) => options.factory.createCanvas(width, height) as never,
       // Library default: continuation unless the caller passes exactly false.
       allowFootnoteContinuation: options.allowFootnoteContinuation !== false,
     });

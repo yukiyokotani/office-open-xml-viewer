@@ -261,7 +261,7 @@ export function renderRadarChart(
           : 2 * Math.min(plotRightX - lx, lx - plotLeftX);
     // §21.2.2.71: format numeric-serial categories via the category-axis
     // numFmt; string spoke labels pass through unchanged.
-    const label = formatCategoryLabel((cats[i] ?? '').toString(), chart.catAxisFormatCode, chart.date1904);
+    const label = formatCategoryLabel((cats[i] ?? '').toString(), chart.catAxisFormatCode, chart.date1904, chart.catAxisFormatDivisors);
     fillAuthoredText(ctx, label, lx, ly, axisLabelLineHeightPx(radarCatFontPx), maxPx);
   }
 

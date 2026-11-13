@@ -3,6 +3,223 @@
 // section, date/time section detection and date/time rendering.
 
 import { excelSerialToUtcDate, isExcelDisplayDateSerial } from './excel-date';
+import { hasOwnKey } from './internal/own-key';
+
+/** §18.8.30 "Specify colors": the eight named section colours (p.1787). */
+const NAMED_COLORS: Record<string, string> = {
+  black: '#000000', blue: '#0000FF', cyan: '#00FFFF', green: '#008000',
+  magenta: '#FF00FF', red: '#FF0000', white: '#FFFFFF', yellow: '#FFFF00',
+};
+
+// Legacy indexed colour palette (§18.8.27, indices 0-63). `[ColorN]` maps N→
+// indexed=(N+7): the spec note says "[Color1] refers to indexed=8 ... [Color3]
+// for Red". Kept in sync with the Rust parser's INDEXED_COLORS.
+const INDEXED_COLORS: readonly string[] = [
+  '#000000', '#FFFFFF', '#FF0000', '#00FF00', '#0000FF', '#FFFF00', '#FF00FF', '#00FFFF', // 0-7
+  '#000000', '#FFFFFF', '#FF0000', '#00FF00', '#0000FF', '#FFFF00', '#FF00FF', '#00FFFF', // 8-15
+  '#800000', '#008000', '#000080', '#808000', '#800080', '#008080', '#C0C0C0', '#808080', // 16-23
+  '#9999FF', '#993366', '#FFFFCC', '#CCFFFF', '#660066', '#FF8080', '#0066CC', '#CCCCFF', // 24-31
+  '#000080', '#FF00FF', '#FFFF00', '#00FFFF', '#800080', '#800000', '#008080', '#0000FF', // 32-39
+  '#00CCFF', '#CCFFFF', '#CCFFCC', '#FFFF99', '#99CCFF', '#FF99CC', '#CC99FF', '#FFCC99', // 40-47
+  '#3366FF', '#33CCCC', '#99CC00', '#FFCC00', '#FF9900', '#FF6600', '#666699', '#969696', // 48-55
+  '#003366', '#339966', '#003300', '#333300', '#993300', '#993366', '#333399', '#333333', // 56-63
+];
+
+interface SectionCondition {
+  op: '<' | '<=' | '>' | '>=' | '=' | '<>';
+  value: number;
+}
+
+/** One numeric format section with its leading modifiers read. */
+export interface ParsedFormatSection {
+  /** Raw section body with colour and condition `[...]` modifiers removed. */
+  body: string;
+  color?: string;
+  condition?: SectionCondition;
+}
+
+/** Parse a section's `[...]` modifiers (colour, condition, currency).
+ *  Currency `[$sym-LCID]` is left *in* the body (its `$sym` is emitted as a
+ *  literal by the tokenizer); only colour and condition brackets are consumed
+ *  here. */
+export function parseFormatSection(section: string): ParsedFormatSection {
+  let body = '';
+  let color: string | undefined;
+  let condition: SectionCondition | undefined;
+  // Once no `]` follows, none follows any later `[` either: an unclosed
+  // run of brackets is copied without searching again (linear work).
+  let unclosed = false;
+  let i = 0;
+  while (i < section.length) {
+    const ch = section[i];
+    if (ch === '"') { // pass a quoted literal straight through
+      body += ch; i++;
+      while (i < section.length && section[i] !== '"') body += section[i++];
+      if (i < section.length) body += section[i++];
+    } else if (ch === '\\' || ch === '_' || ch === '*') {
+      // An escape or a pad / fill pair: its operand is never a delimiter.
+      body += ch;
+      if (i + 1 < section.length) body += section[i + 1];
+      i += 2;
+    } else if (ch === '[') {
+      const end = unclosed ? -1 : section.indexOf(']', i);
+      if (end < 0) { unclosed = true; body += ch; i++; continue; }
+      const inner = section.slice(i + 1, end);
+      const lower = inner.toLowerCase();
+      const idxMatch = lower.match(/^color(\d{1,2})$/);
+      const condMatch = inner.match(/^(<=|>=|<>|<|>|=)\s*([-+]?[0-9.]+(?:[eE][-+]?\d+)?)$/);
+      if (hasOwnKey(NAMED_COLORS, lower)) {
+        color = NAMED_COLORS[lower];
+      } else if (idxMatch) {
+        const n = parseInt(idxMatch[1], 10);
+        // §18.8.30: [ColorN] → indexed=(N+7); valid N is 1..56.
+        if (n >= 1 && n <= 56) color = INDEXED_COLORS[n + 7] ?? color;
+      } else if (condMatch) {
+        condition = { op: condMatch[1] as SectionCondition['op'], value: Number(condMatch[2]) };
+      } else {
+        // Currency / locale / elapsed brackets stay in the body for the
+        // tokenizer to interpret (`[$sym-LCID]`), so re-emit them verbatim.
+        body += section.slice(i, end + 1);
+      }
+      i = end + 1;
+    } else {
+      body += ch; i++;
+    }
+  }
+  return { body, color, condition };
+}
+
+function testCondition(cond: SectionCondition, num: number): boolean {
+  switch (cond.op) {
+    case '<': return num < cond.value;
+    case '<=': return num <= cond.value;
+    case '>': return num > cond.value;
+    case '>=': return num >= cond.value;
+    case '=': return num === cond.value;
+    case '<>': return num !== cond.value;
+  }
+}
+
+/** The numeric section a value formats with (§18.8.30). */
+export interface SelectedFormatSection {
+  section: ParsedFormatSection;
+  /** Index among the numeric sections (the text section left out): the
+   *  index of the section's display divisor. */
+  index: number;
+  /** The section formats the value's magnitude (its literals carry the
+   *  sign): a positional negative section, or a negative value claimed by
+   *  a section's own condition. */
+  useMagnitude: boolean;
+}
+
+/**
+ * Choose the numeric section of `formatCode` for `value`, as worksheet
+ * cells and chart labels both do. `null` when the code has no numeric
+ * section; `'none'` when sections carry conditions and none matches with no
+ * unconditional section to fall back on (Excel shows `#`).
+ */
+export function selectFormatSection(
+  value: number,
+  formatCode: string,
+): SelectedFormatSection | 'none' | null {
+  const raw = splitFormatSections(formatCode);
+  // The text section never formats a number (§18.8.30).
+  const textIndex = textSectionIndex(raw);
+  const parsed = raw.filter((_, i) => i !== textIndex).map(parseFormatSection);
+  if (parsed.length === 0) return null;
+  // Conditional sections (§18.8.30 "Specify conditions"): if any section
+  // carries a `[cond]`, section selection is condition-driven: the first
+  // section whose condition matches wins; a section without a condition is
+  // the "else". This overrides the positional pos/neg/zero rule.
+  if (parsed.some(s => s.condition)) {
+    for (let index = 0; index < parsed.length; index++) {
+      const section = parsed[index];
+      if (!section.condition) return { section, index, useMagnitude: false };
+      if (testCondition(section.condition, value)) {
+        // A section selected by its own matching condition formats the
+        // value's magnitude: its literals carry the sign presentation, like
+        // the positional negative section (§18.8.30 p.1785 example
+        // `$0.00" Surplus";$-0.00" Shortage"`). The unconditional "else"
+        // keeps the value's sign, like the positional fallback.
+        return { section, index, useMagnitude: value < 0 };
+      }
+    }
+    return 'none';
+  }
+  // Positional selection: positive;negative;zero (§18.8.31 p.1783).
+  if (value > 0) return { section: parsed[0], index: 0, useMagnitude: false };
+  if (value < 0) {
+    return parsed.length > 1
+      ? { section: parsed[1], index: 1, useMagnitude: true }
+      : { section: parsed[0], index: 0, useMagnitude: false };
+  }
+  const index = parsed.length > 2 ? 2 : 0;
+  return { section: parsed[index], index, useMagnitude: false };
+}
+
+/** The literal text around the General keyword of a section. */
+export interface GeneralSectionAffixes {
+  prefix: string;
+  suffix: string;
+  /** An unquoted `%` scales the value by 100 (§18.8.30). */
+  percent: boolean;
+}
+
+/**
+ * A section whose only number token is the General keyword, with literal
+ * text around it (`"$"General`, `General" kg"`, `[$€-407] General`;
+ * §18.8.30 lets literals accompany any number format): the literals, or
+ * `null` when the section holds anything else (digit placeholders, date or
+ * text tokens, no General). Quoted and escaped text, pad (`_x`, a space) and
+ * fill (`*x`, nothing) pairs, a currency bracket's symbol and plain
+ * punctuation are literal; other brackets are metadata.
+ */
+export function generalSectionAffixes(body: string): GeneralSectionAffixes | null {
+  let prefix = '';
+  let suffix = '';
+  let seen = false;
+  let percent = false;
+  const add = (text: string): void => {
+    if (seen) suffix += text; else prefix += text;
+  };
+  let i = 0;
+  while (i < body.length) {
+    const ch = body[i];
+    if (ch === '"') {
+      const end = body.indexOf('"', i + 1);
+      add(body.slice(i + 1, end < 0 ? body.length : end));
+      i = end < 0 ? body.length : end + 1;
+    } else if (ch === '\\') {
+      add(body[i + 1] ?? '');
+      i += 2;
+    } else if (ch === '_') {
+      add(' ');
+      i += 2;
+    } else if (ch === '*') {
+      i += 2;
+    } else if (ch === '[') {
+      const end = body.indexOf(']', i);
+      if (end < 0) return null;
+      const currency = /^\$([^-\]]*)/.exec(body.slice(i + 1, end));
+      if (currency) add(currency[1]);
+      i = end + 1;
+    } else if (/^general/i.test(body.slice(i, i + 7))) {
+      if (seen) return null;
+      seen = true;
+      i += 7;
+    } else if (ch === '%') {
+      percent = true;
+      add(ch);
+      i++;
+    } else if (/[\s$+\-()/:!^&'~{}<>=]/.test(ch)) {
+      add(ch);
+      i++;
+    } else {
+      return null;
+    }
+  }
+  return seen ? { prefix, suffix, percent } : null;
+}
 
 /** Index of the text section (§18.8.30), or -1: the fourth section when
  *  there are four, otherwise the last section when it holds an `@`
@@ -102,11 +319,57 @@ function resolveJpEra(date: Date): { abbr: string; short: string; long: string; 
 }
 
 /**
+ * Calendar fields that SpreadsheetML has no token for, written as bracket
+ * tokens by the model sources that have them (OpenDocument
+ * `number:quarter` and `number:week-of-year`, ODF 1.3 Part 3 §16.29.18 /
+ * §16.29.17; a SpreadsheetML parser never produces them, §18.8.30 defines
+ * no such bracket):
+ *
+ *   `[Q]`       the quarter, `Q1` … `Q4`
+ *   `[QQ]`      the quarter's name, `1st quarter` … (`第１四半期` in a ja-JP
+ *               section), as the other names of this formatter are English
+ *               or Japanese
+ *   `[WW]`      the week of the year, weeks starting on Sunday, week 1
+ *               holding 1 January
+ *   `[WW:d,n]`  the same with weeks starting on day `d` (0 Sunday … 6
+ *               Saturday) and week 1 the first week with at least `n` days
+ *               in the year (`[WW:1,4]` is ISO 8601)
+ *
+ * ODF leaves the week numbering to the application; LibreOffice takes it
+ * from the format's locale, so the source resolves the rule and the token
+ * carries it.
+ */
+const CALENDAR_FIELD = /^(?:(Q{1,2})|WW(?::([0-6]),([1-7]))?)$/;
+
+const QUARTER_ORDINALS = ['1st', '2nd', '3rd', '4th'];
+const JP_QUARTERS = ['第１四半期', '第２四半期', '第３四半期', '第４四半期'];
+
+/** Week of the year of a UTC date: weeks start on `firstDay` (0 Sunday);
+ *  week 1 is the first week with at least `minDays` days in the year, so
+ *  the days before it belong to the last week of the previous year. */
+function weekOfYear(date: Date, firstDay: number, minDays: number): number {
+  const DAY = 86_400_000;
+  const startOfWeekOne = (year: number): number => {
+    const jan1 = Date.UTC(year, 0, 1);
+    // Days from the start of its week to 1 January.
+    const offset = (new Date(jan1).getUTCDay() - firstDay + 7) % 7;
+    const start = jan1 - offset * DAY;
+    return 7 - offset < minDays ? start + 7 * DAY : start;
+  };
+  const day = Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate());
+  let year = date.getUTCFullYear();
+  if (day >= startOfWeekOne(year + 1)) year += 1;
+  else if (day < startOfWeekOne(year)) year -= 1;
+  return Math.floor((day - startOfWeekOne(year)) / (7 * DAY)) + 1;
+}
+
+/**
  * Format an Excel date serial with one date/time format section (callers
  * select the section; see splitFormatSections / isDateFormatSection).
  * Supports: y/yy/yyy/yyyy, m/mm/mmm/mmmm/mmmmm, d/dd/ddd/dddd,
  *           h/hh, m/mm (minutes when after h), s/ss, AM/PM, A/P,
- *           quoted literals, bracket escapes, _ padding, * fill.
+ *           quoted literals, bracket escapes, _ padding, * fill, and the
+ *           calendar-field brackets above ({@link CALENDAR_FIELD}).
  *
  * `date1904` selects the date system (`<workbookPr date1904>`, §18.2.28). The
  * serial → calendar-date conversion is delegated to the shared core
@@ -200,6 +463,18 @@ export function formatExcelDateTime(serial: number, section: string, date1904 = 
         }
         prevWasHour = kind === 'h';
       } else {
+        const field = CALENDAR_FIELD.exec(inner);
+        if (field) {
+          if (!validCalendar) return '#';
+          if (field[1]) {
+            const quarter = Math.floor((mo - 1) / 3);
+            result += field[1].length === 1 ? `Q${quarter + 1}`
+              : japaneseEra ? JP_QUARTERS[quarter] : `${QUARTER_ORDINALS[quarter]} quarter`;
+          } else {
+            result += String(weekOfYear(date, Number(field[2] ?? 0), Number(field[3] ?? 1)));
+          }
+          prevWasHour = false;
+        }
         while (i < section.length && section[i] !== ']') i++;
         if (i < section.length) i++;
       }
@@ -356,8 +631,8 @@ export function formatExcelDateTime(serial: number, section: string, date1904 = 
  * Every name-table text {@link formatExcelDateTime} can paint for one date /
  * time section, beyond the section's own characters and ASCII digits: the
  * English month and weekday names (`mmm…`, `ddd…`), AM/PM and A/P, the
- * Japanese weekday names (`aaa`, `aaaa`) and, under a ja-JP locale, the
- * Japanese era names (`g…`). Font-source scalar demand (library policy) uses
+ * Japanese weekday names (`aaa`, `aaaa`), under a ja-JP locale the Japanese
+ * era names (`g…`), and the quarter texts (`[Q]`, `[QQ]`). Font-source scalar demand (library policy) uses
  * it so a date cell never paints a scalar the demand left out. The token test
  * deliberately over-approximates (a quoted `"mmm"` also adds the month names):
  * a superset only loads more subsets, a missing scalar would paint a fallback.
@@ -368,6 +643,9 @@ export function excelDateTimeSectionNameTexts(section: string): string[] {
   if (/d{3}/i.test(section)) texts.push(...WEEKDAY_NAMES);
   if (/a{3}/i.test(section)) texts.push(...JP_WEEKDAY_SHORT, ...JP_WEEKDAY_LONG);
   if (/[ap]/i.test(section)) texts.push('AM', 'PM', 'A', 'P');
+  if (/\[QQ?\]/.test(section)) {
+    texts.push('Q', ...QUARTER_ORDINALS, ' quarter', ...JP_QUARTERS);
+  }
   if (/g/i.test(section) && sectionHasJapaneseLocale(section)) {
     for (const era of JP_ERAS) texts.push(era.abbr, era.short, era.long);
   }
@@ -485,7 +763,8 @@ function hasElapsedBracket(section: string): boolean {
  *  literals and bracket content are skipped; what remains is date/time when
  *  it holds y / m / d / h / s, AM/PM or A/P, the Japanese weekday code
  *  `aaa+`, the Japanese era `g`, era year `e` and locale codes `r` / `rr`,
- *  or an elapsed-time bracket `[h]` / `[mm]` / `[ss]`. An `e` after a numeric
+ *  an elapsed-time bracket `[h]` / `[mm]` / `[ss]` or a calendar-field
+ *  bracket `[Q]` / `[QQ]` / `[WW]`. An `e` after a numeric
  *  placeholder (`0` `#` `?`) or before `+` / `-` / a placeholder is the
  *  scientific exponent, and `General` is the General keyword. */
 export function isDateFormatSection(body: string): boolean {
@@ -501,7 +780,8 @@ export function isDateFormatSection(body: string): boolean {
     } else if (ch === '[') {
       const end = body.indexOf(']', i);
       if (end < 0) return false;
-      if (/^([hms])\1*$/i.test(body.slice(i + 1, end))) return true;
+      const inner = body.slice(i + 1, end);
+      if (/^([hms])\1*$/i.test(inner) || CALENDAR_FIELD.test(inner)) return true;
       i = end + 1;
     } else if (/^general/i.test(body.slice(i))) {
       i += 'general'.length;

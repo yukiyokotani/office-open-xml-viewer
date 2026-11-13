@@ -177,7 +177,7 @@ describe('ODS through the XLSX Node session', () => {
       stops: [{ position: 0, color: 'FFFFFF' }, { position: 1, color: '000000' }] });
     expect(fills[1]).toMatchObject({ fillType: 'gradient', gradType: 'linear', angle: 0 });
     expect(fills[2]).toMatchObject({ fillType: 'hatch', color: '#0000FF', background: '#FFFF00', angle: 45, lines: 2 });
-    expect(fills[3]).toMatchObject({ fillType: 'image', imagePath: 'Pictures/p.svg', mimeType: 'image/svg+xml' });
+    expect(fills[3]).toMatchObject({ fillType: 'image', imagePath: 'Pictures/p.svg', mimeType: 'image/svg+xml', layout: 'stretch' });
     if (!skia) return;
     const factory = skiaFactory();
     const canvas = factory.createCanvas(200, 300);
@@ -201,6 +201,35 @@ describe('ODS through the XLSX Node session', () => {
     const hatch = Array.from({ length: 30 }, (_, i) => at(60 + i, top(4) + 25));
     expect(hatch.some(([r, g, b]) => r! > 200 && g! > 200 && b! < 80)).toBe(true);
     expect(hatch.some(([r, g, b]) => b! > 150 && r! < 120 && g! < 120)).toBe(true);
+  });
+
+  it('shows dates, quarters, weeks and empty formula results as LibreOffice shows them', async () => {
+    const dateStyles = '<number:date-style style:name="DISO"><number:year number:style="long"/><number:text>-</number:text><number:month number:style="long"/><number:text>-</number:text><number:day number:style="long"/></number:date-style>'
+      + '<number:date-style style:name="DQ"><number:quarter/><number:text> / </number:text><number:quarter number:style="long"/></number:date-style>'
+      + '<number:date-style style:name="DW" number:language="de" number:country="DE"><number:text>KW </number:text><number:week-of-year/></number:date-style>'
+      + '<number:date-style style:name="DWUS" number:language="en" number:country="US"><number:week-of-year/></number:date-style>';
+    const cellStyles = ['DISO', 'DQ', 'DW', 'DWUS']
+      .map(n => `<style:style style:name="ce${n}" style:family="table-cell" style:parent-style-name="Default" style:data-style-name="${n}"/>`).join('');
+    const date = (style: string, value: string) =>
+      `<table:table-cell table:style-name="ce${style}" office:value-type="date" office:date-value="${value}"><text:p>x</text:p></table:table-cell>`;
+    const { sheets, text } = await open(buildOdsFixture({
+      automaticStyles: dateStyles + cellStyles,
+      body: '<table:table table:name="S">'
+        // Dates before 1 March 1900 keep their calendar date.
+        + `<table:table-row>${date('DISO', '1900-01-01')}${date('DISO', '1900-02-28')}${date('DISO', '1900-03-01')}${date('DISO', '1899-12-31')}</table:table-row>`
+        // LibreOffice: 2021-01-01 is in Q1, in week 53 for de-DE and week 1 for en-US.
+        + `<table:table-row>${date('DQ', '2021-01-01')}${date('DW', '2021-01-01')}${date('DWUS', '2021-01-01')}${date('DQ', '2024-11-05')}</table:table-row>`
+        // An empty-cell formula result (shown as nothing) and a shown zero.
+        + '<table:table-row><table:table-cell table:formula="of:=VLOOKUP(1;[.X1:.Y2];2)" office:value-type="float" office:value="0"><text:p/></table:table-cell>'
+        + '<table:table-cell table:formula="of:=1-1" office:value-type="float" office:value="0"><text:p>0</text:p></table:table-cell></table:table-row>'
+        + '</table:table>',
+    }));
+    expect([1, 2, 3, 4].map(col => text(0, 1, col))).toEqual(['1900-01-01', '1900-02-28', '1900-03-01', '1899-12-31']);
+    expect([1, 2, 3, 4].map(col => text(0, 2, col))).toEqual(['Q1 / 1st quarter', 'KW 53', '1', 'Q4 / 4th quarter']);
+    expect([1, 2].map(col => text(0, 3, col))).toEqual(['', '0']);
+    expect(sheets[0]!.rows[2]!.cells.map(cell => cell.value)).toEqual([
+      { type: 'number', number: 0 }, { type: 'number', number: 0 },
+    ]);
   });
 
   it('rejects encrypted and corrupt packages, claims only spreadsheets', async () => {

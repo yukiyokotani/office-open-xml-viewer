@@ -182,6 +182,23 @@ pub struct Document {
     /// renderer paints a visible error placeholder.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parse_error: Option<String>,
+    /// Private producer wire (never authored by WordprocessingML, which has
+    /// no physical-page anchor): stories of drawings anchored to an explicit
+    /// physical page, as ODF `text:anchor-page-number` (Part 3 §19.758)
+    /// anchors them. The layout paints each story on its page (1-based),
+    /// registers its wrapping drawings on that page's body, and extends the
+    /// document to the highest page. Empty, and omitted, for DOCX.
+    #[serde(rename = "__pageObjects", skip_serializing_if = "Vec::is_empty")]
+    pub page_objects: Vec<PageObjectStory>,
+}
+
+/// One physical page's anchored drawings (see `Document::page_objects`).
+#[derive(Serialize, Debug, Default, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct PageObjectStory {
+    /// The physical page, 1-based.
+    pub page: u32,
+    pub body: Vec<BodyElement>,
 }
 
 #[derive(Serialize)]
@@ -590,6 +607,17 @@ pub struct DocumentSettings {
         skip_serializing_if = "std::ops::Not::not"
     )]
     pub footnote_column_bands: bool,
+    /// Private producer flag (never set by the DOCX parsers): lines snapped
+    /// to an active line grid count cells from each face's own line box,
+    /// without Word's Far East 1.3 x usWin rule, as LibreOffice does
+    /// (unsnapped lines keep the 1.3 box there too). A snapped line also
+    /// takes its whole cells at the page edge: the page admits it only when
+    /// all of them fit (no grid-leading overhang).
+    #[serde(
+        rename = "__plainFontLineBoxes",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    pub plain_font_line_boxes: bool,
 }
 
 /// Single track-changes event extracted from a body revision wrapper.
@@ -1201,9 +1229,11 @@ pub struct DocParagraph {
         skip_serializing_if = "std::ops::Not::not"
     )]
     pub justified_compression: bool,
-    /// Fixed and minimum line heights place all extra space above the text
-    /// (LibreOffice: the baseline sits the text's descent above the line
-    /// box's bottom). DOCX never sets it; Word's partition applies.
+    /// LibreOffice's fixed and minimum line placement: a minimum line puts
+    /// all extra space above the text (the baseline sits the text's descent
+    /// above the line box's bottom); a fixed line puts its baseline four
+    /// fifths of the way down the line box. DOCX never sets it; Word's
+    /// partition applies.
     #[serde(
         rename = "__lineExtraAbove",
         skip_serializing_if = "std::ops::Not::not"

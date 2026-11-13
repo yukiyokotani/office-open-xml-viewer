@@ -14,7 +14,9 @@
 //! own decoding yields the authored pixel width (96 DPI). Drawing anchors are
 //! resolved from the same pixel grid.
 
+use crate::budget::{self, Scope};
 use crate::error::invalid;
+pub(crate) use crate::error::resource;
 use crate::odf_props::{self, StyleStore};
 use crate::ods_number::DataStyles;
 use crate::package::OdfPackage;
@@ -33,6 +35,9 @@ pub(crate) mod shape_path;
 pub(crate) mod table;
 #[path = "ods_wire.rs"]
 pub mod wire;
+#[cfg(test)]
+#[path = "ods_tests.rs"]
+mod workbook_tests;
 
 pub use crate::odf_text::*;
 pub use cells::XfBuilder;
@@ -51,54 +56,19 @@ pub const NS_CONFIG: &str = crate::xml::NS_CONFIG;
 pub const MAX_ROWS: u32 = 1_048_576;
 pub const MAX_COLS: u32 = 16_384;
 
-/// Implementation bound on the cells (values and styled blanks) a workbook
-/// materializes. Repeated empty cells with the column's default style are
-/// never materialized, so this bounds authored content, not grid size.
+/// Implementation bound on the cells (values and styled blanks) and row
+/// records a workbook materializes. Repeated empty cells with the column's
+/// default style are never materialized, so this bounds authored content,
+/// not grid size.
 pub const MAX_CELLS: usize = 8_000_000;
-/// Implementation bound on the retained model of one workbook (strings and
-/// fixed per-entry overheads), charged as content is materialized.
-pub const MAX_MODEL_BYTES: usize = 512 * 1024 * 1024;
+/// The reader's memory and work bounds are the shared governor's
+/// ([`crate::budget`]): measured by the allocator, checked at every step.
+pub use crate::budget::MAX_MODEL_BYTES;
 /// Implementation bound on charts and drawings per workbook.
 pub const MAX_DRAWINGS: usize = 65_536;
 
 /// ECMA-376 §18.3.1.13 fallback digit width when the host does not measure.
 pub const MDW_FALLBACK: f64 = 8.0;
-
-/// Resource accounting shared by the table and drawing readers.
-pub(crate) struct Budget {
-    cells: usize,
-    bytes: usize,
-}
-
-impl Budget {
-    pub(crate) fn new() -> Self {
-        Self { cells: 0, bytes: 0 }
-    }
-    pub(crate) fn cell(&mut self, text_bytes: usize) -> Result<(), String> {
-        self.cells += 1;
-        self.bytes = self.bytes.saturating_add(64 + text_bytes);
-        if self.cells > MAX_CELLS {
-            return Err(resource("cell count"));
-        }
-        self.check()
-    }
-    pub(crate) fn bytes(&mut self, bytes: usize) -> Result<(), String> {
-        self.bytes = self.bytes.saturating_add(bytes);
-        self.check()
-    }
-    fn check(&self) -> Result<(), String> {
-        if self.bytes > MAX_MODEL_BYTES {
-            Err(resource("model size"))
-        } else {
-            Ok(())
-        }
-    }
-}
-
-/// A resource-limit rejection (content-free).
-pub(crate) fn resource(what: &str) -> String {
-    format!("OpenDocument spreadsheet exceeds the {what} limit")
-}
 
 /// The workbook-wide reading context shared by the sheet readers.
 pub(crate) struct Context {
@@ -107,15 +77,21 @@ pub(crate) struct Context {
     pub faces: HashMap<String, String>,
     /// Named gradients, hatches and fill images (`office:styles`).
     pub fills: crate::odf_fill::FillDefs,
+    /// The line end of each `draw:marker`, read from its path once.
+    pub marker_kinds: HashMap<String, &'static str>,
     pub xfs: XfBuilder,
-    /// Days from the null date (§19.636 `table:null-date`) to 1899-12-30.
-    pub null_date_shift: i64,
     pub date1904: bool,
-    pub budget: Budget,
     /// Package images referenced by drawings (paths).
     pub images: BTreeSet<String>,
+    /// Each referenced package image's facts, read once.
+    pub image_facts: HashMap<String, draw::ImageFact>,
     pub drawing_count: usize,
     pub sheet_names: Vec<String>,
+    /// Position of each sheet name (the first table of the name).
+    pub sheet_index: HashMap<String, usize>,
+    /// Each embedded chart object read so far (by package path): frames
+    /// that reference one object share its single read.
+    pub chart_objects: HashMap<String, Option<ooxml_common::chart::ChartModel>>,
 }
 
 /// One table: its worksheet model (rows held apart for the cursor) and the
@@ -131,6 +107,21 @@ pub struct OdsSheet {
     pub default_col_px: u32,
     /// Cells naming a content validation (§19.616), by validation name.
     pub validation_refs: Vec<(String, xlsx_model::CellRange)>,
+    /// Cell ranges whose cell style carries §16.3 `style:map` conditions.
+    pub(crate) style_map_refs: Vec<(cells::CellStyle, xlsx_model::CellRange)>,
+    /// Blocks of hidden rows (first, last), in row order: charts leave
+    /// their cells out when the plot area asks (§20.26).
+    pub(crate) hidden_rows: Vec<(u32, u32)>,
+}
+
+impl OdsSheet {
+    /// Whether 1-based `row` is hidden.
+    pub(crate) fn row_hidden(&self, row: u32) -> bool {
+        let at = self.hidden_rows.partition_point(|(_, last)| *last < row);
+        self.hidden_rows
+            .get(at)
+            .is_some_and(|(first, _)| *first <= row)
+    }
 }
 
 pub struct OdsWorkbook {
@@ -146,13 +137,107 @@ pub struct OdsWorkbook {
 }
 
 pub fn read(package: &OdfPackage) -> Result<OdsWorkbook, String> {
-    let styles_text = package.read_text("styles.xml")?;
+    read_within(package, MAX_MODEL_BYTES)
+}
+
+/// [`read`] holding at most `limit` bytes beyond the parsed package
+/// documents. The documents are parsed first; everything after runs inside
+/// one governed [`Scope`], so the returned workbook, and whatever was held
+/// while it was built, was measured against `limit`.
+pub(crate) fn read_within(package: &OdfPackage, limit: usize) -> Result<OdsWorkbook, String> {
+    read_measured(package, limit).0
+}
+
+/// [`read`] under `limit`, with what the read held at its peak (bytes) and
+/// the steps it took (allocations and ticks): the two quantities the
+/// governor bounds, for tests and local inspection.
+pub fn read_measured(
+    package: &OdfPackage,
+    limit: usize,
+) -> (Result<OdsWorkbook, String>, usize, u64) {
+    match parse_documents(package) {
+        Ok(documents) => documents.read(package, limit),
+        Err(error) => (Err(error), 0, 0),
+    }
+}
+
+/// The package's XML parts, read and held while the workbook is built.
+struct Documents {
+    styles: Option<String>,
+    content: String,
+    settings: Option<String>,
+}
+
+fn parse_documents(package: &OdfPackage) -> Result<Documents, String> {
+    // ODF Part 3 §2.2.1: `styles.xml` is optional; a package may carry its
+    // spreadsheet and automatic styles in `content.xml` alone.
+    let styles_text = if package.contains("styles.xml") {
+        Some(package.read_text("styles.xml")?)
+    } else {
+        None
+    };
     let content_text = package.read_text("content.xml")?;
-    let styles_doc = xml::parse(&styles_text)?;
-    let content_doc = xml::parse(&content_text)?;
-    let styles_root = styles_doc.root_element();
-    let content_root = content_doc.root_element();
-    if !xml::is(styles_root, NS_OFFICE, "document-styles")
+    let settings_text = if package.contains("settings.xml") {
+        Some(package.read_text("settings.xml")?)
+    } else {
+        None
+    };
+    Ok(Documents {
+        styles: styles_text,
+        content: content_text,
+        settings: settings_text,
+    })
+}
+
+impl Documents {
+    fn read(
+        &self,
+        package: &OdfPackage,
+        limit: usize,
+    ) -> (Result<OdsWorkbook, String>, usize, u64) {
+        let parsed = (|| {
+            Ok::<_, String>((
+                match &self.styles {
+                    Some(text) => Some(xml::parse(text)?),
+                    None => None,
+                },
+                xml::parse(&self.content)?,
+                match &self.settings {
+                    Some(text) => Some(xml::parse(text)?),
+                    None => None,
+                },
+            ))
+        })();
+        let (styles_doc, content_doc, settings_doc) = match parsed {
+            Ok(parsed) => parsed,
+            Err(error) => return (Err(error), 0, 0),
+        };
+        let scope = Scope::enter(limit).with_cell_limit(MAX_CELLS);
+        let workbook = read_documents(
+            package,
+            styles_doc.as_ref().map(|doc| doc.root_element()),
+            content_doc.root_element(),
+            settings_doc.as_ref().map(|doc| doc.root_element()),
+        );
+        let (peak, work) = (budget::peak_bytes(), budget::work());
+        let workbook = workbook.and_then(|workbook| scope.finish().map(|()| workbook));
+        (workbook, peak, work)
+    }
+}
+
+fn read_documents(
+    package: &OdfPackage,
+    styles_root: Option<roxmltree::Node<'_, '_>>,
+    content_root: roxmltree::Node<'_, '_>,
+    settings_root: Option<roxmltree::Node<'_, '_>>,
+) -> Result<OdsWorkbook, String> {
+    // Style values (names, families, lengths) are bounded before any style
+    // resolves: a reader may then treat one as a small constant.
+    crate::odf_text::check_style_values(content_root)?;
+    if let Some(root) = styles_root {
+        crate::odf_text::check_style_values(root)?;
+    }
+    if styles_root.is_some_and(|root| !xml::is(root, NS_OFFICE, "document-styles"))
         || !xml::is(content_root, NS_OFFICE, "document-content")
     {
         return Err(invalid("styles.xml or content.xml has an unexpected root"));
@@ -161,23 +246,31 @@ pub fn read(package: &OdfPackage) -> Result<OdsWorkbook, String> {
     let mut data = DataStyles::default();
     let mut faces = HashMap::new();
     let mut fills = crate::odf_fill::FillDefs::default();
-    odf_props::font_faces(styles_root, &mut faces);
-    odf_props::font_faces(content_root, &mut faces);
-    for child in styles_root.children().filter(|n| n.is_element()) {
+    if let Some(styles_root) = styles_root {
+        odf_props::font_faces(styles_root, &mut faces)?;
+    }
+    odf_props::font_faces(content_root, &mut faces)?;
+    for child in styles_root
+        .iter()
+        .flat_map(|root| root.children())
+        .filter(|n| n.is_element())
+    {
         if xml::is(child, NS_OFFICE, "styles") {
             store.add(child, false)?;
-            fills.add(child);
-            data.add(child);
+            fills.add(child, "styles.xml")?;
+            data.add(child)?;
         } else if xml::is(child, NS_OFFICE, "automatic-styles") {
-            data.add(child);
+            data.add(child)?;
         }
     }
     for child in content_root.children().filter(|n| n.is_element()) {
         if xml::is(child, NS_OFFICE, "automatic-styles") {
             store.add(child, true)?;
-            data.add(child);
+            data.add(child)?;
         }
     }
+    store.check_chains()?;
+    data.check()?;
     let spreadsheet = content_root
         .children()
         .find(|n| xml::is(*n, NS_OFFICE, "body"))
@@ -186,15 +279,12 @@ pub fn read(package: &OdfPackage) -> Result<OdsWorkbook, String> {
                 .find(|n| xml::is(*n, NS_OFFICE, "spreadsheet"))
         })
         .ok_or_else(|| invalid("content.xml has no office:spreadsheet body"))?;
-    let (null_date_shift, date1904) = null_date(spreadsheet);
-    let xfs = XfBuilder::new(&store, &faces);
+    let date1904 = uses_1904_dates(spreadsheet);
+    let xfs = XfBuilder::new(&store, &mut data, &faces)?;
     let default_font = xfs.default_font();
-    let views = if package.contains("settings.xml") {
-        let text = package.read_text("settings.xml")?;
-        let document = xml::parse(&text)?;
-        table::read_view_settings(document.root_element())
-    } else {
-        HashMap::new()
+    let views = match settings_root {
+        Some(root) => table::read_view_settings(root)?,
+        None => HashMap::new(),
     };
     let tables: Vec<_> = spreadsheet
         .children()
@@ -204,18 +294,34 @@ pub fn read(package: &OdfPackage) -> Result<OdsWorkbook, String> {
         .iter()
         .map(|t| t.attribute((NS_TABLE, "name")).unwrap_or("").to_string())
         .collect();
+    // Sheet positions by name (the first table of a name), so name lookups
+    // never scan every sheet.
+    let mut sheet_index: HashMap<String, usize> = HashMap::new();
+    for (index, name) in sheet_names.iter().enumerate() {
+        budget::tick(1)?;
+        if !sheet_index.contains_key(name) {
+            sheet_index.insert(name.clone(), index);
+        }
+    }
+    let mut marker_kinds = HashMap::new();
+    for (name, d) in fills.markers() {
+        budget::tick(1)?;
+        marker_kinds.insert(name.to_string(), draw::marker_kind(d)?);
+    }
     let mut context = Context {
         store,
         data,
         faces,
         fills,
+        marker_kinds,
         xfs,
-        null_date_shift,
         date1904,
-        budget: Budget::new(),
         images: BTreeSet::new(),
+        image_facts: HashMap::new(),
         drawing_count: 0,
         sheet_names: sheet_names.clone(),
+        sheet_index,
+        chart_objects: HashMap::new(),
     };
     let mut sheets = Vec::with_capacity(tables.len());
     let mut pending_charts = Vec::new();
@@ -236,7 +342,7 @@ pub fn read(package: &OdfPackage) -> Result<OdsWorkbook, String> {
         &mut context,
         &mut warnings,
     )?;
-    let mut defined_names = extras::named_expressions(spreadsheet, &sheet_names);
+    let mut defined_names = extras::named_expressions(spreadsheet, &context.sheet_index)?;
     for (index, node) in tables.iter().enumerate() {
         if let Some(ranges) = node.attribute((NS_TABLE, "print-ranges")) {
             if let Some(formula) = extras::convert_range_list(ranges) {
@@ -244,24 +350,41 @@ pub fn read(package: &OdfPackage) -> Result<OdsWorkbook, String> {
             }
         }
     }
-    extras::database_ranges(spreadsheet, &mut sheets, &sheet_names, &mut defined_names);
-    extras::content_validations(spreadsheet, &mut sheets);
+    extras::database_ranges(
+        spreadsheet,
+        &mut sheets,
+        &context.sheet_index,
+        &mut defined_names,
+    )?;
+    extras::content_validations(spreadsheet, &mut sheets)?;
     extras::conditional_formats(&mut context, tables.as_slice(), &mut sheets)?;
-    // Defined names in scope for each sheet (workbook-global, then local).
+    // Defined names in scope for each sheet (workbook-global, then local),
+    // grouped by scope once. Every sheet holds its own copy of each global
+    // name: one step per copy.
+    let global: Vec<usize> = (0..defined_names.len())
+        .filter(|at| defined_names[*at].1.is_none())
+        .collect();
+    let mut local: Vec<Vec<usize>> = Vec::new();
+    for _ in 0..sheets.len() {
+        budget::tick(1)?;
+        local.push(Vec::new());
+    }
+    for (at, (_, scope, _)) in defined_names.iter().enumerate() {
+        if let Some(list) = scope.and_then(|index| local.get_mut(index)) {
+            list.push(at);
+        }
+    }
     for (index, sheet) in sheets.iter_mut().enumerate() {
-        sheet.worksheet.defined_names = defined_names
-            .iter()
-            .filter(|(_, scope, _)| scope.is_none())
-            .chain(
-                defined_names
-                    .iter()
-                    .filter(|(_, scope, _)| *scope == Some(index)),
-            )
-            .map(|(name, _, formula)| xlsx_model::DefinedName {
+        let mut names = Vec::new();
+        for at in global.iter().chain(local[index].iter()) {
+            budget::tick(1)?;
+            let (name, _, formula) = &defined_names[*at];
+            names.push(xlsx_model::DefinedName {
                 name: name.clone(),
                 formula: formula.clone(),
-            })
-            .collect();
+            });
+        }
+        sheet.worksheet.defined_names = names;
     }
     let (styles, xf_indent_pt) = context.xfs.finish();
     Ok(OdsWorkbook {
@@ -327,11 +450,11 @@ pub fn pt_to_px(pt: f64) -> u32 {
     (pt * 96.0 / 72.0).round().max(0.0) as u32
 }
 
-/// §19.636 `table:null-date`: the day value 0. Its shift to the
-/// SpreadsheetML 1900 epoch (1899-12-30, the LibreOffice default), or the
-/// 1904 date system when the null date is 1904-01-01.
-fn null_date(spreadsheet: roxmltree::Node<'_, '_>) -> (i64, bool) {
-    let value = spreadsheet
+/// §19.636 `table:null-date`: whether the day value 0 is 1904-01-01, the
+/// SpreadsheetML 1904 date system. Dates are read from their calendar
+/// `office:date-value`, so any other null date needs no shift.
+fn uses_1904_dates(spreadsheet: roxmltree::Node<'_, '_>) -> bool {
+    spreadsheet
         .children()
         .find(|n| xml::is(*n, NS_TABLE, "calculation-settings"))
         .and_then(|settings| {
@@ -339,107 +462,9 @@ fn null_date(spreadsheet: roxmltree::Node<'_, '_>) -> (i64, bool) {
                 .children()
                 .find(|n| xml::is(*n, NS_TABLE, "null-date"))
         })
-        .and_then(|node| node.attribute((NS_TABLE, "date-value")));
-    let Some(days) = value.and_then(days_from_civil_text) else {
-        return (0, false);
-    };
-    let epoch_1904 = days_from_civil(1904, 1, 1);
-    if days == epoch_1904 {
-        return (0, true);
-    }
-    (days - days_from_civil(1899, 12, 30), false)
-}
-
-/// Days since 1970-01-01 of a proleptic Gregorian date.
-pub fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
-    let y = if month <= 2 { year - 1 } else { year };
-    let era = if y >= 0 { y } else { y - 399 } / 400;
-    let yoe = y - era * 400;
-    let m = month;
-    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + day - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146_097 + doe - 719_468
-}
-
-fn days_from_civil_text(value: &str) -> Option<i64> {
-    let date = value.split('T').next()?;
-    let mut parts = date.splitn(3, '-');
-    let year: i64 = parts.next()?.parse().ok()?;
-    let month: i64 = parts.next()?.parse().ok()?;
-    let day: i64 = parts.next()?.get(..2)?.parse().ok()?;
-    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
-        return None;
-    }
-    Some(days_from_civil(year, month, day))
-}
-
-/// `office:date-value` (§19.372, an xsd:date or xsd:dateTime) as a
-/// SpreadsheetML serial date.
-pub(crate) fn date_serial(value: &str, null_shift: i64, date1904: bool) -> Option<f64> {
-    let days = days_from_civil_text(value)?;
-    let mut fraction = 0.0;
-    if let Some(time) = value.split('T').nth(1) {
-        let time = time.trim_end_matches('Z');
-        let time = time.split(['+']).next().unwrap_or(time);
-        let mut parts = time.splitn(3, ':');
-        let h: f64 = parts.next()?.parse().ok()?;
-        let m: f64 = parts.next().unwrap_or("0").parse().ok()?;
-        let s: f64 = parts.next().unwrap_or("0").parse().ok()?;
-        fraction = (h * 3600.0 + m * 60.0 + s) / 86_400.0;
-    }
-    let _ = null_shift;
-    // Days from the 1900 system's day 0 (1899-12-30). From 1900-03-01 this
-    // is the SpreadsheetML serial (§18.17.4.1); earlier dates keep the same
-    // count, as LibreOffice writes them when it saves SpreadsheetML (the
-    // 1900 system's nonexistent 1900-02-29 has no ODF date).
-    let serial = if date1904 {
-        (days - days_from_civil(1904, 1, 1)) as f64
-    } else {
-        (days - days_from_civil(1899, 12, 30)) as f64
-    };
-    Some(serial + fraction)
-}
-
-/// `office:time-value` (§19.382, an xsd:duration such as `PT12H30M05S`) as a
-/// fraction of a day.
-pub(crate) fn duration_days(value: &str) -> Option<f64> {
-    let value = value.trim();
-    let (negative, rest) = match value.strip_prefix('-') {
-        Some(rest) => (true, rest),
-        None => (false, value),
-    };
-    let rest = rest.strip_prefix('P')?;
-    let (date_part, time_part) = match rest.split_once('T') {
-        Some((d, t)) => (d, t),
-        None => (rest, ""),
-    };
-    let mut seconds = 0.0;
-    let mut number = String::new();
-    for c in date_part.chars() {
-        match c {
-            'D' => {
-                seconds += number.parse::<f64>().ok()? * 86_400.0;
-                number.clear();
-            }
-            'Y' | 'M' | 'W' => return None,
-            _ => number.push(c),
-        }
-    }
-    for c in time_part.chars() {
-        let unit = match c {
-            'H' => 3600.0,
-            'M' => 60.0,
-            'S' => 1.0,
-            _ => {
-                number.push(c);
-                continue;
-            }
-        };
-        seconds += number.parse::<f64>().ok()? * unit;
-        number.clear();
-    }
-    let days = seconds / 86_400.0;
-    Some(if negative { -days } else { days })
+        .and_then(|node| node.attribute((NS_TABLE, "date-value")))
+        .and_then(days_from_civil_text)
+        == Some(days_from_civil(1904, 1, 1))
 }
 
 /// Shared resolved data used by the wire: bootstrap model.
@@ -467,6 +492,19 @@ pub fn bootstrap(workbook: &mut OdsWorkbook) -> xlsx_model::ParsedWorkbook {
     }
 }
 
+/// The sheet a range names (the first of that name), or the first sheet
+/// for a range without a sheet name.
+pub(crate) fn sheet_named<'a>(
+    sheets: &'a [OdsSheet],
+    index: &HashMap<String, usize>,
+    name: Option<&str>,
+) -> Option<&'a OdsSheet> {
+    match name {
+        None => sheets.first(),
+        Some(name) => index.get(name).and_then(|at| sheets.get(*at)),
+    }
+}
+
 pub(crate) fn find_cell(rows: &[xlsx_model::Row], row: u32, col: u32) -> Option<&xlsx_model::Cell> {
     let index = rows.binary_search_by_key(&row, |r| r.index).ok()?;
     let cells = &rows[index].cells;
@@ -480,10 +518,24 @@ mod tests {
 
     #[test]
     fn dates_times_and_addresses() {
-        assert_eq!(date_serial("1900-03-01", 0, false), Some(61.0));
-        assert_eq!(date_serial("1899-12-31", 0, false), Some(1.0));
-        assert_eq!(date_serial("2024-01-05T12:00:00", 0, false), Some(45296.5));
-        assert_eq!(date_serial("1904-01-02", 0, true), Some(1.0));
+        assert_eq!(date_serial("1900-03-01", false), Some(61.0));
+        // Before 1900-03-01 the renderer shows serial n as day n + 1.
+        assert_eq!(date_serial("1900-02-28", false), Some(59.0));
+        assert_eq!(date_serial("1900-01-01", false), Some(1.0));
+        assert_eq!(date_serial("1899-12-31T06:00:00", false), Some(0.25));
+        assert_eq!(date_serial("1899-12-30T06:00:00", false), Some(0.25));
+        assert_eq!(date_serial("1899-12-29", false), Some(-1.0));
+        assert_eq!(date_serial("2024-01-05T12:00:00", false), Some(45296.5));
+        // A zone offset of either sign keeps the authored local time.
+        assert_eq!(
+            date_serial("2024-01-05T12:00:00-05:00", false),
+            Some(45296.5)
+        );
+        assert_eq!(
+            date_serial("2024-01-05T12:00:00+05:00", false),
+            Some(45296.5)
+        );
+        assert_eq!(date_serial("1904-01-02", true), Some(1.0));
         assert_eq!(duration_days("PT12H"), Some(0.5));
         assert_eq!(duration_days("-PT36H00M00S"), Some(-1.5));
         assert_eq!(parse_cell("$AB$12"), Some((12, 28)));

@@ -165,7 +165,11 @@ retained_struct!(ChartAnchor {
     chart
 });
 
-retained_struct!(ConditionalFormat { sqref, rules });
+retained_struct!(ConditionalFormat {
+    sqref,
+    rules,
+    first_match
+});
 
 retained_struct!(DataValidation {
     sqref,
@@ -269,7 +273,8 @@ retained_struct!(ImageAnchor {
 
 retained_struct!(NumFmt {
     num_fmt_id,
-    format_code
+    format_code,
+    section_divisors
 });
 
 impl RetainedBytes for PathCmd {
@@ -477,14 +482,29 @@ impl RetainedBytes for ShapeFill {
                 .saturating_add(bg.heap_bytes())
                 .saturating_add(preset.heap_bytes()),
             Self::Hatch {
-                color, background, ..
+                color,
+                background,
+                angle,
+                distance_pt,
+                lines,
+                alpha: _,
             } => 0u64
                 .saturating_add(color.heap_bytes())
-                .saturating_add(background.heap_bytes()),
+                .saturating_add(background.heap_bytes())
+                .saturating_add(angle.heap_bytes())
+                .saturating_add(distance_pt.heap_bytes())
+                .saturating_add(lines.heap_bytes()),
+            // The layout, sizes and placement are inline values.
             Self::Image {
                 image_path,
                 mime_type,
-                ..
+                layout: _,
+                width: _,
+                height: _,
+                align: _,
+                offset: _,
+                shift: _,
+                alpha: _,
             } => 0u64
                 .saturating_add(image_path.heap_bytes())
                 .saturating_add(mime_type.heap_bytes()),

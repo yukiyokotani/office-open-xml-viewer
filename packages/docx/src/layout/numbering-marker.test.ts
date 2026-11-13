@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { symbolTextToUnicodeSegments } from '@silurus/ooxml-core';
 import type { TextLayoutService } from './text.js';
 import { resolveNumberingMarkerGeometry } from './numbering-marker.js';
 import { createTextLayoutService } from './text.js';
@@ -73,6 +74,157 @@ describe('resolveNumberingMarkerGeometry', () => {
       return { advancePt: request.text.length * request.fontSizePt * em,
         ascentPt: request.fontSizePt * 0.8, descentPt: request.fontSizePt * 0.2 };
     } },
+  });
+
+  // #2177: a symbol marker is judged like run text and shaped as one run.
+  // `native` lists the authored codes (bare or U+F0xx) the marker font draws
+  // as its own symbol glyphs.
+  const symbolMarker = (text: string, native: readonly string[], options: Readonly<{
+    complexScriptFace?: string; baseRtl?: boolean;
+    /** Families whose face paints text in its own colours. */
+    colourFamilies?: readonly string[];
+  }> = {}) => {
+    const requests: { text: string; ascii: string | null | undefined; cs: string | null | undefined }[] = [];
+    const base = createTextLayoutService({
+      fonts: createFontResolver([]),
+      measurer: { fingerprint: 'marker-symbol', measure: (request) => ({
+        advancePt: request.text.length * 6, ascentPt: 8, descentPt: 2,
+      }) },
+      symbolText: (markerText, family) => symbolTextToUnicodeSegments(markerText, family, {
+        native: (code) => native.includes(code),
+        monochrome: () => true,
+      }),
+      symbolDraws: (code) => native.includes(code),
+      symbolMonochrome: (_text, resolution) => !options.colourFamilies?.includes(resolution.requestedFamily),
+    });
+    const service: TextLayoutService = { ...base, shape(request) {
+      requests.push({ text: request.text, ascii: request.fonts.ascii, cs: request.fonts.complexScript });
+      return base.shape(request);
+    } };
+    const geometry = resolveNumberingMarkerGeometry(
+      { numId: 1, level: 0, format: 'bullet', text, suff: 'tab', indentLeft: 0, tab: 36, fontFamily: 'Symbol' },
+      { fontSizePt: 12, fonts: { ascii: 'Symbol', highAnsi: 'Symbol', eastAsia: 'Symbol',
+        complexScript: options.complexScriptFace ?? 'Symbol' },
+        weight: 400, style: 'normal', complexScript: options.complexScriptFace !== undefined },
+      { authoredFirstIndentPt: 0, physicalIndentLeftPt: 0, tabStops: [], defaultTabPt: 36, baseRtl: options.baseRtl ?? false },
+      service,
+    );
+    return { geometry, requests };
+  };
+
+  it('keeps a marker code its font draws, in the symbol slots', () => {
+    const { geometry, requests } = symbolMarker('', ['']);
+    expect(geometry.markerText).toBe('');
+    expect(requests).toEqual([{ text: '', ascii: 'Symbol', cs: 'Symbol' }]);
+  });
+
+  it('shapes a kept bare code that bidi mirroring would replace in its F0-shifted form', () => {
+    const { geometry, requests } = symbolMarker('\u00AB', ['\u00AB'], { baseRtl: true });
+    expect(geometry.markerText).toBe('\uF0AB');
+    expect(requests).toEqual([{ text: '\uF0AB', ascii: 'Symbol', cs: 'Symbol' }]);
+  });
+
+  it('converts a kept mirrored code whose F0-shifted form shaping would give another slot family', () => {
+    // U+00AB takes highAnsi (Symbol) and is native there; U+F0AB would take
+    // eastAsia under the hint, another font: it converts instead of staying
+    // bare, where right-to-left shaping would mirror it to another glyph.
+    const service = createTextLayoutService({
+      fonts: createFontResolver([]),
+      measurer: { fingerprint: 'symbol-shift', measure: (request) => ({ advancePt: request.text.length * 6, ascentPt: 8, descentPt: 2 }) },
+      symbolText: (text, family, _resolution, _route, keepsShifted) => symbolTextToUnicodeSegments(text, family, {
+        native: () => true, monochrome: () => true, ...(keepsShifted ? { keepsShifted } : {}),
+      }),
+    });
+    const slots = (eastAsia: string) => ({
+      text: '«', fonts: { ascii: 'Symbol', highAnsi: 'Symbol', eastAsia, complexScript: 'Symbol' },
+      weight: 400, style: 'normal' as const, fontHint: 'eastAsia' as const,
+    });
+    expect(service.symbolText!(slots('MS Mincho'))).toEqual([{ text: '↔︎', mapped: true }]);
+    expect(service.symbolText!(slots('Symbol'))).toEqual([{ text: '', mapped: false }]);
+  });
+
+  it('keeps the conversion of a native mirrored marker code whose shifted form would change slot family', () => {
+    // As above, for a one-code marker: the code is native, yet it converted;
+    // that is not a partly native marker, and the bare code must not return.
+    const requests: string[] = [];
+    const base = createTextLayoutService({
+      fonts: createFontResolver([]),
+      measurer: { fingerprint: 'marker-shift', measure: (request) => ({ advancePt: request.text.length * 6, ascentPt: 8, descentPt: 2 }) },
+      symbolText: (text, family, _resolution, _route, keepsShifted) => symbolTextToUnicodeSegments(text, family, {
+        native: () => true, monochrome: () => true, ...(keepsShifted ? { keepsShifted } : {}),
+      }),
+      symbolDraws: () => true,
+    });
+    const service: TextLayoutService = { ...base, shape(request) { requests.push(request.text); return base.shape(request); } };
+    const geometry = resolveNumberingMarkerGeometry(
+      { numId: 1, level: 0, format: 'bullet', text: '«', suff: 'tab', indentLeft: 0, tab: 36, fontFamily: 'Symbol' },
+      { fontSizePt: 12, fonts: { ascii: 'Symbol', highAnsi: 'Symbol', eastAsia: 'MS Mincho', complexScript: 'Symbol' },
+        weight: 400, style: 'normal', complexScript: false, fontHint: 'eastAsia' },
+      { authoredFirstIndentPt: 0, physicalIndentLeftPt: 0, tabStops: [], defaultTabPt: 36, baseRtl: true }, service,
+    );
+    expect(geometry.markerText).toBe('↔︎');
+    expect(requests).toEqual(['↔︎']);
+  });
+
+  it('keeps the marker slots for text converted from a font that draws no symbol code', () => {
+    // Apple's Symbol is Unicode-encoded: U+F0B7 becomes "•", which that same
+    // face draws, as in 0.89.
+    const { geometry, requests } = symbolMarker('', []);
+    expect(geometry.markerText).toBe('•');
+    expect(requests).toEqual([{ text: '•', ascii: 'Symbol', cs: 'Symbol' }]);
+  });
+
+  it('gives up the authored slots where they would paint the converted text in colour', () => {
+    // The conversion's colour proof was made in the cleared route.
+    const { geometry, requests } = symbolMarker('\uF0B7', [], { colourFamilies: ['Symbol'] });
+    expect(geometry.markerText).toBe('\u2022');
+    expect(requests).toEqual([{ text: '\u2022', ascii: null, cs: null }]);
+  });
+
+  it('clears the slots of converted text a symbol cmap could read as its own codes', () => {
+    // Symbol 0xB8 is "÷" (U+00F7). A symbol-encoded face that lacks U+F0B8
+    // (say one admitted for U+0000-00FF only) would re-read the converted
+    // character as its code 0xF7, and nothing can show that a face reads a
+    // Latin-1 character as itself: such text never keeps the symbol slots.
+    const { geometry, requests } = symbolMarker('', []);
+    expect(geometry.markerText).toBe('÷');
+    expect(requests).toEqual([{ text: '÷', ascii: null, cs: null }]);
+    // A target above U+00FF next to one below it: cleared as well.
+    expect(symbolMarker('', []).requests).toEqual([{ text: '•÷', ascii: null, cs: null }]);
+  });
+
+  it('shapes an emoji-capable target in the cleared route its monochrome proof was made in', () => {
+    const { geometry, requests } = symbolMarker('', []);
+    expect(geometry.markerText).toBe('©︎');
+    expect(requests[0]).toEqual({ text: '©︎', ascii: null, cs: null });
+  });
+
+  it.each([false, true])('keeps a marker as authored when its font draws only some of its codes (rtl: %s)', (baseRtl) => {
+    const { geometry, requests } = symbolMarker('', [''], { baseRtl });
+    expect(geometry.markerText).toBe('');
+    expect(requests).toEqual([{ text: '', ascii: 'Symbol', cs: 'Symbol' }]);
+    expect(geometry.markerWidthPt).toBe(geometry.shape?.advancePt);
+  });
+
+  it('keeps the mirror-safe form of the native codes of a partly native marker', () => {
+    // The face draws a bare U+00AB but lacks U+F0B7: the marker stays as
+    // authored, with the kept code F0-shifted as in body text, so
+    // right-to-left shaping cannot mirror it to another glyph.
+    const { geometry, requests } = symbolMarker('«', ['«', ''], { baseRtl: true });
+    expect(geometry.markerText).toBe('');
+    expect(requests).toEqual([{ text: '', ascii: 'Symbol', cs: 'Symbol' }]);
+  });
+
+  it('judges a complex-script symbol marker in its symbol family, not its cs text face', () => {
+    // The cs slot names a text face; Word still draws the lvlText code in
+    // Symbol. A kept code is shaped in that family alone; converted text is
+    // ordinary Unicode in the authored slots.
+    const kept = symbolMarker('', [''], { complexScriptFace: 'Times New Roman', baseRtl: true });
+    expect(kept.geometry.markerText).toBe('');
+    expect(kept.requests).toEqual([{ text: '', ascii: 'Symbol', cs: 'Symbol' }]);
+    const converted = symbolMarker('', [], { complexScriptFace: 'Times New Roman', baseRtl: true });
+    expect(converted.geometry.markerText).toBe('•');
+    expect(converted.requests).toEqual([{ text: '•', ascii: 'Symbol', cs: 'Times New Roman' }]);
   });
 
   it.each([

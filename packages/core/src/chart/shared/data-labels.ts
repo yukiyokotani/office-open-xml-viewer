@@ -110,6 +110,7 @@ export function drawSeriesDataLabels(
       bubbleSize: s.bubbleSizes?.[i] ?? undefined,
       valueDivisor: displayUnitDivisor(valueDisplayUnits),
       formatCode: ovr?.formatCode ?? seriesDef?.formatCode ?? null,
+      formatDivisors: ovr?.formatCode != null ? null : seriesDef?.formatDivisors,
       date1904,
       separator: ovr?.separator ?? seriesDef?.separator,
     });
@@ -609,6 +610,9 @@ export function drawCategoryDataLabels(
       valueDivisor: displayUnitDivisor(valueDisplayUnits),
       percentRatio: percentRatioAt?.(ci),
       formatCode: ovr?.formatCode ?? seriesDef?.formatCode ?? null,
+      formatDivisors: ovr?.formatCode != null ? null : seriesDef?.formatDivisors,
+      percentFormatCode: ovr?.formatCode ?? seriesDef?.percentFormatCode,
+      percentFormatDivisors: ovr?.formatCode != null ? null : seriesDef?.percentFormatDivisors,
       date1904,
       separator: ovr?.separator ?? seriesDef?.separator,
     });

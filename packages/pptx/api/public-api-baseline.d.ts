@@ -599,6 +599,7 @@ export interface ChartModel {
     subtotalIndices: number[];
     legendManualLayout?: LegendManualLayout | null;
     valAxisFormatCode?: string | null;
+    valAxisFormatDivisors?: number[] | null;
     valAxisNumberFormat?: ChartAxisNumberFormat | null;
     valAxisDisplayUnits?: ChartDisplayUnits | null;
     catAxisDisplayUnits?: ChartDisplayUnits | null;
@@ -689,6 +690,7 @@ export interface ChartModel {
     valAxisLineDash?: string | null;
     valAxisLinePaintAuthored?: boolean | null;
     catAxisFormatCode?: string | null;
+    catAxisFormatDivisors?: number[] | null;
     catAxisNumberFormat?: ChartAxisNumberFormat | null;
     catAxisMin?: number | null;
     catAxisMax?: number | null;
@@ -919,6 +921,9 @@ export interface ChartSeriesDataLabels {
     fontPaintAuthored?: boolean;
     fontHidden?: boolean;
     formatCode?: string;
+    formatDivisors?: number[] | null;
+    percentFormatCode?: string | null;
+    percentFormatDivisors?: number[] | null;
     separator?: string;
     fontBold?: boolean;
     fontItalic?: boolean;
@@ -2162,6 +2167,7 @@ export interface SecondaryValueAxis {
     title: string | null;
     hidden: boolean;
     formatCode?: string | null;
+    formatDivisors?: number[] | null;
     numberFormat?: ChartAxisNumberFormat | null;
     displayUnits?: ChartDisplayUnits | null;
     fontColor?: string | null;

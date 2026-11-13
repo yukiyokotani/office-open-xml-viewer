@@ -89,6 +89,26 @@ is removed in 0.91.0. See the [0.89 to 0.90 migration guide](docs/migration-0.90
   warns once per JavaScript realm. Combining `useGoogleFonts: true` with
   `fonts` throws a `TypeError`. The VS Code extension keeps its
   `ooxmlViewer.useGoogleFonts` setting.
+- **Fixed:** text, `w:sym`/`a:sym` symbols and list markers in Symbol,
+  Wingdings, Wingdings 2, Wingdings 3 and Webdings now render on every host
+  (#2177). Greek letters and the maths operators of Symbol, and the
+  pictographs of the Wingdings/Webdings fonts, used to draw as tofu or as
+  Latin letters wherever the font is missing or, like Apple's Symbol, is not
+  symbol-encoded. Each code is now checked against the face that actually
+  paints it: a face that draws the code keeps its own glyph, as on Windows;
+  any other code becomes its Unicode character. A converted pictograph takes
+  the text colour, and is never drawn as a colour emoji: where only a colour
+  emoji face has it, the authored code is kept.
+
+## 0.89.10 — Unreleased
+
+Compatible patch release. No migration is required.
+
+- **Word: soft hyphen after a non-breaking-hyphen word:** a paragraph where a
+  `<w:softHyphen/>` follows a word joined with `<w:noBreakHyphen/>` (for
+  example "out-of-pocket" as Word stores it) no longer fails layout with
+  "Segment measurement does not match its retained text range context". The
+  error was a regression in 0.89.0 (#2193).
 
 ## 0.89.9 — 2026-11-10
 

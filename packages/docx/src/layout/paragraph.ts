@@ -3894,7 +3894,12 @@ function planMeasuredLines(
   // border edges. Include CT_PBdr's between/bar rules even when no edge is painted in
   // this slice. The shared admission predicate separately whitelists retained
   // plain text paint, including run-level formatting, on each terminal line.
-  const allowsGridLeadingOverhang = !paragraph.shading
+  // A model source whose grid lines take whole cells (`plainLineBoxes`,
+  // LibreOffice: a snapped line's real height is its cell count times the
+  // pitch, and the page admits it only when the whole height fits) never
+  // lends the grid leading.
+  const allowsGridLeadingOverhang = textService?.plainLineBoxes !== true
+    && !paragraph.shading
     && !Object.values(paragraph.borders ?? {}).some(Boolean)
     && !Object.values(paragraph.typographyInput?.borders ?? {}).some(Boolean)
     && !paragraph.tabStops?.some(stop => stop.alignment === 'bar');
@@ -3943,14 +3948,19 @@ function planMeasuredLines(
       && context.lineSpacing?.rule === 'atLeast'
       && compatibilityMode === 15
       && !context.lineGrid.active && raw.topY === undefined;
-    // A model source's fixed or minimum line with all extra space above the
-    // text (`__lineExtraAbove`, LibreOffice's placement; DOCX never sets it):
-    // the baseline sits the text's descent above the line box's bottom.
+    // A model source's fixed or minimum line in LibreOffice's placement
+    // (`__lineExtraAbove`; DOCX never sets it): a minimum line puts all extra
+    // space above the text, so the baseline sits the text's descent above the
+    // line box's bottom; a fixed line puts its baseline four fifths of the
+    // way down the line box, whatever the text's own metrics
+    // (SwTextFormatter::CalcRealHeight, SvxLineSpaceRule::Fix).
     const extraAboveLine = (paragraph as { readonly __lineExtraAbove?: boolean }).__lineExtraAbove === true
       && (context.lineSpacing?.rule === 'exact' || context.lineSpacing?.rule === 'atLeast')
       && raw.topY === undefined;
     const baselinePt = extraAboveLine
-      ? measuredLine.topYPt + measuredLine.advancePt - (raw.visibleDescent ?? raw.descent)
+      ? context.lineSpacing!.rule === 'exact'
+        ? measuredLine.topYPt + context.lineSpacing!.value * 4 / 5
+        : measuredLine.topYPt + measuredLine.advancePt - (raw.visibleDescent ?? raw.descent)
       : specified
       ? measuredLine.topYPt + specified.baselineOffsetPt
       : exactRubyLine

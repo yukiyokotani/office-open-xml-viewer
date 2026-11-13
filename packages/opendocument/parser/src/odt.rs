@@ -4,7 +4,7 @@
 //! the DOCX document model, following the specification (Part 3) and, where
 //! the specification leaves a choice or LibreOffice reads it differently,
 //! LibreOffice as the reference consumer. It rejects only input that is
-//! corrupt, encrypted, unsafe or beyond the resource limits below; a feature
+//! corrupt, encrypted, unsafe or beyond the resource limits; a feature
 //! the DOCX model cannot express exactly is mapped to its nearest DOCX
 //! equivalent rather than refused (each such approximation is noted beside
 //! its mapping).
@@ -14,8 +14,20 @@
 //! sections), `odt_list` (lists and heading numbering), `odt_table`
 //! (tables), `odt_draw` (frames, pictures, text boxes and shapes),
 //! `odt_geometry` (custom-shape geometry) and `odt_image` (picture sniffing).
+//!
+//! Resources are governed by [`crate::budget`], not by this reader: the
+//! allocator measures every byte the read holds or copies, so nothing here
+//! estimates or charges a size. The reader's part is the two rules of that
+//! module: every loop whose trip count comes from the file (repeated rows
+//! and cells, `text:s` runs) is walked item by item with a step each and
+//! never allocated ahead, and every walk over XML nodes takes a step per
+//! node. Source that is read again (a repeated row, a shared definition)
+//! takes steps for its size ([`rescan`]). Counts written in the file go
+//! through [`xml::bounded_count`]: one over its bound rejects, none is
+//! clipped.
 
-use crate::error::invalid;
+use crate::budget;
+use crate::error::{invalid, resource};
 use crate::iri;
 use crate::package::OdfPackage;
 use crate::script::ScriptClass;
@@ -23,7 +35,8 @@ use crate::style::{
     Cascade, Family, Group, Scope, Style, StyleRef, StyleSheet, LOEXT_GRAPHIC, PARAGRAPH, TEXT,
 };
 use crate::xml::{
-    self, NS_DRAW, NS_FO, NS_LOEXT, NS_OFFICE, NS_STYLE, NS_SVG, NS_TABLE, NS_TEXT, NS_XLINK,
+    self, Stepped, NS_DRAW, NS_FO, NS_LOEXT, NS_OFFICE, NS_STYLE, NS_SVG, NS_TABLE, NS_TEXT,
+    NS_XLINK,
 };
 use docx_model::owned_cursor::OwnedDocumentResource;
 use docx_model::{
@@ -31,7 +44,7 @@ use docx_model::{
     DocumentSettings, DocxNote, HeadersFooters, LineSpacing, ParaBorderEdge, ParagraphBorders,
     RunFontFacts, TabStop, TextRun,
 };
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
 
@@ -65,9 +78,6 @@ const MAX_INLINE_DEPTH: usize = 32;
 /// Implementation bound on nested block containers (sections, lists, tables,
 /// frames, notes).
 const MAX_BLOCK_DEPTH: usize = 32;
-/// Implementation bound on retained text, the dominant construction cost of
-/// this reader; the DOCX cursor additionally enforces its JSON ceilings.
-const MAX_RETAINED_TEXT_BYTES: usize = 64 * 1024 * 1024;
 /// Implementation bound on paragraphs.
 const MAX_PARAGRAPHS: usize = 1_000_000;
 /// Implementation bound on the characters of one paragraph (after `text:s`
@@ -76,46 +86,110 @@ const MAX_PARAGRAPHS: usize = 1_000_000;
 const MAX_PARAGRAPH_CHARS: usize = 1_000_000;
 /// Implementation bound on distinct span contexts in one paragraph.
 const MAX_PARAGRAPH_CONTEXTS: usize = 65_536;
-/// ODT-owned construction policy (a library policy, not a format limit):
-/// the estimated native size of the retained model (text, runs, paragraphs,
-/// pictures), charged before each allocation. The DOCX cursor additionally
-/// enforces its retained JSON ceiling while serializing.
-const MAX_CONSTRUCTION_BYTES: usize = 384 * 1024 * 1024;
 /// Implementation bound on the §16.2 search order of one span: its own style
 /// chain and those of the enclosing spans and paragraph.
 const MAX_SEARCH_ORDER: usize = 256;
-/// Implementation bound on cascade work, document-wide: every paragraph and
-/// run resolution visits each style of its search order and each attribute
-/// of the resolved property group (one unit each plus one per byte).
-const MAX_CASCADE_WORK: usize = 256 * 1024 * 1024;
+/// Implementation bound on `text:anchor-page-number`: the DOCX layout's own
+/// page bound, since the document is extended to the highest anchored page.
+const MAX_ANCHOR_PAGE: u32 = 10_000;
+/// The reader's memory and work bounds are the shared governor's
+/// ([`crate::budget`]): measured by the allocator, checked at every step.
+pub use crate::budget::MAX_MODEL_BYTES;
 
 /// The admitted document and the package files its runs reference by key.
 pub fn read(package: &OdfPackage) -> Result<(Document, Vec<OwnedDocumentResource>), String> {
-    let content_text = package.read_text("content.xml")?;
-    // ODF requires styles.xml in a package (Part 3 §3.1.3); a package
-    // without it is read with no common styles.
-    let styles_text = if package.contains("styles.xml") {
-        package.read_text("styles.xml")?
-    } else {
-        String::from(
-            r#"<office:document-styles xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0"/>"#,
-        )
+    read_within(package, MAX_MODEL_BYTES)
+}
+
+/// [`read`] holding at most `limit` bytes beyond the parsed package
+/// documents.
+pub(crate) fn read_within(
+    package: &OdfPackage,
+    limit: usize,
+) -> Result<(Document, Vec<OwnedDocumentResource>), String> {
+    read_measured(package, limit).0
+}
+
+/// What a read returns: the document and its package resources.
+pub type Read = Result<(Document, Vec<OwnedDocumentResource>), String>;
+
+/// [`read`] under `limit`, with what the read held at its peak (bytes) and
+/// the steps it took (allocations and ticks): the two quantities the
+/// governor bounds, for tests and local inspection.
+///
+/// The package's XML parts are read and parsed first; everything after
+/// runs inside one governed [`budget::Scope`], so the returned document,
+/// and whatever was held while it was built, was measured against `limit`.
+pub fn read_measured(package: &OdfPackage, limit: usize) -> (Read, usize, u64) {
+    let texts = (|| {
+        let content = package.read_text("content.xml")?;
+        // ODF requires styles.xml in a package (Part 3 §3.1.3); a package
+        // without it is read with no common styles.
+        let styles = if package.contains("styles.xml") {
+            package.read_text("styles.xml")?
+        } else {
+            String::from(
+                r#"<office:document-styles xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0"/>"#,
+            )
+        };
+        let settings = if package.contains("settings.xml") {
+            Some(package.read_text("settings.xml")?)
+        } else {
+            None
+        };
+        Ok::<_, String>((content, styles, settings))
+    })();
+    let (content_text, styles_text, settings_text) = match texts {
+        Ok(texts) => texts,
+        Err(error) => return (Err(error), 0, 0),
     };
-    let styles_doc = xml::parse(&styles_text)?;
-    let content_doc = xml::parse(&content_text)?;
-    let styles_root = styles_doc.root_element();
-    let content_root = content_doc.root_element();
+    let parsed = (|| {
+        Ok::<_, String>((
+            xml::parse(&styles_text)?,
+            xml::parse(&content_text)?,
+            match &settings_text {
+                Some(text) => Some(xml::parse(text)?),
+                None => None,
+            },
+        ))
+    })();
+    let (styles_doc, content_doc, settings_doc) = match parsed {
+        Ok(parsed) => parsed,
+        Err(error) => return (Err(error), 0, 0),
+    };
+    let scope = budget::Scope::enter(limit);
+    let document = read_documents(
+        package,
+        styles_doc.root_element(),
+        content_doc.root_element(),
+        settings_doc.as_ref().map(|doc| doc.root_element()),
+    );
+    let (peak, work) = (budget::peak_bytes(), budget::work());
+    let document = document.and_then(|document| scope.finish().map(|()| document));
+    (document, peak, work)
+}
+
+fn read_documents<'a>(
+    package: &'a OdfPackage,
+    styles_root: roxmltree::Node<'a, 'a>,
+    content_root: roxmltree::Node<'a, 'a>,
+    settings_root: Option<roxmltree::Node<'a, 'a>>,
+) -> Read {
     if !xml::is(styles_root, NS_OFFICE, "document-styles")
         || !xml::is(content_root, NS_OFFICE, "document-content")
     {
         return Err(invalid("styles.xml or content.xml has an unexpected root"));
     }
+    // Style values (names, families, lengths) are bounded before any style
+    // resolves: a reader may then treat one as a small constant.
+    crate::style::check_values(styles_root)?;
+    crate::style::check_values(content_root)?;
     let version = content_root.attribute((NS_OFFICE, "version"));
 
     let mut sheet = StyleSheet::default();
     let mut fonts = FontFaces::default();
     for (root, scope) in [(styles_root, Scope::Styles), (content_root, Scope::Content)] {
-        for child in root.children().filter(|n| n.is_element()) {
+        for child in root.kids().filter(|n| n.is_element()) {
             match (child.tag_name().namespace(), child.tag_name().name()) {
                 (Some(NS_OFFICE), "font-face-decls") => fonts.add(child, package)?,
                 (Some(NS_OFFICE), "styles") => {
@@ -127,30 +201,37 @@ pub fn read(package: &OdfPackage) -> Result<(Document, Vec<OwnedDocumentResource
             }
         }
     }
-    let settings = if package.contains("settings.xml") {
-        text::read_settings(&package.read_text("settings.xml")?)?
-    } else {
-        text::LayoutFlags::default()
+    let settings = match settings_root {
+        Some(root) => text::read_settings(root)?,
+        None => text::LayoutFlags::default(),
     };
     let common_styles = styles_root
-        .children()
+        .kids()
         .find(|n| xml::is(*n, NS_OFFICE, "styles"));
     let pages = page::Pages::read(styles_root)?;
     let body = content_root
-        .children()
+        .kids()
         .find(|n| xml::is(*n, NS_OFFICE, "body"))
-        .and_then(|b| b.children().find(|n| xml::is(*n, NS_OFFICE, "text")))
+        .and_then(|b| b.kids().find(|n| xml::is(*n, NS_OFFICE, "text")))
         .ok_or_else(|| invalid("content.xml has no office:text body"))?;
 
     let default_tab_stop = sheet
         .default_style(Family::Paragraph)
-        .and_then(|style| Cascade::new(vec![style], PARAGRAPH).get(NS_STYLE, "tab-stop-distance"))
+        .map(|style| Cascade::build(vec![style], PARAGRAPH))
+        .transpose()?
+        .and_then(|cascade| cascade.get(NS_STYLE, "tab-stop-distance"))
         .and_then(|value| length_pt(value).ok())
         .filter(|value| *value > 0.0);
-    let notes = page::NotesConfiguration::read(common_styles);
+    let notes = page::NotesConfiguration::read(common_styles)?;
     let line_numbering = page::line_numbering(common_styles);
-    let changes = text::TrackedChanges::read(body);
-    let defs = draw::Definitions::read(common_styles);
+    let changes = text::TrackedChanges::read(body)?;
+    let defs = draw::Definitions::read(common_styles)?;
+    // The default paragraph font size, resolved once (section grids read
+    // it per section).
+    let default_font_size = match sheet.default_style(Family::Paragraph) {
+        Some(style) => text::paragraph_font_size(&Cascade::build(vec![style], TEXT)?),
+        None => 12.0,
+    };
 
     let initial = pages.initial_master(body);
     let geometry = pages.geometry(initial);
@@ -169,6 +250,8 @@ pub fn read(package: &OdfPackage) -> Result<(Document, Vec<OwnedDocumentResource
         lists: list::Lists::default(),
         list_paragraph: None,
         text_width: geometry.text_width,
+        default_font_size,
+        page_writing: (pages.plain_horizontal(initial), pages.horizontal(initial)),
         text_height: geometry.text_height,
         page_left_margin: geometry.left,
         page_right_margin: geometry.right,
@@ -189,33 +272,34 @@ pub fn read(package: &OdfPackage) -> Result<(Document, Vec<OwnedDocumentResource
         headers: HashMap::new(),
         used_faces: RefCell::new(HashSet::new()),
         chains: HashMap::new(),
-        cascade_work: Cell::new(0),
+        container: Rc::from(Vec::new()),
         paragraph_count: 0,
-        retained_text_bytes: 0,
-        construction_bytes: 0,
+        intrinsic: HashMap::new(),
+        page_objects: BTreeMap::new(),
+        group_anchor: None,
+        group_depth: 0,
+        page_object_nodes: HashSet::new(),
+        rejected_images: HashSet::new(),
+        section_markers: 0,
+        region_cache: HashMap::new(),
+        level_cache: HashMap::new(),
         contextual_spacing_defined: version != Some("1.2"),
     };
-    // The first section: the initial master page.
-    reader.sections.push(page::SectionStart {
+    // The first section: the initial master page, with its page layout's
+    // columns (§17.12) like every later page-style section.
+    let first = page::SectionStart {
         master: initial.to_string(),
         kind: "nextPage",
-        columns: None,
+        columns: pages.columns(initial),
         page_start: None,
         block: 0,
-    });
+    };
+    reader.sections.push(first);
     reader.walk_blocks(body)?;
     let blocks = std::mem::take(&mut reader.blocks);
     let (body, section_marks) = reader.finish_body(blocks)?;
     let mut document = reader.assemble(body, section_marks, line_numbering)?;
 
-    // The font table and its metadata maps copy each used family name.
-    let font_table_bytes = reader
-        .used_faces
-        .borrow()
-        .iter()
-        .map(|face| 4 * (face.family.len() + 64))
-        .sum::<usize>();
-    reader.charge_construction(font_table_bytes)?;
     let used = text::used_font_table(&reader.used_faces.borrow());
     document.font_family_classes = text::metadata(&used, |face| face.generic);
     document.font_family_pitches = text::metadata(&used, |face| face.pitch);
@@ -230,11 +314,32 @@ pub fn read(package: &OdfPackage) -> Result<(Document, Vec<OwnedDocumentResource
         // under the column holding its reference and continues at the top of
         // the next column's area.
         footnote_column_bands: true,
+        // LibreOffice counts grid cells for a snapped line from the face's
+        // own box, without Word's Far East 1.3 x usWin rule (measured:
+        // MS Mincho and Meiryo grid controls; unsnapped lines keep 1.3),
+        // and admits a snapped line at the page bottom only when its whole
+        // cells fit (rr3 family D: 文 stays at 16.4pt left, moves at 16.35pt).
+        plain_font_line_boxes: true,
         ..DocumentSettings::default()
     });
     document.footnotes = std::mem::take(&mut reader.footnotes);
     document.endnotes = std::mem::take(&mut reader.endnotes);
     document.note_layout_settings = notes.wire(&pages, &reader.current_master);
+    // Page objects: one story per drawing, carried by an empty host
+    // paragraph (objects are independent of each other, so the layout
+    // resolves each in constant work).
+    let page_objects = std::mem::take(&mut reader.page_objects);
+    for (page, runs) in page_objects {
+        for run in runs {
+            budget::tick(1)?;
+            document.page_objects.push(docx_model::PageObjectStory {
+                page,
+                body: vec![BodyElement::Paragraph(Box::new(anchor_paragraph(vec![
+                    run,
+                ])))],
+            });
+        }
+    }
     let images = std::mem::take(&mut reader.images);
     Ok((document, images))
 }
@@ -327,10 +432,35 @@ struct Reader<'a> {
     used_faces: RefCell<HashSet<text::Face>>,
     /// Each applied style's parent chain, by style identity.
     chains: HashMap<*const Style, Rc<[StyleRef<'a>]>>,
-    cascade_work: Cell<usize>,
+    /// The styles a paragraph's property search continues in after its own
+    /// style chain (§16.2): the table-cell style of the cell holding it,
+    /// then the row's and the column's default cell styles (§19.619), or
+    /// the graphic style of the drawing shape holding it.
+    container: Rc<[StyleRef<'a>]>,
     paragraph_count: usize,
-    retained_text_bytes: usize,
-    construction_bytes: usize,
+    default_font_size: f64,
+    /// The current page style's writing: horizontal without a grid, and
+    /// horizontal (resolved when the page style changes).
+    page_writing: (bool, bool),
+    /// Package files that are not pictures (read once, never again).
+    rejected_images: HashSet<String>,
+    /// Section markers among the current story's blocks.
+    section_markers: usize,
+    /// Resolved list levels by scope, list style and level.
+    level_cache: HashMap<(Scope, String, u32), list::Level<'a>>,
+    /// Each master page's own region stories, built once.
+    region_cache: HashMap<String, Rc<page::MasterStories>>,
+    /// The anchor type of the enclosing drawing group (its members take it).
+    group_anchor: Option<&'static str>,
+    /// Drawing groups enclosing the current drawing: their members are not
+    /// anchored objects of their own (never page objects).
+    group_depth: usize,
+    /// Drawing elements already made page objects (by document and node).
+    page_object_nodes: HashSet<(usize, roxmltree::NodeId)>,
+    /// Drawings anchored to an explicit physical page, by page (1-based).
+    page_objects: BTreeMap<u32, Vec<DocRun>>,
+    /// Each retained picture's intrinsic size by key (scanned once).
+    intrinsic: HashMap<String, Option<(f64, f64)>>,
     contextual_spacing_defined: bool,
 }
 
@@ -338,7 +468,7 @@ impl<'a> Reader<'a> {
     fn enter(&mut self) -> Result<(), String> {
         self.depth += 1;
         if self.depth > MAX_BLOCK_DEPTH {
-            return Err("OpenDocument content nests beyond the reader's limit".into());
+            return Err(resource("content nesting"));
         }
         Ok(())
     }
@@ -351,7 +481,8 @@ impl<'a> Reader<'a> {
     /// indexes and frames anchored to the page.
     fn walk_blocks(&mut self, parent: roxmltree::Node<'a, 'a>) -> Result<(), String> {
         self.enter()?;
-        for node in parent.children().filter(|n| n.is_element()) {
+        for node in parent.kids().filter(|n| n.is_element()) {
+            budget::tick(1)?;
             self.block(node)?;
         }
         self.leave();
@@ -361,14 +492,7 @@ impl<'a> Reader<'a> {
     fn block(&mut self, node: roxmltree::Node<'a, 'a>) -> Result<(), String> {
         match (node.tag_name().namespace(), node.tag_name().name()) {
             (Some(NS_TEXT), "p") => self.paragraph(node, None)?,
-            (Some(NS_TEXT), "h") => {
-                let level = node
-                    .attribute((NS_TEXT, "outline-level"))
-                    .and_then(|v| v.parse::<u32>().ok())
-                    .filter(|v| (1..=10).contains(v))
-                    .unwrap_or(1);
-                self.heading(node, level)?
-            }
+            (Some(NS_TEXT), "h") => self.heading(node, outline_level(node))?,
             (Some(NS_TEXT), "list") => self.list(node, None)?,
             (Some(NS_TEXT), "numbered-paragraph") => self.numbered_paragraph(node)?,
             (Some(NS_TABLE), "table") => self.table(node)?,
@@ -380,9 +504,7 @@ impl<'a> Reader<'a> {
                 "table-of-content" | "illustration-index" | "table-index" | "object-index"
                 | "user-index" | "alphabetical-index" | "bibliography",
             ) => {
-                if let Some(index_body) =
-                    node.children().find(|n| xml::is(*n, NS_TEXT, "index-body"))
-                {
+                if let Some(index_body) = node.kids().find(|n| xml::is(*n, NS_TEXT, "index-body")) {
                     self.index_body(index_body)?;
                 }
             }
@@ -404,19 +526,14 @@ impl<'a> Reader<'a> {
     }
 
     fn index_body(&mut self, node: roxmltree::Node<'a, 'a>) -> Result<(), String> {
-        self.enter()?;
-        for child in node.children().filter(|n| n.is_element()) {
-            self.block(child)?;
-        }
-        self.leave();
-        Ok(())
+        self.walk_blocks(node)
     }
 
     /// `text:numbered-paragraph` (§5.3.6): one numbered paragraph outside a
     /// list element, numbered as a list item of its list at its level.
     fn numbered_paragraph(&mut self, node: roxmltree::Node<'a, 'a>) -> Result<(), String> {
         let Some(child) = node
-            .children()
+            .kids()
             .find(|n| xml::is(*n, NS_TEXT, "p") || xml::is(*n, NS_TEXT, "h"))
         else {
             return Ok(());
@@ -433,8 +550,8 @@ impl<'a> Reader<'a> {
             // A paragraph style naming a list style (§19.509
             // style:list-style-name) overrides the outline numbering: an
             // empty name removes it (LibreOffice).
-            let chain = self.paragraph_chain(node.attribute((NS_TEXT, "style-name")));
-            let link = chain.iter().find_map(|style| {
+            let (chain, own) = self.paragraph_chain(node.attribute((NS_TEXT, "style-name")))?;
+            let link = chain[..own].iter().find_map(|style| {
                 style
                     .style()
                     .attributes
@@ -442,7 +559,7 @@ impl<'a> Reader<'a> {
             });
             match link.map(String::as_str) {
                 Some("") => {}
-                Some(name) if self.sheet.find_list(self.scope, name).is_some() => {
+                Some(name) if self.find_list_style(name).is_some() => {
                     self.list_paragraph = self.styled_list_paragraph(node, name, level)?;
                 }
                 _ => self.list_paragraph = self.outline_paragraph(node, level)?,
@@ -460,29 +577,45 @@ impl<'a> Reader<'a> {
         {
             return Ok(());
         }
-        let style = node
+        // The section style with its parents and the family's default
+        // style (§16.2).
+        let mut chain = match node
             .attribute((NS_TEXT, "style-name"))
-            .and_then(|name| self.sheet.find(self.scope, Family::Section, name));
-        let properties = style.and_then(|s| s.group("section-properties"));
-        let indent = properties.map_or((0.0, 0.0), |p| {
+            .and_then(|name| self.find_style(Family::Section, name))
+        {
+            Some(style) => self.style_chain(style)?.to_vec(),
+            None => Vec::new(),
+        };
+        if let Some(default) = self.sheet.default_style(Family::Section) {
+            chain.push(default);
+        }
+        let properties = Cascade::build(chain, "section-properties")?;
+        let indent = {
             let get = |name: &str| {
-                p.attributes
-                    .get(&(NS_FO.to_string(), name.to_string()))
+                properties
+                    .get(NS_FO, name)
                     .and_then(|v| length_pt(v).ok())
                     .unwrap_or(0.0)
             };
             (get("margin-left"), get("margin-right"))
-        });
-        let columns = properties
-            .and_then(|p| p.elements.get("columns"))
+        };
+        let columns = match properties
+            .element("columns")
             .and_then(|elements| elements.first())
-            .and_then(|columns| page::columns(columns, self.text_width - indent.0 - indent.1));
+        {
+            Some(columns) => page::columns(columns, self.text_width - indent.0 - indent.1)?,
+            None => None,
+        };
         let enclosing_indent = self.section_indent;
         self.section_indent = (enclosing_indent.0 + indent.0, enclosing_indent.1 + indent.1);
         // A section with its own columns is a continuous DOCX section; the
         // content after it continues in the enclosing columns.
-        let sectioned = self.story == Story::Body && columns.is_some();
+        // A style that writes a single column sets it over enclosing columns
+        // too (§17.12).
         let enclosing_columns = self.sections.last().and_then(|s| s.columns.clone());
+        let sectioned = self.story == Story::Body
+            && (columns.is_some()
+                || (enclosing_columns.is_some() && properties.element("columns").is_some()));
         if sectioned {
             self.start_section(page::SectionStart {
                 master: self.current_master.clone(),
@@ -490,7 +623,7 @@ impl<'a> Reader<'a> {
                 columns: columns.clone(),
                 page_start: None,
                 block: 0,
-            });
+            })?;
         }
         let enclosing_area = self.area;
         self.next_area += 1;
@@ -501,14 +634,18 @@ impl<'a> Reader<'a> {
         // §20.336 text:dont-balance-text-columns: an unbalanced section that
         // ends the document stays the last DOCX section, which the layout
         // does not balance (a continuous section after it would).
-        let unbalanced_end = properties
-            .and_then(|p| {
-                p.attributes
-                    .get(&(NS_TEXT.to_string(), "dont-balance-text-columns".to_string()))
-            })
-            .is_some_and(|v| v == "true")
-            && node.next_siblings().skip(1).all(|n| !n.is_element())
+        let mut unbalanced_end = properties.get(NS_TEXT, "dont-balance-text-columns")
+            == Some("true")
             && node.parent().is_some_and(|p| xml::is(p, NS_OFFICE, "text"));
+        if unbalanced_end {
+            for sibling in node.next_siblings().skip(1) {
+                budget::tick(1)?;
+                if sibling.is_element() {
+                    unbalanced_end = false;
+                    break;
+                }
+            }
+        }
         if sectioned && !unbalanced_end {
             self.start_section(page::SectionStart {
                 master: self.current_master.clone(),
@@ -516,37 +653,63 @@ impl<'a> Reader<'a> {
                 columns: enclosing_columns,
                 page_start: None,
                 block: 0,
-            });
+            })?;
         }
         Ok(())
     }
 
-    fn start_section(&mut self, mut start: page::SectionStart) {
+    /// Records a section start. Every section later becomes a DOCX section
+    /// break whose properties, columns and header/footer stories are copies.
+    fn start_section(&mut self, mut start: page::SectionStart) -> Result<(), String> {
+        budget::tick(1)?;
         start.block = self.blocks.len();
         self.sections.push(start);
         self.blocks.push(Block::Section(self.sections.len() - 1));
+        self.section_markers += 1;
+        Ok(())
     }
 
-    /// Read `node`'s block content into a separate story (cell, frame, note,
+    /// Read `node`'s block content into a separate story (frame, note,
     /// header), returning its body elements.
     fn contained_story(
         &mut self,
         node: roxmltree::Node<'a, 'a>,
         width: f64,
     ) -> Result<Vec<BodyElement>, String> {
+        self.contained_story_in(node, width, Rc::from(Vec::new()))
+    }
+
+    /// [`Self::contained_story`] for a story whose paragraphs continue
+    /// their property search in `container` (a table cell's or a drawing
+    /// shape's styles, §16.2).
+    fn contained_story_in(
+        &mut self,
+        node: roxmltree::Node<'a, 'a>,
+        width: f64,
+        container: Rc<[StyleRef<'a>]>,
+    ) -> Result<Vec<BodyElement>, String> {
+        let saved_container = std::mem::replace(&mut self.container, container);
         let saved_blocks = std::mem::take(&mut self.blocks);
+        let saved_markers = std::mem::replace(&mut self.section_markers, 0);
         let saved_story = std::mem::replace(&mut self.story, Story::Contained);
         let saved_width = std::mem::replace(&mut self.text_width, width.max(1.0));
         let saved_indent = std::mem::replace(&mut self.section_indent, (0.0, 0.0));
         let saved_anchors = std::mem::take(&mut self.pending_anchors);
+        // A contained story (a text box in a group) anchors on its own.
+        let saved_group_anchor = self.group_anchor.take();
+        let saved_group_depth = std::mem::replace(&mut self.group_depth, 0);
         let saved_list = self.list_paragraph.take();
         let enclosing_area = self.area;
         self.next_area += 1;
         self.area = self.next_area;
         let walked = self.walk_blocks(node);
+        self.container = saved_container;
         self.area = enclosing_area;
         let blocks = std::mem::replace(&mut self.blocks, saved_blocks);
+        self.section_markers = saved_markers;
         self.story = saved_story;
+        self.group_anchor = saved_group_anchor;
+        self.group_depth = saved_group_depth;
         self.text_width = saved_width;
         self.section_indent = saved_indent;
         // Frames anchored inside the story without a following paragraph.
@@ -566,22 +729,25 @@ impl<'a> Reader<'a> {
         node: roxmltree::Node<'a, 'a>,
         outline_level: Option<u32>,
     ) -> Result<(), String> {
-        self.paragraph_count += 1;
-        if self.paragraph_count > MAX_PARAGRAPHS {
-            return Err("OpenDocument text exceeds the paragraph limit".into());
-        }
+        self.count_paragraph()?;
         let list = self.list_paragraph.take();
-        let chain = self.paragraph_chain(node.attribute((NS_TEXT, "style-name")));
-        let named_style = chain
+        // §7.7.11, §19.821: hidden-paragraph fields hide their whole
+        // paragraph.
+        if text::hidden_by_field(node)? {
+            return Ok(());
+        }
+        let (chain, own) = self.paragraph_chain(node.attribute((NS_TEXT, "style-name")))?;
+        // The paragraph's own named style and page style: never those of
+        // the cell or shape its search continues in.
+        let named_style = chain[..own]
             .iter()
             .find(|s| !s.style().automatic)
             .map(|s| s.style() as *const Style);
-        self.charge_cascade(&chain, PARAGRAPH)?;
-        let properties = Cascade::new(chain.clone(), PARAGRAPH);
+        let properties = Cascade::build(chain.clone(), PARAGRAPH)?;
 
         // §19.501: a paragraph whose style names a master page starts a page
         // with that page style (a page number restarts the count there).
-        let master = chain.iter().find_map(|s| {
+        let master = chain[..own].iter().find_map(|s| {
             s.style()
                 .attributes
                 .get(&(NS_STYLE.to_string(), "master-page-name".to_string()))
@@ -590,9 +756,7 @@ impl<'a> Reader<'a> {
         let mut page_break_before = false;
         if let Some(master) = master.filter(|name| !name.is_empty()) {
             if self.story == Story::Body && self.pages.has_master(master) {
-                let page_start = properties
-                    .get(NS_STYLE, "page-number")
-                    .and_then(|v| v.parse::<i64>().ok());
+                let page_start = page_start(&properties)?;
                 if self.has_body_content() {
                     let kind = self.pages.start_kind(master);
                     self.current_master = master.to_string();
@@ -602,7 +766,7 @@ impl<'a> Reader<'a> {
                         columns: self.pages.columns(master),
                         page_start,
                         block: 0,
-                    });
+                    })?;
                 } else {
                     // The first paragraph names the initial page style.
                     self.current_master = master.to_string();
@@ -643,10 +807,10 @@ impl<'a> Reader<'a> {
         // character style (`loext:marker-style-name`) over the paragraph's.
         let mark_context = match node
             .attribute((NS_LOEXT, "marker-style-name"))
-            .and_then(|name| self.sheet.find(self.scope, Family::Text, name))
+            .and_then(|name| self.find_style(Family::Text, name))
         {
             Some(style) => {
-                let styles = self.style_chain(style);
+                let styles = self.style_chain(style)?;
                 inline.contexts.push(TextContext {
                     styles,
                     parent: Some(0),
@@ -658,11 +822,6 @@ impl<'a> Reader<'a> {
         };
         let mark = self.run_properties(&inline.contexts, mark_context, ScriptClass::Latin)?;
         let mark_asian = self.run_properties(&inline.contexts, mark_context, ScriptClass::Asian)?;
-        self.charge_construction(
-            std::mem::size_of::<Collected>()
-                + std::mem::size_of::<BodyElement>()
-                + 5 * mark.family.len(),
-        )?;
         let mut mark_facts = mark.font_facts();
         mark_facts.font_family_east_asia = Some(mark_asian.family.to_string());
         collected.paragraph.paragraph_mark_font_facts = Some(mark_facts);
@@ -675,7 +834,11 @@ impl<'a> Reader<'a> {
 
         self.inline(node, 0, &mut inline, 0)?;
         self.emit_runs(&mut inline, &mut collected.paragraph)?;
-        let drop_cap = self.drop_cap(&properties, &mut collected.paragraph)?;
+        let drop_cap = self.drop_cap(
+            &properties,
+            inline.contexts[0].styles.clone(),
+            &mut collected.paragraph,
+        )?;
         if let Some(label) = list.and_then(|list| list.label) {
             self.list_label(label, &mut inline.contexts, &mut collected.paragraph)?;
         }
@@ -683,12 +846,14 @@ impl<'a> Reader<'a> {
         // earlier block.
         if !self.pending_anchors.is_empty() {
             let anchors = std::mem::take(&mut self.pending_anchors);
+            // Each anchor gains a host run copying the mark's faces.
             let host = mark.text_run();
-            let anchors: Vec<DocRun> = anchors
-                .into_iter()
-                .flat_map(|run| text::with_anchor_host(run, &host))
-                .collect();
-            collected.paragraph.runs.splice(0..0, anchors);
+            let mut hosted: Vec<DocRun> = Vec::new();
+            for run in anchors {
+                budget::tick(1)?;
+                hosted.extend(text::with_anchor_host(run, &host));
+            }
+            collected.paragraph.runs.splice(0..0, hosted);
         }
         if let Some(shading) = collected.paragraph.shading.clone() {
             // §20.395 automatic colour (also an unset colour) over the
@@ -732,6 +897,7 @@ impl<'a> Reader<'a> {
     fn drop_cap(
         &mut self,
         properties: &Cascade<'a>,
+        paragraph_chain: Rc<[StyleRef<'a>]>,
         paragraph: &mut DocParagraph,
     ) -> Result<Option<DocParagraph>, String> {
         let Some(cap) = properties.element("drop-cap").and_then(|e| e.first()) else {
@@ -742,9 +908,8 @@ impl<'a> Reader<'a> {
                 .get(&(NS_STYLE.to_string(), name.to_string()))
                 .map(String::as_str)
         };
-        let lines = attribute("lines")
-            .and_then(|v| v.parse::<u32>().ok())
-            .unwrap_or(1);
+        let lines = attribute("lines").and_then(unsigned).unwrap_or(1);
+        let lines = u32::try_from(lines).map_err(|_| resource("drop cap line"))?;
         if lines < 2 {
             return Ok(None);
         }
@@ -762,7 +927,10 @@ impl<'a> Reader<'a> {
                 .chars()
                 .take_while(|c| !c.is_whitespace())
                 .count(),
-            Some(value) => value.parse::<usize>().unwrap_or(1),
+            // (A length past the text is the whole text.)
+            Some(value) => {
+                unsigned(value).map_or(1, |length| usize::try_from(length).unwrap_or(usize::MAX))
+            }
             None => 1,
         }
         .min(first_text.chars().count());
@@ -770,26 +938,35 @@ impl<'a> Reader<'a> {
             return Ok(None);
         }
         // Take the first `count` characters from the leading text runs.
+        // The whole leading runs move out in one drain; at most one more run
+        // splits.
         let mut remaining = count;
-        let mut cap_runs = Vec::new();
-        let index = 0;
-        while remaining > 0 && index < paragraph.runs.len() {
-            let DocRun::Text(text) = &mut paragraph.runs[index] else {
+        let mut whole = 0;
+        for run in &paragraph.runs {
+            let DocRun::Text(text) = run else {
                 break;
             };
             let chars = text.text.chars().count();
-            if chars <= remaining {
-                remaining -= chars;
-                cap_runs.push(paragraph.runs.remove(index));
-                continue;
+            if remaining == 0 || chars > remaining {
+                break;
             }
-            let split: String = text.text.chars().take(remaining).collect();
-            let rest: String = text.text.chars().skip(remaining).collect();
-            let mut head = text.as_ref().clone();
-            head.text = split;
-            text.text = rest;
-            cap_runs.push(DocRun::Text(Box::new(head)));
-            remaining = 0;
+            remaining -= chars;
+            whole += 1;
+        }
+        let mut cap_runs: Vec<DocRun> = paragraph.runs.drain(..whole).collect();
+        if remaining > 0 {
+            if let Some(DocRun::Text(text)) = paragraph.runs.first_mut() {
+                // The run splits in two: the text moves, the second run's
+                // properties are a copy.
+                let original = std::mem::take(&mut text.text);
+                let split: String = original.chars().take(remaining).collect();
+                let rest: String = original.chars().skip(remaining).collect();
+                drop(original);
+                let mut head = text.as_ref().clone();
+                head.text = split;
+                text.text = rest;
+                cap_runs.push(DocRun::Text(Box::new(head)));
+            }
         }
         let size = paragraph.default_font_size.unwrap_or(12.0);
         let line = paragraph
@@ -802,18 +979,47 @@ impl<'a> Reader<'a> {
         let cap_size = line * f64::from(lines) / 1.15;
         // A character style for the cap (§19.494 style:style-name).
         let styled = attribute("style-name")
-            .and_then(|name| self.sheet.find(self.scope, Family::Text, name))
-            .map(|style| self.style_chain(style));
+            .and_then(|name| self.find_style(Family::Text, name))
+            .map(|style| self.style_chain(style))
+            .transpose()?;
+        // The cap style's properties over the paragraph's (§16.2), resolved
+        // once per script class of the cap runs (§20.358: a run holds
+        // characters of one class).
+        let contexts = styled.map(|chain| {
+            vec![
+                TextContext {
+                    styles: paragraph_chain,
+                    parent: None,
+                    link: None,
+                },
+                TextContext {
+                    styles: chain,
+                    parent: Some(0),
+                    link: None,
+                },
+            ]
+        });
+        let mut by_class: Vec<(ScriptClass, text::RunProperties)> = Vec::new();
         for run in &mut cap_runs {
             if let DocRun::Text(text) = run {
-                if let Some(chain) = &styled {
-                    let contexts = vec![TextContext {
-                        styles: chain.clone(),
-                        parent: None,
-                        link: None,
-                    }];
-                    let styled = self.run_properties(&contexts, 0, ScriptClass::Latin)?;
-                    let mut replacement = styled.text_run();
+                budget::tick(1)?;
+                if let Some(contexts) = &contexts {
+                    let class = if text.cs == Some(true) {
+                        ScriptClass::Complex
+                    } else {
+                        text.text
+                            .chars()
+                            .find_map(crate::script::table_22)
+                            .unwrap_or(ScriptClass::Latin)
+                    };
+                    let index = match by_class.iter().position(|(known, _)| *known == class) {
+                        Some(index) => index,
+                        None => {
+                            by_class.push((class, self.run_properties(contexts, 1, class)?));
+                            by_class.len() - 1
+                        }
+                    };
+                    let mut replacement = by_class[index].1.text_run();
                     replacement.text = std::mem::take(&mut text.text);
                     **text = replacement;
                 }
@@ -845,10 +1051,10 @@ impl<'a> Reader<'a> {
 
     /// Whether the body already holds content before the current block (a
     /// page style named on the first paragraph starts no new page).
+    /// Whether the current story holds a block other than a section marker
+    /// (O(1): the markers in it are counted as they are pushed).
     fn has_body_content(&self) -> bool {
-        self.blocks
-            .iter()
-            .any(|block| !matches!(block, Block::Section(_)))
+        self.blocks.len() > self.section_markers
     }
 
     /// Text area of the current master page.
@@ -858,35 +1064,77 @@ impl<'a> Reader<'a> {
         self.text_height = geometry.text_height;
         self.page_left_margin = geometry.left;
         self.page_right_margin = geometry.right;
+        self.page_writing = (
+            self.pages.plain_horizontal(&self.current_master),
+            self.pages.horizontal(&self.current_master),
+        );
     }
 
-    /// A paragraph style's chain plus the paragraph default style.
-    fn paragraph_chain(&mut self, name: Option<&str>) -> Vec<StyleRef<'a>> {
+    /// Every style lookup by name goes through these.
+    fn find_style(&self, family: Family, name: &str) -> Option<StyleRef<'a>> {
+        self.sheet.find(self.scope, family, name)
+    }
+
+    fn find_common_style(&self, family: Family, name: &str) -> Option<StyleRef<'a>> {
+        self.sheet.find_common(family, name)
+    }
+
+    fn find_list_style(&self, name: &str) -> Option<&'a crate::style::ListStyle> {
+        self.sheet.find_list(self.scope, name)
+    }
+
+    /// A drawing definition by kind and name. A definition is shared, so
+    /// each use reads its source again: every use takes steps for it.
+    fn definition(
+        &self,
+        kind: &'static str,
+        name: &str,
+    ) -> Result<Option<roxmltree::Node<'a, 'a>>, String> {
+        let Some((node, bytes)) = self.defs.get(kind, name) else {
+            return Ok(None);
+        };
+        rescan(bytes)?;
+        Ok(Some(node))
+    }
+
+    /// The §16.2 search order of a paragraph: its style's chain, the styles
+    /// of the cell or shape holding it (`container`), then the paragraph
+    /// default style. Also returns the length of the paragraph's own chain.
+    fn paragraph_chain(
+        &mut self,
+        name: Option<&str>,
+    ) -> Result<(Vec<StyleRef<'a>>, usize), String> {
         let mut chain: Vec<StyleRef<'a>> =
-            match name.and_then(|name| self.sheet.find(self.scope, Family::Paragraph, name)) {
-                Some(style) => self.style_chain(style).to_vec(),
+            match name.and_then(|name| self.find_style(Family::Paragraph, name)) {
+                Some(style) => self.style_chain(style)?.to_vec(),
                 None => Vec::new(),
             };
+        let own = chain.len();
+        chain.extend(self.container.iter().copied());
+        if chain.len() > MAX_SEARCH_ORDER {
+            return Err(resource("style search order"));
+        }
         if let Some(default) = self.sheet.default_style(Family::Paragraph) {
             chain.push(default);
         }
-        chain
+        Ok((chain, own))
     }
 
-    /// A style's parent chain, built once per style and charged to the
-    /// cascade work budget.
-    fn style_chain(&mut self, style: StyleRef<'a>) -> Rc<[StyleRef<'a>]> {
+    /// A style's parent chain, built once per style.
+    fn style_chain(&mut self, style: StyleRef<'a>) -> Result<Rc<[StyleRef<'a>]>, String> {
         let key: *const Style = style.style();
         if let Some(chain) = self.chains.get(&key) {
-            return chain.clone();
+            return Ok(chain.clone());
         }
-        let chain: Rc<[StyleRef<'a>]> = self
-            .sheet
-            .chain(style, |work| self.charge_work(work))
-            .unwrap_or_else(|_| vec![style])
-            .into();
+        // A cyclic or too deep parent chain reads as the style alone
+        // (LibreOffice ignores the broken link).
+        let chain: Rc<[StyleRef<'a>]> = match self.sheet.chain(style) {
+            Ok(chain) => chain.into(),
+            Err(error) if crate::error::is_invalid(&error) => vec![style].into(),
+            Err(error) => return Err(error),
+        };
         self.chains.insert(key, chain.clone());
-        chain
+        Ok(chain)
     }
 
     /// Paragraph properties (§17.6) mapped onto the DOCX paragraph.
@@ -901,6 +1149,8 @@ impl<'a> Reader<'a> {
                 .and_then(|value| length_pt(value).ok())
                 .unwrap_or(0.0)
         };
+        // The paragraph's font size, for the properties measured in it.
+        let font_size = text::paragraph_font_size(&Cascade::build(chain.to_vec(), TEXT)?);
         let rtl = matches!(cascade.get(NS_STYLE, "writing-mode"), Some("rl-tb" | "rl"));
         // DOCX alignment is logical in a right-to-left paragraph (left is the
         // start edge); ODF's start/end are logical, left/right physical
@@ -980,7 +1230,7 @@ impl<'a> Reader<'a> {
                     .ok()
                     .filter(|v| *v != 0.0)
                     .and_then(|lead| {
-                        let size = text::paragraph_font_size(cascade_text(chain)).unwrap_or(12.0);
+                        let size = font_size;
                         let natural = size * 1.15;
                         ((natural + lead) / natural > 0.0).then(|| LineSpacing {
                             value: (natural + lead) / natural,
@@ -990,12 +1240,8 @@ impl<'a> Reader<'a> {
                     })
             }
         };
-        let count = |name: &str| -> u32 {
-            cascade
-                .get(NS_FO, name)
-                .and_then(|v| v.parse::<u32>().ok())
-                .unwrap_or(0)
-        };
+        let count =
+            |name: &str| -> u64 { cascade.get(NS_FO, name).and_then(unsigned).unwrap_or(0) };
         // DOCX widow control is two lines; any ODF widow or orphan count of
         // two or more turns it on.
         let widow_control = count("widows") >= 2 || count("orphans") >= 2;
@@ -1006,12 +1252,13 @@ impl<'a> Reader<'a> {
         // §20.256 style:auto-text-indent: a first-line indent of one em
         // (LibreOffice uses the font size).
         if cascade.get(NS_STYLE, "auto-text-indent") == Some("true") {
-            indent_first = text::paragraph_font_size(cascade_text(chain)).unwrap_or(12.0);
+            indent_first = font_size;
         }
         let mut top = length("margin-top");
         let mut bottom = length("margin-bottom");
         // Relative margins (percentages of the parent style's) are resolved
         // against the parent value in the chain.
+        let automatic_indent = cascade.get(NS_STYLE, "auto-text-indent") == Some("true");
         for (name, value) in [
             ("margin-left", &mut indent_left),
             ("margin-right", &mut indent_right),
@@ -1019,11 +1266,15 @@ impl<'a> Reader<'a> {
             ("margin-top", &mut top),
             ("margin-bottom", &mut bottom),
         ] {
+            // (§20.256: an automatic indent leaves fo:text-indent unused.)
+            if name == "text-indent" && automatic_indent {
+                continue;
+            }
             if let Some(relative) = cascade.get(NS_FO, name).filter(|v| v.ends_with('%')) {
                 *value = relative_length(chain, PARAGRAPH, NS_FO, name, relative);
             }
         }
-        let shading = paragraph_fill(cascade, &Cascade::new(chain.to_vec(), LOEXT_GRAPHIC));
+        let shading = paragraph_fill(cascade, &Cascade::build(chain.to_vec(), LOEXT_GRAPHIC)?);
         // Borders and padding (§20.183, §20.217): a bordered side keeps its
         // padding as the border's distance from the text; LibreOffice also
         // insets an unbordered side's text by its padding, which DOCX
@@ -1074,13 +1325,16 @@ impl<'a> Reader<'a> {
                 .and_then(|v| percent(v).ok())
                 .is_some_and(|v| v < 1.0);
         // LibreOffice's placement of fixed and minimum lines, within its
-        // measured scope (horizontal pages without a layout grid; vertical
-        // and grid pages keep the DOCX placement, which the corpus matches
-        // better there).
+        // measured scope: horizontal pages without a layout grid, and
+        // paragraphs that do not snap to a page's grid. Vertical pages and
+        // snapping paragraphs keep the DOCX placement, which the corpus
+        // matches better there.
         let line_extra_above = matches!(
             line_spacing.as_ref().map(|spacing| spacing.rule.as_str()),
             Some("exact" | "atLeast")
-        ) && self.pages.plain_horizontal(&self.current_master);
+        ) && (self.page_writing.0
+            || (self.page_writing.1
+                && cascade.get(NS_STYLE, "snap-to-layout-grid") == Some("false")));
         let paragraph = DocParagraph {
             alignment: alignment.into(),
             indent_left,
@@ -1097,9 +1351,9 @@ impl<'a> Reader<'a> {
             bidi: rtl.then_some(true),
             justified_compression: justified_compression
                 && matches!(alignment, "both" | "distribute"),
-            // LibreOffice places a fixed or minimum line's extra height above
-            // the text (measured: the text sits on the line box's bottom
-            // less its descent).
+            // LibreOffice places a minimum line's extra height above the
+            // text and a fixed line's baseline at four fifths of its height
+            // (SwTextFormatter::CalcRealHeight; rr3 fixed-line controls).
             line_extra_above,
             // LibreOffice applies paragraph indents from the edge of the
             // area beside a wrapped float (measured: a hanging list item
@@ -1174,7 +1428,7 @@ impl<'a> Reader<'a> {
                 (_, Some("·")) | (Some("dot-dash" | "dot-dot-dash"), _) => "middleDot",
                 _ => "none",
             };
-            self.charge_construction(std::mem::size_of::<TabStop>() + 16)?;
+            budget::tick(1)?;
             stops.push(TabStop {
                 pos: origin + position,
                 alignment: alignment.into(),
@@ -1185,20 +1439,11 @@ impl<'a> Reader<'a> {
         Ok(stops)
     }
 
-    fn charge_text(
-        &mut self,
-        bytes: usize,
-        chars: usize,
-        inline: &Inline<'a>,
-    ) -> Result<(), String> {
-        self.retained_text_bytes = self
-            .retained_text_bytes
-            .checked_add(bytes)
-            .filter(|total| *total <= MAX_RETAINED_TEXT_BYTES)
-            .ok_or_else(|| "OpenDocument text exceeds the retained text limit".to_string())?;
-        self.charge_construction(bytes)?;
+    /// `chars` more characters in the paragraph being read, against the
+    /// per-paragraph bound.
+    fn admit_chars(&self, chars: usize, inline: &Inline<'a>) -> Result<(), String> {
         if inline.tokens.len().saturating_add(chars) > MAX_PARAGRAPH_CHARS {
-            return Err("OpenDocument paragraph exceeds the character limit".to_string());
+            return Err(resource("paragraph character"));
         }
         Ok(())
     }
@@ -1219,18 +1464,21 @@ impl<'a> Reader<'a> {
         if let Some(mime_type) = self.image_types.get(&path) {
             return Ok(Some((path, mime_type)));
         }
-        if !self.package.contains(&path) {
+        if !self.package.contains(&path) || self.rejected_images.contains(&path) {
             return Ok(None);
         }
         let bytes = self
             .package
             .session()
             .run_operation("odf-image", |operation| operation.read_bytes(&path))?;
+        budget::tick(1)?;
         let Some((bytes, mime_type)) = picture(bytes) else {
+            self.rejected_images.insert(path);
             return Ok(None);
         };
-        self.charge_construction(bytes.len() + 2 * path.len() + 64)?;
         self.image_types.insert(path.clone(), mime_type);
+        self.intrinsic
+            .insert(path.clone(), image::intrinsic_size(&bytes));
         self.images.push(OwnedDocumentResource {
             key: path.clone(),
             mime_type: mime_type.to_string(),
@@ -1242,7 +1490,7 @@ impl<'a> Reader<'a> {
     /// Embedded picture data (`office:binary-data`, base64), retained under a
     /// synthetic key.
     fn binary_image(&mut self, data: &str) -> Result<Option<(String, &'static str)>, String> {
-        self.charge_construction(data.len())?;
+        budget::tick(1)?;
         let Some(bytes) = image::base64(data) else {
             return Ok(None);
         };
@@ -1251,6 +1499,8 @@ impl<'a> Reader<'a> {
         };
         let key = format!("odt-binary/{}", self.images.len());
         self.image_types.insert(key.clone(), mime_type);
+        self.intrinsic
+            .insert(key.clone(), image::intrinsic_size(&bytes));
         self.images.push(OwnedDocumentResource {
             key: key.clone(),
             mime_type: mime_type.to_string(),
@@ -1259,40 +1509,19 @@ impl<'a> Reader<'a> {
         Ok(Some((key, mime_type)))
     }
 
-    fn charge_construction(&mut self, bytes: usize) -> Result<(), String> {
-        self.construction_bytes = self
-            .construction_bytes
-            .checked_add(bytes)
-            .filter(|total| *total <= MAX_CONSTRUCTION_BYTES)
-            .ok_or_else(|| "OpenDocument text exceeds the construction limit".to_string())?;
-        Ok(())
+    /// A retained picture's intrinsic size (scanned once, when the picture
+    /// is retained).
+    fn intrinsic_size(&self, key: &str) -> Option<(f64, f64)> {
+        self.intrinsic.get(key).copied().flatten()
     }
 
-    fn charge_cascade(&self, styles: &[StyleRef<'a>], group: Group) -> Result<(), String> {
-        let work = styles.iter().fold(0usize, |work, style| {
-            work.saturating_add(1)
-                .saturating_add(style.group(group).map_or(0, |p| {
-                    p.element_nodes
-                        + p.attributes
-                            .iter()
-                            .map(|((namespace, name), value)| {
-                                1 + namespace.len() + name.len() + value.len()
-                            })
-                            .sum::<usize>()
-                }))
-        });
-        self.charge_work(work)
-    }
-
-    fn charge_work(&self, work: usize) -> Result<(), String> {
-        let total = self
-            .cascade_work
-            .get()
-            .checked_add(work)
-            .filter(|total| *total <= MAX_CASCADE_WORK)
-            .ok_or_else(|| "OpenDocument text exceeds the style resolution limit".to_string())?;
-        self.cascade_work.set(total);
-        Ok(())
+    /// One paragraph against the document-wide paragraph bound.
+    fn count_paragraph(&mut self) -> Result<(), String> {
+        self.paragraph_count += 1;
+        if self.paragraph_count > MAX_PARAGRAPHS {
+            return Err(resource("paragraph count"));
+        }
+        budget::tick(1)
     }
 
     fn occurrence(&mut self, prefix: &str) -> String {
@@ -1477,11 +1706,6 @@ fn anchor_paragraph(runs: Vec<DocRun>) -> DocParagraph {
     }
 }
 
-/// The text-properties cascade of a paragraph chain.
-fn cascade_text<'a>(chain: &[StyleRef<'a>]) -> Cascade<'a> {
-    Cascade::new(chain.to_vec(), TEXT)
-}
-
 /// A relative length (`NN%`) resolved against the nearest absolute value of
 /// the same attribute further up the chain (§20.204: percentages refer to
 /// the parent style's value).
@@ -1613,7 +1837,8 @@ pub(crate) fn parse_border(value: &str, line_width: Option<&str>) -> Option<Bord
         }
     }
     let mut width = width.unwrap_or(0.75);
-    if let Some(parts) = line_width {
+    // §20.185: the component widths describe a double line only.
+    if let Some(parts) = line_width.filter(|_| matches!(style, Some("double" | "double-thin"))) {
         let sum: f64 = parts
             .split_whitespace()
             .filter_map(|p| length_pt(p).ok())
@@ -1715,6 +1940,74 @@ fn font_facts_of(run: &TextRun) -> RunFontFacts {
 #[path = "odt_tests.rs"]
 mod tests;
 
+/// The source size of a subtree: one unit per node plus its name, attribute
+/// and text bytes (what processing it again reads).
+fn source_bytes(node: roxmltree::Node<'_, '_>) -> Result<usize, String> {
+    let mut sum = 0usize;
+    for n in node.subtree() {
+        budget::tick(1)?;
+        let own = 1
+            + n.tag_name().name().len()
+            + n.text().map_or(0, str::len)
+            + n.attributes()
+                .map(|a| a.name().len() + a.value().len() + 1)
+                .sum::<usize>();
+        sum = sum.saturating_add(own);
+    }
+    Ok(sum)
+}
+
+/// §20.328 style:page-number of a paragraph or table style that starts a
+/// page style: a number restarts the page count there ("auto" continues
+/// it).
+fn page_start(properties: &Cascade<'_>) -> Result<Option<i64>, String> {
+    Ok(xml::bounded_count(
+        properties.get(NS_STYLE, "page-number"),
+        i32::MAX as u64,
+        "page number",
+    )?
+    .map(|start| start as i64))
+}
+
+/// A non-negative integer of any length, saturating: for values that are
+/// compared or clamped to a range the document itself gives (a level, a
+/// length within a text), where a larger number means the same as the
+/// largest. Counts that size something go through [`xml::bounded_count`].
+fn unsigned(value: &str) -> Option<u64> {
+    let value = value.trim();
+    let digits = value.strip_prefix('+').unwrap_or(value);
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    Some(digits.parse().unwrap_or(u64::MAX))
+}
+
+/// `text:outline-level` of a heading (§19.844; default 1), within the ten
+/// levels LibreOffice and the DOCX model have.
+fn outline_level(node: roxmltree::Node<'_, '_>) -> u32 {
+    node.attribute((NS_TEXT, "outline-level"))
+        .and_then(unsigned)
+        .map_or(1, |level| level.clamp(1, 10) as u32)
+}
+
+/// The character data of a subtree, a step per node.
+fn text_content(node: roxmltree::Node<'_, '_>) -> Result<String, String> {
+    let mut out = String::new();
+    for descendant in node.subtree() {
+        budget::tick(1)?;
+        if descendant.is_text() {
+            out.push_str(descendant.text().unwrap_or(""));
+        }
+    }
+    Ok(out)
+}
+
+/// Steps for reading `bytes` of source again (a repeated row or cell, a
+/// shared definition): one, plus one per 64 bytes.
+fn rescan(bytes: usize) -> Result<(), String> {
+    budget::tick(1 + bytes / 64)
+}
+
 /// Picture bytes in a format the renderer draws, with their media type. A
 /// StarView metafile (LibreOffice's object replacement format) is converted
 /// to SVG.
@@ -1722,5 +2015,5 @@ fn picture(bytes: Vec<u8>) -> Option<(Vec<u8>, &'static str)> {
     if let Some(mime_type) = image::sniff(&bytes) {
         return Some((bytes, mime_type));
     }
-    crate::svm::to_svg(&bytes).map(|converted| (converted.svg, "image/svg+xml"))
+    crate::svm::to_svg(&bytes, usize::MAX).map(|converted| (converted.svg, "image/svg+xml"))
 }

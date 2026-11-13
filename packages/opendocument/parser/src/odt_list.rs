@@ -25,7 +25,7 @@
 
 use super::*;
 use crate::style::ListStyle;
-use docx_model::{AnchorHostMetrics, ImageRun, TabStop};
+use docx_model::{AnchorHostMetrics, TabStop};
 
 /// Levels a list style defines (§19.840 `text:level`).
 const MAX_LEVELS: u32 = 10;
@@ -37,8 +37,6 @@ const IMAGE_LABEL_INSET_PT: f64 = 0.5;
 /// Generated tab stops per paragraph, and the smallest grid interval.
 const MAX_TAB_STOPS: usize = 1024;
 const MIN_TAB_INTERVAL_PT: f64 = 0.1 * 72.0 / 2.54;
-/// Affix length bound (bytes).
-const MAX_AFFIX_BYTES: usize = 1024;
 /// The reserved list style name standing for the outline style.
 const OUTLINE: &str = "\u{1}outline";
 
@@ -199,7 +197,8 @@ enum Kind {
     Bullet(char),
     /// A picture (§16.33), drawn at `fo:width` by `fo:height` (pt).
     Image {
-        href: String,
+        /// Shared by every copy of the cached level.
+        href: Rc<str>,
         width: Option<f64>,
         height: Option<f64>,
     },
@@ -207,7 +206,7 @@ enum Kind {
 
 /// One level of a list style.
 #[derive(Clone)]
-struct Level<'a> {
+pub(super) struct Level<'a> {
     kind: Kind,
     start: u32,
     follow: Follow,
@@ -270,6 +269,15 @@ pub(super) struct Frame {
     level: u32,
 }
 
+/// A number a list counter starts at (§19.868 `text:start-value`): beyond
+/// the counting bound it is refused, never clipped.
+fn list_number(value: Option<&str>) -> Result<Option<u32>, String> {
+    Ok(
+        xml::bounded_count(value, u64::from(MAX_COUNTED), "list number")?
+            .map(|number| number as u32),
+    )
+}
+
 impl<'a> Reader<'a> {
     fn list_style(&self, name: &str) -> Option<&'a ListStyle> {
         let sheet: &'a StyleSheet = self.sheet;
@@ -321,12 +329,11 @@ impl<'a> Reader<'a> {
                 let chain = match continued {
                     Some(chain) => chain,
                     None => {
-                        self.charge_construction(std::mem::size_of::<Chain>())?;
+                        budget::tick(1)?;
                         self.lists.chains.push(Chain::default());
                         self.lists.chains.len() - 1
                     }
                 };
-                self.charge_construction(style.len())?;
                 self.lists.previous = Some((style.clone(), chain));
                 Frame {
                     chain,
@@ -336,11 +343,11 @@ impl<'a> Reader<'a> {
             }
         };
         if let Some(id) = id {
-            self.charge_construction(id.len())?;
             self.lists.ids.insert(id.to_string(), frame.chain);
         }
         let level = self.list_level(&frame.style, frame.level)?;
-        for child in node.children().filter(|n| n.is_element()) {
+        for child in node.kids().filter(|n| n.is_element()) {
+            budget::tick(1)?;
             match (child.tag_name().namespace(), child.tag_name().name()) {
                 (Some(NS_TEXT), "list-item") => self.list_item(child, &frame, &level, false)?,
                 (Some(NS_TEXT), "list-header") => self.list_item(child, &frame, &level, true)?,
@@ -358,11 +365,10 @@ impl<'a> Reader<'a> {
         level: &Level<'a>,
         header: bool,
     ) -> Result<(), String> {
-        let start = node
-            .attribute((NS_TEXT, "start-value"))
-            .and_then(|v| v.parse::<u32>().ok());
+        let start = list_number(node.attribute((NS_TEXT, "start-value")))?;
         let mut first = !header;
-        for child in node.children().filter(|n| n.is_element()) {
+        for child in node.kids().filter(|n| n.is_element()) {
+            budget::tick(1)?;
             match (child.tag_name().namespace(), child.tag_name().name()) {
                 (Some(NS_TEXT), "p" | "h") if first => {
                     first = false;
@@ -401,11 +407,7 @@ impl<'a> Reader<'a> {
 
     fn list_child(&mut self, node: roxmltree::Node<'a, 'a>) -> Result<(), String> {
         if xml::is(node, NS_TEXT, "h") {
-            let level = node
-                .attribute((NS_TEXT, "outline-level"))
-                .and_then(|v| v.parse::<u32>().ok())
-                .unwrap_or(1);
-            self.paragraph(node, Some(level))
+            self.paragraph(node, Some(outline_level(node)))
         } else {
             self.paragraph(node, None)
         }
@@ -428,9 +430,8 @@ impl<'a> Reader<'a> {
             .to_string();
         let level = node
             .attribute((NS_TEXT, "level"))
-            .and_then(|v| v.parse::<u32>().ok())
-            .unwrap_or(1)
-            .clamp(1, MAX_LEVELS);
+            .and_then(unsigned)
+            .map_or(1, |level| level.clamp(1, u64::from(MAX_LEVELS)) as u32);
         let chain = match self.lists.numbered.get(&list_id) {
             Some(chain) => *chain,
             None => {
@@ -446,9 +447,7 @@ impl<'a> Reader<'a> {
             level,
         };
         let definition = self.list_level(&frame.style, level)?;
-        let start = node
-            .attribute((NS_TEXT, "start-value"))
-            .and_then(|v| v.parse::<u32>().ok());
+        let start = list_number(node.attribute((NS_TEXT, "start-value")))?;
         let label = if node.attribute((NS_TEXT, "is-list-header")) == Some("true") {
             None
         } else {
@@ -493,9 +492,7 @@ impl<'a> Reader<'a> {
             level,
         };
         let definition = self.list_level(style, level)?;
-        let start = node
-            .attribute((NS_TEXT, "start-value"))
-            .and_then(|v| v.parse::<u32>().ok());
+        let start = list_number(node.attribute((NS_TEXT, "start-value")))?;
         let values = self.count(&frame, start)?;
         let label = self.label(&frame, &definition, &values)?;
         Ok(Some(ListParagraph {
@@ -548,9 +545,7 @@ impl<'a> Reader<'a> {
         if node.attribute((NS_TEXT, "restart-numbering")) == Some("true") {
             self.lists.chains[chain].counters = Default::default();
         }
-        let start = node
-            .attribute((NS_TEXT, "start-value"))
-            .and_then(|v| v.parse::<u32>().ok());
+        let start = list_number(node.attribute((NS_TEXT, "start-value")))?;
         let values = self.count(&frame, start)?;
         let label = self.label(&frame, &definition, &values)?;
         Ok(Some(ListParagraph {
@@ -572,15 +567,20 @@ impl<'a> Reader<'a> {
         }
         let chain = &mut self.lists.chains[frame.chain];
         let index = (frame.level - 1) as usize;
+        // Every value entering a counter is within MAX_COUNTED (start values
+        // are read with that bound), so no label component outgrows it; a
+        // counter that counts past it is beyond the reader's limits.
         for (ancestor, ancestor_start) in starts.iter().enumerate().take(index) {
             chain.counters[ancestor].get_or_insert(*ancestor_start);
         }
         let value = match (start, chain.counters[index]) {
             (Some(start), _) => start,
-            (None, Some(previous)) => previous.saturating_add(1),
+            (None, Some(previous)) => previous + 1,
             (None, None) => starts[index],
+        };
+        if value > MAX_COUNTED {
+            return Err(resource("list number"));
         }
-        .min(MAX_COUNTED);
         chain.counters[index] = Some(value);
         for deeper in chain.counters.iter_mut().skip(index + 1) {
             *deeper = None;
@@ -640,22 +640,18 @@ impl<'a> Reader<'a> {
                             values[(l - 1) as usize],
                             component.0,
                             component.1,
-                        ));
+                        )?);
                     }
                 }
                 format!("{prefix}{}{suffix}", components.join("."))
             }
         };
-        self.charge_construction(text.len())?;
         let image = match &level.kind {
             Kind::Image {
                 href,
                 width,
                 height,
-            } => {
-                self.charge_construction(href.len())?;
-                Some((href.clone(), *width, *height))
-            }
+            } => Some((href.to_string(), *width, *height)),
             _ => None,
         };
         Ok(Label {
@@ -668,16 +664,16 @@ impl<'a> Reader<'a> {
         })
     }
 
-    fn format_counter(&self, value: u32, format: Format, sync: bool) -> String {
+    fn format_counter(&self, value: u32, format: Format, sync: bool) -> Result<String, String> {
         // 0 renders "0" in every format (measured by the reviewer).
         if value == 0 && format != Format::Empty {
-            return "0".to_string();
+            return Ok("0".to_string());
         }
-        match format {
+        Ok(match format {
             Format::Decimal => value.to_string(),
             Format::Empty => String::new(),
-            Format::LowerRoman => roman(value).to_ascii_lowercase(),
-            Format::UpperRoman => roman(value),
+            Format::LowerRoman => roman(value)?.to_ascii_lowercase(),
+            Format::UpperRoman => roman(value)?,
             Format::Circled => match value {
                 1..=20 => char::from_u32(0x2460 + value - 1),
                 21..=35 => char::from_u32(0x3251 + value - 21),
@@ -690,7 +686,7 @@ impl<'a> Reader<'a> {
                 let n = letters.len() as u32;
                 let letter = letters[((value - 1) % n) as usize];
                 let repeat = if sync { (value - 1) / n + 1 } else { 1 };
-                std::iter::repeat_n(letter, repeat as usize).collect()
+                repeated(letter, repeat as usize)?
             }
             Format::Digits(zero) => value
                 .to_string()
@@ -714,19 +710,30 @@ impl<'a> Reader<'a> {
             Format::LowerLetter | Format::UpperLetter => {
                 // Beyond "z" the places count like digits ("aa, ab"), as
                 // ODF 1.4 §19.505 and LibreOffice do.
-                let letters = letters(value, sync);
+                let letters = letters(value, sync)?;
                 if format == Format::UpperLetter {
                     letters.to_ascii_uppercase()
                 } else {
                     letters
                 }
             }
-        }
+        })
     }
 
-    /// A list style's level definition (§16.31-§16.34).
+    /// A list style's level definition (§16.31-§16.34), resolved once per
+    /// scope, style and level; later uses copy the bounded definition.
     fn list_level(&mut self, style: &str, level: u32) -> Result<Level<'a>, String> {
-        self.charge_work(16 + style.len())?;
+        budget::tick(1)?;
+        let key = (self.scope, style.to_string(), level);
+        if let Some(cached) = self.level_cache.get(&key) {
+            return Ok(cached.clone());
+        }
+        let resolved = self.resolve_list_level(style, level)?;
+        self.level_cache.insert(key, resolved.clone());
+        Ok(resolved)
+    }
+
+    fn resolve_list_level(&mut self, style: &str, level: u32) -> Result<Level<'a>, String> {
         let fallback = Level {
             kind: Kind::Number {
                 format: Format::Empty,
@@ -747,7 +754,9 @@ impl<'a> Reader<'a> {
         let Some(list) = self.list_style(style) else {
             return Ok(fallback);
         };
-        self.charge_work(list.element.children.len())?;
+        // The level search and its format templates read the whole
+        // captured definition.
+        budget::tick(list.element.nodes())?;
         // The definition of this level, else the nearest lower one (a list
         // nested deeper than its style defines).
         let level_of = |child: &crate::style::Element| {
@@ -783,21 +792,16 @@ impl<'a> Reader<'a> {
             "list-level-style-image" => (false, true),
             _ => (true, false),
         };
-        let affix = |name: &str| -> String {
-            let value = attribute((NS_STYLE, name)).unwrap_or("");
-            if value.len() > MAX_AFFIX_BYTES {
-                String::new()
-            } else {
-                value.to_string()
-            }
-        };
+        // (A list level's values are bounded by `style::check_values`.)
+        let affix =
+            |name: &str| -> String { attribute((NS_STYLE, name)).unwrap_or("").to_string() };
         let kind = if number {
             let format = parse_format(attribute((NS_STYLE, "num-format")).unwrap_or(""));
             let prefix = affix("num-prefix");
             let suffix = affix("num-suffix");
             let authored_display = attribute((NS_TEXT, "display-levels"))
-                .and_then(|value| value.parse::<u32>().ok())
-                .map(|v| v.clamp(1, level));
+                .and_then(unsigned)
+                .map(|v| v.clamp(1, u64::from(level)) as u32);
             // LibreOffice composes the label from its template when one is
             // written (it may drop `text:display-levels`, measured): the
             // number of level placeholders it holds.
@@ -820,7 +824,7 @@ impl<'a> Reader<'a> {
         } else if image {
             match attribute((NS_XLINK, "href")) {
                 Some(href) => Kind::Image {
-                    href: href.to_string(),
+                    href: Rc::from(href),
                     width: None,
                     height: None,
                 },
@@ -835,9 +839,7 @@ impl<'a> Reader<'a> {
                     .unwrap_or('\u{2022}'),
             )
         };
-        let start = attribute((NS_TEXT, "start-value"))
-            .and_then(|value| value.parse::<u32>().ok())
-            .unwrap_or(1);
+        let start = list_number(attribute((NS_TEXT, "start-value")))?.unwrap_or(1);
         let relative_size = attribute((NS_TEXT, "bullet-relative-size"))
             .and_then(|v| percent(v).ok())
             .filter(|v| *v > 0.0 && (*v - 1.0).abs() > 1e-9);
@@ -923,7 +925,7 @@ impl<'a> Reader<'a> {
                 .find(self.scope, Family::Text, name)
                 .or_else(|| sheet.find_common(Family::Text, name))
             {
-                styles.extend(self.style_chain(style).iter().copied());
+                styles.extend(self.style_chain(style)?.iter().copied());
             }
         }
         Ok(Level {
@@ -953,6 +955,7 @@ impl<'a> Reader<'a> {
     ) -> Result<(), String> {
         let mut margin = list.margin;
         let mut indent = list.indent;
+        let automatic_indent = properties.get(NS_STYLE, "auto-text-indent") == Some("true");
         for (name, value) in [("margin-left", &mut margin), ("text-indent", &mut indent)] {
             let key = (NS_FO.to_string(), name.to_string());
             let Some(index) = chain.iter().position(|style| {
@@ -979,30 +982,36 @@ impl<'a> Reader<'a> {
                 if list.label.is_none() && name == "text-indent" {
                     continue;
                 }
-                if let Ok(length) = length_pt(&setter.groups[PARAGRAPH].attributes[&key]) {
+                // (§20.256: an automatic indent leaves fo:text-indent
+                // unused.)
+                if name == "text-indent" && automatic_indent {
+                    continue;
+                }
+                let raw = &setter.groups[PARAGRAPH].attributes[&key];
+                if raw.ends_with('%') {
+                    // A percentage of the parent style's value (§20.207,
+                    // §20.225).
+                    *value = relative_length(&chain[index..], PARAGRAPH, NS_FO, name, raw);
+                } else if let Ok(length) = length_pt(raw) {
                     *value = length;
                 }
             }
         }
         paragraph.indent_left = margin + self.section_indent.0;
-        paragraph.indent_first = if list.label.is_some() { indent } else { 0.0 };
+        // (An automatic indent, already resolved from the font size,
+        // stays.)
+        if !automatic_indent {
+            paragraph.indent_first = if list.label.is_some() { indent } else { 0.0 };
+        }
         paragraph.no_hanging_indent_tab = true;
         let Some(label) = &list.label else {
             return Ok(());
         };
         if label.follow == Follow::Tab {
+            // (The cascade ends in the paragraph default style.)
             let interval = properties
                 .get(NS_STYLE, "tab-stop-distance")
                 .and_then(|v| length_pt(v).ok())
-                .or_else(|| {
-                    self.sheet
-                        .default_style(Family::Paragraph)
-                        .and_then(|style| {
-                            Cascade::new(vec![style], PARAGRAPH)
-                                .get(NS_STYLE, "tab-stop-distance")
-                                .and_then(|v| length_pt(v).ok())
-                        })
-                })
                 .unwrap_or(36.0);
             let width = self.text_width - paragraph.indent_right;
             let mut stops = self.list_tab_stops(list, margin, interval, width)?;
@@ -1058,7 +1067,7 @@ impl<'a> Reader<'a> {
         };
         let mut runs = Vec::with_capacity(2);
         for text in std::iter::once(label.text.as_str()).chain(separator) {
-            self.charge_construction(properties.retained_estimate() + text.len())?;
+            budget::tick(1)?;
             let mut run = properties.text_run();
             run.text = text.to_string();
             run.list_label = Some(label.align.wire());
@@ -1080,11 +1089,18 @@ impl<'a> Reader<'a> {
         let (href, width, height) = label.image.expect("a picture label");
         // The picture's line geometry follows the formatting of the
         // paragraph's first character (measured).
-        let first = match paragraph.runs.iter().find_map(|run| match run {
-            DocRun::Text(text) if !text.text.is_empty() => Some(text.as_ref().clone()),
+        // Only the first run's properties are read: its text is set aside
+        // while the properties are copied (a charged copy, no text).
+        let first = match paragraph.runs.iter_mut().find_map(|run| match run {
+            DocRun::Text(text) if !text.text.is_empty() => Some(text),
             _ => None,
         }) {
-            Some(first) => first,
+            Some(text) => {
+                let kept = std::mem::take(&mut text.text);
+                let first = text.as_ref().clone();
+                text.text = kept;
+                first
+            }
             None => self
                 .run_properties(contexts, 0, ScriptClass::Latin)?
                 .text_run(),
@@ -1096,13 +1112,6 @@ impl<'a> Reader<'a> {
         let height = height.unwrap_or(first.font_size * 0.8);
         let align = label.align.wire();
         let family = first.font_family.clone();
-        self.charge_construction(
-            std::mem::size_of::<DocRun>() * 3
-                + std::mem::size_of::<ImageRun>()
-                + family.as_ref().map_or(0, String::len)
-                + path.len()
-                + mime_type.len(),
-        )?;
         let _ = IMAGE_LABEL_INSET_PT;
         let mut runs = vec![
             DocRun::AnchorHost(AnchorHostMetrics {
@@ -1166,8 +1175,9 @@ impl<'a> Reader<'a> {
         }
         let mut k = ((first.max(origin) - origin) / interval).floor().max(0.0);
         loop {
+            budget::tick(1)?;
             let pos = origin + k * interval;
-            if pos > width + interval || stops.len() >= MAX_TAB_STOPS {
+            if pos.is_nan() || pos > width + interval || stops.len() >= MAX_TAB_STOPS {
                 break;
             }
             if pos > first {
@@ -1179,14 +1189,13 @@ impl<'a> Reader<'a> {
             }
             k += 1.0;
         }
-        self.charge_construction(stops.len() * (std::mem::size_of::<TabStop>() + 12))?;
         Ok(stops)
     }
 }
 
 /// Roman numerals, thousands as repeated "M" (LibreOffice: 32767 is 32 "M"
 /// and "DCCLXVII", measured by the reviewer).
-fn roman(mut value: u32) -> String {
+fn roman(mut value: u32) -> Result<String, String> {
     const TABLE: [(u32, &str); 13] = [
         (1000, "M"),
         (900, "CM"),
@@ -1202,22 +1211,40 @@ fn roman(mut value: u32) -> String {
         (4, "IV"),
         (1, "I"),
     ];
-    let mut out = String::new();
+    // The thousands are a run of the count's length; the rest is at most
+    // fifteen numerals.
+    let mut out = repeated('M', (value / 1000) as usize)?;
+    value %= 1000;
     for (unit, numeral) in TABLE {
         while value >= unit {
             out.push_str(numeral);
             value -= unit;
         }
     }
-    out
+    Ok(out)
+}
+
+/// `count` times `c`, written in pieces with a step each: a run as long as
+/// a number the file chose is never allocated at once.
+fn repeated(c: char, count: usize) -> Result<String, String> {
+    const PIECE: usize = 4096;
+    let mut out = String::new();
+    let mut left = count;
+    while left > 0 {
+        let piece = left.min(PIECE);
+        budget::tick(1)?;
+        out.extend(std::iter::repeat_n(c, piece));
+        left -= piece;
+    }
+    Ok(out)
 }
 
 /// Lower-case letters (ODF 1.4 §19.505): with letter sync every place repeats
 /// one letter ("aa, bb"), without it the places count like digits ("aa, ab").
-fn letters(value: u32, sync: bool) -> String {
+fn letters(value: u32, sync: bool) -> Result<String, String> {
     if sync {
         let letter = (b'a' + ((value - 1) % 26) as u8) as char;
-        return std::iter::repeat_n(letter, ((value - 1) / 26 + 1) as usize).collect();
+        return repeated(letter, ((value - 1) / 26 + 1) as usize);
     }
     let mut n = value;
     let mut out = Vec::new();
@@ -1227,7 +1254,7 @@ fn letters(value: u32, sync: bool) -> String {
         n /= 26;
     }
     out.reverse();
-    String::from_utf8(out).expect("ASCII letters")
+    Ok(String::from_utf8(out).expect("ASCII letters"))
 }
 
 /// Chinese-style counting with 十, 百 and 千 (the 〇 digit set shows zero

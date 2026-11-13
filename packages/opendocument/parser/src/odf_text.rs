@@ -104,8 +104,20 @@ pub fn sheet_prefix(name: &str) -> String {
 }
 
 /// Collected text of `text:p` / `text:h` children (§6.1), joined by line
-/// feeds, honouring `text:s`, `text:tab` and `text:line-break`.
-pub fn paragraph_text(node: roxmltree::Node<'_, '_>) -> String {
+/// feeds, honouring `text:s`, `text:tab` and `text:line-break`, with its
+/// character data as written (the text of cells and of what Calc reads
+/// like them; see [`Collapse`]).
+pub fn paragraph_text(node: roxmltree::Node<'_, '_>) -> Result<String, String> {
+    paragraphs(node, false)
+}
+
+/// [`paragraph_text`] with the white space of each paragraph collapsed
+/// ([`Collapse`]): the text of comments and titles.
+pub fn collapsed_paragraph_text(node: roxmltree::Node<'_, '_>) -> Result<String, String> {
+    paragraphs(node, true)
+}
+
+fn paragraphs(node: roxmltree::Node<'_, '_>, collapse: bool) -> Result<String, String> {
     let mut out = String::new();
     let mut first = true;
     for p in node
@@ -116,9 +128,60 @@ pub fn paragraph_text(node: roxmltree::Node<'_, '_>) -> String {
             out.push('\n');
         }
         first = false;
-        inline_text(p, &mut out);
+        let mut state = collapse.then(Collapse::default);
+        inline_text(p, state.as_mut(), &mut out)?;
     }
-    out
+    Ok(out)
+}
+
+/// White-space collapsing over the character data of one paragraph, across
+/// its spans, as LibreOffice reads the text of comments, shapes and titles
+/// (§6.1.2): tab, carriage return and line feed are spaces, a run of
+/// spaces is one space, and the spaces that begin the paragraph are
+/// removed. `text:s`, `text:tab` and `text:line-break` stand for the
+/// characters they name and are not character data: a space after one is
+/// kept.
+///
+/// §6.1.2 also removes the space that ends a paragraph. LibreOffice 26.8
+/// keeps it (a comment `  a   note ` and a shape text `  in   shape ` are
+/// read as `a note ` and `in shape `), and the reader follows it.
+///
+/// LibreOffice does not collapse the text of a cell at all (the cell
+/// reader records the measurement), so cells are read without this.
+pub struct Collapse {
+    /// The next space of character data is not written: the paragraph has
+    /// not begun, or a space was just written.
+    skip_space: bool,
+}
+
+impl Default for Collapse {
+    fn default() -> Self {
+        Self { skip_space: true }
+    }
+}
+
+impl Collapse {
+    /// Append the collapsed form of character data to `out`. The scan is
+    /// work of the read whatever it writes: a step per 64 bytes.
+    pub fn text(&mut self, text: &str, out: &mut String) -> Result<(), String> {
+        crate::budget::tick(text.len() / 64)?;
+        for c in text.chars() {
+            if matches!(c, ' ' | '\t' | '\r' | '\n') {
+                if !std::mem::replace(&mut self.skip_space, true) {
+                    out.push(' ');
+                }
+            } else {
+                self.skip_space = false;
+                out.push(c);
+            }
+        }
+        Ok(())
+    }
+
+    /// An element that stands for characters was written.
+    pub fn element(&mut self) {
+        self.skip_space = false;
+    }
 }
 
 /// Split a space-separated list of cell range addresses (§18.3.6), leaving
@@ -145,28 +208,219 @@ pub fn split_addresses(list: &str) -> Vec<&str> {
     out
 }
 
-pub fn inline_text(node: roxmltree::Node<'_, '_>, out: &mut String) {
+/// A namespace-qualified attribute value (`of:=SUM(…)`, §18.3.12
+/// namespacedToken, §19.595 `table:condition`) without its prefix when the
+/// prefix is a namespace bound where the attribute is written; any other
+/// text is returned whole.
+pub fn without_bound_prefix<'a>(node: roxmltree::Node<'_, '_>, value: &'a str) -> &'a str {
+    match value.split_once(':') {
+        Some((prefix, rest))
+            if !prefix.is_empty()
+                && prefix
+                    .chars()
+                    .all(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | '.'))
+                && node.lookup_namespace_uri(Some(prefix)).is_some() =>
+        {
+            rest
+        }
+        _ => value,
+    }
+}
+
+/// The spaces one `text:s` stands for (§19.768 `text:c`, a
+/// nonNegativeInteger; one when absent or not a number). The count is the
+/// file's: spaces are written through [`crate::budget::push_spaces`], never
+/// allocated at once, and a count beyond the platform's integers rejects
+/// instead of becoming one space.
+pub fn space_count(node: roxmltree::Node<'_, '_>) -> Result<usize, String> {
+    let count = crate::xml::bounded_count(
+        node.attribute((crate::xml::NS_TEXT, "c")),
+        usize::MAX as u64,
+        "text space",
+    )?;
+    Ok(count.map_or(1, |count| count as usize))
+}
+
+/// Days since 1970-01-01 of a proleptic Gregorian date.
+pub fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let m = month;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+pub fn days_from_civil_text(value: &str) -> Option<i64> {
+    let date = value.split('T').next()?;
+    let mut parts = date.splitn(3, '-');
+    let year: i64 = parts.next()?.parse().ok()?;
+    let month: i64 = parts.next()?.parse().ok()?;
+    let day: i64 = parts.next()?.get(..2)?.parse().ok()?;
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+    Some(days_from_civil(year, month, day))
+}
+
+/// `office:date-value` (§19.372, an xsd:date or xsd:dateTime) as the serial
+/// the workbook renderer displays as that date.
+///
+/// In the 1904 system that is the day count from 1904-01-01. In the 1900
+/// system it is the day count from 1899-12-30 from 1900-03-01 on
+/// (§18.17.4.1). Before that the renderer, like Excel, counts the
+/// nonexistent 1900-02-29 and shows serial `n` as the day `n + 1` after
+/// 1899-12-30 (`core/src/excel-date.ts`), so an earlier date is one less:
+/// 1900-01-01 is serial 1. The 1900 system has no serial for 1899-12-30 or
+/// before (Excel shows serial 0 as "1900-01-00"); such a value keeps its
+/// plain day count, which shows its time of day and, for a negative count,
+/// the renderer's invalid-date marker.
+pub fn date_serial(value: &str, date1904: bool) -> Option<f64> {
+    let days = days_from_civil_text(value)?;
+    let mut fraction = 0.0;
+    if let Some(time) = value.split('T').nth(1) {
+        let time = time.trim_end_matches('Z');
+        // A zone offset (§19.372 xsd:dateTime, either sign) is dropped: the
+        // authored local time is shown.
+        let time = time.split(['+', '-']).next().unwrap_or(time);
+        let mut parts = time.splitn(3, ':');
+        let h: f64 = parts.next()?.parse().ok()?;
+        let m: f64 = parts.next().unwrap_or("0").parse().ok()?;
+        let s: f64 = parts.next().unwrap_or("0").parse().ok()?;
+        fraction = (h * 3600.0 + m * 60.0 + s) / 86_400.0;
+    }
+    let serial = if date1904 {
+        days - days_from_civil(1904, 1, 1)
+    } else {
+        let days = days - days_from_civil(1899, 12, 30);
+        if (1..=60).contains(&days) {
+            days - 1
+        } else {
+            days
+        }
+    };
+    Some(serial as f64 + fraction)
+}
+
+/// `office:time-value` (§19.382, an xsd:duration such as `PT12H30M05S`) as a
+/// fraction of a day.
+pub fn duration_days(value: &str) -> Option<f64> {
+    let value = value.trim();
+    let (negative, rest) = match value.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, value),
+    };
+    let rest = rest.strip_prefix('P')?;
+    let (date_part, time_part) = match rest.split_once('T') {
+        Some((d, t)) => (d, t),
+        None => (rest, ""),
+    };
+    let mut seconds = 0.0;
+    let mut number = String::new();
+    for c in date_part.chars() {
+        match c {
+            'D' => {
+                seconds += number.parse::<f64>().ok()? * 86_400.0;
+                number.clear();
+            }
+            'Y' | 'M' | 'W' => return None,
+            _ => number.push(c),
+        }
+    }
+    for c in time_part.chars() {
+        let unit = match c {
+            'H' => 3600.0,
+            'M' => 60.0,
+            'S' => 1.0,
+            _ => {
+                number.push(c);
+                continue;
+            }
+        };
+        seconds += number.parse::<f64>().ok()? * unit;
+        number.clear();
+    }
+    let days = seconds / 86_400.0;
+    Some(if negative { -days } else { days })
+}
+
+/// Implementation bound on one style value: any attribute of a style,
+/// font-face, property, data-style or picture-fill definition (`style:` /
+/// `number:` namespaces, `*-properties`, `draw:fill-image`: names, font
+/// families, lengths, colours, fill paths), and any style reference
+/// (`*style-name`) anywhere. Readers compare, hash and copy style values
+/// wherever a style is used (a family into each font that inherits it), so
+/// the bound makes each such use a small constant of work; a longer value
+/// rejects the part. (LibreOffice's values are a few dozen bytes.)
+pub const MAX_STYLE_VALUE_BYTES: usize = 1024;
+/// The bound on a `style:map` condition (§19.472), a formula.
+pub const MAX_STYLE_CONDITION_BYTES: usize = 4096;
+
+const NS_DATASTYLE: &str = "urn:oasis:names:tc:opendocument:xmlns:datastyle:1.0";
+
+/// Reject a part with a style value over [`MAX_STYLE_VALUE_BYTES`] (a map
+/// condition over [`MAX_STYLE_CONDITION_BYTES`]).
+pub fn check_style_values(root: roxmltree::Node<'_, '_>) -> Result<(), String> {
+    for node in root.descendants().filter(|n| n.is_element()) {
+        crate::budget::tick(1)?;
+        // Style, data-style and property elements, whatever the namespace
+        // of an extension property set (`loext:graphic-properties`), and
+        // picture-fill definitions, whose package path every shape that
+        // uses the fill resolves.
+        let namespace = node.tag_name().namespace();
+        let style_element = namespace == Some(crate::xml::NS_STYLE)
+            || namespace == Some(NS_DATASTYLE)
+            || node.tag_name().name().ends_with("-properties")
+            || xml::is(node, crate::xml::NS_DRAW, "fill-image");
+        for attribute in node.attributes() {
+            let name = attribute.name();
+            let bound = if style_element && name == "condition" {
+                MAX_STYLE_CONDITION_BYTES
+            } else if style_element || name.ends_with("style-name") {
+                MAX_STYLE_VALUE_BYTES
+            } else {
+                continue;
+            };
+            if attribute.value().len() > bound {
+                return Err(crate::error::resource("style value"));
+            }
+        }
+    }
+    Ok(())
+}
+
+pub fn inline_text(
+    node: roxmltree::Node<'_, '_>,
+    mut collapse: Option<&mut Collapse>,
+    out: &mut String,
+) -> Result<(), String> {
     for child in node.children() {
+        crate::budget::tick(1)?;
         if child.is_text() {
-            out.push_str(child.text().unwrap_or(""));
+            let text = child.text().unwrap_or("");
+            match collapse.as_deref_mut() {
+                Some(collapse) => collapse.text(text, out)?,
+                None => out.push_str(text),
+            }
             continue;
         }
         if child.tag_name().namespace() != Some(crate::xml::NS_TEXT) {
             continue;
         }
         match child.tag_name().name() {
-            "s" => {
-                let count = child
-                    .attribute((crate::xml::NS_TEXT, "c"))
-                    .and_then(|c| c.parse::<usize>().ok())
-                    .unwrap_or(1)
-                    .min(4096);
-                out.extend(std::iter::repeat_n(' ', count));
-            }
+            "s" => crate::budget::push_spaces(out, space_count(child)?)?,
             "tab" => out.push('\t'),
             "line-break" => out.push('\n'),
-            "note" | "ruby-text" => {}
-            _ => inline_text(child, out),
+            "note" | "ruby-text" => continue,
+            _ => {
+                inline_text(child, collapse.as_deref_mut(), out)?;
+                continue;
+            }
+        }
+        if let Some(collapse) = collapse.as_deref_mut() {
+            collapse.element();
         }
     }
+    Ok(())
 }

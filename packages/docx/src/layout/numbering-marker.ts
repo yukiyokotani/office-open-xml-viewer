@@ -1,4 +1,4 @@
-import { symbolFontToUnicode } from '@silurus/ooxml-core';
+import { isSymbolFontFamily, symbolTextToUnicodeSegments } from '@silurus/ooxml-core';
 import type { NumberingInfo, TabStop } from '../types.js';
 import { wordNumberingSpaceSuffixUsesArial, wordNumberingSuffixAcceptsCoincidentListTab } from './line-compatibility.js';
 import { nextTabStop, type TextLayoutService, type TextShapeResult } from './text.js';
@@ -192,12 +192,78 @@ export function resolveNumberingMarkerGeometry(
   service: TextLayoutService,
   clusterGeometry = true,
 ): NumberingMarkerGeometry {
-  const markerText = numbering.picBulletImagePath
-    ? ''
-    : symbolFontToUnicode(numbering.text, numbering.fontFamily ?? null);
+  // A symbol-font marker (§17.9.x w:lvlText in Symbol/Wingdings...) is judged
+  // against the font the text service selects for it, exactly as run text
+  // (core symbol-font.ts), and is then shaped as ONE run, as every marker is:
+  //   - no code converts: the authored codes, in the marker's symbol slots;
+  //   - codes convert and the face draws none of the marker's codes (the font
+  //     is missing or Unicode-encoded, like Apple's Symbol): the converted
+  //     text. It keeps the authored slots, as in 0.89, only when every
+  //     character of it lies above U+00FF, where no symbol cmap reads a
+  //     character as a code; otherwise every slot is cleared (a
+  //     Unicode-capable generic route), because a symbol cmap would re-read
+  //     e.g. a converted U+00A9 as its own code 0xA9 (a heart in Symbol), and
+  //     whether a face reads a Latin-1 character as itself cannot be
+  //     established. The colour proof of the conversion was made in the
+  //     cleared route, so the authored slots are also given up where they
+  //     would paint the text in its own colours, and for a target written
+  //     with VS15;
+  //   - codes convert while the face draws another code of the same marker
+  //     (a face with only part of its encoding): one run cannot take both
+  //     routes, so the marker stays as authored, as before this conversion.
+  const markerFamily = numbering.fontFamily ?? markerInput.fonts.ascii ?? null;
+  const slots = [markerInput.fonts, markerInput.themeFonts].flatMap((fonts) => fonts
+    ? [fonts.ascii, fonts.highAnsi, fonts.eastAsia, fonts.complexScript] : []);
+  const markerSlots = {
+    fonts: markerInput.fonts, themeFonts: markerInput.themeFonts, themeFontPresence: markerInput.themeFontPresence,
+    weight: markerInput.weight, style: markerInput.style, complexScript: markerInput.complexScript,
+    fontHint: markerInput.fontHint, eastAsiaLanguage: markerInput.eastAsiaLanguage,
+  };
+  // Slots carry the effective level rPr. Where a slot that shaping selects
+  // does not name a symbol font (an older/public model, or a complex-script
+  // marker whose cs slot names a text face), the lvlText codes still belong
+  // to the marker's symbol font (§17.9.x): the marker is judged, and its kept
+  // codes shaped, in that family alone.
+  const slotted = service.scalarFamily
+    ? [...numbering.text].every((character) => isSymbolFontFamily(service.scalarFamily!(markerSlots, character)))
+    : slots.some(isSymbolFontFamily);
+  const symbolMarker = !numbering.picBulletImagePath && [markerFamily, ...slots].some(isSymbolFontFamily);
+  const keptInput: NumberingMarkerShapeInput = slotted || !symbolMarker || !isSymbolFontFamily(markerFamily) ? markerInput : {
+    ...markerInput,
+    fonts: { ascii: markerFamily, highAnsi: markerFamily, eastAsia: markerFamily, complexScript: markerFamily },
+    themeFonts: undefined,
+    themeFontPresence: undefined,
+  };
+  const keptSlots = { ...markerSlots, fonts: keptInput.fonts, themeFonts: keptInput.themeFonts, themeFontPresence: keptInput.themeFontPresence };
+  const judged = !symbolMarker ? [{ text: numbering.text, mapped: false }]
+    : service.symbolText?.({ ...keptSlots, text: numbering.text })
+      ?? symbolTextToUnicodeSegments(numbering.text, markerFamily);
+  const judgedText = judged.map((part) => part.text).join('');
+  const drawnAsSymbol = (slotsOf: typeof markerSlots, text: string) =>
+    [...text].some((character) => service.symbolDraws?.(slotsOf, character) === true);
+  const anyConverted = judged.some((part) => part.mapped);
+  // "Draws another code": a code the judgement kept. (A native code that
+  // was nevertheless converted, see SymbolTextOptions.keepsShifted, is not.)
+  const converted = anyConverted
+    && !judged.some((part) => !part.mapped && drawnAsSymbol(keptSlots, part.text));
+  // A kept code takes its judged form: a bare code that bidi mirroring would
+  // replace is written F0-shifted there (core symbol-font.ts). So a wholly
+  // kept marker is the judged text, and a partly native one is the authored
+  // text with each kept code in that form (judged code by code; the codes
+  // that would have converted stay as authored).
+  const authoredKept = () => [...numbering.text].map((character) => {
+    const parts = service.symbolText?.({ ...keptSlots, text: character });
+    return parts?.length === 1 && !parts[0]!.mapped ? parts[0]!.text : character;
+  }).join('');
+  const markerText = numbering.picBulletImagePath ? ''
+    : converted || !anyConverted ? judgedText : authoredKept();
   const markerLayout = markerText
     ? shapeNumberingMarkerText(
-        markerInput,
+        !converted ? keptInput
+          : [...markerText].every((character) => character.codePointAt(0)! > 0xff && character !== '\uFE0E')
+            && service.symbolMonochrome?.(markerSlots, markerText) !== false ? markerInput
+            : { ...markerInput, fonts: { ascii: null, highAnsi: null, eastAsia: null, complexScript: null },
+              themeFonts: undefined, themeFontPresence: undefined },
         markerText,
         1,
         service,

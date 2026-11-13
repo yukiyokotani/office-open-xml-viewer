@@ -2501,6 +2501,7 @@ pub(super) fn parse_classic_impl(
             title: t,
             hidden: axis_is_deleted(ax),
             format_code,
+            format_divisors: None,
             number_format,
             display_units: parse_axis_display_units(ax, color_resolver),
             font_color: extract_axis_tick_label_color(ax, color_resolver)
@@ -3269,6 +3270,7 @@ pub(super) fn parse_classic_impl(
         data_label_font_language: None,
         data_label_font_baseline: None,
         val_axis_format_code,
+        val_axis_format_divisors: None,
         val_axis_number_format,
         val_axis_display_units,
         cat_axis_display_units,
@@ -3369,6 +3371,7 @@ pub(super) fn parse_classic_impl(
         val_axis_crosses,
         val_axis_crosses_at,
         cat_axis_format_code,
+        cat_axis_format_divisors: None,
         cat_axis_number_format,
         cat_axis_min,
         cat_axis_max,

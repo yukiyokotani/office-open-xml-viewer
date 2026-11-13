@@ -4627,7 +4627,10 @@ function renderShapeGroups(
     const { x: x1, y: y1, width: w, height: h } = resolveWorksheetAnchorRect(
       ws, anchor, colAxis, rowAxis, cs,
     );
-    if (w <= 0 || h <= 0) continue;
+    // A box without area along one edge is a horizontal or vertical line
+    // (its stroke is all there is to draw); one without any extent, or with
+    // a negative one, is nothing.
+    if (!(w >= 0 && h >= 0 && (w > 0 || h > 0))) continue;
 
     const logicalCanvasX = scrollAreaX + (x1 - scrollOriginSheetX) - scrollOffsetX;
     const canvasX = sheetAnchoredRectX(logicalCanvasX, w, canvasW, rtl);
@@ -4645,7 +4648,9 @@ function renderShapeGroups(
       const sy = canvasY + shape.y * h;
       const sw = shape.w * w;
       const sh = shape.h * h;
-      if (sw <= 0 || sh <= 0) continue;
+      if (!(sw >= 0 && sh >= 0 && (sw > 0 || sh > 0))) continue;
+      // Only a stroked preset line is drawn without area.
+      if ((sw === 0 || sh === 0) && !(shape.geom?.type === 'preset' && shape.strokeColor && shape.strokeWidth > 0)) continue;
       drawShape(ctx, shape, sx, sy, sw, sh, cs, loadedImages, cjkFallback, anchor);
     }
   }
@@ -4796,6 +4801,13 @@ function drawShape(
       // xlsx shapes carry no drop shadow on the body, so there's nothing to
       // clear between the engine's fill and stroke passes.
       () => {},
+      // Hatches, staggered picture tiles and translucent pictures are
+      // painted, not set as a fill style: the preset engine hands its path
+      // to the same painter.
+      shape.fill?.fillType === 'hatch'
+        || (shape.fill?.fillType === 'image' && (shape.fill.shift || shape.fill.alpha !== undefined))
+        ? { paintFill: target => fillShape(target, shape, sw, sh, cs, baseFill) }
+        : undefined,
     );
     if (!drawn) {
       ctx.beginPath();
@@ -5431,7 +5443,8 @@ function resolveSpreadsheetShapeFill(
   cs: number,
   loadedImages?: Map<string, CanvasImageSource | null>,
 ): ReturnType<typeof resolveFill> {
-  if (shape.fill?.fillType === 'hatch') return resolveHatchFill(ctx, shape.fill, cs);
+  // A hatch has no fill style: `fillShape` strokes its lines in the path.
+  if (shape.fill?.fillType === 'hatch') return null;
   if (shape.fill?.fillType === 'image') {
     return resolveImageShapeFill(ctx, shape.fill, width, height, cs, loadedImages);
   }
@@ -5451,71 +5464,185 @@ function resolveSpreadsheetShapeFill(
   );
 }
 
-/** One hatch tile per colour/spacing/family set and context scale. */
-const hatchTileCache = new Map<string, HTMLCanvasElement | OffscreenCanvas>();
-const MAX_HATCH_TILES = 64;
+/** Hatch lines closer than this many device pixels merge into one tone. */
+const HATCH_MIN_DEVICE_SPACING = 2;
+/** Guard on the lines of one hatch family where the context cannot report
+ *  its transform (then the shape box, not the visible canvas, is covered). */
+const MAX_HATCH_LINES = 16_384;
+
+/** The part of the local box `[0, width] × [0, height]` on the canvas, in
+ *  local coordinates, and the context's device pixels per local unit. */
+function visibleLocalBox(
+  ctx: CanvasRenderingContext2D,
+  width: number,
+  height: number,
+): { box: [number, number, number, number]; unit: number } {
+  const box: [number, number, number, number] = [Math.min(0, width), Math.min(0, height), Math.max(0, width), Math.max(0, height)];
+  const transform = typeof ctx.getTransform === 'function' ? ctx.getTransform() : null;
+  const canvas = ctx.canvas as { width?: number; height?: number } | undefined;
+  if (!transform || !canvas?.width || !canvas.height) return { box, unit: 1 };
+  const { a, b, c, d, e, f } = transform;
+  const det = a * d - b * c;
+  const unit = Math.sqrt(Math.abs(det));
+  if (!Number.isFinite(unit) || unit === 0) return { box, unit: 1 };
+  // Device corners mapped back through the inverse 2D affine transform.
+  const corners = [[0, 0], [canvas.width, 0], [0, canvas.height], [canvas.width, canvas.height]]
+    .map(([x, y]) => ({
+      x: (d * (x - e) - c * (y - f)) / det,
+      y: (a * (y - f) - b * (x - e)) / det,
+    }));
+  const xs = corners.map(p => p.x);
+  const ys = corners.map(p => p.y);
+  return {
+    box: [
+      Math.max(box[0], Math.min(...xs)), Math.max(box[1], Math.min(...ys)),
+      Math.min(box[2], Math.max(...xs)), Math.min(box[3], Math.max(...ys)),
+    ],
+    unit,
+  };
+}
 
 /**
- * An OpenDocument hatch (ODF 1.3 Part 3 §16.42): line families
- * `distancePt` apart, rotated `angle` degrees counter-clockwise, over the
- * optional background. The tile holds one period of every family (the
- * diagonal of a triple hatch runs corner to corner of the square period).
+ * Paint an OpenDocument hatch (ODF 1.3 Part 3 §16.42 `draw:hatch`) into
+ * the current path: the optional background, then line families
+ * `distancePt` apart, the first rotated `angle` degrees counter-clockwise
+ * from the horizontal, a `double` hatch adding the perpendicular family
+ * and a `triple` hatch also the family 45° further counter-clockwise: the
+ * geometry LibreOffice draws (the reader records how it differs from the
+ * wording of §19.209 / §19.218.3). The lines are stroked directly inside the path's clip, over
+ * the visible part of the shape only, and never closer than
+ * {@link HATCH_MIN_DEVICE_SPACING} device pixels: the work and memory are
+ * bounded by the canvas size, whatever the authored spacing and zoom. The
+ * current path is left intact for the stroke that follows.
  */
-function resolveHatchFill(
+function paintHatchFill(
   ctx: CanvasRenderingContext2D,
   fill: ShapeHatchFill,
+  width: number,
+  height: number,
   cs: number,
-): CanvasPattern | string | null {
-  const period = Math.max(2, Math.round(fill.distancePt * PT_TO_PX * cs));
-  const key = `${fill.color}|${fill.background ?? ''}|${period}|${fill.lines}|${cs}`;
-  let tile = hatchTileCache.get(key);
-  if (!tile) {
-    const canvas = createAuxCanvas(period, period);
-    const tctx = canvas?.getContext('2d') as CanvasRenderingContext2D | null | undefined;
-    if (!canvas || !tctx) return fill.background ?? fill.color;
-    if (fill.background) {
-      tctx.fillStyle = fill.background;
-      tctx.fillRect(0, 0, period, period);
-    }
-    tctx.strokeStyle = fill.color;
-    tctx.lineWidth = Math.max(1, cs);
-    tctx.beginPath();
-    tctx.moveTo(0, 0.5);
-    tctx.lineTo(period, 0.5);
-    if (fill.lines >= 2) {
-      tctx.moveTo(0.5, 0);
-      tctx.lineTo(0.5, period);
-    }
-    if (fill.lines >= 3) {
-      tctx.moveTo(0, period);
-      tctx.lineTo(period, 0);
-    }
-    tctx.stroke();
-    if (hatchTileCache.size >= MAX_HATCH_TILES) {
-      const oldest = hatchTileCache.keys().next().value;
-      if (oldest !== undefined) hatchTileCache.delete(oldest);
-    }
-    hatchTileCache.set(key, canvas);
-    tile = canvas;
+): boolean {
+  if (fill.background) {
+    ctx.fillStyle = fill.background;
+    ctx.fill();
   }
-  const pattern = ctx.createPattern(tile as CanvasImageSource, 'repeat');
-  if (!pattern) return fill.background ?? fill.color;
-  if (typeof pattern.setTransform === 'function' && fill.angle % 360 !== 0) {
-    // Counter-clockwise on the page is a negative canvas rotation (y down).
-    const radians = (-fill.angle * Math.PI) / 180;
-    pattern.setTransform({
-      a: Math.cos(radians), b: Math.sin(radians),
-      c: -Math.sin(radians), d: Math.cos(radians), e: 0, f: 0,
-    });
+  const { box: [x0, y0, x1, y1], unit } = visibleLocalBox(ctx, width, height);
+  if (!(x1 > x0 && y1 > y0)) return true;
+  const authored = fill.distancePt * PT_TO_PX * cs;
+  const extent = Math.hypot(x1 - x0, y1 - y0);
+  const period = Math.max(
+    Number.isFinite(authored) && authored > 0 ? authored : 0,
+    HATCH_MIN_DEVICE_SPACING / unit,
+    extent / MAX_HATCH_LINES,
+  );
+  const axis = (-fill.angle * Math.PI) / 180;
+  const families = [axis];
+  if (fill.lines >= 2) families.push(axis + Math.PI / 2);
+  if (fill.lines >= 3) families.push(axis - Math.PI / 4);
+  const corners = [[x0, y0], [x1, y0], [x0, y1], [x1, y1]];
+  const lineWidth = Math.max(1, cs);
+  ctx.save();
+  ctx.clip();
+  ctx.fillStyle = fill.color;
+  for (const angle of families) {
+    const dx = Math.cos(angle);
+    const dy = Math.sin(angle);
+    // In the family's frame (x along the lines), line k lies at y = k ·
+    // period; x spans the visible box. Each line is a thin filled rect:
+    // `fillRect` leaves the current path intact for the stroke after.
+    const along = corners.map(([x, y]) => x * dx + y * dy);
+    const across = corners.map(([x, y]) => -x * dy + y * dx);
+    const tMin = Math.min(...along);
+    const tMax = Math.max(...along);
+    const first = Math.ceil(Math.min(...across) / period);
+    const last = Math.floor(Math.max(...across) / period);
+    ctx.save();
+    ctx.rotate(angle);
+    for (let k = first; k <= last; k++) {
+      ctx.fillRect(tMin, k * period - lineWidth / 2, tMax - tMin, lineWidth);
+    }
+    ctx.restore();
   }
-  return pattern;
+  ctx.restore();
+  return true;
+}
+
+/**
+ * Paint a hatch at `alpha` into the current path. The opacity is of the
+ * whole fill (ODF §20.152), not of each line: crossings and the background
+ * under the lines must not show through twice, so the hatch is painted
+ * opaque on a layer the size of the shape's visible part and the layer is
+ * drawn once at `alpha`. Returns false where no layer can be made (the
+ * caller then paints the lines at `alpha` directly); the current path is
+ * left intact.
+ */
+function paintTranslucentHatchFill(
+  ctx: CanvasRenderingContext2D,
+  fill: ShapeHatchFill,
+  width: number,
+  height: number,
+  cs: number,
+  alpha: number,
+): boolean {
+  const transform = typeof ctx.getTransform === 'function' ? ctx.getTransform() : null;
+  if (!transform || typeof ctx.drawImage !== 'function') return false;
+  const { box: [x0, y0, x1, y1] } = visibleLocalBox(ctx, width, height);
+  if (!(x1 > x0 && y1 > y0)) return true;
+  const { a, b, c, d, e, f } = transform;
+  const corners = [[x0, y0], [x1, y0], [x0, y1], [x1, y1]]
+    .map(([x, y]) => [a * x + c * y + e, b * x + d * y + f]);
+  const left = Math.floor(Math.min(...corners.map(p => p[0])));
+  const top = Math.floor(Math.min(...corners.map(p => p[1])));
+  const layerWidth = Math.ceil(Math.max(...corners.map(p => p[0]))) - left;
+  const layerHeight = Math.ceil(Math.max(...corners.map(p => p[1]))) - top;
+  if (![left, top, layerWidth, layerHeight].every(Number.isFinite)) return false;
+  if (!(layerWidth > 0 && layerHeight > 0)) return true;
+  const layer = createAuxCanvas(layerWidth, layerHeight);
+  const layerCtx = layer?.getContext('2d') as CanvasRenderingContext2D | null | undefined;
+  if (!layer || !layerCtx) return false;
+  layerCtx.setTransform(a, b, c, d, e - left, f - top);
+  layerCtx.beginPath();
+  layerCtx.rect(x0, y0, x1 - x0, y1 - y0);
+  paintHatchFill(layerCtx, fill, width, height, cs);
+  ctx.save();
+  ctx.clip();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.globalAlpha *= alpha;
+  ctx.drawImage(layer, left, top);
+  ctx.restore();
+  return true;
+}
+
+/** The natural size of the image behind each picture-fill pattern, for the
+ *  staggered painter (a pattern does not expose its image). */
+const imageFillNaturalSize = new WeakMap<CanvasPattern, { iw: number; ih: number }>();
+
+/** The placement of a picture fill in a `width` × `height` box: the size
+ *  of the picture (one tile) and the origin of the tile `align` and
+ *  `offset` place. */
+function imageFillGeometry(
+  fill: ShapeImageFill, iw: number, ih: number, width: number, height: number, cs: number,
+): { tileW: number; tileH: number; x: number; y: number } {
+  if (fill.layout === 'stretch') return { tileW: width, tileH: height, x: 0, y: 0 };
+  const edge = (size: ShapeImageFill['width'], natural: number, box: number): number =>
+    size === undefined ? natural * cs : 'pt' in size ? size.pt * PT_TO_PX * cs : size.fraction * box;
+  const tileW = edge(fill.width, iw, width);
+  const tileH = edge(fill.height, ih, height);
+  const tiled = fill.layout === 'tile';
+  return {
+    tileW, tileH,
+    x: (width - tileW) * fill.align[0] + (tiled ? fill.offset[0] * tileW : 0),
+    y: (height - tileH) * fill.align[1] + (tiled ? fill.offset[1] * tileH : 0),
+  };
 }
 
 /**
  * A picture fill (OpenDocument `draw:fill-image`, §16.41): stretched over
- * the shape box, or repeated from its top-left at the tile size (the
- * image's natural size at 96 DPI where an edge is not authored). The image
- * is pre-decoded by the render orchestrator under its package path.
+ * the shape box, or at its own size (the image's natural size at 96 DPI
+ * where an edge is not authored) repeated or drawn once, placed in the box
+ * by `align` and, when repeated, moved by `offset`. The image is
+ * pre-decoded by the render orchestrator under its package path. A
+ * staggered repetition is painted by {@link paintStaggeredImageFill}.
  */
 function resolveImageShapeFill(
   ctx: CanvasRenderingContext2D,
@@ -5531,18 +5658,71 @@ function resolveImageShapeFill(
   const iw = Number(natural.width) || 0;
   const ih = Number(natural.height) || 0;
   if (iw <= 0 || ih <= 0) return null;
-  const pattern = ctx.createPattern(image, fill.tile ? 'repeat' : 'no-repeat');
+  const { tileW, tileH, x, y } = imageFillGeometry(fill, iw, ih, width, height, cs);
+  // A picture without a finite, positive size or place paints nothing.
+  if (!(tileW > 0 && tileH > 0) || ![tileW, tileH, x, y].every(Number.isFinite)) return null;
+  const pattern = ctx.createPattern(image, fill.layout === 'tile' ? 'repeat' : 'no-repeat');
   if (!pattern) return null;
-  const targetW = fill.tile
-    ? (fill.tileWidthPt !== undefined ? fill.tileWidthPt * PT_TO_PX : iw) * cs
-    : width;
-  const targetH = fill.tile
-    ? (fill.tileHeightPt !== undefined ? fill.tileHeightPt * PT_TO_PX : ih) * cs
-    : height;
   if (typeof pattern.setTransform === 'function') {
-    pattern.setTransform({ a: targetW / iw, b: 0, c: 0, d: targetH / ih, e: 0, f: 0 });
+    pattern.setTransform({ a: tileW / iw, b: 0, c: 0, d: tileH / ih, e: x, f: y });
   }
+  imageFillNaturalSize.set(pattern, { iw, ih });
   return pattern;
+}
+
+/**
+ * Paint a repeated picture whose every second row or column of tiles is
+ * moved (`shift`, ODF §20.175 `draw:tile-repeat-offset`) into the current
+ * path: one band per visible row (or column) of tiles, each filled with the
+ * pattern at that band's position. A canvas pattern cannot stagger itself.
+ * The bands cover the visible part of the shape only, and tiles under one
+ * device pixel are not staggered (the stagger could not be seen), so the
+ * work is bounded by the canvas size. Returns false when there is nothing
+ * to stagger; the current path is left intact.
+ */
+function paintStaggeredImageFill(
+  ctx: CanvasRenderingContext2D,
+  fill: ShapeImageFill,
+  pattern: CanvasPattern,
+  width: number,
+  height: number,
+  cs: number,
+): boolean {
+  const shift = fill.shift;
+  const natural = imageFillNaturalSize.get(pattern);
+  if (!shift || fill.layout !== 'tile' || !natural || typeof pattern.setTransform !== 'function') return false;
+  const { iw, ih } = natural;
+  const { tileW, tileH, x, y } = imageFillGeometry(fill, iw, ih, width, height, cs);
+  const { box: [x0, y0, x1, y1], unit } = visibleLocalBox(ctx, width, height);
+  if (!(x1 > x0 && y1 > y0)) return true;
+  const rows = 'rows' in shift;
+  const across = rows ? tileH : tileW;
+  if (!(across * unit >= 1) || !Number.isFinite(tileW) || !Number.isFinite(tileH)) return false;
+  const start = rows ? y : x;
+  const [from, to] = rows ? [y0, y1] : [x0, x1];
+  const amount = (rows ? shift.rows * tileW : shift.columns * tileH);
+  // The bands over the visible extent, counted: an origin so far away that
+  // band numbers lose integer precision has no parity to stagger by, and
+  // the count (the visible extent in tiles) bounds the loop by itself.
+  const first = Math.floor((from - start) / across);
+  const count = Math.ceil((to - start) / across) - first;
+  if (!Number.isSafeInteger(first) || !Number.isSafeInteger(count) || !Number.isFinite(amount)) return false;
+  ctx.save();
+  ctx.clip();
+  ctx.fillStyle = pattern;
+  for (let k = 0; k < count; k++) {
+    const band = first + k;
+    const moved = band % 2 === 0 ? 0 : amount;
+    pattern.setTransform({
+      a: tileW / iw, b: 0, c: 0, d: tileH / ih,
+      e: x + (rows ? moved : 0), f: y + (rows ? 0 : moved),
+    });
+    // `fillRect` leaves the current path intact for the stroke after.
+    if (rows) ctx.fillRect(x0, start + band * across, x1 - x0, across);
+    else ctx.fillRect(start + band * across, y0, across, y1 - y0);
+  }
+  ctx.restore();
+  return true;
 }
 
 /** Fill the current path; reuse one raster across a custom shape's subpaths. */
@@ -5551,7 +5731,30 @@ function fillShape(
   width: number, height: number, cs: number,
   paint = resolveSpreadsheetShapeFill(ctx, shape, width, height, cs),
 ): boolean {
+  // The opacity of a hatch or picture fill (colours carry their own alpha).
+  const fill = shape.fill;
+  const alpha = (fill?.fillType === 'hatch' || fill?.fillType === 'image') && fill.alpha !== undefined
+    && Number.isFinite(fill.alpha) ? Math.min(1, Math.max(0, fill.alpha)) : 1;
+  if (alpha >= 1) return fillShapeOpaque(ctx, shape, width, height, cs, paint);
+  if (fill?.fillType === 'hatch' && paintTranslucentHatchFill(ctx, fill, width, height, cs, alpha)) return true;
+  const previous = ctx.globalAlpha;
+  ctx.globalAlpha = previous * alpha;
+  try {
+    return fillShapeOpaque(ctx, shape, width, height, cs, paint);
+  } finally {
+    ctx.globalAlpha = previous;
+  }
+}
+
+function fillShapeOpaque(
+  ctx: CanvasRenderingContext2D, shape: ShapeInfo,
+  width: number, height: number, cs: number,
+  paint: ReturnType<typeof resolveSpreadsheetShapeFill>,
+): boolean {
+  if (shape.fill?.fillType === 'hatch') return paintHatchFill(ctx, shape.fill, width, height, cs);
   if (!paint) return false;
+  if (shape.fill?.fillType === 'image' && shape.fill.shift && typeof paint === 'object' && 'setTransform' in paint
+      && paintStaggeredImageFill(ctx, shape.fill, paint, width, height, cs)) return true;
   ctx.fillStyle = paint;
   ctx.fill();
   return true;
