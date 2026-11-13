@@ -54,7 +54,7 @@ export function createOdsSourceEngine(
 }> {
   const runtime = createDirectSourceRuntime<OdsGlue, OdsNativeArchive, ModelSourceOpenContext>({
     label: 'OpenDocument ODS',
-    mapNativeError: (error) => odfNativeRejection(error, 'ods'),
+    mapNativeError: odfNativeRejection,
     loadGlue,
     resolveWasm,
     // The shared governor's WASM encoding: absent → standard limit, 0 → the

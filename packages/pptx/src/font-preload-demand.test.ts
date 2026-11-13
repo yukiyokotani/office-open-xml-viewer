@@ -37,18 +37,46 @@ describe('complete conservative PPTX paint demand', () => {
   });
 
   it('declines canonical changes and generated or unmodelled paint paths', () => {
-    for (const run of [{ text: 'e\u0301' }, { text: '\ud800' }, { text: '\u0378' }, { text: '\uf0a7' }, { text: 'A', fontFamilySym: 'Symbol' }, { text: 'a', fontFamily: 'Symbol' }, { text: 'A', fieldType: 'unknown' }]) {
+    for (const run of [{ text: 'e\u0301' }, { text: '\ud800' }, { text: '\u0378' }, { text: '\uf0a7' }, { text: '\uf0a7', fontFamilySym: 'Segoe UI Symbol' }, { text: 'A', fieldType: 'unknown' }]) {
       expect(collectSlideFontDemand(slide(run.text, run), new Set(), 10000)).toBe('all');
     }
     for (const patch of [{ parseError: 'broken' }, { elements: [{ type: 'chart' }] }, { elements: [{ type: 'picture' }] }]) {
       expect(collectSlideFontDemand({ ...slide('A'), ...patch } as Slide, new Set(), 10000)).toBe('all');
     }
-    const bulleted = slide('A');
-    (bulleted.elements[0] as { textBody: { paragraphs: Array<{ bullet: unknown }> } }).textBody.paragraphs[0].bullet = { type: 'char', char: '•' };
-    expect(collectSlideFontDemand(bulleted, new Set(), 10000)).toBe('all');
+    const numbered = slide('A');
+    (numbered.elements[0] as { textBody: { paragraphs: Array<{ bullet: unknown }> } }).textBody.paragraphs[0].bullet = { type: 'autoNum', numType: 'arabicPeriod' };
+    expect(collectSlideFontDemand(numbered, new Set(), 10000)).toBe('all');
     const vertical = slide('A');
     (vertical.elements[0] as { textBody: { vert: string } }).textBody.vert = 'vert';
     expect(collectSlideFontDemand(vertical, new Set(), 10000)).toBe('all');
+  });
+
+  it('demands what char markers and symbol-encoded faces may paint, not every subset', () => {
+    const bulleted = (char: string, fontFamily: string | null) => {
+      const value = slide('A');
+      (value.elements[0] as { textBody: { paragraphs: Array<{ bullet: unknown }> } }).textBody.paragraphs[0].bullet =
+        { type: 'char', char, fontFamily, color: null, sizePct: null };
+      return collectSlideFontDemand(value, new Set(), 10000);
+    };
+    expect(bulleted('•', null)).toEqual(expect.arrayContaining([0x2022, 0x41]));
+    // A Symbol bullet: the authored code and its conversion (U+2022) only.
+    const symbol = bulleted('\uf0b7', 'Symbol');
+    expect(symbol).toEqual(expect.arrayContaining([0xf0b7, 0x2022]));
+    expect((symbol as number[]).length).toBeLessThan(8);
+    // A symbol-encoded run face and an a:sym face: authored, F0-shifted and converted forms.
+    expect(collectSlideFontDemand(slide('l', { fontFamily: 'Wingdings' }), new Set(), 10000))
+      .toEqual(expect.arrayContaining([0x6c, 0xf06c, 0x25cf]));
+    expect(collectSlideFontDemand(slide('\uf0e0', { fontFamilySym: 'Wingdings' }), new Set(), 10000))
+      .toEqual(expect.arrayContaining([0xf0e0, 0x2192]));
+    // The family the renderer paints: a ",<generic>" hint dropped, a theme reference resolved.
+    expect(bulleted('l', 'Wingdings,Sans-Serif')).toEqual(expect.arrayContaining([0x25cf]));
+    const themed = { ...slide('l', { fontFamily: '+mn-lt' }), theme: { minorFont: 'Wingdings' } } as Slide;
+    expect(collectSlideFontDemand(themed, new Set(), 10000)).toEqual(expect.arrayContaining([0x25cf]));
+    // The byte budget still applies to the symbol scalars.
+    const tight = slide('A');
+    (tight.elements[0] as { textBody: { paragraphs: Array<{ bullet: unknown }> } }).textBody.paragraphs[0].bullet =
+      { type: 'char', char: '\uf0b7', fontFamily: 'Symbol', color: null, sizePct: null };
+    expect(collectSlideFontDemand(tight, new Set(), 20)).toBe('all');
   });
 
   it('keeps bidi mirroring unmodelled and preserves the no-source preflight', () => {

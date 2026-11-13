@@ -181,20 +181,23 @@ pub struct StyleRef<'a> {
 }
 
 impl StyleSheet {
+    /// Common styles of `office:styles` (§3.15.2). Style names are unique
+    /// per family (§19.498.2); a document that repeats one is read anyway:
+    /// the later definition replaces the earlier one, as in the ODS and ODP
+    /// readers' style maps. A style without the name or family
+    /// that every reference needs cannot be referenced and is skipped.
     pub fn add_common(&mut self, parent: roxmltree::Node<'_, '_>) -> Result<(), String> {
         for node in parent.kids().filter(|n| xml::is(*n, NS_TEXT, "list-style")) {
             budget::tick(1)?;
-            let list = read_list_style(node)?;
-            if self.list_common.insert(list.name.clone(), list).is_some() {
-                return Err(invalid("two list styles share a name"));
+            if let Some(list) = read_list_style(node)? {
+                self.list_common.insert(list.name.clone(), list);
             }
         }
         for node in parent.kids().filter(|n| xml::is(*n, NS_STYLE, "style")) {
             budget::tick(1)?;
-            let style = read_style(node)?;
-            let key = (style.family.clone(), style.name.clone());
-            if self.common.insert(key, style).is_some() {
-                return Err(invalid("two common styles share a name and family"));
+            if let Some(style) = read_style(node)? {
+                let key = (style.family.clone(), style.name.clone());
+                self.common.insert(key, style);
             }
         }
         for node in parent
@@ -202,10 +205,9 @@ impl StyleSheet {
             .filter(|n| xml::is(*n, NS_STYLE, "default-style"))
         {
             budget::tick(1)?;
-            let mut style = read_style_body(node, String::new())?;
-            style.parent = None;
-            if self.defaults.insert(style.family.clone(), style).is_some() {
-                return Err(invalid("two default styles share a family"));
+            if let Some(mut style) = read_style_body(node, String::new())? {
+                style.parent = None;
+                self.defaults.insert(style.family.clone(), style);
             }
         }
         Ok(())
@@ -235,24 +237,19 @@ impl StyleSheet {
         scope: Scope,
         parent: roxmltree::Node<'_, '_>,
     ) -> Result<(), String> {
+        // Repeated, nameless and familyless styles as in `add_common`.
         for node in parent.kids().filter(|n| xml::is(*n, NS_TEXT, "list-style")) {
             budget::tick(1)?;
-            let list = read_list_style(node)?;
-            if self
-                .list_automatic
-                .insert((scope, list.name.clone()), list)
-                .is_some()
-            {
-                return Err(invalid("two automatic list styles share a name"));
+            if let Some(list) = read_list_style(node)? {
+                self.list_automatic.insert((scope, list.name.clone()), list);
             }
         }
         for node in parent.kids().filter(|n| xml::is(*n, NS_STYLE, "style")) {
             budget::tick(1)?;
-            let mut style = read_style(node)?;
-            style.automatic = true;
-            let key = (scope, style.family.clone(), style.name.clone());
-            if self.automatic.insert(key, style).is_some() {
-                return Err(invalid("two automatic styles share a name and family"));
+            if let Some(mut style) = read_style(node)? {
+                style.automatic = true;
+                let key = (scope, style.family.clone(), style.name.clone());
+                self.automatic.insert(key, style);
             }
         }
         Ok(())
@@ -423,12 +420,13 @@ impl<'a> Cascade<'a> {
     }
 }
 
-fn read_list_style(node: roxmltree::Node<'_, '_>) -> Result<ListStyle, String> {
-    let name = node
-        .attribute((NS_STYLE, "name"))
-        .ok_or_else(|| invalid("a list style has no name"))?
-        .to_string();
-    read_list_style_named(node, name)
+/// A named list style; `None` for one without a name, which nothing can
+/// reference.
+fn read_list_style(node: roxmltree::Node<'_, '_>) -> Result<Option<ListStyle>, String> {
+    let Some(name) = node.attribute((NS_STYLE, "name")) else {
+        return Ok(None);
+    };
+    read_list_style_named(node, name.to_string()).map(Some)
 }
 
 fn read_list_style_named(node: roxmltree::Node<'_, '_>, name: String) -> Result<ListStyle, String> {
@@ -444,7 +442,7 @@ fn read_list_style_named(node: roxmltree::Node<'_, '_>, name: String) -> Result<
         else {
             continue;
         };
-        let Ok(number) = list_level_number(level) else {
+        let Some(number) = list_level_number(level) else {
             continue;
         };
         let key = number.to_string();
@@ -472,28 +470,40 @@ fn read_list_style_named(node: roxmltree::Node<'_, '_>, name: String) -> Result<
 }
 
 /// A list level's `text:level` (§19.840, a positive integer), compared by
-/// value: "01" is level 1.
-pub fn list_level_number(level: roxmltree::Node<'_, '_>) -> Result<u32, String> {
-    level
-        .attribute((NS_TEXT, "level"))
-        .and_then(|value| value.parse::<u32>().ok())
-        .filter(|value| (1..=10).contains(value))
-        .ok_or_else(|| crate::error::unsupported("list-level"))
+/// value: "01" is level 1. ODF lists have ten levels (LibreOffice's
+/// `MAXLEVEL`); a level definition outside 1–10, or without a level, is
+/// never used and is ignored rather than refusing the document.
+pub fn list_level_number(level: roxmltree::Node<'_, '_>) -> Option<u32> {
+    list_level_value(level.attribute((NS_TEXT, "level"))?)
 }
 
-fn read_style(node: roxmltree::Node<'_, '_>) -> Result<Style, String> {
-    let name = node
-        .attribute((NS_STYLE, "name"))
-        .ok_or_else(|| invalid("a style has no name"))?
-        .to_string();
-    read_style_body(node, name)
+/// [`list_level_number`] of an attribute value.
+pub fn list_level_value(value: &str) -> Option<u32> {
+    value
+        .parse::<u32>()
+        .ok()
+        .filter(|value| (1..=MAX_LIST_LEVEL).contains(value))
 }
 
-fn read_style_body(node: roxmltree::Node<'_, '_>, name: String) -> Result<Style, String> {
-    let family = node
-        .attribute((NS_STYLE, "family"))
-        .ok_or_else(|| invalid("a style has no family"))?
-        .to_string();
+/// The deepest list level ODF defines (§19.840; LibreOffice's ten levels).
+pub const MAX_LIST_LEVEL: u32 = 10;
+
+/// A named style; `None` for one without a name, which nothing can
+/// reference.
+fn read_style(node: roxmltree::Node<'_, '_>) -> Result<Option<Style>, String> {
+    let Some(name) = node.attribute((NS_STYLE, "name")) else {
+        return Ok(None);
+    };
+    read_style_body(node, name.to_string())
+}
+
+/// A style's body; `None` without `style:family` (§19.480, required), which
+/// no reference or default can select.
+fn read_style_body(node: roxmltree::Node<'_, '_>, name: String) -> Result<Option<Style>, String> {
+    let Some(family) = node.attribute((NS_STYLE, "family")) else {
+        return Ok(None);
+    };
+    let family = family.to_string();
     let parent = node
         .attribute((NS_STYLE, "parent-style-name"))
         .map(str::to_string);
@@ -525,14 +535,14 @@ fn read_style_body(node: roxmltree::Node<'_, '_>, name: String) -> Result<Style,
         // A repeated property group: the first is kept.
         groups.entry(group).or_insert(properties);
     }
-    Ok(Style {
+    Ok(Some(Style {
         name,
         family,
         parent,
         automatic: false,
         attributes: attributes(node),
         groups,
-    })
+    }))
 }
 
 /// The shorthand properties that set four sides at once (§20.205

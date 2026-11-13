@@ -91,5 +91,6 @@ export {
   type LoadedChartFontSources,
 } from '../fonts/chart-font-sources.js';
 export { instanceOpenTypeLineMetrics } from '../fonts/open-type-metrics.js';
+export { readFontResourceMetrics } from '../fonts/source-metric-tables.js';
 export { retainFace, releaseFaces } from '../fonts/font-registry.js';
 export { scopeServedFontFamilies } from './css-font-family.js';

@@ -17,6 +17,7 @@ import { SlidePullWorker } from './slide-pull-worker';
 import {
   bindMetafileFontFamilies,
   activeFontSet,
+  createSymbolFaceOracleCache,
   loadNativeRouteSentinels,
   loadOfficeFontFallbacks,
   unloadOfficeFontFallbacks,
@@ -103,8 +104,12 @@ async function officeRoutesForRequests(
 }
 
 let symbolSentinels: Promise<FontFace[] | null> | null = null;
+/** Symbol-code verdicts across this document's renders, kept while the
+ * worker realm's faces are unchanged (core createSymbolFaceOracleCache). */
+let symbolFaces = createSymbolFaceOracleCache();
 
 function releaseOfficeFonts(): void {
+  symbolFaces = createSymbolFaceOracleCache();
   void symbolSentinels?.then((faces) => { if (faces) unloadOfficeFontFallbacks(faces); });
   symbolSentinels = null;
   for (const pending of distinctOfficeRouteLoads(officeFontLoads)) {
@@ -429,6 +434,7 @@ self.onmessage = async (event: MessageEvent<RenderWorkerRequest | WorkerSvgDecod
           officeFontRoutes,
           officeInstalledFamilies,
           fontSources: fontSources?.loaded,
+          symbolFaces,
           fetchMedia: getMedia,
           fetchImage: getImage,
           svgDecoder: svgDecodeClient.decode,
@@ -474,6 +480,7 @@ self.onmessage = async (event: MessageEvent<RenderWorkerRequest | WorkerSvgDecod
           officeFontRoutes,
           officeInstalledFamilies,
           fontSources: fontSources?.loaded,
+          symbolFaces,
           fetchMedia: getMedia,
           fetchImage: getImage,
           svgDecoder: svgDecodeClient.decode,

@@ -15,8 +15,11 @@
  *
  * - strong-RTL text: Canvas performs UAX #9 mirroring, which is unmodelled
  *   here, so a mirrored glyph could be painted that the text does not spell;
- * - PUA `U+F020–F0FF`: symbol-font remapping (see `symbol-font.ts`) paints a
- *   different scalar than the stored one;
+ * - PUA `U+F020–F0FF` outside a symbol-encoded family: an unmodelled
+ *   symbol-font remapping could paint a different scalar than the stored one.
+ *   Text in a symbol-encoded family ({@link FontDemandScalarCollector.addSymbolText})
+ *   demands instead every scalar its conversion may paint, a finite set
+ *   from the conversion tables (`symbol-font.ts`);
  * - any scalar that is not normalization-inert ({@link fontDemandInertScalar}):
  *   canonical composition or decomposition could paint a scalar the text does
  *   not spell, and malformed/unassigned input proves nothing;
@@ -35,6 +38,7 @@ import {
 } from '../internal/font-measurement-sentinels.js';
 import { HARD_MAX_FONT_DEMAND_SCALARS } from '../worker/resource-policy.generated.js';
 import { fontDemandInertScalar } from './inert-scalars.js';
+import { symbolFontKey, symbolPaintCandidates, type SymbolFontKey } from './symbol-font.js';
 
 /** `'all'`, or the demanded scalars in first-seen order. */
 export type FontDemandScalars = 'all' | readonly number[];
@@ -80,13 +84,52 @@ export class FontDemandScalarCollector {
     if (hasStrongRtl(text)) return this.decline();
     for (const scalar of text) {
       const cp = scalar.codePointAt(0) as number;
-      if (!fontDemandInertScalar(cp) || (cp >= 0xf020 && cp <= 0xf0ff)) return this.decline();
-      if (this.committed.has(cp) || this.points.has(cp)) continue;
-      this.bytes += String(cp).length + 1;
-      if (this.bytes > this.budget
-        || this.committed.size + this.points.size >= HARD_MAX_FONT_DEMAND_SCALARS) return this.decline();
-      this.points.add(cp);
+      if ((cp >= 0xf020 && cp <= 0xf0ff) || !this.admit(cp)) return this.decline();
     }
+    return true;
+  }
+
+  /**
+   * Collect one text painted in a font list that may name symbol-encoded
+   * families (`fontFamilies`, any order; `symbol-font.ts`). Each character
+   * the painter may convert demands every scalar its conversion may write in
+   * any of those families ({@link symbolPaintCandidates}): which ones paint
+   * depends on what the painting font draws, judged only at paint time. The
+   * rest of the text is collected as by {@link add}. Without a symbol family
+   * this is {@link add}.
+   */
+  addSymbolText(text: string, fontFamilies: Iterable<string | null | undefined>): boolean {
+    if (this.declined) return false;
+    const keys = new Set<SymbolFontKey>();
+    for (const family of fontFamilies) {
+      const key = symbolFontKey(family);
+      if (key) keys.add(key);
+    }
+    if (!keys.size) return this.add(text);
+    let rest = '';
+    for (const ch of text) {
+      const cp = ch.codePointAt(0) as number;
+      if (!(cp >= 0xf020 && cp <= 0xf0ff) && (cp < 0x20 || cp > 0xff)) {
+        rest += ch;
+        continue;
+      }
+      for (const key of keys) {
+        for (const scalar of symbolPaintCandidates(ch, key)) {
+          if (!this.admit(scalar.codePointAt(0) as number)) return this.decline();
+        }
+      }
+    }
+    return this.add(rest);
+  }
+
+  /** Demand one normalization-inert scalar within the budgets. */
+  private admit(cp: number): boolean {
+    if (!fontDemandInertScalar(cp)) return false;
+    if (this.committed.has(cp) || this.points.has(cp)) return true;
+    this.bytes += String(cp).length + 1;
+    if (this.bytes > this.budget
+      || this.committed.size + this.points.size >= HARD_MAX_FONT_DEMAND_SCALARS) return false;
+    this.points.add(cp);
     return true;
   }
 

@@ -146,24 +146,30 @@ describe('Node bounded XLSX workbook session', () => {
     }
   });
 
-  it('reports the counters of earlier picture reads when a later operation fails', async () => {
+  it('rejects a non-picture or missing path without failing the session', async () => {
     const onResourceMetrics = vi.fn();
     const picture = new Uint8Array(65_536);
     const session = await openXlsxWorkbook(pictureWorkbook(picture), { onResourceMetrics });
-    try {
-      await session.getImage('xl/media/image1.png', 'image/png');
-      // A missing entry is an untyped failure, so the report keeps the
-      // session's last observed usage rather than a violation checkpoint.
-      await expect(session.getImage('xl/media/missing.png', 'image/png')).rejects.toThrow();
-      expect(onResourceMetrics).toHaveBeenCalledWith(expect.objectContaining({
-        status: 'error',
-        usage: expect.objectContaining({
-          distinctInflatedBytes: expect.toSatisfy((bytes: number) => bytes >= picture.byteLength),
-        }),
-      }));
-    } finally {
-      await session.close();
-    }
+    const opened = session.resourceUsage?.distinctInflatedBytes ?? 0;
+    // XML parts are not pictures, whatever their path spelling. The refused
+    // check still accounts for the [Content_Types].xml it read.
+    await expect(session.getImage('xl/workbook.xml')).rejects.toThrow(TypeError);
+    expect(session.resourceUsage?.distinctInflatedBytes).toBeGreaterThan(opened);
+    await session.getImage('xl/media/image1.png', 'image/png');
+    await expect(session.getImage('/XL/Workbook.xml')).rejects.toThrow(TypeError);
+    await expect(session.getImage('xl/media/missing.png', 'image/png')).rejects.toBeDefined();
+    expect(onResourceMetrics).not.toHaveBeenCalled();
+    expect((await session.getImage('xl/media/image1.png', 'image/png')).size).toBe(picture.byteLength);
+    expect(await session.worksheetRows(0).next()).toBeDefined();
+    await session.close();
+    // The session closes normally and keeps the earlier picture read's counters.
+    expect(onResourceMetrics).toHaveBeenCalledTimes(1);
+    expect(onResourceMetrics).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'ok',
+      usage: expect.objectContaining({
+        distinctInflatedBytes: expect.toSatisfy((bytes: number) => bytes >= picture.byteLength),
+      }),
+    }));
   });
 
   it('fails the session when a picture read exceeds the archive entry budget', async () => {

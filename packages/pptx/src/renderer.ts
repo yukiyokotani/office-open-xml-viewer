@@ -18,6 +18,8 @@ import {
   clampPartFailureMessage,
   errorPlaceholderDetail,
   errorPlaceholderTitle,
+  errorPlaceholderCanvasLines,
+  ERROR_PLACEHOLDER_DETAIL_LINES,
   prepareErrorPlaceholder,
   resolvedFromWire,
   resolveErrorPlaceholderFor,
@@ -2024,6 +2026,8 @@ export function paragraphInputRuns(
     // base's font segment and a cluster never straddles two segments (one
     // stacked cell, one shaped horizontal glyph). An empty ea/cs slot draws
     // in PowerPoint's application default (issue #1627).
+    // Whether the run's Latin face is symbol-encoded: one answer per run.
+    const runLatinSymbol = isSymbolFontFamily(authoredFamilyOf(family, rc));
     let clusterStart = 0;
     let emitted = false;
     let lastCluster = '';
@@ -2052,7 +2056,7 @@ export function paragraphInputRuns(
       // symbol Latin face (§21.1.2.3.7) draws them and its bare codes. Each
       // is judged against the face this render selects (symbolFaceSegments).
       const puaCode = cp >= 0xf020 && cp <= 0xf0ff;
-      const latinSymbol = !eaGlyph && !csGlyph && isSymbolFontFamily(authoredFamilyOf(family, rc));
+      const latinSymbol = !eaGlyph && !csGlyph && runLatinSymbol;
       const symbolFamily = puaCode ? familySym ?? (latinSymbol ? family : null)
         : latinSymbol && cp > 0x20 && cp <= 0xff ? family : null;
       if (symbolFamily) {
@@ -8349,6 +8353,9 @@ type InternalSlideRenderOptions = SlideRenderOptions & {
    * Node session): symbol colour probes allocate their scratch canvas
    * through it, on the backend that paints (core symbol-face.ts). */
   createCanvas?: import('@silurus/ooxml-core').SymbolProbeCanvasFactory;
+  /** The presentation's symbol oracle across its renders (presentation and
+   * render worker); absent, each render judges symbol codes afresh. */
+  symbolFaces?: import('@silurus/ooxml-core').SymbolFaceOracleCache;
   cjkFallback?: CjkLang;
   officeFontRoutes?: Readonly<Record<string, import('@silurus/ooxml-core').OfficeFontFallbackRoute>>;
   /** Normalized authored families with any installed face (presence probes). */
@@ -8424,11 +8431,11 @@ function drawParseErrorPlaceholder(
   const headSize = Math.max(11, Math.min(widthPx, heightPx) * 0.045);
   ctx.fillStyle = '#333333';
   ctx.font = `600 ${headSize}px sans-serif`;
-  ctx.fillText(
-    errorPlaceholderTitle(placeholder, `Slide ${slideNumber} could not be displayed`),
-    cx,
-    heightPx * 0.52,
-  );
+  const maxLineWidth = widthPx - pad * 4;
+  const title = errorPlaceholderTitle(placeholder, `Slide ${slideNumber} could not be displayed`);
+  for (const line of errorPlaceholderCanvasLines(ctx, title, maxLineWidth, 1)) {
+    ctx.fillText(line, cx, heightPx * 0.52);
+  }
   const detail = errorPlaceholderDetail(placeholder, message);
   if (detail === null) {
     ctx.restore();
@@ -8440,24 +8447,10 @@ function drawParseErrorPlaceholder(
   const detailSize = Math.max(9, Math.min(widthPx, heightPx) * 0.028);
   ctx.fillStyle = '#666666';
   ctx.font = `${detailSize}px sans-serif`;
-  const maxLineWidth = widthPx - pad * 4;
-  const words = detail.split(/\s+/);
-  const lines: string[] = [];
-  let line = '';
-  for (const word of words) {
-    const candidate = line ? `${line} ${word}` : word;
-    if (ctx.measureText(candidate).width > maxLineWidth && line) {
-      lines.push(line);
-      line = word;
-    } else {
-      line = candidate;
-    }
-    if (lines.length >= 4) break; // cap so it never overruns the card
-  }
-  if (line && lines.length < 4) lines.push(line);
+  const lines = errorPlaceholderCanvasLines(ctx, detail, maxLineWidth, ERROR_PLACEHOLDER_DETAIL_LINES);
   const lineHeight = detailSize * 1.35;
   let y = heightPx * 0.6 + lineHeight;
-  for (const l of lines.slice(0, 4)) {
+  for (const l of lines) {
     ctx.fillText(l, cx, y);
     y += lineHeight;
   }
@@ -8718,13 +8711,15 @@ async function renderSlideLeased(
     officeFontRoutes: opts.officeFontRoutes,
     officeInstalledFamilies: opts.officeInstalledFamilies,
     fontSources: opts.fontSources,
-    // Symbol-font codes are judged in this render's painting context, by an
-    // oracle of this render alone: a render sees one set of font resources
-    // (core symbol-face.ts).
-    symbolFaces: createSymbolFaceOracle(
-      canvas.getContext('2d') as CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D | null,
-      opts.createCanvas ? { createCanvas: opts.createCanvas } : {},
-    ),
+    // Symbol-font codes are judged in the realm of this render's painting
+    // context: by the presentation's oracle, kept while the realm's faces are
+    // unchanged, or by one of this render alone (core symbol-face.ts).
+    symbolFaces: opts.symbolFaces
+      ? opts.symbolFaces.oracleFor(canvas.getContext('2d') as CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D | null)
+      : createSymbolFaceOracle(
+        canvas.getContext('2d') as CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D | null,
+        opts.createCanvas ? { createCanvas: opts.createCanvas } : {},
+      ),
     // The backing store may have been clamped below `canvasSize × dpr`; downstream
     // crisp-offset math must use the SAME effective dpr the ctx was scaled by.
     dpr: effectiveDpr,

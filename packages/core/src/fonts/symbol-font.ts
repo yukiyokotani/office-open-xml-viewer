@@ -208,6 +208,26 @@ function convertCodePoint(
 }
 
 /**
+ * Every character {@link symbolTextToUnicodeSegments} may write for the
+ * authored character `ch` of a text in the symbol family `key`, whatever the
+ * painting font draws: `ch` itself, the F0-shifted form of a bare code, and
+ * each conversion target (the full table's and the 0.89 subset's), an
+ * emoji-capable one with its VS15. A finite answer from the tables: font
+ * loading demands these scalars instead of every subset (scalar-demand.ts).
+ */
+export function symbolPaintCandidates(ch: string, key: SymbolFontKey): string {
+  const cp = ch.codePointAt(0) ?? 0;
+  const pua = cp >= 0xf020 && cp <= 0xf0ff;
+  if (!pua && (cp < 0x20 || cp > 0xff)) return ch;
+  const code = pua ? cp - 0xf000 : cp;
+  let out = pua ? ch : ch + String.fromCharCode(0xf000 + code);
+  for (const target of [FULL_LOOKUPS.get(key)?.[code], LEGACY_LOOKUPS.get(key)?.[code]]) {
+    if (target !== undefined) out += EMOJI_CAPABLE.test(target) ? target + TEXT_PRESENTATION : target;
+  }
+  return out;
+}
+
+/**
  * Convert every code point of `text` that the painted font does not draw
  * (see the module notes) and split the result into maximal same-disposition
  * runs, so the caller can switch the draw font at each boundary. A family

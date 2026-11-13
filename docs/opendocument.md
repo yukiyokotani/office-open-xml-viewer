@@ -46,14 +46,24 @@ const odt = createOdt({
 
 ## Admission
 
-The source claims a package only by its leading `mimetype` file, which a
-packaged OpenDocument text document must carry (ODF 1.3 Part 2 §3.3, Part 3
-§2.2.3). Other inputs, including other OpenDocument families, continue on the
-OOXML path unchanged. The ZIP is read with the same structural checks and
-inflation limits as OOXML packages, including the caller's `resourceLimits`;
-item names are compared exactly. Encrypted packages reject with
-`unsupported-encryption`. The declared ODF version is not checked: older
-documents are read by the ODF 1.3 rules.
+The source claims a package only by its `mimetype` file, which a packaged
+OpenDocument text document must carry (ODF 1.3 Part 2 §3.3, Part 3 §2.2.3).
+Producers store it first and uncompressed; a package re-zipped by a general
+archiver, with the file compressed, listed later or given extra fields, is
+claimed and read as well, as LibreOffice does (the claim compares the
+central directory's checksum and size of the entry with the media types, so
+nothing is inflated in the calling realm). Other inputs, including other
+OpenDocument families, continue on the OOXML path unchanged. The ZIP is read
+with the same structural checks and inflation limits as OOXML packages,
+including the caller's `resourceLimits`; item names are compared exactly.
+The manifest is read only to detect encryption: encrypted packages reject
+with `unsupported-encryption`, and the manifest's version and root entry are
+not checked. The declared ODF version is not checked either: older documents,
+and documents that do not declare one, are read by the ODF 1.3 rules.
+A style definition that repeats a name within a family replaces the earlier
+one instead of refusing the document; a style or list
+style without a name, or a style without a family, cannot be referenced and
+is skipped. List level definitions outside levels 1 to 10 are never used.
 
 ## Rendering policy
 
@@ -192,8 +202,9 @@ await viewer.load(odpOrPptxBytes);
 The ODP reader maps a presentation directly into the PPTX slide model; the
 ordinary PPTX renderer draws it. Its assets are `odp-source-module.mjs` and
 `opendocument_odp_bg.wasm`; `createOdp({ moduleUrl, wasmUrl })` relocates
-them as for ODT. The source claims a package by its leading `mimetype`
-(`application/vnd.oasis.opendocument.presentation` and `-template`).
+them as for ODT. The source claims a package by its `mimetype` file
+(`application/vnd.oasis.opendocument.presentation` and `-template`), and
+admits packages, versions and styles as the ODT reader does.
 
 It follows the same rendering policy as the ODT reader: every presentation
 feature is read from its ODF definition and mapped onto the slide model, and
@@ -262,8 +273,9 @@ const viewer = new XlsxViewer(container, { ods });
 await viewer.load(odsOrXlsxBytes);
 ```
 
-The source claims a package by its leading `mimetype`
-(`application/vnd.oasis.opendocument.spreadsheet` or `-template`) and loads
+The source claims a package by its `mimetype` file
+(`application/vnd.oasis.opendocument.spreadsheet` or `-template`), admits
+packages as the ODT reader does, and loads
 `ods-source-module.mjs` and `opendocument_ods_bg.wasm` the same way as the ODT
 reader. It follows the same rendering policy as the ODT reader: every
 spreadsheet feature is read from its ODF definition and mapped onto the

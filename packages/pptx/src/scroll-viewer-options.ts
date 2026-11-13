@@ -66,7 +66,8 @@ export interface PptxScrollViewerOptions extends Pick<RenderSlideOptions, 'width
    * - `'skip'`: hidden slides are left out of the scroll layout (no slot, no
    *   gap, no scroll extent). `scrollToSlide(i)` (and an internal hyperlink)
    *   aimed at a hidden slide lands on the next shown slide after it, else the
-   *   nearest shown slide before it; `findText` returns no matches on hidden
+   *   nearest shown slide before it (a `previousslide` jump looks before it
+   *   first); `findText` returns no matches on hidden
    *   slides; `goToComment` on a hidden slide resolves `false`. Every reported
    *   index stays the deck's absolute slide index, as in `PptxViewer`:
    *   `onVisibleSlideChange(topIndex, total)` reports the absolute index of the

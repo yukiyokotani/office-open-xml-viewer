@@ -8,7 +8,8 @@
 // 1. Lists every ODT with a LibreOffice PDF in the private corpus that
 //    convert.mjs built (main checkout, packages/opendocument/public/private/odt).
 // 2. Classifies each file natively with the reader's `inspect_odt` example,
-//    which reports the exact `ODF_UNSUPPORTED:<code>` the browser path hides.
+//    which reports the native reason for any rejection (the browser path
+//    passes only content-free messages).
 // 3. Loads each file in Chrome through this checkout's `odt` model source and
 //    the DOCX renderer, and diffs every page against the LibreOffice PDF
 //    (odt-corpus.spec.ts).

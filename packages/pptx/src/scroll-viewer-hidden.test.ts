@@ -10,6 +10,7 @@ import {
 import type { HiddenSlideMode } from './hidden';
 import type { PptxScrollViewerOptions } from './scroll-viewer';
 import type { PptxTextRunInfo } from './renderer';
+import { parseRelativeSlideJump, resolveRelativeSlideJump } from '@silurus/ooxml-core';
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -118,6 +119,27 @@ describe("PptxScrollViewer hiddenSlideMode: 'skip' (#2181)", () => {
     });
     expect(v.topVisibleSlide).toBe(3);
     v.destroy();
+  });
+
+  it('a previousslide jump to a hidden slide lands on the shown slide before it', () => {
+    const click = (v: unknown) => (v as { _onHyperlinkClick(target: unknown): void })._onHyperlinkClick({
+      kind: 'internal', ref: 'ppaction://hlinkshowjump?jump=previousslide',
+    });
+    const { v, engine } = setup(6, [1, 2], 'skip');
+    engine.resolveFn = (ref, current) => resolveRelativeSlideJump(parseRelativeSlideJump(ref)!, current, 6);
+    v.scrollToSlide(3);
+    expect(v.topVisibleSlide).toBe(3);
+    click(v);
+    expect(v.topVisibleSlide).toBe(0);
+    v.destroy();
+
+    // No shown slide before the target: the jump stays on the first shown slide.
+    const first = setup(3, [0], 'skip');
+    first.engine.resolveFn = (ref, current) => resolveRelativeSlideJump(parseRelativeSlideJump(ref)!, current, 3);
+    expect(first.v.topVisibleSlide).toBe(1);
+    click(first.v);
+    expect(first.v.topVisibleSlide).toBe(1);
+    first.v.destroy();
   });
 
   it('find does not match hidden slides', async () => {

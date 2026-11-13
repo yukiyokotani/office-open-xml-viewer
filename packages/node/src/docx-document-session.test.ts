@@ -129,6 +129,23 @@ describe('Node bounded DOCX document session', () => {
     }
   });
 
+  it('rejects a non-picture or missing path without failing the session', async () => {
+    const onResourceMetrics = vi.fn();
+    const session = await openDocxDocument(bytes, { factory, currentDate: 0, onResourceMetrics });
+    onResourceMetrics.mockClear();
+    try {
+      await expect(session.getImage('word/document.xml')).rejects.toThrow(TypeError);
+      await expect(session.getImage('[Content_Types].xml')).rejects.toThrow(TypeError);
+      await expect(session.getImage('word/media/missing.jpeg', 'image/jpeg')).rejects.toBeDefined();
+      expect(onResourceMetrics).not.toHaveBeenCalled();
+      expect((await session.getImage('word/media/image1.jpeg', 'image/jpeg')).size).toBe(202_076);
+      await expect(session.renderPage(0)).resolves.toBeDefined();
+    } finally {
+      await session.close();
+    }
+    expect(onResourceMetrics).toHaveBeenCalledWith(expect.objectContaining({ status: 'ok' }));
+  });
+
   it('fails the session when a picture read exceeds the archive entry budget', async () => {
     // document.xml (68,517 bytes) and every other non-media part fit; the
     // 202,076-byte image1.jpeg does not.

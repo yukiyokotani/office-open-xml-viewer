@@ -1,9 +1,10 @@
 import type { SectionLayoutContext } from '../layout-context.js';
 import type { TextLayoutService } from './text.js';
-import { graphemeClusterOffsets } from '@silurus/ooxml-core';
 import {
+  ERROR_PLACEHOLDER_DETAIL_LINES,
   errorPlaceholderDetail,
   errorPlaceholderTitle,
+  wrapErrorPlaceholderText,
   type ResolvedErrorPlaceholder,
 } from '@silurus/ooxml-core/internal/part-failures';
 
@@ -28,83 +29,17 @@ const ERROR_SOURCE: SourceRef = Object.freeze({
   path: Object.freeze([]),
 });
 
-function wrapWords(
+function placeholderLines(
   text: string,
   maxWidthPt: number,
   fontSizePt: number,
   service: TextLayoutService,
   maxLines: number,
+  weight?: number,
 ): string[] {
-  const words = text.trim().split(/\s+/).filter(Boolean);
-  const lines: string[] = [];
-  let line = '';
-  const widthOf = (value: string): number => service.shape({
-    text: value,
-    fontSizePt,
-    fonts: {},
-    genericFamily: 'sans-serif',
-  }).advancePt;
-  const ellipsize = (value: string): string => {
-    const ellipsis = '…';
-    const offsets = [0, ...graphemeClusterOffsets(value), value.length]
-      .filter((offset, index, values) => index === 0 || offset !== values[index - 1]);
-    let end = offsets.length - 1;
-    while (end > 0 && widthOf(`${value.slice(0, offsets[end])}${ellipsis}`) > maxWidthPt) end -= 1;
-    return `${value.slice(0, offsets[end] ?? 0)}${ellipsis}`;
-  };
-  const truncateLast = (): void => {
-    if (lines.length === 0) lines.push(ellipsize(''));
-    else lines[lines.length - 1] = ellipsize(lines[lines.length - 1]);
-  };
-  const pushOverlong = (word: string): boolean => {
-    const offsets = [0, ...graphemeClusterOffsets(word), word.length]
-      .filter((offset, index, values) => index === 0 || offset !== values[index - 1]);
-    let start = 0;
-    while (start < offsets.length - 1) {
-      if (lines.length >= maxLines) {
-        truncateLast();
-        return true;
-      }
-      let end = start + 1;
-      while (end < offsets.length && widthOf(word.slice(offsets[start], offsets[end])) <= maxWidthPt) end += 1;
-      const fittingEnd = Math.max(start + 1, end - 1);
-      const chunk = word.slice(offsets[start], offsets[fittingEnd]);
-      if (lines.length >= maxLines - 1 && fittingEnd < offsets.length - 1) {
-        lines.push(ellipsize(chunk));
-        return true;
-      }
-      lines.push(chunk);
-      start = fittingEnd;
-    }
-    return false;
-  };
-  for (let wordIndex = 0; wordIndex < words.length; wordIndex += 1) {
-    const word = words[wordIndex];
-    const candidate = line ? `${line} ${word}` : word;
-    const candidateWidth = widthOf(candidate);
-    if (line && candidateWidth > maxWidthPt) {
-      lines.push(line);
-      line = '';
-      if (lines.length >= maxLines) {
-        truncateLast();
-        break;
-      }
-      if (widthOf(word) > maxWidthPt) {
-        if (pushOverlong(word)) break;
-      }
-      else line = word;
-    } else if (!line && candidateWidth > maxWidthPt) {
-      if (pushOverlong(word)) break;
-    } else {
-      line = candidate;
-    }
-    if (wordIndex < words.length - 1 && lines.length >= maxLines && !line) {
-      truncateLast();
-      break;
-    }
-  }
-  if (line && lines.length < maxLines) lines.push(line);
-  return lines;
+  return wrapErrorPlaceholderText(text, maxWidthPt, maxLines, (value) => service.shape(weight === undefined
+    ? { text: value, fontSizePt, fonts: {}, genericFamily: 'sans-serif' }
+    : { text: value, fontSizePt, weight, fonts: {}, genericFamily: 'sans-serif' }).advancePt);
 }
 
 export const PARSE_ERROR_PAGE_TITLE = 'This document could not be displayed';
@@ -132,8 +67,16 @@ export function layoutParseErrorPage(
   const detailSizePt = Math.max(8, Math.min(size.widthPt, size.heightPt) * 0.02);
   const fontRoute = text.resolve({ fonts: {}, slot: 'ascii', genericFamily: 'sans-serif' }).route;
   const detail = errorPlaceholderDetail(placeholder, message);
-  const detailLines = detail === null ? [] : wrapWords(detail, size.widthPt - padPt * 4, detailSizePt, text, 4);
+  const detailLines = detail === null ? [] : placeholderLines(detail, size.widthPt - padPt * 4, detailSizePt, text, ERROR_PLACEHOLDER_DETAIL_LINES);
   const detailLineHeightPt = detailSizePt * 1.4;
+  const title = placeholderLines(
+    errorPlaceholderTitle(placeholder, PARSE_ERROR_PAGE_TITLE),
+    size.widthPt - padPt * 4,
+    13,
+    text,
+    1,
+    600,
+  )[0] ?? '';
   const commands: DrawingPaintCommand[] = [
     { kind: 'fill-rect', rect: { xPt: 0, yPt: 0, widthPt: size.widthPt, heightPt: size.heightPt }, fill: '#ffffff' },
     { kind: 'stroke-rect', rect: frame, stroke: '#c8ccd2', lineWidthPt: 1, dashPt: [6, 5] },
@@ -144,7 +87,7 @@ export function layoutParseErrorPage(
     },
     {
       kind: 'text', rect: { xPt: padPt * 2, yPt: size.heightPt * 0.40, widthPt: size.widthPt - padPt * 4, heightPt: 24 },
-      text: errorPlaceholderTitle(placeholder, PARSE_ERROR_PAGE_TITLE), fill: '#333333', fontRoute, fontSizePt: 13,
+      text: title, fill: '#333333', fontRoute, fontSizePt: 13,
       fontWeight: 600, fontStyle: 'normal', align: 'center', baseline: 'middle',
     },
     ...detailLines.map((line, index): DrawingPaintCommand => ({

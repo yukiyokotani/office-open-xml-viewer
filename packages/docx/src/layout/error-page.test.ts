@@ -123,4 +123,23 @@ describe('parse-error page layout', () => {
     expect(values.at(-1)).toMatch(/…$/u);
     expect(values.every((line) => !line.startsWith('\u0301'))).toBe(true);
   });
+
+  it('ellipsizes a long caller title to one line inside the frame', () => {
+    const text = createTextLayoutService({
+      fonts: createFontResolver([]),
+      measurer: {
+        fingerprint: 'fixed-title-v1',
+        measure: (request) => ({ advancePt: [...request.text].length * 10, ascentPt: 8, descentPt: 2 }),
+      },
+    });
+    const layout = layoutParseErrorPage('detail', { widthPt: 180, heightPt: 300 }, text, {
+      title: 'Title '.repeat(2_000),
+      detail: undefined,
+    });
+    const title = layout.pages[0]?.layers.body.flatMap((node) =>
+      node.kind === 'drawing' ? node.commands.filter((command) => command.kind === 'text').slice(1, 2) : [],
+    )[0];
+    // Frame text width: 180 - 4 * 18 pt.
+    expect(title?.kind === 'text' && title.text).toBe('Title…');
+  });
 });

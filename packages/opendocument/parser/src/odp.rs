@@ -11,7 +11,7 @@
 //! lives only while it is built: it is serialized at once (the exact bytes
 //! the WASM cursor returns per pull) and the deck retains those bytes.
 
-use crate::error::{invalid, unsupported};
+use crate::error::invalid;
 use crate::odp_geometry::{
     self as geo, enhanced_geometry, parse_points, parse_svg_path, parse_transform, parse_view_box,
     place, Affine, GeoPath, Geometry, Placed, Seg, ShapeFrame,
@@ -21,7 +21,7 @@ use crate::odp_paint::{self as paint, Line, Marker, PaintContext};
 use crate::odp_style::{Nd, Props, Scope, Sheet, DRAWING_PAGE, GRAPHIC};
 use crate::odp_text::{self as text, ObjectStyles, TextEnv, NS_PRESENTATION};
 use crate::odp_units::{color, length_emu, percent};
-use crate::package::{OdfPackage, SUPPORTED_VERSIONS};
+use crate::package::OdfPackage;
 use crate::xml::{self, NS_DRAW, NS_FO, NS_OFFICE, NS_STYLE, NS_SVG, NS_TABLE, NS_XLINK};
 use ooxml_common::blip::{BlipEffect, SrcRect};
 use ooxml_common::json_measurement::serialize_json_with_limit;
@@ -119,10 +119,8 @@ fn read_documents<'a>(
     if !xml::is(root, NS_OFFICE, "document-content") {
         return Err(invalid("content.xml is not office:document-content"));
     }
-    let version = root.attribute((NS_OFFICE, "version"));
-    if !version.is_some_and(|v| SUPPORTED_VERSIONS.contains(&v)) {
-        return Err(unsupported("odf-version"));
-    }
+    // `office:version` is not checked: older documents, and documents that
+    // omit it, are read by the ODF 1.3 rules (best effort), as ODT and ODS.
     let mut sheet = Sheet::default();
     if let Some(styles) = styles {
         sheet.add_document(styles, Scope::Styles)?;
@@ -2043,11 +2041,31 @@ mod tests {
         pages: &str,
         extra: &[(&str, &[u8])],
     ) -> Result<OdpDeck, String> {
+        deck_versioned(
+            styles,
+            master,
+            automatic,
+            pages,
+            extra,
+            r#" office:version="1.3""#,
+        )
+    }
+
+    /// [`deck_with`] whose roots carry `version` (the whole attribute, or
+    /// nothing).
+    fn deck_versioned(
+        styles: &str,
+        master: &str,
+        automatic: &str,
+        pages: &str,
+        extra: &[(&str, &[u8])],
+        version: &str,
+    ) -> Result<OdpDeck, String> {
         let styles_xml = format!(
-            r##"<office:document-styles {NS} office:version="1.3"><office:styles>{styles}</office:styles><office:automatic-styles><style:page-layout style:name="pm1"><style:page-layout-properties fo:page-width="28cm" fo:page-height="21cm"/></style:page-layout></office:automatic-styles><office:master-styles><style:master-page style:name="Default" style:page-layout-name="pm1">{master}</style:master-page></office:master-styles></office:document-styles>"##
+            r##"<office:document-styles {NS}{version}><office:styles>{styles}</office:styles><office:automatic-styles><style:page-layout style:name="pm1"><style:page-layout-properties fo:page-width="28cm" fo:page-height="21cm"/></style:page-layout></office:automatic-styles><office:master-styles><style:master-page style:name="Default" style:page-layout-name="pm1">{master}</style:master-page></office:master-styles></office:document-styles>"##
         );
         let content = format!(
-            r##"<office:document-content {NS} office:version="1.3"><office:automatic-styles>{automatic}</office:automatic-styles><office:body><office:presentation>{pages}</office:presentation></office:body></office:document-content>"##
+            r##"<office:document-content {NS}{version}><office:automatic-styles>{automatic}</office:automatic-styles><office:body><office:presentation>{pages}</office:presentation></office:body></office:document-content>"##
         );
         let files = [
             ("META-INF/manifest.xml", manifest(ODP, "")),
@@ -2066,6 +2084,38 @@ mod tests {
             &MEDIA_TYPES,
         )?;
         read(&package)
+    }
+
+    #[test]
+    fn any_declared_office_version_is_read() {
+        // ODF 1.0/1.1 documents, documents without the attribute and
+        // versions newer than 1.4 are read by the ODF 1.3 rules.
+        let page = r#"<draw:page draw:name="p1" draw:master-page-name="Default"/>"#;
+        for version in [
+            "",
+            r#" office:version="1.0""#,
+            r#" office:version="1.1""#,
+            r#" office:version="1.5""#,
+        ] {
+            let deck = deck_versioned("", "", "", page, &[], version).unwrap();
+            assert_eq!(deck.slides.len(), 1, "{version}");
+        }
+    }
+
+    #[test]
+    fn nameless_styles_and_master_pages_are_skipped() {
+        // A nameless style and master page cannot be referenced; a
+        // repeated style name takes the later definition.
+        let styles = r##"<style:style style:family="graphic"/><style:style style:name="g" style:family="graphic"><style:graphic-properties draw:fill="solid" draw:fill-color="#ff0000"/></style:style><style:style style:name="g" style:family="graphic"><style:graphic-properties draw:fill="solid" draw:fill-color="#00ff00"/></style:style>"##;
+        let master = r#"</style:master-page><style:master-page style:page-layout-name="pm1">"#;
+        let page = r#"<draw:page draw:name="p1" draw:master-page-name="Default"><draw:rect draw:style-name="g" svg:x="1cm" svg:y="1cm" svg:width="2cm" svg:height="2cm"/></draw:page>"#;
+        let deck = deck(styles, master, "", page).unwrap();
+        assert_eq!(deck.slides.len(), 1);
+        let json = serde_json::to_string(&model(&deck, 0)).unwrap();
+        assert!(
+            json.contains("00FF00") && !json.contains("FF0000"),
+            "{json}"
+        );
     }
 
     /// The model of slide `index` (its serialized JSON is checked to be

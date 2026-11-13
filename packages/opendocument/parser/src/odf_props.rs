@@ -388,15 +388,11 @@ pub fn hex_color(value: &str) -> Option<String> {
     }
 }
 
-/// A percentage `"50%"` as a fraction.
+/// A `percent` (§18.3.23) as a fraction: `"50%"` → 0.5; `None` unless
+/// finite.
 pub fn percent(value: &str) -> Option<f64> {
-    value
-        .trim()
-        .strip_suffix('%')?
-        .trim()
-        .parse::<f64>()
-        .ok()
-        .map(|v| v / 100.0)
+    let number: f64 = value.trim().strip_suffix('%')?.trim().parse().ok()?;
+    number.is_finite().then_some(number / 100.0)
 }
 
 /// `svg:font-family` without the CSS quotes (§19.528).

@@ -76,6 +76,14 @@ describe('XLSX sheet placeholder text (#1974)', () => {
     expect(texts.join(' ')).not.toContain('sheet2.xml');
   });
 
+  it('keeps a long caller title and detail inside the card', async () => {
+    const texts = await paint({ state: 'resolved', title: 'T'.repeat(5_000), detail: 'd '.repeat(50_000) });
+    // 320 px viewport: the title fits 0.9 and the detail 0.8 of the width, at 7 px per code point here.
+    for (const text of texts) expect([...text].length * 7).toBeLessThanOrEqual(text.startsWith('T') ? 288 : 256);
+    expect(texts.filter((text) => text.startsWith('T'))).toHaveLength(1);
+    expect(texts.filter((text) => text.startsWith('d')).length).toBeLessThanOrEqual(4);
+  });
+
   it('paints nothing when the text still has to be resolved on main', async () => {
     await expect(paint({ state: 'resolve-on-main' })).rejects.toThrow(/main thread/);
   });

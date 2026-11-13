@@ -44,6 +44,10 @@ export interface XlsxNodeArchive {
   resource_usage(): Uint8Array;
   /** Raw bytes of one picture part (or a model source's picture key). */
   extract_image(path: string): Uint8Array;
+  /** OOXML packages only: whether the part's content type is `image/*`. A
+   * model-source archive omits it because its picture keys are already the
+   * only readable entries. */
+  is_picture_part?(path: string): boolean;
   open_sheet_cursor(sheetIndex: number, name: string): void;
   pull_sheet_cursor(rowCredit: number): Uint8Array;
   sheet_cursor_pull_finished(): boolean;

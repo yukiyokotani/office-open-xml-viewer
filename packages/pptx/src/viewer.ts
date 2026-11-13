@@ -3,6 +3,7 @@ import {
   type RenderOptions,
   type PptxTextRunInfo,
 } from './renderer';
+import { isBackwardSlideJump } from './slide-nav';
 import { buildPptxTextLayer } from './text-layer';
 import { buildPptxHighlightLayer, type PptxHighlightMatch } from './find-highlight-layer';
 import { PptxFindController, type PptxMatchLocation } from './find';
@@ -140,7 +141,8 @@ export interface PptxViewerOptions extends Pick<RenderOptions, 'width' | 'dpr' |
    * - `'skip'`: hidden slides are never drawn. Sequential navigation
    *   (`nextSlide`/`prevSlide`, initial load) jumps over them; `goToSlide(i)`
    *   (and an internal hyperlink or find match) aimed at a hidden slide lands on
-   *   the next shown slide after it, else the nearest shown slide before it;
+   *   the next shown slide after it, else the nearest shown slide before it
+   *   (a `previousslide` jump, like `prevSlide`, looks before it first);
    *   `findText` returns no matches on hidden slides. Absolute indices are
    *   unchanged. If every slide is hidden there is nothing to skip to, and the
    *   deck behaves as in `'show'`: the requested slide is drawn and `findText`
@@ -439,12 +441,14 @@ export class PptxViewer implements ZoomableViewer {
     await this._goToSlide(index, generation);
   }
 
-  private async _goToSlide(index: number, generation: number): Promise<void> {
+  /** `backward`: a `previousslide` jump, whose hidden target resolves to the
+   *  nearest shown slide before it first. */
+  private async _goToSlide(index: number, generation: number, backward = false): Promise<void> {
     if (generation !== this._navigationGeneration) return;
     if (!this.engine || this.slideCount === 0) return;
     let next = Math.max(0, Math.min(index, this.slideCount - 1));
     if (this._hiddenMode === 'skip') {
-      const shown = await this._nearestShownSlide(next, generation);
+      const shown = await this._nearestShownSlide(next, generation, backward);
       if (generation !== this._navigationGeneration) return;
       // `undefined`: every slide is hidden, so the target is drawn as in 'show'
       // (as the initial load does). `null`: the slide never became available;
@@ -511,7 +515,13 @@ export class PptxViewer implements ZoomableViewer {
   private async _nearestShownSlide(
     index: number,
     generation: number,
+    backward = false,
   ): Promise<number | undefined | null> {
+    if (backward) {
+      const before = await this._scanShown(index, -1, generation);
+      if (before !== undefined) return before;
+      return await this._scanShown(index + 1, 1, generation);
+    }
     const forward = await this._scanShown(index, 1, generation);
     if (forward !== undefined) return forward;
     return await this._scanShown(index - 1, -1, generation);
@@ -1094,7 +1104,10 @@ export class PptxViewer implements ZoomableViewer {
       return;
     }
     if (enriched.slideIndex !== undefined) {
-      void this.goToSlide(enriched.slideIndex).catch((error) => this._reportRenderError(error));
+      const backward = isBackwardSlideJump(enriched.ref);
+      const generation = this._beginNavigation();
+      void this._goToSlide(enriched.slideIndex, generation, backward)
+        .catch((error) => this._reportRenderError(error));
     }
   }
 

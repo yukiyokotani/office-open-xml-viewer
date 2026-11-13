@@ -424,6 +424,60 @@ fn numbers_lists_and_headings() {
 }
 
 #[test]
+fn list_levels_outside_one_to_ten_are_ignored() {
+    // Levels 0, 11 and a non-number are not ODF list levels: their
+    // definitions are skipped, the defined ones still number the list.
+    let styles = r##"<text:list-style style:name="L"><text:list-level-style-number text:level="0" style:num-format="I"/><text:list-level-style-number text:level="1" style:num-suffix="." style:num-format="1"><style:text-properties fo:font-weight="bold"/></text:list-level-style-number><text:list-level-style-number text:level="11" style:num-format="A"><style:text-properties fo:font-style="italic"/></text:list-level-style-number><text:list-level-style-bullet text:level="x" text:bullet-char="*"/></text:list-style>"##;
+    let body = r##"<text:list text:style-name="L"><text:list-item><text:p>one</text:p></text:list-item><text:list-item><text:p>two</text:p></text:list-item></text:list><text:numbered-paragraph text:list-id="n" text:style-name="L" text:level="12"><text:p>deep</text:p></text:numbered-paragraph>"##;
+    let document = read_fixture(Fixture {
+        styles,
+        body,
+        ..Fixture::default()
+    });
+    let p = paragraphs(&document.body);
+    assert_eq!(texts(p[0])[0], "1.");
+    assert_eq!(texts(p[1])[0], "2.");
+    assert_eq!(texts(p[2]).last().map(String::as_str), Some("deep"));
+
+    // A style whose only definition is level 0 defines no level: its
+    // "I." format is not borrowed as the nearest lower level.
+    let styles = r##"<text:list-style style:name="Z"><text:list-level-style-number text:level="0" style:num-suffix="." style:num-format="I"/></text:list-style>"##;
+    let body = r##"<text:list text:style-name="Z"><text:list-item><text:p>zero</text:p></text:list-item></text:list>"##;
+    let document = read_fixture(Fixture {
+        styles,
+        body,
+        ..Fixture::default()
+    });
+    let p = paragraphs(&document.body);
+    assert!(
+        texts(p[0]).iter().all(|text| text != "I."),
+        "{:?}",
+        texts(p[0])
+    );
+    assert_eq!(texts(p[0]).last().map(String::as_str), Some("zero"));
+}
+
+#[test]
+fn repeated_and_unreferenceable_styles_do_not_refuse_the_document() {
+    // A repeated name in one family: the later definition is used. Styles
+    // without a name or family, a default style without a family and a
+    // nameless list style are skipped.
+    let styles = r##"<style:style style:name="P" style:family="paragraph"><style:paragraph-properties fo:margin-left="10pt"/></style:style><style:style style:name="P" style:family="paragraph"><style:paragraph-properties fo:margin-left="20pt"/></style:style><style:style style:family="paragraph"/><style:style style:name="Q"/><style:default-style><style:text-properties fo:font-size="30pt"/></style:default-style><text:list-style><text:list-level-style-bullet text:level="1" text:bullet-char="*"/></text:list-style><text:list-style style:name="L"/><text:list-style style:name="L"><text:list-level-style-number text:level="1" style:num-suffix=")" style:num-format="a"/></text:list-style>"##;
+    let automatic = r##"<style:style style:name="A" style:family="paragraph" style:parent-style-name="P"><style:paragraph-properties fo:margin-right="5pt"/></style:style><style:style style:name="A" style:family="paragraph" style:parent-style-name="P"><style:paragraph-properties fo:margin-right="7pt"/></style:style><style:style style:family="text"/>"##;
+    let body = r##"<text:p text:style-name="P">common</text:p><text:p text:style-name="A">automatic</text:p><text:list text:style-name="L"><text:list-item><text:p>item</text:p></text:list-item></text:list>"##;
+    let document = read_fixture(Fixture {
+        styles,
+        automatic,
+        body,
+        ..Fixture::default()
+    });
+    let p = paragraphs(&document.body);
+    assert_eq!(p[0].indent_left, 20.0);
+    assert_eq!((p[1].indent_left, p[1].indent_right), (20.0, 7.0));
+    assert_eq!(texts(p[2])[0], "a)");
+}
+
+#[test]
 fn hyperlinks_tracked_deletions_and_fields() {
     let body = r##"<text:tracked-changes><text:changed-region text:id="c1"><text:deletion><office:change-info/><text:p>gone</text:p></text:deletion></text:changed-region></text:tracked-changes><text:p><text:a xlink:href="https://example.com/">link</text:a> <text:a xlink:href="#mark">inner</text:a><text:change-start text:change-id="c1"/>dropped<text:change-end text:change-id="c1"/> <text:date>2026-01-01</text:date><text:bookmark text:name="mark"/></text:p>"##;
     let document = read_fixture(Fixture {
