@@ -138,7 +138,7 @@ impl<'p> Media<'p> {
             })
             .ok()?;
         if bytes.starts_with(b"VCLMTF") {
-            let converted = crate::svm::to_svg(&bytes)?;
+            let converted = crate::svm::to_svg(&bytes, usize::MAX)?;
             self.charge(converted.svg.len()).ok()?;
             self.converted.insert(path.to_string(), converted.svg);
             Some(Resource {

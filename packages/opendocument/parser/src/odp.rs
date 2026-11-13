@@ -52,10 +52,12 @@ const MAX_GROUP_DEPTH: usize = 64;
 /// Implementation bound on the drawing-object nodes the whole deck visits
 /// (master objects once per slide that shows them, empty ones included).
 const MAX_DECK_VISITS: usize = 64_000_000;
-/// Implementation bound on the bytes all embedded charts of the deck read
-/// and expand together (their parts' text and every record their readers
-/// charge); each distinct chart is read once.
-const MAX_DECK_CHART_WORK: usize = 1024 * 1024 * 1024;
+/// Implementation bound on the bytes all embedded charts of the deck
+/// allocate together (as metered by [`crate::budget`]: their parts' text and
+/// everything their readers build or copy); each distinct chart is read
+/// once. Stricter than the read's overall copy bound
+/// ([`crate::budget::MAX_COPIED_BYTES`]).
+const MAX_DECK_CHART_WORK: u64 = 1024 * 1024 * 1024;
 /// Implementation bound on the slides of a deck (the PPTX bootstrap limit).
 const MAX_SLIDES: usize = 10_000;
 
@@ -83,6 +85,11 @@ pub struct OdpSlide {
 }
 
 /// Read the presentation. Every rejection happens here.
+///
+/// The package's XML parts are read and parsed first; everything after runs
+/// inside one governed [`budget::Scope`](crate::budget::Scope), so the deck,
+/// and whatever was held while it was built, was measured against
+/// [`MAX_MODEL_BYTES`](crate::budget::MAX_MODEL_BYTES).
 pub fn read(package: &OdfPackage) -> Result<OdpDeck, String> {
     let content_text = package.read_text("content.xml")?;
     let styles_text = if package.contains("styles.xml") {
@@ -95,7 +102,20 @@ pub fn read(package: &OdfPackage) -> Result<OdpDeck, String> {
         Some(t) => Some(xml::parse(t)?),
         None => None,
     };
-    let root = content.root_element();
+    let scope = crate::budget::Scope::enter(crate::budget::MAX_MODEL_BYTES);
+    let deck = read_documents(
+        package,
+        content.root_element(),
+        styles.as_ref().map(|doc| doc.root_element()),
+    );
+    deck.and_then(|deck| scope.finish().map(|()| deck))
+}
+
+fn read_documents<'a>(
+    package: &'a OdfPackage,
+    root: Nd<'a>,
+    styles: Option<Nd<'a>>,
+) -> Result<OdpDeck, String> {
     if !xml::is(root, NS_OFFICE, "document-content") {
         return Err(invalid("content.xml is not office:document-content"));
     }
@@ -104,8 +124,8 @@ pub fn read(package: &OdfPackage) -> Result<OdpDeck, String> {
         return Err(unsupported("odf-version"));
     }
     let mut sheet = Sheet::default();
-    if let Some(styles) = &styles {
-        sheet.add_document(styles.root_element(), Scope::Styles)?;
+    if let Some(styles) = styles {
+        sheet.add_document(styles, Scope::Styles)?;
     }
     sheet.add_document(root, Scope::Content)?;
     let presentation = root
@@ -277,8 +297,8 @@ struct SlideReader<'a, 'r, 'p> {
     visits: &'r mut usize,
     /// Text work left of `odp_text::MAX_DECK_TEXT_WORK`.
     text_work: &'r std::cell::Cell<usize>,
-    /// Chart reading work left of [`MAX_DECK_CHART_WORK`] (bytes).
-    chart_work: &'r std::cell::Cell<usize>,
+    /// Chart allocation volume left of [`MAX_DECK_CHART_WORK`] (bytes).
+    chart_work: &'r std::cell::Cell<u64>,
     /// Each master's presentation frames by class, for placeholders that
     /// take their placement from the master (indexed once per master).
     master_frames: &'r mut HashMap<roxmltree::NodeId, HashMap<&'a str, Nd<'a>>>,
@@ -1353,14 +1373,27 @@ impl<'a, 'r, 'p> SlideReader<'a, 'r, 'p> {
             let cached = match self.charts.get(&path) {
                 Some(found) => found.clone(),
                 None => {
-                    let read = crate::odf_chart::read_chart_object_within(
-                        self.media.package(),
-                        &path,
-                        None,
-                        self.chart_work,
-                    )
-                    .ok()
-                    .flatten();
+                    // The chart is read inside the deck's governed scope;
+                    // its allocation volume is also charged to the deck's
+                    // chart bound.
+                    let before = crate::budget::allocated_bytes();
+                    let read =
+                        crate::odf_chart::read_chart_object(self.media.package(), &path, None);
+                    let used = crate::budget::allocated_bytes().saturating_sub(before);
+                    self.chart_work.set(
+                        self.chart_work
+                            .get()
+                            .checked_sub(used)
+                            .ok_or_else(|| crate::error::resource("deck chart work"))?,
+                    );
+                    // A structurally invalid object is drawn from its
+                    // replacement; a resource limit or package failure
+                    // rejects the deck.
+                    let read = match read {
+                        Ok(read) => read,
+                        Err(error) if crate::error::is_invalid(&error) => None,
+                        Err(error) => return Err(error),
+                    };
                     // The cached model is retained for the whole read.
                     if let Some(model) = &read {
                         self.media.charge(chart_bytes(model)?)?;
@@ -2464,31 +2497,32 @@ mod tests {
     }
 
     #[test]
-    fn chart_reading_shares_one_deck_budget() {
+    fn a_chart_is_read_once_inside_the_deck_scope() {
         let chart = r##"<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:chart="urn:oasis:names:tc:opendocument:xmlns:chart:1.0" office:version="1.3"><office:body><office:chart><chart:chart chart:class="chart:bar"/></office:chart></office:body></office:document-content>"##;
-        let files = [
-            ("META-INF/manifest.xml", manifest(ODP, "")),
-            ("Object 1/content.xml", chart.to_string()),
-        ];
-        let files: Vec<(&str, &[u8])> = files.iter().map(|(n, b)| (*n, b.as_bytes())).collect();
-        let package = OdfPackage::open(
-            package_bytes(ODP, &files),
-            OoxmlFormat::Pptx,
-            PackageLimits::default(),
-            &MEDIA_TYPES,
+        let frame = r#"<draw:frame svg:width="5cm" svg:height="5cm"><draw:object xlink:href="./Object 1"/></draw:frame>"#;
+        let pages = page(frame).repeat(2);
+        let deck = deck_with(
+            "",
+            "",
+            "",
+            &pages,
+            &[("Object 1/content.xml", chart.as_bytes())],
         )
         .unwrap();
-        let work = std::cell::Cell::new(chart.len() * 2 + 1);
-        for _ in 0..2 {
-            assert!(
-                crate::odf_chart::read_chart_object_within(&package, "Object 1", None, &work)
-                    .is_ok()
-            );
+        for index in 0..2 {
+            assert!(model(&deck, index)
+                .elements
+                .iter()
+                .any(|e| matches!(e, SlideElement::Chart(_))));
         }
-        assert!(work.get() <= 1);
-        assert!(
-            crate::odf_chart::read_chart_object_within(&package, "Object 1", None, &work).is_err()
-        );
+        // Outside a running scope the chart reader governs itself; inside
+        // the deck's scope it joins it, so its allocations are the deck's.
+        let before = crate::budget::allocated_bytes();
+        let scope = crate::budget::Scope::enter(1 << 20);
+        let _ = crate::odf_chart::read_chart_document(chart, None, None).unwrap();
+        assert!(crate::budget::work() > 0);
+        assert!(crate::budget::allocated_bytes() > before);
+        assert!(scope.finish().is_ok());
     }
 
     #[test]
