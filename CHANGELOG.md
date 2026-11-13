@@ -115,6 +115,15 @@ the host fonts (see **Served font line heights** below). See the
   the text colour, and is never drawn as a colour emoji: where only a colour
   emoji face has it, the authored code is kept.
 
+## 0.89.11 — Unreleased
+
+Compatible patch release. No migration is required.
+
+- **Word: all-caps custom footnote and endnote marks:** a footnote or endnote
+  reference with a custom mark (`w:customMarkFollows`) whose run is formatted
+  as all caps or small caps no longer fails layout of the whole document with
+  "Text shape request does not match its full run context" (#2209).
+
 ## 0.89.10 — Unreleased
 
 Compatible patch release. No migration is required.
