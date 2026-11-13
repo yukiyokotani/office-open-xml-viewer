@@ -2390,16 +2390,6 @@ describe('layoutPages — vanished (hidden) empty-paragraph mark collapse (§17.
     expect(retainedTableOn(pages[1]!)).toBeDefined();
   });
 
-  it('applies one page break for a hidden run with several breaks', () => {
-    const pages = layoutPages(
-      [para({ text: 'a' }), hiddenWithPageBreak(), hiddenWithPageBreak(), framed('framed')],
-      section(),
-      makeCtx(),
-    );
-    expect(pages.length).toBe(2);
-    expect(pageOf(pages, 'framed')).toBe(1);
-  });
-
   it.each([
     ['an ordinary paragraph', () => [hiddenWithPageBreak(), para({ text: 'b' })]],
     ['another hidden paragraph, then an ordinary paragraph',
@@ -2409,6 +2399,9 @@ describe('layoutPages — vanished (hidden) empty-paragraph mark collapse (§17.
     ['a continuous section break, then a frame',
       () => [hiddenWithPageBreak(), sectionBreak('continuous'), framed('framed')]],
     ['the end of the body', () => [hiddenWithPageBreak()]],
+    // Untested in Word: a run with several breaks keeps the previous behaviour.
+    ['a second break in the same run, then a frame',
+      () => [hiddenWithPageBreak(), hiddenWithPageBreak(), framed('framed')]],
   ])('control: drops the page break of a hidden run followed by %s', (_label, tail) => {
     // The section after the continuous break starts on the same page
     // (§17.6.22), so any retained break would show as a second page.
