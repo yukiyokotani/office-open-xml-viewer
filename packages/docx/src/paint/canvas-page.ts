@@ -242,7 +242,9 @@ function paintPageContents(
   )));
   const regionById = new Map(page.sectionRegions.map((region) => [region.id, region]));
   for (const domain of page.flowDomains) {
-    if (domain.kind === 'footnote' || domain.kind === 'endnote') {
+    // Note bands, and a page story declaring its section region (a producer
+    // page object), are drawn through that region's transform.
+    if (domain.kind === 'footnote' || domain.kind === 'endnote' || domain.sectionRegionId !== undefined) {
       const storyRegion = domain.sectionRegionId
         ? regionById.get(domain.sectionRegionId)
         : page.sectionRegions[0];

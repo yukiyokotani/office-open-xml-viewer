@@ -208,7 +208,8 @@ function pageRegionsByDomain(
     }
   }
   for (const domain of page.flowDomains) {
-    if (domain.kind !== 'footnote' && domain.kind !== 'endnote') continue;
+    if (domain.kind !== 'footnote' && domain.kind !== 'endnote'
+      && domain.sectionRegionId === undefined) continue;
     const storyRegion = domain.sectionRegionId
       ? byId.get(domain.sectionRegionId)
       : page.sectionRegions[0];

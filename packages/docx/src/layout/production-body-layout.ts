@@ -92,6 +92,7 @@ import type {
   ReservedNoteSeparatorDefinitionInput,
   SelectedNoteSeparatorDefinitionInput,
 } from './body-layout-input.js';
+import { isPageObjectSource } from './body-layout-input.js';
 import {
   sectionBodyInsetPt as bodyMarginInsetPt,
   physicalSectionGeometry,
@@ -972,8 +973,12 @@ function layoutBodyStory(
     displayPageNumber: request.pageNumber?.displayNumber ?? pageFieldContext?.displayPageNumber ?? request.pageIndex + 1,
     pageNumberFormat: request.pageNumber?.format ?? pageFieldContext?.pageNumberFormat ?? state.pageNumberFormat,
     pageWidth: request.section.geometry.pageWidth,
+    // A note band's unbounded flow has no page frame of its own. A page
+    // story with unbounded flow (only a producer page object's header-class
+    // story) keeps its physical page, which its page-positioned drawings
+    // resolve against.
     pageH:
-      request.container.capacity === 'unbounded'
+      request.container.capacity === 'unbounded' && request.container.kind !== 'header'
         ? Number.MAX_SAFE_INTEGER
         : request.section.geometry.pageHeight,
     marginLeft: request.section.geometry.marginLeft,
@@ -1827,8 +1832,11 @@ function measureBodyParagraphEntry(
           markBelowBaselinePt: measured.lastLineBelowBaselinePt,
           markOnLineGrid,
           // The page-margin observation grants no allowance through floats.
-          // A wrapped mark keeps its complete cell, as plain text does.
+          // A wrapped mark keeps its complete cell, as plain text does, and
+          // so does every mark of a model source whose grid lines take whole
+          // cells (`plainLineBoxes`, LibreOffice).
           markGridAfterLeadingPt: layout.exclusions.length === 0
+            && services.text?.plainLineBoxes !== true
             ? measured.markGridAfterLeadingPt ?? 0 : 0,
         }
       : {}),
@@ -2424,7 +2432,10 @@ function prescanBodyPageAnchors(
         }),
       ];
     }
-    const paragraph = sourceElement(dependencies.source, anchor.paragraphSource);
+    // A producer page object's drawing lives in its page story, not the body.
+    const paragraph = isPageObjectSource(anchor.paragraphSource)
+      ? nestedSourceElement(dependencies.source, anchor.paragraphSource)
+      : sourceElement(dependencies.source, anchor.paragraphSource);
     if (paragraph.type !== 'paragraph') {
       throw new Error('Page-anchor prescan source kind mismatch');
     }

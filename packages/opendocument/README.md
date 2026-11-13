@@ -21,8 +21,10 @@ the reader loads nothing: its source module and WASM load only when an ODT file
 is opened. When an asset pipeline relocates the bundled files, create the
 reader with `createOdt({ wasmUrl, moduleUrl })` and pass it as the same option.
 
-The reader is fail-closed: a document that uses anything outside the admitted
-subset is rejected as a whole with `OoxmlError.code === 'unsupported-content'`
-instead of being shown partially. The admitted subset is currently narrow
-(paragraphs, headings and character formatting of Latin-script text on one page
-style) and grows release by release.
+The reader renders every OpenDocument text feature, following the ODF 1.3
+specification and, where it leaves a choice, LibreOffice. It rejects only
+corrupt, encrypted or unsafe input and input beyond the resource limits;
+features the DOCX model cannot express exactly are drawn with their nearest
+DOCX equivalent, so small differences from LibreOffice remain. See
+[docs/opendocument.md](../../docs/opendocument.md) for what is rendered and
+the known differences.

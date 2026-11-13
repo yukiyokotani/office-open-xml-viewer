@@ -573,8 +573,12 @@ export const WORD_PER_COLUMN_FOOTNOTE_BANDS = defineCompatibilityRule({
 export function wordPerColumnFootnoteBandsApply(
   compatibilityMode: number | undefined,
   regionColumnCount: number,
+  producerColumnBands = false,
 ): boolean {
-  return compatibilityMode !== undefined && compatibilityMode < 15 && regionColumnCount > 1;
+  // A producer that lays notes out per column (LibreOffice) uses the same
+  // band geometry whatever the Word compatibility mode.
+  return regionColumnCount > 1
+    && (producerColumnBands || (compatibilityMode !== undefined && compatibilityMode < 15));
 }
 
 
