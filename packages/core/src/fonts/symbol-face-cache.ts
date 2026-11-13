@@ -18,6 +18,11 @@ export interface SymbolFaceOracleCache {
   /** The oracle for a render painting with `context`: the kept one while the
    * realm's font faces are unchanged since it was made. */
   oracleFor(context: SymbolProbeContext | null | undefined): SymbolFaceOracle;
+  /** Drop the kept oracle and the realm's face snapshot (the document is
+   * gone). An oracle handed out before still answers, judging afresh in its
+   * own context, so a painting context that outlives the document retains
+   * no font face through it. */
+  dispose(): void;
 }
 
 /**
@@ -38,6 +43,7 @@ export function createSymbolFaceOracleCache(factory?: SymbolProbeCanvasFactory):
   let fontSet: FontFaceSet | null = null;
   let faces: FontFace[] = [];
   let states: string[] = [];
+  let disposed = false;
   // What font matching and shaping read of a face (CSS Fonts 4 §4.5, §5):
   // its status and descriptors, which a page may rewrite on a registered face.
   const state = (face: FontFace) => [face.status, face.family, face.style, face.weight, face.stretch,
@@ -68,6 +74,7 @@ export function createSymbolFaceOracleCache(factory?: SymbolProbeCanvasFactory):
    * new one otherwise; undefined when the realm cannot be keyed or has no
    * scratch canvas. */
   const current = (context: SymbolProbeContext): SymbolFaceOracle | undefined => {
+    if (disposed) return undefined;
     try {
       const set = realmFontSet(context);
       if (oracle && unchanged(set)) return oracle;
@@ -103,6 +110,13 @@ export function createSymbolFaceOracleCache(factory?: SymbolProbeCanvasFactory):
         monochrome: (text: string, font: string) => now().monochrome(text, font),
         segments: (...args: Parameters<SymbolFaceOracle['segments']>) => now().segments(...args),
       });
+    },
+    dispose() {
+      disposed = true;
+      oracle = undefined;
+      fontSet = null;
+      faces = [];
+      states = [];
     },
   };
 }

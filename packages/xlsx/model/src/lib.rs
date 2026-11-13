@@ -1219,6 +1219,11 @@ pub enum ShapeTextRun {
         /// Additive — omitted from JSON when None.
         #[serde(skip_serializing_if = "Option::is_none")]
         font_face_cs: Option<String>,
+        /// Symbol typeface (`<a:sym@typeface>`, ECMA-376 §21.1.2.3.10): the
+        /// face of the run's F0-shifted (U+F020..U+F0FF) symbol codes.
+        /// Additive — omitted from JSON when None.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        font_face_sym: Option<String>,
     },
     /// Soft line break (`<a:br>`).
     Break,
