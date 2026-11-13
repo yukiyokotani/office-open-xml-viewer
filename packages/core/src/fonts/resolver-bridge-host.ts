@@ -28,17 +28,18 @@ import {
   releaseAcquiredFaces,
 } from './face-download.js';
 import { FONT_LOAD_CEILING_MS } from './font-registry.js';
-import {
-  copiedForTransfer,
-  isWorkerFontResolveMessage,
-  type BridgedFamilyAnswer,
-  type FontAcquireOutcome,
-  type FontResolveOutcome,
-  type MainFontAcquireReply,
-  type MainFontResolveReply,
-  type WorkerFontAcquireRequest,
-  type WorkerFontResolveMessage,
-  type WorkerFontResolveRequest,
+// The guards and reply copies only: resolver-bridge.ts also holds the worker
+// client, whose resolution bookkeeping a page realm never runs.
+import { copiedForTransfer, isWorkerFontResolveMessage } from './resolver-bridge-messages.js';
+import type {
+  BridgedFamilyAnswer,
+  FontAcquireOutcome,
+  FontResolveOutcome,
+  MainFontAcquireReply,
+  MainFontResolveReply,
+  WorkerFontAcquireRequest,
+  WorkerFontResolveMessage,
+  WorkerFontResolveRequest,
 } from './resolver-bridge.js';
 import type { FontResolverResponder } from './resolver-bridge-responder.js';
 import {

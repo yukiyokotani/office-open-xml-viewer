@@ -1,13 +1,11 @@
 /** Raw line metrics read from one OpenType face. Values remain in design units;
  * format consumers decide which table and compatibility rule governs layout. */
-import {
-  lineMetricsVaryAlong,
-  metricDelta,
-  parseOpenTypeVariation,
-  variationCoordinates,
-  type LineMetricMvarTag,
-  type OpenTypeVariation,
-} from './open-type-variations.js';
+import type { OpenTypeVariation, parseOpenTypeVariation } from './open-type-variations.js';
+
+/** The fvar/avar/MVAR reader of open-type-variations.ts. Only the font-source
+ * session instances variable faces; it passes the reader in
+ * (open-type-instances.ts), so the static parsers here do not carry it. */
+export type OpenTypeVariationReader = typeof parseOpenTypeVariation;
 
 export interface OpenTypeLineMetrics {
   readonly unitsPerEm: number;
@@ -404,57 +402,21 @@ export function parseOpenTypeLineMetrics(
 
 /** Strict coverage for any concrete resource whose design metrics may own
  * layout. The caller and embedded loaders must both check the returned cmap
- * ranges before attributing a shaped segment to this face. */
+ * ranges before attributing a shaped segment to this face. A variable face
+ * (fvar) is read only with `options.variations`, the variation reader. */
 export function parseOpenTypeResourceMetrics(
   bytes: Uint8Array,
   faceIndex?: number,
-  options: Readonly<{ variations?: boolean }> = {},
+  options: Readonly<{ variations?: OpenTypeVariationReader }> = {},
 ): OpenTypeLineMetrics | null {
-  return readOpenTypeLineMetrics(bytes, faceIndex, true, options.variations === true);
-}
-
-/**
- * Line metrics of one instance of a variable font: the default-instance
- * values plus the MVAR deltas at `axisValues` (user-space values by axis tag;
- * a missing axis takes its fvar default). A static font is returned as is.
- * MVAR tags follow the OpenType value-tag table: `hasc`/`hdsc`/`hlgp` vary
- * the OS/2 typo values, `hcla`/`hcld` usWin; the hhea values have no tag and
- * never vary. Returns null when a value of `opszTags` (default: every one of
- * them) varies along `opsz`: the browser sets that axis from the font size
- * (CSS `font-optical-sizing: auto`), so one size-free value does not exist.
- * A caller passes only the tags its projection reads.
- */
-export function instanceOpenTypeLineMetrics(
-  metrics: OpenTypeLineMetrics,
-  axisValues: Readonly<Record<string, number>>,
-  opszTags?: readonly LineMetricMvarTag[],
-): OpenTypeLineMetrics | null {
-  const variation = metrics.variation;
-  if (!variation) return metrics;
-  if (lineMetricsVaryAlong(variation, 'opsz', opszTags)) return null;
-  const coords = variationCoordinates(variation, axisValues);
-  const delta = (tag: Parameters<typeof metricDelta>[1]) => metricDelta(variation, tag, coords);
-  const { variation: _variation, ...base } = metrics;
-  void _variation;
-  return Object.freeze({
-    ...base,
-    ...(metrics.winAscent === undefined ? {} : {
-      winAscent: metrics.winAscent + delta('hcla'),
-      winDescent: (metrics.winDescent ?? 0) + delta('hcld'),
-    }),
-    ...(metrics.typoAscent === undefined ? {} : {
-      typoAscent: metrics.typoAscent + delta('hasc'),
-      typoDescent: (metrics.typoDescent ?? 0) + delta('hdsc'),
-      typoLineGap: (metrics.typoLineGap ?? 0) + delta('hlgp'),
-    }),
-  });
+  return readOpenTypeLineMetrics(bytes, faceIndex, true, options.variations);
 }
 
 function readOpenTypeLineMetrics(
   bytes: Uint8Array,
   faceIndex: number | undefined,
   resourceCoverage: boolean,
-  variations = false,
+  variations?: OpenTypeVariationReader,
 ): OpenTypeLineMetrics | null {
   if ((faceIndex !== undefined && (!Number.isSafeInteger(faceIndex) || faceIndex < 0))
     || bytes.byteLength < 12) return null;
@@ -500,7 +462,7 @@ function readOpenTypeLineMetrics(
     } else if (!variations) {
       return null;
     } else {
-      variation = parseOpenTypeVariation(view, tables, tagValue) ?? undefined;
+      variation = variations(view, tables, tagValue) ?? undefined;
       if (!variation) return null;
     }
   }

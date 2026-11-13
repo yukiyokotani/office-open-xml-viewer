@@ -46,7 +46,8 @@ import {
 } from '@silurus/ooxml-core/worker';
 import { prepareMathRuns, renderLayoutSourceToCanvas } from './renderer';
 import { createLayoutServices, nativeRouteLineRequests } from './layout-runtime.js';
-import { completeDocxFontPresence, declaredFontSubstitutions, docxFontFamilyPlan, docxOfficeFontFallbackRequests } from './font-plan.js';
+import { declaredFontSubstitutions, docxOfficeFontFallbackRequests } from './font-plan.js';
+import { completeDocxFontPresence, docxFontFamilyPlan } from './font-demand-plan.js';
 import { loadDocxFontSources, type DocxLoadedFontSources } from './font-source-load.js';
 import {
   prepareServedFaceLines,

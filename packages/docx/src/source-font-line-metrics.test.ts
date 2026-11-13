@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { findReferenceFontMetrics, parseOpenTypeResourceMetrics } from '@silurus/ooxml-core';
+import { parseVariableOpenTypeResourceMetrics } from '@silurus/ooxml-core/internal/font-sources';
 import { sourceFontLayoutOptions } from './testing/font-sources.js';
 import { createLayoutServices } from './layout-runtime.js';
 import { buildSegments, layoutLines } from './line-layout.js';
@@ -18,8 +19,8 @@ import type { PreparedServedFaceLines } from './served-face-lines.js';
 
 const FIXTURE = readFileSync(new URL('../../../tests/fixtures/fonts/ooxml-fixture-gap.ttf', import.meta.url));
 const TABLES = parseOpenTypeResourceMetrics(new Uint8Array(FIXTURE))!;
-const VARIABLE = parseOpenTypeResourceMetrics(new Uint8Array(readFileSync(
-  new URL('../../../tests/fixtures/fonts/ooxml-fixture-gap-var.ttf', import.meta.url))), undefined, { variations: true })!;
+const VARIABLE = parseVariableOpenTypeResourceMetrics(new Uint8Array(readFileSync(
+  new URL('../../../tests/fixtures/fonts/ooxml-fixture-gap-var.ttf', import.meta.url))))!;
 
 const ASCENT = 0.8;
 const DESCENT = 0.2;
@@ -141,9 +142,9 @@ describe('served font line metrics', () => {
       sources: [fontFiles({ faces: [{ family: 'Ooxml Fixture Gap', url: 'https://app.example/gap.ttf' }] })],
     });
     const other = [{ family: 'Ooxml Fixture Gap', status: 'loaded', weight: '400', style: 'normal', unicodeRange: 'U+0-10FFFF' }];
-    const alone = sourceFontLineMetrics(options.sourceFonts.loaded, null);
+    const alone = sourceFontLineMetrics(options.sourceFonts, null);
     expect(Object.keys(alone).length).toBeGreaterThan(0);
-    expect(sourceFontLineMetrics(options.sourceFonts.loaded, other as unknown as FontFaceSet)).toEqual(alone);
+    expect(sourceFontLineMetrics(options.sourceFonts, other as unknown as FontFaceSet)).toEqual(alone);
   });
 
   it('keeps the Canvas box for a served face whose tables are unavailable', () => {
@@ -190,7 +191,7 @@ describe('served font line metrics', () => {
     // is 0.6 of the way: 860. The class is the parsed one, set Far East here.
     const farEast = { ...VARIABLE, farEastCodePage: true };
     const loaded = sourceFontLayoutOptions(model('V'), [{ family: 'V', weight: '100 900', style: 'normal', resourceMetrics: farEast }],
-      { sources: [fontFiles({ faces: [{ family: 'V', url: 'https://app.example/v.ttf' }] })] }).sourceFonts.loaded;
+      { sources: [fontFiles({ faces: [{ family: 'V', url: 'https://app.example/v.ttf' }] })] }).sourceFonts;
     const metrics = Object.values(sourceFontLineMetrics(loaded, null));
     const at = (winAscent: number) => wordOpenTypeAutoLineRatios({ ...TABLES, winAscent, winDescent: 200, farEastCodePage: true })!.lineHeightRatio;
     const bold = metrics.find((metric) => metric.weight === 700 && metric.style === 'normal')!;
@@ -202,7 +203,7 @@ describe('served font line metrics', () => {
 
   it('carries the parsed code-page class of a table-backed face', () => {
     const loaded = sourceFontLayoutOptions(model('Ooxml Fixture Gap'), [{ family: 'Ooxml Fixture Gap', weight: '400', style: 'normal', resourceMetrics: TABLES }],
-      { sources: [fontFiles({ faces: [{ family: 'Ooxml Fixture Gap', url: 'https://app.example/gap.ttf' }] })] }).sourceFonts.loaded;
+      { sources: [fontFiles({ faces: [{ family: 'Ooxml Fixture Gap', url: 'https://app.example/gap.ttf' }] })] }).sourceFonts;
     // Grid allocation (segment-builder.ts) reads an explicit false.
     expect(Object.values(sourceFontLineMetrics(loaded, null)).every((metric) => metric.farEastCodePage === false)).toBe(true);
     const doc = model('Ooxml Fixture Gap');
@@ -217,14 +218,14 @@ describe('served font line metrics', () => {
 
   it('clamps a variable instance to the weight descriptor (a 400-only face paints bold synthesized)', () => {
     const loaded = sourceFontLayoutOptions(model('V'), [{ family: 'V', weight: '400', style: 'normal', resourceMetrics: VARIABLE }],
-      { sources: [fontFiles({ faces: [{ family: 'V', url: 'https://app.example/v.ttf' }] })] }).sourceFonts.loaded;
+      { sources: [fontFiles({ faces: [{ family: 'V', url: 'https://app.example/v.ttf' }] })] }).sourceFonts;
     const metrics = Object.values(sourceFontLineMetrics(loaded, null));
     expect(metrics.find((metric) => metric.weight === 700 && metric.style === 'normal')!.lineHeightRatio).toBeCloseTo(1.3, 9);
   });
 
   it('projects a measured normal line for a face without tables, owned by its private family', () => {
     const loaded = sourceFontLayoutOptions(model('Measured Face'), [{ family: 'Measured Face', weight: '400', style: 'normal', unicodeRange: 'U+0-FF' }],
-      { sources: [fontFiles({ faces: [{ family: 'Measured Face', url: 'https://app.example/m.woff2' }] })] }).sourceFonts.loaded;
+      { sources: [fontFiles({ faces: [{ family: 'Measured Face', url: 'https://app.example/m.woff2' }] })] }).sourceFonts;
     const line = { ascentRatio: 0.8, descentRatio: 0.2, lineGapRatio: 0.3 };
     const prepared: PreparedServedFaceLines = {
       faceLines: new Map([[0, { ownershipFamily: '__probe', lines: { '400:normal': line, '700:normal': line, '400:italic': null, '700:italic': line } }]]),
@@ -251,7 +252,7 @@ describe('served font line metrics', () => {
     // can share an hhea box with different usWin: nothing is inferred from it,
     // not even for a box equal to the catalogued face's.
     const loaded = sourceFontLayoutOptions(model('Yu Gothic'), [{ family: 'Yu Gothic', weight: '400', style: 'normal' }],
-      { sources: [fontFiles({ faces: [{ family: 'Yu Gothic', url: 'https://app.example/yu.woff2' }] })] }).sourceFonts.loaded;
+      { sources: [fontFiles({ faces: [{ family: 'Yu Gothic', url: 'https://app.example/yu.woff2' }] })] }).sourceFonts;
     const prepared = (line: { ascentRatio: number; descentRatio: number; lineGapRatio: number }): PreparedServedFaceLines => ({
       faceLines: new Map([[0, { ownershipFamily: '__probe', lines: { '400:normal': line } }]]), familyLines: new Map(),
     });
