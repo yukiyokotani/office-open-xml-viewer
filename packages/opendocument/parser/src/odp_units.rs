@@ -1,5 +1,10 @@
 //! Lengths, percentages, angles and colours of ODF attributes (Part 3 §18).
 
+// Colours, percentages and opacity are parsed by the helpers the ODT and ODS
+// readers share (one copy in the ODP WASM).
+pub(crate) use crate::odf_fill::with_alpha;
+pub(crate) use crate::odf_props::{hex_color as color, percent};
+
 pub const EMU_PER_CM: f64 = 360_000.0;
 pub const EMU_PER_PT: f64 = 12_700.0;
 /// 1/100 mm, the unit of `logwidth` / `logheight` (Part 3 §19.171).
@@ -37,12 +42,6 @@ fn length_i64(value: &str) -> Option<i64> {
     length_emu(value).map(|v| v.round() as i64)
 }
 
-/// A `percent` (§18.3.23) as a fraction: "50%" → 0.5.
-pub fn percent(value: &str) -> Option<f64> {
-    let number: f64 = value.trim().strip_suffix('%')?.trim().parse().ok()?;
-    number.is_finite().then_some(number / 100.0)
-}
-
 /// An `angle` (§18.3.1) in degrees: a plain number is degrees; `deg`,
 /// `rad` and `grad` units are converted.
 pub fn angle_degrees(value: &str) -> Option<f64> {
@@ -58,34 +57,6 @@ pub fn angle_degrees(value: &str) -> Option<f64> {
     };
     let number: f64 = number.trim().parse().ok()?;
     number.is_finite().then_some(number * factor)
-}
-
-/// A `color` (§18.3.8): `#rrggbb`, returned as six lowercase-free hex digits
-/// (uppercase, no `#`).
-pub fn color(value: &str) -> Option<String> {
-    let hex = value.trim().strip_prefix('#')?;
-    if hex.len() == 6 && hex.bytes().all(|b| b.is_ascii_hexdigit()) {
-        Some(hex.to_ascii_uppercase())
-    } else if hex.len() == 3 && hex.bytes().all(|b| b.is_ascii_hexdigit()) {
-        Some(
-            hex.chars()
-                .flat_map(|c| [c, c])
-                .collect::<String>()
-                .to_ascii_uppercase(),
-        )
-    } else {
-        None
-    }
-}
-
-/// Append an opacity (0–1) to a six-digit colour, as the renderer's
-/// RRGGBBAA form; fully opaque colours stay six digits.
-pub fn with_alpha(color: &str, opacity: f64) -> String {
-    let opacity = opacity.clamp(0.0, 1.0);
-    if opacity >= 1.0 || color.len() != 6 {
-        return color.to_string();
-    }
-    format!("{color}{:02X}", (opacity * 255.0).round() as u8)
 }
 
 pub fn rgb(color: &str) -> (f64, f64, f64) {

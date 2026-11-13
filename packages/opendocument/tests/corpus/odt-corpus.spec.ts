@@ -189,8 +189,9 @@ for (const file of files) {
         return { status: 'opened', pageCount: document.pageCount };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        // OoxmlError('unsupported-content', { reason: 'source-subset' }): the
-        // reader declined the input; the native pass supplies its code.
+        // 'unsupported-content' is how older checkouts declined content
+        // outside the reader's subset (kept so their runs still classify);
+        // the native pass supplies the reason for any rejection.
         const code = (error as { code?: unknown }).code;
         return { status: code === 'unsupported-content' ? 'rejected' : 'error', message: `${String(code ?? '')} ${message}`.trim() };
       }

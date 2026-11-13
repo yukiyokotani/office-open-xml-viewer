@@ -1230,7 +1230,7 @@ fn list_label<'a>(
             .and_then(|f| env.sheet.font_family(f).map(str::to_string))
             .or_else(|| {
                 t.attribute((NS_FO, "font-family"))
-                    .map(crate::odp_style::unquote_family)
+                    .map(crate::odf_props::unquote_family)
             })
     });
     if xml::is(level_node, NS_TEXT, "list-level-style-bullet") {
@@ -1465,7 +1465,7 @@ fn face(
             );
         }
         if let Some(family) = node.attribute(family_attr) {
-            return Some(crate::odp_style::unquote_family(family));
+            return Some(crate::odf_props::unquote_family(family));
         }
     }
     None
