@@ -323,37 +323,21 @@ function rangeIntersects(ranges: readonly (readonly [number, number])[], sorted:
   return false;
 }
 
-/** CSS Fonts 4 §2.5 keyword values of `font-stretch`, as percentages. */
-const STRETCH_KEYWORDS: Readonly<Record<string, number>> = {
-  'ultra-condensed': 50, 'extra-condensed': 62.5, condensed: 75, 'semi-condensed': 87.5, normal: 100,
-  'semi-expanded': 112.5, expanded: 125, 'extra-expanded': 150, 'ultra-expanded': 200,
-};
-
-/** A face descriptor as CSS matching compares it: a number for a numeric
- * weight or stretch (keywords and omitted values mapped: normal = 400 /
- * 100%, bold = 700), a keyword for a style; `undefined` for anything else
- * (a range, a math function): it may equal any value. */
-function descriptorValue(value: string | undefined, keywords: Readonly<Record<string, number | string>>): number | string | undefined {
-  const text = (value ?? 'normal').trim().toLowerCase();
-  if (Object.prototype.hasOwnProperty.call(keywords, text)) return keywords[text];
-  return /^[+]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?%?$/.test(text) ? Number(text.replace('%', '')) : undefined;
+/** A face's `font-style` when it is a plain keyword (omitted = `normal`);
+ * undefined for an oblique angle range or anything else. */
+function plainStyle({ style = 'normal' }: FontFaceDeclaration): string | undefined {
+  const text = style.trim().toLowerCase();
+  return text === 'normal' || text === 'italic' || text === 'oblique' ? text : undefined;
 }
 
-const DESCRIPTOR_KEYWORDS = [
-  { normal: 400, bold: 700 },
-  { normal: 'normal', italic: 'italic', oblique: 'oblique' },
-  STRETCH_KEYWORDS,
-] as const;
-
-/** Whether two faces can be candidates for one style request (CSS Fonts 4
- * §5.2 narrows by stretch, style and weight before `unicode-range`). Only
- * values known to differ separate them. */
+/** Whether two faces can be candidates for one style request: CSS Fonts 4
+ * §5.2 narrows by stretch, style and weight before `unicode-range`. Only a
+ * difference in plain style keywords (upright vs italic) separates them:
+ * weights and stretches are kept together whatever their values, which
+ * costs at most a few extra subsets of another weight, never precedence. */
 function mayMatchTogether(a: FontFaceDeclaration, b: FontFaceDeclaration): boolean {
-  const pairs = [[a.weight, b.weight], [a.style, b.style], [a.stretch, b.stretch]] as const;
-  return pairs.every(([x, y], index) => {
-    const left = descriptorValue(x, DESCRIPTOR_KEYWORDS[index]!), right = descriptorValue(y, DESCRIPTOR_KEYWORDS[index]!);
-    return left === undefined || right === undefined || left === right;
-  });
+  const left = plainStyle(a), right = plainStyle(b);
+  return left === undefined || right === undefined || left === right;
 }
 
 /**

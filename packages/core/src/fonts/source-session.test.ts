@@ -717,24 +717,23 @@ describe('FontSourceSession: run-time limits fail only their family', () => {
     expect(set.faces.map((face) => (face.source as ArrayBuffer).byteLength)).toEqual([4, 5]);
   });
 
-  it('keeps an unranged face with every subset it may compete with, whatever the spelling', async () => {
+  it('keeps an unranged face with every subset of the same style, whatever the weight spelling', async () => {
     const { calls } = installFetch({
       'https://app.example/any.woff2': { bytes: 4 },
       'https://app.example/cjk-400.woff2': { bytes: 5 },
-      'https://app.example/var.woff2': { bytes: 6 },
+      'https://app.example/hangul-700.woff2': { bytes: 6 },
     });
     const set = fakeSet();
-    // The unranged face precedes the subsets it may compete with: omitted
-    // weight equals '400', and a weight range may match any weight; 'bold'
-    // never competes with it.
     const session = open([fontFiles({ faces: [
       { family: 'Mixed', url: 'https://app.example/any.woff2' },
       { family: 'Mixed', url: 'https://app.example/cjk-400.woff2', weight: '400', unicodeRange: 'U+4E00-9FFF' },
-      { family: 'Mixed', url: 'https://app.example/var.woff2', weight: '100 900', unicodeRange: 'U+3000-30FF' },
       { family: 'Mixed', url: 'https://app.example/hangul-700.woff2', weight: 'bold', unicodeRange: 'U+AC00-D7AF' },
+      { family: 'Mixed', url: 'https://app.example/kana-italic.woff2', style: 'italic', unicodeRange: 'U+3000-30FF' },
     ] })], set);
     await session.ensure(demand(['Mixed'], [0x41]));
-    expect(calls.map((call) => call.url.split('/').pop())).toEqual(['any.woff2', 'cjk-400.woff2', 'var.woff2']);
+    // Upright faces of any weight stay with the unranged upright face; the
+    // italic subset is apart.
+    expect(calls.map((call) => call.url.split('/').pop())).toEqual(['any.woff2', 'cjk-400.woff2', 'hangul-700.woff2']);
     expect(set.faces.map((face) => (face.source as ArrayBuffer).byteLength)).toEqual([4, 5, 6]);
   });
 
