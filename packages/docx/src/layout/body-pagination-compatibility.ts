@@ -417,6 +417,49 @@ export function wordContinuousSectionRole(
     : undefined;
 }
 
+export const WORD_HIDDEN_PARAGRAPH_UNJOINABLE_PAGE_BREAK = defineCompatibilityRule({
+  id: 'word-hidden-paragraph-unjoinable-page-break',
+  evidence: {
+    kind: 'regression-test',
+    reference: 'packages/docx/src/pagination.test.ts#keeps the page break of a hidden paragraph followed by a framed paragraph',
+  },
+  description: 'ECMA-376 does not define how a vanished paragraph mark (§17.3.1.29, §17.3.2.41) interacts with paragraph properties. A run of consecutive hidden, unframed, inkless paragraphs joins the next paragraph and takes its properties, so a pageBreakBefore (§17.3.1.23) in the run is lost; when the run is followed directly by a table or by a non-drop-cap framed paragraph (§17.3.1.11) it cannot join, and the first pageBreakBefore in the run applies once. Evidence: PR #2195 Word 16 for Mac page counts on synthetic probes (hidden paragraphs with and without text; the break on the first or a later hidden paragraph; page-, margin- and text-anchored frames and a table keep the break; an ordinary following paragraph, directly or after another hidden paragraph, drops it). Untested and left on the previous behaviour (break dropped): runs ending at a section break, an explicit break, the end of the body or a hidden framed paragraph, hidden framed paragraphs themselves (they stay members of their frame group, §17.3.1.11), drop-cap successors, and how many breaks a run with several applies.',
+});
+
+/** Compatibility projection governed by
+ * {@link WORD_HIDDEN_PARAGRAPH_UNJOINABLE_PAGE_BREAK}: sequence indices of the
+ * hidden paragraphs whose pageBreakBefore applies as an authored break. */
+export function wordHiddenParagraphPageBreakEntries(
+  sequence: readonly BodyLayoutSequenceEntryFor<unknown>[],
+): ReadonlySet<number> {
+  const retained = new Set<number>();
+  const runMember = (entry: BodyLayoutSequenceEntryFor<unknown> | undefined): boolean =>
+    entry?.kind === 'consume-source' && entry.framed === undefined;
+  for (let start = 0; start < sequence.length;) {
+    if (!runMember(sequence[start])) {
+      start += 1;
+      continue;
+    }
+    let end = start;
+    while (runMember(sequence[end])) end += 1;
+    const next = sequence[end];
+    const blocksJoin = next?.kind === 'adjacent-table-group'
+      || (next?.kind === 'body-block'
+        && (next.block.kind === 'table' || next.block.framed === 'frame'));
+    if (blocksJoin) {
+      for (let index = start; index < end; index += 1) {
+        const entry = sequence[index]!;
+        if (entry.kind === 'consume-source' && entry.pageBreakBefore === true) {
+          retained.add(index);
+          break;
+        }
+      }
+    }
+    start = end;
+  }
+  return retained;
+}
+
 function paragraphHasOnlyDrawingAnchors(layout: ParagraphLayout): boolean {
   return layout.drawings.length > 0 && layout.lines.every((line) =>
     line.placements.every((placement) =>

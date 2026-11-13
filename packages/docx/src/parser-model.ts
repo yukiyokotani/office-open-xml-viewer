@@ -1065,6 +1065,7 @@ function acquiredBodyParagraph(paragraph: DocParagraph, source: SourceRef) {
     widowControl: paragraph.widowControl !== false,
     ...(paragraph.framePr?.vAnchor === 'text' && paragraph.framePr.dropCap === 'none'
       ? { textFrameMember: true as const } : {}),
+    ...paragraphFrameFact(paragraph),
     spaceBeforePt: paragraph.spaceBefore ?? 0,
     spaceAfterPt: paragraph.spaceAfter ?? 0,
     contextualSpacing: paragraph.contextualSpacing === true,
@@ -1108,59 +1109,20 @@ function repeatedFootnoteLastEntries(
   })));
 }
 
-function isHiddenBodyParagraph(
-  element: BodyElement | undefined,
-): element is Extract<BodyElement, { type: 'paragraph' }> {
-  return element?.type === 'paragraph'
-    && element.markVanish === true
-    && !paragraphHasUnavailableDrawing(element)
-    && isInklessParagraph(element);
-}
-
-/**
- * Body indices of hidden paragraphs whose `w:pageBreakBefore` (§17.3.1.23)
- * still applies.
- *
- * Observed Word behavior; ECMA-376 does not define how a vanished paragraph
- * mark (§17.3.1.29, §17.3.2.41) interacts with paragraph properties. A run of
- * consecutive hidden paragraphs joins the next paragraph, and the joined
- * paragraph takes that paragraph's properties, so the hidden page break is
- * lost. When the run is followed by a table or a framed paragraph (§17.3.1.11),
- * the run cannot join it, and Word starts a new page if any paragraph in the
- * run has a page break. Tested in Word 16 for Mac by page count: hidden
- * paragraphs with and without text, a break on the first or a later hidden
- * paragraph, page- and margin/text-anchored frames, and a table (break kept);
- * an ordinary following paragraph (break dropped). Runs that end at a section
- * break, an explicit break, or the end of the body are untested and keep the
- * previous behavior (break dropped).
- */
-function retainedHiddenPageBreaks(body: readonly BodyElement[]): ReadonlySet<number> {
-  const retained = new Set<number>();
-  for (let start = 0; start < body.length;) {
-    if (!isHiddenBodyParagraph(body[start])) {
-      start += 1;
-      continue;
-    }
-    let end = start;
-    while (isHiddenBodyParagraph(body[end])) end += 1;
-    const next = body[end];
-    const blocksJoin = next?.type === 'table'
-      || (next?.type === 'paragraph' && next.framePr != null);
-    if (blocksJoin) {
-      const breakIndex = body.slice(start, end)
-        .findIndex((element) => element.type === 'paragraph' && element.pageBreakBefore === true);
-      if (breakIndex >= 0) retained.add(start + breakIndex);
-    }
-    start = end;
-  }
-  return retained;
+/** §17.3.1.11 frame presence as a parse fact; dropCap other than none
+ * (§17.18.20) marks a drop-cap frame. */
+function paragraphFrameFact(
+  paragraph: Pick<DocParagraph, 'framePr'>,
+): Readonly<{ framed?: 'frame' | 'drop-cap' }> {
+  if (!paragraph.framePr) return {};
+  const dropCap = paragraph.framePr.dropCap;
+  return { framed: dropCap === 'drop' || dropCap === 'margin' ? 'drop-cap' : 'frame' };
 }
 
 function bodyLayoutSequenceInput(
   body: readonly BodyElement[],
   sectionAtMarker: (bodyIndex: number) => AcquiredBodySectionReference,
 ): readonly BodyLayoutSequenceEntryFor<AcquiredBodySectionReference>[] {
-  const hiddenPageBreaks = retainedHiddenPageBreaks(body);
   let bodyIndex = 0;
   return Object.freeze(Array.from(normalizeAdjacentTables(adjacentTableSequenceEntries(body)), (entry) => {
     if (entry.kind === 'adjacent-table-group') {
@@ -1181,12 +1143,21 @@ function bodyLayoutSequenceInput(
     const source = bodySourceAt(entryBodyIndex);
     bodyIndex += 1;
     if (element.type === 'paragraph') {
-      if (!isHiddenBodyParagraph(element)) {
+      if (element.markVanish !== true
+        || paragraphHasUnavailableDrawing(element)
+        || !isInklessParagraph(element)) {
         return Object.freeze({ kind: 'body-block' as const, block: acquiredBodyParagraph(element, source) });
       }
-      return hiddenPageBreaks.has(entryBodyIndex)
-        ? Object.freeze({ kind: 'authored-break' as const, source, break: 'pageBreakBefore' as const })
-        : Object.freeze({ kind: 'consume-source' as const, source, reason: 'hidden-paragraph' as const });
+      // Facts only: whether the hidden paragraph's pageBreakBefore
+      // (§17.3.1.23) still applies is decided by
+      // wordHiddenParagraphPageBreakEntries in projectBodyLayoutInput.
+      return Object.freeze({
+        kind: 'consume-source' as const,
+        source,
+        reason: 'hidden-paragraph' as const,
+        ...(element.pageBreakBefore === true ? { pageBreakBefore: true as const } : {}),
+        ...paragraphFrameFact(element),
+      });
     }
     if (element.type === 'table') {
       return Object.freeze({
