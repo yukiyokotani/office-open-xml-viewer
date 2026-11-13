@@ -189,7 +189,7 @@ impl<'a> Sheet<'a> {
                     if let Some(name) = face.attribute((NS_STYLE, "name")) {
                         let family = face
                             .attribute((NS_SVG, "font-family"))
-                            .map(unquote_family)
+                            .map(crate::odf_props::unquote_family)
                             .unwrap_or_else(|| name.to_string());
                         self.font_faces.insert(name, family);
                     }
@@ -203,9 +203,11 @@ impl<'a> Sheet<'a> {
                     .children()
                     .filter(|n| xml::is(*n, NS_STYLE, "master-page"))
                 {
-                    let name = master
-                        .attribute((NS_STYLE, "name"))
-                        .ok_or_else(|| invalid("a master page has no name"))?;
+                    // A nameless master page (§19.498.2 requires the
+                    // name) is one no page can select: skipped.
+                    let Some(name) = master.attribute((NS_STYLE, "name")) else {
+                        continue;
+                    };
                     // Its name selects its outline styles for every paragraph.
                     if name.len() > MAX_PROPERTY_VALUE_BYTES {
                         return Err(invalid("a master page name exceeds the name limit"));
@@ -226,9 +228,11 @@ impl<'a> Sheet<'a> {
             match (ns, local) {
                 (Some(NS_STYLE), "style") => {
                     check_style_record(node)?;
-                    let name = node
-                        .attribute((NS_STYLE, "name"))
-                        .ok_or_else(|| invalid("a style has no name"))?;
+                    // A nameless style cannot be referenced: skipped. A
+                    // repeated name replaces the earlier definition.
+                    let Some(name) = node.attribute((NS_STYLE, "name")) else {
+                        continue;
+                    };
                     let family = node.attribute((NS_STYLE, "family")).unwrap_or("");
                     match scope {
                         Some(scope) => {
@@ -340,13 +344,6 @@ impl<'a> Sheet<'a> {
         }
         Ok(out)
     }
-}
-
-/// `svg:font-family` is a CSS font-family list; the first family is used
-/// (quotes removed).
-pub fn unquote_family(value: &str) -> String {
-    let first = value.split(',').next().unwrap_or("").trim();
-    first.trim_matches(|c| c == '\'' || c == '"').to_string()
 }
 
 /// An ordered list of property elements (nearest first) for one property

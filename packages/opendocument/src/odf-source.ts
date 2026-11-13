@@ -50,8 +50,7 @@ const MAX_MIMETYPE_BYTES = 128;
  * The media type stored in the package's leading `mimetype` file, or
  * `undefined` when the bytes do not start with one. ODF Part 2 §3.3: the
  * `mimetype` file is the first ZIP entry, stored (method 0) and holds the
- * media type in ASCII. Only this first local header is read; the owning realm
- * validates the archive, the manifest and the absence of an extra field.
+ * media type in ASCII. Only this first local header is read.
  */
 export function leadingOdfMediaType(bytes: Uint8Array): string | undefined {
   if (bytes.byteLength < 30) return undefined;
@@ -61,19 +60,14 @@ export function leadingOdfMediaType(bytes: Uint8Array): string | undefined {
   const method = view.getUint16(8, true);
   const compressed = view.getUint32(18, true);
   const size = view.getUint32(22, true);
-  const nameLength = view.getUint16(26, true);
-  const extraLength = view.getUint16(28, true);
-  // Encrypted, stream-sized (data descriptor) or compressed entries are not a
-  // conforming `mimetype` file.
+  if (!isMimetypeName(bytes, 30, view.getUint16(26, true))) return undefined;
+  // Encrypted, stream-sized (data descriptor) or compressed entries are read
+  // through the central directory instead.
   if ((flags & 0x0009) !== 0 || method !== 0 || compressed !== size || size === 0 || size > MAX_MIMETYPE_BYTES) {
     return undefined;
   }
-  if (nameLength !== MIMETYPE_NAME.length) return undefined;
-  const start = 30 + nameLength + extraLength;
+  const start = 30 + MIMETYPE_NAME.length + view.getUint16(28, true);
   if (bytes.byteLength < start + size) return undefined;
-  for (let index = 0; index < nameLength; index++) {
-    if (bytes[30 + index] !== MIMETYPE_NAME[index]) return undefined;
-  }
   let mediaType = '';
   for (let index = start; index < start + size; index++) {
     const byte = bytes[index] as number;
@@ -81,6 +75,147 @@ export function leadingOdfMediaType(bytes: Uint8Array): string | undefined {
     mediaType += String.fromCharCode(byte);
   }
   return mediaType;
+}
+
+/**
+ * Whether the package's `mimetype` file holds one of `mediaTypes`. Producers
+ * store it first and uncompressed (Part 2 §3.3), which
+ * {@link leadingOdfMediaType} reads directly. A package re-zipped by a
+ * general archiver may compress it or list it later; LibreOffice opens such
+ * packages, and so do the readers. The claim then finds the `mimetype` entry
+ * in the central directory and compares its CRC-32 and size with each media
+ * type, so nothing is inflated in the calling realm; the reader verifies the
+ * content itself.
+ */
+export function claimsOdfMediaType(bytes: Uint8Array, mediaTypes: ReadonlySet<string>): boolean {
+  const leading = leadingOdfMediaType(bytes);
+  if (leading !== undefined) return mediaTypes.has(leading);
+  const entry = centralMimetypeEntry(bytes);
+  if (entry === undefined) return false;
+  for (const mediaType of mediaTypes) {
+    if (mediaType.length === entry.size && crc32(mediaType) === entry.crc) return true;
+  }
+  return false;
+}
+
+function isMimetypeName(bytes: Uint8Array, at: number, length: number): boolean {
+  if (length !== MIMETYPE_NAME.length || bytes.byteLength < at + length) return false;
+  for (let index = 0; index < length; index++) {
+    if (bytes[at + index] !== MIMETYPE_NAME[index]) return false;
+  }
+  return true;
+}
+
+interface MimetypeEntry { readonly crc: number; readonly size: number }
+
+/**
+ * The CRC-32 and size the central directory records for `mimetype`. Like the
+ * reader's ZIP preflight, an end record counts only where its comment ends
+ * the input, offsets are relative to the archive start (data may precede
+ * it), and ZIP64 records and sizes are resolved; a candidate whose directory
+ * does not walk is skipped.
+ */
+function centralMimetypeEntry(bytes: Uint8Array): MimetypeEntry | undefined {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const length = bytes.byteLength;
+  const u32 = (at: number) => (at >= 0 && at + 4 <= length ? view.getUint32(at, true) : -1);
+  const u64 = (at: number) => (at >= 0 && at + 8 <= length ? Number(view.getBigUint64(at, true)) : -1);
+  let zip64Records: Map<number, number[]> | undefined;
+  for (let end = length - 22; end >= Math.max(0, length - 22 - 0xffff); end--) {
+    if (u32(end) !== 0x06054b50 || end + 22 + view.getUint16(end + 20, true) !== length) continue;
+    const count = view.getUint16(end + 10, true);
+    const size = view.getUint32(end + 12, true);
+    const offset = view.getUint32(end + 16, true);
+    const locator = end - 20;
+    if (u32(locator) === 0x07064b50) {
+      // ZIP64: a record ending at its locator (its extensible data may
+      // vary), its directory ending at the record. The input is scanned for
+      // records once, indexed by where each ends.
+      zip64Records ??= indexZip64Records(view, u64);
+      const relative = u64(locator + 8);
+      for (const record of zip64Records.get(locator) ?? []) {
+        const entry = directoryEntry(view, record, record - relative,
+          count === 0xffff ? u64(record + 32) : count,
+          size === 0xffffffff ? u64(record + 40) : size,
+          offset === 0xffffffff ? u64(record + 48) : offset);
+        if (entry !== false) return entry;
+      }
+      if (count === 0xffff || size === 0xffffffff || offset === 0xffffffff) continue;
+    }
+    const entry = directoryEntry(view, end, end - offset - size, count, size, offset);
+    if (entry !== false) return entry;
+  }
+  return undefined;
+}
+
+/** ZIP64 end-of-central-directory records (at least 56 bytes) by end offset. */
+function indexZip64Records(view: DataView, u64: (at: number) => number): Map<number, number[]> {
+  const records = new Map<number, number[]>();
+  for (let at = view.byteLength - 56; at >= 0; at--) {
+    if (view.getUint32(at, true) !== 0x06064b50) continue;
+    const size = u64(at + 4);
+    if (size < 44) continue;
+    const end = at + 12 + size;
+    const list = records.get(end);
+    if (list === undefined) records.set(end, [at]); else list.push(at);
+  }
+  return records;
+}
+
+/**
+ * The `mimetype` entry of the directory at archive-relative `offset` that ends
+ * exactly at `directoryEnd`, or `false` when the candidate does not hold one
+ * coherent directory.
+ */
+function directoryEntry(view: DataView, directoryEnd: number, base: number, count: number, size: number, offset: number): MimetypeEntry | undefined | false {
+  if (base < 0 || count < 0 || size < 0 || offset < 0 || base + offset + size !== directoryEnd) return false;
+  return walkCentralDirectory(view, base + offset, directoryEnd, count);
+}
+
+/** The `mimetype` entry of a directory, or `false` when it does not walk. */
+function walkCentralDirectory(view: DataView, start: number, limit: number, count: number): MimetypeEntry | undefined | false {
+  const bytes = new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
+  let at = start;
+  let found: MimetypeEntry | undefined;
+  for (let index = 0; index < count; index++) {
+    if (at + 46 > limit || view.getUint32(at, true) !== 0x02014b50) return false;
+    const nameLength = view.getUint16(at + 28, true);
+    const extraLength = view.getUint16(at + 30, true);
+    const next = at + 46 + nameLength + extraLength + view.getUint16(at + 32, true);
+    if (next > limit) return false;
+    if (found === undefined && isMimetypeName(bytes, at + 46, nameLength)) {
+      let size = view.getUint32(at + 24, true);
+      if (size === 0xffffffff) {
+        // ZIP64 extended information (0x0001): the uncompressed size first.
+        size = -1;
+        const extraEnd = at + 46 + nameLength + extraLength;
+        for (let field = at + 46 + nameLength; field + 4 <= extraEnd;) {
+          const fieldSize = view.getUint16(field + 2, true);
+          if (field + 4 + fieldSize > extraEnd) break;
+          if (view.getUint16(field, true) === 0x0001 && fieldSize >= 8) {
+            size = Number(view.getBigUint64(field + 4, true));
+            break;
+          }
+          field += 4 + fieldSize;
+        }
+      }
+      found = { crc: view.getUint32(at + 16, true), size };
+    }
+    at = next;
+  }
+  // An optional digital signature record may close the directory.
+  if (at + 6 <= limit && view.getUint32(at, true) === 0x05054b50) at += 6 + view.getUint16(at + 4, true);
+  return at === limit ? found : false;
+}
+
+/** CRC-32 (ZIP, reflected 0xEDB88320) of an ASCII string. */
+function crc32(text: string): number {
+  let crc = 0xffffffff;
+  for (let index = 0; index < text.length; index++) {
+    crc ^= text.charCodeAt(index);
+    for (let bit = 0; bit < 8; bit++) crc = (crc >>> 1) ^ (0xedb88320 & -(crc & 1));
+  }
+  return (crc ^ 0xffffffff) >>> 0;
 }
 
 export function createOdfSource<T extends ModelSourceTarget>(
@@ -111,8 +246,7 @@ export function createOdfSource<T extends ModelSourceTarget>(
   return Object.freeze({
     target,
     claim(bytes: Uint8Array): boolean {
-      const mediaType = leadingOdfMediaType(bytes);
-      return mediaType !== undefined && mediaTypes.has(mediaType);
+      return claimsOdfMediaType(bytes, mediaTypes);
     },
     beginLoad() {
       // The calling realm retains no transfer or native handle; the opened

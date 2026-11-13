@@ -28,7 +28,7 @@ use crate::style::ListStyle;
 use docx_model::{AnchorHostMetrics, TabStop};
 
 /// Levels a list style defines (§19.840 `text:level`).
-const MAX_LEVELS: u32 = 10;
+const MAX_LEVELS: u32 = crate::style::MAX_LIST_LEVEL;
 /// Counting bound (LibreOffice counts to 32768, measured).
 const MAX_COUNTED: u32 = 1_000_000;
 /// LibreOffice's margin around a picture label, on every side (measured:
@@ -759,11 +759,13 @@ impl<'a> Reader<'a> {
         budget::tick(list.element.nodes())?;
         // The definition of this level, else the nearest lower one (a list
         // nested deeper than its style defines).
+        // A definition outside levels 1–10 is never used (as the level
+        // text styles of `style::read_list_style_named`).
         let level_of = |child: &crate::style::Element| {
             child
                 .attributes
                 .get(&(NS_TEXT.to_string(), "level".to_string()))
-                .and_then(|value| value.parse::<u32>().ok())
+                .and_then(|value| crate::style::list_level_value(value))
         };
         let definition = list
             .element

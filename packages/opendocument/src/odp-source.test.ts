@@ -13,13 +13,15 @@ import { buildOdpFixture } from './odp-fixture.js';
 const PRESENTATION = 'application/vnd.oasis.opendocument.presentation';
 
 describe('ODP source claim', () => {
-  it('claims packaged presentations and templates by the leading mimetype only', () => {
+  it('claims packaged presentations and templates by their mimetype file', () => {
     expect(odp.claim(buildOdpFixture({ pages: '<draw:page/>' }))).toBe(true);
     expect(odp.claim(storedZip([['mimetype', `${PRESENTATION}-template`]]))).toBe(true);
     for (const other of ['application/vnd.oasis.opendocument.text', 'application/vnd.oasis.opendocument.graphics']) {
       expect(odp.claim(storedZip([['mimetype', other]]))).toBe(false);
     }
-    expect(odp.claim(storedZip([['[Content_Types].xml', '<Types/>'], ['mimetype', PRESENTATION]]))).toBe(false);
+    // A later mimetype entry (a re-zipped package) is claimed too.
+    expect(odp.claim(storedZip([['[Content_Types].xml', '<Types/>'], ['mimetype', PRESENTATION]]))).toBe(true);
+    expect(odp.claim(storedZip([['[Content_Types].xml', '<Types/>']]))).toBe(false);
     expect(loaded).toEqual([]);
   });
 

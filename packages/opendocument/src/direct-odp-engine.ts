@@ -46,7 +46,7 @@ export function createOdpSourceEngine(
 }> {
   const runtime = createDirectSourceRuntime<OdpGlue, OdpNativePresentation, ModelSourceOpenContext>({
     label: 'OpenDocument ODP',
-    mapNativeError: (error) => odfNativeRejection(error, 'odp'),
+    mapNativeError: odfNativeRejection,
     loadGlue,
     resolveWasm,
     // The shared governor's WASM encoding: absent → standard limit, 0 → the
