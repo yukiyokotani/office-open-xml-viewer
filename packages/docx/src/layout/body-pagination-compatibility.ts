@@ -423,7 +423,7 @@ export const WORD_HIDDEN_PARAGRAPH_UNJOINABLE_PAGE_BREAK = defineCompatibilityRu
     kind: 'regression-test',
     reference: 'packages/docx/src/pagination.test.ts#keeps the page break of a hidden paragraph followed by a framed paragraph',
   },
-  description: 'ECMA-376 does not define how a vanished paragraph mark (§17.3.1.29, §17.3.2.41) interacts with paragraph properties. A run of consecutive hidden, unframed, inkless paragraphs joins the next paragraph and takes its properties, so a pageBreakBefore (§17.3.1.23) in the run is lost; when the run is followed directly by a table or by a non-drop-cap framed paragraph (§17.3.1.11) it cannot join, and the first pageBreakBefore in the run applies once. Evidence: PR #2195 Word 16 for Mac page counts on synthetic probes (hidden paragraphs with and without text; the break on the first or a later hidden paragraph; page-, margin- and text-anchored frames and a table keep the break; an ordinary following paragraph, directly or after another hidden paragraph, drops it). Untested and left on the previous behaviour (break dropped): runs ending at a section break, an explicit break, the end of the body or a hidden framed paragraph, hidden framed paragraphs themselves (they stay members of their frame group, §17.3.1.11), drop-cap successors, and how many breaks a run with several applies.',
+  description: 'ECMA-376 does not define how a vanished paragraph mark (§17.3.1.29, §17.3.2.41) interacts with paragraph properties. A run of consecutive hidden, unframed, inkless paragraphs joins the next paragraph and takes its properties, so a pageBreakBefore (§17.3.1.23) in the run is lost; when the run is followed directly by a table or by a non-drop-cap framed paragraph (§17.3.1.11) it cannot join, and the pageBreakBefore of the only break-carrying paragraph in the run applies. Evidence: PR #2195 Word 16 for Mac page counts on synthetic probes (hidden paragraphs with and without text; the break on the first or a later hidden paragraph; page-, margin- and text-anchored frames and a table keep the break; an ordinary following paragraph, directly or after another hidden paragraph, drops it). Untested and left on the previous behaviour (break dropped): runs ending at a section break, an explicit break, the end of the body or a hidden framed paragraph, hidden framed paragraphs themselves (they stay members of their frame group, §17.3.1.11), drop-cap successors, and runs in which more than one paragraph carries pageBreakBefore.',
 });
 
 /** Compatibility projection governed by
@@ -447,13 +447,13 @@ export function wordHiddenParagraphPageBreakEntries(
       || (next?.kind === 'body-block'
         && (next.block.kind === 'table' || next.block.framed === 'frame'));
     if (blocksJoin) {
+      const breaks: number[] = [];
       for (let index = start; index < end; index += 1) {
         const entry = sequence[index]!;
-        if (entry.kind === 'consume-source' && entry.pageBreakBefore === true) {
-          retained.add(index);
-          break;
-        }
+        if (entry.kind === 'consume-source' && entry.pageBreakBefore === true) breaks.push(index);
       }
+      // Only a run with exactly one break was observed; several stay dropped.
+      if (breaks.length === 1) retained.add(breaks[0]!);
     }
     start = end;
   }
