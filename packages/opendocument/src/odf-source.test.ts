@@ -118,6 +118,26 @@ it('claims in bounded time when many end records point at ZIP64 locators', () =>
   expect(performance.now() - started).toBeLessThan(500);
 });
 
+it('claims in bounded time when many end records reuse one long directory', () => {
+  // 65,534 one-letter central entries, then ~2,900 end records whose
+  // directories all start at byte 0 and run into the next end record.
+  const entries = 65_534;
+  const entry = [0x50, 0x4b, 0x01, 0x02, ...new Array<number>(24).fill(0), 1, 0, ...new Array<number>(16).fill(0), 0x61];
+  const directory = entries * entry.length;
+  const bytes = new Uint8Array(directory + 0xffff);
+  for (let index = 0; index < entries; index++) bytes.set(entry, index * entry.length);
+  const view = new DataView(bytes.buffer);
+  for (let end = directory; end + 22 <= bytes.length; end += 22) {
+    view.setUint32(end, 0x06054b50, true);
+    view.setUint16(end + 10, 0xfffe, true);
+    view.setUint32(end + 12, end, true);
+    view.setUint16(end + 20, bytes.length - end - 22, true);
+  }
+  const started = performance.now();
+  expect(odt.claim(bytes)).toBe(false);
+  expect(performance.now() - started).toBeLessThan(500);
+});
+
 describe('ODT source claim', () => {
   it('claims packaged text documents and templates by their mimetype file', () => {
     expect(odt.claim(buildOdtFixture({ body: '<text:p/>' }))).toBe(true);

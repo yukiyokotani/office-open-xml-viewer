@@ -438,6 +438,23 @@ fn list_levels_outside_one_to_ten_are_ignored() {
     assert_eq!(texts(p[0])[0], "1.");
     assert_eq!(texts(p[1])[0], "2.");
     assert_eq!(texts(p[2]).last().map(String::as_str), Some("deep"));
+
+    // A style whose only definition is level 0 defines no level: its
+    // "I." format is not borrowed as the nearest lower level.
+    let styles = r##"<text:list-style style:name="Z"><text:list-level-style-number text:level="0" style:num-suffix="." style:num-format="I"/></text:list-style>"##;
+    let body = r##"<text:list text:style-name="Z"><text:list-item><text:p>zero</text:p></text:list-item></text:list>"##;
+    let document = read_fixture(Fixture {
+        styles,
+        body,
+        ..Fixture::default()
+    });
+    let p = paragraphs(&document.body);
+    assert!(
+        texts(p[0]).iter().all(|text| text != "I."),
+        "{:?}",
+        texts(p[0])
+    );
+    assert_eq!(texts(p[0]).last().map(String::as_str), Some("zero"));
 }
 
 #[test]

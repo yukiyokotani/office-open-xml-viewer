@@ -109,6 +109,15 @@ function isMimetypeName(bytes: Uint8Array, at: number, length: number): boolean 
 interface MimetypeEntry { readonly crc: number; readonly size: number }
 
 /**
+ * Work bound of one claim: central directory entries visited and ZIP64
+ * records kept, over all end-record candidates. Real packages need a few
+ * per entry; input that needs more is not claimed (it stays on the OOXML
+ * path), so hostile end records cannot stall the calling realm.
+ */
+const MAX_CLAIM_STEPS = 1 << 18;
+const EXHAUSTED: unique symbol = Symbol('claim work exhausted');
+
+/**
  * The CRC-32 and size the central directory records for `mimetype`. Like the
  * reader's ZIP preflight, an end record counts only where its comment ends
  * the input, offsets are relative to the archive start (data may precede
@@ -120,46 +129,52 @@ function centralMimetypeEntry(bytes: Uint8Array): MimetypeEntry | undefined {
   const length = bytes.byteLength;
   const u32 = (at: number) => (at >= 0 && at + 4 <= length ? view.getUint32(at, true) : -1);
   const u64 = (at: number) => (at >= 0 && at + 8 <= length ? Number(view.getBigUint64(at, true)) : -1);
-  let zip64Records: Map<number, number[]> | undefined;
+  const ends: number[] = [];
+  const locators = new Set<number>();
   for (let end = length - 22; end >= Math.max(0, length - 22 - 0xffff); end--) {
     if (u32(end) !== 0x06054b50 || end + 22 + view.getUint16(end + 20, true) !== length) continue;
-    const count = view.getUint16(end + 10, true);
-    const size = view.getUint32(end + 12, true);
-    const offset = view.getUint32(end + 16, true);
-    const locator = end - 20;
-    if (u32(locator) === 0x07064b50) {
-      // ZIP64: a record ending at its locator (its extensible data may
-      // vary), its directory ending at the record. The input is scanned for
-      // records once, indexed by where each ends.
-      zip64Records ??= indexZip64Records(view, u64);
-      const relative = u64(locator + 8);
-      for (const record of zip64Records.get(locator) ?? []) {
-        const entry = directoryEntry(view, record, record - relative,
-          count === 0xffff ? u64(record + 32) : count,
-          size === 0xffffffff ? u64(record + 40) : size,
-          offset === 0xffffffff ? u64(record + 48) : offset);
-        if (entry !== false) return entry;
-      }
-      if (count === 0xffff || size === 0xffffffff || offset === 0xffffffff) continue;
+    ends.push(end);
+    if (u32(end - 20) === 0x07064b50) locators.add(end - 20);
+  }
+  const budget = { steps: MAX_CLAIM_STEPS };
+  // ZIP64 records ending at one of those locators (their extensible data may
+  // vary), found in one pass.
+  const records = new Map<number, number[]>();
+  if (locators.size > 0) {
+    for (let at = length - 56; at >= 0; at--) {
+      if (view.getUint32(at, true) !== 0x06064b50) continue;
+      const size = u64(at + 4);
+      if (size < 44 || !locators.has(at + 12 + size)) continue;
+      if (--budget.steps < 0) return undefined;
+      const list = records.get(at + 12 + size);
+      if (list === undefined) records.set(at + 12 + size, [at]); else list.push(at);
     }
-    const entry = directoryEntry(view, end, end - offset - size, count, size, offset);
-    if (entry !== false) return entry;
+  }
+  try {
+    for (const end of ends) {
+      const count = view.getUint16(end + 10, true);
+      const size = view.getUint32(end + 12, true);
+      const offset = view.getUint32(end + 16, true);
+      const locator = end - 20;
+      if (locators.has(locator)) {
+        const relative = u64(locator + 8);
+        for (const record of records.get(locator) ?? []) {
+          const entry = directoryEntry(view, budget, record, record - relative,
+            count === 0xffff ? u64(record + 32) : count,
+            size === 0xffffffff ? u64(record + 40) : size,
+            offset === 0xffffffff ? u64(record + 48) : offset);
+          if (entry !== false) return entry;
+        }
+        if (count === 0xffff || size === 0xffffffff || offset === 0xffffffff) continue;
+      }
+      const entry = directoryEntry(view, budget, end, end - offset - size, count, size, offset);
+      if (entry !== false) return entry;
+    }
+  } catch (error) {
+    if (error === EXHAUSTED) return undefined;
+    throw error;
   }
   return undefined;
-}
-
-/** ZIP64 end-of-central-directory records (at least 56 bytes) by end offset. */
-function indexZip64Records(view: DataView, u64: (at: number) => number): Map<number, number[]> {
-  const records = new Map<number, number[]>();
-  for (let at = view.byteLength - 56; at >= 0; at--) {
-    if (view.getUint32(at, true) !== 0x06064b50) continue;
-    const size = u64(at + 4);
-    if (size < 44) continue;
-    const end = at + 12 + size;
-    const list = records.get(end);
-    if (list === undefined) records.set(end, [at]); else list.push(at);
-  }
-  return records;
 }
 
 /**
@@ -167,17 +182,22 @@ function indexZip64Records(view: DataView, u64: (at: number) => number): Map<num
  * exactly at `directoryEnd`, or `false` when the candidate does not hold one
  * coherent directory.
  */
-function directoryEntry(view: DataView, directoryEnd: number, base: number, count: number, size: number, offset: number): MimetypeEntry | undefined | false {
+function directoryEntry(
+  view: DataView, budget: { steps: number }, directoryEnd: number, base: number, count: number, size: number, offset: number,
+): MimetypeEntry | undefined | false {
   if (base < 0 || count < 0 || size < 0 || offset < 0 || base + offset + size !== directoryEnd) return false;
-  return walkCentralDirectory(view, base + offset, directoryEnd, count);
+  return walkCentralDirectory(view, budget, base + offset, directoryEnd, count);
 }
 
 /** The `mimetype` entry of a directory, or `false` when it does not walk. */
-function walkCentralDirectory(view: DataView, start: number, limit: number, count: number): MimetypeEntry | undefined | false {
+function walkCentralDirectory(
+  view: DataView, budget: { steps: number }, start: number, limit: number, count: number,
+): MimetypeEntry | undefined | false {
   const bytes = new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
   let at = start;
   let found: MimetypeEntry | undefined;
   for (let index = 0; index < count; index++) {
+    if (--budget.steps < 0) throw EXHAUSTED;
     if (at + 46 > limit || view.getUint32(at, true) !== 0x02014b50) return false;
     const nameLength = view.getUint16(at + 28, true);
     const extraLength = view.getUint16(at + 30, true);
