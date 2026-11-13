@@ -366,7 +366,7 @@ describe('PptxPresentation.destroy() — rejects in-flight worker requests', () 
       await (pres as unknown as {
         _ensureFontSources(names: string[], facts: undefined, scalars: undefined): Promise<void>;
       })._ensureFontSources(['Arial'], undefined, undefined);
-      expect(added.map((face) => face.family)).toEqual(installed.length ? [] : ['Arial']);
+      expect(added).toHaveLength(installed.length ? 0 : 1);
       pres.destroy();
     }
   });

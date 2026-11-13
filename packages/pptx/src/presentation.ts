@@ -1267,7 +1267,7 @@ export class PptxPresentation {
             embeddedFontTuples: this._embeddedFontTuples,
             officeFontRoutes,
             officeInstalledFamilies,
-            fontSubstitutions: this._fontSources?.loaded.substitutions,
+            fontSources: this._fontSources?.loaded,
             fetchMedia: this._fetchMedia,
             fetchImage: this._fetchImage,
             skipMediaControls: opts.skipMediaControls,

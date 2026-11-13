@@ -1361,11 +1361,16 @@ export interface XlsxChromeColors {
  *  (`LoadOptions.fonts`) in the painting realm: the substitutions whose served
  *  face loaded (keyed per lower-cased authored family; a script-scoped one
  *  paints only runs of its script) and regular full-name aliases
- *  ('lato regular' → 'Lato'). Absent without sources: font stacks are then
- *  exactly the offline stacks. */
+ *  ('lato regular' → 'Lato'), and the private families its faces are
+ *  registered under. Absent without sources: font stacks are then exactly
+ *  the offline stacks. */
 export interface XlsxLoadedFontSources {
   readonly substitutions: ReadonlyMap<string, { readonly family: string; readonly script?: import('@silurus/ooxml-core').FontSubstituteScript }>;
   readonly regularAliases: ReadonlyMap<string, string>;
+  /** Lower-cased served family → the private family the session registered
+   *  its faces under; every stack names it before the served family
+   *  (core `scopeServedFontFamilies`). */
+  readonly families: ReadonlyMap<string, string>;
 }
 
 /** Internal renderer options. The workbook owns both the byte source and the

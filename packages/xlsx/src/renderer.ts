@@ -7,7 +7,7 @@ import { inheritCellFontLanguage, usesJapaneseCellFonts } from './internal/cell-
 import { drawShapeStackedText } from './shape-stacked-text.js';
 import { cellXfAt, effectiveCellStyleIndex } from './internal/cell-style.js';
 import type { CjkLang } from '@silurus/ooxml-core';
-import { quoteCssFontFamily } from '@silurus/ooxml-core/internal/css-font-family';
+import { quoteCssFontFamily, scopeServedFontFamilies } from '@silurus/ooxml-core/internal/css-font-family';
 import { arabicFallbackFamilies, containsArabicFallbackText } from '@silurus/ooxml-core/internal/font-stack';
 import {
   breakDrawingMlText, drawingMlTextRect, drawingMlLineHeight,
@@ -260,6 +260,7 @@ function fontSourceFingerprint(sources: XlsxLoadedFontSources | undefined): stri
     key = JSON.stringify([
       [...sources.substitutions].map(([family, sub]) => [family, sub.family, sub.script ?? '']).sort(),
       [...sources.regularAliases].sort(),
+      [...sources.families].sort(),
     ]);
     fontSourceFingerprints.set(sources, key);
   }
@@ -322,7 +323,7 @@ function bindNormalFontState(
     ? computeMdw(worksheet.defaultFontFamily, worksheet.defaultFontSize, route,
       sources?.substitutions, worksheet.defaultFontBold ? 700 : 400,
       worksheet.defaultFontItalic ? 'italic' : 'normal', measureCtx,
-      regularAliasOf(sources, worksheet.defaultFontFamily))
+      regularAliasOf(sources, worksheet.defaultFontFamily), sources?.families)
     : undefined;
   const next = { tupleKey, route, hasDeclaredFace, canvasMdw };
   const old = normalFontBindingByWorksheet.get(worksheet);
@@ -366,6 +367,14 @@ function contextRegularAlias(ctx: CanvasRenderingContext2D, name: string | null 
 
 function contextSubstitutions(ctx: CanvasRenderingContext2D): LoadedSubstitutions | undefined {
   return fontSourcesByContext.get(ctx)?.substitutions;
+}
+
+/** A font-family list bound to `ctx` with this realm's served families
+ *  scoped: font sources register their faces under the workbook session's
+ *  private families (core source-session.ts), never under the real names,
+ *  so another open document's faces are never selected for this one. */
+function contextScoped(ctx: CanvasRenderingContext2D, families: string): string {
+  return scopeServedFontFamilies(families, fontSourcesByContext.get(ctx)?.families);
 }
 
 export function bindXlsxWorksheetOfficeFontRoutes(
@@ -571,6 +580,7 @@ export function computeMdw(
   style: 'normal' | 'italic' = 'normal',
   ownerCtx?: CanvasRenderingContext2D,
   regularAlias?: string,
+  servedFamilies?: ReadonlyMap<string, string>,
 ): number {
   const sizePx = sizePt * PT_TO_PX;
   // A viewer-owned context resolves CSS faces in its own Document (which may
@@ -584,7 +594,8 @@ export function computeMdw(
   const stylePrefix = weight !== 400 || style !== 'normal' ? `${style} ${weight} ` : '';
   if (ownerCtx) ctx.save();
   try {
-    ctx.font = `${stylePrefix}${sizePx}px ${fontStackFor(family, undefined, '', route, substitutions, undefined, regularAlias)}`;
+    ctx.font = `${stylePrefix}${sizePx}px ${scopeServedFontFamilies(
+      fontStackFor(family, undefined, '', route, substitutions, undefined, regularAlias), servedFamilies)}`;
     let mdw = 0;
     for (const d of '0123456789') {
       const w = ctx.measureText(d).width;
@@ -634,6 +645,7 @@ export function getMdwForWorksheet(ws: Pick<Worksheet,
     style,
     undefined,
     regularAliasOf(fontSourcesByWorksheet.get(ws as Worksheet), ws.defaultFontFamily),
+    fontSourcesByWorksheet.get(ws as Worksheet)?.families,
   );
 }
 
@@ -1154,13 +1166,13 @@ function buildFont(ctx: CanvasRenderingContext2D, font: CellFont, cs = 1, cjkFal
   const sizePx = Math.max(1, Math.round(font.size * PT_TO_PX * cs));
   const selected = cachedThemeCellFont(font, themeCellFontByContext.get(ctx));
   const weight = selected.weight === 400 ? '' : `${selected.weight} `;
-  return `${style}${weight}${sizePx}px ${fontStackFor(
+  return `${style}${weight}${sizePx}px ${contextScoped(ctx, fontStackFor(
     selected.family, cjkFallback, text,
     officeRoute(ctx, selected.family, font.bold, font.italic),
     contextSubstitutions(ctx),
     selected.fallbackAlias,
     contextRegularAlias(ctx, selected.family),
-  )}`;
+  ))}`;
 }
 
 /**
@@ -4991,10 +5003,10 @@ export function drawShapeText(
   const textFont = (run: Extract<import('./types.js').ShapeTextRun, { type: 'text' }>, fontScale = 1): { font: string; px: number } => {
     const size = run.size > 0 ? run.size : DEFAULT_FONT_SIZE;
     const px = size * PT_TO_PX * cs * fontScale;
-    const family = fontStackFor(run.fontFace, cjkFallback, run.text,
+    const family = contextScoped(ctx, fontStackFor(run.fontFace, cjkFallback, run.text,
       officeRoute(ctx, run.fontFace, run.bold, run.italic),
       contextSubstitutions(ctx),
-      undefined, contextRegularAlias(ctx, run.fontFace));
+      undefined, contextRegularAlias(ctx, run.fontFace)));
     return { font: `${run.italic ? 'italic ' : ''}${run.bold ? 'bold ' : ''}${px}px ${family}`, px };
   };
 
@@ -5184,9 +5196,9 @@ export function drawShapeText(
       }
       return {
         height: pxSize * 1.2,
-        ascent: measuredAscent(`${pxSize}px ${fontStackFor(face, undefined, '',
+        ascent: measuredAscent(`${pxSize}px ${contextScoped(ctx, fontStackFor(face, undefined, '',
           officeRoute(ctx, face), contextSubstitutions(ctx),
-          undefined, contextRegularAlias(ctx, face))}`, pxSize),
+          undefined, contextRegularAlias(ctx, face)))}`, pxSize),
       };
     };
     const reduction = txt.autoFit === 'norm' ? txt.lnSpcReduction ?? 0 : 0;
@@ -6154,7 +6166,7 @@ function renderCharts(
     // loaded (ChartModel.fontSubstitutions), as cell text does.
     renderChart(
       ctx,
-      withChartFontSubstitutions(anchor.chart, chartFontSubstitutions(contextSubstitutions(ctx))),
+      withChartFontSubstitutions(anchor.chart, chartFontSubstitutions(fontSourcesByContext.get(ctx))),
       cs === 1
         ? { x: cx, y: cy, w: cw, h: ch }
         : { x: cx / cs, y: cy / cs, w: cw / cs, h: ch / cs },
@@ -6287,7 +6299,7 @@ export function drawSlicerFrame(
     ctx.fillRect(x + 1, y + 1, w - 2, headerH);
   }
   ctx.fillStyle = style?.header?.fontColor ?? SLICER_HEADER_FG;
-  ctx.font = slicerFont(style?.header, SLICER_HEADER_FONT, cs, contextSubstitutions(ctx), caption);
+  ctx.font = slicerFont(style?.header, SLICER_HEADER_FONT, cs, fontSourcesByContext.get(ctx), caption);
   ctx.textBaseline = 'middle';
   ctx.textAlign = 'left';
   const headerPad = 6 * cs;
@@ -6344,7 +6356,7 @@ export function drawSlicerFrame(
         ctx.strokeRect(listX + 0.5, iy + 0.5, listW - 1, itemH - 1);
       }
     }
-    ctx.font = slicerFont(itemStyle, SLICER_ITEM_FONT, cs, contextSubstitutions(ctx), item.name);
+    ctx.font = slicerFont(itemStyle, SLICER_ITEM_FONT, cs, fontSourcesByContext.get(ctx), item.name);
     ctx.fillStyle = itemStyle?.fontColor ??
       (selected ? SLICER_ITEM_SEL_FG : SLICER_ITEM_OFF_FG);
     drawClippedText(ctx, item.name, listX + itemPad, iy + itemH / 2 + 1, listW - 2 * itemPad);
@@ -6377,7 +6389,7 @@ function slicerFont(
   style: SlicerElementStyle | undefined,
   fallback: string,
   cs: number,
-  substitutions: LoadedSubstitutions | undefined,
+  sources: XlsxLoadedFontSources | undefined,
   text: string,
 ): string {
   if (!style) return scaleFont(fallback, cs);
@@ -6386,9 +6398,9 @@ function slicerFont(
   // An authored slicer face takes the substitute a font source loaded for
   // it, exactly as cell and shape text do (script-gated by the painted text).
   const family = style.fontFamily
-    ? `${quoteCssFontFamily(style.fontFamily)}, ${loadedSubstitutePart(substitutions, style.fontFamily, text)}"Segoe UI", sans-serif`
+    ? `${quoteCssFontFamily(style.fontFamily)}, ${loadedSubstitutePart(sources?.substitutions, style.fontFamily, text)}"Segoe UI", sans-serif`
     : '"Meiryo UI", "Segoe UI", sans-serif';
-  return `${weight}${size}px ${family}`;
+  return `${weight}${size}px ${scopeServedFontFamilies(family, sources?.families)}`;
 }
 
 function scaleFont(css: string, cs: number): string {

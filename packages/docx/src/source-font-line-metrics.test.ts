@@ -130,6 +130,22 @@ describe('served font line metrics', () => {
     expect((line!.ascent + line!.descent) / 10).toBeCloseTo(word.lineHeightRatio, 6);
   });
 
+  it('keeps its served metrics whatever another open document serves under the same family name', () => {
+    // Another document's source serves "Ooxml Fixture Gap" with other faces.
+    // Its registration (under that document's private family, or the real
+    // name as before) neither joins this document's matched set nor declines
+    // its served metrics.
+    const served = { family: 'Ooxml Fixture Gap', weight: '400', style: 'normal', resourceMetrics: TABLES };
+    const doc = model('Ooxml Fixture Gap');
+    const options = sourceFontLayoutOptions(doc, [served], {
+      sources: [fontFiles({ faces: [{ family: 'Ooxml Fixture Gap', url: 'https://app.example/gap.ttf' }] })],
+    });
+    const other = [{ family: 'Ooxml Fixture Gap', status: 'loaded', weight: '400', style: 'normal', unicodeRange: 'U+0-10FFFF' }];
+    const alone = sourceFontLineMetrics(options.sourceFonts.loaded, null);
+    expect(Object.keys(alone).length).toBeGreaterThan(0);
+    expect(sourceFontLineMetrics(options.sourceFonts.loaded, other as unknown as FontFaceSet)).toEqual(alone);
+  });
+
   it('keeps the Canvas box for a served face whose tables are unavailable', () => {
     // A face the browser fetched itself (or WOFF/WOFF2): no bytes to read.
     const served = { family: 'Ooxml Fixture Gap', weight: '400', style: 'normal' };

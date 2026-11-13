@@ -69,7 +69,7 @@ class IdentityHash {
   }
 }
 
-/** Content key of one face's bytes or `data:` URL, as used in registry
+/** Content key of one face's bytes or `data:` URL, as used in registration
  * signatures (a `data:` URL can be tens of MiB; the signature stays short). */
 export function fontContentKey(value: ArrayBuffer | string): string {
   if (typeof value === 'string') return `data:${value.length}:${new IdentityHash().text(value).digest()}`;

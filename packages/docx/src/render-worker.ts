@@ -489,7 +489,7 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest | WorkerSvgDecod
         if (requestedGeneration !== parseGeneration) throw new Error('render-worker parse was superseded');
         officeFontFaces = officeFaces;
         fontSourceSession = loadedSources?.session ?? null;
-        chartFontSubstitutionsOfDoc = chartFontSubstitutions(loadedSources?.loaded.substitutions);
+        chartFontSubstitutionsOfDoc = chartFontSubstitutions(loadedSources?.loaded);
         embeddedFontFaces = embeddedFonts.faces;
         fontDiagnostics = embeddedFonts.diagnostics ?? [];
         fontsTransferred = true;

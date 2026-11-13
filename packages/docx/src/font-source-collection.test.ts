@@ -802,6 +802,8 @@ describe('substitution relationships are keyed per authored family', () => {
     const painted = calls.filter((call) => call.text.includes('Latin'));
     expect(painted.length).toBeGreaterThan(0);
     expect(painted.map((call) => call.face)).toEqual(painted.map(() => 'Alpha Face'));
-    expect(painted.every((call) => cssFamilies(call.font)[0] === 'Alpha Face')).toBe(true);
+    // Its own served family leads, through the document's private family.
+    expect(painted.every((call) => /^ooxml-font-source-test-\d+$/.test(cssFamilies(call.font)[0] ?? '')
+      && cssFamilies(call.font)[1] === 'Alpha Face')).toBe(true);
   });
 });

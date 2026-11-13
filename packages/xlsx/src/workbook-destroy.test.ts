@@ -249,13 +249,13 @@ describe('XlsxWorkbook.destroy() — rejects in-flight worker requests', () => {
     const workbook = wb as unknown as XlsxWorkbook;
     await (workbook as unknown as FontSourceInternals).prepareFontSources(FONT_WORKBOOK, FONTS);
     await workbook[retainXlsxViewerFonts](G.document as Document);
-    expect(added.map((face) => face.family)).toEqual(['Carlito']);
+    expect(added).toHaveLength(1);
     wb.destroy();
     expect(added).toHaveLength(0);
     expect((wb as unknown as { retainedFontSets: Map<unknown, unknown> }).retainedFontSets.size).toBe(0);
   });
 
-  it('an in-flight destroy releases once and preserves another workbook holder', async () => {
+  it('an in-flight destroy releases once and preserves another workbook\'s faces', async () => {
     let open!: () => void;
     const { added } = installFontFaceSet(new Promise<void>((resolve) => { open = resolve; }), true);
     const first = makeWorkbook().wb as unknown as XlsxWorkbook;
@@ -266,8 +266,9 @@ describe('XlsxWorkbook.destroy() — rejects in-flight worker requests', () => {
 
     const firstRetain = first[retainXlsxViewerFonts](targetDocument);
     const secondRetain = second[retainXlsxViewerFonts](targetDocument);
-    // Destroy while the shared face is still loading.
-    await vi.waitFor(() => expect(added).toHaveLength(1));
+    // Destroy while the faces are still loading. Each workbook registers its
+    // own face (under its private family); the destroyed one's goes.
+    await vi.waitFor(() => expect(added).toHaveLength(2));
     first.destroy();
     open();
     const [releaseFirst] = await Promise.all([firstRetain, secondRetain]);

@@ -6,7 +6,6 @@ import {
 } from '@silurus/ooxml-core';
 import {
   fontFamilyKey,
-  fontSourceFaceIdentity,
   parseUnicodeRange,
   releaseFaces,
   retainFace,
@@ -178,7 +177,7 @@ export async function prepareServedFaceLines(
   const requests = sources ? servedFaceLineRequests(sources) : [];
   const owner = typeof document !== 'undefined' && document.body && document.fonts === fontSet ? document : null;
   // Application faces are measured only where they live: the DOM realm.
-  const appFaces = owner ? appRegisteredFaces(sources, fontSet, families) : [];
+  const appFaces = owner ? appRegisteredFaces(fontSet, families) : [];
   if (!fontSet || (requests.length === 0 && appFaces.length === 0)) return { ...NO_SERVED_FACE_LINES, faces: [] };
   if (signal?.aborted) return { ...NO_SERVED_FACE_LINES, faces: [] };
   const sentinels = await loadNativeRouteSentinels(fontSet);
@@ -224,15 +223,15 @@ export async function prepareServedFaceLines(
 const unquoted = (family: string) => family.trim().replace(/^(['"])(.*)\1$/, '$2');
 
 /** Loaded application FontFaces of `families` that are their family's only
- * loaded face, cover U+0020, and are not this session's own faces. */
+ * loaded face and cover U+0020. Font sources register under private families
+ * (core source-session.ts), so a face declaring a document family is always
+ * the application's own. */
 export function appRegisteredFaces(
-  sources: LoadedFontSources | undefined,
   fontSet: FontFaceSet | null,
   families: readonly string[],
 ): FontFace[] {
   if (!fontSet || typeof fontSet[Symbol.iterator] !== 'function') return [];
   const wanted = new Set(families.map(fontFamilyKey));
-  const session = new Set(sources?.faces.map((face) => face.face) ?? []);
   const byFamily = new Map<string, FontFace[]>();
   for (const face of fontSet) {
     if (face.status !== 'loaded') continue;
@@ -242,9 +241,7 @@ export function appRegisteredFaces(
   const single: FontFace[] = [];
   for (const faces of byFamily.values()) {
     const [face] = faces;
-    // A face any font-source session registered is a served face, not one
-    // the application registered.
-    if (faces.length !== 1 || !face || session.has(face) || fontSourceFaceIdentity(face) !== undefined) continue;
+    if (faces.length !== 1 || !face) continue;
     const ranges = parseUnicodeRange(face.unicodeRange) ?? [[0, 0x10ffff]];
     if (ranges.some(([lo, hi]) => lo <= 0x20 && 0x20 <= hi)) single.push(face);
   }

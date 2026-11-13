@@ -308,6 +308,10 @@ What paints, highest first:
 4. A source face for a declared substitute.
 5. The host's fallback chain.
 
+Source faces belong to the document that loaded them. Two documents open at
+the same time never paint or lay out with each other's faces, even when their
+sources serve different faces under the same family name.
+
 ## Substitutions
 
 `officeFontSubstitutions` (`OFFICE_FONT_SUBSTITUTIONS` inside the library) is

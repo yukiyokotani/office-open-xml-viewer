@@ -1095,7 +1095,7 @@ export class DocxDocument {
       throw new PaginationAbortError();
     }
     this._fontSourceSession = loaded.session;
-    this._chartFontSubstitutions = chartFontSubstitutions(loaded.loaded.substitutions);
+    this._chartFontSubstitutions = chartFontSubstitutions(loaded.loaded);
     return {
       installedSubstituteFamilies: plan.installedSubstituteFamilies,
       sourceFonts: { names: loaded.names, loaded: loaded.loaded },

@@ -1,5 +1,5 @@
 import { cjkLangFromLanguage, type CjkLang, type ResolvedFontMetric } from '@silurus/ooxml-core';
-import { quoteCssFontFamily } from '@silurus/ooxml-core/internal/css-font-family';
+import { parseFamilyList, quoteCssFontFamily, scopeServedFontFamilies } from '@silurus/ooxml-core/internal/css-font-family';
 import type { LayoutDiagnostic } from './types.js';
 import { stableFingerprint } from './fingerprint.js';
 import { ownValue } from '@silurus/ooxml-core/internal/own-key';
@@ -112,6 +112,12 @@ export interface FontResolverOptions {
   /** Measured native route lines keyed by {@link nativeRouteMetricKey}. They
    * participate in cache identity: main and worker resolve the same table. */
   readonly nativeRouteMetrics?: Readonly<Record<string, NativeRouteLineMetric>>;
+  /** Lower-cased served family → the private family this document's font
+   * sources registered its faces under (core `LoadedFontSources.families`).
+   * Every route list names it before the served family
+   * (`scopeServedFontFamilies`), so this document's routes select its own
+   * served faces and never another document's. */
+  readonly servedFamilies?: ReadonlyMap<string, string>;
 }
 
 /** Exact native route identity: the complete CSS family list Canvas receives
@@ -233,12 +239,30 @@ export function createFontResolver(
   const nativeRouteMetrics = Object.freeze(Object.fromEntries(
     Object.entries(options.nativeRouteMetrics ?? {}).sort(([a], [b]) => a.localeCompare(b)),
   ));
+  const servedFamilies = options.servedFamilies?.size ? options.servedFamilies : undefined;
   const fingerprint = stableFingerprint('fonts', {
     faces, nativeFamilyLists, regionalFamilyLists, scriptScopedFamilies,
     ...(installedFamilies.length > 0 ? { installedFamilies } : {}),
     ...(shadowedFamilies.length > 0 ? { shadowedFamilies } : {}),
     ...(Object.keys(nativeRouteMetrics).length > 0 ? { nativeRouteMetrics } : {}),
+    ...(servedFamilies ? { servedFamilies: [...servedFamilies].sort(([a], [b]) => a.localeCompare(b)) } : {}),
   });
+  const served = (familyList: string): string => scopeServedFontFamilies(familyList, servedFamilies);
+  const servedAliases = new Set(servedFamilies?.values());
+  // A native route line is measured on the unscoped list (native route
+  // enumeration runs before any font loads). It still describes the scoped
+  // route when its first available family precedes every served family:
+  // the scoped list agrees with the measured one up to that family. A served
+  // face at or before it is a registered face, which native measurement
+  // declines (core native-route-line-metrics.ts).
+  const nativeMetricFor = (familyList: string, scoped: string, weight: number, style: FontStyle) => {
+    const metric = ownValue(nativeRouteMetrics, nativeRouteMetricKey(familyList, weight, style));
+    if (!metric || scoped === familyList) return metric;
+    const entries = parseFamilyList(scoped) ?? [];
+    const primary = entries.findIndex((entry) => entry.text === metric.nativeRoutePrimaryFamily);
+    const servedAt = entries.findIndex((entry) => !entry.generic && servedAliases.has(entry.name));
+    return primary >= 0 && (servedAt < 0 || primary < servedAt) ? metric : undefined;
+  };
 
   // Every shaped script span, line segment and east-Asian line floor asks for a
   // resolution, and each fresh answer carried its own copy of the complete CSS
@@ -279,7 +303,7 @@ export function createFontResolver(
         requestedFamily,
         resolvedFamily: face.resolvedFamily,
         route: createCanvasFontRoute(
-          withoutScopedSubstitutes(familyList, requestedFamily, request.script),
+          served(withoutScopedSubstitutes(familyList, requestedFamily, request.script)),
           'registered',
         ),
         source: face.source,
@@ -307,16 +331,14 @@ export function createFontResolver(
         && (installedFamilySet.has(normalizeFamily(authored))
           || candidates.some((candidate) => candidate.source === 'local'
             && candidate.resourceIdentity?.startsWith('office-local:') === true));
-      const route = createCanvasFontRoute(
-        withoutScopedSubstitutes(familyList, authored, request.script),
-        'native',
-      );
+      const nativeList = withoutScopedSubstitutes(familyList, authored, request.script);
+      const route = createCanvasFontRoute(served(nativeList), 'native');
       // An installed authored face paints this route itself (catalog path);
       // otherwise the route's first available face paints, and its measured
       // normal line (when one was admitted for this exact list) describes it.
       const routeLineMetric = installedFamily
         ? undefined
-        : ownValue(nativeRouteMetrics, nativeRouteMetricKey(route.familyList, weight, style));
+        : nativeMetricFor(nativeList.trim(), route.familyList, weight, style);
       return freezeResolution({
         ...(installedFamily ? { installedFamily: true as const } : {}),
         ...(routeLineMetric ? { routeLineMetric } : {}),
@@ -334,7 +356,7 @@ export function createFontResolver(
       requestedFamily,
       resolvedFamily: generic,
       route: createCanvasFontRoute(
-        familyListFor(generic, request.language, request.cjkFallback) ?? generic,
+        served(familyListFor(generic, request.language, request.cjkFallback) ?? generic),
         'generic',
       ),
       source: 'generic',

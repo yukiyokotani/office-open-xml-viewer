@@ -122,8 +122,10 @@ describe('ECMA-376 maximum digit width authority', () => {
     const worksheet = { defaultFontFamily: 'Lato Regular', defaultFontSize: 11 } as Parameters<typeof bindXlsxOfficeFontRoutes>[1];
     bindXlsxOfficeFontRoutes(ctx, worksheet, {}, {
       substitutions: new Map(), regularAliases: new Map([['lato regular', 'Lato']]),
+      families: new Map([['lato', 'ooxml-font-source-1-0']]),
     });
-    expect(observedFonts[0]).toContain('"Lato Regular", "Lato",');
+    // The served regular face paints through this workbook's private family.
+    expect(observedFonts[0]).toContain('"Lato Regular", "ooxml-font-source-1-0", "Lato",');
   });
 
   it('keeps actual font measurements authoritative for exact and app faces', () => {

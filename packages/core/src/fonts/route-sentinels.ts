@@ -191,64 +191,6 @@ export async function loadNativeRouteSentinels(fontSet: FontFaceSet | null): Pro
   return null;
 }
 
-// ── Family lists ────────────────────────────────────────────────────────────
+// ── Family lists ──────────────────────────────────────────────────────────────
 
-const GENERIC_FAMILIES = new Set([
-  'serif', 'sans-serif', 'monospace', 'cursive', 'fantasy', 'system-ui',
-  'ui-serif', 'ui-sans-serif', 'ui-monospace', 'ui-rounded', 'math', 'emoji', 'fangsong',
-]);
-
-export interface FamilyEntry {
-  /** Source text of the entry, as written in the list. */
-  readonly text: string;
-  /** Family name (quotes and escapes removed). */
-  readonly name: string;
-  readonly generic: boolean;
-}
-
-/** Split a CSS font-family list into entries, honouring quoted strings and
- * escapes (CSS Syntax 3 §4.3.5). Unquoted multi-word names collapse their
- * whitespace (CSS Fonts 4 §2.1). Returns null for malformed lists. */
-export function parseFamilyList(list: string): FamilyEntry[] | null {
-  const entries: FamilyEntry[] = [];
-  let index = 0;
-  while (index < list.length) {
-    while (index < list.length && /\s/.test(list[index]!)) index += 1;
-    const start = index;
-    let name = '';
-    let quoted = false;
-    if (list[index] === '"' || list[index] === "'") {
-      quoted = true;
-      const quote = list[index]!;
-      index += 1;
-      let closed = false;
-      while (index < list.length) {
-        const character = list[index]!;
-        if (character === '\\') {
-          const hex = /^[0-9a-fA-F]{1,6}\s?/.exec(list.slice(index + 1));
-          if (hex) {
-            name += String.fromCodePoint(Math.min(parseInt(hex[0].trim(), 16) || 0xfffd, 0x10ffff));
-            index += 1 + hex[0].length;
-          } else {
-            name += list[index + 1] ?? '';
-            index += 2;
-          }
-          continue;
-        }
-        if (character === quote) { closed = true; index += 1; break; }
-        name += character;
-        index += 1;
-      }
-      if (!closed) return null;
-      while (index < list.length && /\s/.test(list[index]!)) index += 1;
-    } else {
-      while (index < list.length && list[index] !== ',') index += 1;
-      name = list.slice(start, index).trim().replace(/\s+/g, ' ');
-    }
-    const text = list.slice(start, index).trim();
-    if (!name || (index < list.length && list[index] !== ',')) return null;
-    entries.push({ text, name, generic: !quoted && GENERIC_FAMILIES.has(name.toLowerCase()) });
-    index += 1;
-  }
-  return entries.length > 0 ? entries : null;
-}
+export { parseFamilyList, type FamilyEntry } from '../internal/css-font-family.js';

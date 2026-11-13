@@ -73,10 +73,13 @@ describe('progressive PPTX font-source loading', () => {
         const loaded = progressive ? session.loaded : await session.ensure(pptxFontDemand(
           full.fontPreloadNames, full.fontPreloadFacts, full.fontPreloadDemand, new Map()));
         session.release();
-        return { families: faces.map((face) => face.family), substitution: loaded.substitutions.get('authored') };
+        // Faces register under the session's private families: name them by
+        // the served family each stands for.
+        const servedOf = new Map([...loaded.families].map(([family, alias]) => [alias, family]));
+        return { families: faces.map((face) => servedOf.get(face.family)), substitution: loaded.substitutions.get('authored') };
       };
       const ordinary = await ensureAll(false);
-      expect(ordinary).toEqual({ families: ['Served'], substitution: { family: 'Served', script: 'arabic' } });
+      expect(ordinary).toEqual({ families: ['served'], substitution: { family: 'Served', script: 'arabic' } });
       expect(await ensureAll(true)).toEqual(ordinary);
     } finally {
       vi.unstubAllGlobals();

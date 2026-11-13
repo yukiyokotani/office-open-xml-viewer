@@ -301,7 +301,8 @@ describe('numbering marker + body eastAsia font routing (§17.3.2.26 / §17.9.6)
 
     const marker = fillTextCalls.find((call) => call.text === '•');
     expect(marker).toBeDefined();
-    expect(headFamily(marker!.font)).toBe('Carlito');
+    // The served substitute paints through the document's private family.
+    expect(marker!.font).toContain('"ooxml-font-source-test-0", "Carlito"');
   });
 
   it('no-regression: a CJK run with NO eastAsia axis falls back to the ascii face', async () => {
@@ -456,6 +457,7 @@ describe('numbering marker + body eastAsia font routing (§17.3.2.26 / §17.9.6)
 
     const marker = fillTextCalls.find((call) => call.text === '•');
     expect(marker).toBeDefined();
-    expect(headFamily(marker!.font)).toBe('Carlito');
+    // The served substitute paints through the document's private family.
+    expect(marker!.font).toContain('"ooxml-font-source-test-0", "Carlito"');
   });
 });

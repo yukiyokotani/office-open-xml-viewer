@@ -1,6 +1,6 @@
 import { clipCanvasHorizontally } from '@silurus/ooxml-core/internal/canvas-clip';
 import { ownValue } from '@silurus/ooxml-core/internal/own-key';
-import { quoteCssFontFamily } from '@silurus/ooxml-core/internal/css-font-family';
+import { quoteCssFontFamily, scopeServedFontFamilies } from '@silurus/ooxml-core/internal/css-font-family';
 import {
   arabicFallbackFamilies,
   containsArabicFallbackText,
@@ -239,9 +239,10 @@ export interface RenderContext {
   officeFontRoutes?: Readonly<Record<string, import('@silurus/ooxml-core').OfficeFontFallbackRoute>>;
   /** Normalized authored families with any installed face (presence probes). */
   officeInstalledFamilies?: readonly string[];
-  /** Substitutions whose served face this presentation's font sources
-   *  (`LoadOptions.fonts`) actually loaded. Absent without sources. */
-  fontSubstitutions?: LoadedFontSubstitutions;
+  /** What this presentation's font sources (`LoadOptions.fonts`) loaded:
+   *  the substitutions whose served face loaded, and the private families
+   *  its faces are registered under. Absent without sources. */
+  fontSources?: PptxLoadedFontSources;
   themeMajorFont: string | null;
   themeMinorFont: string | null;
   /** Lower-cased authored family → this presentation's isolated FontFace alias. */
@@ -1175,6 +1176,14 @@ function isArabicScriptFace(family: string): boolean {
  *  (`LoadedFontSources.substitutions`: only substitutions with a loaded face). */
 export type LoadedFontSubstitutions = ReadonlyMap<string, { readonly family: string; readonly script?: FontSubstituteScript }>;
 
+/** The parts of a font-source snapshot (core `LoadedFontSources`) PPTX
+ *  stacks read: substitutions, and served family → its private family
+ *  (core `scopeServedFontFamilies`). */
+export interface PptxLoadedFontSources {
+  readonly substitutions: LoadedFontSubstitutions;
+  readonly families: ReadonlyMap<string, string>;
+}
+
 /**
  * Build the CSS font-family LIST for a (already-normalized, non-generic) face:
  * named face + loaded substitute + script Noto fallbacks +
@@ -1422,19 +1431,25 @@ export function buildFont(
     const latin = normalized === 'monospace' ? ['Courier New', 'Liberation Mono']
       : normalized === 'serif' ? [...NON_CJK_SERIF_FALLBACKS, 'Times New Roman', 'Liberation Serif']
       : [...NON_CJK_SANS_FALLBACKS, 'Arial', 'Helvetica', 'Liberation Sans'];
-    return `${style}${weight}${sizePx}px ${families.length ? `${quoteAll([...latin, ...families])}, ` : ''}${normalized}`;
+    return `${style}${weight}${sizePx}px ${scopeServedFontFamilies(
+      `${families.length ? `${quoteAll([...latin, ...families])}, ` : ''}${normalized}`, rc.fontSources?.families)}`;
   }
   const stack = cssFontStack(
     officeRoute?.family ?? normalized, authoredFamily, fallback, text,
-    rc.fontSubstitutions,
+    rc.fontSources?.substitutions,
   );
   // Application-default faces follow the primary face in their fallback
   // order (issue #1627), ahead of the generic web fallbacks.
   const extras = extraFamilies.filter((name) => name !== normalized);
   // Match the complete escaped primary string. A callback keeps $&/$' in
   // authored family names literal instead of treating them as replace tokens.
-  return `${style}${weight}${sizePx}px ${extras.length
-    ? stack.replace(/^("(?:[^"\\]|\\.)*"), /u, (_match, first: string) => `${first}, ${quoteAll(extras)}, `) : stack}`;
+  const families = extras.length
+    ? stack.replace(/^("(?:[^"\\]|\\.)*"), /u, (_match, first: string) => `${first}, ${quoteAll(extras)}, `) : stack;
+  // Served faces are registered under this presentation's private families
+  // (core source-session.ts): every family of the stack a source served is
+  // preceded by its private family, so measurement and painting select this
+  // presentation's faces and never another document's.
+  return `${style}${weight}${sizePx}px ${scopeServedFontFamilies(families, rc.fontSources?.families)}`;
 }
 
 /**
@@ -8243,8 +8258,8 @@ type InternalSlideRenderOptions = SlideRenderOptions & {
   officeFontRoutes?: Readonly<Record<string, import('@silurus/ooxml-core').OfficeFontFallbackRoute>>;
   /** Normalized authored families with any installed face (presence probes). */
   officeInstalledFamilies?: readonly string[];
-  /** See {@link RenderContext.fontSubstitutions}. */
-  fontSubstitutions?: LoadedFontSubstitutions;
+  /** See {@link RenderContext.fontSources}. */
+  fontSources?: PptxLoadedFontSources;
   embeddedFontAliases?: ReadonlyMap<string, string>;
   embeddedFontAuthoredFamilies?: ReadonlyMap<string, string>;
   embeddedFontTuples?: ReadonlySet<string>;
@@ -8607,7 +8622,7 @@ async function renderSlideLeased(
     embeddedFontTuples: opts.embeddedFontTuples,
     officeFontRoutes: opts.officeFontRoutes,
     officeInstalledFamilies: opts.officeInstalledFamilies,
-    fontSubstitutions: opts.fontSubstitutions,
+    fontSources: opts.fontSources,
     // Symbol-font codes are judged in this render's painting context, by an
     // oracle of this render alone: a render sees one set of font resources
     // (core symbol-face.ts).
@@ -9166,7 +9181,7 @@ async function renderSlideLeased(
         applyFrameTransform(ctx, el, scale);
         renderChart(
           ctx,
-          withChartFontSubstitutions(el.chart, chartFontSubstitutions(rc.fontSubstitutions)),
+          withChartFontSubstitutions(el.chart, chartFontSubstitutions(rc.fontSources)),
           {
             x: emuToPx(el.x, scale),
             y: emuToPx(el.y, scale),

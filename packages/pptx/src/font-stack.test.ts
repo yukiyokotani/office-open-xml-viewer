@@ -302,10 +302,12 @@ describe('buildFont — style encoded in a face name', () => {
     expect(font).toMatch(/^500 48px "Franklin Gothic Medium"/);
     expect(font).not.toContain('"Libre Franklin"');
     const substituted = buildFont(false, false, 48, 'Franklin Gothic Medium', {
-      themeMajorFont: null, themeMinorFont: null, dpr: 1, fontSubstitutions: LOADED_OFFICE_SUBSTITUTIONS,
+      themeMajorFont: null, themeMinorFont: null, dpr: 1,
+      fontSources: { substitutions: LOADED_OFFICE_SUBSTITUTIONS, families: new Map([['libre franklin', 'ooxml-font-source-1-0']]) },
     });
     expect(substituted).toMatch(/^500 48px "Franklin Gothic Medium"/);
-    expect(substituted).toContain('"Libre Franklin"');
+    // The served substitute paints through this presentation's private family.
+    expect(substituted).toContain('"ooxml-font-source-1-0", "Libre Franklin"');
   });
 
   it.each([

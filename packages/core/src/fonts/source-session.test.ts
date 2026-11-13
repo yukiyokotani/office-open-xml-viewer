@@ -6,7 +6,7 @@ import { OoxmlError } from '../errors/ooxml-error.js';
 import { HARD_MAX_FONT_SOURCE_FACE_BYTES, HARD_MAX_FONT_SOURCE_FAMILIES } from '../worker/resource-policy.generated.js';
 import { googleFonts } from './presets/google-fonts.js';
 import { liveSourceCacheCount, sourceCacheEntryCount } from './source-cache.js';
-import { FontSourceSession, fontSourceFaceIdentity, pendingMetricDecodeCount, retainedFontSourceBytes, type FontSessionDemand } from './source-session.js';
+import { FontSourceSession, pendingMetricDecodeCount, retainedFontSourceBytes, type FontSessionDemand } from './source-session.js';
 import {
   fontCssApi,
   fontCss,
@@ -236,35 +236,27 @@ describe('FontSourceSession: lazy unicode-range loading', () => {
     expect(await outcome(2)).toEqual({ faces: [0, 0], registered: 0 });
   });
 
-  it('keeps one outcome per face while a document holds it, so overlapping precedence never reverses', async () => {
+  it('decides each document\'s faces apart, so one document\'s failure never repaints another', async () => {
     // A (U+0-FF) and B (U+80-17F) overlap: one component, declared A then B,
     // so B wins U+80-FF. Document 1 cannot fetch A and lays out with B alone.
     const sheet = rule('Brand', 'a.woff2', 'unicode-range: U+0-FF;') + rule('Brand', 'b.woff2', 'unicode-range: U+80-17F;');
     const routes: Record<string, Route> = { [SHEET_URL]: { css: sheet }, 'https://fonts.example/a.woff2': { status: 503 } };
-    const { calls } = installFetch(routes);
+    installFetch(routes);
     const set = fakeSet();
     const source = fontCss({ url: SHEET_URL });
     const first = open([source], set);
-    await first.ensure(demand(['Brand'], [0x41]));
-    expect(set.faces.map(urlOf)).toEqual(['https://fonts.example/b.woff2']);
-    // A would load now, but document 2 adopts document 1's outcome: no
-    // retry, and A never appears to repaint document 1 or to be registered
-    // after B (which would reverse CSS precedence).
+    const one = await first.ensure(demand(['Brand'], [0x41]));
+    const painted = (family: string | undefined) => set.faces.filter((face) => face.family === family).map(urlOf);
+    expect(painted(one.families.get('brand'))).toEqual(['https://fonts.example/b.woff2']);
+    // Document 2 fetches A itself and registers the component in declaration
+    // order under its own family; document 1 still paints B alone.
     delete routes['https://fonts.example/a.woff2'];
-    const second = open([source], set);
-    await second.ensure(demand(['Brand'], [0x41]));
-    expect(set.faces.map(urlOf)).toEqual(['https://fonts.example/b.woff2']);
-    expect(fileCalls(calls).map((call) => call.url).filter((url) => url.endsWith('/a.woff2'))).toHaveLength(1);
-    // Once every holder closed, a new document retries and registers the
-    // component in declaration order.
-    first.release();
-    second.release();
-    const third = open([source], set);
-    await third.ensure(demand(['Brand'], [0x41]));
-    expect(set.faces.map(urlOf)).toEqual(['https://fonts.example/a.woff2', 'https://fonts.example/b.woff2']);
+    const two = await open([source], set).ensure(demand(['Brand'], [0x41]));
+    expect(painted(two.families.get('brand'))).toEqual(['https://fonts.example/a.woff2', 'https://fonts.example/b.woff2']);
+    expect(painted(one.families.get('brand'))).toEqual(['https://fonts.example/b.woff2']);
   });
 
-  it('gives a face one registration across documents, whichever subsets each demands first', async () => {
+  it('shares downloads across documents, whichever subsets each demands first', async () => {
     const { calls } = installFetch({ [SHEET_URL]: { css: SHEET } });
     const set = fakeSet();
     const source = fontCss({ url: SHEET_URL });
@@ -275,21 +267,18 @@ describe('FontSourceSession: lazy unicode-range loading', () => {
       kanaFirst.ensure(demand(['Noto Sans JP'], [0x3042])),
     ]);
     expect(set.faces.map(urlOf).sort()).toEqual(['https://fonts.example/kana.woff2', 'https://fonts.example/latin.woff2']);
-    // Each document's later demand reuses the other's registration and the
-    // bytes this realm keeps: no new request, no new registration.
+    // Each document's later demand reuses the bytes this realm keeps (no new
+    // request) and registers them under its own family.
     const [a2, b2] = await Promise.all([
       latinFirst.ensure(demand(['Noto Sans JP'], [0x3042])),
       kanaFirst.ensure(demand(['Noto Sans JP'], [0x41])),
     ]);
-    expect(set.faces).toHaveLength(2);
+    expect(set.faces).toHaveLength(4);
     expect(fileCalls(calls)).toHaveLength(2);
     expect(a.faces).toHaveLength(1);
     expect(b.faces).toHaveLength(1);
-    expect(new Set([...a2.faces, ...b2.faces].map((face) => face.face)).size).toBe(2);
-    // Both registrations carry the source's identity, for every session.
-    const id = fontSourceFaceIdentity(a2.faces[0]!.face);
-    expect(id).toBeDefined();
-    expect(b2.faces.every((face) => fontSourceFaceIdentity(face.face) === id)).toBe(true);
+    expect(new Set([...a2.faces, ...b2.faces].map((face) => face.face)).size).toBe(4);
+    expect(a2.families.get('noto sans jp')).not.toBe(b2.families.get('noto sans jp'));
   });
 
   it('applies the same laziness to font-css-api presets and to font files', async () => {
@@ -310,6 +299,28 @@ describe('FontSourceSession: lazy unicode-range loading', () => {
     ]);
     expect(loaded.substitutions.get('calibri')).toEqual({ family: 'Carlito' });
     expect(loaded.regularAliases.get('carlito regular')).toBe('Carlito');
+  });
+});
+
+describe('FontSourceSession: documents are isolated from each other', () => {
+  it('paints each document only with the faces its own sources serve, whatever another document serves under the same name', async () => {
+    // Two open documents whose sources serve the same family name with
+    // different faces. The family each document's stacks name must select
+    // only that document's faces in the shared FontFaceSet.
+    const set = fakeSet();
+    const a = open([fontFiles({ faces: [{ family: 'Brand', url: 'https://a.example/brand.woff2' }] })], set);
+    const b = open([fontFiles({ faces: [{ family: 'Brand', url: 'https://b.example/brand.woff2' }] })], set);
+    const loadedA = await a.ensure(demand(['Brand']));
+    const loadedB = await b.ensure(demand(['Brand']));
+    const painted = (loaded: { families?: ReadonlyMap<string, string> }) => {
+      const family = loaded.families?.get('brand') ?? 'Brand';
+      return set.faces.filter((face) => face.family === family).map(urlOf);
+    };
+    expect(painted(loadedA)).toEqual(['https://a.example/brand.woff2']);
+    expect(painted(loadedB)).toEqual(['https://b.example/brand.woff2']);
+    // Releasing one document leaves the other's faces alone.
+    b.release();
+    expect(painted(a.loaded)).toEqual(['https://a.example/brand.woff2']);
   });
 });
 
@@ -362,15 +373,16 @@ describe('FontSourceSession: credentials omit', () => {
     expect(retainedFontSourceBytes()).toBe(2 * 30);
   });
 
-  it('shares one download across sessions and charges it once', async () => {
+  it('shares one download across sessions; each registers (and is charged for) its own face', async () => {
     const { calls } = installFetch({ 'https://app.example/file.woff2': { bytes: 8 } });
     const source = fontFiles({ faces: [{ family: 'File', url: 'https://app.example/file.woff2' }], credentials: 'omit' });
     const set = fakeSet();
     const opened = [open([source], set), open([source], set), open([source], set)];
     for (const session of opened) await session.ensure(demand(['File']));
     expect(calls).toHaveLength(1);
-    // One kept body and one registration in the shared set.
-    expect(retainedFontSourceBytes()).toBe(2 * 8);
+    // One kept body and one registration per document.
+    expect(retainedFontSourceBytes()).toBe(8 + 3 * 8);
+    expect(set.faces).toHaveLength(3);
     for (const session of opened) session.release();
     expect(retainedFontSourceBytes()).toBe(0);
   });
@@ -442,7 +454,7 @@ describe('FontSourceSession: isolation and sharing', () => {
     expect(String(warn.mock.calls[0][0])).toContain('Calibri (HTTP 503)');
   });
 
-  it('shares one stylesheet fetch and one face per realm across documents', async () => {
+  it('shares one stylesheet fetch and one download across documents, each registering its own face', async () => {
     const { fetchMock } = installFetch({ 'https://fonts.example/a.css': { css: rule('Brand', 'brand.woff2') } });
     const set = fakeSet();
     // Equal configurations built separately share one identity.
@@ -451,11 +463,11 @@ describe('FontSourceSession: isolation and sharing', () => {
     const [loadedA, loadedB] = await Promise.all([a.ensure(demand(['Brand'])), b.ensure(demand(['Brand']))]);
     // One stylesheet and one face download, shared by both documents.
     expect(fetchMock.mock.calls.map(([url]) => url)).toEqual(['https://fonts.example/a.css', 'https://fonts.example/brand.woff2']);
-    expect(set.faces).toHaveLength(1);
-    expect(loadedA.faces[0].face).toBe(loadedB.faces[0].face);
+    expect(set.faces.map((face) => face.family)).toEqual([loadedA.families.get('brand'), loadedB.families.get('brand')]);
+    expect(loadedA.families.get('brand')).not.toBe(loadedB.families.get('brand'));
 
     a.release();
-    expect(set.faces).toHaveLength(1);
+    expect(set.faces.map((face) => face.family)).toEqual([loadedB.families.get('brand')]);
     b.release();
     expect(set.faces).toHaveLength(0);
     expect(liveSourceCacheCount()).toBe(0);
@@ -669,7 +681,7 @@ describe('FontSourceSession: limits fail closed', () => {
     expectLimit(error, 'stylesheet');
   });
 
-  it('charges data bytes once per realm and rejects beyond the retained ceiling', async () => {
+  it('charges the data bytes each document registers and rejects beyond the retained ceiling', async () => {
     vi.resetModules();
     vi.doMock('../worker/resource-policy.generated.js', async (importOriginal) => ({
       ...await importOriginal<Record<string, unknown>>(),
@@ -679,7 +691,7 @@ describe('FontSourceSession: limits fail closed', () => {
       const fresh = await import('./source-session.js');
       const sourceModule = await import('./source.js');
       const bytes = (length: number) => new Uint8Array(length).buffer;
-      const shared = sourceModule.fontFiles({ faces: [{ family: 'Shared', data: bytes(60) }] });
+      const shared = sourceModule.fontFiles({ faces: [{ family: 'Shared', data: bytes(30) }] });
       const set = fakeSet();
       const a = new fresh.FontSourceSession({ sources: [shared], fontSet: asSet(set) });
       const b = new fresh.FontSourceSession({ sources: [shared], fontSet: asSet(set) });
@@ -1160,7 +1172,7 @@ describe('FontSourceSession: script-scoped substitution proof (FontSessionDemand
     expect(set.faces).toHaveLength(0);
     const second = await session.ensure({ ...demand(['Authored'], [0x645]), substituteScripts: { authored: ['arabic'] } });
     expect(second.substitutions.get('authored')).toEqual({ family: 'Served', script: 'arabic' });
-    expect(set.faces.map((face) => face.family)).toEqual(['Served']);
+    expect(set.faces.map((face) => face.family)).toEqual([second.families.get('served')]);
     // A repeated demand with the same scope resolves nothing further.
     await session.ensure({ ...demand(['Authored'], [0x646]), substituteScripts: { authored: ['arabic'] } });
     expect(set.faces).toHaveLength(1);

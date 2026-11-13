@@ -30,22 +30,14 @@
  * no batch can outgrow it, and each body is bounded by the face ceiling; a
  * breach rejects with `OoxmlError('font-source-limit')` and aborts the rest of
  * the batch. A network error, a non-OK status or a missed deadline fails that
- * face only. A completed download is shared by every holder of the same
- * (credentials, URL) until the last holder releases it.
- *
- * Every holder of a (credentials, URL) in this realm gets one outcome while
- * any of them holds it: the faces it decides are registered in one shared
- * FontFaceSet, so a face one document laid out without must not appear for
- * another (it would repaint the first, and an earlier overlapping
- * declaration registered after a later one would reverse CSS
- * `unicode-range` precedence). The first terminal outcome is kept for its
- * holders: bytes a holder accepted within its own deadline are adopted by a
- * requester whose own request failed or timed out (bytes still held only by
- * joins that have not validated them are not), and a kept failure is adopted by later requesters (and by
- * one whose own request completed after it) instead of being retried. A
- * failure is kept only while a holder that adopted it is open, so a document
- * opened after every such holder closed retries. A cancellation (the
- * requester released) is no outcome.
+ * face only. A download in flight is joined, and a completed one shared, by
+ * every holder of the same (credentials, URL) until the last holder releases
+ * it: the bytes are the same for each, so sharing them is only a memory and
+ * request saving. Each holder judges its own outcome against its own
+ * deadline; a holder's outcome never decides another's, since every document
+ * registers its faces under names of its own (`source-session.ts`). A failure
+ * is not kept: a later request retries. A cancellation (the requester
+ * released) is no outcome.
  */
 import { fontSourceLimitError } from '../errors/font-source-limit.js';
 import { OoxmlError } from '../errors/ooxml-error.js';
@@ -172,9 +164,6 @@ class Entry {
   /** Retained bytes charged for this entry (while downloading and kept). */
   charged = 0;
   settled?: FaceAcquisition;
-  /** Some holder accepted the bytes within its own deadline. Until then they
-   * are only held by joins still being validated, and nobody adopts them. */
-  accepted = false;
 
   constructor(produce: (signal: AbortSignal, entry: Entry) => Promise<FaceAcquisition>, onAbandon: (entry: Entry) => void) {
     this.task = new SharedTask((signal) => produce(signal, this), () => onAbandon(this));
@@ -183,23 +172,6 @@ class Entry {
 
 /** Kept and in-flight acquisitions, by `credentials\0url`. */
 const entries = new Map<string, Entry>();
-
-/** Kept failures, by `credentials\0url`: the reason and the holders that
- * adopted it (see the module comment). */
-const failures = new Map<string, { readonly reason: string; readonly holders: Set<object> }>();
-
-function keptFailure(key: string, holder: object): FaceAcquisition | undefined {
-  const failure = failures.get(key);
-  if (!failure) return undefined;
-  failure.holders.add(holder);
-  return { reason: failure.reason };
-}
-
-function keepFailure(key: string, holder: object, reason: string): void {
-  const failure = failures.get(key);
-  if (failure) failure.holders.add(holder);
-  else failures.set(key, { reason, holders: new Set([holder]) });
-}
 
 function dropEntry(key: string, entry: Entry): void {
   if (entries.get(key) === entry) entries.delete(key);
@@ -311,7 +283,7 @@ async function acquireOne(
 function keptAcquisition(url: string, credentials: FontSourceCredentials, holder: object): ArrayBuffer | undefined {
   if (releasedHolders.has(holder)) return undefined;
   const entry = entries.get(`${credentials}\u0000${url}`);
-  if (!entry?.settled || !('data' in entry.settled) || !entry.accepted) return undefined;
+  if (!entry?.settled || !('data' in entry.settled)) return undefined;
   takeLease(entry, holder);
   return entry.settled.data;
 }
@@ -346,10 +318,6 @@ export async function acquireFaceUrls(
     const unique = [...new Set(urls)];
     const results = await Promise.all(unique.map(async (url): Promise<[string, FaceAcquisition]> => {
       const key = `${credentials}\u0000${url}`;
-      if (!releasedHolders.has(holder) && !entries.get(key)?.settled) {
-        const failed = keptFailure(key, holder);
-        if (failed) return [url, failed];
-      }
       let result: FaceAcquisition;
       try {
         result = await acquireOne(url, credentials, batch.signal, holder);
@@ -363,22 +331,7 @@ export async function acquireFaceUrls(
         if (error instanceof OoxmlError) { batch.abort(); throw error; }
         result = { reason: 'timed out' };
       }
-      if (cancelled()) return [url, 'data' in result ? result : { reason: 'timed out' }];
-      if ('data' in result) {
-        // Another holder's failure came first: adopt it, keep no bytes.
-        if (failures.has(key)) {
-          const entry = entries.get(key);
-          if (entry) returnLease(key, entry, holder);
-          return [url, keptFailure(key, holder)!];
-        }
-        const entry = entries.get(key);
-        if (entry) entry.accepted = true;
-        return [url, result];
-      }
-      // Bytes another holder keeps come first; else this failure is kept.
-      const kept = keptAcquisition(url, credentials, holder);
-      if (kept) return [url, { data: kept }];
-      keepFailure(key, holder, result.reason);
+      if (cancelled() && !('data' in result)) return [url, { reason: 'timed out' }];
       return [url, result];
     }));
     return new Map(results);
@@ -390,9 +343,6 @@ export async function acquireFaceUrls(
 /** Return every acquisition `holder` keeps; idempotent. */
 export function releaseAcquiredFaces(holder: object): void {
   releasedHolders.add(holder);
-  for (const [key, failure] of [...failures]) {
-    if (failure.holders.delete(holder) && failure.holders.size === 0) failures.delete(key);
-  }
   for (const [key, entry] of [...entries]) {
     if (!entry.leases.delete(holder)) continue;
     if (entry.leases.size === 0 && entry.settled) dropEntry(key, entry);
@@ -401,7 +351,7 @@ export function releaseAcquiredFaces(holder: object): void {
 
 /** Acquisitions this realm keeps or runs (tests, leak checks). */
 export function acquiredFaceCount(): number {
-  return entries.size + failures.size;
+  return entries.size;
 }
 
 /** `declaration` with its acquired bytes in place of the URL. */
