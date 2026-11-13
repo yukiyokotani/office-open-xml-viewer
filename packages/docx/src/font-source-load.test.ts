@@ -14,7 +14,7 @@ const descriptor = (source: FontSource) => fontSourceDescriptors([source])[0]!;
 const fontCssApi = (...args: Parameters<typeof publicFontCssApi>) => descriptor(publicFontCssApi(...args));
 const fontFiles = (...args: Parameters<typeof publicFontFiles>) => descriptor(publicFontFiles(...args));
 const fontResolver = (...args: Parameters<typeof publicFontResolver>) => descriptor(publicFontResolver(...args));
-import { docxFontFamilyPlan } from './font-plan.js';
+import { docxFontFamilyPlan } from './font-demand-plan.js';
 import { formatOrdinalNumber } from '@silurus/ooxml-core';
 import { ASCII_NUMBER_FORMATS, docxFontDemandScalars, loadDocxFontSources } from './font-source-load.js';
 import { LAYOUT_SYNTHESIZED_SCALARS } from './line-layout.js';

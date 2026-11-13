@@ -1,7 +1,7 @@
 import { classifyCjkFont, type CjkLang, type NativeRouteLineRequest, type OfficeFontFallbackRoute } from '@silurus/ooxml-core';
 import { activeFontSet, isHTMLCanvas, withVertFeatureCanvasScope } from '@silurus/ooxml-core';
 import type { DocxDocumentModel } from './types.js';
-import type { FontSubstitution, LoadedFontSources } from '@silurus/ooxml-core/internal/font-sources';
+import type { FontSubstitution } from '@silurus/ooxml-core/internal/font-sources';
 import type { LoadedEmbeddedFontRoute } from './embedded-fonts.js';
 import type { ResolvedFontMetric } from './layout/text.js';
 import { snapshotFontMetrics } from './layout/text.js';
@@ -111,7 +111,7 @@ export function createLayoutServices(
     readonly createCanvas?: import('@silurus/ooxml-core').SymbolProbeCanvasFactory;
     readonly embeddedRoutes?: readonly LoadedEmbeddedFontRoute[];
     readonly officeRoutes?: readonly OfficeFontFallbackRoute[];
-    readonly sourceFonts?: Readonly<{ names: readonly string[]; loaded: LoadedFontSources }>;
+    readonly sourceFonts?: import('./source-font-metrics.js').DocxSourceFonts;
     /** Measured served/application face lines (served-face-lines.ts). */
     readonly servedFaceLines?: import('./served-face-lines.js').PreparedServedFaceLines;
     readonly installedSubstituteFamilies?: readonly string[];

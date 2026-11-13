@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { sourceFontLayoutOptions } from '../testing/font-sources.js';
+import { servedFontLineMetrics } from '../served-font-metrics.js';
 import {
   buildSegments,
   layoutLines,
@@ -934,6 +935,7 @@ describe('production layout service integration', () => {
               regularAliases: new Map(),
               families: new Map([['review served', 'ooxml-font-source-test-0']]),
             },
+            lineMetrics: servedFontLineMetrics,
           },
         });
         for (const [weight, style] of [[400, 'normal'], [700, 'normal'], [400, 'italic'], [700, 'italic']] as const) {

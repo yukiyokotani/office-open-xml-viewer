@@ -72,7 +72,8 @@ import {
   HARD_MAX_FONT_SOURCE_DECLARATIONS,
   HARD_MAX_FONT_SOURCE_FAMILIES,
 } from '../worker/resource-policy.generated.js';
-import { parseUnicodeRange, resolveCssSource } from './css-source.js';
+import { resolveCssSource } from './css-source.js';
+import { parseUnicodeRange } from './unicode-range.js';
 import {
   FONT_DEADLINE_REASON,
   acquireFaceUrls,

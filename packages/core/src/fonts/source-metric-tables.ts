@@ -7,14 +7,15 @@
  * format that never reads the tables (PPTX, XLSX) neither runs nor bundles
  * the decoders.
  */
-import { parseOpenTypeResourceMetrics, type OpenTypeLineMetrics } from './open-type-metrics.js';
+import type { OpenTypeLineMetrics } from './open-type-metrics.js';
+import { parseVariableOpenTypeResourceMetrics } from './open-type-instances.js';
 import { metricSfnt } from './web-font-sfnt.js';
 
 /** The tables of `data`, or null when they cannot be read. */
 export async function readFontResourceMetrics(data: ArrayBuffer): Promise<OpenTypeLineMetrics | null> {
   try {
     const sfnt = await metricSfnt(data);
-    return sfnt instanceof Uint8Array ? parseOpenTypeResourceMetrics(sfnt, undefined, { variations: true }) : null;
+    return sfnt instanceof Uint8Array ? parseVariableOpenTypeResourceMetrics(sfnt) : null;
   } catch {
     return null;
   }

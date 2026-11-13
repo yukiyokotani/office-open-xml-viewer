@@ -121,7 +121,7 @@
     "screenshots:readme": "playwright test --config tests/smoke/playwright.config.ts readme-screenshots --project=chrome",
     "test:pattern-browser": "playwright test --config tests/patterns/playwright.config.ts",
     "test:site-runtime": "playwright test --config tests/site-dist/playwright.config.ts",
-    "test": "vitest run && node --test scripts/optional-renderer-markers.test.mjs tests/visual/private-corpus.test.mjs scripts/companion-release.test.mjs scripts/check-relative-wasm-urls.test.mjs packages/docx/tests/visual/stable-canvas-render.test.mjs 'packages/legacy-office/tools/*.test.mjs'",
+    "test": "vitest run && node --test scripts/optional-renderer-markers.test.mjs scripts/check-font-source-tree-shaking.test.mjs tests/visual/private-corpus.test.mjs scripts/companion-release.test.mjs scripts/check-relative-wasm-urls.test.mjs packages/docx/tests/visual/stable-canvas-render.test.mjs 'packages/legacy-office/tools/*.test.mjs'",
     "test:python": "uv run --no-project --with fonttools==4.67.0 python scripts/run-python-tests.py",
     "bench:layout": "vitest bench --run packages/docx/src/layout/layout.bench.ts",
     "bench:progressive": "OOXML_DOCX_PROGRESSIVE_BENCH=1 vitest run --disableConsoleIntercept packages/docx/src/layout/progressive-timing.test.ts",

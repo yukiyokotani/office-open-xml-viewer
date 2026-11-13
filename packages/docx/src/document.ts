@@ -52,7 +52,8 @@ import { createLayoutServices, nativeRouteLineRequests } from './layout-runtime.
 import { mainThreadFallbackWarning } from './main-thread-fallback.js';
 import { admitDocxNativeRouteLines, measureDocxNativeRouteLines } from './native-route-line-metrics.js';
 import { buildBookmarkPageMap } from './bookmark-nav';
-import { completeDocxFontPresence, declaredFontSubstitutions, docxFontFamilyPlan, docxOfficeFontFallbackRequests, type DocxOfficeFontPresence } from './font-plan.js';
+import { declaredFontSubstitutions, docxOfficeFontFallbackRequests } from './font-plan.js';
+import type { DocxOfficeFontPresence } from './font-demand-plan.js';
 import { chartFontSubstitutions, FontResolverBridgeHost, normalizeFontOptions, optionFontSources, type FontSourceDescriptor } from '@silurus/ooxml-core/internal/font-sources';
 import { loadEmbeddedFonts } from './embedded-fonts';
 import {
@@ -1067,17 +1068,17 @@ export class DocxDocument {
     signal: AbortSignal | undefined,
   ): Promise<{
     installedSubstituteFamilies: readonly string[];
-    sourceFonts?: Readonly<{ names: readonly string[]; loaded: import('@silurus/ooxml-core/internal/font-sources').LoadedFontSources }>;
+    sourceFonts?: import('./source-font-metrics.js').DocxSourceFonts;
   }> {
     if (this._mode !== 'main' || !fonts?.length || !this._document) return { installedSubstituteFamilies: [] };
+    const { completeDocxFontPresence, docxFontFamilyPlan, loadDocxFontSources } = await import('./font-source-load.js');
+    if (signal?.aborted || !this._document) throw new PaginationAbortError();
     // An installed authored face is never displaced by a source face
     // (docxFontFamilyPlan): every authored family is probed first, past the
     // office-fallback probe's cap (completeDocxFontPresence).
     const presence = await completeDocxFontPresence(this._document, fonts, cjkFallback, officeFonts);
     if (signal?.aborted || !this._document) throw new PaginationAbortError();
     const plan = docxFontFamilyPlan(this._document, fonts, cjkFallback, presence);
-    const { loadDocxFontSources } = await import('./font-source-load.js');
-    if (signal?.aborted) throw new PaginationAbortError();
     const controller = new AbortController();
     this._fontSourceLoad = controller;
     let loaded: Awaited<ReturnType<typeof loadDocxFontSources>>;
@@ -1101,7 +1102,7 @@ export class DocxDocument {
     bindMetafileFontFamilies(this._fetchImage, loaded.loaded);
     return {
       installedSubstituteFamilies: plan.installedSubstituteFamilies,
-      sourceFonts: { names: loaded.names, loaded: loaded.loaded },
+      sourceFonts: { names: loaded.names, loaded: loaded.loaded, lineMetrics: loaded.lineMetrics },
     };
   }
 

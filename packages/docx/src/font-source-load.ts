@@ -28,7 +28,13 @@ import {
   parseFieldFormatSwitch,
 } from '@silurus/ooxml-core';
 import { docxRenderedTextUsages } from './document-content.js';
-import type { DocxFontFamilyPlan } from './font-plan.js';
+import type { DocxFontFamilyPlan } from './font-demand-plan.js';
+import { servedFontLineMetrics } from './served-font-metrics.js';
+import type { DocxSourceFonts } from './source-font-metrics.js';
+
+// The demand plan travels with the session: the main thread imports both
+// together, and only when sources are configured.
+export { completeDocxFontPresence, docxFontFamilyPlan } from './font-demand-plan.js';
 import { emphasisGlyph } from './layout/paragraph.js';
 import { LAYOUT_SYNTHESIZED_SCALARS } from './line-layout.js';
 import type { DocxDocumentModel } from './types.js';
@@ -177,11 +183,8 @@ export function docxFontDemand(doc: DocxDocumentModel, plan: DocxFontFamilyPlan)
 }
 
 /** Loaded font sources for layout, plus the session that owns their faces. */
-export interface DocxLoadedFontSources {
+export interface DocxLoadedFontSources extends DocxSourceFonts {
   readonly session: FontSourceSession;
-  /** Demanded names (authored, then fallback) the inventory iterates. */
-  readonly names: readonly string[];
-  readonly loaded: LoadedFontSources;
 }
 
 /**
@@ -205,7 +208,12 @@ export async function loadDocxFontSources(
   const session = new FontSourceSession({ ...options, sources, readMetricTables: readFontResourceMetrics });
   try {
     const loaded = await session.ensure(docxFontDemand(doc, plan));
-    return { session, names: Object.freeze([...plan.families, ...plan.fallbackFamilies]), loaded };
+    return {
+      session,
+      names: Object.freeze([...plan.families, ...plan.fallbackFamilies]),
+      loaded,
+      lineMetrics: servedFontLineMetrics,
+    };
   } catch (error) {
     session.release();
     throw error;

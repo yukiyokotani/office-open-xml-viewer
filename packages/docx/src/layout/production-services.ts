@@ -3,7 +3,6 @@ import { type CjkLang } from '@silurus/ooxml-core';
 import {
   fontFamilyKey,
   type FontSubstitution,
-  type LoadedFontSources,
 } from '@silurus/ooxml-core/internal/font-sources';
 import {
   activeFontSet,
@@ -81,7 +80,7 @@ export interface ProductionLayoutServiceOptions {
   readonly officeRoutes?: readonly OfficeFontFallbackRoute[];
   /** Faces the font sources loaded for this document (`font-source-load.ts`):
    * the demanded names in demand order and the session snapshot. */
-  readonly sourceFonts?: Readonly<{ names: readonly string[]; loaded: LoadedFontSources }>;
+  readonly sourceFonts?: import('../source-font-metrics.js').DocxSourceFonts;
   /** Measured normal lines of served faces without readable tables and of
    * application-registered faces (served-face-lines.ts). */
   readonly servedFaceLines?: PreparedServedFaceLines;
@@ -212,7 +211,7 @@ export function createProductionTextLayoutService(
   // Served faces are sized from their own tables (source-font-metrics.ts),
   // exactly as an installed or embedded face with the same tables.
   const sourceMetrics = options.sourceFonts || options.servedFaceLines
-    ? sourceFontLineMetrics(options.sourceFonts?.loaded, fontSet, options.servedFaceLines) : {};
+    ? sourceFontLineMetrics(options.sourceFonts, fontSet, options.servedFaceLines) : {};
   const appFaceIdentities = new Set(Object.values(sourceMetrics)
     .flatMap((metric) => metric.sourceIdentity?.startsWith('app-face:') ? [metric.sourceIdentity] : []));
   const fontMetrics = snapshotFontMetrics({

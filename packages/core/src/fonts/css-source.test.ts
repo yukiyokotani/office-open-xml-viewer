@@ -4,7 +4,8 @@ import {
   HARD_MAX_FONT_SOURCE_DECLARATIONS,
   HARD_MAX_FONT_SOURCE_STYLESHEET_BYTES,
 } from '../worker/resource-policy.generated.js';
-import { fetchFontStylesheet, parseFontFaceCss, parseUnicodeRange, tokenizeCss } from './css-source.js';
+import { fetchFontStylesheet, parseFontFaceCss, tokenizeCss } from './css-source.js';
+import { parseUnicodeRange } from './unicode-range.js';
 
 const SHEET = 'https://cdn.internal.example/styles/office.css';
 

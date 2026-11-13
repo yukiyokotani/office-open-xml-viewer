@@ -8,8 +8,11 @@ import {
   type LoadedFontSources,
 } from '@silurus/ooxml-core/internal/font-sources';
 import type { OpenTypeLineMetrics } from '@silurus/ooxml-core';
-import { declaredFontSubstitutions, docxFontFamilyPlan } from '../font-plan.js';
+import { declaredFontSubstitutions } from '../font-plan.js';
+import { docxFontFamilyPlan } from '../font-demand-plan.js';
 import type { DocxDocumentModel } from '../types.js';
+import { servedFontLineMetrics } from '../served-font-metrics.js';
+import type { DocxSourceFonts } from '../source-font-metrics.js';
 
 type LoadedFaceRecord = Readonly<{
   family: string; weight?: string; style?: string; status?: string;
@@ -31,7 +34,7 @@ export function sourceFontLayoutOptions(
   options: Readonly<{ installed?: readonly string[]; sources?: readonly FontSource[] }> = {},
 ): {
   fontSubstitutes: readonly FontSubstitution[];
-  sourceFonts: { names: readonly string[]; loaded: LoadedFontSources };
+  sourceFonts: DocxSourceFonts & { loaded: LoadedFontSources };
   installedSubstituteFamilies: readonly string[];
 } {
   const sources = fontSourceDescriptors(options.sources ?? [googleFonts()]);
@@ -70,6 +73,7 @@ export function sourceFontLayoutOptions(
         // As a session registers them: one private family per served family.
         families: new Map([...loadedFamilies].map((key, index) => [key, `ooxml-font-source-test-${index}`])),
       },
+      lineMetrics: servedFontLineMetrics,
     },
   };
 }

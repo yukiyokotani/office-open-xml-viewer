@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { instanceOpenTypeLineMetrics, parseOpenTypeResourceMetrics } from './open-type-metrics.js';
+import { instanceOpenTypeLineMetrics, parseVariableOpenTypeResourceMetrics } from './open-type-instances.js';
+import { parseOpenTypeResourceMetrics } from './open-type-metrics.js';
 import { MAX_INFLATED_BYTES, metricSfnt, nativeBrotliAvailable } from './web-font-sfnt.js';
 
 // Synthetic fixtures (scripts/generate-fixture-font.py).
@@ -11,7 +12,7 @@ const fixture = (name: string) => {
 
 const parse = async (name: string) => {
   const sfnt = await metricSfnt(fixture(name));
-  return sfnt instanceof Uint8Array ? parseOpenTypeResourceMetrics(sfnt, undefined, { variations: true }) : sfnt;
+  return sfnt instanceof Uint8Array ? parseVariableOpenTypeResourceMetrics(sfnt) : sfnt;
 };
 
 afterEach(() => { vi.unstubAllGlobals(); });
@@ -108,13 +109,13 @@ describe('variable font line metrics (MVAR)', () => {
   it('declines a variable font unless the caller instances it', () => {
     const bytes = new Uint8Array(fixture('ooxml-fixture-gap-var.ttf'));
     expect(parseOpenTypeResourceMetrics(bytes)).toBeNull();
-    expect(parseOpenTypeResourceMetrics(bytes, undefined, { variations: true })?.variation?.axes)
+    expect(parseVariableOpenTypeResourceMetrics(bytes)?.variation?.axes)
       .toEqual([{ tag: 'wght', min: 100, default: 400, max: 900 }]);
   });
 
   it('applies the MVAR deltas of the instance (default instance without axis values)', () => {
     // Masters (wght 100/400/900): ascender 800/800/900, lineGap 300/300/500.
-    const metrics = parseOpenTypeResourceMetrics(new Uint8Array(fixture('ooxml-fixture-gap-var.ttf')), undefined, { variations: true })!;
+    const metrics = parseVariableOpenTypeResourceMetrics(new Uint8Array(fixture('ooxml-fixture-gap-var.ttf')))!;
     const at = (wght?: number) => {
       const instance = instanceOpenTypeLineMetrics(metrics, wght === undefined ? {} : { wght })!;
       return [instance.hheaAscent, instance.hheaLineGap, instance.typoAscent, instance.typoLineGap, instance.winAscent]
