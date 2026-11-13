@@ -138,6 +138,21 @@ it('claims in bounded time when many end records reuse one long directory', () =
   expect(performance.now() - started).toBeLessThan(500);
 });
 
+it('bounds the ZIP64 record search on a large body without records', () => {
+  // A ZIP64 locator whose record is neither at its offset nor before it.
+  const bytes = new Uint8Array(160 * 1024 * 1024);
+  const view = new DataView(bytes.buffer);
+  const end = bytes.length - 22;
+  view.setUint32(end, 0x06054b50, true);
+  view.setUint16(end + 10, 0xffff, true);
+  view.setUint32(end - 20, 0x07064b50, true);
+  view.setUint32(end - 20 + 8, 12345, true);
+  view.setUint32(end - 20 + 16, 1, true);
+  const started = performance.now();
+  expect(odt.claim(bytes)).toBe(false);
+  expect(performance.now() - started).toBeLessThan(100);
+});
+
 describe('ODT source claim', () => {
   it('claims packaged text documents and templates by their mimetype file', () => {
     expect(odt.claim(buildOdtFixture({ body: '<text:p/>' }))).toBe(true);

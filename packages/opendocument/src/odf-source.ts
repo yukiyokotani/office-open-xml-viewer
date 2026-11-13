@@ -140,17 +140,28 @@ function centralMimetypeEntry(bytes: Uint8Array): MimetypeEntry | undefined {
     if (u32(locator) === 0x07064b50 && u32(locator + 4) === 0 && u32(locator + 16) === 1) locators.add(locator);
   }
   const budget = { steps: MAX_CLAIM_STEPS };
-  // ZIP64 records ending at one of those locators (their extensible data may
-  // vary), found in one pass.
+  // ZIP64 records ending at one of those locators. A record usually sits at
+  // the locator's offset (nothing precedes the archive) or right before the
+  // locator (no extensible data); only otherwise is the input searched, a
+  // search charged to the budget (one step per 16 bytes).
   const records = new Map<number, number[]>();
-  if (locators.size > 0) {
+  const keep = (at: number) => {
+    const size = u64(at + 4);
+    if (u32(at) !== 0x06064b50 || size < 44 || !locators.has(at + 12 + size) || u32(at + 16) !== 0 || u32(at + 20) !== 0) return false;
+    const list = records.get(at + 12 + size);
+    if (list === undefined) records.set(at + 12 + size, [at]); else if (!list.includes(at)) list.push(at);
+    return true;
+  };
+  let search = false;
+  for (const locator of locators) {
+    const direct = keep(u64(locator + 8));
+    const adjacent = keep(locator - 56);
+    search ||= !direct && !adjacent;
+  }
+  if (search) {
     for (let at = length - 56; at >= 0; at--) {
-      if (view.getUint32(at, true) !== 0x06064b50) continue;
-      const size = u64(at + 4);
-      if (size < 44 || !locators.has(at + 12 + size) || u32(at + 16) !== 0 || u32(at + 20) !== 0) continue;
-      if (--budget.steps < 0) return undefined;
-      const list = records.get(at + 12 + size);
-      if (list === undefined) records.set(at + 12 + size, [at]); else list.push(at);
+      if ((at & 15) === 0 && --budget.steps < 0) return undefined;
+      if (view.getUint32(at, true) === 0x06064b50 && keep(at) && --budget.steps < 0) return undefined;
     }
   }
   try {
