@@ -171,15 +171,6 @@ export interface DocSettings {
   /** `w:compat/w:compatSetting[@w:name="compatibilityMode"]` (Word URI) — the
    *  Word version whose layout rules the document uses (for example 14, 15). */
   compatibilityMode?: number;
-  /** Private producer flag (never authored by OOXML): every column of a
-   *  multi-column section owns its footnote band, as LibreOffice lays out
-   *  footnotes. */
-  __footnoteColumnBands?: boolean;
-  /** Private producer flag (never authored by OOXML): lines snapped to an
-   *  active line grid count cells from each face's own line box, without
-   *  Word's Far East 1.3 x usWin rule, as LibreOffice does, and take their
-   *  whole cells at the page edge (no grid-leading overhang). */
-  __plainFontLineBoxes?: boolean;
 }
 
 export interface DocRevision {

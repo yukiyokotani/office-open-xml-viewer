@@ -260,6 +260,25 @@ export type InternalMathRun = Extract<DocRun, { type: 'math' }> & {
 
 export { documentPageObjects, type PageObjectStoryWire };
 
+/** Private producer settings (never authored by OOXML, and not part of the
+ * public `DocumentSettings`): a model source sets them on the settings it
+ * hands over. */
+export interface ProducerDocumentSettings {
+  /** Every column of a multi-column section owns its footnote band, as
+   *  LibreOffice lays out footnotes. */
+  readonly __footnoteColumnBands?: boolean;
+  /** Lines snapped to an active line grid count cells from each face's own
+   *  line box, without Word's Far East 1.3 x usWin rule, as LibreOffice
+   *  does, and take their whole cells at the page edge (no grid-leading
+   *  overhang). */
+  readonly __plainFontLineBoxes?: boolean;
+}
+
+/** The producer settings of a model; none is set for a DOCX document. */
+export function producerDocumentSettings(doc: DocxDocumentModel): ProducerDocumentSettings {
+  return (doc.settings ?? {}) as ProducerDocumentSettings;
+}
+
 export interface InternalDocxDocumentModel extends DocxDocumentModel {
   fontFamilyCharsets?: Record<string, string>;
   __pageObjects?: PageObjectStoryWire[];
@@ -1479,7 +1498,7 @@ export function bodyLayoutAcquisitionInput(doc: DocxDocumentModel): BodyLayoutAc
     sectionIndex,
     compatibilityMode: doc.settings?.compatibilityMode,
     footnoteLayoutLikeWW8: doc.settings?.footnoteLayoutLikeWW8,
-    ...(doc.settings?.__footnoteColumnBands === true ? { producerFootnoteColumnBands: true } : {}),
+    ...(producerDocumentSettings(doc).__footnoteColumnBands === true ? { producerFootnoteColumnBands: true } : {}),
     evenAndOddHeaders: doc.section.evenAndOddHeaders,
     endnoteIds: (doc.endnotes ?? []).map((note) => note.id),
     repeatedFootnoteLastEntries: repeatedFootnoteLastEntries(doc.body, sequence),

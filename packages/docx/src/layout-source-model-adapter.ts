@@ -12,6 +12,7 @@ import {
   selectedNoteSeparatorParagraphAcquisitionInput,
   tableSourceAcquisitionInput,
   documentPageObjects,
+  producerDocumentSettings,
   type InternalShapeRun,
   type NormalizedDocumentInput,
 } from './parser-model.js';
@@ -519,7 +520,7 @@ function buildLayoutSourceModelAdapter(
     renderedFamilies: docxRenderedFontFamilies(privateDocument),
     scriptCjkLanguage: docxScriptCjkLanguage(privateDocument),
     defaultBodyFontSizePt: docDefaultFontSizePt(privateDocument),
-    ...(privateDocument.settings?.__plainFontLineBoxes === true ? { plainLineBoxes: true } : {}),
+    ...(producerDocumentSettings(privateDocument).__plainFontLineBoxes === true ? { plainLineBoxes: true } : {}),
   };
 
   // Acquire while parser sidecars are still attached. On the builder-owned
