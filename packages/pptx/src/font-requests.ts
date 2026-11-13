@@ -15,6 +15,7 @@ import {
 } from '@silurus/ooxml-core/internal/font-sources';
 import { chartFontFamilies } from '@silurus/ooxml-core/internal/chart-font-sources';
 import type { Slide, SlideElement, TextBody } from './types';
+import type { OfficeFaceWeight } from './office-face-name.js';
 import { officeFaceWeight } from './powerpoint-line-metrics.js';
 
 // PPTX font requests: the families a deck paints (`fontPreloadNames`), the
@@ -106,10 +107,13 @@ export function* pptxSlideTextRuns(slide: Slide): Generator<string> {
  * {@link PptxFontDemandFacts}). */
 interface DemandFactState {
   readonly scripts: Map<string, Set<FontSubstituteScript>>;
+  /** Groups the slide's face tuples (`slideOfficeFontRequests`). */
+  readonly faceWeight: OfficeFaceWeight;
 }
 
 function cloneDemandFacts(state: DemandFactState): DemandFactState {
   return {
+    faceWeight: state.faceWeight,
     scripts: new Map([...state.scripts].map(([key, scripts]) => [key, new Set(scripts)])),
   };
 }
@@ -127,13 +131,17 @@ export class PptxFontPreloadAccumulator {
     families?: Set<string>,
     private readonly fallback?: CjkLang,
     private readonly scriptNames = new Set<string>(),
-    /** Collect {@link PptxFontDemandFacts} (font sources configured). */
-    demand: boolean | DemandFactState = false,
+    /** Collect {@link PptxFontDemandFacts} (font sources configured), grouping
+     * face tuples with this face-weight function. The caller injects it so a
+     * graph that bundles the metrics catalogue uses `officeFaceWeight` and one
+     * that does not (the parse worker) uses `indexedOfficeFaceWeight`; both
+     * give the same weight for every input. */
+    demand: false | OfficeFaceWeight | DemandFactState = false,
   ) {
     const cjkLang = classifyCjkFont(majorFont) ?? classifyCjkFont(minorFont) ?? fallback ?? null;
     this.scripts = scripts ?? new ScriptPreloadAccumulator(cjkLang);
     this.families = families ?? new Set();
-    this.demand = demand === false ? null : demand === true ? { scripts: new Map() } : demand;
+    this.demand = demand === false ? null : typeof demand === 'function' ? { scripts: new Map(), faceWeight: demand } : demand;
     if (majorFont) this.addThemeFamily(majorFont);
     if (minorFont) this.addThemeFamily(minorFont);
   }
@@ -172,7 +180,7 @@ export class PptxFontPreloadAccumulator {
     if (this.demand) {
       const major = slide.theme ? slide.theme.majorFont : this.majorFont;
       const minor = slide.theme ? slide.theme.minorFont : this.minorFont;
-      for (const request of pptxSlideOfficeFontRequests(slide, major, minor)) {
+      for (const request of slideOfficeFontRequests(slide, major, minor, this.demand.faceWeight)) {
         // Every face a slide's text can paint with is demanded, not only the
         // run families above: bullet faces (a:buFont), line-break and
         // end-of-paragraph properties, and theme tokens resolved to the
@@ -276,6 +284,17 @@ export function pptxSlideOfficeFontRequests(
   majorFont: string | null,
   minorFont: string | null,
 ): OfficeFontFallbackRequest[] {
+  return slideOfficeFontRequests(slide, majorFont, minorFont, officeFaceWeight);
+}
+
+/** {@link pptxSlideOfficeFontRequests} with an injected face-weight function
+ * (see the accumulator's `demand` parameter). */
+export function slideOfficeFontRequests(
+  slide: Slide,
+  majorFont: string | null,
+  minorFont: string | null,
+  faceWeight: OfficeFaceWeight,
+): OfficeFontFallbackRequest[] {
   if (slide.theme) { majorFont = slide.theme.majorFont; minorFont = slide.theme.minorFont; }
   const requests = new Map<string, OfficeFontFallbackRequest>();
   const resolved = (family: string | null | undefined): string | null => {
@@ -292,7 +311,7 @@ export function pptxSlideOfficeFontRequests(
     // only for faces proven present (no family-name gate).
     const name = resolved(family);
     if (!name || CSS_GENERIC_FAMILY_NAMES.has(name.toLowerCase())) return;
-    const weight = officeFaceWeight(name, bold, italic);
+    const weight = faceWeight(name, bold, italic);
     const style = italic ? 'italic' : 'normal';
     requests.set(`${name.toLowerCase()}:${weight}:${style}`, { family: name, weight, style });
     // Family presence is probed independently of the styled tuples a slide

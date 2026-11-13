@@ -1,4 +1,5 @@
 import { loadFontDemandCollector } from './font-demand-collector.js';
+import { officeFaceWeight } from './powerpoint-line-metrics.js';
 import { resolveCjkFallback, type CjkLang } from '@silurus/ooxml-core';
 import type { DimOptions, PptxComment } from './types';
 import {
@@ -727,7 +728,7 @@ export class PptxPresentation {
         return slide;
       },
     });
-    const builder = new PresentationPreflightBuilder(bootstrap, { cjkFallback: this._cjkFallback, collectFontDemand: collectFontDemand ? await loadFontDemandCollector(true) : undefined });
+    const builder = new PresentationPreflightBuilder(bootstrap, { cjkFallback: this._cjkFallback, collectFontDemand: collectFontDemand ? await loadFontDemandCollector(true) : undefined, officeFaceWeight });
     const ensureFonts = async (): Promise<void> => {
       await embeddedFontLoad;
       if (!fonts) return;

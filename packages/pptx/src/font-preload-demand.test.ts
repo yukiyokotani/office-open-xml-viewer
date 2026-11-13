@@ -5,6 +5,7 @@ import { collectSlideFontDemand } from './font-preload-demand.js';
 import { PresentationPreflightBuilder, normalizePresentationPreflight } from './presentation-preflight.js';
 import type { Slide } from './types';
 import type { PresentationBootstrap } from './worker-protocol.js';
+import { officeFaceWeight } from './powerpoint-line-metrics.js';
 
 function slide(text: string, run: Partial<TextRunData> = {}): Slide {
   return { index: 0, slideNumber: 27, background: null, elements: [{ type: 'shape', textBody: {
@@ -92,7 +93,7 @@ describe('complete conservative PPTX paint demand', () => {
   });
 
   it('commits only new scalar deltas and rolls back both scalars and all transitions', () => {
-    const builder = new PresentationPreflightBuilder(bootstrap, { collectFontDemand: collectSlideFontDemand });
+    const builder = new PresentationPreflightBuilder(bootstrap, { collectFontDemand: collectSlideFontDemand, officeFaceWeight });
     builder.addSlide(slide('A'));
     expect(builder.currentFontPreloadDemandDelta).toEqual(expect.arrayContaining([65]));
     builder.prepareSlide({ ...slide('B'), index: 1 }).rollback();
@@ -108,14 +109,14 @@ describe('complete conservative PPTX paint demand', () => {
 
   it('collapses optional demand growth before exceeding the retained projection allowance', () => {
     expect(collectSlideFontDemand(slide('ABCDEFG'), new Set(), 3)).toBe('all');
-    const baseline = new PresentationPreflightBuilder(bootstrap, { collectFontDemand: collectSlideFontDemand });
+    const baseline = new PresentationPreflightBuilder(bootstrap, { collectFontDemand: collectSlideFontDemand, officeFaceWeight });
     const first = baseline.prepareSlide(slide('漢'));
     const firstPeak = first.projectedBytes;
     first.commit();
     const second = baseline.prepareSlide({ ...slide('字'), index: 1 });
     const limit = Math.max(firstPeak, second.projectedBytes) + 10;
     second.commit();
-    const builder = new PresentationPreflightBuilder(bootstrap, { collectFontDemand: collectSlideFontDemand, maxProjectionBytes: limit });
+    const builder = new PresentationPreflightBuilder(bootstrap, { collectFontDemand: collectSlideFontDemand, officeFaceWeight, maxProjectionBytes: limit });
     builder.addSlide(slide(Array.from({ length: 300 }, (_, i) => String.fromCodePoint(0x4e00 + i)).join('')));
     builder.addSlide({ ...slide('字'), index: 1 });
     expect(builder.projectedBytes).toBeLessThanOrEqual(limit);
@@ -129,12 +130,12 @@ it('evicts optional precision under metadata pressure without rejecting or retai
   const secondSlide = { ...slide('B'), index: 1, notes: 'n'.repeat(200) };
   // Mandatory font-source facts are charged whenever demand is collected; a
   // collector that always declines to 'all' retains no optional precision.
-  const ordinary = new PresentationPreflightBuilder(bootstrap, { collectFontDemand: () => 'all' });
+  const ordinary = new PresentationPreflightBuilder(bootstrap, { collectFontDemand: () => 'all', officeFaceWeight });
   ordinary.addSlide(firstSlide);
   const required = ordinary.prepareSlide(secondSlide);
   const limit = required.projectedBytes;
   required.rollback();
-  const builder = new PresentationPreflightBuilder(bootstrap, { collectFontDemand: collectSlideFontDemand, maxProjectionBytes: limit });
+  const builder = new PresentationPreflightBuilder(bootstrap, { collectFontDemand: collectSlideFontDemand, officeFaceWeight, maxProjectionBytes: limit });
   builder.addSlide(firstSlide);
   expect(builder.currentFontPreloadDemandDelta).toEqual(expect.arrayContaining([65]));
   const prepared = builder.prepareSlide(secondSlide);
@@ -149,13 +150,13 @@ it('evicts optional precision under metadata pressure without rejecting or retai
 
 
 it('does not repair a saturated mandatory projection by subtracting optional cache bytes', () => {
-  const ordinary = new PresentationPreflightBuilder(bootstrap, { collectFontDemand: () => 'all' });
+  const ordinary = new PresentationPreflightBuilder(bootstrap, { collectFontDemand: () => 'all', officeFaceWeight });
   ordinary.addSlide(slide('A'));
   const second = { ...slide('B'), index: 1, notes: 'n'.repeat(100) };
   const probe = ordinary.prepareSlide(second);
   const limit = probe.projectedBytes;
   probe.rollback();
-  const builder = new PresentationPreflightBuilder(bootstrap, { collectFontDemand: collectSlideFontDemand, maxProjectionBytes: limit });
+  const builder = new PresentationPreflightBuilder(bootstrap, { collectFontDemand: collectSlideFontDemand, officeFaceWeight, maxProjectionBytes: limit });
   builder.addSlide(slide('A'));
   const prior = builder.currentFontPreloadDemandDelta;
   expect(() => builder.prepareSlide({ ...second, notes: 'n'.repeat(1000) })).toThrow('hard limit');
@@ -166,7 +167,7 @@ it('does not repair a saturated mandatory projection by subtracting optional cac
 it.each([0, 1])('falls back to all when an empty delta array cannot fit its two-byte JSON representation (%i bytes free)', (remaining) => {
   const first = slide('A');
   const second = { ...slide('A'), index: 1, notes: 'n'.repeat(200) };
-  const probe = new PresentationPreflightBuilder(bootstrap, { collectFontDemand: collectSlideFontDemand });
+  const probe = new PresentationPreflightBuilder(bootstrap, { collectFontDemand: collectSlideFontDemand, officeFaceWeight });
   probe.addSlide(first);
   const prepared = probe.prepareSlide(second);
   const limit = prepared.projectedBytes - 2 + remaining;
@@ -174,7 +175,7 @@ it.each([0, 1])('falls back to all when an empty delta array cannot fit its two-
   const ordinary = new PresentationPreflightBuilder(bootstrap, { maxProjectionBytes: limit });
   ordinary.addSlide(first);
   ordinary.addSlide(second);
-  const filtered = new PresentationPreflightBuilder(bootstrap, { collectFontDemand: collectSlideFontDemand, maxProjectionBytes: limit });
+  const filtered = new PresentationPreflightBuilder(bootstrap, { collectFontDemand: collectSlideFontDemand, officeFaceWeight, maxProjectionBytes: limit });
   filtered.addSlide(first);
   expect(() => filtered.addSlide(second)).not.toThrow();
   expect(filtered.finish().fontPreloadDemand).toBeUndefined();

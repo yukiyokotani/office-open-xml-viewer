@@ -1,5 +1,6 @@
 import referenceData from './reference-font-metrics-data.json';
 import { OPEN_FONT_REFERENCE_PROFILES } from './reference-font-metrics-open.js';
+import { normalizeReferenceFontFamilyName } from './reference-font-name.js';
 
 export type ReferenceFontSource = 'office-mac' | 'macos-system' | 'macos-supplemental' | 'published-open-font';
 export type ReferenceFontStyle = 'normal' | 'italic';
@@ -80,16 +81,8 @@ let aliasProfiles: ReadonlyMap<string, readonly ReferenceFontMetricProfile[]> | 
 // families, so first paint no longer pays for the whole catalogue's buckets.
 const aliasBuckets = new Map<string, OptionBuckets>();
 const EMPTY_RESULTS = Object.freeze([]) as readonly ReferenceFontMetricProfile[];
-const ASCII_TEXT = /^[\u0000-\u007f]*$/;
 
-function normalizeFamilyName(value: string): string {
-  // The alias index normalizes every catalogue alias on its first lookup in
-  // each realm, so the common ASCII names take a cheap path: NFKC leaves ASCII
-  // unchanged, and on ASCII the en-US case mapping equals the locale-independent
-  // toLowerCase (Unicode SpecialCasing tailors only lt, tr and az).
-  if (ASCII_TEXT.test(value)) return value.trim().replace(/\s+/g, ' ').toLowerCase();
-  return value.normalize('NFKC').trim().replace(/\s+/gu, ' ').toLocaleLowerCase('en-US');
-}
+const normalizeFamilyName = normalizeReferenceFontFamilyName;
 
 function optionKey(options: FindReferenceFontMetricsOptions): string {
   return `${options.source ?? '*'}|${options.weight ?? '*'}|${options.style ?? '*'}`;

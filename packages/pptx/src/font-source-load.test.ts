@@ -5,6 +5,7 @@ import { FontSourceSession, PptxInstalledFamilies, pptxFontDemand } from './font
 import { PresentationPreflightBuilder } from './presentation-preflight.js';
 import type { Slide } from './types';
 import type { PresentationBootstrap } from './worker-protocol.js';
+import { officeFaceWeight } from './powerpoint-line-metrics.js';
 
 describe('pptxFontDemand', () => {
   const facts = {
@@ -61,7 +62,7 @@ describe('progressive PPTX font-source loading', () => {
       const ensureAll = async (progressive: boolean) => {
         const { faces, set } = fakeFontSet();
         const session = new FontSourceSession({ sources, fontSet: set });
-        const builder = new PresentationPreflightBuilder(bootstrap, { collectFontDemand: collectSlideFontDemand });
+        const builder = new PresentationPreflightBuilder(bootstrap, { collectFontDemand: collectSlideFontDemand, officeFaceWeight });
         for (const [index, text] of ['Latin', 'العربية'].entries()) {
           builder.addSlide(textSlide(index, text));
           if (progressive) {
