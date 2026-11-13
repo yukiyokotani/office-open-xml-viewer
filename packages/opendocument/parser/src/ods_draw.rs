@@ -258,12 +258,13 @@ fn transform(value: &str) -> Option<Affine> {
                     ..Affine::IDENTITY
                 }
             }
+            // The shear LibreOffice draws (shared with the other readers).
             "skewX" => Affine {
-                c: -number(0)?.tan(),
+                c: crate::odf_props::skew_shear(number(0)?),
                 ..Affine::IDENTITY
             },
             "skewY" => Affine {
-                b: -number(0)?.tan(),
+                b: crate::odf_props::skew_shear(number(0)?),
                 ..Affine::IDENTITY
             },
             "matrix" => Affine {
@@ -403,6 +404,8 @@ pub fn package_path(href: &str) -> Option<String> {
 }
 
 /// MIME type of an image the renderer can decode, from its first bytes.
+/// The metafile types are the names the shared renderer keys metafile
+/// handling on (core `isMetafileMime`: crop frame, text font demand).
 pub fn image_mime(bytes: &[u8]) -> Option<&'static str> {
     if bytes.starts_with(b"\x89PNG") {
         Some("image/png")
@@ -415,9 +418,9 @@ pub fn image_mime(bytes: &[u8]) -> Option<&'static str> {
     } else if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP") {
         Some("image/webp")
     } else if bytes.starts_with(&[0xD7, 0xCD, 0xC6, 0x9A]) || bytes.starts_with(&[1, 0, 9, 0]) {
-        Some("image/x-wmf")
+        Some("image/wmf")
     } else if bytes.get(40..44) == Some(b" EMF") {
-        Some("image/x-emf")
+        Some("image/emf")
     } else if bytes.starts_with(b"II*\0") || bytes.starts_with(b"MM\0*") {
         Some("image/tiff")
     } else {
@@ -427,8 +430,12 @@ pub fn image_mime(bytes: &[u8]) -> Option<&'static str> {
     }
 }
 
-/// Pixel size of a PNG, JPEG or GIF (for crop fractions).
+/// Pixel size of a PNG, JPEG or GIF (for crop fractions); a metafile's
+/// natural size (`odf_props::metafile_size_pt`) as 96 DPI pixels.
 fn image_size(bytes: &[u8]) -> Option<(f64, f64)> {
+    if let Some((w, h)) = crate::odf_props::metafile_size_pt(bytes) {
+        return Some((w / 0.75, h / 0.75));
+    }
     let be32 = |at: usize| -> Option<u32> {
         Some(u32::from_be_bytes(bytes.get(at..at + 4)?.try_into().ok()?))
     };

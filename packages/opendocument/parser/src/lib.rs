@@ -18,7 +18,8 @@ mod odt_wasm;
 pub mod odf_chart;
 #[cfg(feature = "odf-chart")]
 pub mod odf_fill;
-#[cfg(feature = "odf-chart")]
+// The shared property store and the values every reader reads alike.
+#[cfg(any(feature = "odf-chart", feature = "odt"))]
 pub mod odf_props;
 #[cfg(feature = "odf-chart")]
 pub mod odf_text;

@@ -1822,12 +1822,12 @@ pub(crate) fn parse_border(value: &str, line_width: Option<&str>) -> Option<Bord
             width = Some(length);
         } else if part.starts_with('#') {
             color = hex_color(part).ok();
+        } else if let Some(keyword) = crate::odf_props::border_width_keyword(part) {
+            // The keyword widths every reader shares.
+            width = Some(keyword);
         } else {
             match part {
                 "none" | "hidden" => return None,
-                "thin" => width = Some(0.75),
-                "medium" => width = Some(2.25),
-                "thick" => width = Some(4.5),
                 "solid" | "double" | "dotted" | "dashed" | "groove" | "ridge" | "inset"
                 | "outset" | "dash-dot" | "dash-dot-dot" | "fine-dashed" | "double-thin" => {
                     style = Some(part)

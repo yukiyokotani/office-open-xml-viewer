@@ -6,8 +6,8 @@
 //! grammar. LibreOffice writes imported OOXML custom geometry as
 //! `draw:type="ooxml-non-primitive"` with one coordinate space per subpath
 //! (`drawooo:sub-view-size`), otherwise the `svg:viewBox` is the space.
-//! Elliptic arcs (`T`, `U`, `A`, `B`, `V`, `W`, `X`, `Y`) are flattened to
-//! line segments of at most 5 degrees.
+//! Elliptic arcs (`T`, `U`, `A`, `B`, `V`, `W`, `G`, `X`, `Y`) are flattened
+//! to line segments of at most 5 degrees.
 
 use crate::xml::{self, NS_DRAW, NS_SVG};
 use xlsx_model::{PathCmd, PathInfo};
@@ -264,18 +264,12 @@ impl Parser<'_> {
 
     fn number(&mut self) -> Option<f64> {
         self.skip();
-        let start = self.at;
-        while self.at < self.text.len()
-            && (self.text[self.at].is_ascii_digit()
-                || self.text[self.at] == b'.'
-                || (self.at > start && matches!(self.text[self.at], b'e' | b'E')))
-        {
-            self.at += 1;
+        let value = crate::odf_props::scan_number(self.text, &mut self.at);
+        if value.is_none() {
+            // Not a number (a lone `.`): the formula is malformed.
+            self.at = self.text.len();
         }
-        std::str::from_utf8(&self.text[start..self.at])
-            .ok()?
-            .parse()
-            .ok()
+        value
     }
 }
 
@@ -468,11 +462,13 @@ pub fn custom_geometry(
         let p = |x: f64, y: f64| (x - ox, y - oy);
         // Commands past the bound are counted, not stored: the shape is
         // rejected once the path is read.
+        // `false` once over the bound: arcs stop flattening there.
         let mut push = |cmd: PathCmd, current: &mut PathInfo| {
             *emitted += 1;
             if *emitted <= MAX_COMMANDS {
                 current.commands.push(cmd);
             }
+            *emitted <= MAX_COMMANDS
         };
         match command {
             'M' => {
@@ -537,14 +533,14 @@ pub fn custom_geometry(
                         .enumerate()
                     {
                         let first_move = command == 'U' && i == 0 && j == 0;
-                        push(
-                            if first_move {
-                                PathCmd::MoveTo { x, y }
-                            } else {
-                                PathCmd::LineTo { x, y }
-                            },
-                            current,
-                        );
+                        let cmd = if first_move {
+                            PathCmd::MoveTo { x, y }
+                        } else {
+                            PathCmd::LineTo { x, y }
+                        };
+                        if !push(cmd, current) {
+                            return;
+                        }
                         *last = (x, y);
                     }
                 }
@@ -580,14 +576,36 @@ pub fn custom_geometry(
                         .enumerate()
                     {
                         let first = move_first && i == 0 && j == 0;
-                        push(
-                            if first {
-                                PathCmd::MoveTo { x, y }
-                            } else {
-                                PathCmd::LineTo { x, y }
-                            },
-                            current,
-                        );
+                        let cmd = if first {
+                            PathCmd::MoveTo { x, y }
+                        } else {
+                            PathCmd::LineTo { x, y }
+                        };
+                        if !push(cmd, current) {
+                            return;
+                        }
+                        *last = (x, y);
+                    }
+                }
+            }
+            'G' => {
+                // arcangleto (ODF 1.4 Part 3 Table 10): radii, then the start
+                // and swing central angles in degrees (clockwise on the page),
+                // on the ellipse placed so that its start is the current point.
+                for c in values.chunks(4).filter(|c| c.len() == 4) {
+                    let (rx, ry) = (c[0].abs(), c[1].abs());
+                    let (start, sweep) = crate::odf_props::arc_angle_to(rx, ry, c[2], c[3]);
+                    let (cx, cy) = (last.0 - rx * start.cos(), last.1 - ry * start.sin());
+                    // Up to the longest `G` arc (`MAX_ARC_TURNS`) in steps.
+                    let most = (crate::odf_props::MAX_ARC_TURNS as usize + 2) * 360 / 5;
+                    let steps = ((sweep.abs().to_degrees() / ARC_STEP_DEGREES).ceil() as usize)
+                        .clamp(1, most);
+                    for i in 1..=steps {
+                        let t = start + sweep * i as f64 / steps as f64;
+                        let (x, y) = (cx + rx * t.cos(), cy + ry * t.sin());
+                        if !push(PathCmd::LineTo { x, y }, current) {
+                            return;
+                        }
                         *last = (x, y);
                     }
                 }
@@ -609,7 +627,9 @@ pub fn custom_geometry(
                         sweep += 360.0;
                     }
                     for (px, py) in arc_points(cx, cy, rx, ry, start, sweep).into_iter().skip(1) {
-                        push(PathCmd::LineTo { x: px, y: py }, current);
+                        if !push(PathCmd::LineTo { x: px, y: py }, current) {
+                            return;
+                        }
                     }
                     *last = (x, y);
                     x_first = !x_first;
@@ -1067,45 +1087,51 @@ fn svg_arc(
     }
     let phi = rotation.to_radians();
     let (sin_phi, cos_phi) = phi.sin_cos();
-    let dx = (x1 - x2) / 2.0;
-    let dy = (y1 - y2) / 2.0;
+    // Halves first, so neither the difference nor the midpoint overflows.
+    let dx = x1 / 2.0 - x2 / 2.0;
+    let dy = y1 / 2.0 - y2 / 2.0;
+    let (mx, my) = (x1 / 2.0 + x2 / 2.0, y1 / 2.0 + y2 / 2.0);
     let x1p = cos_phi * dx + sin_phi * dy;
     let y1p = -sin_phi * dx + cos_phi * dy;
-    let lambda = (x1p * x1p) / (rx * rx) + (y1p * y1p) / (ry * ry);
-    if lambda > 1.0 {
-        let scale = lambda.sqrt();
-        rx *= scale;
-        ry *= scale;
+    // §F.6.5 in the unit-circle frame of the ellipse (`u`, `v` = x1', y1'
+    // over the radii), with lengths taken by `hypot`: no square or product
+    // of coordinates over- or underflows.
+    let (mut u, mut v) = (x1p / rx, y1p / ry);
+    let mut reach = u.hypot(v);
+    if reach > 1.0 {
+        // §F.6.6: radii too small for the ends grow until they fit.
+        rx *= reach;
+        ry *= reach;
+        u /= reach;
+        v /= reach;
+        reach = 1.0;
     }
-    let numerator = rx * rx * ry * ry - rx * rx * y1p * y1p - ry * ry * x1p * x1p;
-    let denominator = rx * rx * y1p * y1p + ry * ry * x1p * x1p;
-    let mut coefficient = if denominator == 0.0 {
-        0.0
-    } else {
-        (numerator / denominator).max(0.0).sqrt()
-    };
+    // The centre in the frame is ±√(1−r²)·(v, −u)/r, r = |(u, v)|.
+    let mut lift = ((1.0 - reach) * (1.0 + reach)).max(0.0).sqrt();
     if large == sweep {
-        coefficient = -coefficient;
+        lift = -lift;
     }
-    let cxp = coefficient * rx * y1p / ry;
-    let cyp = -coefficient * ry * x1p / rx;
-    let cx = cos_phi * cxp - sin_phi * cyp + (x1 + x2) / 2.0;
-    let cy = sin_phi * cxp + cos_phi * cyp + (y1 + y2) / 2.0;
+    let (cu, cv) = (lift * (v / reach), -lift * (u / reach));
+    let (cxp, cyp) = (cu * rx, cv * ry);
+    let cx = cos_phi * cxp - sin_phi * cyp + mx;
+    let cy = sin_phi * cxp + cos_phi * cyp + my;
     let angle = |ux: f64, uy: f64, vx: f64, vy: f64| (ux * vy - uy * vx).atan2(ux * vx + uy * vy);
-    let theta1 = angle(1.0, 0.0, (x1p - cxp) / rx, (y1p - cyp) / ry);
-    let mut delta = angle(
-        (x1p - cxp) / rx,
-        (y1p - cyp) / ry,
-        (-x1p - cxp) / rx,
-        (-y1p - cyp) / ry,
-    );
+    let theta1 = angle(1.0, 0.0, u - cu, v - cv);
+    let mut delta = angle(u - cu, v - cv, -u - cu, -v - cv);
     if !sweep && delta > 0.0 {
         delta -= std::f64::consts::TAU;
     } else if sweep && delta < 0.0 {
         delta += std::f64::consts::TAU;
     }
+    if ![cx, cy, rx, ry, theta1, delta]
+        .iter()
+        .all(|v| v.is_finite())
+    {
+        // Beyond the range of the arithmetic: the chord.
+        return vec![(x2, y2)];
+    }
     let steps = ((delta.abs().to_degrees() / ARC_STEP_DEGREES).ceil() as usize).max(1);
-    (1..=steps)
+    let points: Vec<(f64, f64)> = (1..=steps)
         .map(|i| {
             if i == steps {
                 return (x2, y2);
@@ -1117,7 +1143,13 @@ fn svg_arc(
                 cy + rx * sin_phi * cos_t + ry * cos_phi * sin_t,
             )
         })
-        .collect()
+        .collect();
+    if points.iter().all(|(x, y)| x.is_finite() && y.is_finite()) {
+        points
+    } else {
+        // A point beyond the range of the arithmetic: the chord.
+        vec![(x2, y2)]
+    }
 }
 
 #[cfg(test)]
@@ -1153,6 +1185,88 @@ mod tests {
     fn geometry(xml: &str) -> Result<Option<Vec<PathInfo>>, String> {
         let document = roxmltree::Document::parse(xml).unwrap();
         custom_geometry(document.root_element(), (72.0, 72.0))
+    }
+
+    fn end_point(path: &PathInfo) -> (f64, f64) {
+        match path.commands.last() {
+            Some(PathCmd::LineTo { x, y }) => (*x, *y),
+            _ => panic!("no end point"),
+        }
+    }
+
+    #[test]
+    fn arc_angle_to_turns_through_central_angles() {
+        // G wR hR st sw on a 2:1 ellipse (wR 40, hR 20) from (10, 50): the
+        // start and end are the rays at -45° and +45° from the centre, which
+        // meet the ellipse at parameter ∓atan 2: the chord is 2·hR·sin(atan 2)
+        // = 35.78 straight down, as LibreOffice draws it.
+        // k = wR·cos(atan 2) = hR·sin(atan 2) = 40/√5.
+        let k = 40.0 / 5f64.sqrt();
+        let paths = geometry(&shape("", "M 10 50 G 40 20 -45 90"))
+            .unwrap()
+            .unwrap();
+        let (x, y) = end_point(&paths[0]);
+        assert!(
+            (x - 10.0).abs() < 1e-9 && (y - (50.0 + 2.0 * k)).abs() < 1e-9,
+            "{x} {y}"
+        );
+        // Its rightmost point is the centre plus wR: (10 - k) + 40.
+        let max_x = paths[0]
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                PathCmd::LineTo { x, .. } => Some(*x),
+                _ => None,
+            })
+            .fold(f64::MIN, f64::max);
+        assert!((max_x - (10.0 - k + 40.0)).abs() < 0.2, "{max_x}");
+        // A negative swing turns counter-clockwise, over the top.
+        let back = geometry(&shape("", "M 10 50 G 40 20 -45 -90"))
+            .unwrap()
+            .unwrap();
+        let (x, y) = end_point(&back[0]);
+        assert!(
+            (x - (10.0 - 2.0 * k)).abs() < 1e-9 && (y - 50.0).abs() < 1e-9,
+            "{x} {y}"
+        );
+        // Repeated parameter groups continue from the arc's end.
+        let twice = geometry(&shape("", "M 10 50 G 40 20 -45 90 40 20 45 90"))
+            .unwrap()
+            .unwrap();
+        let (x, y) = end_point(&twice[0]);
+        assert!(
+            (x - (10.0 - 2.0 * k)).abs() < 1e-9 && (y - (50.0 + 2.0 * k)).abs() < 1e-9,
+            "{x} {y}"
+        );
+    }
+
+    #[test]
+    fn svg_arcs_stay_finite_or_fall_back_to_the_chord() {
+        // Tiny radii grow to the half circle (§F.6.6) without overflowing.
+        let points = svg_arc(0.0, 0.0, 1e-200, 1e-200, 0.0, false, true, 100.0, 0.0);
+        let top = points[points.len() / 2 - 1];
+        assert!(
+            (top.0 - 50.0).abs() < 1e-9 && (top.1 + 50.0).abs() < 1e-9,
+            "{top:?}"
+        );
+        // Points beyond the finite range: the chord.
+        let far = svg_arc(1e308, 1e308, 1e308, 1e308, 0.0, false, false, 1e308, -1e308);
+        assert_eq!(far, vec![(1e308, -1e308)]);
+    }
+
+    #[test]
+    fn formula_numbers_take_exponents() {
+        for formula in ["4e1", "4E1", "0.4e+2", "4000e-2"] {
+            let xml = shape(
+                &format!(r#"<draw:equation draw:name="f0" draw:formula="{formula}"/>"#),
+                "M 0 0 L ?f0 0",
+            );
+            let paths = geometry(&xml).unwrap().unwrap();
+            assert!(
+                matches!(paths[0].commands[1], PathCmd::LineTo { x, .. } if (x - 40.0).abs() < 1e-9),
+                "{formula}"
+            );
+        }
     }
 
     #[test]

@@ -246,12 +246,13 @@ pub fn parse_transform(value: &str) -> Option<Affine> {
                     ..Affine::IDENTITY
                 }
             }
+            // The shear LibreOffice draws (shared with the other readers).
             "skewX" => Affine {
-                c: num(0)?.tan(),
+                c: crate::odf_props::skew_shear(num(0)?),
                 ..Affine::IDENTITY
             },
             "skewY" => Affine {
-                b: num(0)?.tan(),
+                b: crate::odf_props::skew_shear(num(0)?),
                 ..Affine::IDENTITY
             },
             "matrix" => Affine {
@@ -340,7 +341,9 @@ pub fn arc_segments(
     if !(rx.is_finite() && ry.is_finite() && start.is_finite() && sweep.is_finite()) {
         return;
     }
-    let pieces = ((sweep.abs() / (std::f64::consts::FRAC_PI_2)).ceil() as usize).clamp(1, 8);
+    // Quarter turns, at most the longest `G` arc's (`MAX_ARC_TURNS`).
+    let most = 4 * (crate::odf_props::MAX_ARC_TURNS as usize + 2);
+    let pieces = ((sweep.abs() / (std::f64::consts::FRAC_PI_2)).ceil() as usize).clamp(1, most);
     let step = sweep / pieces as f64;
     let alpha = 4.0 / 3.0 * (step / 4.0).tan();
     let point = |t: f64| (cx + rx * t.cos(), cy + ry * t.sin());
@@ -895,29 +898,9 @@ impl<'s, 'n> FormulaParser<'s, 'n> {
     }
 }
 
+/// One unsigned number of the §19.171 grammar (shared with the other readers).
 fn number(bytes: &[u8], pos: &mut usize) -> Option<f64> {
-    let start = *pos;
-    let mut seen_exp = false;
-    while let Some(&b) = bytes.get(*pos) {
-        if b.is_ascii_digit() || b == b'.' {
-            *pos += 1;
-        } else if (b == b'e' || b == b'E')
-            && !seen_exp
-            && bytes
-                .get(*pos + 1)
-                .is_some_and(|n| n.is_ascii_digit() || *n == b'-' || *n == b'+')
-        {
-            seen_exp = true;
-            *pos += 2;
-        } else {
-            break;
-        }
-    }
-    let v: f64 = std::str::from_utf8(&bytes[start..*pos])
-        .ok()?
-        .parse()
-        .ok()?;
-    v.is_finite().then_some(v)
+    crate::odf_props::scan_number(bytes, pos)
 }
 
 /// The evaluation context of one custom shape.
@@ -1526,9 +1509,13 @@ fn build_paths(
                 quadrant_x = !quadrant_x;
             }
             'G' => {
+                // arcangleto (ODF 1.4 Table 10): radii, then the start and
+                // swing central angles in degrees, clockwise on the page.
                 let Some(v) = params!(4) else { break };
                 let (rx, ry) = ((v[0] * sx).abs(), (v[1] * sy).abs());
-                let (st, sw) = (v[2].to_radians(), v[3].to_radians());
+                // The angles are central in the path's own units, before the
+                // view box is scaled to the shape.
+                let (st, sw) = crate::odf_props::arc_angle_to(v[0].abs(), v[1].abs(), v[2], v[3]);
                 let p = pen.unwrap_or((0.0, 0.0));
                 ensure_pen(&mut current, &mut pen, &mut start, p);
                 let cx = p.0 - rx * st.cos();
@@ -1862,6 +1849,52 @@ mod tests {
         assert_eq!(segs[2], Seg::Line(1_260_000.0, 0.0));
         let area = g.text_area.unwrap();
         assert!((area.2 - 1_260_000.0).abs() < 1e-6 && (area.3 - 720_000.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn arc_angle_to_reads_central_angles_in_path_units() {
+        // A 2:1 ellipse in a square shape: the -45° and +45° rays meet it at
+        // parameter ∓atan 2, so the arc ends 2·400/√5 path units below its
+        // start; a circle in a view box stretched 1:2 ends 2·400·sin 45°
+        // units below (the angles are read before the stretch), as
+        // LibreOffice draws both.
+        for (path, height, drop) in [
+            ("M 100 500 G 400 200 -45 90", 360_000.0, 800.0 / 5f64.sqrt()),
+            (
+                "M 100 500 G 400 400 -45 90",
+                180_000.0,
+                800.0 * 0.5f64.sqrt(),
+            ),
+        ] {
+            let xml = format!(
+                r#"<draw:enhanced-geometry {NS} svg:viewBox="0 0 1000 1000" draw:enhanced-path="{path}"/>"#
+            );
+            let d = doc(&xml);
+            let frame = ShapeFrame {
+                width: 360_000.0,
+                height,
+                has_fill: true,
+                has_stroke: true,
+            };
+            let g = enhanced_geometry(d.root_element(), &frame).unwrap();
+            let Some(Seg::Cubic(_, _, _, _, x, y)) = g.paths[0].segs.last().copied() else {
+                panic!("{g:?}");
+            };
+            let unit = (360.0, height / 1000.0);
+            assert!((x - 100.0 * unit.0).abs() < 1e-6, "{path}: {x}");
+            assert!((y - (500.0 + drop) * unit.1).abs() < 1e-6, "{path}: {y}");
+        }
+    }
+
+    #[test]
+    fn skews_shear_as_libreoffice_does() {
+        // skewX (a) keeps the top edge and moves the bottom edge left.
+        let m = parse_transform("skewX (0.5)").unwrap();
+        let (x, y) = m.apply(0.0, 100.0);
+        assert!((x + 100.0 * 0.5f64.tan()).abs() < 1e-9 && y == 100.0);
+        let m = parse_transform("skewY (0.5)").unwrap();
+        let (x, y) = m.apply(100.0, 0.0);
+        assert!(x == 100.0 && (y + 100.0 * 0.5f64.tan()).abs() < 1e-9);
     }
 
     #[test]

@@ -1582,8 +1582,23 @@ fn transform_rotation(
                 let sx = next(1.0);
                 Some([sx, 0.0, 0.0, next(sx), 0.0, 0.0])
             }
-            "skewX" => Some([1.0, 0.0, next(0.0).tan(), 1.0, 0.0, 0.0]),
-            "skewY" => Some([1.0, next(0.0).tan(), 0.0, 1.0, 0.0, 0.0]),
+            // The shear LibreOffice draws (shared with the other readers).
+            "skewX" => Some([
+                1.0,
+                0.0,
+                crate::odf_props::skew_shear(next(0.0)),
+                1.0,
+                0.0,
+                0.0,
+            ]),
+            "skewY" => Some([
+                1.0,
+                crate::odf_props::skew_shear(next(0.0)),
+                0.0,
+                1.0,
+                0.0,
+                0.0,
+            ]),
             "matrix" => Some([
                 next(1.0),
                 next(0.0),
@@ -1713,140 +1728,539 @@ fn gradient(node: roxmltree::Node<'_, '_>) -> ShapeFill {
     }
 }
 
-/// An SVG path (`svg:d`, §19.554) in the view box, normalized: absolute and
-/// relative M, L, H, V, C, S, Q, T, Z (arcs as lines).
+/// An SVG path (`svg:d`, §19.554: SVG 1.1 §8.3 path data) in the view box,
+/// normalized: absolute and relative M, L, H, V, C, S, Q, T, A and Z. `S` and
+/// `T` take their first control point as the reflection of the previous
+/// curve's last one about the current point (the current point itself after
+/// any other command; SVG 1.1 §8.3.6, §8.3.7). `A` is the elliptical arc of
+/// SVG 1.1 §F.6 (§F.6.5 endpoint-to-centre conversion, §F.6.6 out-of-range
+/// radii scaled up, §F.6.2 zero radii a line), drawn as cubic Béziers of at
+/// most a quarter turn.
 fn svg_path(d: &str, view: (f64, f64, f64, f64)) -> Result<Vec<Vec<PathCmd>>, String> {
-    let mut numbers: Vec<(Option<char>, f64)> = Vec::new();
-    let mut current = String::new();
-    let mut command: Option<char> = None;
-    let flush =
-        |current: &mut String, command: &mut Option<char>, out: &mut Vec<(Option<char>, f64)>| {
-            if let Ok(value) = current.parse::<f64>() {
-                out.push((command.take(), value));
-            }
-            current.clear();
-        };
-    for c in d.chars() {
-        if c.is_ascii_alphabetic() && c != 'e' && c != 'E' {
-            flush(&mut current, &mut command, &mut numbers);
-            if matches!(c, 'Z' | 'z') {
-                numbers.push((Some(c), 0.0));
-            } else {
-                command = Some(c);
-            }
-        } else if c == ' ' || c == ',' {
-            flush(&mut current, &mut command, &mut numbers);
-        } else if c == '-' && !current.is_empty() && !current.ends_with(['e', 'E']) {
-            flush(&mut current, &mut command, &mut numbers);
-            current.push(c);
-        } else {
-            current.push(c);
-        }
-    }
-    flush(&mut current, &mut command, &mut numbers);
-    let norm = |x: f64, y: f64| ((x - view.0) / view.2, (y - view.1) / view.3);
+    let norm = |(x, y): (f64, f64)| ((x - view.0) / view.2, (y - view.1) / view.3);
+    let mut reader = SvgData {
+        text: d.as_bytes(),
+        at: 0,
+    };
     let mut paths: Vec<Vec<PathCmd>> = Vec::new();
     let mut path: Vec<PathCmd> = Vec::new();
     let mut point = (0.0, 0.0);
     let mut start = (0.0, 0.0);
-    let mut cmd = 'M';
-    let mut index = 0;
-    while index < numbers.len() {
-        // Each step adds at most one command.
+    let mut command: Option<u8> = None;
+    // The previous command's last control point, for S (after C / S) and T
+    // (after Q / T).
+    let mut last_cubic: Option<(f64, f64)> = None;
+    let mut last_quad: Option<(f64, f64)> = None;
+    let line = |path: &mut Vec<PathCmd>, p: (f64, f64)| {
+        let (x, y) = norm(p);
+        path.push(PathCmd::LineTo { x, y });
+    };
+    let cubic = |path: &mut Vec<PathCmd>, c1: (f64, f64), c2: (f64, f64), p: (f64, f64)| {
+        let ((x1, y1), (x2, y2), (x, y)) = (norm(c1), norm(c2), norm(p));
+        path.push(PathCmd::CubicBezTo {
+            x1,
+            y1,
+            x2,
+            y2,
+            x,
+            y,
+        });
+    };
+    let reflect = |control: Option<(f64, f64)>, about: (f64, f64)| {
+        control.map_or(about, |(x, y)| (2.0 * about.0 - x, 2.0 * about.1 - y))
+    };
+    loop {
+        // Each step adds at most one command (an arc at most four).
         budget::tick(1)?;
-        if let Some(c) = numbers[index].0 {
-            cmd = c;
-            if matches!(c, 'Z' | 'z') {
+        reader.skip();
+        let Some(next) = reader.peek() else {
+            break;
+        };
+        if next.is_ascii_alphabetic() {
+            reader.at += 1;
+            command = Some(next);
+        }
+        let Some(letter) = command else {
+            break;
+        };
+        let base = if letter.is_ascii_lowercase() {
+            point
+        } else {
+            (0.0, 0.0)
+        };
+        let abs = |x: f64, y: f64| (base.0 + x, base.1 + y);
+        let (previous_cubic, previous_quad) = (last_cubic.take(), last_quad.take());
+        let ok = match letter.to_ascii_uppercase() {
+            b'Z' => {
                 path.push(PathCmd::Close);
                 point = start;
-                index += 1;
-                continue;
+                // Numbers after Z without a command are an error (§8.3.3).
+                command = None;
+                true
             }
-        }
-        let relative = cmd.is_ascii_lowercase();
-        let arity = match cmd.to_ascii_uppercase() {
-            'M' | 'L' | 'T' => 2,
-            'H' | 'V' => 1,
-            'C' => 6,
-            'S' | 'Q' => 4,
-            'A' => 7,
-            _ => {
-                index += 1;
-                continue;
-            }
-        };
-        if index + arity > numbers.len() {
-            break;
-        }
-        let v: Vec<f64> = numbers[index..index + arity].iter().map(|n| n.1).collect();
-        index += arity;
-        let abs = |x: f64, y: f64| {
-            if relative {
-                (point.0 + x, point.1 + y)
-            } else {
-                (x, y)
-            }
-        };
-        match cmd.to_ascii_uppercase() {
-            'M' => {
+            b'M' => reader.numbers::<2>().is_some_and(|[x, y]| {
                 if path.len() > 1 {
                     paths.push(std::mem::take(&mut path));
                 } else {
                     path.clear();
                 }
-                point = abs(v[0], v[1]);
+                point = abs(x, y);
                 start = point;
-                let (x, y) = norm(point.0, point.1);
+                let (x, y) = norm(point);
                 path.push(PathCmd::MoveTo { x, y });
-                cmd = if relative { 'l' } else { 'L' };
-            }
-            'L' | 'T' | 'A' => {
-                point = if cmd.eq_ignore_ascii_case(&'A') {
-                    abs(v[5], v[6])
+                // Further pairs are implicit line-tos.
+                command = Some(if letter == b'm' { b'l' } else { b'L' });
+                true
+            }),
+            b'L' => reader.numbers::<2>().is_some_and(|[x, y]| {
+                point = abs(x, y);
+                line(&mut path, point);
+                true
+            }),
+            b'H' => reader.numbers::<1>().is_some_and(|[x]| {
+                point.0 = base.0 + x;
+                line(&mut path, point);
+                true
+            }),
+            b'V' => reader.numbers::<1>().is_some_and(|[y]| {
+                point.1 = base.1 + y;
+                line(&mut path, point);
+                true
+            }),
+            b'C' => reader.numbers::<6>().is_some_and(|v| {
+                let (c1, c2, p) = (abs(v[0], v[1]), abs(v[2], v[3]), abs(v[4], v[5]));
+                cubic(&mut path, c1, c2, p);
+                point = p;
+                last_cubic = Some(c2);
+                true
+            }),
+            b'S' => reader.numbers::<4>().is_some_and(|v| {
+                let c1 = reflect(previous_cubic, point);
+                let (c2, p) = (abs(v[0], v[1]), abs(v[2], v[3]));
+                cubic(&mut path, c1, c2, p);
+                point = p;
+                last_cubic = Some(c2);
+                true
+            }),
+            b'Q' | b'T' => {
+                let quad = if letter.eq_ignore_ascii_case(&b'Q') {
+                    reader
+                        .numbers::<4>()
+                        .map(|v| (abs(v[0], v[1]), abs(v[2], v[3])))
                 } else {
-                    abs(v[0], v[1])
+                    reader
+                        .numbers::<2>()
+                        .map(|[x, y]| (reflect(previous_quad, point), abs(x, y)))
                 };
-                let (x, y) = norm(point.0, point.1);
-                path.push(PathCmd::LineTo { x, y });
+                quad.is_some_and(|(c, p)| {
+                    let ((x1, y1), (x, y)) = (norm(c), norm(p));
+                    path.push(PathCmd::QuadBezTo { x1, y1, x, y });
+                    point = p;
+                    last_quad = Some(c);
+                    true
+                })
             }
-            'H' => {
-                point.0 = if relative { point.0 + v[0] } else { v[0] };
-                let (x, y) = norm(point.0, point.1);
-                path.push(PathCmd::LineTo { x, y });
-            }
-            'V' => {
-                point.1 = if relative { point.1 + v[0] } else { v[0] };
-                let (x, y) = norm(point.0, point.1);
-                path.push(PathCmd::LineTo { x, y });
-            }
-            'C' => {
-                let c1 = abs(v[0], v[1]);
-                let c2 = abs(v[2], v[3]);
-                let p = abs(v[4], v[5]);
-                let ((x1, y1), (x2, y2), (x, y)) =
-                    (norm(c1.0, c1.1), norm(c2.0, c2.1), norm(p.0, p.1));
-                path.push(PathCmd::CubicBezTo {
-                    x1,
-                    y1,
-                    x2,
-                    y2,
-                    x,
-                    y,
-                });
-                point = p;
-            }
-            'S' | 'Q' => {
-                let c = abs(v[0], v[1]);
-                let p = abs(v[2], v[3]);
-                let ((x1, y1), (x, y)) = (norm(c.0, c.1), norm(p.0, p.1));
-                path.push(PathCmd::QuadBezTo { x1, y1, x, y });
-                point = p;
-            }
-            _ => {}
+            b'A' => reader
+                .arc()
+                .is_some_and(|(rx, ry, rotation, large, sweep, x, y)| {
+                    let end = abs(x, y);
+                    let curves = svg_arc(point, (rx, ry), rotation, large, sweep, end);
+                    if curves.is_empty() && point != end {
+                        // A zero radius (§F.6.2) or an arc beyond the arithmetic.
+                        line(&mut path, end);
+                    }
+                    for (c1, c2, p) in curves {
+                        cubic(&mut path, c1, c2, p);
+                    }
+                    point = end;
+                    true
+                }),
+            _ => false,
+        };
+        if !ok {
+            break;
         }
     }
     if path.len() > 1 {
         paths.push(path);
     }
     Ok(paths)
+}
+
+/// The SVG path-data reader: numbers (§8.3.9 grammar, the unsigned part read
+/// by the formula grammar every reader shares) and arc flags.
+struct SvgData<'t> {
+    text: &'t [u8],
+    at: usize,
+}
+
+impl SvgData<'_> {
+    fn skip(&mut self) {
+        while self
+            .text
+            .get(self.at)
+            .is_some_and(|c| c.is_ascii_whitespace() || *c == b',')
+        {
+            self.at += 1;
+        }
+    }
+
+    fn peek(&self) -> Option<u8> {
+        self.text.get(self.at).copied()
+    }
+
+    fn number(&mut self) -> Option<f64> {
+        self.skip();
+        let start = self.at;
+        let negative = match self.peek() {
+            Some(b'-') => true,
+            Some(b'+') => false,
+            _ => {
+                return crate::odf_props::scan_number(self.text, &mut self.at);
+            }
+        };
+        self.at += 1;
+        match crate::odf_props::scan_number(self.text, &mut self.at) {
+            Some(value) => Some(if negative { -value } else { value }),
+            None => {
+                self.at = start;
+                None
+            }
+        }
+    }
+
+    fn numbers<const N: usize>(&mut self) -> Option<[f64; N]> {
+        let mut out = [0.0; N];
+        for slot in &mut out {
+            *slot = self.number()?;
+        }
+        Some(out)
+    }
+
+    /// An arc flag (`0` / `1`), which may abut the next number (§8.3.9).
+    fn flag(&mut self) -> Option<bool> {
+        self.skip();
+        let value = match self.peek()? {
+            b'0' => false,
+            b'1' => true,
+            _ => return None,
+        };
+        self.at += 1;
+        Some(value)
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn arc(&mut self) -> Option<(f64, f64, f64, bool, bool, f64, f64)> {
+        let [rx, ry, rotation] = self.numbers::<3>()?;
+        let large = self.flag()?;
+        let sweep = self.flag()?;
+        let [x, y] = self.numbers::<2>()?;
+        Some((rx, ry, rotation, large, sweep, x, y))
+    }
+}
+
+type Cubic = ((f64, f64), (f64, f64), (f64, f64));
+
+/// The cubic Béziers (control, control, end) of an SVG elliptical arc from
+/// `from` to `to` (SVG 1.1 §F.6.5 endpoint-to-centre conversion, §F.6.6
+/// radius correction), at most a quarter turn each. Empty for an arc that is
+/// nothing or a line (§F.6.2), or beyond the range of the arithmetic.
+fn svg_arc(
+    from: (f64, f64),
+    radii: (f64, f64),
+    rotation: f64,
+    large: bool,
+    sweep: bool,
+    to: (f64, f64),
+) -> Vec<Cubic> {
+    let (mut rx, mut ry) = (radii.0.abs(), radii.1.abs());
+    if from == to || rx == 0.0 || ry == 0.0 {
+        return Vec::new();
+    }
+    let (sin_phi, cos_phi) = rotation.to_radians().sin_cos();
+    // Halves first, so neither the difference nor the midpoint overflows.
+    let dx = from.0 / 2.0 - to.0 / 2.0;
+    let dy = from.1 / 2.0 - to.1 / 2.0;
+    let (mx, my) = (from.0 / 2.0 + to.0 / 2.0, from.1 / 2.0 + to.1 / 2.0);
+    let x1p = cos_phi * dx + sin_phi * dy;
+    let y1p = -sin_phi * dx + cos_phi * dy;
+    // §F.6.5 in the unit-circle frame of the ellipse (`u`, `v` = x1', y1'
+    // over the radii), with lengths taken by `hypot`: no square or product
+    // of coordinates over- or underflows.
+    let (mut u, mut v) = (x1p / rx, y1p / ry);
+    let mut reach = u.hypot(v);
+    if reach > 1.0 {
+        // §F.6.6: radii too small for the ends grow until they fit.
+        rx *= reach;
+        ry *= reach;
+        u /= reach;
+        v /= reach;
+        reach = 1.0;
+    }
+    // The centre in the frame is ±√(1−r²)·(v, −u)/r, r = |(u, v)|.
+    let mut lift = ((1.0 - reach) * (1.0 + reach)).max(0.0).sqrt();
+    if large == sweep {
+        lift = -lift;
+    }
+    let (cu, cv) = (lift * (v / reach), -lift * (u / reach));
+    let (cxp, cyp) = (cu * rx, cv * ry);
+    let cx = cos_phi * cxp - sin_phi * cyp + mx;
+    let cy = sin_phi * cxp + cos_phi * cyp + my;
+    let angle = |ux: f64, uy: f64, vx: f64, vy: f64| (ux * vy - uy * vx).atan2(ux * vx + uy * vy);
+    let theta1 = angle(1.0, 0.0, u - cu, v - cv);
+    let mut delta = angle(u - cu, v - cv, -u - cu, -v - cv);
+    if !sweep && delta > 0.0 {
+        delta -= std::f64::consts::TAU;
+    } else if sweep && delta < 0.0 {
+        delta += std::f64::consts::TAU;
+    }
+    if ![cx, cy, rx, ry, theta1, delta]
+        .iter()
+        .all(|v| v.is_finite())
+    {
+        // Beyond the range of the arithmetic: the caller draws the chord.
+        return Vec::new();
+    }
+    // The ellipse point and tangent at parameter t, rotated and placed.
+    let place = |(x, y): (f64, f64)| (cos_phi * x - sin_phi * y, sin_phi * x + cos_phi * y);
+    let at = |t: f64| {
+        let (x, y) = place((rx * t.cos(), ry * t.sin()));
+        (cx + x, cy + y)
+    };
+    let tangent = |t: f64| place((-rx * t.sin(), ry * t.cos()));
+    // Quarter turns, not split by rounding (a quarter arc is one curve).
+    let pieces = ((delta.abs() / std::f64::consts::FRAC_PI_2 - 1e-9).ceil() as usize).clamp(1, 4);
+    let step = delta / pieces as f64;
+    let k = 4.0 / 3.0 * (step / 4.0).tan();
+    let curves: Vec<Cubic> = (0..pieces)
+        .map(|i| {
+            let (a, b) = (theta1 + step * i as f64, theta1 + step * (i + 1) as f64);
+            let (p0, p1) = (at(a), at(b));
+            let (ta, tb) = (tangent(a), tangent(b));
+            let end = if i + 1 == pieces { to } else { p1 };
+            (
+                (p0.0 + k * ta.0, p0.1 + k * ta.1),
+                (p1.0 - k * tb.0, p1.1 - k * tb.1),
+                end,
+            )
+        })
+        .collect();
+    let finite = |(x, y): (f64, f64)| x.is_finite() && y.is_finite();
+    if curves
+        .iter()
+        .all(|(c1, c2, p)| finite(*c1) && finite(*c2) && finite(*p))
+    {
+        curves
+    } else {
+        // A point beyond the range of the arithmetic: the caller draws the chord.
+        Vec::new()
+    }
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::*;
+
+    const VIEW: (f64, f64, f64, f64) = (0.0, 0.0, 100.0, 100.0);
+
+    /// The end point of every command of the only sub-path, in view units.
+    fn ends(d: &str) -> Vec<(f64, f64)> {
+        let paths = svg_path(d, VIEW).unwrap();
+        assert_eq!(paths.len(), 1);
+        paths[0]
+            .iter()
+            .filter_map(|c| match *c {
+                PathCmd::MoveTo { x, y }
+                | PathCmd::LineTo { x, y }
+                | PathCmd::QuadBezTo { x, y, .. }
+                | PathCmd::CubicBezTo { x, y, .. } => Some((x * 100.0, y * 100.0)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn close(actual: &[(f64, f64)], expected: &[(f64, f64)]) {
+        assert_eq!(actual.len(), expected.len(), "{actual:?}");
+        for (a, e) in actual.iter().zip(expected) {
+            assert!(
+                (a.0 - e.0).abs() < 1e-9 && (a.1 - e.1).abs() < 1e-9,
+                "{actual:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn arcs_follow_the_svg_endpoint_parameterization() {
+        // A half circle from (0,0) to (100,0): the sweep flag picks the side
+        // (1 turns through positive angles, up the page here), each quarter
+        // is one curve, and both spellings of the flags read alike.
+        for d in [
+            "M 0 0 A 50 50 0 0 1 100 0",
+            "M0,0a50,50 0 0,1 100,0",
+            "M0 0a50 50 0 01100 0",
+        ] {
+            close(&ends(d), &[(0.0, 0.0), (50.0, -50.0), (100.0, 0.0)]);
+        }
+        close(
+            &ends("M 0 0 A 50 50 0 0 0 100 0"),
+            &[(0.0, 0.0), (50.0, 50.0), (100.0, 0.0)],
+        );
+        // Radii too small for the ends are scaled up (§F.6.6).
+        close(
+            &ends("M 0 0 A 10 10 0 1 0 100 0"),
+            &[(0.0, 0.0), (50.0, 50.0), (100.0, 0.0)],
+        );
+        // The x-axis rotation turns the ellipse: rx 20 upright, ry 50 flat.
+        close(
+            &ends("M 0 0 A 20 50 90 0 1 100 0"),
+            &[(0.0, 0.0), (50.0, -20.0), (100.0, 0.0)],
+        );
+        // The large-arc flag takes the long way round: three quarters of
+        // the circle about (50,-50) through the same ends.
+        close(
+            &ends("M 0 0 A 70.71067811865476 70.71067811865476 0 1 1 100 0"),
+            &[(0.0, 0.0), (0.0, -100.0), (100.0, -100.0), (100.0, 0.0)],
+        );
+        // A zero radius is a line; equal ends draw nothing.
+        close(&ends("M 0 0 A 0 5 0 0 1 10 0"), &[(0.0, 0.0), (10.0, 0.0)]);
+        close(
+            &ends("M 0 0 L 5 5 A 5 5 0 0 1 5 5"),
+            &[(0.0, 0.0), (5.0, 5.0)],
+        );
+    }
+
+    #[test]
+    fn a_quarter_arc_is_the_standard_cubic() {
+        // From (100,50) clockwise on the page to (50,100) about (50,50):
+        // the controls sit k·r along the tangents, k = 4/3·tan(π/8).
+        let paths = svg_path("M 100 50 A 50 50 0 0 1 50 100", VIEW).unwrap();
+        let k = 4.0 / 3.0 * (std::f64::consts::PI / 8.0).tan() * 50.0;
+        match paths[0][1] {
+            PathCmd::CubicBezTo {
+                x1,
+                y1,
+                x2,
+                y2,
+                x,
+                y,
+            } => {
+                let got = [x1, y1, x2, y2, x, y].map(|v| v * 100.0);
+                let want = [100.0, 50.0 + k, 50.0 + k, 100.0, 50.0, 100.0];
+                for (g, w) in got.iter().zip(want) {
+                    assert!((g - w).abs() < 1e-9, "{got:?}");
+                }
+            }
+            ref other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn arcs_are_scale_invariant() {
+        // A quarter circle about the origin, at tiny, unit and huge scales:
+        // the same normalized controls (k = 4/3·tan(π/8) along the tangents).
+        let k = 4.0 / 3.0 * (std::f64::consts::PI / 8.0).tan();
+        for scale in [1e-100, 1.0, 1e100] {
+            let d = format!("M{scale} 0 A{scale} {scale} 0 0 1 0 {scale}");
+            let paths = svg_path(&d, (0.0, 0.0, scale, scale)).unwrap();
+            let PathCmd::CubicBezTo {
+                x1,
+                y1,
+                x2,
+                y2,
+                x,
+                y,
+            } = paths[0][1]
+            else {
+                panic!("{scale}: {:?}", paths[0]);
+            };
+            let want = [1.0, k, k, 1.0, 0.0, 1.0];
+            for (got, want) in [x1, y1, x2, y2, x, y].iter().zip(want) {
+                assert!((got - want).abs() < 1e-9, "{scale}: {:?}", paths[0][1]);
+            }
+        }
+    }
+
+    #[test]
+    fn arcs_survive_extreme_finite_values() {
+        // Tiny radii against a unit chord grow to the half circle (§F.6.6).
+        close(
+            &ends("M 0 0 A 1e-200 1e-200 0 0 1 100 0"),
+            &[(0.0, 0.0), (50.0, -50.0), (100.0, 0.0)],
+        );
+        // Ends near the top of the range: their difference overflows unless
+        // halved first. The half circle of radius 1.6e308 about the origin.
+        let r = 1.6e308;
+        let curves = svg_arc((-r, 0.0), (r, r), 0.0, false, true, (r, 0.0));
+        assert_eq!(curves.len(), 2);
+        let (_, _, top) = curves[0];
+        assert!(
+            (top.0 / r).abs() < 1e-12 && (top.1 / r + 1.0).abs() < 1e-12,
+            "{top:?}"
+        );
+        assert_eq!(curves[1].2, (r, 0.0));
+        // An arc whose points leave the finite range is drawn as its chord.
+        let far = svg_arc(
+            (1e308, 1e308),
+            (1e308, 1e308),
+            0.0,
+            false,
+            false,
+            (1e308, -1e308),
+        );
+        assert!(far.is_empty());
+        let paths = svg_path(
+            "M 1e308 1e308 A 1e308 1e308 0 0 0 1e308 -1e308",
+            (0.0, 0.0, 1.0, 1.0),
+        )
+        .unwrap();
+        assert!(
+            matches!(paths[0][1], PathCmd::LineTo { .. }),
+            "{:?}",
+            paths[0]
+        );
+    }
+
+    #[test]
+    fn smooth_curves_reflect_the_previous_control_point() {
+        let paths = svg_path("M 0 0 C 0 10 20 10 20 0 S 40 -10 40 0", VIEW).unwrap();
+        assert!(matches!(
+            paths[0][2],
+            PathCmd::CubicBezTo { x1, y1, x2, y2, x, y }
+                if (x1, y1, x2, y2, x, y) == (0.2, -0.1, 0.4, -0.1, 0.4, 0.0)
+        ));
+        // Relative T after relative Q: the control mirrors (10,10) about (20,0).
+        for d in ["M 0 0 Q 10 10 20 0 T 40 0", "m 0 0 q 10 10 20 0 t 20 0"] {
+            let paths = svg_path(d, VIEW).unwrap();
+            assert!(
+                matches!(paths[0][2], PathCmd::QuadBezTo { x1, y1, x, y } if (x1, y1, x, y) == (0.3, -0.1, 0.4, 0.0)),
+                "{d}: {:?}",
+                paths[0][2]
+            );
+        }
+        // After a non-curve command, S and T start at the current point.
+        let paths = svg_path("M 0 0 L 10 0 S 20 10 30 0 L 40 0 T 50 0", VIEW).unwrap();
+        assert!(matches!(
+            paths[0][2],
+            PathCmd::CubicBezTo { x1, y1, .. } if (x1, y1) == (0.1, 0.0)
+        ));
+        assert!(matches!(
+            paths[0][4],
+            PathCmd::QuadBezTo { x1, y1, .. } if (x1, y1) == (0.4, 0.0)
+        ));
+    }
+
+    #[test]
+    fn skew_moves_the_centre_as_libreoffice_shears() {
+        // A 4 × 2 box sheared by skewX (0.5): LibreOffice keeps its top edge
+        // and moves its bottom edge left, so its centre moves left by
+        // tan 0.5 (half the height times the shear) before the translation.
+        let (rotation, corner) =
+            transform_rotation(Some("skewX (0.5) translate (5 5)"), (0.0, 0.0), 4.0, 2.0);
+        let (x, y) = corner.unwrap();
+        assert_eq!(rotation, 0.0);
+        assert!(
+            (x - (5.0 - 0.5f64.tan())).abs() < 1e-9 && (y - 5.0).abs() < 1e-9,
+            "{x} {y}"
+        );
+    }
 }

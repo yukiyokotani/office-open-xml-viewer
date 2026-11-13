@@ -795,7 +795,8 @@ pub fn font_of(chain: &[&Style], faces: &HashMap<String, String>, base: Option<&
 
 /// `0.74pt solid #000000` (§20.183 fo:border) as a SpreadsheetML edge.
 /// Widths follow LibreOffice's SpreadsheetML line weights: hair 0.05pt,
-/// thin 0.75pt, medium 1.75pt, thick 2.5pt.
+/// thin 0.75pt, medium 1.75pt, thick 2.5pt. Width keywords are the widths
+/// every reader shares (`odf_props::border_width_keyword`).
 pub fn border_edge(value: &str) -> Option<BorderEdge> {
     let mut width = None;
     let mut style = None;
@@ -806,11 +807,9 @@ pub fn border_edge(value: &str) -> Option<BorderEdge> {
         } else if let Some(pt) = length_pt(token) {
             width = Some(pt);
         } else {
-            match token {
-                "thin" => width = Some(0.75),
-                "medium" => width = Some(1.75),
-                "thick" => width = Some(2.5),
-                other => style = Some(other.to_string()),
+            match crate::odf_props::border_width_keyword(token) {
+                Some(keyword) => width = Some(keyword),
+                None => style = Some(token.to_string()),
             }
         }
     }
@@ -892,5 +891,9 @@ mod tests {
             "mediumDashDotDot"
         );
         assert_eq!(edge("none"), None);
+        // Keywords: LibreOffice's hairline, middle and thick widths.
+        assert_eq!(edge("thin solid #000000").unwrap().0, "hair");
+        assert_eq!(edge("medium solid #000000").unwrap().0, "thin");
+        assert_eq!(edge("thick solid #000000").unwrap().0, "thick");
     }
 }
