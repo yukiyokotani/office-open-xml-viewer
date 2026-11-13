@@ -1,6 +1,6 @@
 {
   "name": "@silurus/ooxml",
-  "version": "0.89.9",
+  "version": "0.89.10",
   "description": "Browser-based OOXML viewer (docx/xlsx/pptx) — Rust/WASM parser + Canvas renderer",
   "license": "MIT",
   "author": "Yuki Yokotani <silurus.dev@gmail.com>",
