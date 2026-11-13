@@ -449,7 +449,8 @@ function bookmarkSectionByDomain(page: LayoutPage): ReadonlyMap<string, string> 
     }
   }
   for (const domain of page.flowDomains) {
-    if (domain.kind !== 'footnote' && domain.kind !== 'endnote') continue;
+    if (domain.kind !== 'footnote' && domain.kind !== 'endnote'
+      && domain.sectionRegionId === undefined) continue;
     const region = domain.sectionRegionId
       ? regionById.get(domain.sectionRegionId)
       : regions[0];

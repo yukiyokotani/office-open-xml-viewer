@@ -11,6 +11,8 @@ import pixelmatch from 'pixelmatch';
 import { PNG } from 'pngjs';
 // @ts-expect-error -- untyped local helper module
 import { inputsHash } from './paths.mjs';
+// @ts-expect-error -- untyped local helper module
+import { libreOfficeFaces } from './fonts.mjs';
 
 interface CorpusFile {
   readonly id: string;
@@ -148,16 +150,41 @@ for (const file of files) {
         status: 200, contentType: 'application/wasm', body: readFileSync(wasmPath),
       }));
     }
+    // Harness environment parity (not reader behaviour), opt-in with
+    // ODF_HARNESS_LO_FACES=1: the faces LibreOffice drew this PDF with, served
+    // through the `fonts` option under the families the document asks for
+    // (fonts.mjs). Off by default: the DOCX layout measures a served face's
+    // line box without its hhea line gap (Carlito served as Calibri lays out
+    // at 1.0 em where Word and LibreOffice use 1.22 em), so served faces skew
+    // line pitch more than the font fallback they replace.
+    const faces = (process.env.ODF_HARNESS_LO_FACES === '1' ? libreOfficeFaces(file.odt, file.pdf, maxPages) : []) as
+      { family: string; weight: string; style: string; bytes: Buffer }[];
+    await page.route('**/__odf_harness/font/*', (route) => {
+      const face = faces[Number(route.request().url().split('/').pop())];
+      return face
+        ? route.fulfill({ status: 200, contentType: 'font/ttf', body: face.bytes })
+        : route.fulfill({ status: 404 });
+    });
+    const faceDescriptors = faces.map(({ family, weight, style }, index) => ({ family, weight, style, index }));
     // Any page served by the DOCX dev server gives the module graph its origin;
     // the fixture's own default load is irrelevant here.
     await page.goto('/tests/visual/fixture.html?file=__odf_harness/none');
 
-    const loaded = await page.evaluate(async ({ odtModule, useCustomWasm }) => {
-      const { DocxDocument } = await import('/src/index.ts');
+    const loaded = await page.evaluate(async ({ odtModule, root, useCustomWasm, faceDescriptors }) => {
+      const { DocxDocument, fontFiles } = await import('/src/index.ts');
       const { createOdt } = await import(odtModule);
+      // The opt-in renderers the DOCX visual fixture loads, so every
+      // feature the reader maps is drawn (TIFF pictures, equations).
+      const { math } = await import(`${root}/src/math.ts`);
+      const { tiff } = await import(`${root}/src/tiff.ts`);
       const odt = createOdt(useCustomWasm ? { wasmUrl: new URL('/__odf_harness/odt.wasm', location.href).href } : {});
+      const fonts = faceDescriptors.length === 0 ? [] : [fontFiles({
+        faces: faceDescriptors.map(({ family, weight, style, index }) => ({
+          family, weight, style, url: new URL(`/__odf_harness/font/${index}`, location.href).href,
+        })),
+      })];
       try {
-        const document = await DocxDocument.load('/__odf_harness/input', { odt });
+        const document = await DocxDocument.load('/__odf_harness/input', { odt, fonts, math, tiff });
         (window as unknown as { odfHarnessDocument: unknown }).odfHarnessDocument = document;
         return { status: 'opened', pageCount: document.pageCount };
       } catch (error) {
@@ -167,7 +194,7 @@ for (const file of files) {
         const code = (error as { code?: unknown }).code;
         return { status: code === 'unsupported-content' ? 'rejected' : 'error', message: `${String(code ?? '')} ${message}`.trim() };
       }
-    }, { odtModule: `/@fs${checkout}/packages/opendocument/src/odt.ts`, useCustomWasm: Boolean(wasmPath) });
+    }, { odtModule: `/@fs${checkout}/packages/opendocument/src/odt.ts`, root: `/@fs${checkout}`, useCustomWasm: Boolean(wasmPath), faceDescriptors });
 
     let result: BrowserResult = loaded as BrowserResult;
     let references: PNG[] = [];

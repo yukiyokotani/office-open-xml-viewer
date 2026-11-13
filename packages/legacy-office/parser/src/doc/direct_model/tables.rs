@@ -391,6 +391,7 @@ fn project_table(
             .into(),
             is_header: planned.is_header,
             cant_split: planned.source.cant_split,
+            cuts_in_place: false,
             table_row_layout: TableRowLayoutAcquisitionWire {
                 height: (height != 0).then(|| TableRowHeightAcquisitionWire {
                     value: Some(height.abs().to_string()),

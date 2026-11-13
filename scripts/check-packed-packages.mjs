@@ -64,7 +64,11 @@ try {
   }
   await writeFile(join(scratch, 'public', 'deferred.ppt'), fixtures.buildPptFixture());
   await writeFile(join(scratch, 'public', 'sample.odt'), fixtures.buildOdtFixture({ body: '<text:p>Hello ODT</text:p>' }));
-  await writeFile(join(scratch, 'public', 'unsupported.odt'), fixtures.buildOdtFixture({ body: '<table:table xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0"/>' }));
+  // The ODT reader renders every text feature; it refuses encrypted input.
+  await writeFile(join(scratch, 'public', 'unsupported.odt'), fixtures.buildOdtFixture({
+    body: '<text:p>x</text:p>',
+    manifestExtra: '<manifest:file-entry manifest:full-path="content.xml" manifest:media-type="text/xml"><manifest:encryption-data/></manifest:file-entry>',
+  }));
   await writeFile(join(scratch, 'node-smoke.mjs'), `
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
@@ -98,7 +102,9 @@ for (const [family, open, options] of [
   ['odt', materializeDocxDocument, { odt: createOdt() }],
 ]) {
   await assert.rejects(async () => open(await readFile('public/unsupported.' + family), options),
-    error => error instanceof OoxmlError && error.code === 'unsupported-content' && error.details.format === family && error.details.reason === 'source-subset');
+    error => error instanceof OoxmlError && (family === 'odt'
+      ? error.code === 'unsupported-encryption'
+      : error.code === 'unsupported-content' && error.details.format === family && error.details.reason === 'source-subset'));
 }
 await assert.rejects(async () => materializePptxPresentation(await readFile('public/deferred.ppt'), { legacyPpt }),
   error => error instanceof OoxmlError && error.code === 'unsupported-content' && error.details.format === 'ppt');
@@ -130,8 +136,10 @@ try {
       const unsupported = await (await fetch('/unsupported.' + family)).arrayBuffer();
       try { await Loader.load(unsupported, options); throw new Error('unsupported input was accepted'); }
       catch (error) {
-        if (!(error instanceof OoxmlError) || error.code !== 'unsupported-content'
-          || error.details?.format !== family || error.details?.reason !== 'source-subset') throw error;
+        if (!(error instanceof OoxmlError)) throw error;
+        if (family === 'odt' ? error.code !== 'unsupported-encryption'
+          : error.code !== 'unsupported-content'
+            || error.details?.format !== family || error.details?.reason !== 'source-subset') throw error;
       }
       if (family === 'ppt') {
         const deferred = await (await fetch('/deferred.ppt')).arrayBuffer();
