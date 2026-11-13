@@ -704,6 +704,19 @@ describe('FontSourceSession: run-time limits fail only their family', () => {
     expect(calls.map((call) => call.url.split('/').pop()).sort()).toEqual(['italic.woff2', 'latin.woff2']);
   });
 
+  it('registers a ranged face before an unranged one it competes with, however the weight is spelled', async () => {
+    installFetch({ 'https://app.example/cjk.woff2': { bytes: 4 }, 'https://app.example/any.woff2': { bytes: 5 } });
+    const set = fakeSet();
+    const session = open([fontFiles({ faces: [
+      { family: 'Spelled', url: 'https://app.example/cjk.woff2', weight: '400.0', unicodeRange: 'U+4E00-9FFF' },
+      { family: 'Spelled', url: 'https://app.example/any.woff2', weight: 'normal' },
+    ] })], set);
+    await session.ensure(demand(['Spelled'], [0x41]));
+    await session.ensure(demand([], [0x4E00]));
+    // One component, in declaration order (the later unranged face wins).
+    expect(set.faces.map((face) => (face.source as ArrayBuffer).byteLength)).toEqual([4, 5]);
+  });
+
   it('keeps an unranged face with every subset it may compete with, whatever the spelling', async () => {
     const { calls } = installFetch({
       'https://app.example/any.woff2': { bytes: 4 },

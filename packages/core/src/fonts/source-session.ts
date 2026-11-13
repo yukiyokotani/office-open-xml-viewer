@@ -323,23 +323,37 @@ function rangeIntersects(ranges: readonly (readonly [number, number])[], sorted:
   return false;
 }
 
-/** A face descriptor as CSS matching compares it: omitted and `normal`
- * spellings unified; a range (or any multi-token value) is `undefined`,
- * which may match any value. */
-function descriptorValue(value: string | undefined, normal: string): string | undefined {
+/** CSS Fonts 4 §2.5 keyword values of `font-stretch`, as percentages. */
+const STRETCH_KEYWORDS: Readonly<Record<string, number>> = {
+  'ultra-condensed': 50, 'extra-condensed': 62.5, condensed: 75, 'semi-condensed': 87.5, normal: 100,
+  'semi-expanded': 112.5, expanded: 125, 'extra-expanded': 150, 'ultra-expanded': 200,
+};
+
+/** A face descriptor as CSS matching compares it: a number for a numeric
+ * weight or stretch (keywords and omitted values mapped: normal = 400 /
+ * 100%, bold = 700), a keyword for a style; `undefined` for anything else
+ * (a range, a math function): it may equal any value. */
+function descriptorValue(value: string | undefined, keywords: Readonly<Record<string, number | string>>): number | string | undefined {
   const text = (value ?? 'normal').trim().toLowerCase();
-  if (/\s/.test(text)) return undefined;
-  return text === 'normal' ? normal : text === 'bold' ? '700' : text;
+  if (Object.prototype.hasOwnProperty.call(keywords, text)) return keywords[text];
+  return /^[+]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?%?$/.test(text) ? Number(text.replace('%', '')) : undefined;
 }
 
+const DESCRIPTOR_KEYWORDS = [
+  { normal: 400, bold: 700 },
+  { normal: 'normal', italic: 'italic', oblique: 'oblique' },
+  STRETCH_KEYWORDS,
+] as const;
+
 /** Whether two faces can be candidates for one style request (CSS Fonts 4
- * §5.2 narrows by stretch, style and weight before `unicode-range`). */
+ * §5.2 narrows by stretch, style and weight before `unicode-range`). Only
+ * values known to differ separate them. */
 function mayMatchTogether(a: FontFaceDeclaration, b: FontFaceDeclaration): boolean {
-  for (const [x, y, normal] of [[a.weight, b.weight, '400'], [a.style, b.style, 'normal'], [a.stretch, b.stretch, '100%']] as const) {
-    const left = descriptorValue(x, normal), right = descriptorValue(y, normal);
-    if (left !== undefined && right !== undefined && left !== right) return false;
-  }
-  return true;
+  const pairs = [[a.weight, b.weight], [a.style, b.style], [a.stretch, b.stretch]] as const;
+  return pairs.every(([x, y], index) => {
+    const left = descriptorValue(x, DESCRIPTOR_KEYWORDS[index]!), right = descriptorValue(y, DESCRIPTOR_KEYWORDS[index]!);
+    return left === undefined || right === undefined || left === right;
+  });
 }
 
 /**
