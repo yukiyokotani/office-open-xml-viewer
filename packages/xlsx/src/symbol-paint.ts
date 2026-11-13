@@ -22,7 +22,10 @@
  * that mixes codes the symbol face draws with codes it lacks (a partial face)
  * converts every convertible code and paints in the Unicode fallback face:
  * converted text must never paint in the symbol family, whose cmap would
- * re-read a target such as U+00A9 as its own symbol code.
+ * re-read a target such as U+00A9 as its own symbol code. If a drawn code of
+ * such a text cannot convert (its target is proven to paint in colour), the
+ * text stays in the symbol face instead, so no drawn glyph is lost; the codes
+ * the face lacks then paint as authored, as in 0.89.
  */
 import { isSymbolFontFamily, symbolTextToUnicodeSegments, type SymbolFaceOracle } from '@silurus/ooxml-core';
 
@@ -82,10 +85,15 @@ export function symbolPaint(
       const base = converted.replace(TEXT_PRESENTATION, '');
       return verdict !== true || base === converted ? verdict : oracle.monochrome(base, unicodeFont(base));
     };
-    for (const ch of native) {
-      const segment = symbolTextToUnicodeSegments(ch, family, { native: () => false, monochrome })[0];
-      if (segment?.mapped) pieces.set(ch, segment.text);
-      else pieces.delete(ch);
+    const forced = native.map((ch) => symbolTextToUnicodeSegments(ch, family, { native: () => false, monochrome })[0]);
+    if (forced.every((segment) => segment?.mapped)) {
+      native.forEach((ch, index) => pieces.set(ch, forced[index]!.text));
+    } else {
+      // A drawn code whose conversion is refused (its target is proven to
+      // paint in colour) keeps its own face: the text stays in the symbol
+      // face, and the codes it lacks paint as authored there.
+      unicode = false;
+      for (const [ch, piece] of [...pieces]) if (!native.includes(ch) || piece === ch) pieces.delete(ch);
     }
   }
   if (pieces.size === 0) return AUTHORED_PAINT;

@@ -256,7 +256,36 @@ const symbols = workbookBytes(
     + '</xdr:sp><xdr:clientData/></xdr:twoCellAnchor>',
 );
 
+// Readings paint in the phonetic font (font 0 here: Symbol), and a symbol
+// face named only by a shared rich run is charged through that run.
+const symbolReadings = workbookBytes(
+  '<fonts count="2"><font><sz val="11"/><name val="Symbol"/></font><font><sz val="11"/><name val="Calibri"/></font></fonts>'
+    + base + '<cellXfs count="2"><xf numFmtId="0" fontId="0"/><xf numFmtId="0" fontId="1"/></cellXfs>',
+  '<row r="1"><c r="A1" s="1" t="s" ph="1"><v>1</v></c>'
+    + '<c r="B1" s="1" t="s"><v>0</v></c></row>',
+  '<si><r><t>Done </t></r><r><rPr><rFont val="Wingdings"/></rPr><t>\uF0FC</t></r></si>'
+    + '<si><t>xy</t><rPh sb="0" eb="2"><t>\u00B7p</t></rPh></si>',
+);
+
 describe('XLSX font demand covers symbol-encoded text in either face outcome', () => {
+  it('charges phonetic readings and rich-run-only symbol faces to the face that paints them', () => {
+    const { workbook, sheets } = parse(symbolReadings);
+    const ws = sheets[0]!;
+    const demand = new XlsxFontDemand(workbook, 'jp', []);
+    const deltas = [demand.take()];
+    demand.worksheetParts(ws);
+    demand.newRowsOf(ws);
+    deltas.push(demand.take());
+    expect(deltas.some((delta) => delta?.scalars === 'all')).toBe(false);
+    const demanded = new Set(deltas.flatMap((delta) => delta?.scalars === 'all' ? [] : delta?.scalars ?? []));
+    const realm = symbolRealm();
+    renderViewport(realm.ctx, ws, workbook.styles, { row: 1, col: 1, rows: 4, cols: 4 }, { dpr: 1, loadedImages: new Map() }, 'jp');
+    const scalars = new Set<number>();
+    for (const record of [...realm.fills, ...realm.measures]) for (const ch of record.text) scalars.add(ch.codePointAt(0) as number);
+    expect(scalars.has(0x2022)).toBe(true);
+    expect([...scalars].filter((cp) => !demanded.has(cp)).map((cp) => cp.toString(16))).toEqual([]);
+  });
+
   it('stays finite and covers the painted form, kept or converted', () => {
     const { workbook, sheets } = parse(symbols);
     const ws = sheets[0]!;

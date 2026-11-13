@@ -1258,6 +1258,39 @@ function symbolPaintRuns(
   return out ?? runs;
 }
 
+/**
+ * Rich runs that name a symbol-encoded face, in their painted form; undefined
+ * for any other value. Such a run's codes are judged against its own face
+ * (symbol-paint.ts), so its painted text exists only run by run: overflow,
+ * shrink-to-fit, rotated and stacked text, the automatic row height and the
+ * virtualized overflow pre-pass measure and paint these cells per run. Other
+ * rich values keep the established measurement of their joined text in the
+ * cell font (library simplification), which their paint does not contradict.
+ */
+function symbolRichRuns(
+  ctx: CanvasRenderingContext2D, runs: Run[] | undefined, baseFont: CellFont, cs = 1, cjkFallback?: CjkLang,
+): Run[] | undefined {
+  if (!runs?.length) return undefined;
+  const state = themeCellFontByContext.get(ctx);
+  const symbolic = runs.some((run) => isSymbolFontFamily(cachedThemeCellFont(applyRunFont(baseFont, run), state).family));
+  return symbolic ? symbolPaintRuns(ctx, runs, baseFont, cs, cjkFallback) : undefined;
+}
+
+/** Painted runs as measured segments of one line (line breaks read as spaces). */
+function richRunSegments(
+  ctx: CanvasRenderingContext2D, runs: readonly Run[], baseFont: CellFont, cs: number, cjkFallback?: CjkLang,
+): RichSeg[] {
+  const previous = ctx.font;
+  const segs = runs.map((run) => {
+    const font = applyRunFont(baseFont, run);
+    const text = run.text.replace(/\n/gu, ' ');
+    ctx.font = buildFont(ctx, vertAlignDrawFont(font), cs, cjkFallback, text);
+    return { text, font, width: ctx.measureText(text).width };
+  });
+  ctx.font = previous;
+  return segs;
+}
+
 /** Width of `text` painted in `font` (in its painted form), restoring the
  *  context font. */
 function measureCellText(
@@ -1930,6 +1963,43 @@ export function drawWrappedRichText(
   }
 }
 
+/** One stacked slot per authored code point of painted text: a converted
+ *  symbol's VS15 stays with its base (symbol-paint.ts). */
+const STACKED_SLOT = /[\s\S]\uFE0E?/gu;
+
+/**
+ * Stacked text (`textRotation="255"`, §18.8.1) of rich runs in their painted
+ * form (symbolRichRuns): one slot per authored code point, each painted in
+ * its run's font and colour with the same UAX #50 orientation as the plain
+ * stacked path.
+ */
+function drawStackedRichRuns(
+  ctx: CanvasRenderingContext2D, runs: readonly Run[], baseFont: CellFont,
+  centerX: number, cy: number, cellH: number, alignV: string, paddingY: number,
+  charH: number, cs: number, fontColor: string | null | undefined, cjkFallback?: CjkLang,
+): void {
+  const slots = runs.reduce((sum, run) => sum + (run.text.match(STACKED_SLOT)?.length ?? 0), 0);
+  const totalH = slots * charH;
+  let charY = alignV === 'top' ? cy + paddingY
+    : alignV === 'center' ? cy + (cellH - totalH) / 2
+    : cy + cellH - totalH - paddingY;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  for (const run of runs) {
+    const font = applyRunFont(baseFont, run);
+    ctx.font = buildFont(ctx, font, cs, cjkFallback, run.text);
+    const color = fontColor ?? font.color;
+    ctx.fillStyle = color ? hexToRgba(color) : '#000000';
+    const paint = (value: string, x: number, y: number) => paintCellText(ctx, value, x, y, font, cs);
+    for (const ch of run.text.match(STACKED_SLOT) ?? []) {
+      const cp = ch.codePointAt(0) ?? 0;
+      const vertCapable = verticalTrLongMark(cp) && verticalVertGlyphReachable(ctx, cp);
+      drawStackedVerticalChar(ctx, ch, centerX, charY, charH, vertCapable, paint);
+      charY += charH;
+    }
+  }
+}
+
 function colToLetter(col: number): string {
   let result = '';
   while (col > 0) {
@@ -2364,7 +2434,8 @@ function renderQuadrant(
     const tableRunColor = tableRunFontColor(styleFormat, xf);
     const rawRuns = cell.value.type === 'text' ? cell.value.runs : undefined;
     const richBaseFont = tableRunColor != null ? { ...fontForDraw, color: tableRunColor } : fontForDraw;
-    const runs = rawRuns && symbolPaintRuns(ctx, richRunsWithTableColor(rawRuns, tableRunColor), richBaseFont, cs, cjkFallback);
+    const colouredRuns = rawRuns && richRunsWithTableColor(rawRuns, tableRunColor);
+    const runs = symbolRichRuns(ctx, colouredRuns, richBaseFont, cs, cjkFallback) ?? colouredRuns;
     const hasRichText = runs && runs.length > 0;
 
     if (xf.wrapText && hasRichText) {
@@ -2756,6 +2827,19 @@ function renderQuadrant(
       const paintFont = painted.font;
       const paintText = painted.text;
       if (paintFont !== fontForDraw) ctx.font = buildFont(ctx, paintFont, cs, cjkFallback, paintText);
+      // Rich runs take the table style's font color by the measured run rule
+      // (richRunsWithTableColor), in their painted form; runs in a
+      // symbol-encoded face are measured run by run (symbolRichRuns).
+      const tableRunColor = tableRunFontColor(styleFormat, xf);
+      const rawRuns = cell.value.type === 'text' ? cell.value.runs : undefined;
+      const richBaseFont = tableRunColor != null ? { ...fontForDraw, color: tableRunColor } : fontForDraw;
+      const colouredRuns = rawRuns && richRunsWithTableColor(rawRuns, tableRunColor);
+      const symbolRuns = symbolRichRuns(ctx, colouredRuns, richBaseFont, cs, cjkFallback);
+      const runs = symbolRuns ?? colouredRuns;
+      const symbolSegments = symbolRuns && richRunSegments(ctx, symbolRuns, richBaseFont, cs, cjkFallback);
+      const valueWidth = () => symbolSegments
+        ? symbolSegments.reduce((sum, seg) => sum + seg.width, 0)
+        : ctx.measureText(paintText).width;
 
       // Text overflow into adjacent empty cells is observed Excel display
       // behavior when `wrapText=false`; OOXML persists the cell's alignment
@@ -2775,7 +2859,7 @@ function renderQuadrant(
       // clip rect extends into adjacent empty cells when the text is wider.
       const hasHardBreak = text.includes('\n');
       if (!mergeInfo && !xf.wrapText && !xf.textRotation && !isNumeric && !hasHardBreak) {
-        const textW = ctx.measureText(paintText).width;
+        const textW = valueWidth();
         const isCenterCont = alignH === 'centerContinuous';
         const textPx = isCenterCont ? textW + paddingX * 2 : textW + leftPad + paddingX;
         const containerW = isCenterCont ? centerContinuousW : cellW;
@@ -2919,6 +3003,12 @@ function renderQuadrant(
         // an astral character reserves one slot, keeping center/bottom anchoring
         // correct (issue #790 codex review, finding 3).
         const stackedCount = [...text].length;
+        if (symbolRuns) {
+          drawStackedRichRuns(ctx, symbolRuns, richBaseFont, cx + cellW / 2, cy, cellH, alignV,
+            paddingY, vMetricPx(font.size, cs, 1.1), cs, cf.fontColor, cjkFallback);
+          ctx.restore();
+          return;
+        }
         const totalH = stackedCount * charH;
         let charY = alignV === 'top' ? cy + paddingY
           : alignV === 'center' ? cy + (cellH - totalH) / 2
@@ -2950,6 +3040,12 @@ function renderQuadrant(
           : ((rotation - 90) * Math.PI / 180);
         ctx.translate(cx + cellW / 2, cy + cellH / 2);
         ctx.rotate(angleRad);
+        if (symbolSegments) {
+          const total = symbolSegments.reduce((sum, seg) => sum + seg.width, 0);
+          drawResolvedRichLine(ctx, symbolSegments, -total / 2, 0, 'middle', cs, dpr, { fontColor: cf.fontColor }, cjkFallback);
+          ctx.restore();
+          return;
+        }
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
         paintCellText(ctx, paintText, 0, 0, paintFont, cs);
@@ -2959,7 +3055,7 @@ function renderQuadrant(
 
       // shrinkToFit: scale context horizontally if text is wider than cell
       if (xf.shrinkToFit) {
-        const textW = ctx.measureText(paintText).width;
+        const textW = valueWidth();
         const availW = cellW - leftPad - paddingX;
         if (textW > availW && textW > 0) {
           const scale = availW / textW;
@@ -2987,12 +3083,7 @@ function renderQuadrant(
           cellBaseRtl(xf.readingOrder, paintText) ? 'rtl' : 'ltr';
       } catch { /* ignore */ }
 
-      // Rich text: draw each run with its own font. Rich runs take the table
-      // style's font color by the measured run rule (richRunsWithTableColor).
-      const tableRunColor = tableRunFontColor(styleFormat, xf);
-      const rawRuns = cell.value.type === 'text' ? cell.value.runs : undefined;
-      const richBaseFont = tableRunColor != null ? { ...fontForDraw, color: tableRunColor } : fontForDraw;
-      const runs = rawRuns && symbolPaintRuns(ctx, richRunsWithTableColor(rawRuns, tableRunColor), richBaseFont, cs, cjkFallback);
+      // Rich text: draw each run with its own font.
       const hasRichText = runs && runs.length > 0;
 
       if (xf.wrapText && hasRichText) {
@@ -3458,7 +3549,8 @@ function requiredAutoCellHeightPx(
   const rotation = xf.textRotation ?? 0;
   // Measured exactly as paint measures: the painted form and font of the
   // value and of each rich run (symbol-paint.ts).
-  const runs = rawRuns && symbolPaintRuns(ctx, rawRuns, font, 1, cjkFallback);
+  const symbolRuns = symbolRichRuns(ctx, rawRuns, font, 1, cjkFallback);
+  const runs = symbolRuns ?? rawRuns;
   const painted = cellSymbolPaint(ctx, font, text, 1, cjkFallback);
 
   ctx.font = buildFont(ctx, painted.font, 1, cjkFallback, painted.text);
@@ -3472,7 +3564,9 @@ function requiredAutoCellHeightPx(
       ? rotation * Math.PI / 180
       : (rotation - 90) * Math.PI / 180;
     const lineHeight = vMetricPx(font.size, 1, 1.2);
-    const textWidth = ctx.measureText(painted.text.replace(/\n/g, ' ')).width;
+    const textWidth = symbolRuns
+      ? richRunSegments(ctx, symbolRuns, font, 1, cjkFallback).reduce((sum, seg) => sum + seg.width, 0)
+      : ctx.measureText(painted.text.replace(/\n/g, ' ')).width;
     return Math.abs(Math.sin(angle)) * textWidth
       + Math.abs(Math.cos(angle)) * lineHeight
       + paddingY * 2;
@@ -3902,7 +3996,11 @@ function virtualizedTextOverflowOverscan(
     const iconSize = cf.iconSet ? Math.max(8, Math.round(Math.min(cellW, cellH) * 0.55)) : 0;
     const iconPad = iconSize > 0 ? iconSize + 4 : 0;
     const leftPad = paddingX + (alignH === 'left' || !xf.alignH ? indentPx : 0) + iconPad;
-    const textPx = ctx.measureText(painted.text).width + leftPad + paddingX;
+    const symbolRuns = symbolRichRuns(ctx, cell.value.type === 'text' ? cell.value.runs : undefined,
+      effectiveFont, cs, cjkFallback);
+    const textPx = (symbolRuns
+      ? richRunSegments(ctx, symbolRuns, effectiveFont, cs, cjkFallback).reduce((sum, seg) => sum + seg.width, 0)
+      : ctx.measureText(painted.text).width) + leftPad + paddingX;
     const overflow = Math.max(0, textPx - cellW);
     if (overflow <= 0) return false;
 

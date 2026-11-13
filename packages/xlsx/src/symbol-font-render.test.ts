@@ -57,6 +57,37 @@ describe('XLSX symbol-font cell text', () => {
     expect(painted(installed, '✓')).toEqual([]);
   });
 
+  it('keeps a partial face for a text whose drawn code cannot convert', () => {
+    // The face draws J (the smiley) but not ü (the check): one face per text,
+    // so J converts too, unless its smiley only paints in colour.
+    const partial = { wingdings: (ch: string) => ch === 'J' || ch === '\uF04A' };
+    const converted = symbolRealm(partial);
+    render(converted, [{ font: font('Wingdings'), value: text('Jü') }]);
+    expect(painted(converted, `☺${VS15}✓`)[0]?.font).not.toMatch(/Wingdings/u);
+    const colour = symbolRealm(partial, undefined, (value) => value.includes('☺'));
+    render(colour, [{ font: font('Wingdings'), value: text('Jü') }]);
+    expect(painted(colour, 'Jü')[0]?.font).toMatch(/^15px "Wingdings"/u);
+  });
+
+  it('paints rotated and stacked rich runs in their own faces', () => {
+    const run = (value: string, name: string) => ({ text: value,
+      font: { bold: false, italic: false, underline: false, strike: false, name } });
+    for (const textRotation of [45, 255]) {
+      const realm = symbolRealm();
+      render(realm, [
+        { font: font('Calibri'), xf: { textRotation },
+          value: { type: 'text', text: 'xl', runs: [run('x', 'Calibri'), run('l', 'Wingdings')] } },
+        { font: font('Symbol'), xf: { textRotation },
+          value: { type: 'text', text: 'ab', runs: [run('a', 'Calibri'), run('b', 'Symbol')] } },
+      ]);
+      expect(painted(realm, '⚫')[0]?.font, `rotation ${textRotation}`).not.toMatch(/Wingdings/u);
+      expect(painted(realm, 'x')[0]?.font).toMatch(/"Calibri"/u);
+      expect(painted(realm, 'a')[0]?.font).toMatch(/"Calibri"/u);
+      expect(painted(realm, 'β')).toHaveLength(1);
+      expect(painted(realm, 'α')).toEqual([]);
+    }
+  });
+
   it('converts number-format output and the invalid-value hash fill in the cell face', () => {
     const realm = symbolRealm();
     render(realm, [

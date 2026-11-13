@@ -31,10 +31,13 @@ function families(font: string): string[] {
   return list.split(',').map((entry) => entry.trim().replace(/^"(.*)"$/u, '$1').toLowerCase());
 }
 
-/** `installed`: lower-case family → whether it draws a character. */
+/** `installed`: lower-case family → whether it draws a character.
+ * `colour`: text the realm paints in its own colours (a colour emoji face),
+ * whatever the fill style. */
 export function symbolRealm(
   installed: Readonly<Record<string, (ch: string) => boolean>> = {},
   size: { width: number; height: number } = { width: 1200, height: 800 },
+  colour: (text: string) => boolean = () => false,
 ): SymbolRealm {
   const fills: PaintRecord[] = [];
   const measures: PaintRecord[] = [];
@@ -88,7 +91,8 @@ export function symbolRealm(
       fillText: (text: string, x: number, y: number) => {
         if (record) fills.push({ text, font, x, y });
         const hex = /^#([0-9a-f])([0-9a-f])([0-9a-f])$/iu.exec(fillStyle);
-        ink = hex ? [1, 2, 3].map((i) => parseInt(hex[i]!, 16) * 17) as [number, number, number] : null;
+        ink = colour(text) ? [255, 160, 0]
+          : hex ? [1, 2, 3].map((i) => parseInt(hex[i]!, 16) * 17) as [number, number, number] : null;
       },
       clearRect: () => { ink = null; },
       getImageData: (_x: number, _y: number, w: number, h: number) => {

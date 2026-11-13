@@ -123,8 +123,11 @@ export class XlsxFontDemand {
     for (const shared of workbook.sharedStrings ?? []) {
       // Its cell face is charged when the rows are scanned; a symbol code
       // (F0-shifted) is collected for the symbol style faces here, so it is
-      // not declined before then.
-      this.addText(shared.text, undefined, /[\uF020-\uF0FF]/u.test(shared.text) ? this.symbolStyleFamilies : undefined);
+      // not declined before then. A rich string is collected through its
+      // runs, each with the face that paints it.
+      if (!shared.runs?.length) {
+        this.addText(shared.text, undefined, /[\uF020-\uF0FF]/u.test(shared.text) ? this.symbolStyleFamilies : undefined);
+      }
       // A run's own face paints it wherever the string is used; plain shared
       // text is charged to its cell's face when the sheet's rows are scanned.
       for (const run of shared.runs ?? []) {
@@ -132,7 +135,7 @@ export class XlsxFontDemand {
         this.addText(run.text, run.font?.name,
           /[\uF020-\uF0FF]/u.test(run.text) ? this.symbolStyleFamilies : undefined);
       }
-      for (const phonetic of shared.phoneticRuns ?? []) this.addText(phonetic.text);
+      for (const phonetic of shared.phoneticRuns ?? []) this.addText(phonetic.text, this.phoneticFamily(shared.phoneticPr));
     }
     // Number-format output is painted text like any cell text, in the font of
     // the style that formats it: its scalars, its script fallback evidence (a
@@ -222,6 +225,14 @@ export class XlsxFontDemand {
     if (regular?.[1]?.trim()) this.addFamily(regular[1].trim());
   }
 
+  /** The face the phonetic band paints readings with, as the renderer
+   *  (drawPhoneticBand): `phoneticPr@fontId`, else (or out of range) font 0
+   *  (§18.4.3). */
+  private phoneticFamily(pr: { fontId?: number } | undefined): string {
+    const fonts = this.workbook.styles?.fonts ?? [];
+    return (fonts[pr?.fontId ?? 0] ?? fonts[0])?.name?.trim() || 'Calibri';
+  }
+
   /** The font a cell paints with, through the renderer's effective-style rule
    * (internal/cell-style.ts: cell style, else its column's style, else Normal). */
   private fontOfCell(worksheet: Worksheet | undefined, cell: Cell): CellFont | undefined {
@@ -254,8 +265,7 @@ export class XlsxFontDemand {
         const theme = font.scheme === 'major' ? worksheet?.themeJapaneseMajorFont : worksheet?.themeJapaneseMinorFont;
         if (theme) this.prove(theme, value.text);
       }
-      const phoneticFont = value.phoneticPr ? this.workbook.styles.fonts?.[value.phoneticPr.fontId] : undefined;
-      for (const phonetic of value.phoneticRuns ?? []) this.addText(phonetic.text, phoneticFont?.name ?? family);
+      for (const phonetic of value.phoneticRuns ?? []) this.addText(phonetic.text, this.phoneticFamily(value.phoneticPr));
     }
   }
 
