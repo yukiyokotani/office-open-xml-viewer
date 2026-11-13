@@ -86,7 +86,7 @@ const RESOURCE_METRICS = { name: 'onResourceMetrics', type: '(metrics: OoxmlReso
 const RESOURCE_METRICS_METHOD = { sig: 'getResourceMetrics(): Promise<OoxmlResourceMetrics>', desc: 'Return a fresh, content-free package-usage snapshot, including lazy archive work observed since load. Collection is always active; debug controls only console output.', emphasis: 'Collection is always active; debug controls only console output.' };
 const DEBUG = { name: 'debug', type: 'boolean', def: 'false', desc: 'Print one content-free, Ratatui-inspired resource report when the measured load or Node session finishes or fails. Browser DevTools use typography-only %c styling to keep Unicode borders and gauges aligned without changing foreground or background colours; Node and Worker consoles receive one plain argument. Use onResourceMetrics instead for production collection.', emphasis: 'Use onResourceMetrics instead for production collection.' };
 const ZIP = { name: 'maxZipEntryBytes', type: 'number', def: 'resource policy default', desc: 'Deprecated compatibility alias for resourceLimits.maxArchiveEntryBytes. It is scheduled for removal in a future breaking release; new code should use resourceLimits. Existing positive values retain their per-entry meaning; zero / negative values fall back to the standard default.', emphasis: 'It is scheduled for removal in a future breaking release; new code should use resourceLimits.' };
-const FONTS = { name: 'fonts', type: 'readonly FontSource[]', def: '[] (offline)', desc: 'Ordered application font sources for authored and script-fallback families the host lacks, built with googleFonts({ cssOrigin?, substitutes?, families? }), fontCssApi({ urlTemplate, … }), fontCss({ url }), fontFiles({ faces }) or fontResolver(fn) from @silurus/ooxml or the docx, xlsx and pptx entries. A FontSource is opaque: only values those factories returned are accepted. googleFonts({ families }) adds Google families outside the preset catalog, family → CSS2 axis query. googleFonts({ cssOrigin }) sends the stylesheet requests to that Google-compatible origin; redirects are followed and the font file URLs in the returned CSS are used as given, so for network isolation the mirror must control both. fontResolver runs on the main thread in both modes, for authenticated or private services that return URLs or bytes; it receives family names, never document text, and answers each family with all its faces, like an @font-face stylesheet; in worker mode the page also fetches the URLs it returns and sends the worker the bytes. Sources are consulted per family in option order: the first source that has a face for a family claims it, and a failed stylesheet, resolver or face keeps the host fallback with a console.warn and never retries another source. Faces register under their real CSS family in the painting realm (main thread or render worker, identically), and for every source only the unicode-range subsets the document paints are fetched and loaded. The library fetches font files itself with fetch() (with the source\'s credentials; fontResolver URLs from the page with same-origin credentials, in both modes), so DOCX can read each face\'s line metrics. An installed authored face is never displaced. Cross-origin fonts need CORS; a CSP needs connect-src for stylesheet origins, and both connect-src and font-src for font file origins (for Google Fonts: connect-src fonts.googleapis.com and fonts.gstatic.com, font-src fonts.gstatic.com). A factory input beyond a fixed limit throws OoxmlError(\'font-source-limit\'); a limit reached while loading fails only the families concerned, with a console.warn. Off by default: no network request is made without a source.', emphasis: 'Off by default: no network request is made without a source.', detailsHref: 'https://github.com/yukiyokotani/office-open-xml-viewer/blob/main/docs/migration-0.90.md', detailsLabel: 'Font sources guide' };
+const FONTS = { name: 'fonts', type: 'readonly FontSource[]', def: '[] (offline)', desc: 'Ordered application font sources for authored and script-fallback families the host lacks, built with googleFonts({ cssOrigin?, substitutes?, families? }), fontCssApi({ urlTemplate, … }), fontCss({ url }), fontFiles({ faces }) or fontResolver(fn) from @silurus/ooxml or the docx, xlsx and pptx entries. A FontSource is opaque: only values those factories returned are accepted. googleFonts({ families }) adds Google families outside the preset catalog, family → CSS2 axis query. googleFonts({ cssOrigin }) sends the stylesheet requests to that Google-compatible origin; redirects are followed and the font file URLs in the returned CSS are used as given, so for network isolation the mirror must control both. fontResolver runs on the main thread in both modes, for authenticated or private services that return URLs or bytes; it receives family names, never document text, and answers each family with all its faces, like an @font-face stylesheet; in worker mode the page also fetches the URLs it returns and sends the worker the bytes. Sources are consulted per family in option order: the first source that has a face for a family claims it, and a failed stylesheet, resolver or face keeps the host fallback with a console.warn and never retries another source. Faces register under names private to the document in the painting realm (main thread or render worker, identically), so two open documents never paint with each other\'s faces, and for every source only the unicode-range subsets the document paints are fetched and loaded. The library fetches font files itself with fetch() (with the source\'s credentials; fontResolver URLs from the page with same-origin credentials, in both modes), so DOCX can read each face\'s line metrics. An installed authored face is never displaced. Cross-origin fonts need CORS; a CSP needs connect-src for stylesheet origins, and both connect-src and font-src for font file origins (for Google Fonts: connect-src fonts.googleapis.com and fonts.gstatic.com, font-src fonts.gstatic.com). A factory input beyond a fixed limit throws OoxmlError(\'font-source-limit\'); a limit reached while loading fails only the families concerned, with a console.warn. Off by default: no network request is made without a source.', emphasis: 'Off by default: no network request is made without a source.', detailsHref: 'https://github.com/yukiyokotani/office-open-xml-viewer/blob/main/docs/migration-0.90.md', detailsLabel: 'Font sources guide' };
 const GFONTS_DEPRECATED = { name: 'useGoogleFonts', type: 'boolean', def: 'false', desc: 'Deprecated alias of fonts: [googleFonts()], warned once per JavaScript realm. From 0.91.0 it is ignored with the same warning (no web fonts, never an error). false is a no-op that still warns; combining true with fonts throws a TypeError.', emphasis: 'Deprecated alias of fonts: [googleFonts()]' };
 const CJK_FALLBACK = { name: 'cjkFallback', type: "'auto' | 'sc' | 'tc' | 'hk' | 'jp' | 'kr'", def: "'auto'", desc: 'Regional preference used when Han text reaches font fallback and the document has not already identified a region. The requested font remains first; recognized regional CJK font names, an East Asian run language where available, and unambiguous Kana or Hangul take priority. Auto snapshots HTML lang, then navigator.languages and navigator.language; otherwise JP. Hans or Hant selects SC or TC; without an explicit script, HK/MO selects HK, TW selects TC, and bare zh selects SC. An explicit value makes the regional choice independent of the host locale, but does not download fonts or by itself guarantee pixel-identical output across different font environments.' };
 const PASSWORD = { name: 'password', type: 'string', def: 'undefined', desc: 'Password for an Agile-encrypted OOXML file. Available on self-loading Viewer constructors and headless load(); borrowed fromDocument(), fromPresentation(), and fromWorkbook() factories omit load-only options because their engine is already loaded.', emphasis: 'Available on self-loading Viewer constructors and headless load()' };
@@ -110,6 +110,18 @@ const LEGACY_SOURCE = (exportName: 'legacyDoc' | 'legacyXls' | 'legacyPpt', entr
 const LEGACY_DOC = LEGACY_SOURCE('legacyDoc', 'doc', 'docx', 'createLegacyDoc');
 const LEGACY_XLS = LEGACY_SOURCE('legacyXls', 'xls', 'xlsx', 'createLegacyXls');
 const LEGACY_PPT = LEGACY_SOURCE('legacyPpt', 'ppt', 'pptx', 'createLegacyPpt');
+const ODF_SOURCE = (exportName: 'odt' | 'odp' | 'ods', format: 'docx' | 'xlsx' | 'pptx', templates: string, factory: string): ApiOption => ({
+  name: exportName,
+  type: `ModelSource<'${format}'>`,
+  def: 'undefined',
+  desc: `Experimental opt-in OpenDocument reader for .${exportName} (and .${templates}) files, from the separate @silurus/ooxml-opendocument add-on (install it at exactly the same version). Import \`${exportName}\` from \`@silurus/ooxml-opendocument/${exportName}\` and pass it as \`{ ${exportName} }\`; use \`${factory}({ wasmUrl, moduleUrl })\` for custom asset URLs. Importing it fetches nothing; its reader loads only when a matching file is opened. Every feature it reads is drawn; only corrupt, encrypted, unsafe or over-limit files reject.`,
+  emphasis: 'Experimental opt-in OpenDocument reader',
+  detailsHref: 'https://github.com/yukiyokotani/office-open-xml-viewer/blob/main/docs/opendocument.md',
+  detailsLabel: 'OpenDocument guide',
+});
+const ODT = ODF_SOURCE('odt', 'docx', 'ott', 'createOdt');
+const ODP = ODF_SOURCE('odp', 'pptx', 'otp', 'createOdp');
+const ODS = ODF_SOURCE('ods', 'xlsx', 'ots', 'createOds');
 const MODE = { name: 'mode', type: "'main' | 'worker'", def: "'main'", desc: "Use 'main' for the smallest worker download, the lowest single-frame overhead or custom renderer objects; parsing still runs in a Worker, while Canvas rendering runs on the main thread. Use 'worker' when document layout and paint would compete with application UI responsiveness. It requires Worker and OffscreenCanvas, downloads a larger render worker and transfers an ImageBitmap per frame. Built-in math, ChartEx, 3-D, Region Map and TIFF renderers use the same options in both modes. In worker mode, use the bitmap render methods instead of methods that accept a Canvas.", emphasis: "Use 'worker' when document layout and paint would compete with application UI responsiveness." };
 const VIEWER_MODE = { name: 'mode', type: "'main' | 'worker'", def: "'main'", desc: "Use 'main' for ordinary previews, the smallest worker download or custom renderer objects. Use 'worker' when rendering larger or more complex documents would compete with scrolling, navigation or other application UI. Worker mode requires Worker and OffscreenCanvas, downloads a larger render worker and transfers an ImageBitmap per frame. Viewer navigation, zoom, virtualized scrolling, selection, find, hyperlinks and the built-in math, ChartEx, 3-D, Region Map and TIFF renderers remain available in both modes.", emphasis: "Use 'worker' when rendering larger or more complex documents would compete with scrolling, navigation or other application UI." };
 const ZOOM_MIN_MAX = { name: 'zoomMin / zoomMax', type: 'number', def: '0.1 / 4', desc: 'Zoom factor bounds for setScale / fitWidth / fitPage (10%–400%).' };
@@ -320,6 +332,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         CHART_EX,
         TIFF,
         LEGACY_PPT,
+        ODP,
         VIEWER_MODE,
         ...PPTX_PROGRESSIVE_OPTIONS,
         ZOOM_MIN_MAX,
@@ -359,7 +372,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
       name: 'PptxPresentation',
       ctor: 'await PptxPresentation.load(source, options?)',
       note: 'Headless engine — parse once, render any slide into any canvas you supply (scroll views, thumbnail grids, master–detail).',
-      options: [FONTS, GFONTS_DEPRECATED, CJK_FALLBACK, PASSWORD, WASM_URL, ZIP, RESOURCE_LIMITS, RESOURCE_METRICS, DEBUG, WORKER_TIMEOUT, MATH, THREE_D, REGION_MAP, CHART_EX, TIFF, LEGACY_PPT, MODE, ...PPTX_PROGRESSIVE_OPTIONS],
+      options: [FONTS, GFONTS_DEPRECATED, CJK_FALLBACK, PASSWORD, WASM_URL, ZIP, RESOURCE_LIMITS, RESOURCE_METRICS, DEBUG, WORKER_TIMEOUT, MATH, THREE_D, REGION_MAP, CHART_EX, TIFF, LEGACY_PPT, ODP, MODE, ...PPTX_PROGRESSIVE_OPTIONS],
       methods: [
         { sig: 'static load(source, options?): Promise<PptxPresentation>', desc: 'Parse a deck from a URL or ArrayBuffer. With progressiveLayout, resolve when the opening slide is paintable.' },
         { sig: 'get slideCount(): number', desc: 'Total slides.' },
@@ -424,6 +437,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         CHART_EX,
         TIFF,
         LEGACY_PPT,
+        ODP,
         DPR,
         MODE,
         ...PPTX_PROGRESSIVE_OPTIONS,
@@ -484,6 +498,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         CHART_EX,
         TIFF,
         LEGACY_DOC,
+        ODT,
         VIEWER_MODE,
         DOCX_PROGRESSIVE_LAYOUT,
         DOCX_SLICE_LAYOUT,
@@ -523,7 +538,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
       name: 'DocxDocument',
       ctor: 'await DocxDocument.load(source, options?)',
       note: 'Headless engine — render any page into any canvas you supply.',
-      options: [FONTS, GFONTS_DEPRECATED, CJK_FALLBACK, PASSWORD, WASM_URL, ZIP, RESOURCE_LIMITS, RESOURCE_METRICS, DEBUG, WORKER_TIMEOUT, MATH, THREE_D, REGION_MAP, CHART_EX, TIFF, LEGACY_DOC, MODE, ...DOCX_LAYOUT_VIEW_OPTIONS, DOCX_FOOTNOTE_CONTINUATION, DOCX_PROGRESSIVE_LAYOUT, DOCX_SLICE_LAYOUT, DOCX_LAYOUT_PROGRESS, DOCX_LAYOUT_PARTIAL, DOCX_LAYOUT_COMPLETE],
+      options: [FONTS, GFONTS_DEPRECATED, CJK_FALLBACK, PASSWORD, WASM_URL, ZIP, RESOURCE_LIMITS, RESOURCE_METRICS, DEBUG, WORKER_TIMEOUT, MATH, THREE_D, REGION_MAP, CHART_EX, TIFF, LEGACY_DOC, ODT, MODE, ...DOCX_LAYOUT_VIEW_OPTIONS, DOCX_FOOTNOTE_CONTINUATION, DOCX_PROGRESSIVE_LAYOUT, DOCX_SLICE_LAYOUT, DOCX_LAYOUT_PROGRESS, DOCX_LAYOUT_PARTIAL, DOCX_LAYOUT_COMPLETE],
       methods: [
         { sig: 'static load(source, options?): Promise<DocxDocument>', desc: 'Parse a document from a URL or ArrayBuffer. With progressiveLayout, resolve when the opening pages are paintable while pagination continues in the background.' },
         { sig: 'get comments(): readonly Readonly<DocComment>[]', desc: 'Immutable detached comments and replies stored in the document.' },
@@ -586,6 +601,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         CHART_EX,
         TIFF,
         LEGACY_DOC,
+        ODT,
         DPR,
         MODE,
         DOCX_PROGRESSIVE_LAYOUT,
@@ -652,6 +668,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         CHART_EX,
         TIFF,
         LEGACY_XLS,
+        ODS,
         VIEWER_MODE,
         ON_SCALE_CHANGE,
         ON_HYPERLINK_CLICK,
@@ -735,6 +752,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         CHART_EX,
         TIFF,
         LEGACY_XLS,
+        ODS,
         VIEWER_MODE,
         ON_SCALE_CHANGE,
         ON_HYPERLINK_CLICK,
@@ -781,7 +799,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
       name: 'XlsxWorkbook',
       ctor: 'await XlsxWorkbook.load(source, options?)',
       note: 'Headless engine — parse once, render any sheet viewport into any canvas you supply.',
-      options: [FONTS, GFONTS_DEPRECATED, CJK_FALLBACK, PASSWORD, WASM_URL, ZIP, RESOURCE_LIMITS, XLSX_WORKSHEET_LIMITS, RESOURCE_METRICS, DEBUG, WORKER_TIMEOUT, MATH, THREE_D, REGION_MAP, CHART_EX, TIFF, LEGACY_XLS, MODE],
+      options: [FONTS, GFONTS_DEPRECATED, CJK_FALLBACK, PASSWORD, WASM_URL, ZIP, RESOURCE_LIMITS, XLSX_WORKSHEET_LIMITS, RESOURCE_METRICS, DEBUG, WORKER_TIMEOUT, MATH, THREE_D, REGION_MAP, CHART_EX, TIFF, LEGACY_XLS, ODS, MODE],
       methods: [
         { sig: 'static load(source, options?): Promise<XlsxWorkbook>', desc: 'Parse a workbook from a URL or ArrayBuffer.' },
         { sig: 'get sheetNames(): string[]', desc: 'Names of all sheets.' },

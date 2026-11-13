@@ -11,7 +11,7 @@
     "check": "tsc --noEmit"
   },
   "dependencies": {
-    "@silurus/ooxml": "^0.89.0",
+    "@silurus/ooxml": "^0.90.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8"
   },

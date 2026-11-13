@@ -35,6 +35,20 @@ It maps the presentation directly into the PPTX slide model and renders every
 feature it reads, rejecting only corrupt, encrypted or over-limit packages
 (see `docs/opendocument.md`).
 
+For spreadsheets (`.ods`, `.ots`) pass the `ods` reader to the XLSX viewers
+and loaders:
+
+```ts
+import { XlsxViewer } from '@silurus/ooxml/xlsx';
+import { ods } from '@silurus/ooxml-opendocument/ods';
+
+const container = document.getElementById('viewer') as HTMLElement;
+const sheets = new XlsxViewer(container, { ods });
+```
+
+It maps the spreadsheet directly into the XLSX workbook model and renders
+every feature it reads under the same policy (see `docs/opendocument.md`).
+
 The reader renders every OpenDocument text feature, following the ODF 1.3
 specification and, where it leaves a choice, LibreOffice. It rejects only
 corrupt, encrypted or unsafe input and input beyond the resource limits;
