@@ -86,8 +86,11 @@ const isNonNegativeSafeInteger = (value: unknown): value is number =>
   typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
 
 export class FontResolverBridge {
-  private readonly postToWorker: Post;
+  private postToWorker: Post;
   private host: FontResolverBridgeHost | null = null;
+  /** What the host is constructed with, until it is (or never will be): a
+   * stalled import must not keep the document's sources alive. */
+  private construction: Pick<FontResolverBridgeOptions, 'post' | 'sources' | 'resolverFailures'> | null = null;
   /** `none`: the document has no resolver; no host is ever loaded. */
   private state: 'none' | 'pending' | 'ready' | 'unavailable';
   /** Messages received before the host (see the module comment). */
@@ -115,6 +118,10 @@ export class FontResolverBridge {
       return;
     }
     this.state = 'pending';
+    this.construction = {
+      post: options.post, sources,
+      ...(options.resolverFailures ? { resolverFailures: options.resolverFailures } : {}),
+    };
     this.signal({ kind: 'ooxmlFontBridgeState', state: 'pending' });
     this.timer = setTimeout(() => this.unavailable(`it did not load within ${FONT_LOAD_CEILING_MS} ms`), FONT_LOAD_CEILING_MS);
     let loading: Promise<FontResolverBridgeHostModule>;
@@ -124,13 +131,11 @@ export class FontResolverBridge {
       loading = Promise.reject(error);
     }
     loading.then(({ FontResolverBridgeHost: Host }) => {
-      if (this.disposed || this.state !== 'pending') return;
+      const construction = this.construction;
+      if (this.disposed || this.state !== 'pending' || !construction) return;
       clearTimeout(this.timer);
-      const host = new Host({
-        post: options.post,
-        sources,
-        ...(options.resolverFailures ? { resolverFailures: options.resolverFailures } : {}),
-      });
+      this.construction = null;
+      const host = new Host(construction);
       this.host = host;
       this.state = 'ready';
       this.signal({ kind: 'ooxmlFontBridgeState', state: 'ready' });
@@ -157,6 +162,7 @@ export class FontResolverBridge {
   private unavailable(detail: string): void {
     if (this.disposed || this.state !== 'pending') return;
     clearTimeout(this.timer);
+    this.construction = null;
     this.state = 'unavailable';
     console.warn(`[ooxml] font resolver bridge failed to load: ${detail}; fontResolver families fall back`);
     this.signal({ kind: 'ooxmlFontBridgeState', state: 'unavailable', reason: FONT_RESOLVER_BRIDGE_UNAVAILABLE });
@@ -189,6 +195,8 @@ export class FontResolverBridge {
     if (this.disposed) return;
     this.disposed = true;
     clearTimeout(this.timer);
+    this.construction = null;
+    this.postToWorker = () => undefined;
     this.early = [];
     // Waiting sessions belong to the destroyed document: their release ends them.
     for (const resolve of this.waiters.splice(0)) resolve();
