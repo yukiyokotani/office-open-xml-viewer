@@ -165,6 +165,9 @@ describe('ODT source claim', () => {
     expect(odt.claim(Uint8Array.from([...new Uint8Array(64).fill(7), ...archive]))).toBe(true);
     // An end-record signature inside the archive comment is not the record.
     expect(odt.claim(zip([['content.xml', '<a/>'], ['mimetype', TEXT, { deflate: true }]], `x\u0050\u004b\u0005\u0006${'y'.repeat(30)}`))).toBe(true);
+    // A comment ending in an end record of another disk (an empty directory).
+    const otherDisk = String.fromCharCode(0x50, 0x4b, 5, 6, 1, 0, 1, 0, ...new Array<number>(14).fill(0));
+    expect(odt.claim(zip([['content.xml', '<a/>'], ['mimetype', TEXT, { deflate: true }]], `x${otherDisk}`))).toBe(true);
     // A comment ending in an end record whose directory does not walk.
     const fake = String.fromCharCode(0x50, 0x4b, 5, 6, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0);
     expect(odt.claim(zip([['content.xml', '<a/>'], ['mimetype', TEXT, { deflate: true }]], `x${fake}`))).toBe(true);

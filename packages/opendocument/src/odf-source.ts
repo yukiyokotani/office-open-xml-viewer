@@ -133,8 +133,11 @@ function centralMimetypeEntry(bytes: Uint8Array): MimetypeEntry | undefined {
   const locators = new Set<number>();
   for (let end = length - 22; end >= Math.max(0, length - 22 - 0xffff); end--) {
     if (u32(end) !== 0x06054b50 || end + 22 + view.getUint16(end + 20, true) !== length) continue;
+    // Single-disk archives only, as the reader's preflight: disk numbers 0.
+    if (view.getUint32(end + 4, true) !== 0) continue;
     ends.push(end);
-    if (u32(end - 20) === 0x07064b50) locators.add(end - 20);
+    const locator = end - 20;
+    if (u32(locator) === 0x07064b50 && u32(locator + 4) === 0 && u32(locator + 16) === 1) locators.add(locator);
   }
   const budget = { steps: MAX_CLAIM_STEPS };
   // ZIP64 records ending at one of those locators (their extensible data may
@@ -144,7 +147,7 @@ function centralMimetypeEntry(bytes: Uint8Array): MimetypeEntry | undefined {
     for (let at = length - 56; at >= 0; at--) {
       if (view.getUint32(at, true) !== 0x06064b50) continue;
       const size = u64(at + 4);
-      if (size < 44 || !locators.has(at + 12 + size)) continue;
+      if (size < 44 || !locators.has(at + 12 + size) || u32(at + 16) !== 0 || u32(at + 20) !== 0) continue;
       if (--budget.steps < 0) return undefined;
       const list = records.get(at + 12 + size);
       if (list === undefined) records.set(at + 12 + size, [at]); else list.push(at);
@@ -153,6 +156,7 @@ function centralMimetypeEntry(bytes: Uint8Array): MimetypeEntry | undefined {
   try {
     for (const end of ends) {
       const count = view.getUint16(end + 10, true);
+      if (view.getUint16(end + 8, true) !== count) continue;
       const size = view.getUint32(end + 12, true);
       const offset = view.getUint32(end + 16, true);
       const locator = end - 20;
