@@ -411,7 +411,7 @@ self.onmessage = async (event: MessageEvent<RenderWorkerRequest | WorkerSvgDecod
         const canvas = request.canvas ?? new OffscreenCanvas(1, 1);
         const runs: PptxTextRunInfo[] = [];
         // Metafile pictures paint their text with the served faces too.
-        bindMetafileFontFamilies(getImage, fontSources?.loaded.families);
+        bindMetafileFontFamilies(getImage, fontSources?.loaded);
         await renderSlideWithEmbeddedFonts(canvas, slide, compact.slideWidth, compact.slideHeight, {
           width: request.width,
           dpr: request.dpr,
@@ -458,7 +458,7 @@ self.onmessage = async (event: MessageEvent<RenderWorkerRequest | WorkerSvgDecod
         const canvas = request.canvas ?? new OffscreenCanvas(1, 1);
         const runs: PptxTextRunInfo[] = [];
         // Metafile pictures paint their text with the served faces too.
-        bindMetafileFontFamilies(getImage, fontSources?.loaded.families);
+        bindMetafileFontFamilies(getImage, fontSources?.loaded);
         await renderSlideWithEmbeddedFonts(canvas, slide, compact.slideWidth, compact.slideHeight, {
           width: request.width,
           defaultTextColor: compact.defaultTextColor,

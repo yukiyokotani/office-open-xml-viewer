@@ -1543,8 +1543,8 @@ export class XlsxWorkbook {
       : (typeof document !== 'undefined' ? document.fonts : null);
     // Metafile pictures are rasterized in this realm (its own FontFaceSet)
     // and paint their text with the served faces of this realm's session.
-    bindMetafileFontFamilies(this._fetchImage,
-      this.loadedFontSources(typeof document !== 'undefined' ? document.fonts : null)?.families);
+    bindMetafileFontFamilies(this._fetchImage, typeof document !== 'undefined'
+      ? this.retainedFontSets.get(document.fonts)?.session?.loaded : undefined);
     const preview = this.sheetPreviews?.get(sheetIndex);
     if (preview?.worksheet && extracted.worksheet) {
       await preview.waitFor(Math.max(

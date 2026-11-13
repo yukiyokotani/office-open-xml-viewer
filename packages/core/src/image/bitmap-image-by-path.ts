@@ -524,49 +524,53 @@ export interface CachedBitmapOptions {
    *  `IncompleteMetafilePolicy` in raster-or-metafile.ts. The two policies
    *  never share a cache entry. */
   incompleteMetafile?: IncompleteMetafilePolicy;
-  /** The document's served families and their private registered families
-   *  (core `LoadedFontSources.families`) metafile text paints with. Part of
-   *  the metafile cache key: a picture rasterized before a family loaded is
-   *  played again once it has. Defaults to the families bound to the cache
-   *  owner ({@link bindMetafileFontFamilies}). */
-  metafileFontFamilies?: ReadonlyMap<string, string>;
+  /** The document's served faces metafile text paints with
+   *  ({@link bindMetafileFontFamilies}); part of the metafile cache key.
+   *  Defaults to those bound to the cache owner. */
+  metafileFonts?: MetafileFonts;
 }
 
-/** Served families per cache owner (one document's image loader in one
- * realm); see {@link bindMetafileFontFamilies}. */
-const metafileFontFamiliesByOwner = new WeakMap<DecodedBitmapCacheOwner, ReadonlyMap<string, string>>();
+/** What metafile text reads of a document's font-source snapshot (core
+ * `LoadedFontSources`): served family → private registered family, and the
+ * loaded faces. */
+export interface MetafileFontSources {
+  readonly families: ReadonlyMap<string, string>;
+  readonly faces: readonly unknown[];
+}
 
-/** Bind the families a document's font-source session registered in this
- * realm (core `LoadedFontSources.families`) to its image cache owner, so the
- * metafile pictures it decodes paint their text with the document's served
- * faces, as its own text does. Rebinding after each load keeps them current;
- * `undefined` unbinds. */
+interface MetafileFonts {
+  readonly families: ReadonlyMap<string, string>;
+  /** Cache identity: the families and how many faces had loaded. A session
+   * only adds faces, so a later load (another subset or weight of a family
+   * already mapped) changes it and the picture is played again. */
+  readonly key: string;
+}
+
+/** Served faces per cache owner (one document's image loader in one realm);
+ * see {@link bindMetafileFontFamilies}. */
+const metafileFontsByOwner = new WeakMap<DecodedBitmapCacheOwner, MetafileFonts>();
+
+/** Bind the faces a document's font-source session loaded in this realm to
+ * its image cache owner, so the metafile pictures it decodes paint their
+ * text with the document's served faces, as its own text does. Rebind after
+ * each load (a picture rasterized before a face loaded is played again once
+ * it has); `undefined` unbinds. */
 export function bindMetafileFontFamilies(
   owner: DecodedBitmapCacheOwner,
-  families: ReadonlyMap<string, string> | undefined,
+  sources: MetafileFontSources | undefined,
 ): void {
-  if (families?.size) metafileFontFamiliesByOwner.set(owner, families);
-  else metafileFontFamiliesByOwner.delete(owner);
+  if (!sources?.families.size) { metafileFontsByOwner.delete(owner); return; }
+  const families = [...sources.families].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  metafileFontsByOwner.set(owner, {
+    families: sources.families,
+    key: `:f${sources.faces.length}${JSON.stringify(families)}`,
+  });
 }
 
 function withOwnerFontFamilies(opts: CachedBitmapOptions, owner: DecodedBitmapCacheOwner): CachedBitmapOptions {
-  if (opts.metafileFontFamilies) return opts;
-  const families = metafileFontFamiliesByOwner.get(owner);
-  return families ? { ...opts, metafileFontFamilies: families } : opts;
-}
-
-const metafileFontKeys = new WeakMap<ReadonlyMap<string, string>, string>();
-
-/** Content key of a served-family map (stable across snapshots with the same
- * entries, so an ensure that loads nothing new keeps the cached rasters). */
-function metafileFontKey(families: ReadonlyMap<string, string> | undefined): string {
-  if (!families?.size) return '';
-  let key = metafileFontKeys.get(families);
-  if (key === undefined) {
-    key = `:f${JSON.stringify([...families].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)))}`;
-    metafileFontKeys.set(families, key);
-  }
-  return key;
+  if (opts.metafileFonts) return opts;
+  const fonts = metafileFontsByOwner.get(owner);
+  return fonts ? { ...opts, metafileFonts: fonts } : opts;
 }
 
 function normalizedRasterTarget(value: number | undefined): number | undefined {
@@ -658,7 +662,7 @@ function metafileVariant(opts: CachedBitmapOptions): MetafileVariant {
     height: target.h,
     pixelLimit: retainedPixelLimit(opts),
     rejectIncomplete: opts.incompleteMetafile === 'reject',
-    fonts: metafileFontKey(opts.metafileFontFamilies),
+    fonts: opts.metafileFonts?.key ?? '',
   };
 }
 
@@ -1085,7 +1089,7 @@ export function getCachedBitmapByPath(
           targetHeightPx: resizeToTarget ? targetHeightPx : undefined,
           maxRetainedPixels,
           incompleteMetafile,
-          ...(normalized.metafileFontFamilies ? { metafileFontFamilies: normalized.metafileFontFamilies } : {}),
+          ...(normalized.metafileFonts ? { metafileFontFamilies: normalized.metafileFonts.families } : {}),
         };
         const bitmap = initial
           ? await decodeRasterOrMetafileWithInspection(blob, decodeOpts, initial.inspection)

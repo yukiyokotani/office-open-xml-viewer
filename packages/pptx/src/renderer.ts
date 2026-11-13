@@ -8974,8 +8974,9 @@ async function renderSlideLeased(
       const added: string[] = [];
       for (const { element } of chartDescriptors) {
         const host = { rotation: element.rotation, flipH: element.flipH, flipV: element.flipV };
+        // Prepared exactly as it paints: with the document's served families.
         for (const { fill, occurrence } of collectChartFillRenderedSizes(
-          element.chart,
+          withChartFontSubstitutions(element.chart, chartFontSubstitutions(rc.fontSources)),
           {
             x: emuToPx(element.x, scale), y: emuToPx(element.y, scale),
             w: emuToPx(element.width, scale), h: emuToPx(element.height, scale),

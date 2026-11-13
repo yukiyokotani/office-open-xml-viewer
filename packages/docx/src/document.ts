@@ -1098,7 +1098,7 @@ export class DocxDocument {
     this._fontSourceSession = loaded.session;
     this._chartFontSubstitutions = chartFontSubstitutions(loaded.loaded);
     // Metafile pictures paint their text with the served faces too.
-    bindMetafileFontFamilies(this._fetchImage, loaded.loaded.families);
+    bindMetafileFontFamilies(this._fetchImage, loaded.loaded);
     return {
       installedSubstituteFamilies: plan.installedSubstituteFamilies,
       sourceFonts: { names: loaded.names, loaded: loaded.loaded },

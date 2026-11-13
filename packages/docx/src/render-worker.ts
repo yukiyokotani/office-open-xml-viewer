@@ -493,7 +493,7 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest | WorkerSvgDecod
         fontSourceSession = loadedSources?.session ?? null;
         chartFontSubstitutionsOfDoc = chartFontSubstitutions(loadedSources?.loaded);
         // Metafile pictures paint their text with the served faces too.
-        bindMetafileFontFamilies(getImage, loadedSources?.loaded.families);
+        bindMetafileFontFamilies(getImage, loadedSources?.loaded);
         embeddedFontFaces = embeddedFonts.faces;
         fontDiagnostics = embeddedFonts.diagnostics ?? [];
         fontsTransferred = true;

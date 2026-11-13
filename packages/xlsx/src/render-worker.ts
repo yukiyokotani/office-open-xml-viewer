@@ -506,7 +506,7 @@ self.onmessage = async (e: MessageEvent<
         return;
       }
       // Metafile pictures paint their text with the served faces too.
-      bindMetafileFontFamilies(getImage, fontSources?.loaded.families);
+      bindMetafileFontFamilies(getImage, fontSources?.loaded);
       await renderWorksheetViewport(
         { ...workerRenderDeps(renderWorksheet, workbook.styles, renderers), cjkFallback },
         canvas,
