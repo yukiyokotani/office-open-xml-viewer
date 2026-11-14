@@ -342,6 +342,8 @@ it.each(['default', 'source'] as const)('still loads when the collector sidecar 
   })));
   // Every slide then demands every subset (font-demand-collector.ts).
   const { importFontDemandCollector } = await import('./font-demand-collector.js');
-  const collector = await importFontDemandCollector('./missing-font-demand-sidecar.mjs');
-  expect(collector({ index: 0, elements: [] } as never, new Set(), 1000)).toBe('all');
+  for (const url of ['./missing-font-demand-sidecar.mjs', '']) {
+    const collector = await importFontDemandCollector(url);
+    expect(collector({ index: 0, elements: [] } as never, new Set(), 1000), url).toBe('all');
+  }
 });

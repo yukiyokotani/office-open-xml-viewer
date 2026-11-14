@@ -16,6 +16,7 @@ export async function loadFontDemandCollector(enabled: boolean): Promise<FontDem
  * every subset of the same families, as before demand was collected: the
  * same faces paint, only more of their subsets load. */
 export async function importFontDemandCollector(url: string): Promise<FontDemandCollector> {
+  if (!url) return demandEverySubset;
   try {
     return ((await import(/* @vite-ignore */ url)) as typeof import('./internal/font-demand-sidecar.js')).collectSlideFontDemand;
   } catch {

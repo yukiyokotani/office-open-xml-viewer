@@ -187,20 +187,25 @@ try {
   browser = await chromium.launch({ channel: 'chrome', headless: true });
   const page = await browser.newPage();
   const sidecarResponses = [];
+  const isSidecar = (request) => /\/pptx-font-demand[^/]*\.mjs$/.test(new URL(request.url()).pathname);
   page.context().on('requestfinished', async (request) => {
-    if (/\/pptx-font-demand[^/]*\.mjs$/.test(new URL(request.url()).pathname)) sidecarResponses.push((await request.response())?.status());
+    if (isSidecar(request)) sidecarResponses.push((await request.response())?.status());
   });
+  page.context().on('requestfailed', (request) => { if (isSidecar(request)) sidecarResponses.push('failed'); });
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));
   await page.goto(server.resolvedUrls.local[0]);
   await page.waitForFunction(() => window.packedResult !== undefined, undefined, { timeout: 90_000 });
   assert.equal(await page.evaluate(() => window.packedResult), 'passed');
   assert.deepEqual(errors, []);
+  // Both font-source loads' parse workers (PPTX and the legacy PPT source)
+  // fetched the sidecar successfully, before any page-side import.
+  const workerResponses = [...sidecarResponses];
+  assert.ok(workerResponses.length >= 2 && workerResponses.every(status => status === 200), `sidecar responses ${JSON.stringify(workerResponses)}`);
   // The emitted sidecar is served and exports the collector.
   assert.equal(await page.evaluate(async (file) => typeof (await import(new URL('assets/' + file, location.href).href)).collectSlideFontDemand,
     sidecars[0]), 'function');
-  // The parse workers requested it (two font-source loads), never failing.
-  assert.ok(sidecarResponses.length > 0 && sidecarResponses.every(status => status === 200), `sidecar responses ${JSON.stringify(sidecarResponses)}`);
+
   console.log('Packed Vite viewers/loaders: DOC/XLS/PPT/ODT main + worker passed');
 } finally {
   await browser?.close();
