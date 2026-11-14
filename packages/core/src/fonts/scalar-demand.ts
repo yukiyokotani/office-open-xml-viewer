@@ -20,8 +20,9 @@
  *   Text in a symbol-encoded family ({@link FontDemandScalarCollector.addSymbolText})
  *   demands instead every scalar its conversion may paint, a finite set
  *   from the conversion tables (`symbol-font.ts`);
- * - an unassigned scalar or a lone surrogate: malformed or unknown input
- *   proves nothing;
+ * - a scalar that is not normalization-inert and that the host does not know
+ *   as assigned, or a lone surrogate: malformed or unknown input proves
+ *   nothing;
  * - a cluster whose canonical closure outgrows a sane cluster
  *   (`canonical-closure.ts`).
  *
@@ -45,7 +46,7 @@ import {
   FONT_TRACKING_SENTINEL,
 } from '../internal/font-measurement-sentinels.js';
 import { HARD_MAX_FONT_DEMAND_SCALARS } from '../worker/resource-policy.generated.js';
-import { canonicalClusterScalars, isCanonicallyDescribed, isClusterJoiner } from './canonical-closure.js';
+import { canonicalClusterScalars, isCanonicallyKnown, isClusterJoiner } from './canonical-closure.js';
 import { fontDemandInertScalar } from './inert-scalars.js';
 import { symbolFontKey, symbolPaintCandidates, type SymbolFontKey } from './symbol-font.js';
 
@@ -107,7 +108,7 @@ export class FontDemandScalarCollector {
       const cp = scalar.codePointAt(0) as number;
       if (cp >= 0xf020 && cp <= 0xf0ff) return this.decline();
       const inert = fontDemandInertScalar(cp);
-      if (!inert && !isCanonicallyDescribed(cp)) return this.decline();
+      if (!inert && !isCanonicallyKnown(cp)) return this.decline();
       if (inert || !isClusterJoiner(cp)) {
         if (!flush()) return this.decline();
       } else if (!cluster.length) {
