@@ -1884,7 +1884,14 @@ pub struct Cell {
 
 #[derive(Debug, Serialize, Default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(rename_all = "camelCase", tag = "type")]
+// `rename_all` renames the variants (the `type` tag); `rename_all_fields`
+// renames the struct-variant fields (`phoneticRuns`, `phoneticPr`), which
+// the TS model reads.
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "type"
+)]
 pub enum CellValue {
     #[default]
     Empty,

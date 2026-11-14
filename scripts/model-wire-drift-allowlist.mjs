@@ -335,21 +335,14 @@ export const MODEL_WIRE_DRIFT_ALLOWLIST = {
     // checked comparisons.
     'Font(ts CellFont).scheme: ts-narrower-literal ["major","minor"]': 'OOXML closed vocabulary',
     'Font(ts CellFont).vertAlign: ts-narrower-literal ["subscript","superscript"]': 'OOXML closed vocabulary',
+    'PhoneticProperties.alignment: ts-narrower-literal ["center","distributed","left","noControl"]': 'OOXML closed vocabulary',
+    'PhoneticProperties.type: ts-narrower-literal ["Hiragana","fullwidthKatakana","halfwidthKatakana","noConversion"]': 'OOXML closed vocabulary',
     'PathInfo.fill: ts-narrower-literal ["darken","darkenLess","lighten","lightenLess","none"]': 'OOXML closed vocabulary',
     'PathInfo.stroke: ts-narrower-literal [false]': 'OOXML closed vocabulary',
     'RunFont.vertAlign: ts-narrower-literal ["subscript","superscript"]': 'OOXML closed vocabulary',
     'ShapeInfo.strokeAlignment: ts-narrower-literal ["ctr","in"]': 'OOXML closed vocabulary',
     'ShapeInfo.strokeLineCap: ts-narrower-literal ["butt","round","square"]': 'OOXML closed vocabulary',
     'ShapeInfo.strokeLineJoin: ts-narrower-literal ["bevel","miter","round"]': 'OOXML closed vocabulary',
-
-    // ---- DRIFT: genuine inaccuracies, reported for follow-up ----------------
-    // The XLSX inline-string furigana fields are serialized in snake_case
-    // (serde `rename_all` on an enum renames variants, not their fields), so
-    // TS never receives them. The fix is on the Rust/wire side.
-    'CellValue<type=text>.phoneticPr: ts-only': 'DRIFT: the wire name is phonetic_pr',
-    'CellValue<type=text>.phoneticRuns: ts-only': 'DRIFT: the wire name is phonetic_runs',
-    'CellValue<type=text>.phonetic_pr: missing-in-ts': 'DRIFT: Rust emits snake_case (variant fields miss rename_all)',
-    'CellValue<type=text>.phonetic_runs: missing-in-ts': 'DRIFT: Rust emits snake_case (variant fields miss rename_all)',
   },
   pptx: {
     ...COMMON,
