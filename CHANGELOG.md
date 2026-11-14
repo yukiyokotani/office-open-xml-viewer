@@ -136,6 +136,10 @@ the host fonts (see **Served font line heights** below). See the
   (`a:lnTlToBr`/`a:lnBlToTr`). The renderer read the misnamed fields and never
   drew them. The end-of-paragraph run properties now also apply to stacked
   vertical text.
+- **Fixed:** XLSX inline-string cells (`<is>`) now show their furigana when
+  phonetic display is on. The parser JSON named the reading `phonetic_runs` /
+  `phonetic_pr` instead of `phoneticRuns` / `phoneticPr`, so the renderer
+  never received it. Shared-string cells were not affected.
 
 ## 0.89.11 — Unreleased
 
