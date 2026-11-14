@@ -51,6 +51,13 @@ jobs:
       - name: Model crate opt-in feature clippy
         run: cargo clippy -p docx-model --all-targets --features owned-source-cursor -- -D warnings
 
+      # Dev-only JSON Schema derive used by the model wire drift check.
+      - name: Model schema feature clippy
+        run: |
+          for crate in docx-model xlsx-model pptx-model; do
+            cargo clippy -p "$crate" --all-targets --features schema -- -D warnings
+          done
+
       # The cargo-fuzz harness is an intentionally independent workspace, so
       # the root workspace checks above do not format, lint, or compile it.
       - name: Fuzz target format check
@@ -177,6 +184,13 @@ jobs:
           pnpm check:resource-policy
           pnpm check:pptx-face-weight-index
           pnpm lint
+
+      # Rust model (serde wire, via the dev-only `schema` feature) vs the
+      # hand-written TS model types. Needs no WASM build.
+      - name: Model wire drift
+        run: |
+          node --test scripts/check-model-wire-drift.test.mjs
+          pnpm check:model-wire-drift
 
       - name: DOCX layout boundary tests
         run: |

@@ -946,6 +946,312 @@ describe('FontSourceSession: registration order', () => {
   });
 });
 
+describe('FontSourceSession: faces are built as their downloads land', () => {
+  it('builds a face from its bytes before the rest of its batch arrives, then names and adds it in order', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    installFetch({ 'https://app.example/slow.woff2': { gate, body: fetchedFontBody('https://app.example/slow.woff2') } });
+    const built: FakeFontFace[] = [];
+    G.FontFace = class extends FakeFontFace {
+      constructor(family: string, source: string | ArrayBuffer, descriptors?: FontFaceDescriptors) {
+        super(family, source, descriptors);
+        built.push(this);
+      }
+    };
+    const set = fakeSet();
+    const session = open([fontFiles({ faces: [
+      { family: 'Brand', url: 'https://app.example/slow.woff2', weight: '400' },
+      { family: 'Brand', url: 'https://app.example/fast.woff2', weight: '400', unicodeRange: 'U+3000-30FF' },
+      { family: 'Brand', url: 'https://app.example/fast.woff2', weight: '700', unicodeRange: 'U+3000-30FF' },
+    ] })], set);
+    const ensured = session.ensure(demand(['Brand']));
+    // The fast file's two faces exist while the slow file still downloads;
+    // nothing is registered yet.
+    await vi.waitFor(() => expect(built.map(urlOf)).toEqual(['https://app.example/fast.woff2', 'https://app.example/fast.woff2']));
+    expect(set.faces).toEqual([]);
+    release();
+    const loaded = await ensured;
+    const family = loaded.families?.get('brand');
+    expect(family).toMatch(/^ooxml-font-source-/);
+    // Declaration order, one private family, one FontFace per face (the
+    // prepared ones reused), from the fetched bytes.
+    expect(set.faces.map(urlOf)).toEqual(['https://app.example/slow.woff2', 'https://app.example/fast.woff2', 'https://app.example/fast.woff2']);
+    expect(set.faces.map((face) => face.weight)).toEqual(['400', '400', '700']);
+    expect(set.faces.every((face) => face.family === family && typeof face.source !== 'string')).toBe(true);
+    expect(built).toHaveLength(3);
+    expect(set.faces.filter((face) => built.includes(face))).toHaveLength(3);
+  });
+
+  it('prepares nothing in the last second before the face-loading deadline', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const start = Date.now();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    G.fetch = vi.fn(async (url: string) => {
+      if (url.endsWith('slow.woff2')) await gate;
+      else vi.setSystemTime(start + 14_500);
+      return fontFileResponse(url);
+    });
+    let prepared = 0;
+    G.FontFace = class extends FakeFontFace {
+      constructor(family: string, source: string | ArrayBuffer, descriptors?: FontFaceDescriptors) {
+        super(family, source, descriptors);
+        if (family.endsWith('-prepared')) prepared++;
+      }
+    };
+    const set = fakeSet();
+    const ensured = open([fontFiles({ faces: [
+      { family: 'Brand', url: 'https://app.example/fast.woff2' },
+      { family: 'Brand', url: 'https://app.example/slow.woff2', unicodeRange: 'U+3000-30FF' },
+    ] })], set).ensure(demand(['Brand']));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(prepared).toBe(0);
+    release();
+    await ensured;
+    expect(set.faces.map(urlOf)).toEqual(['https://app.example/fast.woff2', 'https://app.example/slow.woff2']);
+  });
+
+  it('stops preparing mid-batch at the margin, so a later download still meets the deadline', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const start = Date.now();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    G.fetch = vi.fn(async (url: string) => {
+      if (url.endsWith('slow.woff2')) await gate;
+      else vi.setSystemTime(start + 10_000);
+      return fontFileResponse(url);
+    });
+    // Each prepared face takes a simulated second.
+    let prepared = 0;
+    G.FontFace = class extends FakeFontFace {
+      constructor(family: string, source: string | ArrayBuffer, descriptors?: FontFaceDescriptors) {
+        super(family, source, descriptors);
+        if (family.endsWith('-prepared')) { prepared++; vi.setSystemTime(Date.now() + 1_000); }
+      }
+    };
+    const weights = Array.from({ length: 9 }, (_, index) => String((index + 1) * 100));
+    const set = fakeSet();
+    const ensured = open([fontFiles({ faces: [
+      ...weights.map((weight) => ({ family: 'Brand', url: 'https://app.example/shared.woff2', weight })),
+      { family: 'Brand', url: 'https://app.example/slow.woff2', unicodeRange: 'U+3000-30FF' },
+    ] })], set).ensure(demand(['Brand']));
+    await vi.waitFor(() => expect(prepared).toBeGreaterThan(0));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    // Started 10 s into a 15 s ceiling: five faces (the last one starting 1 s
+    // before the deadline), then the margin stops it.
+    expect(prepared).toBe(5);
+    release();
+    await ensured;
+    expect(set.faces).toHaveLength(10);
+  });
+
+  it('drops a prepared face whose download missed the deadline', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const start = Date.now();
+    G.fetch = vi.fn(async (url: string) => {
+      if (url.endsWith('late.woff2')) vi.setSystemTime(start + 60_000);
+      return fontFileResponse(url);
+    });
+    const set = fakeSet();
+    const loaded = await open([fontFiles({ faces: [{ family: 'Late', url: 'https://app.example/late.woff2' }] })], set)
+      .ensure(demand(['Late']));
+    expect(set.faces).toEqual([]);
+    expect(loaded.faces).toEqual([]);
+    expect(warn).toHaveBeenCalled();
+  });
+});
+
+
+describe('FontSourceSession: prepared faces stay within the realm ceilings', () => {
+  it('never builds faces past the retained-byte ceiling, and registers the same faces as before', async () => {
+    vi.resetModules();
+    vi.doMock('../worker/resource-policy.generated.js', async (importOriginal) => ({
+      ...await importOriginal<Record<string, unknown>>(),
+      HARD_MAX_FONT_SOURCE_RETAINED_BYTES: 100,
+    }));
+    try {
+      const fresh = await import('./source-session.js');
+      const sourceModule = await import('./source.js');
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => { release = resolve; });
+      installFetch({
+        'https://app.example/shared.woff2': { bytes: 20 },
+        'https://app.example/slow.woff2': { bytes: 1, gate },
+      });
+      // Five styles of one 20-byte file: the download keeps 20 bytes and each
+      // registered face another 20. Prepared faces never take room a
+      // download or registration needs: both files are kept (21 bytes) and
+      // faces are charged in declaration order, 100-300 and 600 fitting.
+      const weights = ['100', '200', '300', '400', '500'];
+      let peak = 0;
+      const built: FakeFontFace[] = [];
+      G.FontFace = class extends FakeFontFace {
+        constructor(family: string, source: string | ArrayBuffer, descriptors?: FontFaceDescriptors) {
+          super(family, source, descriptors);
+          built.push(this);
+          peak = Math.max(peak, fresh.retainedFontSourceBytes());
+        }
+      };
+      const set = fakeSet();
+      const session = new fresh.FontSourceSession({ sources: [sourceModule.fontFiles({ faces: [
+        ...weights.map((weight) => ({ family: 'Shared', url: 'https://app.example/shared.woff2', weight })),
+        { family: 'Shared', url: 'https://app.example/slow.woff2', weight: '600' },
+      ] })], fontSet: asSet(set) });
+      const ensured = session.ensure(demand(['Shared']));
+      await vi.waitFor(() => expect(built.length).toBeGreaterThan(0));
+      expect(fresh.retainedFontSourceBytes()).toBeLessThanOrEqual(100);
+      release();
+      await ensured;
+      expect(peak).toBeLessThanOrEqual(100);
+      expect(set.faces.map((face) => face.weight)).toEqual(['100', '200', '300', '600']);
+      session.release();
+      expect(fresh.retainedFontSourceBytes()).toBe(0);
+    } finally {
+      vi.doUnmock('../worker/resource-policy.generated.js');
+      vi.resetModules();
+    }
+  });
+
+  it('gives a prepared face\'s room back to an earlier declaration that needs it', async () => {
+    vi.resetModules();
+    vi.doMock('../worker/resource-policy.generated.js', async (importOriginal) => ({
+      ...await importOriginal<Record<string, unknown>>(),
+      HARD_MAX_FONT_SOURCE_RETAINED_BYTES: 100,
+    }));
+    try {
+      const fresh = await import('./source-session.js');
+      const sourceModule = await import('./source.js');
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => { release = resolve; });
+      installFetch({
+        'https://app.example/early.woff2': { bytes: 20 },
+        'https://app.example/slow.woff2': { bytes: 1, gate },
+      });
+      let prepared = 0;
+      G.FontFace = class extends FakeFontFace {
+        constructor(family: string, source: string | ArrayBuffer, descriptors?: FontFaceDescriptors) {
+          super(family, source, descriptors);
+          if (family.endsWith('-prepared')) prepared++;
+        }
+      };
+      const set = fakeSet();
+      const session = new fresh.FontSourceSession({ sources: [sourceModule.fontFiles({ faces: [
+        { family: 'Mixed', data: new Uint8Array(79).buffer },
+        { family: 'Mixed', url: 'https://app.example/early.woff2', weight: '600' },
+        { family: 'Mixed', url: 'https://app.example/slow.woff2', weight: '700' },
+      ] })], fontSet: asSet(set) });
+      const ensured = session.ensure(demand(['Mixed']));
+      await vi.waitFor(() => expect(prepared).toBe(1));
+      release();
+      await ensured;
+      // As without preparation: the inline face is charged first (79 + the
+      // 21 bytes of downloads), the prepared face is reclaimed for it, and
+      // neither downloaded face fits any more.
+      expect(set.faces.map((face) => face.weight)).toEqual(['normal']);
+      expect(fresh.retainedFontSourceBytes()).toBe(100);
+      session.release();
+      expect(fresh.retainedFontSourceBytes()).toBe(0);
+    } finally {
+      vi.doUnmock('../worker/resource-policy.generated.js');
+      vi.resetModules();
+    }
+  });
+
+  it('drops prepared faces and returns their bytes when the session is released mid-batch', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    installFetch({ 'https://app.example/slow.woff2': { bytes: 4, gate } });
+    const built: FakeFontFace[] = [];
+    G.FontFace = class extends FakeFontFace {
+      constructor(family: string, source: string | ArrayBuffer, descriptors?: FontFaceDescriptors) {
+        super(family, source, descriptors);
+        built.push(this);
+      }
+    };
+    const set = fakeSet();
+    const session = open([fontFiles({ faces: [
+      { family: 'Brand', url: 'https://app.example/fast.woff2' },
+      { family: 'Brand', url: 'https://app.example/slow.woff2', unicodeRange: 'U+3000-30FF' },
+    ] })], set);
+    const ensured = session.ensure(demand(['Brand'])).catch(() => undefined);
+    await vi.waitFor(() => expect(built).toHaveLength(1));
+    expect(retainedFontSourceBytes()).toBeGreaterThan(0);
+    session.release();
+    release();
+    await ensured;
+    expect(set.faces).toEqual([]);
+    expect(retainedFontSourceBytes()).toBe(0);
+  });
+});
+
+describe('FontSourceSession: one face per file across the requested weights', () => {
+  const faces = (extra: { weight: string; url: string; unicodeRange?: string }[] = []) => fontFiles({ faces: [
+    { family: 'Var', url: 'https://app.example/var-a.woff2', weight: '400', unicodeRange: 'U+0-FF' },
+    { family: 'Var', url: 'https://app.example/var-b.woff2', weight: '400', unicodeRange: 'U+3000-30FF' },
+    { family: 'Var', url: 'https://app.example/var-a.woff2', weight: '700', unicodeRange: 'U+0-FF' },
+    { family: 'Var', url: 'https://app.example/var-b.woff2', weight: 'bold', unicodeRange: 'U+3000-30FF' },
+    ...extra.map((face) => ({ family: 'Var', unicodeRange: 'U+0-FF', ...face })),
+  ] });
+  const run = async (source: ReturnType<typeof fontFiles>, requestedWeights?: number[], scalars: FontSessionDemand['scalars'] = [0x41, 0x3042]) => {
+    installFetch({});
+    const set = fakeSet();
+    const session = new FontSourceSession({ sources: [source], fontSet: asSet(set), ...(requestedWeights ? { requestedWeights } : {}) });
+    sessions.push(session);
+    const loaded = await session.ensure(demand(['Var'], scalars));
+    return { set, loaded };
+  };
+
+  it('registers each file once with the weight range when every file is declared at exactly the requested weights', async () => {
+    const { set, loaded } = await run(faces(), [700, 400]);
+    expect(set.faces.map((face) => [urlOf(face), face.weight])).toEqual([
+      ['https://app.example/var-a.woff2', '400 700'], ['https://app.example/var-b.woff2', '400 700'],
+    ]);
+    expect(loaded.faces.map((face) => face.weight)).toEqual(['400 700', '400 700']);
+    // The ranged faces stand for their 400 declarations: the regular alias stays.
+    expect(loaded.regularAliases.get('var regular')).toBe('Var');
+  });
+
+  it('keeps one face per declaration otherwise', async () => {
+    const separate = (set: FakeSet) => set.faces.map((face) => face.weight);
+    // No proof of the requested weights.
+    expect(separate((await run(faces())).set)).toEqual(['400', '400', '700', 'bold']);
+    // A requested weight no file is declared at.
+    expect(separate((await run(faces(), [400, 500, 700])).set)).toEqual(['400', '400', '700', 'bold']);
+    // A file declared at a weight outside the requested set, or at one weight only.
+    expect(separate((await run(faces([{ weight: '500', url: 'https://app.example/var-c.woff2' }]), [400, 700])).set))
+      .toHaveLength(5);
+    expect(separate((await run(faces([{ weight: '400', url: 'https://app.example/static.woff2', unicodeRange: 'U+100-17F' }]), [400, 700], [0x41, 0x3042, 0x101])).set))
+      .toEqual(['400', '400', '700', 'bold', '400']);
+    // An 'all' demand.
+    expect(separate((await run(faces(), [400, 700], 'all')).set)).toEqual(['400', '400', '700', 'bold']);
+    // Overlapping files in a different order per weight: regular text picks
+    // the later 400 face (b), bold the later 700 face (a); one face per file
+    // could keep only one of those precedences.
+    const crossed = fontFiles({ faces: [
+      { family: 'Var', url: 'https://app.example/var-a.woff2', weight: '400', unicodeRange: 'U+0-FF' },
+      { family: 'Var', url: 'https://app.example/var-b.woff2', weight: '400', unicodeRange: 'U+0-FF' },
+      { family: 'Var', url: 'https://app.example/var-b.woff2', weight: '700', unicodeRange: 'U+0-FF' },
+      { family: 'Var', url: 'https://app.example/var-a.woff2', weight: '700', unicodeRange: 'U+0-FF' },
+    ] });
+    expect((await run(crossed, [400, 700], [0x41])).set.faces.map((face) => [urlOf(face), face.weight])).toEqual([
+      ['https://app.example/var-a.woff2', '400'], ['https://app.example/var-b.woff2', '400'],
+      ['https://app.example/var-b.woff2', '700'], ['https://app.example/var-a.woff2', '700'],
+    ]);
+  });
+
+  it('keeps the per-weight precedence of overlapping files declared in the same order', async () => {
+    const ordered = fontFiles({ faces: [
+      { family: 'Var', url: 'https://app.example/var-a.woff2', weight: '700', unicodeRange: 'U+0-FF' },
+      { family: 'Var', url: 'https://app.example/var-a.woff2', weight: '400', unicodeRange: 'U+0-FF' },
+      { family: 'Var', url: 'https://app.example/var-b.woff2', weight: '400', unicodeRange: 'U+0-FF' },
+      { family: 'Var', url: 'https://app.example/var-b.woff2', weight: '700', unicodeRange: 'U+0-FF' },
+    ] });
+    expect((await run(ordered, [400, 700], [0x41])).set.faces.map((face) => [urlOf(face), face.weight])).toEqual([
+      ['https://app.example/var-a.woff2', '400 700'], ['https://app.example/var-b.woff2', '400 700'],
+    ]);
+  });
+});
+
 describe('FontSourceSession: released sessions keep no FontFace alive', () => {
   it('lets every face of a released session be collected without another ensure', async () => {
     setFlagsFromString('--expose-gc');

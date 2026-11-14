@@ -1,3 +1,4 @@
+import { compatProfile } from '../test-support/compat-environment.test-support.js';
 import { DEFAULT_KINSOKU_RULES, getDefaultBidiEngine, setBidiEngine } from '@silurus/ooxml-core';
 import { describe, expect, it } from 'vitest';
 import type { ParagraphLayoutContext } from '../layout-context.js';
@@ -197,7 +198,7 @@ describe('paragraph acquisition cache', () => {
     // Warm the body cache without borrowing the self-owned legacy capability.
     const external = acquire({});
     expect(markerBody(external)).toEqual(markerBody(acquire({
-      environment: { ...base.environment, doNotSuppressIndentation: true },
+      environment: { ...base.environment, compat: compatProfile({ doNotSuppressIndentation: true }) },
     })));
     const declined: Partial<ParagraphAcquisitionOptions>[] = [
       { source: { story: 'header', storyInstance: 'header:default', path: [0] } },
@@ -210,7 +211,7 @@ describe('paragraph acquisition cache', () => {
     for (const override of declined) {
       const actual = acquire(override);
       const established = acquire({ ...override,
-        environment: { ...base.environment, doNotSuppressIndentation: true } });
+        environment: { ...base.environment, compat: compatProfile({ doNotSuppressIndentation: true }) } });
       // Same physical frame and source, unchanged established marker/body
       // geometry. The true setting is only a bypass reference, not its Word rule.
       expect(markerBody(actual)).toEqual(markerBody(established));
@@ -277,7 +278,7 @@ describe('paragraph acquisition cache', () => {
     });
     const at = (doNotExpandShiftReturn: boolean, startYPt: number) => ({
       ...base,
-      environment: { ...base.environment, compatibilityMode: 15, doNotExpandShiftReturn },
+      environment: { ...base.environment, compat: compatProfile({ compatibilityMode: 15, doNotExpandShiftReturn }) },
       placement: { ...base.placement, startYPt },
     });
     const geometry = (result: ReturnType<typeof acquireParagraphResult>) => result.layout.lines.map(line =>
@@ -326,7 +327,7 @@ describe('paragraph acquisition cache', () => {
           context: { ...context, baseRtl: true, tabStops: paragraph.tabStops },
         });
         const at = (startYPt: number) => ({ ...base,
-          environment: { ...base.environment, compatibilityMode: 15 },
+          environment: { ...base.environment, compat: compatProfile({ compatibilityMode: 15 }) },
           placement: { ...base.placement, startYPt } });
         const initial = geometry(acquireParagraphResult(input, at(72)));
         if (change === 'same-object setter') { reverse = true; setBidiEngine(adapter); }
@@ -362,7 +363,7 @@ describe('paragraph acquisition cache', () => {
     const base = options(services, { measurer: { context: ctx, fontFamilyClasses: {} } });
     const at = (compatibilityMode: number | undefined, startYPt: number) => acquireParagraphResult(input, {
       ...base,
-      environment: { ...base.environment, compatibilityMode },
+      environment: { ...base.environment, compat: compatProfile({ compatibilityMode }) },
       placement: { ...base.placement, startYPt },
     }).layout.lines[0]!.placements.find((placement) => placement.kind === 'text')?.kerning;
     // WORD_KERN_THRESHOLD_AUTHORITY: measured with the mode omitted and in
@@ -745,11 +746,11 @@ describe('paragraph acquisition cache', () => {
       key({ environment: { ...base.environment, verticalCJK: true } }),
       key({ environment: { ...base.environment, verticalPageFrame: true } }),
       key({ environment: { ...base.environment, documentHasEastAsianText: true } }),
-      key({ environment: { ...base.environment, useFeLayout: true } }),
-      key({ environment: { ...base.environment, lineWrapLikeWord6: true } }),
+      key({ environment: { ...base.environment, compat: compatProfile({ useFeLayout: true }) } }),
+      key({ environment: { ...base.environment, compat: compatProfile({ lineWrapLikeWord6: true }) } }),
       key({ environment: {
         ...base.environment,
-        balanceSingleByteDoubleByteWidth: true,
+        compat: compatProfile({ balanceSingleByteDoubleByteWidth: true }),
       } }),
       key({ environment: {
         ...base.environment,

@@ -103,7 +103,19 @@ export interface FontCssApiSource extends FontSourceBase {
    * {@link fontCssApi}.
    */
   readonly sharedSubsetMetricFamilies?: readonly string[];
+  /**
+   * Set only by a library preset (`googleFonts()` on its default origin), for
+   * a file host it knows serves many requests at once: how many of this
+   * source's face files a realm downloads in parallel, in a pool of its own,
+   * instead of the default six (`face-download.ts`). An integer from 1 to
+   * 64. Never settable through
+   * {@link fontCssApi}.
+   */
+  readonly parallelFaceDownloads?: number;
 }
+
+/** Upper bound of {@link FontCssApiSource.parallelFaceDownloads}. */
+const HARD_MAX_PARALLEL_FACE_DOWNLOADS = 64;
 
 /** One static stylesheet describing any number of families. */
 export interface FontCssSource extends FontSourceBase {
@@ -493,7 +505,12 @@ export function validateFontFaceDeclaration(
 const TEMPLATE_PLACEHOLDER = /\{[^{}]*\}/g;
 
 function normalizeCssApi(fields: Fields, location: string): FontCssApiSource {
-  requireKnownKeys(fields, ['protocol', 'kind', 'urlTemplate', 'query', 'families', 'substitutes', 'credentials', 'sharedSubsetMetricFamilies'], location);
+  requireKnownKeys(fields, ['protocol', 'kind', 'urlTemplate', 'query', 'families', 'substitutes', 'credentials', 'sharedSubsetMetricFamilies', 'parallelFaceDownloads'], location);
+  const parallelFaceDownloads = fields.parallelFaceDownloads;
+  if (parallelFaceDownloads !== undefined && (typeof parallelFaceDownloads !== 'number' || !Number.isInteger(parallelFaceDownloads)
+    || parallelFaceDownloads < 1 || parallelFaceDownloads > HARD_MAX_PARALLEL_FACE_DOWNLOADS)) {
+    throw new TypeError(`${location}.parallelFaceDownloads must be an integer from 1 to ${HARD_MAX_PARALLEL_FACE_DOWNLOADS}`);
+  }
   let sharedSubsetMetricFamilies: readonly string[] | undefined;
   if (fields.sharedSubsetMetricFamilies !== undefined) {
     const list = fields.sharedSubsetMetricFamilies;
@@ -570,6 +587,7 @@ function normalizeCssApi(fields: Fields, location: string): FontCssApiSource {
     ...(substitutes === undefined ? {} : { substitutes }),
     ...(credentials === undefined ? {} : { credentials }),
     ...(sharedSubsetMetricFamilies === undefined ? {} : { sharedSubsetMetricFamilies }),
+    ...(parallelFaceDownloads === undefined ? {} : { parallelFaceDownloads }),
   });
 }
 
@@ -688,12 +706,13 @@ export function fontCssApi(options: FontCssApiOptions): FontSource {
  * {@link FontCssApiSource.sharedSubsetMetricFamilies} (`googleFonts()`). Not public. */
 export function presetFontCssApi(
   options: FontCssApiOptions,
-  preset: { readonly sharedSubsetMetricFamilies?: readonly string[] },
+  preset: { readonly sharedSubsetMetricFamilies?: readonly string[]; readonly parallelFaceDownloads?: number },
 ): FontSource {
   const fields = factoryOptions(options, 'fontCssApi', ['urlTemplate', 'query', 'families', 'substitutes', 'credentials']);
   return issued(normalizeCssApi({
     ...fields,
     ...(preset.sharedSubsetMetricFamilies ? { sharedSubsetMetricFamilies: preset.sharedSubsetMetricFamilies } : {}),
+    ...(preset.parallelFaceDownloads !== undefined ? { parallelFaceDownloads: preset.parallelFaceDownloads } : {}),
     protocol: FONT_SOURCE_PROTOCOL, kind: 'font-css-api',
   }, 'fontCssApi()'));
 }

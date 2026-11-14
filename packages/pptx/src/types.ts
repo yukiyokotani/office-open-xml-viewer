@@ -349,6 +349,11 @@ export interface ShapeElement {
   /** Equation Choice preview retained for runtime conversion failures (MCE §9.3). */
   mathFallback?: EquationBranchFallback;
   type: 'shape';
+  /** `<p:ph @type>` (ECMA-376 §19.7.10 ST_PlaceholderType), e.g. "title",
+   *  "body", "sldNum"; absent for non-placeholder shapes. */
+  placeholderType?: string;
+  /** `<p:ph @idx>`: the placeholder index the layout chain matches on. */
+  placeholderIdx?: number;
   x: number;
   y: number;
   width: number;
@@ -576,10 +581,10 @@ export interface TableCell {
   borderR: Stroke | null;
   borderT: Stroke | null;
   borderB: Stroke | null;
-  /** Diagonal from top-left to bottom-right */
-  diagonalTL?: Stroke | null;
-  /** Diagonal from top-right to bottom-left */
-  diagonalTR?: Stroke | null;
+  /** Diagonal from top-left to bottom-right (`a:lnTlToBr`). */
+  diagonalTl?: Stroke | null;
+  /** Diagonal from top-right to bottom-left (`a:lnBlToTr`). */
+  diagonalTr?: Stroke | null;
   /** Column span */
   gridSpan: number;
   /** Row span */
@@ -660,11 +665,11 @@ export interface PictureElement {
   /**
    * Border line from `<p:pic><p:spPr><a:ln>` (ECMA-376 §20.1.2.2.24). A
    * `p:pic`'s spPr is `CT_ShapeProperties` (§19.3.1.37), so a picture carries
-   * the same line model as a shape. `null` when there is no `<a:ln>` or it
+   * the same line model as a shape. Absent when there is no `<a:ln>` or it
    * resolves to `<a:noFill/>` (border explicitly suppressed). The border is
    * stroked along the picture's clip silhouette (roundRect / custGeom / rect).
    */
-  stroke: Stroke | null;
+  stroke?: Stroke | null;
   /**
    * `<p:spPr>` fill (a `p:pic`'s spPr is CT_ShapeProperties, §19.3.1.37),
    * painted inside the picture silhouette BEHIND the blip so it shows through

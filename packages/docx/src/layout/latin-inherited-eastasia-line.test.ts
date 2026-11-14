@@ -1,3 +1,4 @@
+import { compatProfile } from '../test-support/compat-environment.test-support.js';
 import { expect, it } from 'vitest';
 import { createLayoutServices } from '../layout-runtime.js';
 import { testFontSnapshot } from './test-font-snapshot.js';
@@ -42,7 +43,7 @@ function measuredLine(text: string, eastAsia: string | null, lineGridActive: boo
   }] as DocRun[];
   const segments = buildSegments(runs, {
     pageIndex: 0, totalPages: 1, layoutServices: services,
-    useFeLayout: true, lineGridActive,
+    compat: compatProfile({ useFeLayout: true }), lineGridActive,
     lineSpacing: { rule: 'auto', value: 1 },
   });
   const line = layoutLines(context, segments, 400, 0, 1)[0]!;

@@ -461,7 +461,10 @@ for the Noto CJK families.
 - A face file the library fetches itself (see
   [Network, CORS and cookies](#network-cors-and-cookies)) is
   fetched in the face-loading phase,
-  within its deadline, at most six at a time. A face that cannot be fetched
+  within its deadline, at most six at a time per page or worker. Face files
+  of `googleFonts()` on its default origin (`fonts.gstatic.com`, served over
+  HTTP/2 and HTTP/3) are fetched up to 32 at a time, in a pool of their own.
+  A face that cannot be fetched
   fails like a face that cannot load: it is left out with a `console.warn`,
   and the family is not passed to another source or substitute. For XLSX in
   worker mode, the viewer and the worker share each fetch and its outcome.

@@ -275,7 +275,7 @@ export interface ChartDataTable {
     fontBold?: boolean | null;
     fontItalic?: boolean | null;
     fillColor?: string | null;
-    fill?: SolidFill | GradientFill | PatternFill | null;
+    fill?: SolidFill | GradientFill | PatternFill | ImageFill | null;
     fillHidden?: boolean | null;
     fillPaintAuthored?: boolean | null;
     lineColor?: string | null;
@@ -874,7 +874,7 @@ export interface ChartSeries {
     fillPattern?: PatternFill | null;
     invertIfNegative?: boolean | null;
     automaticNegativeStyle?: boolean | null;
-    invertedFill?: SolidFill | GradientFill | PatternFill | null;
+    invertedFill?: SolidFill | GradientFill | PatternFill | ImageFill | null;
     invertedFillHidden?: boolean | null;
     invertedFillAuthored?: boolean | null;
     invertedLineColor?: string | null;
@@ -993,7 +993,7 @@ type ChartStyleRole = 'axisTitle' | 'categoryAxis' | 'chartArea' | 'dataLabel' |
 export interface ChartSurfaceBandFormat {
     idx: number;
     style?: ChartExElementStyle | null;
-    fill?: SolidFill | GradientFill | PatternFill | null;
+    fill?: SolidFill | GradientFill | PatternFill | ImageFill | null;
     fillHidden?: boolean | null;
     lineColor?: string | null;
     lineWidthEmu?: number | null;
@@ -1030,7 +1030,7 @@ export interface ChartTextRun {
     paragraphAlign?: 'l' | 'ctr' | 'r' | 'just' | 'dist' | string | null;
 }
 export interface ChartThreeD {
-    view3DPresent?: boolean | null;
+    view3dPresent?: boolean | null;
     rotationX?: number | null;
     rotationXAuthored?: boolean | null;
     rotationY?: number | null;
@@ -1199,6 +1199,7 @@ export interface DocNote {
     content: BodyElement[];
 }
 export interface DocParagraph {
+    outlineLevel?: number;
     paragraphId?: string;
     alignment: 'left' | 'start' | 'center' | 'right' | 'end' | 'justify' | 'both' | 'distribute' | 'lowKashida' | 'mediumKashida' | 'highKashida' | 'thaiDistribute' | string;
     indentLeft: number;
@@ -1908,7 +1909,7 @@ export interface ImageRun {
     anchorYPt?: number;
     anchorXFromMargin?: boolean;
     anchorYFromPara?: boolean;
-    colorReplaceFrom?: string;
+    colorReplaceFrom?: string | null;
     duotone?: Duotone;
     blipEffects?: BlipEffect[];
     alpha?: number;
@@ -2305,11 +2306,11 @@ export interface ParaBorderEdge {
     space: number;
 }
 export interface ParagraphBorders {
-    top: ParaBorderEdge | null;
-    bottom: ParaBorderEdge | null;
-    left: ParaBorderEdge | null;
-    right: ParaBorderEdge | null;
-    between: ParaBorderEdge | null;
+    top?: ParaBorderEdge | null;
+    bottom?: ParaBorderEdge | null;
+    left?: ParaBorderEdge | null;
+    right?: ParaBorderEdge | null;
+    between?: ParaBorderEdge | null;
 }
 export type PathCmd = {
     cmd: 'moveTo';
@@ -2660,7 +2661,7 @@ export interface ShapeRun {
     presetGeometry?: string | null;
     adjValues?: Array<number | null>;
     vmlPicture?: Pick<ImageRun, 'imagePath' | 'mimeType' | 'srcRect' | 'colorReplaceFrom' | 'duotone' | 'blipEffects'>;
-    fill: ShapeFill | null;
+    fill?: ShapeFill | null;
     stroke: string | null;
     strokeWidth?: number;
     strokeFill?: ShapeStrokeFill | null;

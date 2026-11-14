@@ -7667,6 +7667,11 @@ mod phonetic_tests {
             }
             other => panic!("expected text cell, got {other:?}"),
         }
+        // The TS model reads camelCase keys at the JSON boundary.
+        let json = serde_json::to_value(&cell.value).expect("serialize cell value");
+        assert_eq!(json["phoneticRuns"][0]["text"], "モリ");
+        assert_eq!(json["phoneticPr"]["fontId"], 1);
+        assert!(json.get("phonetic_runs").is_none() && json.get("phonetic_pr").is_none());
     }
 }
 

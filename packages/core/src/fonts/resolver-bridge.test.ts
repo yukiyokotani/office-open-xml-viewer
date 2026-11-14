@@ -1369,6 +1369,54 @@ describe('face acquisition', () => {
     expect(main.acquiredFaceCount()).toBe(0);
   });
 
+  it('runs a source\'s own parallelism in a pool of its own, beside the six', async () => {
+    const started: string[] = [];
+    G.fetch = vi.fn((url: string, init?: RequestInit) => {
+      started.push(url);
+      return new Promise((_resolve, reject) => init?.signal?.addEventListener('abort',
+        () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' }))));
+    });
+    const controller = new AbortController();
+    const holder = {};
+    const options = { credentials: 'omit' as const, signal: controller.signal, deadline: Date.now() + 60_000, holder };
+    const wide = Array.from({ length: 40 }, (_, index) => `https://fonts.wide.example/${index}.woff2`);
+    const plain = Array.from({ length: 10 }, (_, index) => `https://fonts.app.example/p-${index}.woff2`);
+    const pending = [
+      main.acquireFaceUrls(wide, { ...options, parallel: 32 }),
+      main.acquireFaceUrls(plain, options),
+    ];
+    await vi.waitFor(() => expect(started).toHaveLength(38));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(started.filter((url) => url.includes('wide'))).toHaveLength(32);
+    expect(started.filter((url) => url.includes('/p-'))).toHaveLength(6);
+    controller.abort();
+    await Promise.all(pending);
+    main.releaseAcquiredFaces(holder);
+    expect(main.acquiredFaceCount()).toBe(0);
+  });
+
+  it('tells the caller of each URL as soon as its bytes arrive', async () => {
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    G.fetch = vi.fn(async (url: string) => {
+      if (url.includes('slow')) await gate;
+      return { ok: true, status: 200, arrayBuffer: async () => new Uint8Array(8).buffer };
+    });
+    const holder = {};
+    const seen: string[] = [];
+    const pending = main.acquireFaceUrls(['https://fonts.app.example/slow.woff2', 'https://fonts.app.example/fast.woff2'], {
+      credentials: 'omit', signal: new AbortController().signal, deadline: Date.now() + 60_000, holder,
+      onAcquired: (url, data) => { seen.push(url); expect(data.byteLength).toBe(8); },
+    });
+    await vi.waitFor(() => expect(seen).toEqual(['https://fonts.app.example/fast.woff2']));
+    release();
+    const outcomes = await pending;
+    expect(seen).toEqual(['https://fonts.app.example/fast.woff2', 'https://fonts.app.example/slow.woff2']);
+    expect([...outcomes.values()].every((outcome) => 'data' in outcome)).toBe(true);
+    main.releaseAcquiredFaces(holder);
+    expect(main.acquiredFaceCount()).toBe(0);
+  });
+
   it('keeps a holder\'s bytes when one of its overlapping joins is cancelled', async () => {
     let release: () => void = () => undefined;
     const gate = new Promise<void>((resolve) => { release = resolve; });

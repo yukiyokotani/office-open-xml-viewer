@@ -13,6 +13,7 @@ import {
   type SectionPageLayoutPolicy,
 } from './context.js';
 import type { SectionStartType, AuthoredBreak } from './paginator.js';
+import type { DocxCompatProfile } from './compat-profile.js';
 import { snapshotPlainData } from './plain-data.js';
 import type { DeepReadonly, LayoutDiagnostic, SourceRef } from './types.js';
 import {
@@ -246,11 +247,8 @@ export interface PageObjectInput {
 }
 
 export interface BodyLayoutInput {
-  /** `w:compatSetting` compatibilityMode value from settings (§17.15.3.4). */
-  readonly compatibilityMode?: number;
-  readonly footnoteLayoutLikeWW8?: boolean;
-  /** Producer footnote layout: every column owns its note band. */
-  readonly producerFootnoteColumnBands?: boolean;
+  /** Document compatibility profile; absent means DEFAULT_DOCX_COMPAT_PROFILE. */
+  readonly compat?: DocxCompatProfile;
   readonly source: SourceRef;
   readonly initialSection: BodySectionLayoutInput;
   readonly sequence: readonly BodyLayoutSequenceEntry[];
@@ -297,10 +295,7 @@ export interface NoteNumberingInput {
 
 export interface BodyLayoutAcquisitionInput {
   readonly pageObjects?: readonly PageObjectInput[];
-  readonly compatibilityMode?: number;
-  readonly footnoteLayoutLikeWW8?: boolean;
-  /** Producer footnote layout: every column owns its note band. */
-  readonly producerFootnoteColumnBands?: boolean;
+  readonly compat: DocxCompatProfile;
   readonly sectionIndex: BodySectionIndexInput;
   readonly evenAndOddHeaders: boolean;
   readonly parserDiagnostics?: readonly LayoutDiagnostic[];
@@ -461,9 +456,7 @@ export function projectBodyLayoutInput(acquired: BodyLayoutAcquisitionInput): Bo
   });
   return snapshotPlainData({
     source: { story: 'body', storyInstance: 'body', path: [] },
-    compatibilityMode: acquired.compatibilityMode,
-    footnoteLayoutLikeWW8: acquired.footnoteLayoutLikeWW8,
-    ...(acquired.producerFootnoteColumnBands ? { producerFootnoteColumnBands: true } : {}),
+    compat: acquired.compat,
     initialSection,
     sequence,
     parserDiagnostics: acquired.parserDiagnostics ?? [],

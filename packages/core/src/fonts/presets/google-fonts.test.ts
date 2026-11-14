@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { assertFontSourceDescriptors, fontCssApiRequests, fontSourceDescriptors, type FontCssApiSource } from '../source.js';
+import { assertFontSourceDescriptors, fontCssApi, fontCssApiRequests, fontSourceDescriptors, type FontCssApiSource } from '../source.js';
 import {
   GOOGLE_FONTS_CATALOG,
+  GOOGLE_FONTS_PARALLEL_FACE_DOWNLOADS,
   GOOGLE_FONTS_SUBSTITUTIONS,
   GOOGLE_NOTO_CJK_NAMING,
   googleFonts as publicGoogleFonts,
@@ -171,6 +172,14 @@ describe('googleFonts() preset', () => {
     expect(extended).not.toContain('inter');
     expect(extended).toContain('noto serif jp');
     expect(googleFonts({ cssOrigin: 'https://fonts.example.test' }).sharedSubsetMetricFamilies).toBeUndefined();
+  });
+
+  it('downloads the default origin\'s face files in a wider pool of their own, and only those', () => {
+    expect(googleFonts().parallelFaceDownloads).toBe(GOOGLE_FONTS_PARALLEL_FACE_DOWNLOADS);
+    expect(googleFonts({ families: { Inter: 'wght@400' } }).parallelFaceDownloads).toBe(GOOGLE_FONTS_PARALLEL_FACE_DOWNLOADS);
+    expect(googleFonts({ cssOrigin: 'https://fonts.example.test' }).parallelFaceDownloads).toBeUndefined();
+    expect(() => fontCssApi({ urlTemplate: 'https://fonts.example.test/css?family={family}', parallelFaceDownloads: 64 } as never))
+      .toThrow(TypeError);
   });
 
   it('adds families outside the catalog, and replaces a catalog family\'s query', () => {

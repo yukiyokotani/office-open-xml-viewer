@@ -19,6 +19,7 @@ fn attr_pct(node: Node<'_, '_>, name: &str) -> Option<f64> {
 
 /// ECMA-376 §20.1.8.45/40 outer or inner shadow.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct Shadow {
     pub color: String,
@@ -43,6 +44,7 @@ pub struct Shadow {
 
 /// ECMA-376 §20.1.8.17 coloured glow halo.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct Glow {
     pub color: String,
@@ -52,6 +54,7 @@ pub struct Glow {
 
 /// ECMA-376 §20.1.8.31 feathered edge.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct SoftEdge {
     pub radius: i64,
@@ -59,6 +62,7 @@ pub struct SoftEdge {
 
 /// ECMA-376 §20.1.8.27 mirrored reflection.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct Reflection {
     pub blur: i64,
@@ -77,6 +81,7 @@ pub struct Reflection {
 /// Canvas wire model. `unsupported` records other concrete effect children so
 /// callers can suppress lower-precedence defaults instead of guessing.
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct DrawingMlEffects {
     #[serde(default, skip_serializing_if = "Option::is_none")]

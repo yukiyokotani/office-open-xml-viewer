@@ -26,6 +26,7 @@ pub use ooxml_common::chart::ChartModel;
 pub use ooxml_common::fill::GradStop;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct Presentation {
     pub slide_width: i64,
@@ -50,6 +51,7 @@ pub struct Presentation {
 
 /// Part-local renderer defaults after theme and color-map inheritance.
 #[derive(Serialize, Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct SlideTheme {
     pub default_text_color: Option<String>,
@@ -59,6 +61,7 @@ pub struct SlideTheme {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct Slide {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -104,6 +107,7 @@ pub struct Slide {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub enum SlideElementOrigin {
     Master,
@@ -112,6 +116,7 @@ pub enum SlideElementOrigin {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct SlideElementSource {
     pub origin: SlideElementOrigin,
@@ -121,6 +126,7 @@ pub struct SlideElementSource {
 /// §2.16.3.3 requires one anchor group; drawing and text anchors use the
 /// content-moniker lists from [MS-ODRAWXML] §2.29.3.20/21.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum PptxCommentAnchor {
     Slide,
@@ -145,6 +151,7 @@ pub enum PptxCommentAnchor {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct PptxComment {
     /// `<cm @authorId>` — author-list identifier. Required by ECMA-376
@@ -194,6 +201,7 @@ pub struct PptxComment {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct PptxCommentReply {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -219,6 +227,7 @@ pub struct PptxCommentReply {
 // re-parsing the master XML and re-walking its spTree for every slide (D4). The
 // derive is otherwise inert on this parse-once-then-serialize type.
 #[derive(Serialize, Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum SlideElement {
     Shape(ShapeElement),
@@ -232,6 +241,7 @@ pub enum SlideElement {
 /// [`ChartModel`]; only the frame geometry (`x`/`y`/`width`/`height`, in EMU)
 /// and the `type` discriminant are pptx-specific.
 #[derive(Serialize, Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ChartElement {
     /// `<p:nvGraphicFramePr><p:cNvPr @id>` for the chart frame.
@@ -248,6 +258,7 @@ pub struct ChartElement {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct TableElement {
     /// Part 3 §9.3: whole-branch recovery also applies to equations in table cells.
@@ -277,6 +288,7 @@ pub struct TableElement {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct TableRow {
     /// Row height in EMU
@@ -285,6 +297,7 @@ pub struct TableRow {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct TableCell {
     pub text_body: Option<TextBody>,
@@ -344,6 +357,7 @@ pub struct TableCell {
 /// region here (e.g. an arrow's label sits past an overlapping circle node,
 /// a roundRect's label avoids an overlapping bottom badge).
 #[derive(Serialize, Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct TextRect {
     pub x: i64,
@@ -358,6 +372,7 @@ pub struct TextRect {
 /// `lon` are latitude/longitude and `rev` is the revolution about the resulting
 /// view axis.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct Rot3d {
     /// Latitude — rotation about the horizontal (X) axis, degrees.
@@ -372,6 +387,7 @@ pub struct Rot3d {
 /// views the 3D scene. `prst` selects one of the 62 preset cameras
 /// (§20.1.10.47); `fov`/`zoom` optionally override the preset.
 #[derive(Serialize, Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct Camera3d {
     /// Preset camera name (`ST_PresetCameraType`), e.g. "perspectiveRelaxed".
@@ -393,6 +409,7 @@ pub struct Camera3d {
 /// `<a:lightRig>` — ECMA-376 §20.1.5.9 (`CT_LightRig`). Parsed for Phase B
 /// (lighting/bevel shading); the Phase A camera renderer ignores it.
 #[derive(Serialize, Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct LightRig {
     /// Light-rig preset (`ST_LightRigType`), e.g. "threePt".
@@ -407,6 +424,7 @@ pub struct LightRig {
 /// `<a:scene3d>` — ECMA-376 §20.1.4.1.41 (`CT_Scene3D`). Holds the camera and
 /// light rig for a shape's 3D scene.
 #[derive(Serialize, Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct Scene3d {
     pub camera: Camera3d,
@@ -417,6 +435,7 @@ pub struct Scene3d {
 /// `<a:bevel>` — ECMA-376 §20.1.5.3 (`CT_Bevel`). Lengths in EMU; `w`/`h`
 /// default to 76200 EMU and `prst` to "circle" per the schema.
 #[derive(Serialize, Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct Bevel3d {
     /// Bevel width in EMU.
@@ -432,6 +451,7 @@ pub struct Bevel3d {
 /// are Phase B; the renderer reads only `scene3d` for the perspective
 /// projection.
 #[derive(Serialize, Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct Sp3d {
     /// Z position of the shape's front face in EMU (default 0).
@@ -468,6 +488,7 @@ pub struct Sp3d {
 /// Counts are relative to a text-bearing anchor in the flattened spTree stream.
 /// Recovery replaces the complete branch, independently of the anchor kind.
 #[derive(Serialize, Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct EquationBranchFallback {
     pub elements: Vec<SlideElement>,
@@ -476,6 +497,7 @@ pub struct EquationBranchFallback {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ShapeElement {
     /// Part 3 §9.3: retained equation preview for a runtime conversion failure.
@@ -587,6 +609,7 @@ pub struct ShapeElement {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct PictureElement {
     /// The source drawing node's `<p:cNvPr @id>`.
@@ -714,6 +737,7 @@ pub struct PictureElement {
 /// p14:media extension (embed attribute).
 /// Represents a p:pic that acts as an audio/video placeholder.
 #[derive(Serialize, Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct MediaElement {
     /// `<p:nvPicPr><p:cNvPr @id>` for the media frame.
@@ -748,6 +772,7 @@ pub use ooxml_common::fill::{FillRect, TileInfo};
 pub use ooxml_common::effect::{Glow, Reflection, Shadow, SoftEdge};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "fillType", rename_all = "camelCase")]
 pub enum Fill {
     Solid {
@@ -842,6 +867,7 @@ pub enum Fill {
 
 /// Arrow end descriptor for headEnd / tailEnd on a line.
 #[derive(Serialize, Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ArrowEnd {
     /// OOXML type: "none" | "triangle" | "stealth" | "diamond" | "oval" | "arrow"
@@ -854,6 +880,7 @@ pub struct ArrowEnd {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct StrokeDashSegment {
     /// Dash length as a multiplier of the rendered line width.
@@ -863,6 +890,7 @@ pub struct StrokeDashSegment {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct Stroke {
     pub color: String,
@@ -902,6 +930,7 @@ pub struct Stroke {
 
 /// Paint flags of one custGeom path (ECMA-376 20.1.9.15).
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct PathPaint {
     /// ST_PathFillMode (20.1.10.37): `none`, `lighten`, `lightenLess`,
@@ -920,6 +949,7 @@ pub struct PathPaint {
 /// Coordinates are normalised to [0.0, 1.0] relative to the path's w/h,
 /// so the renderer can map them directly to shape-local pixel coordinates.
 #[derive(Serialize, Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "cmd", rename_all = "camelCase")]
 pub enum PathCmd {
     MoveTo {
@@ -973,6 +1003,7 @@ pub enum PathCmd {
 /// percent, OOXML convention) in `adj1`, `adj2`, … order. An empty `adj` means
 /// the preset's declared defaults apply. Absent (`None`) → no warp.
 #[derive(Serialize, Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct TextWarp {
     /// The `prst` attribute, e.g. `"textArchUp"`. Renderer lower-cases it to key
@@ -985,6 +1016,7 @@ pub struct TextWarp {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct TextBody {
     pub vertical_anchor: String,
@@ -1084,6 +1116,7 @@ pub fn is_false(b: &bool) -> bool {
 
 /// Bullet / list-item marker for a paragraph
 #[derive(Serialize, Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum Bullet {
     /// Explicitly no bullet (buNone)
@@ -1153,6 +1186,7 @@ pub enum Bullet {
 
 /// A tab stop defined in a paragraph's pPr > tabLst.
 #[derive(Serialize, Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct TabStop {
     /// Position in EMU from the left edge of the text area (after lIns)
@@ -1168,6 +1202,7 @@ pub struct TabStop {
 /// Nested alternatives are emitted inner first, so equal ranges end with the
 /// outermost alternative.
 #[derive(Serialize, Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct InlineEquationFallback {
     pub start: usize,
@@ -1176,6 +1211,7 @@ pub struct InlineEquationFallback {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct Paragraph {
     pub alignment: String,
@@ -1256,6 +1292,7 @@ pub struct Paragraph {
 // no meaningful gain on this parse-once-then-serialize type.
 #[allow(clippy::large_enum_variant)]
 #[derive(Serialize, Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum TextRun {
     Text(TextRunData),
@@ -1298,6 +1335,7 @@ pub enum TextRun {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct TextRunData {
     pub text: String,
@@ -1442,6 +1480,7 @@ pub struct TextRunData {
 /// Run-level text outline (`<a:rPr><a:ln>`). The width is the OOXML EMU
 /// value (`w` attribute, 12700 EMU = 1 pt); the renderer converts to px.
 #[derive(Serialize, Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct TextOutline {
     /// Outline width in EMU.
@@ -1456,6 +1495,7 @@ pub struct TextOutline {
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Transform {
     pub x: i64,
     pub y: i64,
@@ -1661,6 +1701,7 @@ pub fn apply_group_transform_to_element(el: &mut SlideElement, gt: &GroupTransfo
 }
 
 #[derive(Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct PresentationBootstrap {
     pub slide_count: usize,
@@ -1676,6 +1717,7 @@ pub struct PresentationBootstrap {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct PptxEmbeddedFontRef {
     pub font_name: String,
@@ -1685,6 +1727,7 @@ pub struct PptxEmbeddedFontRef {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub enum EmbeddedFontStyle {
     Regular,
@@ -1694,6 +1737,7 @@ pub enum EmbeddedFontStyle {
 }
 
 #[derive(Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct BootstrapSlide {
     pub index: usize,

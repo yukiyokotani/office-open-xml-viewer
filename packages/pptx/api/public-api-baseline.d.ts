@@ -270,7 +270,7 @@ export interface ChartDataTable {
     fontBold?: boolean | null;
     fontItalic?: boolean | null;
     fillColor?: string | null;
-    fill?: SolidFill | GradientFill | PatternFill | null;
+    fill?: SolidFill | GradientFill | PatternFill | ImageFill | null;
     fillHidden?: boolean | null;
     fillPaintAuthored?: boolean | null;
     lineColor?: string | null;
@@ -854,7 +854,7 @@ export interface ChartSeries {
     fillPattern?: PatternFill | null;
     invertIfNegative?: boolean | null;
     automaticNegativeStyle?: boolean | null;
-    invertedFill?: SolidFill | GradientFill | PatternFill | null;
+    invertedFill?: SolidFill | GradientFill | PatternFill | ImageFill | null;
     invertedFillHidden?: boolean | null;
     invertedFillAuthored?: boolean | null;
     invertedLineColor?: string | null;
@@ -973,7 +973,7 @@ type ChartStyleRole = 'axisTitle' | 'categoryAxis' | 'chartArea' | 'dataLabel' |
 export interface ChartSurfaceBandFormat {
     idx: number;
     style?: ChartExElementStyle | null;
-    fill?: SolidFill | GradientFill | PatternFill | null;
+    fill?: SolidFill | GradientFill | PatternFill | ImageFill | null;
     fillHidden?: boolean | null;
     lineColor?: string | null;
     lineWidthEmu?: number | null;
@@ -1010,7 +1010,7 @@ export interface ChartTextRun {
     paragraphAlign?: 'l' | 'ctr' | 'r' | 'just' | 'dist' | string | null;
 }
 export interface ChartThreeD {
-    view3DPresent?: boolean | null;
+    view3dPresent?: boolean | null;
     rotationX?: number | null;
     rotationXAuthored?: boolean | null;
     rotationY?: number | null;
@@ -1662,7 +1662,7 @@ interface Paragraph__emitterCollision1 {
     tabStops: TabStop[];
     rtl?: boolean;
     runs: TextRun[];
-    endRunProperties?: TextRunData;
+    endRunProperties?: Omit<TextRunData, 'type'>;
 }
 export type PathCmd = {
     cmd: 'moveTo';
@@ -1716,7 +1716,7 @@ export interface PictureElement {
     svgImagePath?: string;
     intrinsicWidthPx?: number;
     intrinsicHeightPx?: number;
-    stroke: Stroke | null;
+    stroke?: Stroke | null;
     fill?: Fill;
     prstGeom?: string;
     prstAdjust?: number[];
@@ -2209,6 +2209,8 @@ export interface Shadow {
 export interface ShapeElement {
     mathFallback?: EquationBranchFallback;
     type: 'shape';
+    placeholderType?: string;
+    placeholderIdx?: number;
     x: number;
     y: number;
     width: number;
@@ -2337,8 +2339,8 @@ export interface TableCell {
     borderR: Stroke | null;
     borderT: Stroke | null;
     borderB: Stroke | null;
-    diagonalTL?: Stroke | null;
-    diagonalTR?: Stroke | null;
+    diagonalTl?: Stroke | null;
+    diagonalTr?: Stroke | null;
     gridSpan: number;
     rowSpan: number;
     hMerge: boolean;
@@ -2439,7 +2441,7 @@ export interface TextRunData {
     baseline?: number;
     caps?: 'none' | 'small' | 'all';
     letterSpacing?: number;
-    fieldType?: string;
+    fieldType?: string | null;
     hyperlink?: string;
     hyperlinkAction?: string;
     hyperlinkMouseOver?: string;

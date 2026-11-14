@@ -1,3 +1,4 @@
+import { compatProfile } from './test-support/compat-environment.test-support.js';
 import { describe, it, expect } from 'vitest';
 import { DEFAULT_KINSOKU_RULES } from '@silurus/ooxml-core';
 import { createLayoutServices } from './layout-runtime.js';
@@ -617,7 +618,7 @@ it('does not infer authored Arabic direction from a flattened compatibility text
     { xPt: 0, yPt: 0, widthPt: 345, heightPt: 400 }, {
       id: 'compatibility', source, flowDomainId: 'compatibility', context,
       measurer: { context: ctx, fontFamilyClasses: {} },
-      environment: { pageIndex: 0, totalPages: 1, compatibilityMode: 15, documentHasEastAsianText: false,
+      environment: { pageIndex: 0, totalPages: 1, compat: compatProfile({ compatibilityMode: 15 }), documentHasEastAsianText: false,
         pageWritingMode: 'horizontal-tb', layoutServices: createLayoutServices(model, { measureContext: ctx }) },
       input: textBoxAcquisitionInput(shape, source),
     });

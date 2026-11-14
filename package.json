@@ -154,6 +154,7 @@
     "check:viewer-api-symmetry": "node scripts/check-viewer-api-symmetry.mjs",
     "check:public-type-exports": "node scripts/check-public-type-exports.mjs",
     "check:docx-compatibility": "node scripts/check-docx-compatibility-evidence.mjs",
+    "check:model-wire-drift": "node scripts/check-model-wire-drift.mjs",
     "test:docx-package-build": "node --test scripts/check-docx-package-build.test.mjs",
     "check:legacy-wasm-exports": "node scripts/check-legacy-wasm-exports.mjs packages/legacy-office/dist",
     "check:core-legacy-boundary": "node scripts/check-core-legacy-boundary.mjs",

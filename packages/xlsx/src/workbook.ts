@@ -1601,7 +1601,7 @@ export class XlsxWorkbook {
     }
     return this.withWorksheetArchiveOperation(sheetIndex, (source) => {
       const ws = extracted.worksheet ?? createSizeOverriddenWorksheet(source, sizeOverrides);
-      if (ws !== source) inheritSheetRenderCache(source, ws);
+      if (ws !== source) inheritSheetRenderCache(source, ws, styles);
       const errorPlaceholderText = this.sheetErrorPlaceholderText(preparedPlaceholder, sheetIndex, ws);
       // The render bind may invalidate a geometry snapshot made in another
       // font realm. Pin the viewer's MDW inside the renderer after binding.

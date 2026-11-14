@@ -2,6 +2,7 @@ import type { LineSpacing, TabStop, DocxRunBorder, EmphasisMark } from '../types
 import type { CanvasFontRoute, HyperlinkTarget, NumberFormat, Duotone, ResolvedFontMetric } from '@silurus/ooxml-core';
 import { type FloatRect, type LineWindowAdmission } from '../float-layout.js';
 import type { LayoutServices } from '../layout/types.js';
+import type { DocxCompatProfile } from '../layout/compat-profile.js';
 import type { VerticalGlyphMeasurementService } from '../layout/measurement-capabilities.js';
 import type { GlyphInkBounds, TextLayoutService, TextShapeRequest, FontScriptSlot } from '../layout/text.js';
 import type { MathLayoutResource } from '../layout/resources.js';
@@ -772,8 +773,10 @@ export interface LineLayoutEnvironment {
   /** Owner section's counter-turn for upright inline graphics; maps their
    *  physical §20.4.2.6 effect edges onto the logical line axes. */
   readonly uprightResourceOrientation?: import('../layout/types.js').UprightResourceOrientation;
-  /** ECMA-376 Part 4 §14.8.3.50 w:useFELayout compatibility switch. */
-  readonly useFeLayout?: boolean;
+  /** Document compatibility profile (layout/compat-profile.ts): every
+   *  document-level compatibility flag and compatibilityMode-derived gate.
+   *  Absent means DEFAULT_DOCX_COMPAT_PROFILE. */
+  readonly compat?: DocxCompatProfile;
   /** §17.6.5 effective line-grid gate after section type, paragraph opt-out,
    *  and §17.15.3.1 table-cell compatibility have been resolved. */
   readonly lineGridActive?: boolean;
@@ -781,24 +784,15 @@ export interface LineLayoutEnvironment {
   readonly characterGridActive?: boolean;
   /** Paragraph base direction after inherited bidi resolution. */
   readonly paragraphRtl?: boolean;
-  /** §17.15.3.3 w:balanceSingleByteDoubleByteWidth document compatibility switch. */
-  readonly balanceSingleByteDoubleByteWidth?: boolean;
   readonly resolvedLocalFonts?: Readonly<Record<string, ResolvedFontMetric>>;
   readonly layoutServices?: LayoutServices;
   readonly verticalGlyphMeasurement?: VerticalGlyphMeasurementService;
   /** ECMA-376 §17.15.1.18 document-wide full-width character compression. */
   readonly characterSpacingControl?: string;
-  /** §17.15.3.31: use full character width when deciding line fit. */
-  readonly lineWrapLikeWord6?: boolean;
-  /** `w:compatSetting` compatibilityMode; absent when not authored. Gates
-   * WORD_COMPRESSED_SPACE_LINE_FIT. */
-  readonly compatibilityMode?: number;
   /** Paragraph §17.3.1.2-3 automatic East Asian/Latin and East Asian/number
    * spacing (absent means on), applied as WORD_EAST_ASIAN_AUTO_SPACE. */
   readonly autoSpaceDE?: boolean;
   readonly autoSpaceDN?: boolean;
-  /** See WORD_KERN_THRESHOLD_AUTHORITY for absent `w:kern`. */
-  readonly enableOpenTypeFeatures?: boolean;
   /** False only when `w:framePr` specifies a drop cap with a fixed `w:lines`;
    * the authored frame height remains authoritative even when glyph paint is
    * lowered beyond it. Folded into retained text segments during acquisition. */

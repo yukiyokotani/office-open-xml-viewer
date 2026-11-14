@@ -514,6 +514,9 @@ export type BodyElement =
 
 
 export interface DocParagraph {
+  /** ECMA-376 §17.3.1.20 `w:outlineLvl` (direct or style-inherited), 0-based;
+   *  absent for paragraphs outside the document outline. */
+  outlineLevel?: number;
   /**
    * Authored `w14:paraId` for the source paragraph, preserved verbatim and
    * absent when the source paragraph does not carry that identifier.
@@ -688,12 +691,13 @@ export interface FramePr {
   yAlign?: 'inline' | 'top' | 'center' | 'bottom' | 'inside' | 'outside' | string;
 }
 
+/** Absent edges are omitted from the parser JSON. */
 export interface ParagraphBorders {
-  top: ParaBorderEdge | null;
-  bottom: ParaBorderEdge | null;
-  left: ParaBorderEdge | null;
-  right: ParaBorderEdge | null;
-  between: ParaBorderEdge | null;
+  top?: ParaBorderEdge | null;
+  bottom?: ParaBorderEdge | null;
+  left?: ParaBorderEdge | null;
+  right?: ParaBorderEdge | null;
+  between?: ParaBorderEdge | null;
 }
 
 export interface ParaBorderEdge {
@@ -995,7 +999,8 @@ export interface ShapeRun {
   adjValues?: Array<number | null>;
   /** Part 4 §§19.1.2.10/.11: image above the backing fill, below the outline. */
   vmlPicture?: Pick<ImageRun, 'imagePath' | 'mimeType' | 'srcRect' | 'colorReplaceFrom' | 'duotone' | 'blipEffects'>;
-  fill: ShapeFill | null;
+  /** Absent when the shape has no fill. */
+  fill?: ShapeFill | null;
   stroke: string | null;
   strokeWidth?: number;
   strokeFill?: ShapeStrokeFill | null;
@@ -1546,7 +1551,7 @@ export interface ImageRun {
    * When set, the renderer replaces all pixels of this hex color (e.g. "FFFFFF") with full
    * transparency. Implements a:clrChange (make-background-transparent).
    */
-  colorReplaceFrom?: string;
+  colorReplaceFrom?: string | null;
   /**
    * ECMA-376 §20.1.8.23 `<a:duotone>` recolour, resolved to its two endpoint
    * colours (through the document theme). Absent ⇒ no duotone. When present the

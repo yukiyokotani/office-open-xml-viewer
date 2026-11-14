@@ -43,8 +43,14 @@ describe('complete conservative PPTX paint demand', () => {
       .toEqual(expect.arrayContaining([0x32, 0x37]));
   });
 
-  it('declines canonical changes and generated or unmodelled paint paths', () => {
-    for (const run of [{ text: 'e\u0301' }, { text: '\ud800' }, { text: '\u0378' }, { text: '\uf0a7' }, { text: '\uf0a7', fontFamilySym: 'Segoe UI Symbol' }]) {
+  it('demands the canonical closure of decomposable text instead of every subset', () => {
+    // core canonical-closure.ts: the spelled, decomposed and composed forms.
+    expect(collectSlideFontDemand(slide('e\u0301\u304c'), new Set(), 10000))
+      .toEqual(expect.arrayContaining([0x65, 0x301, 0xe9, 0x304c, 0x304b, 0x3099]));
+  });
+
+  it('declines malformed or unknown text and generated or unmodelled paint paths', () => {
+    for (const run of [{ text: '\ud800' }, { text: '\u0378' }, { text: '\uf0a7' }, { text: '\uf0a7', fontFamilySym: 'Segoe UI Symbol' }]) {
       expect(collectSlideFontDemand(slide(run.text, run), new Set(), 10000)).toBe('all');
     }
     for (const patch of [

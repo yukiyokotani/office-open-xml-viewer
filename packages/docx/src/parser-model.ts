@@ -91,6 +91,7 @@ import type {
   BodyLayoutSequenceEntryFor,
 } from './layout/body-layout-input.js';
 import { pageObjectStorySource, projectBodyLayoutInput } from './layout/body-layout-input.js';
+import { buildDocxCompatProfile, type DocxCompatSettingsInput } from './layout/compat-profile.js';
 import type { BodyAcquisitionInputProjections } from './layout/acquisition-input-projections.js';
 import type { DocumentTypographySettingsInput } from './layout-context.js';
 import { isInklessParagraph } from './layout/paragraph-visibility.js';
@@ -1517,9 +1518,8 @@ export function bodyLayoutAcquisitionInput(doc: DocxDocumentModel): BodyLayoutAc
   return {
     ...(pageObjects.length > 0 ? { pageObjects: Object.freeze(pageObjects) } : {}),
     sectionIndex,
-    compatibilityMode: doc.settings?.compatibilityMode,
-    footnoteLayoutLikeWW8: doc.settings?.footnoteLayoutLikeWW8,
-    ...(producerDocumentSettings(doc).__footnoteColumnBands === true ? { producerFootnoteColumnBands: true } : {}),
+    // Producer settings (__footnoteColumnBands) ride on the same settings object.
+    compat: buildDocxCompatProfile(doc.settings as DocxCompatSettingsInput | undefined),
     evenAndOddHeaders: doc.section.evenAndOddHeaders,
     endnoteIds: (doc.endnotes ?? []).map((note) => note.id),
     repeatedFootnoteLastEntries: repeatedFootnoteLastEntries(doc.body, sequence),

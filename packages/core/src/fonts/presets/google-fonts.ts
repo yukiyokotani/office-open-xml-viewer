@@ -36,6 +36,19 @@ import { fontFamilyKey, OFFICE_FONT_SUBSTITUTIONS, type FontSubstitution } from 
 
 export const GOOGLE_FONTS_DEFAULT_CSS_ORIGIN = 'https://fonts.googleapis.com';
 
+/**
+ * Face files the default origin's stylesheets point at (fonts.gstatic.com)
+ * downloaded in parallel per realm. The host serves HTTP/2 and HTTP/3, where
+ * one connection multiplexes many requests, and the CSS2 API slices a CJK
+ * style into about a hundred `unicode-range` subsets, all of which a long
+ * document can need at once; with the HTTP/1.1 per-host norm of six they
+ * would queue. Measured (2026-11, Chromium, Japanese DOCX with Noto Sans JP
+ * and Noto Serif JP, about 250 subsets): 32 fetched them as fast as 64 did,
+ * while six took several hundred milliseconds longer. Every other source
+ * keeps the six.
+ */
+export const GOOGLE_FONTS_PARALLEL_FACE_DOWNLOADS = 32;
+
 /** Regular, bold and their italics. */
 const TEXT_FACES = 'ital,wght@0,400;0,700;1,400;1,700';
 /** Regular and bold, upright only: the Noto script families. */
@@ -186,5 +199,7 @@ export function googleFonts(options: GoogleFontsOptions = {}): FontSource {
     urlTemplate: `${origin}/css2?family={family}:{query}&display=swap`,
     families: requestedFamilies(options.families),
     substitutes: options.substitutes === undefined ? GOOGLE_FONTS_SUBSTITUTIONS : options.substitutes,
-  }, origin === GOOGLE_FONTS_DEFAULT_CSS_ORIGIN ? { sharedSubsetMetricFamilies: catalogFamiliesKept(options.families) } : {});
+  }, origin === GOOGLE_FONTS_DEFAULT_CSS_ORIGIN
+    ? { sharedSubsetMetricFamilies: catalogFamiliesKept(options.families), parallelFaceDownloads: GOOGLE_FONTS_PARALLEL_FACE_DOWNLOADS }
+    : {});
 }
