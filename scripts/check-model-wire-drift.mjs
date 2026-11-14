@@ -728,58 +728,42 @@ function rustSchema(format, schemaFile) {
 }
 
 /** The schema cannot tell `Option<T>` skipped on `None` (never null) from a
- * field that can still serialize null while present: `Option<Option<T>>`,
- * `Option<Box<Option<T>>>`, an alias or generic parameter standing for an
- * Option, a unit type (serializes as null), or an Option skipped by another
- * predicate. Scan the model sources and report every such field (failing
- * closed on aliases and generic parameters) so the null handling in
- * rustShapes stays sound. */
+ * field that can still serialize null while present (`Some(x)` where `x`
+ * itself serializes as null). Scan the model sources and require, for every
+ * skipped Option field, a payload type proven null-free; anything else fails
+ * closed: nested Options (through Box/Arc/Rc and aliases), unit types,
+ * newtypes over nullable types, untagged or transparent types, generic
+ * parameters, generic aliases and types the scan cannot find. Also reject
+ * Options skipped by another predicate. This keeps the null handling in
+ * rustShapes sound. */
 export function scanNullProvenance(dirs) {
   const files = dirs.flatMap((dir) => listRust(path.resolve(repoRoot, dir)));
   const texts = new Map(files.map((file) => [file, readFileSync(file, 'utf8')]));
-  // Names that may serialize as null: Option aliases (transitively) and unit
-  // structs.
-  const nullish = new Set(['Option']);
-  const aliases = [];
-  // Generic aliases are not expanded (no argument substitution): a skipped
-  // field that mentions one fails closed.
+  const aliases = new Map();
   const genericAliases = new Set();
+  // name -> 'braced' | 'enum' | 'unit' | 'ambiguous' | { newtype: inner }
+  const decls = new Map();
+  const declare = (name, kind) => decls.set(name, decls.has(name) && decls.get(name) !== kind ? 'ambiguous' : kind);
+  const attrsBefore = String.raw`((?:(?:#\[[^\]]*\]|///[^\n]*)\s*)*)`;
   for (const text of texts.values()) {
     for (const m of text.matchAll(/\btype\s+(\w+)(<[^=]*>)?\s*=\s*([^;]+);/g)) {
       if (m[2]) genericAliases.add(m[1]);
-      else aliases.push([m[1], m[3]]);
+      else aliases.set(m[1], m[3]);
     }
-    for (const m of text.matchAll(/\bstruct\s+(\w+)\s*;/g)) nullish.add(m[1]);
+    for (const m of text.matchAll(new RegExp(`${attrsBefore}(?:pub(?:\\([^)]*\\))?\\s+)?(struct|enum)\\s+(\\w+)(<[^>{(;]*>)?\\s*([{(;])([^;{}]*\\)\\s*;)?`, 'g'))) {
+      const [, attrs, keyword, name, , open, tuple] = m;
+      if (/\b(?:untagged|transparent)\b/.test(attrs)) declare(name, 'ambiguous');
+      else if (keyword === 'enum') declare(name, 'enum');
+      else if (open === '{') declare(name, 'braced');
+      else if (open === ';') declare(name, 'unit');
+      else {
+        const inner = (tuple ?? '').replace(/\)\s*;$/, '');
+        const fields = splitTopLevel(inner).map((f) => f.replace(/^pub(?:\([^)]*\))?\s+/, '').trim()).filter(Boolean);
+        declare(name, fields.length === 1 ? { newtype: fields[0] } : 'braced');
+      }
+    }
   }
-  // A value is null-capable when, after peeling transparent smart pointers
-  // (serde serializes `Box<T>`/`Arc<T>`/`Rc<T>` as `T`), it is an Option, a
-  // nullable alias, a unit type, or a generic parameter (fail closed).
-  // Containers (`Vec<Option<T>>`, maps) are fine: their nullable elements
-  // stay in the schema of the item, which is never stripped.
-  const aliasRhs = new Map(aliases);
-  const peel = (type) => {
-    let t = type.replace(/\s+/g, '');
-    for (let m; (m = /^(?:(?:std|alloc)::(?:boxed|sync|rc)::)?(?:Box|Arc|Rc)<(.*)>$/.exec(t));) t = m[1];
-    return t;
-  };
-  const head = (type, generics = new Set()) => {
-    const t = peel(type);
-    if (t === '()') return '()';
-    const name = /^(?:[\w]+::)*(\w+)/.exec(t)?.[1];
-    return name && (nullish.has(name) || generics.has(name)) ? name : null;
-  };
-  /** The field type with transparent wrappers peeled and aliases expanded
-   * (bounded, in case of alias cycles). */
-  const outer = (type) => {
-    let t = peel(type);
-    for (let i = 0; i < 16; i++) {
-      const name = /^(?:[\w]+::)*(\w+)(?:<.*>)?$/.exec(t)?.[1];
-      if (!name || !aliasRhs.has(name)) break;
-      t = peel(aliasRhs.get(name));
-    }
-    return t;
-  };
-  // Aliases built on a generic alias inherit its ambiguity.
+  // Generic ambiguity propagates through aliases built on generic aliases.
   for (let changed = true; changed;) {
     changed = false;
     for (const [name, rhs] of aliases) {
@@ -789,15 +773,44 @@ export function scanNullProvenance(dirs) {
       }
     }
   }
-  for (let changed = true; changed;) {
-    changed = false;
-    for (const [name, rhs] of aliases) {
-      if (!nullish.has(name) && head(rhs)) {
-        nullish.add(name);
-        changed = true;
-      }
+  const peel = (type) => {
+    let t = type.replace(/\s+/g, '');
+    for (let m; (m = /^(?:(?:std|alloc)::(?:boxed|sync|rc)::)?(?:Box|Arc|Rc)<(.*)>$/.exec(t));) t = m[1];
+    return t;
+  };
+  /** Why `type` may serialize as null, or null when it is proven not to. */
+  const nullable = (type, generics, depth = 0) => {
+    if (depth > 16) return 'unresolved alias/newtype chain';
+    const t = peel(type);
+    const generic = (t.match(/\w+/g) ?? []).find((token) => genericAliases.has(token));
+    if (generic) return `generic alias ${generic}`;
+    if (t === '()' || t === '') return 'unit';
+    if (/^(?:String|str|&(?:'\w+)?str|bool|char|[iu](?:8|16|32|64|128|size)|f32|f64)$/.test(t)) return null;
+    // Containers keep nullable elements in their item schema (never stripped).
+    if (/^\[|^\(.+\)$|^(?:(?:std::)?(?:collections::|vec::)?)(?:Vec|VecDeque|BTreeMap|HashMap|BTreeSet|HashSet)</.test(t)) return null;
+    const name = /^(?:\w+::)*(\w+)/.exec(t)?.[1];
+    if (!name) return `unrecognized type ${t}`;
+    if (name === 'Option') return 'Option';
+    if (generics.has(name)) return `generic parameter ${name}`;
+    if (aliases.has(name)) return nullable(aliases.get(name), generics, depth + 1);
+    const decl = decls.get(name);
+    if (decl === 'braced' || decl === 'enum') return null;
+    if (decl === 'unit') return `unit struct ${name}`;
+    if (decl === 'ambiguous') return `untagged/transparent or ambiguous type ${name}`;
+    if (decl?.newtype) return nullable(decl.newtype, new Set(), depth + 1);
+    return `type ${name} not found in the scanned sources`;
+  };
+  /** The field type with transparent wrappers peeled and aliases expanded. */
+  const outer = (type) => {
+    let t = peel(type);
+    for (let i = 0; i < 16; i++) {
+      const name = /^(?:\w+::)*(\w+)(?:<.*>)?$/.exec(t)?.[1];
+      if (!name || !aliases.has(name)) break;
+      t = peel(aliases.get(name));
     }
-  }
+    return t;
+  };
+
   const problems = [];
   for (const [file, text] of texts) {
     const lines = text.split('\n');
@@ -829,19 +842,36 @@ export function scanNullProvenance(dirs) {
       const option = /^(?:(?:std|core)::option::)?Option<(.*)>$/.exec(type);
       if (!option) {
         // A skipped generic or unit field cannot be proven null-free.
-        const culprit = head(type, generics);
-        if (culprit) problems.push(`${where}: skipped ${field[2].trim()} can serialize null while present (${culprit})`);
+        const why = /^(?:\w+::)*(\w+)$/.test(type) && (generics.has(type) || decls.get(type) === 'unit') ? nullable(type, generics) : null;
+        if (why) problems.push(`${where}: skipped ${field[2].trim()} can serialize null while present (${why})`);
         return;
       }
       if (skip !== 'Option::is_none') {
         problems.push(`${where}: Option skipped by "${skip}" can still serialize null`);
         return;
       }
-      const culprit = head(option[1], generics);
-      if (culprit) problems.push(`${where}: Option<${option[1]}> can serialize null while present (${culprit})`);
+      const why = nullable(option[1], generics);
+      if (why) problems.push(`${where}: Option<${option[1]}> can serialize null while present (${why})`);
     });
   }
   return problems;
+}
+
+/** Split a type list on top-level commas (not inside <>, (), []). */
+function splitTopLevel(text) {
+  const parts = [];
+  let depth = 0;
+  let current = '';
+  for (const ch of text) {
+    if ('<([' .includes(ch)) depth += 1;
+    if ('>)]'.includes(ch)) depth -= 1;
+    if (ch === ',' && depth === 0) {
+      parts.push(current);
+      current = '';
+    } else current += ch;
+  }
+  parts.push(current);
+  return parts;
 }
 
 function listRust(dir) {

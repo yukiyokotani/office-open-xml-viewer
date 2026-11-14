@@ -207,9 +207,9 @@ test('fields whose omission does not exclude null are rejected', () => {
       '9 other_predicate: Option skipped by "is_blank" can still serialize null',
       '11 nested: Option<Option<u32>> can serialize null while present (Option)',
       '13 boxed: Option<Box<Option<String>>> can serialize null while present (Option)',
-      '15 aliased: Option<Maybe> can serialize null while present (Maybe)',
-      '17 unit: Option<Marker> can serialize null while present (Marker)',
-      '23 generic: Option<T> can serialize null while present (T)',
+      '15 aliased: Option<Maybe> can serialize null while present (Option)',
+      '17 unit: Option<Marker> can serialize null while present (unit struct Marker)',
+      '23 generic: Option<T> can serialize null while present (generic parameter T)',
     ]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -334,4 +334,39 @@ test('template-literal and string-mapping narrowing is reported', () => {
     'Doc.p: ts-narrower-pattern (`word/${string}`)',
     'Doc.u: ts-narrower-pattern (Uppercase<string>)',
   ]);
+});
+
+test('null provenance requires a proven null-free payload', () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'model-wire-drift-rs-'));
+  try {
+    writeFileSync(path.join(dir, 'model.rs'), [
+      'pub struct Nullable(Option<String>);',
+      'pub struct Wrapped(pub Vec<Option<String>>);',
+      'pub struct Plain { pub x: u32 }',
+      '#[serde(untagged)]',
+      'pub enum Loose { A(Option<u32>) }',
+      'pub struct A {',
+      '    #[serde(skip_serializing_if = "Option::is_none")]',
+      '    pub newtype: Option<Nullable>,',
+      '    #[serde(skip_serializing_if = "Option::is_none")]',
+      '    pub container: Option<Wrapped>,',
+      '    #[serde(skip_serializing_if = "Option::is_none")]',
+      '    pub plain: Option<crate::model::Plain>,',
+      '    #[serde(skip_serializing_if = "Option::is_none")]',
+      '    pub untagged: Option<Loose>,',
+      '    #[serde(skip_serializing_if = "Option::is_none")]',
+      '    pub external: Option<serde_json::Value>,',
+      '    #[serde(skip_serializing_if = "Option::is_none")]',
+      '    pub list: Option<Vec<Option<f64>>>,',
+      '}',
+    ].join('\n'));
+    const problems = scanNullProvenance([dir]).map((p) => p.replace(/^.*model\.rs:/, ''));
+    assert.deepEqual(problems, [
+      '8 newtype: Option<Nullable> can serialize null while present (Option)',
+      '14 untagged: Option<Loose> can serialize null while present (untagged/transparent or ambiguous type Loose)',
+      '16 external: Option<serde_json::Value> can serialize null while present (type Value not found in the scanned sources)',
+    ]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
