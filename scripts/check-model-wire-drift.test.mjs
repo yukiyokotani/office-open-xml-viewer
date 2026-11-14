@@ -89,7 +89,7 @@ test('each kind of drift is reported once with a stable key', () => {
     'Doc.body<type=image>: variant-never-emitted',
     'Doc.color: rust-null',
     'Doc.kind: literal-missing-in-ts ["b"]',
-    'Doc.size: type-mismatch (Rust array 2..2 vs TS tuple 3)',
+    'Doc.size: type-mismatch (Rust length 2..2 vs TS length 3..3)',
     'Doc.title: rust-optional',
     // The recursive union is checked again where Para nests it.
     'Para<type=para>.children<type=image>: variant-never-emitted',
@@ -104,9 +104,9 @@ test('a field Rust emits but TS lacks is reported', () => {
 
 test('allowlist entries suppress known drift and stale entries are reported', () => {
   const drifted = inSync.replace('title?: string;', 'title: string;');
-  const result = run(drifted, { 'Doc.title: rust-optional': 'known', 'Doc.*: ts-only': 'gone' });
+  const result = run(drifted, { 'Doc.title: rust-optional': 'known', 'Doc.kind: ts-only': 'gone' });
   assert.deepEqual(result.unexpected, []);
-  assert.deepEqual(result.stale, ['Doc.*: ts-only']);
+  assert.deepEqual(result.stale, ['Doc.kind: ts-only']);
 });
 
 const keysOf = (source, rustSchema) => run(source, {}, rustSchema).findings.map((f) => f.key);
@@ -145,15 +145,17 @@ test('union members are paired by compatibility, not declaration order', () => {
   for (const ts of ['string[] | boolean[]', 'boolean[] | string[]']) {
     assert.deepEqual(keysOf(`export interface Doc { v: ${ts} }`, rust), [
       'Doc.v: type-mismatch (Rust number[] vs TS boolean[] | string[])',
+      'Doc.v: variant-never-emitted (TS boolean[])',
     ]);
   }
   // Two TS members sharing a tag value: the compatible one is used.
   const tagged = single({
     v: { oneOf: [{ type: 'object', properties: { t: { const: 'a' }, n: { type: 'number' } }, required: ['t', 'n'] }] },
   });
+  // ...and the other one is reported as an alternative Rust never emits.
   assert.deepEqual(
     keysOf("export interface Doc { v: { t: 'a'; s: string } | { t: 'a'; n: number } }", tagged),
-    [],
+    ['Doc.v<t=a>: variant-never-emitted'],
   );
 });
 
@@ -186,14 +188,87 @@ test('fields whose omission does not exclude null are rejected', () => {
       '    pub other_predicate: Option<String>,',
       '    #[serde(skip_serializing_if = "Option::is_none")]',
       '    pub nested: Option<Option<u32>>,',
+      '    #[serde(skip_serializing_if = "Option::is_none")]',
+      '    pub boxed: Option<Box<Option<String>>>,',
+      '    #[serde(skip_serializing_if = "Option::is_none")]',
+      '    pub aliased: Option<Maybe>,',
+      '    #[serde(skip_serializing_if = "Option::is_none")]',
+      '    pub unit: Option<Marker>,',
+      '}',
+      'type Maybe = Option<String>;',
+      'struct Marker;',
+      'pub struct G<T: Clone> {',
+      '    #[serde(skip_serializing_if = "Option::is_none")]',
+      '    pub generic: Option<T>,',
       '}',
     ].join('\n'));
     const problems = scanNullProvenance([dir]).map((p) => p.replace(/^.*model\.rs:/, ''));
     assert.deepEqual(problems, [
       '9 other_predicate: Option skipped by "is_blank" can still serialize null',
-      '11 nested: Option<Option<..>> can serialize null',
+      '11 nested: Option<Option<u32>> can serialize null while present (Option)',
+      '13 boxed: Option<Box<Option<String>>> can serialize null while present (Option)',
+      '15 aliased: Option<Maybe> can serialize null while present (Maybe)',
+      '17 unit: Option<Marker> can serialize null while present (Marker)',
+      '23 generic: Option<T> can serialize null while present (T)',
     ]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('recursive untagged unions terminate', () => {
+  const node = (own) => ({
+    type: 'object',
+    properties: { child: { anyOf: [{ $ref: '#/$defs/A' }, { $ref: '#/$defs/B' }] }, [own]: { type: 'number' } },
+    required: ['child', own],
+  });
+  const rust = { title: 'Doc', $ref: '#/$defs/A', $defs: { A: node('a'), B: node('b') } };
+  const source = `
+    export interface A { child: A | B; a: number }
+    export interface B { child: A | B; b: number }
+    export type Doc = A;`;
+  assert.deepEqual(keysOf(source, rust), []);
+});
+
+test('numeric and boolean literal narrowing is reported', () => {
+  const rust = single({ n: { type: 'number' }, b: { type: 'boolean' }, k: { const: 2 } });
+  assert.deepEqual(keysOf('export interface Doc { n: 1 | 2; b: true; k: 2 | 3 }', rust), [
+    'Doc.b: ts-narrower-literal [true]',
+    'Doc.k: literal-never-emitted [3]',
+    'Doc.n: ts-narrower-literal [1,2]',
+  ]);
+});
+
+test('TS-only alternatives of untagged unions are reported', () => {
+  const rust = single({ v: { type: ['number', 'string'] } });
+  assert.deepEqual(keysOf('export interface Doc { v: number | string | boolean }', rust), [
+    'Doc.v: variant-never-emitted (TS boolean)',
+  ]);
+});
+
+test('required TS fields are not satisfied by extra keys', () => {
+  const rust = single({ id: { type: 'number' } });
+  rust.additionalProperties = { type: 'number' };
+  assert.deepEqual(keysOf('export interface Doc { id: number; mustExist: number; [key: string]: number }', rust), [
+    'Doc.mustExist: rust-optional',
+  ]);
+});
+
+test('one Rust tagged type compared with two TS projections keeps separate keys', () => {
+  const variant = { type: 'object', properties: { type: { const: 'a' }, n: { type: 'number' } }, required: ['type', 'n'] };
+  const rust = single({ x: { $ref: '#/$defs/R' }, y: { $ref: '#/$defs/R' } }, ['x', 'y'], { R: { oneOf: [variant] } });
+  const keys = keysOf(`
+    export type TA = { type: 'a' };
+    export type TB = { type: 'a' };
+    export interface Doc { x: TA; y: TB }`, rust);
+  assert.deepEqual(keys, ['R(ts TA).n: missing-in-ts', 'R(ts TB).n: missing-in-ts']);
+});
+
+test('TS tuples with rest elements accept fixed-size Rust arrays', () => {
+  const rust = single({ v: { type: 'array', items: { type: 'number' }, minItems: 3, maxItems: 3 } });
+  assert.deepEqual(keysOf('export interface Doc { v: [number, ...number[]] }', rust), []);
+  assert.deepEqual(keysOf('export interface Doc { v: [number, number, number, number?] }', rust), []);
+  assert.deepEqual(keysOf('export interface Doc { v: [number, number] }', rust), [
+    'Doc.v: type-mismatch (Rust length 3..3 vs TS length 2..2)',
+  ]);
 });

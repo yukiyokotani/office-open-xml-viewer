@@ -3,23 +3,22 @@
 //
 // Keys are exactly what `node scripts/check-model-wire-drift.mjs --list`
 // prints: `<owner>.<field>: <category>[ <payload>]`. The owner is the Rust
-// type (`<Enum><tag=value>` for an inline variant, `Rust(ts TsName)` when the
-// TS type has a different name); the payload pins concrete values, so an
-// allowlisted difference cannot silently grow. `*` matches any run of
-// characters and is used only for the `__` channel convention below. Every
-// entry must still match: once a difference is fixed the checker reports the
-// entry as stale and it must be deleted.
+// type (`<Type><tag=value>` for a tagged-union variant, `Rust(ts TsName)` when
+// the TS type has a different name); the payload pins concrete values, so an
+// allowlisted difference cannot silently grow. Matching is exact. Every entry
+// must still match: once a difference is fixed the checker reports the entry
+// as stale and it must be deleted.
 //
 // Categories:
 //   missing-in-ts          Rust emits the field; the TS type does not declare it.
 //   ts-only                The TS type declares a field Rust never emits.
 //   rust-optional          Rust may omit the field; the TS type requires it.
 //   rust-null              Rust emits `null`; the TS type does not allow null.
-//   literal-missing-in-ts  Rust emits string values the TS literal union lacks.
-//   literal-never-emitted  TS accepts string values Rust never emits.
-//   ts-narrower-literal    Rust emits any string; TS narrows it to literals.
-//   variant-missing-in-ts  A tagged-union variant Rust emits is absent in TS.
-//   variant-never-emitted  A TS tagged-union variant Rust never emits.
+//   literal-missing-in-ts  Rust emits literal values the TS type does not accept.
+//   literal-never-emitted  TS accepts literal values Rust never emits.
+//   ts-narrower-literal    Rust emits any string/number/boolean; TS narrows it.
+//   variant-missing-in-ts  A union alternative Rust emits is absent in TS.
+//   variant-never-emitted  A TS union alternative Rust never emits.
 //   rust-untyped/ts-untyped  One side is unconstrained (any), so unchecked.
 //   type-mismatch          Incompatible shapes.
 //
@@ -32,8 +31,51 @@ export const MODEL_WIRE_DRIFT_ALLOWLIST = {
     // `__`-prefixed fields are private acquisition facts that the layout layer
     // reads through internal wire types (packages/docx/src/layout/*-input.ts,
     // page-object-wire.ts, parser-model.ts, core math); they are deliberately
-    // not part of the public model types. This is the only glob entry.
-    '*.__*: missing-in-ts': 'internal channel',
+    // not part of the public model types. Each one is listed, so a new channel
+    // needs a reviewed entry.
+    'AnchorHostMetrics<type=anchorHost>.__anchorOccurrenceId: missing-in-ts': 'internal channel',
+    'AnchorHostMetrics<type=anchorHost>.__listLabel: missing-in-ts': 'internal channel',
+    'BodyElement<type=sectionBreak>.__sectionPlacement: missing-in-ts': 'internal channel',
+    'ChartRun<type=chart>.__anchorAcquisition: missing-in-ts': 'internal channel',
+    'DocParagraph<type=paragraph>.__complexFieldBoundaries: missing-in-ts': 'internal channel',
+    'DocParagraph<type=paragraph>.__indentsFromFloats: missing-in-ts': 'internal channel',
+    'DocParagraph<type=paragraph>.__justifiedCompression: missing-in-ts': 'internal channel',
+    'DocParagraph<type=paragraph>.__lineExtraAbove: missing-in-ts': 'internal channel',
+    'DocParagraph<type=paragraph>.__noHangingIndentTab: missing-in-ts': 'internal channel',
+    'DocParagraph<type=paragraph>.__paragraphTypographyAcquisition: missing-in-ts': 'internal channel',
+    'DocParagraph<type=paragraph>.__runRevisions: missing-in-ts': 'internal channel',
+    'DocTable<type=table>.__tableLayout: missing-in-ts': 'internal channel',
+    'DocTableCell.__tableCellLayout: missing-in-ts': 'internal channel',
+    'DocTableRow.__cutsInPlace: missing-in-ts': 'internal channel',
+    'DocTableRow.__tableRowLayout: missing-in-ts': 'internal channel',
+    'Document(ts DocxDocumentModel).__documentTypographySettings: missing-in-ts': 'internal channel',
+    'Document(ts DocxDocumentModel).__noteLayoutSettings: missing-in-ts': 'internal channel',
+    'Document(ts DocxDocumentModel).__pageLayoutSettings: missing-in-ts': 'internal channel',
+    'Document(ts DocxDocumentModel).__pageObjects: missing-in-ts': 'internal channel',
+    'DocumentSettings(ts DocSettings).__footnoteColumnBands: missing-in-ts': 'internal channel',
+    'DocumentSettings(ts DocSettings).__plainFontLineBoxes: missing-in-ts': 'internal channel',
+    'FieldRun<type=field>.__typographyAcquisition: missing-in-ts': 'internal channel',
+    'FramePr.__anchorLock: missing-in-ts': 'internal channel',
+    'ImageRun(ts Pick).__anchorAcquisition: missing-in-ts': 'internal channel',
+    'ImageRun(ts Pick).__inlineObjectFontFacts: missing-in-ts': 'internal channel',
+    'ImageRun(ts Pick).__inlineObjectOrigin: missing-in-ts': 'internal channel',
+    'ImageRun(ts Pick).__listLabel: missing-in-ts': 'internal channel',
+    'ImageRun<type=image>.__anchorAcquisition: missing-in-ts': 'internal channel',
+    'ImageRun<type=image>.__inlineObjectFontFacts: missing-in-ts': 'internal channel',
+    'ImageRun<type=image>.__inlineObjectOrigin: missing-in-ts': 'internal channel',
+    'ImageRun<type=image>.__listLabel: missing-in-ts': 'internal channel',
+    'MathNode<kind=run>.__script: missing-in-ts': 'internal channel',
+    'SectionProps.__sectionPlacement: missing-in-ts': 'internal channel',
+    'ShapeRun<type=shape>.__anchorAcquisition: missing-in-ts': 'internal channel',
+    'ShapeRun<type=shape>.__inlineObjectFontFacts: missing-in-ts': 'internal channel',
+    'ShapeRun<type=shape>.__inlineObjectOrigin: missing-in-ts': 'internal channel',
+    'TextRun<type=text>.__listLabel: missing-in-ts': 'internal channel',
+    'TextRun<type=text>.__noBreakAfter: missing-in-ts': 'internal channel',
+    'TextRun<type=text>.__noBreakBefore: missing-in-ts': 'internal channel',
+    'TextRun<type=text>.__noBreakHyphenOffsets: missing-in-ts': 'internal channel',
+    'TextRun<type=text>.__optionalHyphen: missing-in-ts': 'internal channel',
+    'TextRun<type=text>.__spaceAdvancePt: missing-in-ts': 'internal channel',
+    'TextRun<type=text>.__typographyAcquisition: missing-in-ts': 'internal channel',
 
     // ---- Intentional: facts read through internal (non-public) wire types ---
     // The public model types omit these; parser-model.ts and the layout types read
@@ -164,17 +206,23 @@ export const MODEL_WIRE_DRIFT_ALLOWLIST = {
     'ChartModel.legendLineFill<fillType=image>: variant-missing-in-ts': 'a:ln has no blipFill',
     'ChartModel.plotAreaLineFill<fillType=image>: variant-missing-in-ts': 'a:ln has no blipFill',
 
-    // ---- Intentional: string vocabularies narrowed in TS --------------------
-    // The Rust field is a `String` the parser fills from a closed OOXML
-    // vocabulary; TS names that vocabulary. The payload pins the TS literals,
-    // so changing them must update this entry. Making the Rust field an enum
-    // would turn these into checked comparisons.
+    // ---- Intentional: values the parser restricts ---------------------------
+    // `PathPaint.stroke` is serialized only when false (skip_serializing_if on
+    // true), which TS types as `stroke?: false`.
+    'PathPaint.stroke: ts-narrower-literal [false]': 'serialized only when false',
+
+    // ---- Intentional: vocabularies narrowed in TS ---------------------------
+    // The Rust field is a `String` (or number) the parser fills from a closed
+    // OOXML vocabulary; TS names that vocabulary. The payload pins the TS
+    // literals, so changing them must update this entry. Making the Rust field
+    // an enum would turn these into checked comparisons.
     'BlipEffect<type=blend>.blend: ts-narrower-literal ["darken","lighten","mult","over","screen"]': 'closed vocabulary',
     'BlipEffect<type=fillOverlay>.blend: ts-narrower-literal ["darken","lighten","mult","over","screen"]': 'closed vocabulary',
     'BlipReflection.algn: ts-narrower-literal ["b","bl","br","ctr","l","r","t","tl","tr"]': 'closed vocabulary',
     'BodyElement<type=pageBreak>.parity: ts-narrower-literal ["even","odd"]': 'closed vocabulary',
     'ChartexHistogramBinning.intervalClosed: ts-narrower-literal ["l","r"]': 'closed vocabulary',
     'ChartexRegionMap.regionLabelLayout: ts-narrower-literal ["bestFitOnly","none","showAll"]': 'closed vocabulary',
+    'ChartexRegionMapColors.stopCount: ts-narrower-literal [2,3]': 'closed vocabulary',
     'ChartModel.bubbleSizeRepresents: ts-narrower-literal ["area","w"]': 'closed vocabulary',
     'ChartModel.catAxisTitleVerticalMode: ts-narrower-literal ["eaVert","horz","mongolianVert","vert","vert270","wordArtVert","wordArtVertRtl"]': 'closed vocabulary',
     'ChartModel.legendPos: ts-narrower-literal ["b","l","r","t","tr"]': 'closed vocabulary',
@@ -221,8 +269,8 @@ export const MODEL_WIRE_DRIFT_ALLOWLIST = {
     'ChartDataTable.fill<fillType=image>: variant-missing-in-ts': 'DRIFT: TS excludes an image fill Rust can carry',
     'ChartSeries.invertedFill<fillType=image>: variant-missing-in-ts': 'DRIFT: TS excludes an image fill Rust can carry',
     'ChartSurfaceBandFormat.fill<fillType=image>: variant-missing-in-ts': 'DRIFT: TS excludes an image fill Rust can carry',
-    'ChartThreeD.view3dPresent: missing-in-ts': 'DRIFT: TS declares view3DPresent',
     'ChartThreeD.view3DPresent: ts-only': 'DRIFT: the wire name is view3dPresent',
+    'ChartThreeD.view3dPresent: missing-in-ts': 'DRIFT: TS declares view3DPresent',
     'DocParagraph<type=paragraph>.outlineLevel: missing-in-ts': 'DRIFT: emitted but read by no TS code',
     'ImageRun(ts Pick).colorReplaceFrom: rust-null': 'DRIFT: TS lacks null (readers use truthiness)',
     'ImageRun<type=image>.colorReplaceFrom: rust-null': 'DRIFT: TS lacks null (readers use truthiness)',
@@ -232,5 +280,6 @@ export const MODEL_WIRE_DRIFT_ALLOWLIST = {
     'ParagraphBorders.right: rust-optional': 'DRIFT: TS should mark it optional',
     'ParagraphBorders.top: rust-optional': 'DRIFT: TS should mark it optional',
     'ShapeRun<type=shape>.fill: rust-optional': 'DRIFT: TS should mark it optional',
+    'TextRun<type=text>.fitTextId: variant-never-emitted (TS number)': 'DRIFT: the wire value is always a string',
   },
 };
