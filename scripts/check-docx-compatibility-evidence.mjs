@@ -622,33 +622,12 @@ function jsDocTagText(tag) {
 // Each profile field is declared once with its evidence: the rule IDs it
 // gates, whose declarations carry the evidence, or a normative settings
 // reference. Returns the number of verified fields (0 without a profile).
-// A whole-line `@compatSetting <reference>` tag in the profile owner. The
-// reference is validated by verifyCompatibilityProfile, so the observation
-// scanner skips exactly these lines (a Microsoft section is catalog-checked).
-const COMPAT_SETTING_TAG_LINE = /^(?:\/\*\*|\*)?\s*@compatSetting (?:ECMA-376 (?:Part [1-4] )?§§?[0-9.,\s–-]+|\[MS-[A-Z0-9]+\] §§?[0-9.,\s–-]+)\s*(?:\*\/)?$/;
+// A normative settings reference: one ECMA-376 section. Observed Office
+// behaviour (including [MS-…] notes) belongs in a declared rule instead, so a
+// field reaches Microsoft evidence only through @compatRule.
+const COMPAT_SETTING_REFERENCE = /^ECMA-376 (?:Part [1-4] )?§\d+(?:\.\d+)+$/;
 
-function verifyCompatibilitySetting(field, reference, microsoftCatalog, citedMicrosoftSections) {
-  const invalid = () => fail(
-    'COMPATIBILITY_PROFILE_FIELD_EVIDENCE',
-    `${COMPATIBILITY_PROFILE_INTERFACE}.${field} has an invalid @compatSetting reference`,
-  );
-  if (!COMPAT_SETTING_TAG_LINE.test(`@compatSetting ${reference}`)) invalid();
-  const microsoft = reference.match(/^\[(MS-[A-Z0-9]+)\] §§?(.+)$/);
-  if (!microsoft) return;
-  const sectionIds = [...microsoft[2].matchAll(/\b\d+(?:\.\d+)+\b/g)].map((entry) => entry[0]);
-  const knownSections = microsoftCatalog.get(microsoft[1]);
-  if (sectionIds.length === 0
-    || !knownSections
-    || sectionIds.some((sectionId) => !knownSections.has(sectionId))) {
-    fail(
-      'COMPATIBILITY_MICROSOFT_EVIDENCE',
-      `${COMPATIBILITY_PROFILE_INTERFACE}.${field} references an uncatalogued Microsoft section: ${reference}`,
-    );
-  }
-  for (const sectionId of sectionIds) citedMicrosoftSections.add(`${microsoft[1]} ${sectionId}`);
-}
-
-function verifyCompatibilityProfile(root, rules, microsoftCatalog, citedMicrosoftSections) {
+function verifyCompatibilityProfile(root, rules) {
   const absolute = resolve(root, COMPATIBILITY_PROFILE);
   if (!existsSync(absolute)) return 0;
   const source = ts.createSourceFile(
@@ -706,7 +685,12 @@ function verifyCompatibilityProfile(root, rules, microsoftCatalog, citedMicrosof
       }
     }
     for (const reference of settings) {
-      verifyCompatibilitySetting(field, reference, microsoftCatalog, citedMicrosoftSections);
+      if (!COMPAT_SETTING_REFERENCE.test(reference)) {
+        fail(
+          'COMPATIBILITY_PROFILE_FIELD_EVIDENCE',
+          `${COMPATIBILITY_PROFILE_INTERFACE}.${field} has an invalid @compatSetting reference`,
+        );
+      }
     }
   }
   return profile.members.length;
@@ -737,7 +721,6 @@ function observationKeys(root) {
       if (ALLOWED_DECLARATION_FILES.has(file)) return [];
       return readFileSync(absolute, 'utf8').split(/\r?\n/).flatMap((line) =>
         observationMarker.test(line)
-          && !(file === COMPATIBILITY_PROFILE && COMPAT_SETTING_TAG_LINE.test(line.trim()))
           ? [`${file}::${line.trim().replace(/\s+/g, ' ')}`]
           : []);
     })
@@ -774,9 +757,9 @@ export function checkDocxCompatibilityEvidence(root) {
     );
   }
   if (rules.size === 0) fail('COMPATIBILITY_REGISTRY_EMPTY', DOCX_SOURCE);
-  verifyCompatibilityProfile(root, rules, microsoftCatalog, citedMicrosoftSections);
   verifyMicrosoftCatalogCited(microsoftCatalog, citedMicrosoftSections);
   verifyRulesCited(root, rules, declarationRanges);
+  verifyCompatibilityProfile(root, rules);
   const observations = observationKeys(root);
   verifyObservationBaseline(root, observations);
   return Object.freeze([...rules].map(([id, { file }]) => Object.freeze({ id, file })));

@@ -545,26 +545,16 @@ test('rejects an invalid profile settings reference and a missing interface', ()
   assert.match(missing.stderr, /COMPATIBILITY_PROFILE_SHAPE/);
 });
 
-test('accepts a catalogued Microsoft settings reference without an inline-observation error', () => {
-  const root = fixture({ microsoftSections: ['MS-OI29500 2.1.120'] });
-  write(root, 'packages/docx/src/layout/compat-profile.ts', profile(`
-  /**
-   * Settings flag.
-   * @compatSetting [MS-OI29500] §2.1.120
-   */
+test('rejects Microsoft and malformed settings references', () => {
+  for (const reference of ['[MS-OI29500] §2.1.120', 'ECMA-376 §---', 'ECMA-376 §17', 'ECMA-376 Part 4 §14.8.3.20 and more']) {
+    const root = fixture();
+    write(root, 'packages/docx/src/layout/compat-profile.ts', profile(`
+  /** @compatSetting ${reference} */
   readonly flag: boolean;`));
-  const result = run(root);
-  assert.equal(result.status, 0, result.stderr);
-});
-
-test('rejects an uncatalogued Microsoft settings reference', () => {
-  const root = fixture();
-  write(root, 'packages/docx/src/layout/compat-profile.ts', profile(`
-  /** @compatSetting [MS-OI29500] §2.1.120 */
-  readonly flag: boolean;`));
-  const result = run(root);
-  assert.equal(result.status, 1);
-  assert.match(result.stderr, /COMPATIBILITY_MICROSOFT_EVIDENCE: DocxCompatProfile\.flag/);
+    const result = run(root);
+    assert.equal(result.status, 1, reference);
+    assert.match(result.stderr, /COMPATIBILITY_PROFILE_FIELD_EVIDENCE: DocxCompatProfile\.flag has an invalid/, reference);
+  }
 });
 
 test('rejects a merged second profile declaration', () => {

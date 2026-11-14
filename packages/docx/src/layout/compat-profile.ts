@@ -12,7 +12,7 @@ import type { DocSettings } from '../types.js';
  * per-paragraph condition stay with its declaration (`*-compatibility.ts`).
  *
  * Each field carries `@compatRule <rule-id>` for every rule whose document
- * gate it is, or `@compatSetting <reference>` for a normative settings flag
+ * gate it is, or `@compatSetting ECMA-376 [Part N ]§x.y` for a normative flag
  * that layout reads directly. scripts/check-docx-compatibility-evidence.mjs
  * rejects a field without one, and a `@compatRule` that names no declared
  * rule.
