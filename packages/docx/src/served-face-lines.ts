@@ -54,8 +54,7 @@ import {
  * Cost (library resource policy): a probe is a pure function of its source
  * bytes and descriptors in one realm, so one registration (one browser
  * decode) serves every document of the realm holding the same downloaded
- * buffer, and is measured once; every probe of a document is measured in
- * one batch (core measureFontFaceNormalLines), a few layouts in all rather
+ * buffer; every probe of a document is measured in one batch (core measureFontFaceNormalLines), a few layouts in all rather
  * than several per face.
  */
 
@@ -216,34 +215,27 @@ async function loaded(face: FontFace, signal?: AbortSignal): Promise<boolean> {
 
 type TupleLines = Readonly<Record<string, LocalFontNormalLine | null>>;
 
-/** Measured tuples per loaded probe: a probe is library-private and never
- * changes, so it is measured once in its realm. */
-const measuredProbes = new WeakMap<FontFace, TupleLines>();
-
 /** Every WordprocessingML tuple of each face, measured in one batch (core
  * measureFontFaceNormalLines: at most a few layouts for the whole list).
- * `cache` keeps the results of library probes (never of application faces,
- * whose descriptors the application may change). */
-function measureTuples(faces: readonly FontFace[], owner: Document, cache: boolean): TupleLines[] {
-  const fresh = [...new Set(faces)].filter((face) => !cache || !measuredProbes.has(face));
-  const context = fresh.length ? owner.createElement('canvas').getContext('2d') : null;
+ * Every document measures its own probes, even a probe it shares: a
+ * measurement describes the page as it is now (a hidden body measures
+ * nothing), so another document's earlier answer never stands in for it. */
+function measureTuples(faces: readonly FontFace[], owner: Document): TupleLines[] {
+  const distinct = [...new Set(faces)];
+  const context = distinct.length ? owner.createElement('canvas').getContext('2d') : null;
   const measured = context
-    ? measureFontFaceNormalLines(fresh.flatMap((face) => WML_TUPLES.map(({ weight, style }) => ({ face, weight, style }))),
+    ? measureFontFaceNormalLines(distinct.flatMap((face) => WML_TUPLES.map(({ weight, style }) => ({ face, weight, style }))),
       owner.fonts, context, PROBE_EM_PX, owner)
-    : fresh.flatMap(() => WML_TUPLES.map(() => null));
+    : [];
   const byFace = new Map<FontFace, TupleLines>();
-  fresh.forEach((face, index) => {
+  distinct.forEach((face, index) => {
     const lines: Record<string, LocalFontNormalLine | null> = Object.create(null);
     WML_TUPLES.forEach(({ weight, style }, tuple) => {
       lines[tupleKey(weight, style)] = measured[index * WML_TUPLES.length + tuple] ?? null;
     });
     byFace.set(face, lines);
-    // Only a complete measurement is kept: one taken without a context, or
-    // while the page could not lay the struts out (a hidden body), is taken
-    // again by the next document instead of answering for it.
-    if (cache && context && Object.values(lines).every((line) => line !== null)) measuredProbes.set(face, Object.freeze(lines));
   });
-  return faces.map((face) => byFace.get(face) ?? measuredProbes.get(face)!);
+  return faces.map((face) => byFace.get(face)!);
 }
 
 /** DOM realm, worker mode: measure each request with a transient private
@@ -257,7 +249,7 @@ export async function measureServedFaceLines(
   const faces = registerProbes(requests, owner.fonts);
   try {
     const ready = await Promise.all(faces.map((face) => loaded(face, signal)));
-    const measured = measureTuples(faces.filter((_, position) => ready[position]), owner, true);
+    const measured = measureTuples(faces.filter((_, position) => ready[position]), owner);
     let next = 0;
     return requests.map((request, position) => ({ index: request.index, lines: ready[position] ? measured[next++]! : {} }));
   } finally {
@@ -328,7 +320,7 @@ export async function prepareServedFaceLines(
   const answered = owner || signal?.aborted ? undefined : await measured;
   const byIndex = new Map(answered?.map((measurement) => [measurement.index, measurement.lines]));
   const measurements: (TupleLines | undefined)[] = owner && !signal?.aborted
-    ? measureTuples(measurable.map((request) => probeOf.get(request)!), owner, true)
+    ? measureTuples(measurable.map((request) => probeOf.get(request)!), owner)
     : measurable.map((request) => byIndex.get(request.index));
   // A shared-metric style's measuring probe is not needed once measured.
   releaseFaces(new Set(probes.filter((face) => !kept.has(face))));
@@ -353,7 +345,7 @@ export async function prepareServedFaceLines(
   // single loaded face and its unicode-range holds U+0020, so it is the
   // family's first available font (CSS Fonts 4 §5) and both the strut and the
   // Canvas box are its own.
-  const appLines = appFaces.length ? measureTuples(appFaces, owner!, false) : [];
+  const appLines = appFaces.length ? measureTuples(appFaces, owner!) : [];
   appFaces.forEach((face, position) => {
     familyLines.set(fontFamilyKey(unquoted(face.family)), { ownershipFamily: unquoted(face.family), lines: appLines[position]! });
   });

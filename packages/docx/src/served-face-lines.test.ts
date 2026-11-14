@@ -189,7 +189,7 @@ describe('subsets of a shared-metric style', () => {
 });
 
 describe('served-face probe measurements', () => {
-  it('keep only complete measurements, so a hidden page does not answer for a later document', async () => {
+  it('are taken per document, so no page state answers for a later document', async () => {
     G.FontFace = LoadingFontFace;
     const { set } = fakeSet();
     let hidden = true;
@@ -221,8 +221,10 @@ describe('served-face probe measurements', () => {
       // The first document still holds the shared probe.
       const second = await prepareServedFaceLines(sources, set, []);
       expect(second.faceLines.get(0)?.lines['400:normal']?.lineGapRatio).toBeCloseTo(0.3, 2);
-      unloadOfficeFontFallbacks(first.faces);
-      unloadOfficeFontFallbacks(second.faces);
+      hidden = true;
+      const third = await prepareServedFaceLines(sources, set, []);
+      expect(third.faceLines.get(0)?.lines['400:normal']).toBeNull();
+      for (const prepared of [first, second, third]) unloadOfficeFontFallbacks(prepared.faces);
     } finally {
       vi.unstubAllGlobals();
     }
