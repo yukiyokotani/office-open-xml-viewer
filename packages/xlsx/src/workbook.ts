@@ -9,7 +9,7 @@ import { xlsxCjkFallback } from './font-requests.js';
 import InlineWorker from './worker.ts?worker&inline';
 import wasmAssetUrl from './wasm/xlsx_parser_bg.wasm?url';
 import {
-  FontResolverBridgeHost,
+  FontResolverBridge,
   normalizeFontOptions,
   optionFontSources,
   type FontSessionDemand,
@@ -20,6 +20,8 @@ import {
 } from '@silurus/ooxml-core/internal/font-sources';
 import {
   bindMetafileFontFamilies,
+  createSymbolFaceOracleCache,
+  loadNativeRouteSentinels,
   loadOfficeFontFallbacks,
   unloadOfficeFontFallbacks,
   type LoadedOfficeFontFallbacks,
@@ -256,11 +258,15 @@ export class XlsxWorkbook {
   /** Every demand delta so far, replayed into each newly retained set. */
   private fontDeltas: Promise<FontSessionDemand>[] = [];
   private officeFontRequests: OfficeFontFallbackRequest[] = [];
+  /** Symbol-code verdicts across this workbook's main-realm measurements and
+   *  renders, kept while a realm's faces are unchanged (core
+   *  createSymbolFaceOracleCache); replaced in {@link destroy}. */
+  private symbolFaces = createSymbolFaceOracleCache();
   private readonly retainedFontSets = new Map<FontFaceSet, RetainedFontSet>();
   /** Worker mode: runs this workbook's `fontResolver` functions for the
-   *  worker's font-source session (core `resolver-bridge-host.ts`); disposed
+   *  worker's font-source session (core `resolver-bridge-gate.ts`); disposed
    *  in {@link destroy}, which aborts every in-flight resolver call. */
-  private fontResolverBridge: FontResolverBridgeHost | null = null;
+  private fontResolverBridge: FontResolverBridge | null = null;
   /** Resolver failures of this workbook, shared by its viewer-realm sessions
    * and its worker bridge (core `resolver-resolution.ts`). */
   private fontResolverFailures: FontResolverFailures = new Map();
@@ -696,12 +702,12 @@ export class XlsxWorkbook {
   }
 
   /** Worker mode: answer the render worker's `fontResolver` calls for the
-   * document about to be parsed (core `resolver-bridge-host.ts`). */
+   * document about to be parsed (core `resolver-bridge-gate.ts`). */
   private attachFontResolverBridge(bridge: WorkbookBridge, fonts: readonly FontSourceDescriptor[] | undefined): void {
     this.fontResolverBridge?.dispose();
     this.fontResolverFailures = new Map();
     this.fontResolverBridge = this._mode === 'worker'
-      ? new FontResolverBridgeHost({
+      ? new FontResolverBridge({
         post: (message, transfer) => bridge.post(message, transfer),
         sources: fonts,
         // One outcome per family for the whole workbook: the viewer-realm
@@ -779,6 +785,11 @@ export class XlsxWorkbook {
           // same cache and failure record, so both realms paint the same bytes.
           ...(this._mode === 'worker' && this.fontAcquirerFor
             ? { acquireResolverFaces: this.fontAcquirerFor(this.fontResolverFailures) } : {}),
+          // Worker mode: resolve only once the bridge host is ready, and fail
+          // the resolver's families if it never will be, as the worker does
+          // (core resolver-bridge-gate.ts), so both realms reach one outcome.
+          ...(this._mode === 'worker' && this.fontResolverBridge
+            ? { resolverBridge: this.fontResolverBridge.sessionState } : {}),
         })
         : null;
       const record = {
@@ -792,8 +803,17 @@ export class XlsxWorkbook {
       const loading = Promise.allSettled([
         sourcesReady,
         loadOfficeFontFallbacks(this.officeFontRequests, fontSet),
-      ]).then(([sources, office]) => {
-        if (sources.status === 'fulfilled' && office.status === 'fulfilled') return { office: office.value };
+        // The symbol-font oracle asks this set's painting contexts through
+        // the route sentinels (core symbol-face.ts); without them it declines
+        // and the 0.89 behaviour stays. Released with the Office faces.
+        loadNativeRouteSentinels(fontSet).catch(() => null),
+      ]).then(([sources, office, sentinels]) => {
+        const sentinelFaces = sentinels.status === 'fulfilled' ? sentinels.value ?? [] : [];
+        if (sources.status === 'fulfilled' && office.status === 'fulfilled') {
+          office.value.faces.push(...sentinelFaces);
+          return { office: office.value };
+        }
+        unloadOfficeFontFallbacks(sentinelFaces);
         if (office.status === 'fulfilled') unloadOfficeFontFallbacks(office.value.faces);
         record.session?.release();
         throw sources.status === 'rejected' ? sources.reason : (office as PromiseRejectedResult).reason;
@@ -871,7 +891,7 @@ export class XlsxWorkbook {
     const set = isHTMLCanvas(ctx.canvas)
       ? ctx.canvas.ownerDocument.fonts : null;
     const routes = set ? this.retainedFontSets.get(set)?.loaded?.office.routes : undefined;
-    bindXlsxOfficeFontRoutes(ctx, worksheet, routes, this.loadedFontSources(set));
+    bindXlsxOfficeFontRoutes(ctx, worksheet, routes, this.loadedFontSources(set), this.symbolFaces);
     getGridGeometryForWorksheet(worksheet);
     applyAutoRowHeights(ctx, worksheet, this.parsedWorkbook.styles, this.cjkFallback);
   }
@@ -1572,6 +1592,7 @@ export class XlsxWorkbook {
             ? this.retainedFontSets.get(targetFontSet)?.loaded?.office.routes
             : undefined,
           fontSources: this.loadedFontSources(targetFontSet),
+          symbolFaces: this.symbolFaces,
           fetchImage: this._fetchImage,
           ...(errorPlaceholderText === undefined ? {} : { errorPlaceholderText }),
         },
@@ -1606,6 +1627,7 @@ export class XlsxWorkbook {
             ? this.retainedFontSets.get(targetFontSet)?.loaded?.office.routes
             : undefined,
           fontSources: this.loadedFontSources(targetFontSet),
+          symbolFaces: this.symbolFaces,
           fetchImage: this._fetchImage,
           ...(errorPlaceholderText === undefined ? {} : { errorPlaceholderText }),
         },
@@ -1825,6 +1847,10 @@ export class XlsxWorkbook {
       // callback and releases exactly once when the faces become available.
     }
     this.retainedFontSets.clear();
+    // A caller canvas may outlive the workbook: its bound oracle must not
+    // keep the released faces reachable.
+    this.symbolFaces?.dispose();
+    this.symbolFaces = createSymbolFaceOracleCache();
     // The descriptors may hold application font bytes (fontFiles data,
     // inline data: URLs): a destroyed workbook must not keep them reachable.
     this.fonts = undefined;

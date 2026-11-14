@@ -2257,6 +2257,7 @@ export type ShapeTextRun = {
     fontFace?: string;
     fontFaceEa?: string;
     fontFaceCs?: string;
+    fontFaceSym?: string;
 } | {
     type: 'break';
 } | {

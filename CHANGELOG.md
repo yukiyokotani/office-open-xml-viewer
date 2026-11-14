@@ -104,9 +104,11 @@ the host fonts (see **Served font line heights** below). See the
   warns once per JavaScript realm. Combining `useGoogleFonts: true` with
   `fonts` throws a `TypeError`. The VS Code extension keeps its
   `ooxmlViewer.useGoogleFonts` setting.
-- **Fixed:** in DOCX and PPTX, text, `w:sym`/`a:sym` symbols and list
+- **Fixed:** in DOCX, PPTX and XLSX, text, `w:sym`/`a:sym` symbols and list
   markers in Symbol, Wingdings, Wingdings 2, Wingdings 3 and Webdings now
-  render on every host (#2177). Greek letters and the maths operators of Symbol, and the
+  render on every host (#2177). In XLSX this covers cell values (number-format
+  output included), rich-text runs, text boxes and slicer labels, and
+  overflow, wrapping and automatic row heights follow the symbols as drawn. Greek letters and the maths operators of Symbol, and the
   pictographs of the Wingdings/Webdings fonts, used to draw as tofu or as
   Latin letters wherever the font is missing or, like Apple's Symbol, is not
   symbol-encoded. Each code is now checked against the face that actually

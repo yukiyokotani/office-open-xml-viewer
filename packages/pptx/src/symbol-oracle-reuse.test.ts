@@ -114,6 +114,16 @@ describe('PPTX symbol oracle across slide renders', () => {
     expect(await again()).toBe(4 * once);
   });
 
+  it('judges afresh through a disposed cache (its presentation destroyed)', async () => {
+    const once = await renderSlides(1);
+    const cache = createSymbolFaceOracleCache();
+    const faces = [{ status: 'loaded' }];
+    expect(await renderSlides(3, cache, faces)).toBe(once);
+    cache.dispose();
+    // No kept oracle or face snapshot remains: each render probes again.
+    expect(await renderSlides(3, cache, faces)).toBe(3 * once);
+  });
+
   it('never keeps a verdict across an await of the render that took the oracle', async () => {
     const faces: { status: string }[] = [];
     const { canvas, probes } = realm(faces);
