@@ -516,8 +516,15 @@ function requestedWeightSet(weights: readonly number[] | undefined): readonly nu
 }
 
 /** `declaration` with its weight replaced by `range`, when given. */
+/** Declarations {@link withWeightRange} made: each stands for its file's
+ * declarations at every requested weight. */
+const weightRanged = new WeakSet<FontFaceDeclaration>();
+
 function withWeightRange(declaration: FontFaceDeclaration, range: string | undefined): FontFaceDeclaration {
-  return range === undefined ? declaration : Object.freeze({ ...declaration, weight: range });
+  if (range === undefined) return declaration;
+  const ranged = Object.freeze({ ...declaration, weight: range });
+  weightRanged.add(ranged);
+  return ranged;
 }
 
 /** A CSS `url()` for a validated absolute URL (data: URLs are kept verbatim
@@ -1398,9 +1405,16 @@ export class FontSourceSession {
 
   private takeSnapshot(): LoadedFontSources {
     const faces: LoadedSourceFace[] = [];
+    // A weight-ranged face stands for its file's declaration at 400 too.
+    const regular: { family: string; weight: string; style: string }[] = [];
     for (const entry of this.owned.values()) {
       if (entry.face.status !== 'loaded') continue;
       const { declaration } = entry;
+      regular.push({
+        family: declaration.family,
+        weight: weightRanged.has(declaration) && this.requestedWeights?.includes(400) ? '400' : declaration.weight ?? 'normal',
+        style: declaration.style ?? 'normal',
+      });
       const resourceMetrics = (this.readMetricTables && declaration.data && faceResourceMetrics.get(declaration.data)) || undefined;
       const probeSource = resourceMetrics ? undefined
         : declaration.data ?? (declaration.url === undefined ? undefined : cssUrl(declaration.url));
@@ -1428,7 +1442,7 @@ export class FontSourceSession {
     return Object.freeze({
       faces: Object.freeze(faces),
       substitutions,
-      regularAliases: loadedRegularAliases(faces.map((face) => ({ ...face, status: 'loaded' as const }))),
+      regularAliases: loadedRegularAliases(regular.map((face) => ({ ...face, status: 'loaded' as const }))),
       families: new Map(this.aliases),
     });
   }

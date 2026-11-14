@@ -1207,6 +1207,8 @@ describe('FontSourceSession: one face per file across the requested weights', ()
       ['https://app.example/var-a.woff2', '400 700'], ['https://app.example/var-b.woff2', '400 700'],
     ]);
     expect(loaded.faces.map((face) => face.weight)).toEqual(['400 700', '400 700']);
+    // The ranged faces stand for their 400 declarations: the regular alias stays.
+    expect(loaded.regularAliases.get('var regular')).toBe('Var');
   });
 
   it('keeps one face per declaration otherwise', async () => {

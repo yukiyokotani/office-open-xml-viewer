@@ -72,6 +72,8 @@ describe('collectFontDemandScalars', () => {
     expect(scalars(['\u1112', '\u1161', '\u11ab'])).toContain(0xd55c);
     // An excluded composition a shaper may still make across runs.
     expect(scalars(['\u09af', '\u09bc'])).toContain(0x9df);
+    // A soft hyphen a painter strips leaves the cluster open.
+    expect(scalars(['a\u00ad\u0301'])).toContain(0xe1);
     // A precomposed starter decomposes and recomposes with the run.
     expect(scalars(['\u00e9', '\u0323'])).toContain(0x1eb9);
   });

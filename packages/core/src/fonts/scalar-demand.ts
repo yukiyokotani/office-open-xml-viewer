@@ -121,6 +121,12 @@ export class FontDemandScalarCollector {
     for (const scalar of text) {
       const cp = scalar.codePointAt(0) as number;
       if (cp >= 0xf020 && cp <= 0xf0ff) return this.decline();
+      // A soft hyphen is demanded but leaves the cluster open: a painter may
+      // strip it and draw the scalars around it as one text (DOCX §17.3.3.29).
+      if (cp === 0xad) {
+        if (!this.admitScalar(cp)) return this.decline();
+        continue;
+      }
       const inert = fontDemandInertScalar(cp);
       if (!inert && !isCanonicallyKnown(cp)) return this.decline();
       if (inert || !isClusterJoiner(cp)) {
