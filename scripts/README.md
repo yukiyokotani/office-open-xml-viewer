@@ -47,7 +47,7 @@ Other committed generators live beside their output:
 | Script | Purpose |
 | --- | --- |
 | `append-wasm-reinit.mjs` | Adds the `reinit()` export to wasm-bindgen glue (each package's `wasm` script). |
-| `build-model-source-sidecars.mjs` | Builds the self-contained optional model-source worker sidecars (`pnpm build`). |
+| `build-model-source-sidecars.mjs` | Builds the self-contained optional worker sidecars: model-source owners and the PPTX font-demand collector (`pnpm build`). |
 | `bundle-declarations.mjs` | Bundles the published `.d.ts` entries (`pnpm build`). |
 | `docx-compatibility-build.mjs` | Freezes DOCX compatibility rule metadata for Vite, Storybook and the site. Its evidence ledger is `docx-compatibility-microsoft-evidence.json`. |
 | `optional-renderer-markers.mjs` | Emits the ownership markers that the optional-renderer checks read. |

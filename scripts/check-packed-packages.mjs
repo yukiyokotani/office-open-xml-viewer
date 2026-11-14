@@ -67,6 +67,9 @@ try {
     await writeFile(join(scratch, 'public', `unsupported.${family}`), new Uint8Array(fixtures.buildCfbFixture(['Root Entry', stream])));
   }
   await writeFile(join(scratch, 'public', 'deferred.ppt'), fixtures.buildPptFixture());
+  // A text deck for the font-source path: the main-mode parse worker imports
+  // the font-demand collector sidecar by URL from the consumer's build.
+  await writeFile(join(scratch, 'public', 'sample.pptx'), readFileSync(join(root, 'packages/pptx/public/demo/sample-1.pptx')));
   await writeFile(join(scratch, 'public', 'sample.odt'), fixtures.buildOdtFixture({ body: '<text:p>Hello ODT</text:p>' }));
   // The ODT reader renders every text feature; it refuses encrypted input.
   await writeFile(join(scratch, 'public', 'unsupported.odt'), fixtures.buildOdtFixture({
@@ -119,7 +122,7 @@ console.log('Packed Node imports, all three legacy readers and the ODT reader pa
   await writeFile(join(scratch, 'main.js'), `
 import { DocxDocument, DocxViewer, OoxmlError } from '@silurus/ooxml/docx';
 import { XlsxWorkbook, XlsxViewer } from '@silurus/ooxml/xlsx';
-import { PptxPresentation, PptxViewer } from '@silurus/ooxml/pptx';
+import { PptxPresentation, PptxViewer, fontResolver } from '@silurus/ooxml/pptx';
 import { legacyDoc, createLegacyDoc } from '@silurus/ooxml-legacy-office/doc';
 import { legacyXls, createLegacyXls } from '@silurus/ooxml-legacy-office/xls';
 import { legacyPpt, createLegacyPpt } from '@silurus/ooxml-legacy-office/ppt';
@@ -163,6 +166,13 @@ try {
       try { await viewer.load(bytes); }
       finally { viewer.destroy(); element.remove(); }
     }
+  }
+  // Font sources make the parse worker import the font-demand collector
+  // sidecar; a sidecar the consumer build did not emit fails the load.
+  for (const [file, sourceOptions] of [['/sample.pptx', {}], ['/sample.ppt', { legacyPpt }]]) {
+    const deck = await PptxPresentation.load(await (await fetch(file)).arrayBuffer(),
+      { mode: 'main', fonts: [fontResolver(() => [])], ...sourceOptions });
+    deck.destroy();
   }
   window.packedResult = 'passed';
 } catch (error) { window.packedResult = String(error?.stack || error); }
