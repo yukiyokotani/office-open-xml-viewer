@@ -11,9 +11,9 @@ import type { Presentation, Slide } from './types';
 // scalar the renderer measures or paints. A scalar outside the demand belongs
 // to a unicode-range subset that never loads, so its glyph would silently
 // fall back to a host font. Exercised over the public demo deck and targeted
-// synthetic slides; every paint path the collector cannot prove declines to
-// 'all' (charts, pictures, metafiles, groups, autoNum and picture bullets,
-// vertical text, WordArt, RTL, non-slidenum fields, equations).
+// synthetic slides (charts and raster pictures are exercised by the demo
+// deck); every paint path the collector cannot prove declines to 'all'
+// (metafiles, region maps, WordArt, stacked vertical text, RTL, equations).
 
 const TARGETED: Record<string, Uint8Array> = {
   'caps and small caps': deck(textBox(para(run('straße αβγ', ' cap="all"') + run('mixed Case', ' cap="small"')))),
@@ -30,6 +30,17 @@ const TARGETED: Record<string, Uint8Array> = {
     + `<a:tc><a:txBody><a:bodyPr/><a:lstStyle/>${para(run('Cell ß'))}</a:txBody><a:tcPr/></a:tc>`
     + `<a:tc><a:txBody><a:bodyPr/><a:lstStyle/>${para(run('42%'))}</a:txBody><a:tcPr/></a:tc>`
     + '</a:tr></a:tbl></a:graphicData></a:graphic></p:graphicFrame>'),
+  'auto-number markers': deck(textBox(
+    para(run('First'), '<a:pPr marL="342900" indent="-342900"><a:buFont typeface="+mj-lt"/><a:buAutoNum type="romanUcPeriod" startAt="3"/></a:pPr>')
+    + para(run('Second'), '<a:pPr marL="342900" indent="-342900"><a:buFont typeface="+mj-lt"/><a:buAutoNum type="romanUcPeriod" startAt="3"/></a:pPr>')
+    + para(run('Third'), '<a:pPr marL="342900" indent="-342900"><a:buAutoNum type="arabicDbPeriod"/></a:pPr>')
+    + para(run('Fourth'), '<a:pPr marL="342900" indent="-342900"><a:buAutoNum type="alphaLcParenBoth" startAt="25"/></a:pPr>')
+    + para(run('Fifth'), '<a:pPr marL="342900" indent="-342900"><a:buAutoNum type="alphaLcParenBoth" startAt="25"/></a:pPr>')
+    + para(run('Sixth'), '<a:pPr marL="342900" indent="-342900"><a:buAutoNum type="alphaLcParenBoth" startAt="25"/></a:pPr>'))),
+  'rotated vertical text': deck(textBox(para(run('Rotated text, ninety degrees')), '<a:bodyPr vert="vert270" wrap="square"/>')),
+  'east asian vertical text': deck(textBox(para(run('縦書き、「括弧」（丸）。ABC 12', ' altLang="ja-JP"')), '<a:bodyPr vert="eaVert" wrap="square"/>')),
+  'date field': deck(textBox(para('<a:fld id="{00000000-0000-0000-0000-000000000002}" type="datetime1">'
+    + '<a:rPr lang="en-US" sz="2400"/><a:t>11/14/2026</a:t></a:fld>' + run(' today')))),
   'east asian and latin mix': deck(textBox(para(run('漢字かなカナ ABC 123', ' altLang="ja-JP"')))),
   // §21.1.2.4.3 buFont / §21.1.2.3.7 latin / §21.1.2.3.10 sym in symbol-encoded faces.
   'symbol bullet and symbol faces': deck(textBox(
@@ -132,10 +143,18 @@ describe('PPTX font demand covers every measured or painted scalar', () => {
   it('public demo deck', async () => {
     const demo = new URL('../public/demo/', import.meta.url);
     const outcomes: Array<'all' | 'finite'> = [];
+    const finiteKinds = new Set<string>();
     for (const name of readdirSync(demo).filter((file) => file.endsWith('.pptx'))) {
-      outcomes.push(...await check(name, new Uint8Array(readFileSync(new URL(name, demo)))));
+      const bytes = new Uint8Array(readFileSync(new URL(name, demo)));
+      const slideOutcomes = await check(name, bytes);
+      outcomes.push(...slideOutcomes);
+      parse(bytes).slides.forEach((slide, index) => {
+        if (slideOutcomes[index] === 'finite') for (const element of slide.elements) finiteKinds.add(element.type);
+      });
     }
-    // The invariant is vacuous for 'all' demand; record that some slides are finite.
+    // The invariant is vacuous for 'all' demand: the deck's chart and picture
+    // slides must be finite, so their painted chart labels are checked.
     expect(outcomes).toContain('finite');
+    expect([...finiteKinds]).toEqual(expect.arrayContaining(['chart', 'picture', 'table', 'shape']));
   }, 120_000);
 });
