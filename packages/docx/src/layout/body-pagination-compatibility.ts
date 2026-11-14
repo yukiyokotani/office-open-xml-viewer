@@ -4,6 +4,7 @@ import type {
   BodyParagraphSourceInput,
 } from './body-layout-input.js';
 import { defineCompatibilityRule } from './compatibility.js';
+import type { DocxCompatProfile } from './compat-profile.js';
 import type {
   LineLayout,
   ParagraphLayout,
@@ -612,16 +613,14 @@ export const WORD_PER_COLUMN_FOOTNOTE_BANDS = defineCompatibilityRule({
   description: 'ECMA-376 §17.11.21 puts pageBottom footnotes at the bottom of the page without defining multi-column note geometry. In Windows Word controls of two- and three-column sections (equal and 144/288pt columns, exact 12pt body and 10pt note lines), compatibility modes 11, 12 and 14 give each column its own note band, independent of footnoteLayoutLikeWW8 and the other legacy compatibility flags: a column\'s band holds the notes referenced in that column, wraps them at that column\'s width, starts with its own one-line separator band (also for an empty separator story) and ends at the body bottom, even when a column break ends the column early; a column without references keeps its full height. A note that does not fit continues at the top of the next column\'s band, before that column\'s own notes, and then on the next page; the reference line stays with as much of the note as fits, even when the whole note would fit the next column or a fresh page with nothing after the reference (one-line paragraphs closed by the reference, 10- and 20-line notes), unlike the single-column fallback of WORD_PARAGRAPH_FOOTNOTE_CONTINUATION. Endnotes follow the text in the column flow. Compatibility mode 15 (with or without footnoteLayoutLikeWW8) instead flows one page-wide note area through the columns; see WORD_PAGE_WIDE_FOOTNOTE_AREA. An omitted compatibility mode keeps the page band.',
 });
 
-/** Gate of {@link WORD_PER_COLUMN_FOOTNOTE_BANDS} for the active region. */
+/** Gate of {@link WORD_PER_COLUMN_FOOTNOTE_BANDS} for the active region; the
+ * document gate (including a producer that lays notes out per column, such as
+ * LibreOffice) is DocxCompatProfile.perColumnFootnoteBands. */
 export function wordPerColumnFootnoteBandsApply(
-  compatibilityMode: number | undefined,
+  compat: Pick<DocxCompatProfile, 'perColumnFootnoteBands'>,
   regionColumnCount: number,
-  producerColumnBands = false,
 ): boolean {
-  // A producer that lays notes out per column (LibreOffice) uses the same
-  // band geometry whatever the Word compatibility mode.
-  return regionColumnCount > 1
-    && (producerColumnBands || (compatibilityMode !== undefined && compatibilityMode < 15));
+  return regionColumnCount > 1 && compat.perColumnFootnoteBands;
 }
 
 
@@ -664,9 +663,9 @@ export const WORD_CONTINUOUS_SECTION_FOOTNOTE_PAGE = defineCompatibilityRule({
 });
 
 export function wordContinuousSectionMayShareFootnotePage(
-  compatibilityMode: number | undefined,
-  footnoteLayoutLikeWW8: boolean | undefined,
+  compat: Pick<DocxCompatProfile, 'continuousSectionKeepsFootnotePage' | 'footnoteLayoutLikeWW8'>,
   hasColumnBands: boolean,
 ): boolean {
-  return compatibilityMode === 15 || (footnoteLayoutLikeWW8 === true && !hasColumnBands);
+  return compat.continuousSectionKeepsFootnotePage
+    || (compat.footnoteLayoutLikeWW8 && !hasColumnBands);
 }
