@@ -728,8 +728,14 @@ export function scanNullProvenance(dirs) {
   // structs.
   const nullish = new Set(['Option']);
   const aliases = [];
+  // Generic aliases are not expanded (no argument substitution): a skipped
+  // field that mentions one fails closed.
+  const genericAliases = new Set();
   for (const text of texts.values()) {
-    for (const m of text.matchAll(/\btype\s+(\w+)(?:<[^=]*>)?\s*=\s*([^;]+);/g)) aliases.push([m[1], m[2]]);
+    for (const m of text.matchAll(/\btype\s+(\w+)(<[^=]*>)?\s*=\s*([^;]+);/g)) {
+      if (m[2]) genericAliases.add(m[1]);
+      else aliases.push([m[1], m[3]]);
+    }
     for (const m of text.matchAll(/\bstruct\s+(\w+)\s*;/g)) nullish.add(m[1]);
   }
   // A value is null-capable when, after peeling transparent smart pointers
@@ -790,8 +796,13 @@ export function scanNullProvenance(dirs) {
       const skip = /skip_serializing_if\s*=\s*"([^"]+)"/.exec(attrs)?.[1];
       attrs = '';
       if (!field || !skip || trimmed.startsWith('let ')) return;
-      const type = outer(field[2]);
       const where = `${path.relative(repoRoot, file)}:${i + 1} ${field[1]}`;
+      const generic = (field[2].match(/\w+/g) ?? []).find((token) => genericAliases.has(token));
+      if (generic) {
+        problems.push(`${where}: skipped ${field[2].trim()} uses generic alias ${generic}; null exclusion cannot be established`);
+        return;
+      }
+      const type = outer(field[2]);
       const option = /^(?:(?:std|core)::option::)?Option<(.*)>$/.exec(type);
       if (!option) {
         // A skipped generic or unit field cannot be proven null-free.

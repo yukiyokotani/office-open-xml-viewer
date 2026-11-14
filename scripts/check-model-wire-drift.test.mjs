@@ -292,6 +292,8 @@ test('null provenance follows outer aliases and wrappers', () => {
     writeFileSync(path.join(dir, 'model.rs'), [
       'type MaybeError = Option<Option<String>>;',
       'type Plain = Option<String>;',
+      'type Maybe<T> = Option<T>;',
+      'type Identity<T> = T;',
       'pub struct A {',
       '    #[serde(skip_serializing_if = "Option::is_none")]',
       '    pub aliased: MaybeError,',
@@ -299,12 +301,18 @@ test('null provenance follows outer aliases and wrappers', () => {
       '    pub boxed: Box<Option<Option<String>>>,',
       '    #[serde(skip_serializing_if = "Option::is_none")]',
       '    pub fine: Plain,',
+      '    #[serde(skip_serializing_if = "Option::is_none")]',
+      '    pub generic_outer: Maybe<Option<String>>,',
+      '    #[serde(skip_serializing_if = "Option::is_none")]',
+      '    pub generic_inner: Option<Identity<Option<String>>>,',
       '}',
     ].join('\n'));
     const problems = scanNullProvenance([dir]).map((p) => p.replace(/^.*model\.rs:/, ''));
     assert.deepEqual(problems, [
-      '5 aliased: Option<Option<String>> can serialize null while present (Option)',
-      '7 boxed: Option<Option<String>> can serialize null while present (Option)',
+      '7 aliased: Option<Option<String>> can serialize null while present (Option)',
+      '9 boxed: Option<Option<String>> can serialize null while present (Option)',
+      '13 generic_outer: skipped Maybe<Option<String>> uses generic alias Maybe; null exclusion cannot be established',
+      '15 generic_inner: skipped Option<Identity<Option<String>>> uses generic alias Identity; null exclusion cannot be established',
     ]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
