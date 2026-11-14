@@ -53,11 +53,26 @@ describe('collectFontDemandScalars', () => {
     expect([...demanded('AB')].filter((cp) => !SENTINELS.includes(cp))).toEqual([0x41, 0x42]);
   });
 
-  it('closes a cluster across texts that may be shaped together', () => {
-    const result = collectFontDemandScalars(['e', '\u0301'], { budget: BUDGET });
-    expect(result).not.toBe('all');
-    // The joined cluster composes; the mark may also be shaped on its own.
-    for (const cp of [0x65, 0x301, 0xe9, 0x25cc]) expect(result as number[]).toContain(cp);
+  it('closes a leading joiner run with every demanded scalar layout may shape it after', () => {
+    const scalars = (texts: string[]) => {
+      const result = collectFontDemandScalars(texts, { budget: BUDGET });
+      if (result === 'all') throw new Error(`all for ${JSON.stringify(texts)}`);
+      return result;
+    };
+    // Adjacent runs of one format.
+    for (const cp of [0x65, 0x301, 0xe9, 0x25cc]) expect(scalars(['e', '\u0301'])).toContain(cp);
+    // A case-mapped run visited in another order, or a deleted run between.
+    for (const cp of [0xc1, 0xe1]) expect(scalars(['\u0301', 'a', 'A'])).toContain(cp);
+    for (const cp of [0x103, 0x1eaf]) expect(scalars(['a', 'x', '\u0306\u0301'])).toContain(cp);
+    // A precomposed starter decomposes and recomposes with the run.
+    expect(scalars(['\u00e9', '\u0323'])).toContain(0x1eb9);
+  });
+
+  it('demands the dotted circle for any mark or joiner', () => {
+    for (const text of [' \u09cb', '\uac00\u302e\u302e', '\u0915\u093e', '\u1100\u1161']) {
+      expect(collectFontDemandScalars([text], { budget: BUDGET }), JSON.stringify(text)).toContain(0x25cc);
+    }
+    expect(collectFontDemandScalars(['AB'], { budget: BUDGET })).not.toContain(0x25cc);
   });
 
   it('declines a cluster too large to close before composing it', () => {

@@ -79,6 +79,14 @@ function excludedComposites(): readonly Decomposed[] {
   return excludedDecompositions;
 }
 
+/** Whether `starter` followed by `joiner` has a canonical composition in
+ * its canonical forms (NFC holds fewer scalars than NFD): the pair may
+ * paint a composite. */
+export function mayCompose(starter: number, joiner: number): boolean {
+  const text = String.fromCodePoint(starter, joiner);
+  return [...text.normalize('NFC')].length !== [...text.normalize('NFD')].length;
+}
+
 function decompose(cp: number, into: Set<number>): void {
   into.add(cp);
   for (const part of String.fromCodePoint(cp).normalize('NFD')) into.add(part.codePointAt(0) as number);
