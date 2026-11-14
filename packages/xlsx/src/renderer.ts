@@ -43,7 +43,7 @@ import {
   canvasShapeFontBoxProbe, excelShapeSpacing, officeRequestKey, shapeOfficeRouteKey, shapeRunLineRatios,
   type ShapeRunLineRatios,
 } from './shape-office-line.js';
-import { fitGeneralNumber, formatCellValueWithColor, type FormattedCell } from './number-format.js';
+import { fitGeneralNumber, formatCellValueWithColor, indexStyleNumFmts, type FormattedCell, type StyleNumFmtIndex } from './number-format.js';
 import { symbolPaint, type SymbolPaint } from './symbol-paint.js';
 import { createSymbolFaceOracle, isSymbolFontFamily, type SymbolFaceOracle, type SymbolFaceOracleCache } from '@silurus/ooxml-core';
 import { type CfContext, type CfResult, compileCf, evaluateCf } from './conditional-format.js';
@@ -2334,6 +2334,9 @@ function renderQuadrant(
   if (clipW <= 0 || clipH <= 0) return;
 
   const { styles, cellMap, mergeAnchorMap, mergeSkipSet, cfContext, cs, dpr } = rc;
+  // One numFmt index, built at the first formatted cell, for the rest of
+  // this pass (`styles` is library-owned parsed data; see indexStyleNumFmts).
+  let numFmtIndex: StyleNumFmtIndex | undefined;
   const numCols = colWidths.length;
   const numRows = rowHeights.length;
   const visibleRows = new Set(rowIndices);
@@ -2463,7 +2466,7 @@ function renderQuadrant(
     mergeBorderTasks.push(() => renderBorder(ctx, preBorder, aCx, aCy, cW, cH, dpr));
 
     if (!cell) continue;
-    const unfitted = formatCellValueWithColor(cell, styles, cf.numFmt, rc.worksheet.date1904);
+    const unfitted = formatCellValueWithColor(cell, styles, cf.numFmt, rc.worksheet.date1904, numFmtIndex ??= indexStyleNumFmts(styles.numFmts));
     if (!unfitted.text || (unfitted.text === '0' && rc.worksheet.showZeros === false)) continue;
 
     const fontForDraw = layeredCellFont(font, cf, styleFormat);
@@ -2849,7 +2852,7 @@ function renderQuadrant(
       }
 
       if (!cell) continue;
-      const unfitted = formatCellValueWithColor(cell, styles, cf.numFmt, rc.worksheet.date1904);
+      const unfitted = formatCellValueWithColor(cell, styles, cf.numFmt, rc.worksheet.date1904, numFmtIndex ??= indexStyleNumFmts(styles.numFmts));
       if (!unfitted.text || (unfitted.text === '0' && rc.worksheet.showZeros === false)) continue;
 
       textTasks.push(() => {
@@ -3762,6 +3765,9 @@ export function applyAutoRowHeights(
     autoRowHeightState.set(worksheet, { derived: new Map() });
     return false;
   }
+  // One numFmt index, built at the first formatted cell, for the rest of
+  // this pass (`styles` is library-owned parsed data; see indexStyleNumFmts).
+  let numFmtIndex: StyleNumFmtIndex | undefined;
 
   const geometry = getGridGeometryForWorksheet(worksheet);
   const defaultHeightPx = rowHeightToPx(worksheet.defaultRowHeight);
@@ -3813,7 +3819,7 @@ export function applyAutoRowHeights(
         if (!cellCanGrowAutomaticRow(cell, font, xf, defaultFontLineHeightPx)) continue;
         const cf = evaluateCf(cell, row.index, cell.col, cfContext, styles.dxfs ?? []);
         const measuredFont = layeredCellFont(font, cf, structuredStyleMap.get(key));
-        const formatted = formatCellValueWithColor(cell, styles, cf.numFmt, worksheet.date1904);
+        const formatted = formatCellValueWithColor(cell, styles, cf.numFmt, worksheet.date1904, numFmtIndex ??= indexStyleNumFmts(styles.numFmts));
         const text = formatted.text;
         if (!text || (text === '0' && worksheet.showZeros === false)) continue;
         const cellWidthPx = geometry.col.sizeOf(cell.col);
@@ -4070,6 +4076,9 @@ function virtualizedTextOverflowOverscan(
 ): OverflowColumnOverscan {
   let startCol = visibleStartCol;
   let endCol = visibleEndCol;
+  // One numFmt index, built at the first formatted cell, for the rest of
+  // this pass (`styles` is library-owned parsed data; see indexStyleNumFmts).
+  let numFmtIndex: StyleNumFmtIndex | undefined;
   const anchorKeys = new Set<string>();
 
   const reaches = (
@@ -4086,7 +4095,7 @@ function virtualizedTextOverflowOverscan(
     // inherits the column style, §18.3.1.13).
     const { font, xf } = resolveXf(styles, effectiveCellStyleIndex(worksheet, cell, col));
     const cf = evaluateCf(cell, row, col, cfContext, styles.dxfs ?? []);
-    const formatted = formatCellValueWithColor(cell, styles, cf.numFmt, worksheet.date1904);
+    const formatted = formatCellValueWithColor(cell, styles, cf.numFmt, worksheet.date1904, numFmtIndex ??= indexStyleNumFmts(styles.numFmts));
     const text = formatted.text;
     if (
       !text ||

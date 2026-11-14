@@ -28,6 +28,7 @@ import {
 } from '@silurus/ooxml-pptx/internal/session';
 import { InProcessPullTransport } from '@silurus/ooxml-core/internal/in-process-pull-transport';
 import type { OoxmlNodeSessionOptions } from './session-options.ts';
+import { toUint8 } from './input-normalization.ts';
 import type { NodeCanvasFactory, NodeCanvasLike } from './render.ts';
 import { createLazyWasmModule, resolveWasm } from './wasm-loader.ts';
 import { markParsedPptxSlide } from './pptx-parsed-slides.ts';
@@ -377,10 +378,6 @@ export async function materializePptxPresentation(
       return session.materialize(slides);
     },
   );
-}
-
-function toUint8(buffer: ArrayBuffer | Uint8Array): Uint8Array {
-  return buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer as ArrayBuffer);
 }
 
 declare const __OOXML_MODEL_SOURCES__: boolean;

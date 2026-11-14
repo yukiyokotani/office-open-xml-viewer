@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { cellDisplayTexts, fitGeneralNumber, formatCellValue, formatCellValueWithColor, formatGeneralNumber } from './number-format.js';
+import { cellDisplayTexts, fitGeneralNumber, formatCellValue, formatCellValueWithColor, formatGeneralNumber, indexStyleNumFmts } from './number-format.js';
 import type { Cell, Styles } from './types.js';
 
 const FMT_ID = 164; // first free custom id
@@ -78,6 +78,32 @@ describe('number formats — sign sections (§18.8.30)', () => {
 describe('number formats — literals', () => {
   it('keeps quoted literal text around the number', () => {
     expect(fmt(3, '0" units"')).toBe('3 units');
+  });
+});
+
+describe('style numFmt lookup — linear search and the per-pass index agree', () => {
+  const formatBoth = (s: Styles, n: number) => [
+    formatCellValueWithColor(numCell(n), s).text,
+    formatCellValueWithColor(numCell(n), s, null, false, indexStyleNumFmts(s.numFmts)).text,
+  ];
+
+  it('keeps the first <numFmt> when a stylesheet repeats an id', () => {
+    const s = styles('0.0');
+    s.numFmts.push({ numFmtId: FMT_ID, formatCode: '0.000' });
+    expect(formatBoth(s, 1.5)).toEqual(['1.5', '1.5']);
+  });
+
+  it('never matches a NaN id, as strict equality does', () => {
+    const s = styles('0.000');
+    s.cellXfs[0].numFmtId = NaN;
+    s.numFmts[0].numFmtId = NaN;
+    expect(formatBoth(s, 1.5)).toEqual(['1.5', '1.5']);
+  });
+
+  it('keeps the linear search for a malformed collection', () => {
+    const s = styles('0.0');
+    (s.numFmts as unknown[]).push(null);
+    expect(formatBoth(s, 1.5)).toEqual(['1.5', '1.5']);
   });
 });
 
