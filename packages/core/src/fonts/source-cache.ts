@@ -129,6 +129,7 @@ export function fontSourceId(source: FontSourceDescriptor): string {
       for (const [family, value] of families ?? []) hash.text(family).text(value === true ? undefined : value);
       hash.text(source.sharedSubsetMetricFamilies === undefined ? undefined : String(source.sharedSubsetMetricFamilies.length));
       for (const family of source.sharedSubsetMetricFamilies ?? []) hash.text(family);
+      hash.text(source.parallelFaceDownloads === undefined ? undefined : String(source.parallelFaceDownloads));
       break;
     }
     case 'font-css':
@@ -240,12 +241,37 @@ export class SharedTask<T> {
 let retainedTotal = 0;
 
 /** Charge `bytes` or reject with `OoxmlError('font-source-limit')`. */
+/** Holders of reclaimable bytes (faces a session built ahead of
+ * registration): released before any charge is refused. */
+const reclaimers = new Set<() => void>();
+
+/** Register `reclaim`, which must refund every reclaimable byte it holds;
+ * the returned function unregisters it. */
+export function addRetainedReclaimer(reclaim: () => void): () => void {
+  reclaimers.add(reclaim);
+  return () => { reclaimers.delete(reclaim); };
+}
+
 export function chargeRetainedBytes(bytes: number): void {
   if (bytes <= 0) return;
+  if (retainedTotal + bytes > HARD_MAX_FONT_SOURCE_RETAINED_BYTES) {
+    // Reclaimable bytes never decide a charge: the charge is judged as if
+    // they had not been taken.
+    for (const reclaim of [...reclaimers]) reclaim();
+  }
   if (retainedTotal + bytes > HARD_MAX_FONT_SOURCE_RETAINED_BYTES) {
     throw fontSourceLimitError('retained', HARD_MAX_FONT_SOURCE_RETAINED_BYTES, retainedTotal + bytes);
   }
   retainedTotal += bytes;
+}
+
+/** Charge `bytes` only if the realm has room without reclaiming anything:
+ * for reclaimable bytes. Returns whether it charged. */
+export function chargeReclaimableBytes(bytes: number): boolean {
+  if (bytes <= 0) return true;
+  if (retainedTotal + bytes > HARD_MAX_FONT_SOURCE_RETAINED_BYTES) return false;
+  retainedTotal += bytes;
+  return true;
 }
 
 export function refundRetainedBytes(bytes: number): void {

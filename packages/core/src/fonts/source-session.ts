@@ -100,6 +100,8 @@ import {
 import { activeFontSet, FONT_LOAD_CEILING_MS } from './font-registry.js';
 import {
   acquireSourceCache,
+  addRetainedReclaimer,
+  chargeReclaimableBytes,
   chargeRetainedBytes,
   fontContentKey,
   refundRetainedBytes,
@@ -443,6 +445,44 @@ function declarationKey(declaration: FontFaceDeclaration): string {
   ].join('|');
 }
 
+/** {@link FontSourceSession}'s registration signature of one
+ * declaration: source × family × every descriptor × content, so a face two
+ * claimed families share is registered once. */
+function faceSignature(sourceIndex: number, declaration: FontFaceDeclaration): string {
+  const { data, url = '' } = declaration;
+  const dataUrl = data === undefined && /^\s*data:/i.test(url);
+  return [
+    sourceIndex,
+    fontFamilyKey(declaration.family),
+    declaration.weight ?? '',
+    declaration.style ?? '',
+    declaration.stretch ?? '',
+    declaration.unicodeRange ?? '',
+    data !== undefined ? fontContentKey(data) : dataUrl ? fontContentKey(url) : url,
+  ].join('|');
+}
+
+/** The batch a source's own downloads join: one per credentials mode and
+ * download pool. */
+function directGroup(source: Exclude<FontSourceDescriptor, FontResolverSource>): string {
+  const parallel = source.kind === 'font-css-api' ? source.parallelFaceDownloads : undefined;
+  return `${source.credentials ?? 'same-origin'}\u0000${parallel ?? ''}`;
+}
+
+/** The `FontFace` descriptors of one declaration. */
+function faceDescriptors(declaration: FontFaceDeclaration): FontFaceDescriptors {
+  const descriptors: FontFaceDescriptors = {};
+  if (declaration.weight) descriptors.weight = declaration.weight;
+  if (declaration.style) descriptors.style = declaration.style;
+  if (declaration.stretch) descriptors.stretch = declaration.stretch;
+  if (declaration.unicodeRange) descriptors.unicodeRange = declaration.unicodeRange;
+  return descriptors;
+}
+
+/** Faces are no longer prepared ahead this close to the face-loading
+ * deadline, so no added work can delay a download's deadline check there. */
+const PREPARE_DEADLINE_MARGIN_MS = 1_000;
+
 /** A CSS `url()` for a validated absolute URL (data: URLs are kept verbatim
  * by validation and may contain characters a CSS string must escape). */
 function cssUrl(url: string): string {
@@ -581,6 +621,13 @@ export class FontSourceSession {
   private readonly owned = new Map<string, OwnedFace>();
   /** Served family key → this session's private family for it. */
   private readonly aliases = new Map<string, string>();
+  /** Faces built from downloaded bytes as each download completed (while the
+   * rest of its batch still downloads), by {@link register}'s signature,
+   * under a placeholder family; {@link register} names and adds them in its
+   * own order. Emptied after each registration pass. */
+  private readonly prepared = new Map<string, { readonly face: FontFace; readonly bytes: number }>();
+  /** Unregisters {@link dropPrepared} from the realm's reclaimers. */
+  private stopReclaim: (() => void) | undefined;
   private readonly serial = ++sessionSerial;
   /** Every declaration this session claimed (by {@link declarationKey}). */
   private readonly claimedDeclarations = new Set<string>();
@@ -642,6 +689,7 @@ export class FontSourceSession {
     this.closed = true;
     this.controller.abort();
     this.detachSignal();
+    this.dropPrepared();
     for (const entry of this.owned.values()) {
       this.fontSet?.delete(entry.face);
       refundRetainedBytes(entry.bytes);
@@ -835,7 +883,10 @@ export class FontSourceSession {
     if (!work.length) return false;
     // The needed URLs, per acquisition path: a credentials mode for the
     // library's own requests, or a resolver source (its acquirer).
-    const direct = new Map<FontSourceCredentials, Set<string>>();
+    const direct = new Map<string, { credentials: FontSourceCredentials; parallel: number | undefined; urls: Set<string> }>();
+    // Faces each URL's bytes will register as (their signatures need the
+    // bytes), prepared as soon as those bytes arrive.
+    const pending = new Map<string, { sourceIndex: number; declaration: FontFaceDeclaration }[]>();
     const viaResolver = new Map<number, Map<string, string[]>>();
     for (const { state, indices } of work) {
       const source = this.sources[state.sourceIndex];
@@ -849,18 +900,67 @@ export class FontSourceSession {
           families.set(state.name, [...families.get(state.name) ?? [], url]);
         } else {
           const credentials = source.credentials ?? 'same-origin';
-          let urls = direct.get(credentials);
-          if (!urls) { urls = new Set(); direct.set(credentials, urls); }
-          urls.add(url);
+          const parallel = source.kind === 'font-css-api' ? source.parallelFaceDownloads : undefined;
+          const group = directGroup(source);
+          let batch = direct.get(group);
+          if (!batch) { batch = { credentials, parallel, urls: new Set() }; direct.set(group, batch); }
+          batch.urls.add(url);
+          let faces = pending.get(url);
+          if (!faces) { faces = []; pending.set(url, faces); }
+          faces.push({ sourceIndex: state.sourceIndex, declaration });
         }
       }
     }
     const deadline = Date.now() + ceiling.remaining();
     const outcomes = new Map<string, ReadonlyMap<string, FaceAcquisition>>();
     const batches: Promise<void>[] = [];
-    for (const [credentials, urls] of direct) {
-      batches.push(acquireFaceUrls(urls, { credentials, signal: ceiling.signal, deadline, holder: this })
-        .then((acquired) => { outcomes.set(credentials, acquired); }));
+    // Building a face from bytes decodes them synchronously; doing it as
+    // each download lands overlaps that work with the downloads still in
+    // flight instead of running it all after the last one.
+    // Preparation runs in a task of its own after the downloads that landed
+    // (their deadline checks come first), and no face is built within
+    // PREPARE_DEADLINE_MARGIN_MS of the deadline (checked before each), so
+    // preparing never delays a download's deadline check past the deadline.
+    const landed: [string, ArrayBuffer][] = [];
+    let flush: ReturnType<typeof setTimeout> | undefined;
+    const prepareLanded = () => {
+      flush = undefined;
+      for (const [url, data] of landed.splice(0)) if (!prepare(url, data)) break;
+    };
+    const onAcquired = (url: string, data: ArrayBuffer) => {
+      if (this.closed) return;
+      landed.push([url, data]);
+      flush ??= setTimeout(prepareLanded, 0);
+    };
+    /** False once the margin is reached: nothing more is prepared. */
+    const prepare = (url: string, data: ArrayBuffer): boolean => {
+      for (const { sourceIndex, declaration } of pending.get(url) ?? []) {
+        // Checked before any work for a face (hashing included).
+        if (this.closed || Date.now() + PREPARE_DEADLINE_MARGIN_MS > deadline) return false;
+        const acquired = withAcquiredBytes(declaration, data);
+        const signature = faceSignature(sourceIndex, acquired);
+        if (this.owned.has(signature) || this.prepared.has(signature)) continue;
+        // The face's copy of the bytes is charged while it is prepared, only
+        // from room the realm has: any charge that would be refused first
+        // drops every prepared face (dropPrepared), so preparing never
+        // decides a download or registration, and never passes the ceiling.
+        if (!chargeReclaimableBytes(data.byteLength)) continue;
+        try {
+          const face = new FontFace(`ooxml-font-source-${this.serial}-prepared`, data, faceDescriptors(acquired));
+          this.prepared.set(signature, { face, bytes: data.byteLength });
+          this.stopReclaim ??= addRetainedReclaimer(() => this.dropPrepared());
+        } catch {
+          // Left to register(), which builds it again and records the error.
+          refundRetainedBytes(data.byteLength);
+        }
+      }
+      return true;
+    };
+    for (const [group, { credentials, parallel, urls }] of direct) {
+      batches.push(acquireFaceUrls(urls, {
+        credentials, signal: ceiling.signal, deadline, holder: this, onAcquired,
+        ...(parallel === undefined ? {} : { parallel }),
+      }).then((acquired) => { outcomes.set(group, acquired); }));
     }
     const acquire = this.acquireResolverFaces;
     for (const [sourceIndex, byFamily] of viaResolver) {
@@ -868,11 +968,40 @@ export class FontSourceSession {
       batches.push(this.acquireResolverUrls(acquire, sourceIndex, byFamily, ceiling, deadline)
         .then((acquired) => { outcomes.set(`resolver:${sourceIndex}`, acquired); }));
     }
-    await Promise.all(batches);
-    if (this.closed) throw createAbortError('Font source session released');
+    try {
+      await Promise.all(batches);
+      if (this.closed) throw createAbortError('Font source session released');
+      // Prepared faces stay charged (and reclaimable) until registration
+      // takes them over in declaration order; see register().
+      this.registerAcquired(work, outcomes, registered, failures);
+    } finally {
+      if (flush !== undefined) clearTimeout(flush);
+      landed.length = 0;
+      // Prepared faces no registration took (a missed deadline, a face
+      // another family registered first, a released session) are dropped.
+      this.dropPrepared();
+    }
+    return viaResolver.size > 0 && acquire !== undefined;
+  }
+
+  /** Drop every prepared face and return its charge. */
+  private dropPrepared(): void {
+    for (const entry of this.prepared.values()) refundRetainedBytes(entry.bytes);
+    this.prepared.clear();
+    this.stopReclaim?.();
+    this.stopReclaim = undefined;
+  }
+
+  /** Register the acquired faces of each work item, in declaration order. */
+  private registerAcquired(
+    work: readonly { state: Extract<FamilyState, { kind: 'claimed' }>; demand: DemandFaces; indices: readonly number[] }[],
+    outcomes: ReadonlyMap<string, ReadonlyMap<string, FaceAcquisition>>,
+    registered: Set<OwnedFace>,
+    failures: Map<string, string>,
+  ): void {
     for (const { state, demand, indices } of work) {
       const source = this.sources[state.sourceIndex];
-      const group = outcomes.get(source.kind === 'font-resolver' ? `resolver:${state.sourceIndex}` : source.credentials ?? 'same-origin');
+      const group = outcomes.get(source.kind === 'font-resolver' ? `resolver:${state.sourceIndex}` : directGroup(source));
       const ready: number[] = [];
       for (const index of indices) {
         demand.settled[index] = true;
@@ -888,7 +1017,6 @@ export class FontSourceSession {
       }
       this.register(state, registered, failures, ready);
     }
-    return viaResolver.size > 0 && acquire !== undefined;
   }
 
   /** Acquire the needed URL faces of one resolver source's claimed families
@@ -1093,16 +1221,7 @@ export class FontSourceSession {
     const signed = chosen.map((declaration) => {
       const { data, url = '' } = declaration;
       const dataUrl = data === undefined && /^\s*data:/i.test(url);
-      const signature = [
-        state.sourceIndex,
-        fontFamilyKey(declaration.family),
-        declaration.weight ?? '',
-        declaration.style ?? '',
-        declaration.stretch ?? '',
-        declaration.unicodeRange ?? '',
-        data !== undefined ? fontContentKey(data) : dataUrl ? fontContentKey(url) : url,
-      ].join('|');
-      return { declaration, signature, data, url, dataUrl };
+      return { declaration, signature: faceSignature(state.sourceIndex, declaration), data, url, dataUrl };
     });
     // A face registered later in a FontFaceSet takes precedence over an
     // earlier one with the same descriptors (CSS Fonts 4 §4.10 / Font Loading
@@ -1124,15 +1243,20 @@ export class FontSourceSession {
       let charged = false;
       try {
         // Beyond the realm's retained-byte ceiling the face fails like a
-        // face that cannot load (its family warned), nothing else.
-        chargeRetainedBytes(bytes);
+        // face that cannot load (its family warned), nothing else. A
+        // prepared face's charge (the same bytes) is taken over: it fit with
+        // every earlier face and download charged, so it would fit here too;
+        // charging another face first reclaims any prepared face still held.
+        const prepared = this.prepared.get(signature);
+        this.prepared.delete(signature);
+        if (!prepared) chargeRetainedBytes(bytes);
         charged = true;
-        const descriptors: FontFaceDescriptors = {};
-        if (declaration.weight) descriptors.weight = declaration.weight;
-        if (declaration.style) descriptors.style = declaration.style;
-        if (declaration.stretch) descriptors.stretch = declaration.stretch;
-        if (declaration.unicodeRange) descriptors.unicodeRange = declaration.unicodeRange;
-        face = new FontFace(alias, data ?? cssUrl(url), descriptors);
+        if (prepared) {
+          face = prepared.face;
+          face.family = alias;
+        } else {
+          face = new FontFace(alias, data ?? cssUrl(url), faceDescriptors(declaration));
+        }
         try { set.add(face); }
         catch (error) { set.delete(face); throw error; }
       } catch (error) {

@@ -24,7 +24,9 @@
  *   bytes from one request.
  *
  * Requests are CORS requests, as CSS font fetching is, at most
- * {@link MAX_CONCURRENT_FACE_DOWNLOADS} at a time per realm.
+ * {@link MAX_CONCURRENT_FACE_DOWNLOADS} at a time per realm, or the
+ * {@link FontCssApiSource.parallelFaceDownloads} of a library preset whose
+ * file host it states (a pool of its own, also per realm).
  *
  * Bytes are charged to the realm's retained-byte ceiling as they arrive, so
  * no batch can outgrow it, and each body is bounded by the face ceiling. A
@@ -44,7 +46,7 @@ import { createAbortError } from '../internal/abort.js';
 import { HARD_MAX_FONT_SOURCE_FACE_BYTES } from '../worker/resource-policy.generated.js';
 import type { FontResolverFailures } from './resolver-failures.js';
 import { chargeRetainedBytes, fontSourceId, refundRetainedBytes, SharedTask } from './source-cache.js';
-import type { FontFaceDeclaration, FontResolverSource, FontSourceCredentials } from './source.js';
+import type { FontCssApiSource, FontFaceDeclaration, FontResolverSource, FontSourceCredentials } from './source.js';
 
 /**
  * Abort reason of a deadline (the face-loading ceiling, a bridged call's
@@ -53,7 +55,8 @@ import type { FontFaceDeclaration, FontResolverSource, FontSourceCredentials } f
  */
 export const FONT_DEADLINE_REASON: unique symbol = Symbol('font deadline');
 
-/** Parallel face downloads per realm (the HTTP/1.1 per-host norm). */
+/** Parallel face downloads per realm (the HTTP/1.1 per-host norm), for every
+ * source that sets no {@link FontCssApiSource.parallelFaceDownloads}. */
 export const MAX_CONCURRENT_FACE_DOWNLOADS = 6;
 
 /** Whether the library acquires `declaration` (an http(s) or blob: URL). */
@@ -66,15 +69,21 @@ export type FaceAcquisition = { readonly data: ArrayBuffer } | { readonly reason
 
 // ---- download slots -------------------------------------------------------------
 
-let active = 0;
-const queued: (() => void)[] = [];
+/** One realm-wide download slot pool per parallelism (the default pool, and
+ * a source's own {@link FontCssApiSource.parallelFaceDownloads} pool). */
+interface SlotPool { active: number; readonly queued: (() => void)[] }
+const pools = new Map<number, SlotPool>();
 
-/** Wait for a download slot; the returned function frees it. A freed slot
- * passes straight to the first queued waiter (it stays counted as taken), so
- * a newcomer can never take it during the handoff. */
-async function slot(signal: AbortSignal): Promise<() => void> {
-  if (active < MAX_CONCURRENT_FACE_DOWNLOADS) {
-    active++;
+/** Wait for a download slot of the pool of `parallel` slots; the returned
+ * function frees it. A freed slot passes straight to the first queued waiter
+ * (it stays counted as taken), so a newcomer can never take it during the
+ * handoff. */
+async function slot(signal: AbortSignal, parallel: number): Promise<() => void> {
+  let pool = pools.get(parallel);
+  if (!pool) pools.set(parallel, pool = { active: 0, queued: [] });
+  const { queued } = pool;
+  if (pool.active < parallel) {
+    pool.active++;
   } else {
     await new Promise<void>((resolve, reject) => {
       const take = () => { signal.removeEventListener('abort', onAbort); resolve(); };
@@ -94,7 +103,7 @@ async function slot(signal: AbortSignal): Promise<() => void> {
     freed = true;
     const next = queued.shift();
     if (next) next();
-    else active--;
+    else pool.active--;
   };
 }
 
@@ -184,12 +193,13 @@ async function download(
   credentials: FontSourceCredentials,
   signal: AbortSignal,
   entry: Entry,
+  parallel: number,
 ): Promise<FaceAcquisition> {
   const charge = (bytes: number) => {
     chargeRetainedBytes(bytes);
     entry.charged += bytes;
   };
-  const free = await slot(signal);
+  const free = await slot(signal, parallel);
   let result: FaceAcquisition;
   try {
     if (typeof fetch !== 'function') {
@@ -243,6 +253,7 @@ async function acquireOne(
   credentials: FontSourceCredentials,
   signal: AbortSignal,
   holder: object,
+  parallel: number,
 ): Promise<FaceAcquisition> {
   // A requester that already left starts nothing and takes no hold.
   if (signal.aborted || releasedHolders.has(holder)) return { reason: 'timed out' };
@@ -252,7 +263,7 @@ async function acquireOne(
     // Abandoned before it settled (every waiter left): forget it, so the next
     // request starts afresh; the producer refunds what it charged.
     entry = new Entry(
-      (taskSignal, created) => download(key, url, credentials, taskSignal, created),
+      (taskSignal, created) => download(key, url, credentials, taskSignal, created, parallel),
       (created) => { if (entries.get(key) === created) entries.delete(key); },
     );
     entries.set(key, entry);
@@ -293,6 +304,12 @@ function keptAcquisition(url: string, credentials: FontSourceCredentials, holder
  * absolute `Date.now()` value) fails with `'timed out'`, whatever the timers
  * did; a face beyond a ceiling fails with the breach as its reason; an abort
  * of `signal` fails every unfinished face with `'timed out'`.
+ *
+ * `parallel` picks the realm's download pool a new download waits in
+ * ({@link MAX_CONCURRENT_FACE_DOWNLOADS} by default). `onAcquired` is told of
+ * each URL as soon as its bytes are in hand within the deadline, before the
+ * whole batch settles, so a caller can prepare work on them while the rest
+ * still downloads; the returned map stays the outcome.
  */
 export async function acquireFaceUrls(
   urls: Iterable<string>,
@@ -301,9 +318,12 @@ export async function acquireFaceUrls(
     readonly signal: AbortSignal;
     readonly deadline: number;
     readonly holder: object;
+    readonly parallel?: number;
+    readonly onAcquired?: (url: string, data: ArrayBuffer) => void;
   },
 ): Promise<Map<string, FaceAcquisition>> {
-  const { credentials, holder, deadline, signal } = options;
+  const { credentials, holder, deadline, signal, onAcquired } = options;
+  const parallel = options.parallel ?? MAX_CONCURRENT_FACE_DOWNLOADS;
   // A deadline ends the wait with an outcome; any other abort of `signal` is
   // a cancellation (the requester is gone), which decides nothing.
   const cancelled = () => releasedHolders.has(holder)
@@ -313,7 +333,7 @@ export async function acquireFaceUrls(
     const key = `${credentials}\u0000${url}`;
     let result: FaceAcquisition;
     try {
-      result = await acquireOne(url, credentials, signal, holder);
+      result = await acquireOne(url, credentials, signal, holder, parallel);
       if (Date.now() > deadline && 'data' in result) {
         // Missed the deadline: the bytes stay only if another holder keeps them.
         const entry = entries.get(key);
@@ -324,6 +344,8 @@ export async function acquireFaceUrls(
       result = { reason: 'timed out' };
     }
     if (cancelled() && !('data' in result)) return [url, { reason: 'timed out' }];
+    // Preparation only: whatever it does, the outcome stands.
+    if (onAcquired && 'data' in result) try { onAcquired(url, result.data); } catch { /* ignored */ }
     return [url, result];
   }));
   return new Map(results);
