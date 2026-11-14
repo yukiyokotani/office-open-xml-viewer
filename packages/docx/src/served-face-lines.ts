@@ -35,8 +35,10 @@ import {
  * Subsets of one style (`LoadedSourceFace.sharedSubsetMetrics`). A source
  * may guarantee that its `unicode-range` subsets of one served family with
  * equal descriptors keep one font file's vertical metric tables (core
- * FontCssApiSource.sharedSubsetMetrics: the Google Fonts CSS2 API, observed
- * for every subset of its catalog). Their measurements are then equal, so
+ * FontCssApiSource.sharedSubsetMetricFamilies: the Google Fonts CSS2 API,
+ * observed for every subset of its catalog). This applies only when every
+ * loaded face of the served family comes from that one source, since the
+ * session's private family holds the faces of every source. Their measurements are then equal, so
  * the style is measured once, through the subset whose range holds U+0020
  * (the style's first available font, CSS Fonts 4 §5: the face whose metrics
  * CSS gives the family's normal line), and every loaded subset of the style
@@ -114,9 +116,21 @@ export function servedFaceLineRequests(loaded: LoadedFontSources): ServedFaceLin
       ...(members ? { members } : {}),
     };
   };
+  // The painting family judges a style only when every loaded face of the
+  // served family is a shared-metric subset of one source: the session's
+  // private family holds every source's faces of that served family.
+  const sourceOf = new Map<string, number | null>();
+  for (const face of loaded.faces) {
+    const key = fontFamilyKey(face.family);
+    const source = face.sharedSubsetMetrics ? face.sourceIndex : null;
+    sourceOf.set(key, sourceOf.has(key) && sourceOf.get(key) !== source ? null : source);
+  }
   loaded.faces.forEach((face, index) => {
     if (face.resourceMetrics || face.probeSource === undefined) return;
-    if (!face.sharedSubsetMetrics) { requests.push(request(index)); return; }
+    if (!face.sharedSubsetMetrics || sourceOf.get(fontFamilyKey(face.family)) == null) {
+      requests.push(request(index));
+      return;
+    }
     const key = [face.sourceIndex, fontFamilyKey(face.family), face.weight, face.style, face.stretch].join('\u0000');
     const members = styles.get(key);
     if (members) members.push(index);
@@ -224,9 +238,10 @@ function measureTuples(faces: readonly FontFace[], owner: Document, cache: boole
       lines[tupleKey(weight, style)] = measured[index * WML_TUPLES.length + tuple] ?? null;
     });
     byFace.set(face, lines);
-    // Without a context nothing was measured: not kept, so a later call
-    // measures the probe.
-    if (cache && context) measuredProbes.set(face, Object.freeze(lines));
+    // Only a complete measurement is kept: one taken without a context, or
+    // while the page could not lay the struts out (a hidden body), is taken
+    // again by the next document instead of answering for it.
+    if (cache && context && Object.values(lines).every((line) => line !== null)) measuredProbes.set(face, Object.freeze(lines));
   });
   return faces.map((face) => byFace.get(face) ?? measuredProbes.get(face)!);
 }

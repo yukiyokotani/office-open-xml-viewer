@@ -11,14 +11,18 @@
  * - Google's distribution names for the native Noto CJK packages
  *   ("Noto Sans CJK SC" is served as "Noto Sans SC"). Google serves no
  *   Noto Serif HK, so the native serif HK name has no substitution;
- * - how the CSS2 API slices a font (`sharedSubsetMetrics`): each family style
- *   is served as `unicode-range` subsets of one font file, and every subset
- *   keeps that file's vertical metric tables. Observed (2026-11, Chromium):
- *   for every family and style of {@link GOOGLE_FONTS_CATALOG} (88 styles,
- *   2408 subsets, Latin to CJK), each subset registered alone measured the
- *   same CSS normal line and Canvas font box at every WordprocessingML tuple.
- *   A format that measures served faces (DOCX, where Chromium cannot inflate
- *   WOFF2 to read the tables) measures each style once.
+ * - how the CSS2 API slices a font (`sharedSubsetMetricFamilies`): each family
+ *   style is served as `unicode-range` subsets of one font file, and every
+ *   subset keeps that file's vertical metric tables. Observed (2026-11,
+ *   Chromium) on fonts.googleapis.com: for every family and style of
+ *   {@link GOOGLE_FONTS_CATALOG} at its catalog query (88 styles, 2408
+ *   subsets, Latin to CJK), each subset registered alone measured the same
+ *   CSS normal line and Canvas font box at every WordprocessingML tuple. A
+ *   format that measures served faces (DOCX, where Chromium cannot inflate
+ *   WOFF2 to read the tables) then measures each style once. The claim covers
+ *   only that evidence: the default origin (a mirror's files are its own) and
+ *   catalog families the caller did not replace; anything else is measured
+ *   per subset.
  *
  * The Office substitutions (Calibri → Carlito, …) are the vendor-neutral
  * {@link OFFICE_FONT_SUBSTITUTIONS}, adopted here like any source may adopt
@@ -158,6 +162,13 @@ function requestedFamilies(extra: unknown): Readonly<Record<string, string>> {
   ]);
 }
 
+/** Catalog families whose catalog query the caller's `families` kept (the
+ * evidence of `sharedSubsetMetricFamilies` is per catalog query). */
+function catalogFamiliesKept(extra: GoogleFontsOptions['families']): readonly string[] {
+  const replaced = new Set(Object.keys(extra ?? {}).map(fontFamilyKey));
+  return Object.keys(GOOGLE_FONTS_CATALOG).filter((family) => !replaced.has(fontFamilyKey(family)));
+}
+
 /** Google Fonts (or a Google-compatible mirror) as a font source. */
 export function googleFonts(options: GoogleFontsOptions = {}): FontSource {
   if (!options || typeof options !== 'object' || Array.isArray(options)) {
@@ -175,5 +186,5 @@ export function googleFonts(options: GoogleFontsOptions = {}): FontSource {
     urlTemplate: `${origin}/css2?family={family}:{query}&display=swap`,
     families: requestedFamilies(options.families),
     substitutes: options.substitutes === undefined ? GOOGLE_FONTS_SUBSTITUTIONS : options.substitutes,
-  }, { sharedSubsetMetrics: true });
+  }, origin === GOOGLE_FONTS_DEFAULT_CSS_ORIGIN ? { sharedSubsetMetricFamilies: catalogFamiliesKept(options.families) } : {});
 }

@@ -163,6 +163,16 @@ describe('googleFonts() preset', () => {
     expect(() => googleFonts({ substitutes: [{ for: 'A' }] } as never)).toThrow(TypeError);
   });
 
+  it('claims shared subset metrics only for unreplaced catalog families on the default origin', () => {
+    const keys = (source: FontCssApiSource) => source.sharedSubsetMetricFamilies?.map((family) => family.toLowerCase());
+    expect(keys(googleFonts())).toEqual(Object.keys(GOOGLE_FONTS_CATALOG).map((family) => family.toLowerCase()));
+    const extended = keys(googleFonts({ families: { 'Noto Sans JP': 'wght@300', 'Inter': 'wght@400' } }))!;
+    expect(extended).not.toContain('noto sans jp');
+    expect(extended).not.toContain('inter');
+    expect(extended).toContain('noto serif jp');
+    expect(googleFonts({ cssOrigin: 'https://fonts.example.test' }).sharedSubsetMetricFamilies).toBeUndefined();
+  });
+
   it('adds families outside the catalog, and replaces a catalog family\'s query', () => {
     const source = googleFonts({ families: { Inter: 'wght@400;700', roboto: 'wght@300' } });
     expect(onlyRequest(source, 'Inter').url).toBe(legacyUrl('Inter:wght@400;700'));

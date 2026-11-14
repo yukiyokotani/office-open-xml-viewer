@@ -152,7 +152,7 @@ export interface LoadedSourceFace {
   readonly probeSource?: string | ArrayBuffer;
   /** The supplying source guarantees that its `unicode-range` subsets of one
    * served family with equal descriptors share one font file's vertical
-   * metric tables ({@link FontCssApiSource.sharedSubsetMetrics}); present
+   * metric tables ({@link FontCssApiSource.sharedSubsetMetricFamilies}); present
    * only with {@link probeSource}. */
   readonly sharedSubsetMetrics?: true;
 }
@@ -1212,7 +1212,7 @@ export class FontSourceSession {
         face: entry.face,
         ...(resourceMetrics ? { resourceMetrics } : {}),
         ...(probeSource === undefined ? {} : { probeSource }),
-        ...(probeSource !== undefined && sharesSubsetMetrics(this.sources[entry.sourceIndex])
+        ...(probeSource !== undefined && sharesSubsetMetrics(this.sources[entry.sourceIndex], declaration.family)
           ? { sharedSubsetMetrics: true as const } : {}),
       }));
     }
@@ -1232,8 +1232,9 @@ export class FontSourceSession {
   }
 }
 
-const sharesSubsetMetrics = (source: FontSourceDescriptor | undefined) =>
-  source?.kind === 'font-css-api' && source.sharedSubsetMetrics === true;
+const sharesSubsetMetrics = (source: FontSourceDescriptor | undefined, family: string) =>
+  source?.kind === 'font-css-api'
+  && source.sharedSubsetMetricFamilies?.some((entry) => fontFamilyKey(entry) === fontFamilyKey(family)) === true;
 
 const releasedRunner: FontResolverRunner = () => {
   throw createAbortError('Font source session released');

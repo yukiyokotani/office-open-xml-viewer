@@ -138,9 +138,9 @@ describe('served-face probe registrations', () => {
 
 describe('subsets of a shared-metric style', () => {
   function slicedSources(): LoadedFontSources {
-    const face = (family: string, weight: string, unicodeRange: string, shared: boolean) => ({
+    const face = (family: string, weight: string, unicodeRange: string, shared: boolean, sourceIndex = 0) => ({
       family, weight, style: 'normal', stretch: 'normal', unicodeRange,
-      sourceIndex: 0, face: {} as FontFace, probeSource: new ArrayBuffer(8),
+      sourceIndex, face: {} as FontFace, probeSource: new ArrayBuffer(8),
       ...(shared ? { sharedSubsetMetrics: true } : {}),
     });
     return {
@@ -149,14 +149,20 @@ describe('subsets of a shared-metric style', () => {
         face('Sliced', '400', 'U+0-FF', true),
         face('Sliced', '400', 'U+3000-30FF', true),
         face('Sliced', '700', 'U+0-FF', true),
+        // A source without the guarantee: per face.
+        face('Plain', '400', 'U+0-FF', false),
         // A style none of whose loaded subsets holds U+0020: per face.
-        face('Sliced', '400', 'U+AC00-D7AF', false),
         face('Kanji Only', '400', 'U+4E00-9FFF', true),
         face('Kanji Only', '400', 'U+3000-30FF', true),
+        // One served family from two sources (the private family holds both):
+        // per face.
+        face('Two Sources', '400', 'U+0-FF', true, 0),
+        face('Two Sources', '400', 'U+4E00-9FFF', true, 1),
       ],
       substitutions: new Map(),
       regularAliases: new Map(),
-      families: new Map([['sliced', 'ooxml-font-source-test-2'], ['kanji only', 'ooxml-font-source-test-3']]),
+      families: new Map([['sliced', 'ooxml-font-source-test-2'], ['plain', 'ooxml-font-source-test-4'],
+        ['kanji only', 'ooxml-font-source-test-3'], ['two sources', 'ooxml-font-source-test-5']]),
     } as unknown as LoadedFontSources;
   }
 
@@ -164,20 +170,61 @@ describe('subsets of a shared-metric style', () => {
     const sources = slicedSources();
     const requests = servedFaceLineRequests(sources);
     expect(requests.map((request) => [request.index, request.members])).toEqual([
-      [1, [0, 1, 2]], [3, [3]], [4, undefined], [5, undefined], [6, undefined],
+      [1, [0, 1, 2]], [3, [3]], [4, undefined], [5, undefined], [6, undefined], [7, undefined], [8, undefined],
     ]);
     G.FontFace = LoadingFontFace;
     const { faces, set } = fakeSet();
     const measured = requests.map((request) => ({ index: request.index, lines: LINES }));
     const prepared = await prepareServedFaceLines(sources, set, [], measured);
     // The layout realm registers probes only for faces judged on their own.
-    expect(faces).toHaveLength(3);
+    expect(faces).toHaveLength(5);
     for (const index of [0, 1, 2]) {
       expect(prepared.faceLines.get(index)).toEqual({ ownershipFamily: 'ooxml-font-source-test-2', lines: LINES });
     }
     expect(prepared.faceLines.get(3)?.ownershipFamily).toBe('ooxml-font-source-test-2');
-    for (const index of [4, 5, 6]) expect(prepared.faceLines.get(index)?.ownershipFamily).toMatch(/^__ooxml_served_face_/);
+    for (const index of [4, 5, 6, 7, 8]) expect(prepared.faceLines.get(index)?.ownershipFamily).toMatch(/^__ooxml_served_face_/);
     unloadOfficeFontFallbacks(prepared.faces);
     expect(faces).toHaveLength(0);
+  });
+});
+
+describe('served-face probe measurements', () => {
+  it('keep only complete measurements, so a hidden page does not answer for a later document', async () => {
+    G.FontFace = LoadingFontFace;
+    const { set } = fakeSet();
+    let hidden = true;
+    const px = (css: string) => Number(/(\d+(?:\.\d+)?)px/.exec(css)?.[1] ?? 0);
+    const context = {
+      font: '',
+      measureText() {
+        const scale = px(this.font) / 1000;
+        return { fontBoundingBoxAscent: 800 * scale, fontBoundingBoxDescent: 200 * scale } as TextMetrics;
+      },
+    };
+    vi.stubGlobal('document', {
+      fonts: set,
+      body: { append() {} },
+      defaultView: { getComputedStyle: (strut: { style: { cssText: string } }) => ({ fontFamily: /px ("[^"]*")/.exec(strut.style.cssText)?.[1] ?? '' }) },
+      createElement: (tag: string) => tag === 'canvas' ? { getContext: () => context }
+        : tag === 'div' ? { style: { cssText: '' }, attachShadow: () => ({ append() {} }), remove() {} }
+        : { style: { cssText: '' }, textContent: '', get offsetHeight() { return hidden ? 0 : Math.round(1.3 * px(this.style.cssText)); } },
+    });
+    try {
+      const buffer = new ArrayBuffer(8);
+      const sources = {
+        faces: [{ family: 'Probed', weight: '400', style: 'normal', stretch: 'normal', unicodeRange: 'U+0-FF', sourceIndex: 0, face: {} as FontFace, probeSource: buffer }],
+        substitutions: new Map(), regularAliases: new Map(), families: new Map([['probed', 'ooxml-font-source-test-6']]),
+      } as unknown as LoadedFontSources;
+      const first = await prepareServedFaceLines(sources, set, []);
+      expect(first.faceLines.get(0)?.lines['400:normal']).toBeNull();
+      hidden = false;
+      // The first document still holds the shared probe.
+      const second = await prepareServedFaceLines(sources, set, []);
+      expect(second.faceLines.get(0)?.lines['400:normal']?.lineGapRatio).toBeCloseTo(0.3, 2);
+      unloadOfficeFontFallbacks(first.faces);
+      unloadOfficeFontFallbacks(second.faces);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });

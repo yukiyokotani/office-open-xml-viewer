@@ -127,7 +127,8 @@ export function fontSourceId(source: FontSourceDescriptor): string {
       const families = source.families ? Object.entries(source.families) : undefined;
       hash.text(families === undefined ? undefined : String(families.length));
       for (const [family, value] of families ?? []) hash.text(family).text(value === true ? undefined : value);
-      hash.text(source.sharedSubsetMetrics ? 'shared-subset-metrics' : undefined);
+      hash.text(source.sharedSubsetMetricFamilies === undefined ? undefined : String(source.sharedSubsetMetricFamilies.length));
+      for (const family of source.sharedSubsetMetricFamilies ?? []) hash.text(family);
       break;
     }
     case 'font-css':
