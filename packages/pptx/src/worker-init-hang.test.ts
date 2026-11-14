@@ -316,7 +316,7 @@ it.each(['default', 'source'] as const)('carries completed compact demand from t
   if (variant === 'source') openSourceMock.mockResolvedValue({ archive: sourceArchive(), viewDefaults: {}, close: vi.fn() });
   const fake = await loadWorker(variant);
   fake.onmessage?.({ data: { kind: 'init', wasmUrl: 'x' } } as MessageEvent);
-  fake.onmessage?.({ data: { kind: 'parse', id: 80, buffer: new ArrayBuffer(4), resourcePolicy, cjkFallback: 'jp', collectFontDemand: true,
+  fake.onmessage?.({ data: { kind: 'parse', id: 80, buffer: new ArrayBuffer(4), resourcePolicy, cjkFallback: 'jp', collectFontDemand: './font-preload-demand.js',
     ...(variant === 'source' ? { source: modelSource, sourceOwnerUrl: './internal/worker-presentation-source.js' } : {}),
   } } as MessageEvent);
   await vi.waitFor(() => expect(fake.posted).toContainEqual(expect.objectContaining({ kind: 'presentationOpened', id: 80 })));

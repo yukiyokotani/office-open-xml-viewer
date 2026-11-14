@@ -1,4 +1,4 @@
-import { loadFontDemandCollector } from './font-demand-collector.js';
+import { importFontDemandCollector } from './font-demand-collector.js';
 import { indexedOfficeFaceWeight } from './office-face-weight.js';
 import { decodeDataUrl, WasmParserHost } from '@silurus/ooxml-core';
 import {
@@ -113,8 +113,8 @@ self.onmessage = async (
         preflightBuilder = null;
         // Fetch the optional collector chunk while the archive opens, off
         // the critical path (observed so an open failure leaves no rejection).
-        const collectorLoad = request.collectFontDemand === true && !request.progressiveLayout
-          ? loadFontDemandCollector(true) : undefined;
+        const collectorLoad = typeof request.collectFontDemand === 'string' && !request.progressiveLayout
+          ? importFontDemandCollector(request.collectFontDemand) : undefined;
         void collectorLoad?.catch(() => undefined);
         const [maxEntry, maxTotal, maxEntries] = resourcePolicyForWasm(request.resourcePolicy);
         const bootstrap = host.run(() => {
