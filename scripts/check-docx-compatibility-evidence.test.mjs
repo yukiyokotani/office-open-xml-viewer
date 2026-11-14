@@ -488,3 +488,81 @@ fn nested() { let id = "${first}"; }
   const accepted = run(root);
   assert.equal(accepted.status, 0, accepted.stderr);
 });
+
+function profile(fields) {
+  return `export interface DocxCompatProfile {\n${fields}\n}\n`;
+}
+
+test('accepts profile fields that name declared rules or settings references', () => {
+  const root = fixture();
+  write(root, 'packages/docx/src/layout/compat-profile.ts', profile(`
+  /** Gate. @compatRule word-float-gap-flow */
+  readonly gap: boolean;
+  /**
+   * Two rules share one gate.
+   * @compatRule word-float-gap-flow
+   * @compatRule word-text-box-physical-insets
+   */
+  readonly shared: boolean;
+  /** @compatSetting ECMA-376 Part 4 §14.8.3.20 */
+  readonly flag: boolean;`));
+  const result = run(root);
+  assert.equal(result.status, 0, result.stderr);
+});
+
+test('rejects a profile field without evidence', () => {
+  const root = fixture();
+  write(root, 'packages/docx/src/layout/compat-profile.ts', profile(`
+  /** Undocumented gate. */
+  readonly gate: boolean;`));
+  const result = run(root);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /COMPATIBILITY_PROFILE_FIELD_EVIDENCE: DocxCompatProfile\.gate/);
+});
+
+test('rejects a profile field naming an undeclared rule', () => {
+  const root = fixture();
+  write(root, 'packages/docx/src/layout/compat-profile.ts', profile(`
+  /** @compatRule word-retired-rule */
+  readonly gate: boolean;`));
+  const result = run(root);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /COMPATIBILITY_PROFILE_UNKNOWN_RULE: .*word-retired-rule/);
+});
+
+test('rejects an invalid profile settings reference and a missing interface', () => {
+  const root = fixture();
+  write(root, 'packages/docx/src/layout/compat-profile.ts', profile(`
+  /** @compatSetting the settings flag */
+  readonly gate: boolean;`));
+  const invalid = run(root);
+  assert.equal(invalid.status, 1);
+  assert.match(invalid.stderr, /COMPATIBILITY_PROFILE_FIELD_EVIDENCE: .*invalid @compatSetting/);
+
+  write(root, 'packages/docx/src/layout/compat-profile.ts', 'export interface Other {}\n');
+  const missing = run(root);
+  assert.equal(missing.status, 1);
+  assert.match(missing.stderr, /COMPATIBILITY_PROFILE_SHAPE/);
+});
+
+test('rejects Microsoft and malformed settings references', () => {
+  for (const reference of ['[MS-OI29500] §2.1.120', 'ECMA-376 §---', 'ECMA-376 §17', 'ECMA-376 Part 4 §14.8.3.20 and more']) {
+    const root = fixture();
+    write(root, 'packages/docx/src/layout/compat-profile.ts', profile(`
+  /** @compatSetting ${reference} */
+  readonly flag: boolean;`));
+    const result = run(root);
+    assert.equal(result.status, 1, reference);
+    assert.match(result.stderr, /COMPATIBILITY_PROFILE_FIELD_EVIDENCE: DocxCompatProfile\.flag has an invalid/, reference);
+  }
+});
+
+test('rejects a merged second profile declaration', () => {
+  const root = fixture();
+  write(root, 'packages/docx/src/layout/compat-profile.ts', `${profile(`
+  /** @compatRule word-float-gap-flow */
+  readonly gap: boolean;`)}export interface DocxCompatProfile { readonly undocumentedGate: boolean; }\n`);
+  const result = run(root);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /COMPATIBILITY_PROFILE_SHAPE/);
+});

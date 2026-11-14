@@ -17,6 +17,10 @@ const ts = require('typescript-compiler-api');
 const DOCX_SOURCE = 'packages/docx/src';
 const DOCX_PARSER_SOURCE = 'packages/docx/parser/src';
 const COMPATIBILITY_OWNER = `${DOCX_SOURCE}/layout/compatibility.ts`;
+// Document-level gates: every DocxCompatProfile field names the rules it
+// gates (@compatRule) or the normative settings flag it carries (@compatSetting).
+const COMPATIBILITY_PROFILE = `${DOCX_SOURCE}/layout/compat-profile.ts`;
+const COMPATIBILITY_PROFILE_INTERFACE = 'DocxCompatProfile';
 const OBSERVATION_BASELINE =
   'scripts/docx-compatibility-observation-baseline.json';
 const MICROSOFT_EVIDENCE_CATALOG =
@@ -608,6 +612,90 @@ function verifyRulesCited(root, rules, declarationRanges) {
   }
 }
 
+function jsDocTagText(tag) {
+  const comment = typeof tag.comment === 'string'
+    ? tag.comment
+    : (tag.comment ?? []).map((part) => part.text).join('');
+  return comment.trim();
+}
+
+// Each profile field is declared once with its evidence: the rule IDs it
+// gates, whose declarations carry the evidence, or a normative settings
+// reference. Returns the number of verified fields (0 without a profile).
+// A normative settings reference: one ECMA-376 section. Observed Office
+// behaviour (including [MS-…] notes) belongs in a declared rule instead, so a
+// field reaches Microsoft evidence only through @compatRule.
+const COMPAT_SETTING_REFERENCE = /^ECMA-376 (?:Part [1-4] )?§\d+(?:\.\d+)+$/;
+
+function verifyCompatibilityProfile(root, rules) {
+  const absolute = resolve(root, COMPATIBILITY_PROFILE);
+  if (!existsSync(absolute)) return 0;
+  const source = ts.createSourceFile(
+    absolute,
+    readFileSync(absolute, 'utf8'),
+    ts.ScriptTarget.Latest,
+    true,
+  );
+  // Interfaces merge: every declaration of the name would contribute fields,
+  // so exactly one interface (and no other declaration) may own it.
+  const declarations = [];
+  const collect = (node) => {
+    if ((ts.isInterfaceDeclaration(node) || ts.isTypeAliasDeclaration(node)
+      || ts.isClassDeclaration(node) || ts.isModuleDeclaration(node)
+      || ts.isEnumDeclaration(node))
+      && node.name?.text === COMPATIBILITY_PROFILE_INTERFACE) declarations.push(node);
+    ts.forEachChild(node, collect);
+  };
+  collect(source);
+  const [profile] = declarations;
+  if (declarations.length !== 1 || !ts.isInterfaceDeclaration(profile)
+    || profile.heritageClauses?.length) {
+    fail(
+      'COMPATIBILITY_PROFILE_SHAPE',
+      `${COMPATIBILITY_PROFILE} must declare interface ${COMPATIBILITY_PROFILE_INTERFACE} without heritage`,
+    );
+  }
+  for (const member of profile.members) {
+    if (!ts.isPropertySignature(member) || !ts.isIdentifier(member.name)) {
+      fail(
+        'COMPATIBILITY_PROFILE_SHAPE',
+        `${COMPATIBILITY_PROFILE} fields must be named property signatures`,
+      );
+    }
+    const field = member.name.text;
+    const tags = ts.getJSDocTags(member);
+    const ruleIds = tags
+      .filter((tag) => tag.tagName.text === 'compatRule')
+      .map(jsDocTagText);
+    const settings = tags
+      .filter((tag) => tag.tagName.text === 'compatSetting')
+      .map(jsDocTagText);
+    if (ruleIds.length + settings.length === 0) {
+      fail(
+        'COMPATIBILITY_PROFILE_FIELD_EVIDENCE',
+        `${COMPATIBILITY_PROFILE_INTERFACE}.${field} names no @compatRule or @compatSetting`,
+      );
+    }
+    for (const id of ruleIds) {
+      if (!rules.has(id)) {
+        fail(
+          'COMPATIBILITY_PROFILE_UNKNOWN_RULE',
+          `${COMPATIBILITY_PROFILE_INTERFACE}.${field} names undeclared rule ${id || '<empty>'}`,
+        );
+      }
+    }
+    for (const reference of settings) {
+      if (!COMPAT_SETTING_REFERENCE.test(reference)) {
+        fail(
+          'COMPATIBILITY_PROFILE_FIELD_EVIDENCE',
+          `${COMPATIBILITY_PROFILE_INTERFACE}.${field} has an invalid @compatSetting reference`,
+        );
+      }
+    }
+  }
+  return profile.members.length;
+}
+
 function options(argv) {
   let root = process.cwd();
   for (let index = 0; index < argv.length; index += 1) {
@@ -671,6 +759,7 @@ export function checkDocxCompatibilityEvidence(root) {
   if (rules.size === 0) fail('COMPATIBILITY_REGISTRY_EMPTY', DOCX_SOURCE);
   verifyMicrosoftCatalogCited(microsoftCatalog, citedMicrosoftSections);
   verifyRulesCited(root, rules, declarationRanges);
+  verifyCompatibilityProfile(root, rules);
   const observations = observationKeys(root);
   verifyObservationBaseline(root, observations);
   return Object.freeze([...rules].map(([id, { file }]) => Object.freeze({ id, file })));
