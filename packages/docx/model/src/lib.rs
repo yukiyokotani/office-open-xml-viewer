@@ -55,6 +55,7 @@ pub const PARSE_DIAGNOSTIC_SEVERITY_UNSUPPORTED_VML_CONTENT: DiagnosticSeverity 
 /// smaller than the public document model: diagnostics carry stable facts and
 /// source coordinates, never authored text or raw invalid lexical values.
 #[derive(Serialize, Debug, Clone, Copy, Eq, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum DiagnosticSeverity {
     Warning,
@@ -64,6 +65,7 @@ pub enum DiagnosticSeverity {
 /// One parser-owned fact that layout cannot otherwise recover after the
 /// authored node is normalized or omitted.
 #[derive(Serialize, Debug, Clone, Eq, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ParseDiagnostic {
     pub code: String,
@@ -73,6 +75,7 @@ pub struct ParseDiagnostic {
 }
 
 #[derive(Serialize, Debug, Default, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct Document {
     pub section: SectionProps,
@@ -194,6 +197,7 @@ pub struct Document {
 
 /// One physical page's anchored drawings (see `Document::page_objects`).
 #[derive(Serialize, Debug, Default, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct PageObjectStory {
     /// The physical page, 1-based.
@@ -202,6 +206,7 @@ pub struct PageObjectStory {
 }
 
 #[derive(Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum StreamedDocumentUnit {
     Body { body: Vec<BodyElement> },
@@ -316,12 +321,14 @@ mod serialization_tests {
 }
 
 #[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct DocumentTypographySettingsWire {
     pub normal_style_font_size_pt: f64,
 }
 
 #[derive(Serialize, Debug, Clone, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct PageLayoutSettingsWire {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -337,6 +344,7 @@ pub struct PageLayoutSettingsWire {
 }
 
 #[derive(Serialize, Debug, Clone, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct NoteLayoutSettingsWire {
     /// §17.11.21 / §17.18.34 `w:footnotePr/w:pos`.
@@ -405,6 +413,7 @@ pub struct NoteLayoutSettingsWire {
 /// Reserved separator stories, retained once per document for each present
 /// note kind (never per note, page or worker).
 #[derive(Serialize, Debug, Clone, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ReservedNoteSeparatorsWire {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -416,6 +425,7 @@ pub struct ReservedNoteSeparatorsWire {
 /// The three role slots of one note kind (separator, continuation separator,
 /// continuation notice). Role does not select the rule kind.
 #[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ReservedNoteSeparatorStoriesWire {
     pub separator: ReservedNoteSeparatorStoryWire,
@@ -427,6 +437,7 @@ pub struct ReservedNoteSeparatorStoriesWire {
 /// paragraph without a rule is a paragraph-only story; a rule always comes
 /// with the paragraph whose mark ends it.
 #[derive(Serialize, Debug, Clone, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ReservedNoteSeparatorStoryWire {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -439,6 +450,7 @@ pub struct ReservedNoteSeparatorStoryWire {
 /// `continuationSeparator` semantics). `mark` is present only when the
 /// producer established that the control has its rule meaning.
 #[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ReservedNoteSeparatorRuleWire {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -450,6 +462,7 @@ pub struct ReservedNoteSeparatorRuleWire {
 /// from the control character. `content_mark` is absent when the story
 /// authors no paragraph mark.
 #[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ReservedNoteSeparatorParagraphWire {
     pub paragraph: DocParagraph,
@@ -466,6 +479,7 @@ pub struct ReservedNoteSeparatorParagraphWire {
 /// Effective character properties of one character. An absent run is an
 /// effectively hidden character, which differs from an absent character.
 #[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ReservedNoteSeparatorCharacterWire {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -481,6 +495,7 @@ pub struct ReservedNoteSeparatorCharacterWire {
 /// this fact does not authorize dropping custom text or formatting. None
 /// suppresses ink under existing band-gap policy.
 #[derive(Serialize, Debug, Clone, Copy, Eq, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum NoteSeparatorMark {
     Short,
@@ -491,6 +506,7 @@ pub enum NoteSeparatorMark {
 /// One embedded font-style slot from `word/fontTable.xml`. `style` is one of
 /// "regular" | "bold" | "italic" | "boldItalic" (the `<w:embed*>` element).
 #[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct EmbeddedFont {
     /// The `<w:font w:name>` this style belongs to (FontFace family name).
@@ -506,6 +522,7 @@ pub struct EmbeddedFont {
 /// Document-wide settings surfaced from `word/settings.xml`. Only the
 /// typography settings the renderer needs are extracted.
 #[derive(Serialize, Debug, Clone, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct DocumentSettings {
     /// ECMA-376 Part4 §14.8.3.12. Retain explicit state so the legacy
@@ -622,6 +639,7 @@ pub struct DocumentSettings {
 
 /// Single track-changes event extracted from a body revision wrapper.
 #[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct DocxRevision {
     /// "insertion" | "deletion" | "moveFrom" | "moveTo"
@@ -641,6 +659,7 @@ pub struct DocxRevision {
 }
 
 #[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct DocxComment {
     pub id: String,
@@ -678,6 +697,7 @@ pub struct DocxComment {
 /// measured width, line breaking, or paint geometry. The parser may preserve a
 /// run boundary at a mark so the authored position remains addressable.
 #[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct DocxCommentMark {
     /// `@w:id` linking the mark to its `word/comments.xml` entry.
@@ -696,6 +716,7 @@ pub struct DocxCommentMark {
 /// renderer can lay it out faithfully at page bottom / document end, and so the
 /// data-only API can surface the plain text.
 #[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct DocxNote {
     pub id: String,
@@ -705,6 +726,7 @@ pub struct DocxNote {
 }
 
 #[derive(Serialize, Debug, Default, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct HeadersFooters {
     pub default: Option<HeaderFooter>,
@@ -713,6 +735,7 @@ pub struct HeadersFooters {
 }
 
 #[derive(Serialize, Debug, Default, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct HeaderFooter {
     pub body: Vec<BodyElement>,
@@ -735,6 +758,7 @@ pub struct HeaderFooter {
 /// state); a `<w:pgNumType>` that carries only those is treated as "no start / no
 /// fmt" and numbering continues normally.
 #[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct PageNumType {
     /// `@w:start` — the first page number of the section. `None` ⇒ continue from
@@ -753,6 +777,7 @@ pub struct PageNumType {
 /// `None` on `SectionProps` when the sectPr declares no `<w:pgBorders>` (the
 /// common case — no page border), so existing snapshots are byte-identical.
 #[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct PageBorders {
     /// `@w:offsetFrom` (ST_PageBorderOffset §17.18.63): "page" ⇒ each edge's
@@ -783,6 +808,7 @@ pub struct PageBorders {
 /// values) are NOT modeled — an art `val` is carried verbatim and the renderer
 /// falls back to no ink (documented as unsupported).
 #[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct PageBorderEdge {
     /// `@w:val` — ST_Border line style ("single" | "double" | "dashed" | "dotted"
@@ -804,6 +830,7 @@ pub struct PageBorderEdge {
 /// `None` on `SectionProps` when the sectPr declares no `<w:lnNumType>` (line
 /// numbering is off — the common case; snapshots stay byte-identical).
 #[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct LineNumbering {
     /// `@w:countBy` (§17.6.8): only lines whose number is an even multiple of this
@@ -838,6 +865,7 @@ pub struct LineNumbering {
 /// default (US Letter portrait, 1" margins, 0.5" header/footer). Use
 /// `spec_default_geom()` (parser.rs) when a spec-default geometry is needed.
 #[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct SectionGeom {
     /// page width in pt (converted from twips)
@@ -857,6 +885,7 @@ pub struct SectionGeom {
 }
 
 #[derive(Serialize, Debug, Default, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct SectionProps {
     /// page width in pt (converted from twips)
@@ -942,6 +971,7 @@ pub struct SectionProps {
 
 /// ECMA-376 §17.6.4 `<w:cols>` — the section's multi-column configuration.
 #[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ColumnsSpec {
     /// `@w:num` — number of columns (>= 2 when this struct is emitted).
@@ -962,6 +992,7 @@ pub struct ColumnsSpec {
 
 /// ECMA-376 §17.6.3 `<w:col>` — one column's width and trailing space.
 #[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ColSpec {
     /// `@w:w` — the column's width in pt (converted from twips).
@@ -974,6 +1005,7 @@ pub struct ColSpec {
  * under `__sectionPlacement` on SectionBreak and projected into an internal TS
  * sidecar; it is not part of the stable public BodyElement declaration. */
 #[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct SectionPlacementWire {
     pub section_id: String,
@@ -1012,12 +1044,14 @@ pub struct SectionPlacementWire {
 
 /// See [`SectionPlacementWire::section_flow`].
 #[derive(Serialize, Debug, Clone, Copy, Eq, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub enum SectionFlow {
     BottomToTop,
 }
 
 #[derive(Serialize, Debug, Clone, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct SectionPageGeometryWire {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1039,6 +1073,7 @@ pub struct SectionPageGeometryWire {
 }
 
 #[derive(Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub enum PageBreakOrigin {
     Authored,
@@ -1046,6 +1081,7 @@ pub enum PageBreakOrigin {
 }
 
 #[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum BodyElement {
     // Keep the block wrapper compact as paragraph metadata grows. `Box` is
@@ -1169,6 +1205,7 @@ pub enum BodyElement {
 /// payloads; unsupported block-level children remain ordered markers so the
 /// retained layout can diagnose rather than silently discard them.
 #[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(untagged)]
 pub enum TextBoxBlockWire {
     Body(BodyElement),
@@ -1183,6 +1220,7 @@ pub enum TextBoxBlockWire {
 }
 
 #[derive(Serialize, Debug, Clone, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct DocParagraph {
     /// [MS-DOCX] §2.6.2.3 `w14:paraId` — source paragraph identifier, unique
@@ -1428,6 +1466,7 @@ pub struct DocParagraph {
 }
 
 #[derive(Serialize, Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ComplexFieldBoundaryWire {
     pub occurrence_id: u32,
@@ -1446,6 +1485,7 @@ pub struct ComplexFieldBoundaryWire {
 }
 
 #[derive(Serialize, Debug, Clone, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ParagraphBorders {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1461,6 +1501,7 @@ pub struct ParagraphBorders {
 }
 
 #[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ParaBorderEdge {
     /// "single" | "double" | "dashed" | ...
@@ -1475,6 +1516,7 @@ pub struct ParaBorderEdge {
 /// ECMA-376 §17.3.2.4 `<w:bdr>` — a run-level border ("box" around the run).
 /// Serialized shape matches `DocxRunBorder` on the TS side.
 #[derive(Serialize, Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct RunBorder {
     /// "single" | "double" | "dashed" | ... (w:bdr/@w:val)
@@ -1488,6 +1530,7 @@ pub struct RunBorder {
 }
 
 #[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct TabStop {
     /// tab stop position in pt (from the left of the paragraph content area)
@@ -1499,6 +1542,7 @@ pub struct TabStop {
 }
 
 #[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct LineSpacing {
     /// multiplier (e.g. 1.15) or exact pt
@@ -1526,6 +1570,7 @@ pub struct LineSpacing {
 /// `x`/`y` are ignored when `xAlign`/`yAlign` are set; for a drop cap, `y`/
 /// `yAlign` are ignored entirely and `lines` drives the height.
 #[derive(Serialize, Debug, Clone, Default, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct FramePr {
     /// ECMA-376 §17.3.1.11 `anchorLock`. This is retained only for effective
@@ -1574,6 +1619,7 @@ pub struct FramePr {
 }
 
 #[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct NumberingInfo {
     pub num_id: u32,
@@ -1649,6 +1695,7 @@ pub struct NumberingInfo {
 }
 
 #[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct PictureBulletTransform {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1659,6 +1706,7 @@ pub struct PictureBulletTransform {
 }
 
 #[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum DocRun {
     // Boxed: TextRun is the largest non-Shape Run variant (it carries the full
@@ -1746,6 +1794,7 @@ pub enum DocRun {
 /// (CT_LineEndProperties): `type` ∈ none/triangle/stealth/diamond/oval/arrow,
 /// `w`/`len` ∈ sm/med/lg. Maps 1:1 to core's `ArrowEnd`.
 #[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct LineEnd {
     /// ST_LineEndType (§20.1.10.33).
@@ -1758,6 +1807,7 @@ pub struct LineEnd {
 
 /// One DrawingML custom dash pair normalized to line-width multipliers.
 #[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ShapeLineDashSegment {
     pub dash: f64,
@@ -1768,6 +1818,7 @@ pub struct ShapeLineDashSegment {
 /// floating drawing. The drawing is out of inline flow, but Word still uses its
 /// anchor character's run metrics when sizing the containing text line.
 #[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct AnchorHostMetrics {
     /// Effective run size in points (§17.3.2.38 `<w:sz>`).
@@ -1797,6 +1848,7 @@ pub struct AnchorHostMetrics {
 }
 
 #[derive(Serialize, Debug, Clone, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct AnchorEdgesWire {
     pub top_pt: Option<f64>,
@@ -1810,6 +1862,7 @@ pub struct AnchorEdgesWire {
 }
 
 #[derive(Serialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub enum AnchorValueStatusWire {
     #[default]
@@ -1819,6 +1872,7 @@ pub enum AnchorValueStatusWire {
 }
 
 #[derive(Serialize, Debug, Clone, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum AnchorAxisChoiceWire {
     #[default]
@@ -1837,6 +1891,7 @@ pub enum AnchorAxisChoiceWire {
 }
 
 #[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct AnchorAxisWire {
     pub relative_from: Option<String>,
@@ -1855,6 +1910,7 @@ impl Default for AnchorAxisWire {
 }
 
 #[derive(Serialize, Debug, Clone, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct AnchorSimplePositionWire {
     pub enabled: Option<bool>,
@@ -1866,6 +1922,7 @@ pub struct AnchorSimplePositionWire {
 }
 
 #[derive(Serialize, Debug, Clone, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct AnchorExtentWire {
     pub width_pt: Option<f64>,
@@ -1875,6 +1932,7 @@ pub struct AnchorExtentWire {
 }
 
 #[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct AnchorRelativeSizeAxisWire {
     pub relative_from: Option<String>,
@@ -1884,6 +1942,7 @@ pub struct AnchorRelativeSizeAxisWire {
 }
 
 #[derive(Serialize, Debug, Clone, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct AnchorRelativeSizeWire {
     pub horizontal: Option<AnchorRelativeSizeAxisWire>,
@@ -1891,6 +1950,7 @@ pub struct AnchorRelativeSizeWire {
 }
 
 #[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct AnchorPointWire {
     pub x: Option<i64>,
@@ -1900,6 +1960,7 @@ pub struct AnchorPointWire {
 }
 
 #[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct AnchorPolygonWire {
     pub edited: bool,
@@ -1909,6 +1970,7 @@ pub struct AnchorPolygonWire {
 }
 
 #[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct AnchorPolygonSpaceWire {
     pub width: u32,
@@ -1916,6 +1978,7 @@ pub struct AnchorPolygonSpaceWire {
 }
 
 #[derive(Serialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub enum AnchorWrapKindWire {
     #[default]
@@ -1929,6 +1992,7 @@ pub enum AnchorWrapKindWire {
 }
 
 #[derive(Serialize, Debug, Clone, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct AnchorWrapWire {
     pub kind: AnchorWrapKindWire,
@@ -1940,6 +2004,7 @@ pub struct AnchorWrapWire {
 }
 
 #[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct AnchorBehaviorWire {
     pub behind_doc: Option<bool>,
@@ -1972,6 +2037,7 @@ impl Default for AnchorBehaviorWire {
 }
 
 #[derive(Serialize, Debug, Clone, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct AnchorRawTransformWire {
     pub offset_x_emu: Option<f64>,
@@ -1988,6 +2054,7 @@ pub struct AnchorRawTransformWire {
 }
 
 #[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct AnchorResolvedChildFrameWire {
     pub offset_x_pt: f64,
@@ -2000,6 +2067,7 @@ pub struct AnchorResolvedChildFrameWire {
 }
 
 #[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct AnchorGroupWire {
     pub child_source_id: String,
@@ -2011,6 +2079,7 @@ pub struct AnchorGroupWire {
 }
 
 #[derive(Serialize, Debug, Clone, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct AnchorAcquisitionWire {
     pub occurrence_id: String,
@@ -2029,6 +2098,7 @@ pub struct AnchorAcquisitionWire {
 /// VML §19.1.2.18 facts. Absolute offsets remain points; fractional offsets
 /// resolve against final layout dimensions, including group scaling.
 #[derive(Serialize, Debug, Clone, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct VmlShadowOffset {
     pub x_pt: f64,
@@ -2038,6 +2108,7 @@ pub struct VmlShadowOffset {
 }
 
 #[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct VmlShadow {
     pub kind: String,
@@ -2054,6 +2125,7 @@ pub struct VmlShadow {
 
 /// Part 4 §19.2.2.31: vector-only transform, after host rotation.
 #[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct VmlSkew {
     pub offset: VmlShadowOffset,
@@ -2065,6 +2137,7 @@ pub struct VmlSkew {
 /// Part 4 §§19.2.2.1/.6/.17/.29/.32: an independent edge pen.
 /// Defaults belong to this pen, never to its parent v:stroke.
 #[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct VmlEdgeStroke {
     pub edge: String,
@@ -2081,6 +2154,7 @@ pub struct VmlEdgeStroke {
 
 /// Source provenance for the bounded inline outer-run minimum policy.
 #[derive(Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum InlineObjectOrigin {
     #[serde(rename = "drawingml")]
     DrawingMl,
@@ -2091,6 +2165,7 @@ pub enum InlineObjectOrigin {
 /// A drawn shape (wps:wsp inside wp:anchor). Positioned like an anchor image
 /// and rendered via core's buildCustomPath + paint primitives.
 #[derive(Serialize, Debug, Clone, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ShapeRun {
     /// Effective WordprocessingML drawing-run font (§17.7.2, §17.3.2.26).
@@ -2393,6 +2468,7 @@ pub struct ShapeRun {
 /// downstream acquisition applies display and fitting only when those controls
 /// request it.
 #[derive(Serialize, Debug, Clone, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct TextPath {
     /// The `string` attribute — the watermark text (e.g. "DRAFT").
@@ -2420,6 +2496,7 @@ pub struct TextPath {
 /// reserved for a non-parser/default Rust value and therefore remains distinct
 /// from explicit parser provenance on the serialized wire object.
 #[derive(Serialize, Debug, Clone, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct VmlTextPathFacts {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2439,6 +2516,7 @@ pub struct VmlTextPathFacts {
 }
 
 #[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "fillType", rename_all = "camelCase")]
 pub enum ShapeStrokeFill {
     #[serde(rename_all = "camelCase")]
@@ -2469,12 +2547,14 @@ pub enum ShapeStrokeFill {
 /// VML Part 4 §19.1.2.5 brush placement. Native image dimensions are
 /// acquired lazily with the image, never inferred from the shape's extent.
 #[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct VmlFillLength {
     pub value: f64,
     pub fraction: bool,
 }
 #[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct VmlImageFill {
     pub repeat: bool,
@@ -2486,6 +2566,7 @@ pub struct VmlImageFill {
 }
 
 #[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "fillType", rename_all = "camelCase")]
 pub enum ShapeFill {
     Solid {
@@ -2550,6 +2631,7 @@ pub enum ShapeFill {
 }
 
 #[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct GradientStop {
     /// 0.0–1.0
@@ -2560,6 +2642,7 @@ pub struct GradientStop {
 
 /// Paint flags of one custom geometry path (ECMA-376 §20.1.9.15).
 #[derive(Serialize, Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct PathPaint {
     /// VML end-delimited path sets use even-odd parity. DrawingML keeps nonzero.
@@ -2577,6 +2660,7 @@ pub struct PathPaint {
 /// Custom geometry path command (shape rendering). Mirrors the pptx
 /// PathCmd type to keep JSON output compatible with core's buildCustomPath.
 #[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "cmd", rename_all = "camelCase")]
 pub enum PathCmd {
     MoveTo {
@@ -2624,6 +2708,7 @@ pub enum PathCmd {
 }
 
 #[derive(Serialize, Debug, Clone, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct RunFontAxisValues {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2637,6 +2722,7 @@ pub struct RunFontAxisValues {
 }
 
 #[derive(Serialize, Debug, Clone, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct RunFontAxisPresence {
     pub ascii: bool,
@@ -2646,6 +2732,7 @@ pub struct RunFontAxisPresence {
 }
 
 #[derive(Serialize, Debug, Clone, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct RunFontSlots {
     pub direct: RunFontAxisValues,
@@ -2658,6 +2745,7 @@ pub struct RunFontSlots {
 /// line probes (§17.3.1.29); the stable public TypeScript model intentionally
 /// remains unchanged.
 #[derive(Serialize, Debug, Clone, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct RunFontFacts {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2697,6 +2785,7 @@ pub struct RunFontFacts {
 }
 
 #[derive(Serialize, Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub enum TypographyValueStatusWire {
     #[default]
@@ -2709,6 +2798,7 @@ pub enum TypographyValueStatusWire {
 /// diagnostic seam: required/enum values that are absent or malformed remain
 /// distinguishable from valid zero/false values instead of being guessed.
 #[derive(Serialize, Debug, Clone, Default, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct TypographyValueWire<T> {
     pub status: TypographyValueStatusWire,
@@ -2717,6 +2807,7 @@ pub struct TypographyValueWire<T> {
 }
 
 #[derive(Serialize, Debug, Clone, Default, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct CtBorderTypographyWire {
     pub val: TypographyValueWire<String>,
@@ -2731,6 +2822,7 @@ pub struct CtBorderTypographyWire {
 }
 
 #[derive(Serialize, Debug, Clone, Default, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct UnderlineTypographyWire {
     pub val: TypographyValueWire<String>,
@@ -2741,6 +2833,7 @@ pub struct UnderlineTypographyWire {
 }
 
 #[derive(Serialize, Debug, Clone, Default, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct TypographyLanguagesWire {
     pub east_asia: Option<String>,
@@ -2748,6 +2841,7 @@ pub struct TypographyLanguagesWire {
 }
 
 #[derive(Serialize, Debug, Clone, Default, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct EastAsianLayoutTypographyWire {
     pub vert: Option<bool>,
@@ -2757,6 +2851,7 @@ pub struct EastAsianLayoutTypographyWire {
 }
 
 #[derive(Serialize, Debug, Clone, Default, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct RubyGuideRunTypographyWire {
     pub text: String,
@@ -2769,6 +2864,7 @@ pub struct RubyGuideRunTypographyWire {
 }
 
 #[derive(Serialize, Debug, Clone, Default, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct RubyTypographyWire {
     pub align: TypographyValueWire<String>,
@@ -2779,6 +2875,7 @@ pub struct RubyTypographyWire {
 }
 
 #[derive(Serialize, Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct RevisionTypographyWire {
     pub kind: String,
@@ -2788,6 +2885,7 @@ pub struct RevisionTypographyWire {
 }
 
 #[derive(Serialize, Debug, Clone, Default, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct RunTypographyWire {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2817,6 +2915,7 @@ pub struct RunTypographyWire {
 }
 
 #[derive(Serialize, Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct FitTextSpecWire {
     pub val_twips: f64,
@@ -2824,6 +2923,7 @@ pub struct FitTextSpecWire {
 }
 
 #[derive(Serialize, Debug, Clone, Default, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ParagraphTypographyBordersWire {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2841,12 +2941,14 @@ pub struct ParagraphTypographyBordersWire {
 }
 
 #[derive(Serialize, Debug, Clone, Default, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ParagraphTypographyWire {
     pub borders: ParagraphTypographyBordersWire,
 }
 
 #[derive(Serialize, Debug, Clone, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct FieldRun {
     /// "page" | "numPages" | "other"
@@ -2912,6 +3014,7 @@ pub struct FieldRun {
 }
 
 #[derive(Serialize, Debug, Clone, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct TextRun {
     pub text: String,
@@ -3168,6 +3271,7 @@ pub struct TextRun {
 /// the renderer from the note's sequential position (ECMA-376 numbering), so
 /// only the kind + id need to travel through the model.
 #[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct NoteRef {
     /// "footnote" | "endnote".
@@ -3182,6 +3286,7 @@ pub struct NoteRef {
 }
 
 #[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct RunRevision {
     /// "insertion" | "deletion" | "moveFrom" | "moveTo" (ECMA-376 §17.13.5.18
@@ -3205,6 +3310,7 @@ pub struct RunRevision {
 }
 
 #[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct RubyAnnotation {
     pub text: String,
@@ -3227,6 +3333,7 @@ pub struct RubyAnnotation {
 /// bold label followed by non-bold body text keeps each run's formatting
 /// instead of collapsing to the first run's.
 #[derive(Serialize, Debug, Clone, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ShapeTextRun {
     pub text: String,
@@ -3282,6 +3389,7 @@ pub struct ShapeTextRun {
 /// PER-RUN formatting so the renderer can draw mixed bold/non-bold runs as rich
 /// text (ECMA-376 §17.3.2 — each `<w:r>` resolves its own rPr).
 #[derive(Serialize, Debug, Clone, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ShapeText {
     pub text: String,
@@ -3416,6 +3524,7 @@ pub struct ShapeText {
 pub use ooxml_common::blip::{BlipEffect, Duotone, SrcRect};
 
 #[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ImageRun {
     /// Effective WordprocessingML drawing-run font (§17.7.2, §17.3.2.26).
@@ -3565,6 +3674,7 @@ pub struct ImageRun {
 }
 
 #[derive(Serialize, Debug, Clone, Copy, Eq, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub enum UnavailableDrawingResourceKind {
     Image,
@@ -3572,6 +3682,7 @@ pub enum UnavailableDrawingResourceKind {
 }
 
 #[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct UnavailableDrawingRun {
     /// ECMA-376 §20.4.2.6 `wp:effectExtent` of a `wp:inline` container,
@@ -3613,6 +3724,7 @@ fn is_true(v: &bool) -> bool {
 /// positions it and wraps body text around it with picture parity
 /// (issues #752, #788).
 #[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ChartRun {
     /// Authored inline `wp:effectExtent` (ECMA-376 §20.4.2.6), physical
@@ -3704,6 +3816,7 @@ pub struct ChartRun {
 }
 
 #[derive(Serialize, Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub enum BreakType {
     Line,
@@ -3723,6 +3836,7 @@ pub enum BreakType {
 /// presence in `<w:tblPr>` makes the table FLOAT (out of the main text flow,
 /// absolutely positioned by its top-left corner). All attributes are optional.
 #[derive(Serialize, Debug, Clone, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct TblpPr {
     /// §17.4.57 leftFromText/rightFromText/topFromText/bottomFromText
@@ -3761,6 +3875,7 @@ pub struct TblpPr {
 }
 
 #[derive(Serialize, Debug, Clone, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct DocTable {
     /// column widths in pt
@@ -3832,6 +3947,7 @@ pub struct DocTable {
 /// from the element being absent (represented by the owning `Option`). Layout
 /// resolves the lexical kind only after its containing-block width is known.
 #[derive(Serialize, Debug, Clone, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct TableWidthAcquisitionWire {
     pub kind: Option<String>,
@@ -3839,12 +3955,14 @@ pub struct TableWidthAcquisitionWire {
 }
 
 #[derive(Serialize, Debug, Clone, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct TableLayoutKindAcquisitionWire {
     pub kind: Option<String>,
 }
 
 #[derive(Serialize, Debug, Clone, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct TableGridColumnAcquisitionWire {
     /// Raw `gridCol/@w` twips token. Missing is not an inferred width: per
@@ -3853,6 +3971,7 @@ pub struct TableGridColumnAcquisitionWire {
 }
 
 #[derive(Serialize, Debug, Clone, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct TableGridAcquisitionWire {
     pub authored: bool,
@@ -3864,6 +3983,7 @@ pub struct TableGridAcquisitionWire {
 }
 
 #[derive(Serialize, Debug, Clone, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct TableMarginAcquisitionWire {
     pub top: Option<TableWidthAcquisitionWire>,
@@ -3875,6 +3995,7 @@ pub struct TableMarginAcquisitionWire {
 }
 
 #[derive(Serialize, Debug, Clone, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct TableLayoutAcquisitionWire {
     pub effective_style_id: Option<String>,
@@ -3911,6 +4032,7 @@ pub struct TableLayoutAcquisitionWire {
 }
 
 #[derive(Serialize, Debug, Clone, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct TableBorders {
     pub top: Option<BorderSpec>,
@@ -3922,6 +4044,7 @@ pub struct TableBorders {
 }
 
 #[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct BorderSpec {
     /// pt
@@ -3932,6 +4055,7 @@ pub struct BorderSpec {
 }
 
 #[derive(Serialize, Debug, Clone, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct DocTableRow {
     pub cells: Vec<DocTableCell>,
@@ -3962,6 +4086,7 @@ pub struct DocTableRow {
 }
 
 #[derive(Serialize, Debug, Clone, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct TableRowHeightAcquisitionWire {
     pub value: Option<String>,
@@ -3973,6 +4098,7 @@ pub struct TableRowHeightAcquisitionWire {
 }
 
 #[derive(Serialize, Debug, Clone, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct TablePropertyExceptionAcquisitionWire {
     pub preferred_width: Option<TableWidthAcquisitionWire>,
@@ -3985,6 +4111,7 @@ pub struct TablePropertyExceptionAcquisitionWire {
 }
 
 #[derive(Serialize, Debug, Clone, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct TableRowLayoutAcquisitionWire {
     pub height: Option<TableRowHeightAcquisitionWire>,
@@ -4010,6 +4137,7 @@ pub struct TableRowLayoutAcquisitionWire {
 /// One block-level entry inside a table cell. ECMA-376 §17.4.7 (w:tc) allows
 /// any BlockLevelElts inside a cell — paragraphs and nested tables.
 #[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum CellElement {
     // Match `BodyElement`: nested cell block vectors must not inherit the full
@@ -4019,6 +4147,7 @@ pub enum CellElement {
 }
 
 #[derive(Serialize, Debug, Clone, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct DocTableCell {
     pub content: Vec<CellElement>,
@@ -4070,6 +4199,7 @@ pub struct DocTableCell {
 }
 
 #[derive(Serialize, Debug, Clone, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct TableCellLayoutAcquisitionWire {
     pub preferred_width: Option<TableWidthAcquisitionWire>,
@@ -4077,6 +4207,7 @@ pub struct TableCellLayoutAcquisitionWire {
 }
 
 #[derive(Serialize, Debug, Clone, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct CellBorders {
     pub top: Option<BorderSpec>,

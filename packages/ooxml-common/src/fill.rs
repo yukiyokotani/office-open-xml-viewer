@@ -26,6 +26,7 @@ use roxmltree::Node;
 /// ECMA-376 §20.1.8.30 `a:fillRect` (CT_RelativeRect) destination insets.
 /// Values are signed fractions; negative values extend beyond the fill box.
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Default, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct FillRect {
     #[serde(skip_serializing_if = "is_zero", default)]
@@ -40,6 +41,7 @@ pub struct FillRect {
 
 /// ECMA-376 §20.1.8.58 `a:tile` placement facts shared by every DrawingML host.
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct TileInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -69,6 +71,7 @@ fn is_zero(value: &f64) -> bool {
 /// former inline `GradStop`, so its JSON stays byte-identical when it stores a
 /// `Vec<GradStop>` on its own `Fill::Gradient`.
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct GradStop {
     /// Stop offset along the gradient axis, `0.0`–`1.0` (raw `pos` / 100000).

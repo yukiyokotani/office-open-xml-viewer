@@ -18,6 +18,11 @@ zip = { workspace = true }
 # Test support only: a GFM parser for checking that the Markdown projection
 # keeps document text literal. Parser crates enable it from dev-dependencies.
 comrak = { version = "0.52", default-features = false, optional = true }
+# Dev-only: derive JSON Schema for the serialized model types so
+# scripts/check-model-wire-drift.mjs can compare the serde wire shape with the
+# hand-written TS model types. Never enabled by a WASM build.
+schemars = { version = "1", optional = true }
 
 [features]
 gfm-check = ["dep:comrak"]
+schema = ["dep:schemars"]

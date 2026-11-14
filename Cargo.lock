@@ -230,6 +230,7 @@ name = "docx-model"
 version = "0.1.0"
 dependencies = [
  "ooxml-common",
+ "schemars",
  "serde",
  "serde_json",
 ]
@@ -631,6 +632,7 @@ dependencies = [
  "flate2",
  "quick-xml",
  "roxmltree",
+ "schemars",
  "serde",
  "serde_json",
  "zip",

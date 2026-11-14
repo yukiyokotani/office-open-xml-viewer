@@ -8,10 +8,19 @@ publish = false
 # Owned document cursor for model sources that build a complete Document up
 # front (companion packages). The OOXML parser does not enable it.
 owned-source-cursor = []
+# Dev-only: derive JSON Schema for the serialized model (see the
+# `wire-schema` example and scripts/check-model-wire-drift.mjs). Never enabled
+# by a WASM build, so the shipped parsers are unchanged.
+schema = ["dep:schemars", "ooxml-common/schema"]
 
 [dependencies]
 serde = { workspace = true }
 ooxml-common = { workspace = true }
+schemars = { version = "1", optional = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
+
+[[example]]
+name = "wire-schema"
+required-features = ["schema"]

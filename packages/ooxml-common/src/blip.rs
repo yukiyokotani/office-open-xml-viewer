@@ -109,6 +109,7 @@ pub fn mime_from_ext(path: &str) -> &'static str {
 /// knowledge. `ST_Percentage` has no fixed range; absent edges default to `0`.
 /// Shared by the docx, pptx and xlsx parsers so the three formats crop identically.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, Default, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct SrcRect {
     pub l: f64,
@@ -193,6 +194,7 @@ pub fn parse_blip_alpha(blip_fill: Node<'_, '_>) -> Option<f64> {
 /// (lumMod/lumOff/tint/satMod/shade/…) are already baked in by
 /// [`crate::color::parse_color_node`]. Shared across the docx/pptx/xlsx parsers.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct Duotone {
     /// First colour child — dark endpoint. 6-char hex, no `#`.
@@ -254,6 +256,7 @@ pub fn parse_blip_duotone(
 /// Ordered CT_Blip effects (ECMA-376 §20.1.8.13). Each entry owns all of
 /// its parameters; malformed effects remain explicit diagnostics.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum BlipEffect {
     /// §20.1.8.34 `<a:grayscl>`.
@@ -397,6 +400,7 @@ pub enum BlipEffect {
 /// CT_ReflectionEffect's complete geometry, extending the shared shape
 /// descriptor with the attributes a recursive mask must not discard.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct BlipReflection {
     #[serde(flatten)]
@@ -411,6 +415,7 @@ pub struct BlipReflection {
 /// §20.1.8.20, §20.1.10.22. Siblings each consume the parent;
 /// trees consume the previous result. Names remain owned graph facts.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct EffectContainer {
     pub kind: String,
@@ -422,6 +427,7 @@ pub struct EffectContainer {
 /// Fill recipes match core's shared Fill model. Geometry and palette parsing
 /// use fill.rs; there is no second gradient/pattern implementation here.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "fillType", rename_all = "camelCase")]
 pub enum EffectFill {
     None,
