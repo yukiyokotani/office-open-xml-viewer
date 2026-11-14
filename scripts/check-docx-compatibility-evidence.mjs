@@ -622,7 +622,33 @@ function jsDocTagText(tag) {
 // Each profile field is declared once with its evidence: the rule IDs it
 // gates, whose declarations carry the evidence, or a normative settings
 // reference. Returns the number of verified fields (0 without a profile).
-function verifyCompatibilityProfile(root, rules) {
+// A whole-line `@compatSetting <reference>` tag in the profile owner. The
+// reference is validated by verifyCompatibilityProfile, so the observation
+// scanner skips exactly these lines (a Microsoft section is catalog-checked).
+const COMPAT_SETTING_TAG_LINE = /^(?:\/\*\*|\*)?\s*@compatSetting (?:ECMA-376 (?:Part [1-4] )?§§?[0-9.,\s–-]+|\[MS-[A-Z0-9]+\] §§?[0-9.,\s–-]+)\s*(?:\*\/)?$/;
+
+function verifyCompatibilitySetting(field, reference, microsoftCatalog, citedMicrosoftSections) {
+  const invalid = () => fail(
+    'COMPATIBILITY_PROFILE_FIELD_EVIDENCE',
+    `${COMPATIBILITY_PROFILE_INTERFACE}.${field} has an invalid @compatSetting reference`,
+  );
+  if (!COMPAT_SETTING_TAG_LINE.test(`@compatSetting ${reference}`)) invalid();
+  const microsoft = reference.match(/^\[(MS-[A-Z0-9]+)\] §§?(.+)$/);
+  if (!microsoft) return;
+  const sectionIds = [...microsoft[2].matchAll(/\b\d+(?:\.\d+)+\b/g)].map((entry) => entry[0]);
+  const knownSections = microsoftCatalog.get(microsoft[1]);
+  if (sectionIds.length === 0
+    || !knownSections
+    || sectionIds.some((sectionId) => !knownSections.has(sectionId))) {
+    fail(
+      'COMPATIBILITY_MICROSOFT_EVIDENCE',
+      `${COMPATIBILITY_PROFILE_INTERFACE}.${field} references an uncatalogued Microsoft section: ${reference}`,
+    );
+  }
+  for (const sectionId of sectionIds) citedMicrosoftSections.add(`${microsoft[1]} ${sectionId}`);
+}
+
+function verifyCompatibilityProfile(root, rules, microsoftCatalog, citedMicrosoftSections) {
   const absolute = resolve(root, COMPATIBILITY_PROFILE);
   if (!existsSync(absolute)) return 0;
   const source = ts.createSourceFile(
@@ -631,10 +657,20 @@ function verifyCompatibilityProfile(root, rules) {
     ts.ScriptTarget.Latest,
     true,
   );
-  const profile = source.statements.find((statement) =>
-    ts.isInterfaceDeclaration(statement)
-    && statement.name.text === COMPATIBILITY_PROFILE_INTERFACE);
-  if (!profile || profile.heritageClauses?.length) {
+  // Interfaces merge: every declaration of the name would contribute fields,
+  // so exactly one interface (and no other declaration) may own it.
+  const declarations = [];
+  const collect = (node) => {
+    if ((ts.isInterfaceDeclaration(node) || ts.isTypeAliasDeclaration(node)
+      || ts.isClassDeclaration(node) || ts.isModuleDeclaration(node)
+      || ts.isEnumDeclaration(node))
+      && node.name?.text === COMPATIBILITY_PROFILE_INTERFACE) declarations.push(node);
+    ts.forEachChild(node, collect);
+  };
+  collect(source);
+  const [profile] = declarations;
+  if (declarations.length !== 1 || !ts.isInterfaceDeclaration(profile)
+    || profile.heritageClauses?.length) {
     fail(
       'COMPATIBILITY_PROFILE_SHAPE',
       `${COMPATIBILITY_PROFILE} must declare interface ${COMPATIBILITY_PROFILE_INTERFACE} without heritage`,
@@ -670,12 +706,7 @@ function verifyCompatibilityProfile(root, rules) {
       }
     }
     for (const reference of settings) {
-      if (!/^(?:ECMA-376 |\[MS-[A-Z0-9]+\] )\S/.test(reference)) {
-        fail(
-          'COMPATIBILITY_PROFILE_FIELD_EVIDENCE',
-          `${COMPATIBILITY_PROFILE_INTERFACE}.${field} has an invalid @compatSetting reference`,
-        );
-      }
+      verifyCompatibilitySetting(field, reference, microsoftCatalog, citedMicrosoftSections);
     }
   }
   return profile.members.length;
@@ -706,6 +737,7 @@ function observationKeys(root) {
       if (ALLOWED_DECLARATION_FILES.has(file)) return [];
       return readFileSync(absolute, 'utf8').split(/\r?\n/).flatMap((line) =>
         observationMarker.test(line)
+          && !(file === COMPATIBILITY_PROFILE && COMPAT_SETTING_TAG_LINE.test(line.trim()))
           ? [`${file}::${line.trim().replace(/\s+/g, ' ')}`]
           : []);
     })
@@ -742,9 +774,9 @@ export function checkDocxCompatibilityEvidence(root) {
     );
   }
   if (rules.size === 0) fail('COMPATIBILITY_REGISTRY_EMPTY', DOCX_SOURCE);
+  verifyCompatibilityProfile(root, rules, microsoftCatalog, citedMicrosoftSections);
   verifyMicrosoftCatalogCited(microsoftCatalog, citedMicrosoftSections);
   verifyRulesCited(root, rules, declarationRanges);
-  verifyCompatibilityProfile(root, rules);
   const observations = observationKeys(root);
   verifyObservationBaseline(root, observations);
   return Object.freeze([...rules].map(([id, { file }]) => Object.freeze({ id, file })));
