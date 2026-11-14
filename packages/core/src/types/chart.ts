@@ -11,6 +11,7 @@ import type {
   Fill,
   Glow,
   GradientFill,
+  ImageFill,
   PatternFill,
   Reflection,
   Shadow,
@@ -43,7 +44,7 @@ export interface ChartSeries {
    * Kept as a shared fill recipe so solid, gradient, and pattern alternates
    * render identically in XLSX, DOCX, and PPTX chart hosts.
    */
-  invertedFill?: SolidFill | GradientFill | PatternFill | null;
+  invertedFill?: SolidFill | GradientFill | PatternFill | ImageFill | null;
   /** Alternate negative fill explicitly authored as `<a:noFill>`. */
   invertedFillHidden?: boolean | null;
   /** Whether `c14:invertSolidFillFmt` directly authored a fill choice. */
@@ -776,7 +777,7 @@ export interface ChartSurfaceBandFormat {
   /** Direct outline geometry/paint and fill-authorship provenance. The one
    * authoritative direct fill recipe is carried by `fill`. */
   style?: ChartExElementStyle | null;
-  fill?: SolidFill | GradientFill | PatternFill | null;
+  fill?: SolidFill | GradientFill | PatternFill | ImageFill | null;
   fillHidden?: boolean | null;
   lineColor?: string | null;
   lineWidthEmu?: number | null;
@@ -811,7 +812,7 @@ export interface ChartDataTable {
   fillColor?: string | null;
   /** Direct DrawingML fill recipe. Preserved even where Office's application-
    * defined data-table paint extent has not been established for that recipe. */
-  fill?: SolidFill | GradientFill | PatternFill | null;
+  fill?: SolidFill | GradientFill | PatternFill | ImageFill | null;
   /** Explicit `<a:noFill>` on the data-table shape properties. */
   fillHidden?: boolean | null;
   /** True when `spPr` authored any DrawingML fill child, including one whose
@@ -1754,7 +1755,7 @@ export interface ChartThreeDPictureOptions {
 
 export interface ChartThreeD {
   /** Whether `<c:view3D>` itself was authored. */
-  view3DPresent?: boolean | null;
+  view3dPresent?: boolean | null;
   rotationX?: number | null;
   rotationXAuthored?: boolean | null;
   rotationY?: number | null;

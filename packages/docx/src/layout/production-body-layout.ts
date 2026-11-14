@@ -4230,7 +4230,7 @@ function registerImageFloat(
   // gate under allowOverlap=true, and the right-then-down re-seat using dist
   // padding as the float-to-float gap. See layout/floats.ts.
   const allowOverlap = img.allowOverlap ?? true;
-  const key = anchoredImageCollisionKey(img.imagePath, img.colorReplaceFrom, img.duotone);
+  const key = anchoredImageCollisionKey(img.imagePath, img.colorReplaceFrom ?? undefined, img.duotone);
   pushFloatRect(state, {
     x: box.x,
     y: box.y,

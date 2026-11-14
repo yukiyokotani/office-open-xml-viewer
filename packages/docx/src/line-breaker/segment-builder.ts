@@ -1982,7 +1982,7 @@ function appendRunsToSegments(
         anchorYPt: img.anchorYPt ?? 0,
         anchorXFromMargin: img.anchorXFromMargin ?? false,
         anchorYFromPara: img.anchorYFromPara ?? false,
-        colorReplaceFrom: img.colorReplaceFrom,
+        colorReplaceFrom: img.colorReplaceFrom ?? undefined,
         duotone: img.duotone,
         alpha: img.alpha,
         srcRect: img.srcRect ?? undefined,

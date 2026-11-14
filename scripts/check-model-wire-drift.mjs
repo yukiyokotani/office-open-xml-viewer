@@ -36,10 +36,26 @@ export const FORMATS = {
     crate: 'docx-model',
     tsconfig: 'packages/docx/tsconfig.json',
     tsFile: 'packages/docx/src/types.ts',
-    tsRoot: 'DocxDocumentModel',
+    roots: [{ rust: 'Document', ts: 'DocxDocumentModel' }],
     // Sources of every serialized type reachable from the root, scanned for
     // the null-provenance convention (see scanNullProvenance).
     rustSources: ['packages/docx/model/src', 'packages/ooxml-common/src'],
+  },
+  xlsx: {
+    crate: 'xlsx-model',
+    tsconfig: 'packages/xlsx/tsconfig.json',
+    tsFile: 'packages/xlsx/src/types.ts',
+    // The workbook JSON and each worksheet JSON are separate payloads.
+    roots: [{ rust: 'Workbook', ts: 'Workbook' }, { rust: 'Worksheet', ts: 'Worksheet' }],
+    rustSources: ['packages/xlsx/model/src', 'packages/ooxml-common/src'],
+  },
+  pptx: {
+    crate: 'pptx-model',
+    tsconfig: 'packages/pptx/tsconfig.json',
+    tsFile: 'packages/pptx/src/types.ts',
+    // Slide payloads are the `slides[]` elements of the presentation.
+    roots: [{ rust: 'Presentation', ts: 'Presentation' }],
+    rustSources: ['packages/pptx/model/src', 'packages/ooxml-common/src'],
   },
 };
 
@@ -232,6 +248,7 @@ function deref(shape) {
 
 // ------------------------------- TypeScript --------------------------------
 
+/** TS shapes for each `format.roots[].ts` export of `format.tsFile`. */
 function tsShapes(format) {
   const configPath = path.resolve(repoRoot, format.tsconfig);
   const config = ts.readConfigFile(configPath, ts.sys.readFile);
@@ -242,9 +259,12 @@ function tsShapes(format) {
   const checker = program.getTypeChecker();
   const source = program.getSourceFile(file);
   const moduleSymbol = source && checker.getSymbolAtLocation(source);
-  const rootSymbol = moduleSymbol && checker.getExportsOfModule(moduleSymbol).find((s) => s.name === format.tsRoot);
-  if (!rootSymbol) throw new Error(`${format.tsFile}: cannot find exported ${format.tsRoot}`);
-  const rootType = checker.getDeclaredTypeOfSymbol(rootSymbol);
+  const exports = moduleSymbol ? checker.getExportsOfModule(moduleSymbol) : [];
+  const rootTypes = new Map(rootsOf(format).map(({ ts: name }) => {
+    const symbol = exports.find((s) => s.name === name);
+    if (!symbol) throw new Error(`${format.tsFile}: cannot find exported ${name}`);
+    return [name, checker.getDeclaredTypeOfSymbol(symbol)];
+  }));
   const cache = new Map();
 
   function typeName(type) {
@@ -325,7 +345,12 @@ function tsShapes(format) {
     return ANY;
   }
 
-  return convert(rootType);
+  return new Map([...rootTypes].map(([name, type]) => [name, convert(type)]));
+}
+
+/** A format compares one or more (Rust root, TS root) pairs. */
+function rootsOf(format) {
+  return format.roots ?? [{ rust: null, ts: format.tsRoot }];
 }
 
 /** An optional property's `undefined` member means absence, not a value. */
@@ -349,11 +374,13 @@ function memo(fn) {
  * A key is `<owner>.<field>: <category>[ <payload>]`; the payload carries the
  * concrete values (literals, mismatched kinds) so an allowlisted difference
  * cannot silently grow. */
-export function compareShapes(rustRoot, tsRoot) {
+export function compareShapes(pairs) {
   const findings = new Map();
-  comparer((f) => {
-    if (!findings.has(f.key)) findings.set(f.key, f);
-  }).walk(rustRoot, tsRoot, { owner: '(root)', field: '(root)', path: '$' });
+  for (const [rustRoot, tsRoot, label] of pairs) {
+    comparer((f) => {
+      if (!findings.has(f.key)) findings.set(f.key, f);
+    }).walk(rustRoot, tsRoot, { owner: '(root)', field: '(root)', path: label ? `${label}$` : '$' });
+  }
   return [...findings.values()].sort((a, b) => a.key.localeCompare(b.key));
 }
 
@@ -783,14 +810,17 @@ const q = (v) => JSON.stringify(v);
 
 // --------------------------------- Driver ----------------------------------
 
-function rustSchema(format, schemaFile) {
-  if (schemaFile) return JSON.parse(readFileSync(schemaFile, 'utf8'));
-  const out = execFileSync(
-    'cargo',
-    ['run', '--quiet', '--locked', '-p', format.crate, '--features', 'schema', '--example', 'wire-schema'],
-    { cwd: repoRoot, encoding: 'utf8', maxBuffer: 256 * 1024 * 1024, stdio: ['ignore', 'pipe', 'inherit'] },
-  );
-  return JSON.parse(out);
+/** `{ RustRootName: jsonSchema }` as printed by the crate's `wire-schema`
+ * example (a single schema file is keyed by its title). */
+function rustSchemas(format, schemaFile) {
+  const parsed = JSON.parse(schemaFile
+    ? readFileSync(schemaFile, 'utf8')
+    : execFileSync(
+      'cargo',
+      ['run', '--quiet', '--locked', '-p', format.crate, '--features', 'schema', '--example', 'wire-schema'],
+      { cwd: repoRoot, encoding: 'utf8', maxBuffer: 256 * 1024 * 1024, stdio: ['ignore', 'pipe', 'inherit'] },
+    ));
+  return parsed.$schema || parsed.$defs || parsed.type || parsed.$ref ? { [parsed.title]: parsed } : parsed;
 }
 
 /** The schema cannot tell an omitted field that never carries null (e.g.
@@ -962,7 +992,7 @@ function namedFields(body, base, lineAt) {
     .filter((part) => part.text.trim())
     .map((part) => {
       const { attrs, rest } = splitAttributes(part.text);
-      const decl = /^\s*(?:pub(?:\s*\([^)]*\))?\s+)?([A-Za-z_]\w*)\s*:\s*([\s\S]+?)\s*$/.exec(rest);
+      const decl = /^\s*(?:pub(?:\s*\([^)]*\))?\s+)?((?:r#)?[A-Za-z_]\w*)\s*:\s*([\s\S]+?)\s*$/.exec(rest);
       return {
         attrs,
         name: decl?.[1] ?? rest.trim().split(/\s/)[0],
@@ -1157,7 +1187,14 @@ export function checkFormat(name, {
     throw new Error(`model-wire-drift: null provenance is ambiguous for:\n  ${provenance.join('\n  ')}\n`
       + 'Teach rustShapes to keep null for such fields before allowing them.');
   }
-  const findings = compareShapes(rustShapes(rustSchema(format, schemaFile)), tsShapes(format));
+  const schemas = rustSchemas(format, schemaFile);
+  const ts = tsShapes(format);
+  const roots = rootsOf(format);
+  const findings = compareShapes(roots.map(({ rust, ts: tsName }) => {
+    const name = rust ?? Object.keys(schemas)[0];
+    if (!schemas[name]) throw new Error(`model-wire-drift: the ${format.crate} schema has no root ${name}`);
+    return [rustShapes(schemas[name]), ts.get(tsName), roots.length > 1 ? name : ''];
+  }));
   if (list) return { findings, unexpected: findings, stale: [] };
   const allowed = new Set(Object.keys(allowlist ?? {}));
   for (const [category, owners] of Object.entries(widening ?? {})) {

@@ -32,10 +32,110 @@
 //   type-mismatch          Incompatible shapes.
 //
 // Entries marked DRIFT are genuine inaccuracies reported for follow-up; the
-// rest are intentional.
+// rest are intentional. Differences in the shared ooxml-common types (charts,
+// math, effects) that every format reaches are listed once in COMMON.
+
+/** Shared ooxml-common types reached from every format root. */
+const COMMON = {
+  // ---- Intentional: internal parser→layout channels -------------------------
+  // `__`-prefixed fields are private acquisition facts that the layout layer
+  // reads through internal wire types (packages/docx/src/layout/*-input.ts,
+  // page-object-wire.ts, parser-model.ts, core math); they are deliberately
+  // not part of the public model types. Each one is listed, so a new channel
+  // needs a reviewed entry.
+  'MathNode<kind=run>.__script: missing-in-ts': 'internal channel',
+
+  // ---- Intentional: shared TS interfaces ------------------------------------
+  // One TS interface serves several Rust shapes (MathScript for sub and sup;
+  // BlipEffectImageFill for every image effect fill).
+  'EffectFill<fillType=image>.alpha: ts-only': 'shared TS interface',
+  'EffectFill<fillType=image>.duotone: ts-only': 'shared TS interface',
+  'MathNode<kind=sub>.sup: ts-only': 'shared TS interface',
+  'MathNode<kind=sup>.sub: ts-only': 'shared TS interface',
+
+  // ---- Intentional: chart fields derived on the TS side ---------------------
+  // Filled by packages/core/src/chart (label-box style merge, effective-style)
+  // or by the chart host after parsing.
+  'ChartLabelBox.effectFallbackIndex: ts-only': 'derived by core chart code',
+  'ChartLabelBox.effectFallbackStyle: ts-only': 'derived by core chart code',
+  'ChartLabelBox.effectStyleIndex: ts-only': 'derived by core chart code',
+  'ChartModel.fontSubstitutions: ts-only': 'derived by core chart code',
+  'ChartModel.linkedChartStyleRoles: ts-only': 'derived by core chart code',
+  'ChartModel.varyingPointChartStyleRoles: ts-only': 'derived by core chart code',
+  'ChartModel.varyingPointChartStyleRolesByGroup: ts-only': 'derived by core chart code',
+
+  // ---- Intentional: shared core Fill union ----------------------------------
+  // These TS fields use the shared core `Fill` union, which also accepts
+  // variants the Rust field type does not have (ChartStyleFill has no `none`;
+  // the XLSX shape stroke paint is never solid, which uses the color field).
+  'ChartDataPointOverride.markerFillPaint<fillType=none>: variant-never-emitted': 'shared core Fill union',
+  'ChartExElementStyle.fillPaints[]<fillType=none>: variant-never-emitted': 'shared core Fill union',
+  'ChartLabelBox.fillPaint<fillType=none>: variant-never-emitted': 'shared core Fill union',
+  'ChartModel.chartFill<fillType=none>: variant-never-emitted': 'shared core Fill union',
+  'ChartModel.legendFill<fillType=none>: variant-never-emitted': 'shared core Fill union',
+  'ChartModel.plotAreaFill<fillType=none>: variant-never-emitted': 'shared core Fill union',
+  'ChartSeries.markerFillPaint<fillType=none>: variant-never-emitted': 'shared core Fill union',
+  'ChartStockBarPaint.fill<fillType=none>: variant-never-emitted': 'shared core Fill union',
+
+  // ---- Intentional: DrawingML line paints -----------------------------------
+  // A DrawingML line (`a:ln`, ECMA-376 §20.1.2.2.24) cannot hold a blipFill, so
+  // the TS line-paint types exclude the image variant of ChartStyleFill. The
+  // PPTX Stroke.fill carries only gradient/pattern line paint (solid uses
+  // `color`, noFill drops the stroke; pptx parser fill.rs).
+  'ChartDecorationLineStyle.fill<fillType=image>: variant-missing-in-ts': 'a:ln has no blipFill',
+  'ChartExElementStyle.linePaints[]<fillType=image>: variant-missing-in-ts': 'a:ln has no blipFill',
+  'ChartLabelBox.borderFill<fillType=image>: variant-missing-in-ts': 'a:ln has no blipFill',
+  'ChartModel.chartBorderLineFill<fillType=image>: variant-missing-in-ts': 'a:ln has no blipFill',
+  'ChartModel.legendLineFill<fillType=image>: variant-missing-in-ts': 'a:ln has no blipFill',
+  'ChartModel.plotAreaLineFill<fillType=image>: variant-missing-in-ts': 'a:ln has no blipFill',
+
+  // ---- Intentional: chart style role tables ---------------------------------
+  // Rust keys these maps by role name (String); TS names the closed set of
+  // MS-ODRAWXML §2.8.3.1 CT_ChartStyle roles the parser fills in. The payload
+  // pins the role list.
+  'ChartModel.chartStyleRoles: ts-closed-keys ["axisTitle","categoryAxis","chartArea","dataLabel","dataLabelCallout","dataPoint","dataPoint3D","dataPointLine","dataPointMarker","dataPointWireframe","dataTable","downBar","dropLine","errorBar","floor","gridlineMajor","gridlineMinor","hiLoLine","leaderLine","legend","plotArea","plotArea3D","seriesAxis","seriesLine","title","trendline","trendlineLabel","upBar","valueAxis","wall"]': 'chart style role names',
+  'ChartModel.classicChartStyleRoles: ts-closed-keys ["axisTitle","categoryAxis","chartArea","dataLabel","dataLabelCallout","dataPoint","dataPoint3D","dataPointLine","dataPointMarker","dataPointWireframe","dataTable","downBar","dropLine","errorBar","floor","gridlineMajor","gridlineMinor","hiLoLine","leaderLine","legend","plotArea","plotArea3D","seriesAxis","seriesLine","title","trendline","trendlineLabel","upBar","valueAxis","wall"]': 'chart style role names',
+  'ChartModel.classicVaryingPointChartStyleRoles: ts-closed-keys ["axisTitle","categoryAxis","chartArea","dataLabel","dataLabelCallout","dataPoint","dataPoint3D","dataPointLine","dataPointMarker","dataPointWireframe","dataTable","downBar","dropLine","errorBar","floor","gridlineMajor","gridlineMinor","hiLoLine","leaderLine","legend","plotArea","plotArea3D","seriesAxis","seriesLine","title","trendline","trendlineLabel","upBar","valueAxis","wall"]': 'chart style role names',
+  'ChartModel.classicVaryingPointChartStyleRolesByGroup[]: ts-closed-keys ["axisTitle","categoryAxis","chartArea","dataLabel","dataLabelCallout","dataPoint","dataPoint3D","dataPointLine","dataPointMarker","dataPointWireframe","dataTable","downBar","dropLine","errorBar","floor","gridlineMajor","gridlineMinor","hiLoLine","leaderLine","legend","plotArea","plotArea3D","seriesAxis","seriesLine","title","trendline","trendlineLabel","upBar","valueAxis","wall"]': 'chart style role names',
+
+  // ---- Intentional: vocabularies narrowed in TS -----------------------------
+  // The Rust field is a `String` (or number) holding a value from a closed
+  // OOXML simple type (ST_*), which the parser copies or normalizes; TS names
+  // that vocabulary. The payload pins the TS literals, so changing them must
+  // update this entry. Making the Rust field an enum would turn these into
+  // checked comparisons.
+  'BlipEffect<type=blend>.blend: ts-narrower-literal ["darken","lighten","mult","over","screen"]': 'OOXML closed vocabulary',
+  'BlipEffect<type=fillOverlay>.blend: ts-narrower-literal ["darken","lighten","mult","over","screen"]': 'OOXML closed vocabulary',
+  'BlipReflection.algn: ts-narrower-literal ["b","bl","br","ctr","l","r","t","tl","tr"]': 'OOXML closed vocabulary',
+  'ChartModel.bubbleSizeRepresents: ts-narrower-literal ["area","w"]': 'OOXML closed vocabulary',
+  'ChartModel.catAxisTitleVerticalMode: ts-narrower-literal ["eaVert","horz","mongolianVert","vert","vert270","wordArtVert","wordArtVertRtl"]': 'OOXML closed vocabulary',
+  'ChartModel.legendPos: ts-narrower-literal ["b","l","r","t","tr"]': 'OOXML closed vocabulary',
+  'ChartModel.valAxisTitleVerticalMode: ts-narrower-literal ["eaVert","horz","mongolianVert","vert","vert270","wordArtVert","wordArtVertRtl"]': 'OOXML closed vocabulary',
+  'ChartOfPie.splitType: ts-narrower-literal ["auto","cust","percent","pos","val"]': 'OOXML closed vocabulary',
+  'ChartOfPie.type: ts-narrower-literal ["bar","pie"]': 'OOXML closed vocabulary',
+  'ChartPatternFill(ts PatternFill).fillType: ts-narrower-literal ["pattern"]': 'OOXML closed vocabulary',
+  'ChartPlotGroup.bubbleSizeRepresents: ts-narrower-literal ["area","w"]': 'OOXML closed vocabulary',
+  'ChartPlotGroup.categoryAxis: ts-narrower-literal ["none","primary","secondary","unresolved"]': 'OOXML closed vocabulary',
+  'ChartPlotGroup.kind: ts-narrower-literal ["area","area3D","bar","bar3D","bubble","doughnut","line","line3D","ofPie","pie","pie3D","radar","scatter","stock","surface","surface3D"]': 'OOXML closed vocabulary',
+  'ChartPlotGroup.seriesAxis: ts-narrower-literal ["none","primary","secondary","unresolved"]': 'OOXML closed vocabulary',
+  'ChartPlotGroup.valueAxis: ts-narrower-literal ["none","primary","secondary","unresolved"]': 'OOXML closed vocabulary',
+  'ChartThreeDSeriesAxis.titleVerticalMode: ts-narrower-literal ["eaVert","horz","mongolianVert","vert","vert270","wordArtVert","wordArtVertRtl"]': 'OOXML closed vocabulary',
+  'ChartexHistogramBinning.intervalClosed: ts-narrower-literal ["l","r"]': 'OOXML closed vocabulary',
+  'ChartexRegionMap.regionLabelLayout: ts-narrower-literal ["bestFitOnly","none","showAll"]': 'OOXML closed vocabulary',
+  'ChartexRegionMapColors.stopCount: ts-narrower-literal [2,3]': 'OOXML closed vocabulary',
+  'EffectContainer(ts BlipEffectContainer).kind: ts-narrower-literal ["sib","tree"]': 'OOXML closed vocabulary',
+  'MathNode<kind=array>.align: ts-narrower-literal ["center","eq","left"]': 'OOXML closed vocabulary',
+  'MathNode<kind=bar>.pos: ts-narrower-literal ["bot","top"]': 'OOXML closed vocabulary',
+  'MathNode<kind=groupChr>.pos: ts-narrower-literal ["bot","top"]': 'OOXML closed vocabulary',
+  'MathNode<kind=run>.style: ts-narrower-literal ["bold","boldItalic","italic","roman"]': 'OOXML closed vocabulary',
+  'SecondaryValueAxis.labelAlignment: ts-narrower-literal ["ctr","l","r"]': 'OOXML closed vocabulary',
+  'SecondaryValueAxis.titleVerticalMode: ts-narrower-literal ["eaVert","horz","mongolianVert","vert","vert270","wordArtVert","wordArtVertRtl"]': 'OOXML closed vocabulary',
+  'Shadow.algn: ts-narrower-literal ["b","bl","br","ctr","l","r","t","tl","tr"]': 'OOXML closed vocabulary',
+};
 
 export const MODEL_WIRE_DRIFT_ALLOWLIST = {
   docx: {
+    ...COMMON,
     // ---- Intentional: internal parser→layout channels -----------------------
     // `__`-prefixed fields are private acquisition facts that the layout layer
     // reads through internal wire types (packages/docx/src/layout/*-input.ts,
@@ -73,7 +173,6 @@ export const MODEL_WIRE_DRIFT_ALLOWLIST = {
     'ImageRun<type=image>.__inlineObjectFontFacts: missing-in-ts': 'internal channel',
     'ImageRun<type=image>.__inlineObjectOrigin: missing-in-ts': 'internal channel',
     'ImageRun<type=image>.__listLabel: missing-in-ts': 'internal channel',
-    'MathNode<kind=run>.__script: missing-in-ts': 'internal channel',
     'SectionProps.__sectionPlacement: missing-in-ts': 'internal channel',
     'ShapeRun<type=shape>.__anchorAcquisition: missing-in-ts': 'internal channel',
     'ShapeRun<type=shape>.__inlineObjectFontFacts: missing-in-ts': 'internal channel',
@@ -158,7 +257,8 @@ export const MODEL_WIRE_DRIFT_ALLOWLIST = {
     // ---- Intentional: parser-private or stripped values ---------------------
     // UnavailableDrawing runs are parser-private (recovered through a sidecar and
     // typed as layout/text.ts UnavailableDrawingAcquisitionRun); Word rendered-page
-    // break hints are stripped by the parser before serialization.
+    // break hints are stripped by the parser before serialization; a visible sheet
+    // omits `visibility` (skip_serializing_if = is_visible).
     'DocParagraph<type=paragraph>.runs[]<type=unavailableDrawing>: variant-missing-in-ts': 'parser-private UnavailableDrawing',
     'DocRun<type=break>.breakType: literal-missing-in-ts ["renderedPage"]': 'renderedPage runs are stripped by the parser',
 
@@ -174,60 +274,17 @@ export const MODEL_WIRE_DRIFT_ALLOWLIST = {
     'ImageRun<type=image>.revision: ts-only': 'DocRun intersection',
     'ShapeRun<type=shape>.revision: ts-only': 'DocRun intersection',
 
-    // ---- Intentional: shared TS interfaces ----------------------------------
-    // One TS interface serves several Rust shapes (MathScript for sub and sup;
-    // BlipEffectImageFill for every image effect fill).
-    'EffectFill<fillType=image>.alpha: ts-only': 'shared TS interface',
-    'EffectFill<fillType=image>.duotone: ts-only': 'shared TS interface',
-    'MathNode<kind=sub>.sup: ts-only': 'shared TS interface',
-    'MathNode<kind=sup>.sub: ts-only': 'shared TS interface',
-
-    // ---- Intentional: chart fields derived on the TS side -------------------
-    // Filled by packages/core/src/chart (label-box style merge, effective-style)
-    // or by the chart host after parsing.
-    'ChartLabelBox.effectFallbackIndex: ts-only': 'derived by core chart code',
-    'ChartLabelBox.effectFallbackStyle: ts-only': 'derived by core chart code',
-    'ChartLabelBox.effectStyleIndex: ts-only': 'derived by core chart code',
-    'ChartModel.fontSubstitutions: ts-only': 'derived by core chart code',
-    'ChartModel.linkedChartStyleRoles: ts-only': 'derived by core chart code',
-    'ChartModel.varyingPointChartStyleRoles: ts-only': 'derived by core chart code',
-    'ChartModel.varyingPointChartStyleRolesByGroup: ts-only': 'derived by core chart code',
-
-    // ---- Intentional: shared core Fill union --------------------------------
-    // Rust ChartStyleFill has no `none` variant; these TS fields use the shared
-    // core `Fill` union, which includes NoFill.
-    'ChartDataPointOverride.markerFillPaint<fillType=none>: variant-never-emitted': 'core Fill includes NoFill',
-    'ChartExElementStyle.fillPaints[]<fillType=none>: variant-never-emitted': 'core Fill includes NoFill',
-    'ChartLabelBox.fillPaint<fillType=none>: variant-never-emitted': 'core Fill includes NoFill',
-    'ChartModel.chartFill<fillType=none>: variant-never-emitted': 'core Fill includes NoFill',
-    'ChartModel.legendFill<fillType=none>: variant-never-emitted': 'core Fill includes NoFill',
-    'ChartModel.plotAreaFill<fillType=none>: variant-never-emitted': 'core Fill includes NoFill',
-    'ChartSeries.markerFillPaint<fillType=none>: variant-never-emitted': 'core Fill includes NoFill',
-    'ChartStockBarPaint.fill<fillType=none>: variant-never-emitted': 'core Fill includes NoFill',
-
-    // ---- Intentional: DrawingML line paints ---------------------------------
-    // A DrawingML line (`a:ln`, ECMA-376 §20.1.2.2.24) cannot hold a blipFill, so
-    // the TS line-paint types exclude the image variant of ChartStyleFill.
-    'ChartDecorationLineStyle.fill<fillType=image>: variant-missing-in-ts': 'a:ln has no blipFill',
-    'ChartExElementStyle.linePaints[]<fillType=image>: variant-missing-in-ts': 'a:ln has no blipFill',
-    'ChartLabelBox.borderFill<fillType=image>: variant-missing-in-ts': 'a:ln has no blipFill',
-    'ChartModel.chartBorderLineFill<fillType=image>: variant-missing-in-ts': 'a:ln has no blipFill',
-    'ChartModel.legendLineFill<fillType=image>: variant-missing-in-ts': 'a:ln has no blipFill',
-    'ChartModel.plotAreaLineFill<fillType=image>: variant-missing-in-ts': 'a:ln has no blipFill',
+    // ---- Intentional: TS input widening -------------------------------------
+    // `fitTextId` also accepts numbers for direct model construction and layout
+    // tests (types.ts); the parser always emits the XSD integer as a string.
+    'TextRun<type=text>.fitTextId: variant-never-emitted (TS number)': 'numeric ids accepted for direct model construction',
 
     // ---- Intentional: values the parser restricts ---------------------------
     // `PathPaint.stroke` is serialized only when false (skip_serializing_if on
-    // true), which TS types as `stroke?: false`.
+    // true), which TS types as `stroke?: false`. `TextRunData.patternFill` only
+    // ever holds a pattern fill (pptx parser text.rs); the full glyph fill choice
+    // travels separately.
     'PathPaint.stroke: ts-narrower-literal [false]': 'serialized only when false',
-
-    // ---- Intentional: chart style role tables ------------------------------
-    // Rust keys these maps by role name (String); TS names the closed set of
-    // MS-ODRAWXML §2.8.3.1 CT_ChartStyle roles the parser fills in. The payload
-    // pins the role list.
-    'ChartModel.chartStyleRoles: ts-closed-keys ["axisTitle","categoryAxis","chartArea","dataLabel","dataLabelCallout","dataPoint","dataPoint3D","dataPointLine","dataPointMarker","dataPointWireframe","dataTable","downBar","dropLine","errorBar","floor","gridlineMajor","gridlineMinor","hiLoLine","leaderLine","legend","plotArea","plotArea3D","seriesAxis","seriesLine","title","trendline","trendlineLabel","upBar","valueAxis","wall"]': 'chart style role names',
-    'ChartModel.classicChartStyleRoles: ts-closed-keys ["axisTitle","categoryAxis","chartArea","dataLabel","dataLabelCallout","dataPoint","dataPoint3D","dataPointLine","dataPointMarker","dataPointWireframe","dataTable","downBar","dropLine","errorBar","floor","gridlineMajor","gridlineMinor","hiLoLine","leaderLine","legend","plotArea","plotArea3D","seriesAxis","seriesLine","title","trendline","trendlineLabel","upBar","valueAxis","wall"]': 'chart style role names',
-    'ChartModel.classicVaryingPointChartStyleRoles: ts-closed-keys ["axisTitle","categoryAxis","chartArea","dataLabel","dataLabelCallout","dataPoint","dataPoint3D","dataPointLine","dataPointMarker","dataPointWireframe","dataTable","downBar","dropLine","errorBar","floor","gridlineMajor","gridlineMinor","hiLoLine","leaderLine","legend","plotArea","plotArea3D","seriesAxis","seriesLine","title","trendline","trendlineLabel","upBar","valueAxis","wall"]': 'chart style role names',
-    'ChartModel.classicVaryingPointChartStyleRolesByGroup[]: ts-closed-keys ["axisTitle","categoryAxis","chartArea","dataLabel","dataLabelCallout","dataPoint","dataPoint3D","dataPointLine","dataPointMarker","dataPointWireframe","dataTable","downBar","dropLine","errorBar","floor","gridlineMajor","gridlineMinor","hiLoLine","leaderLine","legend","plotArea","plotArea3D","seriesAxis","seriesLine","title","trendline","trendlineLabel","upBar","valueAxis","wall"]': 'chart style role names',
 
     // ---- Intentional: vocabularies narrowed in TS ---------------------------
     // The Rust field is a `String` (or number) holding a value from a closed
@@ -235,44 +292,17 @@ export const MODEL_WIRE_DRIFT_ALLOWLIST = {
     // that vocabulary. The payload pins the TS literals, so changing them must
     // update this entry. Making the Rust field an enum would turn these into
     // checked comparisons.
-    'BlipEffect<type=blend>.blend: ts-narrower-literal ["darken","lighten","mult","over","screen"]': 'OOXML closed vocabulary',
-    'BlipEffect<type=fillOverlay>.blend: ts-narrower-literal ["darken","lighten","mult","over","screen"]': 'OOXML closed vocabulary',
-    'BlipReflection.algn: ts-narrower-literal ["b","bl","br","ctr","l","r","t","tl","tr"]': 'OOXML closed vocabulary',
     'BodyElement<type=pageBreak>.parity: ts-narrower-literal ["even","odd"]': 'OOXML closed vocabulary',
-    'ChartexHistogramBinning.intervalClosed: ts-narrower-literal ["l","r"]': 'OOXML closed vocabulary',
-    'ChartexRegionMap.regionLabelLayout: ts-narrower-literal ["bestFitOnly","none","showAll"]': 'OOXML closed vocabulary',
-    'ChartexRegionMapColors.stopCount: ts-narrower-literal [2,3]': 'OOXML closed vocabulary',
-    'ChartModel.bubbleSizeRepresents: ts-narrower-literal ["area","w"]': 'OOXML closed vocabulary',
-    'ChartModel.catAxisTitleVerticalMode: ts-narrower-literal ["eaVert","horz","mongolianVert","vert","vert270","wordArtVert","wordArtVertRtl"]': 'OOXML closed vocabulary',
-    'ChartModel.legendPos: ts-narrower-literal ["b","l","r","t","tr"]': 'OOXML closed vocabulary',
-    'ChartModel.valAxisTitleVerticalMode: ts-narrower-literal ["eaVert","horz","mongolianVert","vert","vert270","wordArtVert","wordArtVertRtl"]': 'OOXML closed vocabulary',
-    'ChartOfPie.splitType: ts-narrower-literal ["auto","cust","percent","pos","val"]': 'OOXML closed vocabulary',
-    'ChartOfPie.type: ts-narrower-literal ["bar","pie"]': 'OOXML closed vocabulary',
-    'ChartPatternFill(ts PatternFill).fillType: ts-narrower-literal ["pattern"]': 'OOXML closed vocabulary',
-    'ChartPlotGroup.bubbleSizeRepresents: ts-narrower-literal ["area","w"]': 'OOXML closed vocabulary',
-    'ChartPlotGroup.categoryAxis: ts-narrower-literal ["none","primary","secondary","unresolved"]': 'OOXML closed vocabulary',
-    'ChartPlotGroup.kind: ts-narrower-literal ["area","area3D","bar","bar3D","bubble","doughnut","line","line3D","ofPie","pie","pie3D","radar","scatter","stock","surface","surface3D"]': 'OOXML closed vocabulary',
-    'ChartPlotGroup.seriesAxis: ts-narrower-literal ["none","primary","secondary","unresolved"]': 'OOXML closed vocabulary',
-    'ChartPlotGroup.valueAxis: ts-narrower-literal ["none","primary","secondary","unresolved"]': 'OOXML closed vocabulary',
-    'ChartThreeDSeriesAxis.titleVerticalMode: ts-narrower-literal ["eaVert","horz","mongolianVert","vert","vert270","wordArtVert","wordArtVertRtl"]': 'OOXML closed vocabulary',
     'DocRun<type=ptab>.alignment: ts-narrower-literal ["center","left","right"]': 'OOXML closed vocabulary',
     'DocRun<type=ptab>.leader: ts-narrower-literal ["dot","hyphen","middleDot","none","underscore"]': 'OOXML closed vocabulary',
     'DocRun<type=ptab>.relativeTo: ts-narrower-literal ["indent","margin"]': 'OOXML closed vocabulary',
     'DocTableCell.vAlign: ts-narrower-literal ["bottom","center","top"]': 'OOXML closed vocabulary',
-    'EffectContainer(ts BlipEffectContainer).kind: ts-narrower-literal ["sib","tree"]': 'OOXML closed vocabulary',
     'EmbeddedFont(ts EmbeddedFontRef).style: ts-narrower-literal ["bold","boldItalic","italic","regular"]': 'OOXML closed vocabulary',
     'FieldRun<type=field>.emphasisMark: ts-narrower-literal ["circle","comma","dot","underDot"]': 'OOXML closed vocabulary',
     'FieldRun<type=field>.vertAlign: ts-narrower-literal ["sub","super"]': 'OOXML closed vocabulary',
     'LineSpacing.rule: ts-narrower-literal ["atLeast","auto","exact"]': 'OOXML closed vocabulary',
-    'MathNode<kind=array>.align: ts-narrower-literal ["center","eq","left"]': 'OOXML closed vocabulary',
-    'MathNode<kind=bar>.pos: ts-narrower-literal ["bot","top"]': 'OOXML closed vocabulary',
-    'MathNode<kind=groupChr>.pos: ts-narrower-literal ["bot","top"]': 'OOXML closed vocabulary',
-    'MathNode<kind=run>.style: ts-narrower-literal ["bold","boldItalic","italic","roman"]': 'OOXML closed vocabulary',
     'PathPaint.fill: ts-narrower-literal ["darken","darkenLess","lighten","lightenLess","none"]': 'OOXML closed vocabulary',
     'PathPaint.fillRule: ts-narrower-literal ["evenodd","nonzero"]': 'OOXML closed vocabulary',
-    'SecondaryValueAxis.labelAlignment: ts-narrower-literal ["ctr","l","r"]': 'OOXML closed vocabulary',
-    'SecondaryValueAxis.titleVerticalMode: ts-narrower-literal ["eaVert","horz","mongolianVert","vert","vert270","wordArtVert","wordArtVertRtl"]': 'OOXML closed vocabulary',
-    'Shadow.algn: ts-narrower-literal ["b","bl","br","ctr","l","r","t","tl","tr"]': 'OOXML closed vocabulary',
     'ShapeRun<type=shape>.strokeAlignment: ts-narrower-literal ["ctr","in"]': 'OOXML closed vocabulary',
     'ShapeRun<type=shape>.strokeCap: ts-narrower-literal ["butt","round","square"]': 'OOXML closed vocabulary',
     'ShapeRun<type=shape>.strokeJoin: ts-narrower-literal ["bevel","miter","round"]': 'OOXML closed vocabulary',
@@ -281,25 +311,93 @@ export const MODEL_WIRE_DRIFT_ALLOWLIST = {
     'TextRun<type=text>.emphasisMark: ts-narrower-literal ["circle","comma","dot","underDot"]': 'OOXML closed vocabulary',
     'TextRun<type=text>.vertAlign: ts-narrower-literal ["sub","super"]': 'OOXML closed vocabulary',
     'VmlShadow.kind: ts-narrower-literal ["double","emboss","perspective","single"]': 'OOXML closed vocabulary',
+  },
+  xlsx: {
+    ...COMMON,
+    // ---- Intentional: parser-private or stripped values ---------------------
+    // UnavailableDrawing runs are parser-private (recovered through a sidecar and
+    // typed as layout/text.ts UnavailableDrawingAcquisitionRun); Word rendered-page
+    // break hints are stripped by the parser before serialization; a visible sheet
+    // omits `visibility` (skip_serializing_if = is_visible).
+    'SheetMeta.visibility: literal-missing-in-ts ["visible"]': 'Visible is never serialized',
+
+    // ---- Intentional: shared core Fill union --------------------------------
+    // These TS fields use the shared core `Fill` union, which also accepts
+    // variants the Rust field type does not have (ChartStyleFill has no `none`;
+    // the XLSX shape stroke paint is never solid, which uses the color field).
+    'ShapeInfo.strokeFill<fillType=solid>: variant-never-emitted': 'shared core Fill union',
+
+    // ---- Intentional: vocabularies narrowed in TS ---------------------------
+    // The Rust field is a `String` (or number) holding a value from a closed
+    // OOXML simple type (ST_*), which the parser copies or normalizes; TS names
+    // that vocabulary. The payload pins the TS literals, so changing them must
+    // update this entry. Making the Rust field an enum would turn these into
+    // checked comparisons.
+    'Font(ts CellFont).scheme: ts-narrower-literal ["major","minor"]': 'OOXML closed vocabulary',
+    'Font(ts CellFont).vertAlign: ts-narrower-literal ["subscript","superscript"]': 'OOXML closed vocabulary',
+    'PathInfo.fill: ts-narrower-literal ["darken","darkenLess","lighten","lightenLess","none"]': 'OOXML closed vocabulary',
+    'PathInfo.stroke: ts-narrower-literal [false]': 'OOXML closed vocabulary',
+    'RunFont.vertAlign: ts-narrower-literal ["subscript","superscript"]': 'OOXML closed vocabulary',
+    'ShapeInfo.strokeAlignment: ts-narrower-literal ["ctr","in"]': 'OOXML closed vocabulary',
+    'ShapeInfo.strokeLineCap: ts-narrower-literal ["butt","round","square"]': 'OOXML closed vocabulary',
+    'ShapeInfo.strokeLineJoin: ts-narrower-literal ["bevel","miter","round"]': 'OOXML closed vocabulary',
 
     // ---- DRIFT: genuine inaccuracies, reported for follow-up ----------------
-    // Each fix changes a public TS type (and API baseline), so none is fixed in
-    // the PR that introduced this check.
-    'ChartDataTable.fill<fillType=image>: variant-missing-in-ts': 'DRIFT: TS excludes an image fill Rust can carry',
-    'ChartSeries.invertedFill<fillType=image>: variant-missing-in-ts': 'DRIFT: TS excludes an image fill Rust can carry',
-    'ChartSurfaceBandFormat.fill<fillType=image>: variant-missing-in-ts': 'DRIFT: TS excludes an image fill Rust can carry',
-    'ChartThreeD.view3DPresent: ts-only': 'DRIFT: the wire name is view3dPresent',
-    'ChartThreeD.view3dPresent: missing-in-ts': 'DRIFT: TS declares view3DPresent',
-    'DocParagraph<type=paragraph>.outlineLevel: missing-in-ts': 'DRIFT: emitted but read by no TS code',
-    'ImageRun(ts Pick).colorReplaceFrom: rust-null': 'DRIFT: TS lacks null (readers use truthiness)',
-    'ImageRun<type=image>.colorReplaceFrom: rust-null': 'DRIFT: TS lacks null (readers use truthiness)',
-    'ParagraphBorders.between: rust-optional': 'DRIFT: TS should mark it optional',
-    'ParagraphBorders.bottom: rust-optional': 'DRIFT: TS should mark it optional',
-    'ParagraphBorders.left: rust-optional': 'DRIFT: TS should mark it optional',
-    'ParagraphBorders.right: rust-optional': 'DRIFT: TS should mark it optional',
-    'ParagraphBorders.top: rust-optional': 'DRIFT: TS should mark it optional',
-    'ShapeRun<type=shape>.fill: rust-optional': 'DRIFT: TS should mark it optional',
-    'TextRun<type=text>.fitTextId: variant-never-emitted (TS number)': 'DRIFT: the wire value is always a string',
+    // The XLSX inline-string furigana fields are serialized in snake_case
+    // (serde `rename_all` on an enum renames variants, not their fields), so
+    // TS never receives them. The fix is on the Rust/wire side.
+    'CellValue<type=text>.phoneticPr: ts-only': 'DRIFT: the wire name is phonetic_pr',
+    'CellValue<type=text>.phoneticRuns: ts-only': 'DRIFT: the wire name is phonetic_runs',
+    'CellValue<type=text>.phonetic_pr: missing-in-ts': 'DRIFT: Rust emits snake_case (variant fields miss rename_all)',
+    'CellValue<type=text>.phonetic_runs: missing-in-ts': 'DRIFT: Rust emits snake_case (variant fields miss rename_all)',
+  },
+  pptx: {
+    ...COMMON,
+    // ---- Intentional: DrawingML line paints ---------------------------------
+    // A DrawingML line (`a:ln`, ECMA-376 §20.1.2.2.24) cannot hold a blipFill, so
+    // the TS line-paint types exclude the image variant of ChartStyleFill. The
+    // PPTX Stroke.fill carries only gradient/pattern line paint (solid uses
+    // `color`, noFill drops the stroke; pptx parser fill.rs).
+    'Stroke.fill<fillType=image>: variant-missing-in-ts': 'pptx parser stores only gradient/pattern line paint',
+    'Stroke.fill<fillType=none>: variant-missing-in-ts': 'pptx parser stores only gradient/pattern line paint',
+
+    // ---- Intentional: values the parser restricts ---------------------------
+    // `PathPaint.stroke` is serialized only when false (skip_serializing_if on
+    // true), which TS types as `stroke?: false`. `TextRunData.patternFill` only
+    // ever holds a pattern fill (pptx parser text.rs); the full glyph fill choice
+    // travels separately.
+    'TextRunData(ts Omit).patternFill<fillType=gradient>: variant-missing-in-ts': 'parser stores only pattern fills here',
+    'TextRunData(ts Omit).patternFill<fillType=image>: variant-missing-in-ts': 'parser stores only pattern fills here',
+    'TextRunData(ts Omit).patternFill<fillType=none>: variant-missing-in-ts': 'parser stores only pattern fills here',
+    'TextRunData(ts Omit).patternFill<fillType=solid>: variant-missing-in-ts': 'parser stores only pattern fills here',
+    'TextRunData<type=text>.patternFill<fillType=gradient>: variant-missing-in-ts': 'parser stores only pattern fills here',
+    'TextRunData<type=text>.patternFill<fillType=image>: variant-missing-in-ts': 'parser stores only pattern fills here',
+    'TextRunData<type=text>.patternFill<fillType=none>: variant-missing-in-ts': 'parser stores only pattern fills here',
+    'TextRunData<type=text>.patternFill<fillType=solid>: variant-missing-in-ts': 'parser stores only pattern fills here',
+
+    // ---- Intentional: PPTX picture bullets ----------------------------------
+    // The PPTX `Paragraph` extends the core paragraph, and a TS interface cannot
+    // widen the inherited core `bullet` union; readers narrow with `asBullet`
+    // (packages/pptx/src/types.ts documents this).
+    'Paragraph.bullet<type=blip>: variant-missing-in-ts': 'read through asBullet',
+
+    // ---- Intentional: vocabularies narrowed in TS ---------------------------
+    // The Rust field is a `String` (or number) holding a value from a closed
+    // OOXML simple type (ST_*), which the parser copies or normalizes; TS names
+    // that vocabulary. The payload pins the TS literals, so changing them must
+    // update this entry. Making the Rust field an enum would turn these into
+    // checked comparisons.
+    'MediaElement<type=media>.mediaKind: ts-narrower-literal ["audio","video"]': 'OOXML closed vocabulary',
+    'Paragraph.fontAlgn: ts-narrower-literal ["b","ctr","t"]': 'OOXML closed vocabulary',
+    'PathPaint.fillRule: ts-narrower-literal ["evenodd","nonzero"]': 'OOXML closed vocabulary',
+    'PptxComment.status: ts-narrower-literal ["active","closed","resolved"]': 'OOXML closed vocabulary',
+    'PptxCommentReply(ts Readonly).status: ts-narrower-literal ["active","closed","resolved"]': 'OOXML closed vocabulary',
+    'Stroke.alignment: ts-narrower-literal ["ctr","in"]': 'OOXML closed vocabulary',
+    'Stroke.lineCap: ts-narrower-literal ["butt","round","square"]': 'OOXML closed vocabulary',
+    'Stroke.lineJoin: ts-narrower-literal ["bevel","miter","round"]': 'OOXML closed vocabulary',
+    'TableCell.horzOverflow: ts-narrower-literal ["clip","overflow"]': 'OOXML closed vocabulary',
+    'TextRunData(ts Omit).caps: ts-narrower-literal ["all","none","small"]': 'OOXML closed vocabulary',
+    'TextRunData<type=text>.caps: ts-narrower-literal ["all","none","small"]': 'OOXML closed vocabulary',
   },
 };
 
@@ -307,8 +405,8 @@ export const MODEL_WIRE_DRIFT_ALLOWLIST = {
 // case still changes this file:
 //   ts-null      TS also accepts `null` where Rust never emits null (Rust omits
 //                the field instead). The TS model types, notably the core
-//                chart types shared with xlsx/pptx, declare optional fields as
-//                `?: T | null` by convention.
+//                chart types shared by every format, declare optional fields
+//                as `?: T | null` by convention.
 //   ts-optional  TS marks optional a field Rust always emits (readers already
 //                handle its absence).
 export const MODEL_WIRE_TS_WIDENING_ALLOWLIST = {
@@ -482,7 +580,7 @@ export const MODEL_WIRE_TS_WIDENING_ALLOWLIST = {
         'gapDepthPercent', 'gapDepthPercentAuthored', 'heightPercent', 'heightPercentAuthored',
         'perspective', 'perspectiveAuthored', 'rightAngleAxes', 'rightAngleAxesAuthored',
         'rotationX', 'rotationXAuthored', 'rotationY', 'rotationYAuthored', 'seriesAxis', 'shape',
-        'sideWall',
+        'sideWall', 'view3dPresent',
       ],
       'ChartThreeDPictureOptions': [
         'applyToEnd', 'applyToFront', 'applyToSides', 'pictureFormat', 'pictureFormatAuthored',
@@ -599,6 +697,515 @@ export const MODEL_WIRE_TS_WIDENING_ALLOWLIST = {
       'RunBorder(ts DocxRunBorder)': ['color'],
       'SecondaryValueAxis': ['majorGridlines', 'minorGridlines'],
       'ShapeText': ['paragraphMarkColor'],
+    },
+  },
+  xlsx: {
+    'ts-null': {
+      'Border': ['diagonalDown', 'diagonalUp', 'horizontal', 'vertical'],
+      'ChartAreaGroupDecorations': ['dropLines'],
+      'ChartAxisNumberFormat': ['sourceLinked'],
+      'ChartBarGroupDecorations': ['seriesLines'],
+      'ChartClassicSurfaceBandStyles': ['byBandCount', 'byBandCount[]', 'fixed'],
+      'ChartDataPointOverride': [
+        'bubble3D', 'chartexStyle', 'markerFillPaint', 'markerFillPaintAuthored',
+        'markerLinePaintAuthored', 'markerStyle',
+      ],
+      'ChartDataTable': [
+        'fill', 'fillColor', 'fillHidden', 'fillPaintAuthored', 'fontBold', 'fontColor', 'fontFace',
+        'fontHidden', 'fontItalic', 'fontPaintAuthored', 'fontSizeHpt', 'lineColor', 'lineDash',
+        'lineHidden', 'linePaintAuthored', 'lineWidthEmu', 'style',
+      ],
+      'ChartDecorationLineStyle': [
+        'cap', 'color', 'dash', 'fill', 'hidden', 'join', 'paintAuthored', 'style', 'widthEmu',
+      ],
+      'ChartDisplayUnits': ['builtInUnit', 'label'],
+      'ChartDisplayUnitsLabel': [
+        'boxStyle', 'fontBold', 'fontColor', 'fontFace', 'fontHidden', 'fontItalic',
+        'fontPaintAuthored', 'fontSizeHpt', 'manualLayout', 'rotation', 'text',
+      ],
+      'ChartErrBars': ['linePaintAuthored', 'style'],
+      'ChartExElementStyle': [
+        'allowNoFillOverride', 'allowNoLineOverride', 'effectAuthored', 'effectColorIndex',
+        'effectFormattingIndices', 'effectNoStyle', 'effectUnsupported', 'fillColorIndex',
+        'fillColors', 'fillFormattingIndices', 'fillHidden', 'fillNoStyle', 'fillPaintAuthored',
+        'fillPaints', 'fillSemanticFallbackIndices', 'fontBaseline', 'fontBold', 'fontColor',
+        'fontColorIndex', 'fontColors', 'fontFace', 'fontFormattingIndices', 'fontHidden',
+        'fontItalic', 'fontLanguage', 'fontPaintAuthored', 'fontSizeHpt', 'glows', 'innerShadows',
+        'lineCap', 'lineColorIndex', 'lineColors', 'lineCompound', 'lineCustomDash', 'lineDash',
+        'lineDashAuthored', 'lineFormattingIndices', 'lineHidden', 'lineJoin', 'lineNoStyle',
+        'linePaintAuthored', 'linePaints', 'lineSemanticFallbackIndices', 'lineWidthEmu',
+        'reflections', 'shadows', 'shapePropertiesPresent', 'softEdges', 'textBInsEmu',
+        'textBodyAuthored', 'textLInsEmu', 'textRInsEmu', 'textRotation', 'textTInsEmu',
+        'textVerticalAnchor', 'textVerticalMode', 'textWrap',
+      ],
+      'ChartLabelBox': [
+        'borderCap', 'borderCompound', 'borderCustomDash', 'borderDash', 'borderDashAuthored',
+        'borderFill', 'borderHidden', 'borderJoin', 'borderPaintAuthored', 'fillHidden',
+        'fillPaint', 'fillPaintAuthored', 'style',
+      ],
+      'ChartLegendEntryOverride': [
+        'deleted', 'fontBold', 'fontColor', 'fontFace', 'fontItalic', 'fontSizeHpt',
+      ],
+      'ChartLineGroupDecorations': ['dropLines', 'hiLowLines', 'upDownBars'],
+      'ChartModel': [
+        'areaGroupDecorations', 'barGapWidth', 'barGroupDecorations', 'barOverlap', 'bubbleScale',
+        'bubbleSizeRepresents', 'cartesianAutoLayoutProfile', 'catAxisBaseTimeUnit',
+        'catAxisCrosses', 'catAxisCrossesAt', 'catAxisDisplayUnits', 'catAxisFontBold',
+        'catAxisFontColor', 'catAxisFontFace', 'catAxisFontItalic', 'catAxisFontPaintAuthored',
+        'catAxisFormatCode', 'catAxisFormatDivisors', 'catAxisGridlineColor', 'catAxisGridlineDash',
+        'catAxisGridlinePaintAuthored', 'catAxisGridlineWidthEmu', 'catAxisIsDate',
+        'catAxisLabelAlignment', 'catAxisLabelOffsetPercent', 'catAxisLabelRotation',
+        'catAxisLineColor', 'catAxisLineDash', 'catAxisLinePaintAuthored', 'catAxisLineWidthEmu',
+        'catAxisLogBase', 'catAxisMajorGridlineStyle', 'catAxisMajorGridlines',
+        'catAxisMajorTimeUnit', 'catAxisMajorUnit', 'catAxisMax', 'catAxisMin',
+        'catAxisMinorGridlineColor', 'catAxisMinorGridlineDash',
+        'catAxisMinorGridlinePaintAuthored', 'catAxisMinorGridlineStyle',
+        'catAxisMinorGridlineWidthEmu', 'catAxisMinorGridlines', 'catAxisMinorTickMark',
+        'catAxisMinorTimeUnit', 'catAxisMinorUnit', 'catAxisNoMultiLevelLabels',
+        'catAxisNumberFormat', 'catAxisOrientation', 'catAxisStyle', 'catAxisTickLabelPos',
+        'catAxisTickLabelSkip', 'catAxisTickMarkSkip', 'catAxisTitleFontBold',
+        'catAxisTitleFontColor', 'catAxisTitleFontFace', 'catAxisTitleFontItalic',
+        'catAxisTitleFontPaintAuthored', 'catAxisTitleFontSizeHpt', 'catAxisTitleManualLayout',
+        'catAxisTitleRotation', 'catAxisTitleStyle', 'catAxisTitleTextVerticalInsetEmu',
+        'catAxisTitleVerticalMode', 'categoryLevels', 'categorySourceHidden', 'chartAreaStyle',
+        'chartBorderCap', 'chartBorderColor', 'chartBorderCompound', 'chartBorderCustomDash',
+        'chartBorderDash', 'chartBorderDashAuthored', 'chartBorderHidden', 'chartBorderJoin',
+        'chartBorderLineFill', 'chartBorderPaintAuthored', 'chartBorderWidthEmu', 'chartFill',
+        'chartFillHidden', 'chartFillPaintAuthored', 'chartStyleColorMethod',
+        'chartStyleColorPalette', 'chartStyleMarkerSizePt', 'chartStyleMarkerSymbol',
+        'chartStyleRoles', 'chartTextBoxes', 'chartTextStyle', 'chartexAccents', 'chartexBox',
+        'chartexColorPalette', 'chartexColorStyleMethod', 'chartexConnectorLines',
+        'chartexDataPointLineStyle', 'chartexDataPointMarkerStyle', 'chartexDataPointStyle',
+        'chartexHistogramBinning', 'chartexMarkerSizePt', 'chartexMarkerSymbol',
+        'chartexParetoFlatEndpoint', 'chartexParetoOutlineOwner', 'chartexParetoOwnerIndex',
+        'chartexParetoSortDescending', 'chartexPrimaryAxisRight', 'chartexRegionMap',
+        'chartexSeriesLineStyle', 'chartexShowUnpairedPercentageAxis', 'chartexSunburst',
+        'chartexSuppressGeometry', 'chartexTreemap', 'classicChartStyleRoles',
+        'classicSurfaceBandStyles', 'classicVaryingPointChartStyleRoles',
+        'classicVaryingPointChartStyleRolesByGroup', 'dataLabelFontBaseline', 'dataLabelFontBold',
+        'dataLabelFontColor', 'dataLabelFontFace', 'dataLabelFontItalic', 'dataLabelFontLanguage',
+        'dataLabelFontPaintAuthored', 'dataLabelFormatCode', 'dataLabelPosition', 'dataTable',
+        'dispBlanksAs', 'firstSliceAngle', 'holeSize', 'legacyChartStyle', 'legendEntries',
+        'legendFill', 'legendFillColor', 'legendFillHidden', 'legendFillPaintAuthored',
+        'legendFontBaseline', 'legendFontBold', 'legendFontColor', 'legendFontFace',
+        'legendFontItalic', 'legendFontLanguage', 'legendFontPaintAuthored', 'legendFontSizeHpt',
+        'legendLineCap', 'legendLineColor', 'legendLineCompound', 'legendLineCustomDash',
+        'legendLineDash', 'legendLineDashAuthored', 'legendLineFill', 'legendLineHidden',
+        'legendLineJoin', 'legendLinePaintAuthored', 'legendLineWidthEmu', 'legendManualLayout',
+        'legendOverlay', 'legendStyle', 'lineGroupDecorations', 'ofPie', 'plotAreaFill',
+        'plotAreaFillAutomatic', 'plotAreaFillHidden', 'plotAreaFillPaintAuthored',
+        'plotAreaLineCap', 'plotAreaLineColor', 'plotAreaLineCompound', 'plotAreaLineCustomDash',
+        'plotAreaLineDash', 'plotAreaLineDashAuthored', 'plotAreaLineFill', 'plotAreaLineHidden',
+        'plotAreaLineJoin', 'plotAreaLinePaintAuthored', 'plotAreaLineWidthEmu',
+        'plotAreaManualLayout', 'plotAreaStyle', 'plotGroups', 'plotVisibleOnly', 'radarStyle',
+        'roundedCorners', 'scatterStyle', 'secondaryCatAxis', 'secondaryValAxis',
+        'showDataLabelsOverMax', 'showNegativeBubbles', 'stockAutomaticStyle', 'stockDropLines',
+        'stockHiLowLineColor', 'stockHiLowLineStyle', 'stockHiLowLines', 'stockUpDownBarStyle',
+        'stockUpDownBars', 'surfaceBandFormats', 'surfaceWireframe', 'themeAccentColors',
+        'themeMajorFontLatin', 'themeMinorFontLatin', 'threeD', 'titleFontBaseline',
+        'titleFontBold', 'titleFontItalic', 'titleFontLanguage', 'titleFontPaintAuthored',
+        'titleManualLayout', 'titleRichRuns', 'titleStyle', 'valAxisCrosses', 'valAxisCrossesAt',
+        'valAxisDisplayUnits', 'valAxisFontBold', 'valAxisFontColor', 'valAxisFontFace',
+        'valAxisFontItalic', 'valAxisFontPaintAuthored', 'valAxisFormatCode',
+        'valAxisFormatDivisors', 'valAxisGridlineColor', 'valAxisGridlineDash',
+        'valAxisGridlinePaintAuthored', 'valAxisGridlineWidthEmu', 'valAxisLineColor',
+        'valAxisLineDash', 'valAxisLinePaintAuthored', 'valAxisLineWidthEmu', 'valAxisLogBase',
+        'valAxisMajorGridlineStyle', 'valAxisMajorGridlines', 'valAxisMajorUnit',
+        'valAxisMinorGridlineColor', 'valAxisMinorGridlineDash',
+        'valAxisMinorGridlinePaintAuthored', 'valAxisMinorGridlineStyle',
+        'valAxisMinorGridlineWidthEmu', 'valAxisMinorGridlines', 'valAxisMinorTickMark',
+        'valAxisMinorUnit', 'valAxisNumberFormat', 'valAxisOrientation', 'valAxisStyle',
+        'valAxisTickLabelPos', 'valAxisTitleFontBold', 'valAxisTitleFontColor',
+        'valAxisTitleFontFace', 'valAxisTitleFontItalic', 'valAxisTitleFontPaintAuthored',
+        'valAxisTitleFontSizeHpt', 'valAxisTitleManualLayout', 'valAxisTitleRotation',
+        'valAxisTitleStyle', 'valAxisTitleTextVerticalInsetEmu', 'valAxisTitleVerticalMode',
+        'varyColors',
+      ],
+      'ChartOfPie': [
+        'customSplitIndices', 'seriesLineStyle', 'splitPos', 'splitPosAuthored',
+        'splitTypeAuthored',
+      ],
+      'ChartPlotGroup': [
+        'axisIds', 'barDirection', 'bubbleScale', 'bubbleSizeRepresents', 'gapWidth', 'grouping',
+        'overlap', 'radarStyle', 'scatterStyle', 'showNegativeBubbles', 'varyColors',
+      ],
+      'ChartSeries': [
+        'areaGroupIndex', 'automaticMarkerSymbol', 'automaticNegativeStyle', 'barGroupDirection',
+        'barGroupGapWidth', 'barGroupGrouping', 'barGroupIndex', 'barGroupOverlap', 'bubble3D',
+        'bubble3DGroupDefault', 'bubbleSizes', 'bubbleXSourceIsString', 'catFormatBuiltinId',
+        'catFormatCode', 'catFormatCodes', 'categories', 'chartexFormatIdx', 'chartexStyle',
+        'dataLabelColors', 'dataLabelOverrides', 'dataPointColors', 'dataPointOverrides', 'errBars',
+        'explosion', 'fillPattern', 'invertIfNegative', 'invertedFill', 'invertedFillAuthored',
+        'invertedFillHidden', 'invertedLineAuthored', 'invertedLineColor', 'invertedLineHidden',
+        'invertedLineWidthEmu', 'labelColor', 'lineColor', 'lineGroupIndex', 'lineHidden',
+        'lineWidthEmu', 'markerFill', 'markerFillPaint', 'markerFillPaintAuthored', 'markerLine',
+        'markerLinePaintAuthored', 'markerLineWidthEmu', 'markerSize', 'markerStyle',
+        'markerSymbol', 'seriesDataLabels', 'seriesType', 'showMarker', 'smooth', 'sourceHidden',
+        'threeDShape', 'trendLines', 'useSecondaryAxis', 'valFormatCode',
+      ],
+      'ChartSeriesDataLabels': [
+        'deleted', 'formatDivisors', 'leaderLinePaintAuthored', 'leaderLineStyle',
+        'percentFormatCode', 'percentFormatDivisors',
+      ],
+      'ChartStockBarPaint': [
+        'fill', 'fillColor', 'fillHidden', 'fillPaintAuthored', 'lineCap', 'lineColor', 'lineDash',
+        'lineHidden', 'lineJoin', 'linePaintAuthored', 'lineWidthEmu', 'style',
+      ],
+      'ChartSurfaceBandFormat': [
+        'fill', 'fillHidden', 'lineColor', 'lineHidden', 'lineWidthEmu', 'style',
+      ],
+      'ChartTextBox': ['verticalAnchor', 'wrap'],
+      'ChartTextParagraph': ['align'],
+      'ChartTextRun': [
+        'baseline', 'bold', 'color', 'colorHidden', 'colorPaintAuthored', 'fontFace', 'fontSizeHpt',
+        'italic', 'language', 'paragraphAlign',
+      ],
+      'ChartThreeD': [
+        'backWall', 'barGrouping', 'depthPercent', 'depthPercentAuthored', 'floor',
+        'gapDepthPercent', 'gapDepthPercentAuthored', 'heightPercent', 'heightPercentAuthored',
+        'perspective', 'perspectiveAuthored', 'rightAngleAxes', 'rightAngleAxesAuthored',
+        'rotationX', 'rotationXAuthored', 'rotationY', 'rotationYAuthored', 'seriesAxis', 'shape',
+        'sideWall', 'view3dPresent',
+      ],
+      'ChartThreeDPictureOptions': [
+        'applyToEnd', 'applyToFront', 'applyToSides', 'pictureFormat', 'pictureFormatAuthored',
+        'pictureStackUnit', 'pictureStackUnitAuthored',
+      ],
+      'ChartThreeDSeriesAxis': [
+        'fontColor', 'fontFace', 'fontItalic', 'fontPaintAuthored', 'fontSizeHpt', 'lineColor',
+        'lineDash', 'linePaintAuthored', 'lineWidthEmu', 'majorGridlineStyle', 'minorGridlineStyle',
+        'minorTickMark', 'orientation', 'style', 'tickLabelPos', 'tickLabelSkip', 'tickMarkSkip',
+        'title', 'titleFontBold', 'titleFontColor', 'titleFontFace', 'titleFontItalic',
+        'titleFontPaintAuthored', 'titleFontSizeHpt', 'titleManualLayout', 'titleRotation',
+        'titleStyle', 'titleVerticalMode',
+      ],
+      'ChartThreeDSurface': [
+        'fillColor', 'fillHidden', 'lineColor', 'lineDash', 'lineHidden', 'lineWidthEmu',
+        'pictureOptions', 'style', 'thicknessPercent',
+      ],
+      'ChartTrendline': [
+        'backward', 'dispEq', 'dispRSqr', 'forward', 'intercept', 'labelBox', 'labelFontBaseline',
+        'labelFontBold', 'labelFontColor', 'labelFontFace', 'labelFontHidden', 'labelFontItalic',
+        'labelFontLanguage', 'labelFontPaintAuthored', 'labelFontSizeHpt', 'labelFormatCode',
+        'labelFormatSourceLinked', 'labelManualLayout', 'labelRichRuns', 'labelText',
+        'labelTextAlign', 'labelTextBInsEmu', 'labelTextBodyAuthored', 'labelTextLInsEmu',
+        'labelTextRInsEmu', 'labelTextRotation', 'labelTextTInsEmu', 'labelTextVerticalAnchor',
+        'labelTextVerticalMode', 'labelTextWrap', 'lineColor', 'lineDash', 'lineHidden',
+        'linePaintAuthored', 'lineWidthEmu', 'name', 'order', 'period', 'style',
+      ],
+      'ChartexBoxSeries': [
+        'chartexFormatIdx', 'chartexStyle', 'color', 'lineColor', 'lineWidthEmu',
+      ],
+      'ChartexGeography': [
+        'attribution', 'cacheProvider', 'cultureLanguage', 'cultureRegion', 'projectionType',
+        'viewedRegionType',
+      ],
+      'ChartexHistogramBinning': [
+        'binCount', 'binSize', 'edgeFormatCode', 'intervalClosed', 'overflow', 'underflow',
+      ],
+      'ChartexRegionMap': ['colors', 'geography', 'regionLabelLayout'],
+      'ChartexRegionMapColors': [
+        'maxColor', 'maxPosition', 'midColor', 'midPosition', 'minColor', 'minPosition',
+        'stopCount',
+      ],
+      'ChartexRegionMapRow': ['entityId', 'value'],
+      'ChartexTreemap': ['parentLabelLayout'],
+      'ChartexValueColorStop': ['value'],
+      'Fill(ts CellFill)': ['gradient'],
+      'RunFont': ['color', 'name'],
+      'SecondaryValueAxis': [
+        'crossBetween', 'crosses', 'crossesAt', 'dateAxis', 'displayUnits', 'fontBold', 'fontColor',
+        'fontFace', 'fontItalic', 'fontPaintAuthored', 'fontSizeHpt', 'formatCode',
+        'formatDivisors', 'labelAlignment', 'labelOffsetPercent', 'lineColor', 'lineDash',
+        'linePaintAuthored', 'lineWidthEmu', 'logBase', 'majorGridlineColor', 'majorGridlineDash',
+        'majorGridlinePaintAuthored', 'majorGridlineStyle', 'majorGridlineWidthEmu', 'majorUnit',
+        'minorGridlineColor', 'minorGridlineDash', 'minorGridlinePaintAuthored',
+        'minorGridlineStyle', 'minorGridlineWidthEmu', 'minorTickMark', 'minorUnit', 'numberFormat',
+        'orientation', 'pairedBesidePrimary', 'style', 'tickLabelPos', 'tickLabelSkip',
+        'tickMarkSkip', 'titleFontBold', 'titleFontColor', 'titleFontFace', 'titleFontItalic',
+        'titleFontPaintAuthored', 'titleFontSizeHpt', 'titleManualLayout', 'titleRotation',
+        'titleStyle', 'titleVerticalMode',
+      ],
+      'ShapeParagraph': ['spaceAfter', 'spaceBefore', 'spaceLine'],
+      'ShapeText': ['fontScale', 'lnSpcReduction'],
+      'SheetMeta': ['tabColor'],
+      'Worksheet': ['autoFilter', 'tabColor'],
+    },
+    'ts-optional': {
+      'BlipEffect<type=duotone>': ['clr1', 'clr2'],
+      'BlipReflection': ['algn', 'fadeDir', 'kx', 'ky', 'rotWithShape'],
+      'ChartAnchor': ['zOrder'],
+      'ChartManualLayout': ['hMode', 'wMode', 'xMode', 'yMode'],
+      'ChartOfPie': ['splitPosAuthored', 'splitTypeAuthored'],
+      'ChartTextBox': ['bIns', 'lIns', 'rIns', 'tIns'],
+      'ChartThreeDSeriesAxis': ['fontBold'],
+      'ChartexBoxWhisker': ['oneBoxPerSeries'],
+      'Dxf': ['numFmt'],
+      'EffectFill<fillType=image>': ['blipEffects', 'stretch'],
+      'Hyperlink': ['display', 'location'],
+      'ImageAnchor': ['zOrder'],
+      'LegendManualLayout': ['hMode', 'wMode', 'xMode', 'yMode'],
+      'MathNode<kind=sub>': ['sub'],
+      'MathNode<kind=subSup>': ['sub', 'sup'],
+      'MathNode<kind=sup>': ['sup'],
+      'SecondaryValueAxis': ['majorGridlines', 'minorGridlines'],
+      'ShapeInfo': ['zOrder'],
+      'ShapeText': ['anchorCtr', 'autoFit', 'spcFirstLastPara', 'vert'],
+      'TableInfo': ['isCustom'],
+      'Worksheet': [
+        'commentRefs', 'definedNames', 'hyperlinks', 'rightToLeft', 'shapeGroups', 'showGridlines',
+        'showZeros', 'slicers', 'sparklineGroups', 'tables',
+      ],
+      'XlsxComment': ['kind'],
+    },
+  },
+  pptx: {
+    'ts-null': {
+      'ChartAreaGroupDecorations': ['dropLines'],
+      'ChartAxisNumberFormat': ['sourceLinked'],
+      'ChartBarGroupDecorations': ['seriesLines'],
+      'ChartClassicSurfaceBandStyles': ['byBandCount', 'byBandCount[]', 'fixed'],
+      'ChartDataPointOverride': [
+        'bubble3D', 'chartexStyle', 'markerFillPaint', 'markerFillPaintAuthored',
+        'markerLinePaintAuthored', 'markerStyle',
+      ],
+      'ChartDataTable': [
+        'fill', 'fillColor', 'fillHidden', 'fillPaintAuthored', 'fontBold', 'fontColor', 'fontFace',
+        'fontHidden', 'fontItalic', 'fontPaintAuthored', 'fontSizeHpt', 'lineColor', 'lineDash',
+        'lineHidden', 'linePaintAuthored', 'lineWidthEmu', 'style',
+      ],
+      'ChartDecorationLineStyle': [
+        'cap', 'color', 'dash', 'fill', 'hidden', 'join', 'paintAuthored', 'style', 'widthEmu',
+      ],
+      'ChartDisplayUnits': ['builtInUnit', 'label'],
+      'ChartDisplayUnitsLabel': [
+        'boxStyle', 'fontBold', 'fontColor', 'fontFace', 'fontHidden', 'fontItalic',
+        'fontPaintAuthored', 'fontSizeHpt', 'manualLayout', 'rotation', 'text',
+      ],
+      'ChartErrBars': ['linePaintAuthored', 'style'],
+      'ChartExElementStyle': [
+        'allowNoFillOverride', 'allowNoLineOverride', 'effectAuthored', 'effectColorIndex',
+        'effectFormattingIndices', 'effectNoStyle', 'effectUnsupported', 'fillColorIndex',
+        'fillColors', 'fillFormattingIndices', 'fillHidden', 'fillNoStyle', 'fillPaintAuthored',
+        'fillPaints', 'fillSemanticFallbackIndices', 'fontBaseline', 'fontBold', 'fontColor',
+        'fontColorIndex', 'fontColors', 'fontFace', 'fontFormattingIndices', 'fontHidden',
+        'fontItalic', 'fontLanguage', 'fontPaintAuthored', 'fontSizeHpt', 'glows', 'innerShadows',
+        'lineCap', 'lineColorIndex', 'lineColors', 'lineCompound', 'lineCustomDash', 'lineDash',
+        'lineDashAuthored', 'lineFormattingIndices', 'lineHidden', 'lineJoin', 'lineNoStyle',
+        'linePaintAuthored', 'linePaints', 'lineSemanticFallbackIndices', 'lineWidthEmu',
+        'reflections', 'shadows', 'shapePropertiesPresent', 'softEdges', 'textBInsEmu',
+        'textBodyAuthored', 'textLInsEmu', 'textRInsEmu', 'textRotation', 'textTInsEmu',
+        'textVerticalAnchor', 'textVerticalMode', 'textWrap',
+      ],
+      'ChartLabelBox': [
+        'borderCap', 'borderCompound', 'borderCustomDash', 'borderDash', 'borderDashAuthored',
+        'borderFill', 'borderHidden', 'borderJoin', 'borderPaintAuthored', 'fillHidden',
+        'fillPaint', 'fillPaintAuthored', 'style',
+      ],
+      'ChartLegendEntryOverride': [
+        'deleted', 'fontBold', 'fontColor', 'fontFace', 'fontItalic', 'fontSizeHpt',
+      ],
+      'ChartLineGroupDecorations': ['dropLines', 'hiLowLines', 'upDownBars'],
+      'ChartModel': [
+        'areaGroupDecorations', 'barGapWidth', 'barGroupDecorations', 'barOverlap', 'bubbleScale',
+        'bubbleSizeRepresents', 'cartesianAutoLayoutProfile', 'catAxisBaseTimeUnit',
+        'catAxisCrosses', 'catAxisCrossesAt', 'catAxisDisplayUnits', 'catAxisFontBold',
+        'catAxisFontColor', 'catAxisFontFace', 'catAxisFontItalic', 'catAxisFontPaintAuthored',
+        'catAxisFormatCode', 'catAxisFormatDivisors', 'catAxisGridlineColor', 'catAxisGridlineDash',
+        'catAxisGridlinePaintAuthored', 'catAxisGridlineWidthEmu', 'catAxisIsDate',
+        'catAxisLabelAlignment', 'catAxisLabelOffsetPercent', 'catAxisLabelRotation',
+        'catAxisLineColor', 'catAxisLineDash', 'catAxisLinePaintAuthored', 'catAxisLineWidthEmu',
+        'catAxisLogBase', 'catAxisMajorGridlineStyle', 'catAxisMajorGridlines',
+        'catAxisMajorTimeUnit', 'catAxisMajorUnit', 'catAxisMax', 'catAxisMin',
+        'catAxisMinorGridlineColor', 'catAxisMinorGridlineDash',
+        'catAxisMinorGridlinePaintAuthored', 'catAxisMinorGridlineStyle',
+        'catAxisMinorGridlineWidthEmu', 'catAxisMinorGridlines', 'catAxisMinorTickMark',
+        'catAxisMinorTimeUnit', 'catAxisMinorUnit', 'catAxisNoMultiLevelLabels',
+        'catAxisNumberFormat', 'catAxisOrientation', 'catAxisStyle', 'catAxisTickLabelPos',
+        'catAxisTickLabelSkip', 'catAxisTickMarkSkip', 'catAxisTitleFontBold',
+        'catAxisTitleFontColor', 'catAxisTitleFontFace', 'catAxisTitleFontItalic',
+        'catAxisTitleFontPaintAuthored', 'catAxisTitleFontSizeHpt', 'catAxisTitleManualLayout',
+        'catAxisTitleRotation', 'catAxisTitleStyle', 'catAxisTitleTextVerticalInsetEmu',
+        'catAxisTitleVerticalMode', 'categoryLevels', 'categorySourceHidden', 'chartAreaStyle',
+        'chartBorderCap', 'chartBorderColor', 'chartBorderCompound', 'chartBorderCustomDash',
+        'chartBorderDash', 'chartBorderDashAuthored', 'chartBorderHidden', 'chartBorderJoin',
+        'chartBorderLineFill', 'chartBorderPaintAuthored', 'chartBorderWidthEmu', 'chartFill',
+        'chartFillHidden', 'chartFillPaintAuthored', 'chartStyleColorMethod',
+        'chartStyleColorPalette', 'chartStyleMarkerSizePt', 'chartStyleMarkerSymbol',
+        'chartStyleRoles', 'chartTextBoxes', 'chartTextStyle', 'chartexAccents', 'chartexBox',
+        'chartexColorPalette', 'chartexColorStyleMethod', 'chartexConnectorLines',
+        'chartexDataPointLineStyle', 'chartexDataPointMarkerStyle', 'chartexDataPointStyle',
+        'chartexHistogramBinning', 'chartexMarkerSizePt', 'chartexMarkerSymbol',
+        'chartexParetoFlatEndpoint', 'chartexParetoOutlineOwner', 'chartexParetoOwnerIndex',
+        'chartexParetoSortDescending', 'chartexPrimaryAxisRight', 'chartexRegionMap',
+        'chartexSeriesLineStyle', 'chartexShowUnpairedPercentageAxis', 'chartexSunburst',
+        'chartexSuppressGeometry', 'chartexTreemap', 'classicChartStyleRoles',
+        'classicSurfaceBandStyles', 'classicVaryingPointChartStyleRoles',
+        'classicVaryingPointChartStyleRolesByGroup', 'dataLabelFontBaseline', 'dataLabelFontBold',
+        'dataLabelFontColor', 'dataLabelFontFace', 'dataLabelFontItalic', 'dataLabelFontLanguage',
+        'dataLabelFontPaintAuthored', 'dataLabelFormatCode', 'dataLabelPosition', 'dataTable',
+        'dispBlanksAs', 'firstSliceAngle', 'holeSize', 'legacyChartStyle', 'legendEntries',
+        'legendFill', 'legendFillColor', 'legendFillHidden', 'legendFillPaintAuthored',
+        'legendFontBaseline', 'legendFontBold', 'legendFontColor', 'legendFontFace',
+        'legendFontItalic', 'legendFontLanguage', 'legendFontPaintAuthored', 'legendFontSizeHpt',
+        'legendLineCap', 'legendLineColor', 'legendLineCompound', 'legendLineCustomDash',
+        'legendLineDash', 'legendLineDashAuthored', 'legendLineFill', 'legendLineHidden',
+        'legendLineJoin', 'legendLinePaintAuthored', 'legendLineWidthEmu', 'legendManualLayout',
+        'legendOverlay', 'legendStyle', 'lineGroupDecorations', 'ofPie', 'plotAreaFill',
+        'plotAreaFillAutomatic', 'plotAreaFillHidden', 'plotAreaFillPaintAuthored',
+        'plotAreaLineCap', 'plotAreaLineColor', 'plotAreaLineCompound', 'plotAreaLineCustomDash',
+        'plotAreaLineDash', 'plotAreaLineDashAuthored', 'plotAreaLineFill', 'plotAreaLineHidden',
+        'plotAreaLineJoin', 'plotAreaLinePaintAuthored', 'plotAreaLineWidthEmu',
+        'plotAreaManualLayout', 'plotAreaStyle', 'plotGroups', 'plotVisibleOnly', 'radarStyle',
+        'roundedCorners', 'scatterStyle', 'secondaryCatAxis', 'secondaryValAxis',
+        'showDataLabelsOverMax', 'showNegativeBubbles', 'stockAutomaticStyle', 'stockDropLines',
+        'stockHiLowLineColor', 'stockHiLowLineStyle', 'stockHiLowLines', 'stockUpDownBarStyle',
+        'stockUpDownBars', 'surfaceBandFormats', 'surfaceWireframe', 'themeAccentColors',
+        'themeMajorFontLatin', 'themeMinorFontLatin', 'threeD', 'titleFontBaseline',
+        'titleFontBold', 'titleFontItalic', 'titleFontLanguage', 'titleFontPaintAuthored',
+        'titleManualLayout', 'titleRichRuns', 'titleStyle', 'valAxisCrosses', 'valAxisCrossesAt',
+        'valAxisDisplayUnits', 'valAxisFontBold', 'valAxisFontColor', 'valAxisFontFace',
+        'valAxisFontItalic', 'valAxisFontPaintAuthored', 'valAxisFormatCode',
+        'valAxisFormatDivisors', 'valAxisGridlineColor', 'valAxisGridlineDash',
+        'valAxisGridlinePaintAuthored', 'valAxisGridlineWidthEmu', 'valAxisLineColor',
+        'valAxisLineDash', 'valAxisLinePaintAuthored', 'valAxisLineWidthEmu', 'valAxisLogBase',
+        'valAxisMajorGridlineStyle', 'valAxisMajorGridlines', 'valAxisMajorUnit',
+        'valAxisMinorGridlineColor', 'valAxisMinorGridlineDash',
+        'valAxisMinorGridlinePaintAuthored', 'valAxisMinorGridlineStyle',
+        'valAxisMinorGridlineWidthEmu', 'valAxisMinorGridlines', 'valAxisMinorTickMark',
+        'valAxisMinorUnit', 'valAxisNumberFormat', 'valAxisOrientation', 'valAxisStyle',
+        'valAxisTickLabelPos', 'valAxisTitleFontBold', 'valAxisTitleFontColor',
+        'valAxisTitleFontFace', 'valAxisTitleFontItalic', 'valAxisTitleFontPaintAuthored',
+        'valAxisTitleFontSizeHpt', 'valAxisTitleManualLayout', 'valAxisTitleRotation',
+        'valAxisTitleStyle', 'valAxisTitleTextVerticalInsetEmu', 'valAxisTitleVerticalMode',
+        'varyColors',
+      ],
+      'ChartOfPie': [
+        'customSplitIndices', 'seriesLineStyle', 'splitPos', 'splitPosAuthored',
+        'splitTypeAuthored',
+      ],
+      'ChartPlotGroup': [
+        'axisIds', 'barDirection', 'bubbleScale', 'bubbleSizeRepresents', 'gapWidth', 'grouping',
+        'overlap', 'radarStyle', 'scatterStyle', 'showNegativeBubbles', 'varyColors',
+      ],
+      'ChartSeries': [
+        'areaGroupIndex', 'automaticMarkerSymbol', 'automaticNegativeStyle', 'barGroupDirection',
+        'barGroupGapWidth', 'barGroupGrouping', 'barGroupIndex', 'barGroupOverlap', 'bubble3D',
+        'bubble3DGroupDefault', 'bubbleSizes', 'bubbleXSourceIsString', 'catFormatBuiltinId',
+        'catFormatCode', 'catFormatCodes', 'categories', 'chartexFormatIdx', 'chartexStyle',
+        'dataLabelColors', 'dataLabelOverrides', 'dataPointColors', 'dataPointOverrides', 'errBars',
+        'explosion', 'fillPattern', 'invertIfNegative', 'invertedFill', 'invertedFillAuthored',
+        'invertedFillHidden', 'invertedLineAuthored', 'invertedLineColor', 'invertedLineHidden',
+        'invertedLineWidthEmu', 'labelColor', 'lineColor', 'lineGroupIndex', 'lineHidden',
+        'lineWidthEmu', 'markerFill', 'markerFillPaint', 'markerFillPaintAuthored', 'markerLine',
+        'markerLinePaintAuthored', 'markerLineWidthEmu', 'markerSize', 'markerStyle',
+        'markerSymbol', 'seriesDataLabels', 'seriesType', 'showMarker', 'smooth', 'sourceHidden',
+        'threeDShape', 'trendLines', 'useSecondaryAxis', 'valFormatCode',
+      ],
+      'ChartSeriesDataLabels': [
+        'deleted', 'formatDivisors', 'leaderLinePaintAuthored', 'leaderLineStyle',
+        'percentFormatCode', 'percentFormatDivisors',
+      ],
+      'ChartStockBarPaint': [
+        'fill', 'fillColor', 'fillHidden', 'fillPaintAuthored', 'lineCap', 'lineColor', 'lineDash',
+        'lineHidden', 'lineJoin', 'linePaintAuthored', 'lineWidthEmu', 'style',
+      ],
+      'ChartSurfaceBandFormat': [
+        'fill', 'fillHidden', 'lineColor', 'lineHidden', 'lineWidthEmu', 'style',
+      ],
+      'ChartTextBox': ['verticalAnchor', 'wrap'],
+      'ChartTextParagraph': ['align'],
+      'ChartTextRun': [
+        'baseline', 'bold', 'color', 'colorHidden', 'colorPaintAuthored', 'fontFace', 'fontSizeHpt',
+        'italic', 'language', 'paragraphAlign',
+      ],
+      'ChartThreeD': [
+        'backWall', 'barGrouping', 'depthPercent', 'depthPercentAuthored', 'floor',
+        'gapDepthPercent', 'gapDepthPercentAuthored', 'heightPercent', 'heightPercentAuthored',
+        'perspective', 'perspectiveAuthored', 'rightAngleAxes', 'rightAngleAxesAuthored',
+        'rotationX', 'rotationXAuthored', 'rotationY', 'rotationYAuthored', 'seriesAxis', 'shape',
+        'sideWall', 'view3dPresent',
+      ],
+      'ChartThreeDPictureOptions': [
+        'applyToEnd', 'applyToFront', 'applyToSides', 'pictureFormat', 'pictureFormatAuthored',
+        'pictureStackUnit', 'pictureStackUnitAuthored',
+      ],
+      'ChartThreeDSeriesAxis': [
+        'fontColor', 'fontFace', 'fontItalic', 'fontPaintAuthored', 'fontSizeHpt', 'lineColor',
+        'lineDash', 'linePaintAuthored', 'lineWidthEmu', 'majorGridlineStyle', 'minorGridlineStyle',
+        'minorTickMark', 'orientation', 'style', 'tickLabelPos', 'tickLabelSkip', 'tickMarkSkip',
+        'title', 'titleFontBold', 'titleFontColor', 'titleFontFace', 'titleFontItalic',
+        'titleFontPaintAuthored', 'titleFontSizeHpt', 'titleManualLayout', 'titleRotation',
+        'titleStyle', 'titleVerticalMode',
+      ],
+      'ChartThreeDSurface': [
+        'fillColor', 'fillHidden', 'lineColor', 'lineDash', 'lineHidden', 'lineWidthEmu',
+        'pictureOptions', 'style', 'thicknessPercent',
+      ],
+      'ChartTrendline': [
+        'backward', 'dispEq', 'dispRSqr', 'forward', 'intercept', 'labelBox', 'labelFontBaseline',
+        'labelFontBold', 'labelFontColor', 'labelFontFace', 'labelFontHidden', 'labelFontItalic',
+        'labelFontLanguage', 'labelFontPaintAuthored', 'labelFontSizeHpt', 'labelFormatCode',
+        'labelFormatSourceLinked', 'labelManualLayout', 'labelRichRuns', 'labelText',
+        'labelTextAlign', 'labelTextBInsEmu', 'labelTextBodyAuthored', 'labelTextLInsEmu',
+        'labelTextRInsEmu', 'labelTextRotation', 'labelTextTInsEmu', 'labelTextVerticalAnchor',
+        'labelTextVerticalMode', 'labelTextWrap', 'lineColor', 'lineDash', 'lineHidden',
+        'linePaintAuthored', 'lineWidthEmu', 'name', 'order', 'period', 'style',
+      ],
+      'ChartexBoxSeries': [
+        'chartexFormatIdx', 'chartexStyle', 'color', 'lineColor', 'lineWidthEmu',
+      ],
+      'ChartexGeography': [
+        'attribution', 'cacheProvider', 'cultureLanguage', 'cultureRegion', 'projectionType',
+        'viewedRegionType',
+      ],
+      'ChartexHistogramBinning': [
+        'binCount', 'binSize', 'edgeFormatCode', 'intervalClosed', 'overflow', 'underflow',
+      ],
+      'ChartexRegionMap': ['colors', 'geography', 'regionLabelLayout'],
+      'ChartexRegionMapColors': [
+        'maxColor', 'maxPosition', 'midColor', 'midPosition', 'minColor', 'minPosition',
+        'stopCount',
+      ],
+      'ChartexRegionMapRow': ['entityId', 'value'],
+      'ChartexTreemap': ['parentLabelLayout'],
+      'ChartexValueColorStop': ['value'],
+      'PictureElement<type=picture>': ['custGeom', 'stroke'],
+      'SecondaryValueAxis': [
+        'crossBetween', 'crosses', 'crossesAt', 'dateAxis', 'displayUnits', 'fontBold', 'fontColor',
+        'fontFace', 'fontItalic', 'fontPaintAuthored', 'fontSizeHpt', 'formatCode',
+        'formatDivisors', 'labelAlignment', 'labelOffsetPercent', 'lineColor', 'lineDash',
+        'linePaintAuthored', 'lineWidthEmu', 'logBase', 'majorGridlineColor', 'majorGridlineDash',
+        'majorGridlinePaintAuthored', 'majorGridlineStyle', 'majorGridlineWidthEmu', 'majorUnit',
+        'minorGridlineColor', 'minorGridlineDash', 'minorGridlinePaintAuthored',
+        'minorGridlineStyle', 'minorGridlineWidthEmu', 'minorTickMark', 'minorUnit', 'numberFormat',
+        'orientation', 'pairedBesidePrimary', 'style', 'tickLabelPos', 'tickLabelSkip',
+        'tickMarkSkip', 'titleFontBold', 'titleFontColor', 'titleFontFace', 'titleFontItalic',
+        'titleFontPaintAuthored', 'titleFontSizeHpt', 'titleManualLayout', 'titleRotation',
+        'titleStyle', 'titleVerticalMode',
+      ],
+      'TableCell': ['diagonalTl', 'diagonalTr'],
+      'TextBody': ['fontScale', 'lnSpcReduction'],
+      'TextRun<type=math>': ['color', 'fontSize'],
+    },
+    'ts-optional': {
+      'BlipEffect<type=duotone>': ['clr1', 'clr2'],
+      'BlipReflection': ['algn', 'fadeDir', 'kx', 'ky', 'rotWithShape'],
+      'Bullet<type=autoNum>': ['fontFamily', 'sizePct'],
+      'ChartManualLayout': ['hMode', 'wMode', 'xMode', 'yMode'],
+      'ChartOfPie': ['splitPosAuthored', 'splitTypeAuthored'],
+      'ChartTextBox': ['bIns', 'lIns', 'rIns', 'tIns'],
+      'ChartThreeDSeriesAxis': ['fontBold'],
+      'ChartexBoxWhisker': ['oneBoxPerSeries'],
+      'EffectFill<fillType=image>': ['blipEffects', 'stretch'],
+      'LegendManualLayout': ['hMode', 'wMode', 'xMode', 'yMode'],
+      'MathNode<kind=sub>': ['sub'],
+      'MathNode<kind=subSup>': ['sub', 'sup'],
+      'MathNode<kind=sup>': ['sup'],
+      'SecondaryValueAxis': ['majorGridlines', 'minorGridlines'],
+      'Slide': ['elementSources'],
+      'TextRunData(ts Omit)': ['fieldType'],
+      'TextRunData<type=text>': ['fieldType'],
     },
   },
 };
