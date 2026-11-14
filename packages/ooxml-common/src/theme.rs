@@ -263,6 +263,7 @@ pub const CLR_SCHEME_SLOTS: [&str; 12] = [
 /// A [`BTreeMap`] backs it so any serialized form is deterministic; lookups by
 /// slot name are the common case ([`ThemeColorScheme::get`]).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ThemeColorScheme {
     colors: BTreeMap<String, String>,
 }
@@ -341,6 +342,7 @@ fn color_node_hex(node: roxmltree::Node<'_, '_>) -> Option<String> {
 /// more `CT_SupplementalFont` entries keyed by script. Each host maps these
 /// authored facts onto its own font-selection policy.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ThemeFonts {
     /// `<a:majorFont>` typefaces (latin / ea / cs).
@@ -354,6 +356,7 @@ pub struct ThemeFonts {
 /// supplemental list. Supplemental entries retain source order so malformed
 /// duplicate script mappings are not silently resolved by parse order.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ThemeFontGroup {
     pub latin: Option<String>,
     pub ea: Option<String>,
@@ -364,6 +367,7 @@ pub struct ThemeFontGroup {
 
 /// ECMA-376 `CT_SupplementalFont`: an authored script-to-typeface association.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ThemeSupplementalFont {
     pub script: String,
     pub typeface: String,

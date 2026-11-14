@@ -25,6 +25,7 @@ use std::collections::BTreeMap;
 /// resource such as a hyperlink URL (`External`). External targets are opaque
 /// URLs and must never be run through part-name resolution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum TargetMode {
     /// `TargetMode="Internal"` (or omitted). `Target` is a package part name,
     /// relative to the source part's directory (or root-absolute with a leading
@@ -41,6 +42,7 @@ pub enum TargetMode {
 /// (External); resolution against a base directory is a separate step
 /// ([`resolve_target`]) because the base differs per source part.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct RelTarget {
     /// The `Target` attribute verbatim (e.g. `../media/image1.png`,

@@ -15,6 +15,7 @@ pub(super) fn extract_axis_format_code(axis_node: Node) -> Option<String> {
 /// format projected into the renderer's `*formatCode` fields. `None` for
 /// `sourceLinked` preserves omission, whose effective meaning is true.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ChartAxisNumberFormat {
     pub authored_code: String,
