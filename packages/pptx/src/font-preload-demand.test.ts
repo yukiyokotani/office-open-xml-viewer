@@ -12,6 +12,9 @@ function slide(text: string, run: Partial<TextRunData> = {}): Slide {
     vert: 'horz', paragraphs: [{ bullet: { type: 'inherit' }, runs: [{ type: 'text', text, ...run }] }],
   } }] } as Slide;
 }
+function picture(imagePath: string, mimeType: string) {
+  return { type: 'picture', imagePath, mimeType, x: 0, y: 0, width: 1, height: 1, rotation: 0, flipH: false, flipV: false, stroke: null };
+}
 const bootstrap = { slideCount: 2, slideWidth: 100, slideHeight: 100, defaultTextColor: null,
   majorFont: null, minorFont: null, hlinkColor: null, folHlinkColor: null, embeddedFonts: [],
   slides: [{ index: 0 }, { index: 1 }] } as PresentationBootstrap;
@@ -38,18 +41,99 @@ describe('complete conservative PPTX paint demand', () => {
   });
 
   it('declines canonical changes and generated or unmodelled paint paths', () => {
-    for (const run of [{ text: 'e\u0301' }, { text: '\ud800' }, { text: '\u0378' }, { text: '\uf0a7' }, { text: '\uf0a7', fontFamilySym: 'Segoe UI Symbol' }, { text: 'A', fieldType: 'unknown' }]) {
+    for (const run of [{ text: 'e\u0301' }, { text: '\ud800' }, { text: '\u0378' }, { text: '\uf0a7' }, { text: '\uf0a7', fontFamilySym: 'Segoe UI Symbol' }]) {
       expect(collectSlideFontDemand(slide(run.text, run), new Set(), 10000)).toBe('all');
     }
-    for (const patch of [{ parseError: 'broken' }, { elements: [{ type: 'chart' }] }, { elements: [{ type: 'picture' }] }]) {
-      expect(collectSlideFontDemand({ ...slide('A'), ...patch } as Slide, new Set(), 10000)).toBe('all');
+    for (const patch of [
+      { parseError: 'broken' },
+      { elements: [{ type: 'unknown' }] },
+      { elements: [{ type: 'chart', chart: { chartType: 'regionMap', series: [] } }] },
+      { elements: [picture('ppt/media/image1.emf', 'image/emf')] },
+      { elements: [picture('ppt/media/image1.wmf', 'application/octet-stream')] },
+      { elements: [picture('ppt/media/image1.pict', 'image/x-pict')] },
+      { elements: [picture('ppt/media/image1.png', 'image/png')], background: { fillType: 'image', imagePath: 'ppt/media/bg.emf', mimeType: 'image/emf' } },
+      { elements: [{ type: 'media', posterPath: 'ppt/media/poster.wmf', posterMimeType: 'image/wmf', mediaPath: 'ppt/media/m.mp4', mimeType: 'video/mp4' }] },
+    ]) {
+      expect(collectSlideFontDemand({ ...slide('A'), ...patch } as Slide, new Set(), 10000), JSON.stringify(patch)).toBe('all');
     }
-    const numbered = slide('A');
-    (numbered.elements[0] as { textBody: { paragraphs: Array<{ bullet: unknown }> } }).textBody.paragraphs[0].bullet = { type: 'autoNum', numType: 'arabicPeriod' };
-    expect(collectSlideFontDemand(numbered, new Set(), 10000)).toBe('all');
-    const vertical = slide('A');
-    (vertical.elements[0] as { textBody: { vert: string } }).textBody.vert = 'vert';
-    expect(collectSlideFontDemand(vertical, new Set(), 10000)).toBe('all');
+    const body = (value: Slide) => (value.elements[0] as unknown as { textBody: Record<string, unknown> & { paragraphs: Array<Record<string, unknown>> } }).textBody;
+    for (const vert of ['wordArtVert', 'wordArtVertRtl']) {
+      const stacked = slide('A');
+      body(stacked).vert = vert;
+      expect(collectSlideFontDemand(stacked, new Set(), 10000), vert).toBe('all');
+    }
+    const warped = slide('A');
+    body(warped).textWarp = { prst: 'textArchUp' };
+    expect(collectSlideFontDemand(warped, new Set(), 10000)).toBe('all');
+    const equation = slide('A');
+    body(equation).paragraphs[0].runs = [{ type: 'math', nodes: [], display: false }];
+    expect(collectSlideFontDemand(equation, new Set(), 10000)).toBe('all');
+    // A picture fill or picture marker that is a metafile plays its own text records.
+    const filled = slide('A');
+    (filled.elements[0] as unknown as Record<string, unknown>).fill = { fillType: 'image', imagePath: 'ppt/media/image2.emf', mimeType: 'image/emf' };
+    expect(collectSlideFontDemand(filled, new Set(), 10000)).toBe('all');
+    const marker = slide('A');
+    body(marker).paragraphs[0].bullet = { type: 'blip', imagePath: 'ppt/media/image3.wmf', mimeType: 'image/wmf' };
+    expect(collectSlideFontDemand(marker, new Set(), 10000)).toBe('all');
+  });
+
+  it('demands nothing for text-free images and media posters', () => {
+    const plain = collectSlideFontDemand(slide('A'), new Set(), 10000);
+    for (const patch of [
+      { elements: [...slide('A').elements, picture('ppt/media/image1.png', 'image/png'), picture('ppt/media/image2.svg', 'image/svg+xml'), picture('ppt/media/image3.JPG', 'image/jpeg')] },
+      { elements: [...slide('A').elements, { type: 'media', posterPath: 'ppt/media/poster.png', posterMimeType: 'image/png', mediaPath: 'ppt/media/m.mp4', mimeType: 'video/mp4' }] },
+      { elements: [...slide('A').elements, { type: 'media', posterPath: '', posterMimeType: '', mediaPath: 'ppt/media/m.mp3', mimeType: 'audio/mpeg' }] },
+      { background: { fillType: 'image', imagePath: 'ppt/media/bg.gif', mimeType: 'image/gif' } },
+    ]) {
+      expect(collectSlideFontDemand({ ...slide('A'), ...patch } as Slide, new Set(), 10000), JSON.stringify(patch)).toEqual(plain);
+    }
+    const marker = slide('A');
+    (marker.elements[0] as unknown as { textBody: { paragraphs: Array<{ bullet: unknown }> } }).textBody.paragraphs[0].bullet =
+      { type: 'blip', imagePath: 'ppt/media/image3.png', mimeType: 'image/png' };
+    expect(collectSlideFontDemand(marker, new Set(), 10000)).toEqual(plain);
+  });
+
+  it('demands every label an auto-number scheme can paint, in its marker face', () => {
+    const numbered = (numType: string, fontFamily: string | null = null) => {
+      const value = slide('A');
+      (value.elements[0] as unknown as { textBody: { paragraphs: Array<{ bullet: unknown }> } }).textBody.paragraphs[0].bullet =
+        { type: 'autoNum', numType, startAt: 3, color: null, fontFamily };
+      const demand = collectSlideFontDemand(value, new Set(), 10000);
+      expect(demand, numType).not.toBe('all');
+      return new Set(demand as number[]);
+    };
+    const has = (set: Set<number>, text: string) => [...text].every((ch) => set.has(ch.codePointAt(0)!));
+    expect(has(numbered('arabicPeriod'), '0123456789.-')).toBe(true);
+    expect(has(numbered('arabicParenBoth'), '()0123456789')).toBe(true);
+    expect(has(numbered('alphaLcParenR'), 'abcdefghijklmnopqrstuvwxyz)0123456789')).toBe(true);
+    expect(has(numbered('alphaUcPeriod'), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ.')).toBe(true);
+    expect(has(numbered('romanUcPeriod'), 'MDCLXVI.')).toBe(true);
+    expect(has(numbered('romanLcPlain'), 'mdclxvi')).toBe(true);
+    expect(has(numbered('arabicDbPeriod'), '０１２３４５６７８９.')).toBe(true);
+    // An unknown scheme formats as arabicPeriod.
+    expect(has(numbered('thaiAlphaPeriod'), '0123456789.')).toBe(true);
+    // A symbol-encoded marker face demands its conversions too.
+    expect(has(numbered('arabicPeriod', 'Wingdings'), '\uf030')).toBe(true);
+  });
+
+  it('demands rotated and vertical bodies, including eaVert vertical forms', () => {
+    const vertical = (vert: string, text: string) => {
+      const value = slide(text);
+      (value.elements[0] as unknown as { textBody: { vert: string } }).textBody.vert = vert;
+      return collectSlideFontDemand(value, new Set(), 10000);
+    };
+    for (const vert of ['vert', 'vert270', 'mongolianVert']) {
+      expect(vertical(vert, 'Ab、「')).toEqual(collectSlideFontDemand(slide('Ab、「'), new Set(), 10000));
+    }
+    // 、 → U+FE11, 「 → U+FE41, （ → U+FE35 (core vertical-orientation).
+    expect(vertical('eaVert', 'あ、「（')).toEqual(expect.arrayContaining([0x3042, 0x3001, 0xfe11, 0x300c, 0xfe41, 0xff08, 0xfe35]));
+  });
+
+  it('demands every field\'s painted text', () => {
+    expect(collectSlideFontDemand(slide('11/14/2026', { fieldType: 'datetime1' }), new Set(), 10000))
+      .toEqual(collectSlideFontDemand(slide('11/14/2026'), new Set(), 10000));
+    expect(collectSlideFontDemand(slide('Fußnote', { fieldType: 'unknown', caps: 'all' }), new Set(), 10000))
+      .toEqual(expect.arrayContaining([0xdf, 0x53]));
   });
 
   it('demands what char markers and symbol-encoded faces may paint, not every subset', () => {
