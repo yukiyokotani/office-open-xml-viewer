@@ -229,14 +229,17 @@ describe('XLSX font demand covers every measured or painted scalar', () => {
     const names = readdirSync(dir).filter((file) => file.endsWith('.xlsx')).sort().filter((_, index) => index % shards === shard);
     for (const name of names) {
       const file = `${dir}/${name}`;
+      const started = Date.now();
+      process.stdout.write(`corpus file ${name}\n`);
       try {
         outcomes.push(...check(file, new Uint8Array(readFileSync(file))));
       } catch (error) {
         if ((error as Error)?.name === 'AssertionError') throw new Error(`${name}: ${(error as Error).message}`);
         outcomes.push('unreadable');
       }
+      process.stdout.write(`corpus done ${name} ${Date.now() - started} ms\n`);
     }
-    console.log(`.xlsx corpus outcomes`, JSON.stringify(outcomes.reduce<Record<string, number>>((counts, outcome) => { counts[outcome] = (counts[outcome] ?? 0) + 1; return counts; }, {})));
+    process.stdout.write(`.xlsx corpus outcomes ${JSON.stringify(outcomes.reduce<Record<string, number>>((counts, outcome) => { counts[outcome] = (counts[outcome] ?? 0) + 1; return counts; }, {}))}\n`);
   }, 21_600_000);
 
   it('public demo workbook', () => {

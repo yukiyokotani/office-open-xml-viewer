@@ -127,7 +127,9 @@ async function paintedScalars(model: DocxDocumentModel): Promise<Set<number>> {
   const pages = layoutDocument(model, services).pages.length;
   for (let pageIndex = 0; pageIndex < pages; pageIndex++) {
     await renderDocumentToCanvas(model, canvas, pageIndex, {
-      dpr: 1, width: 612, currentDate: Date.UTC(2026, 9, 26, 9, 0), layoutServices: createLayoutServices(model, { measureContext: ctx }),
+      // One layout for every page (a fresh service per page lays the whole
+      // document out again for each page).
+      dpr: 1, width: 612, currentDate: Date.UTC(2026, 9, 26, 9, 0), layoutServices: services,
     });
   }
   const scalars = new Set<number>();
@@ -166,14 +168,17 @@ describe('DOCX font demand covers every measured or painted scalar', () => {
     const names = readdirSync(dir).filter((file) => file.endsWith('.docx')).sort().filter((_, index) => index % shards === shard);
     for (const name of names) {
       const file = `${dir}/${name}`;
+      const started = Date.now();
+      process.stdout.write(`corpus file ${name}\n`);
       try {
         outcomes.push(await check(file, new Uint8Array(await readFile(file))));
       } catch (error) {
         if ((error as Error)?.name === 'AssertionError') throw new Error(`${name}: ${(error as Error).message}`);
         outcomes.push('unreadable');
       }
+      process.stdout.write(`corpus done ${name} ${Date.now() - started} ms\n`);
     }
-    console.log(`.docx corpus outcomes`, JSON.stringify(outcomes.reduce<Record<string, number>>((counts, outcome) => { counts[outcome] = (counts[outcome] ?? 0) + 1; return counts; }, {})));
+    process.stdout.write(`.docx corpus outcomes ${JSON.stringify(outcomes.reduce<Record<string, number>>((counts, outcome) => { counts[outcome] = (counts[outcome] ?? 0) + 1; return counts; }, {}))}\n`);
   }, 21_600_000);
 
   it('synthetic conformance corpus and public demo samples', async () => {
