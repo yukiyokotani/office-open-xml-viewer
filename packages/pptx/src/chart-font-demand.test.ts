@@ -32,6 +32,8 @@ describe('chart paint texts for font demand', () => {
     expect(demand).not.toBe('all');
     expect(demand).toEqual(expect.arrayContaining(scalars('売上東京ØΔ円' + CHART_SYNTHESIZED_TEXT)));
     expect(demand).not.toContain('游'.codePointAt(0));
+    // Elision measures lone-surrogate prefixes as U+FFFD.
+    expect(demand).toContain(0xfffd);
   });
 
   it('adds the formatter name tables for every date section, as the formatter detects it', () => {

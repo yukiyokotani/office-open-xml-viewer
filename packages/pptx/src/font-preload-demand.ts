@@ -132,17 +132,20 @@ function verticalForms(text: string): string {
  * 1–26 (every letter), 30–39 (every digit of the alphabetic schemes' Arabic
  * fallback beyond 26) and 3888 (MMMDCCCLXXXVIII, every roman numeral; a
  * non-positive counter has none).
- * Memoized per scheme. */
+ * Memoized per scheme; the memo is bounded because `numType` is document
+ * text (an unknown scheme formats as arabicPeriod). */
 function autoNumAlphabet(numType: string): string {
   let alphabet = autoNumAlphabets.get(numType);
   if (alphabet === undefined) {
     alphabet = [...new Set(AUTONUM_ALPHABET_COUNTERS.map((counter) => formatAutoNum(counter, numType)).join(''))].join('');
-    autoNumAlphabets.set(numType, alphabet);
+    if (autoNumAlphabets.size < AUTONUM_ALPHABET_MEMO_LIMIT) autoNumAlphabets.set(numType, alphabet);
   }
   return alphabet;
 }
 
 const autoNumAlphabets = new Map<string, string>();
+/** Above the 41 ST_TextAutonumberScheme values (§20.1.10.61). */
+const AUTONUM_ALPHABET_MEMO_LIMIT = 64;
 const AUTONUM_ALPHABET_COUNTERS: readonly number[] = [
   -1, 0, 3888, ...Array.from({ length: 39 }, (_, index) => index + 1),
 ];

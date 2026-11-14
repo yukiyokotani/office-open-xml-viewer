@@ -102,5 +102,7 @@ const CHART_FACE_KEY = /^(?:fontFace|[A-Za-z]+FontFace|themeMajorFontLatin|theme
  * trendline names) plus the non-ASCII literals the chart painter writes: the
  * elision ellipsis (text-elide, data-label-layout), histogram bin bounds
  * `≤ ≥` (histogram-binning), and the trendline equation minus sign and `R²`
- * (trendline). */
-export const CHART_SYNTHESIZED_TEXT = `${String.fromCharCode(...Array.from({ length: 0x7f - 0x20 }, (_, i) => 0x20 + i))}…≤≥−²`;
+ * (trendline). U+FFFD: elision's binary search measures UTF-16 prefixes that
+ * may end in a lone surrogate, which Canvas measures as the replacement
+ * character. */
+export const CHART_SYNTHESIZED_TEXT = `${String.fromCharCode(...Array.from({ length: 0x7f - 0x20 }, (_, i) => 0x20 + i))}…≤≥−²\ufffd`;
