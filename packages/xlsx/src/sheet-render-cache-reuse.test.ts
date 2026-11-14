@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { getSheetRenderCache, inheritSheetRenderCache, renderViewport } from './renderer.js';
+import { createSheetViewModel } from './internal/sheet-viewer-runtime.js';
 import type { CellFont, Styles, Worksheet } from './types.js';
 
 // The per-worksheet render index (cell map, merge topology, compiled CF,
@@ -85,6 +86,38 @@ describe('sheet render index reuse across frames', () => {
     expect(entries[1]).toBe(entries[0]);
     expect(entries[2]).toBe(entries[0]);
     expect(entries[0]).toBe(getSheetRenderCache(source, st));
+  });
+
+  it('gives a viewer-owned view its own index, built once, when its inputs differ', () => {
+    const source = { ...sheet('A', 'label'), commentRefs: ['A1'] } as Worksheet;
+    const st = styles();
+    // XlsxViewer with `comments: false`: copied rows, no comment refs.
+    const view = { ...createSheetViewModel(source), commentRefs: [] } as Worksheet;
+    const { ctx } = recorder(() => 7);
+    const entries = [];
+    for (let frame = 0; frame < 3; frame++) {
+      inheritSheetRenderCache(source, view, st);
+      renderViewport(ctx, view, st, VIEWPORT);
+      entries.push(getSheetRenderCache(view, st));
+    }
+    expect(entries[1]).toBe(entries[0]);
+    expect(entries[2]).toBe(entries[0]);
+    expect(entries[0]).not.toBe(getSheetRenderCache(source, st));
+    expect(entries[0].commentCells.size).toBe(0);
+    expect(getSheetRenderCache(source, st).commentCells.has('1:1')).toBe(true);
+  });
+
+  it('drops a shared index once a projection no longer matches its source', () => {
+    const source = sheet('A', 'label');
+    const st = styles();
+    const projection: Worksheet = { ...source, colWidths: { 1: 9 } };
+    inheritSheetRenderCache(source, projection, st);
+    expect(getSheetRenderCache(projection, st)).toBe(getSheetRenderCache(source, st));
+    projection.mergeCells = [{ top: 1, left: 1, bottom: 1, right: 2 }];
+    inheritSheetRenderCache(source, projection, st);
+    const own = getSheetRenderCache(projection, st);
+    expect(own).not.toBe(getSheetRenderCache(source, st));
+    expect(own.mergeAnchorSet.has('1:1')).toBe(true);
   });
 
   it('keeps the index across zoom and device-pixel-ratio changes; text follows the scale', () => {

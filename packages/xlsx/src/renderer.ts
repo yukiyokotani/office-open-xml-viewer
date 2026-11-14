@@ -3404,11 +3404,15 @@ interface SheetRenderCache {
   sparklineMap: Map<string, SparklineModel>;
 }
 const sheetRenderCache = new WeakMap<Worksheet, SheetRenderCache>();
+/** Worksheets whose current entry was shared from a source by
+ * {@link inheritSheetRenderCache} rather than built from their own fields. */
+const inheritedRenderCache = new WeakSet<Worksheet>();
 
 /** @internal A provisional row graph grows between renders; its coordinate
  * indexes must be rebuilt after every accepted chunk. */
 export function invalidateSheetRenderCache(worksheet: Worksheet): void {
   sheetRenderCache.delete(worksheet);
+  inheritedRenderCache.delete(worksheet);
 }
 
 function coordinateIndexIdentity(
@@ -3435,6 +3439,7 @@ export function getSheetRenderCache(worksheet: Worksheet, styles?: Styles): Shee
     return cached;
   }
   if (cached) sheetRenderCache.delete(worksheet);
+  inheritedRenderCache.delete(worksheet);
 
   const cellIdentity = coordinateIndexIdentity(
     worksheet,
@@ -4185,9 +4190,30 @@ function virtualizedTextOverflowOverscan(
   return { startCol, endCol, anchorKeys };
 }
 
+/** Worksheet fields a render-local size projection replaces
+ * (createSizeOverriddenWorksheet, worksheetWithAutoRowHeights). None of them is
+ * an input of {@link getSheetRenderCache}. */
+const PROJECTION_SIZE_FIELDS: ReadonlySet<string> = new Set(['rowHeights', 'colWidths', 'colCollapsed']);
+
+/** Whether `projection` holds exactly the source's render-index inputs: every
+ * own field other than the size maps is the same value. A viewer-owned view
+ * (copied rows, filtered comments) is not such a projection. */
+function sharesRenderIndexInputs(source: Worksheet, projection: Worksheet): boolean {
+  const a = source as unknown as Record<string, unknown>;
+  const b = projection as unknown as Record<string, unknown>;
+  for (const key of Object.keys(a)) {
+    if (!PROJECTION_SIZE_FIELDS.has(key) && a[key] !== b[key]) return false;
+  }
+  for (const key of Object.keys(b)) {
+    if (!PROJECTION_SIZE_FIELDS.has(key) && !Object.hasOwn(a, key)) return false;
+  }
+  return true;
+}
+
 /** Reuse viewport-independent indexes for a render-local worksheet projection.
- * The projection may differ only in row/column sizing and outline flags; cells,
- * merges, formatting, tables, links, comments, and sparklines remain source-owned.
+ * Only a projection that differs from `source` in its size maps alone shares
+ * the source index; any other worksheet keeps (or builds once) its own, which
+ * then persists across frames like any other worksheet's.
  *
  * `styles` must be the workbook styles the projection is painted with: the
  * source entry is validated (and, when absent, built) against their `dxfs`,
@@ -4197,7 +4223,12 @@ function virtualizedTextOverflowOverscan(
 export function inheritSheetRenderCache(source: Worksheet, projection: Worksheet, styles: Styles): void {
   inheritCellFontLanguage(source, projection);
   inheritWorksheetPolicy(source, projection);
-  sheetRenderCache.set(projection, getSheetRenderCache(source, styles));
+  if (sharesRenderIndexInputs(source, projection)) {
+    sheetRenderCache.set(projection, getSheetRenderCache(source, styles));
+    inheritedRenderCache.add(projection);
+  } else if (inheritedRenderCache.delete(projection)) {
+    sheetRenderCache.delete(projection);
+  }
 }
 
 export function renderViewport(
