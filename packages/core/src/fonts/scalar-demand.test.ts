@@ -83,6 +83,22 @@ describe('collectFontDemandScalars', () => {
     expect(collectFontDemandScalars(['AB'], { budget: BUDGET })).not.toContain(0x25cc);
   });
 
+  it('demands every multi-scalar composition exclusion from its decomposition', () => {
+    // Unicode 17 Full_Composition_Exclusion, singletons left out.
+    const excluded = ('344 958-95f 9dc-9dd 9df a33 a36 a59-a5b a5e b5c-b5d f43 f4d f52 f57 f5c f69 f73 f75-f76 f78 f81 '
+      + 'f93 f9d fa2 fa7 fac fb9 2adc fb1d fb1f fb2a-fb36 fb38-fb3c fb3e fb40-fb41 fb43-fb44 fb46-fb4e 1d15e-1d164 1d1bb-1d1c0')
+      .split(' ').flatMap((range) => {
+        const [lo, hi = lo] = range.split('-').map((hex) => parseInt(hex, 16)) as [number, number?];
+        return Array.from({ length: hi! - lo + 1 }, (_, at) => lo + at);
+      });
+    expect(excluded).toHaveLength(85);
+    // The Hebrew presentation forms are strong RTL text, which declines.
+    for (const cp of excluded.filter((cp) => cp < 0xfb1d || cp > 0xfb4e)) {
+      const text = String.fromCodePoint(cp).normalize('NFD');
+      expect(collectFontDemandScalars([text], { budget: BUDGET }), `U+${cp.toString(16)}`).toContain(cp);
+    }
+  });
+
   it('declines, without throwing, a long leading run of one mark', () => {
     expect(collectFontDemandScalars(['\u0301'.repeat(150_000)], { budget: Number.POSITIVE_INFINITY })).not.toBe('all');
     const marks = String.fromCodePoint(...[...Array(80)].map((_, i) => 0x300 + i));

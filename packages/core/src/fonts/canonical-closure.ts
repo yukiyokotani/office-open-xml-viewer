@@ -44,34 +44,37 @@ export function isClusterJoiner(cp: number): boolean {
 }
 
 /**
- * The full composition exclusions whose decomposition has two or more
- * scalars (Unicode 17 Full_Composition_Exclusion without the singletons,
- * which no shaper composes to), as inclusive ranges. NFC never composes
- * them, but a shaper may (HarfBuzz's Indic shaper recomposes U+09AF U+09BC
- * to U+09DF), so a cluster holding one's whole decomposition demands it too.
- * Their decompositions are the host's NFD (stable, UAX #15 §12.1).
+ * The blocks holding every full composition exclusion whose decomposition
+ * has two or more scalars (Unicode Full_Composition_Exclusion without the
+ * singletons, which no shaper composes to: U+0344, the Indic and Tibetan
+ * nukta and vowel forms, U+2ADC, the Hebrew presentation forms and the
+ * musical symbols), as inclusive ranges. NFC never composes them, but a
+ * shaper may (HarfBuzz's Indic shaper recomposes U+09AF U+09BC to U+09DF),
+ * so a cluster holding one's whole decomposition demands it too. Which
+ * scalars of these blocks they are, and their decompositions, are the
+ * host's (stable, UAX #15 §12.1): a multi-scalar NFD that NFC does not
+ * recompose to the scalar.
  */
-const EXCLUDED_COMPOSITES: readonly number[] = [
-  0x344, 0x344, 0x958, 0x95f, 0x9dc, 0x9dd, 0x9df, 0x9df, 0xa33, 0xa33, 0xa36, 0xa36,
-  0xa59, 0xa5b, 0xa5e, 0xa5e, 0xb5c, 0xb5d, 0xf43, 0xf43, 0xf4d, 0xf4d, 0xf52, 0xf52,
-  0xf57, 0xf57, 0xf5c, 0xf5c, 0xf69, 0xf69, 0xf73, 0xf73, 0xf75, 0xf76, 0xf78, 0xf78,
-  0xf81, 0xf81, 0xf93, 0xf93, 0xf9d, 0xf9d, 0xfa2, 0xfa2, 0xfa7, 0xfa7, 0xfac, 0xfac,
-  0xfb9, 0xfb9, 0x2adc, 0x2adc, 0xfb1d, 0xfb1d, 0xfb1f, 0xfb1f, 0xfb2a, 0xfb36,
-  0xfb38, 0xfb3c, 0xfb3e, 0xfb3e, 0xfb40, 0xfb41, 0xfb43, 0xfb44, 0xfb46, 0xfb4e,
-  0x1d15e, 0x1d164, 0x1d1bb, 0x1d1c0,
-];
+const EXCLUSION_BLOCKS = [0x344, 0x344, 0x958, 0xfb9, 0x2adc, 0x2adc, 0xfb1d, 0xfb4e, 0x1d15e, 0x1d1c0];
 
 type Decomposed = readonly [composite: number, parts: readonly number[]];
 let excludedDecompositions: readonly Decomposed[] | undefined;
+let excludedPartSet: Set<number> | undefined;
 
 /** Each excluded composite with its full canonical decomposition (first use
- * allocates). */
+ * scans {@link EXCLUSION_BLOCKS}). */
 function excludedComposites(): readonly Decomposed[] {
   if (!excludedDecompositions) {
     const list: Decomposed[] = [];
-    for (let at = 0; at < EXCLUDED_COMPOSITES.length; at += 2) {
-      for (let cp = EXCLUDED_COMPOSITES[at]!; cp <= EXCLUDED_COMPOSITES[at + 1]!; cp++) {
-        list.push([cp, [...String.fromCodePoint(cp).normalize('NFD')].map((part) => part.codePointAt(0) as number)]);
+    excludedPartSet = new Set();
+    for (let at = 0; at < EXCLUSION_BLOCKS.length; at += 2) {
+      for (let cp = EXCLUSION_BLOCKS[at]!; cp <= EXCLUSION_BLOCKS[at + 1]!; cp++) {
+        const text = String.fromCodePoint(cp);
+        const nfd = text.normalize('NFD');
+        const parts = [...nfd].map((part) => part.codePointAt(0) as number);
+        if (parts.length < 2 || nfd.normalize('NFC') === text) continue;
+        list.push([cp, parts]);
+        for (const part of parts) excludedPartSet.add(part);
       }
     }
     excludedDecompositions = list;
@@ -79,24 +82,14 @@ function excludedComposites(): readonly Decomposed[] {
   return excludedDecompositions;
 }
 
-let excludedPartSet: ReadonlySet<number> | undefined;
-
-/** Every scalar of an excluded composite's decomposition. */
-function excludedParts(): ReadonlySet<number> {
-  return excludedPartSet ??= new Set(excludedComposites().flatMap(([, parts]) => parts));
-}
-
 /** Whether `starter` followed by `joiner` may paint a composite: their
- * canonical forms compose (NFC holds fewer scalars than NFD), or together
- * they hold the whole decomposition of a composition-excluded composite a
- * shaper may still compose ({@link EXCLUDED_COMPOSITES}). */
+ * canonical forms compose (NFC holds fewer scalars than NFD), or `joiner` is
+ * part of an excluded composite a shaper may still compose. */
 export function mayCompose(starter: number, joiner: number): boolean {
   const text = String.fromCodePoint(starter, joiner);
-  const decomposed = [...text.normalize('NFD')];
-  if ([...text.normalize('NFC')].length !== decomposed.length) return true;
-  if (!excludedParts().has(joiner)) return false;
-  const parts = new Set(decomposed.map((part) => part.codePointAt(0) as number));
-  return excludedComposites().some(([, composite]) => composite.includes(joiner) && composite.every((part) => parts.has(part)));
+  if ([...text.normalize('NFC')].length !== [...text.normalize('NFD')].length) return true;
+  excludedComposites();
+  return excludedPartSet!.has(joiner);
 }
 
 function decompose(cp: number, into: Set<number>): void {

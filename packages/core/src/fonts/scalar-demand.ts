@@ -24,8 +24,8 @@
  *   as assigned, or a lone surrogate: malformed or unknown input proves
  *   nothing;
  * - a cluster whose canonical closure outgrows a sane cluster
- *   (`canonical-closure.ts`), or too many distinct runs of joiners that
- *   start a text;
+ *   (`canonical-closure.ts`), including the closure of the joiners that
+ *   start texts with a scalar they may compose with;
  * - growth beyond the caller's JSON byte budget (the collected list is carried
  *   in a bounded projection) or beyond `HARD_MAX_FONT_DEMAND_SCALARS`.
  *
@@ -34,7 +34,8 @@
  * compose it (`が` can paint `か` and U+3099; `e` U+0301 can paint `é`), so
  * every scalar of every canonically equivalent rendering is demanded. A text
  * that starts with joiners may be shaped after any other painted text, so
- * that run is also closed with every demanded scalar it may compose with.
+ * those joiners are also closed with every demanded scalar they may compose
+ * with.
  * Any combining mark or joiner also demands U+25CC, the dotted circle a
  * shaper may insert for a mark without a valid base.
  *
@@ -70,12 +71,6 @@ const NO_SCALARS: ReadonlySet<number> = new Set();
 /** Any combining mark (General_Category M). */
 const MARK_TEXT = /\p{M}/u;
 
-/** Distinct leading joiner runs beyond which the demand proves nothing. */
-const MAX_LEADING_JOINER_RUNS = 64;
-
-/** Distinct scalars of one leading joiner run beyond which its closure
- * proves nothing (as a cluster's, `canonical-closure.ts`). */
-const MAX_LEADING_JOINER_RUN_SCALARS = 64;
 
 /** Incremental form for formats that interleave their own unmodelled-path
  * checks with text collection. Once a text is declined, the collector stays
@@ -92,12 +87,12 @@ export class FontDemandScalarCollector {
   private cluster: number[] = [];
   /** Whether {@link cluster} holds a scalar that is not normalization-inert. */
   private canonical = false;
-  /** Each distinct run of joiners a text starts with, by spelling. Layout
-   * may shape such a text after any other painted text (adjacent runs of
-   * one format, runs a deletion or an unchosen optional hyphen separated,
-   * case-mapped runs), so {@link result} closes it with every demanded
-   * scalar it can compose with. */
-  private readonly leading = new Map<string, readonly number[]>();
+  /** Every joiner of a run of joiners some text starts with. Layout may
+   * shape such a text after any other painted text (adjacent runs of one
+   * format, runs a deletion or an unchosen optional hyphen separated,
+   * case-mapped runs), so {@link result} closes these joiners with every
+   * demanded scalar they may compose with. */
+  private readonly leading = new Set<number>();
   /** Whether U+25CC is demanded: a shaper may paint a dotted circle for a
    * mark or joiner it finds without a valid base (HarfBuzz broken clusters,
    * Hangul tone marks), wherever it stands in the text. */
@@ -121,8 +116,8 @@ export class FontDemandScalarCollector {
     if (this.declined) return false;
     if (hasStrongRtl(text)) return this.decline();
     if (!this.dottedCircle && MARK_TEXT.test(text) && !this.demandDottedCircle()) return this.decline();
-    // The run of joiners this text starts with, until its first starter.
-    let leading: Set<number> | undefined = new Set();
+    // Whether this text has not yet reached its first starter.
+    let leading = true;
     for (const scalar of text) {
       const cp = scalar.codePointAt(0) as number;
       if (cp >= 0xf020 && cp <= 0xf0ff) return this.decline();
@@ -130,27 +125,15 @@ export class FontDemandScalarCollector {
       if (!inert && !isCanonicallyKnown(cp)) return this.decline();
       if (inert || !isClusterJoiner(cp)) {
         if (!this.flush()) return this.decline();
-        if (leading && !this.recordLeading(leading)) return this.decline();
-        leading = undefined;
+        leading = false;
       } else {
         if (!this.dottedCircle && !this.demandDottedCircle()) return this.decline();
-        leading?.add(cp);
+        if (leading) this.leading.add(cp);
       }
       this.cluster.push(cp);
       if (!inert) this.canonical = true;
     }
-    if (!this.flush()) return this.decline();
-    if (leading && !this.recordLeading(leading)) return this.decline();
-    return true;
-  }
-
-  /** Record a leading joiner run by its distinct scalars (a closure is
-   * order-free); false when there are too many runs or too many scalars. */
-  private recordLeading(run: ReadonlySet<number>): boolean {
-    if (!run.size) return true;
-    const scalars = [...run].sort((a, b) => a - b);
-    this.leading.set(scalars.join(), scalars);
-    return this.leading.size <= MAX_LEADING_JOINER_RUNS && scalars.length <= MAX_LEADING_JOINER_RUN_SCALARS;
+    return this.flush() || this.decline();
   }
 
   private demandDottedCircle(): boolean {
@@ -158,31 +141,25 @@ export class FontDemandScalarCollector {
     return this.admitScalar(0x25cc);
   }
 
-  /** Close every leading joiner run ({@link leading}) with each demanded
-   * scalar it may compose with, to a fixed point: a scalar composed with
-   * one run may compose with the next run that follows it. */
+  /** Close the leading joiners ({@link leading}) with each demanded scalar
+   * they may compose with, to a fixed point: a scalar composed with one run
+   * may compose with another run that follows it. The closure of all of
+   * them together is a superset of each run's. */
   private closeLeadingJoiners(): boolean {
-    if (!this.leading.size) return true;
-    const runs = [...this.leading.values()];
-    const joiners = new Set<number>();
-    for (const run of runs) for (const cp of run) joiners.add(cp);
+    const joiners = [...this.leading];
     const tried = new Set<number>();
-    for (let pending = [...this.committed, ...this.points]; pending.length;) {
+    for (let pending = joiners.length ? [...this.committed, ...this.points] : []; pending.length;) {
       const next: number[] = [];
       for (const starter of pending) {
         if (tried.has(starter)) continue;
         tried.add(starter);
-        let composes = false;
-        for (const joiner of joiners) if (mayCompose(starter, joiner)) { composes = true; break; }
-        if (!composes) continue;
-        for (const run of runs) {
-          const scalars = canonicalClusterScalars([starter, ...run]);
-          if (!scalars) return false;
-          for (const cp of scalars) {
-            if (this.committed.has(cp) || this.points.has(cp)) continue;
-            if (!this.admitScalar(cp)) return false;
-            next.push(cp);
-          }
+        if (!joiners.some((joiner) => mayCompose(starter, joiner))) continue;
+        const scalars = canonicalClusterScalars([starter, ...joiners]);
+        if (!scalars) return false;
+        for (const cp of scalars) {
+          if (this.committed.has(cp) || this.points.has(cp)) continue;
+          if (!this.admitScalar(cp)) return false;
+          next.push(cp);
         }
       }
       pending = next;
