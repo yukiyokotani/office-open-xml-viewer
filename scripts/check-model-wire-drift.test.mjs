@@ -204,12 +204,12 @@ test('fields whose omission does not exclude null are rejected', () => {
     ].join('\n'));
     const problems = scanNullProvenance([dir]).map((p) => p.replace(/^.*model\.rs:/, ''));
     assert.deepEqual(problems, [
-      '9 other_predicate: Option skipped by "is_blank" can still serialize null',
-      '11 nested: Option<Option<u32>> can serialize null while present (Option)',
-      '13 boxed: Option<Box<Option<String>>> can serialize null while present (Option)',
-      '15 aliased: Option<Maybe> can serialize null while present (Option)',
-      '17 unit: Option<Marker> can serialize null while present (unit struct Marker)',
-      '23 generic: Option<T> can serialize null while present (generic parameter T)',
+      '9 A.other_predicate: Option skipped by "is_blank" can still serialize null',
+      '11 A.nested: skipped Option<Option<u32>> can serialize null while present (Option)',
+      '13 A.boxed: skipped Option<Box<Option<String>>> can serialize null while present (Option)',
+      '15 A.aliased: skipped Option<Maybe> can serialize null while present (Option)',
+      '17 A.unit: skipped Option<Marker> can serialize null while present (unit struct Marker)',
+      '23 G.generic: skipped Option<T> can serialize null while present (generic parameter T)',
     ]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -312,11 +312,11 @@ test('null provenance follows outer aliases and wrappers', () => {
     ].join('\n'));
     const problems = scanNullProvenance([dir]).map((p) => p.replace(/^.*model\.rs:/, ''));
     assert.deepEqual(problems, [
-      '8 aliased: Option<Option<String>> can serialize null while present (Option)',
-      '10 boxed: Option<Option<String>> can serialize null while present (Option)',
-      '14 generic_outer: skipped Maybe<Option<String>> uses generic alias Maybe; null exclusion cannot be established',
-      '16 generic_inner: skipped Option<Identity<Option<String>>> uses generic alias Identity; null exclusion cannot be established',
-      '18 through_alias: skipped NullableId uses generic alias NullableId; null exclusion cannot be established',
+      '8 A.aliased: skipped MaybeError can serialize null while present (Option)',
+      '10 A.boxed: skipped Box<Option<Option<String>>> can serialize null while present (Option)',
+      '14 A.generic_outer: skipped Maybe<Option<String>> can serialize null while present (generic alias Maybe)',
+      '16 A.generic_inner: skipped Option<Identity<Option<String>>> can serialize null while present (generic alias Identity)',
+      '18 A.through_alias: skipped NullableId can serialize null while present (generic alias NullableId)',
     ]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -362,9 +362,40 @@ test('null provenance requires a proven null-free payload', () => {
     ].join('\n'));
     const problems = scanNullProvenance([dir]).map((p) => p.replace(/^.*model\.rs:/, ''));
     assert.deepEqual(problems, [
-      '8 newtype: Option<Nullable> can serialize null while present (Option)',
-      '14 untagged: Option<Loose> can serialize null while present (untagged/transparent or ambiguous type Loose)',
-      '16 external: Option<serde_json::Value> can serialize null while present (type Value not found in the scanned sources)',
+      '8 A.newtype: skipped Option<Nullable> can serialize null while present (Option)',
+      '14 A.untagged: skipped Option<Loose> can serialize null while present (untagged/transparent or ambiguous type Loose)',
+      '16 A.external: skipped Option<serde_json::Value> can serialize null while present (type Value not found in the scanned sources)',
+    ]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('null provenance parses multi-line types, comments and skipped non-Options', () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'model-wire-drift-rs-'));
+  try {
+    writeFileSync(path.join(dir, 'model.rs'), [
+      'pub struct Nullable(Option<String>);',
+      'pub struct A {',
+      '    #[serde(skip_serializing_if = "Option::is_none")]',
+      '    pub multi: Option<',
+      '        Option<String>,',
+      '    >,',
+      '    #[serde(skip_serializing_if = "Option::is_none")]',
+      '    pub v: Option<Option<String>>, // wire value',
+      '    #[serde(skip_serializing_if = "is_blank")]',
+      '    pub wrapped: Nullable,',
+      '    #[serde(skip_serializing_if = "Vec::is_empty")]',
+      '    pub list: Vec<Option<String>>, /* "not a string" */',
+      '    #[serde(rename = "a//b", skip_serializing_if = "Option::is_none")]',
+      '    pub url: Option<String>,',
+      '}',
+    ].join('\n'));
+    const problems = scanNullProvenance([dir]).map((p) => p.replace(/^.*model\.rs:/, ''));
+    assert.deepEqual(problems, [
+      '4 A.multi: skipped Option<Option<String>> can serialize null while present (Option)',
+      '8 A.v: skipped Option<Option<String>> can serialize null while present (Option)',
+      '10 A.wrapped: skipped Nullable can serialize null while present (Option)',
     ]);
   } finally {
     rmSync(dir, { recursive: true, force: true });

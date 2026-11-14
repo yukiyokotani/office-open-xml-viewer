@@ -727,43 +727,34 @@ function rustSchema(format, schemaFile) {
   return JSON.parse(out);
 }
 
-/** The schema cannot tell `Option<T>` skipped on `None` (never null) from a
- * field that can still serialize null while present (`Some(x)` where `x`
- * itself serializes as null). Scan the model sources and require, for every
- * skipped Option field, a payload type proven null-free; anything else fails
- * closed: nested Options (through Box/Arc/Rc and aliases), unit types,
- * newtypes over nullable types, untagged or transparent types, generic
- * parameters, generic aliases and types the scan cannot find. Also reject
- * Options skipped by another predicate. This keeps the null handling in
- * rustShapes sound. */
+/** The schema cannot tell an omitted field that never carries null (e.g.
+ * `Option<String>` skipped on `None`) from one that can still serialize null
+ * while present (`Some(x)` where `x` itself serializes as null).
+ * rustShapes drops null from omittable fields, so this scan parses the model
+ * declarations (comment- and string-aware, multi-line types) and requires,
+ * for every field with `skip_serializing_if`, a proof that a present value is
+ * never null: for `Option<T>` skipped by `Option::is_none` the payload `T`,
+ * otherwise the field type itself. Proven null-free are scalars, containers,
+ * braced structs and tagged enums declared in the scanned sources, newtypes
+ * over such types, and aliases of them. Everything else fails closed. */
 export function scanNullProvenance(dirs) {
   const files = dirs.flatMap((dir) => listRust(path.resolve(repoRoot, dir)));
-  const texts = new Map(files.map((file) => [file, readFileSync(file, 'utf8')]));
+  const items = files.flatMap((file) => parseRustItems(readFileSync(file, 'utf8')).map((item) => ({ ...item, file })));
   const aliases = new Map();
   const genericAliases = new Set();
   // name -> 'braced' | 'enum' | 'unit' | 'ambiguous' | { newtype: inner }
   const decls = new Map();
-  const declare = (name, kind) => decls.set(name, decls.has(name) && decls.get(name) !== kind ? 'ambiguous' : kind);
-  const attrsBefore = String.raw`((?:(?:#\[[^\]]*\]|///[^\n]*)\s*)*)`;
-  for (const text of texts.values()) {
-    for (const m of text.matchAll(/\btype\s+(\w+)(<[^=]*>)?\s*=\s*([^;]+);/g)) {
-      if (m[2]) genericAliases.add(m[1]);
-      else aliases.set(m[1], m[3]);
-    }
-    for (const m of text.matchAll(new RegExp(`${attrsBefore}(?:pub(?:\\([^)]*\\))?\\s+)?(struct|enum)\\s+(\\w+)(<[^>{(;]*>)?\\s*([{(;])([^;{}]*\\)\\s*;)?`, 'g'))) {
-      const [, attrs, keyword, name, , open, tuple] = m;
-      if (/\b(?:untagged|transparent)\b/.test(attrs)) declare(name, 'ambiguous');
-      else if (keyword === 'enum') declare(name, 'enum');
-      else if (open === '{') declare(name, 'braced');
-      else if (open === ';') declare(name, 'unit');
-      else {
-        const inner = (tuple ?? '').replace(/\)\s*;$/, '');
-        const fields = splitTopLevel(inner).map((f) => f.replace(/^pub(?:\([^)]*\))?\s+/, '').trim()).filter(Boolean);
-        declare(name, fields.length === 1 ? { newtype: fields[0] } : 'braced');
-      }
-    }
+  const declare = (name, kind) => decls.set(name, decls.has(name) && JSON.stringify(decls.get(name)) !== JSON.stringify(kind) ? 'ambiguous' : kind);
+  for (const item of items) {
+    if (item.kind === 'type') {
+      if (item.generics.length) genericAliases.add(item.name);
+      else aliases.set(item.name, item.rhs);
+    } else if (/\b(?:untagged|transparent)\b/.test(item.attrs)) declare(item.name, 'ambiguous');
+    else if (item.kind === 'enum') declare(item.name, 'enum');
+    else if (item.shape === 'unit') declare(item.name, 'unit');
+    else if (item.shape === 'tuple') declare(item.name, item.fields.length === 1 ? { newtype: item.fields[0].type } : 'braced');
+    else declare(item.name, 'braced');
   }
-  // Generic ambiguity propagates through aliases built on generic aliases.
   for (let changed = true; changed;) {
     changed = false;
     for (const [name, rhs] of aliases) {
@@ -778,7 +769,8 @@ export function scanNullProvenance(dirs) {
     for (let m; (m = /^(?:(?:std|alloc)::(?:boxed|sync|rc)::)?(?:Box|Arc|Rc)<(.*)>$/.exec(t));) t = m[1];
     return t;
   };
-  /** Why `type` may serialize as null, or null when it is proven not to. */
+  /** Why a present value of `type` may serialize as null, or null when it is
+   * proven not to. */
   const nullable = (type, generics, depth = 0) => {
     if (depth > 16) return 'unresolved alias/newtype chain';
     const t = peel(type);
@@ -812,66 +804,263 @@ export function scanNullProvenance(dirs) {
   };
 
   const problems = [];
-  for (const [file, text] of texts) {
-    const lines = text.split('\n');
-    let attrs = '';
-    let depth = 0;
-    let generics = new Set();
-    lines.forEach((line, i) => {
-      const trimmed = line.trim();
-      const decl = /^(?:pub(?:\([^)]*\))?\s+)?(?:struct|enum)\s+\w+\s*<([^>{]*)>/.exec(trimmed);
-      if (decl) generics = new Set(decl[1].split(',').map((g) => g.trim().split(/[:\s=]/)[0]).filter((g) => /^[A-Z]\w*$/.test(g)));
-      else if (/^(?:pub(?:\([^)]*\))?\s+)?(?:struct|enum)\s/.test(trimmed)) generics = new Set();
-      if (depth > 0 || trimmed.startsWith('#[')) {
-        attrs += ` ${trimmed}`;
-        for (const ch of trimmed) depth += ch === '[' ? 1 : ch === ']' ? -1 : 0;
-        return;
+  for (const item of items) {
+    for (const field of item.fields ?? []) {
+      const skip = /skip_serializing_if\s*=\s*"([^"]+)"/.exec(field.attrs)?.[1];
+      if (!skip) continue;
+      const where = `${path.relative(repoRoot, item.file)}:${field.line} ${item.name}.${field.name}`;
+      if (!field.type) {
+        problems.push(`${where}: cannot parse the skipped field declaration`);
+        continue;
       }
-      if (trimmed.startsWith('//') || trimmed === '') return;
-      const field = /^(?:pub(?:\([^)]*\))?\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.+?),?$/.exec(trimmed);
-      const skip = /skip_serializing_if\s*=\s*"([^"]+)"/.exec(attrs)?.[1];
-      attrs = '';
-      if (!field || !skip || trimmed.startsWith('let ')) return;
-      const where = `${path.relative(repoRoot, file)}:${i + 1} ${field[1]}`;
-      const generic = (field[2].match(/\w+/g) ?? []).find((token) => genericAliases.has(token));
-      if (generic) {
-        problems.push(`${where}: skipped ${field[2].trim()} uses generic alias ${generic}; null exclusion cannot be established`);
-        return;
-      }
-      const type = outer(field[2]);
-      const option = /^(?:(?:std|core)::option::)?Option<(.*)>$/.exec(type);
-      if (!option) {
-        // A skipped generic or unit field cannot be proven null-free.
-        const why = /^(?:\w+::)*(\w+)$/.test(type) && (generics.has(type) || decls.get(type) === 'unit') ? nullable(type, generics) : null;
-        if (why) problems.push(`${where}: skipped ${field[2].trim()} can serialize null while present (${why})`);
-        return;
-      }
-      if (skip !== 'Option::is_none') {
+      const generics = new Set(item.generics);
+      const option = /^(?:(?:std|core)::option::)?Option<(.*)>$/.exec(outer(field.type));
+      if (option && skip !== 'Option::is_none') {
         problems.push(`${where}: Option skipped by "${skip}" can still serialize null`);
-        return;
+        continue;
       }
-      const why = nullable(option[1], generics);
-      if (why) problems.push(`${where}: Option<${option[1]}> can serialize null while present (${why})`);
-    });
+      const why = option ? nullable(option[1], generics) : nullable(field.type, generics);
+      if (why) problems.push(`${where}: skipped ${field.type} can serialize null while present (${why})`);
+    }
   }
   return problems;
 }
 
-/** Split a type list on top-level commas (not inside <>, (), []). */
-function splitTopLevel(text) {
+/** Minimal Rust item reader for model declarations: strips comments (string
+ * and char literal aware) and returns structs, enums (with the fields of
+ * their struct variants and the types of tuple variants) and type aliases. */
+export function parseRustItems(source) {
+  const text = stripComments(source);
+  const lineAt = (index) => text.slice(0, index).split('\n').length;
+  const items = [];
+  const re = /\b(struct|enum|type)\s+([A-Za-z_]\w*)/g;
+  for (let m; (m = re.exec(text));) {
+    const [, kind, name] = m;
+    let i = m.index + m[0].length;
+    let generics = [];
+    i = skipSpace(text, i);
+    if (text[i] === '<') {
+      const end = matchClose(text, i);
+      generics = splitTopLevel(text.slice(i + 1, end))
+        .map((g) => g.trim().split(/[:\s=]/)[0])
+        .filter((g) => /^[A-Z]\w*$/.test(g));
+      i = end + 1;
+    }
+    const attrs = leadingAttributes(text, m.index);
+    if (kind === 'type') {
+      const eq = text.indexOf('=', i);
+      const semi = text.indexOf(';', i);
+      if (eq < 0 || semi < eq || /[{}]/.test(text.slice(i, eq))) continue;
+      items.push({ kind, name, generics, attrs, rhs: text.slice(eq + 1, semi).trim() });
+      continue;
+    }
+    i = skipWhere(text, skipSpace(text, i));
+    if (text[i] === ';') {
+      items.push({ kind, name, generics, attrs, shape: 'unit', fields: [] });
+      continue;
+    }
+    if (text[i] !== '{' && text[i] !== '(') continue;
+    const end = matchClose(text, i);
+    const body = text.slice(i + 1, end);
+    const base = i + 1;
+    if (kind === 'struct') {
+      const fields = text[i] === '{' ? namedFields(body, base, lineAt) : tupleFields(body, base, lineAt);
+      items.push({ kind, name, generics, attrs, shape: text[i] === '{' ? 'braced' : 'tuple', fields });
+    } else {
+      const fields = [];
+      for (const part of splitTopLevelWithOffsets(body)) {
+        const v = part.text.replace(/^(\s*#\[[\s\S]*?\]\s*)*/, (a) => a);
+        const brace = indexOfTopLevel(v, '{');
+        if (brace >= 0) {
+          const close = matchClose(v, brace);
+          fields.push(...namedFields(v.slice(brace + 1, close), base + part.offset + brace + 1, lineAt));
+        }
+      }
+      items.push({ kind, name, generics, attrs, shape: 'enum', fields });
+    }
+    re.lastIndex = end;
+  }
+  return items;
+}
+
+function namedFields(body, base, lineAt) {
+  return splitTopLevelWithOffsets(body)
+    .filter((part) => part.text.trim())
+    .map((part) => {
+      const { attrs, rest } = splitAttributes(part.text);
+      const decl = /^\s*(?:pub(?:\s*\([^)]*\))?\s+)?([A-Za-z_]\w*)\s*:\s*([\s\S]+?)\s*$/.exec(rest);
+      return {
+        attrs,
+        name: decl?.[1] ?? rest.trim().split(/\s/)[0],
+        type: decl ? normalizeType(decl[2]) : null,
+        line: lineAt(base + part.offset + (part.text.length - rest.length) + Math.max(0, rest.search(/\S/))),
+      };
+    });
+}
+
+function tupleFields(body, base, lineAt) {
+  return splitTopLevelWithOffsets(body)
+    .filter((part) => part.text.trim())
+    .map((part, index) => {
+      const { attrs, rest } = splitAttributes(part.text);
+      const type = normalizeType(rest.replace(/^\s*pub(?:\s*\([^)]*\))?\s+/, ''));
+      return { attrs, name: String(index), type, line: lineAt(base + part.offset) };
+    });
+}
+
+/** Whitespace-free type text without trailing commas in generic lists. */
+function normalizeType(text) {
+  return text.replace(/\s+/g, '').replace(/,(?=[>)\]])/g, '');
+}
+
+function splitAttributes(text) {
+  let i = skipSpace(text, 0);
+  let attrs = '';
+  while (text[i] === '#' && text[skipSpace(text, i + 1)] === '[') {
+    const open = skipSpace(text, i + 1);
+    const close = matchClose(text, open);
+    attrs += ` ${text.slice(i, close + 1)}`;
+    i = skipSpace(text, close + 1);
+  }
+  return { attrs, rest: text.slice(i) };
+}
+
+/** Attributes directly before an item keyword (`#[..] pub struct X`). */
+function leadingAttributes(text, index) {
+  const before = text.slice(Math.max(0, index - 4000), index);
+  const m = /((?:#\[(?:[^\[\]]|\[[^\]]*\])*\]\s*)*)(?:pub(?:\s*\([^)]*\))?\s+)?$/.exec(before);
+  return m?.[1] ?? '';
+}
+
+function skipSpace(text, i) {
+  while (i < text.length && /\s/.test(text[i])) i += 1;
+  return i;
+}
+
+function skipWhere(text, i) {
+  if (!text.startsWith('where', i)) return i;
+  let j = i + 5;
+  while (j < text.length && text[j] !== '{' && text[j] !== ';' && text[j] !== '(') j += 1;
+  return j;
+}
+
+/** Index of the bracket closing the one at `open` (string-literal aware). */
+function matchClose(text, open) {
+  const pairs = { '{': '}', '(': ')', '[': ']', '<': '>' };
+  const stack = [pairs[text[open]]];
+  for (let i = open + 1; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === '"') {
+      i = skipString(text, i);
+      continue;
+    }
+    if (ch === '-' && text[i + 1] === '>') {
+      i += 1;
+      continue;
+    }
+    if (ch === stack[stack.length - 1]) {
+      stack.pop();
+      if (stack.length === 0) return i;
+    } else if (pairs[ch] && (ch !== '<' || stack[stack.length - 1] === '>' || stack.length)) {
+      stack.push(pairs[ch]);
+    }
+  }
+  return text.length;
+}
+
+function skipString(text, i) {
+  for (let j = i + 1; j < text.length; j++) {
+    if (text[j] === '\\') j += 1;
+    else if (text[j] === '"') return j;
+  }
+  return text.length;
+}
+
+function indexOfTopLevel(text, needle) {
+  let depth = 0;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === '"') i = skipString(text, i);
+    else if (ch === needle && depth === 0) return i;
+    else if ('([<'.includes(ch)) depth += 1;
+    else if (')]>'.includes(ch) && !(ch === '>' && text[i - 1] === '-')) depth -= 1;
+  }
+  return -1;
+}
+
+/** Remove `//` and `/* *\/` comments, keeping string and char literals (and
+ * line structure) intact. */
+function stripComments(source) {
+  let out = '';
+  for (let i = 0; i < source.length; i++) {
+    const ch = source[i];
+    const next = source[i + 1];
+    if (ch === '/' && next === '/') {
+      while (i < source.length && source[i] !== '\n') i += 1;
+      out += '\n';
+      continue;
+    }
+    if (ch === '/' && next === '*') {
+      let depth = 1;
+      i += 2;
+      for (; i < source.length && depth > 0; i++) {
+        if (source[i] === '/' && source[i + 1] === '*') { depth += 1; i += 1; }
+        else if (source[i] === '*' && source[i + 1] === '/') { depth -= 1; i += 1; }
+        else if (source[i] === '\n') out += '\n';
+      }
+      i -= 1;
+      continue;
+    }
+    const raw = /^r(#*)"/.exec(source.slice(i, i + 12));
+    if (raw && !/\w/.test(source[i - 1] ?? '')) {
+      const close = `"${raw[1]}`;
+      const end = source.indexOf(close, i + raw[0].length);
+      const stop = end < 0 ? source.length : end + close.length;
+      out += source.slice(i, stop);
+      i = stop - 1;
+      continue;
+    }
+    if (ch === '"') {
+      const end = skipString(source, i);
+      out += source.slice(i, end + 1);
+      i = end;
+      continue;
+    }
+    if (ch === "'") {
+      // Char literal ('a', '\n', '\'') vs lifetime ('a).
+      const lit = /^'(?:\\(?:x[0-9a-fA-F]{2}|u\{[0-9a-fA-F]+\}|.)|[^\\'])'/u.exec(source.slice(i, i + 12));
+      if (lit) {
+        out += lit[0];
+        i += lit[0].length - 1;
+        continue;
+      }
+    }
+    out += ch;
+  }
+  return out;
+}
+
+/** Split on top-level commas (not inside <>, (), [], {} or strings). */
+function splitTopLevelWithOffsets(text) {
   const parts = [];
   let depth = 0;
-  let current = '';
-  for (const ch of text) {
-    if ('<([' .includes(ch)) depth += 1;
-    if ('>)]'.includes(ch)) depth -= 1;
-    if (ch === ',' && depth === 0) {
-      parts.push(current);
-      current = '';
-    } else current += ch;
+  let start = 0;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === '"') i = skipString(text, i);
+    else if ('<([{'.includes(ch)) depth += 1;
+    else if ('>)]}'.includes(ch) && !(ch === '>' && text[i - 1] === '-')) depth -= 1;
+    else if (ch === ',' && depth === 0) {
+      parts.push({ text: text.slice(start, i), offset: start });
+      start = i + 1;
+    }
   }
-  parts.push(current);
+  parts.push({ text: text.slice(start), offset: start });
   return parts;
+}
+
+function splitTopLevel(text) {
+  return splitTopLevelWithOffsets(text).map((p) => p.text);
 }
 
 function listRust(dir) {
