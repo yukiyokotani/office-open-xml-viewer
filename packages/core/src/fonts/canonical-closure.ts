@@ -92,6 +92,25 @@ export function mayCompose(starter: number, joiner: number): boolean {
   return excludedPartSet!.has(joiner);
 }
 
+/**
+ * Scalars HarfBuzz's shapers paint for `cp` outside canonical equivalence:
+ * the Thai and Lao AM split into NIKHAHIT/NIGGAHITA and AA (U+0E33, U+0EB3,
+ * a compatibility decomposition, `hb-ot-shaper-thai.cc`), the Thai PUA
+ * fallback glyphs (U+F700–U+F71A) for a Thai mark in a face without Thai
+ * GSUB, Khmer split vowels' pre-base E U+17C1 (`hb-ot-shaper-khmer.cc`) and
+ * U+2011's U+2010 fallback (`hb-ot-shape-normalize.cc`).
+ */
+export function shaperSplitScalars(cp: number): readonly number[] {
+  if (cp === 0xe33) return [0xe4d, 0xe32];
+  if (cp === 0xeb3) return [0xecd, 0xeb2];
+  if (cp === 0x2011) return [0x2010];
+  if (cp === 0x17be || cp === 0x17bf || cp === 0x17c0 || cp === 0x17c4 || cp === 0x17c5) return [0x17c1];
+  if (cp === 0xe31 || (cp >= 0xe34 && cp <= 0xe3a) || (cp >= 0xe47 && cp <= 0xe4e)) {
+    return Array.from({ length: 0x1b }, (_, at) => 0xf700 + at);
+  }
+  return [];
+}
+
 function decompose(cp: number, into: Set<number>): void {
   into.add(cp);
   for (const part of String.fromCodePoint(cp).normalize('NFD')) into.add(part.codePointAt(0) as number);

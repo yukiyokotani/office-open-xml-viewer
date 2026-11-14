@@ -37,7 +37,9 @@
  * those joiners are also closed with every demanded scalar they may compose
  * with.
  * Any combining mark or joiner also demands U+25CC, the dotted circle a
- * shaper may insert for a mark without a valid base.
+ * shaper may insert for a mark without a valid base, and the few scalars
+ * shapers split outside canonical equivalence demand their parts
+ * (`shaperSplitScalars`).
  *
  * The production Canvas measurement sentinels (`ii` tracking, `M` baseline,
  * space for tabs) are always included because the renderers measure them with
@@ -50,7 +52,7 @@ import {
   FONT_TRACKING_SENTINEL,
 } from '../internal/font-measurement-sentinels.js';
 import { HARD_MAX_FONT_DEMAND_SCALARS } from '../worker/resource-policy.generated.js';
-import { canonicalClusterScalars, isCanonicallyKnown, isClusterJoiner, mayCompose } from './canonical-closure.js';
+import { canonicalClusterScalars, isCanonicallyKnown, isClusterJoiner, mayCompose, shaperSplitScalars } from './canonical-closure.js';
 import { fontDemandInertScalar } from './inert-scalars.js';
 import { symbolFontKey, symbolPaintCandidates, type SymbolFontKey } from './symbol-font.js';
 
@@ -129,6 +131,9 @@ export class FontDemandScalarCollector {
       }
       const inert = fontDemandInertScalar(cp);
       if (!inert && !isCanonicallyKnown(cp)) return this.decline();
+      if (cp >= 0xe31 && cp <= 0x2011) {
+        for (const split of shaperSplitScalars(cp)) if (!this.admitScalar(split)) return this.decline();
+      }
       if (inert || !isClusterJoiner(cp)) {
         if (!this.flush()) return this.decline();
         leading = false;

@@ -78,6 +78,17 @@ describe('collectFontDemandScalars', () => {
     expect(scalars(['\u00e9', '\u0323'])).toContain(0x1eb9);
   });
 
+  it('demands what shapers split outside canonical equivalence', () => {
+    const has = (text: string, scalars: number[]) => {
+      const result = collectFontDemandScalars([text], { budget: BUDGET });
+      for (const cp of scalars) expect(result, `${JSON.stringify(text)} U+${cp.toString(16)}`).toContain(cp);
+    };
+    has('\u0e01\u0e48\u0e33', [0xe4d, 0xe32, 0xf700, 0xf71a]);
+    has('\u0e81\u0eb3', [0xecd, 0xeb2]);
+    has('\u1780\u17be', [0x17c1]);
+    has('a\u2011b', [0x2010]);
+  });
+
   it('demands the dotted circle for any mark or joiner', () => {
     for (const text of [' \u09cb', '\uac00\u302e\u302e', '\u0915\u093e', '\u1100\u1161']) {
       expect(collectFontDemandScalars([text], { budget: BUDGET }), JSON.stringify(text)).toContain(0x25cc);
