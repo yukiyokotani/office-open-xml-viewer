@@ -461,6 +461,8 @@ function comparer(sink) {
     if (r.kind === 'map' && t.kind === 'object' && !t.index && t.props().size > 0 && [...t.props().values()].every((p) => p.optional)) {
       // A Rust map keyed by a closed vocabulary is typed as
       // `Partial<Record<Key, V>>` in TS: every value must match.
+      // The closed key set itself is a narrowing Rust cannot express: pin it.
+      report(ctx.owner, ctx.field, 'ts-closed-keys', 'Rust emits a map with arbitrary keys; TS names a closed key set', ctx.path, values(t.props().keys()));
       for (const [key, p] of t.props()) walk(r.value, p.shape, { ...ctx, field: `${ctx.field}{${key}}`, path: `${ctx.path}.${key}` });
       return;
     }
@@ -494,6 +496,8 @@ function comparer(sink) {
     const rMax = r.kind === 'tuple' ? r.items.length : r.maxItems ?? Infinity;
     if (rMin < tMin || rMax > tMax) {
       report(ctx.owner, ctx.field, 'type-mismatch', 'array lengths differ', ctx.path, `(Rust length ${rMin}..${rMax} vs TS length ${tMin}..${tMax})`);
+    } else if (tMin < rMin || tMax > rMax) {
+      report(ctx.owner, ctx.field, 'ts-wider-length', 'TS accepts lengths Rust never emits', ctx.path, `(Rust length ${rMin}..${rMax} vs TS length ${tMin}..${tMax})`);
     }
     if (r.kind === 'array') {
       // Every element of a Rust array has the item type: it must fit every
@@ -532,6 +536,10 @@ function comparer(sink) {
     const owner = ownerName(r, t, variant);
     const rp = r.props();
     const tp = t.props();
+    // The discriminant is matched by value, but Rust always emits it.
+    if (variant && tp.get(variant.tag)?.optional) {
+      report(owner, variant.tag, 'ts-optional', `Rust always emits the discriminant; TS ${t.name} marks it optional`, `${ctx.path}.${variant.tag}`);
+    }
     for (const [field, rf] of rp) {
       // The discriminant was matched by value when the variant was paired.
       if (variant && field === variant.tag) continue;

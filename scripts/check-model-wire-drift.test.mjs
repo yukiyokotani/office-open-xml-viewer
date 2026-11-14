@@ -267,8 +267,11 @@ test('one Rust tagged type compared with two TS projections keeps separate keys'
 
 test('TS tuples with rest elements accept fixed-size Rust arrays', () => {
   const rust = single({ v: { type: 'array', items: { type: 'number' }, minItems: 3, maxItems: 3 } });
-  assert.deepEqual(keysOf('export interface Doc { v: [number, ...number[]] }', rust), []);
-  assert.deepEqual(keysOf('export interface Doc { v: [number, number, number, number?] }', rust), []);
+  // Accepted, though TS also admits lengths Rust never emits.
+  assert.deepEqual(keysOf('export interface Doc { v: [number, ...number[]] }', rust), [
+    'Doc.v: ts-wider-length (Rust length 3..3 vs TS length 1..Infinity)',
+  ]);
+  assert.deepEqual(keysOf('export interface Doc { v: [number, number, number] }', rust), []);
   assert.deepEqual(keysOf('export interface Doc { v: [number, number] }', rust), [
     'Doc.v: type-mismatch (Rust length 3..3 vs TS length 2..2)',
   ]);
@@ -323,7 +326,9 @@ test('null provenance follows outer aliases and wrappers', () => {
 
 test('TS tuples with trailing fixed elements', () => {
   const rust = single({ v: { type: 'array', prefixItems: [{ type: 'number' }, { type: 'string' }], minItems: 2, maxItems: 2 } });
-  assert.deepEqual(keysOf('export interface Doc { v: [...number[], string] }', rust), []);
+  assert.deepEqual(keysOf('export interface Doc { v: [...number[], string] }', rust), [
+    'Doc.v: ts-wider-length (Rust length 2..2 vs TS length 1..Infinity)',
+  ]);
 });
 
 test('template-literal and string-mapping narrowing is reported', () => {
@@ -438,4 +443,22 @@ test('TS widening a Rust literal set to its primitive is reported', () => {
 
 test('requiredness is compared in both directions', () => {
   assert.deepEqual(keysOf(inSync.replace('body: Block[];', 'body?: Block[];')), ['Doc.body: ts-optional']);
+});
+
+test('an optional TS discriminant is reported', () => {
+  assert.deepEqual(keysOf(inSync.replace("{ type: 'rule'; width: number }", "{ type?: 'rule'; width: number }")), [
+    'Block<type=rule>.type: ts-optional',
+  ]);
+});
+
+test('a TS closed key set over a Rust map is pinned', () => {
+  const rust = single({ m: { type: 'object', additionalProperties: { type: 'string' } } });
+  assert.deepEqual(keysOf('export interface Doc { m: { a?: string; b?: string } }', rust), ['Doc.m: ts-closed-keys ["a","b"]']);
+});
+
+test('TS tuples accepting lengths Rust never emits are reported', () => {
+  const rust = single({ v: { type: 'array', items: { type: 'number' }, minItems: 2, maxItems: 2 } });
+  assert.deepEqual(keysOf('export interface Doc { v: [number, number, number?] }', rust), [
+    'Doc.v: ts-wider-length (Rust length 2..2 vs TS length 2..3)',
+  ]);
 });

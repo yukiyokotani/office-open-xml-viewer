@@ -22,6 +22,8 @@
 //   ts-undefined           TS accepts `undefined` as a value (not absence).
 //   ts-wider-primitive     Rust emits a closed literal set; TS accepts any
 //                          string/number/boolean.
+//   ts-closed-keys         Rust emits a map; TS names a closed key set.
+//   ts-wider-length        A TS tuple accepts lengths Rust never emits.
 //   ts-narrower-pattern    Rust emits any string; TS narrows it to a template
 //                          literal or string-mapping type.
 //   variant-missing-in-ts  A union alternative Rust emits is absent in TS.
@@ -217,6 +219,15 @@ export const MODEL_WIRE_DRIFT_ALLOWLIST = {
     // `PathPaint.stroke` is serialized only when false (skip_serializing_if on
     // true), which TS types as `stroke?: false`.
     'PathPaint.stroke: ts-narrower-literal [false]': 'serialized only when false',
+
+    // ---- Intentional: chart style role tables ------------------------------
+    // Rust keys these maps by role name (String); TS names the closed set of
+    // MS-ODRAWXML §2.8.3.1 CT_ChartStyle roles the parser fills in. The payload
+    // pins the role list.
+    'ChartModel.chartStyleRoles: ts-closed-keys ["axisTitle","categoryAxis","chartArea","dataLabel","dataLabelCallout","dataPoint","dataPoint3D","dataPointLine","dataPointMarker","dataPointWireframe","dataTable","downBar","dropLine","errorBar","floor","gridlineMajor","gridlineMinor","hiLoLine","leaderLine","legend","plotArea","plotArea3D","seriesAxis","seriesLine","title","trendline","trendlineLabel","upBar","valueAxis","wall"]': 'chart style role names',
+    'ChartModel.classicChartStyleRoles: ts-closed-keys ["axisTitle","categoryAxis","chartArea","dataLabel","dataLabelCallout","dataPoint","dataPoint3D","dataPointLine","dataPointMarker","dataPointWireframe","dataTable","downBar","dropLine","errorBar","floor","gridlineMajor","gridlineMinor","hiLoLine","leaderLine","legend","plotArea","plotArea3D","seriesAxis","seriesLine","title","trendline","trendlineLabel","upBar","valueAxis","wall"]': 'chart style role names',
+    'ChartModel.classicVaryingPointChartStyleRoles: ts-closed-keys ["axisTitle","categoryAxis","chartArea","dataLabel","dataLabelCallout","dataPoint","dataPoint3D","dataPointLine","dataPointMarker","dataPointWireframe","dataTable","downBar","dropLine","errorBar","floor","gridlineMajor","gridlineMinor","hiLoLine","leaderLine","legend","plotArea","plotArea3D","seriesAxis","seriesLine","title","trendline","trendlineLabel","upBar","valueAxis","wall"]': 'chart style role names',
+    'ChartModel.classicVaryingPointChartStyleRolesByGroup[]: ts-closed-keys ["axisTitle","categoryAxis","chartArea","dataLabel","dataLabelCallout","dataPoint","dataPoint3D","dataPointLine","dataPointMarker","dataPointWireframe","dataTable","downBar","dropLine","errorBar","floor","gridlineMajor","gridlineMinor","hiLoLine","leaderLine","legend","plotArea","plotArea3D","seriesAxis","seriesLine","title","trendline","trendlineLabel","upBar","valueAxis","wall"]': 'chart style role names',
 
     // ---- Intentional: vocabularies narrowed in TS ---------------------------
     // The Rust field is a `String` (or number) holding a value from a closed
