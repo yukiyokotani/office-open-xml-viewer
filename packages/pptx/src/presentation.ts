@@ -1,4 +1,5 @@
 import { loadFontDemandCollector } from './font-demand-collector.js';
+import { fontDemandCollectorUrl } from './font-demand-collector-url.js';
 import { officeFaceWeight } from './powerpoint-line-metrics.js';
 import { resolveCjkFallback, type CjkLang } from '@silurus/ooxml-core';
 import type { DimOptions, PptxComment } from './types';
@@ -588,7 +589,7 @@ export class PptxPresentation {
       (id) =>
         this._mode === 'worker'
           ? ({ kind: 'parse', id, buffer, resourcePolicy, ...(fonts ? { fonts } : {}), cjkFallback: this._cjkFallback, renderers } satisfies RenderWorkerRequest)
-          : ({ kind: 'parse', id, buffer, resourcePolicy, cjkFallback: this._cjkFallback, ...(fonts && !renderers ? { collectFontDemand: true } : {}) } satisfies PptxWorkerRequest),
+          : ({ kind: 'parse', id, buffer, resourcePolicy, cjkFallback: this._cjkFallback, ...(fonts && !renderers ? { collectFontDemand: fontDemandCollectorUrl() } : {}) } satisfies PptxWorkerRequest),
       [buffer],
       { timeoutMs },
     );

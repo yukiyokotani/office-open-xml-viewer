@@ -66,7 +66,11 @@ pnpm add @silurus/ooxml
 >   `.wasm` into your served output and point the viewer at it with the
 >   `wasmUrl` load option. For Angular CLI, copy the required
 >   `*_parser_bg.wasm` asset from `node_modules/@silurus/ooxml/dist` into the
->   served output and pass its public URL to the viewer.
+>   served output and pass its public URL to the viewer. PPTX loads with `fonts`
+>   then also miss the `pptx-font-demand.mjs` sidecar and fall back to loading
+>   every unicode-range subset of the demanded families (same faces, more
+>   downloads); serving that file beside the bundled module restores precise
+>   demand.
 >
 > `wasmUrl` also serves the parser WASM from a CDN or any path you control:
 >

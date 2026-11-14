@@ -205,6 +205,22 @@ test('rejects computed imports and requires, import attributes and type-level im
   );
 });
 
+test('admits only the worker sidecar loader\'s one exact computed import', () => {
+  const loader = 'packages/core/src/internal/worker-sidecar.ts';
+  const at = (path, text) => findViolations([{ path, text }]).map((v) => v.rule);
+  // The listed expression, once, in the listed file.
+  assert.deepEqual(at(loader, 'export async function f(url) { return import(url); }'), []);
+  // A second computed import in that file, another expression there, or the
+  // same expression in any other file is still rejected.
+  assert.deepEqual(at(loader, 'async function f(url) { await import(url); return import(url); }'), ['computed-module']);
+  assert.deepEqual(at(loader, 'async function f(other) { return import(other); }'), ['computed-module']);
+  for (const path of ['packages/core/src/internal/other-sidecar.ts', 'packages/pptx/src/font-demand-collector.ts', 'packages/pptx/src/worker.ts']) {
+    assert.deepEqual(at(path, 'async function f(url) { return import(url); }'), ['computed-module'], path);
+  }
+  // A literal legacy specifier stays a legacy-package violation there too.
+  assert.ok(at(loader, "import('@silurus/ooxml-\\u006cegacy-office');").includes('legacy-package'));
+});
+
 test('rejects indirect Node require forms even with escaped module names', () => {
   for (const code of [
     "import { createRequire } from 'node:module'; const load = createRequire(import.meta.url); load(name);",

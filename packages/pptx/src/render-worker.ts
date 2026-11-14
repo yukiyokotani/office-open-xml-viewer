@@ -242,6 +242,9 @@ async function openPresentation(request: Extract<RenderWorkerRequest, { kind: 'p
   // Load-time resources belong to the parse failure channel. Complete embedded
   // extraction before preflight/publication, including a zero-slide deck, so a
   // rejected font read cannot outlive parse cleanup or publish a ready result.
+  // Fetch the optional collector chunk while embedded fonts load.
+  const collectorLoad = loadFontDemandCollector(sources.length > 0);
+  void collectorLoad.catch(() => undefined);
   const embedded = await loadEmbeddedFonts(bootstrap.embeddedFonts, getFontBytes);
   embeddedFontFaces = embedded.faces;
   embeddedFontAliases = embedded.aliases;
@@ -250,9 +253,9 @@ async function openPresentation(request: Extract<RenderWorkerRequest, { kind: 'p
   cjkFallback = request.cjkFallback;
   // Font-source subset loading is library policy keyed to the slide model
   // alone, as in main mode. Registering an optional renderer does not widen it:
-  // the text those renderers draw (math runs, charts) already yields 'all', and
-  // TIFF decoding draws no text.
-  preflightBuilder = new PresentationPreflightBuilder(bootstrap, { cjkFallback, collectFontDemand: await loadFontDemandCollector(sources.length > 0), officeFaceWeight });
+  // math runs and region maps yield 'all', chart labels are collected from the
+  // chart model (chart-font-demand.ts), and TIFF decoding draws no text.
+  preflightBuilder = new PresentationPreflightBuilder(bootstrap, { cjkFallback, collectFontDemand: await collectorLoad, officeFaceWeight });
   slides = new PptxSlideRepository({
     slideCount: bootstrap.slideCount,
     maxCachedSlides: HARD_MAX_PPTX_CACHED_SLIDES,
