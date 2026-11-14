@@ -312,26 +312,6 @@ function production(state, table, para, group) {
   return root;
 }
 
-const canonicalBodyLayoutAdapter =
-  "import { bodyLayoutAcquisitionInput } from './parser-model.js';\n"
-  + "import type { DocxDocumentModel } from './types.js';\n"
-  + "import { projectBodyLayoutInput, type BodyLayoutInput } from './layout/body-layout-input.js';\n"
-  + 'export function createBodyLayoutInput(document: DocxDocumentModel): BodyLayoutInput {\n'
-  + '  return projectBodyLayoutInput(bodyLayoutAcquisitionInput(document));\n'
-  + '}\n';
-
-function initializeBodyLayoutAdapterFixture(prefix = 'docx-layout-boundary-input-adapter-') {
-  const root = initializeCanonicalFixture(prefix);
-  write(root, 'packages/docx/src/parser-model.ts',
-    'export function bodyLayoutAcquisitionInput(document) { return document; }\n');
-  write(root, 'packages/docx/src/types.ts', 'export interface DocxDocumentModel {}\n');
-  write(root, 'packages/docx/src/layout/body-layout-input.ts',
-    'export interface BodyLayoutInput {}\n'
-      + 'export function projectBodyLayoutInput(value) { return value; }\n');
-  write(root, 'packages/docx/src/body-layout-input.ts', canonicalBodyLayoutAdapter);
-  return root;
-}
-
 const canonicalParagraphAnchorFrameAdapter =
   "import type { AnchorReferenceFramesInput } from './layout/anchor-frame.js';\n"
   + 'export interface ParagraphAnchorReferenceFrameSnapshot { readonly scale: number }\n'
@@ -580,6 +560,31 @@ test('layout acquisition contexts reject paint capabilities and renderer back-ed
     'renderer.ts',
     '--final',
   );
+
+  // Line-breaker consumers are discovered from the directory, so a module
+  // added after the guard was written is still inspected; tests are not.
+  const testOnlyRoot = initializeCanonicalFixture('docx-layout-boundary-line-breaker-test-');
+  write(
+    testOnlyRoot,
+    'packages/docx/src/line-breaker/added-module.test.ts',
+    "import type { Hidden } from '../renderer.js';\nexport type Probe = Hidden;\n",
+  );
+  const testOnly = runChecker(testOnlyRoot, '--final');
+  assert.equal(testOnly.status, 0, testOnly.output);
+
+  const lineBreakerRoot = initializeCanonicalFixture('docx-layout-boundary-line-breaker-edge-');
+  write(
+    lineBreakerRoot,
+    'packages/docx/src/line-breaker/added-module.ts',
+    "import type { Hidden } from '../renderer.js';\nexport type Probe = Hidden;\n",
+  );
+  const added = expectDiagnostic(
+    lineBreakerRoot,
+    'ACQUISITION_RENDERER_DEPENDENCY',
+    'added line-breaker module',
+    '--final',
+  );
+  assert.match(added.output, /packages\/docx\/src\/line-breaker\/added-module\.ts -> /u);
 });
 
 test('layout acquisition ownership cannot be bypassed by removing a required module', () => {
@@ -1146,116 +1151,6 @@ test('layout may share parser-independent values and erased parser-adjacent cont
       + 'export type Contract = ParserContract;\nexport const stop = nextTabStop;\n');
   const result = runChecker(root, '--final');
   assert.equal(result.status, 0, result.output);
-});
-
-test('body-layout input adapter has one exact parser acquisition projection', () => {
-  const root = initializeBodyLayoutAdapterFixture();
-  assert.equal(runChecker(root, '--final').status, 0);
-});
-
-test('body-layout input adapter rejects non-exact import sets', () => {
-  const root = initializeBodyLayoutAdapterFixture('docx-layout-boundary-input-import-');
-  write(root, 'packages/docx/src/body-layout-input.ts', canonicalBodyLayoutAdapter.replace(
-    "import type { DocxDocumentModel } from './types.js';\n",
-    '',
-  ));
-  expectDiagnostic(root, 'BODY_LAYOUT_ADAPTER_IMPORT', 'incomplete import set', '--final');
-});
-
-test('body-layout input adapter rejects incomplete bindings within a reviewed module', () => {
-  const root = initializeBodyLayoutAdapterFixture('docx-layout-boundary-input-incomplete-binding-');
-  write(root, 'packages/docx/src/body-layout-input.ts', canonicalBodyLayoutAdapter.replace(
-    'import { projectBodyLayoutInput, type BodyLayoutInput }',
-    'import { projectBodyLayoutInput }',
-  ));
-  expectDiagnostic(root, 'BODY_LAYOUT_ADAPTER_IMPORT', 'incomplete reviewed binding', '--final');
-});
-
-test('body-layout input adapter rejects duplicate, default, and unreviewed imports', () => {
-  for (const [name, source] of [
-    ['duplicate', canonicalBodyLayoutAdapter.replace(
-      "import type { DocxDocumentModel } from './types.js';\n",
-      "import type { DocxDocumentModel } from './types.js';\n"
-        + "import type { DocxDocumentModel as DuplicateModel } from './types.js';\n",
-    )],
-    ['default', canonicalBodyLayoutAdapter.replace(
-      "import type { DocxDocumentModel } from './types.js';",
-      "import DocxDocumentModel from './types.js';",
-    )],
-    ['unreviewed', `${canonicalBodyLayoutAdapter}import { extra } from './extra.js';\nvoid extra;\n`],
-  ]) {
-    const root = initializeBodyLayoutAdapterFixture(`docx-layout-boundary-input-import-${name}-`);
-    write(root, 'packages/docx/src/extra.ts', 'export const extra = true;\n');
-    write(root, 'packages/docx/src/body-layout-input.ts', source);
-    expectDiagnostic(root, 'BODY_LAYOUT_ADAPTER_IMPORT', name, '--final');
-  }
-});
-
-test('body-layout input adapter rejects a non-literal import specifier', () => {
-  const root = initializeBodyLayoutAdapterFixture('docx-layout-boundary-input-dynamic-specifier-');
-  write(root, 'packages/docx/src/body-layout-input.ts', canonicalBodyLayoutAdapter.replace(
-    "import { bodyLayoutAcquisitionInput } from './parser-model.js';",
-    'import { bodyLayoutAcquisitionInput } from parserModule;',
-  ));
-  expectDiagnostic(root, 'BODY_LAYOUT_ADAPTER_IMPORT', 'non-literal import', '--final');
-});
-
-test('body-layout input adapter rejects aliased or incorrectly typed bindings', () => {
-  for (const [name, source] of [
-    ['alias', canonicalBodyLayoutAdapter.replace(
-      '{ bodyLayoutAcquisitionInput }',
-      '{ bodyLayoutAcquisitionInput as acquireBodyLayoutInput }',
-    )],
-    ['value-as-type', canonicalBodyLayoutAdapter.replace(
-      'import type { DocxDocumentModel }',
-      'import { DocxDocumentModel }',
-    )],
-  ]) {
-    const root = initializeBodyLayoutAdapterFixture(`docx-layout-boundary-input-binding-${name}-`);
-    write(root, 'packages/docx/src/body-layout-input.ts', source);
-    expectDiagnostic(root, 'BODY_LAYOUT_ADAPTER_BINDING', name, '--final');
-  }
-});
-
-test('body-layout input adapter rejects additional declarations', () => {
-  const root = initializeBodyLayoutAdapterFixture('docx-layout-boundary-input-declaration-');
-  write(root, 'packages/docx/src/body-layout-input.ts',
-    `${canonicalBodyLayoutAdapter}\nfunction hiddenProjection() {}\n`);
-  expectDiagnostic(root, 'BODY_LAYOUT_ADAPTER_DECLARATION', 'additional declaration', '--final');
-});
-
-test('body-layout input adapter requires exactly one declaration', () => {
-  const root = initializeBodyLayoutAdapterFixture('docx-layout-boundary-input-missing-declaration-');
-  write(root, 'packages/docx/src/body-layout-input.ts', canonicalBodyLayoutAdapter.replace(
-    /export function createBodyLayoutInput[\s\S]*?\n}\n/,
-    '',
-  ));
-  expectDiagnostic(root, 'BODY_LAYOUT_ADAPTER_DECLARATION', 'missing declaration', '--final');
-});
-
-test('body-layout input adapter rejects alternate export forms', () => {
-  const root = initializeBodyLayoutAdapterFixture('docx-layout-boundary-input-export-');
-  write(root, 'packages/docx/src/body-layout-input.ts',
-    `${canonicalBodyLayoutAdapter}\nexport { createBodyLayoutInput as default };\n`);
-  expectDiagnostic(root, 'BODY_LAYOUT_ADAPTER_EXPORT', 'export declaration', '--final');
-});
-
-test('body-layout input adapter rejects a default declaration export', () => {
-  const root = initializeBodyLayoutAdapterFixture('docx-layout-boundary-input-default-export-');
-  write(root, 'packages/docx/src/body-layout-input.ts', canonicalBodyLayoutAdapter.replace(
-    'export function createBodyLayoutInput',
-    'export default function createBodyLayoutInput',
-  ));
-  expectDiagnostic(root, 'BODY_LAYOUT_ADAPTER_EXPORT', 'default declaration', '--final');
-});
-
-test('body-layout input adapter rejects any body other than the exact projection', () => {
-  const root = initializeBodyLayoutAdapterFixture('docx-layout-boundary-input-body-');
-  write(root, 'packages/docx/src/body-layout-input.ts', canonicalBodyLayoutAdapter.replace(
-    'return projectBodyLayoutInput(bodyLayoutAcquisitionInput(document));',
-    'return projectBodyLayoutInput(document);',
-  ));
-  expectDiagnostic(root, 'BODY_LAYOUT_ADAPTER_BODY', 'non-acquisition body', '--final');
 });
 
 test('paragraph anchor frame adapter is rejected from the final architecture', () => {

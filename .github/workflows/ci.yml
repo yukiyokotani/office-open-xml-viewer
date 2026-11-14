@@ -240,6 +240,8 @@ jobs:
           pnpm check:model-source-lazy-runtime
           pnpm check:production-render-workers
           pnpm check:optional-chart-ex
+          pnpm check:optional-three-d
+          pnpm check:optional-region-map
           pnpm check:optional-tiff
           pnpm check:font-source-tree-shaking
           pnpm check:optional-legacy-doc
