@@ -10,10 +10,10 @@ import {
 } from './line-layout.js';
 import { jcIsFullyJustified, jcStretchesLastLine } from './bidi-line.js';
 import { prepareBodyFrameMetadata } from './layout/frame.js';
+import { buildDocxCompatProfile, type DocxCompatProfile, type DocxCompatSettingsInput } from './layout/compat-profile.js';
 import {
   wordAuthoredTabReplacesImplicitHangingStop,
   wordContainerAllowsGridRightIndentAdjustment,
-  wordGridRightIndentPitchAlignmentApplies,
   wordGridRightIndentAdjustmentPt,
   wordCjkClosingMarkHang,
   type CjkClosingMarkHang,
@@ -45,23 +45,8 @@ export interface DocumentLayoutSettings {
   readonly documentHasEastAsianText: boolean;
   /** ECMA-376 §17.6.5 base pitch from the resolved Normal style. */
   readonly normalStyleFontSizePt: number;
-  readonly compat: {
-    readonly adjustLineHeightInTable: boolean;
-    readonly useFeLayout: boolean;
-    readonly balanceSingleByteDoubleByteWidth: boolean;
-    readonly lineWrapLikeWord6: boolean;
-    readonly enableOpenTypeFeatures: boolean;
-    /** §17.15.3.8 ulTrailSpace: underline trailing spaces. */
-    readonly ulTrailSpace: boolean;
-    /** §17.15.3.5 doNotExpandShiftReturn. */
-    readonly doNotExpandShiftReturn: boolean;
-    readonly doNotSuppressIndentation?: boolean;
-    readonly ww11IndentRules?: boolean;
-    readonly doNotUseIndentAsNumberingTabStop?: boolean;
-    readonly noTabHangInd?: boolean;
-    /** compatSetting compatibilityMode; undefined when the document omits it. */
-    readonly compatibilityMode?: number;
-  };
+  /** Document compatibility profile (layout/compat-profile.ts). */
+  readonly compat: DocxCompatProfile;
 }
 
 /** Parser-independent document typography facts projected once at the model
@@ -268,23 +253,7 @@ export function resolveDocumentLayoutSettings(
     mathDefJc: document.settings?.mathDefJc,
     documentHasEastAsianText: documentHasEastAsianText(document.body),
     normalStyleFontSizePt: typography.normalStyleFontSizePt,
-    compat: {
-      adjustLineHeightInTable: document.settings?.adjustLineHeightInTable ?? false,
-      useFeLayout: document.settings?.useFeLayout ?? false,
-      balanceSingleByteDoubleByteWidth:
-        document.settings?.balanceSingleByteDoubleByteWidth ?? false,
-      lineWrapLikeWord6: document.settings?.lineWrapLikeWord6 ?? false,
-      enableOpenTypeFeatures: document.settings?.enableOpenTypeFeatures ?? false,
-      ulTrailSpace: document.settings?.ulTrailSpace ?? false,
-      doNotExpandShiftReturn: document.settings?.doNotExpandShiftReturn ?? false,
-      doNotSuppressIndentation: document.settings?.doNotSuppressIndentation,
-      ww11IndentRules: document.settings?.ww11IndentRules,
-      doNotUseIndentAsNumberingTabStop: document.settings?.doNotUseIndentAsNumberingTabStop,
-      noTabHangInd: document.settings?.noTabHangInd,
-      ...(document.settings?.compatibilityMode !== undefined
-        ? { compatibilityMode: document.settings.compatibilityMode }
-        : {}),
-    },
+    compat: buildDocxCompatProfile(document.settings as DocxCompatSettingsInput | undefined),
   };
 }
 
@@ -408,7 +377,8 @@ export function resolveParagraphLayoutContext(
     ? settings.normalStyleFontSizePt + (section.grid.charSpacePt ?? 0)
     : null;
   const rightIndentPitchPt = section.grid.kind === 'linesAndChars'
-    && wordGridRightIndentPitchAlignmentApplies(settings.compat.compatibilityMode)
+    // WORD_GRID_RIGHT_INDENT_PITCH_ALIGNMENT
+    && settings.compat.gridRightIndentPitchAlignment
     ? characterPitchPt
     : null;
 
@@ -503,7 +473,7 @@ export function resolveParagraphLayoutContext(
       // The retained paragraph fact only admits the ON hanging extension.
       // Paragraph-OFF edge policy is resolved independently above.
       paragraph.kinsoku === false,
-      settings.compat.compatibilityMode,
+      settings.compat.cjkClosingMarkHangProfile,
       settings.kinsoku.enabled,
       paragraphOffAdmitted,
     )),

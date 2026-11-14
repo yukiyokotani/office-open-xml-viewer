@@ -1,3 +1,4 @@
+import { DEFAULT_DOCX_COMPAT_PROFILE, type DocxCompatProfile } from './compat-profile.js';
 import { isSymbolFontFamily, symbolTextToUnicodeSegments } from '@silurus/ooxml-core';
 import type { NumberingInfo, TabStop } from '../types.js';
 import { wordNumberingSpaceSuffixUsesArial, wordNumberingSuffixAcceptsCoincidentListTab } from './line-compatibility.js';
@@ -69,7 +70,7 @@ export function applyNumberingBodyOffset<Context extends Readonly<{
     authoredFirstIndentPt: number;
     tabStops: readonly TabStop[];
     defaultTabPt?: number;
-    compatibilityMode?: number;
+    compat?: DocxCompatProfile;
     service?: TextLayoutService;
     clusterGeometry?: boolean;
   }>,
@@ -86,7 +87,7 @@ export function applyNumberingBodyOffset<Context extends Readonly<{
     physicalIndentLeftPt: context.physicalIndentLeftPt,
     tabStops: input.tabStops,
     defaultTabPt: input.defaultTabPt ?? context.defaultTabPt,
-    compatibilityMode: input.compatibilityMode,
+    ...(input.compat ? { compat: input.compat } : {}),
     baseRtl: context.baseRtl,
   }, service, input.clusterGeometry ?? true);
   return {
@@ -184,7 +185,8 @@ export function resolveNumberingMarkerGeometry(
     suffixFrameOriginPt?: number;
     tabStops: readonly TabStop[];
     defaultTabPt: number;
-    compatibilityMode?: number;
+    /** Document profile; absent means DEFAULT_DOCX_COMPAT_PROFILE. */
+    compat?: DocxCompatProfile;
     /** Paragraph direction; WORD_NUMBERING_SPACE_SUFFIX_ARIAL is measured for
      * left-to-right paragraphs only, so an absent value keeps the marker face. */
     baseRtl?: boolean;
@@ -286,7 +288,7 @@ export function resolveNumberingMarkerGeometry(
     // and theme. Keep the marker size and measure through the same authority,
     // including its resource resolution / metric-compatible fallback.
     const spaceInput = wordNumberingSpaceSuffixUsesArial({
-      compatibilityMode: input.compatibilityMode,
+      compat: input.compat ?? DEFAULT_DOCX_COMPAT_PROFILE,
       leftToRight: input.baseRtl === false,
       markerWeight: markerInput.weight,
       markerStyle: markerInput.style,

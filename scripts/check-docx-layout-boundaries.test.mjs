@@ -180,7 +180,6 @@ function production(state, table, para, group) {
     'export function canonicalParagraphTextScaleEligible() {}\n'
       + 'export function docDefaultFontSizePt() {}\n'
       + 'export function paragraphMeasurementEnvironment() {}\n'
-      + 'export function segmentEnvironmentOf() {}\n'
       + 'export function snapParaLineToGrid() {}\n'
       + 'export function gridForParagraphContext() {}\n');
   write(root, 'packages/docx/src/layout/measurement-capabilities.ts',

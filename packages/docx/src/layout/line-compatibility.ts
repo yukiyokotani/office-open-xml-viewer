@@ -1,5 +1,6 @@
 import { isCjkBreakChar } from '@silurus/ooxml-core';
 import { defineCompatibilityRule } from './compatibility.js';
+import type { DocxCompatProfile } from './compat-profile.js';
 import { OFFICE_FAR_EAST_SINGLE_LINE_FACTOR, officeOpenTypeAutoLineRatios } from '@silurus/ooxml-core/internal/office-auto-line';
 import type { LineSpacing, TabStop } from '../types.js';
 import type { ParagraphLayoutSource } from './text.js';
@@ -16,11 +17,9 @@ export const WORD_TAB_DISPLACED_READING_FRAME = defineCompatibilityRule({
   description: 'Stop eligibility stays margin-relative (ECMA-376 §17.3.1.37). With the compatibility mode absent or below 15, an authored stop moves with a float-displaced leading line edge, and a cell whose displaced target lies outside the float window is placed there anyway: it overlaps the float or runs past the margin (and off the page) instead of breaking the line. From mode 15 stops are not displaced; an end/center/decimal cell is limited to the window by WORD_ALIGNED_TAB_CELL_FIT_BACK and a left/start stop past the window breaks the line. Evidence: issue #1672 controls (mode absent; ordinary left/right/center/decimal tabs, one/two tabs, both directions, either float edge, no-float counterexamples; PR #1698, Windows re-export for #1896), and the blk-0898-tabs-float controls of #2047 (Windows Word 16.0.20527, modes absent, 14 and 15; Courier New 12; a 150 x 10 pt square-wrapped float at either column edge narrowing line 1; right stops at 200, 300, 360, 400 and 481.9 pt, center, decimal and left stops at 360/400 pt, a single word and a six-word cell, LTR rows and bidi end/start rows; jc left, both, distribute, lowKashida). Modes absent and 14 are identical: every cell sits at stop + displacement (for example right 360 pt beside a left float ends at 510 pt, past the 481.9 pt margin; right 481.9 pt ends off the page), or over the float when the float is on the trailing side. Mode 15 places every row at its undisplaced stop or limited to the window end. Two pre-15 rows (jc left six-word cell, jc distribute bidi start stop) were instead set below the float with undisplaced stops; their siblings with identical geometry under other justifications were not, and this unexplained exception is not emulated. The renderer reproduces 76 of the 84 #1672 positions exactly (all single-tab and in-window cases); in the 8 two-tab cases the second tab starts past the right margin, where Word advances it 14 pt at 10 and 20 pt (tabs-floats-overflow-font20) while the library keeps the automatic grid (10 pt further), an unexplained residual. Library scope: the overflow applies only when the rest of the paragraph (every later cell to the paragraph end or line break) is no wider than the paragraph, and not in a second gap on the same baseline (WORD_FLOAT_GAP_FLOW); longer content (an empty cell before a long one included) and continuation gaps were not measured and keep the window containment.',
 });
 
-/** The compatibility modes in which {@link WORD_TAB_DISPLACED_READING_FRAME}
- * displaces stops and lets out-of-window cells overflow. */
-export function wordTabDisplacedReadingFrameApplies(compatibilityMode: number | undefined): boolean {
-  return compatibilityMode === undefined || compatibilityMode < 15;
-}
+// {@link WORD_TAB_DISPLACED_READING_FRAME} displaces stops and lets
+// out-of-window cells overflow in the modes of
+// DocxCompatProfile.tabDisplacedReadingFrame.
 
 /** Projection of {@link WORD_TAB_DISPLACED_READING_FRAME}. The caller has already
  * selected the next eligible stop in margin coordinates. */
@@ -203,12 +202,9 @@ export const WORD_NUMBERING_MARKER_FIRST_LINE_UNION = defineCompatibilityRule({
  * The caller retains eligibility: only mode 15 admits floats and atLeast;
  * legacy atLeast participation remains unsupported despite the new controls.
  * Other modes and grid/ruby/fixed-line exclusions keep their existing policy.
+ * Gates: DocxCompatProfile.textMarkerKeepsBodyDescent and
+ * textMarkerFirstLineUnionMode15.
  */
-export function wordTextMarkerKeepsBodyDescent(compatibilityMode?: number): boolean {
-  void WORD_NUMBERING_MARKER_FIRST_LINE_UNION;
-  return compatibilityMode == null || compatibilityMode === 12
-    || compatibilityMode === 14 || compatibilityMode === 15;
-}
 
 export const WORD_PICTURE_BULLET_LINE_PARTICIPATION = defineCompatibilityRule({
   id: 'word-picture-bullet-line-participation',
@@ -297,13 +293,8 @@ export const WORD_GRID_RIGHT_INDENT_PITCH_ALIGNMENT = defineCompatibilityRule({
   description: 'For body paragraphs whose ECMA-376 §17.3.1.1 adjustment is enabled on a linesAndChars character grid, Word removes from the line the remainder of the unindented available width over the character pitch, then applies the paragraph indents. The observed matrix covers exact and non-exact widths, zero and negative charSpace, explicit opt-out, line-only control, both physical indent sides, and the separately registered table-cell exception. Windows Word 16.0.20527 controls (issue #2152: w2152 and w2152b, 84 documents, 258 labelled lines; MS Mincho 9-14pt text, charSpace -1024/0/1024/4096, Normal 10/10.5/12pt, text widths 450/481.9/500pt, left/right/both indents, adjustRightInd off) apply the reduction with the compatibility mode absent or below 15 only: the line loses the remainder of the section text width over the pitch whatever the paragraph indents, and every pre-15 case of a document with a styles part matches. A document without a styles part is set by Word with the Normal size of its installed template (10.5pt on the measured host) instead of the 10pt ECMA-376 default; that host-dependent value is not emulated. In mode 15 no case is reduced (for example 40 MS Mincho 12pt characters on a 481.9pt line with a 10.5pt pitch, where the reduction allows 39).',
 });
 
-/** The compatibility modes in which {@link WORD_GRID_RIGHT_INDENT_PITCH_ALIGNMENT}
- * applies. */
-export function wordGridRightIndentPitchAlignmentApplies(
-  compatibilityMode: number | undefined,
-): boolean {
-  return compatibilityMode === undefined || compatibilityMode < 15;
-}
+// {@link WORD_GRID_RIGHT_INDENT_PITCH_ALIGNMENT} applies in the modes of
+// DocxCompatProfile.gridRightIndentPitchAlignment.
 
 /** Word compatibility projection governed by
  * {@link WORD_GRID_RIGHT_INDENT_PITCH_ALIGNMENT}. */
@@ -543,20 +534,20 @@ export const WORD_KASHIDA_LINE_FIT = defineCompatibilityRule({
  * width. */
 export function wordJustifiedLineFit(
   alignment: string | null | undefined,
-  compatibilityMode: number | undefined,
+  compat: Pick<DocxCompatProfile, 'kashidaLineFitMode15'>,
   baseRtl: boolean,
   wordWrap: boolean,
   trailingIndentPt = 0,
 ): { readonly fraction: number; readonly reserveShare: number; readonly rtlVisiblePrefix: boolean } | undefined {
   // Before mode 15 a negative trailing indent, from -5pt, removes the reserve
   // (blk-0898-floats-negind: 76 of 76 lines; blk-0898-kfit9).
-  const reserve = compatibilityMode !== 15 && trailingIndentPt < 0 ? 0
+  const reserve = !compat.kashidaLineFitMode15 && trailingIndentPt < 0 ? 0
     : alignment === 'mediumKashida' ? 0.1 : alignment === 'highKashida' ? 0.2 : 0;
   const rtlVisiblePrefix = wordRtlLineEndSpaceHangs(baseRtl, wordWrap);
   if (reserve === 0 && !rtlVisiblePrefix) return undefined;
   // From mode 15 the reserve is a share of the line's own width; before it, a
   // share of the width from the start edge to the far edge.
-  return compatibilityMode === 15
+  return compat.kashidaLineFitMode15
     ? { fraction: 1 - reserve, reserveShare: 0, rtlVisiblePrefix }
     : { fraction: 1, reserveShare: reserve, rtlVisiblePrefix };
 }
@@ -576,12 +567,12 @@ export function wordJustifiedLineFit(
  * line hanging or paint, and never remeasures source substrings. */
 export function wordUnmarkedArabicKashidaChargesSourceSpace(
   paragraph: ParagraphLayoutSource,
-  compatibilityMode: number | undefined,
+  compat: Pick<DocxCompatProfile, 'kashidaLineFitMode15'>,
   baseRtl: boolean,
   wordWrap: boolean,
   horizontal: boolean,
 ): boolean {
-  if (compatibilityMode !== 15 || !baseRtl || !wordWrap
+  if (!compat.kashidaLineFitMode15 || !baseRtl || !wordWrap
     || (paragraph.alignment !== 'mediumKashida' && paragraph.alignment !== 'highKashida')
     || !horizontal
     || (paragraph.numbering !== null && paragraph.numbering !== undefined)
@@ -681,11 +672,11 @@ export const WORD_JUSTIFIED_INTERWORD_COMPRESSION = defineCompatibilityRule({
  */
 export function wordJustifiedInterwordCompressionApplies(
   alignment: string | null | undefined,
-  compatibilityMode: number | undefined,
+  compat: Pick<DocxCompatProfile, 'justifiedInterwordCompression'>,
 ): boolean {
   return (alignment === 'both' || alignment === 'justify'
     || alignment === 'distribute' || alignment === 'lowKashida')
-    && compatibilityMode === 15;
+    && compat.justifiedInterwordCompression;
 }
 
 /** The existing quarter-space cap, shared with conservative refusal proofs.
@@ -840,19 +831,12 @@ export const WORD_LATIN_INTERWORD_XAVG_FLOOR = defineCompatibilityRule({
 
 /** Document and run gate of {@link WORD_LATIN_INTERWORD_XAVG_FLOOR} beyond
  * the line-content conditions the breaker checks. */
-export function wordLatinInterwordXavgFloorApplies(input: Readonly<{
-  compatibilityMode: number | undefined;
-  lineWrapLikeWord6: boolean | undefined;
-  enableOpenTypeFeatures: boolean | undefined;
-  hasExplicitKerningThreshold: boolean;
-}>): boolean {
-  if (input.compatibilityMode !== undefined && input.compatibilityMode < 15) {
-    // OpenType independence is measured in mode 14 only.
-    return input.compatibilityMode === 14 || input.enableOpenTypeFeatures !== true;
-  }
-  return input.lineWrapLikeWord6 !== true
-    && input.enableOpenTypeFeatures !== true
-    && !input.hasExplicitKerningThreshold;
+export function wordLatinInterwordXavgFloorApplies(
+  compat: Pick<DocxCompatProfile, 'latinInterwordXavgFloor'>,
+  hasExplicitKerningThreshold: boolean,
+): boolean {
+  return compat.latinInterwordXavgFloor === 'always'
+    || (compat.latinInterwordXavgFloor === 'without-explicit-kerning' && !hasExplicitKerningThreshold);
 }
 
 export const WORD_EAST_ASIAN_AUTO_SPACE = defineCompatibilityRule({
@@ -902,10 +886,10 @@ export const WORD_COMPRESSED_SPACE_LINE_FIT = defineCompatibilityRule({
  * characterSpacingControl. The line breaker further restricts it to lines
  * holding East Asian text. */
 export function wordCompressedSpaceLineFitApplies(
-  compatibilityMode: number | undefined,
+  compat: Pick<DocxCompatProfile, 'compressedSpaceLineFitMode'>,
   characterSpacingControl: string | undefined,
 ): boolean {
-  return compatibilityMode !== undefined && compatibilityMode < 15
+  return compat.compressedSpaceLineFitMode
     && (characterSpacingControl === 'compressPunctuation'
       || characterSpacingControl === 'compressPunctuationAndJapaneseKana');
 }
@@ -1036,7 +1020,7 @@ export function wordCjkClosingMarkHang(
   measuredScope: boolean,
   insideTableCell = false,
   paragraphKinsokuOff = false,
-  compatibilityMode?: number,
+  hangProfile: DocxCompatProfile['cjkClosingMarkHangProfile'] = 'earlier',
   documentKinsokuEnabled = true,
   boundedJapaneseParagraphOff = false,
 ): CjkClosingMarkHang | undefined {
@@ -1045,8 +1029,8 @@ export function wordCjkClosingMarkHang(
   // OFF body class permits the head but grants no punctuation extension.
   // Pre15 one-mark admission and existing Kashida/Thai none remain separate.
   if (boundedJapaneseParagraphOff && paragraphKinsokuOff && documentKinsokuEnabled) {
-    if (compatibilityMode === 15) return 'none';
-    if ((compatibilityMode === undefined || compatibilityMode === 11 || compatibilityMode === 12 || compatibilityMode === 14)
+    if (hangProfile === 'mode15') return 'none';
+    if (hangProfile === 'earlier'
       && (alignment === 'left' || alignment === 'both' || alignment === 'justify' || alignment === 'distribute')) {
       return 'one-from-fitting-prefix';
     }
@@ -1058,13 +1042,11 @@ export function wordCjkClosingMarkHang(
   // Explicit punctuation-compression on/off does not select this rule.
   // Outside the separately admitted Japanese OFF class above, other modes,
   // document-off and paragraph-off retain their exact old hanging policy.
-  const measuredOnProfile = compatibilityMode === undefined
-    || compatibilityMode === 11 || compatibilityMode === 12
-    || compatibilityMode === 14 || compatibilityMode === 15;
+  const measuredOnProfile = hangProfile !== 'unmeasured';
   if (documentKinsokuEnabled && !paragraphKinsokuOff && measuredOnProfile
     && (alignment === 'left' || alignment === 'start' || alignment === 'center'
       || alignment === 'right' || alignment === 'end')) {
-    return insideTableCell || compatibilityMode === 15 ? 'none' : 'one';
+    return insideTableCell || hangProfile === 'mode15' ? 'none' : 'one';
   }
   switch (alignment) {
     case 'lowKashida':
@@ -1242,7 +1224,7 @@ export const WORD_NUMBERING_SPACE_SUFFIX_ARIAL = defineCompatibilityRule({
 /** WORD_NUMBERING_SPACE_SUFFIX_ARIAL admission: the measured classes only;
  * everything else keeps the space in the marker's own face. */
 export function wordNumberingSpaceSuffixUsesArial(input: Readonly<{
-  compatibilityMode: number | undefined;
+  compat: Pick<DocxCompatProfile, 'numberingSpaceSuffixArialMode'>;
   leftToRight: boolean;
   markerWeight: number;
   markerStyle: 'normal' | 'italic';
@@ -1250,7 +1232,7 @@ export function wordNumberingSpaceSuffixUsesArial(input: Readonly<{
   symbolMarker: boolean;
 }>): boolean {
   void WORD_NUMBERING_SPACE_SUFFIX_ARIAL;
-  return (input.compatibilityMode === undefined || input.compatibilityMode === 14 || input.compatibilityMode === 15)
+  return input.compat.numberingSpaceSuffixArialMode
     && input.leftToRight
     && input.markerWeight <= 400
     && input.markerStyle === 'normal'
@@ -1341,9 +1323,7 @@ export const WORD_OVERLONG_HEAD_AFTER_ANCHOR = defineCompatibilityRule({
  * rule in mode 15. Preserve prior allocation in older or unauthored modes;
  * their anchored-head behavior differs, and modes 11–13 are unmeasured.
  * An unchanged full-width line keeps the separately measured all-mode rule. */
-export function wordPreservesPre15AnchorLine(compatibilityMode?: number): boolean {
-  return compatibilityMode !== 15;
-}
+// Gate: DocxCompatProfile.preservePre15AnchorLine.
 
 export const WORD_OVERLONG_TOKEN_EMERGENCY_BREAK = defineCompatibilityRule({
   id: 'word-overlong-token-emergency-break',
@@ -1460,7 +1440,7 @@ export const WORD_INLINE_PICTURE_AUTO_LEADING = defineCompatibilityRule({
  * paragraphs. The caller additionally admits only horizontal off-grid root
  * body flow; other stories, mixed text and legacy modes keep their old route. */
 export function wordInlineDrawingRunLeadingApplies(
-  compatibilityMode: number | undefined,
+  compat: Pick<DocxCompatProfile, 'inlinePictureAutoLeading'>,
   paragraph: Readonly<{
     lineSpacing?: Readonly<LineSpacing> | null;
     numbering?: unknown;
@@ -1468,7 +1448,7 @@ export function wordInlineDrawingRunLeadingApplies(
     runs: readonly Readonly<{ type: string; anchor?: boolean; inline?: boolean }>[];
   }>,
 ): boolean {
-  return compatibilityMode === 15 && !paragraph.numbering && !paragraph.framePr
+  return compat.inlinePictureAutoLeading && !paragraph.numbering && !paragraph.framePr
     && paragraph.lineSpacing?.rule === 'auto' && paragraph.lineSpacing.value > 1
     && paragraph.runs.length > 0
     && paragraph.runs.every(run => (run.type === 'image' && run.anchor !== true)

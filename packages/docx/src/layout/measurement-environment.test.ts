@@ -1,3 +1,4 @@
+import { compatProfile } from '../test-support/compat-environment.test-support.js';
 import { MAIN_BODY_STORY_CONTEXT, BODY_STORY_CONTEXT } from './acquisition-state.js';
 import { enterTableCellStoryContext, withoutClosingMarkHangAdmission } from '../layout-context.js';
 import { describe, expect, it } from 'vitest';
@@ -10,7 +11,6 @@ import {
   docDefaultFontSizePt,
   gridForParagraphContext,
   paragraphMeasurementEnvironment,
-  segmentEnvironmentOf,
   snapParaLineToGrid,
 } from './measurement-environment.js';
 
@@ -98,6 +98,7 @@ describe('layout measurement environment', () => {
   });
 
   it('clears upright-vertical grouping only for the all-rotated btLr path', () => {
+    const compat = compatProfile({ useFeLayout: true, balanceSingleByteDoubleByteWidth: true, lineWrapLikeWord6: true });
     const state = {
       pageIndex: 2,
       totalPages: 4,
@@ -111,11 +112,7 @@ describe('layout measurement environment', () => {
       docEastAsian: true,
       layoutSettings: {
         characterSpacingControl: 'compressPunctuation',
-        compat: {
-          useFeLayout: true,
-          balanceSingleByteDoubleByteWidth: true,
-          lineWrapLikeWord6: true,
-        },
+        compat: compat,
       },
       resolvedLocalFonts: {},
       layoutServices: { text: {}, images: {}, math: {} },
@@ -131,21 +128,12 @@ describe('layout measurement environment', () => {
       verticalCJK: false,
       pageWritingMode: 'vertical-rl',
       documentHasEastAsianText: true,
-      useFeLayout: true,
-      balanceSingleByteDoubleByteWidth: true,
-      lineWrapLikeWord6: true,
+      characterSpacingControl: 'compressPunctuation',
     });
-    const segments = segmentEnvironmentOf(state);
-    expect(segments).not.toBe(state);
-    expect(segments.verticalCJK).toBe(false);
+    // The document profile is carried by reference, not copied per paragraph.
+    expect(paragraphMeasurementEnvironment(state).compat).toBe(compat);
 
     const upright = { ...state, verticalAllRotated: false } as BodyMeasurementContext;
-    expect(segmentEnvironmentOf(upright)).toMatchObject({
-      verticalCJK: true,
-      characterSpacingControl: 'compressPunctuation',
-      balanceSingleByteDoubleByteWidth: true,
-      lineWrapLikeWord6: true,
-    });
     expect(paragraphMeasurementEnvironment(upright).verticalCJK).toBe(true);
   });
 

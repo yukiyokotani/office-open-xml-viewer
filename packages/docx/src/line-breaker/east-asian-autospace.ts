@@ -1,3 +1,4 @@
+import { compatOf } from '../layout/compat-profile.js';
 import { graphemeClusterOffsets } from '@silurus/ooxml-core';
 import { wordCompressedSpaceLineFitApplies, wordEastAsianAutoSpacePt } from '../layout/line-compatibility.js';
 import { RESET_SLICED_TEXT_MEASUREMENT, slicedTextMetadata } from './advance.js';
@@ -95,16 +96,17 @@ function segmentPiece(segment: LayoutTextSeg, start: number, end: number): Layou
  */
 export function assignEastAsianAutoSpace(
   segs: LayoutSeg[],
-  environment: Pick<LineLayoutEnvironment, 'autoSpaceDE' | 'autoSpaceDN' | 'compatibilityMode'
-    | 'characterSpacingControl' | 'lineWrapLikeWord6' | 'verticalCJK'>,
+  environment: Pick<LineLayoutEnvironment, 'autoSpaceDE' | 'autoSpaceDN' | 'compat'
+    | 'characterSpacingControl' | 'verticalCJK'>,
 ): void {
   if (environment.autoSpaceDE === false && environment.autoSpaceDN === false) return;
   // WORD_COMPRESSED_SPACE_LINE_FIT shrinks the gap with the line's spaces
   // under its document gate; its lineWrapLikeWord6 and vertical exclusions
   // are the same as for U+0020.
+  const compat = compatOf(environment);
   const compressible = wordCompressedSpaceLineFitApplies(
-    environment.compatibilityMode, environment.characterSpacingControl,
-  ) && environment.lineWrapLikeWord6 !== true && environment.verticalCJK !== true;
+    compat, environment.characterSpacingControl,
+  ) && !compat.lineWrapLikeWord6 && environment.verticalCJK !== true;
   const applies = (left: string | undefined, right: string | undefined): boolean =>
     left !== undefined && right !== undefined && eastAsianAutoSpacePairApplies(
       eastAsianAutoSpaceClass(left), eastAsianAutoSpaceClass(right),

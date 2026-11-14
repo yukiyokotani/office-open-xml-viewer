@@ -95,7 +95,7 @@ function applyNumberingContext(
     authoredFirstIndentPt: paragraph.indentFirst,
     tabStops: paragraph.tabStops,
     defaultTabPt: state.defaultTabPt,
-    compatibilityMode: state.layoutSettings.compat.compatibilityMode,
+    compat: state.layoutSettings.compat,
     service: state.layoutServices?.text,
   });
 }

@@ -1,3 +1,5 @@
+import type { DocxCompatSettingsInput } from '../layout/compat-profile.js';
+import { withCompat } from './compat-environment.test-support.js';
 // Shared stub for WORD_COMPRESSED_SPACE_LINE_FIT tests: the Word-control
 // fixture's embedded-face hmtx advances, glyf ink bounds and OS/2
 // xAvgCharWidth, routed through the production text service.
@@ -173,7 +175,8 @@ export interface StubRun {
 
 export interface StubParagraph {
   readonly runs: readonly StubRun[];
-  readonly environment: Partial<LineLayoutEnvironment>;
+  /** Environment overrides; document settings keys become its `compat`. */
+  readonly environment: Partial<LineLayoutEnvironment> & DocxCompatSettingsInput;
   readonly bandPt: number;
   readonly justification: 'left' | 'both' | 'distribute' | 'center';
   /** Build uncached text services (for measurement counting). */
@@ -219,7 +222,7 @@ export function retainStubParagraph(paragraph: StubParagraph) {
   const environment = {
     pageIndex: 0, totalPages: 1, documentHasEastAsianText: true,
     pageWritingMode: 'horizontal-tb' as const, layoutServices: cachedServices(families),
-    autoSpaceDE: false, autoSpaceDN: false, ...paragraph.environment,
+    autoSpaceDE: false, autoSpaceDN: false, ...withCompat(paragraph.environment),
   };
   const source = { story: 'body' as const, storyInstance: 'body', path: [0] };
   const input = paragraphAcquisitionInput(docParagraph, source);
@@ -239,7 +242,7 @@ export function layoutStubParagraph(paragraph: StubParagraph) {
     pageIndex: 0, totalPages: 1, layoutServices: paragraph.freshServices ? services(families) : cachedServices(families),
     // The Word controls author both automatic-spacing flags off; stub
     // paragraphs follow them unless a test sets the flags.
-    autoSpaceDE: false, autoSpaceDN: false, ...paragraph.environment,
+    autoSpaceDE: false, autoSpaceDN: false, ...withCompat(paragraph.environment),
   });
   const justified = paragraph.justification === 'both' || paragraph.justification === 'distribute';
   return layoutLines(canvas, segments, paragraph.bandPt, 0, 1, [], undefined, {}, 0, undefined,

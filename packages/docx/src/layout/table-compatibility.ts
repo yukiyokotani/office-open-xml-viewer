@@ -1,6 +1,7 @@
 import type { FramePr } from '../types.js';
 import { ownValue } from '@silurus/ooxml-core/internal/own-key';
 import { defineCompatibilityRule } from './compatibility.js';
+import type { DocxCompatProfile } from './compat-profile.js';
 import { stableFingerprint } from './fingerprint.js';
 import type { ParagraphLayoutSource, ParagraphAcquisitionInput } from './text.js';
 import type { TableLayoutSource } from './table-source-acquisition.js';
@@ -201,7 +202,7 @@ export const WORD_TABLE_NONLEADING_INDENT_SCOPE = defineCompatibilityRule({
 /** WORD_TABLE_NONLEADING_INDENT_SCOPE: the measured structures where a
  * nonleading table ignores its tblInd outside the origin observation. */
 export function wordNonleadingIndentScope(input: Readonly<{
-  mode: number | undefined;
+  compat: Pick<DocxCompatProfile, 'tableOriginPlacementMode'>;
   story: string | undefined;
   topLevel: boolean;
   tableCellDepth: number;
@@ -221,7 +222,7 @@ export function wordNonleadingIndentScope(input: Readonly<{
   const measuredStory = story === 'body' || story === 'header' || story === 'footer'
     || story === 'footnote' || story === 'textbox';
   const measuredNesting = input.topLevel || (story === 'body' && input.tableCellDepth === 1);
-  return wordMeasuredTableOriginPlacementMode(input.mode) && measuredStory && measuredNesting
+  return input.compat.tableOriginPlacementMode && measuredStory && measuredNesting
     && !input.verticalText && input.commonFrame && input.marginClass && !input.outerEdgeIndent && input.ordinaryFlow
     && !input.positioned && !input.rowOverrides && !input.gridSkips && !input.unfittedContentSizedAutoFit;
 }
@@ -273,14 +274,14 @@ export function wordUniformSpacedTableBorderPt(table: TableLayoutSource): number
  * WORD_TABLE_CELL_SPACING_GEOMETRY keeps border placement and the legacy hang
  * separate, with no half-border shift in the legacy modes. */
 export function wordSpacedTableTranslationPt(input: Readonly<{
-  mode: number | undefined; justification: string | null | undefined; bidi: boolean;
+  compat: Pick<DocxCompatProfile, 'tableMode15Geometry'>; justification: string | null | undefined; bidi: boolean;
   indentPt: number; indentAuthored: boolean; spacingPt: number; borderPt: number;
   leadingMarginPt: number; trailingMarginPt: number;
 }>): number {
   const leading = input.justification == null || input.justification === 'left' || input.justification === 'start';
   const center = input.justification === 'center';
   const indent = leading ? input.indentPt : 0;
-  if (input.mode === 15) {
+  if (input.compat.tableMode15Geometry) {
     const physicalBorderShift = center ? 0 : (leading !== input.bidi ? 1 : -1) * input.borderPt / 2;
     const physicalShift = physicalBorderShift - (input.bidi ? input.borderPt / 2 : 0);
     return indent + (input.bidi ? -physicalShift : physicalShift);
@@ -304,7 +305,7 @@ export type WordTableMarginHangScope = 'none' | 'leading' | 'all';
 /** WORD_TABLE_MARGIN_HANG_SCOPE: which rows of a table outside the origin
  * observation hang the legacy left margin. */
 export function wordTableMarginHangScope(input: Readonly<{
-  mode: number | undefined;
+  compat: Pick<DocxCompatProfile, 'tableOriginPlacementMode'>;
   story: string | undefined;
   topLevel: boolean;
   verticalText: boolean;
@@ -319,24 +320,18 @@ export function wordTableMarginHangScope(input: Readonly<{
   gridSkips: boolean;
 }>): WordTableMarginHangScope {
   const story = input.story;
-  if (!wordMeasuredTableOriginPlacementMode(input.mode) || !input.topLevel || input.verticalText
+  if (!input.compat.tableOriginPlacementMode || !input.topLevel || input.verticalText
     || !input.commonFrame || !input.marginClass || input.spacing || input.outerEdgeIndent
     || !input.ordinaryFlow || input.positioned || input.rowOverrides || input.gridSkips) return 'none';
   if (story === 'body' || story === 'header' || story === 'footer' || story === 'footnote') return 'all';
   return story === 'textbox' ? 'leading' : 'none';
 }
 
-/** The observation is deliberately restricted to the exported mode boundaries. */
-export function wordMeasuredTableOriginMode(mode: number | undefined): boolean {
-  return mode === 11 || mode === 12 || mode === 14 || mode === 15;
-}
-
-/** WORD_TABLE_ORIGIN_COMPATIBILITY origin scope: the explicit measured modes
- * plus an omitted compatibilityMode, which places tables like mode 14.
- * WORD_FIXED_UNUSED_LEADING_GRID keeps {@link wordMeasuredTableOriginMode}. */
-export function wordMeasuredTableOriginPlacementMode(mode: number | undefined): boolean {
-  return mode === undefined || wordMeasuredTableOriginMode(mode);
-}
+// The table-origin observation is deliberately restricted to the exported
+// mode boundaries (DocxCompatProfile.tableOriginMeasuredMode). Its placement
+// scope adds an omitted compatibilityMode, which places tables like mode 14
+// (tableOriginPlacementMode); WORD_FIXED_UNUSED_LEADING_GRID keeps the
+// explicit modes only.
 
 /**
  * ECMA-376 §17.4.34 / §17.4.11 give tables whose style hierarchy never
@@ -748,7 +743,7 @@ export function wordTableEffectiveIndentPt(input: Readonly<{
 /** WORD_TABLE_ORIGIN_COMPATIBILITY. An unresolved/unmeasured class retains
  * its established translation rather than inventing a margin default. */
 export function wordTableOriginTranslationPt(input: Readonly<{
-  mode: number | undefined;
+  compat: Pick<DocxCompatProfile, 'tableMode15Geometry'>;
   measured: boolean;
   justification: string | null | undefined;
   indentPt: number;
@@ -763,20 +758,20 @@ export function wordTableOriginTranslationPt(input: Readonly<{
   if (!input.measured) return indentPt;
   if (input.justification === 'center') return indentPt;
   if (input.justification === 'right' || input.justification === 'end') {
-    return indentPt + (input.mode === 15 ? 0 : input.rowLeftMarginPt);
+    return indentPt + (input.compat.tableMode15Geometry ? 0 : input.rowLeftMarginPt);
   }
   return indentPt
-    - (input.mode !== 15 && input.indentAuthored ? input.firstLeftMarginPt : 0);
+    - (!input.compat.tableMode15Geometry && input.indentAuthored ? input.firstLeftMarginPt : 0);
 }
 
 /** Preserve grid indexes while dropping only the Office-measured unused track.
  * O(rows + columns + cells), with no parser mutation or extra content walk. */
 export function wordFixedOccupiedGridInput(
   input: TableColumnLayoutInput,
-  mode: number | undefined,
+  compat: Pick<DocxCompatProfile, 'tableOriginMeasuredMode'>,
   measuredScope: boolean,
 ): TableColumnLayoutInput {
-  if (!wordMeasuredTableOriginMode(mode) || !measuredScope
+  if (!compat.tableOriginMeasuredMode || !measuredScope
     || input.layout !== 'fixed' || input.rows.length === 0
     || !input.rows.every((row) => row.cells.length > 0
       && row.cells[0]?.columnStart === 1 && row.after === null

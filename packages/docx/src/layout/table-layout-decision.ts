@@ -1,13 +1,15 @@
 import type { TableFormatInput } from './types.js';
 import { projectTableColumnLayoutInput, projectEffectiveTablePreferredWidthPt, absoluteTablePreferredWidthPt,
   type TableLayoutSource, type TableSourceAcquisitionInput } from './table-source-acquisition.js';
-import { wordFixedOccupiedGridInput, wordMeasuredTableOriginMode, wordMeasuredTableOriginPlacementMode,
+import { DEFAULT_DOCX_COMPAT_PROFILE, type DocxCompatProfile } from './compat-profile.js';
+import { wordFixedOccupiedGridInput,
   wordNonleadingIndentScope, wordUniformSpacedTableBorderPt, wordSpacedTableTranslationPt, wordTableEffectiveIndentPt, wordTableMarginHangScope, wordTableOriginTranslationPt,
   type WordTableMarginHangScope } from './table-compatibility.js';
 import { isVerticalTextDirection } from './section-orientation.js';
 
 export interface TableDecisionEnvironment {
-  readonly mode: number | undefined;
+  /** Document compatibility profile; only its table facts are read here. */
+  readonly compat: DocxCompatProfile;
   readonly story: string | undefined;
   readonly topLevel: boolean;
   readonly singleColumn: boolean;
@@ -27,7 +29,7 @@ export interface TableDecisionEnvironment {
 function tableOriginContext(
   table: TableLayoutSource,
   format: TableFormatInput,
-  mode: number | undefined,
+  compat: DocxCompatProfile,
 ) {
   const firstRowException = format.firstRowException;
   const tableIndentPt = firstRowException?.indentAuthored
@@ -44,11 +46,11 @@ function tableOriginContext(
         : table.widthPt != null && table.widthPt > 0))
     && table.rows.every((row) => row.cells.every((cell) => cell.widthPt != null && cell.widthPt > 0 && cell.widthPct == null))
     && format.rows.every((row) => row.cellSpacingPt === 0);
-  const measuredOrigin = wordMeasuredTableOriginPlacementMode(mode) && measuredStructure
+  const measuredOrigin = compat.tableOriginPlacementMode && measuredStructure
     && format.rows.every((row) => row.cells[0]?.originLeftMarginPt != null);
   // WORD_TABLE_ORIGIN_COMPATIBILITY: the same structure with horizontal
   // margins omitted at every layer was measured only for end justification.
-  const omittedMarginEndOrigin = wordMeasuredTableOriginMode(mode) && measuredStructure
+  const omittedMarginEndOrigin = compat.tableOriginMeasuredMode && measuredStructure
     && format.rows.every((row) => row.cells.every((cell) => cell.horizontalMarginsOmitted === true));
   const indentAuthored = firstRowException?.indentAuthored || table.tblInd != null;
   // Provenance travels with the selected logical indent: a first-row tblPrEx
@@ -138,12 +140,12 @@ function memberContext(
       !ownException && baseIndentInherited);
   });
   const rowTranslationsPt = format.rows.map((row) => spacingGeometry ? wordSpacedTableTranslationPt({
-    mode: state.mode, justification: row.justification ?? table.jc, bidi: table.bidiVisual === true,
+    compat: state.compat, justification: row.justification ?? table.jc, bidi: table.bidiVisual === true,
     indentPt: tableIndentPt, indentAuthored: origin.indentAuthored, ...spacingGeometry,
     leadingMarginPt: table.bidiVisual ? row.cells[0]?.marginsPt.right ?? 0 : row.cells[0]?.marginsPt.left ?? 0,
     trailingMarginPt: table.bidiVisual ? row.cells.at(-1)?.marginsPt.left ?? 0 : row.cells.at(-1)?.marginsPt.right ?? 0,
   }) : wordTableOriginTranslationPt({
-    mode: state.mode, measured: measuredRow(row.justification ?? table.jc), justification: row.justification ?? table.jc,
+    compat: state.compat, measured: measuredRow(row.justification ?? table.jc), justification: row.justification ?? table.jc,
     indentPt: rowIndent(row.justification ?? table.jc, tableIndentPt, tableIndentInherited),
     indentAuthored: logicalProperties ? origin.indentAuthored : firstRowException?.indentAuthored || table.tblInd != null,
     firstLeftMarginPt: origin.firstLeftMarginPt,
@@ -230,9 +232,7 @@ function memberContext(
     const nonleading = justification === 'center' || justification === 'right' || justification === 'end';
     return !nonleading || Math.abs(savedGridWidthPt + indentPt - contentWPt) <= 1e-9;
   });
-  const compatibilityMode = state.mode;
-  const hasMeasuredCompatibilityMode = compatibilityMode === undefined
-    || compatibilityMode === 14 || compatibilityMode === 15;
+  const hasMeasuredCompatibilityMode = state.compat.autofitLeadingIndentBandMode;
   const usesLeadingIndentBand = effectiveLayout !== 'fixed'
     && format.ordinaryFlow
     && isTopLevelPageOwnedStory
@@ -247,7 +247,7 @@ function memberContext(
   const contentGrowth: 'band' | 'nonbinding' | 'none' = spacingGeometry
     ? (contentFitted ? 'nonbinding' : 'none')
     : usesLeadingIndentBand ? 'band' : contentFitted ? 'nonbinding' : 'none';
-  const outerCellMarginsHangOutsideBand = compatibilityMode === undefined || compatibilityMode === 14;
+  const outerCellMarginsHangOutsideBand = state.compat.autofitOuterMarginsHangOutsideBand;
   const textBandPt = usesLeadingIndentBand
     ? Math.max(0, Math.min(...rowPlacements.map(({ justification, indentPt }) => {
         const trailing = justification === 'right' || justification === 'end';
@@ -324,7 +324,7 @@ function memberContext(
   // band (every mode but 15), a percentage tblW is a share of the band plus
   // the first row's outer margins.
   const firstRowCells = format.rows[0]?.cells;
-  const percentWidthBasePt = marginHang === 'all' && state.mode !== 15 && isTopLevelPageOwnedStory && firstRowCells
+  const percentWidthBasePt = marginHang === 'all' && !state.compat.tableMode15Geometry && isTopLevelPageOwnedStory && firstRowCells
     ? contentWPt + Math.max(0, firstRowCells[0]?.marginsPt.left ?? 0)
       + Math.max(0, firstRowCells.at(-1)?.marginsPt.right ?? 0)
     : contentWPt;
@@ -369,10 +369,11 @@ export function decideLogicalTable(
   // physical outer edge and grid; the OOXML table compatibility modes
   // describe tblInd/tblGrid semantics it does not have, so its decisions
   // keep the mode-absent contract.
-  const environment = source.format.outerEdgeIndent === true && authoredEnvironment.mode !== undefined
-    ? { ...authoredEnvironment, mode: undefined }
+  const environment = source.format.outerEdgeIndent === true
+    && authoredEnvironment.compat !== DEFAULT_DOCX_COMPAT_PROFILE
+    ? { ...authoredEnvironment, compat: DEFAULT_DOCX_COMPAT_PROFILE }
     : authoredEnvironment;
-  const origin = tableOriginContext(table, source.format, environment.mode);
+  const origin = tableOriginContext(table, source.format, environment.compat);
   const topLevelBody = environment.topLevel && environment.story === 'body';
   // An omitted mode is inside the origin observation; the outer-edge table
   // keeps its unmeasured placement instead.
@@ -385,7 +386,7 @@ export function decideLogicalTable(
   const gridScope = commonFrame && commonGrid && topLevelBody && source.format.ordinaryFlow
     && table.widthPct == null && source.format.firstRowException?.preferredWidth?.kind !== 'pct'
     && source.format.rows.every((row) => row.cellSpacingPt === 0);
-  const dropsUnusedLeadingGrid = wordFixedOccupiedGridInput(input, environment.mode, gridScope) !== input;
+  const dropsUnusedLeadingGrid = wordFixedOccupiedGridInput(input, environment.compat, gridScope) !== input;
   const usesLogicalProperties = measuredOrigin || dropsUnusedLeadingGrid;
   const format = source.format;
   const rowOverrides = format.firstRowException != null
@@ -415,7 +416,7 @@ export function decideLogicalTable(
     // The blk-0898 table controls (spaced one-row tables, modes 11/12/14/15
     // and omitted, tblInd -360) place modes 11/12 like 14 and move a leading
     // table by a negative indent like a positive one.
-    && wordMeasuredTableOriginPlacementMode(environment.mode)
+    && environment.compat.tableOriginPlacementMode
     && format.rows.every((row) => row.cellSpacingPt === spacingPt && row.height == null
       && row.cells.every((cell) => cell.dxaHorizontalMarginsOnly === true))
     && ((input.layout === 'fixed' && table.widthPt != null
@@ -448,9 +449,9 @@ export function decideLogicalTable(
     && environment.quarterTurnedStory !== true
     && (environment.story === 'header' || environment.story === 'footer'
       || (environment.story === 'body' && environment.singleColumn))
-    && wordMeasuredTableOriginPlacementMode(environment.mode);
+    && environment.compat.tableOriginPlacementMode;
   const nonleadingIndentIgnored = wordNonleadingIndentScope({
-    mode: environment.mode,
+    compat: environment.compat,
     story: environment.story,
     topLevel: environment.topLevel,
     tableCellDepth: environment.tableCellDepth ?? (environment.inTableCell ? Number.POSITIVE_INFINITY : 0),
@@ -471,7 +472,7 @@ export function decideLogicalTable(
     && origin.effectiveLayout === 'fixed' && format.rows.every((row) => row.cellSpacingPt === 0);
   // WORD_TABLE_MARGIN_HANG_SCOPE: inside the nonleading-indent structures.
   const marginHang = measuredOrigin || !nonleadingIndentIgnored || !singleTable ? 'none' : wordTableMarginHangScope({
-    mode: environment.mode,
+    compat: environment.compat,
     story: environment.story,
     topLevel: environment.topLevel,
     verticalText: isVerticalTextDirection(environment.textDirection) || environment.quarterTurnedStory === true,
@@ -511,6 +512,6 @@ export function unmeasuredTableMemberDecision(table: TableLayoutSource, format: 
     tableIndentInherited: !format.firstRowException?.indentAuthored && table.tblIndInherited === true,
     indentAuthored: format.firstRowException?.indentAuthored || table.tblInd != null,
     firstLeftMarginPt: format.rows[0]?.cells[0]?.originLeftMarginPt ?? 0 };
-  return memberContext(table, source, origin, false, 0, { mode: undefined, story: undefined, topLevel: false,
+  return memberContext(table, source, origin, false, 0, { compat: DEFAULT_DOCX_COMPAT_PROFILE, story: undefined, topLevel: false,
     singleColumn: false, textDirection: null, inTableCell: false, contentX: 0, pageWidth: 0 });
 }

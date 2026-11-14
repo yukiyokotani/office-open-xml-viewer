@@ -38,9 +38,8 @@ export function paragraphOffJapaneseAdmitted(
   settings: DocumentLayoutSettings, section: SectionLayoutContext,
   story: StoryContext, paragraph: ParagraphLayoutSource,
 ): boolean {
-  const mode = settings.compat.compatibilityMode;
   return paragraph.kinsoku === false && settings.kinsoku.enabled
-    && (mode === undefined || mode === 11 || mode === 12 || mode === 14 || mode === 15)
+    && settings.compat.paragraphOffJapaneseLineEdges
     && !settings.hasCustomKinsokuRules
     // The registered CSC Kashida pair allocation is unresolved (library limit).
     // Per-scalar compressed minima can lose natural/contextual pair allocation
@@ -115,8 +114,7 @@ export function japaneseOffOrdinarySource(paragraph: ParagraphLayoutSource): boo
 export function paragraphOffLineEdges(
   settings: DocumentLayoutSettings, paragraph: ParagraphLayoutSource, admitted: boolean,
 ): KinsokuRules | undefined {
-  const mode = settings.compat.compatibilityMode;
-  if (!admitted || (mode !== undefined && mode !== 11 && mode !== 12 && mode !== 14)
+  if (!admitted || !settings.compat.paragraphOffThaiLineEdges
     || paragraph.alignment !== 'thaiDistribute'
     || (settings.characterSpacingControl !== 'compressPunctuation'
       && settings.characterSpacingControl !== 'compressPunctuationAndJapaneseKana')) return undefined;

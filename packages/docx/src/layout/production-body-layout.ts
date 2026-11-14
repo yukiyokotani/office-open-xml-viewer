@@ -3383,7 +3383,7 @@ function resolveAdjacentTableGroup(
  */
 function tableDecisionEnvironment(state: BodyMeasurementContext) {
   return {
-    mode: state.layoutSettings.compat.compatibilityMode,
+    compat: state.layoutSettings.compat,
     story: state.storyContext?.story,
     topLevel: state.storyContext?.containers.length === 0,
     singleColumn: state.sectionLayout?.columns.length === 1,
@@ -3472,7 +3472,7 @@ function acquireTableColumnInput(
               defaultTabPt: state.defaultTabPt,
               service: state.layoutServices?.text,
               clusterGeometry: false,
-              compatibilityMode: state.layoutSettings.compat.compatibilityMode,
+              compat: state.layoutSettings.compat,
             });
             const numbering = context.numberingMarkerGeometry
               ?? (paragraph.numbering && markerInput && state.layoutServices?.text
@@ -3481,7 +3481,7 @@ function acquireTableColumnInput(
                     physicalIndentLeftPt: context.physicalIndentLeftPt,
                     tabStops: paragraph.tabStops,
                     defaultTabPt: state.defaultTabPt,
-                    compatibilityMode: state.layoutSettings.compat.compatibilityMode,
+                    compat: state.layoutSettings.compat,
                     baseRtl: context.baseRtl,
                   }, state.layoutServices.text, false)
                 : undefined);
