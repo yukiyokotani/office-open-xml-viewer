@@ -316,7 +316,7 @@ it.each(['default', 'source'] as const)('carries completed compact demand from t
   if (variant === 'source') openSourceMock.mockResolvedValue({ archive: sourceArchive(), viewDefaults: {}, close: vi.fn() });
   const fake = await loadWorker(variant);
   fake.onmessage?.({ data: { kind: 'init', wasmUrl: 'x' } } as MessageEvent);
-  fake.onmessage?.({ data: { kind: 'parse', id: 80, buffer: new ArrayBuffer(4), resourcePolicy, cjkFallback: 'jp', collectFontDemand: './font-preload-demand.js',
+  fake.onmessage?.({ data: { kind: 'parse', id: 80, buffer: new ArrayBuffer(4), resourcePolicy, cjkFallback: 'jp', collectFontDemand: new URL('./font-preload-demand.ts', import.meta.url).href,
     ...(variant === 'source' ? { source: modelSource, sourceOwnerUrl: './internal/worker-presentation-source.js' } : {}),
   } } as MessageEvent);
   await vi.waitFor(() => expect(fake.posted).toContainEqual(expect.objectContaining({ kind: 'presentationOpened', id: 80 })));
@@ -342,7 +342,9 @@ it.each(['default', 'source'] as const)('still loads when the collector sidecar 
   })));
   // Every slide then demands every subset (font-demand-collector.ts).
   const { importFontDemandCollector } = await import('./font-demand-collector.js');
-  for (const url of ['./missing-font-demand-sidecar.mjs', '']) {
+  for (const url of ['./missing-font-demand-sidecar.mjs', '', new URL('./missing-font-demand-sidecar.mjs', import.meta.url).href,
+    // A served module without the export.
+    new URL('./office-face-weight.ts', import.meta.url).href]) {
     const collector = await importFontDemandCollector(url);
     expect(collector({ index: 0, elements: [] } as never, new Set(), 1000), url).toBe('all');
   }

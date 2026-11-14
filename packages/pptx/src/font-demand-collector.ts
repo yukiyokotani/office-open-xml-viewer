@@ -1,3 +1,4 @@
+import { importWorkerSidecar } from '@silurus/ooxml-core/internal/worker-sidecar';
 import type { FontDemandCollector } from './presentation-preflight.js';
 
 /** Analysis/data is optional: ordinary parser/viewer graphs do not execute or
@@ -18,7 +19,8 @@ export async function loadFontDemandCollector(enabled: boolean): Promise<FontDem
 export async function importFontDemandCollector(url: string): Promise<FontDemandCollector> {
   if (!url) return demandEverySubset;
   try {
-    return ((await import(/* @vite-ignore */ url)) as typeof import('./internal/font-demand-sidecar.js')).collectSlideFontDemand;
+    const namespace = await importWorkerSidecar(url) as Partial<typeof import('./internal/font-demand-sidecar.js')>;
+    return typeof namespace.collectSlideFontDemand === 'function' ? namespace.collectSlideFontDemand : demandEverySubset;
   } catch {
     return demandEverySubset;
   }

@@ -279,13 +279,16 @@ export function legacyCargoViolations(manifestPath) {
   return violations;
 }
 
-// The only computed imports in production source are the six worker-realm
-// sidecars and the companion runtime's Node file read. The main thread supplies these absolute URLs after it selects a
+// The only computed imports in production source are the six model-source
+// worker-realm sidecars, the format-generic worker sidecar loader (the PPTX
+// font-demand collector) and the companion runtime's Node file read. The main thread supplies these absolute URLs after it selects a
 // model source; document bytes cannot choose them. Keep this list exact so a
 // new computed import or require cannot evade module resolution.
 export const ALLOWED_COMPUTED_IMPORTS = new Map([
   ['packages/core/src/math/engine-runtime.ts', ['src']],
   ['packages/core/src/source/model-source.ts', ['sourceModule.moduleUrl']],
+  // Absolute http(s)/file/blob URLs only; never a bare package specifier.
+  ['packages/core/src/internal/worker-sidecar.ts', ['url']],
   // Companion source modules read a validated file: WASM URL in Node; the
   // specifier is the constant 'node:fs/promises', hidden from browser bundlers.
   ['packages/core/src/source/model-source-runtime.ts', ['nodeFsPromises']],
