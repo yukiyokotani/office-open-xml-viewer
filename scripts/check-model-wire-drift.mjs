@@ -419,7 +419,7 @@ function comparer(sink) {
       r.items.forEach((item, i) => walk(item, t.item, { ...ctx, path: `${ctx.path}[${i}]` }));
       return;
     }
-    if (r.kind === 'map' && t.kind === 'object' && !t.index && [...t.props().values()].every((p) => p.optional)) {
+    if (r.kind === 'map' && t.kind === 'object' && !t.index && t.props().size > 0 && [...t.props().values()].every((p) => p.optional)) {
       // A Rust map keyed by a closed vocabulary is typed as
       // `Partial<Record<Key, V>>` in TS: every value must match.
       for (const [key, p] of t.props()) walk(r.value, p.shape, { ...ctx, path: `${ctx.path}.${key}` });
@@ -456,11 +456,24 @@ function comparer(sink) {
     if (rMin < tMin || rMax > tMax) {
       report(ctx.owner, ctx.field, 'type-mismatch', 'array lengths differ', ctx.path, `(Rust length ${rMin}..${rMax} vs TS length ${tMin}..${tMax})`);
     }
-    const tAt = (i) => (i < fixed ? t.items[i] : rest >= 0 ? t.items[rest] : null);
-    const count = Math.min(Number.isFinite(rMax) ? rMax : fixed + 1, t.items.length + (rest >= 0 ? 1 : 0));
-    for (let i = 0; i < count; i++) {
+    if (r.kind === 'array') {
+      // Every element of a Rust array has the item type: it must fit every
+      // TS position it can occupy.
+      t.items.forEach((item, i) => walk(r.item, item, { ...ctx, path: `${ctx.path}[${i}]` }));
+      return;
+    }
+    // Known Rust length: fixed TS head, rest middle, fixed TS tail.
+    const n = r.items.length;
+    const trailing = rest < 0 ? 0 : t.items.length - rest - 1;
+    const tAt = (i) => {
+      if (i < fixed) return t.items[i];
+      if (rest < 0) return null;
+      if (i >= n - trailing) return t.items[rest + 1 + (i - (n - trailing))];
+      return t.items[rest];
+    };
+    for (let i = 0; i < n; i++) {
       const ti = tAt(i);
-      if (ti) walk(r.kind === 'tuple' ? r.items[i] : r.item, ti, { ...ctx, path: `${ctx.path}[${i}]` });
+      if (ti) walk(r.items[i], ti, { ...ctx, path: `${ctx.path}[${i}]` });
     }
   }
 
@@ -542,6 +555,7 @@ function comparer(sink) {
     const rObjects = rMembers.filter((m) => m.kind === 'object');
     const tObjects = tMembers.filter((m) => m.kind === 'object');
     const matched = new Set();
+    const seenTags = new Set();
     const tag = rObjects.length > 0 ? discriminant(rObjects) : null;
     const suffix = r.name && t.name && /^\w+$/.test(t.name) && t.name !== r.name ? `(ts ${t.name})` : '';
     if (tag) {
@@ -562,7 +576,15 @@ function comparer(sink) {
           continue;
         }
         matched.add(match);
+        seenTags.add(value);
         walkObject(o, match, { ...ctx, path: `${ctx.path}<${tag}=${value}>` }, { tag, value, suffix });
+      }
+      // A TS member accepting several discriminant values is matched once;
+      // every value no Rust variant emits is still a TS-only alternative.
+      for (const value of tByTag.keys()) {
+        if (!seenTags.has(value)) {
+          report(ctx.owner, `${ctx.field}<${tag}=${value}>`, 'variant-never-emitted', `TS accepts ${tag}=${q(value)}; Rust never emits it`, ctx.path);
+        }
       }
     } else {
       for (const o of rObjects) {
@@ -578,8 +600,14 @@ function comparer(sink) {
     for (const o of tObjects) {
       if (matched.has(o)) continue;
       const v = tag && deref(o.props().get(tag)?.shape ?? ANY);
-      const label = v?.kind === 'literal' ? `<${tag}=${[...v.values].join('|')}>` : '<object>';
-      report(ctx.owner, `${ctx.field}${label}`, 'variant-never-emitted', 'TS accepts an object alternative Rust never emits', ctx.path, label === '<object>' ? `(${describe(o)})` : undefined);
+      if (v?.kind === 'literal') {
+        // Values no Rust variant emits are reported above; this member shares
+        // an emitted value with another, better matching TS member.
+        const shared = [...v.values].filter((value) => seenTags.has(value));
+        if (shared.length) report(ctx.owner, `${ctx.field}<${tag}=${shared.join('|')}>`, 'variant-never-emitted', 'TS accepts an object alternative Rust never emits', ctx.path, `(${describe(o)})`);
+      } else {
+        report(ctx.owner, `${ctx.field}<object>`, 'variant-never-emitted', 'TS accepts an object alternative Rust never emits', ctx.path, `(${describe(o)})`);
+      }
     }
 
     // Arrays, tuples and maps: pair by compatibility in both directions.
@@ -709,12 +737,28 @@ export function scanNullProvenance(dirs) {
   // nullable alias, a unit type, or a generic parameter (fail closed).
   // Containers (`Vec<Option<T>>`, maps) are fine: their nullable elements
   // stay in the schema of the item, which is never stripped.
-  const head = (type, generics = new Set()) => {
+  const aliasRhs = new Map(aliases);
+  const peel = (type) => {
     let t = type.replace(/\s+/g, '');
     for (let m; (m = /^(?:(?:std|alloc)::(?:boxed|sync|rc)::)?(?:Box|Arc|Rc)<(.*)>$/.exec(t));) t = m[1];
+    return t;
+  };
+  const head = (type, generics = new Set()) => {
+    const t = peel(type);
     if (t === '()') return '()';
     const name = /^(?:[\w]+::)*(\w+)/.exec(t)?.[1];
     return name && (nullish.has(name) || generics.has(name)) ? name : null;
+  };
+  /** The field type with transparent wrappers peeled and aliases expanded
+   * (bounded, in case of alias cycles). */
+  const outer = (type) => {
+    let t = peel(type);
+    for (let i = 0; i < 16; i++) {
+      const name = /^(?:[\w]+::)*(\w+)(?:<.*>)?$/.exec(t)?.[1];
+      if (!name || !aliasRhs.has(name)) break;
+      t = peel(aliasRhs.get(name));
+    }
+    return t;
   };
   for (let changed = true; changed;) {
     changed = false;
@@ -746,10 +790,15 @@ export function scanNullProvenance(dirs) {
       const skip = /skip_serializing_if\s*=\s*"([^"]+)"/.exec(attrs)?.[1];
       attrs = '';
       if (!field || !skip || trimmed.startsWith('let ')) return;
-      const type = field[2].replace(/\s+/g, '');
+      const type = outer(field[2]);
       const where = `${path.relative(repoRoot, file)}:${i + 1} ${field[1]}`;
-      const option = /^Option<(.*)>$/.exec(type);
-      if (!option) return;
+      const option = /^(?:(?:std|core)::option::)?Option<(.*)>$/.exec(type);
+      if (!option) {
+        // A skipped generic or unit field cannot be proven null-free.
+        const culprit = head(type, generics);
+        if (culprit) problems.push(`${where}: skipped ${field[2].trim()} can serialize null while present (${culprit})`);
+        return;
+      }
       if (skip !== 'Option::is_none') {
         problems.push(`${where}: Option skipped by "${skip}" can still serialize null`);
         return;

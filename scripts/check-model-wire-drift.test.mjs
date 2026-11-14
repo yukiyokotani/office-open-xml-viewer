@@ -155,7 +155,7 @@ test('union members are paired by compatibility, not declaration order', () => {
   // ...and the other one is reported as an alternative Rust never emits.
   assert.deepEqual(
     keysOf("export interface Doc { v: { t: 'a'; s: string } | { t: 'a'; n: number } }", tagged),
-    ['Doc.v<t=a>: variant-never-emitted'],
+    ['Doc.v<t=a>: variant-never-emitted (object { t: "a"; s: string; })'],
   );
 });
 
@@ -271,4 +271,47 @@ test('TS tuples with rest elements accept fixed-size Rust arrays', () => {
   assert.deepEqual(keysOf('export interface Doc { v: [number, number] }', rust), [
     'Doc.v: type-mismatch (Rust length 3..3 vs TS length 2..2)',
   ]);
+});
+
+test('widening a tagged member to an extra discriminant value is reported', () => {
+  const widened = inSync.replace("{ type: 'rule'; width: number }", "{ type: 'rule' | 'hr'; width: number }");
+  assert.deepEqual(keysOf(widened), [
+    'Doc.body<type=hr>: variant-never-emitted',
+    'Para<type=para>.children<type=hr>: variant-never-emitted',
+  ]);
+});
+
+test('an empty TS object does not erase a Rust map', () => {
+  const rust = single({ m: { type: 'object', additionalProperties: { type: 'string' } } });
+  assert.deepEqual(keysOf('export interface Doc { m: {} }', rust), ['Doc.m: type-mismatch (Rust {[key]: string} vs TS object {})']);
+});
+
+test('null provenance follows outer aliases and wrappers', () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'model-wire-drift-rs-'));
+  try {
+    writeFileSync(path.join(dir, 'model.rs'), [
+      'type MaybeError = Option<Option<String>>;',
+      'type Plain = Option<String>;',
+      'pub struct A {',
+      '    #[serde(skip_serializing_if = "Option::is_none")]',
+      '    pub aliased: MaybeError,',
+      '    #[serde(skip_serializing_if = "Option::is_none")]',
+      '    pub boxed: Box<Option<Option<String>>>,',
+      '    #[serde(skip_serializing_if = "Option::is_none")]',
+      '    pub fine: Plain,',
+      '}',
+    ].join('\n'));
+    const problems = scanNullProvenance([dir]).map((p) => p.replace(/^.*model\.rs:/, ''));
+    assert.deepEqual(problems, [
+      '5 aliased: Option<Option<String>> can serialize null while present (Option)',
+      '7 boxed: Option<Option<String>> can serialize null while present (Option)',
+    ]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('TS tuples with trailing fixed elements', () => {
+  const rust = single({ v: { type: 'array', prefixItems: [{ type: 'number' }, { type: 'string' }], minItems: 2, maxItems: 2 } });
+  assert.deepEqual(keysOf('export interface Doc { v: [...number[], string] }', rust), []);
 });
