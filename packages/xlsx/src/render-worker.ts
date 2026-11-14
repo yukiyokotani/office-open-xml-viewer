@@ -505,7 +505,7 @@ self.onmessage = async (e: MessageEvent<
         sizeOverrides,
       );
       const renderWorksheet = projected.worksheet;
-      if (projected.created) inheritSheetRenderCache(ws, renderWorksheet);
+      if (projected.created) inheritSheetRenderCache(ws, renderWorksheet, workbook.styles);
       if (req.viewProjection?.autoRowHeightsPrepared) {
         markAutoRowHeightsPrepared(renderWorksheet);
       }
