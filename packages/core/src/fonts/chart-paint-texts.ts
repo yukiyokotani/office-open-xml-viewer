@@ -1,13 +1,11 @@
-import {
-  excelDateTimeSectionNameTexts,
-  isDateFormatSection,
-  localizedExcelShortDateTexts,
-  splitFormatSections,
-} from '@silurus/ooxml-core';
+import { localizedExcelShortDateTexts } from '../chart/chart-number-format.js';
+import { excelDateTimeSectionNameTexts, isDateFormatSection, splitFormatSections } from '../excel-number-format.js';
 
 /**
  * The texts a DrawingML chart may paint, for `unicode-range` font demand
- * (library loading policy, not OOXML rendering behaviour). The chart painter
+ * (library loading policy, not OOXML rendering behaviour). Shared by every
+ * format that paints the canonical chart model (PPTX graphic frames, XLSX
+ * drawing anchors and chart sheets). The chart painter
  * (core `renderChart`) lays its labels out at paint time, so the exact label
  * strings (tick values, elided or wrapped labels, formatted data labels) are
  * not known before render. Every scalar they can contain is, though:
@@ -32,7 +30,7 @@ import {
  * labels come from bundled geodata names), a metafile or unknown image fill
  * (a metafile plays its own text records), or a non-Gregorian / native-digit
  * locale short date. Strings are collected by the caller's scalar collector,
- * which still declines RTL, PUA and non-inert scalars.
+ * which applies its own scalar rules (PUA, unknown scalars, closures).
  */
 export function chartPaintTexts(chart: unknown): readonly string[] | 'all' {
   const texts: string[] = [CHART_SYNTHESIZED_TEXT];
@@ -115,3 +113,14 @@ const CHART_FACE_KEY = /^(?:fontFace|[A-Za-z]+FontFace|themeMajorFontLatin|theme
  * may end in a lone surrogate, which Canvas measures as the replacement
  * character. */
 export const CHART_SYNTHESIZED_TEXT = `${String.fromCharCode(...Array.from({ length: 0x7f - 0x20 }, (_, i) => 0x20 + i))}…≤≥−²\ufffd`;
+
+/** Every vertical presentation form core substitutes in vertical text
+ * (`verticalFormSubstitute` → U+FE10–FE19, `verticalBracketFormSubstitute`
+ * → U+FE17/FE18 and U+FE35–FE44; text/vertical-orientation.ts), used by
+ * PPTX eaVert and stacked bodies, XLSX stacked cells and vertical shape text:
+ * the two blocks, a small superset. Kept static so a demand chunk shares no
+ * module with the renderers. */
+export const VERTICAL_PRESENTATION_FORMS = String.fromCharCode(
+  ...Array.from({ length: 10 }, (_, i) => 0xfe10 + i),
+  ...Array.from({ length: 0x20 }, (_, i) => 0xfe30 + i),
+);

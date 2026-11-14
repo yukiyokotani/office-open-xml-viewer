@@ -11,6 +11,7 @@
  */
 import {
   FontDemandScalarCollector,
+  VERTICAL_PRESENTATION_FORMS,
   type FontDemandScalars,
 } from '@silurus/ooxml-core/internal/font-scalar-demand';
 import {
@@ -51,8 +52,12 @@ export const ASCII_NUMBER_FORMATS: ReadonlySet<string> = new Set([
   'cardinalText', 'ordinalText', 'ordinal',
 ]);
 
-/** §17.18.93 ST_TextDirection: only `lrTb` is horizontal. */
-const HORIZONTAL_TEXT_DIRECTIONS: ReadonlySet<string> = new Set(['lrTb']);
+/** §17.18.93 ST_TextDirection, strict and transitional spellings: `lrTb`
+ * is horizontal; every other value lays the text out vertically
+ * (vertical-text.ts), which substitutes vertical presentation forms. */
+const TEXT_DIRECTIONS: ReadonlySet<string> = new Set([
+  'lrTb', 'tbRl', 'btLr', 'lrTbV', 'tbRlV', 'tbLrV', 'tb', 'rl', 'lr', 'tbV', 'rlV', 'lrV',
+]);
 
 const METAFILE_PATH = /\.(?:wmf|emf|wmz|emz)$/i;
 
@@ -65,11 +70,9 @@ const DOCX_RUN_WEIGHTS: readonly number[] = Object.freeze([400, 700]);
  * uses). Returns the extra texts layout synthesises for this document, or
  * `'all'` for a paint path whose scalars cannot be proven from the text:
  *
- * - vertical text (section, cell or text-box direction other than `lrTb` /
- *   `horz`; §17.3.2.10 `eastAsianLayout` vert/combine): vertical forms and
- *   rotated punctuation are font-selected alternates;
- * - ruby (§17.3.3.25), RTL runs and bidi paragraphs (UAX #9 mirroring paints
- *   scalars the text does not spell);
+ * - text-box direction other than `horz` and §17.3.2.10 `eastAsianLayout`
+ *   vert/combine (combined brackets are generated text);
+ * - an unknown section or cell text direction;
  * - charts and equations (their own text and number formatting) and WMF/EMF
  *   pictures (metafile text records paint with the document's fonts, and the
  *   Office-face web alias); a raster-labelled part whose bytes are a metafile
@@ -77,11 +80,19 @@ const DOCX_RUN_WEIGHTS: readonly number[] = Object.freeze([400, 700]);
  * - page / note numbers in a non-ASCII number format.
  *
  * Synthesised texts: `allCaps` / `smallCaps` runs paint their text upper-cased
- * (§17.3.2.5/.33), emphasis marks paint their glyph (§17.3.2.12), and a DATE /
- * TIME picture (§17.16.4.1) paints its literal characters.
+ * (§17.3.2.5/.33), emphasis marks paint their glyph (§17.3.2.12), a DATE /
+ * TIME picture (§17.16.4.1) paints its literal characters, a ruby run
+ * (§17.3.3.25) paints its guide text, and a vertical section or cell
+ * (§17.6.20 / §17.4.72 textDirection) paints the vertical presentation forms
+ * vertical-text.ts substitutes, and kashida justification paints U+0640.
+ * Right-to-left runs and bidi paragraphs paint their texts reordered; the
+ * core collector demands what the shaper may substitute (mirrored partners,
+ * Arabic presentation forms).
  */
 function docxSynthesizedPaint(doc: DocxDocumentModel): 'all' | string[] {
   const texts: string[] = [];
+  let verticalForms = false;
+  let kashida = false;
   const settings = (doc as { __noteLayoutSettings?: { footnoteNumberFormat?: string; endnoteNumberFormat?: string } })
     .__noteLayoutSettings;
   for (const format of [settings?.footnoteNumberFormat, settings?.endnoteNumberFormat]) {
@@ -96,10 +107,21 @@ function docxSynthesizedPaint(doc: DocxDocumentModel): 'all' | string[] {
     if (ArrayBuffer.isView(value) || value instanceof ArrayBuffer) continue;
     if (!Array.isArray(value)) {
       const record = value as Record<string, unknown>;
-      if (typeof record.textDirection === 'string' && !HORIZONTAL_TEXT_DIRECTIONS.has(record.textDirection)) return 'all';
+      if (typeof record.textDirection === 'string') {
+        if (!TEXT_DIRECTIONS.has(record.textDirection)) return 'all';
+        if (record.textDirection !== 'lrTb' && !verticalForms) {
+          verticalForms = true;
+          texts.push(VERTICAL_PRESENTATION_FORMS);
+        }
+      }
       if (typeof record.textVert === 'string' && record.textVert !== 'horz') return 'all';
-      if (record.ruby != null || record.eastAsianVert === true || record.eastAsianCombine === true) return 'all';
-      if (record.rtl === true || record.bidi === true) return 'all';
+      if (record.eastAsianVert === true || record.eastAsianCombine === true) return 'all';
+      // §17.18.44 kashida justification elongates Arabic words with inserted
+      // U+0640 TATWEEL (kashida-justify.ts).
+      if (typeof record.alignment === 'string' && record.alignment.endsWith('Kashida') && !kashida) {
+        kashida = true;
+        texts.push('\u0640');
+      }
       if (record.type === 'chart' || record.type === 'math') return 'all';
       if (typeof record.mimeType === 'string' && isMetafileMime(record.mimeType)) return 'all';
       if (typeof record.imagePath === 'string' && METAFILE_PATH.test(record.imagePath)) return 'all';
@@ -120,6 +142,9 @@ function docxSynthesizedPaint(doc: DocxDocumentModel): 'all' | string[] {
           if (picture) own.push(picture);
         }
       }
+      // §17.3.3.25 ruby: the guide text paints above its base run.
+      const ruby = record.ruby as { text?: unknown } | null | undefined;
+      if (ruby && typeof ruby === 'object' && typeof ruby.text === 'string') own.push(ruby.text);
       texts.push(...own);
       // §17.3.2.5 caps / §17.3.2.33 smallCaps: the shaper paints the
       // upper-cased display text of the run (segment-builder.ts), including
@@ -141,8 +166,8 @@ function docxSynthesizedPaint(doc: DocxDocumentModel): 'all' | string[] {
 
 /**
  * The Unicode scalars a document paints, for `unicode-range` subset laziness
- * (core `scalar-demand.ts` owns the scalar rules: strong RTL, PUA symbol
- * codes and non-inert scalars decline to `'all'`). Texts come from
+ * (core `scalar-demand.ts` owns the scalar rules: PUA symbol codes outside
+ * a known face list and unknown scalars decline to `'all'`). Texts come from
  * {@link docxRenderedTextUsages} (body, tables, headers/footers, notes,
  * text-box stories, numbering markers, field results), plus
  * {@link LAYOUT_SYNTHESIZED_SCALARS} and the synthesised paint of
@@ -166,7 +191,10 @@ export function docxFontDemandScalars(doc: DocxDocumentModel): FontDemandScalars
   const symbolFamilies = new Set<string>();
   for (const usage of docxRenderedTextUsages(doc, 'font-demand')) {
     for (const family of usage.fontFamilies) if (isSymbolFontFamily(family)) symbolFamilies.add(family!);
-    if (!collector.addSymbolText(usage.text, usage.fontFamilies)) return 'all';
+    // The usage lists every slot face the run's symbol conversion consults
+    // (segment-builder symbolSegments, numbering-marker): with none
+    // symbol-encoded, a PUA code paints as itself.
+    if (!collector.addSymbolText(usage.text, usage.fontFamilies, true)) return 'all';
   }
   // Layout-generated text (a field result such as a PAGE number) is painted
   // in its field's fonts too.

@@ -1,6 +1,10 @@
-import { FontDemandScalarCollector } from '@silurus/ooxml-core/internal/font-scalar-demand';
+import {
+  FontDemandScalarCollector,
+  VERTICAL_PRESENTATION_FORMS,
+  chartPaintTexts,
+  paintsTextFreeImage,
+} from '@silurus/ooxml-core/internal/font-scalar-demand';
 import type { FontPreloadDemand, TextBody } from '@silurus/ooxml-core';
-import { chartPaintTexts, paintsTextFreeImage } from './chart-font-demand.js';
 import { preparedPowerPointText } from './font-display-text.js';
 import type { Slide, SlideElement } from './types';
 
@@ -27,10 +31,11 @@ import type { Slide, SlideElement } from './types';
  *   scheme can format, in the marker face;
  * - images (pictures, media posters, picture fills, picture bullets): no text,
  *   unless a metafile (its text records paint with served faces) or of an
- *   unknown type (chart-font-demand.ts `paintsTextFreeImage`);
- * - charts: every scalar their labels can contain (`chartPaintTexts`).
- * Not modelled (`'all'`): equations, right-to-left paragraphs, region-map
- * charts and unknown elements. */
+ *   unknown type (core `paintsTextFreeImage`);
+ * - charts: every scalar their labels can contain (core `chartPaintTexts`).
+ * Right-to-left paragraphs paint their texts reordered (UAX #9), mirrored
+ * characters demanded by the core collector. Not modelled (`'all'`):
+ * equations, region-map charts and unknown elements. */
 export function collectSlideFontDemand(
   slide: Slide,
   committed: ReadonlySet<number>,
@@ -59,7 +64,6 @@ export function collectSlideFontDemand(
     const add = (text: string, families: readonly (string | null | undefined)[]): boolean =>
       scalars.addSymbolText(text, families);
     for (const para of textBody.paragraphs) {
-      if (para.rtl) return false;
       // The parsed inherit sentinel produces no marker in resolveBulletLabel,
       // just like none. A char marker paints its code in its a:buFont
       // (§21.1.2.4.3; renderer paragraphBullet), converted like run text when
@@ -123,15 +127,6 @@ const TEXT_VERTS: ReadonlySet<string> = new Set(['horz', 'vert', 'vert270', 'mon
 /** Vertical-type values whose painter substitutes vertical presentation
  * forms: eaVert (vertical-text.ts) and stacked text (renderStackedTextBody). */
 const VERTICAL_FORM_VERTS: ReadonlySet<string> = new Set(['eaVert', 'wordArtVert', 'wordArtVertRtl']);
-
-/** Every vertical presentation form core substitutes in vertical text
- * (`verticalFormSubstitute` → U+FE10–FE19, `verticalBracketFormSubstitute`
- * → U+FE17/FE18 and U+FE35–FE44): the two blocks, a small superset. Kept
- * static so the collector chunk shares no module with the renderer. */
-export const VERTICAL_PRESENTATION_FORMS = String.fromCharCode(
-  ...Array.from({ length: 10 }, (_, i) => 0xfe10 + i),
-  ...Array.from({ length: 0x20 }, (_, i) => 0xfe30 + i),
-);
 
 /** Every scalar `formatAutoNum` (autonum-label.ts) can write for any scheme
  * and counter: Arabic digits and sign, Latin letters (alphabetic and roman

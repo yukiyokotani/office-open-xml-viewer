@@ -17,8 +17,8 @@ import { SYMBOL_ENCODED, symbolRealm } from './test-support/symbol-realm.js';
 // to a host font. Exercised over targeted synthetic workbooks (number formats,
 // dates, rich and inline text, phonetic runs, errors, booleans, shapes) and
 // the public demo workbook; every paint path the collector cannot prove
-// declines to 'all' (charts, equations, vertical/stacked/RTL text, metafiles,
-// and any scalar that is not normalization-inert, e.g. a precomposed é).
+// declines to 'all' (region-map charts, equations, metafiles, unknown
+// scalars).
 
 const MAIN = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main';
 const REL = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
@@ -103,6 +103,30 @@ const shapes = workbookBytes(
     + '</xdr:sp><xdr:clientData/></xdr:twoCellAnchor>',
 );
 
+// §18.8.1 stacked (textRotation 255) and right-to-left (readingOrder 2) cells.
+const alignedCells = workbookBytes(
+  fonts + base + '<cellXfs count="3"><xf numFmtId="0" fontId="0"/>'
+    + '<xf numFmtId="0" fontId="2" applyAlignment="1"><alignment textRotation="255"/></xf>'
+    + '<xf numFmtId="0" fontId="0" applyAlignment="1"><alignment horizontal="right" readingOrder="2"/></xf></cellXfs>',
+  '<row r="1" ht="120" customHeight="1"><c r="A1" s="1" t="inlineStr"><is><t>縦書き、「括弧」（丸）。AB</t></is></c>'
+    + '<c r="B1" s="2" t="inlineStr"><is><t>مرحبا (عالم) [1] «اقتباس»</t></is></c>'
+    + '<c r="C1" s="2" t="inlineStr"><is><t>(latin) &lt;tail&gt;</t></is></c></row>',
+);
+
+const verticalShape = (vert: string) => '<xdr:twoCellAnchor><xdr:from><xdr:col>1</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>1</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>'
+  + '<xdr:to><xdr:col>3</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>12</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>'
+  + `<xdr:sp><xdr:nvSpPr><xdr:cNvPr id="2" name="${vert}"/><xdr:cNvSpPr txBox="1"/></xdr:nvSpPr>`
+  + '<xdr:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="1200000" cy="3000000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></xdr:spPr>'
+  + `<xdr:txBody><a:bodyPr vert="${vert}" wrap="square"/><a:p><a:r><a:rPr lang="ja-JP" sz="1400"><a:ea typeface="Meiryo"/></a:rPr><a:t>縦書き、「括弧」（丸）。AB 12</a:t></a:r></a:p>`
+  + '<a:p><a:pPr rtl="1"/><a:r><a:rPr lang="ar-SA" sz="1100"/><a:t>مرحبا (عالم)</a:t></a:r></a:p></xdr:txBody>'
+  + '</xdr:sp><xdr:clientData/></xdr:twoCellAnchor>';
+const verticalShapes = workbookBytes(
+  fonts + base + '<cellXfs count="1"><xf numFmtId="0" fontId="0"/></cellXfs>',
+  '<row r="1"><c r="A1" t="inlineStr"><is><t>cell</t></is></c></row>',
+  undefined,
+  ['eaVert', 'wordArtVert', 'wordArtVertRtl', 'vert270'].map(verticalShape).join(''),
+);
+
 /** Canvas stand-in recording every string measured or painted. */
 function recordingContext() {
   let font = '10px serif';
@@ -173,8 +197,10 @@ function parse(bytes: Uint8Array): { workbook: ParsedWorkbook; sheets: Worksheet
 
 function paintedScalars(workbook: ParsedWorkbook, ws: Worksheet): Set<number> {
   const { ctx, texts } = recordingContext();
-  const lastRow = Math.max(40, ...ws.rows.map((row) => row.index));
-  const lastCol = Math.max(16, ...ws.rows.flatMap((row) => row.cells.map((cell) => cell.col)));
+  // Every drawing anchor is inside the painted viewport.
+  const anchors = [...(ws.charts ?? []), ...(ws.shapeGroups ?? [])];
+  const lastRow = Math.max(40, ...ws.rows.map((row) => row.index), ...anchors.map((anchor) => anchor.toRow + 2));
+  const lastCol = Math.max(16, ...ws.rows.flatMap((row) => row.cells.map((cell) => cell.col)), ...anchors.map((anchor) => anchor.toCol + 2));
   renderViewport(ctx, ws, workbook.styles, { row: 1, col: 1, rows: lastRow, cols: lastCol },
     { dpr: 1, loadedImages: new Map() }, 'jp');
   const scalars = new Set<number>();
@@ -215,7 +241,7 @@ describe('XLSX font demand covers every measured or painted scalar', () => {
   };
 
   it('targeted synthetic workbooks', () => {
-    for (const [label, bytes] of Object.entries({ numberFormats, richText, shapes })) {
+    for (const [label, bytes] of Object.entries({ numberFormats, richText, shapes, alignedCells, verticalShapes })) {
       expect(check(label, bytes), label).toEqual(['finite']);
     }
   });
@@ -256,8 +282,8 @@ describe('XLSX font demand covers every measured or painted scalar', () => {
 // Symbol-encoded faces (symbol-paint.ts): a code paints as authored where the
 // face draws it, as its Unicode conversion where it does not; the demand
 // covers both outcomes without declining to 'all'. (A precomposed authored
-// code such as Wingdings 0xFC is not normalization-inert, so its text still
-// demands 'all': core scalar-demand.ts.)
+// code such as Wingdings 0xFC demands its canonical closure: core
+// scalar-demand.ts.)
 const symbols = workbookBytes(
   '<numFmts count="1"><numFmt numFmtId="164" formatCode="&quot;a&quot;0"/></numFmts>'
     + '<fonts count="3"><font><sz val="11"/><name val="Calibri"/></font><font><sz val="11"/><name val="Wingdings"/></font>'

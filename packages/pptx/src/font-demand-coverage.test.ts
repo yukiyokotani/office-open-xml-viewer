@@ -13,7 +13,7 @@ import type { Presentation, Slide } from './types';
 // fall back to a host font. Exercised over the public demo deck and targeted
 // synthetic slides (charts and raster pictures are exercised by the demo
 // deck); every paint path the collector cannot prove declines to 'all'
-// (metafiles, region maps, RTL, equations).
+// (metafiles, region maps, equations).
 
 const TARGETED: Record<string, Uint8Array> = {
   'caps and small caps': deck(textBox(para(run('straße αβγ', ' cap="all"') + run('mixed Case', ' cap="small"')))),
@@ -42,6 +42,8 @@ const TARGETED: Record<string, Uint8Array> = {
   'stacked vertical text': deck(textBox(para(run('縦書き、「括弧」（丸）。AB 12', ' altLang="ja-JP"')), '<a:bodyPr vert="wordArtVert" wrap="square"/>')),
   'stacked right-to-left columns': deck(textBox(para(run('右から、「左」へ。')) + para(run('二列目')), '<a:bodyPr vert="wordArtVertRtl" wrap="square"/>')),
   'warped text': deck(textBox(para(run('Arched WordArt, ß &amp; 漢字')), '<a:bodyPr wrap="none"><a:prstTxWarp prst="textArchUp"><a:avLst/></a:prstTxWarp></a:bodyPr>')),
+  'right-to-left paragraphs': deck(textBox(para(run('مرحبا (عالم) [1] «اقتباس»'), '<a:pPr rtl="1" algn="r"/>')
+    + para(run('(latin) &lt;tail&gt; שלום'), '<a:pPr rtl="1"/>'))),
   'date field': deck(textBox(para('<a:fld id="{00000000-0000-0000-0000-000000000002}" type="datetime1">'
     + '<a:rPr lang="en-US" sz="2400"/><a:t>11/14/2026</a:t></a:fld>' + run(' today')))),
   'east asian and latin mix': deck(textBox(para(run('漢字かなカナ ABC 123', ' altLang="ja-JP"')))),
