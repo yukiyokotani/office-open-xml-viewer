@@ -12,9 +12,23 @@ describe('collectFontDemandScalars', () => {
   });
 
   it('answers all for every text whose painted scalars its spelling cannot prove', () => {
-    for (const text of ['\ud800', '͸', '', 'שלום', '‮(']) {
+    for (const text of ['\ud800', '͸', '']) {
       expect(collectFontDemandScalars(['A', text], { budget: BUDGET }), JSON.stringify(text)).toBe('all');
     }
+  });
+
+  it('demands right-to-left text with the mirror partner of every mirrored character', () => {
+    // BidiMirroring.txt: ( ↔ ), « ↔ », ≤ ↔ ≥; ∑ is Bidi_Mirrored without a partner.
+    expect(collectFontDemandScalars(['שלום (א)', '‮«≤∑'], { budget: BUDGET })).toEqual(expect.arrayContaining(
+      [0x5e9, 0x5dc, 0x5d5, 0x5dd, 0x28, 0x29, 0x5d0, 0x202e, 0xab, 0xbb, 0x2264, 0x2265, 0x2211]));
+    // Generated scalars mirror too: a canonical closure (≮ → < U+0338 mirrors to >) and its mirror's closure.
+    expect(collectFontDemandScalars(['≮'], { budget: BUDGET })).toEqual(expect.arrayContaining([0x226e, 0x3c, 0x338, 0x226f, 0x3e]));
+    // Arabic letters demand the presentation forms a fallback shaper substitutes, ligatures only with all their letters.
+    const arabic = new Set(collectFontDemandScalars(['بلا'], { budget: BUDGET }) as number[]);
+    for (const cp of [0xfe8f, 0xfe90, 0xfe91, 0xfe92, 0xfedd, 0xfe8d, 0xfefb, 0xfefc]) expect(arabic.has(cp), cp.toString(16)).toBe(true);
+    expect(arabic.has(0xfef5)).toBe(false); // lam with alef madda: no madda demanded
+    // Any text may paint in a right-to-left run, so the partner is demanded whatever the text's direction.
+    expect(new Set(collectFontDemandScalars(['['], { budget: BUDGET }) as number[])).toEqual(new Set([...SENTINELS, 0x5b, 0x5d]));
   });
 
   it('demands every scalar a canonically equivalent rendering can paint', () => {
@@ -105,8 +119,7 @@ describe('collectFontDemandScalars', () => {
         return Array.from({ length: hi! - lo + 1 }, (_, at) => lo + at);
       });
     expect(excluded).toHaveLength(85);
-    // The Hebrew presentation forms are strong RTL text, which declines.
-    for (const cp of excluded.filter((cp) => cp < 0xfb1d || cp > 0xfb4e)) {
+    for (const cp of excluded) {
       const text = String.fromCodePoint(cp).normalize('NFD');
       expect(collectFontDemandScalars([text], { budget: BUDGET }), `U+${cp.toString(16)}`).toContain(cp);
     }

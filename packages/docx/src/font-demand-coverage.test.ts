@@ -68,6 +68,23 @@ const TARGETED: Record<string, Uint8Array> = {
     + run('lnþ(a', '<w:rFonts w:ascii="Symbol" w:hAnsi="Symbol"/>')
     + run('\uF0B7\uF06C', '<w:rFonts w:ascii="Wingdings" w:hAnsi="Wingdings"/>')
     + run('ab', '<w:rFonts w:ascii="Symbol" w:hAnsi="Symbol"/><w:caps/>'))),
+  // §17.3.2.30 rtl runs and §17.3.1.6 bidi paragraphs (UAX #9 mirroring).
+  'right-to-left text': docx(p(run('مرحبا (عالم) [1] «اقتباس»', '<w:rtl/>') + run(' and (latin) &lt;tail&gt;'), '<w:bidi/>')
+    + p(run('שלום {עולם}', '<w:rtl/>'))),
+  // §17.18.44 kashida justification inserts U+0640 into justified lines.
+  'kashida justification': docx(p(run('بين البيت والمدرسة طريق طويل يمر بين الحقول والبيوت القديمة في القرية الصغيرة '.repeat(4), '<w:rtl/>'),
+    '<w:bidi/><w:jc w:val="highKashida"/>')),
+  // §17.3.3.25 ruby.
+  'ruby': docx(p('<w:ruby><w:rubyPr><w:rubyAlign w:val="distributeSpace"/><w:hps w:val="10"/><w:hpsRaise w:val="18"/><w:hpsBaseText w:val="21"/><w:lid w:val="ja-JP"/></w:rubyPr>'
+    + '<w:rt><w:r><w:rPr><w:sz w:val="10"/></w:rPr><w:t>かんじ</w:t></w:r></w:rt><w:rubyBase><w:r><w:rPr><w:sz w:val="21"/></w:rPr><w:t>漢字</w:t></w:r></w:rubyBase></w:ruby>'
+    + run('の読み'))),
+  // §17.18.93 vertical section and cell text directions.
+  'vertical section': docx(p(run('縦書き、「括弧」（丸）。ABC 12 ー〜')), '<w:textDirection w:val="tbRl"/>'),
+  'vertical table cell': docx('<w:tbl><w:tblPr><w:tblW w:w="4000" w:type="dxa"/></w:tblPr><w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/></w:tblGrid>'
+    + '<w:tr><w:trPr><w:trHeight w:val="2000"/></w:trPr><w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/><w:textDirection w:val="tbRlV"/></w:tcPr>' + p(run('縦、「セル」。')) + '</w:tc>'
+    + '<w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/><w:textDirection w:val="btLr"/></w:tcPr>' + p(run('Rotated (cell)')) + '</w:tc></w:tr></w:tbl>' + p('')),
+  // A PUA code in a Unicode-encoded face paints as itself.
+  'PUA code in a text face': docx(p(run('\uF0B7 item', '<w:rFonts w:ascii="Arial" w:hAnsi="Arial"/>'))),
   'east asian empty marks': docx(p('', '<w:rPr><w:rFonts w:eastAsia="MS Mincho" w:hint="eastAsia"/></w:rPr>')
     + p(run('日本語の文', '<w:rFonts w:eastAsia="MS Mincho"/><w:lang w:eastAsia="ja-JP"/>'))),
 };

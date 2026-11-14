@@ -6,3 +6,9 @@ export {
   type FontDemandScalarOptions,
   type FontDemandScalars,
 } from '../fonts/scalar-demand.js';
+export {
+  CHART_SYNTHESIZED_TEXT,
+  VERTICAL_PRESENTATION_FORMS,
+  chartPaintTexts,
+  paintsTextFreeImage,
+} from '../fonts/chart-paint-texts.js';

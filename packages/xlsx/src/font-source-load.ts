@@ -25,7 +25,11 @@ import {
   type CjkLang,
   type FontSubstituteScript,
 } from '@silurus/ooxml-core';
-import { FontDemandScalarCollector } from '@silurus/ooxml-core/internal/font-scalar-demand';
+import {
+  FontDemandScalarCollector,
+  VERTICAL_PRESENTATION_FORMS,
+  chartPaintTexts,
+} from '@silurus/ooxml-core/internal/font-scalar-demand';
 import { ScriptPreloadAccumulator } from '@silurus/ooxml-core/internal/script-preload-accumulator';
 import {
   chartFontFamilies,
@@ -59,16 +63,21 @@ export function declaredFontSubstitutions(sources: readonly FontSourceDescriptor
  */
 const RENDERER_SENTINEL_TEXT = `${String.fromCharCode(...Array.from({ length: 0x7f - 0x20 }, (_, i) => 0x20 + i))}…`;
 
-/** DrawingML vertical text modes other than horizontal (§20.1.10.83). */
-const HORIZONTAL_SHAPE_TEXT: ReadonlySet<string> = new Set(['horz']);
+/** §20.1.10.83 ST_TextVerticalType. `vert` / `vert270` rotate the
+ * horizontal layout and `mongolianVert` paints horizontally;
+ * {@link VERTICAL_FORM_SHAPE_TEXT} may also substitute vertical forms. */
+const SHAPE_TEXT_VERTS: ReadonlySet<string> = new Set(['horz', 'vert', 'vert270', 'mongolianVert', 'eaVert', 'wordArtVert', 'wordArtVertRtl']);
+/** Vertical-type values whose painter may substitute vertical presentation
+ * forms (eaVert, stacked WordArt). */
+const VERTICAL_FORM_SHAPE_TEXT: ReadonlySet<string> = new Set(['eaVert', 'wordArtVert', 'wordArtVertRtl']);
 
 const METAFILE_PATH = /\.(?:wmf|emf|wmz|emz)$/i;
 
-/** Stacked text (`textRotation="255"`, §18.8.1) substitutes vertical forms;
- * RTL reading order (`readingOrder="2"`) mirrors neutral text (UAX #9). Either
- * paints scalars the text does not spell. */
-function stylesNeedAllScalars(workbook: ParsedWorkbook): boolean {
-  return (workbook.styles?.cellXfs ?? []).some((xf) => xf.textRotation === 255 || xf.readingOrder === 2);
+/** Stacked text (`textRotation="255"`, §18.8.1) substitutes vertical forms
+ * (vertical-text.ts). RTL reading order (`readingOrder="2"`) mirrors neutral
+ * text (UAX #9), whose partners the core collector demands for every text. */
+function stylesStackText(workbook: ParsedWorkbook): boolean {
+  return (workbook.styles?.cellXfs ?? []).some((xf) => xf.textRotation === 255);
 }
 
 /**
@@ -113,7 +122,7 @@ export class XlsxFontDemand {
     this.collector = this.newCollector();
     this.symbolStyleFamilies = [...new Set((workbook.styles?.fonts ?? [])
       .map((font) => font.name?.trim() ?? '').filter(isSymbolFontFamily))];
-    if (stylesNeedAllScalars(workbook)) this.collector.decline();
+    if (stylesStackText(workbook)) this.collector.add(VERTICAL_PRESENTATION_FORMS);
     // The sentinel text paints in every style font, a symbol-encoded one
     // included (core addSymbolText demands each code's conversions).
     this.collector.addSymbolText(RENDERER_SENTINEL_TEXT, this.symbolStyleFamilies);
@@ -289,11 +298,14 @@ export class XlsxFontDemand {
       this.addFamily(worksheet.themeJapaneseMinorFont);
     }
     // Charts paint their own text and number formatting (axis labels, data
-    // labels, legends): the scalars cannot be proven from the model text.
-    // Chart sheets carry their chart in `charts` as well.
-    if ((worksheet.charts ?? []).length > 0) this.collector.decline();
+    // labels, legends): every scalar their labels can contain (core
+    // chartPaintTexts), or 'all' when that set is not provable. Chart sheets
+    // carry their chart in `charts` as well.
     for (const anchor of worksheet.charts ?? []) {
       for (const family of chartFontFamilies(anchor.chart)) this.addFamily(family);
+      const texts = chartPaintTexts(anchor.chart);
+      if (texts === 'all') this.collector.decline();
+      else for (const text of texts) this.collector.add(text);
     }
     for (const image of worksheet.images ?? []) {
       // Metafile text records paint with document faces (core wmf-text.ts).
@@ -325,10 +337,10 @@ export class XlsxFontDemand {
     const text = shape.text;
     if (!text) return;
     // Vertical and WordArt-vertical text rotate or substitute vertical forms;
-    // RTL paragraphs mirror neutral text (UAX #9).
-    if (text.vert !== undefined && !HORIZONTAL_SHAPE_TEXT.has(text.vert)) this.collector.decline();
+    // RTL paragraphs mirror neutral text (UAX #9; core demands the partners).
+    if (text.vert !== undefined && !SHAPE_TEXT_VERTS.has(text.vert)) this.collector.decline();
+    if (text.vert !== undefined && VERTICAL_FORM_SHAPE_TEXT.has(text.vert)) this.collector.add(VERTICAL_PRESENTATION_FORMS);
     for (const paragraph of text.paragraphs) {
-      if (paragraph.rtl) this.collector.decline();
       for (const run of paragraph.runs) {
         // OMML equations paint their own operator and layout glyphs.
         if (run.type === 'math') { this.collector.decline(); continue; }

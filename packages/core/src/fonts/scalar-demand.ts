@@ -13,13 +13,13 @@
  * conservative answer and never an error; the collector returns it whenever
  * the painted scalars cannot be proven from the input text:
  *
- * - strong-RTL text: Canvas performs UAX #9 mirroring, which is unmodelled
- *   here, so a mirrored glyph could be painted that the text does not spell;
  * - PUA `U+F020–F0FF` outside a symbol-encoded family: an unmodelled
  *   symbol-font remapping could paint a different scalar than the stored one.
  *   Text in a symbol-encoded family ({@link FontDemandScalarCollector.addSymbolText})
  *   demands instead every scalar its conversion may paint, a finite set
- *   from the conversion tables (`symbol-font.ts`);
+ *   from the conversion tables (`symbol-font.ts`), and text whose caller
+ *   names every face that may paint it, none symbol-encoded, demands the
+ *   code itself (no conversion applies);
  * - a scalar that is not normalization-inert and that the host does not know
  *   as assigned, or a lone surrogate: malformed or unknown input proves
  *   nothing;
@@ -41,11 +41,21 @@
  * shapers split outside canonical equivalence demand their parts
  * (`shaperSplitScalars`).
  *
+ * Right-to-left text paints scalars its spelling may not: every demanded
+ * scalar with a Bidi_Mirroring_Glyph partner (BidiMirroring.txt) also
+ * demands that partner, closed canonically (the shaper mirrors after
+ * normalizing, UAX #9 L4), and Arabic letters demand every Arabic
+ * presentation form whose compatibility decomposition consists of demanded
+ * scalars (a shaper without the font's joining features substitutes those
+ * forms, HarfBuzz `arabic-fallback`). Any text may be painted in a
+ * right-to-left run whatever direction the format resolves, so both apply to
+ * every text, generated scalars (closures, symbol conversions) included.
+ *
  * The production Canvas measurement sentinels (`ii` tracking, `M` baseline,
  * space for tabs) are always included because the renderers measure them with
  * every face they paint.
  */
-import { hasStrongRtl } from '../text/bidi/line-order.js';
+import { MIRROR_FLAT } from '../text/bidi/char-data.generated.js';
 import {
   FONT_BASELINE_SENTINEL,
   FONT_SPACE_SENTINEL,
@@ -69,6 +79,42 @@ export interface FontDemandScalarOptions {
 }
 
 const NO_SCALARS: ReadonlySet<number> = new Set();
+
+let mirrors: Map<number, number> | undefined;
+/** Bidi_Mirroring_Glyph, from the bidi engine's generated table (read
+ * directly so the class tables stay out of this chunk). */
+function mirrorOf(cp: number): number | undefined {
+  if (!mirrors) {
+    mirrors = new Map();
+    for (let i = 0; i < MIRROR_FLAT.length; i += 2) mirrors.set(MIRROR_FLAT[i]!, MIRROR_FLAT[i + 1]!);
+  }
+  return mirrors.get(cp);
+}
+
+/** Arabic letters (Arabic, Arabic Supplement, Arabic Extended-A/B/C). */
+function isArabicLetter(cp: number): boolean {
+  return (cp >= 0x600 && cp <= 0x6ff) || (cp >= 0x750 && cp <= 0x77f) || (cp >= 0x870 && cp <= 0x8ff)
+    || (cp >= 0x10ec0 && cp <= 0x10eff);
+}
+
+let arabicForms: ReadonlyArray<readonly [number, readonly number[]]> | undefined;
+/** Every Arabic presentation form (U+FB50–FDFF, U+FE70–FEFF) with the
+ * scalars of its compatibility decomposition, derived from the host's
+ * normalization (no table). */
+function arabicPresentationForms(): ReadonlyArray<readonly [number, readonly number[]]> {
+  if (!arabicForms) {
+    const forms: Array<readonly [number, readonly number[]]> = [];
+    for (const [lo, hi] of [[0xfb50, 0xfdff], [0xfe70, 0xfeff]] as const) {
+      for (let cp = lo; cp <= hi; cp++) {
+        const form = String.fromCodePoint(cp);
+        const parts = form.normalize('NFKD');
+        if (parts !== form) forms.push([cp, [...parts].map((ch) => ch.codePointAt(0) as number)]);
+      }
+    }
+    arabicForms = forms;
+  }
+  return arabicForms;
+}
 
 /** Any combining mark (General_Category M). */
 const MARK_TEXT = /\p{M}/u;
@@ -99,6 +145,8 @@ export class FontDemandScalarCollector {
    * mark or joiner it finds without a valid base (HarfBuzz broken clusters,
    * Hangul tone marks), wherever it stands in the text. */
   private dottedCircle = false;
+  /** Whether an Arabic letter was demanded ({@link closeArabicForms}). */
+  private arabic = false;
 
   constructor(options: FontDemandScalarOptions) {
     this.budget = options.budget;
@@ -115,14 +163,17 @@ export class FontDemandScalarCollector {
   /** Collect one painted text. Returns false (and becomes `'all'`) when the
    * text's painted scalars cannot be proven from its spelling. */
   add(text: string): boolean {
+    return this.collect(text, false);
+  }
+
+  private collect(text: string, literalPua: boolean): boolean {
     if (this.declined) return false;
-    if (hasStrongRtl(text)) return this.decline();
     if (!this.dottedCircle && MARK_TEXT.test(text) && !this.demandDottedCircle()) return this.decline();
     // Whether this text has not yet reached its first starter.
     let leading = true;
     for (const scalar of text) {
       const cp = scalar.codePointAt(0) as number;
-      if (cp >= 0xf020 && cp <= 0xf0ff) return this.decline();
+      if (!literalPua && cp >= 0xf020 && cp <= 0xf0ff) return this.decline();
       // A soft hyphen is demanded but leaves the cluster open: a painter may
       // strip it and draw the scalars around it as one text (DOCX §17.3.3.29).
       if (cp === 0xad) {
@@ -198,16 +249,19 @@ export class FontDemandScalarCollector {
    * any of those families ({@link symbolPaintCandidates}): which ones paint
    * depends on what the painting font draws, judged only at paint time. The
    * rest of the text is collected as by {@link add}. Without a symbol family
-   * this is {@link add}.
+   * this is {@link add}, unless `complete`: the caller proves that only the
+   * listed faces (an empty slot: no symbol face either) select a symbol
+   * conversion for this text, so with none symbol-encoded a PUA code paints
+   * as itself and is demanded as itself.
    */
-  addSymbolText(text: string, fontFamilies: Iterable<string | null | undefined>): boolean {
+  addSymbolText(text: string, fontFamilies: Iterable<string | null | undefined>, complete = false): boolean {
     if (this.declined) return false;
     const keys = new Set<SymbolFontKey>();
     for (const family of fontFamilies) {
       const key = symbolFontKey(family);
       if (key) keys.add(key);
     }
-    if (!keys.size) return this.add(text);
+    if (!keys.size) return this.collect(text, complete);
     let rest = '';
     for (const ch of text) {
       const cp = ch.codePointAt(0) as number;
@@ -232,6 +286,22 @@ export class FontDemandScalarCollector {
   /** Demand one scalar within the budgets. */
   private admitScalar(cp: number): boolean {
     if (this.committed.has(cp) || this.points.has(cp)) return true;
+    if (!this.admitOne(cp)) return false;
+    if (isArabicLetter(cp)) this.arabic = true;
+    // The mirrored partner a right-to-left run may paint, with its canonical
+    // closure (a mirrored precomposed character may be painted decomposed).
+    const mirrored = mirrorOf(cp);
+    if (mirrored === undefined || this.committed.has(mirrored) || this.points.has(mirrored)) return true;
+    if (!this.admitScalar(mirrored)) return false;
+    if (fontDemandInertScalar(mirrored)) return true;
+    const closure = canonicalClusterScalars([mirrored]);
+    if (!closure) return false;
+    for (const scalar of closure) if (!this.admitScalar(scalar)) return false;
+    return true;
+  }
+
+  /** Charge and record one scalar. */
+  private admitOne(cp: number): boolean {
     this.bytes += String(cp).length + 1;
     if (this.bytes > this.budget
       || this.committed.size + this.points.size >= HARD_MAX_FONT_DEMAND_SCALARS) return false;
@@ -245,7 +315,19 @@ export class FontDemandScalarCollector {
     return false;
   }
 
+  /** Demand the Arabic presentation forms a fallback shaper may substitute
+   * for the demanded Arabic letters (see the module notes). */
+  private closeArabicForms(): boolean {
+    if (!this.arabic) return true;
+    const has = (cp: number) => this.points.has(cp) || this.committed.has(cp);
+    for (const [form, parts] of arabicPresentationForms()) {
+      if (!has(form) && parts.every(has) && !this.admitScalar(form)) return false;
+    }
+    return true;
+  }
+
   result(): FontDemandScalars {
+    if (!this.declined && !this.closeArabicForms()) this.decline();
     if (!this.declined && !this.closeLeadingJoiners()) this.decline();
     return this.declined ? 'all' : [...this.points];
   }

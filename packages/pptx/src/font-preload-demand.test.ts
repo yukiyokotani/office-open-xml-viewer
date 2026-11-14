@@ -3,8 +3,6 @@ import type { TextRunData } from '@silurus/ooxml-core';
 import { collectFontDemandScalars } from '@silurus/ooxml-core/internal/font-scalar-demand';
 import { collectSlideFontDemand } from './font-preload-demand.js';
 import { formatAutoNum } from './autonum-label.js';
-import { verticalBracketFormSubstitute, verticalFormSubstitute } from '@silurus/ooxml-core';
-import { VERTICAL_PRESENTATION_FORMS } from './font-preload-demand.js';
 import { PresentationPreflightBuilder, normalizePresentationPreflight } from './presentation-preflight.js';
 import type { Slide } from './types';
 import type { PresentationBootstrap } from './worker-protocol.js';
@@ -136,13 +134,6 @@ describe('complete conservative PPTX paint demand', () => {
     for (const vert of ['vert', 'vert270', 'mongolianVert']) {
       expect(vertical(vert, 'Ab、「')).toEqual(collectSlideFontDemand(slide('Ab、「'), new Set(), 10000));
     }
-    // Every form core substitutes is inside the static set.
-    const forms = new Set([...VERTICAL_PRESENTATION_FORMS].map((ch) => ch.codePointAt(0)!));
-    for (let cp = 0; cp <= 0xffff; cp++) {
-      for (const form of [verticalFormSubstitute(cp), verticalBracketFormSubstitute(cp)]) {
-        if (form !== null) expect(forms.has(form), cp.toString(16)).toBe(true);
-      }
-    }
     // 、 → U+FE11, 「 → U+FE41, （ → U+FE35 (core vertical-orientation).
     for (const vert of ['eaVert', 'wordArtVert', 'wordArtVertRtl']) {
       expect(vertical(vert, 'あ、「（'), vert).toEqual(expect.arrayContaining([0x3042, 0x3001, 0xfe11, 0x300c, 0xfe41, 0xff08, 0xfe35]));
@@ -190,12 +181,15 @@ describe('complete conservative PPTX paint demand', () => {
     expect(collectSlideFontDemand(tight, new Set(), 20)).toBe('all');
   });
 
-  it('keeps bidi mirroring unmodelled and preserves the no-source preflight', () => {
+  it('demands mirrored partners of right-to-left text and preserves the no-source preflight', () => {
     const rtl = slide('(');
     (rtl.elements[0] as { textBody: { paragraphs: Array<{ rtl?: boolean }> } }).textBody.paragraphs[0].rtl = true;
-    expect(collectSlideFontDemand(rtl, new Set(), 10000)).toBe('all');
-    expect(collectSlideFontDemand(slide('א('), new Set(), 10000)).toBe('all');
-    expect(collectSlideFontDemand(slide('\u202e('), new Set(), 10000)).toBe('all');
+    expect(collectSlideFontDemand(rtl, new Set(), 10000)).toEqual(expect.arrayContaining([0x28, 0x29]));
+    expect(collectSlideFontDemand(slide('א«'), new Set(), 10000)).toEqual(expect.arrayContaining([0x5d0, 0xab, 0xbb]));
+    expect(collectSlideFontDemand(slide('\u202e['), new Set(), 10000)).toEqual(expect.arrayContaining([0x202e, 0x5b, 0x5d]));
+    // A symbol conversion's target mirrors too (Symbol U+F0A3 → ≤, mirrored ≥).
+    const symbol = slide('\uf0a3', { fontFamily: 'Symbol' });
+    expect(collectSlideFontDemand(symbol, new Set(), 10000)).toEqual(expect.arrayContaining([0x2264, 0x2265]));
     const ordinary = new PresentationPreflightBuilder(bootstrap);
     ordinary.addSlide(slide('A'));
     ordinary.addSlide({ ...slide('B'), index: 1 });

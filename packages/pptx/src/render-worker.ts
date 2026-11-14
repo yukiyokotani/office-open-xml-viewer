@@ -254,7 +254,7 @@ async function openPresentation(request: Extract<RenderWorkerRequest, { kind: 'p
   // Font-source subset loading is library policy keyed to the slide model
   // alone, as in main mode. Registering an optional renderer does not widen it:
   // math runs and region maps yield 'all', chart labels are collected from the
-  // chart model (chart-font-demand.ts), and TIFF decoding draws no text.
+  // chart model (core chart-paint-texts.ts), and TIFF decoding draws no text.
   preflightBuilder = new PresentationPreflightBuilder(bootstrap, { cjkFallback, collectFontDemand: await collectorLoad, officeFaceWeight });
   slides = new PptxSlideRepository({
     slideCount: bootstrap.slideCount,
