@@ -16,7 +16,6 @@ const DOCX_SOURCE = 'packages/docx/src';
 const PAINT_SOURCE = `${DOCX_SOURCE}/paint`;
 const LAYOUT_SOURCE = `${DOCX_SOURCE}/layout`;
 const PARSER_MODEL = `${DOCX_SOURCE}/parser-model.ts`;
-const BODY_LAYOUT_ADAPTER = `${DOCX_SOURCE}/body-layout-input.ts`;
 const PARAGRAPH_ANCHOR_FRAME_ADAPTER = `${DOCX_SOURCE}/paragraph-anchor-frame-adapter.ts`;
 const WORKER_LAYOUT_RETENTION = `${DOCX_SOURCE}/render-worker-layout.ts`;
 const TEXT_RUN_PROJECTION_ADAPTER = `${DOCX_SOURCE}/text-run-projection.ts`;
@@ -65,7 +64,6 @@ const FINAL_RENDERER_DECLARATIONS = new Set([
   'normalizeRenderOptions',
 ]);
 
-const BODY_LAYOUT_ADAPTER_DECLARATIONS = new Set(['createBodyLayoutInput']);
 const WORKER_LAYOUT_RETENTION_DECLARATIONS = new Set([
   'RetainedRenderWorkerDocumentLayout',
   'retainRenderWorkerDocumentLayout',
@@ -86,15 +84,6 @@ const LAYOUT_AFFINE_EXPORTS = new Set([
   'scaleAffine',
   'translationAffine',
 ]);
-const BODY_LAYOUT_ADAPTER_IMPORT_BINDINGS = new Map([
-  [PARSER_MODEL, new Map([['bodyLayoutAcquisitionInput', 'value']])],
-  [`${DOCX_SOURCE}/types.ts`, new Map([['DocxDocumentModel', 'type']])],
-  [`${LAYOUT_SOURCE}/body-layout-input.ts`, new Map([
-    ['projectBodyLayoutInput', 'value'],
-    ['BodyLayoutInput', 'type'],
-  ])],
-]);
-
 const SHARED_PAINT_IMPORTS = new Map([
   ['@silurus/ooxml-core', new Map([
     ['acquireBitmapCacheLease', 'value'],
@@ -298,6 +287,9 @@ const DELETED_LEGACY_STAMP_PROPERTIES = new Set([
   'sectionTextDirection',
 ]);
 
+// Deny-list by basename. layout-fragments.ts, table-fragments.ts and
+// table-geometry.ts no longer exist; they stay listed on purpose so a
+// reintroduced module of that name cannot become a renderer import again.
 const LEGACY_RENDERER_IMPORTS = new Set([
   'layout-context.ts',
   'layout-fragments.ts',
@@ -393,26 +385,14 @@ const ACQUISITION_CONTEXT_CONSUMERS = [
   `${DOCX_SOURCE}/float-table-geometry.ts`,
   `${DOCX_SOURCE}/frame-geometry.ts`,
   `${DOCX_SOURCE}/line-layout.ts`,
-  `${DOCX_SOURCE}/line-breaker/advance.ts`,
-  `${DOCX_SOURCE}/line-breaker/break-opportunities.ts`,
-  `${DOCX_SOURCE}/line-breaker/break-queue.ts`,
-  `${DOCX_SOURCE}/line-breaker/fit-search.ts`,
-  `${DOCX_SOURCE}/line-breaker/font-metrics.ts`,
-  `${DOCX_SOURCE}/line-breaker/font-routes.ts`,
-  `${DOCX_SOURCE}/line-breaker/justify-fit.ts`,
-  `${DOCX_SOURCE}/line-breaker/kinsoku.ts`,
-  `${DOCX_SOURCE}/line-breaker/line-finalize.ts`,
-  `${DOCX_SOURCE}/line-breaker/line-metrics.ts`,
-  `${DOCX_SOURCE}/line-breaker/model.ts`,
-  `${DOCX_SOURCE}/line-breaker/pass-driver.ts`,
-  `${DOCX_SOURCE}/line-breaker/pass-operations.ts`,
-  `${DOCX_SOURCE}/line-breaker/ruby-metrics.ts`,
-  `${DOCX_SOURCE}/line-breaker/segment-builder.ts`,
-  `${DOCX_SOURCE}/line-breaker/tabs.ts`,
-  `${DOCX_SOURCE}/line-breaker/text-runs.ts`,
-  `${DOCX_SOURCE}/line-breaker/vertical-text.ts`,
   BODY_TABLE_MEASUREMENT,
   `${DOCX_SOURCE}/paragraph-measure.ts`,
+];
+// Every production module under these directories is an acquisition consumer.
+// Scanning the directory instead of naming files keeps new line-breaker modules
+// covered and cannot leave stale entries behind when a module is deleted.
+const ACQUISITION_CONTEXT_CONSUMER_DIRECTORIES = [
+  `${DOCX_SOURCE}/line-breaker`,
 ];
 
 const ACQUISITION_PAINT_PROPERTIES = new Set([
@@ -567,6 +547,11 @@ function assertAcquisitionContextBoundary(root) {
   const inspected = [
     ...surfaces.keys(),
     ...ACQUISITION_CONTEXT_CONSUMERS,
+    ...ACQUISITION_CONTEXT_CONSUMER_DIRECTORIES.flatMap((directory) =>
+      listFiles(resolve(root, directory))
+        .map((path) => posixPath(relative(root, path)))
+        .filter(isProductionTypeScript)
+        .sort()),
   ];
   for (const file of inspected) {
     const path = resolve(root, file);
@@ -597,6 +582,8 @@ function assertProductionBodyAcquisitionAuthority(root) {
       'layoutLines',
       'lineBoxHeight',
     ])],
+    // table-geometry.ts was deleted (the retained table pipeline owns row
+    // heights); the entry is kept as a tombstone against reintroduction.
     [`${DOCX_SOURCE}/table-geometry.ts`, new Set([
       'applyTableRowBoundaryFootprints',
       'resolveTableRowContentHeights',
@@ -2042,90 +2029,6 @@ function assertLayoutParserModelBoundaries(root) {
   }
 }
 
-function assertBodyLayoutAdapterBoundary(root) {
-  const adapter = resolve(root, BODY_LAYOUT_ADAPTER);
-  if (!existsSync(adapter)) return;
-  const source = sourceFile(adapter);
-  const seenImports = new Map();
-  const declarations = [];
-  for (const statement of source.statements) {
-    if (ts.isExportDeclaration(statement) || ts.isExportAssignment(statement)) {
-      fail('BODY_LAYOUT_ADAPTER_EXPORT', statement.getText(source));
-    }
-    if (statement.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.DefaultKeyword)) {
-      fail('BODY_LAYOUT_ADAPTER_EXPORT', statement.getText(source));
-    }
-    if (ts.isImportDeclaration(statement)) {
-      if (!ts.isStringLiteralLike(statement.moduleSpecifier)) {
-        fail('BODY_LAYOUT_ADAPTER_IMPORT', '<dynamic>');
-      }
-      const dependency = resolveLocalImport(adapter, statement.moduleSpecifier.text);
-      const dependencyRelative = dependency ? posixPath(relative(root, dependency)) : null;
-      const reviewedBindings = dependencyRelative
-        ? BODY_LAYOUT_ADAPTER_IMPORT_BINDINGS.get(dependencyRelative)
-        : undefined;
-      const clause = statement.importClause;
-      if (!reviewedBindings || !clause || clause.name || !clause.namedBindings
-        || !ts.isNamedImports(clause.namedBindings)) {
-        fail('BODY_LAYOUT_ADAPTER_IMPORT', statement.getText(source));
-      }
-      if (seenImports.has(dependencyRelative)) {
-        fail('BODY_LAYOUT_ADAPTER_IMPORT', `duplicate:${dependencyRelative}`);
-      }
-      const actualBindings = new Map();
-      for (const element of clause.namedBindings.elements) {
-        const importedName = element.propertyName?.text ?? element.name.text;
-        const kind = clause.isTypeOnly || element.isTypeOnly ? 'type' : 'value';
-        if (element.name.text !== importedName || reviewedBindings.get(importedName) !== kind) {
-          fail('BODY_LAYOUT_ADAPTER_BINDING', `${dependencyRelative}#${importedName}:${kind}`);
-        }
-        actualBindings.set(importedName, kind);
-      }
-      if (actualBindings.size !== reviewedBindings.size
-        || [...reviewedBindings].some(([name, kind]) => actualBindings.get(name) !== kind)) {
-        fail('BODY_LAYOUT_ADAPTER_IMPORT', `incomplete:${dependencyRelative}`);
-      }
-      seenImports.set(dependencyRelative, actualBindings);
-    }
-    for (const name of declarationNames(statement)) {
-      declarations.push(name);
-      if (!BODY_LAYOUT_ADAPTER_DECLARATIONS.has(name)) {
-        fail('BODY_LAYOUT_ADAPTER_DECLARATION', name);
-      }
-    }
-  }
-  if (declarations.length !== 1 || declarations[0] !== 'createBodyLayoutInput') {
-    fail('BODY_LAYOUT_ADAPTER_DECLARATION', declarations.join(','));
-  }
-  if (seenImports.size !== BODY_LAYOUT_ADAPTER_IMPORT_BINDINGS.size
-    || [...BODY_LAYOUT_ADAPTER_IMPORT_BINDINGS.keys()].some((path) => !seenImports.has(path))) {
-    fail('BODY_LAYOUT_ADAPTER_IMPORT', 'exact-import-set-required');
-  }
-  const declaration = source.statements.find(ts.isFunctionDeclaration);
-  const returned = declaration?.body?.statements.length === 1
-    && ts.isReturnStatement(declaration.body.statements[0])
-    ? declaration.body.statements[0].expression
-    : null;
-  const isAcquisitionCall = returned && ts.isCallExpression(returned)
-    && ts.isIdentifier(returned.expression)
-    && returned.expression.text === 'projectBodyLayoutInput'
-    && returned.arguments.length === 1
-    && ts.isCallExpression(returned.arguments[0])
-    && ts.isIdentifier(returned.arguments[0].expression)
-    && returned.arguments[0].expression.text === 'bodyLayoutAcquisitionInput'
-    && returned.arguments[0].arguments.length === 1
-    && ts.isIdentifier(returned.arguments[0].arguments[0])
-    && returned.arguments[0].arguments[0].text === 'document';
-  if (!declaration
-    || declaration.name?.text !== 'createBodyLayoutInput'
-    || declaration.parameters.length !== 1
-    || !ts.isIdentifier(declaration.parameters[0].name)
-    || declaration.parameters[0].name.text !== 'document'
-    || !isAcquisitionCall) {
-    fail('BODY_LAYOUT_ADAPTER_BODY', declaration?.getText(source) ?? '<missing>');
-  }
-}
-
 function assertParagraphAnchorFrameAdapterBoundary(root) {
   const adapter = resolve(root, PARAGRAPH_ANCHOR_FRAME_ADAPTER);
   if (!existsSync(adapter)) return;
@@ -3117,7 +3020,6 @@ export function checkDocxLayoutBoundaries(options) {
   assertOccurrenceProjectionRuntimeDependencies(root);
   assertBodyPaintConsumesRetainedLayout(root);
   assertLayoutParserModelBoundaries(root);
-  assertBodyLayoutAdapterBoundary(root);
   assertParagraphAnchorFrameAdapterBoundary(root);
   assertBodyKernelServiceOwner(root);
   assertCanonicalCutoverBoundaries(root);
