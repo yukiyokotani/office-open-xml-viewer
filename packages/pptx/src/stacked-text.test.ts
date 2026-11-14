@@ -415,7 +415,9 @@ it('keeps strikes in a rotated glyph frame and a vertical presentation glyph fra
 it('honors an explicit unstruck paragraph insertion style', () => {
   const b = body('A', 'wordArtVert');
   const run = b.paragraphs[0].runs[0] as TextRunData;
-  b.paragraphs[0].endRunProperties = { ...run, text: '' };
+  // Parser JSON carries run properties only: no `type` discriminant here.
+  const { type: _type, ...properties } = run;
+  b.paragraphs[0].endRunProperties = { ...properties, text: '' };
   run.strikethrough = true;
   const { ctx, strokes } = mockCtx();
   renderTextBody(ctx, b, 0, 0, 200, 200, SCALE);

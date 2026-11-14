@@ -116,6 +116,26 @@ the host fonts (see **Served font line heights** below). See the
   any other code becomes its Unicode character. A converted pictograph takes
   the text colour, and is never drawn as a colour emoji: where only a colour
   emoji face has it, the authored code is kept.
+- **Changed: model types follow the parser JSON.** The public model types now
+  describe what the parsers actually emit. This is checked in CI against the
+  Rust model (`pnpm check:model-wire-drift`).
+  - Fields the parser omits are optional: `ParagraphBorders` edges and
+    `ShapeRun.fill` (DOCX), and `PictureElement.stroke` (PPTX).
+  - Fields that can be `null` say so: DOCX `ImageRun.colorReplaceFrom` and
+    the shared `TextRunData.fieldType`.
+  - Names match the JSON: `ChartThreeD.view3DPresent` is now `view3dPresent`,
+    and PPTX `TableCell.diagonalTL`/`diagonalTR` are now
+    `diagonalTl`/`diagonalTr`.
+  - Chart data-table, surface-band and inverted (negative) series fills may
+    be image fills.
+  - `Paragraph.endRunProperties` no longer claims a `type` discriminant.
+  - Fields the parser already emitted are now declared: DOCX
+    `DocParagraph.outlineLevel` and PPTX `ShapeElement.placeholderType` /
+    `placeholderIdx`.
+- **Fixed:** PPTX table cells now draw their diagonal borders
+  (`a:lnTlToBr`/`a:lnBlToTr`). The renderer read the misnamed fields and never
+  drew them. The end-of-paragraph run properties now also apply to stacked
+  vertical text.
 
 ## 0.89.11 — Unreleased
 

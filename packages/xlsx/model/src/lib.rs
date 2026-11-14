@@ -5,6 +5,7 @@ mod retained;
 pub mod style_presets;
 
 #[derive(Debug, Serialize, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct Workbook {
     pub sheets: Vec<SheetMeta>,
@@ -32,6 +33,7 @@ pub struct Workbook {
 /// `Hidden` = hidden but user-unhideable via the UI; `VeryHidden` = revealable
 /// only programmatically. Default is `Visible`.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub enum SheetVisibility {
     Visible,
@@ -48,6 +50,7 @@ impl SheetVisibility {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct SheetMeta {
     pub name: String,
@@ -66,6 +69,7 @@ pub struct SheetMeta {
 }
 
 #[derive(Debug, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct MergeCell {
     pub top: u32,
@@ -78,6 +82,7 @@ pub struct MergeCell {
 /// permits one declaration to cover all 16,384 columns, so expanding the range
 /// into `col_widths` would unnecessarily inflate the parser wire payload.
 #[derive(Debug, Clone, Serialize, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ColumnWidthRange {
     pub min: u32,
@@ -88,6 +93,7 @@ pub struct ColumnWidthRange {
 /// Compact `<col min max style>` default formatting. SpreadsheetML applies
 /// this style to cells in the column that do not carry their own `c/@s`.
 #[derive(Debug, Clone, Serialize, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ColumnStyleRange {
     pub min: u32,
@@ -96,6 +102,7 @@ pub struct ColumnStyleRange {
 }
 
 #[derive(Debug, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct Worksheet {
     pub name: String,
@@ -359,6 +366,7 @@ impl Worksheet {
 }
 
 #[derive(Debug, Serialize, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct PivotTableMetadata {
     pub name: String,
@@ -399,6 +407,7 @@ pub struct PivotTableMetadata {
 
 /// A PivotTable style as applied to one PivotTable (§18.10.1.97, §18.8.40).
 #[derive(Debug, Serialize, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct PivotTableStyle {
     pub name: String,
@@ -413,6 +422,7 @@ pub struct PivotTableStyle {
 
 /// One `tableStyleElement` of a PivotTable style.
 #[derive(Debug, Serialize, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct PivotTableStyleElement {
     /// ECMA-376 §18.18.77 ST_TableStyleType, e.g. `firstRowSubheading`.
@@ -424,6 +434,7 @@ pub struct PivotTableStyleElement {
 
 /// One `i` of `rowItems`/`colItems` (§18.10.1.44).
 #[derive(Debug, Serialize, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct PivotAxisItem {
     /// ECMA-376 §18.18.43 ST_ItemType (`data`, `default`, `sum`, …, `grand`,
@@ -434,6 +445,7 @@ pub struct PivotAxisItem {
 }
 
 #[derive(Debug, Serialize, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct PivotLocation {
     #[serde(flatten)]
@@ -444,6 +456,7 @@ pub struct PivotLocation {
 }
 
 #[derive(Debug, Serialize, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct PivotPageField {
     /// ECMA-376 §18.10.1.66 `CT_PageField@fld` is signed.
@@ -455,6 +468,7 @@ pub struct PivotPageField {
 }
 
 #[derive(Debug, Serialize, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct PivotDataField {
     /// ECMA-376 §18.10.1.16 `CT_DataField@fld` is unsigned.
@@ -468,6 +482,7 @@ pub struct PivotDataField {
 }
 
 #[derive(Debug, Serialize, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum PivotCacheSource {
     Worksheet {
@@ -486,6 +501,7 @@ pub enum PivotCacheSource {
 }
 
 #[derive(Debug, Serialize, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "state", rename_all = "camelCase")]
 pub enum PivotMetadataStatus {
     Complete,
@@ -493,6 +509,7 @@ pub enum PivotMetadataStatus {
 }
 
 #[derive(Debug, Serialize, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum PivotPartialReason {
     MissingCacheRelationship,
@@ -516,6 +533,7 @@ pub enum PivotPartialReason {
 }
 
 #[derive(Debug, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct PivotDiagnostic {
     pub part: String,
@@ -523,6 +541,7 @@ pub struct PivotDiagnostic {
 }
 
 #[derive(Debug, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum PivotDiagnosticReason {
     UnreadableWorksheetRelationships,
@@ -538,6 +557,7 @@ pub enum PivotDiagnosticReason {
 /// Single sparkline group (`<x14:sparklineGroup>`). Holds the shared formatting
 /// for every individual sparkline cell that belongs to the group.
 #[derive(Debug, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct SparklineGroup {
     /// `line` (default) | `column` | `stem` (win/loss).
@@ -589,6 +609,7 @@ pub struct SparklineGroup {
 }
 
 #[derive(Debug, Serialize, Clone, Copy)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub enum SparklineType {
     Line,
@@ -597,6 +618,7 @@ pub enum SparklineType {
 }
 
 #[derive(Debug, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct Sparkline {
     /// 1-based row of the cell that displays this sparkline (`<xm:sqref>`).
@@ -611,6 +633,7 @@ pub struct Sparkline {
 /// Excel Table metadata (ECMA-376 §18.5 `<table>`). The renderer overlays a
 /// built-in style on top of the cell styles inside `range`.
 #[derive(Debug, Serialize, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct TableInfo {
     /// Inclusive table area including the header row.
@@ -686,6 +709,7 @@ pub struct TableInfo {
 /// Per-column DXF references inside a `<table>` element
 /// (ECMA-376 §18.5.1.3 `tableColumn`).
 #[derive(Debug, Serialize, Default, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct TableColumnInfo {
     /// `<tableColumn dataDxfId>` — applied to data-region cells in this column.
@@ -702,6 +726,7 @@ pub struct TableColumnInfo {
 /// One cell comment. Sourced from the classic notes file `xl/commentsN.xml`
 /// One cell-attached classic note or threaded-comment root.
 #[derive(Debug, Serialize, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct XlsxComment {
     /// `note` for ECMA-376 §18.7; `thread` for MS-XLSX §2.3.7.
@@ -734,6 +759,7 @@ pub struct XlsxComment {
 }
 
 #[derive(Debug, Serialize, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub enum XlsxCommentKind {
     Note,
@@ -741,6 +767,7 @@ pub enum XlsxCommentKind {
 }
 
 #[derive(Debug, Serialize, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct XlsxCommentReply {
     pub id: String,
@@ -760,6 +787,7 @@ pub struct XlsxCommentReply {
 /// "custom"). `operator` qualifies it ("between", "notBetween", "equal",
 /// "notEqual", "lessThan", …). `formula1` / `formula2` are the rule operands.
 #[derive(Debug, Serialize, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct DataValidation {
     /// Affected cell ranges, written verbatim from `@sqref` (space-separated).
@@ -791,6 +819,7 @@ pub struct DataValidation {
 /// `ProjectSchedule!$E1`). Relative references inside are shifted relative to
 /// A1 when substituted into a formula.
 #[derive(Debug, Serialize, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct DefinedName {
     pub name: String,
@@ -800,6 +829,7 @@ pub struct DefinedName {
 /// A chart anchored to a rectangular range of cells (ECMA-376 §20.5 twoCellAnchor).
 /// Offsets are EMU (914400 EMU = 1 inch, 9525 EMU = 1 px @ 96 DPI).
 #[derive(Debug, Serialize, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ChartAnchor {
     /// Document-order byte position of the `<xdr:graphicFrame>` in its drawing
@@ -825,6 +855,7 @@ pub struct ChartAnchor {
 /// model means the producer did not record it (older models, VML/OLE previews,
 /// producers without DrawingML anchors), and consumers keep their untagged behaviour.
 #[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum DrawingAnchorTag {
     /// `<xdr:oneCellAnchor>` (§20.5.2.24): `from` + anchor-level `<xdr:ext>`.
     #[serde(rename = "oneCellAnchor")]
@@ -839,6 +870,7 @@ pub enum DrawingAnchorTag {
 /// level are flattened into `shapes` with normalized coordinates so the
 /// renderer only needs to scale to the anchor rect.
 #[derive(Debug, Serialize, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ShapeAnchor {
     pub from_col: u32,
@@ -877,6 +909,7 @@ pub struct ShapeAnchor {
 /// to [0,1] relative to the top-level grpSp extent (which itself maps to the
 /// anchor rect).
 #[derive(Debug, Serialize, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ShapeInfo {
     /// Document-order byte position of this leaf in the drawing part.
@@ -930,6 +963,7 @@ pub struct ShapeInfo {
 }
 
 #[derive(Debug, Serialize, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "fillType", rename_all = "camelCase")]
 pub enum ShapeStrokeFill {
     #[serde(rename_all = "camelCase")]
@@ -958,6 +992,7 @@ pub enum ShapeStrokeFill {
 }
 
 #[derive(Debug, Serialize, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "fillType", rename_all = "camelCase")]
 pub enum ShapeFill {
     Solid {
@@ -1035,6 +1070,7 @@ pub enum ShapeFill {
 /// How a picture fill covers its shape (ODF 1.3 Part 3 §20.341
 /// `style:repeat`).
 #[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub enum ShapeImageLayout {
     Stretch,
@@ -1045,6 +1081,7 @@ pub enum ShapeImageLayout {
 /// One edge of a picture fill's size: points, or a fraction of the shape's
 /// edge.
 #[derive(Debug, Serialize, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub enum ShapeImageSize {
     Pt(f64),
@@ -1055,6 +1092,7 @@ pub enum ShapeImageSize {
 /// the row, or every second column along the column, by a fraction of the
 /// tile.
 #[derive(Debug, Serialize, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub enum ShapeImageShift {
     Rows(f64),
@@ -1062,6 +1100,7 @@ pub enum ShapeImageShift {
 }
 
 #[derive(Debug, Serialize, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ShapeLineDashSegment {
     pub dash: f64,
@@ -1069,6 +1108,7 @@ pub struct ShapeLineDashSegment {
 }
 
 #[derive(Debug, Serialize, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ShapeLineEnd {
     pub r#type: String,
@@ -1084,6 +1124,7 @@ pub use ooxml_common::text::SpaceLine;
 /// Text body inside a shape (`<xdr:txBody>`, ECMA-376 §20.1.2.2). Holds
 /// the paragraphs plus body-level formatting (`<a:bodyPr>`).
 #[derive(Debug, Serialize, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ShapeText {
     /// DrawingML direction, ECMA-376 §20.1.10.83. Preserve it for host layout.
@@ -1126,6 +1167,7 @@ pub struct ShapeText {
 }
 
 #[derive(Debug, Serialize, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ShapeParagraph {
     /// `<a:pPr@algn>` — `l` (default), `ctr`, `r`, `just`, `dist`.
@@ -1172,6 +1214,7 @@ pub struct ShapeParagraph {
 }
 
 #[derive(Debug, Serialize, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ShapeTabStop {
     pub pos: i64,
@@ -1183,6 +1226,7 @@ pub struct ShapeTabStop {
 /// equation. Excel stores "Insert > Equation" as OMML inside the shared
 /// DrawingML `<xdr:txBody>` grammar (ECMA-376 §22.1), exactly like PowerPoint.
 #[derive(Debug, Serialize, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum ShapeTextRun {
     /// The enum-level `rename_all = "camelCase"` (tag = "type") renames only the
@@ -1248,6 +1292,7 @@ pub enum ShapeTextRun {
 }
 
 #[derive(Debug, Serialize, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum ShapeGeom {
     /// Preset geometry (rect, ellipse, roundRect, triangle, etc.).
@@ -1301,6 +1346,7 @@ pub enum ShapeGeom {
 }
 
 #[derive(Debug, Serialize, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct PathInfo {
     /// Path's own coordinate system width.
@@ -1324,6 +1370,7 @@ fn is_true(value: &bool) -> bool {
 }
 
 #[derive(Debug, Serialize, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "op", rename_all = "camelCase")]
 pub enum PathCmd {
     MoveTo {
@@ -1375,6 +1422,7 @@ pub enum PathCmd {
 /// `xl/slicerCaches/*.xml` and the underlying item list in the linked
 /// pivotCache's `sharedItems`.
 #[derive(Debug, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct SlicerAnchor {
     pub from_col: u32,
@@ -1401,6 +1449,7 @@ pub struct SlicerAnchor {
 }
 
 #[derive(Debug, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct SlicerItem {
     pub name: String,
@@ -1408,6 +1457,7 @@ pub struct SlicerItem {
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct SlicerStyle {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1421,6 +1471,7 @@ pub struct SlicerStyle {
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct SlicerElementStyle {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1441,6 +1492,7 @@ pub struct SlicerElementStyle {
 /// (ECMA-376 §20.5, `<xdr:twoCellAnchor>`). Offsets are EMU (English
 /// Metric Unit): 914400 EMU = 1 inch, and 9525 EMU = 1 pixel at 96 DPI.
 #[derive(Debug, Serialize, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ImageAnchor {
     /// Document-order byte position of the `<xdr:pic>` in its drawing part.
@@ -1537,6 +1589,7 @@ pub use ooxml_common::blip::SrcRect;
 pub use ooxml_common::blip::{BlipEffect, Duotone};
 
 #[derive(Debug, Serialize, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct CellRange {
     pub top: u32,
@@ -1546,6 +1599,7 @@ pub struct CellRange {
 }
 
 #[derive(Debug, Serialize, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ConditionalFormat {
     pub sqref: Vec<CellRange>,
@@ -1580,6 +1634,7 @@ pub struct ConditionalFormat {
 /// formula `0` drew nothing and did not stop a lower rule; formula `1` drew
 /// the scale and stopped it).
 #[derive(Debug, Serialize, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", tag = "type")]
 pub enum CfRule {
     #[serde(rename_all = "camelCase")]
@@ -1699,6 +1754,7 @@ pub enum CfRule {
 }
 
 #[derive(Debug, Serialize, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct CfIcon {
     pub icon_set: String,
@@ -1706,6 +1762,7 @@ pub struct CfIcon {
 }
 
 #[derive(Debug, Serialize, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct CfStop {
     pub kind: String,
@@ -1714,6 +1771,7 @@ pub struct CfStop {
 }
 
 #[derive(Debug, Serialize, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct CfValue {
     pub kind: String,
@@ -1721,6 +1779,7 @@ pub struct CfValue {
 }
 
 #[derive(Debug, Serialize, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct Hyperlink {
     pub col: u32,
@@ -1744,6 +1803,7 @@ pub struct Hyperlink {
 /// (summary to the right of detail by default). These decide where the outline
 /// gutter draws each group's collapse toggle.
 #[derive(Debug, Serialize, Clone, Copy)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct OutlinePr {
     pub summary_below: bool,
@@ -1761,6 +1821,7 @@ impl Default for OutlinePr {
 }
 
 #[derive(Debug, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct Row {
     pub index: u32,
@@ -1797,6 +1858,7 @@ fn is_zero_u8(v: &u8) -> bool {
 }
 
 #[derive(Debug, Serialize, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct Cell {
     pub col: u32,
@@ -1821,6 +1883,7 @@ pub struct Cell {
 }
 
 #[derive(Debug, Serialize, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", tag = "type")]
 pub enum CellValue {
     #[default]
@@ -1858,6 +1921,7 @@ pub enum CellValue {
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct Run {
     pub text: String,
@@ -1866,6 +1930,7 @@ pub struct Run {
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct RunFont {
     pub bold: bool,
@@ -1897,6 +1962,7 @@ pub struct RunFont {
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct SharedString {
     pub text: String,
@@ -1924,6 +1990,7 @@ pub struct SharedString {
 /// characters `[sb, eb)`. The spec requires `sb < eb` and both within the base
 /// length; the renderer positions the hint over that base span.
 #[derive(Debug, Clone, Serialize, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct PhoneticRun {
     /// Zero-based start character offset into the base text (inclusive).
@@ -1940,6 +2007,7 @@ pub struct PhoneticRun {
 /// `alignment` default to `fullwidthKatakana` and `left` respectively when the
 /// attribute is absent (CT_PhoneticPr schema defaults).
 #[derive(Debug, Clone, Serialize, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct PhoneticProperties {
     /// Zero-based index into the style sheet's font records (§18.18.32 ST_FontId).
@@ -1955,6 +2023,7 @@ pub struct PhoneticProperties {
 }
 
 #[derive(Debug, Serialize, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct Styles {
     pub fonts: Vec<Font>,
@@ -1966,6 +2035,7 @@ pub struct Styles {
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct Dxf {
     pub font: Option<Font>,
@@ -1990,6 +2060,7 @@ pub struct Dxf {
 /// A differential font's toggle properties: `None` when the element is
 /// absent, `Some(false)` for an explicit off (`val="0"`, or `<u val="none"/>`).
 #[derive(Debug, Clone, Copy, Serialize, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct DxfFontToggles {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2008,6 +2079,7 @@ pub struct DxfFontToggles {
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct Font {
     pub bold: bool,
@@ -2037,6 +2109,7 @@ pub struct Font {
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct Fill {
     pub pattern_type: String,
@@ -2050,6 +2123,7 @@ pub struct Fill {
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct GradientFillSpec {
     /// "linear" (default) or "path". Linear uses `degree`; path uses top/bottom/left/right.
@@ -2065,6 +2139,7 @@ pub struct GradientFillSpec {
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct GradientStopSpec {
     pub position: f64,
@@ -2072,6 +2147,7 @@ pub struct GradientStopSpec {
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct Border {
     pub left: Option<BorderEdge>,
@@ -2096,6 +2172,7 @@ pub struct Border {
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct BorderEdge {
     pub style: String,
@@ -2103,6 +2180,7 @@ pub struct BorderEdge {
 }
 
 #[derive(Debug, Serialize, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct CellXf {
     pub font_id: u32,
@@ -2135,6 +2213,7 @@ pub struct CellXf {
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct NumFmt {
     pub num_fmt_id: u32,
@@ -2150,6 +2229,7 @@ pub struct NumFmt {
 }
 
 #[derive(Debug, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ParsedWorkbook {
     pub workbook: Workbook,

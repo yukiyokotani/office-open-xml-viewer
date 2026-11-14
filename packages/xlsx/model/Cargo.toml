@@ -4,9 +4,20 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 
+[features]
+# Dev-only: derive JSON Schema for the serialized model (see the
+# `wire-schema` example and scripts/check-model-wire-drift.mjs). Never enabled
+# by a WASM build, so the shipped parsers are unchanged.
+schema = ["dep:schemars", "ooxml-common/schema"]
+
 [dependencies]
 serde = { workspace = true }
 ooxml-common = { workspace = true }
+schemars = { version = "1", optional = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
+
+[[example]]
+name = "wire-schema"
+required-features = ["schema"]

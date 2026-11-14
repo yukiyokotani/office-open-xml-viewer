@@ -49,7 +49,7 @@ function cell(overrides: Partial<TableCell> = {}): TableCell {
   return {
     textBody: null, fill: null,
     borderL: null, borderR: null, borderT: null, borderB: null,
-    diagonalTL: null, diagonalTR: null,
+    diagonalTl: null, diagonalTr: null,
     gridSpan: 1, rowSpan: 1, hMerge: false, vMerge: false,
     ...overrides,
   } as TableCell;

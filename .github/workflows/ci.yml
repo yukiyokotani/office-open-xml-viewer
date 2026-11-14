@@ -53,7 +53,10 @@ jobs:
 
       # Dev-only JSON Schema derive used by the model wire drift check.
       - name: Model schema feature clippy
-        run: cargo clippy -p docx-model --all-targets --features schema -- -D warnings
+        run: |
+          for crate in docx-model xlsx-model pptx-model; do
+            cargo clippy -p "$crate" --all-targets --features schema -- -D warnings
+          done
 
       # The cargo-fuzz harness is an intentionally independent workspace, so
       # the root workspace checks above do not format, lint, or compile it.

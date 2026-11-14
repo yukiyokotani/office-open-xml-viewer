@@ -469,3 +469,28 @@ test('TS tuples accepting lengths Rust never emits are reported', () => {
     'Doc.v: ts-wider-length (Rust length 2..2 vs TS array)',
   ]);
 });
+
+test('a format can compare several payload roots', () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'model-wire-drift-'));
+  try {
+    writeFileSync(path.join(dir, 'tsconfig.json'), JSON.stringify({ compilerOptions: { strict: true } }));
+    writeFileSync(path.join(dir, 'types.ts'), 'export interface Book { name: string }\nexport interface Sheet { rows: number[]; extra: string }\n');
+    writeFileSync(path.join(dir, 'schema.json'), JSON.stringify({
+      Book: { title: 'Book', type: 'object', properties: { name: { type: 'string' } }, required: ['name'] },
+      Sheet: { title: 'Sheet', type: 'object', properties: { rows: { type: 'array', items: { type: 'number' } } }, required: ['rows'] },
+    }));
+    const result = checkFormat('fixture', {
+      schemaFile: path.join(dir, 'schema.json'),
+      format: {
+        tsconfig: path.join(dir, 'tsconfig.json'),
+        tsFile: path.join(dir, 'types.ts'),
+        roots: [{ rust: 'Book', ts: 'Book' }, { rust: 'Sheet', ts: 'Sheet' }],
+      },
+      allowlist: {},
+      widening: {},
+    });
+    assert.deepEqual(result.findings.map((f) => [f.key, f.path]), [['Sheet.extra: ts-only', 'Sheet$.extra']]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

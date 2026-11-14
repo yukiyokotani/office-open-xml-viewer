@@ -775,7 +775,9 @@ name = "pptx-model"
 version = "0.1.0"
 dependencies = [
  "ooxml-common",
+ "schemars",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -1428,6 +1430,7 @@ name = "xlsx-model"
 version = "0.1.0"
 dependencies = [
  "ooxml-common",
+ "schemars",
  "serde",
  "serde_json",
 ]
