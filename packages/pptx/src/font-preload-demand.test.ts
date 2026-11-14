@@ -66,14 +66,9 @@ describe('complete conservative PPTX paint demand', () => {
       expect(collectSlideFontDemand({ ...slide('A'), ...patch } as Slide, new Set(), 10000), JSON.stringify(patch)).toBe('all');
     }
     const body = (value: Slide) => (value.elements[0] as unknown as { textBody: Record<string, unknown> & { paragraphs: Array<Record<string, unknown>> } }).textBody;
-    for (const vert of ['wordArtVert', 'wordArtVertRtl']) {
-      const stacked = slide('A');
-      body(stacked).vert = vert;
-      expect(collectSlideFontDemand(stacked, new Set(), 10000), vert).toBe('all');
-    }
-    const warped = slide('A');
-    body(warped).textWarp = { prst: 'textArchUp' };
-    expect(collectSlideFontDemand(warped, new Set(), 10000)).toBe('all');
+    const unknownVert = slide('A');
+    body(unknownVert).vert = 'diagonal';
+    expect(collectSlideFontDemand(unknownVert, new Set(), 10000)).toBe('all');
     const equation = slide('A');
     body(equation).paragraphs[0].runs = [{ type: 'math', nodes: [], display: false }];
     expect(collectSlideFontDemand(equation, new Set(), 10000)).toBe('all');
@@ -132,7 +127,7 @@ describe('complete conservative PPTX paint demand', () => {
     expect(has(numbered('arabicPeriod', 'Wingdings'), '\uf030')).toBe(true);
   });
 
-  it('demands rotated and vertical bodies, including eaVert vertical forms', () => {
+  it('demands rotated and vertical bodies, including eaVert and stacked vertical forms', () => {
     const vertical = (vert: string, text: string) => {
       const value = slide(text);
       (value.elements[0] as unknown as { textBody: { vert: string } }).textBody.vert = vert;
@@ -149,7 +144,15 @@ describe('complete conservative PPTX paint demand', () => {
       }
     }
     // 、 → U+FE11, 「 → U+FE41, （ → U+FE35 (core vertical-orientation).
-    expect(vertical('eaVert', 'あ、「（')).toEqual(expect.arrayContaining([0x3042, 0x3001, 0xfe11, 0x300c, 0xfe41, 0xff08, 0xfe35]));
+    for (const vert of ['eaVert', 'wordArtVert', 'wordArtVertRtl']) {
+      expect(vertical(vert, 'あ、「（'), vert).toEqual(expect.arrayContaining([0x3042, 0x3001, 0xfe11, 0x300c, 0xfe41, 0xff08, 0xfe35]));
+    }
+  });
+
+  it('demands a warped body like its flat text', () => {
+    const warped = slide('Arched title');
+    (warped.elements[0] as unknown as { textBody: Record<string, unknown> }).textBody.textWarp = { preset: 'textArchUp', adj: [] };
+    expect(collectSlideFontDemand(warped, new Set(), 10000)).toEqual(collectSlideFontDemand(slide('Arched title'), new Set(), 10000));
   });
 
   it('demands every field\'s painted text', () => {

@@ -13,7 +13,7 @@ import type { Presentation, Slide } from './types';
 // fall back to a host font. Exercised over the public demo deck and targeted
 // synthetic slides (charts and raster pictures are exercised by the demo
 // deck); every paint path the collector cannot prove declines to 'all'
-// (metafiles, region maps, WordArt, stacked vertical text, RTL, equations).
+// (metafiles, region maps, RTL, equations).
 
 const TARGETED: Record<string, Uint8Array> = {
   'caps and small caps': deck(textBox(para(run('straße αβγ', ' cap="all"') + run('mixed Case', ' cap="small"')))),
@@ -39,6 +39,9 @@ const TARGETED: Record<string, Uint8Array> = {
     + para(run('Sixth'), '<a:pPr marL="342900" indent="-342900"><a:buAutoNum type="alphaLcParenBoth" startAt="25"/></a:pPr>'))),
   'rotated vertical text': deck(textBox(para(run('Rotated text, ninety degrees')), '<a:bodyPr vert="vert270" wrap="square"/>')),
   'east asian vertical text': deck(textBox(para(run('縦書き、「括弧」（丸）。ABC 12', ' altLang="ja-JP"')), '<a:bodyPr vert="eaVert" wrap="square"/>')),
+  'stacked vertical text': deck(textBox(para(run('縦書き、「括弧」（丸）。AB 12', ' altLang="ja-JP"')), '<a:bodyPr vert="wordArtVert" wrap="square"/>')),
+  'stacked right-to-left columns': deck(textBox(para(run('右から、「左」へ。')) + para(run('二列目')), '<a:bodyPr vert="wordArtVertRtl" wrap="square"/>')),
+  'warped text': deck(textBox(para(run('Arched WordArt, ß &amp; 漢字')), '<a:bodyPr wrap="none"><a:prstTxWarp prst="textArchUp"><a:avLst/></a:prstTxWarp></a:bodyPr>')),
   'date field': deck(textBox(para('<a:fld id="{00000000-0000-0000-0000-000000000002}" type="datetime1">'
     + '<a:rPr lang="en-US" sz="2400"/><a:t>11/14/2026</a:t></a:fld>' + run(' today')))),
   'east asian and latin mix': deck(textBox(para(run('漢字かなカナ ABC 123', ' altLang="ja-JP"')))),
@@ -100,7 +103,35 @@ function parse(bytes: Uint8Array): Presentation {
   }
 }
 
+/** The slide without its image paint (pictures, media, picture fills and
+ * markers). Node has no image decoder, and an authored blip effect chain
+ * fails strictly on the rejected fetch; images paint no served-face text, so
+ * the texts painted are the same. */
+function withoutImages(slide: Slide): Slide {
+  const strip = (value: unknown): unknown => {
+    if (Array.isArray(value)) {
+      return value.filter((item) => !(item && typeof item === 'object'
+        && ((item as { type?: unknown }).type === 'picture' || (item as { type?: unknown }).type === 'media'))).map(strip);
+    }
+    if (value === null || typeof value !== 'object') return value;
+    const record = value as Record<string, unknown>;
+    if (record.type === 'blip') return { type: 'none' };
+    if (typeof record.imagePath === 'string') return { fillType: 'none' };
+    return Object.fromEntries(Object.entries(record).map(([key, child]) => [key, strip(child)]));
+  };
+  return strip(slide) as Slide;
+}
+
 async function paintedScalars(pres: Presentation, slide: Slide): Promise<Set<number>> {
+  try {
+    return await paintedScalarsOnce(pres, slide);
+  } catch (error) {
+    if ((error as Error)?.message !== 'Image effect preparation or evaluation failed') throw error;
+    return paintedScalarsOnce(pres, withoutImages(slide));
+  }
+}
+
+async function paintedScalarsOnce(pres: Presentation, slide: Slide): Promise<Set<number>> {
   const { canvas, texts } = recordingCanvas();
   await renderSlideWithEmbeddedFonts(canvas, slide, pres.slideWidth, pres.slideHeight, {
     width: 960, dpr: 1,

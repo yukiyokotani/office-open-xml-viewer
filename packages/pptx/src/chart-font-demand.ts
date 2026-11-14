@@ -63,9 +63,6 @@ export function chartPaintTexts(chart: unknown): readonly string[] | 'all' {
         for (const section of splitFormatSections(child)) {
           if (!isDateFormatSection(section)) continue;
           texts.push(...excelDateTimeSectionNameTexts(section));
-          // Under ja-JP `rr` writes the era name too (`gggee`), which the
-          // name table above reads only from `g`: ask it as if `g` were present.
-          if (/r/i.test(section)) texts.push(...excelDateTimeSectionNameTexts(`${section}g`));
         }
       } else if (child !== null && typeof child === 'object') {
         if (Array.isArray(child) && FORMAT_KEY.test(key)) formatArrays.add(child);

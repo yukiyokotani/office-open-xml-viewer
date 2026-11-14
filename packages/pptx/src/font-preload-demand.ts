@@ -18,8 +18,10 @@ import type { Slide, SlideElement } from './types';
  *   flattens inherited placeholders and group children into `elements`), in
  *   horizontal, `vert`/`vert270` (the horizontal layout under a rotation) and
  *   `mongolianVert` (painted horizontally) bodies, plus the vertical
- *   presentation forms an `eaVert` body substitutes for corner punctuation
- *   and brackets (vertical-text.ts);
+ *   presentation forms an `eaVert` or stacked (`wordArtVert*`) body
+ *   substitutes for corner punctuation and brackets (vertical-text.ts, core
+ *   stacked-glyphs.ts), and text warps (the flat layout's glyphs mapped
+ *   through the envelope);
  * - fields: their stored text, a slide number its actual number;
  * - char markers in their a:buFont, auto-number markers every label their
  *   scheme can format, in the marker face;
@@ -27,8 +29,8 @@ import type { Slide, SlideElement } from './types';
  *   unless a metafile (its text records paint with served faces) or of an
  *   unknown type (chart-font-demand.ts `paintsTextFreeImage`);
  * - charts: every scalar their labels can contain (`chartPaintTexts`).
- * Not modelled (`'all'`): equations, WordArt warps, stacked (`wordArtVert*`)
- * text, right-to-left paragraphs, region-map charts and unknown elements. */
+ * Not modelled (`'all'`): equations, right-to-left paragraphs, region-map
+ * charts and unknown elements. */
 export function collectSlideFontDemand(
   slide: Slide,
   committed: ReadonlySet<number>,
@@ -46,11 +48,14 @@ export function collectSlideFontDemand(
   };
   const body = (textBody: TextBody | null | undefined): boolean => {
     if (!textBody) return true;
-    if (textBody.vert && !HORIZONTAL_GLYPH_VERTS.has(textBody.vert) || 'textWarp' in textBody) return false;
-    // eaVert stands corner punctuation and brackets upright as their vertical
-    // presentation forms (UAX #50 Tu/Tr; vertical-text.ts): the authored
-    // scalars (measured) and every form core substitutes (painted).
-    if (textBody.vert === 'eaVert' && !scalars.add(VERTICAL_PRESENTATION_FORMS)) return false;
+    if (textBody.vert && !TEXT_VERTS.has(textBody.vert)) return false;
+    // eaVert and stacked (wordArtVert*) text stand corner punctuation and
+    // brackets upright as their vertical presentation forms (UAX #50 Tu/Tr;
+    // vertical-text.ts, core stacked-glyphs.ts): the authored scalars
+    // (measured) and every form core substitutes (painted). A text warp
+    // (renderWarpedText) maps the flat layout's glyphs through its envelope,
+    // painting the same texts.
+    if (textBody.vert && VERTICAL_FORM_VERTS.has(textBody.vert) && !scalars.add(VERTICAL_PRESENTATION_FORMS)) return false;
     const add = (text: string, families: readonly (string | null | undefined)[]): boolean =>
       scalars.addSymbolText(text, families);
     for (const para of textBody.paragraphs) {
@@ -110,12 +115,16 @@ export function collectSlideFontDemand(
   return scalars.result();
 }
 
-/** `vert` / `vert270` lay the body out horizontally under a rotation and
- * `mongolianVert` paints horizontally (renderer renderTextBody), so each
- * paints exactly its horizontal glyphs; `eaVert` adds vertical forms. */
-const HORIZONTAL_GLYPH_VERTS: ReadonlySet<string> = new Set(['horz', 'vert', 'vert270', 'mongolianVert', 'eaVert']);
+/** §20.1.10.83 ST_TextVerticalType. `vert` / `vert270` lay the body out
+ * horizontally under a rotation and `mongolianVert` paints horizontally
+ * (renderer renderTextBody), so each paints exactly its horizontal glyphs;
+ * {@link VERTICAL_FORM_VERTS} add vertical forms. */
+const TEXT_VERTS: ReadonlySet<string> = new Set(['horz', 'vert', 'vert270', 'mongolianVert', 'eaVert', 'wordArtVert', 'wordArtVertRtl']);
+/** Vertical-type values whose painter substitutes vertical presentation
+ * forms: eaVert (vertical-text.ts) and stacked text (renderStackedTextBody). */
+const VERTICAL_FORM_VERTS: ReadonlySet<string> = new Set(['eaVert', 'wordArtVert', 'wordArtVertRtl']);
 
-/** Every vertical presentation form core substitutes in eaVert text
+/** Every vertical presentation form core substitutes in vertical text
  * (`verticalFormSubstitute` → U+FE10–FE19, `verticalBracketFormSubstitute`
  * → U+FE17/FE18 and U+FE35–FE44): the two blocks, a small superset. Kept
  * static so the collector chunk shares no module with the renderer. */
