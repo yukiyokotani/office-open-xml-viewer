@@ -1740,9 +1740,6 @@ function splitCjkOverflow(context: BreakOpportunityIteratorContext, frame: TextF
   // to the SEA branch below instead — its `seaBreaks` already merges the CJK
   // per-character opportunities with the SEA dictionary/transition ones
   // (issue #960), so both scripts break by their own rule from one offset set.
-  // (pptx's analogous CJK fit is cjk-wrap.ts `fitCjkLine`, kept intentionally
-  //  separate: it sums per-char advances, whereas this path uses substring
-  //  binary-search + the cross-run 追い出し below. Don't naively unify them.)
   const available = availW() - breakerState.currentWidth;
   let rawPrefix = '';
   const maximumIdeographicSpaceHang = paragraphFinalIdeographicSpaceTail
