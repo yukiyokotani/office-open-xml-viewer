@@ -4187,11 +4187,17 @@ function virtualizedTextOverflowOverscan(
 
 /** Reuse viewport-independent indexes for a render-local worksheet projection.
  * The projection may differ only in row/column sizing and outline flags; cells,
- * merges, formatting, tables, links, comments, and sparklines remain source-owned. */
-export function inheritSheetRenderCache(source: Worksheet, projection: Worksheet): void {
+ * merges, formatting, tables, links, comments, and sparklines remain source-owned.
+ *
+ * `styles` must be the workbook styles the projection is painted with: the
+ * source entry is validated (and, when absent, built) against their `dxfs`,
+ * exactly as {@link renderViewport} validates it. Without them the inherited
+ * entry would carry no dxfs, fail that check and be rebuilt (a full-sheet
+ * cell index) on every frame that re-inherits it. */
+export function inheritSheetRenderCache(source: Worksheet, projection: Worksheet, styles: Styles): void {
   inheritCellFontLanguage(source, projection);
   inheritWorksheetPolicy(source, projection);
-  sheetRenderCache.set(projection, getSheetRenderCache(source));
+  sheetRenderCache.set(projection, getSheetRenderCache(source, styles));
 }
 
 export function renderViewport(

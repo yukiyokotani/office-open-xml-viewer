@@ -9,7 +9,7 @@ import { getSheetRenderCache, inheritSheetRenderCache } from './renderer.js';
 import { bindWorksheetPolicy, getWorksheetPolicy } from './worksheet-policy-context.js';
 import { createSheetViewModel } from './internal/sheet-viewer-runtime.js';
 import { createSizeOverriddenWorksheet } from './worker-protocol.js';
-import type { Cell, TableInfo, Worksheet } from './types.js';
+import type { Cell, Styles, TableInfo, Worksheet } from './types.js';
 
 const DEFAULT_CAP = 250_000;
 const RAISED_CAP = 300_000;
@@ -136,7 +136,7 @@ describe('renderer coordinate index honours the bound worksheet policy', () => {
 
     // Inherited (auto-height) cache reuse preserves the policy.
     const reused = createSizeOverriddenWorksheet(source, { rows: { 2: 40 } });
-    inheritSheetRenderCache(source, reused);
+    inheritSheetRenderCache(source, reused, { fonts: [], fills: [], borders: [], cellXfs: [], numFmts: [], dxfs: [] } as Styles);
     expect(getWorksheetPolicy(reused)).toBe(raised);
     expect(getSheetRenderCache(reused).cellMap.size).toBe(TOTAL_CELLS);
     expect(cachedCell(reused, ROWS, COLS)).toBe(lastCellBefore);

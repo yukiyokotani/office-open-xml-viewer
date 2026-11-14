@@ -927,7 +927,7 @@ export function worksheetWithAutoRowHeights(
   // intent before geometry/wrapping. Render-cache inheritance also runs after
   // worker size overrides, so it must never overwrite their CSS channel.
   inheritWorksheetSizeContext(source, projection);
-  inheritSheetRenderCache(source, projection);
+  inheritSheetRenderCache(source, projection, styles);
   // The viewer/main realm supplies the authoritative Normal-font MDW used by
   // hit-testing and spacer geometry. Preserve it across the render-local clone
   // so worker/direct auto-fit wraps at the exact same column pixels.
