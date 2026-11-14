@@ -73,6 +73,10 @@ const MARK_TEXT = /\p{M}/u;
 /** Distinct leading joiner runs beyond which the demand proves nothing. */
 const MAX_LEADING_JOINER_RUNS = 64;
 
+/** Distinct scalars of one leading joiner run beyond which its closure
+ * proves nothing (as a cluster's, `canonical-closure.ts`). */
+const MAX_LEADING_JOINER_RUN_SCALARS = 64;
+
 /** Incremental form for formats that interleave their own unmodelled-path
  * checks with text collection. Once a text is declined, the collector stays
  * `'all'`. */
@@ -117,7 +121,8 @@ export class FontDemandScalarCollector {
     if (this.declined) return false;
     if (hasStrongRtl(text)) return this.decline();
     if (!this.dottedCircle && MARK_TEXT.test(text) && !this.demandDottedCircle()) return this.decline();
-    let leading: number[] | undefined = [];
+    // The run of joiners this text starts with, until its first starter.
+    let leading: Set<number> | undefined = new Set();
     for (const scalar of text) {
       const cp = scalar.codePointAt(0) as number;
       if (cp >= 0xf020 && cp <= 0xf0ff) return this.decline();
@@ -125,20 +130,27 @@ export class FontDemandScalarCollector {
       if (!inert && !isCanonicallyKnown(cp)) return this.decline();
       if (inert || !isClusterJoiner(cp)) {
         if (!this.flush()) return this.decline();
+        if (leading && !this.recordLeading(leading)) return this.decline();
         leading = undefined;
       } else {
         if (!this.dottedCircle && !this.demandDottedCircle()) return this.decline();
-        leading?.push(cp);
+        leading?.add(cp);
       }
       this.cluster.push(cp);
       if (!inert) this.canonical = true;
     }
     if (!this.flush()) return this.decline();
-    if (leading?.length) {
-      this.leading.set(String.fromCodePoint(...leading), leading);
-      if (this.leading.size > MAX_LEADING_JOINER_RUNS) return this.decline();
-    }
+    if (leading && !this.recordLeading(leading)) return this.decline();
     return true;
+  }
+
+  /** Record a leading joiner run by its distinct scalars (a closure is
+   * order-free); false when there are too many runs or too many scalars. */
+  private recordLeading(run: ReadonlySet<number>): boolean {
+    if (!run.size) return true;
+    const scalars = [...run].sort((a, b) => a - b);
+    this.leading.set(scalars.join(), scalars);
+    return this.leading.size <= MAX_LEADING_JOINER_RUNS && scalars.length <= MAX_LEADING_JOINER_RUN_SCALARS;
   }
 
   private demandDottedCircle(): boolean {
@@ -147,23 +159,33 @@ export class FontDemandScalarCollector {
   }
 
   /** Close every leading joiner run ({@link leading}) with each demanded
-   * scalar it may compose with. */
+   * scalar it may compose with, to a fixed point: a scalar composed with
+   * one run may compose with the next run that follows it. */
   private closeLeadingJoiners(): boolean {
     if (!this.leading.size) return true;
+    const runs = [...this.leading.values()];
     const joiners = new Set<number>();
-    for (const run of this.leading.values()) for (const cp of run) joiners.add(cp);
-    const starters: number[] = [];
-    for (const cp of new Set([...this.committed, ...this.points])) {
-      for (const joiner of joiners) {
-        if (mayCompose(cp, joiner)) { starters.push(cp); break; }
+    for (const run of runs) for (const cp of run) joiners.add(cp);
+    const tried = new Set<number>();
+    for (let pending = [...this.committed, ...this.points]; pending.length;) {
+      const next: number[] = [];
+      for (const starter of pending) {
+        if (tried.has(starter)) continue;
+        tried.add(starter);
+        let composes = false;
+        for (const joiner of joiners) if (mayCompose(starter, joiner)) { composes = true; break; }
+        if (!composes) continue;
+        for (const run of runs) {
+          const scalars = canonicalClusterScalars([starter, ...run]);
+          if (!scalars) return false;
+          for (const cp of scalars) {
+            if (this.committed.has(cp) || this.points.has(cp)) continue;
+            if (!this.admitScalar(cp)) return false;
+            next.push(cp);
+          }
+        }
       }
-    }
-    for (const starter of starters) {
-      for (const run of this.leading.values()) {
-        const scalars = canonicalClusterScalars([starter, ...run]);
-        if (!scalars) return false;
-        for (const cp of scalars) if (!this.admitScalar(cp)) return false;
-      }
+      pending = next;
     }
     this.leading.clear();
     return true;

@@ -79,12 +79,24 @@ function excludedComposites(): readonly Decomposed[] {
   return excludedDecompositions;
 }
 
-/** Whether `starter` followed by `joiner` has a canonical composition in
- * its canonical forms (NFC holds fewer scalars than NFD): the pair may
- * paint a composite. */
+let excludedPartSet: ReadonlySet<number> | undefined;
+
+/** Every scalar of an excluded composite's decomposition. */
+function excludedParts(): ReadonlySet<number> {
+  return excludedPartSet ??= new Set(excludedComposites().flatMap(([, parts]) => parts));
+}
+
+/** Whether `starter` followed by `joiner` may paint a composite: their
+ * canonical forms compose (NFC holds fewer scalars than NFD), or together
+ * they hold the whole decomposition of a composition-excluded composite a
+ * shaper may still compose ({@link EXCLUDED_COMPOSITES}). */
 export function mayCompose(starter: number, joiner: number): boolean {
   const text = String.fromCodePoint(starter, joiner);
-  return [...text.normalize('NFC')].length !== [...text.normalize('NFD')].length;
+  const decomposed = [...text.normalize('NFD')];
+  if ([...text.normalize('NFC')].length !== decomposed.length) return true;
+  if (!excludedParts().has(joiner)) return false;
+  const parts = new Set(decomposed.map((part) => part.codePointAt(0) as number));
+  return excludedComposites().some(([, composite]) => composite.includes(joiner) && composite.every((part) => parts.has(part)));
 }
 
 function decompose(cp: number, into: Set<number>): void {

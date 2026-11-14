@@ -64,6 +64,14 @@ describe('collectFontDemandScalars', () => {
     // A case-mapped run visited in another order, or a deleted run between.
     for (const cp of [0xc1, 0xe1]) expect(scalars(['\u0301', 'a', 'A'])).toContain(cp);
     for (const cp of [0x103, 0x1eaf]) expect(scalars(['a', 'x', '\u0306\u0301'])).toContain(cp);
+    // A leading run followed by a starter in the same text.
+    expect(scalars(['e', '\u0301x'])).toContain(0xe9);
+    expect(scalars(['\u1112', '\u1161\u11abx'])).toContain(0xd55c);
+    // Runs that follow one another, to a fixed point.
+    expect(scalars(['a', '\u0306', '\u0301'])).toContain(0x1eaf);
+    expect(scalars(['\u1112', '\u1161', '\u11ab'])).toContain(0xd55c);
+    // An excluded composition a shaper may still make across runs.
+    expect(scalars(['\u09af', '\u09bc'])).toContain(0x9df);
     // A precomposed starter decomposes and recomposes with the run.
     expect(scalars(['\u00e9', '\u0323'])).toContain(0x1eb9);
   });
@@ -73,6 +81,12 @@ describe('collectFontDemandScalars', () => {
       expect(collectFontDemandScalars([text], { budget: BUDGET }), JSON.stringify(text)).toContain(0x25cc);
     }
     expect(collectFontDemandScalars(['AB'], { budget: BUDGET })).not.toContain(0x25cc);
+  });
+
+  it('declines, without throwing, a long leading run of one mark', () => {
+    expect(collectFontDemandScalars(['\u0301'.repeat(150_000)], { budget: Number.POSITIVE_INFINITY })).not.toBe('all');
+    const marks = String.fromCodePoint(...[...Array(80)].map((_, i) => 0x300 + i));
+    expect(collectFontDemandScalars(['a', marks], { budget: Number.POSITIVE_INFINITY })).toBe('all');
   });
 
   it('declines a cluster too large to close before composing it', () => {
