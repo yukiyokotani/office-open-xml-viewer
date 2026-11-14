@@ -336,7 +336,6 @@ const MEASUREMENT_ENVIRONMENT_DECLARATIONS = new Set([
   'canonicalParagraphTextScaleEligible',
   'docDefaultFontSizePt',
   'paragraphMeasurementEnvironment',
-  'segmentEnvironmentOf',
   'snapParaLineToGrid',
   'gridForParagraphContext',
 ]);

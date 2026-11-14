@@ -5,7 +5,6 @@ import {
   isGridLineRule,
   type DocGridCtx,
   type LayoutSeg,
-  type LineLayoutEnvironment,
 } from '../line-layout.js';
 import {
   paragraphCharacterGrid,
@@ -78,7 +77,6 @@ export function paragraphMeasurementEnvironment(
   // Optional flags are assigned after the literal rather than spread into it:
   // this runs once per measured paragraph, and conditional spreads cost an
   // extra object allocation and copy each.
-  const compat = state.layoutSettings.compat;
   const environment: { -readonly [K in keyof ParagraphMeasurementEnvironment]: ParagraphMeasurementEnvironment[K] } = {
     pageIndex: state.pageIndex,
     totalPages: state.totalPages,
@@ -95,15 +93,8 @@ export function paragraphMeasurementEnvironment(
     verticalCJK: state.verticalCJK && !state.verticalAllRotated,
     verticalPageFrame: state.verticalCJK === true,
     documentHasEastAsianText: state.docEastAsian,
-    useFeLayout: compat.useFeLayout,
-    balanceSingleByteDoubleByteWidth: compat.balanceSingleByteDoubleByteWidth,
+    compat: state.layoutSettings.compat,
     characterSpacingControl: state.layoutSettings.characterSpacingControl,
-    lineWrapLikeWord6: compat.lineWrapLikeWord6,
-    enableOpenTypeFeatures: compat.enableOpenTypeFeatures,
-    doNotSuppressIndentation: compat.doNotSuppressIndentation,
-    ww11IndentRules: compat.ww11IndentRules,
-    doNotUseIndentAsNumberingTabStop: compat.doNotUseIndentAsNumberingTabStop,
-    noTabHangInd: compat.noTabHangInd,
     resolvedLocalFonts: state.resolvedLocalFonts,
     layoutServices: state.layoutServices,
     verticalGlyphMeasurement: state.verticalGlyphMeasurement,
@@ -116,35 +107,7 @@ export function paragraphMeasurementEnvironment(
     && state.storyContext.inlineObjectRunLeadingAdmitted === true) {
     environment.inlineObjectRunLeadingAdmitted = true;
   }
-  if (compat.ulTrailSpace) environment.ulTrailSpace = true;
-  if (compat.doNotExpandShiftReturn) environment.doNotExpandShiftReturn = true;
-  if (compat.compatibilityMode !== undefined) environment.compatibilityMode = compat.compatibilityMode;
   return environment;
-}
-
-/** Build-segment environment for direct acquisition measurement. `btLr` clears
- * upright-vertical grouping because its complete horizontal layout is rotated. */
-export function segmentEnvironmentOf(
-  state: BodyMeasurementContext,
-): LineLayoutEnvironment {
-  if (!state.verticalAllRotated
-    && state.layoutSettings.characterSpacingControl === undefined
-    && state.layoutSettings.compat.compatibilityMode === undefined
-    && !state.layoutSettings.compat.lineWrapLikeWord6
-    && !state.layoutSettings.compat.enableOpenTypeFeatures
-    && !state.layoutSettings.compat.balanceSingleByteDoubleByteWidth) return state;
-  return {
-    ...state,
-    ...(state.verticalAllRotated ? { verticalCJK: false } : {}),
-    characterSpacingControl: state.layoutSettings.characterSpacingControl,
-    lineWrapLikeWord6: state.layoutSettings.compat.lineWrapLikeWord6,
-    enableOpenTypeFeatures: state.layoutSettings.compat.enableOpenTypeFeatures,
-    balanceSingleByteDoubleByteWidth:
-      state.layoutSettings.compat.balanceSingleByteDoubleByteWidth,
-    ...(state.layoutSettings.compat.compatibilityMode === undefined
-      ? {}
-      : { compatibilityMode: state.layoutSettings.compat.compatibilityMode }),
-  };
 }
 
 /** Snap a uniform paragraph line advance to an integer docGrid pitch. */

@@ -566,3 +566,17 @@ test('rejects a merged second profile declaration', () => {
   assert.equal(result.status, 1);
   assert.match(result.stderr, /COMPATIBILITY_PROFILE_SHAPE/);
 });
+
+test('rejects a compatibilityMode read outside the profile', () => {
+  const root = fixture();
+  write(root, 'packages/docx/src/layout/fixture-mode-reader.ts',
+    '// compatibilityMode in a comment is allowed\nexport const gate = (s: { compatibilityMode?: number }) => s.compatibilityMode === 15;\n');
+  const result = run(root);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /COMPATIBILITY_MODE_OUTSIDE_PROFILE: packages\/docx\/src\/layout\/fixture-mode-reader\.ts/);
+
+  write(root, 'packages/docx/src/layout/fixture-mode-reader.ts',
+    '// compatibilityMode in a comment is allowed\nexport const gate = 1;\n');
+  const accepted = run(root);
+  assert.equal(accepted.status, 0, accepted.stderr);
+});

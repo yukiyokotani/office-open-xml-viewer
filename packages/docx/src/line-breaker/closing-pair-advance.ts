@@ -1,3 +1,4 @@
+import { compatOf } from '../layout/compat-profile.js';
 import { checkedMetadataUtf16Work, checkedPrefixWorkTotal } from './prefix-work-budget.js';
 import { segmentsHaveRtl } from '../bidi-line.js';
 import type { ParagraphLayoutContext } from '../layout-context.js';
@@ -57,7 +58,7 @@ const equal = (a: number, b: number) => Number.isFinite(a) && Number.isFinite(b)
 export function retainClosingPairAdvances(runs: readonly ParagraphLayoutSource['runs'][number][],
   environment: LineLayoutEnvironment, segments: LayoutSeg[]): void {
   if (!environment.closingPairAdvanceAdmitted
-    || ![undefined, 11, 12, 14, 15].includes(environment.compatibilityMode)) return;
+    || !compatOf(environment).firstOwnerClosingPairAdvance) return;
   const service = environment.layoutServices?.text;
   if (!service?.acquireContextualAdvances || !service.exactLocalFaces || !service.ownsGlyphs || !service.sameGlyphRaster) return;
   // A complete ordinary source class, including constituents hidden by an

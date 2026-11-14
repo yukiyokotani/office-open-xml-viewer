@@ -1,3 +1,4 @@
+import { compatProfile } from './test-support/compat-environment.test-support.js';
 import { describe, expect, it, vi } from 'vitest';
 import { createLayoutServices } from './layout-runtime.js';
 import { createFontResolver } from './layout/font-service.js';
@@ -257,7 +258,7 @@ describe('native reference font vertical layout', () => {
     } as DocRun;
     const segment = (metrics: Record<string, ResolvedFontMetric>, word6 = false) => buildSegments([run], {
       pageIndex: 0, totalPages: 1, characterSpacingControl: 'compressPunctuation',
-      lineWrapLikeWord6: word6,
+      compat: compatProfile({ lineWrapLikeWord6: word6 }),
       layoutServices: { ...services(), text: { ...text, fontMetrics: metrics } },
     })[0] as LayoutTextSeg;
     expect(segment(fontMetrics).latinSpaceAverageWidthRatio).toBe(0.4);
@@ -300,9 +301,9 @@ describe('native reference font vertical layout', () => {
       kerning: switches.kerning,
     }], {
       pageIndex: 0, totalPages: 1, layoutServices,
-      compatibilityMode: 14, characterSpacingControl: 'compressPunctuation',
-      balanceSingleByteDoubleByteWidth: true,
-      enableOpenTypeFeatures: switches.enableOpenTypeFeatures,
+      characterSpacingControl: 'compressPunctuation',
+      compat: compatProfile({ compatibilityMode: 14, balanceSingleByteDoubleByteWidth: true,
+        enableOpenTypeFeatures: switches.enableOpenTypeFeatures }),
     });
     const grid = { type: 'linesAndChars' as const, charSpacePt: -1, linePitchPt: 12 };
     const lines = (width: number) => layoutLines(context, segments, width, 0, 1,
@@ -337,10 +338,9 @@ describe('native reference font vertical layout', () => {
       kerning: c.kerning,
     }], {
       pageIndex: 0, totalPages: 1, layoutServices,
-      ...(c.compatibilityMode === undefined ? {} : { compatibilityMode: c.compatibilityMode }),
       characterSpacingControl: 'compressPunctuation',
-      balanceSingleByteDoubleByteWidth: true,
-      enableOpenTypeFeatures: c.enableOpenTypeFeatures,
+      compat: compatProfile({ compatibilityMode: c.compatibilityMode, balanceSingleByteDoubleByteWidth: true,
+        enableOpenTypeFeatures: c.enableOpenTypeFeatures }),
     });
     const grid = { type: 'linesAndChars' as const, charSpacePt: -1, linePitchPt: 12 };
     expect(layoutLines(context, segments, 10.5, 0, 1, [], undefined, {}, 0, undefined, grid))
@@ -369,9 +369,8 @@ describe('native reference font vertical layout', () => {
       kerning: c.kerning,
     }], {
       pageIndex: 0, totalPages: 1, layoutServices,
-      compatibilityMode: c.compatibilityMode,
       characterSpacingControl: 'compressPunctuation',
-      lineWrapLikeWord6: c.lineWrapLikeWord6,
+      compat: compatProfile({ compatibilityMode: c.compatibilityMode, lineWrapLikeWord6: c.lineWrapLikeWord6 }),
     });
     // Natural 15pt; the sole 5pt space can shrink only to 2pt (half xAvg).
     expect(layoutLines(context, segments, 12, 0, 1, [], undefined, {}, 0)).toHaveLength(c.fits ? 1 : 2);

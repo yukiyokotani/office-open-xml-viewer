@@ -1,3 +1,4 @@
+import { compatProfile } from './test-support/compat-environment.test-support.js';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { Canvas } from 'skia-canvas';
 import { DEFAULT_KINSOKU_RULES } from '@silurus/ooxml-core';
@@ -326,7 +327,7 @@ describe('table intrinsic content widths', () => {
       ...base,
       layoutSettings: {
         ...base.layoutSettings,
-        compat: { ...base.layoutSettings.compat, compatibilityMode },
+        compat: compatProfile({ compatibilityMode }),
       },
       storyContext: { story: 'body', containers: [], lineNumberingEligible: false },
     } as ColumnState);
@@ -482,7 +483,7 @@ describe('table intrinsic content widths', () => {
         totalPages: 1,
         pageWritingMode: 'horizontal-tb',
         documentHasEastAsianText: true,
-        balanceSingleByteDoubleByteWidth: true,
+        compat: compatProfile({ balanceSingleByteDoubleByteWidth: true }),
         layoutServices: createLayoutServices(model([]), { measureContext: context }),
       },
     )).toEqual({
@@ -703,8 +704,8 @@ describe('table intrinsic content widths', () => {
     const widths = measureParagraphIntrinsicWidths(source, intrinsicContext(), 200,
       { context: ctx, fontFamilyClasses: {} },
       { pageIndex: 0, totalPages: 1, pageWritingMode: 'horizontal-tb',
-        documentHasEastAsianText: false, layoutServices: services, enableOpenTypeFeatures: true,
-        compatibilityMode: 15 });
+        documentHasEastAsianText: false, layoutServices: services,
+        compat: compatProfile({ enableOpenTypeFeatures: true, compatibilityMode: 15 }) });
     expect(widths).toEqual(kerning === 8 || kerning === 10
       ? { minWidthPt: 18, maxWidthPt: 18 } : { minWidthPt: 20, maxWidthPt: 20 });
   });
@@ -739,7 +740,7 @@ describe('table intrinsic content widths', () => {
       paragraph(texts.map((text) => ({ ...textRun(text), kerning }))),
       intrinsicContext(), 200, { context: ctx, fontFamilyClasses: {} },
       { pageIndex: 0, totalPages: 1, pageWritingMode: 'horizontal-tb',
-        documentHasEastAsianText: false, compatibilityMode: 15, layoutServices: services },
+        documentHasEastAsianText: false, compat: compatProfile({ compatibilityMode: 15 }), layoutServices: services },
     );
     expect(widths([parts.join('')])).toEqual({ minWidthPt: min, maxWidthPt: max });
     expect(widths(parts)).toEqual({ minWidthPt: min, maxWidthPt: max });
@@ -758,7 +759,7 @@ describe('table intrinsic content widths', () => {
     expect(measureParagraphIntrinsicWidths(paragraph(runs), intrinsicContext(), 200,
       { context: ctx, fontFamilyClasses: {} },
       { pageIndex: 0, totalPages: 1, pageWritingMode: 'horizontal-tb',
-        documentHasEastAsianText: false, compatibilityMode: 15, layoutServices: services },
+        documentHasEastAsianText: false, compat: compatProfile({ compatibilityMode: 15 }), layoutServices: services },
     )).toEqual({ minWidthPt: 10, maxWidthPt: 21 });
   });
 
@@ -784,7 +785,7 @@ describe('table intrinsic content widths', () => {
       paragraph(texts.map((text) => ({ ...textRun(text), kerning: 8, fontFamily: 'Scoped Face' }))),
       intrinsicContext(), 200, { context: ctx, fontFamilyClasses: {} },
       { pageIndex: 0, totalPages: 1, pageWritingMode: 'horizontal-tb',
-        documentHasEastAsianText: false, compatibilityMode: 15, layoutServices: services },
+        documentHasEastAsianText: false, compat: compatProfile({ compatibilityMode: 15 }), layoutServices: services },
     );
     expect(widths(['T i'])).toEqual({ minWidthPt: 10, maxWidthPt: 20 });
     expect(widths(['T', ' i'])).toEqual({ minWidthPt: 10, maxWidthPt: 20 });

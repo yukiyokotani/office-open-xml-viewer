@@ -1,3 +1,4 @@
+import { compatProfile } from '../test-support/compat-environment.test-support.js';
 import { describe, expect, it } from 'vitest';
 import { sourceFontLayoutOptions } from '../testing/font-sources.js';
 import { servedFontLineMetrics } from '../served-font-metrics.js';
@@ -386,7 +387,7 @@ describe('production layout service integration', () => {
     const off = buildSegments([hinted, unhinted], { pageIndex: 0, totalPages: 1 });
     const on = buildSegments(
       [hinted, unhinted],
-      { pageIndex: 0, totalPages: 1, useFeLayout: true, lineGridActive: true },
+      { pageIndex: 0, totalPages: 1, compat: compatProfile({ useFeLayout: true }), lineGridActive: true },
     );
 
     expect(off.filter((segment) => 'text' in segment)

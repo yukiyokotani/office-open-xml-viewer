@@ -1,3 +1,4 @@
+import { compatProfile } from '../test-support/compat-environment.test-support.js';
 import { expect, it } from 'vitest';
 import { createFontResolver } from './font-service.js';
 import { createTextLayoutService, independentTextShapeRequest, replaceTextShapeRequest,
@@ -282,7 +283,7 @@ it('acquires native max-content context while retaining its separate word units'
   const intrinsic = measureParagraphIntrinsicWidths(paragraph, paragraphContext, 100,
     { context, fontFamilyClasses: {} }, { pageIndex: 0, totalPages: 1,
       pageWritingMode: 'horizontal-tb', documentHasEastAsianText: false,
-      compatibilityMode: 15, layoutServices: services });
+      compat: compatProfile({ compatibilityMode: 15 }), layoutServices: services });
   expect(intrinsic.maxWidthPt).toBe(nativeAdvance('a Té'));
   const placements = textPlacements(doc);
   expect(placements.map(p => p.paintOps.map(op => op.text))).toEqual([['a '], ['Té']]);
@@ -497,7 +498,7 @@ it('uses the separated body in max-content width', () => {
   const intrinsic = measureParagraphIntrinsicWidths(paragraph, paragraphContext, 100,
     { context, fontFamilyClasses: {} }, { pageIndex: 0, totalPages: 1,
       pageWritingMode: 'horizontal-tb', documentHasEastAsianText: false,
-      compatibilityMode: 15, layoutServices: services });
+      compat: compatProfile({ compatibilityMode: 15 }), layoutServices: services });
   expect(intrinsic.maxWidthPt).toBe(18); // body 6 + space 6 + b 6; baseline mark split gives 20
 });
 

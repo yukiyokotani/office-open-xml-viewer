@@ -1,3 +1,4 @@
+import { compatProfile } from './test-support/compat-environment.test-support.js';
 import { describe, expect, it } from 'vitest';
 import { layoutDocument } from './document-layout.js';
 import { createLayoutServices } from './layout-runtime.js';
@@ -205,7 +206,7 @@ describe('kerned U+0020 pairs (WORD_KERNED_SPACE_PAIRS)', () => {
     const intrinsic = measureParagraphIntrinsicWidths(paragraph, INTRINSIC_CONTEXT, 400,
       { context: measure, fontFamilyClasses: {} }, {
         pageIndex: 0, totalPages: 1, pageWritingMode: 'horizontal-tb',
-        documentHasEastAsianText: false, compatibilityMode: 15,
+        documentHasEastAsianText: false, compat: compatProfile({ compatibilityMode: 15 }),
         layoutServices: createLayoutServices(doc, { measureContext: measure }),
       });
     expect(intrinsic.maxWidthPt).toBeCloseTo(6 + 3 + 4 + 3 + 6 - 0.5, 6);
@@ -241,7 +242,7 @@ describe('kerned U+0020 pairs (WORD_KERNED_SPACE_PAIRS)', () => {
     const { maxWidthPt } = measureParagraphIntrinsicWidths(paragraph, INTRINSIC_CONTEXT, 400,
       { context: measure, fontFamilyClasses: {} }, {
         pageIndex: 0, totalPages: 1, pageWritingMode: 'horizontal-tb',
-        documentHasEastAsianText: false, compatibilityMode: 15,
+        documentHasEastAsianText: false, compat: compatProfile({ compatibilityMode: 15 }),
         layoutServices: createLayoutServices(doc, { measureContext: measure }),
       });
     const [bounded] = lines(layout(runs, 400, 15));
@@ -297,7 +298,7 @@ function maxContent(runs: DocxTextRun[]): number {
   return measureParagraphIntrinsicWidths(paragraph, INTRINSIC_CONTEXT, 400,
     { context: measure, fontFamilyClasses: {} }, {
       pageIndex: 0, totalPages: 1, pageWritingMode: 'horizontal-tb',
-      documentHasEastAsianText: false, compatibilityMode: 15,
+      documentHasEastAsianText: false, compat: compatProfile({ compatibilityMode: 15 }),
       layoutServices: createLayoutServices(doc, { measureContext: measure }),
     }).maxWidthPt;
 }

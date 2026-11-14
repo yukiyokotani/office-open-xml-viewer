@@ -4,7 +4,7 @@ import { buildDocxCompatProfile } from './compat-profile.js';
 
 const bands = (mode: number | undefined, columns: number, producer?: boolean) =>
   wordPerColumnFootnoteBandsApply(
-    buildDocxCompatProfile({ compatibilityMode: mode }, { footnoteColumnBands: producer }),
+    buildDocxCompatProfile({ compatibilityMode: mode, __footnoteColumnBands: producer }),
     columns,
   );
 

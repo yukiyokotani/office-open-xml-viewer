@@ -696,6 +696,31 @@ function verifyCompatibilityProfile(root, rules) {
   return profile.members.length;
 }
 
+// compatibilityMode is read only where the profile is built (and declared in
+// the public model type): layout consumes named profile facts instead.
+const COMPATIBILITY_MODE_READERS = new Set([COMPATIBILITY_PROFILE, `${DOCX_SOURCE}/types.ts`]);
+
+function verifyCompatibilityModeReaders(root) {
+  for (const absolute of listFiles(resolve(root, DOCX_SOURCE)).filter(isProductionTypeScript)) {
+    const file = posixPath(relative(root, absolute));
+    if (COMPATIBILITY_MODE_READERS.has(file) || !isCitationSource(file)) continue;
+    const text = readFileSync(absolute, 'utf8');
+    if (!text.includes('compatibilityMode')) continue;
+    const source = ts.createSourceFile(absolute, text, ts.ScriptTarget.Latest, true);
+    const visit = (node) => {
+      if ((ts.isIdentifier(node) || ts.isStringLiteralLike(node) || ts.isPrivateIdentifier(node))
+        && node.text === 'compatibilityMode') {
+        fail(
+          'COMPATIBILITY_MODE_OUTSIDE_PROFILE',
+          `${file} reads compatibilityMode; use a DocxCompatProfile fact`,
+        );
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(source);
+  }
+}
+
 function options(argv) {
   let root = process.cwd();
   for (let index = 0; index < argv.length; index += 1) {
@@ -760,6 +785,7 @@ export function checkDocxCompatibilityEvidence(root) {
   verifyMicrosoftCatalogCited(microsoftCatalog, citedMicrosoftSections);
   verifyRulesCited(root, rules, declarationRanges);
   verifyCompatibilityProfile(root, rules);
+  verifyCompatibilityModeReaders(root);
   const observations = observationKeys(root);
   verifyObservationBaseline(root, observations);
   return Object.freeze([...rules].map(([id, { file }]) => Object.freeze({ id, file })));

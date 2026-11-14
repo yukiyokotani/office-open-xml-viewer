@@ -1,3 +1,4 @@
+import { compatProfile } from './test-support/compat-environment.test-support.js';
 import { describe, expect, it } from 'vitest';
 import { createFontResolver } from './layout/font-service.js';
 import { createTextLayoutService } from './layout/text.js';
@@ -81,7 +82,7 @@ describe('first-owner closing-pair allocation', () => {
     const widths = measureParagraphIntrinsicWidths(p, intrinsicContext, 10000,
       { context: canvas.getContext('2d') as CanvasRenderingContext2D, fontFamilyClasses: {} },
       { pageIndex: 0, totalPages: 1, pageWritingMode: 'horizontal-tb', documentHasEastAsianText: true,
-        compatibilityMode: 15, closingPairRootSource: true, layoutServices: services });
+        compat: compatProfile({ compatibilityMode: 15 }), closingPairRootSource: true, layoutServices: services });
     expect(widths.maxWidthPt).toBe(510);
   });
 
@@ -98,7 +99,7 @@ describe('first-owner closing-pair allocation', () => {
       placement: { startYPt: 0, paragraphXPt: 0, availableWidthPt: 468, maximumYPt: 600, suppressSpaceBefore: true },
       measurer: { context: canvas.getContext('2d') as CanvasRenderingContext2D, fontFamilyClasses: {} },
       environment: { pageIndex: 0, totalPages: 1, pageWritingMode: 'horizontal-tb', documentHasEastAsianText: true,
-        compatibilityMode: 15, closingPairRootSource: true, layoutServices: services },
+        compat: compatProfile({ compatibilityMode: 15 }), closingPairRootSource: true, layoutServices: services },
       exclusions: [], paragraphBorderEdges: { top: 'top', bottom: 'bottom' }, trailingExtentPt: 0,
     };
     const width = (o: ParagraphAcquisitionOptions) => acquireParagraphResult(input, o).layout.lines[0]!.placements
@@ -201,7 +202,7 @@ describe('first-owner closing-pair allocation', () => {
   it('does not project across a field hidden inside an identical-format sequence', () => {
     const text = service();
     const field = { ...run('unused'), type: 'field', fieldType: 'other', instruction: 'UNKNOWN', fallbackText: '」' } as DocParagraph['runs'][number];
-    const segments = buildSegments([run('。'), field], { pageIndex: 0, totalPages: 1, compatibilityMode: 15,
+    const segments = buildSegments([run('。'), field], { pageIndex: 0, totalPages: 1, compat: compatProfile({ compatibilityMode: 15 }),
       closingPairAdvanceAdmitted: true, layoutServices: { text } as never });
     expect(segments.map(s => 'text' in s ? s.text : '').join('')).toBe('。」');
     expect(segments.reduce((sum, seg) => sum + ('text' in seg ? segAdvanceWidth(seg,
@@ -211,7 +212,7 @@ describe('first-owner closing-pair allocation', () => {
   it('preflights huge unselected font metadata before new native or proof work', () => {
     const measured: string[] = [], proofs: string[] = [], text = service('fixed', measured, proofs);
     const segments = buildSegments([run('。」', { fontSlots: { direct: { ascii: 'unused'.repeat(200000), eastAsia: 'Pair Face' }, theme: {}, themePresent: {} } })],
-      { pageIndex: 0, totalPages: 1, compatibilityMode: 15, closingPairAdvanceAdmitted: true, layoutServices: { text } as never });
+      { pageIndex: 0, totalPages: 1, compat: compatProfile({ compatibilityMode: 15 }), closingPairAdvanceAdmitted: true, layoutServices: { text } as never });
     expect(measured).toEqual([]); expect(proofs).toEqual([]);
     expect(segments.reduce((sum, seg) => sum + ('text' in seg ? segAdvanceWidth(seg, seg.text.length * 12, undefined, 1) : 0), 0)).toBe(24);
   });
@@ -220,7 +221,7 @@ describe('first-owner closing-pair allocation', () => {
   it('does not spend optional native work on an unavailable selected route', () => {
     const measured: string[] = [], proofs: string[] = [], text = service('fixed', measured, proofs);
     const segments = buildSegments([run('。」', { fontFamilyEastAsia: 'Unavailable Face' })],
-      { pageIndex: 0, totalPages: 1, compatibilityMode: 15, closingPairAdvanceAdmitted: true, layoutServices: { text } as never });
+      { pageIndex: 0, totalPages: 1, compat: compatProfile({ compatibilityMode: 15 }), closingPairAdvanceAdmitted: true, layoutServices: { text } as never });
     expect(measured).toEqual([]); expect(proofs).toEqual([]);
     expect(segments.reduce((sum, seg) => sum + ('text' in seg ? segAdvanceWidth(seg, seg.text.length * 12, undefined, 1) : 0), 0)).toBe(24);
   });
@@ -228,7 +229,7 @@ describe('first-owner closing-pair allocation', () => {
   it('uses the first owner across a size and family seam, preserving source text', () => {
     const text = service();
     const segments = buildSegments([run('あ。', { fontSize: 20 }), run('」い', { fontSize: 8, fontFamily: 'Following Face', fontFamilyEastAsia: 'Following Face' })],
-      { pageIndex: 0, totalPages: 1, compatibilityMode: 15, closingPairAdvanceAdmitted: true, layoutServices: { text } as never });
+      { pageIndex: 0, totalPages: 1, compat: compatProfile({ compatibilityMode: 15 }), closingPairAdvanceAdmitted: true, layoutServices: { text } as never });
     const ctx = makeRecordingCanvas().canvas.getContext('2d') as CanvasRenderingContext2D;
     expect(segments.map(s => 'text' in s ? s.text : '').join('')).toBe('あ。」い');
     expect(segments.reduce((sum, s) => sum + ('text' in s ? segAdvanceWidth(s, text.shape({ ...s.textShapeRequest!, measure: true, clusterGeometry: false }).advancePt, undefined, 1) : 0), 0)).toBe(46);
@@ -239,7 +240,7 @@ describe('first-owner closing-pair allocation', () => {
     const measured: string[] = [];
     const text = service('fixed', measured);
     const source = '。」'.repeat(4096);
-    const segments = buildSegments([run(source)], { pageIndex: 0, totalPages: 1, compatibilityMode: 15,
+    const segments = buildSegments([run(source)], { pageIndex: 0, totalPages: 1, compat: compatProfile({ compatibilityMode: 15 }),
       closingPairAdvanceAdmitted: true, layoutServices: { text } as never });
     expect(measured).toEqual([]);
     expect(segments.reduce((sum, s) => sum + ('text' in s
@@ -272,7 +273,7 @@ describe('first-owner closing-pair allocation', () => {
   it.each(['english', 'proportional', 'native-pair', 'missing-proof', 'prior-CSC', 'tab', 'unknown-service'] as const)('preserves the independent %s refusal', kind => {
     const text = service(kind === 'proportional' || kind === 'native-pair' || kind === 'missing-proof' ? kind : 'fixed');
     const runs = [run(kind === 'tab' ? '。\t」' : '。」', kind === 'english' ? { langEastAsia: 'en-US' } : {})];
-    const env = { pageIndex: 0, totalPages: 1, compatibilityMode: 15, closingPairAdvanceAdmitted: true,
+    const env = { pageIndex: 0, totalPages: 1, compat: compatProfile({ compatibilityMode: 15 }), closingPairAdvanceAdmitted: true,
       ...(kind === 'prior-CSC' ? { characterSpacingControl: 'compressPunctuation' } : {}), layoutServices: { text: kind === 'unknown-service' ? { ...text, acquireContextualAdvances: undefined } : text } as never };
     const withPair = buildSegments(runs, env);
     const withoutPair = buildSegments(runs, { ...env, closingPairAdvanceAdmitted: false });

@@ -3,6 +3,7 @@ import { hasNativeUnitReceipt, hasNativeVisiblePrefix } from '../line-breaker/na
 import { prepareSourceSpaceCells, type SourceSpaceCells } from './source-space-cells.js';
 import { hasRtlDecimalTabCapability } from '../line-breaker/tabs.js';
 import { wordLineEndJustification } from './line-compatibility.js';
+import { compatOf, DEFAULT_DOCX_COMPAT_PROFILE, docxCompatProfileKey, type DocxCompatProfile } from './compat-profile.js';
 import {
   countedSpacingAdvance,
   countSpacingCharacters,
@@ -168,7 +169,6 @@ import {
   wordPreservesLowerLayerSameParagraphComposition,
   wordTextBoxVisibleAnchorExtentPt,
   wordGridPictureLineOriginPt,
-  wordStepsThroughWrapLines,
 } from './anchor-compatibility.js';
 import {
   wordRunVerticalAlignRaisePt,
@@ -445,7 +445,7 @@ export interface PlanLineInput {
   /** §17.15.3.5 doNotExpandShiftReturn: a line ended by a manual line break
    * stays unjustified. */
   readonly doNotExpandShiftReturn?: boolean;
-  /** compatibilityMode is absent or below 15 (WORD_LINE_END_JUSTIFICATION). */
+  /** compatibilityMode is not 15 (WORD_LINE_END_JUSTIFICATION). */
   readonly lineEndJustificationBeforeMode15?: boolean;
   /** Compatibility shape-text fallback preserves its prior ordering when
    * authoritative WordprocessingML direction provenance is unavailable. */
@@ -2866,7 +2866,7 @@ function retainedNumberingPlan(
     physicalIndentLeftPt: context.physicalIndentLeftPt,
     tabStops: paragraph.tabStops,
     defaultTabPt: context.defaultTabPt,
-    compatibilityMode: options.environment.compatibilityMode,
+    ...(options.environment.compat ? { compat: options.environment.compat } : {}),
     baseRtl: context.baseRtl,
   }, service);
 }
@@ -2926,10 +2926,7 @@ function numberingFirstLineWindow(
   // East Asian hanging composition is unmeasured by this legacy Latin class.
   const numberedWindowFrameApplies = ownsUnresolvedFloatFrame && !context.hasEastAsianText && numberedWindowScopeEligible(options) && !context.baseRtl && !options.environment.verticalCJK
     && !options.environment.verticalPageFrame
-    && (options.environment.compatibilityMode === undefined
-      || options.environment.compatibilityMode === 12 || options.environment.compatibilityMode === 14)
-    && options.environment.doNotSuppressIndentation !== true && options.environment.ww11IndentRules !== true
-    && options.environment.doNotUseIndentAsNumberingTabStop !== true && options.environment.noTabHangInd !== true
+    && compatOf(options.environment).numberedWindowFrame
     && (paragraph.alignment == null || paragraph.alignment === 'left' || paragraph.alignment === 'start')
     && (numbering.jc == null || numbering.jc === 'left') && (numbering.suff || 'tab') === 'tab'
     && !numbering.picBulletImagePath && paragraph.indentFirst <= 0
@@ -2946,7 +2943,7 @@ function numberingFirstLineWindow(
       physicalIndentLeftPt: context.baseRtl ? context.physicalIndentRightPt : context.physicalIndentLeftPt,
       tabStops: paragraph.tabStops,
       defaultTabPt: context.defaultTabPt,
-      compatibilityMode: options.environment.compatibilityMode,
+      ...(options.environment.compat ? { compat: options.environment.compat } : {}),
       baseRtl: context.baseRtl,
     }, service).bodyOffsetPt,
   };
@@ -3882,13 +3879,12 @@ function planMeasuredLines(
   textService?: import('./text.js').TextLayoutService,
   verticalGlyphMeasurement?: VerticalGlyphMeasurementService,
   verticalPageFrame = false,
-  compatibilityMode?: number,
+  compat: DocxCompatProfile = DEFAULT_DOCX_COMPAT_PROFILE,
   paragraphMarkShapeInput?: NumberingMarkerShapeInput,
   /** Owner section's counter-turn for upright inline graphics. */
   resourceOrientation?: import('./types.js').UprightResourceOrientation,
-  ulTrailSpace = false,
-  doNotExpandShiftReturn = false,
 ): readonly LineLayout[] {
+  const { ulTrailSpace, doNotExpandShiftReturn } = compat;
   // WORD_GRID_LINE_CONTENT_FIT_ADMISSION covers plain captions only. Decide
   // authored paragraph eligibility before continuation/keep-next slicing removes
   // border edges. Include CT_PBdr's between/bar rules even when no edge is painted in
@@ -3921,7 +3917,7 @@ function planMeasuredLines(
       ? earliestTab.pos - context.physicalIndentLeftPt
       : undefined;
   const specifiedParagraph = specifiedTextParagraphIsHomogeneous(paragraph,
-    context.lineGrid.active || compatibilityMode !== 15);
+    context.lineGrid.active || !compat.specifiedTextLineBoxMode15);
   return retainPhysicalLines(measured.lines.map((measuredLine, lineIndex) => {
     const raw = measuredLine.layout;
     // The measured allocation's first-line marker union (paragraph-measure.ts):
@@ -3929,7 +3925,7 @@ function planMeasuredLines(
     const markerAscentPt = lineIndex === 0 && numberingPlan?.markerText
       ? numberingPlan.lineBox?.ascentPt : undefined;
     const specified = specifiedParagraph
-      ? specifiedTextLineMetrics(raw, context, paragraph, compatibilityMode, verticalPageFrame,
+      ? specifiedTextLineMetrics(raw, context, paragraph, compat, verticalPageFrame,
           paragraphMarkShapeInput,
           markerAscentPt === undefined ? undefined : Math.max(markerAscentPt, raw.ascent) + raw.descent)
       : null;
@@ -3940,13 +3936,13 @@ function planMeasuredLines(
     const exactRubyLine = !specified && measuredRubyLine(raw)
       && context.lineSpacing?.rule === 'exact' && context.lineSpacing.value >= 12
       && context.lineSpacing.value <= 30
-      && compatibilityMode === 15
+      && compat.specifiedTextLineBoxMode15
       && !context.lineGrid.active && raw.topY === undefined;
     // Under atLeast the added leading falls before the line, which keeps its
     // own descent above the bottom (atLeast 18pt, the same controls).
     const atLeastRubyLine = !specified && measuredRubyLine(raw)
       && context.lineSpacing?.rule === 'atLeast'
-      && compatibilityMode === 15
+      && compat.specifiedTextLineBoxMode15
       && !context.lineGrid.active && raw.topY === undefined;
     // A model source's fixed or minimum line in LibreOffice's placement
     // (`__lineExtraAbove`; DOCX never sets it): a minimum line puts all extra
@@ -4200,8 +4196,8 @@ function planMeasuredLines(
       ...(doNotExpandShiftReturn ? { doNotExpandShiftReturn } : {}),
       ...(context.endsAtHardBreak ? { endsAtHardBreak: true } : {}),
       ...(context.runDirectionUnauthored ? { runDirectionUnauthored: true } : {}),
-      ...(compatibilityMode !== 15 ? { lineEndJustificationBeforeMode15: true } : {}),
-      ...(paragraph.alignment === 'thaiDistribute' && (compatibilityMode ?? 0) < 15
+      ...(compat.lineEndJustificationBeforeMode15 ? { lineEndJustificationBeforeMode15: true } : {}),
+      ...(paragraph.alignment === 'thaiDistribute' && compat.thaiDistributeProportionalSpread
         && !context.characterGrid.active ? { thaiProportionalSpread: true } : {}),
       ...(context.wordWrap === false ? { wordWrap: false } : {}),
       firstLineIndentPt: context.firstIndentPt,
@@ -5275,7 +5271,7 @@ function acquireAnchorOccurrence(
       ? { anchorLineExemptTopPt: options.anchorLineExemptions.get(occurrenceId)! }
       : {}),
     ...(effectiveResult.geometry.wrap.kind === 'tight'
-      && options.environment.compatibilityMode === 14
+      && compatOf(options.environment).mode14TightAnchor
       ? { wordMode14TightAnchor: true }
       : {}),
     verticalOwnership: anchorAxisOwnership(
@@ -6067,9 +6063,8 @@ function wordMode14AnchorLineExemptions(
   layout: ParagraphLayout,
   ownedExclusions: readonly WrapExclusion[],
 ): ReadonlyMap<string, number> {
-  const mode = options.environment.compatibilityMode;
   const exemptions = new Map<string, number>();
-  if (mode !== 14) return exemptions;
+  if (!compatOf(options.environment).mode14TightAnchor) return exemptions;
   for (const exclusion of ownedExclusions) {
     if (exclusion.wrap !== 'tight' || exclusion.anchorOccurrenceId === undefined) continue;
     const line = layout.lines.find((candidate) => candidate.placements.some((placement) =>
@@ -6101,8 +6096,7 @@ function wordMode14ColumnOriginApplies(
   acquisition: AnchorAcquisitionInput,
   options: ParagraphAcquisitionOptions,
 ): boolean {
-  const mode = options.environment.compatibilityMode;
-  return mode === 14
+  return compatOf(options.environment).mode14ColumnLineStartOrigin
     && options.ordinaryFlow
     && acquisition.simplePosition.enabled !== true
     && acquisition.horizontal.relativeFromStatus === 'valid'
@@ -6126,7 +6120,7 @@ function measurementPlacement(
             ? pageReference.xPt + pageReference.widthPt
             : options.placement.paragraphXPt + options.placement.availableWidthPt,
           readingDirection: options.context.baseRtl ? 'rtl' : 'ltr',
-          stepThroughPolygons: wordStepsThroughWrapLines(options.environment.compatibilityMode),
+          stepThroughPolygons: compatOf(options.environment).throughWrapStepsLines,
         });
   return {
     ...options.placement,
@@ -6395,19 +6389,11 @@ function paragraphAcquisitionKey(
         : layoutServices?.text.acquireProjectableNativeUnits !== undefined,
       environment.verticalCJK ?? null,
       lineOnly ? null : environment.verticalPageFrame ?? null,
-      // Mode owns acquired kerning and justified-compression decisions.
-      environment.compatibilityMode ?? null,
-      // Manual-break expansion also owns the acquired decimal order model.
-      environment.doNotExpandShiftReturn === true,
-      environment.doNotSuppressIndentation === true,
-      environment.ww11IndentRules === true,
-      environment.doNotUseIndentAsNumberingTabStop === true,
-      environment.noTabHangInd === true,
+      // The profile owns acquired kerning, justified-compression, manual-break
+      // expansion (decimal order model) and numbering-indent decisions.
+      docxCompatProfileKey(compatOf(environment)),
       environment.documentHasEastAsianText,
-      environment.useFeLayout ?? null,
-      environment.balanceSingleByteDoubleByteWidth ?? null,
       environment.characterSpacingControl ?? null,
-      environment.lineWrapLikeWord6 ?? null,
       environment.resolvedLocalFonts
         ? cache.objectIdentity(environment.resolvedLocalFonts)
         : null,
@@ -6424,7 +6410,6 @@ function paragraphAcquisitionKey(
       environment.showTrackedChanges === true && environment.revisionAuthorColor
         ? cache.objectIdentity(environment.revisionAuthorColor) : null,
       ...(lineOnly ? [
-        environment.enableOpenTypeFeatures === true,
         environment.positionExtendsLineBox !== false,
       ] : []),
     ],
@@ -7152,14 +7137,12 @@ function projectAcquiredParagraphLines(
     occurrences, numberingPlan, options.environment.layoutServices?.text,
     options.environment.verticalGlyphMeasurement,
     options.environment.verticalPageFrame,
-    options.environment.compatibilityMode,
+    compatOf(options.environment),
     options.environment.paragraphMarkShapeInput,
     uprightResourceOrientation(
       options.environment.verticalPageFrame,
       options.environment.pageWritingMode,
     ),
-    options.environment.ulTrailSpace === true,
-    options.environment.doNotExpandShiftReturn === true,
   );
   if (options.sourceRangeStart !== undefined) {
     lines = rebaseMeasuredLineRanges(lines, options.sourceRangeStart);

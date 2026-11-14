@@ -1,3 +1,4 @@
+import { compatProfile } from './test-support/compat-environment.test-support.js';
 import { describe, expect, it } from 'vitest';
 import { DEFAULT_KINSOKU_RULES } from '@silurus/ooxml-core';
 import {
@@ -78,7 +79,7 @@ function environment(enabled: boolean): LineLayoutEnvironment {
   return {
     pageIndex: 0,
     totalPages: 1,
-    balanceSingleByteDoubleByteWidth: enabled,
+    compat: compatProfile({ balanceSingleByteDoubleByteWidth: enabled }),
     layoutServices: createLayoutServices(model(), { measureContext: measureContext() }),
   };
 }

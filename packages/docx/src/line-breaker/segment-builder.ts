@@ -1,3 +1,4 @@
+import { compatOf } from '../layout/compat-profile.js';
 import { retainClosingPairAdvances } from './closing-pair-advance.js';
 import { ownSourceCursor } from './source-cursor.js';
 import { acquireNativeSourceUnits, eligibleNativeSourceText } from './native-source-units.js';
@@ -44,7 +45,6 @@ import {
   wordBalancedConsecutiveSpaceCellApplies,
   wordBalancedLinesAndCharsGridDeltaFactor,
   wordExternalLinkSyntaxBreakOffsets,
-  wordTabDisplacedReadingFrameApplies,
 } from '../layout/line-compatibility.js';
 import { type LayoutSeg, type LayoutTextSeg, type LineLayoutEnvironment } from './model.js';
 import { charScaleFactor, retainHorizontalPunctuationInkClearance } from './advance.js';
@@ -667,7 +667,7 @@ export function finalizeBuiltSegments(
     groupStart = groupEnd;
   }
 
-  if (environment.balanceSingleByteDoubleByteWidth) {
+  if (compatOf(environment).balanceSingleByteDoubleByteWidth) {
     // ECMA-376 §17.15.3.3 normatively requests a 1:2 SBCS/DBCS width balance,
     // but does not define how a proportional inter-word separator becomes a
     // fixed-pitch half-width cell. The registered Word observation limits that
@@ -1142,7 +1142,7 @@ function pushSegmentPiece(
   if (!substituteContext) scopeContext.cursor += text.length;
 
   if (
-    environment.balanceSingleByteDoubleByteWidth &&
+    compatOf(environment).balanceSingleByteDoubleByteWidth &&
     !cs &&
     text.includes('\u3000') &&
     [...text].some((character) => character !== '\u3000')
@@ -1533,7 +1533,7 @@ function emitResolvedTextSegment(
   // adjustLineHeightInTable is enabled. An inherited eastAsia font axis
   // alone must not raise a Latin-only non-grid line's normal-line floor.
   const useFeEastAsianMetric =
-    environment.useFeLayout &&
+    compatOf(environment).useFeLayout &&
     environment.lineGridActive &&
     (r.fontHint === 'eastAsia' || Boolean(resolvedEaFloorFamily?.trim()));
   const resolvedScript =
@@ -1546,12 +1546,7 @@ function emitResolvedTextSegment(
   // remain unexplained and do not justify a broader allowance or lower floor.
   const latinSpaceCompressionEligible =
     environment.characterSpacingControl === 'compressPunctuation' &&
-    wordLatinInterwordXavgFloorApplies({
-      compatibilityMode: environment.compatibilityMode,
-      lineWrapLikeWord6: environment.lineWrapLikeWord6,
-      enableOpenTypeFeatures: environment.enableOpenTypeFeatures,
-      hasExplicitKerningThreshold: effectiveKerningThreshold != null,
-    }) &&
+    wordLatinInterwordXavgFloorApplies(compatOf(environment), effectiveKerningThreshold != null) &&
     // The xAvg floor was measured for horizontal Latin words; upright
     // vertical runs and tate-chu-yoko use distinct advance allocation.
     environment.verticalCJK !== true &&
@@ -1569,10 +1564,10 @@ function emitResolvedTextSegment(
   // OpenType features and explicit kerning thresholds do not gate it.
   const mixedSpaceCompressionEligible =
     wordCompressedSpaceLineFitApplies(
-      environment.compatibilityMode,
+      compatOf(environment),
       environment.characterSpacingControl,
     ) &&
-    environment.lineWrapLikeWord6 !== true &&
+    !compatOf(environment).lineWrapLikeWord6 &&
     environment.verticalCJK !== true &&
     documentCharacterCompressionApplies &&
     (resolvedScript === 'ascii' || resolvedScript === 'highAnsi') &&
@@ -1583,7 +1578,7 @@ function emitResolvedTextSegment(
   const mixedSpaceAverageWidthRatio = mixedSpaceCompressionEligible
     ? latinSpaceAverageWidthRatio ?? selectedAverageWidth(resolvedSpan?.font, text)
     : undefined;
-  const widthBalanceGridDeltaFactor = environment.balanceSingleByteDoubleByteWidth
+  const widthBalanceGridDeltaFactor = compatOf(environment).balanceSingleByteDoubleByteWidth
     ? wordBalancedLinesAndCharsGridDeltaFactor(text, resolvedScript)
     : undefined;
   segs.push({
@@ -1962,7 +1957,8 @@ function appendRunsToSegments(
             sourceRunIndex: runIndex,
             ...(sequence ? { sourceTextOffset: displayOffset - 1 } : {}),
             ...(tabListLabel !== undefined ? { listLabel: tabListLabel } : {}),
-            ...(wordTabDisplacedReadingFrameApplies(environment.compatibilityMode)
+            // WORD_TAB_DISPLACED_READING_FRAME
+            ...(compatOf(environment).tabDisplacedReadingFrame
               ? { displacedFloatTabFrame: true } : {}),
           });
         }
