@@ -56,6 +56,9 @@ const HORIZONTAL_TEXT_DIRECTIONS: ReadonlySet<string> = new Set(['lrTb']);
 
 const METAFILE_PATH = /\.(?:wmf|emf|wmz|emz)$/i;
 
+/** The CSS weights a WordprocessingML run paints with: regular and bold. */
+const DOCX_RUN_WEIGHTS: readonly number[] = Object.freeze([400, 700]);
+
 /**
  * Paint facts the rendered-text traversal does not spell, from one walk over
  * the parsed model (the same generic walk `vertical-render-capability.ts`
@@ -205,9 +208,17 @@ export async function loadDocxFontSources(
 ): Promise<DocxLoadedFontSources> {
   // DOCX lays out with the served faces' own tables (source-font-metrics.ts):
   // the session reads them before the snapshot. PPTX and XLSX do not.
-  const session = new FontSourceSession({ ...options, sources, readMetricTables: readFontResourceMetrics });
+  const demand = docxFontDemand(doc, plan);
+  const session = new FontSourceSession({
+    ...options, sources, readMetricTables: readFontResourceMetrics,
+    // Without an `'all'` paint path (docxSynthesizedPaint: no chart, equation,
+    // metafile or other unmodelled text) every painted run is regular or
+    // bold: WordprocessingML §17.3.2.1 `b` (layout paragraph.ts, tabs,
+    // shape-drawing-plan text paths), so 400 and 700 are the only weights.
+    ...(demand.scalars === 'all' ? {} : { requestedWeights: DOCX_RUN_WEIGHTS }),
+  });
   try {
-    const loaded = await session.ensure(docxFontDemand(doc, plan));
+    const loaded = await session.ensure(demand);
     return {
       session,
       names: Object.freeze([...plan.families, ...plan.fallbackFamilies]),

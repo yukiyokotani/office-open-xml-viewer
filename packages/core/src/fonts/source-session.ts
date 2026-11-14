@@ -231,6 +231,20 @@ export interface FontSourceSessionOptions {
    * lays out with those tables passes it (DOCX). Absent, no face is inflated
    * or parsed, and every face carries its {@link LoadedSourceFace.probeSource}. */
   readonly readMetricTables?: (data: ArrayBuffer) => Promise<OpenTypeLineMetrics | null>;
+  /**
+   * Every CSS font weight any painter of the document can request from any
+   * family, when the format proves the set (DOCX without an `'all'` paint
+   * path: WordprocessingML runs are regular or bold). Fixed for the session.
+   * A claimed family whose every face file is declared once per weight of
+   * exactly this set (as Google Fonts serves a variable font: one URL per
+   * `unicode-range` subset, declared at 400 and at 700) is then registered as
+   * one face per file with the weight range from the lowest to the highest:
+   * CSS Fonts 4 §5.2 matches each requested weight to that face exactly as to
+   * the face declared at it, and the variation axis is clamped to the
+   * requested weight either way, so one decode serves both. Absent, or for
+   * an `'all'` demand, every declaration is its own face.
+   */
+  readonly requestedWeights?: readonly number[];
 }
 
 
@@ -483,6 +497,36 @@ function faceDescriptors(declaration: FontFaceDeclaration): FontFaceDescriptors 
  * deadline, so no added work can delay a download's deadline check there. */
 const PREPARE_DEADLINE_MARGIN_MS = 1_000;
 
+/** A declaration's single weight as a number (keywords resolved); undefined
+ * for a range or anything else. */
+function singleWeight({ weight = 'normal' }: FontFaceDeclaration): number | undefined {
+  const text = weight.trim().toLowerCase();
+  if (text === 'normal') return 400;
+  if (text === 'bold') return 700;
+  return /^[0-9]+$/.test(text) ? Number(text) : undefined;
+}
+
+/** The sorted distinct weights of {@link FontSourceSessionOptions.requestedWeights},
+ * when there are at least two valid ones. */
+function requestedWeightSet(weights: readonly number[] | undefined): readonly number[] | undefined {
+  if (!weights) return undefined;
+  const set = [...new Set(weights)].sort((a, b) => a - b);
+  return set.length >= 2 && set.every((weight) => Number.isInteger(weight) && weight >= 1 && weight <= 1000)
+    ? Object.freeze(set) : undefined;
+}
+
+/** `declaration` with its weight replaced by `range`, when given. */
+/** Declarations {@link withWeightRange} made: each stands for its file's
+ * declarations at every requested weight. */
+const weightRanged = new WeakSet<FontFaceDeclaration>();
+
+function withWeightRange(declaration: FontFaceDeclaration, range: string | undefined): FontFaceDeclaration {
+  if (range === undefined) return declaration;
+  const ranged = Object.freeze({ ...declaration, weight: range });
+  weightRanged.add(ranged);
+  return ranged;
+}
+
 /** A CSS `url()` for a validated absolute URL (data: URLs are kept verbatim
  * by validation and may contain characters a CSS string must escape). */
 function cssUrl(url: string): string {
@@ -564,6 +608,9 @@ interface OwnedFace {
 interface DemandFaces {
   /** Overlap component of each declaration. */
   readonly component: readonly number[];
+  /** The weight range every face of the family registers with
+   * ({@link FontSourceSessionOptions.requestedWeights}), when eligible. */
+  readonly weightRange?: string;
   /** Per declaration: registered, or dropped (its download failed). */
   readonly settled: boolean[];
 }
@@ -604,6 +651,7 @@ export class FontSourceSession {
   private acquireResolverFaces: ResolverFaceAcquirer | undefined;
   private readonly ownsAcquiredFaces: boolean;
   private readonly readMetricTables: FontSourceSessionOptions['readMetricTables'];
+  private readonly requestedWeights: readonly number[] | undefined;
   /** Resolver faces this session acquired, by `sourceIndex\0url`: a later
    * delta claiming the same face reuses the bytes instead of asking again. */
   private readonly acquiredFaces = new Map<string, ArrayBuffer>();
@@ -649,6 +697,7 @@ export class FontSourceSession {
     this.acquireResolverFaces = options.acquireResolverFaces ?? inRealmResolverFaceAcquirer(options.resolverFailures);
     this.ownsAcquiredFaces = options.acquiredFacesOwnedBySession === true;
     this.readMetricTables = options.readMetricTables;
+    this.requestedWeights = requestedWeightSet(options.requestedWeights);
     this.caches = this.sources.map(acquireSourceCache);
     const signal = options.signal;
     if (signal) {
@@ -808,7 +857,11 @@ export class FontSourceSession {
           state = { kind: 'failed', name, reason: limitReason('declarations', HARD_MAX_FONT_SOURCE_DECLARATIONS, size) };
         } else {
           for (const declaration of keys) this.claimedDeclarations.add(declaration);
-          state = { ...state, demand: { component: overlapComponents(state.declarations), settled: state.declarations.map(() => false) } };
+          state = { ...state, demand: {
+            component: overlapComponents(state.declarations),
+            settled: state.declarations.map(() => false),
+            ...this.sharedWeightRange(state.declarations),
+          } };
         }
       }
       this.families.set(key, state);
@@ -907,7 +960,7 @@ export class FontSourceSession {
           batch.urls.add(url);
           let faces = pending.get(url);
           if (!faces) { faces = []; pending.set(url, faces); }
-          faces.push({ sourceIndex: state.sourceIndex, declaration });
+          faces.push({ sourceIndex: state.sourceIndex, declaration: withWeightRange(declaration, state.demand?.weightRange) });
         }
       }
     }
@@ -1206,6 +1259,38 @@ export class FontSourceSession {
     });
   }
 
+  /**
+   * The weight range a claimed family registers its faces with
+   * ({@link FontSourceSessionOptions.requestedWeights}): when the session's
+   * requested weights are known, the demand is not `'all'`, and every face
+   * file of the family (by style, stretch, `unicode-range` and URL or bytes)
+   * is declared once at each requested weight and at no other, in the same
+   * file order at every weight.
+   */
+  private sharedWeightRange(declarations: readonly FontFaceDeclaration[]): { weightRange?: string } {
+    const weights = this.requestedWeights;
+    if (!weights || this.all || !declarations.length) return {};
+    // Per requested weight, its face files in declaration order.
+    const files = new Map<number, string[]>(weights.map((weight) => [weight, []]));
+    const seen = new Set<string>();
+    for (const declaration of declarations) {
+      const weight = singleWeight(declaration);
+      const order = weight === undefined ? undefined : files.get(weight);
+      if (!order) return {};
+      const content = declaration.data !== undefined ? fontContentKey(declaration.data) : declaration.url ?? '';
+      const key = [declaration.style ?? '', declaration.stretch ?? '', declaration.unicodeRange ?? '', content].join('|');
+      if (seen.has(`${weight}|${key}`)) return {};
+      seen.add(`${weight}|${key}`);
+      order.push(key);
+    }
+    // Every weight declares the same files in the same order: registering
+    // each file once (at its last occurrence, `register`) then keeps, at
+    // every requested weight, the precedence its own declarations had.
+    const [first, ...rest] = [...files.values()];
+    if (rest.some((order) => order.length !== first!.length || order.some((key, at) => key !== first![at]))) return {};
+    return { weightRange: `${weights[0]} ${weights[weights.length - 1]}` };
+  }
+
   /** Register the declarations `indices` (ascending) of one claimed family,
    * in order. */
   private register(
@@ -1215,7 +1300,7 @@ export class FontSourceSession {
     indices: readonly number[],
   ): void {
     const set = this.fontSet as FontFaceSet;
-    const chosen = indices.map((index) => state.declarations[index]!);
+    const chosen = indices.map((index) => withWeightRange(state.declarations[index]!, state.demand?.weightRange));
     // Within this session: source × family × every descriptor × content, so
     // a face two claimed families share is registered once.
     const signed = chosen.map((declaration) => {
@@ -1320,9 +1405,16 @@ export class FontSourceSession {
 
   private takeSnapshot(): LoadedFontSources {
     const faces: LoadedSourceFace[] = [];
+    // A weight-ranged face stands for its file's declaration at 400 too.
+    const regular: { family: string; weight: string; style: string }[] = [];
     for (const entry of this.owned.values()) {
       if (entry.face.status !== 'loaded') continue;
       const { declaration } = entry;
+      regular.push({
+        family: declaration.family,
+        weight: weightRanged.has(declaration) && this.requestedWeights?.includes(400) ? '400' : declaration.weight ?? 'normal',
+        style: declaration.style ?? 'normal',
+      });
       const resourceMetrics = (this.readMetricTables && declaration.data && faceResourceMetrics.get(declaration.data)) || undefined;
       const probeSource = resourceMetrics ? undefined
         : declaration.data ?? (declaration.url === undefined ? undefined : cssUrl(declaration.url));
@@ -1350,7 +1442,7 @@ export class FontSourceSession {
     return Object.freeze({
       faces: Object.freeze(faces),
       substitutions,
-      regularAliases: loadedRegularAliases(faces.map((face) => ({ ...face, status: 'loaded' as const }))),
+      regularAliases: loadedRegularAliases(regular.map((face) => ({ ...face, status: 'loaded' as const }))),
       families: new Map(this.aliases),
     });
   }
