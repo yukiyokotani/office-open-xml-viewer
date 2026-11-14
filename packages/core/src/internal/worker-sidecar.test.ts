@@ -7,8 +7,8 @@ describe('importWorkerSidecar', () => {
     expect(typeof namespace.resolveBundledAssetUrl).toBe('function');
   });
 
-  it('rejects bare specifiers, relative paths and other protocols before importing', async () => {
-    for (const url of ['@silurus/ooxml-legacy-office', '@silurus/ooxml-legacy-office/ppt', './x.mjs', '/x.mjs', '', ' https://a.test/x.mjs',
+  it('rejects bare package specifiers (any package), relative paths and other protocols before importing', async () => {
+    for (const url of ['@silurus/ooxml-pptx', '@scope/package/sub', 'package-name', './x.mjs', '/x.mjs', '', ' https://a.test/x.mjs',
       'data:text/javascript,export default 1', 'javascript:alert(1)', 'node:fs']) {
       await expect(importWorkerSidecar(url), url).rejects.toThrow(TypeError);
     }
