@@ -17,7 +17,7 @@
 //   node scripts/check-model-wire-drift.mjs --list docx       (print all, no allowlist)
 
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import process from 'node:process';
@@ -37,15 +37,12 @@ export const FORMATS = {
     tsconfig: 'packages/docx/tsconfig.json',
     tsFile: 'packages/docx/src/types.ts',
     tsRoot: 'DocxDocumentModel',
+    // Sources of every serialized type reachable from the root, scanned for
+    // the null-provenance convention (see scanNullProvenance).
+    rustSources: ['packages/docx/model/src', 'packages/ooxml-common/src'],
   },
 };
 
-/** Categories that cannot be verified from the Rust types and so never fail:
- * a Rust `String` field whose TS type narrows it to a literal union carries no
- * vocabulary on the Rust side to compare against (the parser normalizes the
- * value). They are printed as a count; turning such fields into Rust enums
- * makes them checked. */
-const UNVERIFIABLE = new Set(['ts-narrower-literal']);
 
 // ---------------------------------------------------------------------------
 // Normalized shapes shared by both sides:
@@ -129,16 +126,20 @@ function rustShapes(schema) {
       const optional = !required.has(key);
       let shape = convert(value, name);
       // Serialize-mode schemas leave a field out of `required` only when serde
-      // skips it (`skip_serializing_if`). Every such Option field in the
-      // models skips exactly `None`, so an omitted field never carries null:
-      // drop the null member and let optionality express absence.
+      // skips it (`skip_serializing_if`). An optional `Option<T>` field that
+      // skips exactly `None` never carries null, so the null member is
+      // dropped and optionality expresses absence. scanNullProvenance fails
+      // the check for any field where that does not hold (another predicate
+      // on an Option, or `Option<Option<T>>`).
       if (optional) {
         const inner = shape;
         shape = lazy(() => stripNull(deref(inner)));
       }
       props.set(key, { shape, optional });
     }
-    return { kind: 'object', name: name ?? '(inline)', props: () => props };
+    const extra = node.additionalProperties;
+    const additional = extra !== undefined && extra !== false ? convert(extra) : undefined;
+    return { kind: 'object', name: name ?? '(inline)', props: () => props, additional };
   }
 
   function mergeObjects(parts, name) {
@@ -158,6 +159,7 @@ function rustShapes(schema) {
     return {
       kind: 'object',
       name: label,
+      additional: objects.find((o) => o.additional)?.additional,
       props: () => {
         const merged = new Map();
         for (const o of objects) for (const [k, v] of o.props()) merged.set(k, v);
@@ -191,9 +193,14 @@ function unionResolved(members) {
     if (d.kind === 'union') flat.push(...d.members);
     else if (d.kind !== 'never') flat.push(m);
   }
-  // Collapse literal members into one literal set.
+  // Collapse literal members into one literal set and repeated primitives
+  // (`2 | 3` is two number members) into one.
   const literals = flat.filter((m) => deref(m).kind === 'literal');
-  const others = flat.filter((m) => deref(m).kind !== 'literal');
+  const others = flat.filter((m, i) => {
+    const d = deref(m);
+    if (d.kind === 'literal') return false;
+    return d.kind !== 'prim' || flat.findIndex((x) => deref(x).kind === 'prim' && deref(x).name === d.name) === i;
+  });
   const out = [...others];
   if (literals.length > 0) {
     out.push({ kind: 'literal', values: new Set(literals.flatMap((l) => [...deref(l).values])) });
@@ -288,6 +295,7 @@ function tsShapes(format) {
       return {
         kind: 'object',
         name,
+        index: index ? convert(index.type) : undefined,
         props: memo(() => {
           const props = new Map();
           for (const symbol of properties) {
@@ -317,65 +325,109 @@ function memo(fn) {
 
 // ------------------------------- Comparison --------------------------------
 
-/** Returns drift findings `{ key, category, detail, path }`, one per key. */
+/** Returns drift findings `{ key, category, detail, path }`, one per key.
+ * A key is `<owner>.<field>: <category>[ <payload>]`; the payload carries the
+ * concrete values (literals, mismatched kinds) so an allowlisted difference
+ * cannot silently grow. */
 export function compareShapes(rustRoot, tsRoot) {
   const findings = new Map();
+  comparer((f) => {
+    if (!findings.has(f.key)) findings.set(f.key, f);
+  }).walk(rustRoot, tsRoot, { owner: '(root)', field: '(root)', path: '$' });
+  return [...findings.values()].sort((a, b) => a.key.localeCompare(b.key));
+}
+
+const PROBE_LIMIT = Symbol('probe-limit');
+
+/** Number of findings comparing `r` with `t` in isolation, capped at
+ * `limit + 1`; used to pick the compatible alternative of a union. */
+function probeCost(r, t, limit) {
+  let n = 0;
+  try {
+    comparer(() => {
+      n += 1;
+      if (n > limit) throw PROBE_LIMIT;
+    }).walk(r, t, { owner: '?', field: '?', path: '?' });
+  } catch (error) {
+    if (error !== PROBE_LIMIT) throw error;
+  }
+  return n;
+}
+
+/** The candidate with the fewest differences, or `null` when there is none
+ * or when several candidates are equally (in)compatible: the result never
+ * depends on the order of union members. */
+function bestMatch(r, candidates) {
+  if (candidates.length <= 1) return candidates[0] ?? null;
+  const costs = candidates.map((c) => probeCost(r, c, 50));
+  const min = Math.min(...costs);
+  // Any fully compatible member is as good as another.
+  if (min === 0 || costs.filter((c) => c === min).length === 1) return candidates[costs.indexOf(min)];
+  return null;
+}
+
+function comparer(sink) {
   const visited = new Set();
-  const report = (owner, field, category, detail, where) => {
-    const key = `${owner}.${field}: ${category}`;
-    if (!findings.has(key)) findings.set(key, { key, category, detail, path: where });
+  const report = (owner, field, category, detail, where, payload) => {
+    const key = `${owner}.${field}: ${category}${payload ? ` ${payload}` : ''}`;
+    sink({ key, category, detail, path: where });
   };
 
   function walk(r, t, ctx) {
     r = deref(r);
     t = deref(t);
-    if (r.kind === 'any' || t.kind === 'any') return;
-    const rNull = hasNull(r);
-    const tNull = hasNull(t);
-    if (rNull && !tNull) report(ctx.owner, ctx.field, 'rust-null', 'Rust can emit null; the TS type does not allow null', ctx.path);
-    r = stripNull(r);
-    t = stripNull(t);
-    if (r.kind === 'any' || t.kind === 'any') return;
-    if (r.kind === 'never' || t.kind === 'never') return;
-
-    if (r.kind === 'union' || t.kind === 'union') return walkUnion(r, t, ctx);
-    if (r.kind === 'literal' && t.kind === 'literal') {
-      const missing = [...r.values].filter((v) => !t.values.has(v));
-      const extra = [...t.values].filter((v) => !r.values.has(v));
-      if (missing.length) report(ctx.owner, ctx.field, 'literal-missing-in-ts', `Rust emits ${missing.map(q).join(', ')}`, ctx.path);
-      if (extra.length) report(ctx.owner, ctx.field, 'literal-never-emitted', `TS also accepts ${extra.map(q).join(', ')}`, ctx.path);
+    if (r.kind === 'never') return;
+    if (r.kind === 'any' || t.kind === 'any') {
+      if (r.kind === 'any' && t.kind !== 'any') {
+        report(ctx.owner, ctx.field, 'rust-untyped', 'the Rust schema does not constrain this value; it cannot be checked', ctx.path);
+      } else if (t.kind === 'any' && r.kind !== 'any') {
+        report(ctx.owner, ctx.field, 'ts-untyped', `TS types it as any/unknown; Rust emits ${describe(r)}`, ctx.path);
+      }
       return;
     }
+    if (t.kind === 'never') {
+      report(ctx.owner, ctx.field, 'type-mismatch', 'TS never accepts the value Rust emits', ctx.path, `(Rust ${describe(r)} vs TS never)`);
+      return;
+    }
+    if (hasNull(r) && !hasNull(t)) {
+      report(ctx.owner, ctx.field, 'rust-null', 'Rust can emit null; the TS type does not allow null', ctx.path);
+    }
+    r = stripNull(r);
+    t = stripNull(t);
+    if (r.kind === 'prim' && r.name === 'null') return;
+    if (t.kind === 'prim' && t.name === 'null') {
+      report(ctx.owner, ctx.field, 'type-mismatch', 'TS accepts only null', ctx.path, `(Rust ${describe(r)} vs TS null)`);
+      return;
+    }
+
+    if (r.kind === 'union' || t.kind === 'union') return walkUnion(r, t, ctx);
+    if (r.kind === 'literal' && t.kind === 'literal') return compareLiterals(r.values, t.values, ctx);
     if (r.kind === 'literal' && t.kind === 'prim' && t.name === 'string') return;
     if (r.kind === 'prim' && r.name === 'string' && t.kind === 'literal') {
-      report(ctx.owner, ctx.field, 'ts-narrower-literal', `Rust emits any string; TS narrows to ${[...t.values].map(q).join(' | ')}`, ctx.path);
+      report(ctx.owner, ctx.field, 'ts-narrower-literal', 'Rust emits any string; TS narrows it to literals', ctx.path, values(t.values));
       return;
     }
     if (r.kind === 'array' && t.kind === 'tuple') {
       // Fixed-size Rust arrays (`[f64; 4]`) are JSON arrays typed as TS tuples.
-      if (r.minItems !== undefined && (r.minItems !== t.items.length || r.maxItems !== t.items.length)) {
-        report(ctx.owner, ctx.field, 'type-mismatch', `Rust array of ${r.minItems}..${r.maxItems} vs TS tuple of ${t.items.length}`, ctx.path);
-      } else if (r.minItems === undefined) {
-        report(ctx.owner, ctx.field, 'type-mismatch', `Rust variable-length array vs TS tuple of ${t.items.length}`, ctx.path);
+      if (r.minItems !== t.items.length || r.maxItems !== t.items.length) {
+        report(ctx.owner, ctx.field, 'type-mismatch', 'array length differs', ctx.path, `(Rust array ${r.minItems ?? 0}..${r.maxItems ?? 'n'} vs TS tuple ${t.items.length})`);
       }
       t.items.forEach((item, i) => walk(r.item, item, { ...ctx, path: `${ctx.path}[${i}]` }));
       return;
     }
-    if (r.kind === 'map' && t.kind === 'object' && [...t.props().values()].every((p) => p.optional)) {
+    if (r.kind === 'map' && t.kind === 'object' && !t.index && [...t.props().values()].every((p) => p.optional)) {
       // A Rust map keyed by a closed vocabulary is typed as
       // `Partial<Record<Key, V>>` in TS: every value must match.
       for (const [key, p] of t.props()) walk(r.value, p.shape, { ...ctx, path: `${ctx.path}.${key}` });
       return;
     }
     if (r.kind !== t.kind) {
-      // A JSON object map can be typed as an object with only an index
-      // signature (handled above) — anything else is a mismatch.
-      report(ctx.owner, ctx.field, 'type-mismatch', `Rust ${describe(r)} vs TS ${describe(t)}`, ctx.path);
+      report(ctx.owner, ctx.field, 'type-mismatch', 'incompatible shapes', ctx.path, `(Rust ${describe(r)} vs TS ${describe(t)})`);
       return;
     }
     switch (r.kind) {
       case 'prim':
-        if (r.name !== t.name) report(ctx.owner, ctx.field, 'type-mismatch', `Rust ${r.name} vs TS ${t.name}`, ctx.path);
+        if (r.name !== t.name) report(ctx.owner, ctx.field, 'type-mismatch', 'incompatible primitives', ctx.path, `(Rust ${r.name} vs TS ${t.name})`);
         return;
       case 'array':
         return walk(r.item, t.item, { ...ctx, path: `${ctx.path}[]` });
@@ -383,7 +435,7 @@ export function compareShapes(rustRoot, tsRoot) {
         return walk(r.value, t.value, { ...ctx, path: `${ctx.path}{}` });
       case 'tuple':
         if (r.items.length !== t.items.length) {
-          report(ctx.owner, ctx.field, 'type-mismatch', `tuple arity ${r.items.length} vs ${t.items.length}`, ctx.path);
+          report(ctx.owner, ctx.field, 'type-mismatch', 'tuple arity differs', ctx.path, `(Rust ${r.items.length} vs TS ${t.items.length})`);
           return;
         }
         r.items.forEach((item, i) => walk(item, t.items[i], { ...ctx, path: `${ctx.path}[${i}]` }));
@@ -395,48 +447,61 @@ export function compareShapes(rustRoot, tsRoot) {
     }
   }
 
+  function compareLiterals(rValues, tValues, ctx) {
+    const missing = [...rValues].filter((v) => !tValues.has(v));
+    const extra = [...tValues].filter((v) => !rValues.has(v));
+    if (missing.length) report(ctx.owner, ctx.field, 'literal-missing-in-ts', 'Rust emits values the TS literal union lacks', ctx.path, values(missing));
+    if (extra.length) report(ctx.owner, ctx.field, 'literal-never-emitted', 'TS accepts values Rust never emits', ctx.path, values(extra));
+  }
+
   function walkObject(r, t, ctx, variant) {
     const visitKey = `${objectId(r)}|${objectId(t)}`;
     if (visited.has(visitKey)) return;
     visited.add(visitKey);
-    // Inline enum variants have no Rust type name of their own: name them by
-    // their enum and tag value so allowlist keys stay stable.
-    const owner = variant ? `${r.name.replace(/#\d+$/, '')}<${variant.tag}=${variant.value}>` : r.name;
+    const owner = ownerName(r, t, variant);
     const rp = r.props();
     const tp = t.props();
     for (const [field, rf] of rp) {
+      // The discriminant was matched by value when the variant was paired.
       if (variant && field === variant.tag) continue;
       const tf = tp.get(field);
       const where = `${ctx.path}.${field}`;
       if (!tf) {
-        report(owner, field, 'missing-in-ts', `TS ${t.name} has no "${field}"`, where);
+        if (t.index) walk(rf.shape, t.index, { owner, field, path: where });
+        else report(owner, field, 'missing-in-ts', `TS ${t.name} has no "${field}"`, where);
         continue;
       }
-      if (rf.optional && !tf.optional && !isLiteralTag(rf.shape)) {
-        report(owner, field, 'rust-optional', `Rust may omit it; TS ${t.name} requires it`, where);
-      }
+      if (rf.optional && !tf.optional) report(owner, field, 'rust-optional', `Rust may omit it; TS ${t.name} requires it`, where);
       walk(rf.shape, tf.shape, { owner, field, path: where });
     }
     for (const field of tp.keys()) {
-      if (!rp.has(field)) report(owner, field, 'ts-only', `TS ${t.name} declares "${field}"; Rust never emits it`, `${ctx.path}.${field}`);
+      if (rp.has(field) || (variant && field === variant.tag)) continue;
+      if (r.additional) walk(r.additional, tp.get(field).shape, { owner, field, path: `${ctx.path}.${field}` });
+      else report(owner, field, 'ts-only', `TS ${t.name} declares "${field}"; Rust never emits it`, `${ctx.path}.${field}`);
     }
+    // String-keyed extra entries (`additionalProperties` / index signature).
+    if (r.additional && t.index) walk(r.additional, t.index, { owner, field: '[key]', path: `${ctx.path}[key]` });
+    else if (r.additional) report(owner, '[key]', 'missing-in-ts', `Rust emits extra keys; TS ${t.name} has no index signature`, `${ctx.path}[key]`);
+    else if (t.index) report(owner, '[key]', 'ts-only', `TS ${t.name} has an index signature; Rust emits only named fields`, `${ctx.path}[key]`);
   }
 
   function walkUnion(r, t, ctx) {
     const rMembers = r.kind === 'union' ? r.members.map(deref) : [r];
     const tMembers = t.kind === 'union' ? t.members.map(deref) : [t];
-    const rLit = rMembers.filter((m) => m.kind === 'literal');
-    const tLit = tMembers.filter((m) => m.kind === 'literal');
-    if (rLit.length || tLit.length) {
-      const rl = { kind: 'literal', values: new Set(rLit.flatMap((m) => [...m.values])) };
-      const tl = { kind: 'literal', values: new Set(tLit.flatMap((m) => [...m.values])) };
-      const tString = tMembers.some((m) => m.kind === 'prim' && m.name === 'string');
-      if (rLit.length && !tLit.length && !tString) {
-        report(ctx.owner, ctx.field, 'type-mismatch', `Rust string literals ${[...rl.values].map(q).join(', ')} not accepted by TS`, ctx.path);
-      } else if (rLit.length && tLit.length) {
-        walk(rl, tl, ctx);
-      }
+    const rLit = new Set(rMembers.filter((m) => m.kind === 'literal').flatMap((m) => [...m.values]));
+    const tLit = new Set(tMembers.filter((m) => m.kind === 'literal').flatMap((m) => [...m.values]));
+    const rString = rMembers.some((m) => m.kind === 'prim' && m.name === 'string');
+    const tString = tMembers.some((m) => m.kind === 'prim' && m.name === 'string');
+    if (rLit.size && tLit.size) compareLiterals(rLit, tLit, ctx);
+    else if (rLit.size && !tString) {
+      report(ctx.owner, ctx.field, 'literal-missing-in-ts', 'Rust emits string literals TS does not accept', ctx.path, values(rLit));
+    } else if (tLit.size && !rString) {
+      report(ctx.owner, ctx.field, 'literal-never-emitted', 'TS accepts literals Rust never emits', ctx.path, values(tLit));
     }
+    if (rString && !tString && tLit.size) {
+      report(ctx.owner, ctx.field, 'ts-narrower-literal', 'Rust emits any string; TS narrows it to literals', ctx.path, values(tLit));
+    }
+
     const rObjects = rMembers.filter((m) => m.kind === 'object');
     const tObjects = tMembers.filter((m) => m.kind === 'object');
     const tag = rObjects.length > 0 ? discriminant(rObjects) : null;
@@ -445,15 +510,21 @@ export function compareShapes(rustRoot, tsRoot) {
       for (const o of tObjects) {
         const p = o.props().get(tag);
         const v = p && deref(p.shape);
-        if (v?.kind === 'literal') for (const value of v.values) tByTag.set(value, o);
+        if (v?.kind !== 'literal') {
+          report(ctx.owner, `${ctx.field}<${tag}=?>`, 'variant-never-emitted', `TS member ${o.name} has no literal "${tag}"`, ctx.path, `(${o.name})`);
+          continue;
+        }
+        for (const value of v.values) tByTag.set(value, [...(tByTag.get(value) ?? []), o]);
       }
       const seen = new Set();
       for (const o of rObjects) {
         const value = [...deref(o.props().get(tag).shape).values][0];
         seen.add(value);
-        const match = tByTag.get(value);
+        const candidates = tByTag.get(value) ?? [];
+        const match = bestMatch(o, candidates);
         if (!match) {
-          report(ctx.owner, `${ctx.field}<${tag}=${value}>`, 'variant-missing-in-ts', `TS union has no ${tag}=${q(value)} member`, ctx.path);
+          if (candidates.length) report(ctx.owner, `${ctx.field}<${tag}=${value}>`, 'type-mismatch', 'no single compatible TS member', ctx.path, `(Rust ${describe(o)} vs ${candidates.length} TS members)`);
+          else report(ctx.owner, `${ctx.field}<${tag}=${value}>`, 'variant-missing-in-ts', `TS union has no ${tag}=${q(value)} member`, ctx.path);
           continue;
         }
         walkObject(o, match, { ...ctx, path: `${ctx.path}<${tag}=${value}>` }, { tag, value });
@@ -461,31 +532,38 @@ export function compareShapes(rustRoot, tsRoot) {
       for (const value of tByTag.keys()) {
         if (!seen.has(value)) report(ctx.owner, `${ctx.field}<${tag}=${value}>`, 'variant-never-emitted', `TS union accepts ${tag}=${q(value)}; Rust never emits it`, ctx.path);
       }
-    } else if (rObjects.length) {
+    } else {
       for (const o of rObjects) {
-        const best = bestOverlap(o, tObjects);
-        if (!best) report(ctx.owner, ctx.field, 'type-mismatch', `Rust object ${o.name} has no TS object counterpart`, ctx.path);
-        else walkObject(o, best, ctx);
+        const match = bestMatch(o, tObjects);
+        if (!match) report(ctx.owner, ctx.field, 'type-mismatch', 'no single compatible TS object member', ctx.path, `(Rust ${describe(o)} vs TS ${describeUnion(tObjects)})`);
+        else walk(o, match, ctx);
       }
     }
-    // Non-object, non-literal members (prim/array/map/tuple): match by kind.
+    // Remaining Rust members (primitives except string, arrays, maps, tuples):
+    // pair each with its most compatible TS member of the same kind.
     for (const m of rMembers.filter((x) => !['object', 'literal'].includes(x.kind))) {
-      const counterpart = tMembers.find((x) => x.kind === m.kind && (m.kind !== 'prim' || x.name === m.name));
-      if (!counterpart) {
-        if (m.kind === 'prim' && m.name === 'string' && tLit.length) {
-          report(ctx.owner, ctx.field, 'ts-narrower-literal', 'Rust emits any string; TS narrows to literals', ctx.path);
-        } else {
-          report(ctx.owner, ctx.field, 'type-mismatch', `Rust ${describe(m)} not accepted by TS ${describe(t)}`, ctx.path);
-        }
-      } else if (m.kind !== 'prim') {
-        walk(m, counterpart, ctx);
-      }
+      if (m.kind === 'prim' && m.name === 'string' && (tString || tLit.size)) continue;
+      const candidates = tMembers.filter((x) => x.kind === m.kind && (m.kind !== 'prim' || x.name === m.name));
+      const match = bestMatch(m, candidates);
+      if (!match) report(ctx.owner, ctx.field, 'type-mismatch', 'no single compatible TS member', ctx.path, `(Rust ${describeDeep(m)} vs TS ${describeUnion(candidates.length ? candidates : tMembers)})`);
+      else if (m.kind !== 'prim') walk(m, match, ctx);
     }
   }
 
-  walk(rustRoot, tsRoot, { owner: '(root)', field: '(root)', path: '$' });
-  return [...findings.values()].sort((a, b) => a.key.localeCompare(b.key));
+  return { walk };
 }
+
+/** Allowlist owner: the Rust type, plus the TS type it was compared with when
+ * that is a different named type (so one Rust type compared against two TS
+ * projections yields separate keys). Inline enum variants have no Rust type
+ * name of their own: they are named by enum and tag value. */
+function ownerName(r, t, variant) {
+  const rust = r.name.replace(/#\d+$/, '');
+  if (variant) return `${rust}<${variant.tag}=${variant.value}>`;
+  return /^\w+$/.test(t.name) && t.name !== rust ? `${rust}(ts ${t.name})` : rust;
+}
+
+const values = (list) => JSON.stringify([...list].sort());
 
 const objectIds = new WeakMap();
 let nextObjectId = 0;
@@ -512,22 +590,6 @@ function discriminant(objects) {
   return null;
 }
 
-function bestOverlap(o, candidates) {
-  const keys = new Set(o.props().keys());
-  let best = null;
-  let bestScore = 0;
-  for (const c of candidates) {
-    const score = [...c.props().keys()].filter((k) => keys.has(k)).length;
-    if (score > bestScore) { best = c; bestScore = score; }
-  }
-  return best;
-}
-
-function isLiteralTag(shape) {
-  const s = deref(shape);
-  return s.kind === 'literal' && s.values.size === 1;
-}
-
 function hasNull(s) {
   return (s.kind === 'prim' && s.name === 'null') || (s.kind === 'union' && s.members.some((m) => hasNull(deref(m))));
 }
@@ -547,6 +609,19 @@ function describe(s) {
   return s.kind;
 }
 
+/** Order-independent description of union members. */
+function describeUnion(members) {
+  return members.map(describeDeep).sort().join(' | ');
+}
+
+/** `describe`, but with array/map element kinds spelled out. */
+function describeDeep(s) {
+  s = deref(s);
+  if (s.kind === 'array') return `${describeDeep(s.item)}[]`;
+  if (s.kind === 'map') return `{[key]: ${describeDeep(s.value)}}`;
+  return describe(s);
+}
+
 const q = (v) => JSON.stringify(v);
 
 // --------------------------------- Driver ----------------------------------
@@ -561,15 +636,60 @@ function rustSchema(format, schemaFile) {
   return JSON.parse(out);
 }
 
+/** The schema cannot tell `Option<T>` skipped on `None` (never null) from
+ * `Option<Option<T>>` or an Option skipped by another predicate (both can
+ * emit null). Scan the model sources and report every such field so the
+ * checker's null handling stays sound. */
+export function scanNullProvenance(dirs) {
+  const problems = [];
+  for (const file of dirs.flatMap((dir) => listRust(path.resolve(repoRoot, dir)))) {
+    const lines = readFileSync(file, 'utf8').split('\n');
+    let attrs = '';
+    let depth = 0;
+    lines.forEach((line, i) => {
+      const trimmed = line.trim();
+      if (depth > 0 || trimmed.startsWith('#[')) {
+        attrs += ` ${trimmed}`;
+        for (const ch of trimmed) depth += ch === '[' ? 1 : ch === ']' ? -1 : 0;
+        return;
+      }
+      if (trimmed.startsWith('//') || trimmed === '') return;
+      const field = /^(?:pub(?:\([^)]*\))?\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.+?),?$/.exec(trimmed);
+      if (field && !trimmed.startsWith('let ')) {
+        const type = field[2].replace(/\s+/g, '');
+        const skip = /skip_serializing_if\s*=\s*"([^"]+)"/.exec(attrs)?.[1];
+        const where = `${path.relative(repoRoot, file)}:${i + 1} ${field[1]}`;
+        if (/Option<Option</.test(type)) problems.push(`${where}: Option<Option<..>> can serialize null`);
+        else if (skip && type.startsWith('Option<') && skip !== 'Option::is_none') {
+          problems.push(`${where}: Option skipped by "${skip}" can still serialize null`);
+        }
+      }
+      attrs = '';
+    });
+  }
+  return problems;
+}
+
+function listRust(dir) {
+  return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) return listRust(full);
+    return entry.name.endsWith('.rs') ? [full] : [];
+  });
+}
+
 export function checkFormat(name, { schemaFile, list = false, format = FORMATS[name], allowlist = MODEL_WIRE_DRIFT_ALLOWLIST[name] } = {}) {
-  const all = compareShapes(rustShapes(rustSchema(format, schemaFile)), tsShapes(format));
-  const unverifiable = all.filter((f) => UNVERIFIABLE.has(f.category));
-  const findings = all.filter((f) => !UNVERIFIABLE.has(f.category));
-  if (list) return { findings, unverifiable, unexpected: findings, stale: [] };
+  const provenance = format.rustSources ? scanNullProvenance(format.rustSources) : [];
+  if (provenance.length) {
+    throw new Error(`model-wire-drift: null provenance is ambiguous for:\n  ${provenance.join('\n  ')}\n`
+      + 'Teach rustShapes to keep null for such fields before allowing them.');
+  }
+  const findings = compareShapes(rustShapes(rustSchema(format, schemaFile)), tsShapes(format));
+  if (list) return { findings, unexpected: findings, stale: [] };
   const entries = Object.keys(allowlist ?? {}).map((key) => ({ key, re: allowPattern(key) }));
   const unexpected = findings.filter((f) => !entries.some((e) => e.re.test(f.key)));
   const stale = entries.filter((e) => !findings.some((f) => e.re.test(f.key))).map((e) => e.key);
-  return { findings, unverifiable, unexpected, stale };
+  return { findings, unexpected, stale };
 }
 
 /** Allowlist keys are exact finding keys; `*` matches any run of characters
@@ -593,10 +713,10 @@ function main(argv) {
   let failed = false;
   for (const name of selected) {
     if (!FORMATS[name]) throw new Error(`unknown format ${name}`);
-    const { findings, unverifiable, unexpected, stale } = checkFormat(name, { schemaFile, list });
+    const { findings, unexpected, stale } = checkFormat(name, { schemaFile, list });
     if (list) {
-      for (const f of [...findings, ...unverifiable]) console.log(`${f.key}\t${f.detail}\t${f.path}`);
-      console.log(`${name}: ${findings.length} difference(s), ${unverifiable.length} unverifiable`);
+      for (const f of findings) console.log(`${f.key}\t${f.detail}\t${f.path}`);
+      console.log(`${name}: ${findings.length} difference(s)`);
       continue;
     }
     for (const f of unexpected) {
@@ -606,7 +726,7 @@ function main(argv) {
       console.error(`${name}: stale allowlist entry "${k}" (the difference is gone; remove it)`);
     }
     if (unexpected.length || stale.length) failed = true;
-    else console.log(`${name}: model wire types in sync (${findings.length} allowlisted difference(s); ${unverifiable.length} Rust String field(s) narrowed to TS literals, unverifiable)`);
+    else console.log(`${name}: model wire types in sync (${findings.length} allowlisted difference(s))`);
   }
   if (failed) {
     console.error('\nFix the Rust or TS model, or (for an intentional difference) add a commented entry to scripts/model-wire-drift-allowlist.mjs.');

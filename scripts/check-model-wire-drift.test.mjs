@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
 
-import { checkFormat } from './check-model-wire-drift.mjs';
+import { checkFormat, scanNullProvenance } from './check-model-wire-drift.mjs';
 
 // A serialize-mode schema in the shape schemars emits for:
 //   struct Doc { body: Vec<Block>, #[skip_serializing_if] title: Option<String>,
@@ -54,12 +54,12 @@ export interface Doc {
 }
 `;
 
-function run(source, allowlist = {}) {
+function run(source, allowlist = {}, rustSchema = schema) {
   const dir = mkdtempSync(path.join(tmpdir(), 'model-wire-drift-'));
   try {
     writeFileSync(path.join(dir, 'tsconfig.json'), JSON.stringify({ compilerOptions: { strict: true } }));
     writeFileSync(path.join(dir, 'types.ts'), source);
-    writeFileSync(path.join(dir, 'schema.json'), JSON.stringify(schema));
+    writeFileSync(path.join(dir, 'schema.json'), JSON.stringify(rustSchema));
     return checkFormat('fixture', {
       schemaFile: path.join(dir, 'schema.json'),
       format: { tsconfig: path.join(dir, 'tsconfig.json'), tsFile: path.join(dir, 'types.ts'), tsRoot: 'Doc' },
@@ -88,8 +88,8 @@ test('each kind of drift is reported once with a stable key', () => {
   assert.deepEqual(keys, [
     'Doc.body<type=image>: variant-never-emitted',
     'Doc.color: rust-null',
-    'Doc.kind: literal-missing-in-ts',
-    'Doc.size: type-mismatch',
+    'Doc.kind: literal-missing-in-ts ["b"]',
+    'Doc.size: type-mismatch (Rust array 2..2 vs TS tuple 3)',
     'Doc.title: rust-optional',
     // The recursive union is checked again where Para nests it.
     'Para<type=para>.children<type=image>: variant-never-emitted',
@@ -107,4 +107,93 @@ test('allowlist entries suppress known drift and stale entries are reported', ()
   const result = run(drifted, { 'Doc.title: rust-optional': 'known', 'Doc.*: ts-only': 'gone' });
   assert.deepEqual(result.unexpected, []);
   assert.deepEqual(result.stale, ['Doc.*: ts-only']);
+});
+
+const keysOf = (source, rustSchema) => run(source, {}, rustSchema).findings.map((f) => f.key);
+const single = (properties, required = Object.keys(properties), $defs = {}) => ({
+  title: 'Doc', type: 'object', properties, required, $defs,
+});
+
+test('untyped and never TS types do not silence the comparison', () => {
+  assert.deepEqual(keysOf(inSync.replace('body: Block[];', 'body: any;')), ['Doc.body: ts-untyped']);
+  assert.deepEqual(keysOf(inSync.replace('body: Block[];', 'body: never;')), [
+    'Doc.body: type-mismatch (Rust array vs TS never)',
+  ]);
+  assert.deepEqual(keysOf('export interface Doc { v: string }', single({ v: true })), ['Doc.v: rust-untyped']);
+});
+
+test('an allowlisted literal difference cannot silently grow', () => {
+  const drifted = inSync.replace("kind: 'a' | 'b';", "kind: 'a';");
+  assert.deepEqual(run(drifted, { 'Doc.kind: literal-missing-in-ts ["b"]': 'known' }).unexpected, []);
+  const grown = structuredClone(schema);
+  grown.$defs.Kind.oneOf[0].enum.push('c');
+  assert.deepEqual(
+    run(drifted, { 'Doc.kind: literal-missing-in-ts ["b"]': 'known' }, grown).unexpected.map((f) => f.key),
+    ['Doc.kind: literal-missing-in-ts ["b","c"]'],
+  );
+  // Narrowing a Rust String in TS is pinned by its literals too.
+  assert.deepEqual(keysOf("export interface Doc { v: 'x' | 'y' }", single({ v: { type: 'string' } })), [
+    'Doc.v: ts-narrower-literal ["x","y"]',
+  ]);
+});
+
+test('union members are paired by compatibility, not declaration order', () => {
+  const rust = single({
+    v: { anyOf: [{ type: 'array', items: { type: 'number' } }, { type: 'array', items: { type: 'string' } }] },
+  });
+  assert.deepEqual(keysOf('export interface Doc { v: string[] | number[] }', rust), []);
+  for (const ts of ['string[] | boolean[]', 'boolean[] | string[]']) {
+    assert.deepEqual(keysOf(`export interface Doc { v: ${ts} }`, rust), [
+      'Doc.v: type-mismatch (Rust number[] vs TS boolean[] | string[])',
+    ]);
+  }
+  // Two TS members sharing a tag value: the compatible one is used.
+  const tagged = single({
+    v: { oneOf: [{ type: 'object', properties: { t: { const: 'a' }, n: { type: 'number' } }, required: ['t', 'n'] }] },
+  });
+  assert.deepEqual(
+    keysOf("export interface Doc { v: { t: 'a'; s: string } | { t: 'a'; n: number } }", tagged),
+    [],
+  );
+});
+
+test('named fields and index signatures are both compared', () => {
+  const rust = single({ id: { type: 'string' } });
+  rust.additionalProperties = { type: 'number' };
+  assert.deepEqual(keysOf('export interface Doc { id: string; [key: string]: string }', rust), [
+    'Doc.[key]: type-mismatch (Rust number vs TS string)',
+  ]);
+  assert.deepEqual(keysOf('export interface Doc { id: string }', rust), ['Doc.[key]: missing-in-ts']);
+});
+
+test('an omittable literal-valued field still needs an optional TS field', () => {
+  const rust = single({ v: { const: 'fixed' } }, []);
+  assert.deepEqual(keysOf("export interface Doc { v: 'fixed' }", rust), ['Doc.v: rust-optional']);
+});
+
+test('fields whose omission does not exclude null are rejected', () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'model-wire-drift-rs-'));
+  try {
+    writeFileSync(path.join(dir, 'model.rs'), [
+      'pub struct A {',
+      '    #[serde(skip_serializing_if = "Option::is_none")]',
+      '    pub fine: Option<String>,',
+      '    /// Doc comment between attribute and field.',
+      '    #[serde(',
+      '        rename = "x",',
+      '        skip_serializing_if = "is_blank"',
+      '    )]',
+      '    pub other_predicate: Option<String>,',
+      '    #[serde(skip_serializing_if = "Option::is_none")]',
+      '    pub nested: Option<Option<u32>>,',
+      '}',
+    ].join('\n'));
+    const problems = scanNullProvenance([dir]).map((p) => p.replace(/^.*model\.rs:/, ''));
+    assert.deepEqual(problems, [
+      '9 other_predicate: Option skipped by "is_blank" can still serialize null',
+      '11 nested: Option<Option<..>> can serialize null',
+    ]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
