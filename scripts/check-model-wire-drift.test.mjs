@@ -64,7 +64,7 @@ function run(source, allowlist = {}, rustSchema = schema) {
       schemaFile: path.join(dir, 'schema.json'),
       format: { tsconfig: path.join(dir, 'tsconfig.json'), tsFile: path.join(dir, 'types.ts'), tsRoot: 'Doc' },
       allowlist,
-      tsNullAllowlist: {},
+      widening: {},
     });
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -87,8 +87,9 @@ test('each kind of drift is reported once with a stable key', () => {
     .replace('size: [number, number];', 'size: [number, number, number];');
   const keys = run(drifted).findings.map((f) => f.key);
   assert.deepEqual(keys, [
-    'Doc.body<type=image>: variant-never-emitted',
+    'Doc.body[]<type=image>: variant-never-emitted',
     'Doc.color: rust-null',
+    'Doc.color: ts-optional',
     'Doc.kind: literal-missing-in-ts ["b"]',
     'Doc.size: type-mismatch (Rust length 2..2 vs TS length 3..3)',
     'Doc.title: rust-optional',
@@ -275,7 +276,7 @@ test('TS tuples with rest elements accept fixed-size Rust arrays', () => {
 
 test('widening a tagged member to an extra discriminant value is reported', () => {
   const widened = inSync.replace("{ type: 'rule'; width: number }", "{ type: 'rule' | 'hr'; width: number }");
-  assert.deepEqual(keysOf(widened), ['Doc.body<type=hr>: variant-never-emitted']);
+  assert.deepEqual(keysOf(widened), ['Doc.body[]<type=hr>: variant-never-emitted']);
 });
 
 test('an empty TS object does not erase a Rust map', () => {
@@ -420,4 +421,21 @@ test('TS-only null alternatives are reported', () => {
 test('recursive array shapes terminate', () => {
   const rust = { title: 'Doc', type: 'object', properties: { v: { $ref: '#/$defs/A' } }, required: ['v'], $defs: { A: { type: 'array', items: { $ref: '#/$defs/A' } } } };
   assert.deepEqual(keysOf('type A = A[]; export interface Doc { v: A }', rust), []);
+});
+
+test('keys distinguish a field from its elements, and undefined values are reported', () => {
+  const rust = single({ v: { type: ['array', 'null'], items: { type: 'number' } } });
+  assert.deepEqual(keysOf('export interface Doc { v: number[] | null }', rust), []);
+  assert.deepEqual(keysOf('export interface Doc { v: (number | null)[] | null }', rust), ['Doc.v[]: ts-null']);
+  assert.deepEqual(keysOf('export interface Doc { v: (number | undefined)[] | null }', rust), ['Doc.v[]: ts-undefined']);
+  assert.deepEqual(keysOf('export interface Doc { v: number[] | null | undefined }', rust), ['Doc.v: ts-undefined']);
+});
+
+test('TS widening a Rust literal set to its primitive is reported', () => {
+  const rust = single({ k: { type: 'string', enum: ['a', 'b'] } });
+  assert.deepEqual(keysOf('export interface Doc { k: string }', rust), ['Doc.k: ts-wider-primitive (Rust ["a","b"] vs TS string)']);
+});
+
+test('requiredness is compared in both directions', () => {
+  assert.deepEqual(keysOf(inSync.replace('body: Block[];', 'body?: Block[];')), ['Doc.body: ts-optional']);
 });

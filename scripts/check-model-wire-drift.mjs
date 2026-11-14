@@ -23,7 +23,7 @@ import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 
-import { MODEL_WIRE_DRIFT_ALLOWLIST, MODEL_WIRE_TS_NULL_ALLOWLIST } from './model-wire-drift-allowlist.mjs';
+import { MODEL_WIRE_DRIFT_ALLOWLIST, MODEL_WIRE_TS_WIDENING_ALLOWLIST } from './model-wire-drift-allowlist.mjs';
 
 const require = createRequire(new URL('../package.json', import.meta.url));
 const ts = require('typescript-compiler-api');
@@ -265,7 +265,9 @@ function tsShapes(format) {
     if (f & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) return ANY;
     if (f & ts.TypeFlags.Never) return { kind: 'never' };
     if (f & ts.TypeFlags.Union) {
-      const members = type.types.filter((t) => !(t.flags & (ts.TypeFlags.Undefined | ts.TypeFlags.Void)));
+      // `undefined` is kept here; optional properties drop it at the property
+      // boundary (absence), anywhere else it is a value JSON cannot carry.
+      const members = type.types;
       const bools = members.filter((t) => t.flags & ts.TypeFlags.BooleanLiteral);
       const rest = members.filter((t) => !(t.flags & ts.TypeFlags.BooleanLiteral));
       const shapes = rest.map(convert);
@@ -282,11 +284,13 @@ function tsShapes(format) {
     if (f & (ts.TypeFlags.Number | ts.TypeFlags.Enum | ts.TypeFlags.EnumLiteral)) return prim('number');
     if (f & ts.TypeFlags.Boolean) return prim('boolean');
     if (f & ts.TypeFlags.Null) return prim('null');
+    if (f & (ts.TypeFlags.Undefined | ts.TypeFlags.Void)) return prim('undefined');
     if (checker.isTupleType(type)) {
       const flags = type.target.elementFlags ?? [];
       return {
         kind: 'tuple',
-        items: checker.getTypeArguments(type).map(convert),
+        // An optional element's `undefined` means a shorter tuple.
+        items: checker.getTypeArguments(type).map((t, i) => ((flags[i] ?? 1) & 2 ? withoutUndefined(convert(t)) : convert(t))),
         // ts.ElementFlags: Required 1, Optional 2, Rest 4, Variadic 8.
         flags: checker.getTypeArguments(type).map((_, i) => flags[i] ?? 1),
       };
@@ -310,10 +314,9 @@ function tsShapes(format) {
             const propType = declaration
               ? checker.getTypeOfSymbolAtLocation(symbol, declaration)
               : checker.getTypeOfSymbol(symbol);
-            props.set(symbol.getName(), {
-              shape: convert(propType),
-              optional: (symbol.flags & ts.SymbolFlags.Optional) !== 0,
-            });
+            const optional = (symbol.flags & ts.SymbolFlags.Optional) !== 0;
+            const shape = convert(propType);
+            props.set(symbol.getName(), { shape: optional ? withoutUndefined(shape) : shape, optional });
           }
           return props;
         }),
@@ -323,6 +326,16 @@ function tsShapes(format) {
   }
 
   return convert(rootType);
+}
+
+/** An optional property's `undefined` member means absence, not a value. */
+function withoutUndefined(shape) {
+  return lazy(() => {
+    const s = deref(shape);
+    if (s.kind !== 'union') return s.kind === 'prim' && s.name === 'undefined' ? { kind: 'never' } : s;
+    const members = s.members.filter((m) => !(deref(m).kind === 'prim' && deref(m).name === 'undefined'));
+    return members.length === 1 ? deref(members[0]) : { ...s, members };
+  });
 }
 
 function memo(fn) {
@@ -416,6 +429,11 @@ function comparer(sink) {
       report(ctx.owner, ctx.field, 'type-mismatch', 'TS never accepts the value Rust emits', ctx.path, `(Rust ${describe(r)} vs TS never)`);
       return;
     }
+    if (hasPrim(t, 'undefined')) {
+      report(ctx.owner, ctx.field, 'ts-undefined', 'TS accepts undefined as a value; JSON never carries it', ctx.path);
+      t = withoutPrim(t, 'undefined');
+      if (t.kind === 'never') return;
+    }
     if (hasNull(r) && !hasNull(t)) {
       report(ctx.owner, ctx.field, 'rust-null', 'Rust can emit null; the TS type does not allow null', ctx.path);
     } else if (hasNull(t) && !hasNull(r)) {
@@ -437,13 +455,13 @@ function comparer(sink) {
     if ([r.kind, t.kind].some((k) => k === 'union' || k === 'literal' || k === 'pattern')) return walkUnion(r, t, ctx);
     if ((r.kind === 'array' || r.kind === 'tuple') && t.kind === 'tuple') return walkTuple(r, t, ctx);
     if (r.kind === 'tuple' && t.kind === 'array') {
-      r.items.forEach((item, i) => walk(item, t.item, { ...ctx, path: `${ctx.path}[${i}]` }));
+      r.items.forEach((item, i) => walk(item, t.item, { ...ctx, field: `${ctx.field}[${i}]`, path: `${ctx.path}[${i}]` }));
       return;
     }
     if (r.kind === 'map' && t.kind === 'object' && !t.index && t.props().size > 0 && [...t.props().values()].every((p) => p.optional)) {
       // A Rust map keyed by a closed vocabulary is typed as
       // `Partial<Record<Key, V>>` in TS: every value must match.
-      for (const [key, p] of t.props()) walk(r.value, p.shape, { ...ctx, path: `${ctx.path}.${key}` });
+      for (const [key, p] of t.props()) walk(r.value, p.shape, { ...ctx, field: `${ctx.field}{${key}}`, path: `${ctx.path}.${key}` });
       return;
     }
     if (r.kind !== t.kind) {
@@ -455,9 +473,9 @@ function comparer(sink) {
         if (r.name !== t.name) report(ctx.owner, ctx.field, 'type-mismatch', 'incompatible primitives', ctx.path, `(Rust ${r.name} vs TS ${t.name})`);
         return;
       case 'array':
-        return walk(r.item, t.item, { ...ctx, path: `${ctx.path}[]` });
+        return walk(r.item, t.item, { ...ctx, field: `${ctx.field}[]`, path: `${ctx.path}[]` });
       case 'map':
-        return walk(r.value, t.value, { ...ctx, path: `${ctx.path}{}` });
+        return walk(r.value, t.value, { ...ctx, field: `${ctx.field}{}`, path: `${ctx.path}{}` });
       case 'object':
         return walkObject(r, t, ctx);
       default:
@@ -480,7 +498,7 @@ function comparer(sink) {
     if (r.kind === 'array') {
       // Every element of a Rust array has the item type: it must fit every
       // TS position it can occupy.
-      t.items.forEach((item, i) => walk(r.item, item, { ...ctx, path: `${ctx.path}[${i}]` }));
+      t.items.forEach((item, i) => walk(r.item, item, { ...ctx, field: `${ctx.field}[${i}]`, path: `${ctx.path}[${i}]` }));
       return;
     }
     // Known Rust length: fixed TS head, rest middle, fixed TS tail.
@@ -494,7 +512,7 @@ function comparer(sink) {
     };
     for (let i = 0; i < n; i++) {
       const ti = tAt(i);
-      if (ti) walk(r.items[i], ti, { ...ctx, path: `${ctx.path}[${i}]` });
+      if (ti) walk(r.items[i], ti, { ...ctx, field: `${ctx.field}[${i}]`, path: `${ctx.path}[${i}]` });
     }
   }
 
@@ -525,6 +543,7 @@ function comparer(sink) {
         continue;
       }
       if (rf.optional && !tf.optional) report(owner, field, 'rust-optional', `Rust may omit it; TS ${t.name} requires it`, where);
+      else if (!rf.optional && tf.optional) report(owner, field, 'ts-optional', `Rust always emits it; TS ${t.name} marks it optional`, where);
       walk(rf.shape, tf.shape, { owner, field, path: where });
     }
     for (const [field, tf] of tp) {
@@ -577,7 +596,11 @@ function comparer(sink) {
       else report(ctx.owner, ctx.field, 'type-mismatch', 'no TS member accepts this primitive', ctx.path, `(Rust ${p} vs TS ${describeUnion(tMembers)})`);
     }
     for (const p of tPrim) {
-      if (!rPrim.has(p) && ![...rLit].some((v) => scalarKind(v) === p)) {
+      if (rPrim.has(p)) continue;
+      const emitted = [...rLit].filter((v) => scalarKind(v) === p);
+      if (emitted.length) {
+        report(ctx.owner, ctx.field, 'ts-wider-primitive', `Rust emits a closed set; TS accepts any ${p}`, ctx.path, `(Rust ${values(emitted)} vs TS ${p})`);
+      } else {
         report(ctx.owner, ctx.field, 'variant-never-emitted', 'TS accepts a primitive Rust never emits', ctx.path, `(TS ${p})`);
       }
     }
@@ -698,6 +721,17 @@ function discriminant(objects) {
     if (ok) return key;
   }
   return null;
+}
+
+function hasPrim(s, name) {
+  return (s.kind === 'prim' && s.name === name) || (s.kind === 'union' && s.members.some((m) => hasPrim(deref(m), name)));
+}
+
+function withoutPrim(s, name) {
+  if (s.kind === 'prim' && s.name === name) return { kind: 'never' };
+  if (s.kind !== 'union') return s;
+  const members = s.members.filter((m) => !(deref(m).kind === 'prim' && deref(m).name === name));
+  return members.length === 1 ? deref(members[0]) : { ...s, members };
 }
 
 function hasNull(s) {
@@ -1104,7 +1138,7 @@ export function checkFormat(name, {
   list = false,
   format = FORMATS[name],
   allowlist = MODEL_WIRE_DRIFT_ALLOWLIST[name],
-  tsNullAllowlist = MODEL_WIRE_TS_NULL_ALLOWLIST[name],
+  widening = MODEL_WIRE_TS_WIDENING_ALLOWLIST[name],
 } = {}) {
   const provenance = format.rustSources ? scanNullProvenance(format.rustSources) : [];
   if (provenance.length) {
@@ -1114,8 +1148,10 @@ export function checkFormat(name, {
   const findings = compareShapes(rustShapes(rustSchema(format, schemaFile)), tsShapes(format));
   if (list) return { findings, unexpected: findings, stale: [] };
   const allowed = new Set(Object.keys(allowlist ?? {}));
-  for (const [owner, fields] of Object.entries(tsNullAllowlist ?? {})) {
-    for (const field of fields) allowed.add(`${owner}.${field}: ts-null`);
+  for (const [category, owners] of Object.entries(widening ?? {})) {
+    for (const [owner, fields] of Object.entries(owners)) {
+      for (const field of fields) allowed.add(`${owner}.${field}: ${category}`);
+    }
   }
   const keys = new Set(findings.map((f) => f.key));
   const unexpected = findings.filter((f) => !allowed.has(f.key));
