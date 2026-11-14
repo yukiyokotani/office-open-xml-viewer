@@ -294,6 +294,7 @@ test('null provenance follows outer aliases and wrappers', () => {
       'type Plain = Option<String>;',
       'type Maybe<T> = Option<T>;',
       'type Identity<T> = T;',
+      'type NullableId = Maybe<Option<String>>;',
       'pub struct A {',
       '    #[serde(skip_serializing_if = "Option::is_none")]',
       '    pub aliased: MaybeError,',
@@ -305,14 +306,17 @@ test('null provenance follows outer aliases and wrappers', () => {
       '    pub generic_outer: Maybe<Option<String>>,',
       '    #[serde(skip_serializing_if = "Option::is_none")]',
       '    pub generic_inner: Option<Identity<Option<String>>>,',
+      '    #[serde(skip_serializing_if = "Option::is_none")]',
+      '    pub through_alias: NullableId,',
       '}',
     ].join('\n'));
     const problems = scanNullProvenance([dir]).map((p) => p.replace(/^.*model\.rs:/, ''));
     assert.deepEqual(problems, [
-      '7 aliased: Option<Option<String>> can serialize null while present (Option)',
-      '9 boxed: Option<Option<String>> can serialize null while present (Option)',
-      '13 generic_outer: skipped Maybe<Option<String>> uses generic alias Maybe; null exclusion cannot be established',
-      '15 generic_inner: skipped Option<Identity<Option<String>>> uses generic alias Identity; null exclusion cannot be established',
+      '8 aliased: Option<Option<String>> can serialize null while present (Option)',
+      '10 boxed: Option<Option<String>> can serialize null while present (Option)',
+      '14 generic_outer: skipped Maybe<Option<String>> uses generic alias Maybe; null exclusion cannot be established',
+      '16 generic_inner: skipped Option<Identity<Option<String>>> uses generic alias Identity; null exclusion cannot be established',
+      '18 through_alias: skipped NullableId uses generic alias NullableId; null exclusion cannot be established',
     ]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -322,4 +326,12 @@ test('null provenance follows outer aliases and wrappers', () => {
 test('TS tuples with trailing fixed elements', () => {
   const rust = single({ v: { type: 'array', prefixItems: [{ type: 'number' }, { type: 'string' }], minItems: 2, maxItems: 2 } });
   assert.deepEqual(keysOf('export interface Doc { v: [...number[], string] }', rust), []);
+});
+
+test('template-literal and string-mapping narrowing is reported', () => {
+  const rust = single({ p: { type: 'string' }, u: { type: 'string' } });
+  assert.deepEqual(keysOf('export interface Doc { p: `word/${string}`; u: Uppercase<string> }', rust), [
+    'Doc.p: ts-narrower-pattern (`word/${string}`)',
+    'Doc.u: ts-narrower-pattern (Uppercase<string>)',
+  ]);
 });

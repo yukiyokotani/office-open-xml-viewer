@@ -277,7 +277,8 @@ function tsShapes(format) {
     }
     if (f & (ts.TypeFlags.StringLiteral | ts.TypeFlags.NumberLiteral)) return { kind: 'literal', values: new Set([type.value]) };
     if (f & ts.TypeFlags.BooleanLiteral) return { kind: 'literal', values: new Set([type.intrinsicName === 'true']) };
-    if (f & (ts.TypeFlags.String | ts.TypeFlags.TemplateLiteral | ts.TypeFlags.StringMapping)) return prim('string');
+    if (f & (ts.TypeFlags.TemplateLiteral | ts.TypeFlags.StringMapping)) return { kind: 'pattern', text: checker.typeToString(type) };
+    if (f & ts.TypeFlags.String) return prim('string');
     if (f & (ts.TypeFlags.Number | ts.TypeFlags.Enum | ts.TypeFlags.EnumLiteral)) return prim('number');
     if (f & ts.TypeFlags.Boolean) return prim('boolean');
     if (f & ts.TypeFlags.Null) return prim('null');
@@ -413,7 +414,7 @@ function comparer(sink) {
       return;
     }
 
-    if ([r.kind, t.kind].some((k) => k === 'union' || k === 'literal')) return walkUnion(r, t, ctx);
+    if ([r.kind, t.kind].some((k) => k === 'union' || k === 'literal' || k === 'pattern')) return walkUnion(r, t, ctx);
     if ((r.kind === 'array' || r.kind === 'tuple') && t.kind === 'tuple') return walkTuple(r, t, ctx);
     if (r.kind === 'tuple' && t.kind === 'array') {
       r.items.forEach((item, i) => walk(item, t.item, { ...ctx, path: `${ctx.path}[${i}]` }));
@@ -532,6 +533,17 @@ function comparer(sink) {
     const tLit = literalsOf(tMembers);
     const rPrim = primsOf(rMembers);
     const tPrim = primsOf(tMembers);
+    // TS template-literal / `Uppercase<string>` members: string subsets the
+    // Rust schema cannot express. Rust strings checked against them are
+    // reported as narrowing; Rust string literals are not matched against
+    // the pattern and so must be accepted by a plain string or literal.
+    const tPatterns = tMembers.filter((m) => m.kind === 'pattern').map((m) => m.text).sort();
+    if (tPatterns.length && rPrim.has('string') && !tPrim.has('string')) {
+      report(ctx.owner, ctx.field, 'ts-narrower-pattern', 'Rust emits any string; TS narrows it to a pattern', ctx.path, `(${tPatterns.join(' | ')})`);
+    }
+    if (tPatterns.length && !rPrim.has('string') && ![...rLit].some((v) => typeof v === 'string')) {
+      report(ctx.owner, ctx.field, 'variant-never-emitted', 'TS accepts a string pattern Rust never emits', ctx.path, `(TS ${tPatterns.join(' | ')})`);
+    }
 
     // Scalar literals and primitives.
     const missing = [...rLit].filter((v) => !tLit.has(v) && !tPrim.has(scalarKind(v)));
@@ -539,7 +551,7 @@ function comparer(sink) {
     const extra = [...tLit].filter((v) => !rLit.has(v) && !rPrim.has(scalarKind(v)));
     if (extra.length) report(ctx.owner, ctx.field, 'literal-never-emitted', 'TS accepts values Rust never emits', ctx.path, values(extra));
     for (const p of rPrim) {
-      if (tPrim.has(p)) continue;
+      if (tPrim.has(p) || (p === 'string' && tPatterns.length)) continue;
       const narrowed = [...tLit].filter((v) => scalarKind(v) === p);
       if (narrowed.length) report(ctx.owner, ctx.field, 'ts-narrower-literal', `Rust emits any ${p}; TS narrows it to literals`, ctx.path, values(narrowed));
       else report(ctx.owner, ctx.field, 'type-mismatch', 'no TS member accepts this primitive', ctx.path, `(Rust ${p} vs TS ${describeUnion(tMembers)})`);
@@ -684,6 +696,7 @@ function describe(s) {
   if (s.kind === 'prim') return s.name;
   if (s.kind === 'object') return `object ${s.name}`;
   if (s.kind === 'literal') return [...s.values].map(q).join(' | ');
+  if (s.kind === 'pattern') return s.text;
   return s.kind;
 }
 
@@ -766,6 +779,16 @@ export function scanNullProvenance(dirs) {
     }
     return t;
   };
+  // Aliases built on a generic alias inherit its ambiguity.
+  for (let changed = true; changed;) {
+    changed = false;
+    for (const [name, rhs] of aliases) {
+      if (!genericAliases.has(name) && (rhs.match(/\w+/g) ?? []).some((t) => genericAliases.has(t))) {
+        genericAliases.add(name);
+        changed = true;
+      }
+    }
+  }
   for (let changed = true; changed;) {
     changed = false;
     for (const [name, rhs] of aliases) {

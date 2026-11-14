@@ -17,6 +17,8 @@
 //   literal-missing-in-ts  Rust emits literal values the TS type does not accept.
 //   literal-never-emitted  TS accepts literal values Rust never emits.
 //   ts-narrower-literal    Rust emits any string/number/boolean; TS narrows it.
+//   ts-narrower-pattern    Rust emits any string; TS narrows it to a template
+//                          literal or string-mapping type.
 //   variant-missing-in-ts  A union alternative Rust emits is absent in TS.
 //   variant-never-emitted  A TS union alternative Rust never emits.
 //   rust-untyped/ts-untyped  One side is unconstrained (any), so unchecked.
