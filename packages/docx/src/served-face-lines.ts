@@ -1,6 +1,6 @@
 import {
   loadNativeRouteSentinels,
-  measureFontFaceNormalLine,
+  measureFontFaceNormalLines,
   unloadOfficeFontFallbacks,
   type LocalFontNormalLine,
 } from '@silurus/ooxml-core';
@@ -29,7 +29,32 @@ import {
  *
  * In worker mode the DOM realm measures (a worker has no layout strut) and
  * the worker receives plain numbers; it registers its own private family
- * from the same source for the ownership judgement.
+ * from the same source for the ownership judgement, while the DOM realm
+ * measures.
+ *
+ * Subsets of one style (`LoadedSourceFace.sharedSubsetMetrics`). A source
+ * may guarantee that its `unicode-range` subsets of one served family with
+ * equal descriptors keep one font file's vertical metric tables (core
+ * FontCssApiSource.sharedSubsetMetrics: the Google Fonts CSS2 API, observed
+ * for every subset of its catalog). Their measurements are then equal, so
+ * the style is measured once, through the subset whose range holds U+0020
+ * (the style's first available font, CSS Fonts 4 §5: the face whose metrics
+ * CSS gives the family's normal line), and every loaded subset of the style
+ * takes that measurement. A style none of whose loaded subsets holds U+0020
+ * is measured per face, as above. Ownership of such a style's clusters is
+ * judged on the session's own private family of the served family (the
+ * family that paints): a cluster is owned when the face CSS selects for it
+ * among the style's subsets draws it, which, for equal geometry and the
+ * declared `unicode-range` gate, gives the per-subset judgement's answer, so
+ * no subset is registered again to be judged and the measuring probe is
+ * released at once.
+ *
+ * Cost (library resource policy): a probe is a pure function of its source
+ * bytes and descriptors in one realm, so one registration (one browser
+ * decode) serves every document of the realm holding the same downloaded
+ * buffer, and is measured once; every probe of a document is measured in
+ * one batch (core measureFontFaceNormalLines), a few layouts in all rather
+ * than several per face.
  */
 
 /** The longest a probe registration may take to load: the font-source
@@ -55,6 +80,9 @@ export interface ServedFaceLineRequest {
   readonly weight: string;
   readonly style: string;
   readonly stretch: string;
+  /** Snapshot indices of the subsets of a shared-metric style this face
+   * measures for (itself included); absent for a face measured for itself. */
+  readonly members?: readonly number[];
 }
 
 export interface ServedFaceLineMeasurement {
@@ -70,27 +98,83 @@ export interface ServedFaceLine {
   readonly lines: Readonly<Record<string, LocalFontNormalLine | null>>;
 }
 
+const holdsSpace = (unicodeRange: string) =>
+  (parseUnicodeRange(unicodeRange) ?? [[0, 0x10ffff] as const]).some(([lo, hi]) => lo <= 0x20 && 0x20 <= hi);
+
+/** The faces to measure: each face without tables, except that the loaded
+ * subsets of a shared-metric style are measured once, through the last
+ * registered of them whose range holds U+0020 (see the module comment). */
 export function servedFaceLineRequests(loaded: LoadedFontSources): ServedFaceLineRequest[] {
-  return loaded.faces.flatMap((face, index) => face.resourceMetrics || face.probeSource === undefined ? [] : [{
-    index,
-    source: face.probeSource,
-    weight: face.weight,
-    style: face.style,
-    stretch: face.stretch,
-  }]);
+  const requests: ServedFaceLineRequest[] = [];
+  const styles = new Map<string, number[]>();
+  const request = (index: number, members?: readonly number[]): ServedFaceLineRequest => {
+    const face = loaded.faces[index]!;
+    return {
+      index, source: face.probeSource!, weight: face.weight, style: face.style, stretch: face.stretch,
+      ...(members ? { members } : {}),
+    };
+  };
+  loaded.faces.forEach((face, index) => {
+    if (face.resourceMetrics || face.probeSource === undefined) return;
+    if (!face.sharedSubsetMetrics) { requests.push(request(index)); return; }
+    const key = [face.sourceIndex, fontFamilyKey(face.family), face.weight, face.style, face.stretch].join('\u0000');
+    const members = styles.get(key);
+    if (members) members.push(index);
+    else styles.set(key, [index]);
+  });
+  for (const members of styles.values()) {
+    const first = [...members].reverse().find((index) => holdsSpace(loaded.faces[index]!.unicodeRange));
+    if (first === undefined) requests.push(...members.map((index) => request(index)));
+    else requests.push(request(first, Object.freeze(members)));
+  }
+  return requests.sort((a, b) => a.index - b.index);
 }
 
 let probeSerial = 0;
 
+/** Serial of each probe source buffer in this realm (see {@link registerProbe}). */
+const probeBuffers = new WeakMap<ArrayBuffer, number>();
+let probeBufferSerial = 0;
+
+/** The registration key of a probe: its source and descriptors. A probe is a
+ * pure function of its source bytes and descriptors in one realm (its own
+ * family holds it alone), so equal keys measure and own exactly alike.
+ * Downloaded bytes are one buffer for every session of the realm
+ * (core face-download.ts), so documents sharing a face share its probe. An
+ * inline data: URL is not shared (no cheap identity). */
+function probeKey(request: ServedFaceLineRequest): string | undefined {
+  const { source } = request;
+  if (typeof source === 'string') return undefined;
+  let serial = probeBuffers.get(source);
+  if (serial === undefined) { serial = ++probeBufferSerial; probeBuffers.set(source, serial); }
+  return `served-face:bytes:${serial}\u0000${request.weight}\u0000${request.style}\u0000${request.stretch}`;
+}
+
+/** Register (or join) the probe of `request` in `fontSet`. Each call holds
+ * one reference, released with releaseFaces. */
 function registerProbe(request: ServedFaceLineRequest, fontSet: FontFaceSet): FontFace {
-  const family = `__ooxml_served_face_${++probeSerial}`;
-  return retainFace(`served-face:${family}`, fontSet, () => {
-    const created = new FontFace(family, request.source, {
+  const key = probeKey(request);
+  return retainFace(key ?? `served-face:${++probeSerial}`, fontSet, () => {
+    const created = new FontFace(`__ooxml_served_face_${++probeSerial}`, request.source, {
       weight: request.weight, style: request.style, stretch: request.stretch,
     });
     fontSet.add(created);
     return created;
   }).face;
+}
+
+/** One probe per distinct registration key of `requests`, each held once:
+ * the probe of every request, by position. */
+function registerProbes(requests: readonly ServedFaceLineRequest[], fontSet: FontFaceSet): FontFace[] {
+  const byKey = new Map<string, FontFace>();
+  return requests.map((request) => {
+    const key = probeKey(request);
+    const held = key === undefined ? undefined : byKey.get(key);
+    if (held) return held;
+    const face = registerProbe(request, fontSet);
+    if (key !== undefined) byKey.set(key, face);
+    return face;
+  });
 }
 
 /** Whether `face` loads within {@link SERVED_FACE_PROBE_TIMEOUT_MS} and
@@ -116,15 +200,35 @@ async function loaded(face: FontFace, signal?: AbortSignal): Promise<boolean> {
   }
 }
 
-function measureTuples(face: FontFace, owner: Document): Record<string, LocalFontNormalLine | null> {
-  const context = owner.createElement('canvas').getContext('2d');
-  const lines: Record<string, LocalFontNormalLine | null> = Object.create(null);
-  for (const { weight, style } of WML_TUPLES) {
-    lines[tupleKey(weight, style)] = context
-      ? measureFontFaceNormalLine(face, weight, style, owner.fonts, context, PROBE_EM_PX, owner)
-      : null;
-  }
-  return lines;
+type TupleLines = Readonly<Record<string, LocalFontNormalLine | null>>;
+
+/** Measured tuples per loaded probe: a probe is library-private and never
+ * changes, so it is measured once in its realm. */
+const measuredProbes = new WeakMap<FontFace, TupleLines>();
+
+/** Every WordprocessingML tuple of each face, measured in one batch (core
+ * measureFontFaceNormalLines: at most a few layouts for the whole list).
+ * `cache` keeps the results of library probes (never of application faces,
+ * whose descriptors the application may change). */
+function measureTuples(faces: readonly FontFace[], owner: Document, cache: boolean): TupleLines[] {
+  const fresh = [...new Set(faces)].filter((face) => !cache || !measuredProbes.has(face));
+  const context = fresh.length ? owner.createElement('canvas').getContext('2d') : null;
+  const measured = context
+    ? measureFontFaceNormalLines(fresh.flatMap((face) => WML_TUPLES.map(({ weight, style }) => ({ face, weight, style }))),
+      owner.fonts, context, PROBE_EM_PX, owner)
+    : fresh.flatMap(() => WML_TUPLES.map(() => null));
+  const byFace = new Map<FontFace, TupleLines>();
+  fresh.forEach((face, index) => {
+    const lines: Record<string, LocalFontNormalLine | null> = Object.create(null);
+    WML_TUPLES.forEach(({ weight, style }, tuple) => {
+      lines[tupleKey(weight, style)] = measured[index * WML_TUPLES.length + tuple] ?? null;
+    });
+    byFace.set(face, lines);
+    // Without a context nothing was measured: not kept, so a later call
+    // measures the probe.
+    if (cache && context) measuredProbes.set(face, Object.freeze(lines));
+  });
+  return faces.map((face) => byFace.get(face) ?? measuredProbes.get(face)!);
 }
 
 /** DOM realm, worker mode: measure each request with a transient private
@@ -135,14 +239,17 @@ export async function measureServedFaceLines(
 ): Promise<ServedFaceLineMeasurement[]> {
   const owner = typeof document === 'undefined' ? null : document;
   if (!owner?.body) return requests.map(({ index }) => ({ index, lines: {} }));
-  return Promise.all(requests.map(async (request) => {
-    const face = registerProbe(request, owner.fonts);
-    try {
-      return { index: request.index, lines: await loaded(face, signal) ? measureTuples(face, owner) : {} };
-    } finally {
-      releaseFaces([face]);
-    }
-  }));
+  const faces = registerProbes(requests, owner.fonts);
+  try {
+    const ready = await Promise.all(faces.map((face) => loaded(face, signal)));
+    const measured = measureTuples(faces.filter((_, position) => ready[position]), owner, true);
+    let next = 0;
+    return requests.map((request, position) => ({ index: request.index, lines: ready[position] ? measured[next++]! : {} }));
+  } finally {
+    // After the caller has posted the answer: removing hundreds of faces from
+    // the set is not on the worker's path.
+    setTimeout(() => releaseFaces(new Set(faces)), 0);
+  }
 }
 
 /** Measured lines for one document's layout realm. */
@@ -171,7 +278,7 @@ export async function prepareServedFaceLines(
   sources: LoadedFontSources | undefined,
   fontSet: FontFaceSet | null,
   families: readonly string[],
-  measured?: readonly ServedFaceLineMeasurement[],
+  measured?: readonly ServedFaceLineMeasurement[] | PromiseLike<readonly ServedFaceLineMeasurement[]>,
   signal?: AbortSignal,
 ): Promise<PreparedServedFaceLines & { faces: FontFace[] }> {
   const requests = sources ? servedFaceLineRequests(sources) : [];
@@ -189,17 +296,38 @@ export async function prepareServedFaceLines(
   }
   const faceLines = new Map<number, ServedFaceLine>();
   const familyLines = new Map<string, ServedFaceLine>();
-  await Promise.all(requests.map(async (request) => {
-    const face = registerProbe(request, fontSet);
-    if (!await loaded(face, signal)) {
-      releaseFaces([face]);
+  // Probes: every face measured here (main mode), and every face judged on
+  // its own probe (not a shared-metric style). All are registered before any
+  // load is awaited; the loaded ones are measured together in one batch.
+  const probed = requests.filter((request) => owner || !request.members);
+  const probes = registerProbes(probed, fontSet);
+  const ready = await Promise.all(probes.map((face) => loaded(face, signal)));
+  const probeOf = new Map<ServedFaceLineRequest, FontFace>();
+  probed.forEach((request, position) => { if (ready[position]) probeOf.set(request, probes[position]!); });
+  // Kept for the document: the loaded probes of faces judged on their own.
+  const kept = new Set(probed.flatMap((request) => !request.members && probeOf.has(request) ? [probeOf.get(request)!] : []));
+  faces.push(...kept);
+  const measurable = requests.filter((request) => probeOf.has(request) || (!owner && request.members));
+  // Worker mode: the DOM realm measures while this realm registers and
+  // loads its own probes.
+  const answered = owner || signal?.aborted ? undefined : await measured;
+  const byIndex = new Map(answered?.map((measurement) => [measurement.index, measurement.lines]));
+  const measurements: (TupleLines | undefined)[] = owner && !signal?.aborted
+    ? measureTuples(measurable.map((request) => probeOf.get(request)!), owner, true)
+    : measurable.map((request) => byIndex.get(request.index));
+  // A shared-metric style's measuring probe is not needed once measured.
+  releaseFaces(new Set(probes.filter((face) => !kept.has(face))));
+  measurable.forEach((request, position) => {
+    const lines = measurements[position];
+    if (!lines) return;
+    if (!request.members) {
+      faceLines.set(request.index, { ownershipFamily: probeOf.get(request)!.family, lines });
       return;
     }
-    faces.push(face);
-    const measurement = owner ? measureTuples(face, owner)
-      : measured?.find((candidate) => candidate.index === request.index)?.lines;
-    if (measurement) faceLines.set(request.index, { ownershipFamily: face.family, lines: measurement });
-  }));
+    // The session's private family of the served family paints the style.
+    const alias = sources?.families.get(fontFamilyKey(sources.faces[request.index]!.family));
+    if (alias) for (const member of request.members) faceLines.set(member, { ownershipFamily: alias, lines });
+  });
   if (signal?.aborted) {
     unloadOfficeFontFallbacks(faces);
     return { ...NO_SERVED_FACE_LINES, faces: [] };
@@ -210,9 +338,10 @@ export async function prepareServedFaceLines(
   // single loaded face and its unicode-range holds U+0020, so it is the
   // family's first available font (CSS Fonts 4 §5) and both the strut and the
   // Canvas box are its own.
-  for (const face of appFaces) {
-    familyLines.set(fontFamilyKey(unquoted(face.family)), { ownershipFamily: unquoted(face.family), lines: measureTuples(face, owner!) });
-  }
+  const appLines = appFaces.length ? measureTuples(appFaces, owner!, false) : [];
+  appFaces.forEach((face, position) => {
+    familyLines.set(fontFamilyKey(unquoted(face.family)), { ownershipFamily: unquoted(face.family), lines: appLines[position]! });
+  });
   if (faceLines.size === 0 && familyLines.size === 0) {
     unloadOfficeFontFallbacks(faces);
     return { ...NO_SERVED_FACE_LINES, faces: [] };

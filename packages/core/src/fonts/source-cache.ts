@@ -57,7 +57,15 @@ class IdentityHash {
   bytes(value: Uint8Array): this {
     this.unit(0x110001);
     this.unit(value.length);
-    for (let index = 0; index < value.length; index++) this.unit(value[index]);
+    // unit() per byte, with the state in locals: font files are megabytes.
+    let h1 = this.h1, h2 = this.h2;
+    for (let index = 0; index < value.length; index++) {
+      const byte = value[index]!;
+      h1 = Math.imul(h1 ^ byte, 2654435761);
+      h2 = Math.imul(h2 ^ byte, 1597334677);
+    }
+    this.h1 = h1;
+    this.h2 = h2;
     return this;
   }
 
@@ -69,11 +77,24 @@ class IdentityHash {
   }
 }
 
+/** Content keys of buffers already keyed in this realm. Face buffers are
+ * never written after they are handed to the library (descriptor `data` is
+ * owned by it; downloaded bytes are one shared buffer per URL), so a buffer's
+ * key is computed once however many sessions and declarations use it. */
+const bufferContentKeys = new WeakMap<ArrayBuffer, string>();
+
 /** Content key of one face's bytes or `data:` URL, as used in registration
  * signatures (a `data:` URL can be tens of MiB; the signature stays short). */
 export function fontContentKey(value: ArrayBuffer | string): string {
   if (typeof value === 'string') return `data:${value.length}:${new IdentityHash().text(value).digest()}`;
-  return `bytes:${value.byteLength}:${new IdentityHash().bytes(new Uint8Array(value)).digest()}`;
+  // A detached buffer (length 0 once transferred) is never answered from
+  // the memo: reading it throws, as it always did.
+  let key = value.byteLength > 0 ? bufferContentKeys.get(value) : undefined;
+  if (key === undefined) {
+    key = `bytes:${value.byteLength}:${new IdentityHash().bytes(new Uint8Array(value)).digest()}`;
+    if (value.byteLength > 0) bufferContentKeys.set(value, key);
+  }
+  return key;
 }
 
 function hashSubstitutes(hash: IdentityHash, substitutes: readonly FontSubstitution[] | undefined): void {
@@ -106,6 +127,7 @@ export function fontSourceId(source: FontSourceDescriptor): string {
       const families = source.families ? Object.entries(source.families) : undefined;
       hash.text(families === undefined ? undefined : String(families.length));
       for (const [family, value] of families ?? []) hash.text(family).text(value === true ? undefined : value);
+      hash.text(source.sharedSubsetMetrics ? 'shared-subset-metrics' : undefined);
       break;
     }
     case 'font-css':

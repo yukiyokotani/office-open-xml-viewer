@@ -93,6 +93,15 @@ export interface FontCssApiSource extends FontSourceBase {
    * or `true` for the default query. When present, only these are requested. */
   readonly families?: Readonly<Record<string, string | true>>;
   readonly credentials?: FontSourceCredentials;
+  /**
+   * Set only by a library preset whose API serves each family style as
+   * `unicode-range` subsets of one font file that keep that file's vertical
+   * metric tables (`googleFonts()`): the subsets of one served family with
+   * equal descriptors have one normal line, so a format may measure the
+   * family once instead of each subset (`LoadedSourceFace.sharedSubsetMetrics`).
+   * Never settable through {@link fontCssApi}.
+   */
+  readonly sharedSubsetMetrics?: true;
 }
 
 /** One static stylesheet describing any number of families. */
@@ -483,7 +492,10 @@ export function validateFontFaceDeclaration(
 const TEMPLATE_PLACEHOLDER = /\{[^{}]*\}/g;
 
 function normalizeCssApi(fields: Fields, location: string): FontCssApiSource {
-  requireKnownKeys(fields, ['protocol', 'kind', 'urlTemplate', 'query', 'families', 'substitutes', 'credentials'], location);
+  requireKnownKeys(fields, ['protocol', 'kind', 'urlTemplate', 'query', 'families', 'substitutes', 'credentials', 'sharedSubsetMetrics'], location);
+  if (fields.sharedSubsetMetrics !== undefined && fields.sharedSubsetMetrics !== true) {
+    throw new TypeError(`${location}.sharedSubsetMetrics must be true when present`);
+  }
   const urlTemplate = fields.urlTemplate;
   if (typeof urlTemplate !== 'string' || urlTemplate.trim() === '') {
     throw new TypeError(`${location}.urlTemplate must be a non-empty string`);
@@ -551,6 +563,7 @@ function normalizeCssApi(fields: Fields, location: string): FontCssApiSource {
     ...(families === undefined ? {} : { families }),
     ...(substitutes === undefined ? {} : { substitutes }),
     ...(credentials === undefined ? {} : { credentials }),
+    ...(fields.sharedSubsetMetrics === true ? { sharedSubsetMetrics: true as const } : {}),
   });
 }
 
@@ -663,6 +676,15 @@ function factoryOptions(value: unknown, name: string, allowed: readonly string[]
 export function fontCssApi(options: FontCssApiOptions): FontSource {
   const fields = factoryOptions(options, 'fontCssApi', ['urlTemplate', 'query', 'families', 'substitutes', 'credentials']);
   return issued(normalizeCssApi({ ...fields, protocol: FONT_SOURCE_PROTOCOL, kind: 'font-css-api' }, 'fontCssApi()'));
+}
+
+/** {@link fontCssApi} for a library preset that guarantees
+ * {@link FontCssApiSource.sharedSubsetMetrics} (`googleFonts()`). Not public. */
+export function presetFontCssApi(options: FontCssApiOptions, preset: { readonly sharedSubsetMetrics: true }): FontSource {
+  const fields = factoryOptions(options, 'fontCssApi', ['urlTemplate', 'query', 'families', 'substitutes', 'credentials']);
+  return issued(normalizeCssApi({
+    ...fields, sharedSubsetMetrics: preset.sharedSubsetMetrics, protocol: FONT_SOURCE_PROTOCOL, kind: 'font-css-api',
+  }, 'fontCssApi()'));
 }
 
 /** One static stylesheet (self-hosted or kit CSS) describing many families. */

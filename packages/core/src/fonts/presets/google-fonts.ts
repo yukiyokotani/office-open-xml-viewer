@@ -10,7 +10,15 @@
  *   former per-format tables, which the oracle test pins);
  * - Google's distribution names for the native Noto CJK packages
  *   ("Noto Sans CJK SC" is served as "Noto Sans SC"). Google serves no
- *   Noto Serif HK, so the native serif HK name has no substitution.
+ *   Noto Serif HK, so the native serif HK name has no substitution;
+ * - how the CSS2 API slices a font (`sharedSubsetMetrics`): each family style
+ *   is served as `unicode-range` subsets of one font file, and every subset
+ *   keeps that file's vertical metric tables. Observed (2026-11, Chromium):
+ *   for every family and style of {@link GOOGLE_FONTS_CATALOG} (88 styles,
+ *   2408 subsets, Latin to CJK), each subset registered alone measured the
+ *   same CSS normal line and Canvas font box at every WordprocessingML tuple.
+ *   A format that measures served faces (DOCX, where Chromium cannot inflate
+ *   WOFF2 to read the tables) measures each style once.
  *
  * The Office substitutions (Calibri → Carlito, …) are the vendor-neutral
  * {@link OFFICE_FONT_SUBSTITUTIONS}, adopted here like any source may adopt
@@ -19,7 +27,7 @@
  * `substitutes` replaces that list, exactly as it is every other source's
  * whole list.
  */
-import { fontCssApi, type FontSource } from '../source.js';
+import { presetFontCssApi, type FontSource } from '../source.js';
 import { fontFamilyKey, OFFICE_FONT_SUBSTITUTIONS, type FontSubstitution } from '../substitutions.js';
 
 export const GOOGLE_FONTS_DEFAULT_CSS_ORIGIN = 'https://fonts.googleapis.com';
@@ -163,9 +171,9 @@ export function googleFonts(options: GoogleFontsOptions = {}): FontSource {
   const origin = options.cssOrigin === undefined
     ? GOOGLE_FONTS_DEFAULT_CSS_ORIGIN
     : validatedOrigin(options.cssOrigin);
-  return fontCssApi({
+  return presetFontCssApi({
     urlTemplate: `${origin}/css2?family={family}:{query}&display=swap`,
     families: requestedFamilies(options.families),
     substitutes: options.substitutes === undefined ? GOOGLE_FONTS_SUBSTITUTIONS : options.substitutes,
-  });
+  }, { sharedSubsetMetrics: true });
 }
