@@ -64,6 +64,7 @@ function run(source, allowlist = {}, rustSchema = schema) {
       schemaFile: path.join(dir, 'schema.json'),
       format: { tsconfig: path.join(dir, 'tsconfig.json'), tsFile: path.join(dir, 'types.ts'), tsRoot: 'Doc' },
       allowlist,
+      tsNullAllowlist: {},
     });
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -91,8 +92,7 @@ test('each kind of drift is reported once with a stable key', () => {
     'Doc.kind: literal-missing-in-ts ["b"]',
     'Doc.size: type-mismatch (Rust length 2..2 vs TS length 3..3)',
     'Doc.title: rust-optional',
-    // The recursive union is checked again where Para nests it.
-    'Para<type=para>.children<type=image>: variant-never-emitted',
+    // The recursive union nested in Para is the same pair, compared once.
     'Para<type=para>.depth: ts-only',
   ]);
 });
@@ -275,10 +275,7 @@ test('TS tuples with rest elements accept fixed-size Rust arrays', () => {
 
 test('widening a tagged member to an extra discriminant value is reported', () => {
   const widened = inSync.replace("{ type: 'rule'; width: number }", "{ type: 'rule' | 'hr'; width: number }");
-  assert.deepEqual(keysOf(widened), [
-    'Doc.body<type=hr>: variant-never-emitted',
-    'Para<type=para>.children<type=hr>: variant-never-emitted',
-  ]);
+  assert.deepEqual(keysOf(widened), ['Doc.body<type=hr>: variant-never-emitted']);
 });
 
 test('an empty TS object does not erase a Rust map', () => {
@@ -409,4 +406,18 @@ test('null provenance parses multi-line types, comments and skipped non-Options'
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('TS-only null alternatives are reported', () => {
+  assert.deepEqual(keysOf(inSync.replace('title?: string;', 'title?: string | null;')), ['Doc.title: ts-null']);
+  assert.deepEqual(keysOf(inSync.replace('body: Block[];', 'body: Block[] | null;')), ['Doc.body: ts-null']);
+  const nullOnly = single({ v: { type: 'null' } });
+  assert.deepEqual(keysOf('export interface Doc { v: string | null }', nullOnly), [
+    'Doc.v: variant-never-emitted (TS string)',
+  ]);
+});
+
+test('recursive array shapes terminate', () => {
+  const rust = { title: 'Doc', type: 'object', properties: { v: { $ref: '#/$defs/A' } }, required: ['v'], $defs: { A: { type: 'array', items: { $ref: '#/$defs/A' } } } };
+  assert.deepEqual(keysOf('type A = A[]; export interface Doc { v: A }', rust), []);
 });

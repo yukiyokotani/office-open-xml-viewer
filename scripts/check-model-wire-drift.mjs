@@ -23,7 +23,7 @@ import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 
-import { MODEL_WIRE_DRIFT_ALLOWLIST } from './model-wire-drift-allowlist.mjs';
+import { MODEL_WIRE_DRIFT_ALLOWLIST, MODEL_WIRE_TS_NULL_ALLOWLIST } from './model-wire-drift-allowlist.mjs';
 
 const require = createRequire(new URL('../package.json', import.meta.url));
 const ts = require('typescript-compiler-api');
@@ -390,6 +390,19 @@ function comparer(sink) {
   function walk(r, t, ctx) {
     r = deref(r);
     t = deref(t);
+    // Recursive non-object shapes (`type A = A[]`) are bounded like objects:
+    // a pair met again while still open is assumed compatible.
+    const pair = `w${objectId(r)}|${objectId(t)}`;
+    if (OPEN_PAIRS.has(pair)) return;
+    OPEN_PAIRS.add(pair);
+    try {
+      walkOpen(r, t, ctx);
+    } finally {
+      OPEN_PAIRS.delete(pair);
+    }
+  }
+
+  function walkOpen(r, t, ctx) {
     if (r.kind === 'never') return;
     if (r.kind === 'any' || t.kind === 'any') {
       if (r.kind === 'any' && t.kind !== 'any') {
@@ -405,10 +418,17 @@ function comparer(sink) {
     }
     if (hasNull(r) && !hasNull(t)) {
       report(ctx.owner, ctx.field, 'rust-null', 'Rust can emit null; the TS type does not allow null', ctx.path);
+    } else if (hasNull(t) && !hasNull(r)) {
+      report(ctx.owner, ctx.field, 'ts-null', 'TS allows null; Rust never emits null here', ctx.path);
     }
     r = stripNull(r);
     t = stripNull(t);
-    if (r.kind === 'prim' && r.name === 'null') return;
+    if (r.kind === 'prim' && r.name === 'null') {
+      if (!(t.kind === 'prim' && t.name === 'null')) {
+        report(ctx.owner, ctx.field, 'variant-never-emitted', 'Rust only emits null', ctx.path, `(TS ${describeDeep(t)})`);
+      }
+      return;
+    }
     if (t.kind === 'prim' && t.name === 'null') {
       report(ctx.owner, ctx.field, 'type-mismatch', 'TS accepts only null', ctx.path, `(Rust ${describe(r)} vs TS null)`);
       return;
@@ -1079,7 +1099,13 @@ function listRust(dir) {
   });
 }
 
-export function checkFormat(name, { schemaFile, list = false, format = FORMATS[name], allowlist = MODEL_WIRE_DRIFT_ALLOWLIST[name] } = {}) {
+export function checkFormat(name, {
+  schemaFile,
+  list = false,
+  format = FORMATS[name],
+  allowlist = MODEL_WIRE_DRIFT_ALLOWLIST[name],
+  tsNullAllowlist = MODEL_WIRE_TS_NULL_ALLOWLIST[name],
+} = {}) {
   const provenance = format.rustSources ? scanNullProvenance(format.rustSources) : [];
   if (provenance.length) {
     throw new Error(`model-wire-drift: null provenance is ambiguous for:\n  ${provenance.join('\n  ')}\n`
@@ -1088,6 +1114,9 @@ export function checkFormat(name, { schemaFile, list = false, format = FORMATS[n
   const findings = compareShapes(rustShapes(rustSchema(format, schemaFile)), tsShapes(format));
   if (list) return { findings, unexpected: findings, stale: [] };
   const allowed = new Set(Object.keys(allowlist ?? {}));
+  for (const [owner, fields] of Object.entries(tsNullAllowlist ?? {})) {
+    for (const field of fields) allowed.add(`${owner}.${field}: ts-null`);
+  }
   const keys = new Set(findings.map((f) => f.key));
   const unexpected = findings.filter((f) => !allowed.has(f.key));
   const stale = [...allowed].filter((k) => !keys.has(k));
