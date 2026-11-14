@@ -282,8 +282,8 @@ describe('XLSX font demand covers every measured or painted scalar', () => {
 // Symbol-encoded faces (symbol-paint.ts): a code paints as authored where the
 // face draws it, as its Unicode conversion where it does not; the demand
 // covers both outcomes without declining to 'all'. (A precomposed authored
-// code such as Wingdings 0xFC is not normalization-inert, so its text still
-// demands 'all': core scalar-demand.ts.)
+// code such as Wingdings 0xFC demands its canonical closure: core
+// scalar-demand.ts.)
 const symbols = workbookBytes(
   '<numFmts count="1"><numFmt numFmtId="164" formatCode="&quot;a&quot;0"/></numFmts>'
     + '<fonts count="3"><font><sz val="11"/><name val="Calibri"/></font><font><sz val="11"/><name val="Wingdings"/></font>'

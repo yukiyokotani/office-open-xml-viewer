@@ -43,6 +43,9 @@ describe('collectFontDemandScalars', () => {
         }
       }
     }
+    // Authored forms close like their letters (lam + alef → U+FEFB), and the fallback's private-use ligatures are demanded.
+    expect(collectFontDemandScalars(['\ufedf\ufe8e'], { budget: BUDGET })).toEqual(expect.arrayContaining([0xfefb, 0xf201, 0xf211, 0xf2ee]));
+    expect(collectFontDemandScalars(['لله'], { budget: BUDGET })).toEqual(expect.arrayContaining([0xf201]));
     // A mirrored partner's own decomposition: ⫮ U+2AEE mirrors to ∤ U+2224 = U+2223 U+0338.
     expect(collectFontDemandScalars(['\u2aee'], { budget: BUDGET })).toEqual(expect.arrayContaining([0x2224, 0x2223, 0x338]));
     // Any text may paint in a right-to-left run, so the partner is demanded whatever the text's direction.

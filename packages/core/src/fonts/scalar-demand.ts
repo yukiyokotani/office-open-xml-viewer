@@ -48,9 +48,10 @@
  * presentation form whose compatibility decomposition consists of demanded
  * scalars or of the demanded letters' own compatibility decompositions (a
  * shaper without the font's joining features substitutes those forms,
- * HarfBuzz `arabic-fallback`). Any text may be painted in a
- * right-to-left run whatever direction the format resolves, so both apply to
- * every text, generated scalars (closures, symbol conversions) included.
+ * HarfBuzz `arabic-fallback`, whose few private-use ligature glyphs are
+ * demanded too). Any text may be painted in a right-to-left run whatever
+ * direction the format resolves, so both apply to every text, generated
+ * scalars (closures, symbol conversions) included.
  *
  * The production Canvas measurement sentinels (`ii` tracking, `M` baseline,
  * space for tabs) are always included because the renderers measure them with
@@ -92,11 +93,18 @@ function mirrorOf(cp: number): number | undefined {
   return mirrors.get(cp);
 }
 
-/** Arabic letters (Arabic, Arabic Supplement, Arabic Extended-A/B/C). */
+/** Arabic letters (Arabic, Arabic Supplement, Arabic Extended-A/B/C) and
+ * authored Arabic presentation forms. */
 function isArabicLetter(cp: number): boolean {
   return (cp >= 0x600 && cp <= 0x6ff) || (cp >= 0x750 && cp <= 0x77f) || (cp >= 0x870 && cp <= 0x8ff)
-    || (cp >= 0x10ec0 && cp <= 0x10eff);
+    || (cp >= 0xfb50 && cp <= 0xfdff) || (cp >= 0xfe70 && cp <= 0xfeff) || (cp >= 0x10ec0 && cp <= 0x10eff);
 }
+
+/** Private-use glyph codes HarfBuzz's Arabic fallback ligature table
+ * substitutes (hb-ot-shaper-arabic-table.hh: the Allah ligature, lam-meem-
+ * jeem and shadda-fathatan), with no Unicode decomposition to derive them
+ * from: demanded with any Arabic text. */
+const ARABIC_FALLBACK_PUA = [0xf201, 0xf211, 0xf2ee] as const;
 
 let arabicForms: ReadonlyArray<readonly [number, readonly number[]]> | undefined;
 /** Every Arabic presentation form (U+FB50–FDFF, U+FE70–FEFF) with the
@@ -320,8 +328,10 @@ export class FontDemandScalarCollector {
    * for the demanded Arabic letters (see the module notes). */
   private closeArabicForms(): boolean {
     if (!this.arabic) return true;
+    for (const cp of ARABIC_FALLBACK_PUA) if (!this.admitScalar(cp)) return false;
     // A letter's own compatibility decomposition counts as present (U+0677
-    // is U+06C7 U+0674, whose isolated form U+FBDD a fallback shaper paints).
+    // is U+06C7 U+0674, whose isolated form U+FBDD a fallback shaper paints;
+    // an authored form contributes its letters to ligatures).
     const present = new Set<number>();
     for (const scalars of [this.points, this.committed]) {
       for (const cp of scalars) {
