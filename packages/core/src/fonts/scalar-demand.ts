@@ -74,6 +74,13 @@ export class FontDemandScalarCollector {
   // The empty delta still serializes as "[]"; charge it before any scalar.
   private bytes = 2;
   private declined: boolean;
+  /** The last cluster (a starter and the joiners after it,
+   * `canonical-closure.ts`), pending across texts: adjacent texts may be
+   * shaped together (DOCX joins same-format runs), so a text that starts
+   * with a joiner extends it. */
+  private cluster: number[] = [];
+  /** Whether {@link cluster} holds a scalar that is not normalization-inert. */
+  private canonical = false;
 
   constructor(options: FontDemandScalarOptions) {
     this.budget = options.budget;
@@ -92,33 +99,35 @@ export class FontDemandScalarCollector {
   add(text: string): boolean {
     if (this.declined) return false;
     if (hasStrongRtl(text)) return this.decline();
-    // A cluster: a starter and the joiners after it (canonical-closure.ts).
-    let cluster: number[] = [];
-    let canonical = false;
-    const flush = (): boolean => {
-      if (!cluster.length) return true;
-      const scalars = canonical ? canonicalClusterScalars(cluster) : cluster;
-      cluster = [];
-      canonical = false;
-      if (!scalars) return false;
-      for (const cp of scalars) if (!this.admitScalar(cp)) return false;
-      return true;
-    };
+    let first = true;
     for (const scalar of text) {
       const cp = scalar.codePointAt(0) as number;
       if (cp >= 0xf020 && cp <= 0xf0ff) return this.decline();
       const inert = fontDemandInertScalar(cp);
       if (!inert && !isCanonicallyKnown(cp)) return this.decline();
       if (inert || !isClusterJoiner(cp)) {
-        if (!flush()) return this.decline();
-      } else if (!cluster.length) {
-        // A mark without a base: a shaper may paint a dotted circle for it.
+        if (!this.flush()) return this.decline();
+      } else if (first || !this.cluster.length) {
+        // A mark without a base (this text may be shaped on its own): a
+        // shaper may paint a dotted circle for it.
         if (!this.admitScalar(0x25cc)) return this.decline();
       }
-      cluster.push(cp);
-      if (!inert) canonical = true;
+      first = false;
+      this.cluster.push(cp);
+      if (!inert) this.canonical = true;
     }
-    if (!flush()) return this.decline();
+    return true;
+  }
+
+  /** Demand the pending cluster: its scalars, or its canonical closure when
+   * it holds a scalar that is not normalization-inert. */
+  private flush(): boolean {
+    if (!this.cluster.length) return true;
+    const scalars = this.canonical ? canonicalClusterScalars(this.cluster) : this.cluster;
+    this.cluster = [];
+    this.canonical = false;
+    if (!scalars) return false;
+    for (const cp of scalars) if (!this.admitScalar(cp)) return false;
     return true;
   }
 
@@ -177,6 +186,7 @@ export class FontDemandScalarCollector {
   }
 
   result(): FontDemandScalars {
+    if (!this.declined && !this.flush()) this.decline();
     return this.declined ? 'all' : [...this.points];
   }
 }

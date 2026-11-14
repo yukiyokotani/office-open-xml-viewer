@@ -1257,23 +1257,30 @@ export class FontSourceSession {
    * ({@link FontSourceSessionOptions.requestedWeights}): when the session's
    * requested weights are known, the demand is not `'all'`, and every face
    * file of the family (by style, stretch, `unicode-range` and URL or bytes)
-   * is declared once at each requested weight and at no other.
+   * is declared once at each requested weight and at no other, in the same
+   * file order at every weight.
    */
   private sharedWeightRange(declarations: readonly FontFaceDeclaration[]): { weightRange?: string } {
     const weights = this.requestedWeights;
     if (!weights || this.all || !declarations.length) return {};
-    const files = new Map<string, Set<number>>();
+    // Per requested weight, its face files in declaration order.
+    const files = new Map<number, string[]>(weights.map((weight) => [weight, []]));
+    const seen = new Set<string>();
     for (const declaration of declarations) {
       const weight = singleWeight(declaration);
-      if (weight === undefined || !weights.includes(weight)) return {};
+      const order = weight === undefined ? undefined : files.get(weight);
+      if (!order) return {};
       const content = declaration.data !== undefined ? fontContentKey(declaration.data) : declaration.url ?? '';
       const key = [declaration.style ?? '', declaration.stretch ?? '', declaration.unicodeRange ?? '', content].join('|');
-      let seen = files.get(key);
-      if (!seen) { seen = new Set(); files.set(key, seen); }
-      if (seen.has(weight)) return {};
-      seen.add(weight);
+      if (seen.has(`${weight}|${key}`)) return {};
+      seen.add(`${weight}|${key}`);
+      order.push(key);
     }
-    for (const seen of files.values()) if (seen.size !== weights.length) return {};
+    // Every weight declares the same files in the same order: registering
+    // each file once (at its last occurrence, `register`) then keeps, at
+    // every requested weight, the precedence its own declarations had.
+    const [first, ...rest] = [...files.values()];
+    if (rest.some((order) => order.length !== first!.length || order.some((key, at) => key !== first![at]))) return {};
     return { weightRange: `${weights[0]} ${weights[weights.length - 1]}` };
   }
 

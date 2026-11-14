@@ -43,8 +43,27 @@ describe('collectFontDemandScalars', () => {
     covers('\u212b', [0x212b, 0xc5, 0x41, 0x30a]);
     // A mark without a base may be painted on a dotted circle.
     covers('\u0301', [0x301, 0x25cc]);
+    // A combining mark with a decomposition still attaches to its base.
+    covers('e\u0340', [0x65, 0x340, 0x300, 0xe8]);
+    covers('A\u0344', [0x41, 0x344, 0x308, 0x301, 0xc4]);
+    // A composition exclusion a shaper may still compose (HarfBuzz Indic).
+    covers('\u09af\u09bc', [0x9af, 0x9bc, 0x9df]);
+    covers('\u0915\u093c', [0x958]);
     // Inert text is unchanged.
     expect([...demanded('AB')].filter((cp) => !SENTINELS.includes(cp))).toEqual([0x41, 0x42]);
+  });
+
+  it('closes a cluster across texts that may be shaped together', () => {
+    const result = collectFontDemandScalars(['e', '\u0301'], { budget: BUDGET });
+    expect(result).not.toBe('all');
+    // The joined cluster composes; the mark may also be shaped on its own.
+    for (const cp of [0x65, 0x301, 0xe9, 0x25cc]) expect(result as number[]).toContain(cp);
+  });
+
+  it('declines a cluster too large to close before composing it', () => {
+    const marks = String.fromCodePoint(...[...Array(64)].map((_, i) => 0x300 + i), ...[...Array(32)].map((_, i) => 0x350 + i));
+    const text = (' ' + marks).repeat(1000);
+    expect(collectFontDemandScalars([text], { budget: BUDGET })).toBe('all');
   });
 
   it('charges only uncommitted scalars and degrades to all beyond the JSON budget', () => {

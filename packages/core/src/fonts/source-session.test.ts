@@ -1222,6 +1222,31 @@ describe('FontSourceSession: one face per file across the requested weights', ()
       .toEqual(['400', '400', '700', 'bold', '400']);
     // An 'all' demand.
     expect(separate((await run(faces(), [400, 700], 'all')).set)).toEqual(['400', '400', '700', 'bold']);
+    // Overlapping files in a different order per weight: regular text picks
+    // the later 400 face (b), bold the later 700 face (a); one face per file
+    // could keep only one of those precedences.
+    const crossed = fontFiles({ faces: [
+      { family: 'Var', url: 'https://app.example/var-a.woff2', weight: '400', unicodeRange: 'U+0-FF' },
+      { family: 'Var', url: 'https://app.example/var-b.woff2', weight: '400', unicodeRange: 'U+0-FF' },
+      { family: 'Var', url: 'https://app.example/var-b.woff2', weight: '700', unicodeRange: 'U+0-FF' },
+      { family: 'Var', url: 'https://app.example/var-a.woff2', weight: '700', unicodeRange: 'U+0-FF' },
+    ] });
+    expect((await run(crossed, [400, 700], [0x41])).set.faces.map((face) => [urlOf(face), face.weight])).toEqual([
+      ['https://app.example/var-a.woff2', '400'], ['https://app.example/var-b.woff2', '400'],
+      ['https://app.example/var-b.woff2', '700'], ['https://app.example/var-a.woff2', '700'],
+    ]);
+  });
+
+  it('keeps the per-weight precedence of overlapping files declared in the same order', async () => {
+    const ordered = fontFiles({ faces: [
+      { family: 'Var', url: 'https://app.example/var-a.woff2', weight: '700', unicodeRange: 'U+0-FF' },
+      { family: 'Var', url: 'https://app.example/var-a.woff2', weight: '400', unicodeRange: 'U+0-FF' },
+      { family: 'Var', url: 'https://app.example/var-b.woff2', weight: '400', unicodeRange: 'U+0-FF' },
+      { family: 'Var', url: 'https://app.example/var-b.woff2', weight: '700', unicodeRange: 'U+0-FF' },
+    ] });
+    expect((await run(ordered, [400, 700], [0x41])).set.faces.map((face) => [urlOf(face), face.weight])).toEqual([
+      ['https://app.example/var-a.woff2', '400 700'], ['https://app.example/var-b.woff2', '400 700'],
+    ]);
   });
 });
 
