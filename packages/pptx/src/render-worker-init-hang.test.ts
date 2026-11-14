@@ -365,7 +365,10 @@ describe('pptx render-worker.ts — init failure never hangs a request (AR4)', S
 });
 
 
-const sourceName = (source: string | ArrayBuffer) => typeof source === 'string' ? source : new TextDecoder().decode(source);
+// googleFonts() faces register from the URL they were downloaded from
+// (`url("…")`); other faces from their bytes (here, the URL's own text).
+const sourceName = (source: string | ArrayBuffer) => typeof source === 'string'
+  ? /^url\("(.*)"\)$/.exec(source)?.[1] ?? source : new TextDecoder().decode(source);
 
 describe('font-source subset readiness in progressive render owners', SUITE_OPTIONS, () => {
   it.each(['default', 'source'] as const)('loads a later subset of an already requested family before publication (%s)', async (variant) => {

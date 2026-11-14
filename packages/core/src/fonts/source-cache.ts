@@ -31,6 +31,29 @@ import { HARD_MAX_FONT_SOURCE_RETAINED_BYTES } from '../worker/resource-policy.g
 import { dataUrlDecodedByteLength, type FontFaceDeclaration, type FontSourceDescriptor } from './source.js';
 import type { FontSubstitution } from './substitutions.js';
 
+// ---- bounded memo ---------------------------------------------------------------
+
+/**
+ * `compute`, memoized by its string argument for this realm. The memo holds
+ * at most `limit` UTF-16 code units of keys: past that it starts over, and a
+ * longer key is computed every time. Memos of pure functions of their key
+ * only, so dropping entries never changes a result.
+ */
+export function stringMemo<T>(compute: (key: string) => T, limit: number): (key: string) => T {
+  const entries = new Map<string, T>();
+  let size = 0;
+  return (key) => {
+    if (entries.has(key)) return entries.get(key) as T;
+    const value = compute(key);
+    if (key.length <= limit) {
+      size += key.length;
+      if (size > limit) { entries.clear(); size = key.length; }
+      entries.set(key, value);
+    }
+    return value;
+  };
+}
+
 // ---- identity -------------------------------------------------------------------
 
 /** Two-lane 32-bit multiplicative hash (cyrb53 construction), 64 bits of
@@ -83,17 +106,92 @@ class IdentityHash {
  * key is computed once however many sessions and declarations use it. */
 const bufferContentKeys = new WeakMap<ArrayBuffer, string>();
 
-/** Content key of one face's bytes or `data:` URL, as used in registration
- * signatures (a `data:` URL can be tens of MiB; the signature stays short). */
+/** One keyed buffer, held weakly, with its hash once one was needed. */
+interface KeyedBuffer { readonly length: number; readonly ref: WeakRef<ArrayBuffer>; hash?: string }
+
+/** The keyed buffers of one byte length in this realm: while only one is
+ * live it is never read; once another buffer of the length arrives, each is
+ * hashed once and indexed by its hash. */
+interface LengthBucket {
+  readonly unhashed: Set<KeyedBuffer>;
+  readonly byHash: Map<string, Set<KeyedBuffer>>;
+}
+
+/** Live keyed buffers by byte length. A buffer that shares its length with
+ * no live keyed buffer takes a new key unread; otherwise it is hashed, and
+ * compared byte by byte only with the buffers of its hash, so the work is
+ * linear in the bytes that share a length (plus true duplicates). Entries
+ * leave with their buffer. */
+const keyedByLength = new Map<number, LengthBucket>();
+const keyedBuffers = new FinalizationRegistry<KeyedBuffer>((entry) => {
+  const bucket = keyedByLength.get(entry.length);
+  if (!bucket) return;
+  bucket.unhashed.delete(entry);
+  const refs = entry.hash === undefined ? undefined : bucket.byHash.get(entry.hash);
+  if (refs?.delete(entry) && refs.size === 0) bucket.byHash.delete(entry.hash!);
+  if (bucket.unhashed.size === 0 && bucket.byHash.size === 0) keyedByLength.delete(entry.length);
+});
+let contentSerial = 0;
+
+const contentHash = (value: ArrayBuffer) => new IdentityHash().bytes(new Uint8Array(value)).digest();
+
+function indexByHash(bucket: LengthBucket, entry: KeyedBuffer, hash: string): void {
+  entry.hash = hash;
+  let refs = bucket.byHash.get(hash);
+  if (!refs) bucket.byHash.set(hash, refs = new Set());
+  refs.add(entry);
+}
+
+function sameBytes(a: ArrayBuffer, b: ArrayBuffer): boolean {
+  const length = a.byteLength;
+  if (length % 4 === 0) {
+    const left = new Uint32Array(a), right = new Uint32Array(b);
+    for (let index = 0; index < left.length; index++) if (left[index] !== right[index]) return false;
+    return true;
+  }
+  const left = new Uint8Array(a), right = new Uint8Array(b);
+  for (let index = 0; index < length; index++) if (left[index] !== right[index]) return false;
+  return true;
+}
+
+/**
+ * Content key of one face's bytes or `data:` URL, as used in registration
+ * signatures (a `data:` URL can be tens of MiB; the signature stays short).
+ * Two buffers have one key exactly when their bytes are equal; a key is valid
+ * in this realm while a buffer holding it lives (every structure that keeps a
+ * key also keeps its declaration's bytes).
+ */
 export function fontContentKey(value: ArrayBuffer | string): string {
   if (typeof value === 'string') return `data:${value.length}:${new IdentityHash().text(value).digest()}`;
   // A detached buffer (length 0 once transferred) is never answered from
   // the memo: reading it throws, as it always did.
-  let key = value.byteLength > 0 ? bufferContentKeys.get(value) : undefined;
-  if (key === undefined) {
-    key = `bytes:${value.byteLength}:${new IdentityHash().bytes(new Uint8Array(value)).digest()}`;
-    if (value.byteLength > 0) bufferContentKeys.set(value, key);
+  const length = value.byteLength;
+  if (length === 0) return `bytes:0:${contentHash(value)}`;
+  let key = bufferContentKeys.get(value);
+  if (key !== undefined) return key;
+  let bucket = keyedByLength.get(length);
+  if (!bucket) keyedByLength.set(length, bucket = { unhashed: new Set(), byHash: new Map() });
+  const entry: KeyedBuffer = { length, ref: new WeakRef(value) };
+  if (bucket.unhashed.size > 0 || bucket.byHash.size > 0) {
+    // Another buffer of this length: index the unread ones by hash first.
+    for (const other of bucket.unhashed) {
+      bucket.unhashed.delete(other);
+      const buffer = other.ref.deref();
+      // A transferred buffer reads as empty: it matches nothing any more.
+      if (buffer && buffer.byteLength === length) indexByHash(bucket, other, contentHash(buffer));
+    }
+    const hash = contentHash(value);
+    for (const other of bucket.byHash.get(hash) ?? []) {
+      const buffer = other.ref.deref();
+      if (buffer && buffer.byteLength === length && sameBytes(buffer, value)) { key = bufferContentKeys.get(buffer); break; }
+    }
+    indexByHash(bucket, entry, hash);
+  } else {
+    bucket.unhashed.add(entry);
   }
+  key ??= `bytes:${length}:${++contentSerial}`;
+  bufferContentKeys.set(value, key);
+  keyedBuffers.register(value, entry);
   return key;
 }
 

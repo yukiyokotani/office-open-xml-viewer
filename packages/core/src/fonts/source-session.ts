@@ -28,7 +28,8 @@
  *    (`face-download.ts`) only then, one request per needed
  *    `unicode-range` subset, with the source's credentials (a resolver's
  *    through its acquirer: the worker bridge in a worker, this realm
- *    otherwise), and is registered from its bytes in the realm's FontFaceSet
+ *    otherwise), and is registered in the realm's FontFaceSet (from its
+ *    bytes, or from the URL they came from: {@link registersFromUrl})
  *    under this session's private alias of the family
  *    ({@link LoadedFontSources.families}), never under its real name, once,
  *    whichever subsets are demanded first. A component holds every
@@ -106,6 +107,7 @@ import {
   fontContentKey,
   refundRetainedBytes,
   retainedFontSourceBytes,
+  stringMemo,
   type FamilyResolution,
   type SourceCache,
 } from './source-cache.js';
@@ -356,7 +358,7 @@ export function normalizeFontDemand(demand: FontSessionDemand): NormalizedDemand
   const scriptsOf = substituteScriptsOf(demand.substituteScripts);
   const add = (list: string[], fallback: boolean) => {
     for (const name of list) {
-      const key = fontFamilyKey(name);
+      const key = familyKeyOf(name);
       if (!key || seen.has(key)) continue;
       seen.add(key);
       names.push({ name, fallback, scripts: scriptsOf(name) });
@@ -364,24 +366,40 @@ export function normalizeFontDemand(demand: FontSessionDemand): NormalizedDemand
   };
   add(familyList(demand.families, 'font demand families'), false);
   add(familyList(demand.fallbackFamilies, 'font demand fallbackFamilies'), true);
-  let scalars: 'all' | readonly number[];
-  if (demand.scalars === 'all') {
-    scalars = 'all';
-  } else {
-    if (!Array.isArray(demand.scalars)) throw new TypeError("font demand scalars must be 'all' or an array");
-    const unique = new Set<number>();
-    for (const scalar of demand.scalars) {
-      if (!Number.isInteger(scalar) || scalar < 0 || scalar > 0x10ffff) {
-        throw new TypeError('font demand scalars must be integers in U+0000..U+10FFFF');
-      }
-      unique.add(scalar);
+  return { names, scalars: normalizeScalars(demand.scalars) };
+}
+
+function normalizeScalars(demanded: FontSessionDemand['scalars']): NormalizedDemand['scalars'] {
+  if (demanded === 'all') return 'all';
+  if (!Array.isArray(demanded)) throw new TypeError("font demand scalars must be 'all' or an array");
+  const unique = new Set<number>();
+  for (const scalar of demanded) {
+    if (!Number.isInteger(scalar) || scalar < 0 || scalar > 0x10ffff) {
+      throw new TypeError('font demand scalars must be integers in U+0000..U+10FFFF');
     }
-    scalars = unique.size > HARD_MAX_FONT_DEMAND_SCALARS ? 'all' : [...unique].sort((a, b) => a - b);
+    unique.add(scalar);
   }
-  return { names, scalars };
+  return unique.size > HARD_MAX_FONT_DEMAND_SCALARS ? 'all' : [...unique].sort((a, b) => a - b);
 }
 
 // ---- helpers ---------------------------------------------------------------------------
+
+/** {@link fontFamilyKey}, memoized: a session asks it of the same few family
+ * spellings for every declaration and face. */
+const familyKeyOf = stringMemo(fontFamilyKey, 1 << 16);
+
+/** {@link parseUnicodeRange}, memoized per value (frozen results): a face's
+ * range is read at claim, at each registration pass and when it loads, and
+ * the styles of one font file, and families sliced alike (Google Fonts' CJK
+ * families), declare the same values. */
+const parsedRanges = stringMemo((value) => {
+  const parsed = parseUnicodeRange(value);
+  return parsed && Object.freeze(parsed.map((range) => Object.freeze([range[0], range[1]] as const)));
+}, 1 << 20);
+
+function rangesOf(value: string | undefined): readonly (readonly [number, number])[] | null {
+  return value === undefined ? null : parsedRanges(value);
+}
 
 function rangeIntersects(ranges: readonly (readonly [number, number])[], sorted: readonly number[]): boolean {
   for (const [lo, hi] of ranges) {
@@ -431,19 +449,37 @@ function overlapComponents(declarations: readonly FontFaceDeclaration[]): number
     return index;
   };
   const union = (a: number, b: number) => { const ra = find(a), rb = find(b); if (ra !== rb) parent[Math.max(ra, rb)] = Math.min(ra, rb); };
-  const intervals: [number, number, number][] = [];
+  // Every range as (start, end, declaration), visited by start: a range
+  // starting within the reach of an earlier one overlaps it. Ranges sharing a
+  // start overlap each other, so their order is immaterial.
+  const ranged = declarations.map((declaration) => rangesOf(declaration.unicodeRange));
+  let count = 0;
+  for (const ranges of ranged) count += ranges?.length ?? 0;
+  const ends = new Uint32Array(count);
+  const owners = new Uint32Array(count);
+  // start × 2^32 + position: exact in a double (start ≤ 0x10FFFF < 2^21, and
+  // position < 2^32, the length bound of a typed array).
+  const order = new Float64Array(count);
+  let position = 0;
   declarations.forEach((declaration, index) => {
-    const ranges = parseUnicodeRange(declaration.unicodeRange);
+    const ranges = ranged[index];
     if (ranges === null) {
       declarations.forEach((other, at) => { if (at !== index && mayMatchTogether(declaration, other)) union(index, at); });
       return;
     }
-    for (const [lo, hi] of ranges) intervals.push([lo, hi, index]);
+    for (const [lo, hi] of ranges!) {
+      ends[position] = hi;
+      owners[position] = index;
+      order[position] = lo * 0x100000000 + position;
+      position++;
+    }
   });
-  intervals.sort((a, b) => a[0] - b[0]);
+  order.sort();
   let reach = -1;
   let owner = -1;
-  for (const [lo, hi, index] of intervals) {
+  for (const key of order) {
+    const at = key % 0x100000000;
+    const lo = (key - at) / 0x100000000, hi = ends[at]!, index = owners[at]!;
     if (lo <= reach) union(owner, index);
     if (hi > reach) { reach = hi; owner = index; }
   }
@@ -454,7 +490,7 @@ function overlapComponents(declarations: readonly FontFaceDeclaration[]): number
  * descriptors and source (URL, or the owned bytes' content key). */
 function declarationKey(declaration: FontFaceDeclaration): string {
   return [
-    fontFamilyKey(declaration.family), declaration.weight ?? '', declaration.style ?? '', declaration.stretch ?? '',
+    familyKeyOf(declaration.family), declaration.weight ?? '', declaration.style ?? '', declaration.stretch ?? '',
     declaration.unicodeRange ?? '', declaration.data !== undefined ? fontContentKey(declaration.data) : declaration.url ?? '',
   ].join('|');
 }
@@ -467,7 +503,7 @@ function faceSignature(sourceIndex: number, declaration: FontFaceDeclaration): s
   const dataUrl = data === undefined && /^\s*data:/i.test(url);
   return [
     sourceIndex,
-    fontFamilyKey(declaration.family),
+    familyKeyOf(declaration.family),
     declaration.weight ?? '',
     declaration.style ?? '',
     declaration.stretch ?? '',
@@ -524,7 +560,64 @@ function withWeightRange(declaration: FontFaceDeclaration, range: string | undef
   if (range === undefined) return declaration;
   const ranged = Object.freeze({ ...declaration, weight: range });
   weightRanged.add(ranged);
+  const url = registrationUrls.get(declaration);
+  if (url !== undefined) registrationUrls.set(ranged, url);
   return ranged;
+}
+
+/** Acquired declarations (bytes) whose face registers from the URL they were
+ * downloaded from ({@link registersFromUrl}), with that URL. */
+const registrationUrls = new WeakMap<FontFaceDeclaration, string>();
+
+/**
+ * Whether `source`'s downloaded faces register from the URL they were
+ * downloaded from rather than from their bytes: the file host a library
+ * preset states ({@link FontCssApiSource.parallelFaceDownloads}: Google
+ * Fonts' fonts.gstatic.com, which serves every file under a versioned URL as
+ * `public, max-age=31536000` with `Access-Control-Allow-Origin: *`).
+ *
+ * `new FontFace(family, bytes)` decodes (and sanitises) the font
+ * synchronously on the calling thread, about 0.5 ms per CJK subset; a URL
+ * face is decoded by the engine off the main thread (Chromium), and its
+ * request, made after the library's own download landed, is answered from
+ * the HTTP cache. The library still downloads, keeps and charges the bytes
+ * exactly as for a face registered from them, so every limit, failure,
+ * dedupe, metric and probe decision is the same; only the registration
+ * source differs. Such a face loads with its registration, as a face built
+ * from bytes does (OwnedFace.quiet), and one whose URL fails to load, or has
+ * not loaded shortly before the deadline, is built from the bytes in its
+ * place ({@link FontSourceSession.loadFace}), so the outcome is the bytes'.
+ * A cache the engine does not keep (disabled, `no-store`) costs the file a
+ * second download. Font file origins need `font-src` in either case
+ * (docs/migration-0.90.md).
+ *
+ * Only in a window that no service worker controls: a worker decodes off the
+ * main thread anyway (and cannot see whether one controls it), and a service
+ * worker could answer the font request (`destination` "font") otherwise than
+ * the library's fetch, so the face would not be the bytes the library read.
+ */
+function registersFromUrl(source: FontSourceDescriptor | undefined): boolean {
+  if (source?.kind !== 'font-css-api' || source.parallelFaceDownloads === undefined) return false;
+  const realm = globalThis as { document?: unknown; navigator?: { serviceWorker?: { controller?: unknown } } };
+  try {
+    return realm.document !== undefined && !realm.navigator?.serviceWorker?.controller;
+  } catch {
+    // `navigator.serviceWorker` throws in an opaque-origin (sandboxed) frame.
+    return false;
+  }
+}
+
+/** `declaration` (a downloadable face of source `source`) with its acquired
+ * bytes; one that registers from its URL keeps that URL for registration. */
+function acquiredDeclaration(
+  source: FontSourceDescriptor | undefined,
+  declaration: FontFaceDeclaration,
+  data: ArrayBuffer,
+): FontFaceDeclaration {
+  const acquired = withAcquiredBytes(declaration, data);
+  const url = registrationUrls.get(declaration) ?? declaration.url;
+  if (url !== undefined && registersFromUrl(source)) registrationUrls.set(acquired, url);
+  return acquired;
 }
 
 /** A CSS `url()` for a validated absolute URL (data: URLs are kept verbatim
@@ -544,6 +637,8 @@ function warnFailures(failures: readonly (readonly [string, string])[]): void {
 function limitReason(quota: OoxmlFontSourceQuota, limit: number, observed: number): string {
   return fontSourceLimitError(quota, limit, observed).message;
 }
+
+const ignoreRejection = (): undefined => undefined;
 
 const isAbortError = (error: unknown) => error instanceof Error && error.name === 'AbortError';
 
@@ -586,7 +681,9 @@ export { retainedFontSourceBytes };
 // ---- session ------------------------------------------------------------------------
 
 interface OwnedFace {
-  readonly face: FontFace;
+  /** The registered face; a face registered from its URL is replaced by one
+   * built from its bytes if that URL does not load ({@link FontSourceSession.loadFace}). */
+  face: FontFace;
   readonly declaration: FontFaceDeclaration;
   readonly sourceIndex: number;
   /** null: no (or an unparseable) unicode-range, so the face covers all. */
@@ -598,6 +695,16 @@ interface OwnedFace {
   readiness?: Promise<void>;
   /** Settled load outcome; undefined while loading. */
   outcome?: boolean;
+  /** A face registered from its URL ({@link registersFromUrl}) loads with its
+   * registration, as a face built from bytes does when it is constructed
+   * (CSS Font Loading §2.1); until the demand reaches it, as it would reach a
+   * face built from bytes, its failure is not reported. */
+  quiet?: boolean;
+  /** The URL face {@link FontSourceSession.loadFace} replaced by `face`,
+   * until {@link FontSourceSession.placeReplaced} swaps them in the set. */
+  replaced?: FontFace;
+  /** `face` was built from the bytes in place of the URL face. */
+  fromBytes?: boolean;
 }
 
 /** The demand-driven faces of a claimed family (every source kind): its
@@ -673,7 +780,10 @@ export class FontSourceSession {
    * rest of its batch still downloads), by {@link register}'s signature,
    * under a placeholder family; {@link register} names and adds them in its
    * own order. Emptied after each registration pass. */
-  private readonly prepared = new Map<string, { readonly face: FontFace; readonly bytes: number }>();
+  private readonly prepared = new Map<string, { readonly face: FontFace; readonly bytes: number; readonly url?: string }>();
+  /** URL face loads still waiting ({@link loadUrlFace}): `fallback` builds
+   * the face from its bytes now, `cancel` settles the wait (release). */
+  private readonly urlLoads = new Map<OwnedFace, { readonly fallback: () => void; readonly cancel: () => void }>();
   /** Unregisters {@link dropPrepared} from the realm's reclaimers. */
   private stopReclaim: (() => void) | undefined;
   private readonly serial = ++sessionSerial;
@@ -722,10 +832,28 @@ export class FontSourceSession {
    * After {@link release} it resolves with an empty snapshot.
    */
   ensure(demand: FontSessionDemand): Promise<LoadedFontSources> {
+    return this.enqueue(demand);
+  }
+
+  /**
+   * {@link ensure} with the delta's scalars computed by `scalars` only once
+   * its new families' resolution has sent its requests (one task later), so
+   * computing them overlaps the stylesheet round trips. Resolution never
+   * reads scalars; everything else is {@link ensure}'s. A `scalars` that
+   * throws fails the session as any error of an ensure does.
+   */
+  ensureWithScalars(
+    demand: Omit<FontSessionDemand, 'scalars'>,
+    scalars: () => FontSessionDemand['scalars'],
+  ): Promise<LoadedFontSources> {
+    return this.enqueue({ ...demand, scalars: [] }, scalars);
+  }
+
+  private enqueue(demand: FontSessionDemand, later?: () => FontSessionDemand['scalars']): Promise<LoadedFontSources> {
     let normalized: NormalizedDemand;
     try { normalized = normalizeFontDemand(demand); }
     catch (error) { return Promise.reject(error); }
-    const task = this.queue.then(() => this.ensureNow(normalized));
+    const task = this.queue.then(() => this.ensureNow(normalized, later));
     // The queue only orders ensures: it must never hold a settled snapshot
     // (its FontFaces) past the caller's own reference.
     this.queue = task.then(() => undefined, () => undefined);
@@ -739,8 +867,10 @@ export class FontSourceSession {
     this.controller.abort();
     this.detachSignal();
     this.dropPrepared();
+    for (const { cancel } of [...this.urlLoads.values()]) cancel();
     for (const entry of this.owned.values()) {
       this.fontSet?.delete(entry.face);
+      if (entry.replaced) this.fontSet?.delete(entry.replaced);
       refundRetainedBytes(entry.bytes);
     }
     this.owned.clear();
@@ -775,7 +905,7 @@ export class FontSourceSession {
     return this.snapshot;
   }
 
-  private async ensureNow(demand: NormalizedDemand): Promise<LoadedFontSources> {
+  private async ensureNow(demand: NormalizedDemand, later?: () => FontSessionDemand['scalars']): Promise<LoadedFontSources> {
     if (this.closed || this.failure !== undefined) return this.settledState();
     if (!this.fontSet || typeof FontFace === 'undefined' || this.sources.length === 0) return this.snapshot;
     try {
@@ -791,7 +921,7 @@ export class FontSourceSession {
       // exactly the ones counted against it.
       let tracked = this.families.size;
       for (const entry of demand.names) {
-        const key = fontFamilyKey(entry.name);
+        const key = familyKeyOf(entry.name);
         const prior = this.families.get(key);
         if (!prior) {
           // The family ceiling is document demand, judged per family: the
@@ -816,8 +946,19 @@ export class FontSourceSession {
         warnFailures([[`families over the limit: ${overflow.length} [${overflow.slice(0, 8).join(', ')}${overflow.length > 8 ? ', …' : ''}]`,
           limitReason('families', HARD_MAX_FONT_SOURCE_FAMILIES, tracked + overflow.length)]]);
       }
-      const delta = this.addScalars(demand.scalars);
-      const resolved = fresh.length ? await this.resolve(fresh) : new Map<string, FamilyState>();
+      const resolving = fresh.length ? this.resolve(fresh) : undefined;
+      let scalars = demand.scalars;
+      if (later) {
+        if (resolving) {
+          // Observed here; awaited below unless the session is released first.
+          resolving.catch(() => undefined);
+          await new Promise((resolve) => setTimeout(resolve, 0));
+          if (this.closed) return this.settledState();
+        }
+        scalars = normalizeScalars(later());
+      }
+      const delta = this.addScalars(scalars);
+      const resolved = resolving ? await resolving : new Map<string, FamilyState>();
       if (this.closed) return this.settledState();
       // One face-loading ceiling covers acquisition and loading, as the
       // browser's own fetch inside FontFace.load() would.
@@ -843,7 +984,7 @@ export class FontSourceSession {
     failures: Map<string, string>,
   ): Promise<LoadedFontSources> {
     for (const { name, scripts } of fresh) {
-      const key = fontFamilyKey(name);
+      const key = familyKeyOf(name);
       let state = resolved.get(key) ?? { kind: 'absent', name, scripts };
       if (state.kind === 'claimed') {
         // The declaration ceiling covers every claimed declaration, acquired
@@ -879,7 +1020,7 @@ export class FontSourceSession {
     const loadCeiling = bridged && ceiling.remaining() === 0
       ? ceilingSignal(this.controller.signal, FONT_LOAD_CEILING_MS) : undefined;
     try {
-      await this.load(delta, registered, failures, (loadCeiling ?? ceiling).signal);
+      await this.load(delta, registered, failures, loadCeiling ?? ceiling);
     } finally {
       loadCeiling?.dispose();
     }
@@ -926,7 +1067,7 @@ export class FontSourceSession {
       const needed = new Set<number>();
       state.declarations.forEach((declaration, index) => {
         if (settled[index]) return;
-        const ranges = parseUnicodeRange(declaration.unicodeRange);
+        const ranges = rangesOf(declaration.unicodeRange);
         if (this.all || ranges === null || rangeIntersects(ranges, sorted)) needed.add(component[index]!);
       });
       if (!needed.size) continue;
@@ -990,7 +1131,7 @@ export class FontSourceSession {
       for (const { sourceIndex, declaration } of pending.get(url) ?? []) {
         // Checked before any work for a face (hashing included).
         if (this.closed || Date.now() + PREPARE_DEADLINE_MARGIN_MS > deadline) return false;
-        const acquired = withAcquiredBytes(declaration, data);
+        const acquired = acquiredDeclaration(this.sources[sourceIndex], declaration, data);
         const signature = faceSignature(sourceIndex, acquired);
         if (this.owned.has(signature) || this.prepared.has(signature)) continue;
         // The face's copy of the bytes is charged while it is prepared, only
@@ -999,8 +1140,16 @@ export class FontSourceSession {
         // decides a download or registration, and never passes the ceiling.
         if (!chargeReclaimableBytes(data.byteLength)) continue;
         try {
-          const face = new FontFace(`ooxml-font-source-${this.serial}-prepared`, data, faceDescriptors(acquired));
-          this.prepared.set(signature, { face, bytes: data.byteLength });
+          const url = registrationUrls.get(acquired);
+          const face = new FontFace(`ooxml-font-source-${this.serial}-prepared`, url === undefined ? data : cssUrl(url),
+            faceDescriptors(acquired));
+          // A face registered from its URL starts loading now, as a face
+          // built from bytes does (the engine decodes it off the main thread);
+          // its registration loads it in any case (OwnedFace.quiet).
+          // A handler of no closure: the engine may keep it for as long as
+          // a stalled load lasts, and nothing it reaches is kept with it.
+          if (url !== undefined) face.load().catch(ignoreRejection);
+          this.prepared.set(signature, { face, bytes: data.byteLength, ...(url === undefined ? {} : { url }) });
           this.stopReclaim ??= addRetainedReclaimer(() => this.dropPrepared());
         } catch {
           // Left to register(), which builds it again and records the error.
@@ -1062,7 +1211,7 @@ export class FontSourceSession {
         if (!isDownloadableFace(declaration)) { ready.push(index); continue; }
         const outcome = group?.get(declaration.url as string) ?? { reason: 'font download failed' };
         if ('data' in outcome) {
-          state.declarations[index] = withAcquiredBytes(declaration, outcome.data);
+          state.declarations[index] = acquiredDeclaration(source, declaration, outcome.data);
           ready.push(index);
         } else if (!failures.has(state.name)) {
           failures.set(state.name, outcome.reason);
@@ -1162,7 +1311,7 @@ export class FontSourceSession {
           if (isAbortError(error) && !timedOut) throw error;
           const reason = timedOut ? 'timed out' : error instanceof Error ? error.message : String(error);
           if (source.kind !== 'font-resolver') {
-            for (const { name } of pending) result.set(fontFamilyKey(name), { kind: 'failed', name, reason });
+            for (const { name } of pending) result.set(familyKeyOf(name), { kind: 'failed', name, reason });
             pending = [];
             break;
           }
@@ -1177,7 +1326,7 @@ export class FontSourceSession {
         }
         const next: typeof pending[number][] = [];
         for (const entry of pending) {
-          const key = fontFamilyKey(entry.name);
+          const key = familyKeyOf(entry.name);
           const answer = answers.get(key) ?? { kind: 'absent' };
           if (answer.kind === 'absent') next.push(entry);
           else if (answer.kind === 'failed') result.set(key, { kind: 'failed', name: entry.name, reason: answer.reason });
@@ -1207,7 +1356,7 @@ export class FontSourceSession {
   ): ReadonlyMap<string, FamilyResolution> {
     const claims = new Map(answers);
     for (const { name, scripts } of families) {
-      const key = fontFamilyKey(name);
+      const key = familyKeyOf(name);
       const answer = answers.get(key);
       if (answer) claims.set(key, claimResolverCandidates(answer, name, source.substitutes, scripts));
     }
@@ -1223,8 +1372,8 @@ export class FontSourceSession {
     const source = this.sources[sourceIndex];
     const cache = this.caches[sourceIndex];
     const names = families.map(({ name }) => name);
-    const scripts = new Map(families.map(({ name, scripts: proven }) => [fontFamilyKey(name), proven]));
-    const scriptsOf = (name: string): FontSubstituteScripts => scripts.get(fontFamilyKey(name)) ?? 'all';
+    const scripts = new Map(families.map(({ name, scripts: proven }) => [familyKeyOf(name), proven]));
+    const scriptsOf = (name: string): FontSubstituteScripts => scripts.get(familyKeyOf(name)) ?? 'all';
     switch (source.kind) {
       case 'font-css-api':
       case 'font-css':
@@ -1234,7 +1383,7 @@ export class FontSourceSession {
       case 'font-resolver': {
         const unavailable = this.resolverBridge?.unavailable();
         if (unavailable !== undefined) {
-          return new Map(families.map(({ name }) => [fontFamilyKey(name), { kind: 'failed', reason: unavailable } satisfies FamilyResolution]));
+          return new Map(families.map(({ name }) => [familyKeyOf(name), { kind: 'failed', reason: unavailable } satisfies FamilyResolution]));
         }
         return this.claimFromCandidates(source, families,
           await this.resolveWithResolver(source, sourceIndex, cache, families, signal, remainingMs));
@@ -1322,7 +1471,7 @@ export class FontSourceSession {
         continue;
       }
       const bytes = data !== undefined ? data.byteLength : dataUrl ? dataUrlDecodedByteLength(url) ?? 0 : 0;
-      const familyKey = fontFamilyKey(declaration.family);
+      const familyKey = familyKeyOf(declaration.family);
       const alias = this.aliases.get(familyKey) ?? `ooxml-font-source-${this.serial}-${this.aliases.size}`;
       let face: FontFace;
       let charged = false;
@@ -1336,11 +1485,16 @@ export class FontSourceSession {
         this.prepared.delete(signature);
         if (!prepared) chargeRetainedBytes(bytes);
         charged = true;
-        if (prepared) {
+        // A face prepared from another source than the declaration now
+        // registers from (the realm's eligibility changed in between: a
+        // service worker took control) is built again from that source.
+        const registrationUrl = registrationUrls.get(declaration);
+        if (prepared && prepared.url === registrationUrl) {
           face = prepared.face;
           face.family = alias;
         } else {
-          face = new FontFace(alias, data ?? cssUrl(url), faceDescriptors(declaration));
+          face = new FontFace(alias, registrationUrl !== undefined ? cssUrl(registrationUrl) : data ?? cssUrl(url),
+            faceDescriptors(declaration));
         }
         try { set.add(face); }
         catch (error) { set.delete(face); throw error; }
@@ -1352,9 +1506,10 @@ export class FontSourceSession {
       this.aliases.set(familyKey, alias);
       const entry: OwnedFace = {
         face, declaration, sourceIndex: state.sourceIndex,
-        ranges: parseUnicodeRange(declaration.unicodeRange),
+        ranges: rangesOf(declaration.unicodeRange),
         bytes,
         families: new Set([state.name]),
+        ...(registrationUrls.has(declaration) ? { quiet: true } : {}),
       };
       this.owned.set(signature, entry);
       state.faces.push(entry);
@@ -1369,37 +1524,134 @@ export class FontSourceSession {
     delta: 'all' | readonly number[],
     registered: Set<OwnedFace>,
     failures: Map<string, string>,
-    signal: AbortSignal,
+    ceiling: ReturnType<typeof ceilingSignal>,
   ): Promise<void> {
+    const signal = ceiling.signal;
+    // A face registered from its URL that has not loaded by then is built
+    // from its bytes instead (loadFace), early enough to load by the deadline.
+    const fallbackAt = Date.now() + ceiling.remaining() - PREPARE_DEADLINE_MARGIN_MS;
+    const pass = { placed: false };
+    // Too late for any URL still loading (the downloads used the time up):
+    // its bytes now, before the wait, as faces built from them would be.
+    if (Date.now() >= fallbackAt) for (const { fallback } of [...this.urlLoads.values()]) fallback();
     const becameAll = delta === 'all';
     const deltaIndex = delta === 'all' ? [] : [...delta].sort((a, b) => a - b);
     const cumulative = registered.size && !this.all ? [...this.points].sort((a, b) => a - b) : deltaIndex;
     const waits: OwnedFace[] = [];
     for (const entry of this.owned.values()) {
-      if (entry.readiness) { waits.push(entry); continue; }
+      if (entry.readiness && !entry.quiet) { waits.push(entry); continue; }
       const isNew = registered.has(entry);
       const eligible = (this.all && (becameAll || isNew)) || entry.ranges === null
         || rangeIntersects(entry.ranges, isNew ? cumulative : deltaIndex);
-      if (!eligible) continue;
+      if (eligible) entry.quiet = false;
+      if (entry.readiness) { waits.push(entry); continue; }
+      // A face registered from its URL loads now whatever the demand (quiet).
+      if (!eligible && !(isNew && entry.quiet)) continue;
       entry.readiness = Promise.resolve()
-        .then(() => (this.closed ? undefined : entry.face.load()))
+        .then(() => (this.closed ? undefined : this.loadFace(entry, fallbackAt, pass)))
         .then(() => { entry.outcome = true; }, () => { entry.outcome = false; });
       waits.push(entry);
     }
-    if (!waits.length) return;
+    if (!waits.length) { this.placeReplaced(); return; }
     await until(Promise.all(waits.map((entry) => entry.readiness)), signal);
     if (this.closed) return;
+    this.placeReplaced();
+    pass.placed = true;
     for (const entry of waits) {
-      if (entry.outcome === true) continue;
+      if (entry.outcome === true || entry.quiet) continue;
       const reason = entry.outcome === false ? 'font load failed' : 'timed out';
       for (const family of entry.families) if (!failures.has(family)) failures.set(family, reason);
     }
   }
 
+  /**
+   * Load one registered face. A face registered from its URL
+   * ({@link registersFromUrl}) whose load fails, or has not settled by
+   * `fallbackAt`, is replaced by a face built from the bytes the library
+   * downloaded (`OwnedFace.replaced`; {@link placeReplaced} puts it in the
+   * set at its place), so its outcome is that of a face built from its bytes:
+   * the URL only moves the decode off the main thread. A release settles the
+   * wait at once and keeps nothing of the face.
+   */
+  private loadFace(entry: OwnedFace, fallbackAt: number, pass: { placed: boolean }): Promise<unknown> {
+    if (!registrationUrls.has(entry.declaration) || entry.declaration.data === undefined) return entry.face.load();
+    // No time left for the URL: the bytes now, as a face built from them would be.
+    if (entry.face.status !== 'loaded' && Date.now() >= fallbackAt) {
+      this.fallBackToBytes(entry);
+      return entry.face.load();
+    }
+    return this.loadUrlFace({ entry }, entry.face, fallbackAt, pass);
+  }
+
+  /** {@link loadFace} of a URL face. Its callbacks reach the entry (and its
+   * bytes) only through `held`, which is emptied once the wait is over: the
+   * URL load may keep them alive long after a release. */
+  private loadUrlFace(
+    held: { entry?: OwnedFace }, face: FontFace, fallbackAt: number, pass: { placed: boolean },
+  ): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      const done = () => {
+        if (held.entry) this.urlLoads.delete(held.entry);
+        held.entry = undefined;
+        clearTimeout(timer);
+      };
+      /** `place`: put the replacement in the set now when this wait's load
+       * already placed its replacements (a timer that ran late); a load that
+       * triggers fallbacks itself places them once. */
+      const fallback = (place: boolean) => {
+        const owned = held.entry;
+        if (!owned) return;
+        done();
+        if (this.closed) { resolve(); return; }
+        try {
+          this.fallBackToBytes(owned);
+        } catch (error) {
+          reject(error);
+          return;
+        }
+        if (place && pass.placed) this.placeReplaced();
+        owned.face.load().then(() => resolve(), reject);
+      };
+      const timer = setTimeout(() => fallback(true), Math.max(0, fallbackAt - Date.now()));
+      this.urlLoads.set(held.entry!, { fallback: () => fallback(false), cancel: () => { done(); resolve(); } });
+      face.load().then(() => { if (held.entry) { done(); resolve(); } }, () => fallback(true));
+    });
+  }
+
+  /** Build `entry`'s face from its bytes in place of its URL face (once);
+   * {@link placeReplaced} puts it in the set. */
+  private fallBackToBytes(entry: OwnedFace): void {
+    if (entry.fromBytes) return;
+    const face = new FontFace(entry.face.family, entry.declaration.data as ArrayBuffer, faceDescriptors(entry.declaration));
+    entry.fromBytes = true;
+    entry.replaced = entry.face;
+    entry.face = face;
+  }
+
+  /** Put every face built from bytes in place of a URL face ({@link loadFace})
+   * where that face was: it and every later face of this session are added
+   * again in registration order (CSS Fonts 4: among equal descriptors the
+   * later face wins), one pass for every replacement of a load. */
+  private placeReplaced(): void {
+    const set = this.fontSet;
+    if (!set) return;
+    let placing = false;
+    for (const entry of this.owned.values()) {
+      if (entry.replaced) {
+        set.delete(entry.replaced);
+        entry.replaced = undefined;
+        placing = true;
+      } else if (!placing || !set.delete(entry.face)) {
+        continue;
+      }
+      set.add(entry.face);
+    }
+  }
+
   private warn(failures: Map<string, string>): void {
-    const fresh = [...failures].filter(([family]) => !this.warned.has(fontFamilyKey(family)));
+    const fresh = [...failures].filter(([family]) => !this.warned.has(familyKeyOf(family)));
     if (!fresh.length) return;
-    for (const [family] of fresh) this.warned.add(fontFamilyKey(family));
+    for (const [family] of fresh) this.warned.add(familyKeyOf(family));
     warnFailures(fresh);
   }
 
@@ -1448,9 +1700,15 @@ export class FontSourceSession {
   }
 }
 
-const sharesSubsetMetrics = (source: FontSourceDescriptor | undefined, family: string) =>
-  source?.kind === 'font-css-api'
-  && source.sharedSubsetMetricFamilies?.some((entry) => fontFamilyKey(entry) === fontFamilyKey(family)) === true;
+/** {@link FontCssApiSource.sharedSubsetMetricFamilies} of each source, by key. */
+const sharedSubsetMetricKeys = new WeakMap<FontSourceDescriptor, ReadonlySet<string>>();
+
+function sharesSubsetMetrics(source: FontSourceDescriptor | undefined, family: string): boolean {
+  if (source?.kind !== 'font-css-api' || !source.sharedSubsetMetricFamilies) return false;
+  let keys = sharedSubsetMetricKeys.get(source);
+  if (!keys) sharedSubsetMetricKeys.set(source, keys = new Set(source.sharedSubsetMetricFamilies.map(familyKeyOf)));
+  return keys.has(familyKeyOf(family));
+}
 
 const releasedRunner: FontResolverRunner = () => {
   throw createAbortError('Font source session released');
