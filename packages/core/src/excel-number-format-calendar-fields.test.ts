@@ -73,3 +73,17 @@ describe('the General keyword beside literal text', () => {
     }
   });
 });
+
+describe('date-section name texts', () => {
+  it('lists every era name a ja-JP `rr` writes', () => {
+    // §18.8.30: under [$-411] `rr` is `gggee`, the long era name.
+    for (const date of ['1900-06-01', '1920-06-01', '1950-06-01', '2000-06-01', '2024-06-01']) {
+      const painted = format(date, '[$-411]rr');
+      const listed = new Set([...excelDateTimeSectionNameTexts('[$-411]rr').join('')]);
+      const missing = [...painted].filter((ch) => !/[0-9]/.test(ch) && !listed.has(ch));
+      expect(missing, `${date} ${painted}`).toEqual([]);
+    }
+    // Outside ja-JP `rr` is the four-digit year: no names.
+    expect(excelDateTimeSectionNameTexts('rr')).toEqual([]);
+  });
+});

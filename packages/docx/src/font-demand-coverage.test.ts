@@ -1,4 +1,5 @@
 /// <reference types="node" />
+import { readdirSync } from 'node:fs';
 import { readFile, readdir } from 'node:fs/promises';
 import { beforeAll, describe, expect, it } from 'vitest';
 import init, { DocxArchive } from './wasm/docx_parser.js';
@@ -155,6 +156,25 @@ describe('DOCX font demand covers every measured or painted scalar', () => {
       expect(await check(label, bytes), label).toBe('finite');
     }
   });
+
+  // Opt-in: OOXML_FONT_DEMAND_CORPUS=<dir> also checks every .docx in it
+  // (the private corpus, which is not committed).
+  it.skipIf(!process.env.OOXML_FONT_DEMAND_CORPUS)('opt-in corpus', async () => {
+    const dir = process.env.OOXML_FONT_DEMAND_CORPUS!;
+    const outcomes: string[] = [];
+    const [shard, shards] = (process.env.OOXML_FONT_DEMAND_SHARD ?? '0/1').split('/').map(Number) as [number, number];
+    const names = readdirSync(dir).filter((file) => file.endsWith('.docx')).sort().filter((_, index) => index % shards === shard);
+    for (const name of names) {
+      const file = `${dir}/${name}`;
+      try {
+        outcomes.push(await check(file, new Uint8Array(await readFile(file))));
+      } catch (error) {
+        if ((error as Error)?.name === 'AssertionError') throw new Error(`${name}: ${(error as Error).message}`);
+        outcomes.push('unreadable');
+      }
+    }
+    console.log(`.docx corpus outcomes`, JSON.stringify(outcomes.reduce<Record<string, number>>((counts, outcome) => { counts[outcome] = (counts[outcome] ?? 0) + 1; return counts; }, {})));
+  }, 21_600_000);
 
   it('synthetic conformance corpus and public demo samples', async () => {
     const outcomes: string[] = [];

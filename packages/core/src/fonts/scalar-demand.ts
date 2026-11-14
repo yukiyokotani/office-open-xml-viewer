@@ -20,9 +20,17 @@
  *   Text in a symbol-encoded family ({@link FontDemandScalarCollector.addSymbolText})
  *   demands instead every scalar its conversion may paint, a finite set
  *   from the conversion tables (`symbol-font.ts`);
- * - any scalar that is not normalization-inert ({@link fontDemandInertScalar}):
- *   canonical composition or decomposition could paint a scalar the text does
- *   not spell, and malformed/unassigned input proves nothing;
+ * - an unassigned scalar or a lone surrogate: malformed or unknown input
+ *   proves nothing;
+ * - a cluster whose canonical closure outgrows a sane cluster
+ *   (`canonical-closure.ts`).
+ *
+ * A scalar that is not normalization-inert ({@link fontDemandInertScalar})
+ * is demanded with its cluster's canonical closure: shaping may decompose or
+ * compose it (`が` can paint `か` and U+3099; `e` U+0301 can paint `é`), so
+ * every scalar of every canonically equivalent rendering is demanded. A
+ * cluster that starts with a joiner also demands U+25CC, the dotted circle a
+ * shaper may insert for a mark without a base.
  * - growth beyond the caller's JSON byte budget (the collected list is carried
  *   in a bounded projection) or beyond `HARD_MAX_FONT_DEMAND_SCALARS`.
  *
@@ -37,6 +45,7 @@ import {
   FONT_TRACKING_SENTINEL,
 } from '../internal/font-measurement-sentinels.js';
 import { HARD_MAX_FONT_DEMAND_SCALARS } from '../worker/resource-policy.generated.js';
+import { canonicalClusterScalars, isCanonicallyDescribed, isClusterJoiner } from './canonical-closure.js';
 import { fontDemandInertScalar } from './inert-scalars.js';
 import { symbolFontKey, symbolPaintCandidates, type SymbolFontKey } from './symbol-font.js';
 
@@ -82,10 +91,33 @@ export class FontDemandScalarCollector {
   add(text: string): boolean {
     if (this.declined) return false;
     if (hasStrongRtl(text)) return this.decline();
+    // A cluster: a starter and the joiners after it (canonical-closure.ts).
+    let cluster: number[] = [];
+    let canonical = false;
+    const flush = (): boolean => {
+      if (!cluster.length) return true;
+      const scalars = canonical ? canonicalClusterScalars(cluster) : cluster;
+      cluster = [];
+      canonical = false;
+      if (!scalars) return false;
+      for (const cp of scalars) if (!this.admitScalar(cp)) return false;
+      return true;
+    };
     for (const scalar of text) {
       const cp = scalar.codePointAt(0) as number;
-      if ((cp >= 0xf020 && cp <= 0xf0ff) || !this.admit(cp)) return this.decline();
+      if (cp >= 0xf020 && cp <= 0xf0ff) return this.decline();
+      const inert = fontDemandInertScalar(cp);
+      if (!inert && !isCanonicallyDescribed(cp)) return this.decline();
+      if (inert || !isClusterJoiner(cp)) {
+        if (!flush()) return this.decline();
+      } else if (!cluster.length) {
+        // A mark without a base: a shaper may paint a dotted circle for it.
+        if (!this.admitScalar(0x25cc)) return this.decline();
+      }
+      cluster.push(cp);
+      if (!inert) canonical = true;
     }
+    if (!flush()) return this.decline();
     return true;
   }
 
@@ -124,7 +156,11 @@ export class FontDemandScalarCollector {
 
   /** Demand one normalization-inert scalar within the budgets. */
   private admit(cp: number): boolean {
-    if (!fontDemandInertScalar(cp)) return false;
+    return fontDemandInertScalar(cp) && this.admitScalar(cp);
+  }
+
+  /** Demand one scalar within the budgets. */
+  private admitScalar(cp: number): boolean {
     if (this.committed.has(cp) || this.points.has(cp)) return true;
     this.bytes += String(cp).length + 1;
     if (this.bytes > this.budget

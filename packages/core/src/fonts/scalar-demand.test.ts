@@ -12,9 +12,39 @@ describe('collectFontDemandScalars', () => {
   });
 
   it('answers all for every text whose painted scalars its spelling cannot prove', () => {
-    for (const text of ['é', 'é', '\ud800', '͸', '', 'שלום', '‮(']) {
+    for (const text of ['\ud800', '͸', '', 'שלום', '‮(']) {
       expect(collectFontDemandScalars(['A', text], { budget: BUDGET }), JSON.stringify(text)).toBe('all');
     }
+  });
+
+  it('demands every scalar a canonically equivalent rendering can paint', () => {
+    const demanded = (text: string) => {
+      const result = collectFontDemandScalars([text], { budget: BUDGET });
+      if (result === 'all') throw new Error(`all for ${JSON.stringify(text)}`);
+      return new Set(result);
+    };
+    const covers = (text: string, scalars: readonly number[]) => {
+      const set = demanded(text);
+      for (const cp of scalars) expect(set.has(cp), `${JSON.stringify(text)} U+${cp.toString(16)}`).toBe(true);
+    };
+    // Precomposed: itself and its decomposition.
+    covers('\u00e9', [0xe9, 0x65, 0x301]);
+    // Decomposed: the spelled scalars and the composition.
+    covers('e\u0301', [0x65, 0x301, 0xe9]);
+    // Voiced kana: the base kana and the combining voiced marks.
+    covers('\u304c', [0x304c, 0x304b, 0x3099]);
+    covers('\u30d7', [0x30d7, 0x30d5, 0x309a]);
+    // Two marks: each partial composition a shaper may stop at.
+    covers('A\u0323\u0302', [0x41, 0x323, 0x302, 0x1ea0, 0xc2, 0x1eac]);
+    // Hangul: the syllable and its jamo, both ways.
+    covers('\ud55c', [0xd55c, 0x1112, 0x1161, 0x11ab, 0xd558]);
+    covers('\u1112\u1161\u11ab', [0xd55c, 0xd558]);
+    // A singleton decomposition (Angstrom sign) paints U+00C5 or A + ring.
+    covers('\u212b', [0x212b, 0xc5, 0x41, 0x30a]);
+    // A mark without a base may be painted on a dotted circle.
+    covers('\u0301', [0x301, 0x25cc]);
+    // Inert text is unchanged.
+    expect([...demanded('AB')].filter((cp) => !SENTINELS.includes(cp))).toEqual([0x41, 0x42]);
   });
 
   it('charges only uncommitted scalars and degrades to all beyond the JSON budget', () => {

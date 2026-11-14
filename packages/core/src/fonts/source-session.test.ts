@@ -1184,6 +1184,47 @@ describe('FontSourceSession: prepared faces stay within the realm ceilings', () 
   });
 });
 
+describe('FontSourceSession: one face per file across the requested weights', () => {
+  const faces = (extra: { weight: string; url: string; unicodeRange?: string }[] = []) => fontFiles({ faces: [
+    { family: 'Var', url: 'https://app.example/var-a.woff2', weight: '400', unicodeRange: 'U+0-FF' },
+    { family: 'Var', url: 'https://app.example/var-b.woff2', weight: '400', unicodeRange: 'U+3000-30FF' },
+    { family: 'Var', url: 'https://app.example/var-a.woff2', weight: '700', unicodeRange: 'U+0-FF' },
+    { family: 'Var', url: 'https://app.example/var-b.woff2', weight: 'bold', unicodeRange: 'U+3000-30FF' },
+    ...extra.map((face) => ({ family: 'Var', unicodeRange: 'U+0-FF', ...face })),
+  ] });
+  const run = async (source: ReturnType<typeof fontFiles>, requestedWeights?: number[], scalars: FontSessionDemand['scalars'] = [0x41, 0x3042]) => {
+    installFetch({});
+    const set = fakeSet();
+    const session = new FontSourceSession({ sources: [source], fontSet: asSet(set), ...(requestedWeights ? { requestedWeights } : {}) });
+    sessions.push(session);
+    const loaded = await session.ensure(demand(['Var'], scalars));
+    return { set, loaded };
+  };
+
+  it('registers each file once with the weight range when every file is declared at exactly the requested weights', async () => {
+    const { set, loaded } = await run(faces(), [700, 400]);
+    expect(set.faces.map((face) => [urlOf(face), face.weight])).toEqual([
+      ['https://app.example/var-a.woff2', '400 700'], ['https://app.example/var-b.woff2', '400 700'],
+    ]);
+    expect(loaded.faces.map((face) => face.weight)).toEqual(['400 700', '400 700']);
+  });
+
+  it('keeps one face per declaration otherwise', async () => {
+    const separate = (set: FakeSet) => set.faces.map((face) => face.weight);
+    // No proof of the requested weights.
+    expect(separate((await run(faces())).set)).toEqual(['400', '400', '700', 'bold']);
+    // A requested weight no file is declared at.
+    expect(separate((await run(faces(), [400, 500, 700])).set)).toEqual(['400', '400', '700', 'bold']);
+    // A file declared at a weight outside the requested set, or at one weight only.
+    expect(separate((await run(faces([{ weight: '500', url: 'https://app.example/var-c.woff2' }]), [400, 700])).set))
+      .toHaveLength(5);
+    expect(separate((await run(faces([{ weight: '400', url: 'https://app.example/static.woff2', unicodeRange: 'U+100-17F' }]), [400, 700], [0x41, 0x3042, 0x101])).set))
+      .toEqual(['400', '400', '700', 'bold', '400']);
+    // An 'all' demand.
+    expect(separate((await run(faces(), [400, 700], 'all')).set)).toEqual(['400', '400', '700', 'bold']);
+  });
+});
+
 describe('FontSourceSession: released sessions keep no FontFace alive', () => {
   it('lets every face of a released session be collected without another ensure', async () => {
     setFlagsFromString('--expose-gc');

@@ -10,7 +10,10 @@ Writes these fonts under tests/fixtures/fonts/:
 - ooxml-fixture-gap.woff / .woff2: the same font as WOFF 1.0 and WOFF 2.0;
 - ooxml-fixture-gap-var.ttf: a variable version (wght 100-900) whose Black
   master has ascender 900 and lineGap 500, so MVAR varies the OS/2 typo values
-  (hasc/hlgp) and usWin (hcla) with the weight; hhea has no MVAR tag.
+  (hasc/hlgp) and usWin (hcla) with the weight; hhea has no MVAR tag;
+- ooxml-fixture-weight-var.ttf: a variable font (wght 100-900) whose outlines
+  thicken with the weight while its metrics stay fixed, so each weight paints
+  differently;
 
 Every glyph is a synthetic rectangle (no outline is derived from any existing
 font, so the files carry no third-party copyright). Advances are fixed per
@@ -50,7 +53,7 @@ def empty():
 
 
 def build(path: Path | None, family: str, code_points: list[int], advance: int, line_gap: int = 0,
-          ascent: int = ASCENT, weight: int = 400, style_name: str = 'Regular') -> FontBuilder:
+          ascent: int = ASCENT, weight: int = 400, style_name: str = 'Regular', inset: int = 60) -> FontBuilder:
     glyph_order = ['.notdef']
     glyphs = {'.notdef': rectangle(advance, ASCENT, 40)}
     metrics = {'.notdef': (advance, 40)}
@@ -64,8 +67,8 @@ def build(path: Path | None, family: str, code_points: list[int], advance: int, 
         else:
             # Height encodes the code point, so different text paints differently.
             height = 200 + (cp * 37) % 560
-            glyphs[name] = rectangle(advance, height, 60)
-            metrics[name] = (advance, 60)
+            glyphs[name] = rectangle(advance, height, inset)
+            metrics[name] = (advance, inset)
         cmap[cp] = name
     builder = FontBuilder(UPM, isTTF=True)
     builder.setupGlyphOrder(glyph_order)
@@ -96,7 +99,7 @@ def build(path: Path | None, family: str, code_points: list[int], advance: int, 
     return builder
 
 
-def build_variable(path: Path, family: str, code_points: list[int]) -> None:
+def build_variable(path: Path, family: str, code_points: list[int], stroke: bool = False) -> None:
     from fontTools.designspaceLib import AxisDescriptor, DesignSpaceDocument, SourceDescriptor
     from fontTools.varLib import build as build_varfont
 
@@ -105,10 +108,15 @@ def build_variable(path: Path, family: str, code_points: list[int]) -> None:
     axis.tag, axis.name, axis.minimum, axis.default, axis.maximum = 'wght', 'Weight', 100, 400, 900
     doc.addAxis(axis)
     masters = [(100, 'Thin', 800, 300), (400, 'Regular', 800, 300), (900, 'Black', 900, 500)]
+    # With `stroke`, outlines vary with the weight too (inset 160 at Thin, 60
+    # at Regular, 0 at Black) and the metrics do not.
+    insets = {100: 160, 400: 60, 900: 0} if stroke else {100: 60, 400: 60, 900: 60}
     for weight, style, ascent, gap in masters:
+        if stroke:
+            ascent, gap = ASCENT, 0
         source = SourceDescriptor()
         source.font = build(None, family, code_points, 600, line_gap=gap, ascent=ascent,
-                            weight=weight, style_name=style).font
+                            weight=weight, style_name=style, inset=insets[weight]).font
         source.location = {'Weight': weight}
         source.styleName = style
         doc.addSource(source)
@@ -134,6 +142,7 @@ def main() -> None:
     build(OUT / 'ooxml-fixture-gap.ttf', 'Ooxml Fixture Gap', latin, 600, line_gap=300)
     save_flavors(OUT / 'ooxml-fixture-gap.ttf')
     build_variable(OUT / 'ooxml-fixture-gap-var.ttf', 'Ooxml Fixture Gap Var', latin)
+    build_variable(OUT / 'ooxml-fixture-weight-var.ttf', 'Ooxml Fixture Weight Var', latin, stroke=True)
 
 
 if __name__ == '__main__':

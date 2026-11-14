@@ -220,6 +220,25 @@ describe('XLSX font demand covers every measured or painted scalar', () => {
     }
   });
 
+  // Opt-in: OOXML_FONT_DEMAND_CORPUS=<dir> also checks every .xlsx in it
+  // (the private corpus, which is not committed).
+  it.skipIf(!process.env.OOXML_FONT_DEMAND_CORPUS)('opt-in corpus', async () => {
+    const dir = process.env.OOXML_FONT_DEMAND_CORPUS!;
+    const outcomes: string[] = [];
+    const [shard, shards] = (process.env.OOXML_FONT_DEMAND_SHARD ?? '0/1').split('/').map(Number) as [number, number];
+    const names = readdirSync(dir).filter((file) => file.endsWith('.xlsx')).sort().filter((_, index) => index % shards === shard);
+    for (const name of names) {
+      const file = `${dir}/${name}`;
+      try {
+        outcomes.push(...check(file, new Uint8Array(readFileSync(file))));
+      } catch (error) {
+        if ((error as Error)?.name === 'AssertionError') throw new Error(`${name}: ${(error as Error).message}`);
+        outcomes.push('unreadable');
+      }
+    }
+    console.log(`.xlsx corpus outcomes`, JSON.stringify(outcomes.reduce<Record<string, number>>((counts, outcome) => { counts[outcome] = (counts[outcome] ?? 0) + 1; return counts; }, {})));
+  }, 21_600_000);
+
   it('public demo workbook', () => {
     const demo = new URL('../public/demo/', import.meta.url);
     const outcomes: Array<'all' | 'finite'> = [];
