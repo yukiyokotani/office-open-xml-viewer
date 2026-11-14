@@ -70,18 +70,20 @@ describe('DOCX host-face line geometry', () => {
     let probes = 0;
     const context = contractCanvas();
     vi.stubGlobal('FontFace', LocalFace);
-    let strut = '';
+    // Each strut keeps its own style: a batch holds several at once.
     vi.stubGlobal('document', {
       fonts, body: { append() {} },
-      defaultView: { getComputedStyle: () => ({ fontFamily: /px ("[^"]*")/.exec(strut)?.[1] ?? '' }) },
+      defaultView: {
+        getComputedStyle: (strut: { style: { cssText: string } }) => ({ fontFamily: /px ("[^"]*")/.exec(strut.style.cssText)?.[1] ?? '' }),
+      },
       createElement: (tag: string) => tag === 'canvas' ? { getContext: () => context }
         : tag === 'div' ? { style: { cssText: '' }, attachShadow: () => ({ append() {} }), remove() {} }
         : {
-          style: { set cssText(value: string) { strut = value; }, get cssText() { return strut; } },
+          style: { cssText: '' },
           textContent: '',
           get offsetHeight() {
             probes++;
-            return Math.round(2355 * Number(/(\d+)px/.exec(strut)?.[1] ?? 0) / 2048);
+            return Math.round(2355 * Number(/(\d+)px/.exec(this.style.cssText)?.[1] ?? 0) / 2048);
           },
         },
     });

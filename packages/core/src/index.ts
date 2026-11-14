@@ -820,9 +820,11 @@ export {
 export {
   measureLocalFontNormalLine,
   measureFontFaceNormalLine,
+  measureFontFaceNormalLines,
   loadLocalFontCoverageProbe,
   localFontMetricCoversText,
   measureLocalFontSourceNormalLine,
+  type FontFaceNormalLineRequest,
   type LocalFontNormalLine,
 } from './fonts/local-line-metrics';
 export { loadNativeRouteSentinels } from './fonts/route-sentinels';

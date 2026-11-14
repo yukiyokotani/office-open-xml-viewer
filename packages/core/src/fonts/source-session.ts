@@ -111,6 +111,7 @@ import {
   assertFontSourceDescriptors,
   dataUrlDecodedByteLength,
   type FontFaceDeclaration,
+  type FontCssApiSource,
   type FontResolverSource,
   type FontSource,
   type FontSourceDescriptor,
@@ -149,6 +150,11 @@ export interface LoadedSourceFace {
    * it in the DOM without a request. Absent for a face the tables were read
    * from. */
   readonly probeSource?: string | ArrayBuffer;
+  /** The supplying source guarantees that its `unicode-range` subsets of one
+   * served family with equal descriptors share one font file's vertical
+   * metric tables ({@link FontCssApiSource.sharedSubsetMetricFamilies}); present
+   * only with {@link probeSource}. */
+  readonly sharedSubsetMetrics?: true;
 }
 
 /** What the renderers consume after each ensure. */
@@ -1206,6 +1212,8 @@ export class FontSourceSession {
         face: entry.face,
         ...(resourceMetrics ? { resourceMetrics } : {}),
         ...(probeSource === undefined ? {} : { probeSource }),
+        ...(probeSource !== undefined && sharesSubsetMetrics(this.sources[entry.sourceIndex], declaration.family)
+          ? { sharedSubsetMetrics: true as const } : {}),
       }));
     }
     const substitutions = new Map<string, { readonly family: string; readonly script?: FontSubstituteScript }>();
@@ -1223,6 +1231,10 @@ export class FontSourceSession {
     });
   }
 }
+
+const sharesSubsetMetrics = (source: FontSourceDescriptor | undefined, family: string) =>
+  source?.kind === 'font-css-api'
+  && source.sharedSubsetMetricFamilies?.some((entry) => fontFamilyKey(entry) === fontFamilyKey(family)) === true;
 
 const releasedRunner: FontResolverRunner = () => {
   throw createAbortError('Font source session released');
