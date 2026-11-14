@@ -46,8 +46,9 @@
  * demands that partner, closed canonically (the shaper mirrors after
  * normalizing, UAX #9 L4), and Arabic letters demand every Arabic
  * presentation form whose compatibility decomposition consists of demanded
- * scalars (a shaper without the font's joining features substitutes those
- * forms, HarfBuzz `arabic-fallback`). Any text may be painted in a
+ * scalars or of the demanded letters' own compatibility decompositions (a
+ * shaper without the font's joining features substitutes those forms,
+ * HarfBuzz `arabic-fallback`). Any text may be painted in a
  * right-to-left run whatever direction the format resolves, so both apply to
  * every text, generated scalars (closures, symbol conversions) included.
  *
@@ -319,9 +320,19 @@ export class FontDemandScalarCollector {
    * for the demanded Arabic letters (see the module notes). */
   private closeArabicForms(): boolean {
     if (!this.arabic) return true;
-    const has = (cp: number) => this.points.has(cp) || this.committed.has(cp);
+    // A letter's own compatibility decomposition counts as present (U+0677
+    // is U+06C7 U+0674, whose isolated form U+FBDD a fallback shaper paints).
+    const present = new Set<number>();
+    for (const scalars of [this.points, this.committed]) {
+      for (const cp of scalars) {
+        if (!isArabicLetter(cp)) continue;
+        present.add(cp);
+        for (const part of String.fromCodePoint(cp).normalize('NFKD')) present.add(part.codePointAt(0) as number);
+      }
+    }
+    const has = (cp: number) => present.has(cp) || this.points.has(cp) || this.committed.has(cp);
     for (const [form, parts] of arabicPresentationForms()) {
-      if (!has(form) && parts.every(has) && !this.admitScalar(form)) return false;
+      if (!this.points.has(form) && !this.committed.has(form) && parts.every(has) && !this.admitScalar(form)) return false;
     }
     return true;
   }

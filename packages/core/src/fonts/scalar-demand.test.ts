@@ -27,6 +27,24 @@ describe('collectFontDemandScalars', () => {
     const arabic = new Set(collectFontDemandScalars(['بلا'], { budget: BUDGET }) as number[]);
     for (const cp of [0xfe8f, 0xfe90, 0xfe91, 0xfe92, 0xfedd, 0xfe8d, 0xfefb, 0xfefc]) expect(arabic.has(cp), cp.toString(16)).toBe(true);
     expect(arabic.has(0xfef5)).toBe(false); // lam with alef madda: no madda demanded
+    // A letter with a compatibility decomposition: U+0677 = U+06C7 U+0674, isolated form U+FBDD.
+    expect(collectFontDemandScalars(['\u0677'], { budget: BUDGET })).toContain(0xfbdd);
+    // Every single-letter presentation form (HarfBuzz's fallback table maps a letter to the forms sharing its
+    // compatibility decomposition) is demanded with its letter.
+    for (let cp = 0x620; cp <= 0x6ff; cp++) {
+      const letter = String.fromCodePoint(cp);
+      if (!/\p{L}/u.test(letter)) continue;
+      const demanded = new Set(collectFontDemandScalars([letter], { budget: BUDGET }) as number[]);
+      for (const [lo, hi] of [[0xfb50, 0xfdff], [0xfe70, 0xfeff]]) {
+        for (let form = lo!; form <= hi!; form++) {
+          if (String.fromCodePoint(form).normalize('NFKD') === letter.normalize('NFKD')) {
+            expect(demanded.has(form), `U+${cp.toString(16)} U+${form.toString(16)}`).toBe(true);
+          }
+        }
+      }
+    }
+    // A mirrored partner's own decomposition: ⫮ U+2AEE mirrors to ∤ U+2224 = U+2223 U+0338.
+    expect(collectFontDemandScalars(['\u2aee'], { budget: BUDGET })).toEqual(expect.arrayContaining([0x2224, 0x2223, 0x338]));
     // Any text may paint in a right-to-left run, so the partner is demanded whatever the text's direction.
     expect(new Set(collectFontDemandScalars(['['], { budget: BUDGET }) as number[])).toEqual(new Set([...SENTINELS, 0x5b, 0x5d]));
   });
