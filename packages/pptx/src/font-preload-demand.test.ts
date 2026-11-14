@@ -3,6 +3,8 @@ import type { TextRunData } from '@silurus/ooxml-core';
 import { collectFontDemandScalars } from '@silurus/ooxml-core/internal/font-scalar-demand';
 import { collectSlideFontDemand } from './font-preload-demand.js';
 import { formatAutoNum } from './autonum-label.js';
+import { verticalBracketFormSubstitute, verticalFormSubstitute } from '@silurus/ooxml-core';
+import { VERTICAL_PRESENTATION_FORMS } from './font-preload-demand.js';
 import { PresentationPreflightBuilder, normalizePresentationPreflight } from './presentation-preflight.js';
 import type { Slide } from './types';
 import type { PresentationBootstrap } from './worker-protocol.js';
@@ -112,7 +114,7 @@ describe('complete conservative PPTX paint demand', () => {
     expect(has(numbered('romanLcPlain'), 'mdclxvi')).toBe(true);
     expect(has(numbered('arabicDbPeriod'), '０１２３４５６７８９.')).toBe(true);
     // Every label of every counter is inside its scheme's demand.
-    for (const numType of ['arabicPlain', 'arabicParenR', 'arabicDbPlain', 'alphaLcPeriod', 'alphaUcParenBoth', 'romanLcParenR', 'romanUcPlain', 'circleNumDbPlain']) {
+    for (const numType of ['arabicPlain', 'arabicPeriod', 'arabicParenR', 'arabicParenBoth', 'arabicDbPlain', 'arabicDbPeriod', 'alphaLcPlain', 'alphaLcPeriod', 'alphaLcParenR', 'alphaLcParenBoth', 'alphaUcPlain', 'alphaUcPeriod', 'alphaUcParenR', 'alphaUcParenBoth', 'romanLcPlain', 'romanLcPeriod', 'romanLcParenR', 'romanLcParenBoth', 'romanUcPlain', 'romanUcPeriod', 'romanUcParenR', 'romanUcParenBoth', 'circleNumDbPlain']) {
       const demand = numbered(numType);
       for (const counter of [-42, 0, ...Array.from({ length: 200 }, (_, i) => i + 1), 999, 3999, 4000, 12345, 1_000_000]) {
         expect(has(demand, formatAutoNum(counter, numType)), `${numType} ${counter}`).toBe(true);
@@ -132,6 +134,13 @@ describe('complete conservative PPTX paint demand', () => {
     };
     for (const vert of ['vert', 'vert270', 'mongolianVert']) {
       expect(vertical(vert, 'Ab、「')).toEqual(collectSlideFontDemand(slide('Ab、「'), new Set(), 10000));
+    }
+    // Every form core substitutes is inside the static set.
+    const forms = new Set([...VERTICAL_PRESENTATION_FORMS].map((ch) => ch.codePointAt(0)!));
+    for (let cp = 0; cp <= 0xffff; cp++) {
+      for (const form of [verticalFormSubstitute(cp), verticalBracketFormSubstitute(cp)]) {
+        if (form !== null) expect(forms.has(form), cp.toString(16)).toBe(true);
+      }
     }
     // 、 → U+FE11, 「 → U+FE41, （ → U+FE35 (core vertical-orientation).
     expect(vertical('eaVert', 'あ、「（')).toEqual(expect.arrayContaining([0x3042, 0x3001, 0xfe11, 0x300c, 0xfe41, 0xff08, 0xfe35]));

@@ -20,9 +20,9 @@ import {
  *   signs, separators and exponents (printable ASCII below), the code's own
  *   literals (above) and, for a date / time section, the formatter's name
  *   tables (core `excelDateTimeSectionNameTexts`: month, weekday, AM/PM,
- *   Japanese weekday, era and quarter names). Every model string is tested as
- *   a possible format code, so no format-code key is missed (a title that
- *   reads as a date section only over-demands). Excel built-in format 14 in a
+ *   Japanese weekday, era and quarter names). Every string under a key naming
+ *   a format (`/format/i`, array items inheriting their array's key) is
+ *   tested as a code. Excel built-in format 14 in a
  *   data table paints the viewer's locale short date (`Intl`), complete only
  *   for a Gregorian, Latin-digit locale; any other locale declines;
  * - the painter's own literals ({@link CHART_SYNTHESIZED_TEXT}): elision,
@@ -39,6 +39,7 @@ export function chartPaintTexts(chart: unknown): readonly string[] | 'all' {
   let localizedShortDate = false;
   const pending: unknown[] = [chart];
   const seen = new Set<object>();
+  const formatArrays = new Set<unknown[]>();
   while (pending.length) {
     const value = pending.pop();
     if (value === null || typeof value !== 'object' || seen.has(value) || ArrayBuffer.isView(value)) continue;
@@ -49,10 +50,16 @@ export function chartPaintTexts(chart: unknown): readonly string[] | 'all' {
       if (typeof record.imagePath === 'string' && !paintsTextFreeImage(record.imagePath, record.mimeType)) return 'all';
       if (record.catFormatBuiltinId === 14) localizedShortDate = true;
     }
-    for (const [key, child] of Object.entries(record)) {
+    // A string under a format key (`formatCode`, `valAxisFormatCode`,
+    // `catFormatCodes[i]`, `numberFormat.formatCode`, …) may be a §18.8.30
+    // code; the parent's key carries over to array items.
+    const formatArray = Array.isArray(value) && formatArrays.has(value);
+    for (const key in record) {
+      const child = record[key];
       if (typeof child === 'string') {
         if (CHART_FACE_KEY.test(key)) continue;
         texts.push(child);
+        if (!formatArray && !FORMAT_KEY.test(key)) continue;
         for (const section of splitFormatSections(child)) {
           if (!isDateFormatSection(section)) continue;
           texts.push(...excelDateTimeSectionNameTexts(section));
@@ -61,6 +68,7 @@ export function chartPaintTexts(chart: unknown): readonly string[] | 'all' {
           if (/r/i.test(section)) texts.push(...excelDateTimeSectionNameTexts(`${section}g`));
         }
       } else if (child !== null && typeof child === 'object') {
+        if (Array.isArray(child) && FORMAT_KEY.test(key)) formatArrays.add(child);
         pending.push(child);
       }
     }
@@ -94,6 +102,10 @@ const TEXT_FREE_IMAGE_TYPES: ReadonlySet<string> = new Set([
   'image/png', 'image/jpeg', 'image/jpg', 'image/gif', 'image/bmp', 'image/webp', 'image/tiff', 'image/svg+xml',
 ]);
 const METAFILE_PATH = /\.(?:wmf|emf|wmz|emz)$/i;
+
+/** Keys holding a §18.8.30 format code: every ChartModel code field
+ * (`*FormatCode`, `*FormatCodes`, `formatCode` of a number-format object). */
+const FORMAT_KEY = /format/i;
 
 /** Keys naming a face (core chart-font-sources CHART_FACE_KEY): not painted. */
 const CHART_FACE_KEY = /^(?:fontFace|[A-Za-z]+FontFace|themeMajorFontLatin|themeMinorFontLatin)$/;

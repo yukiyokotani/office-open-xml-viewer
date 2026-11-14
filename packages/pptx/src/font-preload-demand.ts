@@ -1,7 +1,5 @@
 import { FontDemandScalarCollector } from '@silurus/ooxml-core/internal/font-scalar-demand';
-import { verticalBracketFormSubstitute, verticalFormSubstitute } from '@silurus/ooxml-core';
 import type { FontPreloadDemand, TextBody } from '@silurus/ooxml-core';
-import { formatAutoNum } from './autonum-label.js';
 import { chartPaintTexts, paintsTextFreeImage } from './chart-font-demand.js';
 import { preparedPowerPointText } from './font-display-text.js';
 import type { Slide, SlideElement } from './types';
@@ -50,11 +48,11 @@ export function collectSlideFontDemand(
     if (!textBody) return true;
     if (textBody.vert && !HORIZONTAL_GLYPH_VERTS.has(textBody.vert) || 'textWarp' in textBody) return false;
     // eaVert stands corner punctuation and brackets upright as their vertical
-    // presentation forms (UAX #50 Tu/Tr; vertical-text.ts): both the authored
-    // scalar (measured) and its form (painted) are demanded.
+    // presentation forms (UAX #50 Tu/Tr; vertical-text.ts): the authored
+    // scalars (measured) and every form core substitutes (painted).
+    if (textBody.vert === 'eaVert' && !scalars.add(VERTICAL_PRESENTATION_FORMS)) return false;
     const add = (text: string, families: readonly (string | null | undefined)[]): boolean =>
-      scalars.addSymbolText(text, families)
-      && (textBody.vert !== 'eaVert' || scalars.addSymbolText(verticalForms(text), families));
+      scalars.addSymbolText(text, families);
     for (const para of textBody.paragraphs) {
       if (para.rtl) return false;
       // The parsed inherit sentinel produces no marker in resolveBulletLabel,
@@ -62,7 +60,7 @@ export function collectSlideFontDemand(
       // (§21.1.2.4.3; renderer paragraphBullet), converted like run text when
       // that face is symbol-encoded. An auto-number label paints in its
       // a:buFont, else the first run's face; its counter is unbounded across
-      // startAt values, so the scheme's whole alphabet is demanded. A picture
+      // startAt values, so every scalar any scheme writes is demanded. A picture
       // marker paints no text (its image is checked with the element's).
       const bullet = para.bullet as TextBody['paragraphs'][number]['bullet'] | { type: 'blip' };
       if (bullet?.type === 'char') {
@@ -70,7 +68,7 @@ export function collectSlideFontDemand(
       } else if (bullet?.type === 'autoNum') {
         const firstRun = para.runs.find((run) => run.type === 'text' && !!run.fontFamily);
         const face = bullet.fontFamily ?? (firstRun?.type === 'text' ? firstRun.fontFamily : null) ?? para.defFontFamily;
-        if (!add(autoNumAlphabet(bullet.numType), [painted(face)])) return false;
+        if (!add(AUTONUM_ALPHABET, [painted(face)])) return false;
       } else if (bullet?.type !== 'none' && bullet?.type !== 'inherit' && bullet?.type !== 'blip') return false;
       for (const run of para.runs) {
         if (run.type === 'break') continue;
@@ -82,7 +80,8 @@ export function collectSlideFontDemand(
         // stored text, a slide-number field its actual number
         // (preparedPowerPointText, the renderer's display text).
         const families = [painted(run.fontFamily ?? para.defFontFamily), run.fontFamilySym && painted(run.fontFamilySym)];
-        if (!add(run.text, families) || !add(preparedPowerPointText(run, slide.slideNumber), families)) return false;
+        const display = preparedPowerPointText(run, slide.slideNumber);
+        if (!add(run.text, families) || (display !== run.text && !add(display, families))) return false;
       }
     }
     return true;
@@ -116,59 +115,41 @@ export function collectSlideFontDemand(
  * paints exactly its horizontal glyphs; `eaVert` adds vertical forms. */
 const HORIZONTAL_GLYPH_VERTS: ReadonlySet<string> = new Set(['horz', 'vert', 'vert270', 'mongolianVert', 'eaVert']);
 
-function verticalForms(text: string): string {
-  let forms = '';
-  for (const ch of text) {
-    const cp = ch.codePointAt(0) as number;
-    for (const form of [verticalFormSubstitute(cp), verticalBracketFormSubstitute(cp)]) {
-      if (form !== null) forms += String.fromCodePoint(form);
-    }
-  }
-  return forms;
-}
+/** Every vertical presentation form core substitutes in eaVert text
+ * (`verticalFormSubstitute` → U+FE10–FE19, `verticalBracketFormSubstitute`
+ * → U+FE17/FE18 and U+FE35–FE44): the two blocks, a small superset. Kept
+ * static so the collector chunk shares no module with the renderer. */
+export const VERTICAL_PRESENTATION_FORMS = String.fromCharCode(
+  ...Array.from({ length: 10 }, (_, i) => 0xfe10 + i),
+  ...Array.from({ length: 0x20 }, (_, i) => 0xfe30 + i),
+);
 
-/** Every scalar {@link formatAutoNum} can write for `numType`, whatever the
- * counter: its labels for a negative counter (the sign), 0–9 (every digit),
- * 1–26 (every letter), 30–39 (every digit of the alphabetic schemes' Arabic
- * fallback beyond 26) and 3888 (MMMDCCCLXXXVIII, every roman numeral; a
- * non-positive counter has none).
- * Memoized per scheme; the memo is bounded because `numType` is document
- * text (an unknown scheme formats as arabicPeriod). */
-function autoNumAlphabet(numType: string): string {
-  let alphabet = autoNumAlphabets.get(numType);
-  if (alphabet === undefined) {
-    alphabet = [...new Set(AUTONUM_ALPHABET_COUNTERS.map((counter) => formatAutoNum(counter, numType)).join(''))].join('');
-    if (autoNumAlphabets.size < AUTONUM_ALPHABET_MEMO_LIMIT) autoNumAlphabets.set(numType, alphabet);
-  }
-  return alphabet;
-}
-
-const autoNumAlphabets = new Map<string, string>();
-/** Above the 41 ST_TextAutonumberScheme values (§20.1.10.61). */
-const AUTONUM_ALPHABET_MEMO_LIMIT = 64;
-const AUTONUM_ALPHABET_COUNTERS: readonly number[] = [
-  -1, 0, 3888, ...Array.from({ length: 39 }, (_, index) => index + 1),
-];
+/** Every scalar `formatAutoNum` (autonum-label.ts) can write for any scheme
+ * and counter: Arabic digits and sign, Latin letters (alphabetic and roman
+ * schemes), the scheme punctuation `.()`, and full-width digits (arabicDb*).
+ * Printable ASCII is a small superset; kept static so the collector chunk
+ * shares no module with the renderer. */
+export const AUTONUM_ALPHABET = `${String.fromCharCode(...Array.from({ length: 0x7f - 0x20 }, (_, i) => 0x20 + i))}${
+  String.fromCharCode(...Array.from({ length: 10 }, (_, i) => 0xff10 + i))}`;
 
 /** Whether every image an element (or the slide background) paints is free of
  * served-face text: any `imagePath` (picture, picture fill, picture bullet)
  * and a media poster. Chart fills are checked by chartPaintTexts, equation
  * fallbacks as elements of their own. */
-function textFreeImages(value: unknown): boolean {
-  const pending: unknown[] = [value];
-  const seen = new Set<object>();
-  while (pending.length) {
-    const next = pending.pop();
-    if (next === null || typeof next !== 'object' || seen.has(next)) continue;
-    seen.add(next);
-    const record = next as Record<string, unknown>;
-    if (typeof record.imagePath === 'string' && !paintsTextFreeImage(record.imagePath, record.mimeType)) return false;
-    if (typeof record.posterPath === 'string' && record.posterPath
-      && !paintsTextFreeImage(record.posterPath, record.posterMimeType)) return false;
-    for (const [key, child] of Object.entries(record)) {
-      if (key === 'chart' || key === 'mathFallback') continue;
-      if (child !== null && typeof child === 'object') pending.push(child);
-    }
+function textFreeImages(value: unknown, depth = 0): boolean {
+  // The model is a JSON tree (parser output, structured-cloned): a plain
+  // recursive walk without a visited set; the depth bound only guards
+  // against a pathological hand-built model.
+  if (value === null || typeof value !== 'object') return true;
+  if (depth > 64) return false;
+  const record = value as Record<string, unknown>;
+  if (typeof record.imagePath === 'string' && !paintsTextFreeImage(record.imagePath, record.mimeType)) return false;
+  if (typeof record.posterPath === 'string' && record.posterPath
+    && !paintsTextFreeImage(record.posterPath, record.posterMimeType)) return false;
+  for (const key in record) {
+    if (key === 'chart' || key === 'mathFallback') continue;
+    const child = record[key];
+    if (child !== null && typeof child === 'object' && !textFreeImages(child, depth + 1)) return false;
   }
   return true;
 }

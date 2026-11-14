@@ -111,6 +111,11 @@ self.onmessage = async (
 
       if (request.kind === 'parse') {
         preflightBuilder = null;
+        // Fetch the optional collector chunk while the archive opens, off
+        // the critical path (observed so an open failure leaves no rejection).
+        const collectorLoad = request.collectFontDemand === true && !request.progressiveLayout
+          ? loadFontDemandCollector(true) : undefined;
+        void collectorLoad?.catch(() => undefined);
         const [maxEntry, maxTotal, maxEntries] = resourcePolicyForWasm(request.resourcePolicy);
         const bootstrap = host.run(() => {
           const archive = new PptxArchive(
@@ -130,7 +135,7 @@ self.onmessage = async (
         // keeping a second builder here would duplicate the bounded projection.
         preflightBuilder = request.progressiveLayout
           ? null
-          : new PresentationPreflightBuilder(bootstrap, { cjkFallback: request.cjkFallback, collectFontDemand: request.collectFontDemand === true ? await loadFontDemandCollector(true) : undefined, officeFaceWeight: indexedOfficeFaceWeight });
+          : new PresentationPreflightBuilder(bootstrap, { cjkFallback: request.cjkFallback, collectFontDemand: await collectorLoad, officeFaceWeight: indexedOfficeFaceWeight });
         post({ kind: 'presentationOpened', id, bootstrap });
         presentationState = 'ready';
         return;
