@@ -461,4 +461,11 @@ test('TS tuples accepting lengths Rust never emits are reported', () => {
   assert.deepEqual(keysOf('export interface Doc { v: [number, number, number?] }', rust), [
     'Doc.v: ts-wider-length (Rust length 2..2 vs TS length 2..3)',
   ]);
+  assert.deepEqual(keysOf('export interface Doc { v: number[] }', rust), [
+    'Doc.v: ts-wider-length (Rust length 2..2 vs TS array)',
+  ]);
+  const tuple = single({ v: { type: 'array', prefixItems: [{ type: 'number' }, { type: 'number' }], minItems: 2, maxItems: 2 } });
+  assert.deepEqual(keysOf('export interface Doc { v: number[] }', tuple), [
+    'Doc.v: ts-wider-length (Rust length 2..2 vs TS array)',
+  ]);
 });

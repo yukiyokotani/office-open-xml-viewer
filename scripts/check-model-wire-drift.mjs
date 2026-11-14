@@ -455,6 +455,7 @@ function comparer(sink) {
     if ([r.kind, t.kind].some((k) => k === 'union' || k === 'literal' || k === 'pattern')) return walkUnion(r, t, ctx);
     if ((r.kind === 'array' || r.kind === 'tuple') && t.kind === 'tuple') return walkTuple(r, t, ctx);
     if (r.kind === 'tuple' && t.kind === 'array') {
+      report(ctx.owner, ctx.field, 'ts-wider-length', 'TS accepts lengths Rust never emits', ctx.path, `(Rust length ${r.items.length}..${r.items.length} vs TS array)`);
       r.items.forEach((item, i) => walk(item, t.item, { ...ctx, field: `${ctx.field}[${i}]`, path: `${ctx.path}[${i}]` }));
       return;
     }
@@ -475,6 +476,9 @@ function comparer(sink) {
         if (r.name !== t.name) report(ctx.owner, ctx.field, 'type-mismatch', 'incompatible primitives', ctx.path, `(Rust ${r.name} vs TS ${t.name})`);
         return;
       case 'array':
+        if (r.minItems !== undefined || r.maxItems !== undefined) {
+          report(ctx.owner, ctx.field, 'ts-wider-length', 'TS accepts lengths Rust never emits', ctx.path, `(Rust length ${r.minItems ?? 0}..${r.maxItems ?? 'Infinity'} vs TS array)`);
+        }
         return walk(r.item, t.item, { ...ctx, field: `${ctx.field}[]`, path: `${ctx.path}[]` });
       case 'map':
         return walk(r.value, t.value, { ...ctx, field: `${ctx.field}{}`, path: `${ctx.path}{}` });
