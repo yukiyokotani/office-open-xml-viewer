@@ -337,13 +337,21 @@ export function buildDocxCompatProfile(
  * inputs. */
 export const DEFAULT_DOCX_COMPAT_PROFILE: DocxCompatProfile = buildDocxCompatProfile(undefined);
 
-const profileKeys = new WeakMap<DocxCompatProfile, string>();
+const profileKeys = new WeakMap<DocxCompatProfile, number>();
+const profileOrdinals = new Map<string, number>();
 
-/** Stable value key of a profile for acquisition cache keys. */
-export function docxCompatProfileKey(profile: DocxCompatProfile): string {
+/** Small stable value key of a profile for acquisition cache keys: equal
+ * profiles share one ordinal, so the serialized cache keys stay short. The
+ * ordinal table grows by one entry per distinct settings combination seen. */
+export function docxCompatProfileKey(profile: DocxCompatProfile): number {
   let key = profileKeys.get(profile);
   if (key === undefined) {
-    key = JSON.stringify(Object.values(profile));
+    const value = JSON.stringify(Object.values(profile));
+    key = profileOrdinals.get(value);
+    if (key === undefined) {
+      key = profileOrdinals.size;
+      profileOrdinals.set(value, key);
+    }
     profileKeys.set(profile, key);
   }
   return key;

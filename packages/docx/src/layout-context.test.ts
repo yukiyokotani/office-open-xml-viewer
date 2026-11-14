@@ -146,7 +146,6 @@ describe('layout context resolvers', () => {
     );
 
     expect(settings.defaultTabPt).toBe(36);
-    expect(settings.compat).toBe(settings.compat);
     expect(settings.compat).toEqual(DEFAULT_DOCX_COMPAT_PROFILE);
     expect(context.grid).toEqual({
       kind: 'none',

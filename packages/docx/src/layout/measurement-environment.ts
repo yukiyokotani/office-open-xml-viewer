@@ -5,7 +5,6 @@ import {
   isGridLineRule,
   type DocGridCtx,
   type LayoutSeg,
-  type LineLayoutEnvironment,
 } from '../line-layout.js';
 import {
   paragraphCharacterGrid,
