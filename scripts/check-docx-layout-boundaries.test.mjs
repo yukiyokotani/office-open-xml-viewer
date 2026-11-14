@@ -562,13 +562,16 @@ test('layout acquisition contexts reject paint capabilities and renderer back-ed
   );
 
   // Line-breaker consumers are discovered from the directory, so a module
-  // added after the guard was written is still inspected; tests are not.
+  // added after the guard was written is still inspected; non-production
+  // files (tests, benches, test support, declarations) are not.
   const testOnlyRoot = initializeCanonicalFixture('docx-layout-boundary-line-breaker-test-');
-  write(
-    testOnlyRoot,
-    'packages/docx/src/line-breaker/added-module.test.ts',
-    "import type { Hidden } from '../renderer.js';\nexport type Probe = Hidden;\n",
-  );
+  for (const name of ['added-module.test.ts', 'added-module.bench.ts', 'added-module.test-support.ts', 'added-module.d.ts']) {
+    write(
+      testOnlyRoot,
+      `packages/docx/src/line-breaker/${name}`,
+      "import type { Hidden } from '../renderer.js';\nexport type Probe = Hidden;\n",
+    );
+  }
   const testOnly = runChecker(testOnlyRoot, '--final');
   assert.equal(testOnly.status, 0, testOnly.output);
 

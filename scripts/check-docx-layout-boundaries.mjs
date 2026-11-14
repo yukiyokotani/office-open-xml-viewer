@@ -549,8 +549,8 @@ function assertAcquisitionContextBoundary(root) {
     ...ACQUISITION_CONTEXT_CONSUMERS,
     ...ACQUISITION_CONTEXT_CONSUMER_DIRECTORIES.flatMap((directory) =>
       listFiles(resolve(root, directory))
-        .filter((path) => /\.tsx?$/u.test(path) && !/\.(?:test|stories)\.tsx?$/u.test(path))
         .map((path) => posixPath(relative(root, path)))
+        .filter(isProductionTypeScript)
         .sort()),
   ];
   for (const file of inspected) {
