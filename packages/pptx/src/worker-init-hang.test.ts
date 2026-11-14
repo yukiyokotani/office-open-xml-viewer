@@ -325,3 +325,23 @@ it.each(['default', 'source'] as const)('carries completed compact demand from t
     kind: 'presentationPreflightReady', id: 81, preflight: expect.objectContaining({ fontPreloadDemand: [] }),
   })));
 });
+
+it.each(['default', 'source'] as const)('still loads when the collector sidecar is not served (%s)', async (variant) => {
+  initMock.mockResolvedValue(undefined);
+  if (variant === 'source') openSourceMock.mockResolvedValue({ archive: sourceArchive(), viewDefaults: {}, close: vi.fn() });
+  const fake = await loadWorker(variant);
+  fake.onmessage?.({ data: { kind: 'init', wasmUrl: 'x' } } as MessageEvent);
+  // A bundler that does not emit module-relative assets (esbuild) leaves the URL unserved.
+  fake.onmessage?.({ data: { kind: 'parse', id: 90, buffer: new ArrayBuffer(4), resourcePolicy, cjkFallback: 'jp', collectFontDemand: './missing-font-demand-sidecar.mjs',
+    ...(variant === 'source' ? { source: modelSource, sourceOwnerUrl: './internal/worker-presentation-source.js' } : {}),
+  } } as MessageEvent);
+  await vi.waitFor(() => expect(fake.posted).toContainEqual(expect.objectContaining({ kind: 'presentationOpened', id: 90 })));
+  fake.onmessage?.({ data: { kind: 'finishPresentationPreflight', id: 91 } } as MessageEvent);
+  await vi.waitFor(() => expect(fake.posted).toContainEqual(expect.objectContaining({
+    kind: 'presentationPreflightReady', id: 91, preflight: expect.objectContaining({ fontPreloadDemand: expect.anything() }),
+  })));
+  // Every slide then demands every subset (font-demand-collector.ts).
+  const { importFontDemandCollector } = await import('./font-demand-collector.js');
+  const collector = await importFontDemandCollector('./missing-font-demand-sidecar.mjs');
+  expect(collector({ index: 0, elements: [] } as never, new Set(), 1000)).toBe('all');
+});
