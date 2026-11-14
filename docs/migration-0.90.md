@@ -465,11 +465,11 @@ for the Noto CJK families.
   fails like a face that cannot load: it is left out with a `console.warn`,
   and the family is not passed to another source or substitute. For XLSX in
   worker mode, the viewer and the worker share each fetch and its outcome.
-  Documents open in the same realm share each face file's outcome too, since
-  they paint from one set of registered faces: while a document that could
-  not fetch a face is open, another document does not retry it (and a
-  document whose own request failed uses the file another one holds). A
-  document opened after those have closed retries.
+  Documents open in the same realm join a download of the same file (same URL
+  and `credentials`) that is in flight or already held, which only saves
+  requests: each document judges its own outcome against its own deadline
+  and registers the face under names of its own. A failure is not kept, so a
+  later request for the file retries.
 - A resolver is called only for families that no earlier call answered and no
   live cache entry covers. Within a document that means once per family. For
   XLSX in worker mode, the

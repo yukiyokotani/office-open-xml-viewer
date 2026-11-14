@@ -28,7 +28,8 @@ describe('experimental legacy Office add-on guidance', () => {
     for (const contract of ['experimental', 'versions must match', 'openPptxPresentation', 'session.close()', 'createLegacyPpt', 'legacy-binary-format', 'unsupported-content', 'source-subset', 'Markdown', 'WASM', 'moduleUrl', 'wasmUrl']) {
       expect(page).toContain(contract);
     }
-    expect(source('./pages/bundle-size.astro')).toContain('Optional add-on package');
+    expect(source('./pages/bundle-size.astro')).toContain('Legacy Office add-on');
+    expect(source('./pages/bundle-size.astro')).toContain('OpenDocument add-on');
     expect(source('../../README.md')).toContain('https://ooxml.silurus.dev/legacy-office/');
   });
 

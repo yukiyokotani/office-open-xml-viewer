@@ -15,7 +15,7 @@ import SiteFooter from '../components/SiteFooter.astro';
       <div class="wrap">
         <p class="eyebrow">Current measurement</p>
         <h1>Bundle size.</h1>
-        <p>Current production assets for v0.89.4.</p>
+        <p>Current production assets for v0.90.0.</p>
       </div>
     </header>
 
@@ -28,18 +28,18 @@ import SiteFooter from '../components/SiteFooter.astro';
           <tbody>
             <tr>
               <th>DOCX static JavaScript</th>
-              <td>3,076 KiB</td>
-              <td>701 KiB</td>
+              <td>3,347 KiB</td>
+              <td>789 KiB</td>
             </tr>
             <tr>
               <th>XLSX static JavaScript</th>
-              <td>2,118 KiB</td>
-              <td>457 KiB</td>
+              <td>2,210 KiB</td>
+              <td>494 KiB</td>
             </tr>
             <tr>
               <th>PPTX static JavaScript</th>
-              <td>2,127 KiB</td>
-              <td>461 KiB</td>
+              <td>2,539 KiB</td>
+              <td>537 KiB</td>
             </tr>
           </tbody>
         </table>
@@ -51,17 +51,17 @@ import SiteFooter from '../components/SiteFooter.astro';
             <tr><th>Configuration</th><th>Raw</th><th>gzip</th></tr>
           </thead>
           <tbody>
-            <tr><th>ChartEx</th><td>39.7 KiB</td><td>12.2 KiB</td></tr>
-            <tr><th>3-D charts</th><td>106.2 KiB</td><td>30.1 KiB</td></tr>
-            <tr><th>Region Map</th><td>231.2 KiB</td><td>62.6 KiB</td></tr>
+            <tr><th>ChartEx</th><td>39.8 KiB</td><td>12.1 KiB</td></tr>
+            <tr><th>3-D charts</th><td>106.8 KiB</td><td>30.3 KiB</td></tr>
+            <tr><th>Region Map</th><td>231.4 KiB</td><td>62.6 KiB</td></tr>
             <tr><th>Math adapter</th><td>1.2 KiB</td><td>0.6 KiB</td></tr>
             <tr><th>TIFF image codec</th><td>27.4 KiB</td><td>8.2 KiB</td></tr>
           </tbody>
         </table>
       </div>
-      <h2>Optional add-on package</h2>
+      <h2>Legacy Office add-on</h2>
       <p>
-        Experimental <code>@silurus/ooxml-legacy-office</code> v0.89.4 assets, measured separately
+        Experimental <code>@silurus/ooxml-legacy-office</code> v0.90.0 assets, measured separately
         from the viewer totals above. Entry rows exclude the add-on's shared helper, counted
         once below, and the viewer peer. Creating a source fetches nothing; its reader module and
         dedicated WASM load only for a claimed file. Ordinary OOXML imports include none of these
@@ -76,11 +76,36 @@ import SiteFooter from '../components/SiteFooter.astro';
             <tr><th>PPT entry (/ppt)</th><td>0.5 KiB</td><td>0.3 KiB</td></tr>
             <tr><th>Shared source helper</th><td>5.3 KiB</td><td>2.1 KiB</td></tr>
             <tr><th>DOC reader module</th><td>10.8 KiB</td><td>4.1 KiB</td></tr>
-            <tr><th>XLS reader module</th><td>10.4 KiB</td><td>4.0 KiB</td></tr>
+            <tr><th>XLS reader module</th><td>10.5 KiB</td><td>4.0 KiB</td></tr>
             <tr><th>PPT reader module</th><td>10.1 KiB</td><td>3.9 KiB</td></tr>
-            <tr><th>DOC reader WASM</th><td>1,209.3 KiB</td><td>489.5 KiB</td></tr>
-            <tr><th>XLS reader WASM</th><td>1,235.6 KiB</td><td>508.0 KiB</td></tr>
-            <tr><th>PPT reader WASM</th><td>1,359.2 KiB</td><td>572.7 KiB</td></tr>
+            <tr><th>DOC reader WASM</th><td>1,221.7 KiB</td><td>493.5 KiB</td></tr>
+            <tr><th>XLS reader WASM</th><td>1,242.3 KiB</td><td>510.4 KiB</td></tr>
+            <tr><th>PPT reader WASM</th><td>1,365.2 KiB</td><td>575.0 KiB</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <h2>OpenDocument add-on</h2>
+      <p>
+        Experimental <code>@silurus/ooxml-opendocument</code> v0.90.0 assets, measured separately
+        from the viewer totals above. Entry rows exclude the add-on's shared helper, counted
+        once below, and the viewer peer. Creating a source fetches nothing; its reader module and
+        dedicated WASM load only for a claimed file. Ordinary OOXML imports include none of these
+        readers. <a href="https://github.com/yukiyokotani/office-open-xml-viewer/blob/main/docs/opendocument.md">Read the OpenDocument guide →</a>
+      </p>
+      <div class="size-table-wrap">
+        <table>
+          <thead><tr><th>Add-on asset</th><th>Raw</th><th>gzip</th></tr></thead>
+          <tbody>
+            <tr><th>ODT entry (/odt)</th><td>0.6 KiB</td><td>0.4 KiB</td></tr>
+            <tr><th>ODP entry (/odp)</th><td>0.6 KiB</td><td>0.4 KiB</td></tr>
+            <tr><th>ODS entry (/ods)</th><td>0.6 KiB</td><td>0.4 KiB</td></tr>
+            <tr><th>Shared source helper</th><td>6.6 KiB</td><td>2.5 KiB</td></tr>
+            <tr><th>ODT reader module</th><td>9.9 KiB</td><td>3.8 KiB</td></tr>
+            <tr><th>ODP reader module</th><td>10.0 KiB</td><td>3.8 KiB</td></tr>
+            <tr><th>ODS reader module</th><td>10.1 KiB</td><td>3.8 KiB</td></tr>
+            <tr><th>ODT reader WASM</th><td>1,198.0 KiB</td><td>506.6 KiB</td></tr>
+            <tr><th>ODP reader WASM</th><td>1,401.0 KiB</td><td>550.0 KiB</td></tr>
+            <tr><th>ODS reader WASM</th><td>1,415.0 KiB</td><td>548.6 KiB</td></tr>
           </tbody>
         </table>
       </div>
@@ -91,9 +116,9 @@ import SiteFooter from '../components/SiteFooter.astro';
             <tr><th>Asset</th><th>Raw</th><th>gzip</th></tr>
           </thead>
           <tbody>
-            <tr><th>DOCX parser WASM</th><td>2,196 KiB</td><td>920 KiB</td></tr>
-            <tr><th>XLSX parser WASM</th><td>1,864 KiB</td><td>774 KiB</td></tr>
-            <tr><th>PPTX parser WASM</th><td>1,946 KiB</td><td>784 KiB</td></tr>
+            <tr><th>DOCX parser WASM</th><td>2,243 KiB</td><td>942 KiB</td></tr>
+            <tr><th>XLSX parser WASM</th><td>1,901 KiB</td><td>788 KiB</td></tr>
+            <tr><th>PPTX parser WASM</th><td>1,977 KiB</td><td>794 KiB</td></tr>
             <tr><th>MathJax runtime</th><td>3,846 KiB</td><td>1,269 KiB</td></tr>
           </tbody>
         </table>

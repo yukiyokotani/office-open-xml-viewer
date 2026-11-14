@@ -5,18 +5,33 @@ semantic versioning. While the major version is zero, minor releases may contain
 explicitly documented breaking changes; patch releases remain compatible with
 the corresponding minor release.
 
-## 0.90.0 — Unreleased
+## 0.90.0 — 2026-11-14
 
-Minor release that lets applications choose where web fonts come from. Two
-changes may need action. If you pass `useGoogleFonts`, replace
+Minor release that lets applications choose where web fonts come from and
+adds an optional, experimental OpenDocument add-on. Two changes may need
+action. If you pass `useGoogleFonts`, replace
 `useGoogleFonts: true` with `fonts: [googleFonts()]`. The alias still works in
 0.90 with a warning; from 0.91.0 it is ignored with the same warning, and never
 throws. If your page has a Content Security Policy and loads web fonts, allow
 the font file host (for example `fonts.gstatic.com`) in `connect-src` as well
 as `font-src`: font files are now fetched, and a blocked fetch falls back to
 the host fonts (see **Served font line heights** below). See the
-[0.89 to 0.90 migration guide](docs/migration-0.90.md).
+[0.89 to 0.90 migration guide](docs/migration-0.90.md). It also
+contains the fixes of 0.89.10.
 
+- **Experimental OpenDocument add-on:** the new
+  `@silurus/ooxml-opendocument` package reads `.odt`/`.ott`, `.odp`/`.otp`
+  and `.ods`/`.ots` directly into the DOCX, PPTX and XLSX models, without
+  generating an OOXML package. Import `odt` from
+  `@silurus/ooxml-opendocument/odt` and pass `{ odt }` to the DOCX viewers
+  and loaders (likewise `odp` for PPTX and `ods` for XLSX, including the
+  Node `open*` functions; `createOdt(...)` etc. for custom asset URLs).
+  Importing an entry fetches nothing; each format's reader module and WASM
+  load only when such a file is opened. Every feature the reader meets is
+  drawn, with LibreOffice as the reference where ODF leaves a choice, and only
+  corrupt, encrypted, unsafe or over-limit files reject. Its version must
+  match `@silurus/ooxml` exactly. See
+  [Experimental OpenDocument sources](docs/opendocument.md) (#1934).
 - **Font sources:** the new `fonts` load option takes an ordered list of
   sources, built with `googleFonts({ cssOrigin?, substitutes?, families? })`,
   `fontCssApi()`, `fontCss()`, `fontFiles()` (URLs, `data:` URLs or bytes)
@@ -29,7 +44,9 @@ the host fonts (see **Served font line heights** below). See the
   `googleFontsSubstitutions`. DOCX, XLSX and PPTX behave the same in main and
   worker mode: in worker mode the page runs a resolver and also fetches the
   URLs it returns, so cookies and authentication behave as in main mode.
-  Nothing is requested without a source (#1460, #1497).
+  Faces from a source belong to the document that loaded them: two documents
+  open at once never paint with each other's faces. Nothing is requested
+  without a source (#1460, #1497).
 - **Custom Google Fonts origin:** `googleFonts({ cssOrigin })` sends the
   stylesheet requests to a regional mirror or an internal proxy instead of
   `fonts.googleapis.com`. Redirects are followed and the font file URLs in the
@@ -146,9 +163,12 @@ Compatible patch release. No migration is required.
   as all caps or small caps no longer fails layout of the whole document with
   "Text shape request does not match its full run context" (#2209).
 
-## 0.89.10 — Unreleased
+## 0.89.10 — 2026-11-13
 
-Compatible patch release. No migration is required.
+Compatible patch release. No migration is required. Two Word layout fixes: a
+soft hyphen after a word joined with a non-breaking hyphen no longer fails
+layout, and a hidden paragraph with "page break before" ahead of a text frame
+or table now starts a new page as Word does. Both are described below.
 
 - **Word: soft hyphen after a non-breaking-hyphen word:** a paragraph where a
   `<w:softHyphen/>` follows a word joined with `<w:noBreakHyphen/>` (for

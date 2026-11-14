@@ -2,7 +2,8 @@
 // Measures the production asset sizes listed on site/src/pages/bundle-size.astro.
 //
 // Usage (after `pnpm build:wasm && pnpm build`):
-//   node scripts/measure-bundle-size.mjs [--dist dist] [--legacy-dist packages/legacy-office/dist] [--json]
+//   node scripts/measure-bundle-size.mjs [--dist dist] [--legacy-dist packages/legacy-office/dist]
+//     [--opendocument-dist packages/opendocument/dist] [--json]
 //
 // Definitions (the same ones the page states):
 // - "static JavaScript" for a format is every JavaScript file reachable from the
@@ -13,8 +14,9 @@
 //   already present in the union of the three format graphs.
 // - raw is the byte length; gzip is measured per emitted asset at level 9 and
 //   summed. Values are KiB (1,024 bytes).
-// - legacy add-on entry rows exclude the shared source helper (counted once in
-//   its own row) and the `@silurus/ooxml` viewer peer.
+// - add-on entry rows (legacy Office, OpenDocument) exclude the package's shared
+//   source helper (counted once in its own row) and the `@silurus/ooxml` viewer
+//   peer; a reader module row excludes what the entries already load.
 import { readFileSync, existsSync, readdirSync } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
 import { gzipSync } from 'node:zlib';
@@ -26,6 +28,7 @@ const option = (name, fallback) => {
 };
 const dist = resolve(option('--dist', 'dist'));
 const legacyDist = resolve(option('--legacy-dist', 'packages/legacy-office/dist'));
+const openDocumentDist = resolve(option('--opendocument-dist', 'packages/opendocument/dist'));
 const asJson = args.includes('--json');
 
 const STATIC_EDGE = /(?:\bfrom\s*|\bimport\s*)(["'])(\.{1,2}\/[^"']+)\1/g;
@@ -81,32 +84,45 @@ for (const [name, entry] of [
   row('Optional modules', name, size(without(staticGraph(join(dist, entry)), shared)), 1);
 }
 
-if (existsSync(legacyDist)) {
-  const legacyFiles = readdirSync(legacyDist);
-  const entryGraphs = Object.fromEntries(
-    ['doc', 'xls', 'ppt'].map((format) => [format, staticGraph(join(legacyDist, `${format}.mjs`))]),
-  );
-  // The shared helper is every add-on file that all three entries import.
+// An add-on package's rows: one per entry (without the shared helper), the
+// shared helper (every add-on file that all entries import), one per reader
+// module (without anything an entry already loads) and one per reader WASM.
+function addOnRows(section, addOnDist, formats, moduleFile, wasmFile) {
+  const files = readdirSync(addOnDist);
+  const entryGraphs = Object.fromEntries(formats.map((format) => [format, staticGraph(join(addOnDist, `${format}.mjs`))]));
+  const entryFile = new RegExp(`/(${formats.join('|')})\\.mjs$`);
   const helper = new Set(
-    [...entryGraphs.doc].filter(
-      (file) => entryGraphs.xls.has(file) && entryGraphs.ppt.has(file) && !/\/(doc|xls|ppt)\.mjs$/.test(file),
+    [...entryGraphs[formats[0]]].filter(
+      (file) => formats.every((format) => entryGraphs[format].has(file)) && !entryFile.test(file),
     ),
   );
-  for (const format of ['doc', 'xls', 'ppt']) {
-    row('Optional add-on package', `${format.toUpperCase()} entry (/${format})`, size(without(entryGraphs[format], helper)), 1);
+  for (const format of formats) {
+    row(section, `${format.toUpperCase()} entry (/${format})`, size(without(entryGraphs[format], helper)), 1);
   }
-  row('Optional add-on package', 'Shared source helper', size(helper), 1);
+  row(section, 'Shared source helper', size(helper), 1);
   const excluded = new Set([...helper, ...Object.values(entryGraphs).flatMap((graph) => [...graph])]);
-  for (const format of ['doc', 'xls', 'ppt']) {
-    const moduleFile = legacyFiles.find((file) => new RegExp(`^legacy-${format}-source-module.*\\.m?js$`).test(file));
-    if (!moduleFile) throw new Error(`legacy ${format} reader module not found in ${legacyDist}`);
-    row('Optional add-on package', `${format.toUpperCase()} reader module`, size(without(staticGraph(join(legacyDist, moduleFile)), excluded)), 1);
+  for (const format of formats) {
+    const file = files.find((name) => moduleFile(format).test(name));
+    if (!file) throw new Error(`${format} reader module not found in ${addOnDist}`);
+    row(section, `${format.toUpperCase()} reader module`, size(without(staticGraph(join(addOnDist, file)), excluded)), 1);
   }
-  for (const format of ['doc', 'xls', 'ppt']) {
-    const wasm = legacyFiles.find((file) => file.startsWith(`legacy_${format}_direct`) && file.endsWith('.wasm'));
-    if (!wasm) throw new Error(`legacy ${format} WASM not found in ${legacyDist}`);
-    row('Optional add-on package', `${format.toUpperCase()} reader WASM`, size([join(legacyDist, wasm)]), 1);
+  for (const format of formats) {
+    const file = files.find((name) => wasmFile(format).test(name));
+    if (!file) throw new Error(`${format} WASM not found in ${addOnDist}`);
+    row(section, `${format.toUpperCase()} reader WASM`, size([join(addOnDist, file)]), 1);
   }
+}
+
+if (existsSync(legacyDist)) {
+  addOnRows('Legacy Office add-on', legacyDist, ['doc', 'xls', 'ppt'],
+    (format) => new RegExp(`^legacy-${format}-source-module.*\\.m?js$`),
+    (format) => new RegExp(`^legacy_${format}_direct.*\\.wasm$`));
+}
+
+if (existsSync(openDocumentDist)) {
+  addOnRows('OpenDocument add-on', openDocumentDist, ['odt', 'odp', 'ods'],
+    (format) => new RegExp(`^${format}-source-module.*\\.m?js$`),
+    (format) => new RegExp(`^opendocument_${format}.*\\.wasm$`));
 }
 
 for (const format of ['docx', 'xlsx', 'pptx']) {
