@@ -777,6 +777,8 @@ export function scanNullProvenance(dirs) {
     const generic = (t.match(/\w+/g) ?? []).find((token) => genericAliases.has(token));
     if (generic) return `generic alias ${generic}`;
     if (t === '()' || t === '') return 'unit';
+    // Floats are assumed finite: serde_json writes NaN/inf as null, and the
+    // parsers only emit finite measurements.
     if (/^(?:String|str|&(?:'\w+)?str|bool|char|[iu](?:8|16|32|64|128|size)|f32|f64)$/.test(t)) return null;
     // Containers keep nullable elements in their item schema (never stripped).
     if (/^\[|^\(.+\)$|^(?:(?:std::)?(?:collections::|vec::)?)(?:Vec|VecDeque|BTreeMap|HashMap|BTreeSet|HashSet)</.test(t)) return null;
@@ -806,9 +808,15 @@ export function scanNullProvenance(dirs) {
   const problems = [];
   for (const item of items) {
     for (const field of item.fields ?? []) {
-      const skip = /skip_serializing_if\s*=\s*"([^"]+)"/.exec(field.attrs)?.[1];
-      if (!skip) continue;
+      if (!/\bskip_serializing_if\b/.test(field.attrs)) continue;
       const where = `${path.relative(repoRoot, item.file)}:${field.line} ${item.name}.${field.name}`;
+      // `"path"`, `r"path"` or `r#"path"#`; anything else fails closed.
+      const literal = /\bskip_serializing_if\s*=\s*(?:"((?:[^"\\]|\\.)*)"|r(#*)"([\s\S]*?)"\2)/.exec(field.attrs);
+      const skip = literal ? (literal[1] ?? literal[3]).trim() : null;
+      if (!skip) {
+        problems.push(`${where}: cannot read the skip_serializing_if predicate`);
+        continue;
+      }
       if (!field.type) {
         problems.push(`${where}: cannot parse the skipped field declaration`);
         continue;

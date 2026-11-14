@@ -389,6 +389,12 @@ test('null provenance parses multi-line types, comments and skipped non-Options'
       '    pub list: Vec<Option<String>>, /* "not a string" */',
       '    #[serde(rename = "a//b", skip_serializing_if = "Option::is_none")]',
       '    pub url: Option<String>,',
+      '    #[serde(skip_serializing_if = r"Option::is_none")]',
+      '    pub raw: Option<Option<String>>,',
+      '    #[serde(skip_serializing_if = r#"Option::is_none"#)]',
+      '    pub raw_hash: Option<Option<String>>,',
+      '    #[serde(skip_serializing_if = SKIP)]',
+      '    pub opaque: Option<String>,',
       '}',
     ].join('\n'));
     const problems = scanNullProvenance([dir]).map((p) => p.replace(/^.*model\.rs:/, ''));
@@ -396,6 +402,9 @@ test('null provenance parses multi-line types, comments and skipped non-Options'
       '4 A.multi: skipped Option<Option<String>> can serialize null while present (Option)',
       '8 A.v: skipped Option<Option<String>> can serialize null while present (Option)',
       '10 A.wrapped: skipped Nullable can serialize null while present (Option)',
+      '16 A.raw: skipped Option<Option<String>> can serialize null while present (Option)',
+      '18 A.raw_hash: skipped Option<Option<String>> can serialize null while present (Option)',
+      '20 A.opaque: cannot read the skip_serializing_if predicate',
     ]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
