@@ -4,7 +4,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
-import { mkdtemp, mkdir, realpath, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, readdir, realpath, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
@@ -178,15 +178,29 @@ try {
 } catch (error) { window.packedResult = String(error?.stack || error); }
 `);
   await build({ configFile: false, root: scratch, base: './', logLevel: 'warn', build: { target: 'esnext' } });
+  // The consumer build must emit the font-demand collector sidecar: a load
+  // without it still succeeds (every subset is demanded), so its absence is
+  // checked here directly.
+  const sidecars = (await readdir(join(scratch, 'dist', 'assets'))).filter(name => /^pptx-font-demand.*\.mjs$/.test(name));
+  assert.equal(sidecars.length, 1, `consumer build emitted ${sidecars.length} font-demand sidecars`);
   server = await preview({ configFile: false, root: scratch, preview: { host: '127.0.0.1', port: 0, open: false } });
   browser = await chromium.launch({ channel: 'chrome', headless: true });
   const page = await browser.newPage();
+  const sidecarResponses = [];
+  page.context().on('requestfinished', async (request) => {
+    if (/\/pptx-font-demand[^/]*\.mjs$/.test(new URL(request.url()).pathname)) sidecarResponses.push((await request.response())?.status());
+  });
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));
   await page.goto(server.resolvedUrls.local[0]);
   await page.waitForFunction(() => window.packedResult !== undefined, undefined, { timeout: 90_000 });
   assert.equal(await page.evaluate(() => window.packedResult), 'passed');
   assert.deepEqual(errors, []);
+  // The emitted sidecar is served and exports the collector.
+  assert.equal(await page.evaluate(async (file) => typeof (await import(new URL('assets/' + file, location.href).href)).collectSlideFontDemand,
+    sidecars[0]), 'function');
+  // The parse workers requested it (two font-source loads), never failing.
+  assert.ok(sidecarResponses.length > 0 && sidecarResponses.every(status => status === 200), `sidecar responses ${JSON.stringify(sidecarResponses)}`);
   console.log('Packed Vite viewers/loaders: DOC/XLS/PPT/ODT main + worker passed');
 } finally {
   await browser?.close();
