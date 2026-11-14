@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { TextRunData } from '@silurus/ooxml-core';
 import { collectFontDemandScalars } from '@silurus/ooxml-core/internal/font-scalar-demand';
 import { collectSlideFontDemand } from './font-preload-demand.js';
+import { formatAutoNum } from './autonum-label.js';
 import { PresentationPreflightBuilder, normalizePresentationPreflight } from './presentation-preflight.js';
 import type { Slide } from './types';
 import type { PresentationBootstrap } from './worker-protocol.js';
@@ -110,6 +111,13 @@ describe('complete conservative PPTX paint demand', () => {
     expect(has(numbered('romanUcPeriod'), 'MDCLXVI.')).toBe(true);
     expect(has(numbered('romanLcPlain'), 'mdclxvi')).toBe(true);
     expect(has(numbered('arabicDbPeriod'), '０１２３４５６７８９.')).toBe(true);
+    // Every label of every counter is inside its scheme's demand.
+    for (const numType of ['arabicPlain', 'arabicParenR', 'arabicDbPlain', 'alphaLcPeriod', 'alphaUcParenBoth', 'romanLcParenR', 'romanUcPlain', 'circleNumDbPlain']) {
+      const demand = numbered(numType);
+      for (const counter of [-42, 0, ...Array.from({ length: 200 }, (_, i) => i + 1), 999, 3999, 4000, 12345, 1_000_000]) {
+        expect(has(demand, formatAutoNum(counter, numType)), `${numType} ${counter}`).toBe(true);
+      }
+    }
     // An unknown scheme formats as arabicPeriod.
     expect(has(numbered('thaiAlphaPeriod'), '0123456789.')).toBe(true);
     // A symbol-encoded marker face demands its conversions too.

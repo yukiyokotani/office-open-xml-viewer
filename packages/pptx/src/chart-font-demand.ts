@@ -1,4 +1,9 @@
-import { localizedExcelShortDateTexts } from '@silurus/ooxml-core';
+import {
+  excelDateTimeSectionNameTexts,
+  isDateFormatSection,
+  localizedExcelShortDateTexts,
+  splitFormatSections,
+} from '@silurus/ooxml-core';
 
 /**
  * The texts a DrawingML chart may paint, for `unicode-range` font demand
@@ -12,12 +17,14 @@ import { localizedExcelShortDateTexts } from '@silurus/ooxml-core';
  *   format codes whose literals a formatted label copies). Face names are not
  *   painted and are left out;
  * - generated numbers and dates: §18.8.30 formatting writes ASCII digits,
- *   signs, separators, exponents, English month and day names and AM/PM
- *   (printable ASCII below), plus the code's own literals (above), plus the
- *   Japanese weekday, era and quarter names of a date section
- *   ({@link CHART_DATE_SYNTHESIZED_TEXT}). Excel built-in format 14 in a data
- *   table paints the viewer's locale short date (`Intl`), complete only for a
- *   Gregorian, Latin-digit locale; any other locale declines;
+ *   signs, separators and exponents (printable ASCII below), the code's own
+ *   literals (above) and, for a date / time section, the formatter's name
+ *   tables (core `excelDateTimeSectionNameTexts`: month, weekday, AM/PM,
+ *   Japanese weekday, era and quarter names). Every model string is tested as
+ *   a possible format code, so no format-code key is missed (a title that
+ *   reads as a date section only over-demands). Excel built-in format 14 in a
+ *   data table paints the viewer's locale short date (`Intl`), complete only
+ *   for a Gregorian, Latin-digit locale; any other locale declines;
  * - the painter's own literals ({@link CHART_SYNTHESIZED_TEXT}): elision,
  *   histogram bin bounds and trendline equations.
  *
@@ -29,7 +36,6 @@ import { localizedExcelShortDateTexts } from '@silurus/ooxml-core';
  */
 export function chartPaintTexts(chart: unknown): readonly string[] | 'all' {
   const texts: string[] = [CHART_SYNTHESIZED_TEXT];
-  let dateSection = false;
   let localizedShortDate = false;
   const pending: unknown[] = [chart];
   const seen = new Set<object>();
@@ -47,15 +53,18 @@ export function chartPaintTexts(chart: unknown): readonly string[] | 'all' {
       if (typeof child === 'string') {
         if (CHART_FACE_KEY.test(key)) continue;
         texts.push(child);
-        if (FORMAT_CODE_KEY.test(key) && formatCodeMayFormatDate(child)) dateSection = true;
+        for (const section of splitFormatSections(child)) {
+          if (!isDateFormatSection(section)) continue;
+          texts.push(...excelDateTimeSectionNameTexts(section));
+          // Under ja-JP `rr` writes the era name too (`gggee`), which the
+          // name table above reads only from `g`: ask it as if `g` were present.
+          if (/r/i.test(section)) texts.push(...excelDateTimeSectionNameTexts(`${section}g`));
+        }
       } else if (child !== null && typeof child === 'object') {
-        if (FORMAT_CODE_KEY.test(key) && Array.isArray(child)
-          && child.some((code) => typeof code === 'string' && formatCodeMayFormatDate(code))) dateSection = true;
         pending.push(child);
       }
     }
   }
-  if (dateSection) texts.push(...CHART_DATE_SYNTHESIZED_TEXT);
   if (localizedShortDate) {
     const shortDate = localizedExcelShortDateTexts();
     if (!shortDate.complete) return 'all';
@@ -66,10 +75,16 @@ export function chartPaintTexts(chart: unknown): readonly string[] | 'all' {
 
 /** Image parts that paint no text with a served face: rasters (decoded by the
  * browser) and SVG (decoded through an `<img>`, which cannot reach document
- * fonts). A metafile (WMF/EMF, decoded by the library's players, which draw
- * text records with served faces) or an unknown type is not admitted. The
- * type is the parser's extension mapping (`mime_from_ext`); a metafile part
- * mislabelled with a raster extension is not detected (as in DOCX demand). */
+ * fonts). A metafile (WMF/EMF, played by the library's players, which draw
+ * text records with served faces) or an unknown type is not admitted.
+ *
+ * The type is the parser's extension mapping (`mime_from_ext`), as the
+ * package declares the part. The decoder also sniffs content, so a metafile
+ * stored under a raster extension (a mislabelled part) still plays; its text
+ * is not demanded and paints in a host fallback where no loaded subset covers
+ * it (no late load: an undemanded subset is never registered). Sniffing every
+ * image part during preflight would inflate every picture before first
+ * paint; DOCX demand makes the same trade. */
 export function paintsTextFreeImage(path: unknown, mimeType: unknown): boolean {
   if (typeof path === 'string' && METAFILE_PATH.test(path)) return false;
   return typeof mimeType === 'string' && TEXT_FREE_IMAGE_TYPES.has(mimeType.toLowerCase());
@@ -82,39 +97,10 @@ const METAFILE_PATH = /\.(?:wmf|emf|wmz|emz)$/i;
 
 /** Keys naming a face (core chart-font-sources CHART_FACE_KEY): not painted. */
 const CHART_FACE_KEY = /^(?:fontFace|[A-Za-z]+FontFace|themeMajorFontLatin|themeMinorFontLatin)$/;
-/** Keys holding §18.8.30 format codes (`formatCode`, `valAxisFormatCode`,
- * `catFormatCodes`, …). */
-const FORMAT_CODE_KEY = /formatCodes?$/i;
 
-/**
- * Whether a format code may contain a date/time section, so its output may
- * contain the Japanese weekday, era or quarter names. An over-approximation:
- * after removing General, quoted and escaped literals and bracketed
- * metadata, any date-capable letter (`y m d h s g e a b q`, except the
- * scientific `E+`/`E-`) counts.
- */
-function formatCodeMayFormatDate(code: string): boolean {
-  const stripped = code
-    .replace(/"[^"]*"?/g, '')
-    .replace(/\\./g, '')
-    .replace(/[_*]./g, '')
-    .replace(/\[[^\]]*\]?/g, '')
-    .replace(/general/gi, '')
-    .replace(/[eE][+-]/g, '');
-  return /[ymdhsgeabqYMDHSGEABQ]/.test(stripped);
-}
-
-/** Printable ASCII (numbers, signs, separators, English month and day names,
- * AM/PM, generated series and trendline names) plus the non-ASCII literals
- * the chart painter writes: the elision ellipsis (text-elide,
- * data-label-layout), histogram bin bounds `≤ ≥` (histogram-binning), and
- * the trendline equation minus sign and `R²` (trendline). */
+/** Printable ASCII (numbers, signs, separators, generated series and
+ * trendline names) plus the non-ASCII literals the chart painter writes: the
+ * elision ellipsis (text-elide, data-label-layout), histogram bin bounds
+ * `≤ ≥` (histogram-binning), and the trendline equation minus sign and `R²`
+ * (trendline). */
 export const CHART_SYNTHESIZED_TEXT = `${String.fromCharCode(...Array.from({ length: 0x7f - 0x20 }, (_, i) => 0x20 + i))}…≤≥−²`;
-
-/** The non-ASCII names a §18.8.30 date section may paint (core
- * excel-number-format: `aaa`/`aaaa` weekdays, `g`/`gg`/`ggg` eras, quarters). */
-export const CHART_DATE_SYNTHESIZED_TEXT: readonly string[] = Object.freeze([
-  '日月火水木金土', '曜日',
-  '令和平成昭和大正明治',
-  '第１２３４四半期',
-]);

@@ -128,15 +128,23 @@ function verticalForms(text: string): string {
 }
 
 /** Every scalar {@link formatAutoNum} can write for `numType`, whatever the
- * counter: its labels for counters that use every digit and the sign, every
- * letter (1–26), every roman numeral (3888 = MMMDCCCLXXXVIII) and zero. */
+ * counter: its labels for a negative counter (the sign), 0–9 (every digit),
+ * 1–26 (every letter), 30–39 (every digit of the alphabetic schemes' Arabic
+ * fallback beyond 26) and 3888 (MMMDCCCLXXXVIII, every roman numeral; a
+ * non-positive counter has none).
+ * Memoized per scheme. */
 function autoNumAlphabet(numType: string): string {
-  return AUTONUM_ALPHABET_COUNTERS.map((counter) => formatAutoNum(counter, numType)).join('');
+  let alphabet = autoNumAlphabets.get(numType);
+  if (alphabet === undefined) {
+    alphabet = [...new Set(AUTONUM_ALPHABET_COUNTERS.map((counter) => formatAutoNum(counter, numType)).join(''))].join('');
+    autoNumAlphabets.set(numType, alphabet);
+  }
+  return alphabet;
 }
 
+const autoNumAlphabets = new Map<string, string>();
 const AUTONUM_ALPHABET_COUNTERS: readonly number[] = [
-  -1234567890, 0, 1234567890, 3888,
-  ...Array.from({ length: 27 }, (_, index) => index + 1),
+  -1, 0, 3888, ...Array.from({ length: 39 }, (_, index) => index + 1),
 ];
 
 /** Whether every image an element (or the slide background) paints is free of
