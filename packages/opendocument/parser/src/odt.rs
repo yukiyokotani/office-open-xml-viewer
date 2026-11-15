@@ -56,6 +56,8 @@ mod geometry;
 mod image;
 #[path = "odt_list.rs"]
 mod list;
+#[path = "odt_marks.rs"]
+mod marks;
 #[path = "odt_math.rs"]
 mod math;
 #[path = "odt_page.rs"]
@@ -320,6 +322,19 @@ fn read_documents<'a>(
         // and admits a snapped line at the page bottom only when its whole
         // cells fit (rr3 family D: 文 stays at 16.4pt left, moves at 16.35pt).
         plain_font_line_boxes: true,
+        // LibreOffice sets an unsnapped line from each face's own normal
+        // line (hhea, or OS/2 typo with USE_TYPO_METRICS) with the face's
+        // whole line gap below the baseline, never Word's Far East 1.3 x
+        // usWin box, and keeps a proportional line on a page when its
+        // natural line fits, the extra space hanging below the margin
+        // (odt-font-line-box and odt-proportional-line-page-fit controls).
+        libre_office_line_boxes: true,
+        // settings.xml MsWordCompGridMetrics (documents imported from Word)
+        // grows a Far East face's line by 27% above its ascent, and
+        // AddExternalLeading false drops the faces' line gap
+        // (LIBREOFFICE_FONT_LINE_BOX).
+        libre_office_ms_word_grid_metrics: reader.settings.word_grid_metrics,
+        libre_office_no_external_leading: reader.settings.no_external_leading,
         ..DocumentSettings::default()
     });
     document.footnotes = std::mem::take(&mut reader.footnotes);
@@ -834,11 +849,17 @@ impl<'a> Reader<'a> {
 
         self.inline(node, 0, &mut inline, 0)?;
         self.emit_runs(&mut inline, &mut collected.paragraph)?;
-        let drop_cap = self.drop_cap(
+        let mut drop_cap = self.drop_cap(
             &properties,
             inline.contexts[0].styles.clone(),
             &mut collected.paragraph,
         )?;
+        // The drop cap takes the source characters first; a mark that begins
+        // the paragraph then begins the cap, which is shaped from there.
+        match drop_cap.as_mut() {
+            Some(cap) => dotted_circle_base(&mut cap.runs),
+            None => dotted_circle_base(&mut collected.paragraph.runs),
+        }
         if let Some(label) = list.and_then(|list| list.label) {
             self.list_label(label, &mut inline.contexts, &mut collected.paragraph)?;
         }
@@ -1329,10 +1350,14 @@ impl<'a> Reader<'a> {
         // paragraphs that do not snap to a page's grid. Vertical pages and
         // snapping paragraphs keep the DOCX placement, which the corpus
         // matches better there.
-        let line_extra_above = matches!(
-            line_spacing.as_ref().map(|spacing| spacing.rule.as_str()),
-            Some("exact" | "atLeast")
-        ) && (self.page_writing.0
+        // A proportional line below 100% is placed as a fixed line of its
+        // own height (SwTextFormatter::CalcRealHeight: the ascent becomes
+        // four fifths of the shrunk line; 80% control lines in Hiragino
+        // Sans and Liberation Serif).
+        let line_extra_above = line_spacing.as_ref().is_some_and(|spacing| {
+            matches!(spacing.rule.as_str(), "exact" | "atLeast")
+                || (spacing.rule == "auto" && spacing.value < 1.0)
+        }) && (self.page_writing.0
             || (self.page_writing.1
                 && cascade.get(NS_STYLE, "snap-to-layout-grid") == Some("false")));
         let paragraph = DocParagraph {
@@ -1933,6 +1958,34 @@ fn font_facts_of(run: &TextRun) -> RunFontFacts {
         bold: run.bold,
         italic: run.italic,
         ..RunFontFacts::default()
+    }
+}
+
+/// A combining mark that begins a paragraph's text has no base character.
+/// LibreOffice shapes each paragraph as text that begins there, so HarfBuzz
+/// gives such a mark a dotted circle (U+25CC) as its base, drawn and advanced
+/// like any character (hb-ot-shape.cc, hb_insert_dotted_circle). A mark later
+/// in the paragraph keeps the character before it as its base, a space, tab,
+/// line break, no-break space or punctuation included, and takes no
+/// advance. Measured in LibreOffice 26.8 (30 pt Liberation Serif): U+0301,
+/// U+0301 U+0308, U+05B4, U+0E31, U+20DD and U+FE0F at the paragraph start
+/// draw a dotted circle (`Z` after U+0301 at 37.9 pt from 20.1 pt); after a
+/// space, tab, `text:s`, line break, U+00A0, `-`, U+2014 or a digit, and
+/// after U+200D at the start, they do not. HarfBuzz inserts the circle only
+/// when the face has a U+25CC glyph; the reader cannot see the faces, so it
+/// always inserts it (font demand loads a face that draws it).
+fn dotted_circle_base(runs: &mut [DocRun]) {
+    for run in runs.iter_mut() {
+        match run {
+            DocRun::Text(text) if text.text.is_empty() => continue,
+            DocRun::Text(text) => {
+                if text.text.chars().next().is_some_and(marks::is_mark) {
+                    text.text.insert(0, '\u{25CC}');
+                }
+                return;
+            }
+            _ => return,
+        }
     }
 }
 

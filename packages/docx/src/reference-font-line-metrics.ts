@@ -3,7 +3,24 @@ import {
   findReferenceFontMetrics,
   type ReferenceFontMetricProfile,
 } from '@silurus/ooxml-core';
-import { wordOpenTypeAutoLineRatios } from './layout/line-compatibility.js';
+import { libreOfficeLineBox, libreOfficeNormalLine, wordOpenTypeAutoLineRatios, type LibreOfficeLineBoxOptions } from './layout/line-compatibility.js';
+
+/** How a face's tables become a line box: Word's projection (OOXML), the
+ * plain hhea box of a producer's grid-snapped lines (`plainLineBoxes`), or
+ * LIBREOFFICE_FONT_LINE_BOX for a producer's unsnapped lines
+ * (`libreOfficeLineBoxes`). */
+export type FontLineBoxProjection = 'word' | 'plain' | 'libreoffice' | 'libreoffice-no-leading'
+  | 'libreoffice-ms-word-grid' | 'libreoffice-ms-word-grid-no-leading';
+
+/** The LIBREOFFICE_FONT_LINE_BOX options a projection names, or undefined
+ * for Word's and the plain projection. */
+export function libreOfficeProjectionOptions(projection: FontLineBoxProjection): LibreOfficeLineBoxOptions | undefined {
+  if (!projection.startsWith('libreoffice')) return undefined;
+  return {
+    externalLeading: !projection.endsWith('-no-leading'),
+    msWordGridMetrics: projection.startsWith('libreoffice-ms-word-grid'),
+  };
+}
 
 export interface ReferenceFontLineMetrics {
   readonly lineHeightRatio: number;
@@ -13,8 +30,10 @@ export interface ReferenceFontLineMetrics {
   readonly eastAsianLineHeightRatio?: undefined;
 }
 
-const projectedProfiles = new WeakMap<object, ReferenceFontLineMetrics | null>();
-const plainProfiles = new WeakMap<object, ReferenceFontLineMetrics | null>();
+const projectedProfiles: Record<FontLineBoxProjection, WeakMap<object, ReferenceFontLineMetrics | null>> = {
+  word: new WeakMap(), plain: new WeakMap(), libreoffice: new WeakMap(), 'libreoffice-no-leading': new WeakMap(),
+  'libreoffice-ms-word-grid': new WeakMap(), 'libreoffice-ms-word-grid-no-leading': new WeakMap(),
+};
 
 // Layout asks for the same few (family, weight, style) tuples for every text
 // segment. The answer is a pure function of the immutable generated catalog,
@@ -86,13 +105,23 @@ export function referenceFontDecorationMetrics(
   return geometry;
 }
 
-function project(profile: ReferenceFontMetricProfile, plain = false): ReferenceFontLineMetrics | null {
-  const cache = plain ? plainProfiles : projectedProfiles;
+function project(profile: ReferenceFontMetricProfile, projection: FontLineBoxProjection = 'word'): ReferenceFontLineMetrics | null {
+  const cache = projectedProfiles[projection];
   const retained = cache.get(profile);
   if (retained !== undefined) return retained;
+  const plain = projection === 'plain';
   // The catalog cannot prove the installed/painted face. Its class is used
   // only as vertical reference geometry, and unknown OS/2 data is declined.
-  const projected = profile.farEastCodePage == null ? null : wordOpenTypeAutoLineRatios({
+  const options = libreOfficeProjectionOptions(projection);
+  const normal = options ? libreOfficeNormalLine({
+    unitsPerEm: profile.unitsPerEm,
+    hhea: profile.hhea,
+    ...(profile.win ? { win: profile.win } : {}),
+    ...(profile.typoMetrics ? { typo: profile.typoMetrics } : {}),
+  }) : undefined;
+  // LIBREOFFICE_FONT_LINE_BOX reads hhea alone, so it needs no OS/2 class.
+  const projected = normal && options ? libreOfficeLineBox(normal, options, profile.farEastCodePage === true)
+    : profile.farEastCodePage == null ? null : wordOpenTypeAutoLineRatios({
     unitsPerEm: profile.unitsPerEm,
     hheaAscent: profile.hhea[0],
     hheaDescent: profile.hhea[1],
@@ -119,9 +148,9 @@ function project(profile: ReferenceFontMetricProfile, plain = false): ReferenceF
 
 function identicalProjection(
   profiles: readonly ReferenceFontMetricProfile[],
-  plain = false,
+  projection: FontLineBoxProjection = 'word',
 ): ReferenceFontLineMetrics | undefined {
-  const projected = profiles.map((profile) => project(profile, plain));
+  const projected = profiles.map((profile) => project(profile, projection));
   const first = projected[0];
   if (!first || projected.some((candidate) => !candidate
     || candidate.farEastCodePage !== first.farEastCodePage
@@ -172,9 +201,9 @@ export function referenceFontLineMetrics(
   family: string | null | undefined,
   weight = 400,
   style: 'normal' | 'italic' = 'normal',
-  plain = false,
+  projection: FontLineBoxProjection = 'word',
 ): ReferenceFontLineMetrics | undefined {
-  return identicalProjection(preferredProfiles(family, weight, style), plain);
+  return identicalProjection(preferredProfiles(family, weight, style), projection);
 }
 
 /** Metadata-only OS/2 average width for a native face selected by Canvas.

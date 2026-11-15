@@ -1562,3 +1562,88 @@ fn page_objects_are_extracted_once_and_nested_groups_keep_the_outer_anchor() {
         .unwrap();
     assert_eq!(shape.anchor_y_relative_from.as_deref(), Some("page"));
 }
+
+#[test]
+fn gives_a_mark_that_begins_a_paragraph_a_dotted_circle() {
+    // LibreOffice 26.8 draws U+25CC under a mark only at the paragraph start
+    // (odt_marks controls); after a space, tab, line break or other
+    // character the mark keeps that character as its base.
+    let automatic = r##"<style:style style:name="B" style:family="text"><style:text-properties fo:font-weight="bold"/></style:style>"##;
+    let document = read_fixture(Fixture {
+        automatic,
+        body: concat!(
+            "<text:p>\u{301} Z</text:p>",
+            "<text:p>\u{301}\u{308}Z</text:p>",
+            "<text:p><text:span text:style-name=\"B\"/><text:span text:style-name=\"B\">\u{5B4}Z</text:span></text:p>",
+            "<text:p>a \u{301}Z<text:tab/>\u{301}<text:line-break/>\u{301}Z</text:p>",
+            "<text:p>a\u{301}Z</text:p>",
+            "<text:p>\u{200D}\u{301}Z</text:p>",
+        ),
+        ..Fixture::default()
+    });
+    let p = paragraphs(&document.body);
+    let text = |i: usize| -> String {
+        text_runs(p[i])
+            .iter()
+            .map(|run| run.text.as_str())
+            .collect()
+    };
+    assert_eq!(text(0), "\u{25CC}\u{301} Z");
+    assert_eq!(text(1), "\u{25CC}\u{301}\u{308}Z");
+    assert_eq!(text(2), "\u{25CC}\u{5B4}Z");
+    assert!(!text(3).contains('\u{25CC}'));
+    assert_eq!(text(4), "a\u{301}Z");
+    assert_eq!(text(5), "\u{200D}\u{301}Z");
+}
+
+#[test]
+fn lays_lines_out_as_libreoffice_does() {
+    let automatic = r##"<style:style style:name="Q" style:family="paragraph"><style:paragraph-properties fo:line-height="80%"/></style:style><style:style style:name="P" style:family="paragraph"><style:paragraph-properties fo:line-height="200%"/></style:style>"##;
+    let document = read_fixture(Fixture {
+        automatic,
+        body: r##"<text:p text:style-name="Q">a</text:p><text:p text:style-name="P">b</text:p>"##,
+        ..Fixture::default()
+    });
+    let settings = document.settings.as_ref().unwrap();
+    assert!(settings.libre_office_line_boxes && settings.plain_font_line_boxes);
+    assert!(!settings.libre_office_ms_word_grid_metrics);
+    // No settings.xml: AddExternalLeading keeps its default (on).
+    assert!(!settings.libre_office_no_external_leading);
+    let p = paragraphs(&document.body);
+    // A proportional line below 100% is placed as a fixed line.
+    assert!(p[0].line_extra_above);
+    assert!(!p[1].line_extra_above);
+}
+
+#[test]
+fn a_drop_cap_takes_the_source_mark_before_its_dotted_circle() {
+    let automatic = r##"<style:style style:name="D" style:family="paragraph"><style:paragraph-properties><style:drop-cap style:lines="2" style:length="1"/></style:paragraph-properties></style:style>"##;
+    let document = read_fixture(Fixture {
+        automatic,
+        body: "<text:p text:style-name=\"D\">\u{301}bc</text:p>",
+        ..Fixture::default()
+    });
+    let p = paragraphs(&document.body);
+    let text = |i: usize| -> String {
+        text_runs(p[i])
+            .iter()
+            .map(|run| run.text.as_str())
+            .collect()
+    };
+    assert_eq!(p.len(), 2);
+    assert_eq!(text(0), "\u{25CC}\u{301}");
+    assert_eq!(text(1), "bc");
+}
+
+#[test]
+fn reads_the_libreoffice_line_settings() {
+    // An item missing from a present configuration set reads as false.
+    let settings = br##"<office:document-settings xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:config="urn:oasis:names:tc:opendocument:xmlns:config:1.0" xmlns:ooo="http://openoffice.org/2004/office"><office:settings><config:config-item-set config:name="ooo:configuration-settings"><config:config-item config:name="MsWordCompGridMetrics" config:type="boolean">true</config:config-item></config:config-item-set></office:settings></office:document-settings>"##;
+    let document = read_fixture(Fixture {
+        body: "<text:p>a</text:p>",
+        files: &[("settings.xml", settings)],
+        ..Fixture::default()
+    });
+    let s = document.settings.as_ref().unwrap();
+    assert!(s.libre_office_ms_word_grid_metrics && s.libre_office_no_external_leading);
+}

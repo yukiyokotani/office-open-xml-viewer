@@ -8,6 +8,7 @@ import {
 } from './layout-context.js';
 import {
   buildSegments,
+  keepsWordLineBoxes,
   getDefaultFontSize,
   isGridLineRule,
   layoutLines,
@@ -93,6 +94,9 @@ export interface MeasuredParagraph {
   readonly markOnly: boolean;
   /** Grid-only leading below the empty mark's own font/spacing box. */
   readonly markGridAfterLeadingPt?: number;
+  /** LIBREOFFICE_PROPORTIONAL_LINE_PAGE_FIT: the empty mark line's
+   * proportional extra space below its natural line. */
+  readonly markPageEdgeOverhangPt?: number;
   /** Selected empty-mark wrap gap, retained for measurement-free shading. */
   readonly markWrapBounds?: { readonly xPt: number; readonly yPt: number; readonly widthPt: number; readonly heightPt: number };
   /** An empty numbered item whose marker leading edge a float moved: that
@@ -342,6 +346,12 @@ export function measureParagraph(
         ? lineBelowBaselinePx(markAdvancePt, markMetrics.ascentPx, markMetrics.descentPx)
         : textMarkerMarkBelowBaselinePt(markAdvancePt, markMetrics.ascentPx, markMetrics.descentPx),
       markGridAfterLeadingPt: markMetrics.gridAfterLeadingPx,
+      ...(environment.layoutServices?.text.libreOfficeLineBoxes === true && !context.lineGrid.active
+        && environment.verticalPageFrame !== true && !keepsWordLineBoxes(paragraph.runs)
+        && context.lineSpacing?.rule === 'auto' && context.lineSpacing.value > 1
+        ? { markPageEdgeOverhangPt: Math.max(0, markAdvancePt - Math.max(
+          markMetrics.ascentPx + markMetrics.descentPx, markMetrics.intendedSinglePx)) }
+        : {}),
       placement: recordedPlacement,
     };
   };

@@ -9,7 +9,7 @@ import { wordDegenerateLineSpacingIsSingle, wordEastAsianGridLineCells, wordFarE
 import { type DocGridCtx, type LayoutLine } from './model.js';
 import { isGridLineRule } from './advance.js';
 import { buildFont, getDefaultFontFamily, getDefaultFontSize } from './font-routes.js';
-import { allowsReferenceFontMetric, authoredReferenceVerticalMetric, indexedFontMetrics, mayUseAuthoredReferenceVerticalMetric, selectResourceMetric } from './font-metrics.js';
+import { allowsReferenceFontMetric, authoredReferenceVerticalMetric, fontLineBoxProjection, indexedFontMetrics, mayUseAuthoredReferenceVerticalMetric, projectedResourceMetric, selectResourceMetric } from './font-metrics.js';
 
 /**
  * ECMA-376 §17.6.5 docGrid line grid — number of whole grid CELLS a
@@ -401,10 +401,12 @@ export function paragraphMarkLineMetrics(
     // resource set: an authored alias cannot disambiguate overlapping faces.
     // The probe selects the mark's face but is never painted, so painted-glyph
     // ownership does not apply (see metricCoversText).
+    const gridActive = (grid?.linePitchPt ?? 0) > 0 && grid?.type != null && grid.type !== 'default';
+    const projection = fontLineBoxProjection(textLayoutService, gridActive);
     resolvedLocalFont = selectedFont
-      ? selectResourceMetric(indexedFontMetrics(
+      ? projectedResourceMetric(selectResourceMetric(indexedFontMetrics(
           textLayoutService.fontMetrics ?? textLayoutService.localMetrics,
-        ), selectedFont, markProbe, false)
+        ), selectedFont, markProbe, false), projection)
       : undefined;
     if (!naturalMetricAllowed && resolvedLocalFont?.designAscentRatio != null) {
       resolvedLocalFont = undefined;
@@ -415,8 +417,7 @@ export function paragraphMarkLineMetrics(
         textLayoutService.fontMetrics ?? textLayoutService.localMetrics ?? {},
       ), selectedFont)
       ? authoredReferenceVerticalMetric(selectedFont, { text: textLayoutService, probe: markProbe },
-        textLayoutService.plainLineBoxes === true && (grid?.linePitchPt ?? 0) > 0
-          && grid?.type != null && grid.type !== 'default')
+        projection)
       : undefined;
     if (naturalMetricAllowed && !resolvedLocalFont && !referenceMarkMetric
       && selectedFont?.source === 'native' && ctx) {

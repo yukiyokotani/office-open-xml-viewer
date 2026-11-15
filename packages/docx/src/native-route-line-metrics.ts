@@ -148,6 +148,9 @@ export function admitDocxNativeRouteLines(
       designAscentRatio: ascent,
       designDescentRatio: descent,
       lineGapRatio: line.lineGapRatio,
+      normalAscentRatio: line.ascentRatio,
+      normalDescentRatio: line.descentRatio,
+      normalLineGapRatio: line.lineGapRatio,
     });
   });
   return metrics;

@@ -398,6 +398,12 @@ export interface LayoutTextSeg extends LayoutSegSource {
 export interface LayoutTabSeg extends LayoutSegSource {
   isTab: true;
   fontSize: number;  // pt — for line-height purposes
+  /** LIBREOFFICE_FONT_LINE_BOX: the tab takes its own face's sides below
+   * instead of the synthetic em box. */
+  textOwnedLineBox?: true;
+  /** With it, the tab's own face's sides (em ratios). */
+  lineBoxAscentRatio?: number;
+  lineBoxDescentRatio?: number;
   measuredWidth: number;
   /** Queue-resolved reading-frame gap. The bidi post-pass must preserve the
    * same gap that ordinary text fitting consumed, including a collapsed
@@ -770,6 +776,9 @@ export interface LineLayoutEnvironment {
   readonly noteNumbering?: NoteNumbering;
   readonly noteReferenceNumber?: number;
   readonly verticalCJK?: boolean;
+  /** The paragraph keeps Word's line boxes under a LibreOffice producer
+   * (keepsWordLineBoxes). */
+  readonly wordLineBoxes?: boolean;
   /** Owner section's counter-turn for upright inline graphics; maps their
    *  physical §20.4.2.6 effect edges onto the logical line axes. */
   readonly uprightResourceOrientation?: import('../layout/types.js').UprightResourceOrientation;

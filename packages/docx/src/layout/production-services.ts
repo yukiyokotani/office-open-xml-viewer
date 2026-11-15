@@ -211,7 +211,8 @@ export function createProductionTextLayoutService(
   // Served faces are sized from their own tables (source-font-metrics.ts),
   // exactly as an installed or embedded face with the same tables.
   const sourceMetrics = options.sourceFonts || options.servedFaceLines
-    ? sourceFontLineMetrics(options.sourceFonts, fontSet, options.servedFaceLines) : {};
+    ? sourceFontLineMetrics(options.sourceFonts, fontSet, options.servedFaceLines,
+      source.fonts.libreOfficeLineBoxes === true) : {};
   const appFaceIdentities = new Set(Object.values(sourceMetrics)
     .flatMap((metric) => metric.sourceIdentity?.startsWith('app-face:') ? [metric.sourceIdentity] : []));
   const fontMetrics = snapshotFontMetrics({
@@ -454,6 +455,9 @@ export function createProductionTextLayoutService(
     cjkFallback: options.cjkFallback,
     fontMetrics,
     ...(source.fonts.plainLineBoxes ? { plainLineBoxes: true } : {}),
+    ...(source.fonts.libreOfficeLineBoxes ? { libreOfficeLineBoxes: true } : {}),
+    ...(source.fonts.libreOfficeMsWordGridMetrics ? { libreOfficeMsWordGridMetrics: true } : {}),
+    ...(source.fonts.libreOfficeNoExternalLeading ? { libreOfficeNoExternalLeading: true } : {}),
     eastAsiaFontCharsets: fontFamilyCharsets,
     ...(() => {
       // Symbol-encoded text (core symbol-font.ts) is judged by the core oracle

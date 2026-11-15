@@ -1,4 +1,4 @@
-import type { ResolvedFontMetric } from '@silurus/ooxml-core';
+import type { OpenTypeLineMetrics, ResolvedFontMetric } from '@silurus/ooxml-core';
 import {
   fontFamilyKey,
   instanceOpenTypeLineMetrics,
@@ -6,6 +6,7 @@ import {
   type LoadedFontSources,
 } from '@silurus/ooxml-core/internal/font-sources';
 import { cssMatchedFace } from './line-breaker/font-metrics.js';
+import { libreOfficeProducerLineMetric } from './layout/line-compatibility.js';
 import { WML_TUPLES, tupleKey, type PreparedServedFaceLines } from './served-face-lines.js';
 import {
   displayFamily,
@@ -15,6 +16,14 @@ import {
   sourceFontResourceIdentity,
   wordResourceLineMetric,
 } from './source-font-metrics.js';
+
+/** The MVAR tags of the values LIBREOFFICE_FONT_LINE_BOX reads: the OS/2
+ * typo values with USE_TYPO_METRICS, usWin for an empty hhea, and nothing
+ * else (hhea has no MVAR tag). */
+function normalLineMvarTags(tables: OpenTypeLineMetrics): ('hasc' | 'hdsc' | 'hlgp' | 'hcla' | 'hcld')[] {
+  if (tables.useTypoMetrics) return ['hasc', 'hdsc', 'hlgp'];
+  return tables.hheaAscent === 0 && tables.hheaDescent === 0 ? ['hcla', 'hcld'] : [];
+}
 
 // The served faces' part of sourceFontLineMetrics (source-font-metrics.ts,
 // whose comment states the rules): loaded only with the font-source session
@@ -98,6 +107,7 @@ function frozenDeclared(declared: NonNullable<ReturnType<typeof parseUnicodeRang
 export function servedFontLineMetrics(
   loaded: LoadedFontSources,
   prepared: PreparedServedFaceLines,
+  libreOfficeLineBoxes = false,
 ): Record<string, ResolvedFontMetric> {
   const metrics: Record<string, ResolvedFontMetric> = Object.create(null);
   const byFamily = new Map<string, { display: string; faces: { face: SourceFace; index: number }[] }>();
@@ -127,6 +137,18 @@ export function servedFontLineMetrics(
       const set = matchedSet(described, weight, style);
       const projected = set.map(({ face, index, range, style: faceStyle, declared }) => {
         if (!declared) return undefined;
+        if (face.resourceMetrics && libreOfficeLineBoxes) {
+          // Word's box of a Far East face reads usWin, which must be size-free too.
+          const wordFarEast = face.resourceMetrics.farEastCodePage === true;
+          // LIBREOFFICE_FONT_LINE_BOX reads only the face's normal line; the
+          // instance must be size-free in exactly the values it reads.
+          const instance = instanceOpenTypeLineMetrics(face.resourceMetrics, {
+            wght: clamp(weight, range), ital: faceStyle === 'italic' ? 1 : 0,
+          }, [...normalLineMvarTags(face.resourceMetrics), ...(wordFarEast ? ['hcla', 'hcld'] as const : [])]);
+          if (!instance?.unicodeRanges) return undefined;
+          return libreOfficeProducerLineMetric(instance,
+            Object.freeze(intersectRanges(normalizedRanges(declared), normalizedRanges(instance.unicodeRanges))));
+        }
         if (face.resourceMetrics) {
           const instance = instanceOpenTypeLineMetrics(face.resourceMetrics, {
             // An upright face drawn for an italic request is slanted by
