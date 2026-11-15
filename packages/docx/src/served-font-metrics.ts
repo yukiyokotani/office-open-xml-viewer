@@ -6,7 +6,7 @@ import {
   type LoadedFontSources,
 } from '@silurus/ooxml-core/internal/font-sources';
 import { cssMatchedFace } from './line-breaker/font-metrics.js';
-import { libreOfficeOnlyLineMetric, openTypeNormalLine } from './layout/line-compatibility.js';
+import { libreOfficeOnlyLineMetric } from './layout/line-compatibility.js';
 import { WML_TUPLES, tupleKey, type PreparedServedFaceLines } from './served-face-lines.js';
 import {
   displayFamily,
@@ -17,25 +17,12 @@ import {
   wordResourceLineMetric,
 } from './source-font-metrics.js';
 
-/** The instance a LIBREOFFICE_FONT_LINE_BOX normal line is read from. With
- * USE_TYPO_METRICS it reads the OS/2 typo values, which MVAR may vary with
- * optical size (hasc/hdsc/hlgp); such a face has no size-free normal line. */
-function normalLineInstance(
-  tables: OpenTypeLineMetrics, instance: OpenTypeLineMetrics,
-  weight: number, range: readonly [number, number], style: Style,
-): OpenTypeLineMetrics | undefined {
-  if (!instance.useTypoMetrics) return instance;
-  return instanceOpenTypeLineMetrics(tables, {
-    wght: clamp(weight, range), ital: style === 'italic' ? 1 : 0,
-  }, ['hasc', 'hdsc', 'hlgp']) ?? undefined;
-}
-
-function servedNormalLine(
-  tables: OpenTypeLineMetrics, instance: OpenTypeLineMetrics,
-  weight: number, range: readonly [number, number], style: Style,
-): ReturnType<typeof openTypeNormalLine> | Record<string, never> {
-  const normal = normalLineInstance(tables, instance, weight, range, style);
-  return (normal && openTypeNormalLine(normal)) ?? {};
+/** The MVAR tags of the values LIBREOFFICE_FONT_LINE_BOX reads: the OS/2
+ * typo values with USE_TYPO_METRICS, usWin for an empty hhea, and nothing
+ * else (hhea has no MVAR tag). */
+function normalLineMvarTags(tables: OpenTypeLineMetrics): ('hasc' | 'hdsc' | 'hlgp' | 'hcla' | 'hcld')[] {
+  if (tables.useTypoMetrics) return ['hasc', 'hdsc', 'hlgp'];
+  return tables.hheaAscent === 0 && tables.hheaDescent === 0 ? ['hcla', 'hcld'] : [];
 }
 
 // The served faces' part of sourceFontLineMetrics (source-font-metrics.ts,
@@ -150,6 +137,16 @@ export function servedFontLineMetrics(
       const set = matchedSet(described, weight, style);
       const projected = set.map(({ face, index, range, style: faceStyle, declared }) => {
         if (!declared) return undefined;
+        if (face.resourceMetrics && libreOfficeLineBoxes) {
+          // LIBREOFFICE_FONT_LINE_BOX reads only the face's normal line; the
+          // instance must be size-free in exactly the values it reads.
+          const instance = instanceOpenTypeLineMetrics(face.resourceMetrics, {
+            wght: clamp(weight, range), ital: faceStyle === 'italic' ? 1 : 0,
+          }, normalLineMvarTags(face.resourceMetrics));
+          if (!instance?.unicodeRanges) return undefined;
+          return libreOfficeOnlyLineMetric(instance,
+            Object.freeze(intersectRanges(normalizedRanges(declared), normalizedRanges(instance.unicodeRanges))));
+        }
         if (face.resourceMetrics) {
           const instance = instanceOpenTypeLineMetrics(face.resourceMetrics, {
             // An upright face drawn for an italic request is slanted by
@@ -159,13 +156,7 @@ export function servedFontLineMetrics(
           // has no MVAR tag: only those usWin values must be size-free.
           }, face.resourceMetrics.farEastCodePage ? ['hcla', 'hcld'] : []);
           const line = instance && wordResourceLineMetric(instance);
-          if (!instance?.unicodeRanges) return undefined;
-          const unicodeRanges = Object.freeze(intersectRanges(normalizedRanges(declared), normalizedRanges(instance.unicodeRanges)));
-          if (!line || instance.farEastCodePage == null) {
-            const normalInstance = libreOfficeLineBoxes
-              ? normalLineInstance(face.resourceMetrics, instance, weight, range, faceStyle) : undefined;
-            return normalInstance ? libreOfficeOnlyLineMetric(normalInstance, unicodeRanges) : undefined;
-          }
+          if (!instance?.unicodeRanges || !line || instance.farEastCodePage == null) return undefined;
           return {
             // The parsed class, as the installed-face catalogue carries it
             // (reference-font-line-metrics.ts): grid allocation reads it.
@@ -173,8 +164,7 @@ export function servedFontLineMetrics(
             lineHeightRatio: line.lineHeightRatio,
             designAscentRatio: line.designAscentRatio,
             designDescentRatio: line.designDescentRatio,
-            ...(libreOfficeLineBoxes ? servedNormalLine(face.resourceMetrics, instance, weight, range, faceStyle) : {}),
-            unicodeRanges,
+            unicodeRanges: Object.freeze(intersectRanges(normalizedRanges(declared), normalizedRanges(instance.unicodeRanges))),
             ...(instance.hasEastAsianCmap ? { eastAsianLineHeightRatio: line.lineHeightRatio } : {}),
           };
         }

@@ -3963,8 +3963,7 @@ function planMeasuredLines(
     // shrunk height (SvxInterLineSpaceRule::Prop).
     const extraAboveLine = (paragraph as { readonly __lineExtraAbove?: boolean }).__lineExtraAbove === true
       && (context.lineSpacing?.rule === 'exact' || context.lineSpacing?.rule === 'atLeast'
-        || (context.lineSpacing?.rule === 'auto' && context.lineSpacing.value < 1))
-      && raw.topY === undefined;
+        || (context.lineSpacing?.rule === 'auto' && context.lineSpacing.value < 1));
     const baselinePt = extraAboveLine
       ? context.lineSpacing!.rule === 'exact'
         ? measuredLine.topYPt + context.lineSpacing!.value * 4 / 5

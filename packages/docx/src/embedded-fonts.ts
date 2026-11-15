@@ -17,7 +17,7 @@ import {
 } from '@silurus/ooxml-core/worker';
 import type { LayoutDiagnostic } from './layout/types.js';
 import type { DocxDocumentModel, EmbeddedFontRef } from './types';
-import { libreOfficeOnlyLineMetric, openTypeNormalLine, wordOpenTypeAutoLineRatios } from './layout/line-compatibility.js';
+import { libreOfficeOnlyLineMetric, wordOpenTypeAutoLineRatios } from './layout/line-compatibility.js';
 import { sha256 } from '@silurus/ooxml-core/internal/sha256';
 
 // Resource governance for one retained DOCX font set. The byte ceiling matches
@@ -174,7 +174,7 @@ export async function loadEmbeddedFonts(
           // OS/2 code-page class and usWin data; cmap coverage is a separate
           // question. A face without declared code-page ranges does not gain
           // this authority merely because it contains a CJK glyph.
-          const line = openType?.farEastCodePage == null
+          const line = openType?.farEastCodePage == null || libreOfficeLineBoxes
             ? null
             : wordOpenTypeAutoLineRatios({
                 ...openType,
@@ -182,7 +182,8 @@ export async function loadEmbeddedFonts(
               });
           // A `libreOfficeLineBoxes` producer sizes a face without a Word
           // projection from its hhea alone (LIBREOFFICE_FONT_LINE_BOX).
-          const libreOfficeOnly = !line && openType && libreOfficeLineBoxes
+          // (LibreOffice reads the face's normal line only, never Word's box.)
+          const libreOfficeOnly = openType && libreOfficeLineBoxes
             ? libreOfficeOnlyLineMetric(openType, undefined) : undefined;
           if (line || libreOfficeOnly || openType?.averageCharWidthRatio != null) {
             metric = Object.freeze({
@@ -199,7 +200,6 @@ export async function loadEmbeddedFonts(
                 lineHeightRatio: line.lineHeightRatio,
                 designAscentRatio: line.designAscentRatio,
                 designDescentRatio: line.designDescentRatio,
-                ...(libreOfficeLineBoxes ? openTypeNormalLine(openType!) : {}),
               } : libreOfficeOnly ?? {}),
               ...(openType?.averageCharWidthRatio == null ? {} : {
                 averageCharWidthRatio: openType.averageCharWidthRatio,

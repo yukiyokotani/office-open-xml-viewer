@@ -2262,9 +2262,15 @@ function measureFollowingBodyBlock(
     });
     // LIBREOFFICE_PROPORTIONAL_LINE_PAGE_FIT: the first line's overhang may
     // hang below the page bottom as when it is the last line placed there.
-    const leadLineBoxExtentPt = firstLine
-      ? firstLine.bounds.yPt + firstLine.advancePt - (firstLine.pageEdgeOverhangPt ?? 0) - layout.flowBounds.yPt
-      : libreOfficeProportionalLineAdmissionExtentPt(layout, layout.advancePt);
+    // The overhang applies only when nothing retained follows the line
+    // (a single-line paragraph's bottom border or padding keeps it).
+    const firstLineEndPt = firstLine
+      ? firstLine.bounds.yPt + firstLine.advancePt - layout.flowBounds.yPt : layout.advancePt;
+    const overhangPt = (firstLine ?? layout.paragraphMark)?.pageEdgeOverhangPt ?? 0;
+    const leadLineBoxExtentPt = !(overhangPt > 0) ? firstLineEndPt
+      : firstLine && layout.lines.length > 1 ? firstLineEndPt - overhangPt
+      : Math.min(firstLineEndPt, libreOfficeProportionalLineAdmissionExtentPt(
+        layout, Math.max(0, layout.advancePt - layout.spacing.afterPt)));
     return Object.freeze({
       fullExtentPt: layout.advancePt,
       // keepNext admits the successor's first content line, including
