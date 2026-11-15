@@ -523,6 +523,91 @@ fn custom_shapes_evaluate_their_geometry() {
 }
 
 #[test]
+fn shape_line_caps_and_joins_use_the_canvas_vocabulary() {
+    // The DOCX model's stroke cap is a canvas name; DrawingML's `flat` /
+    // `rnd` / `sq` would make the renderer reject the page.
+    let cases = [
+        ("butt", "round", "butt", Some("round")),
+        ("round", "miter", "round", Some("miter")),
+        ("square", "bevel", "square", Some("bevel")),
+        ("bogus", "middle", "butt", Some("miter")),
+        // Joins keep the reader's existing mapping (`none` as the default
+        // miter), unchanged by the cap fix.
+        ("butt", "none", "butt", Some("miter")),
+    ];
+    for (cap, join, want_cap, want_join) in cases {
+        let automatic = format!(
+            r##"<style:style style:name="gr1" style:family="graphic"><style:graphic-properties draw:stroke="solid" svg:stroke-width="0cm" svg:stroke-linecap="{cap}" draw:stroke-linejoin="{join}" draw:fill="none" style:wrap="run-through" style:run-through="background"/></style:style>"##
+        );
+        let body = r##"<text:p><draw:rect draw:style-name="gr1" text:anchor-type="paragraph" svg:x="1pt" svg:y="2pt" svg:width="50pt" svg:height="50pt"/>x</text:p>"##;
+        let document = read_fixture(Fixture {
+            automatic: &automatic,
+            body,
+            ..Fixture::default()
+        });
+        let p = paragraphs(&document.body)[0];
+        let shape = p
+            .runs
+            .iter()
+            .find_map(|run| match run {
+                DocRun::Shape(shape) => Some(shape),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(shape.stroke_cap.as_deref(), Some(want_cap), "{cap}");
+        assert_eq!(shape.stroke_join.as_deref(), want_join, "{join}");
+    }
+}
+
+#[test]
+fn drawings_hidden_from_display_draw_nothing() {
+    // LibreOffice writes a Writer object that is neither visible nor
+    // printable as `drawooo:display="none"` and draws it nowhere.
+    let automatic = r##"<style:style style:name="gr1" style:family="graphic"><style:graphic-properties draw:stroke="solid" svg:stroke-linecap="butt" style:wrap="run-through" style:run-through="background"/></style:style>"##;
+    let shapes = |display: &str| {
+        let body = format!(
+            r##"<text:p><draw:line xmlns:drawooo="http://openoffice.org/2010/draw" {display} draw:style-name="gr1" text:anchor-type="paragraph" svg:x1="0cm" svg:y1="0cm" svg:x2="0cm" svg:y2="5cm"/>x</text:p>"##
+        );
+        let document = read_fixture(Fixture {
+            automatic,
+            body: &body,
+            ..Fixture::default()
+        });
+        paragraphs(&document.body)[0]
+            .runs
+            .iter()
+            .filter(|run| matches!(run, DocRun::Shape(_)))
+            .count()
+    };
+    assert_eq!(shapes(r#"drawooo:display="none""#), 0);
+    assert_eq!(shapes(r#"draw:display="none""#), 0);
+    assert_eq!(shapes(r#"drawooo:display="printer""#), 1);
+    assert_eq!(shapes(r#"drawooo:display="always""#), 1);
+    assert_eq!(shapes(""), 1);
+}
+
+#[test]
+fn page_anchored_drawings_hidden_from_display_register_no_page_object() {
+    // The gate runs before page-object registration: a hidden page-anchored
+    // drawing in a header adds nothing to the page, a visible one does.
+    let page_objects = |display: &str| {
+        let master = format!(
+            r##"<style:header><text:p>h<draw:rect xmlns:drawooo="http://openoffice.org/2010/draw" {display} text:anchor-type="page" text:anchor-page-number="1" svg:width="1cm" svg:height="1cm"/></text:p></style:header>"##
+        );
+        read_fixture(Fixture {
+            master: &master,
+            body: "<text:p>x</text:p>",
+            ..Fixture::default()
+        })
+        .page_objects
+        .len()
+    };
+    assert_eq!(page_objects(r#"drawooo:display="none""#), 0);
+    assert_eq!(page_objects(r#"draw:display="none""#), 0);
+    assert_eq!(page_objects(""), 1);
+}
+
+#[test]
 fn deeply_nested_content_stays_bounded() {
     let groups = format!(
         "<text:p>{}<draw:rect text:anchor-type=\"paragraph\" svg:width=\"1pt\" svg:height=\"1pt\"/>{}x</text:p>",
