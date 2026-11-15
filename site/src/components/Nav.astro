@@ -1,6 +1,6 @@
 ---
 interface Props {
-  active?: 'pptx' | 'docx' | 'xlsx' | 'announcements' | 'frameworks';
+  active?: 'pptx' | 'docx' | 'xlsx' | 'announcements' | 'frameworks' | 'fonts' | 'opendocument';
 }
 const { active } = Astro.props;
 ---
@@ -16,6 +16,8 @@ const { active } = Astro.props;
       <a href="/pptx" class:list={[{ 'nav-on': active === 'pptx' }]}>PPTX</a>
       <a href="/try">Try yours</a>
       <a href="/frameworks" class:list={[{ 'nav-on': active === 'frameworks' }]}>Frameworks</a>
+      <a href="/fonts" class:list={['nav-guide', { 'nav-on': active === 'fonts' }]}>Fonts</a>
+      <a href="/opendocument" class:list={['nav-guide', { 'nav-on': active === 'opendocument' }]}>OpenDocument</a>
       <button class="theme-toggle" type="button" data-theme-toggle aria-label="Toggle color theme">
         <span class="theme-glyph" aria-hidden="true"></span>
         <span class="theme-label" aria-hidden="true"></span>
