@@ -104,9 +104,16 @@ export function docxFontDemandCandidates(
   const scripts = new ScriptPreloadAccumulator(cjkLang);
   const languageNames = new Set<string>();
   const authored = new Map<string, string>();
+  // Runs repeat a few family spellings many times.
+  const keys = new Map<string, string>();
+  const familyKey = (name: string) => {
+    let key = keys.get(name);
+    if (key === undefined) keys.set(name, key = fontFamilyKey(name));
+    return key;
+  };
   const addAuthored = (family: string | null | undefined) => {
     const name = family?.trim();
-    const key = name ? fontFamilyKey(name) : '';
+    const key = name ? familyKey(name) : '';
     if (name && key && !authored.has(key)) authored.set(key, name);
   };
   const scopedScripts = new Map<string, Set<FontSubstituteScript>>();
@@ -129,7 +136,7 @@ export function docxFontDemandCandidates(
       const name = family?.trim();
       if (!name) continue;
       addAuthored(name);
-      const key = fontFamilyKey(name);
+      const key = familyKey(name);
       for (const script of scopedScripts.get(key) ?? []) {
         if (!proven.get(key)?.has(script) && substituteEntryCoversText({ script }, usage.text, 'any')) prove(key, script);
       }

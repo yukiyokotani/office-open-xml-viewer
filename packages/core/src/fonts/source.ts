@@ -108,7 +108,9 @@ export interface FontCssApiSource extends FontSourceBase {
    * a file host it knows serves many requests at once: how many of this
    * source's face files a realm downloads in parallel, in a pool of its own,
    * instead of the default six (`face-download.ts`). An integer from 1 to
-   * 64. Never settable through
+   * 64. The stated host also serves immutable, cacheable CORS responses, so
+   * the source's downloaded faces register from their URL
+   * (`source-session.ts` `registersFromUrl`). Never settable through
    * {@link fontCssApi}.
    */
   readonly parallelFaceDownloads?: number;

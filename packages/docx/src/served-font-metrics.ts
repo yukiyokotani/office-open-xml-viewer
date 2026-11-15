@@ -70,6 +70,30 @@ function matchedSet<T extends { range: readonly [number, number]; style: Style }
     && matched.weight <= candidate.face.range[1]).map(({ face }) => face) : [];
 }
 
+/** Declared ranges of each loaded face: snapshot faces are frozen, and
+ * layout asks for the metrics more than once per snapshot. */
+const facesDeclared = new WeakMap<SourceFace, ReturnType<typeof parseUnicodeRange>>();
+
+/** The declared ranges of `face`, one parse per value within one call
+ * (`values`: the faces of one file at two weights declare the same range). */
+function declaredRanges(face: SourceFace, values: Map<string, ReturnType<typeof parseUnicodeRange>>): ReturnType<typeof parseUnicodeRange> {
+  if (facesDeclared.has(face)) return facesDeclared.get(face)!;
+  let ranges = values.get(face.unicodeRange);
+  if (ranges === undefined) values.set(face.unicodeRange, ranges = parseUnicodeRange(face.unicodeRange));
+  facesDeclared.set(face, ranges);
+  return ranges;
+}
+
+/** {@link frozenRanges} of each declared range list ({@link declaredRanges}
+ * hands the faces of one value the same list). */
+const frozenByDeclared = new WeakMap<object, ReturnType<typeof frozenRanges>>();
+
+function frozenDeclared(declared: NonNullable<ReturnType<typeof parseUnicodeRange>>): ReturnType<typeof frozenRanges> {
+  let frozen = frozenByDeclared.get(declared);
+  if (!frozen) frozenByDeclared.set(declared, frozen = frozenRanges(declared));
+  return frozen;
+}
+
 /** Metrics of the faces `loaded` served, by tuple (see sourceFontLineMetrics). */
 export function servedFontLineMetrics(
   loaded: LoadedFontSources,
@@ -77,6 +101,7 @@ export function servedFontLineMetrics(
 ): Record<string, ResolvedFontMetric> {
   const metrics: Record<string, ResolvedFontMetric> = Object.create(null);
   const byFamily = new Map<string, { display: string; faces: { face: SourceFace; index: number }[] }>();
+  const values = new Map<string, ReturnType<typeof parseUnicodeRange>>();
   loaded.faces.forEach((face, index) => {
     const key = fontFamilyKey(face.family);
     if (!key) return;
@@ -85,20 +110,22 @@ export function servedFontLineMetrics(
     else byFamily.set(key, { display: displayFamily(face.family), faces: [{ face, index }] });
   });
   for (const { display, faces } of byFamily.values()) {
-    const described: { face: SourceFace; index: number; range: readonly [number, number]; style: Style }[] = [];
+    const described: {
+      face: SourceFace; index: number; range: readonly [number, number]; style: Style;
+      declared: ReturnType<typeof parseUnicodeRange>;
+    }[] = [];
     let modelled = true;
     for (const { face, index } of faces) {
       const range = descriptorWeight(face.weight);
       const style = descriptorStyle(face.style);
       if (!range || !style || face.stretch.trim().toLowerCase() !== 'normal') { modelled = false; break; }
-      described.push({ face, index, range, style });
+      described.push({ face, index, range, style, declared: declaredRanges(face, values) });
     }
     if (!modelled) continue;
     const identity = sourceFontResourceIdentity(display);
     for (const { weight, style } of WML_TUPLES) {
       const set = matchedSet(described, weight, style);
-      const projected = set.map(({ face, index, range, style: faceStyle }) => {
-        const declared = parseUnicodeRange(face.unicodeRange);
+      const projected = set.map(({ face, index, range, style: faceStyle, declared }) => {
         if (!declared) return undefined;
         if (face.resourceMetrics) {
           const instance = instanceOpenTypeLineMetrics(face.resourceMetrics, {
@@ -123,7 +150,7 @@ export function servedFontLineMetrics(
         }
         const ownership = prepared.faceLines.get(index);
         const measured = ownership && measuredMetric(display, ownership.lines[tupleKey(weight, style)], ownership);
-        return measured && { ...measured, unicodeRanges: frozenRanges(declared) };
+        return measured && { ...measured, unicodeRanges: frozenDeclared(declared) };
       });
       if (projected.length === 0 || projected.some((entry) => entry === undefined)) continue;
       projected.forEach((entry, position) => {

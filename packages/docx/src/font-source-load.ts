@@ -17,7 +17,6 @@ import {
 import {
   FontSourceSession,
   readFontResourceMetrics,
-  type FontSessionDemand,
   type FontSourceSessionOptions,
   type FontSourceDescriptor,
   type LoadedFontSources,
@@ -203,16 +202,6 @@ export function docxFontDemandScalars(doc: DocxDocumentModel): FontDemandScalars
   return collector.result();
 }
 
-/** One document's demand: the family plan plus its scalars. */
-export function docxFontDemand(doc: DocxDocumentModel, plan: DocxFontFamilyPlan): FontSessionDemand {
-  return Object.freeze({
-    families: plan.families,
-    fallbackFamilies: plan.fallbackFamilies,
-    scalars: docxFontDemandScalars(doc),
-    substituteScripts: plan.substituteScripts,
-  });
-}
-
 /** Loaded font sources for layout, plus the session that owns their faces. */
 export interface DocxLoadedFontSources extends DocxSourceFonts {
   readonly session: FontSourceSession;
@@ -236,17 +225,23 @@ export async function loadDocxFontSources(
 ): Promise<DocxLoadedFontSources> {
   // DOCX lays out with the served faces' own tables (source-font-metrics.ts):
   // the session reads them before the snapshot. PPTX and XLSX do not.
-  const demand = docxFontDemand(doc, plan);
   const session = new FontSourceSession({
     ...options, sources, readMetricTables: readFontResourceMetrics,
     // Without an `'all'` paint path (docxSynthesizedPaint: no chart, equation,
     // metafile or other unmodelled text) every painted run is regular or
     // bold: WordprocessingML §17.3.2.1 `b` (layout paragraph.ts, tabs,
     // shape-drawing-plan text paths), so 400 and 700 are the only weights.
-    ...(demand.scalars === 'all' ? {} : { requestedWeights: DOCX_RUN_WEIGHTS }),
+    // The session uses them only for a finite demand (an `'all'` demand
+    // registers every declaration as its own face).
+    requestedWeights: DOCX_RUN_WEIGHTS,
   });
   try {
-    const loaded = await session.ensure(demand);
+    // The scalars are collected while the families' stylesheets download.
+    const loaded = await session.ensureWithScalars({
+      families: plan.families,
+      fallbackFamilies: plan.fallbackFamilies,
+      substituteScripts: plan.substituteScripts,
+    }, () => docxFontDemandScalars(doc));
     return {
       session,
       names: Object.freeze([...plan.families, ...plan.fallbackFamilies]),

@@ -2,9 +2,11 @@
  * Library acquisition of `url` faces. Library resource policy, not OOXML
  * behaviour.
  *
- * The library fetches every http(s) / blob: face file itself, and hands the
- * bytes to `FontFace` as a `data` face (so their OpenType tables can be read
- * for line metrics); only data: URLs are left to `FontFace`. Every source kind
+ * The library fetches every http(s) / blob: face file itself, and keeps the
+ * bytes (so their OpenType tables can be read for line metrics, and every
+ * limit judges them); only data: URLs are left to `FontFace`. The face is
+ * registered from those bytes, or, for a preset's stated file host, from the
+ * URL they were downloaded from (`source-session.ts`). Every source kind
  * takes one path (`source-session.ts`): a face is fetched when the demand
  * first needs its `unicode-range` subset (one request per needed subset),
  * after its family is claimed (claim precedence is unchanged: a claimed face
@@ -149,6 +151,10 @@ async function readBoundedBytes(response: FaceResponse, charge: (bytes: number) 
     reader.cancel().catch(() => undefined);
     throw error;
   }
+  // One chunk that is its whole buffer is the body itself: no copy.
+  const [only] = chunks;
+  if (chunks.length === 1 && only!.byteOffset === 0 && only!.byteLength === only!.buffer.byteLength
+    && only!.buffer instanceof ArrayBuffer) return only!.buffer;
   const bytes = new Uint8Array(size);
   let offset = 0;
   for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }

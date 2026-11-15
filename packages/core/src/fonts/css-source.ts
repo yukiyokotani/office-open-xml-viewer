@@ -60,7 +60,7 @@ import {
   HARD_MAX_FONT_SOURCE_STYLESHEET_BYTES,
 } from '../worker/resource-policy.generated.js';
 import { claimFromIndex, indexFontDeclarations } from './files-source.js';
-import type { FamilyResolution, FontSourceFailure, FontStylesheet, SourceCache } from './source-cache.js';
+import { stringMemo, type FamilyResolution, type FontSourceFailure, type FontStylesheet, type SourceCache } from './source-cache.js';
 import {
   fontCssApiRequests,
   validateFontFaceDeclaration,
@@ -233,6 +233,44 @@ function splitTopLevel(text: string, separator: string): string[] {
     start = end + 1;
   }
   return parts;
+}
+
+/**
+ * A plain stylesheet, as font CSS APIs serve it (the Google Fonts CSS2 API):
+ * white space, comments and `@font-face` blocks only, each body a list of
+ * `name: value` declarations whose values hold no comment, escape, double
+ * quote, brace, bracket, `;` inside a string or parentheses, `!`, `<`, `*`
+ * or nested parentheses. In such a stylesheet every `;`, `:` and `}` the
+ * tokenizer finds outside blocks is one of these literal characters, so the
+ * scan by {@link plainFontFaceBodies} finds exactly the bodies and
+ * declarations {@link parseFontFaceCss} finds token by token.
+ */
+const PLAIN_DECLARATION = /^[ \t\n]*([A-Za-z][A-Za-z-]*)[ \t\n]*:((?:[^;'"\\(){}[\]!<*/]|\/(?!\*)|'[^'\\\n;{}()[\]*]*'|\((?:[^()'"\\;{}[\]\n*]|'[^'\\\n;{}()[\]*]*')*\))*)$/;
+/** One top-level item: a closed comment, an `@font-face` block, white
+ * space, or (any other code point) the end of the plain form. */
+const PLAIN_ITEM = /\/\*[^]*?\*\/|@font-face[ \t\n]*\{([^{}]*)\}|[ \t\n]+|[^]/gy;
+
+/** The `@font-face` bodies of a plain stylesheet, or null when it is not one. */
+function plainFontFaceBodies(css: string): FontFaceBody[] | null {
+  const bodies: FontFaceBody[] = [];
+  PLAIN_ITEM.lastIndex = 0;
+  for (let match = PLAIN_ITEM.exec(css); match; match = PLAIN_ITEM.exec(css)) {
+    const [text, body] = match;
+    if (body === undefined) {
+      if (text.length > 1 || /[ \t\n]/.test(text)) continue;
+      return null;
+    }
+    const face = emptyBody();
+    for (const part of body.split(';')) {
+      // An empty declaration (the text after the last `;`) declares nothing.
+      if (/^[ \t\n]*$/.test(part)) continue;
+      const declaration = PLAIN_DECLARATION.exec(part);
+      if (!declaration) return null;
+      addDescriptor(face, declaration[1]!.toLowerCase(), declaration[2]!);
+    }
+    bodies.push(face);
+  }
+  return bodies;
 }
 
 const isNewline = (char: string | undefined) => char === '\n' || char === '\r' || char === '\f';
@@ -642,6 +680,24 @@ function parseSrc(value: string, entryValid: ((text: string) => boolean) | null)
   return valid ? { url } : null;
 }
 
+/** One plain `url(…) format('…')` entry (an unquoted url of url-token code
+ * points only, a format every grammar accepts): the url the full parse
+ * returns, or undefined for anything else (the full parse decides). */
+const PLAIN_SRC = /^[ \t\n]*url\(([^\s"'()\\\x00-\x08\x0b\x0e-\x1f\x7f]+)\)[ \t\n]+format\('(woff2|woff|truetype|opentype)'\)[ \t\n]*$/;
+
+/**
+ * {@link parseSrc} of a plain entry, without the tokenizer. Its host verdict
+ * is taken for the entry with its url replaced: a url token's contents are
+ * never interpreted by the `src` grammar (the url is resolved only when the
+ * face loads), so every plain entry of one format has one verdict.
+ */
+function plainSrc(value: string, validateHost: HostValidator | null): { readonly url: string | null } | null | undefined {
+  const match = PLAIN_SRC.exec(value);
+  if (!match) return undefined;
+  if (validateHost && !validateHost.srcEntry(`url(u) format('${match[2]}')`)) return null;
+  return { url: match[1]! };
+}
+
 /** `unicode-range` (CSS Fonts 4 §4.5): valid only when every range parses.
  * An escape in the value is treated as invalid (ignored): the face then keeps
  * an earlier range or covers every scalar, never fewer than CSS would. */
@@ -670,7 +726,7 @@ const PROBE_FAMILY = 'ooxml-descriptor-probe';
  * parse failure, sets `status` to "error" (older engines throw a SyntaxError
  * instead; both count as invalid). The probe uses a `local()` source and is
  * never added to a FontFaceSet or loaded, so it fetches nothing; its
- * rejected `loaded` promise is observed. Results are memoized per parse.
+ * rejected `loaded` promise is observed. Results are memoized per realm.
  * Chrome's behaviour (status "error", a rejected `loaded`, no request, no
  * FontFaceSet entry; main thread and worker) is checked by
  * `tests/patterns/font-descriptor-host-validation.spec.ts`.
@@ -682,28 +738,35 @@ interface HostValidator {
   srcEntry(text: string): boolean;
 }
 
+/** Host verdicts of this realm, by `FontFace` constructor (the host parser
+ * is fixed for its lifetime) and probe (`<descriptor>\n<text>`, `src` for a
+ * source entry), bounded by {@link stringMemo}. Families sliced alike (Google
+ * Fonts' CJK families) declare the same descriptor values. */
+const hostVerdicts = new WeakMap<typeof FontFace, (probe: string) => boolean>();
+
 function hostDescriptorValidator(): HostValidator | null {
   const Face = (globalThis as { FontFace?: typeof FontFace }).FontFace;
   if (typeof Face !== 'function') return null;
-  const memo = new Map<string, boolean>();
-  const probe = (memoKey: string, create: () => FontFace) => {
-    let valid = memo.get(memoKey);
-    if (valid === undefined) {
+  let verdict = hostVerdicts.get(Face);
+  if (!verdict) {
+    verdict = stringMemo((probe) => {
+      const at = probe.indexOf('\n');
+      const key = probe.slice(0, at), text = probe.slice(at + 1);
       try {
-        const face = create();
+        const face = key === 'src' ? new Face(PROBE_FAMILY, text)
+          : new Face(PROBE_FAMILY, `local(${PROBE_FAMILY})`, { [key]: text });
         face.loaded?.catch(() => undefined);
-        valid = face.status !== 'error';
+        return face.status !== 'error';
       } catch {
-        valid = false;
+        return false;
       }
-      memo.set(memoKey, valid);
-    }
-    return valid;
-  };
+    }, 1 << 20);
+    hostVerdicts.set(Face, verdict);
+  }
+  const host = verdict;
   return {
-    descriptor: (key, text) => (probe(`${key}\n${text}`,
-      () => new Face(PROBE_FAMILY, `local(${PROBE_FAMILY})`, { [key]: text })) ? { value: text } : null),
-    srcEntry: (text) => probe(`src\n${text}`, () => new Face(PROBE_FAMILY, text)),
+    descriptor: (key, text) => (host(`${key}\n${text}`) ? { value: text } : null),
+    srcEntry: (text) => host(`src\n${text}`),
   };
 }
 
@@ -715,15 +778,34 @@ function hostDescriptorValidator(): HostValidator | null {
  * does not pass to `FontFace` (font-display, font-feature-settings, the
  * metric overrides, …) are not interpreted.
  */
-function parseFontFaceBody(
-  body: string,
-  stylesheetUrl: string,
-  location: string,
-  validateHost: HostValidator | null,
-): FontFaceDeclaration | null {
-  let family: string | null = null;
-  const srcCandidates: string[] = [];
-  const candidates: Record<FaceDescriptorKey, string[]> = { weight: [], style: [], stretch: [], unicodeRange: [] };
+/** The interpreted descriptors of one `@font-face` body, in declaration order. */
+interface FontFaceBody {
+  family: string | null;
+  readonly srcCandidates: string[];
+  readonly candidates: Record<FaceDescriptorKey, string[]>;
+}
+
+/** Record one `name: value` declaration of an `@font-face` body (name
+ * already lower-cased, value free of block and `!important`). */
+function addDescriptor(body: FontFaceBody, name: string, value: string): void {
+  switch (name) {
+    case 'font-family': body.family = parseFamily(value) ?? body.family; break;
+    case 'src': body.srcCandidates.push(value); break;
+    case 'font-weight': body.candidates.weight.push(cssTrim(value)); break;
+    case 'font-style': body.candidates.style.push(cssTrim(value)); break;
+    case 'font-stretch': body.candidates.stretch.push(cssTrim(value)); break;
+    case 'unicode-range': body.candidates.unicodeRange.push(cssTrim(value)); break;
+    default: break;
+  }
+}
+
+const emptyBody = (): FontFaceBody => ({
+  family: null, srcCandidates: [], candidates: { weight: [], style: [], stretch: [], unicodeRange: [] },
+});
+
+/** The declarations of one `@font-face` body by the full tokenizer. */
+function scanFontFaceBody(body: string): FontFaceBody {
+  const face = emptyBody();
   for (const raw of splitTopLevel(body, ';')) {
     const declaration = stripComments(raw);
     const colon = scanUntil(declaration, 0, ':{');
@@ -731,20 +813,20 @@ function parseFontFaceBody(
     // The name is one identifier token (escapes decoded, ASCII case-insensitive).
     const names = identifierSequence(declaration.slice(0, colon));
     if (names?.length !== 1) continue;
-    const name = names[0].toLowerCase();
     const value = declaration.slice(colon + 1);
     // A block-valued or !important descriptor is invalid in @font-face.
     if (scanUntil(value, 0, '{') < value.length || /!\s*important\s*$/i.test(value)) continue;
-    switch (name) {
-      case 'font-family': family = parseFamily(value) ?? family; break;
-      case 'src': srcCandidates.push(value); break;
-      case 'font-weight': candidates.weight.push(cssTrim(value)); break;
-      case 'font-style': candidates.style.push(cssTrim(value)); break;
-      case 'font-stretch': candidates.stretch.push(cssTrim(value)); break;
-      case 'unicode-range': candidates.unicodeRange.push(cssTrim(value)); break;
-      default: break;
-    }
+    addDescriptor(face, names[0].toLowerCase(), value);
   }
+  return face;
+}
+
+function parseFontFaceBody(
+  { family, srcCandidates, candidates }: FontFaceBody,
+  stylesheetUrl: string,
+  location: string,
+  validateHost: HostValidator | null,
+): FontFaceDeclaration | null {
   // The last valid declaration of each descriptor wins: walk back from the
   // last until one validates. The host parser decides where it exists, the
   // fallback grammar otherwise (`auto` there resets to the initial value).
@@ -762,7 +844,7 @@ function parseFontFaceBody(
   // url to register is extracted from it with the library's own tokenizer.
   let src: string | null = null;
   for (let index = srcCandidates.length - 1; index >= 0; index--) {
-    const parsed = parseSrc(srcCandidates[index], validateHost ? validateHost.srcEntry : null);
+    const parsed = plainSrc(srcCandidates[index], validateHost) ?? parseSrc(srcCandidates[index], validateHost ? validateHost.srcEntry : null);
     if (parsed === null) continue;
     src = parsed.url;
     break;
@@ -814,6 +896,19 @@ export function parseFontFaceCss(css: string, stylesheetUrl: string): FontFaceDe
   css = preprocessCss(css);
   const declarations: FontFaceDeclaration[] = [];
   const validateHost = hostDescriptorValidator();
+  const plain = plainFontFaceBodies(css);
+  if (plain) {
+    for (const body of plain) {
+      const declaration = parseFontFaceBody(body, stylesheetUrl,
+        `stylesheet @font-face #${declarations.length + 1}`, validateHost);
+      if (!declaration) continue;
+      if (declarations.length >= HARD_MAX_FONT_SOURCE_DECLARATIONS) {
+        throw fontSourceLimitError('declarations', HARD_MAX_FONT_SOURCE_DECLARATIONS, declarations.length + 1);
+      }
+      declarations.push(declaration);
+    }
+    return declarations;
+  }
   let index = 0;
   while (index < css.length) {
     // CSS Syntax §5.4.1 consume a list of rules (top level): white space,
@@ -833,7 +928,7 @@ export function parseFontFaceCss(css: string, stylesheetUrl: string): FontFaceDe
     const isFontFace = atName?.toLowerCase() === 'font-face'
       && stripComments(css.slice(nameEnd, stop)).trim() === '';
     if (isFontFace && end >= 0) {
-      const declaration = parseFontFaceBody(css.slice(stop + 1, end), stylesheetUrl,
+      const declaration = parseFontFaceBody(scanFontFaceBody(css.slice(stop + 1, end)), stylesheetUrl,
         `stylesheet @font-face #${declarations.length + 1}`, validateHost);
       if (declaration) {
         if (declarations.length >= HARD_MAX_FONT_SOURCE_DECLARATIONS) {
