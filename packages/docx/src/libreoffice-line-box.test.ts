@@ -1,11 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import type { ResolvedFontMetric } from '@silurus/ooxml-core';
 import { layoutBodyModel } from './test-support/document-layout.test-support.js';
+import { createLayoutServices } from './layout-runtime.js';
+import { layoutDocument } from './document-layout.js';
 import { libreOfficeNormalLine, libreOfficeProducerLineMetric, openTypeNormalLine } from './layout/line-compatibility.js';
 import { snapshotFontMetrics } from './layout/text.js';
 import { projectedResourceMetric } from './line-breaker/font-metrics.js';
 import type { LineLayout, ParagraphLayout } from './layout/types.js';
-import type { BodyElement, DocParagraph, DocSettings, DocxTextRun, LineSpacing, SectionProps } from './types';
+import type { BodyElement, DocParagraph, DocSettings, DocxDocumentModel, DocxTextRun, LineSpacing, SectionProps } from './types';
 
 // LIBREOFFICE_FONT_LINE_BOX and LIBREOFFICE_PROPORTIONAL_LINE_PAGE_FIT: a
 // model source that lays lines out as LibreOffice does sets
@@ -47,11 +49,11 @@ function section(pageHeight = 200): SectionProps {
   };
 }
 
-function run(text: string, fontSize = 12): DocParagraph['runs'][number] {
+function run(text: string, fontSize = 12, extra: Partial<DocxTextRun> = {}): DocParagraph['runs'][number] {
   const textRun: DocxTextRun = {
     text, bold: false, italic: false, underline: false, strikethrough: false,
     fontSize, color: null, fontFamily: 'Gap Face', isLink: false, background: null,
-    vertAlign: null, hyperlink: null,
+    vertAlign: null, hyperlink: null, ...extra,
   };
   return { type: 'text', ...textRun } as DocParagraph['runs'][number];
 }
@@ -210,6 +212,44 @@ describe('LIBREOFFICE_PROPORTIONAL_LINE_PAGE_FIT', () => {
       .map((page) => page.layers.body.filter((node) => node.kind === 'paragraph').length);
     expect(layout(15.65)).toEqual([2, 1]);
     expect(layout(15.5)).toEqual([1, 2]);
+  });
+
+  it('lets the extra space hang into a footnote area as into the margin', () => {
+    // The note band (6 pt separator band and one 15.6 pt note line) starts
+    // at 158.4 pt. Next carries the reference: it stays when its natural
+    // line ends above the band, its extra 15.6 pt hanging into it, and the
+    // body's flow charge ends at the band instead of claiming it.
+    const reference = run('1', 12, { noteRef: { kind: 'footnote', id: '1' } });
+    const layout = (room: number) => {
+      const model = {
+        body: [filler(160 - room), para([run('Probe'), BR, run('Next'), reference, BR, run('Third')], auto(2))],
+        section: section(), headers: { default: null, first: null, even: null },
+        footers: { default: null, first: null, even: null },
+        footnotes: [{ id: '1', content: [para([run('', 12, { noteRef: { kind: 'footnote', id: '' } }), run('Note')])] }],
+        endnotes: [], fontFamilyClasses: {}, settings: LIBREOFFICE,
+      } as unknown as DocxDocumentModel;
+      return layoutDocument(model, createLayoutServices(model, {
+        measureContext: linearCtx(), localMetrics: { 'gap face': GAP_FACE },
+      }), { currentDateMs: 0 });
+    };
+    // The probe starts at 111 pt: Probe's 31.2 pt and Next's natural
+    // 15.6 pt end at 157.8 pt, 0.6 pt above the band.
+    const fits = layout(69);
+    const page = fits.pages[0]!;
+    const probe = page.layers.body[1] as ParagraphLayout;
+    const [band] = page.layers.notes;
+    expect(probe.lines.length).toBe(2);
+    expect(band!.flowBounds.yPt).toBeCloseTo(158.4, 6);
+    const next = probe.lines[1]!;
+    expect(next.bounds.yPt + 15.6).toBeLessThanOrEqual(158.4);
+    expect(next.bounds.yPt + next.advancePt).toBeGreaterThan(158.4);
+    expect(probe.flowBounds.yPt + probe.flowBounds.heightPt).toBeCloseTo(158.4, 6);
+    // 1 pt less room: the natural line would end 0.4 pt inside the band,
+    // so Next takes its note to the next page.
+    const moved = layout(68);
+    expect((moved.pages[0]!.layers.body[1] as ParagraphLayout).lines.length).toBe(1);
+    expect(moved.pages[0]!.layers.notes).toEqual([]);
+    expect(moved.pages[1]!.layers.notes.length).toBe(1);
   });
 
   it('keeps charging DOCX lines their whole advance', () => {

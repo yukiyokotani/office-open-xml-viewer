@@ -285,7 +285,7 @@ export const LIBREOFFICE_PROPORTIONAL_LINE_PAGE_FIT = defineCompatibilityRule({
     version: '26.8.2.2',
     platform: 'macOS (headless PDF export)',
   },
-  description: 'A producer laying lines out as LibreOffice does (DocumentSettings.__libreOfficeLineBoxes; DOCX never sets it) keeps a line with proportional spacing on a page when its natural line (LIBREOFFICE_FONT_LINE_BOX, before the multiple) fits above the bottom of the text area; the multiple\'s extra space below it may extend past the margin, and the next line starts the next page. Evidence: odt-proportional-line-page-fit controls, A4 with 2 cm margins (text area bottom 785.20 pt), a filler paragraph whose spacing after was bisected to 0.02 pt, then a probe paragraph of 1, 2 or 3 lines (manual line breaks, no widow or orphan control) at 100, 120, 150, 200 and 300%: in 12 pt Liberation Serif (natural line 13.79 pt) the last line kept on the first page starts at most 13.78 pt above the bottom for every multiple (771.41 pt), the first of two lines at 120/150/200/300% leaves 30.34/34.49/41.38/55.19 pt (its full advance plus one natural line), and the middle line of three lines follows the same rule (743.82 and 730.01 pt at 200 and 300%); in 12 pt Hiragino Sans the single line keeps 18.00 pt (its natural line with the 0.5 em gap) at 100 to 300%. An empty paragraph needs its natural line too, also at 100% (an empty 12 pt Liberation Serif paragraph stays with 13.78 pt left at 100 and 200%), so Word\'s below-baseline empty-mark allowance does not apply. The line that moves starts the next page at its top. Only proportional multiples above 100% on unsnapped lines are covered; other trailing extents keep their own admission rules.',
+  description: 'A producer laying lines out as LibreOffice does (DocumentSettings.__libreOfficeLineBoxes; DOCX never sets it) keeps a line with proportional spacing on a page when its natural line (LIBREOFFICE_FONT_LINE_BOX, before the multiple) fits above the bottom of the text area; the multiple\'s extra space below it may extend past the margin, and the next line starts the next page. Evidence: odt-proportional-line-page-fit controls, A4 with 2 cm margins (text area bottom 785.20 pt), a filler paragraph whose spacing after was bisected to 0.02 pt, then a probe paragraph of 1, 2 or 3 lines (manual line breaks, no widow or orphan control) at 100, 120, 150, 200 and 300%: in 12 pt Liberation Serif (natural line 13.79 pt) the last line kept on the first page starts at most 13.78 pt above the bottom for every multiple (771.41 pt), the first of two lines at 120/150/200/300% leaves 30.34/34.49/41.38/55.19 pt (its full advance plus one natural line), and the middle line of three lines follows the same rule (743.82 and 730.01 pt at 200 and 300%); in 12 pt Hiragino Sans the single line keeps 18.00 pt (its natural line with the 0.5 em gap) at 100 to 300%. An empty paragraph needs its natural line too, also at 100% (an empty 12 pt Liberation Serif paragraph stays with 13.78 pt left at 100 and 200%), so Word\'s below-baseline empty-mark allowance does not apply. The line that moves starts the next page at its top. A footnote area is a bottom of the same kind: with 10 pt Liberation Serif footnotes (separator 0.1 cm before and after, 0.018 cm line) the 200% threshold moved by exactly the area height (17.58 pt for one note line, 40.66 pt for three, against 17.67 and 40.65 pt), whether the reference sits in an earlier paragraph or on the kept line itself, so the kept line\'s natural line ends above the area and its extra space hangs into it (a one-line note: line top 753.66 pt, natural end 767.45 pt, area top 767.53 pt); the body\'s flow charge therefore ends at the area, as it ends at the margin. Only proportional multiples above 100% on unsnapped lines are covered; other trailing extents keep their own admission rules.',
 });
 
 /** {@link LIBREOFFICE_PROPORTIONAL_LINE_PAGE_FIT}: the fit extent of a
@@ -306,6 +306,27 @@ export function libreOfficeProportionalLineAdmissionExtentPt(
     : mark!.bounds.yPt + mark!.bounds.heightPt - fragment.flowBounds.yPt;
   if (logicalLineBoxExtentPt > lineEndPt + 1e-6) return logicalLineBoxExtentPt;
   return Math.max(0, Math.min(logicalLineBoxExtentPt, lineEndPt - overhangPt));
+}
+
+/** {@link LIBREOFFICE_PROPORTIONAL_LINE_PAGE_FIT}: the flow charge of an
+ * admitted fragment whose last line's extra space may hang below the region
+ * bottom. A page-local reserve this fragment adds (a footnote area) starts
+ * that bottom just as the margin does: the natural line fits above it and the
+ * extra space hangs into it, so the charge ends at the reserve and the body
+ * never claims the note area. The admission extent stays charged even when a
+ * fragment is forced into a region it overflows. */
+export function libreOfficeProportionalLineAdmittedExtentPt(
+  fragment: ParagraphLayout,
+  admittedBlockExtentPt: number,
+  availableBlockExtentPt: number,
+  reservePt: number,
+  admissionExtentPt: number,
+): number {
+  const lastLine = fragment.lines.at(-1);
+  const mark = lastLine ? undefined : fragment.paragraphMark;
+  const overhangPt = (lastLine ?? mark)?.pageEdgeOverhangPt ?? 0;
+  if (!(overhangPt > 0) || !(reservePt > 0)) return admittedBlockExtentPt;
+  return Math.min(admittedBlockExtentPt, Math.max(admissionExtentPt, availableBlockExtentPt - reservePt));
 }
 
 /** Compatibility projection governed by {@link WORD_TRAILING_SPACE_AFTER_FIT_ADMISSION}. */
