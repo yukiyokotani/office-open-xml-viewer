@@ -359,6 +359,9 @@ importers:
       '@silurus/ooxml-legacy-office':
         specifier: workspace:*
         version: link:../packages/legacy-office
+      '@silurus/ooxml-opendocument':
+        specifier: workspace:*
+        version: link:../packages/opendocument
       '@silurus/ooxml-pptx':
         specifier: workspace:*
         version: link:../packages/pptx

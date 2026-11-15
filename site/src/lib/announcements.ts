@@ -8,6 +8,14 @@ export interface AnnouncementSection {
   readonly bullets?: readonly string[];
   readonly kind?: 'summary';
   readonly examples?: readonly AnnouncementExample[];
+  /** Site-internal guide pages for the section, rendered after its text. */
+  readonly links?: readonly AnnouncementLink[];
+}
+
+export interface AnnouncementLink {
+  readonly label: string;
+  /** Site-relative path, such as `/fonts`. */
+  readonly href: `/${string}`;
 }
 
 export interface AnnouncementExample {
@@ -35,6 +43,127 @@ export interface Announcement {
 }
 
 export const announcements: readonly Announcement[] = [
+  {
+    slug: 'v090-opendocument-and-font-sources',
+    date: '2026-11-16',
+    label: 'Release note',
+    version: 'v0.90.0',
+    title: 'OpenDocument reading and application-chosen font sources in v0.90.0',
+    summary: 'v0.90.0 lets applications choose where web fonts come from with the new fonts option, adds optional, experimental reading of ODP presentations, ODT documents and ODS spreadsheets, renders Symbol and Wingdings text on every host, and cuts work from the font loading path when web fonts are enabled. The useGoogleFonts option is deprecated in favour of fonts: [googleFonts()].',
+    audience: 'All Viewer and Node integrations. Applications that pass useGoogleFonts, load web fonts under a Content Security Policy or compile against the low-level model types should read Upgrading.',
+    sections: [
+      {
+        title: 'In short',
+        kind: 'summary',
+        paragraphs: [
+          'This release hands font provision to the application and opens a second family of document formats through an optional add-on. Without configuration nothing changes: no font is requested from any network host, and ordinary OOXML viewing loads no OpenDocument code.',
+        ],
+        bullets: [
+          'Load web fonts from Google Fonts, a mirror or proxy, a hosted font service, your own files or your own resolver, with one `fonts` option for DOCX, XLSX and PPTX in main and worker mode.',
+          'Open .odp, .odt and .ods files in the PPTX, DOCX and XLSX viewers through the experimental `@silurus/ooxml-opendocument` add-on.',
+          'Draw Symbol, Wingdings, Wingdings 2, Wingdings 3 and Webdings text on every host instead of tofu or Latin letters.',
+          'Do less font work before first display with web fonts enabled, and repaint large XLSX sheets without rebuilding their render index on every frame.',
+          'Replace the deprecated `useGoogleFonts: true` with `fonts: [googleFonts()]`; allow the font file host in `connect-src` as well as `font-src`.',
+        ],
+      },
+      {
+        title: 'OpenDocument reading, as an optional add-on',
+        modules: ['@silurus/ooxml-opendocument/odp', '@silurus/ooxml-opendocument/odt', '@silurus/ooxml-opendocument/ods'],
+        rationale: 'Many documents arrive as OpenDocument files. Reading them into the existing models lets applications show them with the viewers they already use, without a conversion service.',
+        paragraphs: [
+          'The experimental `@silurus/ooxml-opendocument` add-on reads OpenDocument presentations, text documents and spreadsheets directly into the PPTX slide, DOCX document and XLSX workbook models; the ordinary renderers draw them, and no intermediate OOXML package is generated. Pass `odp` to the PPTX viewers and loaders, `odt` to the DOCX ones and `ods` to the XLSX ones, in the browser and in Node sessions.',
+          'The readers aim to render every feature they read, as ODF 1.3 specifies, with LibreOffice as the reference where the specification leaves a choice. Where the target model has no exact counterpart, a feature is drawn with its nearest equivalent; a few, listed as known differences, are not drawn. Only corrupt, encrypted or unsafe packages, or packages over a resource limit, are rejected. The readers never run scripts, macros or forms and never fetch external resources.',
+          'ODP covers master pages, the style cascade, custom-shape geometry, gradient and bitmap fills, text, pictures, tables, speaker notes and charts. Importing a reader fetches nothing; its source module and WASM load only when a matching file is opened. For custom asset URLs, create one with `createOdp({ wasmUrl, moduleUrl })` (likewise `createOdt` and `createOds`).',
+        ],
+        examples: [
+          {
+            title: 'Open ODP presentations in the PPTX viewer',
+            code: `import { PptxViewer } from '@silurus/ooxml/pptx';
+import { odp } from '@silurus/ooxml-opendocument/odp';
+
+const canvas = document.querySelector('canvas') as HTMLCanvasElement;
+const viewer = new PptxViewer(canvas, { odp });
+await viewer.load(await file.arrayBuffer()); // .odp, .otp or .pptx`,
+          },
+        ],
+        links: [{ label: 'OpenDocument files guide', href: '/opendocument' }],
+      },
+      {
+        title: 'Font sources',
+        modules: ['DOCX', 'XLSX', 'PPTX'],
+        rationale: 'Applications differ in where they may fetch fonts from: a public CDN, a regional mirror, an internal proxy, a licensed font service or their own servers. The library now asks the application instead of assuming Google Fonts.',
+        paragraphs: [
+          'The new `fonts` load option takes an ordered list of sources built with `googleFonts()`, `fontCssApi()`, `fontCss()`, `fontFiles()` and `fontResolver()`. `googleFonts({ baseUrl })` sends the stylesheet requests to a Google-compatible mirror or proxy, and `googleFonts({ additionalFamilies })` adds Google families outside the preset catalog. `fontCssApi()` covers other per-family CSS APIs, `fontCss()` a static kit stylesheet, `fontFiles()` your own files or bytes, and `fontResolver()` authenticated or private services through a function that runs in the page.',
+          'Sources are consulted per family, in order; the first source that has a face claims the family, and a failure keeps the host font with a `console.warn` instead of rejecting the load. Every source takes `substitutions`, such as the exported `officeFontSubstitutions` (Calibri to Carlito, Cambria to Caladea and others). A `FontSource` is opaque, so create every entry with a factory. Font sources have fixed limits; a factory input beyond one throws the new `OoxmlError` code `font-source-limit`.',
+          'DOCX and XLSX now load only the `unicode-range` subsets that the document paints, as PPTX already did. DOCX also lays out a served face with Word\'s line rule from the face\'s own OpenType tables, so served fonts no longer set lines too tight. To read those tables, the library fetches the font files itself.',
+        ],
+        examples: [
+          {
+            title: 'A private resolver, then an internal Google-compatible mirror',
+            code: `import { fontResolver, googleFonts, officeFontSubstitutions } from '@silurus/ooxml';
+
+const privateFonts = fontResolver(async (demand, { signal }) => {
+  const response = await fetch('/api/fonts/resolve', {
+    method: 'POST',
+    body: JSON.stringify({ authoredFamilies: demand.authoredFamilies, fallbackFamilies: demand.fallbackFamilies }),
+    signal,
+  });
+  return response.json(); // FontFaceDeclaration[]
+}, { substitutions: officeFontSubstitutions });
+
+const viewer = new DocxViewer(canvas, {
+  fonts: [privateFonts, googleFonts({ baseUrl: 'https://fonts.internal.example' })],
+});`,
+          },
+        ],
+        links: [{ label: 'Font sources guide', href: '/fonts' }],
+      },
+      {
+        title: 'Symbol fonts on every host',
+        modules: ['DOCX', 'XLSX', 'PPTX'],
+        paragraphs: [
+          'Text, `w:sym` and `a:sym` symbols and list markers in Symbol, Wingdings, Wingdings 2, Wingdings 3 and Webdings now render on every host. Greek letters and maths operators of Symbol, and the pictographs of the Wingdings and Webdings fonts, used to draw as tofu or as Latin letters wherever the font was missing or, like Apple\'s Symbol, not symbol-encoded.',
+          'Each code is checked against the face that actually paints it: a face that draws the code keeps its own glyph, as on Windows, and any other code becomes its Unicode character. A converted pictograph takes the text colour and is never drawn as a colour emoji: where only a colour emoji face has it, the authored code is kept. In XLSX this covers cell values, number-format output, rich-text runs, text boxes and slicer labels, and overflow, wrapping and automatic row heights follow the symbols as drawn.',
+        ],
+      },
+      {
+        title: 'Less font work before first display',
+        modules: ['DOCX', 'XLSX', 'PPTX'],
+        paragraphs: [
+          'With font sources enabled, more content now has a precise font demand: accented and other composed text, right-to-left text, ruby, vertical Word sections and table cells, most charts, raster and SVG pictures, and numbered or vertical PowerPoint text no longer make a document fetch every `unicode-range` subset of its families. Some content still does, for example metafile pictures, equations, region-map charts and Word vertical text boxes.',
+          'The font load path does less work on the main thread. Faces are built as their downloads land instead of after a whole batch; `googleFonts()` on its default origin downloads files with a wider parallel pool and, in pages without a service worker, decodes files from their downloaded bytes on the main thread only for the first MiB of a load and only while that has taken at most half of the load\'s time so far, registering the other files from their URLs so the browser decodes them off the main thread; `unicode-range` lists are parsed in one pass and families sliced alike share their range work; and the font-source code is imported while the worker parses instead of afterwards. The PowerPoint font-demand preflight no longer repeats work and keeps the opening slide it already transferred, and the XLSX workbook demand skips text the renderer already covers. Rendering is unchanged.',
+          'XLSX scrolling and repainting no longer rebuild the sheet render index on every frame, which made up most of each frame on very large sheets.',
+        ],
+      },
+      {
+        title: 'More fixes and additions',
+        modules: ['DOCX', 'XLSX', 'PPTX', 'Node'],
+        paragraphs: [
+          'PowerPoint table cells now draw their diagonal borders, and end-of-paragraph run properties apply to stacked vertical text. XLSX inline-string cells now show their furigana when phonetic display is on. A DOCX whose main document part cannot be parsed now opens with the "could not be displayed" page instead of rejecting.',
+          'New additive APIs: `partFailures` and the `onPartFailure` viewer option list parts that failed to parse; `errorPlaceholder` replaces the placeholder\'s title and detail text; `getImage()` on DOCX and XLSX Node sessions returns picture bytes as PPTX sessions already did; and `PptxScrollViewer` gains `hiddenSlideMode` with `\'skip\'` and `\'dim\'` modes.',
+        ],
+      },
+      {
+        title: 'Upgrading',
+        paragraphs: [
+          'If you pass `useGoogleFonts`, migrate it. `useGoogleFonts: true` becomes `fonts: [googleFonts()]`, which sends the same stylesheet requests; `useGoogleFonts: false` is simply omitted. The alias still works in v0.90.0 with a warning printed once per JavaScript realm, and when `fonts` is also given, `fonts` wins: `useGoogleFonts` adds nothing, a warning is printed and nothing is thrown. From v0.91.0 it is ignored with the same warning and loads no web fonts, but never throws.',
+          'If your page has a Content Security Policy and loads web fonts, allow the font file host (for example `fonts.gstatic.com`) in `connect-src` as well as `font-src`: font files are now fetched by the library, and a blocked fetch falls back to the host fonts.',
+          'If your application inspects `OoxmlError.code`, one new code can appear: `font-source-limit`, thrown by a font source factory for a value beyond a fixed limit. It reports an application configuration problem, not a document problem.',
+          'TypeScript users of the low-level model types may see compile errors where the types now match the parser output: some fields became optional or nullable, and `ChartThreeD.view3DPresent` and PPTX `TableCell.diagonalTL`/`diagonalTR` are renamed to `view3dPresent` and `diagonalTl`/`diagonalTr`. The data sent by the parser is unchanged.',
+          'To try OpenDocument reading, install `@silurus/ooxml-opendocument` at exactly the same version as `@silurus/ooxml` and upgrade both together. The same exact-version rule applies to `@silurus/ooxml-legacy-office`; a mismatched pair fails before loading with `companion-runtime-mismatch`.',
+        ],
+        bullets: [
+          '`useGoogleFonts: true` → `fonts: [googleFonts()]`',
+          '`useGoogleFonts: false` → omit the option',
+          'A custom Google-compatible origin → `googleFonts({ baseUrl })`; other sources → `fontCssApi()`, `fontCss()`, `fontFiles()` or `fontResolver()`',
+        ],
+        links: [
+          { label: 'Font sources guide, including migration', href: '/fonts#migration' },
+          { label: 'OpenDocument files guide', href: '/opendocument' },
+        ],
+      },
+    ],
+  },
   {
     slug: 'experimental-legacy-office',
     date: '2026-10-19',

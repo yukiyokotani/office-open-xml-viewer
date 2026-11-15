@@ -7,8 +7,8 @@ import {
   assertFontSourceDescriptors,
   type FontDemand,
   type FontFaceDeclaration,
-  type FontResolveContext,
-  type FontResolveFn,
+  type FontResolverContext,
+  type FontResolver,
   type FontResolverOptions,
   type FontResolverSource,
   type FontSourceDescriptor,
@@ -91,7 +91,7 @@ beforeAll(async () => {
   main = await loadRealm();
 });
 // The main realm's descriptor behind the opaque factory result.
-const fontResolver = (resolve: FontResolveFn, options?: FontResolverOptions) =>
+const fontResolver = (resolve: FontResolver, options?: FontResolverOptions) =>
   main.fontSourceDescriptors([main.fontResolver(resolve, options)])[0] as FontResolverSource;
 
 const G = globalThis as Record<string, unknown>;
@@ -226,11 +226,11 @@ describe('fontResolver bridge: main and worker sessions resolve alike', () => {
   it('registers and charges the same faces as a direct session; main keeps the original', async () => {
     const answered: ArrayBuffer[] = [];
     const seen: FontDemand[] = [];
-    const resolve: FontResolveFn = (request) => {
+    const resolve: FontResolver = (request) => {
       seen.push(request);
       const face = FACE(64);
       answered.push(face.data as ArrayBuffer);
-      return request.families.map(() => face);
+      return request.authoredFamilies.map(() => face);
     };
     const source = fontResolver(resolve);
     const { session: direct } = mainSession([source]);
@@ -252,7 +252,7 @@ describe('fontResolver bridge: main and worker sessions resolve alike', () => {
     expect(answered[1]?.byteLength).toBe(64);
     // The application saw the same demand in both modes: family names only.
     expect(seen[1]).toEqual(seen[0]);
-    expect(seen[0]).toEqual({ families: ['Private Face'], fallbackFamilies: [] });
+    expect(seen[0]).toEqual({ authoredFamilies: ['Private Face'], fallbackFamilies: [] });
     session.release();
     link.host.dispose();
     await vi.waitFor(() => expect(main.retainedFontSourceBytes()).toBe(0));
@@ -274,7 +274,7 @@ describe('fontResolver bridge: main and worker sessions resolve alike', () => {
   for (const order of ['worker first', 'viewer first', 'concurrently'] as const) {
     it(`runs the resolver once per family when the viewer realm also paints (${order})`, async () => {
       let calls = 0;
-      const source = fontResolver((request) => { calls++; return request.families.map((family) => FACE(16, family)); });
+      const source = fontResolver((request) => { calls++; return request.authoredFamilies.map((family) => FACE(16, family)); });
       const failures = new Map<string, string>();
       const link = bridge([source], { failures });
       const viewer = mainSession([source], failures);
@@ -338,8 +338,8 @@ describe('fontResolver bridge: review findings', () => {
 
   // Finding 2: two configurations of one function.
   it('names the exact source, so a substitute configuration of the same function is honoured', async () => {
-    const resolve: FontResolveFn = () => [FACE(8, 'Served')];
-    const fonts = [fontResolver(resolve), fontResolver(resolve, { substitutes: [{ for: 'Missing', use: 'Served' }] })];
+    const resolve: FontResolver = () => [FACE(8, 'Served')];
+    const fonts = [fontResolver(resolve), fontResolver(resolve, { substitutions: [{ for: 'Missing', use: 'Served' }] })];
     const { session: direct } = mainSession(fonts);
     const mainLoaded = await direct.ensure(demand(['Missing']));
     direct.release();
@@ -621,8 +621,8 @@ describe('fontResolver bridge: review findings', () => {
     let calls = 0;
     const source = fontResolver((request) => {
       calls++;
-      if (request.families.includes('Slow')) return new Promise(() => undefined);
-      return request.families.map((family) => FACE(8, family));
+      if (request.authoredFamilies.includes('Slow')) return new Promise(() => undefined);
+      return request.authoredFamilies.map((family) => FACE(8, family));
     });
     const failures = new Map<string, string>();
     const worker = bridge([source], { failures }).session();
@@ -642,8 +642,8 @@ describe('fontResolver bridge: review findings', () => {
       let calls = 0;
       const source = fontResolver((request) => {
         calls++;
-        if (request.families.includes('Big')) return Array.from({ length: HARD_MAX_FONT_SOURCE_DECLARATIONS + 1 }, () => FACE(1, 'Big'));
-        return request.families.map((family) => FACE(8, family));
+        if (request.authoredFamilies.includes('Big')) return Array.from({ length: HARD_MAX_FONT_SOURCE_DECLARATIONS + 1 }, () => FACE(1, 'Big'));
+        return request.authoredFamilies.map((family) => FACE(8, family));
       });
       const failures = new Map<string, string>();
       const link = bridge([source], { failures });
@@ -741,7 +741,7 @@ describe('fontResolver bridge: review findings', () => {
   it('cancels every pending call on reset, so a late answer is never posted or detached', async () => {
     let signal: AbortSignal | undefined;
     let finish!: (faces: readonly FontFaceDeclaration[]) => void;
-    const source = fontResolver((_demand, context: FontResolveContext) => {
+    const source = fontResolver((_demand, context: FontResolverContext) => {
       signal = context.signal;
       return new Promise((resolve) => { finish = resolve; });
     });
@@ -770,7 +770,7 @@ describe('fontResolver bridge: review findings', () => {
     const posts: unknown[] = [];
     const responder = new main.FontResolverResponder({ post: (message) => posts.push(message), sources: [source] });
     const request = (generation: number, requestId: number, family: string) => ({
-      kind: 'ooxmlResolveFonts', generation, requestId, sourceIndex: 0, resolverId: source.id, demand: { families: [family], fallbackFamilies: [] },
+      kind: 'ooxmlResolveFonts', generation, requestId, sourceIndex: 0, resolverId: source.id, demand: { authoredFamilies: [family], fallbackFamilies: [] },
     } as never);
     responder.accept(request(0, 1, 'A'));
     await vi.waitFor(() => expect(signals).toHaveLength(1));
@@ -791,7 +791,7 @@ describe('fontResolver bridge: abort and malformed replies', () => {
   it('aborts the application call when the worker abandons it and posts no late answer', async () => {
     let signal: AbortSignal | undefined;
     let finish!: (faces: readonly FontFaceDeclaration[]) => void;
-    const source = fontResolver((_demand, context: FontResolveContext) => {
+    const source = fontResolver((_demand, context: FontResolverContext) => {
       signal = context.signal;
       return new Promise((resolve) => { finish = resolve; });
     });
@@ -890,7 +890,7 @@ describe('fontResolver bridge: abort and malformed replies', () => {
     });
     const posts: unknown[] = [];
     const responder = new main.FontResolverResponder({ post: (message) => posts.push(message), sources: [source] });
-    responder.accept({ kind: 'ooxmlResolveFonts', generation: 0, requestId: 1, sourceIndex: 0, resolverId: source.id, demand: { families: ['A'], fallbackFamilies: [] } } as never);
+    responder.accept({ kind: 'ooxmlResolveFonts', generation: 0, requestId: 1, sourceIndex: 0, resolverId: source.id, demand: { authoredFamilies: ['A'], fallbackFamilies: [] } } as never);
     await vi.advanceTimersByTimeAsync(15_000);
     expect(signal?.aborted).toBe(true);
     expect(posts).toEqual([{
@@ -1221,7 +1221,7 @@ describe('fontResolver bridge: the page fetches resolver URLs', () => {
 
   it('reuses the bytes of a face a later delta claims again, charging the copy once', async () => {
     const calls = installFetch({ 'https://fonts.app.example/sub.woff2': { bytes: 32 } });
-    const source = fontResolver((request) => request.families.map((family) => ({ family, url: 'https://fonts.app.example/sub.woff2' })));
+    const source = fontResolver((request) => request.authoredFamilies.map((family) => ({ family, url: 'https://fonts.app.example/sub.woff2' })));
     const link = bridge([source]);
     const { session } = link.session();
     await session.ensure(demand(['First']));
@@ -1241,7 +1241,7 @@ describe('fontResolver bridge: the page fetches resolver URLs', () => {
     const source = fontResolver(() => [
       { family: 'Private Face', url: 'https://fonts.app.example/gone.woff2' },
       { family: 'Sub Face', url: 'https://fonts.app.example/sub.woff2' },
-    ], { substitutes: [{ for: 'Private Face', use: 'Sub Face' }] });
+    ], { substitutions: [{ for: 'Private Face', use: 'Sub Face' }] });
     const link = bridge([source]);
     const { session, set } = link.session();
     const loaded = await session.ensure(demand(['Private Face']));
@@ -1595,13 +1595,13 @@ describe('face acquisition', () => {
 
 describe('fontResolver bridge: demand copy', () => {
   it('accepts family names only and rejects malformed demand', () => {
-    expect(main.copyBridgedFontDemand({ families: ['A'], fallbackFamilies: ['B'] }))
-      .toEqual({ families: ['A'], fallbackFamilies: ['B'] });
-    expect(main.copyBridgedFontDemand({ families: [1], fallbackFamilies: [] })).toBeUndefined();
-    expect(main.copyBridgedFontDemand({ families: ['A'] })).toBeUndefined();
+    expect(main.copyBridgedFontDemand({ authoredFamilies: ['A'], fallbackFamilies: ['B'] }))
+      .toEqual({ authoredFamilies: ['A'], fallbackFamilies: ['B'] });
+    expect(main.copyBridgedFontDemand({ authoredFamilies: [1], fallbackFamilies: [] })).toBeUndefined();
+    expect(main.copyBridgedFontDemand({ authoredFamilies: ['A'] })).toBeUndefined();
     // Nothing else crosses the bridge: scalars, tuples and scopes stay in the worker.
-    expect(main.copyBridgedFontDemand({ families: ['A'], fallbackFamilies: [], scalars: 'all' })).toBeUndefined();
-    expect(main.copyBridgedFontDemand({ families: ['A'], fallbackFamilies: [], substituteScripts: {} })).toBeUndefined();
+    expect(main.copyBridgedFontDemand({ authoredFamilies: ['A'], fallbackFamilies: [], scalars: 'all' })).toBeUndefined();
+    expect(main.copyBridgedFontDemand({ authoredFamilies: ['A'], fallbackFamilies: [], substituteScripts: {} })).toBeUndefined();
   });
 });
 
@@ -1628,7 +1628,7 @@ describe('fontResolver bridge: the lazily loaded host', () => {
     messages.map((message) => (message as { state?: string }).state ?? (message as { kind: string }).kind);
   const workerSource = (source: FontSourceDescriptor, realm: WorkerRealm = worker1) =>
     realm.assertFontSourceDescriptors(structuredClone([source]))[0] as FontResolverSource;
-  const familyDemand: FontDemand = { families: ['Private Face'], fallbackFamilies: [] };
+  const familyDemand: FontDemand = { authoredFamilies: ['Private Face'], fallbackFamilies: [] };
 
   it('holds the worker\'s calls until the host is ready, then posts them in order', async () => {
     let calls = 0;

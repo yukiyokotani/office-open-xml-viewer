@@ -233,7 +233,7 @@ async function resolverRaceInRealm(): Promise<RaceOutcome> {
         ensure(demand: unknown): Promise<unknown>;
         release(): void;
       };
-      fontResolver(resolve: (request: { families: readonly string[] }) => unknown[]): unknown;
+      fontResolver(resolve: (request: { authoredFamilies: readonly string[] }) => unknown[]): unknown;
     };
     document?: { fonts: FontFaceSet };
     fonts?: FontFaceSet;
@@ -244,7 +244,7 @@ async function resolverRaceInRealm(): Promise<RaceOutcome> {
   let calls = 0;
   const source = fontResolver((request) => {
     calls++;
-    return request.families.map((family) => ({ family, url: 'data:font/woff2;base64,AAAA' }));
+    return request.authoredFamilies.map((family) => ({ family, url: 'data:font/woff2;base64,AAAA' }));
   });
   const demand = { families: ['Shared'], fallbackFamilies: [], scalars: 'all' };
   const first = new FontSourceSession({ sources: [source] });

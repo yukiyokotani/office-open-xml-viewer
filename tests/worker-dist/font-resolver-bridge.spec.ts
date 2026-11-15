@@ -80,7 +80,7 @@ interface Rendered {
   readonly calls: number;
   readonly demands: readonly {
     readonly keys: readonly string[];
-    readonly families: readonly string[];
+    readonly authoredFamilies: readonly string[];
     readonly fallbackFamilies: readonly string[];
   }[];
   readonly answeredBytes: readonly number[];
@@ -127,16 +127,16 @@ async function render(
       const entry = `/dist/${format}.mjs`;
       const api = await import(entry);
       const font = new Uint8Array(fontBytes);
-      const calls: { keys: string[]; families: string[]; fallbackFamilies: string[] }[] = [];
+      const calls: { keys: string[]; authoredFamilies: string[]; fallbackFamilies: string[] }[] = [];
       const answered: ArrayBuffer[] = [];
       let fonts: unknown[] | undefined;
       if (source === 'resolver') {
-        fonts = [api.fontResolver((demand: { families: string[]; fallbackFamilies: string[] }, context: { signal: AbortSignal }) => {
+        fonts = [api.fontResolver((demand: { authoredFamilies: string[]; fallbackFamilies: string[] }, context: { signal: AbortSignal }) => {
           if (!(context.signal instanceof AbortSignal)) throw new Error('resolver received no AbortSignal');
           calls.push({
-            keys: Object.keys(demand).sort(), families: [...demand.families], fallbackFamilies: [...demand.fallbackFamilies],
+            keys: Object.keys(demand).sort(), authoredFamilies: [...demand.authoredFamilies], fallbackFamilies: [...demand.fallbackFamilies],
           });
-          if (!demand.families.includes(family)) return [];
+          if (!demand.authoredFamilies.includes(family)) return [];
           const data = font.slice().buffer;
           answered.push(data);
           return [{ family, data }];
@@ -242,8 +242,8 @@ for (const format of ['docx', 'pptx', 'xlsx'] as const) {
       // The application function ran on main in both modes and saw the same
       // demand: family names only (FontDemand), the fixture family among them.
       for (const demand of [...main.demands, ...worker.demands]) {
-        expect(demand.keys).toEqual(['fallbackFamilies', 'families']);
-        expect(demand.families).toContain(FAMILY);
+        expect(demand.keys).toEqual(['authoredFamilies', 'fallbackFamilies']);
+        expect(demand.authoredFamilies).toContain(FAMILY);
       }
       expect(worker.demands).toEqual(main.demands);
       expect(main.calls).toBe(1);

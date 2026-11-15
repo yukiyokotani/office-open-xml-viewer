@@ -109,7 +109,9 @@ export interface LoadOptions {
    * Build the entries with the factories exported next to this type
    * (`googleFonts()`, `fontCssApi()`, `fontCss()`, `fontFiles()`,
    * `fontResolver()`); a {@link FontSource} is opaque and only their results
-   * are accepted (anything else throws a `TypeError`). The first
+   * are accepted (anything else throws a `TypeError`). Results of the same
+   * copy of the library are guaranteed to be accepted; those of another copy
+   * loaded in the page are accepted on a best-effort basis only. The first
    * source that declares a face for a family claims it; later sources are not
    * consulted for that family, and a claimed family never retries another
    * source if its faces fail to load (the family then keeps its host fallback
@@ -126,8 +128,9 @@ export interface LoadOptions {
    * @deprecated Since 0.90. From 0.91 it is ignored, with the same warning
    * (no web fonts are loaded; it never throws). Replace `useGoogleFonts: true`
    * with `fonts: [googleFonts()]`. In 0.90 every format normalises it to
-   * exactly that and warns once per JavaScript realm; passing it together
-   * with `fonts` throws a `TypeError`, and `false` is a no-op that still warns.
+   * exactly that and warns once per JavaScript realm; when `fonts` is also
+   * given, `fonts` wins and this key adds nothing (it still warns, and never
+   * throws). `false` is a no-op that still warns.
    *
    * Opt in to loading webfont substitutes from Google Fonts
    * (`fonts.googleapis.com`). Default `false` — the canvas falls back to

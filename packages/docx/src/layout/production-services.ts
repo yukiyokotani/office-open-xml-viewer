@@ -106,15 +106,15 @@ export interface ProductionLayoutServiceOptions {
  * an override only when a loaded scoped substitute wins the exact resource
  * tuple, after embedded, local and authored CSS inventory precedence. */
 function docxScriptScopedFamilies(
-  substitutes: readonly FontSubstitution[],
+  substitutions: readonly FontSubstitution[],
   installed: readonly string[],
 ): Record<string, { script: FontSubstituteScript; substituteFamilies: string[] }> {
-  const scoped = scriptScopedSubstitutedFamilies(substitutes);
+  const scoped = scriptScopedSubstitutedFamilies(substitutions);
   return Object.fromEntries([...scoped]
     .filter(([key]) => !installed.includes(key))
     .map(([key, script]) => [key, {
       script,
-      substituteFamilies: [...new Set(substitutes
+      substituteFamilies: [...new Set(substitutions
         .filter((substitution) => substitution.script === script && fontFamilyKey(substitution.use) !== key)
         .map((substitution) => substitution.use))],
     }]));

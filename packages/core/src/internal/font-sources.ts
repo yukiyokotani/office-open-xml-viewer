@@ -22,8 +22,8 @@ export {
   type FontFaceDeclaration,
   type FontFilesOptions,
   type FontFilesSource,
-  type FontResolveContext,
-  type FontResolveFn,
+  type FontResolverContext,
+  type FontResolver,
   type FontResolverOptions,
   type FontResolverSource,
   type FontSource,
@@ -42,7 +42,7 @@ export {
 } from '../fonts/substitutions.js';
 export {
   GOOGLE_FONTS_CATALOG,
-  GOOGLE_FONTS_DEFAULT_CSS_ORIGIN,
+  GOOGLE_FONTS_DEFAULT_BASE_URL,
   GOOGLE_FONTS_SUBSTITUTIONS,
   GOOGLE_NOTO_CJK_NAMING,
   googleFonts,

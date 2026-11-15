@@ -61,22 +61,46 @@ export interface OoxmlUnsupportedContentDetails {
   readonly reason: 'source-subset';
 }
 
-/** Font-source quota, named after its generated `HARD_MAX_FONT_SOURCE_*`
- * ceiling. Library resource policy, not an OOXML rule. */
-export type OoxmlFontSourceQuota =
+type ExtensibleLiteral<Known extends string> = Known | (string & Record<never, never>);
+
+/**
+ * Font-source quota, named after its generated `HARD_MAX_FONT_SOURCE_*`
+ * ceiling. Library resource policy, not an OOXML rule.
+ *
+ * The known literals provide editor completion; the string tail is
+ * deliberate (as for {@link OoxmlResourceName}), so a quota added by a later
+ * release does not break an exhaustive `switch` compiled against this one.
+ * Handle unknown values with a default branch.
+ *
+ * Quotas a factory can throw, before any load:
+ * - `'declarations'`: `fontFiles()` (more `faces` than the ceiling);
+ * - `'face'`: `fontFiles()` (a `data` buffer or a `data:` URL body beyond the
+ *   face byte ceiling);
+ * - `'url'`: `fontCssApi()`, `googleFonts()`, `fontCss()` and `fontFiles()`
+ *   (a URL, URL template or composed request URL beyond the length ceiling).
+ *
+ * `fontResolver()` throws none. `'stylesheet'`, `'families'` and `'retained'`
+ * are reached only while a document loads, as is any quota of a resolver
+ * answer or a fetched stylesheet; there they never throw: the families
+ * concerned keep their host fallback, with a `console.warn`.
+ */
+export type OoxmlFontSourceQuota = ExtensibleLiteral<
   | 'stylesheet'
   | 'declarations'
   | 'families'
   | 'face'
   | 'retained'
-  | 'url';
+  | 'url'
+>;
 
 /** Violation record carried by `OoxmlError('font-source-limit')`. It names
  * the quota and its measurement only: no family, URL or font bytes. */
 export interface OoxmlFontSourceViolation {
   readonly resource: 'font-source';
   readonly quota: OoxmlFontSourceQuota;
-  readonly metric: 'bytes' | 'entry-count' | 'length';
+  /** Measurement axis of the quota. Open-ended like `quota`: a later release
+   * may report an axis this one does not know. */
+  readonly metric: 'bytes' | 'entry-count' | 'length' | (string & Record<never, never>);
   readonly limit: number;
   readonly observed: number;
 }
@@ -134,8 +158,6 @@ export interface OoxmlResourceUsageSnapshot {
   readonly distinctInflatedBytes: number;
   readonly operationInflatedBytes: number;
 }
-
-type ExtensibleLiteral<Known extends string> = Known | (string & Record<never, never>);
 
 /**
  * Resource family reported by a policy or hard-quota violation.

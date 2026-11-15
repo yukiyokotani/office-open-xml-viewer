@@ -8,7 +8,6 @@
  */
 import {
   OoxmlError,
-  type OoxmlFontSourceQuota,
   type OoxmlFontSourceViolation,
 } from './ooxml-error.js';
 
@@ -19,7 +18,11 @@ const FONT_SOURCE_QUOTA_METRICS = {
   face: 'bytes',
   retained: 'bytes',
   url: 'length',
-} as const satisfies Record<OoxmlFontSourceQuota, OoxmlFontSourceViolation['metric']>;
+} as const;
+
+/** The quotas this version of the library emits (the public
+ * `OoxmlFontSourceQuota` is open-ended for later versions). */
+export type KnownFontSourceQuota = keyof typeof FONT_SOURCE_QUOTA_METRICS;
 
 function isNonNegativeSafeInteger(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
@@ -31,7 +34,7 @@ export function fontSourceLimitMessage(violation: OoxmlFontSourceViolation): str
 
 /** Typed rejection for one breached font-source ceiling. */
 export function fontSourceLimitError(
-  quota: OoxmlFontSourceQuota,
+  quota: KnownFontSourceQuota,
   limit: number,
   observed: number,
 ): OoxmlError {
@@ -52,7 +55,7 @@ export function fontSourceViolationFromWire(value: unknown): OoxmlFontSourceViol
   const { resource, quota, metric, limit, observed } = candidate;
   if (resource !== 'font-source' || typeof quota !== 'string'
     || !Object.prototype.hasOwnProperty.call(FONT_SOURCE_QUOTA_METRICS, quota)) return undefined;
-  const typedQuota = quota as OoxmlFontSourceQuota;
+  const typedQuota = quota as KnownFontSourceQuota;
   if (metric !== FONT_SOURCE_QUOTA_METRICS[typedQuota]
     || !isNonNegativeSafeInteger(limit) || !isNonNegativeSafeInteger(observed)
     || observed <= limit) return undefined;

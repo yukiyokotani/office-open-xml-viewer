@@ -172,8 +172,10 @@ specification differently, the reader follows LibreOffice:
 - table columns are fitted to the table as LibreOffice fits them, rows are
   cut at a page as LibreOffice cuts them, and shared cell edges keep the
   wider rule;
-- superscript and subscript without an explicit raise use LibreOffice's
-  automatic escapement;
+- superscript and subscript without an explicit raise follow LibreOffice's
+  automatic escapement, approximated with a nominal ascent and descent of
+  0.8 and 0.2 em (the reader has no font metrics); without a relative size
+  the text keeps its size and baseline;
 - a line snapped to a layout grid takes as many cells as the face's own
   line box needs (without Word's 1.3 East Asian box), and the page admits it
   only when all of its cells fit.
@@ -223,8 +225,9 @@ them as for ODT. The source claims a package by its `mimetype` file
 (`application/vnd.oasis.opendocument.presentation` and `-template`), and
 admits packages, versions and styles as the ODT reader does.
 
-It follows the same rendering policy as the ODT reader: every presentation
-feature is read from its ODF definition and mapped onto the slide model, and
+It follows the same rendering policy as the ODT reader: the presentation
+features below are read from their ODF definitions and mapped onto the slide
+model, and
 only corrupt, encrypted or unsafe packages, or packages over the resource
 limits, reject. Where ODF leaves a choice to the application, LibreOffice
 Impress is the reference. It reads:
@@ -239,10 +242,12 @@ Impress is the reference. It reads:
   number labels;
 - custom shapes from their enhanced geometry (formulas, modifiers, every
   path command, text areas, mirroring), rectangles, ellipses and arcs,
-  polygons, paths, lines, connectors, captions, groups, transforms and shape
-  hyperlinks;
+  polygons and regular polygons, paths, lines, connectors, dimension lines
+  (drawn as their line), captions, groups,
+  transforms and shape hyperlinks;
 - area fills (solid, every gradient style with borders and multi-colour
-  stops, uniform and gradient transparency, hatches as the nearest pattern,
+  stops, uniform and gradient transparency, hatches as generated SVG pictures (the
+  nearest preset pattern when none is generated),
   bitmaps stretched, tiled or placed once), lines with dashes, caps, joins
   and markers, shadows, glow and soft edges;
 - text: fonts per script, sizes, weight, posture, colours (including
@@ -259,8 +264,10 @@ Impress is the reference. It reads:
 Charts (`draw:object` frames holding an `office:chart` document) are read
 with their own data table into the shared chart model; an object the chart
 reader finds structurally invalid is drawn from its replacement picture.
-Known gaps: 3D extrusion of custom shapes and fontwork text paths are drawn
-flat; animations and transitions are not played; text measurement follows
+Extruded custom shapes (`draw:extrusion`) are mapped to the slide model's 3-D
+scene and extrusion, and Fontwork shapes (a `draw:text-path` geometry) to the
+DrawingML text warp LibreOffice pairs with their shape type (an unmatched type
+becomes a plain warp). Known gaps: animations and transitions are not played; text measurement follows
 the fonts available to the browser, so text set in fonts LibreOffice
 substitutes (for example metric-compatible replacements) can wrap
 differently.
@@ -270,8 +277,14 @@ at most 512 MiB beyond the package's parsed XML and take a bounded number of
 steps, as measured by the same allocator as the other readers; the embedded
 charts of a deck may allocate at most 1 GiB together, and the deck's
 elements, slides (10,000), group nesting and retained pictures and slide
-data have bounds of their own. A presentation over a limit is rejected with
-an error that names the limit, instead of being shown in part.
+data have bounds of their own. A presentation over one of these limits is
+rejected instead of being shown in part; a checked limit is named in the
+error, while an allocation past the reader's hard memory ceiling (the limit
+plus 1 GiB of slack between checks) aborts the read as a WASM trap. Some
+drawing bounds simplify a single feature instead of rejecting: a gradient
+reads at most 256 stops per colour or opacity definition, enhanced geometry
+reads at most 1,024 modifiers, regular polygons have 3 to 1,000 corners and
+very dense hatches are drawn with wider spacing.
 
 ## Spreadsheets (ODS)
 
@@ -359,7 +372,7 @@ cannot hold what LibreOffice shows, the reader does the following:
 - Numbers are formatted by the workbook renderer's formatter, which follows
   Excel where the two differ: a negative number that rounds to zero keeps
   its minus sign (`-0` where LibreOffice shows `0`), and General shows at
-  most eleven characters.
+  most eleven characters, not counting the minus sign.
 - Hatch lines turn counter-clockwise from the horizontal by the hatch's
   rotation, as LibreOffice draws them (ODF 1.3 Part 3 §19.209 words the
   rotation as clockwise from the vertical axis).
@@ -386,9 +399,11 @@ as a workbook.
 
 Resource limits: while it builds the workbook, the reader may grow its heap
 by at most 512 MiB beyond the package's parsed XML, materialize at most 8
-million cells and take a bounded number of steps. A spreadsheet over a
-limit is rejected with an error that names the limit, instead of being shown
-in part. That measured limit covers building the workbook. Before it, the
+million cells and row records together and take a bounded number of steps.
+A spreadsheet over a limit is rejected with an error that names the limit,
+instead of being shown in part; an allocation past the reader's hard memory
+ceiling (the limit plus 1 GiB of slack between checks) aborts the read as a
+WASM trap instead. That measured limit covers building the workbook. Before it, the
 package directory and the text and parsed form of
 `styles.xml`, `content.xml` and `settings.xml` are bounded by the package
 limits (entries, bytes per entry, total inflated bytes) and the XML parsing
