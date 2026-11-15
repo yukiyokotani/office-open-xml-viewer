@@ -199,6 +199,7 @@ jobs:
           pnpm test:docx-compatibility-build
           pnpm test:docx-public-api
           node scripts/check-docx-layout-boundaries.mjs --final
+          pnpm check:tombstones
           pnpm check:docx-compatibility
 
       - name: Core legacy boundary

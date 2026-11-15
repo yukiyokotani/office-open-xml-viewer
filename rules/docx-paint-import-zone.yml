@@ -1,0 +1,74 @@
+id: docx-paint-import-zone
+language: TypeScript
+severity: error
+message: DOCX paint modules import only their siblings, the erased `layout/types` contract and reviewed package bindings.
+note: |
+  A module under `packages/docx/src/paint` may reach `./sibling.js`, type-only
+  `../layout/types.js`, and the package bindings reviewed in
+  `docx-paint-package-imports`. Everything else (layout algorithms, the
+  parser model, the renderer, measurement modules, side-effect imports,
+  `require`, non-literal `import()`) is forbidden. Because every paint module
+  is checked, no chain of paint modules can reach outside either.
+rule:
+  matches: docx-paint-forbidden-edge
+files:
+  - "packages/docx/src/paint/**/*.ts"
+ignores:
+  - "packages/docx/src/paint/affine.ts"
+  - "packages/docx/src/paint/**/*.d.ts"
+  - "packages/docx/src/paint/**/*.{test,spec,stories,test-support,bench}.{ts,tsx}"
+  - "packages/docx/src/paint/**/wasm/**"
+---
+id: docx-paint-affine-facade
+language: TypeScript
+severity: error
+message: paint/affine.ts is the only paint module that reaches layout affine algebra, through one exact re-export.
+note: |
+  `paint/affine.ts` follows the paint import zone with one addition: the
+  value re-export of exactly the reviewed `layout/affine.ts` functions, each
+  under its own name.
+rule:
+  any:
+    - matches: facade-violation
+    # A name listed twice.
+    - kind: export_specifier
+      any:
+        - { regex: "^composeAffine$", follows: { stopBy: end, kind: export_specifier, regex: "^composeAffine$" } }
+        - { regex: "^inverseMapAffinePoint$", follows: { stopBy: end, kind: export_specifier, regex: "^inverseMapAffinePoint$" } }
+        - { regex: "^inverseMapAffineVector$", follows: { stopBy: end, kind: export_specifier, regex: "^inverseMapAffineVector$" } }
+        - { regex: "^mapAffinePoint$", follows: { stopBy: end, kind: export_specifier, regex: "^mapAffinePoint$" } }
+        - { regex: "^quarterTurnAffine$", follows: { stopBy: end, kind: export_specifier, regex: "^quarterTurnAffine$" } }
+        - { regex: "^scaleAffine$", follows: { stopBy: end, kind: export_specifier, regex: "^scaleAffine$" } }
+        - { regex: "^translationAffine$", follows: { stopBy: end, kind: export_specifier, regex: "^translationAffine$" } }
+utils:
+  facade-violation:
+    matches: docx-paint-forbidden-edge
+    not:
+      all:
+        - kind: export_statement
+        - regex: "^export\\s*\\{"
+        - has: { field: source, regex: "^['\"]\\.\\./layout/affine\\.js['\"]$" }
+        - not:
+            has:
+              stopBy: end
+              kind: export_specifier
+              not: { regex: "^(composeAffine|inverseMapAffinePoint|inverseMapAffineVector|mapAffinePoint|quarterTurnAffine|scaleAffine|translationAffine)$" }
+        - has: { stopBy: end, kind: export_specifier, regex: "^composeAffine$" }
+        - has: { stopBy: end, kind: export_specifier, regex: "^inverseMapAffinePoint$" }
+        - has: { stopBy: end, kind: export_specifier, regex: "^inverseMapAffineVector$" }
+        - has: { stopBy: end, kind: export_specifier, regex: "^mapAffinePoint$" }
+        - has: { stopBy: end, kind: export_specifier, regex: "^quarterTurnAffine$" }
+        - has: { stopBy: end, kind: export_specifier, regex: "^scaleAffine$" }
+        - has: { stopBy: end, kind: export_specifier, regex: "^translationAffine$" }
+files:
+  - "packages/docx/src/paint/affine.ts"
+---
+id: docx-import-zones-are-ts-only
+language: Tsx
+severity: error
+message: Modules in the DOCX paint and line-breaker import zones must be `.ts`; the import-zone rules do not read TSX.
+rule:
+  kind: program
+files:
+  - "packages/docx/src/paint/**/*.tsx"
+  - "packages/docx/src/line-breaker/**/*.tsx"

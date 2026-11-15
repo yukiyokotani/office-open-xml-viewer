@@ -1,0 +1,4 @@
+id: docx-import-zones-are-ts-only
+invalid:
+  - "export const Paint = () => <canvas />;"
+  - ""

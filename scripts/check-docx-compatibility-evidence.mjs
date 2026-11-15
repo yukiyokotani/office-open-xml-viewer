@@ -21,8 +21,6 @@ const COMPATIBILITY_OWNER = `${DOCX_SOURCE}/layout/compatibility.ts`;
 // gates (@compatRule) or the normative settings flag it carries (@compatSetting).
 const COMPATIBILITY_PROFILE = `${DOCX_SOURCE}/layout/compat-profile.ts`;
 const COMPATIBILITY_PROFILE_INTERFACE = 'DocxCompatProfile';
-const OBSERVATION_BASELINE =
-  'scripts/docx-compatibility-observation-baseline.json';
 const MICROSOFT_EVIDENCE_CATALOG =
   'scripts/docx-compatibility-microsoft-evidence.json';
 const ALLOWED_DECLARATION_FILES = new Set([
@@ -752,11 +750,8 @@ function observationKeys(root) {
     .sort();
 }
 
-function verifyObservationBaseline(root, observations) {
-  const path = resolve(root, OBSERVATION_BASELINE);
-  if (existsSync(path)) {
-    fail('FINAL_COMPATIBILITY_OBSERVATION_BASELINE', OBSERVATION_BASELINE);
-  }
+// The transitional observation baseline is a tombstone (scripts/tombstones.mjs).
+function rejectInlineObservations(observations) {
   if (observations.length > 0) {
     fail(
       'INLINE_COMPATIBILITY_OBSERVATION',
@@ -787,7 +782,7 @@ export function checkDocxCompatibilityEvidence(root) {
   verifyCompatibilityProfile(root, rules);
   verifyCompatibilityModeReaders(root);
   const observations = observationKeys(root);
-  verifyObservationBaseline(root, observations);
+  rejectInlineObservations(observations);
   return Object.freeze([...rules].map(([id, { file }]) => Object.freeze({ id, file })));
 }
 

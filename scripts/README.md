@@ -63,12 +63,16 @@ from `.github/workflows/ci.yml`.
   `check-viewer-api-symmetry.mjs`.
 - Bundle shape: `check-no-inline-wasm.mjs`, `check-relative-wasm-urls.mjs`,
   `check-production-render-workers.mjs`, `check-font-source-tree-shaking.mjs`,
-  `check-optional-{chart-ex,region-map,three-d,tiff}.mjs`,
-  `check-optional-legacy-source.mjs`, `check-legacy-wasm-exports.mjs`.
+  `check-optional-entries.mjs` (optional renderers and legacy model sources),
+  `check-legacy-wasm-exports.mjs`.
 - Module boundaries: `check-core-legacy-boundary.mjs`,
   `check-docx-layout-boundaries.mjs`, `check-model-source-lazy-graph.mjs`,
   `check-model-source-lazy-runtime.mjs` (with its `model-source-runtime-*.mjs`
-  helpers), `check-model-source-ooxml-path.mjs`.
+  helpers), `check-model-source-ooxml-path.mjs`. Plain import restrictions
+  (DOCX paint and layout import zones) are ast-grep rules under `rules/`,
+  run by `pnpm lint`.
+- Deleted code that must not return: `tombstones.mjs` (the list) and
+  `check-tombstones.mjs`.
 - DOCX compatibility evidence: `check-docx-compatibility-evidence.mjs`.
 - Python generator tests: `run-python-tests.py` (`pnpm test:python`).
 

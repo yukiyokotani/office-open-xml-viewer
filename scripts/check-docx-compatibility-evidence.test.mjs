@@ -321,15 +321,6 @@ test('does not exempt an unreviewed file merely because its name ends in compati
   assert.match(result.stderr, /INLINE_COMPATIBILITY_OBSERVATION/);
 });
 
-test('rejects any transitional observation baseline in the final architecture', () => {
-  const root = fixture();
-  write(root, 'scripts/docx-compatibility-observation-baseline.json',
-    '{ "version": 1, "observations": [] }\n');
-  const result = run(root);
-  assert.equal(result.status, 1);
-  assert.match(result.stderr, /FINAL_COMPATIBILITY_OBSERVATION_BASELINE/);
-});
-
 test('rejects the removed transitional observation inventory argument', () => {
   const root = fixture();
   const result = run(root, '--print-observations');
