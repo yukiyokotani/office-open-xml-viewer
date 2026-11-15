@@ -96,7 +96,7 @@ contains the fixes of 0.89.10 and 0.89.11.
   mismatched pair fails with `companion-runtime-mismatch`. Without the package
   nothing changes. See [docs/opendocument.md](docs/opendocument.md) and the
   [OpenDocument guide](https://ooxml.silurus.dev/opendocument/) (#2168, #2169,
-  #2170, #2189, #2205, #2208, #2245).
+  #2170, #2189, #2205, #2208, #2245, #2246, #2247).
 - **Failed package parts:** a new `partFailures` getter on `DocxDocument`,
   `PptxPresentation`, `XlsxWorkbook` and every viewer lists the parts that
   failed to parse, and the new `onPartFailure` viewer option is called once for
