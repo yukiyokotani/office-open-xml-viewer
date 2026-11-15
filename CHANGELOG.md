@@ -7,7 +7,8 @@ the corresponding minor release.
 
 ## 0.90.0 — Unreleased
 
-Minor release that lets applications choose where web fonts come from. Two
+Minor release that lets applications choose where web fonts come from and
+adds experimental OpenDocument reading through a new optional package. Two
 changes may need action. If you pass `useGoogleFonts`, replace
 `useGoogleFonts: true` with `fonts: [googleFonts()]`. The alias still works in
 0.90 with a warning (when `fonts` is also given, `fonts` wins); from 0.91.0 it
@@ -58,6 +59,28 @@ the host fonts (see **Served font line heights** below). See the
   while a document loads fails only the families concerned, with a warning,
   like a network failure. The limit values, and the `quota` and `metric`
   strings of `error.violation`, may grow in later minor releases.
+- **OpenDocument (experimental):** the new optional companion package
+  `@silurus/ooxml-opendocument` reads OpenDocument files into the existing
+  models, so the ordinary viewers, loaders and Node sessions display them
+  without an intermediate OOXML package (#1934). Each format is a separate
+  opt-in entry: pass `odp` (`@silurus/ooxml-opendocument/odp`, `.odp`/`.otp`)
+  to the PPTX viewers and loaders, `odt` (`/odt`, `.odt`/`.ott`) to the DOCX
+  ones and `ods` (`/ods`, `.ods`/`.ots`) to the XLSX ones, for example
+  `new PptxViewer(canvas, { odp })`. A reader claims a package only by its
+  `mimetype` file; other input keeps the OOXML path. Importing a reader
+  fetches nothing: its source module and WASM load only when a matching file
+  is opened, and `createOdp()`, `createOdt()` and `createOds()` take
+  `{ moduleUrl, wasmUrl }` for relocated assets. The readers render every
+  feature they read, as ODF 1.3 specifies, with LibreOffice as the reference
+  where it leaves a choice, and draw what the target model cannot express
+  exactly with its nearest equivalent. They reject only corrupt, encrypted
+  (`unsupported-encryption`) or unsafe packages, and packages over a resource
+  limit; they never run scripts, macros or forms or fetch external resources.
+  Install the package at exactly the same version as `@silurus/ooxml`; a
+  mismatched pair fails with `companion-runtime-mismatch`. Without the package
+  nothing changes. See [docs/opendocument.md](docs/opendocument.md) and the
+  [OpenDocument guide](https://ooxml.silurus.dev/opendocument/) (#2168, #2169,
+  #2170, #2189, #2205, #2208).
 - **Failed package parts:** a new `partFailures` getter on `DocxDocument`,
   `PptxPresentation`, `XlsxWorkbook` and every viewer lists the parts that
   failed to parse, and the new `onPartFailure` viewer option is called once for

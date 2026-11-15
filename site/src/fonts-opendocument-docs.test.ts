@@ -38,14 +38,30 @@ describe('font sources guide', () => {
       expect(root).toContain(list);
       for (const baseline of baselines) expect(baseline).toContain(`export const ${list}:`);
     }
-    for (const type of ['FontResolveFn', 'FontDemand', 'FontResolveContext', 'FontFaceDeclaration']) {
+    for (const type of ['FontResolver', 'FontDemand', 'FontResolverContext', 'FontFaceDeclaration', 'FontSubstituteScript']) {
       expect(page).toContain(type);
       expect(root).toContain(`type ${type},`);
     }
   });
 
+  it('uses the option and field names the font source types declare', () => {
+    const sourceTypes = source('../../packages/core/src/fonts/source.ts');
+    const googleTypes = source('../../packages/core/src/fonts/presets/google-fonts.ts');
+    for (const option of ['baseUrl', 'additionalFamilies', 'substitutions']) {
+      expect(googleTypes).toContain(`readonly ${option}?:`);
+      expect(page).toContain(option);
+    }
+    expect(sourceTypes).toContain('readonly authoredFamilies: readonly string[];');
+    expect(page).toContain('demand.authoredFamilies');
+    const announcementText = JSON.stringify(announcements[0]);
+    for (const retired of ['cssOrigin', 'substitutes:', 'FontResolveFn', 'FontResolveContext', 'demand.families', 'googleFonts({ families })']) {
+      expect(page).not.toContain(retired);
+      expect(announcementText).not.toContain(retired);
+    }
+  });
+
   it('answers fallback families in the resolver examples', () => {
-    const request = 'JSON.stringify({ families: demand.families, fallbackFamilies: demand.fallbackFamilies })';
+    const request = 'JSON.stringify({ authoredFamilies: demand.authoredFamilies, fallbackFamilies: demand.fallbackFamilies })';
     expect(page).toContain(request);
     expect(JSON.stringify(announcements[0])).toContain(request.replace(/"/g, '\\"'));
   });
@@ -72,7 +88,7 @@ describe('OpenDocument guide', () => {
   it('is published and linked like the legacy Office guide', () => {
     expect(page).toContain('canonicalPath="/opendocument/"');
     expect(sitemapPaths).toContain('/opendocument/');
-    for (const path of ['./components/Nav.astro', './components/SiteFooter.astro', './components/Capabilities.astro', './pages/production.astro']) {
+    for (const path of ['./components/Nav.astro', './components/SiteFooter.astro', './components/Capabilities.astro', './pages/production.astro', './pages/try.astro']) {
       expect(source(path)).toContain('href="/opendocument"');
     }
     expect(source('../../README.md')).toContain('https://ooxml.silurus.dev/opendocument/');
