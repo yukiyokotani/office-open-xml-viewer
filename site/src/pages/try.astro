@@ -14,13 +14,13 @@ import BrandIcon from '../components/BrandIcon.astro';
         <p class="try-lead">DOCX, XLSX and PPTX are parsed and rendered locally in your browser. Your file is never uploaded.</p>
       </div>
 
-      <input type="file" id="file" accept=".docx,.xlsx,.pptx,.doc,.xls,.ppt,.csv,.tsv" hidden />
+      <input type="file" id="file" accept=".docx,.xlsx,.pptx,.doc,.xls,.ppt,.odt,.ott,.ods,.ots,.odp,.otp,.csv,.tsv" hidden />
       <button class="dropzone" id="dropzone" type="button">
         <span class="dz-action"><strong>Choose or drop a file</strong><small>.docx · .xlsx · .pptx</small></span>
         <span class="dz-arrow" aria-hidden="true">＋</span>
       </button>
 
-      <p class="try-legacy">Experimental: .doc · .xls · .ppt via the <a href="/legacy-office">legacy Office add-on</a>. Unsupported files reject.</p>
+      <p class="try-legacy">Experimental: .doc · .xls · .ppt via the <a href="/legacy-office">legacy Office add-on</a>, and .odt · .ods · .odp via the <a href="https://github.com/yukiyokotani/office-open-xml-viewer/blob/main/docs/opendocument.md">OpenDocument add-on</a>. Unsupported files reject.</p>
 
       <div class="try-status" id="status" hidden></div>
       <div class="try-privacy">

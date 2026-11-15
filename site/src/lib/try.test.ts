@@ -12,6 +12,9 @@ const mocks = vi.hoisted(() => ({
   legacyDoc: vi.fn(() => ({ target: 'docx' })),
   legacyXls: vi.fn(() => ({ target: 'xlsx' })),
   legacyPpt: vi.fn(() => ({ target: 'pptx' })),
+  odt: vi.fn(() => ({ target: 'docx', family: 'odt' })),
+  ods: vi.fn(() => ({ target: 'xlsx', family: 'ods' })),
+  odp: vi.fn(() => ({ target: 'pptx', family: 'odp' })),
   math: { loadMathJax: vi.fn(), mathMLToSvg: vi.fn() },
   googleFontsSource: { kind: 'font-css-api' },
   threeD: { render: vi.fn() },
@@ -165,6 +168,10 @@ vi.mock('@silurus/ooxml-legacy-office/doc', () => ({ get legacyDoc() { return mo
 vi.mock('@silurus/ooxml-legacy-office/xls', () => ({ get legacyXls() { return mocks.legacyXls(); } }));
 vi.mock('@silurus/ooxml-legacy-office/ppt', () => ({ get legacyPpt() { return mocks.legacyPpt(); } }));
 
+vi.mock('@silurus/ooxml-opendocument/odt', () => ({ get odt() { return mocks.odt(); } }));
+vi.mock('@silurus/ooxml-opendocument/ods', () => ({ get ods() { return mocks.ods(); } }));
+vi.mock('@silurus/ooxml-opendocument/odp', () => ({ get odp() { return mocks.odp(); } }));
+
 vi.mock('../../../src/math', () => ({ math: mocks.math }));
 vi.mock('../../../src/three-d', () => ({ threeD: mocks.threeD }));
 vi.mock('../../../src/region-map', () => ({ regionMap: mocks.regionMap }));
@@ -237,6 +244,11 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
+const optionalSourceKeys = ['legacyDoc', 'legacyXls', 'legacyPpt', 'odt', 'ods', 'odp'];
+const optionalSourceFactories = () => [
+  mocks.legacyDoc, mocks.legacyXls, mocks.legacyPpt, mocks.odt, mocks.ods, mocks.odp,
+];
+
 describe('Try Yours ScrollViewer integration', () => {
   it.each([
     { ext: 'DOC', format: 'docx', instances: mocks.docx, factory: mocks.legacyDoc, key: 'legacyDoc' },
@@ -246,19 +258,40 @@ describe('Try Yours ScrollViewer integration', () => {
     const result = await renderFile(stage(), file(`legacy.${ext}`));
     expect(result.format).toBe(format);
     expect(instances[0].opts[key]).toEqual({ target: format });
-    for (const other of ['legacyDoc', 'legacyXls', 'legacyPpt'].filter((name) => name !== key)) {
+    for (const other of optionalSourceKeys.filter((name) => name !== key)) {
       expect(instances[0].opts).not.toHaveProperty(other);
     }
-    for (const candidate of [mocks.legacyDoc, mocks.legacyXls, mocks.legacyPpt]) {
+    for (const candidate of optionalSourceFactories()) {
       expect(candidate).toHaveBeenCalledTimes(candidate === factory ? 1 : 0);
     }
   });
 
-  it('keeps ordinary OOXML loads free of legacy sources', async () => {
+  it.each([
+    { ext: 'odt', format: 'docx', instances: mocks.docx, factory: mocks.odt, key: 'odt' },
+    { ext: 'OTT', format: 'docx', instances: mocks.docx, factory: mocks.odt, key: 'odt' },
+    { ext: 'ods', format: 'xlsx', instances: mocks.xlsx, factory: mocks.ods, key: 'ods' },
+    { ext: 'ots', format: 'xlsx', instances: mocks.xlsx, factory: mocks.ods, key: 'ods' },
+    { ext: 'ODP', format: 'pptx', instances: mocks.pptx, factory: mocks.odp, key: 'odp' },
+    { ext: 'otp', format: 'pptx', instances: mocks.pptx, factory: mocks.odp, key: 'odp' },
+  ])('opens .$ext through only its matching OpenDocument source', async ({ ext, format, instances, factory, key }) => {
+    const result = await renderFile(stage(), file(`open.${ext}`));
+    expect(result.format).toBe(format);
+    expect(instances).toHaveLength(1);
+    expect(mocks.docx.length + mocks.xlsx.length + mocks.pptx.length + mocks.xlsxSheet.length).toBe(1);
+    expect(instances[0].opts[key]).toEqual({ target: format, family: key });
+    for (const other of optionalSourceKeys.filter((name) => name !== key)) {
+      expect(instances[0].opts).not.toHaveProperty(other);
+    }
+    for (const candidate of optionalSourceFactories()) {
+      expect(candidate).toHaveBeenCalledTimes(candidate === factory ? 1 : 0);
+    }
+  });
+
+  it('keeps ordinary OOXML loads free of legacy and OpenDocument sources', async () => {
     for (const ext of ['docx', 'xlsx', 'pptx']) await renderFile(stage(), file(`modern.${ext}`));
-    for (const factory of [mocks.legacyDoc, mocks.legacyXls, mocks.legacyPpt]) expect(factory).not.toHaveBeenCalled();
+    for (const factory of optionalSourceFactories()) expect(factory).not.toHaveBeenCalled();
     for (const instance of [mocks.docx[0], mocks.xlsx[0], mocks.pptx[0]]) {
-      for (const key of ['legacyDoc', 'legacyXls', 'legacyPpt']) expect(instance.opts).not.toHaveProperty(key);
+      for (const key of optionalSourceKeys) expect(instance.opts).not.toHaveProperty(key);
     }
   });
 
