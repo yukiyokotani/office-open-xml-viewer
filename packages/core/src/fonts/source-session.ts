@@ -1251,6 +1251,9 @@ export class FontSourceSession {
     const passStart = this.now();
     let decodedBytes = 0;
     let decodeMs = 0;
+    // The decoding that was timed (faces built here), for the files decided
+    // without being built.
+    let timedMs = 0, timedBytes = 0;
     const viaUrl = (url: string, bytes: number): boolean => {
       let decided = urlFiles.get(url);
       if (decided === undefined) {
@@ -1277,7 +1280,12 @@ export class FontSourceSession {
           const start = this.now();
           const face = new FontFace(`ooxml-font-source-${this.serial}-prepared`, url === undefined ? data : cssUrl(url),
             faceDescriptors(acquired));
-          if (url === undefined) decodeMs += this.now() - start;
+          if (url === undefined) {
+            const took = this.now() - start;
+            decodeMs += took;
+            timedMs += took;
+            timedBytes += data.byteLength;
+          }
           // A face registered from its URL starts loading now, as a face
           // built from bytes does (the engine decodes it off the main thread);
           // its registration loads it in any case (OwnedFace.quiet).
@@ -1308,9 +1316,17 @@ export class FontSourceSession {
     try {
       await Promise.all(batches);
       if (this.closed) throw createAbortError('Font source session released');
-      // The files that landed last are prepared now, so that each is
-      // decided in landing order before registration (declaration order).
-      if (flush !== undefined) { clearTimeout(flush); prepareLanded(); }
+      // The files that landed last and were not prepared are decided now,
+      // in landing order (registration follows declaration order). They are
+      // built at registration, after every decision, so each one that
+      // decodes from bytes counts for the time the pass's decoding so far
+      // took per byte (nothing, when none was timed).
+      for (const [url, data] of landed) {
+        const faces = (pending.get(url) ?? []).filter(({ sourceIndex }) => registersFromUrl(this.sources[sourceIndex])).length;
+        if (faces && !urlFiles.has(url) && !viaUrl(url, data.byteLength) && timedBytes) {
+          decodeMs += faces * data.byteLength * (timedMs / timedBytes);
+        }
+      }
       // Prepared faces stay charged (and reclaimable) until registration
       // takes them over in declaration order; see register().
       this.registerAcquired(work, outcomes, registered, failures, viaUrl);

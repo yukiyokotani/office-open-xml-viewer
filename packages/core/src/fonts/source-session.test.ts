@@ -407,27 +407,41 @@ describe('FontSourceSession: googleFonts() faces register from their URL', () =>
     ]);
   });
 
-  it('registers the files of a pass that landed at once from their URLs once one decode used the share up', async () => {
+  it('decides files that land together after a timed decode by what that decode took', async () => {
     urlRegistrationMinBytes = undefined;
     FakeFontFace.decodeMs = 10;
     const carlito = 'https://fonts.googleapis.com/css2?family=Carlito:ital,wght@0,400;0,700;1,400;1,700&display=swap';
     const files = [0, 1, 2].map((index) => `https://fonts.gstatic.example/f${index}.woff2`);
-    const gates = files.map(() => { let open!: () => void; const gate = new Promise<void>((resolve) => { open = resolve; }); return { gate, open }; });
-    installFetch({
-      [carlito]: { css: files.map((file, index) => rule('Carlito', file, `unicode-range: U+${(0x41 + index).toString(16)};`)).join('') },
-      ...Object.fromEntries(files.map((file, index) => [file, { bytes: 1000, gate: gates[index]!.gate }])),
-    });
-    const set = fakeSet();
-    const pending = open([googleFonts()], set).ensure(demand(['Calibri'], [0x41, 0x42, 0x43]));
-    await vi.waitFor(() => expect(G.fetch).toHaveBeenCalledTimes(4));
-    // A warm cache: every file lands 4 ms into the pass, f1 first. Its
-    // decode (10 ms) is more than half of the 14 ms by then.
-    clock = 4;
-    for (const index of [1, 2, 0]) gates[index]!.open();
-    await pending;
-    expect(set.faces.map((face) => [face.unicodeRange, typeof face.source])).toEqual([
-      ['U+41', 'string'], ['U+42', 'object'], ['U+43', 'string'],
-    ]);
+    const run = async (firstLandsAt: number) => {
+      clock = 0;
+      const gates = files.map(() => { let open!: () => void; const gate = new Promise<void>((resolve) => { open = resolve; }); return { gate, open }; });
+      const { fetchMock } = installFetch({
+        [carlito]: { css: files.map((file, index) => rule('Carlito', file, `unicode-range: U+${(0x41 + index).toString(16)};`)).join('') },
+        ...Object.fromEntries(files.map((file, index) => [file, { bytes: 1000, gate: gates[index]!.gate }])),
+      });
+      const set = fakeSet();
+      const session = open([googleFonts()], set);
+      const pending = session.ensure(demand(['Calibri'], [0x41, 0x42, 0x43]));
+      await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(4));
+      // f1 lands alone and is built from bytes (10 ms).
+      clock = firstLandsAt;
+      gates[1]!.open();
+      await vi.waitFor(() => expect(clock).toBe(firstLandsAt + 10));
+      // f2 then f0 land together and the pass settles before either is built.
+      gates[2]!.open();
+      gates[0]!.open();
+      await pending;
+      const sources = set.faces.map((face) => [face.unicodeRange, typeof face.source]);
+      session.release();
+      return sources;
+    };
+    // 10 ms decoded of 14: both register from their URL.
+    expect(await run(4)).toEqual([['U+41', 'string'], ['U+42', 'object'], ['U+43', 'string']]);
+    // 10 ms of 30: f2 decodes from bytes, counted as another 10 ms (its
+    // size at f1's rate), which leaves no room for f0.
+    expect(await run(20)).toEqual([['U+41', 'string'], ['U+42', 'object'], ['U+43', 'object']]);
+    // 10 ms of 100: both decode from bytes.
+    expect(await run(90)).toEqual([['U+41', 'object'], ['U+42', 'object'], ['U+43', 'object']]);
   });
 
   it('decodes a pass below the default threshold from bytes', async () => {
