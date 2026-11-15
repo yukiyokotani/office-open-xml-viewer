@@ -2,7 +2,7 @@ import { isCjkBreakChar } from '@silurus/ooxml-core';
 import { defineCompatibilityRule } from './compatibility.js';
 import type { DocxCompatProfile } from './compat-profile.js';
 import { OFFICE_FAR_EAST_SINGLE_LINE_FACTOR, officeOpenTypeAutoLineRatios } from '@silurus/ooxml-core/internal/office-auto-line';
-import type { OpenTypeLineMetrics } from '@silurus/ooxml-core';
+import type { OpenTypeLineMetrics, ResolvedFontMetric } from '@silurus/ooxml-core';
 import type { LineSpacing, TabStop } from '../types.js';
 import type { ParagraphLayoutSource } from './text.js';
 
@@ -126,13 +126,14 @@ export const LIBREOFFICE_FONT_LINE_BOX = defineCompatibilityRule({
 /** A face's own normal line, LIBREOFFICE_FONT_LINE_BOX: em ratios of the
  * ascent above the baseline, the descent below it and the line gap. Inputs are
  * design units; `typo` is given only when fsSelection USE_TYPO_METRICS is
- * set. A negative line gap is treated as none (unmeasured). */
+ * set. The gap stays signed; the projection treats a negative gap as none
+ * (unmeasured). */
 export function libreOfficeNormalLine(metrics: Readonly<{
   unitsPerEm: number;
   hhea: readonly [ascent: number, descent: number, lineGap: number];
   win?: readonly [ascent: number, descent: number];
   typo?: readonly [ascent: number, descent: number, lineGap: number];
-}>): Readonly<{ normalAscentRatio: number; normalDescentRatio: number; lineGapRatio: number }> | undefined {
+}>): Readonly<{ normalAscentRatio: number; normalDescentRatio: number; normalLineGapRatio: number }> | undefined {
   const { unitsPerEm, hhea, win, typo } = metrics;
   if (!(Number.isFinite(unitsPerEm) && unitsPerEm > 0)) return undefined;
   let [ascent, descent, gap] = hhea[0] >= 0 && hhea[1] <= 0 ? [hhea[0], -hhea[1], hhea[2]] : [0, 0, 0];
@@ -142,7 +143,7 @@ export function libreOfficeNormalLine(metrics: Readonly<{
   return Object.freeze({
     normalAscentRatio: ascent / unitsPerEm,
     normalDescentRatio: descent / unitsPerEm,
-    lineGapRatio: Math.max(0, gap) / unitsPerEm,
+    normalLineGapRatio: gap / unitsPerEm,
   });
 }
 
@@ -159,12 +160,32 @@ export function openTypeNormalLine(openType: OpenTypeLineMetrics): ReturnType<ty
   });
 }
 
+/** The geometry of a face whose tables give no Word projection (no OS/2
+ * code-page class, or a Far East face without usWin) for a
+ * `libreOfficeLineBoxes` producer only: LIBREOFFICE_FONT_LINE_BOX reads hhea
+ * alone. OOXML documents never receive it, so their admission is unchanged. */
+export function libreOfficeOnlyLineMetric(
+  openType: OpenTypeLineMetrics,
+  unicodeRanges: readonly (readonly [number, number])[] | undefined,
+): Omit<ResolvedFontMetric, 'family'> | undefined {
+  const normal = openTypeNormalLine(openType);
+  if (!normal) return undefined;
+  const box = libreOfficeLineBox(normal);
+  return {
+    ...(openType.farEastCodePage == null ? {} : { farEastCodePage: openType.farEastCodePage }),
+    ...box,
+    ...normal,
+    ...(unicodeRanges === undefined ? {} : { unicodeRanges }),
+    ...(openType.hasEastAsianCmap ? { eastAsianLineHeightRatio: box.lineHeightRatio } : {}),
+  };
+}
+
 /** LIBREOFFICE_FONT_LINE_BOX projection of a face's normal line: the gap
  * below the baseline. */
 export function libreOfficeLineBox(normal: Readonly<{
-  normalAscentRatio: number; normalDescentRatio: number; lineGapRatio: number;
+  normalAscentRatio: number; normalDescentRatio: number; normalLineGapRatio: number;
 }>): Readonly<{ lineHeightRatio: number; designAscentRatio: number; designDescentRatio: number }> {
-  const designDescentRatio = normal.normalDescentRatio + Math.max(0, normal.lineGapRatio);
+  const designDescentRatio = normal.normalDescentRatio + Math.max(0, normal.normalLineGapRatio);
   return Object.freeze({
     lineHeightRatio: normal.normalAscentRatio + designDescentRatio,
     designAscentRatio: normal.normalAscentRatio,

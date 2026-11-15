@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import type { ResolvedFontMetric } from '@silurus/ooxml-core';
 import { layoutBodyModel } from './test-support/document-layout.test-support.js';
-import { libreOfficeNormalLine, openTypeNormalLine } from './layout/line-compatibility.js';
+import { libreOfficeNormalLine, libreOfficeOnlyLineMetric, openTypeNormalLine } from './layout/line-compatibility.js';
+import { snapshotFontMetrics } from './layout/text.js';
 import type { LineLayout, ParagraphLayout } from './layout/types.js';
 import type { BodyElement, DocParagraph, DocSettings, DocxTextRun, LineSpacing, SectionProps } from './types';
 
@@ -16,7 +17,7 @@ const GAP_FACE: ResolvedFontMetric = {
   family: 'Gap Face', requestedFamily: 'Gap Face', sourceIdentity: 'test-resource:gap-face',
   farEastCodePage: false,
   lineHeightRatio: 1.3, designAscentRatio: 1.1, designDescentRatio: 0.2,
-  lineGapRatio: 0.3, normalAscentRatio: 0.8, normalDescentRatio: 0.2,
+  normalAscentRatio: 0.8, normalDescentRatio: 0.2, normalLineGapRatio: 0.3,
 };
 const LIBREOFFICE = { __libreOfficeLineBoxes: true } as unknown as DocSettings;
 
@@ -75,17 +76,38 @@ function pages(body: readonly BodyElement[], settings?: DocSettings, pageHeight?
 describe('LIBREOFFICE_FONT_LINE_BOX', () => {
   it('reads a face\'s own normal line as LibreOffice selects it', () => {
     expect(libreOfficeNormalLine({ unitsPerEm: 1000, hhea: [880, -120, 500], win: [1015, 242] }))
-      .toEqual({ normalAscentRatio: 0.88, normalDescentRatio: 0.12, lineGapRatio: 0.5 });
+      .toEqual({ normalAscentRatio: 0.88, normalDescentRatio: 0.12, normalLineGapRatio: 0.5 });
     // fsSelection USE_TYPO_METRICS: the OS/2 typo values instead.
     expect(libreOfficeNormalLine({ unitsPerEm: 1000, hhea: [880, -120, 500], typo: [750, -250, 200] }))
-      .toEqual({ normalAscentRatio: 0.75, normalDescentRatio: 0.25, lineGapRatio: 0.2 });
+      .toEqual({ normalAscentRatio: 0.75, normalDescentRatio: 0.25, normalLineGapRatio: 0.2 });
     // An empty hhea falls back to usWin without a gap.
     expect(libreOfficeNormalLine({ unitsPerEm: 1000, hhea: [0, 0, 100], win: [900, 300] }))
-      .toEqual({ normalAscentRatio: 0.9, normalDescentRatio: 0.3, lineGapRatio: 0 });
+      .toEqual({ normalAscentRatio: 0.9, normalDescentRatio: 0.3, normalLineGapRatio: 0 });
     expect(openTypeNormalLine({
       unitsPerEm: 1000, hheaAscent: 800, hheaDescent: -200, hheaLineGap: 300,
       typoAscent: 700, typoDescent: -300, typoLineGap: 0, useTypoMetrics: false, hasEastAsianCmap: false,
-    })).toEqual({ normalAscentRatio: 0.8, normalDescentRatio: 0.2, lineGapRatio: 0.3 });
+    })).toEqual({ normalAscentRatio: 0.8, normalDescentRatio: 0.2, normalLineGapRatio: 0.3 });
+  });
+
+  it('sizes a face without a Word projection for a LibreOffice producer only', () => {
+    // No OS/2 code-page class: Word's projection declines; hhea still gives
+    // LibreOffice's box.
+    expect(libreOfficeOnlyLineMetric({
+      unitsPerEm: 1000, hheaAscent: 800, hheaDescent: -200, hheaLineGap: 300,
+      farEastCodePage: null, hasEastAsianCmap: true,
+    }, [[0x20, 0x7e]])).toEqual({
+      lineHeightRatio: 1.3, designAscentRatio: 0.8, designDescentRatio: 0.5,
+      normalAscentRatio: 0.8, normalDescentRatio: 0.2, normalLineGapRatio: 0.3,
+      unicodeRanges: [[0x20, 0x7e]], eastAsianLineHeightRatio: 1.3,
+    });
+  });
+
+  it('keeps a measured negative gap as projection input, never an error', () => {
+    const snapshot = snapshotFontMetrics({
+      'tight face': { family: 'Tight Face', lineHeightRatio: 0.98, designAscentRatio: 0.78, designDescentRatio: 0.2,
+        lineGapRatio: -0.02, normalAscentRatio: 0.8, normalDescentRatio: 0.2, normalLineGapRatio: -0.02 },
+    });
+    expect(snapshot['tight face']).toMatchObject({ normalLineGapRatio: -0.02, lineHeightRatio: 0.98 });
   });
 
   it('pins the text to the line top and puts the whole line gap below it', () => {

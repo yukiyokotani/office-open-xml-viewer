@@ -843,12 +843,17 @@ impl<'a> Reader<'a> {
 
         self.inline(node, 0, &mut inline, 0)?;
         self.emit_runs(&mut inline, &mut collected.paragraph)?;
-        dotted_circle_base(&mut collected.paragraph.runs);
-        let drop_cap = self.drop_cap(
+        let mut drop_cap = self.drop_cap(
             &properties,
             inline.contexts[0].styles.clone(),
             &mut collected.paragraph,
         )?;
+        // The drop cap takes the source characters first; a mark that begins
+        // the paragraph then begins the cap, which is shaped from there.
+        match drop_cap.as_mut() {
+            Some(cap) => dotted_circle_base(&mut cap.runs),
+            None => dotted_circle_base(&mut collected.paragraph.runs),
+        }
         if let Some(label) = list.and_then(|list| list.label) {
             self.list_label(label, &mut inline.contexts, &mut collected.paragraph)?;
         }

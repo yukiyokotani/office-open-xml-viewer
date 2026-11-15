@@ -51,7 +51,7 @@ export interface FontResolution {
 export type NativeRouteLineMetric = Readonly<Pick<ResolvedFontMetric,
   'family' | 'requestedFamily' | 'weight' | 'style' | 'farEastCodePage' | 'requiresGlyphCoverage'
   | 'nativeRoutePrimaryFamily' | 'lineHeightRatio' | 'designAscentRatio' | 'designDescentRatio'
-  | 'lineGapRatio' | 'normalAscentRatio' | 'normalDescentRatio'>>;
+  | 'lineGapRatio' | 'normalAscentRatio' | 'normalDescentRatio' | 'normalLineGapRatio'>>;
 
 export interface FontResolver {
   readonly fingerprint: string;

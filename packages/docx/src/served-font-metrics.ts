@@ -6,7 +6,7 @@ import {
   type LoadedFontSources,
 } from '@silurus/ooxml-core/internal/font-sources';
 import { cssMatchedFace } from './line-breaker/font-metrics.js';
-import { openTypeNormalLine } from './layout/line-compatibility.js';
+import { libreOfficeOnlyLineMetric, openTypeNormalLine } from './layout/line-compatibility.js';
 import { WML_TUPLES, tupleKey, type PreparedServedFaceLines } from './served-face-lines.js';
 import {
   displayFamily,
@@ -99,6 +99,7 @@ function frozenDeclared(declared: NonNullable<ReturnType<typeof parseUnicodeRang
 export function servedFontLineMetrics(
   loaded: LoadedFontSources,
   prepared: PreparedServedFaceLines,
+  libreOfficeLineBoxes = false,
 ): Record<string, ResolvedFontMetric> {
   const metrics: Record<string, ResolvedFontMetric> = Object.create(null);
   const byFamily = new Map<string, { display: string; faces: { face: SourceFace; index: number }[] }>();
@@ -137,7 +138,11 @@ export function servedFontLineMetrics(
           // has no MVAR tag: only those usWin values must be size-free.
           }, face.resourceMetrics.farEastCodePage ? ['hcla', 'hcld'] : []);
           const line = instance && wordResourceLineMetric(instance);
-          if (!instance?.unicodeRanges || !line || instance.farEastCodePage == null) return undefined;
+          if (!instance?.unicodeRanges) return undefined;
+          const unicodeRanges = Object.freeze(intersectRanges(normalizedRanges(declared), normalizedRanges(instance.unicodeRanges)));
+          if (!line || instance.farEastCodePage == null) {
+            return libreOfficeLineBoxes ? libreOfficeOnlyLineMetric(instance, unicodeRanges) : undefined;
+          }
           return {
             // The parsed class, as the installed-face catalogue carries it
             // (reference-font-line-metrics.ts): grid allocation reads it.
@@ -146,7 +151,7 @@ export function servedFontLineMetrics(
             designAscentRatio: line.designAscentRatio,
             designDescentRatio: line.designDescentRatio,
             ...openTypeNormalLine(instance),
-            unicodeRanges: Object.freeze(intersectRanges(normalizedRanges(declared), normalizedRanges(instance.unicodeRanges))),
+            unicodeRanges,
             ...(instance.hasEastAsianCmap ? { eastAsianLineHeightRatio: line.lineHeightRatio } : {}),
           };
         }

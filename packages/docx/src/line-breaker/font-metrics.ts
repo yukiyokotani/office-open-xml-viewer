@@ -27,14 +27,14 @@ export function projectedResourceMetric(
   metric: ResolvedFontMetric | undefined,
   projection: FontLineBoxProjection,
 ): ResolvedFontMetric | undefined {
-  if (projection !== 'libreoffice' || !metric || metric.lineGapRatio === undefined
+  if (projection !== 'libreoffice' || !metric || metric.normalLineGapRatio === undefined
     || metric.normalAscentRatio === undefined || metric.normalDescentRatio === undefined) return metric;
   let projected = libreOfficeResourceMetrics.get(metric);
   if (!projected) {
     const box = libreOfficeLineBox({
       normalAscentRatio: metric.normalAscentRatio,
       normalDescentRatio: metric.normalDescentRatio,
-      lineGapRatio: metric.lineGapRatio,
+      normalLineGapRatio: metric.normalLineGapRatio,
     });
     projected = Object.freeze({
       ...metric,
@@ -225,8 +225,6 @@ export function sameResourceGeometry(a: ResolvedFontMetric, b: ResolvedFontMetri
     && a.designAscentRatio === b.designAscentRatio
     && a.designDescentRatio === b.designDescentRatio
     && a.lineGapRatio === b.lineGapRatio
-    && a.normalAscentRatio === b.normalAscentRatio
-    && a.normalDescentRatio === b.normalDescentRatio
     && a.eastAsianLineHeightRatio === b.eastAsianLineHeightRatio
     && a.fontBoxRatio === b.fontBoxRatio;
 }
@@ -328,11 +326,36 @@ export function selectResourceMetric(
   // Source identity proves which resource was requested, but not which of the
   // overlapping CSS faces Canvas actually paints. Compare every covering
   // resource in the tuple, including resources acquired from other sources.
+  let normalLineAgrees = true;
   for (const metric of candidates) {
-    if (metricCoversText(metric, probeText, selected.route, paintsGlyphs)
-      && !sameResourceGeometry(first, metric)) return undefined;
+    if (!metricCoversText(metric, probeText, selected.route, paintsGlyphs)) continue;
+    if (!sameResourceGeometry(first, metric)) return undefined;
+    normalLineAgrees &&= sameNormalLine(first, metric);
   }
-  return first;
+  return normalLineAgrees ? first : withoutNormalLine(first);
+}
+
+/** The face's own normal line (LIBREOFFICE_FONT_LINE_BOX) is projection
+ * input outside the Word geometry compared above: overlapping resources that
+ * disagree on it lend none, and keep their Word geometry. */
+function sameNormalLine(a: ResolvedFontMetric, b: ResolvedFontMetric): boolean {
+  return a.normalAscentRatio === b.normalAscentRatio
+    && a.normalDescentRatio === b.normalDescentRatio
+    && a.normalLineGapRatio === b.normalLineGapRatio;
+}
+
+const withoutNormalLines = new WeakMap<ResolvedFontMetric, ResolvedFontMetric>();
+
+function withoutNormalLine(metric: ResolvedFontMetric): ResolvedFontMetric {
+  if (metric.normalAscentRatio === undefined && metric.normalDescentRatio === undefined
+    && metric.normalLineGapRatio === undefined) return metric;
+  let stripped = withoutNormalLines.get(metric);
+  if (!stripped) {
+    const { normalAscentRatio: _ascent, normalDescentRatio: _descent, normalLineGapRatio: _gap, ...rest } = metric;
+    stripped = Object.freeze(rest);
+    withoutNormalLines.set(metric, stripped);
+  }
+  return stripped;
 }
 
 

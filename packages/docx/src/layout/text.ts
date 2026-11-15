@@ -876,12 +876,12 @@ export function snapshotFontMetrics(
         && (!Number.isFinite(metric.designDescentRatio) || metric.designDescentRatio < 0)) {
         throw new RangeError(`Font metric ${key} designDescentRatio must be finite and non-negative`);
       }
-      for (const field of ['lineGapRatio', 'normalAscentRatio', 'normalDescentRatio'] as const) {
-        const value = metric[field];
-        if (value !== undefined && (!Number.isFinite(value) || value < 0)) {
-          throw new RangeError(`Font metric ${key} ${field} must be finite and non-negative`);
-        }
-      }
+      // The face's own normal line (LIBREOFFICE_FONT_LINE_BOX) is optional
+      // projection input: an invalid triple is dropped, never fatal.
+      const normalLine = [metric.normalAscentRatio, metric.normalDescentRatio, metric.normalLineGapRatio];
+      const keepsNormalLine = normalLine.every((value) => value !== undefined && Number.isFinite(value))
+        && metric.normalAscentRatio! >= 0 && metric.normalDescentRatio! >= 0
+        && metric.normalAscentRatio! + metric.normalDescentRatio! > 0;
       if (metric.eastAsianLineHeightRatio !== undefined
         && (!Number.isFinite(metric.eastAsianLineHeightRatio) || metric.eastAsianLineHeightRatio < 0)) {
         throw new RangeError(`Font metric ${key} eastAsianLineHeightRatio must be finite and non-negative`);
@@ -909,11 +909,10 @@ export function snapshotFontMetrics(
         ...(metric.designDescentRatio === undefined ? {} : { designDescentRatio: metric.designDescentRatio }),
         // The face's own normal line (LIBREOFFICE_FONT_LINE_BOX), kept only
         // whole: the three values project together.
-        ...(metric.lineGapRatio !== undefined && metric.normalAscentRatio !== undefined
-          && metric.normalDescentRatio !== undefined ? {
-            lineGapRatio: metric.lineGapRatio,
+        ...(keepsNormalLine ? {
             normalAscentRatio: metric.normalAscentRatio,
             normalDescentRatio: metric.normalDescentRatio,
+            normalLineGapRatio: metric.normalLineGapRatio,
           } : {}),
         ...(metric.eastAsianLineHeightRatio === undefined
           ? {}

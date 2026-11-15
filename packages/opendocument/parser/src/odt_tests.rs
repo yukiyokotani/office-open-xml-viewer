@@ -1606,3 +1606,18 @@ fn lays_lines_out_as_libreoffice_does() {
     assert!(p[0].line_extra_above);
     assert!(!p[1].line_extra_above);
 }
+
+#[test]
+fn a_drop_cap_takes_the_source_mark_before_its_dotted_circle() {
+    let automatic = r##"<style:style style:name="D" style:family="paragraph"><style:paragraph-properties><style:drop-cap style:lines="2" style:length="1"/></style:paragraph-properties></style:style>"##;
+    let document = read_fixture(Fixture {
+        automatic,
+        body: "<text:p text:style-name=\"D\">\u{301}bc</text:p>",
+        ..Fixture::default()
+    });
+    let p = paragraphs(&document.body);
+    let text = |i: usize| -> String { text_runs(p[i]).iter().map(|run| run.text.as_str()).collect() };
+    assert_eq!(p.len(), 2);
+    assert_eq!(text(0), "\u{25CC}\u{301}");
+    assert_eq!(text(1), "bc");
+}
