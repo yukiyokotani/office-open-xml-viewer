@@ -252,6 +252,42 @@ describe('LIBREOFFICE_PROPORTIONAL_LINE_PAGE_FIT', () => {
     expect(moved.pages[1]!.layers.notes.length).toBe(1);
   });
 
+  it.each([
+    { note: false, continuation: false },
+    { note: true, continuation: false },
+    { note: true, continuation: true },
+  ])('cuts the space after before the hanging line (note $note, continuation $continuation)', ({ note, continuation }) => {
+    // A completed two-line probe with 25 pt space after and contextual
+    // spacing, followed by a paragraph of the same style. The region bottom
+    // (the margin at 180 pt, or the note band at 158.4 pt) cuts the space
+    // after first, so the following paragraph's collapse cannot rewind the
+    // cursor into the hanging line: After starts the next page.
+    const reference = note ? [run('1', 12, { noteRef: { kind: 'footnote', id: '1' } })] : [];
+    const model = {
+      body: [
+        filler(91),
+        para([run('Probe'), BR, run('Next'), ...reference], auto(2), { spaceAfter: 25, contextualSpacing: true, styleId: 'a' }),
+        para([run('After')], null, { styleId: 'a' }),
+      ],
+      section: section(), headers: { default: null, first: null, even: null },
+      footers: { default: null, first: null, even: null },
+      footnotes: [{ id: '1', content: [para([run('', 12, { noteRef: { kind: 'footnote', id: '' } }), run('Note')])] }],
+      endnotes: [], fontFamilyClasses: {}, settings: LIBREOFFICE,
+    } as unknown as DocxDocumentModel;
+    const layout = layoutDocument(model, createLayoutServices(model, {
+      measureContext: linearCtx(), localMetrics: { 'gap face': GAP_FACE }, allowFootnoteContinuation: continuation,
+    }), { currentDateMs: 0 });
+    const [first, second] = layout.pages;
+    const probe = first!.layers.body[1] as ParagraphLayout;
+    expect(first!.layers.body).toHaveLength(2);
+    expect(probe.lines.map((line) => line.bounds.yPt)).toEqual([111, 142.2].map((v) => expect.closeTo(v, 6)));
+    const bottomPt = note ? 158.4 : 180;
+    const flowEndPt = probe.flowBounds.yPt + probe.flowBounds.heightPt;
+    expect(flowEndPt).toBeGreaterThanOrEqual(142.2 + 15.6);
+    expect(flowEndPt).toBeLessThanOrEqual(bottomPt + 1e-6);
+    expect((second!.layers.body[0] as ParagraphLayout).lines[0]!.bounds.yPt).toBeCloseTo(20, 6);
+  });
+
   it('keeps charging DOCX lines their whole advance', () => {
     expect(pageOf(31.2 + 15.65)).toEqual([2, 2]);
     expect(pageOf(31.2 + 31.25)).toEqual([3, 1]);

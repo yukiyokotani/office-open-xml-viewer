@@ -329,6 +329,25 @@ export function libreOfficeProportionalLineAdmittedExtentPt(
   return Math.min(admittedBlockExtentPt, Math.max(admissionExtentPt, availableBlockExtentPt - reservePt));
 }
 
+/** {@link LIBREOFFICE_PROPORTIONAL_LINE_PAGE_FIT}: the part of a fragment's
+ * retained space after that remains inside a flow charge shorter than its
+ * advance. The space after follows the last line's extra space, so the region
+ * bottom (margin or footnote area) cuts it first: content-owned bounds keep
+ * the hanging line, and a following paragraph's spacing collapse cannot rewind
+ * the cursor into that line. Fragments without an overhang keep their whole
+ * retained space after. */
+export function libreOfficeProportionalLineRetainedSpaceAfterPt(
+  fragment: ParagraphLayout,
+  chargePt: number,
+): number {
+  const afterPt = fragment.spacing.afterPt;
+  const lastLine = fragment.lines.at(-1);
+  const mark = lastLine ? undefined : fragment.paragraphMark;
+  const overhangPt = (lastLine ?? mark)?.pageEdgeOverhangPt ?? 0;
+  if (!(overhangPt > 0)) return afterPt;
+  return Math.max(0, Math.min(afterPt, afterPt - (fragment.advancePt - chargePt)));
+}
+
 /** Compatibility projection governed by {@link WORD_TRAILING_SPACE_AFTER_FIT_ADMISSION}. */
 export function wordFinalParagraphAdmissionExtentPt(input: Readonly<{
   advancePt: number;

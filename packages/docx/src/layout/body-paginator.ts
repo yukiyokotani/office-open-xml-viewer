@@ -116,6 +116,7 @@ import {
   sectionContentFirstAppearancePageIndices,
 } from './section-page-identity.js';
 import {
+  libreOfficeProportionalLineRetainedSpaceAfterPt,
   wordFinalParagraphAdmissionExtentPt,
   wordGridLineAdmissionExtentPt,
   wordParagraphFootnoteMayContinue,
@@ -620,6 +621,8 @@ function acceptNode(
     yPt: number;
     sectionFlowOwnership?: 'host-flow' | 'page';
   }>,
+  /** Retained space after still inside `blockExtentPt` (default: all of it). */
+  retainedSpaceAfterPt?: number,
 ): BodyPaginationState {
   const page = state.pages.at(-1);
   if (!page || page.kind !== 'content') throw new Error('Body content requires an active page');
@@ -662,7 +665,7 @@ function acceptNode(
         const contentStartPt = admittedBlockStartPt + ownershipRetained.spacing.beforePt;
         const contentEndPt = admittedBlockStartPt
           + blockExtentPt
-          - ownershipRetained.spacing.afterPt;
+          - (retainedSpaceAfterPt ?? ownershipRetained.spacing.afterPt);
         return Object.freeze({
           ...ownershipRetained,
           flowBounds: Object.freeze({
@@ -2798,6 +2801,9 @@ function* paginateBodyPassSteps(
       // A text-anchored frame takes no flow space, so the next in-flow
       // paragraph collapses its spacing against the text before the frames
       // (WORD_TEXT_FRAME_PRECEDING_TEXT_PUSH).
+      // Space after left inside the last fragment's flow charge, when the
+      // region bottom cut part of it (LIBREOFFICE_PROPORTIONAL_LINE_PAGE_FIT).
+      let cutSpaceAfterPt = 0;
       while (cursor) {
         const fragmentStartKey = paragraphFragmentStartKey(cursor);
         let location = acquisitionLocation(state);
@@ -3180,15 +3186,19 @@ function* paginateBodyPassSteps(
           }));
           pendingFrameRun = null;
         }
+        const chargePt = Math.min(selected.admittedBlockExtentPt, location.availableBounds.heightPt);
+        const retainedSpaceAfterPt = libreOfficeProportionalLineRetainedSpaceAfterPt(selected.fragment, chargePt);
+        cutSpaceAfterPt = selected.fragment.spacing.afterPt - retainedSpaceAfterPt;
         state = acceptPageNode(
           state,
           selected.fragment,
           block.source,
-          Math.min(selected.admittedBlockExtentPt, location.availableBounds.heightPt),
+          chargePt,
           fragmentStartKey,
           acceptedOccurrenceIds,
           allocations,
           acquired.placement,
+          retainedSpaceAfterPt,
         );
         const notes = plannedNotes
           ?? footnoteAdmission(selected.fragment, location.availableBounds.widthPt);
@@ -3211,7 +3221,11 @@ function* paginateBodyPassSteps(
         location = acquisitionLocation(state);
         session.moveAcquisitionCursor(location);
       }
-      if (!block.textFrameMember) previousParagraph = block;
+      if (!block.textFrameMember) {
+        previousParagraph = cutSpaceAfterPt > 0
+          ? Object.freeze({ ...block, spaceAfterPt: Math.max(0, block.spaceAfterPt - cutSpaceAfterPt) })
+          : block;
+      }
     } else {
       previousParagraph = null;
       // Only a paragraph anchors a frame run (ECMA-376 §17.3.1.11).
