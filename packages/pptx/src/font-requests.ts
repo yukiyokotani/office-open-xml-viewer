@@ -103,6 +103,20 @@ export function* pptxSlideTextRuns(slide: Slide): Generator<string> {
   }
 }
 
+/** A character each scoped-substitute script needs in a text to prove it: a
+ * cluster proves a script only by a character whose UAX #24
+ * Script_Extensions include it (core `fontSubstituteScriptClusterClass`). */
+const SUBSTITUTE_SCRIPT_TEXT: Readonly<Record<FontSubstituteScript, RegExp>> = {
+  arabic: /\p{Script_Extensions=Arabic}/u,
+};
+
+/** False when `text` proves no scoped-substitute script, decided without
+ * segmenting it: nearly every run of a deck. True may still prove none. */
+export function mayProveSubstituteScript(text: string): boolean {
+  for (const script of FONT_SUBSTITUTE_SCRIPTS) if (SUBSTITUTE_SCRIPT_TEXT[script].test(text)) return true;
+  return false;
+}
+
 /** Mutable font-source demand facts of an accumulator (see
  * {@link PptxFontDemandFacts}). */
 interface DemandFactState {
@@ -200,7 +214,6 @@ export class PptxFontPreloadAccumulator {
   private proveSubstituteScripts(textBody: TextBody | null | undefined): void {
     const scripts = (this.demand as DemandFactState).scripts;
     const prove = (text: string, families: readonly (string | null | undefined)[]) => {
-      if (!text) return;
       for (const script of FONT_SUBSTITUTE_SCRIPTS) {
         if (!substituteEntryCoversText({ script }, text, 'any')) continue;
         for (const family of families) {
@@ -215,7 +228,7 @@ export class PptxFontPreloadAccumulator {
     };
     for (const paragraph of textBody?.paragraphs ?? []) {
       for (const run of paragraph.runs) {
-        if (run.type !== 'text') continue;
+        if (run.type !== 'text' || !mayProveSubstituteScript(run.text)) continue;
         prove(run.text, [run.fontFamily ?? paragraph.defFontFamily, run.fontFamilyEa, run.fontFamilyCs, run.fontFamilySym]);
       }
       // Synthesized marker text paints with the marker's resolved family
@@ -225,15 +238,20 @@ export class PptxFontPreloadAccumulator {
       // label with its a:buFont, else the first run's family. Field text is
       // the run text above; line breaks and paragraph marks paint no glyph.
       const bullet = paragraph.bullet;
-      if (bullet.type === 'char' && bullet.char
-        && symbolFontToUnicode(bullet.char, bullet.fontFamily ?? null) === bullet.char) {
-        prove(bullet.char, [bullet.fontFamily]);
+      if (bullet.type === 'char') {
+        if (bullet.char && mayProveSubstituteScript(bullet.char)
+          && symbolFontToUnicode(bullet.char, bullet.fontFamily ?? null) === bullet.char) {
+          prove(bullet.char, [bullet.fontFamily]);
+        }
       } else if (bullet.type === 'autoNum') {
-        const firstRunFamily = paragraph.runs.find((run) => run.type === 'text' && !!run.fontFamily);
         // Each scheme labels every counter in one script.
-        prove(formatAutoNum(bullet.startAt ?? 1, bullet.numType), [
-          bullet.fontFamily ?? (firstRunFamily?.type === 'text' ? firstRunFamily.fontFamily : null) ?? paragraph.defFontFamily,
-        ]);
+        const label = formatAutoNum(bullet.startAt ?? 1, bullet.numType);
+        if (mayProveSubstituteScript(label)) {
+          const firstRunFamily = paragraph.runs.find((run) => run.type === 'text' && !!run.fontFamily);
+          prove(label, [
+            bullet.fontFamily ?? (firstRunFamily?.type === 'text' ? firstRunFamily.fontFamily : null) ?? paragraph.defFontFamily,
+          ]);
+        }
       }
     }
   }
@@ -306,17 +324,35 @@ export function slideOfficeFontRequests(
     if (family.startsWith('+mj-')) return majorFont;
     return family.split(',')[0]?.trim() ?? null;
   };
-  const add = (family: string | null | undefined, bold: boolean, italic: boolean) => {
+  // The two requests of one authored (family, bold, italic), computed once: a
+  // slide repeats a few tuples on every run. Each occurrence still writes
+  // both keys, so a later spelling of a name replaces an earlier one as before.
+  type Tuple = readonly [string, OfficeFontFallbackRequest, string, OfficeFontFallbackRequest];
+  const tuples = new Map<string, (Tuple | null | undefined)[]>();
+  const tuple = (family: string, bold: boolean, italic: boolean): Tuple | null => {
     // Every authored face is probed, so layout can admit catalog geometry
     // only for faces proven present (no family-name gate).
     const name = resolved(family);
-    if (!name || CSS_GENERIC_FAMILY_NAMES.has(name.toLowerCase())) return;
+    if (!name || CSS_GENERIC_FAMILY_NAMES.has(name.toLowerCase())) return null;
     const weight = faceWeight(name, bold, italic);
     const style = italic ? 'italic' : 'normal';
-    requests.set(`${name.toLowerCase()}:${weight}:${style}`, { family: name, weight, style });
-    // Family presence is probed independently of the styled tuples a slide
-    // uses, so an installed regular-only family stays present for bold runs.
-    requests.set(`presence:${name.toLowerCase()}`, { family: name, presenceOnly: true });
+    return [
+      `${name.toLowerCase()}:${weight}:${style}`, { family: name, weight, style },
+      // Family presence is probed independently of the styled tuples a slide
+      // uses, so an installed regular-only family stays present for bold runs.
+      `presence:${name.toLowerCase()}`, { family: name, presenceOnly: true },
+    ];
+  };
+  const add = (family: string | null | undefined, bold: boolean, italic: boolean) => {
+    if (!family) return;
+    let styles = tuples.get(family);
+    if (!styles) tuples.set(family, styles = []);
+    const index = (bold ? 2 : 0) + (italic ? 1 : 0);
+    let entry = styles[index];
+    if (entry === undefined) styles[index] = entry = tuple(family, bold, italic);
+    if (!entry) return;
+    requests.set(entry[0], entry[1]);
+    requests.set(entry[2], entry[3]);
   };
   const body = (textBody: TextBody | null | undefined) => {
     for (const paragraph of textBody?.paragraphs ?? []) {
