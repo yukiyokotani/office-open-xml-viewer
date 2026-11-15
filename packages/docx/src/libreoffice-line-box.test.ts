@@ -151,12 +151,22 @@ describe('LIBREOFFICE_PROPORTIONAL_LINE_PAGE_FIT', () => {
 
   it('keeps a line whose natural line fits, its extra space hanging below the margin', () => {
     // Probe takes its full 31.2 pt advance; Next needs its natural 15.6 pt.
-    expect(pageOf(31.2 + 15.6, LIBREOFFICE)).toEqual([3, 1]);
+    expect(pageOf(31.2 + 15.65, LIBREOFFICE)).toEqual([3, 1]);
     expect(pageOf(31.2 + 15.5, LIBREOFFICE)).toEqual([2, 2]);
   });
 
+  it('gives an empty paragraph the allowance of a text line', () => {
+    // The empty line (31.2 pt advance) stays when its 15.6 pt natural line
+    // fits: After then starts page 2.
+    const layout = (room: number) => layoutBodyModel([filler(160 - room), para([], auto(2)), para([run('After')])],
+      section(), linearCtx(), {}, LIBREOFFICE, { 'gap face': GAP_FACE }).pages
+      .map((page) => page.layers.body.filter((node) => node.kind === 'paragraph').length);
+    expect(layout(15.65)).toEqual([2, 1]);
+    expect(layout(15.5)).toEqual([1, 2]);
+  });
+
   it('keeps charging DOCX lines their whole advance', () => {
-    expect(pageOf(31.2 + 15.6)).toEqual([2, 2]);
-    expect(pageOf(31.2 + 31.2)).toEqual([3, 1]);
+    expect(pageOf(31.2 + 15.65)).toEqual([2, 2]);
+    expect(pageOf(31.2 + 31.25)).toEqual([3, 1]);
   });
 });

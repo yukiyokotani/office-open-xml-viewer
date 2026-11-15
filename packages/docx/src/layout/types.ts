@@ -710,6 +710,8 @@ export interface ParagraphMarkLayout {
   readonly hidden: boolean;
   readonly wrapBounds?: LayoutRect;
   readonly bounds: LayoutRect;
+  /** LineLayout.pageEdgeOverhangPt of the empty paragraph's mark line. */
+  readonly pageEdgeOverhangPt?: number;
 }
 
 export interface LineNumberPaintOperation {

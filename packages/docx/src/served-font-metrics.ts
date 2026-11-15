@@ -1,4 +1,4 @@
-import type { ResolvedFontMetric } from '@silurus/ooxml-core';
+import type { OpenTypeLineMetrics, ResolvedFontMetric } from '@silurus/ooxml-core';
 import {
   fontFamilyKey,
   instanceOpenTypeLineMetrics,
@@ -16,6 +16,27 @@ import {
   sourceFontResourceIdentity,
   wordResourceLineMetric,
 } from './source-font-metrics.js';
+
+/** The instance a LIBREOFFICE_FONT_LINE_BOX normal line is read from. With
+ * USE_TYPO_METRICS it reads the OS/2 typo values, which MVAR may vary with
+ * optical size (hasc/hdsc/hlgp); such a face has no size-free normal line. */
+function normalLineInstance(
+  tables: OpenTypeLineMetrics, instance: OpenTypeLineMetrics,
+  weight: number, range: readonly [number, number], style: Style,
+): OpenTypeLineMetrics | undefined {
+  if (!instance.useTypoMetrics) return instance;
+  return instanceOpenTypeLineMetrics(tables, {
+    wght: clamp(weight, range), ital: style === 'italic' ? 1 : 0,
+  }, ['hasc', 'hdsc', 'hlgp']) ?? undefined;
+}
+
+function servedNormalLine(
+  tables: OpenTypeLineMetrics, instance: OpenTypeLineMetrics,
+  weight: number, range: readonly [number, number], style: Style,
+): ReturnType<typeof openTypeNormalLine> | Record<string, never> {
+  const normal = normalLineInstance(tables, instance, weight, range, style);
+  return (normal && openTypeNormalLine(normal)) ?? {};
+}
 
 // The served faces' part of sourceFontLineMetrics (source-font-metrics.ts,
 // whose comment states the rules): loaded only with the font-source session
@@ -141,7 +162,9 @@ export function servedFontLineMetrics(
           if (!instance?.unicodeRanges) return undefined;
           const unicodeRanges = Object.freeze(intersectRanges(normalizedRanges(declared), normalizedRanges(instance.unicodeRanges)));
           if (!line || instance.farEastCodePage == null) {
-            return libreOfficeLineBoxes ? libreOfficeOnlyLineMetric(instance, unicodeRanges) : undefined;
+            const normalInstance = libreOfficeLineBoxes
+              ? normalLineInstance(face.resourceMetrics, instance, weight, range, faceStyle) : undefined;
+            return normalInstance ? libreOfficeOnlyLineMetric(normalInstance, unicodeRanges) : undefined;
           }
           return {
             // The parsed class, as the installed-face catalogue carries it
@@ -150,7 +173,7 @@ export function servedFontLineMetrics(
             lineHeightRatio: line.lineHeightRatio,
             designAscentRatio: line.designAscentRatio,
             designDescentRatio: line.designDescentRatio,
-            ...openTypeNormalLine(instance),
+            ...(libreOfficeLineBoxes ? servedNormalLine(face.resourceMetrics, instance, weight, range, faceStyle) : {}),
             unicodeRanges,
             ...(instance.hasEastAsianCmap ? { eastAsianLineHeightRatio: line.lineHeightRatio } : {}),
           };

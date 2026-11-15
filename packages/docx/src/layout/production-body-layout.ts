@@ -146,7 +146,7 @@ import {
 import { paragraphGapAdjustment } from './paragraph-spacing.js';
 import { bottomBorderExtentPt, resolveParagraphBorderEdges, topBorderExtentPt, type ParagraphBorderEdges } from './paragraph-border-adjacency.js';
 import { acquireParagraphResult, acquireRetainedFrameGroup, bodyFrameGroupFor, bodyParagraphBorderEdgesFor, projectPhysicalAnchorResult, retainedFrameMaximumBaselineLoweringPt, sliceParagraphLayout, type BodyFrameGroup } from './paragraph.js';
-import { wordLoweredDropCapAnchorLeadingPt } from './body-pagination-compatibility.js';
+import { libreOfficeProportionalLineAdmissionExtentPt, wordLoweredDropCapAnchorLeadingPt } from './body-pagination-compatibility.js';
 import { wordGridFrameCarrierSourceOwnsNoFlow } from './table-compatibility.js';
 import type { CompleteTextBoxStoryAcquirer } from './paragraph.js';
 import type { AnchorFloatRegistrationState, BodyAcquisitionState, BodyMeasurementContext, CompleteTextBoxStoryOwner, PhysicalAnchorFrame, RetainedTableRecord } from './acquisition-context.js';
@@ -1829,7 +1829,12 @@ function measureBodyParagraphEntry(
         }),
     ...(measured.markOnly
       ? {
-          markBelowBaselinePt: measured.lastLineBelowBaselinePt,
+          // LIBREOFFICE_PROPORTIONAL_LINE_PAGE_FIT gives a LibreOffice
+          // producer's empty line the allowance of a text line instead of
+          // Word's below-baseline empty-mark allowance (an empty 13.79 pt
+          // Liberation Serif line needs 13.78 pt at 100% and 200%).
+          markBelowBaselinePt: services.text?.libreOfficeLineBoxes === true && !markOnLineGrid
+            ? 0 : measured.lastLineBelowBaselinePt,
           markOnLineGrid,
           // The page-margin observation grants no allowance through floats.
           // A wrapped mark keeps its complete cell, as plain text does, and
@@ -2259,7 +2264,7 @@ function measureFollowingBodyBlock(
     // hang below the page bottom as when it is the last line placed there.
     const leadLineBoxExtentPt = firstLine
       ? firstLine.bounds.yPt + firstLine.advancePt - (firstLine.pageEdgeOverhangPt ?? 0) - layout.flowBounds.yPt
-      : layout.advancePt;
+      : libreOfficeProportionalLineAdmissionExtentPt(layout, layout.advancePt);
     return Object.freeze({
       fullExtentPt: layout.advancePt,
       // keepNext admits the successor's first content line, including

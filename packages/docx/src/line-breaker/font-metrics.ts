@@ -2,7 +2,7 @@ import type { CanvasFontRoute, ResolvedFontMetric } from '@silurus/ooxml-core';
 import { localFontMetricCoversText, normalizeFontMetricFamily } from '@silurus/ooxml-core';
 import type { FontResolution } from '../layout/font-service.js';
 import type { TextLayoutService } from '../layout/text.js';
-import { familyLibreOfficeLineMetrics, referenceFontLineMetrics, type FontLineBoxProjection, type ReferenceFontLineMetrics } from '../reference-font-line-metrics.js';
+import { referenceFontLineMetrics, type FontLineBoxProjection, type ReferenceFontLineMetrics } from '../reference-font-line-metrics.js';
 import { LIBRARY_SYNTHESIZED_FACE_LINE_GEOMETRY, libreOfficeLineBox } from '../layout/line-compatibility.js';
 
 /** The projection of a producer's line boxes: grid-snapped lines of a
@@ -100,10 +100,6 @@ export function authoredReferenceVerticalMetric(
 ): ReferenceFontLineMetrics | undefined {
   void LIBRARY_SYNTHESIZED_FACE_LINE_GEOMETRY;
   const exact = referenceFontLineMetrics(selected.requestedFamily, selected.weight, selected.style, projection);
-  // LIBREOFFICE_FONT_LINE_BOX needs only the family's shared box.
-  if (!exact && projection === 'libreoffice' && selected.source === 'native' && selected.installedFamily === true) {
-    return familyLibreOfficeLineMetrics(selected.requestedFamily);
-  }
   if (exact || !synthesis?.text.sameGlyphRaster
     || selected.source !== 'native' || selected.installedFamily !== true) return exact;
   const faces = synthesis.text.exactLocalFaces?.(selected.requestedFamily) ?? [];

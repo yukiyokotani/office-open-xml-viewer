@@ -34,4 +34,9 @@ describe('LIBREOFFICE_FONT_LINE_BOX catalog projection', () => {
     expect(box!.lineHeightRatio * 12).toBeCloseTo(pitchPt, 1);
     expect(box!.designAscentRatio + box!.designDescentRatio).toBeCloseTo(box!.lineHeightRatio, 9);
   });
+
+  it('needs no OS/2 code-page class, which only Word\'s projection reads', () => {
+    expect(referenceFontLineMetrics('Courier')).toBeUndefined();
+    expect(referenceFontLineMetrics('Courier', 400, 'normal', 'libreoffice')?.lineHeightRatio).toBeGreaterThan(0);
+  });
 });

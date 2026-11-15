@@ -106,7 +106,8 @@ function project(profile: ReferenceFontMetricProfile, projection: FontLineBoxPro
     ...(profile.win ? { win: profile.win } : {}),
     ...(profile.typoMetrics ? { typo: profile.typoMetrics } : {}),
   }) : undefined;
-  const projected = profile.farEastCodePage == null ? null : normal ? libreOfficeLineBox(normal) : wordOpenTypeAutoLineRatios({
+  // LIBREOFFICE_FONT_LINE_BOX reads hhea alone, so it needs no OS/2 class.
+  const projected = normal ? libreOfficeLineBox(normal) : profile.farEastCodePage == null ? null : wordOpenTypeAutoLineRatios({
     unitsPerEm: profile.unitsPerEm,
     hheaAscent: profile.hhea[0],
     hheaDescent: profile.hhea[1],
@@ -190,33 +191,6 @@ export function referenceFontLineMetrics(
 ): ReferenceFontLineMetrics | undefined {
   return identicalProjection(preferredProfiles(family, weight, style), projection);
 }
-
-/** LIBREOFFICE_FONT_LINE_BOX geometry of an installed family whose
- * requested tuple has no catalog profile (Hiragino Mincho ProN is catalogued
- * at W3 and W6 only, and CSS matching paints W3 for weight 400): every
- * catalogued face of the family in its preferred source group, whatever its
- * weight or style, must give the same box, so the box does not depend on
- * which of them paints. */
-export function familyLibreOfficeLineMetrics(
-  family: string | null | undefined,
-): ReferenceFontLineMetrics | undefined {
-  if (!family?.trim()) return undefined;
-  if (familyLineMemo.has(family)) return familyLineMemo.get(family) ?? undefined;
-  let result: ReferenceFontLineMetrics | undefined;
-  for (const sources of [['office-mac'], ['macos-system', 'macos-supplemental'], ['published-open-font']] as const) {
-    const profiles = sources.flatMap((source) => findReferenceFontMetrics(family, { source }));
-    if (profiles.length > 0) {
-      result = identicalProjection(profiles, 'libreoffice');
-      break;
-    }
-  }
-  familyLineMemo.set(family, result ?? null);
-  if (familyLineMemo.size > preferredProfilesMemoLimit) {
-    familyLineMemo.delete(familyLineMemo.keys().next().value as string);
-  }
-  return result;
-}
-const familyLineMemo = new Map<string, ReferenceFontLineMetrics | null>();
 
 /** Metadata-only OS/2 average width for a native face selected by Canvas.
  * The caller must apply the same native-route gate as vertical references;

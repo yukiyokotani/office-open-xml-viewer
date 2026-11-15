@@ -199,7 +199,7 @@ export async function loadEmbeddedFonts(
                 lineHeightRatio: line.lineHeightRatio,
                 designAscentRatio: line.designAscentRatio,
                 designDescentRatio: line.designDescentRatio,
-                ...openTypeNormalLine(openType!),
+                ...(libreOfficeLineBoxes ? openTypeNormalLine(openType!) : {}),
               } : libreOfficeOnly ?? {}),
               ...(openType?.averageCharWidthRatio == null ? {} : {
                 averageCharWidthRatio: openType.averageCharWidthRatio,

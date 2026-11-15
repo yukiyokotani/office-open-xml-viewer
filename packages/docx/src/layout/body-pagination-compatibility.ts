@@ -285,7 +285,7 @@ export const LIBREOFFICE_PROPORTIONAL_LINE_PAGE_FIT = defineCompatibilityRule({
     version: '26.8.2.2',
     platform: 'macOS (headless PDF export)',
   },
-  description: 'A producer laying lines out as LibreOffice does (DocumentSettings.__libreOfficeLineBoxes; DOCX never sets it) keeps a line with proportional spacing on a page when its natural line (LIBREOFFICE_FONT_LINE_BOX, before the multiple) fits above the bottom of the text area; the multiple\'s extra space below it may extend past the margin, and the next line starts the next page. Evidence: odt-proportional-line-page-fit controls, A4 with 2 cm margins (text area bottom 785.20 pt), a filler paragraph whose spacing after was bisected to 0.02 pt, then a probe paragraph of 1, 2 or 3 lines (manual line breaks, no widow or orphan control) at 100, 120, 150, 200 and 300%: in 12 pt Liberation Serif (natural line 13.79 pt) the last line kept on the first page starts at most 13.78 pt above the bottom for every multiple (771.41 pt), the first of two lines at 120/150/200/300% leaves 30.34/34.49/41.38/55.19 pt (its full advance plus one natural line), and the middle line of three lines follows the same rule (743.82 and 730.01 pt at 200 and 300%); in 12 pt Hiragino Sans the single line keeps 18.00 pt (its natural line with the 0.5 em gap) at 100 to 300%. The line that moves starts the next page at its top. Only proportional multiples above 100% on unsnapped lines are covered; other trailing extents keep their own admission rules.',
+  description: 'A producer laying lines out as LibreOffice does (DocumentSettings.__libreOfficeLineBoxes; DOCX never sets it) keeps a line with proportional spacing on a page when its natural line (LIBREOFFICE_FONT_LINE_BOX, before the multiple) fits above the bottom of the text area; the multiple\'s extra space below it may extend past the margin, and the next line starts the next page. Evidence: odt-proportional-line-page-fit controls, A4 with 2 cm margins (text area bottom 785.20 pt), a filler paragraph whose spacing after was bisected to 0.02 pt, then a probe paragraph of 1, 2 or 3 lines (manual line breaks, no widow or orphan control) at 100, 120, 150, 200 and 300%: in 12 pt Liberation Serif (natural line 13.79 pt) the last line kept on the first page starts at most 13.78 pt above the bottom for every multiple (771.41 pt), the first of two lines at 120/150/200/300% leaves 30.34/34.49/41.38/55.19 pt (its full advance plus one natural line), and the middle line of three lines follows the same rule (743.82 and 730.01 pt at 200 and 300%); in 12 pt Hiragino Sans the single line keeps 18.00 pt (its natural line with the 0.5 em gap) at 100 to 300%. An empty paragraph needs its natural line too, also at 100% (an empty 12 pt Liberation Serif paragraph stays with 13.78 pt left at 100 and 200%), so Word\'s below-baseline empty-mark allowance does not apply. The line that moves starts the next page at its top. Only proportional multiples above 100% on unsnapped lines are covered; other trailing extents keep their own admission rules.',
 });
 
 /** {@link LIBREOFFICE_PROPORTIONAL_LINE_PAGE_FIT}: the fit extent of a
@@ -297,9 +297,13 @@ export function libreOfficeProportionalLineAdmissionExtentPt(
   logicalLineBoxExtentPt: number,
 ): number {
   const lastLine = fragment.lines.at(-1);
-  const overhangPt = lastLine?.pageEdgeOverhangPt ?? 0;
-  if (!lastLine || !(overhangPt > 0)) return logicalLineBoxExtentPt;
-  const lineEndPt = lastLine.bounds.yPt + lastLine.advancePt - fragment.flowBounds.yPt;
+  // An empty paragraph's mark line has the same allowance.
+  const mark = lastLine ? undefined : fragment.paragraphMark;
+  const overhangPt = (lastLine ?? mark)?.pageEdgeOverhangPt ?? 0;
+  if (!(overhangPt > 0)) return logicalLineBoxExtentPt;
+  const lineEndPt = lastLine
+    ? lastLine.bounds.yPt + lastLine.advancePt - fragment.flowBounds.yPt
+    : mark!.bounds.yPt + mark!.bounds.heightPt - fragment.flowBounds.yPt;
   if (logicalLineBoxExtentPt > lineEndPt + 1e-6) return logicalLineBoxExtentPt;
   return Math.max(0, Math.min(logicalLineBoxExtentPt, lineEndPt - overhangPt));
 }

@@ -7546,6 +7546,8 @@ function projectAcquiredParagraph(
     ...(anchorResults.length ? { anchorFrames: anchorResults } : {}),
     paragraphMark: measured.markOnly ? {
       ...(measured.markWrapBounds ? { wrapBounds: measured.markWrapBounds } : {}),
+      ...((measured.markPageEdgeOverhangPt ?? 0) > 0
+        ? { pageEdgeOverhangPt: measured.markPageEdgeOverhangPt } : {}),
       hidden: paragraph.markVanish === true,
       bounds: { xPt: paragraphXPt, yPt: measured.contentStartYPt, widthPt: 0, heightPt: contentHeightPt },
     } : undefined,
