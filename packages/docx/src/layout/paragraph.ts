@@ -2,7 +2,7 @@ import { closingPairScopeApplies } from '../line-breaker/closing-pair-advance.js
 import { hasNativeUnitReceipt, hasNativeVisiblePrefix } from '../line-breaker/native-unit-contract.js';
 import { prepareSourceSpaceCells, type SourceSpaceCells } from './source-space-cells.js';
 import { hasRtlDecimalTabCapability } from '../line-breaker/tabs.js';
-import { wordLineEndJustification } from './line-compatibility.js';
+import { LIBREOFFICE_FONT_LINE_BOX, wordLineEndJustification } from './line-compatibility.js';
 import { compatOf, DEFAULT_DOCX_COMPAT_PROFILE, docxCompatProfileKey, type DocxCompatProfile } from './compat-profile.js';
 import {
   countedSpacingAdvance,
@@ -2818,10 +2818,19 @@ function measuredRubyLine(raw: MeasuredParagraph['lines'][number]['layout']): bo
 function plannedBaselinePt(
   measuredLine: MeasuredParagraph['lines'][number],
   context: ParagraphLayoutContext,
+  libreOfficeLineBoxes = false,
 ): number {
   const raw = measuredLine.layout;
   // `word-mixed-anchor-visible-line-metrics`
   const visibleAscentPt = raw.visibleAscent ?? raw.ascent;
+  // LIBREOFFICE_FONT_LINE_BOX: an unsnapped single or proportional line
+  // keeps its text at the line top; every extra space (line gap, a larger
+  // intended single line, the proportional multiple) lies below it.
+  if (libreOfficeLineBoxes && !context.lineGrid.active
+    && (!context.lineSpacing || (context.lineSpacing.rule === 'auto' && context.lineSpacing.value >= 1))) {
+    void LIBREOFFICE_FONT_LINE_BOX;
+    return measuredLine.topYPt + visibleAscentPt;
+  }
   const visibleDescentPt = raw.visibleDescent ?? raw.descent;
   const visibleNaturalPt = visibleAscentPt + visibleDescentPt;
   // Windows Word 16.0 #1885 controls: ruby lines under automatic multiples
@@ -3949,21 +3958,26 @@ function planMeasuredLines(
     // space above the text, so the baseline sits the text's descent above the
     // line box's bottom; a fixed line puts its baseline four fifths of the
     // way down the line box, whatever the text's own metrics
-    // (SwTextFormatter::CalcRealHeight, SvxLineSpaceRule::Fix).
+    // (SwTextFormatter::CalcRealHeight, SvxLineSpaceRule::Fix). A
+    // proportional line below 100% is placed as a fixed line of its own
+    // shrunk height (SvxInterLineSpaceRule::Prop).
     const extraAboveLine = (paragraph as { readonly __lineExtraAbove?: boolean }).__lineExtraAbove === true
-      && (context.lineSpacing?.rule === 'exact' || context.lineSpacing?.rule === 'atLeast')
+      && (context.lineSpacing?.rule === 'exact' || context.lineSpacing?.rule === 'atLeast'
+        || (context.lineSpacing?.rule === 'auto' && context.lineSpacing.value < 1))
       && raw.topY === undefined;
     const baselinePt = extraAboveLine
       ? context.lineSpacing!.rule === 'exact'
         ? measuredLine.topYPt + context.lineSpacing!.value * 4 / 5
-        : measuredLine.topYPt + measuredLine.advancePt - (raw.visibleDescent ?? raw.descent)
+        : context.lineSpacing!.rule === 'auto'
+          ? measuredLine.topYPt + measuredLine.advancePt * 4 / 5
+          : measuredLine.topYPt + measuredLine.advancePt - (raw.visibleDescent ?? raw.descent)
       : specified
       ? measuredLine.topYPt + specified.baselineOffsetPt
       : exactRubyLine
         ? measuredLine.topYPt + context.lineSpacing!.value * 4 / 5
         : atLeastRubyLine
           ? measuredLine.topYPt + measuredLine.advancePt - (raw.visibleDescent ?? raw.descent)
-          : plannedBaselinePt(measuredLine, context);
+          : plannedBaselinePt(measuredLine, context, textService?.libreOfficeLineBoxes === true);
     let lineStartOffset = Number.POSITIVE_INFINITY;
     let lineEndOffset = sourceOffset;
     const segments: MeasuredLinePlanSegment[] = [];
@@ -4236,6 +4250,16 @@ function planMeasuredLines(
       raw.intendedSingle, raw.eastAsian, raw.gridCountSingle, undefined,
       raw.uniformPositionAuto, raw.inlinePictureTextSingle, raw.latinGridCountSingle,
     ) : measuredLine.advancePt;
+    // LIBREOFFICE_PROPORTIONAL_LINE_PAGE_FIT: an unsnapped proportional
+    // line of a LibreOffice producer needs only its natural line at a page
+    // bottom; the multiple's extra space may hang below it.
+    const pageEdgeOverhangPt = !context.lineGrid.active && textService?.libreOfficeLineBoxes === true
+      && context.lineSpacing?.rule === 'auto' && context.lineSpacing.value > 1
+      ? Math.max(0, measuredLine.advancePt - lineBoxHeight(
+        null, raw.ascent, raw.descent, 1, undefined, context.hasRuby, raw.intendedSingle,
+        raw.eastAsian, raw.gridCountSingle,
+      ))
+      : 0;
     const retained = context.lineGrid.active ? sealLineCopy({
       ...planned,
       gridAfterLeadingPt: allowsGridLeadingOverhang ? Math.max(0, Math.min(
@@ -4243,7 +4267,9 @@ function planMeasuredLines(
         measuredLine.topYPt + measuredLine.advancePt
           - baselinePt - (raw.visibleDescent ?? raw.descent),
       )) : 0,
-    }, [planned]) : planned;
+    }, [planned]) : pageEdgeOverhangPt > 0
+      ? sealLineCopy({ ...planned, pageEdgeOverhangPt }, [planned])
+      : planned;
     return raw.availWidth !== undefined && (raw.availWidth < availableWidthPt || (raw.xOffset ?? 0) !== 0)
       ? sealLineCopy({ ...retained, wrapBounds: {
           xPt: paragraphXPt + (raw.xOffset ?? 0) + (lineIndex === 0 ? Math.min(0, context.firstIndentPt) : 0),

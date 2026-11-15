@@ -3,7 +3,13 @@ import {
   findReferenceFontMetrics,
   type ReferenceFontMetricProfile,
 } from '@silurus/ooxml-core';
-import { wordOpenTypeAutoLineRatios } from './layout/line-compatibility.js';
+import { libreOfficeLineBox, libreOfficeNormalLine, wordOpenTypeAutoLineRatios } from './layout/line-compatibility.js';
+
+/** How a face's tables become a line box: Word's projection (OOXML), the
+ * plain hhea box of a producer's grid-snapped lines (`plainLineBoxes`), or
+ * LIBREOFFICE_FONT_LINE_BOX for a producer's unsnapped lines
+ * (`libreOfficeLineBoxes`). */
+export type FontLineBoxProjection = 'word' | 'plain' | 'libreoffice';
 
 export interface ReferenceFontLineMetrics {
   readonly lineHeightRatio: number;
@@ -13,8 +19,9 @@ export interface ReferenceFontLineMetrics {
   readonly eastAsianLineHeightRatio?: undefined;
 }
 
-const projectedProfiles = new WeakMap<object, ReferenceFontLineMetrics | null>();
-const plainProfiles = new WeakMap<object, ReferenceFontLineMetrics | null>();
+const projectedProfiles: Record<FontLineBoxProjection, WeakMap<object, ReferenceFontLineMetrics | null>> = {
+  word: new WeakMap(), plain: new WeakMap(), libreoffice: new WeakMap(),
+};
 
 // Layout asks for the same few (family, weight, style) tuples for every text
 // segment. The answer is a pure function of the immutable generated catalog,
@@ -86,13 +93,20 @@ export function referenceFontDecorationMetrics(
   return geometry;
 }
 
-function project(profile: ReferenceFontMetricProfile, plain = false): ReferenceFontLineMetrics | null {
-  const cache = plain ? plainProfiles : projectedProfiles;
+function project(profile: ReferenceFontMetricProfile, projection: FontLineBoxProjection = 'word'): ReferenceFontLineMetrics | null {
+  const cache = projectedProfiles[projection];
   const retained = cache.get(profile);
   if (retained !== undefined) return retained;
+  const plain = projection === 'plain';
   // The catalog cannot prove the installed/painted face. Its class is used
   // only as vertical reference geometry, and unknown OS/2 data is declined.
-  const projected = profile.farEastCodePage == null ? null : wordOpenTypeAutoLineRatios({
+  const normal = projection === 'libreoffice' ? libreOfficeNormalLine({
+    unitsPerEm: profile.unitsPerEm,
+    hhea: profile.hhea,
+    ...(profile.win ? { win: profile.win } : {}),
+    ...(profile.typoMetrics ? { typo: profile.typoMetrics } : {}),
+  }) : undefined;
+  const projected = profile.farEastCodePage == null ? null : normal ? libreOfficeLineBox(normal) : wordOpenTypeAutoLineRatios({
     unitsPerEm: profile.unitsPerEm,
     hheaAscent: profile.hhea[0],
     hheaDescent: profile.hhea[1],
@@ -119,9 +133,9 @@ function project(profile: ReferenceFontMetricProfile, plain = false): ReferenceF
 
 function identicalProjection(
   profiles: readonly ReferenceFontMetricProfile[],
-  plain = false,
+  projection: FontLineBoxProjection = 'word',
 ): ReferenceFontLineMetrics | undefined {
-  const projected = profiles.map((profile) => project(profile, plain));
+  const projected = profiles.map((profile) => project(profile, projection));
   const first = projected[0];
   if (!first || projected.some((candidate) => !candidate
     || candidate.farEastCodePage !== first.farEastCodePage
@@ -172,10 +186,37 @@ export function referenceFontLineMetrics(
   family: string | null | undefined,
   weight = 400,
   style: 'normal' | 'italic' = 'normal',
-  plain = false,
+  projection: FontLineBoxProjection = 'word',
 ): ReferenceFontLineMetrics | undefined {
-  return identicalProjection(preferredProfiles(family, weight, style), plain);
+  return identicalProjection(preferredProfiles(family, weight, style), projection);
 }
+
+/** LIBREOFFICE_FONT_LINE_BOX geometry of an installed family whose
+ * requested tuple has no catalog profile (Hiragino Mincho ProN is catalogued
+ * at W3 and W6 only, and CSS matching paints W3 for weight 400): every
+ * catalogued face of the family in its preferred source group, whatever its
+ * weight or style, must give the same box, so the box does not depend on
+ * which of them paints. */
+export function familyLibreOfficeLineMetrics(
+  family: string | null | undefined,
+): ReferenceFontLineMetrics | undefined {
+  if (!family?.trim()) return undefined;
+  if (familyLineMemo.has(family)) return familyLineMemo.get(family) ?? undefined;
+  let result: ReferenceFontLineMetrics | undefined;
+  for (const sources of [['office-mac'], ['macos-system', 'macos-supplemental'], ['published-open-font']] as const) {
+    const profiles = sources.flatMap((source) => findReferenceFontMetrics(family, { source }));
+    if (profiles.length > 0) {
+      result = identicalProjection(profiles, 'libreoffice');
+      break;
+    }
+  }
+  familyLineMemo.set(family, result ?? null);
+  if (familyLineMemo.size > preferredProfilesMemoLimit) {
+    familyLineMemo.delete(familyLineMemo.keys().next().value as string);
+  }
+  return result;
+}
+const familyLineMemo = new Map<string, ReferenceFontLineMetrics | null>();
 
 /** Metadata-only OS/2 average width for a native face selected by Canvas.
  * The caller must apply the same native-route gate as vertical references;

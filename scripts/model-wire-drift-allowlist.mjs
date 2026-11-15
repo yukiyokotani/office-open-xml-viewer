@@ -162,6 +162,7 @@ export const MODEL_WIRE_DRIFT_ALLOWLIST = {
     'Document(ts DocxDocumentModel).__pageLayoutSettings: missing-in-ts': 'internal channel',
     'Document(ts DocxDocumentModel).__pageObjects: missing-in-ts': 'internal channel',
     'DocumentSettings(ts DocSettings).__footnoteColumnBands: missing-in-ts': 'internal channel',
+    'DocumentSettings(ts DocSettings).__libreOfficeLineBoxes: missing-in-ts': 'internal channel',
     'DocumentSettings(ts DocSettings).__plainFontLineBoxes: missing-in-ts': 'internal channel',
     'FieldRun<type=field>.__typographyAcquisition: missing-in-ts': 'internal channel',
     'FramePr.__anchorLock: missing-in-ts': 'internal channel',

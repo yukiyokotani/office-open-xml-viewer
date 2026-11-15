@@ -2,6 +2,7 @@ import { isCjkBreakChar } from '@silurus/ooxml-core';
 import { defineCompatibilityRule } from './compatibility.js';
 import type { DocxCompatProfile } from './compat-profile.js';
 import { OFFICE_FAR_EAST_SINGLE_LINE_FACTOR, officeOpenTypeAutoLineRatios } from '@silurus/ooxml-core/internal/office-auto-line';
+import type { OpenTypeLineMetrics } from '@silurus/ooxml-core';
 import type { LineSpacing, TabStop } from '../types.js';
 import type { ParagraphLayoutSource } from './text.js';
 
@@ -109,6 +110,67 @@ export const LIBRARY_SYNTHESIZED_FACE_LINE_GEOMETRY = defineCompatibilityRule({
   },
   description: 'Library evidence boundary (user decision 2026-10-18, issue #1848): the reference catalog holds some installed faces only at weight 400 (MS Mincho, for example), so a bold or italic run of such a family resolves to a native route without a catalog tuple. Catalog absence does not show that the host synthesizes the tuple: a genuine styled face may exist with different vertical tables, and Canvas cannot expose OS/2 usWin, which the Far-East 1.3 x usWin line needs. Instead the span is proved to paint a loaded face. Each installed Office face loaded through an exact local() name sits under a private family holding only that FontFace, so by CSS Fonts Level 4 section 5.2 font matching any weight/style request to that family selects it and the browser synthesizes the missing bold/oblique from it. Fixed probe glyphs of the span\'s script class (国あ for East Asian text, Hxg otherwise; 64px) are rasterized once per route and tuple through the native route and through that private family on this realm\'s Canvas. Every grapheme of the span and of the probe must also be owned by that exact source, shown by zero advance through its size-adjust:0% registration (the #1842 coverage probe, loaded for regular faces whose catalog family lacks a bold or italic face), since CSS font matching still falls back per glyph. Pixel-identical non-empty rasters of owned glyphs prove the native route paints the same synthesized face, so the catalog geometry of the CSS-matched loaded tuple applies, including its Far-East projection. Any raster or advance difference (a genuine styled face, another file, glyphs from a fallback face) is no proof and the span keeps its own Canvas box, as before. Main thread and worker each rasterize with their own Canvas and FontFaceSet over the same host fonts. Residual risk: a genuine styled face whose glyphs are pixel-identical to the synthesized regular face but whose vertical tables differ. Scope: only the span\'s own painted face and its paragraph mark are proved; an anchor host (the floating-object anchor character) and the East Asian floor of a run painted in another slot are not, because a Word-exported page keeps a bold Latin heading\'s line when its East Asian slot names a regular-only face.',
 });
+
+export const LIBREOFFICE_FONT_LINE_BOX = defineCompatibilityRule({
+  id: 'libreoffice-font-line-box',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'odt-font-line-box',
+    application: 'LibreOffice',
+    version: '26.8.2.2',
+    platform: 'macOS (headless PDF export)',
+  },
+  description: 'Producer line boxes of a model source laid out as LibreOffice lays lines out (DocumentSettings.__libreOfficeLineBoxes; DOCX never sets it, and ODF does not define line metrics). A line not snapped to a line grid takes each face\'s own normal line: the hhea ascender above the baseline and the hhea descender plus the whole hhea line gap below it, with OS/2 sTypo values when fsSelection USE_TYPO_METRICS is set and usWin values without a gap when hhea is empty (vcl FontMetricData::ImplCalcLineSpacing). The line\'s ascent and descent are the largest of its runs\', so the text is pinned to the line top and a proportional multiple scales that whole box, adding its extra space below. No Far East 1.3 x usWin box applies. Evidence: odt-font-line-box controls, 12 pt text on a 200 x 200 pt page with 20 pt margins, paragraphs "One", "Two", a 6 pt + 24 pt line, "あいう" and "Five": Hiragino Sans W4 (hhea 880/-120/500) baselines 30.55, 48.55 (pitch 18.00 = 1.5 em, where Word\'s Far East box gives 19.61), mixed-line baseline 77.10 (24 pt ascent above the 12 pt line\'s 0.62 em below); Hiragino Mincho ProN and Hiragino Sans GB identical; Meiryo (hhea 2171/-901/0, Word 1.95 em) baseline 32.70 and pitch 18.00; MS Mincho (220/-36/0 per 256, Word 1.3 em) baseline 30.30 and pitch 12.00, also unsnapped on a page with a line grid; Liberation Serif and Times New Roman baseline 30.70, pitch 13.80 (the 0.51 pt gap below the text, where Word puts it above); Arial baseline 30.85, pitch 13.80. At 200% the Hiragino Sans baseline stays 10.55 pt below the line top and the pitch is 36 pt; at least 30 pt puts the baseline the descent plus line gap (7.45 pt) above the line bottom. Grid-snapped lines keep the plain projection of the grid rule.',
+});
+
+/** A face's own normal line, LIBREOFFICE_FONT_LINE_BOX: em ratios of the
+ * ascent above the baseline, the descent below it and the line gap. Inputs are
+ * design units; `typo` is given only when fsSelection USE_TYPO_METRICS is
+ * set. A negative line gap is treated as none (unmeasured). */
+export function libreOfficeNormalLine(metrics: Readonly<{
+  unitsPerEm: number;
+  hhea: readonly [ascent: number, descent: number, lineGap: number];
+  win?: readonly [ascent: number, descent: number];
+  typo?: readonly [ascent: number, descent: number, lineGap: number];
+}>): Readonly<{ normalAscentRatio: number; normalDescentRatio: number; lineGapRatio: number }> | undefined {
+  const { unitsPerEm, hhea, win, typo } = metrics;
+  if (!(Number.isFinite(unitsPerEm) && unitsPerEm > 0)) return undefined;
+  let [ascent, descent, gap] = hhea[0] >= 0 && hhea[1] <= 0 ? [hhea[0], -hhea[1], hhea[2]] : [0, 0, 0];
+  if (ascent === 0 && descent === 0 && win) [ascent, descent, gap] = [win[0], win[1], 0];
+  if (typo && typo[0] >= 0 && typo[1] <= 0) [ascent, descent, gap] = [typo[0], -typo[1], typo[2]];
+  if (![ascent, descent, gap].every(Number.isFinite) || !(ascent + descent > 0)) return undefined;
+  return Object.freeze({
+    normalAscentRatio: ascent / unitsPerEm,
+    normalDescentRatio: descent / unitsPerEm,
+    lineGapRatio: Math.max(0, gap) / unitsPerEm,
+  });
+}
+
+/** The face's own normal line from its tables (LIBREOFFICE_FONT_LINE_BOX
+ * selects hhea, OS/2 typo or usWin), carried beside Word's projection. */
+export function openTypeNormalLine(openType: OpenTypeLineMetrics): ReturnType<typeof libreOfficeNormalLine> {
+  return libreOfficeNormalLine({
+    unitsPerEm: openType.unitsPerEm,
+    hhea: [openType.hheaAscent, openType.hheaDescent, openType.hheaLineGap],
+    ...(openType.winAscent !== undefined && openType.winDescent !== undefined
+      ? { win: [openType.winAscent, openType.winDescent] as const } : {}),
+    ...(openType.useTypoMetrics && openType.typoAscent !== undefined && openType.typoDescent !== undefined
+      ? { typo: [openType.typoAscent, openType.typoDescent, openType.typoLineGap ?? 0] as const } : {}),
+  });
+}
+
+/** LIBREOFFICE_FONT_LINE_BOX projection of a face's normal line: the gap
+ * below the baseline. */
+export function libreOfficeLineBox(normal: Readonly<{
+  normalAscentRatio: number; normalDescentRatio: number; lineGapRatio: number;
+}>): Readonly<{ lineHeightRatio: number; designAscentRatio: number; designDescentRatio: number }> {
+  const designDescentRatio = normal.normalDescentRatio + Math.max(0, normal.lineGapRatio);
+  return Object.freeze({
+    lineHeightRatio: normal.normalAscentRatio + designDescentRatio,
+    designAscentRatio: normal.normalAscentRatio,
+    designDescentRatio,
+  });
+}
 
 export const WORD_RUBY_LINE_ASCENT = defineCompatibilityRule({
   id: 'word-ruby-line-ascent',

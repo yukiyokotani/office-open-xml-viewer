@@ -706,6 +706,8 @@ export interface TextLayoutService {
   readonly localMetrics: Readonly<Record<string, Readonly<ResolvedFontMetric>>>;
   /** Producer grid line boxes (TextLayoutServiceInput.plainLineBoxes). */
   readonly plainLineBoxes?: boolean;
+  /** Producer unsnapped line boxes (TextLayoutServiceInput.libreOfficeLineBoxes). */
+  readonly libreOfficeLineBoxes?: boolean;
   resolve(request: Readonly<TextFontResolveRequest>): FontResolution;
   shape(request: Readonly<TextShapeRequest>): TextShapeResult;
   /** Available only when measurement and every installed auxiliary explicitly
@@ -790,6 +792,11 @@ export interface TextLayoutServiceInput {
    * grid count grid cells from each catalogued face's own hhea box, without
    * Word's Far East 1.3 x usWin projection, as LibreOffice does. */
   readonly plainLineBoxes?: boolean;
+  /** Producer line boxes (never OOXML): lines not snapped to a line grid
+   * take each face's own normal line with its line gap below the baseline
+   * (LIBREOFFICE_FONT_LINE_BOX), and a proportional line may let its extra
+   * space hang below a page bottom (LIBREOFFICE_PROPORTIONAL_LINE_PAGE_FIT). */
+  readonly libreOfficeLineBoxes?: boolean;
 }
 
 /** Generic tail for an authored DOCX face. fontTable family/pitch metadata is
@@ -869,6 +876,12 @@ export function snapshotFontMetrics(
         && (!Number.isFinite(metric.designDescentRatio) || metric.designDescentRatio < 0)) {
         throw new RangeError(`Font metric ${key} designDescentRatio must be finite and non-negative`);
       }
+      for (const field of ['lineGapRatio', 'normalAscentRatio', 'normalDescentRatio'] as const) {
+        const value = metric[field];
+        if (value !== undefined && (!Number.isFinite(value) || value < 0)) {
+          throw new RangeError(`Font metric ${key} ${field} must be finite and non-negative`);
+        }
+      }
       if (metric.eastAsianLineHeightRatio !== undefined
         && (!Number.isFinite(metric.eastAsianLineHeightRatio) || metric.eastAsianLineHeightRatio < 0)) {
         throw new RangeError(`Font metric ${key} eastAsianLineHeightRatio must be finite and non-negative`);
@@ -894,6 +907,14 @@ export function snapshotFontMetrics(
         ...(metric.lineHeightRatio === undefined ? {} : { lineHeightRatio: metric.lineHeightRatio }),
         ...(metric.designAscentRatio === undefined ? {} : { designAscentRatio: metric.designAscentRatio }),
         ...(metric.designDescentRatio === undefined ? {} : { designDescentRatio: metric.designDescentRatio }),
+        // The face's own normal line (LIBREOFFICE_FONT_LINE_BOX), kept only
+        // whole: the three values project together.
+        ...(metric.lineGapRatio !== undefined && metric.normalAscentRatio !== undefined
+          && metric.normalDescentRatio !== undefined ? {
+            lineGapRatio: metric.lineGapRatio,
+            normalAscentRatio: metric.normalAscentRatio,
+            normalDescentRatio: metric.normalDescentRatio,
+          } : {}),
         ...(metric.eastAsianLineHeightRatio === undefined
           ? {}
           : { eastAsianLineHeightRatio: metric.eastAsianLineHeightRatio }),
@@ -1162,6 +1183,7 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
     eastAsiaFontCharsets,
     genericFamilies,
     ...(input.plainLineBoxes ? { plainLineBoxes: true } : {}),
+    ...(input.libreOfficeLineBoxes ? { libreOfficeLineBoxes: true } : {}),
   });
   const resolve = (request: Readonly<TextFontResolveRequest>): FontResolution => {
     const authoredFamily = requestedFamily(request, request.slot);
@@ -1452,6 +1474,7 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
     fontMetrics,
     localMetrics: fontMetrics,
     ...(input.plainLineBoxes ? { plainLineBoxes: true as const } : {}),
+    ...(input.libreOfficeLineBoxes ? { libreOfficeLineBoxes: true as const } : {}),
     resolve,
     sourceScopeKey(request: Readonly<TextShapeRequest>): string | undefined {
       if (!SCOPE_SLOTS.some(slot => input.fonts.scopedSubstituteScript?.(

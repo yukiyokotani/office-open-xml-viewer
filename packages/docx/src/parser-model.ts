@@ -273,6 +273,11 @@ export interface ProducerDocumentSettings {
    *  does, and take their whole cells at the page edge (no grid-leading
    *  overhang). */
   readonly __plainFontLineBoxes?: boolean;
+  /** Unsnapped lines take each face's own normal line with its line gap
+   *  below the baseline, and a proportional line's extra space may hang
+   *  below a page's bottom, as LibreOffice lays lines out
+   *  (LIBREOFFICE_FONT_LINE_BOX, LIBREOFFICE_PROPORTIONAL_LINE_PAGE_FIT). */
+  readonly __libreOfficeLineBoxes?: boolean;
 }
 
 /** The producer settings of a model; none is set for a DOCX document. */

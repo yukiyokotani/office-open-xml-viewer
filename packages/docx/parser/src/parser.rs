@@ -3628,6 +3628,7 @@ fn parse_document_settings(settings_xml: &str) -> Option<crate::types::DocumentS
         compatibility_mode,
         footnote_column_bands: false,
         plain_font_line_boxes: false,
+        libre_office_line_boxes: false,
     })
 }
 

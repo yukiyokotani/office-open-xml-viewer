@@ -454,6 +454,7 @@ export function createProductionTextLayoutService(
     cjkFallback: options.cjkFallback,
     fontMetrics,
     ...(source.fonts.plainLineBoxes ? { plainLineBoxes: true } : {}),
+    ...(source.fonts.libreOfficeLineBoxes ? { libreOfficeLineBoxes: true } : {}),
     eastAsiaFontCharsets: fontFamilyCharsets,
     ...(() => {
       // Symbol-encoded text (core symbol-font.ts) is judged by the core oracle

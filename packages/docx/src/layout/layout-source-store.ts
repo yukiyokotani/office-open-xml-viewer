@@ -80,6 +80,8 @@ export interface LayoutSourceFontFacts {
   readonly defaultBodyFontSizePt: number;
   /** Producer line boxes (DocumentSettings.__plainFontLineBoxes). */
   readonly plainLineBoxes?: boolean;
+  /** Producer line boxes (DocumentSettings.__libreOfficeLineBoxes). */
+  readonly libreOfficeLineBoxes?: boolean;
 }
 
 export interface LayoutBlockRepository {

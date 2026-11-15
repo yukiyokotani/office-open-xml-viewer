@@ -17,7 +17,7 @@ import {
 } from '@silurus/ooxml-core/worker';
 import type { LayoutDiagnostic } from './layout/types.js';
 import type { DocxDocumentModel, EmbeddedFontRef } from './types';
-import { wordOpenTypeAutoLineRatios } from './layout/line-compatibility.js';
+import { openTypeNormalLine, wordOpenTypeAutoLineRatios } from './layout/line-compatibility.js';
 import { sha256 } from '@silurus/ooxml-core/internal/sha256';
 
 // Resource governance for one retained DOCX font set. The byte ceiling matches
@@ -193,6 +193,7 @@ export async function loadEmbeddedFonts(
                 lineHeightRatio: line.lineHeightRatio,
                 designAscentRatio: line.designAscentRatio,
                 designDescentRatio: line.designDescentRatio,
+                ...openTypeNormalLine(openType!),
               } : {}),
               ...(openType?.averageCharWidthRatio == null ? {} : {
                 averageCharWidthRatio: openType.averageCharWidthRatio,

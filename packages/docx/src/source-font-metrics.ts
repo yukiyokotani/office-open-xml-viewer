@@ -77,6 +77,8 @@ export function measuredMetric(
     designAscentRatio: ascent,
     designDescentRatio: descent,
     lineGapRatio: line.lineGapRatio,
+    normalAscentRatio: line.ascentRatio,
+    normalDescentRatio: line.descentRatio,
   };
 }
 

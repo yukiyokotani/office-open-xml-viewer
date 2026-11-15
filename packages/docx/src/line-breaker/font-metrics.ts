@@ -2,8 +2,49 @@ import type { CanvasFontRoute, ResolvedFontMetric } from '@silurus/ooxml-core';
 import { localFontMetricCoversText, normalizeFontMetricFamily } from '@silurus/ooxml-core';
 import type { FontResolution } from '../layout/font-service.js';
 import type { TextLayoutService } from '../layout/text.js';
-import { referenceFontLineMetrics, type ReferenceFontLineMetrics } from '../reference-font-line-metrics.js';
-import { LIBRARY_SYNTHESIZED_FACE_LINE_GEOMETRY } from '../layout/line-compatibility.js';
+import { familyLibreOfficeLineMetrics, referenceFontLineMetrics, type FontLineBoxProjection, type ReferenceFontLineMetrics } from '../reference-font-line-metrics.js';
+import { LIBRARY_SYNTHESIZED_FACE_LINE_GEOMETRY, libreOfficeLineBox } from '../layout/line-compatibility.js';
+
+/** The projection of a producer's line boxes: grid-snapped lines of a
+ * `plainLineBoxes` producer take the plain box, unsnapped lines of a
+ * `libreOfficeLineBoxes` producer LIBREOFFICE_FONT_LINE_BOX; OOXML keeps
+ * Word's projection. */
+export function fontLineBoxProjection(
+  service: Pick<TextLayoutService, 'plainLineBoxes' | 'libreOfficeLineBoxes'> | undefined,
+  lineGridActive: boolean,
+): FontLineBoxProjection {
+  if (lineGridActive) return service?.plainLineBoxes === true ? 'plain' : 'word';
+  return service?.libreOfficeLineBoxes === true ? 'libreoffice' : 'word';
+}
+
+const libreOfficeResourceMetrics = new WeakMap<ResolvedFontMetric, ResolvedFontMetric>();
+
+/** A selected resource's geometry in `projection`. LIBREOFFICE_FONT_LINE_BOX
+ * re-projects the face's own normal line, when the resource carries it, in
+ * place of the sides of the Word projection. A resource without it is
+ * unchanged. */
+export function projectedResourceMetric(
+  metric: ResolvedFontMetric | undefined,
+  projection: FontLineBoxProjection,
+): ResolvedFontMetric | undefined {
+  if (projection !== 'libreoffice' || !metric || metric.lineGapRatio === undefined
+    || metric.normalAscentRatio === undefined || metric.normalDescentRatio === undefined) return metric;
+  let projected = libreOfficeResourceMetrics.get(metric);
+  if (!projected) {
+    const box = libreOfficeLineBox({
+      normalAscentRatio: metric.normalAscentRatio,
+      normalDescentRatio: metric.normalDescentRatio,
+      lineGapRatio: metric.lineGapRatio,
+    });
+    projected = Object.freeze({
+      ...metric,
+      ...box,
+      ...(metric.eastAsianLineHeightRatio === undefined ? {} : { eastAsianLineHeightRatio: box.lineHeightRatio }),
+    });
+    libreOfficeResourceMetrics.set(metric, projected);
+  }
+  return projected;
+}
 
 /** Text that proves which face a native route paints (#1848). */
 export interface SynthesizedFaceProbe {
@@ -55,10 +96,14 @@ export function cssMatchedFace<T extends FaceTuple>(faces: readonly T[], weight:
 export function authoredReferenceVerticalMetric(
   selected: FontResolution,
   synthesis?: SynthesizedFaceProbe,
-  plain = false,
+  projection: FontLineBoxProjection = 'word',
 ): ReferenceFontLineMetrics | undefined {
   void LIBRARY_SYNTHESIZED_FACE_LINE_GEOMETRY;
-  const exact = referenceFontLineMetrics(selected.requestedFamily, selected.weight, selected.style, plain);
+  const exact = referenceFontLineMetrics(selected.requestedFamily, selected.weight, selected.style, projection);
+  // LIBREOFFICE_FONT_LINE_BOX needs only the family's shared box.
+  if (!exact && projection === 'libreoffice' && selected.source === 'native' && selected.installedFamily === true) {
+    return familyLibreOfficeLineMetrics(selected.requestedFamily);
+  }
   if (exact || !synthesis?.text.sameGlyphRaster
     || selected.source !== 'native' || selected.installedFamily !== true) return exact;
   const faces = synthesis.text.exactLocalFaces?.(selected.requestedFamily) ?? [];
@@ -66,7 +111,7 @@ export function authoredReferenceVerticalMetric(
   // Glyph ownership: the span's own graphemes (and the raster probe's) must
   // come from the matched exact source, not from a fallback face.
   if (!matched?.coverageProbeFamily || !synthesis.text.ownsGlyphs) return undefined;
-  const reference = referenceFontLineMetrics(selected.requestedFamily, matched.weight, matched.style, plain);
+  const reference = referenceFontLineMetrics(selected.requestedFamily, matched.weight, matched.style, projection);
   // Face identity is a property of the route and tuple, as for the regular
   // catalog tuple this extends (which admits a native installed route without
   // per-glyph proof). One fixed probe per script class bounds the work to a
@@ -95,14 +140,14 @@ export function selectedFontLineMetric(
   naturalMetricAllowed: boolean,
   referenceMetricAllowed = true,
   synthesis?: SynthesizedFaceProbe,
-  plain = false,
+  projection: FontLineBoxProjection = 'word',
 ) {
   const resourceMetric = (naturalMetricAllowed || localFont?.designAscentRatio == null)
     && (localFont?.lineHeightRatio != null || localFont?.designAscentRatio != null
-      || localFont?.eastAsianLineHeightRatio != null) ? localFont : undefined;
+      || localFont?.eastAsianLineHeightRatio != null) ? projectedResourceMetric(localFont, projection) : undefined;
   const referenceMetric = naturalMetricAllowed && referenceMetricAllowed && !resourceMetric
     && mayUseAuthoredReferenceVerticalMetric(selected)
-    ? authoredReferenceVerticalMetric(selected, synthesis, plain)
+    ? authoredReferenceVerticalMetric(selected, synthesis, projection)
     : undefined;
   return { resourceMetric, referenceMetric, lineMetric: resourceMetric ?? referenceMetric };
 }
@@ -180,6 +225,8 @@ export function sameResourceGeometry(a: ResolvedFontMetric, b: ResolvedFontMetri
     && a.designAscentRatio === b.designAscentRatio
     && a.designDescentRatio === b.designDescentRatio
     && a.lineGapRatio === b.lineGapRatio
+    && a.normalAscentRatio === b.normalAscentRatio
+    && a.normalDescentRatio === b.normalDescentRatio
     && a.eastAsianLineHeightRatio === b.eastAsianLineHeightRatio
     && a.fontBoxRatio === b.fontBoxRatio;
 }

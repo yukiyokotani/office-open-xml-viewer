@@ -635,6 +635,17 @@ pub struct DocumentSettings {
         skip_serializing_if = "std::ops::Not::not"
     )]
     pub plain_font_line_boxes: bool,
+    /// Private producer flag (never set by the DOCX parsers): lines not
+    /// snapped to a line grid take each face's own normal line (hhea, or OS/2
+    /// typo with USE_TYPO_METRICS) with its whole line gap below the
+    /// baseline, without Word's Far East 1.3 x usWin box, and a proportional
+    /// line's extra space may hang below the bottom of a page, as LibreOffice
+    /// lays lines out.
+    #[serde(
+        rename = "__libreOfficeLineBoxes",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    pub libre_office_line_boxes: bool,
 }
 
 /// Single track-changes event extracted from a body revision wrapper.
@@ -1269,9 +1280,9 @@ pub struct DocParagraph {
     pub justified_compression: bool,
     /// LibreOffice's fixed and minimum line placement: a minimum line puts
     /// all extra space above the text (the baseline sits the text's descent
-    /// above the line box's bottom); a fixed line puts its baseline four
-    /// fifths of the way down the line box. DOCX never sets it; Word's
-    /// partition applies.
+    /// above the line box's bottom); a fixed line, and a proportional line
+    /// below 100%, puts its baseline four fifths of the way down the line
+    /// box. DOCX never sets it; Word's partition applies.
     #[serde(
         rename = "__lineExtraAbove",
         skip_serializing_if = "std::ops::Not::not"

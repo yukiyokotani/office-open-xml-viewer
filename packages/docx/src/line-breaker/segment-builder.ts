@@ -70,6 +70,8 @@ import {
   selectResourceMetric,
   allowsReferenceFontMetric,
   selectedFontLineMetric,
+  fontLineBoxProjection,
+  projectedResourceMetric,
   type MetricTupleIndex,
 } from './font-metrics.js';
 
@@ -1518,13 +1520,13 @@ function emitResolvedTextSegment(
         ?? environment.layoutServices?.text.localMetrics ?? {}), resolvedSpan?.font),
       environment.layoutServices ? { text: environment.layoutServices.text, probe: text,
         ...(textShapeRequest.baseDirection !== undefined ? { baseDirection: textShapeRequest.baseDirection } : {}) } : undefined,
-      environment.layoutServices?.text.plainLineBoxes === true && environment.lineGridActive === true);
+      fontLineBoxProjection(environment.layoutServices?.text, environment.lineGridActive === true));
   // LIBRARY_SYNTHESIZED_FACE_LINE_GEOMETRY does not extend to the East Asian
   // floor of a run painted in another slot (see that rule's scope).
   const { lineMetric: eaLineMetric } = selectedFontLineMetric(eaResolution, localEaFloor, naturalMetricAllowed,
       allowsReferenceFontMetric(indexedFontMetrics(environment.layoutServices?.text.fontMetrics
         ?? environment.layoutServices?.text.localMetrics ?? {}), eaResolution), undefined,
-      environment.layoutServices?.text.plainLineBoxes === true && environment.lineGridActive === true);
+      fontLineBoxProjection(environment.layoutServices?.text, environment.lineGridActive === true));
   const resolvedEaFloorFamily =
     eaResolution?.resolvedFamily ?? localEaFloor?.family ?? eaFontFamily;
   // WORD_USE_FE_LAYOUT_INHERITED_GRID_MINIMUM was observed for an active
@@ -2143,8 +2145,10 @@ function appendRunsToSegments(
       // The mark hosting a floating anchor participates in the same natural
       // atLeast line box as a visible text line.
       const naturalMetricAllowed = environment.lineSpacing?.rule !== 'exact';
-      const resourceMetric =
-        naturalMetricAllowed || localFont?.designAscentRatio == null ? localFont : undefined;
+      const resourceMetric = naturalMetricAllowed || localFont?.designAscentRatio == null
+        ? projectedResourceMetric(localFont,
+          fontLineBoxProjection(environment.layoutServices?.text, environment.lineGridActive === true))
+        : undefined;
       const referenceMetric =
         naturalMetricAllowed && !resourceMetric && mayUseAuthoredReferenceVerticalMetric(selected)
           && allowsReferenceFontMetric(indexedFontMetrics(environment.layoutServices?.text.fontMetrics
@@ -2153,7 +2157,7 @@ function appendRunsToSegments(
           // spans and paragraph marks only; an anchor host is outside its
           // evidence, so only an exact catalogued tuple lends its geometry.
           ? referenceFontLineMetrics(selected.requestedFamily, weight, style,
-            environment.layoutServices?.text.plainLineBoxes === true && environment.lineGridActive === true)
+            fontLineBoxProjection(environment.layoutServices?.text, environment.lineGridActive === true))
           : undefined;
       const familyLineMetric = resourceMetric ?? referenceMetric;
       segs.push({

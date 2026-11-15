@@ -2255,8 +2255,10 @@ function measureFollowingBodyBlock(
       lineStart: 0, lineEnd: 1,
       continuesFromPrevious: false, continuesOnNext: layout.lines.length > 1,
     });
+    // LIBREOFFICE_PROPORTIONAL_LINE_PAGE_FIT: the first line's overhang may
+    // hang below the page bottom as when it is the last line placed there.
     const leadLineBoxExtentPt = firstLine
-      ? firstLine.bounds.yPt + firstLine.advancePt - layout.flowBounds.yPt
+      ? firstLine.bounds.yPt + firstLine.advancePt - (firstLine.pageEdgeOverhangPt ?? 0) - layout.flowBounds.yPt
       : layout.advancePt;
     return Object.freeze({
       fullExtentPt: layout.advancePt,

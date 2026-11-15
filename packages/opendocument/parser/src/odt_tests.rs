@@ -1562,3 +1562,47 @@ fn page_objects_are_extracted_once_and_nested_groups_keep_the_outer_anchor() {
         .unwrap();
     assert_eq!(shape.anchor_y_relative_from.as_deref(), Some("page"));
 }
+
+#[test]
+fn gives_a_mark_that_begins_a_paragraph_a_dotted_circle() {
+    // LibreOffice 26.8 draws U+25CC under a mark only at the paragraph start
+    // (odt_marks controls); after a space, tab, line break or other
+    // character the mark keeps that character as its base.
+    let automatic = r##"<style:style style:name="B" style:family="text"><style:text-properties fo:font-weight="bold"/></style:style>"##;
+    let document = read_fixture(Fixture {
+        automatic,
+        body: concat!(
+            "<text:p>\u{301} Z</text:p>",
+            "<text:p>\u{301}\u{308}Z</text:p>",
+            "<text:p><text:span text:style-name=\"B\"/><text:span text:style-name=\"B\">\u{5B4}Z</text:span></text:p>",
+            "<text:p>a \u{301}Z<text:tab/>\u{301}<text:line-break/>\u{301}Z</text:p>",
+            "<text:p>a\u{301}Z</text:p>",
+            "<text:p>\u{200D}\u{301}Z</text:p>",
+        ),
+        ..Fixture::default()
+    });
+    let p = paragraphs(&document.body);
+    let text = |i: usize| -> String { text_runs(p[i]).iter().map(|run| run.text.as_str()).collect() };
+    assert_eq!(text(0), "\u{25CC}\u{301} Z");
+    assert_eq!(text(1), "\u{25CC}\u{301}\u{308}Z");
+    assert_eq!(text(2), "\u{25CC}\u{5B4}Z");
+    assert!(!text(3).contains('\u{25CC}'));
+    assert_eq!(text(4), "a\u{301}Z");
+    assert_eq!(text(5), "\u{200D}\u{301}Z");
+}
+
+#[test]
+fn lays_lines_out_as_libreoffice_does() {
+    let automatic = r##"<style:style style:name="Q" style:family="paragraph"><style:paragraph-properties fo:line-height="80%"/></style:style><style:style style:name="P" style:family="paragraph"><style:paragraph-properties fo:line-height="200%"/></style:style>"##;
+    let document = read_fixture(Fixture {
+        automatic,
+        body: r##"<text:p text:style-name="Q">a</text:p><text:p text:style-name="P">b</text:p>"##,
+        ..Fixture::default()
+    });
+    let settings = document.settings.as_ref().unwrap();
+    assert!(settings.libre_office_line_boxes && settings.plain_font_line_boxes);
+    let p = paragraphs(&document.body);
+    // A proportional line below 100% is placed as a fixed line.
+    assert!(p[0].line_extra_above);
+    assert!(!p[1].line_extra_above);
+}

@@ -6,6 +6,7 @@ import {
   type LoadedFontSources,
 } from '@silurus/ooxml-core/internal/font-sources';
 import { cssMatchedFace } from './line-breaker/font-metrics.js';
+import { openTypeNormalLine } from './layout/line-compatibility.js';
 import { WML_TUPLES, tupleKey, type PreparedServedFaceLines } from './served-face-lines.js';
 import {
   displayFamily,
@@ -144,6 +145,7 @@ export function servedFontLineMetrics(
             lineHeightRatio: line.lineHeightRatio,
             designAscentRatio: line.designAscentRatio,
             designDescentRatio: line.designDescentRatio,
+            ...openTypeNormalLine(instance),
             unicodeRanges: Object.freeze(intersectRanges(normalizedRanges(declared), normalizedRanges(instance.unicodeRanges))),
             ...(instance.hasEastAsianCmap ? { eastAsianLineHeightRatio: line.lineHeightRatio } : {}),
           };
