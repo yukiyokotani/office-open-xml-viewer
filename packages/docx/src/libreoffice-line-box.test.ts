@@ -160,6 +160,10 @@ describe('LIBREOFFICE_FONT_LINE_BOX', () => {
     const tabLine = (tabOnly.pages[0]!.layers.body[0] as ParagraphLayout).lines[0]!;
     expect(tabLine.advancePt).toBeCloseTo(15.6, 6);
     expect(tabLine.baselinePt).toBeCloseTo(20 + 8.4, 6);
+    // Without admitted face geometry the tab keeps the synthetic em box.
+    const unknown = layoutBodyModel([para([{ ...run('\t'), fontFamily: 'Unknown Face' } as DocParagraph['runs'][number]])],
+      section(), linearCtx(), {}, LIBREOFFICE, {});
+    expect((unknown.pages[0]!.layers.body[0] as ParagraphLayout).lines[0]!.baselinePt).toBeCloseTo(20 + 9.6, 6);
   });
 
   it('takes a mixed line\'s largest ascent and largest descent with its gap', () => {

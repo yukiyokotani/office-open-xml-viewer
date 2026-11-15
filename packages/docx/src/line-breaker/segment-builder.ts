@@ -1766,13 +1766,13 @@ function inlineEffectExtentBox(
 }
 
 /** LIBREOFFICE_FONT_LINE_BOX sides of a tab's own face (its run's ascii
- * slot), so a line holding only tabs keeps that face's box. Undefined when no
- * geometry of the face is admitted; the line's text then sizes it. */
+ * slot), so a line holding only tabs keeps that face's box. Empty when no
+ * geometry of the face is admitted: the tab then keeps the synthetic box. */
 function tabFaceLineBox(
   run: DocxTextRun,
   environment: LineLayoutEnvironment,
   selectedMetric: SegmentBuildContext['selectedMetric'],
-): Partial<Pick<import('./model.js').LayoutTabSeg, 'lineBoxAscentRatio' | 'lineBoxDescentRatio'>> {
+): Partial<Pick<import('./model.js').LayoutTabSeg, 'textOwnedLineBox' | 'lineBoxAscentRatio' | 'lineBoxDescentRatio'>> {
   const service = environment.layoutServices?.text;
   const weight = run.bold ? 700 : 400;
   const style = run.italic ? 'italic' as const : 'normal' as const;
@@ -1786,7 +1786,7 @@ function tabFaceLineBox(
     allowsReferenceFontMetric(indexedFontMetrics(service?.fontMetrics ?? service?.localMetrics ?? {}), selected),
     undefined, fontLineBoxProjection(service, false));
   return lineMetric?.designAscentRatio != null && lineMetric.designDescentRatio != null
-    ? { lineBoxAscentRatio: lineMetric.designAscentRatio, lineBoxDescentRatio: lineMetric.designDescentRatio }
+    ? { textOwnedLineBox: true, lineBoxAscentRatio: lineMetric.designAscentRatio, lineBoxDescentRatio: lineMetric.designDescentRatio }
     : {};
 }
 
@@ -1985,7 +1985,7 @@ function appendRunsToSegments(
             // box, not the synthetic em box.
             ...(environment.layoutServices?.text.libreOfficeLineBoxes === true && environment.lineGridActive !== true
               && environment.verticalCJK !== true
-              ? { textOwnedLineBox: true as const, ...tabFaceLineBox(t, environment, selectedMetric) } : {}),
+              ? tabFaceLineBox(t, environment, selectedMetric) : {}),
             bold: t.bold,
             italic: t.italic,
             sourceRunIndex: runIndex,

@@ -398,10 +398,10 @@ export interface LayoutTextSeg extends LayoutSegSource {
 export interface LayoutTabSeg extends LayoutSegSource {
   isTab: true;
   fontSize: number;  // pt — for line-height purposes
-  /** LIBREOFFICE_FONT_LINE_BOX: the tab adds no synthetic ascent or descent;
-   * the line's text (or, alone, the line's own synthesized box) sizes it. */
+  /** LIBREOFFICE_FONT_LINE_BOX: the tab takes its own face's sides below
+   * instead of the synthetic em box. */
   textOwnedLineBox?: true;
-  /** With it, the tab's own face's sides (em ratios), when admitted. */
+  /** With it, the tab's own face's sides (em ratios). */
   lineBoxAscentRatio?: number;
   lineBoxDescentRatio?: number;
   measuredWidth: number;

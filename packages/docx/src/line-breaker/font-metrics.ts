@@ -354,12 +354,22 @@ export function selectResourceMetric(
   // overlapping CSS faces Canvas actually paints. Compare every covering
   // resource in the tuple, including resources acquired from other sources.
   let normalLineAgrees = true;
+  let wordBoxAgrees = true;
   for (const metric of candidates) {
     if (!metricCoversText(metric, probeText, selected.route, paintsGlyphs)) continue;
     if (!sameResourceGeometry(first, metric)) return undefined;
     normalLineAgrees &&= sameNormalLine(first, metric);
+    wordBoxAgrees &&= sameWordBox(first, metric);
   }
-  return normalLineAgrees ? first : withoutNormalLine(first);
+  return withoutProjectionInputs(first, !normalLineAgrees, !wordBoxAgrees);
+}
+
+/** A LibreOffice producer's kept Word box of a Far East face, compared as
+ * the normal line is. */
+function sameWordBox(a: ResolvedFontMetric, b: ResolvedFontMetric): boolean {
+  return a.wordLineHeightRatio === b.wordLineHeightRatio
+    && a.wordAscentRatio === b.wordAscentRatio
+    && a.wordDescentRatio === b.wordDescentRatio;
 }
 
 /** The face's own normal line (LIBREOFFICE_FONT_LINE_BOX) is projection
@@ -371,16 +381,30 @@ function sameNormalLine(a: ResolvedFontMetric, b: ResolvedFontMetric): boolean {
     && a.normalLineGapRatio === b.normalLineGapRatio;
 }
 
-const withoutNormalLines = new WeakMap<ResolvedFontMetric, ResolvedFontMetric>();
+const strippedMetrics = [new WeakMap<ResolvedFontMetric, ResolvedFontMetric>(),
+  new WeakMap<ResolvedFontMetric, ResolvedFontMetric>(), new WeakMap<ResolvedFontMetric, ResolvedFontMetric>()];
 
-function withoutNormalLine(metric: ResolvedFontMetric): ResolvedFontMetric {
-  if (metric.normalAscentRatio === undefined && metric.normalDescentRatio === undefined
-    && metric.normalLineGapRatio === undefined) return metric;
-  let stripped = withoutNormalLines.get(metric);
+/** `metric` without the projection inputs its overlapping resources disagree
+ * on (the normal line, the kept Word box); its own geometry stays. */
+function withoutProjectionInputs(metric: ResolvedFontMetric, normal: boolean, word: boolean): ResolvedFontMetric {
+  normal &&= metric.normalAscentRatio !== undefined || metric.normalDescentRatio !== undefined
+    || metric.normalLineGapRatio !== undefined;
+  word &&= metric.wordLineHeightRatio !== undefined || metric.wordAscentRatio !== undefined
+    || metric.wordDescentRatio !== undefined;
+  if (!normal && !word) return metric;
+  const cache = strippedMetrics[(normal ? 1 : 0) + (word ? 2 : 0) - 1]!;
+  let stripped = cache.get(metric);
   if (!stripped) {
-    const { normalAscentRatio: _ascent, normalDescentRatio: _descent, normalLineGapRatio: _gap, ...rest } = metric;
-    stripped = Object.freeze(rest);
-    withoutNormalLines.set(metric, stripped);
+    const {
+      normalAscentRatio, normalDescentRatio, normalLineGapRatio,
+      wordLineHeightRatio, wordAscentRatio, wordDescentRatio, ...rest
+    } = metric;
+    stripped = Object.freeze({
+      ...rest,
+      ...(normal ? {} : { normalAscentRatio, normalDescentRatio, normalLineGapRatio }),
+      ...(word ? {} : { wordLineHeightRatio, wordAscentRatio, wordDescentRatio }),
+    });
+    cache.set(metric, stripped);
   }
   return stripped;
 }
