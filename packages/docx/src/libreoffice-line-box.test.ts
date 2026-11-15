@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { ResolvedFontMetric } from '@silurus/ooxml-core';
 import { layoutBodyModel } from './test-support/document-layout.test-support.js';
-import { libreOfficeNormalLine, libreOfficeOnlyLineMetric, openTypeNormalLine } from './layout/line-compatibility.js';
+import { libreOfficeNormalLine, libreOfficeProducerLineMetric, openTypeNormalLine } from './layout/line-compatibility.js';
 import { snapshotFontMetrics } from './layout/text.js';
 import type { LineLayout, ParagraphLayout } from './layout/types.js';
 import type { BodyElement, DocParagraph, DocSettings, DocxTextRun, LineSpacing, SectionProps } from './types';
@@ -89,14 +89,14 @@ describe('LIBREOFFICE_FONT_LINE_BOX', () => {
     })).toEqual({ normalAscentRatio: 0.8, normalDescentRatio: 0.2, normalLineGapRatio: 0.3 });
   });
 
-  it('sizes a face without a Word projection for a LibreOffice producer only', () => {
-    // No OS/2 code-page class: Word's projection declines; hhea still gives
-    // LibreOffice's box.
-    expect(libreOfficeOnlyLineMetric({
+  it('sizes a face for a LibreOffice producer from its own tables only', () => {
+    // No OS/2 code-page class: Word's projection declines; the plain hhea
+    // box (grid lines) and the normal line (LibreOffice's box) remain.
+    expect(libreOfficeProducerLineMetric({
       unitsPerEm: 1000, hheaAscent: 800, hheaDescent: -200, hheaLineGap: 300,
       farEastCodePage: null, hasEastAsianCmap: true,
     }, [[0x20, 0x7e]])).toEqual({
-      lineHeightRatio: 1.3, designAscentRatio: 0.8, designDescentRatio: 0.5,
+      lineHeightRatio: 1.3, designAscentRatio: 1.1, designDescentRatio: 0.2,
       normalAscentRatio: 0.8, normalDescentRatio: 0.2, normalLineGapRatio: 0.3,
       unicodeRanges: [[0x20, 0x7e]], eastAsianLineHeightRatio: 1.3,
     });

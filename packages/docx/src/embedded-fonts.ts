@@ -17,7 +17,7 @@ import {
 } from '@silurus/ooxml-core/worker';
 import type { LayoutDiagnostic } from './layout/types.js';
 import type { DocxDocumentModel, EmbeddedFontRef } from './types';
-import { libreOfficeOnlyLineMetric, wordOpenTypeAutoLineRatios } from './layout/line-compatibility.js';
+import { libreOfficeProducerLineMetric, wordOpenTypeAutoLineRatios } from './layout/line-compatibility.js';
 import { sha256 } from '@silurus/ooxml-core/internal/sha256';
 
 // Resource governance for one retained DOCX font set. The byte ceiling matches
@@ -182,9 +182,9 @@ export async function loadEmbeddedFonts(
               });
           // A `libreOfficeLineBoxes` producer sizes a face without a Word
           // projection from its hhea alone (LIBREOFFICE_FONT_LINE_BOX).
-          // (LibreOffice reads the face's normal line only, never Word's box.)
+          // (Never Word's box: libreOfficeProducerLineMetric.)
           const libreOfficeOnly = openType && libreOfficeLineBoxes
-            ? libreOfficeOnlyLineMetric(openType, undefined) : undefined;
+            ? libreOfficeProducerLineMetric(openType, undefined) : undefined;
           if (line || libreOfficeOnly || openType?.averageCharWidthRatio != null) {
             metric = Object.freeze({
               family,

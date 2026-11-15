@@ -160,23 +160,28 @@ export function openTypeNormalLine(openType: OpenTypeLineMetrics): ReturnType<ty
   });
 }
 
-/** The geometry of a face whose tables give no Word projection (no OS/2
- * code-page class, or a Far East face without usWin) for a
- * `libreOfficeLineBoxes` producer only: LIBREOFFICE_FONT_LINE_BOX reads hhea
- * alone. OOXML documents never receive it, so their admission is unchanged. */
-export function libreOfficeOnlyLineMetric(
+/** A face's geometry for a `libreOfficeLineBoxes` producer, from its own
+ * tables only: the plain hhea box (the projection of the producer's
+ * grid-snapped lines, as the catalogue gives it) as the base geometry, and the
+ * face's normal line, from which unsnapped lines project
+ * LIBREOFFICE_FONT_LINE_BOX. Neither reads the OS/2 code-page class or Word's
+ * Far East box; OOXML documents never receive it, so their admission is
+ * unchanged. Undefined when either is unavailable. */
+export function libreOfficeProducerLineMetric(
   openType: OpenTypeLineMetrics,
   unicodeRanges: readonly (readonly [number, number])[] | undefined,
 ): Omit<ResolvedFontMetric, 'family'> | undefined {
   const normal = openTypeNormalLine(openType);
-  if (!normal) return undefined;
-  const box = libreOfficeLineBox(normal);
+  const plain = wordOpenTypeAutoLineRatios({ ...openType, farEastCodePage: false });
+  if (!normal || !plain) return undefined;
   return {
     ...(openType.farEastCodePage == null ? {} : { farEastCodePage: openType.farEastCodePage }),
-    ...box,
+    lineHeightRatio: plain.lineHeightRatio,
+    designAscentRatio: plain.designAscentRatio,
+    designDescentRatio: plain.designDescentRatio,
     ...normal,
     ...(unicodeRanges === undefined ? {} : { unicodeRanges }),
-    ...(openType.hasEastAsianCmap ? { eastAsianLineHeightRatio: box.lineHeightRatio } : {}),
+    ...(openType.hasEastAsianCmap ? { eastAsianLineHeightRatio: plain.lineHeightRatio } : {}),
   };
 }
 

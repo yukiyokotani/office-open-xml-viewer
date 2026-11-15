@@ -6,7 +6,7 @@ import {
   type LoadedFontSources,
 } from '@silurus/ooxml-core/internal/font-sources';
 import { cssMatchedFace } from './line-breaker/font-metrics.js';
-import { libreOfficeOnlyLineMetric } from './layout/line-compatibility.js';
+import { libreOfficeProducerLineMetric } from './layout/line-compatibility.js';
 import { WML_TUPLES, tupleKey, type PreparedServedFaceLines } from './served-face-lines.js';
 import {
   displayFamily,
@@ -144,7 +144,7 @@ export function servedFontLineMetrics(
             wght: clamp(weight, range), ital: faceStyle === 'italic' ? 1 : 0,
           }, normalLineMvarTags(face.resourceMetrics));
           if (!instance?.unicodeRanges) return undefined;
-          return libreOfficeOnlyLineMetric(instance,
+          return libreOfficeProducerLineMetric(instance,
             Object.freeze(intersectRanges(normalizedRanges(declared), normalizedRanges(instance.unicodeRanges))));
         }
         if (face.resourceMetrics) {

@@ -146,7 +146,7 @@ import {
 import { paragraphGapAdjustment } from './paragraph-spacing.js';
 import { bottomBorderExtentPt, resolveParagraphBorderEdges, topBorderExtentPt, type ParagraphBorderEdges } from './paragraph-border-adjacency.js';
 import { acquireParagraphResult, acquireRetainedFrameGroup, bodyFrameGroupFor, bodyParagraphBorderEdgesFor, projectPhysicalAnchorResult, retainedFrameMaximumBaselineLoweringPt, sliceParagraphLayout, type BodyFrameGroup } from './paragraph.js';
-import { libreOfficeProportionalLineAdmissionExtentPt, wordLoweredDropCapAnchorLeadingPt } from './body-pagination-compatibility.js';
+import { libreOfficeProportionalLineAdmissionExtentPt, wordFinalParagraphAdmissionExtentPt, wordLoweredDropCapAnchorLeadingPt } from './body-pagination-compatibility.js';
 import { wordGridFrameCarrierSourceOwnsNoFlow } from './table-compatibility.js';
 import type { CompleteTextBoxStoryAcquirer } from './paragraph.js';
 import type { AnchorFloatRegistrationState, BodyAcquisitionState, BodyMeasurementContext, CompleteTextBoxStoryOwner, PhysicalAnchorFrame, RetainedTableRecord } from './acquisition-context.js';
@@ -2269,8 +2269,14 @@ function measureFollowingBodyBlock(
     const overhangPt = (firstLine ?? layout.paragraphMark)?.pageEdgeOverhangPt ?? 0;
     const leadLineBoxExtentPt = !(overhangPt > 0) ? firstLineEndPt
       : firstLine && layout.lines.length > 1 ? firstLineEndPt - overhangPt
-      : Math.min(firstLineEndPt, libreOfficeProportionalLineAdmissionExtentPt(
-        layout, Math.max(0, layout.advancePt - layout.spacing.afterPt)));
+      // A single-line successor: the selector's own completing extent
+      // (WORD_TRAILING_SPACE_AFTER_FIT_ADMISSION, then the overhang), so a
+      // retained bottom border or padding is still charged.
+      : libreOfficeProportionalLineAdmissionExtentPt(layout, wordFinalParagraphAdmissionExtentPt({
+        advancePt: layout.advancePt,
+        retainedSpaceAfterPt: layout.spacing.afterPt,
+        authoredSpaceAfterPt: element.spaceAfter ?? 0,
+      }));
     return Object.freeze({
       fullExtentPt: layout.advancePt,
       // keepNext admits the successor's first content line, including
