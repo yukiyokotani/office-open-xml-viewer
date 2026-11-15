@@ -101,8 +101,9 @@ export async function loadEmbeddedFonts(
 ): Promise<LoadedEmbeddedFonts> {
   const refs = doc.embeddedFonts;
   if (!refs || refs.length === 0) return { faces: [], metrics: {}, routes: [] };
-  const libreOfficeLineBoxes = (doc.settings as { readonly __libreOfficeLineBoxes?: boolean } | undefined)
-    ?.__libreOfficeLineBoxes === true;
+  const producer = doc.settings as {
+    readonly __libreOfficeLineBoxes?: boolean; readonly __libreOfficeWordFarEastBoxes?: boolean;
+  } | undefined;
 
   // A CSS family/weight/style tuple cannot identify two different resources.
   // Preserve document order and admit only the first definition before any
@@ -170,6 +171,10 @@ export async function loadEmbeddedFonts(
         let metric: ResolvedFontMetric | null = null;
         try {
           const openType = parseOpenTypeResourceMetrics(data);
+          // A LibreOffice producer's face (a Far East face keeps Word's box
+          // under __libreOfficeWordFarEastBoxes).
+          const libreOfficeLineBoxes = producer?.__libreOfficeLineBoxes === true
+            && !(producer.__libreOfficeWordFarEastBoxes === true && openType?.farEastCodePage === true);
           // The wordOpenTypeAutoLineRatios projection requires this face's
           // OS/2 code-page class and usWin data; cmap coverage is a separate
           // question. A face without declared code-page ranges does not gain

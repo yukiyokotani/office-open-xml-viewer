@@ -131,6 +131,17 @@ describe('LIBREOFFICE_FONT_LINE_BOX', () => {
     expect(word!.map((line) => line.baselinePt)).toEqual([20 + 13.2, 20 + 15.6 + 13.2].map((v) => expect.closeTo(v, 6)));
   });
 
+  it('lets a tab take its text\'s box, not a synthetic em box', () => {
+    // A face whose ascent (0.7 em) is below the synthetic 0.8 em tab box.
+    const low: ResolvedFontMetric = { ...GAP_FACE, family: 'Low Face', requestedFamily: 'Low Face',
+      sourceIdentity: 'test-resource:low-face', normalAscentRatio: 0.7, normalDescentRatio: 0.2, normalLineGapRatio: 0.4 };
+    const layout = layoutBodyModel([para([{ ...run('a\tb'), fontFamily: 'Low Face' } as DocParagraph['runs'][number]])],
+      section(), linearCtx(), {}, LIBREOFFICE, { 'low face': low });
+    const line = (layout.pages[0]!.layers.body[0] as ParagraphLayout).lines[0]!;
+    expect(line.advancePt).toBeCloseTo(15.6, 6);
+    expect(line.baselinePt).toBeCloseTo(20 + 8.4, 6);
+  });
+
   it('takes a mixed line\'s largest ascent and largest descent with its gap', () => {
     const [lines] = pages([para([run('ab', 6), run('cd', 24)])], LIBREOFFICE);
     // 0.8 x 24 above, 0.5 x 24 below.

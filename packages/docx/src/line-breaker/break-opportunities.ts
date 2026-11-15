@@ -870,8 +870,8 @@ function processTabSegment(
     flush(undefined, false, seg.src);
     breakerState.queue.unshift(seg);
   };
-  const tabAscent = seg.fontSize * scale * SYNTHETIC_ASCENT_EM;
-  const tabDescent = seg.fontSize * scale * SYNTHETIC_DESCENT_EM;
+  const tabAscent = seg.textOwnedLineBox ? 0 : seg.fontSize * scale * SYNTHETIC_ASCENT_EM;
+  const tabDescent = seg.textOwnedLineBox ? 0 : seg.fontSize * scale * SYNTHETIC_DESCENT_EM;
 
   // Ordinary RTL stops still require the complete cell's visual order. A
   // positional tab additionally owns a normative next-line decision, which

@@ -708,6 +708,8 @@ export interface TextLayoutService {
   readonly plainLineBoxes?: boolean;
   /** Producer unsnapped line boxes (TextLayoutServiceInput.libreOfficeLineBoxes). */
   readonly libreOfficeLineBoxes?: boolean;
+  /** TextLayoutServiceInput.libreOfficeWordFarEastBoxes. */
+  readonly libreOfficeWordFarEastBoxes?: boolean;
   resolve(request: Readonly<TextFontResolveRequest>): FontResolution;
   shape(request: Readonly<TextShapeRequest>): TextShapeResult;
   /** Available only when measurement and every installed auxiliary explicitly
@@ -797,6 +799,9 @@ export interface TextLayoutServiceInput {
    * (LIBREOFFICE_FONT_LINE_BOX), and a proportional line may let its extra
    * space hang below a page bottom (LIBREOFFICE_PROPORTIONAL_LINE_PAGE_FIT). */
   readonly libreOfficeLineBoxes?: boolean;
+  /** With `libreOfficeLineBoxes`: lines in a Far East face keep Word's
+   * projection (LibreOffice's MsWordCompGridMetrics). */
+  readonly libreOfficeWordFarEastBoxes?: boolean;
 }
 
 /** Generic tail for an authored DOCX face. fontTable family/pitch metadata is
@@ -1183,6 +1188,7 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
     genericFamilies,
     ...(input.plainLineBoxes ? { plainLineBoxes: true } : {}),
     ...(input.libreOfficeLineBoxes ? { libreOfficeLineBoxes: true } : {}),
+    ...(input.libreOfficeWordFarEastBoxes ? { libreOfficeWordFarEastBoxes: true } : {}),
   });
   const resolve = (request: Readonly<TextFontResolveRequest>): FontResolution => {
     const authoredFamily = requestedFamily(request, request.slot);
@@ -1474,6 +1480,7 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
     localMetrics: fontMetrics,
     ...(input.plainLineBoxes ? { plainLineBoxes: true as const } : {}),
     ...(input.libreOfficeLineBoxes ? { libreOfficeLineBoxes: true as const } : {}),
+    ...(input.libreOfficeWordFarEastBoxes ? { libreOfficeWordFarEastBoxes: true as const } : {}),
     resolve,
     sourceScopeKey(request: Readonly<TextShapeRequest>): string | undefined {
       if (!SCOPE_SLOTS.some(slot => input.fonts.scopedSubstituteScript?.(

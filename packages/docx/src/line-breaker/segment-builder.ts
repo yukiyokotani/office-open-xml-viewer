@@ -1954,6 +1954,10 @@ function appendRunsToSegments(
             isTab: true,
             fontSize: t.fontSize,
             measuredWidth: 0,
+            // LIBREOFFICE_FONT_LINE_BOX: a tab portion takes its own text's
+            // box; the line's text supplies it, not the synthetic em box.
+            ...(environment.layoutServices?.text.libreOfficeLineBoxes === true && environment.lineGridActive !== true
+              ? { textOwnedLineBox: true as const } : {}),
             bold: t.bold,
             italic: t.italic,
             sourceRunIndex: runIndex,

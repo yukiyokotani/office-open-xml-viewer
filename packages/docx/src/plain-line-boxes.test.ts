@@ -35,6 +35,15 @@ describe('LIBREOFFICE_FONT_LINE_BOX catalog projection', () => {
     expect(box!.designAscentRatio + box!.designDescentRatio).toBeCloseTo(box!.lineHeightRatio, 9);
   });
 
+  it('keeps Word\'s Far East box under MsWordCompGridMetrics', () => {
+    // DOCX-imported Meiryo 12 pt control: 22.85 pt per line with
+    // MsWordCompGridMetrics, 18.00 pt without; Latin faces keep LibreOffice's box.
+    expect(referenceFontLineMetrics('Meiryo', 400, 'normal', 'libreoffice-word-far-east'))
+      .toEqual(referenceFontLineMetrics('Meiryo'));
+    expect(referenceFontLineMetrics('Arial', 400, 'normal', 'libreoffice-word-far-east'))
+      .toEqual(referenceFontLineMetrics('Arial', 400, 'normal', 'libreoffice'));
+  });
+
   it('needs no OS/2 code-page class, which only Word\'s projection reads', () => {
     expect(referenceFontLineMetrics('Courier')).toBeUndefined();
     expect(referenceFontLineMetrics('Courier', 400, 'normal', 'libreoffice')?.lineHeightRatio).toBeGreaterThan(0);

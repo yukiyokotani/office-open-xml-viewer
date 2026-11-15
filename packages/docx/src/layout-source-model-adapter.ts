@@ -522,6 +522,7 @@ function buildLayoutSourceModelAdapter(
     defaultBodyFontSizePt: docDefaultFontSizePt(privateDocument),
     ...(producerDocumentSettings(privateDocument).__plainFontLineBoxes === true ? { plainLineBoxes: true } : {}),
     ...(producerDocumentSettings(privateDocument).__libreOfficeLineBoxes === true ? { libreOfficeLineBoxes: true } : {}),
+    ...(producerDocumentSettings(privateDocument).__libreOfficeWordFarEastBoxes === true ? { libreOfficeWordFarEastBoxes: true } : {}),
   };
 
   // Acquire while parser sidecars are still attached. On the builder-owned

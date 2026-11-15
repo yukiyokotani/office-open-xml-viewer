@@ -82,6 +82,8 @@ export interface LayoutSourceFontFacts {
   readonly plainLineBoxes?: boolean;
   /** Producer line boxes (DocumentSettings.__libreOfficeLineBoxes). */
   readonly libreOfficeLineBoxes?: boolean;
+  /** DocumentSettings.__libreOfficeWordFarEastBoxes. */
+  readonly libreOfficeWordFarEastBoxes?: boolean;
 }
 
 export interface LayoutBlockRepository {

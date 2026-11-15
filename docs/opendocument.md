@@ -146,7 +146,9 @@ specification differently, the reader follows LibreOffice:
 - a line takes each face's own normal line (its hhea values, or the OS/2
   typo values when the face asks for them), without Word's 1.3 East Asian
   box, and puts the face's whole line gap below the text, so the text sits
-  at the top of the line;
+  at the top of the line (in a document carrying LibreOffice's
+  `MsWordCompGridMetrics` setting, as documents imported from Word do, Far
+  East faces keep the Word box);
 - proportional line height scales the font's natural line height; at the
   bottom of a page a line stays when its natural line fits, and the extra
   space hangs below the margin; below 100% the line is placed as a fixed

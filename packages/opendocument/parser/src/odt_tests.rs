@@ -1601,6 +1601,7 @@ fn lays_lines_out_as_libreoffice_does() {
     });
     let settings = document.settings.as_ref().unwrap();
     assert!(settings.libre_office_line_boxes && settings.plain_font_line_boxes);
+    assert!(!settings.libre_office_word_far_east_boxes);
     let p = paragraphs(&document.body);
     // A proportional line below 100% is placed as a fixed line.
     assert!(p[0].line_extra_above);

@@ -10,11 +10,12 @@ import { LIBRARY_SYNTHESIZED_FACE_LINE_GEOMETRY, libreOfficeLineBox } from '../l
  * `libreOfficeLineBoxes` producer LIBREOFFICE_FONT_LINE_BOX; OOXML keeps
  * Word's projection. */
 export function fontLineBoxProjection(
-  service: Pick<TextLayoutService, 'plainLineBoxes' | 'libreOfficeLineBoxes'> | undefined,
+  service: Pick<TextLayoutService, 'plainLineBoxes' | 'libreOfficeLineBoxes' | 'libreOfficeWordFarEastBoxes'> | undefined,
   lineGridActive: boolean,
 ): FontLineBoxProjection {
   if (lineGridActive) return service?.plainLineBoxes === true ? 'plain' : 'word';
-  return service?.libreOfficeLineBoxes === true ? 'libreoffice' : 'word';
+  if (service?.libreOfficeLineBoxes !== true) return 'word';
+  return service.libreOfficeWordFarEastBoxes === true ? 'libreoffice-word-far-east' : 'libreoffice';
 }
 
 const libreOfficeResourceMetrics = new WeakMap<ResolvedFontMetric, ResolvedFontMetric>();
@@ -27,7 +28,9 @@ export function projectedResourceMetric(
   metric: ResolvedFontMetric | undefined,
   projection: FontLineBoxProjection,
 ): ResolvedFontMetric | undefined {
-  if (projection !== 'libreoffice' || !metric || metric.normalLineGapRatio === undefined
+  if (!(projection === 'libreoffice'
+      || (projection === 'libreoffice-word-far-east' && metric?.farEastCodePage !== true))
+    || !metric || metric.normalLineGapRatio === undefined
     || metric.normalAscentRatio === undefined || metric.normalDescentRatio === undefined) return metric;
   let projected = libreOfficeResourceMetrics.get(metric);
   if (!projected) {

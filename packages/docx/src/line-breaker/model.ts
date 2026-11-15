@@ -398,6 +398,9 @@ export interface LayoutTextSeg extends LayoutSegSource {
 export interface LayoutTabSeg extends LayoutSegSource {
   isTab: true;
   fontSize: number;  // pt — for line-height purposes
+  /** LIBREOFFICE_FONT_LINE_BOX: the tab adds no synthetic ascent or descent;
+   * the line's text (or, alone, the line's own synthesized box) sizes it. */
+  textOwnedLineBox?: true;
   measuredWidth: number;
   /** Queue-resolved reading-frame gap. The bidi post-pass must preserve the
    * same gap that ordinary text fitting consumed, including a collapsed

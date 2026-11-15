@@ -36,6 +36,10 @@ pub(super) struct LayoutFlags {
     /// JustifyLinesWithShrinking: justification may also compress spaces
     /// (LibreOffice's emulation of Word's mode-15 justification).
     pub shrink: bool,
+    /// MsWordCompGridMetrics: LibreOffice's Word-compatible line metrics,
+    /// set on documents imported from Word. Lines in Far East faces then
+    /// take a Word-like box instead of the face's own normal line.
+    pub word_grid_metrics: bool,
 }
 
 pub(super) fn read_settings(root: roxmltree::Node<'_, '_>) -> Result<LayoutFlags, String> {
@@ -64,6 +68,7 @@ pub(super) fn read_settings(root: roxmltree::Node<'_, '_>) -> Result<LayoutFlags
             Some("BalanceSpacesAndIdeographicSpaces") => flags.balance = value,
             Some("TabsRelativeToIndent") => flags.tabs_relative = Some(value),
             Some("JustifyLinesWithShrinking") => flags.shrink = value,
+            Some("MsWordCompGridMetrics") => flags.word_grid_metrics = value,
             _ => {}
         }
     }

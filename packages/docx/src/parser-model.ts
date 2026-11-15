@@ -278,6 +278,9 @@ export interface ProducerDocumentSettings {
    *  below a page's bottom, as LibreOffice lays lines out
    *  (LIBREOFFICE_FONT_LINE_BOX, LIBREOFFICE_PROPORTIONAL_LINE_PAGE_FIT). */
   readonly __libreOfficeLineBoxes?: boolean;
+  /** With `__libreOfficeLineBoxes`: lines in a Far East face keep Word's
+   *  projection (LibreOffice's MsWordCompGridMetrics). */
+  readonly __libreOfficeWordFarEastBoxes?: boolean;
 }
 
 /** The producer settings of a model; none is set for a DOCX document. */

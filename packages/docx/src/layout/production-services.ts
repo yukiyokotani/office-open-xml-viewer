@@ -212,7 +212,7 @@ export function createProductionTextLayoutService(
   // exactly as an installed or embedded face with the same tables.
   const sourceMetrics = options.sourceFonts || options.servedFaceLines
     ? sourceFontLineMetrics(options.sourceFonts, fontSet, options.servedFaceLines,
-      source.fonts.libreOfficeLineBoxes === true) : {};
+      source.fonts.libreOfficeLineBoxes === true, source.fonts.libreOfficeWordFarEastBoxes === true) : {};
   const appFaceIdentities = new Set(Object.values(sourceMetrics)
     .flatMap((metric) => metric.sourceIdentity?.startsWith('app-face:') ? [metric.sourceIdentity] : []));
   const fontMetrics = snapshotFontMetrics({
@@ -456,6 +456,7 @@ export function createProductionTextLayoutService(
     fontMetrics,
     ...(source.fonts.plainLineBoxes ? { plainLineBoxes: true } : {}),
     ...(source.fonts.libreOfficeLineBoxes ? { libreOfficeLineBoxes: true } : {}),
+    ...(source.fonts.libreOfficeWordFarEastBoxes ? { libreOfficeWordFarEastBoxes: true } : {}),
     eastAsiaFontCharsets: fontFamilyCharsets,
     ...(() => {
       // Symbol-encoded text (core symbol-font.ts) is judged by the core oracle

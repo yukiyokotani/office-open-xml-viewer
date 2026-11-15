@@ -646,6 +646,14 @@ pub struct DocumentSettings {
         skip_serializing_if = "std::ops::Not::not"
     )]
     pub libre_office_line_boxes: bool,
+    /// Private producer flag (never set by the DOCX parsers), with
+    /// `libre_office_line_boxes`: lines in a Far East face keep Word's
+    /// projection (LibreOffice's MsWordCompGridMetrics).
+    #[serde(
+        rename = "__libreOfficeWordFarEastBoxes",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    pub libre_office_word_far_east_boxes: bool,
 }
 
 /// Single track-changes event extracted from a body revision wrapper.

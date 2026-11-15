@@ -9,7 +9,7 @@ import { libreOfficeLineBox, libreOfficeNormalLine, wordOpenTypeAutoLineRatios }
  * plain hhea box of a producer's grid-snapped lines (`plainLineBoxes`), or
  * LIBREOFFICE_FONT_LINE_BOX for a producer's unsnapped lines
  * (`libreOfficeLineBoxes`). */
-export type FontLineBoxProjection = 'word' | 'plain' | 'libreoffice';
+export type FontLineBoxProjection = 'word' | 'plain' | 'libreoffice' | 'libreoffice-word-far-east';
 
 export interface ReferenceFontLineMetrics {
   readonly lineHeightRatio: number;
@@ -20,7 +20,7 @@ export interface ReferenceFontLineMetrics {
 }
 
 const projectedProfiles: Record<FontLineBoxProjection, WeakMap<object, ReferenceFontLineMetrics | null>> = {
-  word: new WeakMap(), plain: new WeakMap(), libreoffice: new WeakMap(),
+  word: new WeakMap(), plain: new WeakMap(), libreoffice: new WeakMap(), 'libreoffice-word-far-east': new WeakMap(),
 };
 
 // Layout asks for the same few (family, weight, style) tuples for every text
@@ -100,7 +100,10 @@ function project(profile: ReferenceFontMetricProfile, projection: FontLineBoxPro
   const plain = projection === 'plain';
   // The catalog cannot prove the installed/painted face. Its class is used
   // only as vertical reference geometry, and unknown OS/2 data is declined.
-  const normal = projection === 'libreoffice' ? libreOfficeNormalLine({
+  // 'libreoffice-word-far-east' keeps Word's projection for a Far East face.
+  const libreOffice = projection === 'libreoffice'
+    || (projection === 'libreoffice-word-far-east' && profile.farEastCodePage !== true);
+  const normal = libreOffice ? libreOfficeNormalLine({
     unitsPerEm: profile.unitsPerEm,
     hhea: profile.hhea,
     ...(profile.win ? { win: profile.win } : {}),
