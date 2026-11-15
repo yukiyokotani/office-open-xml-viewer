@@ -907,10 +907,21 @@ export function finalizeBuiltSegments(
   retainClosingPairAdvances(runs, environment, segs);
 }
 
+/** Paragraphs LIBREOFFICE_FONT_LINE_BOX leaves on Word's projection, as
+ * before the rule: text in a vertical text box (only horizontal lines were
+ * measured). */
+export function keepsWordLineBoxes(runs: readonly ParagraphLayoutRun[]): boolean {
+  return runs.some((run) => (run as { textBoxVertical?: boolean }).textBoxVertical === true);
+}
+
 export function buildSegments(
   runs: readonly ParagraphLayoutRun[],
   environment: LineLayoutEnvironment,
 ): LayoutSeg[] {
+  if (environment.layoutServices?.text.libreOfficeLineBoxes === true && environment.wordLineBoxes === undefined
+    && keepsWordLineBoxes(runs)) {
+    environment = { ...environment, wordLineBoxes: true };
+  }
   const segs: LayoutSeg[] = [];
   const selectedFontMetrics =
     environment.layoutServices?.text.fontMetrics ??
@@ -1521,14 +1532,14 @@ function emitResolvedTextSegment(
       environment.layoutServices ? { text: environment.layoutServices.text, probe: text,
         ...(textShapeRequest.baseDirection !== undefined ? { baseDirection: textShapeRequest.baseDirection } : {}) } : undefined,
       fontLineBoxProjection(environment.layoutServices?.text, environment.lineGridActive === true,
-        environment.verticalCJK === true));
+        environment.verticalCJK === true || environment.wordLineBoxes === true));
   // LIBRARY_SYNTHESIZED_FACE_LINE_GEOMETRY does not extend to the East Asian
   // floor of a run painted in another slot (see that rule's scope).
   const { lineMetric: eaLineMetric } = selectedFontLineMetric(eaResolution, localEaFloor, naturalMetricAllowed,
       allowsReferenceFontMetric(indexedFontMetrics(environment.layoutServices?.text.fontMetrics
         ?? environment.layoutServices?.text.localMetrics ?? {}), eaResolution), undefined,
       fontLineBoxProjection(environment.layoutServices?.text, environment.lineGridActive === true,
-        environment.verticalCJK === true));
+        environment.verticalCJK === true || environment.wordLineBoxes === true));
   const resolvedEaFloorFamily =
     eaResolution?.resolvedFamily ?? localEaFloor?.family ?? eaFontFamily;
   // WORD_USE_FE_LAYOUT_INHERITED_GRID_MINIMUM was observed for an active
@@ -1984,7 +1995,7 @@ function appendRunsToSegments(
             // LIBREOFFICE_FONT_LINE_BOX: a tab portion takes its own face's
             // box, not the synthetic em box.
             ...(environment.layoutServices?.text.libreOfficeLineBoxes === true && environment.lineGridActive !== true
-              && environment.verticalCJK !== true
+              && environment.verticalCJK !== true && environment.wordLineBoxes !== true
               ? tabFaceLineBox(t, environment, selectedMetric) : {}),
             bold: t.bold,
             italic: t.italic,
@@ -2180,7 +2191,7 @@ function appendRunsToSegments(
       const resourceMetric = naturalMetricAllowed || localFont?.designAscentRatio == null
         ? projectedResourceMetric(localFont,
           fontLineBoxProjection(environment.layoutServices?.text, environment.lineGridActive === true,
-        environment.verticalCJK === true))
+        environment.verticalCJK === true || environment.wordLineBoxes === true))
         : undefined;
       const referenceMetric =
         naturalMetricAllowed && !resourceMetric && mayUseAuthoredReferenceVerticalMetric(selected)
@@ -2191,7 +2202,7 @@ function appendRunsToSegments(
           // evidence, so only an exact catalogued tuple lends its geometry.
           ? referenceFontLineMetrics(selected.requestedFamily, weight, style,
             fontLineBoxProjection(environment.layoutServices?.text, environment.lineGridActive === true,
-        environment.verticalCJK === true))
+        environment.verticalCJK === true || environment.wordLineBoxes === true))
           : undefined;
       const familyLineMetric = resourceMetric ?? referenceMetric;
       segs.push({

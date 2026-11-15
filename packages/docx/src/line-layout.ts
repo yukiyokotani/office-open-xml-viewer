@@ -17,7 +17,7 @@ export { docGridLineCells, eastAsianGridCountSinglePx, lineBoxHeight, emptyLineN
 export { splitSmallCapsCase, type NoteNumbering, formatNoteNumber, findNearbyFontSize, resolveFieldText, hasCJKBreakOpportunity, isRtlBidiLang, splitByComplexScript, splitByEastAsia, splitDigitGroups, splitTextForLayout } from './line-breaker/text-runs.js';
 export { fitCJKPrefix } from './line-breaker/fit-search.js';
 export { DEFAULT_TAB_PT, resolveDefaultTabPt, type BidiTabItem, type BidiTabResult, layoutBidiTabStops } from './line-breaker/tabs.js';
-export { buildSegments } from './line-breaker/segment-builder.js';
+export { buildSegments, keepsWordLineBoxes } from './line-breaker/segment-builder.js';
 
 /** WORD_JUSTIFIED_INTERWORD_COMPRESSION for the paragraph; the object form
  * also says whether a line-end U+3000 hangs from the visible fit

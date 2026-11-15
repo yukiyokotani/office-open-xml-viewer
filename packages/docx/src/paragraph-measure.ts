@@ -8,6 +8,7 @@ import {
 } from './layout-context.js';
 import {
   buildSegments,
+  keepsWordLineBoxes,
   getDefaultFontSize,
   isGridLineRule,
   layoutLines,
@@ -346,7 +347,7 @@ export function measureParagraph(
         : textMarkerMarkBelowBaselinePt(markAdvancePt, markMetrics.ascentPx, markMetrics.descentPx),
       markGridAfterLeadingPt: markMetrics.gridAfterLeadingPx,
       ...(environment.layoutServices?.text.libreOfficeLineBoxes === true && !context.lineGrid.active
-        && environment.verticalPageFrame !== true
+        && environment.verticalPageFrame !== true && !keepsWordLineBoxes(paragraph.runs)
         && context.lineSpacing?.rule === 'auto' && context.lineSpacing.value > 1
         ? { markPageEdgeOverhangPt: Math.max(0, markAdvancePt - Math.max(
           markMetrics.ascentPx + markMetrics.descentPx, markMetrics.intendedSinglePx)) }

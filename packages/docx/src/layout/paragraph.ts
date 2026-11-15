@@ -72,6 +72,7 @@ import type {
   DocGridCtx,
 } from '../line-layout.js';
 import {
+  keepsWordLineBoxes,
   effectiveCharacterSpacingPt,
   lineBoxHeight,
   getDefaultFontSize,
@@ -3925,6 +3926,9 @@ function planMeasuredLines(
     && /^[+\-(]?[\d., ]+\)?%?$/u.test(visibleText)
       ? earliestTab.pos - context.physicalIndentLeftPt
       : undefined;
+  // LIBREOFFICE_FONT_LINE_BOX scope (keepsWordLineBoxes).
+  const libreOfficeLines = textService?.libreOfficeLineBoxes === true && !verticalPageFrame
+    && !keepsWordLineBoxes(paragraph.runs as readonly import('./text.js').ParagraphLayoutRun[]);
   const specifiedParagraph = specifiedTextParagraphIsHomogeneous(paragraph,
     context.lineGrid.active || !compat.specifiedTextLineBoxMode15);
   return retainPhysicalLines(measured.lines.map((measuredLine, lineIndex) => {
@@ -3976,7 +3980,7 @@ function planMeasuredLines(
         ? measuredLine.topYPt + context.lineSpacing!.value * 4 / 5
         : atLeastRubyLine
           ? measuredLine.topYPt + measuredLine.advancePt - (raw.visibleDescent ?? raw.descent)
-          : plannedBaselinePt(measuredLine, context, textService?.libreOfficeLineBoxes === true && !verticalPageFrame);
+          : plannedBaselinePt(measuredLine, context, libreOfficeLines);
     let lineStartOffset = Number.POSITIVE_INFINITY;
     let lineEndOffset = sourceOffset;
     const segments: MeasuredLinePlanSegment[] = [];
@@ -4252,8 +4256,7 @@ function planMeasuredLines(
     // LIBREOFFICE_PROPORTIONAL_LINE_PAGE_FIT: an unsnapped proportional
     // line of a LibreOffice producer needs only its natural line at a page
     // bottom; the multiple's extra space may hang below it.
-    const pageEdgeOverhangPt = !context.lineGrid.active && textService?.libreOfficeLineBoxes === true
-      && !verticalPageFrame
+    const pageEdgeOverhangPt = !context.lineGrid.active && libreOfficeLines
       && context.lineSpacing?.rule === 'auto' && context.lineSpacing.value > 1
       ? Math.max(0, measuredLine.advancePt - lineBoxHeight(
         null, raw.ascent, raw.descent, 1, undefined, context.hasRuby, raw.intendedSingle,

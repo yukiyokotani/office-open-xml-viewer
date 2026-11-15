@@ -776,6 +776,9 @@ export interface LineLayoutEnvironment {
   readonly noteNumbering?: NoteNumbering;
   readonly noteReferenceNumber?: number;
   readonly verticalCJK?: boolean;
+  /** The paragraph keeps Word's line boxes under a LibreOffice producer
+   * (keepsWordLineBoxes). */
+  readonly wordLineBoxes?: boolean;
   /** Owner section's counter-turn for upright inline graphics; maps their
    *  physical §20.4.2.6 effect edges onto the logical line axes. */
   readonly uprightResourceOrientation?: import('../layout/types.js').UprightResourceOrientation;
