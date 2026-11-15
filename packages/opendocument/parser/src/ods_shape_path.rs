@@ -12,7 +12,7 @@
 use crate::xml::{self, NS_DRAW, NS_SVG};
 use xlsx_model::{PathCmd, PathInfo};
 
-const NS_DRAWOOO: &str = "http://openoffice.org/2010/draw";
+use crate::xml::NS_DRAWOOO;
 /// Implementation bounds: equations per shape, nesting depth of one
 /// evaluation (parentheses, signs, function arguments and equation
 /// references together), path commands per shape. A shape over any of them

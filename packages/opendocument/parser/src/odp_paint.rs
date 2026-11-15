@@ -785,11 +785,9 @@ pub fn line<'a>(props: &Props<'a>, sheet: &Sheet<'a>) -> Line<'a> {
     } else {
         width_emu.round() as i64
     };
-    let line_cap = props.get(NS_SVG, "stroke-linecap").map(|cap| match cap {
-        "round" => "round".to_string(),
-        "square" => "square".to_string(),
-        _ => "butt".to_string(),
-    });
+    let line_cap = props
+        .get(NS_SVG, "stroke-linecap")
+        .map(|cap| crate::odf_props::stroke_line_cap(cap).to_string());
     let line_join = props
         .get(NS_DRAW, "stroke-linejoin")
         .and_then(|join| match join {

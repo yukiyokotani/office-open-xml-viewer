@@ -12,7 +12,7 @@ use crate::error::invalid;
 use crate::odp_units::{length_emu, EMU_PER_HMM};
 use std::collections::HashMap;
 
-pub const NS_DRAWOOO: &str = "http://openoffice.org/2010/draw";
+use crate::xml::NS_DRAWOOO;
 
 /// Implementation bound on the segments one shape may emit (all paths).
 pub const MAX_SEGMENTS_PER_SHAPE: usize = 200_000;
