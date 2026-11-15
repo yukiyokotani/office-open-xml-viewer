@@ -37,10 +37,12 @@
  *    precedence is independent of the order demand arrives in. A face that
  *    cannot be fetched (network, status, deadline, size or retained-byte
  *    ceiling) is dropped and its family warned;
- * 4. **loads** (`FontFace.load()`) only faces whose `unicode-range`
- *    intersects the demanded scalars (every face for `'all'`, and faces
- *    without a range always). Canvas never triggers a load itself, so an
- *    unloaded face paints nothing; later deltas load further subsets;
+ * 4. **loads** (`FontFace.load()`) faces whose `unicode-range` intersects
+ *    the demanded scalars (every face for `'all'`, and faces without a range
+ *    always); a face registered from its URL loads with its registration, as
+ *    a face built from bytes does, and its failure is reported only once the
+ *    demand reaches it. Canvas never triggers a load itself, so an unloaded
+ *    face paints nothing; later deltas load further subsets;
  * 5. **snapshots** {@link LoadedFontSources}: the faces that actually loaded,
  *    the substitutions whose served face loaded, and regular-name aliases.
  *
@@ -1067,9 +1069,13 @@ export class FontSourceSession {
    * `url` face is fetched by the library (CORS, one request per face), with
    * the source's `credentials` for a stylesheet or file source and through
    * the resolver acquirer for a {@link fontResolver} answer (the page fetches
-   * it, in both modes, with the CSS font-loading credentials), and is
-   * registered from those bytes, so its tables can be read and the file is
-   * downloaded once. Downloads are shared with other sessions of this realm
+   * it, in both modes, with the CSS font-loading credentials), and the
+   * library keeps those bytes, so its tables can be read. The face is
+   * registered from them, or, beyond a pass's first
+   * {@link URL_REGISTRATION_MIN_BYTES} of a preset's stated file host, from
+   * its URL ({@link registersFromUrl}: a second request, answered from the
+   * HTTP cache when the engine keeps one). Downloads are shared with other
+   * sessions of this realm
    * while any of them holds them. A face that cannot be fetched is dropped
    * and its family warned; the family stays claimed (a claimed face that
    * fails never promotes another source or substitute). Returns whether a
