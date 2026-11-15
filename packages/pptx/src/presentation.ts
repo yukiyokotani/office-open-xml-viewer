@@ -2,7 +2,7 @@ import { loadFontDemandCollector } from './font-demand-collector.js';
 import { fontDemandCollectorUrl } from './font-demand-collector-url.js';
 import { officeFaceWeight } from './powerpoint-line-metrics.js';
 import { resolveCjkFallback, type CjkLang } from '@silurus/ooxml-core';
-import type { DimOptions, PptxComment } from './types';
+import type { DimOptions, PptxComment, Slide } from './types';
 import {
   renderSlideWithEmbeddedFonts,
   dropImageBitmapCache,
@@ -651,10 +651,16 @@ export class PptxPresentation {
     // Preflight deliberately drains one transferred unit at a time without
     // decoding it in Window. The worker prepares compact facts from the same
     // unit and publishes them only when this consumer ACKs it.
+    // The opening slide is the exception: its unit is already here, so the
+    // window decodes it and the repository below starts with it. Its first
+    // render then needs no second pull (a parse and a transfer in the worker)
+    // after the fonts are ready.
+    let openingSlide: Slide | undefined;
     let finished: Extract<PptxWorkerResponse, { kind: 'presentationPreflightReady' }>;
     try {
       for (let slideIndex = 0; slideIndex < bootstrap.slideCount; slideIndex += 1) {
-        await this._slidePullClient.load(slideIndex, false, timeoutMs);
+        const slide = await this._slidePullClient.load(slideIndex, slideIndex === 0, timeoutMs);
+        if (slideIndex === 0) openingSlide = slide;
       }
       finished = await this._bridge.request(
         (id) => ({ kind: 'finishPresentationPreflight', id }) satisfies PptxWorkerRequest,
@@ -676,11 +682,20 @@ export class PptxPresentation {
       maxCachedSlides: HARD_MAX_PPTX_CACHED_SLIDES,
       maxCachedStructuralBytes: HARD_MAX_PPTX_CACHED_SLIDE_PROJECTION_BYTES,
       loadSlide: async (slideIndex) => {
+        if (slideIndex === 0 && openingSlide) {
+          const slide = openingSlide;
+          openingSlide = undefined;
+          return slide;
+        }
         const slide = await this._slidePullClient?.load(slideIndex, true, timeoutMs);
         if (!slide) throw new Error('PPTX slide pull client is unavailable');
         return slide;
       },
     });
+    // Admitted now, under the repository's own ceilings like any loaded slide
+    // (a slide over them is not retained and is pulled again when rendered),
+    // so the decoded slide is never held outside that bounded cache.
+    if (openingSlide) void this._slides.withSlide(0, () => undefined).catch(() => undefined);
   }
 
   private async _parseMainProgressively(

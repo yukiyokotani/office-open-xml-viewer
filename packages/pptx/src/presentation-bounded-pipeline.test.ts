@@ -37,7 +37,7 @@ function pullResponse(
 }
 
 describe('PptxPresentation bounded main-mode pipeline', () => {
-  it('preflights sequentially, retains compact synchronous facts, and reloads a slide on demand', async () => {
+  async function parseDeck() {
     const pullCommands: PullSessionCommand<number>[] = [];
     let pullRequestId = 1;
     const transport: WorkerBridgeTransport<PullResponse> = {
@@ -45,8 +45,10 @@ describe('PptxPresentation bounded main-mode pipeline', () => {
         const command = build(pullRequestId++) as PullSessionCommand<number>;
         pullCommands.push(command);
         if (command.kind === 'pull') {
+          const opened = ordinary.find((request) =>
+            request.kind === 'openSlideSession' && request.sessionId === command.sessionId);
           const payload = new TextEncoder().encode(
-            JSON.stringify(slide(command.sessionId <= 2 ? command.sessionId - 1 : 0)),
+            JSON.stringify(slide(opened?.kind === 'openSlideSession' ? opened.slideIndex : -1)),
           ).buffer;
           return pullResponse(command, {
             kind: 'chunk',
@@ -145,7 +147,12 @@ describe('PptxPresentation bounded main-mode pipeline', () => {
     await (presentation as unknown as {
       _parse(buffer: ArrayBuffer, policy: Policy): Promise<void>;
     })._parse(new ArrayBuffer(4), policy);
+    const opens = () => ordinary.filter((request) => request.kind === 'openSlideSession').length;
+    return { compact, instance, opens, ordinary, presentation, pullCommands, repository: instance._slides as PptxSlideRepository };
+  }
 
+  it('preflights sequentially, retains compact synchronous facts, and reloads a slide on demand', async () => {
+    const { compact, instance, ordinary, presentation, pullCommands, repository } = await parseDeck();
     expect(presentation.slideCount).toBe(2);
     expect(presentation.getNotes(0)).toBe('speaker note');
     // A notes-free slide, an out-of-range index and a non-integer index are
@@ -162,10 +169,31 @@ describe('PptxPresentation bounded main-mode pipeline', () => {
     );
     expect(pullCommands.filter((command) => command.kind === 'ack')).toHaveLength(2);
 
-    const repository = instance._slides as PptxSlideRepository;
+    // The opening slide was kept from its preflight transfer: no second pull.
     await expect(repository.withSlide(0, (value) => value)).resolves.toEqual(slide(0));
+    expect(ordinary.filter((request) => request.kind === 'openSlideSession')).toHaveLength(2);
+    await expect(repository.withSlide(1, (value) => value)).resolves.toEqual(slide(1));
     expect(ordinary.filter((request) => request.kind === 'openSlideSession')).toHaveLength(3);
     expect(pullCommands.filter((command) => command.kind === 'ack')).toHaveLength(3);
+    // The kept slide is admitted once: a cleared repository pulls it again.
+    repository.clear();
+    await expect(repository.withSlide(0, (value) => value)).resolves.toEqual(slide(0));
+    expect(ordinary.filter((request) => request.kind === 'openSlideSession')).toHaveLength(4);
     expect(instance._presentation).toBeUndefined();
+  });
+
+  it('holds the kept opening slide only in the bounded repository cache', async () => {
+    const { opens, repository } = await parseDeck();
+    // Admitted without a request for it: one retained slide, nothing pending.
+    await repository.withSlide(1, () => undefined);
+    expect(opens()).toBe(3);
+    const { entries, weight } = repository.usage;
+    expect(entries).toBe(2);
+    expect(weight).toBeGreaterThan(0);
+    // Nothing else holds it: once the cache drops it, its first use pulls it.
+    repository.clear();
+    expect(repository.usage).toEqual({ entries: 0, weight: 0, pending: 0 });
+    await expect(repository.withSlide(0, (value) => value)).resolves.toEqual(slide(0));
+    expect(opens()).toBe(4);
   });
 });

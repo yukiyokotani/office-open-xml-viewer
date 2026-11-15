@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { TextRunData } from '@silurus/ooxml-core';
-import { collectFontDemandScalars } from '@silurus/ooxml-core/internal/font-scalar-demand';
+import { FontDemandScalarCollector, collectFontDemandScalars } from '@silurus/ooxml-core/internal/font-scalar-demand';
 import { collectSlideFontDemand } from './font-preload-demand.js';
 import { formatAutoNum } from './autonum-label.js';
 import { PresentationPreflightBuilder, normalizePresentationPreflight } from './presentation-preflight.js';
@@ -93,6 +93,72 @@ describe('complete conservative PPTX paint demand', () => {
     (marker.elements[0] as unknown as { textBody: { paragraphs: Array<{ bullet: unknown }> } }).textBody.paragraphs[0].bullet =
       { type: 'blip', imagePath: 'ppt/media/image3.png', mimeType: 'image/png' };
     expect(collectSlideFontDemand(marker, new Set(), 10000)).toEqual(plain);
+  });
+
+  it('finds an image path at any depth of an element, through arrays and null entries', () => {
+    const plain = collectSlideFontDemand(slide('A'), new Set(), 10000);
+    const nested = (image: unknown): Slide => ({ ...slide('A'), elements: [...slide('A').elements,
+      { type: 'shape', textBody: null, fill: { layers: [null, 3, 'text', [{ stops: [{ tile: image }] }]] } }] } as unknown as Slide);
+    expect(collectSlideFontDemand(nested({ imagePath: 'ppt/media/a.png', mimeType: 'image/png' }), new Set(), 10000)).toEqual(plain);
+    expect(collectSlideFontDemand(nested({ imagePath: 'ppt/media/a.emf', mimeType: 'image/emf' }), new Set(), 10000)).toBe('all');
+    expect(collectSlideFontDemand(nested({ imagePath: '', mimeType: null }), new Set(), 10000)).toBe('all');
+    expect(collectSlideFontDemand(nested({ posterPath: 'ppt/media/p.wmf', posterMimeType: 'image/wmf' }), new Set(), 10000)).toBe('all');
+    expect(collectSlideFontDemand(nested({ posterPath: '', posterMimeType: '' }), new Set(), 10000)).toEqual(plain);
+    // Not a path: only a string under the key names an image part.
+    expect(collectSlideFontDemand(nested({ imagePath: { mimeType: 'image/emf' } }), new Set(), 10000)).toEqual(plain);
+  });
+
+  it('collects a text repeated on a slide once for plain faces and again for a symbol-encoded face', () => {
+    const runs = (...list: Array<Partial<TextRunData>>): Slide => ({ index: 0, slideNumber: 1, background: null, elements: [{ type: 'shape', textBody: {
+      vert: 'horz', paragraphs: [{ bullet: { type: 'inherit' }, runs: list.map((run) => ({ type: 'text', ...run })) }],
+    } }] } as Slide);
+    const repeated = collectSlideFontDemand(
+      runs({ text: 'l' }, { text: 'l', fontFamily: 'Arial' }, { text: 'l', fontFamily: 'Wingdings' }, { text: 'l' }), new Set(), 10000);
+    expect(repeated).toEqual(collectSlideFontDemand(runs({ text: 'l' }, { text: 'l', fontFamily: 'Wingdings' }), new Set(), 10000));
+    expect(repeated).toEqual(expect.arrayContaining([0x6c, 0xf06c, 0x25cf]));
+    // The symbol test is per authored name: the same name in either slot.
+    expect(collectSlideFontDemand(runs({ text: 'l' }, { text: 'l', fontFamilySym: 'Wingdings' }), new Set(), 10000)).toEqual(repeated);
+    // A repeated text that declines still declines.
+    expect(collectSlideFontDemand(runs({ text: 'A' }, { text: 'A' }, { text: '\uf0a7' }), new Set(), 10000)).toBe('all');
+
+    // Exactly the shared collector's answer for the same texts, each added
+    // every time it occurs: the same scalars in the same order, under any
+    // budget and committed set. Leading combining marks (closed with every
+    // starter at the end), marks after a starter, decomposable text, Arabic
+    // letters and mirrored characters all keep state in the collector.
+    const committed = new Set([0x41, 0x301]);
+    for (const texts of [
+      ['\u0301', 'a', '\u0301', 'a', '\u0301'],
+      ['\u3099', '\u304b', '\u3099', '\u304b\u3099', '\u304c', '\u304b'],
+      ['e\u0301', 'e', '\u0301', 'e\u0301', '\u00e9'],
+      ['\u0639', '(', '\u0639', ')', '(', '\u0644\u0627', '\u0639'],
+      ['AB', 'AB', 'A', 'B', '', '', 'AB'],
+    ]) {
+      for (const budget of [2, 9, 14, 40, 10000]) {
+        for (const prior of [new Set<number>(), committed]) {
+          const expected = new FontDemandScalarCollector({ budget, committed: prior });
+          for (const text of texts) if (!expected.add(text)) break;
+          expect(collectSlideFontDemand(runs(...texts.map((text) => ({ text }))), prior, budget),
+            `${JSON.stringify(texts)} @${budget}`).toEqual(expected.result());
+        }
+      }
+    }
+
+    // A run without a face paints in the theme's minor face, whatever its
+    // (absent or empty) a:sym slot: symbol-encoded here, plain otherwise.
+    const themed = (minorFont: string, ...list: Array<Partial<TextRunData>>): Slide =>
+      ({ ...runs(...list), theme: { majorFont: 'Arial', minorFont } }) as Slide;
+    for (const sym of [undefined, null, '']) {
+      const list = [{ text: 'l', fontFamilySym: sym }, { text: 'l', fontFamily: null, fontFamilySym: sym },
+        { text: 'l', fontFamily: '+mj-lt', fontFamilySym: sym }] as unknown as Array<Partial<TextRunData>>;
+      const symbol = new FontDemandScalarCollector({ budget: 10000 });
+      symbol.addSymbolText('l', ['Wingdings', sym]);
+      symbol.addSymbolText('l', ['Wingdings', sym]);
+      symbol.addSymbolText('l', ['Arial', sym]);
+      expect(collectSlideFontDemand(themed('Wingdings', ...list), new Set(), 10000)).toEqual(symbol.result());
+      expect(collectSlideFontDemand(themed('Calibri', ...list), new Set(), 10000))
+        .toEqual(collectFontDemandScalars(['l'], { budget: 10000 }));
+    }
   });
 
   it('demands every label an auto-number scheme can paint, in its marker face', () => {
