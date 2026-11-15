@@ -38,7 +38,7 @@ import type {
 import { blipEffectsMayExtendCoverage, blipPixelEffectsKey, imageEffectFrame, stretchedSourceFrame, type BlipEffect, type BlipPixelEffects } from '@silurus/ooxml-core';
 import { usesPathShade, trackPaintPath, currentStrokeBounds, chartImageFillStoreLookup, paintOptionalImagePlaceholder, pathFillModeOverlay, withDrawingMLShapeTransform, buildPresetGeometryFillPath } from '@silurus/ooxml-core';
 import { placePhoneticRuns } from './phonetic.js';
-import { crispOffset, renderChart, renderSparkline, renderPresetShape, createAuxCanvas, PT_TO_PX, EMU_PER_PX, mathToMathML, rasterizeMathSvg, cachedTintedMathRaster, classifyCjkFont, classifyFontGeneric, cjkFallbackChain, NON_CJK_SANS_FALLBACKS, NON_CJK_SERIF_FALLBACKS, isCjkBreakChar, xlsxBorderDashArray, drawImageCropped, hexToRgba, verticalTrLongMark, verticalVertGlyphReachable, applyStroke, resolveFill, type SparklineModel, type MathNode, type MathRenderer, type RasterizedMathSvg } from '@silurus/ooxml-core';
+import { crispOffset, renderChart, renderSparkline, renderPresetShape, createAuxCanvas, PT_TO_PX, EMU_PER_PX, mathToMathML, rasterizeMathSvg, cachedTintedMathRaster, classifyCjkFont, classifyFontGeneric, cjkFallbackChain, NON_CJK_SANS_FALLBACKS, NON_CJK_SERIF_FALLBACKS, isCjkBreakChar, xlsxBorderDashArray, drawImageCropped, hexToRgba, verticalTrLongMark, verticalVertGlyphReachable, applyStroke, resolveFill, getConnectorAnchors, drawArrowHead, resolveArrowPaint, lineEndRetract, traceTrimmedPath, tracePresetLeader, EMU_PER_PT, type SparklineModel, type MathNode, type MathRenderer, type RasterizedMathSvg } from '@silurus/ooxml-core';
 import {
   canvasShapeFontBoxProbe, excelShapeSpacing, officeRequestKey, shapeOfficeRouteKey, shapeRunLineRatios,
   type ShapeRunLineRatios,
@@ -5156,6 +5156,72 @@ function appendSpreadsheetShapeOutline(
   }
 }
 
+const CONNECTOR_GEOMS = new Set([
+  'line', 'straightconnector1',
+  'bentconnector2', 'bentconnector3', 'bentconnector4', 'bentconnector5',
+  'curvedconnector2', 'curvedconnector3', 'curvedconnector4', 'curvedconnector5',
+]);
+
+/** Straight / bent connectors are re-stroked from their vertices, shortened at
+ *  each decorated end (same policy as the PPTX renderer). */
+function isRetractableConnector(geom: string): boolean {
+  return geom === 'line' || geom === 'straightconnector1' || geom.startsWith('bentconnector');
+}
+
+/** Head/tail decorations of a connector-like preset (`xdr:cxnSp` or a line
+ *  `xdr:sp`), or null when the shape carries none. Core measures the sizes. */
+function connectorLineEnds(shape: ShapeInfo): { geom: string; head: number; tail: number } | null {
+  if (shape.geom?.type !== 'preset') return null;
+  const geom = shape.geom.name.toLowerCase();
+  if (!CONNECTOR_GEOMS.has(geom)) return null;
+  const stroke = shapeStroke(shape);
+  if (!stroke) return null;
+  const scale = 1 / EMU_PER_PX;
+  const head = stroke.headEnd && stroke.headEnd.type !== 'none' ? lineEndRetract(stroke.headEnd, stroke, scale, EMU_PER_PT) : 0;
+  const tail = stroke.tailEnd && stroke.tailEnd.type !== 'none' ? lineEndRetract(stroke.tailEnd, stroke, scale, EMU_PER_PT) : 0;
+  const hasHead = !!stroke.headEnd && stroke.headEnd.type !== 'none';
+  const hasTail = !!stroke.tailEnd && stroke.tailEnd.type !== 'none';
+  return hasHead || hasTail ? { geom, head, tail } : null;
+}
+
+/** ECMA-376 §20.1.8.38 `a:headEnd` / `a:tailEnd`: paint the (retracted) leader
+ *  and the arrow decorations in the shape-local frame (0,0)-(sw,sh). */
+function drawConnectorLineEnds(
+  ctx: CanvasRenderingContext2D, shape: ShapeInfo,
+  ends: { geom: string; head: number; tail: number }, sw: number, sh: number,
+): void {
+  const stroke = shapeStroke(shape);
+  if (!stroke || shape.geom.type !== 'preset') return;
+  const scale = 1 / EMU_PER_PX;
+  const name = shape.geom.name;
+  const adj = shape.geom.adj ?? [];
+  const anchors = getConnectorAnchors(name, 0, 0, sw, sh, adj);
+  if (!anchors) return;
+  ctx.save();
+  applyStroke(ctx, stroke, scale);
+  ctx.beginPath();
+  if (isRetractableConnector(ends.geom) && anchors.vertices.length >= 2) {
+    const pts = anchors.vertices;
+    traceTrimmedPath(ctx, (sink) => {
+      sink.moveTo(pts[0].x, pts[0].y);
+      for (let i = 1; i < pts.length; i++) sink.lineTo(pts[i].x, pts[i].y);
+    }, ends.head, ends.tail);
+    ctx.stroke();
+  } else if (tracePresetLeader(ctx, name, 0, 0, sw, sh, adj, ends.head, ends.tail)) {
+    ctx.stroke();
+  }
+  ctx.restore();
+  const frame = { x: 0, y: 0, w: sw, h: sh };
+  const paint = (end: NonNullable<Stroke['tailEnd']>, tip: { x: number; y: number; angle: number }) => {
+    ctx.save();
+    drawArrowHead(ctx, tip.x, tip.y, tip.angle, end, stroke, scale, EMU_PER_PT,
+      resolveArrowPaint(ctx, stroke, scale, EMU_PER_PT, tip.x, tip.y, tip.angle, end, frame, shape.rot, scale * EMU_PER_PT));
+    ctx.restore();
+  };
+  if (stroke.tailEnd && stroke.tailEnd.type !== 'none') paint(stroke.tailEnd, anchors.end);
+  if (stroke.headEnd && stroke.headEnd.type !== 'none') paint(stroke.headEnd, anchors.start);
+}
+
 function drawShape(
   ctx: CanvasRenderingContext2D,
   shape: ShapeInfo,
@@ -5206,6 +5272,7 @@ function drawShape(
     const applyAndStroke = shape.strokeColor && shape.strokeWidth > 0
       ? () => strokeShapePath(ctx, shape, sw, sh, cs)
       : null;
+    const lineEnds = connectorLineEnds(shape);
     const drawn = renderPresetShape(
       ctx,
       shape.geom.name,
@@ -5225,8 +5292,12 @@ function drawShape(
       shape.fill?.fillType === 'hatch'
         || (shape.fill?.fillType === 'image' && (shape.fill.shift || shape.fill.alpha !== undefined))
         ? { paintFill: target => fillShape(target, shape, sw, sh, cs, baseFill) }
-        : undefined,
+        // A retractable connector is re-stroked shortened at its decorated ends.
+        : lineEnds && isRetractableConnector(lineEnds.geom) ? { skipTrailingStroke: true } : undefined,
     );
+    if (drawn && lineEnds) {
+      drawConnectorLineEnds(ctx, shape, lineEnds, sw, sh);
+    }
     if (!drawn) {
       ctx.beginPath();
       ctx.rect(0, 0, sw, sh);
