@@ -341,39 +341,51 @@ test('Try Yours loads only the selected experimental legacy reader', async ({ pa
 });
 
 // The OpenDocument readers follow the same rule as the legacy ones: nothing at
-// page load, then only the reader of the selected family (templates included).
-test('Try Yours loads only the selected OpenDocument reader', async ({ page }) => {
-  test.setTimeout(120_000);
-  const { buildOdtFixture } = await import('../../packages/opendocument/src/odt-fixture');
-  const { buildOdsFixture } = await import('../../packages/opendocument/src/ods-fixture');
-  const { buildOdpFixture } = await import('../../packages/opendocument/src/odp-fixture');
-  await page.route('https://fonts.googleapis.com/**', (route) => route.abort());
-  await page.route('https://fonts.gstatic.com/**', (route) => route.abort());
-  const requested: string[] = [];
-  const failures: string[] = [];
-  page.on('request', (request) => requested.push(request.url()));
-  page.on('pageerror', (error) => failures.push(error.message));
-  page.on('response', (response) => {
-    if (response.status() >= 400 && new URL(response.url()).origin === new URL(page.url()).origin) {
-      failures.push(`${response.status()} ${response.url()}`);
-    }
-  });
-  const fileName = (url: string) => new URL(url).pathname.split('/').pop() ?? '';
-  const odfRequests = () => requested.map(fileName)
-    .filter((name) => /^(?:od[tsp][-.]|odf-|opendocument_)/.test(name));
-  await page.goto('/try/');
-  await page.locator('#file').setInputFiles(docxSample);
-  await expect(page.locator('#status')).toContainText('rendered in', { timeout: 60_000 });
-  expect(odfRequests()).toEqual([]);
+// page load, then only the reader of the selected family. Every case runs in
+// its own page, so a reader another case loaded cannot be served from the
+// module cache, and templates carry their own media type.
+const odfBodies = {
+  odt: '<text:p>OpenDocument text</text:p>',
+  ods: '<table:table table:name="Sheet1"><table:table-row><table:table-cell office:value-type="string"><text:p>OpenDocument sheet</text:p></table:table-cell></table:table-row></table:table>',
+  odp: '<draw:page draw:name="page1"/>',
+};
+for (const [extension, family, format, mediaType] of [
+  ['odt', 'odt', 'docx', 'application/vnd.oasis.opendocument.text'],
+  ['ott', 'odt', 'docx', 'application/vnd.oasis.opendocument.text-template'],
+  ['ods', 'ods', 'xlsx', 'application/vnd.oasis.opendocument.spreadsheet'],
+  ['ots', 'ods', 'xlsx', 'application/vnd.oasis.opendocument.spreadsheet-template'],
+  ['odp', 'odp', 'pptx', 'application/vnd.oasis.opendocument.presentation'],
+  ['otp', 'odp', 'pptx', 'application/vnd.oasis.opendocument.presentation-template'],
+] as const) {
+  test(`Try Yours loads only the ${family.toUpperCase()} reader for .${extension}`, async ({ page }) => {
+    test.setTimeout(120_000);
+    const { buildOdtFixture } = await import('../../packages/opendocument/src/odt-fixture');
+    const { buildOdsFixture } = await import('../../packages/opendocument/src/ods-fixture');
+    const { buildOdpFixture } = await import('../../packages/opendocument/src/odp-fixture');
+    const bytes = family === 'odt'
+      ? buildOdtFixture({ body: odfBodies.odt, mediaType })
+      : family === 'ods'
+        ? buildOdsFixture({ body: odfBodies.ods, mediaType })
+        : buildOdpFixture({ pages: odfBodies.odp, mediaType });
+    await page.route('https://fonts.googleapis.com/**', (route) => route.abort());
+    await page.route('https://fonts.gstatic.com/**', (route) => route.abort());
+    const requested: string[] = [];
+    const failures: string[] = [];
+    page.on('request', (request) => requested.push(request.url()));
+    page.on('pageerror', (error) => failures.push(error.message));
+    page.on('response', (response) => {
+      if (response.status() >= 400 && new URL(response.url()).origin === new URL(page.url()).origin) {
+        failures.push(`${response.status()} ${response.url()}`);
+      }
+    });
+    const odfRequests = () => requested
+      .map((url) => new URL(url).pathname.split('/').pop() ?? '')
+      .filter((name) => /^(?:od[tsp][-.]|odf-|opendocument_)/.test(name));
+    await page.goto('/try/');
+    await page.locator('#file').setInputFiles(docxSample);
+    await expect(page.locator('#status')).toContainText('rendered in', { timeout: 60_000 });
+    expect(odfRequests()).toEqual([]);
 
-  for (const [extension, family, format, bytes] of [
-    ['odt', 'odt', 'docx', buildOdtFixture({ body: '<text:p>OpenDocument text</text:p>' })],
-    ['ots', 'ods', 'xlsx', buildOdsFixture({
-      body: '<table:table table:name="Sheet1"><table:table-row><table:table-cell office:value-type="string"><text:p>OpenDocument sheet</text:p></table:table-cell></table:table-row></table:table>',
-    })],
-    ['odp', 'odp', 'pptx', buildOdpFixture({ pages: '<draw:page draw:name="page1"/>' })],
-  ] as const) {
-    requested.length = 0;
     await page.locator('#file').setInputFiles({
       name: `example.${extension}`,
       mimeType: 'application/octet-stream',
@@ -388,6 +400,6 @@ test('Try Yours loads only the selected OpenDocument reader', async ({ page }) =
     for (const other of ['odt', 'ods', 'odp'].filter((value) => value !== family)) {
       expect(names).not.toMatch(new RegExp(`(?:^|\\n)${other}[-.]|opendocument_${other}_`));
     }
-  }
-  expect(failures).toEqual([]);
-});
+    expect(failures).toEqual([]);
+  });
+}
