@@ -333,6 +333,27 @@ describe('FontSourceSession: googleFonts() faces register from their URL', () =>
     expect(set.faces.map((face) => typeof face.source).sort()).toEqual(['object', 'object', 'string']);
   });
 
+  it('applies the threshold in the order the bytes land, not in declaration order', async () => {
+    urlRegistrationMinBytes = 1500;
+    const carlito = 'https://fonts.googleapis.com/css2?family=Carlito:ital,wght@0,400;0,700;1,400;1,700&display=swap';
+    const files = [0, 1, 2].map((index) => `https://fonts.gstatic.example/f${index}.woff2`);
+    const gates = files.map(() => { let open!: () => void; const gate = new Promise<void>((resolve) => { open = resolve; }); return { gate, open }; });
+    installFetch({
+      [carlito]: { css: files.map((file, index) => rule('Carlito', file, `unicode-range: U+${(0x41 + index).toString(16)};`)).join('') },
+      ...Object.fromEntries(files.map((file, index) => [file, { bytes: 1000, gate: gates[index]!.gate }])),
+    });
+    const set = fakeSet();
+    const pending = open([googleFonts()], set).ensure(demand(['Calibri'], [0x41, 0x42, 0x43]));
+    await vi.waitFor(() => expect(G.fetch).toHaveBeenCalledTimes(4));
+    // f2, then f1, then f0 land, all before any face is prepared.
+    for (const index of [2, 1, 0]) gates[index]!.open();
+    await pending;
+    expect(set.faces.map((face) => [face.unicodeRange, typeof face.source])).toEqual([
+      ['U+41', 'string'], ['U+42', 'object'], ['U+43', 'object'],
+    ]);
+    expect(urlOf(set.faces[0]!)).toBe(files[0]);
+  });
+
   it('decodes a pass below the default threshold from bytes', async () => {
     urlRegistrationMinBytes = undefined;
     const carlito = 'https://fonts.googleapis.com/css2?family=Carlito:ital,wght@0,400;0,700;1,400;1,700&display=swap';

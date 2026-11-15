@@ -1145,6 +1145,11 @@ export class FontSourceSession {
     };
     const onAcquired = (url: string, data: ArrayBuffer) => {
       if (this.closed) return;
+      // The threshold follows the order the bytes land in, whenever the
+      // faces are prepared or registered.
+      if ((pending.get(url) ?? []).some(({ sourceIndex }) => registersFromUrl(this.sources[sourceIndex]))) {
+        viaUrl(url, data.byteLength);
+      }
       landed.push([url, data]);
       flush ??= setTimeout(prepareLanded, 0);
     };
