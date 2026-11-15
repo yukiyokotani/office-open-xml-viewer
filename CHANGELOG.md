@@ -10,29 +10,32 @@ the corresponding minor release.
 Minor release that lets applications choose where web fonts come from. Two
 changes may need action. If you pass `useGoogleFonts`, replace
 `useGoogleFonts: true` with `fonts: [googleFonts()]`. The alias still works in
-0.90 with a warning; from 0.91.0 it is ignored with the same warning, and never
-throws. If your page has a Content Security Policy and loads web fonts, allow
+0.90 with a warning (when `fonts` is also given, `fonts` wins); from 0.91.0 it
+is ignored with the same warning, and never throws. If your page has a Content Security Policy and loads web fonts, allow
 the font file host (for example `fonts.gstatic.com`) in `connect-src` as well
 as `font-src`: font files are now fetched, and a blocked fetch falls back to
 the host fonts (see **Served font line heights** below). See the
 [0.89 to 0.90 migration guide](docs/migration-0.90.md).
 
 - **Font sources:** the new `fonts` load option takes an ordered list of
-  sources, built with `googleFonts({ cssOrigin?, substitutes?, families? })`,
+  sources, built with `googleFonts({ baseUrl?, substitutions?, additionalFamilies? })`,
   `fontCssApi()`, `fontCss()`, `fontFiles()` (URLs, `data:` URLs or bytes)
   and `fontResolver()` for authenticated or private services. Every source
-  takes `substitutes`; `fontCssApi()`, `fontCss()` and `fontFiles()` also take
-  `credentials`. `googleFonts({ families })` adds Google families outside the
-  preset's catalog. A `FontSource` is opaque, and `fonts` accepts only values
+  takes `substitutions`; `fontCssApi()`, `fontCss()` and `fontFiles()` also take
+  `credentials`. `googleFonts({ additionalFamilies })` adds Google families
+  outside the preset's catalog. A resolver (type `FontResolver`) receives the
+  missing family names as `demand.authoredFamilies` and
+  `demand.fallbackFamilies`; in what it returns, unknown properties are
+  ignored and `weight` may be a number. A `FontSource` is opaque, and `fonts` accepts only values
   the factories returned. The factories are exported from `@silurus/ooxml`
   and from each format entry, along with `officeFontSubstitutions` and
   `googleFontsSubstitutions`. DOCX, XLSX and PPTX behave the same in main and
   worker mode: in worker mode the page runs a resolver and also fetches the
   URLs it returns, so cookies and authentication behave as in main mode.
   Nothing is requested without a source (#1460, #1497).
-- **Custom Google Fonts origin:** `googleFonts({ cssOrigin })` sends the
+- **Custom Google Fonts origin:** `googleFonts({ baseUrl })` sends the
   stylesheet requests to a regional mirror or an internal proxy instead of
-  `fonts.googleapis.com`. Redirects are followed and the font file URLs in the
+  `fonts.googleapis.com`. In 0.90 `baseUrl` must be an origin (no path). Redirects are followed and the font file URLs in the
   returned CSS are used as given, so the mirror controls where those go. A
   failing origin keeps the host fonts and is never replaced by another source
   (#1497).
@@ -53,7 +56,8 @@ the host fonts (see **Served font line heights** below). See the
 - **Resource safety:** font sources have fixed limits. A factory input beyond
   one throws the new `OoxmlError` code `font-source-limit`; a limit reached
   while a document loads fails only the families concerned, with a warning,
-  like a network failure.
+  like a network failure. The limit values, and the `quota` and `metric`
+  strings of `error.violation`, may grow in later minor releases.
 - **Failed package parts:** a new `partFailures` getter on `DocxDocument`,
   `PptxPresentation`, `XlsxWorkbook` and every viewer lists the parts that
   failed to parse, and the new `onPartFailure` viewer option is called once for

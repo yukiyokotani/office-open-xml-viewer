@@ -1754,16 +1754,16 @@ export interface FontCssApiOptions {
     readonly urlTemplate: string;
     readonly query?: string;
     readonly families?: Readonly<Record<string, string | true>>;
-    readonly substitutes?: readonly FontSubstitution[];
+    readonly substitutions?: readonly FontSubstitution[];
     readonly credentials?: FontSourceCredentials;
 }
 export interface FontCssOptions {
     readonly url: string;
-    readonly substitutes?: readonly FontSubstitution[];
+    readonly substitutions?: readonly FontSubstitution[];
     readonly credentials?: FontSourceCredentials;
 }
 export interface FontDemand {
-    readonly families: readonly string[];
+    readonly authoredFamilies: readonly string[];
     readonly fallbackFamilies: readonly string[];
 }
 export interface FontFaceDeclaration {
@@ -1778,16 +1778,20 @@ export interface FontFaceDeclaration {
 export function fontFiles(options: FontFilesOptions): FontSource;
 export interface FontFilesOptions {
     readonly faces: readonly FontFaceDeclaration[];
-    readonly substitutes?: readonly FontSubstitution[];
+    readonly substitutions?: readonly FontSubstitution[];
     readonly credentials?: FontSourceCredentials;
 }
-export interface FontResolveContext {
+export function fontResolver(resolve: FontResolver, options?: FontResolverOptions): FontSource;
+export type FontResolver = (demand: FontDemand, context: FontResolverContext) => readonly (Omit<FontFaceDeclaration, 'weight'> & {
+    readonly weight?: string | number;
+})[] | Promise<readonly (Omit<FontFaceDeclaration, 'weight'> & {
+    readonly weight?: string | number;
+})[]>;
+export interface FontResolverContext {
     readonly signal: AbortSignal;
 }
-export type FontResolveFn = (demand: FontDemand, context: FontResolveContext) => readonly FontFaceDeclaration[] | Promise<readonly FontFaceDeclaration[]>;
-export function fontResolver(resolve: FontResolveFn, options?: FontResolverOptions): FontSource;
 export interface FontResolverOptions {
-    readonly substitutes?: readonly FontSubstitution[];
+    readonly substitutions?: readonly FontSubstitution[];
 }
 export interface FontSource {
     readonly __ooxmlFontSource: 'opaque';
@@ -1822,9 +1826,9 @@ export interface Glow {
 }
 export function googleFonts(options?: GoogleFontsOptions): FontSource;
 export interface GoogleFontsOptions {
-    readonly cssOrigin?: string;
-    readonly substitutes?: readonly FontSubstitution[];
-    readonly families?: Readonly<Record<string, string>>;
+    readonly baseUrl?: string;
+    readonly substitutions?: readonly FontSubstitution[];
+    readonly additionalFamilies?: Readonly<Record<string, string>>;
 }
 export const googleFontsSubstitutions: readonly FontSubstitution[];
 export interface GradientFill {
@@ -2191,11 +2195,12 @@ export class OoxmlError extends Error {
 }
 export type OoxmlErrorCode = 'encrypted' | 'invalid-password' | 'unsupported-encryption' | 'legacy-binary-format' | 'not-ooxml' | 'unsupported-image-effect' | 'invalid-numbering' | 'unsupported-content' | 'font-source-limit';
 export type OoxmlErrorStage = 'container' | 'decompression' | 'parsing' | 'serialization' | 'layout' | 'rendering' | 'worker';
-export type OoxmlFontSourceQuota = 'stylesheet' | 'declarations' | 'families' | 'face' | 'retained' | 'url';
+export type OoxmlFontSourceMetric = ExtensibleLiteral<'bytes' | 'entry-count' | 'length'>;
+export type OoxmlFontSourceQuota = ExtensibleLiteral<'stylesheet' | 'declarations' | 'families' | 'face' | 'retained' | 'url'>;
 export interface OoxmlFontSourceViolation {
     readonly resource: 'font-source';
     readonly quota: OoxmlFontSourceQuota;
-    readonly metric: 'bytes' | 'entry-count' | 'length';
+    readonly metric: OoxmlFontSourceMetric;
     readonly limit: number;
     readonly observed: number;
 }

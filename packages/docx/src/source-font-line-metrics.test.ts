@@ -112,7 +112,7 @@ describe('served font line metrics', () => {
     const served = { family: 'Ooxml Fixture Gap', weight: '400', style: 'normal', resourceMetrics: TABLES };
     const sources = [fontFiles({
       faces: [{ family: 'Ooxml Fixture Gap', url: 'https://app.example/gap.ttf' }],
-      substitutes: [{ for: 'Authored Missing', use: 'Ooxml Fixture Gap' }],
+      substitutions: [{ for: 'Authored Missing', use: 'Ooxml Fixture Gap' }],
     })];
     expect(lineEm('Authored Missing', [served], sources)).toBeCloseTo(word.lineHeightRatio, 6);
   });

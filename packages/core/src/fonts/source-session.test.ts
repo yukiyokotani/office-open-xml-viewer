@@ -21,7 +21,7 @@ import {
   fontResolver,
   type FontDemand,
   type FontFaceDeclaration,
-  type FontResolveFn,
+  type FontResolver,
   type FontSource,
 } from './source.js';
 import { OFFICE_FONT_SUBSTITUTIONS } from './substitutions.js';
@@ -715,13 +715,13 @@ describe('FontSourceSession: googleFonts() faces register from their URL', () =>
     }
   });
 
-  it('keeps registering other sources, and a custom cssOrigin, from bytes', async () => {
+  it('keeps registering other sources, and a custom baseUrl, from bytes', async () => {
     const mirror = 'https://fonts.mirror.example';
     const css = `${mirror}/css2?family=Carlito:ital,wght@0,400;0,700;1,400;1,700&display=swap`;
     const latin = 'https://fonts.mirror.example/c-latin.woff2';
     installFetch({ [css]: { css: rule('Carlito', latin, LATIN) } });
     const set = fakeSet();
-    const session = open([googleFonts({ cssOrigin: mirror }), fontFiles({ faces: [{ family: 'Bundled', url: 'https://app.example/b.woff2' }] })], set);
+    const session = open([googleFonts({ baseUrl: mirror }), fontFiles({ faces: [{ family: 'Bundled', url: 'https://app.example/b.woff2' }] })], set);
     await session.ensure(demand(['Calibri', 'Bundled'], [0x61]));
     expect(set.faces.map((face) => face.source instanceof ArrayBuffer)).toEqual([true, true]);
     session.release();
@@ -923,8 +923,8 @@ describe('FontSourceSession: isolation and sharing', () => {
     const mirrorSet = fakeSet();
     const internalSet = fakeSet();
     const [mirror, internal] = await Promise.all([
-      open([googleFonts({ cssOrigin: MIRROR })], mirrorSet).ensure(demand(['Calibri'])),
-      open([googleFonts({ cssOrigin: INTERNAL })], internalSet).ensure(demand(['Calibri'])),
+      open([googleFonts({ baseUrl: MIRROR })], mirrorSet).ensure(demand(['Calibri'])),
+      open([googleFonts({ baseUrl: INTERNAL })], internalSet).ensure(demand(['Calibri'])),
     ]);
     expect(sheetCalls(calls).map((call) => new URL(call.url).origin).sort()).toEqual([INTERNAL, MIRROR]);
     expect(fileCalls(calls).map((call) => call.url)).toEqual([`${INTERNAL}/carlito.woff2`]);
@@ -982,7 +982,7 @@ describe('FontSourceSession: isolation and sharing', () => {
       },
     });
     const set = fakeSet();
-    const loaded = await open([googleFonts({ cssOrigin: CN })], set)
+    const loaded = await open([googleFonts({ baseUrl: CN })], set)
       .ensure(demand(['Calibri'], [0x61, 0x3042], ['Noto Sans JP']));
     expect(sheetCalls(calls)).toHaveLength(2);
     expect(sheetCalls(calls).every((call) => new URL(call.url).origin === CN)).toBe(true);
@@ -1003,8 +1003,8 @@ describe('FontSourceSession: isolation and sharing', () => {
       [carlitoAt(OTHER)]: { css: rule('Carlito', 'carlito.woff2') },
     });
     const set = fakeSet();
-    const first = open([googleFonts({ cssOrigin: MIRROR })], set);
-    const second = open([googleFonts({ cssOrigin: OTHER })], set);
+    const first = open([googleFonts({ baseUrl: MIRROR })], set);
+    const second = open([googleFonts({ baseUrl: OTHER })], set);
     const [loadedFirst, loadedSecond] = await Promise.all([
       first.ensure(demand(['Calibri'])), second.ensure(demand(['Calibri'])),
     ]);
@@ -1047,7 +1047,7 @@ describe('FontSourceSession: claim-once chaining', () => {
     const set = fakeSet();
     const loaded = await open([
       fontFiles({ faces: [{ family: 'Carlito', url: 'https://app.example/carlito.woff2' }] }),
-      fontCss({ url: 'https://fonts.example/all.css', substitutes: OFFICE_FONT_SUBSTITUTIONS }),
+      fontCss({ url: 'https://fonts.example/all.css', substitutions: OFFICE_FONT_SUBSTITUTIONS }),
     ], set).ensure(demand(['Calibri', 'Carlito', 'Other']));
     // Calibri: neither source serves it directly; the files source has no
     // substitutes, so the stylesheet claims it through Calibri → Carlito.
@@ -1098,16 +1098,16 @@ describe('FontSourceSession: claim-once chaining', () => {
       [caladea]: { css: rule('Caladea', 'caladea.woff2') },
     });
     const seen: FontDemand[] = [];
-    const resolve: FontResolveFn = (request, { signal }) => {
+    const resolve: FontResolver = (request, { signal }) => {
       seen.push(request);
       expect(signal).toBeInstanceOf(AbortSignal);
-      return request.families.includes('Private') ? [{ family: 'Private', data: new Uint8Array([1, 2, 3]).buffer }] : [];
+      return request.authoredFamilies.includes('Private') ? [{ family: 'Private', data: new Uint8Array([1, 2, 3]).buffer }] : [];
     };
     const set = fakeSet();
     const loaded = await open([fontResolver(resolve), googleFonts()], set)
       .ensure(demand(['Private', 'Calibri'], [0x62, 0x61, 0x62], ['Noto Sans JP']));
     expect(seen).toEqual([{
-      families: ['Private', 'Calibri'], fallbackFamilies: ['Noto Sans JP'],
+      authoredFamilies: ['Private', 'Calibri'], fallbackFamilies: ['Noto Sans JP'],
     }]);
     expect(loaded.faces.map((face) => face.family)).toEqual(['Private', 'Carlito']);
     // The cached resolution and the registered face are both real copies,
@@ -1279,7 +1279,7 @@ describe('FontSourceSession: retained bytes held by shared caches', () => {
       const fresh = await import('./source-session.js');
       const sourceModule = await import('./source.js');
       const source = sourceModule.fontResolver((request) =>
-        request.families.map((family) => ({ family, data: new Uint8Array(30).buffer })));
+        request.authoredFamilies.map((family) => ({ family, data: new Uint8Array(30).buffer })));
       const set = fakeSet();
       const idle = new fresh.FontSourceSession({ sources: [source], fontSet: asSet(set) });
       const cycle = async (family: string) => {
@@ -1329,7 +1329,7 @@ describe('FontSourceSession: caches keep only accounted bytes', () => {
       let live = 0;
       const registry = new FinalizationRegistry<number>((bytes) => { live -= bytes; });
       // Answers every demanded family except "Absent*" with 30 bytes.
-      const source = sourceModule.fontResolver((request) => request.families
+      const source = sourceModule.fontResolver((request) => request.authoredFamilies
         .filter((family) => !family.startsWith('Absent'))
         .map((family) => {
           const data = new ArrayBuffer(30);
@@ -1364,7 +1364,7 @@ describe('FontSourceSession: caches keep only accounted bytes', () => {
 
 describe('FontSourceSession: charge and refund pair per cache entry', () => {
   it('refunds a charge whose task was abandoned before it settled, across retries', async () => {
-    const source = fontResolver((request) => request.families.map((family) => ({ family, data: new Uint8Array(10).buffer })));
+    const source = fontResolver((request) => request.authoredFamilies.map((family) => ({ family, data: new Uint8Array(10).buffer })));
     const set = fakeSet();
     const idle = open([source], set);
     for (let ticks = 0; ticks < 40; ticks++) {
@@ -1740,7 +1740,7 @@ describe('FontSourceSession: shared resolver work survives a released waiter', (
     let calls = 0;
     const source = fontResolver((request) => {
       calls++;
-      return request.families.map((family) => ({ family, url: 'https://app.example/shared.woff2' }));
+      return request.authoredFamilies.map((family) => ({ family, url: 'https://app.example/shared.woff2' }));
     });
     const set = fakeSet();
     const first = open([source], set);
@@ -1898,7 +1898,7 @@ describe('FontSourceSession: release balance and cancellation', () => {
     await other.ensure(demand(['Carlito']));
     const session = open([fontFiles({
       faces: [{ family: 'Carlito', url: 'https://app.example/c.woff2' }],
-      substitutes: OFFICE_FONT_SUBSTITUTIONS,
+      substitutions: OFFICE_FONT_SUBSTITUTIONS,
     })], set);
     const loaded = await session.ensure(demand(['Calibri', 'Carlito']));
     expect(loaded.faces).toHaveLength(1);
@@ -2028,7 +2028,7 @@ describe('FontSourceSession: script-scoped substitution proof (FontSessionDemand
     // a later slide's Arabic text in the same family proves 'arabic'.
     const files = fontFiles({
       faces: [{ family: 'Served', url: 'https://app.example/served.woff2' }],
-      substitutes: [{ for: 'Authored', use: 'Served', script: 'arabic' }],
+      substitutions: [{ for: 'Authored', use: 'Served', script: 'arabic' }],
     });
     const set = fakeSet();
     const session = open([files], set);
@@ -2054,7 +2054,7 @@ describe('FontSourceSession: served face tables', () => {
     const gap = new Uint8Array(await readFile(new URL('../../../../tests/fixtures/fonts/ooxml-fixture-gap.ttf', import.meta.url)));
     const { calls } = installFetch({ [url]: { body: gap.buffer.slice(gap.byteOffset, gap.byteOffset + gap.byteLength) as ArrayBuffer } });
     const set = fakeSet();
-    const loaded = await tables([fontResolver((request) => request.families.map((family) => ({ family, url })))], set)
+    const loaded = await tables([fontResolver((request) => request.authoredFamilies.map((family) => ({ family, url })))], set)
       .ensure(demand(['Private']));
     // One request (no second load of the URL by FontFace, whatever the
     // cache headers), with the CSS font-loading credentials.
@@ -2073,7 +2073,7 @@ describe('FontSourceSession: served face tables', () => {
     let resolved = 0;
     const session = tables([fontResolver((request) => {
       resolved++;
-      return request.families.flatMap((family) => [
+      return request.authoredFamilies.flatMap((family) => [
         { family, url: 'https://fonts.app.example/latin.woff2', unicodeRange: 'U+0-FF' },
         { family, url: 'https://fonts.app.example/kana.woff2', unicodeRange: 'U+3000-30FF' },
       ]);

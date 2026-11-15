@@ -82,20 +82,21 @@ function names(value: unknown): readonly string[] | undefined {
 
 /**
  * The application's copy of a bridged demand, or undefined when the worker
- * sent something no library session produces: exactly `families` and
+ * sent something no library session produces: exactly `authoredFamilies` and
  * `fallbackFamilies`, string lists within `HARD_MAX_FONT_SOURCE_FAMILIES`
  * together.
  */
 export function copyBridgedFontDemand(value: unknown): FontDemand | undefined {
   if (value === null || typeof value !== 'object') return undefined;
   const fields = value as Partial<Record<keyof FontDemand, unknown>>;
-  if (Object.keys(fields).some((key) => key !== 'families' && key !== 'fallbackFamilies')) return undefined;
-  const families = names(fields.families);
+  if (Object.keys(fields).some((key) => key !== 'authoredFamilies' && key !== 'fallbackFamilies')) return undefined;
+  const authoredFamilies = names(fields.authoredFamilies);
   const fallbackFamilies = names(fields.fallbackFamilies);
-  if (!families || !fallbackFamilies || families.length + fallbackFamilies.length > HARD_MAX_FONT_SOURCE_FAMILIES) {
+  if (!authoredFamilies || !fallbackFamilies
+    || authoredFamilies.length + fallbackFamilies.length > HARD_MAX_FONT_SOURCE_FAMILIES) {
     return undefined;
   }
-  return Object.freeze({ families, fallbackFamilies });
+  return Object.freeze({ authoredFamilies, fallbackFamilies });
 }
 
 /** One document's main-side bridge. */
@@ -243,7 +244,7 @@ export class FontResolverResponder {
       return fail('font resolver function is not available in this realm');
     }
     const families = [
-      ...demand.families.map((name) => ({ name, fallback: false })),
+      ...demand.authoredFamilies.map((name) => ({ name, fallback: false })),
       ...demand.fallbackFamilies.map((name) => ({ name, fallback: true })),
     ];
     const cache = this.cacheOf(sourceIndex, source);

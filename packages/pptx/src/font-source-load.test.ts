@@ -57,7 +57,7 @@ describe('progressive PPTX font-source loading', () => {
     try {
       const sources = [fontFiles({
         faces: [{ family: 'Served', url: 'https://app.example/served.woff2' }],
-        substitutes: [{ for: 'Authored', use: 'Served', script: 'arabic' }],
+        substitutions: [{ for: 'Authored', use: 'Served', script: 'arabic' }],
       })];
       const ensureAll = async (progressive: boolean) => {
         const { faces, set } = fakeFontSet();

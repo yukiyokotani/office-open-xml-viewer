@@ -102,8 +102,8 @@ export function concludeFamilies(
  */
 export function bridgedRequestFamilies(demand: unknown): ResolverFamily[] {
   if (demand === null || typeof demand !== 'object') return [];
-  const fields = demand as { families?: unknown; fallbackFamilies?: unknown };
-  return [fields.families, fields.fallbackFamilies]
+  const fields = demand as { authoredFamilies?: unknown; fallbackFamilies?: unknown };
+  return [fields.authoredFamilies, fields.fallbackFamilies]
     .flatMap((list) => (Array.isArray(list) ? list.filter((name): name is string => typeof name === 'string') : []))
     .map((name) => ({ name }));
 }

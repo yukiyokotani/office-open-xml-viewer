@@ -68,7 +68,7 @@
  * several documents share; the downloaded bytes are still shared.
  */
 import { fontSourceLimitError } from '../errors/font-source-limit.js';
-import type { OoxmlFontSourceQuota } from '../errors/ooxml-error.js';
+import type { KnownFontSourceQuota } from '../errors/font-source-limit.js';
 import { createAbortError } from '../internal/abort.js';
 import {
   HARD_MAX_FONT_DEMAND_SCALARS,
@@ -738,7 +738,7 @@ function warnFailures(failures: readonly (readonly [string, string])[]): void {
 }
 
 /** The warning reason of a run-time ceiling breach: the family fails alone. */
-function limitReason(quota: OoxmlFontSourceQuota, limit: number, observed: number): string {
+function limitReason(quota: KnownFontSourceQuota, limit: number, observed: number): string {
   return fontSourceLimitError(quota, limit, observed).message;
 }
 
@@ -1518,7 +1518,7 @@ export class FontSourceSession {
     for (const { name, scripts } of families) {
       const key = familyKeyOf(name);
       const answer = answers.get(key);
-      if (answer) claims.set(key, claimResolverCandidates(answer, name, source.substitutes, scripts));
+      if (answer) claims.set(key, claimResolverCandidates(answer, name, source.substitutions, scripts));
     }
     return claims;
   }

@@ -169,6 +169,7 @@ export {
   type OoxmlResourceLimit,
   type OoxmlResourceLimitErrorDetails,
   type OoxmlUnsupportedContentDetails,
+  type OoxmlFontSourceMetric,
   type OoxmlFontSourceQuota,
   type OoxmlFontSourceViolation,
   type OoxmlResourceLimits,
@@ -306,11 +307,12 @@ export {
   type FontDemand,
   type FontFaceDeclaration,
   type FontFilesOptions,
-  type FontResolveContext,
-  type FontResolveFn,
+  type FontResolverContext,
+  type FontResolver,
   type FontResolverOptions,
   type FontSource,
   type FontSourceCredentials,
   type FontSubstitution,
   type GoogleFontsOptions,
 } from '@silurus/ooxml-core/internal/font-sources';
+export type { FontSubstituteScript } from '@silurus/ooxml-core';

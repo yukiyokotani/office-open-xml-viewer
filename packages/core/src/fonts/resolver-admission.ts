@@ -20,7 +20,9 @@ export type AdmittedFontResolverResult =
  * declaration, more than `HARD_MAX_FONT_SOURCE_DECLARATIONS` entries or a
  * face beyond the face ceiling is a failure of the call's families (`ok:
  * false`: they keep their host fallback with a warning). A run-time answer
- * never rejects the load: only factory input is rejected outright.
+ * never rejects the load: only factory input is rejected outright. Unlike
+ * `fontFiles()` input, a returned declaration may carry properties the
+ * library does not know (ignored) and a numeric `weight`.
  */
 export function admitFontResolverResult(raw: unknown): AdmittedFontResolverResult {
   if (!Array.isArray(raw)) return { ok: false, reason: 'resolver did not return an array' };
@@ -31,7 +33,7 @@ export function admitFontResolverResult(raw: unknown): AdmittedFontResolverResul
     return {
       ok: true,
       declarations: Object.freeze(raw.map((entry: unknown, index) =>
-        validateFontFaceDeclaration(entry, `font resolver declaration ${index}`))),
+        validateFontFaceDeclaration(entry, `font resolver declaration ${index}`, undefined, true))),
     };
   } catch (error) {
     return { ok: false, reason: error instanceof Error ? error.message : String(error) };

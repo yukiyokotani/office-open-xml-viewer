@@ -30,20 +30,24 @@ describe('normalizeFontOptions (useGoogleFonts alias, design §9.1)', () => {
     normalizeFontOptions({ useGoogleFonts: true });
     expect(warn.mock.calls).toEqual([[USE_GOOGLE_FONTS_DEPRECATION_MESSAGE]]);
     expect(USE_GOOGLE_FONTS_DEPRECATION_MESSAGE).toBe(
-      '[ooxml] useGoogleFonts is deprecated: from 0.91.0 it is ignored (no web fonts are loaded). Replace it with fonts: [googleFonts()] — import { googleFonts } from \'@silurus/ooxml\' (also exported from the docx/xlsx/pptx entries). A custom CSS origin is googleFonts({ cssOrigin }); other sources are fontCssApi(), fontCss(), fontFiles() and fontResolver(). See docs/migration-0.90.md.',
+      '[ooxml] useGoogleFonts is deprecated: from 0.91.0 it is ignored (no web fonts are loaded). Replace it with fonts: [googleFonts()] — import { googleFonts } from \'@silurus/ooxml\' (also exported from the docx/xlsx/pptx entries). When fonts is also given, fonts wins and useGoogleFonts is ignored. A Google-compatible mirror is googleFonts({ baseUrl }); other sources are fontCssApi(), fontCss(), fontFiles() and fontResolver(). See https://github.com/yukiyokotani/office-open-xml-viewer/blob/main/docs/migration-0.90.md.',
     );
     resetFontDeprecationWarningsForTests();
     normalizeFontOptions({ useGoogleFonts: false });
     expect(warn).toHaveBeenCalledTimes(2);
   });
 
-  it('rejects useGoogleFonts: true combined with fonts, but lets false accompany fonts', () => {
-    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+  it('lets fonts win over useGoogleFonts (true or false), with the warning and without throwing', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     const source = fontCssApi({ urlTemplate: 'https://fonts.example/css?family={family}' });
-    expect(() => normalizeFontOptions({ useGoogleFonts: true, fonts: [] })).toThrow(
-      new TypeError('useGoogleFonts cannot be combined with fonts; add googleFonts() to fonts instead'),
-    );
+    // No googleFonts() is added: the application's list is the whole answer.
+    expect(normalizeFontOptions({ useGoogleFonts: true, fonts: [source] }).fonts).toEqual([source]);
+    expect(warn.mock.calls).toEqual([[USE_GOOGLE_FONTS_DEPRECATION_MESSAGE]]);
+    // An explicit empty list is an explicit "offline", also against `true`.
+    expect(normalizeFontOptions({ useGoogleFonts: true, fonts: [] })).toEqual({});
     expect(normalizeFontOptions({ useGoogleFonts: false, fonts: [source] }).fonts).toEqual([source]);
+    // `fonts` is still checked.
+    expect(() => normalizeFontOptions({ useGoogleFonts: true, fonts: [{}] as never })).toThrow(TypeError);
   });
 
   it('accepts only factory results in fonts and omits an empty list', () => {

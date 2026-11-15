@@ -1131,7 +1131,7 @@ async function resolveFontFaceCssFamily(
   if (!sheet.ok) return { kind: 'failed', reason: sheet.reason };
   let index = stylesheetIndexes.get(sheet);
   if (!index) { index = indexFontDeclarations(sheet.declarations); stylesheetIndexes.set(sheet, index); }
-  return claimFromIndex(index, family, source.substitutes, scripts);
+  return claimFromIndex(index, family, source.substitutions, scripts);
 }
 
 /** Resolve demanded families against a CSS source through the shared

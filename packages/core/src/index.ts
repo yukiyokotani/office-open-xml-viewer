@@ -114,6 +114,7 @@ export {
   type OoxmlResourceName,
   type OoxmlResourceLimitErrorDetails,
   type OoxmlUnsupportedContentDetails,
+  type OoxmlFontSourceMetric,
   type OoxmlFontSourceQuota,
   type OoxmlFontSourceViolation,
   type OoxmlResourceUsageSnapshot,
