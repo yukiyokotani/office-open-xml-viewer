@@ -3,6 +3,7 @@ import type { ResolvedFontMetric } from '@silurus/ooxml-core';
 import { layoutBodyModel } from './test-support/document-layout.test-support.js';
 import { libreOfficeNormalLine, libreOfficeProducerLineMetric, openTypeNormalLine } from './layout/line-compatibility.js';
 import { snapshotFontMetrics } from './layout/text.js';
+import { projectedResourceMetric } from './line-breaker/font-metrics.js';
 import type { LineLayout, ParagraphLayout } from './layout/types.js';
 import type { BodyElement, DocParagraph, DocSettings, DocxTextRun, LineSpacing, SectionProps } from './types';
 
@@ -100,6 +101,17 @@ describe('LIBREOFFICE_FONT_LINE_BOX', () => {
       normalAscentRatio: 0.8, normalDescentRatio: 0.2, normalLineGapRatio: 0.3,
       unicodeRanges: [[0x20, 0x7e]], eastAsianLineHeightRatio: 1.3,
     });
+  });
+
+  it('keeps Word\'s Far East box apart from the grid geometry under MsWordCompGridMetrics', () => {
+    const farEast = { unitsPerEm: 1000, hheaAscent: 800, hheaDescent: -200, hheaLineGap: 0, winAscent: 1000, winDescent: 300,
+      farEastCodePage: true, hasEastAsianCmap: true };
+    const metric = { family: 'FE', ...libreOfficeProducerLineMetric(farEast, undefined, true)! } as ResolvedFontMetric;
+    // Grid lines: the plain hhea box (1 em), as catalogued faces give it.
+    expect(projectedResourceMetric(metric, 'plain')!.lineHeightRatio).toBeCloseTo(1, 9);
+    // Unsnapped lines: Word's 1.3 x usWin box.
+    expect(projectedResourceMetric(metric, 'libreoffice-word-far-east')!.lineHeightRatio).toBeCloseTo(1.69, 9);
+    expect(projectedResourceMetric(metric, 'libreoffice')!.designAscentRatio).toBeCloseTo(0.8, 9);
   });
 
   it('sizes a face with an empty hhea from usWin or typo values', () => {

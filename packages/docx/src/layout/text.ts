@@ -914,6 +914,14 @@ export function snapshotFontMetrics(
         ...(metric.designDescentRatio === undefined ? {} : { designDescentRatio: metric.designDescentRatio }),
         // The face's own normal line (LIBREOFFICE_FONT_LINE_BOX), kept only
         // whole: the three values project together.
+        ...(metric.wordLineHeightRatio !== undefined && metric.wordAscentRatio !== undefined
+          && metric.wordDescentRatio !== undefined
+          && [metric.wordLineHeightRatio, metric.wordAscentRatio, metric.wordDescentRatio]
+            .every((value) => Number.isFinite(value) && value >= 0) ? {
+            wordLineHeightRatio: metric.wordLineHeightRatio,
+            wordAscentRatio: metric.wordAscentRatio,
+            wordDescentRatio: metric.wordDescentRatio,
+          } : {}),
         ...(keepsNormalLine ? {
             normalAscentRatio: metric.normalAscentRatio,
             normalDescentRatio: metric.normalDescentRatio,

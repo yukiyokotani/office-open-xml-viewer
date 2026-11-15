@@ -3976,7 +3976,7 @@ function planMeasuredLines(
         ? measuredLine.topYPt + context.lineSpacing!.value * 4 / 5
         : atLeastRubyLine
           ? measuredLine.topYPt + measuredLine.advancePt - (raw.visibleDescent ?? raw.descent)
-          : plannedBaselinePt(measuredLine, context, textService?.libreOfficeLineBoxes === true);
+          : plannedBaselinePt(measuredLine, context, textService?.libreOfficeLineBoxes === true && !verticalPageFrame);
     let lineStartOffset = Number.POSITIVE_INFINITY;
     let lineEndOffset = sourceOffset;
     const segments: MeasuredLinePlanSegment[] = [];
@@ -4253,6 +4253,7 @@ function planMeasuredLines(
     // line of a LibreOffice producer needs only its natural line at a page
     // bottom; the multiple's extra space may hang below it.
     const pageEdgeOverhangPt = !context.lineGrid.active && textService?.libreOfficeLineBoxes === true
+      && !verticalPageFrame
       && context.lineSpacing?.rule === 'auto' && context.lineSpacing.value > 1
       ? Math.max(0, measuredLine.advancePt - lineBoxHeight(
         null, raw.ascent, raw.descent, 1, undefined, context.hasRuby, raw.intendedSingle,

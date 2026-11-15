@@ -138,16 +138,17 @@ export function servedFontLineMetrics(
       const set = matchedSet(described, weight, style);
       const projected = set.map(({ face, index, range, style: faceStyle, declared }) => {
         if (!declared) return undefined;
-        if (face.resourceMetrics && libreOfficeLineBoxes
-          && !(libreOfficeWordFarEastBoxes && face.resourceMetrics.farEastCodePage === true)) {
+        if (face.resourceMetrics && libreOfficeLineBoxes) {
+          const wordFarEast = libreOfficeWordFarEastBoxes && face.resourceMetrics.farEastCodePage === true;
           // LIBREOFFICE_FONT_LINE_BOX reads only the face's normal line; the
           // instance must be size-free in exactly the values it reads.
           const instance = instanceOpenTypeLineMetrics(face.resourceMetrics, {
             wght: clamp(weight, range), ital: faceStyle === 'italic' ? 1 : 0,
-          }, normalLineMvarTags(face.resourceMetrics));
+          }, [...normalLineMvarTags(face.resourceMetrics), ...(wordFarEast ? ['hcla', 'hcld'] as const : [])]);
           if (!instance?.unicodeRanges) return undefined;
           return libreOfficeProducerLineMetric(instance,
-            Object.freeze(intersectRanges(normalizedRanges(declared), normalizedRanges(instance.unicodeRanges))));
+            Object.freeze(intersectRanges(normalizedRanges(declared), normalizedRanges(instance.unicodeRanges))),
+            wordFarEast);
         }
         if (face.resourceMetrics) {
           const instance = instanceOpenTypeLineMetrics(face.resourceMetrics, {

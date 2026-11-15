@@ -12,13 +12,36 @@ import { LIBRARY_SYNTHESIZED_FACE_LINE_GEOMETRY, libreOfficeLineBox } from '../l
 export function fontLineBoxProjection(
   service: Pick<TextLayoutService, 'plainLineBoxes' | 'libreOfficeLineBoxes' | 'libreOfficeWordFarEastBoxes'> | undefined,
   lineGridActive: boolean,
+  /** Vertical text keeps Word's projection: LIBREOFFICE_FONT_LINE_BOX was
+   * measured on horizontal lines only. */
+  vertical = false,
 ): FontLineBoxProjection {
   if (lineGridActive) return service?.plainLineBoxes === true ? 'plain' : 'word';
-  if (service?.libreOfficeLineBoxes !== true) return 'word';
+  if (service?.libreOfficeLineBoxes !== true || vertical) return 'word';
   return service.libreOfficeWordFarEastBoxes === true ? 'libreoffice-word-far-east' : 'libreoffice';
 }
 
 const libreOfficeResourceMetrics = new WeakMap<ResolvedFontMetric, ResolvedFontMetric>();
+const wordFarEastResourceMetrics = new WeakMap<ResolvedFontMetric, ResolvedFontMetric>();
+
+/** A LibreOffice-producer Far East face under __libreOfficeWordFarEastBoxes:
+ * Word's box when the resource kept it; any other resource is unchanged. */
+function wordFarEastResourceMetric(metric: ResolvedFontMetric): ResolvedFontMetric {
+  if (metric.wordLineHeightRatio === undefined || metric.wordAscentRatio === undefined
+    || metric.wordDescentRatio === undefined) return metric;
+  let projected = wordFarEastResourceMetrics.get(metric);
+  if (!projected) {
+    projected = Object.freeze({
+      ...metric,
+      lineHeightRatio: metric.wordLineHeightRatio,
+      designAscentRatio: metric.wordAscentRatio,
+      designDescentRatio: metric.wordDescentRatio,
+      ...(metric.eastAsianLineHeightRatio === undefined ? {} : { eastAsianLineHeightRatio: metric.wordLineHeightRatio }),
+    });
+    wordFarEastResourceMetrics.set(metric, projected);
+  }
+  return projected;
+}
 
 /** A selected resource's geometry in `projection`. LIBREOFFICE_FONT_LINE_BOX
  * re-projects the face's own normal line, when the resource carries it, in
@@ -28,6 +51,9 @@ export function projectedResourceMetric(
   metric: ResolvedFontMetric | undefined,
   projection: FontLineBoxProjection,
 ): ResolvedFontMetric | undefined {
+  if (projection === 'libreoffice-word-far-east' && metric?.farEastCodePage === true) {
+    return wordFarEastResourceMetric(metric);
+  }
   if (!(projection === 'libreoffice'
       || (projection === 'libreoffice-word-far-east' && metric?.farEastCodePage !== true))
     || !metric || metric.normalLineGapRatio === undefined

@@ -173,8 +173,7 @@ export async function loadEmbeddedFonts(
           const openType = parseOpenTypeResourceMetrics(data);
           // A LibreOffice producer's face (a Far East face keeps Word's box
           // under __libreOfficeWordFarEastBoxes).
-          const libreOfficeLineBoxes = producer?.__libreOfficeLineBoxes === true
-            && !(producer.__libreOfficeWordFarEastBoxes === true && openType?.farEastCodePage === true);
+          const libreOfficeLineBoxes = producer?.__libreOfficeLineBoxes === true;
           // The wordOpenTypeAutoLineRatios projection requires this face's
           // OS/2 code-page class and usWin data; cmap coverage is a separate
           // question. A face without declared code-page ranges does not gain
@@ -189,7 +188,8 @@ export async function loadEmbeddedFonts(
           // projection from its hhea alone (LIBREOFFICE_FONT_LINE_BOX).
           // (Never Word's box: libreOfficeProducerLineMetric.)
           const libreOfficeOnly = openType && libreOfficeLineBoxes
-            ? libreOfficeProducerLineMetric(openType, undefined) : undefined;
+            ? libreOfficeProducerLineMetric(openType, undefined, producer?.__libreOfficeWordFarEastBoxes === true)
+            : undefined;
           if (line || libreOfficeOnly || openType?.averageCharWidthRatio != null) {
             metric = Object.freeze({
               family,

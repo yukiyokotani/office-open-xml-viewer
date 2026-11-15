@@ -1520,13 +1520,15 @@ function emitResolvedTextSegment(
         ?? environment.layoutServices?.text.localMetrics ?? {}), resolvedSpan?.font),
       environment.layoutServices ? { text: environment.layoutServices.text, probe: text,
         ...(textShapeRequest.baseDirection !== undefined ? { baseDirection: textShapeRequest.baseDirection } : {}) } : undefined,
-      fontLineBoxProjection(environment.layoutServices?.text, environment.lineGridActive === true));
+      fontLineBoxProjection(environment.layoutServices?.text, environment.lineGridActive === true,
+        environment.verticalCJK === true));
   // LIBRARY_SYNTHESIZED_FACE_LINE_GEOMETRY does not extend to the East Asian
   // floor of a run painted in another slot (see that rule's scope).
   const { lineMetric: eaLineMetric } = selectedFontLineMetric(eaResolution, localEaFloor, naturalMetricAllowed,
       allowsReferenceFontMetric(indexedFontMetrics(environment.layoutServices?.text.fontMetrics
         ?? environment.layoutServices?.text.localMetrics ?? {}), eaResolution), undefined,
-      fontLineBoxProjection(environment.layoutServices?.text, environment.lineGridActive === true));
+      fontLineBoxProjection(environment.layoutServices?.text, environment.lineGridActive === true,
+        environment.verticalCJK === true));
   const resolvedEaFloorFamily =
     eaResolution?.resolvedFamily ?? localEaFloor?.family ?? eaFontFamily;
   // WORD_USE_FE_LAYOUT_INHERITED_GRID_MINIMUM was observed for an active
@@ -1957,6 +1959,7 @@ function appendRunsToSegments(
             // LIBREOFFICE_FONT_LINE_BOX: a tab portion takes its own text's
             // box; the line's text supplies it, not the synthetic em box.
             ...(environment.layoutServices?.text.libreOfficeLineBoxes === true && environment.lineGridActive !== true
+              && environment.verticalCJK !== true
               ? { textOwnedLineBox: true as const } : {}),
             bold: t.bold,
             italic: t.italic,
@@ -2151,7 +2154,8 @@ function appendRunsToSegments(
       const naturalMetricAllowed = environment.lineSpacing?.rule !== 'exact';
       const resourceMetric = naturalMetricAllowed || localFont?.designAscentRatio == null
         ? projectedResourceMetric(localFont,
-          fontLineBoxProjection(environment.layoutServices?.text, environment.lineGridActive === true))
+          fontLineBoxProjection(environment.layoutServices?.text, environment.lineGridActive === true,
+        environment.verticalCJK === true))
         : undefined;
       const referenceMetric =
         naturalMetricAllowed && !resourceMetric && mayUseAuthoredReferenceVerticalMetric(selected)
@@ -2161,7 +2165,8 @@ function appendRunsToSegments(
           // spans and paragraph marks only; an anchor host is outside its
           // evidence, so only an exact catalogued tuple lends its geometry.
           ? referenceFontLineMetrics(selected.requestedFamily, weight, style,
-            fontLineBoxProjection(environment.layoutServices?.text, environment.lineGridActive === true))
+            fontLineBoxProjection(environment.layoutServices?.text, environment.lineGridActive === true,
+        environment.verticalCJK === true))
           : undefined;
       const familyLineMetric = resourceMetric ?? referenceMetric;
       segs.push({

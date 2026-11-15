@@ -29,6 +29,12 @@ export interface ResolvedFontMetric {
   normalAscentRatio?: number;
   normalDescentRatio?: number;
   normalLineGapRatio?: number;
+  /** Word's projection of a Far East face whose base geometry above is a
+   * producer's own projection, kept for a producer that selects Word's box
+   * for such faces on some lines. Present as a whole. */
+  wordLineHeightRatio?: number;
+  wordAscentRatio?: number;
+  wordDescentRatio?: number;
   /** Positive OS/2 xAvgCharWidth / em for the selected face. DOCX may use it
    * for Word-observed adjustable Latin spaces; it is never a glyph advance. */
   averageCharWidthRatio?: number;
