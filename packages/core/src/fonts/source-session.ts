@@ -247,6 +247,8 @@ export interface FontSourceSessionOptions {
    * an `'all'` demand, every declaration is its own face.
    */
   readonly requestedWeights?: readonly number[];
+  /** {@link URL_REGISTRATION_MIN_BYTES} (tests). */
+  readonly urlRegistrationMinBytes?: number;
 }
 
 
@@ -576,6 +578,9 @@ const registrationUrls = new WeakMap<FontFaceDeclaration, string>();
  * Fonts' fonts.gstatic.com, which serves every file under a versioned URL as
  * `public, max-age=31536000` with `Access-Control-Allow-Origin: *`).
  *
+ * Only files of a registration pass beyond its first
+ * {@link URL_REGISTRATION_MIN_BYTES} do (`viaUrl` in registerDemanded).
+ *
  * `new FontFace(family, bytes)` decodes (and sanitises) the font
  * synchronously on the calling thread, about 0.5 ms per CJK subset; a URL
  * face is decoded by the engine off the main thread (Chromium), and its
@@ -607,16 +612,31 @@ function registersFromUrl(source: FontSourceDescriptor | undefined): boolean {
   }
 }
 
+/**
+ * Bytes a registration pass decodes from bytes before its later faces
+ * register from their URL ({@link registersFromUrl}). A URL face costs one
+ * HTTP-cache round trip before it can load (about 10–15 ms in Chromium,
+ * paid once per pass: the requests run in parallel); a face built from bytes
+ * costs a synchronous decode of about 10 ms per MiB of WOFF2 instead. Below
+ * this many bytes the decode is the cheaper one. Chosen by sweeping 0,
+ * 0.5, 1, 2, 4 MiB and unbounded over Latin, CJK and mixed documents
+ * (#2233): from 1 MiB no document was slower than registering every face
+ * from bytes, and CJK documents kept most of the gain.
+ */
+export const URL_REGISTRATION_MIN_BYTES = 1 << 20;
+
 /** `declaration` (a downloadable face of source `source`) with its acquired
- * bytes; one that registers from its URL keeps that URL for registration. */
+ * bytes; one that registers from its URL (`viaUrl`, the pass's decision for
+ * its file) keeps that URL for registration. */
 function acquiredDeclaration(
   source: FontSourceDescriptor | undefined,
   declaration: FontFaceDeclaration,
   data: ArrayBuffer,
+  viaUrl: (url: string, bytes: number) => boolean,
 ): FontFaceDeclaration {
   const acquired = withAcquiredBytes(declaration, data);
   const url = registrationUrls.get(declaration) ?? declaration.url;
-  if (url !== undefined && registersFromUrl(source)) registrationUrls.set(acquired, url);
+  if (url !== undefined && registersFromUrl(source) && viaUrl(url, data.byteLength)) registrationUrls.set(acquired, url);
   return acquired;
 }
 
@@ -759,6 +779,7 @@ export class FontSourceSession {
   private readonly ownsAcquiredFaces: boolean;
   private readonly readMetricTables: FontSourceSessionOptions['readMetricTables'];
   private readonly requestedWeights: readonly number[] | undefined;
+  private readonly urlRegistrationMinBytes: number;
   /** Resolver faces this session acquired, by `sourceIndex\0url`: a later
    * delta claiming the same face reuses the bytes instead of asking again. */
   private readonly acquiredFaces = new Map<string, ArrayBuffer>();
@@ -808,6 +829,7 @@ export class FontSourceSession {
     this.ownsAcquiredFaces = options.acquiredFacesOwnedBySession === true;
     this.readMetricTables = options.readMetricTables;
     this.requestedWeights = requestedWeightSet(options.requestedWeights);
+    this.urlRegistrationMinBytes = options.urlRegistrationMinBytes ?? URL_REGISTRATION_MIN_BYTES;
     this.caches = this.sources.map(acquireSourceCache);
     const signal = options.signal;
     if (signal) {
@@ -1127,11 +1149,25 @@ export class FontSourceSession {
       flush ??= setTimeout(prepareLanded, 0);
     };
     /** False once the margin is reached: nothing more is prepared. */
+    // Which files of this pass register from their URL: in the order their
+    // bytes land, those beyond URL_REGISTRATION_MIN_BYTES of earlier files
+    // (decided once per file, so a prepared face and its registration agree).
+    const urlFiles = new Map<string, boolean>();
+    let landedBytes = 0;
+    const viaUrl = (url: string, bytes: number): boolean => {
+      let decided = urlFiles.get(url);
+      if (decided === undefined) {
+        decided = landedBytes >= this.urlRegistrationMinBytes;
+        landedBytes += bytes;
+        urlFiles.set(url, decided);
+      }
+      return decided;
+    };
     const prepare = (url: string, data: ArrayBuffer): boolean => {
       for (const { sourceIndex, declaration } of pending.get(url) ?? []) {
         // Checked before any work for a face (hashing included).
         if (this.closed || Date.now() + PREPARE_DEADLINE_MARGIN_MS > deadline) return false;
-        const acquired = acquiredDeclaration(this.sources[sourceIndex], declaration, data);
+        const acquired = acquiredDeclaration(this.sources[sourceIndex], declaration, data, viaUrl);
         const signature = faceSignature(sourceIndex, acquired);
         if (this.owned.has(signature) || this.prepared.has(signature)) continue;
         // The face's copy of the bytes is charged while it is prepared, only
@@ -1175,7 +1211,7 @@ export class FontSourceSession {
       if (this.closed) throw createAbortError('Font source session released');
       // Prepared faces stay charged (and reclaimable) until registration
       // takes them over in declaration order; see register().
-      this.registerAcquired(work, outcomes, registered, failures);
+      this.registerAcquired(work, outcomes, registered, failures, viaUrl);
     } finally {
       if (flush !== undefined) clearTimeout(flush);
       landed.length = 0;
@@ -1200,6 +1236,7 @@ export class FontSourceSession {
     outcomes: ReadonlyMap<string, ReadonlyMap<string, FaceAcquisition>>,
     registered: Set<OwnedFace>,
     failures: Map<string, string>,
+    viaUrl: (url: string, bytes: number) => boolean,
   ): void {
     for (const { state, demand, indices } of work) {
       const source = this.sources[state.sourceIndex];
@@ -1211,7 +1248,7 @@ export class FontSourceSession {
         if (!isDownloadableFace(declaration)) { ready.push(index); continue; }
         const outcome = group?.get(declaration.url as string) ?? { reason: 'font download failed' };
         if ('data' in outcome) {
-          state.declarations[index] = acquiredDeclaration(source, declaration, outcome.data);
+          state.declarations[index] = acquiredDeclaration(source, declaration, outcome.data, viaUrl);
           ready.push(index);
         } else if (!failures.has(state.name)) {
           failures.set(state.name, outcome.reason);

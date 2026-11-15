@@ -141,9 +141,14 @@ function demand(families: string[], scalars: FontSessionDemand['scalars'] = 'all
 }
 
 const sessions: FontSourceSession[] = [];
+/** FontSourceSessionOptions.urlRegistrationMinBytes of the sessions `open` creates. */
+let urlRegistrationMinBytes: number | undefined;
 function open(sources: readonly FontSource[], set: FakeSet, signal?: AbortSignal,
   readMetricTables?: typeof readFontResourceMetrics): FontSourceSession {
-  const session = new FontSourceSession({ sources, fontSet: asSet(set), signal, readMetricTables });
+  const session = new FontSourceSession({
+    sources, fontSet: asSet(set), signal, readMetricTables,
+    ...(urlRegistrationMinBytes === undefined ? {} : { urlRegistrationMinBytes }),
+  });
   sessions.push(session);
   return session;
 }
@@ -309,7 +314,33 @@ describe('FontSourceSession: lazy unicode-range loading', () => {
 
 describe('FontSourceSession: googleFonts() faces register from their URL', () => {
   // A window realm (Node has no document); a worker keeps registering bytes.
-  beforeEach(() => { G.document = {}; });
+  // Every file registers from its URL unless a test sets a threshold.
+  beforeEach(() => { G.document = {}; urlRegistrationMinBytes = 0; });
+  afterEach(() => { urlRegistrationMinBytes = undefined; });
+
+  it('decodes the first files of a pass from bytes, up to the threshold, and registers the rest from their URL', async () => {
+    urlRegistrationMinBytes = 1500;
+    const carlito = 'https://fonts.googleapis.com/css2?family=Carlito:ital,wght@0,400;0,700;1,400;1,700&display=swap';
+    const files = [0, 1, 2].map((index) => `https://fonts.gstatic.example/f${index}.woff2`);
+    installFetch({
+      [carlito]: { css: files.map((file, index) => rule('Carlito', file, `unicode-range: U+${(0x41 + index).toString(16)};`)).join('') },
+      ...Object.fromEntries(files.map((file) => [file, { bytes: 1000 }])),
+    });
+    const set = fakeSet();
+    const loaded = await open([googleFonts()], set).ensure(demand(['Calibri'], [0x41, 0x42, 0x43]));
+    expect(loaded.faces).toHaveLength(3);
+    // 1000 + 1000 bytes reach the threshold: the third file registers from its URL.
+    expect(set.faces.map((face) => typeof face.source).sort()).toEqual(['object', 'object', 'string']);
+  });
+
+  it('decodes a pass below the default threshold from bytes', async () => {
+    urlRegistrationMinBytes = undefined;
+    const carlito = 'https://fonts.googleapis.com/css2?family=Carlito:ital,wght@0,400;0,700;1,400;1,700&display=swap';
+    installFetch({ [carlito]: { css: rule('Carlito', 'https://fonts.gstatic.example/c-latin.woff2', LATIN) } });
+    const set = fakeSet();
+    await open([googleFonts()], set).ensure(demand(['Calibri'], [0x61]));
+    expect(set.faces.map((face) => face.source instanceof ArrayBuffer)).toEqual([true]);
+  });
 
   it('downloads and charges each face, then registers the downloaded URL (no decode from bytes)', async () => {
     const carlito = 'https://fonts.googleapis.com/css2?family=Carlito:ital,wght@0,400;0,700;1,400;1,700&display=swap';
