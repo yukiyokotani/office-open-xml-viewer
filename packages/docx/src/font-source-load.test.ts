@@ -187,7 +187,7 @@ const SOURCE = fontCssApi({
   urlTemplate: 'https://fonts.example/css?family={family}',
   families: { 'Noto Sans JP': true, Carlito: true },
   query: 'x',
-  substitutes: OFFICE_FONT_SUBSTITUTIONS,
+  substitutions: OFFICE_FONT_SUBSTITUTIONS,
 });
 
 describe('loadDocxFontSources', () => {
@@ -248,7 +248,7 @@ describe('loadDocxFontSources', () => {
   it('forwards the worker bridge options: claimed resolver URL faces go through the acquirer', async () => {
     const { faces, set, fetched } = install();
     const url = 'https://fonts.app.example/brand.woff2';
-    const source = fontResolver((request) => request.families.map((family) => ({ family, url })));
+    const source = fontResolver((request) => request.authoredFamilies.map((family) => ({ family, url })));
     const bytes = new Uint8Array(12).buffer;
     const acquireResolverFaces = vi.fn(async (_request: { readonly sourceIndex: number }) => new Map([[url, { data: bytes }]]));
     const doc = docWith([text('Hello', { fontFamily: 'Brand' })]);
@@ -282,7 +282,7 @@ describe('loadDocxFontSources', () => {
       urlTemplate: 'https://fonts.example/css?family={family}',
       families: { 'Noto Naskh Arabic': true },
       query: 'x',
-      substitutes: OFFICE_FONT_SUBSTITUTIONS,
+      substitutions: OFFICE_FONT_SUBSTITUTIONS,
     });
     for (const sources of [[own, naskh], [own]]) {
       const plan = docxFontFamilyPlan(doc, sources, undefined, { routes: {} });

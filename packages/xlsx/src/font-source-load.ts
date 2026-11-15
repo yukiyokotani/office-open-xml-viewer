@@ -51,7 +51,7 @@ export {
 
 /** The substitutions every configured source declares, in option order. */
 export function declaredFontSubstitutions(sources: readonly FontSourceDescriptor[]): readonly FontSubstitution[] {
-  return Object.freeze(sources.flatMap((source) => source.substitutes ?? []));
+  return Object.freeze(sources.flatMap((source) => source.substitutions ?? []));
 }
 
 /**
@@ -112,9 +112,9 @@ export class XlsxFontDemand {
   constructor(
     private readonly workbook: ParsedWorkbook,
     cjkFallback: CjkLang,
-    substitutes: readonly FontSubstitution[],
+    substitutions: readonly FontSubstitution[],
   ) {
-    for (const substitution of substitutes) {
+    for (const substitution of substitutions) {
       if (!substitution.script) continue;
       const key = fontFamilyKey(substitution.for);
       this.scopedScripts.set(key, (this.scopedScripts.get(key) ?? new Set()).add(substitution.script));

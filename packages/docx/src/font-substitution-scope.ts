@@ -15,17 +15,17 @@ import {
 export function declaredFontSubstitutions(
   sources: readonly FontSourceDescriptor[] | undefined,
 ): readonly FontSubstitution[] {
-  return Object.freeze((sources ?? []).flatMap((source) => source.substitutes ?? []));
+  return Object.freeze((sources ?? []).flatMap((source) => source.substitutions ?? []));
 }
 
 /** Authored families (normalised) every declared substitution of which is
  * scoped to one script, mapped to that script. A family with any unscoped
  * substitution, or with substitutions of different scripts, is not scoped. */
 export function scriptScopedSubstitutedFamilies(
-  substitutes: readonly FontSubstitution[],
+  substitutions: readonly FontSubstitution[],
 ): ReadonlyMap<string, FontSubstituteScript> {
   const scripts = new Map<string, FontSubstituteScript | null>();
-  for (const substitution of substitutes) {
+  for (const substitution of substitutions) {
     const key = fontFamilyKey(substitution.for);
     const script = substitution.script ?? null;
     const prior = scripts.get(key);

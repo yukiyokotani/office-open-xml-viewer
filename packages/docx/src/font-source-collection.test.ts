@@ -785,7 +785,7 @@ describe('substitution relationships are keyed per authored family', () => {
     // Being C's target must not scope A out of A's own route.
     const sources = [fontFiles({
       faces: [{ family: 'Alpha Face', url: 'https://app.example/alpha.woff2' }],
-      substitutes: [
+      substitutions: [
         { for: 'Alpha Face', use: 'Beta Face', script: 'arabic' },
         { for: 'Gamma Face', use: 'Alpha Face', script: 'arabic' },
       ],

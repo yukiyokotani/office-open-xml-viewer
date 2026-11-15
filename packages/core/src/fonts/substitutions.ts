@@ -75,13 +75,13 @@ export type FontSubstituteScripts = 'all' | readonly FontSubstituteScript[];
  * only when `scripts` proves its script: it limits when the substitute is
  * requested, never whether the authored family itself is. */
 export function substitutionsFor(
-  substitutes: readonly FontSubstitution[] | undefined,
+  substitutions: readonly FontSubstitution[] | undefined,
   authoredFamily: string,
   scripts: FontSubstituteScripts = 'all',
 ): readonly FontSubstitution[] {
-  if (!substitutes || substitutes.length === 0) return [];
+  if (!substitutions || substitutions.length === 0) return [];
   const key = fontFamilyKey(authoredFamily);
-  return substitutes.filter((entry) => fontFamilyKey(entry.for) === key
+  return substitutions.filter((entry) => fontFamilyKey(entry.for) === key
     && (entry.script === undefined || scripts === 'all' || scripts.includes(entry.script)));
 }
 
@@ -108,11 +108,11 @@ export type FontDeclarationMatch =
 export function matchFontDeclaration(
   declarationFamily: string,
   demandedFamily: string,
-  substitutes: readonly FontSubstitution[] | undefined,
+  substitutions: readonly FontSubstitution[] | undefined,
 ): FontDeclarationMatch | null {
   const declared = fontFamilyKey(declarationFamily);
   if (declared === fontFamilyKey(demandedFamily)) return { kind: 'family' };
-  const substitution = substitutionsFor(substitutes, demandedFamily)
+  const substitution = substitutionsFor(substitutions, demandedFamily)
     .find((entry) => fontFamilyKey(entry.use) === declared);
   return substitution ? { kind: 'substitute', substitution } : null;
 }

@@ -195,9 +195,9 @@ export function fontContentKey(value: ArrayBuffer | string): string {
   return key;
 }
 
-function hashSubstitutes(hash: IdentityHash, substitutes: readonly FontSubstitution[] | undefined): void {
-  hash.text(substitutes === undefined ? undefined : String(substitutes.length));
-  for (const entry of substitutes ?? []) hash.text(entry.for).text(entry.use).text(entry.script);
+function hashSubstitutions(hash: IdentityHash, substitutions: readonly FontSubstitution[] | undefined): void {
+  hash.text(substitutions === undefined ? undefined : String(substitutions.length));
+  for (const entry of substitutions ?? []) hash.text(entry.for).text(entry.use).text(entry.script);
 }
 
 function hashDeclaration(hash: IdentityHash, face: FontFaceDeclaration): void {
@@ -241,7 +241,7 @@ export function fontSourceId(source: FontSourceDescriptor): string {
       hash.text(source.id);
       break;
   }
-  hashSubstitutes(hash, source.substitutes);
+  hashSubstitutions(hash, source.substitutions);
   const id = `${source.kind}:${hash.digest()}`;
   sourceIds.set(source, id);
   return id;
