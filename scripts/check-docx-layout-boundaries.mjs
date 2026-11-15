@@ -2,21 +2,19 @@
 
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { createRequire } from 'node:module';
-import { basename, dirname, join, relative, resolve, sep } from 'node:path';
+import { dirname, join, relative, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 // TypeScript 7 intentionally exposes no stable Compiler API yet. This
 // architecture guard is root-only tooling, so it uses the explicitly named
 // TypeScript 6 compatibility dependency while library builds stay on TS 7.
 const require = createRequire(new URL('../package.json', import.meta.url));
-const ts = require('typescript-compiler-api');
+export const ts = require('typescript-compiler-api');
 
-const BASELINE_PATH = 'scripts/docx-layout-boundary-baseline.json';
 const DOCX_SOURCE = 'packages/docx/src';
 const PAINT_SOURCE = `${DOCX_SOURCE}/paint`;
 const LAYOUT_SOURCE = `${DOCX_SOURCE}/layout`;
 const PARSER_MODEL = `${DOCX_SOURCE}/parser-model.ts`;
-const PARAGRAPH_ANCHOR_FRAME_ADAPTER = `${DOCX_SOURCE}/paragraph-anchor-frame-adapter.ts`;
 const WORKER_LAYOUT_RETENTION = `${DOCX_SOURCE}/render-worker-layout.ts`;
 const TEXT_RUN_PROJECTION_ADAPTER = `${DOCX_SOURCE}/text-run-projection.ts`;
 const LAYOUT_RUNTIME_ADAPTER = `${DOCX_SOURCE}/layout-runtime.ts`;
@@ -75,230 +73,6 @@ const TEXT_RUN_PROJECTION_ADAPTER_DECLARATIONS = new Set([
   'textRunsForPage',
   'textRunsForSelectedPage',
 ]);
-const LAYOUT_AFFINE_EXPORTS = new Set([
-  'composeAffine',
-  'inverseMapAffinePoint',
-  'inverseMapAffineVector',
-  'mapAffinePoint',
-  'quarterTurnAffine',
-  'scaleAffine',
-  'translationAffine',
-]);
-const SHARED_PAINT_IMPORTS = new Map([
-  ['@silurus/ooxml-core', new Map([
-    ['acquireBitmapCacheLease', 'value'],
-    ['applyDuotone', 'value'],
-    // Pixel corrections, effect budgets and cache keys consume decoded resources without acquiring layout.
-    ['blipPixelEffectsKey', 'value'],
-    ['autoContrastColor', 'value'],
-    // A retained run-shading preset is rasterized as an 8x8 paint tile;
-    // this helper cannot measure text or change the layout result.
-    ['buildPatternBitmap', 'value'],
-    ['captureDecodedBitmapCacheEpoch', 'value'],
-    ['canvasFontString', 'value'],
-    ['clampCanvasSize', 'value'],
-    // Chart picture-marker discovery and lookup warm the document-owned image
-    // cache before measurement-free chart paint. They expose no layout API.
-    ['chartImageFillKey', 'value'],
-    ['chartImageFillPixelTransform', 'value'],
-    // Per-rendered-size chart picture preparation: a scratch-surface chart
-    // paint records the sizes; keys/lookups address the decoded sources.
-    ['chartImageFillNeedsRenderedSize', 'value'],
-    ['chartFillRenderedSizeKey', 'value'],
-    ['chartImageFillStoreLookup', 'value'],
-    ['collectChartFillRenderedSizes', 'value'],
-    ['assertChartFillRenderedSizeCount', 'value'],
-    ['chartImageFillUsageSize', 'value'],
-    ['collectChartImageFillUsages', 'value'],
-    ['collectChartImageFillUsagesForCharts', 'value'],
-    ['collectChartMarkerImageFills', 'value'],
-    ['collectChartMarkerImageFillsForCharts', 'value'],
-    // DrawingML silhouette clipping is shared paint behavior used by
-    // resource-backed shape fills; it does not expose layout acquisition.
-    ['clipDrawingMLShape', 'value'],
-    ['crispOffset', 'value'],
-    ['defaultDpr', 'value'],
-    ['deferBitmapCloseWhileLeased', 'value'],
-    ['docxBorderDashArray', 'value'],
-    ['drawImageCropped', 'value'],
-    // Pure geometry: the full source frame a stretched/cropped CT_Blip chain
-    // is evaluated on. It reads authored fractions only, never layout.
-    ['stretchedSourceFrame', 'value'],
-    ['doubleRailGeometry', 'value'],
-    ['fillDoubleBorder', 'value'],
-    // Shared decoded-surface ownership is a paint resource concern. DOCX may
-    // create/drop derived clrChange/duotone surfaces without importing layout.
-    ['dropCachedDerivedBitmapNamespace', 'value'],
-    ['decodedBitmapTargetResizeOptions', 'value'],
-    ['duotoneImageData', 'value'],
-    ['applyImageDataTransform', 'value'],
-    ['decodeSvgBlobOnMainThread', 'value'],
-    ['OoxmlDecodedImageLimitError', 'value'],
-    ['getCachedBitmapByPath', 'value'],
-    // Shared CT_Blip decoding/effects own bounded image resources only; the
-    // interpreter never acquires text, layout, or parser-model geometry.
-    ['getCachedDuotoneBitmapByPath', 'value'],
-    ['getCachedDerivedBitmap', 'value'],
-    ['getCachedSvgImageByPath', 'value'],
-    // Header inspection reuses the document-owned byte profile to decide
-    // whether browser target-resize is available. Both predicates remain
-    // paint-resource admission and cannot affect acquired layout geometry.
-    ['inspectCachedRasterSource', 'value'],
-    ['isBrowserResizableRasterMimeType', 'value'],
-    ['isDecodeTargetResizableRasterFormat', 'value'],
-    ['isOoxmlDecodedImageLimitError', 'value'],
-    // Lazy archive admission errors remain terminal at paint-resource catches.
-    ['OoxmlResourceLimitError', 'value'],
-    // An invalid authored CT_Blip chain cannot be replaced by a raw fallback.
-    ['OoxmlError', 'value'],
-    ['isTiffDecodeError', 'value'],
-    // Missing optional image codecs are contained at paint-resource acquisition;
-    // the placeholder consumes only the already-retained authored bounds.
-    ['isOptionalImageCodecUnavailableError', 'value'],
-    ['paintOptionalImagePlaceholder', 'value'],
-    ['OptionalImageCodecUnavailableError', 'type'],
-    ['HyperlinkTarget', 'type'],
-    ['imageNaturalSize', 'value'],
-    ['isHTMLCanvas', 'value'],
-    ['mathToMathML', 'value'],
-    // Math engine output is decoded before layout; paint consumes only the
-    // resulting CanvasImageSource keyed by the immutable resource record.
-    ['rasterizeMathSvg', 'value'],
-    ['metafileRasterSize', 'value'],
-    // Paint-time image admission uses the completed layout box and effective
-    // DPR to choose a retained decode. These resource-policy primitives neither
-    // measure nor feed geometry back into DocumentLayout.
-    ['MAX_RASTER_PIXELS', 'value'],
-    // Decoded-image policy is shared across all format painters. DOCX supplies
-    // immutable paint demands and consumes the returned target plan; neither
-    // operation may feed measurement or pagination.
-    ['normalizeImageResourceOptions', 'value'],
-    ['planDecodedImageTargets', 'value'],
-    ['paintDrawingMLShape', 'value'],
-    // Bounded VML mask/concentric compositing allocates temporary paint-only surfaces.
-    ['createAuxCanvas', 'value'],
-    ['withVertFeature', 'value'],
-    ['preferVectorBlip', 'value'],
-    ['releaseOwnedBitmap', 'value'],
-    ['resolvedCachedBitmapVariantKey', 'value'],
-    ['sourceRasterTargetSize', 'value'],
-    ['PT_TO_PX', 'value'],
-    // Shared fill resolution keeps gradient/no-fill semantics identical across
-    // DOCX, PPTX, and XLSX painters; paint may consume it but not layout APIs.
-    ['resolveFill', 'value'],
-    ['recolorSvg', 'value'],
-    ['renderChart', 'value'],
-    ['withDrawingMLShapeTransform', 'value'],
-    // This scope only adjusts a CanvasPattern's phase while painting a
-    // retained DrawingML shape; it cannot acquire or alter page layout.
-    ['withPatternCoordinateSpace', 'value'],
-    // Serial admission and bitmap pinning are document-owned paint-resource
-    // lifecycle concerns, not layout acquisition.
-    ['withBitmapCacheLease', 'value'],
-    // Optional renderers and image codecs are paint-only capabilities threaded
-    // into existing shared painters. Their erased contracts do not expose
-    // layout acquisition or permit a renderer back-edge.
-    ['ChartThreeDRenderer', 'type'],
-    ['ChartRegionMapRenderer', 'type'],
-    ['ChartExRenderer', 'type'],
-    ['ChartImageLookup', 'type'],
-    ['Duotone', 'type'],
-    ['BlipEffect', 'type'],
-    ['ImageResourceOptions', 'type'],
-    ['MathRenderer', 'type'],
-    ['TiffRenderer', 'type'],
-    // Erased SVG decoder capability; paint forwards it to the shared image owner.
-    ['SvgBlobDecoder', 'type'],
-  ])],
-  // Chart paint stamps the document's loaded font substitutions onto the chart
-  // model; a pure map over already-loaded state, no measurement or layout.
-  ['@silurus/ooxml-core/internal/chart-font-sources', new Map([
-    ['withChartFontSubstitutions', 'value'],
-  ])],
-]);
-
-const LEGACY_SYMBOLS = [
-  'fitMeasureReuseEnabled',
-  'fragmentPaintEnabled',
-  'lineReuseEnabled',
-  'isFragmentPaintableParagraph',
-  'layoutLinesInputs',
-  'stampParagraphLines',
-  'renderBodyParagraphLines',
-  'renderShapeText',
-  'tableRequiresLegacyPaint',
-  'isFragmentPaintableTable',
-  'tableReuseEnabled',
-  'renderTableFragment',
-  'computePages',
-  'computeTableLayout',
-  'calculateRowHeight',
-  'measureCellContentHeightPx',
-  'buildTableCellBlocks',
-  'renderHeaderFooter',
-  'measureFootnoteHeight',
-  'RenderState',
-  'deferFront',
-  'deferFrontDrawing',
-  'deferBehindDrawing',
-  'deferredFrontPaint',
-  'deferredPaintWrapper',
-  'bodyDrawingPass',
-  'sectionBreakSpacer',
-  'collapsedSpacer',
-  'leadsCollapsedRun',
-  'hiddenCollapsed',
-  'tableColWidthsPt',
-  'tableRowHeightsPt',
-  'tableLayoutInputs',
-];
-
-const DELETED_PAGE_PRODUCER_IDENTIFIERS = new Set([
-  'bodyFragmentFor',
-  'bodyLayoutFallback',
-  'computePages',
-  'paginateDocument',
-  'paginateWithHeaderFooterReserve',
-  'PaginatedBodyElement',
-  'physicalPageSizeForPage',
-  'prebuiltPages',
-  'retainedLayout',
-  'sectionBreakSpacer',
-  'collapsedSpacer',
-  'leadsCollapsedRun',
-  'hiddenCollapsed',
-  'computeTableRowHeights',
-  'estimateTableHeight',
-  'measureRetainedCellContentHeightPt',
-  'measureCellParagraphWindow',
-  'measureCellElementHeight',
-  'trimTrailingStructuralMarker',
-  'paragraphSegsStateSensitive',
-  'rescaleLayoutLines',
-]);
-
-const DELETED_LEGACY_STAMP_PROPERTIES = new Set([
-  'colIndex',
-  'colGeom',
-  'colTopPt',
-  'sectionHF',
-  'sectionGeom',
-  'sectionPageNumType',
-  'sectionTextDirection',
-]);
-
-// Deny-list by basename. layout-fragments.ts, table-fragments.ts and
-// table-geometry.ts no longer exist; they stay listed on purpose so a
-// reintroduced module of that name cannot become a renderer import again.
-const LEGACY_RENDERER_IMPORTS = new Set([
-  'layout-context.ts',
-  'layout-fragments.ts',
-  'line-layout.ts',
-  'paragraph-measure.ts',
-  'table-fragments.ts',
-  'table-geometry.ts',
-]);
-
 const ACQUISITION_CONTEXT_DECLARATIONS = new Set([
   'AnchorFloatRegistrationState',
   'AnchorGeometryContext',
@@ -379,21 +153,6 @@ const EXACT_ACQUISITION_SURFACE_MEMBERS = new Map([
   ])],
 ]);
 
-const ACQUISITION_CONTEXT_CONSUMERS = [
-  `${DOCX_SOURCE}/anchor-geometry.ts`,
-  `${DOCX_SOURCE}/float-table-geometry.ts`,
-  `${DOCX_SOURCE}/frame-geometry.ts`,
-  `${DOCX_SOURCE}/line-layout.ts`,
-  BODY_TABLE_MEASUREMENT,
-  `${DOCX_SOURCE}/paragraph-measure.ts`,
-];
-// Every production module under these directories is an acquisition consumer.
-// Scanning the directory instead of naming files keeps new line-breaker modules
-// covered and cannot leave stale entries behind when a module is deleted.
-const ACQUISITION_CONTEXT_CONSUMER_DIRECTORIES = [
-  `${DOCX_SOURCE}/line-breaker`,
-];
-
 const ACQUISITION_PAINT_PROPERTIES = new Set([
   'canvas',
   'defaultColor',
@@ -410,11 +169,11 @@ function fail(code, detail) {
   throw new Error(`${code}: ${detail}`);
 }
 
-function posixPath(path) {
+export function posixPath(path) {
   return path.split(sep).join('/');
 }
 
-function isProductionTypeScript(path) {
+export function isProductionTypeScript(path) {
   return /\.tsx?$/.test(path)
     && !path.endsWith('.d.ts')
     // `.bench.ts` files are `vitest bench` tooling, not shipped code: they are
@@ -543,29 +302,6 @@ function assertAcquisitionContextBoundary(root) {
       }
     }
   }
-  const inspected = [
-    ...surfaces.keys(),
-    ...ACQUISITION_CONTEXT_CONSUMERS,
-    ...ACQUISITION_CONTEXT_CONSUMER_DIRECTORIES.flatMap((directory) =>
-      listFiles(resolve(root, directory))
-        .map((path) => posixPath(relative(root, path)))
-        .filter(isProductionTypeScript)
-        .sort()),
-  ];
-  for (const file of inspected) {
-    const path = resolve(root, file);
-    if (!existsSync(path)) continue;
-    for (const edge of moduleEdges(path)) {
-      if (!edge.literal || !edge.specifier.startsWith('.')) continue;
-      const dependency = resolveLocalImport(path, edge.specifier);
-      if (dependency && posixPath(relative(root, dependency)) === `${DOCX_SOURCE}/renderer.ts`) {
-        fail(
-          'ACQUISITION_RENDERER_DEPENDENCY',
-          `${file} -> ${DOCX_SOURCE}/renderer.ts`,
-        );
-      }
-    }
-  }
 }
 
 function assertProductionBodyAcquisitionAuthority(root) {
@@ -581,8 +317,8 @@ function assertProductionBodyAcquisitionAuthority(root) {
       'layoutLines',
       'lineBoxHeight',
     ])],
-    // table-geometry.ts was deleted (the retained table pipeline owns row
-    // heights); the entry is kept as a tombstone against reintroduction.
+    // table-geometry.ts is a tombstone (scripts/tombstones.mjs); the names
+    // stay listed so an import cannot precede the file's return.
     [`${DOCX_SOURCE}/table-geometry.ts`, new Set([
       'applyTableRowBoundaryFootprints',
       'resolveTableRowContentHeights',
@@ -1000,7 +736,7 @@ function assertFloatPlacementAuthority(root) {
   }
 }
 
-function listFiles(root) {
+export function listFiles(root) {
   if (!existsSync(root)) return [];
   const files = [];
   for (const entry of readdirSync(root)) {
@@ -1011,7 +747,7 @@ function listFiles(root) {
   return files;
 }
 
-function sourceFile(path) {
+export function sourceFile(path) {
   const kind = path.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS;
   return ts.createSourceFile(path, readFileSync(path, 'utf8'), ts.ScriptTarget.Latest, true, kind);
 }
@@ -1126,72 +862,87 @@ function dependencyGraph(root) {
   return graph;
 }
 
-function paintBoundaryViolations(root) {
-  const graph = dependencyGraph(root);
+// Which modules and bindings paint may import is an ast-grep rule
+// (docx-paint-import-zone), which reads specifier text. What only the compiler
+// view can say stays here: a relative specifier names a real module, inside
+// paint or one of the two reviewed TypeScript contracts, and no `import()` or
+// `require()` call leaves paint.
+function assertPaintEdgeTargets(root) {
   const paintRoot = resolve(root, PAINT_SOURCE);
-  const layoutTypes = resolve(root, LAYOUT_SOURCE, 'types.ts');
-  const layoutAffine = resolve(root, LAYOUT_AFFINE);
-  const paintAffine = resolve(root, PAINT_SOURCE, 'affine.ts');
-  const entries = [...graph.keys()].filter((path) => path.startsWith(`${paintRoot}${sep}`));
-  const violations = [];
-  const nonLiteral = [];
-
-  for (const entry of entries) {
-    const stack = [{ path: entry, chain: [entry] }];
-    const visited = new Set([entry]);
-    while (stack.length > 0) {
-      const current = stack.pop();
-      for (const edge of graph.get(current.path) ?? []) {
-        if (!edge.literal) {
-          nonLiteral.push(posixPath(relative(root, current.path)));
-          continue;
-        }
-        if (edge.bare) {
-          violations.push([...current.chain.map((path) => posixPath(relative(root, path))), edge.specifier]);
-          continue;
-        }
-        if (!edge.specifier.startsWith('.')) {
-          const allowedNames = SHARED_PAINT_IMPORTS.get(edge.specifier);
-          const allowed = edge.kind === 'import'
-            && !edge.aliased
-            && allowedNames
-            && edge.importedNames?.length > 0
-            && edge.importedNames?.every((name) => (
-              allowedNames.get(name) === (edge.typeOnly ? 'type' : 'value')
-            ));
-          if (!allowed) {
-            violations.push([...current.chain.map((path) => posixPath(relative(root, path))), edge.specifier]);
-          }
-          continue;
-        }
-        const dependency = resolveLocalImport(current.path, edge.specifier);
-        if (!dependency) {
-          violations.push([...current.chain.map((path) => posixPath(relative(root, path))), edge.specifier]);
-          continue;
-        }
-        const chain = [...current.chain, dependency];
-        const insidePaint = dependency.startsWith(`${paintRoot}${sep}`);
-        const allowedAffineContract = current.path === paintAffine
-          && dependency === layoutAffine
-          && edge.kind === 'export'
-          && !edge.typeOnly
-          && !edge.aliased
-          && edge.importedNames?.length === LAYOUT_AFFINE_EXPORTS.size
-          && edge.importedNames.every((name) => LAYOUT_AFFINE_EXPORTS.has(name));
-        const allowedContract = (edge.typeOnly && dependency === layoutTypes)
-          || allowedAffineContract;
-        if (!insidePaint && !allowedContract) {
-          violations.push(chain.map((path) => posixPath(relative(root, path))));
-          continue;
-        }
-        if (insidePaint && !visited.has(dependency)) {
-          visited.add(dependency);
-          stack.push({ path: dependency, chain });
-        }
+  const outside = new Set([resolve(root, LAYOUT_SOURCE, 'types.ts'), resolve(root, LAYOUT_AFFINE)]);
+  for (const path of listFiles(paintRoot).filter(isProductionTypeScript)) {
+    for (const edge of moduleEdges(path)) {
+      // `import()` and `require()` are judged here, as the compiler reads them:
+      // literal, and inside paint. tree-sitter reads the erased
+      // `import('m').T` of a type as the same call.
+      const call = edge.kind === 'dynamic-import' || edge.kind === 'require';
+      if (call && (!edge.literal || !edge.specifier.startsWith('.'))) {
+        fail('PAINT_EDGE_TARGET', `${posixPath(relative(root, path))} -> ${edge.specifier}`);
+      }
+      if (!edge.literal || !edge.specifier.startsWith('.')) continue;
+      const dependency = resolveLocalImport(path, edge.specifier);
+      if (!dependency || !(dependency.startsWith(`${paintRoot}${sep}`) || (outside.has(dependency) && !call))) {
+        fail('PAINT_EDGE_TARGET', `${posixPath(relative(root, path))} -> ${edge.specifier}`);
       }
     }
   }
-  return { violations, nonLiteral };
+}
+
+// ast-grep reads source with tree-sitter, which separates tokens on ASCII
+// white space only. TypeScript also accepts U+0085, U+FEFF and the Unicode
+// space separators between tokens, so `import<U+0085>* as x from` would be an
+// import to the compiler and no import to the import-zone rules. Between
+// tokens DOCX source uses space, tab and line feeds; elsewhere (strings,
+// comments) any character is fine.
+function assertPlainTokenSeparators(root) {
+  const separators = /[\v\f\u0085\u00a0\u1680\u2000-\u200b\u2028\u2029\u202f\u205f\u3000\ufeff]/;
+  for (const path of listFiles(resolve(root, DOCX_SOURCE)).filter(isProductionTypeScript)) {
+    // ast-grep skips a file that is not valid UTF-8 without a diagnostic.
+    try {
+      new TextDecoder('utf-8', { fatal: true }).decode(readFileSync(path));
+    } catch {
+      fail('IMPORT_ZONE_ENCODING', posixPath(relative(root, path)));
+    }
+    const source = sourceFile(path);
+    // The two parsers recover from a syntax error differently.
+    if (source.parseDiagnostics.length > 0) {
+      const { line } = ts.getLineAndCharacterOfPosition(source, source.parseDiagnostics[0].start);
+      fail('IMPORT_ZONE_SYNTAX', `${posixPath(relative(root, path))}:${line + 1}`);
+    }
+    const text = source.text;
+    // Blank out what is not between tokens: comments and literal text.
+    const between = text.split('');
+    const blank = (start, end) => between.fill(' ', start, end);
+    const visit = (node) => {
+      for (const comment of [
+        ...ts.getLeadingCommentRanges(text, node.getFullStart()) ?? [],
+        ...ts.getTrailingCommentRanges(text, node.end) ?? [],
+      ]) blank(comment.pos, comment.end);
+      if (ts.isStringLiteralLike(node) || ts.isTemplateLiteralToken(node)
+        || ts.isRegularExpressionLiteral(node) || ts.isJsxText(node)) blank(node.getStart(source), node.end);
+      for (const child of node.getChildren(source)) visit(child);
+    };
+    visit(source);
+    const at = between.join('').search(separators);
+    if (at >= 0 || readFileSync(path, 'utf8').startsWith('\uFEFF')) {
+      const { line } = ts.getLineAndCharacterOfPosition(source, Math.max(at, 0));
+      fail('IMPORT_ZONE_TOKEN_SEPARATOR', `${posixPath(relative(root, path))}:${line + 1}`);
+    }
+  }
+}
+
+// The import-zone rules (ids `docx-*`) are ast-grep rules, and ast-grep honors
+// `ast-grep-ignore` comments. A suppression in DOCX source must name the rules
+// it silences, and may not name an import-zone rule.
+function assertNoImportZoneSuppression(root) {
+  for (const path of listFiles(resolve(root, DOCX_SOURCE)).filter(isProductionTypeScript)) {
+    for (const match of readFileSync(path, 'utf8').matchAll(/ast-grep-ignore([^\n]*)/g)) {
+      const ids = /^: ([^\n]*?)(?: -- |\s*\*\/|$)/.exec(match[1])?.[1].split(',').map((id) => id.trim());
+      if (!ids || !ids.every((id) => /^[a-z0-9-]+$/.test(id) && !id.startsWith('docx-'))) {
+        fail('IMPORT_ZONE_SUPPRESSION', `${posixPath(relative(root, path))}: ${match[0].trim()}`);
+      }
+    }
+  }
 }
 
 function identifierText(node) {
@@ -2028,12 +1779,6 @@ function assertLayoutParserModelBoundaries(root) {
   }
 }
 
-function assertParagraphAnchorFrameAdapterBoundary(root) {
-  const adapter = resolve(root, PARAGRAPH_ANCHOR_FRAME_ADAPTER);
-  if (!existsSync(adapter)) return;
-  fail('FINAL_PARAGRAPH_ANCHOR_ADAPTER', PARAGRAPH_ANCHOR_FRAME_ADAPTER);
-}
-
 function assertBodyKernelServiceOwner(root) {
   const runtime = resolve(root, LAYOUT_RUNTIME_ADAPTER);
   if (!existsSync(runtime)) {
@@ -2080,69 +1825,6 @@ function assertBodyKernelServiceOwner(root) {
   }
   if (calls.length !== 1 || identifiers.length !== 2 || !owned || !insideOwner) {
     fail('BODY_KERNEL_SERVICE_OWNER', `calls:${calls.length};identifiers:${identifiers.length}`);
-  }
-}
-
-// `legacyDoc` is the public opt-in key for the optional binary DOC reader
-// (an input format, like `math` or `chartEx`), not a layout migration switch.
-const INPUT_FORMAT_OPTION_IDENTIFIERS = new Set(['legacyDoc']);
-
-const MIGRATION_IDENTIFIER = /(?:legacy|(?:use|enable|prefer|require)[a-z0-9]*(?:old|previous|alternate)[a-z0-9]*(?:engine|layout|path|algorithm)|(?:reuse|paint)enabled|requireslegacy|dryrun)/i;
-
-function matchingIdentifierCounts(root, predicate) {
-  const counts = {};
-  const sourceRoot = resolve(root, DOCX_SOURCE);
-  for (const path of listFiles(sourceRoot).filter(isProductionTypeScript)) {
-    const source = sourceFile(path);
-    const file = posixPath(relative(root, path));
-    const visit = (node) => {
-      if (ts.isIdentifier(node) && predicate(node.text)) {
-        const key = `${file}#${node.text}`;
-        counts[key] = (counts[key] ?? 0) + 1;
-      }
-      ts.forEachChild(node, visit);
-    };
-    visit(source);
-  }
-  return Object.fromEntries(Object.entries(counts).sort(([left], [right]) => left.localeCompare(right)));
-}
-
-function assertNoDeletedPageProducerIdentifiers(root) {
-  const matches = {};
-  const sourceRoot = resolve(root, DOCX_SOURCE);
-  const record = (file, name) => {
-    const key = `${file}#${name}`;
-    matches[key] = (matches[key] ?? 0) + 1;
-  };
-  for (const path of listFiles(sourceRoot).filter(isProductionTypeScript)) {
-    const source = sourceFile(path);
-    const file = posixPath(relative(root, path));
-    const visit = (node) => {
-      if (ts.isIdentifier(node) && DELETED_PAGE_PRODUCER_IDENTIFIERS.has(node.text)) {
-        record(file, node.text);
-      } else if ((ts.isIdentifier(node) || ts.isStringLiteralLike(node))
-        && DELETED_LEGACY_STAMP_PROPERTIES.has(node.text)) {
-        const parent = node.parent;
-        const isStaticPropertyName = (
-          (ts.isPropertyAccessExpression(parent) && parent.name === node)
-          || (ts.isElementAccessExpression(parent) && parent.argumentExpression === node)
-          || (ts.isPropertyAssignment(parent) && parent.name === node)
-          || (ts.isShorthandPropertyAssignment(parent) && parent.name === node)
-          || (ts.isPropertyDeclaration(parent) && parent.name === node)
-          || (ts.isPropertySignature(parent) && parent.name === node)
-          || (ts.isMethodDeclaration(parent) && parent.name === node)
-          || (ts.isGetAccessorDeclaration(parent) && parent.name === node)
-          || (ts.isSetAccessorDeclaration(parent) && parent.name === node)
-          || (ts.isBindingElement(parent) && (parent.propertyName ?? parent.name) === node)
-        );
-        if (isStaticPropertyName) record(file, node.text);
-      }
-      ts.forEachChild(node, visit);
-    };
-    visit(source);
-  }
-  if (Object.keys(matches).length > 0) {
-    fail('FORBIDDEN_PAGE_PRODUCER_IDENTIFIER', stableJson(matches).trim());
   }
 }
 
@@ -2666,25 +2348,6 @@ function assertCanonicalCutoverBoundaries(root) {
   }
 }
 
-function identifierCounts(root) {
-  const counts = {};
-  const sourceRoot = resolve(root, DOCX_SOURCE);
-  for (const path of listFiles(sourceRoot).filter(isProductionTypeScript)) {
-    const fileCounts = Object.fromEntries(LEGACY_SYMBOLS.map((symbol) => [symbol, 0]));
-    const source = sourceFile(path);
-    const visit = (node) => {
-      if (ts.isIdentifier(node) && Object.hasOwn(fileCounts, node.text)) fileCounts[node.text] += 1;
-      ts.forEachChild(node, visit);
-    };
-    visit(source);
-    const file = posixPath(relative(root, path));
-    for (const [symbol, count] of Object.entries(fileCounts)) {
-      if (count > 0) counts[`${file}#${symbol}`] = count;
-    }
-  }
-  return Object.fromEntries(Object.entries(counts).sort(([left], [right]) => left.localeCompare(right)));
-}
-
 function bindingNames(name, names = []) {
   if (ts.isIdentifier(name)) names.push(name.text);
   else for (const element of name.elements) {
@@ -2707,43 +2370,6 @@ function declarationNames(statement) {
     return statement.declarationList.declarations.flatMap((declaration) => bindingNames(declaration.name));
   }
   return [];
-}
-
-function rendererImportEdges(root) {
-  const renderer = resolve(root, DOCX_SOURCE, 'renderer.ts');
-  if (!existsSync(renderer)) return [];
-  return [...new Set(moduleEdges(renderer)
-    .filter((edge) => edge.literal)
-    .map((edge) => resolveLocalImport(renderer, edge.specifier))
-    .filter((path) => path && LEGACY_RENDERER_IMPORTS.has(basename(path)))
-    .map((path) => `${DOCX_SOURCE}/renderer.ts -> ${posixPath(relative(root, path))}`))]
-    .sort();
-}
-
-function currentLegacyInventory(root) {
-  return {
-    version: 3,
-    legacySymbolCounts: identifierCounts(root),
-    migrationIdentifierCounts: matchingIdentifierCounts(
-      root,
-      (name) => MIGRATION_IDENTIFIER.test(name) && !INPUT_FORMAT_OPTION_IDENTIFIERS.has(name),
-    ),
-    rendererImportEdges: rendererImportEdges(root),
-  };
-}
-
-function stableJson(value) {
-  return `${JSON.stringify(value, null, 2)}\n`;
-}
-
-function assertPaintBoundaries(root) {
-  const { violations, nonLiteral } = paintBoundaryViolations(root);
-  if (nonLiteral.length > 0) {
-    fail('NON_LITERAL_MODULE_EDGE', nonLiteral.join('\n'));
-  }
-  if (violations.length > 0) {
-    fail('FORBIDDEN_PAINT_EDGE', violations.map((chain) => chain.join(' -> ')).join('\n'));
-  }
 }
 
 function hasExportModifier(statement) {
@@ -3001,8 +2627,6 @@ function assertTextShapeRangeContext(root) {
 
 export function checkDocxLayoutBoundaries(options) {
   const root = resolve(options.root);
-  const baselinePath = resolve(root, BASELINE_PATH);
-  const baselineExists = existsSync(baselinePath);
   assertNoProductionTestSupportImports(root);
   assertTextShapeRangeContext(root);
   assertAcquisitionContextBoundary(root);
@@ -3010,8 +2634,9 @@ export function checkDocxLayoutBoundaries(options) {
   assertRendererAcquisitionProjectionBoundary(root);
   assertFloatRectTransportBoundary(root);
   assertFloatPlacementAuthority(root);
-  assertNoDeletedPageProducerIdentifiers(root);
-  assertPaintBoundaries(root);
+  assertPlainTokenSeparators(root);
+  assertNoImportZoneSuppression(root);
+  assertPaintEdgeTargets(root);
   assertCapabilityBoundaries(root);
   assertAffineRuntimeDependencies(root);
   assertTextRunProjectionAdapterBoundary(root);
@@ -3019,19 +2644,11 @@ export function checkDocxLayoutBoundaries(options) {
   assertOccurrenceProjectionRuntimeDependencies(root);
   assertBodyPaintConsumesRetainedLayout(root);
   assertLayoutParserModelBoundaries(root);
-  assertParagraphAnchorFrameAdapterBoundary(root);
   assertBodyKernelServiceOwner(root);
   assertCanonicalCutoverBoundaries(root);
 
-  if (baselineExists) fail('FINAL_BASELINE_PRESENT', BASELINE_PATH);
   assertFinalRendererAdapter(root);
   assertFinalRendererAssetImports(root);
-  const actual = currentLegacyInventory(root);
-  if (Object.keys(actual.legacySymbolCounts).length > 0
-    || Object.keys(actual.migrationIdentifierCounts).length > 0
-    || actual.rendererImportEdges.length > 0) {
-    fail('FINAL_LEGACY_BOUNDARY', stableJson(actual).trim());
-  }
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1]).href) {

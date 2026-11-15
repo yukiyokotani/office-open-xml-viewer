@@ -1,0 +1,84 @@
+# A module edge of a DOCX paint module that leaves the paint directory, apart
+# from the erased `layout/types` contract and reviewed package imports
+# (`docx-paint-package-imports`). Matches the statement or call.
+id: docx-paint-forbidden-edge
+language: TypeScript
+utils:
+  # `./name.js`: a sibling inside the paint directory. No `..`, no subpath.
+  paint-sibling:
+    regex: "^['\"]\\./[A-Za-z0-9_][A-Za-z0-9_-]*(\\.[A-Za-z0-9_-]+)*['\"]$"
+  layout-types:
+    regex: "^['\"]\\.\\./layout/types\\.js['\"]$"
+  package:
+    regex: "^['\"][^.]"
+  # The first ancestor that is not part of the `import(...).A.B` chain is a
+  # node that holds types only, or the type operand of `as` / `satisfies`.
+  type-position:
+    any:
+      - inside:
+          stopBy: { not: { kind: member_expression } }
+          any:
+            - kind: type_annotation
+            - kind: type_arguments
+            - kind: type_alias_declaration
+            - kind: union_type
+            - kind: intersection_type
+            - kind: array_type
+            # tree-sitter recovers `import('m').T[]` and `import('m').T<U>` through an error node.
+            - { kind: ERROR, inside: { kind: type_annotation } }
+      - inside:
+          stopBy: { not: { kind: member_expression } }
+          kind: member_expression
+          nthChild: 2
+          inside:
+            any:
+              - kind: as_expression
+              - kind: satisfies_expression
+rule:
+  any:
+    # `\u0072equire(...)` is `require(...)`; the rules below read names as written.
+    - { kind: identifier, regex: "\\\\" }
+    # CommonJS in any form, including spellings tree-sitter does not read as a call.
+    - { kind: identifier, regex: "^require$" }
+    # Side-effect imports hide what they reach.
+    - kind: import_statement
+      not:
+        any:
+          - has: { kind: import_clause }
+          - has: { kind: import_require_clause }
+    - kind: import_statement
+      has: { kind: import_require_clause }
+    - any:
+        - kind: import_statement
+        - kind: export_statement
+      has: { field: source, kind: string }
+      not:
+        any:
+          - has: { field: source, matches: paint-sibling }
+          - has: { field: source, matches: package }
+          - all:
+              # `import type {` / `export type {` / `export type *`. A bare
+              # `import type from` would be a value import named `type`.
+              - regex: "^(import\\s+type\\s*\\{|export\\s+type\\s*[{*])"
+              - has: { field: source, matches: layout-types }
+    # `import()`: only a literal sibling, or the erased type
+    # form `import('../layout/types.js').T` where a type is expected.
+    - kind: call_expression
+      has:
+        field: function
+        kind: import
+      not:
+        all:
+          - has: { field: function, kind: import }
+          - any:
+              - has:
+                  field: arguments
+                  regex: "^\\(\\s*['\"]\\./[A-Za-z0-9_][A-Za-z0-9_-]*(\\.[A-Za-z0-9_-]+)*['\"]\\s*\\)$"
+              - all:
+                  - has:
+                      field: arguments
+                      regex: "^\\(\\s*['\"](\\.\\./layout/types\\.js|@silurus/ooxml-core)['\"]\\s*\\)$"
+                  - inside:
+                      kind: member_expression
+                      has: { field: property, regex: "^[A-Z]" }
+                  - matches: type-position

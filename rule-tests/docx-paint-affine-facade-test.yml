@@ -1,0 +1,19 @@
+id: docx-paint-affine-facade
+valid:
+  - "export { composeAffine, inverseMapAffinePoint, inverseMapAffineVector, mapAffinePoint, quarterTurnAffine, scaleAffine, translationAffine } from '../layout/affine.js';"
+  - "import type { Matrix2DData } from '../layout/types.js';"
+invalid:
+  # Incomplete facade.
+  - "export { composeAffine, inverseMapAffinePoint, inverseMapAffineVector, mapAffinePoint, quarterTurnAffine, scaleAffine } from '../layout/affine.js';"
+  # Names swapped through aliases.
+  - |
+    export { composeAffine,
+      inverseMapAffinePoint as inverseMapAffineVector,
+      inverseMapAffineVector as inverseMapAffinePoint,
+      mapAffinePoint, quarterTurnAffine, scaleAffine, translationAffine } from '../layout/affine.js';
+  - "export { composeAffine, inverseMapAffinePoint, inverseMapAffineVector, mapAffinePoint, quarterTurnAffine, scaleAffine, translationAffine, extra } from '../layout/affine.js';"
+  - "export type { composeAffine, inverseMapAffinePoint, inverseMapAffineVector, mapAffinePoint, quarterTurnAffine, scaleAffine, translationAffine } from '../layout/affine.js';"
+  - "export * from '../layout/affine.js';"
+  - "import { composeAffine } from '../layout/affine.js';"
+  - "import { paginateBody } from '../layout/body-paginator.js';"
+  - "export { composeAffine, inverseMapAffinePoint, inverseMapAffineVector, mapAffinePoint, quarterTurnAffine, scaleAffine, translationAffine, composeAffine } from '../layout/affine.js';"
