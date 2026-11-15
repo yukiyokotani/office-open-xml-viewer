@@ -63,7 +63,6 @@ export {
   type OoxmlResourceLimit,
   type OoxmlResourceLimitErrorDetails,
   type OoxmlUnsupportedContentDetails,
-  type OoxmlFontSourceMetric,
   type OoxmlFontSourceQuota,
   type OoxmlFontSourceViolation,
   type OoxmlResourceLimits,

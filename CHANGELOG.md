@@ -105,8 +105,9 @@ the host fonts (see **Served font line heights** below). See the
   hidden now goes to the shown slide before it, as `prevSlide()` does. It used
   to land on the next shown slide, which is usually the slide it started from.
 - **Deprecated:** `useGoogleFonts` is an alias of `fonts: [googleFonts()]` and
-  warns once per JavaScript realm. Combining `useGoogleFonts: true` with
-  `fonts` throws a `TypeError`. The VS Code extension keeps its
+  warns once per JavaScript realm. When `fonts` is also given, `fonts` wins:
+  the alias adds nothing to it, still warns, and never throws. The VS Code
+  extension keeps its
   `ooxmlViewer.useGoogleFonts` setting.
 - **Fixed:** in DOCX, PPTX and XLSX, text, `w:sym`/`a:sym` symbols and list
   markers in Symbol, Wingdings, Wingdings 2, Wingdings 3 and Webdings now

@@ -2195,12 +2195,11 @@ export class OoxmlError extends Error {
 }
 export type OoxmlErrorCode = 'encrypted' | 'invalid-password' | 'unsupported-encryption' | 'legacy-binary-format' | 'not-ooxml' | 'unsupported-image-effect' | 'invalid-numbering' | 'unsupported-content' | 'font-source-limit';
 export type OoxmlErrorStage = 'container' | 'decompression' | 'parsing' | 'serialization' | 'layout' | 'rendering' | 'worker';
-export type OoxmlFontSourceMetric = ExtensibleLiteral<'bytes' | 'entry-count' | 'length'>;
 export type OoxmlFontSourceQuota = ExtensibleLiteral<'stylesheet' | 'declarations' | 'families' | 'face' | 'retained' | 'url'>;
 export interface OoxmlFontSourceViolation {
     readonly resource: 'font-source';
     readonly quota: OoxmlFontSourceQuota;
-    readonly metric: OoxmlFontSourceMetric;
+    readonly metric: 'bytes' | 'entry-count' | 'length' | (string & Record<never, never>);
     readonly limit: number;
     readonly observed: number;
 }

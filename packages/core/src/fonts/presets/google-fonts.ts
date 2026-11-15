@@ -3,7 +3,7 @@
  * with Google-owned data. Nothing outside this module knows about Google.
  *
  * What is Google's here, and only here:
- * - the default CSS origin and the CSS2 API URL grammar
+ * - the default base URL (an origin) and the CSS2 API URL grammar
  *   (`/css2?family=<Family+Name>:<axes>&display=swap`);
  * - the families the library asks Google for, each with the exact axis query
  *   the loaders have always requested (so requests are byte-identical to the

@@ -93,16 +93,14 @@ export type OoxmlFontSourceQuota = ExtensibleLiteral<
   | 'url'
 >;
 
-/** Measurement axis of a font-source quota. Extensible by design, like
- * {@link OoxmlFontSourceQuota}. */
-export type OoxmlFontSourceMetric = ExtensibleLiteral<'bytes' | 'entry-count' | 'length'>;
-
 /** Violation record carried by `OoxmlError('font-source-limit')`. It names
  * the quota and its measurement only: no family, URL or font bytes. */
 export interface OoxmlFontSourceViolation {
   readonly resource: 'font-source';
   readonly quota: OoxmlFontSourceQuota;
-  readonly metric: OoxmlFontSourceMetric;
+  /** Measurement axis of the quota. Open-ended like `quota`: a later release
+   * may report an axis this one does not know. */
+  readonly metric: 'bytes' | 'entry-count' | 'length' | (string & Record<never, never>);
   readonly limit: number;
   readonly observed: number;
 }
