@@ -2,6 +2,7 @@ import { adjustForWidowOrphan, selectLargestFittingEnd } from '../line-fit-polic
 import type { LineBoundary } from '../line-layout.js';
 import {
   libreOfficeProportionalLineAdmissionExtentPt,
+  libreOfficeProportionalLineAdmittedExtentPt,
   wordFinalParagraphAdmissionExtentPt,
   wordGridLineAdmissionExtentPt,
   wordVerticalRlFinalLineAdmissionExtentPt,
@@ -185,7 +186,10 @@ export function selectParagraphFragment(
       nextCursor: null,
       requiresFreshFlowRegion: false,
       additionalReservePt: completeReserve,
-      admittedBlockExtentPt: Math.min(acquired.advancePt, availableBlockExtentPt),
+      admittedBlockExtentPt: libreOfficeProportionalLineAdmittedExtentPt(
+        acquired, Math.min(acquired.advancePt, availableBlockExtentPt),
+        availableBlockExtentPt, completeReserve, completeExtentPt,
+      ),
       admissionExtentPt: completeExtentPt,
     };
   }
@@ -205,7 +209,10 @@ export function selectParagraphFragment(
     return {
       fragment: acquired, nextCursor: null,
       requiresFreshFlowRegion: false, additionalReservePt: reserve,
-      admittedBlockExtentPt: Math.min(acquired.advancePt, availableBlockExtentPt),
+      admittedBlockExtentPt: libreOfficeProportionalLineAdmittedExtentPt(
+        acquired, Math.min(acquired.advancePt, availableBlockExtentPt),
+        availableBlockExtentPt, reserve, completeExtentPt,
+      ),
       admissionExtentPt: completeExtentPt,
     };
   }
@@ -290,6 +297,7 @@ export function selectParagraphFragment(
     throw new Error('Paragraph continuation source boundary did not advance');
   }
   const finalReservePt = reserveFor(fragment);
+  const finalAdmissionExtentPt = admissionExtent(fragment, end === total, finalReservePt);
   return {
     fragment,
     nextCursor: nextBoundary === null ? null : Object.freeze({
@@ -300,7 +308,10 @@ export function selectParagraphFragment(
     }),
     requiresFreshFlowRegion: false,
     additionalReservePt: finalReservePt,
-    admittedBlockExtentPt: Math.min(fragment.advancePt, availableBlockExtentPt),
-    admissionExtentPt: admissionExtent(fragment, end === total, finalReservePt),
+    admittedBlockExtentPt: libreOfficeProportionalLineAdmittedExtentPt(
+      fragment, Math.min(fragment.advancePt, availableBlockExtentPt),
+      availableBlockExtentPt, finalReservePt, finalAdmissionExtentPt,
+    ),
+    admissionExtentPt: finalAdmissionExtentPt,
   };
 }

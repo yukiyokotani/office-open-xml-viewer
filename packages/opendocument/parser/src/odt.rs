@@ -35,8 +35,8 @@ use crate::style::{
     Cascade, Family, Group, Scope, Style, StyleRef, StyleSheet, LOEXT_GRAPHIC, PARAGRAPH, TEXT,
 };
 use crate::xml::{
-    self, Stepped, NS_DRAW, NS_FO, NS_LOEXT, NS_OFFICE, NS_STYLE, NS_SVG, NS_TABLE, NS_TEXT,
-    NS_XLINK,
+    self, Stepped, NS_DRAW, NS_DRAWOOO, NS_FO, NS_LOEXT, NS_OFFICE, NS_STYLE, NS_SVG, NS_TABLE,
+    NS_TEXT, NS_XLINK,
 };
 use docx_model::owned_cursor::OwnedDocumentResource;
 use docx_model::{
