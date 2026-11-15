@@ -81,6 +81,33 @@ describe('XLSX font-source demand', () => {
     expect(demand.take()).toBeNull();
   });
 
+  it('demands for printable-ASCII text in a style font exactly what the same text demands as a rich run', () => {
+    // A rich run names its face, so it is always collected; plain shared and
+    // cell text in a style font must add the same scalars (none beyond the
+    // sentinel text), a symbol-encoded style font's conversions included.
+    const texts = ['Total', '100%', "<=>~ 'a'", ''];
+    for (const fonts of [[font('Calibri')], [font('Calibri'), font('Wingdings')]]) {
+      const cellXfs = fonts.map((_, fontId) => ({ numFmtId: 0, fontId, fillId: 0, borderId: 0 }));
+      const cells = (rich: boolean): Row[] => fonts.flatMap((face, styleIndex) => texts.map((text) => ({
+        index: 1, height: null, cells: [{
+          col: 1, row: 1, styleIndex,
+          value: { type: 'text', text, ...(rich ? { runs: [{ text, font: { name: face.name } }] } : {}) },
+        }],
+      }) as unknown as Row));
+      const collected = (rich: boolean) => {
+        const demand = new XlsxFontDemand(workbook({
+          fonts, cellXfs,
+          sharedStrings: texts.map((text) => (rich ? { text, runs: [{ text, font: { name: 'Calibri' } }] } : { text })) as never,
+        }), 'jp', OFFICE_FONT_SUBSTITUTIONS);
+        const first = demand.take();
+        demand.rows(cells(rich), sheet([]));
+        return [first, demand.take()];
+      };
+      expect(collected(false)).toEqual(collected(true));
+      expect(collected(false)[1]).toBeNull();
+    }
+  });
+
   it('scans only rows a growing worksheet added since the last delta', () => {
     const demand = new XlsxFontDemand(workbook(), 'jp', []);
     demand.take();

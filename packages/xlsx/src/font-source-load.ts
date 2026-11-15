@@ -71,6 +71,12 @@ const SHAPE_TEXT_VERTS: ReadonlySet<string> = new Set(['horz', 'vert', 'vert270'
  * forms (eaVert, stacked WordArt). */
 const VERTICAL_FORM_SHAPE_TEXT: ReadonlySet<string> = new Set(['eaVert', 'wordArtVert', 'wordArtVertRtl']);
 
+/** Text of printable ASCII only. {@link RENDERER_SENTINEL_TEXT} demands each
+ * of these scalars for every style font (a symbol-encoded one's conversions
+ * included), and none is script evidence: collecting such a text again in a
+ * style font, or in no named face, adds nothing. */
+const SENTINEL_COVERED_TEXT = /^[\x20-\x7e]*$/;
+
 const METAFILE_PATH = /\.(?:wmf|emf|wmz|emz)$/i;
 
 /** Stacked text (`textRotation="255"`, §18.8.1) substitutes vertical forms
@@ -185,15 +191,21 @@ export class XlsxFontDemand {
   /** A painted text: its scalars and its script fallback evidence. Text in a
    *  symbol-encoded face (`family` or one of `symbolFamilies`) demands every
    *  scalar its conversion may paint (core addSymbolText; the renderer's
-   *  symbol-paint.ts converts the codes its face does not draw). */
+   *  symbol-paint.ts converts the codes its face does not draw).
+   *  `styleFont`: `family` is one of the workbook's style fonts (or the
+   *  default face) and no other face may paint the text. */
   private addText(
     text: string | null | undefined,
     family?: string | null,
     symbolFamilies: readonly (string | null | undefined)[] = [],
+    styleFont = false,
   ): void {
     if (!text) return;
-    this.collector.addSymbolText(text, [family, ...symbolFamilies]);
-    this.scripts.addText([text]);
+    const covered = (styleFont || !family) && symbolFamilies.length === 0 && SENTINEL_COVERED_TEXT.test(text);
+    if (!covered) {
+      this.collector.addSymbolText(text, [family, ...symbolFamilies]);
+      this.scripts.addText([text]);
+    }
     if (family) this.prove(family, text);
   }
 
@@ -268,7 +280,7 @@ export class XlsxFontDemand {
           this.addText(run.text, run.font?.name?.trim() || family);
         }
       } else {
-        this.addText(value.text, family);
+        this.addText(value.text, family, [], true);
       }
       if (japanese && font?.scheme) {
         const theme = font.scheme === 'major' ? worksheet?.themeJapaneseMajorFont : worksheet?.themeJapaneseMinorFont;
