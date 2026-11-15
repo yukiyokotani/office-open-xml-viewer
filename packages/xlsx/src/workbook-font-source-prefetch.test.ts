@@ -32,7 +32,7 @@ it('imports the font-source module during the parse of a load with sources only'
   const stop = new Error('request stub');
   const seen: number[] = [];
   vi.spyOn(WorkerBridge.prototype, 'request').mockImplementation((async () => {
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await vi.dynamicImportSettled();
     seen.push(evaluations.count);
     throw stop;
   }) as never);

@@ -31,7 +31,7 @@ it('imports the font-source module during a main-mode parse with sources only', 
   const seen: number[] = [];
   vi.spyOn(PptxPresentation.prototype as unknown as { _parse(...args: unknown[]): Promise<void> }, '_parse')
     .mockImplementation(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 0));
+      await vi.dynamicImportSettled();
       seen.push(evaluations.count);
       throw stop;
     });
