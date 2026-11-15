@@ -84,6 +84,8 @@ export async function loadDocxModelSource(
     const resourceOptions = normalizeLoadResourceOptions(opts);
     const defaultCurrentDateMs = Date.now();
     const mode = opts.mode ?? 'main';
+    // As DocxDocument.load: the font-source module loads while the source parses.
+    if (mode === 'main' && opts.fonts) void import('../font-source-load.js').catch(() => undefined);
     const metrics = new OoxmlResourceMetricsSession({
       enabled: true,
       format: 'docx',

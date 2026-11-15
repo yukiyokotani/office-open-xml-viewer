@@ -409,6 +409,9 @@ export class PptxPresentation {
     const cjkFallback = resolveCjkFallback(opts.cjkFallback);
     const resourceOptions = normalizeLoadResourceOptions(opts);
     const mode = opts.mode ?? 'main';
+    // Main mode loads the font-source module after the preflight: import it
+    // now, while the container resolves and the worker parses.
+    if (mode === 'main' && opts.fonts) void import('./font-source-load.js').catch(() => undefined);
     const metrics = new OoxmlResourceMetricsSession({
       enabled: true,
       format: 'pptx',
@@ -494,7 +497,7 @@ export class PptxPresentation {
       await pres._parse(
         buffer,
         resourceOptions.policy,
-        optionFontSources(opts.fonts),
+        pres._fonts,
         opts.workerTimeoutMs,
         (usage) => metrics.observeUsage(usage),
         rendererDescriptors,

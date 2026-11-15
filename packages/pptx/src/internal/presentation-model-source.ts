@@ -58,6 +58,8 @@ export async function loadPptxModelSource(
   opts: LoadOptions,
 ): Promise<PptxPresentation> {
   const mode = opts.mode ?? 'main';
+  // As PptxPresentation.load: the font-source module loads while the source parses.
+  if (mode === 'main' && opts.fonts) void import('../font-source-load.js').catch(() => undefined);
   const resourceOptions = normalizeLoadResourceOptions(opts);
   const metrics = new OoxmlResourceMetricsSession({
     enabled: true, format: 'pptx', mode, policy: resourceOptions.policy,
