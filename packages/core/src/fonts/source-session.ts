@@ -678,8 +678,9 @@ function registersFromUrl(source: FontSourceDescriptor | undefined): boolean {
 }
 
 /**
- * Bytes a registration pass decodes from bytes at most; the faces of its
- * other files register from their URL ({@link registersFromUrl}). Chosen by
+ * Bytes of files after which a registration pass decodes no further file
+ * from bytes (the file that reaches it still does); the faces of its other
+ * files register from their URL ({@link registersFromUrl}). Chosen by
  * sweeping 0, 0.5, 1, 2, 4 MiB and unbounded over Latin, CJK and mixed
  * documents loaded over the network (#2233): a pass that downloads more
  * than this is faster when the engine decodes the rest off the main thread.
@@ -1234,7 +1235,11 @@ export class FontSourceSession {
     let flush: ReturnType<typeof setTimeout> | undefined;
     const prepareLanded = () => {
       flush = undefined;
-      for (const [url, data] of landed.splice(0)) if (!prepare(url, data)) break;
+      // A file preparation stops at (the margin) stays, with those after it,
+      // for the decisions after the last download.
+      let done = 0;
+      while (done < landed.length && prepare(...landed[done]!)) done++;
+      landed.splice(0, done);
     };
     const onAcquired = (url: string, data: ArrayBuffer) => {
       if (this.closed) return;
@@ -1244,9 +1249,9 @@ export class FontSourceSession {
     /** False once the margin is reached: nothing more is prepared. */
     // Which files of this pass register from their URL: decided as each is
     // prepared, in the order their bytes land (once per file, so a prepared
-    // face and its registration agree). A file decodes from bytes while the
-    // pass has decoded fewer than URL_REGISTRATION_MIN_BYTES and has spent
-    // at most BYTE_DECODE_TIME_SHARE of its time so far decoding.
+    // face and its registration agree). A file decodes from bytes while
+    // the files doing so are fewer than URL_REGISTRATION_MIN_BYTES and the
+    // pass has spent at most BYTE_DECODE_TIME_SHARE of its time decoding.
     const urlFiles = new Map<string, boolean>();
     const passStart = this.now();
     let decodedBytes = 0;

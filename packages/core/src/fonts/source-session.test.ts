@@ -444,6 +444,41 @@ describe('FontSourceSession: googleFonts() faces register from their URL', () =>
     expect(await run(90)).toEqual([['U+41', 'object'], ['U+42', 'object'], ['U+43', 'object']]);
   });
 
+  it('decides files that landed within the deadline margin in landing order too', async () => {
+    urlRegistrationMinBytes = 1500;
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const start = Date.now();
+    const carlito = 'https://fonts.googleapis.com/css2?family=Carlito:ital,wght@0,400;0,700;1,400;1,700&display=swap';
+    const files = [0, 1, 2].map((index) => `https://fonts.gstatic.example/f${index}.woff2`);
+    const gates = files.map(() => { let open!: () => void; const gate = new Promise<void>((resolve) => { open = resolve; }); return { gate, open }; });
+    const { fetchMock } = installFetch({
+      [carlito]: { css: files.map((file, index) => rule('Carlito', file, `unicode-range: U+${(0x41 + index).toString(16)};`)).join('') },
+      ...Object.fromEntries(files.map((file, index) => [file, { bytes: 1000, gate: gates[index]!.gate }])),
+    });
+    // What each file's face is first built from.
+    const first = new Map<string, string>();
+    G.FontFace = class extends FakeFontFace {
+      constructor(family: string, source: string | ArrayBuffer, descriptors?: FontFaceDescriptors) {
+        super(family, source, descriptors);
+        if (family.startsWith('ooxml-font-source-') && !first.has(this.unicodeRange)) first.set(this.unicodeRange, typeof source);
+      }
+    };
+    const set = fakeSet();
+    const pending = open([googleFonts()], set).ensure(demand(['Calibri'], [0x41, 0x42, 0x43]));
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(4));
+    // Half a second before the deadline nothing is prepared: f1 then f0
+    // land and stay undecided until f2 has landed.
+    vi.setSystemTime(start + 14_500);
+    gates[1]!.open();
+    gates[0]!.open();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(first.size).toBe(0);
+    gates[2]!.open();
+    await pending;
+    // f1 and f0 reach the threshold; f2, the last to land, starts from its URL.
+    expect([...first].sort()).toEqual([['U+41', 'object'], ['U+42', 'object'], ['U+43', 'string']]);
+  });
+
   it('decodes a pass below the default threshold from bytes', async () => {
     urlRegistrationMinBytes = undefined;
     const carlito = 'https://fonts.googleapis.com/css2?family=Carlito:ital,wght@0,400;0,700;1,400;1,700&display=swap';
