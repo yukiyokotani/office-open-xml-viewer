@@ -166,14 +166,16 @@ export function openTypeNormalLine(openType: OpenTypeLineMetrics): ReturnType<ty
  * face's normal line, from which unsnapped lines project
  * LIBREOFFICE_FONT_LINE_BOX. Neither reads the OS/2 code-page class or Word's
  * Far East box; OOXML documents never receive it, so their admission is
- * unchanged. Undefined when either is unavailable. */
+ * unchanged. A face whose hhea gives no plain box (an empty hhea, sized by
+ * usWin or typo) takes its LibreOffice box for grid lines too. Undefined
+ * without a normal line. */
 export function libreOfficeProducerLineMetric(
   openType: OpenTypeLineMetrics,
   unicodeRanges: readonly (readonly [number, number])[] | undefined,
 ): Omit<ResolvedFontMetric, 'family'> | undefined {
   const normal = openTypeNormalLine(openType);
-  const plain = wordOpenTypeAutoLineRatios({ ...openType, farEastCodePage: false });
-  if (!normal || !plain) return undefined;
+  if (!normal) return undefined;
+  const plain = wordOpenTypeAutoLineRatios({ ...openType, farEastCodePage: false }) ?? libreOfficeLineBox(normal);
   return {
     ...(openType.farEastCodePage == null ? {} : { farEastCodePage: openType.farEastCodePage }),
     lineHeightRatio: plain.lineHeightRatio,

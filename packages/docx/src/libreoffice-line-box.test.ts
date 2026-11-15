@@ -102,6 +102,16 @@ describe('LIBREOFFICE_FONT_LINE_BOX', () => {
     });
   });
 
+  it('sizes a face with an empty hhea from usWin or typo values', () => {
+    const empty = { unitsPerEm: 1000, hheaAscent: 0, hheaDescent: 0, hheaLineGap: 0, winAscent: 900, winDescent: 300,
+      farEastCodePage: false, hasEastAsianCmap: false };
+    expect(libreOfficeProducerLineMetric(empty, undefined)).toMatchObject({
+      lineHeightRatio: 1.2, designAscentRatio: 0.9, designDescentRatio: 0.3, normalLineGapRatio: 0,
+    });
+    expect(libreOfficeProducerLineMetric({ ...empty, useTypoMetrics: true, typoAscent: 700, typoDescent: -300, typoLineGap: 200 },
+      undefined)).toMatchObject({ lineHeightRatio: 1.2, designAscentRatio: 0.7, designDescentRatio: 0.5 });
+  });
+
   it('keeps a measured negative gap as projection input, never an error', () => {
     const snapshot = snapshotFontMetrics({
       'tight face': { family: 'Tight Face', lineHeightRatio: 0.98, designAscentRatio: 0.78, designDescentRatio: 0.2,
