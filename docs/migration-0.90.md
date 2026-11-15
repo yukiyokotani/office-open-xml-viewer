@@ -432,13 +432,16 @@ for the Noto CJK families.
   `connect-src https://fonts.googleapis.com https://fonts.gstatic.com` and
   `font-src https://fonts.gstatic.com`. A mirror uses its own two origins.
 - In a page that no service worker controls, `googleFonts()` on its default
-  origin registers the downloaded files of a load beyond its first MiB from
-  their URLs, so the browser decodes them off the main thread (decoding a
-  smaller load from its bytes is faster than the cache round trip). That second request is normally answered from the
-  HTTP cache (fonts.gstatic.com files are cacheable for a year); where the
-  cache is disabled, each file downloads twice. A file whose second request
-  fails is registered from the downloaded bytes. Workers, pages under a
-  service worker and every other source register the downloaded bytes.
+  origin registers some downloaded files from their URLs, so the browser
+  decodes them off the main thread: the files of a load beyond the first MiB
+  it decodes from bytes, and the files that arrive faster than the load can
+  decode them (typically files answered from a warm cache: a load decodes
+  from bytes only while that has taken at most half of its time so far). That
+  second request is normally answered from the HTTP cache (fonts.gstatic.com
+  files are cacheable for a year); where the cache is disabled, each such
+  file downloads twice. A file whose second request fails is registered
+  from the downloaded bytes. Workers, pages under a service worker and every
+  other source register the downloaded bytes.
 
 ### Resolver buffers and timing
 

@@ -887,9 +887,13 @@ function utf8ByteLength(text: string): number {
  * URL the stylesheet was served from (relative font URLs resolve against it).
  */
 export function parseFontFaceCss(css: string, stylesheetUrl: string): FontFaceDeclaration[] {
-  const size = utf8ByteLength(css);
-  if (size > HARD_MAX_FONT_SOURCE_STYLESHEET_BYTES) {
-    throw fontSourceLimitError('stylesheet', HARD_MAX_FONT_SOURCE_STYLESHEET_BYTES, size);
+  // A UTF-16 code unit is at most three UTF-8 bytes: a text that short is
+  // within the limit without counting them.
+  if (css.length * 3 > HARD_MAX_FONT_SOURCE_STYLESHEET_BYTES) {
+    const size = utf8ByteLength(css);
+    if (size > HARD_MAX_FONT_SOURCE_STYLESHEET_BYTES) {
+      throw fontSourceLimitError('stylesheet', HARD_MAX_FONT_SOURCE_STYLESHEET_BYTES, size);
+    }
   }
   // CSS Syntax §3.3 input preprocessing: CR LF, CR and FF become LF; NUL and
   // lone surrogates become U+FFFD.

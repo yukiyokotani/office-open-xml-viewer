@@ -76,7 +76,7 @@ import {
   HARD_MAX_FONT_SOURCE_FAMILIES,
 } from '../worker/resource-policy.generated.js';
 import { resolveCssSource } from './css-source.js';
-import { parseUnicodeRange } from './unicode-range.js';
+import { parseUnicodeRangePairs } from './unicode-range.js';
 import {
   FONT_DEADLINE_REASON,
   acquireFaceUrls,
@@ -251,6 +251,8 @@ export interface FontSourceSessionOptions {
   readonly requestedWeights?: readonly number[];
   /** {@link URL_REGISTRATION_MIN_BYTES} (tests). */
   readonly urlRegistrationMinBytes?: number;
+  /** The clock of {@link BYTE_DECODE_TIME_SHARE} (tests); `performance.now()`. */
+  readonly now?: () => number;
 }
 
 
@@ -392,30 +394,46 @@ function normalizeScalars(demanded: FontSessionDemand['scalars']): NormalizedDem
  * spellings for every declaration and face. */
 const familyKeyOf = stringMemo(fontFamilyKey, 1 << 16);
 
-/** {@link parseUnicodeRange}, memoized per value (frozen results): a face's
- * range is read at claim, at each registration pass and when it loads, and
- * the styles of one font file, and families sliced alike (Google Fonts' CJK
- * families), declare the same values. */
-const parsedRanges = stringMemo((value) => {
-  const parsed = parseUnicodeRange(value);
-  return parsed && Object.freeze(parsed.map((range) => Object.freeze([range[0], range[1]] as const)));
-}, 1 << 20);
+/** A parsed `unicode-range`: flat `[lo0, hi0, lo1, hi1, …]` pairs
+ * ({@link parseUnicodeRangePairs}). Never written after parsing. */
+type RangePairs = Uint32Array;
 
-function rangesOf(value: string | undefined): readonly (readonly [number, number])[] | null {
+/** {@link parseUnicodeRangePairs}, memoized per value (one array per value,
+ * so equal values are one object): a face's range is read at claim, at each
+ * registration pass and when it loads, and the styles of one font file, and
+ * families sliced alike (Google Fonts' CJK families), declare the same
+ * values. */
+const parsedRanges = stringMemo(parseUnicodeRangePairs, 1 << 20);
+
+function rangesOf(value: string | undefined): RangePairs | null {
   return value === undefined ? null : parsedRanges(value);
 }
 
-function rangeIntersects(ranges: readonly (readonly [number, number])[], sorted: readonly number[]): boolean {
-  for (const [lo, hi] of ranges) {
-    let left = 0, right = sorted.length;
+function rangeIntersects(ranges: RangePairs, sorted: readonly number[]): boolean {
+  const count = sorted.length;
+  for (let index = 0; index < ranges.length; index += 2) {
+    const lo = ranges[index]!;
+    let left = 0, right = count;
     while (left < right) {
       const mid = (left + right) >>> 1;
-      if (sorted[mid] < lo) left = mid + 1;
+      if (sorted[mid]! < lo) left = mid + 1;
       else right = mid;
     }
-    if (left < sorted.length && sorted[left] <= hi) return true;
+    if (left < count && sorted[left]! <= ranges[index + 1]!) return true;
   }
   return false;
+}
+
+/** {@link rangeIntersects} against one sorted demand, remembered per parsed
+ * range for one pass over many faces (the weights and styles of a file, and
+ * families sliced alike, share their ranges: {@link parsedRanges}). */
+function rangeIntersector(sorted: readonly number[]): (ranges: RangePairs) => boolean {
+  const verdicts = new Map<RangePairs, boolean>();
+  return (ranges) => {
+    let verdict = verdicts.get(ranges);
+    if (verdict === undefined) verdicts.set(ranges, verdict = rangeIntersects(ranges, sorted));
+    return verdict;
+  };
 }
 
 /** A face's `font-style` when it is a plain keyword (omitted = `normal`);
@@ -444,9 +462,24 @@ function mayMatchTogether(a: FontFaceDeclaration, b: FontFaceDeclaration): boole
  * request (CSS Fonts 4 §4.5, §5), so registering whole components, each in
  * declaration order, keeps every precedence the full declaration order
  * defines, whatever order components are needed in, while an unranged face
- * of one style never pulls in the subsets of another.
+ * of one style never pulls in the subsets of another. Each declaration's
+ * component is the index of its first declaration. Exported for tests.
  */
-function overlapComponents(declarations: readonly FontFaceDeclaration[]): number[] {
+export function overlapComponents(declarations: readonly FontFaceDeclaration[]): number[] {
+  const ranged = declarations.map((declaration) => rangesOf(declaration.unicodeRange));
+  // Families sliced alike (and the same family claimed again) have the same
+  // components: they depend only on each declaration's parsed range and, for
+  // {@link mayMatchTogether}, its plain style.
+  let key: string | undefined = '';
+  for (let index = 0; index < ranged.length && key !== undefined; index++) {
+    const ranges = ranged[index]!;
+    let id = ranges ? rangeIds.get(ranges) : undefined;
+    if (ranges && id === undefined) rangeIds.set(ranges, id = ++lastRangeId);
+    key += `${id ?? ''}${plainStyle(declarations[index]!)?.[0] ?? '?'},`;
+    if (key.length > MAX_COMPONENT_KEY_LENGTH) key = undefined;
+  }
+  const known = key === undefined ? undefined : componentMemo.get(key);
+  if (known) return [...known];
   const parent = declarations.map((_, index) => index);
   const find = (index: number): number => {
     while (parent[index] !== index) { parent[index] = parent[parent[index]!]!; index = parent[index]!; }
@@ -455,40 +488,68 @@ function overlapComponents(declarations: readonly FontFaceDeclaration[]): number
   const union = (a: number, b: number) => { const ra = find(a), rb = find(b); if (ra !== rb) parent[Math.max(ra, rb)] = Math.min(ra, rb); };
   // Every range as (start, end, declaration), visited by start: a range
   // starting within the reach of an earlier one overlaps it. Ranges sharing a
-  // start overlap each other, so their order is immaterial.
-  const ranged = declarations.map((declaration) => rangesOf(declaration.unicodeRange));
+  // start overlap each other, so their order is immaterial. Declarations of
+  // one parsed range (the weights of one file) overlap entirely: the first
+  // stands for them all.
+  const first = new Map<RangePairs, number>();
   let count = 0;
-  for (const ranges of ranged) count += ranges?.length ?? 0;
+  const carriers: number[] = [];
+  ranged.forEach((ranges, index) => {
+    if (ranges === null) return;
+    const carrier = first.get(ranges);
+    if (carrier !== undefined) { union(carrier, index); return; }
+    first.set(ranges, index);
+    carriers.push(index);
+    count += ranges.length / 2;
+  });
   const ends = new Uint32Array(count);
   const owners = new Uint32Array(count);
   // start × 2^32 + position: exact in a double (start ≤ 0x10FFFF < 2^21, and
   // position < 2^32, the length bound of a typed array).
   const order = new Float64Array(count);
   let position = 0;
-  declarations.forEach((declaration, index) => {
-    const ranges = ranged[index];
-    if (ranges === null) {
-      declarations.forEach((other, at) => { if (at !== index && mayMatchTogether(declaration, other)) union(index, at); });
-      return;
-    }
-    for (const [lo, hi] of ranges!) {
-      ends[position] = hi;
+  for (const index of carriers) {
+    const ranges = ranged[index]!;
+    for (let at = 0; at < ranges.length; at += 2) {
+      ends[position] = ranges[at + 1]!;
       owners[position] = index;
-      order[position] = lo * 0x100000000 + position;
+      order[position] = ranges[at]! * 0x100000000 + position;
       position++;
     }
+  }
+  declarations.forEach((declaration, index) => {
+    if (ranged[index] !== null) return;
+    declarations.forEach((other, at) => { if (at !== index && mayMatchTogether(declaration, other)) union(index, at); });
   });
   order.sort();
   let reach = -1;
   let owner = -1;
-  for (const key of order) {
-    const at = key % 0x100000000;
-    const lo = (key - at) / 0x100000000, hi = ends[at]!, index = owners[at]!;
+  for (let slot = 0; slot < count; slot++) {
+    const sortKey = order[slot]!;
+    const at = sortKey % 0x100000000;
+    const lo = (sortKey - at) / 0x100000000, hi = ends[at]!, index = owners[at]!;
     if (lo <= reach) union(owner, index);
     if (hi > reach) { reach = hi; owner = index; }
   }
-  return declarations.map((_, index) => find(index));
+  const components = declarations.map((_, index) => find(index));
+  if (key !== undefined) {
+    componentMemoSize += key.length;
+    if (componentMemoSize > MAX_COMPONENT_MEMO_LENGTH) { componentMemo.clear(); componentMemoSize = key.length; }
+    componentMemo.set(key, [...components]);
+  }
+  return components;
 }
+
+/** A number per parsed range ({@link parsedRanges}), for {@link componentMemo}'s keys. */
+const rangeIds = new WeakMap<RangePairs, number>();
+let lastRangeId = 0;
+/** {@link overlapComponents} of earlier declaration lists, by each
+ * declaration's range number and plain style; bounded like
+ * {@link stringMemo} (code units of keys; a longer list is not kept). */
+const componentMemo = new Map<string, readonly number[]>();
+let componentMemoSize = 0;
+const MAX_COMPONENT_KEY_LENGTH = 1 << 16;
+const MAX_COMPONENT_MEMO_LENGTH = 1 << 20;
 
 /** One declaration's identity for the declaration ceiling: its family,
  * descriptors and source (URL, or the owned bytes' content key). */
@@ -580,8 +641,10 @@ const registrationUrls = new WeakMap<FontFaceDeclaration, string>();
  * Fonts' fonts.gstatic.com, which serves every file under a versioned URL as
  * `public, max-age=31536000` with `Access-Control-Allow-Origin: *`).
  *
- * Only files of a registration pass beyond its first
- * {@link URL_REGISTRATION_MIN_BYTES} do (`viaUrl` in registerDemanded).
+ * Only the files of a registration pass that its downloads would not hide
+ * the decoding of ({@link BYTE_DECODE_TIME_SHARE}), and those beyond the
+ * first {@link URL_REGISTRATION_MIN_BYTES} it decodes, do (`viaUrl` in
+ * registerDemanded).
  *
  * `new FontFace(family, bytes)` decodes (and sanitises) the font
  * synchronously on the calling thread, about 0.5 ms per CJK subset; a URL
@@ -615,17 +678,36 @@ function registersFromUrl(source: FontSourceDescriptor | undefined): boolean {
 }
 
 /**
- * Bytes a registration pass decodes from bytes before its later faces
- * register from their URL ({@link registersFromUrl}). A URL face costs one
- * HTTP-cache round trip before it can load (about 10–15 ms in Chromium,
- * paid once per pass: the requests run in parallel); a face built from bytes
- * costs a synchronous decode of about 10 ms per MiB of WOFF2 instead. Below
- * this many bytes the decode is the cheaper one. Chosen by sweeping 0,
- * 0.5, 1, 2, 4 MiB and unbounded over Latin, CJK and mixed documents
- * (#2233): from 1 MiB no document was slower than registering every face
- * from bytes, and CJK documents kept most of the gain.
+ * Bytes of files after which a registration pass decodes no further file
+ * from bytes (the file that reaches it still does); the faces of its other
+ * files register from their URL ({@link registersFromUrl}). Chosen by
+ * sweeping 0, 0.5, 1, 2, 4 MiB and unbounded over Latin, CJK and mixed
+ * documents loaded over the network (#2233): a pass that downloads more
+ * than this is faster when the engine decodes the rest off the main thread.
  */
 export const URL_REGISTRATION_MIN_BYTES = 1 << 20;
+
+/**
+ * The share of the time a registration pass has taken that its faces may
+ * have spent decoding from bytes: a file whose bytes land when the pass has
+ * decoded for longer registers from its URL ({@link registersFromUrl}).
+ *
+ * A face built from bytes decodes synchronously (about 0.6 ms per Latin or
+ * CJK subset file, measured as each face is built). While other downloads of
+ * the pass are in flight the main thread would only wait for them, so that
+ * decoding is hidden; once the files have landed it delays the first paint,
+ * where a URL face is decoded off the main thread after one HTTP-cache round
+ * trip (about 5 ms in Chromium, the faces in parallel). Files answered from
+ * a warm cache land within a few milliseconds, faster than they decode, and
+ * register from their URL; over a network the downloads hide the decoding,
+ * and the pass decodes its first {@link URL_REGISTRATION_MIN_BYTES} as
+ * before. Where the engine keeps no cache a URL face downloads again, which
+ * costs what its first download did: little when a pass was fast enough to
+ * choose URLs. With a clock too coarse to time a decode every file is within
+ * the share. Chosen by sweeping 0 (every file from its URL), 0.1, 0.25, 0.5,
+ * 1, 2 and unbounded over Latin and CJK documents, warm and without a cache.
+ */
+export const BYTE_DECODE_TIME_SHARE = 0.5;
 
 /** `declaration` (a downloadable face of source `source`) with its acquired
  * bytes; one that registers from its URL (`viaUrl`, the pass's decision for
@@ -709,7 +791,7 @@ interface OwnedFace {
   readonly declaration: FontFaceDeclaration;
   readonly sourceIndex: number;
   /** null: no (or an unparseable) unicode-range, so the face covers all. */
-  readonly ranges: readonly (readonly [number, number])[] | null;
+  readonly ranges: RangePairs | null;
   /** Decoded bytes charged to the realm ceiling while registered. */
   readonly bytes: number;
   /** Demanded families this face serves (for warnings). */
@@ -782,6 +864,8 @@ export class FontSourceSession {
   private readonly readMetricTables: FontSourceSessionOptions['readMetricTables'];
   private readonly requestedWeights: readonly number[] | undefined;
   private readonly urlRegistrationMinBytes: number;
+  /** The clock registration passes time their decoding with (milliseconds). */
+  private readonly now: () => number;
   /** Resolver faces this session acquired, by `sourceIndex\0url`: a later
    * delta claiming the same face reuses the bytes instead of asking again. */
   private readonly acquiredFaces = new Map<string, ArrayBuffer>();
@@ -832,6 +916,8 @@ export class FontSourceSession {
     this.readMetricTables = options.readMetricTables;
     this.requestedWeights = requestedWeightSet(options.requestedWeights);
     this.urlRegistrationMinBytes = options.urlRegistrationMinBytes ?? URL_REGISTRATION_MIN_BYTES;
+    const { performance: clock } = globalThis as { performance?: { now(): number } };
+    this.now = options.now ?? (clock ? () => clock.now() : Date.now);
     this.caches = this.sources.map(acquireSourceCache);
     const signal = options.signal;
     if (signal) {
@@ -1071,15 +1157,17 @@ export class FontSourceSession {
    * the resolver acquirer for a {@link fontResolver} answer (the page fetches
    * it, in both modes, with the CSS font-loading credentials), and the
    * library keeps those bytes, so its tables can be read. The face is
-   * registered from them, or, beyond a pass's first
-   * {@link URL_REGISTRATION_MIN_BYTES} of a preset's stated file host, from
-   * its URL ({@link registersFromUrl}: a second request, answered from the
-   * HTTP cache when the engine keeps one). Downloads are shared with other
-   * sessions of this realm
-   * while any of them holds them. A face that cannot be fetched is dropped
-   * and its family warned; the family stays claimed (a claimed face that
-   * fails never promotes another source or substitute). Returns whether a
-   * resolver acquisition ran (its verdict may postdate this realm's ceiling).
+   * registered from them, or, for a file of a preset's stated file host that
+   * the pass's downloads would not hide the decoding of
+   * ({@link BYTE_DECODE_TIME_SHARE}) or that is beyond the first
+   * {@link URL_REGISTRATION_MIN_BYTES} the pass decodes, from its URL
+   * ({@link registersFromUrl}: a second request, answered from the HTTP
+   * cache when the engine keeps one). Downloads are shared with other
+   * sessions of this realm while any of them holds them. A face that cannot
+   * be fetched is dropped and its family warned; the family stays claimed (a
+   * claimed face that fails never promotes another source or substitute).
+   * Returns whether a resolver acquisition ran (its verdict may postdate
+   * this realm's ceiling).
    */
   private async registerDemanded(
     registered: Set<OwnedFace>,
@@ -1087,7 +1175,7 @@ export class FontSourceSession {
     ceiling: ReturnType<typeof ceilingSignal>,
   ): Promise<boolean> {
     type Claimed = Extract<FamilyState, { kind: 'claimed' }>;
-    const sorted = this.all ? [] : [...this.points].sort((a, b) => a - b);
+    const intersects = rangeIntersector(this.all ? [] : [...this.points].sort((a, b) => a - b));
     const work: { state: Claimed; demand: DemandFaces; indices: number[] }[] = [];
     for (const state of this.families.values()) {
       if (state.kind !== 'claimed' || !state.demand) continue;
@@ -1096,7 +1184,7 @@ export class FontSourceSession {
       state.declarations.forEach((declaration, index) => {
         if (settled[index]) return;
         const ranges = rangesOf(declaration.unicodeRange);
-        if (this.all || ranges === null || rangeIntersects(ranges, sorted)) needed.add(component[index]!);
+        if (this.all || ranges === null || intersects(ranges)) needed.add(component[index]!);
       });
       if (!needed.size) continue;
       const indices = state.declarations.flatMap((_, index) => !settled[index] && needed.has(component[index]!) ? [index] : []);
@@ -1147,29 +1235,35 @@ export class FontSourceSession {
     let flush: ReturnType<typeof setTimeout> | undefined;
     const prepareLanded = () => {
       flush = undefined;
-      for (const [url, data] of landed.splice(0)) if (!prepare(url, data)) break;
+      // A file preparation stops at (the margin) stays, with those after it,
+      // for the decisions after the last download.
+      let done = 0;
+      while (done < landed.length && prepare(...landed[done]!)) done++;
+      landed.splice(0, done);
     };
     const onAcquired = (url: string, data: ArrayBuffer) => {
       if (this.closed) return;
-      // The threshold follows the order the bytes land in, whenever the
-      // faces are prepared or registered.
-      if ((pending.get(url) ?? []).some(({ sourceIndex }) => registersFromUrl(this.sources[sourceIndex]))) {
-        viaUrl(url, data.byteLength);
-      }
       landed.push([url, data]);
       flush ??= setTimeout(prepareLanded, 0);
     };
     /** False once the margin is reached: nothing more is prepared. */
-    // Which files of this pass register from their URL: in the order their
-    // bytes land, those beyond URL_REGISTRATION_MIN_BYTES of earlier files
-    // (decided once per file, so a prepared face and its registration agree).
+    // Which files of this pass register from their URL: decided as each is
+    // prepared, in the order their bytes land (once per file, so a prepared
+    // face and its registration agree). A file decodes from bytes while
+    // the files doing so are fewer than URL_REGISTRATION_MIN_BYTES and the
+    // pass has spent at most BYTE_DECODE_TIME_SHARE of its time decoding.
     const urlFiles = new Map<string, boolean>();
-    let landedBytes = 0;
+    const passStart = this.now();
+    let decodedBytes = 0;
+    let decodeMs = 0;
+    // The decoding that was timed (faces built here), for the files decided
+    // without being built.
+    let timedMs = 0, timedBytes = 0;
     const viaUrl = (url: string, bytes: number): boolean => {
       let decided = urlFiles.get(url);
       if (decided === undefined) {
-        decided = landedBytes >= this.urlRegistrationMinBytes;
-        landedBytes += bytes;
+        decided = decodedBytes >= this.urlRegistrationMinBytes || decodeMs > BYTE_DECODE_TIME_SHARE * (this.now() - passStart);
+        if (!decided) decodedBytes += bytes;
         urlFiles.set(url, decided);
       }
       return decided;
@@ -1188,8 +1282,15 @@ export class FontSourceSession {
         if (!chargeReclaimableBytes(data.byteLength)) continue;
         try {
           const url = registrationUrls.get(acquired);
+          const start = this.now();
           const face = new FontFace(`ooxml-font-source-${this.serial}-prepared`, url === undefined ? data : cssUrl(url),
             faceDescriptors(acquired));
+          if (url === undefined) {
+            const took = this.now() - start;
+            decodeMs += took;
+            timedMs += took;
+            timedBytes += data.byteLength;
+          }
           // A face registered from its URL starts loading now, as a face
           // built from bytes does (the engine decodes it off the main thread);
           // its registration loads it in any case (OwnedFace.quiet).
@@ -1220,6 +1321,17 @@ export class FontSourceSession {
     try {
       await Promise.all(batches);
       if (this.closed) throw createAbortError('Font source session released');
+      // The files that landed last and were not prepared are decided now,
+      // in landing order (registration follows declaration order). They are
+      // built at registration, after every decision, so each one that
+      // decodes from bytes counts for the time the pass's decoding so far
+      // took per byte (nothing, when none was timed).
+      for (const [url, data] of landed) {
+        const faces = (pending.get(url) ?? []).filter(({ sourceIndex }) => registersFromUrl(this.sources[sourceIndex])).length;
+        if (faces && !urlFiles.has(url) && !viaUrl(url, data.byteLength) && timedBytes) {
+          decodeMs += faces * data.byteLength * (timedMs / timedBytes);
+        }
+      }
       // Prepared faces stay charged (and reclaimable) until registration
       // takes them over in declaration order; see register().
       this.registerAcquired(work, outcomes, registered, failures, viaUrl);
@@ -1585,12 +1697,13 @@ export class FontSourceSession {
     const becameAll = delta === 'all';
     const deltaIndex = delta === 'all' ? [] : [...delta].sort((a, b) => a - b);
     const cumulative = registered.size && !this.all ? [...this.points].sort((a, b) => a - b) : deltaIndex;
+    const intersectsCumulative = rangeIntersector(cumulative), intersectsDelta = rangeIntersector(deltaIndex);
     const waits: OwnedFace[] = [];
     for (const entry of this.owned.values()) {
       if (entry.readiness && !entry.quiet) { waits.push(entry); continue; }
       const isNew = registered.has(entry);
       const eligible = (this.all && (becameAll || isNew)) || entry.ranges === null
-        || rangeIntersects(entry.ranges, isNew ? cumulative : deltaIndex);
+        || (isNew ? intersectsCumulative : intersectsDelta)(entry.ranges);
       if (eligible) entry.quiet = false;
       if (entry.readiness) { waits.push(entry); continue; }
       // A face registered from its URL loads now whatever the demand (quiet).
