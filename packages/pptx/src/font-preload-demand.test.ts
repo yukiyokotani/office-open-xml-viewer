@@ -95,6 +95,33 @@ describe('complete conservative PPTX paint demand', () => {
     expect(collectSlideFontDemand(marker, new Set(), 10000)).toEqual(plain);
   });
 
+  it('finds an image path at any depth of an element, through arrays and null entries', () => {
+    const plain = collectSlideFontDemand(slide('A'), new Set(), 10000);
+    const nested = (image: unknown): Slide => ({ ...slide('A'), elements: [...slide('A').elements,
+      { type: 'shape', textBody: null, fill: { layers: [null, 3, 'text', [{ stops: [{ tile: image }] }]] } }] } as unknown as Slide);
+    expect(collectSlideFontDemand(nested({ imagePath: 'ppt/media/a.png', mimeType: 'image/png' }), new Set(), 10000)).toEqual(plain);
+    expect(collectSlideFontDemand(nested({ imagePath: 'ppt/media/a.emf', mimeType: 'image/emf' }), new Set(), 10000)).toBe('all');
+    expect(collectSlideFontDemand(nested({ imagePath: '', mimeType: null }), new Set(), 10000)).toBe('all');
+    expect(collectSlideFontDemand(nested({ posterPath: 'ppt/media/p.wmf', posterMimeType: 'image/wmf' }), new Set(), 10000)).toBe('all');
+    expect(collectSlideFontDemand(nested({ posterPath: '', posterMimeType: '' }), new Set(), 10000)).toEqual(plain);
+    // Not a path: only a string under the key names an image part.
+    expect(collectSlideFontDemand(nested({ imagePath: { mimeType: 'image/emf' } }), new Set(), 10000)).toEqual(plain);
+  });
+
+  it('collects a text repeated on a slide once for plain faces and again for a symbol-encoded face', () => {
+    const runs = (...list: Array<Partial<TextRunData>>): Slide => ({ index: 0, slideNumber: 1, background: null, elements: [{ type: 'shape', textBody: {
+      vert: 'horz', paragraphs: [{ bullet: { type: 'inherit' }, runs: list.map((run) => ({ type: 'text', ...run })) }],
+    } }] } as Slide);
+    const repeated = collectSlideFontDemand(
+      runs({ text: 'l' }, { text: 'l', fontFamily: 'Arial' }, { text: 'l', fontFamily: 'Wingdings' }, { text: 'l' }), new Set(), 10000);
+    expect(repeated).toEqual(collectSlideFontDemand(runs({ text: 'l' }, { text: 'l', fontFamily: 'Wingdings' }), new Set(), 10000));
+    expect(repeated).toEqual(expect.arrayContaining([0x6c, 0xf06c, 0x25cf]));
+    // The symbol test is per authored name: the same name in either slot.
+    expect(collectSlideFontDemand(runs({ text: 'l' }, { text: 'l', fontFamilySym: 'Wingdings' }), new Set(), 10000)).toEqual(repeated);
+    // A repeated text that declines still declines.
+    expect(collectSlideFontDemand(runs({ text: 'A' }, { text: 'A' }, { text: '\uf0a7' }), new Set(), 10000)).toBe('all');
+  });
+
   it('demands every label an auto-number scheme can paint, in its marker face', () => {
     const numbered = (numType: string, fontFamily: string | null = null) => {
       const value = slide('A');
