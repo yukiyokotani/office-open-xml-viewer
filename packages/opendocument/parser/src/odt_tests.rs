@@ -1582,7 +1582,12 @@ fn gives_a_mark_that_begins_a_paragraph_a_dotted_circle() {
         ..Fixture::default()
     });
     let p = paragraphs(&document.body);
-    let text = |i: usize| -> String { text_runs(p[i]).iter().map(|run| run.text.as_str()).collect() };
+    let text = |i: usize| -> String {
+        text_runs(p[i])
+            .iter()
+            .map(|run| run.text.as_str())
+            .collect()
+    };
     assert_eq!(text(0), "\u{25CC}\u{301} Z");
     assert_eq!(text(1), "\u{25CC}\u{301}\u{308}Z");
     assert_eq!(text(2), "\u{25CC}\u{5B4}Z");
@@ -1619,7 +1624,12 @@ fn a_drop_cap_takes_the_source_mark_before_its_dotted_circle() {
         ..Fixture::default()
     });
     let p = paragraphs(&document.body);
-    let text = |i: usize| -> String { text_runs(p[i]).iter().map(|run| run.text.as_str()).collect() };
+    let text = |i: usize| -> String {
+        text_runs(p[i])
+            .iter()
+            .map(|run| run.text.as_str())
+            .collect()
+    };
     assert_eq!(p.len(), 2);
     assert_eq!(text(0), "\u{25CC}\u{301}");
     assert_eq!(text(1), "bc");
