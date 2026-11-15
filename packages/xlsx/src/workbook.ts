@@ -515,6 +515,9 @@ export class XlsxWorkbook {
     onUsage?: (usage: import('@silurus/ooxml-core').OoxmlResourceUsageSnapshot) => void,
     preserveCallerBuffer = false,
   ): Promise<void> {
+    // The font-source module loads once the workbook is parsed: import it
+    // now, while the worker parses.
+    if (opts.fonts) void import('./font-source-load.js').catch(() => undefined);
     const worksheetPolicy = normalizeXlsxWorksheetPolicy(opts);
     const bridge = this.requireBridge();
     this.worksheetPolicy = worksheetPolicy;
