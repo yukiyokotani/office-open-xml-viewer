@@ -20,6 +20,21 @@ export interface ResolvedFontMetric {
   /** Inter-line leading divided by em. Kept out of the baseline descent so
    * inline objects and paragraph marks are not shifted by line gap. */
   lineGapRatio?: number;
+  /** The face's own normal line divided by em, unprojected: the ascent above
+   * the baseline, the descent below it (without the gap) and the signed line
+   * gap. The hhea values (OS/2 typo when USE_TYPO_METRICS is set) for a
+   * parsed face, the measured CSS normal line for a host-measured one. All
+   * three are present together; a format may project them into its own line
+   * allocation rule (the design sides above are Word's projection). */
+  normalAscentRatio?: number;
+  normalDescentRatio?: number;
+  normalLineGapRatio?: number;
+  /** Word's projection of a Far East face whose base geometry above is a
+   * producer's own projection, kept for a producer that selects Word's box
+   * for such faces on some lines. Present as a whole. */
+  wordLineHeightRatio?: number;
+  wordAscentRatio?: number;
+  wordDescentRatio?: number;
   /** Positive OS/2 xAvgCharWidth / em for the selected face. DOCX may use it
    * for Word-observed adjustable Latin spaces; it is never a glyph advance. */
   averageCharWidthRatio?: number;

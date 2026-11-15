@@ -1,6 +1,7 @@
 import { adjustForWidowOrphan, selectLargestFittingEnd } from '../line-fit-policy.js';
 import type { LineBoundary } from '../line-layout.js';
 import {
+  libreOfficeProportionalLineAdmissionExtentPt,
   wordFinalParagraphAdmissionExtentPt,
   wordGridLineAdmissionExtentPt,
   wordVerticalRlFinalLineAdmissionExtentPt,
@@ -65,9 +66,9 @@ function completingParagraphAdmissionExtentPt(
     retainedSpaceAfterPt: fragment.spacing.afterPt,
     authoredSpaceAfterPt,
   });
-  const logicalLineBoxExtentPt = wordGridLineAdmissionExtentPt(
+  const logicalLineBoxExtentPt = libreOfficeProportionalLineAdmissionExtentPt(fragment, wordGridLineAdmissionExtentPt(
     fragment, wholeParagraphHasPlacements, withoutSpaceAfterPt, unreservedBodyBottomPt, reservePt,
-  );
+  ));
   return wordVerticalRlFinalLineAdmissionExtentPt({
     paragraph: fragment,
     writingMode,
@@ -157,9 +158,9 @@ export function selectParagraphFragment(
         policy.writingMode ?? 'horizontal-tb', availableBlockExtentPt,
         policy.unreservedBodyBottomPt, reservePt,
       )
-      : wordGridLineAdmissionExtentPt(
+      : libreOfficeProportionalLineAdmissionExtentPt(fragment, wordGridLineAdmissionExtentPt(
         fragment, wholeParagraphHasPlacements, fragment.advancePt, policy.unreservedBodyBottomPt, reservePt,
-      )
+      ))
   );
   if (fragmentation.kind === 'indivisible') {
     const completeReserve = reserveFor(acquired);

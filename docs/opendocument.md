@@ -143,7 +143,19 @@ the package are not drawn).
 Where ODF leaves the behaviour to the consumer, or LibreOffice reads the
 specification differently, the reader follows LibreOffice:
 
-- proportional line height scales the font's natural line height;
+- a line takes each face's own normal line (its hhea values, or the OS/2
+  typo values when the face asks for them), without Word's 1.3 East Asian
+  box, and puts the face's whole line gap below the text, so the text sits
+  at the top of the line; LibreOffice's `AddExternalLeading` setting off
+  drops the gap, and its `MsWordCompGridMetrics` setting (documents imported
+  from Word) makes a Far East face's line 27% taller, the extra above the
+  text; vertical text keeps the Word box;
+- proportional line height scales the font's natural line height; at the
+  bottom of a page a line stays when its natural line fits, and the extra
+  space hangs below the margin; below 100% the line is placed as a fixed
+  line of its height;
+- a combining mark that begins a paragraph is drawn on a dotted circle
+  (U+25CC), as LibreOffice's shaping draws it;
 - spaces, punctuation, symbols and emoji outside ODF's script table take the
   script class of the preceding character (the following one at paragraph
   start);
@@ -163,7 +175,7 @@ specification differently, the reader follows LibreOffice:
 - superscript and subscript without an explicit raise follow LibreOffice's
   automatic escapement, approximated with a nominal ascent and descent of
   0.8 and 0.2 em (the reader has no font metrics); without a relative size
-  the text keeps its size and baseline.
+  the text keeps its size and baseline;
 - a line snapped to a layout grid takes as many cells as the face's own
   line box needs (without Word's 1.3 East Asian box), and the page admits it
   only when all of its cells fit.
@@ -177,6 +189,11 @@ The DOCX layout draws some features differently from LibreOffice:
   four fifths of the way down the line; a minimum line's extra space above
   the text) applies only on horizontal pages, to paragraphs that do not snap
   to a layout grid;
+- leading line spacing (`style:line-spacing`) is approximated as a
+  proportional height, with the extra space below the text where
+  LibreOffice puts it above;
+- the dotted circle under a mark that begins a paragraph is drawn even with
+  a face that has no U+25CC glyph, where LibreOffice draws the bare mark;
 - LibreOffice spreads a justified line's spare width in whole layout units;
 - section backgrounds, character shadows, outlines and reliefs, overlines
   and Graphite font shaping are not drawn (page backgrounds are);

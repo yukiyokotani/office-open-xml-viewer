@@ -706,6 +706,12 @@ export interface TextLayoutService {
   readonly localMetrics: Readonly<Record<string, Readonly<ResolvedFontMetric>>>;
   /** Producer grid line boxes (TextLayoutServiceInput.plainLineBoxes). */
   readonly plainLineBoxes?: boolean;
+  /** Producer unsnapped line boxes (TextLayoutServiceInput.libreOfficeLineBoxes). */
+  readonly libreOfficeLineBoxes?: boolean;
+  /** TextLayoutServiceInput.libreOfficeMsWordGridMetrics. */
+  readonly libreOfficeMsWordGridMetrics?: boolean;
+  /** With `libreOfficeLineBoxes`: AddExternalLeading off, no line gap. */
+  readonly libreOfficeNoExternalLeading?: boolean;
   resolve(request: Readonly<TextFontResolveRequest>): FontResolution;
   shape(request: Readonly<TextShapeRequest>): TextShapeResult;
   /** Available only when measurement and every installed auxiliary explicitly
@@ -790,6 +796,16 @@ export interface TextLayoutServiceInput {
    * grid count grid cells from each catalogued face's own hhea box, without
    * Word's Far East 1.3 x usWin projection, as LibreOffice does. */
   readonly plainLineBoxes?: boolean;
+  /** Producer line boxes (never OOXML): lines not snapped to a line grid
+   * take each face's own normal line with its line gap below the baseline
+   * (LIBREOFFICE_FONT_LINE_BOX), and a proportional line may let its extra
+   * space hang below a page bottom (LIBREOFFICE_PROPORTIONAL_LINE_PAGE_FIT). */
+  readonly libreOfficeLineBoxes?: boolean;
+  /** With `libreOfficeLineBoxes`: lines in a Far East face keep Word's
+   * projection (LibreOffice's MsWordCompGridMetrics). */
+  readonly libreOfficeMsWordGridMetrics?: boolean;
+  /** With `libreOfficeLineBoxes`: AddExternalLeading off, no line gap. */
+  readonly libreOfficeNoExternalLeading?: boolean;
 }
 
 /** Generic tail for an authored DOCX face. fontTable family/pitch metadata is
@@ -869,6 +885,12 @@ export function snapshotFontMetrics(
         && (!Number.isFinite(metric.designDescentRatio) || metric.designDescentRatio < 0)) {
         throw new RangeError(`Font metric ${key} designDescentRatio must be finite and non-negative`);
       }
+      // The face's own normal line (LIBREOFFICE_FONT_LINE_BOX) is optional
+      // projection input: an invalid triple is dropped, never fatal.
+      const normalLine = [metric.normalAscentRatio, metric.normalDescentRatio, metric.normalLineGapRatio];
+      const keepsNormalLine = normalLine.every((value) => value !== undefined && Number.isFinite(value))
+        && metric.normalAscentRatio! >= 0 && metric.normalDescentRatio! >= 0
+        && metric.normalAscentRatio! + metric.normalDescentRatio! > 0;
       if (metric.eastAsianLineHeightRatio !== undefined
         && (!Number.isFinite(metric.eastAsianLineHeightRatio) || metric.eastAsianLineHeightRatio < 0)) {
         throw new RangeError(`Font metric ${key} eastAsianLineHeightRatio must be finite and non-negative`);
@@ -894,6 +916,21 @@ export function snapshotFontMetrics(
         ...(metric.lineHeightRatio === undefined ? {} : { lineHeightRatio: metric.lineHeightRatio }),
         ...(metric.designAscentRatio === undefined ? {} : { designAscentRatio: metric.designAscentRatio }),
         ...(metric.designDescentRatio === undefined ? {} : { designDescentRatio: metric.designDescentRatio }),
+        // The face's own normal line (LIBREOFFICE_FONT_LINE_BOX), kept only
+        // whole: the three values project together.
+        ...(metric.wordLineHeightRatio !== undefined && metric.wordAscentRatio !== undefined
+          && metric.wordDescentRatio !== undefined
+          && [metric.wordLineHeightRatio, metric.wordAscentRatio, metric.wordDescentRatio]
+            .every((value) => Number.isFinite(value) && value >= 0) ? {
+            wordLineHeightRatio: metric.wordLineHeightRatio,
+            wordAscentRatio: metric.wordAscentRatio,
+            wordDescentRatio: metric.wordDescentRatio,
+          } : {}),
+        ...(keepsNormalLine ? {
+            normalAscentRatio: metric.normalAscentRatio,
+            normalDescentRatio: metric.normalDescentRatio,
+            normalLineGapRatio: metric.normalLineGapRatio,
+          } : {}),
         ...(metric.eastAsianLineHeightRatio === undefined
           ? {}
           : { eastAsianLineHeightRatio: metric.eastAsianLineHeightRatio }),
@@ -1162,6 +1199,9 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
     eastAsiaFontCharsets,
     genericFamilies,
     ...(input.plainLineBoxes ? { plainLineBoxes: true } : {}),
+    ...(input.libreOfficeLineBoxes ? { libreOfficeLineBoxes: true } : {}),
+    ...(input.libreOfficeMsWordGridMetrics ? { libreOfficeMsWordGridMetrics: true } : {}),
+    ...(input.libreOfficeNoExternalLeading ? { libreOfficeNoExternalLeading: true } : {}),
   });
   const resolve = (request: Readonly<TextFontResolveRequest>): FontResolution => {
     const authoredFamily = requestedFamily(request, request.slot);
@@ -1452,6 +1492,9 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
     fontMetrics,
     localMetrics: fontMetrics,
     ...(input.plainLineBoxes ? { plainLineBoxes: true as const } : {}),
+    ...(input.libreOfficeLineBoxes ? { libreOfficeLineBoxes: true as const } : {}),
+    ...(input.libreOfficeMsWordGridMetrics ? { libreOfficeMsWordGridMetrics: true as const } : {}),
+    ...(input.libreOfficeNoExternalLeading ? { libreOfficeNoExternalLeading: true as const } : {}),
     resolve,
     sourceScopeKey(request: Readonly<TextShapeRequest>): string | undefined {
       if (!SCOPE_SLOTS.some(slot => input.fonts.scopedSubstituteScript?.(

@@ -77,6 +77,9 @@ export function measuredMetric(
     designAscentRatio: ascent,
     designDescentRatio: descent,
     lineGapRatio: line.lineGapRatio,
+    normalAscentRatio: line.ascentRatio,
+    normalDescentRatio: line.descentRatio,
+    normalLineGapRatio: line.lineGapRatio,
   };
 }
 
@@ -86,6 +89,7 @@ export function measuredMetric(
 export type ServedFontLineMetrics = (
   loaded: LoadedFontSources,
   prepared: PreparedServedFaceLines,
+  libreOfficeLineBoxes?: boolean,
 ) => Record<string, ResolvedFontMetric>;
 
 /** One document's loaded font sources, as layout reads them. */
@@ -129,9 +133,12 @@ export function sourceFontLineMetrics(
   sources: Pick<DocxSourceFonts, 'loaded' | 'lineMetrics'> | undefined,
   fontSet: FontFaceSet | null | undefined,
   prepared: PreparedServedFaceLines = NO_SERVED_FACE_LINES,
+  /** A `libreOfficeLineBoxes` producer: a face whose tables have no Word
+   * projection is still sized by LIBREOFFICE_FONT_LINE_BOX. */
+  libreOfficeLineBoxes = false,
 ): Record<string, ResolvedFontMetric> {
   const metrics: Record<string, ResolvedFontMetric> = sources?.loaded.faces.length
-    ? sources.lineMetrics(sources.loaded, prepared) : Object.create(null);
+    ? sources.lineMetrics(sources.loaded, prepared, libreOfficeLineBoxes) : Object.create(null);
   // Families with a served face are sized from those faces only.
   const servedFamilies = new Set<string>();
   for (const face of sources?.loaded.faces ?? []) {

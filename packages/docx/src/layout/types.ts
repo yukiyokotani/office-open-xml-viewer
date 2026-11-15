@@ -636,6 +636,10 @@ export interface LineLayout {
    * only whitelisted plain text paint can use it at unreserved body boundaries.
    * Placement and paint always retain the full advance. */
   readonly gridAfterLeadingPt?: number;
+  /** Trailing part of the advance that a page or column bottom may cut
+   * (LIBREOFFICE_PROPORTIONAL_LINE_PAGE_FIT: a producer's proportional extra
+   * space below the natural line). Placement and paint keep the full advance. */
+  readonly pageEdgeOverhangPt?: number;
   readonly placements: readonly ParagraphPlacement[];
   /** §17.18.84 bar-tab vertical rules acquired independently of tab advances. */
   readonly barTabRules?: readonly BorderSegment[];
@@ -706,6 +710,8 @@ export interface ParagraphMarkLayout {
   readonly hidden: boolean;
   readonly wrapBounds?: LayoutRect;
   readonly bounds: LayoutRect;
+  /** LineLayout.pageEdgeOverhangPt of the empty paragraph's mark line. */
+  readonly pageEdgeOverhangPt?: number;
 }
 
 export interface LineNumberPaintOperation {

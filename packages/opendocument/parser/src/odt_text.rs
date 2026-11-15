@@ -36,6 +36,14 @@ pub(super) struct LayoutFlags {
     /// JustifyLinesWithShrinking: justification may also compress spaces
     /// (LibreOffice's emulation of Word's mode-15 justification).
     pub shrink: bool,
+    /// MsWordCompGridMetrics: LibreOffice's Word-compatible line metrics,
+    /// set on documents imported from Word: a Far East face's line grows by
+    /// 27% above its ascent.
+    pub word_grid_metrics: bool,
+    /// AddExternalLeading false: a face's line gap takes no space. LibreOffice
+    /// reads an item missing from a present configuration set as false; a
+    /// document without the set keeps the gap.
+    pub no_external_leading: bool,
 }
 
 pub(super) fn read_settings(root: roxmltree::Node<'_, '_>) -> Result<LayoutFlags, String> {
@@ -53,6 +61,7 @@ pub(super) fn read_settings(root: roxmltree::Node<'_, '_>) -> Result<LayoutFlags
     else {
         return Ok(flags);
     };
+    let mut external_leading = false;
     for item in set
         .kids()
         .filter(|n| xml::is(*n, xml::NS_CONFIG, "config-item"))
@@ -64,9 +73,12 @@ pub(super) fn read_settings(root: roxmltree::Node<'_, '_>) -> Result<LayoutFlags
             Some("BalanceSpacesAndIdeographicSpaces") => flags.balance = value,
             Some("TabsRelativeToIndent") => flags.tabs_relative = Some(value),
             Some("JustifyLinesWithShrinking") => flags.shrink = value,
+            Some("MsWordCompGridMetrics") => flags.word_grid_metrics = value,
+            Some("AddExternalLeading") => external_leading = value,
             _ => {}
         }
     }
+    flags.no_external_leading = !external_leading;
     Ok(flags)
 }
 

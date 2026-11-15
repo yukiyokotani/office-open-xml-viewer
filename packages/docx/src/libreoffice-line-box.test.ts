@@ -1,0 +1,219 @@
+import { describe, expect, it } from 'vitest';
+import type { ResolvedFontMetric } from '@silurus/ooxml-core';
+import { layoutBodyModel } from './test-support/document-layout.test-support.js';
+import { libreOfficeNormalLine, libreOfficeProducerLineMetric, openTypeNormalLine } from './layout/line-compatibility.js';
+import { snapshotFontMetrics } from './layout/text.js';
+import { projectedResourceMetric } from './line-breaker/font-metrics.js';
+import type { LineLayout, ParagraphLayout } from './layout/types.js';
+import type { BodyElement, DocParagraph, DocSettings, DocxTextRun, LineSpacing, SectionProps } from './types';
+
+// LIBREOFFICE_FONT_LINE_BOX and LIBREOFFICE_PROPORTIONAL_LINE_PAGE_FIT: a
+// model source that lays lines out as LibreOffice does sets
+// `__libreOfficeLineBoxes`. The face below has LibreOffice's own geometry
+// in proportion: an ascent of 0.8 em, a descent of 0.2 em and a 0.3 em line
+// gap (the gap fixture font's hhea 800/-200/300), so Word's projection puts
+// 1.1 em above the baseline and LibreOffice 0.8 em.
+
+const GAP_FACE: ResolvedFontMetric = {
+  family: 'Gap Face', requestedFamily: 'Gap Face', sourceIdentity: 'test-resource:gap-face',
+  farEastCodePage: false,
+  lineHeightRatio: 1.3, designAscentRatio: 1.1, designDescentRatio: 0.2,
+  normalAscentRatio: 0.8, normalDescentRatio: 0.2, normalLineGapRatio: 0.3,
+};
+const LIBREOFFICE = { __libreOfficeLineBoxes: true } as unknown as DocSettings;
+
+function linearCtx(): CanvasRenderingContext2D {
+  let font = '10px serif';
+  const px = (): number => Number.parseFloat(/([\d.]+)px/.exec(font)?.[1] ?? '10');
+  return {
+    get font() { return font; },
+    set font(value: string) { font = value; },
+    letterSpacing: '0px',
+    measureText: (text: string) => ({
+      width: [...text].length * px() * 0.5,
+      fontBoundingBoxAscent: px() * 0.8,
+      fontBoundingBoxDescent: px() * 0.2,
+      actualBoundingBoxAscent: px() * 0.8,
+      actualBoundingBoxDescent: px() * 0.2,
+    } as TextMetrics),
+  } as unknown as CanvasRenderingContext2D;
+}
+
+function section(pageHeight = 200): SectionProps {
+  return {
+    pageWidth: 200, pageHeight,
+    marginTop: 20, marginRight: 20, marginBottom: 20, marginLeft: 20,
+    headerDistance: 0, footerDistance: 0, titlePage: false, evenAndOddHeaders: false,
+  };
+}
+
+function run(text: string, fontSize = 12): DocParagraph['runs'][number] {
+  const textRun: DocxTextRun = {
+    text, bold: false, italic: false, underline: false, strikethrough: false,
+    fontSize, color: null, fontFamily: 'Gap Face', isLink: false, background: null,
+    vertAlign: null, hyperlink: null,
+  };
+  return { type: 'text', ...textRun } as DocParagraph['runs'][number];
+}
+const BR = { type: 'break', breakType: 'line' } as DocParagraph['runs'][number];
+
+function para(runs: DocParagraph['runs'], lineSpacing: LineSpacing | null = null, extra: object = {}): BodyElement {
+  return {
+    type: 'paragraph', alignment: 'left', indentLeft: 0, indentRight: 0, indentFirst: 0,
+    spaceBefore: 0, spaceAfter: 0, lineSpacing, numbering: null, tabStops: [],
+    runs, defaultFontSize: 12, defaultFontFamily: 'Gap Face', widowControl: false, ...extra,
+  } as unknown as BodyElement;
+}
+
+const auto = (value: number): LineSpacing => ({ rule: 'auto', value, explicit: true } as LineSpacing);
+
+function pages(body: readonly BodyElement[], settings?: DocSettings, pageHeight?: number): LineLayout[][] {
+  const layout = layoutBodyModel(body, section(pageHeight), linearCtx(), {}, settings, { 'gap face': GAP_FACE });
+  return layout.pages.map((page) => page.layers.body
+    .filter((node): node is ParagraphLayout => node.kind === 'paragraph')
+    .flatMap((paragraph) => paragraph.lines));
+}
+
+describe('LIBREOFFICE_FONT_LINE_BOX', () => {
+  it('reads a face\'s own normal line as LibreOffice selects it', () => {
+    expect(libreOfficeNormalLine({ unitsPerEm: 1000, hhea: [880, -120, 500], win: [1015, 242] }))
+      .toEqual({ normalAscentRatio: 0.88, normalDescentRatio: 0.12, normalLineGapRatio: 0.5 });
+    // fsSelection USE_TYPO_METRICS: the OS/2 typo values instead.
+    expect(libreOfficeNormalLine({ unitsPerEm: 1000, hhea: [880, -120, 500], typo: [750, -250, 200] }))
+      .toEqual({ normalAscentRatio: 0.75, normalDescentRatio: 0.25, normalLineGapRatio: 0.2 });
+    // An empty hhea falls back to usWin without a gap.
+    expect(libreOfficeNormalLine({ unitsPerEm: 1000, hhea: [0, 0, 100], win: [900, 300] }))
+      .toEqual({ normalAscentRatio: 0.9, normalDescentRatio: 0.3, normalLineGapRatio: 0 });
+    expect(openTypeNormalLine({
+      unitsPerEm: 1000, hheaAscent: 800, hheaDescent: -200, hheaLineGap: 300,
+      typoAscent: 700, typoDescent: -300, typoLineGap: 0, useTypoMetrics: false, hasEastAsianCmap: false,
+    })).toEqual({ normalAscentRatio: 0.8, normalDescentRatio: 0.2, normalLineGapRatio: 0.3 });
+  });
+
+  it('sizes a face for a LibreOffice producer from its own tables only', () => {
+    // No OS/2 code-page class: Word's projection declines; the plain hhea
+    // box (grid lines) and the normal line (LibreOffice's box) remain.
+    expect(libreOfficeProducerLineMetric({
+      unitsPerEm: 1000, hheaAscent: 800, hheaDescent: -200, hheaLineGap: 300,
+      farEastCodePage: null, hasEastAsianCmap: true,
+    }, [[0x20, 0x7e]])).toEqual({
+      lineHeightRatio: 1.3, designAscentRatio: 1.1, designDescentRatio: 0.2,
+      normalAscentRatio: 0.8, normalDescentRatio: 0.2, normalLineGapRatio: 0.3,
+      unicodeRanges: [[0x20, 0x7e]], eastAsianLineHeightRatio: 1.3,
+    });
+  });
+
+  it('keeps a Far East face\'s grid, LibreOffice and Word geometry apart', () => {
+    const farEast = { unitsPerEm: 1000, hheaAscent: 800, hheaDescent: -200, hheaLineGap: 0, winAscent: 1000, winDescent: 300,
+      farEastCodePage: true, hasEastAsianCmap: true };
+    const metric = { family: 'FE', ...libreOfficeProducerLineMetric(farEast, undefined)! } as ResolvedFontMetric;
+    // Grid lines: the plain hhea box (1 em), as catalogued faces give it.
+    expect(projectedResourceMetric(metric, 'plain')!.lineHeightRatio).toBeCloseTo(1, 9);
+    // Unsnapped lines: the face's own box, grown by 27% above under
+    // MsWordCompGridMetrics.
+    expect(projectedResourceMetric(metric, 'libreoffice')!.designAscentRatio).toBeCloseTo(0.8, 9);
+    expect(projectedResourceMetric(metric, 'libreoffice-ms-word-grid')).toMatchObject({
+      lineHeightRatio: expect.closeTo(1.27, 9), designAscentRatio: expect.closeTo(1.07, 9), designDescentRatio: expect.closeTo(0.2, 9) });
+    // Vertical text keeps Word's projection: the same box.
+    expect(projectedResourceMetric(metric, 'word')!.lineHeightRatio).toBeCloseTo(1.69, 9);
+  });
+
+  it('sizes a face with an empty hhea from usWin or typo values', () => {
+    const empty = { unitsPerEm: 1000, hheaAscent: 0, hheaDescent: 0, hheaLineGap: 0, winAscent: 900, winDescent: 300,
+      farEastCodePage: false, hasEastAsianCmap: false };
+    expect(libreOfficeProducerLineMetric(empty, undefined)).toMatchObject({
+      lineHeightRatio: 1.2, designAscentRatio: 0.9, designDescentRatio: 0.3, normalLineGapRatio: 0,
+    });
+    expect(libreOfficeProducerLineMetric({ ...empty, useTypoMetrics: true, typoAscent: 700, typoDescent: -300, typoLineGap: 200 },
+      undefined)).toMatchObject({ lineHeightRatio: 1.2, designAscentRatio: 0.7, designDescentRatio: 0.5 });
+  });
+
+  it('keeps a measured negative gap as projection input, never an error', () => {
+    const snapshot = snapshotFontMetrics({
+      'tight face': { family: 'Tight Face', lineHeightRatio: 0.98, designAscentRatio: 0.78, designDescentRatio: 0.2,
+        lineGapRatio: -0.02, normalAscentRatio: 0.8, normalDescentRatio: 0.2, normalLineGapRatio: -0.02 },
+    });
+    expect(snapshot['tight face']).toMatchObject({ normalLineGapRatio: -0.02, lineHeightRatio: 0.98 });
+  });
+
+  it('pins the text to the line top and puts the whole line gap below it', () => {
+    const body = [para([run('One')]), para([run('Two')])];
+    const [lines] = pages(body, LIBREOFFICE);
+    // LibreOffice: baseline 0.8 em below the top, pitch 1.3 em.
+    expect(lines!.map((line) => line.baselinePt)).toEqual([20 + 9.6, 20 + 15.6 + 9.6].map((v) => expect.closeTo(v, 6)));
+    expect(lines!.map((line) => line.advancePt)).toEqual([15.6, 15.6].map((v) => expect.closeTo(v, 6)));
+    // DOCX keeps Word's projection, the gap above the text.
+    const [word] = pages(body);
+    expect(word!.map((line) => line.baselinePt)).toEqual([20 + 13.2, 20 + 15.6 + 13.2].map((v) => expect.closeTo(v, 6)));
+  });
+
+  it('lets a tab take its text\'s box, not a synthetic em box', () => {
+    // A face whose ascent (0.7 em) is below the synthetic 0.8 em tab box.
+    const low: ResolvedFontMetric = { ...GAP_FACE, family: 'Low Face', requestedFamily: 'Low Face',
+      sourceIdentity: 'test-resource:low-face', normalAscentRatio: 0.7, normalDescentRatio: 0.2, normalLineGapRatio: 0.4 };
+    const layout = layoutBodyModel([para([{ ...run('a\tb'), fontFamily: 'Low Face' } as DocParagraph['runs'][number]])],
+      section(), linearCtx(), {}, LIBREOFFICE, { 'low face': low });
+    const line = (layout.pages[0]!.layers.body[0] as ParagraphLayout).lines[0]!;
+    expect(line.advancePt).toBeCloseTo(15.6, 6);
+    expect(line.baselinePt).toBeCloseTo(20 + 8.4, 6);
+    // A line holding only a tab keeps its face's box too.
+    const tabOnly = layoutBodyModel([para([{ ...run('\t'), fontFamily: 'Low Face' } as DocParagraph['runs'][number]])],
+      section(), linearCtx(), {}, LIBREOFFICE, { 'low face': low });
+    const tabLine = (tabOnly.pages[0]!.layers.body[0] as ParagraphLayout).lines[0]!;
+    expect(tabLine.advancePt).toBeCloseTo(15.6, 6);
+    expect(tabLine.baselinePt).toBeCloseTo(20 + 8.4, 6);
+    // Without admitted face geometry the tab keeps the synthetic em box.
+    const unknown = layoutBodyModel([para([{ ...run('\t'), fontFamily: 'Unknown Face' } as DocParagraph['runs'][number]])],
+      section(), linearCtx(), {}, LIBREOFFICE, {});
+    expect((unknown.pages[0]!.layers.body[0] as ParagraphLayout).lines[0]!.baselinePt).toBeCloseTo(20 + 9.6, 6);
+  });
+
+  it('takes a mixed line\'s largest ascent and largest descent with its gap', () => {
+    const [lines] = pages([para([run('ab', 6), run('cd', 24)])], LIBREOFFICE);
+    // 0.8 x 24 above, 0.5 x 24 below.
+    expect(lines![0]!.baselinePt).toBeCloseTo(20 + 19.2, 6);
+    expect(lines![0]!.advancePt).toBeCloseTo(31.2, 6);
+  });
+
+  it('keeps the text at the top of a proportional line', () => {
+    const [lines] = pages([para([run('One'), BR, run('Two')], auto(2))], LIBREOFFICE);
+    expect(lines!.map((line) => line.baselinePt)).toEqual([20 + 9.6, 20 + 31.2 + 9.6].map((v) => expect.closeTo(v, 6)));
+  });
+
+  it('places a proportional line below 100% as a fixed line of its height', () => {
+    const [lines] = pages([para([run('Low')], auto(0.8), { __lineExtraAbove: true })], LIBREOFFICE);
+    expect(lines![0]!.advancePt).toBeCloseTo(12.48, 6);
+    expect(lines![0]!.baselinePt).toBeCloseTo(20 + 12.48 * 4 / 5, 6);
+  });
+});
+
+describe('LIBREOFFICE_PROPORTIONAL_LINE_PAGE_FIT', () => {
+  // A 200 pt page with 20 pt margins: the text area ends at 180 pt. A
+  // filler paragraph of fixed lines leaves `room` points above the bottom.
+  const filler = (heightPt: number) => para([run('x')], { rule: 'exact', value: heightPt, explicit: true } as LineSpacing);
+  const pageOf = (room: number, settings?: DocSettings) => {
+    const body = [filler(160 - room), para([run('Probe'), BR, run('Next')], auto(2)), para([run('After')])];
+    return pages(body, settings).map((lines) => lines.length);
+  };
+
+  it('keeps a line whose natural line fits, its extra space hanging below the margin', () => {
+    // Probe takes its full 31.2 pt advance; Next needs its natural 15.6 pt.
+    expect(pageOf(31.2 + 15.65, LIBREOFFICE)).toEqual([3, 1]);
+    expect(pageOf(31.2 + 15.5, LIBREOFFICE)).toEqual([2, 2]);
+  });
+
+  it('gives an empty paragraph the allowance of a text line', () => {
+    // The empty line (31.2 pt advance) stays when its 15.6 pt natural line
+    // fits: After then starts page 2.
+    const layout = (room: number) => layoutBodyModel([filler(160 - room), para([], auto(2)), para([run('After')])],
+      section(), linearCtx(), {}, LIBREOFFICE, { 'gap face': GAP_FACE }).pages
+      .map((page) => page.layers.body.filter((node) => node.kind === 'paragraph').length);
+    expect(layout(15.65)).toEqual([2, 1]);
+    expect(layout(15.5)).toEqual([1, 2]);
+  });
+
+  it('keeps charging DOCX lines their whole advance', () => {
+    expect(pageOf(31.2 + 15.65)).toEqual([2, 2]);
+    expect(pageOf(31.2 + 31.25)).toEqual([3, 1]);
+  });
+});
