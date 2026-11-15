@@ -435,8 +435,8 @@ for the Noto CJK families.
   origin registers some downloaded files from their URLs, so the browser
   decodes them off the main thread: the files of a load beyond the first MiB
   it decodes from bytes, and the files that arrive faster than the load can
-  decode them (files answered from a warm cache; while a load's downloads
-  are still in flight, decoding from bytes costs no time and is kept). That
+  decode them (typically files answered from a warm cache: a load decodes
+  from bytes only while that has taken at most half of its time so far). That
   second request is normally answered from the HTTP cache (fonts.gstatic.com
   files are cacheable for a year); where the cache is disabled, each such
   file downloads twice. A file whose second request fails is registered
