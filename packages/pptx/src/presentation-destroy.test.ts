@@ -124,6 +124,16 @@ describe('PptxPresentation.destroy() — rejects in-flight worker requests', () 
     await expect(inFlight).rejects.toThrow(/terminated/i);
   });
 
+  it('disposes the symbol oracle cache that render contexts may still hold', () => {
+    const { pres } = makePresentation();
+    const instance = pres as unknown as Record<string, unknown>;
+    const cache = { oracleFor: vi.fn(), dispose: vi.fn() };
+    instance._symbolFaces = cache;
+    pres.destroy();
+    expect(cache.dispose).toHaveBeenCalledTimes(1);
+    expect(instance._symbolFaces).not.toBe(cache);
+  });
+
   it('is safe to call destroy() twice', () => {
     const { pres } = makePresentation();
     pres.destroy();

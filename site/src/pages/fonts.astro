@@ -1,0 +1,525 @@
+---
+import { Code } from 'astro:components';
+import Base from '../layouts/Base.astro';
+import Nav from '../components/Nav.astro';
+import SiteFooter from '../components/SiteFooter.astro';
+import { codeThemes } from '../lib/code-theme';
+
+const migrationGuide = 'https://github.com/yukiyokotani/office-open-xml-viewer/blob/main/docs/migration-0.90.md';
+
+const overviewExample = `import { DocxViewer, googleFonts } from '@silurus/ooxml/docx';
+
+const viewer = new DocxViewer(canvas, { fonts: [googleFonts()] });
+await viewer.load(await file.arrayBuffer());`;
+
+const googleExample = `import { googleFonts, googleFontsSubstitutions } from '@silurus/ooxml';
+
+fonts: [googleFonts({
+  // Google Fonts family (Google's spelling) → CSS2 axis query.
+  additionalFamilies: { Inter: 'wght@400;700', 'Source Serif 4': 'ital,wght@0,400;0,700;1,400;1,700' },
+  // Replaces the default list; spread it to extend it.
+  substitutions: [...googleFontsSubstitutions, { for: 'Corporate Sans', use: 'Inter' }],
+})]`;
+
+const googleCsp = `connect-src https://fonts.googleapis.com https://fonts.gstatic.com;
+font-src https://fonts.gstatic.com;`;
+
+const mirrorExample = `fonts: [googleFonts({ baseUrl: 'https://fonts.googleapis.cn' })]
+fonts: [googleFonts({ baseUrl: 'https://fonts.internal.example:8443' })]`;
+
+const prefixedProxyExample = `import { fontCssApi, googleFontsSubstitutions } from '@silurus/ooxml';
+
+const TEXT = 'ital,wght@0,400;0,700;1,400;1,700';
+fonts: [fontCssApi({
+  urlTemplate: 'https://proxy.example/google-fonts/css2?family={family}:{query}&display=swap',
+  families: { Carlito: TEXT, Caladea: TEXT, 'Noto Sans JP': 'wght@400;700' },
+  substitutions: googleFontsSubstitutions,
+})]`;
+
+const resolverExample = `import { fontResolver, googleFonts, officeFontSubstitutions } from '@silurus/ooxml';
+
+const privateFonts = fontResolver(async (demand, { signal }) => {
+  const response = await fetch('/api/fonts/resolve', {
+    method: 'POST',
+    body: JSON.stringify({ authoredFamilies: demand.authoredFamilies, fallbackFamilies: demand.fallbackFamilies }),
+    signal,
+  });
+  return response.json(); // FontFaceDeclaration[]: { family, url | data, … }
+}, { substitutions: officeFontSubstitutions });
+
+fonts: [privateFonts, googleFonts({ baseUrl: 'https://fonts.internal.example' })]`;
+
+const cssApiExample = `import { fontCssApi, officeFontSubstitutions } from '@silurus/ooxml';
+
+fonts: [fontCssApi({
+  urlTemplate: 'https://fonts.example/css?family={family}:{query}',
+  query: '400,700',
+  families: { 'Open Sans': true, Lato: '400' },
+  substitutions: officeFontSubstitutions,
+})]`;
+
+const cssExample = `import { fontCss, officeFontSubstitutions } from '@silurus/ooxml';
+
+fonts: [fontCss({ url: '/fonts/office.css', substitutions: officeFontSubstitutions })]`;
+
+const filesExample = `import { fontFiles, officeFontSubstitutions } from '@silurus/ooxml';
+
+fonts: [fontFiles({
+  faces: [
+    { family: 'Carlito', url: '/fonts/Carlito-Regular.woff2', weight: '400' },
+    { family: 'Carlito', url: '/fonts/Carlito-Bold.woff2', weight: '700' },
+    { family: 'Noto Sans JP', url: '/fonts/NotoSansJP-kana.woff2', unicodeRange: 'U+3000-30FF' },
+    { family: 'Brand Display', data: brandDisplayBytes }, // an ArrayBuffer
+  ],
+  substitutions: officeFontSubstitutions,
+})]`;
+
+const resolverTypes = `type FontResolver = (
+  demand: FontDemand,
+  context: FontResolverContext,
+) =>
+  | readonly (Omit<FontFaceDeclaration, 'weight'> & { readonly weight?: string | number })[]
+  | Promise<readonly (Omit<FontFaceDeclaration, 'weight'> & { readonly weight?: string | number })[]>;
+
+interface FontDemand {
+  readonly authoredFamilies: readonly string[];  // authored families the host lacks
+  readonly fallbackFamilies: readonly string[];  // library script fallbacks, e.g. Noto CJK
+}
+
+interface FontResolverContext {
+  readonly signal: AbortSignal;
+}
+
+interface FontFaceDeclaration {
+  readonly family: string;
+  readonly url?: string;        // absolute http(s), blob: or data: URL
+  readonly data?: ArrayBuffer;  // or owned font bytes (exactly one of url / data)
+  readonly weight?: string;
+  readonly style?: string;
+  readonly stretch?: string;
+  readonly unicodeRange?: string;
+}`;
+
+const substitutionExample = `import { officeFontSubstitutions } from '@silurus/ooxml';
+
+substitutions: [...officeFontSubstitutions, { for: 'Corporate Sans', use: 'Inter' }]`;
+
+const limits = [
+  ['Stylesheet size', '1 MiB per stylesheet'],
+  ['Declarations', '2,048 per document'],
+  ['Requested families', '256 per document'],
+  ['One face (data, the decoded body of a data: URL, or a font file the library downloads)', '30 MiB'],
+  ['Retained data bytes', '256 MiB per realm, across open documents'],
+  ['URL length (non-data: URLs and composed fontCssApi requests)', '8 KiB'],
+];
+---
+
+<Base
+  title="Font sources | @silurus/ooxml"
+  description="Choose where DOCX, XLSX and PPTX viewers load web fonts from with the fonts option: Google Fonts, a mirror or proxy, hosted font services, your own files or a resolver."
+  canonicalPath="/fonts/"
+>
+  <Nav active="fonts" />
+  <header class="guide-hero">
+    <div class="wrap">
+      <p class="eyebrow">Guide · LoadOptions.fonts</p>
+      <h1>Font sources.</h1>
+      <p>Decide where web fonts come from, or keep using only the fonts installed on the viewer's machine.</p>
+    </div>
+  </header>
+  <main class="wrap guide-layout">
+    <aside aria-label="Font sources guide contents">
+      <p>Contents</p>
+      <nav>
+        <a href="#overview">Overview</a>
+        <a href="#google-fonts">Google Fonts</a>
+        <a href="#proxy">Your proxy or mirror</a>
+        <a href="#providers">Other providers</a>
+        <a href="#resolver">Resolver contract</a>
+        <a href="#chaining">Chaining</a>
+        <a href="#substitutions">Substitutions</a>
+        <a href="#network">Network and CSP</a>
+        <a href="#privacy">Privacy</a>
+        <a href="#limits">Timing and limits</a>
+        <a href="#migration">Migration</a>
+      </nav>
+    </aside>
+    <div class="guide-content">
+      <section id="overview">
+        <p class="section-label">Overview</p>
+        <h2>Fonts are opt-in.</h2>
+        <p>The <code>fonts</code> load option is an ordered list of font sources. With no sources,
+          the library requests no fonts from any network host and the canvas uses the fonts installed
+          on the viewer's machine. Fonts embedded in a document and installed fonts with the authored
+          name always come first; sources only fill in families the host does not have.</p>
+        <p>A <code>FontSource</code> is opaque. Create every entry with one of the factories:
+          <code>googleFonts()</code>, <code>fontCssApi()</code>, <code>fontCss()</code>,
+          <code>fontFiles()</code> or <code>fontResolver()</code>, in the page that loads the document.
+          Its contents are not part of the API. A copy of a source (spread, <code>structuredClone</code>,
+          JSON) or a hand-written object throws a <code>TypeError</code>. Every factory validates its
+          input when it is called, before any load. A source is guaranteed to be accepted by the
+          <code>load()</code> and viewers of the same library copy that created it; if a page loads two
+          copies of the library, passing one copy's source to the other is best effort only.</p>
+        <p>The factories, <code>officeFontSubstitutions</code> and <code>googleFontsSubstitutions</code>
+          are exported from <code>@silurus/ooxml</code> and from the <code>@silurus/ooxml/docx</code>,
+          <code>@silurus/ooxml/xlsx</code> and <code>@silurus/ooxml/pptx</code> entries; they are the
+          same objects in every entry. <code>fonts</code> works the same way for DOCX, XLSX and PPTX,
+          on every engine <code>load()</code> and every viewer, in <code>mode: 'main'</code> and
+          <code>mode: 'worker'</code>.</p>
+        <div class="code-card"><Code code={overviewExample} lang="ts" themes={codeThemes} defaultColor={false} /></div>
+        <p>Sources load only what the document needs: the families it paints that the host lacks,
+          and normally only the <code>unicode-range</code> subsets that intersect its painted characters.
+          A failing source never rejects <code>load()</code>; the affected families keep their host
+          fallback and a <code>console.warn</code> names them.</p>
+      </section>
+
+      <section id="google-fonts">
+        <p class="section-label">Use case 1</p>
+        <h2>Google Fonts.</h2>
+        <p><code>googleFonts()</code> requests stylesheets from <code>https://fonts.googleapis.com</code>
+          with the CSS2 API (<code>/css2?family=…&amp;display=swap</code>). It asks only for the families
+          in its catalog (the Office stand-ins such as Carlito and Caladea, the Noto script families and
+          a few popular web fonts) plus the families you add with <code>additionalFamilies</code>. The catalog
+          and the default substitution list are the current implementation's contents and may change in a
+          minor release: name the families and substitutions your application depends on yourself.</p>
+        <ul>
+          <li><code>additionalFamilies</code> maps a Google Fonts family name to its CSS2 axis query, sent after
+            <code>family=&lt;name&gt;:</code>. Request only axes the family has: CSS2 answers an unknown
+            axis with HTTP 400, which fails the family. A key that names a catalog family
+            (case-insensitively) replaces that family's query.</li>
+          <li><code>substitutions</code> defaults to <code>googleFontsSubstitutions</code>: the
+            <a href="#substitutions">Office substitutions</a> followed by Google's names for the
+            native Noto CJK families (<code>Noto Sans CJK JP</code> → <code>Noto Sans JP</code>, …).
+            Passing <code>substitutions</code> replaces that list; spread it to extend it. A
+            substitution's <code>use</code> must be a family the preset requests.</li>
+          <li><code>additionalFamilies</code> adds to the catalog. It is not the <code>families</code> option
+            of <code>fontCssApi()</code>, which is an allow-list that replaces everything.</li>
+        </ul>
+        <div class="code-card"><Code code={googleExample} lang="ts" themes={codeThemes} defaultColor={false} /></div>
+        <p>With a Content Security Policy, allow the stylesheet host in <code>connect-src</code> and the
+          font file host in both <code>connect-src</code> and <code>font-src</code>. The library fetches
+          the stylesheets and the font files itself with <code>fetch()</code>; it does not inject a
+          <code>&lt;link&gt;</code>.</p>
+        <div class="code-card"><Code code={googleCsp} lang="txt" themes={codeThemes} defaultColor={false} /></div>
+        <p>Google receives the end user's IP address and User-Agent with each request, which may have
+          privacy implications for your application.</p>
+      </section>
+
+      <section id="proxy">
+        <p class="section-label">Use case 2</p>
+        <h2>Your own proxy or mirror.</h2>
+        <h3>A Google-compatible origin: <code>googleFonts(&#123; baseUrl &#125;)</code></h3>
+        <p>In 0.90, <code>baseUrl</code> must be an origin: a scheme, host and optional port
+          (<code>http:</code> or <code>https:</code>); one trailing slash is accepted. A path, query or user
+          name throws a <code>TypeError</code> that names <code>baseUrl</code> when <code>googleFonts()</code>
+          is called. A later release may accept a path prefix; until then, use the proxy example below. The requests keep the Google
+          CSS2 path and query, so the origin must serve that API, and no stylesheet request goes to
+          <code>fonts.googleapis.com</code>.</p>
+        <div class="code-card"><Code code={mirrorExample} lang="ts" themes={codeThemes} defaultColor={false} /></div>
+        <p><code>baseUrl</code> sets only where the stylesheet requests start:</p>
+        <ul>
+          <li>Redirects are followed. The stylesheet is read from the final URL, which can be on another origin.</li>
+          <li>Font file URLs come from the returned CSS and are used as given. Relative URLs resolve
+            against the stylesheet's final URL; absolute URLs can point anywhere, for example at
+            <code>fonts.gstatic.com</code> if the mirror passes Google's CSS through unchanged.</li>
+        </ul>
+        <p>For network isolation, the mirror must control its redirects and rewrite the font URLs it
+          returns to hosts you allow. Your CSP (<code>connect-src</code> and <code>font-src</code>) is the
+          enforcement point. A failing mirror keeps the host fonts; the library never retries it against
+          the public Google origin.</p>
+
+        <h3>A path-prefixed proxy: <code>fontCssApi()</code></h3>
+        <p>A proxy that serves the CSS2 API under a path prefix is not an origin, so <code>baseUrl</code>
+          cannot express it in 0.90. Use <code>fontCssApi()</code> with the full URL template, the families the
+          proxy serves with their CSS2 axes, and the default Google substitutions. List every family the
+          proxy should serve: CSS2 rejects an axis query a family does not have, and without
+          <code>families</code> every demanded family is requested.</p>
+        <div class="code-card"><Code code={prefixedProxyExample} lang="ts" themes={codeThemes} defaultColor={false} /></div>
+
+        <h3>An authenticated or private proxy: <code>fontResolver()</code></h3>
+        <p>When requests need tokens, signed URLs or your own network client, answer font demand with a
+          function. It runs in the page that created it; in worker mode the worker asks the page to run
+          it, so tokens and clients stay in your application. See
+          <a href="#resolver">the resolver contract</a>.</p>
+        <div class="code-card"><Code code={resolverExample} lang="ts" themes={codeThemes} defaultColor={false} /></div>
+      </section>
+
+      <section id="providers">
+        <p class="section-label">Use case 3</p>
+        <h2>Third-party font providers.</h2>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Provider shape</th><th>Factory</th><th>Notes</th></tr></thead>
+            <tbody>
+              <tr><th>CSS API with one request per family</th><td><code>fontCssApi()</code></td><td>Absolute <code>http(s)</code> <code>urlTemplate</code> with <code>&#123;family&#125;</code> (percent-encoded, <code>+</code> for spaces) and optional <code>&#123;query&#125;</code>, filled from <code>query</code> or the <code>families</code> allow-list, never from document content.</td></tr>
+              <tr><th>Static kit stylesheet: an Adobe Fonts web project, Bunny Fonts, a Fontsource CDN stylesheet, a Monotype or Morisawa static kit</th><td><code>fontCss()</code></td><td>One stylesheet describing any number of families. Only <code>@font-face</code> rules with <code>url()</code> sources are read; <code>local()</code>, <code>@import</code> and everything else are ignored.</td></tr>
+              <tr><th>Self-hosted font files</th><td><code>fontFiles()</code></td><td>Each face has exactly one of <code>url</code> (<code>http(s)</code>, <code>blob:</code> or <code>data:</code>) or <code>data</code> (a non-empty <code>ArrayBuffer</code>), plus standard <code>@font-face</code> descriptors.</td></tr>
+              <tr><th>Authenticated or private service</th><td><code>fontResolver()</code></td><td>Your function returns <code>FontFaceDeclaration</code> objects for the families asked for.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <h3>CSS API per family</h3>
+        <p><code>query</code> is required when the template has <code>&#123;query&#125;</code>, unless every
+          <code>families</code> entry supplies its own. With <code>families</code>, only those families are
+          requested. Without it, every demanded family is requested, and an error response (such as an
+          HTTP 400 for a family the API does not serve) fails that family. List the served families when
+          the source is not the last in the chain.</p>
+        <div class="code-card"><Code code={cssApiExample} lang="ts" themes={codeThemes} defaultColor={false} /></div>
+        <h3>Static kit CSS</h3>
+        <p>Documents that use the same configuration share one stylesheet fetch while any of them is open.
+          No script in the page runs.</p>
+        <div class="code-card"><Code code={cssExample} lang="ts" themes={codeThemes} defaultColor={false} /></div>
+        <h3>Self-hosted files</h3>
+        <p><code>weight</code>, <code>style</code>, <code>stretch</code> and <code>unicodeRange</code> take
+          standard CSS <code>@font-face</code> descriptor values. <code>ArrayBuffer</code> views,
+          <code>SharedArrayBuffer</code>s and resizable buffers are rejected. Relative URLs in
+          <code>fontFiles()</code> and <code>fontCss()</code> resolve against the page's base URL when the
+          factory is called, so build these sources on the page, not in a worker.</p>
+        <div class="code-card"><Code code={filesExample} lang="ts" themes={codeThemes} defaultColor={false} /></div>
+        <h3>Not supported: per-text dynamic subsetting</h3>
+        <p>Services that subset fonts per page text at run time (for example TypeSquare, FONTPLUS or
+          Adobe Fonts dynamic CJK kits) are not supported. They generate faces for the text their script
+          sees in the page, which a canvas viewer does not expose to them, and <code>fontResolver()</code>
+          does not see the text either. Serve static faces for those families with
+          <code>unicode-range</code> subsets, from a stylesheet, <code>fontFiles()</code> or a resolver; the
+          library then fetches only the subsets the document paints.</p>
+        <h3>Licences and tracking are yours</h3>
+        <p>The library ships no font binaries and only reads <code>@font-face</code> <code>url()</code>
+          rules. It does not run a provider's embed code (<code>&lt;script&gt;</code> or JavaScript kits),
+          and it sends no usage or page-view tracking. Loading the embed code, any usage reporting the
+          provider requires, and the font licences, including whether a licence covers rendering in a
+          document viewer, are your application's responsibility.</p>
+      </section>
+
+      <section id="resolver">
+        <p class="section-label">fontResolver()</p>
+        <h2>The resolver contract.</h2>
+        <p>This contract is settled for 0.90. Later versions may add fields to <code>demand</code> and
+          <code>context</code>; they will not remove or change these.</p>
+        <div class="code-card"><Code code={resolverTypes} lang="ts" themes={codeThemes} defaultColor={false} /></div>
+        <ul>
+          <li><code>demand.authoredFamilies</code> holds the authored families the host does not have and that no
+            earlier call answered. <code>demand.fallbackFamilies</code> holds the library's script fallback
+            families for the text, such as Noto families for CJK. <code>demand</code> carries family names
+            only, never document text.</li>
+          <li>Answer each family the way an <code>@font-face</code> stylesheet declares it: every face you
+            have for it (all weights, styles and <code>unicode-range</code> subsets), or nothing. With
+            <code>substitutions</code>, a family may also be answered with faces of its substitute's
+            <code>use</code> family. A family you do not answer goes to the next source.</li>
+          <li>A family is resolved once per document, so a face you leave out is not asked for again.
+            The renderer picks the weight and style of each run.</li>
+          <li>Returned URLs must be absolute. <code>http(s)</code> and <code>blob:</code> faces are fetched
+            by the library in the page, with <code>credentials: 'same-origin'</code>, only for the
+            <code>unicode-range</code> subsets the document paints, in both modes. The worker never
+            fetches them, so cookies, HTTP authentication and Referer checks see the page.
+            <code>data</code> faces and <code>data:</code> URLs are used as returned.</li>
+          <li>A returned object is checked more leniently than <code>fontFiles()</code> input, so one
+            service can answer several library versions: properties the library does not know are ignored,
+            and <code>weight</code> may be a number from 1 to 1000. <code>fontFiles()</code> stays strict: an
+            unknown property or a numeric <code>weight</code> throws a <code>TypeError</code>.</li>
+          <li>Send both <code>authoredFamilies</code> and <code>fallbackFamilies</code> to your service: a
+            resolver that reads only <code>authoredFamilies</code> never serves the fallback families.</li>
+          <li>A <code>data</code> buffer belongs to the library once returned. Do not modify it; in worker
+            mode the worker receives a copy and your buffer is not detached.</li>
+        </ul>
+        <h3>Sharing and abort</h3>
+        <p>Documents that need the same families from the same function at the same time share one call.
+          <code>signal</code> is aborted only when no document is waiting for that call any more: every
+          document sharing it was destroyed or reached its resolution deadline, or, in worker mode, the
+          worker cancelled the request. Destroying one of several documents that share a call does not abort it.</p>
+        <h3>Errors</h3>
+        <p>If the answer is not an array or contains a malformed declaration, every family of that call
+          keeps its host fallback and a <code>console.warn</code> reports the problem. If the function
+          throws, the same happens and the warning includes the error message. More than 2,048
+          declarations or a face over 30 MiB fails the call's families the same way. None of these
+          rejects the load.</p>
+      </section>
+
+      <section id="chaining">
+        <p class="section-label">Chaining</p>
+        <h2>First source to claim a family wins.</h2>
+        <p>Sources are consulted per family, in option order:</p>
+        <ol>
+          <li>Each source tries the family itself, then the <code>use</code> family of each of its matching <code>substitutions</code>.</li>
+          <li>The first source that has a face for the family claims it. Later sources are never consulted for that family.</li>
+          <li>A source that does not serve the family passes it on: a family outside a <code>fontCssApi</code>
+            allow-list, missing from a loaded stylesheet or file list, or not answered by a resolver.</li>
+          <li>A source that tries a family and fails makes the family final, with no retry elsewhere:
+            an unreachable or empty stylesheet, an HTTP error, a resolver error or the resolution deadline.
+            A <code>fontCss</code> stylesheet that fails to load fails every family it is asked for.</li>
+          <li>A face that is claimed but fails to load keeps its host fallback. It does not re-enter the chain.</li>
+        </ol>
+        <p>There is no strict mode and no callback. Failures are not cached, so a document opened later
+          retries the same source. Source faces belong to the document that loaded them; two open
+          documents never paint with each other's faces.</p>
+        <h3>Paint priority</h3>
+        <ol>
+          <li>A font embedded in the document.</li>
+          <li>An installed face with the authored name. Installed families are never requested from a source.</li>
+          <li>A source face for the authored family.</li>
+          <li>A source face for a declared substitute.</li>
+          <li>The host's fallback chain.</li>
+        </ol>
+      </section>
+
+      <section id="substitutions">
+        <p class="section-label">Substitutions</p>
+        <h2>Openly licensed stand-ins.</h2>
+        <p><code>officeFontSubstitutions</code> is the library's list of openly licensed stand-ins for
+          Office faces: Calibri → Carlito, Cambria → Caladea, Franklin Gothic Book and Franklin Gothic
+          Medium → Libre Franklin, and several Arabic faces → Noto Naskh Arabic or Noto Sans Arabic, for
+          Arabic text only. Any source can use it, or a list of your own, through <code>substitutions</code>.</p>
+        <div class="code-card"><Code code={substitutionExample} lang="ts" themes={codeThemes} defaultColor={false} /></div>
+        <p>An entry is <code>&#123; for, use, script? &#125;</code>: <code>for</code> is the authored family,
+          matched case-insensitively; <code>use</code> is the family the source serves; the optional
+          <code>script: 'arabic'</code> limits the substitution to Arabic text; its type,
+          <code>FontSubstituteScript</code>, is exported from every entry. The renderers use a substitution
+          only when its face actually loaded. <code>googleFonts()</code> already includes
+          <code>officeFontSubstitutions</code>. The entries of both lists are the current implementation's
+          and may change in a minor release.</p>
+      </section>
+
+      <section id="network">
+        <p class="section-label">Network</p>
+        <h2>CORS, credentials and CSP.</h2>
+        <ul>
+          <li>Fonts from another origin need CORS headers (<code>Access-Control-Allow-Origin</code>) on
+            stylesheets and font files.</li>
+          <li><code>fontCssApi()</code>, <code>fontCss()</code> and <code>fontFiles()</code> take
+            <code>credentials</code>: <code>'same-origin'</code> (the default, credentials to the same
+            origin only, as CSS font loading does) or <code>'omit'</code> (no cookies or HTTP
+            authentication at all). <code>'include'</code> and custom headers are not supported.
+            <code>googleFonts()</code> takes no <code>credentials</code>.</li>
+          <li>The library fetches font files itself (<code>fetch()</code>, CORS mode) when the text first
+            needs them, so that layout can read each face's own line metrics. A subset is fetched only
+            when the text needs it, or when its <code>unicode-range</code> overlaps one that is needed.</li>
+          <li>Cookies are never sent to another origin. For an authenticated service on another origin,
+            use <code>fontResolver</code> and return <code>data</code> bytes or a signed URL.</li>
+          <li>A hosted source receives the end user's IP address and User-Agent.</li>
+        </ul>
+        <h3>Content Security Policy</h3>
+        <ul>
+          <li>Stylesheet origins (<code>googleFonts</code>, <code>fontCssApi</code>, <code>fontCss</code>) need <code>connect-src</code>.</li>
+          <li>Font file origins need <code>font-src</code> and, because the library downloads them, <code>connect-src</code>
+            as well. That covers every font file of <code>googleFonts()</code>, <code>fontCssApi()</code>,
+            <code>fontCss()</code> and <code>fontFiles()</code> <code>url</code> faces, and every resolver URL.</li>
+          <li>Add <code>data:</code> or <code>blob:</code> to <code>font-src</code> when you use those URLs.
+            <code>data</code> buffers are not fetched and need no entry.</li>
+          <li>A mirror uses its own stylesheet and font file origins in place of Google's.</li>
+        </ul>
+      </section>
+
+      <section id="privacy">
+        <p class="section-label">Privacy</p>
+        <h2>What a font host can learn.</h2>
+        <ul>
+          <li>A hosted source receives the end user's IP address and User-Agent with each request.</li>
+          <li>Normally only the <code>unicode-range</code> subsets that intersect the painted text are fetched
+            (plus any subset whose range overlaps one of those), so the set of requested subset files reveals
+            approximately which character ranges the document uses.
+            This is coarse: no order, no counts and no text. With finely sliced CJK families it can still
+            hint at the content. Ordinary web pages that use CSS <code>unicode-range</code> have the same property.</li>
+          <li><code>fontResolver</code> receives family names only, never document text.</li>
+          <li>When some content cannot be demanded precisely (for example metafile pictures or equations),
+            or the painted text has more than 65,536 distinct characters, the document requests every subset
+            of the families concerned.</li>
+        </ul>
+        <p>If this matters, self-host the fonts: <code>fontFiles()</code> or <code>fontCss()</code> on your own
+          origin, or a proxy that you control.</p>
+      </section>
+
+      <section id="limits">
+        <p class="section-label">Timing and limits</p>
+        <h2>Bounded, and never fatal.</h2>
+        <p>The numbers in this section (deadlines, parallel downloads, size and count limits) are the
+          values the current implementation uses. They are documented so that you can size a deployment,
+          not as API: a minor release may change them. Do not build logic on the exact values; read
+          <code>error.violation</code> for the limit that applied.</p>
+        <p>A font load step runs each time a document needs new fonts or characters: for example once per
+          DOCX document, once per PPTX slide that adds them, and once per XLSX workbook plus once per sheet
+          that adds them. Layout waits for the step. Each step has two phases, each with its own 15 s deadline:</p>
+        <ol>
+          <li><strong>Resolution</strong> walks the sources in order. One deadline covers the whole walk,
+            so a slow first source leaves less time for the next. Families still unresolved when it
+            expires keep their host fallback.</li>
+          <li><strong>Face loading</strong> fetches the faces the library downloads and waits for them to
+            load. Faces not loaded when it expires keep their host fallback for that step.</li>
+        </ol>
+        <p>A step therefore normally takes at most about 30 s. In worker mode the page owns a resolver's
+          deadline, and the worker adopts the page's answer even when it arrives after the worker's own
+          deadline; the faces it delivers then get a fresh face-loading deadline of their own. In DOCX, measuring a face whose metric tables
+          cannot be read waits at most another 15 s. In worker mode the worker waits silently while a
+          resolver runs, so a slow resolver combined with a short <code>workerTimeoutMs</code> can make the
+          load time out.</p>
+        <p>Font sources are application configuration, so they have fixed limits that are not part of
+          <code>resourceLimits</code>:</p>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Limit</th><th>Current value</th></tr></thead>
+            <tbody>
+              {limits.map(([name, value]) => <tr><th>{name}</th><td>{value}</td></tr>)}
+            </tbody>
+          </table>
+        </div>
+        <p>A limit that can be checked up front makes the factory throw an <code>OoxmlError</code> with
+          <code>code === 'font-source-limit'</code>; <code>error.violation</code> holds
+          <code>&#123; resource: 'font-source', quota, metric, limit, observed &#125;</code>. <code>quota</code> and
+          <code>metric</code> are open-ended strings: a later release may report values this one does not
+          know, so give a <code>switch</code> over them a default branch. A limit reached
+          while a document loads never rejects <code>load()</code> or a later slide or sheet: only the
+          families concerned fail, with a <code>console.warn</code>, and the rest of the document loads.</p>
+        <p><a href="/errors">Error delivery and application messages →</a></p>
+      </section>
+
+      <section id="migration">
+        <p class="section-label">Migration</p>
+        <h2>From <code>useGoogleFonts</code>.</h2>
+        <p>Version 0.90 replaces the boolean <code>useGoogleFonts</code> option with <code>fonts</code>.
+          Migration is required only if you pass <code>useGoogleFonts</code>.</p>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>0.89</th><th>0.90</th></tr></thead>
+            <tbody>
+              <tr><td><code>useGoogleFonts: true</code></td><td><code>fonts: [googleFonts()]</code></td></tr>
+              <tr><td><code>useGoogleFonts: false</code></td><td>omit the option</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>In 0.90 the alias still works: <code>useGoogleFonts: true</code> without <code>fonts</code> becomes
+          <code>fonts: [googleFonts()]</code> and sends the same stylesheet requests, with a deprecation
+          warning printed once per JavaScript realm. <code>useGoogleFonts: false</code> does nothing but
+          still warns. When <code>fonts</code> is also given, <code>fonts</code> wins: <code>useGoogleFonts</code>
+          adds nothing to it and still warns, and nothing is thrown. From 0.91.0 the option is ignored with the same warning: no web fonts are
+          loaded until you migrate, but passing it never throws.</p>
+        <p><a href={migrationGuide}>Read the full 0.89 to 0.90 migration guide on GitHub →</a></p>
+      </section>
+    </div>
+  </main>
+  <SiteFooter />
+</Base>
+
+<style>
+  .guide-hero { padding: 80px 0 56px; border-bottom: 1px solid var(--border); }
+  h1 { margin: 18px 0; font-size: clamp(42px, 7vw, 76px); letter-spacing: -.04em; }
+  .guide-hero p:last-child { max-width: 58ch; color: var(--text-dim); font-size: 18px; }
+  .guide-layout { display: grid; grid-template-columns: 180px minmax(0, 1fr); gap: 48px; padding-top: 48px; padding-bottom: 80px; }
+  aside { align-self: start; position: sticky; top: 94px; font-size: 13px; }
+  aside p, .section-label { color: var(--text-faint); font: 500 11px var(--mono); text-transform: uppercase; letter-spacing: .08em; }
+  aside nav { display: grid; gap: 12px; }
+  .guide-content { min-width: 0; }
+  section { padding-bottom: 36px; margin-bottom: 36px; border-bottom: 1px solid var(--border); scroll-margin-top: 94px; }
+  h2 { font-size: clamp(24px, 3vw, 34px); letter-spacing: -.025em; }
+  h3 { margin-top: 28px; font-size: 18px; }
+  section p, section li { color: var(--text-dim); line-height: 1.7; }
+  section li + li { margin-top: 8px; }
+  section a { text-decoration: underline; text-underline-offset: 3px; }
+  code { font: .88em var(--mono); overflow-wrap: anywhere; }
+  .code-card { border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+  .code-card :global(pre) { padding: 20px; margin: 0; overflow-x: auto; background: var(--code-bg) !important; font-size: 13px; line-height: 1.65; }
+  .table-wrap { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th, td { padding: 14px; text-align: left; vertical-align: top; border-bottom: 1px solid var(--border); }
+  td { color: var(--text-dim); min-width: 200px; }
+  thead { background: var(--bg-elev); }
+  @media (max-width: 800px) { .guide-layout { grid-template-columns: 1fr; gap: 28px; } aside { position: static; } aside nav { display: flex; flex-wrap: wrap; gap: 10px 20px; } }
+</style>

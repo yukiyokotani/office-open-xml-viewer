@@ -52,18 +52,25 @@ describe('DocxDocument.load font options', () => {
 
   it('posts application sources unchanged and nothing without sources', async () => {
     const parse = stubParse();
-    const fonts = [googleFonts({ cssOrigin: 'https://fonts.internal.example:8443' })];
+    const fonts = [googleFonts({ baseUrl: 'https://fonts.internal.example:8443' })];
     await expect(DocxDocument.load(new ArrayBuffer(0), { mode: 'worker', fonts })).rejects.toBe(stop);
     await expect(DocxDocument.load(new ArrayBuffer(0), { mode: 'worker' })).rejects.toBe(stop);
     await expect(DocxDocument.load(new ArrayBuffer(0), { fonts })).rejects.toBe(stop);
     expect(parse.mock.calls.map((call) => call[2])).toEqual([fonts, undefined, undefined]);
   });
 
-  it('rejects useGoogleFonts: true with fonts, and malformed sources, before any worker starts', async () => {
+  it('lets fonts win over useGoogleFonts: true, with the warning and without throwing', async () => {
     const parse = stubParse();
-    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
-    await expect(DocxDocument.load(new ArrayBuffer(0), { useGoogleFonts: true, fonts: [] }))
-      .rejects.toThrow(TypeError);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const fonts = [googleFonts({ baseUrl: 'https://fonts.internal.example:8443' })];
+    await expect(DocxDocument.load(new ArrayBuffer(0), { mode: 'worker', useGoogleFonts: true, fonts })).rejects.toBe(stop);
+    await expect(DocxDocument.load(new ArrayBuffer(0), { mode: 'worker', useGoogleFonts: true, fonts: [] })).rejects.toBe(stop);
+    expect(parse.mock.calls.map((call) => call[2])).toEqual([fonts, undefined]);
+    expect(warn.mock.calls.filter(([message]) => message === USE_GOOGLE_FONTS_DEPRECATION_MESSAGE)).toHaveLength(1);
+  });
+
+  it('rejects malformed sources before any worker starts', async () => {
+    const parse = stubParse();
     await expect(DocxDocument.load(new ArrayBuffer(0), { fonts: [{ kind: 'font-css-api' }] as never }))
       .rejects.toThrow(TypeError);
     expect(parse).not.toHaveBeenCalled();

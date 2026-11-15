@@ -66,9 +66,11 @@ export type PptxWorkerRequest =
        *  renderer paints the resolved one. */
       cjkFallback: import('@silurus/ooxml-core').CjkLang;
       /** Font sources are configured: the parse worker's preflight also
-       * collects the font-source demand facts and scalars. Internal opt-in
+       * collects the font-source demand facts and scalars, with the
+       * collector imported from this absolute sidecar URL (`''`: none
+       * resolvable, every subset is demanded). Internal opt-in
        * only; omission preserves ordinary parse payloads. */
-      collectFontDemand?: boolean;
+      collectFontDemand?: string;
       progressiveLayout?: boolean;
     }
   | ({

@@ -1,3 +1,4 @@
+import type { DocxCompatProfile } from './compat-profile.js';
 import type { LayoutLine, LayoutTextSeg } from '../line-layout.js';
 import type { NumberingMarkerShapeInput } from './types.js';
 import type { ParagraphLayoutSource, ParagraphTextBearingRun } from './text.js';
@@ -63,14 +64,14 @@ export function specifiedTextLineMetrics(
   line: LayoutLine,
   context: ParagraphLayoutContext,
   mark: Pick<ParagraphLayoutSource, 'defaultFontSize' | 'defaultFontFamily' | 'paragraphMarkShapeInput'>,
-  mode: number | undefined,
+  compat: Pick<DocxCompatProfile, 'specifiedTextLineBoxMode' | 'specifiedTextLineBoxMode15'>,
   vertical = false,
   markShape?: NumberingMarkerShapeInput,
   /** Normal box of a first line a taller numbering marker raised. */
   markerRaisedNormalPt?: number,
 ): Readonly<{ advancePt: number; baselineOffsetPt: number }> | null {
   const spacing = context.lineSpacing;
-  if ((mode !== 14 && mode !== 15) || vertical || context.hasRuby
+  if (!compat.specifiedTextLineBoxMode || vertical || context.hasRuby
     || spacing?.explicit !== true || spacing.value <= 0
     || (spacing.rule !== 'exact' && spacing.rule !== 'atLeast'
       && !(spacing.rule === 'auto' && spacing.value === 1))) return null;
@@ -129,7 +130,7 @@ export function specifiedTextLineMetrics(
   // The #1884 controls that admitted numbered lines and marks of another face
   // were mode 15 without a document grid; other paragraphs keep the
   // homogeneous admission.
-  if (context.lineGrid.active || mode !== 15) {
+  if (context.lineGrid.active || !compat.specifiedTextLineBoxMode15) {
     if ('numbering' in mark && (mark as { numbering?: unknown }).numbering) return null;
     if (mark.defaultFontFamily !== authoredFamily) return null;
     if (paragraphMark) {

@@ -1,3 +1,4 @@
+import { compatProfile } from './test-support/compat-environment.test-support.js';
 import { createFontResolver } from './layout/font-service.js';
 import { createTextLayoutService } from './layout/text.js';
 import { readFile } from 'node:fs/promises';
@@ -70,7 +71,7 @@ function intrinsic(runs: DocParagraph['runs']) {
   return measureParagraphIntrinsicWidths(p, contextPt, 100,
     { context: measure, fontFamilyClasses: {} }, {
       pageIndex: 0, totalPages: 1, pageWritingMode: 'horizontal-tb',
-      documentHasEastAsianText: false, compatibilityMode: 15,
+      documentHasEastAsianText: false, compat: compatProfile({ compatibilityMode: 15 }),
       layoutServices: createLayoutServices(doc, { measureContext: measure }),
     });
 }
@@ -433,7 +434,7 @@ it('uses the same sequence in the shape text-box adapter', () => {
       id: 'box', source: { story: 'body', storyInstance: 'body', path: [0, 0] },
       flowDomainId: 'body', context: contextPt, measurer: { context: measure, fontFamilyClasses: {} },
       environment: { pageIndex: 0, totalPages: 1, documentHasEastAsianText: false,
-        pageWritingMode: 'horizontal-tb', compatibilityMode: 15,
+        pageWritingMode: 'horizontal-tb', compat: compatProfile({ compatibilityMode: 15 }),
         layoutServices: createLayoutServices(doc, { measureContext: measure }) },
     });
     if (!layout) throw new Error('Expected text box');

@@ -24,10 +24,10 @@ const BUDGET_BYTES = 32 * 1024;
 const VIEWER_MARKERS = ['_parser_bg.wasm', 'OffscreenCanvas', 'getContext('];
 
 // The other direction: a document loaded without `LoadOptions.fonts` must
-// not pay for the font-source runtime (the worker bridge host, with its
-// source cache, failure record and face downloads, stays static: it must
-// answer the worker's messages synchronously). These modules are reachable
-// from a
+// not pay for the font-source runtime, the worker bridge host with its
+// source cache, failure record and face downloads included (only its gate,
+// resolver-bridge-gate.ts, is static; it loads the host for a document with
+// a resolver). These modules are reachable from a
 // format entry only through dynamic `import()`, so none may be retained by a
 // chunk of the entry's static graph (its static `import` edges, as
 // scripts/measure-bundle-size.mjs counts them). One static import of any
@@ -41,6 +41,7 @@ export const LAZY_FONT_SOURCE_MODULES = Object.freeze([
     'resolver-resolution', 'resolver-admission', 'resolver-bridge-responder',
     'source-metric-tables', 'web-font-sfnt', 'open-type-variations', 'open-type-instances',
     'installed-families',
+    'resolver-bridge-host', 'source-cache', 'resolver-failures', 'face-download',
   ].map((name) => `packages/core/src/fonts/${name}.ts`),
   ...['docx', 'xlsx', 'pptx'].map((format) => `packages/${format}/src/font-source-load.ts`),
   'packages/docx/src/font-demand-plan.ts',

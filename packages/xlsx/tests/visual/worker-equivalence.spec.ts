@@ -5,6 +5,8 @@ import pixelmatch from 'pixelmatch';
 import { chartExXlsxBytes } from '../../../../tests/fixtures/chart-ex-packages.mjs';
 // @ts-ignore - shared plain-JS test fixture builder.
 import { frozenOverflowXlsxBytes } from '../../../../tests/fixtures/frozen-overflow-xlsx.mjs';
+// @ts-ignore - shared plain-JS test fixture builder.
+import { symbolFontXlsxBytes } from '../../../../tests/fixtures/symbol-font-xlsx.mjs';
 
 // Worker mode must produce (near-)identical pixels to main mode: same
 // renderer, same per-sheet parse, same fonts, different thread. The only
@@ -228,4 +230,33 @@ test('unscrolled frozen panes paint overflow exactly like the unfrozen sheet', a
     }
     expect(stray).toBe(0);
   }
+});
+
+// Symbol-encoded faces are judged in each realm by its own oracle (main
+// document, worker realm), each with route sentinels loaded: kept or
+// converted codes, measured and wrapped identically in both modes.
+test('worker mode matches main mode › symbol-font cells, runs and text box', async ({ page }) => {
+  const bytes = symbolFontXlsxBytes();
+  await page.route('**/generated/symbol-fonts.xlsx', (route) => route.fulfill({
+    status: 200, contentType: 'application/octet-stream', body: Buffer.from(bytes),
+  }));
+  await page.goto('/tests/visual/worker-fixture.html?xlsx=generated/symbol-fonts&sheet=0');
+  await page.waitForFunction(
+    () => document.body.dataset.status === 'ready' || document.body.dataset.status === 'error',
+    { timeout: 60_000 },
+  );
+  const status = await page.evaluate(() => document.body.dataset.status);
+  if (status === 'error') {
+    throw new Error(await page.evaluate(() => document.body.dataset.errorMessage ?? ''));
+  }
+  const [mainUrl, workerUrl] = await page.evaluate(() => [
+    (document.getElementById('main-canvas') as HTMLCanvasElement).toDataURL('image/png'),
+    (document.getElementById('worker-canvas') as HTMLCanvasElement).toDataURL('image/png'),
+  ]);
+  const main = PNG.sync.read(Buffer.from(mainUrl.split(',')[1], 'base64'));
+  const worker = PNG.sync.read(Buffer.from(workerUrl.split(',')[1], 'base64'));
+  expect(worker.width).toBe(main.width);
+  expect(worker.height).toBe(main.height);
+  const diff = pixelmatch(main.data, worker.data, undefined, main.width, main.height, { threshold: 0.1 });
+  expect((diff / (main.width * main.height)) * 100).toBeLessThanOrEqual(0.1);
 });

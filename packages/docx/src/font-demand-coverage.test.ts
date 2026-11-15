@@ -1,4 +1,5 @@
 /// <reference types="node" />
+import { readdirSync } from 'node:fs';
 import { readFile, readdir } from 'node:fs/promises';
 import { beforeAll, describe, expect, it } from 'vitest';
 import init, { DocxArchive } from './wasm/docx_parser.js';
@@ -67,6 +68,23 @@ const TARGETED: Record<string, Uint8Array> = {
     + run('lnþ(a', '<w:rFonts w:ascii="Symbol" w:hAnsi="Symbol"/>')
     + run('\uF0B7\uF06C', '<w:rFonts w:ascii="Wingdings" w:hAnsi="Wingdings"/>')
     + run('ab', '<w:rFonts w:ascii="Symbol" w:hAnsi="Symbol"/><w:caps/>'))),
+  // §17.3.2.30 rtl runs and §17.3.1.6 bidi paragraphs (UAX #9 mirroring).
+  'right-to-left text': docx(p(run('مرحبا (عالم) [1] «اقتباس»', '<w:rtl/>') + run(' and (latin) &lt;tail&gt;'), '<w:bidi/>')
+    + p(run('שלום {עולם}', '<w:rtl/>'))),
+  // §17.18.44 kashida justification inserts U+0640 into justified lines.
+  'kashida justification': docx(p(run('بين البيت والمدرسة طريق طويل يمر بين الحقول والبيوت القديمة في القرية الصغيرة '.repeat(4), '<w:rtl/>'),
+    '<w:bidi/><w:jc w:val="highKashida"/>')),
+  // §17.3.3.25 ruby.
+  'ruby': docx(p('<w:ruby><w:rubyPr><w:rubyAlign w:val="distributeSpace"/><w:hps w:val="10"/><w:hpsRaise w:val="18"/><w:hpsBaseText w:val="21"/><w:lid w:val="ja-JP"/></w:rubyPr>'
+    + '<w:rt><w:r><w:rPr><w:sz w:val="10"/></w:rPr><w:t>かんじ</w:t></w:r></w:rt><w:rubyBase><w:r><w:rPr><w:sz w:val="21"/></w:rPr><w:t>漢字</w:t></w:r></w:rubyBase></w:ruby>'
+    + run('の読み'))),
+  // §17.18.93 vertical section and cell text directions.
+  'vertical section': docx(p(run('縦書き、「括弧」（丸）。ABC 12 ー〜')), '<w:textDirection w:val="tbRl"/>'),
+  'vertical table cell': docx('<w:tbl><w:tblPr><w:tblW w:w="4000" w:type="dxa"/></w:tblPr><w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/></w:tblGrid>'
+    + '<w:tr><w:trPr><w:trHeight w:val="2000"/></w:trPr><w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/><w:textDirection w:val="tbRlV"/></w:tcPr>' + p(run('縦、「セル」。')) + '</w:tc>'
+    + '<w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/><w:textDirection w:val="btLr"/></w:tcPr>' + p(run('Rotated (cell)')) + '</w:tc></w:tr></w:tbl>' + p('')),
+  // A PUA code in a Unicode-encoded face paints as itself.
+  'PUA code in a text face': docx(p(run('\uF0B7 item', '<w:rFonts w:ascii="Arial" w:hAnsi="Arial"/>'))),
   'east asian empty marks': docx(p('', '<w:rPr><w:rFonts w:eastAsia="MS Mincho" w:hint="eastAsia"/></w:rPr>')
     + p(run('日本語の文', '<w:rFonts w:eastAsia="MS Mincho"/><w:lang w:eastAsia="ja-JP"/>'))),
 };
@@ -126,7 +144,9 @@ async function paintedScalars(model: DocxDocumentModel): Promise<Set<number>> {
   const pages = layoutDocument(model, services).pages.length;
   for (let pageIndex = 0; pageIndex < pages; pageIndex++) {
     await renderDocumentToCanvas(model, canvas, pageIndex, {
-      dpr: 1, width: 612, currentDate: Date.UTC(2026, 9, 26, 9, 0), layoutServices: createLayoutServices(model, { measureContext: ctx }),
+      // One layout for every page (a fresh service per page lays the whole
+      // document out again for each page).
+      dpr: 1, width: 612, currentDate: Date.UTC(2026, 9, 26, 9, 0), layoutServices: services,
     });
   }
   const scalars = new Set<number>();
@@ -155,6 +175,28 @@ describe('DOCX font demand covers every measured or painted scalar', () => {
       expect(await check(label, bytes), label).toBe('finite');
     }
   });
+
+  // Opt-in: OOXML_FONT_DEMAND_CORPUS=<dir> also checks every .docx in it
+  // (the private corpus, which is not committed).
+  it.skipIf(!process.env.OOXML_FONT_DEMAND_CORPUS)('opt-in corpus', async () => {
+    const dir = process.env.OOXML_FONT_DEMAND_CORPUS!;
+    const outcomes: string[] = [];
+    const [shard, shards] = (process.env.OOXML_FONT_DEMAND_SHARD ?? '0/1').split('/').map(Number) as [number, number];
+    const names = readdirSync(dir).filter((file) => file.endsWith('.docx')).sort().filter((_, index) => index % shards === shard);
+    for (const name of names) {
+      const file = `${dir}/${name}`;
+      const started = Date.now();
+      process.stdout.write(`corpus file ${name}\n`);
+      try {
+        outcomes.push(await check(file, new Uint8Array(await readFile(file))));
+      } catch (error) {
+        if ((error as Error)?.name === 'AssertionError') throw new Error(`${name}: ${(error as Error).message}`);
+        outcomes.push('unreadable');
+      }
+      process.stdout.write(`corpus done ${name} ${Date.now() - started} ms\n`);
+    }
+    process.stdout.write(`.docx corpus outcomes ${JSON.stringify(outcomes.reduce<Record<string, number>>((counts, outcome) => { counts[outcome] = (counts[outcome] ?? 0) + 1; return counts; }, {}))}\n`);
+  }, 21_600_000);
 
   it('synthetic conformance corpus and public demo samples', async () => {
     const outcomes: string[] = [];

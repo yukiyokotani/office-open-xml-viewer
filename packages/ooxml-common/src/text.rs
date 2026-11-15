@@ -21,6 +21,7 @@ use crate::units::coordinate32_to_emu;
 /// shape (`{"type":"pct","val":..}` / `{"type":"pts","val":..}`) mirrors core's
 /// TS `SpaceLine`, so the pptx and xlsx JSON stays byte-identical.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum SpaceLine {
     /// `<a:spcPct@val>` (e.g. 100000 = 100%, 150000 = 150%).

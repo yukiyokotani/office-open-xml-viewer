@@ -180,7 +180,7 @@ describe('view-only column resize keeps canonical CSS pixel intent', () => {
     expect(colPx(projected, 8, 1)).toBe(84);
     expect(colPx(projected, 8, 2)).toBe(96);
     // Renderer cache inheritance must not drop the projection sidecar.
-    inheritSheetRenderCache(source, projected);
+    inheritSheetRenderCache(source, projected, { fonts: [], fills: [], borders: [], cellXfs: [], numFmts: [], dxfs: [] } as Styles);
     expect(colPx(projected, 8, 1)).toBe(84);
 
     // Sibling projection and the immutable source keep the authored decode.

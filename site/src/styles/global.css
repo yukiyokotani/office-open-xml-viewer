@@ -306,6 +306,10 @@ h1, h2, h3 { line-height: 1.08; letter-spacing: -0.035em; margin: 0; }
 .theme-glyph { width: 12px; height: 12px; border: 1px solid currentColor; border-radius: 50%; background: linear-gradient(90deg, currentColor 50%, transparent 50%); }
 .theme-label::before { content: 'Dark'; }
 :root[data-theme='dark'] .theme-label::before { content: 'Light'; }
+/* The guide links stay reachable from the footer when the bar is too narrow. */
+@media (max-width: 1040px) {
+  .nav-links .nav-guide { display: none; }
+}
 @media (max-width: 720px) {
   .nav-links a:not(.nav-gh) { display: none; }
   .nav-links { gap: 12px; }

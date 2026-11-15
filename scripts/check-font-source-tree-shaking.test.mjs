@@ -31,3 +31,17 @@ test('lazy font-source modules reached only through import() pass', () => {
   assert.deepEqual(staticLazyFontSourceModules(stats, ['xlsx.mjs']), []);
   assert.throws(() => staticLazyFontSourceModules(stats, ['pptx.mjs']), /lack the entry pptx\.mjs/);
 });
+
+test('a statically retained resolver bridge host is reported; its gate is not', () => {
+  const stats = {
+    chunks: {
+      'pptx.mjs': chunk(['presentation.js'], 'src/pptx.ts'),
+      'presentation.js': chunk([], 'packages/pptx/src/presentation.ts', 'packages/core/src/fonts/resolver-bridge-gate.ts',
+        'packages/core/src/fonts/resolver-bridge-host.ts', 'packages/core/src/fonts/source-cache.ts'),
+    },
+  };
+  assert.deepEqual(staticLazyFontSourceModules(stats, ['pptx.mjs']), [
+    ['pptx.mjs', 'packages/core/src/fonts/resolver-bridge-host.ts', 'presentation.js'],
+    ['pptx.mjs', 'packages/core/src/fonts/source-cache.ts', 'presentation.js'],
+  ]);
+});

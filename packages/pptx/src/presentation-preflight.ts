@@ -10,6 +10,7 @@ import {
 import { HARD_MAX_PPTX_PREFLIGHT_PROJECTION_BYTES } from '@silurus/ooxml-core/worker';
 import { FONT_SUBSTITUTE_SCRIPTS } from '@silurus/ooxml-core/internal/font-sources';
 import { PptxFontPreloadAccumulator, type PptxFontDemandFacts } from './font-requests';
+import type { OfficeFaceWeight } from './office-face-name.js';
 import { createPptxPartFailureLog, type PptxPartFailure } from './part-failures';
 import type {
   MediaElement,
@@ -556,6 +557,11 @@ export type FontDemandCollector = (slide: Slide, committed: ReadonlySet<number>,
 export interface PresentationPreflightBuilderOptions {
   readonly cjkFallback?: import('@silurus/ooxml-core').CjkLang;
   readonly collectFontDemand?: FontDemandCollector;
+  /** Groups demanded face tuples; required with `collectFontDemand`. A graph
+   * that bundles the metrics catalogue passes `officeFaceWeight`
+   * (powerpoint-line-metrics.ts), the parse worker the equivalent
+   * `indexedOfficeFaceWeight` (office-face-weight.ts). */
+  readonly officeFaceWeight?: OfficeFaceWeight;
   /** Optional lower admission budget; the generated hard ceiling always applies. */
   readonly maxProjectionBytes?: number;
 }
@@ -613,6 +619,9 @@ export class PresentationPreflightBuilder {
     ) {
       throw new Error('invalid PPTX presentation preflight limit');
     }
+    if (options.collectFontDemand !== undefined && options.officeFaceWeight === undefined) {
+      throw new Error('PPTX font demand needs a face-weight function');
+    }
     this.limit = requestedLimit;
     this.collectFontDemand = options.collectFontDemand;
     this.demandPoints = this.collectFontDemand ? new Set<number>() : undefined;
@@ -638,7 +647,8 @@ export class PresentationPreflightBuilder {
       undefined, undefined, options.cjkFallback, undefined,
       // Font-source demand facts exist only with font sources, which are
       // also what installs a demand collector.
-      this.collectFontDemand !== undefined,
+      this.collectFontDemand !== undefined && options.officeFaceWeight !== undefined
+        ? options.officeFaceWeight : false,
     );
     this.fontPreloadNames = Object.freeze(this.fonts.names());
     this.fontPreloadFacts = this.fonts.demandFacts();

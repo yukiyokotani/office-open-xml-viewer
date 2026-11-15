@@ -1107,6 +1107,9 @@ pub(crate) fn parse_tx_body(
                             // (e.g. Meiryo set only on `<a:ea>`).
                             let mut font_face_ea: Option<String> = None;
                             let mut font_face_cs: Option<String> = None;
+                            // §21.1.2.3.10 `<a:sym>`: the face of the run's
+                            // F0-shifted symbol codes (Insert > Symbol).
+                            let mut font_face_sym: Option<String> = None;
                             for rc in pc.children().filter(|n| n.is_element()) {
                                 match rc.tag_name().name() {
                                     "rPr" => {
@@ -1139,6 +1142,10 @@ pub(crate) fn parse_tx_body(
                                                     font_face_cs =
                                                         rpc.attribute("typeface").map(String::from);
                                                 }
+                                                "sym" => {
+                                                    font_face_sym =
+                                                        rpc.attribute("typeface").map(String::from);
+                                                }
                                                 _ => {}
                                             }
                                         }
@@ -1162,6 +1169,7 @@ pub(crate) fn parse_tx_body(
                                     font_face,
                                     font_face_ea,
                                     font_face_cs,
+                                    font_face_sym,
                                 });
                             }
                         }
@@ -2998,6 +3006,30 @@ mod math_tests {
             v["fontFaceCs"], "Sakkal Majalla",
             "serializes as camelCase fontFaceCs"
         );
+    }
+
+    /// §21.1.2.3.10 `<a:sym>` names the face of the run's F0-shifted symbol
+    /// codes, serialized as `fontFaceSym` (omitted when absent).
+    #[test]
+    fn parses_sym_typeface() {
+        let xml = format!(
+            r#"<xdr:txBody {NS}>
+              <a:p>
+                <a:r>
+                  <a:rPr sz="1400"><a:sym typeface="Wingdings"/></a:rPr>
+                  <a:t>&#xF0FC;</a:t>
+                </a:r>
+                <a:r><a:rPr sz="1400"/><a:t>x</a:t></a:r>
+              </a:p>
+            </xdr:txBody>"#
+        );
+        let doc = roxmltree::Document::parse(&xml).unwrap();
+        let text = parse_tx_body(&doc.root_element(), &[]).expect("txBody parses");
+        let v: serde_json::Value = serde_json::to_value(&text.paragraphs[0].runs[0]).unwrap();
+        assert_eq!(v["fontFaceSym"], "Wingdings");
+        assert_eq!(v["text"], "\u{f0fc}");
+        let plain: serde_json::Value = serde_json::to_value(&text.paragraphs[0].runs[1]).unwrap();
+        assert!(plain.get("fontFaceSym").is_none());
     }
 
     /// Additive guarantee: a run with no `<a:ea>` / `<a:cs>` omits both keys

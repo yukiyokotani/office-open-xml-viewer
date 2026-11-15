@@ -13,6 +13,7 @@ use std::rc::Rc;
 include!("resource-policy.generated.rs");
 
 #[derive(Clone, Copy, Debug, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum OoxmlFormat {
     Docx,
@@ -62,6 +63,7 @@ struct LogicalOperationState {
 pub struct ResourceOperation(u64);
 
 #[derive(Clone, Copy, Debug, Default, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ResourceUsage {
     pub archive_entry_count: u64,
@@ -209,6 +211,7 @@ impl ResourceUsage {
 }
 
 #[derive(Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 struct ResourceLimitEnvelope<'a> {
     code: &'static str,
@@ -216,6 +219,7 @@ struct ResourceLimitEnvelope<'a> {
 }
 
 #[derive(Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 struct ResourceLimitDetails<'a> {
     stage: &'static str,
@@ -223,6 +227,7 @@ struct ResourceLimitDetails<'a> {
 }
 
 #[derive(Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 struct ResourceViolation<'a> {
     format: OoxmlFormat,

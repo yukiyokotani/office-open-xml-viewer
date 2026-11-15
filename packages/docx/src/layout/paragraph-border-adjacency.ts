@@ -47,11 +47,11 @@ export function topBorderExtentPt(
   return (top.space ?? 0) + (top.width ?? 0) / 2;
 }
 
-function effectiveEdge(edge: ParaBorderEdge | null): ParaBorderEdge | null {
+function effectiveEdge(edge: ParaBorderEdge | null | undefined): ParaBorderEdge | null {
   return edge == null || edge.style === 'none' ? null : edge;
 }
 
-function sameParagraphEdge(a: ParaBorderEdge | null, b: ParaBorderEdge | null): boolean {
+function sameParagraphEdge(a: ParaBorderEdge | null | undefined, b: ParaBorderEdge | null | undefined): boolean {
   const left = effectiveEdge(a);
   const right = effectiveEdge(b);
   if (left == null || right == null) return left == null && right == null;

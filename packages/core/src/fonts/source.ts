@@ -14,7 +14,8 @@
  *
  * The public type {@link FontSource} is opaque: the factories are the only
  * supported construction, and the `fonts` option accepts only values this
- * realm's factories returned ({@link fontSourceDescriptors}), so the
+ * realm's factories returned ({@link fontSourceDescriptors}; guaranteed for
+ * this copy of the library, best effort for another copy), so the
  * descriptor shape below stays library-internal and can change without a
  * breaking change. Descriptors are plain frozen data so a load request can
  * carry them to a render worker unchanged. The one exception is
@@ -65,8 +66,14 @@ export type FontSourceCredentials = 'omit' | 'same-origin';
  * A font source for `LoadOptions.fonts`. Opaque: create it with
  * `googleFonts()`, {@link fontCssApi}, {@link fontCss}, {@link fontFiles} or
  * {@link fontResolver}. Its contents are not part of the API, and the `fonts`
- * option accepts only values those factories returned (in the same
- * JavaScript realm); anything else is rejected with a `TypeError`.
+ * option accepts only values those factories returned, in the same
+ * JavaScript realm; anything else is rejected with a `TypeError`.
+ *
+ * Guaranteed: a value created by this copy of the library (any of its
+ * entries) is accepted by this copy's `load()` and Viewers. A value created
+ * by another copy of the library loaded in the same realm (a second bundle
+ * or version) is accepted on a best-effort basis only; that is not a
+ * guarantee and may change in any release.
  */
 export interface FontSource {
   /** Type-level marker only (no such property exists at run time). A string
@@ -78,7 +85,7 @@ export interface FontSource {
 interface FontSourceBase {
   readonly protocol: typeof FONT_SOURCE_PROTOCOL;
   readonly kind: string;
-  readonly substitutes?: readonly FontSubstitution[];
+  readonly substitutions?: readonly FontSubstitution[];
 }
 
 /** Library-internal descriptor of a CSS API answering one request per served family. */
@@ -93,7 +100,31 @@ export interface FontCssApiSource extends FontSourceBase {
    * or `true` for the default query. When present, only these are requested. */
   readonly families?: Readonly<Record<string, string | true>>;
   readonly credentials?: FontSourceCredentials;
+  /**
+   * Set only by a library preset (`googleFonts()`), for the served families
+   * its evidence covers: the API serves each style of these families as
+   * `unicode-range` subsets of one font file that keep that file's vertical
+   * metric tables, so the subsets of one style have one normal line and a
+   * format may measure the style once instead of each subset
+   * (`LoadedSourceFace.sharedSubsetMetrics`). Never settable through
+   * {@link fontCssApi}.
+   */
+  readonly sharedSubsetMetricFamilies?: readonly string[];
+  /**
+   * Set only by a library preset (`googleFonts()` on its default origin), for
+   * a file host it knows serves many requests at once: how many of this
+   * source's face files a realm downloads in parallel, in a pool of its own,
+   * instead of the default six (`face-download.ts`). An integer from 1 to
+   * 64. The stated host also serves immutable, cacheable CORS responses, so
+   * the source's downloaded faces register from their URL
+   * (`source-session.ts` `registersFromUrl`). Never settable through
+   * {@link fontCssApi}.
+   */
+  readonly parallelFaceDownloads?: number;
 }
+
+/** Upper bound of {@link FontCssApiSource.parallelFaceDownloads}. */
+const HARD_MAX_PARALLEL_FACE_DOWNLOADS = 64;
 
 /** One static stylesheet describing any number of families. */
 export interface FontCssSource extends FontSourceBase {
@@ -132,8 +163,10 @@ export interface FontFaceDeclaration {
   readonly url?: string;
   /** Owned font bytes; transferred once to a worker. */
   readonly data?: ArrayBuffer;
+  /** CSS `font-weight` descriptor (`'400'`, `'bold'`, `'100 900'`). */
   readonly weight?: string;
   readonly style?: string;
+  /** CSS `font-stretch` descriptor, always a string (`'condensed'`, `'75%'`). */
   readonly stretch?: string;
   /** Standard CSS `unicode-range`; enables lazy subset loading. */
   readonly unicodeRange?: string;
@@ -145,10 +178,11 @@ export interface FontFaceDeclaration {
  *
  * Contract (settled for 0.90; later versions may add fields, never remove or
  * change these):
- * - answer each family with every face you have for it (all weights, styles
- *   and `unicode-range` subsets), the way an `@font-face` stylesheet declares
- *   a family, or with nothing (the next source is consulted). Faces of a
- *   declared substitute's `use` family also answer it;
+ * - answer each family of both lists ({@link FontDemand.authoredFamilies} and
+ *   {@link FontDemand.fallbackFamilies}) with every face you have for it (all
+ *   weights, styles and `unicode-range` subsets), the way an `@font-face`
+ *   stylesheet declares a family, or with nothing (the next source is
+ *   consulted). Faces of a declared substitution's `use` family also answer it;
  * - a family is resolved once per document (shared by concurrent documents
  *   using the same function), so faces left out are never asked for again;
  *   the renderer picks the weight and style per run;
@@ -160,45 +194,59 @@ export interface FontFaceDeclaration {
  * - `data` faces are used as returned.
  */
 export interface FontDemand {
-  /** Authored family names not proven installed on the host (trimmed, original case). */
-  readonly families: readonly string[];
+  /** Family names the document authors that are not proven installed on the
+   * host (trimmed, original case). */
+  readonly authoredFamilies: readonly string[];
   /** Library fallback families the renderer puts in CSS tails for the scripts
    * present in the text (for example Noto families for CJK). */
   readonly fallbackFamilies: readonly string[];
 }
 
-export interface FontResolveContext {
+/** Second argument of a {@link FontResolver}. */
+export interface FontResolverContext {
   /** Aborted when the requesting document is destroyed or the font ceiling expires. */
   readonly signal: AbortSignal;
 }
 
-export type FontResolveFn = (
+/**
+ * The application function behind {@link fontResolver}; see
+ * {@link FontDemand} for what it is asked.
+ *
+ * Its answer is checked leniently, unlike `fontFiles()` input: properties the
+ * library does not know are ignored, so one resolver can serve several
+ * library versions, and `weight` may be a number from 1 to 1000 (`700` is
+ * `'700'`; `stretch` stays a string). A malformed answer never rejects the
+ * load: the families of that call keep their host fallback, with a warning.
+ */
+export type FontResolver = (
   demand: FontDemand,
-  context: FontResolveContext,
-) => readonly FontFaceDeclaration[] | Promise<readonly FontFaceDeclaration[]>;
+  context: FontResolverContext,
+) =>
+  | readonly (Omit<FontFaceDeclaration, 'weight'> & { readonly weight?: string | number })[]
+  | Promise<readonly (Omit<FontFaceDeclaration, 'weight'> & { readonly weight?: string | number })[]>;
 
 export interface FontCssApiOptions {
   readonly urlTemplate: string;
   readonly query?: string;
   readonly families?: Readonly<Record<string, string | true>>;
-  readonly substitutes?: readonly FontSubstitution[];
+  readonly substitutions?: readonly FontSubstitution[];
   readonly credentials?: FontSourceCredentials;
 }
 
 export interface FontCssOptions {
   readonly url: string;
-  readonly substitutes?: readonly FontSubstitution[];
+  readonly substitutions?: readonly FontSubstitution[];
   readonly credentials?: FontSourceCredentials;
 }
 
 export interface FontFilesOptions {
   readonly faces: readonly FontFaceDeclaration[];
-  readonly substitutes?: readonly FontSubstitution[];
+  readonly substitutions?: readonly FontSubstitution[];
   readonly credentials?: FontSourceCredentials;
 }
 
 export interface FontResolverOptions {
-  readonly substitutes?: readonly FontSubstitution[];
+  readonly substitutions?: readonly FontSubstitution[];
 }
 
 // ---- validation primitives --------------------------------------------------
@@ -417,7 +465,7 @@ const FACE_PROTOCOLS = ['https:', 'http:', 'blob:', 'data:'] as const;
 
 const SUBSTITUTE_SCRIPTS = { arabic: true } satisfies Record<FontSubstituteScript, true>;
 
-function normalizeSubstitutes(value: unknown, location: string): readonly FontSubstitution[] | undefined {
+function normalizeSubstitutions(value: unknown, location: string): readonly FontSubstitution[] | undefined {
   if (value === undefined) return undefined;
   if (!Array.isArray(value)) throw new TypeError(`${location} must be an array`);
   return Object.freeze(value.map((entry: unknown, index) => {
@@ -442,14 +490,21 @@ function normalizeSubstitutes(value: unknown, location: string): readonly FontSu
  * owned non-empty `ArrayBuffer` within the face ceiling, `url` an absolute
  * http(s) / blob: / data: URL (relative URLs resolve against `base`).
  * The buffer is referenced, not copied.
+ *
+ * `returned` is set for a declaration a {@link fontResolver} function
+ * returned (never for `fontFiles()` input, which stays strict): unknown
+ * properties are ignored instead of failing the call, so a resolver written
+ * for a later version of the library keeps working, and `weight` may be a
+ * number from 1 to 1000 (it becomes the CSS string).
  */
 export function validateFontFaceDeclaration(
   value: unknown,
   location = 'font face declaration',
   base: string | undefined = undefined,
+  returned = false,
 ): FontFaceDeclaration {
   const fields = requireRecord(value, location);
-  requireKnownKeys(fields, ['family', 'url', 'data', 'weight', 'style', 'stretch', 'unicodeRange'], location);
+  if (!returned) requireKnownKeys(fields, ['family', 'url', 'data', 'weight', 'style', 'stretch', 'unicodeRange'], location);
   const family = requireName(fields.family, `${location}.family`);
   const hasUrl = fields.url !== undefined;
   const hasData = fields.data !== undefined;
@@ -465,7 +520,11 @@ export function validateFontFaceDeclaration(
     }
     data = fields.data as ArrayBuffer;
   }
-  const weight = optionalDescriptor(fields.weight, `${location}.weight`);
+  const numericWeight = returned && typeof fields.weight === 'number';
+  if (numericWeight && !((fields.weight as number) >= 1 && (fields.weight as number) <= 1000)) {
+    throw new TypeError(`${location}.weight must be a number from 1 to 1000 or a non-empty string`);
+  }
+  const weight = optionalDescriptor(numericWeight ? String(fields.weight) : fields.weight, `${location}.weight`);
   const style = optionalDescriptor(fields.style, `${location}.style`);
   const stretch = optionalDescriptor(fields.stretch, `${location}.stretch`);
   const unicodeRange = optionalDescriptor(fields.unicodeRange, `${location}.unicodeRange`);
@@ -483,7 +542,20 @@ export function validateFontFaceDeclaration(
 const TEMPLATE_PLACEHOLDER = /\{[^{}]*\}/g;
 
 function normalizeCssApi(fields: Fields, location: string): FontCssApiSource {
-  requireKnownKeys(fields, ['protocol', 'kind', 'urlTemplate', 'query', 'families', 'substitutes', 'credentials'], location);
+  requireKnownKeys(fields, ['protocol', 'kind', 'urlTemplate', 'query', 'families', 'substitutions', 'credentials', 'sharedSubsetMetricFamilies', 'parallelFaceDownloads'], location);
+  const parallelFaceDownloads = fields.parallelFaceDownloads;
+  if (parallelFaceDownloads !== undefined && (typeof parallelFaceDownloads !== 'number' || !Number.isInteger(parallelFaceDownloads)
+    || parallelFaceDownloads < 1 || parallelFaceDownloads > HARD_MAX_PARALLEL_FACE_DOWNLOADS)) {
+    throw new TypeError(`${location}.parallelFaceDownloads must be an integer from 1 to ${HARD_MAX_PARALLEL_FACE_DOWNLOADS}`);
+  }
+  let sharedSubsetMetricFamilies: readonly string[] | undefined;
+  if (fields.sharedSubsetMetricFamilies !== undefined) {
+    const list = fields.sharedSubsetMetricFamilies;
+    if (!Array.isArray(list) || list.some((family) => typeof family !== 'string' || !fontFamilyKey(family))) {
+      throw new TypeError(`${location}.sharedSubsetMetricFamilies must be an array of family names`);
+    }
+    sharedSubsetMetricFamilies = Object.freeze([...list as string[]]);
+  }
   const urlTemplate = fields.urlTemplate;
   if (typeof urlTemplate !== 'string' || urlTemplate.trim() === '') {
     throw new TypeError(`${location}.urlTemplate must be a non-empty string`);
@@ -541,7 +613,7 @@ function normalizeCssApi(fields: Fields, location: string): FontCssApiSource {
   } else {
     composeCssApiUrl(urlTemplate, '', query);
   }
-  const substitutes = normalizeSubstitutes(fields.substitutes, `${location}.substitutes`);
+  const substitutions = normalizeSubstitutions(fields.substitutions, `${location}.substitutions`);
   const credentials = optionalCredentials(fields.credentials, `${location}.credentials`);
   return Object.freeze({
     protocol: FONT_SOURCE_PROTOCOL,
@@ -549,27 +621,29 @@ function normalizeCssApi(fields: Fields, location: string): FontCssApiSource {
     urlTemplate,
     ...(query === undefined ? {} : { query }),
     ...(families === undefined ? {} : { families }),
-    ...(substitutes === undefined ? {} : { substitutes }),
+    ...(substitutions === undefined ? {} : { substitutions }),
     ...(credentials === undefined ? {} : { credentials }),
+    ...(sharedSubsetMetricFamilies === undefined ? {} : { sharedSubsetMetricFamilies }),
+    ...(parallelFaceDownloads === undefined ? {} : { parallelFaceDownloads }),
   });
 }
 
 function normalizeFontFaceCss(fields: Fields, location: string, base: string | undefined): FontCssSource {
-  requireKnownKeys(fields, ['protocol', 'kind', 'url', 'substitutes', 'credentials'], location);
+  requireKnownKeys(fields, ['protocol', 'kind', 'url', 'substitutions', 'credentials'], location);
   const url = requireUrl(fields.url, `${location}.url`, STYLESHEET_PROTOCOLS, base);
-  const substitutes = normalizeSubstitutes(fields.substitutes, `${location}.substitutes`);
+  const substitutions = normalizeSubstitutions(fields.substitutions, `${location}.substitutions`);
   const credentials = optionalCredentials(fields.credentials, `${location}.credentials`);
   return Object.freeze({
     protocol: FONT_SOURCE_PROTOCOL,
     kind: 'font-css',
     url,
-    ...(substitutes === undefined ? {} : { substitutes }),
+    ...(substitutions === undefined ? {} : { substitutions }),
     ...(credentials === undefined ? {} : { credentials }),
   });
 }
 
 function normalizeFontFiles(fields: Fields, location: string, base: string | undefined): FontFilesSource {
-  requireKnownKeys(fields, ['protocol', 'kind', 'faces', 'substitutes', 'credentials'], location);
+  requireKnownKeys(fields, ['protocol', 'kind', 'faces', 'substitutions', 'credentials'], location);
   const faces = fields.faces;
   if (!Array.isArray(faces) || faces.length === 0) {
     throw new TypeError(`${location}.faces must be a non-empty array`);
@@ -579,13 +653,13 @@ function normalizeFontFiles(fields: Fields, location: string, base: string | und
   }
   const declarations = Object.freeze(faces.map((face: unknown, index) =>
     validateFontFaceDeclaration(face, `${location}.faces[${index}]`, base)));
-  const substitutes = normalizeSubstitutes(fields.substitutes, `${location}.substitutes`);
+  const substitutions = normalizeSubstitutions(fields.substitutions, `${location}.substitutions`);
   const credentials = optionalCredentials(fields.credentials, `${location}.credentials`);
   return Object.freeze({
     protocol: FONT_SOURCE_PROTOCOL,
     kind: 'font-files',
     faces: declarations,
-    ...(substitutes === undefined ? {} : { substitutes }),
+    ...(substitutions === undefined ? {} : { substitutions }),
     ...(credentials === undefined ? {} : { credentials }),
   });
 }
@@ -593,16 +667,16 @@ function normalizeFontFiles(fields: Fields, location: string, base: string | und
 const RESOLVER_ID = /^font-resolver:[1-9]\d*$/;
 
 function normalizeFontResolver(fields: Fields, location: string): FontResolverSource {
-  requireKnownKeys(fields, ['protocol', 'kind', 'id', 'substitutes'], location);
+  requireKnownKeys(fields, ['protocol', 'kind', 'id', 'substitutions'], location);
   if (typeof fields.id !== 'string' || !RESOLVER_ID.test(fields.id)) {
     throw new TypeError(`${location}.id must be a font resolver id`);
   }
-  const substitutes = normalizeSubstitutes(fields.substitutes, `${location}.substitutes`);
+  const substitutions = normalizeSubstitutions(fields.substitutions, `${location}.substitutions`);
   return Object.freeze({
     protocol: FONT_SOURCE_PROTOCOL,
     kind: 'font-resolver',
     id: fields.id,
-    ...(substitutes === undefined ? {} : { substitutes }),
+    ...(substitutions === undefined ? {} : { substitutions }),
   });
 }
 
@@ -638,17 +712,17 @@ const factoryDescriptors = new WeakSet<object>();
  */
 const ISSUED = Symbol.for('@silurus/ooxml/font-source');
 
-function issued(source: FontSourceDescriptor, resolve: FontResolveFn | true = true): FontSource {
+function issued(source: FontSourceDescriptor, resolve: FontResolver | true = true): FontSource {
   const result = Object.freeze(Object.defineProperty({ ...source }, ISSUED, { value: resolve }));
   factoryDescriptors.add(result);
   return result as unknown as FontSource;
 }
 
 /** The issuance marker of a frozen factory result (of any library copy). */
-function issuance(value: object): FontResolveFn | true | undefined {
+function issuance(value: object): FontResolver | true | undefined {
   if (!Object.isFrozen(value)) return undefined;
   const marker = Object.getOwnPropertyDescriptor(value, ISSUED)?.value as unknown;
-  return marker === true || typeof marker === 'function' ? marker as FontResolveFn | true : undefined;
+  return marker === true || typeof marker === 'function' ? marker as FontResolver | true : undefined;
 }
 
 function factoryOptions(value: unknown, name: string, allowed: readonly string[]): Fields {
@@ -661,25 +735,40 @@ function factoryOptions(value: unknown, name: string, allowed: readonly string[]
  * (`{family}` is percent-encoded with `+` for spaces; `{query}` is inserted
  * verbatim from descriptor data, never from document content). */
 export function fontCssApi(options: FontCssApiOptions): FontSource {
-  const fields = factoryOptions(options, 'fontCssApi', ['urlTemplate', 'query', 'families', 'substitutes', 'credentials']);
+  const fields = factoryOptions(options, 'fontCssApi', ['urlTemplate', 'query', 'families', 'substitutions', 'credentials']);
   return issued(normalizeCssApi({ ...fields, protocol: FONT_SOURCE_PROTOCOL, kind: 'font-css-api' }, 'fontCssApi()'));
+}
+
+/** {@link fontCssApi} for a library preset that guarantees
+ * {@link FontCssApiSource.sharedSubsetMetricFamilies} (`googleFonts()`). Not public. */
+export function presetFontCssApi(
+  options: FontCssApiOptions,
+  preset: { readonly sharedSubsetMetricFamilies?: readonly string[]; readonly parallelFaceDownloads?: number },
+): FontSource {
+  const fields = factoryOptions(options, 'fontCssApi', ['urlTemplate', 'query', 'families', 'substitutions', 'credentials']);
+  return issued(normalizeCssApi({
+    ...fields,
+    ...(preset.sharedSubsetMetricFamilies ? { sharedSubsetMetricFamilies: preset.sharedSubsetMetricFamilies } : {}),
+    ...(preset.parallelFaceDownloads !== undefined ? { parallelFaceDownloads: preset.parallelFaceDownloads } : {}),
+    protocol: FONT_SOURCE_PROTOCOL, kind: 'font-css-api',
+  }, 'fontCssApi()'));
 }
 
 /** One static stylesheet (self-hosted or kit CSS) describing many families. */
 export function fontCss(options: FontCssOptions): FontSource {
-  const fields = factoryOptions(options, 'fontCss', ['url', 'substitutes', 'credentials']);
+  const fields = factoryOptions(options, 'fontCss', ['url', 'substitutions', 'credentials']);
   return issued(normalizeFontFaceCss({ ...fields, protocol: FONT_SOURCE_PROTOCOL, kind: 'font-css' },
     'fontCss()', realmBaseUrl()));
 }
 
 /** Faces declared up front by the application (URLs or owned bytes). */
 export function fontFiles(options: FontFilesOptions): FontSource {
-  const fields = factoryOptions(options, 'fontFiles', ['faces', 'substitutes', 'credentials']);
+  const fields = factoryOptions(options, 'fontFiles', ['faces', 'substitutions', 'credentials']);
   return issued(normalizeFontFiles({ ...fields, protocol: FONT_SOURCE_PROTOCOL, kind: 'font-files' },
     'fontFiles()', realmBaseUrl()));
 }
 
-const resolverIds = new WeakMap<FontResolveFn, string>();
+const resolverIds = new WeakMap<FontResolver, string>();
 // One id sequence per realm, shared by every copy of the library, so two
 // copies never give different functions the same id (ids key shared caches).
 const resolverIdSequence = ((globalThis as Record<symbol, unknown>)[Symbol.for('@silurus/ooxml/font-resolver-ids')] ??= { next: 1 }) as { next: number };
@@ -698,9 +787,9 @@ const resolverIdSequence = ((globalThis as Record<symbol, unknown>)[Symbol.for('
  * shared across documents of this realm); the application must not modify
  * them. In worker mode the worker receives a copy; nothing is detached.
  */
-export function fontResolver(resolve: FontResolveFn, options: FontResolverOptions = {}): FontSource {
+export function fontResolver(resolve: FontResolver, options: FontResolverOptions = {}): FontSource {
   if (typeof resolve !== 'function') throw new TypeError('fontResolver() requires a function');
-  const fields = factoryOptions(options, 'fontResolver', ['substitutes']);
+  const fields = factoryOptions(options, 'fontResolver', ['substitutions']);
   let id = resolverIds.get(resolve);
   if (id === undefined) {
     id = `font-resolver:${resolverIdSequence.next++}`;
@@ -713,7 +802,7 @@ export function fontResolver(resolve: FontResolveFn, options: FontResolverOption
 
 /** The application function behind a {@link fontResolver} result of this
  * realm, or undefined (a descriptor from another realm or not from the factory). */
-export function fontResolverFunction(source: FontResolverSource): FontResolveFn | undefined {
+export function fontResolverFunction(source: FontResolverSource): FontResolver | undefined {
   const marker = issuance(source);
   return typeof marker === 'function' ? marker : undefined;
 }
@@ -721,8 +810,10 @@ export function fontResolverFunction(source: FontResolverSource): FontResolveFn 
 /**
  * The descriptors of a public `fonts` option value. Only factory results are
  * accepted (the factories are the only supported construction): this
- * instance's as they are, another library copy's after the same validation
- * as a worker applies; anything else throws a `TypeError`.
+ * instance's as they are (the documented guarantee), another library copy's
+ * after the same validation as a worker applies (best effort, not a
+ * guarantee: a copy with another descriptor shape fails that validation);
+ * anything else throws a `TypeError`.
  */
 export function fontSourceDescriptors(value: unknown): readonly FontSourceDescriptor[] {
   if (!Array.isArray(value)) throw new TypeError('fonts must be an array of font sources');
@@ -810,7 +901,7 @@ export function fontCssApiRequests(
 ): readonly FontCssApiRequest[] {
   const candidates: { family: string; substitution?: FontSubstitution }[] = [
     { family: demandedFamily.trim() },
-    ...substitutionsFor(source.substitutes, demandedFamily, scripts).map((substitution) => ({
+    ...substitutionsFor(source.substitutions, demandedFamily, scripts).map((substitution) => ({
       family: substitution.use, substitution,
     })),
   ];

@@ -4,7 +4,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
-import { mkdtemp, mkdir, realpath, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, readdir, realpath, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
@@ -67,6 +67,9 @@ try {
     await writeFile(join(scratch, 'public', `unsupported.${family}`), new Uint8Array(fixtures.buildCfbFixture(['Root Entry', stream])));
   }
   await writeFile(join(scratch, 'public', 'deferred.ppt'), fixtures.buildPptFixture());
+  // A text deck for the font-source path: the main-mode parse worker imports
+  // the font-demand collector sidecar by URL from the consumer's build.
+  await writeFile(join(scratch, 'public', 'sample.pptx'), readFileSync(join(root, 'packages/pptx/public/demo/sample-1.pptx')));
   await writeFile(join(scratch, 'public', 'sample.odt'), fixtures.buildOdtFixture({ body: '<text:p>Hello ODT</text:p>' }));
   // The ODT reader renders every text feature; it refuses encrypted input.
   await writeFile(join(scratch, 'public', 'unsupported.odt'), fixtures.buildOdtFixture({
@@ -119,7 +122,7 @@ console.log('Packed Node imports, all three legacy readers and the ODT reader pa
   await writeFile(join(scratch, 'main.js'), `
 import { DocxDocument, DocxViewer, OoxmlError } from '@silurus/ooxml/docx';
 import { XlsxWorkbook, XlsxViewer } from '@silurus/ooxml/xlsx';
-import { PptxPresentation, PptxViewer } from '@silurus/ooxml/pptx';
+import { PptxPresentation, PptxViewer, fontResolver } from '@silurus/ooxml/pptx';
 import { legacyDoc, createLegacyDoc } from '@silurus/ooxml-legacy-office/doc';
 import { legacyXls, createLegacyXls } from '@silurus/ooxml-legacy-office/xls';
 import { legacyPpt, createLegacyPpt } from '@silurus/ooxml-legacy-office/ppt';
@@ -164,19 +167,45 @@ try {
       finally { viewer.destroy(); element.remove(); }
     }
   }
+  // Font sources make the parse worker import the font-demand collector
+  // sidecar; a sidecar the consumer build did not emit fails the load.
+  for (const [file, sourceOptions] of [['/sample.pptx', {}], ['/sample.ppt', { legacyPpt }]]) {
+    const deck = await PptxPresentation.load(await (await fetch(file)).arrayBuffer(),
+      { mode: 'main', fonts: [fontResolver(() => [])], ...sourceOptions });
+    deck.destroy();
+  }
   window.packedResult = 'passed';
 } catch (error) { window.packedResult = String(error?.stack || error); }
 `);
   await build({ configFile: false, root: scratch, base: './', logLevel: 'warn', build: { target: 'esnext' } });
+  // The consumer build must emit the font-demand collector sidecar: a load
+  // without it still succeeds (every subset is demanded), so its absence is
+  // checked here directly.
+  const sidecars = (await readdir(join(scratch, 'dist', 'assets'))).filter(name => /^pptx-font-demand.*\.mjs$/.test(name));
+  assert.equal(sidecars.length, 1, `consumer build emitted ${sidecars.length} font-demand sidecars`);
   server = await preview({ configFile: false, root: scratch, preview: { host: '127.0.0.1', port: 0, open: false } });
   browser = await chromium.launch({ channel: 'chrome', headless: true });
   const page = await browser.newPage();
+  const sidecarResponses = [];
+  const isSidecar = (request) => /\/pptx-font-demand[^/]*\.mjs$/.test(new URL(request.url()).pathname);
+  page.context().on('requestfinished', async (request) => {
+    if (isSidecar(request)) sidecarResponses.push((await request.response())?.status());
+  });
+  page.context().on('requestfailed', (request) => { if (isSidecar(request)) sidecarResponses.push('failed'); });
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));
   await page.goto(server.resolvedUrls.local[0]);
   await page.waitForFunction(() => window.packedResult !== undefined, undefined, { timeout: 90_000 });
   assert.equal(await page.evaluate(() => window.packedResult), 'passed');
   assert.deepEqual(errors, []);
+  // Both font-source loads' parse workers (PPTX and the legacy PPT source)
+  // fetched the sidecar successfully, before any page-side import.
+  const workerResponses = [...sidecarResponses];
+  assert.ok(workerResponses.length >= 2 && workerResponses.every(status => status === 200), `sidecar responses ${JSON.stringify(workerResponses)}`);
+  // The emitted sidecar is served and exports the collector.
+  assert.equal(await page.evaluate(async (file) => typeof (await import(new URL('assets/' + file, location.href).href)).collectSlideFontDemand,
+    sidecars[0]), 'function');
+
   console.log('Packed Vite viewers/loaders: DOC/XLS/PPT/ODT main + worker passed');
 } finally {
   await browser?.close();

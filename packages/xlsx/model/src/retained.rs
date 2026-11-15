@@ -646,6 +646,7 @@ impl RetainedBytes for ShapeTextRun {
                 font_face,
                 font_face_ea,
                 font_face_cs,
+                font_face_sym,
             } => 0u64
                 .saturating_add(text.heap_bytes())
                 .saturating_add(bold.heap_bytes())
@@ -655,7 +656,8 @@ impl RetainedBytes for ShapeTextRun {
                 .saturating_add(color.heap_bytes())
                 .saturating_add(font_face.heap_bytes())
                 .saturating_add(font_face_ea.heap_bytes())
-                .saturating_add(font_face_cs.heap_bytes()),
+                .saturating_add(font_face_cs.heap_bytes())
+                .saturating_add(font_face_sym.heap_bytes()),
             Self::Break => 0,
             Self::Math {
                 nodes,

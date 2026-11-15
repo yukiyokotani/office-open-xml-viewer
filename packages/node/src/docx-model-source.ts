@@ -19,6 +19,7 @@ import { parseResourceLimitError, parseTypedParserError } from '@silurus/ooxml-c
 import { usingOwnedSession } from '@silurus/ooxml-core/internal/owned-session';
 import type { DocxDocumentModel } from '@silurus/ooxml-docx';
 import type { OoxmlNodeSessionOptions } from './session-options.ts';
+import { normalizeCurrentDate } from './input-normalization.ts';
 import { resolveNodeSessionInput } from './model-source.ts';
 import {
   DocxDocumentSessionImpl,
@@ -125,12 +126,6 @@ export async function materializeDocxSource(
       }
     },
   );
-}
-
-function normalizeCurrentDate(value: Date | number | undefined): number {
-  const current = value instanceof Date ? value.getTime() : (value ?? Date.now());
-  if (!Number.isFinite(current)) throw new RangeError('currentDate must resolve to finite epoch milliseconds');
-  return current;
 }
 
 /** Selected-source DOCX acquisition, loaded only after source-option dispatch. */

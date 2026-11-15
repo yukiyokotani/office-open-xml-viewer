@@ -47,7 +47,9 @@ export function toCodePoints(s: string): string[] {
  *
  * `measure(str)` returns the advance width of `str` in the BASE font at the
  * current scale — the same measurer the base-text draw uses — so the phonetic
- * band lines up with the glyphs it annotates. `baseLeftX` is the sheet-x where
+ * band lines up with the glyphs it annotates; `start` is the code-point
+ * offset of `str` in the base text, for a base painted in several fonts.
+ * `baseLeftX` is the sheet-x where
  * the base text's first glyph starts.
  *
  * Runs whose `sb >= eb` or that fall outside the base length are skipped
@@ -58,7 +60,7 @@ export function placePhoneticRuns(
   baseText: string,
   baseLeftX: number,
   alignment: Exclude<PhoneticAlignment, 'noControl'>,
-  measure: (s: string) => number,
+  measure: (s: string, start: number) => number,
 ): PlacedPhonetic[] {
   const cps = toCodePoints(baseText);
   const n = cps.length;
@@ -69,8 +71,8 @@ export function placePhoneticRuns(
     const eb = run.eb;
     if (!(sb < eb) || sb >= n) continue;
     const clampedEb = Math.min(eb, n);
-    const spanStart = baseLeftX + measure(cps.slice(0, sb).join(''));
-    const spanWidth = measure(cps.slice(sb, clampedEb).join(''));
+    const spanStart = baseLeftX + measure(cps.slice(0, sb).join(''), 0);
+    const spanWidth = measure(cps.slice(sb, clampedEb).join(''), sb);
     const spread: PlacedPhonetic['spread'] =
       alignment === 'center' ? 'center'
       : alignment === 'distributed' ? 'distribute'

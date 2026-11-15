@@ -38,6 +38,7 @@ import { InProcessPullTransport } from '@silurus/ooxml-core/internal/in-process-
 import { BoundedRawPartCache } from '@silurus/ooxml-core/internal/bounded-raw-part-cache';
 import { throwIfAborted } from '@silurus/ooxml-core/internal/abort';
 import type { OoxmlNodeSessionOptions } from './session-options.ts';
+import { toUint8 } from './input-normalization.ts';
 import { createLazyWasmModule, resolveWasm } from './wasm-loader.ts';
 import { usingOwnedSession } from '@silurus/ooxml-core/internal/owned-session';
 
@@ -565,7 +566,4 @@ function decodeUsage(bytes: Uint8Array): OoxmlResourceUsageSnapshot | undefined 
   }
 }
 
-function toUint8(buffer: ArrayBuffer | Uint8Array): Uint8Array {
-  return buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer as ArrayBuffer);
-}
 declare const __OOXML_MODEL_SOURCES__: boolean;

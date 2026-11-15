@@ -1,9 +1,10 @@
 /**
- * Main-thread entry of the `fontResolver` worker bridge for one document
- * (`resolver-bridge.ts`). It recognises bridge messages synchronously and
- * loads the responder only on the document's first resolver request, so a
- * document without a `fontResolver` source, or one that paints on main, loads
- * no bridge code beyond this class. Messages are handled in arrival order
+ * Main-thread host of the `fontResolver` worker bridge for one document
+ * (`resolver-bridge.ts`). It is loaded through `import()`, only for a
+ * worker-mode document with a `fontResolver` source, by the gate
+ * (`resolver-bridge-gate.ts`), which hands it every bridge message once it
+ * exists; the worker holds its messages until then. The host starts loading
+ * the responder when it is constructed. Messages are handled in arrival order
  * (a cancellation never overtakes its request). Each request's deadline
  * starts when it arrives here, so the time the responder takes to load counts
  * against it, as main mode's ceiling would; a request that expires before the

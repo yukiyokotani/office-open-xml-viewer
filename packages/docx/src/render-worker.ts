@@ -462,15 +462,15 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest | WorkerSvgDecod
           mathDrawables: preparedMath?.drawables,
         };
         // Served faces without readable tables (served-face-lines.ts): the
-        // page measures them; this realm keeps their private families.
+        // page measures them while this realm registers their private
+        // families.
         const servedRequests = loadedSources ? servedFaceLineRequests(loadedSources.loaded) : [];
         const servedMeasurements = servedRequests.length > 0
-          ? await new Promise<ServedFaceLineMeasurement[]>(resolve => {
+          ? new Promise<ServedFaceLineMeasurement[]>(resolve => {
               servedFaceMeasurements.set(id, resolve);
               post({ type: 'measureServedFaceLines', forId: id, requests: servedRequests });
             })
           : [];
-        if (requestedGeneration !== parseGeneration) throw new Error('render-worker parse was superseded');
         const servedFaceLines = await prepareServedFaceLines(
           loadedSources?.loaded, activeFontSet(), [], servedMeasurements, servedFaceProbe.signal,
         );

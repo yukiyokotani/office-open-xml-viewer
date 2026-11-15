@@ -11,9 +11,9 @@ import type { Presentation, Slide } from './types';
 // scalar the renderer measures or paints. A scalar outside the demand belongs
 // to a unicode-range subset that never loads, so its glyph would silently
 // fall back to a host font. Exercised over the public demo deck and targeted
-// synthetic slides; every paint path the collector cannot prove declines to
-// 'all' (charts, pictures, metafiles, groups, autoNum and picture bullets,
-// vertical text, WordArt, RTL, non-slidenum fields, equations).
+// synthetic slides (charts and raster pictures are exercised by the demo
+// deck); every paint path the collector cannot prove declines to 'all'
+// (metafiles, region maps, equations).
 
 const TARGETED: Record<string, Uint8Array> = {
   'caps and small caps': deck(textBox(para(run('straße αβγ', ' cap="all"') + run('mixed Case', ' cap="small"')))),
@@ -30,6 +30,22 @@ const TARGETED: Record<string, Uint8Array> = {
     + `<a:tc><a:txBody><a:bodyPr/><a:lstStyle/>${para(run('Cell ß'))}</a:txBody><a:tcPr/></a:tc>`
     + `<a:tc><a:txBody><a:bodyPr/><a:lstStyle/>${para(run('42%'))}</a:txBody><a:tcPr/></a:tc>`
     + '</a:tr></a:tbl></a:graphicData></a:graphic></p:graphicFrame>'),
+  'auto-number markers': deck(textBox(
+    para(run('First'), '<a:pPr marL="342900" indent="-342900"><a:buFont typeface="+mj-lt"/><a:buAutoNum type="romanUcPeriod" startAt="3"/></a:pPr>')
+    + para(run('Second'), '<a:pPr marL="342900" indent="-342900"><a:buFont typeface="+mj-lt"/><a:buAutoNum type="romanUcPeriod" startAt="3"/></a:pPr>')
+    + para(run('Third'), '<a:pPr marL="342900" indent="-342900"><a:buAutoNum type="arabicDbPeriod"/></a:pPr>')
+    + para(run('Fourth'), '<a:pPr marL="342900" indent="-342900"><a:buAutoNum type="alphaLcParenBoth" startAt="25"/></a:pPr>')
+    + para(run('Fifth'), '<a:pPr marL="342900" indent="-342900"><a:buAutoNum type="alphaLcParenBoth" startAt="25"/></a:pPr>')
+    + para(run('Sixth'), '<a:pPr marL="342900" indent="-342900"><a:buAutoNum type="alphaLcParenBoth" startAt="25"/></a:pPr>'))),
+  'rotated vertical text': deck(textBox(para(run('Rotated text, ninety degrees')), '<a:bodyPr vert="vert270" wrap="square"/>')),
+  'east asian vertical text': deck(textBox(para(run('縦書き、「括弧」（丸）。ABC 12', ' altLang="ja-JP"')), '<a:bodyPr vert="eaVert" wrap="square"/>')),
+  'stacked vertical text': deck(textBox(para(run('縦書き、「括弧」（丸）。AB 12', ' altLang="ja-JP"')), '<a:bodyPr vert="wordArtVert" wrap="square"/>')),
+  'stacked right-to-left columns': deck(textBox(para(run('右から、「左」へ。')) + para(run('二列目')), '<a:bodyPr vert="wordArtVertRtl" wrap="square"/>')),
+  'warped text': deck(textBox(para(run('Arched WordArt, ß &amp; 漢字')), '<a:bodyPr wrap="none"><a:prstTxWarp prst="textArchUp"><a:avLst/></a:prstTxWarp></a:bodyPr>')),
+  'right-to-left paragraphs': deck(textBox(para(run('مرحبا (عالم) [1] «اقتباس»'), '<a:pPr rtl="1" algn="r"/>')
+    + para(run('(latin) &lt;tail&gt; שלום'), '<a:pPr rtl="1"/>'))),
+  'date field': deck(textBox(para('<a:fld id="{00000000-0000-0000-0000-000000000002}" type="datetime1">'
+    + '<a:rPr lang="en-US" sz="2400"/><a:t>11/14/2026</a:t></a:fld>' + run(' today')))),
   'east asian and latin mix': deck(textBox(para(run('漢字かなカナ ABC 123', ' altLang="ja-JP"')))),
   // §21.1.2.4.3 buFont / §21.1.2.3.7 latin / §21.1.2.3.10 sym in symbol-encoded faces.
   'symbol bullet and symbol faces': deck(textBox(
@@ -89,7 +105,35 @@ function parse(bytes: Uint8Array): Presentation {
   }
 }
 
+/** The slide without its image paint (pictures, media, picture fills and
+ * markers). Node has no image decoder, and an authored blip effect chain
+ * fails strictly on the rejected fetch; images paint no served-face text, so
+ * the texts painted are the same. */
+function withoutImages(slide: Slide): Slide {
+  const strip = (value: unknown): unknown => {
+    if (Array.isArray(value)) {
+      return value.filter((item) => !(item && typeof item === 'object'
+        && ((item as { type?: unknown }).type === 'picture' || (item as { type?: unknown }).type === 'media'))).map(strip);
+    }
+    if (value === null || typeof value !== 'object') return value;
+    const record = value as Record<string, unknown>;
+    if (record.type === 'blip') return { type: 'none' };
+    if (typeof record.imagePath === 'string') return { fillType: 'none' };
+    return Object.fromEntries(Object.entries(record).map(([key, child]) => [key, strip(child)]));
+  };
+  return strip(slide) as Slide;
+}
+
 async function paintedScalars(pres: Presentation, slide: Slide): Promise<Set<number>> {
+  try {
+    return await paintedScalarsOnce(pres, slide);
+  } catch (error) {
+    if ((error as Error)?.message !== 'Image effect preparation or evaluation failed') throw error;
+    return paintedScalarsOnce(pres, withoutImages(slide));
+  }
+}
+
+async function paintedScalarsOnce(pres: Presentation, slide: Slide): Promise<Set<number>> {
   const { canvas, texts } = recordingCanvas();
   await renderSlideWithEmbeddedFonts(canvas, slide, pres.slideWidth, pres.slideHeight, {
     width: 960, dpr: 1,
@@ -129,13 +173,43 @@ describe('PPTX font demand covers every measured or painted scalar', () => {
     }
   });
 
+  // Opt-in: OOXML_FONT_DEMAND_CORPUS=<dir> also checks every .pptx in it
+  // (the private corpus, which is not committed).
+  it.skipIf(!process.env.OOXML_FONT_DEMAND_CORPUS)('opt-in corpus', async () => {
+    const dir = process.env.OOXML_FONT_DEMAND_CORPUS!;
+    const outcomes: string[] = [];
+    const [shard, shards] = (process.env.OOXML_FONT_DEMAND_SHARD ?? '0/1').split('/').map(Number) as [number, number];
+    const names = readdirSync(dir).filter((file) => file.endsWith('.pptx')).sort().filter((_, index) => index % shards === shard);
+    for (const name of names) {
+      const file = `${dir}/${name}`;
+      const started = Date.now();
+      process.stdout.write(`corpus file ${name}\n`);
+      try {
+        outcomes.push(...await check(file, new Uint8Array(readFileSync(file))));
+      } catch (error) {
+        if ((error as Error)?.name === 'AssertionError') throw new Error(`${name}: ${(error as Error).message}`);
+        outcomes.push('unreadable');
+      }
+      process.stdout.write(`corpus done ${name} ${Date.now() - started} ms\n`);
+    }
+    process.stdout.write(`.pptx corpus outcomes ${JSON.stringify(outcomes.reduce<Record<string, number>>((counts, outcome) => { counts[outcome] = (counts[outcome] ?? 0) + 1; return counts; }, {}))}\n`);
+  }, 21_600_000);
+
   it('public demo deck', async () => {
     const demo = new URL('../public/demo/', import.meta.url);
     const outcomes: Array<'all' | 'finite'> = [];
+    const finiteKinds = new Set<string>();
     for (const name of readdirSync(demo).filter((file) => file.endsWith('.pptx'))) {
-      outcomes.push(...await check(name, new Uint8Array(readFileSync(new URL(name, demo)))));
+      const bytes = new Uint8Array(readFileSync(new URL(name, demo)));
+      const slideOutcomes = await check(name, bytes);
+      outcomes.push(...slideOutcomes);
+      parse(bytes).slides.forEach((slide, index) => {
+        if (slideOutcomes[index] === 'finite') for (const element of slide.elements) finiteKinds.add(element.type);
+      });
     }
-    // The invariant is vacuous for 'all' demand; record that some slides are finite.
+    // The invariant is vacuous for 'all' demand: the deck's chart and picture
+    // slides must be finite, so their painted chart labels are checked.
     expect(outcomes).toContain('finite');
+    expect([...finiteKinds]).toEqual(expect.arrayContaining(['chart', 'picture', 'table', 'shape']));
   }, 120_000);
 });

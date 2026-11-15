@@ -1466,6 +1466,7 @@ fn push_text_run(runs: &mut Vec<xlsx_model::ShapeTextRun>, text: &str, font: &xl
         font_face: font.name.clone(),
         font_face_ea: None,
         font_face_cs: None,
+        font_face_sym: None,
     });
 }
 

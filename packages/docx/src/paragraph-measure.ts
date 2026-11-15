@@ -25,15 +25,14 @@ import type { ParagraphLayoutSource, ParagraphShapeRun, ParagraphImageRun } from
 import type { WrapOracle } from './layout/float-wrap-oracle.js';
 import type { NumberingMarkerShapeInput, WritingMode } from './layout/types.js';
 import { wordEmptyMarkMinimumStartWidthPx } from './layout/compatibility.js';
+import { compatOf } from './layout/compat-profile.js';
 import {
-  wordTextMarkerKeepsBodyDescent,
   WORD_INLINE_OBJECT_GRID_LINE_ALLOCATION,
   WORD_PICTURE_BULLET_LINE_PARTICIPATION,
   wordJustifiedInterwordCompressionApplies,
   wordJustifiedLineFit,
   wordUnmarkedArabicKashidaChargesSourceSpace,
   wordInlineDrawingRunLeadingApplies,
-  wordPreservesPre15AnchorLine,
 } from './layout/line-compatibility.js';
 import { LayoutInvariantError } from './layout/diagnostics.js';
 import type { MeasurementTextContext } from './layout/measurement-capabilities.js';
@@ -64,17 +63,6 @@ export interface ParagraphMeasurementEnvironment extends LineLayoutEnvironment {
   /** The paragraph is acquired in a section-logical frame that paint rotates
    * into a vertical physical page. This is independent of glyph orientation. */
   readonly verticalPageFrame?: boolean;
-  /** `w:compatSetting` compatibilityMode (§17.15.3.4) of the document; absent when not authored. */
-  readonly compatibilityMode?: number;
-  /** §17.15.3.8 ulTrailSpace: hanging line-end spaces keep their underline. */
-  readonly ulTrailSpace?: boolean;
-  /** §17.15.3.5 doNotExpandShiftReturn: lines ended by a manual break stay
-   * unjustified. */
-  readonly doNotExpandShiftReturn?: boolean;
-  readonly doNotSuppressIndentation?: boolean;
-  readonly ww11IndentRules?: boolean;
-  readonly doNotUseIndentAsNumberingTabStop?: boolean;
-  readonly noTabHangInd?: boolean;
 }
 
 export interface TextMeasurer {
@@ -180,6 +168,7 @@ export function measureParagraph(
   },
 ): MeasuredParagraph {
   const grid = paragraphGrid(context);
+  const compat = compatOf(environment);
   const rightGridAdjustmentPt = paragraphGridRightAdjustmentPt(
     context,
     placement.availableWidthPt,
@@ -209,7 +198,7 @@ export function measureParagraph(
   // body marks and footnote/endnote separators),
   // including when the inherited East Asian font slot names a different face.
   const markUsesEastAsianGrid = environment.documentHasEastAsianText === true
-    || (environment.useFeLayout === true && context.lineGrid.active);
+    || (compat.useFeLayout && context.lineGrid.active);
   // WORD_PICTURE_BULLET_LINE_PARTICIPATION: a picture bullet stands on its
   // paragraph's first baseline and takes part in that line's box, except
   // under exact spacing, whose box and baseline it leaves unchanged (the
@@ -252,7 +241,7 @@ export function measureParagraph(
   // interval of WORD_SPECIFIED_TEXT_LINE_BOX; other classes keep their path.
   const markSpacing = context.lineSpacing;
   const textMarkerAscentPt = !continuation && firstLinePictureMarkerHeightPt === undefined
-    && environment.compatibilityMode === 15
+    && compat.specifiedTextLineBoxMode15
     && !context.lineGrid.active && !context.hasRuby
     && !(markSpacing?.rule === 'exact' && (markSpacing.value < 12 || markSpacing.value > 30))
     ? environment.markOnlyTextMarkerAscentPt : undefined;
@@ -276,7 +265,7 @@ export function measureParagraph(
       environment.resolvedLocalFonts,
       environment.layoutServices?.text,
       environment.paragraphMarkShapeInput,
-      environment.useFeLayout === true,
+      compat.useFeLayout,
       firstLinePictureMarkerHeightPt ?? textMarkerAscentPt ?? 0,
     );
     const markAdvancePt = markMetrics.advancePx;
@@ -396,7 +385,7 @@ export function measureParagraph(
     // Caller-built public objects without private acquisition facts retain
     // the paragraph-mark fallback. Charts keep their established allocation.
     const useRunFont = environment.inlineObjectRunLeadingAdmitted === true
-      && wordInlineDrawingRunLeadingApplies(environment.compatibilityMode, paragraph)
+      && wordInlineDrawingRunLeadingApplies(compat, paragraph)
       && environment.pageWritingMode === 'horizontal-tb'
       && environment.verticalCJK !== true && environment.verticalPageFrame !== true
       && !context.lineGrid.active && !context.characterGrid.active && !context.baseRtl;
@@ -427,7 +416,7 @@ export function measureParagraph(
   if ((context.lineSpacing == null
     || (context.lineSpacing.rule === 'auto' && context.lineSpacing.value === 1))
     && environment.inlineObjectRunLeadingAdmitted === true
-    && environment.compatibilityMode === 15 && !paragraph.numbering && !paragraph.framePr
+    && compat.inlinePictureAutoLeading && !paragraph.numbering && !paragraph.framePr
     && environment.pageWritingMode === 'horizontal-tb'
     && environment.verticalCJK !== true && environment.verticalPageFrame !== true
     && !context.lineGrid.active && !context.characterGrid.active && !context.baseRtl
@@ -453,7 +442,7 @@ export function measureParagraph(
   // Resolve the complete physical unions before querying floats: a per-fragment
   // reserve cannot determine either a probe band or the next physical origin.
   const specifiedParagraph = specifiedTextParagraphIsHomogeneous(paragraph,
-    context.lineGrid.active || environment.compatibilityMode !== 15);
+    context.lineGrid.active || !compat.specifiedTextLineBoxMode15);
   const allocateLines = (lines: readonly LayoutLine[]) => {
     // `word-ruby-paragraph-uniform-line-advance`
     let uniformRubyAdvancePt = context.hasRuby
@@ -508,8 +497,8 @@ export function measureParagraph(
       // under atLeast is still bounded to the earlier mode-15 controls.
       // Correct body allocation here; note reserves must retain their measured
       // separator/line boxes even when excess body height changes pagination.
-      const windowsMarkerUnion = environment.compatibilityMode === 15;
-      const markerAscentOnly = wordTextMarkerKeepsBodyDescent(environment.compatibilityMode);
+      const windowsMarkerUnion = compat.textMarkerFirstLineUnionMode15;
+      const markerAscentOnly = compat.textMarkerKeepsBodyDescent;
       const onFirstPhysicalLine = lineIndex === 0 || (windowsMarkerUnion
         && lines[0]?.physicalLineIndex !== undefined
         && fragment.physicalLineIndex === lines[0]!.physicalLineIndex);
@@ -555,7 +544,7 @@ export function measureParagraph(
       const markerRaisesBox = line !== originalLine
         && markerNaturalPt > textSinglePt;
       const specified = specifiedParagraph
-        ? specifiedTextLineMetrics(line, context, paragraph, environment.compatibilityMode,
+        ? specifiedTextLineMetrics(line, context, paragraph, compat,
             environment.verticalPageFrame === true, environment.paragraphMarkShapeInput,
             markerRaisesBox ? markerNaturalPt : undefined)
         : null;
@@ -616,7 +605,7 @@ export function measureParagraph(
   const wrapContext: WrapLayoutCtx | undefined = placement.wrap
     ? {
         startPageY: cursorPt,
-        preservePre15AnchorLine: wordPreservesPre15AnchorLine(environment.compatibilityMode),
+        preservePre15AnchorLine: compat.preservePre15AnchorLine,
         resolveLineAdvances: (lines) => allocateLines(lines).allocations.map(line => line.advancePt),
         paraX: paragraphXPt,
         // Raw COLUMN band (placement) for the topAndBottom gate; paraX above is
@@ -654,7 +643,7 @@ export function measureParagraph(
       }
     : undefined;
   const lineFit = wordJustifiedLineFit(
-    paragraph.alignment, environment.compatibilityMode, context.baseRtl, context.wordWrap !== false,
+    paragraph.alignment, compat, context.baseRtl, context.wordWrap !== false,
     context.baseRtl ? context.physicalIndentLeftPt : context.physicalIndentRightPt + rightGridAdjustmentPt,
   );
   // WORD_UNMARKED_ARABIC_KASHIDA_SOURCE_SPACE: admission only. Retain the
@@ -663,7 +652,7 @@ export function measureParagraph(
   // compatibility shapes have no authoritative WML run-direction provenance;
   // an absent flag there cannot establish the observed unmarked-run class.
   const chargeArabicSourceSpace = !context.runDirectionUnauthored && wordUnmarkedArabicKashidaChargesSourceSpace(
-    paragraph, environment.compatibilityMode, context.baseRtl, context.wordWrap !== false,
+    paragraph, compat, context.baseRtl, context.wordWrap !== false,
     environment.verticalCJK !== true
       && (environment.pageWritingMode === undefined || environment.pageWritingMode === 'horizontal-tb'),
   );
@@ -691,7 +680,7 @@ export function measureParagraph(
     environment.verticalGlyphMeasurement,
     context.overflowPunct !== false,
     (wordJustifiedInterwordCompressionApplies(
-      paragraph.alignment, environment.compatibilityMode,
+      paragraph.alignment, compat,
     ) || producerJustifiedCompression(paragraph)) && environment.verticalCJK !== true
       // The added alignment capability is bounded to the existing LTR gap
       // representation. Strong RTL text and authored HL1 marks need physical
@@ -710,8 +699,8 @@ export function measureParagraph(
     {
       alignment: paragraph.alignment,
       runDirectionUnauthored: context.runDirectionUnauthored,
-      lineEndJustificationBeforeMode15: environment.compatibilityMode !== 15,
-      doNotExpandShiftReturn: environment.doNotExpandShiftReturn,
+      lineEndJustificationBeforeMode15: compat.lineEndJustificationBeforeMode15,
+      doNotExpandShiftReturn: compat.doNotExpandShiftReturn,
       endsAtHardBreak: context.endsAtHardBreak,
     },
     context.lineEdgeRules,

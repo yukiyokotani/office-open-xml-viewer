@@ -805,6 +805,7 @@ export {
   type ReferenceFontSource,
   type ReferenceFontStyle,
 } from './fonts/reference-font-metrics';
+export { normalizeReferenceFontFamilyName } from './fonts/reference-font-name';
 // Backward-compatible exact-local resource loader. Format packages should not
 // add family-specific requests; DOCX now derives its metrics from resolved
 // resources and no longer uses this API for a Meiryo-only path.
@@ -819,9 +820,11 @@ export {
 export {
   measureLocalFontNormalLine,
   measureFontFaceNormalLine,
+  measureFontFaceNormalLines,
   loadLocalFontCoverageProbe,
   localFontMetricCoversText,
   measureLocalFontSourceNormalLine,
+  type FontFaceNormalLineRequest,
   type LocalFontNormalLine,
 } from './fonts/local-line-metrics';
 export { loadNativeRouteSentinels } from './fonts/route-sentinels';

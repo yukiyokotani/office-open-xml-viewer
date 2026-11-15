@@ -1,6 +1,8 @@
 import { loadFontDemandCollector } from './font-demand-collector.js';
+import { fontDemandCollectorUrl } from './font-demand-collector-url.js';
+import { officeFaceWeight } from './powerpoint-line-metrics.js';
 import { resolveCjkFallback, type CjkLang } from '@silurus/ooxml-core';
-import type { DimOptions, PptxComment } from './types';
+import type { DimOptions, PptxComment, Slide } from './types';
 import {
   renderSlideWithEmbeddedFonts,
   dropImageBitmapCache,
@@ -66,7 +68,7 @@ import { ProgressiveLayoutLifecycle } from '@silurus/ooxml-core/internal/progres
 import { ProgressiveLayoutObserverNotifier } from '@silurus/ooxml-core/internal/progressive-layout-observers';
 import { pptxSlideOfficeFontRequests, type PptxFontDemandFacts } from './font-requests';
 import {
-  FontResolverBridgeHost,
+  FontResolverBridge,
   normalizeFontOptions,
   optionFontSources,
   type FontSourceDescriptor,
@@ -317,7 +319,7 @@ export class PptxPresentation {
   /** Worker mode: runs this deck's `fontResolver` functions for the worker's
    *  font-source session (core `resolver-bridge-host.ts`); disposed in
    *  {@link destroy}, which aborts every in-flight resolver call. */
-  private _fontResolverBridge: FontResolverBridgeHost | null = null;
+  private _fontResolverBridge: FontResolverBridge | null = null;
   /** Presence of the authored families demanded so far (main mode). */
   private _installedFamilies: import('./font-source-load.js').PptxInstalledFamilies | null = null;
   private readonly _officeFontLoads = new Map<FontFaceSet, Map<string, Promise<LoadedOfficeFontFallbacks>>>();
@@ -407,6 +409,9 @@ export class PptxPresentation {
     const cjkFallback = resolveCjkFallback(opts.cjkFallback);
     const resourceOptions = normalizeLoadResourceOptions(opts);
     const mode = opts.mode ?? 'main';
+    // Main mode loads the font-source module after the preflight: import it
+    // now, while the container resolves and the worker parses.
+    if (mode === 'main' && opts.fonts) void import('./font-source-load.js').catch(() => undefined);
     const metrics = new OoxmlResourceMetricsSession({
       enabled: true,
       format: 'pptx',
@@ -492,7 +497,7 @@ export class PptxPresentation {
       await pres._parse(
         buffer,
         resourceOptions.policy,
-        optionFontSources(opts.fonts),
+        pres._fonts,
         opts.workerTimeoutMs,
         (usage) => metrics.observeUsage(usage),
         rendererDescriptors,
@@ -547,11 +552,12 @@ export class PptxPresentation {
   }
 
   /** Worker mode: answer the render worker's `fontResolver` calls for the
-   *  document about to be parsed (core `resolver-bridge-host.ts`): resolved
-   *  through this realm's resolution cache and held until destroy. */
+   *  document about to be parsed (core `resolver-bridge-gate.ts`, which loads
+   *  the host only for a document with a resolver): resolved through this
+   *  realm's resolution cache and held until destroy. */
   private _attachFontResolverBridge(fonts: readonly FontSourceDescriptor[] | undefined): void {
     this._fontResolverBridge?.dispose();
-    this._fontResolverBridge = new FontResolverBridgeHost({
+    this._fontResolverBridge = new FontResolverBridge({
       post: (message, transfer) => (this._worker.postMessage as (value: unknown, transfer?: Transferable[]) => void)(message, transfer),
       sources: fonts,
     });
@@ -586,7 +592,7 @@ export class PptxPresentation {
       (id) =>
         this._mode === 'worker'
           ? ({ kind: 'parse', id, buffer, resourcePolicy, ...(fonts ? { fonts } : {}), cjkFallback: this._cjkFallback, renderers } satisfies RenderWorkerRequest)
-          : ({ kind: 'parse', id, buffer, resourcePolicy, cjkFallback: this._cjkFallback, ...(fonts && !renderers ? { collectFontDemand: true } : {}) } satisfies PptxWorkerRequest),
+          : ({ kind: 'parse', id, buffer, resourcePolicy, cjkFallback: this._cjkFallback, ...(fonts && !renderers ? { collectFontDemand: fontDemandCollectorUrl() } : {}) } satisfies PptxWorkerRequest),
       [buffer],
       { timeoutMs },
     );
@@ -645,10 +651,16 @@ export class PptxPresentation {
     // Preflight deliberately drains one transferred unit at a time without
     // decoding it in Window. The worker prepares compact facts from the same
     // unit and publishes them only when this consumer ACKs it.
+    // The opening slide is the exception: its unit is already here, so the
+    // window decodes it and the repository below starts with it. Its first
+    // render then needs no second pull (a parse and a transfer in the worker)
+    // after the fonts are ready.
+    let openingSlide: Slide | undefined;
     let finished: Extract<PptxWorkerResponse, { kind: 'presentationPreflightReady' }>;
     try {
       for (let slideIndex = 0; slideIndex < bootstrap.slideCount; slideIndex += 1) {
-        await this._slidePullClient.load(slideIndex, false, timeoutMs);
+        const slide = await this._slidePullClient.load(slideIndex, slideIndex === 0, timeoutMs);
+        if (slideIndex === 0) openingSlide = slide;
       }
       finished = await this._bridge.request(
         (id) => ({ kind: 'finishPresentationPreflight', id }) satisfies PptxWorkerRequest,
@@ -670,11 +682,20 @@ export class PptxPresentation {
       maxCachedSlides: HARD_MAX_PPTX_CACHED_SLIDES,
       maxCachedStructuralBytes: HARD_MAX_PPTX_CACHED_SLIDE_PROJECTION_BYTES,
       loadSlide: async (slideIndex) => {
+        if (slideIndex === 0 && openingSlide) {
+          const slide = openingSlide;
+          openingSlide = undefined;
+          return slide;
+        }
         const slide = await this._slidePullClient?.load(slideIndex, true, timeoutMs);
         if (!slide) throw new Error('PPTX slide pull client is unavailable');
         return slide;
       },
     });
+    // Admitted now, under the repository's own ceilings like any loaded slide
+    // (a slide over them is not retained and is pulled again when rendered),
+    // so the decoded slide is never held outside that bounded cache.
+    if (openingSlide) void this._slides.withSlide(0, () => undefined).catch(() => undefined);
   }
 
   private async _parseMainProgressively(
@@ -727,7 +748,7 @@ export class PptxPresentation {
         return slide;
       },
     });
-    const builder = new PresentationPreflightBuilder(bootstrap, { cjkFallback: this._cjkFallback, collectFontDemand: collectFontDemand ? await loadFontDemandCollector(true) : undefined });
+    const builder = new PresentationPreflightBuilder(bootstrap, { cjkFallback: this._cjkFallback, collectFontDemand: collectFontDemand ? await loadFontDemandCollector(true) : undefined, officeFaceWeight });
     const ensureFonts = async (): Promise<void> => {
       await embeddedFontLoad;
       if (!fonts) return;
@@ -1684,6 +1705,9 @@ export class PptxPresentation {
     // reachable. In worker mode the worker's copy ends with the worker.
     this._fonts = undefined;
     this._installedFamilies = null;
+    // A caller canvas may outlive the presentation: its bound oracle must not
+    // keep the released faces reachable (core symbol-face-cache.ts).
+    this._symbolFaces?.dispose();
     this._symbolFaces = createSymbolFaceOracleCache();
     for (const loads of this._officeFontLoads.values()) {
       for (const pending of distinctOfficeRouteLoads(loads)) {

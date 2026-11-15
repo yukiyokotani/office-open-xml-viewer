@@ -54,7 +54,7 @@ import { admitDocxNativeRouteLines, measureDocxNativeRouteLines } from './native
 import { buildBookmarkPageMap } from './bookmark-nav';
 import { declaredFontSubstitutions, docxOfficeFontFallbackRequests } from './font-plan.js';
 import type { DocxOfficeFontPresence } from './font-demand-plan.js';
-import { chartFontSubstitutions, FontResolverBridgeHost, normalizeFontOptions, optionFontSources, type FontSourceDescriptor } from '@silurus/ooxml-core/internal/font-sources';
+import { chartFontSubstitutions, FontResolverBridge, normalizeFontOptions, optionFontSources, type FontSourceDescriptor } from '@silurus/ooxml-core/internal/font-sources';
 import { loadEmbeddedFonts } from './embedded-fonts';
 import {
   attachDocumentLayoutRuntime,
@@ -494,7 +494,7 @@ export class DocxDocument {
   /** Worker mode: runs this document's `fontResolver` functions for the
    *  worker's font-source session (core `resolver-bridge-host.ts`); disposed
    *  in {@link destroy}, which aborts every in-flight resolver call. */
-  private _fontResolverBridge: FontResolverBridgeHost | null = null;
+  private _fontResolverBridge: FontResolverBridge | null = null;
   /** The unscoped substitutions this document's font sources loaded,
    *  painted by chart text (ChartModel.fontSubstitutions). */
   private _chartFontSubstitutions: Readonly<Record<string, string>> | undefined;
@@ -575,6 +575,9 @@ export class DocxDocument {
     const resourceOptions = normalizeLoadResourceOptions(opts);
     const defaultCurrentDateMs = Date.now();
     const mode = opts.mode ?? 'main';
+    // Main mode loads the font-source module once the document is parsed:
+    // import it now, while the container resolves and the worker parses.
+    if (mode === 'main' && opts.fonts) void import('./font-source-load.js').catch(() => undefined);
     const metrics = new OoxmlResourceMetricsSession({
       enabled: true,
       format: 'docx',
@@ -1107,11 +1110,12 @@ export class DocxDocument {
   }
 
   /** Worker mode: answer the render worker's `fontResolver` calls for the
-   *  document about to be parsed (core `resolver-bridge-host.ts`): resolved
-   *  through this realm's resolution cache and held until destroy. */
+   *  document about to be parsed (core `resolver-bridge-gate.ts`, which loads
+   *  the host only for a document with a resolver): resolved through this
+   *  realm's resolution cache and held until destroy. */
   private _attachFontResolverBridge(fonts: readonly FontSourceDescriptor[] | undefined): void {
     this._fontResolverBridge?.dispose();
-    this._fontResolverBridge = new FontResolverBridgeHost({
+    this._fontResolverBridge = new FontResolverBridge({
       post: (message, transfer) => (this._worker.postMessage as (value: unknown, transfer?: Transferable[]) => void)(message, transfer),
       sources: fonts,
     });

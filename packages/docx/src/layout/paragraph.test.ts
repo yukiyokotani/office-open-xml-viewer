@@ -1,3 +1,4 @@
+import { compatProfile } from '../test-support/compat-environment.test-support.js';
 import { paragraphAcquisitionInput } from '../parser-model.js';
 import { lineGapModel } from '../line-breaker/line-gaps.js';
 import { describe, expect, it } from 'vitest';
@@ -845,7 +846,7 @@ describe('paragraphLayoutFromMeasurement retained authorities', () => {
     const environment = {
       documentHasEastAsianText: options.documentHasEastAsianText ?? false, pageWritingMode: 'horizontal-tb' as const,
       pageIndex: 0, totalPages: 1, layoutServices,
-      compatibilityMode: options.compatibilityMode ?? 15,
+      compat: compatProfile({ compatibilityMode: options.compatibilityMode ?? 15 }),
       ...(options.admitRunLeading === false ? {} : { inlineObjectRunLeadingAdmitted: true as const }),
     };
     const acquired = paragraphAcquisitionInput(value, source);

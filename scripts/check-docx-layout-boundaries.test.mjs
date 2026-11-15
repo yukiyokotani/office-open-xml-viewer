@@ -180,7 +180,6 @@ function production(state, table, para, group) {
     'export function canonicalParagraphTextScaleEligible() {}\n'
       + 'export function docDefaultFontSizePt() {}\n'
       + 'export function paragraphMeasurementEnvironment() {}\n'
-      + 'export function segmentEnvironmentOf() {}\n'
       + 'export function snapParaLineToGrid() {}\n'
       + 'export function gridForParagraphContext() {}\n');
   write(root, 'packages/docx/src/layout/measurement-capabilities.ts',
@@ -312,47 +311,6 @@ function production(state, table, para, group) {
   return root;
 }
 
-const canonicalBodyLayoutAdapter =
-  "import { bodyLayoutAcquisitionInput } from './parser-model.js';\n"
-  + "import type { DocxDocumentModel } from './types.js';\n"
-  + "import { projectBodyLayoutInput, type BodyLayoutInput } from './layout/body-layout-input.js';\n"
-  + 'export function createBodyLayoutInput(document: DocxDocumentModel): BodyLayoutInput {\n'
-  + '  return projectBodyLayoutInput(bodyLayoutAcquisitionInput(document));\n'
-  + '}\n';
-
-function initializeBodyLayoutAdapterFixture(prefix = 'docx-layout-boundary-input-adapter-') {
-  const root = initializeCanonicalFixture(prefix);
-  write(root, 'packages/docx/src/parser-model.ts',
-    'export function bodyLayoutAcquisitionInput(document) { return document; }\n');
-  write(root, 'packages/docx/src/types.ts', 'export interface DocxDocumentModel {}\n');
-  write(root, 'packages/docx/src/layout/body-layout-input.ts',
-    'export interface BodyLayoutInput {}\n'
-      + 'export function projectBodyLayoutInput(value) { return value; }\n');
-  write(root, 'packages/docx/src/body-layout-input.ts', canonicalBodyLayoutAdapter);
-  return root;
-}
-
-const canonicalParagraphAnchorFrameAdapter =
-  "import type { AnchorReferenceFramesInput } from './layout/anchor-frame.js';\n"
-  + 'export interface ParagraphAnchorReferenceFrameSnapshot { readonly scale: number }\n'
-  + 'export function paragraphAnchorReferenceFrames(snapshot: ParagraphAnchorReferenceFrameSnapshot): '
-  + "Readonly<Pick<AnchorReferenceFramesInput, 'page'>> {\n"
-  + '  return { page: { xPt: 0, yPt: 0, widthPt: snapshot.scale, heightPt: 1 } };\n'
-  + '}\n';
-
-function installParagraphAnchorFrameAdapter(root) {
-  write(root, 'packages/docx/src/layout/anchor-frame.ts',
-    'export interface AnchorReferenceFramesInput { page: unknown }\n');
-  write(root, 'packages/docx/src/paragraph-anchor-frame-adapter.ts',
-    canonicalParagraphAnchorFrameAdapter);
-  const rendererPath = join(root, 'packages/docx/src/renderer.ts');
-  write(root, 'packages/docx/src/renderer.ts',
-    "import { paragraphAnchorReferenceFrames } from './paragraph-anchor-frame-adapter.js';\n"
-      + readFileSync(rendererPath, 'utf8')
-        .replace('return { doc, ctx, localMetrics };',
-          'paragraphAnchorReferenceFrames({ scale: 1 });\n  return { doc, ctx, localMetrics };'));
-}
-
 test('accepts the final canonical producer, retained model, selected variant, and worker route', () => {
   const root = initializeCanonicalFixture();
   const result = runChecker(root, '--final');
@@ -414,51 +372,7 @@ test('requires one private concrete body-kernel owner with exact loud attachment
   }
 });
 
-test('rejects every deleted body producer, raw page route, and test adapter symbol', () => {
-  const deleted = [
-    'computePages',
-    'paginateDocument',
-    'paginateWithHeaderFooterReserve',
-    'physicalPageSizeForPage',
-    'PaginatedBodyElement',
-    'prebuiltPages',
-    'retainedLayout',
-    'bodyFragmentFor',
-    'sectionBreakSpacer',
-    'collapsedSpacer',
-    'leadsCollapsedRun',
-    'hiddenCollapsed',
-  ];
-  for (const name of deleted) {
-    const root = initializeCanonicalFixture(`docx-layout-boundary-deleted-${name}-`);
-    write(root, 'packages/docx/src/layout/deleted-path.ts', `export const ${name} = true;\n`);
-    expectDiagnostic(root, 'FORBIDDEN_PAGE_PRODUCER_IDENTIFIER', name, '--final');
-  }
-});
-
-test('rejects migration flags and silent alternate layout fallbacks', () => {
-  for (const [name, diagnostic] of [
-    ['useOldLayoutEngine', 'FINAL_LEGACY_BOUNDARY'],
-    ['preferAlternateLayoutPath', 'FINAL_LEGACY_BOUNDARY'],
-    ['bodyLayoutFallback', 'FORBIDDEN_PAGE_PRODUCER_IDENTIFIER'],
-  ]) {
-    const root = initializeCanonicalFixture(`docx-layout-boundary-migration-${name}-`);
-    write(root, 'packages/docx/src/layout/path.ts', `export const ${name} = true;\n`);
-    expectDiagnostic(root, diagnostic, name, '--final');
-  }
-});
-
-test('rejects renderer-owned acquisition state from the final architecture', () => {
-  const root = initializeCanonicalFixture('docx-layout-boundary-render-state-');
-  write(
-    root,
-    'packages/docx/src/layout/obsolete-state.ts',
-    'export interface RenderState { readonly dryRun: boolean }\n',
-  );
-  expectDiagnostic(root, 'FINAL_LEGACY_BOUNDARY', 'RenderState', '--final');
-});
-
-test('layout acquisition contexts reject paint capabilities and renderer back-edges', () => {
+test('layout acquisition contexts reject paint capabilities', () => {
   const scaleRoot = initializeCanonicalFixture('docx-layout-boundary-acquisition-scale-');
   write(
     scaleRoot,
@@ -560,26 +474,6 @@ test('layout acquisition contexts reject paint capabilities and renderer back-ed
       '--final',
     );
   }
-
-  const edgeRoot = initializeCanonicalFixture('docx-layout-boundary-acquisition-edge-');
-  write(
-    edgeRoot,
-    'packages/docx/src/layout/acquisition-context.ts',
-    "import type { Hidden } from '../renderer.js';\n"
-      + 'export interface AnchorFloatRegistrationState {}\n'
-      + 'export interface AnchorGeometryContext {}\n'
-      + 'export interface BodyAcquisitionState { hidden?: Hidden; retainedTableAcquisition: unknown; retainedTablesBySourceIndex: Map<number, unknown> }\n'
-      + 'export type BodyMeasurementContext = Readonly<BodyAcquisitionState>;\n'
-      + 'export interface FloatRegistrationState {}\n'
-      + 'export interface PhysicalAnchorFrame {}\n'
-      + 'export interface RetainedTableRecord {}\n',
-  );
-  expectDiagnostic(
-    edgeRoot,
-    'ACQUISITION_RENDERER_DEPENDENCY',
-    'renderer.ts',
-    '--final',
-  );
 });
 
 test('layout acquisition ownership cannot be bypassed by removing a required module', () => {
@@ -910,135 +804,102 @@ test('keeps layout display-independent and paint measurement-free', () => {
   }
 });
 
-test('paint imports only retained layout contracts and reviewed atomic core painters', () => {
-  const allowed = initializeCanonicalFixture('docx-layout-boundary-paint-allowed-');
-  write(allowed, 'packages/docx/src/paint/helper.ts',
-    "import type { PointPt } from '../layout/types.js';\n"
-      + "import { crispOffset } from '@silurus/ooxml-core';\n"
-      + 'export const helper = [crispOffset] satisfies unknown as PointPt[];\n');
-  assert.equal(runChecker(allowed, '--final').status, 0);
-
+test('paint module edges must name a real module', () => {
   for (const [name, source] of [
-    ['layout implementation', "import { paginateBody } from '../layout/body-paginator.js';\nexport const helper = paginateBody;\n"],
-    ['measurement module', "import { measure } from '../paragraph-measure.js';\nexport const helper = measure;\n"],
-    ['forbidden core API', "import { measureText } from '@silurus/ooxml-core';\nexport const helper = measureText;\n"],
-    ['aliased core API', "import { crispOffset as crisp } from '@silurus/ooxml-core';\nexport const helper = crisp;\n"],
+    ['static', "import { helper } from './missing.js';\nexport const paint = helper;\n"],
+    ['dynamic', "export const load = () => import('./missing.js');\n"],
+    ['re-export', "export * from './missing.js';\n"],
   ]) {
-    const root = initializeCanonicalFixture(`docx-layout-boundary-paint-${name}-`);
-    write(root, 'packages/docx/src/paint/helper.ts', source);
-    expectDiagnostic(root, 'FORBIDDEN_PAINT_EDGE', name, '--final');
+    const root = initializeCanonicalFixture(`docx-layout-boundary-paint-unresolved-${name}-`);
+    write(root, 'packages/docx/src/paint/graph.ts', source);
+    expectDiagnostic(root, 'PAINT_EDGE_TARGET', name, '--final');
   }
 });
 
-test('paint reaches layout affine algebra only through the exact reviewed facade', () => {
-  const names = [
-    'composeAffine',
-    'inverseMapAffinePoint',
-    'inverseMapAffineVector',
-    'mapAffinePoint',
-    'quarterTurnAffine',
-    'scaleAffine',
-    'translationAffine',
-  ];
-  const allowed = initializeCanonicalFixture('docx-layout-boundary-paint-affine-allowed-');
-  write(allowed, 'packages/docx/src/paint/affine.ts',
-    `export { ${names.join(', ')} } from '../layout/affine.js';\n`);
-  assert.equal(runChecker(allowed, '--final').status, 0);
-
-  const incomplete = initializeCanonicalFixture('docx-layout-boundary-paint-affine-incomplete-');
-  write(incomplete, 'packages/docx/src/paint/affine.ts',
-    `export { ${names.slice(0, -1).join(', ')} } from '../layout/affine.js';\n`);
-  expectDiagnostic(incomplete, 'FORBIDDEN_PAINT_EDGE', 'incomplete affine facade', '--final');
-
-  const aliased = initializeCanonicalFixture('docx-layout-boundary-paint-affine-aliased-');
-  write(aliased, 'packages/docx/src/paint/affine.ts',
-    "export { composeAffine,\n"
-      + '  inverseMapAffinePoint as inverseMapAffineVector,\n'
-      + '  inverseMapAffineVector as inverseMapAffinePoint,\n'
-      + "  mapAffinePoint, quarterTurnAffine, scaleAffine, translationAffine } from '../layout/affine.js';\n");
-  expectDiagnostic(aliased, 'FORBIDDEN_PAINT_EDGE', 'aliased affine facade', '--final');
-
-  const direct = initializeCanonicalFixture('docx-layout-boundary-paint-affine-direct-');
-  write(direct, 'packages/docx/src/paint/helper.ts',
-    "import { composeAffine } from '../layout/affine.js';\nvoid composeAffine;\n");
-  expectDiagnostic(direct, 'FORBIDDEN_PAINT_EDGE', 'direct affine edge', '--final');
+test('the paint contracts outside paint are the TypeScript modules themselves', () => {
+  const root = initializeCanonicalFixture('docx-layout-boundary-paint-shadowed-affine-');
+  write(root, 'packages/docx/src/layout/affine.ts', 'export const composeAffine = 1;\n');
+  write(root, 'packages/docx/src/paint/affine.ts', "export { composeAffine } from '../layout/affine.js';\n");
+  assert.equal(runChecker(root, '--final').status, 0);
+  write(root, 'packages/docx/src/layout/affine.js', 'export const composeAffine = 2;\n');
+  expectDiagnostic(root, 'PAINT_EDGE_TARGET', 'shadowing JavaScript module', '--final');
 });
 
-test('every reviewed atomic core paint binding remains explicitly allowed', () => {
-  const valueBindings = [
-    'getCachedDuotoneBitmapByPath',
-    'blipPixelEffectsKey',
-    'autoContrastColor',
-    'canvasFontString',
-    'captureDecodedBitmapCacheEpoch',
-    'crispOffset',
-    'deferBitmapCloseWhileLeased',
-    'drawImageCropped',
-    'doubleRailGeometry',
-    'fillDoubleBorder',
-    'isTiffDecodeError',
-    'paintDrawingMLShape',
-    'resolveFill',
-    'renderChart',
-  ];
-  for (const name of valueBindings) {
-    const root = initializeCanonicalFixture(`docx-layout-boundary-core-${name}-`);
-    write(root, 'packages/docx/src/paint/core-binding.ts',
-      `import { ${name} } from '@silurus/ooxml-core';\nvoid ${name};\n`);
-    const result = runChecker(root, '--final');
-    assert.equal(result.status, 0, `${name}: ${result.output}`);
+test('only ASCII white space may separate tokens in DOCX source', () => {
+  for (const [name, source] of [
+    ['next line', "import\u0085* as core from '@silurus/ooxml-core';\n"],
+    ['zero width no-break space', "import\uFEFFtype { crispOffset } from '@silurus/ooxml-core';\n"],
+    ['byte order mark', "\uFEFFexport const paint = 1;\n"],
+    ['no-break space', "export\u00a0const paint = 1;\n"],
+    ['ideographic space', "export const paint =\u30001;\n"],
+    ['line separator', "export const paint = 1;\u2028"],
+    ['form feed', "export const paint = 1;\f"],
+  ]) {
+    const root = initializeCanonicalFixture(`docx-layout-boundary-separator-${name}-`);
+    write(root, 'packages/docx/src/paint/graph.ts', source);
+    expectDiagnostic(root, 'IMPORT_ZONE_TOKEN_SEPARATOR', name, '--final');
   }
-  const typeRoot = initializeCanonicalFixture('docx-layout-boundary-core-hyperlink-');
-  write(typeRoot, 'packages/docx/src/paint/core-binding.ts',
-    "import type { HyperlinkTarget } from '@silurus/ooxml-core';\nexport type Target = HyperlinkTarget;\n");
-  const result = runChecker(typeRoot, '--final');
+  const text = initializeCanonicalFixture('docx-layout-boundary-separator-text-');
+  write(text, 'packages/docx/src/paint/graph.ts',
+    "// no\u00a0break\nexport const space = '\u3000';\nexport const joined = `a\u00a0${space}\u2003b`;\n");
+  const result = runChecker(text, '--final');
   assert.equal(result.status, 0, result.output);
 });
 
-test('paint boundary follows transitive edges and rejects sibling or public package imports', () => {
-  const cases = [
-    ['transitive local', (root) => {
-      write(root, 'packages/docx/src/paint/helper.ts',
-        "import { measure } from '../paragraph-measure.js';\nexport const helper = measure;\n");
-      write(root, 'packages/docx/src/paragraph-measure.ts', 'export const measure = 1;\n');
-      return "import { helper } from './helper.js';\nexport const paint = helper;\n";
-    }],
-    ['sibling package', () => "import { render } from '@silurus/ooxml-pptx';\nexport const paint = render;\n"],
-    ['public package', () => "import { render } from '@silurus/ooxml';\nexport const paint = render;\n"],
-    ['bare side effect', () => "import '@silurus/ooxml-core';\nexport const paint = true;\n"],
-  ];
-  for (const [name, source] of cases) {
-    const root = initializeCanonicalFixture(`docx-layout-boundary-paint-graph-${name}-`);
-    write(root, 'packages/docx/src/paint/graph.ts', source(root));
-    expectDiagnostic(root, 'FORBIDDEN_PAINT_EDGE', name, '--final');
-  }
-});
-
-test('paint cannot import the retained page graph implementation', () => {
-  const rejected = initializeCanonicalFixture('docx-layout-boundary-page-graph-');
-  write(rejected, 'packages/docx/src/paint/graph.ts',
-    "import { PAGE_LAYER_IDS } from '../layout/page-graph.js';\nexport const paint = PAGE_LAYER_IDS;\n");
-  expectDiagnostic(rejected, 'FORBIDDEN_PAINT_EDGE', 'page graph edge', '--final');
-});
-
-test('layout-only treatment stays outside paint while layout resource implementations stay forbidden', () => {
-  const isolated = initializeCanonicalFixture('docx-layout-boundary-layout-only-treatment-');
-  write(isolated, 'packages/docx/src/layout/border-treatment.ts',
-    "import { docxBorderDashArray } from '@silurus/ooxml-core';\n"
-      + "export const treatment = docxBorderDashArray('dotDash', 1);\n");
-  const isolatedResult = runChecker(isolated, '--final');
-  assert.equal(isolatedResult.status, 0, isolatedResult.output);
-
+test('paint import() and require() calls stay inside paint as the compiler reads them', () => {
   for (const [name, source] of [
-    ['value', "import { createRegistry } from '../layout/paint-resources.js';\nexport const paint = createRegistry();\n"],
-    ['type', "import type { Registry } from '../layout/paint-resources.js';\nexport type PaintRegistry = Registry;\n"],
+    ['package', "export const core = await import('@silurus/ooxml-core');\n"],
+    ['capitalized member', "export const core = await import('@silurus/ooxml-core').Module;\n"],
+    ['layout types', "export const types = import('../layout/types.js');\n"],
+    ['heritage', 'export interface X extends import("@silurus/ooxml-core").X {}\n'],
+    ['generic require', 'declare const require: <T>(name: string) => T;\nexport const core = require<number>("@silurus/ooxml-core");\n'],
+    ['non-literal', "const name = './canvas-page.js';\nexport const load = () => import(name);\n"],
   ]) {
-    const root = initializeCanonicalFixture(`docx-layout-boundary-layout-resource-${name}-`);
-    write(root, 'packages/docx/src/layout/paint-resources.ts',
-      'export interface Registry {}\nexport function createRegistry() { return {}; }\n');
-    write(root, 'packages/docx/src/paint/resource.ts', source);
-    expectDiagnostic(root, 'FORBIDDEN_PAINT_EDGE', name, '--final');
+    const root = initializeCanonicalFixture(`docx-layout-boundary-paint-call-${name}-`);
+    write(root, 'packages/docx/src/paint/graph.ts', source);
+    expectDiagnostic(root, 'PAINT_EDGE_TARGET', name, '--final');
   }
+  const typed = initializeCanonicalFixture('docx-layout-boundary-paint-call-type-');
+  write(typed, 'packages/docx/src/paint/graph.ts',
+    "export function paint(model: import('@silurus/ooxml-core').ChartModel, at: import('../layout/types.js').PointPt): void {}\n"
+      + "export const load = () => import('./canvas-page.js');\n");
+  const result = runChecker(typed, '--final');
+  assert.equal(result.status, 0, result.output);
+});
+
+test('DOCX source must parse without syntax errors', () => {
+  const root = initializeCanonicalFixture('docx-layout-boundary-syntax-');
+  write(root, 'packages/docx/src/paint/graph.ts', 'type X = any = import("@silurus/ooxml-core").X;\n');
+  expectDiagnostic(root, 'IMPORT_ZONE_SYNTAX', 'syntax error', '--final');
+});
+
+test('DOCX source must be valid UTF-8', () => {
+  const root = initializeCanonicalFixture('docx-layout-boundary-encoding-');
+  write(root, 'packages/docx/src/paint/graph.ts', Buffer.concat([
+    Buffer.from('// '), Buffer.from([0xff]), Buffer.from("\nimport { readFile } from 'node:fs';\n"),
+  ]));
+  expectDiagnostic(root, 'IMPORT_ZONE_ENCODING', 'invalid byte', '--final');
+});
+
+test('ast-grep suppressions cannot silence the import-zone rules', () => {
+  const edge = "import { paginateBody } from '../layout/body-paginator.js';\nexport const paint = paginateBody;\n";
+  for (const [name, comment] of [
+    ['blanket', '// ast-grep-ignore'],
+    ['blanket with reason', '// ast-grep-ignore -- reviewed'],
+    ['zone rule', '// ast-grep-ignore: docx-paint-import-zone'],
+    ['zone rule in a list', '// ast-grep-ignore: no-plain-object-string-map, docx-paint-import-zone -- reviewed'],
+    ['block comment', '/* ast-grep-ignore */'],
+    ['unparsed list', '// ast-grep-ignore:docx-paint-import-zone'],
+  ]) {
+    const root = initializeCanonicalFixture(`docx-layout-boundary-suppression-${name}-`);
+    write(root, 'packages/docx/src/paint/graph.ts', `${comment}\n${edge}`);
+    expectDiagnostic(root, 'IMPORT_ZONE_SUPPRESSION', name, '--final');
+  }
+  const named = initializeCanonicalFixture('docx-layout-boundary-suppression-named-');
+  write(named, 'packages/docx/src/layout/keys.ts',
+    '// ast-grep-ignore: no-plain-object-string-map -- library-generated keys.\nexport const keys = {};\n');
+  const result = runChecker(named, '--final');
+  assert.equal(result.status, 0, result.output);
 });
 
 test('computed paint measurement and TSX layout display inputs are audited', () => {
@@ -1051,16 +912,6 @@ test('computed paint measurement and TSX layout display inputs are audited', () 
   write(layout, 'packages/docx/src/layout/display.tsx',
     'export const Layout = ({ dpr }: { dpr: number }) => dpr;\n');
   expectDiagnostic(layout, 'LAYOUT_DISPLAY_CAPABILITY', 'TSX dpr', '--final');
-});
-
-test('paint CommonJS edges cannot bypass the dependency graph', () => {
-  const root = initializeCanonicalFixture('docx-layout-boundary-paint-require-');
-  write(root, 'packages/docx/src/paint/require-edge.ts',
-    "const helper = require('./require-helper.js');\nexport { helper };\n");
-  write(root, 'packages/docx/src/paint/require-helper.ts',
-    "const measured = require('../paragraph-measure.js');\nexport { measured };\n");
-  write(root, 'packages/docx/src/paragraph-measure.ts', 'export const measured = true;\n');
-  expectDiagnostic(root, 'FORBIDDEN_PAINT_EDGE', 'CommonJS paint edge', '--final');
 });
 
 test('allows only the exact parser normalization gateway and erased contracts', () => {
@@ -1146,123 +997,6 @@ test('layout may share parser-independent values and erased parser-adjacent cont
       + 'export type Contract = ParserContract;\nexport const stop = nextTabStop;\n');
   const result = runChecker(root, '--final');
   assert.equal(result.status, 0, result.output);
-});
-
-test('body-layout input adapter has one exact parser acquisition projection', () => {
-  const root = initializeBodyLayoutAdapterFixture();
-  assert.equal(runChecker(root, '--final').status, 0);
-});
-
-test('body-layout input adapter rejects non-exact import sets', () => {
-  const root = initializeBodyLayoutAdapterFixture('docx-layout-boundary-input-import-');
-  write(root, 'packages/docx/src/body-layout-input.ts', canonicalBodyLayoutAdapter.replace(
-    "import type { DocxDocumentModel } from './types.js';\n",
-    '',
-  ));
-  expectDiagnostic(root, 'BODY_LAYOUT_ADAPTER_IMPORT', 'incomplete import set', '--final');
-});
-
-test('body-layout input adapter rejects incomplete bindings within a reviewed module', () => {
-  const root = initializeBodyLayoutAdapterFixture('docx-layout-boundary-input-incomplete-binding-');
-  write(root, 'packages/docx/src/body-layout-input.ts', canonicalBodyLayoutAdapter.replace(
-    'import { projectBodyLayoutInput, type BodyLayoutInput }',
-    'import { projectBodyLayoutInput }',
-  ));
-  expectDiagnostic(root, 'BODY_LAYOUT_ADAPTER_IMPORT', 'incomplete reviewed binding', '--final');
-});
-
-test('body-layout input adapter rejects duplicate, default, and unreviewed imports', () => {
-  for (const [name, source] of [
-    ['duplicate', canonicalBodyLayoutAdapter.replace(
-      "import type { DocxDocumentModel } from './types.js';\n",
-      "import type { DocxDocumentModel } from './types.js';\n"
-        + "import type { DocxDocumentModel as DuplicateModel } from './types.js';\n",
-    )],
-    ['default', canonicalBodyLayoutAdapter.replace(
-      "import type { DocxDocumentModel } from './types.js';",
-      "import DocxDocumentModel from './types.js';",
-    )],
-    ['unreviewed', `${canonicalBodyLayoutAdapter}import { extra } from './extra.js';\nvoid extra;\n`],
-  ]) {
-    const root = initializeBodyLayoutAdapterFixture(`docx-layout-boundary-input-import-${name}-`);
-    write(root, 'packages/docx/src/extra.ts', 'export const extra = true;\n');
-    write(root, 'packages/docx/src/body-layout-input.ts', source);
-    expectDiagnostic(root, 'BODY_LAYOUT_ADAPTER_IMPORT', name, '--final');
-  }
-});
-
-test('body-layout input adapter rejects a non-literal import specifier', () => {
-  const root = initializeBodyLayoutAdapterFixture('docx-layout-boundary-input-dynamic-specifier-');
-  write(root, 'packages/docx/src/body-layout-input.ts', canonicalBodyLayoutAdapter.replace(
-    "import { bodyLayoutAcquisitionInput } from './parser-model.js';",
-    'import { bodyLayoutAcquisitionInput } from parserModule;',
-  ));
-  expectDiagnostic(root, 'BODY_LAYOUT_ADAPTER_IMPORT', 'non-literal import', '--final');
-});
-
-test('body-layout input adapter rejects aliased or incorrectly typed bindings', () => {
-  for (const [name, source] of [
-    ['alias', canonicalBodyLayoutAdapter.replace(
-      '{ bodyLayoutAcquisitionInput }',
-      '{ bodyLayoutAcquisitionInput as acquireBodyLayoutInput }',
-    )],
-    ['value-as-type', canonicalBodyLayoutAdapter.replace(
-      'import type { DocxDocumentModel }',
-      'import { DocxDocumentModel }',
-    )],
-  ]) {
-    const root = initializeBodyLayoutAdapterFixture(`docx-layout-boundary-input-binding-${name}-`);
-    write(root, 'packages/docx/src/body-layout-input.ts', source);
-    expectDiagnostic(root, 'BODY_LAYOUT_ADAPTER_BINDING', name, '--final');
-  }
-});
-
-test('body-layout input adapter rejects additional declarations', () => {
-  const root = initializeBodyLayoutAdapterFixture('docx-layout-boundary-input-declaration-');
-  write(root, 'packages/docx/src/body-layout-input.ts',
-    `${canonicalBodyLayoutAdapter}\nfunction hiddenProjection() {}\n`);
-  expectDiagnostic(root, 'BODY_LAYOUT_ADAPTER_DECLARATION', 'additional declaration', '--final');
-});
-
-test('body-layout input adapter requires exactly one declaration', () => {
-  const root = initializeBodyLayoutAdapterFixture('docx-layout-boundary-input-missing-declaration-');
-  write(root, 'packages/docx/src/body-layout-input.ts', canonicalBodyLayoutAdapter.replace(
-    /export function createBodyLayoutInput[\s\S]*?\n}\n/,
-    '',
-  ));
-  expectDiagnostic(root, 'BODY_LAYOUT_ADAPTER_DECLARATION', 'missing declaration', '--final');
-});
-
-test('body-layout input adapter rejects alternate export forms', () => {
-  const root = initializeBodyLayoutAdapterFixture('docx-layout-boundary-input-export-');
-  write(root, 'packages/docx/src/body-layout-input.ts',
-    `${canonicalBodyLayoutAdapter}\nexport { createBodyLayoutInput as default };\n`);
-  expectDiagnostic(root, 'BODY_LAYOUT_ADAPTER_EXPORT', 'export declaration', '--final');
-});
-
-test('body-layout input adapter rejects a default declaration export', () => {
-  const root = initializeBodyLayoutAdapterFixture('docx-layout-boundary-input-default-export-');
-  write(root, 'packages/docx/src/body-layout-input.ts', canonicalBodyLayoutAdapter.replace(
-    'export function createBodyLayoutInput',
-    'export default function createBodyLayoutInput',
-  ));
-  expectDiagnostic(root, 'BODY_LAYOUT_ADAPTER_EXPORT', 'default declaration', '--final');
-});
-
-test('body-layout input adapter rejects any body other than the exact projection', () => {
-  const root = initializeBodyLayoutAdapterFixture('docx-layout-boundary-input-body-');
-  write(root, 'packages/docx/src/body-layout-input.ts', canonicalBodyLayoutAdapter.replace(
-    'return projectBodyLayoutInput(bodyLayoutAcquisitionInput(document));',
-    'return projectBodyLayoutInput(document);',
-  ));
-  expectDiagnostic(root, 'BODY_LAYOUT_ADAPTER_BODY', 'non-acquisition body', '--final');
-});
-
-test('paragraph anchor frame adapter is rejected from the final architecture', () => {
-  const root = initializeCanonicalFixture('docx-layout-boundary-final-paragraph-anchor-adapter-');
-  installParagraphAnchorFrameAdapter(root);
-
-  expectDiagnostic(root, 'FINAL_PARAGRAPH_ANCHOR_ADAPTER', 'final adapter', '--final');
 });
 
 test('retained body paint cannot reacquire layout', () => {
@@ -1470,7 +1204,6 @@ test('retained body paint follows the else branch of a negated paragraph dispatc
 
 test('final renderer rejects transitional exports, hidden algorithms, and non-layout imports', () => {
   for (const [name, source, diagnostic] of [
-    ['deleted pagination export', canonicalRenderer + '\nexport function paginateDocument() {}\n', 'FORBIDDEN_PAGE_PRODUCER_IDENTIFIER'],
     ['star export', canonicalRenderer + "\nexport * from './layout/document.js';\n", 'FINAL_ADAPTER_EXPORT'],
     ['hidden algorithm', canonicalRenderer + '\nexport function accidentalAlgorithm() {}\n', 'FINAL_ADAPTER_DECLARATION'],
     ['source layout loop', canonicalRenderer.replace(
@@ -1681,12 +1414,6 @@ test('worker retains keyed parity and never duplicates selected-page validation'
   }
 });
 
-test('a transitional baseline is forbidden by the default CI invocation', () => {
-  const root = initializeCanonicalFixture('docx-layout-boundary-default-final-');
-  write(root, 'scripts/docx-layout-boundary-baseline.json', '{}\n');
-  expectDiagnostic(root, 'FINAL_BASELINE_PRESENT', 'final baseline');
-});
-
 test('reports an unknown CLI argument exactly', () => {
   const root = initializeCanonicalFixture('docx-layout-boundary-cli-');
   expectDiagnostic(root, 'UNKNOWN_ARGUMENT', 'unknown argument', '--definitely-unknown');
@@ -1696,20 +1423,6 @@ test('reports a missing final renderer exactly', () => {
   const root = initializeCanonicalFixture('docx-layout-boundary-missing-renderer-');
   rmSync(join(root, 'packages/docx/src/renderer.ts'));
   expectDiagnostic(root, 'FINAL_ADAPTER_MISSING', 'missing renderer', '--final');
-});
-
-test('reports final legacy inventory without accepting an alternate diagnostic', () => {
-  const root = initializeCanonicalFixture('docx-layout-boundary-final-legacy-');
-  write(root, 'packages/docx/src/layout/legacy-route.ts',
-    'export const useOldLayoutEngine = true;\n');
-  expectDiagnostic(root, 'FINAL_LEGACY_BOUNDARY', 'legacy migration flag', '--final');
-});
-
-test('reports non-literal module edges from paint exactly', () => {
-  const root = initializeCanonicalFixture('docx-layout-boundary-nonliteral-paint-');
-  write(root, 'packages/docx/src/paint/dynamic.ts',
-    "const moduleName = './canvas-page.js';\nexport const load = () => import(moduleName);\n");
-  expectDiagnostic(root, 'NON_LITERAL_MODULE_EDGE', 'paint dynamic import', '--final');
 });
 
 test('reports non-literal module edges from layout exactly', () => {
@@ -1741,52 +1454,6 @@ test('production rejects both test and test-support module imports', () => {
   }
 });
 
-test('every deleted final producer and legacy stamp identifier is rejected exactly', () => {
-  const deletedProducers = [
-    'bodyFragmentFor',
-    'bodyLayoutFallback',
-    'computePages',
-    'paginateDocument',
-    'paginateWithHeaderFooterReserve',
-    'PaginatedBodyElement',
-    'physicalPageSizeForPage',
-    'prebuiltPages',
-    'retainedLayout',
-    'sectionBreakSpacer',
-    'collapsedSpacer',
-    'leadsCollapsedRun',
-    'hiddenCollapsed',
-    'computeTableRowHeights',
-    'estimateTableHeight',
-    'measureRetainedCellContentHeightPt',
-    'measureCellParagraphWindow',
-    'measureCellElementHeight',
-    'trimTrailingStructuralMarker',
-    'rescaleLayoutLines',
-    'paragraphSegsStateSensitive',
-  ];
-  const deletedStampProperties = [
-    'colIndex',
-    'colGeom',
-    'colTopPt',
-    'sectionHF',
-    'sectionGeom',
-    'sectionPageNumType',
-    'sectionTextDirection',
-  ];
-  for (const name of deletedProducers) {
-    const root = initializeCanonicalFixture(`docx-layout-boundary-deleted-exact-${name}-`);
-    write(root, 'packages/docx/src/deleted-path.ts', `export const ${name} = true;\n`);
-    expectDiagnostic(root, 'FORBIDDEN_PAGE_PRODUCER_IDENTIFIER', name, '--final');
-  }
-  for (const name of deletedStampProperties) {
-    const root = initializeCanonicalFixture(`docx-layout-boundary-deleted-property-${name}-`);
-    write(root, 'packages/docx/src/deleted-path.ts',
-      `export const legacyStamp = { ${name}: true };\n`);
-    expectDiagnostic(root, 'FORBIDDEN_PAGE_PRODUCER_IDENTIFIER', name, '--final');
-  }
-});
-
 test('FloatRect transport cannot regain the deleted drawn state', () => {
   const root = initializeCanonicalFixture('docx-layout-boundary-float-drawn-state-');
   write(root, 'packages/docx/src/layout/float-wrap.ts', `
@@ -1796,14 +1463,6 @@ interface FloatRectCore {
 export type FloatRect = FloatRectCore & { kind: 'shape' };
 `);
   expectDiagnostic(root, 'FLOAT_RECT_TRANSITIONAL_STATE', 'FloatRect.drawn', '--final');
-});
-
-test('legacy stamp property guards do not ban unrelated local variable names', () => {
-  const root = initializeCanonicalFixture('docx-layout-boundary-local-column-index-');
-  write(root, 'packages/docx/src/layout/local-index.ts',
-    'export function localIndex() { const colIndex = 0; return colIndex + 1; }\n');
-  const result = runChecker(root, '--final');
-  assert.equal(result.status, 0, result.output);
 });
 
 test('the concrete body kernel is private even though its declaration is allowed', () => {

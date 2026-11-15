@@ -646,7 +646,8 @@ export function excelDateTimeSectionNameTexts(section: string): string[] {
   if (/\[QQ?\]/.test(section)) {
     texts.push('Q', ...QUARTER_ORDINALS, ' quarter', ...JP_QUARTERS);
   }
-  if (/g/i.test(section) && sectionHasJapaneseLocale(section)) {
+  // Under ja-JP, `g` writes an era name and `rr` (`gggee`) the long one.
+  if (/g|r{2}/i.test(section) && sectionHasJapaneseLocale(section)) {
     for (const era of JP_ERAS) texts.push(era.abbr, era.short, era.long);
   }
   return texts;

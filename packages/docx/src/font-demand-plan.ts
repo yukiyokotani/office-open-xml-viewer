@@ -96,7 +96,7 @@ export interface DocxFontDemandCandidates {
  */
 export function docxFontDemandCandidates(
   doc: DocxDocumentModel,
-  substitutes: readonly FontSubstitution[],
+  substitutions: readonly FontSubstitution[],
   fallback?: CjkLang,
 ): DocxFontDemandCandidates {
   const cjkLang =
@@ -104,13 +104,20 @@ export function docxFontDemandCandidates(
   const scripts = new ScriptPreloadAccumulator(cjkLang);
   const languageNames = new Set<string>();
   const authored = new Map<string, string>();
+  // Runs repeat a few family spellings many times.
+  const keys = new Map<string, string>();
+  const familyKey = (name: string) => {
+    let key = keys.get(name);
+    if (key === undefined) keys.set(name, key = fontFamilyKey(name));
+    return key;
+  };
   const addAuthored = (family: string | null | undefined) => {
     const name = family?.trim();
-    const key = name ? fontFamilyKey(name) : '';
+    const key = name ? familyKey(name) : '';
     if (name && key && !authored.has(key)) authored.set(key, name);
   };
   const scopedScripts = new Map<string, Set<FontSubstituteScript>>();
-  for (const substitution of substitutes) {
+  for (const substitution of substitutions) {
     if (!substitution.script) continue;
     const key = fontFamilyKey(substitution.for);
     scopedScripts.set(key, (scopedScripts.get(key) ?? new Set()).add(substitution.script));
@@ -129,7 +136,7 @@ export function docxFontDemandCandidates(
       const name = family?.trim();
       if (!name) continue;
       addAuthored(name);
-      const key = fontFamilyKey(name);
+      const key = familyKey(name);
       for (const script of scopedScripts.get(key) ?? []) {
         if (!proven.get(key)?.has(script) && substituteEntryCoversText({ script }, usage.text, 'any')) prove(key, script);
       }
@@ -182,8 +189,8 @@ export function docxFontFamilyPlan(
   cjkFallback: CjkLang | undefined,
   officeFonts: DocxOfficeFontPresence,
 ): DocxFontFamilyPlan {
-  const substitutes = declaredFontSubstitutions(sources);
-  const candidates = docxFontDemandCandidates(doc, substitutes, cjkFallback);
+  const substitutions = declaredFontSubstitutions(sources);
+  const candidates = docxFontDemandCandidates(doc, substitutions, cjkFallback);
   const probed = new Set(officeFonts.installed ?? []);
   const checked = officeFonts.presenceChecked === undefined ? undefined : new Set(officeFonts.presenceChecked);
   // Any proven face of the family counts, whichever styles produced it.
@@ -207,7 +214,7 @@ export function docxFontFamilyPlan(
       ? candidates.substituteScripts[key]
       : [];
   };
-  const substituted = (family: string) => substitutionsFor(substitutes, family, scriptsOf(family)).length > 0;
+  const substituted = (family: string) => substitutionsFor(substitutions, family, scriptsOf(family)).length > 0;
   const installedSubstituteFamilies = [...new Set(candidates.authored
     .filter((family) => installed(family) && substituted(family))
     .map((family) => family.trim().toLowerCase()))].sort();

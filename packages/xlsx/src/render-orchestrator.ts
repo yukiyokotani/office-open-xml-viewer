@@ -927,7 +927,7 @@ export function worksheetWithAutoRowHeights(
   // intent before geometry/wrapping. Render-cache inheritance also runs after
   // worker size overrides, so it must never overwrite their CSS channel.
   inheritWorksheetSizeContext(source, projection);
-  inheritSheetRenderCache(source, projection);
+  inheritSheetRenderCache(source, projection, styles);
   // The viewer/main realm supplies the authoritative Normal-font MDW used by
   // hit-testing and spacer geometry. Preserve it across the render-local clone
   // so worker/direct auto-fit wraps at the exact same column pixels.
@@ -991,7 +991,7 @@ async function renderWorksheetViewportLeased(
   const styles = deps.styles;
   const measurementCtx = target.getContext('2d') as CanvasRenderingContext2D | null;
   if (!measurementCtx) throw new Error('XLSX render target does not provide a 2-D canvas context');
-  bindXlsxOfficeFontRoutes(measurementCtx, deps.ws, opts.officeFontRoutes, opts.fontSources);
+  bindXlsxOfficeFontRoutes(measurementCtx, deps.ws, opts.officeFontRoutes, opts.fontSources, opts.symbolFaces);
   pinXlsxGridGeometry(deps.ws, opts.authoritativeMdw);
   const ws = deps.ws.isDialogSheet
     ? deps.ws

@@ -1,0 +1,58 @@
+id: docx-paint-import-zone
+valid:
+  - "import type { PointPt } from '../layout/types.js';"
+  - "export type { PointPt } from '../layout/types.js';"
+  - "import { paintLayoutPage } from './canvas-page.js';"
+  - "import type { Session } from './resource-session.js';"
+  - "export * from './canvas-page.js';"
+  - "import { crispOffset } from '@silurus/ooxml-core';"
+  - "const load = () => import('./canvas-page.js');"
+  - "function paint(drawing: import('../layout/types.js').DrawingLayout): void {}"
+  - "const model = descriptor.model as import('@silurus/ooxml-core').ChartModel;"
+  - "function paint(a: import('../layout/types.js').A | undefined, b: Array<import('../layout/types.js').B>): import('../layout/types.js').C[] { return []; }"
+  - "type Target = import('../layout/types.js').TextPlacement;"
+  - "const ok = value satisfies import('../layout/types.js').TextPlacement;"
+invalid:
+  # Layout algorithms, measurement modules, CommonJS and non-literal edges.
+  - "import { paginateBody } from '../layout/body-paginator.js';"
+  - "import { measure } from '../paragraph-measure.js';"
+  - "import { composeAffine } from '../layout/affine.js';"
+  - "import { PAGE_LAYER_IDS } from '../layout/page-graph.js';"
+  - "import { createRegistry } from '../layout/paint-resources.js';"
+  - "import type { Registry } from '../layout/paint-resources.js';"
+  - "import '@silurus/ooxml-core';"
+  - "const helper = require('./require-helper.js');"
+  - "const measured = require('../paragraph-measure.js');"
+  - |
+    const moduleName = './canvas-page.js';
+    export const load = () => import(moduleName);
+  # A runtime edge to the erased contract, and every other way out of the directory.
+  - "import { PAGE } from '../layout/types.js';"
+  - "import { type PointPt } from '../layout/types.js';"
+  - "export { PAGE } from '../layout/types.js';"
+  - "export * from '../layout/types.js';"
+  - "export { composeAffine } from '../layout/affine.js';"
+  - "import type { DocParagraph } from '../types.js';"
+  - "import { x } from './../renderer.js';"
+  - "import { x } from './sub/../../renderer.js';"
+  - "import { x } from './..';"
+  - "import { x } from '.';"
+  - "import './canvas-page.js';"
+  - "import renderer = require('../renderer.js');"
+  - "const core = await import('@silurus/ooxml-core');"
+  - "const types = await import('../layout/types.js');"
+  - "import('@silurus/ooxml-core').then((core) => core.measureText);"
+  - "const same = import('@silurus/ooxml-core').valueOf();"
+  - "const load = () => import(`./canvas-page.js`);"
+  - "const load = () => import('../layout/flow.js');"
+  - "function paint(flow: import('../layout/flow.js').FlowBlockInput): void {}"
+  - "import type from '../layout/types.js';"
+  - "import type, { PAGE } from '../layout/types.js';"
+  - "export const core = await import('@silurus/ooxml-core').Module;"
+  - "export const types = (await import('../layout/types.js').Module).PAGE;"
+  - "const core = import('@silurus/ooxml-core').Module as Promise<unknown>;"
+  - "f(import('@silurus/ooxml-core').Module);"
+  - "\\u0072equire('../layout/body-paginator.js');"
+  - |
+    declare const require: <T>(name: string) => T;
+    export const core = require<import("./resource-session.js").PaintResourceSession>("@silurus/ooxml-core");

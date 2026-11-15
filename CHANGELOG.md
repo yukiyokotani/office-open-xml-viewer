@@ -5,40 +5,30 @@ semantic versioning. While the major version is zero, minor releases may contain
 explicitly documented breaking changes; patch releases remain compatible with
 the corresponding minor release.
 
-## 0.90.0 — 2026-11-14
+## 0.90.0 — 2026-11-16
 
 Minor release that lets applications choose where web fonts come from and
-adds an optional, experimental OpenDocument add-on. Two changes may need
-action. If you pass `useGoogleFonts`, replace
+adds experimental OpenDocument reading through a new optional package. Two
+changes may need action. If you pass `useGoogleFonts`, replace
 `useGoogleFonts: true` with `fonts: [googleFonts()]`. The alias still works in
-0.90 with a warning; from 0.91.0 it is ignored with the same warning, and never
-throws. If your page has a Content Security Policy and loads web fonts, allow
+0.90 with a warning (when `fonts` is also given, `fonts` wins); from 0.91.0 it
+is ignored with the same warning, and never throws. If your page has a Content Security Policy and loads web fonts, allow
 the font file host (for example `fonts.gstatic.com`) in `connect-src` as well
 as `font-src`: font files are now fetched, and a blocked fetch falls back to
 the host fonts (see **Served font line heights** below). See the
 [0.89 to 0.90 migration guide](docs/migration-0.90.md). It also
-contains the fixes of 0.89.10.
+contains the fixes of 0.89.10 and 0.89.11.
 
-- **Experimental OpenDocument add-on:** the new
-  `@silurus/ooxml-opendocument` package reads `.odt`/`.ott`, `.odp`/`.otp`
-  and `.ods`/`.ots` directly into the DOCX, PPTX and XLSX models, without
-  generating an OOXML package. Import `odt` from
-  `@silurus/ooxml-opendocument/odt` and pass `{ odt }` to the DOCX viewers
-  and loaders (likewise `odp` for PPTX and `ods` for XLSX, including the
-  Node `open*` functions; `createOdt(...)` etc. for custom asset URLs).
-  Importing an entry fetches nothing; each format's reader module and WASM
-  load only when such a file is opened. Every feature the reader meets is
-  drawn, with LibreOffice as the reference where ODF leaves a choice, and only
-  corrupt, encrypted, unsafe or over-limit files reject. Its version must
-  match `@silurus/ooxml` exactly. See
-  [Experimental OpenDocument sources](docs/opendocument.md) (#1934).
 - **Font sources:** the new `fonts` load option takes an ordered list of
-  sources, built with `googleFonts({ cssOrigin?, substitutes?, families? })`,
+  sources, built with `googleFonts({ baseUrl?, substitutions?, additionalFamilies? })`,
   `fontCssApi()`, `fontCss()`, `fontFiles()` (URLs, `data:` URLs or bytes)
   and `fontResolver()` for authenticated or private services. Every source
-  takes `substitutes`; `fontCssApi()`, `fontCss()` and `fontFiles()` also take
-  `credentials`. `googleFonts({ families })` adds Google families outside the
-  preset's catalog. A `FontSource` is opaque, and `fonts` accepts only values
+  takes `substitutions`; `fontCssApi()`, `fontCss()` and `fontFiles()` also take
+  `credentials`. `googleFonts({ additionalFamilies })` adds Google families
+  outside the preset's catalog. A resolver (type `FontResolver`) receives the
+  missing family names as `demand.authoredFamilies` and
+  `demand.fallbackFamilies`; in what it returns, unknown properties are
+  ignored and `weight` may be a number. A `FontSource` is opaque, and `fonts` accepts only values
   the factories returned. The factories are exported from `@silurus/ooxml`
   and from each format entry, along with `officeFontSubstitutions` and
   `googleFontsSubstitutions`. DOCX, XLSX and PPTX behave the same in main and
@@ -47,14 +37,27 @@ contains the fixes of 0.89.10.
   Faces from a source belong to the document that loaded them: two documents
   open at once never paint with each other's faces. Nothing is requested
   without a source (#1460, #1497).
-- **Custom Google Fonts origin:** `googleFonts({ cssOrigin })` sends the
+- **Custom Google Fonts origin:** `googleFonts({ baseUrl })` sends the
   stylesheet requests to a regional mirror or an internal proxy instead of
-  `fonts.googleapis.com`. Redirects are followed and the font file URLs in the
+  `fonts.googleapis.com`. In 0.90 `baseUrl` must be an origin (no path). Redirects are followed and the font file URLs in the
   returned CSS are used as given, so the mirror controls where those go. A
   failing origin keeps the host fonts and is never replaced by another source
   (#1497).
 - **Fewer font downloads:** DOCX and XLSX now load only the `unicode-range`
   subsets that the document's text paints, as PPTX already did.
+- **Font loading cost:** with font sources, first display does less work.
+  The subsets a document needs are now worked out precisely for accented,
+  Vietnamese and Indic text, right-to-left text, ruby, vertical text,
+  pictures, charts and numbered lists, where the whole family used to be
+  downloaded. Each face is built as its download lands, `googleFonts()` faces
+  are registered from their URL so the browser decodes them off the main
+  thread, Google Fonts files download 32 at a time, a served face's line
+  metrics are measured once per family, and the font-source code loads only
+  when `fonts` is configured and while the worker parses. Rendering is
+  unchanged (#2210, #2217, #2220, #2224, #2226, #2231–#2234, #2236–#2238).
+- **XLSX repaint:** scrolling and repainting a sheet no longer rebuild its
+  render index (cell map, merges, conditional formats, table styles) on every
+  frame, which took most of each frame on large sheets (#2230).
 - **Served font line heights:** DOCX lays out a face from the `fonts` option
   with Word's line rule from the face's own OpenType tables (including the
   line gap and, for variable fonts, the MVAR usWin deltas), as for an
@@ -70,7 +73,30 @@ contains the fixes of 0.89.10.
 - **Resource safety:** font sources have fixed limits. A factory input beyond
   one throws the new `OoxmlError` code `font-source-limit`; a limit reached
   while a document loads fails only the families concerned, with a warning,
-  like a network failure.
+  like a network failure. The limit values, and the `quota` and `metric`
+  strings of `error.violation`, may grow in later minor releases.
+- **OpenDocument (experimental):** the new optional companion package
+  `@silurus/ooxml-opendocument` reads OpenDocument files into the existing
+  models, so the ordinary viewers, loaders and Node sessions display them
+  without an intermediate OOXML package (#1934). Each format is a separate
+  opt-in entry: pass `odp` (`@silurus/ooxml-opendocument/odp`, `.odp`/`.otp`)
+  to the PPTX viewers and loaders, `odt` (`/odt`, `.odt`/`.ott`) to the DOCX
+  ones and `ods` (`/ods`, `.ods`/`.ots`) to the XLSX ones, for example
+  `new PptxViewer(canvas, { odp })`. A reader claims a package only by its
+  `mimetype` file; other input keeps the OOXML path. Importing a reader
+  fetches nothing: its source module and WASM load only when a matching file
+  is opened, and `createOdp()`, `createOdt()` and `createOds()` take
+  `{ moduleUrl, wasmUrl }` for relocated assets. The readers render every
+  feature they read, as ODF 1.3 specifies, with LibreOffice as the reference
+  where it leaves a choice, and draw what the target model cannot express
+  exactly with its nearest equivalent. They reject only corrupt, encrypted
+  (`unsupported-encryption`) or unsafe packages, and packages over a resource
+  limit; they never run scripts, macros or forms or fetch external resources.
+  Install the package at exactly the same version as `@silurus/ooxml`; a
+  mismatched pair fails with `companion-runtime-mismatch`. Without the package
+  nothing changes. See [docs/opendocument.md](docs/opendocument.md) and the
+  [OpenDocument guide](https://ooxml.silurus.dev/opendocument/) (#2168, #2169,
+  #2170, #2189, #2205, #2208, #2245).
 - **Failed package parts:** a new `partFailures` getter on `DocxDocument`,
   `PptxPresentation`, `XlsxWorkbook` and every viewer lists the parts that
   failed to parse, and the new `onPartFailure` viewer option is called once for
@@ -118,12 +144,15 @@ contains the fixes of 0.89.10.
   hidden now goes to the shown slide before it, as `prevSlide()` does. It used
   to land on the next shown slide, which is usually the slide it started from.
 - **Deprecated:** `useGoogleFonts` is an alias of `fonts: [googleFonts()]` and
-  warns once per JavaScript realm. Combining `useGoogleFonts: true` with
-  `fonts` throws a `TypeError`. The VS Code extension keeps its
+  warns once per JavaScript realm. When `fonts` is also given, `fonts` wins:
+  the alias adds nothing to it, still warns, and never throws. The VS Code
+  extension keeps its
   `ooxmlViewer.useGoogleFonts` setting.
-- **Fixed:** in DOCX and PPTX, text, `w:sym`/`a:sym` symbols and list
+- **Fixed:** in DOCX, PPTX and XLSX, text, `w:sym`/`a:sym` symbols and list
   markers in Symbol, Wingdings, Wingdings 2, Wingdings 3 and Webdings now
-  render on every host (#2177). Greek letters and the maths operators of Symbol, and the
+  render on every host (#2177). In XLSX this covers cell values (number-format
+  output included), rich-text runs, text boxes and slicer labels, and
+  overflow, wrapping and automatic row heights follow the symbols as drawn. Greek letters and the maths operators of Symbol, and the
   pictographs of the Wingdings/Webdings fonts, used to draw as tofu or as
   Latin letters wherever the font is missing or, like Apple's Symbol, is not
   symbol-encoded. Each code is now checked against the face that actually
@@ -131,6 +160,41 @@ contains the fixes of 0.89.10.
   any other code becomes its Unicode character. A converted pictograph takes
   the text colour, and is never drawn as a colour emoji: where only a colour
   emoji face has it, the authored code is kept.
+- **Changed: model types follow the parser JSON.** The public model types now
+  describe what the parsers actually emit. This is checked in CI against the
+  Rust model (`pnpm check:model-wire-drift`).
+  - Fields the parser omits are optional: `ParagraphBorders` edges and
+    `ShapeRun.fill` (DOCX), and `PictureElement.stroke` (PPTX).
+  - Fields that can be `null` say so: DOCX `ImageRun.colorReplaceFrom` and
+    the shared `TextRunData.fieldType`.
+  - Names match the JSON: `ChartThreeD.view3DPresent` is now `view3dPresent`,
+    and PPTX `TableCell.diagonalTL`/`diagonalTR` are now
+    `diagonalTl`/`diagonalTr`.
+  - Chart data-table, surface-band and inverted (negative) series fills may
+    be image fills.
+  - `Paragraph.endRunProperties` no longer claims a `type` discriminant.
+  - Fields the parser already emitted are now declared: DOCX
+    `DocParagraph.outlineLevel` and PPTX `ShapeElement.placeholderType` /
+    `placeholderIdx`.
+- **Fixed:** PPTX table cells now draw their diagonal borders
+  (`a:lnTlToBr`/`a:lnBlToTr`). The renderer read the misnamed fields and never
+  drew them. The end-of-paragraph run properties now also apply to stacked
+  vertical text.
+- **Fixed:** XLSX inline-string cells (`<is>`) now show their furigana when
+  phonetic display is on. The parser JSON named the reading `phonetic_runs` /
+  `phonetic_pr` instead of `phoneticRuns` / `phoneticPr`, so the renderer
+  never received it. Shared-string cells were not affected.
+
+## 0.89.11 — 2026-11-14
+
+Compatible patch release. No migration is required. One Word layout fix: a
+custom footnote or endnote mark formatted as all caps or small caps no longer
+stops the whole document from rendering. It is described below.
+
+- **Word: all-caps custom footnote and endnote marks:** a footnote or endnote
+  reference with a custom mark (`w:customMarkFollows`) whose run is formatted
+  as all caps or small caps no longer fails layout of the whole document with
+  "Text shape request does not match its full run context" (#2209).
 
 ## 0.89.10 — 2026-11-13
 

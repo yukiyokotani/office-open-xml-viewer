@@ -73,7 +73,7 @@ function cell(over: Partial<TableCell> = {}): TableCell {
   return {
     textBody: null, fill: null,
     borderL: null, borderR: null, borderT: null, borderB: null,
-    diagonalTL: null, diagonalTR: null,
+    diagonalTl: null, diagonalTr: null,
     gridSpan: 1, rowSpan: 1, hMerge: false, vMerge: false,
     ...over,
   } as TableCell;
@@ -537,4 +537,16 @@ describe('DrawingML <a:tbl> — shared interior gridline drawn once (spec-silent
     expect(bot.some((s) => s.color === rgba('222222'))).toBe(true);
   });
 
+});
+
+describe('PowerPoint table-cell diagonal borders', () => {
+  it('strokes the parser-named diagonalTl / diagonalTr lines', () => {
+    // The parser JSON names these `diagonalTl` / `diagonalTr` (a:lnTlToBr /
+    // a:lnBlToTr); a renderer reading any other spelling draws nothing.
+    const t = tableOf([[cell({ diagonalTl: ln({ color: 'FF0000' }), diagonalTr: ln({ color: '0000FF' }) })]], [COL]);
+    const diagonals = render(t).filter((s) => Math.abs(s.x1 - s.x2) > 0.5 && Math.abs(s.y1 - s.y2) > 0.5);
+    expect(diagonals.map((s) => s.color).sort()).toEqual([rgba('0000FF'), rgba('FF0000')].sort());
+    const tl = diagonals.find((s) => s.color === rgba('FF0000'));
+    expect(tl && Math.sign(tl.x2 - tl.x1) === Math.sign(tl.y2 - tl.y1)).toBe(true);
+  });
 });

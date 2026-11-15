@@ -1,15 +1,20 @@
 import { describe, expect, it } from 'vitest';
 import type { TextRunData } from '@silurus/ooxml-core';
-import { collectFontDemandScalars } from '@silurus/ooxml-core/internal/font-scalar-demand';
+import { FontDemandScalarCollector, collectFontDemandScalars } from '@silurus/ooxml-core/internal/font-scalar-demand';
 import { collectSlideFontDemand } from './font-preload-demand.js';
+import { formatAutoNum } from './autonum-label.js';
 import { PresentationPreflightBuilder, normalizePresentationPreflight } from './presentation-preflight.js';
 import type { Slide } from './types';
 import type { PresentationBootstrap } from './worker-protocol.js';
+import { officeFaceWeight } from './powerpoint-line-metrics.js';
 
 function slide(text: string, run: Partial<TextRunData> = {}): Slide {
   return { index: 0, slideNumber: 27, background: null, elements: [{ type: 'shape', textBody: {
     vert: 'horz', paragraphs: [{ bullet: { type: 'inherit' }, runs: [{ type: 'text', text, ...run }] }],
   } }] } as Slide;
+}
+function picture(imagePath: string, mimeType: string) {
+  return { type: 'picture', imagePath, mimeType, x: 0, y: 0, width: 1, height: 1, rotation: 0, flipH: false, flipV: false, stroke: null };
 }
 const bootstrap = { slideCount: 2, slideWidth: 100, slideHeight: 100, defaultTextColor: null,
   majorFont: null, minorFont: null, hlinkColor: null, folHlinkColor: null, embeddedFonts: [],
@@ -36,19 +41,182 @@ describe('complete conservative PPTX paint demand', () => {
       .toEqual(expect.arrayContaining([0x32, 0x37]));
   });
 
-  it('declines canonical changes and generated or unmodelled paint paths', () => {
-    for (const run of [{ text: 'e\u0301' }, { text: '\ud800' }, { text: '\u0378' }, { text: '\uf0a7' }, { text: '\uf0a7', fontFamilySym: 'Segoe UI Symbol' }, { text: 'A', fieldType: 'unknown' }]) {
+  it('demands the canonical closure of decomposable text instead of every subset', () => {
+    // core canonical-closure.ts: the spelled, decomposed and composed forms.
+    expect(collectSlideFontDemand(slide('e\u0301\u304c'), new Set(), 10000))
+      .toEqual(expect.arrayContaining([0x65, 0x301, 0xe9, 0x304c, 0x304b, 0x3099]));
+  });
+
+  it('declines malformed or unknown text and generated or unmodelled paint paths', () => {
+    for (const run of [{ text: '\ud800' }, { text: '\u0378' }, { text: '\uf0a7' }, { text: '\uf0a7', fontFamilySym: 'Segoe UI Symbol' }]) {
       expect(collectSlideFontDemand(slide(run.text, run), new Set(), 10000)).toBe('all');
     }
-    for (const patch of [{ parseError: 'broken' }, { elements: [{ type: 'chart' }] }, { elements: [{ type: 'picture' }] }]) {
-      expect(collectSlideFontDemand({ ...slide('A'), ...patch } as Slide, new Set(), 10000)).toBe('all');
+    for (const patch of [
+      { parseError: 'broken' },
+      { elements: [{ type: 'unknown' }] },
+      { elements: [{ type: 'chart', chart: { chartType: 'regionMap', series: [] } }] },
+      { elements: [picture('ppt/media/image1.emf', 'image/emf')] },
+      { elements: [picture('ppt/media/image1.wmf', 'application/octet-stream')] },
+      { elements: [picture('ppt/media/image1.pict', 'image/x-pict')] },
+      { elements: [picture('ppt/media/image1.png', 'image/png')], background: { fillType: 'image', imagePath: 'ppt/media/bg.emf', mimeType: 'image/emf' } },
+      { elements: [{ type: 'media', posterPath: 'ppt/media/poster.wmf', posterMimeType: 'image/wmf', mediaPath: 'ppt/media/m.mp4', mimeType: 'video/mp4' }] },
+    ]) {
+      expect(collectSlideFontDemand({ ...slide('A'), ...patch } as Slide, new Set(), 10000), JSON.stringify(patch)).toBe('all');
     }
-    const numbered = slide('A');
-    (numbered.elements[0] as { textBody: { paragraphs: Array<{ bullet: unknown }> } }).textBody.paragraphs[0].bullet = { type: 'autoNum', numType: 'arabicPeriod' };
-    expect(collectSlideFontDemand(numbered, new Set(), 10000)).toBe('all');
-    const vertical = slide('A');
-    (vertical.elements[0] as { textBody: { vert: string } }).textBody.vert = 'vert';
-    expect(collectSlideFontDemand(vertical, new Set(), 10000)).toBe('all');
+    const body = (value: Slide) => (value.elements[0] as unknown as { textBody: Record<string, unknown> & { paragraphs: Array<Record<string, unknown>> } }).textBody;
+    const unknownVert = slide('A');
+    body(unknownVert).vert = 'diagonal';
+    expect(collectSlideFontDemand(unknownVert, new Set(), 10000)).toBe('all');
+    const equation = slide('A');
+    body(equation).paragraphs[0].runs = [{ type: 'math', nodes: [], display: false }];
+    expect(collectSlideFontDemand(equation, new Set(), 10000)).toBe('all');
+    // A picture fill or picture marker that is a metafile plays its own text records.
+    const filled = slide('A');
+    (filled.elements[0] as unknown as Record<string, unknown>).fill = { fillType: 'image', imagePath: 'ppt/media/image2.emf', mimeType: 'image/emf' };
+    expect(collectSlideFontDemand(filled, new Set(), 10000)).toBe('all');
+    const marker = slide('A');
+    body(marker).paragraphs[0].bullet = { type: 'blip', imagePath: 'ppt/media/image3.wmf', mimeType: 'image/wmf' };
+    expect(collectSlideFontDemand(marker, new Set(), 10000)).toBe('all');
+  });
+
+  it('demands nothing for text-free images and media posters', () => {
+    const plain = collectSlideFontDemand(slide('A'), new Set(), 10000);
+    for (const patch of [
+      { elements: [...slide('A').elements, picture('ppt/media/image1.png', 'image/png'), picture('ppt/media/image2.svg', 'image/svg+xml'), picture('ppt/media/image3.JPG', 'image/jpeg')] },
+      { elements: [...slide('A').elements, { type: 'media', posterPath: 'ppt/media/poster.png', posterMimeType: 'image/png', mediaPath: 'ppt/media/m.mp4', mimeType: 'video/mp4' }] },
+      { elements: [...slide('A').elements, { type: 'media', posterPath: '', posterMimeType: '', mediaPath: 'ppt/media/m.mp3', mimeType: 'audio/mpeg' }] },
+      { background: { fillType: 'image', imagePath: 'ppt/media/bg.gif', mimeType: 'image/gif' } },
+    ]) {
+      expect(collectSlideFontDemand({ ...slide('A'), ...patch } as Slide, new Set(), 10000), JSON.stringify(patch)).toEqual(plain);
+    }
+    const marker = slide('A');
+    (marker.elements[0] as unknown as { textBody: { paragraphs: Array<{ bullet: unknown }> } }).textBody.paragraphs[0].bullet =
+      { type: 'blip', imagePath: 'ppt/media/image3.png', mimeType: 'image/png' };
+    expect(collectSlideFontDemand(marker, new Set(), 10000)).toEqual(plain);
+  });
+
+  it('finds an image path at any depth of an element, through arrays and null entries', () => {
+    const plain = collectSlideFontDemand(slide('A'), new Set(), 10000);
+    const nested = (image: unknown): Slide => ({ ...slide('A'), elements: [...slide('A').elements,
+      { type: 'shape', textBody: null, fill: { layers: [null, 3, 'text', [{ stops: [{ tile: image }] }]] } }] } as unknown as Slide);
+    expect(collectSlideFontDemand(nested({ imagePath: 'ppt/media/a.png', mimeType: 'image/png' }), new Set(), 10000)).toEqual(plain);
+    expect(collectSlideFontDemand(nested({ imagePath: 'ppt/media/a.emf', mimeType: 'image/emf' }), new Set(), 10000)).toBe('all');
+    expect(collectSlideFontDemand(nested({ imagePath: '', mimeType: null }), new Set(), 10000)).toBe('all');
+    expect(collectSlideFontDemand(nested({ posterPath: 'ppt/media/p.wmf', posterMimeType: 'image/wmf' }), new Set(), 10000)).toBe('all');
+    expect(collectSlideFontDemand(nested({ posterPath: '', posterMimeType: '' }), new Set(), 10000)).toEqual(plain);
+    // Not a path: only a string under the key names an image part.
+    expect(collectSlideFontDemand(nested({ imagePath: { mimeType: 'image/emf' } }), new Set(), 10000)).toEqual(plain);
+  });
+
+  it('collects a text repeated on a slide once for plain faces and again for a symbol-encoded face', () => {
+    const runs = (...list: Array<Partial<TextRunData>>): Slide => ({ index: 0, slideNumber: 1, background: null, elements: [{ type: 'shape', textBody: {
+      vert: 'horz', paragraphs: [{ bullet: { type: 'inherit' }, runs: list.map((run) => ({ type: 'text', ...run })) }],
+    } }] } as Slide);
+    const repeated = collectSlideFontDemand(
+      runs({ text: 'l' }, { text: 'l', fontFamily: 'Arial' }, { text: 'l', fontFamily: 'Wingdings' }, { text: 'l' }), new Set(), 10000);
+    expect(repeated).toEqual(collectSlideFontDemand(runs({ text: 'l' }, { text: 'l', fontFamily: 'Wingdings' }), new Set(), 10000));
+    expect(repeated).toEqual(expect.arrayContaining([0x6c, 0xf06c, 0x25cf]));
+    // The symbol test is per authored name: the same name in either slot.
+    expect(collectSlideFontDemand(runs({ text: 'l' }, { text: 'l', fontFamilySym: 'Wingdings' }), new Set(), 10000)).toEqual(repeated);
+    // A repeated text that declines still declines.
+    expect(collectSlideFontDemand(runs({ text: 'A' }, { text: 'A' }, { text: '\uf0a7' }), new Set(), 10000)).toBe('all');
+
+    // Exactly the shared collector's answer for the same texts, each added
+    // every time it occurs: the same scalars in the same order, under any
+    // budget and committed set. Leading combining marks (closed with every
+    // starter at the end), marks after a starter, decomposable text, Arabic
+    // letters and mirrored characters all keep state in the collector.
+    const committed = new Set([0x41, 0x301]);
+    for (const texts of [
+      ['\u0301', 'a', '\u0301', 'a', '\u0301'],
+      ['\u3099', '\u304b', '\u3099', '\u304b\u3099', '\u304c', '\u304b'],
+      ['e\u0301', 'e', '\u0301', 'e\u0301', '\u00e9'],
+      ['\u0639', '(', '\u0639', ')', '(', '\u0644\u0627', '\u0639'],
+      ['AB', 'AB', 'A', 'B', '', '', 'AB'],
+    ]) {
+      for (const budget of [2, 9, 14, 40, 10000]) {
+        for (const prior of [new Set<number>(), committed]) {
+          const expected = new FontDemandScalarCollector({ budget, committed: prior });
+          for (const text of texts) if (!expected.add(text)) break;
+          expect(collectSlideFontDemand(runs(...texts.map((text) => ({ text }))), prior, budget),
+            `${JSON.stringify(texts)} @${budget}`).toEqual(expected.result());
+        }
+      }
+    }
+
+    // A run without a face paints in the theme's minor face, whatever its
+    // (absent or empty) a:sym slot: symbol-encoded here, plain otherwise.
+    const themed = (minorFont: string, ...list: Array<Partial<TextRunData>>): Slide =>
+      ({ ...runs(...list), theme: { majorFont: 'Arial', minorFont } }) as Slide;
+    for (const sym of [undefined, null, '']) {
+      const list = [{ text: 'l', fontFamilySym: sym }, { text: 'l', fontFamily: null, fontFamilySym: sym },
+        { text: 'l', fontFamily: '+mj-lt', fontFamilySym: sym }] as unknown as Array<Partial<TextRunData>>;
+      const symbol = new FontDemandScalarCollector({ budget: 10000 });
+      symbol.addSymbolText('l', ['Wingdings', sym]);
+      symbol.addSymbolText('l', ['Wingdings', sym]);
+      symbol.addSymbolText('l', ['Arial', sym]);
+      expect(collectSlideFontDemand(themed('Wingdings', ...list), new Set(), 10000)).toEqual(symbol.result());
+      expect(collectSlideFontDemand(themed('Calibri', ...list), new Set(), 10000))
+        .toEqual(collectFontDemandScalars(['l'], { budget: 10000 }));
+    }
+  });
+
+  it('demands every label an auto-number scheme can paint, in its marker face', () => {
+    const numbered = (numType: string, fontFamily: string | null = null) => {
+      const value = slide('A');
+      (value.elements[0] as unknown as { textBody: { paragraphs: Array<{ bullet: unknown }> } }).textBody.paragraphs[0].bullet =
+        { type: 'autoNum', numType, startAt: 3, color: null, fontFamily };
+      const demand = collectSlideFontDemand(value, new Set(), 10000);
+      expect(demand, numType).not.toBe('all');
+      return new Set(demand as number[]);
+    };
+    const has = (set: Set<number>, text: string) => [...text].every((ch) => set.has(ch.codePointAt(0)!));
+    expect(has(numbered('arabicPeriod'), '0123456789.-')).toBe(true);
+    expect(has(numbered('arabicParenBoth'), '()0123456789')).toBe(true);
+    expect(has(numbered('alphaLcParenR'), 'abcdefghijklmnopqrstuvwxyz)0123456789')).toBe(true);
+    expect(has(numbered('alphaUcPeriod'), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ.')).toBe(true);
+    expect(has(numbered('romanUcPeriod'), 'MDCLXVI.')).toBe(true);
+    expect(has(numbered('romanLcPlain'), 'mdclxvi')).toBe(true);
+    expect(has(numbered('arabicDbPeriod'), '０１２３４５６７８９.')).toBe(true);
+    // Every label of every counter is inside its scheme's demand.
+    for (const numType of ['arabicPlain', 'arabicPeriod', 'arabicParenR', 'arabicParenBoth', 'arabicDbPlain', 'arabicDbPeriod', 'alphaLcPlain', 'alphaLcPeriod', 'alphaLcParenR', 'alphaLcParenBoth', 'alphaUcPlain', 'alphaUcPeriod', 'alphaUcParenR', 'alphaUcParenBoth', 'romanLcPlain', 'romanLcPeriod', 'romanLcParenR', 'romanLcParenBoth', 'romanUcPlain', 'romanUcPeriod', 'romanUcParenR', 'romanUcParenBoth', 'circleNumDbPlain']) {
+      const demand = numbered(numType);
+      for (const counter of [-42, 0, ...Array.from({ length: 200 }, (_, i) => i + 1), 999, 3999, 4000, 12345, 1_000_000]) {
+        expect(has(demand, formatAutoNum(counter, numType)), `${numType} ${counter}`).toBe(true);
+      }
+    }
+    // An unknown scheme formats as arabicPeriod.
+    expect(has(numbered('thaiAlphaPeriod'), '0123456789.')).toBe(true);
+    // A symbol-encoded marker face demands its conversions too.
+    expect(has(numbered('arabicPeriod', 'Wingdings'), '\uf030')).toBe(true);
+  });
+
+  it('demands rotated and vertical bodies, including eaVert and stacked vertical forms', () => {
+    const vertical = (vert: string, text: string) => {
+      const value = slide(text);
+      (value.elements[0] as unknown as { textBody: { vert: string } }).textBody.vert = vert;
+      return collectSlideFontDemand(value, new Set(), 10000);
+    };
+    for (const vert of ['vert', 'vert270', 'mongolianVert']) {
+      expect(vertical(vert, 'Ab、「')).toEqual(collectSlideFontDemand(slide('Ab、「'), new Set(), 10000));
+    }
+    // 、 → U+FE11, 「 → U+FE41, （ → U+FE35 (core vertical-orientation).
+    for (const vert of ['eaVert', 'wordArtVert', 'wordArtVertRtl']) {
+      expect(vertical(vert, 'あ、「（'), vert).toEqual(expect.arrayContaining([0x3042, 0x3001, 0xfe11, 0x300c, 0xfe41, 0xff08, 0xfe35]));
+    }
+  });
+
+  it('demands a warped body like its flat text', () => {
+    const warped = slide('Arched title');
+    (warped.elements[0] as unknown as { textBody: Record<string, unknown> }).textBody.textWarp = { preset: 'textArchUp', adj: [] };
+    expect(collectSlideFontDemand(warped, new Set(), 10000)).toEqual(collectSlideFontDemand(slide('Arched title'), new Set(), 10000));
+  });
+
+  it('demands every field\'s painted text', () => {
+    expect(collectSlideFontDemand(slide('11/14/2026', { fieldType: 'datetime1' }), new Set(), 10000))
+      .toEqual(collectSlideFontDemand(slide('11/14/2026'), new Set(), 10000));
+    expect(collectSlideFontDemand(slide('Fußnote', { fieldType: 'unknown', caps: 'all' }), new Set(), 10000))
+      .toEqual(expect.arrayContaining([0xdf, 0x53]));
   });
 
   it('demands what char markers and symbol-encoded faces may paint, not every subset', () => {
@@ -79,12 +247,15 @@ describe('complete conservative PPTX paint demand', () => {
     expect(collectSlideFontDemand(tight, new Set(), 20)).toBe('all');
   });
 
-  it('keeps bidi mirroring unmodelled and preserves the no-source preflight', () => {
+  it('demands mirrored partners of right-to-left text and preserves the no-source preflight', () => {
     const rtl = slide('(');
     (rtl.elements[0] as { textBody: { paragraphs: Array<{ rtl?: boolean }> } }).textBody.paragraphs[0].rtl = true;
-    expect(collectSlideFontDemand(rtl, new Set(), 10000)).toBe('all');
-    expect(collectSlideFontDemand(slide('א('), new Set(), 10000)).toBe('all');
-    expect(collectSlideFontDemand(slide('\u202e('), new Set(), 10000)).toBe('all');
+    expect(collectSlideFontDemand(rtl, new Set(), 10000)).toEqual(expect.arrayContaining([0x28, 0x29]));
+    expect(collectSlideFontDemand(slide('א«'), new Set(), 10000)).toEqual(expect.arrayContaining([0x5d0, 0xab, 0xbb]));
+    expect(collectSlideFontDemand(slide('\u202e['), new Set(), 10000)).toEqual(expect.arrayContaining([0x202e, 0x5b, 0x5d]));
+    // A symbol conversion's target mirrors too (Symbol U+F0A3 → ≤, mirrored ≥).
+    const symbol = slide('\uf0a3', { fontFamily: 'Symbol' });
+    expect(collectSlideFontDemand(symbol, new Set(), 10000)).toEqual(expect.arrayContaining([0x2264, 0x2265]));
     const ordinary = new PresentationPreflightBuilder(bootstrap);
     ordinary.addSlide(slide('A'));
     ordinary.addSlide({ ...slide('B'), index: 1 });
@@ -92,7 +263,7 @@ describe('complete conservative PPTX paint demand', () => {
   });
 
   it('commits only new scalar deltas and rolls back both scalars and all transitions', () => {
-    const builder = new PresentationPreflightBuilder(bootstrap, { collectFontDemand: collectSlideFontDemand });
+    const builder = new PresentationPreflightBuilder(bootstrap, { collectFontDemand: collectSlideFontDemand, officeFaceWeight });
     builder.addSlide(slide('A'));
     expect(builder.currentFontPreloadDemandDelta).toEqual(expect.arrayContaining([65]));
     builder.prepareSlide({ ...slide('B'), index: 1 }).rollback();
@@ -108,14 +279,14 @@ describe('complete conservative PPTX paint demand', () => {
 
   it('collapses optional demand growth before exceeding the retained projection allowance', () => {
     expect(collectSlideFontDemand(slide('ABCDEFG'), new Set(), 3)).toBe('all');
-    const baseline = new PresentationPreflightBuilder(bootstrap, { collectFontDemand: collectSlideFontDemand });
+    const baseline = new PresentationPreflightBuilder(bootstrap, { collectFontDemand: collectSlideFontDemand, officeFaceWeight });
     const first = baseline.prepareSlide(slide('漢'));
     const firstPeak = first.projectedBytes;
     first.commit();
     const second = baseline.prepareSlide({ ...slide('字'), index: 1 });
     const limit = Math.max(firstPeak, second.projectedBytes) + 10;
     second.commit();
-    const builder = new PresentationPreflightBuilder(bootstrap, { collectFontDemand: collectSlideFontDemand, maxProjectionBytes: limit });
+    const builder = new PresentationPreflightBuilder(bootstrap, { collectFontDemand: collectSlideFontDemand, officeFaceWeight, maxProjectionBytes: limit });
     builder.addSlide(slide(Array.from({ length: 300 }, (_, i) => String.fromCodePoint(0x4e00 + i)).join('')));
     builder.addSlide({ ...slide('字'), index: 1 });
     expect(builder.projectedBytes).toBeLessThanOrEqual(limit);
@@ -129,12 +300,12 @@ it('evicts optional precision under metadata pressure without rejecting or retai
   const secondSlide = { ...slide('B'), index: 1, notes: 'n'.repeat(200) };
   // Mandatory font-source facts are charged whenever demand is collected; a
   // collector that always declines to 'all' retains no optional precision.
-  const ordinary = new PresentationPreflightBuilder(bootstrap, { collectFontDemand: () => 'all' });
+  const ordinary = new PresentationPreflightBuilder(bootstrap, { collectFontDemand: () => 'all', officeFaceWeight });
   ordinary.addSlide(firstSlide);
   const required = ordinary.prepareSlide(secondSlide);
   const limit = required.projectedBytes;
   required.rollback();
-  const builder = new PresentationPreflightBuilder(bootstrap, { collectFontDemand: collectSlideFontDemand, maxProjectionBytes: limit });
+  const builder = new PresentationPreflightBuilder(bootstrap, { collectFontDemand: collectSlideFontDemand, officeFaceWeight, maxProjectionBytes: limit });
   builder.addSlide(firstSlide);
   expect(builder.currentFontPreloadDemandDelta).toEqual(expect.arrayContaining([65]));
   const prepared = builder.prepareSlide(secondSlide);
@@ -149,13 +320,13 @@ it('evicts optional precision under metadata pressure without rejecting or retai
 
 
 it('does not repair a saturated mandatory projection by subtracting optional cache bytes', () => {
-  const ordinary = new PresentationPreflightBuilder(bootstrap, { collectFontDemand: () => 'all' });
+  const ordinary = new PresentationPreflightBuilder(bootstrap, { collectFontDemand: () => 'all', officeFaceWeight });
   ordinary.addSlide(slide('A'));
   const second = { ...slide('B'), index: 1, notes: 'n'.repeat(100) };
   const probe = ordinary.prepareSlide(second);
   const limit = probe.projectedBytes;
   probe.rollback();
-  const builder = new PresentationPreflightBuilder(bootstrap, { collectFontDemand: collectSlideFontDemand, maxProjectionBytes: limit });
+  const builder = new PresentationPreflightBuilder(bootstrap, { collectFontDemand: collectSlideFontDemand, officeFaceWeight, maxProjectionBytes: limit });
   builder.addSlide(slide('A'));
   const prior = builder.currentFontPreloadDemandDelta;
   expect(() => builder.prepareSlide({ ...second, notes: 'n'.repeat(1000) })).toThrow('hard limit');
@@ -166,7 +337,7 @@ it('does not repair a saturated mandatory projection by subtracting optional cac
 it.each([0, 1])('falls back to all when an empty delta array cannot fit its two-byte JSON representation (%i bytes free)', (remaining) => {
   const first = slide('A');
   const second = { ...slide('A'), index: 1, notes: 'n'.repeat(200) };
-  const probe = new PresentationPreflightBuilder(bootstrap, { collectFontDemand: collectSlideFontDemand });
+  const probe = new PresentationPreflightBuilder(bootstrap, { collectFontDemand: collectSlideFontDemand, officeFaceWeight });
   probe.addSlide(first);
   const prepared = probe.prepareSlide(second);
   const limit = prepared.projectedBytes - 2 + remaining;
@@ -174,7 +345,7 @@ it.each([0, 1])('falls back to all when an empty delta array cannot fit its two-
   const ordinary = new PresentationPreflightBuilder(bootstrap, { maxProjectionBytes: limit });
   ordinary.addSlide(first);
   ordinary.addSlide(second);
-  const filtered = new PresentationPreflightBuilder(bootstrap, { collectFontDemand: collectSlideFontDemand, maxProjectionBytes: limit });
+  const filtered = new PresentationPreflightBuilder(bootstrap, { collectFontDemand: collectSlideFontDemand, officeFaceWeight, maxProjectionBytes: limit });
   filtered.addSlide(first);
   expect(() => filtered.addSlide(second)).not.toThrow();
   expect(filtered.finish().fontPreloadDemand).toBeUndefined();

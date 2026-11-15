@@ -81,6 +81,7 @@ const sectionId = (title: string): string => title
                 <Code code={example.code} lang="ts" themes={codeThemes} defaultColor={false} />
               </div>
             ))}
+            {section.links && <p class="article-links">{section.links.map((link, index) => <>{index > 0 && ' · '}<a href={link.href}>{link.label} →</a></>)}</p>}
           </section>
         ))}
         <div class="article-next">
@@ -114,6 +115,7 @@ const sectionId = (title: string): string => title
   .article-toc a { color: var(--text-dim); font-size: 13px; line-height: 1.4; }
   .article-toc a:hover { color: var(--accent); }
   .article-body section + section { margin-top: 64px; }
+  .article-links a { color: var(--accent); text-decoration: underline; text-underline-offset: 3px; }
   .article-body h2 { font-size: 28px; letter-spacing: -.035em; }
   .article-body h3 { margin-top: 0; font: 600 12px var(--mono); letter-spacing: .02em; color: var(--text-dim); }
   .article-section-meta { display: grid; grid-template-columns: 112px minmax(0, 1fr); gap: 8px 18px; margin: 20px 0 26px; padding: 18px 20px; border-left: 3px solid var(--border); background: var(--bg-elev); }

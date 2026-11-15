@@ -32,10 +32,16 @@ XLSX and PPTX, on every engine `load()` and every Viewer, in `mode: 'main'` and
 A `FontSource` is opaque. Create every entry with one of the factories
 (`googleFonts()`, `fontCssApi()`, `fontCss()`, `fontFiles()`,
 `fontResolver()`) in the page that loads the document. Its contents are not
-part of the API, and `fonts` accepts only values those factories returned
-(from any copy of the library loaded in the page): a copy of a source
-(spread, `structuredClone`, JSON) or a hand-written object throws a
-`TypeError`.
+part of the API, and `fonts` accepts only values those factories returned: a
+copy of a source (spread, `structuredClone`, JSON) or a hand-written object
+throws a `TypeError`.
+
+The guarantee is for one copy of the library: a source is accepted by the
+`load()` and Viewers of the same library copy (the same installed version and
+bundle) whose factory created it, from any of its entries. If a page loads
+two copies of the library, passing one copy's source to the other is best
+effort only: it may work, but it is not guaranteed and can change in any
+release. Create each source with the copy that loads the document.
 
 `fonts: [googleFonts()]` sends the same stylesheet requests as
 `useGoogleFonts: true`. In 0.90, DOCX and XLSX also load only the
@@ -44,15 +50,16 @@ PPTX already did.
 
 While the alias exists:
 
-- `useGoogleFonts: true` is converted to `fonts: [googleFonts()]` before
-  loading starts.
+- `useGoogleFonts: true` without `fonts` is converted to
+  `fonts: [googleFonts()]` before loading starts.
 - `useGoogleFonts: false` does nothing, but still warns.
-- `useGoogleFonts: true` together with `fonts` throws a `TypeError`. Add
-  `googleFonts()` to `fonts` instead.
+- When `fonts` is also given, `fonts` wins: `useGoogleFonts` adds nothing to
+  it, whatever its value, and still warns. It never throws. Add
+  `googleFonts()` to `fonts` yourself if you want it in the list.
 - The warning is printed once per JavaScript realm (page, popup or worker):
 
   ```text
-  [ooxml] useGoogleFonts is deprecated: from 0.91.0 it is ignored (no web fonts are loaded). Replace it with fonts: [googleFonts()] — import { googleFonts } from '@silurus/ooxml' (also exported from the docx/xlsx/pptx entries). A custom CSS origin is googleFonts({ cssOrigin }); other sources are fontCssApi(), fontCss(), fontFiles() and fontResolver(). See docs/migration-0.90.md.
+  [ooxml] useGoogleFonts is deprecated: from 0.91.0 it is ignored (no web fonts are loaded). Replace it with fonts: [googleFonts()] — import { googleFonts } from '@silurus/ooxml' (also exported from the docx/xlsx/pptx entries). When fonts is also given, fonts wins and useGoogleFonts is ignored. A Google-compatible mirror is googleFonts({ baseUrl }); other sources are fontCssApi(), fontCss(), fontFiles() and fontResolver(). See https://github.com/yukiyokotani/office-open-xml-viewer/blob/main/docs/migration-0.90.md.
   ```
 
 The VS Code extension keeps its `ooxmlViewer.useGoogleFonts` setting. It now
@@ -60,20 +67,22 @@ passes `fonts: [googleFonts()]`, so its users see no warning.
 
 ## Font source kinds
 
-### A Google-compatible mirror or proxy: `googleFonts({ cssOrigin })`
+### A Google-compatible mirror or proxy: `googleFonts({ baseUrl })`
 
 ```ts
-fonts: [googleFonts({ cssOrigin: 'https://fonts.googleapis.cn' })]
-fonts: [googleFonts({ cssOrigin: 'https://fonts.internal.example:8443' })]
+fonts: [googleFonts({ baseUrl: 'https://fonts.googleapis.cn' })]
+fonts: [googleFonts({ baseUrl: 'https://fonts.internal.example:8443' })]
 ```
 
-`cssOrigin` is a scheme, host and optional port (`http:` or `https:`). One
-trailing slash is accepted. A path, query or user name throws a `TypeError`
-when `googleFonts()` is called, before any load. The requests keep the Google
+In 0.90, `baseUrl` must be an origin: a scheme, host and optional port
+(`http:` or `https:`). One trailing slash is accepted. A path, query or user
+name throws a `TypeError` that names `baseUrl` when `googleFonts()` is
+called, before any load. A later release may accept a path prefix; until
+then, see the proxy example below. The requests keep the Google
 CSS2 path and query (`/css2?family=…&display=swap`), so the origin must serve
 that API. The library sends no stylesheet request to `fonts.googleapis.com`.
 
-`cssOrigin` sets only where the stylesheet requests start:
+`baseUrl` sets only where the stylesheet requests start:
 
 - Redirects are followed. The stylesheet is read from the final URL, which can
   be on another origin.
@@ -89,9 +98,9 @@ origins share no stylesheet, cache entry or registered face.
 
 A proxy that serves the Google CSS2 API under a path prefix
 (`https://proxy.example/google-fonts/css2?…`) is not an origin, so
-`cssOrigin` cannot express it. Use [`fontCssApi()`](#another-css-api-fontcssapi)
+`baseUrl` cannot express it in 0.90. Use [`fontCssApi()`](#another-css-api-fontcssapi)
 with the full template, the families the proxy serves with their CSS2 axes,
-and the default substitutes:
+and the default substitutions:
 
 ```ts
 import { fontCssApi, googleFontsSubstitutions } from '@silurus/ooxml';
@@ -100,38 +109,41 @@ const TEXT = 'ital,wght@0,400;0,700;1,400;1,700';
 fonts: [fontCssApi({
   urlTemplate: 'https://proxy.example/google-fonts/css2?family={family}:{query}&display=swap',
   families: { Carlito: TEXT, Caladea: TEXT, 'Noto Sans JP': 'wght@400;700' },
-  substitutes: googleFontsSubstitutions,
+  substitutions: googleFontsSubstitutions,
 })]
 ```
 
 List every family the proxy should serve: CSS2 rejects an axis query a family
 does not have, and without `families` every demanded family is requested.
 
-### Substitutes for `googleFonts()`
+### Substitutions for `googleFonts()`
 
 `googleFonts()` uses `googleFontsSubstitutions` by default: the
 [Office substitutions](#substitutions) followed by Google's names for the
 native Noto CJK families (`Noto Sans CJK JP` → `Noto Sans JP`, …). Pass
-`substitutes` to replace that list. To extend it, spread it:
+`substitutions` to replace that list. To extend it, spread it:
 
 ```ts
 import { googleFonts, googleFontsSubstitutions } from '@silurus/ooxml';
 
 fonts: [googleFonts({
-  substitutes: [...googleFontsSubstitutions, { for: 'Corporate Sans', use: 'Open Sans' }],
+  substitutions: [...googleFontsSubstitutions, { for: 'Corporate Sans', use: 'Open Sans' }],
 })]
 ```
 
 `googleFonts()` requests only the families in its catalog (the Office
 stand-ins, the Noto script families and a few popular web fonts) plus the
-families you add with `families`, so a substitute's `use` must be one of them.
+families you add with `additionalFamilies`, so a substitution's `use` must be
+one of them. The catalog and the default substitution list are the current
+implementation's contents: a minor release may add, remove or change entries.
+Name the families and substitutions your application depends on yourself.
 
-### More Google families: `googleFonts({ families })`
+### More Google families: `googleFonts({ additionalFamilies })`
 
 ```ts
 fonts: [googleFonts({
-  families: { Inter: 'wght@400;700', 'Source Serif 4': 'ital,wght@0,400;0,700;1,400;1,700' },
-  substitutes: [...googleFontsSubstitutions, { for: 'Corporate Sans', use: 'Inter' }],
+  additionalFamilies: { Inter: 'wght@400;700', 'Source Serif 4': 'ital,wght@0,400;0,700;1,400;1,700' },
+  substitutions: [...googleFontsSubstitutions, { for: 'Corporate Sans', use: 'Inter' }],
 })]
 ```
 
@@ -139,7 +151,10 @@ Each key is a Google Fonts family (Google's spelling), and each value is its
 CSS2 axis query, sent after `family=<name>:`. Request only axes the family
 has: CSS2 answers an unknown axis with an HTTP 400, which fails the family. A
 key that names a catalog family (case-insensitively) replaces that family's
-query. The catalog and the default substitutes are otherwise unchanged.
+query. The catalog and the default substitutions are otherwise unchanged.
+
+`additionalFamilies` adds to the preset's catalog. It is not the `families`
+option of `fontCssApi()`, which is an allow-list that replaces everything.
 
 ### Another CSS API: `fontCssApi()`
 
@@ -149,7 +164,7 @@ import { fontCssApi, officeFontSubstitutions } from '@silurus/ooxml';
 fonts: [fontCssApi({
   urlTemplate: 'https://fonts.example/css?family={family}:{query}',
   query: '400,700',
-  substitutes: officeFontSubstitutions,
+  substitutions: officeFontSubstitutions,
 })]
 ```
 
@@ -172,7 +187,7 @@ not the last in the chain.
 ### A self-hosted stylesheet: `fontCss()`
 
 ```ts
-fonts: [fontCss({ url: '/fonts/office.css', substitutes: officeFontSubstitutions })]
+fonts: [fontCss({ url: '/fonts/office.css', substitutions: officeFontSubstitutions })]
 ```
 
 The stylesheet may describe any number of families. Documents that use the
@@ -211,7 +226,7 @@ fonts: [fontFiles({
     { family: 'Brand', url: 'data:font/woff2;base64,…' },
     { family: 'Brand Display', data: brandDisplayBytes },
   ],
-  substitutes: officeFontSubstitutions,
+  substitutions: officeFontSubstitutions,
 })]
 ```
 
@@ -238,13 +253,16 @@ import { fontResolver, googleFonts, officeFontSubstitutions } from '@silurus/oox
 const privateFonts = fontResolver(async (demand, { signal }) => {
   const response = await fetch('/api/fonts/resolve', {
     method: 'POST',
-    body: JSON.stringify({ families: demand.families }),
+    body: JSON.stringify({
+      authoredFamilies: demand.authoredFamilies,
+      fallbackFamilies: demand.fallbackFamilies,
+    }),
     signal,
   });
   return response.json(); // FontFaceDeclaration[]: { family, url | data, … }
-}, { substitutes: officeFontSubstitutions });
+}, { substitutions: officeFontSubstitutions });
 
-fonts: [privateFonts, googleFonts({ cssOrigin: 'https://fonts.internal.example' })]
+fonts: [privateFonts, googleFonts({ baseUrl: 'https://fonts.internal.example' })]
 ```
 
 The function runs in the page that created it. In worker mode, the worker
@@ -261,13 +279,16 @@ requests.
 This contract is settled for 0.90. Later versions may add fields to `demand`
 and `context`; they will not remove or change these.
 
-- `demand.families` holds the authored families the host does not have and
-  that no earlier call answered. `demand.fallbackFamilies` holds the library's
-  script fallback families for the text, such as Noto families for CJK.
+- `demand.authoredFamilies` holds the families the document names that the
+  host does not have and that no earlier call answered.
+  `demand.fallbackFamilies` holds the library's script fallback families for
+  the text, such as Noto families for CJK. Send both lists to your service: a
+  resolver that reads only `authoredFamilies` never serves the fallback
+  families.
 - `demand` carries family names only, never document text.
 - Answer each family the way an `@font-face` stylesheet declares it: return
   every face you have for it (all weights, styles and `unicode-range`
-  subsets), or nothing for it. With `substitutes`, a family may also be
+  subsets), or nothing for it. With `substitutions`, a family may also be
   answered with faces of its substitute's `use` family. A family you do not
   answer goes to the next source.
 - A family is resolved once per document, so a face you leave out is not asked
@@ -281,7 +302,16 @@ and `context`; they will not remove or change these.
   cannot be driven through it. Declare static `unicode-range` subsets instead.
 
 The function returns `FontFaceDeclaration` objects with the same fields as
-`fontFiles()` faces. URLs must be absolute.
+`fontFiles()` faces. URLs must be absolute. A returned object is checked more
+leniently than `fontFiles()` input, so one service can answer several library
+versions:
+
+- properties the library does not know are ignored;
+- `weight` may be a number from 1 to 1000 (`700` means `'700'`). `stretch`
+  and the other descriptors are strings.
+
+`fontFiles()` itself stays strict: an unknown property or a numeric `weight`
+throws a `TypeError`.
 
 Documents that need the same families from the same function at the same time
 share one call. `signal` is aborted only when no document is waiting for that
@@ -289,7 +319,9 @@ call any more: every document sharing it was destroyed or reached its
 resolution deadline, or, in worker mode, the worker cancelled the request.
 Destroying one of several documents that share a call does not abort it.
 
-If the answer is not an array or contains a malformed declaration, every family
+If the answer is not an array or contains a malformed declaration (a missing
+`family`, both or neither of `url` and `data`, a known field of the wrong
+type), every family
 of that call keeps its host fallback, and a `console.warn` reports the problem.
 If the function throws, the same happens and the warning includes the error
 message. More than 2,048 declarations or a face over 30 MiB fails the call's
@@ -301,7 +333,7 @@ reject the load.
 Sources are consulted per family, in option order:
 
 1. Each source tries the family itself, then the `use` family of each of its
-   matching `substitutes`.
+   matching `substitutions`.
 2. The first source that has a face for the family claims it. Later sources
    are never consulted for that family.
 3. A source that does not serve the family passes it to the next source.
@@ -320,9 +352,9 @@ Each font load step prints one `console.warn` listing the families that newly
 failed. There is no strict mode
 and no callback. The library therefore never retries a failing mirror against
 the public Google origin: it requests Google's stylesheets only when
-`googleFonts()` without `cssOrigin` is in the list. Where a working mirror's
+`googleFonts()` without `baseUrl` is in the list. Where a working mirror's
 redirects and font URLs lead is up to the mirror (see
-[the mirror section](#a-google-compatible-mirror-or-proxy-googlefonts-cssorigin-)). Failures are not cached, so a document opened later
+[the mirror section](#a-google-compatible-mirror-or-proxy-googlefonts-baseurl-)). Failures are not cached, so a document opened later
 retries the same source.
 
 Within one document a family is decided once. A family that a source claimed
@@ -357,23 +389,32 @@ the library's list of openly licensed stand-ins for Office faces:
 - several Arabic faces → Noto Naskh Arabic or Noto Sans Arabic, for Arabic
   text only
 
-Any source can use it, or a list of your own, through `substitutes`:
+Any source can use it, or a list of your own, through `substitutions`:
 
 ```ts
-substitutes: [...officeFontSubstitutions, { for: 'Corporate Sans', use: 'Inter' }]
+substitutions: [...officeFontSubstitutions, { for: 'Corporate Sans', use: 'Inter' }]
 ```
 
 An entry is `{ for, use, script? }`:
 
 - `for`: the authored family, matched case-insensitively.
 - `use`: the family the source serves.
-- `script`: optional. `'arabic'` limits the substitute to Arabic text.
+- `script`: optional. `'arabic'` limits the substitution to Arabic text. Its
+  type, `FontSubstituteScript`, is exported from every entry.
 
 The renderers use a substitution only when its face actually loaded.
 `googleFonts()` already includes `officeFontSubstitutions`, plus Google's names
-for the Noto CJK families.
+for the Noto CJK families. The entries of both lists are the current
+implementation's and may change in a minor release.
 
 ## Requirements and limits
+
+The numbers in this section (deadlines, parallel downloads, size and count
+limits, and the thresholds under
+[Implementation notes](#implementation-notes)) are the values the current
+implementation uses. They are documented so that you can size a deployment,
+not as API: a minor release may change them. Do not build logic on the exact
+values; read `error.violation` for the limit that applied.
 
 ### Network, CORS and cookies
 
@@ -431,6 +472,10 @@ for the Noto CJK families.
 - For Google Fonts, the policy is
   `connect-src https://fonts.googleapis.com https://fonts.gstatic.com` and
   `font-src https://fonts.gstatic.com`. A mirror uses its own two origins.
+- `googleFonts()` on its default origin may request a font file a second
+  time to register it from its URL (normally answered from the HTTP cache);
+  the same two directives cover it. See
+  [Implementation notes](#implementation-notes).
 
 ### Resolver buffers and timing
 
@@ -461,7 +506,10 @@ for the Noto CJK families.
 - A face file the library fetches itself (see
   [Network, CORS and cookies](#network-cors-and-cookies)) is
   fetched in the face-loading phase,
-  within its deadline, at most six at a time. A face that cannot be fetched
+  within its deadline, at most six at a time per page or worker. Face files
+  of `googleFonts()` on its default origin (`fonts.gstatic.com`, served over
+  HTTP/2 and HTTP/3) are fetched up to 32 at a time, in a pool of their own.
+  A face that cannot be fetched
   fails like a face that cannot load: it is left out with a `console.warn`,
   and the family is not passed to another source or substitute. For XLSX in
   worker mode, the viewer and the worker share each fetch and its outcome.
@@ -482,9 +530,10 @@ for the Noto CJK families.
 ### Resource limits
 
 Font sources are application configuration, so they have fixed limits. These
-limits are not part of `resourceLimits`.
+limits are not part of `resourceLimits`. The values are the current ones (see
+the note at the top of this section).
 
-| Limit | Value |
+| Limit | Current value |
 | --- | --- |
 | Stylesheet size | 1 MiB per stylesheet |
 | Declarations | 2,048 per document |
@@ -496,7 +545,12 @@ limits are not part of `resourceLimits`.
 Limits that can be checked up front make the factory throw immediately, with
 an `OoxmlError` whose `code === 'font-source-limit'` and whose
 `error.violation` holds `{ resource: 'font-source', quota, metric, limit,
-observed }`: a misconfigured source fails fast.
+observed }`: a misconfigured source fails fast. A factory can throw the
+quotas `'declarations'` and `'face'` (`fontFiles()`) and `'url'` (every
+factory that takes a URL or composes one: `fontCssApi()`, `googleFonts()`,
+`fontCss()`, `fontFiles()`). `quota` and `metric` are open-ended strings: a
+later release may report values this one does not know, so give a `switch`
+over them a default branch.
 
 A limit reached while a document loads (a stylesheet, resolver answer or font
 file over its limit, a document that asks for more families or declarations
@@ -514,7 +568,26 @@ The library does not count the bytes of `url` faces the browser downloads
 decoded size). Font files the library downloads itself (see
 [Network, CORS and cookies](#network-cors-and-cookies)) count like `data`
 faces, so a library-fetched face file over 30 MiB fails that face, with a
-warning. Reading a WOFF or WOFF2 file's metric tables inflates
+warning.
+
+### Implementation notes
+
+These details describe how the current implementation behaves. None of them
+is API, and any of them may change in a minor release.
+
+In a page that no service worker controls, `googleFonts()` on its default
+origin registers some downloaded files from their URLs, so the browser
+decodes them off the main thread: the files of a load beyond the first MiB
+it decodes from bytes, and the files that arrive faster than the load can
+decode them (typically files answered from a warm cache: a load decodes
+from bytes only while that has taken at most half of its time so far). That
+second request is normally answered from the HTTP cache (fonts.gstatic.com
+files are cacheable for a year); where the cache is disabled, each such
+file downloads twice. A file whose second request fails is registered
+from the downloaded bytes. Workers, pages under a service worker and every
+other source register the downloaded bytes.
+
+Reading a WOFF or WOFF2 file's metric tables inflates
 only those tables (for WOFF2, the compressed stream up to the last of them).
 Everything one file's decode inflates and allocates is held to 120 MiB in
 total, checked against the declared sizes before any buffer is allocated,

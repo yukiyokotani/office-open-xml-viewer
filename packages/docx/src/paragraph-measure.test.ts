@@ -1,3 +1,5 @@
+import type { DocxCompatSettingsInput } from './layout/compat-profile.js';
+import { withCompat } from './test-support/compat-environment.test-support.js';
 import { describe, expect, it } from 'vitest';
 import { DEFAULT_KINSOKU_RULES } from '@silurus/ooxml-core';
 import type { FloatRect } from './float-layout.js';
@@ -43,13 +45,13 @@ const measurer: TextMeasurer = {
 };
 
 const environment = (
-  overrides: Partial<ParagraphMeasurementEnvironment> = {},
+  overrides: Partial<ParagraphMeasurementEnvironment> & DocxCompatSettingsInput = {},
 ): ParagraphMeasurementEnvironment => ({
   pageIndex: 0,
   totalPages: 1,
   pageWritingMode: 'horizontal-tb',
   documentHasEastAsianText: false,
-  ...overrides,
+  ...withCompat(overrides),
 });
 
 const RESOLVED_EA_FAMILY = 'Arbitrary Resolved EA';

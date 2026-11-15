@@ -1,3 +1,4 @@
+import { compatProfile } from '../test-support/compat-environment.test-support.js';
 import { describe, expect, it } from 'vitest';
 import { symbolTextToUnicodeSegments } from '@silurus/ooxml-core';
 import type { TextLayoutService } from './text.js';
@@ -232,7 +233,7 @@ describe('resolveNumberingMarkerGeometry', () => {
     [11, 7.5], [12, 7.5], [13, 7.5],
   ])('uses the suffix font advance at marker size in mode %s', (compatibilityMode, suffixPt) => {
     const input = { authoredFirstIndentPt: 0, physicalIndentLeftPt: 0,
-      tabStops: [], defaultTabPt: 36, compatibilityMode, baseRtl: false };
+      tabStops: [], defaultTabPt: 36, compat: compatProfile({ compatibilityMode }), baseRtl: false };
     const geometry = resolveNumberingMarkerGeometry(
       { numId: 1, level: 0, format: 'decimal', text: '1.', suff: 'space', indentLeft: 0, tab: 36 },
       { fontSizePt: 12, fonts: { ascii: 'Courier New', eastAsia: 'Courier New', complexScript: 'Courier New' },
@@ -260,7 +261,7 @@ describe('resolveNumberingMarkerGeometry', () => {
       { fontSizePt: 12, fonts: { ascii: 'Courier New', eastAsia: 'Courier New', complexScript: 'Courier New' },
         weight: 400, style: 'normal', complexScript: false, ...markerPatch },
       { authoredFirstIndentPt: 0, physicalIndentLeftPt: 0, tabStops: [], defaultTabPt: 36,
-        compatibilityMode: 15, baseRtl: false, ...inputPatch },
+        compat: compatProfile({ compatibilityMode: 15 }), baseRtl: false, ...inputPatch },
       suffixService,
     );
     expect(geometry.bodyOffsetPt - geometry.markerWidthPt).toBe(7.5);

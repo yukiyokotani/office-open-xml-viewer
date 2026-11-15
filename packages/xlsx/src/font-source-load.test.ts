@@ -81,6 +81,33 @@ describe('XLSX font-source demand', () => {
     expect(demand.take()).toBeNull();
   });
 
+  it('demands for printable-ASCII text in a style font exactly what the same text demands as a rich run', () => {
+    // A rich run names its face, so it is always collected; plain shared and
+    // cell text in a style font must add the same scalars (none beyond the
+    // sentinel text), a symbol-encoded style font's conversions included.
+    const texts = ['Total', '100%', "<=>~ 'a'", ''];
+    for (const fonts of [[font('Calibri')], [font('Calibri'), font('Wingdings')]]) {
+      const cellXfs = fonts.map((_, fontId) => ({ numFmtId: 0, fontId, fillId: 0, borderId: 0 }));
+      const cells = (rich: boolean): Row[] => fonts.flatMap((face, styleIndex) => texts.map((text) => ({
+        index: 1, height: null, cells: [{
+          col: 1, row: 1, styleIndex,
+          value: { type: 'text', text, ...(rich ? { runs: [{ text, font: { name: face.name } }] } : {}) },
+        }],
+      }) as unknown as Row));
+      const collected = (rich: boolean) => {
+        const demand = new XlsxFontDemand(workbook({
+          fonts, cellXfs,
+          sharedStrings: texts.map((text) => (rich ? { text, runs: [{ text, font: { name: 'Calibri' } }] } : { text })) as never,
+        }), 'jp', OFFICE_FONT_SUBSTITUTIONS);
+        const first = demand.take();
+        demand.rows(cells(rich), sheet([]));
+        return [first, demand.take()];
+      };
+      expect(collected(false)).toEqual(collected(true));
+      expect(collected(false)[1]).toBeNull();
+    }
+  });
+
   it('scans only rows a growing worksheet added since the last delta', () => {
     const demand = new XlsxFontDemand(workbook(), 'jp', []);
     demand.take();
@@ -109,14 +136,14 @@ describe('XLSX font-source demand', () => {
 
   it("declines to 'all' for paint the model text does not spell", () => {
     const cases: Array<[string, (demand: XlsxFontDemand) => void, ParsedWorkbook?]> = [
-      ['chart', (d) => d.worksheetParts(sheet([], { charts: [{ chart: { themeMinorFontLatin: 'Aptos' } }] } as never))],
+      ['region-map chart', (d) => d.worksheetParts(sheet([], { charts: [{ chart: { chartType: 'regionMap', themeMinorFontLatin: 'Aptos' } }] } as never))],
+      ['metafile chart fill', (d) => d.worksheetParts(sheet([], { charts: [{ chart: { chartType: 'bar',
+        series: [{ fill: { fillType: 'image', imagePath: 'xl/media/image1.emf', mimeType: 'image/x-emf' } }] } }] } as never))],
+      ['unknown shape text direction', (d) => d.worksheetParts(sheet([], { shapeGroups: [{ shapes: [{ geom: { type: 'preset', name: 'rect' },
+        text: { vert: 'diagonal', paragraphs: [] } }] }] } as never))],
       ['equation', (d) => d.worksheetParts(sheet([], { shapeGroups: [{ shapes: [{ geom: { type: 'preset', name: 'rect' },
         text: { paragraphs: [{ runs: [{ type: 'math', nodes: [], display: false }] }] } }] }] } as never))],
-      ['vertical shape text', (d) => d.worksheetParts(sheet([], { shapeGroups: [{ shapes: [{ geom: { type: 'preset', name: 'rect' },
-        text: { vert: 'eaVert', paragraphs: [] } }] }] } as never))],
       ['metafile picture', (d) => d.worksheetParts(sheet([], { images: [{ imagePath: 'xl/media/image1.emf', mimeType: 'image/x-emf' }] } as never))],
-      ['stacked cell text', () => undefined, workbook({ cellXfs: [{ numFmtId: 0, fontId: 0, textRotation: 255 }] })],
-      ['RTL reading order', () => undefined, workbook({ cellXfs: [{ numFmtId: 0, fontId: 0, readingOrder: 2 }] })],
     ];
     for (const [label, add, wb] of cases) {
       const demand = new XlsxFontDemand(wb ?? workbook(), 'jp', []);
@@ -125,6 +152,31 @@ describe('XLSX font-source demand', () => {
       const scalars = wb ? first?.scalars : demand.take()?.scalars;
       expect(scalars, label).toBe('all');
     }
+  });
+
+  it('demands chart labels, vertical forms and mirrored partners instead of every subset', () => {
+    const scalarsOf = (add: (demand: XlsxFontDemand) => void, wb?: ParsedWorkbook) => {
+      const demand = new XlsxFontDemand(wb ?? workbook(), 'jp', []);
+      const first = demand.take();
+      add(demand);
+      const scalars = wb ? first?.scalars : demand.take()?.scalars;
+      expect(scalars).not.toBe('all');
+      return new Set(scalars as number[]);
+    };
+    // Chart text: authored strings and the painter's synthesized literals.
+    const chart = scalarsOf((d) => d.worksheetParts(sheet([], { charts: [{ chart: { chartType: 'bar', title: '売上', series: [{ name: 'Δ' }] } }] } as never)));
+    for (const ch of '売上Δ≤²') expect(chart.has(ch.codePointAt(0)!), ch).toBe(true);
+    // Vertical presentation forms: stacked cells and vertical shape text.
+    const stacked = scalarsOf(() => undefined, workbook({ cellXfs: [{ numFmtId: 0, fontId: 0, textRotation: 255 }] }));
+    expect(stacked.has(0xfe11)).toBe(true);
+    for (const vert of ['eaVert', 'wordArtVert', 'vert270']) {
+      const shape = scalarsOf((d) => d.worksheetParts(sheet([], { shapeGroups: [{ shapes: [{ geom: { type: 'preset', name: 'rect' },
+        text: { vert, paragraphs: [{ rtl: true, runs: [{ type: 'text', text: 'あ«', fontFace: 'Meiryo', bold: false, italic: false, size: 11 }] }] } }] }] } as never)));
+      expect(shape.has(0xbb), vert).toBe(true);
+      expect(shape.has(0xfe11), vert).toBe(vert !== 'vert270');
+    }
+    // RTL reading order: no longer every subset (mirrored partners are core's).
+    scalarsOf(() => undefined, workbook({ cellXfs: [{ numFmtId: 0, fontId: 0, readingOrder: 2 }] }));
   });
 
   it('demands chart faces and theme Japanese cell faces with the sheet', () => {
@@ -228,12 +280,12 @@ describe('XLSX font-source demand', () => {
         expect(collect(build('مرحبا')).scripts, source).toContain('arabic');
       });
     }
-    it('chart text: its scalars are unprovable (demand is all) and it paints only unscoped substitutes', () => {
+    it('chart text: its scalars are demanded and it paints only unscoped substitutes', () => {
       const demand = new XlsxFontDemand(scopedWorkbook(), 'jp', OFFICE_FONT_SUBSTITUTIONS);
       demand.take();
       demand.worksheetParts(sheet([], { charts: [{ chart: { title: 'مرحبا', titleFontFace: SCOPED } }] } as never));
       const delta = demand.take();
-      expect(delta?.scalars).toBe('all');
+      expect(delta?.scalars).toEqual(expect.arrayContaining([...'مرحبا'].map((ch) => ch.codePointAt(0))));
       expect(delta?.substituteScripts?.['sakkal majalla'] ?? []).toEqual([]);
     });
   });

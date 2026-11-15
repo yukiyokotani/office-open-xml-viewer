@@ -5032,7 +5032,7 @@ function renderStackedTextBody(
     // §21.1.2.2.2: the insertion position has its own run properties. In
     // particular an explicit noStrike must stop inherited final-mark strokes.
     const endRun = para.endRunProperties;
-    const endInput = endRun ? paragraphInputRuns({ ...para, runs: [{ ...endRun, text: ' ' }] },
+    const endInput = endRun ? paragraphInputRuns({ ...para, runs: [{ ...endRun, type: 'text', text: ' ' }] },
       sizePx, color, scale, bodyDefaultBold, bodyDefaultItalic, fontScale, slideNumber, rc, false, ctx)
       .input.find(item => item.type === 'text') : undefined;
     const spacing = (pts: number | null, pct: number | undefined): DrawingMlLineSpacing =>
@@ -8276,8 +8276,8 @@ export function renderTable(
     // Diagonal borders: top-left→bottom-right and bottom-left→top-right. These
     // are never shared between cells, so they are always drawn per-cell (and are
     // not pixel-aligned).
-    if (cell.diagonalTL) {
-      applyStroke(ctx, cell.diagonalTL, scale, {
+    if (cell.diagonalTl) {
+      applyStroke(ctx, cell.diagonalTl, scale, {
         x: colX, y: rowY, w: cellW, h: cellH,
       }, el.rotation);
       ctx.beginPath();
@@ -8285,8 +8285,8 @@ export function renderTable(
       ctx.lineTo(colX + cellW, rowY + cellH);
       ctx.stroke();
     }
-    if (cell.diagonalTR) {
-      applyStroke(ctx, cell.diagonalTR, scale, {
+    if (cell.diagonalTr) {
+      applyStroke(ctx, cell.diagonalTr, scale, {
         x: colX, y: rowY, w: cellW, h: cellH,
       }, el.rotation);
       ctx.beginPath();

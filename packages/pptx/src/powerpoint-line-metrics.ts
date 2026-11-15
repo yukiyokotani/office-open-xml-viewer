@@ -1,7 +1,7 @@
 import { findReferenceFontMetrics, SYNTHETIC_ASCENT_EM, SYNTHETIC_DESCENT_EM } from '@silurus/ooxml-core';
-import { ownValue } from '@silurus/ooxml-core/internal/own-key';
 import { excelDrawingMlLineRatios } from '@silurus/ooxml-core/internal/office-auto-line';
 import type { FontDecorationGeometry } from '@silurus/ooxml-core/internal/font-decoration';
+import { officeLayoutFaceName, type OfficeFaceWeight } from './office-face-name.js';
 
 /**
  * PowerPoint's split of a text line at its baseline (observed behaviour; the
@@ -33,14 +33,10 @@ import type { FontDecorationGeometry } from '@silurus/ooxml-core/internal/font-d
  *       name with Arial's glyphs and usWin metrics);
  *     - Avenir, Menlo and Hiragino Sans → the deck's theme font or a Far
  *       East fallback.
- *   - Only the first two mappings are pinned. Every other system-only face
- *     returns undefined, and the caller keeps its ordinary line model.
+ *   - Only the first two mappings are pinned (`OBSERVED_SUBSTITUTES` in
+ *     office-face-name.ts). Every other system-only face returns
+ *     undefined, and the caller keeps its ordinary line model.
  */
-const OBSERVED_SUBSTITUTES: Readonly<Record<string, string>> = {
-  palatino: 'Palatino Linotype',
-  helvetica: 'Arial',
-  'helvetica neue': 'Arial',
-};
 
 /**
  * Resolved shares keyed by face/weight/style. Font names come from document
@@ -78,25 +74,26 @@ export function powerPointAscentShare(
  * Light" is weight 300; a bold run synthesizes bold on that face). Acquisition,
  * presence keys and metric lookup share this tuple so an installed named cut is
  * probed and recognized under the same weight. Uncatalogued names keep the
- * requested weight (they have no catalog geometry either way).
+ * requested weight (they have no catalog geometry either way). Graphs without
+ * the catalogue use the equivalent generated-index form,
+ * `indexedOfficeFaceWeight` (office-face-weight.ts).
  */
-export function officeFaceWeight(family: string, bold: boolean, italic: boolean): number {
+export const officeFaceWeight: OfficeFaceWeight = (family, bold, italic) => {
   const requested = bold ? 700 : 400;
-  const name = ownValue(OBSERVED_SUBSTITUTES, family.trim().toLocaleLowerCase('en-US')) ?? family.trim();
+  const name = officeLayoutFaceName(family);
   if (!name) return requested;
   const style = italic ? 'italic' : 'normal';
   if (findReferenceFontMetrics(name, { weight: requested, style }).length > 0) return requested;
   const named = findReferenceFontMetrics(name, { style });
   return named.length > 0 && named.every((p) => p.weight === named[0].weight) ? named[0].weight : requested;
-}
+};
 
 type Profile = ReturnType<typeof findReferenceFontMetrics>[number];
 
 /** The profiles of the copy PowerPoint lays the face out with (see above). */
 function chosenProfiles(family: string, bold: boolean, italic: boolean): Profile[] {
-  const trimmed = family.trim();
-  if (!trimmed) return [];
-  const name = ownValue(OBSERVED_SUBSTITUTES, trimmed.toLocaleLowerCase('en-US')) ?? trimmed;
+  const name = officeLayoutFaceName(family);
+  if (!name) return [];
   const style = italic ? 'italic' : 'normal';
   let profiles = findReferenceFontMetrics(name, { weight: bold ? 700 : 400, style });
   if (profiles.length === 0) {

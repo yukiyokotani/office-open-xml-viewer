@@ -22,8 +22,8 @@ export {
   type FontFaceDeclaration,
   type FontFilesOptions,
   type FontFilesSource,
-  type FontResolveContext,
-  type FontResolveFn,
+  type FontResolverContext,
+  type FontResolver,
   type FontResolverOptions,
   type FontResolverSource,
   type FontSource,
@@ -42,7 +42,7 @@ export {
 } from '../fonts/substitutions.js';
 export {
   GOOGLE_FONTS_CATALOG,
-  GOOGLE_FONTS_DEFAULT_CSS_ORIGIN,
+  GOOGLE_FONTS_DEFAULT_BASE_URL,
   GOOGLE_FONTS_SUBSTITUTIONS,
   GOOGLE_NOTO_CJK_NAMING,
   googleFonts,
@@ -72,7 +72,14 @@ export {
   type WorkerFontResolveMessage,
   type WorkerFontResolveRequest,
 } from '../fonts/resolver-bridge.js';
+// The host only through import(): the gate loads it (resolver-bridge-gate.ts).
 export { FontResolverBridgeHost, type FontResolverBridgeHostOptions } from '../fonts/resolver-bridge-host.js';
+export {
+  FONT_RESOLVER_BRIDGE_UNAVAILABLE,
+  FontResolverBridge,
+  type FontResolverBridgeHostModule,
+  type FontResolverBridgeOptions,
+} from '../fonts/resolver-bridge-gate.js';
 export {
   USE_GOOGLE_FONTS_DEPRECATION_MESSAGE,
   normalizeFontOptions,

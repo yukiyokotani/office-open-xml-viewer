@@ -11,7 +11,7 @@ import {
   splitFormatSections,
   textSectionIndex,
 } from '@silurus/ooxml-core';
-import type { Cell, CellValue, Styles } from './types.js';
+import type { Cell, CellValue, NumFmt, Styles } from './types.js';
 
 function cellValueText(value: CellValue): string {
   switch (value.type) {
@@ -42,16 +42,56 @@ export interface FormattedCell {
   general?: boolean;
 }
 
+/** A conditional-format number format: a dxf's id and code, with the
+ *  section divisors of an OpenDocument display factor. */
+type CfNumFmt = { numFmtId: number; formatCode: string | null; sectionDivisors?: number[] };
+
+/** A `numFmtId` → `<numFmt>` lookup of one `styles.numFmts`, built once by a
+ *  caller that formats many cells in one synchronous pass (the renderer)
+ *  instead of a linear `numFmts` search per cell. */
+export interface StyleNumFmtIndex {
+  get(numFmtId: number): NumFmt | undefined;
+}
+
+/** Build a {@link StyleNumFmtIndex} that answers as
+ *  `numFmts?.find(f => f.numFmtId === id)` does: a repeated id keeps its
+ *  FIRST entry, and `NaN` is never indexed (`===` never matches it, whereas
+ *  `Map` keys compare by SameValueZero). A collection that is not an array of
+ *  objects keeps the linear search, so it succeeds or fails as before.
+ *
+ *  Contract: `numFmts` is library-owned plain data — parser output decoded
+ *  by `JSON.parse` or a structured clone, or the delimited-text loader's own
+ *  literal (data properties only, no getters), which no public API hands to
+ *  callers for mutation (Node exposes its copy
+ *  recursively frozen). The index reflects `numFmts` as it is now; build it
+ *  per pass, never cache it across passes. Callers formatting caller-supplied
+ *  styles (find, validation lists, the OpenDocument facade) keep the linear
+ *  search by not passing an index. */
+export function indexStyleNumFmts(numFmts: readonly NumFmt[] | undefined): StyleNumFmtIndex {
+  if (Array.isArray(numFmts)) {
+    let wellFormed = true;
+    for (let i = 0; i < numFmts.length; i++) {
+      const format: unknown = numFmts[i];
+      if (typeof format !== 'object' || format === null) { wellFormed = false; break; }
+    }
+    if (wellFormed) {
+      const index = new Map<number, NumFmt>();
+      for (const format of numFmts) {
+        if (Number.isNaN(format.numFmtId) || index.has(format.numFmtId)) continue;
+        index.set(format.numFmtId, format);
+      }
+      return index;
+    }
+  }
+  return { get: (numFmtId) => numFmts?.find(f => f.numFmtId === numFmtId) };
+}
+
 /**
  * Backward-compatible string entry point. Returns exactly the display string
  * (colour discarded). Kept as the primary export so existing call sites
  * (find, validation-list, workbook.cellText) are unaffected — the renderer,
  * which needs the colour, calls {@link formatCellValueWithColor} instead.
  */
-/** A conditional-format number format: a dxf's id and code, with the
- *  section divisors of an OpenDocument display factor. */
-type CfNumFmt = { numFmtId: number; formatCode: string | null; sectionDivisors?: number[] };
-
 export function formatCellValue(
   cell: Cell,
   styles: Styles,
@@ -69,12 +109,17 @@ export function formatCellValueWithColor(
    *  serial dates against the 1904 epoch (§18.17.4.1). Defaults to false (1900
    *  date system) so callers that don't thread the flag are unaffected. */
   date1904 = false,
+  /** {@link indexStyleNumFmts} of `styles.numFmts`, built in the caller's
+   *  current pass; absent → a linear search. */
+  numFmtIndex?: StyleNumFmtIndex,
 ): FormattedCell {
   // Resolve the effective format once so both the numeric and text paths
   // honour the same precedence: CF dxf numFmt > style numFmt (§18.8.15).
   const xf = styles.cellXfs[cell.styleIndex ?? 0];
   const styleNumFmtId = xf?.numFmtId ?? 0;
-  const styleNumFmt = styles.numFmts?.find(f => f.numFmtId === styleNumFmtId);
+  const styleNumFmt = numFmtIndex
+    ? numFmtIndex.get(styleNumFmtId)
+    : styles.numFmts?.find(f => f.numFmtId === styleNumFmtId);
   const styleFmt = styleNumFmt?.formatCode ?? null;
   const effectiveFmtId = cfNumFmt?.numFmtId ?? styleNumFmtId;
   // A matched differential format replaces the id/code pair. An absent CF

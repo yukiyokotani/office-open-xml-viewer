@@ -17,6 +17,7 @@ Rerun one when its input changes, then commit the regenerated output with it.
 | `generate-spreadsheet-style-presets.mjs` | `packages/ooxml-common/src/spreadsheet_style_presets.generated.rs` from ECMA-376 Annex G `presetTableStyles.xml` | `node scripts/generate-spreadsheet-style-presets.mjs <presetTableStyles.xml>` |
 | `generate-region-map-asset.mjs` | `packages/core/src/chart/region-map-natural-earth.generated.ts` from Natural Earth GeoJSON | `node scripts/generate-region-map-asset.mjs <geojson> [output]` |
 | `generate-font-reference-metrics.py` | `packages/core/src/fonts/reference-font-metrics-data.json` and `reference-font-metrics-provenance.json` from the fonts installed with Office and macOS | `uv run --no-project --with fonttools==4.67.0 python scripts/generate-font-reference-metrics.py` (test: `pnpm test:python`) |
+| `generate-pptx-face-weight-index.mjs` | `packages/pptx/src/office-face-weight-index.generated.ts` (the single-weight catalogue names behind PPTX `officeFaceWeight`) from `reference-font-metrics-data.json` and `reference-font-metrics-open.ts` | `pnpm generate:pptx-face-weight-index` after either input changes (CI runs `pnpm check:pptx-face-weight-index`; `pnpm test` also fails when it is stale) |
 | `generate-font-demand-inert-ranges.py` | `packages/core/src/fonts/inert-scalar-ranges.ts` from Unicode 17 `UnicodeData.txt` | `python3 scripts/generate-font-demand-inert-ranges.py --unicode-data <UnicodeData.txt>` (`--check` to verify) |
 | `generate-pptx-east-asian-defaults.py` | `packages/pptx/src/east-asian-default-coverage.ts` from PowerPoint's bundled East Asian fonts | `uv run --with fonttools python scripts/generate-pptx-east-asian-defaults.py` |
 | `generate-fixture-font.py` | The synthetic test fonts in `tests/fixtures/fonts/` | `uv run --no-project --with fonttools==4.67.0 python scripts/generate-fixture-font.py` |
@@ -46,7 +47,7 @@ Other committed generators live beside their output:
 | Script | Purpose |
 | --- | --- |
 | `append-wasm-reinit.mjs` | Adds the `reinit()` export to wasm-bindgen glue (each package's `wasm` script). |
-| `build-model-source-sidecars.mjs` | Builds the self-contained optional model-source worker sidecars (`pnpm build`). |
+| `build-model-source-sidecars.mjs` | Builds the self-contained optional worker sidecars: model-source owners and the PPTX font-demand collector (`pnpm build`). |
 | `bundle-declarations.mjs` | Bundles the published `.d.ts` entries (`pnpm build`). |
 | `docx-compatibility-build.mjs` | Freezes DOCX compatibility rule metadata for Vite, Storybook and the site. Its evidence ledger is `docx-compatibility-microsoft-evidence.json`. |
 | `optional-renderer-markers.mjs` | Emits the ownership markers that the optional-renderer checks read. |
@@ -62,12 +63,16 @@ from `.github/workflows/ci.yml`.
   `check-viewer-api-symmetry.mjs`.
 - Bundle shape: `check-no-inline-wasm.mjs`, `check-relative-wasm-urls.mjs`,
   `check-production-render-workers.mjs`, `check-font-source-tree-shaking.mjs`,
-  `check-optional-{chart-ex,region-map,three-d,tiff}.mjs`,
-  `check-optional-legacy-source.mjs`, `check-legacy-wasm-exports.mjs`.
+  `check-optional-entries.mjs` (optional renderers and legacy model sources),
+  `check-legacy-wasm-exports.mjs`.
 - Module boundaries: `check-core-legacy-boundary.mjs`,
   `check-docx-layout-boundaries.mjs`, `check-model-source-lazy-graph.mjs`,
   `check-model-source-lazy-runtime.mjs` (with its `model-source-runtime-*.mjs`
-  helpers), `check-model-source-ooxml-path.mjs`.
+  helpers), `check-model-source-ooxml-path.mjs`. Plain import restrictions
+  (DOCX paint and layout import zones) are ast-grep rules under `rules/`,
+  run by `pnpm lint`.
+- Deleted code that must not return: `tombstones.mjs` (the list) and
+  `check-tombstones.mjs`.
 - DOCX compatibility evidence: `check-docx-compatibility-evidence.mjs`.
 - Python generator tests: `run-python-tests.py` (`pnpm test:python`).
 

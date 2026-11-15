@@ -27,6 +27,7 @@ import {
   renderLayoutSourceToCanvas,
 } from '@silurus/ooxml-docx/internal/session';
 import type { OoxmlNodeSessionOptions } from './session-options.ts';
+import { normalizeCurrentDate, toUint8 } from './input-normalization.ts';
 import {
   type NodeCanvasFactory,
   type NodeCanvasLike,
@@ -437,17 +438,5 @@ export class DocxDocumentSessionImpl implements DocxDocumentSession {
 }
 
 const NOT_A_PICTURE = 'DOCX getImage(): the path does not name a picture part (a part whose content type is image/*)';
-
-function normalizeCurrentDate(value: Date | number | undefined): number {
-  const current = value instanceof Date ? value.getTime() : (value ?? Date.now());
-  if (!Number.isFinite(current)) {
-    throw new RangeError('currentDate must resolve to finite epoch milliseconds');
-  }
-  return current;
-}
-
-function toUint8(buffer: ArrayBuffer | Uint8Array): Uint8Array {
-  return buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer as ArrayBuffer);
-}
 
 declare const __OOXML_MODEL_SOURCES__: boolean;

@@ -9,7 +9,10 @@ import {
 } from '../worker/resource-policy.generated.js';
 import { googleFonts } from './presets/google-fonts.js';
 import { liveSourceCacheCount, sourceCacheEntryCount } from './source-cache.js';
-import { FontSourceSession, pendingMetricDecodeCount, retainedFontSourceBytes, type FontSessionDemand } from './source-session.js';
+import {
+  FontSourceSession, overlapComponents, pendingMetricDecodeCount, retainedFontSourceBytes, type FontSessionDemand,
+} from './source-session.js';
+import { parseUnicodeRange } from './unicode-range.js';
 import { readFontResourceMetrics } from './source-metric-tables.js';
 import {
   fontCssApi,
@@ -18,7 +21,7 @@ import {
   fontResolver,
   type FontDemand,
   type FontFaceDeclaration,
-  type FontResolveFn,
+  type FontResolver,
   type FontSource,
 } from './source.js';
 import { OFFICE_FONT_SUBSTITUTIONS } from './substitutions.js';
@@ -28,8 +31,14 @@ import { OFFICE_FONT_SUBSTITUTIONS } from './substitutions.js';
 const G = globalThis as Record<string, unknown>;
 const ORIGINAL = { FontFace: G.FontFace, fetch: G.fetch, document: G.document, self: G.self };
 
+/** The sessions' clock (FontSourceSessionOptions.now): it only moves when a
+ * test moves it, or by {@link FakeFontFace.decodeMs} per face built from bytes. */
+let clock = 0;
+
 class FakeFontFace {
   static loadImpl: (face: FakeFontFace) => Promise<void> = () => Promise.resolve();
+  /** Time building a face from bytes takes on {@link clock}. */
+  static decodeMs = 0;
   status: FontFaceLoadStatus = 'unloaded';
   loadCalls = 0;
   readonly weight: string;
@@ -40,6 +49,7 @@ class FakeFontFace {
     this.weight = descriptors.weight ?? 'normal';
     this.style = descriptors.style ?? 'normal';
     this.unicodeRange = descriptors.unicodeRange ?? 'U+0-10FFFF';
+    if (typeof source !== 'string') clock += FakeFontFace.decodeMs;
   }
   load(): Promise<FakeFontFace> {
     this.loadCalls++;
@@ -141,9 +151,14 @@ function demand(families: string[], scalars: FontSessionDemand['scalars'] = 'all
 }
 
 const sessions: FontSourceSession[] = [];
+/** FontSourceSessionOptions.urlRegistrationMinBytes of the sessions `open` creates. */
+let urlRegistrationMinBytes: number | undefined;
 function open(sources: readonly FontSource[], set: FakeSet, signal?: AbortSignal,
   readMetricTables?: typeof readFontResourceMetrics): FontSourceSession {
-  const session = new FontSourceSession({ sources, fontSet: asSet(set), signal, readMetricTables });
+  const session = new FontSourceSession({
+    sources, fontSet: asSet(set), signal, readMetricTables, now: () => clock,
+    ...(urlRegistrationMinBytes === undefined ? {} : { urlRegistrationMinBytes }),
+  });
   sessions.push(session);
   return session;
 }
@@ -153,6 +168,8 @@ beforeEach(() => {
   G.FontFace = FakeFontFace;
   G.fetch = defaultFontFetch();
   FakeFontFace.loadImpl = () => Promise.resolve();
+  FakeFontFace.decodeMs = 0;
+  clock = 0;
   warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
 });
 afterEach(() => {
@@ -304,6 +321,437 @@ describe('FontSourceSession: lazy unicode-range loading', () => {
     ]);
     expect(loaded.substitutions.get('calibri')).toEqual({ family: 'Carlito' });
     expect(loaded.regularAliases.get('carlito regular')).toBe('Carlito');
+  });
+});
+
+describe('FontSourceSession: googleFonts() faces register from their URL', () => {
+  // A window realm (Node has no document); a worker keeps registering bytes.
+  // Every file registers from its URL unless a test sets a threshold.
+  beforeEach(() => { G.document = {}; urlRegistrationMinBytes = 0; });
+  afterEach(() => { urlRegistrationMinBytes = undefined; });
+
+  it('decodes the first files of a pass from bytes, up to the threshold, and registers the rest from their URL', async () => {
+    urlRegistrationMinBytes = 1500;
+    const carlito = 'https://fonts.googleapis.com/css2?family=Carlito:ital,wght@0,400;0,700;1,400;1,700&display=swap';
+    const files = [0, 1, 2].map((index) => `https://fonts.gstatic.example/f${index}.woff2`);
+    installFetch({
+      [carlito]: { css: files.map((file, index) => rule('Carlito', file, `unicode-range: U+${(0x41 + index).toString(16)};`)).join('') },
+      ...Object.fromEntries(files.map((file) => [file, { bytes: 1000 }])),
+    });
+    const set = fakeSet();
+    const loaded = await open([googleFonts()], set).ensure(demand(['Calibri'], [0x41, 0x42, 0x43]));
+    expect(loaded.faces).toHaveLength(3);
+    // 1000 + 1000 bytes reach the threshold: the third file registers from its URL.
+    expect(set.faces.map((face) => typeof face.source).sort()).toEqual(['object', 'object', 'string']);
+  });
+
+  it('applies the threshold in the order the bytes land, not in declaration order', async () => {
+    urlRegistrationMinBytes = 1500;
+    const carlito = 'https://fonts.googleapis.com/css2?family=Carlito:ital,wght@0,400;0,700;1,400;1,700&display=swap';
+    const files = [0, 1, 2].map((index) => `https://fonts.gstatic.example/f${index}.woff2`);
+    const gates = files.map(() => { let open!: () => void; const gate = new Promise<void>((resolve) => { open = resolve; }); return { gate, open }; });
+    installFetch({
+      [carlito]: { css: files.map((file, index) => rule('Carlito', file, `unicode-range: U+${(0x41 + index).toString(16)};`)).join('') },
+      ...Object.fromEntries(files.map((file, index) => [file, { bytes: 1000, gate: gates[index]!.gate }])),
+    });
+    const set = fakeSet();
+    const pending = open([googleFonts()], set).ensure(demand(['Calibri'], [0x41, 0x42, 0x43]));
+    await vi.waitFor(() => expect(G.fetch).toHaveBeenCalledTimes(4));
+    // f2, then f1, then f0 land, all before any face is prepared.
+    for (const index of [2, 1, 0]) gates[index]!.open();
+    await pending;
+    expect(set.faces.map((face) => [face.unicodeRange, typeof face.source])).toEqual([
+      ['U+41', 'string'], ['U+42', 'object'], ['U+43', 'object'],
+    ]);
+    expect(urlOf(set.faces[0]!)).toBe(files[0]);
+  });
+
+  it('decodes from bytes only while that keeps within its share of the time the pass has taken', async () => {
+    urlRegistrationMinBytes = undefined;
+    FakeFontFace.decodeMs = 10;
+    const carlito = 'https://fonts.googleapis.com/css2?family=Carlito:ital,wght@0,400;0,700;1,400;1,700&display=swap';
+    const files = [0, 1, 2, 3].map((index) => `https://fonts.gstatic.example/f${index}.woff2`);
+    const gates = files.map(() => { let open!: () => void; const gate = new Promise<void>((resolve) => { open = resolve; }); return { gate, open }; });
+    installFetch({
+      [carlito]: { css: files.map((file, index) => rule('Carlito', file, `unicode-range: U+${(0x41 + index).toString(16)};`)).join('') },
+      ...Object.fromEntries(files.map((file, index) => [file, { bytes: 1000, gate: gates[index]!.gate }])),
+    });
+    const set = fakeSet();
+    const built: (string | ArrayBuffer)[] = [];
+    G.FontFace = class extends FakeFontFace {
+      constructor(family: string, source: string | ArrayBuffer, descriptors?: FontFaceDescriptors) {
+        super(family, source, descriptors);
+        // Not the stylesheet parser's descriptor probes.
+        if (family.startsWith('ooxml-font-source-')) built.push(source);
+      }
+    };
+    const pending = open([googleFonts()], set).ensure(demand(['Calibri'], [0x41, 0x42, 0x43, 0x44]));
+    await vi.waitFor(() => expect(G.fetch).toHaveBeenCalledTimes(5));
+    // The pass has taken 10 ms when f0 lands: nothing decoded yet, so bytes
+    // (10 ms, half of the 20 ms by then).
+    clock = 10;
+    gates[0]!.open();
+    await vi.waitFor(() => expect(built).toHaveLength(1));
+    // f1: 10 ms decoded of 20: bytes again (20 ms of 30).
+    gates[1]!.open();
+    await vi.waitFor(() => expect(built).toHaveLength(2));
+    // f2: 20 ms decoded is over half of 30: its URL.
+    gates[2]!.open();
+    await vi.waitFor(() => expect(built).toHaveLength(3));
+    // f3 lands much later: the downloads hide a decode again.
+    clock = 200;
+    gates[3]!.open();
+    await pending;
+    expect(set.faces.map((face) => [face.unicodeRange, typeof face.source])).toEqual([
+      ['U+41', 'object'], ['U+42', 'object'], ['U+43', 'string'], ['U+44', 'object'],
+    ]);
+  });
+
+  it('decides files that land together after a timed decode by what that decode took', async () => {
+    urlRegistrationMinBytes = undefined;
+    FakeFontFace.decodeMs = 10;
+    const carlito = 'https://fonts.googleapis.com/css2?family=Carlito:ital,wght@0,400;0,700;1,400;1,700&display=swap';
+    const files = [0, 1, 2].map((index) => `https://fonts.gstatic.example/f${index}.woff2`);
+    const run = async (firstLandsAt: number) => {
+      clock = 0;
+      const gates = files.map(() => { let open!: () => void; const gate = new Promise<void>((resolve) => { open = resolve; }); return { gate, open }; });
+      const { fetchMock } = installFetch({
+        [carlito]: { css: files.map((file, index) => rule('Carlito', file, `unicode-range: U+${(0x41 + index).toString(16)};`)).join('') },
+        ...Object.fromEntries(files.map((file, index) => [file, { bytes: 1000, gate: gates[index]!.gate }])),
+      });
+      const set = fakeSet();
+      const session = open([googleFonts()], set);
+      const pending = session.ensure(demand(['Calibri'], [0x41, 0x42, 0x43]));
+      await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(4));
+      // f1 lands alone and is built from bytes (10 ms).
+      clock = firstLandsAt;
+      gates[1]!.open();
+      await vi.waitFor(() => expect(clock).toBe(firstLandsAt + 10));
+      // f2 then f0 land together and the pass settles before either is built.
+      gates[2]!.open();
+      gates[0]!.open();
+      await pending;
+      const sources = set.faces.map((face) => [face.unicodeRange, typeof face.source]);
+      session.release();
+      return sources;
+    };
+    // 10 ms decoded of 14: both register from their URL.
+    expect(await run(4)).toEqual([['U+41', 'string'], ['U+42', 'object'], ['U+43', 'string']]);
+    // 10 ms of 30: f2 decodes from bytes, counted as another 10 ms (its
+    // size at f1's rate), which leaves no room for f0.
+    expect(await run(20)).toEqual([['U+41', 'string'], ['U+42', 'object'], ['U+43', 'object']]);
+    // 10 ms of 100: both decode from bytes.
+    expect(await run(90)).toEqual([['U+41', 'object'], ['U+42', 'object'], ['U+43', 'object']]);
+  });
+
+  it('decides files that landed within the deadline margin in landing order too', async () => {
+    urlRegistrationMinBytes = 1500;
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const start = Date.now();
+    const carlito = 'https://fonts.googleapis.com/css2?family=Carlito:ital,wght@0,400;0,700;1,400;1,700&display=swap';
+    const files = [0, 1, 2].map((index) => `https://fonts.gstatic.example/f${index}.woff2`);
+    const gates = files.map(() => { let open!: () => void; const gate = new Promise<void>((resolve) => { open = resolve; }); return { gate, open }; });
+    const { fetchMock } = installFetch({
+      [carlito]: { css: files.map((file, index) => rule('Carlito', file, `unicode-range: U+${(0x41 + index).toString(16)};`)).join('') },
+      ...Object.fromEntries(files.map((file, index) => [file, { bytes: 1000, gate: gates[index]!.gate }])),
+    });
+    // What each file's face is first built from.
+    const first = new Map<string, string>();
+    G.FontFace = class extends FakeFontFace {
+      constructor(family: string, source: string | ArrayBuffer, descriptors?: FontFaceDescriptors) {
+        super(family, source, descriptors);
+        if (family.startsWith('ooxml-font-source-') && !first.has(this.unicodeRange)) first.set(this.unicodeRange, typeof source);
+      }
+    };
+    const set = fakeSet();
+    const pending = open([googleFonts()], set).ensure(demand(['Calibri'], [0x41, 0x42, 0x43]));
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(4));
+    // Half a second before the deadline nothing is prepared: f1 then f0
+    // land and stay undecided until f2 has landed.
+    vi.setSystemTime(start + 14_500);
+    gates[1]!.open();
+    gates[0]!.open();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(first.size).toBe(0);
+    gates[2]!.open();
+    await pending;
+    // f1 and f0 reach the threshold; f2, the last to land, starts from its URL.
+    expect([...first].sort()).toEqual([['U+41', 'object'], ['U+42', 'object'], ['U+43', 'string']]);
+  });
+
+  it('decodes a pass below the default threshold from bytes', async () => {
+    urlRegistrationMinBytes = undefined;
+    const carlito = 'https://fonts.googleapis.com/css2?family=Carlito:ital,wght@0,400;0,700;1,400;1,700&display=swap';
+    installFetch({ [carlito]: { css: rule('Carlito', 'https://fonts.gstatic.example/c-latin.woff2', LATIN) } });
+    const set = fakeSet();
+    await open([googleFonts()], set).ensure(demand(['Calibri'], [0x61]));
+    expect(set.faces.map((face) => face.source instanceof ArrayBuffer)).toEqual([true]);
+  });
+
+  it('downloads and charges each face, then registers the downloaded URL (no decode from bytes)', async () => {
+    const carlito = 'https://fonts.googleapis.com/css2?family=Carlito:ital,wght@0,400;0,700;1,400;1,700&display=swap';
+    const latin = 'https://fonts.gstatic.example/c-latin.woff2';
+    const { calls } = installFetch({ [carlito]: { css: rule('Carlito', latin, LATIN) + rule('Carlito', latin, `${LATIN} font-weight: 700;`) },
+      [latin]: { bytes: 1000 } });
+    const set = fakeSet();
+    const before = retainedFontSourceBytes();
+    const session = open([googleFonts()], set);
+    const loaded = await session.ensure(demand(['Calibri'], [0x61]));
+    expect(fileCalls(calls).map(({ url }) => url)).toEqual([latin]);
+    // Both weights of the file are registered from its URL, never from bytes.
+    expect(set.faces.map((face) => [face.source, face.weight, face.loadCalls > 0])).toEqual([
+      [`url("${latin}")`, '400', true], [`url("${latin}")`, '700', true],
+    ]);
+    // The download and each registered face are charged as for byte faces.
+    expect(retainedFontSourceBytes() - before).toBe(3000);
+    // The probe source stays the downloaded bytes (no request to measure).
+    expect(loaded.faces.map((face) => face.probeSource instanceof ArrayBuffer)).toEqual([true, true]);
+    session.release();
+    expect(retainedFontSourceBytes()).toBe(before);
+  });
+
+  it('loads every registered URL face, as a face built from bytes loads when constructed, and warns only for demanded ones', async () => {
+    // Overlapping subsets share a component: both register for U+0041. A face
+    // built from bytes loads on construction, so both used to be loaded; the
+    // URL faces load with their registration likewise.
+    const carlito = 'https://fonts.googleapis.com/css2?family=Carlito:ital,wght@0,400;0,700;1,400;1,700&display=swap';
+    const a = 'https://fonts.gstatic.example/a.woff2', b = 'https://fonts.gstatic.example/b.woff2';
+    installFetch({ [carlito]: { css: rule('Carlito', a, 'unicode-range: U+41-42;') + rule('Carlito', b, 'unicode-range: U+42-43;') } });
+    FakeFontFace.loadImpl = (face) => (urlOf(face) === b ? Promise.reject(new Error('decode')) : Promise.resolve());
+    const set = fakeSet();
+    const session = open([googleFonts()], set);
+    const loaded = await session.ensure(demand(['Calibri'], [0x41]));
+    expect(set.faces.map((face) => [urlOf(face), face.loadCalls > 0, face.status])).toEqual([[a, true, 'loaded'], [b, true, 'error']]);
+    expect(loaded.faces.map((face) => face.unicodeRange)).toEqual(['U+41-42']);
+    // b failed, but nothing demanded its range yet: no warning, as for bytes.
+    expect(warn).not.toHaveBeenCalled();
+    await session.ensure(demand(['Calibri'], [0x43]));
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0]![0])).toContain('Calibri (font load failed)');
+  });
+
+  it('builds a face from its bytes, in its place, when its URL does not load', async () => {
+    const carlito = 'https://fonts.googleapis.com/css2?family=Carlito:ital,wght@0,400;0,700;1,400;1,700&display=swap';
+    const a = 'https://fonts.gstatic.example/a.woff2', b = 'https://fonts.gstatic.example/b.woff2';
+    installFetch({ [carlito]: { css: rule('Carlito', a, 'unicode-range: U+41;') + rule('Carlito', b, 'unicode-range: U+42;') } });
+    // The URL request fails (no cache, offline): the downloaded bytes load.
+    FakeFontFace.loadImpl = (face) => (typeof face.source === 'string' && urlOf(face) === a
+      ? Promise.reject(new Error('network')) : Promise.resolve());
+    const set = fakeSet();
+    const loaded = await open([googleFonts()], set).ensure(demand(['Calibri'], [0x41, 0x42]));
+    expect(set.faces.map((face) => [urlOf(face), typeof face.source, face.status])).toEqual([
+      [a, 'object', 'loaded'], [b, 'string', 'loaded'],
+    ]);
+    expect(loaded.faces.map((face) => face.unicodeRange)).toEqual(['U+41', 'U+42']);
+    expect(loaded.faces[0]!.face).toBe(set.faces[0]);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it('builds a face from its bytes before the deadline when its URL load stalls', async () => {
+    vi.useFakeTimers();
+    const carlito = 'https://fonts.googleapis.com/css2?family=Carlito:ital,wght@0,400;0,700;1,400;1,700&display=swap';
+    const a = 'https://fonts.gstatic.example/a.woff2';
+    installFetch({ [carlito]: { css: rule('Carlito', a, LATIN) } });
+    FakeFontFace.loadImpl = (face) => (typeof face.source === 'string' ? new Promise(() => undefined) : Promise.resolve());
+    const set = fakeSet();
+    let settled: { faces: readonly unknown[] } | undefined;
+    void open([googleFonts()], set).ensure(demand(['Calibri'], [0x61])).then((value) => { settled = value; });
+    await vi.advanceTimersByTimeAsync(13_000);
+    expect(settled).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(settled?.faces).toHaveLength(1);
+    expect(set.faces.map((face) => typeof face.source)).toEqual(['object']);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it('settles a stalled URL load at release, keeping no timer and no bytes', async () => {
+    vi.useFakeTimers();
+    const carlito = 'https://fonts.googleapis.com/css2?family=Carlito:ital,wght@0,400;0,700;1,400;1,700&display=swap';
+    installFetch({ [carlito]: { css: rule('Carlito', 'https://fonts.gstatic.example/a.woff2', LATIN) } });
+    FakeFontFace.loadImpl = (face) => (typeof face.source === 'string' ? new Promise(() => undefined) : Promise.resolve());
+    const set = fakeSet();
+    const session = open([googleFonts()], set);
+    const pending = session.ensure(demand(['Calibri'], [0x61]));
+    await vi.advanceTimersByTimeAsync(100);
+    expect(set.faces).toHaveLength(1);
+    session.release();
+    expect((await pending).faces).toEqual([]);
+    expect(set.faces).toHaveLength(0);
+    expect(retainedFontSourceBytes()).toBe(0);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('keeps neither the face nor its bytes alive through a stalled URL load after release', async () => {
+    setFlagsFromString('--expose-gc');
+    const gc = runInNewContext('gc') as () => void;
+    const carlito = 'https://fonts.googleapis.com/css2?family=Carlito:ital,wght@0,400;0,700;1,400;1,700&display=swap';
+    installFetch({ [carlito]: { css: rule('Carlito', 'https://fonts.gstatic.example/a.woff2', LATIN) }, 'https://fonts.gstatic.example/a.woff2': { bytes: 54321 } });
+    // The engine keeps a stalled URL load (and whatever its callbacks hold).
+    const stalled: Promise<unknown>[] = [];
+    FakeFontFace.loadImpl = (face) => {
+      if (typeof face.source !== 'string') return Promise.resolve();
+      const never = new Promise<void>(() => undefined);
+      stalled.push(never);
+      return never;
+    };
+    let collected = false;
+    const registry = new FinalizationRegistry<undefined>(() => { collected = true; });
+    const set = fakeSet();
+    const session = open([googleFonts()], set);
+    const pending = session.ensure(demand(['Calibri'], [0x61]));
+    await vi.waitFor(() => expect(set.faces).toHaveLength(1));
+    // The downloaded bytes the registered face was built from.
+    registry.register((session as unknown as { owned: Map<string, { declaration: { data: ArrayBuffer } }> })
+      .owned.values().next().value!.declaration.data, undefined);
+    session.release();
+    await pending;
+    for (let round = 0; round < 50 && !collected; round++) { await new Promise((resolve) => setTimeout(resolve, 0)); gc(); }
+    expect(stalled.length).toBeGreaterThan(0);
+    expect(collected).toBe(true);
+  });
+
+  it('places the faces built after failed URL loads in one pass', async () => {
+    const carlito = 'https://fonts.googleapis.com/css2?family=Carlito:ital,wght@0,400;0,700;1,400;1,700&display=swap';
+    const files = Array.from({ length: 200 }, (_, index) => `https://fonts.gstatic.example/f${index}.woff2`);
+    installFetch({ [carlito]: { css: files.map((file, index) => rule('Carlito', file, `unicode-range: U+${(0x4e00 + index).toString(16)};`)).join('') } });
+    FakeFontFace.loadImpl = (face) => (typeof face.source === 'string' ? Promise.reject(new Error('offline')) : Promise.resolve());
+    const set = fakeSet();
+    let operations = 0;
+    const counted = { ...set, add: (face: FakeFontFace) => { operations++; set.add(face); },
+      delete: (face: FakeFontFace) => { operations++; return set.delete(face); } };
+    const loaded = await open([googleFonts()], counted as FakeSet).ensure(demand(['Calibri'], files.map((_, index) => 0x4e00 + index)));
+    expect(loaded.faces).toHaveLength(200);
+    expect(set.faces.every((face) => face.source instanceof ArrayBuffer)).toBe(true);
+    expect(set.faces.map(urlOf)).toEqual(files);
+    // 200 registrations, then one delete and one add per face.
+    expect(operations).toBeLessThanOrEqual(3 * files.length);
+  });
+
+  it('publishes the bytes of a face whose URL stalls when another download used the deadline up', async () => {
+    vi.useFakeTimers();
+    // Chromium: a face built from bytes is loaded when constructed.
+    G.FontFace = class extends FakeFontFace {
+      constructor(family: string, source: string | ArrayBuffer, descriptors?: FontFaceDescriptors) {
+        super(family, source, descriptors);
+        if (source instanceof ArrayBuffer) this.status = 'loaded';
+      }
+    };
+    const carlito = 'https://fonts.googleapis.com/css2?family=Carlito:ital,wght@0,400;0,700;1,400;1,700&display=swap';
+    const a = 'https://fonts.gstatic.example/a.woff2', b = 'https://fonts.gstatic.example/b.woff2';
+    installFetch({
+      [carlito]: { css: rule('Carlito', a, 'unicode-range: U+41;') + rule('Carlito', b, 'unicode-range: U+42;') },
+      // b's download lasts to the deadline: the load that follows has no time.
+      [b]: { bytes: 100, gate: new Promise<void>(() => undefined) },
+    });
+    FakeFontFace.loadImpl = (face) => (typeof face.source === 'string' ? new Promise(() => undefined) : Promise.resolve());
+    const set = fakeSet();
+    let settled: { faces: readonly { unicodeRange: string }[] } | undefined;
+    void open([googleFonts()], set).ensure(demand(['Calibri'], [0x41, 0x42])).then((value) => { settled = value; });
+    await vi.advanceTimersByTimeAsync(15_100);
+    // As with bytes: a is published, b fails by the deadline.
+    expect(settled?.faces.map((face) => face.unicodeRange)).toEqual(['U+41']);
+    expect(set.faces.map((face) => typeof face.source)).toEqual(['object']);
+  });
+
+  it('registers bytes for a face prepared from its URL before a service worker took control', async () => {
+    const carlito = 'https://fonts.googleapis.com/css2?family=Carlito:ital,wght@0,400;0,700;1,400;1,700&display=swap';
+    const a = 'https://fonts.gstatic.example/a.woff2', b = 'https://fonts.gstatic.example/b.woff2';
+    let releaseB!: () => void;
+    installFetch({
+      [carlito]: { css: rule('Carlito', a, 'unicode-range: U+41;') + rule('Carlito', b, 'unicode-range: U+42;') },
+      [b]: { bytes: 100, gate: new Promise<void>((resolve) => { releaseB = resolve; }) },
+    });
+    // a's URL request fails: only its bytes can serve it.
+    FakeFontFace.loadImpl = (face) => (typeof face.source === 'string' ? Promise.reject(new Error('offline')) : Promise.resolve());
+    const original = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+    const controlled = { serviceWorker: { controller: null as unknown } };
+    Object.defineProperty(globalThis, 'navigator', { configurable: true, value: controlled });
+    try {
+      const set = fakeSet();
+      const pending = open([googleFonts()], set).ensure(demand(['Calibri'], [0x41, 0x42]));
+      // a lands and is prepared from its URL; then a service worker claims the page.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      controlled.serviceWorker.controller = {};
+      releaseB();
+      const loaded = await pending;
+      expect(loaded.faces.map((face) => face.unicodeRange)).toEqual(['U+41', 'U+42']);
+      expect(set.faces.map((face) => typeof face.source)).toEqual(['object', 'object']);
+    } finally {
+      if (original) Object.defineProperty(globalThis, 'navigator', original);
+    }
+  });
+
+  it('registers bytes where reading the service worker throws (an opaque-origin frame)', async () => {
+    const carlito = 'https://fonts.googleapis.com/css2?family=Carlito:ital,wght@0,400;0,700;1,400;1,700&display=swap';
+    installFetch({ [carlito]: { css: rule('Carlito', 'https://fonts.gstatic.example/c-latin.woff2', LATIN) } });
+    const original = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+    Object.defineProperty(globalThis, 'navigator', { configurable: true, value: {
+      get serviceWorker(): never { throw new DOMException('opaque origin', 'SecurityError'); },
+    } });
+    try {
+      const set = fakeSet();
+      const loaded = await open([googleFonts()], set).ensure(demand(['Calibri'], [0x61]));
+      expect(loaded.faces).toHaveLength(1);
+      expect(set.faces.map((face) => face.source instanceof ArrayBuffer)).toEqual([true]);
+    } finally {
+      if (original) Object.defineProperty(globalThis, 'navigator', original);
+    }
+  });
+
+  it('registers bytes in a worker, or under a service worker, which could answer the font request otherwise', async () => {
+    const carlito = 'https://fonts.googleapis.com/css2?family=Carlito:ital,wght@0,400;0,700;1,400;1,700&display=swap';
+    installFetch({ [carlito]: { css: rule('Carlito', 'https://fonts.gstatic.example/c-latin.woff2', LATIN) } });
+    for (const realm of [{ document: undefined }, { navigator: { serviceWorker: { controller: {} } } }]) {
+      const original = { document: G.document, navigator: G.navigator };
+      Object.defineProperty(globalThis, 'navigator', { value: realm.navigator ?? original.navigator, configurable: true, writable: true });
+      if ('document' in realm) G.document = realm.document;
+      const set = fakeSet();
+      const session = open([googleFonts()], set);
+      await session.ensure(demand(['Calibri'], [0x61]));
+      expect(set.faces.map((face) => face.source instanceof ArrayBuffer)).toEqual([true]);
+      session.release();
+      Object.defineProperty(globalThis, 'navigator', { value: original.navigator, configurable: true, writable: true });
+      G.document = original.document;
+    }
+  });
+
+  it('keeps registering other sources, and a custom baseUrl, from bytes', async () => {
+    const mirror = 'https://fonts.mirror.example';
+    const css = `${mirror}/css2?family=Carlito:ital,wght@0,400;0,700;1,400;1,700&display=swap`;
+    const latin = 'https://fonts.mirror.example/c-latin.woff2';
+    installFetch({ [css]: { css: rule('Carlito', latin, LATIN) } });
+    const set = fakeSet();
+    const session = open([googleFonts({ baseUrl: mirror }), fontFiles({ faces: [{ family: 'Bundled', url: 'https://app.example/b.woff2' }] })], set);
+    await session.ensure(demand(['Calibri', 'Bundled'], [0x61]));
+    expect(set.faces.map((face) => face.source instanceof ArrayBuffer)).toEqual([true, true]);
+    session.release();
+  });
+});
+
+describe('FontSourceSession.ensureWithScalars', () => {
+  it('computes the scalars after the stylesheet request went out, with the result of ensure', async () => {
+    const carlito = 'https://fonts.googleapis.com/css2?family=Carlito:ital,wght@0,400;0,700;1,400;1,700&display=swap';
+    const css = rule('Carlito', 'https://fonts.gstatic.example/c-latin.woff2', LATIN)
+      + rule('Carlito', 'https://fonts.gstatic.example/c-greek.woff2', 'unicode-range: U+0370-03FF;');
+    const { calls } = installFetch({ [carlito]: { css } });
+    let requestsBeforeScalars = -1;
+    const set = fakeSet();
+    const lazy = await open([googleFonts()], set).ensureWithScalars({ families: ['Calibri'], fallbackFamilies: [] }, () => {
+      requestsBeforeScalars = sheetCalls(calls).length;
+      return [0x61];
+    });
+    expect(requestsBeforeScalars).toBe(1);
+    const eager = await open([googleFonts()], fakeSet()).ensure(demand(['Calibri'], [0x61]));
+    const shape = (loaded: typeof lazy) => loaded.faces.map(({ family, weight, unicodeRange }) => [family, weight, unicodeRange]);
+    expect(shape(lazy)).toEqual(shape(eager));
+    expect(set.faces.map(urlOf)).toEqual(['https://fonts.gstatic.example/c-latin.woff2']);
+  });
+
+  it('fails the session when the scalars throw, as any error of an ensure does', async () => {
+    const session = open([fontFiles({ faces: [{ family: 'Bundled', url: 'https://app.example/b.woff2' }] })], fakeSet());
+    await expect(session.ensureWithScalars({ families: ['Bundled'], fallbackFamilies: [] }, () => { throw new TypeError('bad'); }))
+      .rejects.toThrow('bad');
+    await expect(session.ensure(demand(['Bundled']))).rejects.toThrow('bad');
   });
 });
 
@@ -475,8 +923,8 @@ describe('FontSourceSession: isolation and sharing', () => {
     const mirrorSet = fakeSet();
     const internalSet = fakeSet();
     const [mirror, internal] = await Promise.all([
-      open([googleFonts({ cssOrigin: MIRROR })], mirrorSet).ensure(demand(['Calibri'])),
-      open([googleFonts({ cssOrigin: INTERNAL })], internalSet).ensure(demand(['Calibri'])),
+      open([googleFonts({ baseUrl: MIRROR })], mirrorSet).ensure(demand(['Calibri'])),
+      open([googleFonts({ baseUrl: INTERNAL })], internalSet).ensure(demand(['Calibri'])),
     ]);
     expect(sheetCalls(calls).map((call) => new URL(call.url).origin).sort()).toEqual([INTERNAL, MIRROR]);
     expect(fileCalls(calls).map((call) => call.url)).toEqual([`${INTERNAL}/carlito.woff2`]);
@@ -534,7 +982,7 @@ describe('FontSourceSession: isolation and sharing', () => {
       },
     });
     const set = fakeSet();
-    const loaded = await open([googleFonts({ cssOrigin: CN })], set)
+    const loaded = await open([googleFonts({ baseUrl: CN })], set)
       .ensure(demand(['Calibri'], [0x61, 0x3042], ['Noto Sans JP']));
     expect(sheetCalls(calls)).toHaveLength(2);
     expect(sheetCalls(calls).every((call) => new URL(call.url).origin === CN)).toBe(true);
@@ -555,8 +1003,8 @@ describe('FontSourceSession: isolation and sharing', () => {
       [carlitoAt(OTHER)]: { css: rule('Carlito', 'carlito.woff2') },
     });
     const set = fakeSet();
-    const first = open([googleFonts({ cssOrigin: MIRROR })], set);
-    const second = open([googleFonts({ cssOrigin: OTHER })], set);
+    const first = open([googleFonts({ baseUrl: MIRROR })], set);
+    const second = open([googleFonts({ baseUrl: OTHER })], set);
     const [loadedFirst, loadedSecond] = await Promise.all([
       first.ensure(demand(['Calibri'])), second.ensure(demand(['Calibri'])),
     ]);
@@ -599,7 +1047,7 @@ describe('FontSourceSession: claim-once chaining', () => {
     const set = fakeSet();
     const loaded = await open([
       fontFiles({ faces: [{ family: 'Carlito', url: 'https://app.example/carlito.woff2' }] }),
-      fontCss({ url: 'https://fonts.example/all.css', substitutes: OFFICE_FONT_SUBSTITUTIONS }),
+      fontCss({ url: 'https://fonts.example/all.css', substitutions: OFFICE_FONT_SUBSTITUTIONS }),
     ], set).ensure(demand(['Calibri', 'Carlito', 'Other']));
     // Calibri: neither source serves it directly; the files source has no
     // substitutes, so the stylesheet claims it through Calibri → Carlito.
@@ -650,16 +1098,16 @@ describe('FontSourceSession: claim-once chaining', () => {
       [caladea]: { css: rule('Caladea', 'caladea.woff2') },
     });
     const seen: FontDemand[] = [];
-    const resolve: FontResolveFn = (request, { signal }) => {
+    const resolve: FontResolver = (request, { signal }) => {
       seen.push(request);
       expect(signal).toBeInstanceOf(AbortSignal);
-      return request.families.includes('Private') ? [{ family: 'Private', data: new Uint8Array([1, 2, 3]).buffer }] : [];
+      return request.authoredFamilies.includes('Private') ? [{ family: 'Private', data: new Uint8Array([1, 2, 3]).buffer }] : [];
     };
     const set = fakeSet();
     const loaded = await open([fontResolver(resolve), googleFonts()], set)
       .ensure(demand(['Private', 'Calibri'], [0x62, 0x61, 0x62], ['Noto Sans JP']));
     expect(seen).toEqual([{
-      families: ['Private', 'Calibri'], fallbackFamilies: ['Noto Sans JP'],
+      authoredFamilies: ['Private', 'Calibri'], fallbackFamilies: ['Noto Sans JP'],
     }]);
     expect(loaded.faces.map((face) => face.family)).toEqual(['Private', 'Carlito']);
     // The cached resolution and the registered face are both real copies,
@@ -831,7 +1279,7 @@ describe('FontSourceSession: retained bytes held by shared caches', () => {
       const fresh = await import('./source-session.js');
       const sourceModule = await import('./source.js');
       const source = sourceModule.fontResolver((request) =>
-        request.families.map((family) => ({ family, data: new Uint8Array(30).buffer })));
+        request.authoredFamilies.map((family) => ({ family, data: new Uint8Array(30).buffer })));
       const set = fakeSet();
       const idle = new fresh.FontSourceSession({ sources: [source], fontSet: asSet(set) });
       const cycle = async (family: string) => {
@@ -881,7 +1329,7 @@ describe('FontSourceSession: caches keep only accounted bytes', () => {
       let live = 0;
       const registry = new FinalizationRegistry<number>((bytes) => { live -= bytes; });
       // Answers every demanded family except "Absent*" with 30 bytes.
-      const source = sourceModule.fontResolver((request) => request.families
+      const source = sourceModule.fontResolver((request) => request.authoredFamilies
         .filter((family) => !family.startsWith('Absent'))
         .map((family) => {
           const data = new ArrayBuffer(30);
@@ -916,7 +1364,7 @@ describe('FontSourceSession: caches keep only accounted bytes', () => {
 
 describe('FontSourceSession: charge and refund pair per cache entry', () => {
   it('refunds a charge whose task was abandoned before it settled, across retries', async () => {
-    const source = fontResolver((request) => request.families.map((family) => ({ family, data: new Uint8Array(10).buffer })));
+    const source = fontResolver((request) => request.authoredFamilies.map((family) => ({ family, data: new Uint8Array(10).buffer })));
     const set = fakeSet();
     const idle = open([source], set);
     for (let ticks = 0; ticks < 40; ticks++) {
@@ -943,6 +1391,312 @@ describe('FontSourceSession: registration order', () => {
     const set = fakeSet();
     await open([fontFiles({ faces: [a, b, a] })], set).ensure(demand(['Brand']));
     expect(set.faces.map(urlOf)).toEqual(['https://app.example/b.woff2', 'https://app.example/a.woff2']);
+  });
+});
+
+describe('FontSourceSession: faces are built as their downloads land', () => {
+  it('builds a face from its bytes before the rest of its batch arrives, then names and adds it in order', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    installFetch({ 'https://app.example/slow.woff2': { gate, body: fetchedFontBody('https://app.example/slow.woff2') } });
+    const built: FakeFontFace[] = [];
+    G.FontFace = class extends FakeFontFace {
+      constructor(family: string, source: string | ArrayBuffer, descriptors?: FontFaceDescriptors) {
+        super(family, source, descriptors);
+        built.push(this);
+      }
+    };
+    const set = fakeSet();
+    const session = open([fontFiles({ faces: [
+      { family: 'Brand', url: 'https://app.example/slow.woff2', weight: '400' },
+      { family: 'Brand', url: 'https://app.example/fast.woff2', weight: '400', unicodeRange: 'U+3000-30FF' },
+      { family: 'Brand', url: 'https://app.example/fast.woff2', weight: '700', unicodeRange: 'U+3000-30FF' },
+    ] })], set);
+    const ensured = session.ensure(demand(['Brand']));
+    // The fast file's two faces exist while the slow file still downloads;
+    // nothing is registered yet.
+    await vi.waitFor(() => expect(built.map(urlOf)).toEqual(['https://app.example/fast.woff2', 'https://app.example/fast.woff2']));
+    expect(set.faces).toEqual([]);
+    release();
+    const loaded = await ensured;
+    const family = loaded.families?.get('brand');
+    expect(family).toMatch(/^ooxml-font-source-/);
+    // Declaration order, one private family, one FontFace per face (the
+    // prepared ones reused), from the fetched bytes.
+    expect(set.faces.map(urlOf)).toEqual(['https://app.example/slow.woff2', 'https://app.example/fast.woff2', 'https://app.example/fast.woff2']);
+    expect(set.faces.map((face) => face.weight)).toEqual(['400', '400', '700']);
+    expect(set.faces.every((face) => face.family === family && typeof face.source !== 'string')).toBe(true);
+    expect(built).toHaveLength(3);
+    expect(set.faces.filter((face) => built.includes(face))).toHaveLength(3);
+  });
+
+  it('prepares nothing in the last second before the face-loading deadline', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const start = Date.now();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    G.fetch = vi.fn(async (url: string) => {
+      if (url.endsWith('slow.woff2')) await gate;
+      else vi.setSystemTime(start + 14_500);
+      return fontFileResponse(url);
+    });
+    let prepared = 0;
+    G.FontFace = class extends FakeFontFace {
+      constructor(family: string, source: string | ArrayBuffer, descriptors?: FontFaceDescriptors) {
+        super(family, source, descriptors);
+        if (family.endsWith('-prepared')) prepared++;
+      }
+    };
+    const set = fakeSet();
+    const ensured = open([fontFiles({ faces: [
+      { family: 'Brand', url: 'https://app.example/fast.woff2' },
+      { family: 'Brand', url: 'https://app.example/slow.woff2', unicodeRange: 'U+3000-30FF' },
+    ] })], set).ensure(demand(['Brand']));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(prepared).toBe(0);
+    release();
+    await ensured;
+    expect(set.faces.map(urlOf)).toEqual(['https://app.example/fast.woff2', 'https://app.example/slow.woff2']);
+  });
+
+  it('stops preparing mid-batch at the margin, so a later download still meets the deadline', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const start = Date.now();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    G.fetch = vi.fn(async (url: string) => {
+      if (url.endsWith('slow.woff2')) await gate;
+      else vi.setSystemTime(start + 10_000);
+      return fontFileResponse(url);
+    });
+    // Each prepared face takes a simulated second.
+    let prepared = 0;
+    G.FontFace = class extends FakeFontFace {
+      constructor(family: string, source: string | ArrayBuffer, descriptors?: FontFaceDescriptors) {
+        super(family, source, descriptors);
+        if (family.endsWith('-prepared')) { prepared++; vi.setSystemTime(Date.now() + 1_000); }
+      }
+    };
+    const weights = Array.from({ length: 9 }, (_, index) => String((index + 1) * 100));
+    const set = fakeSet();
+    const ensured = open([fontFiles({ faces: [
+      ...weights.map((weight) => ({ family: 'Brand', url: 'https://app.example/shared.woff2', weight })),
+      { family: 'Brand', url: 'https://app.example/slow.woff2', unicodeRange: 'U+3000-30FF' },
+    ] })], set).ensure(demand(['Brand']));
+    await vi.waitFor(() => expect(prepared).toBeGreaterThan(0));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    // Started 10 s into a 15 s ceiling: five faces (the last one starting 1 s
+    // before the deadline), then the margin stops it.
+    expect(prepared).toBe(5);
+    release();
+    await ensured;
+    expect(set.faces).toHaveLength(10);
+  });
+
+  it('drops a prepared face whose download missed the deadline', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const start = Date.now();
+    G.fetch = vi.fn(async (url: string) => {
+      if (url.endsWith('late.woff2')) vi.setSystemTime(start + 60_000);
+      return fontFileResponse(url);
+    });
+    const set = fakeSet();
+    const loaded = await open([fontFiles({ faces: [{ family: 'Late', url: 'https://app.example/late.woff2' }] })], set)
+      .ensure(demand(['Late']));
+    expect(set.faces).toEqual([]);
+    expect(loaded.faces).toEqual([]);
+    expect(warn).toHaveBeenCalled();
+  });
+});
+
+
+describe('FontSourceSession: prepared faces stay within the realm ceilings', () => {
+  it('never builds faces past the retained-byte ceiling, and registers the same faces as before', async () => {
+    vi.resetModules();
+    vi.doMock('../worker/resource-policy.generated.js', async (importOriginal) => ({
+      ...await importOriginal<Record<string, unknown>>(),
+      HARD_MAX_FONT_SOURCE_RETAINED_BYTES: 100,
+    }));
+    try {
+      const fresh = await import('./source-session.js');
+      const sourceModule = await import('./source.js');
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => { release = resolve; });
+      installFetch({
+        'https://app.example/shared.woff2': { bytes: 20 },
+        'https://app.example/slow.woff2': { bytes: 1, gate },
+      });
+      // Five styles of one 20-byte file: the download keeps 20 bytes and each
+      // registered face another 20. Prepared faces never take room a
+      // download or registration needs: both files are kept (21 bytes) and
+      // faces are charged in declaration order, 100-300 and 600 fitting.
+      const weights = ['100', '200', '300', '400', '500'];
+      let peak = 0;
+      const built: FakeFontFace[] = [];
+      G.FontFace = class extends FakeFontFace {
+        constructor(family: string, source: string | ArrayBuffer, descriptors?: FontFaceDescriptors) {
+          super(family, source, descriptors);
+          built.push(this);
+          peak = Math.max(peak, fresh.retainedFontSourceBytes());
+        }
+      };
+      const set = fakeSet();
+      const session = new fresh.FontSourceSession({ sources: [sourceModule.fontFiles({ faces: [
+        ...weights.map((weight) => ({ family: 'Shared', url: 'https://app.example/shared.woff2', weight })),
+        { family: 'Shared', url: 'https://app.example/slow.woff2', weight: '600' },
+      ] })], fontSet: asSet(set) });
+      const ensured = session.ensure(demand(['Shared']));
+      await vi.waitFor(() => expect(built.length).toBeGreaterThan(0));
+      expect(fresh.retainedFontSourceBytes()).toBeLessThanOrEqual(100);
+      release();
+      await ensured;
+      expect(peak).toBeLessThanOrEqual(100);
+      expect(set.faces.map((face) => face.weight)).toEqual(['100', '200', '300', '600']);
+      session.release();
+      expect(fresh.retainedFontSourceBytes()).toBe(0);
+    } finally {
+      vi.doUnmock('../worker/resource-policy.generated.js');
+      vi.resetModules();
+    }
+  });
+
+  it('gives a prepared face\'s room back to an earlier declaration that needs it', async () => {
+    vi.resetModules();
+    vi.doMock('../worker/resource-policy.generated.js', async (importOriginal) => ({
+      ...await importOriginal<Record<string, unknown>>(),
+      HARD_MAX_FONT_SOURCE_RETAINED_BYTES: 100,
+    }));
+    try {
+      const fresh = await import('./source-session.js');
+      const sourceModule = await import('./source.js');
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => { release = resolve; });
+      installFetch({
+        'https://app.example/early.woff2': { bytes: 20 },
+        'https://app.example/slow.woff2': { bytes: 1, gate },
+      });
+      let prepared = 0;
+      G.FontFace = class extends FakeFontFace {
+        constructor(family: string, source: string | ArrayBuffer, descriptors?: FontFaceDescriptors) {
+          super(family, source, descriptors);
+          if (family.endsWith('-prepared')) prepared++;
+        }
+      };
+      const set = fakeSet();
+      const session = new fresh.FontSourceSession({ sources: [sourceModule.fontFiles({ faces: [
+        { family: 'Mixed', data: new Uint8Array(79).buffer },
+        { family: 'Mixed', url: 'https://app.example/early.woff2', weight: '600' },
+        { family: 'Mixed', url: 'https://app.example/slow.woff2', weight: '700' },
+      ] })], fontSet: asSet(set) });
+      const ensured = session.ensure(demand(['Mixed']));
+      await vi.waitFor(() => expect(prepared).toBe(1));
+      release();
+      await ensured;
+      // As without preparation: the inline face is charged first (79 + the
+      // 21 bytes of downloads), the prepared face is reclaimed for it, and
+      // neither downloaded face fits any more.
+      expect(set.faces.map((face) => face.weight)).toEqual(['normal']);
+      expect(fresh.retainedFontSourceBytes()).toBe(100);
+      session.release();
+      expect(fresh.retainedFontSourceBytes()).toBe(0);
+    } finally {
+      vi.doUnmock('../worker/resource-policy.generated.js');
+      vi.resetModules();
+    }
+  });
+
+  it('drops prepared faces and returns their bytes when the session is released mid-batch', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    installFetch({ 'https://app.example/slow.woff2': { bytes: 4, gate } });
+    const built: FakeFontFace[] = [];
+    G.FontFace = class extends FakeFontFace {
+      constructor(family: string, source: string | ArrayBuffer, descriptors?: FontFaceDescriptors) {
+        super(family, source, descriptors);
+        built.push(this);
+      }
+    };
+    const set = fakeSet();
+    const session = open([fontFiles({ faces: [
+      { family: 'Brand', url: 'https://app.example/fast.woff2' },
+      { family: 'Brand', url: 'https://app.example/slow.woff2', unicodeRange: 'U+3000-30FF' },
+    ] })], set);
+    const ensured = session.ensure(demand(['Brand'])).catch(() => undefined);
+    await vi.waitFor(() => expect(built).toHaveLength(1));
+    expect(retainedFontSourceBytes()).toBeGreaterThan(0);
+    session.release();
+    release();
+    await ensured;
+    expect(set.faces).toEqual([]);
+    expect(retainedFontSourceBytes()).toBe(0);
+  });
+});
+
+describe('FontSourceSession: one face per file across the requested weights', () => {
+  const faces = (extra: { weight: string; url: string; unicodeRange?: string }[] = []) => fontFiles({ faces: [
+    { family: 'Var', url: 'https://app.example/var-a.woff2', weight: '400', unicodeRange: 'U+0-FF' },
+    { family: 'Var', url: 'https://app.example/var-b.woff2', weight: '400', unicodeRange: 'U+3000-30FF' },
+    { family: 'Var', url: 'https://app.example/var-a.woff2', weight: '700', unicodeRange: 'U+0-FF' },
+    { family: 'Var', url: 'https://app.example/var-b.woff2', weight: 'bold', unicodeRange: 'U+3000-30FF' },
+    ...extra.map((face) => ({ family: 'Var', unicodeRange: 'U+0-FF', ...face })),
+  ] });
+  const run = async (source: ReturnType<typeof fontFiles>, requestedWeights?: number[], scalars: FontSessionDemand['scalars'] = [0x41, 0x3042]) => {
+    installFetch({});
+    const set = fakeSet();
+    const session = new FontSourceSession({ sources: [source], fontSet: asSet(set), ...(requestedWeights ? { requestedWeights } : {}) });
+    sessions.push(session);
+    const loaded = await session.ensure(demand(['Var'], scalars));
+    return { set, loaded };
+  };
+
+  it('registers each file once with the weight range when every file is declared at exactly the requested weights', async () => {
+    const { set, loaded } = await run(faces(), [700, 400]);
+    expect(set.faces.map((face) => [urlOf(face), face.weight])).toEqual([
+      ['https://app.example/var-a.woff2', '400 700'], ['https://app.example/var-b.woff2', '400 700'],
+    ]);
+    expect(loaded.faces.map((face) => face.weight)).toEqual(['400 700', '400 700']);
+    // The ranged faces stand for their 400 declarations: the regular alias stays.
+    expect(loaded.regularAliases.get('var regular')).toBe('Var');
+  });
+
+  it('keeps one face per declaration otherwise', async () => {
+    const separate = (set: FakeSet) => set.faces.map((face) => face.weight);
+    // No proof of the requested weights.
+    expect(separate((await run(faces())).set)).toEqual(['400', '400', '700', 'bold']);
+    // A requested weight no file is declared at.
+    expect(separate((await run(faces(), [400, 500, 700])).set)).toEqual(['400', '400', '700', 'bold']);
+    // A file declared at a weight outside the requested set, or at one weight only.
+    expect(separate((await run(faces([{ weight: '500', url: 'https://app.example/var-c.woff2' }]), [400, 700])).set))
+      .toHaveLength(5);
+    expect(separate((await run(faces([{ weight: '400', url: 'https://app.example/static.woff2', unicodeRange: 'U+100-17F' }]), [400, 700], [0x41, 0x3042, 0x101])).set))
+      .toEqual(['400', '400', '700', 'bold', '400']);
+    // An 'all' demand.
+    expect(separate((await run(faces(), [400, 700], 'all')).set)).toEqual(['400', '400', '700', 'bold']);
+    // Overlapping files in a different order per weight: regular text picks
+    // the later 400 face (b), bold the later 700 face (a); one face per file
+    // could keep only one of those precedences.
+    const crossed = fontFiles({ faces: [
+      { family: 'Var', url: 'https://app.example/var-a.woff2', weight: '400', unicodeRange: 'U+0-FF' },
+      { family: 'Var', url: 'https://app.example/var-b.woff2', weight: '400', unicodeRange: 'U+0-FF' },
+      { family: 'Var', url: 'https://app.example/var-b.woff2', weight: '700', unicodeRange: 'U+0-FF' },
+      { family: 'Var', url: 'https://app.example/var-a.woff2', weight: '700', unicodeRange: 'U+0-FF' },
+    ] });
+    expect((await run(crossed, [400, 700], [0x41])).set.faces.map((face) => [urlOf(face), face.weight])).toEqual([
+      ['https://app.example/var-a.woff2', '400'], ['https://app.example/var-b.woff2', '400'],
+      ['https://app.example/var-b.woff2', '700'], ['https://app.example/var-a.woff2', '700'],
+    ]);
+  });
+
+  it('keeps the per-weight precedence of overlapping files declared in the same order', async () => {
+    const ordered = fontFiles({ faces: [
+      { family: 'Var', url: 'https://app.example/var-a.woff2', weight: '700', unicodeRange: 'U+0-FF' },
+      { family: 'Var', url: 'https://app.example/var-a.woff2', weight: '400', unicodeRange: 'U+0-FF' },
+      { family: 'Var', url: 'https://app.example/var-b.woff2', weight: '400', unicodeRange: 'U+0-FF' },
+      { family: 'Var', url: 'https://app.example/var-b.woff2', weight: '700', unicodeRange: 'U+0-FF' },
+    ] });
+    expect((await run(ordered, [400, 700], [0x41])).set.faces.map((face) => [urlOf(face), face.weight])).toEqual([
+      ['https://app.example/var-a.woff2', '400 700'], ['https://app.example/var-b.woff2', '400 700'],
+    ]);
   });
 });
 
@@ -986,7 +1740,7 @@ describe('FontSourceSession: shared resolver work survives a released waiter', (
     let calls = 0;
     const source = fontResolver((request) => {
       calls++;
-      return request.families.map((family) => ({ family, url: 'https://app.example/shared.woff2' }));
+      return request.authoredFamilies.map((family) => ({ family, url: 'https://app.example/shared.woff2' }));
     });
     const set = fakeSet();
     const first = open([source], set);
@@ -1144,7 +1898,7 @@ describe('FontSourceSession: release balance and cancellation', () => {
     await other.ensure(demand(['Carlito']));
     const session = open([fontFiles({
       faces: [{ family: 'Carlito', url: 'https://app.example/c.woff2' }],
-      substitutes: OFFICE_FONT_SUBSTITUTIONS,
+      substitutions: OFFICE_FONT_SUBSTITUTIONS,
     })], set);
     const loaded = await session.ensure(demand(['Calibri', 'Carlito']));
     expect(loaded.faces).toHaveLength(1);
@@ -1274,7 +2028,7 @@ describe('FontSourceSession: script-scoped substitution proof (FontSessionDemand
     // a later slide's Arabic text in the same family proves 'arabic'.
     const files = fontFiles({
       faces: [{ family: 'Served', url: 'https://app.example/served.woff2' }],
-      substitutes: [{ for: 'Authored', use: 'Served', script: 'arabic' }],
+      substitutions: [{ for: 'Authored', use: 'Served', script: 'arabic' }],
     });
     const set = fakeSet();
     const session = open([files], set);
@@ -1300,7 +2054,7 @@ describe('FontSourceSession: served face tables', () => {
     const gap = new Uint8Array(await readFile(new URL('../../../../tests/fixtures/fonts/ooxml-fixture-gap.ttf', import.meta.url)));
     const { calls } = installFetch({ [url]: { body: gap.buffer.slice(gap.byteOffset, gap.byteOffset + gap.byteLength) as ArrayBuffer } });
     const set = fakeSet();
-    const loaded = await tables([fontResolver((request) => request.families.map((family) => ({ family, url })))], set)
+    const loaded = await tables([fontResolver((request) => request.authoredFamilies.map((family) => ({ family, url })))], set)
       .ensure(demand(['Private']));
     // One request (no second load of the URL by FontFace, whatever the
     // cache headers), with the CSS font-loading credentials.
@@ -1319,7 +2073,7 @@ describe('FontSourceSession: served face tables', () => {
     let resolved = 0;
     const session = tables([fontResolver((request) => {
       resolved++;
-      return request.families.flatMap((family) => [
+      return request.authoredFamilies.flatMap((family) => [
         { family, url: 'https://fonts.app.example/latin.woff2', unicodeRange: 'U+0-FF' },
         { family, url: 'https://fonts.app.example/kana.woff2', unicodeRange: 'U+3000-30FF' },
       ]);
@@ -1400,5 +2154,94 @@ describe('FontSourceSession: served face tables', () => {
     expect(loaded.faces).toHaveLength(1);
     expect(loaded.faces[0]!.resourceMetrics).toBeUndefined();
     expect(loaded.faces[0]!.probeSource).toBe(data);
+  });
+});
+
+describe('FontSourceSession: overlap components of families sliced alike', () => {
+  const faces = (family: string, styles: readonly [string, string, string]) => [
+    { family, url: `https://app.example/${family}-latin.woff2`, unicodeRange: 'U+0-FF', style: styles[0] },
+    { family, url: `https://app.example/${family}-cjk.woff2`, unicodeRange: 'U+4E00-9FFF', style: styles[1] },
+    { family, url: `https://app.example/${family}-any.woff2`, style: styles[2] },
+  ];
+  const fetched = (calls: readonly { url: string }[]) => calls.map((call) => call.url.split('/').pop()).sort();
+
+  it('gives a second family with the same ranges and styles the same components', async () => {
+    const { calls } = installFetch({});
+    const session = open([fontFiles({ faces: [
+      ...faces('One', ['normal', 'normal', 'italic']), ...faces('Two', ['normal', 'normal', 'italic']),
+    ] })], fakeSet());
+    await session.ensure(demand(['One', 'Two'], [0x41]));
+    // The unranged italic face is always needed; it pulls in no upright subset.
+    expect(fetched(calls)).toEqual(['One-any.woff2', 'One-latin.woff2', 'Two-any.woff2', 'Two-latin.woff2']);
+  });
+
+  it('keeps the components of a family whose styles differ from an earlier family with the same ranges', async () => {
+    const { calls } = installFetch({});
+    const session = open([fontFiles({ faces: [
+      ...faces('One', ['normal', 'normal', 'italic']), ...faces('Two', ['italic', 'italic', 'italic']),
+    ] })], fakeSet());
+    await session.ensure(demand(['One', 'Two'], [0x41]));
+    // Two's unranged face may match with both of its subsets: one component.
+    expect(fetched(calls)).toEqual([
+      'One-any.woff2', 'One-latin.woff2', 'Two-any.woff2', 'Two-cjk.woff2', 'Two-latin.woff2',
+    ]);
+  });
+});
+
+describe('overlapComponents', () => {
+  /** Components by comparing every pair of declarations. */
+  function reference(declarations: readonly FontFaceDeclaration[]): number[] {
+    const plain = ({ style = 'normal' }: FontFaceDeclaration) => {
+      const text = style.trim().toLowerCase();
+      return text === 'normal' || text === 'italic' || text === 'oblique' ? text : undefined;
+    };
+    const parent = declarations.map((_, index) => index);
+    const find = (index: number): number => (parent[index] === index ? index : find(parent[index]!));
+    const ranges = declarations.map((declaration) => parseUnicodeRange(declaration.unicodeRange));
+    for (let a = 0; a < declarations.length; a++) {
+      for (let b = a + 1; b < declarations.length; b++) {
+        const ra = ranges[a]!, rb = ranges[b]!;
+        const together = ra && rb
+          ? ra.some(([lo, hi]) => rb.some(([otherLo, otherHi]) => lo <= otherHi && otherLo <= hi))
+          : plain(declarations[a]!) === undefined || plain(declarations[b]!) === undefined
+            || plain(declarations[a]!) === plain(declarations[b]!);
+        if (together) { const x = find(a), y = find(b); parent[Math.max(x, y)] = Math.min(x, y); }
+      }
+    }
+    return declarations.map((_, index) => find(index));
+  }
+
+  it('agrees with a pairwise comparison on generated families, first and repeated', () => {
+    let seed = 20261115;
+    const random = (below: number) => Math.floor((seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x80000000 * below);
+    const hex = (value: number) => value.toString(16).toUpperCase();
+    const styles = [undefined, 'normal', 'italic', 'Oblique', 'oblique 10deg', ' ITALIC '];
+    let split = 0;
+    for (let round = 0; round < 400; round++) {
+      // A few range values, so that declarations share them (as weights do).
+      const values = Array.from({ length: 1 + random(6) }, () => Array.from({ length: 1 + random(3) }, () => {
+        const lo = random(200) * 8;
+        return random(4) === 0 ? `U+${hex(lo)}` : `U+${hex(lo)}-${hex(lo + random(24))}`;
+      }).join(', '));
+      const declarations: FontFaceDeclaration[] = Array.from({ length: 1 + random(12) }, (_, index) => {
+        const unicodeRange = random(12) === 0 ? undefined : values[random(values.length)];
+        const style = styles[random(styles.length)];
+        return {
+          family: `F${round}`, url: `https://app.example/${round}-${index}.woff2`,
+          ...(unicodeRange === undefined ? {} : { unicodeRange }), ...(style === undefined ? {} : { style }),
+        };
+      });
+      const expected = reference(declarations);
+      if (new Set(expected).size > 1) split++;
+      expect(overlapComponents(declarations)).toEqual(expected);
+      // The same list again (answered from the memo); a caller writing to
+      // its result does not reach the next one.
+      const again = overlapComponents(declarations);
+      expect(again).toEqual(expected);
+      again.fill(-1);
+      expect(overlapComponents(declarations.map((declaration) => ({ ...declaration, family: 'Other' })))).toEqual(expected);
+    }
+    // The generator produces families of several components, not only one.
+    expect(split).toBeGreaterThan(100);
   });
 });

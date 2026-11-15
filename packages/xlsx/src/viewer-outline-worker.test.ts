@@ -10,7 +10,7 @@ import {
   type WireSizeOverrides,
 } from './worker-protocol.js';
 import { getSheetRenderCache, inheritSheetRenderCache, getGridGeometryForWorksheet } from './renderer.js';
-import type { Worksheet } from './types.js';
+import type { Styles, Worksheet } from './types.js';
 import type { OutlineLayout } from './outline.js';
 
 afterEach(() => {
@@ -357,8 +357,9 @@ describe('applySizeOverrides wire semantics', () => {
     const first = createSizeOverriddenWorksheet(cached, { rows: { 4: null } });
     const second = createSizeOverriddenWorksheet(cached, { cols: { 2: 18 } });
 
-    inheritSheetRenderCache(cached, first);
-    inheritSheetRenderCache(cached, second);
+    const styles = { fonts: [], fills: [], borders: [], cellXfs: [], numFmts: [], dxfs: [] } as Styles;
+    inheritSheetRenderCache(cached, first, styles);
+    inheritSheetRenderCache(cached, second, styles);
 
     expect(getSheetRenderCache(first)).toBe(getSheetRenderCache(cached));
     expect(getSheetRenderCache(second)).toBe(getSheetRenderCache(cached));

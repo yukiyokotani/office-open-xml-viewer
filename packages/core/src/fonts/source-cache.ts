@@ -31,6 +31,29 @@ import { HARD_MAX_FONT_SOURCE_RETAINED_BYTES } from '../worker/resource-policy.g
 import { dataUrlDecodedByteLength, type FontFaceDeclaration, type FontSourceDescriptor } from './source.js';
 import type { FontSubstitution } from './substitutions.js';
 
+// ---- bounded memo ---------------------------------------------------------------
+
+/**
+ * `compute`, memoized by its string argument for this realm. The memo holds
+ * at most `limit` UTF-16 code units of keys: past that it starts over, and a
+ * longer key is computed every time. Memos of pure functions of their key
+ * only, so dropping entries never changes a result.
+ */
+export function stringMemo<T>(compute: (key: string) => T, limit: number): (key: string) => T {
+  const entries = new Map<string, T>();
+  let size = 0;
+  return (key) => {
+    if (entries.has(key)) return entries.get(key) as T;
+    const value = compute(key);
+    if (key.length <= limit) {
+      size += key.length;
+      if (size > limit) { entries.clear(); size = key.length; }
+      entries.set(key, value);
+    }
+    return value;
+  };
+}
+
 // ---- identity -------------------------------------------------------------------
 
 /** Two-lane 32-bit multiplicative hash (cyrb53 construction), 64 bits of
@@ -57,7 +80,15 @@ class IdentityHash {
   bytes(value: Uint8Array): this {
     this.unit(0x110001);
     this.unit(value.length);
-    for (let index = 0; index < value.length; index++) this.unit(value[index]);
+    // unit() per byte, with the state in locals: font files are megabytes.
+    let h1 = this.h1, h2 = this.h2;
+    for (let index = 0; index < value.length; index++) {
+      const byte = value[index]!;
+      h1 = Math.imul(h1 ^ byte, 2654435761);
+      h2 = Math.imul(h2 ^ byte, 1597334677);
+    }
+    this.h1 = h1;
+    this.h2 = h2;
     return this;
   }
 
@@ -69,16 +100,104 @@ class IdentityHash {
   }
 }
 
-/** Content key of one face's bytes or `data:` URL, as used in registration
- * signatures (a `data:` URL can be tens of MiB; the signature stays short). */
-export function fontContentKey(value: ArrayBuffer | string): string {
-  if (typeof value === 'string') return `data:${value.length}:${new IdentityHash().text(value).digest()}`;
-  return `bytes:${value.byteLength}:${new IdentityHash().bytes(new Uint8Array(value)).digest()}`;
+/** Content keys of buffers already keyed in this realm. Face buffers are
+ * never written after they are handed to the library (descriptor `data` is
+ * owned by it; downloaded bytes are one shared buffer per URL), so a buffer's
+ * key is computed once however many sessions and declarations use it. */
+const bufferContentKeys = new WeakMap<ArrayBuffer, string>();
+
+/** One keyed buffer, held weakly, with its hash once one was needed. */
+interface KeyedBuffer { readonly length: number; readonly ref: WeakRef<ArrayBuffer>; hash?: string }
+
+/** The keyed buffers of one byte length in this realm: while only one is
+ * live it is never read; once another buffer of the length arrives, each is
+ * hashed once and indexed by its hash. */
+interface LengthBucket {
+  readonly unhashed: Set<KeyedBuffer>;
+  readonly byHash: Map<string, Set<KeyedBuffer>>;
 }
 
-function hashSubstitutes(hash: IdentityHash, substitutes: readonly FontSubstitution[] | undefined): void {
-  hash.text(substitutes === undefined ? undefined : String(substitutes.length));
-  for (const entry of substitutes ?? []) hash.text(entry.for).text(entry.use).text(entry.script);
+/** Live keyed buffers by byte length. A buffer that shares its length with
+ * no live keyed buffer takes a new key unread; otherwise it is hashed, and
+ * compared byte by byte only with the buffers of its hash, so the work is
+ * linear in the bytes that share a length (plus true duplicates). Entries
+ * leave with their buffer. */
+const keyedByLength = new Map<number, LengthBucket>();
+const keyedBuffers = new FinalizationRegistry<KeyedBuffer>((entry) => {
+  const bucket = keyedByLength.get(entry.length);
+  if (!bucket) return;
+  bucket.unhashed.delete(entry);
+  const refs = entry.hash === undefined ? undefined : bucket.byHash.get(entry.hash);
+  if (refs?.delete(entry) && refs.size === 0) bucket.byHash.delete(entry.hash!);
+  if (bucket.unhashed.size === 0 && bucket.byHash.size === 0) keyedByLength.delete(entry.length);
+});
+let contentSerial = 0;
+
+const contentHash = (value: ArrayBuffer) => new IdentityHash().bytes(new Uint8Array(value)).digest();
+
+function indexByHash(bucket: LengthBucket, entry: KeyedBuffer, hash: string): void {
+  entry.hash = hash;
+  let refs = bucket.byHash.get(hash);
+  if (!refs) bucket.byHash.set(hash, refs = new Set());
+  refs.add(entry);
+}
+
+function sameBytes(a: ArrayBuffer, b: ArrayBuffer): boolean {
+  const length = a.byteLength;
+  if (length % 4 === 0) {
+    const left = new Uint32Array(a), right = new Uint32Array(b);
+    for (let index = 0; index < left.length; index++) if (left[index] !== right[index]) return false;
+    return true;
+  }
+  const left = new Uint8Array(a), right = new Uint8Array(b);
+  for (let index = 0; index < length; index++) if (left[index] !== right[index]) return false;
+  return true;
+}
+
+/**
+ * Content key of one face's bytes or `data:` URL, as used in registration
+ * signatures (a `data:` URL can be tens of MiB; the signature stays short).
+ * Two buffers have one key exactly when their bytes are equal; a key is valid
+ * in this realm while a buffer holding it lives (every structure that keeps a
+ * key also keeps its declaration's bytes).
+ */
+export function fontContentKey(value: ArrayBuffer | string): string {
+  if (typeof value === 'string') return `data:${value.length}:${new IdentityHash().text(value).digest()}`;
+  // A detached buffer (length 0 once transferred) is never answered from
+  // the memo: reading it throws, as it always did.
+  const length = value.byteLength;
+  if (length === 0) return `bytes:0:${contentHash(value)}`;
+  let key = bufferContentKeys.get(value);
+  if (key !== undefined) return key;
+  let bucket = keyedByLength.get(length);
+  if (!bucket) keyedByLength.set(length, bucket = { unhashed: new Set(), byHash: new Map() });
+  const entry: KeyedBuffer = { length, ref: new WeakRef(value) };
+  if (bucket.unhashed.size > 0 || bucket.byHash.size > 0) {
+    // Another buffer of this length: index the unread ones by hash first.
+    for (const other of bucket.unhashed) {
+      bucket.unhashed.delete(other);
+      const buffer = other.ref.deref();
+      // A transferred buffer reads as empty: it matches nothing any more.
+      if (buffer && buffer.byteLength === length) indexByHash(bucket, other, contentHash(buffer));
+    }
+    const hash = contentHash(value);
+    for (const other of bucket.byHash.get(hash) ?? []) {
+      const buffer = other.ref.deref();
+      if (buffer && buffer.byteLength === length && sameBytes(buffer, value)) { key = bufferContentKeys.get(buffer); break; }
+    }
+    indexByHash(bucket, entry, hash);
+  } else {
+    bucket.unhashed.add(entry);
+  }
+  key ??= `bytes:${length}:${++contentSerial}`;
+  bufferContentKeys.set(value, key);
+  keyedBuffers.register(value, entry);
+  return key;
+}
+
+function hashSubstitutions(hash: IdentityHash, substitutions: readonly FontSubstitution[] | undefined): void {
+  hash.text(substitutions === undefined ? undefined : String(substitutions.length));
+  for (const entry of substitutions ?? []) hash.text(entry.for).text(entry.use).text(entry.script);
 }
 
 function hashDeclaration(hash: IdentityHash, face: FontFaceDeclaration): void {
@@ -106,6 +225,9 @@ export function fontSourceId(source: FontSourceDescriptor): string {
       const families = source.families ? Object.entries(source.families) : undefined;
       hash.text(families === undefined ? undefined : String(families.length));
       for (const [family, value] of families ?? []) hash.text(family).text(value === true ? undefined : value);
+      hash.text(source.sharedSubsetMetricFamilies === undefined ? undefined : String(source.sharedSubsetMetricFamilies.length));
+      for (const family of source.sharedSubsetMetricFamilies ?? []) hash.text(family);
+      hash.text(source.parallelFaceDownloads === undefined ? undefined : String(source.parallelFaceDownloads));
       break;
     }
     case 'font-css':
@@ -119,7 +241,7 @@ export function fontSourceId(source: FontSourceDescriptor): string {
       hash.text(source.id);
       break;
   }
-  hashSubstitutes(hash, source.substitutes);
+  hashSubstitutions(hash, source.substitutions);
   const id = `${source.kind}:${hash.digest()}`;
   sourceIds.set(source, id);
   return id;
@@ -217,12 +339,37 @@ export class SharedTask<T> {
 let retainedTotal = 0;
 
 /** Charge `bytes` or reject with `OoxmlError('font-source-limit')`. */
+/** Holders of reclaimable bytes (faces a session built ahead of
+ * registration): released before any charge is refused. */
+const reclaimers = new Set<() => void>();
+
+/** Register `reclaim`, which must refund every reclaimable byte it holds;
+ * the returned function unregisters it. */
+export function addRetainedReclaimer(reclaim: () => void): () => void {
+  reclaimers.add(reclaim);
+  return () => { reclaimers.delete(reclaim); };
+}
+
 export function chargeRetainedBytes(bytes: number): void {
   if (bytes <= 0) return;
+  if (retainedTotal + bytes > HARD_MAX_FONT_SOURCE_RETAINED_BYTES) {
+    // Reclaimable bytes never decide a charge: the charge is judged as if
+    // they had not been taken.
+    for (const reclaim of [...reclaimers]) reclaim();
+  }
   if (retainedTotal + bytes > HARD_MAX_FONT_SOURCE_RETAINED_BYTES) {
     throw fontSourceLimitError('retained', HARD_MAX_FONT_SOURCE_RETAINED_BYTES, retainedTotal + bytes);
   }
   retainedTotal += bytes;
+}
+
+/** Charge `bytes` only if the realm has room without reclaiming anything:
+ * for reclaimable bytes. Returns whether it charged. */
+export function chargeReclaimableBytes(bytes: number): boolean {
+  if (bytes <= 0) return true;
+  if (retainedTotal + bytes > HARD_MAX_FONT_SOURCE_RETAINED_BYTES) return false;
+  retainedTotal += bytes;
+  return true;
 }
 
 export function refundRetainedBytes(bytes: number): void {

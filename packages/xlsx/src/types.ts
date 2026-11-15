@@ -754,6 +754,9 @@ export type ShapeTextRun =
        *  A distinct face is not applied to a whole-line metric until script
        *  runs can be resolved independently. */
       fontFaceCs?: string;
+      /** Symbol typeface (`<a:sym@typeface>`, ECMA-376 §21.1.2.3.10): the
+       *  face of the run's F0-shifted (U+F020..U+F0FF) symbol codes. */
+      fontFaceSym?: string;
     }
   | { type: 'break' }
   | {
@@ -1385,6 +1388,9 @@ export interface RenderViewportOptions extends XlsxRenderViewportOptions {
   /** @internal Substitutions and aliases this canvas realm's font-source
    * session (`LoadOptions.fonts`) loaded. Absent without sources. */
   fontSources?: XlsxLoadedFontSources;
+  /** @internal The workbook's symbol-font oracle across its renders in this
+   * realm (core symbol-face-cache.ts); absent, each render judges afresh. */
+  symbolFaces?: import('@silurus/ooxml-core').SymbolFaceOracleCache;
   /** @internal Viewer chrome only; never applied to authored worksheet content. */
   chromeColors?: XlsxChromeColors;
   loadedImages?: Map<string, CanvasImageSource | null>;

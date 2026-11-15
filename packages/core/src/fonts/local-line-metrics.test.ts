@@ -1,17 +1,33 @@
 import { describe, expect, it, vi } from 'vitest';
-import { localFontMetricCoversText, measureLocalFontNormalLine } from './local-line-metrics.js';
+import {
+  localFontMetricCoversText,
+  measureFontFaceNormalLine,
+  measureFontFaceNormalLines,
+  measureLocalFontNormalLine,
+} from './local-line-metrics.js';
 import type { ResolvedFontMetric } from './resource-metrics.js';
 import type { CanvasFontRoute } from './canvas-route.js';
 
 // Boxes are given at a 2048px probe and scale with the requested size, like
 // an engine without a size ceiling; `clampPx` emulates an engine that clamps.
-function environment(height = 2355, clampPx = Infinity) {
+// `heights` gives a family its own strut height (default `height`).
+function environment(height = 2355, clampPx = Infinity, heights: Record<string, number> = {}) {
   let reads = 0;
   let removed = 0;
+  let appended = 0;
   const px = (font: string) => Math.min(Number(/(\d+(?:\.\d+)?)px/.exec(font)?.[1] ?? 0), clampPx);
-  const probe = {
-    style: { cssText: '' }, textContent: '',
-    get offsetHeight() { reads++; return Math.round(height * px(probe.style.cssText) / 2048); },
+  const familyOf = (css: string) => /px ("[^"]*")/.exec(css)?.[1] ?? '';
+  const probes: { style: { cssText: string }; textContent: string; readonly offsetHeight: number }[] = [];
+  const newProbe = () => {
+    const probe = {
+      style: { cssText: '' }, textContent: '',
+      get offsetHeight() {
+        reads++;
+        return Math.round((heights[familyOf(probe.style.cssText).slice(1, -1)] ?? height) * px(probe.style.cssText) / 2048);
+      },
+    };
+    probes.push(probe);
+    return probe;
   };
   const host = {
     style: { cssText: '' },
@@ -24,11 +40,11 @@ function environment(height = 2355, clampPx = Infinity) {
   const computed = { family: undefined as string | undefined };
   const document = {
     fonts,
-    body: { append() {} },
-    createElement: (tag: string) => tag === 'div' ? host : probe,
+    body: { append() { appended++; } },
+    createElement: (tag: string) => tag === 'div' ? host : newProbe(),
     defaultView: {
-      getComputedStyle: () => ({
-        fontFamily: computed.family ?? /px ("[^"]*")/.exec(probe.style.cssText)?.[1] ?? '',
+      getComputedStyle: (element: { style: { cssText: string } }) => ({
+        fontFamily: computed.family ?? familyOf(element.style.cssText),
       }),
     },
   } as unknown as Document;
@@ -39,7 +55,10 @@ function environment(height = 2355, clampPx = Infinity) {
       return { fontBoundingBoxAscent: 1825 * scale, fontBoundingBoxDescent: 443 * scale } as TextMetrics;
     },
   };
-  return { document, fonts, context, probe, computed, reads: () => reads, removed: () => removed };
+  return {
+    document, fonts, context, computed, probe: { get style() { return probes[probes.length - 1]!.style; } },
+    reads: () => reads, removed: () => removed, appended: () => appended,
+  };
 }
 
 describe('prepared local-face normal line measurement', () => {
@@ -49,9 +68,9 @@ describe('prepared local-face normal line measurement', () => {
     const first = measureLocalFontNormalLine(face, env.fonts, env.context, 2048, env.document);
     expect(first).toEqual({ ascentRatio: 1825 / 2048, descentRatio: 443 / 2048, lineGapRatio: 87 / 2048 });
     expect(measureLocalFontNormalLine(face, env.fonts, env.context, 2048, env.document)).toBe(first);
-    // One linearity check: the requested em and half of it.
+    // One linearity check: the requested em and half of it, in one host.
     expect(env.reads()).toBe(2);
-    expect(env.removed()).toBe(2);
+    expect(env.removed()).toBe(1);
     expect(env.probe.style.cssText).toContain('"isolated-face"');
     expect(env.context.font).toBe('12px serif');
     // An equal alias in another registration must not reuse this resource's gap.
@@ -71,6 +90,28 @@ describe('prepared local-face normal line measurement', () => {
     // A ceiling below every tried size never scales linearly: decline.
     const tiny = environment(2355, 10);
     expect(measureLocalFontNormalLine({ ...face } as FontFace, tiny.fonts, tiny.context, 2048, tiny.document)).toBeNull();
+  });
+
+  it('measures a batch with one layout per linear-scale attempt and the per-face results', () => {
+    const faces = ['gap-a', 'gap-b', 'gap-c'].map((family) => ({ family, weight: '400', style: 'normal', status: 'loaded' } as FontFace));
+    const unloaded = { family: 'gap-unloaded', weight: '400', style: 'normal', status: 'unloaded' } as FontFace;
+    const heights = { 'gap-a': 2355, 'gap-b': 2268, 'gap-c': 2500 };
+    // A 2000px ceiling: every face needs a second attempt, so the batch takes
+    // exactly two layouts whatever the number of requests.
+    const env = environment(2355, 2000, heights);
+    const requests = [...faces.flatMap((face) => [{ face, weight: 400, style: 'normal' }, { face, weight: 700, style: 'italic' }]),
+      { face: unloaded, weight: 400, style: 'normal' }];
+    const batch = measureFontFaceNormalLines(requests, env.fonts, env.context, 2048, env.document);
+    expect(env.appended()).toBe(2);
+    expect(env.removed()).toBe(2);
+    expect(env.context.font).toBe('12px serif');
+    // Each result is the one the request gets measured alone.
+    requests.forEach(({ face, weight, style }, index) => {
+      const alone = environment(2355, 2000, heights);
+      expect(batch[index]).toEqual(measureFontFaceNormalLine(face, weight, style, alone.fonts, alone.context, 2048, alone.document));
+    });
+    expect(batch[0]).not.toEqual(batch[2]);
+    expect(batch[6]).toBeNull();
   });
 
   it('declines a strut whose computed family is not the measured face', () => {

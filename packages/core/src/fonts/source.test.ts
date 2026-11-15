@@ -20,10 +20,11 @@ import {
   type FontCssApiSource,
   type FontCssSource,
   type FontFilesSource,
-  type FontResolveFn,
+  type FontResolver,
   type FontResolverSource,
   type FontSource,
 } from './source.js';
+import { admitFontResolverResult } from './resolver-admission.js';
 import { OFFICE_FONT_SUBSTITUTIONS } from './substitutions.js';
 
 // The descriptors behind the opaque factory results: these tests pin the
@@ -53,7 +54,7 @@ describe('font source descriptors', () => {
     const resolver = fontResolver(() => []);
     const sources = [
       fontCssApi({ urlTemplate: 'https://fonts.example/css?family={family}:{query}', query: '400,700',
-        substitutes: OFFICE_FONT_SUBSTITUTIONS, credentials: 'omit' }),
+        substitutions: OFFICE_FONT_SUBSTITUTIONS, credentials: 'omit' }),
       fontCss({ url: 'https://cdn.example/office.css' }),
       fontFiles({ faces: [
         { family: 'Carlito', url: 'https://cdn.example/Carlito.woff2', weight: '400', unicodeRange: 'U+0-FF' },
@@ -90,7 +91,7 @@ describe('font source descriptors', () => {
     vi.resetModules();
     const other = await import('./source.js');
     const css = other.fontCss({ url: 'https://cdn.example/office.css' });
-    const resolve: FontResolveFn = () => [];
+    const resolve: FontResolver = () => [];
     const resolver = other.fontResolver(resolve);
     const [cssDescriptor, resolverDescriptor] = fontSourceDescriptors([css, resolver]);
     expect(cssDescriptor).toBe(css);
@@ -133,8 +134,8 @@ describe('font source descriptors', () => {
       () => fontFiles({ faces: [{ family: ' A', url: 'https://a.example/a.woff2' }] }),
       () => fontFiles({ faces: [{ family: 'A', url: 'javascript:alert(1)' }] }),
       () => fontFiles({ faces: [{ family: 'A', url: 'https://a.example/a.woff2' }],
-        substitutes: [{ for: 'Calibri', use: 'Carlito', script: 'latin' as 'arabic' }] }),
-      () => fontResolver('resolve' as unknown as FontResolveFn),
+        substitutions: [{ for: 'Calibri', use: 'Carlito', script: 'latin' as 'arabic' }] }),
+      () => fontResolver('resolve' as unknown as FontResolver),
       () => assertFontSourceDescriptors({}),
       () => assertFontSourceDescriptors([{ protocol: 'other/v1', kind: 'font-files', faces: [] }]),
       () => assertFontSourceDescriptors([{ protocol: FONT_SOURCE_PROTOCOL, kind: 'font-resolver', id: 'x' }]),
@@ -173,6 +174,32 @@ describe('font source descriptors', () => {
     expect(() => validateFontFaceDeclaration({ family: 'A', url: 'data:font/woff2;base64' })).toThrow(TypeError);
   });
 
+  it('reads a resolver answer leniently (unknown keys, numeric weight) while fontFiles() input stays strict', () => {
+    const face = { family: 'A', url: 'https://cdn.example/a.woff2', weight: 700, style: 'italic', license: 'ofl', v2: { any: 1 } };
+    // A returned declaration: unknown keys are dropped, a numeric weight becomes the CSS string.
+    const admitted = admitFontResolverResult([face, { family: 'B', url: 'https://cdn.example/b.woff2', weight: '100 900' }]);
+    expect(admitted).toEqual({ ok: true, declarations: [
+      { family: 'A', url: 'https://cdn.example/a.woff2', weight: '700', style: 'italic' },
+      { family: 'B', url: 'https://cdn.example/b.woff2', weight: '100 900' },
+    ] });
+    // Known fields are still checked: a malformed answer fails the call, never throws.
+    for (const bad of [
+      { family: 'A', url: 'https://cdn.example/a.woff2', weight: 0 },
+      { family: 'A', url: 'https://cdn.example/a.woff2', weight: 1001 },
+      { family: 'A', url: 'https://cdn.example/a.woff2', weight: Number.NaN },
+      { family: 'A', url: 'https://cdn.example/a.woff2', stretch: 75 },
+      { family: 'A', url: 'https://cdn.example/a.woff2', style: 1 },
+      { family: 'A', extra: true },
+      { url: 'https://cdn.example/a.woff2' },
+    ]) {
+      expect(admitFontResolverResult([bad]), JSON.stringify(bad)).toMatchObject({ ok: false });
+    }
+    // fontFiles() input and every other caller stay strict.
+    expect(() => fontFiles({ faces: [{ family: 'A', url: 'https://cdn.example/a.woff2', license: 'ofl' } as never] })).toThrow(/unknown property "license"/);
+    expect(() => fontFiles({ faces: [{ family: 'A', url: 'https://cdn.example/a.woff2', weight: 700 } as never] })).toThrow(TypeError);
+    expect(() => validateFontFaceDeclaration(face)).toThrow(TypeError);
+  });
+
   it('counts data: bodies as the URL parser and Fetch decode them', () => {
     // Fragment, header, tab/newline and base64 whitespace/padding excluded;
     // %XX is one byte, non-ASCII its UTF-8 length (lone surrogate → U+FFFD).
@@ -202,9 +229,9 @@ describe('font source descriptors', () => {
   });
 
   it('keeps the resolver function in this realm and shares one id per function', () => {
-    const resolve: FontResolveFn = () => [];
+    const resolve: FontResolver = () => [];
     const first = fontResolver(resolve);
-    const second = fontResolver(resolve, { substitutes: OFFICE_FONT_SUBSTITUTIONS });
+    const second = fontResolver(resolve, { substitutions: OFFICE_FONT_SUBSTITUTIONS });
     const other = fontResolver(() => []);
     expect(second.id).toBe(first.id);
     expect(other.id).not.toBe(first.id);
@@ -218,7 +245,7 @@ describe('font-css-api request composition', () => {
     const source = fontCssApi({
       urlTemplate: 'https://fonts.example/css?family={family}:{query}',
       query: '400,700',
-      substitutes: OFFICE_FONT_SUBSTITUTIONS,
+      substitutions: OFFICE_FONT_SUBSTITUTIONS,
     });
     expect(fontCssApiRequests(source, 'Calibri')).toEqual([
       { family: 'Calibri', url: 'https://fonts.example/css?family=Calibri:400,700' },
@@ -234,7 +261,7 @@ describe('font-css-api request composition', () => {
       urlTemplate: 'https://fonts.example/css?family={family}:{query}',
       query: 'wght@400',
       families: { 'Open Sans': true, 'Libre Franklin': 'wght@400;600' },
-      substitutes: [{ for: 'Franklin Gothic Book', use: 'Libre Franklin' }],
+      substitutions: [{ for: 'Franklin Gothic Book', use: 'Libre Franklin' }],
     });
     expect(fontCssApiRequests(source, 'OPEN SANS')).toEqual([
       { family: 'Open Sans', url: 'https://fonts.example/css?family=Open+Sans:wght@400' },

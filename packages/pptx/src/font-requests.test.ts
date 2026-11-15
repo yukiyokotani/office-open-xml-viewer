@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
+import { fontSubstituteScriptClusterClass } from '@silurus/ooxml-core';
+import { FONT_SUBSTITUTE_SCRIPTS } from '@silurus/ooxml-core/internal/font-sources';
 import {
   PptxFontPreloadAccumulator,
+  mayProveSubstituteScript,
   pptxSlideCjkFallback,
   pptxSlideOfficeFontRequests,
 } from './font-requests';
@@ -80,6 +83,72 @@ describe('PPTX exact Office face requests', () => {
       { family: 'Calibri', weight: 400, style: 'normal' },
       { family: 'Calibri', weight: 700, style: 'italic' },
     ]));
+  });
+});
+
+describe('PPTX exact Office face requests of repeated tuples', () => {
+  const runs = (...families: string[]): Slide => ({ elements: [{ type: 'shape', textBody: { paragraphs: [{
+    bullet: { type: 'none' }, runs: families.map((fontFamily) => ({ type: 'text', text: 'x', fontFamily })),
+  }] } }] }) as unknown as Slide;
+
+  it('keeps the spelling of the last run that names a face, however often a tuple repeats', () => {
+    expect(pptxSlideOfficeFontRequests(runs('Arial', 'arial', 'Arial'), null, null)).toEqual([
+      { family: 'Arial', weight: 400, style: 'normal' },
+      { family: 'Arial', presenceOnly: true },
+    ]);
+    expect(pptxSlideOfficeFontRequests(runs('Arial', 'Arial', 'arial'), null, null)).toEqual([
+      { family: 'arial', weight: 400, style: 'normal' },
+      { family: 'arial', presenceOnly: true },
+    ]);
+  });
+
+  it('returns a distinct request object for every key', () => {
+    const requests = pptxSlideOfficeFontRequests(runs('Arial', 'Calibri', 'Arial', 'serif', '+mn-lt'), null, 'Calibri');
+    expect(requests).toEqual([
+      { family: 'Arial', weight: 400, style: 'normal' },
+      { family: 'Arial', presenceOnly: true },
+      { family: 'Calibri', weight: 400, style: 'normal' },
+      { family: 'Calibri', presenceOnly: true },
+    ]);
+    expect(new Set(requests).size).toBe(requests.length);
+  });
+});
+
+describe('scoped-substitute script prefilter', () => {
+  it('admits every character that can prove a script', () => {
+    // A text proves a script only by a cluster whose base is a proof
+    // character (core fontSubstituteScriptScope): none may be filtered out.
+    const missed: string[] = [];
+    for (const script of FONT_SUBSTITUTE_SCRIPTS) {
+      for (let cp = 0; cp <= 0x10ffff; cp += 1) {
+        if (cp >= 0xd800 && cp <= 0xdfff) continue;
+        const character = String.fromCodePoint(cp);
+        if (!mayProveSubstituteScript(character) && fontSubstituteScriptClusterClass(script, character) === 'proof') {
+          missed.push(`${script} U+${cp.toString(16)}`);
+        }
+      }
+    }
+    expect(missed).toEqual([]);
+    expect(mayProveSubstituteScript('Latin 123, 漢字')).toBe(false);
+    expect(mayProveSubstituteScript('')).toBe(false);
+    expect(mayProveSubstituteScript('abc ع')).toBe(true);
+  });
+
+  it('proves the same scripts as without the prefilter', () => {
+    const facts = (text: string, bullet: unknown = { type: 'none' }) => {
+      const accumulator = new PptxFontPreloadAccumulator(null, null, undefined, undefined, undefined, undefined, () => 400);
+      accumulator.addSlide({ elements: [{ type: 'shape', textBody: { paragraphs: [{ bullet,
+        runs: [{ type: 'text', text, fontFamily: 'Sakkal Majalla', fontFamilyCs: 'Arial,sans-serif' }] }] } }] } as unknown as Slide);
+      return accumulator.demandFacts()?.substituteScripts;
+    };
+    expect(facts('Latin')).toEqual({});
+    expect(facts('')).toEqual({});
+    // Digits and the Arabic comma belong to the script but never prove it.
+    expect(facts('\u0661\u0662\u060c')).toEqual({});
+    expect(facts('abc \u0639')).toEqual({ 'sakkal majalla': ['arabic'], arial: ['arabic'] });
+    expect(facts('x', { type: 'char', char: '\u0639', fontFamily: 'Tahoma' })).toEqual({ tahoma: ['arabic'] });
+    // Every auto-number scheme labels in Latin or full-width characters.
+    expect(facts('x', { type: 'autoNum', numType: 'arabicPeriod', fontFamily: 'Tahoma' })).toEqual({});
   });
 });
 

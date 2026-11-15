@@ -255,10 +255,8 @@ export const WORD_THROUGH_WRAP_LINE_STEP_ADVANCE = defineCompatibilityRule({
 /** Only mode 15 has matched line-step evidence for through-wrap paragraphs
  * throughout a page. Pre-15 later paragraphs remain unexplained by these
  * controls; preserve their prior continuous search rather than applying the
- * mode-15 inference to them (WORD_THROUGH_WRAP_LINE_STEP_ADVANCE). */
-export function wordStepsThroughWrapLines(compatibilityMode?: number): boolean {
-  return compatibilityMode === 15;
-}
+ * mode-15 inference to them (WORD_THROUGH_WRAP_LINE_STEP_ADVANCE).
+ * Gate: DocxCompatProfile.throughWrapStepsLines. */
 
 /** ECMA-376 §§20.4.2.11, 20.4.2.17, 20.4.2.19 and 20.4.2.20 define
  * positioning and wrapping; this host-line decision records Office observation,

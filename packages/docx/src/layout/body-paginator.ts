@@ -4,6 +4,7 @@ import {
 } from './note-overflow-policy.js';
 import { NoteRecoveryProgress, noteSourceAdvanced } from './note-recovery-progress.js';
 import { MAX_BODY_LAYOUT_PAGES } from './resource-budgets.js';
+import { DEFAULT_DOCX_COMPAT_PROFILE } from './compat-profile.js';
 import type { SectionLayoutContext } from '../layout-context.js';
 import type {
   BodyLayoutInput,
@@ -1151,8 +1152,9 @@ function* paginateBodyPassSteps(
   const kernel = bodyLayoutKernelOf(services);
   if (!kernel) throw new Error('Body layout kernel is not attached to the supplied services');
   const owners = ownerMap(input);
+  const compat = input.compat ?? DEFAULT_DOCX_COMPAT_PROFILE;
   // WORD_PAGE_WIDE_FOOTNOTE_AREA: only the live page replays when its common area changes.
-  const pageLocalNotes = input.compatibilityMode === 15
+  const pageLocalNotes = compat.pageWideFootnoteArea
     && (input.initialSection.context.columns.length > 1 || input.sequence.some(entry =>
       entry.kind === 'begin-section' && entry.section.context.columns.length > 1));
   // A failed note guard replays only the live physical page. Anchor observers
@@ -1625,9 +1627,8 @@ function* paginateBodyPassSteps(
   };
   const pageFootnoteBandId = (pageIndex: number) => `notes:page:${pageIndex}`;
   const perColumnFootnoteBands = (): boolean => wordPerColumnFootnoteBandsApply(
-    input.compatibilityMode,
+    compat,
     activeRegion(state).columns.length,
-    input.producerFootnoteColumnBands === true,
   );
   const activeFootnoteBandId = (): string => {
     const pageBand = pageFootnoteBandId(state.flow.pageIndex);
@@ -2709,7 +2710,7 @@ function* paginateBodyPassSteps(
       // WORD_CONTINUOUS_SECTION_FOOTNOTE_PAGE separates the mode15 observation
       // from the normative WW8 compatibility flag and its later-reference limit.
       const mayShareFootnotePage = wordContinuousSectionMayShareFootnotePage(
-        input.compatibilityMode, input.footnoteLayoutLikeWW8, pageHasColumnFootnoteBands(state.flow.pageIndex));
+        compat, pageHasColumnFootnoteBands(state.flow.pageIndex));
       const boundaryPage = state.flow.pageIndex;
       try {
         yield* commitTransition(
@@ -2725,7 +2726,7 @@ function* paginateBodyPassSteps(
           ),
           entryIndex + 1,
         );
-        if (notesBeforeBoundary && mayShareFootnotePage && input.compatibilityMode !== 15
+        if (notesBeforeBoundary && mayShareFootnotePage && !compat.continuousSectionKeepsFootnotePage
           && effectiveStartType === 'continuous' && state.flow.pageIndex === boundaryPage) {
           continuousSectionNotePage = boundaryPage;
         }
@@ -2827,7 +2828,7 @@ function* paginateBodyPassSteps(
             || (
               cursor.boundary === null
               && block.pageBreakBefore
-              && input.compatibilityMode === 15
+              && compat.pageBreakBeforeSuppressesTopSpacing
               && !state.flow.pageHasContent
             )
             || (
@@ -3553,7 +3554,7 @@ function* paginateBodyPassSteps(
   // §17.11.4 applies also when the next band starts with a new note.
   let endnoteFlowStarted = false;
   if (endnoteIds.length > 0) endnoteFlowStartPage = state.flow.pageIndex;
-  const modernEndnotes = input.compatibilityMode === 15 && activeRegion(state).columns.length > 1;
+  const modernEndnotes = compat.pageWideEndnoteArea && activeRegion(state).columns.length > 1;
   if (modernEndnotes) {
     let pending: readonly PageNoteSource[] = endnoteIds.map(id => Object.freeze({ id, cursor: null }));
     while (pending.length > 0) {
@@ -5617,6 +5618,7 @@ function* paginateBodyWithColumnBalancingSteps(
   pageScoped = false,
 ): PaginationSteps<BodyPaginationPassResult> {
   let plan: BodyBalancePlan = new Map();
+  const compat = input.compat ?? DEFAULT_DOCX_COMPAT_PROFILE;
   let lastBodyEntry = input.sequence.length - 1;
   while (lastBodyEntry >= 0 && input.sequence[lastBodyEntry]!.kind !== 'body-block'
     && input.sequence[lastBodyEntry]!.kind !== 'adjacent-table-group') lastBodyEntry--;
@@ -5626,7 +5628,7 @@ function* paginateBodyWithColumnBalancingSteps(
     }
     return undefined;
   };
-  const seedPublisher = publisher && input.compatibilityMode === 15 && (input.endnoteIds?.length ?? 0) > 0
+  const seedPublisher = publisher && compat.pageWideEndnoteArea && (input.endnoteIds?.length ?? 0) > 0
     ? {
         get publishedPages() { return publisher.publishedPages; },
         get failed() { return publisher.failed; },
@@ -5671,7 +5673,7 @@ function* paginateBodyWithColumnBalancingSteps(
     );
     if (pass.terminalDiagnostic !== null) return pass;
   }
-  if (input.compatibilityMode === 15 && pass.endnoteLayoutsByPage.size > 0) {
+  if (compat.pageWideEndnoteArea && pass.endnoteLayoutsByPage.size > 0) {
     const terminal = terminalBodyPage(pass.layout);
     const region = terminal?.sectionRegions.at(-1);
     if (terminal && region && region.flowDomainIds.length > 1) {

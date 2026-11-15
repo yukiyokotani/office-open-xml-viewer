@@ -5,6 +5,7 @@
 import type {
   BridgedFamilyAnswer,
   MainFontAcquireReply,
+  MainFontBridgeState,
   MainFontResolveReply,
   WorkerFontResolveMessage,
 } from './resolver-bridge.js';
@@ -19,10 +20,11 @@ export function isWorkerFontResolveMessage(value: unknown): value is WorkerFontR
   return kind === 'ooxmlResolveFonts' || kind === 'ooxmlAcquireFonts' || kind === 'ooxmlCancelResolveFonts';
 }
 
-/** Whether `value` is a main → worker resolver-bridge reply (worker side). */
-export function isMainFontResolveReply(value: unknown): value is MainFontResolveReply | MainFontAcquireReply {
+/** Whether `value` is a main → worker resolver-bridge message: a reply or
+ * the host's state (worker side). */
+export function isMainFontResolveReply(value: unknown): value is MainFontResolveReply | MainFontAcquireReply | MainFontBridgeState {
   const kind = kindOf(value);
-  return kind === 'ooxmlFontsResolved' || kind === 'ooxmlFontsAcquired';
+  return kind === 'ooxmlFontsResolved' || kind === 'ooxmlFontsAcquired' || kind === 'ooxmlFontBridgeState';
 }
 
 /** The reply's answers with one copy per distinct buffer: the originals are

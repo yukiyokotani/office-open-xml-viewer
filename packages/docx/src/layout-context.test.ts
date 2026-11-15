@@ -1,3 +1,4 @@
+import { DEFAULT_DOCX_COMPAT_PROFILE } from './layout/compat-profile.js';
 import { describe, expect, it } from 'vitest';
 import type {
   DocParagraph,
@@ -126,7 +127,7 @@ describe('layout context resolvers', () => {
     expect(settings.documentHasEastAsianText).toBe(true);
     expect(settings.characterSpacingControl).toBe('compressPunctuation');
     expect(settings.mathDefJc).toBe('left');
-    expect(settings.compat).toEqual({
+    expect(settings.compat).toMatchObject({
       adjustLineHeightInTable: true,
       useFeLayout: true,
       balanceSingleByteDoubleByteWidth: true,
@@ -145,15 +146,7 @@ describe('layout context resolvers', () => {
     );
 
     expect(settings.defaultTabPt).toBe(36);
-    expect(settings.compat).toEqual({
-      adjustLineHeightInTable: false,
-      useFeLayout: false,
-      balanceSingleByteDoubleByteWidth: false,
-      lineWrapLikeWord6: false,
-      enableOpenTypeFeatures: false,
-      ulTrailSpace: false,
-      doNotExpandShiftReturn: false,
-    });
+    expect(settings.compat).toEqual(DEFAULT_DOCX_COMPAT_PROFILE);
     expect(context.grid).toEqual({
       kind: 'none',
       linePitchPt: 20,

@@ -1,0 +1,21 @@
+# The specifier of an ES module edge: `import`/`export ... from` and `import()`.
+id: module-specifier
+language: TypeScript
+rule:
+  any:
+    - kind: string
+      any:
+        - inside: { kind: import_statement }
+        - inside: { kind: export_statement }
+        - matches: call-argument
+    - kind: template_string
+      matches: call-argument
+utils:
+  call-argument:
+    inside:
+      kind: arguments
+      inside:
+        kind: call_expression
+        has:
+          field: function
+          kind: import

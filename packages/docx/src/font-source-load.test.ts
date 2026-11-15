@@ -60,14 +60,12 @@ describe('docxFontDemandScalars (design §6)', () => {
   });
 
   it.each([
-    ['strong RTL text', docWith([text('مرحبا')])],
-    ['an RTL run', docWith([text('abc', { rtl: true })])],
-    ['ruby', docWith([text('漢', { ruby: { text: 'かん' } })])],
-    ['vertical text', docWith([text('a')], { section: { textDirection: 'tbRl' } as never })],
+    ['an unknown text direction', docWith([text('a')], { section: { textDirection: 'diagonal' } as never })],
+    ['a vertical text box', docWith([{ type: 'shape', textVert: 'eaVert' }])],
+    ['an east Asian combine', docWith([text('12', { eastAsianCombine: true })])],
     ['a chart', docWith([{ type: 'chart', chart: {} }])],
     ['an equation', docWith([{ type: 'math', nodes: [], display: false, fontSize: 10 }])],
     ['a metafile picture', docWith([{ type: 'image', imagePath: 'word/media/image1.emf', mimeType: 'image/emf' }])],
-    ['a PUA symbol code', docWith([text('')])],
     ['a non-ASCII page number format', docWith([text('a')], { section: { pageNumType: { fmt: 'hebrew1' } } as never })],
     ['a non-ASCII field switch', docWith([{ type: 'field', fieldType: 'page', instruction: 'PAGE \\* HEBREW1', fallbackText: '1' }])],
   ])('answers all for %s', (_label, doc) => {
@@ -91,8 +89,35 @@ describe('docxFontDemandScalars (design §6)', () => {
     // A generated field result (PAGE \* ROMAN may paint V) is converted too (ς).
     expect(new Set(scalarsOf(docWith([{ type: 'field', fieldType: 'page', instruction: 'PAGE \\* ROMAN',
       fallbackText: 'I', fontFamily: 'Symbol' }])) as number[]).has(0x3c2)).toBe(true);
-    // A PUA code outside a symbol family still proves nothing.
-    expect(scalarsOf(docWith([text('\uF0B7', { fontFamily: 'Arial' })]))).toBe('all');
+    // A PUA code in a run none of whose slot faces is symbol-encoded is
+    // never converted: it paints, and is demanded, as itself.
+    const literal = scalarsOf(docWith([text('\uF0B7', { fontFamily: 'Arial' })]));
+    expect(literal).not.toBe('all');
+    expect(literal).toContain(0xf0b7);
+    expect(literal).not.toContain(0x2022);
+  });
+
+  it('demands right-to-left, ruby and vertical text with what their layout adds', () => {
+    const set = (doc: DocxDocumentModel) => {
+      const scalars = scalarsOf(doc);
+      expect(scalars).not.toBe('all');
+      return new Set(scalars as number[]);
+    };
+    // UAX #9 mirroring: the partner of a mirrored character.
+    const rtl = set(docWith([text('مرحبا (1)', { rtl: true })]));
+    for (const cp of [0x645, 0x28, 0x29]) expect(rtl.has(cp)).toBe(true);
+    expect(set(docWith([text('[a', { rtl: true })], { body: [{ type: 'paragraph', bidi: true, runs: [text('[a')] } as never] })).has(0x5d)).toBe(true);
+    // §17.18.44 kashida justification inserts U+0640.
+    expect(set(docWith([text('بين')], { body: [{ type: 'paragraph', alignment: 'lowKashida', runs: [text('بين')] } as never] })).has(0x640)).toBe(true);
+    // §17.3.3.25 the ruby guide text, upper-cased in a caps run.
+    const ruby = set(docWith([text('漢', { ruby: { text: 'かん', fontSizePt: 5 } }), text('x', { ruby: { text: 'ß', fontSizePt: 5 }, allCaps: true })]));
+    for (const ch of 'かんßS') expect(ruby.has(ch.codePointAt(0)!), ch).toBe(true);
+    // §17.18.93 vertical directions: the vertical presentation forms.
+    for (const textDirection of ['tbRl', 'btLr', 'tbRlV']) {
+      const vertical = set(docWith([text('あ、「')], { section: { textDirection } as never }));
+      for (const cp of [0x3042, 0x3001, 0xfe11, 0xfe41]) expect(vertical.has(cp), `${textDirection} ${cp.toString(16)}`).toBe(true);
+    }
+    expect(set(docWith([text('、')], { section: { textDirection: 'lrTb' } as never })).has(0xfe11)).toBe(false);
   });
 
   it('treats as ASCII only number formats whose every output is ASCII', () => {
@@ -162,7 +187,7 @@ const SOURCE = fontCssApi({
   urlTemplate: 'https://fonts.example/css?family={family}',
   families: { 'Noto Sans JP': true, Carlito: true },
   query: 'x',
-  substitutes: OFFICE_FONT_SUBSTITUTIONS,
+  substitutions: OFFICE_FONT_SUBSTITUTIONS,
 });
 
 describe('loadDocxFontSources', () => {
@@ -223,7 +248,7 @@ describe('loadDocxFontSources', () => {
   it('forwards the worker bridge options: claimed resolver URL faces go through the acquirer', async () => {
     const { faces, set, fetched } = install();
     const url = 'https://fonts.app.example/brand.woff2';
-    const source = fontResolver((request) => request.families.map((family) => ({ family, url })));
+    const source = fontResolver((request) => request.authoredFamilies.map((family) => ({ family, url })));
     const bytes = new Uint8Array(12).buffer;
     const acquireResolverFaces = vi.fn(async (_request: { readonly sourceIndex: number }) => new Map([[url, { data: bytes }]]));
     const doc = docWith([text('Hello', { fontFamily: 'Brand' })]);
@@ -257,7 +282,7 @@ describe('loadDocxFontSources', () => {
       urlTemplate: 'https://fonts.example/css?family={family}',
       families: { 'Noto Naskh Arabic': true },
       query: 'x',
-      substitutes: OFFICE_FONT_SUBSTITUTIONS,
+      substitutions: OFFICE_FONT_SUBSTITUTIONS,
     });
     for (const sources of [[own, naskh], [own]]) {
       const plan = docxFontFamilyPlan(doc, sources, undefined, { routes: {} });

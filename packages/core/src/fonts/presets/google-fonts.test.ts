@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { assertFontSourceDescriptors, fontCssApiRequests, fontSourceDescriptors, type FontCssApiSource } from '../source.js';
+import { assertFontSourceDescriptors, fontCssApi, fontCssApiRequests, fontSourceDescriptors, type FontCssApiSource } from '../source.js';
 import {
   GOOGLE_FONTS_CATALOG,
+  GOOGLE_FONTS_PARALLEL_FACE_DOWNLOADS,
   GOOGLE_FONTS_SUBSTITUTIONS,
   GOOGLE_NOTO_CJK_NAMING,
   googleFonts as publicGoogleFonts,
@@ -97,7 +98,7 @@ describe('googleFonts() preset', () => {
     const source = googleFonts();
     const answered = new Set([
       ...Object.keys(GOOGLE_FONTS_CATALOG),
-      ...(source.substitutes ?? []).filter((entry) => fontCssApiRequests(source, entry.for).length > 0)
+      ...(source.substitutions ?? []).filter((entry) => fontCssApiRequests(source, entry.for).length > 0)
         .map((entry) => entry.for),
     ].map((family) => family.toLowerCase()));
     // The one deliberate widening: a document that authors a served
@@ -125,56 +126,80 @@ describe('googleFonts() preset', () => {
   });
 
   it('moves every request to a validated custom origin and nothing else (#1497)', () => {
-    for (const [cssOrigin, origin] of [
+    for (const [baseUrl, origin] of [
       ['https://fonts.googleapis.cn', 'https://fonts.googleapis.cn'],
       ['https://fonts.internal.example:8443/', 'https://fonts.internal.example:8443'],
       ['http://localhost:8080', 'http://localhost:8080'],
     ] as const) {
-      const source = googleFonts({ cssOrigin });
+      const source = googleFonts({ baseUrl });
       for (const [key, , , family] of LEGACY_REQUESTS) {
         expect(onlyRequest(source, key).url).toBe(legacyUrl(family, origin));
       }
       expect(assertFontSourceDescriptors(structuredClone([source]))).toEqual([source]);
     }
-    for (const cssOrigin of ['fonts.googleapis.cn', 'ftp://fonts.example', 'https://fonts.example/css2',
+    for (const baseUrl of ['fonts.googleapis.cn', 'ftp://fonts.example', 'https://fonts.example/css2',
       'https://fonts.example?x=1', 'https://user@fonts.example', 'https://fonts.example//', 7]) {
-      expect(() => googleFonts({ cssOrigin } as { cssOrigin: string }), String(cssOrigin)).toThrow(TypeError);
+      expect(() => googleFonts({ baseUrl } as { baseUrl: string }), String(baseUrl)).toThrow(TypeError);
     }
-    expect(() => googleFonts({ origin: 'https://fonts.example' } as never)).toThrow(TypeError);
+    // A path, query or user name is rejected by name; a path prefix may be allowed later.
+    expect(() => googleFonts({ baseUrl: 'https://fonts.example/css2' })).toThrow(/googleFonts\(\) baseUrl must be/);
+    // Names of the 0.90 pre-release API are unknown properties, not aliases.
+    for (const stale of [{ origin: 'https://fonts.example' }, { cssOrigin: 'https://fonts.example' },
+      { families: { Inter: 'wght@400' } }, { substitutes: [] }]) {
+      expect(() => googleFonts(stale as never), JSON.stringify(stale)).toThrow(/unknown property/);
+    }
   });
 
-  it('uses the exported default substitutes, which substitutes replaces entirely', () => {
+  it('uses the exported default substitutions, which substitutions replaces entirely', () => {
     expect(GOOGLE_FONTS_SUBSTITUTIONS).toEqual([...OFFICE_FONT_SUBSTITUTIONS, ...GOOGLE_NOTO_CJK_NAMING]);
     expect(Object.isFrozen(GOOGLE_FONTS_SUBSTITUTIONS)).toBe(true);
-    expect(googleFonts().substitutes).toEqual(GOOGLE_FONTS_SUBSTITUTIONS);
-    expect(googleFonts({ substitutes: GOOGLE_FONTS_SUBSTITUTIONS })).toEqual(googleFonts());
+    expect(googleFonts().substitutions).toEqual(GOOGLE_FONTS_SUBSTITUTIONS);
+    expect(googleFonts({ substitutions: GOOGLE_FONTS_SUBSTITUTIONS })).toEqual(googleFonts());
 
-    const own = googleFonts({ substitutes: [{ for: 'Corporate Sans', use: 'Open Sans' }] });
-    expect(own.substitutes).toEqual([{ for: 'Corporate Sans', use: 'Open Sans' }]);
+    const own = googleFonts({ substitutions: [{ for: 'Corporate Sans', use: 'Open Sans' }] });
+    expect(own.substitutions).toEqual([{ for: 'Corporate Sans', use: 'Open Sans' }]);
     expect(fontCssApiRequests(own, 'Corporate Sans').map((request) => request.family)).toEqual(['Open Sans']);
     // Replaced, not merged: Calibri now asks Google for Calibri only, which
     // the catalog does not list, so nothing is requested.
     expect(fontCssApiRequests(own, 'Calibri')).toEqual([]);
 
-    const extended = googleFonts({ substitutes: [...GOOGLE_FONTS_SUBSTITUTIONS, { for: 'Corporate Sans', use: 'Lato' }] });
+    const extended = googleFonts({ substitutions: [...GOOGLE_FONTS_SUBSTITUTIONS, { for: 'Corporate Sans', use: 'Lato' }] });
     expect(fontCssApiRequests(extended, 'Calibri').map((request) => request.family)).toEqual(['Carlito']);
     expect(fontCssApiRequests(extended, 'Corporate Sans').map((request) => request.family)).toEqual(['Lato']);
-    expect(googleFonts({ substitutes: [] }).substitutes).toEqual([]);
-    expect(() => googleFonts({ substitutes: [{ for: 'A' }] } as never)).toThrow(TypeError);
+    expect(googleFonts({ substitutions: [] }).substitutions).toEqual([]);
+    expect(() => googleFonts({ substitutions: [{ for: 'A' }] } as never)).toThrow(TypeError);
+  });
+
+  it('claims shared subset metrics only for unreplaced catalog families on the default origin', () => {
+    const keys = (source: FontCssApiSource) => source.sharedSubsetMetricFamilies?.map((family) => family.toLowerCase());
+    expect(keys(googleFonts())).toEqual(Object.keys(GOOGLE_FONTS_CATALOG).map((family) => family.toLowerCase()));
+    const extended = keys(googleFonts({ additionalFamilies: { 'Noto Sans JP': 'wght@300', 'Inter': 'wght@400' } }))!;
+    expect(extended).not.toContain('noto sans jp');
+    expect(extended).not.toContain('inter');
+    expect(extended).toContain('noto serif jp');
+    expect(googleFonts({ baseUrl: 'https://fonts.example.test' }).sharedSubsetMetricFamilies).toBeUndefined();
+  });
+
+  it('downloads the default origin\'s face files in a wider pool of their own, and only those', () => {
+    expect(googleFonts().parallelFaceDownloads).toBe(GOOGLE_FONTS_PARALLEL_FACE_DOWNLOADS);
+    expect(googleFonts({ additionalFamilies: { Inter: 'wght@400' } }).parallelFaceDownloads).toBe(GOOGLE_FONTS_PARALLEL_FACE_DOWNLOADS);
+    expect(googleFonts({ baseUrl: 'https://fonts.example.test' }).parallelFaceDownloads).toBeUndefined();
+    expect(() => fontCssApi({ urlTemplate: 'https://fonts.example.test/css?family={family}', parallelFaceDownloads: 64 } as never))
+      .toThrow(TypeError);
   });
 
   it('adds families outside the catalog, and replaces a catalog family\'s query', () => {
-    const source = googleFonts({ families: { Inter: 'wght@400;700', roboto: 'wght@300' } });
+    const source = googleFonts({ additionalFamilies: { Inter: 'wght@400;700', roboto: 'wght@300' } });
     expect(onlyRequest(source, 'Inter').url).toBe(legacyUrl('Inter:wght@400;700'));
     // Case-insensitive replacement: one request, with the caller's spelling and query.
     expect(onlyRequest(source, 'Roboto').url).toBe(legacyUrl('roboto:wght@300'));
-    // The rest of the catalog and the default substitutes are unchanged.
+    // The rest of the catalog and the default substitutions are unchanged.
     expect(onlyRequest(source, 'Calibri').url).toBe(legacyUrl('Carlito:ital,wght@0,400;0,700;1,400;1,700'));
     // A substitute may now name an added family.
-    const corporate = googleFonts({ families: { Inter: 'wght@400' }, substitutes: [{ for: 'Corporate Sans', use: 'Inter' }] });
+    const corporate = googleFonts({ additionalFamilies: { Inter: 'wght@400' }, substitutions: [{ for: 'Corporate Sans', use: 'Inter' }] });
     expect(fontCssApiRequests(corporate, 'Corporate Sans').map((request) => request.family)).toEqual(['Inter']);
-    for (const families of [{ Inter: true }, { Inter: '' }, { ' Inter': 'wght@400' }, { Inter: 'a', inter: 'b' }, ['Inter'], 'Inter']) {
-      expect(() => googleFonts({ families } as never), JSON.stringify(families)).toThrow(TypeError);
+    for (const additionalFamilies of [{ Inter: true }, { Inter: '' }, { ' Inter': 'wght@400' }, { Inter: 'a', inter: 'b' }, ['Inter'], 'Inter']) {
+      expect(() => googleFonts({ additionalFamilies } as never), JSON.stringify(additionalFamilies)).toThrow(TypeError);
     }
   });
 });
