@@ -401,6 +401,9 @@ export interface LayoutTabSeg extends LayoutSegSource {
   /** LIBREOFFICE_FONT_LINE_BOX: the tab adds no synthetic ascent or descent;
    * the line's text (or, alone, the line's own synthesized box) sizes it. */
   textOwnedLineBox?: true;
+  /** With it, the tab's own face's sides (em ratios), when admitted. */
+  lineBoxAscentRatio?: number;
+  lineBoxDescentRatio?: number;
   measuredWidth: number;
   /** Queue-resolved reading-frame gap. The bidi post-pass must preserve the
    * same gap that ordinary text fitting consumed, including a collapsed

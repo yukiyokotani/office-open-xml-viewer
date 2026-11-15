@@ -90,7 +90,6 @@ export type ServedFontLineMetrics = (
   loaded: LoadedFontSources,
   prepared: PreparedServedFaceLines,
   libreOfficeLineBoxes?: boolean,
-  libreOfficeWordFarEastBoxes?: boolean,
 ) => Record<string, ResolvedFontMetric>;
 
 /** One document's loaded font sources, as layout reads them. */
@@ -137,12 +136,9 @@ export function sourceFontLineMetrics(
   /** A `libreOfficeLineBoxes` producer: a face whose tables have no Word
    * projection is still sized by LIBREOFFICE_FONT_LINE_BOX. */
   libreOfficeLineBoxes = false,
-  /** With it, a Far East face keeps Word's projection. */
-  libreOfficeWordFarEastBoxes = false,
 ): Record<string, ResolvedFontMetric> {
   const metrics: Record<string, ResolvedFontMetric> = sources?.loaded.faces.length
-    ? sources.lineMetrics(sources.loaded, prepared, libreOfficeLineBoxes, libreOfficeWordFarEastBoxes)
-    : Object.create(null);
+    ? sources.lineMetrics(sources.loaded, prepared, libreOfficeLineBoxes) : Object.create(null);
   // Families with a served face are sized from those faces only.
   const servedFamilies = new Set<string>();
   for (const face of sources?.loaded.faces ?? []) {

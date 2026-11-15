@@ -1765,6 +1765,31 @@ function inlineEffectExtentBox(
   };
 }
 
+/** LIBREOFFICE_FONT_LINE_BOX sides of a tab's own face (its run's ascii
+ * slot), so a line holding only tabs keeps that face's box. Undefined when no
+ * geometry of the face is admitted; the line's text then sizes it. */
+function tabFaceLineBox(
+  run: DocxTextRun,
+  environment: LineLayoutEnvironment,
+  selectedMetric: SegmentBuildContext['selectedMetric'],
+): Partial<Pick<import('./model.js').LayoutTabSeg, 'lineBoxAscentRatio' | 'lineBoxDescentRatio'>> {
+  const service = environment.layoutServices?.text;
+  const weight = run.bold ? 700 : 400;
+  const style = run.italic ? 'italic' as const : 'normal' as const;
+  const selected = service?.resolve({
+    text: 'x',
+    fonts: { ascii: run.fontFamily, highAnsi: run.fontFamily, eastAsia: run.fontFamilyEastAsia, complexScript: run.fontFamily },
+    slot: 'ascii', weight, style,
+  });
+  if (!selected) return {};
+  const { lineMetric } = selectedFontLineMetric(selected, selectedMetric(selected, 'x'), true,
+    allowsReferenceFontMetric(indexedFontMetrics(service?.fontMetrics ?? service?.localMetrics ?? {}), selected),
+    undefined, fontLineBoxProjection(service, false));
+  return lineMetric?.designAscentRatio != null && lineMetric.designDescentRatio != null
+    ? { lineBoxAscentRatio: lineMetric.designAscentRatio, lineBoxDescentRatio: lineMetric.designDescentRatio }
+    : {};
+}
+
 function appendRunsToSegments(
   runs: readonly ParagraphLayoutRun[],
   environment: LineLayoutEnvironment,
@@ -1956,11 +1981,11 @@ function appendRunsToSegments(
             isTab: true,
             fontSize: t.fontSize,
             measuredWidth: 0,
-            // LIBREOFFICE_FONT_LINE_BOX: a tab portion takes its own text's
-            // box; the line's text supplies it, not the synthetic em box.
+            // LIBREOFFICE_FONT_LINE_BOX: a tab portion takes its own face's
+            // box, not the synthetic em box.
             ...(environment.layoutServices?.text.libreOfficeLineBoxes === true && environment.lineGridActive !== true
               && environment.verticalCJK !== true
-              ? { textOwnedLineBox: true as const } : {}),
+              ? { textOwnedLineBox: true as const, ...tabFaceLineBox(t, environment, selectedMetric) } : {}),
             bold: t.bold,
             italic: t.italic,
             sourceRunIndex: runIndex,

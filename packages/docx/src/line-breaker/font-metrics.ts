@@ -51,8 +51,10 @@ export function projectedResourceMetric(
   metric: ResolvedFontMetric | undefined,
   projection: FontLineBoxProjection,
 ): ResolvedFontMetric | undefined {
-  if (projection === 'libreoffice-word-far-east' && metric?.farEastCodePage === true) {
-    return wordFarEastResourceMetric(metric);
+  // Word's projection: a LibreOffice producer's Far East resource keeps its
+  // Word box apart from its plain base (OOXML resources carry none).
+  if (projection === 'word' || (projection === 'libreoffice-word-far-east' && metric?.farEastCodePage === true)) {
+    return metric && wordFarEastResourceMetric(metric);
   }
   if (!(projection === 'libreoffice'
       || (projection === 'libreoffice-word-far-east' && metric?.farEastCodePage !== true))

@@ -106,12 +106,14 @@ describe('LIBREOFFICE_FONT_LINE_BOX', () => {
   it('keeps Word\'s Far East box apart from the grid geometry under MsWordCompGridMetrics', () => {
     const farEast = { unitsPerEm: 1000, hheaAscent: 800, hheaDescent: -200, hheaLineGap: 0, winAscent: 1000, winDescent: 300,
       farEastCodePage: true, hasEastAsianCmap: true };
-    const metric = { family: 'FE', ...libreOfficeProducerLineMetric(farEast, undefined, true)! } as ResolvedFontMetric;
+    const metric = { family: 'FE', ...libreOfficeProducerLineMetric(farEast, undefined)! } as ResolvedFontMetric;
     // Grid lines: the plain hhea box (1 em), as catalogued faces give it.
     expect(projectedResourceMetric(metric, 'plain')!.lineHeightRatio).toBeCloseTo(1, 9);
     // Unsnapped lines: Word's 1.3 x usWin box.
     expect(projectedResourceMetric(metric, 'libreoffice-word-far-east')!.lineHeightRatio).toBeCloseTo(1.69, 9);
     expect(projectedResourceMetric(metric, 'libreoffice')!.designAscentRatio).toBeCloseTo(0.8, 9);
+    // Vertical text keeps Word's projection: the same box.
+    expect(projectedResourceMetric(metric, 'word')!.lineHeightRatio).toBeCloseTo(1.69, 9);
   });
 
   it('sizes a face with an empty hhea from usWin or typo values', () => {
@@ -152,6 +154,12 @@ describe('LIBREOFFICE_FONT_LINE_BOX', () => {
     const line = (layout.pages[0]!.layers.body[0] as ParagraphLayout).lines[0]!;
     expect(line.advancePt).toBeCloseTo(15.6, 6);
     expect(line.baselinePt).toBeCloseTo(20 + 8.4, 6);
+    // A line holding only a tab keeps its face's box too.
+    const tabOnly = layoutBodyModel([para([{ ...run('\t'), fontFamily: 'Low Face' } as DocParagraph['runs'][number]])],
+      section(), linearCtx(), {}, LIBREOFFICE, { 'low face': low });
+    const tabLine = (tabOnly.pages[0]!.layers.body[0] as ParagraphLayout).lines[0]!;
+    expect(tabLine.advancePt).toBeCloseTo(15.6, 6);
+    expect(tabLine.baselinePt).toBeCloseTo(20 + 8.4, 6);
   });
 
   it('takes a mixed line\'s largest ascent and largest descent with its gap', () => {

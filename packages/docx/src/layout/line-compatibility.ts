@@ -172,13 +172,13 @@ export function openTypeNormalLine(openType: OpenTypeLineMetrics): ReturnType<ty
 export function libreOfficeProducerLineMetric(
   openType: OpenTypeLineMetrics,
   unicodeRanges: readonly (readonly [number, number])[] | undefined,
-  /** Also keep Word's box of a Far East face (__libreOfficeWordFarEastBoxes). */
-  wordFarEastBox = false,
 ): Omit<ResolvedFontMetric, 'family'> | undefined {
   const normal = openTypeNormalLine(openType);
   if (!normal) return undefined;
   const plain = wordOpenTypeAutoLineRatios({ ...openType, farEastCodePage: false }) ?? libreOfficeLineBox(normal);
-  const word = wordFarEastBox && openType.farEastCodePage === true
+  // Word's own box of a Far East face, for the lines that keep Word's
+  // projection (vertical text, __libreOfficeWordFarEastBoxes).
+  const word = openType.farEastCodePage === true
     ? wordOpenTypeAutoLineRatios({ ...openType, farEastCodePage: true }) : null;
   return {
     ...(openType.farEastCodePage == null ? {} : { farEastCodePage: openType.farEastCodePage }),

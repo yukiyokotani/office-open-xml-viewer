@@ -102,7 +102,7 @@ export async function loadEmbeddedFonts(
   const refs = doc.embeddedFonts;
   if (!refs || refs.length === 0) return { faces: [], metrics: {}, routes: [] };
   const producer = doc.settings as {
-    readonly __libreOfficeLineBoxes?: boolean; readonly __libreOfficeWordFarEastBoxes?: boolean;
+    readonly __libreOfficeLineBoxes?: boolean;
   } | undefined;
 
   // A CSS family/weight/style tuple cannot identify two different resources.
@@ -171,8 +171,7 @@ export async function loadEmbeddedFonts(
         let metric: ResolvedFontMetric | null = null;
         try {
           const openType = parseOpenTypeResourceMetrics(data);
-          // A LibreOffice producer's face (a Far East face keeps Word's box
-          // under __libreOfficeWordFarEastBoxes).
+          // A LibreOffice producer's face (libreOfficeProducerLineMetric).
           const libreOfficeLineBoxes = producer?.__libreOfficeLineBoxes === true;
           // The wordOpenTypeAutoLineRatios projection requires this face's
           // OS/2 code-page class and usWin data; cmap coverage is a separate
@@ -188,8 +187,7 @@ export async function loadEmbeddedFonts(
           // projection from its hhea alone (LIBREOFFICE_FONT_LINE_BOX).
           // (Never Word's box: libreOfficeProducerLineMetric.)
           const libreOfficeOnly = openType && libreOfficeLineBoxes
-            ? libreOfficeProducerLineMetric(openType, undefined, producer?.__libreOfficeWordFarEastBoxes === true)
-            : undefined;
+            ? libreOfficeProducerLineMetric(openType, undefined) : undefined;
           if (line || libreOfficeOnly || openType?.averageCharWidthRatio != null) {
             metric = Object.freeze({
               family,

@@ -108,7 +108,6 @@ export function servedFontLineMetrics(
   loaded: LoadedFontSources,
   prepared: PreparedServedFaceLines,
   libreOfficeLineBoxes = false,
-  libreOfficeWordFarEastBoxes = false,
 ): Record<string, ResolvedFontMetric> {
   const metrics: Record<string, ResolvedFontMetric> = Object.create(null);
   const byFamily = new Map<string, { display: string; faces: { face: SourceFace; index: number }[] }>();
@@ -139,7 +138,8 @@ export function servedFontLineMetrics(
       const projected = set.map(({ face, index, range, style: faceStyle, declared }) => {
         if (!declared) return undefined;
         if (face.resourceMetrics && libreOfficeLineBoxes) {
-          const wordFarEast = libreOfficeWordFarEastBoxes && face.resourceMetrics.farEastCodePage === true;
+          // Word's box of a Far East face reads usWin, which must be size-free too.
+          const wordFarEast = face.resourceMetrics.farEastCodePage === true;
           // LIBREOFFICE_FONT_LINE_BOX reads only the face's normal line; the
           // instance must be size-free in exactly the values it reads.
           const instance = instanceOpenTypeLineMetrics(face.resourceMetrics, {
@@ -147,8 +147,7 @@ export function servedFontLineMetrics(
           }, [...normalLineMvarTags(face.resourceMetrics), ...(wordFarEast ? ['hcla', 'hcld'] as const : [])]);
           if (!instance?.unicodeRanges) return undefined;
           return libreOfficeProducerLineMetric(instance,
-            Object.freeze(intersectRanges(normalizedRanges(declared), normalizedRanges(instance.unicodeRanges))),
-            wordFarEast);
+            Object.freeze(intersectRanges(normalizedRanges(declared), normalizedRanges(instance.unicodeRanges))));
         }
         if (face.resourceMetrics) {
           const instance = instanceOpenTypeLineMetrics(face.resourceMetrics, {
