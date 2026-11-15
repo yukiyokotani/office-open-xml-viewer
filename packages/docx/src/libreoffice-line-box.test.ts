@@ -103,15 +103,17 @@ describe('LIBREOFFICE_FONT_LINE_BOX', () => {
     });
   });
 
-  it('keeps Word\'s Far East box apart from the grid geometry under MsWordCompGridMetrics', () => {
+  it('keeps a Far East face\'s grid, LibreOffice and Word geometry apart', () => {
     const farEast = { unitsPerEm: 1000, hheaAscent: 800, hheaDescent: -200, hheaLineGap: 0, winAscent: 1000, winDescent: 300,
       farEastCodePage: true, hasEastAsianCmap: true };
     const metric = { family: 'FE', ...libreOfficeProducerLineMetric(farEast, undefined)! } as ResolvedFontMetric;
     // Grid lines: the plain hhea box (1 em), as catalogued faces give it.
     expect(projectedResourceMetric(metric, 'plain')!.lineHeightRatio).toBeCloseTo(1, 9);
-    // Unsnapped lines: Word's 1.3 x usWin box.
-    expect(projectedResourceMetric(metric, 'libreoffice-word-far-east')!.lineHeightRatio).toBeCloseTo(1.69, 9);
+    // Unsnapped lines: the face's own box, grown by 27% above under
+    // MsWordCompGridMetrics.
     expect(projectedResourceMetric(metric, 'libreoffice')!.designAscentRatio).toBeCloseTo(0.8, 9);
+    expect(projectedResourceMetric(metric, 'libreoffice-ms-word-grid')).toMatchObject({
+      lineHeightRatio: expect.closeTo(1.27, 9), designAscentRatio: expect.closeTo(1.07, 9), designDescentRatio: expect.closeTo(0.2, 9) });
     // Vertical text keeps Word's projection: the same box.
     expect(projectedResourceMetric(metric, 'word')!.lineHeightRatio).toBeCloseTo(1.69, 9);
   });

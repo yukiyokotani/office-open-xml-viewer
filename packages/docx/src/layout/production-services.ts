@@ -456,7 +456,8 @@ export function createProductionTextLayoutService(
     fontMetrics,
     ...(source.fonts.plainLineBoxes ? { plainLineBoxes: true } : {}),
     ...(source.fonts.libreOfficeLineBoxes ? { libreOfficeLineBoxes: true } : {}),
-    ...(source.fonts.libreOfficeWordFarEastBoxes ? { libreOfficeWordFarEastBoxes: true } : {}),
+    ...(source.fonts.libreOfficeMsWordGridMetrics ? { libreOfficeMsWordGridMetrics: true } : {}),
+    ...(source.fonts.libreOfficeNoExternalLeading ? { libreOfficeNoExternalLeading: true } : {}),
     eastAsiaFontCharsets: fontFamilyCharsets,
     ...(() => {
       // Symbol-encoded text (core symbol-font.ts) is judged by the core oracle

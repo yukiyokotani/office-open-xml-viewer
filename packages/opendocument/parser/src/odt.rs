@@ -329,11 +329,12 @@ fn read_documents<'a>(
         // natural line fits, the extra space hanging below the margin
         // (odt-font-line-box and odt-proportional-line-page-fit controls).
         libre_office_line_boxes: true,
-        // With MsWordCompGridMetrics (documents imported from Word) a line
-        // in a Far East face keeps the Word box: LibreOffice's own box
-        // applies only without the setting (Meiryo 12 pt control converted
-        // from DOCX: 22.85 pt per line with it, 18.00 pt without).
-        libre_office_word_far_east_boxes: reader.settings.word_grid_metrics,
+        // settings.xml MsWordCompGridMetrics (documents imported from Word)
+        // grows a Far East face's line by 27% above its ascent, and
+        // AddExternalLeading false drops the faces' line gap
+        // (LIBREOFFICE_FONT_LINE_BOX).
+        libre_office_ms_word_grid_metrics: reader.settings.word_grid_metrics,
+        libre_office_no_external_leading: reader.settings.no_external_leading,
         ..DocumentSettings::default()
     });
     document.footnotes = std::mem::take(&mut reader.footnotes);

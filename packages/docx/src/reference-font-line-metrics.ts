@@ -3,13 +3,24 @@ import {
   findReferenceFontMetrics,
   type ReferenceFontMetricProfile,
 } from '@silurus/ooxml-core';
-import { libreOfficeLineBox, libreOfficeNormalLine, wordOpenTypeAutoLineRatios } from './layout/line-compatibility.js';
+import { libreOfficeLineBox, libreOfficeNormalLine, wordOpenTypeAutoLineRatios, type LibreOfficeLineBoxOptions } from './layout/line-compatibility.js';
 
 /** How a face's tables become a line box: Word's projection (OOXML), the
  * plain hhea box of a producer's grid-snapped lines (`plainLineBoxes`), or
  * LIBREOFFICE_FONT_LINE_BOX for a producer's unsnapped lines
  * (`libreOfficeLineBoxes`). */
-export type FontLineBoxProjection = 'word' | 'plain' | 'libreoffice' | 'libreoffice-word-far-east';
+export type FontLineBoxProjection = 'word' | 'plain' | 'libreoffice' | 'libreoffice-no-leading'
+  | 'libreoffice-ms-word-grid' | 'libreoffice-ms-word-grid-no-leading';
+
+/** The LIBREOFFICE_FONT_LINE_BOX options a projection names, or undefined
+ * for Word's and the plain projection. */
+export function libreOfficeProjectionOptions(projection: FontLineBoxProjection): LibreOfficeLineBoxOptions | undefined {
+  if (!projection.startsWith('libreoffice')) return undefined;
+  return {
+    externalLeading: !projection.endsWith('-no-leading'),
+    msWordGridMetrics: projection.startsWith('libreoffice-ms-word-grid'),
+  };
+}
 
 export interface ReferenceFontLineMetrics {
   readonly lineHeightRatio: number;
@@ -20,7 +31,8 @@ export interface ReferenceFontLineMetrics {
 }
 
 const projectedProfiles: Record<FontLineBoxProjection, WeakMap<object, ReferenceFontLineMetrics | null>> = {
-  word: new WeakMap(), plain: new WeakMap(), libreoffice: new WeakMap(), 'libreoffice-word-far-east': new WeakMap(),
+  word: new WeakMap(), plain: new WeakMap(), libreoffice: new WeakMap(), 'libreoffice-no-leading': new WeakMap(),
+  'libreoffice-ms-word-grid': new WeakMap(), 'libreoffice-ms-word-grid-no-leading': new WeakMap(),
 };
 
 // Layout asks for the same few (family, weight, style) tuples for every text
@@ -100,17 +112,16 @@ function project(profile: ReferenceFontMetricProfile, projection: FontLineBoxPro
   const plain = projection === 'plain';
   // The catalog cannot prove the installed/painted face. Its class is used
   // only as vertical reference geometry, and unknown OS/2 data is declined.
-  // 'libreoffice-word-far-east' keeps Word's projection for a Far East face.
-  const libreOffice = projection === 'libreoffice'
-    || (projection === 'libreoffice-word-far-east' && profile.farEastCodePage !== true);
-  const normal = libreOffice ? libreOfficeNormalLine({
+  const options = libreOfficeProjectionOptions(projection);
+  const normal = options ? libreOfficeNormalLine({
     unitsPerEm: profile.unitsPerEm,
     hhea: profile.hhea,
     ...(profile.win ? { win: profile.win } : {}),
     ...(profile.typoMetrics ? { typo: profile.typoMetrics } : {}),
   }) : undefined;
   // LIBREOFFICE_FONT_LINE_BOX reads hhea alone, so it needs no OS/2 class.
-  const projected = normal ? libreOfficeLineBox(normal) : profile.farEastCodePage == null ? null : wordOpenTypeAutoLineRatios({
+  const projected = normal && options ? libreOfficeLineBox(normal, options, profile.farEastCodePage === true)
+    : profile.farEastCodePage == null ? null : wordOpenTypeAutoLineRatios({
     unitsPerEm: profile.unitsPerEm,
     hheaAscent: profile.hhea[0],
     hheaDescent: profile.hhea[1],

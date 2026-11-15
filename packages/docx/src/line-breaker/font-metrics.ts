@@ -2,7 +2,7 @@ import type { CanvasFontRoute, ResolvedFontMetric } from '@silurus/ooxml-core';
 import { localFontMetricCoversText, normalizeFontMetricFamily } from '@silurus/ooxml-core';
 import type { FontResolution } from '../layout/font-service.js';
 import type { TextLayoutService } from '../layout/text.js';
-import { referenceFontLineMetrics, type FontLineBoxProjection, type ReferenceFontLineMetrics } from '../reference-font-line-metrics.js';
+import { libreOfficeProjectionOptions, referenceFontLineMetrics, type FontLineBoxProjection, type ReferenceFontLineMetrics } from '../reference-font-line-metrics.js';
 import { LIBRARY_SYNTHESIZED_FACE_LINE_GEOMETRY, libreOfficeLineBox } from '../layout/line-compatibility.js';
 
 /** The projection of a producer's line boxes: grid-snapped lines of a
@@ -10,7 +10,8 @@ import { LIBRARY_SYNTHESIZED_FACE_LINE_GEOMETRY, libreOfficeLineBox } from '../l
  * `libreOfficeLineBoxes` producer LIBREOFFICE_FONT_LINE_BOX; OOXML keeps
  * Word's projection. */
 export function fontLineBoxProjection(
-  service: Pick<TextLayoutService, 'plainLineBoxes' | 'libreOfficeLineBoxes' | 'libreOfficeWordFarEastBoxes'> | undefined,
+  service: Pick<TextLayoutService, 'plainLineBoxes' | 'libreOfficeLineBoxes' | 'libreOfficeMsWordGridMetrics'
+    | 'libreOfficeNoExternalLeading'> | undefined,
   lineGridActive: boolean,
   /** Vertical text keeps Word's projection: LIBREOFFICE_FONT_LINE_BOX was
    * measured on horizontal lines only. */
@@ -18,14 +19,17 @@ export function fontLineBoxProjection(
 ): FontLineBoxProjection {
   if (lineGridActive) return service?.plainLineBoxes === true ? 'plain' : 'word';
   if (service?.libreOfficeLineBoxes !== true || vertical) return 'word';
-  return service.libreOfficeWordFarEastBoxes === true ? 'libreoffice-word-far-east' : 'libreoffice';
+  const leading = service.libreOfficeNoExternalLeading === true ? '-no-leading' : '';
+  return service.libreOfficeMsWordGridMetrics === true
+    ? `libreoffice-ms-word-grid${leading}` : `libreoffice${leading}`;
 }
 
-const libreOfficeResourceMetrics = new WeakMap<ResolvedFontMetric, ResolvedFontMetric>();
+const libreOfficeResourceMetrics = new Map<FontLineBoxProjection, WeakMap<ResolvedFontMetric, ResolvedFontMetric>>();
 const wordFarEastResourceMetrics = new WeakMap<ResolvedFontMetric, ResolvedFontMetric>();
 
-/** A LibreOffice-producer Far East face under __libreOfficeWordFarEastBoxes:
- * Word's box when the resource kept it; any other resource is unchanged. */
+/** A LibreOffice producer's Far East face in Word's projection (vertical
+ * text): Word's box when the resource kept it; any other resource is
+ * unchanged. */
 function wordFarEastResourceMetric(metric: ResolvedFontMetric): ResolvedFontMetric {
   if (metric.wordLineHeightRatio === undefined || metric.wordAscentRatio === undefined
     || metric.wordDescentRatio === undefined) return metric;
@@ -53,26 +57,25 @@ export function projectedResourceMetric(
 ): ResolvedFontMetric | undefined {
   // Word's projection: a LibreOffice producer's Far East resource keeps its
   // Word box apart from its plain base (OOXML resources carry none).
-  if (projection === 'word' || (projection === 'libreoffice-word-far-east' && metric?.farEastCodePage === true)) {
-    return metric && wordFarEastResourceMetric(metric);
-  }
-  if (!(projection === 'libreoffice'
-      || (projection === 'libreoffice-word-far-east' && metric?.farEastCodePage !== true))
-    || !metric || metric.normalLineGapRatio === undefined
+  if (projection === 'word') return metric && wordFarEastResourceMetric(metric);
+  const options = libreOfficeProjectionOptions(projection);
+  if (!options || !metric || metric.normalLineGapRatio === undefined
     || metric.normalAscentRatio === undefined || metric.normalDescentRatio === undefined) return metric;
-  let projected = libreOfficeResourceMetrics.get(metric);
+  let cache = libreOfficeResourceMetrics.get(projection);
+  if (!cache) libreOfficeResourceMetrics.set(projection, cache = new WeakMap());
+  let projected = cache.get(metric);
   if (!projected) {
     const box = libreOfficeLineBox({
       normalAscentRatio: metric.normalAscentRatio,
       normalDescentRatio: metric.normalDescentRatio,
       normalLineGapRatio: metric.normalLineGapRatio,
-    });
+    }, options, metric.farEastCodePage === true);
     projected = Object.freeze({
       ...metric,
       ...box,
       ...(metric.eastAsianLineHeightRatio === undefined ? {} : { eastAsianLineHeightRatio: box.lineHeightRatio }),
     });
-    libreOfficeResourceMetrics.set(metric, projected);
+    cache.set(metric, projected);
   }
   return projected;
 }

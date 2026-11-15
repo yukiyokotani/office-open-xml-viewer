@@ -650,10 +650,18 @@ pub struct DocumentSettings {
     /// `libre_office_line_boxes`: lines in a Far East face keep Word's
     /// projection (LibreOffice's MsWordCompGridMetrics).
     #[serde(
-        rename = "__libreOfficeWordFarEastBoxes",
+        rename = "__libreOfficeMsWordGridMetrics",
         skip_serializing_if = "std::ops::Not::not"
     )]
-    pub libre_office_word_far_east_boxes: bool,
+    pub libre_office_ms_word_grid_metrics: bool,
+    /// Private producer flag (never set by the DOCX parsers), with
+    /// `libre_office_line_boxes`: LibreOffice's AddExternalLeading is off,
+    /// so a face's line gap takes no space.
+    #[serde(
+        rename = "__libreOfficeNoExternalLeading",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    pub libre_office_no_external_leading: bool,
 }
 
 /// Single track-changes event extracted from a body revision wrapper.

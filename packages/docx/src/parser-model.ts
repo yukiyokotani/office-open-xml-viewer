@@ -280,7 +280,9 @@ export interface ProducerDocumentSettings {
   readonly __libreOfficeLineBoxes?: boolean;
   /** With `__libreOfficeLineBoxes`: lines in a Far East face keep Word's
    *  projection (LibreOffice's MsWordCompGridMetrics). */
-  readonly __libreOfficeWordFarEastBoxes?: boolean;
+  readonly __libreOfficeMsWordGridMetrics?: boolean;
+  /** With `__libreOfficeLineBoxes`: AddExternalLeading off (no line gap). */
+  readonly __libreOfficeNoExternalLeading?: boolean;
 }
 
 /** The producer settings of a model; none is set for a DOCX document. */

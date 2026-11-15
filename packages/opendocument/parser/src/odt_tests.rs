@@ -1601,7 +1601,9 @@ fn lays_lines_out_as_libreoffice_does() {
     });
     let settings = document.settings.as_ref().unwrap();
     assert!(settings.libre_office_line_boxes && settings.plain_font_line_boxes);
-    assert!(!settings.libre_office_word_far_east_boxes);
+    assert!(!settings.libre_office_ms_word_grid_metrics);
+    // No settings.xml: AddExternalLeading keeps its default (on).
+    assert!(!settings.libre_office_no_external_leading);
     let p = paragraphs(&document.body);
     // A proportional line below 100% is placed as a fixed line.
     assert!(p[0].line_extra_above);
@@ -1621,4 +1623,17 @@ fn a_drop_cap_takes_the_source_mark_before_its_dotted_circle() {
     assert_eq!(p.len(), 2);
     assert_eq!(text(0), "\u{25CC}\u{301}");
     assert_eq!(text(1), "bc");
+}
+
+#[test]
+fn reads_the_libreoffice_line_settings() {
+    // An item missing from a present configuration set reads as false.
+    let settings = br##"<office:document-settings xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:config="urn:oasis:names:tc:opendocument:xmlns:config:1.0" xmlns:ooo="http://openoffice.org/2004/office"><office:settings><config:config-item-set config:name="ooo:configuration-settings"><config:config-item config:name="MsWordCompGridMetrics" config:type="boolean">true</config:config-item></config:config-item-set></office:settings></office:document-settings>"##;
+    let document = read_fixture(Fixture {
+        body: "<text:p>a</text:p>",
+        files: &[("settings.xml", settings)],
+        ..Fixture::default()
+    });
+    let s = document.settings.as_ref().unwrap();
+    assert!(s.libre_office_ms_word_grid_metrics && s.libre_office_no_external_leading);
 }

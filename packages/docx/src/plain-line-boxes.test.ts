@@ -35,13 +35,22 @@ describe('LIBREOFFICE_FONT_LINE_BOX catalog projection', () => {
     expect(box!.designAscentRatio + box!.designDescentRatio).toBeCloseTo(box!.lineHeightRatio, 9);
   });
 
-  it('keeps Word\'s Far East box under MsWordCompGridMetrics', () => {
-    // DOCX-imported Meiryo 12 pt control: 22.85 pt per line with
-    // MsWordCompGridMetrics, 18.00 pt without; Latin faces keep LibreOffice's box.
-    expect(referenceFontLineMetrics('Meiryo', 400, 'normal', 'libreoffice-word-far-east'))
-      .toEqual(referenceFontLineMetrics('Meiryo'));
-    expect(referenceFontLineMetrics('Arial', 400, 'normal', 'libreoffice-word-far-east'))
-      .toEqual(referenceFontLineMetrics('Arial', 400, 'normal', 'libreoffice'));
+  it.each([
+    // LibreOffice 26.8 settings probes, 12 pt, top margin 20 pt: baseline
+    // offset and pitch with MsWordCompGridMetrics and AddExternalLeading on.
+    ['Meiryo', 'libreoffice-ms-word-grid', 17.55, 22.85],
+    ['MS Mincho', 'libreoffice-ms-word-grid', 13.5, 15.2],
+    ['Hiragino Sans', 'libreoffice-ms-word-grid', 15.4, 22.85],
+    ['Arial', 'libreoffice-ms-word-grid', 10.85, 13.8],
+    // AddExternalLeading off: no line gap.
+    ['Hiragino Sans', 'libreoffice-ms-word-grid-no-leading', 13.75, 15.2],
+    ['Hiragino Sans', 'libreoffice-no-leading', 10.55, 12.0],
+    ['Arial', 'libreoffice-no-leading', 10.85, 13.4],
+  ] as const)('applies settings.xml to %s (%s)', (family, projection, ascentPt, pitchPt) => {
+    const box = referenceFontLineMetrics(family, 400, 'normal', projection)!;
+    // LibreOffice truncates the 27% to whole twips (0.05 pt).
+    expect(Math.abs(box.designAscentRatio * 12 - ascentPt)).toBeLessThan(0.075);
+    expect(Math.abs(box.lineHeightRatio * 12 - pitchPt)).toBeLessThan(0.075);
   });
 
   it('needs no OS/2 code-page class, which only Word\'s projection reads', () => {
