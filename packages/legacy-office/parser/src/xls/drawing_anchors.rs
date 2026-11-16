@@ -269,10 +269,23 @@ pub(super) fn chart_sheet_charts(
                                 }
                                 identity = true;
                             }
-                            0xf010 if child.payload.len() == 18 => {
+                            0xf010 => {
+                                if rect.is_some()
+                                    || child.version != 0
+                                    || child.instance != 0
+                                    || child.payload.len() != 18
+                                {
+                                    return Err(unsupported("invalid BIFF cell anchor"));
+                                }
                                 rect = Some(rectangle(&child.payload[2..])?);
                             }
                             0xf011 => {
+                                if child.version != 0
+                                    || child.instance != 0
+                                    || !child.payload.is_empty()
+                                {
+                                    return Err(unsupported("invalid BIFF drawing client marker"));
+                                }
                                 // The chart substream belongs to a chart
                                 // object: an Obj whose FtCmo (ft 0x15,
                                 // cb 0x12) states ot 5.
