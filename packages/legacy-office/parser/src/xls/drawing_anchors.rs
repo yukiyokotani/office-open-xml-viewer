@@ -535,6 +535,17 @@ fn object_framed(data: &[u8]) -> bool {
                 };
                 return object_formula_framed(formula) && data.len() >= at + 6 + length + 8;
             }
+            // FtMacro, the ObjLinkFmla of a scroll bar or spinner and of a
+            // check box or option button: the subrecord is an ObjFmla.
+            0x0004 | 0x000e | 0x0014 => {
+                let Some(formula) = data.get(at + 4..at + 4 + size) else {
+                    return false;
+                };
+                if !object_formula_framed(formula) {
+                    return false;
+                }
+                at += 4 + size;
+            }
             _ => at += 4 + size,
         }
     }
