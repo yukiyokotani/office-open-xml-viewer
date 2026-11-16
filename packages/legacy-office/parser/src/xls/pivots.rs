@@ -13,10 +13,11 @@
 //! formats; the PivotCache (the `_SX_DB_CUR` storage) is not read, so the
 //! metadata is partial like the XLSX parser's.
 //!
-//! Formatting the renderer cannot draw fails closed: a PivotTable AutoFormat
-//! (fAutoFormat), OLAP views (SXViewEx), a built-in style in a theme-less
-//! workbook, and page-field or column-subheading style elements that would
-//! apply.
+//! A PivotTable AutoFormat (fAutoFormat) is not drawn from the view: Excel
+//! applies it to the cells when it lays the view out and saves the result in
+//! their XFs, which are projected. Formatting the renderer cannot draw fails
+//! closed: OLAP views (SXViewEx), a built-in style in a theme-less workbook,
+//! and page-field or column-subheading style elements that would apply.
 
 use super::{tables, u16_at, unsupported};
 
@@ -282,10 +283,11 @@ fn table(
     {
         return Err(unsupported("invalid XLS PivotTable view"));
     }
-    // fAutoFormat: the legacy AutoFormat formats the view by table; the
-    // model has no AutoFormat tables.
+    // fAutoFormat: the legacy AutoFormat (itblAutoFmt) formats the view by
+    // table. The model has no AutoFormat tables; the cells keep the XFs Excel
+    // saved for them.
     if flags & 0x0008 != 0 {
-        return Err(unsupported("XLS PivotTable AutoFormat is not projected"));
+        crate::rejection::skipped("XLS PivotTable AutoFormat is not projected");
     }
     let axis_records = usize::from(rows > 0) + usize::from(columns > 0);
     if view.ivd.len() != axis_records
@@ -386,7 +388,7 @@ fn table(
     // not read.
     reasons.push(feature("pivotCache"));
     let style = match &view.style {
-        Some(record) => Some(style(record, styles, context, pages > 0, columns > 0)?),
+        Some(record) => style(record, styles, context, pages > 0, columns > 0)?,
         None => None,
     };
     Ok(xlsx_model::PivotTableMetadata {
@@ -423,20 +425,25 @@ fn table(
 /// the applied table style: a workbook TableStyle, else a built-in
 /// PivotTable style (ECMA-376 Annex G, shared with the XLSX parser) under
 /// the workbook theme. fDefaultStyle applies the workbook's default
-/// PivotTable style (2.4.322 TableStyles) instead of stName.
+/// PivotTable style (2.4.322 TableStyles) instead of stName. An empty stName
+/// without fDefaultStyle is a view without a table style, which Excel writes
+/// for the "None" style and for views formatted by an AutoFormat.
 fn style(
     record: &[u8],
     styles: &tables::Styles,
     context: &tables::Context<'_>,
     has_pages: bool,
     has_columns: bool,
-) -> Result<xlsx_model::PivotTableStyle, String> {
+) -> Result<Option<xlsx_model::PivotTableStyle>, String> {
     let flags = u16_at(record, 12)?;
     let chars = usize::from(u16_at(record, 14)?);
     let bytes = record
         .get(16..16 + chars * 2)
-        .filter(|_| record.len() == 16 + chars * 2 && chars > 0)
-        .ok_or_else(|| unsupported("invalid XLS PivotTable style"))?;
+        .filter(|_| record.len() == 16 + chars * 2)
+        .ok_or_else(|| crate::rejection::corrupt("invalid XLS PivotTable style"))?;
+    if chars == 0 && flags & 0x0040 == 0 {
+        return Ok(None);
+    }
     let units: Vec<u16> = bytes
         .as_chunks::<2>()
         .0
@@ -504,7 +511,7 @@ fn style(
             dxf,
         });
     }
-    Ok(xlsx_model::PivotTableStyle {
+    Ok(Some(xlsx_model::PivotTableStyle {
         name,
         show_row_headers,
         show_column_headers,
@@ -512,7 +519,7 @@ fn style(
         show_column_stripes,
         show_last_column,
         elements: projected,
-    })
+    }))
 }
 
 #[cfg(test)]
@@ -778,13 +785,51 @@ mod tests {
     }
 
     #[test]
-    fn autoformat_olap_and_unresolvable_styles_fail_closed() {
-        let base = || (0x00b0, sx_view([0, 0, 0, 0, 0, 0], 0));
-        assert!(
-            project_view(&[(0x00b0, sx_view([0, 0, 0, 0, 0, 0], 0x0008))])
-                .unwrap_err()
-                .contains("AutoFormat")
+    fn autoformat_is_not_drawn_from_the_view() {
+        // fAutoFormat leaves the view's metadata as without it: Excel saved
+        // the AutoFormat in the cells' XFs.
+        crate::rejection::take_best_effort();
+        let plain = project_view(&[(0x00b0, sx_view([0, 0, 0, 0, 0, 0], 0))]).unwrap();
+        assert!(crate::rejection::take_best_effort().is_empty());
+        let formatted = project_view(&[(0x00b0, sx_view([0, 0, 0, 0, 0, 0], 0x0008))]).unwrap();
+        assert_eq!(
+            crate::rejection::take_best_effort(),
+            [(
+                crate::rejection::BestEffort::Skipped,
+                "XLS PivotTable AutoFormat is not projected"
+            )]
         );
+        assert_eq!(
+            serde_json::to_value(&formatted).unwrap(),
+            serde_json::to_value(&plain).unwrap()
+        );
+        assert_eq!(formatted.len(), 1);
+        assert!(formatted[0].style.is_none());
+    }
+
+    #[test]
+    fn an_empty_style_name_is_a_view_without_a_table_style() {
+        let base = || (0x00b0, sx_view([0, 0, 0, 0, 0, 0], 0));
+        crate::rejection::take_best_effort();
+        let tables = project_view(&[base(), (0x0864, style_client(0x0033, ""))]).unwrap();
+        assert!(tables[0].style.is_none());
+        // Not a best-effort decision: the record states "no style".
+        assert!(crate::rejection::take_best_effort().is_empty());
+        // The default style is still looked up when the record asks for it.
+        assert!(project_view(&[base(), (0x0864, style_client(0x0073, ""))])
+            .unwrap_err()
+            .contains("default style is not named"));
+        // A name length the record does not hold is a framing error.
+        let mut truncated = style_client(0x0033, "Pv");
+        truncated.truncate(truncated.len() - 1);
+        assert!(project_view(&[base(), (0x0864, truncated)])
+            .unwrap_err()
+            .contains("invalid XLS PivotTable style"));
+    }
+
+    #[test]
+    fn olap_and_unresolvable_styles_fail_closed() {
+        let base = || (0x00b0, sx_view([0, 0, 0, 0, 0, 0], 0));
         assert!(project_view(&[base(), (0x080c, vec![0; 16])])
             .unwrap_err()
             .contains("OLAP"));

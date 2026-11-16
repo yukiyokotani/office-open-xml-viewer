@@ -12,8 +12,9 @@
 //!
 //! The error style, IME mode and the show-prompt/show-error switches only
 //! govern data entry; neither the XLSX model nor its parser carries them. A
-//! list whose in-cell drop-down is suppressed is rejected: the viewer
-//! would draw the drop-down button Excel hides.
+//! list whose in-cell drop-down is suppressed (fSuppressCombo) is not
+//! projected: the model cannot state the suppression, so its rule would draw
+//! the drop-down button Excel hides. The cells keep their stored values.
 
 use super::conditional::{decompile, Externs};
 use super::{u16_at, u32_at, unsupported};
@@ -91,7 +92,7 @@ pub(super) fn project<'a>(
                     .filter(|left| **left > 0)
                     .ok_or_else(|| unsupported("XLS data validation outside its DVal"))?;
                 *left -= 1;
-                output.push(dv(data, externs)?);
+                output.extend(dv(data, externs)?);
             }
             _ => return Err(unsupported("unexpected XLS data validation record")),
         }
@@ -102,7 +103,8 @@ pub(super) fn project<'a>(
     Ok(output)
 }
 
-fn dv(data: &[u8], externs: &Externs) -> Result<xlsx_model::DataValidation, String> {
+/// `None` for a rule that is read but not projected.
+fn dv(data: &[u8], externs: &Externs) -> Result<Option<xlsx_model::DataValidation>, String> {
     let flags = u32_at(data, 0)?;
     let kind = flags & 0x0f;
     let lookup = flags & 0x80 != 0;
@@ -157,11 +159,6 @@ fn dv(data: &[u8], externs: &Externs) -> Result<xlsx_model::DataValidation, Stri
         7 => Some("custom"),
         _ => return Err(unsupported("invalid XLS data validation type")),
     };
-    if kind == 3 && suppress {
-        return Err(unsupported(
-            "XLS list validation without its drop-down is not representable",
-        ));
-    }
     let bounded = matches!(kind, 1 | 2 | 4 | 5 | 6);
     // ST_DataValidationOperator; SpreadsheetML omits the default `between`.
     let operator = if bounded {
@@ -203,7 +200,12 @@ fn dv(data: &[u8], externs: &Externs) -> Result<xlsx_model::DataValidation, Stri
     }
     let [prompt_title, error_title, prompt, error_message]: [Option<String>; 4] =
         texts.try_into().expect("four texts");
-    Ok(xlsx_model::DataValidation {
+    if kind == 3 && suppress {
+        // Every field was read, so a malformed rule still rejects.
+        crate::rejection::skipped("XLS list validation without its drop-down is not representable");
+        return Ok(None);
+    }
+    Ok(Some(xlsx_model::DataValidation {
         sqref: ranges.join(" "),
         validation_type: validation_type.map(str::to_string),
         operator: operator.map(str::to_string),
@@ -214,7 +216,7 @@ fn dv(data: &[u8], externs: &Externs) -> Result<xlsx_model::DataValidation, Stri
         prompt,
         error_title,
         error_message,
-    })
+    }))
 }
 
 #[cfg(test)]
@@ -275,17 +277,31 @@ mod tests {
         assert!(output[0].prompt_title.is_none());
         assert_eq!(output[1].operator.as_deref(), Some("greaterThanOrEqual"));
         assert_eq!(output[1].formula1.as_deref(), Some("0"));
-        // A list whose drop-down is suppressed, and a missing Dv, reject.
+        // A list whose drop-down is suppressed is not projected; the rule
+        // beside it is.
+        crate::rejection::take_best_effort();
         let suppressed = dv(0x0283, &[0x17, 1, 0, b'a'], &[[0, 0, 0, 0]]);
-        let records = [dval(1), suppressed];
-        assert!(project(
+        let whole = dv(0x0060_0001, &[0x1e, 0, 0], &[[6, 6, 2, 2]]);
+        let records = [dval(2), suppressed, whole];
+        let output = project(
             records
                 .iter()
                 .enumerate()
-                .map(|(i, data)| { (if i == 0 { 0x01b2 } else { 0x01be }, data.as_slice()) }),
+                .map(|(i, data)| (if i == 0 { 0x01b2 } else { 0x01be }, data.as_slice())),
             &Externs::default(),
         )
-        .is_err());
+        .unwrap();
+        assert_eq!(output.len(), 1);
+        assert_eq!(output[0].sqref, "C7");
+        assert_eq!(output[0].validation_type.as_deref(), Some("whole"));
+        assert_eq!(
+            crate::rejection::take_best_effort(),
+            [(
+                crate::rejection::BestEffort::Skipped,
+                "XLS list validation without its drop-down is not representable"
+            )]
+        );
+        // A missing Dv rejects.
         let records = [dval(1)];
         assert!(project(
             records.iter().map(|data| (0x01b2, data.as_slice())),

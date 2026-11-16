@@ -2,7 +2,7 @@
 //! 2.5.143/193-195; MS-ODRAW 2.2.13-17/40. Keep raw cell fractions intact.
 use super::{
     parse_bound_sheet, u16_at, u32_at, unsupported, Record, BIFF8, BOF, BOUNDSHEET8, EOF, FILEPASS,
-    WORKBOOK_GLOBALS, WORKSHEET,
+    MACRO_SHEET, WORKBOOK_GLOBALS, WORKSHEET,
 };
 use crate::officeart::record_with_end;
 use std::collections::{BTreeMap, HashSet};
@@ -46,8 +46,8 @@ pub struct DrawingAnchor {
     /// One-based position of this shape container among all shape
     /// containers of the sheet drawing, in document (paint) order.
     pub order: u64,
-    /// OfficeArt facts of a rectangle or text box (Obj ot 2 or 6), whose
-    /// interpretation belongs to the projecting host.
+    /// OfficeArt facts of a shape or comment box (not of a chart or
+    /// picture), whose interpretation belongs to the projecting host.
     pub shape: Option<ShapeSource>,
     /// Members of a group placed on the sheet (Obj ot 0), in document order.
     /// Only the strict walk flattens groups.
@@ -64,7 +64,8 @@ pub struct ShapeSource {
     pub properties: Vec<(u16, u32)>,
     /// Complex data of the geometry arrays (MS-ODRAW 2.3.6: pVertices,
     /// pSegmentInfo, pConnectionSites and their directions, pAdjustHandles,
-    /// pGuides and pInscribe), by property id.
+    /// pGuides and pInscribe) and of fillShadeColors (2.3.7.27), by
+    /// property id.
     pub complex: Vec<(u16, Vec<u8>)>,
     pub text: Option<usize>,
 }
@@ -177,15 +178,241 @@ fn workbook_with_policy(
     // Disjoint physical ranges prevent overlapping BoundSheet pointers from
     // making us repeatedly scan the same worksheet or its embedded charts.
     for (ordinal, &(start, (tab, kind))) in starts.iter().enumerate() {
-        if kind != 0 {
-            continue;
-        }
+        // Worksheets and macro sheets carry sheet drawings.
+        let substream = match kind {
+            0 => WORKSHEET,
+            1 => MACRO_SHEET,
+            _ => continue,
+        };
         let end = starts.get(ordinal + 1).map_or(records.len(), |s| s.0);
-        let data = assemble(&records[start..end], start, &mut work, &mut remaining)?;
+        let data = assemble(
+            &records[start..end],
+            start,
+            substream,
+            &mut work,
+            &mut remaining,
+        )?;
         if let Some(mut drawing) = data {
             walk_with_policy(&mut drawing, tab, &mut work, &mut output, policy)?;
         }
     }
+    Ok(output)
+}
+
+/// A chart object of a chart sheet: its OfficeArtClientAnchorChart
+/// rectangle (left, top, right, bottom in SPRC) and the absolute record
+/// range of its chart substream, and whether the object is hidden (read,
+/// not drawn).
+pub(super) type ChartSheetObject = ([i32; 4], (usize, usize), bool);
+
+/// The embedded charts of a chart sheet substream (`records` runs from its
+/// BOF to its EOF, the BOF being record `base` of the stream): for each
+/// chart object (Obj ot 5 followed by its chart substream), the
+/// OfficeArtClientAnchorChart rectangle (MS-XLS 2.5.191: lx1, ly1, lx2, ly2
+/// in SPRC, 1/4000 of the chart area) and the absolute record range of the
+/// chart substream, in document order.
+pub(super) fn chart_sheet_charts(
+    records: &[Record<'_>],
+    base: usize,
+) -> Result<Vec<ChartSheetObject>, String> {
+    let mut work = 2_000_000;
+    let mut remaining = MAX_BYTES;
+    let Some(mut drawing) = assemble(records, base, 0x0020, &mut work, &mut remaining)? else {
+        return Ok(Vec::new());
+    };
+    let (root, end) = record_with_end(&drawing.bytes, 0, &mut work, "XLS drawing")?;
+    if root.kind != 0xf002 || root.version != 15 || root.instance != 0 || end != drawing.bytes.len()
+    {
+        return Err(unsupported("invalid BIFF sheet drawing root"));
+    }
+    let mut output = Vec::new();
+    let mut ids = HashSet::new();
+    let mut objects = HashSet::new();
+    // Containers still to read: (start, end, nesting depth).
+    let mut stack = vec![(8usize, end, 0usize)];
+    while let Some((mut at, end, depth)) = stack.pop() {
+        if depth > MAX_DEPTH {
+            return Err(crate::rejection::resource(
+                "BIFF drawing group depth exceeded",
+            ));
+        }
+        while at < end {
+            spend(&mut work)?;
+            let (record, next) =
+                record_with_end(&drawing.bytes[..end], at, &mut work, "XLS drawing")?;
+            if matches!(record.kind, 0xf003 | 0xf004)
+                && (record.version != 15 || record.instance != 0)
+            {
+                return Err(unsupported("invalid BIFF shape container"));
+            }
+            match record.kind {
+                0xf003 => stack.push((at + 8, next, depth + 1)),
+                0xf004 => {
+                    let mut rect = None;
+                    let mut chart = None;
+                    let mut identity = false;
+                    let mut hidden = false;
+                    let mut owned = false;
+                    let mut position = at + 8;
+                    while position < next {
+                        let (child, child_end) = record_with_end(
+                            &drawing.bytes[..next],
+                            position,
+                            &mut work,
+                            "XLS shape",
+                        )?;
+                        match child.kind {
+                            // The property tables are not projected, but
+                            // they must hold the properties they declare.
+                            0xf00b | 0xf122 => {
+                                // Group Shape Boolean Properties (MS-ODRAW
+                                // 2.3.4.44): fHidden with its use bit.
+                                let mut read = |p: crate::officeart::properties::Property<'_>| {
+                                    if p.opid & 0xc000 == 0
+                                        && p.opid & 0x3fff == 0x03bf
+                                        && p.value & 0x0002_0000 != 0
+                                    {
+                                        hidden = p.value & 0x0002 != 0;
+                                    }
+                                    Ok(())
+                                };
+                                if child.kind == 0xf00b {
+                                    crate::officeart::properties::visit(
+                                        child, &mut work, &mut read,
+                                    )?;
+                                } else {
+                                    crate::officeart::properties::visit_tertiary(
+                                        child, &mut work, &mut read,
+                                    )?;
+                                }
+                            }
+                            // OfficeArtChildAnchor and the text box marker,
+                            // which a chart object does not use.
+                            0xf00f => {
+                                if child.version != 0 || child.instance != 0 {
+                                    return Err(unsupported("invalid BIFF child anchor"));
+                                }
+                                rectangle(child.payload)?;
+                            }
+                            0xf00d => {
+                                if child.version != 0
+                                    || child.instance != 0
+                                    || !child.payload.is_empty()
+                                {
+                                    return Err(unsupported("invalid BIFF drawing client marker"));
+                                }
+                                let text = drawing
+                                    .clients
+                                    .remove(&child_end)
+                                    .filter(|client| client.kind == 0x01b6)
+                                    .ok_or_else(|| {
+                                        unsupported("invalid BIFF drawing textbox owner")
+                                    })?;
+                                // The text is not drawn; its TxO and
+                                // Continue records must still be whole.
+                                super::shapes::txo_text(records, text.offset)?;
+                            }
+                            // OfficeArtFSP: the shape's identity and flags.
+                            0xf00a => {
+                                if identity || child.version != 2 || child.payload.len() != 8 {
+                                    return Err(unsupported("invalid BIFF shape identity"));
+                                }
+                                if ids.len() >= MAX_OBJECTS {
+                                    return Err(crate::rejection::resource(
+                                        "BIFF shape count budget exceeded",
+                                    ));
+                                }
+                                if !ids.insert(u32_at(child.payload, 0)?) {
+                                    return Err(unsupported("duplicate or excessive BIFF shapes"));
+                                }
+                                identity = true;
+                            }
+                            // OfficeArtFSPGR: a group's coordinate rectangle.
+                            0xf009 => {
+                                if child.version != 1 || child.instance != 0 {
+                                    return Err(unsupported("invalid BIFF group rectangle"));
+                                }
+                                rectangle(child.payload)?;
+                            }
+                            0xf010 => {
+                                if rect.is_some()
+                                    || child.version != 0
+                                    || child.instance != 0
+                                    || child.payload.len() != 18
+                                {
+                                    return Err(unsupported("invalid BIFF cell anchor"));
+                                }
+                                rect = Some(rectangle(&child.payload[2..])?);
+                            }
+                            0xf011 => {
+                                if child.version != 0
+                                    || child.instance != 0
+                                    || !child.payload.is_empty()
+                                {
+                                    return Err(unsupported("invalid BIFF drawing client marker"));
+                                }
+                                // Every client marker ends its fragment
+                                // and is followed by its Obj, with whole
+                                // subrecords and an identifier of its own.
+                                let client = drawing
+                                    .clients
+                                    .remove(&child_end)
+                                    .filter(|client| {
+                                        client.kind == 0x005d
+                                            && client.data.len() >= 22
+                                            && client.data[..4] == [0x15, 0, 0x12, 0]
+                                            && object_framed(client.data)
+                                    })
+                                    .ok_or_else(|| {
+                                        unsupported("invalid BIFF drawing object owner")
+                                    })?;
+                                if owned || !objects.insert(u16_at(client.data, 6)?) {
+                                    return Err(unsupported("duplicate BIFF drawing object id"));
+                                }
+                                owned = true;
+                                // A chart substream belongs to a chart
+                                // object (ot 5) whose record is complete.
+                                if let Some(range) = drawing.charts.remove(&child_end) {
+                                    if u16_at(client.data, 4)? != 5 || !object_complete(client.data)
+                                    {
+                                        return Err(unsupported(
+                                            "invalid BIFF drawing object owner",
+                                        ));
+                                    }
+                                    chart = Some(range);
+                                }
+                            }
+                            _ => {}
+                        }
+                        position = child_end;
+                    }
+                    // Every shape container holds its OfficeArtFSP.
+                    if !identity {
+                        return Err(unsupported("missing BIFF shape identity"));
+                    }
+                    if let Some(chart) = chart {
+                        let rect = rect.ok_or_else(|| {
+                            unsupported("BIFF chart object without its chart anchor")
+                        })?;
+                        if output.len() >= MAX_OBJECTS {
+                            return Err(crate::rejection::resource(
+                                "BIFF retained anchor budget exceeded",
+                            ));
+                        }
+                        output.push((rect, chart, hidden));
+                    }
+                }
+                _ => {}
+            }
+            at = next;
+        }
+    }
+    // Every Obj and TxO of the drawing belongs to a shape, and every chart
+    // substream to a chart object.
+    if !drawing.clients.is_empty() || !drawing.charts.is_empty() {
+        return Err(unsupported("unowned BIFF drawing clients"));
+    }
+    output.sort_by_key(|(_, chart, _)| chart.0);
     Ok(output)
 }
 
@@ -207,13 +434,14 @@ fn spend(work: &mut usize) -> Result<(), String> {
 fn assemble<'a>(
     records: &[Record<'a>],
     base: usize,
+    substream: u16,
     work: &mut usize,
     remaining: &mut usize,
 ) -> Result<Option<Drawing<'a>>, String> {
     let first = records
         .first()
         .ok_or_else(|| unsupported("empty BIFF drawing sheet"))?;
-    if first.kind != BOF || u16_at(first.data, 0)? != BIFF8 || u16_at(first.data, 2)? != WORKSHEET {
+    if first.kind != BOF || u16_at(first.data, 0)? != BIFF8 || u16_at(first.data, 2)? != substream {
         return Err(unsupported("invalid BIFF drawing worksheet BOF"));
     }
     let (mut depth, mut length, mut complete) = (0usize, 0usize, false);
@@ -384,6 +612,108 @@ fn object_complete(data: &[u8]) -> bool {
     false
 }
 
+/// Whether an Obj record's subrecords are whole: they end with FtEnd at
+/// the record end, or reach FtLbsData (2.5.147, ft 0x0013), which does not
+/// state its own length and runs to the end of the record: its ObjFmla
+/// (cbFmla, then that many bytes) and the cLines, iSel, flags and idEdit
+/// fields must be present.
+fn object_framed(data: &[u8]) -> bool {
+    let mut at = 0usize;
+    while at + 4 <= data.len() {
+        let kind = u16::from_le_bytes([data[at], data[at + 1]]);
+        let size = usize::from(u16::from_le_bytes([data[at + 2], data[at + 3]]));
+        match kind {
+            0x0000 => return size == 0 && at + 4 == data.len(),
+            0x0013 => {
+                // cbFContinued 0: the fields after the header are absent.
+                if size == 0 {
+                    return at + 4 == data.len();
+                }
+                // Otherwise it counts at least the empty ObjFmla and the
+                // four fixed fields.
+                if size < 10 {
+                    return false;
+                }
+                let Some(length) = data.get(at + 4..at + 6) else {
+                    return false;
+                };
+                let length = usize::from(u16::from_le_bytes([length[0], length[1]]));
+                let Some(formula) = data.get(at + 6..at + 6 + length) else {
+                    return false;
+                };
+                // cLines, iSel, flags and idEdit, then for a drop-down
+                // (FtCmo ot 0x14) LbsDropData (2.5.180): wStyle, cLine,
+                // dxMin and a counted string.
+                // cbFContinued counts the ObjFmla and the fixed fields.
+                if size < 2 + length + 8 {
+                    return false;
+                }
+                let fixed = at + 6 + length + 8;
+                if !object_formula_framed(formula) || data.len() < fixed {
+                    return false;
+                }
+                if data.get(4..6) != Some(&[0x14, 0][..]) {
+                    return true;
+                }
+                let (Some(count), Some(&high)) =
+                    (data.get(fixed + 6..fixed + 8), data.get(fixed + 8))
+                else {
+                    return false;
+                };
+                let count = usize::from(u16::from_le_bytes([count[0], count[1]]));
+                return data.len() >= fixed + 9 + count * if high & 1 != 0 { 2 } else { 1 };
+            }
+            // FtMacro, the ObjLinkFmla of a scroll bar or spinner and of a
+            // check box or option button: the subrecord is an ObjFmla.
+            0x0004 | 0x000e | 0x0014 => {
+                let Some(formula) = data.get(at + 4..at + 4 + size) else {
+                    return false;
+                };
+                if !object_formula_framed(formula) {
+                    return false;
+                }
+                at += 4 + size;
+            }
+            _ => {
+                // Subrecords of a fixed size (MS-XLS 2.5.139-2.5.150).
+                let fixed = match kind {
+                    0x0006..=0x0008 => Some(2),
+                    0x000a => Some(12),
+                    0x000b | 0x000f => Some(6),
+                    0x000c => Some(20),
+                    0x000d => Some(22),
+                    0x0010 | 0x0012 => Some(8),
+                    0x0011 => Some(4),
+                    0x0015 => Some(18),
+                    _ => None,
+                };
+                if fixed.is_some_and(|fixed| fixed != size) || data.len() < at + 4 + size {
+                    return false;
+                }
+                at += 4 + size;
+            }
+        }
+    }
+    false
+}
+
+/// Whether the bytes of an ObjFmla (MS-XLS 2.5.187) hold its
+/// ObjectParsedFormula (2.5.198.22): cce, four unused bytes and a complete
+/// token program of cce bytes (never an empty one). An empty ObjFmla holds
+/// none.
+pub(super) fn object_formula_framed(formula: &[u8]) -> bool {
+    if formula.is_empty() {
+        return true;
+    }
+    if formula.len() < 6 {
+        return false;
+    }
+    let size = usize::from(u16::from_le_bytes([formula[0], formula[1]]) & 0x7fff);
+    formula
+        .get(6..6 + size)
+        .is_some_and(super::conditional::framed)
+}
+
 fn corner(bytes: &[u8], offset: usize) -> Result<CellCorner, String> {
     let column = u16_at(bytes, offset)?;
     if column > 256 {
@@ -460,8 +790,9 @@ impl Facts<'_> {
     }
 }
 
-/// Geometry arrays retained for hosts that draw OfficeArt freeforms.
-const GEOMETRY_ARRAYS: [u16; 7] = [0x145, 0x146, 0x151, 0x152, 0x155, 0x156, 0x157];
+/// Arrays retained for hosts that draw OfficeArt shapes: the geometry of
+/// a freeform and the colors of a shaded fill (fillShadeColors).
+const GEOMETRY_ARRAYS: [u16; 8] = [0x145, 0x146, 0x151, 0x152, 0x155, 0x156, 0x157, 0x197];
 const MAX_SHAPE_COMPLEX_BYTES: usize = 4 * 1024 * 1024;
 
 fn rectangle(payload: &[u8]) -> Result<[i32; 4], String> {
@@ -594,6 +925,12 @@ fn read_shape<'a>(
                     let kind = u16_at(client.data, 4)?;
                     if !matches!(kind, 0..=9 | 11..=20 | 25 | 30) {
                         return Err(unsupported("invalid BIFF object type"));
+                    }
+                    // The object types read since the readers render every
+                    // feature (lines, ovals, arcs, controls, comments and
+                    // OfficeArt shapes) must hold complete subrecords.
+                    if !matches!(kind, 0 | 2 | 5 | 6 | 8 | 9) && !object_framed(client.data) {
+                        return Err(crate::rejection::corrupt("truncated BIFF drawing object"));
                     }
                     let id = u16_at(client.data, 6)?;
                     if !objects.insert(id) {
@@ -909,7 +1246,7 @@ fn walk_with_policy(
                             .reference(facts.shape_flags, facts.object_data)?,
                         chart: facts.chart.filter(|_| object_type == 5),
                         order,
-                        shape: matches!(object_type, 2 | 6 | 9).then(|| facts.source()),
+                        shape: (!matches!(object_type, 5 | 8)).then(|| facts.source()),
                         members: Vec::new(),
                     });
                 }

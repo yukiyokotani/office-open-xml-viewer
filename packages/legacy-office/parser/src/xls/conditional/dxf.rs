@@ -1,7 +1,7 @@
 //! Differential formats of conditional-formatting rules: MS-XLS 2.5.95 DXFN
 //! (CF), 2.5.96 DXFN12 (CF12, CFExNonCF12) with its 2.5.281 XFExtNoFRT
-//! full-color extensions, onto the XLSX model `Dxf` that the XLSX parser
-//! builds from ECMA-376 18.8.14 `dxf`.
+//! full-color and gradient-fill extensions, onto the XLSX model `Dxf` that
+//! the XLSX parser builds from ECMA-376 18.8.14 `dxf`.
 //!
 //! Each "ninch" bit marks a property the rule leaves unchanged, the same as
 //! an omitted SpreadsheetML child. Alignment (DXFALC) and protection
@@ -348,7 +348,11 @@ fn extend(
                 if value.len() != 16 {
                     return Err(unsupported("invalid XLS differential extended color"));
                 }
-                let color = full_color(value, context)?;
+                // A color of no specified type refines nothing: the
+                // property keeps the palette color of its DXFN.
+                let Some(color) = full_color(value, context)? else {
+                    continue;
+                };
                 let colors = &parts.colors;
                 // An extension refines a color the DXFN specifies; Excel
                 // writes the palette fallback next to each one.
@@ -409,13 +413,25 @@ fn extend(
                     ));
                 }
             }
+            // XFExtGradient (2.5.279): the fill is a gradient, as the
+            // `gradientFill` of an ECMA-376 dxf (18.8.24).
+            6 => {
+                if let Some(gradient) = gradient(value, context)? {
+                    dxf.fill = Some(xlsx_model::Fill {
+                        gradient: Some(gradient),
+                        ..Default::default()
+                    });
+                }
+            }
             // FontScheme: the XLSX model's Dxf font carries no scheme.
             14 => {
                 if value.len() != 2 {
                     return Err(unsupported("invalid XLS differential font scheme"));
                 }
             }
-            _ => return Err(unsupported("unsupported XLS differential format extension")),
+            // An ExtProp (2.5.108) states its own size, so one this
+            // projection has no property for is passed over.
+            _ => crate::rejection::skipped("unsupported XLS differential format extension"),
         }
     }
     if at != end {
@@ -445,15 +461,90 @@ pub(super) fn classic(
     Ok((dxf, end))
 }
 
-/// FullColorExt 2.5.155 as a resolved `#RRGGBB` (None: automatic).
-fn full_color(value: &[u8], context: &Context<'_>) -> Result<Option<String>, String> {
-    use ooxml_common::spreadsheet_color::{resolve_color, SpreadsheetColor};
-    let kind = u16_at(value, 0)?;
+/// XFExtGradient (2.5.279): XFPropGradient (2.5.288: type, angle and the
+/// fill-to rectangle), cGradStops and its GradStop (2.5.158) entries, each
+/// an XColorType, its value, the position and the tint. A stop without a
+/// resolvable color (automatic, or of no specified type) is left out and a
+/// gradient without stops is `None`, as the XLSX parser reads a
+/// `gradientFill` whose stop colors do not resolve.
+fn gradient(
+    value: &[u8],
+    context: &Context<'_>,
+) -> Result<Option<xlsx_model::GradientFillSpec>, String> {
+    use super::super::f64_at;
+    let invalid = || crate::rejection::corrupt("invalid XLS differential gradient fill");
+    let number = |at: usize| -> Result<f64, String> {
+        let number = f64_at(value, at).map_err(|_| invalid())?;
+        number.is_finite().then_some(number).ok_or_else(invalid)
+    };
+    let kind = u32_at(value, 0).map_err(|_| invalid())?;
+    let count =
+        usize::try_from(u32_at(value, 44).map_err(|_| invalid())?).map_err(|_| invalid())?;
+    // cGradStops may be zero: such a gradient has no stop (`None` below).
+    if kind > 1 || count > 256 || value.len() != 48 + count * 22 {
+        return Err(invalid());
+    }
+    let mut stops = Vec::with_capacity(count);
+    for stop in 0..count {
+        let at = 48 + stop * 22;
+        let position = number(at + 6)?;
+        let tint = number(at + 14)?;
+        if !(0.0..=1.0).contains(&position) || !(-1.0..=1.0).contains(&tint) {
+            return Err(invalid());
+        }
+        let color = extended_color(
+            u16_at(value, at)?,
+            u32_at(value, at + 2)?,
+            (tint != 0.0).then_some(tint),
+            context,
+        )?;
+        if let Some(color) = color.flatten() {
+            stops.push(xlsx_model::GradientStopSpec { position, color });
+        }
+    }
+    if stops.is_empty() {
+        return Ok(None);
+    }
+    stops.sort_by(|a, b| {
+        a.position
+            .partial_cmp(&b.position)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    Ok(Some(xlsx_model::GradientFillSpec {
+        gradient_type: if kind == 1 { "path" } else { "linear" }.into(),
+        degree: number(4)?,
+        left: number(12)?,
+        right: number(20)?,
+        top: number(28)?,
+        bottom: number(36)?,
+        stops,
+    }))
+}
+
+/// FullColorExt 2.5.155 as a resolved `#RRGGBB` (`Some(None)`: automatic;
+/// `None`: no specified color type).
+fn full_color(value: &[u8], context: &Context<'_>) -> Result<Option<Option<String>>, String> {
     // nTintShade in n/32767 steps, as for XFExt (styles/extensions.rs).
     let tint = f64::from(u16_at(value, 2)? as i16) / 32767.0;
-    let tint = (tint != 0.0).then_some(tint);
-    let data = u32_at(value, 4)?;
-    Ok(match kind {
+    extended_color(
+        u16_at(value, 0)?,
+        u32_at(value, 4)?,
+        (tint != 0.0).then_some(tint),
+        context,
+    )
+}
+
+/// An XColorType (2.5.283) with its value and tint, resolved. `Some(None)`
+/// is the automatic color; `None` a type the specification does not define,
+/// which states no color.
+fn extended_color(
+    kind: u16,
+    data: u32,
+    tint: Option<f64>,
+    context: &Context<'_>,
+) -> Result<Option<Option<String>>, String> {
+    use ooxml_common::spreadsheet_color::{resolve_color, SpreadsheetColor};
+    Ok(Some(match kind {
         0 => None,
         1 => {
             let base = icv(context, u16::try_from(data).map_err(|_| truncated())?);
@@ -484,6 +575,9 @@ fn full_color(value: &[u8], context: &Context<'_>) -> Result<Option<String>, Str
                 .ok_or_else(|| unsupported("XLS themed differential color lacks a theme"))?;
             resolve_color(SpreadsheetColor::Argb(argb), tint, &[])
         }
-        _ => return Err(unsupported("unsupported XLS differential color")),
-    })
+        _ => {
+            crate::rejection::ignored_value("unsupported XLS differential color");
+            return Ok(None);
+        }
+    }))
 }

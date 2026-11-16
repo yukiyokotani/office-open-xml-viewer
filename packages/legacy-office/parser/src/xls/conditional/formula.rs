@@ -135,7 +135,9 @@ const ECMA_FUTURE: [&str; 12] = [
 #[derive(Default)]
 pub(in super::super) struct Externs {
     xti_names: Vec<Option<std::rc::Rc<Vec<String>>>>,
-    /// Lbl (2.4.150) names in record order; built-in names are `None`.
+    /// Lbl (2.4.150) names in record order, with fProc. A built-in name has
+    /// the `_xlnm.` spelling of the model's defined names (see `names`); an
+    /// unknown built-in code or an empty name is `None`.
     names: Vec<Option<(String, bool)>>,
     /// Formula sheet prefix (quoted when needed) per XTI of this workbook's
     /// own SupBook that names exactly one sheet.
@@ -252,7 +254,12 @@ impl Externs {
                     // fProc (bit 3): the name calls a procedure, e.g. the
                     // hidden `_xlfn.` future-function names (2.2.2.3).
                     let procedure = u16_at(data, 0)? & 0x0008 != 0;
-                    defined.push((!builtin && !name.is_empty()).then_some((name, procedure)));
+                    let name = if builtin {
+                        super::super::names::builtin(&name, count)
+                    } else {
+                        (!name.is_empty()).then_some(name)
+                    };
+                    defined.push(name.map(|name| (name, procedure)));
                 }
                 _ => {}
             }
@@ -287,7 +294,7 @@ impl Externs {
         self.xti_sheets.get(usize::from(xti))?.as_deref()
     }
 
-    /// A one-based Lbl index as the user-defined name it names.
+    /// A one-based Lbl index as the name the model defines it under.
     fn name(&self, index: u32) -> Option<(&str, bool)> {
         let index = usize::try_from(index).ok()?.checked_sub(1)?;
         let (name, procedure) = self.names.get(index)?.as_ref()?;
@@ -329,14 +336,117 @@ fn sheet_prefix(name: &str) -> String {
     }
 }
 
+/// Diagnostics of a well-framed formula this decompiler has no text for: a
+/// token, name, reference or function outside its set. Every other failure
+/// is a formula that cannot be read (truncated or malformed).
+const WITHOUT_TEXT: [&str; 4] = [
+    "unsupported XLS conditional formatting formula token",
+    "unsupported XLS formula defined name",
+    "unsupported XLS 3-D reference",
+    "unsupported XLS conditional formatting add-in function",
+];
+
+/// Whether `error` is one of this module's "no text for this formula"
+/// rejections rather than a framing error.
+pub(in super::super) fn without_text(error: &str) -> bool {
+    WITHOUT_TEXT
+        .iter()
+        .any(|site| error == unsupported(*site).as_str())
+}
+
+/// Whether `rgce` is a complete BIFF8 token program (MS-XLS 2.5.198.25 Ptg
+/// sizes) whose operators find their operands and which leaves one value,
+/// whatever it computes. A caller that passes over a formula
+/// [`without_text`] first establishes this, so a truncated token or a
+/// malformed expression behind the token the decompiler stopped at still
+/// rejects. A token of unknown size, or a fixed-arity function outside the
+/// function table (its operand count is unknown), or a token whose data
+/// lies in the RgbExtra, is not established.
+pub(in super::super) fn framed(rgce: &[u8]) -> bool {
+    let mut at = 0usize;
+    let mut depth = 0usize;
+    while at < rgce.len() {
+        let token = rgce[at];
+        // (size, operands taken, values left)
+        let (size, take, leave) = match token {
+            0x03..=0x11 => (1, 2, 1),
+            0x12..=0x15 => (1, 1, 1),
+            0x16 => (1, 0, 1),
+            0x17 => {
+                let (Some(&count), Some(&high)) = (rgce.get(at + 1), rgce.get(at + 2)) else {
+                    return false;
+                };
+                (
+                    3 + usize::from(count) * if high & 1 != 0 { 2 } else { 1 },
+                    0,
+                    1,
+                )
+            }
+            0x19 => match rgce.get(at + 1) {
+                // PtgAttrChoose: a jump table of cOffset + 1 entries.
+                Some(0x04) => {
+                    let (Some(&low), Some(&high)) = (rgce.get(at + 2), rgce.get(at + 3)) else {
+                        return false;
+                    };
+                    (
+                        4 + 2 * (usize::from(u16::from_le_bytes([low, high])) + 1),
+                        0,
+                        0,
+                    )
+                }
+                // PtgAttrSum.
+                Some(0x10) => (4, 1, 1),
+                Some(_) => (4, 0, 0),
+                None => return false,
+            },
+            0x1c | 0x1d => (2, 0, 1),
+            0x1e => (3, 0, 1),
+            0x1f => (9, 0, 1),
+            0x20..=0x7f => match token & 0x1f {
+                // PtgArray and PtgMemArea take their data from the RgbExtra,
+                // which only a complete decompilation reads, and the PtgMem
+                // tokens state the size of the expression behind them.
+                0x00 | 0x06..=0x09 => return false,
+                0x01 => {
+                    let (Some(&low), Some(&high)) = (rgce.get(at + 1), rgce.get(at + 2)) else {
+                        return false;
+                    };
+                    match ftab::function(u16::from_le_bytes([low, high])) {
+                        Some((_, Some(count))) => (3, usize::from(count), 1),
+                        _ => return false,
+                    }
+                }
+                0x02 => match rgce.get(at + 1) {
+                    Some(&count) => (4, usize::from(count & 0x7f), 1),
+                    None => return false,
+                },
+                0x03 | 0x04 | 0x0a | 0x0c => (5, 0, 1),
+                0x05 | 0x0b | 0x0d => (9, 0, 1),
+                0x19 | 0x1a | 0x1c => (7, 0, 1),
+                0x1b | 0x1d => (11, 0, 1),
+                _ => return false,
+            },
+            _ => return false,
+        };
+        if depth < take {
+            return false;
+        }
+        depth = depth - take + leave;
+        at += size;
+    }
+    at == rgce.len() && depth == 1
+}
+
 fn reject() -> String {
-    unsupported("unsupported XLS conditional formatting formula token")
+    unsupported(WITHOUT_TEXT[0])
 }
 
 /// Operator precedence is carried by the token order and explicit PtgParen,
 /// so text is built without inserting parentheses.
 enum Item {
     Text(String),
+    /// A PtgName defined name: an operand, or the target of a call.
+    Name(String),
     /// A PtgNameX add-in function name, valid only as a UDF call target.
     Function(String),
 }
@@ -491,7 +601,8 @@ fn decompile_with(
     let mut used = 0;
     let text = decompile_inner(rgce, extra, &mut used, anchor, externs, name)?;
     if used != extra.len() {
-        return Err(reject());
+        // RgbExtra the formula does not use is not part of it.
+        return Err(malformed());
     }
     Ok(text)
 }
@@ -581,8 +692,10 @@ fn decompile_inner(
     let mut at = 0;
     let pop = |stack: &mut Vec<Item>| -> Result<String, String> {
         match stack.pop() {
-            Some(Item::Text(text)) => Ok(text),
-            _ => Err(reject()),
+            Some(Item::Text(text) | Item::Name(text)) => Ok(text),
+            Some(Item::Function(_)) => Err(reject()),
+            // An operator without its operand is not a formula.
+            None => Err(malformed()),
         }
     };
     while at < rgce.len() {
@@ -738,13 +851,17 @@ fn decompile_inner(
                     }
                     let text = if tab == 0x00ff {
                         let arguments =
-                            arguments(&mut stack, count.checked_sub(1).ok_or_else(reject)?)?;
+                            arguments(&mut stack, count.checked_sub(1).ok_or_else(malformed)?)?;
                         // The callee is normally a function name; Excel also
                         // stores a call whose callee is a cell reference (a
                         // function unknown to BIFF8) and writes it as, for
-                        // example, `B11(...)` in its .xlsx counterpart.
+                        // example, `B11(...)` in its .xlsx counterpart. A
+                        // defined name is the callee of a user-defined
+                        // function (a VBA or XLL function, or one that no
+                        // longer exists: Excel then shows `#NAME?` and a
+                        // conditional format with it never applies).
                         let name = match stack.pop() {
-                            Some(Item::Function(name)) => name,
+                            Some(Item::Function(name) | Item::Name(name)) => name,
                             Some(Item::Text(reference)) if is_reference(&reference) => reference,
                             _ => return Err(reject()),
                         };
@@ -791,7 +908,7 @@ fn decompile_inner(
                 0x1a | 0x1b => {
                     let sheet = externs
                         .sheet(u16_at(rgce, at + 1)?)
-                        .ok_or_else(|| unsupported("unsupported XLS 3-D reference"))?;
+                        .ok_or_else(|| unsupported(WITHOUT_TEXT[2]))?;
                     let text = if token & 0x1f == 0x1a {
                         cell(u16_at(rgce, at + 3)?, u16_at(rgce, at + 5)?, anchor, name)
                     } else {
@@ -805,13 +922,15 @@ fn decompile_inner(
                     stack.push(Item::Text(format!("{pending}{sheet}!{text}")));
                     at += if token & 0x1f == 0x1a { 7 } else { 11 };
                 }
-                // PtgName (2.5.198.76): a user-defined name, written by name
-                // as in SpreadsheetML (observed with a data-validation list
-                // naming a defined range). Built-in names are not projected.
+                // PtgName (2.5.198.76): a defined name, written by name as
+                // in SpreadsheetML (observed with a data-validation list
+                // naming a defined range). A built-in name is written as the
+                // model defines it (`_xlnm.Print_Area`), so the renderer
+                // resolves it.
                 0x03 => {
                     let (name, procedure) = externs
                         .name(u32_at(rgce, at + 1)?)
-                        .ok_or_else(|| unsupported("unsupported XLS formula defined name"))?;
+                        .ok_or_else(|| unsupported(WITHOUT_TEXT[1]))?;
                     if procedure {
                         // A future function called through PtgFuncVar 0x00FF
                         // (MS-XLS 2.2.2.3): functions ECMA-376 predefines
@@ -826,7 +945,7 @@ fn decompile_inner(
                         }
                         stack.push(Item::Function(function.to_string()));
                     } else {
-                        stack.push(Item::Text(format!("{pending}{name}")));
+                        stack.push(Item::Name(format!("{pending}{name}")));
                     }
                     at += 5;
                 }
@@ -836,10 +955,12 @@ fn decompile_inner(
                 // Excel's .xlsx counterpart, but Excel's own PDF of the .xls
                 // shows those rules never apply, matching #REF!.
                 0x0a => {
+                    rgce.get(at + 1..at + 5).ok_or_else(truncated)?;
                     stack.push(Item::Text(format!("{pending}#REF!")));
                     at += 5;
                 }
                 0x0b => {
+                    rgce.get(at + 1..at + 9).ok_or_else(truncated)?;
                     stack.push(Item::Text(format!("{pending}#REF!")));
                     at += 9;
                 }
@@ -851,9 +972,7 @@ fn decompile_inner(
                     let name = externs
                         .addin(u16_at(rgce, at + 1)?, u32_at(rgce, at + 3)?)
                         .filter(|name| TOOLPAK.contains(name))
-                        .ok_or_else(|| {
-                            unsupported("unsupported XLS conditional formatting add-in function")
-                        })?;
+                        .ok_or_else(|| unsupported(WITHOUT_TEXT[3]))?;
                     if !pending.is_empty() {
                         return Err(reject());
                     }
@@ -865,13 +984,24 @@ fn decompile_inner(
             _ => return Err(reject()),
         }
     }
+    // The last token must end where the program does: a token whose
+    // payload the branch above does not read (an attribute, an error
+    // reference) may not run past it.
+    if at != rgce.len() {
+        return Err(truncated());
+    }
     if !space.is_empty() {
         return Err(reject());
     }
     match (stack.pop(), stack.is_empty()) {
-        (Some(Item::Text(text)), true) => Ok(text),
-        _ => Err(unsupported("malformed XLS conditional formatting formula")),
+        (Some(Item::Text(text) | Item::Name(text)), true) => Ok(text),
+        _ => Err(malformed()),
     }
+}
+
+/// A token program whose operands and operators do not form one expression.
+fn malformed() -> String {
+    unsupported("malformed XLS conditional formatting formula")
 }
 
 /// A single A1 cell reference as the decompiler writes it.
@@ -883,11 +1013,11 @@ fn is_reference(text: &str) -> bool {
 }
 
 fn arguments(stack: &mut Vec<Item>, count: usize) -> Result<Vec<String>, String> {
-    let start = stack.len().checked_sub(count).ok_or_else(reject)?;
+    let start = stack.len().checked_sub(count).ok_or_else(malformed)?;
     stack
         .drain(start..)
         .map(|item| match item {
-            Item::Text(text) => Ok(text),
+            Item::Text(text) | Item::Name(text) => Ok(text),
             Item::Function(_) => Err(reject()),
         })
         .collect()
@@ -930,7 +1060,11 @@ mod tests {
                 "EOMONTH".into(),
                 "MYUDF".into(),
             ]))],
-            names: vec![Some(("List".into(), false)), None],
+            names: vec![
+                Some(("List".into(), false)),
+                None,
+                Some(("_xlnm.Print_Area".into(), false)),
+            ],
             xti_sheets: vec![Some("Data".into())],
         };
         // 'Data'!$B$4:$I$49 through a name's PtgArea3d.
@@ -944,6 +1078,26 @@ mod tests {
             "List"
         );
         assert!(decompile(&[0x23, 2, 0, 0, 0], (0, 0), &externs).is_err());
+        // ROWS(_xlnm.Print_Area)>=1: a built-in name as the model names it.
+        assert_eq!(
+            decompile(
+                &[0x23, 3, 0, 0, 0, 0x41, 0x4c, 0x00, 0x1e, 1, 0, 0x0c],
+                (0, 0),
+                &externs
+            )
+            .unwrap(),
+            "ROWS(_xlnm.Print_Area)>=1"
+        );
+        // List(C3)>1: a call whose callee is a defined name (a user-defined
+        // function): PtgName, PtgRefN, PtgFuncVar(2, 0xFF), PtgInt, PtgGt.
+        let call = [
+            0x23, 1, 0, 0, 0, 0x4c, 0, 0, 0, 0xc0, 0x42, 0x02, 0xff, 0x00, 0x1e, 1, 0, 0x0d,
+        ];
+        assert_eq!(decompile(&call, (2, 2), &externs).unwrap(), "List(C3)>1");
+        // An expression is not a callee.
+        let mut expression = vec![0x1e, 1, 0, 0x1e, 2, 0, 0x03];
+        expression.extend([0x4c, 0, 0, 0, 0xc0, 0x42, 0x02, 0xff, 0x00]);
+        assert!(decompile(&expression, (2, 2), &externs).is_err());
         // EOMONTH($I$7,0): NameX, ref, int, FuncVar(3, 0xFF).
         let rgce = [
             0x39, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x24, 0x06, 0x00, 0x08, 0x00, 0x1e, 0x00,
@@ -959,6 +1113,15 @@ mod tests {
         // Unknown tokens (PtgArray) and dangling operands reject.
         assert!(decompile(&[0x20], (0, 0), &externs).is_err());
         assert!(decompile(&[0x1e, 1, 0, 0x1e, 2, 0], (0, 0), &externs).is_err());
+        // PtgRefErr and PtgAreaErr carry (ignored) payloads that must exist.
+        assert_eq!(
+            decompile(&[0x2a, 0, 0, 0, 0], (0, 0), &externs).unwrap(),
+            "#REF!"
+        );
+        assert!(decompile(&[0x2a], (0, 0), &externs).is_err());
+        // A PtgAttrSemi without its payload.
+        assert!(decompile(&[0x1e, 1, 0, 0x19, 0x01], (0, 0), &externs).is_err());
+        assert!(decompile(&[0x2b, 0, 0, 0, 0], (0, 0), &externs).is_err());
         assert_eq!(number(9.99e307).unwrap(), "9.99E+307");
         assert_eq!(number(1e-10).unwrap(), "1E-10");
         assert_eq!(number(35.3).unwrap(), "35.3");

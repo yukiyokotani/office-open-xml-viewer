@@ -402,7 +402,7 @@ mod tile_dimension_tests {
 
 /// An OfficeArt shade projected to DrawingML stop order. Stop colours stay
 /// OfficeArtCOLORREF values for the host to resolve.
-#[cfg(any(feature = "direct-doc", feature = "direct-ppt"))]
+#[cfg(any(feature = "direct-doc", feature = "direct-ppt", feature = "direct-xls"))]
 pub(crate) struct Shade {
     pub projection: super::gradient::projection::Projection,
     /// Per-stop 16.16 opacity, parallel to `projection.stops`.
@@ -422,7 +422,7 @@ pub(crate) struct Shade {
 
 /// A concentric OfficeArt shade (MS-ODRAW 2.4.11 msofillShadeCenter,
 /// msofillShadeShape and msofillShadeTitle).
-#[cfg(any(feature = "direct-doc", feature = "direct-ppt"))]
+#[cfg(any(feature = "direct-doc", feature = "direct-ppt", feature = "direct-xls"))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[cfg_attr(not(feature = "direct-ppt"), allow(dead_code))]
 pub(crate) struct PathShade {
@@ -436,9 +436,9 @@ pub(crate) struct PathShade {
 
 // Two-colour shades are projected with these marker colours so each output
 // stop keeps its origin (fill or back colour) even when both colours match.
-#[cfg(any(feature = "direct-doc", feature = "direct-ppt"))]
+#[cfg(any(feature = "direct-doc", feature = "direct-ppt", feature = "direct-xls"))]
 const FRONT_MARKER: u32 = 0;
-#[cfg(any(feature = "direct-doc", feature = "direct-ppt"))]
+#[cfg(any(feature = "direct-doc", feature = "direct-ppt", feature = "direct-xls"))]
 const BACK_MARKER: u32 = 1;
 
 impl Paint {
@@ -476,7 +476,7 @@ impl Paint {
     ///
     /// Opacity combined with an authored shade-colour array has no evidence
     /// and is rejected.
-    #[cfg(any(feature = "direct-doc", feature = "direct-ppt"))]
+    #[cfg(any(feature = "direct-doc", feature = "direct-ppt", feature = "direct-xls"))]
     pub(crate) fn shade(
         &self,
         source: &super::gradient::Borrowed<'_>,

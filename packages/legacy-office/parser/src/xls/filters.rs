@@ -6,8 +6,10 @@
 //! AutoFilterInfo, whose column count must match that range. The XLSX model
 //! keeps only the range, from which the renderer draws the filter buttons, as
 //! the XLSX parser does. Active criteria (2.4.6 AutoFilter, 2.4.7
-//! AutoFilter12, 2.4.117 FilterMode) also change how Excel draws the filtered
-//! columns' buttons, which that range cannot express, so they fail closed.
+//! AutoFilter12, 2.4.117 FilterMode) have no counterpart in that range: the
+//! rows they filter out are hidden by their own Row records, which are
+//! projected, and the buttons are drawn as for an unfiltered range. Excel's
+//! printed output of a filtered sheet shows the visible rows and no button.
 //!
 //! Excel inserts one drop-down object per filter column itself (Obj ot 20
 //! with FtCmo.fUIObj, "can only be automatically inserted by the
@@ -85,14 +87,15 @@ impl Databases {
     }
 }
 
-/// The AutoFilterInfo column count must span the range; criteria reject.
+/// The AutoFilterInfo column count must span the range. Criteria are not
+/// drawn (see the module documentation).
 pub(super) fn check(
     range: &xlsx_model::CellRange,
     columns: u16,
     criteria: bool,
 ) -> Result<(), String> {
     if criteria {
-        return Err(unsupported("XLS AutoFilter criteria are not projected"));
+        crate::rejection::skipped("XLS AutoFilter criteria are not projected");
     }
     if range.right - range.left + 1 != u32::from(columns) {
         return Err(unsupported(
@@ -100,6 +103,27 @@ pub(super) fn check(
         ));
     }
     Ok(())
+}
+
+/// Whether an AutoFilter record (2.4.6) holds what it declares: iEntry,
+/// flags, two 10-byte DOPERs (2.5.69) and, for each DOPER of a string
+/// (vt 6, its cch in the seventh byte), an XLUnicodeStringNoCch.
+pub(super) fn criteria_framed(data: &[u8]) -> bool {
+    if data.len() < 24 {
+        return false;
+    }
+    let mut at = 24;
+    for doper in [4usize, 14] {
+        if data[doper] != 6 {
+            continue;
+        }
+        let count = usize::from(data[doper + 6]);
+        let Some(&high) = data.get(at) else {
+            return false;
+        };
+        at += 1 + count * if high & 1 != 0 { 2 } else { 1 };
+    }
+    at == data.len()
 }
 
 /// Whether a drop-down object anchored at this zero-based cell is one of the
@@ -225,6 +249,27 @@ mod tests {
         assert!(check(&range, 7, false)
             .unwrap_err()
             .contains("column count"));
-        assert!(check(&range, 8, true).unwrap_err().contains("criteria"));
+        // AutoFilter records: two numeric DOPERs; a string DOPER with and
+        // without its string.
+        let mut record = vec![0u8; 24];
+        assert!(criteria_framed(&record));
+        assert!(!criteria_framed(&record[..23]));
+        record[4] = 6;
+        record[10] = 2;
+        assert!(!criteria_framed(&record));
+        record.extend([0, b'a', b'b']);
+        assert!(criteria_framed(&record));
+        // Criteria leave the range as it is.
+        crate::rejection::take_best_effort();
+        assert!(check(&range, 8, false).is_ok());
+        assert!(crate::rejection::take_best_effort().is_empty());
+        assert!(check(&range, 8, true).is_ok());
+        assert_eq!(
+            crate::rejection::take_best_effort(),
+            [(
+                crate::rejection::BestEffort::Skipped,
+                "XLS AutoFilter criteria are not projected"
+            )]
+        );
     }
 }

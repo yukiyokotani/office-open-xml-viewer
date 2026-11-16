@@ -92,6 +92,14 @@ impl Pictures {
             .map(|image| image.1)
     }
 
+    /// The file extension and bytes of a store entry's decoded media.
+    pub fn media(&self, id: u32) -> Option<(&'static str, &[u8])> {
+        self.images
+            .iter()
+            .find(|image| image.0 == id)
+            .map(|image| (image.1, image.2.as_slice()))
+    }
+
     pub fn has_unsupported_images(&self) -> bool {
         self.unsupported_images
     }

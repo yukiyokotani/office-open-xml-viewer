@@ -9,7 +9,7 @@ use std::ops::Range;
 
 /// Resolve only in-stream BLIPs. `delayed` is the format-defined binary stream,
 /// never a file path; DOC inline shapes do not supply a delayed store.
-#[cfg(any(test, all(feature = "inspection", not(target_arch = "wasm32"))))]
+#[cfg(test)]
 pub(crate) fn read_store_entry<'a>(
     entry: Record<'a>,
     delayed: Option<&'a [u8]>,
@@ -27,7 +27,7 @@ pub(crate) fn read_store_entry<'a>(
 /// evidence for TIFF in PowerPoint.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Raster {
-    #[cfg(any(test, feature = "direct-doc", feature = "inspection"))]
+    #[cfg(any(test, feature = "direct-doc"))]
     Advertised,
     // Chosen only by the direct DOC reader.
     #[cfg_attr(not(any(test, feature = "direct-doc")), allow(dead_code))]
@@ -37,8 +37,27 @@ pub(crate) enum Raster {
     #[cfg_attr(not(any(test, feature = "direct-ppt")), allow(dead_code))]
     PptPictures,
     /// Advertised raster encodings, plus EMF files with the end-of-file
-    /// layout GDI+ writes, which Excel displays (see the metafile validator).
+    /// layout GDI+ writes, which Excel displays (see the metafile validator),
+    /// and JPEG data of every frame encoding (see `decode`). Chosen only by
+    /// the XLS reader.
     ExcelMetafiles,
+    /// Advertised raster encodings with Excel's JPEG reading but without the
+    /// GDI+ metafile layout: the native XLS image inspection.
+    #[cfg(any(test, all(feature = "inspection", not(target_arch = "wasm32"))))]
+    ExcelAdvertised,
+}
+
+impl Raster {
+    /// Whether JPEG data of every frame encoding is read as Excel reads it
+    /// (see `decode`).
+    fn excel_jpeg(self) -> bool {
+        match self {
+            Raster::ExcelMetafiles => true,
+            #[cfg(any(test, all(feature = "inspection", not(target_arch = "wasm32"))))]
+            Raster::ExcelAdvertised => true,
+            _ => false,
+        }
+    }
 }
 
 #[cfg(any(test, feature = "direct-doc", feature = "direct-xls"))]
@@ -391,9 +410,20 @@ fn decode(
         // A picture frame of this host keeps its place when the frame is
         // well formed but not decodable.
         "jpg" if raster == Raster::PptPictures => {
-            let (size, undecoded) = jpeg_frame(bytes, budget)?;
+            let (size, undecoded) = jpeg_frame(bytes, budget, JpegFrames::Sof)?;
             if undecoded.is_some() {
                 extension = UNDECODED_JPEG;
+            }
+            size
+        }
+        // Excel hands a JPEG of any frame encoding to its image decoder, as
+        // it does for the same picture in an OOXML package: an undecodable
+        // one keeps its bytes for the host to draw or to replace with its
+        // own placeholder.
+        "jpg" if raster.excel_jpeg() => {
+            let (size, undecoded) = jpeg_frame(bytes, budget, JpegFrames::AnyEncoding)?;
+            if undecoded.is_some() {
+                crate::rejection::approximated("unsupported OfficeArt JPEG frame encoding", ());
             }
             size
         }
@@ -523,14 +553,30 @@ pub(crate) fn png_size(b: &[u8]) -> Result<(u32, u32), String> {
 pub(crate) const UNDECODED_JPEG: &str = "jpeg-undecoded";
 
 pub(crate) fn jpeg_size(b: &[u8], budget: &mut usize) -> Result<(u32, u32), String> {
-    match jpeg_frame(b, budget)? {
+    match jpeg_frame(b, budget, JpegFrames::Sof)? {
         (size, None) => Ok(size),
         (_, Some(reason)) => Err(unsupported(reason)),
     }
 }
 
+/// Which first frame headers a JPEG reader takes the dimensions from.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum JpegFrames {
+    /// SOFn headers only; a hierarchical image (DHP) is rejected, and a
+    /// malformed frame header is an unsupported frame.
+    Sof,
+    /// SOFn and the DHP of a hierarchical image, which states the image's
+    /// dimensions (ITU-T T.81 B.3.2); a malformed one is a corrupt file
+    /// (the XLS reader).
+    AnyEncoding,
+}
+
 /// The dimensions of the first frame, and why it is not decodable if so.
-fn jpeg_frame(b: &[u8], budget: &mut usize) -> Result<((u32, u32), Option<&'static str>), String> {
+fn jpeg_frame(
+    b: &[u8],
+    budget: &mut usize,
+    frames: JpegFrames,
+) -> Result<((u32, u32), Option<&'static str>), String> {
     if !b.starts_with(&[0xff, 0xd8]) {
         return Err(unsupported("invalid OfficeArt JPEG header"));
     }
@@ -565,7 +611,7 @@ fn jpeg_frame(b: &[u8], budget: &mut usize) -> Result<((u32, u32), Option<&'stat
         }
         // A hierarchical DHP segment (0xde) precedes frames this reader does
         // not walk: do not skip it and validate a later frame's dimensions.
-        if marker == 0xde {
+        if marker == 0xde && frames == JpegFrames::Sof {
             return Err(unsupported("unsupported OfficeArt JPEG frame encoding"));
         }
         let length = b
@@ -578,14 +624,20 @@ fn jpeg_frame(b: &[u8], budget: &mut usize) -> Result<((u32, u32), Option<&'stat
             .filter(|b| b.len() >= 2)
             .ok_or_else(|| unsupported("invalid OfficeArt JPEG segment length"))?;
         // SOF0-SOF15 except DHT (0xc4), JPG (0xc8) and DAC (0xcc).
-        if matches!(marker, 0xc0..=0xc3 | 0xc5..=0xc7 | 0xc9..=0xcb | 0xcd..=0xcf) {
+        // A DHP (0xde) reaches here only for `JpegFrames::AnyEncoding`.
+        if matches!(marker, 0xc0..=0xc3 | 0xc5..=0xc7 | 0xc9..=0xcb | 0xcd..=0xcf | 0xde) {
             // ITU-T T.81 B.2.2: every frame header is Lf = 8 + 3 * Nf with a
-            // sample precision P, then Y and X.
+            // sample precision P, then Y and X; B.3.2: so is a DHP.
             if segment.len() < 8
                 || segment[7] == 0
                 || segment.len() != 8 + 3 * usize::from(segment[7])
             {
-                return Err(unsupported("unsupported OfficeArt JPEG frame"));
+                return Err(match frames {
+                    JpegFrames::Sof => unsupported("unsupported OfficeArt JPEG frame"),
+                    JpegFrames::AnyEncoding => {
+                        crate::rejection::corrupt("invalid OfficeArt JPEG frame header")
+                    }
+                });
             }
             // Only 8-bit Huffman baseline/sequential/progressive frames are
             // decodable here.
@@ -1005,5 +1057,64 @@ mod tests {
         let embedded = store_entry(Some(&blip_with_trailer), blip_with_trailer.len(), 0, 1);
         let (entry, _) = record_span_with_end(&embedded, 0, &mut 1, "BSE").unwrap();
         assert!(read_store_entry_span(&entry, &embedded, None, &mut 10, usize::MAX).is_err());
+    }
+
+    #[test]
+    fn excel_reads_the_first_frame_of_every_jpeg_encoding() {
+        let blip = |frame: &[u8]| {
+            let jpeg = [&[0xff, 0xd8][..], frame].concat();
+            record(0x46a0, 0xf01d, &[vec![0; 17], jpeg].concat())
+        };
+        let frame = |marker: u8, precision: u8| {
+            vec![0xff, marker, 0, 11, precision, 0, 3, 0, 2, 1, 1, 0x11, 0]
+        };
+        crate::rejection::take_best_effort();
+        // A frame every host decoder reads is admitted as is, for every host.
+        let bytes = blip(&frame(0xc0, 8));
+        let (record, _) = crate::officeart::record_with_end(&bytes, 0, &mut 10, "t").unwrap();
+        for raster in [
+            Raster::ExcelMetafiles,
+            Raster::Advertised,
+            Raster::PptPictures,
+        ] {
+            let image = read_as(record, &mut 100, usize::MAX, raster)
+                .unwrap()
+                .unwrap();
+            assert_eq!(image.extension, "jpg");
+        }
+        assert!(crate::rejection::take_best_effort().is_empty());
+        // Lossless, arithmetic, 12-bit and hierarchical frames: Excel keeps
+        // the JPEG for the host's decoder; the other hosts keep their rules.
+        for (marker, precision) in [(0xc3, 8), (0xc9, 8), (0xc1, 12), (0xde, 8)] {
+            let bytes = blip(&frame(marker, precision));
+            let (record, _) = crate::officeart::record_with_end(&bytes, 0, &mut 10, "t").unwrap();
+            for raster in [Raster::ExcelMetafiles, Raster::ExcelAdvertised] {
+                let image = read_as(record, &mut 100, usize::MAX, raster)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(image.extension, "jpg");
+                assert_eq!(image.bytes.as_ref(), &bytes[8 + 17..]);
+                assert_eq!(
+                    crate::rejection::take_best_effort(),
+                    [(
+                        crate::rejection::BestEffort::Approximated,
+                        "unsupported OfficeArt JPEG frame encoding"
+                    )]
+                );
+            }
+            assert!(read_as(record, &mut 100, usize::MAX, Raster::Advertised).is_err());
+            assert!(crate::rejection::take_best_effort().is_empty());
+        }
+        // The first frame header is the image's: a short one is not skipped
+        // for a later frame.
+        for marker in [0xc3, 0xde] {
+            let bytes = blip(&[&[0xff, marker, 0, 2][..], &frame(0xc0, 8)].concat());
+            let (record, _) = crate::officeart::record_with_end(&bytes, 0, &mut 10, "t").unwrap();
+            for raster in [Raster::ExcelMetafiles, Raster::ExcelAdvertised] {
+                let error = read_as(record, &mut 100, usize::MAX, raster).err().unwrap();
+                assert!(error.contains("invalid OfficeArt JPEG frame header"));
+            }
+            assert!(read_as(record, &mut 100, usize::MAX, Raster::Advertised).is_err());
+        }
     }
 }

@@ -96,7 +96,7 @@ fn project(
     let mut budget = usize::MAX;
     leaf(flags)
         .project(&records, &styles, defaults, shape, &mut budget)
-        .map(|leaf| leaf.map(|(info, _)| info))
+        .map(|leaf| leaf.map(|projected| projected.info))
 }
 
 #[test]
@@ -122,7 +122,9 @@ fn project_limited(
     shape: &ShapeSource,
     budget: &mut usize,
 ) -> Result<Option<(xlsx_model::ShapeInfo, i32)>, String> {
-    leaf(0xa00).project(records, styles, &excel_defaults(), shape, budget)
+    leaf(0xa00)
+        .project(records, styles, &excel_defaults(), shape, budget)
+        .map(|leaf| leaf.map(|projected| (projected.info, projected.rotation)))
 }
 
 /// Excel's own drawing defaults in every corpus workbook (MS-ODRAW 2.2.12):
@@ -343,34 +345,53 @@ fn hidden_shapes_are_not_drawn() {
         .is_none());
 }
 
+use crate::rejection::{take_best_effort, BestEffort};
+
+/// The rectangle with these properties replacing its own values of them.
+fn rectangle_with(owned: &[(u16, Vec<u8>)], kind: u16, properties: &[(u16, u32)]) -> ShapeSource {
+    let mut all = RECTANGLE.to_vec();
+    all.retain(|(id, _)| properties.iter().all(|(other, _)| other & 0x3fff != *id));
+    all.extend_from_slice(properties);
+    source(owned, kind, &all)
+}
+
 #[test]
-fn unevidenced_shape_facts_fail_closed() {
+fn shape_facts_without_a_projection_still_reject() {
     let owned = workbook(0x0224, &compressed("2018"), 4, &[(0, 0)]);
     let reject = |properties: &[(u16, u32)], kind: u16, flags: u32, expected: &str| {
-        // Each case replaces the rectangle's own value of that property.
-        let mut all = RECTANGLE.to_vec();
-        all.retain(|(id, _)| properties.iter().all(|(other, _)| other != id));
-        all.extend_from_slice(properties);
-        let shape = source(&owned, kind, &all);
+        let shape = rectangle_with(&owned, kind, properties);
         let error = project(&owned, &excel_defaults(), &shape, flags)
             .err()
             .unwrap_or_else(|| panic!("{expected} accepted"));
         assert!(error.contains(expected), "{expected}: {error}");
     };
-    reject(&[], 3, 0xa00, "shape type 3");
+    // OLE, master-linked and background shapes, and a shape without its
+    // anchor or type flags.
     reject(&[], 1, 0xa10, "shape flags");
+    reject(&[], 1, 0xa20, "shape flags");
+    reject(&[], 1, 0xe00, "shape flags");
     reject(&[], 1, 0x200, "shape flags");
-    reject(&[(0x023f, 0x0002_0002)], 1, 0xa00, "shadows");
-    reject(&[(0x0180, 1)], 1, 0xa00, "non-solid");
+    // Shade-shape, title and background fills, a fill in its own
+    // rectangle, and patterned lines.
+    reject(&[(0x0180, 6)], 1, 0xa00, "non-solid");
+    reject(&[(0x0180, 8)], 1, 0xa00, "non-solid");
+    reject(&[(0x01bf, 0x0012_0012)], 1, 0xa00, "non-solid");
+    reject(
+        &[(0x01c4, 1), (0x01ff, 0x0008_0008)],
+        1,
+        0xa00,
+        "non-solid XLS shape lines",
+    );
     reject(&[(0x0085, 1)], 1, 0xa00, "wrapping");
+    // Vertical text flow and rotated fonts.
+    reject(&[(0x0088, 2)], 1, 0xa00, "property 0x0088");
+    reject(&[(0x0089, 1)], 1, 0xa00, "property 0x0089");
     reject(&[(0x0087, 0)], 1, 0xa00, "disagrees");
-    reject(&[(0x008b, 1)], 1, 0xa00, "property 0x008b");
-    reject(&[(0x0304, 0)], 1, 0xa00, "property 0x0304");
     reject(&[(0x033f, 0x0001_0001)], 1, 0xa00, "background");
     reject(&[(0x033f, 0x0020_0020)], 1, 0xa00, "OLE icon");
     reject(&[(0x033f, 0x0080_0000)], 1, 0xa00, "flip overrides");
-    reject(&[(0xc105, 4)], 1, 0xa00, "complex property");
-    reject(&[(0x4186, 1)], 1, 0xa00, "BLIP property");
+    // A picture fill names its picture.
+    reject(&[(0x0180, 3)], 1, 0xa00, "without its picture");
     // Primary and tertiary tables that disagree have no precedence.
     let mut conflicting = RECTANGLE.to_vec();
     conflicting.push((0x0181, 0x0800_0041));
@@ -379,39 +400,10 @@ fn unevidenced_shape_facts_fail_closed() {
         .unwrap_err()
         .contains("conflicting"));
 
-    // A fill or line left to Excel's scheme-colored drawing defaults.
-    let shape = source(&owned, 1, &[(0x01ff, 0x0008_0000)]);
-    assert!(project(&owned, &excel_defaults(), &shape, 0xa00)
-        .unwrap_err()
-        .contains("palette or scheme"));
-    let shape = source(&owned, 1, &[(0x0181, 0xff), (0x01ff, 0x0008_0008)]);
-    assert!(project(&owned, &excel_defaults(), &shape, 0xa00)
-        .unwrap_err()
-        .contains("palette or scheme"));
-    let shape = source(
-        &owned,
-        1,
-        &[
-            (0x0181, 0xff),
-            (0x01d1, 1),
-            (0x01c0, 0),
-            (0x01ff, 0x0008_0008),
-        ],
-    );
-    assert!(project(&owned, &excel_defaults(), &shape, 0xa00)
-        .unwrap_err()
-        .contains("line ends"));
-
     let text_error = |owned: &[(u16, Vec<u8>)]| {
         let shape = source(owned, 1, &RECTANGLE);
         project(owned, &excel_defaults(), &shape, 0xa00).unwrap_err()
     };
-    let mut automatic = workbook(0x0224, &compressed("2018"), 4, &[(0, 0)]);
-    automatic[0].1 = font(240, 1, 0x7fff, 700, 0, "Meiryo UI");
-    assert!(text_error(&automatic).contains("automatic"));
-    let mut underlined = workbook(0x0224, &compressed("2018"), 4, &[(0, 0)]);
-    underlined[0].1 = font(240, 1, 9, 700, 1, "Meiryo UI");
-    assert!(text_error(&underlined).contains("underline"));
     let mut formula = workbook(0x0224, &compressed("2018"), 4, &[(0, 0)]);
     formula[TXO].1[16] = 5;
     assert!(text_error(&formula).contains("formula"));
@@ -421,25 +413,582 @@ fn unevidenced_shape_facts_fail_closed() {
     assert!(text_error(&rotated).contains("rotated XLS shape text"));
     assert!(text_error(&workbook(0x0224, &compressed("2018"), 4, &[(1, 0)])).contains("runs"));
     assert!(text_error(&workbook(0x0224, &compressed("20189"), 4, &[(0, 0)])).contains("longer"));
-    let hebrew = workbook(
-        0x0212,
+}
+
+#[test]
+fn shape_types_are_the_presets_office_converts_them_to() {
+    let owned = workbook(0x0224, &compressed("2018"), 4, &[(0, 0)]);
+    let styles_records = records(&owned);
+    let styles = styles::Styles::parse(&styles_records).unwrap();
+    let projected = |kind: u16, properties: &[(u16, u32)], flags: u32| {
+        let shape = rectangle_with(&owned, kind, properties);
+        let mut budget = usize::MAX;
+        leaf(flags)
+            .project(
+                &styles_records,
+                &styles,
+                &excel_defaults(),
+                &shape,
+                &mut budget,
+            )
+            .unwrap()
+            .unwrap()
+    };
+    let name = |projected: &Projected| match &projected.info.geom {
+        xlsx_model::ShapeGeom::Preset { name, adj } => {
+            assert!(adj.is_empty());
+            name.clone()
+        }
+        _ => panic!("preset expected"),
+    };
+    take_best_effort();
+    for (kind, expected) in [
+        (2, "roundRect"),
+        (3, "ellipse"),
+        (5, "triangle"),
+        (13, "rightArrow"),
+        (61, "wedgeRectCallout"),
+        (202, "rect"),
+    ] {
+        let shape = projected(kind, &[], 0xa00);
+        assert_eq!(name(&shape), expected);
+        assert!(shape.preset.is_none());
+    }
+    // A line and a connector carry fConnector.
+    assert_eq!(name(&projected(20, &[], 0xb00)), "line");
+    assert_eq!(name(&projected(34, &[], 0xb00)), "bentConnector3");
+    assert!(take_best_effort().is_empty());
+    // Adjust values wait for the shape's extent: a right arrow whose head
+    // starts at 17280/21600 of a 2:1 shape.
+    let arrow = projected(13, &[(0x0147, 17_280)], 0xa00);
+    assert_eq!(
+        arrow.preset,
+        Some((13, {
+            let mut adjust = [None; 10];
+            adjust[0] = Some(17_280);
+            adjust
+        }))
+    );
+    let (kind, legacy) = arrow.preset.unwrap();
+    assert_eq!(
+        preset_adjustments(kind, &legacy, 2_000_000.0, 1_000_000.0),
+        [None, Some(40_000.0)]
+    );
+    assert!(take_best_effort().is_empty());
+    // Adjust values without an established conversion keep the preset's
+    // default proportions.
+    let mut unknown = [None; 10];
+    unknown[0] = Some(1);
+    assert!(preset_adjustments(96, &unknown, 100.0, 100.0).is_empty());
+    assert_eq!(
+        take_best_effort(),
+        [(
+            BestEffort::Approximated,
+            "XLS drawing shape type is not projected"
+        )]
+    );
+    // A shape type without a preset is its bounding rectangle.
+    assert_eq!(name(&projected(250, &[], 0xa00)), "rect");
+    assert_eq!(
+        take_best_effort(),
+        [(
+            BestEffort::Approximated,
+            "XLS drawing shape type is not projected"
+        )]
+    );
+}
+
+#[test]
+fn a_typed_shape_with_its_own_path_is_drawn_from_the_path() {
+    // The closed triangle of `freeform_polygons_become_custom_geometry` on
+    // a shape of type 100, with text and a pInscribe rectangle.
+    let vertices = [
+        vec![3, 0, 3, 0, 8, 0],
+        [0i32, 0, 100, 0, 50, 50]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect(),
+    ]
+    .concat();
+    let segments = [
+        vec![4, 0, 4, 0, 2, 0],
+        [0x4000u16, 0x0002, 0x6001, 0x8000]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect::<Vec<u8>>(),
+    ]
+    .concat();
+    let owned = workbook(0x0212, &compressed("x"), 1, &[(0, 0)]);
+    let mut shape = source(
+        &owned,
+        100,
         &[
+            (0x0142, 100),
+            (0x0143, 50),
+            (0xc145, vertices.len() as u32),
+            (0xc146, segments.len() as u32),
+            (0xc157, 22),
+            (0x0181, 0xff),
+            (0x01c0, 0),
+            (0x01ff, 0x0008_0008),
+        ],
+    );
+    shape.complex = vec![(0x145, vertices), (0x146, segments), (0x157, vec![0; 22])];
+    take_best_effort();
+    let info = project(&owned, &excel_defaults(), &shape, 0xa00)
+        .unwrap()
+        .unwrap();
+    let xlsx_model::ShapeGeom::Custom { paths } = &info.geom else {
+        panic!("custom geometry expected");
+    };
+    assert_eq!(
+        (paths[0].w, paths[0].h, paths[0].commands.len()),
+        (100.0, 50.0, 4)
+    );
+    // The text is laid out in the shape's bounds.
+    assert_eq!(info.text.unwrap().paragraphs.len(), 1);
+    assert_eq!(
+        take_best_effort(),
+        [(
+            BestEffort::Approximated,
+            "XLS freeform text rectangles are not projected"
+        )]
+    );
+}
+
+#[test]
+fn lines_carry_their_ends_and_compound_style() {
+    let owned = workbook(0x0224, &compressed("2018"), 4, &[(0, 0)]);
+    take_best_effort();
+    // Diamond start, large wide arrow end, a double line of 6 pt.
+    let shape = rectangle_with(
+        &owned,
+        20,
+        &[
+            (0x01bf, 0x0010_0000),
+            (0x01c0, 0x0082_6015),
+            (0x01cb, 76_200),
+            (0x01cc, 0x0008_0000),
+            (0x01cd, 1),
+            (0x01d0, 3),
+            (0x01d1, 5),
+            (0x01d4, 2),
+            (0x01d5, 2),
+            (0x01ff, 0x0008_0008),
+        ],
+    );
+    let info = project(&owned, &excel_defaults(), &shape, 0xb00)
+        .unwrap()
+        .unwrap();
+    assert!(info.fill.is_none() && info.fill_color.is_none());
+    assert_eq!(info.stroke_color.as_deref(), Some("#156082"));
+    assert_eq!(info.stroke_width, 76_200);
+    assert_eq!(info.stroke_cmpd.as_deref(), Some("dbl"));
+    let end = |end: &Option<xlsx_model::ShapeLineEnd>| {
+        end.as_ref()
+            .map(|end| (end.r#type.clone(), end.w.clone(), end.len.clone()))
+    };
+    assert_eq!(
+        end(&info.stroke_head_end),
+        Some(("diamond".into(), "med".into(), "med".into()))
+    );
+    assert_eq!(
+        end(&info.stroke_tail_end),
+        Some(("arrow".into(), "lg".into(), "lg".into()))
+    );
+    assert!(take_best_effort().is_empty());
+    // A line style outside MSOLINESTYLE is the simple line.
+    let shape = rectangle_with(&owned, 1, &[(0x01cd, 9), (0x01ff, 0x0008_0008)]);
+    let info = project(&owned, &excel_defaults(), &shape, 0xa00)
+        .unwrap()
+        .unwrap();
+    assert!(info.stroke_cmpd.is_none());
+    assert_eq!(
+        take_best_effort(),
+        [(
+            BestEffort::IgnoredValue,
+            "XLS drawing shape property is not projected"
+        )]
+    );
+}
+
+#[test]
+fn scheme_colors_come_from_the_workbook_color_table() {
+    let owned = workbook(0x0224, &compressed("2018"), 4, &[(0, 0)]);
+    take_best_effort();
+    // A fill and line left to Excel's drawing defaults: the window
+    // background (Icv 0x41) and the window text color (0x40).
+    let shape = source(&owned, 1, &[(0x01ff, 0x0008_0008)]);
+    let info = project(&owned, &excel_defaults(), &shape, 0xa00)
+        .unwrap()
+        .unwrap();
+    assert_eq!(info.fill_color.as_deref(), Some("#FFFFFF"));
+    assert_eq!(info.stroke_color.as_deref(), Some("#000000"));
+    // Icv 0x0A is red in the built-in palette.
+    let shape = rectangle_with(&owned, 1, &[(0x0181, 0x0800_000a)]);
+    let info = project(&owned, &excel_defaults(), &shape, 0xa00)
+        .unwrap()
+        .unwrap();
+    assert_eq!(info.fill_color.as_deref(), Some("#FF0000"));
+    assert!(take_best_effort().is_empty());
+    // A system-indexed color, a palette index and an Icv outside the table
+    // state no color: the fill is the white and the line the black MS-ODRAW
+    // gives them.
+    for (fill, line) in [
+        (0x1000_0005, 0x1000_0008),
+        (0x0100_0002, 0x0100_0003),
+        (0x0800_0045, 0x0800_0046),
+    ] {
+        let shape = rectangle_with(
+            &owned,
+            1,
+            &[(0x0181, fill), (0x01c0, line), (0x01ff, 0x0008_0008)],
+        );
+        let info = project(&owned, &excel_defaults(), &shape, 0xa00)
+            .unwrap()
+            .unwrap();
+        assert_eq!(info.fill_color.as_deref(), Some("#FFFFFF"));
+        assert_eq!(info.stroke_color.as_deref(), Some("#000000"));
+        assert_eq!(
+            take_best_effort(),
+            [(
+                BestEffort::IgnoredValue,
+                "XLS drawing palette or scheme colors are not projected"
+            ); 2]
+        );
+    }
+}
+
+#[test]
+fn shadows_and_properties_without_a_counterpart_are_not_drawn() {
+    let owned = workbook(0x0224, &compressed("2018"), 4, &[(0, 0)]);
+    let plain = project(
+        &owned,
+        &excel_defaults(),
+        &source(&owned, 1, &RECTANGLE),
+        0xa00,
+    )
+    .unwrap()
+    .unwrap();
+    take_best_effort();
+    for (properties, expected) in [
+        // fShadow with its color and offsets.
+        (
+            vec![(0x0201, 0), (0x0205, 76_200), (0x023f, 0x0003_0002)],
+            "XLS drawing shadows are not projected",
+        ),
+        // A 3-D property, a complex one and a BLIP reference other than
+        // the fill's.
+        (
+            vec![(0x0281, 5)],
+            "XLS drawing shape property is not projected",
+        ),
+        (
+            vec![(0xc0c0, 4)],
+            "XLS drawing shape complex property is not projected",
+        ),
+        (
+            vec![(0x41c5, 1)],
+            "XLS drawing shape BLIP property is not projected",
+        ),
+    ] {
+        let shape = rectangle_with(&owned, 1, &properties);
+        let info = project(&owned, &excel_defaults(), &shape, 0xa00)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(&info).unwrap(),
+            serde_json::to_value(&plain).unwrap()
+        );
+        assert_eq!(take_best_effort(), [(BestEffort::Skipped, expected)]);
+    }
+    // A shadow that is switched off needs no decision.
+    let shape = rectangle_with(&owned, 1, &[(0x0201, 0), (0x023f, 0x0002_0000)]);
+    project(&owned, &excel_defaults(), &shape, 0xa00).unwrap();
+    assert!(take_best_effort().is_empty());
+}
+
+/// fillShadeColors: an IMsoArray of (color, 16.16 position).
+fn shade_colors(stops: &[(u32, u32)]) -> Vec<u8> {
+    let mut data = Vec::new();
+    for value in [stops.len() as u16, stops.len() as u16, 8] {
+        data.extend(value.to_le_bytes());
+    }
+    for (color, position) in stops {
+        data.extend(color.to_le_bytes());
+        data.extend(position.to_le_bytes());
+    }
+    data
+}
+
+#[test]
+fn shaded_fills_are_gradients() {
+    let owned = workbook(0x0224, &compressed("2018"), 4, &[(0, 0)]);
+    let fill = |properties: &[(u16, u32)], colors: Option<Vec<u8>>| {
+        let mut shape = rectangle_with(&owned, 1, properties);
+        if let Some(colors) = colors {
+            shape.properties.push((0xc197, colors.len() as u32));
+            shape.complex.push((0x197, colors));
+        }
+        let info = project(&owned, &excel_defaults(), &shape, 0xa00)
+            .unwrap()
+            .unwrap();
+        (
+            serde_json::to_value(&info.fill).unwrap(),
+            info.fill_color.clone(),
+        )
+    };
+    take_best_effort();
+    // Excel's two-color vertical gradient: red (fill) at the top, blue
+    // (back) at the bottom, with the fill 40% opaque.
+    let (linear, fallback) = fill(
+        &[
+            (0x0180, 7),
+            (0x0181, 0x0000_00ff),
+            (0x0182, 0x6666),
+            (0x0183, 0x00ff_0000),
+            (0x018c, 100),
+        ],
+        None,
+    );
+    assert_eq!(
+        linear,
+        serde_json::json!({
+            "fillType": "gradient",
+            "stops": [
+                {"position": 0.0, "color": "FF000066"},
+                {"position": 1.0, "color": "0000FF"}
+            ],
+            "angle": 90.0,
+            "gradType": "linear",
+            "scaled": true,
+            "rotWithShape": false
+        })
+    );
+    assert_eq!(fallback.as_deref(), Some("#0000FF"));
+    // msofillShade at 225 degrees with authored stops.
+    let (stops, _) = fill(
+        &[(0x0180, 4), (0x018b, 225 << 16), (0x018c, 100)],
+        Some(shade_colors(&[
+            (0x0000_00ff, 0),
+            (0x0000_c800, 0x8000),
+            (0x00ff_ffff, 0x1_0000),
+        ])),
+    );
+    assert_eq!(stops["angle"], 225.0);
+    assert_eq!(stops["scaled"], false);
+    assert_eq!(
+        stops["stops"],
+        serde_json::json!([
+            {"position": 0.0, "color": "FF0000"},
+            {"position": 0.5, "color": "00C800"},
+            {"position": 1.0, "color": "FFFFFF"}
+        ])
+    );
+    // msofillShadeCenter: from the fillTo rectangle to the bounds. Excel
+    // writes 0.5 four times for "from center" and nothing for "from corner".
+    let (center, _) = fill(
+        &[
+            (0x0180, 5),
+            (0x0181, 0x00e6_aa78),
+            (0x018c, 100),
+            (0x018d, 0x8000),
+            (0x018e, 0x8000),
+            (0x018f, 0x8000),
+            (0x0190, 0x8000),
+        ],
+        None,
+    );
+    assert_eq!(
+        center,
+        serde_json::json!({
+            "fillType": "gradient",
+            "stops": [
+                {"position": 0.0, "color": "78AAE6"},
+                {"position": 1.0, "color": "FFFFFF"}
+            ],
+            "angle": 0.0,
+            "gradType": "radial",
+            "path": "rect",
+            "fillToRect": {"l": 0.5, "t": 0.5, "r": 0.5, "b": 0.5},
+            "rotWithShape": false
+        })
+    );
+    let (corner, _) = fill(&[(0x0180, 5), (0x0181, 0x00e6_aa78), (0x018c, 100)], None);
+    assert_eq!(
+        corner["fillToRect"],
+        serde_json::json!({"r": 1.0, "b": 1.0})
+    );
+    assert!(take_best_effort().is_empty());
+}
+
+#[test]
+fn picture_fills_wait_for_their_media() {
+    let owned = workbook(0x0224, &compressed("2018"), 4, &[(0, 0)]);
+    let styles_records = records(&owned);
+    let styles = styles::Styles::parse(&styles_records).unwrap();
+    let projected = |properties: &[(u16, u32)]| {
+        let shape = rectangle_with(&owned, 1, properties);
+        let mut budget = usize::MAX;
+        leaf(0xa00)
+            .project(
+                &styles_records,
+                &styles,
+                &excel_defaults(),
+                &shape,
+                &mut budget,
+            )
+            .unwrap()
+            .unwrap()
+    };
+    take_best_effort();
+    // A texture repeats and a picture is stretched; fillOpacity applies.
+    let texture = projected(&[(0x0180, 2), (0x4186, 3)]);
+    assert_eq!(texture.blip.as_ref().map(|blip| blip.store), Some(3));
+    assert_eq!(
+        serde_json::to_value(&texture.info.fill).unwrap(),
+        serde_json::json!({
+            "fillType": "image",
+            "imagePath": "legacy-xls/image/3",
+            "mimeType": "",
+            "layout": "tile",
+            "align": [0.0, 0.0],
+            "offset": [0.0, 0.0]
+        })
+    );
+    assert!(texture.info.fill_color.is_none());
+    let picture = projected(&[(0x0180, 3), (0x0182, 0x8000), (0x4186, 4)]);
+    let fill = serde_json::to_value(&picture.info.fill).unwrap();
+    assert_eq!(
+        (&fill["layout"], &fill["alpha"]),
+        (&"stretch".into(), &0.5.into())
+    );
+    assert!(take_best_effort().is_empty());
+    // A texture with an authored tile size is drawn at the picture's size.
+    projected(&[(0x0180, 2), (0x0189, 914_400), (0x4186, 3)]);
+    assert_eq!(
+        take_best_effort(),
+        [(
+            BestEffort::Approximated,
+            "non-solid XLS shape fills are not projected"
+        )]
+    );
+    // A pattern takes its colors now and its preset from the bitmap.
+    let pattern = projected(&[(0x0180, 1), (0x0181, 0), (0x0183, 0x0000_ffff), (0x4186, 1)]);
+    assert_eq!(pattern.blip.as_ref().map(|blip| blip.store), Some(1));
+    assert_eq!(
+        serde_json::to_value(&pattern.info.fill).unwrap(),
+        serde_json::json!({"fillType": "pattern", "fg": "000000", "bg": "FFFF00", "preset": ""})
+    );
+    assert_eq!(pattern.info.fill_color.as_deref(), Some("#000000"));
+    let bitmap = pattern::tests::png(pattern::tests::DARK_DOWN);
+    assert_eq!(fill::pattern_preset(&bitmap, "png"), "dkDnDiag");
+    assert!(take_best_effort().is_empty());
+    // A bitmap this reader does not decode is an even mix of both colors.
+    assert_eq!(fill::pattern_preset(b"BM", "bmp"), "pct50");
+    assert_eq!(
+        take_best_effort(),
+        [(
+            BestEffort::Approximated,
+            "non-solid XLS shape fills are not projected"
+        )]
+    );
+}
+
+#[test]
+fn text_direction_and_fonts_follow_the_shape_model() {
+    let hebrew = |text: &str| -> Vec<u8> {
+        [
             vec![1],
-            "\u{05d0}"
-                .encode_utf16()
-                .flat_map(u16::to_le_bytes)
-                .collect(),
+            text.encode_utf16().flat_map(u16::to_le_bytes).collect(),
         ]
-        .concat(),
-        1,
+        .concat()
+    };
+    let paragraphs = |owned: &[(u16, Vec<u8>)], direction: u32| {
+        let shape = rectangle_with(owned, 1, &[(0x0087, 0), (0x008b, direction)]);
+        let info = project(owned, &excel_defaults(), &shape, 0xa00)
+            .unwrap()
+            .unwrap();
+        info.text
+            .unwrap()
+            .paragraphs
+            .iter()
+            .map(|paragraph| (paragraph.rtl, paragraph.align.clone()))
+            .collect::<Vec<_>>()
+    };
+    take_best_effort();
+    // txdir from the context: each paragraph follows its first strong
+    // character; the TxO alignment stays as stored.
+    let mixed = workbook(
+        0x0212,
+        &hebrew("1 \u{05d0}b\nab \u{05d0}\n12"),
+        12,
         &[(0, 0)],
     );
-    let mut properties = RECTANGLE.to_vec();
-    properties[0] = (0x008b, 2);
-    let shape = source(&hebrew, 1, &properties);
-    assert!(project(&hebrew, &excel_defaults(), &shape, 0xa00)
-        .unwrap_err()
-        .contains("right-to-left"));
+    assert_eq!(
+        paragraphs(&mixed, 2),
+        [
+            (true, "l".to_string()),
+            (false, "l".into()),
+            (false, "l".into())
+        ]
+    );
+    assert_eq!(paragraphs(&mixed, 0), vec![(false, "l".to_string()); 3]);
+    assert_eq!(paragraphs(&mixed, 1), vec![(true, "l".to_string()); 3]);
+    assert!(take_best_effort().is_empty());
+
+    let run = |owned: &[(u16, Vec<u8>)]| {
+        let shape = source(owned, 1, &RECTANGLE);
+        let info = project(owned, &excel_defaults(), &shape, 0xa00)
+            .unwrap()
+            .unwrap();
+        let xlsx_model::ShapeTextRun::Text { bold, color, .. } =
+            info.text.unwrap().paragraphs.remove(0).runs.remove(0)
+        else {
+            panic!("text run expected");
+        };
+        (bold, color)
+    };
+    // Underline: the run is drawn without it.
+    let mut underlined = workbook(0x0224, &compressed("2018"), 4, &[(0, 0)]);
+    underlined[0].1 = font(240, 1, 9, 700, 1, "Meiryo UI");
+    assert_eq!(run(&underlined), (true, Some("#FFFFFF".into())));
+    assert_eq!(
+        take_best_effort(),
+        [(
+            BestEffort::Approximated,
+            "XLS shape text underline, strikethrough or font effects are not projected"
+        )]
+    );
+    // A weight between normal and bold is the nearer of the two.
+    for (weight, bold) in [(600, true), (500, false)] {
+        let mut owned = workbook(0x0224, &compressed("2018"), 4, &[(0, 0)]);
+        owned[0].1 = font(240, 1, 9, weight, 0, "Meiryo UI");
+        assert_eq!(run(&owned).0, bold);
+        assert_eq!(
+            take_best_effort(),
+            [(
+                BestEffort::Approximated,
+                "XLS shape text font weight is not projected"
+            )]
+        );
+    }
+    // The automatic font color is the window text color.
+    let mut automatic = workbook(0x0224, &compressed("2018"), 4, &[(0, 0)]);
+    automatic[0].1 = font(240, 1, 0x7fff, 700, 0, "Meiryo UI");
+    assert_eq!(run(&automatic), (true, Some("#000000".into())));
+    assert!(take_best_effort().is_empty());
+    // An Icv outside the color table states no color.
+    let mut unknown = workbook(0x0224, &compressed("2018"), 4, &[(0, 0)]);
+    unknown[0].1 = font(240, 1, 0x48, 700, 0, "Meiryo UI");
+    assert_eq!(run(&unknown), (true, Some("#000000".into())));
+    assert_eq!(
+        take_best_effort(),
+        [(
+            BestEffort::IgnoredValue,
+            "XLS shape text system colors are not projected"
+        )]
+    );
 }
 
 #[test]

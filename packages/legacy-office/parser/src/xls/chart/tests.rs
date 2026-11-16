@@ -811,3 +811,151 @@ fn font_retention_exhaustion_rejects_instead_of_dropping_the_font() {
         "LEGACY_RESOURCE_LIMIT:XLS chart font retention budget exceeded"
     );
 }
+
+/// One OfficeArt record (MS-ODRAW 2.2.1).
+fn art(kind: u16, options: u16, data: &[u8]) -> Vec<u8> {
+    [
+        options.to_le_bytes().to_vec(),
+        kind.to_le_bytes().to_vec(),
+        (data.len() as u32).to_le_bytes().to_vec(),
+        data.to_vec(),
+    ]
+    .concat()
+}
+
+/// A chart sheet whose own chart area is 400 x 200 pt, with `objects` chart
+/// objects (Obj ot 5 and their chart substreams) anchored at
+/// (1000, 2000)-(3000, 4000) SPRC.
+fn chart_sheet_records(objects: usize) -> Vec<(u16, Vec<u8>)> {
+    let mut own = bar_chart(true, None);
+    let mut area = vec![0u8; 8];
+    area.extend((400u32 << 16).to_le_bytes());
+    area.extend((200u32 << 16).to_le_bytes());
+    own[1].1 = area;
+    let mut records = vec![own.remove(0)];
+    for object in 0..objects {
+        let mut anchor = vec![0u8, 0];
+        for value in [1000i32, 2000, 3000, 4000] {
+            anchor.extend(value.to_le_bytes());
+        }
+        let mut shape = art(
+            0xf00a,
+            0x0c92,
+            &[
+                u32::to_le_bytes(1025 + object as u32),
+                0x0a00u32.to_le_bytes(),
+            ]
+            .concat(),
+        );
+        shape.extend(art(0xf010, 0, &anchor));
+        shape.extend(art(0xf011, 0, &[]));
+        let shape = art(0xf004, 0x000f, &shape);
+        let drawing = if object == 0 {
+            let mut patriarch = art(0xf009, 0x0001, &[0; 16]);
+            patriarch.extend(art(
+                0xf00a,
+                0x0002,
+                &[1024u32.to_le_bytes(), 5u32.to_le_bytes()].concat(),
+            ));
+            let mut group = art(0xf004, 0x000f, &patriarch);
+            group.extend(&shape);
+            // The containers span every object's shape container.
+            let mut group = art(0xf003, 0x000f, &group);
+            let extra = shape.len() * (objects - 1);
+            let length = u32::from_le_bytes(group[4..8].try_into().unwrap()) + extra as u32;
+            group[4..8].copy_from_slice(&length.to_le_bytes());
+            let mut root = art(0xf008, 0x0010, &[0; 8]);
+            root.extend(group);
+            let mut root = art(0xf002, 0x000f, &root);
+            let length = u32::from_le_bytes(root[4..8].try_into().unwrap()) + extra as u32;
+            root[4..8].copy_from_slice(&length.to_le_bytes());
+            root
+        } else {
+            shape
+        };
+        records.push(record(0x00ec, drawing));
+        let mut object_record = u16s(&[0x15, 0x12, 5, 1 + object as u16, 0x4011]);
+        object_record.extend([0u8; 16]);
+        records.push(record(0x005d, object_record));
+        records.extend(bar_chart(true, None));
+    }
+    records.extend(own);
+    records
+}
+
+/// The chart sheet of `chart_sheet_records(objects)`: its chart area and
+/// own chart, then each embedded chart's rectangle and chart, as JSON (a
+/// chart model is large, so none is kept on the caller's stack).
+#[inline(never)]
+fn projected_chart_sheet(
+    owned: &[(u16, Vec<u8>)],
+) -> Result<Vec<([i64; 4], serde_json::Value)>, String> {
+    let styles = super::super::styles::Styles::parse(&[]).unwrap();
+    let records: Vec<_> = owned
+        .iter()
+        .enumerate()
+        .map(|(offset, (kind, data))| Record {
+            kind: *kind,
+            offset,
+            data,
+        })
+        .collect();
+    let budget = std::cell::Cell::new(1 << 20);
+    let sheet = super::chart_sheet(&records, 0, &[], &styles, &[], &[], &budget)?;
+    let mut output = vec![(
+        [sheet.x_emu, sheet.y_emu, sheet.width_emu, sheet.height_emu],
+        serde_json::to_value(sheet.model.as_ref()).unwrap(),
+    )];
+    for embedded in &sheet.embedded {
+        output.push((
+            [
+                embedded.x_emu,
+                embedded.y_emu,
+                embedded.width_emu,
+                embedded.height_emu,
+            ],
+            serde_json::to_value(embedded.model.as_ref()).unwrap(),
+        ));
+    }
+    Ok(output)
+}
+
+#[test]
+fn chart_objects_of_a_chart_sheet_are_drawn_over_its_chart() {
+    let plain = projected_chart_sheet(&chart_sheet_records(0)).unwrap();
+    assert_eq!(plain.len(), 1);
+    assert_eq!(plain[0].0, [0, 0, 400 * 12_700, 200 * 12_700]);
+    assert_eq!(plain[0].1["chartType"], "clusteredBarH");
+    for objects in [1, 2] {
+        let with = projected_chart_sheet(&chart_sheet_records(objects)).unwrap();
+        // The sheet's own chart is the records outside the chart objects.
+        assert_eq!(with[0], plain[0]);
+        assert_eq!(with.len(), 1 + objects);
+        for embedded in &with[1..] {
+            // 1/4000 of the 400 x 200 pt chart area.
+            assert_eq!(
+                embedded.0,
+                [100 * 12_700, 100 * 12_700, 200 * 12_700, 100 * 12_700]
+            );
+            assert_eq!(embedded.1, plain[0].1);
+        }
+    }
+    // The chart substream must follow a chart object's Obj record.
+    let mut owned = chart_sheet_records(1);
+    let object = owned.iter().position(|(kind, _)| *kind == 0x005d).unwrap();
+    owned[object].1[4] = 2;
+    assert!(projected_chart_sheet(&owned)
+        .expect_err("rejected")
+        .contains("invalid BIFF drawing object owner"));
+    let mut owned = chart_sheet_records(1);
+    owned[object].1.truncate(22);
+    assert!(projected_chart_sheet(&owned)
+        .expect_err("rejected")
+        .contains("invalid BIFF drawing object owner"));
+    // A substream no chart object owns is not a chart sheet's structure.
+    let mut owned = chart_sheet_records(0);
+    owned.splice(1..1, bar_chart(true, None));
+    assert!(projected_chart_sheet(&owned)
+        .expect_err("rejected")
+        .contains("nested BIFF substream inside a chart"));
+}
