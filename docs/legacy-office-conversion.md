@@ -598,7 +598,9 @@ or a gradient rotation flag that only the alternative states, adopt the
 alternative. A rotation flag that only the binary sets keeps the binary
 projection. Custom path commands that do not pair one to one are compared as
 traced outlines (another start point, or collinear lines split differently,
-is the same outline); a different outline still rejects the load.
+is the same outline). Outlines that then pair segment by segment but at other
+points are a verified difference and keep the binary projection; outlines
+that do not pair still reject the load.
 Exhausting an optional alternative's verification budgets keeps that
 shape's binary projection and does not poison the document. Input work uses
 the standard OOXML package allowance (256 MiB of actual consumed input per

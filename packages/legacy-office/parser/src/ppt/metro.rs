@@ -1874,6 +1874,11 @@ fn same_outline(binary: &[pptx_model::PathCmd], alternative: &[pptx_model::PathC
     let near = |p: [f64; 2], q: [f64; 2]| {
         (p[0] - q[0]).abs() <= PATH_TOLERANCE && (p[1] - q[1]).abs() <= PATH_TOLERANCE
     };
+    // The distance of `p` from the line through `a` and `b` (`a` != `b`).
+    let off_line = |a: [f64; 2], b: [f64; 2], p: [f64; 2]| {
+        let d = [b[0] - a[0], b[1] - a[1]];
+        ((d[0] * (p[1] - a[1]) - d[1] * (p[0] - a[0])) / d[0].hypot(d[1])).abs()
+    };
     // Merge a cyclic (closed) or linear run of segments; `None` when the
     // contour degenerates to collinear lines only.
     let normalize = |closed: bool, segments: Vec<Segment>| -> Option<Vec<Segment>> {
@@ -1881,50 +1886,45 @@ fn same_outline(binary: &[pptx_model::PathCmd], alternative: &[pptx_model::PathC
             .into_iter()
             .filter(|s| !matches!(s, Segment::Line(a, b) if near(*a, *b)))
             .collect();
+        let continues = |s: &Segment, t: &Segment| match (s, t) {
+            (Segment::Line(a, b), Segment::Line(_, c)) => off_line(*a, *b, *c) <= PATH_TOLERANCE,
+            _ => false,
+        };
         if closed {
             // Rotate so the list starts where a run of collinear lines
             // cannot continue across the boundary.
-            let collinear = |s: &Segment, t: &Segment| match (s, t) {
-                (Segment::Line(a, b), Segment::Line(_, c)) => {
-                    let cross = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
-                    cross.abs() <= PATH_TOLERANCE
-                }
-                _ => false,
-            };
             let n = segments.len();
             let boundary =
-                (0..n).find(|&i| !collinear(&segments[(i + n - 1) % n], &segments[i]))?;
+                (0..n).find(|&i| !continues(&segments[(i + n - 1) % n], &segments[i]))?;
             segments.rotate_left(boundary);
         }
-        // A maximal run of lines on one straight line traces exactly the
-        // line from its first start to its last end when every point of the
-        // run lies between those two.
-        let on_line = |a: [f64; 2], b: [f64; 2], p: [f64; 2]| {
-            ((b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0])).abs() <= PATH_TOLERANCE
-        };
+        // A run of lines traces exactly the line from its first start to
+        // its last end when every point of the run lies on that line,
+        // between those two ends.
         let mut merged: Vec<Segment> = Vec::with_capacity(segments.len());
         let mut index = 0;
         while index < segments.len() {
-            let Segment::Line(first, second) = segments[index] else {
+            let Segment::Line(first, _) = segments[index] else {
                 merged.push(segments[index]);
                 index += 1;
                 continue;
             };
             let mut end = index + 1;
-            while let Some(Segment::Line(_, next)) = segments.get(end) {
-                if !on_line(first, second, *next) {
-                    break;
-                }
+            while end < segments.len() && continues(&segments[end - 1], &segments[end]) {
                 end += 1;
             }
             let last = segments[end - 1].end();
-            let d = [last[0] - first[0], last[1] - first[1]];
-            let along = |p: [f64; 2]| (p[0] - first[0]) * d[0] + (p[1] - first[1]) * d[1];
-            let length = along(last);
-            let within = segments[index..end]
-                .iter()
-                .all(|s| (-PATH_TOLERANCE..=length + PATH_TOLERANCE).contains(&along(s.end())));
-            if end - index > 1 && length > PATH_TOLERANCE && within {
+            let length = (last[0] - first[0]).hypot(last[1] - first[1]);
+            let traced = length > PATH_TOLERANCE
+                && segments[index..end].iter().all(|s| {
+                    let p = s.end();
+                    let along = ((p[0] - first[0]) * (last[0] - first[0])
+                        + (p[1] - first[1]) * (last[1] - first[1]))
+                        / length;
+                    off_line(first, last, p) <= PATH_TOLERANCE
+                        && (-PATH_TOLERANCE..=length + PATH_TOLERANCE).contains(&along)
+                });
+            if end - index > 1 && traced {
                 merged.push(Segment::Line(first, last));
             } else {
                 merged.extend_from_slice(&segments[index..end]);
@@ -1933,28 +1933,13 @@ fn same_outline(binary: &[pptx_model::PathCmd], alternative: &[pptx_model::PathC
         }
         Some(merged)
     };
-    // The largest coordinate difference of two segments of the same kind.
-    let deviation = |s: &Segment, t: &Segment| -> Option<f64> {
-        let max = |p: &[f64], q: &[f64]| {
-            p.iter()
-                .zip(q)
-                .map(|(a, b)| (a - b).abs())
-                .fold(0.0, f64::max)
-        };
-        match (s, t) {
-            (Segment::Line(_, p), Segment::Line(_, q)) => Some(max(p, q)),
-            (Segment::Arc(p, e), Segment::Arc(q, f))
-            | (Segment::Cubic(p, e), Segment::Cubic(q, f)) => Some(max(p, q).max(max(e, f))),
-            _ => None,
-        }
-    };
     let (Some(b), Some(a)) = (contours(binary), contours(alternative)) else {
         return Verdict::Unverifiable("custom geometry");
     };
     if b.len() != a.len() {
         return Verdict::Unverifiable("custom geometry");
     }
-    let mut worst = 0.0_f64;
+    let mut differs = false;
     for ((bs, bc, bseg), (as_, ac, aseg)) in b.into_iter().zip(a) {
         let (Some(bseg), Some(aseg)) = (normalize(bc, bseg), normalize(ac, aseg)) else {
             return Verdict::Unverifiable("custom geometry");
@@ -1962,32 +1947,105 @@ fn same_outline(binary: &[pptx_model::PathCmd], alternative: &[pptx_model::PathC
         if bc != ac || bseg.len() != aseg.len() || bseg.is_empty() {
             return Verdict::Unverifiable("custom geometry");
         }
-        let n = bseg.len();
-        // An open contour pairs from its start point; a closed one at the
-        // rotation that pairs every segment kind most closely.
-        let offsets = if bc { 0..n } else { 0..1 };
-        let start = if bc {
-            0.0
-        } else {
-            (bs[0] - as_[0]).abs().max((bs[1] - as_[1]).abs())
-        };
-        let Some(best) = offsets
-            .filter_map(|offset| {
-                (0..n).try_fold(start, |worst, i| {
-                    deviation(&bseg[(i + offset) % n], &aseg[i]).map(|d| worst.max(d))
+        // An open contour pairs from its start point; a closed one at any
+        // rotation. Rotations are found in linear time on exact keys: the
+        // segment kinds, and the points rounded to the comparison
+        // tolerance; a rounded match is then checked within it.
+        let kinds = |segments: &[Segment]| -> Vec<u8> {
+            segments
+                .iter()
+                .map(|s| match s {
+                    Segment::Line(..) => 0,
+                    Segment::Arc(..) => 1,
+                    Segment::Cubic(..) => 2,
                 })
-            })
-            .min_by(f64::total_cmp)
-        else {
-            return Verdict::Unverifiable("custom geometry");
+                .collect()
         };
-        worst = worst.max(best);
+        let values = |s: &Segment| -> Vec<f64> {
+            match s {
+                Segment::Line(_, e) => e.to_vec(),
+                Segment::Arc(p, e) | Segment::Cubic(p, e) => p.iter().chain(e).copied().collect(),
+            }
+        };
+        let rounded = |segments: &[Segment]| -> Vec<(u8, Vec<i64>)> {
+            kinds(segments)
+                .into_iter()
+                .zip(segments)
+                .map(|(kind, s)| {
+                    let key = values(s)
+                        .into_iter()
+                        .map(|v| (v / PATH_TOLERANCE).round() as i64)
+                        .collect();
+                    (kind, key)
+                })
+                .collect()
+        };
+        let same_at = |offset: usize| {
+            let n = bseg.len();
+            (bc || near(bs, as_))
+                && (0..n).all(|i| {
+                    values(&bseg[(i + offset) % n])
+                        .iter()
+                        .zip(values(&aseg[i]))
+                        .all(|(p, q)| (p - q).abs() <= PATH_TOLERANCE)
+                })
+        };
+        fn offset<T: PartialEq>(closed: bool, b: &[T], a: &[T]) -> Option<usize> {
+            if closed {
+                cyclic_offset(b, a)
+            } else {
+                (b == a).then_some(0)
+            }
+        }
+        if offset(bc, &rounded(&bseg), &rounded(&aseg)).is_some_and(same_at) {
+            continue;
+        }
+        if offset(bc, &kinds(&bseg), &kinds(&aseg)).is_none() {
+            return Verdict::Unverifiable("custom geometry");
+        }
+        differs = true;
     }
-    if worst <= PATH_TOLERANCE {
-        Verdict::Same
-    } else {
+    if differs {
         Verdict::Differs("custom geometry vertices")
+    } else {
+        Verdict::Same
     }
+}
+
+/// A rotation `offset` with `text[(i + offset) % n] == pattern[i]` for all
+/// `i`, found with the Knuth-Morris-Pratt failure function over the doubled
+/// text in O(n).
+#[cfg(any(test, feature = "direct-ppt"))]
+fn cyclic_offset<T: PartialEq>(text: &[T], pattern: &[T]) -> Option<usize> {
+    let n = pattern.len();
+    if n == 0 || text.len() != n {
+        return None;
+    }
+    let mut failure = vec![0usize; n];
+    let mut k = 0;
+    for i in 1..n {
+        while k > 0 && pattern[i] != pattern[k] {
+            k = failure[k - 1];
+        }
+        if pattern[i] == pattern[k] {
+            k += 1;
+        }
+        failure[i] = k;
+    }
+    let mut k = 0;
+    for i in 0..2 * n - 1 {
+        let c = &text[i % n];
+        while k > 0 && *c != pattern[k] {
+            k = failure[k - 1];
+        }
+        if *c == pattern[k] {
+            k += 1;
+        }
+        if k == n {
+            return Some(i + 1 - n);
+        }
+    }
+    None
 }
 
 /// The path without a line to its subpath's start point directly before a
@@ -2744,6 +2802,24 @@ mod tests {
     }
 
     #[test]
+    fn cyclic_offsets_are_found_in_linear_time() {
+        assert_eq!(cyclic_offset(&[3, 1, 2], &[1, 2, 3]), Some(1));
+        assert_eq!(cyclic_offset(&[1, 1, 2, 1], &[1, 2, 1, 1]), Some(1));
+        assert_eq!(cyclic_offset(&[1, 2, 3], &[1, 3, 2]), None);
+        assert_eq!(cyclic_offset::<u8>(&[], &[]), None);
+        assert_eq!(cyclic_offset(&[1, 2], &[1, 2, 1]), None);
+        // A long periodic contour that differs in one place: the search stays
+        // linear (the former all-rotations scan was quadratic).
+        let n = 200_000;
+        let text: Vec<u8> = (0..n).map(|i| u8::from(i == n - 1)).collect();
+        let mut pattern = vec![0u8; n];
+        pattern[n / 2] = 1;
+        assert_eq!(cyclic_offset(&text, &pattern), Some(n / 2 - 1));
+        pattern[n / 2] = 2;
+        assert_eq!(cyclic_offset(&text, &pattern), None);
+    }
+
+    #[test]
     fn custom_paths_compare_vertices_paint_and_structure() {
         let leaf = pptx_model::Transform::default();
         let square = |closing_line: bool, corner: f64| {
@@ -2809,21 +2885,62 @@ mod tests {
             Verdict::Differs("custom geometry vertices")
         );
         // Unpaired commands that trace another outline stay unknown: a
-        // vertex off the edge, or a spike past the edge's end (a stroke
-        // would draw it).
+        // vertex off the edge, a spike past the edge's end (a stroke would
+        // draw it), or a bend behind a tiny first segment, whose direction
+        // must not stand for the run's line.
         for extra in [
-            PathCmd::LineTo { x: 0.5, y: 0.1 },
-            PathCmd::LineTo { x: 1.2, y: 0.0 },
+            vec![PathCmd::LineTo { x: 0.5, y: 0.1 }],
+            vec![PathCmd::LineTo { x: 1.2, y: 0.0 }],
+            vec![
+                PathCmd::LineTo { x: 1e-8, y: 0.0 },
+                PathCmd::LineTo { x: 1.0, y: 0.09 },
+            ],
         ] {
             let mut other = square(true, 1.0);
             if let Some(paths) = other.cust_geom.as_mut() {
-                paths[0].insert(1, extra);
+                for (offset, command) in extra.into_iter().enumerate() {
+                    paths[0].insert(1 + offset, command);
+                }
             }
             assert_eq!(
                 same_geometry(&binary(&other, &leaf), &square(false, 1.0)),
                 Verdict::Unverifiable("custom geometry")
             );
         }
+        // A long closed contour that starts elsewhere compares in linear
+        // time.
+        let n = 10_000;
+        let vertex = |i: usize| {
+            let angle = std::f64::consts::TAU * (i % n) as f64 / n as f64;
+            (0.5 + 0.5 * angle.cos(), 0.5 + 0.5 * angle.sin())
+        };
+        // The binary also splits its first edge at the midpoint, so the
+        // command lists do not pair.
+        let polygon = |from: usize, closing: bool| {
+            let (x, y) = vertex(from);
+            let mut commands = vec![PathCmd::MoveTo { x, y }];
+            if closing {
+                let (nx, ny) = vertex(from + 1);
+                commands.push(PathCmd::LineTo {
+                    x: (x + nx) / 2.0,
+                    y: (y + ny) / 2.0,
+                });
+            }
+            for i in 1..n + usize::from(closing) {
+                let (x, y) = vertex(from + i);
+                commands.push(PathCmd::LineTo { x, y });
+            }
+            commands.push(PathCmd::Close);
+            let mut element = shape("custGeom");
+            element.cust_geom = Some(vec![commands]);
+            element
+        };
+        let started = std::time::Instant::now();
+        assert_eq!(
+            same_geometry(&binary(&polygon(n / 3, true), &leaf), &polygon(0, false)),
+            Verdict::Same
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
         // A verified difference in the paint of the unpaired path is
         // reported as such and keeps the binary.
         let mut unfilled = binary(&moved, &leaf);
@@ -4381,6 +4498,23 @@ mod tests {
             if let Some(paths) = element.cust_geom.as_mut() {
                 paths[0][4] = PathCmd::LineTo { x: 0.1, y: 0.0 };
             }
+            let error = run_verification(&element, &blob(&xml), &theme(), AMPLE)
+                .0
+                .unwrap_err();
+            assert!(
+                error.starts_with("UNSUPPORTED:") && error.contains("custom geometry"),
+                "{error}"
+            );
+            assert!(take_best_effort().is_empty());
+            // A bend behind a tiny first segment is another outline too.
+            element.cust_geom = Some(vec![vec![
+                PathCmd::MoveTo { x: 0.0, y: 0.0 },
+                PathCmd::LineTo { x: 1e-8, y: 0.0 },
+                PathCmd::LineTo { x: 1.0, y: 0.09 },
+                PathCmd::LineTo { x: 1.0, y: 0.0 },
+                PathCmd::LineTo { x: 1.0, y: 1.0 },
+                PathCmd::Close,
+            ]]);
             let error = run_verification(&element, &blob(&xml), &theme(), AMPLE)
                 .0
                 .unwrap_err();
