@@ -99,13 +99,14 @@ export interface FindMatchesOptions {
   /**
    * Match whole words only. Default `false`. A match is kept when it starts and
    * ends at a word boundary: next to a character that is not a letter, combining
-   * mark, number or `_`, at a paragraph or line change, or at the ends of the
-   * text. So `cat` is not found inside `concatenate`, while `C++` is found
-   * before a comma. In scripts written without spaces between words (Han,
-   * Hiragana, Katakana, Thai, Lao, Khmer, Myanmar) the boundaries come from
-   * `Intl.Segmenter` word segmentation and therefore depend on the browser's
-   * dictionaries; where `Intl.Segmenter` is unavailable, text in those scripts
-   * is matched as if `wholeWord` were `false`.
+   * mark, number or `_`, at the end of a paragraph or of a line ended by a
+   * manual break, at a tab, or at the ends of the text. So `cat` is not found
+   * inside `concatenate`, also where that word wraps onto a second line, while
+   * `C++` is found before a comma. In scripts written without spaces between
+   * words (Han, Hiragana, Katakana, Thai, Lao, Khmer, Myanmar) the boundaries
+   * come from `Intl.Segmenter` word segmentation and therefore depend on the
+   * browser's dictionaries; where `Intl.Segmenter` is unavailable, text in
+   * those scripts is matched as if `wholeWord` were `false`.
    */
   wholeWord?: boolean;
 }

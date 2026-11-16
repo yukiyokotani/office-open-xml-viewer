@@ -25,8 +25,9 @@ export type Fold = (text: string) => string;
 export type WordBoundaryTest = (offset: number) => boolean;
 
 /** Whether layout separates two runs that are adjacent in a unit's run list (a
- *  paragraph end, a line change, another text container), although the joined
- *  search text has no character between them. Supplied by the format. */
+ *  paragraph end, a manual line break, a tab, another text container),
+ *  although the joined search text has no character between them. An automatic
+ *  wrap does not separate. Supplied by the format. */
 export type RunBreakTest<Run> = (previous: Run, next: Run) => boolean;
 
 /** Background of a text-highlight group that sets no `color`. */

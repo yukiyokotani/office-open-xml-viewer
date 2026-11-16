@@ -6,9 +6,10 @@
  * start or end there. The rule, in order:
  *
  * 1. The start and the end of the text are boundaries, and so is every offset
- *    the format adapter marked as a hard break (a paragraph end, a line change,
- *    a different text container): the joined text has no separator character
- *    there, but the reader sees one.
+ *    the format adapter marked as a layout break (a paragraph end, a manual
+ *    line break, a tab, a different text container): the joined text has no
+ *    separator character there, but the reader sees one. An automatic line
+ *    wrap is not such a break.
  * 2. An offset with a non-word character on either side is a boundary. Word
  *    characters are Unicode letters, combining marks, numbers and `_` (the
  *    boundary a Unicode-aware regex `\b` draws), so `cat` is not found inside

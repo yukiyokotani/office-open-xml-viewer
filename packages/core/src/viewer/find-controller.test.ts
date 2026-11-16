@@ -108,7 +108,7 @@ describe('UnitFindController — text highlights', () => {
     await find.find('ven');
     await find.highlight(groups);
     expect(find.unitHighlights(0)).toEqual([
-      { slices: [{ runIndex: 0, start: 0, end: 7 }], active: false, color: 'rgba(0,0,255,0.3)' },
+      { slices: [{ runIndex: 0, start: 0, end: 7 }], active: false, color: 'rgba(0,0,255,0.3)', layer: 0 },
       { slices: [{ runIndex: 0, start: 2, end: 5 }], active: false },
     ]);
     const validated = controller([['guaranteed returns']]);
@@ -204,23 +204,24 @@ describe('UnitFindController — text highlights', () => {
     expect(find.unitHighlights(0)[0].color).toBe('red');
   });
 
-  it('collects each unit once when a find and a highlight start together', async () => {
+  it('reuses the runs the other search has cached, and collects again once both are cleared', async () => {
     const collected: number[] = [];
     const find = new UnitFindController(
       () => 2,
       async (unit) => { collected.push(unit); return [{ text: 'alpha' }]; },
       (unit) => ({ unit }),
     );
-    const [found, highlighted] = await Promise.all([
-      find.find('alpha'),
-      find.highlight([{ id: 'a', terms: ['alpha'] }]),
-    ]);
-    expect(found).toHaveLength(2);
-    expect(highlighted).toHaveLength(2);
+    expect(await find.highlight([{ id: 'a', terms: ['alpha'] }])).toHaveLength(2);
+    expect(await find.find('alpha')).toHaveLength(2);
+    expect(await find.highlight([{ id: 'b', terms: ['alp'] }])).toHaveLength(2);
     expect(collected).toEqual([0, 1]);
+    find.clearFind();
+    find.clearHighlights();
+    expect(await find.find('alpha')).toHaveLength(2);
+    expect(collected).toEqual([0, 1, 0, 1]);
   });
 
-  it('still completes when the scan it waited for is cancelled', async () => {
+  it('keeps a find and a highlight that collect at the same time apart', async () => {
     const gates: ((runs: { text: string }[]) => void)[] = [];
     const find = new UnitFindController(
       () => 1,
@@ -230,10 +231,9 @@ describe('UnitFindController — text highlights', () => {
     const found = find.find('alpha');
     const highlighted = find.highlight([{ id: 'a', terms: ['alpha'] }]);
     find.clearFind();
-    gates[0]([{ text: 'alpha' }]);
-    await expect(found).resolves.toEqual([]);
     await vi.waitFor(() => expect(gates).toHaveLength(2));
-    gates[1]([{ text: 'alpha' }]);
+    gates.forEach((open) => open([{ text: 'alpha' }]));
+    await expect(found).resolves.toEqual([]);
     expect(await highlighted).toHaveLength(1);
     expect(find.matches()).toEqual([]);
   });

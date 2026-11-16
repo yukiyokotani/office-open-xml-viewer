@@ -1849,6 +1849,7 @@ export interface PptxHighlightMatch {
     slices: MatchRunSlice[];
     active: boolean;
     color?: string;
+    layer?: number;
 }
 export interface PptxMatchLocation {
     slide: number;
@@ -1997,7 +1998,7 @@ export interface PptxTextRunInfo {
         column: number;
     }>;
     cellHorzOverflow?: 'clip' | 'overflow';
-    stackedColumn?: number;
+    logicalLine?: number;
     textBodyRotation?: number;
     hyperlink?: HyperlinkTarget;
 }

@@ -344,13 +344,13 @@ export interface PptxTextRunInfo {
    */
   cellHorzOverflow?: 'clip' | 'overflow';
   /**
-   * Zero-based column index when this run is one glyph cell of stacked vertical
-   * text (`vert="wordArtVert"` / `"wordArtVertRtl"`). The cells of one column
-   * follow each other downward and continue the same line of text; a change of
-   * column is the line change. Absent for every other run, whose line is its
-   * `inShapeY`.
+   * Zero-based index, within the run's text body, of the authored line the run
+   * belongs to: a paragraph, or the part of a paragraph between manual line
+   * breaks (`<a:br>`). Runs of one authored line share it however the line is
+   * wrapped, or stacked into columns (`vert="wordArtVert"`), so a consumer can
+   * tell an automatic wrap inside a word from the end of a line of text.
    */
-  stackedColumn?: number;
+  logicalLine?: number;
   /**
    * Additional rotation from a vertical text body (`vert="vert"` → 90,
    * `vert="vert270"` → -90). The CSS overlay must add this to `rotation`.
@@ -5055,7 +5055,7 @@ function renderStackedTextBody(
     onTextRun({
       text: run.text, inShapeX: run.x - bx, inShapeY: run.y - by, w: run.w, h: run.h,
       fontSize: run.fontSize, font: run.font, shapeX: bx, shapeY: by, shapeW: bw, shapeH: bh,
-      rotation: shapeRotation, stackedColumn: run.column,
+      rotation: shapeRotation, logicalLine: run.logicalLine,
       ...(run.hyperlink ? { hyperlink: run.hyperlink } : {}),
     });
   }
@@ -5793,6 +5793,9 @@ export function renderTextBody(
   let colIdx = 0;
   let entriesInCol = 0;
 
+  // The authored line each drawn line belongs to, reported on its runs: it
+  // advances at a paragraph end or a manual break, not at an automatic wrap.
+  let logicalLine = 0;
   for (const entry of allLines) {
     const { line, linePx, lineHeight, topGapPx, textXOffset, bulletLabel, bulletFont, bulletColor, bulletFollowsText, bulletImage, alignment, isLastLine, useResolvedFontMetrics, metricAscent } = entry;
     // Balanced column advance: when the current column has reached its share
@@ -6373,6 +6376,7 @@ export function renderTextBody(
           shapeW: bw,
           shapeH: bh,
           rotation: shapeRotation,
+          logicalLine,
           hyperlink: seg.hyperlink,
         });
       }
@@ -6384,6 +6388,7 @@ export function renderTextBody(
     if (paraNeedsBidi) ctx.direction = 'ltr';
 
     cursorY += linePx;
+    if (endsLogicalLine) logicalLine++;
   }
 
   ctx.restore();

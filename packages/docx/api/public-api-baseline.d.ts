@@ -1618,6 +1618,10 @@ export interface DocxTextRunInfo {
     direction?: 'ltr' | 'rtl';
     optionalHyphenGlyph?: true;
     text: string;
+    textRange?: Readonly<{
+        start: number;
+        end: number;
+    }>;
     x: number;
     y: number;
     w: number;

@@ -137,23 +137,66 @@ describe('pptx stacked vertical text (wordArtVert / wordArtVertRtl)', () => {
     expect(calls.some((c) => c.text === '「')).toBe(false);
   });
 
-  // Whole-word matching reads the column of each glyph run: the cells of a
-  // column continue one line, and a paragraph starts another column.
-  it('reports the stacked column of every glyph run', () => {
+  // Whole-word matching reads the authored line of each glyph run: the cells
+  // of a paragraph continue one line, also into a further column, and the
+  // next paragraph (or the text after a manual break) is another line.
+  it('reports the authored line of every glyph run', () => {
     const { ctx } = mockCtx();
-    const twoColumns = body('cat', 'wordArtVert');
-    twoColumns.paragraphs.push({ ...twoColumns.paragraphs[0], runs: [{ ...twoColumns.paragraphs[0].runs[0], text: 'do' } as TextRunData] });
+    const stacked = body('cat', 'wordArtVert');
+    stacked.paragraphs.push({ ...stacked.paragraphs[0], runs: [{ ...stacked.paragraphs[0].runs[0], text: 'do' } as TextRunData] });
     const runs: PptxTextRunInfo[] = [];
-    renderTextBody(ctx, twoColumns, 0, 0, 200, 470, SCALE,
+    renderTextBody(ctx, stacked, 0, 0, 200, 470, SCALE,
       null, 0, false, false, '#000000', undefined, undefined, (run) => runs.push(run));
-    expect(runs.map((run) => [run.text, run.stackedColumn])).toEqual([
+    expect(runs.map((run) => [run.text, run.logicalLine])).toEqual([
       ['c', 0], ['a', 0], ['t', 0], ['d', 1], ['o', 1],
     ]);
-    // The cells of a column advance down; the next column starts at its top.
+    // The cells of a column advance down; the next paragraph starts another column.
     expect(runs[1].inShapeY).toBeGreaterThan(runs[0].inShapeY);
     expect(runs[3].inShapeY).toBeCloseTo(runs[0].inShapeY, 6);
     expect(pptxRunsBreak(runs[0], runs[1])).toBe(false);
     expect(pptxRunsBreak(runs[2], runs[3])).toBe(true);
+
+    // A column too short for the word: it wraps into the next column and
+    // stays one authored line.
+    const short = mockCtx();
+    const wrapped: PptxTextRunInfo[] = [];
+    renderTextBody(short.ctx, body('catalog', 'wordArtVert'), 0, 0, 200, 110, SCALE,
+      null, 0, false, false, '#000000', undefined, undefined, (run) => wrapped.push(run));
+    expect(wrapped.map((run) => run.text).join('')).toBe('catalog');
+    expect(new Set(wrapped.map((run) => run.inShapeX)).size).toBeGreaterThan(1);
+    expect(wrapped.every((run) => run.logicalLine === 0)).toBe(true);
+    for (let i = 1; i < wrapped.length; i++) expect(pptxRunsBreak(wrapped[i - 1], wrapped[i])).toBe(false);
+  });
+
+  it('reports the authored line of horizontal runs across wraps, paragraphs and manual breaks', () => {
+    const collect = (text: TextBody, width: number): PptxTextRunInfo[] => {
+      const runs: PptxTextRunInfo[] = [];
+      renderTextBody(mockCtx().ctx, text, 0, 0, width, 470, SCALE,
+        null, 0, false, false, '#000000', undefined, undefined, (run) => runs.push(run));
+      return runs;
+    };
+    // A box too narrow for the word: it wraps inside the word and stays one line.
+    const wrapped = collect(body('catalogue', 'horz'), 80);
+    expect(wrapped.map((run) => run.text).join('')).toBe('catalogue');
+    expect(new Set(wrapped.map((run) => run.inShapeY)).size).toBeGreaterThan(1);
+    expect(wrapped.every((run) => run.logicalLine === 0)).toBe(true);
+    for (let i = 1; i < wrapped.length; i++) expect(pptxRunsBreak(wrapped[i - 1], wrapped[i])).toBe(false);
+
+    // Two paragraphs, the second with a manual break: three authored lines.
+    const text = body('cat', 'horz');
+    const first = text.paragraphs[0];
+    text.paragraphs.push({
+      ...first,
+      runs: [
+        { ...first.runs[0], text: 'alog' } as TextRunData,
+        { type: 'break' } as unknown as TextRunData,
+        { ...first.runs[0], text: 'cat' } as TextRunData,
+      ],
+    });
+    const lines = collect(text, 400);
+    expect(lines.map((run) => [run.text, run.logicalLine])).toEqual([['cat', 0], ['alog', 1], ['cat', 2]]);
+    expect(pptxRunsBreak(lines[0], lines[1])).toBe(true);
+    expect(pptxRunsBreak(lines[1], lines[2])).toBe(true);
   });
 
   // #1827 PowerPoint controls: vrt2-only ∥ (Yu Gothic) stands unturned in a

@@ -55,6 +55,7 @@ function projectTextRun(
     // while copy/find receive logical text. Ordinary '-' remains unchanged.
     ...(placement.optionalHyphenGlyph ? { optionalHyphenGlyph: true as const } : {}),
     text: placement.optionalHyphenGlyph ? '' : placement.text,
+    textRange: { start: placement.range.start, end: placement.range.end },
     x: origin.xPt,
     y: origin.yPt,
     w: placement.bounds.widthPt * inlineScale,

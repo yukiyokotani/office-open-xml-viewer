@@ -25,12 +25,13 @@ type ScanHit = Pick<ResolvedMatch, 'slices' | 'color' | 'layer' | 'source'>;
 type Matcher<Run> = (index: TextIndex, runs: Run[]) => ScanHit[];
 
 /** One overlay box list entry: the run-slices of a match, whether it is the
- *  active one of its kind, and for a text highlight the group background
- *  (absent for a find match, which uses the find colours). */
+ *  active one of its kind, and for a text highlight the group background and
+ *  paint layer (both absent for a find match, which uses the find colours). */
 export interface UnitHighlight {
   slices: TextMatch['slices'];
   active: boolean;
   color?: string;
+  layer?: number;
 }
 
 /** The matches, cursor and cancellation state of one kind of search (the
@@ -44,8 +45,6 @@ class MatchList<Location> {
   generation = 0;
   /** A non-empty search was requested and not cleared since. */
   armed = false;
-  /** The scan in flight, settled when it commits, fails or is cancelled. */
-  scanning: Promise<void> | null = null;
 
   constructor(private readonly _location: (unit: number) => Location) {}
 
@@ -87,7 +86,9 @@ class MatchList<Location> {
     for (const index of this._paint) {
       const match = this.matches[index];
       if (match.unit !== unit) continue;
-      out.push({ slices: match.slices, active: index === this.active, color: match.color });
+      out.push({
+        slices: match.slices, active: index === this.active, color: match.color, layer: match.layer,
+      });
     }
   }
 }
@@ -97,7 +98,9 @@ class MatchList<Location> {
  *
  * Two independent searches share the cached unit runs: the interactive find
  * (`find` / `next` / `prev` / `clearFind`) and the text highlights
- * (`highlight` / `highlightNext` / `highlightPrev` / `clearHighlights`). */
+ * (`highlight` / `highlightNext` / `highlightPrev` / `clearHighlights`). A
+ * search that starts after the other has committed reuses its runs; two that
+ * collect at the same time each collect the units they still miss. */
 export class UnitFindController<Run extends SearchRun, Location> {
   private _runs = new Map<number, Run[]>();
   private _runsRevision = 0;
@@ -171,7 +174,7 @@ export class UnitFindController<Run extends SearchRun, Location> {
     }
     // Whole-word matching is part of the on-demand term search; a plain find
     // starts without loading anything.
-    return await this._scan(this._find, this._marks, opts.wholeWord
+    return await this._scan(this._find, opts.wholeWord
       ? async () => (await loadTermSearch()).wholeWordMatcher(
         query, opts, foldPreservingLength, sliceRange, this._runBreak, this._acceptMatch)
       : () => (index) => findMatches(index, query, opts)) ?? [];
@@ -191,7 +194,7 @@ export class UnitFindController<Run extends SearchRun, Location> {
       this.clearHighlights();
       return [];
     }
-    const matches = await this._scan(this._marks, this._find, async () =>
+    const matches = await this._scan(this._marks, async () =>
       (await loadTermSearch()).textHighlightMatcher(
         set, foldPreservingLength, sliceRange, this._runBreak, this._acceptMatch));
     return (matches ?? []) as TextHighlightMatch<Location>[];
@@ -221,21 +224,10 @@ export class UnitFindController<Run extends SearchRun, Location> {
    *  untouched, and a failure of the superseded request is not reported. */
   private async _scan(
     list: MatchList<Location>,
-    other: MatchList<Location>,
     prepare: () => Matcher<Run> | Promise<Matcher<Run>>,
   ): Promise<FindMatch<Location>[] | null> {
     const generation = ++list.generation;
-    let settle!: () => void;
-    const scanning = new Promise<void>((resolve) => { settle = resolve; });
-    list.scanning = scanning;
     try {
-      // Both kinds read the same units. Let a scan of the other kind that is
-      // already collecting finish first, so its runs are reused instead of
-      // rendering every unit a second time.
-      if (other.scanning) {
-        await other.scanning;
-        if (generation !== list.generation) return null;
-      }
       let matcher = prepare();
       if (matcher instanceof Promise) {
         matcher = await matcher;
@@ -285,9 +277,6 @@ export class UnitFindController<Run extends SearchRun, Location> {
       // document's run collection, a chunk that did not load).
       if (generation !== list.generation) return null;
       throw error;
-    } finally {
-      if (list.scanning === scanning) list.scanning = null;
-      settle();
     }
   }
 }

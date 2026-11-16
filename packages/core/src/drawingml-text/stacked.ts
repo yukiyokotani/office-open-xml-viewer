@@ -103,6 +103,9 @@ export interface StackedColumn {
   /** Natural thickness (largest cell). */
   thickness: number;
   paragraph: number;
+  /** The column ends an authored line: its paragraph, or a manual line break.
+   *  Otherwise the text wraps into the next column. */
+  endsLine: boolean;
   /** Start of an authored first-column marker, after indent and alignment. */
   prefixTop?: number;
 }
@@ -276,6 +279,7 @@ export function layoutStackedText<T, G extends StackedGlyph<T> = StackedGlyph<T>
       start = columnTop + extra;
     }
     columns.push({ axisX, thickness: line.thickness, paragraph: line.paragraph,
+      endsLine: line.lastInParagraph || line.endsWithBreak,
       ...(prefix ? { prefixTop: start - prefixAdvance } : {}),
     });
     let y = start;

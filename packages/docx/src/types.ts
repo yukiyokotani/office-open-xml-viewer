@@ -1858,6 +1858,12 @@ export interface DocxTextRunInfo {
    * into the selection or the find index. Literal hyphens omit this flag. */
   optionalHyphenGlyph?: true;
   text: string;
+  /** Offsets of this segment in the logical text of the owning paragraph
+   *  (UTF-16, end exclusive). Two segments of one paragraph are adjacent in
+   *  the text when one ends where the other starts, however they are placed:
+   *  an automatic line wrap leaves them adjacent, while a tab, a manual line
+   *  break or an inline object lies between them. */
+  textRange?: Readonly<{ start: number; end: number }>;
   /** Left edge in canvas CSS px. */
   x: number;
   /** Top of line box in canvas CSS px. */

@@ -32,6 +32,11 @@ export interface PptxHighlightMatch {
    *  used instead of the find colours. Its active match keeps this background
    *  and gains a ring. Absent for a find match. */
   color?: string;
+  /** Paint layer of a text highlight: the position of its group in the set.
+   *  Entries are passed in paint order (layer by layer, then the find, which
+   *  has none); each layer gets shape frames of its own, so it stays above the
+   *  layers before it where shapes overlap. */
+  layer?: number;
 }
 
 /** Browser find-bar palette (translucent so glyphs stay legible). */
@@ -75,7 +80,7 @@ export function buildPptxHighlightLayer(
 
   // One positioned + rotated div per shape frame (keyed like the text layer), so
   // boxes inside it inherit the shape's rotation. Reused across matches/slices
-  // of one background (see the loop below).
+  // of one paint layer (see the loop below).
   // The frame is placed as a % of the slide box (so it tracks the scaled canvas)
   // with % width/height too, so the boxes inside (positioned as % of THIS frame)
   // scale with it under the shape's rotate().
@@ -94,16 +99,16 @@ export function buildPptxHighlightLayer(
     return entry;
   };
 
-  // The matches arrive in paint order: text highlights group by group, then the
+  // The matches arrive in paint order: text highlights layer by layer, then the
   // find. A frame is a stacking context, so a later entry in a frame created
   // earlier would end up beneath another shape's frame where shapes overlap.
-  // Starting new frames whenever the background changes keeps the paint order
-  // across shapes; a plain find is one such stretch and keeps one frame per shape.
-  let background: string | undefined | null = null;
+  // Starting new frames at every change of layer keeps the paint order across
+  // shapes; the find is one layer and keeps one frame per shape.
+  let paintLayer: number | undefined | null = null;
   for (const match of matches) {
-    if (match.color !== background) {
+    if (match.layer !== paintLayer) {
       shapeMap.clear();
-      background = match.color;
+      paintLayer = match.layer;
     }
     const fill = match.color ?? (match.active ? activeColor : matchColor);
     const ring = match.color !== undefined && match.active ? ACTIVE_TEXT_HIGHLIGHT_RING : '';

@@ -125,23 +125,28 @@ describe('buildPptxHighlightLayer', () => {
       .toEqual([undefined, '2px solid #111', undefined]);
   });
 
-  it('keeps the paint order across overlapping shapes: later groups and the find get their own frames', () => {
+  it('keeps the paint order across overlapping shapes: each layer and the find get their own frames', () => {
     vi.stubGlobal('document', { createElement: (t: string) => makeEl(t) });
     const layer = makeEl('div');
     const runs = [run({ text: 'abc', shapeX: 0 }), run({ text: 'abc', shapeX: 40 })];
     const slice = (runIndex: number) => [{ runIndex, start: 0, end: 3 }];
+    // Two groups share one background; the later one holds the active match.
     const matches: PptxHighlightMatch[] = [
-      { slices: slice(0), active: false, color: 'red' },
-      { slices: slice(1), active: false, color: 'red' },
-      { slices: slice(0), active: false, color: 'blue' },
+      { slices: slice(0), active: false, color: 'red', layer: 0 },
+      { slices: slice(1), active: false, color: 'red', layer: 0 },
+      { slices: slice(0), active: true, color: 'red', layer: 1 },
+      { slices: slice(0), active: false, color: 'blue', layer: 2 },
       { slices: slice(0), active: false },
       { slices: slice(1), active: true },
     ];
     buildPptxHighlightLayer(layer as unknown as HTMLDivElement, runs, matches, 100, 100, measureForFont);
-    // Frames in DOM order: red on both shapes, then blue, then the find.
+    // Frames in DOM order: layer 0 on both shapes, layer 1, layer 2, the find.
     expect(layer.children.map((frame) => frame.children.map((box) => box.style.background))).toEqual([
-      ['red'], ['red'], ['blue'], [DEFAULT_FIND_HIGHLIGHT], [DEFAULT_FIND_ACTIVE_HIGHLIGHT],
+      ['red'], ['red'], ['red'], ['blue'], [DEFAULT_FIND_HIGHLIGHT], [DEFAULT_FIND_ACTIVE_HIGHLIGHT],
     ]);
+    // The active box of the later group is in a frame after the earlier group's.
+    expect(layer.children.map((frame) => frame.children[0].style.outline === '2px solid #111'))
+      .toEqual([false, false, true, false, false, false]);
     // A find alone still uses one frame per shape.
     const find = makeEl('div');
     buildPptxHighlightLayer(
