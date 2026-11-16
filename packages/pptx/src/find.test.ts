@@ -86,7 +86,7 @@ it('highlights whole words that end at a line of a title, and reports group and 
   expect(find.slideHighlights(0).map((box) => box.color)).toEqual([
     'rgba(0,0,255,0.3)', 'rgba(0,0,255,0.3)', 'rgba(0,0,255,0.3)', 'rgba(0, 184, 148, 0.35)',
   ]);
-  expect((await find.highlightPrev())?.matchIndex).toBe(3);
+  expect((await find.highlightStep(true))?.matchIndex).toBe(3);
 });
 
 it('keeps a term inside one table cell when a longer term of its group would cross cells', async () => {

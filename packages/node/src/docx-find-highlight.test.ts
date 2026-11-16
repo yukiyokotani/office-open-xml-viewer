@@ -180,7 +180,7 @@ describe.skipIf(!skia || !docxMod || !rendererMod || !findMod || !highlightMod |
         ) => {
           find: (q: string, o?: { wholeWord?: boolean }) => Promise<Match[]>;
           highlight: (groups: unknown[]) => Promise<Match[]>;
-          highlightNext: () => Match | null;
+          highlightStep: () => Match | null;
           pageHighlights: (p: number) => { active: boolean; color?: string }[];
         };
       };
@@ -227,7 +227,7 @@ describe.skipIf(!skia || !docxMod || !rendererMod || !findMod || !highlightMod |
       expect(groupsOf('cathed')).toContain('fragment');
       expect(matches.map((match) => match.matchIndex)).toEqual(matches.map((_, index) => index));
       // The find above stays as it was: no matches, and the highlights are drawn.
-      const active = controller.highlightNext();
+      const active = controller.highlightStep();
       expect(active?.matchIndex).toBe(0);
       const boxes = controller.pageHighlights(active!.location.page);
       expect(boxes.filter((box) => box.active)).toHaveLength(1);

@@ -199,6 +199,57 @@ describe('pptx stacked vertical text (wordArtVert / wordArtVertRtl)', () => {
     expect(pptxRunsBreak(lines[1], lines[2])).toBe(true);
   });
 
+  it('ends a span where an automatic wrap drops the space, and not where it breaks a word', () => {
+    const collect = (text: string, width: number): PptxTextRunInfo[] => {
+      const runs: PptxTextRunInfo[] = [];
+      renderTextBody(mockCtx().ctx, body(text, 'horz'), 0, 0, width, 470, SCALE,
+        null, 0, false, false, '#000000', undefined, undefined, (run) => runs.push(run));
+      return runs;
+    };
+    // Narrow the box step by step across the width where the space after
+    // "cat" stops fitting on the first line.
+    const seen = new Set<string>();
+    for (let width = 140; width >= 60; width--) {
+      const runs = collect('cat dog', width);
+      const joined = runs.map((run) => run.text).join('|');
+      if (runs.length !== 2 || runs[0].inShapeY === runs[1].inShapeY) continue;
+      seen.add(joined);
+      if (joined === 'cat|dog') {
+        // The space is on neither line: the two runs are separate words.
+        expect(runs[1].textSpan, `${width}`).toBeGreaterThan(runs[0].textSpan!);
+        expect(pptxRunsBreak(runs[0], runs[1]), `${width}`).toBe(true);
+      } else {
+        // The space stayed at the end of the first line and separates them.
+        expect(joined, `${width}`).toBe('cat |dog');
+        expect(runs[1].textSpan, `${width}`).toBe(runs[0].textSpan);
+      }
+    }
+    expect([...seen].sort()).toEqual(['cat |dog', 'cat|dog']);
+    // The same at a stacked column end: "cat" fills the column, the space is dropped.
+    for (const vert of ['wordArtVert', 'wordArtVertRtl']) {
+      const runs: PptxTextRunInfo[] = [];
+      renderTextBody(mockCtx().ctx, body('cat dog', vert), 0, 0, 200, 110, SCALE,
+        null, 0, false, false, '#000000', undefined, undefined, (run) => runs.push(run));
+      const text = runs.map((run) => run.text).join('');
+      const cat = runs.filter((run) => run.textSpan === runs[0].textSpan).map((run) => run.text).join('');
+      expect(['cat', 'cat '], `${vert}: ${text}`).toContain(cat);
+      if (text === 'catdog') expect(runs.at(-1)!.textSpan).toBeGreaterThan(runs[0].textSpan!);
+    }
+  });
+
+  it.each(['wordArtVert', 'wordArtVertRtl'])('ends a span at a tab in %s text', (vert) => {
+    const runs: PptxTextRunInfo[] = [];
+    renderTextBody(mockCtx().ctx, body('cat\tdog', vert), 0, 0, 200, 470, SCALE,
+      null, 0, false, false, '#000000', undefined, undefined, (run) => runs.push(run));
+    const letters = runs.filter((run) => /[a-z]/.test(run.text));
+    expect(letters.map((run) => run.text).join('')).toBe('catdog');
+    expect(new Set(letters.slice(0, 3).map((run) => run.textSpan)).size).toBe(1);
+    expect(new Set(letters.slice(3).map((run) => run.textSpan)).size).toBe(1);
+    expect(letters[3].textSpan).toBeGreaterThan(letters[2].textSpan!);
+    expect(pptxRunsBreak(letters[2], letters[3])).toBe(true);
+    expect(pptxRunsBreak(letters[0], letters[1])).toBe(false);
+  });
+
   it('ends a span of authored text at a tab, however narrow the tab is drawn', () => {
     const collect = (text: TextBody): PptxTextRunInfo[] => {
       const runs: PptxTextRunInfo[] = [];

@@ -95,17 +95,19 @@ export interface StackedLayoutOptions<T, G extends StackedGlyph<T> = StackedGlyp
   sameStyle?(a: T, b: T): boolean;
 }
 
-/** A host glyph with its place: column axis x and the top of its cell. */
-export type StackedPlacedGlyph<G> = G & { axisX: number; cellTop: number; column: number };
+/**
+ * A host glyph with its place: column axis x and the top of its cell. `span`
+ * is the index of the uninterrupted span of authored text the glyph belongs
+ * to: it advances at a paragraph end, a manual break, a tab, an inline object
+ * and a wrap that dropped spaces, and not at a wrap inside a word.
+ */
+export type StackedPlacedGlyph<G> = G & { axisX: number; cellTop: number; column: number; span: number };
 
 export interface StackedColumn {
   axisX: number;
   /** Natural thickness (largest cell). */
   thickness: number;
   paragraph: number;
-  /** The column ends an authored line: its paragraph, or a manual line break.
-   *  Otherwise the text wraps into the next column. */
-  endsLine: boolean;
   /** Start of an authored first-column marker, after indent and alignment. */
   prefixTop?: number;
 }
@@ -118,7 +120,8 @@ export interface StackedLayout<G> {
 }
 
 interface Line<G> {
-  glyphs: G[];
+  /** The line's glyphs, each with its text span (see {@link StackedPlacedGlyph}). */
+  glyphs: (G & { span: number })[];
   paragraph: number;
   lastInParagraph: boolean;
   endsWithBreak: boolean;
@@ -148,6 +151,7 @@ export function layoutStackedText<T, G extends StackedGlyph<T> = StackedGlyph<T>
   // ([spcBef][lines][spcAft] per paragraph); spacing is a plain gap.
   const items: ({ type: 'gap'; size: number } | { type: 'line'; line: Line<G> })[][] = [];
 
+  let span = 0;
   paragraphs.forEach((para, index) => {
     const broken = breakDrawingMlText(para.runs, {
       maxWidth: options.wrap ? Math.max(0, rect.height - (para.marginStart ?? 0) - (para.marginEnd ?? 0)) : Number.POSITIVE_INFINITY,
@@ -158,18 +162,25 @@ export function layoutStackedText<T, G extends StackedGlyph<T> = StackedGlyph<T>
     });
     const paraLines: Line<G>[] = broken.map((line, i) => {
       const glyphs = line.segments.flatMap((seg) => {
-        if (seg.type === 'text') return options.glyphs(seg.text, seg.style);
-        if (seg.type === 'object') {
-          if (!options.objectGlyph) throw new Error('Stacked inline objects require a host object adapter');
-          const glyph = options.objectGlyph(seg);
-          // Library fallback policy: a zero-size object (unavailable OMML in
-          // PPTX) contributes no inline glyph. Keep the breaker's display
-          // boundaries so an otherwise empty column uses the paragraph mark,
-          // just as the host's empty horizontal line does (§22.1.2.77–78).
-          return glyph.advance === 0 && glyph.thickness === 0 ? [] : [glyph];
+        let made: G[] = [];
+        if (seg.type === 'text') made = options.glyphs(seg.text, seg.style);
+        else {
+          // A tab or an inline object separates the text around it: the text
+          // after it is two spans on, and an object is the span in between.
+          span += 2;
+          if (seg.type === 'object') {
+            if (!options.objectGlyph) throw new Error('Stacked inline objects require a host object adapter');
+            const glyph = options.objectGlyph(seg);
+            // Library fallback policy: a zero-size object (unavailable OMML in
+            // PPTX) contributes no inline glyph. Keep the breaker's display
+            // boundaries so an otherwise empty column uses the paragraph mark,
+            // just as the host's empty horizontal line does (§22.1.2.77–78).
+            if (glyph.advance !== 0 || glyph.thickness !== 0) made = [glyph];
+          }
         }
-        return [];
+        return made.map((glyph) => ({ ...glyph, span: seg.type === 'text' ? span : span - 1 }));
       });
+      if (i === broken.length - 1 || line.endsWithBreak || line.dropsSpace) span++;
       // Iterative maxima throughout: a single run can hold far more glyphs
       // than a call's argument list (no spread into Math.max).
       let thickness = glyphs.length > 0 ? 0 : para.emptyThickness;
@@ -279,7 +290,6 @@ export function layoutStackedText<T, G extends StackedGlyph<T> = StackedGlyph<T>
       start = columnTop + extra;
     }
     columns.push({ axisX, thickness: line.thickness, paragraph: line.paragraph,
-      endsLine: line.lastInParagraph || line.endsWithBreak,
       ...(prefix ? { prefixTop: start - prefixAdvance } : {}),
     });
     let y = start;

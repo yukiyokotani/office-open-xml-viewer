@@ -38,9 +38,6 @@ export interface UnitHighlight {
  *  interactive find, or the text highlights). */
 class MatchList<Location> {
   matches: ResolvedMatch[] = [];
-  /** Match indexes in paint order: by layer, then document order, so a later
-   *  group is painted above an earlier one wherever its matches start. */
-  private _paint: number[] = [];
   active = -1;
   generation = 0;
   /** A non-empty search was requested and not cleared since. */
@@ -50,17 +47,9 @@ class MatchList<Location> {
 
   reset(): void {
     this.generation++;
-    this.commit([]);
-    this.armed = false;
-  }
-
-  /** Install a scan's result and reset the cursor. */
-  commit(matches: ResolvedMatch[]): void {
-    this.matches = matches;
-    // Array.prototype.sort is stable: equal layers keep document order.
-    this._paint = matches.map((_, index) => index)
-      .sort((a, b) => (matches[a].layer ?? 0) - (matches[b].layer ?? 0));
+    this.matches = [];
     this.active = -1;
+    this.armed = false;
   }
 
   /** The public form of match `index`, or `null` when out of range. */
@@ -81,15 +70,15 @@ class MatchList<Location> {
     return this.at(this.active);
   }
 
-  /** Append this list's overlay boxes of a unit to `out`, in paint order. */
+  /** Append this list's overlay boxes of a unit to `out`, in document order. */
   boxes(unit: number, out: UnitHighlight[]): void {
-    for (const index of this._paint) {
-      const match = this.matches[index];
-      if (match.unit !== unit) continue;
-      out.push({
-        slices: match.slices, active: index === this.active, color: match.color, layer: match.layer,
-      });
-    }
+    this.matches.forEach((match, index) => {
+      if (match.unit === unit) {
+        out.push({
+          slices: match.slices, active: index === this.active, color: match.color, layer: match.layer,
+        });
+      }
+    });
   }
 }
 
@@ -98,7 +87,7 @@ class MatchList<Location> {
  *
  * Two independent searches share the cached unit runs: the interactive find
  * (`find` / `next` / `prev` / `clearFind`) and the text highlights
- * (`highlight` / `highlightNext` / `highlightPrev` / `clearHighlights`). A
+ * (`highlight` / `highlightStep` / `clearHighlights`). A
  * search that starts after the other has committed reuses its runs; two that
  * collect at the same time each collect the units they still miss. */
 export class UnitFindController<Run extends SearchRun, Location> {
@@ -158,6 +147,9 @@ export class UnitFindController<Run extends SearchRun, Location> {
   unitHighlights(unit: number): UnitHighlight[] {
     const out: UnitHighlight[] = [];
     this._marks.boxes(unit, out);
+    // A later group is painted above an earlier one wherever its matches
+    // start. Array.prototype.sort is stable: one layer keeps document order.
+    out.sort((a, b) => a.layer! - b.layer!);
     this._find.boxes(unit, out);
     return out;
   }
@@ -200,12 +192,10 @@ export class UnitFindController<Run extends SearchRun, Location> {
     return (matches ?? []) as TextHighlightMatch<Location>[];
   }
 
-  highlightNext(): TextHighlightMatch<Location> | null {
-    return this._marks.step(nextActive) as TextHighlightMatch<Location> | null;
-  }
-
-  highlightPrev(): TextHighlightMatch<Location> | null {
-    return this._marks.step(prevActive) as TextHighlightMatch<Location> | null;
+  /** Move the text-highlight cursor to the next match, or with `back` to the
+   *  previous one (wrap-around), and return it. */
+  highlightStep(back?: boolean): TextHighlightMatch<Location> | null {
+    return this._marks.step(back ? prevActive : nextActive) as TextHighlightMatch<Location> | null;
   }
 
   /** Cached geometry is refreshed only while a search is armed, so it must not
@@ -270,7 +260,8 @@ export class UnitFindController<Run extends SearchRun, Location> {
       }
       this._runsRevision++;
       this._runs = committedRuns;
-      list.commit(matches);
+      list.matches = matches;
+      list.active = -1;
       return list.all();
     } catch (error) {
       // A superseded request reports nothing, not even its failure (a closed

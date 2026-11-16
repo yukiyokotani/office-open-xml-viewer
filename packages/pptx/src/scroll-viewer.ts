@@ -1385,12 +1385,12 @@ export class PptxScrollViewer implements ZoomableViewer {
   /** Activate and reveal the next text highlight, wrapping at the end. The
    * active highlight is marked with a ring. Independent of {@link findNext}. */
   async highlightNext(): Promise<TextHighlightMatch<PptxMatchLocation> | null> {
-    return this._highlights.activate(this._find.highlightNext());
+    return this._highlights.activate(this._find.highlightStep());
   }
 
   /** Activate and reveal the previous text highlight, wrapping at the beginning. */
   async highlightPrev(): Promise<TextHighlightMatch<PptxMatchLocation> | null> {
-    return this._highlights.activate(this._find.highlightPrev());
+    return this._highlights.activate(this._find.highlightStep(true));
   }
 
   /** Remove every text highlight set with {@link highlightText}. The find

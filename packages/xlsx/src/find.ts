@@ -16,7 +16,7 @@
  * `{ sheet, sheetName, ref, row, col }`.
  *
  * The controller holds two independent searches: the interactive find and the
- * text highlights (`highlight` / `highlightNext` / `highlightPrev`), which keep
+ * text highlights (`highlight` / `highlightStep`), which keep
  * separate matches and cursors.
  */
 import {
@@ -82,23 +82,12 @@ type CellMatcher = (candidates: readonly string[]) => CellHit[];
  *  interactive find, or the text highlights). */
 class MatchList {
   matches: XlsxResolvedMatch[] = [];
-  /** Match indexes in paint order: by layer, then document order, so a later
-   *  group is drawn inside (above) an earlier one on a shared cell. */
-  paintOrder: number[] = [];
   active = -1;
   generation = 0;
 
   reset(): void {
     this.generation++;
-    this.commit([]);
-  }
-
-  /** Install a scan's result and reset the cursor. */
-  commit(matches: XlsxResolvedMatch[]): void {
-    this.matches = matches;
-    // Array.prototype.sort is stable: equal layers keep document order.
-    this.paintOrder = matches.map((_, index) => index)
-      .sort((a, b) => (matches[a].layer ?? 0) - (matches[b].layer ?? 0));
+    this.matches = [];
     this.active = -1;
   }
 
@@ -170,9 +159,13 @@ export class XlsxFindController {
     const out: XlsxCellHighlight[] = [];
     const boxes = new Map<string, XlsxCellHighlight>();
     const depth = new Map<string, number>();
-    for (const i of this._marks.paintOrder) {
-      const m = this._marks.matches[i];
-      if (m.sheet !== sheet) continue;
+    // In the order of the set, so a later group is drawn inside (above) an
+    // earlier one on a shared cell. Array.prototype.sort is stable: one group
+    // keeps document order.
+    const marks = this._marks.matches.map((m, i) => ({ m, i }))
+      .filter(({ m }) => m.sheet === sheet)
+      .sort((a, b) => a.m.layer! - b.m.layer!);
+    for (const { m, i } of marks) {
       const cell = `${m.row},${m.col}`;
       const key = `${cell},${m.source!.group}`;
       let box = boxes.get(key);
@@ -244,12 +237,10 @@ export class XlsxFindController {
     return (matches ?? []) as TextHighlightMatch<XlsxMatchLocation>[];
   }
 
-  highlightNext(): TextHighlightMatch<XlsxMatchLocation> | null {
-    return this._marks.step(nextActive) as TextHighlightMatch<XlsxMatchLocation> | null;
-  }
-
-  highlightPrev(): TextHighlightMatch<XlsxMatchLocation> | null {
-    return this._marks.step(prevActive) as TextHighlightMatch<XlsxMatchLocation> | null;
+  /** Move the text-highlight cursor to the next match, or with `back` to the
+   *  previous one (wrap-around), and return it. */
+  highlightStep(back?: boolean): TextHighlightMatch<XlsxMatchLocation> | null {
+    return this._marks.step(back ? prevActive : nextActive) as TextHighlightMatch<XlsxMatchLocation> | null;
   }
 
   /** Read every sheet's cells, resolve the matcher `prepare` yields against
@@ -281,7 +272,8 @@ export class XlsxFindController {
           }
         }
       }
-      list.commit(matches);
+      list.matches = matches;
+      list.active = -1;
       return list.all();
     } catch (error) {
       // A superseded request reports nothing, not even its failure (a closed

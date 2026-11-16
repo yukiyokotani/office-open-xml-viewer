@@ -80,15 +80,24 @@ export function buildPptxHighlightLayer(
 
   // One positioned + rotated div per shape frame (keyed like the text layer), so
   // boxes inside it inherit the shape's rotation. Reused across matches/slices
-  // of one paint layer (see the loop below).
+  // of one paint layer.
   // The frame is placed as a % of the slide box (so it tracks the scaled canvas)
   // with % width/height too, so the boxes inside (positioned as % of THIS frame)
   // scale with it under the shape's rotate().
+  //
+  // The matches arrive in paint order: text highlights layer by layer, then the
+  // find. A frame is a stacking context, so a later entry in a frame created
+  // earlier would end up beneath another shape's frame where shapes overlap.
+  // Keying the frames by layer as well gives every layer frames of its own,
+  // appended after those of the layers before it; the find is one layer and
+  // keeps one frame per shape.
   const ownerDocument = layer.ownerDocument ?? document;
   const shapeMap = new Map<string, { div: HTMLDivElement; w: number; h: number }>();
-  const shapeDiv = (run: PptxTextRunInfo): { div: HTMLDivElement; w: number; h: number } => {
+  const shapeDiv = (
+    run: PptxTextRunInfo, paintLayer: number | undefined,
+  ): { div: HTMLDivElement; w: number; h: number } => {
     const transform = pptxRunFrameTransform(run);
-    const key = pptxRunFrameKey(run, transform);
+    const key = `${pptxRunFrameKey(run, transform)},${paintLayer}`;
     let entry = shapeMap.get(key);
     if (!entry) {
       const frame = createPptxRunFrame(ownerDocument, run, cssWidth, cssHeight, 'none', 'hidden');
@@ -99,17 +108,7 @@ export function buildPptxHighlightLayer(
     return entry;
   };
 
-  // The matches arrive in paint order: text highlights layer by layer, then the
-  // find. A frame is a stacking context, so a later entry in a frame created
-  // earlier would end up beneath another shape's frame where shapes overlap.
-  // Starting new frames at every change of layer keeps the paint order across
-  // shapes; the find is one layer and keeps one frame per shape.
-  let paintLayer: number | undefined | null = null;
   for (const match of matches) {
-    if (match.layer !== paintLayer) {
-      shapeMap.clear();
-      paintLayer = match.layer;
-    }
     const fill = match.color ?? (match.active ? activeColor : matchColor);
     const ring = match.color !== undefined && match.active ? ACTIVE_TEXT_HIGHLIGHT_RING : '';
     for (const slice of match.slices) {
@@ -118,7 +117,7 @@ export function buildPptxHighlightLayer(
       const measure = measureForFont(run.font);
       const { x, width } = sliceHorizontalExtent(run.text, slice.start, slice.end, measure);
       if (width <= 0) continue;
-      const shape = shapeDiv(run);
+      const shape = shapeDiv(run, match.layer);
       const box = ownerDocument.createElement('div');
       // Placed as a % of the shape frame (shapeW/shapeH), so the box scales with
       // the frame when the whole overlay is scaled down by external CSS.

@@ -94,5 +94,5 @@ it('highlights whole words that end at a paragraph, and reports group and term',
   expect(find.pageHighlights(0).map((box) => box.color)).toEqual([
     'rgba(0,0,255,0.3)', 'rgba(0,0,255,0.3)', 'rgba(0, 184, 148, 0.35)', 'rgba(0, 184, 148, 0.35)',
   ]);
-  expect((await find.highlightNext())?.matchIndex).toBe(0);
+  expect((await find.highlightStep())?.matchIndex).toBe(0);
 });

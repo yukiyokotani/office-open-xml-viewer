@@ -1080,12 +1080,12 @@ export class PptxViewer implements ZoomableViewer {
    * when there are none. Independent of {@link findNext}.
    */
   async highlightNext(): Promise<TextHighlightMatch<PptxMatchLocation> | null> {
-    return this._activateMatch(this._find.highlightNext());
+    return this._activateMatch(this._find.highlightStep());
   }
 
   /** Move to the previous text highlight (wrap-around). */
   async highlightPrev(): Promise<TextHighlightMatch<PptxMatchLocation> | null> {
-    return this._activateMatch(this._find.highlightPrev());
+    return this._activateMatch(this._find.highlightStep(true));
   }
 
   /** Remove every text highlight set with {@link highlightText}. The find

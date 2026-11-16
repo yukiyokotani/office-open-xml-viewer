@@ -116,9 +116,9 @@ export interface StackedGlyphRun {
   y: number;
   w: number;
   h: number;
-  /** Zero-based index of the span of authored text (a paragraph, or the part
-   *  of one between manual line breaks) the glyph belongs to. Text that wraps
-   *  into further columns keeps its index. */
+  /** Index of the uninterrupted span of authored text the glyph belongs to
+   *  (see `PptxTextRunInfo.textSpan`). Text that wraps into a further column
+   *  inside a word keeps its index. */
   textSpan: number;
   hyperlink?: HyperlinkTarget;
 }
@@ -275,7 +275,7 @@ export function renderStackedText<T extends StackedSegmentStyle>(
   const prevAlign = ctx.textAlign;
   const prevBaseline = ctx.textBaseline;
   const paintGlyph = (
-    g: Measured<T>, axisX: number, cellTop: number, markerParagraph?: number, textSpan = 0,
+    g: Measured<T> & { span?: number }, axisX: number, cellTop: number, markerParagraph?: number,
   ) => {
     const marker = markerParagraph !== undefined;
     const { style, box } = g;
@@ -286,7 +286,7 @@ export function renderStackedText<T extends StackedSegmentStyle>(
     const size = style.sizePx;
     if (!marker) runs.push({
       text: g.text, font: style.font, fontSize: size,
-      x: axisX - g.thickness / 2, y: cellTop, w: g.thickness, h: g.advance, textSpan,
+      x: axisX - g.thickness / 2, y: cellTop, w: g.thickness, h: g.advance, textSpan: g.span ?? 0,
       ...(style.hyperlink ? { hyperlink: style.hyperlink } : {}),
     });
     ctx.font = style.font;
@@ -337,7 +337,6 @@ export function renderStackedText<T extends StackedSegmentStyle>(
     }
   };
   let glyphIndex = 0;
-  let textSpan = 0;
   for (const [columnIndex, column] of layout.columns.entries()) {
     if (column.prefixTop !== undefined) {
       let top = column.prefixTop;
@@ -350,7 +349,7 @@ export function renderStackedText<T extends StackedSegmentStyle>(
     let last: typeof layout.glyphs[number] | undefined;
     while (glyphIndex < layout.glyphs.length && layout.glyphs[glyphIndex].column === columnIndex) {
       const g = layout.glyphs[glyphIndex++];
-      paintGlyph(g, g.axisX, g.cellTop, undefined, textSpan);
+      paintGlyph(g, g.axisX, g.cellTop);
       last = g;
     }
     // The same uniform/mixed-size Office controls strike the invisible final
@@ -366,7 +365,6 @@ export function renderStackedText<T extends StackedSegmentStyle>(
       body.drawStrike(endStyle, column.axisX - width / 2,
         last.cellTop + last.advance + mark.cell - mark.box.descent * endStyle.sizePx, width);
     }
-    if (column.endsLine) textSpan++;
   }
   ctx.textAlign = prevAlign;
   ctx.textBaseline = prevBaseline;

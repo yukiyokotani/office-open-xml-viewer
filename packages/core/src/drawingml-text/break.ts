@@ -20,6 +20,9 @@ export interface DrawingMlBrokenLine<T> {
   width: number;
   /** The line ended at an authored `<a:br>` or LF, not a soft wrap. */
   endsWithBreak?: boolean;
+  /** The soft wrap after this line consumed authored spaces: they are on
+   *  neither line, so the text of the two lines is not adjacent. */
+  dropsSpace?: boolean;
   /**
    * Indexes of input text runs that paint nothing (empty, or only trimmed or
    * wrapped spaces) but sit on this line. Their run properties (for example
@@ -851,10 +854,14 @@ export function breakDrawingMlText<T>(
       // Keep authored spaces on the closed line. The controlled PDFs establish
       // the visible word break, but cannot identify the advance of invisible
       // trailing spaces; retaining them preserves that unresolved paint detail.
-      lines.push(makeSegments(start, split, lineIndex));
+      const closed = makeSegments(start, split, lineIndex);
+      lines.push(closed);
       markLine(start, split);
       start = split;
-      while (start < end && isSpace(atoms[start])) start++;
+      while (start < end && isSpace(atoms[start])) {
+        start++;
+        closed.dropsSpace = true;
+      }
     }
   }
 

@@ -346,12 +346,13 @@ export interface PptxTextRunInfo {
   /**
    * Zero-based index, within the run's text body, of the uninterrupted span of
    * authored text the run belongs to. A span ends at a paragraph end, a manual
-   * line break (`<a:br>`), a tab or an inline equation. It does not end at an
-   * automatic line wrap, at a formatting change, or between the glyph cells of
-   * stacked vertical text (`vert="wordArtVert"`), so runs of one body with the
-   * same index are pieces of continuous text, and a consumer can tell a wrap
-   * inside a word from an authored separation. The indices increase in run
-   * order and need not be consecutive.
+   * line break (`<a:br>`), a tab, an inline equation, and an automatic wrap
+   * that dropped the spaces it broke at (they are in neither line's text). It
+   * does not end at a wrap inside a word, at a formatting change, or between
+   * the glyph cells of stacked vertical text (`vert="wordArtVert"`), so runs
+   * of one body with the same index are pieces of continuous text, and a
+   * consumer can tell a wrap inside a word from a separation. The indices
+   * increase in run order and need not be consecutive.
    */
   textSpan?: number;
   /**
@@ -1119,6 +1120,9 @@ interface LayoutLine {
    *  left-aligned, not stretched — like the paragraph's last line (§20.1.10.59).
    *  `dist`/`thaiDist` still fill every line, including these. */
   endsWithBreak?: boolean;
+  /** The automatic wrap after this line dropped authored spaces, so its text
+   *  and the next line's are not adjacent (see `PptxTextRunInfo.textSpan`). */
+  dropsSpace?: boolean;
   /** The a:br / endParaRPr marks that size this line with text (see
    * `followingMark`). They take part in the line metrics only: they draw
    * nothing and are not layout pieces. */
@@ -2299,6 +2303,7 @@ export function layoutParagraph(
       segments: [...content, ...(!hasText && breakStyle ? [{ ...breakStyle, text: '' }] : [])],
       ...(metricMarks.length > 0 ? { metricMarks } : {}),
       ...(line.endsWithBreak ? { endsWithBreak: true } : {}),
+      ...(line.dropsSpace ? { dropsSpace: true } : {}),
     };
   });
 }
@@ -6394,7 +6399,7 @@ export function renderTextBody(
     if (paraNeedsBidi) ctx.direction = 'ltr';
 
     cursorY += linePx;
-    if (endsLogicalLine) textSpan++;
+    if (endsLogicalLine || line.dropsSpace) textSpan++;
   }
 
   ctx.restore();

@@ -121,8 +121,8 @@ describe('UnitFindController — text highlights', () => {
     await find.find('revenue');
     await find.highlight(groups);
     expect(find.next()?.matchIndex).toBe(0);
-    expect(find.highlightPrev()).toMatchObject({ matchIndex: 1, group: 'user' });
-    expect(find.highlightNext()).toMatchObject({ matchIndex: 0, group: 'user' });
+    expect(find.highlightStep(true)).toMatchObject({ matchIndex: 1, group: 'user' });
+    expect(find.highlightStep()).toMatchObject({ matchIndex: 0, group: 'user' });
     expect(find.unitHighlights(0).map((box) => box.active)).toEqual([true, false, true, false]);
 
     // A new find query resets only the find cursor.
@@ -136,7 +136,7 @@ describe('UnitFindController — text highlights', () => {
 
     await find.find('revenue');
     find.clearHighlights();
-    expect(find.highlightNext()).toBeNull();
+    expect(find.highlightStep()).toBeNull();
     expect(find.highlighting).toBe(false);
     expect(find.matches()).toHaveLength(2);
     expect(find.unitRuns(0)).toBeDefined();
@@ -181,7 +181,7 @@ describe('UnitFindController — text highlights', () => {
     // Navigation follows the document; painting follows the set.
     expect(matches.map((match) => match.group)).toEqual(['second', 'first']);
     expect(find.unitHighlights(0).map((box) => box.color)).toEqual(['red', 'blue']);
-    expect(find.highlightNext()).toMatchObject({ group: 'second' });
+    expect(find.highlightStep()).toMatchObject({ group: 'second' });
     expect(find.unitHighlights(0).map((box) => box.active)).toEqual([false, true]);
   });
 

@@ -199,12 +199,12 @@ export class FindAdapter {
 
   /** Move to the next text highlight (wrap-around). */
   async highlightNext(): Promise<TextHighlightMatch<XlsxMatchLocation> | null> {
-    return this.activateMatch(this.controller.highlightNext());
+    return this.activateMatch(this.controller.highlightStep());
   }
 
   /** Move to the previous text highlight (wrap-around). */
   async highlightPrev(): Promise<TextHighlightMatch<XlsxMatchLocation> | null> {
-    return this.activateMatch(this.controller.highlightPrev());
+    return this.activateMatch(this.controller.highlightStep(true));
   }
 
   /** Remove the text highlights; the find state stays. */

@@ -285,11 +285,11 @@ describe('XlsxFindController text highlights', () => {
     await c.find('revenue');
     await c.highlight(groups);
     expect(c.next()?.location.ref).toBe('A1');
-    expect(c.highlightPrev()).toMatchObject({ matchIndex: 4, group: 'validated', location: { sheet: 1, ref: 'A3' } });
-    expect(c.highlightNext()).toMatchObject({ matchIndex: 0, group: 'user' });
-    c.highlightNext();
-    c.highlightNext();
-    expect(c.highlightNext()).toMatchObject({ matchIndex: 3, location: { ref: 'B2' } });
+    expect(c.highlightStep(true)).toMatchObject({ matchIndex: 4, group: 'validated', location: { sheet: 1, ref: 'A3' } });
+    expect(c.highlightStep()).toMatchObject({ matchIndex: 0, group: 'user' });
+    c.highlightStep();
+    c.highlightStep();
+    expect(c.highlightStep()).toMatchObject({ matchIndex: 3, location: { ref: 'B2' } });
     expect(c.sheetHighlights(0).map((box) => box.active)).toEqual([false, true, false, true, false, false]);
     // The find cursor did not move.
     expect(c.next()?.matchIndex).toBe(1);
@@ -304,7 +304,7 @@ describe('XlsxFindController text highlights', () => {
     expect(c.sheetHighlights(0)).toHaveLength(3);
     await c.find('revenue');
     c.clearHighlights();
-    expect(c.highlightNext()).toBeNull();
+    expect(c.highlightStep()).toBeNull();
     expect(c.matches()).toHaveLength(3);
     await c.highlight(groups);
     c.invalidate();
