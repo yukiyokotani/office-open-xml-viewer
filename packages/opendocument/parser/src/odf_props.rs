@@ -645,6 +645,393 @@ pub fn metafile_size_pt(bytes: &[u8]) -> Option<(f64, f64)> {
     (size.0 > 0.0 && size.1 > 0.0).then_some(size)
 }
 
+/// `svg:viewBox` numbers: x, y, width, height.
+pub type ViewBox = (f64, f64, f64, f64);
+
+/// Whether an outline is curved, whether it is closed, and its corners.
+type Outline = (bool, bool, Vec<(f64, f64)>);
+
+/// The corners of a marker outline (§16.42.8 `draw:marker` `svg:d`, SVG
+/// path data): whether it holds a curve or an arc, whether it is closed, and
+/// the end points of its moves and straight segments (a point repeating the
+/// first or the previous one is named once). `Ok(None)` when the data
+/// cannot be read; an error past [`MAX_MARKER_COMMANDS`] commands or the
+/// read's work budget.
+fn marker_outline(d: &str) -> Result<Option<Outline>, String> {
+    let bytes = d.as_bytes();
+    let mut at = 0;
+    let skip = |at: &mut usize| {
+        while *at < bytes.len() && (bytes[*at].is_ascii_whitespace() || bytes[*at] == b',') {
+            *at += 1;
+        }
+    };
+    let number = |at: &mut usize| -> Option<f64> {
+        skip(at);
+        let negative = match bytes.get(*at) {
+            Some(b'-') => {
+                *at += 1;
+                true
+            }
+            Some(b'+') => {
+                *at += 1;
+                false
+            }
+            _ => false,
+        };
+        let value = scan_number(bytes, at)?;
+        Some(if negative { -value } else { value })
+    };
+    // A flag of an arc (`0` or `1`), which may abut what follows it.
+    let flag = |at: &mut usize| -> Option<bool> {
+        skip(at);
+        let value = match bytes.get(*at) {
+            Some(b'0') => false,
+            Some(b'1') => true,
+            _ => return None,
+        };
+        *at += 1;
+        Some(value)
+    };
+    let (mut curved, mut closed) = (false, false);
+    let mut commands = 0usize;
+    let mut corners: Vec<(f64, f64)> = Vec::new();
+    let (mut x, mut y, mut start) = (0.0f64, 0.0f64, (0.0f64, 0.0f64));
+    let mut command = 0u8;
+    loop {
+        skip(&mut at);
+        let Some(&byte) = bytes.get(at) else {
+            break;
+        };
+        commands += 1;
+        if commands > MAX_MARKER_COMMANDS {
+            return Err(crate::error::resource("marker geometry"));
+        }
+        crate::budget::tick(1)?;
+        if byte.is_ascii_alphabetic() {
+            command = byte;
+            at += 1;
+            if matches!(command, b'Z' | b'z') {
+                closed = true;
+                (x, y) = start;
+                continue;
+            }
+        } else if command == 0 || matches!(command, b'Z' | b'z') {
+            return Ok(None);
+        }
+        let relative = command.is_ascii_lowercase();
+        let (bx, by) = if relative { (x, y) } else { (0.0, 0.0) };
+        match command.to_ascii_uppercase() {
+            b'M' | b'L' => {
+                let (Some(dx), Some(dy)) = (number(&mut at), number(&mut at)) else {
+                    return Ok(None);
+                };
+                let (nx, ny) = (bx + dx, by + dy);
+                (x, y) = (nx, ny);
+                if command.eq_ignore_ascii_case(&b'M') {
+                    start = (x, y);
+                    // Further pairs after a move are lines.
+                    command = if relative { b'l' } else { b'L' };
+                }
+            }
+            b'H' => match number(&mut at) {
+                Some(v) => x = bx + v,
+                None => return Ok(None),
+            },
+            b'V' => match number(&mut at) {
+                Some(v) => y = by + v,
+                None => return Ok(None),
+            },
+            b'A' => {
+                // SVG 1.1 F.6.2: an arc with a zero radius is a straight
+                // line to its end; one ending where it starts is omitted.
+                // Any other arc is flattened (F.6.5) to its corners, so an
+                // outline with arcs is classified by its shape.
+                let arc = (|| {
+                    let (rx, ry, phi) = (number(&mut at)?, number(&mut at)?, number(&mut at)?);
+                    let (large, sweep) = (flag(&mut at)?, flag(&mut at)?);
+                    Some((
+                        rx,
+                        ry,
+                        phi,
+                        large,
+                        sweep,
+                        number(&mut at)?,
+                        number(&mut at)?,
+                    ))
+                })();
+                let Some((rx, ry, phi, large, sweep, ex, ey)) = arc else {
+                    return Ok(None);
+                };
+                let (nx, ny) = (bx + ex, by + ey);
+                if (nx, ny) == (x, y) {
+                    continue;
+                }
+                let points = svg_arc(x, y, rx, ry, phi, large, sweep, nx, ny);
+                crate::budget::tick(points.len())?;
+                for point in points {
+                    if corners.first() != Some(&point) && corners.last() != Some(&point) {
+                        corners.push(point);
+                    }
+                }
+                (x, y) = (nx, ny);
+                continue;
+            }
+            other => {
+                // Curves and arcs: the outline is curved.
+                let count = match other {
+                    b'C' => 6,
+                    b'S' | b'Q' => 4,
+                    b'T' => 2,
+                    _ => return Ok(None),
+                };
+                curved = true;
+                let mut last = (0.0, 0.0);
+                for i in 0..count {
+                    let Some(v) = number(&mut at) else {
+                        return Ok(None);
+                    };
+                    if i == count - 2 {
+                        last.0 = v;
+                    } else if i == count - 1 {
+                        last.1 = v;
+                    }
+                }
+                (x, y) = (bx + last.0, by + last.1);
+                continue;
+            }
+        }
+        if corners.first() != Some(&(x, y)) && corners.last() != Some(&(x, y)) {
+            corners.push((x, y));
+        }
+    }
+    Ok((!corners.is_empty() || curved).then_some((curved, closed, corners)))
+}
+
+/// The largest angle (degrees) one flattened step of an arc spans.
+pub const SVG_ARC_STEP_DEGREES: f64 = 5.0;
+
+/// The points after the start of an SVG elliptical arc (SVG 1.1 §F.6.5
+/// endpoint-to-centre conversion, §F.6.6 radius correction), flattened in
+/// steps of at most [`SVG_ARC_STEP_DEGREES`].
+#[allow(clippy::too_many_arguments)]
+pub fn svg_arc(
+    x1: f64,
+    y1: f64,
+    rx: f64,
+    ry: f64,
+    rotation: f64,
+    large: bool,
+    sweep: bool,
+    x2: f64,
+    y2: f64,
+) -> Vec<(f64, f64)> {
+    let (mut rx, mut ry) = (rx.abs(), ry.abs());
+    if (x1 == x2 && y1 == y2) || rx == 0.0 || ry == 0.0 {
+        // §F.6.2: a zero radius is a straight line; equal ends draw nothing.
+        return if x1 == x2 && y1 == y2 {
+            Vec::new()
+        } else {
+            vec![(x2, y2)]
+        };
+    }
+    let phi = rotation.to_radians();
+    let (sin_phi, cos_phi) = phi.sin_cos();
+    // Halves first, so neither the difference nor the midpoint overflows.
+    let dx = x1 / 2.0 - x2 / 2.0;
+    let dy = y1 / 2.0 - y2 / 2.0;
+    let (mx, my) = (x1 / 2.0 + x2 / 2.0, y1 / 2.0 + y2 / 2.0);
+    let x1p = cos_phi * dx + sin_phi * dy;
+    let y1p = -sin_phi * dx + cos_phi * dy;
+    // §F.6.5 in the unit-circle frame of the ellipse (`u`, `v` = x1', y1'
+    // over the radii), with lengths taken by `hypot`: no square or product
+    // of coordinates over- or underflows.
+    let (mut u, mut v) = (x1p / rx, y1p / ry);
+    let mut reach = u.hypot(v);
+    if reach > 1.0 {
+        // §F.6.6: radii too small for the ends grow until they fit.
+        rx *= reach;
+        ry *= reach;
+        u /= reach;
+        v /= reach;
+        reach = 1.0;
+    }
+    // The centre in the frame is ±√(1−r²)·(v, −u)/r, r = |(u, v)|.
+    let mut lift = ((1.0 - reach) * (1.0 + reach)).max(0.0).sqrt();
+    if large == sweep {
+        lift = -lift;
+    }
+    let (cu, cv) = (lift * (v / reach), -lift * (u / reach));
+    let (cxp, cyp) = (cu * rx, cv * ry);
+    let cx = cos_phi * cxp - sin_phi * cyp + mx;
+    let cy = sin_phi * cxp + cos_phi * cyp + my;
+    let angle = |ux: f64, uy: f64, vx: f64, vy: f64| (ux * vy - uy * vx).atan2(ux * vx + uy * vy);
+    let theta1 = angle(1.0, 0.0, u - cu, v - cv);
+    let mut delta = angle(u - cu, v - cv, -u - cu, -v - cv);
+    if !sweep && delta > 0.0 {
+        delta -= std::f64::consts::TAU;
+    } else if sweep && delta < 0.0 {
+        delta += std::f64::consts::TAU;
+    }
+    if ![cx, cy, rx, ry, theta1, delta]
+        .iter()
+        .all(|v| v.is_finite())
+    {
+        // Beyond the range of the arithmetic: the chord.
+        return vec![(x2, y2)];
+    }
+    let steps = ((delta.abs().to_degrees() / SVG_ARC_STEP_DEGREES).ceil() as usize).max(1);
+    let points: Vec<(f64, f64)> = (1..=steps)
+        .map(|i| {
+            if i == steps {
+                return (x2, y2);
+            }
+            let t = theta1 + delta * i as f64 / steps as f64;
+            let (sin_t, cos_t) = t.sin_cos();
+            (
+                cx + rx * cos_phi * cos_t - ry * sin_phi * sin_t,
+                cy + rx * sin_phi * cos_t + ry * cos_phi * sin_t,
+            )
+        })
+        .collect();
+    if points.iter().all(|(x, y)| x.is_finite() && y.is_finite()) {
+        points
+    } else {
+        // A point beyond the range of the arithmetic: the chord.
+        vec![(x2, y2)]
+    }
+}
+
+/// The most commands a marker outline is read for (the bound of the
+/// spreadsheet reader's shape paths).
+const MAX_MARKER_COMMANDS: usize = 200_000;
+
+/// The DrawingML line end (ST_LineEndType) a marker's geometry (§16.42.8
+/// `svg:d`) is nearest to, whatever the marker is named: a curved outline
+/// is an oval; a closed outline of three corners a triangle; of four
+/// corners a stealth arrow when one corner lies inside the outline's box
+/// (the notch), else a diamond; a convex outline of many corners (a
+/// polygonal circle) an oval; an open path, or a many-cornered outline
+/// that is not convex (LibreOffice's `msArrowOpenEnd`, a chevron with a
+/// stub of the line), an open arrow. Data that cannot be read is a
+/// triangle, LibreOffice's plain arrow.
+pub fn marker_kind(d: &str) -> Result<&'static str, String> {
+    let Some((curved, closed, corners)) = marker_outline(d)? else {
+        return Ok("triangle");
+    };
+    if curved {
+        return Ok("oval");
+    }
+    let bounds = |pick: fn(&(f64, f64)) -> f64| {
+        corners
+            .iter()
+            .map(pick)
+            .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), v| {
+                (lo.min(v), hi.max(v))
+            })
+    };
+    let ((left, right), (top, bottom)) = (bounds(|p| p.0), bounds(|p| p.1));
+    let notched = corners
+        .iter()
+        .any(|&(x, y)| x > left && x < right && y > top && y < bottom);
+    // A convex outline: every turn has the same sense.
+    let convex = {
+        let n = corners.len();
+        let mut sense = 0.0f64;
+        (0..n).all(|i| {
+            let (a, b, c) = (corners[i], corners[(i + 1) % n], corners[(i + 2) % n]);
+            let cross = (b.0 - a.0) * (c.1 - b.1) - (b.1 - a.1) * (c.0 - b.0);
+            if cross == 0.0 || sense == 0.0 || cross.signum() == sense {
+                if cross != 0.0 {
+                    sense = cross.signum();
+                }
+                true
+            } else {
+                false
+            }
+        })
+    };
+    Ok(if corners.len() > 8 && convex {
+        "oval"
+    } else if !closed || corners.len() > 8 {
+        "arrow"
+    } else {
+        match corners.len() {
+            4 if notched => "stealth",
+            4 => "diamond",
+            _ => "triangle",
+        }
+    })
+}
+
+/// The width of a line end whose style names a marker but no
+/// `draw:marker-start-width` / `-end-width`: 0.3 cm, as the presentation
+/// reader paints it.
+pub const DEFAULT_MARKER_WIDTH_PT: f64 = 0.3 * 72.0 / 2.54;
+
+/// The DrawingML size steps (ST_LineEndWidth, ST_LineEndLength: `sm`,
+/// `med`, `lg`) nearest to a marker's size, for the renderer that draws a
+/// line end of kind `kind` as {2, 3, 5} × `e` across (`w`) and along
+/// (`len`) the line, with `e` the line width, at least 2 pt.
+///
+/// A marker is drawn `width` across (§20.161 `draw:marker-end-width`) and,
+/// keeping its view box's proportions, `width × height / width` of its
+/// view box along the line. LibreOffice converts a DrawingML line end to
+/// exactly that: across {2, 3, 5} × `e`, along by the view box (100 units
+/// per step), with `e` the line width, at least 0.07 cm (measured: a
+/// 0.75 pt line's `sm`/`med`/`lg` ends are 0.14/0.21/0.35 cm, a 4.5 pt
+/// line's 0.318/0.477/0.795 cm, and a `w=sm len=lg` triangle's view box is
+/// 200 × 500). Its open arrow is half a step larger each way (`sm` is
+/// 2.5 `e` across, view box 250 wide), which the renderer's open arrow
+/// includes. Each size is the nearest step on a log scale, so a converted
+/// line end maps back to its own steps; other markers get the nearest the
+/// steps can draw.
+pub fn line_end_size(
+    kind: &str,
+    marker_width_pt: f64,
+    view_box: Option<ViewBox>,
+    line_width_pt: f64,
+) -> (&'static str, &'static str) {
+    let e = if line_width_pt.is_finite() {
+        line_width_pt.max(2.0)
+    } else {
+        2.0
+    };
+    let aspect = view_box
+        .filter(|v| v.2 > 0.0 && v.3 > 0.0 && (v.3 / v.2).is_finite())
+        .map_or(1.0, |v| v.3 / v.2);
+    let open = if kind == "arrow" { 0.5 } else { 0.0 };
+    let step = |size: f64| {
+        if !(size.is_finite() && size > 0.0) {
+            return "med";
+        }
+        // A marker smaller than the smallest step is that step.
+        let ratio = size / e - open;
+        if ratio < 6f64.sqrt() {
+            "sm"
+        } else if ratio < 15f64.sqrt() {
+            "med"
+        } else {
+            "lg"
+        }
+    };
+    (step(marker_width_pt), step(marker_width_pt * aspect))
+}
+
+/// `svg:viewBox` (§19.581): four numbers.
+pub fn view_box(value: &str) -> Option<ViewBox> {
+    let mut parts = value
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.parse::<f64>().ok().filter(|v| v.is_finite()));
+    let v = (
+        parts.next()??,
+        parts.next()??,
+        parts.next()??,
+        parts.next()??,
+    );
+    parts.next().is_none().then_some(v)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -800,5 +1187,113 @@ mod tests {
         assert_eq!(border_width_keyword("thick"), Some(2.5));
         assert_eq!(border_width_keyword("solid"), None);
         assert!((skew_shear(0.5) + 0.5f64.tan()).abs() < 1e-12);
+    }
+
+    #[test]
+    fn markers_map_to_the_nearest_line_end() {
+        // The outlines LibreOffice writes for the DrawingML line ends.
+        for (d, kind) in [
+            ("M150 0l150 300h-300z", "triangle"),
+            ("M150 0l150 300-150-120-150 120z", "stealth"),
+            ("M150 0l150 150-150 150-150-150z", "diamond"),
+            (
+                "M150 0l75 21 54 54 21 75-21 75-54 54-75 21-75-21-54-54-21-75 21-75 54-54z",
+                "oval",
+            ),
+            (
+                "M175 0l175 275-75 75-50-75v75h-100v-75l-50 75-75-75z",
+                "arrow",
+            ),
+            (
+                "M275 0l275 493-57 57-181-342v342h-75v-342l-181 342-56-57z",
+                "arrow",
+            ),
+            // LibreOffice's own markers (its `standard.soe` palette): Arrow,
+            // Circle, Square 45.
+            ("M10 0l-10 30h20z", "triangle"),
+            ("M462 1118l-102-29-102-51-93-72-72-93-51-102-29-102-13-105 13-102 29-106 51-102 72-89 93-72 102-50 102-34 106-9 101 9 106 34 98 50 93 72 72 89 51 102 29 106 13 102-13 105-29 102-51 102-72 93-93 72-98 51-106 29-101 13z", "oval"),
+            ("M0 564l564 567 567-567-567-564z", "diamond"),
+            ("M 0,20 10,0 20,20 Z", "triangle"),
+            ("M0 0c10 0 20 10 20 20s-10 20-20 20z", "oval"),
+            ("M0 0a5 5 0 1 1 10 0z", "oval"),
+            // Arc flags may abut each other and the end point.
+            ("M0 0a5 5 0 1110 0z", "oval"),
+            ("M0 0a5 5 0 11 10 0z", "oval"),
+            // A zero radius is a straight line; an arc to its start is
+            // omitted.
+            ("M0 0L10 0A0 5 0 0 0 10 10L0 10z", "diamond"),
+            ("M0 0L10 0a5 5 0 0 0 0 0L5 10z", "triangle"),
+            // An arc is classified by its shape: a shallow arc on an open
+            // arrow's edge keeps it an arrow; two half circles are an oval.
+            (
+                "M175 0a10000 10000 0 0 1 175 275l-75 75-50-75v75h-100v-75l-50 75-75-75z",
+                "arrow",
+            ),
+            ("M0 5a5 5 0 0 1 10 0a5 5 0 0 1-10 0z", "oval"),
+            ("M0 0A10 10 0 0 1 10 0A10 10 0 0 1 0 0Z", "oval"),
+            ("M0 0l10 20 20-20", "arrow"),
+            ("", "triangle"),
+            ("M0", "triangle"),
+            ("garbage", "triangle"),
+        ] {
+            assert_eq!(marker_kind(d).unwrap(), kind, "{d}");
+        }
+    }
+
+    #[test]
+    fn marker_outlines_are_bounded() {
+        let long = format!("M0 0{}z", "l1 1".repeat(MAX_MARKER_COMMANDS));
+        assert!(marker_kind(&long).is_err());
+    }
+
+    #[test]
+    fn line_end_sizes_map_back_to_their_steps() {
+        let cm = 72.0 / 2.54;
+        // What LibreOffice writes for a 0.75 pt line (0.026 cm): every
+        // w × len, closed ends and open arrows.
+        for (w, width) in [("sm", 0.14), ("med", 0.21), ("lg", 0.35)] {
+            for (len, units) in [("sm", 200.0), ("med", 300.0), ("lg", 500.0)] {
+                let across = 100.0 * (width / 0.07);
+                let view = Some((0.0, 0.0, across, units));
+                assert_eq!(line_end_size("triangle", width * cm, view, 0.75), (w, len));
+                let open = Some((0.0, 0.0, across + 50.0, units + 50.0));
+                assert_eq!(
+                    line_end_size("arrow", (width + 0.035) * cm, open, 0.75),
+                    (w, len)
+                );
+            }
+        }
+        // A 4.5 pt line (0.159 cm): steps of the line width; LibreOffice
+        // writes the open `sm`-wide arrow's view box 10 % longer.
+        let lw = 0.159 * cm;
+        assert_eq!(
+            line_end_size("oval", 0.795 * cm, Some((0.0, 0.0, 500.0, 200.0)), lw),
+            ("lg", "sm")
+        );
+        assert_eq!(
+            line_end_size("arrow", 0.397 * cm, Some((0.0, 0.0, 250.0, 605.0)), lw),
+            ("sm", "lg")
+        );
+        assert_eq!(
+            line_end_size("arrow", 0.397 * cm, Some((0.0, 0.0, 250.0, 275.0)), lw),
+            ("sm", "sm")
+        );
+        // Another marker: the nearest step (0.4 cm on a 0.1 cm line is 4 e).
+        assert_eq!(
+            line_end_size("triangle", 0.4 * cm, Some((0.0, 0.0, 20.0, 30.0)), 0.1 * cm),
+            ("lg", "lg")
+        );
+        // A marker below the smallest step is that step.
+        assert_eq!(line_end_size("arrow", 0.1, None, 0.5), ("sm", "sm"));
+        assert_eq!(line_end_size("triangle", 0.1, None, 0.5), ("sm", "sm"));
+        // Unusable sizes are the middle step.
+        assert_eq!(line_end_size("triangle", 0.0, None, 1.0), ("med", "med"));
+        assert_eq!(
+            line_end_size("triangle", f64::NAN, Some((0.0, 0.0, 0.0, 1.0)), f64::NAN),
+            ("med", "med")
+        );
+        assert_eq!(view_box("0 0 200 300"), Some((0.0, 0.0, 200.0, 300.0)));
+        assert_eq!(view_box("0 0 200"), None);
+        assert_eq!(view_box("0 0 200 300 4"), None);
     }
 }

@@ -1183,6 +1183,63 @@ fn connectors_follow_their_path_and_straight_lines_keep_their_ends() {
 }
 
 #[test]
+fn connectors_keep_their_ends_over_the_end_cell_libreoffice_writes() {
+    // LibreOffice anchors every connector converted from SpreadsheetML in
+    // A1 with the end `A1` + 0.1 cm, and draws it at its ends: a straight
+    // connector of zero height or width is still a line from x1/y1 to
+    // x2/y2. A line or another shape follows its end cell (also in
+    // LibreOffice).
+    let end = r#"table:end-cell-address="Sheet1.A1" table:end-x="0.1cm" table:end-y="0.1cm""#;
+    let body = content(
+        "",
+        &table(&format!(
+            concat!(
+                r#"<table:table-row><table:table-cell>"#,
+                r#"<draw:connector {end} draw:type="line" svg:x1="0.529cm" svg:y1="0.529cm" svg:x2="3.619cm" svg:y2="0.529cm" svg:d="M529 529h3090" svg:viewBox="0 0 3091 1"/>"#,
+                r#"<draw:connector {end} draw:type="line" svg:x1="12.932cm" svg:y1="0.529cm" svg:x2="12.932cm" svg:y2="4.497cm" svg:d="M12932 529v3968" svg:viewBox="0 0 1 3969"/>"#,
+                r#"<draw:connector {end} draw:type="line" svg:x1="3.619cm" svg:y1="2cm" svg:x2="0.529cm" svg:y2="2cm"/>"#,
+                r#"<draw:line table:end-cell-address="Sheet1.C3" table:end-x="0cm" table:end-y="0cm" svg:x1="0cm" svg:y1="0cm" svg:x2="1cm" svg:y2="0cm"/>"#,
+                r#"</table:table-cell></table:table-row>"#
+            ),
+            end = end
+        )),
+    );
+    let workbook = read_text(&body, Some(&styles(""))).unwrap();
+    let groups = &workbook.sheets[0].worksheet.shape_groups;
+    assert_eq!(groups.len(), 4);
+    let anchor = |i: usize| {
+        let g = &groups[i];
+        (
+            (g.from_col, g.from_col_off, g.from_row, g.from_row_off),
+            (g.to_col, g.to_col_off, g.to_row, g.to_row_off),
+        )
+    };
+    type Corner = (u32, i64, u32, i64);
+    let after = |(f, t): (Corner, Corner)| (t.0, t.1) >= (f.0, f.1) && (t.2, t.3) >= (f.2, f.3);
+    // Horizontal: one row, from its start to its end.
+    let (from, to) = anchor(0);
+    assert!(after((from, to)));
+    assert_eq!((from.2, from.3), (to.2, to.3));
+    assert!((to.0, to.1) > (from.0, from.1));
+    assert_eq!(
+        (groups[0].native_ext_cx, groups[0].native_ext_cy),
+        (1_112_400, 0)
+    );
+    // Vertical: one column.
+    let (from, to) = anchor(1);
+    assert!(after((from, to)));
+    assert_eq!((from.0, from.1), (to.0, to.1));
+    assert!((to.2, to.3) > (from.2, from.3));
+    // Right to left: the box from its left end, mirrored.
+    let (from, to) = anchor(2);
+    assert!(after((from, to)) && (to.0, to.1) > (from.0, from.1));
+    assert!(groups[2].shapes[0].flip_h && !groups[2].shapes[0].flip_v);
+    // A line still ends at its end cell (C3's top-left corner).
+    let (_, to) = anchor(3);
+    assert_eq!(to, (2, 0, 2, 0));
+}
+
+#[test]
 fn callouts_and_ellipse_parts_are_drawn() {
     let automatic = concat!(
         r#"<style:style style:name="c0" style:family="graphic"><style:graphic-properties draw:stroke="solid"/></style:style>"#,
@@ -1276,11 +1333,52 @@ fn dashes_markers_and_validation_bases() {
     assert_eq!(shape.stroke_dash_style.as_deref(), Some("sysDot"));
     assert_eq!(shape.stroke_head_end.as_ref().unwrap().r#type, "oval");
     assert_eq!(shape.stroke_tail_end.as_ref().unwrap().r#type, "stealth");
+    // Without a width the marker is 0.3 cm (8.5 pt): over 3.87 times the
+    // 2 pt base of a thin line, the large step; m2 is half again as long.
+    let tail = shape.stroke_tail_end.as_ref().unwrap();
+    assert_eq!((tail.w.as_str(), tail.len.as_str()), ("lg", "lg"));
     // §19.590: `[.A1:.A2]` written from B1 is B1:B2 from C1, where the
     // validation applies.
     let validation = &sheet.data_validations[0];
     assert_eq!(validation.sqref, "C1");
     assert_eq!(validation.formula1.as_deref(), Some("B1:B2"));
+}
+
+#[test]
+fn line_ends_take_their_size_from_the_marker_width() {
+    // What LibreOffice writes for SpreadsheetML line ends: `w=sm len=lg`
+    // and `w=lg len=sm` triangles on a 0.75 pt line, and an open `med`
+    // arrow on a 4.5 pt line.
+    let named = concat!(
+        r##"<draw:marker draw:name="t3" svg:viewBox="0 0 200 500" svg:d="M100 0l100 500h-200z"/>"##,
+        r##"<draw:marker draw:name="t7" svg:viewBox="0 0 500 200" svg:d="M250 0l250 200h-500z"/>"##,
+        r##"<draw:marker draw:name="o5" svg:viewBox="0 0 350 350" svg:d="M175 0l175 275-75 75-50-75v75h-100v-75l-50 75-75-75z"/>"##,
+    );
+    let automatic = concat!(
+        r##"<style:style style:name="g1" style:family="graphic"><style:graphic-properties draw:stroke="solid" svg:stroke-width="0.026cm" draw:marker-start="t3" draw:marker-start-width="0.14cm" draw:marker-end="t7" draw:marker-end-width="0.35cm"/></style:style>"##,
+        r##"<style:style style:name="g2" style:family="graphic"><style:graphic-properties draw:stroke="solid" svg:stroke-width="0.159cm" draw:marker-end="o5" draw:marker-end-width="0.556cm"/></style:style>"##,
+    );
+    let body = content(
+        automatic,
+        &table(concat!(
+            r#"<table:table-row><table:table-cell>"#,
+            r#"<draw:line draw:style-name="g1" svg:x1="0cm" svg:y1="0cm" svg:x2="2cm" svg:y2="0cm"/>"#,
+            r#"<draw:line draw:style-name="g2" svg:x1="0cm" svg:y1="1cm" svg:x2="2cm" svg:y2="1cm"/>"#,
+            r#"</table:table-cell></table:table-row>"#
+        )),
+    );
+    let workbook = read_text(&body, Some(&styles(named))).unwrap();
+    let groups = &workbook.sheets[0].worksheet.shape_groups;
+    let end = |e: &Option<xlsx_model::ShapeLineEnd>| {
+        let e = e.as_ref().unwrap();
+        (e.r#type.clone(), e.w.clone(), e.len.clone())
+    };
+    let triple = |a: &str, b: &str, c: &str| (a.to_string(), b.to_string(), c.to_string());
+    let line = &groups[0].shapes[0];
+    assert_eq!(end(&line.stroke_head_end), triple("triangle", "sm", "lg"));
+    assert_eq!(end(&line.stroke_tail_end), triple("triangle", "lg", "sm"));
+    let thick = &groups[1].shapes[0];
+    assert_eq!(end(&thick.stroke_tail_end), triple("arrow", "med", "med"));
 }
 
 #[test]

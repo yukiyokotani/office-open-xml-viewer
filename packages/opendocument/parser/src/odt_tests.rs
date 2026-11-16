@@ -560,6 +560,54 @@ fn shape_line_caps_and_joins_use_the_canvas_vocabulary() {
 }
 
 #[test]
+fn line_ends_follow_their_marker_outline_and_size() {
+    // What LibreOffice writes for DOCX line ends on a 0.75 pt line: an oval
+    // `w=lg len=sm`, an open arrow `w=sm len=lg` and a stealth `med`, with
+    // marker names that do not say their kind.
+    let styles = concat!(
+        r##"<draw:marker draw:name="o" svg:viewBox="0 0 500 200" svg:d="M250 0l125 35 90 90 35 125-35 125-90 90-125 35-125-35-90-90-35-125 35-125 90-90z"/>"##,
+        r##"<draw:marker draw:name="a" svg:viewBox="0 0 250 550" svg:d="M125 0l125 193-57 57-31-42v42h-75v-42l-31 42-56-57z"/>"##,
+        r##"<draw:marker draw:name="s" svg:viewBox="0 0 300 300" svg:d="M150 0l150 300-150-120-150 120z"/>"##,
+    );
+    let automatic = concat!(
+        r##"<style:style style:name="g1" style:family="graphic"><style:graphic-properties draw:stroke="solid" svg:stroke-width="0.026cm" draw:marker-start="o" draw:marker-start-width="0.35cm" draw:marker-end="a" draw:marker-end-width="0.175cm"/></style:style>"##,
+        r##"<style:style style:name="g2" style:family="graphic"><style:graphic-properties draw:stroke="solid" svg:stroke-width="0.159cm" draw:marker-end="s" draw:marker-end-width="0.477cm"/></style:style>"##,
+        r##"<style:style style:name="g3" style:family="graphic"><style:graphic-properties draw:stroke="solid" draw:marker-end="missing"/></style:style>"##,
+    );
+    let body = concat!(
+        r##"<text:p><draw:line draw:style-name="g1" text:anchor-type="paragraph" svg:x1="0cm" svg:y1="0cm" svg:x2="5cm" svg:y2="0cm"/>"##,
+        r##"<draw:line draw:style-name="g2" text:anchor-type="paragraph" svg:x1="0cm" svg:y1="1cm" svg:x2="5cm" svg:y2="1cm"/>"##,
+        r##"<draw:line draw:style-name="g3" text:anchor-type="paragraph" svg:x1="0cm" svg:y1="2cm" svg:x2="5cm" svg:y2="2cm"/>x</text:p>"##,
+    );
+    let document = read_fixture(Fixture {
+        styles,
+        automatic,
+        body,
+        ..Fixture::default()
+    });
+    let shapes: Vec<_> = paragraphs(&document.body)[0]
+        .runs
+        .iter()
+        .filter_map(|run| match run {
+            DocRun::Shape(shape) => Some(shape),
+            _ => None,
+        })
+        .collect();
+    let end = |e: &Option<docx_model::LineEnd>| {
+        let e = e.as_ref().unwrap();
+        (e.r#type.clone(), e.w.clone(), e.len.clone())
+    };
+    let triple = |a: &str, b: &str, c: &str| (a.to_string(), b.to_string(), c.to_string());
+    assert_eq!(end(&shapes[0].head_end), triple("oval", "lg", "sm"));
+    assert_eq!(end(&shapes[0].tail_end), triple("arrow", "sm", "lg"));
+    assert!(shapes[1].head_end.is_none());
+    assert_eq!(end(&shapes[1].tail_end), triple("stealth", "med", "med"));
+    // An undefined marker: LibreOffice's plain arrow at its 0.3 cm default
+    // (4.25 e on a hairline's 2 pt base).
+    assert_eq!(end(&shapes[2].tail_end), triple("triangle", "lg", "lg"));
+}
+
+#[test]
 fn drawings_hidden_from_display_draw_nothing() {
     // LibreOffice writes a Writer object that is neither visible nor
     // printable as `drawooo:display="none"` and draws it nowhere.
