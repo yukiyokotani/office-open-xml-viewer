@@ -15,7 +15,6 @@ import {
 } from '@silurus/ooxml-core/internal/font-sources';
 import { chartFontFamilies } from '@silurus/ooxml-core/internal/chart-font-sources';
 import type { Slide, SlideElement, TextBody } from './types';
-import type { OfficeFaceWeight } from './office-face-name.js';
 import { officeFaceWeight } from './powerpoint-line-metrics.js';
 
 // PPTX font requests: the families a deck paints (`fontPreloadNames`), the
@@ -121,15 +120,10 @@ export function mayProveSubstituteScript(text: string): boolean {
  * {@link PptxFontDemandFacts}). */
 interface DemandFactState {
   readonly scripts: Map<string, Set<FontSubstituteScript>>;
-  /** Groups the slide's face tuples (`slideOfficeFontRequests`). */
-  readonly faceWeight: OfficeFaceWeight;
 }
 
 function cloneDemandFacts(state: DemandFactState): DemandFactState {
-  return {
-    faceWeight: state.faceWeight,
-    scripts: new Map([...state.scripts].map(([key, scripts]) => [key, new Set(scripts)])),
-  };
+  return { scripts: new Map([...state.scripts].map(([key, scripts]) => [key, new Set(scripts)])) };
 }
 
 /** Incremental PPTX adapter over core's single script-classification source. */
@@ -145,17 +139,13 @@ export class PptxFontPreloadAccumulator {
     families?: Set<string>,
     private readonly fallback?: CjkLang,
     private readonly scriptNames = new Set<string>(),
-    /** Collect {@link PptxFontDemandFacts} (font sources configured), grouping
-     * face tuples with this face-weight function. The caller injects it so a
-     * graph that bundles the metrics catalogue uses `officeFaceWeight` and one
-     * that does not (the parse worker) uses `indexedOfficeFaceWeight`; both
-     * give the same weight for every input. */
-    demand: false | OfficeFaceWeight | DemandFactState = false,
+    /** Collect {@link PptxFontDemandFacts} (font sources configured). */
+    demand: boolean | DemandFactState = false,
   ) {
     const cjkLang = classifyCjkFont(majorFont) ?? classifyCjkFont(minorFont) ?? fallback ?? null;
     this.scripts = scripts ?? new ScriptPreloadAccumulator(cjkLang);
     this.families = families ?? new Set();
-    this.demand = demand === false ? null : typeof demand === 'function' ? { scripts: new Map(), faceWeight: demand } : demand;
+    this.demand = demand === false ? null : demand === true ? { scripts: new Map() } : demand;
     if (majorFont) this.addThemeFamily(majorFont);
     if (minorFont) this.addThemeFamily(minorFont);
   }
@@ -194,12 +184,17 @@ export class PptxFontPreloadAccumulator {
     if (this.demand) {
       const major = slide.theme ? slide.theme.majorFont : this.majorFont;
       const minor = slide.theme ? slide.theme.minorFont : this.minorFont;
-      for (const request of slideOfficeFontRequests(slide, major, minor, this.demand.faceWeight)) {
-        // Every face a slide's text can paint with is demanded, not only the
-        // run families above: bullet faces (a:buFont), line-break and
-        // end-of-paragraph properties, and theme tokens resolved to the
-        // slide's theme fonts.
-        this.families.add(request.family);
+      // Every face a slide's text can paint with is demanded, not only the
+      // run families above: bullet faces (a:buFont), line-break and
+      // end-of-paragraph properties, and theme tokens resolved to the
+      // slide's theme fonts. A face is one name whatever its letter case
+      // (`fontFamilyKey` downstream), so a face that already has a spelling
+      // here adds none: these mandatory projection names never grow past one
+      // spelling per face. The face weight a tuple selects is the main-thread
+      // layout's business, so the parse worker needs no face catalogue.
+      const present = new Set([...this.families].map((family) => family.toLowerCase()));
+      for (const [key, family] of slideFaceSpellings(slide, major, minor)) {
+        if (!present.has(key)) this.families.add(family);
       }
       for (const el of slide.elements) {
         if (el.type === 'chart') for (const family of chartFontFamilies(el.chart)) this.families.add(family);
@@ -293,66 +288,28 @@ export class PptxFontPreloadAccumulator {
 
 const CSS_GENERIC_FAMILY_NAMES = new Set(['serif', 'sans-serif', 'monospace', 'cursive', 'fantasy', 'system-ui']);
 
-/** Authored face tuples actually painted by this slide. DrawingML run properties
- * inherit through paragraph/body defaults (§21.1.2.3.9); theme tokens resolve
- * against the same major/minor values used by the renderer. Loading is delayed
- * until the slide is requested, so unused slides and styles fetch no assets. */
-export function pptxSlideOfficeFontRequests(
-  slide: Slide,
-  majorFont: string | null,
-  minorFont: string | null,
-): OfficeFontFallbackRequest[] {
-  return slideOfficeFontRequests(slide, majorFont, minorFont, officeFaceWeight);
+/** The face a run property names, resolved as the renderer resolves it:
+ * theme tokens against the slide's theme fonts and a ",<generic>" hint
+ * dropped. Null for no face or a CSS generic family. */
+function resolvedFace(family: string, majorFont: string | null, minorFont: string | null): string | null {
+  // A missing family has no authored or inherited font resource. The theme
+  // minor face is the renderer's CSS fallback, but it must not be treated as
+  // a document request for an exact Office face. Explicit +mn-* still is.
+  const name = family.startsWith('+mn-') ? minorFont
+    : family.startsWith('+mj-') ? majorFont
+      : family.split(',')[0]?.trim() ?? null;
+  return !name || CSS_GENERIC_FAMILY_NAMES.has(name.toLowerCase()) ? null : name;
 }
 
-/** {@link pptxSlideOfficeFontRequests} with an injected face-weight function
- * (see the accumulator's `demand` parameter). */
-export function slideOfficeFontRequests(
+/** Visit every authored face one slide's text paints with, as
+ * `(raw family, bold, italic)` in document order. DrawingML run properties
+ * inherit through paragraph/body defaults (§21.1.2.3.9). */
+function forEachSlideFaceTuple(
   slide: Slide,
-  majorFont: string | null,
-  minorFont: string | null,
-  faceWeight: OfficeFaceWeight,
-): OfficeFontFallbackRequest[] {
-  if (slide.theme) { majorFont = slide.theme.majorFont; minorFont = slide.theme.minorFont; }
-  const requests = new Map<string, OfficeFontFallbackRequest>();
-  const resolved = (family: string | null | undefined): string | null => {
-    // A missing family has no authored or inherited font resource. The theme
-    // minor face is the renderer's CSS fallback, but it must not be treated as
-    // a document request for an exact Office face. Explicit +mn-* still is.
-    if (!family) return null;
-    if (family.startsWith('+mn-')) return minorFont;
-    if (family.startsWith('+mj-')) return majorFont;
-    return family.split(',')[0]?.trim() ?? null;
-  };
-  // The two requests of one authored (family, bold, italic), computed once: a
-  // slide repeats a few tuples on every run. Each occurrence still writes
-  // both keys, so a later spelling of a name replaces an earlier one as before.
-  type Tuple = readonly [string, OfficeFontFallbackRequest, string, OfficeFontFallbackRequest];
-  const tuples = new Map<string, (Tuple | null | undefined)[]>();
-  const tuple = (family: string, bold: boolean, italic: boolean): Tuple | null => {
-    // Every authored face is probed, so layout can admit catalog geometry
-    // only for faces proven present (no family-name gate).
-    const name = resolved(family);
-    if (!name || CSS_GENERIC_FAMILY_NAMES.has(name.toLowerCase())) return null;
-    const weight = faceWeight(name, bold, italic);
-    const style = italic ? 'italic' : 'normal';
-    return [
-      `${name.toLowerCase()}:${weight}:${style}`, { family: name, weight, style },
-      // Family presence is probed independently of the styled tuples a slide
-      // uses, so an installed regular-only family stays present for bold runs.
-      `presence:${name.toLowerCase()}`, { family: name, presenceOnly: true },
-    ];
-  };
+  visit: (family: string, bold: boolean, italic: boolean) => void,
+): void {
   const add = (family: string | null | undefined, bold: boolean, italic: boolean) => {
-    if (!family) return;
-    let styles = tuples.get(family);
-    if (!styles) tuples.set(family, styles = []);
-    const index = (bold ? 2 : 0) + (italic ? 1 : 0);
-    let entry = styles[index];
-    if (entry === undefined) styles[index] = entry = tuple(family, bold, italic);
-    if (!entry) return;
-    requests.set(entry[0], entry[1]);
-    requests.set(entry[2], entry[3]);
+    if (family) visit(family, bold, italic);
   };
   const body = (textBody: TextBody | null | undefined) => {
     for (const paragraph of textBody?.paragraphs ?? []) {
@@ -397,6 +354,74 @@ export function slideOfficeFontRequests(
       for (const row of element.rows) for (const cell of row.cells) body(cell.textBody);
     }
   }
+}
+
+/** The resolved faces one slide's text paints with (the families of
+ * {@link pptxSlideOfficeFontRequests}, no face weight), keyed by lower-case
+ * name in first-use order. A face spelled in several letter cases is
+ * represented by its last spelling, as its family-presence request is. */
+function slideFaceSpellings(
+  slide: Slide,
+  majorFont: string | null,
+  minorFont: string | null,
+): Map<string, string> {
+  if (slide.theme) { majorFont = slide.theme.majorFont; minorFont = slide.theme.minorFont; }
+  const resolved = new Map<string, readonly [string, string] | null>();
+  const faces = new Map<string, string>();
+  forEachSlideFaceTuple(slide, (family) => {
+    let face = resolved.get(family);
+    if (face === undefined) {
+      const name = resolvedFace(family, majorFont, minorFont);
+      resolved.set(family, face = name ? [name.toLowerCase(), name] : null);
+    }
+    if (face) faces.set(face[0], face[1]);
+  });
+  return faces;
+}
+
+/** Authored face tuples actually painted by this slide. Theme tokens resolve
+ * against the same major/minor values used by the renderer. Loading is
+ * delayed until the slide is requested, so unused slides and styles fetch no
+ * assets. */
+export function pptxSlideOfficeFontRequests(
+  slide: Slide,
+  majorFont: string | null,
+  minorFont: string | null,
+): OfficeFontFallbackRequest[] {
+  if (slide.theme) { majorFont = slide.theme.majorFont; minorFont = slide.theme.minorFont; }
+  const requests = new Map<string, OfficeFontFallbackRequest>();
+  // The two requests of one authored (family, bold, italic), computed once: a
+  // slide repeats a few tuples on every run. Each occurrence still writes
+  // both keys, so a later spelling of a name replaces an earlier one as before.
+  type Tuple = readonly [string, OfficeFontFallbackRequest, string, OfficeFontFallbackRequest];
+  const tuples = new Map<string, (Tuple | null | undefined)[]>();
+  const tuple = (family: string, bold: boolean, italic: boolean): Tuple | null => {
+    // Every authored face is probed, so layout can admit catalog geometry
+    // only for faces proven present (no family-name gate).
+    const name = resolvedFace(family, majorFont, minorFont);
+    if (!name) return null;
+    const weight = officeFaceWeight(name, bold, italic);
+    const style = italic ? 'italic' : 'normal';
+    // U+0000 separates the key fields: XML 1.0 (§2.2 Char) excludes it from
+    // every authored typeface, so no face name can collide with another
+    // face's key.
+    return [
+      `${name.toLowerCase()}\0${weight}\0${style}`, { family: name, weight, style },
+      // Family presence is probed independently of the styled tuples a slide
+      // uses, so an installed regular-only family stays present for bold runs.
+      `\0${name.toLowerCase()}`, { family: name, presenceOnly: true },
+    ];
+  };
+  forEachSlideFaceTuple(slide, (family, bold, italic) => {
+    let styles = tuples.get(family);
+    if (!styles) tuples.set(family, styles = []);
+    const index = (bold ? 2 : 0) + (italic ? 1 : 0);
+    let entry = styles[index];
+    if (entry === undefined) styles[index] = entry = tuple(family, bold, italic);
+    if (!entry) return;
+    requests.set(entry[0], entry[1]);
+    requests.set(entry[2], entry[3]);
+  });
   return [...requests.values()];
 }
 

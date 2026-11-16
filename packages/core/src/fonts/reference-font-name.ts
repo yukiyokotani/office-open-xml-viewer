@@ -3,8 +3,8 @@ const ASCII_TEXT = /^[\u0000-\u007f]*$/;
 /**
  * The key `findReferenceFontMetrics` matches a family name or alias under.
  * Kept in its own module, free of the catalogue import, so a derived index of
- * the catalogue (for example PPTX's generated face-weight index) can share the
- * exact normalization without bundling the catalogue itself.
+ * the catalogue can share the exact normalization without bundling the
+ * catalogue itself.
  */
 export function normalizeReferenceFontFamilyName(value: string): string {
   // The alias index normalizes every catalogue alias on its first lookup in

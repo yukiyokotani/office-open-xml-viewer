@@ -3,7 +3,6 @@ import type { ChartModel } from '@silurus/ooxml-core';
 import { renderSlideWithEmbeddedFonts } from './renderer.js';
 import { PptxFontPreloadAccumulator } from './font-requests.js';
 import type { Slide } from './types';
-import { officeFaceWeight } from './powerpoint-line-metrics.js';
 
 // Charts demand the faces they name and paint through the same loaded
 // substitution map as shape text (LoadOptions.fonts).
@@ -55,7 +54,7 @@ async function paintedFonts(target: Slide, substitutions?: ReadonlyMap<string, {
 
 describe('chart text and font sources', () => {
   it('demands the faces a chart names, resolving theme references', () => {
-    const accumulator = new PptxFontPreloadAccumulator(null, null, undefined, undefined, undefined, undefined, officeFaceWeight);
+    const accumulator = new PptxFontPreloadAccumulator(null, null, undefined, undefined, undefined, undefined, true);
     accumulator.addSlide(slide(chart({
       legendFontFace: '+mn-lt', themeMinorFontLatin: 'Chart Body', catAxisFontFace: 'Axis Face',
     })));
