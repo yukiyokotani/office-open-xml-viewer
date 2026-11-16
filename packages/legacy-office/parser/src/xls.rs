@@ -691,6 +691,8 @@ fn validate_direct_drawings(
         admit_direct_object(&anchor)?;
         if anchor.object_type == 25 {
             if let Some(text) = anchor.shape.as_ref().and_then(|shape| shape.text) {
+                // Read whether or not a Note names the object.
+                shapes::txo_text(records, text)?;
                 comment_texts.insert((anchor.sheet, anchor.object_id), text);
             }
         }
@@ -1542,7 +1544,8 @@ fn parse_sheet(
                             && u16_at(record.data, 0)? == 0x087e
                             && match u32_at(record.data, 18)? {
                                 0 => true,
-                                1 | 2 => record.data.len() > 60,
+                                // At least the DXFN header (flags).
+                                1 | 2 => record.data.len() >= 66,
                                 3 => record.data.len() >= 68,
                                 _ => false,
                             }

@@ -984,6 +984,12 @@ fn decompile_inner(
             _ => return Err(reject()),
         }
     }
+    // The last token must end where the program does: a token whose
+    // payload the branch above does not read (an attribute, an error
+    // reference) may not run past it.
+    if at != rgce.len() {
+        return Err(truncated());
+    }
     if !space.is_empty() {
         return Err(reject());
     }
@@ -1113,6 +1119,8 @@ mod tests {
             "#REF!"
         );
         assert!(decompile(&[0x2a], (0, 0), &externs).is_err());
+        // A PtgAttrSemi without its payload.
+        assert!(decompile(&[0x1e, 1, 0, 0x19, 0x01], (0, 0), &externs).is_err());
         assert!(decompile(&[0x2b, 0, 0, 0, 0], (0, 0), &externs).is_err());
         assert_eq!(number(9.99e307).unwrap(), "9.99E+307");
         assert_eq!(number(1e-10).unwrap(), "1E-10");
