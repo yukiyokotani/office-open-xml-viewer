@@ -171,6 +171,19 @@ the host fonts (see **Served font line heights** below). See the
   `phonetic_pr` instead of `phoneticRuns` / `phoneticPr`, so the renderer
   never received it. Shared-string cells were not affected.
 
+## 0.89.12 — Unreleased
+
+Compatible patch release. No migration is required. 0.90.0 includes this fix.
+
+- **Excel: connectors and arrow heads:** connector shapes (`xdr:cxnSp`:
+  straight, elbow and curved connectors) are now drawn, alone or inside a
+  group, including horizontal and vertical ones whose extent is zero on one
+  axis. Line ends (`a:headEnd` / `a:tailEnd`) are drawn on connectors, line
+  shapes, callout leaders and custom-geometry lines, and the line stops at
+  the arrow head instead of running through it. A stand-alone line shape
+  with a zero extent on one axis is no longer dropped. Thanks to @tienhieuD
+  for the contribution (#2240, #2243).
+
 ## 0.89.11 — Unreleased
 
 Compatible patch release. No migration is required.
