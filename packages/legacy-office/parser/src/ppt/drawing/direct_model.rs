@@ -100,6 +100,19 @@ fn jump_action(jump: u8) -> Option<&'static str> {
     })
 }
 
+/// The session image a projected picture, pattern or texture fill draws.
+/// For a pattern on a flipped shape this is the bitmap written for it, not
+/// the stored one, so a comparison with an alternative's picture never
+/// equates the alternative with a picture the fill does not draw.
+fn drawn_image(fill: Option<&Fill>) -> Option<u32> {
+    match fill {
+        Some(Fill::Image { image_path, .. }) => image_path
+            .strip_prefix("legacy-ppt/image/")
+            .and_then(|id| id.parse().ok()),
+        _ => None,
+    }
+}
+
 /// [MS-PPT] 2.9.59 ranges are UTF-16 positions in the original text atom;
 /// the paragraph separator occupies one position. A range can cut a style
 /// run, so split that run at UTF-16-safe character boundaries. The ranges of
@@ -860,22 +873,19 @@ impl Context<'_> {
             scene3d: None,
             sp3d: None,
         };
-        // The picture of a binary picture, pattern or texture fill, for
+        // The picture the projected fill draws (a stored picture, pattern or
+        // texture, or the pattern written for a flipped shape), for
         // comparison with the alternative's. One that is too long to equal
         // an alternative's, or past the session's comparison allowance, is
         // not compared: the shape keeps its binary projection.
+        let drawn_image = drawn_image(element.fill.as_ref());
         let image_filled = matches!(element.fill, Some(Fill::Image { .. }));
-        let comparison_image = if metro_blob.is_some() && !binary_edited && image_filled {
-            let id = paint
-                .foreground_image()
-                .map(|(id, ..)| id)
-                .or_else(|| paint.pattern_image().map(|(id, ..)| id))
-                .or_else(|| paint.texture_image().map(|(id, ..)| id));
-            id.map(|id| self.media.comparison_copy(id, self.backing, self.pictures))
-                .transpose()?
-                .flatten()
-        } else {
-            None
+        let comparison_image = match drawn_image {
+            Some(id) if metro_blob.is_some() && !binary_edited => {
+                self.media
+                    .comparison_copy(id, self.backing, self.pictures)?
+            }
+            _ => None,
         };
         let uncompared = image_filled && comparison_image.is_none();
         let adopted = match (&metro_blob, &metro_theme) {
@@ -3316,6 +3326,8 @@ mod tests {
             );
             assert_eq!((tile.tx, tile.ty), (Some(offset.0), Some(offset.1)));
             assert_eq!(take_best_effort(), []);
+            // An alternative's picture is compared with the written bitmap.
+            assert_eq!(drawn_image(shape.fill.as_ref()), Some(2));
         }
         // A bitmap this reader cannot rewrite tiles reflected.
         let model = project(1, 0x240, vec![properties(&pattern)], gif_blip(8, 8), None).unwrap();
