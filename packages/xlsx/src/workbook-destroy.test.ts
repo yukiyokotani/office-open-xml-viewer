@@ -110,7 +110,7 @@ function authoredFaces(added: readonly FakeFace[]): FakeFace[] {
 /** An application font source serving Carlito for Calibri / Cambria. */
 const FONTS = [fontFiles({
   faces: [{ family: 'Carlito', url: 'https://fonts.example/carlito.woff2' }],
-  substitutes: OFFICE_FONT_SUBSTITUTIONS,
+  substitutions: OFFICE_FONT_SUBSTITUTIONS,
 })];
 const FONT_WORKBOOK = {
   styles: { fonts: [{ name: 'Calibri', bold: false, italic: false }], cellXfs: [], numFmts: [], dxfs: [] },

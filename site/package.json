@@ -5,8 +5,8 @@
   "type": "module",
   "description": "Showcase / marketing site for @silurus/ooxml",
   "scripts": {
-    "predev": "pnpm --filter @silurus/ooxml-legacy-office build && node scripts/copy-samples.mjs",
-    "prebuild": "pnpm --filter @silurus/ooxml-legacy-office build && node scripts/copy-samples.mjs",
+    "predev": "pnpm --filter @silurus/ooxml-legacy-office --filter @silurus/ooxml-opendocument build && node scripts/copy-samples.mjs",
+    "prebuild": "pnpm --filter @silurus/ooxml-legacy-office --filter @silurus/ooxml-opendocument build && node scripts/copy-samples.mjs",
     "dev": "astro dev",
     "build": "astro build",
     "preview": "astro preview",
@@ -17,7 +17,8 @@
     "@silurus/ooxml-docx": "workspace:*",
     "@silurus/ooxml-pptx": "workspace:*",
     "@silurus/ooxml-xlsx": "workspace:*",
-    "@silurus/ooxml-legacy-office": "workspace:*"
+    "@silurus/ooxml-legacy-office": "workspace:*",
+    "@silurus/ooxml-opendocument": "workspace:*"
   },
   "devDependencies": {
     "astro": "^6.4.8",

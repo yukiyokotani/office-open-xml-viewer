@@ -14,6 +14,7 @@ pub const NS_XLINK: &str = "http://www.w3.org/1999/xlink";
 pub const NS_XML: &str = "http://www.w3.org/XML/1998/namespace";
 pub const NS_LOEXT: &str = "urn:org:documentfoundation:names:experimental:office:xmlns:loext:1.0";
 pub const NS_OFFICEOOO: &str = "http://openoffice.org/2009/office";
+pub const NS_DRAWOOO: &str = "http://openoffice.org/2010/draw";
 pub const NS_CONFIG: &str = "urn:oasis:names:tc:opendocument:xmlns:config:1.0";
 /// LibreOffice's Word-interop fieldmarks (`field:fieldmark-start` et al.).
 pub const NS_FIELD: &str = "urn:openoffice:names:experimental:ooo-ms-interop:xmlns:field:1.0";

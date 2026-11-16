@@ -68,7 +68,7 @@ describe('XlsxWorkbook.load font options', () => {
   it('sends no font sources to a main-mode parse worker, and none without sources', async () => {
     const messages = captureRequests();
     vi.spyOn(console, 'warn').mockImplementation(() => undefined);
-    const fonts = [googleFonts({ cssOrigin: 'https://fonts.internal.example:8443' })];
+    const fonts = [googleFonts({ baseUrl: 'https://fonts.internal.example:8443' })];
     await expect(XlsxWorkbook.load(zip(), { fonts })).rejects.toBe(stop);
     await expect(XlsxWorkbook[loadXlsxSheetSource](csv(), { fonts }, { format: 'csv' })).rejects.toBe(stop);
     await expect(XlsxWorkbook.load(zip(), { mode: 'worker' })).rejects.toBe(stop);
@@ -77,10 +77,19 @@ describe('XlsxWorkbook.load font options', () => {
     expect(parses.map((message) => message.fonts)).toEqual([undefined, undefined, undefined, fonts]);
   });
 
-  it('rejects useGoogleFonts: true with fonts, and malformed sources, before any worker starts', async () => {
+  it('lets fonts win over useGoogleFonts: true, with the warning and without throwing', async () => {
     const messages = captureRequests();
-    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
-    await expect(XlsxWorkbook.load(zip(), { useGoogleFonts: true, fonts: [] })).rejects.toThrow(TypeError);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const fonts = [googleFonts({ baseUrl: 'https://fonts.internal.example:8443' })];
+    await expect(XlsxWorkbook.load(zip(), { mode: 'worker', useGoogleFonts: true, fonts })).rejects.toBe(stop);
+    await expect(XlsxWorkbook.load(zip(), { mode: 'worker', useGoogleFonts: true, fonts: [] })).rejects.toBe(stop);
+    const parses = messages.filter((message) => message.type === 'parse');
+    expect(parses.map((message) => message.fonts)).toEqual([fonts, undefined]);
+    expect(warn.mock.calls.filter(([message]) => message === USE_GOOGLE_FONTS_DEPRECATION_MESSAGE)).toHaveLength(1);
+  });
+
+  it('rejects malformed sources before any worker starts', async () => {
+    const messages = captureRequests();
     await expect(XlsxWorkbook.load(zip(), { fonts: [{ kind: 'font-css-api' }] as never })).rejects.toThrow(TypeError);
     await expect(XlsxWorkbook[loadXlsxSheetSource](csv(), { fonts: [{ kind: 'font-css-api' }] as never }, { format: 'csv' }))
       .rejects.toThrow(TypeError);

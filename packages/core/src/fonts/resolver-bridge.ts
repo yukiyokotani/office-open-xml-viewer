@@ -64,7 +64,7 @@ import {
   validateFontFaceDeclaration,
   type FontDemand,
   type FontFaceDeclaration,
-  type FontResolveContext,
+  type FontResolverContext,
   type FontResolverSource,
 } from './source.js';
 
@@ -280,7 +280,7 @@ export class WorkerFontResolverClient {
   readonly run = (
     source: FontResolverSource,
     demand: FontDemand,
-    context: FontResolveContext,
+    context: FontResolverContext,
     { sourceIndex, remainingMs }: ResolverCallInfo,
   ): Promise<BridgedFamilyResolutions> => {
     const { signal } = context;

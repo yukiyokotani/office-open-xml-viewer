@@ -523,6 +523,91 @@ fn custom_shapes_evaluate_their_geometry() {
 }
 
 #[test]
+fn shape_line_caps_and_joins_use_the_canvas_vocabulary() {
+    // The DOCX model's stroke cap is a canvas name; DrawingML's `flat` /
+    // `rnd` / `sq` would make the renderer reject the page.
+    let cases = [
+        ("butt", "round", "butt", Some("round")),
+        ("round", "miter", "round", Some("miter")),
+        ("square", "bevel", "square", Some("bevel")),
+        ("bogus", "middle", "butt", Some("miter")),
+        // Joins keep the reader's existing mapping (`none` as the default
+        // miter), unchanged by the cap fix.
+        ("butt", "none", "butt", Some("miter")),
+    ];
+    for (cap, join, want_cap, want_join) in cases {
+        let automatic = format!(
+            r##"<style:style style:name="gr1" style:family="graphic"><style:graphic-properties draw:stroke="solid" svg:stroke-width="0cm" svg:stroke-linecap="{cap}" draw:stroke-linejoin="{join}" draw:fill="none" style:wrap="run-through" style:run-through="background"/></style:style>"##
+        );
+        let body = r##"<text:p><draw:rect draw:style-name="gr1" text:anchor-type="paragraph" svg:x="1pt" svg:y="2pt" svg:width="50pt" svg:height="50pt"/>x</text:p>"##;
+        let document = read_fixture(Fixture {
+            automatic: &automatic,
+            body,
+            ..Fixture::default()
+        });
+        let p = paragraphs(&document.body)[0];
+        let shape = p
+            .runs
+            .iter()
+            .find_map(|run| match run {
+                DocRun::Shape(shape) => Some(shape),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(shape.stroke_cap.as_deref(), Some(want_cap), "{cap}");
+        assert_eq!(shape.stroke_join.as_deref(), want_join, "{join}");
+    }
+}
+
+#[test]
+fn drawings_hidden_from_display_draw_nothing() {
+    // LibreOffice writes a Writer object that is neither visible nor
+    // printable as `drawooo:display="none"` and draws it nowhere.
+    let automatic = r##"<style:style style:name="gr1" style:family="graphic"><style:graphic-properties draw:stroke="solid" svg:stroke-linecap="butt" style:wrap="run-through" style:run-through="background"/></style:style>"##;
+    let shapes = |display: &str| {
+        let body = format!(
+            r##"<text:p><draw:line xmlns:drawooo="http://openoffice.org/2010/draw" {display} draw:style-name="gr1" text:anchor-type="paragraph" svg:x1="0cm" svg:y1="0cm" svg:x2="0cm" svg:y2="5cm"/>x</text:p>"##
+        );
+        let document = read_fixture(Fixture {
+            automatic,
+            body: &body,
+            ..Fixture::default()
+        });
+        paragraphs(&document.body)[0]
+            .runs
+            .iter()
+            .filter(|run| matches!(run, DocRun::Shape(_)))
+            .count()
+    };
+    assert_eq!(shapes(r#"drawooo:display="none""#), 0);
+    assert_eq!(shapes(r#"draw:display="none""#), 0);
+    assert_eq!(shapes(r#"drawooo:display="printer""#), 1);
+    assert_eq!(shapes(r#"drawooo:display="always""#), 1);
+    assert_eq!(shapes(""), 1);
+}
+
+#[test]
+fn page_anchored_drawings_hidden_from_display_register_no_page_object() {
+    // The gate runs before page-object registration: a hidden page-anchored
+    // drawing in a header adds nothing to the page, a visible one does.
+    let page_objects = |display: &str| {
+        let master = format!(
+            r##"<style:header><text:p>h<draw:rect xmlns:drawooo="http://openoffice.org/2010/draw" {display} text:anchor-type="page" text:anchor-page-number="1" svg:width="1cm" svg:height="1cm"/></text:p></style:header>"##
+        );
+        read_fixture(Fixture {
+            master: &master,
+            body: "<text:p>x</text:p>",
+            ..Fixture::default()
+        })
+        .page_objects
+        .len()
+    };
+    assert_eq!(page_objects(r#"drawooo:display="none""#), 0);
+    assert_eq!(page_objects(r#"draw:display="none""#), 0);
+    assert_eq!(page_objects(""), 1);
+}
+
+#[test]
 fn deeply_nested_content_stays_bounded() {
     let groups = format!(
         "<text:p>{}<draw:rect text:anchor-type=\"paragraph\" svg:width=\"1pt\" svg:height=\"1pt\"/>{}x</text:p>",
@@ -1561,4 +1646,89 @@ fn page_objects_are_extracted_once_and_nested_groups_keep_the_outer_anchor() {
         })
         .unwrap();
     assert_eq!(shape.anchor_y_relative_from.as_deref(), Some("page"));
+}
+
+#[test]
+fn gives_a_mark_that_begins_a_paragraph_a_dotted_circle() {
+    // LibreOffice 26.8 draws U+25CC under a mark only at the paragraph start
+    // (odt_marks controls); after a space, tab, line break or other
+    // character the mark keeps that character as its base.
+    let automatic = r##"<style:style style:name="B" style:family="text"><style:text-properties fo:font-weight="bold"/></style:style>"##;
+    let document = read_fixture(Fixture {
+        automatic,
+        body: concat!(
+            "<text:p>\u{301} Z</text:p>",
+            "<text:p>\u{301}\u{308}Z</text:p>",
+            "<text:p><text:span text:style-name=\"B\"/><text:span text:style-name=\"B\">\u{5B4}Z</text:span></text:p>",
+            "<text:p>a \u{301}Z<text:tab/>\u{301}<text:line-break/>\u{301}Z</text:p>",
+            "<text:p>a\u{301}Z</text:p>",
+            "<text:p>\u{200D}\u{301}Z</text:p>",
+        ),
+        ..Fixture::default()
+    });
+    let p = paragraphs(&document.body);
+    let text = |i: usize| -> String {
+        text_runs(p[i])
+            .iter()
+            .map(|run| run.text.as_str())
+            .collect()
+    };
+    assert_eq!(text(0), "\u{25CC}\u{301} Z");
+    assert_eq!(text(1), "\u{25CC}\u{301}\u{308}Z");
+    assert_eq!(text(2), "\u{25CC}\u{5B4}Z");
+    assert!(!text(3).contains('\u{25CC}'));
+    assert_eq!(text(4), "a\u{301}Z");
+    assert_eq!(text(5), "\u{200D}\u{301}Z");
+}
+
+#[test]
+fn lays_lines_out_as_libreoffice_does() {
+    let automatic = r##"<style:style style:name="Q" style:family="paragraph"><style:paragraph-properties fo:line-height="80%"/></style:style><style:style style:name="P" style:family="paragraph"><style:paragraph-properties fo:line-height="200%"/></style:style>"##;
+    let document = read_fixture(Fixture {
+        automatic,
+        body: r##"<text:p text:style-name="Q">a</text:p><text:p text:style-name="P">b</text:p>"##,
+        ..Fixture::default()
+    });
+    let settings = document.settings.as_ref().unwrap();
+    assert!(settings.libre_office_line_boxes && settings.plain_font_line_boxes);
+    assert!(!settings.libre_office_ms_word_grid_metrics);
+    // No settings.xml: AddExternalLeading keeps its default (on).
+    assert!(!settings.libre_office_no_external_leading);
+    let p = paragraphs(&document.body);
+    // A proportional line below 100% is placed as a fixed line.
+    assert!(p[0].line_extra_above);
+    assert!(!p[1].line_extra_above);
+}
+
+#[test]
+fn a_drop_cap_takes_the_source_mark_before_its_dotted_circle() {
+    let automatic = r##"<style:style style:name="D" style:family="paragraph"><style:paragraph-properties><style:drop-cap style:lines="2" style:length="1"/></style:paragraph-properties></style:style>"##;
+    let document = read_fixture(Fixture {
+        automatic,
+        body: "<text:p text:style-name=\"D\">\u{301}bc</text:p>",
+        ..Fixture::default()
+    });
+    let p = paragraphs(&document.body);
+    let text = |i: usize| -> String {
+        text_runs(p[i])
+            .iter()
+            .map(|run| run.text.as_str())
+            .collect()
+    };
+    assert_eq!(p.len(), 2);
+    assert_eq!(text(0), "\u{25CC}\u{301}");
+    assert_eq!(text(1), "bc");
+}
+
+#[test]
+fn reads_the_libreoffice_line_settings() {
+    // An item missing from a present configuration set reads as false.
+    let settings = br##"<office:document-settings xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:config="urn:oasis:names:tc:opendocument:xmlns:config:1.0" xmlns:ooo="http://openoffice.org/2004/office"><office:settings><config:config-item-set config:name="ooo:configuration-settings"><config:config-item config:name="MsWordCompGridMetrics" config:type="boolean">true</config:config-item></config:config-item-set></office:settings></office:document-settings>"##;
+    let document = read_fixture(Fixture {
+        body: "<text:p>a</text:p>",
+        files: &[("settings.xml", settings)],
+        ..Fixture::default()
+    });
+    let s = document.settings.as_ref().unwrap();
+    assert!(s.libre_office_ms_word_grid_metrics && s.libre_office_no_external_leading);
 }

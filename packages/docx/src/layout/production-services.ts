@@ -106,15 +106,15 @@ export interface ProductionLayoutServiceOptions {
  * an override only when a loaded scoped substitute wins the exact resource
  * tuple, after embedded, local and authored CSS inventory precedence. */
 function docxScriptScopedFamilies(
-  substitutes: readonly FontSubstitution[],
+  substitutions: readonly FontSubstitution[],
   installed: readonly string[],
 ): Record<string, { script: FontSubstituteScript; substituteFamilies: string[] }> {
-  const scoped = scriptScopedSubstitutedFamilies(substitutes);
+  const scoped = scriptScopedSubstitutedFamilies(substitutions);
   return Object.fromEntries([...scoped]
     .filter(([key]) => !installed.includes(key))
     .map(([key, script]) => [key, {
       script,
-      substituteFamilies: [...new Set(substitutes
+      substituteFamilies: [...new Set(substitutions
         .filter((substitution) => substitution.script === script && fontFamilyKey(substitution.use) !== key)
         .map((substitution) => substitution.use))],
     }]));
@@ -211,7 +211,8 @@ export function createProductionTextLayoutService(
   // Served faces are sized from their own tables (source-font-metrics.ts),
   // exactly as an installed or embedded face with the same tables.
   const sourceMetrics = options.sourceFonts || options.servedFaceLines
-    ? sourceFontLineMetrics(options.sourceFonts, fontSet, options.servedFaceLines) : {};
+    ? sourceFontLineMetrics(options.sourceFonts, fontSet, options.servedFaceLines,
+      source.fonts.libreOfficeLineBoxes === true) : {};
   const appFaceIdentities = new Set(Object.values(sourceMetrics)
     .flatMap((metric) => metric.sourceIdentity?.startsWith('app-face:') ? [metric.sourceIdentity] : []));
   const fontMetrics = snapshotFontMetrics({
@@ -454,6 +455,9 @@ export function createProductionTextLayoutService(
     cjkFallback: options.cjkFallback,
     fontMetrics,
     ...(source.fonts.plainLineBoxes ? { plainLineBoxes: true } : {}),
+    ...(source.fonts.libreOfficeLineBoxes ? { libreOfficeLineBoxes: true } : {}),
+    ...(source.fonts.libreOfficeMsWordGridMetrics ? { libreOfficeMsWordGridMetrics: true } : {}),
+    ...(source.fonts.libreOfficeNoExternalLeading ? { libreOfficeNoExternalLeading: true } : {}),
     eastAsiaFontCharsets: fontFamilyCharsets,
     ...(() => {
       // Symbol-encoded text (core symbol-font.ts) is judged by the core oracle

@@ -483,6 +483,18 @@ pub fn border_width_keyword(token: &str) -> Option<f64> {
     }
 }
 
+/// The canvas line cap of `svg:stroke-linecap` (§20.171: `butt`, `round`,
+/// `square`), in the vocabulary both the DOCX and PPTX models carry
+/// (`butt` / `round` / `square`, not DrawingML's `flat` / `rnd` / `sq`). An
+/// unknown token reads as the attribute's default, `butt`.
+pub fn stroke_line_cap(value: &str) -> &'static str {
+    match value {
+        "round" => "round",
+        "square" => "square",
+        _ => "butt",
+    }
+}
+
 /// The shear factor of `skewX (a)` / `skewY (a)` in `draw:transform`
 /// (§19.228): `skewX (a)` maps (x, y) to (x + k·y, y) and `skewY (a)` maps it
 /// to (x, y + k·x), in page coordinates (y down), with `a` in radians.

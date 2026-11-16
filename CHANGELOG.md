@@ -7,32 +7,36 @@ the corresponding minor release.
 
 ## 0.90.0 — Unreleased
 
-Minor release that lets applications choose where web fonts come from. Two
+Minor release that lets applications choose where web fonts come from and
+adds experimental OpenDocument reading through a new optional package. Two
 changes may need action. If you pass `useGoogleFonts`, replace
 `useGoogleFonts: true` with `fonts: [googleFonts()]`. The alias still works in
-0.90 with a warning; from 0.91.0 it is ignored with the same warning, and never
-throws. If your page has a Content Security Policy and loads web fonts, allow
+0.90 with a warning (when `fonts` is also given, `fonts` wins); from 0.91.0 it
+is ignored with the same warning, and never throws. If your page has a Content Security Policy and loads web fonts, allow
 the font file host (for example `fonts.gstatic.com`) in `connect-src` as well
 as `font-src`: font files are now fetched, and a blocked fetch falls back to
 the host fonts (see **Served font line heights** below). See the
 [0.89 to 0.90 migration guide](docs/migration-0.90.md).
 
 - **Font sources:** the new `fonts` load option takes an ordered list of
-  sources, built with `googleFonts({ cssOrigin?, substitutes?, families? })`,
+  sources, built with `googleFonts({ baseUrl?, substitutions?, additionalFamilies? })`,
   `fontCssApi()`, `fontCss()`, `fontFiles()` (URLs, `data:` URLs or bytes)
   and `fontResolver()` for authenticated or private services. Every source
-  takes `substitutes`; `fontCssApi()`, `fontCss()` and `fontFiles()` also take
-  `credentials`. `googleFonts({ families })` adds Google families outside the
-  preset's catalog. A `FontSource` is opaque, and `fonts` accepts only values
+  takes `substitutions`; `fontCssApi()`, `fontCss()` and `fontFiles()` also take
+  `credentials`. `googleFonts({ additionalFamilies })` adds Google families
+  outside the preset's catalog. A resolver (type `FontResolver`) receives the
+  missing family names as `demand.authoredFamilies` and
+  `demand.fallbackFamilies`; in what it returns, unknown properties are
+  ignored and `weight` may be a number. A `FontSource` is opaque, and `fonts` accepts only values
   the factories returned. The factories are exported from `@silurus/ooxml`
   and from each format entry, along with `officeFontSubstitutions` and
   `googleFontsSubstitutions`. DOCX, XLSX and PPTX behave the same in main and
   worker mode: in worker mode the page runs a resolver and also fetches the
   URLs it returns, so cookies and authentication behave as in main mode.
   Nothing is requested without a source (#1460, #1497).
-- **Custom Google Fonts origin:** `googleFonts({ cssOrigin })` sends the
+- **Custom Google Fonts origin:** `googleFonts({ baseUrl })` sends the
   stylesheet requests to a regional mirror or an internal proxy instead of
-  `fonts.googleapis.com`. Redirects are followed and the font file URLs in the
+  `fonts.googleapis.com`. In 0.90 `baseUrl` must be an origin (no path). Redirects are followed and the font file URLs in the
   returned CSS are used as given, so the mirror controls where those go. A
   failing origin keeps the host fonts and is never replaced by another source
   (#1497).
@@ -53,7 +57,30 @@ the host fonts (see **Served font line heights** below). See the
 - **Resource safety:** font sources have fixed limits. A factory input beyond
   one throws the new `OoxmlError` code `font-source-limit`; a limit reached
   while a document loads fails only the families concerned, with a warning,
-  like a network failure.
+  like a network failure. The limit values, and the `quota` and `metric`
+  strings of `error.violation`, may grow in later minor releases.
+- **OpenDocument (experimental):** the new optional companion package
+  `@silurus/ooxml-opendocument` reads OpenDocument files into the existing
+  models, so the ordinary viewers, loaders and Node sessions display them
+  without an intermediate OOXML package (#1934). Each format is a separate
+  opt-in entry: pass `odp` (`@silurus/ooxml-opendocument/odp`, `.odp`/`.otp`)
+  to the PPTX viewers and loaders, `odt` (`/odt`, `.odt`/`.ott`) to the DOCX
+  ones and `ods` (`/ods`, `.ods`/`.ots`) to the XLSX ones, for example
+  `new PptxViewer(canvas, { odp })`. A reader claims a package only by its
+  `mimetype` file; other input keeps the OOXML path. Importing a reader
+  fetches nothing: its source module and WASM load only when a matching file
+  is opened, and `createOdp()`, `createOdt()` and `createOds()` take
+  `{ moduleUrl, wasmUrl }` for relocated assets. The readers render every
+  feature they read, as ODF 1.3 specifies, with LibreOffice as the reference
+  where it leaves a choice, and draw what the target model cannot express
+  exactly with its nearest equivalent. They reject only corrupt, encrypted
+  (`unsupported-encryption`) or unsafe packages, and packages over a resource
+  limit; they never run scripts, macros or forms or fetch external resources.
+  Install the package at exactly the same version as `@silurus/ooxml`; a
+  mismatched pair fails with `companion-runtime-mismatch`. Without the package
+  nothing changes. See [docs/opendocument.md](docs/opendocument.md) and the
+  [OpenDocument guide](https://ooxml.silurus.dev/opendocument/) (#2168, #2169,
+  #2170, #2189, #2205, #2208).
 - **Failed package parts:** a new `partFailures` getter on `DocxDocument`,
   `PptxPresentation`, `XlsxWorkbook` and every viewer lists the parts that
   failed to parse, and the new `onPartFailure` viewer option is called once for
@@ -101,8 +128,9 @@ the host fonts (see **Served font line heights** below). See the
   hidden now goes to the shown slide before it, as `prevSlide()` does. It used
   to land on the next shown slide, which is usually the slide it started from.
 - **Deprecated:** `useGoogleFonts` is an alias of `fonts: [googleFonts()]` and
-  warns once per JavaScript realm. Combining `useGoogleFonts: true` with
-  `fonts` throws a `TypeError`. The VS Code extension keeps its
+  warns once per JavaScript realm. When `fonts` is also given, `fonts` wins:
+  the alias adds nothing to it, still warns, and never throws. The VS Code
+  extension keeps its
   `ooxmlViewer.useGoogleFonts` setting.
 - **Fixed:** in DOCX, PPTX and XLSX, text, `w:sym`/`a:sym` symbols and list
   markers in Symbol, Wingdings, Wingdings 2, Wingdings 3 and Webdings now

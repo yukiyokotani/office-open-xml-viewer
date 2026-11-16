@@ -104,10 +104,18 @@ export async function renderFile(
     && ext !== 'doc'
     && ext !== 'xls'
     && ext !== 'ppt'
+    && ext !== 'odt'
+    && ext !== 'ott'
+    && ext !== 'ods'
+    && ext !== 'ots'
+    && ext !== 'odp'
+    && ext !== 'otp'
     && ext !== 'csv'
     && ext !== 'tsv'
   ) {
-    throw new Error('Unsupported file — choose .docx, .xlsx or .pptx, or experimental .doc, .xls or .ppt.');
+    throw new Error(
+      'Unsupported file — choose .docx, .xlsx or .pptx, or experimental .doc, .xls, .ppt, .odt, .ods or .odp.',
+    );
   }
 
   if ((ext === 'csv' || ext === 'tsv') && file.size > MAX_DELIMITED_TEXT_FILE_BYTES) {
@@ -129,9 +137,17 @@ export async function renderFile(
   const legacyPpt = ext === 'ppt'
     ? (await import('@silurus/ooxml-legacy-office/ppt')).legacyPpt
     : undefined;
+  // OpenDocument follows the same rule: one reader per selected family
+  // (templates share their document's reader), nothing at page load.
+  const isOdt = ext === 'odt' || ext === 'ott';
+  const isOds = ext === 'ods' || ext === 'ots';
+  const isOdp = ext === 'odp' || ext === 'otp';
+  const odt = isOdt ? (await import('@silurus/ooxml-opendocument/odt')).odt : undefined;
+  const ods = isOds ? (await import('@silurus/ooxml-opendocument/ods')).ods : undefined;
+  const odp = isOdp ? (await import('@silurus/ooxml-opendocument/odp')).odp : undefined;
   assertCurrentRender(generation);
 
-  if (ext === 'xlsx' || ext === 'xls') {
+  if (ext === 'xlsx' || ext === 'xls' || isOds) {
     const host = document.createElement('div');
     host.className = 'lv-xlsx';
     stage.appendChild(host);
@@ -141,6 +157,7 @@ export async function renderFile(
       showZoomSlider: true,
       comments: false,
       ...(legacyXls === undefined ? {} : { legacyXls }),
+      ...(ods === undefined ? {} : { ods }),
       math,
       ...fullRenderers,
     });
@@ -187,7 +204,7 @@ export async function renderFile(
     return { format: 'xlsx', units: 0, unitLabel: 'sheet' };
   }
 
-  if (ext === 'pptx' || ext === 'ppt') {
+  if (ext === 'pptx' || ext === 'ppt' || isOdp) {
     const host = scrollViewerHost(stage);
     let viewer!: PptxScrollViewer;
     const viewerOptions: PptxScrollViewerOptions = {
@@ -202,6 +219,7 @@ export async function renderFile(
       fonts: [googleFonts()],
       comments: false,
       ...(legacyPpt === undefined ? {} : { legacyPpt }),
+      ...(odp === undefined ? {} : { odp }),
       math,
       // Keep progressive preflight and paint off the UI thread while the user
       // scrolls through slides that are still becoming available.
@@ -268,6 +286,7 @@ export async function renderFile(
     fonts: [googleFonts()],
     comments: false,
     ...(legacyDoc === undefined ? {} : { legacyDoc }),
+    ...(odt === undefined ? {} : { odt }),
     math,
     // Keep progressive pagination and painting off the UI thread so scrolling
     // remains responsive while later pages are still being prepared.

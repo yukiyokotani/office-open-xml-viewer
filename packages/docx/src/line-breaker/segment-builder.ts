@@ -70,6 +70,8 @@ import {
   selectResourceMetric,
   allowsReferenceFontMetric,
   selectedFontLineMetric,
+  fontLineBoxProjection,
+  projectedResourceMetric,
   type MetricTupleIndex,
 } from './font-metrics.js';
 
@@ -905,10 +907,21 @@ export function finalizeBuiltSegments(
   retainClosingPairAdvances(runs, environment, segs);
 }
 
+/** Paragraphs LIBREOFFICE_FONT_LINE_BOX leaves on Word's projection, as
+ * before the rule: text in a vertical text box (only horizontal lines were
+ * measured). */
+export function keepsWordLineBoxes(runs: readonly ParagraphLayoutRun[]): boolean {
+  return runs.some((run) => (run as { textBoxVertical?: boolean }).textBoxVertical === true);
+}
+
 export function buildSegments(
   runs: readonly ParagraphLayoutRun[],
   environment: LineLayoutEnvironment,
 ): LayoutSeg[] {
+  if (environment.layoutServices?.text.libreOfficeLineBoxes === true && environment.wordLineBoxes === undefined
+    && keepsWordLineBoxes(runs)) {
+    environment = { ...environment, wordLineBoxes: true };
+  }
   const segs: LayoutSeg[] = [];
   const selectedFontMetrics =
     environment.layoutServices?.text.fontMetrics ??
@@ -1518,13 +1531,15 @@ function emitResolvedTextSegment(
         ?? environment.layoutServices?.text.localMetrics ?? {}), resolvedSpan?.font),
       environment.layoutServices ? { text: environment.layoutServices.text, probe: text,
         ...(textShapeRequest.baseDirection !== undefined ? { baseDirection: textShapeRequest.baseDirection } : {}) } : undefined,
-      environment.layoutServices?.text.plainLineBoxes === true && environment.lineGridActive === true);
+      fontLineBoxProjection(environment.layoutServices?.text, environment.lineGridActive === true,
+        environment.verticalCJK === true || environment.wordLineBoxes === true));
   // LIBRARY_SYNTHESIZED_FACE_LINE_GEOMETRY does not extend to the East Asian
   // floor of a run painted in another slot (see that rule's scope).
   const { lineMetric: eaLineMetric } = selectedFontLineMetric(eaResolution, localEaFloor, naturalMetricAllowed,
       allowsReferenceFontMetric(indexedFontMetrics(environment.layoutServices?.text.fontMetrics
         ?? environment.layoutServices?.text.localMetrics ?? {}), eaResolution), undefined,
-      environment.layoutServices?.text.plainLineBoxes === true && environment.lineGridActive === true);
+      fontLineBoxProjection(environment.layoutServices?.text, environment.lineGridActive === true,
+        environment.verticalCJK === true || environment.wordLineBoxes === true));
   const resolvedEaFloorFamily =
     eaResolution?.resolvedFamily ?? localEaFloor?.family ?? eaFontFamily;
   // WORD_USE_FE_LAYOUT_INHERITED_GRID_MINIMUM was observed for an active
@@ -1761,6 +1776,31 @@ function inlineEffectExtentBox(
   };
 }
 
+/** LIBREOFFICE_FONT_LINE_BOX sides of a tab's own face (its run's ascii
+ * slot), so a line holding only tabs keeps that face's box. Empty when no
+ * geometry of the face is admitted: the tab then keeps the synthetic box. */
+function tabFaceLineBox(
+  run: DocxTextRun,
+  environment: LineLayoutEnvironment,
+  selectedMetric: SegmentBuildContext['selectedMetric'],
+): Partial<Pick<import('./model.js').LayoutTabSeg, 'textOwnedLineBox' | 'lineBoxAscentRatio' | 'lineBoxDescentRatio'>> {
+  const service = environment.layoutServices?.text;
+  const weight = run.bold ? 700 : 400;
+  const style = run.italic ? 'italic' as const : 'normal' as const;
+  const selected = service?.resolve({
+    text: 'x',
+    fonts: { ascii: run.fontFamily, highAnsi: run.fontFamily, eastAsia: run.fontFamilyEastAsia, complexScript: run.fontFamily },
+    slot: 'ascii', weight, style,
+  });
+  if (!selected) return {};
+  const { lineMetric } = selectedFontLineMetric(selected, selectedMetric(selected, 'x'), true,
+    allowsReferenceFontMetric(indexedFontMetrics(service?.fontMetrics ?? service?.localMetrics ?? {}), selected),
+    undefined, fontLineBoxProjection(service, false));
+  return lineMetric?.designAscentRatio != null && lineMetric.designDescentRatio != null
+    ? { textOwnedLineBox: true, lineBoxAscentRatio: lineMetric.designAscentRatio, lineBoxDescentRatio: lineMetric.designDescentRatio }
+    : {};
+}
+
 function appendRunsToSegments(
   runs: readonly ParagraphLayoutRun[],
   environment: LineLayoutEnvironment,
@@ -1952,6 +1992,11 @@ function appendRunsToSegments(
             isTab: true,
             fontSize: t.fontSize,
             measuredWidth: 0,
+            // LIBREOFFICE_FONT_LINE_BOX: a tab portion takes its own face's
+            // box, not the synthetic em box.
+            ...(environment.layoutServices?.text.libreOfficeLineBoxes === true && environment.lineGridActive !== true
+              && environment.verticalCJK !== true && environment.wordLineBoxes !== true
+              ? tabFaceLineBox(t, environment, selectedMetric) : {}),
             bold: t.bold,
             italic: t.italic,
             sourceRunIndex: runIndex,
@@ -2143,8 +2188,11 @@ function appendRunsToSegments(
       // The mark hosting a floating anchor participates in the same natural
       // atLeast line box as a visible text line.
       const naturalMetricAllowed = environment.lineSpacing?.rule !== 'exact';
-      const resourceMetric =
-        naturalMetricAllowed || localFont?.designAscentRatio == null ? localFont : undefined;
+      const resourceMetric = naturalMetricAllowed || localFont?.designAscentRatio == null
+        ? projectedResourceMetric(localFont,
+          fontLineBoxProjection(environment.layoutServices?.text, environment.lineGridActive === true,
+        environment.verticalCJK === true || environment.wordLineBoxes === true))
+        : undefined;
       const referenceMetric =
         naturalMetricAllowed && !resourceMetric && mayUseAuthoredReferenceVerticalMetric(selected)
           && allowsReferenceFontMetric(indexedFontMetrics(environment.layoutServices?.text.fontMetrics
@@ -2153,7 +2201,8 @@ function appendRunsToSegments(
           // spans and paragraph marks only; an anchor host is outside its
           // evidence, so only an exact catalogued tuple lends its geometry.
           ? referenceFontLineMetrics(selected.requestedFamily, weight, style,
-            environment.layoutServices?.text.plainLineBoxes === true && environment.lineGridActive === true)
+            fontLineBoxProjection(environment.layoutServices?.text, environment.lineGridActive === true,
+        environment.verticalCJK === true || environment.wordLineBoxes === true))
           : undefined;
       const familyLineMetric = resourceMetric ?? referenceMetric;
       segs.push({

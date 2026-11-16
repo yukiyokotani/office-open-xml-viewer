@@ -36,12 +36,12 @@ export function indexFontDeclarations(
 export function claimFromIndex(
   index: ReadonlyMap<string, readonly FontFaceDeclaration[]>,
   family: string,
-  substitutes: readonly FontSubstitution[] | undefined,
+  substitutions: readonly FontSubstitution[] | undefined,
   scripts: FontSubstituteScripts = 'all',
 ): FamilyResolution {
   const direct = index.get(fontFamilyKey(family));
   if (direct?.length) return { kind: 'claimed', served: direct[0].family, declarations: direct };
-  for (const substitution of substitutionsFor(substitutes, family, scripts)) {
+  for (const substitution of substitutionsFor(substitutions, family, scripts)) {
     const served = index.get(fontFamilyKey(substitution.use));
     if (served?.length) {
       return { kind: 'claimed', served: served[0].family, substitution, declarations: served };
@@ -60,5 +60,5 @@ export function resolveFontFiles(
   cache.index ??= indexFontDeclarations(source.faces);
   const index = cache.index;
   return new Map(families.map((family) => [fontFamilyKey(family),
-    claimFromIndex(index, family, source.substitutes, scriptsOf(family))]));
+    claimFromIndex(index, family, source.substitutions, scriptsOf(family))]));
 }

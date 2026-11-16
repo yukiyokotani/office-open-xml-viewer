@@ -216,6 +216,19 @@ impl<'a> Reader<'a> {
         node: roxmltree::Node<'a, 'a>,
         _host: Option<(u32, &Inline<'a>)>,
     ) -> Result<Option<DocRun>, String> {
+        // LibreOffice writes a Writer object that is neither visible nor
+        // printable as `drawooo:display="none"` (ODF's `draw:display`,
+        // §19.132, belongs to layers, which a text document lacks; its
+        // importer accepts that spelling on a shape too) and draws it
+        // nowhere. `screen` and `printer` objects are still drawn: this
+        // library paints one page for screen and print alike, so an object
+        // either use shows is kept.
+        if [NS_DRAWOOO, NS_DRAW]
+            .iter()
+            .any(|ns| node.attribute((*ns, "display")) == Some("none"))
+        {
+            return Ok(None);
+        }
         // §19.758-§19.759: a page-anchored drawing with an explicit physical
         // page belongs to that page, wherever it is written (body, paragraph
         // or a master page's header or footer, as LibreOffice reads it): it
@@ -1372,6 +1385,8 @@ impl<'a> Reader<'a> {
             });
             shape.stroke_dash = Some(if dotted { "sysDot" } else { "dash" }.into());
         }
+        // The DOCX model carries canvas cap names (`butt`, not DrawingML's
+        // `flat`); the renderer rejects any other token.
         shape.stroke_join = graphic.get(NS_DRAW, "stroke-linejoin").map(|join| {
             match join {
                 "round" => "round",
@@ -1380,14 +1395,9 @@ impl<'a> Reader<'a> {
             }
             .into()
         });
-        shape.stroke_cap = graphic.get(NS_SVG, "stroke-linecap").map(|cap| {
-            match cap {
-                "round" => "rnd",
-                "square" => "sq",
-                _ => "flat",
-            }
-            .into()
-        });
+        shape.stroke_cap = graphic
+            .get(NS_SVG, "stroke-linecap")
+            .map(|cap| crate::odf_props::stroke_line_cap(cap).into());
         let marker = |name: Option<&str>, width: Option<f64>| -> Option<LineEnd> {
             let name = name?;
             let kind = if name.contains("Circle") {

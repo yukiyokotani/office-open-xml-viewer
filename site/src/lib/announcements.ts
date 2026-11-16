@@ -93,8 +93,8 @@ await viewer.load(await file.arrayBuffer()); // .odp, .otp or .pptx`,
         modules: ['DOCX', 'XLSX', 'PPTX'],
         rationale: 'Applications differ in where they may fetch fonts from: a public CDN, a regional mirror, an internal proxy, a licensed font service or their own servers. The library now asks the application instead of assuming Google Fonts.',
         paragraphs: [
-          'The new `fonts` load option takes an ordered list of sources built with `googleFonts()`, `fontCssApi()`, `fontCss()`, `fontFiles()` and `fontResolver()`. `googleFonts({ cssOrigin })` sends the stylesheet requests to a Google-compatible mirror or proxy, and `googleFonts({ families })` adds Google families outside the preset catalog. `fontCssApi()` covers other per-family CSS APIs, `fontCss()` a static kit stylesheet, `fontFiles()` your own files or bytes, and `fontResolver()` authenticated or private services through a function that runs in the page.',
-          'Sources are consulted per family, in order; the first source that has a face claims the family, and a failure keeps the host font with a `console.warn` instead of rejecting the load. Every source takes `substitutes`, such as the exported `officeFontSubstitutions` (Calibri to Carlito, Cambria to Caladea and others). A `FontSource` is opaque, so create every entry with a factory. Font sources have fixed limits; a factory input beyond one throws the new `OoxmlError` code `font-source-limit`.',
+          'The new `fonts` load option takes an ordered list of sources built with `googleFonts()`, `fontCssApi()`, `fontCss()`, `fontFiles()` and `fontResolver()`. `googleFonts({ baseUrl })` sends the stylesheet requests to a Google-compatible mirror or proxy, and `googleFonts({ additionalFamilies })` adds Google families outside the preset catalog. `fontCssApi()` covers other per-family CSS APIs, `fontCss()` a static kit stylesheet, `fontFiles()` your own files or bytes, and `fontResolver()` authenticated or private services through a function that runs in the page.',
+          'Sources are consulted per family, in order; the first source that has a face claims the family, and a failure keeps the host font with a `console.warn` instead of rejecting the load. Every source takes `substitutions`, such as the exported `officeFontSubstitutions` (Calibri to Carlito, Cambria to Caladea and others). A `FontSource` is opaque, so create every entry with a factory. Font sources have fixed limits; a factory input beyond one throws the new `OoxmlError` code `font-source-limit`.',
           'DOCX and XLSX now load only the `unicode-range` subsets that the document paints, as PPTX already did. DOCX also lays out a served face with Word\'s line rule from the face\'s own OpenType tables, so served fonts no longer set lines too tight. To read those tables, the library fetches the font files itself.',
         ],
         examples: [
@@ -105,14 +105,14 @@ await viewer.load(await file.arrayBuffer()); // .odp, .otp or .pptx`,
 const privateFonts = fontResolver(async (demand, { signal }) => {
   const response = await fetch('/api/fonts/resolve', {
     method: 'POST',
-    body: JSON.stringify({ families: demand.families, fallbackFamilies: demand.fallbackFamilies }),
+    body: JSON.stringify({ authoredFamilies: demand.authoredFamilies, fallbackFamilies: demand.fallbackFamilies }),
     signal,
   });
   return response.json(); // FontFaceDeclaration[]
-}, { substitutes: officeFontSubstitutions });
+}, { substitutions: officeFontSubstitutions });
 
 const viewer = new DocxViewer(canvas, {
-  fonts: [privateFonts, googleFonts({ cssOrigin: 'https://fonts.internal.example' })],
+  fonts: [privateFonts, googleFonts({ baseUrl: 'https://fonts.internal.example' })],
 });`,
           },
         ],
@@ -131,7 +131,7 @@ const viewer = new DocxViewer(canvas, {
         modules: ['DOCX', 'XLSX', 'PPTX'],
         paragraphs: [
           'With font sources enabled, more content now has a precise font demand: accented and other composed text, right-to-left text, ruby, vertical Word sections and table cells, most charts, raster and SVG pictures, and numbered or vertical PowerPoint text no longer make a document fetch every `unicode-range` subset of its families. Some content still does, for example metafile pictures, equations, region-map charts and Word vertical text boxes.',
-          'The font load path does less work on the main thread. Faces are built as their downloads land instead of after a whole batch; `googleFonts()` on its default origin downloads files with a wider parallel pool and, in pages without a service worker, lets the browser decode larger loads off the main thread; and the font-source code is imported while the worker parses instead of afterwards. The PowerPoint font-demand preflight no longer repeats work and keeps the opening slide it already transferred, and the XLSX workbook demand skips text the renderer already covers. Rendering is unchanged.',
+          'The font load path does less work on the main thread. Faces are built as their downloads land instead of after a whole batch; `googleFonts()` on its default origin downloads files with a wider parallel pool and, in pages without a service worker, decodes files from their downloaded bytes on the main thread only for the first MiB of a load and only while that has taken at most half of the load\'s time so far, registering the other files from their URLs so the browser decodes them off the main thread; `unicode-range` lists are parsed in one pass and families sliced alike share their range work; and the font-source code is imported while the worker parses instead of afterwards. The PowerPoint font-demand preflight no longer repeats work and keeps the opening slide it already transferred, and the XLSX workbook demand skips text the renderer already covers. Rendering is unchanged.',
           'XLSX scrolling and repainting no longer rebuild the sheet render index on every frame, which made up most of each frame on very large sheets.',
         ],
       },
@@ -146,7 +146,7 @@ const viewer = new DocxViewer(canvas, {
       {
         title: 'Upgrading',
         paragraphs: [
-          'If you pass `useGoogleFonts`, migrate it. `useGoogleFonts: true` becomes `fonts: [googleFonts()]`, which sends the same stylesheet requests; `useGoogleFonts: false` is simply omitted. The alias still works in v0.90.0 with a warning printed once per JavaScript realm, and combining `useGoogleFonts: true` with `fonts` throws a `TypeError`. From v0.91.0 it is ignored with the same warning and loads no web fonts, but never throws.',
+          'If you pass `useGoogleFonts`, migrate it. `useGoogleFonts: true` becomes `fonts: [googleFonts()]`, which sends the same stylesheet requests; `useGoogleFonts: false` is simply omitted. The alias still works in v0.90.0 with a warning printed once per JavaScript realm, and when `fonts` is also given, `fonts` wins: `useGoogleFonts` adds nothing, a warning is printed and nothing is thrown. From v0.91.0 it is ignored with the same warning and loads no web fonts, but never throws.',
           'If your page has a Content Security Policy and loads web fonts, allow the font file host (for example `fonts.gstatic.com`) in `connect-src` as well as `font-src`: font files are now fetched by the library, and a blocked fetch falls back to the host fonts.',
           'If your application inspects `OoxmlError.code`, one new code can appear: `font-source-limit`, thrown by a font source factory for a value beyond a fixed limit. It reports an application configuration problem, not a document problem.',
           'TypeScript users of the low-level model types may see compile errors where the types now match the parser output: some fields became optional or nullable, and `ChartThreeD.view3DPresent` and PPTX `TableCell.diagonalTL`/`diagonalTR` are renamed to `view3dPresent` and `diagonalTl`/`diagonalTr`. The data sent by the parser is unchanged.',
@@ -155,7 +155,7 @@ const viewer = new DocxViewer(canvas, {
         bullets: [
           '`useGoogleFonts: true` → `fonts: [googleFonts()]`',
           '`useGoogleFonts: false` → omit the option',
-          'A custom Google-compatible origin → `googleFonts({ cssOrigin })`; other sources → `fontCssApi()`, `fontCss()`, `fontFiles()` or `fontResolver()`',
+          'A custom Google-compatible origin → `googleFonts({ baseUrl })`; other sources → `fontCssApi()`, `fontCss()`, `fontFiles()` or `fontResolver()`',
         ],
         links: [
           { label: 'Font sources guide, including migration', href: '/fonts#migration' },
