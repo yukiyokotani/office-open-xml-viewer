@@ -133,7 +133,7 @@ fn with_acquired_doc<T>(
     let fib_schema = fib::known_schema(&word)?;
     let effective_nfib = fib_schema.effective_version();
     if effective_nfib < FIB_WORD_97 {
-        return Err(unsupported(
+        return Err(crate::rejection::out_of_scope_version(
             "only Word 97-2003 binary documents are supported",
         ));
     }

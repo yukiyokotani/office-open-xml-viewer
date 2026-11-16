@@ -253,7 +253,11 @@ pub(super) fn build(
             "direct DOC model encountered unsupported formatting",
         ));
     }
-    if facts.pictures.omitted || facts.floating.omitted {
+    facts
+        .pictures
+        .omitted
+        .admit("direct DOC model encountered omitted drawing content")?;
+    if facts.floating.omitted {
         return Err(unsupported(
             "direct DOC model encountered omitted drawing content",
         ));
@@ -2982,7 +2986,7 @@ mod tests {
                     3 => facts.formatting.unsupported_character_properties = true,
                     4 => facts.formatting.unsupported_paragraph_properties = true,
                     5 => facts.formatting.unsupported_piece_properties = true,
-                    6 => facts.pictures.omitted = true,
+                    6 => facts.pictures.omitted.defer("test"),
                     7 => facts.floating.omitted = true,
                     _ => unreachable!(),
                 }
@@ -3632,7 +3636,7 @@ mod tests {
             // Shape 100 stays outside the inline picture-frame class.
             let mut model_budget = 1024;
             assert_eq!(facts.pictures.direct_inline(0, &mut model_budget)?, None);
-            assert!(facts.pictures.omitted);
+            assert!(facts.pictures.omitted.is_pending());
             assert!(!facts.pictures.has_selected_direct_resources());
 
             // A failed acquisition commits neither budget nor a cache entry.

@@ -2,22 +2,27 @@
 // legacy Office reader package (see playwright.config.ts). The page is the
 // DOCX package's own VRT fixture on its dev server; this package supplies
 // the direct DOC source, so no OOXML package test imports the reader.
-import { existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { test } from '@playwright/test';
 import pixelmatch from 'pixelmatch';
 import { PNG } from 'pngjs';
-import { packagesDir, viewerOrigin, padded, pdfPages, sideBySide, type Rendered } from './survey.js';
+import {
+  corpusFiles,
+  packagesDir,
+  padded,
+  pdfPages,
+  referencePdf,
+  sideBySide,
+  surveyOutput,
+  viewerOrigin,
+  type Rendered,
+} from './survey.js';
 
 const enabled = process.env.LEGACY_CORPUS === '1';
 const corpus = resolve(packagesDir, 'legacy-office/public/private/doc');
 const filter = process.env.LEGACY_CORPUS_FILTER;
-const names = enabled && existsSync(corpus)
-  ? readdirSync(corpus)
-    .filter((name) => name.toLowerCase().endsWith('.doc') && !name.startsWith('~$'))
-    .filter((name) => !filter || name.includes(filter))
-    .sort()
-  : [];
+const names = enabled ? corpusFiles(corpus, 'doc', filter) : [];
 
 test.describe('legacy DOC corpus survey', () => {
   test.skip(!enabled, 'Set LEGACY_CORPUS=1 and LEGACY_CORPUS_OUT to run');
@@ -26,10 +31,10 @@ test.describe('legacy DOC corpus survey', () => {
   for (const name of names) {
     test(name, async ({ page }) => {
       test.setTimeout(600_000);
-      const out = resolve(process.env.LEGACY_CORPUS_OUT!, 'doc', name.replace(/[^\w.-]+/gu, '_'));
+      const out = surveyOutput(resolve(process.env.LEGACY_CORPUS_OUT!, 'doc'), name);
       mkdirSync(out, { recursive: true });
-      const pdf = resolve(corpus, name.replace(/\.doc$/iu, '.pdf'));
-      const reference = existsSync(pdf) ? pdfPages(pdf, resolve(out, 'word')) : [];
+      const pdf = referencePdf(corpus, name);
+      const reference = pdf ? pdfPages(pdf, resolve(out, 'word')) : [];
       const width = reference[0]?.width ?? 816;
       const directDoc = resolve(packagesDir, 'legacy-office/src/legacy-doc.ts');
       await page.goto(`${viewerOrigin('doc')}/tests/visual/fixture.html`);

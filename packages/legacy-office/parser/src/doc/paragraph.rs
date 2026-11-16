@@ -355,13 +355,19 @@ impl Properties {
                 self.record_frame_origin(code, FrameOrigin::Decoded);
             }
             0x4439 => {
+                // MS-DOC 2.6.2 sprmPWAlignFont: the value MUST be one of
+                // 0..=4. Any other value is ignored as if the SPRM were
+                // absent, so an inherited alignment stays in effect.
                 self.text_alignment = Some(match u16_at(operand, 0)? {
                     0 => "top",
                     1 => "center",
                     2 => "baseline",
                     3 => "bottom",
                     4 => "auto",
-                    _ => return Err(unsupported("invalid Word paragraph text alignment")),
+                    _ => {
+                        crate::rejection::ignored_value("invalid Word paragraph text alignment");
+                        return Ok(true);
+                    }
                 });
             }
             _ => return Ok(false),
@@ -557,6 +563,27 @@ pub fn prm0(prm: u16) -> Option<[u8; 3]> {
 mod tests {
     use super::*;
     use crate::doc::sprm::{Budget, Sprms};
+
+    #[test]
+    fn out_of_range_text_alignment_is_ignored_and_truncation_stays_fatal() {
+        use crate::rejection::{take_best_effort, BestEffort};
+        take_best_effort();
+        let mut properties = Properties::default();
+        assert!(properties.apply(0x4439, &5u16.to_le_bytes()).unwrap());
+        assert_eq!(properties.text_alignment, None);
+        assert!(properties.apply(0x4439, &3u16.to_le_bytes()).unwrap());
+        assert!(properties.apply(0x4439, &0xffffu16.to_le_bytes()).unwrap());
+        assert_eq!(properties.text_alignment, Some("bottom"));
+        assert_eq!(
+            take_best_effort(),
+            [(
+                BestEffort::IgnoredValue,
+                "invalid Word paragraph text alignment"
+            ); 2]
+        );
+        assert!(properties.apply(0x4439, &[5]).is_err());
+        assert!(take_best_effort().is_empty());
+    }
 
     fn projected(properties: &Properties) -> serde_json::Value {
         serde_json::to_value(properties.direct_paragraph()).unwrap()

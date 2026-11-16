@@ -1,7 +1,7 @@
 // Shared helpers of the local-only legacy corpus surveys (Office PDFs).
 import { execFileSync } from 'node:child_process';
-import { readFileSync, readdirSync } from 'node:fs';
-import { basename, dirname, resolve } from 'node:path';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { basename, dirname, posix, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PNG } from 'pngjs';
 
@@ -11,6 +11,56 @@ export const packagesDir = resolve(dirname(fileURLToPath(import.meta.url)), '../
 export interface Rendered {
   readonly error?: string;
   readonly pages: readonly string[];
+}
+
+/**
+ * Corpus inputs with `extension` under `corpus`, subfolders included, as
+ * sorted `/`-separated relative paths. `filter` keeps paths containing it.
+ * Symbolic links are not followed.
+ */
+export function corpusFiles(corpus: string, extension: string, filter?: string): string[] {
+  if (!existsSync(corpus)) return [];
+  const names: string[] = [];
+  const walk = (relative: string): void => {
+    for (const entry of readdirSync(resolve(corpus, relative), { withFileTypes: true })) {
+      const path = posix.join(relative, entry.name);
+      if (entry.isDirectory()) {
+        if (!entry.name.startsWith('.')) walk(path);
+      } else if (
+        entry.isFile()
+        && entry.name.toLowerCase().endsWith(`.${extension}`)
+        && !entry.name.startsWith('~$')
+      ) names.push(path);
+    }
+  };
+  walk('');
+  return names.filter((name) => !filter || name.includes(filter)).sort();
+}
+
+/**
+ * Office PDF of the corpus input `name`: the PDF next to it, otherwise the
+ * one in a `windows` or `windows-<n>` export folder beside it (the folder
+ * with the highest number when several hold it).
+ */
+export function referencePdf(corpus: string, name: string): string | undefined {
+  const directory = resolve(corpus, dirname(name));
+  const pdf = `${basename(name).replace(/\.[^.]+$/u, '')}.pdf`;
+  if (existsSync(resolve(directory, pdf))) return resolve(directory, pdf);
+  return readdirSync(directory, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory() && /^windows(?:-\d+)?$/u.test(entry.name))
+    .map((entry) => entry.name)
+    .sort((a, b) => b.localeCompare(a, 'en', { numeric: true }))
+    .map((folder) => resolve(directory, folder, pdf))
+    .find((candidate) => existsSync(candidate));
+}
+
+/**
+ * Output directory of the corpus input `name` under `root`: its own folders,
+ * then its sanitized file name, so inputs of different folders never share
+ * one.
+ */
+export function surveyOutput(root: string, name: string): string {
+  return resolve(root, dirname(name), basename(name).replace(/[^\w.-]+/gu, '_'));
 }
 
 export function pdfPages(pdf: string, prefix: string): PNG[] {
