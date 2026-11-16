@@ -30,6 +30,7 @@ mod pictures;
 mod sections;
 mod settings;
 mod sprm;
+mod sprm_catalog;
 mod table;
 // Logical table/row/cell indexing for the direct model's style resolution.
 mod table_context;

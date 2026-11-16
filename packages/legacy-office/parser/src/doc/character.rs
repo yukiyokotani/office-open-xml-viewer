@@ -564,12 +564,16 @@ impl Properties {
                 // Windows code page (the corpus value is 1252). MS-DOC 2.4.1
                 // already fixes compressed text to code page 1252 and stores
                 // other text as UTF-16, and a Word-saved DOC/DOCX corpus pair
-                // has no counterpart for it in the DOCX style. Only that
-                // value is accepted as having no display effect.
+                // has no counterpart for it in the DOCX style: that value has
+                // no display effect. Being undefined, any other value is
+                // skipped like every undefined property (`sprm_catalog`).
                 if operand.len() != 2 {
                     return Err(unsupported("invalid Word character code page"));
                 }
-                return Ok(u16_at(operand, 0)? == 1252);
+                if u16_at(operand, 0)? != 1252 {
+                    crate::rejection::skipped("unknown Word property");
+                }
+                return Ok(true);
             }
             0x2879 => {
                 // MS-DOC 2.6.1 sprmCLbcCRJ / 2.9.129 LBCOperand: where text
@@ -860,7 +864,7 @@ impl Properties {
             ),
             0x6870 => ("color", colorref(operand)?),
             0x6877 => ("uColor", colorref(operand)?),
-            _ => return Ok(false),
+            _ => return Ok(super::sprm_catalog::skip_undefined(code)),
         };
         self.values.insert(key, value);
         Ok(true)
@@ -1178,7 +1182,16 @@ mod tests {
         let mut value = base.clone();
         assert!(value.apply(0x486b, &1252u16.to_le_bytes(), &base).unwrap());
         assert_eq!(value, base);
-        assert!(!value.apply(0x486b, &932u16.to_le_bytes(), &base).unwrap());
+        crate::rejection::take_best_effort();
+        assert!(value.apply(0x486b, &932u16.to_le_bytes(), &base).unwrap());
+        assert_eq!(
+            crate::rejection::take_best_effort(),
+            [(
+                crate::rejection::BestEffort::Skipped,
+                "unknown Word property"
+            )]
+        );
+        assert_eq!(value, base);
         assert!(base.clone().apply(0x486b, &[0xe4], &base).is_err());
     }
 

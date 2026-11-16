@@ -3762,12 +3762,34 @@ mod tests {
         assert!(!formatting.unsupported_paragraph_properties);
         assert!(!formatting.unsupported_piece_properties);
 
-        let unsupported = [0x00, 0x24, 0];
+        // A defined property without a projection keeps its gate.
+        let unsupported = [0x43, 0x24, 0];
         let mut formatting = empty();
         formatting
             .direct_paragraph(0, None, 0, 1, &[&unsupported])
             .unwrap();
         assert!(formatting.unsupported_paragraph_properties);
+        // An opcode MS-DOC does not define is skipped.
+        let undefined = [0x00, 0x24, 0];
+        let mut formatting = empty();
+        crate::rejection::take_best_effort();
+        let skipped = formatting
+            .direct_paragraph(0, None, 0, 1, &[&undefined])
+            .unwrap()
+            .paragraph;
+        let plain = empty()
+            .direct_paragraph(0, None, 0, 1, &[&[]])
+            .unwrap()
+            .paragraph;
+        assert_eq!(
+            serde_json::to_value(skipped).unwrap(),
+            serde_json::to_value(plain).unwrap()
+        );
+        assert!(!formatting.unsupported_paragraph_properties);
+        assert!(crate::rejection::take_best_effort().contains(&(
+            crate::rejection::BestEffort::Skipped,
+            "unknown Word property"
+        )));
     }
 
     #[test]

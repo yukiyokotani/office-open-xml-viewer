@@ -354,7 +354,7 @@ impl Properties {
                     }
                 });
             }
-            _ => return Ok(false),
+            _ => return Ok(super::sprm_catalog::skip_undefined(code)),
         }
         Ok(true)
     }
