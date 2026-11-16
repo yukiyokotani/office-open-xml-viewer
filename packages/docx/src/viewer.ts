@@ -603,13 +603,16 @@ export class DocxViewer implements ZoomableViewer {
       this._destroyed || this._doc !== doc || generation !== this._searches[kind];
     // Preserve the established synchronous empty-query cancellation contract.
     // A real full-document search must wait for authoritative pagination or its
-    // result would silently describe only the opening prefix. A superseded
-    // highlight request reports nothing, also when the layout fails; a find
-    // reports that failure as before.
+    // result would silently describe only the opening prefix. A find owns a
+    // failure of that layout and reports it through its Promise, as before. A
+    // highlight request does not: the failure stays on the viewer's error
+    // channel (delivered once, whether or not the request is still current),
+    // and the request resolves with no matches.
     if (!empty && !doc.layoutComplete) {
-      await this._errorRouter.ownBackgroundLifecycle(
-        () => doc.waitUntilLayoutComplete(), kind ? superseded : undefined);
-      if (superseded()) return [];
+      await (kind
+        ? doc.waitUntilLayoutComplete().catch(() => undefined)
+        : this._errorRouter.ownBackgroundLifecycle(() => doc.waitUntilLayoutComplete()));
+      if (superseded() || (kind && !doc.layoutComplete)) return [];
     }
     const matches = await this._errorRouter.ownAwaitable(scan);
     // Redraw the current page's highlights (matches on it become visible without
@@ -656,7 +659,10 @@ export class DocxViewer implements ZoomableViewer {
    * are used), in `mode: 'main'` and `mode: 'worker'`. A new document, or a
    * call that changes the layout ({@link setShowTrackedChanges}), drops the
    * highlights and cancels a request that is still waiting for the layout;
-   * call this again afterwards.
+   * call this again afterwards. If the layout of a progressively loaded
+   * document fails, a waiting request resolves with no matches; the failure
+   * is reported once through the viewer's error channel (`onError`), not
+   * through this Promise.
    */
   async highlightText(
     groups: readonly TextHighlightGroup[],

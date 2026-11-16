@@ -1328,13 +1328,15 @@ export class PptxScrollViewer implements ZoomableViewer {
       return cleared;
     }
     if (!presentation.layoutComplete) {
-      // A superseded highlight request reports nothing, also when the layout
-      // fails; a find reports that failure as before.
-      await this._errorRouter.ownBackgroundLifecycle(
-        () => presentation.waitUntilLayoutComplete(), kind ? superseded : undefined,
-      );
+      // A find owns a failure of the deck preparation and reports it through
+      // its Promise, as before. A highlight request does not: the failure
+      // stays on the viewer's error channel (delivered once, whether or not
+      // the request is still current), and the request resolves with no matches.
+      await (kind
+        ? presentation.waitUntilLayoutComplete().catch(() => undefined)
+        : this._errorRouter.ownBackgroundLifecycle(() => presentation.waitUntilLayoutComplete()));
     }
-    if (superseded()) return [];
+    if (superseded() || (kind && !presentation.layoutComplete)) return [];
     // The complete deck's hidden flags decide which slides a search may match.
     this._refreshShownSlides();
     const matches = await this._errorRouter.ownAwaitable(scan);
@@ -1374,7 +1376,9 @@ export class PptxScrollViewer implements ZoomableViewer {
    * groups may overlap; within a group the longer match wins. An empty set
    * clears the highlights. A new presentation, or entering or leaving
    * `hiddenSlideMode: 'skip'`, drops the highlights; call this again
-   * afterwards.
+   * afterwards. If the preparation of a progressively loaded deck fails, a
+   * waiting request resolves with no matches; the failure is reported once
+   * through the viewer's error channel (`onError`), not through this Promise.
    */
   async highlightText(
     groups: readonly TextHighlightGroup[],

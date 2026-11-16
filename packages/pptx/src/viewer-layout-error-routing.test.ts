@@ -42,29 +42,37 @@ describe.each(['viewer', 'scroll'] as const)('PPTX %s progressive failure routin
     surface.destroy();
   });
 
-  it('routes a failure a current highlight request waits for only through its Promise', async () => {
+  // A highlight request never owns the preparation failure: it resolves with
+  // no matches, and the failure is delivered once on the viewer's error
+  // channel, whether the request is current or was cleared.
+  it.each(['current', 'cleared'] as const)(
+    'routes a failure once through onError while a %s highlight request waits', async (state) => {
+      const onError = vi.fn();
+      const { engine, surface } = await loadedSurface(kind, { onError });
+      const error = new Error('layout failed');
+      const highlighting = surface.highlightText([{ id: 'a', terms: ['needle'] }]);
+      if (state === 'cleared') surface.clearHighlights();
+      engine.setLayoutProgress(1, false, error);
+
+      await expect(highlighting).resolves.toEqual([]);
+      expect(onError).toHaveBeenCalledTimes(1);
+      expect(onError).toHaveBeenCalledWith(error);
+      expect(await surface.highlightNext()).toBeNull();
+      surface.destroy();
+    },
+  );
+
+  it('keeps a failure a find waits for on the find Promise while a highlight request waits too', async () => {
     const onError = vi.fn();
     const { engine, surface } = await loadedSurface(kind, { onError });
     const error = new Error('layout failed');
     const highlighting = surface.highlightText([{ id: 'a', terms: ['needle'] }]);
+    const finding = surface.findText('needle');
     engine.setLayoutProgress(1, false, error);
 
-    await expect(highlighting).rejects.toBe(error);
+    await expect(finding).rejects.toBe(error);
+    await expect(highlighting).resolves.toEqual([]);
     expect(onError).not.toHaveBeenCalled();
-    surface.destroy();
-  });
-
-  it('routes a failure once through onError when the only awaiter is a cleared highlight request', async () => {
-    const onError = vi.fn();
-    const { engine, surface } = await loadedSurface(kind, { onError });
-    const error = new Error('layout failed');
-    const cleared = surface.highlightText([{ id: 'a', terms: ['needle'] }]);
-    surface.clearHighlights();
-    engine.setLayoutProgress(1, false, error);
-
-    await expect(cleared).resolves.toEqual([]);
-    expect(onError).toHaveBeenCalledTimes(1);
-    expect(onError).toHaveBeenCalledWith(error);
     surface.destroy();
   });
 

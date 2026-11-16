@@ -202,7 +202,7 @@ describe('DocxViewer text highlights: the set is taken when the call is made', (
 });
 
 describe('DocxViewer text highlights and a failed layout', () => {
-  it('reports the failure to the current request only; a cleared request reports nothing', async () => {
+  it('resolves waiting highlight requests with no matches; a find reports the failure as before', async () => {
     installMeasuringDom();
     const engine = new FakeDocxEngine(2, [{ widthPt: 612, heightPt: 792 }]);
     engine.feedTextRuns = [RUN];
@@ -217,7 +217,7 @@ describe('DocxViewer text highlights and a failed layout', () => {
     const outcomes = Promise.allSettled([cleared, current, found]);
     engine.setLayoutFailure(new Error('layout failed'));
     expect((await outcomes).map((outcome) => outcome.status === 'fulfilled' ? outcome.value : String(outcome.reason)))
-      .toEqual([[], 'Error: layout failed', 'Error: layout failed']);
+      .toEqual([[], [], 'Error: layout failed']);
     viewer.destroy();
   });
 });
@@ -308,7 +308,7 @@ describe.each(['main', 'worker'] as const)('DocxScrollViewer text highlights (%s
     viewer.destroy();
   });
 
-  it('reports a failed layout to the current request only, and clears an empty set without waiting', async () => {
+  it('resolves waiting requests with no matches when the layout fails, and clears an empty set without waiting', async () => {
     const { viewer, engine, boxes } = mount(2);
     await viewer.highlightText(GROUPS);
     expect(boxes().length).toBeGreaterThan(0);
@@ -325,7 +325,7 @@ describe.each(['main', 'worker'] as const)('DocxScrollViewer text highlights (%s
     const outcomes = Promise.allSettled([cleared, current, found]);
     engine.setLayoutFailure(new Error('layout failed'));
     expect((await outcomes).map((outcome) => outcome.status === 'fulfilled' ? outcome.value : String(outcome.reason)))
-      .toEqual([[], 'Error: layout failed', 'Error: layout failed']);
+      .toEqual([[], [], 'Error: layout failed']);
     viewer.destroy();
   });
 

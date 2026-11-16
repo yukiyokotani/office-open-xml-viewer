@@ -1015,13 +1015,15 @@ export class PptxViewer implements ZoomableViewer {
       return cleared;
     }
     if (!engine.layoutComplete) {
-      // A superseded highlight request reports nothing, also when the layout
-      // fails; a find reports that failure as before.
-      await this.errorRouter.ownBackgroundLifecycle(
-        () => engine.waitUntilLayoutComplete(), kind ? superseded : undefined,
-      );
+      // A find owns a failure of the deck preparation and reports it through
+      // its Promise, as before. A highlight request does not: the failure
+      // stays on the viewer's error channel (delivered once, whether or not
+      // the request is still current), and the request resolves with no matches.
+      await (kind
+        ? engine.waitUntilLayoutComplete().catch(() => undefined)
+        : this.errorRouter.ownBackgroundLifecycle(() => engine.waitUntilLayoutComplete()));
     }
-    if (superseded()) return [];
+    if (superseded() || (kind && !engine.layoutComplete)) return [];
     this._findSkipsHidden = this._hiddenMode === 'skip' && this.visibleSlideCount > 0;
     const matches = await this.errorRouter.ownAwaitable(scan);
     if (superseded()) return [];
@@ -1066,7 +1068,10 @@ export class PptxViewer implements ZoomableViewer {
    * Scans the same slides as {@link findText} (and reuses its slide text when
    * both are used), in `mode: 'main'` and `mode: 'worker'`. A new
    * presentation, or entering or leaving `hiddenSlideMode: 'skip'`, drops the
-   * highlights; call this again afterwards.
+   * highlights; call this again afterwards. If the preparation of a
+   * progressively loaded deck fails, a waiting request resolves with no
+   * matches; the failure is reported once through the viewer's error channel
+   * (`onError`), not through this Promise.
    */
   async highlightText(
     groups: readonly TextHighlightGroup[],

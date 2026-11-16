@@ -1197,14 +1197,16 @@ export class DocxScrollViewer implements ZoomableViewer {
     // incomplete so that an ordinary document still starts its search
     // synchronously: `findText()` followed immediately by `clearFind()` must
     // cancel the find, which it cannot do if the find has not begun. An empty
-    // highlight set is a clear and does not wait. A superseded highlight
-    // request reports nothing, also when the layout fails; a find reports that
-    // failure as before.
+    // highlight set is a clear and does not wait. A find owns a failure of
+    // that layout and reports it through its Promise, as before. A highlight
+    // request does not: the failure stays on the viewer's error channel
+    // (delivered once, whether or not the request is still current), and the
+    // request resolves with no matches.
     if (!empty && doc.layoutComplete === false) {
-      await this._errorRouter.ownBackgroundLifecycle(
-        () => doc.waitUntilLayoutComplete(), kind ? superseded : undefined,
-      );
-      if (superseded()) return [];
+      await (kind
+        ? doc.waitUntilLayoutComplete().catch(() => undefined)
+        : this._errorRouter.ownBackgroundLifecycle(() => doc.waitUntilLayoutComplete()));
+      if (superseded() || (kind && doc.layoutComplete === false)) return [];
     }
     const matches = await this._errorRouter.ownAwaitable(scan);
     this._highlights.redrawAll();
@@ -1243,6 +1245,9 @@ export class DocxScrollViewer implements ZoomableViewer {
    * clears the highlights. A new document, or a call that changes the layout
    * ({@link setShowTrackedChanges}), drops the highlights and cancels a
    * request that is still waiting for the layout; call this again afterwards.
+   * If the layout of a progressively loaded document fails, a waiting request
+   * resolves with no matches; the failure is reported once through the
+   * viewer's error channel (`onError`), not through this Promise.
    */
   async highlightText(
     groups: readonly TextHighlightGroup[],

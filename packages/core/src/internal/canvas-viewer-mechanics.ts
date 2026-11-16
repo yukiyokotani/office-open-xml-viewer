@@ -560,10 +560,8 @@ export class CanvasViewerErrorRouter {
   private readonly handled = new WeakSet<Error>();
   /** Awaiters for the same background lifecycle reported by reportBackground.
    * This is deliberately narrower than all Viewer promises: an unrelated find
-   * or render operation must never suppress a terminal layout notification.
-   * Each awaiter is held as its own "superseded" test: once that returns true
-   * it is no longer a recipient of the failure. */
-  private readonly backgroundLifecycleOwners = new Set<() => boolean>();
+   * or render operation must never suppress a terminal layout notification. */
+  private backgroundLifecycleOwners = 0;
 
   constructor(
     private readonly viewerName: string,
@@ -601,25 +599,13 @@ export class CanvasViewerErrorRouter {
 
   /** Claim the background lifecycle while an explicit public Promise waits for
    * it. Publication and Promise rejection can cross any number of async jobs;
-   * synchronous ownership makes their single-channel contract deterministic.
-   *
-   * With `superseded`, the request stops being a recipient once that returns
-   * true: a failure is then neither rethrown to it nor claimed by it, so
-   * {@link reportBackground} still delivers it to another awaiter or to
-   * `onError`. Its caller checks `superseded` after the wait as it does when
-   * the wait succeeds. */
-  async ownBackgroundLifecycle<T>(operation: () => Promise<T>, superseded?: () => boolean): Promise<T> {
-    // A fresh function per call, so two awaiters are never one Set entry.
-    const owner = (): boolean => superseded?.() === true;
-    this.backgroundLifecycleOwners.add(owner);
+   * synchronous ownership makes their single-channel contract deterministic. */
+  async ownBackgroundLifecycle<T>(operation: () => Promise<T>): Promise<T> {
+    this.backgroundLifecycleOwners++;
     try {
-      return await operation();
-    } catch (error) {
-      if (owner()) return undefined as T;
-      this.markHandled(error);
-      throw error;
+      return await this.ownAwaitable(operation);
     } finally {
-      this.backgroundLifecycleOwners.delete(owner);
+      this.backgroundLifecycleOwners--;
     }
   }
 
@@ -627,8 +613,7 @@ export class CanvasViewerErrorRouter {
    * owner or an explicit Promise awaiting this same lifecycle. */
   reportBackground(error: unknown, explicitCallbackOwner = false): void {
     const normalized = error instanceof Error ? error : new Error(String(error));
-    if (explicitCallbackOwner
-      || [...this.backgroundLifecycleOwners].some((superseded) => !superseded())) {
+    if (explicitCallbackOwner || this.backgroundLifecycleOwners > 0) {
       this.markHandled(normalized);
       return;
     }
