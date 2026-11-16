@@ -95,8 +95,8 @@ fn reference(row: u16, column: u16) -> String {
 }
 
 /// The notes of one sheet as model comments. `text` gives the stream offset
-/// of the TxO of a comment object by its identifier; a note whose object has
-/// none has no text. `budget` bounds the retained comment bytes of the
+/// of the TxO of a comment object by its identifier; a note without such an
+/// object is not a comment. `budget` bounds the retained comment bytes of the
 /// workbook.
 pub(super) fn project(
     notes: &Notes,
@@ -109,14 +109,16 @@ pub(super) fn project(
         .try_reserve_exact(notes.0.len())
         .map_err(|_| crate::rejection::resource("XLS comment allocation failed"))?;
     for note in &notes.0 {
+        // A Note without its comment object is no comment: Excel shows
+        // none, and such a record alone never changed the sheet.
+        let Some(offset) = text(note.object) else {
+            continue;
+        };
         if note.shown {
             // The box Excel keeps on the sheet is not drawn.
             crate::rejection::skipped("BIFF cell comments are not projected");
         }
-        let text = match text(note.object) {
-            Some(offset) => super::shapes::txo_text(records, offset)?,
-            None => String::new(),
-        };
+        let text = super::shapes::txo_text(records, offset)?;
         let cell_ref = reference(note.row, note.column);
         let bytes = std::mem::size_of::<xlsx_model::XlsxComment>()
             + text.len()
@@ -187,7 +189,9 @@ mod tests {
         ];
         let mut notes = Notes::default();
         notes.push(&note(2, 1, 0, 7, "Ann")).unwrap();
-        notes.push(&note(0, 27, 0x0002, 8, "")).unwrap();
+        notes.push(&note(0, 27, 0x0002, 7, "")).unwrap();
+        // A Note that names no comment object.
+        notes.push(&note(5, 5, 0, 9, "Bob")).unwrap();
         let mut budget = 1 << 20;
         let comments = project(
             &notes,
@@ -200,7 +204,7 @@ mod tests {
             serde_json::to_value(&comments).unwrap(),
             serde_json::json!([
                 {"kind": "note", "cellRef": "B3", "author": "Ann", "text": "hello"},
-                {"kind": "note", "cellRef": "AB1", "text": ""}
+                {"kind": "note", "cellRef": "AB1", "text": "hello"}
             ])
         );
         // The second note's box is shown on the sheet (fShow) and not drawn.
@@ -233,7 +237,7 @@ mod tests {
         take_best_effort();
         // Retained bytes are bounded.
         let mut small = 8;
-        assert!(project(&notes, &records, |_| None, &mut small)
+        assert!(project(&notes, &records, |_| Some(40), &mut small)
             .unwrap_err()
             .starts_with("LEGACY_RESOURCE_LIMIT:"));
         // A truncated author and a column past IV are malformed.
