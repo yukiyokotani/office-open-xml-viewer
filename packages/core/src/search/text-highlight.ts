@@ -1,0 +1,60 @@
+/**
+ * Text highlights: a set of term groups an application keeps highlighted in a
+ * viewer, independent of the interactive find (`findText`).
+ *
+ * `viewer.highlightText(groups)` replaces the whole set. Each group is searched
+ * on its own by the on-demand term search (`term-search.ts`); groups do not
+ * affect each other, so where matches of two groups overlap both are kept and
+ * both are painted (in group order, the later group on top). Within one group
+ * the longer match wins an overlap. The combined list is in document order,
+ * and matches that start at the same place follow the group order.
+ */
+import type { FindMatch } from './find-match';
+
+/** One group of terms highlighted together, for example all terms from one
+ *  source. */
+export interface TextHighlightGroup {
+  /** Application-chosen identifier, unique within the set. Reported as
+   *  {@link TextHighlightMatch.group} on every match of this group. */
+  id: string;
+  /** The texts to highlight. Each is matched literally, so a phrase is one term
+   *  that contains spaces. Empty and repeated terms are ignored; terms are not
+   *  trimmed. */
+  terms: readonly string[];
+  /** CSS background of this group's highlight boxes, applied verbatim like
+   *  `findHighlightColors`. Use a translucent value so the text stays readable.
+   *  Any CSS `background` value is accepted, so a pattern (for example a
+   *  `repeating-linear-gradient`) can mark a group without relying on hue.
+   *  XLSX also draws the cell border in this value when it is a plain colour.
+   *  Omitted: a translucent green. */
+  color?: string;
+  /** Match case exactly. Default `false`. */
+  caseSensitive?: boolean;
+  /** Match whole words only; see `FindMatchesOptions.wholeWord` for the rule.
+   *  Default `false`. */
+  wholeWord?: boolean;
+}
+
+/** One highlighted occurrence, as returned by `highlightText`,
+ *  `highlightNext` and `highlightPrev`. */
+export interface TextHighlightMatch<Loc = unknown> extends FindMatch<Loc> {
+  /** The {@link TextHighlightGroup.id} of the group that produced the match. */
+  group: string;
+  /** The term of that group that matched, as the application supplied it. */
+  term: string;
+}
+
+/** Inline declarations that mark the active text highlight (the one
+ *  `highlightNext` / `highlightPrev` last landed on). A ring instead of a
+ *  colour change: the group background keeps its meaning, and the marker does
+ *  not depend on hue. Dark ring with a light halo, visible on any page colour. */
+export const ACTIVE_TEXT_HIGHLIGHT_RING = 'outline:2px solid #111;box-shadow:0 0 0 4px #fff;';
+
+/** Whether the set would highlight nothing (no group has a non-empty term). */
+export function textHighlightGroupsAreEmpty(groups: readonly TextHighlightGroup[]): boolean {
+  return groups.every((group) => group.terms.every((term) => term.length === 0));
+}
+
+/** Load the term-list matcher (several terms, whole words, group search). It
+ *  is a separate chunk: the single-query find does not need it. */
+export const loadTermSearch = (): Promise<typeof import('./term-search')> => import('./term-search');

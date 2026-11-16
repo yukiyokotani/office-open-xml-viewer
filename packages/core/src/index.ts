@@ -859,6 +859,7 @@ export { fontAdvanceBiasEm } from './text/font-advance-metrics';
 export {
   buildTextIndex,
   findMatches,
+  foldPreservingLength,
   type SearchRun,
   type TextIndex,
   type MatchRunSlice,
@@ -869,6 +870,13 @@ export { sliceHorizontalExtent, overlayPercent } from './search/highlight-rect';
 export { nextActive, prevActive, clampActive } from './search/find-cursor';
 export type { FindMatch } from './search/find-match';
 export type { FindHighlightColors } from './search/find-highlight';
+export {
+  ACTIVE_TEXT_HIGHLIGHT_RING,
+  loadTermSearch,
+  textHighlightGroupsAreEmpty,
+  type TextHighlightGroup,
+  type TextHighlightMatch,
+} from './search/text-highlight';
 
 export { resolveDrawingMLGeometry, requireResolvedDrawingMLGeometry, drawingMLGeometryBounds, type ResolvedDrawingMLGeometry } from './shape/drawingml-geometry';
 export { GeometryWorkBudgetError, type GeometryPath, type GeometryPathCommand } from './shape/path-data';
