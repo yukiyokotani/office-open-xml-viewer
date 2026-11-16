@@ -40,6 +40,23 @@ impl Paint {
     /// export paints behind transparent pixels. Only that evidenced case is
     /// projected: `Ok(None)` for an unfilled frame, `Err` for a filled frame
     /// whose fill type or colour source has no evidence.
+    /// msofillTexture on a shape or picture frame, under the same placement
+    /// vetoes as a picture fill (`Paint::foreground_image`): a fill
+    /// rectangle, a view-relative fill (MS-ODRAW 2.3.7.43), an origin or a
+    /// unit has no projection here. The controls that establish the tile
+    /// state none of them.
+    pub(super) fn shape_texture_image(&self) -> Option<(u32, u32)> {
+        self.texture_image().filter(|_| {
+            !self.fill_rect.unwrap_or(false)
+                && self.fill_shape.unwrap_or(true)
+                && self.fill_dztype.unwrap_or(0) == 0
+                && self
+                    .fill_origins
+                    .iter()
+                    .all(|value| value.unwrap_or(0) == 0)
+        })
+    }
+
     /// Whether a picture frame states its own fill (see
     /// [`Self::picture_backing`]).
     pub(super) fn frame_filled(&self) -> bool {

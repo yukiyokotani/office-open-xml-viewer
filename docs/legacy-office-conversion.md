@@ -399,8 +399,9 @@ the stored picture at its own size from the top-left corner. A picture frame
 with a shade, pattern or texture fill gets that fill behind its picture; a
 pattern or texture is drawn by a rectangle under the picture, because the
 presentation renderer paints no picture fill behind a picture.
-Pattern placements with a fill rectangle, an origin or a unit remain
-rejected.
+Pattern and shape texture placements with a fill rectangle, a view-relative
+fill, an origin or a unit remain rejected, on shapes and picture frames
+alike.
 
 Picture colour settings follow how PowerPoint itself reads the binary
 properties when it saves a binary deck as PPTX: "Black and White" becomes
@@ -420,10 +421,11 @@ and adjustments on picture fills stay rejected until Office output confirms
 their rendering.
 
 In a shape that carries alternative shape XML, a text range with a mouse-over
-hyperlink or a click jump to the next, previous, first, last or last viewed
-slide or to the end of the show states the DrawingML run property PowerPoint
-writes for it (`hlinkMouseOver`, or `hlinkClick` with only a
-`ppaction://hlinkshowjump` action). The presentation renderer styles only
+hyperlink, or with a click or mouse-over jump to the next, previous, first,
+last or last viewed slide or to the end of the show, states the DrawingML run
+property PowerPoint writes for it (`hlinkMouseOver` with a target, or
+`hlinkClick` or `hlinkMouseOver` with only a `ppaction://hlinkshowjump`
+action). A range must lie within its text and end after it begins. The presentation renderer styles only
 click hyperlinks with a target as links, for PPTX files as well.
 
 A modern Office-saved PPT can retain paragraph properties in the OfficeArt

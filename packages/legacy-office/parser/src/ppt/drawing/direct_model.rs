@@ -66,21 +66,21 @@ enum TextLink<'a> {
     Jump(&'static str),
     /// `a:hlinkMouseOver` to an external target.
     Over(&'a str),
+    /// `a:hlinkMouseOver` with only an action verb.
+    OverJump(&'static str),
 }
 
 impl TextLink<'_> {
-    fn text(self) -> &'static str {
-        match self {
-            Self::Jump(action) => action,
-            Self::Click(_) | Self::Over(_) => "",
-        }
-    }
-
     fn retained_bytes(self) -> usize {
         match self {
             Self::Click(target) | Self::Over(target) => target.len(),
-            Self::Jump(action) => action.len(),
+            Self::Jump(action) | Self::OverJump(action) => action.len(),
         }
+    }
+
+    /// Whether this is a mouse-over property; the others are click ones.
+    fn over(self) -> bool {
+        matches!(self, Self::Over(_) | Self::OverJump(_))
     }
 }
 
@@ -281,21 +281,32 @@ fn apply_text_links(
                                         part.color = None;
                                     }
                                 }
-                                link @ TextLink::Jump(_) => {
+                                TextLink::Jump(action) => {
                                     if part.hyperlink.is_some() || part.hyperlink_action.is_some() {
                                         return Err(unsupported(
                                             "overlapping PowerPoint text links",
                                         ));
                                     }
-                                    part.hyperlink_action = Some(link.text().to_owned());
+                                    part.hyperlink_action = Some(action.to_owned());
                                 }
-                                TextLink::Over(target) => {
-                                    if part.hyperlink_mouse_over.is_some() {
+                                over @ (TextLink::Over(_) | TextLink::OverJump(_)) => {
+                                    if part.hyperlink_mouse_over.is_some()
+                                        || part.hyperlink_mouse_over_action.is_some()
+                                    {
                                         return Err(unsupported(
                                             "overlapping PowerPoint text links",
                                         ));
                                     }
-                                    part.hyperlink_mouse_over = Some(target.to_owned());
+                                    match over {
+                                        TextLink::Over(target) => {
+                                            part.hyperlink_mouse_over = Some(target.to_owned());
+                                        }
+                                        TextLink::OverJump(action) => {
+                                            part.hyperlink_mouse_over_action =
+                                                Some(action.to_owned());
+                                        }
+                                        _ => {}
+                                    }
                                 }
                             }
                             seen[index] = true;
@@ -782,7 +793,7 @@ impl Context<'_> {
         } else {
             None
         };
-        let image = match (allow_fill, image.is_none(), paint.texture_image()) {
+        let image = match (allow_fill, image.is_none(), paint.shape_texture_image()) {
             (true, true, Some((id, alpha))) => {
                 self.picture_display_effects(&shape, false)?;
                 self.texture_fill(id, alpha, paint.rotate_fill_with_shape.unwrap_or(false))?
@@ -805,7 +816,9 @@ impl Context<'_> {
                 return Err(unprojected_blip_fill(kind));
             }
         }
-        let texture = image.clone().filter(|_| paint.fill_type == Some(2));
+        let texture = image
+            .clone()
+            .filter(|_| paint.shape_texture_image().is_some());
         let (fill, stroke) = paint.model_with_custom_geometry(
             self.presentation.schemes[self.index].as_ref(),
             allow_fill,
@@ -1383,7 +1396,7 @@ impl Context<'_> {
             Some(shade.into_model(self.model_budget)?)
         } else if let Some(pattern) = paint.pattern_image() {
             Some(self.pattern_fill(pattern, Some(frame))?)
-        } else if let Some((id, alpha)) = paint.texture_image() {
+        } else if let Some((id, alpha)) = paint.shape_texture_image() {
             self.texture_fill(id, alpha, paint.rotate_fill_with_shape.unwrap_or(false))?
         } else if let Some((id, alpha, rotate)) = paint.foreground_image() {
             self.image_fill(id, alpha, rotate)?
@@ -1491,13 +1504,14 @@ impl Context<'_> {
                     // InteractiveInfoAtom.action: 4 is II_HyperlinkAction and
                     // 3 II_JumpAction. PowerPoint 16 PDF controls draw the
                     // range of a mouse-over hyperlink and of a click jump
-                    // like a click hyperlink; a mouse-over jump has no
-                    // control and no DrawingML target here, so it states
-                    // nothing, like the other actions.
+                    // like a click hyperlink; a mouse-over jump (no control)
+                    // states the same verb on `a:hlinkMouseOver`. The other
+                    // actions state nothing.
                     let link = match (action, over) {
                         (4, false) => Some(TextLink::Click(self.presentation.hyperlinks.get(id)?)),
                         (4, true) => Some(TextLink::Over(self.presentation.hyperlinks.get(id)?)),
                         (3, false) => jump_action(jump).map(TextLink::Jump),
+                        (3, true) => jump_action(jump).map(TextLink::OverJump),
                         _ => None,
                     };
                     let begin = u32_at(view.payload, 0)? as usize;
@@ -1679,7 +1693,7 @@ impl Context<'_> {
                 let links: Vec<_> = text_links
                     .iter()
                     .copied()
-                    .filter(|(_, _, link)| matches!(link, TextLink::Over(_)) == over)
+                    .filter(|(_, _, link)| link.over() == over)
                     .collect();
                 if !links.is_empty() {
                     apply_text_links(
@@ -2261,12 +2275,35 @@ mod tests {
             ]
         );
         // Actions without a DrawingML run property state nothing.
-        for (instance, action, jump) in [(1, 3, 1), (0, 3, 0), (0, 2, 0)] {
+        for (instance, action, jump) in [(1, 3, 0), (0, 3, 0), (0, 2, 0), (1, 2, 0)] {
             assert_eq!(
                 links(interactive_text(instance, action, jump, instance, (0, 2)).unwrap()),
                 [[None, None, None]]
             );
         }
+        // A mouse-over jump states its verb on the mouse-over property.
+        let slide = interactive_text(1, 3, 6, 1, (0, 2)).unwrap();
+        let SlideElement::Shape(shape) = &slide.elements[0] else {
+            panic!("shape")
+        };
+        let runs: Vec<_> = shape.text_body.as_ref().unwrap().paragraphs[0]
+            .runs
+            .iter()
+            .map(|run| match run {
+                TextRun::Text(run) => (
+                    run.hyperlink_action.as_deref(),
+                    run.hyperlink_mouse_over_action.as_deref(),
+                ),
+                _ => panic!("text run"),
+            })
+            .collect();
+        assert_eq!(
+            runs,
+            [
+                (None, Some("ppaction://hlinkshowjump?jump=endshow")),
+                (None, None)
+            ]
+        );
         // [MS-PPT] 2.9.59: the end of a range is greater than its begin,
         // whatever the action does.
         for action in [4, 2] {
@@ -3122,6 +3159,15 @@ mod tests {
         // shape's, and so does one that names no usable BLIP.
         for (values, expected) in [
             (
+                vec![(0x180, 2), (0x4186, 1), (0x1bf, 0x0002_0002)],
+                "texture fill",
+            ),
+            (
+                vec![(0x180, 2), (0x4186, 1), (0x1bf, 0x0004_0000)],
+                "texture fill",
+            ),
+            (vec![(0x180, 2), (0x4186, 1), (0x199, 1)], "texture fill"),
+            (
                 vec![(0x180, 1), (0x4186, 1), (0x198, 1)],
                 "pattern fill is not projected",
             ),
@@ -3162,6 +3208,20 @@ mod tests {
                 (picture.x, picture.y, picture.width, picture.height)
             );
             take_best_effort();
+        }
+        // A shape texture with a fill rectangle, a view-relative fill, an
+        // origin or a unit has no projection.
+        for veto in [
+            (0x1bf, 0x0002_0002),
+            (0x1bf, 0x0004_0000),
+            (0x198, 1),
+            (0x195, 1),
+        ] {
+            let values = [(0x180, 2), (0x4186, 1), veto];
+            let error = project(1, 0x200, vec![properties(&values)], png_blip(), None)
+                .map(|_| ())
+                .unwrap_err();
+            assert!(error.contains("texture fill is not projected"), "{error}");
         }
         // msofillTexture tiles the BLIP at its own size from the top left.
         let texture = [(0x180, 2), (0x4186, 1), (0x1bf, 0x0060_0060)];
