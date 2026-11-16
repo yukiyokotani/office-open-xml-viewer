@@ -18,6 +18,7 @@ use crate::cfb::CompoundFile;
 
 mod cell_formulas;
 mod chart;
+mod comments;
 mod conditional;
 pub(crate) mod direct;
 #[cfg(all(test, not(target_arch = "wasm32")))]
@@ -161,6 +162,10 @@ struct SheetData {
     chart_sheet: Option<chart::ChartSheet>,
     /// MS-XLS 2.4.351 WsBool fDialog: the sheet is a dialog sheet.
     dialog: bool,
+    /// MS-XLS 2.4.179 Note records (cell comments), in order.
+    notes: comments::Notes,
+    /// Their XLSX-model projection.
+    comments: Vec<xlsx_model::XlsxComment>,
     /// MS-XLS 2.4.113 FeatHdr11, 2.4.114 Feature11, 2.4.115 Feature12 and
     /// 2.4.157 List12 records (tables), in stream order.
     table_records: tables::Records,
@@ -548,7 +553,18 @@ fn prepare_workbook(workbook: &[u8]) -> Result<PreparedXls, String> {
         .zip(&converted)
         .map(|(&tab, (_, sheet))| if sheet.dialog { usize::MAX } else { tab })
         .collect();
-    validate_direct_drawings(&records, &drawing_tabs, &filters)?;
+    let comment_texts = validate_direct_drawings(&records, &drawing_tabs, &filters)?;
+    let mut comment_budget = rich::MAX_MODEL_BYTES;
+    for (&tab, (_, sheet)) in drawing_tabs.iter().zip(&mut converted) {
+        if !sheet.notes.is_empty() {
+            sheet.comments = comments::project(
+                &sheet.notes,
+                &records,
+                |object| comment_texts.get(&(tab, object)).copied(),
+                &mut comment_budget,
+            )?;
+        }
+    }
     // Rectangles, text boxes, freeforms and their groups.
     let mut shapes = shapes::Shapes::prepare(&records, &drawing_tabs, &styles)?;
     let grouped_pictures = shapes.picture_indices();
@@ -613,19 +629,23 @@ fn prepare_workbook(workbook: &[u8]) -> Result<PreparedXls, String> {
     })
 }
 
-/// The direct reader must not drop drawn content: every sheet-anchored
-/// drawing object on a projected worksheet is an embedded chart (MS-XLS
-/// 2.4.181 ot 5 with its chart substream), a picture (ot 8 with a BLIP
-/// reference), a rectangle, text box or freeform polygon (ot 2, 6 or 9) or a
-/// group (ot 0) of those and pictures; any other object (lines, ovals,
-/// controls, cell comments), grouped charts, or a chart/picture without its data
-/// is rejected with the reason. `shapes` validates each shape's properties.
+/// Every sheet-anchored drawing object on a projected worksheet is an
+/// embedded chart (MS-XLS 2.4.181 ot 5 with its chart substream), a picture
+/// (ot 8 with a BLIP reference), a rectangle, text box or freeform polygon
+/// (ot 2, 6 or 9), a group (ot 0) of those and pictures, or a cell comment
+/// (ot 25, see `comments`); any other object (lines, ovals, controls),
+/// grouped charts, or a chart/picture without its data is rejected with the
+/// reason. `shapes` validates each shape's properties.
+///
+/// Returns the stream offset of each comment object's TxO, by BoundSheet tab
+/// and object identifier.
 fn validate_direct_drawings(
     records: &[Record<'_>],
     tabs: &[usize],
     filters: &BTreeMap<usize, &xlsx_model::CellRange>,
-) -> Result<(), String> {
+) -> Result<BTreeMap<(usize, u16), usize>, String> {
     let projected: std::collections::BTreeSet<_> = tabs.iter().copied().collect();
+    let mut comment_texts = BTreeMap::new();
     for anchor in drawing_anchors::strict(records)? {
         if !projected.contains(&anchor.sheet) {
             continue;
@@ -641,8 +661,13 @@ fn validate_direct_drawings(
             continue;
         }
         admit_direct_object(&anchor)?;
+        if anchor.object_type == 25 {
+            if let Some(text) = anchor.shape.as_ref().and_then(|shape| shape.text) {
+                comment_texts.insert((anchor.sheet, anchor.object_id), text);
+            }
+        }
     }
-    Ok(())
+    Ok(comment_texts)
 }
 
 fn admit_direct_object(anchor: &drawing_anchors::DrawingAnchor) -> Result<(), String> {
@@ -664,7 +689,8 @@ fn admit_direct_object(anchor: &drawing_anchors::DrawingAnchor) -> Result<(), St
                     )));
                 }
             }
-            25 => return Err(unsupported("BIFF cell comments are not projected")),
+            // A cell comment: its Note is the model's comment.
+            25 => {}
             kind => {
                 return Err(unsupported(format!(
                     "BIFF drawing object type {kind} is not projected"
@@ -715,10 +741,11 @@ mod direct_drawing_tests {
         };
         assert!(super::admit_direct_object(&anchor(5, Some((1, 2)), None)).is_ok());
         assert!(super::admit_direct_object(&anchor(8, None, picture())).is_ok());
+        // A comment object is its cell's note, not a drawing.
+        assert!(super::admit_direct_object(&anchor(25, None, None)).is_ok());
         for (kind, chart, expected) in [
             (5, None, "without its chart substream"),
             (8, None, "without a BLIP reference"),
-            (25, None, "cell comments"),
             (1, None, "type 1 is not projected"),
             (3, None, "type 3 is not projected"),
             (4, None, "type 4 is not projected"),
@@ -1443,6 +1470,7 @@ fn parse_sheet(
             }
             0x01b2 | 0x01be => output.validation_records.push(record.kind, record.data)?,
             0x0081 => output.dialog = u16_at(record.data, 0)? & 0x0010 != 0,
+            0x001c => output.notes.push(record.data)?,
             0x0862 => {
                 if output.sheet_ext.replace(record.data.to_vec()).is_some() {
                     return Err(unsupported("duplicate BIFF sheet extension"));

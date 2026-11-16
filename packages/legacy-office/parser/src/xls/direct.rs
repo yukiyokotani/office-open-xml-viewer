@@ -663,6 +663,28 @@ fn project_sheet(
     worksheet.defined_names = sheet.defined_names.clone();
     charge_copy(budget, &sheet.pivot_tables)?;
     worksheet.pivot_tables = sheet.pivot_tables.clone();
+    // Classic notes: the comment bodies and, per ECMA-376 18.7.3, the cells
+    // the renderer marks with the comment indicator.
+    charge(
+        budget,
+        sheet
+            .comments
+            .iter()
+            .map(|comment| {
+                std::mem::size_of::<xlsx_model::XlsxComment>()
+                    + std::mem::size_of::<String>()
+                    + 2 * comment.cell_ref.len()
+                    + comment.text.len()
+                    + comment.author.as_ref().map_or(0, String::len)
+            })
+            .sum(),
+    )?;
+    worksheet.comment_refs = sheet
+        .comments
+        .iter()
+        .map(|comment| comment.cell_ref.clone())
+        .collect();
+    worksheet.comments = sheet.comments.clone();
     if let Some(color) = &sheet.tab_color {
         charge(budget, color.len())?;
         worksheet.tab_color = Some(color.clone());

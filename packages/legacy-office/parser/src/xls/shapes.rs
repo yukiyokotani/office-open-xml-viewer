@@ -930,6 +930,55 @@ fn charge_run(budget: &mut usize, font: &RunFont, text_bytes: usize) -> Result<(
     )
 }
 
+/// The `characters` UTF-16 code units of the TxO at `records[index]`, from
+/// the Continue records that follow it (each an XLUnicodeStringNoCch
+/// fragment with its own fHighByte), and the index of the record after them.
+fn txo_characters(
+    records: &[Record<'_>],
+    index: usize,
+    characters: usize,
+) -> Result<(Vec<u16>, usize), String> {
+    let mut next = index + 1;
+    let mut units: Vec<u16> = Vec::with_capacity(characters);
+    while units.len() < characters {
+        let record = records
+            .get(next)
+            .filter(|record| record.kind == 0x003c && !record.data.is_empty())
+            .ok_or_else(|| unsupported("truncated BIFF TxO text"))?;
+        let (flag, chars) = (record.data[0], &record.data[1..]);
+        match flag {
+            0 => units.extend(chars.iter().map(|&byte| u16::from(byte))),
+            1 if chars.len() % 2 == 0 => units.extend(
+                chars
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|pair| u16::from_le_bytes([pair[0], pair[1]])),
+            ),
+            _ => return Err(unsupported("invalid BIFF TxO text fragment")),
+        }
+        if units.len() > characters {
+            return Err(unsupported("BIFF TxO text longer than cchText"));
+        }
+        next += 1;
+    }
+    Ok((units, next))
+}
+
+/// The plain text of the TxO record at stream offset `offset`.
+pub(super) fn txo_text(records: &[Record<'_>], offset: usize) -> Result<String, String> {
+    let index = records
+        .binary_search_by_key(&offset, |record| record.offset)
+        .map_err(|_| unsupported("BIFF TxO record is not a record boundary"))?;
+    let txo = records[index].data;
+    if txo.len() < 18 {
+        return Err(unsupported("truncated BIFF TxO record"));
+    }
+    let characters = usize::from(u16_at(txo, 10)?);
+    let (units, _) = txo_characters(records, index, characters)?;
+    Ok(String::from_utf16_lossy(&units))
+}
+
 struct TextLayout<'a> {
     anchor_text: Option<u32>,
     margins: [u32; 4],
@@ -1004,30 +1053,7 @@ fn text(
     if run_bytes < 16 || run_bytes % 8 != 0 {
         return Err(unsupported("invalid BIFF TxO formatting runs"));
     }
-    let mut next = index + 1;
-    let mut units: Vec<u16> = Vec::with_capacity(characters);
-    while units.len() < characters {
-        let record = records
-            .get(next)
-            .filter(|record| record.kind == 0x003c && !record.data.is_empty())
-            .ok_or_else(|| unsupported("truncated BIFF TxO text"))?;
-        let (flag, chars) = (record.data[0], &record.data[1..]);
-        match flag {
-            0 => units.extend(chars.iter().map(|&byte| u16::from(byte))),
-            1 if chars.len() % 2 == 0 => units.extend(
-                chars
-                    .as_chunks::<2>()
-                    .0
-                    .iter()
-                    .map(|pair| u16::from_le_bytes([pair[0], pair[1]])),
-            ),
-            _ => return Err(unsupported("invalid BIFF TxO text fragment")),
-        }
-        if units.len() > characters {
-            return Err(unsupported("BIFF TxO text longer than cchText"));
-        }
-        next += 1;
-    }
+    let (units, mut next) = txo_characters(records, index, characters)?;
     let mut runs_data = Vec::with_capacity(run_bytes);
     while runs_data.len() < run_bytes {
         let record = records

@@ -46,8 +46,8 @@ pub struct DrawingAnchor {
     /// One-based position of this shape container among all shape
     /// containers of the sheet drawing, in document (paint) order.
     pub order: u64,
-    /// OfficeArt facts of a rectangle or text box (Obj ot 2 or 6), whose
-    /// interpretation belongs to the projecting host.
+    /// OfficeArt facts of a shape or comment box (not of a chart or
+    /// picture), whose interpretation belongs to the projecting host.
     pub shape: Option<ShapeSource>,
     /// Members of a group placed on the sheet (Obj ot 0), in document order.
     /// Only the strict walk flattens groups.
@@ -995,7 +995,7 @@ fn walk_with_policy(
                             .reference(facts.shape_flags, facts.object_data)?,
                         chart: facts.chart.filter(|_| object_type == 5),
                         order,
-                        shape: matches!(object_type, 2 | 6 | 9).then(|| facts.source()),
+                        shape: (!matches!(object_type, 5 | 8)).then(|| facts.source()),
                         members: Vec::new(),
                     });
                 }
