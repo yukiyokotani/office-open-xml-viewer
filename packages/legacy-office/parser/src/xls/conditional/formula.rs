@@ -955,10 +955,12 @@ fn decompile_inner(
                 // Excel's .xlsx counterpart, but Excel's own PDF of the .xls
                 // shows those rules never apply, matching #REF!.
                 0x0a => {
+                    rgce.get(at + 1..at + 5).ok_or_else(truncated)?;
                     stack.push(Item::Text(format!("{pending}#REF!")));
                     at += 5;
                 }
                 0x0b => {
+                    rgce.get(at + 1..at + 9).ok_or_else(truncated)?;
                     stack.push(Item::Text(format!("{pending}#REF!")));
                     at += 9;
                 }
@@ -1105,6 +1107,13 @@ mod tests {
         // Unknown tokens (PtgArray) and dangling operands reject.
         assert!(decompile(&[0x20], (0, 0), &externs).is_err());
         assert!(decompile(&[0x1e, 1, 0, 0x1e, 2, 0], (0, 0), &externs).is_err());
+        // PtgRefErr and PtgAreaErr carry (ignored) payloads that must exist.
+        assert_eq!(
+            decompile(&[0x2a, 0, 0, 0, 0], (0, 0), &externs).unwrap(),
+            "#REF!"
+        );
+        assert!(decompile(&[0x2a], (0, 0), &externs).is_err());
+        assert!(decompile(&[0x2b, 0, 0, 0, 0], (0, 0), &externs).is_err());
         assert_eq!(number(9.99e307).unwrap(), "9.99E+307");
         assert_eq!(number(1e-10).unwrap(), "1E-10");
         assert_eq!(number(35.3).unwrap(), "35.3");

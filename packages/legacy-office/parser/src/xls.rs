@@ -558,7 +558,7 @@ fn prepare_workbook(workbook: &[u8]) -> Result<PreparedXls, String> {
         .zip(&converted)
         .map(|(&tab, (_, sheet))| if sheet.dialog { usize::MAX } else { tab })
         .collect();
-    let comment_texts = validate_direct_drawings(&records, &drawing_tabs, &filters)?;
+    let comment_texts = validate_direct_drawings(&records, &tabs, &drawing_tabs, &filters)?;
     let mut comment_budget = rich::MAX_MODEL_BYTES;
     for (&tab, (_, sheet)) in drawing_tabs.iter().zip(&mut converted) {
         if !sheet.notes.is_empty() {
@@ -644,14 +644,37 @@ fn prepare_workbook(workbook: &[u8]) -> Result<PreparedXls, String> {
 ///
 /// Returns the stream offset of each comment object's TxO, by BoundSheet tab
 /// and object identifier.
+///
+/// `sheets` are the tabs of every projected sheet and `tabs` those whose
+/// drawings are drawn (a dialog sheet's are not, but their records are
+/// still read).
 fn validate_direct_drawings(
     records: &[Record<'_>],
+    sheets: &[usize],
     tabs: &[usize],
     filters: &BTreeMap<usize, &xlsx_model::CellRange>,
 ) -> Result<BTreeMap<(usize, u16), usize>, String> {
     let projected: std::collections::BTreeSet<_> = tabs.iter().copied().collect();
     let mut comment_texts = BTreeMap::new();
     for anchor in drawing_anchors::strict(records)? {
+        // A form control is not drawn, but the TxO of its caption is part
+        // of the sheet's records and must be one.
+        if sheets.contains(&anchor.sheet) {
+            let controls = std::iter::once((anchor.object_type, anchor.shape.as_ref())).chain(
+                anchor
+                    .members
+                    .iter()
+                    .map(|member| (member.object_type, member.shape.as_ref())),
+            );
+            for (kind, shape) in controls {
+                if let Some(text) = shape
+                    .filter(|_| shapes::form_control(kind))
+                    .and_then(|shape| shape.text)
+                {
+                    shapes::txo_text(records, text)?;
+                }
+            }
+        }
         if !projected.contains(&anchor.sheet) {
             continue;
         }
@@ -666,22 +689,6 @@ fn validate_direct_drawings(
             continue;
         }
         admit_direct_object(&anchor)?;
-        // A form control is not drawn, but the TxO of its caption is part
-        // of the sheet's records and must be one.
-        let controls = std::iter::once((anchor.object_type, anchor.shape.as_ref())).chain(
-            anchor
-                .members
-                .iter()
-                .map(|member| (member.object_type, member.shape.as_ref())),
-        );
-        for (kind, shape) in controls {
-            if let Some(text) = shape
-                .filter(|_| shapes::form_control(kind))
-                .and_then(|shape| shape.text)
-            {
-                shapes::txo_text(records, text)?;
-            }
-        }
         if anchor.object_type == 25 {
             if let Some(text) = anchor.shape.as_ref().and_then(|shape| shape.text) {
                 comment_texts.insert((anchor.sheet, anchor.object_id), text);
@@ -1527,8 +1534,19 @@ fn parse_sheet(
                 let framed = match record.kind {
                     0x009b => record.data.is_empty(),
                     0x009e => filters::criteria_framed(record.data),
-                    // FrtRefHeader, then the fixed fields through guidSview.
-                    _ => record.data.len() >= 60 && u16_at(record.data, 0)? == 0x087e,
+                    // FrtRefHeader, then the fixed fields through guidSview
+                    // and rgb: nothing for criteria (ft 0), a DXFN12NoCB
+                    // for a cell or font color (1, 2), an AF12CellIcon (3).
+                    _ => {
+                        record.data.len() >= 60
+                            && u16_at(record.data, 0)? == 0x087e
+                            && match u32_at(record.data, 18)? {
+                                0 => true,
+                                1 | 2 => record.data.len() > 60,
+                                3 => record.data.len() >= 68,
+                                _ => false,
+                            }
+                    }
                 };
                 if !framed {
                     return Err(crate::rejection::corrupt("invalid BIFF AutoFilter record"));
