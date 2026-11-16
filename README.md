@@ -31,7 +31,7 @@ So I'm building this library with AI coding agents, spec-first, and keeping it f
 
 A browser-based viewer for Office Open XML documents that renders to an HTML Canvas element.
 The parsers are written in Rust and compiled to WebAssembly; the renderers use the Canvas 2D API.
-Each format also exposes a headless engine (`DocxDocument` / `XlsxWorkbook` / `PptxPresentation`) that renders into any caller-supplied canvas, so you can compose your own UI — scroll views, thumbnail grids, master-detail panes — instead of being locked into the built-in viewer. See the [live framework examples](https://ooxml.silurus.dev/frameworks/) for runnable React, Vue, Svelte, and Solid projects.
+Each format also exposes a headless engine (`DocxDocument` / `XlsxWorkbook` / `PptxPresentation`) that renders into any caller-supplied canvas, so you can compose your own UI — scroll views, thumbnail grids, master-detail panes — instead of using the built-in viewer. See the [live framework examples](https://ooxml.silurus.dev/frameworks/) for runnable React, Vue, Svelte, and Solid projects.
 
 Optional, experimental [legacy Office add-on](https://ooxml.silurus.dev/legacy-office/) reads a supported subset of `.doc`, `.xls` and `.ppt` with the same viewers, and an optional, experimental [OpenDocument add-on](https://ooxml.silurus.dev/opendocument/) reads `.odt`, `.odp` and `.ods`.
 
@@ -54,7 +54,7 @@ pnpm add @silurus/ooxml
 > and fetched (streaming-compiled) at load time. Verified to work with zero
 > config: **webpack 5**, **Next.js** (Turbopack, dev and build), **Vite 8**
 > (dev and build), **Vite 7 production builds**, and a plain
-> `<script type="module">` with no bundler at all. Two setups need a hand:
+> `<script type="module">` with no bundler at all. Two setups need extra configuration:
 >
 > - **Vite 7 dev server**: the dependency optimizer rewrites the asset reference
 >   into its own cache path and the load fails (fixed in Vite 8). Add
@@ -186,7 +186,7 @@ omit it and the engine asset is not fetched or evaluated (equations are simply s
 the on-demand render-worker asset retains a small loader). When you *do* pass it, the ~4 MB engine ships
 as a **standalone asset file** next to the bundle rather than an inline data URL, and is
 fetched **on demand — only the first time a document actually contains an equation**, so
-equation-free documents never pay for it. It is fully self-contained: served from your own
+equation-free documents never download it. It is fully self-contained: served from your own
 origin, no cross-origin requests.
 
 Accented Latin letters use STIX Two Math paths in normal, italic, bold and bold-italic
@@ -541,7 +541,7 @@ contract, resource bounds, PPTX hit-testing semantics, and extension policy.
 **Hyperlinks.** For DOCX/PPTX the link hit regions live on the text-selection
 overlay, so hyperlink interaction requires `enableTextSelection: true`; when that
 overlay is enabled, links are interactive by default. XLSX hit-tests cells
-directly, so links are interactive out of the box. An external link opens in a
+directly, so links are interactive by default. An external link opens in a
 new tab (scheme-sanitized to `http` / `https` / `mailto` / `tel`, `noopener`),
 and an internal target navigates within the document (docx bookmark, pptx slide
 jump, xlsx defined name or cell reference). XLSX references may switch sheets

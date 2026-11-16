@@ -52,7 +52,7 @@ const contextMenuSnippet = `const viewer = new XlsxViewer(container, {
     <div class="wrap">
       <a class="back" href="/">← Documentation</a>
       <p class="eyebrow">Read-only interaction</p>
-      <h1>Turn the user’s focus into useful context.</h1>
+      <h1>Selection context.</h1>
       <p class="lead">
         Every Viewer exposes one bounded, serializable selection-context API for “explain this”,
         “evaluate these cells”, and similar external actions. It does not edit the Office file or
@@ -64,8 +64,8 @@ const contextMenuSnippet = `const viewer = new XlsxViewer(container, {
   <main class="wrap guide-main">
     <section class="guide-section two-up" aria-labelledby="choose-surface">
       <div class="section-heading">
-        <p class="eyebrow">Two different jobs</p>
-        <h2 id="choose-surface">Keep UI state and content handoff separate.</h2>
+        <p class="eyebrow">Two APIs</p>
+        <h2 id="choose-surface">Selection state and selection context.</h2>
       </div>
       <article>
         <p class="step">01 · Control the selection</p>
@@ -77,7 +77,7 @@ const contextMenuSnippet = `const viewer = new XlsxViewer(container, {
         </p>
       </article>
       <article>
-        <p class="step">02 · Read useful content</p>
+        <p class="step">02 · Read the selected content</p>
         <h3>Selection context is a detached snapshot.</h3>
         <p>
           Call <code>getSelectionContext()</code> when an external tool needs selected text, cells,
@@ -93,11 +93,11 @@ const contextMenuSnippet = `const viewer = new XlsxViewer(container, {
 
     <section class="guide-section live-context-demo" data-selection-context-demo aria-labelledby="live-context-title">
       <div class="section-heading">
-        <p class="eyebrow">Try the handoff</p>
-        <h2 id="live-context-title">See exactly what an external tool would receive.</h2>
+        <p class="eyebrow">Live demo</p>
+        <h2 id="live-context-title">Example selection-context snapshot.</h2>
         <p>
-          Select cells or text—or click a chart, picture, or shape—and watch the bounded, detached snapshot
-          update alongside it. The demo does not call an AI service or send data anywhere.
+          Select cells or text—or click a chart, picture, or shape—and the bounded, detached snapshot
+          updates alongside it. The demo does not call an AI service or send data anywhere.
         </p>
       </div>
       <div class="context-demo-formats">
@@ -115,7 +115,7 @@ const contextMenuSnippet = `const viewer = new XlsxViewer(container, {
         </div>
         <aside class="context-demo-output-panel">
           <div class="context-demo-output-head">
-            <p class="step">No AI required</p>
+            <p class="step">Demo output</p>
             <h3>Selection context snapshot</h3>
             <p class="context-demo-status" data-context-status aria-live="polite">Preparing the Viewer…</p>
           </div>
@@ -126,8 +126,8 @@ const contextMenuSnippet = `const viewer = new XlsxViewer(container, {
 
     <section class="guide-section" aria-labelledby="context-shapes">
       <div class="section-heading">
-        <p class="eyebrow">One extensible family</p>
-        <h2 id="context-shapes">Narrow on <code>format</code> and <code>kind</code>.</h2>
+        <p class="eyebrow">Context types</p>
+        <h2 id="context-shapes">Context types by <code>format</code> and <code>kind</code>.</h2>
         <p>All results are plain, detached data. Each format adds only the facts an assistant can use.</p>
       </div>
       <div class="context-table-wrap">
@@ -152,7 +152,7 @@ const contextMenuSnippet = `const viewer = new XlsxViewer(container, {
     <section class="guide-section code-section" aria-labelledby="browser-example">
       <div class="section-heading">
         <p class="eyebrow">Browser integration</p>
-        <h2 id="browser-example">Ask for only the context you can consume.</h2>
+        <h2 id="browser-example">Browser integration example.</h2>
       </div>
       <Code
         code={browserIntegrationSnippet}
@@ -172,7 +172,7 @@ const contextMenuSnippet = `const viewer = new XlsxViewer(container, {
         resulting read-only focus, use <code>onSelectionContextChange</code>. This keeps one semantic
         selection notification instead of a second callback for the same interaction.
       </p>
-      <h3>Open a menu for the right-click target.</h3>
+      <h3>Context menu for the right-click target</h3>
       <Code
         code={contextMenuSnippet}
         lang="ts"
@@ -190,8 +190,8 @@ const contextMenuSnippet = `const viewer = new XlsxViewer(container, {
 
     <section class="guide-section limits" aria-labelledby="bounded-by-design">
       <div class="section-heading">
-        <p class="eyebrow">Bounded by design</p>
-        <h2 id="bounded-by-design">Large selections do not become unbounded prompts.</h2>
+        <p class="eyebrow">Limits</p>
+        <h2 id="bounded-by-design">Size limits and truncation.</h2>
       </div>
       <ul>
         <li>DOCX and PPTX text is assembled only from tagged Viewer runs and stops at configured text and locator limits.</li>
@@ -208,13 +208,13 @@ const contextMenuSnippet = `const viewer = new XlsxViewer(container, {
     <section class="guide-section mcp-section" aria-labelledby="vscode-mcp">
       <div class="section-heading">
         <p class="eyebrow">VS Code extension</p>
-        <h2 id="vscode-mcp">The MCP server can read the active preview selection.</h2>
+        <h2 id="vscode-mcp">Active preview selection through the MCP server.</h2>
       </div>
       <ol>
         <li>Use GitHub Copilot Chat in Agent mode. The Viewer supplies tools and preview context through VS Code's MCP host; it does not add its own chat panel.</li>
         <li>Run <strong>OOXML Viewer: Install / Enable MCP Server</strong>, then confirm <code>ooxml-mcp-server</code> under <strong>MCP: List Servers</strong>.</li>
         <li>Open a DOCX, XLSX, or PPTX preview and select text or cells; you can also click a chart, picture, or shape.</li>
-        <li>Ask naturally: “Explain the selected cells” or “What does this paragraph mean?” The agent resolves the active preview context first.</li>
+        <li>Ask in ordinary language: “Explain the selected cells” or “What does this paragraph mean?” The agent resolves the active preview context first.</li>
         <li>The agent receives the snapshot. For a local file, it can pass the returned <code>document.path</code> to a detailed format-specific tool only when needed.</li>
       </ol>
       <p>
