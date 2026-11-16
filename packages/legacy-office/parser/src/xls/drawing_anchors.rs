@@ -386,10 +386,11 @@ pub(super) fn chart_sheet_charts(
                         }
                         position = child_end;
                     }
+                    // Every shape container holds its OfficeArtFSP.
+                    if !identity {
+                        return Err(unsupported("missing BIFF shape identity"));
+                    }
                     if let Some(chart) = chart {
-                        if !identity {
-                            return Err(unsupported("missing BIFF shape identity"));
-                        }
                         let rect = rect.ok_or_else(|| {
                             unsupported("BIFF chart object without its chart anchor")
                         })?;
