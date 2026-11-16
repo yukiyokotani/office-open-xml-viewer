@@ -40,9 +40,9 @@
 //!   omitted shape properties from the binary projection;
 //! - an alternative whose only disagreements are restatements (`Verdict::
 //!   Restated`: gradient stops, an XML gradient rotation flag `1` over a
-//!   binary that states none): the alternative, as above. The binary cannot
-//!   hold these values, so their difference is not evidence that the binary
-//!   was edited;
+//!   binary that states none): the alternative, as above. This precedence
+//!   is inferred from the measured XML-only edit controls; no control
+//!   measures a binary-only edit of these values that the comparison reads;
 //! - alternative resource exhaustion keeps the binary projection;
 //! - encryption failures keep their own classification;
 //! - representational failures reject as unsupported: an ambiguous or
@@ -1670,7 +1670,9 @@ fn same_geometry(binary: &BinaryShape<'_>, alternative: &ShapeElement) -> Verdic
 /// alternative does not state) prints like its source and like the control
 /// without an alternative, so neither side's edit is visible there. Other
 /// unpaired structures stay unverifiable: no control establishes which side
-/// PowerPoint draws for them.
+/// PowerPoint draws for them. So does a stroked path with dashes or
+/// arrowheads, which follow the traversal that the outline comparison
+/// normalizes away.
 #[cfg(any(test, feature = "direct-ppt"))]
 fn same_paths(binary: &BinaryShape<'_>, alternative: &ShapeElement) -> Verdict {
     use pptx_model::PathCmd;
@@ -1707,6 +1709,25 @@ fn same_paths(binary: &BinaryShape<'_>, alternative: &ShapeElement) -> Verdict {
                 .zip(&ap)
                 .any(|(bc, ac)| std::mem::discriminant(*bc) != std::mem::discriminant(*ac))
         {
+            // Dashes and arrowheads follow the traversal (start point and
+            // direction of each segment), which the outline comparison
+            // normalizes away; only solid, unterminated strokes are known
+            // to draw alike.
+            let traversal = |stroke: &Option<pptx_model::Stroke>| {
+                stroke.as_ref().is_some_and(|stroke| {
+                    !stroke.custom_dash.is_empty()
+                        || stroke.dash_style.as_deref().is_some_and(|d| d != "solid")
+                        || [&stroke.head_end, &stroke.tail_end]
+                            .into_iter()
+                            .flatten()
+                            .any(|end| end.kind != "none")
+                })
+            };
+            if (b_paint[index].1 || a_paint.1)
+                && (traversal(&binary.element.stroke) || traversal(&alternative.stroke))
+            {
+                return Verdict::Unverifiable("custom geometry");
+            }
             match same_outline(raw_b, raw_a) {
                 Verdict::Same => {}
                 Verdict::Differs(what) => verdict = Verdict::Differs(what),
@@ -2181,9 +2202,9 @@ fn same_color(binary: &str, alternative: &str) -> Option<bool> {
 /// interior positions and colours, and the terminal colour, without inventing
 /// a terminal position for the binary.
 ///
-/// Other unequal stops are restated and drawn from the alternative: the
-/// binary cannot hold the alternative's stop list, and the PowerPoint 16 PDFs
-/// of controls whose XML alone changes a stop colour (five and three binary
+/// Other unequal stops are restated and drawn from the alternative. This is
+/// the precedence the measured controls show, not an encoding limit: the
+/// PowerPoint 16 PDFs of controls whose XML alone changes a stop colour (five and three binary
 /// stops) or moves an interior stop by 19% print the XML stops. Moving it by
 /// 1% prints no visible change and decides nothing. No control edits a binary
 /// stop that this comparison reads (the binary-only colour controls edit
@@ -4493,6 +4514,33 @@ mod tests {
             assert!(matches!(&adopted.fill, Some(Fill::Solid { color }) if color == "FF0000"));
             assert_eq!(adopted.id.as_deref(), Some("3"));
             assert!(take_best_effort().is_empty());
+            // Dashes and arrowheads follow the traversal that the outline
+            // comparison normalizes away: such a stroked path stays unknown,
+            // while a solid line adopts as above.
+            for line in [
+                r#"<a:prstDash val="dash"/>"#,
+                r#"<a:custDash><a:ds d="300000" sp="100000"/></a:custDash>"#,
+                r#"<a:tailEnd type="triangle"/>"#,
+                r#"<a:prstDash val="solid"/>"#,
+            ] {
+                let stroked = xml.replace(
+                    "</p:spPr>",
+                    &format!(
+                        r#"<a:ln w="12700"><a:solidFill><a:srgbClr val="000000"/></a:solidFill>{line}</a:ln></p:spPr>"#
+                    ),
+                );
+                let result = run_verification(&element, &blob(&stroked), &theme(), AMPLE).0;
+                if line.contains("solid") {
+                    assert!(result.unwrap().is_some(), "{line}");
+                } else {
+                    let error = result.unwrap_err();
+                    assert!(
+                        error.starts_with("UNSUPPORTED:") && error.contains("custom geometry"),
+                        "{line}: {error}"
+                    );
+                }
+                assert!(take_best_effort().is_empty());
+            }
             // A closing line to the moved start instead cuts another
             // triangle: no control says which side PowerPoint draws.
             if let Some(paths) = element.cust_geom.as_mut() {
