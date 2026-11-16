@@ -6,7 +6,7 @@ const repositoryRoot = fileURLToPath(new URL('../..', import.meta.url));
 
 export default defineConfig({
   testDir: '.',
-  testMatch: ['production-workers.spec.ts', 'font-resolver-bridge.spec.ts', 'part-failure.spec.ts'],
+  testMatch: ['production-workers.spec.ts', 'font-resolver-bridge.spec.ts', 'part-failure.spec.ts', 'base-href.spec.ts'],
   reporter: [['list']],
   use: {
     baseURL: `http://127.0.0.1:${port}`,

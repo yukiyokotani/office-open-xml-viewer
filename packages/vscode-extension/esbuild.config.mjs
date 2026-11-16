@@ -1,7 +1,7 @@
 import * as esbuild from 'esbuild';
 import { mkdir, readdir, rm } from 'node:fs/promises';
 import { mainThreadOnlyWorkerStubs } from './esbuild-worker-stub.mjs';
-import { bundledAssetSidecars } from './esbuild-asset-sidecars.mjs';
+import { bundledAssetSidecars, parserWasmManifest } from './esbuild-asset-sidecars.mjs';
 
 const production = process.argv.includes('--production');
 const watch = process.argv.includes('--watch');
@@ -37,7 +37,9 @@ const webviewConfig = {
     '.wasm': 'file',
     '.ttf': 'file',
   },
-  plugins: [mainThreadOnlyWorkerStubs, bundledAssetSidecars],
+  // parserWasmManifest records the emitted parser files for the extension
+  // host, which posts their bytes to the webview (see parserWasm.ts).
+  plugins: [mainThreadOnlyWorkerStubs, bundledAssetSidecars, parserWasmManifest],
 };
 
 async function build() {
