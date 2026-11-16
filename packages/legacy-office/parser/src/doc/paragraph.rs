@@ -208,6 +208,42 @@ impl Properties {
                 let side = usize::from(code - 0xc64e);
                 self.borders[side] = Some(Border::paragraph(&operand[1..], false, side)?);
             }
+            0x2664 => {
+                // MS-DOC 2.6.2 sprmPFNumRMIns: the paragraph number was
+                // inserted while revisions were tracked. The model has no
+                // numbering revision markup: the paragraph shows its number,
+                // as Word's final view does (Word control).
+                if operand.len() != 1 {
+                    return Err(crate::rejection::corrupt(
+                        "invalid Word numbering insertion revision operand",
+                    ));
+                }
+                if operand[0] != 0 {
+                    crate::rejection::skipped("direct DOC model encountered a numbering revision");
+                }
+                return Ok(true);
+            }
+            0xc63f | 0xc66f => {
+                // MS-DOC 2.6.2 sprmPPropRMark90/sprmPPropRMark (2.9.210
+                // PropRMarkOperand: cb 7, fPropRMark, ibstshort, dttm): the
+                // paragraph properties were changed while revisions were
+                // tracked. The paragraph shows its current properties, as
+                // Word's final view does (Word control).
+                if operand.len() != 8 || operand[0] != 7 {
+                    return Err(crate::rejection::corrupt(
+                        "invalid Word paragraph property revision operand",
+                    ));
+                }
+                if operand[1] != 0 {
+                    crate::rejection::skipped(
+                        "direct DOC model encountered a paragraph property revision",
+                    );
+                }
+                return Ok(true);
+            }
+            // sprmPIstd: the paragraph style, resolved with the paragraph's
+            // PAPX (`Formatting::paragraph_style`).
+            0x4600 => return Ok(true),
             0xc645 => {
                 // MS-DOC 2.9.159-160: NumRM stores the *previous* numbering
                 // of the paragraph when revision tracking began, independently
@@ -548,6 +584,44 @@ mod tests {
         assert!(properties.apply(0xc645, &operand).is_err());
         operand[0] = 128;
         assert!(properties.apply(0xc645, &operand[..128]).is_err());
+        crate::rejection::take_best_effort();
+
+        // sprmPFNumRMIns and sprmPPropRMark (and its Word 97 form): the
+        // paragraph shows its current number and properties.
+        for (code, set, clear) in [
+            (0x2664u16, vec![1u8], vec![0u8]),
+            (
+                0xc66f,
+                vec![7, 1, 1, 0, 0xf1, 0x85, 0xeb, 0x27],
+                vec![7, 0, 0, 0, 0, 0, 0, 0],
+            ),
+            (
+                0xc63f,
+                vec![7, 1, 1, 0, 0xf1, 0x85, 0xeb, 0x27],
+                vec![7, 0, 0, 0, 0, 0, 0, 0],
+            ),
+        ] {
+            assert!(properties.apply(code, &clear).unwrap());
+            assert!(crate::rejection::take_best_effort().is_empty());
+            assert!(properties.apply(code, &set).unwrap());
+            assert_eq!(projected(&properties), baseline);
+            assert_eq!(
+                crate::rejection::take_best_effort(),
+                [(
+                    crate::rejection::BestEffort::Skipped,
+                    if code == 0x2664 {
+                        "direct DOC model encountered a numbering revision"
+                    } else {
+                        "direct DOC model encountered a paragraph property revision"
+                    }
+                )]
+            );
+            assert!(properties.apply(code, &[]).is_err());
+        }
+        // sprmPIstd is resolved with the paragraph's PAPX.
+        assert!(properties.apply(0x4600, &1u16.to_le_bytes()).unwrap());
+        assert_eq!(projected(&properties), baseline);
+        assert!(crate::rejection::take_best_effort().is_empty());
     }
 
     #[test]

@@ -42,6 +42,12 @@ pub(super) struct Reference {
     kind: Kind,
     id: usize,
     custom: bool,
+    /// The reference character is hidden text: Word displays no mark in the
+    /// text and still places and numbers the note (Word control).
+    hidden: bool,
+    /// The number Word displays, when the reader numbers this note kind
+    /// itself (`direct_model::notes::note_numbers`).
+    mark: Option<String>,
 }
 impl Reference {
     pub(in crate::doc) fn kind(&self) -> Kind {
@@ -57,6 +63,14 @@ impl Reference {
     pub(in crate::doc) fn custom(&self) -> bool {
         self.custom
     }
+
+    pub(in crate::doc) fn hidden(&self) -> bool {
+        self.hidden
+    }
+
+    pub(in crate::doc) fn mark(&self) -> Option<&str> {
+        self.mark.as_deref()
+    }
 }
 
 pub(super) struct References {
@@ -69,6 +83,15 @@ impl References {
 
     pub(in crate::doc) fn iter(&self) -> impl Iterator<Item = &Reference> {
         self.by_cp.values()
+    }
+
+    /// Record the reader-computed marks of one note kind, by note index.
+    pub(in crate::doc) fn set_marks(&mut self, kind: Kind, marks: &[Option<String>]) {
+        for reference in self.by_cp.values_mut() {
+            if reference.kind == kind {
+                reference.mark = marks.get(reference.id - 1).cloned().flatten();
+            }
+        }
     }
 
     /// Custom-mark references whose mark character lies in `cps`, by CP.
@@ -97,6 +120,8 @@ impl References {
                             kind: notes.kind,
                             id: i + 1,
                             custom: !entry.automatic,
+                            hidden: false,
+                            mark: None,
                         },
                     )
                     .is_some()
@@ -108,10 +133,13 @@ impl References {
         if by_cp.is_empty() {
             return Ok(Self { by_cp });
         }
-        let mut references = by_cp.iter().peekable();
+        let mut references = by_cp.iter_mut().peekable();
         let mut cp = 0;
         for ch in main.text.chars() {
-            if let Some((&position, reference)) = references.peek().copied() {
+            if let Some((&position, reference)) = references
+                .peek_mut()
+                .map(|(position, reference)| (&**position, &mut **reference))
+            {
                 if position < cp {
                     return Err(unsupported("Word note reference splits Unicode character"));
                 }
@@ -135,6 +163,11 @@ impl References {
                                 "Word note reference lacks special-character property",
                             ));
                         }
+                    }
+                    if let Some((_, fc, piece)) = main.position(cp) {
+                        let style = formatting.paragraph_style(fc)?;
+                        reference.hidden =
+                            formatting.hidden_character(style, fc, piece.prm, &main.prcs)?;
                     }
                     references.next();
                 }

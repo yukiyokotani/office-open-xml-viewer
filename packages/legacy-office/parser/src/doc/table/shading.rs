@@ -157,6 +157,42 @@ impl Shading {
         }
     }
 
+    /// The one color Word paints for this shading, as lowercase RGB hex:
+    /// `Some(None)` paints nothing, `None` is a pattern without a single
+    /// color (a hatch).
+    ///
+    /// ECMA-376 17.18.78 ST_Shd: `solid` is the foreground alone and `pctN`
+    /// N% of the foreground over the background. Word prints a percentage as
+    /// one color (a Word PDF of a pct15 run paints exactly #D9D9D9 over
+    /// white). An automatic foreground is black and an automatic background
+    /// white: Word's PDFs of a table cell with an automatic solid shading
+    /// and with pct25 of 0000C8 over an automatic background paint #000000
+    /// and #BFBFF1.
+    pub(in crate::doc) fn direct_fill(&self) -> Option<Option<String>> {
+        let hex = |[r, g, b]: [u8; 3]| format!("{r:02x}{g:02x}{b:02x}");
+        let foreground = match self.foreground {
+            Color::Rgb(value) => value,
+            Color::Auto => [0, 0, 0],
+        };
+        match self.pattern {
+            "nil" => Some(None),
+            "clear" => Some(self.direct_background()),
+            "solid" => Some(Some(hex(foreground))),
+            pattern => {
+                let percent = f64::from(pattern.strip_prefix("pct")?.parse::<u8>().ok()?);
+                let background = match self.background {
+                    Color::Rgb(value) => value,
+                    Color::Auto => [0xff, 0xff, 0xff],
+                };
+                Some(Some(hex(std::array::from_fn(|index| {
+                    (f64::from(foreground[index]) * percent / 100.0
+                        + f64::from(background[index]) * (100.0 - percent) / 100.0)
+                        .round() as u8
+                }))))
+            }
+        }
+    }
+
     /// Background representable by `DocTableCell.background`, matching the
     /// existing DOCX parser's fill-only projection without pattern fitting.
     pub(in crate::doc) fn direct_background(&self) -> Option<String> {

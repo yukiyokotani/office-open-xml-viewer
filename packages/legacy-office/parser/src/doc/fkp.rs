@@ -162,11 +162,37 @@ pub fn table_part<'a>(word: &[u8], table: &'a [u8], field: usize) -> Result<&'a 
         .ok_or_else(|| unsupported("Word formatting table outside table stream"))
 }
 
+#[cfg(test)]
 pub fn paragraph_style(index: &Index<'_>, fc: usize) -> Result<usize, String> {
-    match index.at(fc).map(|(_, run)| run.properties) {
-        None | Some([]) => Ok(0),
-        Some(bytes) => Ok(u16_at(bytes, 0)? as usize),
+    Ok(paragraph_styles(index, fc)?.0)
+}
+
+/// The istd of the paragraph's PAPX and the operand of the last top-level
+/// sprmPIstd (0x4600) of its grpprl, if any. MS-DOC 2.6.2: sprmPIstd
+/// "specifies the style of the paragraph" and resets the paragraph
+/// properties to that style. Word writes it for a paragraph whose style
+/// changed while revisions were tracked: the PAPX istd is then the earlier
+/// style.
+pub fn paragraph_styles(index: &Index<'_>, fc: usize) -> Result<(usize, Option<usize>), String> {
+    let bytes = match index.at(fc).map(|(_, run)| run.properties) {
+        None | Some([]) => return Ok((0, None)),
+        Some(bytes) => bytes,
+    };
+    let istd = u16_at(bytes, 0)? as usize;
+    let grpprl = &bytes[2..];
+    // Most paragraphs carry no sprmPIstd: look for its opcode bytes first.
+    if !grpprl.windows(2).any(|pair| pair == [0x00, 0x46]) {
+        return Ok((istd, None));
     }
+    let mut applied = None;
+    let mut sprms = super::sprm::Sprms::new(grpprl);
+    let mut budget = super::sprm::Budget::default();
+    while let Some((code, operand)) = sprms.next(&mut budget)? {
+        if code == 0x4600 {
+            applied = Some(u16_at(operand, 0)? as usize);
+        }
+    }
+    Ok((istd, applied))
 }
 
 #[cfg(test)]
@@ -218,6 +244,19 @@ mod tests {
             paragraph_style(&Index::read(&word, &table, Kind::Paragraph).unwrap(), 109).unwrap(),
             9
         );
+    }
+
+    #[test]
+    fn the_last_sprm_p_istd_of_a_papx_is_reported_beside_its_istd() {
+        let (mut word, table) = fixture(Kind::Paragraph);
+        // istd 7, then sprmPIstd 3 and sprmPIstd 5.
+        word[552..564].copy_from_slice(&[0, 5, 7, 0, 0x00, 0x46, 3, 0, 0x00, 0x46, 5, 0]);
+        let index = Index::read(&word, &table, Kind::Paragraph).unwrap();
+        assert_eq!(paragraph_styles(&index, 109).unwrap(), (7, Some(5)));
+        // The opcode bytes inside an operand are not a sprmPIstd.
+        word[552..560].copy_from_slice(&[0, 3, 7, 0, 0x0b, 0x46, 0x00, 0x46]);
+        let index = Index::read(&word, &table, Kind::Paragraph).unwrap();
+        assert_eq!(paragraph_styles(&index, 109).unwrap(), (7, None));
     }
 
     fn extended_paragraph_payload(word: &mut [u8], properties: &[u8]) {

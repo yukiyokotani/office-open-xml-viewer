@@ -1,11 +1,13 @@
 //! Direct-model facts of a Word floating drawing shape that is not a picture
-//! frame: preset geometry, solid paint and textbox text (MS-ODRAW 2.2.40,
-//! 2.3 and 2.4.24; MS-DOC 2.9.106).
+//! frame: preset geometry, paint, geometry text and textbox text (MS-ODRAW
+//! 2.2.40, 2.3 and 2.4.24; MS-DOC 2.9.106).
 //!
-//! Every OfficeArt property of the shape is classified. A property that is
-//! display-relevant but not represented here rejects the shape with a precise
-//! reason instead of being dropped; only editing, identification and
-//! black-and-white print-mode properties are ignored.
+//! Every OfficeArt property of the shape is classified. A display-relevant
+//! property the DOCX shape model cannot hold exactly is projected to its
+//! nearest equivalent and recorded with `rejection::approximated`; the
+//! properties not classified yet still reject the shape with a precise
+//! reason. Editing, identification and black-and-white print-mode properties
+//! are ignored.
 //!
 //! Absent properties take their normative MS-ODRAW defaults. The document's
 //! OfficeArtDggContainer.drawingPrimaryOptions are not applied as an
@@ -44,11 +46,19 @@ pub(in crate::doc) struct Facts {
     /// zero-based drawing-store BLIP index and whether the fill rotates with
     /// the shape (fUseShapeAnchor, 2.3.7.43).
     pub fill_picture: Option<(usize, bool)>,
+    /// An msofillPattern or msofillTexture fill; see [`Tile`].
+    pub fill_tile: Option<Tile>,
+    /// Geometry text (MS-ODRAW 2.3.22): the shape draws this text instead of
+    /// its outline; see [`GeometryText`].
+    pub geometry_text: Option<GeometryText>,
     /// A linear shade (msofillShade / msofillShadeScale) projected by the
     /// shared OfficeArt rules; see `Paint::shade`.
     pub gradient: Option<Gradient>,
-    /// MS-ODRAW 2.3.18.5 rotation, clockwise about the centre, in degrees.
-    /// Only group members may carry a nonzero rotation (see `group`).
+    /// MS-ODRAW 2.3.13 shadow style, in the shape of the VML `v:shadow`
+    /// the DOCX parser reads (the two state the same properties).
+    pub shadow: Option<docx_model::VmlShadow>,
+    /// MS-ODRAW 2.3.18.5 stored rotation, clockwise about the centre, in
+    /// degrees; `floating::oriented` projects it.
     pub rotation: f64,
     /// Relative width and height (MS-ODRAW 2.3.5.1-2.3.5.2, 2.3.5.5-2.3.5.6):
     /// fraction of the named page element; see `relative_size`.
@@ -69,6 +79,8 @@ pub(in crate::doc) struct Line {
     pub miter: Option<f64>,
     /// Start/end of the projected DrawingML path, not the binary path.
     pub ends: [Option<LineEnd<'static>>; 2],
+    /// ECMA-376 20.1.10.15 ST_CompoundLine other than `sng`.
+    pub compound: Option<&'static str>,
 }
 
 pub(in crate::doc) struct Gradient {
@@ -78,6 +90,45 @@ pub(in crate::doc) struct Gradient {
     pub angle: f64,
     pub scaled: bool,
     pub rotate_with_shape: bool,
+    /// A path shade (msofillShadeCenter, msofillShadeShape): the DrawingML
+    /// path (`rect`, `shape`) and the focus rectangle as l, t, r, b insets.
+    pub radial: Option<(&'static str, [f64; 4])>,
+}
+
+/// A fill that repeats its BLIP (MS-ODRAW 2.3.7.1, 2.4.11).
+pub(in crate::doc) struct Tile {
+    /// Zero-based drawing-store BLIP index (fillBlip, 2.3.7.6).
+    pub blip: usize,
+    /// msofillPattern: the colours of the white and the black pixels of the
+    /// two-colour bitmap (fillColor and fillBackColor), `RRGGBB` or
+    /// `RRGGBBAA`. `None` for msofillTexture, which tiles the picture.
+    pub pattern: Option<[String; 2]>,
+    /// fillOpacity of a texture, FixedPoint 16.16.
+    pub alpha: u32,
+    /// Whether the fill rotates with the shape (fUseShapeAnchor, 2.3.7.43).
+    pub rotates: bool,
+}
+
+/// MS-ODRAW 2.3.22 geometry text in the terms of the VML `v:textpath` that
+/// states the same properties (ECMA-376 Part 4 19.1.2.23).
+pub(in crate::doc) struct GeometryText {
+    /// gtextUNICODE (2.3.22.2).
+    pub string: String,
+    /// gtextFont (2.3.22.7).
+    pub font: Option<String>,
+    /// gtextSize (2.3.22.4) in points; 36 by default.
+    pub size_pt: f64,
+    pub bold: bool,
+    pub italic: bool,
+    /// fGtextOK (2.3.6.31) and fGtext (2.3.22.10): `textpathok` and `on`.
+    pub allowed: bool,
+    pub on: bool,
+    /// gtextFStretch, gtextFBestFit, gtextFShrinkFit and gtextFDxMeasure:
+    /// `fitshape`, `fitpath`, `trim` and `xscale`.
+    pub fit_shape: bool,
+    pub fit_path: bool,
+    pub trim: bool,
+    pub x_scale: bool,
 }
 
 pub(in crate::doc) struct Text {
@@ -92,14 +143,20 @@ pub(in crate::doc) struct Text {
 /// MS-ODRAW 2.4.24 shape types whose unadjusted outline is the named
 /// ECMA-376 ST_ShapeType preset. Adjusted and custom geometries are rejected
 /// before this mapping is consulted.
-fn preset(kind: u16) -> Option<&'static str> {
-    Paint::default().geometry(kind).or_else(|| {
-        // Word's own DOCX of the corpus documents writes these types as the
-        // same presets as the shared PowerPoint table (officeart::preset).
-        matches!(kind, 38 | 51)
-            .then(|| crate::officeart::preset::name(kind))
-            .flatten()
-    })
+fn preset(kind: u16) -> &'static str {
+    // Word's own DOCX of the corpus documents writes the types it was
+    // observed with as the same presets as the shared table of PowerPoint's
+    // conversions (officeart::preset). A type outside that table (the text
+    // effects 136..=175 among them) has no preset: its box is drawn.
+    Paint::default()
+        .geometry(kind)
+        .or_else(|| crate::officeart::preset::name(kind))
+        .unwrap_or_else(|| {
+            crate::rejection::approximated(
+                "Word drawing shape type without a preset drawn as a rectangle",
+                "rect",
+            )
+        })
 }
 
 /// Types whose explicit OfficeArt path is their outline. Type 100 (0x64,
@@ -123,31 +180,47 @@ fn is_line(kind: u16) -> bool {
 ///   ten shapes of varied extents; adj1 (the sixth value) was never authored
 ///   and keeps the preset default.
 ///
-/// A value outside these rules has no evidence and is rejected.
-fn adjustments(kind: u16, legacy: &[Option<i32>; 10]) -> Result<Vec<Option<f64>>, String> {
+/// Every other type follows the rules read from PowerPoint's conversions
+/// of the same OfficeArt shapes (`officeart::preset::adjustments`). An
+/// adjust value without a rule leaves the preset's default.
+fn adjustments(kind: u16, legacy: &[Option<i32>; 10], extent: [i64; 2]) -> Vec<Option<f64>> {
+    const DEFAULTS: &str =
+        "Word drawing shape adjust values without a mapping use the preset defaults";
+    if legacy.iter().all(Option::is_none) {
+        return Vec::new();
+    }
     let sources: &[Option<usize>] = match kind {
         38 => &[Some(0)],
         51 => &[None, Some(4), Some(3), Some(2), Some(1), Some(0)],
-        _ => &[],
-    };
-    for (index, value) in legacy.iter().enumerate() {
-        if value.is_some() && !sources.contains(&Some(index)) {
-            return Err(unsupported(format!(
-                "Word drawing shape type {kind} adjust values have no evidenced mapping"
-            )));
+        _ => {
+            return match crate::officeart::preset::adjustments(kind, legacy, extent[0], extent[1]) {
+                Ok(Some(values)) => {
+                    let used = values
+                        .iter()
+                        .rposition(Option::is_some)
+                        .map_or(0, |index| index + 1);
+                    values[..used].to_vec()
+                }
+                Ok(None) => Vec::new(),
+                Err(_) => crate::rejection::approximated(DEFAULTS, Vec::new()),
+            };
         }
+    };
+    if legacy
+        .iter()
+        .enumerate()
+        .any(|(index, value)| value.is_some() && !sources.contains(&Some(index)))
+    {
+        crate::rejection::approximated(DEFAULTS, ());
     }
-    if legacy.iter().all(Option::is_none) {
-        return Ok(Vec::new());
-    }
-    Ok(sources
+    sources
         .iter()
         .map(|source| {
             source
                 .and_then(|index| legacy[index])
                 .map(|value| f64::from(value) / 21_600.0 * 100_000.0)
         })
-        .collect())
+        .collect()
 }
 
 impl Facts {
@@ -163,13 +236,6 @@ impl Facts {
     ) -> Result<Self, String> {
         // msosptNotPrimitive (0) is a freeform: its outline is the explicit
         // OfficeArt path, decoded in `facts`.
-        let preset = if is_freeform(kind) {
-            None
-        } else {
-            Some(preset(kind).ok_or_else(|| {
-                unsupported(format!("Word drawing shape type {kind} is not supported"))
-            })?)
-        };
         // MS-ODRAW 2.2.40 FSP flags: group members, patriarchs, deleted,
         // OLE and master-linked shapes need facts this projection lacks.
         // fConnector also identifies msosptLine (2.4.24); it does not change
@@ -177,7 +243,9 @@ impl Facts {
         // that this newly admitted class discards no endpoint binding. The
         // established straight connector preset keeps its existing policy.
         let membership = if child { 0x2 } else { 0 };
-        if flags & 0x43f != membership || (flags & 0x100 != 0 && !matches!(kind, 20 | 32)) {
+        // The connector types 33..=40 (bent and curved connectors) are drawn
+        // as their static preset path, like the straight connector.
+        if flags & 0x43f != membership || (flags & 0x100 != 0 && !matches!(kind, 20 | 32..=40)) {
             return Err(unsupported(
                 "Word drawing shape has unsupported shape flags",
             ));
@@ -215,7 +283,7 @@ impl Facts {
                 }
             }
         }
-        table.facts(kind, preset, client_text, spid, budget)
+        table.facts(kind, client_text, spid, extent, budget)
     }
 }
 
@@ -237,7 +305,17 @@ impl<'a> Table<'a> {
             // Word sets fBid on these complex strings as well.
             return match id {
                 0x380 | 0x381 | 0x3a9 => Ok(()),
-                0x145 | 0x146 | 0x151 | 0x152 | 0x155..=0x157 | 0x197 => {
+                // gtextUNICODE, gtextRTF, gtextFont and gtextCSSFont strings.
+                0xc0
+                | 0xc1
+                | 0xc5
+                | 0xc6
+                | 0x145
+                | 0x146
+                | 0x151
+                | 0x152
+                | 0x155..=0x157
+                | 0x197 => {
                     if self.complex.insert(id, data).is_some_and(|old| old != data) {
                         return Err(unsupported("conflicting Word drawing geometry"));
                     }
@@ -249,9 +327,10 @@ impl<'a> Table<'a> {
                 ))),
             };
         }
-        // fillBlip (MS-ODRAW 2.3.7.3) is the only BLIP reference a drawing
-        // shape may carry here; the caller resolves it in the drawing store.
-        if property.opid & 0x4000 != 0 && id != 0x186 {
+        // fillBlip (MS-ODRAW 2.3.7.6) is resolved by the caller in the
+        // drawing store. lineFillBlip (2.3.8.6) paints only a pattern or
+        // texture line, which `facts` does not project.
+        if property.opid & 0x4000 != 0 && !matches!(id, 0x186 | 0x1c5) {
             return Err(unsupported(format!(
                 "Word drawing shape BLIP property {id:#06x} is not supported"
             )));
@@ -287,9 +366,9 @@ impl<'a> Table<'a> {
     fn facts(
         &self,
         kind: u16,
-        preset: Option<&'static str>,
         client_text: Option<u32>,
         spid: Option<u32>,
+        extent: [i64; 2],
         budget: &mut usize,
     ) -> Result<Facts, String> {
         let mut paint = Paint::default();
@@ -332,11 +411,20 @@ impl<'a> Table<'a> {
                 // Word's own DOCX of a corpus document writes both such
                 // boxes as `mso-next-textbox` referencing itself, with their
                 // own text; a second document has four more self-references.
-                // A real chain (another shape) stays unsupported.
                 0x8a if value == 0 || Some(value) == spid => {}
                 // hspNext names the next shape of a linked textbox chain.
-                0x8a => return Err(unsupported("linked Word textbox chains are not supported")),
+                // The DOCX model has no linked text boxes: the story stays
+                // in the first box of its chain (see the lTxid low word
+                // below) and the later boxes are drawn without text.
+                0x8a => crate::rejection::approximated(
+                    "linked Word textbox chain keeps its story in the first box",
+                    (),
+                ),
                 0xbf => {}
+                // Geometry text (2.3.22), read below. gtextRTF and
+                // gtextCSSFont repeat the string and font for other
+                // consumers.
+                0xc0..=0xc6 | 0xff => {}
                 // Picture-only Boolean properties have no effect on shapes.
                 0x13f => {}
                 // Freeform geometry (MS-ODRAW 2.3.6): the explicit path. Adjust
@@ -355,7 +443,7 @@ impl<'a> Table<'a> {
                 // Word's DOCX reproduces those callouts from the adjust values
                 // alone (0x80008 on five shapes, 0x40004 on one).
                 0x37f if kind == 51 && value & !0x000c_000c == 0 => {}
-                0x147..=0x150 if matches!(kind, 38 | 51) => {
+                0x147..=0x150 if !freeform => {
                     legacy_adjust[usize::from(id - 0x147)] = Some(value as i32);
                 }
                 // pInscribe (2.3.6.20) places a freeform's text. An array of
@@ -370,16 +458,23 @@ impl<'a> Table<'a> {
                                 data.len() >= 6 && data[6..].iter().all(|byte| *byte == 0)
                             })) => {}
                 0x186 => paint.property(0x4186, value)?,
+                0x1c5 => {}
                 // fillShadeColors (MS-ODRAW 2.3.7.28): the shade's colours.
                 0x197 => match self.complex.get(&id) {
                     Some(data) => shade.set(*data),
                     None => shade.scalar(value),
                 },
                 0x17f | 0x180..=0x1bf | 0x1c0..=0x1d7 | 0x1ff => paint.property(id, value)?,
-                0x23f => {}
+                // Shadow style (MS-ODRAW 2.3.13), read below when fShadow.
+                0x200..=0x23f => {}
+                // Perspective (2.3.14) and 3-D (2.3.15-2.3.16) styles, used
+                // only when fPerspective or f3D is set; see below.
+                0x240..=0x2ff => {}
                 // Black-and-white display modes only affect B/W output.
                 0x304..=0x306 => {}
-                0x303 if value == 0 => {}
+                // cxstyle (MS-ODRAW 2.3.4.5): how an editor reroutes the
+                // connector. The preset of the shape type is its path.
+                0x303 if value == 0 || (33..=40).contains(&kind) => {}
                 0x33f => {}
                 0x384..=0x387 | 0x388 | 0x38f..=0x392 | 0x3aa | 0x3bf => {}
                 0x53f => {}
@@ -405,7 +500,6 @@ impl<'a> Table<'a> {
             (0x1ff, 9, "Word opaque line background is not supported"),
             (0x1ff, 6, "Word inset line pens are not supported"),
             (0x1ff, 0, "Word no-line dash rendering is not supported"),
-            (0x23f, 1, "Word drawing shadows are not supported"),
             (0x33f, 0, "Word background drawing shapes are not supported"),
             (0x33f, 5, "Word OLE icon shapes are not supported"),
             (0x3bf, 11, "Word horizontal rules are not supported"),
@@ -419,12 +513,30 @@ impl<'a> Table<'a> {
                 return Err(unsupported(reason));
             }
         }
+        // The DOCX shape model has neither a perspective transform nor an
+        // extrusion: the shape is drawn flat.
+        if self.boolean(0x27f, 0) == Some(true) {
+            crate::rejection::approximated(
+                "Word drawing shape perspective is drawn without its transform",
+                (),
+            );
+        }
+        if self.boolean(0x2bf, 3) == Some(true) {
+            crate::rejection::approximated("Word 3-D drawing shape is drawn flat", ());
+        }
         if self.boolean(0x33f, 7).is_some() || self.boolean(0x33f, 6).is_some() {
             return Err(unsupported("Word drawing flip overrides are not supported"));
         }
-        if self.values.get(&0x1cd).is_some_and(|value| *value != 0) {
-            return Err(unsupported("Word compound drawing lines are not supported"));
-        }
+        // MS-ODRAW 2.3.8.19 lineStyle (MSOLINESTYLE) is the ECMA-376
+        // 20.1.10.15 ST_CompoundLine of the same order.
+        let compound = match self.values.get(&0x1cd).copied().unwrap_or(0) {
+            0 => None,
+            1 => Some("dbl"),
+            2 => Some("thickThin"),
+            3 => Some("thinThick"),
+            4 => Some("tri"),
+            _ => crate::rejection::spec_default("invalid Word drawing line style", None),
+        };
 
         let mut subpaths = Vec::new();
         let mut path_paint = (true, true);
@@ -445,7 +557,7 @@ impl<'a> Table<'a> {
         let line_shape = is_line(kind);
         // msofillPicture stretches the picture over the shape (2.3.7.1). A
         // fill rectangle, tiling origin, view-relative sizing or opacity has
-        // no representation here and stays rejected with the non-solid fills.
+        // no representation here; see the remaining fills below.
         let fill_picture = if !line_shape && path_paint.0 && paint.fill_type == Some(3) {
             paint
                 .foreground_image()
@@ -454,38 +566,70 @@ impl<'a> Table<'a> {
         } else {
             None
         };
-        let gradient = if !line_shape && path_paint.0 {
-            // The shared projection also reads concentric shades; this
-            // floating-shape model holds linear ones only, and rejects the
-            // fill type whether or not the fill is displayed, as before.
-            if matches!(paint.fill_type, Some(5 | 6 | 8)) {
-                return Err(unsupported(
-                    "OfficeArt path or title gradient fills are not supported yet",
-                ));
-            }
-            paint
-                // Shade scratch and stops are bounded per shape; the
-                // retained stops are charged with the model payload.
-                .shade(&shade, true, budget, &mut (1usize << 20))?
-                .map(|shade| -> Result<Gradient, String> {
-                    let stops = shade
-                        .projection
-                        .stops
-                        .iter()
-                        .zip(&shade.alphas)
-                        .map(|(stop, alpha)| Ok((stop.position(), rgb(stop.color, *alpha)?)))
-                        .collect::<Result<Vec<_>, String>>()?;
-                    Ok(Gradient {
-                        stops,
-                        angle: shade.projection.angle.degrees(),
-                        scaled: shade.scaled,
-                        rotate_with_shape: shade.rotate_with_shape,
-                    })
-                })
-                .transpose()?
-        } else {
-            None
+        // MS-ODRAW 2.3.7.1 msofillShadeCenter (5) and msofillShadeShape (6)
+        // shade from the focus rectangle fillToLeft..fillToBottom
+        // (2.3.7.14-17) outward, along the bounding rectangle or the shape's
+        // own outline, as a DrawingML path gradient does. The stops are those
+        // of the linear shade and start at the focus rectangle: Word's PDF
+        // of a two-colour shade from the centre (fillFocus 100) paints the
+        // fill colour at the centre and the back colour at the edges.
+        let radial = match paint.fill_type {
+            Some(5) => Some("rect"),
+            Some(6) => Some("shape"),
+            _ => None,
         };
+        let mut shade_paint = paint;
+        if radial.is_some() {
+            shade_paint.fill_type = Some(4);
+        }
+        // Only these two are linear shades; a title shade (8) takes the fill
+        // colour below.
+        let gradient =
+            if !line_shape && path_paint.0 && matches!(shade_paint.fill_type, Some(4 | 7)) {
+                shade_paint
+                    // Shade scratch and stops are bounded per shape; the
+                    // retained stops are charged with the model payload.
+                    .shade(&shade, true, budget, &mut (1usize << 20))?
+                    .map(|shade| -> Result<Gradient, String> {
+                        let stops = shade
+                            .projection
+                            .stops
+                            .iter()
+                            .zip(&shade.alphas)
+                            .map(|(stop, alpha)| Ok((stop.position(), rgb(stop.color, *alpha)?)))
+                            .collect::<Result<Vec<_>, String>>()?;
+                        let radial = radial.map(|path| {
+                            let side = |id: u16| {
+                                (f64::from(self.values.get(&id).copied().unwrap_or(0) as i32)
+                                    / 65_536.0)
+                                    .clamp(0.0, 1.0)
+                            };
+                            (
+                                path,
+                                [
+                                    side(0x18d),
+                                    side(0x18e),
+                                    1.0 - side(0x18f),
+                                    1.0 - side(0x190),
+                                ],
+                            )
+                        });
+                        Ok(Gradient {
+                            stops,
+                            angle: if radial.is_some() {
+                                0.0
+                            } else {
+                                shade.projection.angle.degrees()
+                            },
+                            scaled: shade.scaled,
+                            rotate_with_shape: shade.rotate_with_shape,
+                            radial,
+                        })
+                    })
+                    .transpose()?
+            } else {
+                None
+            };
         let fill = if !path_paint.0 || fill_picture.is_some() || gradient.is_some() {
             None
         } else if let Some((color, alpha)) = paint.solid_fill_or_default(!line_shape) {
@@ -493,8 +637,8 @@ impl<'a> Table<'a> {
         } else {
             None
         };
-        // An enabled but non-solid fill (gradient, pattern, texture,
-        // picture or custom fill rectangle) must not become "no fill".
+        // The remaining enabled fills (MS-ODRAW 2.4.11 MSOFILLTYPE).
+        let (mut fill, mut fill_picture, mut fill_tile) = (fill, fill_picture, None);
         if !line_shape
             && path_paint.0
             && fill.is_none()
@@ -503,9 +647,83 @@ impl<'a> Table<'a> {
             && paint.filled.unwrap_or(true)
             && paint.fill_ok.unwrap_or(true)
         {
-            return Err(unsupported(
-                "Word non-solid drawing fills are not supported",
-            ));
+            const SITE: &str = "Word non-solid drawing fills are not supported";
+            let blip = paint
+                .fill_blip
+                .filter(|blip| *blip != 0)
+                .map(|blip| (blip - 1) as usize);
+            let alpha = paint.fill_alpha.unwrap_or(65536);
+            let color = paint.fill.unwrap_or(0xffffff);
+            // fillRectLeft.., fillDztype, fillWidth/Height and fillOriginX..
+            // (2.3.7.8-2.3.7.13, 2.3.7.36-2.3.7.39) place and scale the
+            // BLIP, and fillShape 0 aligns it with the view instead of the
+            // shape (2.3.7.43). Only the default placement is projected.
+            let placed = paint.fill_rect.unwrap_or(false)
+                || !paint.fill_shape.unwrap_or(true)
+                || paint.fill_dztype.unwrap_or(0) != 0
+                || paint
+                    .fill_origins
+                    .iter()
+                    .any(|value| value.unwrap_or(0) != 0);
+            match (paint.fill_type.unwrap_or(0), blip) {
+                // msofillPattern: fillColor paints the white pixels of the
+                // bitmap and fillBackColor the black ones (see
+                // `officeart::pattern`). Word's PDF export draws a 2x2 tile
+                // of pixels taken from the bitmap, in those colours.
+                (1, Some(blip)) => {
+                    if placed {
+                        crate::rejection::approximated(SITE, ());
+                    }
+                    // fillBackOpacity (2.3.7.5) is a FixedPoint in [0, 1];
+                    // the shared paint validates only fillOpacity.
+                    let back_alpha = match paint.fill_back_alpha.unwrap_or(65536) {
+                        alpha @ 0..=65536 => alpha,
+                        _ => crate::rejection::spec_default(
+                            "invalid Word pattern fill background opacity",
+                            65536,
+                        ),
+                    };
+                    fill_tile = Some(Tile {
+                        blip,
+                        pattern: Some([
+                            rgb(color, alpha)?,
+                            rgb(paint.fill_back.unwrap_or(0xffffff), back_alpha)?,
+                        ]),
+                        alpha: 65536,
+                        rotates: paint.rotate_fill_with_shape.unwrap_or(false),
+                    });
+                }
+                // msofillTexture: the picture repeats at its own size from
+                // the top-left corner of the shape. Word's PDF of a control
+                // tiles a 16x16 picture every 12 points (96 pixels per inch)
+                // from that corner.
+                (2, Some(blip)) => {
+                    if placed {
+                        crate::rejection::approximated(SITE, ());
+                    }
+                    fill_tile = Some(Tile {
+                        blip,
+                        pattern: None,
+                        alpha,
+                        rotates: paint.rotate_fill_with_shape.unwrap_or(false),
+                    });
+                }
+                // An msofillPicture the stretched projection above declined:
+                // a fill rectangle, a tiling origin or an opacity. It is
+                // stretched over the shape like the plain picture fill.
+                (3, Some(blip)) => {
+                    fill_picture = Some(crate::rejection::approximated(
+                        SITE,
+                        (blip, paint.rotate_fill_with_shape.unwrap_or(false)),
+                    ));
+                }
+                // msofillBackground shows what lies behind the shape.
+                (9, _) => crate::rejection::approximated(SITE, ()),
+                // A BLIP fill without its BLIP, a shade the shared rules do
+                // not project (msofillShadeTitle) or a solid fill limited to
+                // a fill rectangle: the fill colour alone.
+                _ => fill = Some(crate::rejection::approximated(SITE, rgb(color, alpha)?)),
+            }
         }
         let line = match paint.solid_line_or_default(path_paint.1) {
             Some((color, alpha)) => {
@@ -535,6 +753,7 @@ impl<'a> Table<'a> {
                     join,
                     miter,
                     ends,
+                    compound,
                 })
             }
             None => {
@@ -552,15 +771,28 @@ impl<'a> Table<'a> {
 
         let text = match (text_id.filter(|id| *id != 0), client_text) {
             (None, None) => None,
+            // MS-DOC 2.9.106 / MS-ODRAW lTxid: the high word is the
+            // one-based FTXBXS index and the low word the zero-based
+            // position of the shape in its chain of linked textboxes. A
+            // later box of a chain holds the text that overflows the boxes
+            // before it; the story is projected in the first box only.
+            (Some(id), client)
+                if client.is_none_or(|client| client == id)
+                    && id & 0xffff != 0
+                    && id >> 16 != 0 =>
+            {
+                crate::rejection::approximated(
+                    "linked Word textbox chain keeps its story in the first box",
+                    (),
+                );
+                None
+            }
             (Some(id), client) if client.is_none_or(|client| client == id) => {
                 if line_shape {
                     return Err(unsupported("Word line shapes cannot carry text"));
                 }
-                // MS-DOC 2.9.106: the high word is the one-based FTXBXS index
-                // and the low word is zero. A nonzero low word is a later box
-                // of a linked chain.
-                if id & 0xffff != 0 || id >> 16 == 0 {
-                    return Err(unsupported("linked Word textbox chains are not supported"));
+                if id >> 16 == 0 {
+                    return Err(unsupported("Word shape text references no textbox"));
                 }
                 Some(Text {
                     index: (id >> 16) as usize,
@@ -570,10 +802,172 @@ impl<'a> Table<'a> {
             }
             _ => return Err(unsupported("inconsistent Word shape textbox reference")),
         };
+        let shadow = if self.boolean(0x23f, 1) == Some(true) {
+            let value = |id: u16| self.values.get(&id).copied();
+            let fixed = |id: u16, default: f64| {
+                value(id).map_or(default, |value| f64::from(value as i32) / 65_536.0)
+            };
+            let offset = |x: u16, y: u16, default: i32| docx_model::VmlShadowOffset {
+                x_pt: f64::from(value(x).map_or(default, |value| value as i32)) / 12_700.0,
+                y_pt: f64::from(value(y).map_or(default, |value| value as i32)) / 12_700.0,
+                x_fraction: 0.0,
+                y_fraction: 0.0,
+            };
+            Some(docx_model::VmlShadow {
+                // MSOSHADOWTYPE (2.4.14).
+                kind: match value(0x200).unwrap_or(0) {
+                    0 => "single",
+                    1 => "double",
+                    2..=4 => "perspective",
+                    5 | 6 => "emboss",
+                    _ => crate::rejection::spec_default("invalid Word shadow type", "single"),
+                }
+                .into(),
+                color: rgb(value(0x201).unwrap_or(0x0080_8080), 65_536)?,
+                color2: rgb(value(0x202).unwrap_or(0x00cb_cbcb), 65_536)?,
+                offset: offset(0x205, 0x206, 25_400),
+                offset2: offset(0x207, 0x208, -25_400),
+                opacity: fixed(0x204, 1.0).clamp(0.0, 1.0),
+                obscured: self.boolean(0x23f, 0) == Some(true),
+                origin: (fixed(0x210, 0.0), fixed(0x211, 0.0)),
+                matrix: [
+                    fixed(0x209, 1.0),
+                    fixed(0x20a, 0.0),
+                    fixed(0x20b, 0.0),
+                    fixed(0x20c, 1.0),
+                    fixed(0x20d, 0.0),
+                    fixed(0x20e, 0.0),
+                ],
+                // The offsets are lengths (EMUs), not fractions of the shape.
+                absolute_perspective: true,
+            })
+        } else {
+            None
+        };
+        // MS-ODRAW 2.3.22.10: fGtext requires gtextUNICODE. The text effect
+        // types 136..=175 are defined with fGtextOK (their VML shapetypes
+        // carry `textpathok`); another type needs the explicit bit.
+        // The complex strings are null-terminated UTF-16 (2.3.22.2, 2.3.22.7):
+        // an odd byte count is broken framing; a string without its
+        // terminator ends with its data.
+        let wide = |id: u16| -> Result<Option<String>, String> {
+            let Some(data) = self.complex.get(&id) else {
+                return Ok(None);
+            };
+            if data.len() % 2 != 0 {
+                return Err(crate::rejection::corrupt(
+                    "truncated Word geometry text string",
+                ));
+            }
+            let units: Vec<u16> = data
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|unit| u16::from_le_bytes(*unit))
+                .take_while(|unit| *unit != 0)
+                .collect();
+            Ok(Some(String::from_utf16_lossy(&units)))
+        };
+        let geometry_text = match self.boolean(0xff, 14) {
+            Some(true) => {
+                // fGtext without the string it requires displays no text.
+                let string = wide(0xc0)?.unwrap_or_else(|| {
+                    crate::rejection::ignored_value("Word geometry text without its string");
+                    String::new()
+                });
+                let flag = |bit: u32| self.boolean(0xff, bit) == Some(true);
+                let value =
+                    |id: u16, default: u32| self.values.get(&id).copied().unwrap_or(default);
+                // The DOCX `v:textpath` facts hold no vertical or normalized
+                // layout (gtextFVertical, gtextFNormalize), no alignment
+                // other than the centred default (gtextAlign), no spacing
+                // (gtextSpacing, 1.0 by default) and no small caps, strike
+                // or shadow: the text is drawn without them. gtextFKern asks
+                // for pair kerning, which the shared text shaping decides;
+                // gtextFUnderline SHOULD be ignored (2.3.22.10).
+                if flag(13)
+                    || flag(7)
+                    || flag(2)
+                    || flag(1)
+                    || flag(0)
+                    || value(0xc2, 1) != 1
+                    || value(0xc4, 0x0001_0000) != 0x0001_0000
+                {
+                    crate::rejection::approximated(
+                        "Word geometry text layout controls are not projected",
+                        (),
+                    );
+                }
+                // gtextSize (2.3.22.4) is a FixedPoint that MUST NOT be
+                // negative; 36 points by default.
+                let size = value(0xc3, 0x0024_0000) as i32;
+                let size = if size < 0 {
+                    crate::rejection::spec_default("invalid Word geometry text size", 0x0024_0000)
+                } else {
+                    size
+                };
+                Some(GeometryText {
+                    string,
+                    font: wide(0xc5)?.filter(|font| !font.is_empty()),
+                    size_pt: f64::from(size) / 65_536.0,
+                    bold: flag(5),
+                    italic: flag(4),
+                    allowed: self
+                        .boolean(0x17f, 2)
+                        .unwrap_or((136..=175).contains(&kind)),
+                    on: true,
+                    fit_shape: flag(10),
+                    fit_path: flag(8),
+                    trim: flag(9),
+                    x_scale: flag(6),
+                })
+            }
+            _ => None,
+        };
+        // A text effect draws its text between the lines of its text path.
+        // Type 136 (plain text) is the VML shapetype path
+        // `m@7,l@8,m@5,21600l@6,21600e`: the top and bottom edges of the
+        // box, shortened from opposite ends as adjustValue leaves 10800. The
+        // types 137..=175 bend those lines; the DOCX shape model has no text
+        // warp, so their text is drawn on the plain path.
+        let text_effect =
+            (136..=175).contains(&kind) && geometry_text.as_ref().is_some_and(|text| text.allowed);
+        if text_effect {
+            if kind != 136 {
+                crate::rejection::approximated(
+                    "Word text effect shape is drawn on the plain text path",
+                    (),
+                );
+            }
+            let adjust = f64::from(legacy_adjust[0].unwrap_or(10_800).clamp(0, 21_600)) / 21_600.0;
+            let line = |from: f64, to: f64, y: f64| {
+                vec![PathCmd::MoveTo { x: from, y }, PathCmd::LineTo { x: to, y }]
+            };
+            subpaths = if kind != 136 || adjust == 0.5 {
+                vec![line(0.0, 1.0, 0.0), line(0.0, 1.0, 1.0)]
+            } else if adjust > 0.5 {
+                vec![
+                    line(0.0, 2.0 - 2.0 * adjust, 0.0),
+                    line(2.0 * adjust - 1.0, 1.0, 1.0),
+                ]
+            } else {
+                vec![
+                    line(1.0 - 2.0 * adjust, 1.0, 0.0),
+                    line(0.0, 2.0 * adjust, 1.0),
+                ]
+            };
+        }
         Ok(Facts {
-            preset,
+            preset: (!freeform && !text_effect).then(|| preset(kind)),
+            fill_tile,
+            geometry_text,
+            shadow,
             subpaths,
-            adjustments: adjustments(kind, &legacy_adjust)?,
+            adjustments: if text_effect {
+                Vec::new()
+            } else {
+                adjustments(kind, &legacy_adjust, extent)
+            },
             fill_picture,
             gradient,
             rotation,
@@ -1103,8 +1497,26 @@ mod tests {
         );
         let own = container(&[(0x80, 0x10000), (0x8a, 0x806)], &[], &fsp);
         assert!(read(202, 0xa00, &own, [9, 9]).unwrap().text.is_some());
-        let other = container(&[(0x80, 0x10000), (0x8a, 0x807)], &[], &fsp);
-        assert!(read(202, 0xa00, &other, [9, 9]).is_err());
+        // A real chain: the first box keeps the story and a later box (a
+        // nonzero low word of lTxid) is drawn without text.
+        let note = (
+            crate::rejection::BestEffort::Approximated,
+            "linked Word textbox chain keeps its story in the first box",
+        );
+        crate::rejection::take_best_effort();
+        let first = container(&[(0x80, 0x10000), (0x8a, 0x807)], &[], &fsp);
+        assert_eq!(
+            read(202, 0xa00, &first, [9, 9])
+                .unwrap()
+                .text
+                .unwrap()
+                .index,
+            1
+        );
+        assert_eq!(crate::rejection::take_best_effort(), [note]);
+        let later = container(&[(0x80, 0x10001)], &[], &fsp);
+        assert!(read(202, 0xa00, &later, [9, 9]).unwrap().text.is_none());
+        assert_eq!(crate::rejection::take_best_effort(), [note]);
     }
 
     #[test]
@@ -1149,16 +1561,291 @@ mod tests {
             fill(&[(0x1bf, 0x0060_0060)]).unwrap().fill_picture,
             Some((0, true))
         );
-        // Opacity, fill rectangles, tiling origins and missing BLIPs fail.
+        assert!(crate::rejection::take_best_effort().is_empty());
+        // An opacity, a fill rectangle or a tiling origin is not projected:
+        // the picture is stretched all the same.
+        let site = (
+            crate::rejection::BestEffort::Approximated,
+            "Word non-solid drawing fills are not supported",
+        );
         for extra in [
             (0x182u16, 0x8000u32),
             (0x1bf, 0x0002_0002),
             (0x198, 1),
             (0x195, 1),
         ] {
-            assert!(fill(&[extra]).is_err(), "{extra:x?}");
+            let facts = fill(&[extra]).unwrap();
+            assert_eq!(facts.fill_picture, Some((0, false)), "{extra:x?}");
+            assert_eq!(crate::rejection::take_best_effort(), [site]);
         }
-        assert!(read(1, 0xa00, &container(&[(0x180, 3)], &[], &[]), [9, 9]).is_err());
+        // A BLIP fill without its BLIP and a title shade leave the fill
+        // colour; a background fill leaves what lies behind the shape.
+        for (kind, color) in [(3, Some("0000FF")), (8, Some("0000FF")), (9, None)] {
+            let bytes = container(&[(0x180, kind), (0x181, 0x00ff_0000)], &[], &[]);
+            let facts = read(1, 0xa00, &bytes, [9, 9]).unwrap();
+            assert_eq!(facts.fill.as_deref(), color, "{kind}");
+            assert!(facts.fill_picture.is_none() && facts.fill_tile.is_none());
+            assert_eq!(crate::rejection::take_best_effort(), [site]);
+        }
+    }
+
+    #[test]
+    fn pattern_and_texture_fills_reference_their_blip() {
+        // msofillPattern: fillColor for the white pixels of the bitmap,
+        // fillBackColor (white by default) for the black ones.
+        let pattern = container(&[(0x180, 1), (0x181, 0x00e6_aa78), (0x4186, 2)], &[], &[]);
+        let facts = read(1, 0xa00, &pattern, [9, 9]).unwrap();
+        let tile = facts.fill_tile.unwrap();
+        assert_eq!(tile.blip, 1);
+        assert_eq!(
+            tile.pattern,
+            Some(["78AAE6".to_string(), "FFFFFF".to_string()])
+        );
+        assert!(facts.fill.is_none() && facts.fill_picture.is_none());
+        // Both colours carry their opacity; a background opacity above 1.0
+        // takes the opaque default.
+        let translucent = |back_alpha: u32| {
+            let bytes = container(
+                &[
+                    (0x180, 1),
+                    (0x182, 0x8000),
+                    (0x183, 0x0000_00ff),
+                    (0x184, back_alpha),
+                    (0x4186, 1),
+                ],
+                &[],
+                &[],
+            );
+            let facts = read(1, 0xa00, &bytes, [9, 9]).unwrap();
+            facts.fill_tile.unwrap().pattern.unwrap()
+        };
+        assert_eq!(translucent(0x4000), ["FFFFFF80", "FF000040"]);
+        assert!(crate::rejection::take_best_effort().is_empty());
+        assert_eq!(translucent(0x0002_0000), ["FFFFFF80", "FF0000"]);
+        assert_eq!(
+            crate::rejection::take_best_effort(),
+            [(
+                crate::rejection::BestEffort::IgnoredValue,
+                "invalid Word pattern fill background opacity"
+            )]
+        );
+        // msofillTexture tiles the picture with the fill opacity.
+        let texture = container(&[(0x180, 2), (0x182, 0x8000), (0x4186, 1)], &[], &[]);
+        let tile = read(1, 0xa00, &texture, [9, 9]).unwrap().fill_tile.unwrap();
+        assert_eq!((tile.blip, tile.pattern, tile.alpha), (0, None, 0x8000));
+        // fUseShapeAnchor (use bit 21, value bit 5) rotates the fill.
+        assert!(!tile.rotates);
+        let rotating = container(&[(0x180, 2), (0x1bf, 0x0060_0060), (0x4186, 1)], &[], &[]);
+        let tile = read(1, 0xa00, &rotating, [9, 9])
+            .unwrap()
+            .fill_tile
+            .unwrap();
+        assert!(tile.rotates);
+        assert!(crate::rejection::take_best_effort().is_empty());
+        // A scaled, offset or view-aligned (fillShape 0) texture or pattern
+        // keeps the default placement.
+        for (kind, placement) in [
+            (1, (0x195, 1)),
+            (2, (0x195, 1)),
+            (1, (0x1bf, 0x0004_0000)),
+            (2, (0x1bf, 0x0004_0000)),
+            (2, (0x198, 1)),
+        ] {
+            let scaled = container(&[(0x180, kind), placement, (0x4186, 1)], &[], &[]);
+            let tile = read(1, 0xa00, &scaled, [9, 9]).unwrap().fill_tile.unwrap();
+            assert_eq!((tile.blip, tile.pattern.is_some()), (0, kind == 1));
+            assert_eq!(
+                crate::rejection::take_best_effort(),
+                [(
+                    crate::rejection::BestEffort::Approximated,
+                    "Word non-solid drawing fills are not supported"
+                )]
+            );
+        }
+    }
+
+    #[test]
+    fn upright_fills_of_turned_shapes_are_recorded() {
+        use super::super::{turned_content, Content};
+        let site = (
+            crate::rejection::BestEffort::Approximated,
+            "upright picture fills in rotated Word shapes are not supported",
+        );
+        // Pattern, texture and picture fills, upright (fUseShapeAnchor 0, the
+        // default) or rotating with the shape.
+        for (kind, rotates) in [(1u32, false), (2, false), (3, false), (2, true), (3, true)] {
+            let mut properties = vec![(0x180u16, kind), (0x4186, 1)];
+            if rotates {
+                properties.push((0x1bf, 0x0060_0060));
+            }
+            let facts = read(1, 0xa00, &container(&properties, &[], &[]), [9, 9]).unwrap();
+            assert_eq!(
+                facts.fill_tile.as_ref().map(|tile| tile.rotates),
+                (kind != 3).then_some(rotates)
+            );
+            assert_eq!(facts.fill_picture, (kind == 3).then_some((0, rotates)));
+            let content = Content::Shape(Box::new(facts));
+            turned_content(&content, 0.0);
+            assert!(crate::rejection::take_best_effort().is_empty());
+            // The DOCX fill turns with the shape either way.
+            turned_content(&content, 90.0);
+            assert_eq!(
+                crate::rejection::take_best_effort(),
+                if rotates { vec![] } else { vec![site] },
+                "{kind} {rotates}"
+            );
+        }
+    }
+
+    /// A FOPT whose complex data follows its entries (MS-ODRAW 2.2.9).
+    fn with_strings(properties: &[(u16, u32)], strings: &[(u16, &str)]) -> Vec<u8> {
+        let mut entries = Vec::new();
+        let mut data = Vec::new();
+        for (key, value) in properties {
+            entries.extend(key.to_le_bytes());
+            entries.extend(value.to_le_bytes());
+        }
+        for (key, text) in strings {
+            let wide: Vec<u8> = text
+                .encode_utf16()
+                .chain([0])
+                .flat_map(u16::to_le_bytes)
+                .collect();
+            entries.extend((key | 0x8000).to_le_bytes());
+            entries.extend((wide.len() as u32).to_le_bytes());
+            data.extend(wide);
+        }
+        let count = (properties.len() + strings.len()) as u16;
+        record(
+            0xf004,
+            15,
+            &record(0xf00b, (count << 4) | 3, &[entries, data].concat()),
+        )
+    }
+
+    #[test]
+    fn geometry_text_is_the_text_path_of_its_shape() {
+        // Word's plain-text WordArt: fGtext, stretch, shrink fit, best fit,
+        // kerning and bold, with the 3-D and perspective defaults it writes.
+        let wordart = |kind: u16, extra: &[(u16, u32)]| {
+            let mut properties = vec![
+                (0xffu16, 0xffff_5720u32),
+                (0x27f, 0x10000),
+                (0x2bf, 0xf0001),
+            ];
+            properties.extend_from_slice(extra);
+            let bytes = with_strings(&properties, &[(0xc0, "Word"), (0xc5, "Arial")]);
+            read(kind, 0xa00, &bytes, [9000, 3000]).unwrap()
+        };
+        let facts = wordart(136, &[]);
+        let text = facts.geometry_text.as_ref().unwrap();
+        assert_eq!(
+            (text.string.as_str(), text.font.as_deref()),
+            ("Word", Some("Arial"))
+        );
+        assert_eq!((text.size_pt, text.bold, text.italic), (36.0, true, false));
+        assert!(text.allowed && text.on && text.fit_shape && text.fit_path && text.trim);
+        assert!(!text.x_scale);
+        // The text path is the top and the bottom edge of the box.
+        let lines = |facts: &Facts| -> Vec<[f64; 4]> {
+            facts
+                .subpaths
+                .iter()
+                .map(|path| match path.as_slice() {
+                    [PathCmd::MoveTo { x, y }, PathCmd::LineTo { x: to, y: line }] => {
+                        [*x, *y, *to, *line]
+                    }
+                    _ => panic!("a text path line"),
+                })
+                .collect()
+        };
+        assert_eq!(facts.preset, None);
+        assert_eq!(lines(&facts), [[0.0, 0.0, 1.0, 0.0], [0.0, 1.0, 1.0, 1.0]]);
+        assert!(crate::rejection::take_best_effort().is_empty());
+        // adjustValue above 10800 shortens the top line from its end and the
+        // bottom line from its start (`m@7,l@8,m@5,21600l@6,21600e`).
+        let facts = wordart(136, &[(0x147, 16_200), (0xc3, 0x0018_0000)]);
+        assert_eq!(facts.geometry_text.as_ref().unwrap().size_pt, 24.0);
+        assert_eq!(lines(&facts), [[0.0, 0.0, 0.5, 0.0], [0.5, 1.0, 1.0, 1.0]]);
+        assert!(facts.adjustments.is_empty());
+        // A negative size takes the default; vertical layout and spacing
+        // are not projected.
+        let facts = wordart(136, &[(0xc3, 0xffff_0000)]);
+        assert_eq!(facts.geometry_text.as_ref().unwrap().size_pt, 36.0);
+        assert_eq!(
+            crate::rejection::take_best_effort(),
+            [(
+                crate::rejection::BestEffort::IgnoredValue,
+                "invalid Word geometry text size"
+            )]
+        );
+        let layout = (
+            crate::rejection::BestEffort::Approximated,
+            "Word geometry text layout controls are not projected",
+        );
+        for bytes in [
+            with_strings(&[(0xff, 0x6000_6000)], &[(0xc0, "Word")]),
+            with_strings(
+                &[(0xff, 0x4000_4000), (0xc4, 0x0001_8000)],
+                &[(0xc0, "Word")],
+            ),
+            with_strings(&[(0xff, 0x4000_4000), (0xc2, 2)], &[(0xc0, "Word")]),
+        ] {
+            let facts = read(136, 0xa00, &bytes, [9000, 3000]).unwrap();
+            assert_eq!(facts.geometry_text.unwrap().string, "Word");
+            assert_eq!(crate::rejection::take_best_effort(), [layout]);
+        }
+        // fGtext without its string displays no text; a string of an odd
+        // byte count is broken framing.
+        let empty = with_strings(&[(0xff, 0x4000_4000)], &[]);
+        let facts = read(136, 0xa00, &empty, [9000, 3000]).unwrap();
+        assert_eq!(facts.geometry_text.unwrap().string, "");
+        assert_eq!(
+            crate::rejection::take_best_effort(),
+            [(
+                crate::rejection::BestEffort::IgnoredValue,
+                "Word geometry text without its string"
+            )]
+        );
+        let odd = record(
+            0xf004,
+            15,
+            &record(
+                0xf00b,
+                (2 << 4) | 3,
+                &[
+                    &0xffu16.to_le_bytes()[..],
+                    &0x4000_4000u32.to_le_bytes(),
+                    &0x80c0u16.to_le_bytes(),
+                    &3u32.to_le_bytes(),
+                    &[0x41, 0, 0x42],
+                ]
+                .concat(),
+            ),
+        );
+        assert_eq!(
+            read(136, 0xa00, &odd, [9000, 3000]).err().as_deref(),
+            Some("UNSUPPORTED:truncated Word geometry text string")
+        );
+        // A bent text effect is drawn on the plain path.
+        assert_eq!(wordart(144, &[]).subpaths.len(), 2);
+        assert_eq!(
+            crate::rejection::take_best_effort(),
+            [(
+                crate::rejection::BestEffort::Approximated,
+                "Word text effect shape is drawn on the plain text path"
+            )]
+        );
+        // Without fGtextOK another shape type keeps its outline and shows no
+        // text; perspective and extrusion are drawn flat.
+        let bytes = with_strings(
+            &[(0xff, 0x4000_4000), (0x27f, 0x10001), (0x2bf, 0x80008)],
+            &[(0xc0, "Word")],
+        );
+        let facts = read(1, 0xa00, &bytes, [9000, 3000]).unwrap();
+        assert_eq!(facts.preset, Some("rect"));
+        assert!(!facts.geometry_text.unwrap().allowed);
+        assert_eq!(crate::rejection::take_best_effort().len(), 2);
         // Other BLIP-valued properties stay rejected.
         assert!(read(1, 0xa00, &container(&[(0x4104, 1)], &[], &[]), [9, 9]).is_err());
     }
@@ -1192,37 +1879,127 @@ mod tests {
         assert!(read(1, 0xa00, &container(&[], &[], &[]), [9000, 0]).is_err());
     }
 
+    fn best_effort() -> Vec<&'static str> {
+        crate::rejection::take_best_effort()
+            .into_iter()
+            .map(|(_, site)| site)
+            .collect()
+    }
+
+    #[test]
+    fn shape_types_use_the_shared_presets_and_adjust_rules() {
+        best_effort();
+        // msosptWedgeRectCallout (61) with both adjust values.
+        let callout = container(&[(0x147, 0x189c), (0x148, 0x5eec)], &[], &[]);
+        let facts = read(61, 0xa00, &callout, [9000, 3000]).unwrap();
+        assert_eq!(facts.preset, Some("wedgeRectCallout"));
+        assert_eq!(facts.adjustments.len(), 2);
+        assert!(facts.adjustments.iter().all(Option::is_some));
+        assert!(best_effort().is_empty());
+        // An adjust value without a rule keeps the preset default.
+        let adjusted = container(&[(0x14c, 100)], &[], &[]);
+        let facts = read(51, 0xa00, &adjusted, [9000, 3000]).unwrap();
+        assert_eq!(facts.preset, Some("accentBorderCallout2"));
+        assert_eq!(
+            best_effort(),
+            ["Word drawing shape adjust values without a mapping use the preset defaults"]
+        );
+        // A bent connector (fConnector, cxstyle 1) is its static preset.
+        let bent = container(&[(0x303, 1)], &[], &[]);
+        let facts = read(34, 0xb00, &bent, [9000, 3000]).unwrap();
+        assert_eq!(facts.preset, Some("bentConnector3"));
+        assert!(best_effort().is_empty());
+        // A text-effect type has no preset: its box is drawn.
+        let facts = read(136, 0xa00, &container(&[], &[], &[]), [9000, 3000]).unwrap();
+        assert_eq!(facts.preset, Some("rect"));
+        assert_eq!(
+            best_effort(),
+            ["Word drawing shape type without a preset drawn as a rectangle"]
+        );
+    }
+
+    #[test]
+    fn compound_lines_shadows_and_path_shades_reach_the_model() {
+        best_effort();
+        let line = |style: u32| {
+            let bytes = container(&[(0x1cd, style)], &[], &[]);
+            read(1, 0xa00, &bytes, [9000, 3000]).unwrap().line.unwrap()
+        };
+        assert_eq!(line(1).compound, Some("dbl"));
+        assert_eq!(line(9).compound, None);
+        assert_eq!(best_effort(), ["invalid Word drawing line style"]);
+
+        // fShadow with an offset of 5 pt by 2 pt and the default colour.
+        let shadowed = container(
+            &[(0x205, 63_500), (0x206, 25_400), (0x23f, 0x0003_0002)],
+            &[],
+            &[],
+        );
+        let shadow = read(1, 0xa00, &shadowed, [9000, 3000])
+            .unwrap()
+            .shadow
+            .unwrap();
+        assert_eq!(
+            (shadow.kind.as_str(), shadow.color.as_str()),
+            ("single", "808080")
+        );
+        assert_eq!((shadow.offset.x_pt, shadow.offset.y_pt), (5.0, 2.0));
+        assert_eq!((shadow.opacity, shadow.obscured), (1.0, false));
+        assert_eq!(shadow.matrix, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+        let plain = container(&[(0x201, 0), (0x23f, 0x0002_0000)], &[], &[]);
+        assert!(read(1, 0xa00, &plain, [9000, 3000])
+            .unwrap()
+            .shadow
+            .is_none());
+
+        // msofillShadeCenter from the centre point: a path gradient whose
+        // first stop is at the focus.
+        let centre = container(
+            &[
+                (0x180, 5),
+                (0x181, 0x00e6_aa78),
+                (0x18c, 100),
+                (0x18d, 0x8000),
+                (0x18e, 0x8000),
+                (0x18f, 0x8000),
+                (0x190, 0x8000),
+            ],
+            &[],
+            &[],
+        );
+        let gradient = read(1, 0xa00, &centre, [9000, 3000])
+            .unwrap()
+            .gradient
+            .unwrap();
+        assert_eq!(gradient.radial, Some(("rect", [0.5, 0.5, 0.5, 0.5])));
+        // The fill colour is at the focus (the first stop).
+        assert_eq!(gradient.stops.first(), Some(&(0.0, "78AAE6".to_string())));
+        assert_eq!(gradient.stops.last().map(|stop| stop.0), Some(1.0));
+        assert!(best_effort().is_empty());
+    }
+
     #[test]
     #[allow(clippy::type_complexity)]
     fn unrepresented_display_properties_fail_closed() {
         let rejected: &[(u16, &[(u16, u32)], &[(u16, u32)])] = &[
             // Unsupported shape type, adjusted preset geometry and a freeform
             // without a decodable path.
-            (52, &[], &[]),
-            (51, &[(0x14c, 100)], &[]),
             (0, &[], &[]),
             (0, &[(0x144, 4)], &[]),
-            (1, &[(0x147, 100)], &[]),
             // System/palette/scheme colors and non-solid paint.
             (1, &[(0x1c0, 0x1000_0002)], &[]),
             (1, &[(0x1c0, 0x1001_0011)], &[]),
             (1, &[(0x181, 0x0800_0001)], &[]),
-            (1, &[(0x180, 5)], &[]),
             (1, &[(0x1c4, 1)], &[]),
-            (1, &[(0x1cd, 1)], &[]),
             // Shadows, auto margins, no-wrap text, flow and linked chains.
-            (1, &[(0x23f, 0x20002)], &[]),
             (1, &[(0xbf, 0x80008)], &[]),
             (1, &[(0x85, 2)], &[]),
             (1, &[(0x88, 1)], &[]),
-            (1, &[(0x80, 0x10001)], &[]),
-            (1, &[(0x80, 0x10000), (0x8a, 0x806)], &[]),
             // Relative sizing, pseudo-inline, horizontal rule, unknown ids.
             (1, &[], &[(0x7c3, 0xc8)]),
             (1, &[], &[(0x7c1, 10_001)]),
             (1, &[], &[(0x7c1, 5), (0x7c5, 6)]),
             (1, &[(0x3bf, 0x0800_0800)], &[]),
-            (1, &[(0x2ff, 0)], &[]),
             // Conflicting scalars and Boolean members between tables.
             (1, &[(0x181, 1)], &[(0x181, 2)]),
             (1, &[(0x1ff, 0x80008)], &[(0x1ff, 0x80000)]),

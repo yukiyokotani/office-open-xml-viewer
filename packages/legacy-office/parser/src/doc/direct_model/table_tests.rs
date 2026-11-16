@@ -1747,14 +1747,23 @@ fn clear_and_solid_cell_backgrounds_use_their_exact_colors() {
         panic!()
     };
     assert_eq!(table.rows[0].cells[0].background.as_deref(), Some("112233"));
-    assert!(build(1, true)
+    // An automatic solid foreground is black, and a percentage is that
+    // share of the foreground over the background (Word controls).
+    let automatic = build(1, true).unwrap();
+    let Block::Table(table) = &automatic.0[0] else {
+        panic!()
+    };
+    assert_eq!(table.rows[0].cells[0].background.as_deref(), Some("000000"));
+    let percent = build(2, false).unwrap();
+    let Block::Table(table) = &percent.0[0] else {
+        panic!()
+    };
+    assert_eq!(table.rows[0].cells[0].background.as_deref(), Some("415263"));
+    // A hatch is not one color.
+    assert!(build(14, false)
         .err()
         .unwrap()
-        .contains("automatic solid cell shading"));
-    assert!(build(2, false)
-        .err()
-        .unwrap()
-        .contains("patterned cell shading"));
+        .contains("hatched cell shading"));
 }
 
 #[test]

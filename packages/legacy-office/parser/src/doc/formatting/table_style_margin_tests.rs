@@ -11,6 +11,7 @@ fn empty<'a>() -> Formatting<'a> {
         characters: Default::default(),
         paragraphs: Default::default(),
         fonts: vec![],
+        symbol_fonts: vec![],
         defaults: Properties::default(),
         styles: vec![],
         paragraph_cache: BTreeMap::new(),

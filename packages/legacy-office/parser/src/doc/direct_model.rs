@@ -11,6 +11,7 @@ use docx_model::{
 
 #[cfg(test)]
 mod automatic_spacing_tests;
+mod equation;
 pub(in crate::doc) mod fields;
 mod headers;
 mod notes;
@@ -100,6 +101,7 @@ pub(super) fn build(
     }
     let note_layout_settings = notes::validate(
         &facts.note_stories,
+        &mut facts.note_references,
         facts.effective_nfib,
         facts.document_settings.as_ref(),
         &facts.sections,
@@ -235,6 +237,7 @@ pub(super) fn build(
         let fields = fields.as_ref().map_err(Clone::clone)?;
         notes::project(
             story,
+            &facts.note_references,
             fields,
             &mut facts.formatting,
             &mut facts.pictures,
@@ -1551,6 +1554,53 @@ mod tests {
     }
 
     #[test]
+    fn numbered_textbox_paragraphs_count_within_the_textbox() {
+        let bytes = with_numbering(&drawing_shape_source(Some("one\rtwo\r"), false));
+        crate::rejection::take_best_effort();
+        let result =
+            super::super::direct_model(&CompoundFile::open(&bytes).unwrap(), 1024 * 1024).unwrap();
+        let shape = result
+            .document
+            .body
+            .iter()
+            .find_map(|element| match element {
+                BodyElement::Paragraph(paragraph) => {
+                    paragraph.runs.iter().find_map(|run| match run {
+                        DocRun::Shape(shape) => Some(shape),
+                        _ => None,
+                    })
+                }
+                _ => None,
+            })
+            .expect("textbox shape");
+        let numbers: Vec<_> = shape
+            .text_box_content
+            .iter()
+            .map(|block| {
+                let docx_model::TextBoxBlockWire::Body(BodyElement::Paragraph(paragraph)) = block
+                else {
+                    panic!("textbox paragraph")
+                };
+                paragraph
+                    .numbering
+                    .as_ref()
+                    .map(|numbering| (numbering.format.clone(), numbering.text.clone()))
+            })
+            .collect();
+        assert_eq!(
+            numbers,
+            [
+                Some(("decimal".to_string(), "1.".to_string())),
+                Some(("decimal".to_string(), "2.".to_string())),
+            ]
+        );
+        assert!(crate::rejection::take_best_effort().contains(&(
+            crate::rejection::BestEffort::Approximated,
+            "Word textbox list numbers counted within the textbox"
+        )));
+    }
+
+    #[test]
     fn textbox_shape_projects_paint_margins_and_its_story() {
         let bytes = drawing_shape_source(Some("Inside\rbox\r"), false);
         let result =
@@ -1715,24 +1765,27 @@ mod tests {
         let (first, _) = member([0, 0xff78_6402]).unwrap();
         assert_eq!((first.0, first.1, first.2, first.3), (0.0, 0.0, 50.0, 25.0));
         assert!((first.4 - 224.391).abs() < 1e-3);
-        // A half-turned group mirrors member centres and adds 180 degrees; its
-        // textbox member makes this group rotate text, which stays rejected.
-        assert!(member([180 << 16, 0])
-            .unwrap_err()
-            .contains("rotated Word drawing text"));
+        // A half-turned group mirrors member centres and adds 180 degrees,
+        // also for its textbox member.
+        let (first, second) = member([180 << 16, 0]).unwrap();
+        assert_eq!(first, (50.0, 25.0, 50.0, 25.0, 180.0, 180.0));
+        assert_eq!(second, (0.0, 0.0, 50.0, 25.0, 180.0, 180.0));
         let (first, second) = member_with(None, [180 << 16, 90 << 16]).unwrap();
         // 100 x 50 pt frame: the rotated member's box mirrors through the
         // centre (its centre 25, 12.5 becomes 75, 37.5) and turns to 270 degrees.
         assert_eq!(first, (62.5, 12.5, 25.0, 50.0, 270.0, 270.0));
         assert_eq!(second, (0.0, 0.0, 50.0, 25.0, 180.0, 180.0));
-        // Other group angles stay unsupported.
-        assert!(member([90 << 16, 0])
-            .unwrap_err()
-            .contains("rotated Word drawing groups"));
+        // A quarter-turned group: its 100 x 50 pt anchor is the rotated
+        // bounds of a 50 x 100 pt frame about the same centre, in which the
+        // first member occupies the top-left quarter. Turned clockwise that
+        // quarter is the top-right one of the anchor.
+        let (first, second) = member_with(None, [90 << 16, 0]).unwrap();
+        assert_eq!(first, (62.5, -12.5, 25.0, 50.0, 90.0, 90.0));
+        assert_eq!(second, (12.5, 12.5, 25.0, 50.0, 90.0, 90.0));
     }
 
     #[test]
-    fn rotated_or_flipped_groups_fail_closed() {
+    fn flipped_groups_mirror_their_members_and_structural_flags_reject() {
         let bytes = drawing_source(Some("Inside\r"), false, true, [0, 0]);
         let cfb = CompoundFile::open(&bytes).unwrap();
         let word = cfb.stream("WordDocument").unwrap();
@@ -1744,19 +1797,31 @@ mod tests {
             .windows(fsp.len())
             .position(|bytes| bytes == fsp)
             .expect("top-level group FSP");
-        for (offset, value, reason) in [
-            (12, 0x41u8, "flipped"),
-            (13, 0x06, "unsupported shape flags"),
-        ] {
+        let changed = |offset: usize, value: u8| {
             let mut table = table.clone();
             table[at + offset] = value;
-            let changed = build_scoped_cfb(&[("WordDocument", word.clone()), ("0Table", table)]);
-            assert!(super::super::direct_model(
-                &CompoundFile::open(&changed).unwrap(),
-                1024 * 1024
-            )
+            let bytes = build_scoped_cfb(&[("WordDocument", word.clone()), ("0Table", table)]);
+            super::super::direct_model(&CompoundFile::open(&bytes).unwrap(), 1024 * 1024)
+        };
+        assert!(changed(13, 0x06)
             .unwrap_err()
-            .contains(reason));
+            .contains("unsupported shape flags"));
+        // fFlipH on the group mirrors the member frames about its centre
+        // (100 x 50 pt, members at 0,0 and 50,25) and flips each member.
+        let result = changed(12, 0x41).unwrap();
+        let BodyElement::Paragraph(paragraph) = &result.document.body[0] else {
+            panic!("body paragraph")
+        };
+        let [_, _, DocRun::Shape(first), DocRun::Shape(second)] = paragraph.runs.as_slice() else {
+            panic!("two members")
+        };
+        for (shape, origin) in [(first, [55.0, 10.0]), (second, [5.0, 35.0])] {
+            assert_eq!([shape.anchor_x_pt, shape.anchor_y_pt], origin);
+            assert_eq!(
+                (shape.flip_h, shape.flip_v, shape.rotation),
+                (true, false, 0.0)
+            );
+            assert!(shape.rotation.is_sign_positive());
         }
     }
 
@@ -2897,7 +2962,7 @@ mod tests {
     }
 
     #[test]
-    fn unverified_private_field_results_are_rejected_not_hidden() {
+    fn private_field_results_are_not_displayed() {
         let sections = [(5, 2, 12_240, 15_840, 1, 720)];
         let slots = [
             None,
@@ -2907,16 +2972,29 @@ mod tests {
             None,
             None,
         ];
+        let header_text = |bytes: &[u8]| -> Vec<String> {
+            let result =
+                super::super::direct_model(&CompoundFile::open(bytes).unwrap(), 1024 * 1024)
+                    .unwrap();
+            let header = result.document.headers.default.expect("default header");
+            let [BodyElement::Paragraph(paragraph)] = header.body.as_slice() else {
+                panic!("one header paragraph");
+            };
+            paragraph
+                .runs
+                .iter()
+                .map(|run| match run {
+                    DocRun::Text(run) => run.text.clone(),
+                    other => panic!("{other:?}"),
+                })
+                .collect()
+        };
         let bytes = source_with_typography("Body\r", &sections, None, None, None, Some(&slots));
-        assert!(
-            super::super::direct_model(&CompoundFile::open(&bytes).unwrap(), 1024 * 1024).is_ok()
-        );
+        assert_eq!(header_text(&bytes), ["x"]);
+        // MS-DOC 2.9.110 fPrivateResult: the result "is not intended to be
+        // visible to the user".
         let bytes = mark_header_field_results_private(&bytes);
-        assert!(
-            super::super::direct_model(&CompoundFile::open(&bytes).unwrap(), 1024 * 1024)
-                .unwrap_err()
-                .contains("private field result")
-        );
+        assert!(header_text(&bytes).is_empty());
     }
 
     #[test]
@@ -3495,9 +3573,25 @@ mod tests {
             ],
             [Some(72.0), Some(36.0)]
         );
+        // Without the `_PictureBullets` bookmark there is no picture: Word
+        // draws the level's text bullet (Word control).
+        for bookmarks in [&[][..], &[("_PictureBullet", 0, 1)][..]] {
+            let bytes = picture_bullet_source(&picture_bullet_level(0, 1), bookmarks, 75);
+            crate::rejection::take_best_effort();
+            let result = picture_bullet_result(&bytes).unwrap();
+            let BodyElement::Paragraph(paragraph) = &result.document.body[0] else {
+                panic!("paragraph")
+            };
+            let numbering = paragraph.numbering.as_ref().unwrap();
+            assert_eq!(numbering.pic_bullet_width_pt, None);
+            assert!(numbering.pic_bullet_transform.is_none());
+            assert!(result.resources.is_empty());
+            assert!(crate::rejection::take_best_effort().contains(&(
+                crate::rejection::BestEffort::Approximated,
+                "Word picture bullet without its picture shown as the text bullet"
+            )));
+        }
         for (bookmarks, relative_cp, expected) in [
-            (&[][..], 0, "lacks its bookmark"),
-            (&[("_PictureBullet", 0, 1)][..], 0, "lacks its bookmark"),
             (&[("_PictureBullets", 0, 1)][..], 1, "outside its bookmark"),
             (
                 &[("_PictureBullets", 1, 2)][..],

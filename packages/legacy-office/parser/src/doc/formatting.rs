@@ -101,6 +101,8 @@ pub struct Formatting<'a> {
     pub characters: Index<'a>,
     paragraphs: Index<'a>,
     fonts: Vec<String>,
+    /// Names of the fonts whose FFN states the symbol character set.
+    symbol_fonts: Vec<String>,
     defaults: Properties,
     styles: Vec<Option<Style<'a>>>,
     paragraph_cache: BTreeMap<(usize, Option<TableFormattingKey>), Properties>,
@@ -144,7 +146,7 @@ impl<'a> Formatting<'a> {
     }
 
     pub fn read(word: &'a [u8], table: &'a [u8], data: &'a [u8]) -> Result<Self, String> {
-        let fonts = read_fonts(fkp::table_part(word, table, 0x112)?)?;
+        let (fonts, symbol_fonts) = read_fonts(fkp::table_part(word, table, 0x112)?)?;
         let (defaults, styles) = read_styles(fkp::table_part(word, table, 0xa2)?)?;
         let characters = Index::read(word, table, Kind::Character)?;
         let paragraphs = Index::read(word, table, Kind::Paragraph)?;
@@ -154,6 +156,7 @@ impl<'a> Formatting<'a> {
             characters,
             paragraphs,
             fonts,
+            symbol_fonts,
             defaults,
             styles,
             paragraph_cache: BTreeMap::new(),
@@ -179,7 +182,23 @@ impl<'a> Formatting<'a> {
         if !self.paragraphs.is_empty() && self.paragraphs.at(end_fc).is_none() {
             return Err(unsupported("Word paragraph mark outside formatting ranges"));
         }
-        fkp::paragraph_style(&self.paragraphs, end_fc)
+        let (istd, applied) = fkp::paragraph_styles(&self.paragraphs, end_fc)?;
+        Ok(match applied {
+            Some(applied) if self.is_paragraph_style(applied) => applied,
+            // MS-DOC 2.6.2 gives such a paragraph the document defaults,
+            // which this reader does not resolve as a style: the PAPX style
+            // stands in for them.
+            Some(_) => crate::rejection::approximated(
+                "Word sprmPIstd without a paragraph style keeps the PAPX style",
+                istd,
+            ),
+            None => istd,
+        })
+    }
+
+    /// MS-DOC 2.9.260 StdfBase stk 1: a paragraph style.
+    fn is_paragraph_style(&self, istd: usize) -> bool {
+        matches!(self.styles.get(istd), Some(Some(style)) if style.kind == 1)
     }
 
     pub(in crate::doc) fn configure_table_styles(
@@ -561,6 +580,23 @@ impl<'a> Formatting<'a> {
         'a: 'b,
     {
         let mut direct_properties = DirectParagraphProperties::default();
+        // MS-DOC 2.6.2 sprmPIstd resets the paragraph properties to the
+        // style it names; `props` enters as the properties of that style
+        // (`Self::paragraph_style` resolves the last sprmPIstd). The state
+        // is restored when the last top-level sprmPIstd of the PAPX is met,
+        // so only the properties after it apply.
+        let mut pending_style_resets = if direct.windows(2).any(|pair| pair == [0x00, 0x46]) {
+            let mut count = 0usize;
+            let mut sprms = sprm::Sprms::new(direct);
+            let mut budget = sprm::Budget::default();
+            while let Some((code, _)) = sprms.next(&mut budget)? {
+                count += usize::from(code == 0x4600);
+            }
+            count
+        } else {
+            0
+        };
+        let mut style_base = (pending_style_resets != 0).then(|| props.clone());
         let (appended_bytes, filter) = appended
             .map_or((None, sprm::TopLevelFilter::All), |(bytes, filter)| {
                 (Some(bytes), filter)
@@ -572,6 +608,16 @@ impl<'a> Formatting<'a> {
             &mut self.budget,
             filter,
             |code, operand, _, is_piece| {
+                if code == 0x4600 && !is_piece {
+                    pending_style_resets = pending_style_resets.saturating_sub(1);
+                    if pending_style_resets == 0 {
+                        // The paragraph properties that precede the last
+                        // sprmPIstd are replaced by the style it names,
+                        // the direct overrides captured from them included.
+                        *props = style_base.take().unwrap_or_else(|| props.clone());
+                        direct_properties = DirectParagraphProperties::default();
+                    }
+                }
                 if (code >> 10) & 7 == 1
                     && !matches!(code, 0x2416 | 0x2417 | 0x6649 | 0x664a | 0x244b | 0x244c)
                     && !props.apply(code, operand)?
@@ -845,6 +891,17 @@ impl<'a> Formatting<'a> {
             .passive_special())
     }
 
+    /// Whether the character is hidden text (sprmCFVanish).
+    pub(in crate::doc) fn hidden_character(
+        &mut self,
+        style: usize,
+        fc: usize,
+        prm: u16,
+        prcs: &[&[u8]],
+    ) -> Result<bool, String> {
+        Ok(self.run_properties(style, fc, prm, prcs)?.hidden())
+    }
+
     fn run_properties(
         &mut self,
         paragraph_style: usize,
@@ -959,9 +1016,12 @@ impl<'a> Formatting<'a> {
     }
 }
 
-fn read_fonts(bytes: &[u8]) -> Result<Vec<String>, String> {
+/// MS-DOC 2.9.86 FFN chs of the symbol character set (SYMBOL_CHARSET).
+const SYMBOL_CHARSET: u8 = 2;
+
+fn read_fonts(bytes: &[u8]) -> Result<(Vec<String>, Vec<String>), String> {
     if bytes.is_empty() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), Vec::new()));
     }
     let count = u16_at(bytes, 0)? as usize;
     if count > 0x7ff0 || u16_at(bytes, 2)? != 0 {
@@ -969,6 +1029,7 @@ fn read_fonts(bytes: &[u8]) -> Result<Vec<String>, String> {
     }
     let mut offset = 4;
     let mut fonts = Vec::with_capacity(count);
+    let mut symbol_fonts = Vec::new();
     for _ in 0..count {
         let size = *bytes
             .get(offset)
@@ -990,13 +1051,15 @@ fn read_fonts(bytes: &[u8]) -> Result<Vec<String>, String> {
         if units.is_empty() || units.len() * 2 + 2 > name.len() {
             return Err(unsupported("unterminated or empty Word font name"));
         }
-        fonts.push(
-            String::from_utf16(&units)
-                .map_err(|_| unsupported("invalid Unicode Word font name"))?,
-        );
+        let name = String::from_utf16(&units)
+            .map_err(|_| unsupported("invalid Unicode Word font name"))?;
+        if font[3] == SYMBOL_CHARSET {
+            symbol_fonts.push(name.clone());
+        }
+        fonts.push(name);
         offset += size;
     }
-    Ok(fonts)
+    Ok((fonts, symbol_fonts))
 }
 
 fn read_styles(bytes: &[u8]) -> Result<(Properties, Vec<Option<Style<'_>>>), String> {
@@ -1117,7 +1180,7 @@ mod tests {
         }
         bytes.push(font.len() as u8);
         bytes.extend(font);
-        assert_eq!(read_fonts(&bytes).unwrap(), ["日本語 Font"]);
+        assert_eq!(read_fonts(&bytes).unwrap().0, ["日本語 Font"]);
         bytes.pop();
         assert!(read_fonts(&bytes).is_err());
     }
@@ -1127,6 +1190,7 @@ mod tests {
             characters: Index::default(),
             paragraphs: Index::default(),
             fonts: vec![],
+            symbol_fonts: vec![],
             defaults: Properties::default(),
             styles: vec![],
             paragraph_cache: BTreeMap::new(),

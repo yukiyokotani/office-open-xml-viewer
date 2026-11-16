@@ -7,6 +7,8 @@ pub(crate) mod gradient;
 pub(crate) mod inflate;
 mod metafile;
 pub(crate) mod paint;
+#[cfg(any(test, feature = "direct-doc", feature = "direct-xls"))]
+pub(crate) mod pattern;
 pub(crate) mod preset;
 pub(crate) mod preset_defaults;
 pub(crate) mod properties;

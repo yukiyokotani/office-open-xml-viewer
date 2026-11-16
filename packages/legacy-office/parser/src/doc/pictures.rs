@@ -75,6 +75,12 @@ impl<'a> Store<'a> {
         self.bullet_document = document;
     }
 
+    /// Whether the document has a Bullet Pictures document (the
+    /// `_PictureBullets` bookmark).
+    pub(in crate::doc) fn has_bullet_document(&self) -> bool {
+        self.bullet_document.is_some()
+    }
+
     /// Acquire the picture of an enabled picture bullet ([MS-DOC] 2.6.1):
     /// the character at the bullet's relative CP in the `_PictureBullets`
     /// bookmark MUST be a passive special U+0001 whose sprmCPicLocation

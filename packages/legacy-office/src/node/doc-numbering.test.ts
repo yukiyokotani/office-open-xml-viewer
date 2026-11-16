@@ -218,13 +218,14 @@ it('scopes numbering to each note/header without restarting the main story', asy
   expect(model.headers.default.body[0].numbering?.text).toBe('1.');
 });
 
-it('rejects a numbered continuation notice in native short/short footnotes', async () => {
+it('draws the default separator for a numbered continuation notice', async () => {
   const text = 'Body\u0002\r';
   const footnotes = [{ cp: 4, text: '\u0002Note\r' }];
   const headerStart = text.length + footnotes[0].text.length + 1;
   // Real list/override data resolves before the gate; the source does not fail
   // merely because it refers to a missing list. Only the notice is numbered.
-  await expect(load(buildDocFixture({ text, footnotes, numbering: listData(),
+  // A numbered notice is outside the model's reserved-story shapes.
+  const model = await load(buildDocFixture({ text, footnotes, numbering: listData(),
     noteSeparators: ['\u0003\r\r', '\u0003\r\r', '\r\r', '', '', ''],
     characterProperties: new Uint8Array([0x55, 0x08, 1]),
     formattingRuns: [
@@ -232,5 +233,8 @@ it('rejects a numbered continuation notice in native short/short footnotes', asy
       { end: headerStart + 7, properties: reference(1) },
       { end: headerStart + 9, properties: new Uint8Array() },
     ],
-  }))).rejects.toMatchObject({ code: 'unsupported-content', details: { format: 'doc', reason: 'source-subset' } });
+  }));
+  const settings = (model as unknown as { __noteLayoutSettings: { reservedSeparators: { footnote?: unknown } } }).__noteLayoutSettings;
+  expect(settings.reservedSeparators.footnote).toBeUndefined();
+  expect(model.footnotes).toHaveLength(1);
 });

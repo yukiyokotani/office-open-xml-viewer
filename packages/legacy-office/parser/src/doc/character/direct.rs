@@ -412,6 +412,17 @@ impl Properties {
         }
     }
 
+    /// sprmCFVanish: the character is hidden text.
+    pub(in crate::doc) fn hidden(&self) -> bool {
+        self.bool_value("vanish").unwrap_or(false)
+    }
+
+    /// The same properties as visible text.
+    pub(in crate::doc) fn shown(mut self) -> Self {
+        self.values.remove("vanish");
+        self
+    }
+
     fn bool_value(&self, key: &str) -> Option<bool> {
         self.values.get(key).map(|value| value == "1")
     }
@@ -712,10 +723,29 @@ mod tests {
             );
         }
 
-        for lid in [u16::MAX, 0x0000, 0x007f, 0x0467, 0x040a] {
-            let unresolved = applied(&[(0x485f, lid.to_le_bytes().to_vec())]);
-            assert!(unresolved.direct_text_run("x".into(), &[]).is_err());
-            assert!(unresolved.direct_font_facts(&[]).is_err());
+        // A LID without a locale name selects no language; the named alias
+        // and Microsoft-specific locales keep their name.
+        for (lid, expected) in [
+            (u16::MAX, None),
+            (0x0000, None),
+            (0x007f, None),
+            (0x0467, Some("ff-ng")),
+            (0x040a, Some("es-es_tradnl")),
+        ] {
+            let properties = applied(&[(0x485f, lid.to_le_bytes().to_vec())]);
+            assert_eq!(
+                properties
+                    .direct_font_facts(&[])
+                    .unwrap()
+                    .lang_bidi
+                    .as_deref(),
+                expected,
+                "LID {lid:04x}"
+            );
+            assert!(properties
+                .direct_text_run("x".into(), &[])
+                .unwrap()
+                .is_some());
         }
 
         // Word's DOCX-to-DOC evidence: 0x0000 is "x-none" on the default and
@@ -739,19 +769,31 @@ mod tests {
         let custom = applied(&[(0x4873, 0x1000u16.to_le_bytes().to_vec())]);
         assert_eq!(custom.resolved_languages().unwrap().default, None);
         assert!(custom.direct_text_run("x".into(), &[]).unwrap().is_some());
-        assert!(applied(&[(0x4874, 0x1000u16.to_le_bytes().to_vec())])
+        let custom_east_asia = applied(&[(0x4874, 0x1000u16.to_le_bytes().to_vec())])
             .direct_text_run("x".into(), &[])
-            .is_err());
+            .unwrap()
+            .unwrap();
+        assert_eq!(custom_east_asia.lang_east_asia, None);
         let inherited = applied(&[(0x485f, 0x0400u16.to_le_bytes().to_vec())])
             .direct_text_run("x".into(), &[])
             .unwrap()
             .unwrap();
         assert_eq!(inherited.lang_bidi, None);
 
-        // Projection validates the retained language before visibility.
-        let hidden_unknown =
-            applied(&[(0x485f, u16::MAX.to_le_bytes().to_vec()), (0x083c, vec![1])]);
-        assert!(hidden_unknown.direct_text_run("x".into(), &[]).is_err());
+        // A LID without a locale name projects no language.
+        crate::rejection::take_best_effort();
+        let unknown = applied(&[(0x485f, u16::MAX.to_le_bytes().to_vec())])
+            .direct_text_run("x".into(), &[])
+            .unwrap()
+            .unwrap();
+        assert_eq!(unknown.lang_bidi, None);
+        assert_eq!(
+            crate::rejection::take_best_effort(),
+            [(
+                crate::rejection::BestEffort::IgnoredValue,
+                "Word language ID without a locale name"
+            )]
+        );
     }
 
     #[test]
@@ -799,9 +841,14 @@ mod tests {
         assert_eq!(facts.lang_bidi.as_deref(), Some("ar-sa"));
 
         for (code, lid) in [(0x4873, 0x0400u16), (0x4874, 0xffff)] {
-            let unresolved = applied(&[(code, lid.to_le_bytes().to_vec())]);
-            assert!(unresolved.direct_text_run("x".into(), &[]).is_err());
-            assert!(unresolved.direct_font_facts(&[]).is_err());
+            crate::rejection::take_best_effort();
+            let unnamed = applied(&[(code, lid.to_le_bytes().to_vec())]);
+            let run = unnamed.direct_text_run("x".into(), &[]).unwrap().unwrap();
+            assert_eq!(run.lang_east_asia, None);
+            assert!(crate::rejection::take_best_effort().contains(&(
+                crate::rejection::BestEffort::IgnoredValue,
+                "Word language ID without a locale name"
+            )));
         }
     }
 
@@ -1389,14 +1436,20 @@ mod tests {
     }
 
     #[test]
-    fn percentage_character_shading_blends_and_other_patterns_stay_unsupported() {
+    fn percentage_character_shading_blends_and_hatches_stay_unsupported() {
         let base = Properties::default();
-        for operand in [
-            cshd([0, 0, 0, 0xff], [0xff, 0xff, 0xff, 0], 14),
-            cshd([0, 0, 0, 0xff], [0, 0, 0, 0xff], 0x26),
-            cshd([0, 0, 0, 0xff], [0xff, 0xff, 0xff, 0], 1),
+        // A hatch pattern is not one color.
+        let hatch = cshd([0, 0, 0, 0xff], [0xff, 0xff, 0xff, 0], 14);
+        assert!(!base.clone().apply(0xca71, &hatch, &base).unwrap());
+        // An automatic foreground is black and an automatic background
+        // white (Word controls of table cells with these shadings).
+        for (operand, fill) in [
+            (cshd([0, 0, 0, 0xff], [0, 0, 0, 0xff], 0x26), "d9d9d9"),
+            (cshd([0, 0, 0, 0xff], [0xff, 0xff, 0xff, 0], 1), "000000"),
         ] {
-            assert!(!base.clone().apply(0xca71, &operand, &base).unwrap());
+            let mut properties = base.clone();
+            assert!(properties.apply(0xca71, &operand, &base).unwrap());
+            assert_eq!(public_run(&properties)["background"], fill);
         }
         // Word paints pct15 with an automatic foreground over white as #D9D9D9.
         let pct = applied(&[(0x4866, 0x9900u16.to_le_bytes().to_vec())]);

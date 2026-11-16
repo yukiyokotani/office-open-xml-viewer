@@ -392,6 +392,7 @@ impl<'a> Store<'a> {
         }
         let [left, top, right, bottom] = anchor.rect.map(i64::from);
         let extent = [(right - left) * 635, (bottom - top) * 635];
+        let flip = [flags & 0x40 != 0, flags & 0x80 != 0];
         if kind != Some(75) {
             // Non-picture drawing shapes: every property is classified by
             // `shape`; unsupported sub-cases are rejected with their reason.
@@ -399,16 +400,11 @@ impl<'a> Store<'a> {
                 self.omitted = true;
                 return Ok(None);
             }
-            let facts = shape::Facts::read(
-                kind.ok_or_else(|| unsupported("Word drawing shape lacks its type"))?,
-                flags,
-                false,
-                shape,
-                extent,
-                &mut self.budget,
-            )?;
-            self.check_line_connector(part, kind.unwrap(), flags, anchor.shape_id, nested_solver)?;
-            if kind == Some(20) && flags & 0x100 != 0 {
+            let kind = kind.ok_or_else(|| unsupported("Word drawing shape lacks its type"))?;
+            let mut facts =
+                shape::Facts::read(kind, flags, false, shape, extent, &mut self.budget)?;
+            self.check_line_connector(part, kind, flags, anchor.shape_id, nested_solver)?;
+            if kind == 20 && flags & 0x100 != 0 {
                 self.bind_group_ids(
                     part,
                     anchor.shape_id,
@@ -416,13 +412,22 @@ impl<'a> Store<'a> {
                     true,
                 )?;
             }
-            // No Word evidence yet shows whether a rotated top-level shape's
-            // SPA rectangle holds its rotated bounds (see `group`).
-            if facts.rotation.rem_euclid(360.0) != 0.0 {
-                return Err(unsupported(
-                    "rotated Word drawing shapes outside groups are not supported",
-                ));
+            // The SPA rectangle is the shape's anchor (see `oriented`). The
+            // shape is read again at its unrotated extent when the two
+            // differ, as its adjust values depend on the extent.
+            let (frame, rotation) = oriented(
+                [0.0, 0.0, extent[0] as f64, extent[1] as f64],
+                facts.rotation,
+                flip,
+            );
+            let turned = [frame[2].round() as i64, frame[3].round() as i64];
+            if turned != extent {
+                facts = shape::Facts::read(kind, flags, false, shape, turned, &mut self.budget)?;
             }
+            let extent = turned;
+            let offset = [frame[0].round() as i64, frame[1].round() as i64];
+            // A whole number of turns is +0.0, as before.
+            let rotation = rotation + 0.0;
             if !self.load_fill_picture(&facts)? {
                 self.omitted = true;
                 return Ok(None);
@@ -454,36 +459,29 @@ impl<'a> Store<'a> {
                     order,
                     extent,
                     flags,
-                    [None; 2],
+                    Alignment {
+                        values: [None; 2],
+                        frames: [anchor.horizontal, anchor.vertical],
+                    },
                     Content::Shape(Box::new(facts)),
                 )?;
+                // The inline shape keeps its unrotated extent and its turn.
+                turned_content(&drawing.content, rotation);
+                drawing.rotation = rotation;
                 drawing.inline = true;
                 return Ok(Some(drawing));
             }
-            let align = direct_alignment(anchor, &placement)?;
-            return self
-                .finish(
-                    anchor,
-                    &placement,
-                    order,
-                    extent,
-                    flags,
-                    align,
-                    Content::Shape(Box::new(facts)),
-                )
-                .map(Some);
+            let align = direct_alignment(anchor, &placement);
+            let content = Content::Shape(Box::new(facts));
+            turned_content(&content, rotation);
+            let mut drawing =
+                self.finish(anchor, &placement, order, extent, flags, align, content)?;
+            drawing.x_emu += offset[0];
+            drawing.y_emu += offset[1];
+            drawing.rotation = rotation;
+            return Ok(Some(drawing));
         }
-        let align = if placement.horizontal == 0 && placement.vertical == 0 {
-            None
-        } else {
-            match direct_alignment(anchor, &placement) {
-                Ok(align) => Some(align),
-                Err(_) => {
-                    self.omitted = true;
-                    return Ok(None);
-                }
-            }
-        };
+        let align = direct_alignment(anchor, &placement);
         if kind != Some(75)
             // MS-ODRAW 2.2.40 identifies fOleShape (0x10) as shape
             // metadata, not permission to execute or inspect an OLE payload.
@@ -492,10 +490,6 @@ impl<'a> Store<'a> {
             || flags & 0x10f != 0
             || placement.hidden
             || placement.script
-            || picture.rotation != 0
-            // SPA provides an explicit, host-defined coordinate origin; aligned
-            // positions are accepted only through `direct_alignment`.
-            || (align.is_none() && (placement.horizontal != 0 || placement.vertical != 0))
             // An authored tight/through contour is not read; the implicit
             // full-envelope contour stands only for an absent one.
             || (matches!(anchor.wrapping, 4 | 5) && picture.authored_wrap_contour)
@@ -504,7 +498,14 @@ impl<'a> Store<'a> {
             return Ok(None);
         }
         let Some(image_index) = picture.pib else {
-            self.omitted = true;
+            if flags & 0x10 == 0 {
+                // A picture frame without a picture: Word draws nothing
+                // (Word control: an icon file Word could not store).
+                crate::rejection::skipped("Word picture shape without a picture");
+            } else {
+                // An OLE object without its presentation picture.
+                self.omitted = true;
+            }
             return Ok(None);
         };
         let Some(extension) = self.load_image(image_index)? else {
@@ -524,23 +525,30 @@ impl<'a> Store<'a> {
             extension,
             crop: picture.crop,
         };
-        self.finish(
-            anchor,
-            &placement,
-            order,
-            extent,
-            flags,
-            align.unwrap_or([None; 2]),
-            content,
-        )
-        .map(Some)
+        // The picture reader holds the angle in 1/60000 degree.
+        let (frame, rotation) = oriented(
+            [0.0, 0.0, extent[0] as f64, extent[1] as f64],
+            picture.rotation as f64 / 60_000.0,
+            flip,
+        );
+        let extent = [frame[2].round() as i64, frame[3].round() as i64];
+        let mut drawing = self.finish(anchor, &placement, order, extent, flags, align, content)?;
+        drawing.x_emu += frame[0].round() as i64;
+        drawing.y_emu += frame[1].round() as i64;
+        // A whole number of turns is +0.0, as before.
+        drawing.rotation = rotation + 0.0;
+        Ok(Some(drawing))
     }
 
-    /// Load a shape's picture fill BLIP; `false` when it is not a supported
+    /// Load a shape's picture, pattern or texture fill BLIP; `false` when it is not a supported
     /// passive image, which the caller reports as omitted content.
     fn load_fill_picture(&mut self, facts: &shape::Facts) -> Result<bool, String> {
-        match facts.fill_picture {
-            Some((index, _)) => Ok(self.load_image(index)?.is_some()),
+        match facts
+            .fill_picture
+            .map(|(index, _)| index)
+            .or(facts.fill_tile.as_ref().map(|tile| tile.blip))
+        {
+            Some(index) => Ok(self.load_image(index)?.is_some()),
             None => Ok(true),
         }
     }
@@ -583,7 +591,7 @@ impl<'a> Store<'a> {
         order: u32,
         extent: [i64; 2],
         flags: u32,
-        align: [Option<&'static str>; 2],
+        align: Alignment,
         content: Content,
     ) -> Result<ResolvedDrawing, String> {
         let [left, top, _, _] = anchor.rect.map(i64::from);
@@ -602,11 +610,12 @@ impl<'a> Store<'a> {
             shape_id: anchor.shape_id,
             extent,
             flip: [flags & 0x40 != 0, flags & 0x80 != 0],
+            rotation: 0.0,
             x_emu: left * 635,
             y_emu: top * 635,
-            horizontal: anchor.horizontal,
-            vertical: anchor.vertical,
-            align,
+            horizontal: align.frames[0],
+            vertical: align.frames[1],
+            align: align.values,
             wrapping: anchor.wrapping,
             side: anchor.side,
             behind: anchor.behind,
@@ -638,6 +647,9 @@ struct ResolvedDrawing {
     shape_id: u32,
     extent: [i64; 2],
     flip: [bool; 2],
+    /// Clockwise rotation of a single drawing about its centre, in degrees;
+    /// `extent` and the position are those of its unrotated frame.
+    rotation: f64,
     x_emu: i64,
     y_emu: i64,
     horizontal: &'static str,
@@ -653,6 +665,70 @@ struct ResolvedDrawing {
     overlap: bool,
     z_order: u32,
     occurrence: u32,
+}
+
+/// The unrotated frame and the DrawingML rotation (degrees, clockwise, in
+/// [0, 360)) of an OfficeArt shape from its stored anchor, stored rotation
+/// (MS-ODRAW 2.3.18.5) and flips (2.2.40).
+///
+/// MS-ODRAW defines only the angle. Two further rules are Office behaviour,
+/// established for the shared OfficeArt layer by a PowerPoint control (see
+/// `ppt::drawing::direct_transform`: one polygon at 24 angles with all four
+/// flip combinations, 120 transforms):
+/// - an anchor whose angle, normalised to [0, 360), lies in [45, 135) or
+///   [225, 315) holds the rotated bounds: width and height are exchanged
+///   about the same centre;
+/// - the stored angle is negated when exactly one flip is set, DrawingML
+///   applying the flip before the rotation.
+///
+/// Word evidence: unflipped group members at seven angles on both sides of
+/// the interval boundaries (see `group`). A turned top-level shape or
+/// picture, whose anchor is the MS-DOC SPA rectangle, and a turned shape with
+/// a flip have no Word control and follow the same rule.
+fn oriented(frame: [f64; 4], stored: f64, flip: [bool; 2]) -> ([f64; 4], f64) {
+    let turn = stored.rem_euclid(360.0);
+    let [x, y, width, height] = frame;
+    let frame = if (45.0..135.0).contains(&turn) || (225.0..315.0).contains(&turn) {
+        [
+            x + (width - height) / 2.0,
+            y + (height - width) / 2.0,
+            height,
+            width,
+        ]
+    } else {
+        frame
+    };
+    // A whole number of turns keeps the value it had before flips were
+    // read here (the sign of its zero included).
+    let rotation = if flip[0] != flip[1] && turn != 0.0 {
+        (-stored).rem_euclid(360.0)
+    } else {
+        turn
+    };
+    (frame, rotation)
+}
+
+/// Content the DOCX shape model turns with its shape although no Word
+/// control shows that Word does: shape text, and a picture, pattern or
+/// texture fill that fUseShapeAnchor 0 keeps upright (MS-ODRAW 2.3.7.43).
+fn turned_content(content: &Content, rotation: f64) {
+    let Content::Shape(shape) = content else {
+        return;
+    };
+    if rotation == 0.0 {
+        return;
+    }
+    if shape.text.is_some() {
+        crate::rejection::approximated("rotated Word drawing text is not supported", ());
+    }
+    if shape.fill_picture.is_some_and(|(_, rotates)| !rotates)
+        || shape.fill_tile.as_ref().is_some_and(|tile| !tile.rotates)
+    {
+        crate::rejection::approximated(
+            "upright picture fills in rotated Word shapes are not supported",
+            (),
+        );
+    }
 }
 
 fn records<'a>(bytes: &'a [u8], budget: &mut usize) -> Result<Vec<Record<'a>>, String> {
@@ -812,74 +888,87 @@ impl Placement {
     }
 }
 
+/// MS-ODRAW posh/posv alignment (2.3.4.19/21) with its container.
+pub(super) struct Alignment {
+    /// Horizontal and vertical `wp:align` values replacing the SPA offsets.
+    values: [Option<&'static str>; 2],
+    /// The reference frame of each axis: the container of the alignment, or
+    /// the SPA origin of an absolute position.
+    frames: [&'static str; 2],
+}
+
 /// Resolve MS-ODRAW posh/posv alignment (2.3.4.19/21) for the direct model.
 ///
 /// The MS-DOC SPA origin (2.9.253 bx/by: margin, page, column/paragraph) is
-/// the normative container of the rca rectangle, so an aligned position is
-/// placed within that container. posrelh/posrelv only corroborate it: Word
-/// writes them as 0 margin, 1 page, 2 text, 3 character/line, one less than
-/// the enumeration published in MS-ODRAW 2.3.4.20/22 (1-4); every aligned and
-/// absolute shape in the local private corpus satisfies bx = posrelh and
-/// by = posrelv under that numbering, and an absent value is the documented
-/// msoprhText/msoprvText default (column/paragraph). Any disagreement,
-/// character/line-relative alignment, inside/outside page-parity alignment
-/// and vertical alignment within a paragraph stay unsupported: each needs an
-/// Office control before its container can be asserted.
-fn direct_alignment(
-    anchor: &Anchor,
-    placement: &Placement,
-) -> Result<[Option<&'static str>; 2], String> {
+/// the origin of the absolute rca rectangle. An aligned position is placed in
+/// the container posrelh/posrelv names (2.3.4.20/22). Word writes them as
+/// 0 margin, 1 page, 2 text, 3 character/line, one less than the published
+/// enumeration (1-4); an absent value, or one outside the enumeration, is the
+/// documented msoprhText / msoprvText default (column/paragraph). An
+/// alignment outside its enumeration leaves the absolute SPA position.
+///
+/// Evidence: every aligned shape in the local private corpus has
+/// bx = posrelh and by = posrelv under that numbering. A Word control with a
+/// centred shape, posrelh 3 and a column SPA origin (bx cannot name a
+/// character) is printed by Word centred on its anchor character, so the
+/// property, not the SPA origin, names the container. The remaining
+/// combinations (inside/outside, alignment within a paragraph or line) have
+/// no Word control and are passed on as the DrawingML `wp:align` /
+/// `relativeFrom` pair of the same names (ECMA-376 20.4.3.1-20.4.3.5).
+fn direct_alignment(anchor: &Anchor, placement: &Placement) -> Alignment {
+    let mut frames = [anchor.horizontal, anchor.vertical];
     let horizontal = match placement.horizontal {
         0 => None,
         1 => Some("left"),
         2 => Some("center"),
         3 => Some("right"),
-        _ => {
-            return Err(unsupported(
-                "Word drawing uses page-parity or invalid horizontal alignment",
-            ))
-        }
+        4 => Some("inside"),
+        5 => Some("outside"),
+        _ => crate::rejection::spec_default(
+            "Word drawing uses page-parity or invalid horizontal alignment",
+            None,
+        ),
     };
     if horizontal.is_some() {
-        let origin = match anchor.horizontal {
-            "margin" => 0,
-            "page" => 1,
-            _ => 2,
-        };
-        if placement.relative_horizontal.unwrap_or(2) != origin {
-            return Err(unsupported(
+        frames[0] = match placement.relative_horizontal.unwrap_or(2) {
+            0 => "margin",
+            1 => "page",
+            2 => "column",
+            3 => "character",
+            _ => crate::rejection::spec_default(
                 "Word aligned drawing disagrees with its horizontal SPA origin",
-            ));
-        }
+                "column",
+            ),
+        };
     }
     let vertical = match placement.vertical {
         0 => None,
         1 => Some("top"),
         2 => Some("center"),
         3 => Some("bottom"),
-        _ => {
-            return Err(unsupported(
-                "Word drawing uses page-parity or invalid vertical alignment",
-            ))
-        }
+        4 => Some("inside"),
+        5 => Some("outside"),
+        _ => crate::rejection::spec_default(
+            "Word drawing uses page-parity or invalid vertical alignment",
+            None,
+        ),
     };
     if vertical.is_some() {
-        let origin = match anchor.vertical {
-            "margin" => 0,
-            "page" => 1,
-            _ => {
-                return Err(unsupported(
-                    "Word drawing aligned within its paragraph is not supported",
-                ))
-            }
-        };
-        if placement.relative_vertical.unwrap_or(2) != origin {
-            return Err(unsupported(
+        frames[1] = match placement.relative_vertical.unwrap_or(2) {
+            0 => "margin",
+            1 => "page",
+            2 => "paragraph",
+            3 => "line",
+            _ => crate::rejection::spec_default(
                 "Word aligned drawing disagrees with its vertical SPA origin",
-            ));
-        }
+                "paragraph",
+            ),
+        };
     }
-    Ok([horizontal, vertical])
+    Alignment {
+        values: [horizontal, vertical],
+        frames,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1520,7 +1609,7 @@ mod tests {
     }
 
     #[test]
-    fn direct_alignment_uses_the_spa_origin_and_rejects_disagreement() {
+    fn direct_alignment_is_placed_in_the_container_the_properties_name() {
         // The fixture's SPA origin is page/page.
         let aligned = |options: &[(u16, u32)]| {
             let (word, table) = drawing_with_options(0xa00, 0, options);
@@ -1546,18 +1635,105 @@ mod tests {
             assert_eq!(image.anchor_y_align.as_deref(), Some(align));
             assert_eq!(image.anchor_x_align, None);
         }
-        // Disagreeing, defaulted (text) or character-relative containers and
-        // page-parity alignment keep the drawing out of the document.
-        for options in [
-            &[(0x38f, 2), (0x390, 0)][..],
-            &[(0x38f, 2)][..],
-            &[(0x38f, 2), (0x390, 3)][..],
-            &[(0x38f, 4), (0x390, 1)][..],
-            &[(0x391, 1), (0x392, 0)][..],
-            &[(0x391, 5), (0x392, 1)][..],
-        ] {
+        // posrelh/posrelv name the container, also where the page/page SPA
+        // origin differs: a Word control centres a shape with posrelh 3 on
+        // its anchor character. An absent value is the text default.
+        type Axes = (Option<&'static str>, &'static str);
+        type Case = (&'static [(u16, u32)], Axes, Axes);
+        let cases: [Case; 8] = [
+            (
+                &[(0x38f, 2), (0x390, 0)],
+                (Some("center"), "margin"),
+                (None, "page"),
+            ),
+            (&[(0x38f, 2)], (Some("center"), "column"), (None, "page")),
+            (
+                &[(0x38f, 2), (0x390, 3)],
+                (Some("center"), "character"),
+                (None, "page"),
+            ),
+            (
+                &[(0x38f, 4), (0x390, 1)],
+                (Some("inside"), "page"),
+                (None, "page"),
+            ),
+            (
+                &[(0x391, 1), (0x392, 0)],
+                (None, "page"),
+                (Some("top"), "margin"),
+            ),
+            (
+                &[(0x391, 5), (0x392, 1)],
+                (None, "page"),
+                (Some("outside"), "page"),
+            ),
+            (&[(0x391, 2)], (None, "page"), (Some("center"), "paragraph")),
+            (
+                &[(0x391, 3), (0x392, 3)],
+                (None, "page"),
+                (Some("bottom"), "line"),
+            ),
+        ];
+        for (options, horizontal, vertical) in cases {
             let (picture, omitted) = aligned(options);
-            assert!(picture.unwrap().is_none() && omitted, "{options:x?}");
+            let image = picture.unwrap().unwrap().image;
+            assert!(!omitted, "{options:x?}");
+            assert_eq!(
+                (
+                    image.anchor_x_align.as_deref(),
+                    image.anchor_x_relative_from.as_deref()
+                ),
+                (horizontal.0, Some(horizontal.1)),
+                "{options:x?}"
+            );
+            assert_eq!(
+                (
+                    image.anchor_y_align.as_deref(),
+                    image.anchor_y_relative_from.as_deref()
+                ),
+                (vertical.0, Some(vertical.1)),
+                "{options:x?}"
+            );
+        }
+        assert!(crate::rejection::take_best_effort().is_empty());
+        // An alignment outside the enumeration leaves the SPA position; a
+        // container outside it is the text default.
+        type Invalid = (&'static [(u16, u32)], [Axes; 2]);
+        let invalid: [Invalid; 4] = [
+            (&[(0x38f, 6)], [(None, "page"), (None, "page")]),
+            (&[(0x391, 6)], [(None, "page"), (None, "page")]),
+            (
+                &[(0x38f, 1), (0x390, 4)],
+                [(Some("left"), "column"), (None, "page")],
+            ),
+            (
+                &[(0x391, 1), (0x392, 4)],
+                [(None, "page"), (Some("top"), "paragraph")],
+            ),
+        ];
+        for (options, [horizontal, vertical]) in invalid {
+            let image = aligned(options).0.unwrap().unwrap().image;
+            assert_eq!(
+                (
+                    image.anchor_x_align.as_deref(),
+                    image.anchor_x_relative_from.as_deref()
+                ),
+                (horizontal.0, Some(horizontal.1)),
+                "{options:x?}"
+            );
+            assert_eq!(
+                (
+                    image.anchor_y_align.as_deref(),
+                    image.anchor_y_relative_from.as_deref()
+                ),
+                (vertical.0, Some(vertical.1)),
+                "{options:x?}"
+            );
+            assert_eq!(
+                crate::rejection::take_best_effort().len(),
+                1,
+                "{options:x?}"
+            );
         }
     }
 
@@ -1846,17 +2022,135 @@ mod tests {
         }
     }
     #[test]
-    fn ambiguous_alignment_and_rotated_shapes_do_not_dereference_blips() {
-        for key in [0x38f, 0x391, 4] {
-            for value in 1..=5 {
-                let operand = if key == 4 { value << 16 } else { value };
-                let (word, table) = drawing_with_options(0xa00, 0, &[(key, operand)]);
-                let mut store = Store::read(&word[..1024], &table, 20).unwrap();
-                assert!(picture(&mut store).unwrap().is_none());
-                assert!(store.images.is_empty());
-                assert!(store.omitted);
+    fn turned_shapes_keep_their_unrotated_frame_anchored_and_inline() {
+        // A 400 x 300 twip rectangle at the SPA origin, turned by `degrees`.
+        let turned = |flags: u16, degrees: i32, options: &[(u16, u32)]| {
+            let (mut word, mut table) = input(flags);
+            for (at, value) in [(12, 0i32), (16, 0), (20, 400), (24, 300)] {
+                table[at..at + 4].copy_from_slice(&value.to_le_bytes());
             }
+            let mut props = Vec::new();
+            for (key, value) in [&[(4u16, (degrees << 16) as u32)][..], options].concat() {
+                props.extend(key.to_le_bytes());
+                props.extend(value.to_le_bytes());
+            }
+            let shape = record(
+                0xf004,
+                15,
+                &[
+                    record(
+                        0xf00a,
+                        (1 << 4) | 2,
+                        &[1027u32.to_le_bytes(), 0xa00u32.to_le_bytes()].concat(),
+                    ),
+                    record(0xf00b, (((1 + options.len()) as u16) << 4) | 3, &props),
+                    record(0xf010, 0, &0u32.to_le_bytes()),
+                ]
+                .concat(),
+            );
+            let art = [
+                record(0xf000, 15, &[]),
+                vec![0],
+                record(0xf002, 15, &record(0xf003, 15, &shape)),
+            ]
+            .concat();
+            word[0x22a..0x22e].copy_from_slice(&(table.len() as u32).to_le_bytes());
+            word[0x22e..0x232].copy_from_slice(&(art.len() as u32).to_le_bytes());
+            table.extend(art);
+            let mut store = Store::read(&word, &table, 20).unwrap();
+            let mut drawing = store
+                .direct_drawing(Part::Main, 12, &mut usize::MAX.clone())
+                .unwrap()
+                .unwrap();
+            let direct::DirectRun::Shape(shape) = drawing.runs.pop().unwrap() else {
+                panic!("a shape")
+            };
+            (drawing.inline, shape.shape)
+        };
+        // Anchored to the page: the 15 x 20 pt unrotated frame about the
+        // centre of the 20 x 15 pt anchor.
+        let (inline, shape) = turned((1 << 1) | (1 << 3) | (3 << 5), 90, &[]);
+        assert!(!inline && !shape.inline);
+        assert_eq!(
+            (shape.width_pt, shape.height_pt, shape.rotation),
+            (15.0, 20.0, 90.0)
+        );
+        assert_eq!((shape.anchor_x_pt, shape.anchor_y_pt), (2.5, -2.5));
+        // A pseudo-inline shape takes part in line flow at the same extent
+        // and keeps its turn.
+        let (inline, shape) = turned(
+            (2 << 1) | (2 << 3) | (3 << 5),
+            90,
+            &[(0x390, 3), (0x392, 3), (0x53f, 0x10001)],
+        );
+        assert!(inline && shape.inline);
+        assert_eq!(
+            (shape.width_pt, shape.height_pt, shape.rotation),
+            (15.0, 20.0, 90.0)
+        );
+        // A whole number of turns stays +0.0 in the model.
+        let (_, shape) = turned((1 << 1) | (1 << 3) | (3 << 5), -360, &[]);
+        assert_eq!(
+            (shape.width_pt, shape.height_pt, shape.rotation),
+            (20.0, 15.0, 0.0)
+        );
+        assert!(shape.rotation.is_sign_positive());
+        assert!(crate::rejection::take_best_effort().is_empty());
+    }
+
+    #[test]
+    fn a_whole_number_of_turns_keeps_its_stored_zero_under_a_flip() {
+        // Group members were projected with `stored.rem_euclid(360)` before
+        // flips reversed the angle: a whole turn keeps that value, sign of
+        // zero included, with or without a single flip.
+        let frame = [0.0, 0.0, 2.0, 1.0];
+        for flip in [[false, false], [true, false], [false, true]] {
+            let (unrotated, rotation) = oriented(frame, -360.0, flip);
+            assert_eq!(unrotated, frame);
+            assert_eq!(
+                rotation.to_bits(),
+                (-360f64).rem_euclid(360.0).to_bits(),
+                "{flip:?}"
+            );
         }
+        assert_eq!(oriented(frame, 30.0, [true, false]).1, 330.0);
+        assert_eq!(oriented(frame, 30.0, [true, true]).1, 30.0);
+    }
+
+    #[test]
+    fn rotated_pictures_keep_their_angle_and_unrotated_frame() {
+        // The fixture's SPA rectangle is the picture's anchor.
+        let turned = |flags: u32, degrees: i32| {
+            let (word, table) = drawing_with_options(flags, 0, &[(4, (degrees << 16) as u32)]);
+            let mut store = Store::read(&word, &table, 20).unwrap();
+            let image = picture(&mut store).unwrap().unwrap().image;
+            assert!(!store.omitted);
+            (
+                [image.width_pt, image.height_pt],
+                [image.anchor_x_pt, image.anchor_y_pt],
+                image.rotation,
+            )
+        };
+        let (size, origin, rotation) = turned(0xa00, 0);
+        assert_eq!(rotation, 0.0);
+        // A whole number of turns stays +0.0 in the model.
+        let full = turned(0xa00, -360);
+        assert_eq!(full, (size, origin, 0.0));
+        assert!(full.2.is_sign_positive());
+        // Below 45 degrees the anchor is the unrotated frame.
+        assert_eq!(turned(0xa00, 30), (size, origin, 30.0));
+        // From 45 degrees it is the rotated bounds: width and height are
+        // exchanged about the same centre.
+        let (turned_size, turned_origin, rotation) = turned(0xa00, 90);
+        assert_eq!(rotation, 90.0);
+        assert_eq!(turned_size, [size[1], size[0]]);
+        for axis in 0..2 {
+            let centre = origin[axis] + size[axis] / 2.0;
+            assert!((turned_origin[axis] + turned_size[axis] / 2.0 - centre).abs() < 1e-4);
+        }
+        // A single flip reverses the stored angle.
+        assert_eq!(turned(0xa40, 30).2, 330.0);
+        assert_eq!(turned(0xac0, 30).2, 30.0);
     }
     #[test]
     fn enforces_media_occurrence_and_operation_budgets() {
