@@ -39,7 +39,7 @@ describe('official-site home design', () => {
   it('stacks every main section introduction without forced heading breaks', () => {
     expect(home).toContain('<h2 class="section-title">Live renderer examples.</h2>');
     expect(home).toContain('<h2 class="section-title">Browser-based OOXML rendering.</h2>');
-    expect(home).toContain('<h2 class="section-title">Format support at a glance.</h2>');
+    expect(home).toContain('<h2 class="section-title">Format support.</h2>');
     expect(home).toContain('<h2 class="section-title">Release and migration notices.</h2>');
     expect(home).toContain('.grid-intro { display: block; margin-bottom: 52px; }');
     expect(home).toContain('.news-head { display: block; margin-bottom: 56px; }');

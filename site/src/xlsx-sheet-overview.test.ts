@@ -10,7 +10,7 @@ describe('XLSX multi-window sheet demo', () => {
   it('keeps the full workbook viewer first and presents multi-window composition as an extension', () => {
     expect(page.indexOf('kind="sheet"')).toBeLessThan(page.indexOf('kind="sheetWindows"'));
     expect(page).toContain('kind="sheetWindows"');
-    expect(page).toContain('One workbook. Many windows.');
+    expect(page).toContain('One workbook in several windows');
     expect(page).toContain('Parse the file once in the parent page');
   });
 

@@ -4,7 +4,7 @@ A [Model Context Protocol](https://modelcontextprotocol.io/) (MCP) server that l
 
 ---
 
-## Easiest: VS Code extension (recommended for VS Code users)
+## Installation through the VS Code extension (recommended for VS Code users)
 
 Install the [Office Viewer extension](https://marketplace.visualstudio.com/items?itemName=silurus.office-open-xml-viewer). Open a workspace that contains an `.xlsx`, `.docx`, or `.pptx` file and accept the prompt — the extension downloads a prebuilt binary (~5 MB, SHA256-verified) and registers the MCP server with VS Code automatically. GitHub Copilot Chat in Agent mode picks it up with no further configuration, including the active Viewer selection.
 

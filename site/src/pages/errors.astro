@@ -82,7 +82,7 @@ try {
     <div class="wrap">
       <a class="back" href="/">← Documentation</a>
       <p class="eyebrow">API reference</p>
-      <h1>Handle failures without guessing.</h1>
+      <h1>Error handling.</h1>
       <p class="lead">Await each operation, use the callback only for background work, and always keep a safe fallback for errors that are not typed.</p>
     </div>
   </header>
@@ -91,7 +91,7 @@ try {
     <section id="start" class="error-section start-section">
       <div class="section-heading">
         <p class="section-index">01</p>
-        <div><h2>Start with Promise rejection</h2><p>Catch the rejected <code>load()</code> whether or not the Viewer also has an <code>onError</code> callback. Success and failure follow normal Promise semantics.</p></div>
+        <div><h2>Promise rejection</h2><p>Catch the rejected <code>load()</code> whether or not the Viewer also has an <code>onError</code> callback. Success and failure follow normal Promise semantics.</p></div>
       </div>
       <div class="code-card"><Code code={simpleExample} lang="ts" themes={codeThemes} defaultColor={false} /></div>
       <div class="principles">
@@ -104,7 +104,7 @@ try {
     <section id="delivery" class="error-section">
       <div class="section-heading">
         <p class="section-index">02</p>
-        <div><h2>Match the channel to the work</h2><p>Awaitable methods reject their Promise. The callback covers only Viewer-managed work that has no Promise for the application to await; the same failure is never delivered twice.</p></div>
+        <div><h2>Delivery channels</h2><p>Awaitable methods reject their Promise. The callback covers only Viewer-managed work that has no Promise for the application to await; the same failure is never delivered twice.</p></div>
       </div>
       <div class="delivery-grid">
         <article class="recommended">
@@ -132,7 +132,7 @@ try {
     <section id="decision-table" class="error-section">
       <div class="section-heading">
         <p class="section-index">03</p>
-        <div><h2>Decide what the user should see</h2><p>Handle the narrow, actionable cases first and finish with one generic fallback.</p></div>
+        <div><h2>Error types and recommended responses</h2><p>Handle the narrow, actionable cases first and finish with one generic fallback.</p></div>
       </div>
       <div class="error-table-wrap">
         <table class="error-table action-table">
@@ -153,7 +153,7 @@ try {
     <section class="error-section example-section">
       <div class="section-heading">
         <p class="section-index">04</p>
-        <div><h2>Use one translation function</h2><p>Keep library diagnostics separate from the short, stable messages your product shows to its users.</p></div>
+        <div><h2>Example error handler</h2><p>Keep library diagnostics separate from the short, stable messages your product shows to its users.</p></div>
       </div>
       <div class="code-card"><Code code={handlerExample} lang="ts" themes={codeThemes} defaultColor={false} /></div>
       <p class="format-note">The same error classes are re-exported from the DOCX, XLSX and PPTX entry points. Replace the Viewer and constructor target for the selected format.</p>

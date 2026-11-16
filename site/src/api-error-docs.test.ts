@@ -20,7 +20,7 @@ describe('public error documentation', () => {
   });
 
   it('guides a first-time integrator from delivery choice to a safe user response', () => {
-    expect(errorPage).toContain('Start with Promise rejection');
+    expect(errorPage).toContain('<h2>Promise rejection</h2>');
     expect(errorPage).toContain('the same failure is never delivered twice');
     expect(errorPage).toContain('Keep <code>onError</code> non-throwing.');
     expect(errorPage).toContain('<code>PptxPresentation.presentSlide()</code>');

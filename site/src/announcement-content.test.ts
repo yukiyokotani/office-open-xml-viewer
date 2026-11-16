@@ -332,7 +332,7 @@ describe('stable documentation boundaries', () => {
     }
     expect(bundleSizePage).toContain('ChartEx');
     expect(bundleSizePage.match(/<th>TIFF image codec<\/th>/g)).toHaveLength(1);
-    expect(productionPage).toContain('A small TIFF reuse');
+    expect(productionPage).toContain('Standalone TIFF preview');
     expect(productionPage).toContain('it is not a');
     expect(productionPage).toContain('general-purpose TIFF library');
     expect(productionPage).toContain('await tiff.render(bytes)');
