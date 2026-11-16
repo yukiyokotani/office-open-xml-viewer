@@ -702,7 +702,15 @@ impl Leaf {
                 0x0157 => inscribed = value != 0,
                 // Geometry Boolean Properties (2.3.6.31): fill/line vetoes.
                 0x017f => paint.property(id, value)?,
-                0x0088 | 0x0089 if value == 0 => {}
+                // txflTextFlow and cdirFont (2.3.21.9-10): horizontal text.
+                // Vertical or rotated text flow is not projected.
+                0x0088 | 0x0089 => {
+                    if value != 0 {
+                        return Err(unsupported(format!(
+                            "XLS drawing shape property {id:#06x}={value:#x} is not projected"
+                        )));
+                    }
+                }
                 // txdir (2.3.21.13): left-to-right, right-to-left or from
                 // the context (the first strong character).
                 0x008b => {

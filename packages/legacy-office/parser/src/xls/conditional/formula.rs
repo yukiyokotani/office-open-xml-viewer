@@ -884,9 +884,7 @@ fn decompile_inner(
                     let name = externs
                         .addin(u16_at(rgce, at + 1)?, u32_at(rgce, at + 3)?)
                         .filter(|name| TOOLPAK.contains(name))
-                        .ok_or_else(|| {
-                            unsupported(WITHOUT_TEXT[3])
-                        })?;
+                        .ok_or_else(|| unsupported(WITHOUT_TEXT[3]))?;
                     if !pending.is_empty() {
                         return Err(reject());
                     }

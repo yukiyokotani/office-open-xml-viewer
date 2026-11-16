@@ -383,6 +383,9 @@ fn shape_facts_without_a_projection_still_reject() {
         "non-solid XLS shape lines",
     );
     reject(&[(0x0085, 1)], 1, 0xa00, "wrapping");
+    // Vertical text flow and rotated fonts.
+    reject(&[(0x0088, 2)], 1, 0xa00, "property 0x0088");
+    reject(&[(0x0089, 1)], 1, 0xa00, "property 0x0089");
     reject(&[(0x0087, 0)], 1, 0xa00, "disagrees");
     reject(&[(0x033f, 0x0001_0001)], 1, 0xa00, "background");
     reject(&[(0x033f, 0x0020_0020)], 1, 0xa00, "OLE icon");

@@ -40,6 +40,8 @@ export const LEGACY_CORPUS_REJECTIONS: readonly LegacyCorpusRejection[] = [
     sha256: [
       '25987c6f20a747e15bd7c573c12278127c516150ceb5f646f552e477cc2f8228',
       '2c4bd594c119b8e696474a9b9db9f3c802445e0f28455a702d15062347a92a14',
+      '933079c26a07c9193451e7ae5c0210325b523846bd8ccdf81b1c5d8b964fe6d0',
+      'eb123f5aeba971678c035375af7205a059967efd1d20e0e388640269e9280287',
     ],
   },
   {
@@ -48,6 +50,31 @@ export const LEGACY_CORPUS_REJECTIONS: readonly LegacyCorpusRejection[] = [
     reason: 'UNSUPPORTED:XLS shape text linked to a formula is not projected',
     sha256: [
       '54b57c1ded6f280dbb8fa44775ccd015afc6002bd335956d19acf436e6c7eb0b',
+      '7093afeaeecb59db9addf982b67ad8ee82bd06025c9a58780d5c82dcb338cef8',
+    ],
+  },
+  {
+    format: 'xls',
+    class: 'pending',
+    reason: 'UNSUPPORTED:XLS drawing shape property 0x0088=0x2 is not projected',
+    sha256: [
+      '18f94fbf4819a9ef15c6407dbeddac3713422debc8b9c66cd06cc3ee883cd6d6',
+    ],
+  },
+  {
+    format: 'xls',
+    class: 'pending',
+    reason: 'UNSUPPORTED:XLS drawing shape property 0x0088=0x3 is not projected',
+    sha256: [
+      '96ef23e7b199816dccb1d7c92da5c3bce4dbc4524bab5c985c2d97e1a2edd8ab',
+    ],
+  },
+  {
+    format: 'xls',
+    class: 'pending',
+    reason: 'UNSUPPORTED:XLS drawing shape property 0x0088=0x5 is not projected',
+    sha256: [
+      'ce2cb68a7fd54e431aafa0c6e1f8c35d0ac0b4931f7da0e5cc50400e9a4aaf79',
     ],
   },
   {
