@@ -163,6 +163,14 @@ const viewer = new PptxViewer(canvas, { legacyPpt });`;
           and throws a <code>RangeError</code> when claimed input exceeds it. There is no
           default input-size ceiling. To retain the former 256 MiB limit, explicitly set
           <code>maxInputBytes: 256 * 1024 * 1024</code>.</p>
+        <h3>Difference from the OpenDocument readers</h3>
+        <p>The two optional reader packages currently follow different policies. The legacy readers
+          reject the whole document with <code>unsupported-content</code> when they meet a structure
+          they cannot map. The <a href="/opendocument#policy">OpenDocument readers</a> render every
+          feature they read and reject only corrupt, encrypted or unsafe input, or input over a
+          resource limit. Keep a conversion fallback for legacy input. The legacy behaviour may change
+          in a later release: aligning it with the OpenDocument policy is tracked in
+          <a href="https://github.com/yukiyokotani/office-open-xml-viewer/issues/2263">issue #2263</a>.</p>
         <p><a href="/errors">Error delivery and application messages →</a></p>
       </section>
       <section id="loading">

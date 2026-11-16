@@ -79,6 +79,12 @@ show small differences from LibreOffice. The reader never executes scripts,
 macros or forms, and never fetches external resources (linked files outside
 the package are not drawn).
 
+This differs from the experimental legacy DOC/XLS/PPT readers
+(`@silurus/ooxml-legacy-office`), which currently reject the whole document
+with `unsupported-content` when they meet a structure they cannot map
+([legacy-office-conversion.md](./legacy-office-conversion.md),
+[issue #2263](https://github.com/yukiyokotani/office-open-xml-viewer/issues/2263)).
+
 ## What is rendered
 
 - Text: paragraphs, headings, spans, white space (`text:s`, tabs, line
