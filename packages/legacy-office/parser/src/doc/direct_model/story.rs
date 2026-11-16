@@ -471,6 +471,10 @@ pub(super) fn project(
                 }
                 Token::NoteReference(reference) => {
                     let id = reference.id().to_string();
+                    // A note the reader numbers, and a hidden reference
+                    // character, project as the custom-mark host: the
+                    // renderer draws no number of its own there.
+                    let literal = reference.mark().is_some() || reference.hidden();
                     push_note_mark(
                         &mut paragraph,
                         story,
@@ -480,7 +484,33 @@ pub(super) fn project(
                         cp,
                         reference.kind(),
                         &id,
-                        reference.custom(),
+                        reference.custom() || literal,
+                        link,
+                        budget,
+                    )?;
+                    if let Some(mark) = reference.mark().filter(|_| !reference.hidden()) {
+                        push_note_text(
+                            &mut paragraph,
+                            story,
+                            formatting,
+                            style,
+                            table_style,
+                            cp,
+                            mark,
+                            link,
+                            budget,
+                        )?;
+                    }
+                }
+                Token::NoteMark(mark) => {
+                    push_note_text(
+                        &mut paragraph,
+                        story,
+                        formatting,
+                        style,
+                        table_style,
+                        cp,
+                        &mark,
                         link,
                         budget,
                     )?;
@@ -833,7 +863,7 @@ fn push_note_mark(
     let (_, fc, piece) = story
         .position(cp)
         .ok_or_else(|| unsupported("Word note mark outside piece table"))?;
-    let mut run = linked_text_run(
+    let run = linked_text_run(
         formatting,
         style,
         table_style,
@@ -841,8 +871,18 @@ fn push_note_mark(
         piece.prm,
         &story.prcs,
         link,
-    )?
-    .ok_or_else(|| unsupported("hidden Word note mark is not supported"))?;
+    )?;
+    let mut run = match run {
+        Some(run) => run,
+        // The number inside a note, as hidden text, displays nothing.
+        None if id.is_empty() => return Ok(()),
+        // A hidden reference character displays no mark, and its note is
+        // still placed (Word control): the zero-width host keeps the
+        // reference, with the character's own properties.
+        None => formatting
+            .direct_shown_text_run(style, table_style, fc, piece.prm, &story.prcs)?
+            .ok_or_else(|| unsupported("Word note mark without character properties"))?,
+    };
     if custom {
         // A sprmCSymbol mark resolves its glyph into the run; that glyph is
         // the following literal mark's text, never the host's. The host keeps
@@ -862,6 +902,42 @@ fn push_note_mark(
         custom_mark_follows: custom,
     });
     budget.text(&mut paragraph.runs, &mut run, id)
+}
+
+/// The number of a note the reader numbers itself (`notes::note_numbers`), as
+/// superscript text with the properties of the automatic number character it
+/// replaces. Hidden text displays nothing.
+#[allow(clippy::too_many_arguments)]
+fn push_note_text(
+    paragraph: &mut docx_model::DocParagraph,
+    story: &Story<'_>,
+    formatting: &mut formatting::Formatting<'_>,
+    style: usize,
+    table_style: Option<formatting::TableFormattingKey>,
+    cp: usize,
+    mark: &str,
+    link: Option<&super::fields::Link>,
+    budget: &mut ModelBudget,
+) -> Result<(), String> {
+    let (_, fc, piece) = story
+        .position(cp)
+        .ok_or_else(|| unsupported("Word note mark outside piece table"))?;
+    let Some(mut run) = linked_text_run(
+        formatting,
+        style,
+        table_style,
+        fc,
+        piece.prm,
+        &story.prcs,
+        link,
+    )?
+    else {
+        return Ok(());
+    };
+    // A sprmCSymbol glyph belongs to a custom mark, never to a number.
+    run.text.clear();
+    run.vert_align = Some("super".to_string());
+    budget.text(&mut paragraph.runs, &mut run, mark)
 }
 
 /// Project an EQ phonetic guide exactly as the DOCX parser projects the

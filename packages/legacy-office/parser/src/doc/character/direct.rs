@@ -412,6 +412,17 @@ impl Properties {
         }
     }
 
+    /// sprmCFVanish: the character is hidden text.
+    pub(in crate::doc) fn hidden(&self) -> bool {
+        self.bool_value("vanish").unwrap_or(false)
+    }
+
+    /// The same properties as visible text.
+    pub(in crate::doc) fn shown(mut self) -> Self {
+        self.values.remove("vanish");
+        self
+    }
+
     fn bool_value(&self, key: &str) -> Option<bool> {
         self.values.get(key).map(|value| value == "1")
     }

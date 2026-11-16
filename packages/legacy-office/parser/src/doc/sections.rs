@@ -64,6 +64,11 @@ impl Section {
         Ok(())
     }
 
+    #[cfg(test)]
+    pub(in crate::doc) fn set_note_properties_for_test(&mut self, notes: NoteProperties) {
+        self.properties.notes = notes;
+    }
+
     pub(in crate::doc) fn note_properties(&self) -> NoteProperties {
         self.properties.notes
     }
@@ -233,7 +238,7 @@ struct Properties {
 /// sprmSNFtn, sprmSNfcFtnRef, sprmSRncEdn, sprmSNEdn, sprmSNfcEdnRef,
 /// sprmSFEndnote). `None` means the SPRM is absent and its default applies.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(super) struct NoteProperties {
+pub(in crate::doc) struct NoteProperties {
     pub footnote_position: Option<u8>,
     pub footnote_restart: Option<u8>,
     pub footnote_offset: Option<u16>,

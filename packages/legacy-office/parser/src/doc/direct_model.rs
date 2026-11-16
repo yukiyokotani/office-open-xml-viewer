@@ -101,6 +101,7 @@ pub(super) fn build(
     }
     let note_layout_settings = notes::validate(
         &facts.note_stories,
+        &mut facts.note_references,
         facts.effective_nfib,
         facts.document_settings.as_ref(),
         &facts.sections,
@@ -236,6 +237,7 @@ pub(super) fn build(
         let fields = fields.as_ref().map_err(Clone::clone)?;
         notes::project(
             story,
+            &facts.note_references,
             fields,
             &mut facts.formatting,
             &mut facts.pictures,

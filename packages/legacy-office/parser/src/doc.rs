@@ -98,6 +98,9 @@ enum Token {
     /// An automatic note-number character inside note text (the DOCX
     /// `footnoteRef`/`endnoteRef`), projected by the direct model only.
     NoteNumber(notes::Kind),
+    /// The number of a note the reader numbers itself, as its text, inside
+    /// the note. Projected by the direct model only.
+    NoteMark(String),
     /// A displayed token inside a hyperlink or `\h` field result, projected
     /// by the direct model only.
     Linked(Box<direct_model::fields::Linked>),

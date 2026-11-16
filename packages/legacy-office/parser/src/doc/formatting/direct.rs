@@ -286,6 +286,21 @@ impl<'a> Formatting<'a> {
     /// A link run (see `direct_model::fields::Link`). Inside a TOC result the
     /// DOCX parser replaces the run's color and underline state with the
     /// paragraph-level (style and table style) character properties.
+    /// The run of a character whose properties are needed although it is
+    /// hidden text: the zero-width host of a hidden note reference.
+    pub(in crate::doc) fn direct_shown_text_run(
+        &mut self,
+        paragraph_style: usize,
+        table_style: Option<TableFormattingKey>,
+        fc: usize,
+        prm: u16,
+        prcs: &[&[u8]],
+    ) -> Result<Option<TextRun>, String> {
+        self.run_properties_with_table(paragraph_style, table_style, fc, prm, prcs)?
+            .shown()
+            .direct_text_run(String::new(), &self.fonts)
+    }
+
     pub(in crate::doc) fn direct_link_text_run(
         &mut self,
         paragraph_style: usize,

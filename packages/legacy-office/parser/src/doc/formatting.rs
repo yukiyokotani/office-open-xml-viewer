@@ -848,6 +848,17 @@ impl<'a> Formatting<'a> {
             .passive_special())
     }
 
+    /// Whether the character is hidden text (sprmCFVanish).
+    pub(in crate::doc) fn hidden_character(
+        &mut self,
+        style: usize,
+        fc: usize,
+        prm: u16,
+        prcs: &[&[u8]],
+    ) -> Result<bool, String> {
+        Ok(self.run_properties(style, fc, prm, prcs)?.hidden())
+    }
+
     fn run_properties(
         &mut self,
         paragraph_style: usize,

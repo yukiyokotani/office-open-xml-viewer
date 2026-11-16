@@ -20,10 +20,18 @@
 //! A custom-mark reference (aFtnIdx/aEdnIdx == 0) projects as the DOCX
 //! `customMarkFollows` reference host followed by its literal mark text; it
 //! consumes no automatic number (ECMA-376 17.11.14 / the shared renderer).
-//! Accepted note properties require continuous numbering with one
-//! format/start per note kind (Arabic, Roman or letters), bottom-of-page
-//! footnotes, document-end endnotes and the separator classes gated below.
-//! Other properties stay rejected.
+//!
+//! Word numbers notes per section (format, first number, restart). When the
+//! document-wide model does not produce those numbers, `note_numbers` computes
+//! them and every mark of that kind is projected as its text, in the
+//! custom-mark shape. A hidden reference character displays no mark in the
+//! text; its note is still placed and numbered.
+//!
+//! Footnote and endnote placement (page bottom, beneath text, section end,
+//! document end) is carried by the model's position fields, as the DOCX
+//! parser carries `w:footnotePr/w:pos` and `w:endnotePr/w:pos`.
+//! A separator story with content of its own has no place in the model's
+//! reserved-story shapes: that kind keeps the layout's default separator.
 
 use super::{
     fields::{Linked, StoryFields},
@@ -39,11 +47,13 @@ use docx_model::{
 
 mod separators;
 
+mod note_numbers;
+
 /// Last effective nFib whose note properties live in the DOP (MS-DOC 2.7.2).
 const DOP_NOTE_PROPERTIES_MAX_NFIB: u16 = 0x00d9;
 
-/// Validate native note properties against the implemented shared contract and
-/// retain numbering/separator facts. ECMA-376 17.11.17/.18/.20 governs automatic
+/// Read the note properties, number the notes and retain the numbering,
+/// placement and separator facts. ECMA-376 17.11.17/.18/.20 governs automatic
 /// numbering; rule geometry and continuation scope follow the library policies
 /// documented beside their gates and layout consumer.
 // The parameters are independent note, header, section and acquisition facts
@@ -52,6 +62,7 @@ const DOP_NOTE_PROPERTIES_MAX_NFIB: u16 = 0x00d9;
 #[allow(clippy::too_many_arguments)]
 pub(super) fn validate(
     stories: &[Option<notes::Notes<'_>>],
+    references: &mut notes::References,
     effective_nfib: u16,
     dop: Option<&settings::Properties>,
     sections: &[sections::Section],
@@ -59,117 +70,119 @@ pub(super) fn validate(
     formatting: &mut formatting::Formatting<'_>,
     budget: &mut ModelBudget,
 ) -> Result<Option<NoteLayoutSettingsWire>, String> {
-    let present = |kind| {
+    let story = |kind| {
         stories
             .iter()
             .flatten()
-            .any(|notes| notes.kind == kind && !notes.entries.is_empty())
+            .find(|notes| notes.kind == kind && !notes.entries.is_empty())
     };
-    let (footnotes, endnotes) = (
-        present(notes::Kind::Footnote),
-        present(notes::Kind::Endnote),
-    );
-    if !footnotes && !endnotes {
+    let (footnotes, endnotes) = (story(notes::Kind::Footnote), story(notes::Kind::Endnote));
+    if footnotes.is_none() && endnotes.is_none() {
         return Ok(None);
     }
     let dop = dop
         .map(|dop| dop.notes)
         .ok_or_else(|| unsupported("Word notes require document note properties"))?;
-    // (format, start) for each kind: MSONFC and the first automatic number.
-    let (footnote_numbering, endnote_numbering);
-    if effective_nfib <= DOP_NOTE_PROPERTIES_MAX_NFIB {
-        // MS-DOC 2.7.2/2.7.4: these documents keep note numbering and footnote
-        // placement in the DOP. Section note SPRMs would be ambiguous.
-        let formats = dop
-            .formats
-            .ok_or_else(|| unsupported("Word note number formats are missing"))?;
-        if sections
-            .iter()
-            .any(|section| section.note_properties() != Default::default())
-        {
-            return Err(unsupported(
-                "Word section note properties in a DOP-scoped document",
-            ));
-        }
-        if footnotes && (dop.footnote_position != 1 || dop.footnote_restart != 0) {
-            return Err(unsupported(footnote_message()));
-        }
-        if endnotes && dop.endnote_restart != 0 {
-            return Err(unsupported(endnote_message()));
-        }
-        footnote_numbering = (formats.0, dop.footnote_start);
-        endnote_numbering = (formats.1, dop.endnote_start);
-    } else {
-        // MS-DOC 2.6.4 defaults: fpcBottomPage, rncCont, no offset, Arabic
-        // footnotes and lowercase-Roman endnotes. With continuous numbering
-        // sprmSNFtn/sprmSNEdn add (value - 1) to every number of the section;
-        // equal values in every section are a document-wide start value.
-        let mut footnote_values = None;
-        let mut endnote_values = None;
-        for section in sections {
-            let properties = section.note_properties();
-            if footnotes
-                && (!matches!(properties.footnote_position, None | Some(1))
-                    || !matches!(properties.footnote_restart, None | Some(0)))
-            {
-                return Err(unsupported(footnote_message()));
-            }
-            if endnotes && !matches!(properties.endnote_restart, None | Some(0)) {
-                return Err(unsupported(endnote_message()));
-            }
-            let footnote = (
-                properties.footnote_format.unwrap_or(0),
-                properties.footnote_offset.unwrap_or(1),
-            );
-            let endnote = (
-                properties.endnote_format.unwrap_or(2),
-                properties.endnote_offset.unwrap_or(1),
-            );
-            if *footnote_values.get_or_insert(footnote) != footnote && footnotes {
-                return Err(unsupported(footnote_message()));
-            }
-            if *endnote_values.get_or_insert(endnote) != endnote && endnotes {
-                return Err(unsupported(endnote_message()));
-            }
-        }
-        footnote_numbering = footnote_values.unwrap_or((0, 1));
-        endnote_numbering = endnote_values.unwrap_or((2, 1));
+    let dop_scoped = effective_nfib <= DOP_NOTE_PROPERTIES_MAX_NFIB;
+    if dop_scoped && dop.formats.is_none() {
+        return Err(unsupported("Word note number formats are missing"));
     }
+    let mut number = |story: Option<&notes::Notes<'_>>| -> Result<_, String> {
+        let Some(story) = story else {
+            return Ok(None);
+        };
+        let hidden: Vec<bool> = story
+            .entries
+            .iter()
+            .map(|entry| {
+                references
+                    .get(entry.reference_cp)
+                    .is_some_and(notes::Reference::hidden)
+            })
+            .collect();
+        let numbering = note_numbers::assign(story, &hidden, effective_nfib, &dop, sections);
+        if let Some(marks) = &numbering.marks {
+            budget.charge(marks.iter().flatten().map(String::capacity).sum())?;
+            references.set_marks(story.kind, marks);
+        }
+        Ok(Some(numbering))
+    };
+    let footnote_numbering = number(footnotes)?;
+    let endnote_numbering = number(endnotes)?;
     let mut settings = NoteLayoutSettingsWire {
-        footnote_number_format: footnotes
-            .then(|| number_format(footnote_numbering.0, footnote_message()))
-            .transpose()?,
-        footnote_number_start: footnotes
-            .then(|| number_start(footnote_numbering.1, footnote_message()))
-            .transpose()?,
-        endnote_number_format: endnotes
-            .then(|| number_format(endnote_numbering.0, endnote_message()))
-            .transpose()?,
-        endnote_number_start: endnotes
-            .then(|| number_start(endnote_numbering.1, endnote_message()))
-            .transpose()?,
+        footnote_number_format: footnote_numbering
+            .as_ref()
+            .map(|numbering| numbering.format.to_string()),
+        footnote_number_start: footnote_numbering.as_ref().map(|numbering| numbering.start),
+        endnote_number_format: endnote_numbering
+            .as_ref()
+            .map(|numbering| numbering.format.to_string()),
+        endnote_number_start: endnote_numbering.as_ref().map(|numbering| numbering.start),
         ..NoteLayoutSettingsWire::default()
     };
-    // DopBase.epc is not scoped by nFib. Only end-of-document placement (3)
-    // matches the shared layout; sprmSFEndnote is then irrelevant.
-    if endnotes && dop.endnote_position != 3 {
-        return Err(unsupported(
-            "Word end-of-section endnote placement is not supported",
-        ));
+    // MS-DOC 2.7.2 DopBase.fpc and 2.6.4 sprmSFpc: 0 end of section, 1 bottom
+    // of page, 2 beneath text. The model states the position once for the
+    // document (ECMA-376 17.11.21); the first section speaks for a later
+    // document.
+    if footnotes.is_some() {
+        let position = if dop_scoped {
+            dop.footnote_position
+        } else {
+            sections
+                .first()
+                .and_then(|section| section.note_properties().footnote_position)
+                .unwrap_or(1)
+        };
+        settings.footnote_position = match position {
+            1 => None,
+            0 => Some("sectEnd"),
+            2 => Some("beneathText"),
+            _ => crate::rejection::spec_default("invalid Word footnote position", None),
+        }
+        .map(str::to_string);
+        budget.charge(
+            settings
+                .footnote_position
+                .as_ref()
+                .map_or(0, String::capacity),
+        )?;
     }
+    // DopBase.epc is not scoped by nFib: 0 end of section, 3 end of document
+    // (ECMA-376 17.11.22).
+    if endnotes.is_some() {
+        settings.endnote_position = match dop.endnote_position {
+            3 => None,
+            0 => Some("sectEnd"),
+            _ => crate::rejection::spec_default("invalid Word endnote position", None),
+        }
+        .map(str::to_string);
+        budget.charge(
+            settings
+                .endnote_position
+                .as_ref()
+                .map_or(0, String::capacity),
+        )?;
+    }
+    let (footnotes, endnotes) = (footnotes.is_some(), endnotes.is_some());
     // MS-DOC 2.3.3/2.8.22 assigns story roles; 2.6.1 sprmCFSpec assigns
     // U+0003/U+0004 short/full semantics independently of those roles. Retain
     // actual PAPX/CHPX for the shared reserved-separator metric consumer.
     // Footnote short/short is supported within its closed metric-only contract.
     // Numeric short-rule span remains the existing library layout policy;
     // admission does not claim Office-exact rule placement or width.
-    let headers = headers
-        .ok_or_else(|| unsupported("Word notes without separator stories are not supported"))?;
     let mut reserved = ReservedNoteSeparatorsWire::default();
     for (present, base) in [(footnotes, 0), (endnotes, 3)] {
         if !present {
             continue;
         }
+        let Some(headers) = headers else {
+            // No separator stories: the layout's default separator.
+            crate::rejection::approximated(
+                "Word notes without separator stories use the default separator",
+                (),
+            );
+            continue;
+        };
         let ordinary = separators::acquire(headers, base, formatting, budget)?;
         let continuation = separators::acquire(headers, base + 1, formatting, budget)?;
         // A paragraph-only notice owns real PAPX/CHPX too. Acquiring it does
@@ -199,8 +212,17 @@ pub(super) fn validate(
                 || continuation.empty_story()
                 || (base == 0 && continuation.paragraph_only()))
             || !matches!(headers.separator_text(base + 2), "" | "\r\r")
+            || !(ordinary.wire_shape() && continuation.wire_shape() && notice.wire_shape())
         {
-            return Err(unsupported("custom Word note separators are not supported"));
+            // A separator with content of its own (text, a rule in another
+            // role) has no reserved-story shape in the model. The kind keeps
+            // the separator the layout draws without one, as for a DOCX
+            // whose separator story it does not read.
+            crate::rejection::approximated(
+                "custom Word note separator drawn as the default separator",
+                (),
+            );
+            continue;
         }
         // A rule retains its explicit kind and effective character metrics.
         // Continuation remains caller opt-in; no document/default option changes.
@@ -223,37 +245,6 @@ pub(super) fn validate(
     budget.charge(std::mem::size_of::<ReservedNoteSeparatorsWire>())?;
     settings.reserved_separators = Some(Box::new(reserved));
     Ok(Some(settings))
-}
-
-/// MS-OSHARED 2.2.1.3 MSONFC values whose ECMA-376 17.18.59 format the shared
-/// note renderer formats natively: Arabic, upper/lower Roman and letters.
-fn number_format(value: u16, message: &'static str) -> Result<String, String> {
-    match value {
-        0 => Ok("decimal"),
-        1 => Ok("upperRoman"),
-        2 => Ok("lowerRoman"),
-        3 => Ok("upperLetter"),
-        4 => Ok("lowerLetter"),
-        _ => Err(unsupported(message)),
-    }
-    .map(str::to_string)
-}
-
-/// A first automatic number of at least 1 (the 14-bit DOP value or the
-/// section SPRM value, at most 16383).
-fn number_start(value: u16, message: &'static str) -> Result<i64, String> {
-    if value == 0 {
-        return Err(unsupported(message));
-    }
-    Ok(i64::from(value))
-}
-
-fn footnote_message() -> &'static str {
-    "Word footnote numbering or placement other than continuous Roman, letter or Arabic numbering at the page bottom is not supported"
-}
-
-fn endnote_message() -> &'static str {
-    "Word endnote numbering other than continuous Roman, letter or Arabic numbering is not supported"
 }
 
 /// Turn main-story note characters into references. Every automatic U+0002
@@ -349,8 +340,10 @@ pub(super) fn check_all_references_placed(
 
 /// Project every note of one note document, in PLC order, as DOCX notes whose
 /// ids match the main-story references (`Reference::id`).
+#[allow(clippy::too_many_arguments)]
 pub(super) fn project(
     notes: &notes::Notes<'_>,
+    references: &notes::References,
     table: &header_fields::Table,
     formatting: &mut formatting::Formatting<'_>,
     pictures: &mut pictures::Store<'_>,
@@ -381,8 +374,15 @@ pub(super) fn project(
                     // Each U+0002 shows the enclosing note's number. A
                     // custom-mark note consumes no number, so the shared
                     // renderer suppresses it there, as for a DOCX `footnoteRef`
-                    // inside a `customMarkFollows` note.
-                    *token = Token::NoteNumber(notes.kind);
+                    // inside a `customMarkFollows` note. A note the reader
+                    // numbers itself shows that number as text.
+                    *token = match references
+                        .get(entry.reference_cp)
+                        .and_then(notes::Reference::mark)
+                    {
+                        Some(mark) => Token::NoteMark(mark.to_string()),
+                        None => Token::NoteNumber(notes.kind),
+                    };
                 }
             }
         }
@@ -534,6 +534,7 @@ mod tests {
             // formatting rather than substituting the continuation-role default.
             let settings = super::validate(
                 &facts.note_stories,
+                &mut facts.note_references,
                 facts.effective_nfib,
                 facts.document_settings.as_ref(),
                 &facts.sections,
@@ -657,6 +658,7 @@ mod tests {
                 let mut budget = super::super::ModelBudget::new(limit);
                 let result = super::validate(
                     &facts.note_stories,
+                    &mut facts.note_references,
                     facts.effective_nfib,
                     facts.document_settings.as_ref(),
                     &facts.sections,
@@ -678,7 +680,7 @@ mod tests {
     }
 
     #[test]
-    fn raw_separator_controls_without_special_meaning_stay_rejected() {
+    fn raw_separator_controls_without_special_meaning_are_custom_separators() {
         let fixture = fixture(&["\u{2} note\r"], &[(1, true)]);
         let bytes = source_with_stories(
             "A\u{2}\r",
@@ -710,11 +712,31 @@ mod tests {
             ("WordDocument", word),
             ("0Table", table),
         ]);
-        assert!(
-            crate::doc::direct_model(&CompoundFile::open(&bytes).unwrap(), 1024 * 1024)
-                .unwrap_err()
-                .contains("separators")
-        );
+        // Without the special-character property U+0003 is ordinary text:
+        // the story is a custom separator, and the kind keeps the layout's
+        // default one.
+        crate::rejection::take_best_effort();
+        let result =
+            crate::doc::direct_model(&CompoundFile::open(&bytes).unwrap(), 1024 * 1024).unwrap();
+        assert_default_separator(&result.document);
+    }
+
+    /// The footnote kind carries no reserved separator story: the layout
+    /// draws its default separator.
+    fn assert_default_separator(document: &Document) {
+        let settings = document.note_layout_settings.as_ref().unwrap();
+        assert_eq!(settings.footnote_separator, None);
+        assert_eq!(settings.footnote_continuation_separator, None);
+        assert!(settings
+            .reserved_separators
+            .as_ref()
+            .unwrap()
+            .footnote
+            .is_none());
+        assert!(crate::rejection::take_best_effort().contains(&(
+            crate::rejection::BestEffort::Approximated,
+            "custom Word note separator drawn as the default separator"
+        )));
     }
 
     #[test]
@@ -815,12 +837,11 @@ mod tests {
             assert!(story.get("rule").is_none());
             assert!(story["paragraph"]["contentMark"]["run"].is_object());
         }
-        // A rule-free story with authored text is still a custom separator.
+        // A rule-free story with authored text is a custom separator.
         let mut properties = fixture(&notes, &references);
         properties.separators[0] = "x\r\r";
-        assert!(document("A\u{2}\r", &properties)
-            .unwrap_err()
-            .contains("custom Word note separators"));
+        crate::rejection::take_best_effort();
+        assert_default_separator(&document("A\u{2}\r", &properties).unwrap());
     }
 
     #[test]
@@ -853,32 +874,164 @@ mod tests {
         }
     }
 
+    fn with_dop(
+        notes: &[&str],
+        references: &[(u32, bool)],
+        text: &str,
+        edit: impl FnOnce(&mut Vec<u8>),
+    ) -> Document {
+        let mut properties = fixture(notes, references);
+        edit(properties.dop.as_mut().unwrap());
+        document(text, &properties).unwrap()
+    }
+
+    fn best_effort() -> Vec<&'static str> {
+        crate::rejection::take_best_effort()
+            .into_iter()
+            .map(|(_, site)| site)
+            .collect()
+    }
+
     #[test]
-    fn unrepresentable_note_properties_are_rejected() {
+    fn symbol_numbering_is_projected_as_the_text_of_each_mark() {
+        // nfcFtnRef 9 (chicago): the shared renderer has no such numbering,
+        // so the reader numbers the notes.
+        let notes = ["\u{2} one\r", "\u{2} two\r"];
+        let references = [(1, true), (3, true)];
+        best_effort();
+        let document = with_dop(&notes, &references, "A\u{2}B\u{2}\r", |dop| dop[492] = 9);
+        assert_eq!(
+            runs(&document.body[0]),
+            ["A", "footnote:1:1:", "*", "B", "footnote:2:2:", "\u{2020}"]
+        );
+        // The reference host is the custom-mark shape; the mark follows as
+        // superscript text, in the body and inside the note.
+        let BodyElement::Paragraph(paragraph) = &document.body[0] else {
+            panic!()
+        };
+        let (DocRun::Text(host), DocRun::Text(mark)) = (&paragraph.runs[1], &paragraph.runs[2])
+        else {
+            panic!()
+        };
+        assert!(host.note_ref.as_ref().unwrap().custom_mark_follows);
+        assert_eq!(mark.vert_align.as_deref(), Some("super"));
+        assert_eq!(
+            runs(&document.footnotes[1].content[0]),
+            ["\u{2020}", " two"]
+        );
+        assert!(best_effort().is_empty());
+    }
+
+    #[test]
+    fn per_page_restart_counts_continuously() {
+        let notes = ["\u{2} one\r", "\u{2} two\r"];
+        let references = [(1, true), (3, true)];
+        best_effort();
+        // rncFtn 2 (restart each page), nFtn 1.
+        let document = with_dop(&notes, &references, "A\u{2}B\u{2}\r", |dop| {
+            dop[2..4].copy_from_slice(&(2u16 | (1 << 2)).to_le_bytes());
+        });
+        assert_eq!(
+            runs(&document.body[0]),
+            ["A", "footnote:1:1:super", "B", "footnote:2:2:super"]
+        );
+        assert_eq!(
+            best_effort(),
+            ["Word per-page note numbering restart counts continuously"]
+        );
+    }
+
+    #[test]
+    fn a_zero_start_counts_from_one_and_positions_reach_the_model() {
         let notes = ["\u{2} one\r"];
         let references = [(1, true)];
-        let reject = |fixture: NotesFixture<'_>, text: &str| document(text, &fixture).unwrap_err();
-        for (offset, value, message) in [
-            // Chicago numbering, per-section and per-page restarts, a zero
-            // start and beneath-text placement have no shared rendering.
-            (492usize, 9u8, "footnote numbering"),
-            (2, 1 | (1 << 2), "footnote numbering"),
-            (2, 2 | (1 << 2), "footnote numbering"),
-            (2, 0, "footnote numbering"),
-            (0, 2 << 5, "footnote numbering"),
-        ] {
-            let mut properties = fixture(&notes, &references);
-            let dop = properties.dop.as_mut().unwrap();
-            if offset == 2 {
-                dop[2..4].copy_from_slice(&u16::from(value).to_le_bytes());
-            } else {
-                dop[offset] = value;
-            }
-            assert!(reject(properties, "A\u{2}\r").contains(message), "{offset}");
+        best_effort();
+        let document = with_dop(&notes, &references, "A\u{2}\r", |dop| {
+            dop[2..4].copy_from_slice(&0u16.to_le_bytes());
+        });
+        let settings = document.note_layout_settings.unwrap();
+        assert_eq!(settings.footnote_number_start, Some(1));
+        assert_eq!(settings.footnote_position, None);
+        assert_eq!(best_effort(), ["zero Word note number start"]);
+        // DopBase.fpc 2 (beneath text) and 0 (end of section).
+        for (fpc, position) in [(2u8, "beneathText"), (0, "sectEnd")] {
+            let document = with_dop(&notes, &references, "A\u{2}\r", |dop| {
+                dop[0] = (dop[0] & !0x60) | (fpc << 5);
+            });
+            let settings = document.note_layout_settings.unwrap();
+            assert_eq!(settings.footnote_position.as_deref(), Some(position));
         }
+        assert!(best_effort().is_empty());
+    }
+
+    #[test]
+    fn a_restart_in_one_section_is_the_document_wide_numbering() {
+        // rncFtn 1 (restart each section) with every note in one section.
+        let notes = ["\u{2} one\r", "\u{2} two\r"];
+        let references = [(1, true), (3, true)];
+        let document = with_dop(&notes, &references, "A\u{2}B\u{2}\r", |dop| {
+            dop[2..4].copy_from_slice(&(1u16 | (4 << 2)).to_le_bytes());
+        });
+        assert_eq!(
+            runs(&document.body[0]),
+            ["A", "footnote:1:1:super", "B", "footnote:2:2:super"]
+        );
+        assert_eq!(
+            document.note_layout_settings.unwrap().footnote_number_start,
+            Some(4)
+        );
+    }
+
+    #[test]
+    fn a_restart_in_each_section_is_numbered_by_the_reader() {
+        // rncFtn 1 (restart each section), nFtn 1, two sections with a note
+        // each: both notes are number 1, which the document-wide model
+        // cannot produce.
+        let notes = ["\u{2} one\r", "\u{2} two\r"];
+        let references = [(1, true), (5, true)];
+        let mut properties = fixture(&notes, &references);
+        properties.dop.as_mut().unwrap()[2..4].copy_from_slice(&(1u16 | (1 << 2)).to_le_bytes());
+        let text = "A\u{2}\r\u{c}B\u{2}\r";
+        let sections = [
+            (4, 2, 12_240, 15_840, 1, 720),
+            (text.encode_utf16().count(), 2, 12_240, 15_840, 1, 720),
+        ];
+        let bytes = source_with_stories(
+            text,
+            &sections,
+            None,
+            None,
+            None,
+            Some(&[None; 12]),
+            Some(&properties),
+        );
+        let bytes = passive_special_source(&bytes);
+        let document =
+            super::super::super::direct_model(&CompoundFile::open(&bytes).unwrap(), 1024 * 1024)
+                .unwrap()
+                .document;
+        let marks: Vec<Vec<String>> = document
+            .body
+            .iter()
+            .filter(|element| matches!(element, BodyElement::Paragraph(_)))
+            .map(runs)
+            .collect();
+        assert_eq!(marks[0], ["A", "footnote:1:1:", "1"]);
+        assert_eq!(marks.last().unwrap(), &["B", "footnote:2:2:", "1"]);
+        for note in &document.footnotes {
+            assert_eq!(runs(&note.content[0])[0], "1");
+        }
+    }
+
+    #[test]
+    fn missing_properties_and_custom_separators() {
+        let notes = ["\u{2} one\r"];
+        let references = [(1, true)];
         let mut missing = fixture(&notes, &references);
         missing.dop = None;
-        assert!(reject(missing, "A\u{2}\r").contains("note properties"));
+        assert!(document("A\u{2}\r", &missing)
+            .unwrap_err()
+            .contains("note properties"));
         for separators in [
             ["\u{3}\r\r\r", "\u{4}\r\r", "", "", "", ""],
             ["\u{4}\r\r", "\u{3}\r\r", "", "", "", ""],
@@ -886,7 +1039,8 @@ mod tests {
         ] {
             let mut properties = fixture(&notes, &references);
             properties.separators = separators;
-            assert!(reject(properties, "A\u{2}\r").contains("separators"));
+            best_effort();
+            assert_default_separator(&document("A\u{2}\r", &properties).unwrap());
         }
     }
 
