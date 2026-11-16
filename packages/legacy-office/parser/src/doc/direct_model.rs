@@ -1765,24 +1765,27 @@ mod tests {
         let (first, _) = member([0, 0xff78_6402]).unwrap();
         assert_eq!((first.0, first.1, first.2, first.3), (0.0, 0.0, 50.0, 25.0));
         assert!((first.4 - 224.391).abs() < 1e-3);
-        // A half-turned group mirrors member centres and adds 180 degrees; its
-        // textbox member makes this group rotate text, which stays rejected.
-        assert!(member([180 << 16, 0])
-            .unwrap_err()
-            .contains("rotated Word drawing text"));
+        // A half-turned group mirrors member centres and adds 180 degrees,
+        // also for its textbox member.
+        let (first, second) = member([180 << 16, 0]).unwrap();
+        assert_eq!(first, (50.0, 25.0, 50.0, 25.0, 180.0, 180.0));
+        assert_eq!(second, (0.0, 0.0, 50.0, 25.0, 180.0, 180.0));
         let (first, second) = member_with(None, [180 << 16, 90 << 16]).unwrap();
         // 100 x 50 pt frame: the rotated member's box mirrors through the
         // centre (its centre 25, 12.5 becomes 75, 37.5) and turns to 270 degrees.
         assert_eq!(first, (62.5, 12.5, 25.0, 50.0, 270.0, 270.0));
         assert_eq!(second, (0.0, 0.0, 50.0, 25.0, 180.0, 180.0));
-        // Other group angles stay unsupported.
-        assert!(member([90 << 16, 0])
-            .unwrap_err()
-            .contains("rotated Word drawing groups"));
+        // A quarter-turned group: its 100 x 50 pt anchor is the rotated
+        // bounds of a 50 x 100 pt frame about the same centre, in which the
+        // first member occupies the top-left quarter. Turned clockwise that
+        // quarter is the top-right one of the anchor.
+        let (first, second) = member_with(None, [90 << 16, 0]).unwrap();
+        assert_eq!(first, (62.5, -12.5, 25.0, 50.0, 90.0, 90.0));
+        assert_eq!(second, (12.5, 12.5, 25.0, 50.0, 90.0, 90.0));
     }
 
     #[test]
-    fn rotated_or_flipped_groups_fail_closed() {
+    fn flipped_groups_mirror_their_members_and_structural_flags_reject() {
         let bytes = drawing_source(Some("Inside\r"), false, true, [0, 0]);
         let cfb = CompoundFile::open(&bytes).unwrap();
         let word = cfb.stream("WordDocument").unwrap();
@@ -1794,19 +1797,31 @@ mod tests {
             .windows(fsp.len())
             .position(|bytes| bytes == fsp)
             .expect("top-level group FSP");
-        for (offset, value, reason) in [
-            (12, 0x41u8, "flipped"),
-            (13, 0x06, "unsupported shape flags"),
-        ] {
+        let changed = |offset: usize, value: u8| {
             let mut table = table.clone();
             table[at + offset] = value;
-            let changed = build_scoped_cfb(&[("WordDocument", word.clone()), ("0Table", table)]);
-            assert!(super::super::direct_model(
-                &CompoundFile::open(&changed).unwrap(),
-                1024 * 1024
-            )
+            let bytes = build_scoped_cfb(&[("WordDocument", word.clone()), ("0Table", table)]);
+            super::super::direct_model(&CompoundFile::open(&bytes).unwrap(), 1024 * 1024)
+        };
+        assert!(changed(13, 0x06)
             .unwrap_err()
-            .contains(reason));
+            .contains("unsupported shape flags"));
+        // fFlipH on the group mirrors the member frames about its centre
+        // (100 x 50 pt, members at 0,0 and 50,25) and flips each member.
+        let result = changed(12, 0x41).unwrap();
+        let BodyElement::Paragraph(paragraph) = &result.document.body[0] else {
+            panic!("body paragraph")
+        };
+        let [_, _, DocRun::Shape(first), DocRun::Shape(second)] = paragraph.runs.as_slice() else {
+            panic!("two members")
+        };
+        for (shape, origin) in [(first, [55.0, 10.0]), (second, [5.0, 35.0])] {
+            assert_eq!([shape.anchor_x_pt, shape.anchor_y_pt], origin);
+            assert_eq!(
+                (shape.flip_h, shape.flip_v, shape.rotation),
+                (true, false, 0.0)
+            );
+            assert!(shape.rotation.is_sign_positive());
         }
     }
 

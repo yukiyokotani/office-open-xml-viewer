@@ -7,30 +7,35 @@
 //! OfficeArtFSPGR onto its child anchor in the parent's system. Mapping is the
 //! linear rectangle-to-rectangle transform these records define.
 //!
-//! Rotation (MS-ODRAW 2.3.18.5 defines only the clockwise angle about the
-//! centre) follows Word's own DOCX of the same drawings in the local corpus,
-//! the DOC files having been saved by Word from those DOCX files:
+//! Rotation and flips (MS-ODRAW 2.3.18.5 defines only the clockwise angle
+//! about the centre; 2.2.40 fFlipH/fFlipV) follow `super::oriented`, the
+//! OfficeArt placement rule a PowerPoint control established, as far as
+//! Word's own DOCX of the same drawings in the local corpus shows (the DOC
+//! files having been saved by Word from those DOCX files):
 //! - A member whose angle, normalised to [0, 360), lies in [45, 135) or
 //!   [225, 315) stores its rotated bounds as its child anchor: Word's DOCX
 //!   gives the same angle with width and height exchanged about the same
 //!   centre (90 degrees, three members). Members at 44.25, 136.16, 224.39 and
-//!   318.31 degrees store their unrotated box unchanged. This is the rule the
-//!   PowerPoint control in ppt/drawing/direct_transform.rs established for
-//!   PowerPoint; Word agrees on every sampled angle. Mapping the stored bounds
-//!   through the group before the exchange reproduces the scale order that
-//!   the DOCX reader applies to Word's exact quarter turns.
+//!   318.31 degrees store their unrotated box unchanged. Mapping the stored
+//!   bounds through the group before the exchange reproduces the scale order
+//!   that the DOCX reader applies to Word's exact quarter turns.
 //! - A top-level group rotated by 180 degrees keeps its unrotated SPA frame
 //!   and member coordinates (Word's DOCX: `rot="10800000"` on the group
 //!   transform with the same extent); members turn about the group centre.
 //!
-//! Other group angles, nested rotated groups, rotated flipped members,
-//! rotated pictures and rotated text shapes have no Word evidence yet and
-//! stay unsupported. Members that are straight connectors keep their static
-//! path; endpoint rerouting is not reconstructed.
+//! A turned or flipped group turns and flips its members about the centre of
+//! its own frame, outer groups after inner ones, as nested DrawingML group
+//! transforms do (ECMA-376 Annex L.4.7.4-L.4.7.6). Word evidence covers the
+//! cases above only: other group angles, flipped groups, turned nested
+//! groups, turned and flipped members, turned pictures and turned text follow
+//! the same rule without a Word control. Members that are straight
+//! connectors keep their static path; endpoint rerouting is not
+//! reconstructed.
 
 use super::super::{u32_at, unsupported};
 use super::{
-    direct_alignment, records, shape, Anchor, Content, Part, Placement, ResolvedDrawing, Store,
+    direct_alignment, oriented, records, shape, turned_content, Anchor, Content, Part, Placement,
+    ResolvedDrawing, Store,
 };
 use crate::doc::pictures::Options as PictureOptions;
 use crate::officeart::{properties, Record};
@@ -47,6 +52,75 @@ pub(in crate::doc) struct Member {
     pub rotation: f64,
     pub flip: [bool; 2],
     pub spid: u32,
+}
+
+/// A turned or flipped group: its unrotated frame in the top-level frame, its
+/// clockwise rotation in degrees and its flips.
+#[derive(Clone, Copy)]
+struct Turn {
+    frame: [f64; 4],
+    rotation: f64,
+    flip: [bool; 2],
+}
+
+impl Turn {
+    /// `None` for a group that neither turns nor flips its members.
+    fn new(frame: [f64; 4], rotation: f64, flip: [bool; 2]) -> Option<Self> {
+        (rotation != 0.0 || flip != [false; 2]).then_some(Self {
+            frame,
+            rotation,
+            flip,
+        })
+    }
+
+    /// Flip, then turn, `member` about the centre of the group frame. A
+    /// single flip reverses the direction of the member's own rotation
+    /// (F x R(a) = R(-a) x F).
+    fn apply(&self, member: &mut Member) {
+        let [x, y, width, height] = member.frame;
+        let [left, top, group_width, group_height] = self.frame;
+        if self.rotation == 180.0 && self.flip == [false; 2] {
+            // A half turn is the point reflection through the centre.
+            member.frame = [
+                left + (left + group_width) - x - width,
+                top + (top + group_height) - y - height,
+                width,
+                height,
+            ];
+        } else {
+            let centre = [left + group_width / 2.0, top + group_height / 2.0];
+            let mut offset = [x + width / 2.0 - centre[0], y + height / 2.0 - centre[1]];
+            for (offset, flip) in offset.iter_mut().zip(self.flip) {
+                if flip {
+                    *offset = -*offset;
+                }
+            }
+            // Exact for quarter turns; the y axis points down.
+            let (sin, cos) = match self.rotation {
+                0.0 => (0.0, 1.0),
+                90.0 => (1.0, 0.0),
+                180.0 => (0.0, -1.0),
+                270.0 => (-1.0, 0.0),
+                angle => angle.to_radians().sin_cos(),
+            };
+            member.frame = [
+                centre[0] + offset[0] * cos - offset[1] * sin - width / 2.0,
+                centre[1] + offset[0] * sin + offset[1] * cos - height / 2.0,
+                width,
+                height,
+            ];
+        }
+        let direction = if self.flip[0] != self.flip[1] {
+            -1.0
+        } else {
+            1.0
+        };
+        member.rotation = (self.rotation + direction * member.rotation).rem_euclid(360.0);
+        member.flip = [
+            member.flip[0] != self.flip[0],
+            member.flip[1] != self.flip[1],
+        ];
+    }
 }
 
 /// The linear map from one group's coordinate system to the top-level frame.
@@ -158,7 +232,7 @@ fn header<'a>(shape: Record<'a>, budget: &mut usize) -> Result<Header<'a>, Strin
 /// Classify a group shape's own properties. Groups have no geometry or
 /// paint; only identification, editing, placement and zero relative-size
 /// properties are accepted.
-/// Returns the group's own rotation in degrees (0 or 180; see above).
+/// Returns the group's own stored rotation in degrees.
 fn group_properties(shape: Record<'_>, budget: &mut usize) -> Result<f64, String> {
     let mut rotation = 0.0;
     let mut visit = |property: properties::Property<'_>| -> Result<(), String> {
@@ -166,12 +240,10 @@ fn group_properties(shape: Record<'_>, budget: &mut usize) -> Result<f64, String
         let value = property.value;
         match id {
             0x380 | 0x381 | 0x3a9 if property.complex.is_some() => Ok(()),
-            0x4 if value == 0 => Ok(()),
-            0x4 if value == 180 << 16 => {
-                rotation = 180.0;
+            0x4 => {
+                rotation = f64::from(value as i32) / 65536.0;
                 Ok(())
             }
-            0x4 => Err(unsupported("rotated Word drawing groups are not supported")),
             0x40..=0x7f | 0x384..=0x388 | 0x38f..=0x392 | 0x3aa | 0x3bf | 0x7c4 | 0x7c5 => Ok(()),
             0x7c0..=0x7c3 if value == 0 => Ok(()),
             // Diagram properties (MS-ODRAW 2.3.17): dgmt and its siblings
@@ -194,15 +266,12 @@ fn group_properties(shape: Record<'_>, budget: &mut usize) -> Result<f64, String
     Ok(rotation)
 }
 
-/// FSP flags of a group shape: fGroup, optionally fChild when nested.
-/// Patriarch, deleted, OLE, master-linked, flipped, connector and background
-/// groups are rejected (MS-ODRAW 2.2.40).
+/// FSP flags of a group shape: fGroup, optionally fChild when nested, and
+/// its flips. Patriarch, deleted, OLE, master-linked, connector and
+/// background groups are rejected (MS-ODRAW 2.2.40).
 fn check_group_flags(flags: u32, nested: bool) -> Result<(), String> {
     if flags & 0x1 == 0 || flags & 0x2 != u32::from(nested) << 1 {
         return Err(unsupported("invalid Word drawing group shape"));
-    }
-    if flags & 0xc0 != 0 {
-        return Err(unsupported("flipped Word drawing groups are not supported"));
     }
     if flags & 0x53c != 0 {
         return Err(unsupported(
@@ -238,7 +307,7 @@ impl Store<'_> {
             // MS-ODRAW 2.3.4.44 fHidden, as for single drawings.
             return Ok(None);
         }
-        let turned = group_properties(head.record, &mut self.budget)? != 0.0;
+        let stored = group_properties(head.record, &mut self.budget)?;
         let [left, top, right, bottom] = anchor.rect.map(i64::from);
         let extent = [(right - left) * 635, (bottom - top) * 635];
         if extent.iter().any(|value| *value <= 0) {
@@ -247,8 +316,14 @@ impl Store<'_> {
         let system = head
             .group_system
             .ok_or_else(|| unsupported("Word drawing group lacks its coordinate system"))?;
-        let map = Map::new(system, [0.0, 0.0, extent[0] as f64, extent[1] as f64])?;
-        let align = direct_alignment(anchor, &head.placement)?;
+        // The SPA rectangle is the group's anchor: its rotated bounds when
+        // the group is turned towards a quarter turn (`super::oriented`).
+        let flip = [head.flags & 0x40 != 0, head.flags & 0x80 != 0];
+        let (frame, rotation) =
+            oriented([0.0, 0.0, extent[0] as f64, extent[1] as f64], stored, flip);
+        let map = Map::new(system, frame)?;
+        let turns: Vec<Turn> = Turn::new(frame, rotation, flip).into_iter().collect();
+        let align = direct_alignment(anchor, &head.placement);
         let mut context = GroupRead {
             part,
             nested_solver: head.nested_solver,
@@ -256,7 +331,7 @@ impl Store<'_> {
             group_ids: vec![head.spid],
         };
         let mut members = Vec::new();
-        self.group_members(&children[1..], map, 0, &mut members, &mut context)?;
+        self.group_members(&children[1..], map, &turns, 0, &mut members, &mut context)?;
         if context.line_connector {
             let mut ids = std::collections::BTreeSet::new();
             if context.nested_solver
@@ -286,36 +361,6 @@ impl Store<'_> {
         if members.is_empty() {
             return Ok(None);
         }
-        if turned {
-            // A half turn about the group centre maps each member's centre
-            // through the centre and adds 180 degrees; flips are unchanged.
-            for member in &mut members {
-                if matches!(member.content, Content::Picture { .. }) {
-                    return Err(unsupported(
-                        "pictures in rotated Word drawing groups are not supported",
-                    ));
-                }
-                if matches!(&member.content, Content::Shape(shape) if shape.text.is_some()) {
-                    return Err(unsupported("rotated Word drawing text is not supported"));
-                }
-                // fUseShapeAnchor 0 keeps a picture fill upright while the
-                // shape turns; the DOCX shape model has no such fill.
-                if matches!(&member.content, Content::Shape(shape) if shape.fill_picture.is_some_and(|(_, rotates)| !rotates))
-                {
-                    return Err(unsupported(
-                        "upright picture fills in rotated Word shapes are not supported",
-                    ));
-                }
-                let [x, y, width, height] = member.frame;
-                member.frame = [
-                    extent[0] as f64 - x - width,
-                    extent[1] as f64 - y - height,
-                    width,
-                    height,
-                ];
-                member.rotation = (member.rotation + 180.0).rem_euclid(360.0);
-            }
-        }
         self.finish(
             anchor,
             &head.placement,
@@ -332,6 +377,7 @@ impl Store<'_> {
         &mut self,
         children: &[Record<'_>],
         map: Map,
+        turns: &[Turn],
         depth: usize,
         members: &mut Vec<Member>,
         context: &mut GroupRead,
@@ -364,27 +410,35 @@ impl Store<'_> {
                     }
                     context.nested_solver |= head.nested_solver;
                     context.group_ids.push(head.spid);
-                    if group_properties(head.record, &mut self.budget)? != 0.0 {
-                        return Err(unsupported(
-                            "rotated nested Word drawing groups are not supported",
-                        ));
-                    }
-                    let frame = map.rect(head.child_anchor.ok_or_else(|| {
-                        unsupported("nested Word drawing group lacks its child anchor")
-                    })?)?;
+                    let stored = group_properties(head.record, &mut self.budget)?;
+                    let flip = [head.flags & 0x40 != 0, head.flags & 0x80 != 0];
+                    let (frame, rotation) = oriented(
+                        map.rect(head.child_anchor.ok_or_else(|| {
+                            unsupported("nested Word drawing group lacks its child anchor")
+                        })?)?,
+                        stored,
+                        flip,
+                    );
+                    let mut inner = turns.to_vec();
+                    inner.extend(Turn::new(frame, rotation, flip));
                     let system = head.group_system.ok_or_else(|| {
                         unsupported("Word drawing group lacks its coordinate system")
                     })?;
                     self.group_members(
                         &nested[1..],
                         Map::new(system, frame)?,
+                        &inner,
                         depth + 1,
                         members,
                         context,
                     )?;
                 }
                 0xf004 => {
-                    if let Some(member) = self.group_member(*child, map, context)? {
+                    if let Some(mut member) = self.group_member(*child, map, context)? {
+                        for turn in turns.iter().rev() {
+                            turn.apply(&mut member);
+                        }
+                        turned_content(&member.content, member.rotation);
                         members.push(member);
                     }
                 }
@@ -408,7 +462,7 @@ impl Store<'_> {
         if head.placement.hidden {
             return Ok(None);
         }
-        let mut frame = map
+        let frame = map
             .rect(head.child_anchor.ok_or_else(|| {
                 unsupported("Word drawing group member lacks its child anchor")
             })?)?;
@@ -421,11 +475,6 @@ impl Store<'_> {
             if head.flags & 0x13d != 0 || head.flags & 0x2 == 0 {
                 return Err(unsupported(
                     "Word grouped picture has unsupported shape flags",
-                ));
-            }
-            if head.picture.rotation != 0 {
-                return Err(unsupported(
-                    "rotated Word grouped pictures are not supported",
                 ));
             }
             let Some(image_index) = head.picture.pib else {
@@ -481,38 +530,12 @@ impl Store<'_> {
                 "relative sizes of Word drawing group members are not supported",
             ));
         }
-        let rotation = match &content {
-            Content::Shape(shape) => shape.rotation.rem_euclid(360.0),
-            _ => 0.0,
+        // The picture reader holds the angle in 1/60000 degree.
+        let stored = match &content {
+            Content::Shape(shape) => shape.rotation,
+            _ => head.picture.rotation as f64 / 60_000.0,
         };
-        if rotation != 0.0 {
-            if flip != [false; 2] {
-                return Err(unsupported(
-                    "rotated flipped Word drawing members are not supported",
-                ));
-            }
-            if matches!(&content, Content::Shape(shape) if shape.text.is_some()) {
-                return Err(unsupported("rotated Word drawing text is not supported"));
-            }
-            // fUseShapeAnchor 0 keeps a picture fill upright while the
-            // shape turns; the DOCX shape model has no such fill.
-            if matches!(&content, Content::Shape(shape) if shape.fill_picture.is_some_and(|(_, rotates)| !rotates))
-            {
-                return Err(unsupported(
-                    "upright picture fills in rotated Word shapes are not supported",
-                ));
-            }
-            if (45.0..135.0).contains(&rotation) || (225.0..315.0).contains(&rotation) {
-                // The child anchor holds the rotated bounds (see above).
-                let [x, y, width, height] = frame;
-                frame = [
-                    x + (width - height) / 2.0,
-                    y + (height - width) / 2.0,
-                    height,
-                    width,
-                ];
-            }
-        }
+        let (frame, rotation) = oriented(frame, stored, flip);
         Ok(Some(Member {
             content,
             frame,
@@ -539,10 +562,10 @@ mod tests {
         };
         let map = Map::new([0, 0, 1, 1], [0.0, 0.0, 1.0, 1.0]).unwrap();
         assert!(store
-            .group_members(&[], map, MAX_DEPTH, &mut vec![], &mut context)
+            .group_members(&[], map, &[], MAX_DEPTH, &mut vec![], &mut context)
             .is_ok());
         assert!(store
-            .group_members(&[], map, MAX_DEPTH + 1, &mut vec![], &mut context)
+            .group_members(&[], map, &[], MAX_DEPTH + 1, &mut vec![], &mut context)
             .unwrap_err()
             .starts_with("LEGACY_RESOURCE_LIMIT:"));
     }
@@ -568,7 +591,7 @@ mod tests {
     }
 
     #[test]
-    fn group_properties_reject_rotation_geometry_and_paint() {
+    fn group_properties_report_rotation_and_reject_geometry_and_paint() {
         let table = |properties: &[(u16, u32)]| {
             let mut body = Vec::new();
             for (key, value) in properties {
@@ -599,20 +622,22 @@ mod tests {
             group_properties(record, &mut 100)
         };
         assert!(check(&[(0x4, 0), (0x3bf, 0x220000), (0x390, 1), (0x7c4, 0)]).is_ok());
-        assert!(check(&[(0x4, 0x5a_0000)]).unwrap_err().contains("rotated"));
+        assert_eq!(check(&[(0x4, 0x5a_0000)]), Ok(90.0));
+        assert_eq!(check(&[(0x4, 0xffd3_0000)]), Ok(-45.0));
         for property in [(0x181, 0), (0x145, 0), (0x7c1, 5), (0x53f, 0x10001)] {
             assert!(check(&[property]).is_err(), "{property:x?}");
         }
     }
 
     #[test]
-    fn group_shape_flags_reject_flips_and_structural_bits() {
+    fn group_shape_flags_admit_flips_and_reject_structural_bits() {
         assert!(check_group_flags(0x201, false).is_ok());
         assert!(check_group_flags(0x203, true).is_ok());
         assert!(check_group_flags(0x203, false).is_err());
         assert!(check_group_flags(0x201, true).is_err());
         assert!(check_group_flags(0x200, false).is_err());
-        for flag in [0x4, 0x8, 0x10, 0x20, 0x40, 0x80, 0x100, 0x400] {
+        assert!(check_group_flags(0x2c1, false).is_ok());
+        for flag in [0x4, 0x8, 0x10, 0x20, 0x100, 0x400] {
             assert!(check_group_flags(0x201 | flag, false).is_err(), "{flag:#x}");
         }
     }
