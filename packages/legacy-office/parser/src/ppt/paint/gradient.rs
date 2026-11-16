@@ -121,7 +121,7 @@ impl ResolvedGradient {
         };
         // The model of `<a:path path="rect|shape"><a:fillToRect/></a:path>`
         // (`ooxml_common::fill`): a "radial" gradient without an angle.
-        let [l, t, r, b] = path.focus_insets.map(|value| f64::from(value) / 65_536.0);
+        let [l, t, r, b] = path.focus_insets.map(|value| value as f64 / 65_536.0);
         Ok(Fill::Gradient {
             stops,
             angle: 0.0,
@@ -278,12 +278,12 @@ mod tests {
         title.fill_type = Some(8);
         assert_eq!(rect(&model(&title, &none)).0, "rect");
         assert_eq!(take_best_effort(), [(BestEffort::Approximated, SITE)]);
-        // An edge outside the shape takes the default 0; an inverted
-        // rectangle collapses onto its near edge.
+        // The edges are signed fractions without a stated range: a centre
+        // rectangle may reach outside the shape.
         let mut outside = corner;
-        outside.fill_to = [Some(0xc000), Some(0x2_0000), Some(0x4000), None];
-        assert_eq!(rect(&model(&outside, &none)).1, [0.75, 0.0, 0.25, 1.0]);
-        assert_eq!(take_best_effort(), [(BestEffort::IgnoredValue, SITE)]);
+        outside.fill_to = [Some(-0x8000), Some(0x2_0000), Some(0x4000), None];
+        assert_eq!(rect(&model(&outside, &none)).1, [-0.5, 2.0, 0.75, 1.0]);
+        assert_eq!(take_best_effort(), []);
     }
 
     #[test]

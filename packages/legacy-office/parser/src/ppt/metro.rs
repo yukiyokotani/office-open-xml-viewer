@@ -928,7 +928,7 @@ struct PatternImage {
 }
 
 #[cfg(any(test, feature = "direct-ppt"))]
-fn binary_pattern_cells(bytes: &[u8]) -> Result<Option<[u8; 8]>, String> {
+pub(in crate::ppt) fn binary_pattern_cells(bytes: &[u8]) -> Result<Option<[u8; 8]>, String> {
     // Decoder admission policy, independent of the 10x10 pattern subset.
     if bytes.len() > 4096 {
         return Err(crate::rejection::resource(

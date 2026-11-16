@@ -379,8 +379,8 @@ Concentric shades (`msofillShadeCenter`, PowerPoint's "from corner" and "from
 centre" styles) become DrawingML `path="rect"` gradients on shapes and slide
 backgrounds, as PowerPoint writes them: the stops keep the linear order from
 the centre rectangle outwards, and `fillToRect` is `fillToLeft`, `fillToTop`,
-1 - `fillToRight` and 1 - `fillToBottom`. An edge outside the shape takes the
-default 0. `msofillShadeShape` becomes `path="shape"` and the host-defined
+1 - `fillToRight` and 1 - `fillToBottom`, each a signed fraction (the centre
+rectangle may reach outside the shape). `msofillShadeShape` becomes `path="shape"` and the host-defined
 `msofillShadeTitle` is drawn as the rectangle shade its properties describe;
 neither could be authored in PowerPoint, so both follow the specification
 only.
@@ -390,8 +390,11 @@ that follow PowerPoint's own output: white pixels in the fill colour and
 black pixels in the background colour, each with its own opacity, tiled from
 the top-left corner. A stored 8x8 bitmap tiles whole at 0.75 pt per pixel; of
 a stored 10x10 bitmap the 8x8 area tiles at one pixel per point. The pattern
-stays upright and unmirrored on rotated and flipped shapes. A bitmap of
-another size has no evidence and tiles like an 8x8 one. Texture fills tile
+stays upright and unmirrored on rotated and flipped shapes: for a flipped
+shape the reader writes the bitmap as seen through the reflection, because
+the presentation renderer reflects a picture fill with its shape. A bitmap it
+cannot read (neither black-and-white GIF nor PNG) is tiled reflected. A
+bitmap of another size has no evidence and tiles like an 8x8 one. Texture fills tile
 the stored picture at its own size from the top-left corner. A picture frame
 with a shade, pattern or texture fill gets that fill behind its picture.
 Pattern placements with a fill rectangle, an origin or a unit remain

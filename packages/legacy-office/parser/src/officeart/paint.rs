@@ -25,9 +25,10 @@ pub(crate) struct Paint {
     pub(crate) fill_angle: Option<u32>,
     pub(crate) fill_focus: Option<u32>,
     /// MS-ODRAW 2.3.7.16-19 fillToLeft, fillToTop, fillToRight, fillToBottom:
-    /// the centre rectangle of a concentric shade, as 16.16 fractions of the
-    /// shape's bounding rectangle measured from its origin.
-    pub(crate) fill_to: [Option<u32>; 4],
+    /// the centre rectangle of a concentric shade, as signed 16.16 fractions
+    /// ([MS-OSHARED] 2.2.1.6 FixedPoint) of the shape's bounding rectangle
+    /// measured from its origin.
+    pub(crate) fill_to: [Option<i32>; 4],
     pub(crate) fill_shade_type: Option<u32>,
     pub(crate) fill_dztype: Option<u32>,
     /// MS-ODRAW 2.3.7.12-13: signed lengths in the units named by fillDztype.
@@ -184,7 +185,7 @@ impl Paint {
             0x184 => self.fill_back_alpha = Some(value),
             0x18b => self.fill_angle = Some(value),
             0x18c => self.fill_focus = Some(value),
-            0x18d..=0x190 => self.fill_to[usize::from(id - 0x18d)] = Some(value),
+            0x18d..=0x190 => self.fill_to[usize::from(id - 0x18d)] = Some(value as i32),
             0x19c => self.fill_shade_type = Some(value),
             // Caller validates fBid on this one-based BStore reference.
             0x4186 => self.fill_blip = Some(value),
@@ -427,8 +428,8 @@ pub(crate) struct PathShade {
     /// of its bounding rectangle.
     pub follows_outline: bool,
     /// The centre rectangle as DrawingML `a:fillToRect` insets from the left,
-    /// top, right and bottom edges, in 16.16 fractions.
-    pub focus_insets: [u32; 4],
+    /// top, right and bottom edges, in signed 16.16 fractions.
+    pub focus_insets: [i64; 4],
 }
 
 // Two-colour shades are projected with these marker colours so each output
@@ -460,9 +461,9 @@ impl Paint {
     ///   its PDF export draws them so. The stops keep the linear order
     ///   (fillColor or the first shade colour at the centre rectangle,
     ///   position 0), and `a:fillToRect` is fillToLeft, fillToTop,
-    ///   1 - fillToRight and 1 - fillToBottom (a corner shade states none and
-    ///   reads `r="100000" b="100000"`; a centre shade states 0.5 four times
-    ///   and reads 50000 four times).
+    ///   1 - fillToRight and 1 - fillToBottom, each a signed fraction (a
+    ///   corner shade states none and reads `r="100000" b="100000"`; a
+    ///   centre shade states 0.5 four times and reads 50000 four times).
     ///
     /// Without Office evidence, from the specification only:
     /// - msofillShadeShape (6) differs from (5) by following the outline of
@@ -487,17 +488,10 @@ impl Paint {
             Some(4) => (false, None),
             Some(7) => (true, None),
             Some(kind @ (5 | 6 | 8)) => {
-                // A fraction outside 0..=1 places an edge of the centre
-                // rectangle outside the shape; the property then takes its
-                // default 0 (MS-ODRAW 2.3.7.16-19).
-                let edge = |index: usize| match self.fill_to[index] {
-                    Some(value) if value > 65_536 => crate::rejection::spec_default(PATH_SITE, 0),
-                    value => value.unwrap_or(0),
-                };
-                let [left, top, right, bottom] = std::array::from_fn(edge);
-                // An inverted rectangle has no DrawingML form: its far edge
-                // collapses onto the near one.
-                let (right, bottom) = (right.max(left), bottom.max(top));
+                // FixedPoint is signed and the properties state no range: an
+                // edge may lie outside the shape, as a DrawingML inset may.
+                let [left, top, right, bottom] =
+                    self.fill_to.map(|value| i64::from(value.unwrap_or(0)));
                 (
                     false,
                     Some(PathShade {

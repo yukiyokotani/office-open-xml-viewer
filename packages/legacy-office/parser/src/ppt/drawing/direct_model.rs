@@ -367,7 +367,7 @@ impl Context<'_> {
                 let image = if let Some((id, alpha)) = background.paint.texture_image() {
                     self.texture_fill(id, alpha, true)?
                 } else if let Some(pattern) = background.paint.pattern_image() {
-                    Some(self.pattern_fill(pattern)?)
+                    Some(self.pattern_fill(pattern, None)?)
                 } else {
                     background
                         .paint
@@ -595,7 +595,7 @@ impl Context<'_> {
                 let fill = if undecoded {
                     None
                 } else if paint.frame_filled() && paint.fill_type.unwrap_or(0) != 0 {
-                    self.picture_frame_fill(&paint, &gradient)?
+                    self.picture_frame_fill(&paint, &gradient, &transform)?
                 } else {
                     match paint.picture_backing()? {
                         Some((color, alpha)) => {
@@ -772,8 +772,9 @@ impl Context<'_> {
             // save of a 180-degree rotated pattern freeform writes the same
             // tile as for unrotated ones (algn tl, tx/ty 0, rotWithShape 0),
             // and its PDFs of a 30-degree rotated and of a flipped pattern
-            // shape print the pattern cells upright and unmirrored.
-            (true, Some(pattern)) => Some(self.pattern_fill(pattern)?),
+            // shape print the pattern cells upright and unmirrored
+            // (`pattern_fill` writes the bitmap a flipped shape needs).
+            (true, Some(pattern)) => Some(self.pattern_fill(pattern, Some(&transform))?),
             _ => None,
         };
         if allow_fill && image.is_none() && pattern.is_none() {
@@ -849,8 +850,26 @@ impl Context<'_> {
             scene3d: None,
             sp3d: None,
         };
+        // The picture of a binary picture, pattern or texture fill, for
+        // comparison with the alternative's. One that is too long to equal
+        // an alternative's, or past the session's comparison allowance, is
+        // not compared: the shape keeps its binary projection.
+        let image_filled = matches!(element.fill, Some(Fill::Image { .. }));
+        let comparison_image = if metro_blob.is_some() && !binary_edited && image_filled {
+            let id = paint
+                .foreground_image()
+                .map(|(id, ..)| id)
+                .or_else(|| paint.pattern_image().map(|(id, ..)| id))
+                .or_else(|| paint.texture_image().map(|(id, ..)| id));
+            id.map(|id| self.media.comparison_copy(id, self.backing, self.pictures))
+                .transpose()?
+                .flatten()
+        } else {
+            None
+        };
+        let uncompared = image_filled && comparison_image.is_none();
         let adopted = match (&metro_blob, &metro_theme) {
-            (Some(span), theme) if !binary_edited => {
+            (Some(span), theme) if !binary_edited && !uncompared => {
                 let missing_theme = crate::ppt::metro::Theme::Unreadable;
                 let theme = theme.as_deref().unwrap_or(&missing_theme);
                 let recorded_fill = if !fill_area {
@@ -884,19 +903,7 @@ impl Context<'_> {
                     fill: recorded_fill,
                     path_paint: authored_paths.take(),
                     adjust_bounds,
-                    image_bytes: if matches!(element.fill, Some(Fill::Image { .. })) {
-                        let id = paint
-                            .foreground_image()
-                            .map(|(id, ..)| id)
-                            .or_else(|| paint.pattern_image().map(|(id, ..)| id))
-                            .or_else(|| paint.texture_image().map(|(id, ..)| id));
-                        id.map(|id| self.media.image(id, self.backing, self.pictures))
-                            .transpose()?
-                            .flatten()
-                            .map(|(_, bytes)| bytes.to_vec())
-                    } else {
-                        None
-                    },
+                    image_bytes: comparison_image,
                 };
                 crate::ppt::metro::adopt(
                     &binary,
@@ -1165,7 +1172,11 @@ impl Context<'_> {
     ///
     /// A bitmap of another size has no evidence: all of it is tiled like an
     /// 8x8 one.
-    fn pattern_fill(&mut self, pattern: (u32, u32, u32, u32, u32)) -> Result<Fill, String> {
+    fn pattern_fill(
+        &mut self,
+        pattern: (u32, u32, u32, u32, u32),
+        frame: Option<&pptx_model::Transform>,
+    ) -> Result<Fill, String> {
         let (id, fore, fore_alpha, back, back_alpha) = pattern;
         if !self
             .media
@@ -1204,6 +1215,54 @@ impl Context<'_> {
                 (96, None),
             ),
         };
+        // The presentation renderer reflects a picture fill with its shape.
+        // PowerPoint does not reflect a pattern (see the caller), so a
+        // flipped shape tiles the bitmap as seen through its own reflections,
+        // from the corner that is drawn at the top left: the tile grid is
+        // offset by the shape's extent modulo the 8-pixel tile.
+        let (flip_h, flip_v) = frame.map_or((false, false), |frame| (frame.flip_h, frame.flip_v));
+        let mut reflected = None;
+        if flip_h || flip_v {
+            *self.work_budget = self.work_budget.checked_sub(64).ok_or_else(|| {
+                crate::rejection::resource("PowerPoint pattern work budget exceeded")
+            })?;
+            reflected = self.media.reflected_pattern(
+                id,
+                flip_h,
+                flip_v,
+                |extension, bytes| {
+                    Ok(crate::ppt::pattern::cells(extension, bytes)?.map(|cells| {
+                        crate::ppt::pattern::png(crate::ppt::pattern::mirrored(
+                            cells, flip_h, flip_v,
+                        ))
+                    }))
+                },
+                self.backing,
+                self.pictures,
+            )?;
+            if reflected.is_none() {
+                // Not a bitmap this reader can rewrite: it tiles reflected.
+                crate::rejection::approximated(
+                    "PowerPoint pattern fill on a flipped shape is not projected",
+                    (),
+                );
+            }
+        }
+        let (id, extension, src_rect) = match reflected {
+            Some(id) => (id, "png", None),
+            None => (id, extension, src_rect),
+        };
+        let tile_emu = 8 * 914_400 / i64::from(dpi);
+        let offset = |flipped: bool, extent: i64| {
+            if flipped && reflected.is_some() {
+                extent.rem_euclid(tile_emu)
+            } else {
+                0
+            }
+        };
+        let (tx, ty) = frame.map_or((0, 0), |frame| {
+            (offset(flip_h, frame.cx), offset(flip_v, frame.cy))
+        });
         let scheme = self.presentation.schemes[self.index].as_ref();
         let color = |value, alpha| {
             paint::model_color(value, alpha, scheme)
@@ -1219,8 +1278,8 @@ impl Context<'_> {
             fill_rect: None,
             stretch: false,
             tile: Some(ooxml_common::fill::TileInfo {
-                tx: Some(0),
-                ty: Some(0),
+                tx: Some(tx),
+                ty: Some(ty),
                 sx: Some(1.0),
                 sy: Some(1.0),
                 flip: Some("none".to_owned()),
@@ -1278,6 +1337,7 @@ impl Context<'_> {
         &mut self,
         paint: &paint::Paint,
         gradient: &crate::officeart::gradient::Borrowed<'_>,
+        frame: &pptx_model::Transform,
     ) -> Result<Option<Fill>, String> {
         const SITE: &str = "PowerPoint picture frame non-solid fill";
         let scheme = self.presentation.schemes[self.index].as_ref();
@@ -1286,7 +1346,7 @@ impl Context<'_> {
         {
             Some(shade.into_model(self.model_budget)?)
         } else if let Some(pattern) = paint.pattern_image() {
-            Some(self.pattern_fill(pattern)?)
+            Some(self.pattern_fill(pattern, Some(frame))?)
         } else if let Some((id, alpha)) = paint.texture_image() {
             self.texture_fill(id, alpha, paint.rotate_fill_with_shape.unwrap_or(false))?
         } else if let Some((id, alpha, rotate)) = paint.foreground_image() {
@@ -1346,6 +1406,7 @@ impl Context<'_> {
         let mut ruler_seen = false;
         let mut pending_action = None;
         let mut text_links = Vec::new();
+        let mut range_end = 0usize;
         for atom in parse_record_spans(self.backing, textbox.payload_span(), self.work_budget)? {
             let view = atom.view(self.backing)?;
             match view.kind {
@@ -1396,9 +1457,12 @@ impl Context<'_> {
                         (3, false) => jump_action(jump).map(TextLink::Jump),
                         _ => None,
                     };
+                    let begin = u32_at(view.payload, 0)? as usize;
+                    let end = u32_at(view.payload, 4)? as usize;
+                    // Checked against the text once it is known, for every
+                    // action: [MS-PPT] 2.9.59 requires a range valid for it.
+                    range_end = range_end.max(end);
                     if let Some(target) = link {
-                        let begin = u32_at(view.payload, 0)? as usize;
-                        let end = u32_at(view.payload, 4)? as usize;
                         if begin >= end {
                             return Err(unsupported("invalid PowerPoint text link range"));
                         }
@@ -1475,6 +1539,11 @@ impl Context<'_> {
         }
         if blocks.len() != 1 {
             return Err(unsupported("ambiguous PowerPoint styled text body"));
+        }
+        if range_end > 0 && range_end > blocks[0].encode_utf16().count() {
+            return Err(crate::rejection::corrupt(
+                "PowerPoint text link range exceeds its text",
+            ));
         }
         let master_link = shape.master();
         let linked = master_link
@@ -2000,6 +2069,7 @@ mod tests {
         action: u8,
         jump: u8,
         range_instance: u16,
+        end: u8,
     ) -> Result<Slide, String> {
         use std::io::Write;
         let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
@@ -2028,7 +2098,7 @@ mod tests {
                 record(0, 3999, &4u32.to_le_bytes()),
                 record(0, TEXT_CHARS_ATOM, &[b'a', 0, b'b', 0, b'c', 0]),
                 record((instance << 4) | 15, 0x0ff2, &record(0, 0x0ff3, &info)),
-                record(range_instance << 4, 0x0fdf, &[0, 0, 0, 0, 2, 0, 0, 0]),
+                record(range_instance << 4, 0x0fdf, &[0, 0, 0, 0, end, 0, 0, 0]),
                 // An origin ruler: left margin and indent 0 at level 0.
                 record(
                     0,
@@ -2119,15 +2189,15 @@ mod tests {
         // [MS-PPT] 2.6.9: action 4 is a hyperlink, 3 a jump; instance 1 of
         // the container and of its range is the mouse-over interaction.
         assert_eq!(
-            links(interactive_text(0, 4, 0, 0).unwrap()),
+            links(interactive_text(0, 4, 0, 0, 2).unwrap()),
             [[url.clone(), None, None], [None, None, None]]
         );
         assert_eq!(
-            links(interactive_text(1, 4, 0, 1).unwrap()),
+            links(interactive_text(1, 4, 0, 1, 2).unwrap()),
             [[None, None, url], [None, None, None]]
         );
         assert_eq!(
-            links(interactive_text(0, 3, 1, 0).unwrap()),
+            links(interactive_text(0, 3, 1, 0, 2).unwrap()),
             [
                 [
                     None,
@@ -2140,13 +2210,20 @@ mod tests {
         // Actions without a DrawingML run property state nothing.
         for (instance, action, jump) in [(1, 3, 1), (0, 3, 0), (0, 2, 0)] {
             assert_eq!(
-                links(interactive_text(instance, action, jump, instance).unwrap()),
+                links(interactive_text(instance, action, jump, instance, 2).unwrap()),
                 [[None, None, None]]
             );
         }
+        // [MS-PPT] 2.9.59: a range past the three characters is not valid
+        // for the text, whatever the action does.
+        for action in [4, 2] {
+            let error = interactive_text(0, action, 0, 0, 4).unwrap_err();
+            assert!(error.contains("exceeds its text"), "{error}");
+        }
+        assert!(interactive_text(0, 4, 0, 0, 3).is_ok());
         // A range of the other interaction, or an unknown one, is malformed.
         for (instance, range) in [(0, 1), (1, 0), (2, 2)] {
-            assert!(interactive_text(instance, 4, 0, range).is_err());
+            assert!(interactive_text(instance, 4, 0, range, 2).is_err());
         }
     }
 
@@ -3039,15 +3116,14 @@ mod tests {
             (duotone.clr1.as_str(), duotone.clr2.as_str()),
             ("0B0B0D", "217EA8")
         );
-        // An 8x8 bitmap tiles whole at 96 DPI, also on a flipped shape; each
-        // opacity applies to its own colour. Another size has no evidence
-        // and tiles like it.
+        // An 8x8 bitmap tiles whole at 96 DPI; each opacity applies to its
+        // own colour. Another size has no evidence and tiles like it.
         let translucent = [pattern.to_vec(), vec![(0x182, 0x8000), (0x184, 0x4000)]].concat();
         for (values, blip, flags, colors, note) in [
             (
                 pattern.to_vec(),
                 gif_blip(8, 8),
-                0x240,
+                0x200,
                 ("0B0B0D", "217EA8"),
                 false,
             ),
@@ -3095,6 +3171,64 @@ mod tests {
                 }
             );
         }
+        // A flipped shape tiles the bitmap as seen through its reflection,
+        // offset so that a tile starts at the edge drawn on the left: the
+        // renderer reflects the fill with the shape, PowerPoint does not.
+        let cells = [0xcc, 0x66, 0x33, 0x99, 0xcc, 0x66, 0x33, 0x99];
+        let stored = record(
+            0x6e00,
+            0xf01e,
+            &[vec![0; 17], crate::ppt::pattern::png(cells)].concat(),
+        );
+        for (flags, offset) in [
+            (0x240, (6350, 0)),
+            (0x280, (0, 6350)),
+            (0x2c0, (6350, 6350)),
+        ] {
+            take_best_effort();
+            let model =
+                project(1, flags, vec![properties(&pattern)], stored.clone(), None).unwrap();
+            let SlideElement::Shape(shape) = &model.elements[0] else {
+                panic!("shape")
+            };
+            let Some(Fill::Image {
+                image_path,
+                mime_type,
+                dpi: Some(96),
+                src_rect: None,
+                tile: Some(tile),
+                duotone: Some(_),
+                ..
+            }) = &shape.fill
+            else {
+                panic!("pattern fill: {:?}", shape.fill)
+            };
+            // The written bitmap is the session's first image after the
+            // stored one. The shape is 158750 EMU wide and high; a tile is
+            // 8 pixels at 96 DPI, 76200 EMU.
+            assert_eq!(
+                (image_path.as_str(), mime_type.as_str()),
+                ("legacy-ppt/image/2", "image/png")
+            );
+            assert_eq!((tile.tx, tile.ty), (Some(offset.0), Some(offset.1)));
+            assert_eq!(take_best_effort(), []);
+        }
+        // A bitmap this reader cannot rewrite tiles reflected.
+        let model = project(1, 0x240, vec![properties(&pattern)], gif_blip(8, 8), None).unwrap();
+        assert!(matches!(
+            &model.elements[0],
+            SlideElement::Shape(shape) if matches!(
+                &shape.fill,
+                Some(Fill::Image { image_path, .. }) if image_path == "legacy-ppt/image/1"
+            )
+        ));
+        assert_eq!(
+            take_best_effort(),
+            [(
+                BestEffort::Approximated,
+                "PowerPoint pattern fill on a flipped shape is not projected"
+            )]
+        );
         // A rotated pattern shape keeps the unrotated tile (rotWithShape 0).
         let rotated = [pattern.to_vec(), vec![(0x0004, 180 << 16)]].concat();
         let model = project(1, 0x200, vec![properties(&rotated)], gif_blip(10, 10), None).unwrap();

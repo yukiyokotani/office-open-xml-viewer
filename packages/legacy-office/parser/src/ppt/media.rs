@@ -7,6 +7,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 // Resource policy: do not pass dimension bombs to the ordinary image decoder.
 const MAX_MEDIA_BYTES: usize = 128 * 1024 * 1024;
+/// The largest part of an alternative shape XML package (`ppt::metro`).
+const MAX_COMPARED_IMAGE_BYTES: usize = 1024 * 1024;
+/// Session allowance for image bytes copied for comparison with alternative
+/// shape XML. Once it is spent, later shapes keep their binary projection.
+const MAX_COMPARISON_COPY_BYTES: usize = 256 * 1024 * 1024;
 
 pub(super) fn catalog_spans(
     document: &[u8],
@@ -316,6 +321,10 @@ pub(super) struct SpanStore {
     blob_images: BTreeMap<u32, (&'static str, Vec<u8>)>,
     used: BTreeSet<u32>,
     remaining: usize,
+    comparison_remaining: usize,
+    /// Pattern bitmaps written for flipped shapes, by their stored bitmap
+    /// and the two reflections (`ppt::pattern`).
+    reflected_patterns: BTreeMap<(u32, bool, bool), u32>,
 }
 
 impl SpanStore {
@@ -326,6 +335,8 @@ impl SpanStore {
             blob_images: BTreeMap::new(),
             used: BTreeSet::new(),
             remaining: MAX_MEDIA_BYTES,
+            comparison_remaining: MAX_COMPARISON_COPY_BYTES,
+            reflected_patterns: BTreeMap::new(),
         }
     }
 
@@ -367,6 +378,59 @@ impl SpanStore {
             .map_err(|_| unsupported("PowerPoint image index overflow"))?;
         self.blob_images.insert(index, (extension, bytes));
         Ok(index)
+    }
+
+    /// The retained bitmap of the stored pattern `index` seen through the
+    /// given reflections, written once per session by `write` and then
+    /// reused. `None`: `write` could not read the stored bitmap.
+    pub fn reflected_pattern(
+        &mut self,
+        index: u32,
+        flip_h: bool,
+        flip_v: bool,
+        write: impl FnOnce(&'static str, &[u8]) -> Result<Option<Vec<u8>>, String>,
+        primary: &[u8],
+        pictures: Option<&[u8]>,
+    ) -> Result<Option<u32>, String> {
+        let key = (index, flip_h, flip_v);
+        if let Some(reflected) = self.reflected_patterns.get(&key) {
+            return Ok(Some(*reflected));
+        }
+        let Some((extension, bytes)) = self.image(index, primary, pictures)? else {
+            return Ok(None);
+        };
+        let Some(written) = write(extension, bytes)? else {
+            return Ok(None);
+        };
+        let reflected = self.admit_blob_image("png", written)?;
+        self.reflected_patterns.insert(key, reflected);
+        Ok(Some(reflected))
+    }
+
+    /// A copy of an admitted image for comparison with the image part of an
+    /// alternative shape XML package, which is at most
+    /// [`MAX_COMPARED_IMAGE_BYTES`] long: a longer image cannot equal one and
+    /// is not copied. The copies of a session are charged to their own
+    /// allowance. `None`: not copied; the caller keeps the binary shape.
+    pub fn comparison_copy(
+        &mut self,
+        index: u32,
+        primary: &[u8],
+        pictures: Option<&[u8]>,
+    ) -> Result<Option<Vec<u8>>, String> {
+        let Some((_, bytes)) = self.image(index, primary, pictures)? else {
+            return Ok(None);
+        };
+        if bytes.len() > MAX_COMPARED_IMAGE_BYTES || bytes.len() > self.comparison_remaining {
+            return Ok(None);
+        }
+        let mut copy = Vec::new();
+        if copy.try_reserve_exact(bytes.len()).is_err() {
+            return Ok(None);
+        }
+        copy.extend_from_slice(bytes);
+        self.comparison_remaining -= copy.len();
+        Ok(Some(copy))
     }
 
     pub fn reference(
@@ -671,6 +735,71 @@ mod tests {
         header[25] = 1;
         assert!(png_size(&header).is_err());
         assert!(png_size(&header[..32]).is_err());
+    }
+
+    #[test]
+    fn comparison_copies_are_bounded_by_size_and_by_a_session_allowance() {
+        let entry = blip(&png(1, 1), false);
+        let mut store = SpanStore::new(vec![spanned(&entry, 0)]);
+        assert!(store.reference(1, &entry, None, &mut 100).unwrap());
+        let stored = store.image(1, &entry, None).unwrap().unwrap().1.to_vec();
+        assert_eq!(
+            store.comparison_copy(1, &entry, None).unwrap(),
+            Some(stored.clone())
+        );
+        assert_eq!(
+            store.comparison_remaining,
+            MAX_COMPARISON_COPY_BYTES - stored.len()
+        );
+        // Past the allowance the image is not copied and nothing is charged.
+        store.comparison_remaining = stored.len() - 1;
+        assert_eq!(store.comparison_copy(1, &entry, None).unwrap(), None);
+        assert_eq!(store.comparison_remaining, stored.len() - 1);
+        // An image longer than any alternative part is never copied.
+        store.comparison_remaining = MAX_COMPARISON_COPY_BYTES;
+        let long = store
+            .admit_blob_image("png", vec![0; MAX_COMPARED_IMAGE_BYTES + 1])
+            .unwrap();
+        assert_eq!(store.comparison_copy(long, &entry, None).unwrap(), None);
+        assert_eq!(store.comparison_remaining, MAX_COMPARISON_COPY_BYTES);
+    }
+
+    #[test]
+    fn reflected_patterns_are_written_once_per_bitmap_and_reflection() {
+        let entry = blip(&png(1, 1), false);
+        let mut store = SpanStore::new(vec![spanned(&entry, 0)]);
+        assert!(store.reference(1, &entry, None, &mut 100).unwrap());
+        let mut writes = 0;
+        let mut reflected = |store: &mut SpanStore, flip_h, flip_v, readable: bool| {
+            store
+                .reflected_pattern(
+                    1,
+                    flip_h,
+                    flip_v,
+                    |extension, _| {
+                        writes += 1;
+                        assert_eq!(extension, "png");
+                        Ok(readable.then(|| vec![u8::from(flip_h), u8::from(flip_v)]))
+                    },
+                    &entry,
+                    None,
+                )
+                .unwrap()
+        };
+        assert_eq!(reflected(&mut store, true, false, false), None);
+        let first = reflected(&mut store, true, false, true).unwrap();
+        assert_eq!(reflected(&mut store, true, false, true), Some(first));
+        let second = reflected(&mut store, true, true, true).unwrap();
+        assert_ne!(first, second);
+        assert_eq!(writes, 3);
+        assert_eq!(
+            store.image(first, &entry, None).unwrap(),
+            Some(("png", [1u8, 0].as_slice()))
+        );
+        assert_eq!(
+            store.image(second, &entry, None).unwrap(),
+            Some(("png", [1u8, 1].as_slice()))
+        );
     }
 
     #[test]
