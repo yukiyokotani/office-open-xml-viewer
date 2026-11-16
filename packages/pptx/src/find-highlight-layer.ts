@@ -15,6 +15,7 @@
  * them along the glyphs. The active match uses a distinct emphasis colour.
  */
 import {
+  ACTIVE_TEXT_HIGHLIGHT_RING,
   sliceHorizontalExtent,
   overlayPercent,
   type FindHighlightColors,
@@ -27,6 +28,10 @@ import { createPptxRunFrame } from './run-frame-dom.js';
 export interface PptxHighlightMatch {
   slices: MatchRunSlice[];
   active: boolean;
+  /** Set for a text highlight (`highlightText`): the group's CSS background,
+   *  used instead of the find colours. Its active match keeps this background
+   *  and gains a ring. Absent for a find match. */
+  color?: string;
 }
 
 /** Browser find-bar palette (translucent so glyphs stay legible). */
@@ -89,7 +94,8 @@ export function buildPptxHighlightLayer(
   };
 
   for (const match of matches) {
-    const fill = match.active ? activeColor : matchColor;
+    const fill = match.color ?? (match.active ? activeColor : matchColor);
+    const ring = match.color !== undefined && match.active ? ACTIVE_TEXT_HIGHLIGHT_RING : '';
     for (const slice of match.slices) {
       const run = runs[slice.runIndex];
       if (!run) continue;
@@ -104,7 +110,7 @@ export function buildPptxHighlightLayer(
         `position:absolute;` +
         `left:${overlayPercent(run.inShapeX + x, shape.w)};top:${overlayPercent(run.inShapeY, shape.h)};` +
         `width:${overlayPercent(width, shape.w)};height:${overlayPercent(run.h, shape.h)};` +
-        `background:${fill};pointer-events:none;`;
+        `background:${fill};pointer-events:none;${ring}`;
       shape.div.appendChild(box);
     }
   }

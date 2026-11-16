@@ -108,6 +108,23 @@ describe('buildPptxHighlightLayer', () => {
     expect(shapeDiv.children[0].style.background).toBe(DEFAULT_FIND_ACTIVE_HIGHLIGHT);
   });
 
+  it("paints a text highlight in its group's background and rings the active one", () => {
+    vi.stubGlobal('document', { createElement: (t: string) => makeEl(t) });
+    const layer = makeEl('div');
+    const runs = [run({ text: 'abc def ghi' })];
+    const matches: PptxHighlightMatch[] = [
+      { slices: [{ runIndex: 0, start: 0, end: 3 }], active: false, color: 'rgba(255, 0, 0, 0.4)' },
+      { slices: [{ runIndex: 0, start: 4, end: 7 }], active: true, color: 'rgba(255, 0, 0, 0.4)' },
+      { slices: [{ runIndex: 0, start: 8, end: 11 }], active: true },
+    ];
+    buildPptxHighlightLayer(layer as unknown as HTMLDivElement, runs, matches, 100, 100, measureForFont);
+    const boxes = layer.children[0].children;
+    expect(boxes.map((box) => box.style.background))
+      .toEqual(['rgba(255, 0, 0, 0.4)', 'rgba(255, 0, 0, 0.4)', DEFAULT_FIND_ACTIVE_HIGHLIGHT]);
+    expect(boxes.map((box) => box.style.outline))
+      .toEqual([undefined, '2px solid #111', undefined]);
+  });
+
   it('composes frame flips with shape and text-body rotation', () => {
     vi.stubGlobal('document', { createElement: (t: string) => makeEl(t) });
     const layer = makeEl('div');
