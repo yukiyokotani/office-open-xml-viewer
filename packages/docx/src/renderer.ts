@@ -5,7 +5,7 @@ import type { ChartThreeDRenderer, ChartRegionMapRenderer, ChartExRenderer, Imag
 export type { DocxTextRunInfo } from './types';
 import { bodyMathOccurrences } from './layout/resources.js';
 import { paintResourceRegistryOf, privateResourceLookupOf } from './layout/runtime-state.js';
-import { errorPageLayoutReady, selectDocumentLayoutPage, withErrorPlaceholderPage } from './layout/document-layout-variants.js';
+import { selectDocumentLayoutPage, withErrorPlaceholderPage } from './layout/document-layout-variants.js';
 import type { WireErrorPlaceholder } from './layout/error-page.js';
 import { rasterPaintOccurrencesForPage } from './layout/text-index.js';
 import { textRunsForPage } from './text-run-projection.js';
@@ -160,17 +160,16 @@ function normalizeRenderOptions(
   };
 }
 
-/** Internal production entry: paint from the same sealed source used by layout. */
+/** Internal production entry: paint from the same sealed source used by layout.
+ * A source that failed to parse comes with its error page's code loaded
+ * (`errorPageLayoutReady`, #2248): whatever produced it asynchronously awaited
+ * that, so this adapter stays free of waits ahead of the paint's render token. */
 export async function renderLayoutSourceToCanvas(
   source: LayoutSourceStore,
   canvas: HTMLCanvasElement | OffscreenCanvas,
   pageIndex: number,
   opts: RenderDocumentOptions & { readonly callerOwnedCanvasTarget?: boolean } = {},
 ): Promise<void> {
-  // A direct caller's fatally unparseable source loads its error page here
-  // (#2248); a document or session has loaded it with the source.
-  const errorPage = errorPageLayoutReady(source);
-  if (errorPage) await errorPage;
   const normalized = normalizeRenderOptions(source, canvas, pageIndex, opts);
   return renderSelectedDocumentPage(
     normalized.selection.layout,

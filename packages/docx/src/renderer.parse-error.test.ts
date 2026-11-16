@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { beforeAll, describe, it, expect, vi } from 'vitest';
 import { createLayoutServices } from './layout-runtime.js';
 import { renderDocumentToCanvas, renderLayoutSourceToCanvas } from './renderer.js';
 import { layoutSourceStore } from './layout-source-model-adapter.js';
@@ -97,6 +97,13 @@ function degradedDoc(parseError: string): DocxDocumentModel {
     parseError,
   };
 }
+
+// Whatever hands out a document that failed to parse loads the error page's
+// code first (#2248); these tests build such documents by hand. The cold
+// paths have their own suite at the end.
+beforeAll(async () => {
+  await errorPageLayoutReady(layoutSourceStore(degradedDoc('word/document.xml: bad')));
+});
 
 describe('RB7 renderDocumentToCanvas placeholder', () => {
   it('paints a placeholder carrying the parseError message for a degraded document', async () => {
@@ -266,7 +273,7 @@ describe('on-demand DOCX error page', () => {
     await renderer.renderLayoutSourceToCanvas(source, stubCanvas(ctx), 0, { width: 816, dpr: 1 });
     // Still not loaded: laying out a failed document now is refused.
     const failed = storeOf(degradedDoc(MESSAGE));
-    expect(() => ensure(servicesOf(failed), 0, () => failed)).toThrow(/error page layout was not loaded/);
+    expect(() => ensure(servicesOf(failed), 0, () => failed)).toThrow(/error page layout is not loaded/);
   });
 
   it('loads with the first failed document and is then synchronous', async () => {
@@ -281,11 +288,12 @@ describe('on-demand DOCX error page', () => {
     expect(variants.selectDocumentLayoutPage(services, { defaultCurrentDateMs: 0 }, 0).layout.pages).toHaveLength(1);
   });
 
-  it('a direct render of a failed source loads it first', async () => {
+  it('refuses to render a failed source whose page was never loaded', async () => {
     const { storeOf, renderer } = await coldModules();
     const { ctx, calls } = recordingCtx(true);
-    await renderer.renderLayoutSourceToCanvas(storeOf(degradedDoc(MESSAGE)), stubCanvas(ctx), 0, { width: 816, dpr: 1 });
-    const texts = calls.filter((c) => c.op === 'fillText').map((c) => String(c.args[0]));
-    expect(texts.some((t) => t.includes('could not be displayed'))).toBe(true);
+    await expect(renderer.renderLayoutSourceToCanvas(
+      storeOf(degradedDoc(MESSAGE)), stubCanvas(ctx), 0, { width: 816, dpr: 1 },
+    )).rejects.toThrow(/error page layout is not loaded/);
+    expect(calls.filter((c) => c.op === 'fillText')).toEqual([]);
   });
 });

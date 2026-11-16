@@ -2477,30 +2477,9 @@ function exactArgumentTexts(call, expected, source) {
     && call.arguments.every((argument, index) => argument.getText(source) === expected[index]);
 }
 
-/** The one statement pair that may precede the source adapter's body: the
- * wait for the on-demand error page of a fatally unparseable source (#2248).
- * It is conditional, so a source that parsed takes no extra await. */
-function isErrorPageReadinessGate(first, second, source) {
-  if (!ts.isVariableStatement(first)
-    || first.declarationList.declarations.length !== 1) return false;
-  const ready = first.declarationList.declarations[0];
-  if (!ts.isIdentifier(ready.name) || ready.name.text !== 'errorPage') return false;
-  if (!exactArgumentTexts(callOf(ready.initializer, 'errorPageLayoutReady'), ['source'], source)) return false;
-  return ts.isIfStatement(second)
-    && !second.elseStatement
-    && second.expression.getText(source) === 'errorPage'
-    && ts.isExpressionStatement(second.thenStatement)
-    && second.thenStatement.expression.getText(source) === 'await errorPage';
-}
-
 function sourceRendererBodyIsCanonical(declaration, source) {
-  if (!declaration?.body) return false;
-  const all = declaration.body.statements;
-  const statements = all.length === 4 && isErrorPageReadinessGate(all[0], all[1], source)
-    ? all.slice(2)
-    : all;
-  if (statements.length !== 2) return false;
-  const [first, second] = statements;
+  if (!declaration?.body || declaration.body.statements.length !== 2) return false;
+  const [first, second] = declaration.body.statements;
   if (!ts.isVariableStatement(first)
     || first.declarationList.declarations.length !== 1) return false;
   const retained = first.declarationList.declarations[0];

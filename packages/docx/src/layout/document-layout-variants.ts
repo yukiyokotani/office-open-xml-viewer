@@ -38,9 +38,10 @@ const errorPage = /* @__PURE__ */ onDemandModule(async () => {
  * Layout is synchronous: the error page's code has to be here before a
  * fatally unparseable source gets its layout variants. Whatever hands out such
  * a source asynchronously awaits this first: the pull materializers
- * (`document-pull-client.ts`), the render worker, the model-source loaders and
- * a direct `renderLayoutSourceToCanvas()`. `undefined` when there is nothing
- * to wait for, which is always the case for a source that parsed. With a
+ * (`document-pull-client.ts`), the render worker and the model-source loaders.
+ * The renderer does not: a wait there would precede the paint's render token.
+ * `undefined` when there is nothing to wait for, which is always the case for
+ * a source that parsed. With a
  * `signal` the wait rejects with an `AbortError` as soon as it aborts: once
  * the document has been pulled, ending its worker no longer settles anything.
  */
@@ -64,7 +65,7 @@ export function errorPageLayoutReady(
 
 function loadedErrorPage() {
   const loaded = errorPage.loaded;
-  if (!loaded) throw new Error('DOCX error page layout was not loaded before its document was laid out');
+  if (!loaded) throw new Error('DOCX error page layout is not loaded: await errorPageLayoutReady(source) before laying out a source that failed to parse');
   return loaded;
 }
 
