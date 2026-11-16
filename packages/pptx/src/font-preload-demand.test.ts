@@ -55,11 +55,8 @@ describe('complete conservative PPTX paint demand', () => {
       { parseError: 'broken' },
       { elements: [{ type: 'unknown' }] },
       { elements: [{ type: 'chart', chart: { chartType: 'regionMap', series: [] } }] },
-      { elements: [picture('ppt/media/image1.emf', 'image/emf')] },
-      { elements: [picture('ppt/media/image1.wmf', 'application/octet-stream')] },
       { elements: [picture('ppt/media/image1.pict', 'image/x-pict')] },
-      { elements: [picture('ppt/media/image1.png', 'image/png')], background: { fillType: 'image', imagePath: 'ppt/media/bg.emf', mimeType: 'image/emf' } },
-      { elements: [{ type: 'media', posterPath: 'ppt/media/poster.wmf', posterMimeType: 'image/wmf', mediaPath: 'ppt/media/m.mp4', mimeType: 'video/mp4' }] },
+      { elements: [picture('ppt/media/image1.bin', 'application/octet-stream')] },
     ]) {
       expect(collectSlideFontDemand({ ...slide('A'), ...patch } as Slide, new Set(), 10000), JSON.stringify(patch)).toBe('all');
     }
@@ -67,16 +64,16 @@ describe('complete conservative PPTX paint demand', () => {
     const unknownVert = slide('A');
     body(unknownVert).vert = 'diagonal';
     expect(collectSlideFontDemand(unknownVert, new Set(), 10000)).toBe('all');
+  });
+
+  it('demands what a failed equation paints: its MCE preview, stored fallback text or placeholder', () => {
+    const body = (value: Slide) => (value.elements[0] as unknown as { textBody: Record<string, unknown> & { paragraphs: Array<Record<string, unknown>> } }).textBody;
     const equation = slide('A');
-    body(equation).paragraphs[0].runs = [{ type: 'math', nodes: [], display: false }];
-    expect(collectSlideFontDemand(equation, new Set(), 10000)).toBe('all');
-    // A picture fill or picture marker that is a metafile plays its own text records.
-    const filled = slide('A');
-    (filled.elements[0] as unknown as Record<string, unknown>).fill = { fillType: 'image', imagePath: 'ppt/media/image2.emf', mimeType: 'image/emf' };
-    expect(collectSlideFontDemand(filled, new Set(), 10000)).toBe('all');
-    const marker = slide('A');
-    body(marker).paragraphs[0].bullet = { type: 'blip', imagePath: 'ppt/media/image3.wmf', mimeType: 'image/wmf' };
-    expect(collectSlideFontDemand(marker, new Set(), 10000)).toBe('all');
+    body(equation).paragraphs[0].runs = [{ type: 'math', nodes: [], display: false, fallbackText: 'πr²' }];
+    body(equation).paragraphs[0].mathFallbacks = [{ start: 0, end: 1, text: '∑α' }];
+    const demand = collectSlideFontDemand(equation, new Set(), 10000);
+    expect(demand).not.toBe('all');
+    expect(demand).toEqual(expect.arrayContaining([...'πr²∑α'].map((ch) => ch.codePointAt(0)!)));
   });
 
   it('demands nothing for text-free images and media posters', () => {
@@ -86,6 +83,10 @@ describe('complete conservative PPTX paint demand', () => {
       { elements: [...slide('A').elements, { type: 'media', posterPath: 'ppt/media/poster.png', posterMimeType: 'image/png', mediaPath: 'ppt/media/m.mp4', mimeType: 'video/mp4' }] },
       { elements: [...slide('A').elements, { type: 'media', posterPath: '', posterMimeType: '', mediaPath: 'ppt/media/m.mp3', mimeType: 'audio/mpeg' }] },
       { background: { fillType: 'image', imagePath: 'ppt/media/bg.gif', mimeType: 'image/gif' } },
+      // Metafiles demand their text records' scalars when they play.
+      { elements: [...slide('A').elements, picture('ppt/media/image1.emf', 'image/emf'), picture('ppt/media/image1.wmf', 'application/octet-stream')] },
+      { background: { fillType: 'image', imagePath: 'ppt/media/bg.emf', mimeType: 'image/emf' } },
+      { elements: [...slide('A').elements, { type: 'media', posterPath: 'ppt/media/poster.wmf', posterMimeType: 'image/wmf', mediaPath: 'ppt/media/m.mp4', mimeType: 'video/mp4' }] },
     ]) {
       expect(collectSlideFontDemand({ ...slide('A'), ...patch } as Slide, new Set(), 10000), JSON.stringify(patch)).toEqual(plain);
     }
@@ -100,9 +101,9 @@ describe('complete conservative PPTX paint demand', () => {
     const nested = (image: unknown): Slide => ({ ...slide('A'), elements: [...slide('A').elements,
       { type: 'shape', textBody: null, fill: { layers: [null, 3, 'text', [{ stops: [{ tile: image }] }]] } }] } as unknown as Slide);
     expect(collectSlideFontDemand(nested({ imagePath: 'ppt/media/a.png', mimeType: 'image/png' }), new Set(), 10000)).toEqual(plain);
-    expect(collectSlideFontDemand(nested({ imagePath: 'ppt/media/a.emf', mimeType: 'image/emf' }), new Set(), 10000)).toBe('all');
+    expect(collectSlideFontDemand(nested({ imagePath: 'ppt/media/a.bin', mimeType: 'application/octet-stream' }), new Set(), 10000)).toBe('all');
     expect(collectSlideFontDemand(nested({ imagePath: '', mimeType: null }), new Set(), 10000)).toBe('all');
-    expect(collectSlideFontDemand(nested({ posterPath: 'ppt/media/p.wmf', posterMimeType: 'image/wmf' }), new Set(), 10000)).toBe('all');
+    expect(collectSlideFontDemand(nested({ posterPath: 'ppt/media/p.bin', posterMimeType: 'application/octet-stream' }), new Set(), 10000)).toBe('all');
     expect(collectSlideFontDemand(nested({ posterPath: '', posterMimeType: '' }), new Set(), 10000)).toEqual(plain);
     // Not a path: only a string under the key names an image part.
     expect(collectSlideFontDemand(nested({ imagePath: { mimeType: 'image/emf' } }), new Set(), 10000)).toEqual(plain);

@@ -7,6 +7,7 @@ import { resolveCjkFallback, type CjkLang } from '@silurus/ooxml-core';
 import InlineWorker from './worker.ts?worker&inline';
 import wasmAssetUrl from './wasm/docx_parser_bg.wasm?url';
 import {
+  bindMetafileFontDemand,
   bindMetafileFontFamilies,
   activeFontSet,
   unloadOfficeFontFallbacks,
@@ -1074,7 +1075,7 @@ export class DocxDocument {
     sourceFonts?: import('./source-font-metrics.js').DocxSourceFonts;
   }> {
     if (this._mode !== 'main' || !fonts?.length || !this._document) return { installedSubstituteFamilies: [] };
-    const { completeDocxFontPresence, docxFontFamilyPlan, loadDocxFontSources } = await import('./font-source-load.js');
+    const { completeDocxFontPresence, docxFontFamilyPlan, loadDocxFontSources, metafileFontDemand } = await import('./font-source-load.js');
     if (signal?.aborted || !this._document) throw new PaginationAbortError();
     // An installed authored face is never displaced by a source face
     // (docxFontFamilyPlan): every authored family is probed first, past the
@@ -1101,8 +1102,10 @@ export class DocxDocument {
     }
     this._fontSourceSession = loaded.session;
     this._chartFontSubstitutions = chartFontSubstitutions(loaded.loaded);
-    // Metafile pictures paint their text with the served faces too.
+    // Metafile pictures paint their text with the served faces too, and
+    // load the scalars it paints before they play.
     bindMetafileFontFamilies(this._fetchImage, loaded.loaded);
+    bindMetafileFontDemand(this._fetchImage, metafileFontDemand(loaded.session));
     return {
       installedSubstituteFamilies: plan.installedSubstituteFamilies,
       sourceFonts: { names: loaded.names, loaded: loaded.loaded, lineMetrics: loaded.lineMetrics },
@@ -1622,6 +1625,7 @@ export class DocxDocument {
     // lookup releases retained decoded elements and prevents stale reuse.
     dropDecodedBitmapCache(this._fetchImage);
     bindMetafileFontFamilies(this._fetchImage, undefined);
+    bindMetafileFontDemand(this._fetchImage, undefined);
     dropSvgImageCache(this._fetchImage);
   }
 

@@ -19,7 +19,6 @@
  */
 import {
   classifyCjkFont,
-  isMetafileMime,
   isSymbolFontFamily,
   substituteEntryCoversText,
   type CjkLang,
@@ -76,8 +75,6 @@ const VERTICAL_FORM_SHAPE_TEXT: ReadonlySet<string> = new Set(['eaVert', 'wordAr
  * included), and none is script evidence: collecting such a text again in a
  * style font, or in no named face, adds nothing. */
 const SENTINEL_COVERED_TEXT = /^[\x20-\x7e]*$/;
-
-const METAFILE_PATH = /\.(?:wmf|emf|wmz|emz)$/i;
 
 /** Stacked text (`textRotation="255"`, §18.8.1) substitutes vertical forms
  * (vertical-text.ts). RTL reading order (`readingOrder="2"`) mirrors neutral
@@ -319,10 +316,9 @@ export class XlsxFontDemand {
       if (texts === 'all') this.collector.decline();
       else for (const text of texts) this.collector.add(text);
     }
-    for (const image of worksheet.images ?? []) {
-      // Metafile text records paint with document faces (core wmf-text.ts).
-      if (isMetafileMime(image.mimeType) || METAFILE_PATH.test(image.imagePath ?? '')) this.collector.decline();
-    }
+    // Pictures (raster, SVG, WMF/EMF) need no load-time demand: a metafile's
+    // text records demand their own scalars when it plays (core
+    // `bindMetafileFontDemand`).
     for (const anchor of worksheet.shapeGroups ?? []) for (const shape of anchor.shapes) this.shape(shape);
     for (const slicer of worksheet.slicers ?? []) {
       // The caption paints with the header face, items with the item-state
@@ -342,10 +338,6 @@ export class XlsxFontDemand {
   }
 
   private shape(shape: ShapeInfo): void {
-    if (shape.geom.type === 'image') {
-      const geom = shape.geom as { mimeType?: string; imagePath?: string };
-      if (isMetafileMime(geom.mimeType) || METAFILE_PATH.test(geom.imagePath ?? '')) this.collector.decline();
-    }
     const text = shape.text;
     if (!text) return;
     // Vertical and WordArt-vertical text rotate or substitute vertical forms;
@@ -354,8 +346,9 @@ export class XlsxFontDemand {
     if (text.vert !== undefined && VERTICAL_FORM_SHAPE_TEXT.has(text.vert)) this.collector.add(VERTICAL_PRESENTATION_FORMS);
     for (const paragraph of text.paragraphs) {
       for (const run of paragraph.runs) {
-        // OMML equations paint their own operator and layout glyphs.
-        if (run.type === 'math') { this.collector.decline(); continue; }
+        // An OMML equation paints a converted raster, whose glyphs reach no
+        // document font, or nothing (renderer drawShapeText).
+        if (run.type === 'math') continue;
         if (run.type !== 'text') continue;
         // Every slot the shape painter can select: the Latin face, and the
         // East Asian face that stacked (WordArt-vertical) text paints CJK
@@ -402,3 +395,7 @@ export class XlsxFontDemand {
     return demand;
   }
 }
+
+/** Metafile pictures demand their text's scalars when they play (core
+ * `bindMetafileFontDemand`). */
+export { metafileFontDemand } from '@silurus/ooxml-core/internal/metafile-font-demand';

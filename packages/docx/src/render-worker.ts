@@ -1,5 +1,6 @@
 import { prepareDocxHostFontMetrics, type HostFontLineMeasurement } from './host-font-line-metrics.js';
 import {
+  bindMetafileFontDemand,
   bindMetafileFontFamilies,
   activeFontSet,
   loadNativeRouteSentinels,
@@ -48,7 +49,7 @@ import { prepareMathRuns, renderLayoutSourceToCanvas } from './renderer';
 import { createLayoutServices, nativeRouteLineRequests } from './layout-runtime.js';
 import { declaredFontSubstitutions, docxOfficeFontFallbackRequests } from './font-plan.js';
 import { completeDocxFontPresence, docxFontFamilyPlan } from './font-demand-plan.js';
-import { loadDocxFontSources, type DocxLoadedFontSources } from './font-source-load.js';
+import { loadDocxFontSources, metafileFontDemand, type DocxLoadedFontSources } from './font-source-load.js';
 import {
   prepareServedFaceLines,
   servedFaceLineRequests,
@@ -151,6 +152,7 @@ function releaseRetainedFonts(): void {
   fontSourceSession = null;
   chartFontSubstitutionsOfDoc = undefined;
   bindMetafileFontFamilies(getImage, undefined);
+  bindMetafileFontDemand(getImage, undefined);
   embeddedFontFaces = [];
   try { unloadOfficeFontFallbacks(office); } catch {}
   try { sources?.release(); } catch {}
@@ -493,8 +495,10 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest | WorkerSvgDecod
         officeFontFaces = officeFaces;
         fontSourceSession = loadedSources?.session ?? null;
         chartFontSubstitutionsOfDoc = chartFontSubstitutions(loadedSources?.loaded);
-        // Metafile pictures paint their text with the served faces too.
+        // Metafile pictures paint their text with the served faces too, and
+        // load the scalars it paints before they play.
         bindMetafileFontFamilies(getImage, loadedSources?.loaded);
+        bindMetafileFontDemand(getImage, loadedSources ? metafileFontDemand(loadedSources.session) : undefined);
         embeddedFontFaces = embeddedFonts.faces;
         fontDiagnostics = embeddedFonts.diagnostics ?? [];
         fontsTransferred = true;

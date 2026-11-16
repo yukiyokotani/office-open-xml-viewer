@@ -78,6 +78,7 @@
     "./internal/own-key": "./src/internal/own-key.ts",
     "./internal/script-preload-accumulator": "./src/internal/script-preload-accumulator.ts",
     "./internal/font-scalar-demand": "./src/internal/font-scalar-demand.ts",
+    "./internal/metafile-font-demand": "./src/internal/metafile-font-demand.ts",
     "./internal/chart-font-sources": "./src/internal/chart-font-sources.ts",
     "./internal/font-sources": "./src/internal/font-sources.ts",
     "./internal/wasm-runtime-generation": "./src/internal/wasm-runtime-generation.ts",

@@ -306,6 +306,7 @@ export {
   peekCachedBitmapByPath,
   dropDecodedBitmapCache,
   bindMetafileFontFamilies,
+  bindMetafileFontDemand,
   releaseOwnedBitmap,
   dropBitmapCacheByPath,
   acquireBitmapCacheLease,
@@ -314,6 +315,7 @@ export {
   type DecodedBitmapCacheEpoch,
   type DecodedBitmapCacheOwner,
   type CachedBitmapOptions,
+  type MetafileFontDemand,
 } from './image/bitmap-image-by-path';
 export {
   isBrowserResizableRasterMimeType,

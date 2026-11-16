@@ -198,7 +198,7 @@ function decodeJohab(bytes: Uint8Array): Decoded {
 
 /** One drawn character: its Unicode text, the String bytes it came from (Dx
  *  entries are per byte), and the face class it must be drawn with. */
-interface TextUnit {
+export interface TextUnit {
   text: string;
   start: number;
   count: number;
@@ -208,12 +208,13 @@ interface TextUnit {
   face: 'authored' | 'symbol' | 'substitute';
 }
 
-type Decoded = { units: TextUnit[] } | { problem: string };
+export type Decoded = { units: TextUnit[] } | { problem: string };
 
 /** Decode a byte string under a CharacterSet, or report why it is undefined.
  *  `hostFaceCovers` tells whether the authored face on this host supplies
- *  glyphs for a string (only consulted for symbol faces). */
-function decodeBytes(
+ *  glyphs for a string (only consulted for symbol faces). Font demand
+ *  (`metafile-paint-texts.ts`) decodes text records with it too. */
+export function decodeWmfTextBytes(
   bytes: Uint8Array,
   charset: number,
   face: string,
@@ -546,7 +547,7 @@ export function drawWmfText(s: WmfTextState, out: WmfTextOutput): { drew: boolea
   const substitute = scopeServedFontFamilies(`${quoteCssFontFamily(SYMBOL_CHARSET_SUBSTITUTE_FACE)}, ${symbol}`, s.fontFamilies);
   const css = (stack: string) => (px: number) => `${style}${weight} ${px}px ${stack}`;
 
-  const decoded = decodeBytes(out.bytes, font.charset, font.face, (text) => hostFaceCovers(ctx, font.face, text, s.fontFamilies));
+  const decoded = decodeWmfTextBytes(out.bytes, font.charset, font.face, (text) => hostFaceCovers(ctx, font.face, text, s.fontFamilies));
   if ('problem' in decoded) return decoded;
   const { units } = decoded;
   const metrics = faceMetrics(ctx, font, css(authored), weight);

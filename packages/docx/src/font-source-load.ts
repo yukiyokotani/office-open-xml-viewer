@@ -37,6 +37,7 @@ import type { DocxSourceFonts } from './source-font-metrics.js';
 export { completeDocxFontPresence, docxFontFamilyPlan } from './font-demand-plan.js';
 import { emphasisGlyph } from './layout/paragraph.js';
 import { LAYOUT_SYNTHESIZED_SCALARS } from './line-layout.js';
+import { mathFallbackText } from './layout/math-fallback-text.js';
 import type { DocxDocumentModel } from './types.js';
 
 /** ST_NumberFormat values (§17.18.59) whose `formatOrdinalNumber` output is
@@ -72,16 +73,20 @@ const DOCX_RUN_WEIGHTS: readonly number[] = Object.freeze([400, 700]);
  * - text-box direction other than `horz` and §17.3.2.10 `eastAsianLayout`
  *   vert/combine (combined brackets are generated text);
  * - an unknown section or cell text direction;
- * - charts and equations (their own text and number formatting) and WMF/EMF
- *   pictures (metafile text records paint with the document's fonts, and the
- *   Office-face web alias); a raster-labelled part whose bytes are a metafile
- *   is not detected (residual);
+ * - charts (their own text and number formatting);
  * - page / note numbers in a non-ASCII number format.
+ *
+ * WMF/EMF pictures need no load-time demand: their text records demand
+ * their own scalars when they play (core `bindMetafileFontDemand`).
  *
  * Synthesised texts: `allCaps` / `smallCaps` runs paint their text upper-cased
  * (§17.3.2.5/.33), emphasis marks paint their glyph (§17.3.2.12), a DATE /
  * TIME picture (§17.16.4.1) paints its literal characters, a ruby run
- * (§17.3.3.25) paints its guide text, and a vertical section or cell
+ * (§17.3.3.25) paints its guide text, an OMML equation (§22.1) that no math
+ * renderer converted is sized by measuring its deterministic text fallback
+ * (layout math-fallback-text.ts: the run's own characters, operators and the
+ * fallback's `/^_√(),` punctuation; a converted equation paints a raster
+ * whose glyphs reach no document font), and a vertical section or cell
  * (§17.6.20 / §17.4.72 textDirection) paints the vertical presentation forms
  * vertical-text.ts substitutes, and kashida justification paints U+0640.
  * Right-to-left runs and bidi paragraphs paint their texts reordered; the
@@ -121,9 +126,12 @@ function docxSynthesizedPaint(doc: DocxDocumentModel): 'all' | string[] {
         kashida = true;
         texts.push('\u0640');
       }
-      if (record.type === 'chart' || record.type === 'math') return 'all';
-      if (typeof record.mimeType === 'string' && isMetafileMime(record.mimeType)) return 'all';
-      if (typeof record.imagePath === 'string' && METAFILE_PATH.test(record.imagePath)) return 'all';
+      if (record.type === 'chart') return 'all';
+      if (record.type === 'math') {
+        texts.push(typeof record.fallbackText === 'string'
+          ? record.fallbackText : mathFallbackText(record.nodes as Parameters<typeof mathFallbackText>[0]));
+        continue;
+      }
       // §17.6.12 pgNumType fmt (body and per-section markers).
       if (record.pageNumType && typeof record.pageNumType === 'object') {
         const fmt = (record.pageNumType as { fmt?: unknown }).fmt;
@@ -202,6 +210,27 @@ export function docxFontDemandScalars(doc: DocxDocumentModel): FontDemandScalars
   return collector.result();
 }
 
+/** Whether the document names a WMF/EMF picture part (by type or part
+ * name), anywhere in the parsed model. */
+function docxReferencesMetafile(doc: DocxDocumentModel): boolean {
+  const pending: unknown[] = [doc];
+  const seen = new Set<object>();
+  while (pending.length > 0) {
+    const value = pending.pop();
+    if (value === null || typeof value !== 'object' || seen.has(value) || ArrayBuffer.isView(value)) continue;
+    seen.add(value);
+    const record = value as Record<string, unknown>;
+    if ((typeof record.mimeType === 'string' && isMetafileMime(record.mimeType))
+      || (typeof record.imagePath === 'string' && METAFILE_PATH.test(record.imagePath))) return true;
+    for (const child of Object.values(record)) if (child !== null && typeof child === 'object') pending.push(child);
+  }
+  return false;
+}
+
+/** Metafile pictures demand their text's scalars when they play (core
+ * `bindMetafileFontDemand`). */
+export { metafileFontDemand } from '@silurus/ooxml-core/internal/metafile-font-demand';
+
 /** Loaded font sources for layout, plus the session that owns their faces. */
 export interface DocxLoadedFontSources extends DocxSourceFonts {
   readonly session: FontSourceSession;
@@ -227,13 +256,16 @@ export async function loadDocxFontSources(
   // the session reads them before the snapshot. PPTX and XLSX do not.
   const session = new FontSourceSession({
     ...options, sources, readMetricTables: readFontResourceMetrics,
-    // Without an `'all'` paint path (docxSynthesizedPaint: no chart, equation,
-    // metafile or other unmodelled text) every painted run is regular or
-    // bold: WordprocessingML §17.3.2.1 `b` (layout paragraph.ts, tabs,
+    // Without an `'all'` paint path (docxSynthesizedPaint: no chart or other
+    // unmodelled text) every painted run is regular or bold:
+    // WordprocessingML §17.3.2.1 `b` (layout paragraph.ts, tabs,
     // shape-drawing-plan text paths), so 400 and 700 are the only weights.
     // The session uses them only for a finite demand (an `'all'` demand
-    // registers every declaration as its own face).
-    requestedWeights: DOCX_RUN_WEIGHTS,
+    // registers every declaration as its own face). Metafile text paints at
+    // its LOGFONT weight (MS-WMF 2.2.1.2, any of 1–1000), which only the
+    // picture's records tell, so a document with metafile pictures registers
+    // every declaration as its own face too.
+    ...(docxReferencesMetafile(doc) ? {} : { requestedWeights: DOCX_RUN_WEIGHTS }),
   });
   try {
     // The scalars are collected while the families' stylesheets download.

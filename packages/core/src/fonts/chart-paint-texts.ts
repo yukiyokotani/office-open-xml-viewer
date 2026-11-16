@@ -27,9 +27,9 @@ import { excelDateTimeSectionNameTexts, isDateFormatSection, splitFormatSections
  *   histogram bin bounds and trendline equations.
  *
  * `'all'` (every subset) when that set is not provable: a region map (its
- * labels come from bundled geodata names), a metafile or unknown image fill
- * (a metafile plays its own text records), or a non-Gregorian / native-digit
- * locale short date. Strings are collected by the caller's scalar collector,
+ * labels come from bundled geodata names), an image fill of unknown type, or
+ * a non-Gregorian / native-digit locale short date. A metafile fill's text
+ * records are demanded when it plays ({@link paintsTextFreeImage}). Strings are collected by the caller's scalar collector,
  * which applies its own scalar rules (PUA, unknown scalars, closures).
  */
 export function chartPaintTexts(chart: unknown): readonly string[] | 'all' {
@@ -76,25 +76,25 @@ export function chartPaintTexts(chart: unknown): readonly string[] | 'all' {
   return texts;
 }
 
-/** Image parts that paint no text with a served face: rasters (decoded by the
- * browser) and SVG (decoded through an `<img>`, which cannot reach document
- * fonts). A metafile (WMF/EMF, played by the library's players, which draw
- * text records with served faces) or an unknown type is not admitted.
+/** Image parts whose painting needs no load-time font demand: rasters
+ * (decoded by the browser), SVG (decoded through an `<img>`, which cannot
+ * reach document fonts) and WMF/EMF metafiles. The metafile players draw
+ * text records with served faces, and the image owner's metafile demand
+ * (core `bindMetafileFontDemand`) loads the scalars a picture's records
+ * paint before it plays; the players sniff content, so a metafile stored
+ * under any part name or type is covered the same way. An unknown type is
+ * not admitted.
  *
  * The type is the parser's extension mapping (`mime_from_ext`), as the
- * package declares the part. The decoder also sniffs content, so a metafile
- * stored under a raster extension (a mislabelled part) still plays; its text
- * is not demanded and paints in a host fallback where no loaded subset covers
- * it (no late load: an undemanded subset is never registered). Sniffing every
- * image part during preflight would inflate every picture before first
- * paint; DOCX demand makes the same trade. */
+ * package declares the part. */
 export function paintsTextFreeImage(path: unknown, mimeType: unknown): boolean {
-  if (typeof path === 'string' && METAFILE_PATH.test(path)) return false;
+  if (typeof path === 'string' && METAFILE_PATH.test(path)) return true;
   return typeof mimeType === 'string' && TEXT_FREE_IMAGE_TYPES.has(mimeType.toLowerCase());
 }
 
 const TEXT_FREE_IMAGE_TYPES: ReadonlySet<string> = new Set([
   'image/png', 'image/jpeg', 'image/jpg', 'image/gif', 'image/bmp', 'image/webp', 'image/tiff', 'image/svg+xml',
+  'image/wmf', 'image/emf',
 ]);
 const METAFILE_PATH = /\.(?:wmf|emf|wmz|emz)$/i;
 

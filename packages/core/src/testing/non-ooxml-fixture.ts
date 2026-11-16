@@ -43,13 +43,13 @@ const u32 = (value: number): number[] => [
 ];
 
 /** Minimal stored (uncompressed) ZIP of UTF-8 entries. */
-export function storedZip(files: ReadonlyArray<readonly [string, string]>): Uint8Array<ArrayBuffer> {
+export function storedZip(files: ReadonlyArray<readonly [string, string | Uint8Array]>): Uint8Array<ArrayBuffer> {
   const encoder = new TextEncoder();
   const local: number[] = [];
   const central: number[] = [];
   for (const [name, content] of files) {
     const nameBytes = [...encoder.encode(name)];
-    const data = encoder.encode(content);
+    const data = typeof content === 'string' ? encoder.encode(content) : content;
     const checksum = crc32(data);
     const offset = local.length;
     local.push(

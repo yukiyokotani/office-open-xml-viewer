@@ -1,7 +1,9 @@
 /// <reference types="node" />
 import { readFileSync, readdirSync } from 'node:fs';
 import { beforeAll, describe, expect, it } from 'vitest';
-import { R, deck, para, run, textBox } from './test-support/synthetic-deck.js';
+import { R, deck, para, picture, run, textBox } from './test-support/synthetic-deck.js';
+import { metafileDemandScalars } from '@silurus/ooxml-core/internal/metafile-font-demand';
+import { emfTextFixture, metafilePaintedTexts, wmfFixture, wmfRecords } from '@silurus/ooxml-core/testing';
 import { initSync, PptxArchive } from './wasm/pptx_parser.js';
 import { collectSlideFontDemand } from './font-preload-demand.js';
 import { renderSlideWithEmbeddedFonts } from './renderer.js';
@@ -12,10 +14,32 @@ import type { Presentation, Slide } from './types';
 // to a unicode-range subset that never loads, so its glyph would silently
 // fall back to a host font. Exercised over the public demo deck and targeted
 // synthetic slides (charts and raster pictures are exercised by the demo
-// deck); every paint path the collector cannot prove declines to 'all'
-// (metafiles, region maps, equations).
+// deck), equations (with and without a failing math engine) and metafile
+// pictures (played on a recording context, against the demand their image
+// owner runs before they play); every paint path the collector cannot prove
+// declines to 'all' (region maps, unknown elements).
+
+const MATH = 'http://schemas.openxmlformats.org/officeDocument/2006/math';
+const A14 = 'http://schemas.microsoft.com/office/drawing/2010/main';
+const MC = 'http://schemas.openxmlformats.org/markup-compatibility/2006';
+const equation = (text: string) => `<m:oMath xmlns:m="${MATH}"><m:sSup><m:e><m:r><m:t>${text}</m:t></m:r></m:e><m:sup><m:r><m:t>2</m:t></m:r></m:sup></m:sSup></m:oMath>`;
 
 const TARGETED: Record<string, Uint8Array> = {
+  // §22.1 OMML in a14:m: a failed equation paints its MCE preview, its
+  // stored fallback text or the unavailable placeholder.
+  'equations': deck(textBox(para(run('Area ') + `<mc:AlternateContent xmlns:mc="${MC}" xmlns:a14="${A14}">`
+    + `<mc:Choice Requires="a14"><a14:m>${equation('πr')}</a14:m></mc:Choice>`
+    + `<mc:Fallback>${run('πr² ≈ ∑')}</mc:Fallback></mc:AlternateContent>`)
+    + para(`<a14:m xmlns:a14="${A14}"><m:oMathPara xmlns:m="${MATH}">${equation('αβ')}</m:oMathPara></a14:m>`))),
+  // WMF/EMF text records demand their own scalars when they play (also
+  // under a raster part name: the players sniff content).
+  'metafile pictures': deck(picture(0) + picture(1) + picture(2), new Map([
+    ['image1.wmf', wmfFixture([wmfRecords.setWindowExt(1000, 1000), wmfRecords.createFont('Times New Roman'),
+      wmfRecords.selectObject(0), wmfRecords.textOut(new Uint8Array([0x80, 0x41, 0xe9]))])],
+    ['image2.emf', emfTextFixture('Arial', ['Größe →'])],
+    ['image3.png', wmfFixture([wmfRecords.setWindowExt(1000, 1000), wmfRecords.createFont('MS Mincho', { charset: 128 }),
+      wmfRecords.selectObject(0), wmfRecords.textOut(new Uint8Array([0x93, 0xfa, 0x96, 0x7b]))])],
+  ])),
   'caps and small caps': deck(textBox(para(run('straße αβγ', ' cap="all"') + run('mixed Case', ' cap="small"')))),
   'slide number field': deck(textBox(para('<a:fld id="{00000000-0000-0000-0000-000000000001}" type="slidenum">'
     + '<a:rPr lang="en-US" sz="2400"/><a:t>‹#›</a:t></a:fld>' + run(' of deck')))),
@@ -96,14 +120,41 @@ function recordingCanvas() {
   return { canvas: canvas as unknown as HTMLCanvasElement, texts };
 }
 
-function parse(bytes: Uint8Array): Presentation {
+function parse(bytes: Uint8Array): Presentation & { metafiles: Uint8Array[][] } {
   const archive = new PptxArchive(bytes);
   try {
-    return JSON.parse(new TextDecoder().decode(archive.parse())) as Presentation;
+    const pres = JSON.parse(new TextDecoder().decode(archive.parse())) as Presentation;
+    return { ...pres, metafiles: pres.slides.map((slide) => pictureParts(slide, (path) => archive.extract_image(path))) };
   } finally {
     archive.free();
   }
 }
+
+/** The bytes of every picture part a slide names (pictures, fills, bullets,
+ * posters, chart fills): the players sniff content, as the image loader
+ * does, and other parts paint no text. */
+function pictureParts(slide: Slide, read: (path: string) => Uint8Array): Uint8Array[] {
+  const paths = new Set<string>();
+  const walk = (value: unknown) => {
+    if (value === null || typeof value !== 'object') return;
+    for (const [key, child] of Object.entries(value)) {
+      if ((key === 'imagePath' || key === 'posterPath') && typeof child === 'string') paths.add(child);
+      else walk(child);
+    }
+  };
+  walk(slide);
+  const parts: Uint8Array[] = [];
+  for (const path of paths) {
+    try { parts.push(read(path)); } catch { /* an absent part paints nothing */ }
+  }
+  return parts;
+}
+
+/** A math renderer whose engine fails: equations take their failure paint. */
+const failingMath = {
+  loadMathJax: () => Promise.reject(new Error('no math engine in this test')),
+  mathMLToSvg: () => Promise.reject(new Error('no math engine in this test')),
+};
 
 /** The slide without its image paint (pictures, media, picture fills and
  * markers). Node has no image decoder, and an authored blip effect chain
@@ -135,13 +186,18 @@ async function paintedScalars(pres: Presentation, slide: Slide): Promise<Set<num
 
 async function paintedScalarsOnce(pres: Presentation, slide: Slide): Promise<Set<number>> {
   const { canvas, texts } = recordingCanvas();
-  await renderSlideWithEmbeddedFonts(canvas, slide, pres.slideWidth, pres.slideHeight, {
-    width: 960, dpr: 1,
-    defaultTextColor: pres.defaultTextColor,
-    majorFont: pres.majorFont, minorFont: pres.minorFont,
-    fetchImage: () => Promise.reject(new Error('no images in a finite-demand slide')),
-    fetchMedia: () => Promise.reject(new Error('no media in a finite-demand slide')),
-  });
+  // Without a math engine and with a failing one (MCE previews, fallback
+  // text and the unavailable placeholder).
+  for (const math of [undefined, failingMath]) {
+    await renderSlideWithEmbeddedFonts(canvas, slide, pres.slideWidth, pres.slideHeight, {
+      width: 960, dpr: 1,
+      defaultTextColor: pres.defaultTextColor,
+      majorFont: pres.majorFont, minorFont: pres.minorFont,
+      fetchImage: () => Promise.reject(new Error('no images in a finite-demand slide')),
+      fetchMedia: () => Promise.reject(new Error('no media in a finite-demand slide')),
+      ...(math ? { math } : {}),
+    });
+  }
   const scalars = new Set<number>();
   for (const text of texts) for (const character of text) scalars.add(character.codePointAt(0)!);
   return scalars;
@@ -155,17 +211,39 @@ describe('PPTX font demand covers every measured or painted scalar', () => {
   const check = async (label: string, bytes: Uint8Array): Promise<Array<'all' | 'finite'>> => {
     const pres = parse(bytes);
     const outcomes: Array<'all' | 'finite'> = [];
-    for (const slide of pres.slides) {
+    for (const [index, slide] of pres.slides.entries()) {
       const demand = collectSlideFontDemand(slide, new Set(), Number.MAX_SAFE_INTEGER);
       if (demand === 'all') { outcomes.push('all'); continue; }
       const demanded = new Set(demand);
-      const missing = [...await paintedScalars(pres, slide)].filter((cp) => !demanded.has(cp))
+      const painted = await paintedScalars(pres, slide);
+      // Metafile pictures: what the players paint, against the demand their
+      // image owner runs before they play.
+      let all = false;
+      for (const metafile of pres.metafiles[index] ?? []) {
+        const own = metafileDemandScalars(metafile);
+        if (own === 'all') { all = true; break; }
+        for (const cp of own) demanded.add(cp);
+        for (const text of metafilePaintedTexts(metafile)) for (const ch of text) painted.add(ch.codePointAt(0)!);
+      }
+      if (all) { outcomes.push('all'); continue; }
+      const missing = [...painted].filter((cp) => !demanded.has(cp))
         .map((cp) => `U+${cp.toString(16).toUpperCase().padStart(4, '0')}`);
       expect(missing, `${label} slide ${slide.index}`).toEqual([]);
       outcomes.push('finite');
     }
     return outcomes;
   };
+
+  it('plays the targeted metafile pictures, including one under a raster part name', () => {
+    const painted = parse(TARGETED['metafile pictures']!).metafiles.flat().flatMap(metafilePaintedTexts).join('');
+    for (const text of ['日本', 'Größe →', '€Aé']) expect(painted).toContain(text);
+  });
+
+  it('targeted equations take their failure paint', async () => {
+    const pres = parse(TARGETED.equations!);
+    const painted = String.fromCodePoint(...await paintedScalars(pres, pres.slides[0]!));
+    for (const ch of 'πr²≈∑') expect(painted).toContain(ch);
+  });
 
   it('targeted synthetic slides', async () => {
     for (const [label, bytes] of Object.entries(TARGETED)) {
