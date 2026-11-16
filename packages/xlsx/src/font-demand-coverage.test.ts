@@ -264,6 +264,10 @@ function paintedScalars(workbook: ParsedWorkbook, ws: Worksheet): Set<number> {
   return scalars;
 }
 
+const paintedOf = (texts: readonly string[]) => new Set(texts.flatMap((text) => [...text].map((ch) => ch.codePointAt(0)!)));
+const missingScalars = (painted: ReadonlySet<number>, demanded: ReadonlySet<number>) => [...painted].filter((cp) => !demanded.has(cp))
+  .map((cp) => `U+${cp.toString(16).toUpperCase().padStart(4, '0')}`);
+
 beforeAll(() => {
   initSync({ module: new Uint8Array(readFileSync(new URL('./wasm/xlsx_parser_bg.wasm', import.meta.url))) });
 });
@@ -287,20 +291,17 @@ describe('XLSX font demand covers every measured or painted scalar', () => {
       demand.worksheetParts(ws);
       demand.newRowsOf(ws);
       take();
-      const painted = paintedScalars(workbook, ws);
-      // Metafile pictures: what the players paint, against the demand their
-      // image owner runs before they play.
-      for (const metafile of metafiles[index] ?? []) {
+      if (all) { outcomes.push('all'); continue; }
+      expect(missingScalars(paintedScalars(workbook, ws), demanded), `${label} sheet ${ws.name}`).toEqual([]);
+      // Each metafile picture: what its player paints, against the sheet's
+      // demand and the demand its image owner runs before it plays.
+      for (const [picture, metafile] of (metafiles[index] ?? []).entries()) {
         const own = metafileDemandScalars(metafile);
         if (own === 'all') { all = true; break; }
-        for (const cp of own) demanded.add(cp);
-        for (const text of metafilePaintedTexts(metafile)) for (const ch of text) painted.add(ch.codePointAt(0)!);
+        expect(missingScalars(paintedOf(metafilePaintedTexts(metafile)), new Set([...demanded, ...own])),
+          `${label} sheet ${ws.name} picture ${picture}`).toEqual([]);
       }
-      if (all) { outcomes.push('all'); continue; }
-      const missing = [...painted].filter((cp) => !demanded.has(cp))
-        .map((cp) => `U+${cp.toString(16).toUpperCase().padStart(4, '0')}`);
-      expect(missing, `${label} sheet ${ws.name}`).toEqual([]);
-      outcomes.push('finite');
+      outcomes.push(all ? 'all' : 'finite');
     }
     return outcomes;
   };

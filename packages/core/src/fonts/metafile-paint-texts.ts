@@ -38,7 +38,7 @@ import { decodeMetafileSymbolText } from './metafile-symbol-encoding.js';
 /** The players' fixed probe and joiner texts: GDI text-metric probes
  * (`faceMetrics` measures `Hg`; the average width weighs `a`–`z` and space)
  * and the ZWJ that gives a separately drawn cell its cursive context. */
-const WMF_PROBE_TEXTS = ['Hg', 'abcdefghijklmnopqrstuvwxyz ', '‍'] as const;
+const WMF_PROBE_TEXTS = ['Hg', 'abcdefghijklmnopqrstuvwxyz ', '\u200d'] as const;
 
 // MS-WMF 2.1.1.1 RecordType.
 const META_EOF = 0x0000;
@@ -76,18 +76,25 @@ const MAX_EMF_TEXT_UNITS = 0x10000;
 /** The symbol repertoires `decodeMetafileSymbolText` knows. */
 const EMF_SYMBOL_FACES = ['Symbol', 'MT Extra'] as const;
 
-/** Every text the metafile `bytes` may paint or measure (see the module
- * notes), each to be demanded literally. Empty for bytes no player plays. */
+/** Visit, record by record, every text the metafile `bytes` may paint or
+ * measure (see the module notes), each to be demanded literally; nothing for
+ * bytes no player plays. The walk stops once `visit` answers false. Nothing
+ * a record decodes is retained past its visit. */
+export function visitMetafilePaintTexts(bytes: Uint8Array, visit: (text: string) => boolean): void {
+  if (isWmf(bytes)) visitWmfPaintTexts(bytes, visit);
+  else if (isEmf(bytes)) visitEmfPaintTexts(bytes, visit);
+}
+
+/** {@link visitMetafilePaintTexts} collected into a list. */
 export function metafilePaintTexts(bytes: Uint8Array): string[] {
-  if (isWmf(bytes)) return wmfPaintTexts(bytes);
-  if (isEmf(bytes)) return emfPaintTexts(bytes);
-  return [];
+  const texts: string[] = [];
+  visitMetafilePaintTexts(bytes, (text) => { texts.push(text); return true; });
+  return texts;
 }
 
 type WmfObject = WmfFont | { kind: 'other' };
 
-function wmfPaintTexts(bytes: Uint8Array): string[] {
-  const texts: string[] = [];
+function visitWmfPaintTexts(bytes: Uint8Array, visit: (text: string) => boolean): void {
   const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   // The placeable header (22 bytes) precedes the 18-byte standard header.
   let pos = (bytes.length >= 4 && dv.getUint32(0, true) === PLACEABLE_MAGIC ? 22 : 0) + 18;
@@ -102,22 +109,27 @@ function wmfPaintTexts(bytes: Uint8Array): string[] {
     if (free < 0) objects.push(object);
     else objects[free] = object;
   };
-  const text = (string: Uint8Array, options: number) => {
-    if (!font || !font.valid || font.height === 0 || font.face.startsWith('@') || (options & ETO_GLYPH_INDEX)) return;
-    if (string.length === 0) return;
-    if (!probed) { probed = true; texts.push(...WMF_PROBE_TEXTS); }
+  /** Visit one text record's texts; false once `visit` stops the walk. */
+  const text = (string: Uint8Array, options: number): boolean => {
+    if (!font || !font.valid || font.height === 0 || font.face.startsWith('@') || (options & ETO_GLYPH_INDEX)) return true;
+    if (string.length === 0) return true;
+    if (!probed) {
+      probed = true;
+      for (const probe of WMF_PROBE_TEXTS) if (!visit(probe)) return false;
+    }
     // A SYMBOL_CHARSET face either draws its font codes itself or is
     // replaced by the font mapper's substitute, as the host decides at paint
     // time (wmf-text.ts `hostFaceCovers`, which measures the font-coded
     // string): both decodings, and that probe.
-    const outcomes = font.charset === SYMBOL_CHARSET ? [false, true] : [false];
-    if (font.charset === SYMBOL_CHARSET) texts.push(Array.from(string, (byte) => String.fromCharCode(0xf000 + byte)).join(''));
-    for (const covers of outcomes) {
+    const symbol = font.charset === SYMBOL_CHARSET;
+    if (symbol && !visit(Array.from(string, (byte) => String.fromCharCode(0xf000 + byte)).join(''))) return false;
+    for (const covers of symbol ? [false, true] : [false]) {
       const decoded = decodeWmfTextBytes(string, font.charset, font.face, () => covers);
       if ('problem' in decoded) continue;
-      for (const unit of decoded.units) texts.push(unit.text);
-      texts.push(decoded.units.map((unit) => unit.text).join(''));
+      for (const unit of decoded.units) if (!visit(unit.text)) return false;
+      if (!visit(decoded.units.map((unit) => unit.text).join(''))) return false;
     }
+    return true;
   };
   while (pos + 6 <= bytes.length) {
     const sizeWords = dv.getUint32(pos, true);
@@ -164,7 +176,7 @@ function wmfPaintTexts(bytes: Uint8Array): string[] {
         if (remaining < 2) break;
         const length = u16(at);
         if (remaining - 2 < length + (length & 1) + 4) break;
-        text(bytes.subarray(at + 2, at + 2 + length), 0);
+        if (!text(bytes.subarray(at + 2, at + 2 + length), 0)) return;
         break;
       }
       case META_EXTTEXTOUT: {
@@ -175,7 +187,7 @@ function wmfPaintTexts(bytes: Uint8Array): string[] {
         const rect = (options & (ETO_OPAQUE | ETO_CLIPPED)) !== 0 ? 8 : 0;
         if (length < 0 || remaining - 8 < rect + length) break;
         const start = at + 8 + rect;
-        text(bytes.subarray(start, start + length), options);
+        if (!text(bytes.subarray(start, start + length), options)) return;
         break;
       }
       default:
@@ -184,11 +196,9 @@ function wmfPaintTexts(bytes: Uint8Array): string[] {
     }
     pos = end;
   }
-  return texts;
 }
 
-function emfPaintTexts(bytes: Uint8Array): string[] {
-  const texts: string[] = [];
+function visitEmfPaintTexts(bytes: Uint8Array, visit: (text: string) => boolean): void {
   const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   let pos = 0;
   while (pos + 8 <= bytes.length) {
@@ -208,18 +218,17 @@ function emfPaintTexts(bytes: Uint8Array): string[] {
         && offString >= header && pos + offString + chars * 2 <= end) {
         let string = '';
         for (let index = 0; index < chars; index++) string += String.fromCharCode(dv.getUint16(pos + offString + index * 2, true));
-        texts.push(string);
+        if (!visit(string)) return;
         // A SYMBOL_CHARSET font's cmap codes are converted through its
         // published repertoire when the record has no options (emf.ts).
-        if (options === 0 && /[-]/.test(string)) {
+        if (options === 0 && /[\uf000-\uf0ff]/.test(string)) {
           for (const face of EMF_SYMBOL_FACES) {
             const converted = decodeMetafileSymbolText(string, face, true);
-            if (converted !== null) texts.push(converted);
+            if (converted !== null && !visit(converted)) return;
           }
         }
       }
     }
     pos = end;
   }
-  return texts;
 }

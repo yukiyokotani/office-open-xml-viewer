@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { metafileDemandScalars, metafilePaintTexts } from '../internal/metafile-font-demand.js';
+import { metafileDemandScalars, metafilePaintTexts, visitMetafilePaintTexts } from '../internal/metafile-font-demand.js';
 import { emfTextFixture, metafilePaintedTexts, wmfFixture, wmfRecords as r } from '../testing/metafile-paint.js';
 
 const bytes = (...values: number[]) => new Uint8Array(values);
@@ -62,7 +62,7 @@ describe('metafile text demand covers what the players measure and paint', () =>
     expect(metafilePaintedTexts(wmf)).toEqual(expect.arrayContaining(['あ', '\u201a\u00a0', '亜']));
     expect(missing(wmf)).toEqual([]);
     const demanded = scalarsOf(wmf) as Set<number>;
-    for (const ch of 'あ‚ 亜') expect(demanded.has(ch.codePointAt(0)!), ch).toBe(true);
+    for (const ch of 'あ‚\u00a0亜') expect(demanded.has(ch.codePointAt(0)!), ch).toBe(true);
     // The bytes painted with no font selected are not decoded at all.
     expect(demanded.has(0x02c6)).toBe(false);
   });
@@ -82,9 +82,28 @@ describe('metafile text demand covers what the players measure and paint', () =>
     const plain = emfTextFixture('Arial', ['Größe 漢字', 'x→y']);
     expect(metafilePaintedTexts(plain)).toEqual(expect.arrayContaining(['Größe 漢字', 'x→y']));
     expect(missing(plain)).toEqual([]);
-    const symbol = emfTextFixture('Symbol', [''], { charset: 2 });
+    const symbol = emfTextFixture('Symbol', ['\uf061\uf0b6'], { charset: 2 });
     expect(metafilePaintedTexts(symbol)).toContain('α∂');
     expect(missing(symbol)).toEqual([]);
+  });
+
+  it('streams record by record and stops when the visitor does', () => {
+    // A large picture of repeated symbol-charset text: each record's texts
+    // are visited as it is walked, never accumulated.
+    const records = Array.from({ length: 5000 }, () => r.textOut(bytes(0x61, 0x62, 0xb6, 0xe0)));
+    const wmf = wmfFixture([r.setWindowExt(1000, 1000), r.createFont('Wingdings', { charset: 2 }), r.selectObject(0), ...records]);
+    let visits = 0;
+    visitMetafilePaintTexts(wmf, () => { visits++; return visits < 3; });
+    expect(visits).toBe(3);
+    const demand = metafileDemandScalars(wmf);
+    expect(demand).not.toBe('all');
+    expect((demand as readonly number[]).length).toBeLessThan(64);
+    // A declined text ends the walk: the rest of the picture is not decoded.
+    const lone = emfTextFixture('Arial', ['\ud800', ...Array.from({ length: 100 }, (_, index) => `text ${index}`)]);
+    visits = 0;
+    visitMetafilePaintTexts(lone, () => { visits++; return false; });
+    expect(visits).toBe(1);
+    expect(metafileDemandScalars(lone)).toBe('all');
   });
 
   it('bytes no player plays demand nothing beyond the measurement sentinels', () => {

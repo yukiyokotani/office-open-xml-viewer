@@ -2,18 +2,20 @@
 // font-source modules, so the record walk and the scalar tables stay out of
 // the default (no font source) graph.
 import { FontDemandScalarCollector, type FontDemandScalars } from '../fonts/scalar-demand.js';
-import { metafilePaintTexts } from '../fonts/metafile-paint-texts.js';
+import { visitMetafilePaintTexts } from '../fonts/metafile-paint-texts.js';
 import type { FontSessionDemand, LoadedFontSources } from '../fonts/source-session.js';
 
-export { metafilePaintTexts } from '../fonts/metafile-paint-texts.js';
+export { metafilePaintTexts, visitMetafilePaintTexts } from '../fonts/metafile-paint-texts.js';
 
 /** The Unicode scalars the metafile `bytes` paints or measures
- * (`metafilePaintTexts`, collected literally: the players apply no symbol-font
+ * (`visitMetafilePaintTexts`, collected literally: the players apply no symbol-font
  * conversion beyond their own), or `'all'` when core's scalar rules cannot
  * prove them (unknown scalars, lone surrogates, the scalar ceiling). */
 export function metafileDemandScalars(bytes: Uint8Array): FontDemandScalars {
   const collector = new FontDemandScalarCollector({ budget: Number.POSITIVE_INFINITY });
-  for (const text of metafilePaintTexts(bytes)) if (!collector.addSymbolText(text, [], true)) break;
+  // Streamed: each record's texts are collected (and dropped) as it is
+  // walked, and the walk stops once the collector declines.
+  visitMetafilePaintTexts(bytes, (text) => collector.addSymbolText(text, [], true));
   return collector.result();
 }
 

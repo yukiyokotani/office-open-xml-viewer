@@ -203,6 +203,10 @@ async function paintedScalarsOnce(pres: Presentation, slide: Slide): Promise<Set
   return scalars;
 }
 
+const paintedOf = (texts: readonly string[]) => new Set(texts.flatMap((text) => [...text].map((ch) => ch.codePointAt(0)!)));
+const missingScalars = (painted: ReadonlySet<number>, demanded: ReadonlySet<number>) => [...painted].filter((cp) => !demanded.has(cp))
+  .map((cp) => `U+${cp.toString(16).toUpperCase().padStart(4, '0')}`);
+
 beforeAll(() => {
   initSync({ module: readFileSync(new URL('./wasm/pptx_parser_bg.wasm', import.meta.url)) });
 });
@@ -215,21 +219,17 @@ describe('PPTX font demand covers every measured or painted scalar', () => {
       const demand = collectSlideFontDemand(slide, new Set(), Number.MAX_SAFE_INTEGER);
       if (demand === 'all') { outcomes.push('all'); continue; }
       const demanded = new Set(demand);
-      const painted = await paintedScalars(pres, slide);
-      // Metafile pictures: what the players paint, against the demand their
-      // image owner runs before they play.
+      expect(missingScalars(await paintedScalars(pres, slide), demanded), `${label} slide ${slide.index}`).toEqual([]);
+      // Each metafile picture: what its player paints, against the slide's
+      // demand and the demand its image owner runs before it plays.
       let all = false;
-      for (const metafile of pres.metafiles[index] ?? []) {
+      for (const [picture, metafile] of (pres.metafiles[index] ?? []).entries()) {
         const own = metafileDemandScalars(metafile);
         if (own === 'all') { all = true; break; }
-        for (const cp of own) demanded.add(cp);
-        for (const text of metafilePaintedTexts(metafile)) for (const ch of text) painted.add(ch.codePointAt(0)!);
+        expect(missingScalars(paintedOf(metafilePaintedTexts(metafile)), new Set([...demanded, ...own])),
+          `${label} slide ${slide.index} picture ${picture}`).toEqual([]);
       }
-      if (all) { outcomes.push('all'); continue; }
-      const missing = [...painted].filter((cp) => !demanded.has(cp))
-        .map((cp) => `U+${cp.toString(16).toUpperCase().padStart(4, '0')}`);
-      expect(missing, `${label} slide ${slide.index}`).toEqual([]);
-      outcomes.push('finite');
+      outcomes.push(all ? 'all' : 'finite');
     }
     return outcomes;
   };
