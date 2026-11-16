@@ -644,6 +644,10 @@ fn object_framed(data: &[u8]) -> bool {
                 // cLines, iSel, flags and idEdit, then for a drop-down
                 // (FtCmo ot 0x14) LbsDropData (2.5.180): wStyle, cLine,
                 // dxMin and a counted string.
+                // cbFContinued counts the ObjFmla and the fixed fields.
+                if size < 2 + length + 8 {
+                    return false;
+                }
                 let fixed = at + 6 + length + 8;
                 if !object_formula_framed(formula) || data.len() < fixed {
                     return false;
