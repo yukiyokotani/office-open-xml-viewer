@@ -421,11 +421,8 @@ impl<'a> Table<'a> {
                 0xbf => {}
                 // Geometry text (2.3.22), read below. gtextRTF and
                 // gtextCSSFont repeat the string and font for other
-                // consumers; gtextAlign and gtextSpacing place text that
-                // does not fill its path and have no `v:textpath` equivalent
-                // in the DOCX shape model.
-                0xc0 | 0xc1 | 0xc3 | 0xc5 | 0xc6 | 0xff => {}
-                0xc2 | 0xc4 => {}
+                // consumers.
+                0xc0..=0xc6 | 0xff => {}
                 // Picture-only Boolean properties have no effect on shapes.
                 0x13f => {}
                 // Freeform geometry (MS-ODRAW 2.3.6): the explicit path. Adjust
@@ -848,11 +845,40 @@ impl<'a> Table<'a> {
         let geometry_text = match wide(0xc0) {
             Some(string) if self.boolean(0xff, 14) == Some(true) => {
                 let flag = |bit: u32| self.boolean(0xff, bit) == Some(true);
+                let value =
+                    |id: u16, default: u32| self.values.get(&id).copied().unwrap_or(default);
+                // The DOCX `v:textpath` facts hold no vertical or normalized
+                // layout (gtextFVertical, gtextFNormalize), no alignment
+                // other than the centred default (gtextAlign), no spacing
+                // (gtextSpacing, 1.0 by default) and no small caps, strike
+                // or shadow: the text is drawn without them. gtextFKern asks
+                // for pair kerning, which the shared text shaping decides;
+                // gtextFUnderline SHOULD be ignored (2.3.22.10).
+                if flag(13)
+                    || flag(7)
+                    || flag(2)
+                    || flag(1)
+                    || flag(0)
+                    || value(0xc2, 1) != 1
+                    || value(0xc4, 0x0001_0000) != 0x0001_0000
+                {
+                    crate::rejection::approximated(
+                        "Word geometry text layout controls are not projected",
+                        (),
+                    );
+                }
+                // gtextSize (2.3.22.4) is a FixedPoint that MUST NOT be
+                // negative; 36 points by default.
+                let size = value(0xc3, 0x0024_0000) as i32;
+                let size = if size < 0 {
+                    crate::rejection::spec_default("invalid Word geometry text size", 0x0024_0000)
+                } else {
+                    size
+                };
                 Some(GeometryText {
                     string,
                     font: wide(0xc5).filter(|font| !font.is_empty()),
-                    size_pt: f64::from(self.values.get(&0xc3).copied().unwrap_or(0x0024_0000))
-                        / 65_536.0,
+                    size_pt: f64::from(size) / 65_536.0,
                     bold: flag(5),
                     italic: flag(4),
                     allowed: self
@@ -1627,6 +1653,33 @@ mod tests {
         assert_eq!(facts.geometry_text.as_ref().unwrap().size_pt, 24.0);
         assert_eq!(lines(&facts), [[0.0, 0.0, 0.5, 0.0], [0.5, 1.0, 1.0, 1.0]]);
         assert!(facts.adjustments.is_empty());
+        // A negative size takes the default; vertical layout and spacing
+        // are not projected.
+        let facts = wordart(136, &[(0xc3, 0xffff_0000)]);
+        assert_eq!(facts.geometry_text.as_ref().unwrap().size_pt, 36.0);
+        assert_eq!(
+            crate::rejection::take_best_effort(),
+            [(
+                crate::rejection::BestEffort::IgnoredValue,
+                "invalid Word geometry text size"
+            )]
+        );
+        let layout = (
+            crate::rejection::BestEffort::Approximated,
+            "Word geometry text layout controls are not projected",
+        );
+        for bytes in [
+            with_strings(&[(0xff, 0x6000_6000)], &[(0xc0, "Word")]),
+            with_strings(
+                &[(0xff, 0x4000_4000), (0xc4, 0x0001_8000)],
+                &[(0xc0, "Word")],
+            ),
+            with_strings(&[(0xff, 0x4000_4000), (0xc2, 2)], &[(0xc0, "Word")]),
+        ] {
+            let facts = read(136, 0xa00, &bytes, [9000, 3000]).unwrap();
+            assert_eq!(facts.geometry_text.unwrap().string, "Word");
+            assert_eq!(crate::rejection::take_best_effort(), [layout]);
+        }
         // A bent text effect is drawn on the plain path.
         assert_eq!(wordart(144, &[]).subpaths.len(), 2);
         assert_eq!(

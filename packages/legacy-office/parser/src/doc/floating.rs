@@ -463,6 +463,9 @@ impl<'a> Store<'a> {
                     },
                     Content::Shape(Box::new(facts)),
                 )?;
+                // The inline shape keeps its unrotated extent and its turn.
+                turned_content(&drawing.content, rotation);
+                drawing.rotation = rotation;
                 drawing.inline = true;
                 return Ok(Some(drawing));
             }
@@ -894,8 +897,9 @@ pub(super) struct Alignment {
 /// the origin of the absolute rca rectangle. An aligned position is placed in
 /// the container posrelh/posrelv names (2.3.4.20/22). Word writes them as
 /// 0 margin, 1 page, 2 text, 3 character/line, one less than the published
-/// enumeration (1-4); an absent value is the documented msoprhText /
-/// msoprvText default (column/paragraph).
+/// enumeration (1-4); an absent value, or one outside the enumeration, is the
+/// documented msoprhText / msoprvText default (column/paragraph). An
+/// alignment outside its enumeration leaves the absolute SPA position.
 ///
 /// Evidence: every aligned shape in the local private corpus has
 /// bx = posrelh and by = posrelv under that numbering. A Word control with a
@@ -927,7 +931,7 @@ fn direct_alignment(anchor: &Anchor, placement: &Placement) -> Alignment {
             3 => "character",
             _ => crate::rejection::spec_default(
                 "Word aligned drawing disagrees with its horizontal SPA origin",
-                anchor.horizontal,
+                "column",
             ),
         };
     }
@@ -951,7 +955,7 @@ fn direct_alignment(anchor: &Anchor, placement: &Placement) -> Alignment {
             3 => "line",
             _ => crate::rejection::spec_default(
                 "Word aligned drawing disagrees with its vertical SPA origin",
-                anchor.vertical,
+                "paragraph",
             ),
         };
     }
@@ -1686,12 +1690,44 @@ mod tests {
             );
         }
         assert!(crate::rejection::take_best_effort().is_empty());
-        // A value outside the enumerations leaves the SPA position or origin.
-        for options in [&[(0x38f, 6)][..], &[(0x38f, 1), (0x390, 4)][..]] {
+        // An alignment outside the enumeration leaves the SPA position; a
+        // container outside it is the text default.
+        type Invalid = (&'static [(u16, u32)], [Axes; 2]);
+        let invalid: [Invalid; 4] = [
+            (&[(0x38f, 6)], [(None, "page"), (None, "page")]),
+            (&[(0x391, 6)], [(None, "page"), (None, "page")]),
+            (
+                &[(0x38f, 1), (0x390, 4)],
+                [(Some("left"), "column"), (None, "page")],
+            ),
+            (
+                &[(0x391, 1), (0x392, 4)],
+                [(None, "page"), (Some("top"), "paragraph")],
+            ),
+        ];
+        for (options, [horizontal, vertical]) in invalid {
             let image = aligned(options).0.unwrap().unwrap().image;
-            assert_eq!(image.anchor_x_relative_from.as_deref(), Some("page"));
-            assert_eq!(image.anchor_x_align.is_some(), options.len() == 2);
-            assert_eq!(crate::rejection::take_best_effort().len(), 1);
+            assert_eq!(
+                (
+                    image.anchor_x_align.as_deref(),
+                    image.anchor_x_relative_from.as_deref()
+                ),
+                (horizontal.0, Some(horizontal.1)),
+                "{options:x?}"
+            );
+            assert_eq!(
+                (
+                    image.anchor_y_align.as_deref(),
+                    image.anchor_y_relative_from.as_deref()
+                ),
+                (vertical.0, Some(vertical.1)),
+                "{options:x?}"
+            );
+            assert_eq!(
+                crate::rejection::take_best_effort().len(),
+                1,
+                "{options:x?}"
+            );
         }
     }
 
@@ -1979,6 +2015,75 @@ mod tests {
             assert_eq!(store.omitted, omitted);
         }
     }
+    #[test]
+    fn turned_shapes_keep_their_unrotated_frame_anchored_and_inline() {
+        // A 400 x 300 twip rectangle at the SPA origin, turned 90 degrees.
+        let turned = |flags: u16, options: &[(u16, u32)]| {
+            let (mut word, mut table) = input(flags);
+            for (at, value) in [(12, 0i32), (16, 0), (20, 400), (24, 300)] {
+                table[at..at + 4].copy_from_slice(&value.to_le_bytes());
+            }
+            let mut props = Vec::new();
+            for (key, value) in [&[(4u16, 90u32 << 16)][..], options].concat() {
+                props.extend(key.to_le_bytes());
+                props.extend(value.to_le_bytes());
+            }
+            let shape = record(
+                0xf004,
+                15,
+                &[
+                    record(
+                        0xf00a,
+                        (1 << 4) | 2,
+                        &[1027u32.to_le_bytes(), 0xa00u32.to_le_bytes()].concat(),
+                    ),
+                    record(0xf00b, (((1 + options.len()) as u16) << 4) | 3, &props),
+                    record(0xf010, 0, &0u32.to_le_bytes()),
+                ]
+                .concat(),
+            );
+            let art = [
+                record(0xf000, 15, &[]),
+                vec![0],
+                record(0xf002, 15, &record(0xf003, 15, &shape)),
+            ]
+            .concat();
+            word[0x22a..0x22e].copy_from_slice(&(table.len() as u32).to_le_bytes());
+            word[0x22e..0x232].copy_from_slice(&(art.len() as u32).to_le_bytes());
+            table.extend(art);
+            let mut store = Store::read(&word, &table, 20).unwrap();
+            let mut drawing = store
+                .direct_drawing(Part::Main, 12, &mut usize::MAX.clone())
+                .unwrap()
+                .unwrap();
+            let direct::DirectRun::Shape(shape) = drawing.runs.pop().unwrap() else {
+                panic!("a shape")
+            };
+            (drawing.inline, shape.shape)
+        };
+        // Anchored to the page: the 15 x 20 pt unrotated frame about the
+        // centre of the 20 x 15 pt anchor.
+        let (inline, shape) = turned((1 << 1) | (1 << 3) | (3 << 5), &[]);
+        assert!(!inline && !shape.inline);
+        assert_eq!(
+            (shape.width_pt, shape.height_pt, shape.rotation),
+            (15.0, 20.0, 90.0)
+        );
+        assert_eq!((shape.anchor_x_pt, shape.anchor_y_pt), (2.5, -2.5));
+        // A pseudo-inline shape takes part in line flow at the same extent
+        // and keeps its turn.
+        let (inline, shape) = turned(
+            (2 << 1) | (2 << 3) | (3 << 5),
+            &[(0x390, 3), (0x392, 3), (0x53f, 0x10001)],
+        );
+        assert!(inline && shape.inline);
+        assert_eq!(
+            (shape.width_pt, shape.height_pt, shape.rotation),
+            (15.0, 20.0, 90.0)
+        );
+        assert!(crate::rejection::take_best_effort().is_empty());
+    }
+
     #[test]
     fn rotated_pictures_keep_their_angle_and_unrotated_frame() {
         // The fixture's SPA rectangle is the picture's anchor.
