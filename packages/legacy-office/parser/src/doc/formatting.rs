@@ -801,7 +801,7 @@ impl<'a> Formatting<'a> {
                     props.stamp_picture_bullet(code, character::BulletOrigin::Style(id));
                     continue;
                 }
-                if !props.apply(code, operand, &baseline)? && code != 0x484e {
+                if !props.apply(code, operand, &baseline)? {
                     self.unsupported_character_properties = true;
                 }
             }
@@ -940,8 +940,7 @@ impl<'a> Formatting<'a> {
                 }
                 0x2a33 => {
                     // MS-DOC 2.6.1 sprmCPlain requires a zero operand. Reset
-                    // to the actual paragraph baseline, not a fabricated
-                    // normal Hresi, and never let malformed input clear it.
+                    // to the actual paragraph baseline.
                     if operand != [0] {
                         return Err(unsupported("invalid Word plain-character reset operand"));
                     }
