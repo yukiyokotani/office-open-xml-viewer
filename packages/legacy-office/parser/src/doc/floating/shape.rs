@@ -860,8 +860,10 @@ impl<'a> Table<'a> {
                 ));
             }
             let units: Vec<u16> = data
-                .chunks_exact(2)
-                .map(|unit| u16::from_le_bytes([unit[0], unit[1]]))
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|unit| u16::from_le_bytes(*unit))
                 .take_while(|unit| *unit != 0)
                 .collect();
             Ok(Some(String::from_utf16_lossy(&units)))
