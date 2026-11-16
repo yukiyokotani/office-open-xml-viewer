@@ -388,7 +388,10 @@ fn decode(
     }
     let (width, height) = match extension {
         "png" => png_size(bytes)?,
-        "jpg" => jpeg_size(bytes, budget)?,
+        // Word stores and displays JPEG data of every coding process
+        // (its PDFs of arithmetic-coded and lossless controls show the
+        // picture). The frame header states the size in all of them.
+        "jpg" => jpeg_frame_size(bytes, budget, raster == Raster::TiffAndGifAware)?,
         "gif" => gif_size(bytes)?,
         _ => tiff_size(bytes, budget)?,
     };
@@ -506,7 +509,17 @@ pub(crate) fn png_size(b: &[u8]) -> Result<(u32, u32), String> {
         u32::from_be_bytes(b[20..24].try_into().unwrap()),
     ))
 }
+#[cfg(all(test, feature = "direct-ppt"))]
 pub(crate) fn jpeg_size(b: &[u8], budget: &mut usize) -> Result<(u32, u32), String> {
+    jpeg_frame_size(b, budget, false)
+}
+
+/// The image size of the first frame. `any_process` also admits the frames
+/// a common decoder may not read: arithmetic coding, lossless and
+/// hierarchical processes and sample precisions other than 8 bits (ITU-T
+/// T.81 table B.1; all share the frame header of B.2.2). The data is then
+/// passed on as it is stored.
+fn jpeg_frame_size(b: &[u8], budget: &mut usize, any_process: bool) -> Result<(u32, u32), String> {
     if !b.starts_with(&[0xff, 0xd8]) {
         return Err(unsupported("invalid OfficeArt JPEG header"));
     }
@@ -541,7 +554,8 @@ pub(crate) fn jpeg_size(b: &[u8], budget: &mut usize) -> Result<(u32, u32), Stri
         }
         // Do not skip an unsupported first frame and accidentally validate the
         // dimensions of a later frame that a decoder would not choose.
-        if matches!(marker, 0xc3 | 0xc5..=0xc7 | 0xc9..=0xcb | 0xcd..=0xcf | 0xde) {
+        let other_process = matches!(marker, 0xc3 | 0xc5..=0xc7 | 0xc9..=0xcb | 0xcd..=0xcf);
+        if (other_process && !any_process) || marker == 0xde {
             return Err(unsupported("unsupported OfficeArt JPEG frame encoding"));
         }
         let length = b
@@ -553,11 +567,12 @@ pub(crate) fn jpeg_size(b: &[u8], budget: &mut usize) -> Result<(u32, u32), Stri
             .and_then(|b| b.get(..length))
             .filter(|b| b.len() >= 2)
             .ok_or_else(|| unsupported("invalid OfficeArt JPEG segment length"))?;
-        if matches!(marker, 0xc0..=0xc2) {
-            // ITU-T T.81 B.2.2: Lf = 8 + 3 * Nf. Only 8-bit Huffman
-            // baseline/sequential/progressive frames are supported here.
+        if matches!(marker, 0xc0..=0xc2) || other_process {
+            // ITU-T T.81 B.2.2: Lf = 8 + 3 * Nf. 8-bit Huffman
+            // baseline/sequential/progressive frames, or any frame for a
+            // host that passes the data on (a precision of 2 to 16 bits).
             if segment.len() < 8
-                || segment[2] != 8
+                || !(segment[2] == 8 || (any_process && (2..=16).contains(&segment[2])))
                 || segment[7] == 0
                 || segment.len() != 8 + 3 * usize::from(segment[7])
             {
@@ -969,5 +984,34 @@ mod tests {
         let embedded = store_entry(Some(&blip_with_trailer), blip_with_trailer.len(), 0, 1);
         let (entry, _) = record_span_with_end(&embedded, 0, &mut 1, "BSE").unwrap();
         assert!(read_store_entry_span(&entry, &embedded, None, &mut 10, usize::MAX).is_err());
+    }
+}
+
+#[cfg(test)]
+mod jpeg_process_tests {
+    use super::jpeg_frame_size;
+
+    fn jpeg(marker: u8, precision: u8) -> Vec<u8> {
+        let mut bytes = vec![0xff, 0xd8, 0xff, marker, 0, 11, precision, 0, 2, 0, 3, 1];
+        bytes.extend([1, 0x11, 0]);
+        bytes
+    }
+
+    #[test]
+    fn every_coding_process_states_its_size_for_a_host_that_passes_the_data_on() {
+        // SOF3 lossless, SOF9 arithmetic sequential, SOF10 arithmetic
+        // progressive; 12-bit extended sequential.
+        for (marker, precision) in [(0xc3, 8), (0xc9, 8), (0xca, 8), (0xc1, 12), (0xc3, 16)] {
+            let bytes = jpeg(marker, precision);
+            assert_eq!(jpeg_frame_size(&bytes, &mut 100, true).unwrap(), (3, 2));
+            assert!(jpeg_frame_size(&bytes, &mut 100, false).is_err());
+        }
+        assert_eq!(
+            jpeg_frame_size(&jpeg(0xc0, 8), &mut 100, false).unwrap(),
+            (3, 2)
+        );
+        // A precision outside 2..=16 and the DHP marker stay rejected.
+        assert!(jpeg_frame_size(&jpeg(0xc3, 17), &mut 100, true).is_err());
+        assert!(jpeg_frame_size(&jpeg(0xde, 8), &mut 100, true).is_err());
     }
 }

@@ -174,6 +174,10 @@ fn group_properties(shape: Record<'_>, budget: &mut usize) -> Result<f64, String
             0x4 => Err(unsupported("rotated Word drawing groups are not supported")),
             0x40..=0x7f | 0x384..=0x388 | 0x38f..=0x392 | 0x3aa | 0x3bf | 0x7c4 | 0x7c5 => Ok(()),
             0x7c0..=0x7c3 if value == 0 => Ok(()),
+            // Diagram properties (MS-ODRAW 2.3.17): dgmt and its siblings
+            // describe how an editor lays the group out as a diagram or a
+            // drawing canvas. The members carry their own geometry.
+            0x500..=0x53e => Ok(()),
             0x53f if value & 0x0001_0001 != 0x0001_0001 => Ok(()),
             _ => Err(unsupported(format!(
                 "Word drawing group property {id:#06x}={value:#x} is not supported"
@@ -425,7 +429,12 @@ impl Store<'_> {
                 ));
             }
             let Some(image_index) = head.picture.pib else {
-                self.omitted = true;
+                if head.flags & 0x10 == 0 {
+                    // A picture frame without a picture: Word draws nothing.
+                    crate::rejection::skipped("Word picture shape without a picture");
+                } else {
+                    self.omitted = true;
+                }
                 return Ok(None);
             };
             let Some(extension) = self.load_image(image_index)? else {

@@ -47,6 +47,9 @@ pub(in crate::doc) struct Facts {
     /// A linear shade (msofillShade / msofillShadeScale) projected by the
     /// shared OfficeArt rules; see `Paint::linear_shade`.
     pub gradient: Option<Gradient>,
+    /// MS-ODRAW 2.3.13 shadow style, in the shape of the VML `v:shadow`
+    /// the DOCX parser reads (the two state the same properties).
+    pub shadow: Option<docx_model::VmlShadow>,
     /// MS-ODRAW 2.3.18.5 rotation, clockwise about the centre, in degrees.
     /// Only group members may carry a nonzero rotation (see `group`).
     pub rotation: f64,
@@ -69,6 +72,8 @@ pub(in crate::doc) struct Line {
     pub miter: Option<f64>,
     /// Start/end of the projected DrawingML path, not the binary path.
     pub ends: [Option<LineEnd<'static>>; 2],
+    /// ECMA-376 20.1.10.15 ST_CompoundLine other than `sng`.
+    pub compound: Option<&'static str>,
 }
 
 pub(in crate::doc) struct Gradient {
@@ -78,6 +83,9 @@ pub(in crate::doc) struct Gradient {
     pub angle: f64,
     pub scaled: bool,
     pub rotate_with_shape: bool,
+    /// A path shade (msofillShadeCenter, msofillShadeShape): the DrawingML
+    /// path (`rect`, `shape`) and the focus rectangle as l, t, r, b insets.
+    pub radial: Option<(&'static str, [f64; 4])>,
 }
 
 pub(in crate::doc) struct Text {
@@ -92,14 +100,20 @@ pub(in crate::doc) struct Text {
 /// MS-ODRAW 2.4.24 shape types whose unadjusted outline is the named
 /// ECMA-376 ST_ShapeType preset. Adjusted and custom geometries are rejected
 /// before this mapping is consulted.
-fn preset(kind: u16) -> Option<&'static str> {
-    Paint::default().geometry(kind).or_else(|| {
-        // Word's own DOCX of the corpus documents writes these types as the
-        // same presets as the shared PowerPoint table (officeart::preset).
-        matches!(kind, 38 | 51)
-            .then(|| crate::officeart::preset::name(kind))
-            .flatten()
-    })
+fn preset(kind: u16) -> &'static str {
+    // Word's own DOCX of the corpus documents writes the types it was
+    // observed with as the same presets as the shared table of PowerPoint's
+    // conversions (officeart::preset). A type outside that table (the text
+    // effects 136..=175 among them) has no preset: its box is drawn.
+    Paint::default()
+        .geometry(kind)
+        .or_else(|| crate::officeart::preset::name(kind))
+        .unwrap_or_else(|| {
+            crate::rejection::approximated(
+                "Word drawing shape type without a preset drawn as a rectangle",
+                "rect",
+            )
+        })
 }
 
 /// Types whose explicit OfficeArt path is their outline. Type 100 (0x64,
@@ -123,31 +137,47 @@ fn is_line(kind: u16) -> bool {
 ///   ten shapes of varied extents; adj1 (the sixth value) was never authored
 ///   and keeps the preset default.
 ///
-/// A value outside these rules has no evidence and is rejected.
-fn adjustments(kind: u16, legacy: &[Option<i32>; 10]) -> Result<Vec<Option<f64>>, String> {
+/// Every other type follows the rules read from PowerPoint's conversions
+/// of the same OfficeArt shapes (`officeart::preset::adjustments`). An
+/// adjust value without a rule leaves the preset's default.
+fn adjustments(kind: u16, legacy: &[Option<i32>; 10], extent: [i64; 2]) -> Vec<Option<f64>> {
+    const DEFAULTS: &str =
+        "Word drawing shape adjust values without a mapping use the preset defaults";
+    if legacy.iter().all(Option::is_none) {
+        return Vec::new();
+    }
     let sources: &[Option<usize>] = match kind {
         38 => &[Some(0)],
         51 => &[None, Some(4), Some(3), Some(2), Some(1), Some(0)],
-        _ => &[],
-    };
-    for (index, value) in legacy.iter().enumerate() {
-        if value.is_some() && !sources.contains(&Some(index)) {
-            return Err(unsupported(format!(
-                "Word drawing shape type {kind} adjust values have no evidenced mapping"
-            )));
+        _ => {
+            return match crate::officeart::preset::adjustments(kind, legacy, extent[0], extent[1]) {
+                Ok(Some(values)) => {
+                    let used = values
+                        .iter()
+                        .rposition(Option::is_some)
+                        .map_or(0, |index| index + 1);
+                    values[..used].to_vec()
+                }
+                Ok(None) => Vec::new(),
+                Err(_) => crate::rejection::approximated(DEFAULTS, Vec::new()),
+            };
         }
+    };
+    if legacy
+        .iter()
+        .enumerate()
+        .any(|(index, value)| value.is_some() && !sources.contains(&Some(index)))
+    {
+        crate::rejection::approximated(DEFAULTS, ());
     }
-    if legacy.iter().all(Option::is_none) {
-        return Ok(Vec::new());
-    }
-    Ok(sources
+    sources
         .iter()
         .map(|source| {
             source
                 .and_then(|index| legacy[index])
                 .map(|value| f64::from(value) / 21_600.0 * 100_000.0)
         })
-        .collect())
+        .collect()
 }
 
 impl Facts {
@@ -163,13 +193,7 @@ impl Facts {
     ) -> Result<Self, String> {
         // msosptNotPrimitive (0) is a freeform: its outline is the explicit
         // OfficeArt path, decoded in `facts`.
-        let preset = if is_freeform(kind) {
-            None
-        } else {
-            Some(preset(kind).ok_or_else(|| {
-                unsupported(format!("Word drawing shape type {kind} is not supported"))
-            })?)
-        };
+        let preset = (!is_freeform(kind)).then(|| preset(kind));
         // MS-ODRAW 2.2.40 FSP flags: group members, patriarchs, deleted,
         // OLE and master-linked shapes need facts this projection lacks.
         // fConnector also identifies msosptLine (2.4.24); it does not change
@@ -177,7 +201,9 @@ impl Facts {
         // that this newly admitted class discards no endpoint binding. The
         // established straight connector preset keeps its existing policy.
         let membership = if child { 0x2 } else { 0 };
-        if flags & 0x43f != membership || (flags & 0x100 != 0 && !matches!(kind, 20 | 32)) {
+        // The connector types 33..=40 (bent and curved connectors) are drawn
+        // as their static preset path, like the straight connector.
+        if flags & 0x43f != membership || (flags & 0x100 != 0 && !matches!(kind, 20 | 32..=40)) {
             return Err(unsupported(
                 "Word drawing shape has unsupported shape flags",
             ));
@@ -215,7 +241,7 @@ impl Facts {
                 }
             }
         }
-        table.facts(kind, preset, client_text, spid, budget)
+        table.facts(kind, preset, client_text, spid, extent, budget)
     }
 }
 
@@ -290,6 +316,7 @@ impl<'a> Table<'a> {
         preset: Option<&'static str>,
         client_text: Option<u32>,
         spid: Option<u32>,
+        extent: [i64; 2],
         budget: &mut usize,
     ) -> Result<Facts, String> {
         let mut paint = Paint::default();
@@ -360,7 +387,7 @@ impl<'a> Table<'a> {
                 // Word's DOCX reproduces those callouts from the adjust values
                 // alone (0x80008 on five shapes, 0x40004 on one).
                 0x37f if kind == 51 && value & !0x000c_000c == 0 => {}
-                0x147..=0x150 if matches!(kind, 38 | 51) => {
+                0x147..=0x150 if !freeform => {
                     legacy_adjust[usize::from(id - 0x147)] = Some(value as i32);
                 }
                 // pInscribe (2.3.6.20) places a freeform's text. An array of
@@ -381,10 +408,13 @@ impl<'a> Table<'a> {
                     None => shade.scalar(value),
                 },
                 0x17f | 0x180..=0x1bf | 0x1c0..=0x1d7 | 0x1ff => paint.property(id, value)?,
-                0x23f => {}
+                // Shadow style (MS-ODRAW 2.3.13), read below when fShadow.
+                0x200..=0x23f => {}
                 // Black-and-white display modes only affect B/W output.
                 0x304..=0x306 => {}
-                0x303 if value == 0 => {}
+                // cxstyle (MS-ODRAW 2.3.4.5): how an editor reroutes the
+                // connector. The preset of the shape type is its path.
+                0x303 if value == 0 || (33..=40).contains(&kind) => {}
                 0x33f => {}
                 0x384..=0x387 | 0x388 | 0x38f..=0x392 | 0x3aa | 0x3bf => {}
                 0x53f => {}
@@ -410,7 +440,6 @@ impl<'a> Table<'a> {
             (0x1ff, 9, "Word opaque line background is not supported"),
             (0x1ff, 6, "Word inset line pens are not supported"),
             (0x1ff, 0, "Word no-line dash rendering is not supported"),
-            (0x23f, 1, "Word drawing shadows are not supported"),
             (0x33f, 0, "Word background drawing shapes are not supported"),
             (0x33f, 5, "Word OLE icon shapes are not supported"),
             (0x3bf, 11, "Word horizontal rules are not supported"),
@@ -427,9 +456,16 @@ impl<'a> Table<'a> {
         if self.boolean(0x33f, 7).is_some() || self.boolean(0x33f, 6).is_some() {
             return Err(unsupported("Word drawing flip overrides are not supported"));
         }
-        if self.values.get(&0x1cd).is_some_and(|value| *value != 0) {
-            return Err(unsupported("Word compound drawing lines are not supported"));
-        }
+        // MS-ODRAW 2.3.8.19 lineStyle (MSOLINESTYLE) is the ECMA-376
+        // 20.1.10.15 ST_CompoundLine of the same order.
+        let compound = match self.values.get(&0x1cd).copied().unwrap_or(0) {
+            0 => None,
+            1 => Some("dbl"),
+            2 => Some("thickThin"),
+            3 => Some("thinThick"),
+            4 => Some("tri"),
+            _ => crate::rejection::spec_default("invalid Word drawing line style", None),
+        };
 
         let mut subpaths = Vec::new();
         let mut path_paint = (true, true);
@@ -459,24 +495,64 @@ impl<'a> Table<'a> {
         } else {
             None
         };
+        // MS-ODRAW 2.3.7.1 msofillShadeCenter (5) and msofillShadeShape (6)
+        // shade from the focus rectangle fillToLeft..fillToBottom
+        // (2.3.7.14-17) outward, along the bounding rectangle or the shape's
+        // own outline. They are the VML `gradientRadial` fill, which the
+        // DOCX parser reads as a DrawingML path gradient: the same stops as
+        // the linear shade, travelling from the focus rectangle outward.
+        let radial = match paint.fill_type {
+            Some(5) => Some("rect"),
+            Some(6) => Some("shape"),
+            _ => None,
+        };
+        let mut shade_paint = paint;
+        if radial.is_some() {
+            shade_paint.fill_type = Some(4);
+        }
         let gradient = if !line_shape && path_paint.0 {
-            paint
+            shade_paint
                 // Shade scratch and stops are bounded per shape; the
                 // retained stops are charged with the model payload.
                 .linear_shade(&shade, true, budget, &mut (1usize << 20))?
                 .map(|shade| -> Result<Gradient, String> {
-                    let stops = shade
+                    let mut stops = shade
                         .projection
                         .stops
                         .iter()
                         .zip(&shade.alphas)
                         .map(|(stop, alpha)| Ok((stop.position(), rgb(stop.color, *alpha)?)))
                         .collect::<Result<Vec<_>, String>>()?;
+                    let radial = radial.map(|path| {
+                        for stop in &mut stops {
+                            stop.0 = 1.0 - stop.0;
+                        }
+                        stops.reverse();
+                        let side = |id: u16| {
+                            (f64::from(self.values.get(&id).copied().unwrap_or(0) as i32)
+                                / 65_536.0)
+                                .clamp(0.0, 1.0)
+                        };
+                        (
+                            path,
+                            [
+                                side(0x18d),
+                                side(0x18e),
+                                1.0 - side(0x18f),
+                                1.0 - side(0x190),
+                            ],
+                        )
+                    });
                     Ok(Gradient {
                         stops,
-                        angle: shade.projection.angle.degrees(),
+                        angle: if radial.is_some() {
+                            0.0
+                        } else {
+                            shade.projection.angle.degrees()
+                        },
                         scaled: shade.scaled,
                         rotate_with_shape: shade.rotate_with_shape,
+                        radial,
                     })
                 })
                 .transpose()?
@@ -532,6 +608,7 @@ impl<'a> Table<'a> {
                     join,
                     miter,
                     ends,
+                    compound,
                 })
             }
             None => {
@@ -580,10 +657,53 @@ impl<'a> Table<'a> {
             }
             _ => return Err(unsupported("inconsistent Word shape textbox reference")),
         };
+        let shadow = if self.boolean(0x23f, 1) == Some(true) {
+            let value = |id: u16| self.values.get(&id).copied();
+            let fixed = |id: u16, default: f64| {
+                value(id).map_or(default, |value| f64::from(value as i32) / 65_536.0)
+            };
+            let offset = |x: u16, y: u16, default: i32| docx_model::VmlShadowOffset {
+                x_pt: f64::from(value(x).map_or(default, |value| value as i32)) / 12_700.0,
+                y_pt: f64::from(value(y).map_or(default, |value| value as i32)) / 12_700.0,
+                x_fraction: 0.0,
+                y_fraction: 0.0,
+            };
+            Some(docx_model::VmlShadow {
+                // MSOSHADOWTYPE (2.4.14).
+                kind: match value(0x200).unwrap_or(0) {
+                    0 => "single",
+                    1 => "double",
+                    2..=4 => "perspective",
+                    5 | 6 => "emboss",
+                    _ => crate::rejection::spec_default("invalid Word shadow type", "single"),
+                }
+                .into(),
+                color: rgb(value(0x201).unwrap_or(0x0080_8080), 65_536)?,
+                color2: rgb(value(0x202).unwrap_or(0x00cb_cbcb), 65_536)?,
+                offset: offset(0x205, 0x206, 25_400),
+                offset2: offset(0x207, 0x208, -25_400),
+                opacity: fixed(0x204, 1.0).clamp(0.0, 1.0),
+                obscured: self.boolean(0x23f, 0) == Some(true),
+                origin: (fixed(0x210, 0.0), fixed(0x211, 0.0)),
+                matrix: [
+                    fixed(0x209, 1.0),
+                    fixed(0x20a, 0.0),
+                    fixed(0x20b, 0.0),
+                    fixed(0x20c, 1.0),
+                    fixed(0x20d, 0.0),
+                    fixed(0x20e, 0.0),
+                ],
+                // The offsets are lengths (EMUs), not fractions of the shape.
+                absolute_perspective: true,
+            })
+        } else {
+            None
+        };
         Ok(Facts {
             preset,
+            shadow,
             subpaths,
-            adjustments: adjustments(kind, &legacy_adjust)?,
+            adjustments: adjustments(kind, &legacy_adjust, extent),
             fill_picture,
             gradient,
             rotation,
@@ -1220,26 +1340,118 @@ mod tests {
         assert!(read(1, 0xa00, &container(&[], &[], &[]), [9000, 0]).is_err());
     }
 
+    fn best_effort() -> Vec<&'static str> {
+        crate::rejection::take_best_effort()
+            .into_iter()
+            .map(|(_, site)| site)
+            .collect()
+    }
+
+    #[test]
+    fn shape_types_use_the_shared_presets_and_adjust_rules() {
+        best_effort();
+        // msosptWedgeRectCallout (61) with both adjust values.
+        let callout = container(&[(0x147, 0x189c), (0x148, 0x5eec)], &[], &[]);
+        let facts = read(61, 0xa00, &callout, [9000, 3000]).unwrap();
+        assert_eq!(facts.preset, Some("wedgeRectCallout"));
+        assert_eq!(facts.adjustments.len(), 2);
+        assert!(facts.adjustments.iter().all(Option::is_some));
+        assert!(best_effort().is_empty());
+        // An adjust value without a rule keeps the preset default.
+        let adjusted = container(&[(0x14c, 100)], &[], &[]);
+        let facts = read(51, 0xa00, &adjusted, [9000, 3000]).unwrap();
+        assert_eq!(facts.preset, Some("accentBorderCallout2"));
+        assert_eq!(
+            best_effort(),
+            ["Word drawing shape adjust values without a mapping use the preset defaults"]
+        );
+        // A bent connector (fConnector, cxstyle 1) is its static preset.
+        let bent = container(&[(0x303, 1)], &[], &[]);
+        let facts = read(34, 0xb00, &bent, [9000, 3000]).unwrap();
+        assert_eq!(facts.preset, Some("bentConnector3"));
+        assert!(best_effort().is_empty());
+        // A text-effect type has no preset: its box is drawn.
+        let facts = read(136, 0xa00, &container(&[], &[], &[]), [9000, 3000]).unwrap();
+        assert_eq!(facts.preset, Some("rect"));
+        assert_eq!(
+            best_effort(),
+            ["Word drawing shape type without a preset drawn as a rectangle"]
+        );
+    }
+
+    #[test]
+    fn compound_lines_shadows_and_path_shades_reach_the_model() {
+        best_effort();
+        let line = |style: u32| {
+            let bytes = container(&[(0x1cd, style)], &[], &[]);
+            read(1, 0xa00, &bytes, [9000, 3000]).unwrap().line.unwrap()
+        };
+        assert_eq!(line(1).compound, Some("dbl"));
+        assert_eq!(line(9).compound, None);
+        assert_eq!(best_effort(), ["invalid Word drawing line style"]);
+
+        // fShadow with an offset of 5 pt by 2 pt and the default colour.
+        let shadowed = container(
+            &[(0x205, 63_500), (0x206, 25_400), (0x23f, 0x0003_0002)],
+            &[],
+            &[],
+        );
+        let shadow = read(1, 0xa00, &shadowed, [9000, 3000])
+            .unwrap()
+            .shadow
+            .unwrap();
+        assert_eq!(
+            (shadow.kind.as_str(), shadow.color.as_str()),
+            ("single", "808080")
+        );
+        assert_eq!((shadow.offset.x_pt, shadow.offset.y_pt), (5.0, 2.0));
+        assert_eq!((shadow.opacity, shadow.obscured), (1.0, false));
+        assert_eq!(shadow.matrix, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+        let plain = container(&[(0x201, 0), (0x23f, 0x0002_0000)], &[], &[]);
+        assert!(read(1, 0xa00, &plain, [9000, 3000])
+            .unwrap()
+            .shadow
+            .is_none());
+
+        // msofillShadeCenter from the centre point: a path gradient whose
+        // first stop is at the focus.
+        let centre = container(
+            &[
+                (0x180, 5),
+                (0x181, 0x00e6_aa78),
+                (0x18c, 100),
+                (0x18d, 0x8000),
+                (0x18e, 0x8000),
+                (0x18f, 0x8000),
+                (0x190, 0x8000),
+            ],
+            &[],
+            &[],
+        );
+        let gradient = read(1, 0xa00, &centre, [9000, 3000])
+            .unwrap()
+            .gradient
+            .unwrap();
+        assert_eq!(gradient.radial, Some(("rect", [0.5, 0.5, 0.5, 0.5])));
+        assert_eq!(gradient.stops.first().map(|stop| stop.0), Some(0.0));
+        assert_eq!(gradient.stops.last().map(|stop| stop.0), Some(1.0));
+        assert!(best_effort().is_empty());
+    }
+
     #[test]
     #[allow(clippy::type_complexity)]
     fn unrepresented_display_properties_fail_closed() {
         let rejected: &[(u16, &[(u16, u32)], &[(u16, u32)])] = &[
             // Unsupported shape type, adjusted preset geometry and a freeform
             // without a decodable path.
-            (52, &[], &[]),
-            (51, &[(0x14c, 100)], &[]),
             (0, &[], &[]),
             (0, &[(0x144, 4)], &[]),
-            (1, &[(0x147, 100)], &[]),
             // System/palette/scheme colors and non-solid paint.
             (1, &[(0x1c0, 0x1000_0002)], &[]),
             (1, &[(0x1c0, 0x1001_0011)], &[]),
             (1, &[(0x181, 0x0800_0001)], &[]),
-            (1, &[(0x180, 5)], &[]),
             (1, &[(0x1c4, 1)], &[]),
-            (1, &[(0x1cd, 1)], &[]),
             // Shadows, auto margins, no-wrap text, flow and linked chains.
-            (1, &[(0x23f, 0x20002)], &[]),
             (1, &[(0xbf, 0x80008)], &[]),
             (1, &[(0x85, 2)], &[]),
             (1, &[(0x88, 1)], &[]),

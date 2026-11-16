@@ -136,13 +136,13 @@ pub(crate) fn name(kind: u16) -> Option<&'static str> {
     })
 }
 
-#[cfg(any(test, feature = "direct-ppt"))]
+#[cfg(any(test, feature = "direct-ppt", feature = "direct-doc"))]
 const SPACE: f64 = 21_600.0;
 
 /// One DrawingML guide computed from one legacy adjust value (index 0 is
 /// adjustValue, 0x147).
 #[derive(Clone, Copy)]
-#[cfg(any(test, feature = "direct-ppt"))]
+#[cfg(any(test, feature = "direct-ppt", feature = "direct-doc"))]
 enum Rule {
     /// a / 21600
     Scale(usize),
@@ -181,7 +181,7 @@ enum Rule {
 /// Guides per DrawingML slot (adj/adj1 .. adj8) for the evidenced shapes.
 /// `None` in a slot keeps the preset default; the legacy values a shape may
 /// carry are exactly those named by its rules.
-#[cfg(any(test, feature = "direct-ppt"))]
+#[cfg(any(test, feature = "direct-ppt", feature = "direct-doc"))]
 fn rules(kind: u16) -> Option<&'static [Option<Rule>]> {
     use Rule::*;
     Some(match kind {
@@ -277,7 +277,7 @@ fn rules(kind: u16) -> Option<&'static [Option<Rule>]> {
     })
 }
 
-#[cfg(any(test, feature = "direct-ppt"))]
+#[cfg(any(test, feature = "direct-ppt", feature = "direct-doc"))]
 fn sources(rule: Rule) -> (usize, Option<usize>) {
     match rule {
         Rule::Scale(i)
@@ -301,7 +301,7 @@ fn sources(rule: Rule) -> (usize, Option<usize>) {
 /// DrawingML guide values (100000 = 1) for `kind` from the legacy adjust
 /// values and the DrawingML extent. `Ok(None)` means no adjust value is
 /// authored, so the preset defaults apply.
-#[cfg(any(test, feature = "direct-ppt"))]
+#[cfg(any(test, feature = "direct-ppt", feature = "direct-doc"))]
 pub(crate) fn adjustments(
     kind: u16,
     legacy: &[Option<i32>; 10],

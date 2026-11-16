@@ -261,10 +261,17 @@ impl Store<'_> {
                     })
                     .collect(),
                 angle: gradient.angle,
-                grad_type: "linear".into(),
+                grad_type: if gradient.radial.is_some() {
+                    "radial"
+                } else {
+                    "linear"
+                }
+                .into(),
                 scaled: Some(gradient.scaled),
-                path: None,
-                fill_to_rect: None,
+                path: gradient.radial.map(|(path, _)| path.into()),
+                fill_to_rect: gradient
+                    .radial
+                    .map(|(_, [l, t, r, b])| ooxml_common::fill::FillRect { l, t, r, b }),
                 tile_rect: None,
                 flip: None,
                 rot_with_shape: Some(gradient.rotate_with_shape),
@@ -728,6 +735,8 @@ fn direct_shape(
         stroke_cap: line.map(|line| line.cap.to_owned()),
         stroke_join: line.map(|line| line.join.to_owned()),
         stroke_miter_limit: line.and_then(|line| line.miter),
+        vml_shadow: shape.shadow.clone(),
+        stroke_compound: line.and_then(|line| line.compound).map(str::to_owned),
         head_end: line.and_then(|line| end(line.ends[0])),
         tail_end: line.and_then(|line| end(line.ends[1])),
         rotation: placed.rotation,
@@ -767,6 +776,12 @@ fn direct_shape(
     if let Some(ShapeFill::Image { mime_type, .. }) = &run.fill {
         total.add(mime_type.capacity())?;
     }
+    if let Some(shadow) = &run.vml_shadow {
+        total.add(shadow.kind.capacity() + shadow.color.capacity() + shadow.color2.capacity())?;
+    }
+    if let Some(ShapeFill::Gradient { path, .. }) = &run.fill {
+        total.add(path.as_ref().map_or(0, String::capacity))?;
+    }
     if let Some(ShapeFill::Gradient { stops, .. }) = &run.fill {
         total.add(stops.capacity() * std::mem::size_of::<docx_model::GradientStop>())?;
         for stop in stops {
@@ -789,6 +804,7 @@ fn direct_shape(
         }),
         run.stroke.as_ref(),
         run.stroke_dash.as_ref(),
+        run.stroke_compound.as_ref(),
         run.stroke_cap.as_ref(),
         run.stroke_join.as_ref(),
         run.text_autofit.as_ref(),

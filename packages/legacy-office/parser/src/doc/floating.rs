@@ -504,7 +504,14 @@ impl<'a> Store<'a> {
             return Ok(None);
         }
         let Some(image_index) = picture.pib else {
-            self.omitted = true;
+            if flags & 0x10 == 0 {
+                // A picture frame without a picture: Word draws nothing
+                // (Word control: an icon file Word could not store).
+                crate::rejection::skipped("Word picture shape without a picture");
+            } else {
+                // An OLE object without its presentation picture.
+                self.omitted = true;
+            }
             return Ok(None);
         };
         let Some(extension) = self.load_image(image_index)? else {
