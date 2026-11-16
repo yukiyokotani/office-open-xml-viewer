@@ -269,6 +269,17 @@ export {
   tracePresetLeader,
   trimGeometryPathEnds,
 } from './shape/arrow';
+export {
+  CONNECTOR_PRESETS,
+  CALLOUT_PRESETS,
+  hasPresetLineEnds,
+  isRetractableLeaderPreset,
+  planPresetLeader,
+  tracePlannedPresetLeader,
+  drawPresetLineEndArrows,
+  type PresetLeaderPlan,
+  type LineEndAnchors,
+} from './shape/preset-line-ends';
 // Shared embedded-SVG decoder (Microsoft asvg:svgBlip extension) — used by all
 // three renderers to prefer the vector original over the raster fallback.
 // Path-keyed for the lazy byte-on-demand pipeline: fetches SVG bytes via a

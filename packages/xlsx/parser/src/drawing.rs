@@ -1327,7 +1327,14 @@ pub(crate) fn collect_shapes(
                 out,
                 child_depth,
             );
-        } else if tag == "sp" {
+        } else if tag == "sp" || tag == "cxnSp" {
+            // `<xdr:cxnSp>` (ECMA-376 Part 1 §20.5.2.13) carries the same
+            // `<xdr:spPr>` (§20.5.2.30) / `<xdr:style>` children as `<xdr:sp>`
+            // (§20.5.2.29); only its non-visual block differs
+            // (`<xdr:nvCxnSpPr>` §20.5.2.19 with `<xdr:cNvCxnSpPr>` §20.5.2.4,
+            // whose connection sites are not needed to paint). So a connector
+            // is a shape whose preset is a line or a bent/curved connector and
+            // whose `<a:ln>` may carry head/tail ends (§20.1.8.38 / §20.1.8.57).
             let sp_pr = child
                 .children()
                 .find(|n| n.is_element() && n.tag_name().name() == "spPr");
@@ -1830,7 +1837,7 @@ fn parse_shape_doc_anchors(
             // second time (the sample-27 regression), so it is owned solely by
             // `ws.images`, including a oneCellAnchor picture selected by MCE.
             // Group image leaves remain owned by collect_shapes below.
-            t == "sp"
+            t == "sp" || t == "cxnSp"
         }) {
             // §20.1.2.2.8 — a hidden stand-alone shape/pic is not rendered.
             if xdr_node_hidden(&sp) {
@@ -1857,17 +1864,29 @@ fn parse_shape_doc_anchors(
             let Some(xfrm) = parse_xfrm(&xfrm_n) else {
                 continue;
             };
-            if xfrm.ext_x == 0.0 || xfrm.ext_y == 0.0 {
+            // A straight horizontal / vertical line legitimately has a zero
+            // `<a:ext>` on one axis (§20.1.7.3 `ext`: cx / cy are
+            // ST_PositiveCoordinate, so 0 is valid). This holds for an
+            // `xdr:sp` with a line preset as much as for an `xdr:cxnSp`, so
+            // admit one zero axis when the other has extent, for both; the
+            // renderer's zero-area guard then paints only stroked presets. A
+            // shape without any extent is still dropped. A negative (invalid)
+            // extent keeps the pre-existing behaviour below.
+            let (zero_x, zero_y) = (xfrm.ext_x == 0.0, xfrm.ext_y == 0.0);
+            if (zero_x || zero_y) && !(xfrm.ext_x > 0.0 || xfrm.ext_y > 0.0) {
                 continue;
             }
             native_ext_cx = xfrm.ext_x as i64;
             native_ext_cy = xfrm.ext_y as i64;
+            // Normalize against the shape's own extent; a zero axis has no
+            // extent to divide by, so use a unit one there (only there: a
+            // negative extent still normalizes to the full anchor as before).
             collect_shapes(
                 &content,
                 xfrm.off_x,
                 xfrm.off_y,
-                xfrm.ext_x,
-                xfrm.ext_y,
+                if zero_x { 1.0 } else { xfrm.ext_x },
+                if zero_y { 1.0 } else { xfrm.ext_y },
                 DrawingGroupTransform::IDENTITY,
                 theme_colors,
                 theme_format_scheme,
@@ -1875,6 +1894,18 @@ fn parse_shape_doc_anchors(
                 &mut shapes,
                 DepthGuard::root(),
             );
+            // The anchor rect carries the shape's real size, so a zero-extent
+            // axis spans the whole anchor on that axis (the line itself).
+            for shape in shapes.iter_mut() {
+                if zero_x {
+                    shape.x = 0.0;
+                    shape.w = 1.0;
+                }
+                if zero_y {
+                    shape.y = 0.0;
+                    shape.h = 1.0;
+                }
+            }
         } else {
             continue;
         }
@@ -5268,5 +5299,156 @@ mod group_transform_contract_tests {
         assert!((mapped.rotation_degrees - 75.0).abs() < 1e-9);
         assert!(mapped.flip_h);
         assert!(mapped.flip_v);
+    }
+}
+
+/// ECMA-376 Part 1 §20.5.2.13 `<xdr:cxnSp>`: a connector is drawn like a
+/// shape, with its geometry from `<xdr:spPr>` (§20.5.2.30) and optional
+/// `<a:headEnd>` / `<a:tailEnd>` line ends (§20.1.8.38 / §20.1.8.57) on its
+/// `<a:ln>`. A stand-alone line keeps a zero `<a:ext>` axis (§20.1.7.3).
+#[cfg(test)]
+mod connector_tests {
+    use super::*;
+
+    const NS: &str = r#"xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing"
+        xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main""#;
+
+    fn connector(ext: &str, flip: &str, ln: &str) -> String {
+        format!(
+            r#"<xdr:wsDr {NS}><xdr:twoCellAnchor>
+              <xdr:from><xdr:col>1</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>1</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>
+              <xdr:to><xdr:col>4</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>1</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>
+              <xdr:cxnSp macro="">
+                <xdr:nvCxnSpPr><xdr:cNvPr id="3" name="C"/><xdr:cNvCxnSpPr/></xdr:nvCxnSpPr>
+                <xdr:spPr>
+                  <a:xfrm{flip}><a:off x="0" y="0"/><a:ext {ext}/></a:xfrm>
+                  <a:prstGeom prst="straightConnector1"><a:avLst/></a:prstGeom>
+                  {ln}
+                </xdr:spPr>
+              </xdr:cxnSp>
+              <xdr:clientData/>
+            </xdr:twoCellAnchor></xdr:wsDr>"#
+        )
+    }
+
+    fn parse(xml: &str) -> Vec<ShapeAnchor> {
+        parse_shape_anchors(xml, &[], &ThemeFormatScheme::default(), &HashMap::new())
+    }
+
+    /// A stand-alone `<xdr:sp>` with preset `prst` and extent `ext`.
+    fn shape(prst: &str, ext: &str) -> String {
+        format!(
+            r#"<xdr:wsDr {NS}><xdr:twoCellAnchor>
+              <xdr:from><xdr:col>1</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>1</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>
+              <xdr:to><xdr:col>4</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>3</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>
+              <xdr:sp macro="" textlink="">
+                <xdr:nvSpPr><xdr:cNvPr id="2" name="S"/><xdr:cNvSpPr/></xdr:nvSpPr>
+                <xdr:spPr>
+                  <a:xfrm><a:off x="100" y="200"/><a:ext {ext}/></a:xfrm>
+                  <a:prstGeom prst="{prst}"><a:avLst/></a:prstGeom>
+                  <a:ln w="12700"><a:solidFill><a:srgbClr val="000000"/></a:solidFill></a:ln>
+                </xdr:spPr>
+              </xdr:sp>
+              <xdr:clientData/>
+            </xdr:twoCellAnchor></xdr:wsDr>"#
+        )
+    }
+
+    fn frame(anchors: &[ShapeAnchor]) -> (f64, f64, f64, f64) {
+        let s = &anchors[0].shapes[0];
+        (s.x, s.y, s.w, s.h)
+    }
+
+    #[test]
+    fn standalone_sp_line_with_one_zero_axis_spans_its_anchor() {
+        // §20.1.7.3: cx / cy are ST_PositiveCoordinate, so a flat line is
+        // valid for an `xdr:sp` as much as for an `xdr:cxnSp`.
+        assert_eq!(
+            frame(&parse(&shape("line", r#"cx="914400" cy="0""#))),
+            (0.0, 0.0, 1.0, 1.0)
+        );
+        assert_eq!(
+            frame(&parse(&shape("line", r#"cx="0" cy="914400""#))),
+            (0.0, 0.0, 1.0, 1.0)
+        );
+    }
+
+    #[test]
+    fn shape_without_any_positive_extent_is_dropped() {
+        for ext in [
+            r#"cx="0" cy="0""#,
+            r#"cx="-914400" cy="0""#,
+            r#"cx="0" cy="-914400""#,
+        ] {
+            assert!(parse(&shape("line", ext)).is_empty(), "{ext}");
+        }
+    }
+
+    #[test]
+    fn negative_extent_still_fills_its_anchor() {
+        // Out-of-schema negative extents keep normalizing to the whole anchor
+        // (only a zero axis gets the unit replacement extent).
+        for ext in [
+            r#"cx="-914400" cy="190500""#,
+            r#"cx="914400" cy="-190500""#,
+            r#"cx="-914400" cy="-190500""#,
+        ] {
+            let (x, y, w, h) = frame(&parse(&shape("rect", ext)));
+            assert_eq!((x.abs(), y.abs(), w, h), (0.0, 0.0, 1.0, 1.0), "{ext}");
+        }
+    }
+
+    #[test]
+    fn standalone_connector_keeps_geometry_stroke_and_line_ends() {
+        let xml = connector(
+            r#"cx="2743200" cy="0""#,
+            r#" flipH="1""#,
+            r#"<a:ln w="19050"><a:solidFill><a:srgbClr val="FF0000"/></a:solidFill><a:tailEnd type="triangle"/></a:ln>"#,
+        );
+        let anchors = parse(&xml);
+        assert_eq!(anchors.len(), 1, "cxnSp dropped");
+        let shape = &anchors[0].shapes[0];
+        assert!(
+            matches!(&shape.geom, ShapeGeom::Preset { name, .. } if name == "straightConnector1")
+        );
+        assert_eq!(shape.stroke_color.as_deref(), Some("#FF0000"));
+        assert!(shape.flip_h);
+        assert!(shape.stroke_tail_end.is_some() && shape.stroke_head_end.is_none());
+        // Zero-height connector: the line spans the anchor on its flat axis.
+        assert_eq!((shape.x, shape.w, shape.y, shape.h), (0.0, 1.0, 0.0, 1.0));
+    }
+
+    #[test]
+    fn connector_without_any_extent_or_hidden_is_dropped() {
+        let none = connector(r#"cx="0" cy="0""#, "", "");
+        assert!(parse(&none).is_empty());
+        let hidden = connector(r#"cx="914400" cy="0""#, "", "")
+            .replace(r#"name="C""#, r#"name="C" hidden="1""#);
+        assert!(parse(&hidden).is_empty());
+    }
+
+    #[test]
+    fn connector_inside_a_group_is_emitted() {
+        let xml = format!(
+            r#"<xdr:wsDr {NS}><xdr:twoCellAnchor>
+              <xdr:from><xdr:col>0</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>0</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>
+              <xdr:to><xdr:col>5</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>5</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>
+              <xdr:grpSp>
+                <xdr:nvGrpSpPr><xdr:cNvPr id="2" name="G"/><xdr:cNvGrpSpPr/></xdr:nvGrpSpPr>
+                <xdr:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="1000000" cy="1000000"/>
+                  <a:chOff x="0" y="0"/><a:chExt cx="1000000" cy="1000000"/></a:xfrm></xdr:grpSpPr>
+                <xdr:cxnSp macro="">
+                  <xdr:nvCxnSpPr><xdr:cNvPr id="3" name="C"/><xdr:cNvCxnSpPr/></xdr:nvCxnSpPr>
+                  <xdr:spPr><a:xfrm><a:off x="250000" y="500000"/><a:ext cx="500000" cy="0"/></a:xfrm>
+                    <a:prstGeom prst="line"><a:avLst/></a:prstGeom>
+                    <a:ln w="12700"><a:solidFill><a:srgbClr val="0000FF"/></a:solidFill></a:ln></xdr:spPr>
+                </xdr:cxnSp>
+              </xdr:grpSp>
+              <xdr:clientData/>
+            </xdr:twoCellAnchor></xdr:wsDr>"#
+        );
+        let anchors = parse(&xml);
+        let shape = &anchors[0].shapes[0];
+        assert_eq!((shape.x, shape.y, shape.w, shape.h), (0.25, 0.5, 0.5, 0.0));
     }
 }
