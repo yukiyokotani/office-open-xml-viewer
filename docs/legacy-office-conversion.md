@@ -595,8 +595,10 @@ rejects the load. Some attributes are encoded differently in the two forms,
 so a difference does not show which side was edited; for these the source
 follows the side that PowerPoint PDF exports draw. Different gradient stops,
 or a gradient rotation flag that only the alternative states, adopt the
-alternative. A rotation flag that only the binary sets, or custom path
-commands that do not pair one to one, keep the binary projection.
+alternative. A rotation flag that only the binary sets keeps the binary
+projection. Custom path commands that do not pair one to one are compared as
+traced outlines (another start point, or collinear lines split differently,
+is the same outline); a different outline still rejects the load.
 Exhausting an optional alternative's verification budgets keeps that
 shape's binary projection and does not poison the document. Input work uses
 the standard OOXML package allowance (256 MiB of actual consumed input per
