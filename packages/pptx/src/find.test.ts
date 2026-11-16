@@ -15,8 +15,8 @@ it('maps shared search results and highlights to PPTX slides', async () => {
   const slides = [[run('Hel'), run('lo')], [run('hello')]];
   const find = new PptxFindController(() => slides.length, async (slide) => slides[slide]);
   expect((await find.find('hello')).map((match) => match.location)).toEqual([{ slide: 0 }, { slide: 1 }]);
-  find.next();
-  expect(find.activeSlide()).toBe(0);
+  expect(find.next()?.location.slide).toBe(0);
+  expect(find.slideHighlights(0)[0].active).toBe(true);
   expect(find.slideHighlights(0)[0].slices).toHaveLength(2);
   expect(find.slideRuns(1)).toEqual(slides[1]);
 });

@@ -47,5 +47,4 @@ export class PptxFindController extends UnitFindController<PptxTextRunInfo, Pptx
   slideHighlights(slide: number): ReturnType<PptxFindController['unitHighlights']> {
     return this.unitHighlights(slide);
   }
-  activeSlide(): number | null { return this.activeUnit(); }
 }

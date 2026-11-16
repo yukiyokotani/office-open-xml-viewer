@@ -21,7 +21,7 @@ describe('UnitFindController', () => {
       active: true,
     }]);
     expect(find.prev()?.location.unit).toBe(1);
-    expect(find.activeUnit()).toBe(1);
+    expect(find.unitHighlights(1).map((box) => box.active)).toEqual([true]);
   });
 
   it('rejects stale collection errors but propagates current errors', async () => {

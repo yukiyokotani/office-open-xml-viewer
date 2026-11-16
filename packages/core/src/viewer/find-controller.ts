@@ -153,8 +153,6 @@ export class UnitFindController<Run extends SearchRun, Location> {
     return out;
   }
 
-  activeUnit(): number | null { return this._find.matches[this._find.active]?.unit ?? null; }
-
   matches(): FindMatch<Location>[] { return this._find.all(); }
 
   async find(query: string, opts: FindMatchesOptions = {}): Promise<FindMatch<Location>[]> {

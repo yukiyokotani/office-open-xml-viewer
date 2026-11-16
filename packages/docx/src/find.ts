@@ -18,5 +18,4 @@ export class DocxFindController extends UnitFindController<DocxTextRunInfo, Docx
   pageHighlights(page: number): ReturnType<DocxFindController['unitHighlights']> {
     return this.unitHighlights(page);
   }
-  activePage(): number | null { return this.activeUnit(); }
 }

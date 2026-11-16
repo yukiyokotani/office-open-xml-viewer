@@ -10,8 +10,8 @@ it('maps shared search results and highlight geometry to DOCX pages', async () =
   const pages = [[run('Hel'), run('lo')], [run('hello')]];
   const find = new DocxFindController(() => pages.length, async (page) => pages[page]);
   expect((await find.find('hello')).map((match) => match.location)).toEqual([{ page: 0 }, { page: 1 }]);
-  find.next();
-  expect(find.activePage()).toBe(0);
+  expect(find.next()?.location.page).toBe(0);
+  expect(find.pageHighlights(0)[0].active).toBe(true);
   expect(find.pageHighlights(0)[0].slices).toHaveLength(2);
   expect(find.pageRuns(1)).toEqual(pages[1]);
 });
