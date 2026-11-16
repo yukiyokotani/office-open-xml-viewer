@@ -71,7 +71,7 @@ fn fixture() -> Vec<(u16, Vec<u8>)> {
 fn run(data: &[(u16, Vec<u8>)]) -> Result<Vec<DrawingAnchor>, String> {
     let mut work = 1000;
     let mut remaining = MAX_BYTES;
-    let mut drawing = assemble(&records(data), 0, &mut work, &mut remaining)?.unwrap();
+    let mut drawing = assemble(&records(data), 0, WORKSHEET, &mut work, &mut remaining)?.unwrap();
     let mut result = Vec::new();
     walk(&mut drawing, 4, &mut work, &mut result)?;
     Ok(result)
@@ -189,9 +189,16 @@ fn bounds_fragments_substreams_and_retained_work() {
     let data = fixture();
     let records = records(&data);
     let mut remaining = MAX_BYTES;
-    assert!(assemble(&records, 0, &mut 0, &mut remaining).is_err());
-    assert!(assemble(&records, 0, &mut 100, &mut 0).is_err());
-    assert!(assemble(&records[..records.len() - 1], 0, &mut 100, &mut remaining).is_err());
+    assert!(assemble(&records, 0, WORKSHEET, &mut 0, &mut remaining).is_err());
+    assert!(assemble(&records, 0, WORKSHEET, &mut 100, &mut 0).is_err());
+    assert!(assemble(
+        &records[..records.len() - 1],
+        0,
+        WORKSHEET,
+        &mut 100,
+        &mut remaining
+    )
+    .is_err());
     let mut overlong = data.clone();
     overlong[1].1.resize(8225, 0);
     assert!(run(&overlong).is_err());
@@ -201,7 +208,7 @@ fn bounds_fragments_substreams_and_retained_work() {
         .err()
         .unwrap()
         .starts_with("LEGACY_RESOURCE_LIMIT:"));
-    let mut drawing = assemble(&records, 0, &mut 100, &mut remaining)
+    let mut drawing = assemble(&records, 0, WORKSHEET, &mut 100, &mut remaining)
         .unwrap()
         .unwrap();
     assert!(walk(&mut drawing, 0, &mut 1, &mut Vec::new()).is_err());
@@ -254,7 +261,8 @@ fn traverses_only_owned_groups_in_order_and_bounds_the_stack() {
     let walk_as = |policy| {
         let mut work = 1000;
         let mut remaining = MAX_BYTES;
-        let mut drawing = assemble(&records(&data), 0, &mut work, &mut remaining)?.unwrap();
+        let mut drawing =
+            assemble(&records(&data), 0, WORKSHEET, &mut work, &mut remaining)?.unwrap();
         let mut result = Vec::new();
         walk_with_policy(&mut drawing, 4, &mut work, &mut result, policy).map(|()| result)
     };
@@ -363,7 +371,7 @@ fn enforces_shape_identity_and_global_retained_anchor_limits() {
 
     let source = fixture();
     let mut remaining = MAX_BYTES;
-    let mut drawing = assemble(&records(&source), 0, &mut 1000, &mut remaining)
+    let mut drawing = assemble(&records(&source), 0, WORKSHEET, &mut 1000, &mut remaining)
         .unwrap()
         .unwrap();
     let mut retained = vec![run(&source).unwrap()[0].clone(); MAX_OBJECTS];
@@ -507,7 +515,7 @@ fn group_fixture(group_extra: &[u8], leaf_flags: u32) -> Vec<(u16, Vec<u8>)> {
 fn walk_as(data: &[(u16, Vec<u8>)], policy: Policy) -> Result<Vec<DrawingAnchor>, String> {
     let mut work = 10_000;
     let mut remaining = MAX_BYTES;
-    let mut drawing = assemble(&records(data), 0, &mut work, &mut remaining)?.unwrap();
+    let mut drawing = assemble(&records(data), 0, WORKSHEET, &mut work, &mut remaining)?.unwrap();
     let mut result = Vec::new();
     walk_with_policy(&mut drawing, 0, &mut work, &mut result, policy).map(|()| result)
 }

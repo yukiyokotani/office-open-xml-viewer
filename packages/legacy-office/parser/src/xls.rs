@@ -6,8 +6,9 @@
 //! conditional formatting, tables, hyperlinks, filters, validation, defined
 //! names, PivotTable layout, charts, pictures and shapes into the XLSX
 //! renderer model (see `direct`). Formula token programs, external links and
-//! macros are never evaluated or copied; drawn content the model cannot carry
-//! fails closed. Anchored drawings require host-measured Normal-font metrics.
+//! macros are never evaluated or copied. A macro sheet is projected as the
+//! grid Excel shows for it and a dialog sheet as the model's dialog sheet.
+//! Anchored drawings require host-measured Normal-font metrics.
 //! See [MS-XLS] 2.4 for record structures and 2.5.293 for BIFF8
 //! Unicode strings. FILEPASS and pre-BIFF8 workbooks fail closed.
 
@@ -59,6 +60,8 @@ const MERGEDCELLS: u16 = 0x00e5;
 const BIFF8: u16 = 0x0600;
 const WORKBOOK_GLOBALS: u16 = 0x0005;
 const WORKSHEET: u16 = 0x0010;
+/// MS-XLS 2.4.21 BOF dt of a macro sheet substream.
+const MACRO_SHEET: u16 = 0x0040;
 const MAX_RECORDS: usize = 2_000_000;
 const MAX_SHEETS: usize = 65_536;
 const MAX_CELLS: usize = 10_000_000;
@@ -153,6 +156,8 @@ struct SheetData {
     conditional_formats: Vec<xlsx_model::ConditionalFormat>,
     /// A chart sheet's chart; such a sheet has no cells.
     chart_sheet: Option<chart::ChartSheet>,
+    /// MS-XLS 2.4.351 WsBool fDialog: the sheet is a dialog sheet.
+    dialog: bool,
     /// MS-XLS 2.4.113 FeatHdr11, 2.4.114 Feature11, 2.4.115 Feature12 and
     /// 2.4.157 List12 records (tables), in stream order.
     table_records: tables::Records,
@@ -319,8 +324,8 @@ fn prepare_workbook(workbook: &[u8]) -> Result<PreparedXls, String> {
             // MS-XLS 2.4.28 BoundSheet8.dt: 1 macro sheet, 2 chart sheet, 6 VB
             // module. A VB module has no sheet content to display. Chart
             // sheets are projected (their charts are parsed once all
-            // worksheets they reference are read); macro sheets are rejected
-            // rather than dropping tabs whose cells Excel shows.
+            // worksheets they reference are read). A macro sheet is a grid of
+            // cells like a worksheet and keeps its tab (below).
             if sheet.sheet_type == 2 {
                 pending_chart_sheets.push((converted.len(), sheet.offset));
                 converted.push((
@@ -333,15 +338,15 @@ fn prepare_workbook(workbook: &[u8]) -> Result<PreparedXls, String> {
                 tabs.push(tab);
                 continue;
             }
-            if sheet.sheet_type != 6 {
-                return Err(unsupported(match sheet.sheet_type {
-                    1 => "XLS macro sheets are not projected",
-                    _ => "unknown XLS sheet type",
-                }));
+            if sheet.sheet_type == 6 {
+                skipped_non_worksheets = true;
+                continue;
             }
-            skipped_non_worksheets = true;
-            continue;
+            if sheet.sheet_type != 1 {
+                return Err(crate::rejection::corrupt("unknown XLS sheet type"));
+            }
         }
+        let macro_sheet = sheet.sheet_type == 1;
         let mut data = parse_sheet(&records, &sheet, &shared_strings)?;
         if let Some(ext) = data.sheet_ext.as_deref() {
             if conditional_theme.is_none() {
@@ -373,7 +378,19 @@ fn prepare_workbook(workbook: &[u8]) -> Result<PreparedXls, String> {
                 ));
             }
             let (_, externs) = conditional_theme.as_ref().expect("parsed theme");
-            data.formulas = cell_formulas::project(data.formula_records.iter(), externs)?;
+            match cell_formulas::project(data.formula_records.iter(), externs) {
+                Ok(formulas) => data.formulas = formulas,
+                // Macro-sheet formulas use command and macro-control
+                // functions the decompiler has no text for. The cells keep
+                // their cached values.
+                Err(error) if macro_sheet && error.starts_with("UNSUPPORTED:") => {
+                    crate::rejection::approximated("XLS macro sheets are not projected", ());
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        if macro_sheet {
+            show_macro_formulas(&mut data);
         }
         if has_names {
             if conditional_theme.is_none() {
@@ -519,15 +536,23 @@ fn prepare_workbook(workbook: &[u8]) -> Result<PreparedXls, String> {
         .zip(&converted)
         .filter_map(|(&tab, (_, sheet))| sheet.auto_filter.as_ref().map(|range| (tab, range)))
         .collect();
-    validate_direct_drawings(&records, &tabs, &filters)?;
+    // The objects of a dialog sheet are its dialog frame and controls. The
+    // model's dialog sheet (ECMA-376 18.3.1.34) has no drawing layer, so no
+    // drawing of such a tab is prepared: its entry names no BoundSheet.
+    let drawing_tabs: Vec<usize> = tabs
+        .iter()
+        .zip(&converted)
+        .map(|(&tab, (_, sheet))| if sheet.dialog { usize::MAX } else { tab })
+        .collect();
+    validate_direct_drawings(&records, &drawing_tabs, &filters)?;
     // Rectangles, text boxes, freeforms and their groups.
-    let mut shapes = shapes::Shapes::prepare(&records, &tabs, &styles)?;
+    let mut shapes = shapes::Shapes::prepare(&records, &drawing_tabs, &styles)?;
     let grouped_pictures = shapes.picture_indices();
     // Excel displays GDI+ metafiles with their short end-of-file record, so
     // their rasters are admitted as Excel draws them.
     let pictures = pictures::Pictures::prepare(
         &records,
-        &tabs,
+        &drawing_tabs,
         crate::officeart::raster::Raster::ExcelMetafiles,
         &grouped_pictures,
     )
@@ -1131,6 +1156,23 @@ fn decode_biff_chars(
     Ok((value, byte_count))
 }
 
+/// A macro sheet (MS-XLS 2.1.7.20.3) is a grid whose window shows formulas
+/// (2.4.346 Window2 fDspFmlaRt), as Excel creates it. Excel draws and prints
+/// each formula cell of such a sheet as `=` and its formula text; the model
+/// has no formula view, so those cells carry that text as their value. A
+/// member of a shared or array formula other than its anchor has no formula
+/// text of its own (see `cell_formulas`) and keeps its cached value.
+fn show_macro_formulas(data: &mut SheetData) {
+    if !data.views.displays_formulas() {
+        return;
+    }
+    for (&(row, column), text) in &data.formulas {
+        if let Some(value) = data.rows.get_mut(&row).and_then(|row| row.get_mut(&column)) {
+            *value = CellValue::Text(format!("={text}"));
+        }
+    }
+}
+
 fn parse_sheet(
     all_records: &[Record<'_>],
     sheet: &BoundSheet,
@@ -1140,7 +1182,12 @@ fn parse_sheet(
         .binary_search_by_key(&sheet.offset, |record| record.offset)
         .map_err(|_| unsupported("BOUNDSHEET8 points outside the BIFF record stream"))?;
     let bof = all_records[start_index];
-    if bof.kind != BOF || u16_at(bof.data, 0)? != BIFF8 || u16_at(bof.data, 2)? != WORKSHEET {
+    let expected = if sheet.sheet_type == 1 {
+        MACRO_SHEET
+    } else {
+        WORKSHEET
+    };
+    if bof.kind != BOF || u16_at(bof.data, 0)? != BIFF8 || u16_at(bof.data, 2)? != expected {
         return Err(unsupported(
             "BOUNDSHEET8 does not point to a BIFF8 worksheet",
         ));
@@ -1338,6 +1385,7 @@ fn parse_sheet(
             0x0208 => output.shows_phonetic |= u16_at(record.data, 14)? & 0x4000 != 0,
             0x007d => output.shows_phonetic |= u16_at(record.data, 8)? & 0x0008 != 0,
             0x01b2 | 0x01be => output.validation_records.push(record.kind, record.data)?,
+            0x0081 => output.dialog = u16_at(record.data, 0)? & 0x0010 != 0,
             0x0862 => {
                 if output.sheet_ext.replace(record.data.to_vec()).is_some() {
                     return Err(unsupported("duplicate BIFF sheet extension"));

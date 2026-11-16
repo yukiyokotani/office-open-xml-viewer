@@ -2,7 +2,7 @@
 //! 2.5.143/193-195; MS-ODRAW 2.2.13-17/40. Keep raw cell fractions intact.
 use super::{
     parse_bound_sheet, u16_at, u32_at, unsupported, Record, BIFF8, BOF, BOUNDSHEET8, EOF, FILEPASS,
-    WORKBOOK_GLOBALS, WORKSHEET,
+    MACRO_SHEET, WORKBOOK_GLOBALS, WORKSHEET,
 };
 use crate::officeart::record_with_end;
 use std::collections::{BTreeMap, HashSet};
@@ -177,11 +177,20 @@ fn workbook_with_policy(
     // Disjoint physical ranges prevent overlapping BoundSheet pointers from
     // making us repeatedly scan the same worksheet or its embedded charts.
     for (ordinal, &(start, (tab, kind))) in starts.iter().enumerate() {
-        if kind != 0 {
-            continue;
-        }
+        // Worksheets and macro sheets carry sheet drawings.
+        let substream = match kind {
+            0 => WORKSHEET,
+            1 => MACRO_SHEET,
+            _ => continue,
+        };
         let end = starts.get(ordinal + 1).map_or(records.len(), |s| s.0);
-        let data = assemble(&records[start..end], start, &mut work, &mut remaining)?;
+        let data = assemble(
+            &records[start..end],
+            start,
+            substream,
+            &mut work,
+            &mut remaining,
+        )?;
         if let Some(mut drawing) = data {
             walk_with_policy(&mut drawing, tab, &mut work, &mut output, policy)?;
         }
@@ -207,13 +216,14 @@ fn spend(work: &mut usize) -> Result<(), String> {
 fn assemble<'a>(
     records: &[Record<'a>],
     base: usize,
+    substream: u16,
     work: &mut usize,
     remaining: &mut usize,
 ) -> Result<Option<Drawing<'a>>, String> {
     let first = records
         .first()
         .ok_or_else(|| unsupported("empty BIFF drawing sheet"))?;
-    if first.kind != BOF || u16_at(first.data, 0)? != BIFF8 || u16_at(first.data, 2)? != WORKSHEET {
+    if first.kind != BOF || u16_at(first.data, 0)? != BIFF8 || u16_at(first.data, 2)? != substream {
         return Err(unsupported("invalid BIFF drawing worksheet BOF"));
     }
     let (mut depth, mut length, mut complete) = (0usize, 0usize, false);
